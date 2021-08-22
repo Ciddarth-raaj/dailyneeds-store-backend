@@ -1,0 +1,22 @@
+{
+  "development": {
+    "host": "localhost",
+    "port": "8889",
+    "user": "root",
+    "password": "root",
+    "database": "test_matser",
+    "schema": "test_matser",
+    "driver": "mysql",
+    "multipleStatements": true
+  },
+  "production": {
+    "host": "localhost",
+    "port": "8889",
+    "user": "root",
+    "password": "root",
+    "database": "test_matser",
+    "schema": "test_matser",
+    "driver": "mysql",
+    "multipleStatements": true
+  }
+}

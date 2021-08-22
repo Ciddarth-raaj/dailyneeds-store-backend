@@ -1,0 +1,41 @@
+{
+  "db": {
+    "mysql": {
+      "development": {
+        "host": "localhost",
+        "port": 8889,
+        "username": "root",
+        "password": "root",
+        "database": "Bus"
+      },
+      "production": {
+        "host": "localhost",
+        "port": 8889,
+        "username": "root",
+        "password": "root",
+        "database": "db"
+      }
+    },
+    "mongo": {
+      "development": {
+        "host": "localhost",
+        "port": 8889,
+        "username": "root",
+        "password": "root",
+        "database": "db"
+      },
+      "production": {
+        "host": "localhost",
+        "port": 8889,
+        "username": "root",
+        "password": "root",
+        "database": "db"
+      }
+    },
+    "redis": {
+      "dev": "localhost",
+      "prod": "localhost"
+    }
+  },
+  "keys": {}
+}
