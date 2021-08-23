@@ -6,6 +6,18 @@ const unProtectedRoutes = {
   },
   "/user/login": {
     methods: { get: true }
+  },
+  "/department": {
+    methods: { get: true }
+  },
+  "/department/create": {
+    methods: { post: true }
+  },
+  "/designation": {
+    methods: { get: true }
+  },
+  "/designation/create": {
+    methods: { post: true }
   }
 }
 
