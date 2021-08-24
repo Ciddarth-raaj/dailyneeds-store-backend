@@ -88,26 +88,38 @@ class Server {
     this.exampleRepo = require("./repository/example")(this.mysql.connection);
     this.departmentRepo = require("./repository/department")(this.mysql.connection);
     this.designationRepo = require("./repository/designation")(this.mysql.connection);
+    this.employeeRepo = require("./repository/employee")(this.mysql.connection);
+    this.shiftRepo = require("./repository/shift")(this.mysql.connection);
   }
 
   initUsecases() {
     this.exampleUsecase = require("./usecase/example")(this.exampleRepo);
     this.departmentUsecase = require("./usecase/department")(this.departmentRepo);
     this.designationUsecase = require("./usecase/designation")(this.designationRepo);
+    this.employeeUsecase = require("./usecase/employee")(this.employeeRepo);
+    this.shiftUsecase = require("./usecase/shift")(this.shiftRepo);
+    this.assetUsecase = require("./usecase/asset");
   }
 
   initRoutes() {
     const authMiddleWare = require("./middlewares/auth");
     app.use(authMiddleWare);
 
+    const assetRouter = require("./routes/asset")(this.assetUsecase);
     const exampleRouter = require("./routes/example")(this.exampleUsecase);
     const departmentRouter = require("./routes/department")(this.departmentUsecase);
     const designationRouter = require("./routes/designation")(this.designationUsecase);
+    const employeeRouter = require("./routes/employee")(this.employeeUsecase);
+    const shiftRouter = require("./routes/shift")(this.shiftUsecase);
     //const exampleRouter = require('./routes/example')( this.example_controller );
 
+    
+		app.use("/asset", assetRouter.getRouter());
     app.use("/example", exampleRouter.getRouter());
     app.use("/department", departmentRouter.getRouter());
     app.use("/designation", designationRouter.getRouter());
+    app.use("/employee", employeeRouter.getRouter());
+    app.use("/shift", shiftRouter.getRouter());
     //app.use('/example', displayRouter.getRouter());
   }
 

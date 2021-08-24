@@ -18,6 +18,15 @@ const unProtectedRoutes = {
   },
   "/designation/create": {
     methods: { post: true }
+  },
+  "/employee": {
+    methods: { post: true }
+  },
+  "/shift": {
+    methods: { get: true }
+  },
+  "/asset": {
+    methods: { post: true }
   }
 }
 
