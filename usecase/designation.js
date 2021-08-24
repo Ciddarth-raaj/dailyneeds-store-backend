@@ -14,11 +14,12 @@ class DesignationUsecase {
             }
         });
     }
+
     create(designation) {
         return new Promise(async (resolve, reject) => {
             try {
                 this.designationRepo.create(designation);
-                resolve(200);
+                resolve({ code: 200 });
             } catch (err) {
                 reject(err);
             }
