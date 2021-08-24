@@ -1,0 +1,1 @@
+CREATE TABLE `permissions` ( `permission_id` INT NOT NULL AUTO_INCREMENT , `permission_key` VARCHAR(100) NOT NULL , `designation_id` INT NOT NULL , `created_at` INT NOT NULL , PRIMARY KEY (`permission_id`)) ENGINE = InnoDB;
