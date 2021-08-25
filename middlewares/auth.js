@@ -27,7 +27,10 @@ const unProtectedRoutes = {
   },
   "/asset": {
     methods: { post: true }
-  }
+  },
+  "/shift/create": {
+    methods: { post: true }
+  },
 }
 
 async function auth (req, res, next) {
