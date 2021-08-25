@@ -1,6 +1,6 @@
 const router = require("express").Router();
 const Joi = require("@hapi/joi");
-const respondError = require("../utils/http")
+const respondError = require("../utils/http");
 
 class DesignationRoutes {
   constructor(designationUsecase) {
@@ -32,6 +32,7 @@ class DesignationRoutes {
           status: Joi.number().required(),
           designation_name: Joi.string().required(),
           online_portal: Joi.number().required(),
+          permissions: Joi.array().items(Joi.string().optional()).required(),
         };
 
         const designation = req.body;
