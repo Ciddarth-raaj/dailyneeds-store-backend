@@ -27,7 +27,7 @@ class EmployeeRoutes {
             qualification: Joi.string().allow('').required(),
             introducer_name: Joi.string().allow('').optional(),
             introducer_details: Joi.string().allow('').optional(),
-            id_number: Joi.number().required(),
+            id_number: Joi.number().allow('').required(),
             salary: Joi.number().required(),
             uniform_qty: Joi.number().allow('').optional(),
             store_id: Joi.number().required(),
@@ -40,27 +40,31 @@ class EmployeeRoutes {
 	          bank_name: Joi.string().allow('').optional(),
 	          ifsc: Joi.number().allow('').optional(),
 	          account_no: Joi.number().allow('').optional(),
-	          esi: Joi.number().required(),
+	          esi: Joi.number().allow('').required(),
 	          esi_number: Joi.number().allow('').optional(),
 	          pf: Joi.number().allow('').optional(),
 	          pf_number: Joi.number().allow('').optional(),
 	          UAN: Joi.number().allow('').optional(),
             date_of_termination: Joi.string().allow('').optional(),
-            id_card: Joi.string().optional(),
-            id_card_no: Joi.number().optional(),
             employee_image: Joi.string().required(),
-            card_image: Joi.string().required(),
             online_portal: Joi.number().required(),
+            file: Joi.array()
+            .items({
+                    id_card: Joi.string().required(),
+                    id_card_no: Joi.number().required(),
+                    file: Joi.string().required(),
+            })
+            .required(),
           };
   
-          const designation = req.body;
-          const isValid = Joi.validate(designation, schema);
+          const employee = req.body;
+          const isValid = Joi.validate(employee, schema);
   
           if (isValid.error !== null) {
             console.log(isValid.error);
             throw isValid.error;
           }
-          const response = await this.employeeUsecase.create(designation);
+          const response = await this.employeeUsecase.create(employee);
   
           res.json(response);
         } catch (err) {

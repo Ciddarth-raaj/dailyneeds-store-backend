@@ -31,6 +31,9 @@ const unProtectedRoutes = {
   "/shift/create": {
     methods: { post: true }
   },
+  "/document": {
+    methods: { get: true }
+  }
 }
 
 async function auth (req, res, next) {

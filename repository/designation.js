@@ -7,7 +7,7 @@ class DesignationRepository {
 
   get() {
     return new Promise((resolve, reject) => {
-      this.db.query("SELECT * FROM DESIGNATION", [], (err, docs) => {
+      this.db.query("SELECT * FROM designation", [], (err, docs) => {
         if (err) {
           logger.Log({
             level: logger.LEVEL.ERROR,
@@ -28,7 +28,7 @@ class DesignationRepository {
   create(designation) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "INSERT INTO DESIGNATION (status, designation_name, online_portal) VALUES (?, ?, ?)",
+        "INSERT INTO designation (status, designation_name, online_portal) VALUES (?, ?, ?)",
         [
           designation.status,
           designation.designation_name,

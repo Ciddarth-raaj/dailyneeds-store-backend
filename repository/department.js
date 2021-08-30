@@ -8,7 +8,7 @@ class DepartmentRepository {
   get() {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "SELECT * FROM DEPARTMENT",
+        "SELECT * FROM department",
         [],
         (err, docs) => {
           if (err) {
@@ -31,7 +31,7 @@ class DepartmentRepository {
   create(department) {
     return new Promise((resolve, reject) => {
         this.db.query(
-          "INSERT INTO DEPARTMENT (status, department_name) VALUES (?, ?)",
+          "INSERT INTO department (status, department_name) VALUES (?, ?)",
           [
             department.status,
             department.department_name
