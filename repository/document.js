@@ -26,10 +26,11 @@ class DocumentRepository {
   }
 
   create(file) {
+    console.log({file: file});
     return new Promise((resolve, reject) => {
       this.db.query(
-        "INSERT INTO emp_documents (employee_id, type, id_number, file, name) VALUES (?, ?, ?, ?, ?)", 
-        [file.employee_id, file.id_card, file.id_card_no, file.name, file.file], 
+        "INSERT INTO new_employee_documents (employee_id, card_type, card_no, card_name, expiry_date, file) VALUES (?, ?, ?, ?, ?, ?)", 
+        [file.employee_id, file.card_type, file.card_no, file.card_name, file.expiry_date, file.file], 
         (err, docs) => {
         if (err) {
           logger.Log({

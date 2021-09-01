@@ -9,22 +9,20 @@ class EmployeeUsecase {
         return new Promise(async (resolve, reject) => {
             try {
                 const { code, id } = await this.employeeRepo.create(employee);
-
-            //to be uncommented after table modification
-            
-                // for(let i in employee.file) {
-                //     console.log({i: i});
-                //     await this.documentUsecase.create({
-                //         id_card: employee.file[i].id_card,
-                //         name: employee.employee_name,
-                //         id_card_no: employee.file[i].id_card_no,
-                //         file: employee.file[i].file,
-                //         employee_id: id,
-                //     })
-                // }
+                for(let i = 0; i < employee.files.length - 1; i++) {
+                    await this.documentUsecase.create({
+                        card_type: employee.files[i].id_card,
+                        card_no: employee.files[i].id_card_no,
+                        card_name: employee.files[i].id_card_name,
+                        expiry_date: employee.files[i].expiry_date,
+                        file: employee.files[i].file,
+                        employee_id: id,
+                    })
+                }
                 resolve(200);
             } catch (err) {
                 reject(err);
+                console.log(err);
             }
         });
     }
