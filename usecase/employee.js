@@ -5,6 +5,28 @@ class EmployeeUsecase {
         this.documentUsecase = documentUsecase;
     }
 
+    get(employee_id) {
+        return new Promise(async (resolve, reject) => {
+          try {
+            const data = await this.employeeRepo.get(employee_id);
+            resolve(data);
+          } catch (err) {
+            reject(err);
+          }
+        });
+      }
+      updateEmployeeDetails(employee) {
+        return new Promise(async (resolve, reject) => {
+          try {
+            const employee_id = seller.employee_id; 
+            const { code } = await this.sellerRepo.updateCustomerSupport(employee.employee_details, employee_id);
+          
+            resolve(code);
+          } catch (err) {
+            reject(err);
+          }
+        });
+      }
     create(employee) {
         return new Promise(async (resolve, reject) => {
             try {

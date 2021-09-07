@@ -33,6 +33,12 @@ const unProtectedRoutes = {
   },
   "/document": {
     methods: { get: true }
+  },
+  "/employee/employee_id": {
+    methods: { get: true }
+  },
+  "/employee/update-employee": {
+    methods: { get: true }
   }
 }
 

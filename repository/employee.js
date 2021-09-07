@@ -70,6 +70,51 @@ class EmployeeRepository {
         );
       });
     }
+    get(employee_id) {
+      return new Promise((resolve, reject) => {
+        this.db.query("SELECT * FROM new_employee where employee_id = ?",
+        [employee_id], 
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.EMPLOYEE",
+              code: "REPOSITORY.EMPLOYEE.GET",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        });
+      });
+    }
+    updateEmployeeDetails(employee_id, data) {
+      return new Promise((resolve, reject) => {
+        this.db.query(
+          `UPDATE new_employee SET ? WHERE employee_id = ?`,
+          [data, employee_id],
+          (err, res) => {
+            if (err) {
+              console.log(this.db.query),
+                logger.Log({
+                  level: logger.LEVEL.ERROR,
+                  component: "REPOSITORY.EMPLOYEE",
+                  code: "REPOSITORY.EMPLOYEE.UPDATE-EMPLOYEE-DETAILS",
+                  description: err.toString(),
+                  category: "",
+                  ref: {},
+                });
+              reject(err);
+              return;
+            }
+            resolve({ code: 200 });
+          }
+        );
+      });
+    }
 }
 
 module.exports = (db) => {
