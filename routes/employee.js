@@ -82,18 +82,9 @@ class EmployeeRoutes {
   
         res.end();
       });
-      router.get("/employee_id", async (req, res) => {
+      router.get("/employees", async (req, res) => {
         try {
-          const schema = {
-            employee_id: Joi.string().required(),
-          };
-
-          const filter = req.query;
-          const isValid = Joi.validate(filter, schema);
-          if (isValid.error !== null) {
-            throw isValid.error;
-          }
-          const employee = await this.employeeUsecase.get(filter.employee_id);
+          const employee = await this.employeeUsecase.get();
           res.json(employee);
         } catch (err) {
           console.log(err);

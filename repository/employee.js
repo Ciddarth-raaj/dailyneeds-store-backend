@@ -70,10 +70,10 @@ class EmployeeRepository {
         );
       });
     }
-    get(employee_id) {
+    get() {
       return new Promise((resolve, reject) => {
-        this.db.query("SELECT * FROM new_employee where employee_id = ?",
-        [employee_id], 
+        this.db.query("SELECT * FROM new_employee",
+        [], 
         (err, docs) => {
           if (err) {
             logger.Log({

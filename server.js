@@ -91,6 +91,7 @@ class Server {
     this.designationRepo = require("./repository/designation")(this.mysql.connection);
     this.employeeRepo = require("./repository/employee")(this.mysql.connection);
     this.shiftRepo = require("./repository/shift")(this.mysql.connection);
+    this.storeRepo = require("./repository/store")(this.mysql.connection);
   }
 
   initUsecases() {
@@ -100,6 +101,7 @@ class Server {
     this.designationUsecase = require("./usecase/designation")(this.designationRepo);
     this.employeeUsecase = require("./usecase/employee")(this.employeeRepo, this.documentUsecase);
     this.shiftUsecase = require("./usecase/shift")(this.shiftRepo);
+    this.storeUsecase = require("./usecase/store")(this.storeRepo);
     this.assetUsecase = require("./usecase/asset");
   }
 
@@ -114,6 +116,7 @@ class Server {
     const designationRouter = require("./routes/designation")(this.designationUsecase);
     const employeeRouter = require("./routes/employee")(this.employeeUsecase);
     const shiftRouter = require("./routes/shift")(this.shiftUsecase);
+    const storeRouter = require("./routes/store")(this.storeUsecase);
     //const exampleRouter = require('./routes/example')( this.example_controller );
 
     app.use("/document", documentRouter.getRouter());
@@ -123,6 +126,7 @@ class Server {
     app.use("/designation", designationRouter.getRouter());
     app.use("/employee", employeeRouter.getRouter());
     app.use("/shift", shiftRouter.getRouter());
+    app.use("/store", storeRouter.getRouter());
     //app.use('/example', displayRouter.getRouter());
   }
 

@@ -34,10 +34,13 @@ const unProtectedRoutes = {
   "/document": {
     methods: { get: true }
   },
-  "/employee/employee_id": {
+  "/employee/employees": {
     methods: { get: true }
   },
   "/employee/update-employee": {
+    methods: { get: true }
+  },
+  "/store": {
     methods: { get: true }
   }
 }
