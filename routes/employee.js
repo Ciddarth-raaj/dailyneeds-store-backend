@@ -62,6 +62,7 @@ class EmployeeRoutes {
           };
   
           const employee = req.body;
+          console.log({employee: employee});
           const isValid = Joi.validate(employee, schema);
           if (isValid.error !== null) {
             console.log(isValid.error);
@@ -97,7 +98,30 @@ class EmployeeRoutes {
   
         res.end();
       });
-      router.patch("/update-employee", async (req, res) => {
+      router.get("/employee_id", async (req, res) => {
+        try {
+          const schema = {
+            employee_id: Joi.string().required(),
+          }
+          const employee = req.query;
+          const isValid = Joi.validate(employee, schema);
+          if (isValid.error !== null) {
+            throw isValid.error;
+          }
+          const data = await this.employeeUsecase.getEmployeeById(employee.employee_id);
+          res.json(data);
+        } catch (err) {
+          console.log(err);
+          if (err.name === "ValidationError") {
+            res.json({ code: 422, msg: err.toString() });
+          } else {
+            res.json({ code: 500, msg: "An error occurred !" });
+          }
+        }
+  
+        res.end();
+      });
+      router.post("/updatedata", async (req, res) => {
         try {
           const schema = {
             employee_id: Joi.number().required(),
@@ -140,16 +164,25 @@ class EmployeeRoutes {
                 additional_course: Joi.string().optional(),
                 spouse_name: Joi.string().allow('').optional(),
                 online_portal: Joi.number().optional(),
+                files: Joi.array()
+                .items({
+                    id_card: Joi.string().allow('').required(),
+                    id_card_no: Joi.number().allow('').required(),
+                    id_card_name: Joi.string().allow('').required(),
+                    expiry_date: Joi.date().allow("").allow(null).optional(),
+                    file: Joi.string().allow('').required(),
+                })
+                .optional(),
             }).optional(),
-
           };
+
           const employee = req.body;
           const isValid = Joi.validate(employee, schema);
           if (isValid.error !== null) {
             throw isValid.error;
           }
   
-          const code = await this.sellerUsecase.updateEmployeeDetails(employee);
+          const code = await this.employeeUsecase.updateEmployeeDetails(employee);
           res.json({ code: code });
         } catch (err) {
           if (err.name === "ValidationError") {

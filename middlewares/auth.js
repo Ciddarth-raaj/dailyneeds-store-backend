@@ -37,7 +37,10 @@ const unProtectedRoutes = {
   "/employee/employees": {
     methods: { get: true }
   },
-  "/employee/update-employee": {
+  "/employee/updatedata": {
+    methods: { post: true }
+  },
+  "/employee/employee_id": {
     methods: { get: true }
   },
   "/store": {

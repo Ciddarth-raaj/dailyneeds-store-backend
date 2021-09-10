@@ -91,7 +91,29 @@ class EmployeeRepository {
         });
       });
     }
-    updateEmployeeDetails(employee_id, data) {
+    getById(employee_id) {
+      return new Promise((resolve, reject) => {
+        this.db.query("SELECT * FROM new_employee where employee_id = ?",
+        [employee_id], 
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.EMPLOYEE",
+              code: "REPOSITORY.EMPLOYEE.GET-ID",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        });
+      });
+    }
+    updateEmployeeDetails(data, employee_id) {
+      delete data['files'];
       return new Promise((resolve, reject) => {
         this.db.query(
           `UPDATE new_employee SET ? WHERE employee_id = ?`,
