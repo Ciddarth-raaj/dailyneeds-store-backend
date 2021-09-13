@@ -45,6 +45,18 @@ const unProtectedRoutes = {
   },
   "/store": {
     methods: { get: true }
+  },
+  "/department/department_id": {
+    methods: { get: true }
+  },
+  "/department/update-department": {
+    methods: { post: true }
+  },
+  "/designation/update-designation": {
+    methods: { post: true }
+  },
+  "/designation/designation_id": {
+    methods: { get: true }
   }
 }
 

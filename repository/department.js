@@ -28,6 +28,50 @@ class DepartmentRepository {
       );
     });
   }
+  getById(department_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query("SELECT * FROM department where department_id = ?",
+      [department_id], 
+      (err, docs) => {
+        if (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "REPOSITORY.DEPARTMENT",
+            code: "REPOSITORY.DEPARTMENT.GET-ID",
+            description: err.toString(),
+            category: "",
+            ref: {},
+          });
+          reject(err);
+          return;
+        }
+        resolve(docs);
+      });
+    });
+  }
+  updateDepartmentDetails(data, department_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `UPDATE department SET ? WHERE department_id = ?`,
+        [data, department_id],
+        (err, res) => {
+          if (err) {
+              logger.Log({
+                level: logger.LEVEL.ERROR,
+                component: "REPOSITORY.DEPARTMENT",
+                code: "REPOSITORY.DEPARTMENT.UPDATE-DEPARTMENT-DETAILS",
+                description: err.toString(),
+                category: "",
+                ref: {},
+              });
+            reject(err);
+            return;
+          }
+          resolve({ code: 200 });
+        }
+      );
+    });
+  }
   create(department) {
     return new Promise((resolve, reject) => {
         this.db.query(

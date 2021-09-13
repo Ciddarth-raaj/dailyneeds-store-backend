@@ -13,7 +13,30 @@ class DepartmentUsecase {
                 reject(err);
             }
         });
+
     }
+    updateDepartmentDetails(department) {
+        return new Promise(async (resolve, reject) => {
+          try {
+            const department_id = department.department_id;
+            const { code } = await this.departmentRepo.updateDepartmentDetails(department.department_details, department_id);  
+            resolve(code);
+          } catch (err) {
+            reject(err);
+          }
+        });
+      }
+    getDepartmentById(department_id) {
+        return new Promise(async (resolve, reject) => {
+          try {
+            const data = await this.departmentRepo.getById(department_id);
+            resolve(data);
+          } catch (err) {
+            console.log(err);
+            reject(err);
+          }
+        });
+      }
     create(department) {
         return new Promise(async (resolve, reject) => {
             try {

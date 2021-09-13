@@ -24,7 +24,50 @@ class DesignationRepository {
       });
     });
   }
-
+  getById(designation_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query("SELECT * FROM designation where designation_id = ?",
+      [designation_id], 
+      (err, docs) => {
+        if (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "REPOSITORY.DESIGNATION",
+            code: "REPOSITORY.DESIGNATION.GET-ID",
+            description: err.toString(),
+            category: "",
+            ref: {},
+          });
+          reject(err);
+          return;
+        }
+        resolve(docs);
+      });
+    });
+  }
+  updateDesignationDetails(data, designation_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `UPDATE designation SET ? WHERE designation_id = ?`,
+        [data, designation_id],
+        (err, res) => {
+          if (err) {
+              logger.Log({
+                level: logger.LEVEL.ERROR,
+                component: "REPOSITORY.DESIGNATION",
+                code: "REPOSITORY.DESIGNATION.UPDATE-DESIGNATION-DETAILS",
+                description: err.toString(),
+                category: "",
+                ref: {},
+              });
+            reject(err);
+            return;
+          }
+          resolve({ code: 200 });
+        }
+      );
+    });
+  }
   create(designation) {
     return new Promise((resolve, reject) => {
       this.db.query(
