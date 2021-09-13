@@ -91,6 +91,70 @@ class EmployeeRepository {
         });
       });
     }
+    getHeadCount() {
+      return new Promise((resolve, reject) => {
+        this.db.query("SELECT count(employee_id) as head_count FROM new_employee",
+        [], 
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.EMPLOYEE",
+              code: "REPOSITORY.EMPLOYEE.GET-HEAD-COUNT",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        });
+      });
+    }
+    getResignedEmployee() {
+      return new Promise((resolve, reject) => {
+        this.db.query("SELECT count(employee_id) as Resigned_employee FROM new_employee where resignation_date IS NOT NULL",
+        [], 
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.EMPLOYEE",
+              code: "REPOSITORY.EMPLOYEE.GET-RESIGNED-EMPLOYEE",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        });
+      });
+    }
+
+    getNewJoiner() {
+      return new Promise((resolve, reject) => {
+        this.db.query("select count(employee_id) as new_joiners from new_employee where MONTH(date_of_joining)=MONTH(now())",
+        [], 
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.EMPLOYEE",
+              code: "REPOSITORY.EMPLOYEE.GET-NEW-JOINER",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        });
+      });
+    }
     getById(employee_id) {
       return new Promise((resolve, reject) => {
         this.db.query("SELECT * FROM new_employee where employee_id = ?",

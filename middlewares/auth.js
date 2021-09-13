@@ -57,6 +57,15 @@ const unProtectedRoutes = {
   },
   "/designation/designation_id": {
     methods: { get: true }
+  },
+  "/employee/resignedemp": {
+    methods: { get: true }
+  },
+  "/employee/newjoiner": {
+    methods: { get: true }
+  },
+  "/employee/headcount": {
+    methods: { get: true }
   }
 }
 

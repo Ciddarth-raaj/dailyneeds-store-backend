@@ -15,7 +15,37 @@ class EmployeeUsecase {
           }
         });
       }
-      
+
+      getHeadCount() {
+        return new Promise(async (resolve, reject) => {
+          try {
+            const data = await this.employeeRepo.getHeadCount();
+            resolve(data);
+          } catch (err) {
+            reject(err);
+          }
+        });
+      }
+      getResignedEmployee() {
+        return new Promise(async (resolve, reject) => {
+          try {
+            const data = await this.employeeRepo.getResignedEmployee();
+            resolve(data);
+          } catch (err) {
+            reject(err);
+          }
+        });
+      }
+      getNewJoiner() {
+        return new Promise(async (resolve, reject) => {
+          try {
+            const data = await this.employeeRepo.getNewJoiner();
+            resolve(data);
+          } catch (err) {
+            reject(err);
+          }
+        });
+      }
       getEmployeeById(employee_id) {
         return new Promise(async (resolve, reject) => {
           try {
