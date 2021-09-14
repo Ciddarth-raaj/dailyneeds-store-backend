@@ -1,0 +1,1 @@
+ALTER TABLE `new_employee` ADD COLUMN `resignation_date` DATE NULL DEFAULT NULL AFTER `status`;
