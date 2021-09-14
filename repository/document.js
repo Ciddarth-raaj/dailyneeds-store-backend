@@ -5,9 +5,11 @@ class DocumentRepository {
     this.db = db;
   }
 
-  get() {
+  get(employee_id) {
     return new Promise((resolve, reject) => {
-      this.db.query("SELECT * FROM doc_type", [], (err, docs) => {
+      this.db.query("SELECT * FROM new_employee_documents where employee_id = ?", 
+      [employee_id],
+      (err, docs) => {
         if (err) {
           logger.Log({
             level: logger.LEVEL.ERROR,

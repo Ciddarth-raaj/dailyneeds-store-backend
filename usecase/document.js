@@ -3,10 +3,10 @@ class DocumentUsecase {
       this.documentRepo = documentRepo;
     }
   
-    get() {
+    get(employee_id) {
       return new Promise(async (resolve, reject) => {
         try {
-          const data = await this.documentRepo.get();
+          const data = await this.documentRepo.get(employee_id);
           resolve(data);
         } catch (err) {
           reject(err);

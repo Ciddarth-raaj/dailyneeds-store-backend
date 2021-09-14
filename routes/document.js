@@ -1,4 +1,5 @@
 const router = require("express").Router();
+const Joi = require("@hapi/joi"); 
 
 class DocumentRoutes {
   constructor(documentUsecase) {
@@ -7,10 +8,18 @@ class DocumentRoutes {
   }
 
   init() {
-    router.get("/", async (req, res) => {
+    router.get("/employee_id", async (req, res) => {
       try {
-        const document = await this.documentUsecase.get();
-        res.json(document);
+        const schema = {
+          employee_id: Joi.number().required(),
+        }
+        const document = req.query;
+        const isValid = Joi.validate(document, schema);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+        const data = await this.documentUsecase.get(document.employee_id);
+        res.json(data);
       } catch (err) {
         console.log(err);
         if (err.name === "ValidationError") {

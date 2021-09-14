@@ -195,20 +195,20 @@ class EmployeeRoutes {
                 shift_id: Joi.number().optional(),
                 department_id: Joi.number().optional(),
                 marital_status: Joi.string().optional(),
-                marriage_date: Joi.string().allow('').optional(),
+                marriage_date: Joi.string().allow('').allow(null).optional(),
                 employee_image: Joi.string().optional(),
                 pan_no: Joi.string().optional(),
-                bank_name: Joi.string().allow('').optional(),
-	              ifsc: Joi.number().allow('').optional(),
-	              account_no: Joi.number().allow('').optional(),
-	              esi: Joi.number().allow('').optional(),
-	              esi_number: Joi.number().allow('').optional(),
-	              pf: Joi.number().allow('').optional(),
-	              pf_number: Joi.number().allow('').optional(),
-	              UAN: Joi.number().allow('').optional(),
+                bank_name: Joi.string().allow('').allow(null).optional(),
+	              ifsc: Joi.string().allow('').allow(null).optional(),
+	              account_no: Joi.string().allow('').allow(null).optional(),
+	              esi: Joi.number().allow('').allow(null).optional(),
+	              esi_number: Joi.number().allow('').allow(null).optional(),
+	              pf: Joi.number().allow('').allow(null).optional(),
+	              pf_number: Joi.number().allow('').allow(null).optional(),
+	              UAN: Joi.string().allow('').allow(null).optional(),
                 additional_course: Joi.string().optional(),
-                spouse_name: Joi.string().allow('').optional(),
-                online_portal: Joi.number().optional(),
+                spouse_name: Joi.string().allow('').allow(null).optional(),
+                online_portal: Joi.number().allow(null).optional(),
                 files: Joi.array()
                 .items({
                     id_card: Joi.string().allow('').required(),
@@ -224,6 +224,7 @@ class EmployeeRoutes {
           const employee = req.body;
           const isValid = Joi.validate(employee, schema);
           if (isValid.error !== null) {
+            console.log(isValid.error);
             throw isValid.error;
           }
   

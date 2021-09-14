@@ -60,7 +60,8 @@ class EmployeeUsecase {
         return new Promise(async (resolve, reject) => {
           try {
             const employee_id = employee.employee_id;
-            for(let i = 0; i < employee.employee_details.files.length - 1; i++) {
+            if(employee.employee_details.files[0].card_type !== undefined) {
+            for(let i = 0; i <= employee.employee_details.files.length; i++) {
               await this.documentUsecase.create({
                   card_type: employee.files[i].id_card,
                   card_no: employee.files[i].id_card_no,
@@ -70,8 +71,8 @@ class EmployeeUsecase {
                   employee_id: id,
               })
           }
+        }
             const { code } = await this.employeeRepo.updateEmployeeDetails(employee.employee_details, employee_id);
-            console.log({employee: employee.employee_details});
             
             resolve(code);
           } catch (err) {
@@ -83,7 +84,8 @@ class EmployeeUsecase {
         return new Promise(async (resolve, reject) => {
             try {
                 const { code, id } = await this.employeeRepo.create(employee);
-                for(let i = 0; i < employee.files.length - 1; i++) {
+                console.log({employeebreach: employee.files});
+                for(let i = 0; i <= employee.files.length - 1; i++) {
                     await this.documentUsecase.create({
                         card_type: employee.files[i].id_card,
                         card_no: employee.files[i].id_card_no,

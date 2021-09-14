@@ -31,7 +31,7 @@ const unProtectedRoutes = {
   "/shift/create": {
     methods: { post: true }
   },
-  "/document": {
+  "/document/employee_id": {
     methods: { get: true }
   },
   "/employee/employees": {

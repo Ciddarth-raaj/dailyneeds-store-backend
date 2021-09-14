@@ -13,7 +13,6 @@ class DepartmentRoutes {
     router.get("/", async (req, res) => {
         try {
           const department = await this.departmentUsecase.get();
-          console.log(department);
           res.json(department);
         } catch (err) {
             console.log(err);
