@@ -9,164 +9,164 @@ class EmployeeRoutes {
     this.init();
   }
 
-  init() {    
+  init() {
     router.post("/", async (req, res) => {
-        try {
-          const schema = {
-            employee_name: Joi.string().required(),
-            father_name: Joi.string().required(),
-            dob: Joi.string().required(),
-            permanent_address: Joi.string().required(),
-            residential_address: Joi.string().required(),
-            primary_contact_number: Joi.number().min(100000000).max(99999999999).required(),
-            alternate_contact_number: Joi.number().min(100000000).allow('').max(99999999999).optional(),
-            email_id: Joi.string().trim().email().required(),
-            qualification: Joi.string().allow('').required(),
-            introducer_name: Joi.string().allow('').optional(),
-            introducer_details: Joi.string().allow('').optional(),
-            salary: Joi.number().required(),
-            uniform_qty: Joi.number().allow('').optional(),
-            previous_experience: Joi.string().allow('').optional(),
-            date_of_joining: Joi.string().allow('').optional(),
-            gender: Joi.string().required(),
-            payment_type: Joi.number().required(),
-            blood_group: Joi.string().required(),
-            designation_id: Joi.number().required(),
-            store_id: Joi.number().required(),
-            shift_id: Joi.number().required(),
-            department_id: Joi.number().required(),
-            marital_status: Joi.string().required(),
-            marriage_date: Joi.string().allow('').optional(),
-            employee_image: Joi.string().required(),
-            pan_no: Joi.string().required(),
-            bank_name: Joi.string().allow('').optional(),
-	          ifsc: Joi.number().allow('').optional(),
-	          account_no: Joi.number().allow('').optional(),
-	          esi: Joi.number().allow('').optional(),
-	          esi_number: Joi.number().allow('').optional(),
-	          pf: Joi.number().allow('').optional(),
-	          pf_number: Joi.number().allow('').optional(),
-	          UAN: Joi.number().allow('').optional(),
-            additional_course: Joi.string().optional(),
-            spouse_name: Joi.string().allow('').optional(),
-            online_portal: Joi.number().optional(),
-            files: Joi.array()
+      try {
+        const schema = {
+          employee_name: Joi.string().required(),
+          father_name: Joi.string().required(),
+          dob: Joi.string().required(),
+          permanent_address: Joi.string().required(),
+          residential_address: Joi.string().required(),
+          primary_contact_number: Joi.number().min(100000000).max(99999999999).required(),
+          alternate_contact_number: Joi.number().min(100000000).allow('').max(99999999999).optional(),
+          email_id: Joi.string().trim().allow('').email().optional(),
+          qualification: Joi.string().allow('').required(),
+          introducer_name: Joi.string().allow('').optional(),
+          introducer_details: Joi.string().allow('').optional(),
+          salary: Joi.number().required(),
+          uniform_qty: Joi.number().allow('').optional(),
+          previous_experience: Joi.string().allow('').optional(),
+          date_of_joining: Joi.string().allow('').optional(),
+          gender: Joi.string().required(),
+          payment_type: Joi.number().required(),
+          blood_group: Joi.string().required(),
+          designation_id: Joi.number().required(),
+          store_id: Joi.number().required(),
+          shift_id: Joi.number().required(),
+          department_id: Joi.number().required(),
+          marital_status: Joi.string().required(),
+          marriage_date: Joi.string().allow('').optional(),
+          employee_image: Joi.string().required(),
+          pan_no: Joi.string().required(),
+          bank_name: Joi.string().allow('').optional(),
+          ifsc: Joi.number().allow('').optional(),
+          account_no: Joi.number().allow('').optional(),
+          esi: Joi.number().allow('').optional(),
+          esi_number: Joi.number().allow('').optional(),
+          pf: Joi.number().allow('').optional(),
+          pf_number: Joi.number().allow('').optional(),
+          UAN: Joi.number().allow('').optional(),
+          additional_course: Joi.string().optional(),
+          spouse_name: Joi.string().allow('').optional(),
+          online_portal: Joi.number().optional(),
+          files: Joi.array()
             .items({
-                    id_card: Joi.string().allow('').required(),
-                    id_card_no: Joi.number().allow('').required(),
-                    id_card_name: Joi.string().allow('').required(),
-                    expiry_date: Joi.date().allow("").allow(null).optional(),
-                    file: Joi.string().allow('').required(),
+              id_card: Joi.string().allow('').required(),
+              id_card_no: Joi.number().allow('').required(),
+              id_card_name: Joi.string().allow('').required(),
+              expiry_date: Joi.date().allow("").allow(null).optional(),
+              file: Joi.string().allow('').required(),
             })
             .required(),
-          };
-  
-          const employee = req.body;
-          const isValid = Joi.validate(employee, schema);
-          if (isValid.error !== null) {
-            console.log(isValid.error);
-            throw isValid.error;
-          }
-          const response = await this.employeeUsecase.create(employee);
-  
-          res.json(response);
-        } catch (err) {
+        };
 
-          if (err.name === "ValidationError") {
-            res.json({ code: 422, msg: err.toString() });
-          } else {
-            console.log(err);
-            res.json({ code: 500, msg: err.message });
-          }
+        const employee = req.body;
+        const isValid = Joi.validate(employee, schema);
+        if (isValid.error !== null) {
+          console.log(isValid.error);
+          throw isValid.error;
         }
-  
-        res.end();
-      });
-      router.get("/employees", async (req, res) => {
-        try {
-          const employee = await this.employeeUsecase.get();
-          res.json(employee);
-        } catch (err) {
-          console.log(err);
-          if (err.name === "ValidationError") {
-            res.json({ code: 422, msg: err.toString() });
-          } else {
-            res.json({ code: 500, msg: "An error occurred !" });
-          }
-        }
-  
-        res.end();
-      });
+        const response = await this.employeeUsecase.create(employee);
 
-      router.get("/headcount", async (req, res) => {
-        try {
-          const employee = await this.employeeUsecase.getHeadCount();
-          res.json(employee);
-        } catch (err) {
+        res.json(response);
+      } catch (err) {
+
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
           console.log(err);
-          if (err.name === "ValidationError") {
-            res.json({ code: 422, msg: err.toString() });
-          } else {
-            res.json({ code: 500, msg: "An error occurred !" });
-          }
+          res.json({ code: 500, msg: err.message });
         }
-  
-        res.end();
-      });
-      router.get("/resignedemp", async (req, res) => {
-        try {
-          const employee = await this.employeeUsecase.getResignedEmployee();
-          res.json(employee);
-        } catch (err) {
-          console.log(err);
-          if (err.name === "ValidationError") {
-            res.json({ code: 422, msg: err.toString() });
-          } else {
-            res.json({ code: 500, msg: "An error occurred !" });
-          }
+      }
+
+      res.end();
+    });
+    router.get("/employees", async (req, res) => {
+      try {
+        const employee = await this.employeeUsecase.get();
+        res.json(employee);
+      } catch (err) {
+        console.log(err);
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          res.json({ code: 500, msg: "An error occurred !" });
         }
-  
-        res.end();
-      });
-      router.get("/newjoiner", async (req, res) => {
-        try {
-          const employee = await this.employeeUsecase.getNewJoiner();
-          res.json(employee);
-        } catch (err) {
-          console.log(err);
-          if (err.name === "ValidationError") {
-            res.json({ code: 422, msg: err.toString() });
-          } else {
-            res.json({ code: 500, msg: "An error occurred !" });
-          }
+      }
+
+      res.end();
+    });
+
+    router.get("/headcount", async (req, res) => {
+      try {
+        const employee = await this.employeeUsecase.getHeadCount();
+        res.json(employee);
+      } catch (err) {
+        console.log(err);
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          res.json({ code: 500, msg: "An error occurred !" });
         }
-  
-        res.end();
-      });
-      router.get("/employee_id", async (req, res) => {
-        try {
-          const schema = {
-            employee_id: Joi.number().required(),
-          }
-          const employee = req.query;
-          const isValid = Joi.validate(employee, schema);
-          if (isValid.error !== null) {
-            throw isValid.error;
-          }
-          const data = await this.employeeUsecase.getEmployeeById(employee.employee_id);
-          res.json(data);
-        } catch (err) {
-          console.log(err);
-          if (err.name === "ValidationError") {
-            res.json({ code: 422, msg: err.toString() });
-          } else {
-            res.json({ code: 500, msg: "An error occurred !" });
-          }
+      }
+
+      res.end();
+    });
+    router.get("/resignedemp", async (req, res) => {
+      try {
+        const employee = await this.employeeUsecase.getResignedEmployee();
+        res.json(employee);
+      } catch (err) {
+        console.log(err);
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          res.json({ code: 500, msg: "An error occurred !" });
         }
-  
-        res.end();
-      });
-      router.post("/updatedata", async (req, res) => {
+      }
+
+      res.end();
+    });
+    router.get("/newjoiner", async (req, res) => {
+      try {
+        const employee = await this.employeeUsecase.getNewJoiner();
+        res.json(employee);
+      } catch (err) {
+        console.log(err);
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          res.json({ code: 500, msg: "An error occurred !" });
+        }
+      }
+
+      res.end();
+    });
+    router.get("/employee_id", async (req, res) => {
+      try {
+        const schema = {
+          employee_id: Joi.number().required(),
+        }
+        const employee = req.query;
+        const isValid = Joi.validate(employee, schema);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+        const data = await this.employeeUsecase.getEmployeeById(employee.employee_id);
+        res.json(data);
+      } catch (err) {
+        console.log(err);
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          res.json({ code: 500, msg: "An error occurred !" });
+        }
+      }
+
+      res.end();
+    });
+    router.post("/updatedata", async (req, res) => {
         try {
           const schema = {
             employee_id: Joi.number().required(),
@@ -240,12 +240,11 @@ class EmployeeRoutes {
         }
         res.end();
       });
-  
   }
   getRouter() {
     return router;
   }
-}   
+}
 
 module.exports = (employeeUsecase) => {
   return new EmployeeRoutes(employeeUsecase);
