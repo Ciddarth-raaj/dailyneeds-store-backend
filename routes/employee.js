@@ -42,14 +42,14 @@ class EmployeeRoutes {
             bank_name: Joi.string().allow('').optional(),
 	          ifsc: Joi.number().allow('').optional(),
 	          account_no: Joi.number().allow('').optional(),
-	          esi: Joi.number().allow('').required(),
+	          esi: Joi.number().allow('').optional(),
 	          esi_number: Joi.number().allow('').optional(),
 	          pf: Joi.number().allow('').optional(),
 	          pf_number: Joi.number().allow('').optional(),
 	          UAN: Joi.number().allow('').optional(),
             additional_course: Joi.string().optional(),
             spouse_name: Joi.string().allow('').optional(),
-            online_portal: Joi.number().required(),
+            online_portal: Joi.number().optional(),
             files: Joi.array()
             .items({
                     id_card: Joi.string().allow('').required(),
@@ -62,7 +62,6 @@ class EmployeeRoutes {
           };
   
           const employee = req.body;
-          console.log({employee: employee});
           const isValid = Joi.validate(employee, schema);
           if (isValid.error !== null) {
             console.log(isValid.error);
@@ -147,7 +146,7 @@ class EmployeeRoutes {
       router.get("/employee_id", async (req, res) => {
         try {
           const schema = {
-            employee_id: Joi.string().required(),
+            employee_id: Joi.number().required(),
           }
           const employee = req.query;
           const isValid = Joi.validate(employee, schema);
