@@ -196,7 +196,6 @@ class EmployeeRoutes {
                 department_id: Joi.number().optional(),
                 marital_status: Joi.string().optional(),
                 marriage_date: Joi.string().allow('').allow(null).optional(),
-                employee_image: Joi.string().optional(),
                 pan_no: Joi.string().optional(),
                 bank_name: Joi.string().allow('').allow(null).optional(),
 	              ifsc: Joi.string().allow('').allow(null).optional(),
@@ -209,6 +208,7 @@ class EmployeeRoutes {
                 additional_course: Joi.string().optional(),
                 spouse_name: Joi.string().allow('').allow(null).optional(),
                 online_portal: Joi.number().allow(null).optional(),
+                modified_employee_image: Joi.string().allow('').allow(null).optional(),
                 files: Joi.array()
                 .items({
                     id_card: Joi.string().allow('').required(),
