@@ -13,6 +13,28 @@ class ShiftUsecase {
             }
         });
     }
+    getShiftById(shift_id) {
+        return new Promise(async (resolve, reject) => {
+          try {
+            const data = await this.shiftRepo.getShiftById(shift_id);
+            resolve(data);
+          } catch (err) {
+            console.log(err);
+            reject(err);
+          }
+        });
+      }
+      updateShiftDetails(shift) {
+        return new Promise(async (resolve, reject) => {
+          try {
+            const shift_id = shift.shift_id;
+            const { code } = await this.shiftRepo.updateShiftDetails(shift.shift_details, shift_id);  
+            resolve(code);
+          } catch (err) {
+            reject(err);
+          }
+        });
+      }
     create(shift) {
         return new Promise(async (resolve, reject) => {
             try {

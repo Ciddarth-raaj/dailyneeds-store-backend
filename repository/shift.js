@@ -28,6 +28,50 @@ class ShiftRepository {
             );
         });
     }
+    updateShiftDetails(data, shift_id) {
+      return new Promise((resolve, reject) => {
+        this.db.query(
+          `UPDATE shift_master SET ? WHERE shift_id = ?`,
+          [data, shift_id],
+          (err, res) => {
+            if (err) {
+                logger.Log({
+                  level: logger.LEVEL.ERROR,
+                  component: "REPOSITORY.SHIFT",
+                  code: "REPOSITORY.SHIFT.UPDATE-SHIFT-DETAILS",
+                  description: err.toString(),
+                  category: "",
+                  ref: {},
+                });
+              reject(err);
+              return;
+            }
+            resolve({ code: 200 });
+          }
+        );
+      });
+    }
+    getShiftById(shift_id) {
+      return new Promise((resolve, reject) => {
+        this.db.query("SELECT * FROM shift_master where shift_id = ?",
+        [shift_id], 
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.SHIFT",
+              code: "REPOSITORY.SHIFT.GET-ID",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        });
+      });
+    }
     create(shift) {
         return new Promise((resolve, reject) => {
             this.db.query(

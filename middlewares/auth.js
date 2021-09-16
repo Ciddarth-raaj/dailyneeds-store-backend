@@ -25,6 +25,12 @@ const unProtectedRoutes = {
   "/shift": {
     methods: { get: true }
   },
+  "/shift/shift_id": {
+    methods: { get: true }
+  },
+  "/shift/update-shift": {
+    methods: { post: true }
+  },
   "/asset": {
     methods: { post: true }
   },
@@ -66,6 +72,15 @@ const unProtectedRoutes = {
   },
   "/employee/headcount": {
     methods: { get: true }
+  },
+  "/outlet": {
+    methods: { get: true }
+  },
+  "/outlet/update-outlet": {
+    methods: { post: true }
+  },
+  "/outlet/create": {
+    methods: { post: true }
   }
 }
 
