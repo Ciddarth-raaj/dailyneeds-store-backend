@@ -72,7 +72,7 @@ class EmployeeUsecase {
             })
           }
         }
-        if(employee.employee_details.modified_employee_image !== null) {
+        if(employee.employee_details.modified_employee_image !== "") {
             await this.employeeRepo.updateEmployeeImage(employee.employee_details.modified_employee_image, employee_id);
         }
         delete employee.employee_details.modified_employee_image;

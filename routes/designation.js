@@ -21,8 +21,30 @@ class DesignationRoutes {
         } else {
           res.json({ code: 500, msg: "An error occurred !" });
         }
+      }    
+      res.end();
+    });
+    
+    router.get("/permission/designation_id", async (req, res) => {
+      try {
+      const schema = {
+        designation_id: Joi.string().required(),
       }
-
+      const designation = req.query;
+      const isValid = Joi.validate(designation, schema);
+      if (isValid.error !== null) {
+        throw isValid.error;
+      }
+        const permission = await this.designationUsecase.getPermissionById(designation.designation_id);
+        res.json(permission);
+      } catch (err) {
+        console.log(err);
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          res.json({ code: 500, msg: "An error occurred !" });
+        }
+      }
       res.end();
     });
     router.post("/update-designation", async (req, res) => {
