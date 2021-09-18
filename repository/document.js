@@ -26,9 +26,30 @@ class DocumentRepository {
       });
     });
   }
-
-  create(file) {
+  update(file) {
     console.log({file: file});
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "UPDATE new_employee_documents SET ? WHERE employee_id = ? AND card_type = ?", 
+        [file.data, file.employee_id, file.card_type], 
+        (err, docs) => {
+        if (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "REPOSITORY.DOCUMENT",
+            code: "REPOSITORY.DOCUMENT.UPDATE",
+            description: err.toString(),
+            category: "",
+            ref: {},
+          }); 
+          reject(err);
+          return;
+        }
+        resolve(docs);
+      });
+    });
+  }
+  create(file) {
     return new Promise((resolve, reject) => {
       this.db.query(
         "INSERT INTO new_employee_documents (employee_id, card_type, card_no, card_name, expiry_date, file) VALUES (?, ?, ?, ?, ?, ?)", 

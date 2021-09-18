@@ -209,7 +209,7 @@ class EmployeeRoutes {
               spouse_name: Joi.string().allow('').allow(null).optional(),
               online_portal: Joi.number().allow(null).optional(),
               modified_employee_image: Joi.string().allow('').allow(null).optional(),
-                files: Joi.array()
+              files: Joi.array()
                 .items({
                     id_card: Joi.string().allow('').required(),
                     id_card_no: Joi.number().allow('').required(),
@@ -218,10 +218,23 @@ class EmployeeRoutes {
                     file: Joi.string().allow('').required(),
                 })
                 .optional(),
+              docupdate: Joi.array()
+              .items({
+                card_name: Joi.string().allow('').allow(null).optional(),
+                card_no: Joi.string().allow('').allow(null).optional(),
+                card_type: Joi.string().allow('').allow(null).required(),
+                file: Joi.string().allow('').allow(null).optional(),
+              })
+              .optional(),
             }).optional(),
           };
 
           const employee = req.body;
+          for(let i=0; i <= employee.employee_details.docupdate.length - 1; i++) {
+            if(employee.employee_details.docupdate[i].file === "") {
+              delete employee.employee_details.docupdate[i].file
+            }
+          }
           const isValid = Joi.validate(employee, schema);
           if (isValid.error !== null) {
             console.log(isValid.error);
