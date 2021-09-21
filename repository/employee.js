@@ -114,7 +114,7 @@ class EmployeeRepository {
     }
     getHeadCount() {
       return new Promise((resolve, reject) => {
-        this.db.query("SELECT count(employee_id) as head_count FROM new_employee",
+        this.db.query("SELECT count(employee_id) as head_count, created_at FROM new_employee GROUP BY MONTH(DATE(created_at))" ,
         [], 
         (err, docs) => {
           if (err) {
@@ -165,6 +165,50 @@ class EmployeeRepository {
               level: logger.LEVEL.ERROR,
               component: "REPOSITORY.EMPLOYEE",
               code: "REPOSITORY.EMPLOYEE.GET-NEW-JOINER",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        });
+      });
+    }
+
+    getEmployeeBirthday() {
+      return new Promise((resolve, reject) => {
+        this.db.query("SELECT dob, employee_name AS birthday FROM new_employee WHERE WEEK(dob) = WEEK(now())",
+        [], 
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.EMPLOYEE",
+              code: "REPOSITORY.EMPLOYEE.GET-BIRTHDAY",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        });
+      });
+    }
+
+    getJoiningAnniversary() {
+      return new Promise((resolve, reject) => {
+        this.db.query("SELECT dob, employee_name AS anniversary FROM new_employee WHERE WEEK(date_of_joining)=WEEK(now())",
+        [], 
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.EMPLOYEE",
+              code: "REPOSITORY.EMPLOYEE.GET-ANNIVERSARY",
               description: err.toString(),
               category: "",
               ref: {},

@@ -73,6 +73,12 @@ const unProtectedRoutes = {
   "/employee/headcount": {
     methods: { get: true }
   },
+  "/employee/birthday": {
+    methods: { get: true }
+  },
+  "/employee/anniversary": {
+    methods: { get: true }
+  },
   "/outlet": {
     methods: { get: true }
   },

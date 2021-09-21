@@ -36,6 +36,26 @@ class EmployeeUsecase {
       }
     });
   }
+  getEmployeeBirthday() {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const data = await this.employeeRepo.getEmployeeBirthday();
+        resolve(data);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+  getJoiningAnniversary() {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const data = await this.employeeRepo.getJoiningAnniversary();
+        resolve(data);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
   getNewJoiner() {
     return new Promise(async (resolve, reject) => {
       try {

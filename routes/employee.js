@@ -143,6 +143,39 @@ class EmployeeRoutes {
 
       res.end();
     });
+
+    router.get("/birthday", async (req, res) => {
+      try {
+        const employee = await this.employeeUsecase.getEmployeeBirthday();
+        res.json(employee);
+      } catch (err) {
+        console.log(err);
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          res.json({ code: 500, msg: "An error occurred !" });
+        }
+      }
+
+      res.end();
+    });
+
+    router.get("/anniversary", async (req, res) => {
+      try {
+        const employee = await this.employeeUsecase.getJoiningAnniversary();
+        res.json(employee);
+      } catch (err) {
+        console.log(err);
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          res.json({ code: 500, msg: "An error occurred !" });
+        }
+      }
+
+      res.end();
+    });
+    
     router.get("/employee_id", async (req, res) => {
       try {
         const schema = {
