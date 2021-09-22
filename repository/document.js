@@ -26,6 +26,29 @@ class DocumentRepository {
       });
     });
   }
+  getAdhaar() {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "select * from new_employee_documents LEFT JOIN new_employee ON new_employee_documents.employee_id = new_employee.employee_id WHERE card_type = 1",
+        [],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.DOCUMENT",
+              code: "REPOSITORY.DOCUMENT.GET-ADHAAR",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs)
+        }
+      );
+    });
+  }
   update(file) {
     console.log({file: file});
     return new Promise((resolve, reject) => {

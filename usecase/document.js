@@ -13,6 +13,16 @@ class DocumentUsecase {
         }
       });
     }
+    getAdhaar() {
+      return new Promise(async (resolve, reject) => {
+          try {
+              const data = await this.documentRepo.getAdhaar();
+              resolve(data);
+          } catch (err) {
+              reject(err);
+          }
+      });
+  }
     create(file) {
       return new Promise(async (resolve, reject) => {
         try {

@@ -99,6 +99,9 @@ const unProtectedRoutes = {
   },
   "/family/update-family": {
     methods: { post: true }
+  },
+  "/document/adhaar": {
+    methods: { get: true }
   }
 }
 
