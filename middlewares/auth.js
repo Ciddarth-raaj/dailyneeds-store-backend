@@ -87,6 +87,18 @@ const unProtectedRoutes = {
   },
   "/outlet/create": {
     methods: { post: true }
+  },
+  "/family": {
+    methods: { get: true }
+  },
+  "/family/create": {
+    methods: { post: true }
+  },
+  "/family/family_id": {
+    methods: { get: true }
+  },
+  "/family/update-family": {
+    methods: { post: true }
   }
 }
 

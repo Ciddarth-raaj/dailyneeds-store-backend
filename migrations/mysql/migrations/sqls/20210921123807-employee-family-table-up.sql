@@ -1,0 +1,1 @@
+CREATE TABLE `employee_family` ( `family_id` INT NOT NULL AUTO_INCREMENT, `name` VARCHAR(45) NOT NULL, `dob` DATE NULL, `gender` VARCHAR(45) NULL, `blood_group` VARCHAR(45) NULL, `relation` VARCHAR(45) NULL, `address` LONGTEXT NULL, `profession` VARCHAR(45) NULL, `nationality` VARCHAR(45) NULL, `remarks` LONGTEXT NULL, PRIMARY KEY (`family_id`));
