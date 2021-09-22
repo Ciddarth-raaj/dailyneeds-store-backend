@@ -7,38 +7,41 @@ const unProtectedRoutes = {
   "/user/login": {
     methods: { get: true }
   },
+
+  
+  //department
   "/department": {
     methods: { get: true }
   },
   "/department/create": {
     methods: { post: true }
   },
+  "/department/department_id": {
+    methods: { get: true }
+  },
+  "/department/update-department": {
+    methods: { post: true }
+  },
+
+
+  //designation
   "/designation": {
     methods: { get: true }
   },
   "/designation/create": {
     methods: { post: true }
   },
+  "/designation/update-designation": {
+    methods: { post: true }
+  },
+  "/designation/designation_id": {
+    methods: { get: true }
+  },
+
+
+  //employee
   "/employee": {
     methods: { post: true }
-  },
-  "/shift": {
-    methods: { get: true }
-  },
-  "/shift/shift_id": {
-    methods: { get: true }
-  },
-  "/shift/update-shift": {
-    methods: { post: true }
-  },
-  "/asset": {
-    methods: { post: true }
-  },
-  "/shift/create": {
-    methods: { post: true }
-  },
-  "/document/employee_id": {
-    methods: { get: true }
   },
   "/employee/employees": {
     methods: { get: true }
@@ -47,21 +50,6 @@ const unProtectedRoutes = {
     methods: { post: true }
   },
   "/employee/employee_id": {
-    methods: { get: true }
-  },
-  "/store": {
-    methods: { get: true }
-  },
-  "/department/department_id": {
-    methods: { get: true }
-  },
-  "/department/update-department": {
-    methods: { post: true }
-  },
-  "/designation/update-designation": {
-    methods: { post: true }
-  },
-  "/designation/designation_id": {
     methods: { get: true }
   },
   "/employee/resignedemp": {
@@ -79,6 +67,48 @@ const unProtectedRoutes = {
   "/employee/anniversary": {
     methods: { get: true }
   },
+  "/employee/bank": {
+    methods: { get: true }
+  },
+
+
+  //shift
+  "/shift": {
+    methods: { get: true }
+  },
+  "/shift/shift_id": {
+    methods: { get: true }
+  },
+  "/shift/update-shift": {
+    methods: { post: true }
+  },
+  "/shift/create": {
+    methods: { post: true }
+  },
+
+
+  //assets
+  "/asset": {
+    methods: { post: true }
+  },
+
+
+  //document
+  "/document/employee_id": {
+    methods: { get: true }
+  },
+  "/document/adhaar": {
+    methods: { get: true }
+  },
+
+
+  //store
+  "/store": {
+    methods: { get: true }
+  },
+
+
+  //outlet
   "/outlet": {
     methods: { get: true }
   },
@@ -88,6 +118,9 @@ const unProtectedRoutes = {
   "/outlet/create": {
     methods: { post: true }
   },
+
+
+  //family
   "/family": {
     methods: { get: true }
   },
@@ -100,9 +133,6 @@ const unProtectedRoutes = {
   "/family/update-family": {
     methods: { post: true }
   },
-  "/document/adhaar": {
-    methods: { get: true }
-  }
 }
 
 async function auth (req, res, next) {

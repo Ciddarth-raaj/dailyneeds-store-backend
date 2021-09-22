@@ -176,6 +176,27 @@ class EmployeeRepository {
         });
       });
     }
+    getBankDetails() {
+      return new Promise((resolve, reject) => {
+        this.db.query("SELECT * FROM new_employee WHERE payment_type = 1",
+        [], 
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.EMPLOYEE",
+              code: "REPOSITORY.EMPLOYEE.GET-BANK",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        });
+      });
+    }
 
     getEmployeeBirthday() {
       return new Promise((resolve, reject) => {
