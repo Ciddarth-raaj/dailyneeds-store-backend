@@ -13,7 +13,6 @@ class FamilyRoutes {
     router.get("/", async (req, res) => {
         try {
           const family = await this.familyUsecase.get();
-          console.log(family);
           res.json(family);
         } catch (err) {
             console.log(err);
@@ -61,7 +60,6 @@ class FamilyRoutes {
               blood_group: Joi.string().optional(),
               relation: Joi.string().optional(),
               nationality: Joi.string().optional(),
-              address: Joi.string().optional(),
               profession: Joi.string().optional(),
               remarks: Joi.string().optional(),
             }).optional(),
@@ -94,7 +92,6 @@ class FamilyRoutes {
             blood_group: Joi.string().required(),
             relation: Joi.string().required(),
             nationality: Joi.string().required(),
-            address: Joi.string().required(),
             profession: Joi.string().required(),
             remarks: Joi.string().required(),
           };
