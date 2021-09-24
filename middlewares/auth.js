@@ -133,6 +133,15 @@ const unProtectedRoutes = {
   "/family/update-family": {
     methods: { post: true }
   },
+  "/document/all": {
+    methods: { get: true }
+  },
+  "/document/document_id": {
+    methods: { get: true }
+  },
+  "/document/update-document": {
+    methods: { post: true }
+  }
 }
 
 async function auth (req, res, next) {
