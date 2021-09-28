@@ -75,13 +75,14 @@ class FamilyRepository {
   create(family) {
     return new Promise((resolve, reject) => {
         this.db.query(
-          "INSERT INTO employee_family (name, dob, gender, blood_group, relation, nationality, profession, remarks) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO employee_family (name, dob, gender, blood_group, relation, employee_name, nationality, profession, remarks) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
           [
             family.name,
             family.dob,
             family.gender,
             family.blood_group,
             family.relation,
+            family.employee_name,
             family.nationality,
             family.profession,
             family.remarks

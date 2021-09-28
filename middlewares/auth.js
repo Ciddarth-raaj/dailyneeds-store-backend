@@ -70,6 +70,9 @@ const unProtectedRoutes = {
   "/employee/bank": {
     methods: { get: true }
   },
+  "/employee/familydet": {
+    methods: { get: true }
+  },
 
 
   //shift
@@ -141,7 +144,7 @@ const unProtectedRoutes = {
   },
   "/document/update-document": {
     methods: { post: true }
-  }
+  },
 }
 
 async function auth (req, res, next) {

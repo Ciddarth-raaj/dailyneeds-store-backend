@@ -58,6 +58,7 @@ class FamilyRoutes {
               dob: Joi.date().optional(),
               gender: Joi.string().optional(),
               blood_group: Joi.string().optional(),
+              employee_name: Joi.string().required(),
               relation: Joi.string().optional(),
               nationality: Joi.string().optional(),
               profession: Joi.string().optional(),
@@ -68,6 +69,7 @@ class FamilyRoutes {
           const family = req.body;
           const isValid = Joi.validate(family, schema);
           if (isValid.error !== null) {
+            console.log({erro: isValid.error})
             throw isValid.error;
           }
   
@@ -90,6 +92,7 @@ class FamilyRoutes {
             dob: Joi.date().required(),
             gender: Joi.string().required(),
             blood_group: Joi.string().required(),
+            employee_name: Joi.string().required(),
             relation: Joi.string().required(),
             nationality: Joi.string().required(),
             profession: Joi.string().required(),

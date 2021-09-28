@@ -154,7 +154,27 @@ class EmployeeRepository {
         });
       });
     }
-
+    getFamilyDet() {
+      return new Promise((resolve, reject) => {
+        this.db.query("SELECT employee_id, employee_name, employee_image FROM new_employee",
+        [], 
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.EMPLOYEE",
+              code: "REPOSITORY.EMPLOYEE.GET-FAMILY-DET",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        });
+      });
+    }
     getNewJoiner() {
       return new Promise((resolve, reject) => {
         this.db.query("select count(employee_id) as new_joiners from new_employee where MONTH(date_of_joining)=MONTH(now())",

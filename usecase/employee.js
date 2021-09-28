@@ -46,6 +46,16 @@ class EmployeeUsecase {
       }
     });
   }
+  getFamilyDet() {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const data = await this.employeeRepo.getFamilyDet();
+        resolve(data);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
   getBankDetails() {
     return new Promise(async (resolve, reject) => {
       try {
