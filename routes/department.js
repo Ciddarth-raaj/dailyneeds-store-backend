@@ -25,6 +25,31 @@ class DepartmentRoutes {
   
         res.end();
       });
+      router.post("/update-status", async (req, res) => {
+        try {
+          const schema = {
+            department_id: Joi.number().required(),
+            status: Joi.number().required(),
+          };
+  
+          const department = req.body;
+          const isValid = Joi.validate(department, schema);
+          if (isValid.error !== null) {
+            throw isValid.error;
+          }
+  
+          const code = await this.departmentUsecase.updateStatus(department);
+          res.json({ code: code });
+        } catch (err) {
+          if (err.name === "ValidationError") {
+            res.json({ code: 422, msg: err.toString() });
+          } else {
+            console.log(err);
+            res.json({ code: 500, msg: "An error occurred !" });
+          }
+        }
+        res.end();
+      });
       router.post("/update-department", async (req, res) => {
         try {
           const schema = {

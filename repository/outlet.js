@@ -28,6 +28,28 @@ class OutletRepository {
       );
     });
   }
+  updateStatus(file) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "UPDATE outlets SET is_active = ? WHERE outlet_id = ?",
+        [file.is_active, file.outlet_id],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.OUTLET",
+              code: "REPOSITORY.OUTLET.UPDATE-STATUS",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        });
+    });
+  }
   updateOutletDetails(data, outlet_id) {
     return new Promise((resolve, reject) => {
       this.db.query(

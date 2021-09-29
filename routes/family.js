@@ -62,7 +62,7 @@ class FamilyRoutes {
               relation: Joi.string().optional(),
               nationality: Joi.string().optional(),
               profession: Joi.string().optional(),
-              remarks: Joi.string().optional(),
+              remarks: Joi.string().allow('').optional(),
             }).optional(),
           };
 
@@ -96,7 +96,7 @@ class FamilyRoutes {
             relation: Joi.string().required(),
             nationality: Joi.string().required(),
             profession: Joi.string().required(),
-            remarks: Joi.string().required(),
+            remarks: Joi.string().optional(),
           };
   
           const family = req.body;

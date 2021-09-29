@@ -22,6 +22,9 @@ const unProtectedRoutes = {
   "/department/update-department": {
     methods: { post: true }
   },
+  "/department/update-status": {
+    methods: { post: true }
+  },
 
 
   //designation
@@ -36,6 +39,9 @@ const unProtectedRoutes = {
   },
   "/designation/designation_id": {
     methods: { get: true }
+  },
+  "/designation/update-status": {
+    methods: { post: true }
   },
 
 
@@ -73,6 +79,9 @@ const unProtectedRoutes = {
   "/employee/familydet": {
     methods: { get: true }
   },
+  "/employee/update-status": {
+    methods: { post: true }
+  },
 
 
   //shift
@@ -88,7 +97,20 @@ const unProtectedRoutes = {
   "/shift/create": {
     methods: { post: true }
   },
+  "/shift/update-status": {
+    methods: { post: true }
+  },
 
+  //company
+  "/company": {
+    methods: { post: true }
+  },
+  "/company/update-status": {
+    methods: { post: true } 
+  },
+  "/company/company_id": {
+    methods: { get: true }
+  },
 
   //assets
   "/asset": {
@@ -102,6 +124,18 @@ const unProtectedRoutes = {
   },
   "/document/adhaar": {
     methods: { get: true }
+  },
+  "/document/update-status": {
+    methods: { post: true }
+  },
+  "/document/all": {
+    methods: { get: true }
+  },
+  "/document/document_id": {
+    methods: { get: true }
+  },
+  "/document/update-document": {
+    methods: { post: true }
   },
 
 
@@ -121,6 +155,9 @@ const unProtectedRoutes = {
   "/outlet/create": {
     methods: { post: true }
   },
+  "/outlet/update-status": {
+    methods: { post: true }
+  },
 
 
   //family
@@ -135,16 +172,7 @@ const unProtectedRoutes = {
   },
   "/family/update-family": {
     methods: { post: true }
-  },
-  "/document/all": {
-    methods: { get: true }
-  },
-  "/document/document_id": {
-    methods: { get: true }
-  },
-  "/document/update-document": {
-    methods: { post: true }
-  },
+  }
 }
 
 async function auth (req, res, next) {

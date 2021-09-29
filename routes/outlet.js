@@ -25,6 +25,31 @@ class OutletRoutes {
 
             res.end();
         });
+        router.post("/update-status", async (req, res) => {
+          try {
+            const schema = {
+              outlet_id: Joi.number().required(),
+              is_active: Joi.number().required(),
+            };
+    
+            const outlet = req.body;
+            const isValid = Joi.validate(outlet, schema);
+            if (isValid.error !== null) {
+              throw isValid.error;
+            }
+    
+            const code = await this.outletUsecase.updateStatus(outlet);
+            res.json({ code: code });
+          } catch (err) {
+            if (err.name === "ValidationError") {
+              res.json({ code: 422, msg: err.toString() });
+            } else {
+              console.log(err);
+              res.json({ code: 500, msg: "An error occurred !" });
+            }
+          }
+          res.end();
+        });
         router.post("/update-outlet", async (req, res) => {
           try {
             const schema = {
@@ -36,7 +61,6 @@ class OutletRoutes {
                 outlet_phone: Joi.number().min(100000000).max(99999999999).optional(),
                 phone: Joi.number().min(100000000).max(99999999999).optional(),
                 outlet_nickname: Joi.string().optional(),
-                is_active: Joi.number().optional(),
               }).optional(),
             };
   

@@ -70,6 +70,28 @@ class EmployeeRepository {
         );
       });
     }
+    updateStatus(file) {
+      return new Promise((resolve, reject) => {
+        this.db.query(
+          "UPDATE new_employee SET status = ? WHERE employee_id = ?",
+          [file.status, file.employee_id],
+          (err, docs) => {
+            if (err) {
+              logger.Log({
+                level: logger.LEVEL.ERROR,
+                component: "REPOSITORY.EMPLOYEE",
+                code: "REPOSITORY.EMPLOYEE.UPDATE-STATUS",
+                description: err.toString(),
+                category: "",
+                ref: {},
+              });
+              reject(err);
+              return;
+            }
+            resolve(docs);
+          });
+      });
+    }
     updateEmployeeImage(data, employee_id) {
       return new Promise((resolve, reject) => {
         this.db.query("UPDATE new_employee SET employee_image = ? WHERE employee_id = ?",

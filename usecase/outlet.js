@@ -14,6 +14,16 @@ class OutletUsecase {
             }
         });
     }
+    updateStatus(file) {
+        return new Promise(async (resolve, reject) => {
+          try {
+            await this.outletRepo.updateStatus(file);
+            resolve(200);
+          } catch (err) {
+            reject(err);
+          }
+        });
+      }
     updateOutletDetails(outlet) {
         return new Promise(async (resolve, reject) => {
           try {

@@ -13,6 +13,16 @@ class DesignationUsecase {
       }
     });
   }
+  updateStatus(file) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        await this.designationRepo.updateStatus(file);
+        resolve(200);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
   updateDesignationDetails(designation) {
     return new Promise(async (resolve, reject) => {
       try {

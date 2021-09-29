@@ -49,6 +49,28 @@ class DepartmentRepository {
       });
     });
   }
+  updateStatus(file) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "UPDATE department SET status = ? WHERE department_id = ?",
+        [file.status, file.department_id],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.DEPARTMENT",
+              code: "REPOSITORY.DEPARTMENT.UPDATE-STATUS",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        });
+    });
+  }
   updateDepartmentDetails(data, department_id) {
     return new Promise((resolve, reject) => {
       this.db.query(

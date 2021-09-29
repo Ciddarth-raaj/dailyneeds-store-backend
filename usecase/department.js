@@ -15,6 +15,16 @@ class DepartmentUsecase {
         });
 
     }
+    updateStatus(file) {
+      return new Promise(async (resolve, reject) => {
+        try {
+          await this.departmentRepo.updateStatus(file);
+          resolve(200);
+        } catch (err) {
+          reject(err);
+        }
+      });
+    }
     updateDepartmentDetails(department) {
         return new Promise(async (resolve, reject) => {
           try {

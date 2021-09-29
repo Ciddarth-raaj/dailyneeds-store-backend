@@ -13,6 +13,16 @@ class ShiftUsecase {
             }
         });
     }
+    updateStatus(file) {
+      return new Promise(async (resolve, reject) => {
+        try {
+          await this.shiftRepo.updateStatus(file);
+          resolve(200);
+        } catch (err) {
+          reject(err);
+        }
+      });
+    }
     getShiftById(shift_id) {
         return new Promise(async (resolve, reject) => {
           try {

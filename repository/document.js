@@ -51,7 +51,7 @@ class DocumentRepository {
     return new Promise((resolve, reject) => {
       this.db.query(
         `SELECT new_employee.employee_name, new_employee_documents.document_id, new_employee_documents.card_type, new_employee_documents.card_no, 
-         new_employee_documents.card_name, new_employee_documents.status, new_employee_documents.created_at FROM new_employee_documents 
+         new_employee_documents.card_name, new_employee_documents.is_verified, new_employee_documents.status, new_employee_documents.created_at FROM new_employee_documents 
          LEFT JOIN new_employee ON new_employee_documents.employee_id = new_employee.employee_id`,
         [],
         (err, docs) => {
@@ -106,6 +106,28 @@ class DocumentRepository {
               level: logger.LEVEL.ERROR,
               component: "REPOSITORY.DOCUMENT",
               code: "REPOSITORY.DOCUMENT.UPDATE",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        });
+    });
+  }
+  updateVerification(file) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "UPDATE new_employee_documents SET is_verified = ? WHERE document_id = ?",
+        [file.is_verified, file.document_id],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.DOCUMENT",
+              code: "REPOSITORY.DOCUMENT.UPDATE-STATUS",
               description: err.toString(),
               category: "",
               ref: {},

@@ -54,7 +54,7 @@ class DocumentRoutes {
 
       res.end();
     });
-    router.post("/update-document", async (req, res) => {
+    router.post("/update-status", async (req, res) => {
       try {
         const schema = {
           document_id: Joi.number().required(),
@@ -68,6 +68,31 @@ class DocumentRoutes {
         }
 
         const code = await this.documentUsecase.updateStatus(document);
+        res.json({ code: code });
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: "An error occurred !" });
+        }
+      }
+      res.end();
+    });
+    router.post("/update-document", async (req, res) => {
+      try {
+        const schema = {
+          document_id: Joi.number().required(),
+          is_verified: Joi.number().required(),
+        };
+
+        const document = req.body;
+        const isValid = Joi.validate(document, schema);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const code = await this.documentUsecase.updateVerification(document);
         res.json({ code: code });
       } catch (err) {
         if (err.name === "ValidationError") {
