@@ -144,6 +144,22 @@ const unProtectedRoutes = {
     methods: { get: true }
   },
 
+  //Materials
+  "/material": {
+    methods: { get: true }
+  },
+  "/material/update-status": {
+    methods: { post: true }
+  },
+  "/material/material_id": {
+    methods: { get: true }
+  },
+  "/material/create": {
+    methods: { post: true } 
+  },
+  "/material/update-material": {
+    methods: { post: true }
+  },
 
   //outlet
   "/outlet": {
