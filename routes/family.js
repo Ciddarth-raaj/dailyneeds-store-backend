@@ -58,7 +58,7 @@ class FamilyRoutes {
               dob: Joi.date().optional(),
               gender: Joi.string().optional(),
               blood_group: Joi.string().optional(),
-              employee_name: Joi.string().required(),
+              employee_name: Joi.string().optional(),
               relation: Joi.string().optional(),
               nationality: Joi.string().optional(),
               profession: Joi.string().optional(),

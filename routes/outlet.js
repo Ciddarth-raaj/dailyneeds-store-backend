@@ -58,8 +58,8 @@ class OutletRoutes {
               outlet_details: Joi.object({
                 outlet_name: Joi.string().optional(),
                 outlet_address: Joi.string().optional(),
-                outlet_phone: Joi.number().min(100000000).max(99999999999).optional(),
-                phone: Joi.number().min(100000000).max(99999999999).optional(),
+                outlet_phone: Joi.string().optional(),
+                phone: Joi.string().optional(),
                 outlet_nickname: Joi.string().optional(),
               }).optional(),
             };
