@@ -1,0 +1,1 @@
+ALTER TABLE `new_employee` CHANGE COLUMN `pan_no` `pan_no` VARCHAR(45) NULL DEFAULT NULL ;
