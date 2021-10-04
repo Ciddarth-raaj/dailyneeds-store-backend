@@ -50,7 +50,7 @@ class DocumentRepository {
   getAllDocuments() {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT new_employee.employee_name, new_employee_documents.document_id, new_employee_documents.card_type, new_employee_documents.card_no, 
+        `SELECT new_employee.employee_name, new_employee_documents.document_id, new_employee_documents.file ,new_employee_documents.card_type, new_employee_documents.card_no, 
          new_employee_documents.card_name, new_employee_documents.is_verified, new_employee_documents.status, new_employee_documents.created_at FROM new_employee_documents 
          LEFT JOIN new_employee ON new_employee_documents.employee_id = new_employee.employee_id`,
         [],
