@@ -52,8 +52,8 @@ class CompanyRepository {
   create(file) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "INSERT INTO company_details (company_name, reg_address, contact_number, gst_number, pan_number, tan_number, pf_number, esi_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        [file.company_name, file.reg_address, file.contact_number, file.gst_number, file.pan_number, file.tan_number, file.pf_number, file.esi_number],
+        "INSERT INTO company_details (company_name, reg_address, contact_number, gst_number, pan_number, tan_number, pf_number, esi_number, logo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [file.company_name, file.reg_address, file.contact_number, file.gst_number, file.pan_number, file.tan_number, file.pf_number, file.esi_number, file.logo],
         (err, docs) => {
           if (err) {
             logger.Log({

@@ -65,6 +65,7 @@ class companyRoutes {
               gst_number: Joi.string().required(),
               pan_number: Joi.string().optional(),
               tan_number: Joi.string().optional(),
+              logo: Joi.string().optional(),
               pf_number: Joi.string().optional(),
               esi_number: Joi.string().allow('').optional(),
           };

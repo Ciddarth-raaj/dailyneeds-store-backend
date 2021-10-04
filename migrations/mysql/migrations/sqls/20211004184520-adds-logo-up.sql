@@ -1,0 +1,1 @@
+ALTER TABLE `company_details` ADD COLUMN `logo` LONGTEXT NULL DEFAULT NULL AFTER `reg_address`;
