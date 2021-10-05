@@ -14,6 +14,19 @@ class FamilyUsecase {
             }
         });
     }
+
+    getFamilyByEmployee(employee_name) {
+      return new Promise(async (resolve, reject) => {
+        try {
+          const data = await this.familyRepo.getFamilyByEmployee(employee_name);
+          resolve(data);
+        } catch (err) {
+          console.log(err);
+          reject(err);
+        }
+      });
+    }
+
     getFamilyById(family_id) {
         return new Promise(async (resolve, reject) => {
           try {

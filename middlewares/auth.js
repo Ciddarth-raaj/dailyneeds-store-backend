@@ -190,6 +190,9 @@ const unProtectedRoutes = {
   },
   "/family/update-family": {
     methods: { post: true }
+  },
+  "/family/employee_name": {
+    methods: { get: true }
   }
 }
 

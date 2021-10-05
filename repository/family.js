@@ -28,6 +28,28 @@ class FamilyRepository {
       );
     });
   }
+  getFamilyByEmployee(employee_name) {
+    console.log({funny: employee_name})
+    return new Promise((resolve, reject) => {
+      this.db.query("SELECT * FROM employee_family WHERE employee_name = ?",
+      [employee_name], 
+      (err, docs) => {
+        if (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "REPOSITORY.FAMILY",
+            code: "REPOSITORY.FAMILY.GET-EMPLOYEE-FAM",
+            description: err.toString(),
+            category: "",
+            ref: {},
+          });
+          reject(err);
+          return;
+        }
+        resolve(docs);
+      });
+    });
+  }
   getFamilyById(family_id) {
     return new Promise((resolve, reject) => {
       this.db.query("SELECT * FROM employee_family where family_id = ?",

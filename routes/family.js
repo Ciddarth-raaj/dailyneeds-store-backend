@@ -48,6 +48,29 @@ class FamilyRoutes {
   
         res.end();
       });
+      router.get("/employee_name", async (req, res) => {
+        try {
+          const schema = {
+            employee_name: Joi.string().required(),
+          }
+          const family = req.query;
+          const isValid = Joi.validate(family, schema);
+          if (isValid.error !== null) {
+            throw isValid.error;
+          }
+          const data = await this.familyUsecase.getFamilyByEmployee(family.employee_name);
+          res.json(data);
+        } catch (err) {
+          console.log(err);
+          if (err.name === "ValidationError") {
+            res.json({ code: 422, msg: err.toString() });
+          } else {
+            res.json({ code: 500, msg: "An error occurred !" });
+          }
+        }
+  
+        res.end();
+      });
       router.post("/update-family", async (req, res) => {
         try {
           const schema = {
