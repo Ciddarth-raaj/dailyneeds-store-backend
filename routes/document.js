@@ -120,6 +120,21 @@ class DocumentRoutes {
 
       res.end();
     });
+    router.get("/withoutadhaar", async (req, res) => {
+      try {
+        const document = await this.documentUsecase.getDocumentsWithoutAdhaar();
+        res.json(document);
+      } catch (err) {
+        console.log(err);
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          res.json({ code: 500, msg: "An error occurred !" });
+        }
+      }
+
+      res.end();
+    });
     router.get("/all", async (req, res) => {
       try {
         const document = await this.documentUsecase.getAllDocuments();

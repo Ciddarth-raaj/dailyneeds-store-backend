@@ -47,6 +47,33 @@ class DocumentRepository {
         });
     });
   }
+  getDocumentsWithoutAdhaar() {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT new_employee_documents.employee_id, new_employee.employee_name, (JSON_ARRAYAGG(JSON_OBJECT("card_type", card_type, 
+        "card_no", card_no))) AS files FROM new_employee_documents 
+        LEFT JOIN new_employee ON new_employee_documents.employee_id = new_employee.employee_id 
+        GROUP BY employee_id`,
+        [],
+        (err, docs) => {
+          if (err) {
+            logger.log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.DOCUMENT",
+              code: "REPOSITORY.DOCUMENT.GET-DOCUMENTS-WITHOUT-ADHAAR",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            console.log(err);
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        }
+      );
+    });
+  }
   getAllDocuments() {
     return new Promise((resolve, reject) => {
       this.db.query(

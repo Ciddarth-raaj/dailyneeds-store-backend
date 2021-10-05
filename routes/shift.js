@@ -59,7 +59,6 @@ class ShiftRoutes {
               shift_name: Joi.string().required(),
               shift_in_time: Joi.string().required(),
               shift_out_time: Joi.string().required(),
-              status: Joi.number().required(),
             }).optional(),
           };
 
@@ -107,13 +106,14 @@ class ShiftRoutes {
       router.post("/create", async (req, res) => {
         try {
           const schema = {
-            status: Joi.number().required(),
             shift_name: Joi.string().required(),
             shift_in_time: Joi.string().required(),
+            status: Joi.number().optional(),
             shift_out_time: Joi.string().required(),
           };
   
           const shift = req.body;
+          console.log(shift);
           const isValid = Joi.validate(shift, schema);
           
           if (isValid.error !== null) {

@@ -137,7 +137,9 @@ const unProtectedRoutes = {
   "/document/update-document": {
     methods: { post: true }
   },
-
+  "/document/withoutadhaar": {
+    methods: { get: true }
+  },
 
   //store
   "/store": {

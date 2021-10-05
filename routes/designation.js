@@ -77,8 +77,9 @@ class DesignationRoutes {
           designation_id: Joi.number().required(),
 
           designation_details: Joi.object({
+            online_portal: Joi.number().required(),
             designation_name: Joi.string().required(),
-            status: Joi.number().required(),
+            // status: Joi.number().required(),
           }).optional(),
         };
 
@@ -126,7 +127,7 @@ class DesignationRoutes {
     router.post("/create", async (req, res) => {
       try {
         const schema = {
-          status: Joi.number().required(),
+          // status: Joi.number().required(),
           designation_name: Joi.string().required(),
           online_portal: Joi.number().required(),
           permissions: Joi.array().items(Joi.string().optional()).required(),

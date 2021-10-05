@@ -57,7 +57,7 @@ class DepartmentRoutes {
 
             department_details: Joi.object({
               department_name: Joi.string().required(),
-              status: Joi.number().required(),
+              // status: Joi.number().required(),
             }).optional(),
           };
 
@@ -105,7 +105,7 @@ class DepartmentRoutes {
     router.post("/create", async (req, res) => {
         try {
           const schema = {
-            status: Joi.string().required(),
+            // status: Joi.string().required(),
             department_name: Joi.string().required(),
           };
   
