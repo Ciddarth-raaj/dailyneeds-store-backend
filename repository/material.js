@@ -7,37 +7,12 @@ class MaterialRepository {
 
   get() {
     return new Promise((resolve, reject) => {
-      this.db.query(
-        "SELECT * FROM material",
-        [],
-        (err, docs) => {
-          if (err) {
-            logger.Log({
-              level: logger.LEVEL.ERROR,
-              component: "REPOSITORY.MATERIAL",
-              code: "REPOSITORY.MATERIAL.GET",
-              description: err.toString(),
-              category: "",
-              ref: {},
-            });
-            reject(err);
-            return;
-          }
-          resolve(docs)
-        }
-      );
-    });
-  }
-  getMaterialById(material_id) {
-    return new Promise((resolve, reject) => {
-      this.db.query("SELECT * FROM material where material_id = ?",
-      [material_id], 
-      (err, docs) => {
+      this.db.query("SELECT * FROM material", [], (err, docs) => {
         if (err) {
           logger.Log({
             level: logger.LEVEL.ERROR,
             component: "REPOSITORY.MATERIAL",
-            code: "REPOSITORY.MATERIAL.GET-ID",
+            code: "REPOSITORY.MATERIAL.GET",
             description: err.toString(),
             category: "",
             ref: {},
@@ -47,6 +22,29 @@ class MaterialRepository {
         }
         resolve(docs);
       });
+    });
+  }
+  getMaterialById(material_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "SELECT * FROM material where material_id = ?",
+        [material_id],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.MATERIAL",
+              code: "REPOSITORY.MATERIAL.GET-ID",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        }
+      );
     });
   }
   updateStatus(file) {
@@ -68,7 +66,8 @@ class MaterialRepository {
             return;
           }
           resolve(docs);
-        });
+        }
+      );
     });
   }
   updateMaterialDetails(data, material_id) {
@@ -78,14 +77,14 @@ class MaterialRepository {
         [data, material_id],
         (err, res) => {
           if (err) {
-              logger.Log({
-                level: logger.LEVEL.ERROR,
-                component: "REPOSITORY.MATERIAL",
-                code: "REPOSITORY.MATERIAL.UPDATE-MATERIAL-DETAILS",
-                description: err.toString(),
-                category: "",
-                ref: {},
-              });
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.MATERIAL",
+              code: "REPOSITORY.MATERIAL.UPDATE-MATERIAL-DETAILS",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
             reject(err);
             return;
           }
@@ -96,35 +95,31 @@ class MaterialRepository {
   }
   create(material) {
     return new Promise((resolve, reject) => {
-        this.db.query(
-          "INSERT INTO material (material_name, description, material_category) VALUES (?, ?, ?)",
-          [
-            material.material_name,
-            material.description,
-            material.category
-          ],
-          (err, res) => {
-            if (err) {
-              if (err.code === "ER_DUP_ENTRY") {
-                resolve({ code: 101 });
-                return;
-              }
-              logger.Log({
-                level: logger.LEVEL.ERROR,
-                component: "REPOSITORY.MATERIAL",
-                code: "REPOSITORY.MATERIAL.CREATE",
-                description: err.toString(),
-                category: "",
-                ref: {},
-              });
-              reject(err);
-              return;
-            }
-            resolve({ code: 200, id: res.insertId });
+      this.db.query(
+        "INSERT INTO material (material_name, description, material_category) VALUES (?, ?, ?)",
+        [
+          material.material_name,
+          material.description,
+          material.material_category,
+        ],
+        (err, res) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.MATERIAL",
+              code: "REPOSITORY.MATERIAL.CREATE",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
           }
-        );
-      });
-    }
+          resolve({ code: 200, id: res.insertId });
+        }
+      );
+    });
+  }
 }
 
 module.exports = (db) => {
