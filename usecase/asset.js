@@ -1,6 +1,6 @@
 const formidable = require("formidable")
 const FileType = require("file-type")
-const { uuid } = require("uuid")
+const { uuid } = require("uuidv4")
 const slug = require("slug")
 
 const logger = require("../utils/logger")
