@@ -1,1 +1,0 @@
-ALTER TABLE `material` CHANGE `description` `description` TEXT CHARACTER SET latin1 COLLATE latin1_swedish_ci NULL DEFAULT NULL;
