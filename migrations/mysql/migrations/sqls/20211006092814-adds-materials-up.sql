@@ -1,0 +1,2 @@
+CREATE TABLE `material` ( `material_id` int NOT NULL AUTO_INCREMENT, `material_name` varchar(150) NOT NULL, `material_category` bigint NOT NULL COMMENT 'refer material category table', `description` text NOT NULL, `status` int NOT NULL DEFAULT '1', PRIMARY KEY (`material_id`));
+ALTER TABLE `material` CHANGE `description` `description` TEXT CHARACTER SET latin1 COLLATE latin1_swedish_ci NULL DEFAULT NULL;
