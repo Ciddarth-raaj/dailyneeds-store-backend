@@ -1,0 +1,1 @@
+CREATE TABLE `designation` (`designation_id` int NOT NULL AUTO_INCREMENT, `designation_name` varchar(255) DEFAULT NULL, `status` int DEFAULT '1', `online_portal` int NOT NULL, PRIMARY KEY (`designation_id`));

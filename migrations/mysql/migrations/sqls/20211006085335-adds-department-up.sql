@@ -1,0 +1,1 @@
+CREATE TABLE `department` ( `department_id` int NOT NULL AUTO_INCREMENT, `department_name` varchar(255) DEFAULT NULL, `status` int DEFAULT '1', PRIMARY KEY (`department_id`));
