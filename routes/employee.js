@@ -206,6 +206,28 @@ class EmployeeRoutes {
       res.end();
     });
     
+    router.get("/store_id", async (req, res) => {
+      try {
+        const schema = {
+          store_id: Joi.number().required(),
+        }
+        const employee = req.query;
+        const isValid = Joi.validate(employee, schema);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+        const data = await this.employeeUsecase.getEmployeeByStore(employee.store_id);
+        res.json(data);
+      } catch (err) {
+        console.log(err);
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          res.json({ code: 500, msg: "An error occurred !" });
+        }
+      }
+      res.end();
+    });
     router.get("/employee_id", async (req, res) => {
       try {
         const schema = {

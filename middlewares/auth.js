@@ -82,6 +82,9 @@ const unProtectedRoutes = {
   "/employee/update-status": {
     methods: { post: true }
   },
+  "/employee/store_id": {
+    methods: { get: true }
+  },
 
 
   //shift

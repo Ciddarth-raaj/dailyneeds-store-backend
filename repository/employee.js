@@ -69,6 +69,28 @@ class EmployeeRepository {
           }
         );
       });
+    }  
+    getEmployeeByStore(store_id) {
+      return new Promise((resolve, reject) => {
+        this.db.query(
+          "SELECT count(employee_id) as store_count FROM new_employee WHERE store_id = ?",
+          [store_id],
+          (err, docs) => {
+            if (err) {
+              logger.Log({
+                level: logger.LEVEL.ERROR,
+                component: "REPOSITORY.EMPLOYEE",
+                code: "REPOSITORY.EMPLOYEE.GET-BY-STORE",
+                description: err.toString(),
+                category: "",
+                ref: {},
+              });
+              reject(err);
+              return;
+            }
+            resolve(docs);
+          });
+      });
     }
     updateStatus(file) {
       return new Promise((resolve, reject) => {

@@ -96,6 +96,17 @@ class EmployeeUsecase {
       }
     });
   }
+  
+  getEmployeeByStore(store_id) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const data = await this.employeeRepo.getEmployeeByStore(store_id);
+        resolve(data);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
   getEmployeeById(employee_id) {
     return new Promise(async (resolve, reject) => {
       try {
