@@ -96,6 +96,7 @@ class Server {
     this.familyRepo = require("./repository/family")(this.mysql.connection);
     this.companyRepo = require("./repository/company")(this.mysql.connection);
     this.materialRepo = require("./repository/material")(this.mysql.connection);
+    this.salaryRepo = require("./repository/salary")(this.mysql.connection);
   }
 
   initUsecases() {
@@ -110,6 +111,7 @@ class Server {
     this.familyUsecase = require("./usecase/family")(this.familyRepo);
     this.companyUsecase = require("./usecase/company")(this.companyRepo);
     this.materialUsecase = require("./usecase/material")(this.materialRepo);
+    this.salaryUsecase = require("./usecase/salary")(this.salaryRepo);
     this.assetUsecase = require("./usecase/asset");
   }
 
@@ -129,6 +131,7 @@ class Server {
     const outletRouter = require("./routes/outlet")(this.outletUsecase);
     const companyRouter = require("./routes/company")(this.companyUsecase);
     const materialRouter = require("./routes/material")(this.materialUsecase);
+    const salaryRouter = require("./routes/salary")(this.salaryUsecase);
     //const exampleRouter = require('./routes/example')( this.example_controller );
 
     app.use("/document", documentRouter.getRouter());
@@ -143,6 +146,7 @@ class Server {
     app.use("/outlet", outletRouter.getRouter());
     app.use("/company", companyRouter.getRouter());
     app.use("/material", materialRouter.getRouter());
+    app.use("/salary", salaryRouter.getRouter());
     //app.use('/example', displayRouter.getRouter());
   }
 

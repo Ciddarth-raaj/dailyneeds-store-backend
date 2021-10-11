@@ -86,7 +86,26 @@ const unProtectedRoutes = {
     methods: { get: true }
   },
 
-
+  //salary
+  "/salary": {
+    methods: { get: true }
+  },
+  "/salary/create": {
+    methods: { post: true }
+  },
+  "/salary/update-payment": {
+    methods: { post: true }
+  },
+  "/salary/update-status": {
+    methods: { post: true }
+  },
+  "/salary/payment_id": {
+    methods: { get: true }
+  },
+  "/salary/update-paidstatus": {
+    methods: { post: true }
+  },
+  
   //shift
   "/shift": {
     methods: { get: true }
