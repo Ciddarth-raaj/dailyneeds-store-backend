@@ -1,0 +1,1 @@
+CREATE TABLE `resignation` ( `resignation_id` INT NOT NULL AUTO_INCREMENT, `employee_name` VARCHAR(45) NOT NULL, `reason` VARCHAR(45) NOT NULL, `resignation_date` VARCHAR(45) NOT NULL, `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (`resignation_id`));

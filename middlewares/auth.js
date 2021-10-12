@@ -105,6 +105,20 @@ const unProtectedRoutes = {
   "/salary/update-paidstatus": {
     methods: { post: true }
   },
+
+  //resignation
+  "/resignation": {
+    methods: { get: true }
+  },
+  "/resignation/create": {
+    methods: { post: true }
+  },
+  "/resignation/resignation_id": {
+    methods: { get: true }
+  },
+  "/resignation/update-resignation": {
+    methods: { post: true }
+  },
   
   //shift
   "/shift": {
