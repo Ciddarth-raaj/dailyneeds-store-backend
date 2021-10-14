@@ -25,47 +25,17 @@ class ResignationRoutes {
   
         res.end();
       });
-      router.post("/update-resignation", async (req, res) => {
+      router.get("/employee_name", async (req, res) => {
         try {
           const schema = {
-            resignation_id: Joi.number().required(),
-
-            resignation_details: Joi.object({
-              employee_name: Joi.string().optional(),
-              reason: Joi.string().optional(),
-              resignation_date: Joi.string().optional(),
-            }).optional(),
-          };
-
-          const resignation = req.body;
-          const isValid = Joi.validate(resignation, schema);
-          if (isValid.error !== null) {
-            throw isValid.error;
-          }
-  
-          const code = await this.resignationUsecase.updateResignationDetails(resignation);
-          res.json({ code: code });
-        } catch (err) {
-          if (err.name === "ValidationError") {
-            res.json({ code: 422, msg: err.toString() });
-          } else {
-            console.log(err);
-            res.json({ code: 500, msg: "An error occurred !" });
-          }
-        }
-        res.end();
-      });
-      router.get("/resignation_id", async (req, res) => {
-        try {
-          const schema = {
-            resignation_id: Joi.string().required(),
+            employee_name: Joi.string().required(),
           }
           const resignation = req.query;
           const isValid = Joi.validate(resignation, schema);
           if (isValid.error !== null) {
             throw isValid.error;
           }
-          const data = await this.resignationUsecase.getResignationById(resignation.resignation_id);
+          const data = await this.resignationUsecase.getResignationById(resignation.employee_name);
           res.json(data);
         } catch (err) {
           console.log(err);
@@ -82,6 +52,7 @@ class ResignationRoutes {
         try {
           const schema = {
             employee_name: Joi.string().required(),
+            reason_type: Joi.string().required(),
             reason: Joi.string().required(),
             resignation_date: Joi.string().required(),
           };

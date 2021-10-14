@@ -53,7 +53,7 @@ class EmployeeRoutes {
           files: Joi.array()
             .items({
               id_card: Joi.string().allow('').required(),
-              id_card_no: Joi.number().allow('').required(),
+              id_card_no: Joi.string().allow('').required(),
               id_card_name: Joi.string().allow('').required(),
               expiry_date: Joi.date().allow("").allow(null).optional(),
               file: Joi.string().allow('').required(),

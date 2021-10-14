@@ -113,7 +113,7 @@ const unProtectedRoutes = {
   "/resignation/create": {
     methods: { post: true }
   },
-  "/resignation/resignation_id": {
+  "/resignation/employee_name": {
     methods: { get: true }
   },
   "/resignation/update-resignation": {

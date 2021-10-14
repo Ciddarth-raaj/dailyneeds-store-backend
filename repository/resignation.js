@@ -28,10 +28,10 @@ class ResignationRepository {
       );
     });
   }
-  getResignationById(resignation_id) {
+  getResignationById(employee_name) {
     return new Promise((resolve, reject) => {
-      this.db.query("SELECT * FROM resignation where resignation_id = ?",
-      [resignation_id], 
+      this.db.query("SELECT * FROM resignation where employee_name = ?",
+      [employee_name], 
       (err, docs) => {
         if (err) {
           logger.Log({
@@ -76,10 +76,11 @@ class ResignationRepository {
   create(resignation) {
     return new Promise((resolve, reject) => {
         this.db.query(
-          "INSERT INTO resignation (employee_name, reason, resignation_date) VALUES (?, ?, ?)",
+          "INSERT INTO resignation (employee_name, reason, reason_type, resignation_date) VALUES (?, ?, ?, ?)",
           [
             resignation.employee_name,
             resignation.reason,
+            resignation.reason_type,
             resignation.resignation_date
           ],
           (err, res) => {

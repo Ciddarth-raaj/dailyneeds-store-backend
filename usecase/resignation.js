@@ -26,10 +26,10 @@ class ResignationUsecase {
           }
         });
       }
-    getResignationById(resignation_id) {
+    getResignationById(employee_name) {
         return new Promise(async (resolve, reject) => {
           try {
-            const data = await this.resignationRepo.getResignationById(resignation_id);
+            const data = await this.resignationRepo.getResignationById(employee_name);
             resolve(data);
           } catch (err) {
             console.log(err);
