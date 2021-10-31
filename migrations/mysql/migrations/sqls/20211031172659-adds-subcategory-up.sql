@@ -1,0 +1,1 @@
+CREATE TABLE `subcategories` ( `subcategory_id` int(11) NOT NULL, `subcategory_name` varchar(255) NOT NULL, `category_id` int(11) NOT NULL, `image_url` text, `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP, `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, PRIMARY KEY (`subcategory_id`));

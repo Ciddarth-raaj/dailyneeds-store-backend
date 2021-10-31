@@ -1,0 +1,1 @@
+CREATE TABLE `product_images` ( `image_id` int(11) NOT NULL, `product_id` int(11) NOT NULL, `image_url` text NOT NULL, `priority` int(11) NOT NULL, `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP, `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP);

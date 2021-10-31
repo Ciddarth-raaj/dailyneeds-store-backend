@@ -120,6 +120,20 @@ const unProtectedRoutes = {
     methods: { post: true }
   },
   
+  //product
+  "/product/create": {
+    methods: { post: true }
+  },
+  "/product/updatedata": {
+    methods: { post: true }
+  },
+  "/product": {
+    methods: { get: true }
+  },
+  "/product/product_id": {
+    methods: { get: true }
+  },
+  
   //shift
   "/shift": {
     methods: { get: true }

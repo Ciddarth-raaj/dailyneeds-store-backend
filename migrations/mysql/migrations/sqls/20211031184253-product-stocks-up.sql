@@ -1,0 +1,1 @@
+CREATE TABLE `product_stocks` ( `product_id` int(11) NOT NULL, `outlet_id` int(11) NOT NULL, `stock` int(11) NOT NULL, `buffer_stock` int(11) NOT NULL DEFAULT '0', `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP, `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, PRIMARY KEY (`product_id`,`outlet_id`));

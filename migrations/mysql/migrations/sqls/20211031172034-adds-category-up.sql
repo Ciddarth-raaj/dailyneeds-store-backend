@@ -1,0 +1,1 @@
+CREATE TABLE `categories` ( `category_id` int(11) NOT NULL, `category_name` varchar(255) NOT NULL, `department_id` int(11) NOT NULL, `image_url` text, `is_hidden` tinyint(1) NOT NULL DEFAULT '0', `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP, `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, PRIMARY KEY (`category_id`));
