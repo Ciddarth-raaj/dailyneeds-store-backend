@@ -1,4 +1,3 @@
-​
 INSERT INTO `product_images` (`image_id`, `product_id`, `image_url`, `priority`, `created_at`, `updated_at`) VALUES
 (1, 11, 'https://dailyneeds-assets-dev.s3.amazonaws.com/products/name-213c6cd7-8919-4a23-94d5-224088aec3c5.png', 100, '2021-01-28 13:45:24', '2021-01-28 13:45:24'),
 (2, 11, 'https://dailyneeds-assets-dev.s3.amazonaws.com/products/name-fda59b99-6ded-4670-bbe9-33d85f25d087.png', 100, '2021-01-28 13:48:51', '2021-01-28 13:48:51'),
