@@ -101,7 +101,6 @@ class ProductRepository {
             reject(err);
             return;
           }
-          console.log({docs: docs});
           resolve(docs);
         });
       });
@@ -113,7 +112,6 @@ class ProductRepository {
           [data, product_id],
           (err, res) => {
             if (err) {
-              console.log(this.db.query),
                 logger.Log({
                   level: logger.LEVEL.ERROR,
                   component: "REPOSITORY.PRODUCT",

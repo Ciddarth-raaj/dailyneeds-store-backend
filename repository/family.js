@@ -29,7 +29,6 @@ class FamilyRepository {
     });
   }
   getFamilyByEmployee(employee_name) {
-    console.log({funny: employee_name})
     return new Promise((resolve, reject) => {
       this.db.query("SELECT * FROM employee_family WHERE employee_name = ?",
       [employee_name], 

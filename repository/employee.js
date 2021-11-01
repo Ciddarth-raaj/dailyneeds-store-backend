@@ -334,7 +334,6 @@ class EmployeeRepository {
           [data, employee_id],
           (err, res) => {
             if (err) {
-              console.log(this.db.query),
                 logger.Log({
                   level: logger.LEVEL.ERROR,
                   component: "REPOSITORY.EMPLOYEE",

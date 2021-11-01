@@ -99,6 +99,7 @@ class Server {
     this.salaryRepo = require("./repository/salary")(this.mysql.connection);
     this.resignationRepo = require("./repository/resignation")(this.mysql.connection);
     this.productRepo = require("./repository/product")(this.mysql.connection);
+    this.imageRepo = require("./repository/image")(this.mysql.connection);
   }
 
   initUsecases() {
@@ -116,6 +117,7 @@ class Server {
     this.salaryUsecase = require("./usecase/salary")(this.salaryRepo);
     this.resignationUsecase = require("./usecase/resignation")(this.resignationRepo);
     this.productUsecase = require("./usecase/product")(this.productRepo);
+    this.imageUsecase = require("./usecase/image")(this.imageRepo);
     this.assetUsecase = require("./usecase/asset");
   }
 
@@ -137,6 +139,7 @@ class Server {
     const materialRouter = require("./routes/material")(this.materialUsecase);
     const salaryRouter = require("./routes/salary")(this.salaryUsecase);
     const resignationRouter = require("./routes/resignation")(this.resignationUsecase);
+    const imageRouter = require("./routes/image")(this.imageUsecase);
     const productRouter = require("./routes/product")(this.productUsecase);
     //const exampleRouter = require('./routes/example')( this.example_controller );
 
@@ -154,6 +157,7 @@ class Server {
     app.use("/material", materialRouter.getRouter());
     app.use("/salary", salaryRouter.getRouter());
     app.use("/resignation", resignationRouter.getRouter());
+    app.use("/image", imageRouter.getRouter());
     app.use("/product", productRouter.getRouter());
     //app.use('/example', displayRouter.getRouter());
   }

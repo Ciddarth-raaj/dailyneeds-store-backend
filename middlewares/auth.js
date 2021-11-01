@@ -151,6 +151,11 @@ const unProtectedRoutes = {
     methods: { post: true }
   },
 
+  //image
+  "/image/product_id": {
+    methods: { get: true }
+  },
+
   //company
   "/company": {
     methods: { post: true }

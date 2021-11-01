@@ -6,6 +6,7 @@ class ProductUsecase {
       return new Promise(async (resolve, reject) => {
         try {
           const product_id = product.product_id;
+          delete product.product_details.product_id;
           const { code } = await this.productRepo.updateProductDetails(product.product_details, product_id);
           resolve(code); 
         } catch (err) {
