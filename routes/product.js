@@ -13,11 +13,10 @@ class ProductRoutes {
     router.post("/create", async (req, res) => {
       try {
         const product = req.body;
-        const isValid = Joi.validate(product, schema);
-        if (isValid.error !== null) {
-          console.log(isValid.error);
-          throw isValid.error;
-        }
+        // const isValid = Joi.validate(product, schema);
+        // if (isValid.error !== null) {
+        //   throw isValid.error;
+        // }
         const response = await this.productUsecase.create(product);
 
         res.json(response);
@@ -73,7 +72,7 @@ class ProductRoutes {
         };
 
         const product = req.body;
-        console.log({productipo: product});
+        console.log({ productipo: product });
         const isValid = Joi.validate(product, schema);
         if (isValid.error !== null) {
           console.log(isValid.error);
@@ -81,7 +80,7 @@ class ProductRoutes {
         }
 
         const code = await this.productUsecase.updateProductDetails(product);
-        console.log({code: code});
+        console.log({ code: code });
         res.json({ code: code });
       } catch (err) {
         if (err.name === "ValidationError") {
@@ -91,8 +90,8 @@ class ProductRoutes {
           res.json({ code: 500, msg: "An error occurred !" });
         }
       }
-    res.end();
-  });
+      res.end();
+    });
     router.get("/product_id", async (req, res) => {
       try {
         const schema = {

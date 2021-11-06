@@ -1,0 +1,1 @@
+ALTER TABLE `product_table` CHANGE `return` `return_prod` TINYINT(4) NULL DEFAULT NULL;
