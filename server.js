@@ -28,6 +28,7 @@ class Server {
       this.initUsecases();
       this.initExpress();
       this.initRoutes();
+      this.initServices();
       this.initServer();
     } catch (err) {
       process.exit(err);
@@ -145,7 +146,7 @@ class Server {
 
     app.use("/document", documentRouter.getRouter());
     app.use("/family", familyRouter.getRouter());
-		app.use("/asset", assetRouter.getRouter());
+    app.use("/asset", assetRouter.getRouter());
     app.use("/example", exampleRouter.getRouter());
     app.use("/department", departmentRouter.getRouter());
     app.use("/designation", designationRouter.getRouter());
@@ -160,6 +161,11 @@ class Server {
     app.use("/image", imageRouter.getRouter());
     app.use("/product", productRouter.getRouter());
     //app.use('/example', displayRouter.getRouter());
+  }
+
+  initServices() {
+    this.synker = require("./services/synker")(this.productUsecase)
+    this.synker.syncProducts()
   }
 
   onClose() {
@@ -185,13 +191,13 @@ const server = new Server();
 ].forEach((eventType) => {
   process.on(eventType, (err = "") => {
     process.removeAllListeners();
-    
+
     let error = err.toString();
 
     if (err.stack) {
       error = err.stack;
     }
-    
+
     logger.Log({
       level: logger.LEVEL.ERROR,
       component: "SERVER",

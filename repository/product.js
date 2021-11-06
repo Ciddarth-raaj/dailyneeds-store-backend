@@ -8,11 +8,11 @@ class ProductRepository {
   create(product) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `INSERT INTO product_table (product_id, variant, variant_of, gf_item_name, gf_description, gf_detailed_description, gf_weight_grams, gf_applies_online, gf_item_product_type, gf_manufacturer, gf_food_type, gf_tax_id, gf_status, de_distributor, brand_id, category_id, subcategory_id, measure, measure_in, packaging_type, cleaning, sticker, grinding, cover_type, cover_sizes, return_prod) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO product_table (product_id, variant, variant_of, gf_item_name, gf_description, gf_detailed_description, gf_weight_grams, gf_applies_online, gf_item_product_type, gf_manufacturer, gf_food_type, gf_tax_id, gf_status, de_distributor, brand_id, category_id, subcategory_id, measure, measure_in, packaging_type, cleaning, sticker, grinding, cover_type, cover_sizes, return_prod, de_display_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           
           ON DUPLICATE KEY UPDATE variant = ?, variant_of = ?, gf_item_name = ?, gf_description = ?, gf_detailed_description = ?, gf_weight_grams = ?, gf_applies_online = ?, gf_item_product_type = ?,
           gf_manufacturer = ?, gf_food_type = ?, gf_tax_id = ?, gf_status = ?, de_distributor = ?, brand_id = ?, category_id = ?, subcategory_id = ?, measure = ?, measure_in = ?, packaging_type = ?,
-          cleaning = ?, sticker = ?, grinding = ?, cover_type = ?, cover_sizes = ?, return_prod = ?`,
+          cleaning = ?, sticker = ?, grinding = ?, cover_type = ?, cover_sizes = ?, return_prod = ?, de_display_name = ?`,
         [
           product.product_id,
           product.variant,
@@ -40,6 +40,7 @@ class ProductRepository {
           product.cover_type,
           product.cover_sizes,
           product.return,
+          product.de_display_name,
 
           product.variant,
           product.variant_of,
@@ -66,6 +67,7 @@ class ProductRepository {
           product.cover_type,
           product.cover_sizes,
           product.return,
+          product.de_display_name,
         ],
         (err, res) => {
           if (err) {

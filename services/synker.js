@@ -14,8 +14,28 @@ const CRON_SYNTAX_PRODUCT_PREF = "0 6 * * *";
 const CRON_SYNTAX_GENERAL = "0 7,16 * * *";
 
 class Synker {
-    constructor() {
+    constructor(productUsecase) {
+        this.productUsecase = productUsecase;
+    }
 
+    async syncProducts() {
+        try {
+            const goFrugalItemsCount = await this._fetchGoFrugalItemsCount()
+            const goFrugalItems = await this._fetchGoFrugalItems(goFrugalItemsCount);
+            const deliumItems = await this._fetchDeliumItems()
+
+            const { itemPrices, outlets, products } = this._transformGofrugalItems(goFrugalItems);
+            const { brands, categories, subcategories, departments, packageTypes, formattedProduct } = this.formatProducts(deliumItems)
+
+            for (const i in formattedProduct) {
+                formattedProduct[i] = { ...formattedProduct[i], ...products[formattedProduct[i].product_id] }
+
+                await this.productUsecase.create(formattedProduct[i])
+            }
+            console.log("Done")
+        } catch (err) {
+            console.log(err)
+        }
     }
 
     _fetchGoFrugalItems(limit) {
@@ -222,6 +242,7 @@ class Synker {
                 measure: product.measure,
                 measure_in: product.measure_in,
                 packaging_type: product.packaging_type,
+                de_display_name: product.display_name
             })
         }
 
@@ -252,18 +273,6 @@ class Synker {
     }
 }
 
-const test = async () => {
-    const obj = new Synker()
-    const goFrugalItemsCount = await obj._fetchGoFrugalItemsCount()
-    const goFrugalItems = await obj._fetchGoFrugalItems(goFrugalItemsCount);
-    const deliumItems = await obj._fetchDeliumItems()
-
-    const { itemPrices, outlets, products } = obj._transformGofrugalItems(goFrugalItems);
-    const { brands, categories, subcategories, departments, packageTypes, formattedProduct } = obj.formatProducts(deliumItems)
-
-    for (const i in formattedProduct) {
-        formattedProduct[i] = { ...formattedProduct[i], ...products[formattedProduct[i].product_id] }
-    }
-}
-
-test()
+module.exports = (productUsecase) => {
+    return new Synker(productUsecase);
+};
