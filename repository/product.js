@@ -92,9 +92,12 @@ class ProductRepository {
     });
   }
 
-  get() {
+  get(limit, offset) {
     return new Promise((resolve, reject) => {
-      this.db.query("SELECT * FROM product_table",
+      this.db.query(`SELECT *, categories.category_name, subcategories.subcategory_name FROM product_table,categories,subcategories
+      WHERE categories.category_id = product_table.category_id
+      AND subcategories.subcategory_id = product_table.subcategory_id
+      LIMIT ${offset}, ${limit}`,
         [],
         (err, docs) => {
           if (err) {

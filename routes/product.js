@@ -34,7 +34,14 @@ class ProductRoutes {
     });
     router.get("/", async (req, res) => {
       try {
-        const product = await this.productUsecase.get();
+        const schema = {
+          limit: Joi.number().required(),
+          offset: Joi.number().required(),
+        };
+
+        const data = req.query;
+
+        const product = await this.productUsecase.get(data.limit, data.offset);
         res.json(product);
       } catch (err) {
         console.log(err);
