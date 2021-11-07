@@ -32,9 +32,10 @@ class Synker {
 
             for (const i in formattedProduct) {
                 formattedProduct[i] = { ...formattedProduct[i], ...products[formattedProduct[i].product_id] }
-
                 await this.productUsecase.create(formattedProduct[i])
             }
+
+            console.log(formattedProduct)
 
             for (const i in categories) {
                 await this.categoryUsecase.upsert(categories[i])
@@ -255,6 +256,7 @@ class Synker {
                 brand_id: transformed.brand_id,
                 category_id: transformed.category_id,
                 subcategory_id: transformed.subcategory_id,
+                department_id: transformed.department_id,
                 measure: product.measure,
                 measure_in: product.measure_in,
                 packaging_type: product.packaging_type,

@@ -1,0 +1,1 @@
+ALTER TABLE `product_table` ADD `department_id` INT NULL DEFAULT NULL AFTER `subcategory_id`;
