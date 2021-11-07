@@ -101,6 +101,7 @@ class Server {
     this.resignationRepo = require("./repository/resignation")(this.mysql.connection);
     this.productRepo = require("./repository/product")(this.mysql.connection);
     this.imageRepo = require("./repository/image")(this.mysql.connection);
+    this.categoryRepo = require("./repository/category")(this.mysql.connection)
   }
 
   initUsecases() {
@@ -120,6 +121,7 @@ class Server {
     this.productUsecase = require("./usecase/product")(this.productRepo);
     this.imageUsecase = require("./usecase/image")(this.imageRepo);
     this.assetUsecase = require("./usecase/asset");
+    this.categoryUsecase = require("./usecase/category")(this.categoryRepo)
   }
 
   initRoutes() {
@@ -142,6 +144,7 @@ class Server {
     const resignationRouter = require("./routes/resignation")(this.resignationUsecase);
     const imageRouter = require("./routes/image")(this.imageUsecase);
     const productRouter = require("./routes/product")(this.productUsecase);
+    const categoryRouter = require("./routes/category")(this.categoryUsecase);
     //const exampleRouter = require('./routes/example')( this.example_controller );
 
     app.use("/document", documentRouter.getRouter());
@@ -160,11 +163,12 @@ class Server {
     app.use("/resignation", resignationRouter.getRouter());
     app.use("/image", imageRouter.getRouter());
     app.use("/product", productRouter.getRouter());
+    app.use("/category", categoryRouter.getRouter());
     //app.use('/example', displayRouter.getRouter());
   }
 
   initServices() {
-    this.synker = require("./services/synker")(this.productUsecase)
+    this.synker = require("./services/synker")(this.productUsecase, this.categoryUsecase)
     this.synker.syncProducts()
   }
 
