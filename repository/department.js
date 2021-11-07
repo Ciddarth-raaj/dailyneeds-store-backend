@@ -31,22 +31,22 @@ class DepartmentRepository {
   getById(department_id) {
     return new Promise((resolve, reject) => {
       this.db.query("SELECT * FROM department where department_id = ?",
-      [department_id], 
-      (err, docs) => {
-        if (err) {
-          logger.Log({
-            level: logger.LEVEL.ERROR,
-            component: "REPOSITORY.DEPARTMENT",
-            code: "REPOSITORY.DEPARTMENT.GET-ID",
-            description: err.toString(),
-            category: "",
-            ref: {},
-          });
-          reject(err);
-          return;
-        }
-        resolve(docs);
-      });
+        [department_id],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.DEPARTMENT",
+              code: "REPOSITORY.DEPARTMENT.GET-ID",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        });
     });
   }
   updateStatus(file) {
@@ -78,14 +78,14 @@ class DepartmentRepository {
         [data, department_id],
         (err, res) => {
           if (err) {
-              logger.Log({
-                level: logger.LEVEL.ERROR,
-                component: "REPOSITORY.DEPARTMENT",
-                code: "REPOSITORY.DEPARTMENT.UPDATE-DEPARTMENT-DETAILS",
-                description: err.toString(),
-                category: "",
-                ref: {},
-              });
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.DEPARTMENT",
+              code: "REPOSITORY.DEPARTMENT.UPDATE-DEPARTMENT-DETAILS",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
             reject(err);
             return;
           }
@@ -96,34 +96,64 @@ class DepartmentRepository {
   }
   create(department) {
     return new Promise((resolve, reject) => {
-        this.db.query(
-          "INSERT INTO department (status, department_name) VALUES (?, ?)",
-          [
-            department.status,
-            department.department_name
-          ],
-          (err, res) => {
-            if (err) {
-              if (err.code === "ER_DUP_ENTRY") {
-                resolve({ code: 101 });
-                return;
-              }
-              logger.Log({
-                level: logger.LEVEL.ERROR,
-                component: "REPOSITORY.DEPARTMENT",
-                code: "REPOSITORY.DEPARTMENT.CREATE",
-                description: err.toString(),
-                category: "",
-                ref: {},
-              });
-              reject(err);
+      this.db.query(
+        "INSERT INTO department (status, department_name) VALUES (?, ?)",
+        [
+          department.status,
+          department.department_name
+        ],
+        (err, res) => {
+          if (err) {
+            if (err.code === "ER_DUP_ENTRY") {
+              resolve({ code: 101 });
               return;
             }
-            resolve({ code: 200, id: res.insertId });
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.DEPARTMENT",
+              code: "REPOSITORY.DEPARTMENT.CREATE",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
           }
-        );
-      });
-    }
+          resolve({ code: 200, id: res.insertId });
+        }
+      );
+    });
+  }
+
+  upsert(department) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `INSERT INTO department (department_id, department_name) 
+           VALUES (?, ?) 
+           ON DUPLICATE KEY UPDATE department_name = ?`,
+        [
+          department.department_id,
+          department.department_name,
+          department.department_name,
+        ],
+        (err) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.DEPARTMENT",
+              code: "REPOSITORY.DEPARTMENT.CREATE",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve();
+        }
+      );
+    });
+  }
 }
 
 module.exports = (db) => {

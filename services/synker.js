@@ -14,9 +14,10 @@ const CRON_SYNTAX_PRODUCT_PREF = "0 6 * * *";
 const CRON_SYNTAX_GENERAL = "0 7,16 * * *";
 
 class Synker {
-    constructor(productUsecase, categoryUsecase) {
+    constructor(productUsecase, categoryUsecase, departmentUsecase) {
         this.productUsecase = productUsecase;
-        this.categoryUsecase = categoryUsecase
+        this.categoryUsecase = categoryUsecase;
+        this.departmentUsecase = departmentUsecase;
     }
 
     async syncProducts() {
@@ -37,6 +38,11 @@ class Synker {
             for (const i in categories) {
                 await this.categoryUsecase.upsert(categories[i])
             }
+
+            for (const i in departments) {
+                await this.departmentUsecase.upsert(departments[i])
+            }
+
             console.log("Done")
         } catch (err) {
             console.log(err)
@@ -278,6 +284,6 @@ class Synker {
     }
 }
 
-module.exports = (productUsecase, categoryUsecase) => {
-    return new Synker(productUsecase, categoryUsecase);
+module.exports = (productUsecase, categoryUsecase, departmentUsecase) => {
+    return new Synker(productUsecase, categoryUsecase, departmentUsecase);
 };

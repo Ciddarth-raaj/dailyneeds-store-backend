@@ -168,7 +168,10 @@ class Server {
   }
 
   initServices() {
-    this.synker = require("./services/synker")(this.productUsecase, this.categoryUsecase)
+    this.synker = require("./services/synker")(
+      this.productUsecase,
+      this.categoryUsecase,
+      this.departmentUsecase)
     this.synker.syncProducts()
   }
 
