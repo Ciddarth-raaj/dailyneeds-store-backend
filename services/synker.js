@@ -14,11 +14,12 @@ const CRON_SYNTAX_PRODUCT_PREF = "0 6 * * *";
 const CRON_SYNTAX_GENERAL = "0 7,16 * * *";
 
 class Synker {
-    constructor(productUsecase, categoryUsecase, subcategoryUsecase, departmentUsecase) {
+    constructor(productUsecase, categoryUsecase, subcategoryUsecase, departmentUsecase, brandUsecase) {
         this.productUsecase = productUsecase;
         this.categoryUsecase = categoryUsecase;
         this.departmentUsecase = departmentUsecase;
         this.subcategoryUsecase = subcategoryUsecase;
+        this.brandUsecase = brandUsecase;
     }
 
     async syncProducts() {
@@ -35,14 +36,16 @@ class Synker {
                 await this.productUsecase.create(formattedProduct[i])
             }
 
-            console.log(formattedProduct)
-
             for (const i in categories) {
                 await this.categoryUsecase.upsert(categories[i])
             }
 
             for (const i of Object.keys(subcategories)) {
                 await this.subcategoryUsecase.upsert(subcategories[i])
+            }
+
+            for (const i of Object.keys(brands)) {
+                await this.brandUsecase.upsert(brands[i])
             }
 
             for (const i in departments) {
@@ -291,6 +294,6 @@ class Synker {
     }
 }
 
-module.exports = (productUsecase, categoryUsecase, subcategoryUsecase, departmentUsecase) => {
-    return new Synker(productUsecase, categoryUsecase, subcategoryUsecase, departmentUsecase);
+module.exports = (productUsecase, categoryUsecase, subcategoryUsecase, departmentUsecase, brandUsecase) => {
+    return new Synker(productUsecase, categoryUsecase, subcategoryUsecase, departmentUsecase, brandUsecase);
 };
