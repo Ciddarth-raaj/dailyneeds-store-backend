@@ -55,6 +55,30 @@ class ProductRoutes {
       res.end();
     });
 
+    router.get("/getById", async (req, res) => {
+      try {
+        const schema = {
+          limit: Joi.number().required(),
+          offset: Joi.number().required(),
+          product_id: Joi.number().required(),
+        };
+
+        const data = req.query;
+        console.log({funny: data});
+        const product = await this.productUsecase.getById(data.limit, data.offset, data.product_id);
+        res.json(product);
+      } catch (err) {
+        console.log(err);
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          res.json({ code: 500, msg: "An error occurred !" });
+        }
+      }
+
+      res.end();
+    });
+
     router.post("/updatedata", async (req, res) => {
       try {
         const schema = {
@@ -65,16 +89,14 @@ class ProductRoutes {
             return: Joi.number().optional(),
             packaging_type: Joi.number().optional(),
             cleaning: Joi.number().optional(),
-            sticker: Joi.number().optional(),
-            grinding: Joi.number().optional(),
+            sticker: Joi.optional(),
+            grinding: Joi.optional(),
             cover_type: Joi.number().optional(),
             cover_sizes: Joi.number().optional(),
             gf_description: Joi.string().optional(),
             gf_detailed_description: Joi.string().optional(),
             de_distributor: Joi.string().optional(),
             keywords: Joi.string().optional(),
-            variant: Joi.number().optional(),
-            variant_of: Joi.number().optional()
           }).optional(),
         };
 

@@ -28,6 +28,28 @@ class CategoryRepository {
     });
   }
 
+  getByCategoryId(category_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT * FROM categories where category_id = ?`, [category_id],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.CATEGORY",
+              code: "REPOSITORY.CATEGORY.GETALL",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        }
+      );
+    });
+  }
   update(category) {
     return new Promise((resolve, reject) => {
 

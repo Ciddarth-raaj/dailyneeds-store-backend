@@ -133,6 +133,9 @@ const unProtectedRoutes = {
   "/product/product_id": {
     methods: { get: true }
   },
+  "/product/getById": {
+    methods: { get: true }
+  },
   
   //shift
   "/shift": {

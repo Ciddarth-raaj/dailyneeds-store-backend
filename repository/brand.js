@@ -24,7 +24,28 @@ class BrandRepository {
 			});
 		});
 	}
-
+	getByBrandId(brand_id) {
+		return new Promise((resolve, reject) => {
+			this.db.query(
+			  `SELECT * FROM hrands where brand_id = ?`, [brand_id],
+			  (err, docs) => {
+				if (err) {
+				  logger.Log({
+					level: logger.LEVEL.ERROR,
+					component: "REPOSITORY.BRANDS",
+					code: "REPOSITORY.BRANDS.GETBYID",
+					description: err.toString(),
+					category: "",
+					ref: {},
+				  });
+				  reject(err);
+				  return;
+				}
+				resolve(docs);
+			  }
+			);
+		  });
+	}
 	getByCategory(categoryId) {
 		return new Promise((resolve, reject) => {
 			this.db.query(
