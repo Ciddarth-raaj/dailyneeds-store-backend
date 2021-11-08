@@ -55,30 +55,6 @@ class ProductRoutes {
       res.end();
     });
 
-    router.get("/getById", async (req, res) => {
-      try {
-        const schema = {
-          limit: Joi.number().required(),
-          offset: Joi.number().required(),
-          product_id: Joi.number().required(),
-        };
-
-        const data = req.query;
-        console.log({funny: data});
-        const product = await this.productUsecase.getById(data.limit, data.offset, data.product_id);
-        res.json(product);
-      } catch (err) {
-        console.log(err);
-        if (err.name === "ValidationError") {
-          res.json({ code: 422, msg: err.toString() });
-        } else {
-          res.json({ code: 500, msg: "An error occurred !" });
-        }
-      }
-
-      res.end();
-    });
-
     router.post("/updatedata", async (req, res) => {
       try {
         const schema = {

@@ -151,7 +151,12 @@ class ProductRepository {
 
   getProductById(product_id) {
     return new Promise((resolve, reject) => {
-      this.db.query("SELECT * FROM product_table WHERE product_id = ?",
+      this.db.query(`select *, categories.category_name, subcategories.subcategory_name, department.department_name, brands.brand_name from product_table
+      LEFT JOIN categories on product_table.category_id = categories.category_id 
+      LEFT JOIN subcategories on subcategories.subcategory_id = product_table.subcategory_id
+      LEFT JOIN department on department.department_id = product_table.department_id
+      LEFT JOIN brands on brands.brand_id = product_table.brand_id
+      WHERE product_id = ${product_id} group by product_id`,
         [product_id],
         (err, docs) => {
           if (err) {
