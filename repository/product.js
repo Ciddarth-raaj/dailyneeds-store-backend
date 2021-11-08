@@ -93,6 +93,7 @@ class ProductRepository {
       );
     });
   }
+
   getById(limit, offset, product_id) {
     return new Promise((resolve, reject) => {
       this.db.query(`SELECT product_table.product_id, categories.category_name, subcategories.subcategory_name, department.department_name, brands.brand_name FROM product_table, categories, subcategories, department, brands
@@ -120,9 +121,10 @@ class ProductRepository {
         });
     });
   }
+
   get(limit, offset) {
     return new Promise((resolve, reject) => {
-      this.db.query(`SELECT product_table.product_id, categories.category_name, subcategories.subcategory_name, department.department_name, brands.brand_name FROM product_table, categories, subcategories, department, brands
+      this.db.query(`SELECT *, categories.category_name, subcategories.subcategory_name, department.department_name, brands.brand_name FROM product_table, categories, subcategories, department, brands
       WHERE categories.category_id = product_table.category_id
       AND subcategories.subcategory_id = product_table.subcategory_id
       AND department.department_id = product_table.department_id
@@ -168,6 +170,7 @@ class ProductRepository {
         });
     });
   }
+
   updateProductDetails(data, product_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
