@@ -136,6 +136,9 @@ const unProtectedRoutes = {
   "/product/getById": {
     methods: { get: true }
   },
+  "/product/prodcount": {
+    methods: { get: true }
+  },
   
   //shift
   "/shift": {

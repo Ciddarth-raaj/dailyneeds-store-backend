@@ -176,6 +176,30 @@ class ProductRepository {
     });
   }
 
+  getProductCount() {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT count(product_id) AS product_count FROM product_table`,
+        [],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PRODUCT",
+              code: "REPOSITORY.PRODUCT.GET-PRODUCT-COUNT",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        }
+      );
+    });
+  }
+  
   updateProductDetails(data, product_id) {
     return new Promise((resolve, reject) => {
       this.db.query(

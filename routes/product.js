@@ -97,6 +97,22 @@ class ProductRoutes {
       }
       res.end();
     });
+    
+    router.get("/prodcount", async (req, res) => {
+      try {
+        const product = await this.productUsecase.getProductCount();
+        res.json(product);
+      } catch (err) {
+          console.log(err);
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          res.json({ code: 500, msg: "An error occurred !" });
+        }
+      }
+      res.end();
+    });
+
     router.get("/product_id", async (req, res) => {
       try {
         const schema = {
