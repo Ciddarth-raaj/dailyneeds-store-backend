@@ -255,7 +255,7 @@ class Synker {
 
             formattedProduct.push({
                 product_id: transformed.product_id,
-                de_distributor: product.distributor,
+                de_distributor: product.distributor_name,
                 brand_id: transformed.brand_id,
                 category_id: transformed.category_id,
                 subcategory_id: transformed.subcategory_id,
@@ -263,7 +263,11 @@ class Synker {
                 measure: product.measure,
                 measure_in: product.measure_in,
                 packaging_type: product.packaging_type,
-                de_display_name: product.display_name
+                de_display_name: product.display_name,
+                de_name: product.name,
+                de_packaging_type: product.packaging_type,
+                de_preparation_type: product.preparation_type,
+                de_combo_name: product.combo_name,
             })
         }
 

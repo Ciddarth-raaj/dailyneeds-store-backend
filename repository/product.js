@@ -8,11 +8,11 @@ class ProductRepository {
   create(product) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `INSERT INTO product_table (product_id, variant, variant_of, gf_item_name, gf_description, gf_detailed_description, gf_weight_grams, gf_applies_online, gf_item_product_type, gf_manufacturer, gf_food_type, gf_tax_id, gf_status, de_distributor, brand_id, category_id, subcategory_id, measure, measure_in, packaging_type, cleaning, sticker, grinding, cover_type, cover_sizes, return_prod, de_display_name, department_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO product_table (product_id, variant, variant_of, gf_item_name, gf_description, gf_detailed_description, gf_weight_grams, gf_applies_online, gf_item_product_type, gf_manufacturer, gf_food_type, gf_tax_id, gf_status, de_distributor, brand_id, category_id, subcategory_id, measure, measure_in, packaging_type, cleaning, sticker, grinding, cover_type, cover_sizes, return_prod, de_display_name, department_id, de_name, de_packaging_type, de_preparation_type, de_combo_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           
           ON DUPLICATE KEY UPDATE variant = ?, variant_of = ?, gf_item_name = ?, gf_description = ?, gf_detailed_description = ?, gf_weight_grams = ?, gf_applies_online = ?, gf_item_product_type = ?,
           gf_manufacturer = ?, gf_food_type = ?, gf_tax_id = ?, gf_status = ?, de_distributor = ?, brand_id = ?, category_id = ?, subcategory_id = ?, measure = ?, measure_in = ?, packaging_type = ?,
-          cleaning = ?, sticker = ?, grinding = ?, cover_type = ?, cover_sizes = ?, return_prod = ?, de_display_name = ?, department_id = ?`,
+          cleaning = ?, sticker = ?, grinding = ?, cover_type = ?, cover_sizes = ?, return_prod = ?, de_display_name = ?, department_id = ?, de_name = ?, de_packaging_type = ?, de_preparation_type = ?, de_combo_name = ?`,
         [
           product.product_id,
           product.variant,
@@ -42,6 +42,10 @@ class ProductRepository {
           product.return,
           product.de_display_name,
           product.department_id,
+          product.de_name,
+          product.de_packaging_type,
+          product.de_preparation_type,
+          product.de_combo_name,
 
           product.variant,
           product.variant_of,
@@ -70,6 +74,10 @@ class ProductRepository {
           product.return,
           product.de_display_name,
           product.department_id,
+          product.de_name,
+          product.de_packaging_type,
+          product.de_preparation_type,
+          product.de_combo_name,
         ],
         (err, res) => {
           if (err) {
@@ -199,7 +207,7 @@ class ProductRepository {
       );
     });
   }
-  
+
   updateProductDetails(data, product_id) {
     return new Promise((resolve, reject) => {
       this.db.query(

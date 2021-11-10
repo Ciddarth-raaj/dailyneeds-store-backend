@@ -1,0 +1,3 @@
+ALTER TABLE `product_table` ADD `de_name` TEXT NULL DEFAULT NULL AFTER `de_display_name`, ADD `de_flavour` VARCHAR(200) NULL DEFAULT NULL AFTER `de_name`, ADD `de_packaging_type` VARCHAR(200) NULL DEFAULT NULL AFTER `de_flavour`, ADD `de_preparation_type` VARCHAR(200) NULL DEFAULT NULL AFTER `de_packaging_type`;
+ALTER TABLE `product_table` CHANGE `de_distributor` `de_distributor` VARCHAR(200) CHARACTER SET utf8 COLLATE utf8_general_ci NULL DEFAULT NULL;
+ALTER TABLE `product_table` ADD `de_combo_name` VARCHAR(200) NULL DEFAULT NULL AFTER `de_preparation_type`;
