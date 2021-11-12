@@ -63,7 +63,7 @@ class ProductRoutes {
           product_details: Joi.object({
             product_id: Joi.number().allow(null).allow('').optional(),
             return: Joi.number().allow(null).allow('').optional(),
-            packaging_type: Joi.number().allow(null).allow('').optional(),
+            de_packaging_type: Joi.string().allow(null).allow('').optional(),
             cleaning: Joi.number().allow(null).allow('').optional(),
             sticker: Joi.number().allow(null).allow('').optional(),
             grinding: Joi.number().allow(null).allow('').optional(),
@@ -112,7 +112,31 @@ class ProductRoutes {
       }
       res.end();
     });
+    router.get("/filter", async (req, res) => {
+      try {
+        const schema = {
+          filter: Joi.string().required(),
+          limit: Joi.number().required(),
+          offset: Joi.number().required(),
+        }
+        const product = req.query;
+        const isValid = Joi.validate(product, schema);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+        const data = await this.productUsecase.getProductByFilter(product.filter, product.limit, product.offset);
+        res.json(data);
+      } catch (err) {
+        console.log(err);
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          res.json({ code: 500, msg: "An error occurred !" });
+        }
+      }
 
+      res.end();
+    });
     router.get("/product_id", async (req, res) => {
       try {
         const schema = {

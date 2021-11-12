@@ -24,7 +24,18 @@ class ProductUsecase {
       }
     })
   }
-  
+
+  getProductByFilter(filter, limit, offset) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const data = await this.productRepo.getProductByFilter(filter, limit, offset);
+        resolve(data);
+      } catch (err) {
+        reject(err);
+      }
+    })
+  }
+
   getProductCount() {
     return new Promise(async (resolve, reject) => {
       try {

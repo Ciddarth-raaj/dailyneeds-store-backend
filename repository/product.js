@@ -183,7 +183,36 @@ class ProductRepository {
         });
     });
   }
-
+  getProductByFilter(filter, limit, offset) {
+    console.log({filter: filter});
+    console.log({offset: offset});
+    console.log({limit: limit});
+    return new Promise((resolve, reject) => {
+      this.db.query(`SELECT * FROM product_table, categories, subcategories, department, brands 
+      WHERE categories.category_id = product_table.category_id
+      AND subcategories.subcategory_id = product_table.subcategory_id
+      AND department.department_id = product_table.department_id
+      AND brands.brand_id = product_table.brand_id
+      AND (gf_item_name LIKE "%${filter}%" OR product_id LIKE "%${filter}%" OR de_distributor LIKE "%${filter}%" OR de_display_name LIKE "%${filter}%" OR de_name LIKE "%${filter}%")
+      LIMIT ${offset}, ${limit}`,
+        [filter, offset, limit],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PRODUCT",
+              code: "REPOSITORY.PRODUCT.GET-BY-FILTER",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        });
+    });
+  }
   getProductCount() {
     return new Promise((resolve, reject) => {
       this.db.query(
