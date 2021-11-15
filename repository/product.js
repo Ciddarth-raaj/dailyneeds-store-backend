@@ -184,9 +184,6 @@ class ProductRepository {
     });
   }
   getProductByFilter(filter, limit, offset) {
-    console.log({filter: filter});
-    console.log({offset: offset});
-    console.log({limit: limit});
     return new Promise((resolve, reject) => {
       this.db.query(`SELECT * FROM product_table, categories, subcategories, department, brands 
       WHERE categories.category_id = product_table.category_id
