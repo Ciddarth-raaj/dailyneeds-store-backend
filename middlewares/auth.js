@@ -26,6 +26,21 @@ const unProtectedRoutes = {
     methods: { post: true }
   },
 
+  //categories
+  "/category": {
+    methods: { get: true }
+  },
+  "/category/catcount": {
+    methods: { get: true }
+  },
+
+  //subcategories
+  "/subcategory": {
+    methods: { get: true }
+  },
+  "/subcategory/subcatcount": {
+    methods: { get: true }
+  },
 
   //designation
   "/designation": {
@@ -241,6 +256,13 @@ const unProtectedRoutes = {
     methods: { post: true }
   },
 
+  //brand
+  "/brand": {
+    methods: { get: true }
+  },
+  "/brand/brandcount": {
+    methods: { get: true }
+  },
 
   //family
   "/family": {

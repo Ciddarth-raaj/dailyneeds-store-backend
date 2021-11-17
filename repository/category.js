@@ -5,10 +5,11 @@ class CategoryRepository {
     this.db = db;
   }
 
-  getAll() {
+  getAll(limit, offset) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT * FROM categories`,
+        `SELECT categories.category_id, categories.category_name, department.department_name, categories.created_at FROM categories LEFT JOIN
+        department on department.department_id = categories.department_id LIMIT ${offset}, ${limit}`,
         (err, docs) => {
           if (err) {
             logger.Log({
@@ -27,7 +28,29 @@ class CategoryRepository {
       );
     });
   }
-
+  getCategoryCount() {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT count(category_id) AS catcount FROM categories`,
+        [],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PRODUCT",
+              code: "REPOSITORY.PRODUCT.GET-CATEGORY-COUNT",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        }
+      );
+    });
+  }
   getByCategoryId(category_id) {
     return new Promise((resolve, reject) => {
       this.db.query(

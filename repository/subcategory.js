@@ -5,9 +5,11 @@ class SubCategoryRepository {
 		this.db = db;
 	}
 
-	getAll() {
+	getAll(limit, offset) {
+		console.log(offset, limit);
 		return new Promise((resolve, reject) => {
-			this.db.query(`SELECT * FROM subcategories`, (err, docs) => {
+			this.db.query(`SELECT subcategories.subcategory_id, subcategories.subcategory_name, categories.category_name, subcategories.created_at FROM subcategories LEFT JOIN
+			categories ON categories.category_id = subcategories.category_id LIMIT ${offset}, ${limit}`, (err, docs) => {
 				if (err) {
 					logger.Log({
 						level: logger.LEVEL.ERROR,
@@ -24,7 +26,29 @@ class SubCategoryRepository {
 			});
 		});
 	}
-
+	getSubCategoryCount() {
+		return new Promise((resolve, reject) => {
+		  this.db.query(
+			`SELECT count(subcategory_id) AS subcat_count FROM subcategories`,
+			[],
+			(err, docs) => {
+			  if (err) {
+				logger.Log({
+				  level: logger.LEVEL.ERROR,
+				  component: "REPOSITORY.PRODUCT",
+				  code: "REPOSITORY.PRODUCT.GET-SUBCATEGORY-COUNT",
+				  description: err.toString(),
+				  category: "",
+				  ref: {},
+				});
+				reject(err);
+				return;
+			  }
+			  resolve(docs);
+			}
+		  );
+		});
+	  }
 	upsert(subCategory) {
 		return new Promise((resolve, reject) => {
 			this.db.query(

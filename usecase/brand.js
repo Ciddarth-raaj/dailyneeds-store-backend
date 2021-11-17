@@ -3,17 +3,26 @@ class BrandUsecase {
 		this.brandRepo = brandRepo;
 	}
 
-	getAll() {
+	getAll(limit, offset) {
 		return new Promise(async (resolve, reject) => {
 			try {
-				const brands = await this.brandRepo.getAll();
+				const brands = await this.brandRepo.getAll(limit, offset);
 				resolve(brands);
 			} catch (err) {
 				reject(err);
 			}
 		});
 	}
-
+	getBrandCount() {
+		return new Promise(async (resolve, reject) => {
+		  try {
+			const data = await this.brandRepo.getBrandCount();
+			resolve(data);
+		  } catch (err) {
+			reject(err);
+		  }
+		}); 
+	  }
 	getByCategory(categoryId) {
 		return new Promise(async (resolve, reject) => {
 			try {

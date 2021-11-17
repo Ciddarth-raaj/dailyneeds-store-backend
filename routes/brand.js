@@ -10,13 +10,30 @@ class BrandRoutes {
 	init() {
 		router.get("/", async (req, res) => {
 			try {
-				const brands = await this.brandUsecase.getAll();
+				const schema = {
+					limit: Joi.number().required(),
+					offset: Joi.number().required(),
+				  };
+				  const data = req.query;		  
+				const brands = await this.brandUsecase.getAll(data.limit, data.offset);
 				res.json(brands);
 			} catch (err) {
 				res.status(500).json({ code: 500, msg: "An error occurred !" });
 			}
 		});
-
+		router.get("/brandcount", async (req, res) => {
+			try {
+			  const brands = await this.brandUsecase.getBrandCount();
+			  res.json(brands);
+			} catch (err) {
+				console.log(err);
+			  if (err.name === "ValidationError") {
+				res.json({ code: 422, msg: err.toString() });
+			  } else {
+				res.json({ code: 500, msg: "An error occurred !" });
+			  }
+			}
+		  });
 		router.get("/category", async (req, res) => {
 			try {
 				const brands = await this.brandUsecase.getByCategory(

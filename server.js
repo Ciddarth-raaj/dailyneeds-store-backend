@@ -170,6 +170,7 @@ class Server {
     app.use("/image", imageRouter.getRouter());
     app.use("/product", productRouter.getRouter());
     app.use("/category", categoryRouter.getRouter());
+    app.use("/subcategory", subcategoryRouter.getRouter());
     app.use("/brand", brandRouter.getRouter());
   }
 

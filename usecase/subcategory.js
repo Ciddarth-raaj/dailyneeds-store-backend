@@ -3,17 +3,26 @@ class SubCategoryUsecase {
 		this.subCategoryRepo = subCategoryRepo;
 	}
 
-	getAll() {
+	getAll(limit, offset) {
 		return new Promise(async (resolve, reject) => {
 			try {
-				const subCategories = await this.subCategoryRepo.getAll();
+				const subCategories = await this.subCategoryRepo.getAll(limit, offset);
 				resolve(subCategories);
 			} catch (err) {
 				reject(err);
 			}
 		});
 	}
-
+	getSubCategoryCount() {
+		return new Promise(async (resolve, reject) => {
+		  try {
+			const data = await this.subCategoryRepo.getSubCategoryCount();
+			resolve(data);
+		  } catch (err) {
+			reject(err);
+		  }
+		}); 
+	  }
 	upsert(subCategory) {
 		return new Promise(async (resolve, reject) => {
 			try {
