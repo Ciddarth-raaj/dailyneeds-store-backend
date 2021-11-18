@@ -13,9 +13,17 @@ class DepartmentUsecase {
         reject(err);
       }
     });
-
   }
-
+  uploadDepartmentImage(image_url, department_id) {
+		return new Promise(async (resolve, reject) => {
+			try {
+				const { code } = await this.departmentRepo.uploadDepartmentImage(image_url, department_id);
+				resolve(code);
+			} catch (err) {
+				reject(err);
+			}
+		});
+	}
   updateStatus(file) {
     return new Promise(async (resolve, reject) => {
       try {

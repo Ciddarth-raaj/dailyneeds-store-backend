@@ -25,6 +25,9 @@ const unProtectedRoutes = {
   "/department/update-status": {
     methods: { post: true }
   },
+  "/department/imageupload": {
+    methods: { post: true }
+  },
 
   //categories
   "/category": {

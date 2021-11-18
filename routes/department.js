@@ -25,6 +25,31 @@ class DepartmentRoutes {
   
         res.end();
       });
+      router.post("/imageupload", async (req, res) => {
+        try {
+          const schema = {
+            image_url: Joi.string().required(),
+            department_id: Joi.number().required()
+          };
+          const department = req.body;
+  
+          const isValid = Joi.validate(department, schema);
+  
+          if (isValid.error !== null) {
+            console.log(isValid.error);
+            throw isValid.error;
+          }
+          const response = await this.departmentUsecase.uploadDepartmentImage(department.image_url, department.department_id);
+          res.json(response);
+        } catch (err) {
+            console.log(err);
+          if (err.name === "ValidationError") {
+            res.json({ code: 422, msg: err.toString() });
+          } else {
+            res.json({ code: 500, msg: "An error occurred !" });
+          }
+        }
+      });
       router.post("/update-status", async (req, res) => {
         try {
           const schema = {
