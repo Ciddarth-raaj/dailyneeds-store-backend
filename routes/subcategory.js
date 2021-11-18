@@ -35,6 +35,31 @@ class SubCategoryRoutes {
         }
       }
     });
+    router.post("/imageupload", async (req, res) => {
+      try {
+        const schema = {
+          image_url: Joi.string().required(),
+          subcategory_id: Joi.number().required()
+        };
+        const subcategories = req.body;
+
+        const isValid = Joi.validate(subcategories, schema);
+
+        if (isValid.error !== null) {
+          console.log(isValid.error);
+          throw isValid.error;
+        }
+        const response = await this.subCategoryUsecase.uploadSubCategoryImage(subcategories.image_url, subcategories.subcategory_id);
+        res.json(response);
+      } catch (err) {
+          console.log(err);
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          res.json({ code: 500, msg: "An error occurred !" });
+        }
+      }
+    });
   }
 
   getRouter() {

@@ -13,6 +13,16 @@ class SubCategoryUsecase {
 			}
 		});
 	}
+	uploadSubCategoryImage(image_url, subcategory_id) {
+		return new Promise(async (resolve, reject) => {
+			try {
+				const { code } = await this.subCategoryRepo.uploadSubCategoryImage(image_url, subcategory_id);
+				resolve(code);
+			} catch (err) {
+				reject(err);
+			}
+		});
+	}
 	getSubCategoryCount() {
 		return new Promise(async (resolve, reject) => {
 		  try {

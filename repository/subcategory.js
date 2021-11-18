@@ -8,7 +8,7 @@ class SubCategoryRepository {
 	getAll(limit, offset) {
 		console.log(offset, limit);
 		return new Promise((resolve, reject) => {
-			this.db.query(`SELECT subcategories.subcategory_id, subcategories.subcategory_name, categories.category_name, subcategories.created_at FROM subcategories LEFT JOIN
+			this.db.query(`SELECT subcategories.subcategory_id, subcategories.subcategory_name, subcategories.image_url, categories.category_name, subcategories.created_at FROM subcategories LEFT JOIN
 			categories ON categories.category_id = subcategories.category_id LIMIT ${offset}, ${limit}`, (err, docs) => {
 				if (err) {
 					logger.Log({
@@ -23,6 +23,27 @@ class SubCategoryRepository {
 					return;
 				}
 				resolve(docs);
+			});
+		});
+	}
+	uploadSubCategoryImage(image_url, subcategory_id) {
+		return new Promise((resolve, reject) => {
+			this.db.query("UPDATE subcategories SET image_url = ? WHERE subcategory_id = ?", 
+			[image_url, subcategory_id],
+			(err, res) => {
+				if (err) {
+					logger.Log({
+						level: logger.LEVEL.ERROR,
+						component: "REPOSITORY.SUBCATEGORY",
+						code: "REPOSITORY.SUBCATEGORY.UPLOAD-IMAGE",
+						description: err.toString(),
+						category: "",
+						ref: {},
+					});
+					reject(err);
+					return;
+				}
+				resolve({ code: 200, id: res.insertId });
 			});
 		});
 	}

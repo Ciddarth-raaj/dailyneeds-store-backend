@@ -8,7 +8,7 @@ class CategoryRepository {
   getAll(limit, offset) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT categories.category_id, categories.category_name, department.department_name, categories.created_at FROM categories LEFT JOIN
+        `SELECT categories.category_id, categories.category_name, categories.image_url, department.department_name, categories.created_at FROM categories LEFT JOIN
         department on department.department_id = categories.department_id LIMIT ${offset}, ${limit}`,
         (err, docs) => {
           if (err) {
@@ -28,6 +28,27 @@ class CategoryRepository {
       );
     });
   }
+  uploadCategoryImage(image_url, category_id) {
+		return new Promise((resolve, reject) => {
+			this.db.query("UPDATE categories SET image_url = ? WHERE category_id = ?", 
+			[image_url, category_id],
+			(err, res) => {
+				if (err) {
+					logger.Log({
+						level: logger.LEVEL.ERROR,
+						component: "REPOSITORY.SUBCATEGORY",
+						code: "REPOSITORY.CATEGORY.UPLOAD-IMAGE",
+						description: err.toString(),
+						category: "",
+						ref: {},
+					});
+					reject(err);
+					return;
+				}
+				resolve({ code: 200, id: res.insertId });
+			});
+		});
+	}
   getCategoryCount() {
     return new Promise((resolve, reject) => {
       this.db.query(

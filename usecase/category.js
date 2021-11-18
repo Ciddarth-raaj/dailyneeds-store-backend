@@ -13,7 +13,16 @@ class CategoryUsecase {
       }
     });
   }
-
+	uploadCategoryImage(image_url, category_id) {
+		return new Promise(async (resolve, reject) => {
+			try {
+				const { code } = await this.categoryRepo.uploadCategoryImage(image_url, category_id);
+				resolve(code);
+			} catch (err) {
+				reject(err);
+			}
+		});
+	}
   update(category) {
     return new Promise(async (resolve, reject) => {
       try {

@@ -33,6 +33,9 @@ const unProtectedRoutes = {
   "/category/catcount": {
     methods: { get: true }
   },
+  "/category/imageupload": {
+    methods: { post: true }
+  },
 
   //subcategories
   "/subcategory": {
@@ -40,6 +43,9 @@ const unProtectedRoutes = {
   },
   "/subcategory/subcatcount": {
     methods: { get: true }
+  },
+  "/subcategory/imageupload": {
+    methods: { post: true }
   },
 
   //designation
