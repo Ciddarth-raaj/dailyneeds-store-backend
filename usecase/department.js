@@ -14,6 +14,16 @@ class DepartmentUsecase {
       }
     });
   }
+  getProductDepartment() {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const data = await this.departmentRepo.getProductDepartment();
+        resolve(data);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
   uploadDepartmentImage(image_url, department_id) {
 		return new Promise(async (resolve, reject) => {
 			try {
@@ -34,7 +44,16 @@ class DepartmentUsecase {
       }
     });
   }
-
+  updateProductDepartmentStatus(file) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        await this.departmentRepo.updateProductDepartmentStatus(file);
+        resolve(200);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
   updateDepartmentDetails(department) {
     return new Promise(async (resolve, reject) => {
       try {

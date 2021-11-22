@@ -28,6 +28,12 @@ const unProtectedRoutes = {
   "/department/imageupload": {
     methods: { post: true }
   },
+  "/department/product-department": {
+    methods: { get: true }
+  },
+  "/department/update-prodstatus": {
+    methods: { post: true }
+  },
 
   //categories
   "/category": {

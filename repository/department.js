@@ -8,7 +8,7 @@ class DepartmentRepository {
   get() {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "SELECT * FROM department_table",
+        "SELECT * FROM department",
         [],
         (err, docs) => {
           if (err) {
@@ -28,6 +28,31 @@ class DepartmentRepository {
       );
     });
   }
+
+  getProductDepartment() {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "SELECT * FROM department_table",
+        [],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.DEPARTMENT",
+              code: "REPOSITORY.DEPARTMENT.GET-DEPARTMENT-TABLE",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs)
+        }
+      );
+    });
+  }
+
   uploadDepartmentImage(image_url, department_id) {
 		return new Promise((resolve, reject) => {
 			this.db.query("UPDATE department_table SET image_url = ? WHERE department_id = ?", 
@@ -51,7 +76,7 @@ class DepartmentRepository {
 	}
   getById(department_id) {
     return new Promise((resolve, reject) => {
-      this.db.query("SELECT * FROM department_table where department_id = ?",
+      this.db.query("SELECT * FROM department where department_id = ?",
         [department_id],
         (err, docs) => {
           if (err) {
@@ -73,7 +98,7 @@ class DepartmentRepository {
   updateStatus(file) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "UPDATE department_table SET status = ? WHERE department_id = ?",
+        "UPDATE department SET status = ? WHERE department_id = ?",
         [file.status, file.department_id],
         (err, docs) => {
           if (err) {
@@ -92,10 +117,32 @@ class DepartmentRepository {
         });
     });
   }
+  updateProductDepartmentStatus(file) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "UPDATE department_table SET status = ? WHERE department_id = ?",
+        [file.status, file.department_id],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.DEPARTMENT",
+              code: "REPOSITORY.DEPARTMENT.UPDATE-DEPARTMENT-STATUS",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        });
+    });
+  }
   updateDepartmentDetails(data, department_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `UPDATE department_table SET ? WHERE department_id = ?`,
+        `UPDATE department SET ? WHERE department_id = ?`,
         [data, department_id],
         (err, res) => {
           if (err) {
@@ -118,7 +165,7 @@ class DepartmentRepository {
   create(department) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "INSERT INTO department_table (status, department_name) VALUES (?, ?)",
+        "INSERT INTO department (status, department_name) VALUES (?, ?)",
         [
           department.status,
           department.department_name
@@ -149,7 +196,7 @@ class DepartmentRepository {
   upsert(department) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `INSERT INTO department_table (department_id, department_name) 
+        `INSERT INTO department (department_id, department_name) 
            VALUES (?, ?) 
            ON DUPLICATE KEY UPDATE department_name = ?`,
         [
