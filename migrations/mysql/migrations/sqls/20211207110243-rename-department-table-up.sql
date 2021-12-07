@@ -1,0 +1,1 @@
+ALTER TABLE `department_table` RENAME TO  `product_department`;

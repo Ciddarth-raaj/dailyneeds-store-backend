@@ -32,7 +32,7 @@ class DepartmentRepository {
   getProductDepartment() {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "SELECT * FROM department_table",
+        "SELECT * FROM product_department",
         [],
         (err, docs) => {
           if (err) {
@@ -55,7 +55,7 @@ class DepartmentRepository {
 
   uploadDepartmentImage(image_url, department_id) {
 		return new Promise((resolve, reject) => {
-			this.db.query("UPDATE department_table SET image_url = ? WHERE department_id = ?", 
+			this.db.query("UPDATE product_department SET image_url = ? WHERE department_id = ?", 
 			[image_url, department_id],
 			(err, res) => {
 				if (err) {
@@ -120,7 +120,7 @@ class DepartmentRepository {
   updateProductDepartmentStatus(file) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "UPDATE department_table SET status = ? WHERE department_id = ?",
+        "UPDATE product_department SET status = ? WHERE department_id = ?",
         [file.status, file.department_id],
         (err, docs) => {
           if (err) {
