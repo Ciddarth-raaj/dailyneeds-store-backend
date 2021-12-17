@@ -41,7 +41,7 @@ class EmployeeRoutes {
           pan_no: Joi.string().allow('').optional(),
           bank_name: Joi.string().allow('').allow(null).optional(),
           ifsc: Joi.string().allow('').optional(),
-          account_no: Joi.number().allow('').allow(null).optional(),
+          account_no: Joi.string().allow('').allow(null).optional(),
           esi: Joi.number().allow('').optional(),
           esi_number: Joi.number().allow('').allow(null).optional(),
           pf: Joi.number().allow('').optional(),

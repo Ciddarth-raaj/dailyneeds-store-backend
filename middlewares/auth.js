@@ -35,6 +35,25 @@ const unProtectedRoutes = {
     methods: { post: true }
   },
 
+  //indents
+  "/indent": {
+    methods: { get: true }
+  },
+  "/indent/indentcount": {
+    methods: { get: true }
+  },
+  "/indent/create": {
+    methods: { post: true }
+  },
+  "/indent/despatch": {
+    methods: { get: true }
+  },
+  
+  //despatch
+  "/despatch/create": {
+    methods: { post: true }
+  },
+
   //categories
   "/category": {
     methods: { get: true }

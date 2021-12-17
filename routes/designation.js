@@ -129,6 +129,8 @@ class DesignationRoutes {
         const schema = {
           // status: Joi.number().required(),
           designation_name: Joi.string().required(),
+          login_access: Joi.number().required(),
+          status: Joi.number().required(),
           online_portal: Joi.number().required(),
           permissions: Joi.array().items(Joi.string().optional()).required(),
         };

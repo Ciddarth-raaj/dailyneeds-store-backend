@@ -104,6 +104,8 @@ class Server {
     this.categoryRepo = require("./repository/category")(this.mysql.connection)
     this.subcategoryRepo = require("./repository/subcategory")(this.mysql.connection)
     this.brandRepo = require("./repository/brand")(this.mysql.connection)
+    this.indentRepo = require("./repository/indent")(this.mysql.connection)
+    this.despatchRepo = require("./repository/despatch")(this.mysql.connection)
   }
 
   initUsecases() {
@@ -126,6 +128,11 @@ class Server {
     this.categoryUsecase = require("./usecase/category")(this.categoryRepo)
     this.subcategoryUsecase = require("./usecase/subcategory")(this.subcategoryRepo)
     this.brandUsecase = require("./usecase/brand")(this.brandRepo)
+    this.indentUsecase = require("./usecase/indent")(this.indentRepo)
+    this.despatchUsecase = require("./usecase/despatch")(
+      this.despatchRepo, 
+      this.indentUsecase
+    )
   }
 
   initRoutes() {
@@ -151,6 +158,8 @@ class Server {
     const categoryRouter = require("./routes/category")(this.categoryUsecase);
     const subcategoryRouter = require("./routes/subcategory")(this.subcategoryUsecase);
     const brandRouter = require("./routes/brand")(this.brandUsecase);
+    const indentRouter = require("./routes/indent")(this.indentUsecase);
+    const despatchRouter = require("./routes/despatch")(this.despatchUsecase);
     //const exampleRouter = require('./routes/example')( this.example_controller );
 
     app.use("/document", documentRouter.getRouter());
@@ -172,6 +181,8 @@ class Server {
     app.use("/category", categoryRouter.getRouter());
     app.use("/subcategory", subcategoryRouter.getRouter());
     app.use("/brand", brandRouter.getRouter());
+    app.use("/indent", indentRouter.getRouter());
+    app.use("/despatch", despatchRouter.getRouter());
   }
 
   initServices() {

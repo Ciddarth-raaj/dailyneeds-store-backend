@@ -93,11 +93,12 @@ class DesignationRepository {
   create(designation) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "INSERT INTO designation (status, designation_name, online_portal) VALUES (?, ?, ?)",
+        "INSERT INTO designation (status, designation_name, online_portal, login_access) VALUES (?, ?, ?, ?)",
         [
           designation.status,
           designation.designation_name,
           designation.online_portal,
+          designation.login_access
         ],
         (err, res) => {
           if (err) {

@@ -1,4 +1,5 @@
 
+const moment = require("moment");
 class EmployeeUsecase {
   constructor(employeeRepo, documentUsecase) {
     this.employeeRepo = employeeRepo;
@@ -164,7 +165,7 @@ class EmployeeUsecase {
             card_type: employee.files[i].id_card,
             card_no: employee.files[i].id_card_no,
             card_name: employee.files[i].id_card_name,
-            expiry_date: employee.files[i].expiry_date == "" ? null : employee.files[i].expiry_date,
+            expiry_date: employee.files[i].expiry_date == "" ? null : moment(employee.files[i].expiry_date).format("YYYY-MM-DD"),
             file: employee.files[i].file,
             employee_id: id,
           })
