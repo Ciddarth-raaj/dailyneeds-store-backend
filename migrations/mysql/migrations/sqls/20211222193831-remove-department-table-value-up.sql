@@ -1,1 +1,1 @@
-DELETE FROM 'department';
+DELETE FROM `department`;
