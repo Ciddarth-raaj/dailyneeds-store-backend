@@ -106,6 +106,7 @@ class Server {
     this.brandRepo = require("./repository/brand")(this.mysql.connection)
     this.indentRepo = require("./repository/indent")(this.mysql.connection)
     this.despatchRepo = require("./repository/despatch")(this.mysql.connection)
+    this.userRepo = require("./repository/user")(this.mysql.connection)
   }
 
   initUsecases() {
@@ -130,9 +131,10 @@ class Server {
     this.brandUsecase = require("./usecase/brand")(this.brandRepo)
     this.indentUsecase = require("./usecase/indent")(this.indentRepo)
     this.despatchUsecase = require("./usecase/despatch")(
-      this.despatchRepo, 
+      this.despatchRepo,
       this.indentUsecase
     )
+    this.userUsecase = require("./usecase/user")(this.userRepo)
   }
 
   initRoutes() {
@@ -160,7 +162,7 @@ class Server {
     const brandRouter = require("./routes/brand")(this.brandUsecase);
     const indentRouter = require("./routes/indent")(this.indentUsecase);
     const despatchRouter = require("./routes/despatch")(this.despatchUsecase);
-    //const exampleRouter = require('./routes/example')( this.example_controller );
+    const userRouter = require('./routes/user')(this.userUsecase);
 
     app.use("/document", documentRouter.getRouter());
     app.use("/family", familyRouter.getRouter());
@@ -183,6 +185,7 @@ class Server {
     app.use("/brand", brandRouter.getRouter());
     app.use("/indent", indentRouter.getRouter());
     app.use("/despatch", despatchRouter.getRouter());
+    app.use("/user", userRouter.getRouter());
   }
 
   initServices() {

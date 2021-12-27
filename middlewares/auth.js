@@ -8,7 +8,7 @@ const unProtectedRoutes = {
     methods: { get: true }
   },
 
-  
+
   //department
   "/department": {
     methods: { get: true }
@@ -48,7 +48,7 @@ const unProtectedRoutes = {
   "/indent/despatch": {
     methods: { get: true }
   },
-  
+
   //despatch
   "/despatch/create": {
     methods: { post: true }
@@ -168,7 +168,7 @@ const unProtectedRoutes = {
   "/resignation/update-resignation": {
     methods: { post: true }
   },
-  
+
   //product
   "/product/create": {
     methods: { post: true }
@@ -191,7 +191,7 @@ const unProtectedRoutes = {
   "/product/filter": {
     methods: { get: true }
   },
-  
+
   //shift
   "/shift": {
     methods: { get: true }
@@ -219,7 +219,7 @@ const unProtectedRoutes = {
     methods: { post: true }
   },
   "/company/update-status": {
-    methods: { post: true } 
+    methods: { post: true }
   },
   "/company/company_id": {
     methods: { get: true }
@@ -270,7 +270,7 @@ const unProtectedRoutes = {
     methods: { get: true }
   },
   "/material/create": {
-    methods: { post: true } 
+    methods: { post: true }
   },
   "/material/update-material": {
     methods: { post: true }
@@ -313,10 +313,13 @@ const unProtectedRoutes = {
   },
   "/family/employee_name": {
     methods: { get: true }
-  }
+  },
+
+  //user
+  "/user/login/password": { methods: { post: true } },
 }
 
-async function auth (req, res, next) {
+async function auth(req, res, next) {
   if (
     unProtectedRoutes[req.path] &&
     unProtectedRoutes[req.path]["methods"][req.method.toLowerCase()]
@@ -335,11 +338,16 @@ async function auth (req, res, next) {
     } else {
       const decoded = await jwt.verify(token);
 
-      if (decoded.role !== "ADMIN") {
-        res.json({ code: 403, msg: "Access Denied" });
-        res.end();
-        return;
-      }
+      req.decoded = {};
+      req.decoded.id = decoded.user_id;
+      req.decoded.store_id = decoded.store_id;
+      req.decoded.designation_id = decoded.designation_id;
+
+      // if (decoded.role !== "ADMIN") {
+      //   res.json({ code: 403, msg: "Access Denied" });
+      //   res.end();
+      //   return;
+      // }
     }
   } catch (err) {
     res.json({ code: 403, msg: "Access Denied" });
