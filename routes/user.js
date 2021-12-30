@@ -8,24 +8,23 @@ class UserRoutes {
     }
 
     init() {
-        router.post("/login/password", async (req, res) => {
+        router.post("/login", async (req, res) => {
             try {
                 const schema = {
                     username: Joi.string().trim().required(),
                     password: Joi.string().trim().required(),
                 };
 
-                const credentials = req.body;
-
+                const credentials = req.query;
                 const isValid = Joi.validate(credentials, schema);
                 if (isValid.error !== null) {
                     throw isValid.error;
                 }
 
-                const { code, token } = await this.userUsecase.login(credentials.username, credentials.password);
+                const data = await this.userUsecase.login(credentials.username, credentials.password);
 
-                if (code === 200) {
-                    res.json({ token });
+                if (data.code === 200) {
+                    res.json({ data });
                 } else {
                     res.status(400).json({ msg: "Incorrect credentials" });
                 }

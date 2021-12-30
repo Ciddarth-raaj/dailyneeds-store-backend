@@ -1,9 +1,10 @@
 
 const moment = require("moment");
 class EmployeeUsecase {
-  constructor(employeeRepo, documentUsecase) {
+  constructor(employeeRepo, documentUsecase, userRepo) {
     this.employeeRepo = employeeRepo;
     this.documentUsecase = documentUsecase;
+    this.userRepo = userRepo;
   }
 
   get() {
@@ -170,6 +171,7 @@ class EmployeeUsecase {
             employee_id: id,
           })
         }
+        const data = await this.userRepo.createLogin(employee.primary_contact_number, '1', id, 'password');
         resolve(200);
       } catch (err) {
         reject(err);
@@ -179,6 +181,6 @@ class EmployeeUsecase {
   }
 }
 
-module.exports = (employeeRepo, documentUsecase) => {
-  return new EmployeeUsecase(employeeRepo, documentUsecase);
+module.exports = (employeeRepo, documentUsecase, userRepo) => {
+  return new EmployeeUsecase(employeeRepo, documentUsecase, userRepo);
 };

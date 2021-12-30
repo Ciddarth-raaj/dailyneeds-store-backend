@@ -67,6 +67,27 @@ class DesignationRepository {
       });
     });
   }
+  getPermissionById(designation_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query("SELECT permission_key FROM permissions WHERE designation_id = ?",
+      [designation_id], 
+      (err, docs) => {
+        if (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "REPOSITORY.DESIGNATION",
+            code: "REPOSITORY.DESIGNATION.GET-PERMISSION-BY-ID",
+            description: err.toString(),
+            category: "",
+            ref: {},
+          });
+          reject(err);
+          return;
+        }
+        resolve(docs);
+      });
+    });
+  }
   updateDesignationDetails(data, designation_id) {
     return new Promise((resolve, reject) => {
       this.db.query(

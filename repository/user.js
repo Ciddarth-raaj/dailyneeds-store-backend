@@ -28,6 +28,30 @@ class UserRepository {
 			);
 		});
 	}
+	createLogin(username, user_type, employee_id, password) {
+		console.log({username: username});
+		return new Promise((resolve, reject) => {
+			this.db.query(
+				'INSERT INTO `user` (`username`, `user_type`, `employee_id`, `password`) VALUES (?, ?, ?, SHA1(?))',
+				[username, user_type, employee_id, password],
+				(err, docs) => {
+					if (err) {
+						logger.Log({
+							level: logger.LEVEL.ERROR,
+							component: "REPOSITORY.USER",
+							code: "REPOSITORY.USER.CREATE",
+							description: err.toString(),
+							category: "",
+							ref: {},
+						});
+						reject(err);
+						return;
+					}
+					resolve(docs);
+				}
+			);
+		});
+	}
 }
 
 module.exports = (db) => {

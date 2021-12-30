@@ -114,7 +114,11 @@ class Server {
     this.exampleUsecase = require("./usecase/example")(this.exampleRepo);
     this.departmentUsecase = require("./usecase/department")(this.departmentRepo);
     this.designationUsecase = require("./usecase/designation")(this.designationRepo);
-    this.employeeUsecase = require("./usecase/employee")(this.employeeRepo, this.documentUsecase);
+    this.employeeUsecase = require("./usecase/employee")(
+      this.employeeRepo, 
+      this.documentUsecase, 
+      this.userRepo
+    );
     this.shiftUsecase = require("./usecase/shift")(this.shiftRepo);
     this.storeUsecase = require("./usecase/store")(this.storeRepo);
     this.outletUsecase = require("./usecase/outlet")(this.outletRepo);

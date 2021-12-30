@@ -49,7 +49,7 @@ class DesignationRoutes {
       }
       res.end();
     });
-    router.get("/permission/designation_id", async (req, res) => {
+    router.get("/permissions", async (req, res) => {
       try {
       const schema = {
         designation_id: Joi.string().required(),

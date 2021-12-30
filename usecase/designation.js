@@ -45,6 +45,17 @@ getDesignationById(designation_id) {
       }
     });
   }
+  getPermissionById(designation_id) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const data = await this.designationRepo.getPermissionById(designation_id);
+        resolve(data);
+      } catch (err) {
+        console.log(err);
+        reject(err);
+      }
+    });
+  }
   create(designation) {
     return new Promise(async (resolve, reject) => {
       try {

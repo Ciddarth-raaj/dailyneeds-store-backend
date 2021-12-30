@@ -92,6 +92,9 @@ const unProtectedRoutes = {
   "/designation/update-status": {
     methods: { post: true }
   },
+  "/designation/permissions": {
+    methods: { get: true }
+  },
 
 
   //employee
@@ -316,7 +319,7 @@ const unProtectedRoutes = {
   },
 
   //user
-  "/user/login/password": { methods: { post: true } },
+  "/user/login": { methods: { post: true } },
 }
 
 async function auth(req, res, next) {
@@ -330,6 +333,7 @@ async function auth(req, res, next) {
 
   try {
     const token = req.headers["x-access-token"];
+    console.log({token: token});
 
     if (token === undefined) {
       res.json({ code: 403, msg: "Access Denied" });

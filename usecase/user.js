@@ -25,7 +25,14 @@ class UserUsecase {
 
                 const token = await jwt.sign(info, "30d");
 
-                resolve({ code: 200, token: token });
+                resolve({ 
+                    code: 200, 
+                    token: token,
+                    store_id: info.store_id,
+                    designation_id: info.designation_id,
+                    employee_id: info.employee_id,
+                    user_type: info.user_type 
+                });
             } catch (err) {
                 reject(err);
             }
