@@ -8,7 +8,7 @@ class UserRepository {
 	login(username, password) {
 		return new Promise((resolve, reject) => {
 			this.db.query(
-				`SELECT user.user_id, user.employee_id, user.user_type, new_employee.store_id, new_employee.department_id, new_employee.designation_id FROM user, new_employee WHERE new_employee.employee_id = user.employee_id AND username = ? AND password = SHA1(?)`,
+				"SELECT user.user_id AS `user_id`, user.employee_id AS `employee_id`, user.user_type AS `user_type`, (SELECT new_employee.store_id FROM new_employee WHERE new_employee.employee_id = user.employee_id) AS `store_id`, (SELECT new_employee.department_id FROM new_employee WHERE new_employee.employee_id = user.employee_id) AS `department_id`, (SELECT new_employee.designation_id FROM new_employee WHERE new_employee.employee_id = user.employee_id) AS `designation_id` FROM user WHERE username = ? AND password = SHA1(?) group by user.user_id",
 				[username, password],
 				(err, docs) => {
 					if (err) {
@@ -29,7 +29,6 @@ class UserRepository {
 		});
 	}
 	createLogin(username, user_type, employee_id, password) {
-		console.log({username: username});
 		return new Promise((resolve, reject) => {
 			this.db.query(
 				'INSERT INTO `user` (`username`, `user_type`, `employee_id`, `password`) VALUES (?, ?, ?, SHA1(?))',

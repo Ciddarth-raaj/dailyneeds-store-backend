@@ -92,9 +92,9 @@ const unProtectedRoutes = {
   "/designation/update-status": {
     methods: { post: true }
   },
-  "/designation/permissions": {
-    methods: { get: true }
-  },
+  // "/designation/permissions": {
+  //   methods: { get: true }
+  // },
 
 
   //employee
@@ -262,22 +262,51 @@ const unProtectedRoutes = {
     methods: { get: true }
   },
 
-  //Materials
-  "/material": {
+  //Materialtype
+  "/materialtype": {
     methods: { get: true }
   },
-  "/material/update-status": {
+  "/materialtype/update-status": {
     methods: { post: true }
   },
-  "/material/material_id": {
+  "/materialtype/material_id": {
     methods: { get: true }
   },
-  "/material/create": {
+  "/materialtype/create": {
     methods: { post: true }
   },
-  "/material/update-material": {
+  "/materialtype/update-material": {
     methods: { post: true }
   },
+  "/materialtype/type": {
+    methods: { get: true }
+  },
+  "/materialtype/size": {
+    methods: { get: true }
+  },
+
+    //Materialsize
+    "/materialsize": {
+      methods: { get: true }
+    },
+    "/materialsize/update-status": {
+      methods: { post: true }
+    },
+    "/materialsize/material_id": {
+      methods: { get: true }
+    },
+    "/materialsize/create": {
+      methods: { post: true }
+    },
+    "/materialsize/update-material": {
+      methods: { post: true }
+    },
+    "/materialsize/type": {
+      methods: { get: true }
+    },
+    "/materialsize/size": {
+      methods: { get: true }
+    },
 
   //outlet
   "/outlet": {
@@ -330,21 +359,18 @@ async function auth(req, res, next) {
     next()
     return
   }
-
   try {
     const token = req.headers["x-access-token"];
-    console.log({token: token});
-
     if (token === undefined) {
       res.json({ code: 403, msg: "Access Denied" });
       res.end();
       return;
     } else {
       const decoded = await jwt.verify(token);
-
       req.decoded = {};
       req.decoded.id = decoded.user_id;
       req.decoded.store_id = decoded.store_id;
+      req.decoded.user_type = decoded.user_type;
       req.decoded.designation_id = decoded.designation_id;
 
       // if (decoded.role !== "ADMIN") {

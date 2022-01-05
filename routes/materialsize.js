@@ -2,9 +2,9 @@ const router = require("express").Router();
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
 
-class MaterialRoutes {
-  constructor(materialUsecase) {
-    this.materialUsecase = materialUsecase;
+class materialSizeRoutes {
+  constructor(materialsizeUsecase) {
+    this.materialsizeUsecase = materialsizeUsecase;
 
     this.init();
   }
@@ -12,7 +12,37 @@ class MaterialRoutes {
   init() {
     router.get("/", async (req, res) => {
       try {
-        const material = await this.materialUsecase.get();
+        const material = await this.materialsizeUsecase.get();
+        res.json(material);
+      } catch (err) {
+        console.log(err);
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          res.json({ code: 500, msg: "An error occurred !" });
+        }
+      }
+
+      res.end();
+    });
+    router.get("/type", async (req, res) => {
+      try {
+        const material = await this.materialsizeUsecase.getType();
+        res.json(material);
+      } catch (err) {
+        console.log(err);
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          res.json({ code: 500, msg: "An error occurred !" });
+        }
+      }
+
+      res.end();
+    });
+    router.get("/size", async (req, res) => {
+      try {
+        const material = await this.materialsizeUsecase.getSize();
         res.json(material);
       } catch (err) {
         console.log(err);
@@ -39,7 +69,7 @@ class MaterialRoutes {
           throw isValid.error;
         }
 
-        const code = await this.materialUsecase.updateStatus(material);
+        const code = await this.materialsizeUsecase.updateStatus(material);
         res.json({ code: code });
       } catch (err) {
         if (err.name === "ValidationError") {
@@ -69,7 +99,7 @@ class MaterialRoutes {
           throw isValid.error;
         }
 
-        const code = await this.materialUsecase.updateMaterialDetails(material);
+        const code = await this.materialsizeUsecase.updateMaterialDetails(material);
         res.json({ code: code });
       } catch (err) {
         if (err.name === "ValidationError") {
@@ -92,7 +122,7 @@ class MaterialRoutes {
         if (isValid.error !== null) {
           throw isValid.error;
         }
-        const data = await this.materialUsecase.getMaterialById(
+        const data = await this.materialsizeUsecase.getMaterialById(
           material.material_id
         );
         res.json(data);
@@ -111,20 +141,22 @@ class MaterialRoutes {
     router.post("/create", async (req, res) => {
       try {
         const schema = {
-          material_name: Joi.string().required(),
+          material_size: Joi.string().optional(),
+          weight: Joi.string().optional(),
+          cost: Joi.string().optional(),
           description: Joi.string().allow("").allow(null).optional(),
-          material_category: Joi.string().required(),
         };
 
         const material = req.body;
+        console.log({material: material})
         const isValid = Joi.validate(material, schema);
 
         if (isValid.error !== null) {
           console.log(isValid.error);
           throw isValid.error;
         }
-        const response = await this.materialUsecase.create(material);
-
+        const response = await this.materialsizeUsecase.create(material);
+        console.log({response: response})
         res.json(response);
       } catch (err) {
         if (err.name === "ValidationError") {
@@ -143,6 +175,6 @@ class MaterialRoutes {
   }
 }
 
-module.exports = (materialUsecase) => {
-  return new MaterialRoutes(materialUsecase);
+module.exports = (materialsizeUsecase) => {
+  return new materialSizeRoutes(materialsizeUsecase);
 };

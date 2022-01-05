@@ -96,7 +96,8 @@ class Server {
     this.outletRepo = require("./repository/outlet")(this.mysql.connection);
     this.familyRepo = require("./repository/family")(this.mysql.connection);
     this.companyRepo = require("./repository/company")(this.mysql.connection);
-    this.materialRepo = require("./repository/material")(this.mysql.connection);
+    this.materialtypeRepo = require("./repository/materialtype")(this.mysql.connection);
+    this.materialsizeRepo = require("./repository/materialsize")(this.mysql.connection);
     this.salaryRepo = require("./repository/salary")(this.mysql.connection);
     this.resignationRepo = require("./repository/resignation")(this.mysql.connection);
     this.productRepo = require("./repository/product")(this.mysql.connection);
@@ -124,7 +125,8 @@ class Server {
     this.outletUsecase = require("./usecase/outlet")(this.outletRepo);
     this.familyUsecase = require("./usecase/family")(this.familyRepo);
     this.companyUsecase = require("./usecase/company")(this.companyRepo);
-    this.materialUsecase = require("./usecase/material")(this.materialRepo);
+    this.materialtypeUsecase = require("./usecase/materialtype")(this.materialtypeRepo);
+    this.materialsizeUsecase = require("./usecase/materialsize")(this.materialsizeRepo);
     this.salaryUsecase = require("./usecase/salary")(this.salaryRepo);
     this.resignationUsecase = require("./usecase/resignation")(this.resignationRepo);
     this.productUsecase = require("./usecase/product")(this.productRepo);
@@ -138,7 +140,7 @@ class Server {
       this.despatchRepo,
       this.indentUsecase
     )
-    this.userUsecase = require("./usecase/user")(this.userRepo)
+    this.userUsecase = require("./usecase/user")(this.userRepo, this.designationRepo)
   }
 
   initRoutes() {
@@ -156,7 +158,8 @@ class Server {
     const storeRouter = require("./routes/store")(this.storeUsecase);
     const outletRouter = require("./routes/outlet")(this.outletUsecase);
     const companyRouter = require("./routes/company")(this.companyUsecase);
-    const materialRouter = require("./routes/material")(this.materialUsecase);
+    const materialtypeRouter = require("./routes/materialtype")(this.materialtypeUsecase);
+    const materialsizeRouter = require("./routes/materialsize")(this.materialsizeUsecase);
     const salaryRouter = require("./routes/salary")(this.salaryUsecase);
     const resignationRouter = require("./routes/resignation")(this.resignationUsecase);
     const imageRouter = require("./routes/image")(this.imageUsecase);
@@ -179,7 +182,8 @@ class Server {
     app.use("/store", storeRouter.getRouter());
     app.use("/outlet", outletRouter.getRouter());
     app.use("/company", companyRouter.getRouter());
-    app.use("/material", materialRouter.getRouter());
+    app.use("/materialtype", materialtypeRouter.getRouter());
+    app.use("/materialsize", materialsizeRouter.getRouter());
     app.use("/salary", salaryRouter.getRouter());
     app.use("/resignation", resignationRouter.getRouter());
     app.use("/image", imageRouter.getRouter());

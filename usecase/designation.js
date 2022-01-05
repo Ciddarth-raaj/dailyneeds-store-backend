@@ -45,10 +45,10 @@ getDesignationById(designation_id) {
       }
     });
   }
-  getPermissionById(designation_id) {
+  getPermissionById(designation_id, user_type) {
     return new Promise(async (resolve, reject) => {
       try {
-        const data = await this.designationRepo.getPermissionById(designation_id);
+        const data = await this.designationRepo.getPermissionById(designation_id, user_type);
         resolve(data);
       } catch (err) {
         console.log(err);

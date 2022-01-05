@@ -1,0 +1,1 @@
+CREATE TABLE `all_permissions` ( `permission_id` INT NOT NULL AUTO_INCREMENT, `permission_key` VARCHAR(45) NULL, `status` TINYINT NULL DEFAULT '1', PRIMARY KEY (`permission_id`));

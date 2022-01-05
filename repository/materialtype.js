@@ -1,13 +1,13 @@
 const logger = require("../utils/logger");
 
-class MaterialRepository {
+class MaterialTypeRepository {
   constructor(db) {
     this.db = db;
   }
 
   get() {
     return new Promise((resolve, reject) => {
-      this.db.query("SELECT * FROM material", [], (err, docs) => {
+      this.db.query("SELECT * FROM pack_material_type", [], (err, docs) => {
         if (err) {
           logger.Log({
             level: logger.LEVEL.ERROR,
@@ -24,10 +24,48 @@ class MaterialRepository {
       });
     });
   }
+  getType() {
+    return new Promise((resolve, reject) => {
+      this.db.query("SELECT material_type FROM pack_material_type WHERE material_type IS NOT NULL", [], (err, docs) => {
+        if (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "REPOSITORY.MATERIAL",
+            code: "REPOSITORY.MATERIAL.GET-TYPE",
+            description: err.toString(),
+            category: "",
+            ref: {},
+          });
+          reject(err);
+          return;
+        }
+        resolve(docs);
+      });
+    });
+  }
+  getSize() {
+    return new Promise((resolve, reject) => {
+      this.db.query("SELECT material_size FROM pack_material_type WHERE material_size IS NOT NULL", [], (err, docs) => {
+        if (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "REPOSITORY.MATERIAL",
+            code: "REPOSITORY.MATERIAL.GET-SIZE",
+            description: err.toString(),
+            category: "",
+            ref: {},
+          });
+          reject(err);
+          return;
+        }
+        resolve(docs);
+      });
+    });
+  }
   getMaterialById(material_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "SELECT * FROM material where material_id = ?",
+        "SELECT * FROM pack_material_type where material_id = ?",
         [material_id],
         (err, docs) => {
           if (err) {
@@ -50,7 +88,7 @@ class MaterialRepository {
   updateStatus(file) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "UPDATE material SET status = ? WHERE material_id = ?",
+        "UPDATE pack_material_type SET status = ? WHERE material_id = ?",
         [file.status, file.material_id],
         (err, docs) => {
           if (err) {
@@ -73,7 +111,7 @@ class MaterialRepository {
   updateMaterialDetails(data, material_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `UPDATE material SET ? WHERE material_id = ?`,
+        `UPDATE pack_material_type SET ? WHERE material_id = ?`,
         [data, material_id],
         (err, res) => {
           if (err) {
@@ -96,11 +134,10 @@ class MaterialRepository {
   create(material) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "INSERT INTO material (material_name, description, material_category) VALUES (?, ?, ?)",
+        "INSERT INTO pack_material_type (material_type, description) VALUES (?, ?)",
         [
-          material.material_name,
+          material.material_type,
           material.description,
-          material.material_category,
         ],
         (err, res) => {
           if (err) {
@@ -123,5 +160,5 @@ class MaterialRepository {
 }
 
 module.exports = (db) => {
-  return new MaterialRepository(db);
+  return new MaterialTypeRepository(db);
 };

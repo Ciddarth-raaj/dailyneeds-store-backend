@@ -51,15 +51,13 @@ class DesignationRoutes {
     });
     router.get("/permissions", async (req, res) => {
       try {
-      const schema = {
-        designation_id: Joi.string().required(),
-      }
-      const designation = req.query;
-      const isValid = Joi.validate(designation, schema);
+      const designation_id = req.decoded.designation_id;
+      const user_type = req.decoded.user_type;
+      const isValid = Joi.validate(designation_id);
       if (isValid.error !== null) {
         throw isValid.error;
       }
-        const permission = await this.designationUsecase.getPermissionById(designation.designation_id);
+        const permission = await this.designationUsecase.getPermissionById(designation_id, user_type);
         res.json(permission);
       } catch (err) {
         console.log(err);

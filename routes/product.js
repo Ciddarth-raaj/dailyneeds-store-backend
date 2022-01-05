@@ -62,13 +62,13 @@ class ProductRoutes {
 
           product_details: Joi.object({
             product_id: Joi.number().allow(null).allow('').optional(),
-            return: Joi.number().allow(null).allow('').optional(),
+            return_prod: Joi.number().allow(null).allow('').optional(),
             de_packaging_type: Joi.string().allow(null).allow('').optional(),
             cleaning: Joi.number().allow(null).allow('').optional(),
             sticker: Joi.number().allow(null).allow('').optional(),
             grinding: Joi.number().allow(null).allow('').optional(),
-            cover_type: Joi.number().allow(null).allow('').optional(),
-            cover_sizes: Joi.number().allow(null).allow('').optional(),
+            cover_type: Joi.string().allow(null).allow('').optional(),
+            cover_sizes: Joi.string().allow(null).allow('').optional(),
             gf_description: Joi.string().allow(null).allow('').optional(),
             gf_detailed_description: Joi.string().allow(null).allow('').optional(),
             de_distributor: Joi.string().allow(null).allow('').optional(),
@@ -77,7 +77,6 @@ class ProductRoutes {
         };
 
         const product = req.body;
-        console.log({ productipo: product });
         const isValid = Joi.validate(product, schema);
         if (isValid.error !== null) {
           console.log(isValid.error);

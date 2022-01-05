@@ -2,8 +2,9 @@ const jwt = require("../services/jwt");
 // const SMS = require("../services/sms");
 
 class UserUsecase {
-    constructor(userRepo) {
+    constructor(userRepo, designationRepo) {
         this.userRepo = userRepo;
+        this.designationRepo = this.designationRepo;
     }
 
     login(username, password) {
@@ -24,7 +25,6 @@ class UserUsecase {
                 info.user_type = details[0].user_type;
 
                 const token = await jwt.sign(info, "30d");
-
                 resolve({ 
                     code: 200, 
                     token: token,
@@ -40,6 +40,6 @@ class UserUsecase {
     }
 }
 
-module.exports = (userRepo) => {
-    return new UserUsecase(userRepo);
+module.exports = (userRepo, designationRepo) => {
+    return new UserUsecase(userRepo, designationRepo);
 };

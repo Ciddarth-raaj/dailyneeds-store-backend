@@ -22,11 +22,10 @@ class UserRoutes {
                 }
 
                 const data = await this.userUsecase.login(credentials.username, credentials.password);
-
                 if (data.code === 200) {
                     res.json({ data });
                 } else {
-                    res.status(400).json({ msg: "Incorrect credentials" });
+                    res.status(400).json({ msg: "Incorrect credentials", code: 400 });
                 }
             } catch (err) {
                 console.log(err)
