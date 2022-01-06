@@ -1,0 +1,1 @@
+INSERT INTO `user` (`username`, `user_type`, `password`) VALUES ('9943800000', 2, SHA1('password'));
