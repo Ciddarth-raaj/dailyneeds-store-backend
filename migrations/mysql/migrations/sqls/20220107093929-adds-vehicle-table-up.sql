@@ -1,0 +1,1 @@
+CREATE TABLE `vehicle` ( `vehicle_id` INT NOT NULL AUTO_INCREMENT, `vehicle_number` VARCHAR(45) NULL, `engine_number` VARCHAR(45) NULL, `chasis_number` VARCHAR(45) NULL, `insurance_validity` VARCHAR(45) NULL, `fc_validity` VARCHAR(45) NULL, `status` TINYINT NULL DEFAULT '1', PRIMARY KEY (`vehicle_id`));

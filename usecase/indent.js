@@ -13,10 +13,10 @@ class IndentUsecase {
         }
       });
     }
-    getDespatch(limit, offset) {
+    getDespatch(limit, offset, delivery_status) {
       return new Promise(async (resolve, reject) => {
         try {
-          const data = await this.indentRepo.getDespatch(limit, offset);
+          const data = await this.indentRepo.getDespatch(limit, offset, delivery_status);
           resolve(data);
         } catch (err) {
           reject(err);

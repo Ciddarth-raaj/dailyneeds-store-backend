@@ -16,6 +16,16 @@ class DespatchUsecase {
         }
       });
     }
+    get() {
+      return new Promise(async (resolve, reject) => {
+          try {
+              const data = await this.despatchRepo.get();
+              resolve(data);
+          } catch (err) {
+              reject(err);
+          }
+      });
+  }
   }
   module.exports = (despatchRepo, indentUsecase) => {
     return new DespatchUsecase(despatchRepo, indentUsecase);

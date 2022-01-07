@@ -14,6 +14,7 @@ class IndentRoutes {
         const schema = {
           limit: Joi.number().required(),
           offset: Joi.number().required(),
+          
         };
         const data = req.query;
         const isValid = Joi.validate(data, schema);
@@ -40,6 +41,7 @@ class IndentRoutes {
         const schema = {
           limit: Joi.number().required(),
           offset: Joi.number().required(),
+          delivery_status: Joi.number().required(),
         };
         const data = req.query;
         const isValid = Joi.validate(data, schema);
@@ -48,7 +50,7 @@ class IndentRoutes {
           console.log(isValid.error);
           throw isValid.error;
         }
-        const indent = await this.indentUsecase.getDespatch(data.limit, data.offset);
+        const indent = await this.indentUsecase.getDespatch(data.limit, data.offset, data.delivery_status);
         res.json(indent);
       } catch (err) {
         console.log(err);

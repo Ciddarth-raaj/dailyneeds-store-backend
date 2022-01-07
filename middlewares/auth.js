@@ -53,6 +53,9 @@ const unProtectedRoutes = {
   "/despatch/create": {
     methods: { post: true }
   },
+  "/despatch": {
+    methods: { get: true }
+  },
 
   //categories
   "/category": {
@@ -327,6 +330,11 @@ const unProtectedRoutes = {
     methods: { get: true }
   },
   "/brand/brandcount": {
+    methods: { get: true }
+  },
+
+  //vechicle
+  "/vehicle": {
     methods: { get: true }
   },
 
