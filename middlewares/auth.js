@@ -56,6 +56,12 @@ const unProtectedRoutes = {
   "/despatch": {
     methods: { get: true }
   },
+  "/despatch/store_id": {
+    methods: { get: true }
+  },
+  "/despatch/despatch_id": {
+    methods: { get: true }
+  },
 
   //categories
   "/category": {
@@ -262,6 +268,9 @@ const unProtectedRoutes = {
 
   //store
   "/store": {
+    methods: { get: true }
+  },
+  "/store/store_id": {
     methods: { get: true }
   },
 

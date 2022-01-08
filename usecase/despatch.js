@@ -16,6 +16,33 @@ class DespatchUsecase {
         }
       });
     }
+    getIndentsByDespatch(despatch_id) {
+      return new Promise(async (resolve, reject) => {
+        try {
+          // console.log({despatch_id: despatch_id})
+          const id = await this.despatchRepo.getIndentsByDespatch(despatch_id);
+          const indent_id = id.split(',');
+          // console.log({indent_id: indent_id});
+          const data = await this.indentUsecase.getIndentById(indent_id);
+          resolve(data);
+        } catch (err) {
+          console.log(err);
+          reject(err);
+        }
+      });
+    }
+    getDespatchByStoreId(store_id) {
+      return new Promise(async (resolve, reject) => {
+        try {
+          const data = await this.despatchRepo.getDespatchByStoreId(store_id);
+          // console.log({data: data});
+          resolve(data);
+        } catch (err) {
+          console.log(err);
+          reject(err);
+        }
+      });
+    }
     get() {
       return new Promise(async (resolve, reject) => {
           try {

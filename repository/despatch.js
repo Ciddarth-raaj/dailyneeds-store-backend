@@ -38,6 +38,48 @@ class DespatchRepository {
       );
     });
   }
+  getIndentsByDespatch(despatch_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query("SELECT indent_id FROM despatch where despatch_id = ?",
+      [despatch_id], 
+      (err, docs) => {
+        if (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "REPOSITORY.DESPATCH",
+            code: "REPOSITORY.DESPATCH.GET-DESPATCH-BY-ID",
+            description: err.toString(),
+            category: "",
+            ref: {},
+          });
+          reject(err);
+          return;
+        }
+        resolve(docs[0].indent_id);
+      });
+    });
+  }
+  getDespatchByStoreId(store_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query("SELECT * FROM despatch where store_id = ?",
+      [store_id], 
+      (err, docs) => {
+        if (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "REPOSITORY.STORE",
+            code: "REPOSITORY.STORE.GET-STORE-BY-ID",
+            description: err.toString(),
+            category: "",
+            ref: {},
+          });
+          reject(err);
+          return;
+        }
+        resolve(docs);
+      });
+    });
+  }
   get() {
     return new Promise((resolve, reject) => {
       this.db.query(

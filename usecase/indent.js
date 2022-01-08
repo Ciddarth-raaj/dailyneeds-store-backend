@@ -33,6 +33,16 @@ class IndentUsecase {
         }
       });
     }
+    getIndentById(indent_id) {
+      return new Promise(async(resolve, reject) => {
+        try {
+          const data = await this.indentRepo.getIndentById(indent_id);
+          resolve(data);
+        } catch(err) {
+          reject(err);
+        }
+      });
+    }
     getIndentCount() {
       return new Promise(async (resolve, reject) => {
         try {

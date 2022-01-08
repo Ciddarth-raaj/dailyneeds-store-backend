@@ -73,6 +73,32 @@ class IndentRepository {
       });
     });
   }
+  getIndentById(indent_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+      `SELECT n.indent_id, n.indent_number, s.store_name as 'from', y.store_name as 'to', n.bags, 
+			n.boxes, n.crates, n.taken_by as 'taken_by', n.checked_by as 'checked_by', n.delivery_status
+			from new_indents n LEFT JOIN store s ON s.store_id = n.store_id LEFT JOIN store y ON 
+			y.store_id = n.store_to LEFT JOIN new_employee e1 ON e1.employee_id = n.indent_id
+			LEFT JOIN new_employee e2 ON e2.employee_id = n.indent_id  WHERE indent_id IN (?)`,
+      [indent_id], 
+      (err, docs) => {
+        if (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "REPOSITORY.INDENTS",
+            code: "REPOSITORY.INDENTS.GET-INDENT-ID",
+            description: err.toString(),
+            category: "",
+            ref: {},
+          });
+          reject(err);
+          return;
+        }
+        resolve(docs);
+      });
+    });
+  }
   createIndent(indent) {
     return new Promise((resolve, reject) => {
       this.db.query(

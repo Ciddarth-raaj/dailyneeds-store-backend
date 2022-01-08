@@ -26,7 +26,7 @@ class StoreRepository {
   }
   getStoreById(store_id) {
     return new Promise((resolve, reject) => {
-      this.db.query("SELECT * FROM store WHERE store_id = ?",
+      this.db.query("SELECT store_id, store_name FROM store WHERE store_id = ?",
         [store_id],
         (err, docs) => {
           if (err) {
