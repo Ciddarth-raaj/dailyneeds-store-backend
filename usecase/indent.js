@@ -23,10 +23,32 @@ class IndentUsecase {
         }
       });
     }
-    updateDeliveryStatus(indent_id) {
+    getIndentByStoreId(store_id) {
+      return new Promise(async (resolve, reject) => {
+        try {
+          const data = await this.indentRepo.getIndentByStoreId(store_id);
+          resolve(data);
+        } catch (err) {
+          console.log(err);
+          reject(err);
+        }
+      });
+    }
+    getIndentFromStoreId(store_id) {
+      return new Promise(async (resolve, reject) => {
+        try {
+          const data = await this.indentRepo.getIndentFromStoreId(store_id);
+          resolve(data);
+        } catch (err) {
+          console.log(err);
+          reject(err);
+        }
+      });
+    }
+    updateDeliveryStatus(delivery_status, indent_id) {
       return new Promise(async(resolve, reject) => {
         try {
-          const data = await this.indentRepo.updateDeliveryStatus(indent_id);
+          const data = await this.indentRepo.updateDeliveryStatus(delivery_status, indent_id);
           resolve(data);
         } catch(err) {
           reject(err);

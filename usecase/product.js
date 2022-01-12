@@ -14,6 +14,16 @@ class ProductUsecase {
       }
     });
   }
+  getAllProductData() {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const data = await this.productRepo.getAllProductData();
+        resolve(data);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
   getProductById(product_id) {
     return new Promise(async (resolve, reject) => {
       try {

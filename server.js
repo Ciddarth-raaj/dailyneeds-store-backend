@@ -87,6 +87,7 @@ class Server {
 
   initRepositories() {
     this.documentRepo = require("./repository/document")(this.mysql.connection);
+    this.issueRepo = require("./repository/issue")(this.mysql.connection);
     this.exampleRepo = require("./repository/example")(this.mysql.connection);
     this.departmentRepo = require("./repository/department")(this.mysql.connection);
     this.designationRepo = require("./repository/designation")(this.mysql.connection);
@@ -113,6 +114,7 @@ class Server {
 
   initUsecases() {
     this.documentUsecase = require("./usecase/document")(this.documentRepo);
+    this.issueUsecase = require("./usecase/issue")(this.issueRepo, this.indentRepo);
     this.vehicleUsecase = require("./usecase/vehicle")(this.vehicleRepo);
     this.exampleUsecase = require("./usecase/example")(this.exampleRepo);
     this.departmentUsecase = require("./usecase/department")(this.departmentRepo);
@@ -150,6 +152,7 @@ class Server {
     app.use(authMiddleWare);
 
     const documentRouter = require("./routes/document")(this.documentUsecase);
+    const issueRouter = require("./routes/issue")(this.issueUsecase);
     const vehicleRouter = require("./routes/vehicle")(this.vehicleUsecase);
     const familyRouter = require("./routes/family")(this.familyUsecase);
     const assetRouter = require("./routes/asset")(this.assetUsecase);
@@ -175,6 +178,7 @@ class Server {
     const userRouter = require('./routes/user')(this.userUsecase);
 
     app.use("/document", documentRouter.getRouter());
+    app.use("/issue", issueRouter.getRouter());
     app.use("/vehicle", vehicleRouter.getRouter());
     app.use("/family", familyRouter.getRouter());
     app.use("/asset", assetRouter.getRouter());

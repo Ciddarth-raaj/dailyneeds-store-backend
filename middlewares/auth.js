@@ -48,6 +48,12 @@ const unProtectedRoutes = {
   "/indent/despatch": {
     methods: { get: true }
   },
+  "/indent/sent/store_id": {
+    methods: { get: true }
+  },
+  "/indent/from/store_id": {
+    methods: { get: true }
+  },
 
   //despatch
   "/despatch/create": {
@@ -203,6 +209,9 @@ const unProtectedRoutes = {
   "/product/filter": {
     methods: { get: true }
   },
+  "/product/all": {
+    methods: { get: true }
+  },
 
   //shift
   "/shift": {
@@ -344,6 +353,20 @@ const unProtectedRoutes = {
 
   //vechicle
   "/vehicle": {
+    methods: { get: true }
+  },
+
+  //issue
+  "/issue/create": {
+    methods: { post: true }
+  },
+  "/issue": {
+    methods: { get: true }
+  },
+  "/issue/store_id": {
+    methods: { get: true }
+  },
+  "/issue/from/store_id": {
     methods: { get: true }
   },
 

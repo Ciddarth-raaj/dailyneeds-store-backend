@@ -101,7 +101,27 @@ class ProductRepository {
       );
     });
   }
-
+  getAllProductData() {
+    return new Promise((resolve, reject) => {
+      this.db.query(`SELECT product_id, de_name FROM product_table limit 0,30`,
+        [],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PRODUCT",
+              code: "REPOSITORY.PRODUCT.GETALL",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        });
+    });
+  }
   getById(limit, offset, product_id) {
     return new Promise((resolve, reject) => {
       this.db.query(`SELECT product_table.product_id, categories.category_name, subcategories.subcategory_name, department.department_name, brands.brand_name FROM product_table, categories, subcategories, department, brands

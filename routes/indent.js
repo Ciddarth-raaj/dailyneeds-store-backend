@@ -97,7 +97,52 @@ class IndentRoutes {
 
       res.end();
     });
+    router.get("/sent/store_id", async (req, res) => {
+      try {
+        const schema = {
+          store_id: Joi.string().required(),
+        }
+        const indent = req.query;
+        const isValid = Joi.validate(indent, schema);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+        const data = await this.indentUsecase.getIndentByStoreId(indent.store_id);
+        res.json(data);
+      } catch (err) {
+        console.log(err);
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          res.json({ code: 500, msg: "An error occurred !" });
+        }
+      }
 
+      res.end();
+    });
+    router.get("/from/store_id", async (req, res) => {
+      try {
+        const schema = {
+          store_id: Joi.string().required(),
+        }
+        const indent = req.query;
+        const isValid = Joi.validate(indent, schema);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+        const data = await this.indentUsecase.getIndentFromStoreId(indent.store_id);
+        res.json(data);
+      } catch (err) {
+        console.log(err);
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          res.json({ code: 500, msg: "An error occurred !" });
+        }
+      }
+
+      res.end();
+    });
     router.get("/indentcount", async (req, res) => {
       try {
         const indent = await this.indentUsecase.getIndentCount();
