@@ -17,13 +17,15 @@ class IndentRoutes {
           
         };
         const data = req.query;
+        console.log({data: data});
         const isValid = Joi.validate(data, schema);
 
         if (isValid.error !== null) {
-          console.log(isValid.error);
+          console.log({err: isValid.error});
           throw isValid.error;
         }
         const indent = await this.indentUsecase.get(data.limit, data.offset);
+        console.log({indentindnet: indent})
         res.json(indent);
       } catch (err) {
         console.log(err);
