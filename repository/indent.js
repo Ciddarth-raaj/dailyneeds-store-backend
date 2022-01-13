@@ -212,7 +212,7 @@ class IndentRepository {
   getIndentCount() {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT count(id) AS indentcount FROM indents`,
+        `SELECT count(id) AS indentcount FROM new_indents`,
         [],
         (err, docs) => {
           if (err) {
