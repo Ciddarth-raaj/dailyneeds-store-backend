@@ -17,7 +17,6 @@ class IndentRoutes {
           
         };
         const data = req.query;
-        console.log({data: data});
         const isValid = Joi.validate(data, schema);
 
         if (isValid.error !== null) {
@@ -25,14 +24,13 @@ class IndentRoutes {
           throw isValid.error;
         }
         const indent = await this.indentUsecase.get(data.limit, data.offset);
-        console.log({indentindnet: indent})
         res.json(indent);
       } catch (err) {
         console.log(err);
         if (err.name === "ValidationError") {
           res.json({ code: 422, msg: err.toString() });
         } else {
-          res.json({ code: 500, msg: "An error occurred !" });
+          res.json({ code: 500, msg: "An error occurred !", err: err });
         }
       }
 
