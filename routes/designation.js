@@ -77,7 +77,8 @@ class DesignationRoutes {
           designation_details: Joi.object({
             online_portal: Joi.number().required(),
             designation_name: Joi.string().required(),
-            // status: Joi.number().required(),
+            login_access: Joi.number().required(),
+            status: Joi.number().required(),
           }).optional(),
         };
 
