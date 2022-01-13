@@ -8,9 +8,9 @@ class IssueRepository {
   get() {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT n.indent_id, n.indent_number, s.store_name as 'from', y.store_name as 'to', i.product_id 
+        `SELECT n.indent_id, n.indent_number, s.outlet_name as 'from', y.outlet_name as 'to', i.product_id 
         , product_table.de_name, i.sent, i.received, i.difference, n.delivery_status
-        from new_indents n LEFT JOIN store s ON s.store_id = n.store_id LEFT JOIN store y ON y.store_id = 
+        from new_indents n LEFT JOIN outlets s ON s.outlet_id = n.store_id LEFT JOIN outlets y ON y.outlet_id = 
         n.store_to LEFT JOIN new_employee e1 ON e1.employee_id = n.indent_id LEFT JOIN new_employee 
         e2 ON e2.employee_id = n.indent_id LEFT JOIN issue i ON i.indent_id = n.indent_id LEFT JOIN
         product_table ON product_table.product_id = i.product_id WHERE i.sent IS NOT NULL`,
@@ -36,12 +36,12 @@ class IssueRepository {
   getIssueFromStoreId(store_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT n.indent_id, n.indent_number, s.store_name as 'from', y.store_name as 'to', i.product_id 
+        `SELECT n.indent_id, n.indent_number, s.outlet_name as 'from', y.outlet_name as 'to', i.product_id 
         , product_table.de_name, i.sent, i.received, i.difference, n.delivery_status
-        from new_indents n LEFT JOIN store s ON s.store_id = n.store_id LEFT JOIN store y ON y.store_id = 
+        from new_indents n LEFT JOIN outlets s ON s.outlet_id = n.store_id LEFT JOIN outlets y ON y.outlet_id = 
         n.store_to LEFT JOIN new_employee e1 ON e1.employee_id = n.indent_id LEFT JOIN new_employee 
         e2 ON e2.employee_id = n.indent_id LEFT JOIN issue i ON i.indent_id = n.indent_id LEFT JOIN
-        product_table ON product_table.product_id = i.product_id WHERE i.sent IS NOT NULL AND s.store_id=${store_id}`,
+        product_table ON product_table.product_id = i.product_id WHERE i.sent IS NOT NULL AND s.outlet_id=${store_id}`,
         [store_id],
         (err, docs) => {
           if (err) {
@@ -64,12 +64,12 @@ class IssueRepository {
   getIssueByStoreId(store_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT n.indent_id, n.indent_number, s.store_name as 'from', y.store_name as 'to', i.product_id 
+        ` SELECT n.indent_id, n.indent_number, s.outlet_name as 'from', y.outlet_name as 'to', i.product_id 
         , product_table.de_name, i.sent, i.received, i.difference, n.delivery_status
-        from new_indents n LEFT JOIN store s ON s.store_id = n.store_id LEFT JOIN store y ON y.store_id = 
+        from new_indents n LEFT JOIN outlets s ON s.outlet_id = n.store_id LEFT JOIN outlets y ON y.outlet_id = 
         n.store_to LEFT JOIN new_employee e1 ON e1.employee_id = n.indent_id LEFT JOIN new_employee 
         e2 ON e2.employee_id = n.indent_id LEFT JOIN issue i ON i.indent_id = n.indent_id LEFT JOIN
-        product_table ON product_table.product_id = i.product_id WHERE i.sent IS NOT NULL AND y.store_id=${store_id}`,
+        product_table ON product_table.product_id = i.product_id WHERE i.sent IS NOT NULL AND y.outlet_id=${store_id}`,
         [store_id],
         (err, docs) => {
           if (err) {

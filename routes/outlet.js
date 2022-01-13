@@ -25,6 +25,31 @@ class OutletRoutes {
 
             res.end();
         });
+        router.get("/outlet_id", async (req, res) => {
+          try {
+            const schema = {
+              outlet_id: Joi.string().required(),
+            }
+            const outlet = req.query;
+            // console.log({store: store})
+            const isValid = Joi.validate(outlet, schema);
+            if (isValid.error !== null) {
+              throw isValid.error;
+            }
+            const data = await this.outletUsecase.getOutletById(outlet.outlet_id);
+            // console.log({data: data});
+            res.json(data);
+          } catch (err) {
+            console.log(err);
+            if (err.name === "ValidationError") {
+              res.json({ code: 422, msg: err.toString() });
+            } else {  
+              res.json({ code: 500, msg: "An error occurred !" });
+            }
+          }
+    
+          res.end();
+        });
         router.post("/update-status", async (req, res) => {
           try {
             const schema = {

@@ -24,6 +24,16 @@ class OutletUsecase {
           }
         });
       }
+      getOutletById(outlet_id) {
+        return new Promise(async (resolve, reject) => {
+          try {
+            const data = await this.outletRepo.getOutletById(outlet_id);
+            resolve(data);
+          } catch (err) {
+            reject(err);
+          }
+        });
+      }
     updateOutletDetails(outlet) {
         return new Promise(async (resolve, reject) => {
           try {

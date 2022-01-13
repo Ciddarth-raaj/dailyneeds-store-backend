@@ -342,6 +342,9 @@ const unProtectedRoutes = {
   "/outlet/update-status": {
     methods: { post: true }
   },
+  "/outlet/outlet_id": {
+    methods: { get: true }
+  },
 
   //brand
   "/brand": {

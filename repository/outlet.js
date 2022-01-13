@@ -107,6 +107,27 @@ class OutletRepository {
           );
         });
       }
+      getOutletById(outlet_id) {
+        return new Promise((resolve, reject) => {
+          this.db.query("SELECT outlet_id, outlet_name FROM outlets WHERE outlet_id = ?",
+            [outlet_id],
+            (err, docs) => {
+              if (err) {
+                logger.Log({
+                  level: logger.LEVEL.ERROR,
+                  component: "REPOSITORY.OUTLET",
+                  code: "REPOSITORY.OUTLET.GET-BY-ID",
+                  description: err.toString(),
+                  category: "",
+                  ref: {},
+                });
+                reject(err);
+                return;
+              }
+              resolve(docs);
+            });
+        });
+      }
 }
 
 module.exports = (db) => {
