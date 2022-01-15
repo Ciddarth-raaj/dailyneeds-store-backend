@@ -1,0 +1,1 @@
+DELETE FROM `department` WHERE `department_name` = 'fiveU';

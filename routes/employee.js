@@ -38,7 +38,7 @@ class EmployeeRoutes {
           marital_status: Joi.string().required(),
           marriage_date: Joi.string().allow('').allow(null).optional(),
           employee_image: Joi.string().required(),
-          pan_no: Joi.string().allow('').optional(),
+          pan_no: Joi.string().allow('').allow(null).optional(),
           bank_name: Joi.string().allow('').allow(null).optional(),
           ifsc: Joi.string().allow('').optional(),
           account_no: Joi.string().allow('').allow(null).optional(),
@@ -52,7 +52,7 @@ class EmployeeRoutes {
           online_portal: Joi.number().optional(),
           files: Joi.array()
             .items({
-              id_card: Joi.string().allow('').required(),
+              id_card: Joi.string().allow('').allow(null).required(),
               id_card_no: Joi.string().allow('').required(),
               id_card_name: Joi.string().allow('').required(),
               expiry_date: Joi.date().allow("").allow(null).optional(),
@@ -289,7 +289,7 @@ class EmployeeRoutes {
               residential_address: Joi.string().optional(),
               primary_contact_number: Joi.number().min(100000000).max(99999999999).optional(),
               alternate_contact_number: Joi.number().min(100000000).allow('').allow(null).max(99999999999).optional(),
-              email_id: Joi.string().trim().email().optional(),
+              email_id: Joi.string().trim().email().allow(null).optional(),
               qualification: Joi.string().allow('').allow(null).optional(),
               introducer_name: Joi.string().allow('').allow(null).optional(),
               introducer_details: Joi.string().allow('').allow(null).optional(),
@@ -306,14 +306,14 @@ class EmployeeRoutes {
               department_id: Joi.number().optional(),
               marital_status: Joi.string().optional(),
               marriage_date: Joi.string().allow('').allow(null).optional(),
-              pan_no: Joi.string().optional(),
+              pan_no: Joi.string().allow('').allow(null).optional(),
               bank_name: Joi.string().allow('').allow(null).optional(),
               ifsc: Joi.string().allow('').allow(null).optional(),
               account_no: Joi.string().allow('').allow(null).optional(),
-              esi: Joi.number().allow('').allow(null).optional(),
-              esi_number: Joi.number().allow('').allow(null).optional(),
-              pf: Joi.number().allow('').allow(null).optional(),
-              pf_number: Joi.number().allow('').allow(null).optional(),
+              esi: Joi.string().allow('').allow(null).optional(),
+              esi_number: Joi.string().allow('').allow(null).optional(),
+              pf: Joi.string().allow('').allow(null).optional(),
+              pf_number: Joi.string().allow('').allow(null).optional(),
               UAN: Joi.string().allow('').allow(null).optional(),
               additional_course: Joi.string().allow('').allow(null).optional(),
               spouse_name: Joi.string().allow('').allow(null).optional(),
@@ -350,7 +350,6 @@ class EmployeeRoutes {
             console.log(isValid.error);
             throw isValid.error;
           }
-  
           const code = await this.employeeUsecase.updateEmployeeDetails(employee);
           res.json({ code: code });
         } catch (err) {

@@ -307,7 +307,7 @@ class EmployeeRepository {
     }
     getById(employee_id) {
       return new Promise((resolve, reject) => {
-        this.db.query("SELECT * FROM new_employee LEFT JOIN department ON new_employee.department_id = department.department_id LEFT JOIN designation ON new_employee.designation_id = designation.designation_id LEFT JOIN store ON new_employee.store_id = store.store_id LEFT JOIN shift_master ON new_employee.shift_id = shift_master.shift_id WHERE employee_id = ?",
+        this.db.query("SELECT * FROM new_employee LEFT JOIN department ON new_employee.department_id = department.department_id LEFT JOIN designation ON new_employee.designation_id = designation.designation_id LEFT JOIN outlets ON new_employee.store_id = outlets.outlet_id LEFT JOIN shift_master ON new_employee.shift_id = shift_master.shift_id WHERE employee_id = ?",
         [employee_id], 
         (err, docs) => {
           if (err) {

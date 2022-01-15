@@ -188,11 +188,19 @@ class DocumentRepository {
         });
     });
   }
+  getQuery(option) {
+    if(option !== '') {
+      return  `INSERT INTO new_employee_documents (employee_id, card_type, card_no, card_name, file, expiry_date ) VALUES (?, ?, ?, ?, ?, ?)`
+    }
+    if(option === '') {
+      return `INSERT INTO new_employee_documents (employee_id, card_type, card_no, card_name, file) VALUES (?, ?, ?, ?, ?)`
+    }
+  }
   create(file) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "INSERT INTO new_employee_documents (employee_id, card_type, card_no, card_name, expiry_date, file) VALUES (?, ?, ?, ?, ?, ?)",
-        [file.employee_id, file.card_type, file.card_no, file.card_name, file.expiry_date, file.file],
+        this.getQuery(file.expiry_date),
+        [file.employee_id, file.card_type, file.card_no, file.card_name, file.file, file.expiry_date],
         (err, docs) => {
           if (err) {
             logger.Log({

@@ -132,16 +132,16 @@ class EmployeeUsecase {
           })
         }
         }
-        
-        if (employee.employee_details.files[0].card_type !== undefined) {
-          for (let i = 0; i <= employee.employee_details.files.length; i++) {
+        const id_card_name = employee.employee_details.files[0].id_card_name;
+        if (id_card_name !== '') {
+          for (let i = 0; i <= employee.employee_details.files.length - 1; i++) {
             await this.documentUsecase.create({
-              card_type: employee.files[i].id_card,
-              card_no: employee.files[i].id_card_no,
-              card_name: employee.files[i].id_card_name,
-              expiry_date: employee.files[i].expiry_date,
-              file: employee.files[i].file,
-              employee_id: id,
+              card_type: employee.employee_details.files[i].id_card,
+              card_no: employee.employee_details.files[i].id_card_no,
+              card_name: employee.employee_details.files[i].id_card_name,
+              expiry_date: employee.employee_details.files[i].expiry_date,
+              file: employee.employee_details.files[i].file,
+              employee_id: employee_id,
             })
           }
         }
@@ -161,6 +161,8 @@ class EmployeeUsecase {
     return new Promise(async (resolve, reject) => {
       try {
         const { code, id } = await this.employeeRepo.create(employee);
+        const id_card = employee.files[0].id_card;
+        if (id_card !== '') {
         for (let i = 0; i <= employee.files.length - 1; i++) {
           await this.documentUsecase.create({
             card_type: employee.files[i].id_card,
@@ -170,6 +172,7 @@ class EmployeeUsecase {
             file: employee.files[i].file,
             employee_id: id,
           })
+        }
         }
         const data = await this.userRepo.createLogin(employee.primary_contact_number, '1', id, 'password');
         resolve(200);

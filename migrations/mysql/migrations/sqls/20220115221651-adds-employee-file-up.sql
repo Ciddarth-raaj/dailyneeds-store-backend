@@ -1,0 +1,1 @@
+DELETE FROM `new_employee` WHERE `employee_name` = 'neeraj';
