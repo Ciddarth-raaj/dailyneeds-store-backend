@@ -290,13 +290,10 @@ const unProtectedRoutes = {
   "/materialtype/update-status": {
     methods: { post: true }
   },
-  "/materialtype/material_id": {
+  "/materialtype/type_id": {
     methods: { get: true }
   },
   "/materialtype/create": {
-    methods: { post: true }
-  },
-  "/materialtype/update-material": {
     methods: { post: true }
   },
   "/materialtype/type": {
@@ -304,6 +301,12 @@ const unProtectedRoutes = {
   },
   "/materialtype/size": {
     methods: { get: true }
+  },
+  "/materialtype/typecount": {
+    methods: { get: true }
+  },
+  "/materialtype/update-materialtype": {
+    methods: { post: true }
   },
 
     //Materialsize
@@ -319,13 +322,19 @@ const unProtectedRoutes = {
     "/materialsize/create": {
       methods: { post: true }
     },
-    "/materialsize/update-material": {
+    "/materialsize/update-materialsize": {
       methods: { post: true }
     },
     "/materialsize/type": {
       methods: { get: true }
     },
     "/materialsize/size": {
+      methods: { get: true }
+    },
+    "/materialsize/sizecount": {
+      methods: { get: true }
+    },
+    "/materialsize/size_id": {
       methods: { get: true }
     },
 

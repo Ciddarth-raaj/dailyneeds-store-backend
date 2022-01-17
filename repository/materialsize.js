@@ -5,9 +5,9 @@ class MaterialSizeRepository {
     this.db = db;
   }
 
-  get() {
+  get(offset, limit) {
     return new Promise((resolve, reject) => {
-      this.db.query("SELECT * FROM pack_material_size", [], (err, docs) => {
+      this.db.query(`SELECT * FROM pack_material_size LIMIT ${offset}, ${limit}`, (err, docs) => {
         if (err) {
           logger.Log({
             level: logger.LEVEL.ERROR,
@@ -24,6 +24,52 @@ class MaterialSizeRepository {
       });
     });
   }
+  updateMaterialDetails(data, size_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `UPDATE pack_material_size SET ? WHERE size_id = ?`,
+        [data, size_id],
+        (err, res) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.MATERIAL",
+              code: "REPOSITORY.MATERIAL.UPDATE-MATERIALSIZE-DETAILS",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve({ code: 200 });
+        }
+      );
+    });
+  }
+  getSizeCount() {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT count(size_id) AS sizecount FROM pack_material_size`,
+        [],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.MATERIAL",
+              code: "REPOSITORY.MATERIAL.GET-SIZE-COUNT",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        }
+      );
+    });
+  }
   updateStatus(file) {
     return new Promise((resolve, reject) => {
       this.db.query(
@@ -35,6 +81,29 @@ class MaterialSizeRepository {
               level: logger.LEVEL.ERROR,
               component: "REPOSITORY.MATERIALSIZE",
               code: "REPOSITORY.MATERIALSIZE.UPDATE-STATUS",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        }
+      );
+    });
+  }
+  getMaterialById(size_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "SELECT * FROM pack_material_size where size_id = ?",
+        [size_id],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.MATERIAL",
+              code: "REPOSITORY.MATERIAL.GET-SIZE-ID",
               description: err.toString(),
               category: "",
               ref: {},

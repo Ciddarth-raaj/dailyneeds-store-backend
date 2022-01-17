@@ -5,9 +5,9 @@ class MaterialTypeRepository {
     this.db = db;
   }
 
-  get() {
+  get(offset, limit) {
     return new Promise((resolve, reject) => {
-      this.db.query("SELECT * FROM pack_material_type", [], (err, docs) => {
+      this.db.query(`SELECT * FROM pack_material_type LIMIT ${offset}, ${limit}`, (err, docs) => {
         if (err) {
           logger.Log({
             level: logger.LEVEL.ERROR,
@@ -62,11 +62,11 @@ class MaterialTypeRepository {
       });
     });
   }
-  getMaterialById(material_id) {
+  getMaterialById(type_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "SELECT * FROM pack_material_type where material_id = ?",
-        [material_id],
+        "SELECT * FROM pack_material_type where type_id = ?",
+        [type_id],
         (err, docs) => {
           if (err) {
             logger.Log({
@@ -108,11 +108,11 @@ class MaterialTypeRepository {
       );
     });
   }
-  updateMaterialDetails(data, material_id) {
+  updatePackMaterialTypeDetails(data, type_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `UPDATE pack_material_type SET ? WHERE material_id = ?`,
-        [data, material_id],
+        `UPDATE pack_material_type SET ? WHERE type_id = ?`,
+        [data, type_id],
         (err, res) => {
           if (err) {
             logger.Log({
@@ -127,6 +127,29 @@ class MaterialTypeRepository {
             return;
           }
           resolve({ code: 200 });
+        }
+      );
+    });
+  }
+  getTypeCount() {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT count(type_id) AS typecount FROM pack_material_type`,
+        [],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.MATERIAL",
+              code: "REPOSITORY.MATERIAL.GET-TYPE-COUNT",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
         }
       );
     });

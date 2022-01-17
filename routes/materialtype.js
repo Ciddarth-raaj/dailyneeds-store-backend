@@ -12,7 +12,13 @@ class MaterialTypeRoutes {
   init() {
     router.get("/", async (req, res) => {
       try {
-        const material = await this.materialtypeUsecase.get();
+        const schema = {
+          limit: Joi.number().required(),
+          offset: Joi.number().required(),
+        };
+        const data = req.query;
+
+        const material = await this.materialtypeUsecase.get(data.offset, data.limit);
         res.json(material);
       } catch (err) {
         console.log(err);
@@ -23,6 +29,71 @@ class MaterialTypeRoutes {
         }
       }
 
+      res.end();
+    });
+    router.get("/typecount", async (req, res) => {
+      try {
+        const material = await this.materialtypeUsecase.getTypeCount();
+        res.json(material);
+      } catch (err) {
+          console.log(err);
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          res.json({ code: 500, msg: "An error occurred !" });
+        }
+      }
+    });
+    router.post("/update-materialtype", async (req, res) => {
+      try {
+        const schema = {
+          type_id: Joi.number().required(),
+  
+          material_type_details: Joi.object({
+            material_type: Joi.string().required(),
+            description: Joi.string().allow(null).required(),
+          }).optional(),
+        };
+  
+        const material = req.body;
+        const isValid = Joi.validate(material, schema);
+        if (isValid.error !== null) {
+          console.log(isValid.error)
+          throw isValid.error;
+        }
+  
+        const code = await this.materialtypeUsecase.updatePackMaterialTypeDetails(material);
+        res.json({ code: code });
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: "An error occurred !" });
+        }
+      }
+      res.end();
+    });
+    router.get("/type_id", async (req, res) => {
+      try {
+        const schema = {
+          type_id: Joi.string().required(),
+        }
+        const material = req.query;
+        const isValid = Joi.validate(material, schema);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+        const data = await this.materialtypeUsecase.getMaterialById(material.type_id);
+        res.json(data);
+      } catch (err) {
+        console.log(err);
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          res.json({ code: 500, msg: "An error occurred !" });
+        }
+      }
       res.end();
     });
     router.get("/type", async (req, res) => {
@@ -63,7 +134,6 @@ class MaterialTypeRoutes {
         };
 
         const material = req.body;
-        console.log(material);
         const isValid = Joi.validate(material, schema);
         if (isValid.error !== null) {
           throw isValid.error;

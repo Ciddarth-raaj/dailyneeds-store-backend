@@ -12,7 +12,13 @@ class materialSizeRoutes {
   init() {
     router.get("/", async (req, res) => {
       try {
-        const material = await this.materialsizeUsecase.get();
+        const schema = {
+          limit: Joi.number().required(),
+          offset: Joi.number().required(),
+        };
+        const data = req.query;
+
+        const material = await this.materialsizeUsecase.get(data.offset, data.limit);
         res.json(material);
       } catch (err) {
         console.log(err);
@@ -24,6 +30,19 @@ class materialSizeRoutes {
       }
 
       res.end();
+    });
+    router.get("/sizecount", async (req, res) => {
+      try {
+        const material = await this.materialsizeUsecase.getSizeCount();
+        res.json(material);
+      } catch (err) {
+          console.log(err);
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          res.json({ code: 500, msg: "An error occurred !" });
+        }
+      }
     });
     router.get("/type", async (req, res) => {
       try {
@@ -63,7 +82,6 @@ class materialSizeRoutes {
         };
 
         const material = req.body;
-        console.log(material);
         const isValid = Joi.validate(material, schema);
         if (isValid.error !== null) {
           throw isValid.error;
@@ -82,14 +100,16 @@ class materialSizeRoutes {
       res.end();
     });
 
-    router.post("/update-material", async (req, res) => {
+
+    router.post("/update-materialsize", async (req, res) => {
       try {
         const schema = {
-          material_id: Joi.number().required(),
+          size_id: Joi.number().required(),
           material_details: Joi.object({
-            material_name: Joi.string().required(),
-            description: Joi.string().allow("").allow(null).optional(),
-            material_category: Joi.string().required(),
+            material_size: Joi.string().required(),
+						weight: Joi.number().required(),
+						cost: Joi.number().required(),
+						description: Joi.string().required(),
           }).optional(),
         };
 
@@ -112,10 +132,10 @@ class materialSizeRoutes {
       res.end();
     });
 
-    router.get("/material_id", async (req, res) => {
+    router.get("/size_id", async (req, res) => {
       try {
         const schema = {
-          material_id: Joi.string().required(),
+          size_id: Joi.string().required(),
         };
         const material = req.query;
         const isValid = Joi.validate(material, schema);
@@ -123,7 +143,7 @@ class materialSizeRoutes {
           throw isValid.error;
         }
         const data = await this.materialsizeUsecase.getMaterialById(
-          material.material_id
+          material.size_id
         );
         res.json(data);
       } catch (err) {
@@ -148,7 +168,6 @@ class materialSizeRoutes {
         };
 
         const material = req.body;
-        console.log({material: material})
         const isValid = Joi.validate(material, schema);
 
         if (isValid.error !== null) {
@@ -156,7 +175,6 @@ class materialSizeRoutes {
           throw isValid.error;
         }
         const response = await this.materialsizeUsecase.create(material);
-        console.log({response: response})
         res.json(response);
       } catch (err) {
         if (err.name === "ValidationError") {

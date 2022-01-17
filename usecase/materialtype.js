@@ -4,10 +4,10 @@ class MaterialTypeUsecase {
         this.materialtypeRepo = materialtypeRepo;
     }
 
-    get() {
+    get(offset, limit) {
         return new Promise(async (resolve, reject) => {
             try {
-                const data = await this.materialtypeRepo.get();
+                const data = await this.materialtypeRepo.get(offset, limit);
                 resolve(data);
             } catch (err) {
                 reject(err);
@@ -23,6 +23,16 @@ class MaterialTypeUsecase {
               reject(err);
           }
       });
+  }
+  getTypeCount() {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const data = await this.materialtypeRepo.getTypeCount();
+        resolve(data);
+      } catch (err) {
+        reject(err);
+      }
+    }); 
   }
   getSize() {
     return new Promise(async (resolve, reject) => {
@@ -55,10 +65,21 @@ class MaterialTypeUsecase {
           }
         });
       }
-    getMaterialById(material_id) {
+    updatePackMaterialTypeDetails(material) {
+      return new Promise(async (resolve, reject) => {
+        try {
+          const type_id = material.type_id;
+          const { code } = await this.materialtypeRepo.updatePackMaterialTypeDetails(material.material_type_details, type_id);
+          resolve(code);
+        } catch (err) {
+          reject(err);
+        }
+      });
+    }
+    getMaterialById(type_id) {
         return new Promise(async (resolve, reject) => {
           try {
-            const data = await this.materialtypeRepo.getMaterialById(material_id);
+            const data = await this.materialtypeRepo.getMaterialById(type_id);
             resolve(data);
           } catch (err) {
             console.log(err);
