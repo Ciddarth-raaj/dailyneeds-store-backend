@@ -1,0 +1,1 @@
+ALTER TABLE `vehicle` ADD COLUMN `vehicle_name` VARCHAR(45) NULL DEFAULT NULL AFTER `vehicle_id`;

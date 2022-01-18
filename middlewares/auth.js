@@ -367,6 +367,21 @@ const unProtectedRoutes = {
   "/vehicle": {
     methods: { get: true }
   },
+  "/vehicle/vehicledet": {
+    methods: { get: true }
+  },
+  "/vehicle/vehiclecount": {
+    methods: { get: true }
+  },
+  "/vehicle/create": {
+    methods: { post: true }
+  },
+  "/vehicle/update-vehicle": {
+    methods: { post: true }
+  },
+  "/vehicle/vehicle_id": {
+    methods: { get: true }
+  },
 
   //issue
   "/issue/create": {
