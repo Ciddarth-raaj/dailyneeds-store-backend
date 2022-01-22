@@ -53,7 +53,7 @@ class BudgetRepo {
                 const arr = budget.budget.filter(n => n)
                 const dataArr = data.map(datum => datum.designation_name); 
 
-                for (let i = 0; i <= budget.budget.length - 1; i++) {
+                for (let i = 0; i <= arr.length - 1; i++) {
                     if (dataArr.indexOf(Object.keys(arr[i])[0]) >= 0) {
                         this.budgetRepo.update({
                             store_id: budget.store_id,

@@ -152,7 +152,6 @@ class OutletRoutes {
               const isValid = Joi.validate(outlet, schema);
       
               if (isValid.error !== null) {
-                console.log(isValid.error);
                 throw isValid.error;
               }
               const response = await this.outletUsecase.create(outlet);
