@@ -189,7 +189,7 @@ class DocumentRepository {
     });
   }
   getQuery(option) {
-    if(option !== '') {
+    if(option !== '' ) {
       return  `INSERT INTO new_employee_documents (employee_id, card_type, card_no, card_name, file, expiry_date ) VALUES (?, ?, ?, ?, ?, ?)`
     }
     if(option === '') {
