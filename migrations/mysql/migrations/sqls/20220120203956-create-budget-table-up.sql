@@ -1,0 +1,1 @@
+CREATE TABLE `budget` ( `budget_id` int NOT NULL AUTO_INCREMENT, `store_id` varchar(45) NOT NULL, `designation_name` varchar(45) DEFAULT NULL, `budget` bigint DEFAULT NULL, `status` tinyint DEFAULT '1', PRIMARY KEY (`budget_id`));

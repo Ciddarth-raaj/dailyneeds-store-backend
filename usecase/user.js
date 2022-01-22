@@ -4,7 +4,7 @@ const jwt = require("../services/jwt");
 class UserUsecase {
     constructor(userRepo, designationRepo) {
         this.userRepo = userRepo;
-        this.designationRepo = this.designationRepo;
+        this.designationRepo = designationRepo;
     }
 
     login(username, password) {

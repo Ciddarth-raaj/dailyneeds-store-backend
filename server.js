@@ -87,6 +87,7 @@ class Server {
 
   initRepositories() {
     this.documentRepo = require("./repository/document")(this.mysql.connection);
+    this.budgetRepo = require("./repository/budget")(this.mysql.connection);
     this.issueRepo = require("./repository/issue")(this.mysql.connection);
     this.exampleRepo = require("./repository/example")(this.mysql.connection);
     this.departmentRepo = require("./repository/department")(this.mysql.connection);
@@ -114,6 +115,7 @@ class Server {
 
   initUsecases() {
     this.documentUsecase = require("./usecase/document")(this.documentRepo);
+    this.budgetUsecase = require("./usecase/budget")(this.budgetRepo);
     this.issueUsecase = require("./usecase/issue")(this.issueRepo, this.indentRepo);
     this.vehicleUsecase = require("./usecase/vehicle")(this.vehicleRepo);
     this.exampleUsecase = require("./usecase/example")(this.exampleRepo);
@@ -126,7 +128,7 @@ class Server {
     );
     this.shiftUsecase = require("./usecase/shift")(this.shiftRepo);
     this.storeUsecase = require("./usecase/store")(this.storeRepo);
-    this.outletUsecase = require("./usecase/outlet")(this.outletRepo);
+    this.outletUsecase = require("./usecase/outlet")(this.outletRepo, this.budgetRepo);
     this.familyUsecase = require("./usecase/family")(this.familyRepo);
     this.companyUsecase = require("./usecase/company")(this.companyRepo);
     this.materialtypeUsecase = require("./usecase/materialtype")(this.materialtypeRepo);
@@ -152,6 +154,7 @@ class Server {
     app.use(authMiddleWare);
 
     const documentRouter = require("./routes/document")(this.documentUsecase);
+    const budgetRouter = require("./routes/budget")(this.budgetUsecase);
     const issueRouter = require("./routes/issue")(this.issueUsecase);
     const vehicleRouter = require("./routes/vehicle")(this.vehicleUsecase);
     const familyRouter = require("./routes/family")(this.familyUsecase);
@@ -178,6 +181,7 @@ class Server {
     const userRouter = require('./routes/user')(this.userUsecase);
 
     app.use("/document", documentRouter.getRouter());
+    app.use("/budget", budgetRouter.getRouter());
     app.use("/issue", issueRouter.getRouter());
     app.use("/vehicle", vehicleRouter.getRouter());
     app.use("/family", familyRouter.getRouter());

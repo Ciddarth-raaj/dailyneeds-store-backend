@@ -76,14 +76,13 @@ class OutletRepository {
   create(outlet) {
       return new Promise((resolve, reject) => {
           this.db.query(
-            "INSERT INTO outlets (status, department_name) VALUES (?, ?)",
+            "INSERT INTO outlets (outlet_name, outlet_address, outlet_phone, phone, outlet_nickname) VALUES (?, ?, ?, ?, ?)",
             [
               outlet.outlet_name,
               outlet.outlet_address,
               outlet.outlet_phone,
               outlet.phone,
               outlet.outlet_nickname,
-              outlet.is_active,
             ],
             (err, res) => {
               if (err) {
@@ -105,6 +104,27 @@ class OutletRepository {
               resolve({ code: 200, id: res.insertId });
             }
           );
+        });
+      }
+      getOutletByOutletId(outlet_id) {
+        return new Promise((resolve, reject) => {
+          this.db.query("SELECT * FROM outlets WHERE outlet_id = ?",
+            [outlet_id],
+            (err, docs) => {
+              if (err) {
+                logger.Log({
+                  level: logger.LEVEL.ERROR,
+                  component: "REPOSITORY.OUTLET",
+                  code: "REPOSITORY.OUTLET.GET-BY-OUTLET-ID",
+                  description: err.toString(),
+                  category: "",
+                  ref: {},
+                });
+                reject(err);
+                return;
+              }
+              resolve(docs);
+            });
         });
       }
       getOutletById(outlet_id) {

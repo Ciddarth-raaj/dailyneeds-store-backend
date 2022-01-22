@@ -24,6 +24,25 @@ class DesignationRepository {
       });
     });
   }
+  getDesignationByBudget() {
+    return new Promise((resolve, reject) => {
+      this.db.query("select designation.designation_id, designation.designation_name, budget.budget_id, budget.budget from designation LEFT JOIN budget ON budget.designation_name = designation.designation_name", [], (err, docs) => {
+        if (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "REPOSITORY.DESIGNATION",
+            code: "REPOSITORY.DESIGNATION.GET",
+            description: err.toString(),
+            category: "",
+            ref: {},
+          });
+          reject(err);
+          return;
+        }
+        resolve(docs);
+      });
+    });
+  }
   getPermissions() {
     return new Promise((resolve, reject) => {
       this.db.query("SELECT * FROM all_permissions", [], (err, docs) => {
@@ -203,7 +222,29 @@ class DesignationRepository {
       );
     });
   }
-
+  getDesignationCount() {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT count(designation_id) AS desigcount FROM designation`,
+        [],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.DESIGNATION",
+              code: "REPOSITORY.DESIGNATION.GET-DESIGNATION-COUNT",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        }
+      );
+    });
+  }
   createPermission(permission_key, designation_id) {
     return new Promise((resolve, reject) => {
       this.db.query(

@@ -13,6 +13,16 @@ class DesignationUsecase {
       }
     });
   }
+  getDesignationByBudget() {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const data = await this.designationRepo.getDesignationByBudget();
+        resolve(data);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
   updateStatus(file) {
     return new Promise(async (resolve, reject) => {
       try {
@@ -55,6 +65,16 @@ getDesignationById(designation_id) {
         reject(err);
       }
     });
+  }
+  getDesignationCount() {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const data = await this.designationRepo.getDesignationCount()
+        resolve(data)
+      } catch (err) {
+        reject(err);
+      }
+    })
   }
   create(designation) {
     return new Promise(async (resolve, reject) => {

@@ -24,6 +24,20 @@ class DesignationRoutes {
       }    
       res.end();
     });
+    router.get("/budget", async (req, res) => {
+      try {
+        const designation = await this.designationUsecase.getDesignationByBudget();
+        res.json(designation);
+      } catch (err) {
+        console.log(err);
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          res.json({ code: 500, msg: "An error occurred !" });
+        }
+      }    
+      res.end();
+    });
     router.post("/update-status", async (req, res) => {
       try {
         const schema = {
@@ -68,6 +82,19 @@ class DesignationRoutes {
         }
       }
       res.end();
+    });
+    router.get("/count", async (req, res) => {
+      try {
+        const designation = await this.designationUsecase.getDesignationCount();
+        res.json(designation);
+      } catch (err) {
+          console.log(err);
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          res.json({ code: 500, msg: "An error occurred !" });
+        }
+      }
     });
     router.post("/update-designation", async (req, res) => {
       try {

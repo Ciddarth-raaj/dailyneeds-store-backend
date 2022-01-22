@@ -107,6 +107,12 @@ const unProtectedRoutes = {
   "/designation/update-status": {
     methods: { post: true }
   },
+  "/designation/count": {
+    methods: { get: true }
+  },
+  "/designation/budget": {
+    methods: { get: true }
+  },
   // "/designation/permissions": {
   //   methods: { get: true }
   // },
@@ -354,6 +360,9 @@ const unProtectedRoutes = {
   "/outlet/outlet_id": {
     methods: { get: true }
   },
+  "/outlet/id": {
+    methods: { get: true }
+  },
 
   //brand
   "/brand": {
@@ -380,6 +389,23 @@ const unProtectedRoutes = {
     methods: { post: true }
   },
   "/vehicle/vehicle_id": {
+    methods: { get: true }
+  },
+
+  //budget
+  "/budget/id": {
+    methods: { get: true }
+  },
+  "/budget/create": {
+    methods: { post: true }
+  },
+  "/budget/store_id": {
+    methods: { get: true }
+  },
+  "/budget/budget_id": {
+    methods: { get: true }
+  },
+  "/budget/storedet": {
     methods: { get: true }
   },
 
