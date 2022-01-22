@@ -122,8 +122,8 @@ class Server {
     this.departmentUsecase = require("./usecase/department")(this.departmentRepo);
     this.designationUsecase = require("./usecase/designation")(this.designationRepo);
     this.employeeUsecase = require("./usecase/employee")(
-      this.employeeRepo, 
-      this.documentUsecase, 
+      this.employeeRepo,
+      this.documentUsecase,
       this.userRepo
     );
     this.shiftUsecase = require("./usecase/shift")(this.shiftRepo);
@@ -216,6 +216,9 @@ class Server {
       this.departmentUsecase,
       this.brandUsecase)
     this.synker.syncProducts()
+
+    // this.telegram = require("./services/telegram")();
+    // this.telegram.sendMessage(chat_id, msg)
   }
 
   onClose() {
