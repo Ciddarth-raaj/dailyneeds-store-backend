@@ -24,7 +24,7 @@ class EmployeeRoutes {
           qualification: Joi.string().allow('').allow(null).required(),
           introducer_name: Joi.string().allow('').allow(null).optional(),
           introducer_details: Joi.string().allow('').allow(null).optional(),
-          salary: Joi.number().required(),
+          salary: Joi.number().required(), 
           uniform_qty: Joi.number().allow('').allow(null).optional(),
           previous_experience: Joi.string().allow('').allow(null).optional(),
           date_of_joining: Joi.string().allow('').allow(null).optional(),
