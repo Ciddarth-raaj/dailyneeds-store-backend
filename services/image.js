@@ -41,11 +41,12 @@ module.exports = {
   },
 
   getFileType: (mimeType) => {
+    console.log({mimeType: mimeType})
     if (mimeType.startsWith("image")) {
       return "image";
     } else if (mimeType.startsWith("video") && !mimeType.endsWith("wmv")) {
       return "video";
-    } else if (mimeType == "application/pdf") {
+    } else if (mimeType === "application/pdf") {
       return "pdf";
     } else if (mimeType.startsWith("audio")) {
       return "audio";

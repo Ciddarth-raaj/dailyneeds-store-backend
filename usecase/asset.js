@@ -9,7 +9,8 @@ const IMAGE = require("../services/image")
 const S3 = require("../services/s3")
 
 const ALLOWED_FILE_TYPES = {
-  image: true
+  image: true,
+  pdf: true
 }
 
 const ALLOWED_FOLDERS = {
@@ -68,6 +69,7 @@ class AssetUsecase {
         const file = files.file
 
         const { ext: fileExtenion, mime } = await FileType.fromFile(file.path)
+        console.log({mime: mime})
         const fileType = IMAGE.getFileType(mime)
 
         if (!ALLOWED_FILE_TYPES[fileType]) {
@@ -85,7 +87,7 @@ class AssetUsecase {
           fileExtenion
 
         try {
-          if (fileExtenion != "webp") await IMAGE.compress(file.path, file.path)
+          if (fileExtenion != "webp" && fileExtenion != "pdf") await IMAGE.compress(file.path, file.path)
           const remoteUrl = await S3.uploadFile(file.path, fileName, mime)
           resolve({ code: 200, remoteUrl })
         } catch (err) {

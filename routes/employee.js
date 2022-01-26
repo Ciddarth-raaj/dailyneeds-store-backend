@@ -62,6 +62,8 @@ class EmployeeRoutes {
         };
 
         const employee = req.body;
+        console.log({employee: employee});
+        console.lg(d);
         const isValid = Joi.validate(employee, schema);
         if (isValid.error !== null) {
           console.log(isValid.error);

@@ -19,6 +19,7 @@ class AssetRoutes {
     router.post("/", async (req, res) => {
       try {
         const resp = await this.assetUsecase.upload(req);
+        console.log({resp: resp});
         res.status(resp.code).json({ ...resp });
       } catch (err) {
         console.log(err);

@@ -87,6 +87,7 @@ class Server {
 
   initRepositories() {
     this.documentRepo = require("./repository/document")(this.mysql.connection);
+    this.whatsappRepo = require("./repository/whatsapp")(this.mysql.connection);
     this.budgetRepo = require("./repository/budget")(this.mysql.connection);
     this.issueRepo = require("./repository/issue")(this.mysql.connection);
     this.exampleRepo = require("./repository/example")(this.mysql.connection);
@@ -115,6 +116,7 @@ class Server {
 
   initUsecases() {
     this.documentUsecase = require("./usecase/document")(this.documentRepo);
+    this.whatsappUsecase = require("./usecase/whatsapp")(this.whatsappRepo);
     this.budgetUsecase = require("./usecase/budget")(this.budgetRepo);
     this.issueUsecase = require("./usecase/issue")(this.issueRepo, this.indentRepo);
     this.vehicleUsecase = require("./usecase/vehicle")(this.vehicleRepo);
@@ -154,6 +156,7 @@ class Server {
     app.use(authMiddleWare);
 
     const documentRouter = require("./routes/document")(this.documentUsecase);
+    const whatsappRouter = require("./routes/whatsapp")(this.whatsappUsecase);
     const budgetRouter = require("./routes/budget")(this.budgetUsecase);
     const issueRouter = require("./routes/issue")(this.issueUsecase);
     const vehicleRouter = require("./routes/vehicle")(this.vehicleUsecase);
@@ -181,6 +184,7 @@ class Server {
     const userRouter = require('./routes/user')(this.userUsecase);
 
     app.use("/document", documentRouter.getRouter());
+    app.use("/whatsapp", whatsappRouter.getRouter());
     app.use("/budget", budgetRouter.getRouter());
     app.use("/issue", issueRouter.getRouter());
     app.use("/vehicle", vehicleRouter.getRouter());
