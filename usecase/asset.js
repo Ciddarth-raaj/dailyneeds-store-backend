@@ -69,7 +69,6 @@ class AssetUsecase {
         const file = files.file
 
         const { ext: fileExtenion, mime } = await FileType.fromFile(file.path)
-        console.log({mime: mime})
         const fileType = IMAGE.getFileType(mime)
 
         if (!ALLOWED_FILE_TYPES[fileType]) {
