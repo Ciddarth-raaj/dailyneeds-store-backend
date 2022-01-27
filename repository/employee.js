@@ -242,7 +242,7 @@ class EmployeeRepository {
     }
     getBankDetails() {
       return new Promise((resolve, reject) => {
-        this.db.query("SELECT * FROM new_employee WHERE payment_type = 1",
+        this.db.query("SELECT * FROM new_employee WHERE payment_type = 2",
         [], 
         (err, docs) => {
           if (err) {
