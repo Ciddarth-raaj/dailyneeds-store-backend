@@ -192,6 +192,12 @@ const unProtectedRoutes = {
   "/resignation/update-resignation": {
     methods: { post: true }
   },
+  "/resignation/resignation_id": {
+    methods: { post: true }
+  },
+  "/resignation/get/resignation_id": {
+    methods: { get: true}
+  },
 
   //product
   "/product/create": {

@@ -139,7 +139,7 @@ class EmployeeUsecase {
               card_type: employee.employee_details.files[i].id_card,
               card_no: employee.employee_details.files[i].id_card_no,
               card_name: employee.employee_details.files[i].id_card_name,
-              expiry_date: employee.employee_details.files[i].expiry_date,
+              expiry_date: employee.employee_details.files[i].expiry_date == "" ? null : moment(employee.employee_details.files[i].expiry_date).format("YYYY-MM-DD"),
               file: employee.employee_details.files[i].file,
               employee_id: employee_id,
             })

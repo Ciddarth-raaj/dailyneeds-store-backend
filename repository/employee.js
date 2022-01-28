@@ -286,7 +286,7 @@ class EmployeeRepository {
 
     getJoiningAnniversary() {
       return new Promise((resolve, reject) => {
-        this.db.query("SELECT dob, employee_name AS anniversary FROM new_employee WHERE WEEK(date_of_joining)=WEEK(now())",
+        this.db.query("SELECT date_of_joining, employee_name AS anniversary FROM new_employee WHERE WEEK(date_of_joining)=WEEK(now())",
         [], 
         (err, docs) => {
           if (err) {

@@ -28,6 +28,48 @@ class ResignationRepository {
       );
     });
   }
+  deleteResignation(resignation_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query("DELETE FROM resignation WHERE resignation_id = ?",
+      [resignation_id], 
+      (err, res) => {
+        if (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "REPOSITORY.RESIGNATION",
+            code: "REPOSITORY.RESIGNATION.GET-DELETE-ID",
+            description: err.toString(),
+            category: "",
+            ref: {},
+          });
+          reject(err);
+          return;
+        }
+        resolve({code: 200});
+      });
+    });
+  }
+  getResignationByResigId(resignation_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query("SELECT * FROM resignation where resignation_id = ?",
+      [resignation_id], 
+      (err, docs) => {
+        if (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "REPOSITORY.RESIGNATION",
+            code: "REPOSITORY.RESIGNATION.GET-BY-ID",
+            description: err.toString(),
+            category: "",
+            ref: {},
+          });
+          reject(err);
+          return;
+        }
+        resolve(docs);
+      });
+    });
+  }
   getResignationById(employee_name) {
     return new Promise((resolve, reject) => {
       this.db.query("SELECT * FROM resignation where employee_name = ?",

@@ -13,19 +13,41 @@ class ResignationUsecase {
                 reject(err);
             }
         });
-
     }
     updateResignationDetails(resignation) {
-        return new Promise(async (resolve, reject) => {
-          try {
-            const resignation_id = resignation.resignation_id;
-            const { code } = await this.resignationRepo.updateResignationDetails(department.resignation_details, resignation_id);  
-            resolve(code);
-          } catch (err) {
-            reject(err);
-          }
-        });
-      }
+      return new Promise(async (resolve, reject) => {
+        try {
+          const resignation_id = resignation.resignation_id;
+          const { code } = await this.resignationRepo.updateResignationDetails(resignation.resignation_details, resignation_id);
+          resolve(code);
+        } catch (err) {
+          reject(err);
+        }
+      });
+    }
+    deleteResignation(resignation_id) {
+      return new Promise(async (resolve, reject) => {
+        try {
+          const { code } = await this.resignationRepo.deleteResignation(resignation_id);
+          resolve(code);
+        } catch (err) {
+          console.log(err);
+          reject(err);
+        }
+      });
+    }
+ 
+    getResignationByResigId(resignation_id) {
+      return new Promise(async (resolve, reject) => {
+        try {
+          const data = await this.resignationRepo.getResignationByResigId(resignation_id);
+          resolve(data);
+        } catch (err) {
+          console.log(err);
+          reject(err);
+        }
+      });
+    }
     getResignationById(employee_name) {
         return new Promise(async (resolve, reject) => {
           try {

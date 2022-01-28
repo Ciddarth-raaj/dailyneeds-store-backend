@@ -25,6 +25,52 @@ class ResignationRoutes {
   
         res.end();
       });
+      router.post("/resignation_id", async (req, res) => {
+        try {
+          const schema = {
+            resignation_id: Joi.string().required(),
+          }
+          const resignation = req.query;
+          const isValid = Joi.validate(resignation, schema);
+          if (isValid.error !== null) {
+            throw isValid.error;
+          }
+          const response = await this.resignationUsecase.deleteResignation(resignation.resignation_id);
+          res.json(response);
+        } catch (err) {
+            console.log(err);
+          if (err.name === "ValidationError") {
+            res.json({ code: 422, msg: err.toString() });
+          } else {
+            res.json({ code: 500, msg: "An error occurred !" });
+          }
+        }
+  
+        res.end();
+      });
+      router.get("/get/resignation_id", async (req, res) => {
+        try {
+          const schema = {
+            resignation_id: Joi.string().required(),
+          }
+          const resignation = req.query;
+          const isValid = Joi.validate(resignation, schema);
+          if (isValid.error !== null) {
+            throw isValid.error;
+          }
+          const data = await this.resignationUsecase.getResignationByResigId(resignation.resignation_id);
+          res.json(data);
+        } catch (err) {
+          console.log(err);
+          if (err.name === "ValidationError") {
+            res.json({ code: 422, msg: err.toString() });
+          } else {
+            res.json({ code: 500, msg: "An error occurred !" });
+          }
+        }
+  
+        res.end();
+      });
       router.get("/employee_name", async (req, res) => {
         try {
           const schema = {
@@ -48,6 +94,37 @@ class ResignationRoutes {
   
         res.end();
       });
+      router.post("/update-resignation", async (req, res) => {
+        try {
+          const schema = {
+            resignation_id: Joi.number().required(),
+
+            resignation_details: Joi.object({
+              employee_name: Joi.string().optional(),
+              reason_type: Joi.string().optional(),
+              reason: Joi.string().optional(),
+              resignation_date: Joi.string().optional(),
+            }).optional(),
+          };
+
+          const resignation = req.body;
+          const isValid = Joi.validate(resignation, schema);
+          if (isValid.error !== null) {
+            throw isValid.error;
+          }
+  
+          const code = await this.resignationUsecase.updateResignationDetails(resignation);
+          res.json({ code: code });
+        } catch (err) {
+          if (err.name === "ValidationError") {
+            res.json({ code: 422, msg: err.toString() });
+          } else {
+            console.log(err);
+            res.json({ code: 500, msg: "An error occurred !" });
+          }
+        }
+        res.end();
+      });
     router.post("/create", async (req, res) => {
         try {
           const schema = {
@@ -58,7 +135,7 @@ class ResignationRoutes {
           };
   
           const resignation = req.body;
-          console.log(resignation);
+
           const isValid = Joi.validate(resignation, schema);
   
           if (isValid.error !== null) {
