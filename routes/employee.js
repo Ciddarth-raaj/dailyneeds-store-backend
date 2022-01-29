@@ -156,6 +156,32 @@ class EmployeeRoutes {
         }
       }
 
+      res.end(); 
+    });
+    router.get("/newjoinee", async (req, res) => {
+      try {
+        const schema = {
+          limit: Joi.number().required(),
+          offset: Joi.number().required(),
+        };
+        const data = req.query;
+        const isValid = Joi.validate(data, schema);
+
+        if (isValid.error !== null) {
+          console.log({err: isValid.error});
+          throw isValid.error;
+        }
+        const employee = await this.employeeUsecase.getnewJoinee(data.limit, data.offset);
+        res.json(employee);
+      } catch (err) {
+        console.log(err);
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          res.json({ code: 500, msg: "An error occurred !", err: err });
+        }
+      }
+
       res.end();
     });
     router.get("/newjoiner", async (req, res) => {

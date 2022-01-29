@@ -70,6 +70,25 @@ class EmployeeRepository {
         );
       });
     }  
+    getnewJoinee(limit, offset) {
+      return new Promise((resolve, reject) => {
+        this.db.query(`SELECT employee_id, employee_name, date_of_joining FROM new_employee WHERE MONTH(date_of_joining)=MONTH(now()) LIMIT ${offset},${limit}`, [], (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.EMPLOYEE",
+              code: "REPOSITORY.EMPLOYEE.GET-JOINEE",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        });
+      });
+    }
     getEmployeeByStore(store_id) {
       return new Promise((resolve, reject) => {
         this.db.query(
