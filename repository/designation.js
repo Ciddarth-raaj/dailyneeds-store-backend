@@ -116,39 +116,8 @@ class DesignationRepository {
   }
   getPermissionById(designation_id, user_type) {
     return new Promise((resolve, reject) => {
-      this.db.query(this.getQuery(user_type),
-      [designation_id], 
-      (err, docs) => {
-        if (err) {
-          logger.Log({
-            level: logger.LEVEL.ERROR,
-            component: "REPOSITORY.DESIGNATION",
-            code: "REPOSITORY.DESIGNATION.GET-PERMISSION-BY-ID",
-            description: err.toString(),
-            category: "",
-            ref: {},
-          });
-          reject(err);
-          return;
-        }
-        resolve(docs);
-      });
-    });
-  }
-
-  getQuery(option) {
-    switch(option) {
-      case "MONTH":
-        return `SELECT open_date, count(open_date) AS count from DT_CLT_DET WHERE DATE(open_date) between ? AND ? AND clt_type_id = 1 GROUP BY MONTH(DATE(open_date))`
-      case "WEEK":
-        return `SELECT open_date, count(open_date) AS count from DT_CLT_DET WHERE DATE(open_date) between ? AND ? AND clt_type_id = 1 GROUP BY WEEK(DATE(open_date))`
-      default:
-        return `SELECT open_date, count(open_date) AS count from DT_CLT_DET WHERE open_date between ? AND ? AND clt_type_id = 1 GROUP BY (DATE(open_date))`
-    }
-  }
-  getPermissionById(designation_id, user_type) {
-    return new Promise((resolve, reject) => {
-      this.db.query("SELECT permission_key FROM permissions WHERE designation_id = ?",
+      this.db.query(
+        this.getQuery(user_type),
       [designation_id], 
       (err, docs) => {
         if (err) {

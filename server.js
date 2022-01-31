@@ -148,7 +148,11 @@ class Server {
       this.despatchRepo,
       this.indentUsecase
     )
-    this.userUsecase = require("./usecase/user")(this.userRepo, this.designationRepo)
+    this.userUsecase = require("./usecase/user")(
+      this.userRepo, 
+      this.designationRepo, 
+      this.employeeRepo
+    )
   }
 
   initRoutes() {

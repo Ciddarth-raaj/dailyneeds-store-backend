@@ -70,9 +70,33 @@ class EmployeeRepository {
         );
       });
     }  
+    
+    getNameById(username) {
+      return new Promise((resolve, reject) => {
+        this.db.query(`SELECT new_employee.employee_name, designation.designation_name, new_employee.employee_image FROM new_employee LEFT JOIN designation ON designation.designation_id = new_employee.designation_id WHERE primary_contact_number = ?`, 
+        [username], 
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.EMPLOYEE",
+              code: "REPOSITORY.EMPLOYEE.GET-NAME",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        });
+      });
+    }
     getnewJoinee(limit, offset) {
       return new Promise((resolve, reject) => {
-        this.db.query(`SELECT employee_id, employee_name, date_of_joining FROM new_employee WHERE MONTH(date_of_joining)=MONTH(now()) LIMIT ${offset},${limit}`, [], (err, docs) => {
+        this.db.query(`SELECT employee_id, employee_name, date_of_joining FROM new_employee WHERE MONTH(date_of_joining)=MONTH(now()) LIMIT ${offset},${limit}`, 
+        [], 
+        (err, docs) => {
           if (err) {
             logger.Log({
               level: logger.LEVEL.ERROR,
