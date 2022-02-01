@@ -50,10 +50,7 @@ class DocumentRepository {
   getDocumentsWithoutAdhaar() {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT new_employee_documents.employee_id, new_employee.employee_name, (JSON_ARRAYAGG(JSON_OBJECT("card_type", card_type, 
-        "card_no", card_no))) AS files FROM new_employee_documents 
-        LEFT JOIN new_employee ON new_employee_documents.employee_id = new_employee.employee_id 
-        GROUP BY employee_id`,
+        `select * from new_employee_documents`,
         [],
         (err, docs) => {
           if (err) {
