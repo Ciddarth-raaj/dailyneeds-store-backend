@@ -48,6 +48,16 @@ class EmployeeUsecase {
       }
     });
   }
+  getEmployeeByFilter(filter) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const data = await this.employeeRepo.getEmployeeByFilter(filter);
+        resolve(data);
+      } catch (err) {
+        reject(err);
+      }
+    })
+  }
   getnewJoinee(limit, offset) {
     return new Promise(async (resolve, reject) => {
       try {

@@ -161,6 +161,9 @@ const unProtectedRoutes = {
   "/employee/newjoinee": {
       methods: { get: true }
   },
+  "/employee/filter": {
+    methods: { get: true }
+  },
 
   //salary
   "/salary": {
