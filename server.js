@@ -126,7 +126,8 @@ class Server {
     this.employeeUsecase = require("./usecase/employee")(
       this.employeeRepo,
       this.documentUsecase,
-      this.userRepo
+      this.userRepo,
+      this.resignationRepo
     );
     this.shiftUsecase = require("./usecase/shift")(this.shiftRepo);
     this.storeUsecase = require("./usecase/store")(this.storeRepo);

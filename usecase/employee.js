@@ -1,16 +1,22 @@
 
 const moment = require("moment");
 class EmployeeUsecase {
-  constructor(employeeRepo, documentUsecase, userRepo) {
+  constructor(employeeRepo, documentUsecase, userRepo, resignationRepo) {
     this.employeeRepo = employeeRepo;
     this.documentUsecase = documentUsecase;
     this.userRepo = userRepo;
+    this.resignationRepo = resignationRepo;
   }
 
   get() {
     return new Promise(async (resolve, reject) => {
       try {
-        const data = await this.employeeRepo.get();
+        const resignation = await this.resignationRepo.getResignedEmployee();
+        let new_data = []
+        for(let i = 0; i <= resignation.length - 1; i++) {
+          new_data.push(resignation[i].employee_name)
+        }
+        const data = await this.employeeRepo.get(new_data);
         resolve(data);
       } catch (err) {
         reject(err);
@@ -204,6 +210,6 @@ class EmployeeUsecase {
   }
 }
 
-module.exports = (employeeRepo, documentUsecase, userRepo) => {
-  return new EmployeeUsecase(employeeRepo, documentUsecase, userRepo);
+module.exports = (employeeRepo, documentUsecase, userRepo, resignationRepo) => {
+  return new EmployeeUsecase(employeeRepo, documentUsecase, userRepo, resignationRepo);
 };

@@ -28,6 +28,29 @@ class ResignationRepository {
       );
     });
   }
+  getResignedEmployee() {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "SELECT employee_name FROM resignation",
+        [],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.RESIGNATION",
+              code: "REPOSITORY.RESIGNATION.GET-EMPLOYEE-NAME",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs)
+        }
+      );
+    });
+  }
   deleteResignation(resignation_id) {
     return new Promise((resolve, reject) => {
       this.db.query("DELETE FROM resignation WHERE resignation_id = ?",

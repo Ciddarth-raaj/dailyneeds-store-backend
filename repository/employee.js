@@ -209,7 +209,7 @@ class EmployeeRepository {
         });
       });
     }
-    get() {
+    get(resignation) {
       return new Promise((resolve, reject) => {
         this.db.query(`SELECT new_employee.employee_id, new_employee.employee_name, new_employee.father_name, new_employee.dob, new_employee.gender, new_employee.marital_status, 
         new_employee.employee_image, new_employee.marriage_date, new_employee.spouse_name, new_employee.permanent_address, new_employee.residential_address, 
@@ -218,10 +218,11 @@ class EmployeeRepository {
         new_employee.esi_number, new_employee.pf_number, new_employee.uan, new_employee.uniform_qty, new_employee.store_id, new_employee.department_id, 
         new_employee.designation_id, new_employee.shift_id, new_employee.previous_experience, new_employee.additional_course, new_employee.date_of_joining,
         new_employee.pan_no, new_employee.payment_type, new_employee.status, designation.designation_name, outlets.outlet_name as store_name, 
-        department.department_name, shift_master.shift_name FROM new_employee LEFT JOIN designation ON designation.designation_id  = new_employee.designation_id
+        department.department_name, shift_master.shift_name, resignation.resignation_date FROM new_employee LEFT JOIN designation ON designation.designation_id  = new_employee.designation_id
         LEFT JOIN department ON department.department_id = new_employee.department_id LEFT JOIN outlets ON outlets.outlet_id = new_employee.store_id 
-        LEFT JOIN shift_master ON shift_master.shift_id = new_employee.shift_id`,
-        [], 
+        LEFT JOIN shift_master ON shift_master.shift_id = new_employee.shift_id LEFT JOIN resignation ON resignation.employee_name = 
+        new_employee.employee_name where new_employee.employee_name NOT IN (?)`,
+        [resignation], 
         (err, docs) => {
           if (err) {
             logger.Log({
