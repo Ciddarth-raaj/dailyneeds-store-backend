@@ -105,7 +105,27 @@ class DesignationRepository {
       });
     });
   }
-
+  getAllPermissions() {
+    return new Promise((resolve, reject) => {
+      this.db.query("SELECT * FROM all_permissions",
+      [], 
+      (err, docs) => {
+        if (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "REPOSITORY.DESIGNATION",
+            code: "REPOSITORY.DESIGNATION.GET-ALL-PERMISSONS",
+            description: err.toString(),
+            category: "",
+            ref: {},
+          });
+          reject(err);
+          return;
+        }
+        resolve(docs);
+      });
+    });
+  }
   getQuery(user_type) {
     if(user_type === 2) {
       return `SELECT * FROM all_permissions`

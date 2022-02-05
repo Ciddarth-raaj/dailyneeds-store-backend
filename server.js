@@ -137,7 +137,7 @@ class Server {
     this.materialtypeUsecase = require("./usecase/materialtype")(this.materialtypeRepo);
     this.materialsizeUsecase = require("./usecase/materialsize")(this.materialsizeRepo);
     this.salaryUsecase = require("./usecase/salary")(this.salaryRepo);
-    this.resignationUsecase = require("./usecase/resignation")(this.resignationRepo);
+    this.resignationUsecase = require("./usecase/resignation")(this.resignationRepo, this.employeeRepo, this.userRepo);
     this.productUsecase = require("./usecase/product")(this.productRepo);
     this.imageUsecase = require("./usecase/image")(this.imageRepo);
     this.assetUsecase = require("./usecase/asset");

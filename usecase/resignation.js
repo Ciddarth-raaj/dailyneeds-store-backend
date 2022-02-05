@@ -1,7 +1,9 @@
 
 class ResignationUsecase {
-    constructor(resignationRepo) {
+    constructor(resignationRepo, employeeRepo, userRepo) {
         this.resignationRepo = resignationRepo;
+        this.employeeRepo = employeeRepo;
+        this.userRepo = userRepo;
     }
 
     get() {
@@ -28,6 +30,8 @@ class ResignationUsecase {
     deleteResignation(resignation_id) {
       return new Promise(async (resolve, reject) => {
         try {
+          const employee_id = await this.employeeRepo.getEmployeeIdByDelete(resignation_id);
+          await this.userRepo.updateStatus({status: 1, employee_id: employee_id});
           const { code } = await this.resignationRepo.deleteResignation(resignation_id);
           resolve(code);
         } catch (err) {
@@ -62,6 +66,8 @@ class ResignationUsecase {
     create(resignation) {
         return new Promise(async (resolve, reject) => {
             try {
+                const employee_id = await this.employeeRepo.getEmployeeIdByName(resignation.employee_name);
+                await this.userRepo.updateStatus({status: 0, employee_id: employee_id});
                 this.resignationRepo.create(resignation);
                 resolve(200);
             } catch (err) {
@@ -72,6 +78,6 @@ class ResignationUsecase {
 
 }
 
-module.exports = (resignationRepo) => {
-    return new ResignationUsecase(resignationRepo);
+module.exports = (resignationRepo, employeeRepo, userRepo) => {
+    return new ResignationUsecase(resignationRepo, employeeRepo, userRepo);
 };

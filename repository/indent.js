@@ -59,7 +59,7 @@ class IndentRepository {
   getIndentFromStoreId(store_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `select n.indent_id, n.indent_number, s.outlet_name as 'from', y.outlet as 'to', n.bags, 
+        `select n.indent_id, n.indent_number, s.outlet_name as 'from', y.outlet_name as 'to', n.bags, 
         n.boxes, n.crates, n.taken_by as 'taken_by', n.checked_by as 'checked_by', n.delivery_status
         from new_indents n LEFT JOIN outlets s ON s.outlet_id = n.store_id LEFT JOIN outlets y ON 
         y.outlet_id = n.store_to LEFT JOIN employee e1 ON e1.employee_id = n.taken_by

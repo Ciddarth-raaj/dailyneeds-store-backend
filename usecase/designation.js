@@ -57,8 +57,14 @@ getDesignationById(designation_id) {
   }
   getPermissionById(designation_id, user_type) {
     return new Promise(async (resolve, reject) => {
+      let data = [];
       try {
-        const data = await this.designationRepo.getPermissionById(designation_id, user_type);
+        if(designation_id !== 4) {
+            data = await this.designationRepo.getPermissionById(designation_id, user_type);
+        } else {
+            data = await this.designationRepo.getAllPermissions();
+        }
+        // console.log({data:data})
         resolve(data);
       } catch (err) {
         console.log(err);

@@ -303,6 +303,48 @@ class EmployeeRepository {
         });
       });
     }
+    getEmployeeIdByName(employee_name) {
+      return new Promise((resolve, reject) => {
+        this.db.query("SELECT employee_id FROM new_employee where employee_name = ?",
+        [employee_name], 
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.EMPLOYEE",
+              code: "REPOSITORY.EMPLOYEE.GET-EMPLOYEE-BY-NAME",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs[0].employee_id);
+        });
+      });
+    }
+    getEmployeeIdByDelete(resignation_id) {
+      return new Promise((resolve, reject) => {
+        this.db.query("SELECT employee_id FROM new_employee LEFT JOIN resignation ON resignation.employee_name = new_employee.employee_name WHERE resignation.resignation_id = ?",
+        [resignation_id], 
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.EMPLOYEE",
+              code: "REPOSITORY.EMPLOYEE.GET-EMPLOYEE-BY-RESIGNATION-ID",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs[0].employee_id);
+        });
+      });
+    }
     getNewJoiner() {
       return new Promise((resolve, reject) => {
         this.db.query("select count(employee_id) as new_joiners from new_employee where MONTH(date_of_joining)=MONTH(now())",
