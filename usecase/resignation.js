@@ -31,6 +31,7 @@ class ResignationUsecase {
       return new Promise(async (resolve, reject) => {
         try {
           const employee_id = await this.employeeRepo.getEmployeeIdByDelete(resignation_id);
+          await this.employeeRepo.updateStatus({status: 1, employee_id: employee_id});
           await this.userRepo.updateStatus({status: 1, employee_id: employee_id});
           const { code } = await this.resignationRepo.deleteResignation(resignation_id);
           resolve(code);
@@ -67,6 +68,7 @@ class ResignationUsecase {
         return new Promise(async (resolve, reject) => {
             try {
                 const employee_id = await this.employeeRepo.getEmployeeIdByName(resignation.employee_name);
+                await this.employeeRepo.updateStatus({status: 0, employee_id: employee_id});
                 await this.userRepo.updateStatus({status: 0, employee_id: employee_id});
                 this.resignationRepo.create(resignation);
                 resolve(200);

@@ -284,7 +284,7 @@ class EmployeeRepository {
     }
     getFamilyDet() {
       return new Promise((resolve, reject) => {
-        this.db.query("SELECT employee_id, employee_name, employee_image FROM new_employee",
+        this.db.query("SELECT employee_id, employee_name, employee_image FROM new_employee WHERE status = 1",
         [], 
         (err, docs) => {
           if (err) {
