@@ -189,7 +189,7 @@ class EmployeeRepository {
         new_employee.pan_no, new_employee.payment_type, new_employee.status, designation.designation_name, outlets.outlet_name as store_name, 
         department.department_name, shift_master.shift_name FROM new_employee LEFT JOIN department ON department.department_id = new_employee.department_id
         LEFT JOIN outlets ON outlets.outlet_id = new_employee.store_id LEFT JOIN designation ON designation.designation_id  = new_employee.designation_id
-        LEFT JOIN shift_master ON shift_master.shift_id = new_employee.shift_id WHERE new_employee.employee_name LIKE "%${filter}%" OR new_employee.employee_id 
+        LEFT JOIN shift_master ON shift_master.shift_id = new_employee.shift_id WHERE new_employee.status = 1 AND new_employee.employee_name LIKE "%${filter}%" OR new_employee.employee_id 
         LIKE "%${filter}%" OR outlets.outlet_name LIKE "%${filter}%"`,
         [filter], 
         (err, docs) => {
@@ -242,7 +242,7 @@ class EmployeeRepository {
     }
     getHeadCount() {
       return new Promise((resolve, reject) => {
-        this.db.query("SELECT count(employee_id) as head_count, created_at FROM new_employee GROUP BY MONTH(DATE(created_at))" ,
+        this.db.query("SELECT count(employee_id) as head_count, created_at FROM new_employee WHERE status = 1 GROUP BY MONTH(DATE(created_at))" ,
         [], 
         (err, docs) => {
           if (err) {
@@ -347,7 +347,7 @@ class EmployeeRepository {
     }
     getNewJoiner() {
       return new Promise((resolve, reject) => {
-        this.db.query("select count(employee_id) as new_joiners from new_employee where MONTH(date_of_joining)=MONTH(now())",
+        this.db.query("select count(employee_id) as new_joiners from new_employee WHERE status = 1 AND MONTH(date_of_joining)=MONTH(now())",
         [], 
         (err, docs) => {
           if (err) {
@@ -368,7 +368,7 @@ class EmployeeRepository {
     }
     getBankDetails() {
       return new Promise((resolve, reject) => {
-        this.db.query("SELECT * FROM new_employee WHERE payment_type = 2",
+        this.db.query("SELECT * FROM new_employee WHERE payment_type = 2 AND status = 1",
         [], 
         (err, docs) => {
           if (err) {
@@ -390,7 +390,7 @@ class EmployeeRepository {
 
     getEmployeeBirthday() {
       return new Promise((resolve, reject) => {
-        this.db.query("SELECT dob, employee_name AS birthday FROM new_employee WHERE WEEK(dob) = WEEK(now())",
+        this.db.query("SELECT dob, employee_name AS birthday FROM new_employee WHERE status = 1 AND WEEK(dob) = WEEK(now())",
         [], 
         (err, docs) => {
           if (err) {
@@ -412,7 +412,7 @@ class EmployeeRepository {
 
     getJoiningAnniversary() {
       return new Promise((resolve, reject) => {
-        this.db.query("SELECT date_of_joining, employee_name AS anniversary FROM new_employee WHERE WEEK(date_of_joining)=WEEK(now())",
+        this.db.query("SELECT date_of_joining, employee_name AS anniversary FROM new_employee WHERE status = 1 AND WEEK(date_of_joining)=WEEK(now())",
         [], 
         (err, docs) => {
           if (err) {
