@@ -1,6 +1,6 @@
 const router = require("express").Router();
 const Joi = require("@hapi/joi");
-const respondError = require("../utils/http")
+const respondError = require("../utils/http");
 
 class EmployeeRoutes {
   constructor(employeeUsecase) {
@@ -13,52 +13,66 @@ class EmployeeRoutes {
     router.post("/", async (req, res) => {
       try {
         const schema = {
+          employee_id: Joi.number().required(),
           employee_name: Joi.string().required(),
-          father_name: Joi.string().required(),
-          dob: Joi.string().required(),
-          permanent_address: Joi.string().required(),
-          residential_address: Joi.string().required(),
-          primary_contact_number: Joi.number().min(100000000).max(99999999999).required(),
-          alternate_contact_number: Joi.number().min(100000000).allow('').allow(null).max(99999999999).optional(),
-          email_id: Joi.string().trim().allow('').allow(null).email().optional(),
-          qualification: Joi.string().allow('').allow(null).required(),
-          introducer_name: Joi.string().allow('').allow(null).optional(),
-          introducer_details: Joi.string().allow('').allow(null).optional(),
-          salary: Joi.number().required(), 
-          uniform_qty: Joi.number().allow('').allow(null).optional(),
-          previous_experience: Joi.string().allow('').allow(null).optional(),
-          date_of_joining: Joi.string().allow('').allow(null).optional(),
+          father_name: Joi.string().optional(),
+          dob: Joi.string().optional(),
+          permanent_address: Joi.string().optional(),
+          residential_address: Joi.string().optional(),
+          primary_contact_number: Joi.number()
+            .min(100000000)
+            .max(99999999999)
+            .required(),
+          alternate_contact_number: Joi.number()
+            .min(100000000)
+            .allow("")
+            .allow(null)
+            .max(99999999999)
+            .optional(),
+          email_id: Joi.string()
+            .trim()
+            .allow("")
+            .allow(null)
+            .email()
+            .optional(),
+          qualification: Joi.string().allow("").allow(null).optional(),
+          introducer_name: Joi.string().allow("").allow(null).optional(),
+          introducer_details: Joi.string().allow("").allow(null).optional(),
+          salary: Joi.number().required(),
+          uniform_qty: Joi.number().allow("").allow(null).optional(),
+          previous_experience: Joi.string().allow("").allow(null).optional(),
+          date_of_joining: Joi.string().allow("").allow(null).optional(),
           gender: Joi.string().required(),
           payment_type: Joi.number().required(),
-          blood_group: Joi.string().allow('').allow(null).optional(),
+          blood_group: Joi.string().allow("").allow(null).optional(),
           designation_id: Joi.number().required(),
           store_id: Joi.number().required(),
-          shift_id: Joi.number().allow('').allow(null).optional(),
+          shift_id: Joi.number().allow("").allow(null).optional(),
           department_id: Joi.number().required(),
-          marital_status: Joi.string().required(),
-          marriage_date: Joi.string().allow('').allow(null).optional(),
+          marital_status: Joi.string().optional(),
+          marriage_date: Joi.string().allow("").allow(null).optional(),
           employee_image: Joi.string().required(),
-          pan_no: Joi.string().allow('').allow(null).optional(),
-          bank_name: Joi.string().allow('').allow(null).optional(),
-          ifsc: Joi.string().allow('').optional(),
-          account_no: Joi.string().allow('').allow(null).optional(),
-          esi: Joi.string().allow('').optional(),
-          esi_number: Joi.string().allow('').allow(null).optional(),
-          pf: Joi.string().allow('').optional(),
-          pf_number: Joi.string().allow('').allow(null).optional(),
-          UAN: Joi.string().allow('').allow(null).optional(),
-          additional_course: Joi.string().allow('').allow(null).optional(),
-          spouse_name: Joi.string().allow('').allow(null).optional(),
+          pan_no: Joi.string().allow("").allow(null).optional(),
+          bank_name: Joi.string().allow("").allow(null).optional(),
+          ifsc: Joi.string().allow("").optional(),
+          account_no: Joi.string().allow("").allow(null).optional(),
+          esi: Joi.string().allow("").optional(),
+          esi_number: Joi.string().allow("").allow(null).optional(),
+          pf: Joi.string().allow("").optional(),
+          pf_number: Joi.string().allow("").allow(null).optional(),
+          UAN: Joi.string().allow("").allow(null).optional(),
+          additional_course: Joi.string().allow("").allow(null).optional(),
+          spouse_name: Joi.string().allow("").allow(null).optional(),
           online_portal: Joi.number().optional(),
           files: Joi.array()
             .items({
-              id_card: Joi.string().allow('').allow(null).required(),
-              id_card_no: Joi.string().allow('').required(),
-              id_card_name: Joi.string().allow('').required(),
+              id_card: Joi.string().allow("").allow(null).required(),
+              id_card_no: Joi.string().allow("").required(),
+              id_card_name: Joi.string().allow("").required(),
               expiry_date: Joi.date().allow("").allow(null).optional(),
-              file: Joi.string().allow('').required(),
+              file: Joi.string().allow("").required(),
             })
-            .required(),
+            .optional(),
         };
 
         const employee = req.body;
@@ -71,7 +85,6 @@ class EmployeeRoutes {
 
         res.json(response);
       } catch (err) {
-
         if (err.name === "ValidationError") {
           res.json({ code: 422, msg: err.toString() });
         } else {
@@ -156,7 +169,7 @@ class EmployeeRoutes {
         }
       }
 
-      res.end(); 
+      res.end();
     });
     router.get("/newjoinee", async (req, res) => {
       try {
@@ -168,10 +181,13 @@ class EmployeeRoutes {
         const isValid = Joi.validate(data, schema);
 
         if (isValid.error !== null) {
-          console.log({err: isValid.error});
+          console.log({ err: isValid.error });
           throw isValid.error;
         }
-        const employee = await this.employeeUsecase.getnewJoinee(data.limit, data.offset);
+        const employee = await this.employeeUsecase.getnewJoinee(
+          data.limit,
+          data.offset
+        );
         res.json(employee);
       } catch (err) {
         console.log(err);
@@ -219,13 +235,15 @@ class EmployeeRoutes {
       try {
         const schema = {
           filter: Joi.string().required(),
-        }
+        };
         const employee = req.query;
         const isValid = Joi.validate(employee, schema);
         if (isValid.error !== null) {
           throw isValid.error;
         }
-        const data = await this.employeeUsecase.getEmployeeByFilter(employee.filter);
+        const data = await this.employeeUsecase.getEmployeeByFilter(
+          employee.filter
+        );
         res.json(data);
       } catch (err) {
         console.log(err);
@@ -253,18 +271,20 @@ class EmployeeRoutes {
 
       res.end();
     });
-    
+
     router.get("/store_id", async (req, res) => {
       try {
         const schema = {
           store_id: Joi.number().required(),
-        }
+        };
         const employee = req.query;
         const isValid = Joi.validate(employee, schema);
         if (isValid.error !== null) {
           throw isValid.error;
         }
-        const data = await this.employeeUsecase.getEmployeeByStore(employee.store_id);
+        const data = await this.employeeUsecase.getEmployeeByStore(
+          employee.store_id
+        );
         res.json(data);
       } catch (err) {
         console.log(err);
@@ -280,13 +300,15 @@ class EmployeeRoutes {
       try {
         const schema = {
           employee_id: Joi.number().required(),
-        }
+        };
         const employee = req.query;
         const isValid = Joi.validate(employee, schema);
         if (isValid.error !== null) {
           throw isValid.error;
         }
-        const data = await this.employeeUsecase.getEmployeeById(employee.employee_id);
+        const data = await this.employeeUsecase.getEmployeeById(
+          employee.employee_id
+        );
         res.json(data);
       } catch (err) {
         console.log(err);
@@ -325,89 +347,104 @@ class EmployeeRoutes {
       res.end();
     });
     router.post("/updatedata", async (req, res) => {
-        try {
-          const schema = {
-            employee_id: Joi.number().required(),
+      try {
+        const schema = {
+          employee_id: Joi.number().required(),
 
-            employee_details: Joi.object({
-              employee_name: Joi.string().allow('').allow(null).optional(),
-              father_name: Joi.string().allow('').allow(null).optional(),
-              dob: Joi.string().allow('').allow(null).optional(),
-              permanent_address: Joi.string().allow('').allow(null).optional(),
-              residential_address: Joi.string().allow('').allow(null).optional(),
-              primary_contact_number: Joi.number().min(100000000).max(99999999999).optional(),
-              alternate_contact_number: Joi.number().min(100000000).allow('').allow(null).max(99999999999).optional(),
-              email_id: Joi.string().trim().email().allow(null).optional(),
-              qualification: Joi.string().allow('').allow(null).optional(),
-              introducer_name: Joi.string().allow('').allow(null).optional(),
-              introducer_details: Joi.string().allow('').allow(null).optional(),
-              salary: Joi.number().allow('').allow(null).optional(),
-              uniform_qty: Joi.number().allow('').allow(null).optional(),
-              previous_experience: Joi.string().allow('').allow(null).optional(),
-              date_of_joining: Joi.string().allow('').allow(null).optional(),
-              gender: Joi.string().allow('').allow(null).optional(),
-              payment_type: Joi.number().allow('').allow(null).optional(),
-              blood_group: Joi.string().allow('').allow(null).optional(),
-              designation_id: Joi.number().allow('').allow(null).optional(),
-              store_id: Joi.number().allow('').allow(null).optional(),
-              shift_id: Joi.number().allow('').allow(null).optional(),
-              department_id: Joi.number().allow('').allow(null).optional(),
-              marital_status: Joi.string().allow('').allow(null).optional(),
-              marriage_date: Joi.string().allow('').allow(null).optional(),
-              pan_no: Joi.string().allow('').allow(null).optional(),
-              bank_name: Joi.string().allow('').allow(null).optional(),
-              ifsc: Joi.string().allow('').allow(null).optional(),
-              account_no: Joi.string().allow('').allow(null).optional(),
-              esi: Joi.string().allow('').allow(null).optional(),
-              esi_number: Joi.string().allow('').allow(null).optional(),
-              pf: Joi.string().allow('').allow(null).optional(),
-              pf_number: Joi.string().allow('').allow(null).optional(),
-              UAN: Joi.string().allow('').allow(null).optional(),
-              additional_course: Joi.string().allow('').allow(null).optional(),
-              spouse_name: Joi.string().allow('').allow(null).optional(),
-              online_portal: Joi.number().allow(null).optional(),
-              modified_employee_image: Joi.string().allow('').allow(null).optional(),
-              files: Joi.array()
-                .items({
-                    id_card: Joi.string().allow('').required(),
-                    id_card_no: Joi.number().allow('').required(),
-                    id_card_name: Joi.string().allow('').required(),
-                    expiry_date: Joi.date().allow("").allow(null).optional(),
-                    file: Joi.string().allow('').required(),
-                })
-                .optional(),
-              docupdate: Joi.array()
+          employee_details: Joi.object({
+            employee_name: Joi.string().allow("").allow(null).optional(),
+            father_name: Joi.string().allow("").allow(null).optional(),
+            dob: Joi.string().allow("").allow(null).optional(),
+            permanent_address: Joi.string().allow("").allow(null).optional(),
+            residential_address: Joi.string().allow("").allow(null).optional(),
+            primary_contact_number: Joi.number()
+              .min(100000000)
+              .max(99999999999)
+              .optional(),
+            alternate_contact_number: Joi.number()
+              .min(100000000)
+              .allow("")
+              .allow(null)
+              .max(99999999999)
+              .optional(),
+            email_id: Joi.string().trim().email().allow(null).optional(),
+            qualification: Joi.string().allow("").allow(null).optional(),
+            introducer_name: Joi.string().allow("").allow(null).optional(),
+            introducer_details: Joi.string().allow("").allow(null).optional(),
+            salary: Joi.number().allow("").allow(null).optional(),
+            uniform_qty: Joi.number().allow("").allow(null).optional(),
+            previous_experience: Joi.string().allow("").allow(null).optional(),
+            date_of_joining: Joi.string().allow("").allow(null).optional(),
+            gender: Joi.string().allow("").allow(null).optional(),
+            payment_type: Joi.number().allow("").allow(null).optional(),
+            blood_group: Joi.string().allow("").allow(null).optional(),
+            designation_id: Joi.number().allow("").allow(null).optional(),
+            store_id: Joi.number().allow("").allow(null).optional(),
+            shift_id: Joi.number().allow("").allow(null).optional(),
+            department_id: Joi.number().allow("").allow(null).optional(),
+            marital_status: Joi.string().allow("").allow(null).optional(),
+            marriage_date: Joi.string().allow("").allow(null).optional(),
+            pan_no: Joi.string().allow("").allow(null).optional(),
+            bank_name: Joi.string().allow("").allow(null).optional(),
+            ifsc: Joi.string().allow("").allow(null).optional(),
+            account_no: Joi.string().allow("").allow(null).optional(),
+            esi: Joi.string().allow("").allow(null).optional(),
+            esi_number: Joi.string().allow("").allow(null).optional(),
+            pf: Joi.string().allow("").allow(null).optional(),
+            pf_number: Joi.string().allow("").allow(null).optional(),
+            UAN: Joi.string().allow("").allow(null).optional(),
+            additional_course: Joi.string().allow("").allow(null).optional(),
+            spouse_name: Joi.string().allow("").allow(null).optional(),
+            online_portal: Joi.number().allow(null).optional(),
+            modified_employee_image: Joi.string()
+              .allow("")
+              .allow(null)
+              .optional(),
+            files: Joi.array()
               .items({
-                card_name: Joi.string().allow('').allow(null).optional(),
-                card_no: Joi.string().allow('').allow(null).optional(),
-                card_type: Joi.string().allow('').allow(null).required(),
-                file: Joi.string().allow('').allow(null).optional(),
+                id_card: Joi.string().allow("").required(),
+                id_card_no: Joi.number().allow("").required(),
+                id_card_name: Joi.string().allow("").required(),
+                expiry_date: Joi.date().allow("").allow(null).optional(),
+                file: Joi.string().allow("").required(),
               })
               .optional(),
-            }).optional(),
-          };
+            docupdate: Joi.array()
+              .items({
+                card_name: Joi.string().allow("").allow(null).optional(),
+                card_no: Joi.string().allow("").allow(null).optional(),
+                card_type: Joi.string().allow("").allow(null).required(),
+                file: Joi.string().allow("").allow(null).optional(),
+              })
+              .optional(),
+          }).optional(),
+        };
 
-          const employee = req.body;
-          for(let i=0; i <= employee.employee_details.docupdate.length - 1; i++) {
-            if(employee.employee_details.docupdate[i].file === "") {
-              delete employee.employee_details.docupdate[i].file
-            }
-          }
-          const isValid = Joi.validate(employee, schema);
-          if (isValid.error !== null) {
-            console.log(isValid.error);
-            throw isValid.error;
-          }
-          const code = await this.employeeUsecase.updateEmployeeDetails(employee);
-          res.json({ code: code });
-        } catch (err) {
-          if (err.name === "ValidationError") {
-            res.json({ code: 422, msg: err.toString() });
-          } else {
-            console.log(err);
-            res.json({ code: 500, msg: "An error occurred !" });
+        const employee = req.body;
+        for (
+          let i = 0;
+          i <= employee.employee_details.docupdate.length - 1;
+          i++
+        ) {
+          if (employee.employee_details.docupdate[i].file === "") {
+            delete employee.employee_details.docupdate[i].file;
           }
         }
+        const isValid = Joi.validate(employee, schema);
+        if (isValid.error !== null) {
+          console.log(isValid.error);
+          throw isValid.error;
+        }
+        const code = await this.employeeUsecase.updateEmployeeDetails(employee);
+        res.json({ code: code });
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: "An error occurred !" });
+        }
+      }
       res.end();
     });
   }
