@@ -8,13 +8,12 @@ class PeopleRepository {
   create(person) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "INSERT INTO people_list (name, primary_phone, secondary_phone, person_type, store_id) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO people_list (name, primary_phone, secondary_phone, person_type) VALUES (?, ?, ?, ?)",
         [
           person.name,
           person.primary_phone,
           person.secondary_phone,
           person.person_type,
-          person.store_id,
         ],
         (err, res) => {
           if (err) {
@@ -22,6 +21,30 @@ class PeopleRepository {
               level: logger.LEVEL.ERROR,
               component: "REPOSITORY.PEOPLE",
               code: "REPOSITORY.PEOPLE.CREATE",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve({ code: 200, id: res.insertId });
+        }
+      );
+    });
+  }
+
+  createOutletMap(store_id, person_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "INSERT INTO people_list_outlets_map (store_id, person_id) VALUES (?, ?)",
+        [store_id, person_id],
+        (err, res) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PEOPLE",
+              code: "REPOSITORY.PEOPLE.CREATE-OUTLET-MAP",
               description: err.toString(),
               category: "",
               ref: {},

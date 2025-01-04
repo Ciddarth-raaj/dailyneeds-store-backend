@@ -6,6 +6,16 @@ class PeopleUsecase {
   async createPerson(person) {
     try {
       const result = await this.peopleRepo.create(person);
+
+      if (result.code === 200) {
+        const store_ids = person.store_ids;
+        const person_id = result.id;
+
+        store_ids.forEach(async (store_id) => {
+          await this.peopleRepo.createOutletMap(store_id, person_id);
+        });
+      }
+
       return result;
     } catch (error) {
       throw error;
