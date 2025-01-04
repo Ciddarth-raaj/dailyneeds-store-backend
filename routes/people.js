@@ -15,8 +15,8 @@ class PeopleRoutes {
       try {
         const schema = {
           name: Joi.string().required(),
-          primary_phone: Joi.string().allow(null),
-          secondary_phone: Joi.string().allow(null),
+          primary_phone: Joi.string().allow(null).required(),
+          secondary_phone: Joi.string().allow("").allow(null).optional(),
           person_type: Joi.number().required(),
         };
 
