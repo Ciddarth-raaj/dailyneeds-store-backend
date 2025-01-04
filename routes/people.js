@@ -18,6 +18,7 @@ class PeopleRoutes {
           primary_phone: Joi.string().allow(null).required(),
           secondary_phone: Joi.string().allow("").allow(null).optional(),
           person_type: Joi.number().required(),
+          store_id: Joi.number().required(),
         };
 
         const isValid = Joi.validate(req.body, schema);
