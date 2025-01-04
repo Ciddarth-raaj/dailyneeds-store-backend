@@ -63,6 +63,7 @@ class EmployeeRoutes {
           UAN: Joi.string().allow("").allow(null).optional(),
           additional_course: Joi.string().allow("").allow(null).optional(),
           spouse_name: Joi.string().allow("").allow(null).optional(),
+          telegram_username: Joi.string().allow("").allow(null).optional(),
           online_portal: Joi.number().optional(),
           files: Joi.array()
             .items({
@@ -352,6 +353,8 @@ class EmployeeRoutes {
           employee_id: Joi.number().required(),
 
           employee_details: Joi.object({
+            employee_id: Joi.string().allow("").allow(null).optional(),
+            telegram_username: Joi.string().allow("").allow(null).optional(),
             employee_name: Joi.string().allow("").allow(null).optional(),
             father_name: Joi.string().allow("").allow(null).optional(),
             dob: Joi.string().allow("").allow(null).optional(),
