@@ -40,9 +40,9 @@ class AccountsUsecase {
     }
   }
 
-  async getAllAccounts() {
+  async getAllAccounts(filters) {
     try {
-      const result = await this.accountsRepo.getAll();
+      const result = await this.accountsRepo.getAll(filters);
       return result;
     } catch (error) {
       throw error;

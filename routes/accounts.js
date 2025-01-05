@@ -123,11 +123,26 @@ class AccountsRoutes {
 
     router.get("/", async (req, res) => {
       try {
-        const result = await this.accountsUsecase.getAllAccounts();
+        const schema = {
+          from_date: Joi.date().optional(),
+          to_date: Joi.date().optional(),
+          store_id: Joi.number().optional(),
+        };
+
+        const isValid = Joi.validate(req.query, schema);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const result = await this.accountsUsecase.getAllAccounts(req.query);
         res.json(result);
       } catch (err) {
-        console.log(err);
-        res.json({ code: 500, msg: err.message });
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: err.message });
+        }
       }
     });
 

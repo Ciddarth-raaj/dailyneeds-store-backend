@@ -158,10 +158,37 @@ class AccountsRepository {
     });
   }
 
-  getAll() {
+  getAll(filters) {
     return new Promise((resolve, reject) => {
+      let filterConditions = [];
+      let filterValues = [];
+
+      // Add date range filter if provided
+      if (filters?.from_date) {
+        filterConditions.push("DATE(a.date) >= ?");
+        filterValues.push(filters.from_date);
+      }
+      if (filters?.to_date) {
+        filterConditions.push("DATE(a.date) <= ?");
+        filterValues.push(filters.to_date);
+      }
+
+      // Add store filter if provided
+      if (filters?.store_id) {
+        filterConditions.push("ne.store_id = ?");
+        filterValues.push(filters.store_id);
+      }
+
+      // Combine filter conditions
+      const whereClause =
+        filterConditions.length > 0
+          ? `WHERE ${filterConditions.join(" AND ")}`
+          : "";
+
       this.db.query(
         `SELECT a.*, 
+         ne.employee_name as cashier_name,
+         ne.store_id,
          GROUP_CONCAT(
            JSON_OBJECT(
              'sales_id', s.sales_id,
@@ -174,9 +201,12 @@ class AccountsRepository {
            )
          ) as sales
          FROM accounts a
+         LEFT JOIN new_employee ne ON ne.employee_id = a.cashier_id
          LEFT JOIN accounts_sales s ON s.accounts_id = a.accounts_id
-         GROUP BY a.accounts_id`,
-        [],
+         ${whereClause}
+         GROUP BY a.accounts_id
+         ORDER BY a.date DESC`,
+        filterValues,
         (err, docs) => {
           if (err) {
             logger.Log({
@@ -207,6 +237,7 @@ class AccountsRepository {
     return new Promise((resolve, reject) => {
       this.db.query(
         `SELECT a.*, 
+         ne.employee_name as cashier_name,
          GROUP_CONCAT(
            JSON_OBJECT(
              'sales_id', s.sales_id,
@@ -219,6 +250,7 @@ class AccountsRepository {
            )
          ) as sales
          FROM accounts a
+         LEFT JOIN new_employee ne ON ne.employee_id = a.cashier_id
          LEFT JOIN accounts_sales s ON s.accounts_id = a.accounts_id
          WHERE a.accounts_id = ?
          GROUP BY a.accounts_id`,
