@@ -125,6 +125,7 @@ class Server {
     this.vehicleRepo = require("./repository/vehicle")(this.mysql.connection);
     this.userRepo = require("./repository/user")(this.mysql.connection);
     this.peopleRepo = require("./repository/people")(this.mysql.connection);
+    this.accountsRepo = require("./repository/accounts")(this.mysql.connection);
   }
 
   initUsecases() {
@@ -188,6 +189,7 @@ class Server {
       this.employeeRepo
     );
     this.peopleUsecase = require("./usecase/people")(this.peopleRepo);
+    this.accountsUsecase = require("./usecase/accounts")(this.accountsRepo);
   }
 
   initRoutes() {
@@ -234,6 +236,7 @@ class Server {
     const despatchRouter = require("./routes/despatch")(this.despatchUsecase);
     const userRouter = require("./routes/user")(this.userUsecase);
     const peopleRouter = require("./routes/people")(this.peopleUsecase);
+    const accountsRouter = require("./routes/accounts")(this.accountsUsecase);
 
     app.use("/document", documentRouter.getRouter());
     app.use("/whatsapp", whatsappRouter.getRouter());
@@ -263,6 +266,7 @@ class Server {
     app.use("/despatch", despatchRouter.getRouter());
     app.use("/user", userRouter.getRouter());
     app.use("/people", peopleRouter.getRouter());
+    app.use("/accounts", accountsRouter.getRouter());
   }
 
   initServices() {
