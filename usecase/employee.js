@@ -1,4 +1,3 @@
-
 const moment = require("moment");
 class EmployeeUsecase {
   constructor(employeeRepo, documentUsecase, userRepo, resignationRepo) {
@@ -8,15 +7,15 @@ class EmployeeUsecase {
     this.resignationRepo = resignationRepo;
   }
 
-  get() {
+  get(filters) {
     return new Promise(async (resolve, reject) => {
       try {
         const resignation = await this.resignationRepo.getResignedEmployee();
-        let new_data = []
-        for(let i = 0; i <= resignation.length - 1; i++) {
-          new_data.push(resignation[i].employee_name)
+        let new_data = [];
+        for (let i = 0; i <= resignation.length - 1; i++) {
+          new_data.push(resignation[i].employee_name);
         }
-        const data = await this.employeeRepo.get(new_data);
+        const data = await this.employeeRepo.get(new_data, filters);
         resolve(data);
       } catch (err) {
         reject(err);
@@ -62,7 +61,7 @@ class EmployeeUsecase {
       } catch (err) {
         reject(err);
       }
-    })
+    });
   }
   getnewJoinee(limit, offset) {
     return new Promise(async (resolve, reject) => {
@@ -124,7 +123,7 @@ class EmployeeUsecase {
       }
     });
   }
-  
+
   getEmployeeByStore(store_id) {
     return new Promise(async (resolve, reject) => {
       try {
@@ -149,35 +148,50 @@ class EmployeeUsecase {
     return new Promise(async (resolve, reject) => {
       try {
         const employee_id = employee.employee_id;
-        if(employee.employee_details.docupdate.length !== 0) {
+        if (employee.employee_details.docupdate.length !== 0) {
           for (let i = 0; i < employee.employee_details.docupdate.length; i++) {
-          await this.documentUsecase.update({ 
-            data: employee.employee_details.docupdate[i],
-            card_type: employee.employee_details.docupdate[i].card_type,
-            employee_id: employee_id,
-          })
-        }
+            await this.documentUsecase.update({
+              data: employee.employee_details.docupdate[i],
+              card_type: employee.employee_details.docupdate[i].card_type,
+              employee_id: employee_id,
+            });
+          }
         }
         const id_card_name = employee.employee_details.files[0].id_card_name;
-        if (id_card_name !== '') {
-          for (let i = 0; i <= employee.employee_details.files.length - 1; i++) {
+        if (id_card_name !== "") {
+          for (
+            let i = 0;
+            i <= employee.employee_details.files.length - 1;
+            i++
+          ) {
             await this.documentUsecase.create({
               card_type: employee.employee_details.files[i].id_card,
               card_no: employee.employee_details.files[i].id_card_no,
               card_name: employee.employee_details.files[i].id_card_name,
-              expiry_date: employee.employee_details.files[i].expiry_date == "" ? null : moment(employee.employee_details.files[i].expiry_date).format("YYYY-MM-DD"),
+              expiry_date:
+                employee.employee_details.files[i].expiry_date == ""
+                  ? null
+                  : moment(
+                      employee.employee_details.files[i].expiry_date
+                    ).format("YYYY-MM-DD"),
               file: employee.employee_details.files[i].file,
               employee_id: employee_id,
-            })
+            });
           }
         }
-        if(employee.employee_details.modified_employee_image !== "") {
-            await this.employeeRepo.updateEmployeeImage(employee.employee_details.modified_employee_image, employee_id);
+        if (employee.employee_details.modified_employee_image !== "") {
+          await this.employeeRepo.updateEmployeeImage(
+            employee.employee_details.modified_employee_image,
+            employee_id
+          );
         }
         delete employee.employee_details.docupdate;
         delete employee.employee_details.modified_employee_image;
-        const { code } = await this.employeeRepo.updateEmployeeDetails(employee.employee_details, employee_id);
-        resolve(code); 
+        const { code } = await this.employeeRepo.updateEmployeeDetails(
+          employee.employee_details,
+          employee_id
+        );
+        resolve(code);
       } catch (err) {
         reject(err);
       }
@@ -188,19 +202,27 @@ class EmployeeUsecase {
       try {
         const { code, id } = await this.employeeRepo.create(employee);
         const id_card = employee.files[0].id_card;
-        if (id_card !== '') {
-        for (let i = 0; i <= employee.files.length - 1; i++) {
-          await this.documentUsecase.create({
-            card_type: employee.files[i].id_card,
-            card_no: employee.files[i].id_card_no,
-            card_name: employee.files[i].id_card_name,
-            expiry_date: employee.files[i].expiry_date == "" ? null : moment(employee.files[i].expiry_date).format("YYYY-MM-DD"),
-            file: employee.files[i].file,
-            employee_id: id,
-          })
+        if (id_card !== "") {
+          for (let i = 0; i <= employee.files.length - 1; i++) {
+            await this.documentUsecase.create({
+              card_type: employee.files[i].id_card,
+              card_no: employee.files[i].id_card_no,
+              card_name: employee.files[i].id_card_name,
+              expiry_date:
+                employee.files[i].expiry_date == ""
+                  ? null
+                  : moment(employee.files[i].expiry_date).format("YYYY-MM-DD"),
+              file: employee.files[i].file,
+              employee_id: id,
+            });
+          }
         }
-        }
-        const data = await this.userRepo.createLogin(employee.primary_contact_number, '1', id, 'password');
+        const data = await this.userRepo.createLogin(
+          employee.primary_contact_number,
+          "1",
+          id,
+          "password"
+        );
         resolve(200);
       } catch (err) {
         reject(err);
@@ -211,5 +233,10 @@ class EmployeeUsecase {
 }
 
 module.exports = (employeeRepo, documentUsecase, userRepo, resignationRepo) => {
-  return new EmployeeUsecase(employeeRepo, documentUsecase, userRepo, resignationRepo);
+  return new EmployeeUsecase(
+    employeeRepo,
+    documentUsecase,
+    userRepo,
+    resignationRepo
+  );
 };

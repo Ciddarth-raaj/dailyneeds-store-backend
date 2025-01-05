@@ -96,9 +96,23 @@ class EmployeeRoutes {
 
       res.end();
     });
+
     router.get("/employees", async (req, res) => {
       try {
-        const employee = await this.employeeUsecase.get();
+        const schema = {
+          store_ids: Joi.array().items(Joi.number().required()).optional(),
+          designation_ids: Joi.array()
+            .items(Joi.number().required())
+            .optional(),
+        };
+
+        const isValid = Joi.validate(req.query, schema);
+        if (isValid.error !== null) {
+          console.log(isValid.error);
+          throw isValid.error;
+        }
+
+        const employee = await this.employeeUsecase.get(req.query);
         res.json(employee);
       } catch (err) {
         console.log(err);
@@ -297,6 +311,7 @@ class EmployeeRoutes {
       }
       res.end();
     });
+
     router.get("/employee_id", async (req, res) => {
       try {
         const schema = {
