@@ -26,7 +26,6 @@ class AccountsRoutes {
           loyalty: Joi.number().required(),
           sales_return: Joi.number().required(),
           cashier_id: Joi.number().required(),
-          user_id: Joi.number().required(),
           sales: Joi.array().items(
             Joi.object({
               person_type: Joi.number().required(),
@@ -44,6 +43,8 @@ class AccountsRoutes {
           console.log(isValid.error);
           throw isValid.error;
         }
+
+        req.body.user_id = req.decoded.id;
 
         const result = await this.accountsUsecase.createAccount(req.body);
         res.json(result);

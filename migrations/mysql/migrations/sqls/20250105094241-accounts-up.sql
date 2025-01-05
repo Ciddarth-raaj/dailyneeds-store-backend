@@ -30,3 +30,8 @@ CREATE TABLE accounts_sales (
     receipt_path VARCHAR(255) NOT NULL,
     FOREIGN KEY (accounts_id) REFERENCES accounts(accounts_id) ON DELETE CASCADE
 );
+
+ALTER TABLE `accounts` CHANGE `date` `date` TIMESTAMP NOT NULL;
+ALTER TABLE `accounts` CHANGE `created_at` `created_at` TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP;
+
+INSERT INTO `all_permissions` (`permission_key`) VALUES ('view_account_sheet');
