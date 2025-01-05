@@ -115,21 +115,38 @@ class PeopleRepository {
 
   getAll() {
     return new Promise((resolve, reject) => {
-      this.db.query("SELECT * FROM people_list", [], (err, docs) => {
-        if (err) {
-          logger.Log({
-            level: logger.LEVEL.ERROR,
-            component: "REPOSITORY.PEOPLE",
-            code: "REPOSITORY.PEOPLE.GET-ALL",
-            description: err.toString(),
-            category: "",
-            ref: {},
-          });
-          reject(err);
-          return;
+      this.db.query(
+        `SELECT people_list.*, 
+         GROUP_CONCAT(people_list_outlets_map.store_id) as store_ids 
+         FROM people_list 
+         LEFT JOIN people_list_outlets_map ON people_list_outlets_map.person_id = people_list.person_id 
+         GROUP BY people_list.person_id`,
+        [],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PEOPLE",
+              code: "REPOSITORY.PEOPLE.GET-ALL",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+
+          // Convert comma-separated store_ids string to array of numbers
+          const people = docs.map((person) => ({
+            ...person,
+            store_ids: person.store_ids
+              ? person.store_ids.split(",").map(Number)
+              : null,
+          }));
+
+          resolve({ code: 200, data: people });
         }
-        resolve({ code: 200, data: docs });
-      });
+      );
     });
   }
 }
