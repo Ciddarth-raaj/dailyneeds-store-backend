@@ -292,6 +292,54 @@ class AccountsRepository {
       );
     });
   }
+
+  saveAccount(sheetData) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "INSERT INTO accounts_saved (sheet_date, store_id) VALUES (?, ?)",
+        [sheetData.sheet_date, sheetData.store_id],
+        (err, res) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.ACCOUNTS",
+              code: "REPOSITORY.ACCOUNTS.SAVE-SHEET",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve({ code: 200 });
+        }
+      );
+    });
+  }
+
+  deleteSavedAccount(sheetData) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "DELETE FROM accounts_saved WHERE sheet_date = ? AND store_id = ?",
+        [sheetData.sheet_date, sheetData.store_id],
+        (err, res) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.ACCOUNTS",
+              code: "REPOSITORY.ACCOUNTS.DELETE-SAVED-SHEET",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve({ code: 200 });
+        }
+      );
+    });
+  }
 }
 
 module.exports = (db) => {

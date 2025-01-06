@@ -8,6 +8,57 @@ class AccountsRoutes {
   }
 
   init() {
+    router.post("/save", async (req, res) => {
+      try {
+        const schema = {
+          sheet_date: Joi.date().required(),
+          store_id: Joi.number().required(),
+        };
+
+        const isValid = Joi.validate(req.body, schema);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const result = await this.accountsUsecase.saveAccount(req.body);
+        res.json(result);
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: err.message });
+        }
+      }
+    });
+
+    router.delete("/save", async (req, res) => {
+      try {
+        const schema = {
+          sheet_date: Joi.date().required(),
+          store_id: Joi.number().required(),
+        };
+
+        const isValid = Joi.validate(req.query, schema);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const result = await this.accountsUsecase.deleteSavedAccount({
+          sheet_date: req.query.sheet_date,
+          store_id: parseInt(req.query.store_id),
+        });
+        res.json(result);
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: err.message });
+        }
+      }
+    });
+
     router.post("/", async (req, res) => {
       try {
         const schema = {

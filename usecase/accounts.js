@@ -57,6 +57,24 @@ class AccountsUsecase {
       throw error;
     }
   }
+
+  async saveAccount(sheetData) {
+    try {
+      const result = await this.accountsRepo.saveAccount(sheetData);
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  async deleteSavedAccount(sheetId) {
+    try {
+      const result = await this.accountsRepo.deleteSavedAccount(sheetId);
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
 }
 
 module.exports = (accountsRepo) => {
