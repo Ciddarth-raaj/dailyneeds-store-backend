@@ -189,22 +189,26 @@ class AccountsRepository {
         `SELECT a.*, 
          ne.employee_name as cashier_name,
          ne.store_id,
-         GROUP_CONCAT(
-           JSON_OBJECT(
-             'sales_id', s.sales_id,
-             'person_type', s.person_type,
-             'payment_type', s.payment_type,
-             'person_id', s.person_id,
-             'description', s.description,
-             'amount', s.amount,
-             'receipt_path', s.receipt_path
+         (
+           SELECT JSON_ARRAYAGG(
+             JSON_OBJECT(
+               'sales_id', s2.sales_id,
+               'person_type', s2.person_type,
+               'payment_type', s2.payment_type,
+               'person_id', s2.person_id,
+               'person_name', pl.name,
+               'description', s2.description,
+               'amount', s2.amount,
+               'receipt_path', s2.receipt_path
+             )
            )
+           FROM accounts_sales s2 
+           LEFT JOIN people_list pl ON pl.person_id = s2.person_id
+           WHERE s2.accounts_id = a.accounts_id
          ) as sales
          FROM accounts a
          LEFT JOIN new_employee ne ON ne.employee_id = a.cashier_id
-         LEFT JOIN accounts_sales s ON s.accounts_id = a.accounts_id
          ${whereClause}
-         GROUP BY a.accounts_id
          ORDER BY a.date DESC`,
         filterValues,
         (err, docs) => {
@@ -221,10 +225,10 @@ class AccountsRepository {
             return;
           }
 
-          // Parse the sales JSON string into an array
+          // Parse the sales JSON string into an array or set to null
           const accounts = docs.map((account) => ({
             ...account,
-            sales: account.sales ? JSON.parse(`[${account.sales}]`) : [],
+            sales: account.sales ? JSON.parse(account.sales) : null,
           }));
 
           resolve({ code: 200, data: accounts });
@@ -238,22 +242,26 @@ class AccountsRepository {
       this.db.query(
         `SELECT a.*, 
          ne.employee_name as cashier_name,
-         GROUP_CONCAT(
-           JSON_OBJECT(
-             'sales_id', s.sales_id,
-             'person_type', s.person_type,
-             'payment_type', s.payment_type,
-             'person_id', s.person_id,
-             'description', s.description,
-             'amount', s.amount,
-             'receipt_path', s.receipt_path
+         (
+           SELECT JSON_ARRAYAGG(
+             JSON_OBJECT(
+               'sales_id', s2.sales_id,
+               'person_type', s2.person_type,
+               'payment_type', s2.payment_type,
+               'person_id', s2.person_id,
+               'person_name', pl.name,
+               'description', s2.description,
+               'amount', s2.amount,
+               'receipt_path', s2.receipt_path
+             )
            )
+           FROM accounts_sales s2 
+           LEFT JOIN people_list pl ON pl.person_id = s2.person_id
+           WHERE s2.accounts_id = a.accounts_id
          ) as sales
          FROM accounts a
          LEFT JOIN new_employee ne ON ne.employee_id = a.cashier_id
-         LEFT JOIN accounts_sales s ON s.accounts_id = a.accounts_id
-         WHERE a.accounts_id = ?
-         GROUP BY a.accounts_id`,
+         WHERE a.accounts_id = ?`,
         [accountId],
         (err, docs) => {
           if (err) {
@@ -276,7 +284,7 @@ class AccountsRepository {
 
           const account = {
             ...docs[0],
-            sales: docs[0].sales ? JSON.parse(`[${docs[0].sales}]`) : [],
+            sales: docs[0].sales ? JSON.parse(docs[0].sales) : null,
           };
 
           resolve({ code: 200, data: account });
