@@ -255,6 +255,7 @@ class AccountsRepository {
       this.db.query(
         `SELECT a.*, 
          ne.employee_name as cashier_name,
+         ne.store_id,
          (
            SELECT JSON_ARRAYAGG(
              JSON_OBJECT(
@@ -271,7 +272,12 @@ class AccountsRepository {
            FROM accounts_sales s2 
            LEFT JOIN people_list pl ON pl.person_id = s2.person_id
            WHERE s2.accounts_id = a.accounts_id
-         ) as sales
+         ) as sales,
+         EXISTS(
+           SELECT 1 FROM accounts_saved acs 
+           WHERE DATE(acs.sheet_date) = DATE(a.date)
+           AND acs.store_id = ne.store_id
+         ) as is_saved
          FROM accounts a
          LEFT JOIN new_employee ne ON ne.employee_id = a.cashier_id
          WHERE a.accounts_id = ?`,
@@ -300,7 +306,17 @@ class AccountsRepository {
             sales: docs[0].sales ? JSON.parse(docs[0].sales) : null,
           };
 
-          resolve({ code: 200, data: account });
+          // Get is_saved value
+          const is_saved = docs[0].is_saved == 1;
+
+          // Remove is_saved from account object
+          const { is_saved: _, ...accountWithoutIsSaved } = account;
+
+          resolve({
+            code: 200,
+            is_saved,
+            data: accountWithoutIsSaved,
+          });
         }
       );
     });
