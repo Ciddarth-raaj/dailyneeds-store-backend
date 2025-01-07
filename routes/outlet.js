@@ -149,7 +149,8 @@ class OutletRoutes {
               .optional(),
             phone: Joi.string().allow(null).allow("").optional(),
             outlet_nickname: Joi.string().required(),
-            telegram_username: Joi.string().optional(),
+            telegram_username: Joi.string().allow(null).allow("").optional(),
+            opening_cash: Joi.number().required(),
           }).optional(),
           budget: Joi.array().allow(null).allow("").required(),
         };

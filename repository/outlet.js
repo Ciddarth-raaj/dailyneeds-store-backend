@@ -73,7 +73,7 @@ class OutletRepository {
   create(outlet) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "INSERT INTO outlets (outlet_name, outlet_address, outlet_phone, phone, outlet_nickname, telegram_username) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO outlets (outlet_name, outlet_address, outlet_phone, phone, outlet_nickname, telegram_username, opening_cash) VALUES (?, ?, ?, ?, ?, ?, ?)",
         [
           outlet.outlet_name,
           outlet.outlet_address,
@@ -81,6 +81,7 @@ class OutletRepository {
           outlet.phone,
           outlet.outlet_nickname,
           outlet.telegram_username,
+          outlet.opening_cash,
         ],
         (err, res) => {
           if (err) {
