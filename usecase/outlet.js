@@ -1,8 +1,7 @@
-
 class OutletUsecase {
   constructor(outletRepo, budgetRepo) {
     this.outletRepo = outletRepo;
-    this.budgetRepo = budgetRepo
+    this.budgetRepo = budgetRepo;
   }
 
   get() {
@@ -49,7 +48,10 @@ class OutletUsecase {
     return new Promise(async (resolve, reject) => {
       try {
         const outlet_id = outlet.outlet_id;
-        const { code } = await this.outletRepo.updateOutletDetails(outlet.outlet_details, outlet_id);
+        const { code } = await this.outletRepo.updateOutletDetails(
+          outlet.outlet_details,
+          outlet_id
+        );
         resolve(code);
       } catch (err) {
         reject(err);
@@ -59,15 +61,20 @@ class OutletUsecase {
   create(outlet) {
     return new Promise(async (resolve, reject) => {
       try {
-        const id  = await this.outletRepo.create(outlet.outlet_details);
-        for (let i = 0; i <= outlet.budget.length - 1; i++) {
-          this.budgetRepo.create({
-            store_id: id.id,
-            designation_name: Object.keys(outlet.budget[i])[0],
-            budget: Object.values(outlet.budget[i])[0]
-          });
+        const id = await this.outletRepo.create(outlet.outlet_details);
+
+        if (outlet.budget) {
+          await Promise.all(
+            outlet.budget.map(async (budget) => {
+              await this.budgetRepo.create({
+                store_id: id.id,
+                designation_name: budget.designation,
+                budget: budget.count,
+              });
+            })
+          );
         }
-        resolve(200);
+        resolve({ code: 200, msg: "Outlet created successfully" });
       } catch (err) {
         reject(err);
       }

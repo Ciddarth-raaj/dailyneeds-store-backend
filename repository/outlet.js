@@ -7,25 +7,21 @@ class OutletRepository {
 
   get() {
     return new Promise((resolve, reject) => {
-      this.db.query(
-        "SELECT * FROM outlets",
-        [],
-        (err, docs) => {
-          if (err) {
-            logger.Log({
-              level: logger.LEVEL.ERROR,
-              component: "REPOSITORY.OUTLET",
-              code: "REPOSITORY.OUTLET.GET",
-              description: err.toString(),
-              category: "",
-              ref: {},
-            });
-            reject(err);
-            return;
-          }
-          resolve(docs)
+      this.db.query("SELECT * FROM outlets", [], (err, docs) => {
+        if (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "REPOSITORY.OUTLET",
+            code: "REPOSITORY.OUTLET.GET",
+            description: err.toString(),
+            category: "",
+            ref: {},
+          });
+          reject(err);
+          return;
         }
-      );
+        resolve(docs);
+      });
     });
   }
   updateStatus(file) {
@@ -47,7 +43,8 @@ class OutletRepository {
             return;
           }
           resolve(docs);
-        });
+        }
+      );
     });
   }
   updateOutletDetails(data, outlet_id) {
@@ -57,14 +54,14 @@ class OutletRepository {
         [data, outlet_id],
         (err, res) => {
           if (err) {
-              logger.Log({
-                level: logger.LEVEL.ERROR,
-                component: "REPOSITORY.OUTLET",
-                code: "REPOSITORY.OUTLET.UPDATE-OUTLET-DETAILS",
-                description: err.toString(),
-                category: "",
-                ref: {},
-              });
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.OUTLET",
+              code: "REPOSITORY.OUTLET.UPDATE-OUTLET-DETAILS",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
             reject(err);
             return;
           }
@@ -72,82 +69,87 @@ class OutletRepository {
         }
       );
     });
-  } 
+  }
   create(outlet) {
-      return new Promise((resolve, reject) => {
-          this.db.query(
-            "INSERT INTO outlets (outlet_name, outlet_address, outlet_phone, phone, outlet_nickname) VALUES (?, ?, ?, ?, ?)",
-            [
-              outlet.outlet_name,
-              outlet.outlet_address,
-              outlet.outlet_phone,
-              outlet.phone,
-              outlet.outlet_nickname,
-            ],
-            (err, res) => {
-              if (err) {
-                if (err.code === "ER_DUP_ENTRY") {
-                  resolve({ code: 101 });
-                  return;
-                }
-                logger.Log({
-                  level: logger.LEVEL.ERROR,
-                  component: "REPOSITORY.OUTLET",
-                  code: "REPOSITORY.OUTLET.CREATE",
-                  description: err.toString(),
-                  category: "",
-                  ref: {},
-                });
-                reject(err);
-                return;
-              }
-              resolve({ code: 200, id: res.insertId });
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "INSERT INTO outlets (outlet_name, outlet_address, outlet_phone, phone, outlet_nickname, telegram_username) VALUES (?, ?, ?, ?, ?, ?)",
+        [
+          outlet.outlet_name,
+          outlet.outlet_address,
+          outlet.outlet_phone,
+          outlet.phone,
+          outlet.outlet_nickname,
+          outlet.telegram_username,
+        ],
+        (err, res) => {
+          if (err) {
+            if (err.code === "ER_DUP_ENTRY") {
+              resolve({ code: 101 });
+              return;
             }
-          );
-        });
-      }
-      getOutletByOutletId(outlet_id) {
-        return new Promise((resolve, reject) => {
-          this.db.query("SELECT * FROM outlets WHERE outlet_id = ?",
-            [outlet_id],
-            (err, docs) => {
-              if (err) {
-                logger.Log({
-                  level: logger.LEVEL.ERROR,
-                  component: "REPOSITORY.OUTLET",
-                  code: "REPOSITORY.OUTLET.GET-BY-OUTLET-ID",
-                  description: err.toString(),
-                  category: "",
-                  ref: {},
-                });
-                reject(err);
-                return;
-              }
-              resolve(docs);
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.OUTLET",
+              code: "REPOSITORY.OUTLET.CREATE",
+              description: err.toString(),
+              category: "",
+              ref: {},
             });
-        });
-      }
-      getOutletById(outlet_id) {
-        return new Promise((resolve, reject) => {
-          this.db.query("SELECT outlet_id, outlet_name FROM outlets WHERE outlet_id = ?",
-            [outlet_id],
-            (err, docs) => {
-              if (err) {
-                logger.Log({
-                  level: logger.LEVEL.ERROR,
-                  component: "REPOSITORY.OUTLET",
-                  code: "REPOSITORY.OUTLET.GET-BY-ID",
-                  description: err.toString(),
-                  category: "",
-                  ref: {},
-                });
-                reject(err);
-                return;
-              }
-              resolve(docs);
+            reject(err);
+            return;
+          }
+          resolve({ code: 200, id: res.insertId });
+        }
+      );
+    });
+  }
+  getOutletByOutletId(outlet_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "SELECT * FROM outlets WHERE outlet_id = ?",
+        [outlet_id],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.OUTLET",
+              code: "REPOSITORY.OUTLET.GET-BY-OUTLET-ID",
+              description: err.toString(),
+              category: "",
+              ref: {},
             });
-        });
-      }
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        }
+      );
+    });
+  }
+  getOutletById(outlet_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "SELECT outlet_id, outlet_name FROM outlets WHERE outlet_id = ?",
+        [outlet_id],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.OUTLET",
+              code: "REPOSITORY.OUTLET.GET-BY-ID",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        }
+      );
+    });
+  }
 }
 
 module.exports = (db) => {

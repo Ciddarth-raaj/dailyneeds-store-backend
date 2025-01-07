@@ -3,3 +3,4 @@ ALTER TABLE `accounts_saved` ADD UNIQUE(`sheet_date`, `store_id`);
 
 INSERT INTO `all_permissions` (`permission_key`) VALUES ('save_account_sheet');
 INSERT INTO `all_permissions` (`permission_key`) VALUES ('unsave_account_sheet');
+INSERT INTO `all_permissions` (`permission_key`) VALUES ('view_store_budget');

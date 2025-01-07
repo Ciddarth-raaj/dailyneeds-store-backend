@@ -1,0 +1,1 @@
+ALTER TABLE `outlets` ADD `telegram_username` VARCHAR(100) NULL DEFAULT NULL AFTER `outlet_nickname`;
