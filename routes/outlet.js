@@ -106,14 +106,19 @@ class OutletRoutes {
       try {
         const schema = {
           outlet_id: Joi.number().required(),
-          store_id: Joi.number().optional(),
           outlet_details: Joi.object({
-            outlet_name: Joi.string().optional(),
-            outlet_address: Joi.string().optional(),
-            outlet_phone: Joi.string().optional(),
-            phone: Joi.string().optional(),
-            outlet_nickname: Joi.string().optional(),
+            outlet_name: Joi.string().required(),
+            outlet_address: Joi.string().required(),
+            outlet_phone: Joi.number()
+              .min(100000000)
+              .max(99999999999)
+              .optional(),
+            phone: Joi.string().allow(null).allow("").optional(),
+            outlet_nickname: Joi.string().required(),
+            telegram_username: Joi.string().allow(null).allow("").optional(),
+            opening_cash: Joi.number().required(),
           }).optional(),
+          budget: Joi.array().allow(null).allow("").optional(),
         };
 
         const outlet = req.body;
@@ -123,9 +128,9 @@ class OutletRoutes {
           throw isValid.error;
         }
 
-        const code = await this.outletUsecase.updateOutletDetails(outlet);
+        const response = await this.outletUsecase.updateOutletDetails(outlet);
         // console.log({code: code});
-        res.json({ code: code });
+        res.json(response);
       } catch (err) {
         if (err.name === "ValidationError") {
           res.json({ code: 422, msg: err.toString() });

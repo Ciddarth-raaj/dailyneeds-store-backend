@@ -54,11 +54,31 @@ class OutletUsecase {
     return new Promise(async (resolve, reject) => {
       try {
         const outlet_id = outlet.outlet_id;
-        const { code } = await this.outletRepo.updateOutletDetails(
+        const res = await this.outletRepo.updateOutletDetails(
           outlet.outlet_details,
           outlet_id
         );
-        resolve(code);
+
+        if (outlet.budget) {
+          await Promise.all(
+            outlet.budget.map(async (budget) => {
+              if (budget.budget_id) {
+                await this.budgetRepo.update({
+                  budget: budget.count,
+                  budget_id: budget.budget_id,
+                });
+              } else {
+                await this.budgetRepo.create({
+                  store_id: outlet_id,
+                  designation_name: budget.designation,
+                  budget: budget.count,
+                });
+              }
+            })
+          );
+        }
+
+        resolve(res);
       } catch (err) {
         reject(err);
       }
