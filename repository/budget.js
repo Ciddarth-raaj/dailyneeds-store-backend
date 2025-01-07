@@ -8,7 +8,20 @@ class BudgetRepository {
   get(limit, offset, store_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT * FROM budget where store_id = ${store_id} LIMIT ${offset},${limit}`,
+        `SELECT b.*, 
+         d.designation_name,
+         (
+           SELECT COUNT(*) 
+           FROM new_employee ne 
+           WHERE ne.designation_id = b.designation_id 
+           AND ne.store_id = b.store_id
+         ) as employee_count
+         FROM budget b
+         LEFT JOIN designation d ON d.designation_id = b.designation_id
+         WHERE b.store_id = ?
+         ORDER BY b.designation_id ASC
+         LIMIT ?, ?`,
+        [store_id, parseInt(offset), parseInt(limit)],
         (err, docs) => {
           if (err) {
             logger.Log({
