@@ -99,8 +99,13 @@ class BudgetRepository {
   create(budget) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "INSERT INTO budget (store_id, designation_name, budget) VALUES (?, ?, ?)",
-        [budget.store_id, budget.designation_name, budget.budget],
+        "INSERT INTO budget (store_id, designation_name, designation_id, budget) VALUES (?, ?, ?, ?)",
+        [
+          budget.store_id,
+          budget.designation_name,
+          budget.designation_id,
+          budget.budget,
+        ],
         (err, res) => {
           if (err) {
             if (err.code === "ER_DUP_ENTRY") {
@@ -126,8 +131,8 @@ class BudgetRepository {
   update(budget) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "Update budget SET budget = ? WHERE budget_id = ?",
-        [budget.budget, budget.budget_id],
+        "Update budget SET budget = ? AND designation_id = ? WHERE budget_id = ?",
+        [budget.budget, budget.designation_id, budget.budget_id],
         (err, res) => {
           if (err) {
             if (err.code === "ER_DUP_ENTRY") {

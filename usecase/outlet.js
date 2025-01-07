@@ -66,11 +66,13 @@ class OutletUsecase {
                 await this.budgetRepo.update({
                   budget: budget.count,
                   budget_id: budget.budget_id,
+                  designation_id: budget.designation_id,
                 });
               } else {
                 await this.budgetRepo.create({
                   store_id: outlet_id,
                   designation_name: budget.designation,
+                  designation_id: budget.designation_id,
                   budget: budget.count,
                 });
               }
@@ -95,6 +97,7 @@ class OutletUsecase {
               await this.budgetRepo.create({
                 store_id: id.id,
                 designation_name: budget.designation,
+                designation_id: budget.designation_id,
                 budget: budget.count,
               });
             })
