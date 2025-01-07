@@ -38,6 +38,12 @@ class OutletUsecase {
     return new Promise(async (resolve, reject) => {
       try {
         const data = await this.outletRepo.getOutletByOutletId(outlet_id);
+        const budget = await this.budgetRepo.getBudgetByStoreId(outlet_id);
+
+        if (data.length > 0) {
+          data[0].budget = budget;
+        }
+
         resolve(data);
       } catch (err) {
         reject(err);
