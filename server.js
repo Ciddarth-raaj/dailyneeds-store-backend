@@ -126,6 +126,9 @@ class Server {
     this.userRepo = require("./repository/user")(this.mysql.connection);
     this.peopleRepo = require("./repository/people")(this.mysql.connection);
     this.accountsRepo = require("./repository/accounts")(this.mysql.connection);
+    this.accountsEbookRepo = require("./repository/accountsEbook")(
+      this.mysql.connection
+    );
   }
 
   initUsecases() {
@@ -190,6 +193,9 @@ class Server {
     );
     this.peopleUsecase = require("./usecase/people")(this.peopleRepo);
     this.accountsUsecase = require("./usecase/accounts")(this.accountsRepo);
+    this.accountsEbookUsecase = require("./usecase/accountsEbook")(
+      this.accountsEbookRepo
+    );
   }
 
   initRoutes() {
@@ -237,6 +243,9 @@ class Server {
     const userRouter = require("./routes/user")(this.userUsecase);
     const peopleRouter = require("./routes/people")(this.peopleUsecase);
     const accountsRouter = require("./routes/accounts")(this.accountsUsecase);
+    const accountsEbookRouter = require("./routes/accountsEbook")(
+      this.accountsEbookUsecase
+    );
 
     app.use("/document", documentRouter.getRouter());
     app.use("/whatsapp", whatsappRouter.getRouter());
@@ -266,6 +275,7 @@ class Server {
     app.use("/despatch", despatchRouter.getRouter());
     app.use("/user", userRouter.getRouter());
     app.use("/people", peopleRouter.getRouter());
+    app.use("/accounts-ebook", accountsEbookRouter.getRouter());
     app.use("/accounts", accountsRouter.getRouter());
   }
 

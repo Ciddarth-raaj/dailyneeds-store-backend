@@ -1,0 +1,2 @@
+CREATE TABLE `accounts_ebook` (`ebook_id` INT NOT NULL AUTO_INCREMENT , `paytm_tid` VARCHAR(100) NOT NULL , `hdur` FLOAT NOT NULL COMMENT 'UPI Payments' , `hfpp` FLOAT NOT NULL COMMENT 'Card Payments' , `sedc` FLOAT NOT NULL COMMENT 'Sodexo Payments' , `ppbl` FLOAT NOT NULL COMMENT 'Paytm Payments' , `store_id` INT NOT NULL , `date` DATE NOT NULL , `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP , PRIMARY KEY (`ebook_id`)) ENGINE = InnoDB;
+ALTER TABLE `accounts_ebook` ADD UNIQUE(`paytm_tid`, `store_id`, `date`);
