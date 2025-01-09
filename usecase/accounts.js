@@ -1,7 +1,8 @@
 class AccountsUsecase {
-  constructor(accountsRepo, accountsEbookUsecase) {
+  constructor(accountsRepo, accountsEbookUsecase, outletUsecase) {
     this.accountsRepo = accountsRepo;
     this.accountsEbookUsecase = accountsEbookUsecase;
+    this.outletUsecase = outletUsecase;
   }
 
   async createAccount(account) {
@@ -47,10 +48,23 @@ class AccountsUsecase {
       const accountsEbook = await this.accountsEbookUsecase.getAllEbooks(
         filters
       );
+      let outlet_data = null;
 
-      console.log(accountsEbook);
+      if (filters.store_id) {
+        const outletResponse = await this.outletUsecase.getOutletByOutletId(
+          filters.store_id
+        );
 
-      result.data = { account: result.data, ebook: accountsEbook.data };
+        if (outletResponse.length > 0) {
+          outlet_data = outletResponse[0];
+        }
+      }
+
+      result.data = {
+        account: result.data,
+        ebook: accountsEbook.data,
+        outlet: outlet_data,
+      };
 
       console.log(result);
       return result;
@@ -87,6 +101,6 @@ class AccountsUsecase {
   }
 }
 
-module.exports = (accountsRepo, accountsEbookUsecase) => {
-  return new AccountsUsecase(accountsRepo, accountsEbookUsecase);
+module.exports = (accountsRepo, accountsEbookUsecase, outletUsecase) => {
+  return new AccountsUsecase(accountsRepo, accountsEbookUsecase, outletUsecase);
 };

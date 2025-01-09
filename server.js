@@ -197,7 +197,8 @@ class Server {
     );
     this.accountsUsecase = require("./usecase/accounts")(
       this.accountsRepo,
-      this.accountsEbookUsecase
+      this.accountsEbookUsecase,
+      this.outletUsecase
     );
   }
 
