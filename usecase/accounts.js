@@ -1,6 +1,7 @@
 class AccountsUsecase {
-  constructor(accountsRepo) {
+  constructor(accountsRepo, accountsEbookUsecase) {
     this.accountsRepo = accountsRepo;
+    this.accountsEbookUsecase = accountsEbookUsecase;
   }
 
   async createAccount(account) {
@@ -43,6 +44,15 @@ class AccountsUsecase {
   async getAllAccounts(filters) {
     try {
       const result = await this.accountsRepo.getAll(filters);
+      const accountsEbook = await this.accountsEbookUsecase.getAllEbooks(
+        filters
+      );
+
+      console.log(accountsEbook);
+
+      result.data = { account: result.data, ebook: accountsEbook.data };
+
+      console.log(result);
       return result;
     } catch (error) {
       throw error;
@@ -77,6 +87,6 @@ class AccountsUsecase {
   }
 }
 
-module.exports = (accountsRepo) => {
-  return new AccountsUsecase(accountsRepo);
+module.exports = (accountsRepo, accountsEbookUsecase) => {
+  return new AccountsUsecase(accountsRepo, accountsEbookUsecase);
 };

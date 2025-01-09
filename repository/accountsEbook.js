@@ -116,11 +116,11 @@ class AccountsEbookRepository {
 
       // Add date range filter if provided
       if (filters?.from_date) {
-        filterConditions.push("DATE(ae.date) >= DATE(?)");
+        filterConditions.push("DATE(ae.date) >= ?");
         filterValues.push(filters.from_date);
       }
       if (filters?.to_date) {
-        filterConditions.push("DATE(ae.date) <= DATE(?)");
+        filterConditions.push("DATE(ae.date) <= ?");
         filterValues.push(filters.to_date);
       }
 

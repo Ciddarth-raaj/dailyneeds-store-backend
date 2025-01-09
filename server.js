@@ -192,9 +192,12 @@ class Server {
       this.employeeRepo
     );
     this.peopleUsecase = require("./usecase/people")(this.peopleRepo);
-    this.accountsUsecase = require("./usecase/accounts")(this.accountsRepo);
     this.accountsEbookUsecase = require("./usecase/accountsEbook")(
       this.accountsEbookRepo
+    );
+    this.accountsUsecase = require("./usecase/accounts")(
+      this.accountsRepo,
+      this.accountsEbookUsecase
     );
   }
 
