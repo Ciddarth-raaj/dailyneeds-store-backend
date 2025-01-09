@@ -86,6 +86,50 @@ class AccountsRepository {
     });
   }
 
+  updateSale(sale) {
+    return new Promise((resolve, reject) => {
+      if (!sale.sales_id) {
+        return this.createSale(sale);
+      }
+
+      this.db.query(
+        `UPDATE accounts_sales 
+        SET person_type = ?, 
+            payment_type = ?, 
+            person_id = ?, 
+            description = ?, 
+            amount = ?, 
+            receipt_path = ?
+        WHERE sales_id = ? AND accounts_id = ?`,
+        [
+          sale.person_type,
+          sale.payment_type,
+          sale.person_id,
+          sale.description,
+          sale.amount,
+          sale.receipt_path,
+          sale.sales_id,
+          sale.accounts_id,
+        ],
+        (err, res) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.ACCOUNTS",
+              code: "REPOSITORY.ACCOUNTS.UPDATE-SALE",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve({ code: 200, id: sale.sales_id });
+        }
+      );
+    });
+  }
+
   update(account) {
     return new Promise((resolve, reject) => {
       this.db.query(

@@ -27,6 +27,24 @@ class AccountsUsecase {
   async updateAccount(account) {
     try {
       const result = await this.accountsRepo.update(account);
+
+      if (account.sales) {
+        for (const sale of account.sales) {
+          if (sale.sales_id) {
+            await this.accountsRepo.updateSale({
+              ...sale,
+              accounts_id: account.accounts_id,
+            });
+          } else {
+            await this.accountsRepo.createSale({
+              ...sale,
+              receipt_path: sale.receipt_path ?? "",
+              accounts_id: account.accounts_id,
+            });
+          }
+        }
+      }
+
       return result;
     } catch (error) {
       throw error;

@@ -112,7 +112,7 @@ class AccountsRoutes {
               person_id: Joi.number().required(),
               description: Joi.string().required(),
               amount: Joi.number().required(),
-              receipt_path: Joi.string().required(),
+              receipt_path: Joi.string().allow("").allow(null).optional(),
             })
           ),
         };
@@ -157,6 +157,17 @@ class AccountsRoutes {
           sales_return: Joi.number().required(),
           cashier_id: Joi.number().required(),
           user_id: Joi.number().required(),
+          sales: Joi.array().items(
+            Joi.object({
+              sales_id: Joi.number().allow("").allow(null).optional(),
+              person_type: Joi.number().required(),
+              payment_type: Joi.number().required(),
+              person_id: Joi.number().required(),
+              description: Joi.string().required(),
+              amount: Joi.number().required(),
+              receipt_path: Joi.string().allow("").allow(null).optional(),
+            })
+          ),
         };
 
         const account = { ...req.body, accounts_id: req.params.id };
