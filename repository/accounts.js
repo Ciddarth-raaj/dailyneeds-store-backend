@@ -369,6 +369,36 @@ class AccountsRepository {
       );
     });
   }
+
+  checkSheetSaved(date, store_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT COUNT(*) as exists_count 
+         FROM accounts_saved 
+         WHERE DATE(sheet_date) = DATE(?) 
+         AND store_id = ?`,
+        [date, store_id],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.ACCOUNTS",
+              code: "REPOSITORY.ACCOUNTS.CHECK-SAVED",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve({
+            code: 200,
+            is_saved: docs[0].exists_count > 0,
+          });
+        }
+      );
+    });
+  }
 }
 
 module.exports = (db) => {

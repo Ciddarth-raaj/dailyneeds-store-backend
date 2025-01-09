@@ -8,6 +8,34 @@ class AccountsRoutes {
   }
 
   init() {
+    router.get("/check-saved", async (req, res) => {
+      try {
+        const schema = {
+          date: Joi.date().required(),
+          store_id: Joi.string().required(),
+        };
+
+        const isValid = Joi.validate(req.query, schema);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const result = await this.accountsUsecase.checkSheetSaved(
+          req.query.date,
+          parseInt(req.query.store_id)
+        );
+        res.json(result);
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          console.log(err);
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: err.message });
+        }
+      }
+    });
+
     router.post("/save", async (req, res) => {
       try {
         const schema = {

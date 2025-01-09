@@ -66,7 +66,6 @@ class AccountsUsecase {
         outlet: outlet_data,
       };
 
-      console.log(result);
       return result;
     } catch (error) {
       throw error;
@@ -94,6 +93,15 @@ class AccountsUsecase {
   async deleteSavedAccount(sheetId) {
     try {
       const result = await this.accountsRepo.deleteSavedAccount(sheetId);
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  async checkSheetSaved(date, store_id) {
+    try {
+      const result = await this.accountsRepo.checkSheetSaved(date, store_id);
       return result;
     } catch (error) {
       throw error;
