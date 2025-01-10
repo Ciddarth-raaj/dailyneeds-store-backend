@@ -443,6 +443,213 @@ class AccountsRepository {
       );
     });
   }
+
+  getStandaloneSaleById(saleId) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT s.*, pl.name as person_name
+         FROM accounts_sales s
+         LEFT JOIN people_list pl ON pl.person_id = s.person_id
+         WHERE s.sales_id = ? AND s.accounts_id IS NULL`,
+        [saleId],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.ACCOUNTS",
+              code: "REPOSITORY.ACCOUNTS.GET-STANDALONE-SALE-BY-ID",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          if (docs.length === 0) {
+            resolve({ code: 404 });
+            return;
+          }
+          resolve({ code: 200, data: docs[0] });
+        }
+      );
+    });
+  }
+
+  createWarehouseSale(sale) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `INSERT INTO accounts_warehouse_sales (
+          person_type, payment_type, person_id, 
+          description, amount, receipt_path, date
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          sale.person_type,
+          sale.payment_type,
+          sale.person_id,
+          sale.description,
+          sale.amount,
+          sale.receipt_path,
+          sale.date,
+        ],
+        (err, res) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.ACCOUNTS",
+              code: "REPOSITORY.ACCOUNTS.CREATE-WAREHOUSE-SALE",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve({ code: 200, id: res.insertId });
+        }
+      );
+    });
+  }
+
+  updateWarehouseSale(sale) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `UPDATE accounts_warehouse_sales 
+        SET person_type = ?, 
+            payment_type = ?, 
+            person_id = ?, 
+            description = ?, 
+            amount = ?, 
+            receipt_path = ?,
+            date = ?
+        WHERE sales_id = ?`,
+        [
+          sale.person_type,
+          sale.payment_type,
+          sale.person_id,
+          sale.description,
+          sale.amount,
+          sale.receipt_path,
+          sale.date,
+          sale.sales_id,
+        ],
+        (err, res) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.ACCOUNTS",
+              code: "REPOSITORY.ACCOUNTS.UPDATE-WAREHOUSE-SALE",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve({ code: 200, id: sale.sales_id });
+        }
+      );
+    });
+  }
+
+  deleteWarehouseSale(saleId) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "DELETE FROM accounts_warehouse_sales WHERE sales_id = ?",
+        [saleId],
+        (err, res) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.ACCOUNTS",
+              code: "REPOSITORY.ACCOUNTS.DELETE-WAREHOUSE-SALE",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve({ code: 200 });
+        }
+      );
+    });
+  }
+
+  getWarehouseSales(filters = {}) {
+    return new Promise((resolve, reject) => {
+      let filterConditions = [];
+      let filterValues = [];
+
+      if (filters.from_date) {
+        filterConditions.push("DATE(s.date) >= ?");
+        filterValues.push(filters.from_date);
+      }
+      if (filters.to_date) {
+        filterConditions.push("DATE(s.date) <= ?");
+        filterValues.push(filters.to_date);
+      }
+
+      const whereClause =
+        filterConditions.length > 0
+          ? `WHERE ${filterConditions.join(" AND ")}`
+          : "";
+
+      this.db.query(
+        `SELECT s.*, pl.name as person_name
+         FROM accounts_warehouse_sales s
+         LEFT JOIN people_list pl ON pl.person_id = s.person_id
+         ${whereClause}
+         ORDER BY s.date DESC, s.sales_id DESC`,
+        filterValues,
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.ACCOUNTS",
+              code: "REPOSITORY.ACCOUNTS.GET-WAREHOUSE-SALES",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve({ code: 200, data: docs });
+        }
+      );
+    });
+  }
+
+  getWarehouseSaleById(saleId) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT s.*, pl.name as person_name
+         FROM accounts_warehouse_sales s
+         LEFT JOIN people_list pl ON pl.person_id = s.person_id
+         WHERE s.sales_id = ?`,
+        [saleId],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.ACCOUNTS",
+              code: "REPOSITORY.ACCOUNTS.GET-WAREHOUSE-SALE-BY-ID",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          if (docs.length === 0) {
+            resolve({ code: 404 });
+            return;
+          }
+          resolve({ code: 200, data: docs[0] });
+        }
+      );
+    });
+  }
 }
 
 module.exports = (db) => {

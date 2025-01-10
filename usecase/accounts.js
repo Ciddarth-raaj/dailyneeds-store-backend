@@ -125,6 +125,60 @@ class AccountsUsecase {
       throw error;
     }
   }
+
+  async getStandaloneSaleById(saleId) {
+    try {
+      const result = await this.accountsRepo.getStandaloneSaleById(saleId);
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  async createWarehouseSale(sale) {
+    try {
+      const result = await this.accountsRepo.createWarehouseSale(sale);
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  async updateWarehouseSale(sale) {
+    try {
+      const result = await this.accountsRepo.updateWarehouseSale(sale);
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  async deleteWarehouseSale(saleId) {
+    try {
+      const result = await this.accountsRepo.deleteWarehouseSale(saleId);
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  async getWarehouseSales(filters) {
+    try {
+      const result = await this.accountsRepo.getWarehouseSales(filters);
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  async getWarehouseSaleById(saleId) {
+    try {
+      const result = await this.accountsRepo.getWarehouseSaleById(saleId);
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
 }
 
 module.exports = (accountsRepo, accountsEbookUsecase, outletUsecase) => {

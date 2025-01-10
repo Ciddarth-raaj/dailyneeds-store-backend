@@ -236,6 +236,141 @@ class AccountsRoutes {
       }
     });
 
+    // Warehouse Sales Routes
+    router.post("/warehouse-sales", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          person_type: Joi.number().required(),
+          payment_type: Joi.number().required(),
+          person_id: Joi.number().required(),
+          description: Joi.string().required(),
+          amount: Joi.number().required(),
+          receipt_path: Joi.string().allow("").allow(null).optional(),
+          date: Joi.date().required(),
+        });
+
+        const isValid = schema.validate(req.body);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const result = await this.accountsUsecase.createWarehouseSale(req.body);
+        res.json(result);
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: err.message });
+        }
+      }
+    });
+
+    router.put("/warehouse-sales/:id", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          sales_id: Joi.number().required(),
+          person_type: Joi.number().required(),
+          payment_type: Joi.number().required(),
+          person_id: Joi.number().required(),
+          description: Joi.string().required(),
+          amount: Joi.number().required(),
+          receipt_path: Joi.string().allow("").allow(null).optional(),
+          date: Joi.date().required(),
+        });
+
+        const sale = { ...req.body, sales_id: parseInt(req.params.id) };
+        const isValid = schema.validate(sale);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const result = await this.accountsUsecase.updateWarehouseSale(sale);
+        res.json(result);
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: err.message });
+        }
+      }
+    });
+
+    router.delete("/warehouse-sales/:id", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          id: Joi.number().required(),
+        });
+
+        const isValid = schema.validate({ id: parseInt(req.params.id) });
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const result = await this.accountsUsecase.deleteWarehouseSale(
+          parseInt(req.params.id)
+        );
+        res.json(result);
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: err.message });
+        }
+      }
+    });
+
+    router.get("/warehouse-sales", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          from_date: Joi.date().optional(),
+          to_date: Joi.date().optional(),
+        });
+
+        const isValid = schema.validate(req.query);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const result = await this.accountsUsecase.getWarehouseSales(req.query);
+        res.json(result);
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: err.message });
+        }
+      }
+    });
+
+    router.get("/warehouse-sales/:id", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          id: Joi.number().required(),
+        });
+
+        const isValid = schema.validate({ id: parseInt(req.params.id) });
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const result = await this.accountsUsecase.getWarehouseSaleById(
+          parseInt(req.params.id)
+        );
+        res.json(result);
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: err.message });
+        }
+      }
+    });
+
     router.get("/:id", async (req, res) => {
       try {
         const schema = {
