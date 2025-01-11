@@ -914,6 +914,81 @@ class AccountsRepository {
       );
     });
   }
+
+  getStartingCash(date) {
+    return new Promise((resolve, reject) => {
+      // First try to get the previous day's date
+      this.db.query(
+        `SELECT * FROM accounts_warehouse_starting_cash 
+         WHERE DATE(date) = DATE_SUB(DATE(?), INTERVAL 1 DAY)`,
+        [date],
+        (err, previousDayDocs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.ACCOUNTS",
+              code: "REPOSITORY.ACCOUNTS.GET-STARTING-CASH",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+
+          // If we found a previous day match, return it
+          if (previousDayDocs.length > 0) {
+            resolve({
+              code: 200,
+              data: {
+                ...previousDayDocs[0],
+                is_carried_forward: false,
+              },
+            });
+            return;
+          }
+
+          // If no previous day match, look for the latest date with can_carry_forward = true
+          this.db.query(
+            `SELECT * FROM accounts_warehouse_starting_cash 
+             WHERE DATE(date) < DATE(?) 
+             ORDER BY date DESC 
+             LIMIT 1`,
+            [date],
+            (err, carriedForwardDocs) => {
+              if (err) {
+                logger.Log({
+                  level: logger.LEVEL.ERROR,
+                  component: "REPOSITORY.ACCOUNTS",
+                  code: "REPOSITORY.ACCOUNTS.GET-STARTING-CASH-CARRIED-FORWARD",
+                  description: err.toString(),
+                  category: "",
+                  ref: {},
+                });
+                reject(err);
+                return;
+              }
+
+              if (
+                carriedForwardDocs.length > 0 &&
+                carriedForwardDocs[0].can_carry_forward
+              ) {
+                resolve({
+                  code: 200,
+                  data: {
+                    ...carriedForwardDocs[0],
+                    is_carried_forward: true,
+                  },
+                });
+              } else {
+                resolve({ code: 200, data: null });
+              }
+            }
+          );
+        }
+      );
+    });
+  }
 }
 
 module.exports = (db) => {

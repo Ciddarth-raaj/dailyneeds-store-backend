@@ -252,6 +252,15 @@ class AccountsUsecase {
       throw error;
     }
   }
+
+  async getStartingCash(date) {
+    try {
+      const result = await this.accountsRepo.getStartingCash(new Date(date));
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
 }
 
 module.exports = (accountsRepo, accountsEbookUsecase, outletUsecase) => {
