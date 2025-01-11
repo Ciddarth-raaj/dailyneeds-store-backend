@@ -650,6 +650,189 @@ class AccountsRepository {
       );
     });
   }
+
+  createWarehouseCashDenomination(denomination) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `INSERT INTO accounts_warehouse_cash_denomination (
+          cash_handover_1, cash_handover_2, cash_handover_5, 
+          cash_handover_10, cash_handover_20, cash_handover_50,
+          cash_handover_100, cash_handover_200, cash_handover_500,
+          date
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          denomination.cash_handover_1,
+          denomination.cash_handover_2,
+          denomination.cash_handover_5,
+          denomination.cash_handover_10,
+          denomination.cash_handover_20,
+          denomination.cash_handover_50,
+          denomination.cash_handover_100,
+          denomination.cash_handover_200,
+          denomination.cash_handover_500,
+          denomination.date,
+        ],
+        (err, res) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.ACCOUNTS",
+              code: "REPOSITORY.ACCOUNTS.CREATE-WAREHOUSE-CASH-DENOMINATION",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve({ code: 200, id: res.insertId });
+        }
+      );
+    });
+  }
+
+  updateWarehouseCashDenomination(denomination) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `UPDATE accounts_warehouse_cash_denomination 
+        SET cash_handover_1 = ?, 
+            cash_handover_2 = ?, 
+            cash_handover_5 = ?, 
+            cash_handover_10 = ?,
+            cash_handover_20 = ?,
+            cash_handover_50 = ?,
+            cash_handover_100 = ?,
+            cash_handover_200 = ?,
+            cash_handover_500 = ?,
+            date = ?
+        WHERE cash_denomination_id = ?`,
+        [
+          denomination.cash_handover_1,
+          denomination.cash_handover_2,
+          denomination.cash_handover_5,
+          denomination.cash_handover_10,
+          denomination.cash_handover_20,
+          denomination.cash_handover_50,
+          denomination.cash_handover_100,
+          denomination.cash_handover_200,
+          denomination.cash_handover_500,
+          denomination.date,
+          denomination.cash_denomination_id,
+        ],
+        (err, res) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.ACCOUNTS",
+              code: "REPOSITORY.ACCOUNTS.UPDATE-WAREHOUSE-CASH-DENOMINATION",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve({ code: 200, id: denomination.cash_denomination_id });
+        }
+      );
+    });
+  }
+
+  deleteWarehouseCashDenomination(denominationId) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "DELETE FROM accounts_warehouse_cash_denomination WHERE cash_denomination_id = ?",
+        [denominationId],
+        (err, res) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.ACCOUNTS",
+              code: "REPOSITORY.ACCOUNTS.DELETE-WAREHOUSE-CASH-DENOMINATION",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve({ code: 200 });
+        }
+      );
+    });
+  }
+
+  getWarehouseCashDenominations(filters = {}) {
+    return new Promise((resolve, reject) => {
+      let filterConditions = [];
+      let filterValues = [];
+
+      if (filters.from_date) {
+        filterConditions.push("DATE(date) >= ?");
+        filterValues.push(filters.from_date);
+      }
+      if (filters.to_date) {
+        filterConditions.push("DATE(date) <= ?");
+        filterValues.push(filters.to_date);
+      }
+
+      const whereClause =
+        filterConditions.length > 0
+          ? `WHERE ${filterConditions.join(" AND ")}`
+          : "";
+
+      this.db.query(
+        `SELECT * FROM accounts_warehouse_cash_denomination
+         ${whereClause}
+         ORDER BY date DESC, cash_denomination_id DESC`,
+        filterValues,
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.ACCOUNTS",
+              code: "REPOSITORY.ACCOUNTS.GET-WAREHOUSE-CASH-DENOMINATIONS",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve({ code: 200, data: docs });
+        }
+      );
+    });
+  }
+
+  getWarehouseCashDenominationById(denominationId) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT * FROM accounts_warehouse_cash_denomination
+         WHERE cash_denomination_id = ?`,
+        [denominationId],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.ACCOUNTS",
+              code: "REPOSITORY.ACCOUNTS.GET-WAREHOUSE-CASH-DENOMINATION-BY-ID",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          if (docs.length === 0) {
+            resolve({ code: 404 });
+            return;
+          }
+          resolve({ code: 200, data: docs[0] });
+        }
+      );
+    });
+  }
 }
 
 module.exports = (db) => {

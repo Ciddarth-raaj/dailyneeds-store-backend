@@ -179,6 +179,61 @@ class AccountsUsecase {
       throw error;
     }
   }
+
+  async createWarehouseCashDenomination(denomination) {
+    try {
+      const result = await this.accountsRepo.createWarehouseCashDenomination(
+        denomination
+      );
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  async updateWarehouseCashDenomination(denomination) {
+    try {
+      const result = await this.accountsRepo.updateWarehouseCashDenomination(
+        denomination
+      );
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  async deleteWarehouseCashDenomination(denominationId) {
+    try {
+      const result = await this.accountsRepo.deleteWarehouseCashDenomination(
+        denominationId
+      );
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  async getWarehouseCashDenominations(filters) {
+    try {
+      const result = await this.accountsRepo.getWarehouseCashDenominations(
+        filters
+      );
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  async getWarehouseCashDenominationById(denominationId) {
+    try {
+      const result = await this.accountsRepo.getWarehouseCashDenominationById(
+        denominationId
+      );
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
 }
 
 module.exports = (accountsRepo, accountsEbookUsecase, outletUsecase) => {

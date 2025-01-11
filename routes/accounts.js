@@ -371,6 +371,158 @@ class AccountsRoutes {
       }
     });
 
+    // Warehouse Cash Denomination Routes
+    router.post("/warehouse-cash-denomination", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          cash_handover_1: Joi.number().required(),
+          cash_handover_2: Joi.number().required(),
+          cash_handover_5: Joi.number().required(),
+          cash_handover_10: Joi.number().required(),
+          cash_handover_20: Joi.number().required(),
+          cash_handover_50: Joi.number().required(),
+          cash_handover_100: Joi.number().required(),
+          cash_handover_200: Joi.number().required(),
+          cash_handover_500: Joi.number().required(),
+          date: Joi.date().required(),
+        });
+
+        const isValid = schema.validate(req.body);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const result =
+          await this.accountsUsecase.createWarehouseCashDenomination(req.body);
+        res.json(result);
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: err.message });
+        }
+      }
+    });
+
+    router.put("/warehouse-cash-denomination/:id", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          cash_denomination_id: Joi.number().required(),
+          cash_handover_1: Joi.number().required(),
+          cash_handover_2: Joi.number().required(),
+          cash_handover_5: Joi.number().required(),
+          cash_handover_10: Joi.number().required(),
+          cash_handover_20: Joi.number().required(),
+          cash_handover_50: Joi.number().required(),
+          cash_handover_100: Joi.number().required(),
+          cash_handover_200: Joi.number().required(),
+          cash_handover_500: Joi.number().required(),
+          date: Joi.date().required(),
+        });
+
+        const denomination = {
+          ...req.body,
+          cash_denomination_id: parseInt(req.params.id),
+        };
+        const isValid = schema.validate(denomination);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const result =
+          await this.accountsUsecase.updateWarehouseCashDenomination(
+            denomination
+          );
+        res.json(result);
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: err.message });
+        }
+      }
+    });
+
+    router.delete("/warehouse-cash-denomination/:id", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          id: Joi.number().required(),
+        });
+
+        const isValid = schema.validate({ id: parseInt(req.params.id) });
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const result =
+          await this.accountsUsecase.deleteWarehouseCashDenomination(
+            parseInt(req.params.id)
+          );
+        res.json(result);
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: err.message });
+        }
+      }
+    });
+
+    router.get("/warehouse-cash-denomination", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          from_date: Joi.date().optional(),
+          to_date: Joi.date().optional(),
+        });
+
+        const isValid = schema.validate(req.query);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const result = await this.accountsUsecase.getWarehouseCashDenominations(
+          req.query
+        );
+        res.json(result);
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: err.message });
+        }
+      }
+    });
+
+    router.get("/warehouse-cash-denomination/:id", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          id: Joi.number().required(),
+        });
+
+        const isValid = schema.validate({ id: parseInt(req.params.id) });
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const result =
+          await this.accountsUsecase.getWarehouseCashDenominationById(
+            parseInt(req.params.id)
+          );
+        res.json(result);
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: err.message });
+        }
+      }
+    });
+
     router.get("/:id", async (req, res) => {
       try {
         const schema = {
