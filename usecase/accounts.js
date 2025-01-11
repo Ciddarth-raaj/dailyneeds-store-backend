@@ -234,6 +234,15 @@ class AccountsUsecase {
       throw error;
     }
   }
+
+  async getAllOutletsCashHandover(filters) {
+    try {
+      const result = await this.accountsRepo.getAllOutletsCashHandover(filters);
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
 }
 
 module.exports = (accountsRepo, accountsEbookUsecase, outletUsecase) => {

@@ -833,6 +833,70 @@ class AccountsRepository {
       );
     });
   }
+
+  getAllOutletsCashHandover(filters = {}) {
+    return new Promise((resolve, reject) => {
+      let filterConditions = [];
+      let filterValues = [];
+
+      if (filters.from_date) {
+        filterConditions.push("DATE(a.date) >= ?");
+        filterValues.push(filters.from_date);
+      }
+      if (filters.to_date) {
+        filterConditions.push("DATE(a.date) <= ?");
+        filterValues.push(filters.to_date);
+      }
+
+      const whereClause =
+        filterConditions.length > 0
+          ? `WHERE ${filterConditions.join(" AND ")}`
+          : "";
+
+      this.db.query(
+        `SELECT 
+          a.date,
+          ne.store_id,
+          o.outlet_name,
+          a.cash_handover_1,
+          a.cash_handover_2,
+          a.cash_handover_5,
+          a.cash_handover_10,
+          a.cash_handover_20,
+          a.cash_handover_50,
+          a.cash_handover_100,
+          a.cash_handover_200,
+          a.cash_handover_500
+         FROM accounts a
+         LEFT JOIN new_employee ne ON ne.employee_id = a.cashier_id
+         LEFT JOIN outlets o ON o.outlet_id = ne.store_id
+         ${whereClause}
+         ORDER BY a.date DESC, ne.store_id`,
+        filterValues,
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.ACCOUNTS",
+              code: "REPOSITORY.ACCOUNTS.GET-ALL-OUTLETS-CASH-HANDOVER",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve({
+            code: 200,
+            data: docs.map((row) => ({
+              ...row,
+              date: row.date.toISOString().split("T")[0],
+            })),
+          });
+        }
+      );
+    });
+  }
 }
 
 module.exports = (db) => {
