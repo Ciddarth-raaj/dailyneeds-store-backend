@@ -1,3 +1,3 @@
 CREATE TABLE `accounts_warehouse_sales` (`sales_id` INT NOT NULL AUTO_INCREMENT , `person_type` INT NOT NULL , `payment_type` INT NOT NULL , `person_id` INT NOT NULL , `description` INT NOT NULL , `amount` DECIMAL NOT NULL , `receipt_path` TEXT NOT NULL , `date` DATE NOT NULL , PRIMARY KEY (`sales_id`)) ENGINE = InnoDB;
 ALTER TABLE `accounts_warehouse_sales` CHANGE `description` `description` TEXT NOT NULL;
-ALTER TABLE `accounts_warehouse_sales` CHANGE `receipt_path` `receipt_path` TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL;
+ALTER TABLE `accounts_warehouse_sales` CHANGE `receipt_path` `receipt_path` TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL;
