@@ -550,6 +550,31 @@ class AccountsRoutes {
       }
     });
 
+    router.post("/warehouse-starting-cash", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          starting_cash: Joi.number().required(),
+          date: Joi.date().required(),
+          can_carry_forward: Joi.boolean().allow(null).optional(),
+        });
+
+        const isValid = schema.validate(req.body);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const result = await this.accountsUsecase.addStartingCash(req.body);
+        res.json(result);
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: err.message });
+        }
+      }
+    });
+
     router.get("/:id", async (req, res) => {
       try {
         const schema = {

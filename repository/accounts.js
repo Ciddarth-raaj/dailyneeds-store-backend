@@ -897,6 +897,23 @@ class AccountsRepository {
       );
     });
   }
+
+  addStartingCash(params) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `INSERT INTO accounts_warehouse_starting_cash (starting_cash, date, can_carry_forward)
+        VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE starting_cash = VALUES(starting_cash), can_carry_forward = VALUES(can_carry_forward)`,
+        [params.starting_cash, params.date, params.can_carry_forward ?? false],
+        (err, res) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+          resolve({ code: 200, id: res.insertId });
+        }
+      );
+    });
+  }
 }
 
 module.exports = (db) => {

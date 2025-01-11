@@ -1,0 +1,2 @@
+CREATE TABLE `accounts_warehouse_starting_cash` (`starting_cash_id` INT NOT NULL AUTO_INCREMENT , `starting_cash` DECIMAL NOT NULL , `date` DATE NOT NULL , `can_carry_forward` BOOLEAN NOT NULL DEFAULT FALSE , `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP , PRIMARY KEY (`starting_cash_id`)) ENGINE = InnoDB;
+ALTER TABLE `accounts_warehouse_starting_cash` ADD UNIQUE(`date`);
