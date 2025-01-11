@@ -444,6 +444,42 @@ class AccountsRepository {
     });
   }
 
+  getSavedAccount(date, store_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT * FROM accounts_saved 
+         WHERE DATE(sheet_date) = DATE(?) 
+         AND store_id = ?`,
+        [new Date(date), store_id],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.ACCOUNTS",
+              code: "REPOSITORY.ACCOUNTS.GET-SAVED-ACCOUNT",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          if (docs.length === 0) {
+            resolve({ code: 404 });
+            return;
+          }
+          resolve({
+            code: 200,
+            data: {
+              ...docs[0],
+              sheet_date: docs[0].sheet_date.toISOString().split("T")[0],
+            },
+          });
+        }
+      );
+    });
+  }
+
   getStandaloneSaleById(saleId) {
     return new Promise((resolve, reject) => {
       this.db.query(
@@ -903,7 +939,11 @@ class AccountsRepository {
       this.db.query(
         `INSERT INTO accounts_warehouse_starting_cash (starting_cash, date, can_carry_forward)
         VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE starting_cash = VALUES(starting_cash), can_carry_forward = VALUES(can_carry_forward)`,
-        [params.starting_cash, params.date, params.can_carry_forward ?? false],
+        [
+          params.starting_cash,
+          new Date(params.date),
+          params.can_carry_forward ?? false,
+        ],
         (err, res) => {
           if (err) {
             reject(err);

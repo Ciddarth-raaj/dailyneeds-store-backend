@@ -261,6 +261,15 @@ class AccountsUsecase {
       throw error;
     }
   }
+
+  async getSavedAccount(date, store_id) {
+    try {
+      const result = await this.accountsRepo.getSavedAccount(date, store_id);
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
 }
 
 module.exports = (accountsRepo, accountsEbookUsecase, outletUsecase) => {

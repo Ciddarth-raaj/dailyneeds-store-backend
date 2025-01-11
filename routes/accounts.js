@@ -600,6 +600,33 @@ class AccountsRoutes {
       }
     });
 
+    router.get("/saved-account", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          date: Joi.date().required(),
+          store_id: Joi.number().required(),
+        });
+
+        const isValid = schema.validate(req.query);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const result = await this.accountsUsecase.getSavedAccount(
+          req.query.date,
+          parseInt(req.query.store_id)
+        );
+        res.json(result);
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: err.message });
+        }
+      }
+    });
+
     router.get("/:id", async (req, res) => {
       try {
         const schema = {
