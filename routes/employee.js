@@ -337,6 +337,32 @@ class EmployeeRoutes {
 
       res.end();
     });
+
+    router.get("/get-details", async (req, res) => {
+      try {
+        const schema = {
+          employee_id: Joi.number().required(),
+        };
+        const employee_id = req.decoded.id;
+        const isValid = Joi.validate({ employee_id }, schema);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const data = await this.employeeUsecase.getEmployeeById(employee_id);
+        res.json(data);
+      } catch (err) {
+        console.log(err);
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          res.json({ code: 500, msg: "An error occurred !" });
+        }
+      }
+
+      res.end();
+    });
+
     router.post("/update-status", async (req, res) => {
       try {
         const schema = {
