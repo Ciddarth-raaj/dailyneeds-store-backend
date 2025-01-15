@@ -270,6 +270,15 @@ class AccountsUsecase {
       throw error;
     }
   }
+
+  async getSalesByOutlet(filters) {
+    try {
+      const result = await this.accountsRepo.getSalesByOutlet(filters);
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
 }
 
 module.exports = (accountsRepo, accountsEbookUsecase, outletUsecase) => {

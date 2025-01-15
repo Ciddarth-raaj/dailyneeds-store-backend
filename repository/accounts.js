@@ -1029,6 +1029,97 @@ class AccountsRepository {
       );
     });
   }
+
+  getSalesByOutlet(filters = {}) {
+    return new Promise((resolve, reject) => {
+      let filterConditions = [];
+      let filterValues = [];
+
+      if (filters.from_date) {
+        filterConditions.push("DATE(a.date) >= ?");
+        filterValues.push(filters.from_date);
+      }
+      if (filters.to_date) {
+        filterConditions.push("DATE(a.date) <= ?");
+        filterValues.push(filters.to_date);
+      }
+
+      const whereClause =
+        filterConditions.length > 0
+          ? `WHERE ${filterConditions.join(" AND ")}`
+          : "";
+
+      this.db.query(
+        `SELECT 
+          ne.store_id,
+          o.outlet_name,
+          JSON_ARRAYAGG(
+            JSON_OBJECT(
+              'accounts_id', IFNULL(a.accounts_id, ''),
+              'date', DATE_FORMAT(a.date, '%Y-%m-%d'),
+              'total_sales', IFNULL(a.total_sales, 0),
+              'card_sales', IFNULL(a.card_sales, 0),
+              'loyalty', IFNULL(a.loyalty, 0),
+              'sales_return', IFNULL(a.sales_return, 0),
+              'cashier_name', IFNULL(ne.employee_name, ''),
+              'sales', IFNULL(
+                (
+                  SELECT JSON_ARRAYAGG(
+                    JSON_OBJECT(
+                      'sales_id', s.sales_id,
+                      'person_type', s.person_type,
+                      'payment_type', s.payment_type,
+                      'person_id', s.person_id,
+                      'person_name', IFNULL(pl.name, ''),
+                      'description', IFNULL(s.description, ''),
+                      'amount', IFNULL(s.amount, 0),
+                      'receipt_path', IFNULL(s.receipt_path, '')
+                    )
+                  )
+                  FROM accounts_sales s
+                  LEFT JOIN people_list pl ON pl.person_id = s.person_id
+                  WHERE s.accounts_id = a.accounts_id
+                ),
+                JSON_ARRAY()
+              )
+            )
+          ) as accounts
+         FROM accounts a
+         LEFT JOIN new_employee ne ON ne.employee_id = a.cashier_id
+         LEFT JOIN outlets o ON o.outlet_id = ne.store_id
+         ${whereClause}
+         GROUP BY ne.store_id, o.outlet_name
+         ORDER BY ne.store_id`,
+        filterValues,
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.ACCOUNTS",
+              code: "REPOSITORY.ACCOUNTS.GET-SALES-BY-OUTLET",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+
+          // Parse the JSON strings and handle null values
+          const formattedDocs = docs.map((doc) => ({
+            store_id: doc.store_id || null,
+            outlet_name: doc.outlet_name || "",
+            accounts: doc.accounts ? JSON.parse(doc.accounts) : [],
+          }));
+
+          resolve({
+            code: 200,
+            data: formattedDocs,
+          });
+        }
+      );
+    });
+  }
 }
 
 module.exports = (db) => {

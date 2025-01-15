@@ -627,6 +627,30 @@ class AccountsRoutes {
       }
     });
 
+    router.get("/sales-by-outlet", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          from_date: Joi.date().optional(),
+          to_date: Joi.date().optional(),
+        });
+
+        const isValid = schema.validate(req.query);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const result = await this.accountsUsecase.getSalesByOutlet(req.query);
+        res.json(result);
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: err.message });
+        }
+      }
+    });
+
     router.get("/:id", async (req, res) => {
       try {
         const schema = {
