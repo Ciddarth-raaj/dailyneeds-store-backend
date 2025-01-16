@@ -92,25 +92,63 @@ class AccountsRepository {
         return this.createSale(sale);
       }
 
+      let updateFields = [];
+      let queryParams = [];
+
+      // Only add fields that are provided
+      if (sale.person_type !== undefined) {
+        updateFields.push("person_type = ?");
+        queryParams.push(sale.person_type);
+      }
+      if (sale.payment_type !== undefined) {
+        updateFields.push("payment_type = ?");
+        queryParams.push(sale.payment_type);
+      }
+      if (sale.person_id !== undefined) {
+        updateFields.push("person_id = ?");
+        queryParams.push(sale.person_id);
+      }
+      if (sale.description !== undefined) {
+        updateFields.push("description = ?");
+        queryParams.push(sale.description);
+      }
+      if (sale.amount !== undefined) {
+        updateFields.push("amount = ?");
+        queryParams.push(sale.amount);
+      }
+      if (sale.receipt_path !== undefined) {
+        updateFields.push("receipt_path = ?");
+        queryParams.push(sale.receipt_path);
+      }
+      if (sale.is_checked !== undefined) {
+        updateFields.push("is_checked = ?");
+        queryParams.push(sale.is_checked);
+      }
+
+      // If no fields to update, return success
+      if (updateFields.length === 0) {
+        resolve({ code: 200, id: sale.sales_id });
+        return;
+      }
+
+      // Add WHERE clause parameter
+      queryParams.push(sale.sales_id);
+
+      const whereClause =
+        sale.accounts_id !== undefined
+          ? "WHERE sales_id = ? AND accounts_id = ?"
+          : "WHERE sales_id = ?";
+
+      // Add accounts_id to params if provided
+      if (sale.accounts_id !== undefined) {
+        queryParams.push(sale.accounts_id);
+      }
+
       this.db.query(
         `UPDATE accounts_sales 
-        SET person_type = ?, 
-            payment_type = ?, 
-            person_id = ?, 
-            description = ?, 
-            amount = ?, 
-            receipt_path = ?
-        WHERE sales_id = ? AND accounts_id = ?`,
-        [
-          sale.person_type,
-          sale.payment_type,
-          sale.person_id,
-          sale.description,
-          sale.amount,
-          sale.receipt_path,
-          sale.sales_id,
-          sale.accounts_id,
-        ],
+        SET ${updateFields.join(", ")}
+        ${whereClause}`,
+        queryParams,
         (err, res) => {
           if (err) {
             logger.Log({
@@ -243,7 +281,8 @@ class AccountsRepository {
                'person_name', pl.name,
                'description', s2.description,
                'amount', s2.amount,
-               'receipt_path', s2.receipt_path
+               'receipt_path', s2.receipt_path,
+               'is_checked', s2.is_checked
              )
            )
            FROM accounts_sales s2 
@@ -310,7 +349,8 @@ class AccountsRepository {
                'person_name', pl.name,
                'description', s2.description,
                'amount', s2.amount,
-               'receipt_path', s2.receipt_path
+               'receipt_path', s2.receipt_path,
+               'is_checked', s2.is_checked
              )
            )
            FROM accounts_sales s2 
@@ -1073,7 +1113,8 @@ class AccountsRepository {
                       'person_name', IFNULL(pl.name, ''),
                       'description', IFNULL(s.description, ''),
                       'amount', IFNULL(s.amount, 0),
-                      'receipt_path', IFNULL(s.receipt_path, '')
+                      'receipt_path', IFNULL(s.receipt_path, ''),
+                      'is_checked', s2.is_checked
                     )
                   )
                   FROM accounts_sales s

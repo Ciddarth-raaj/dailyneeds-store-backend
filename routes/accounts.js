@@ -673,6 +673,38 @@ class AccountsRoutes {
         }
       }
     });
+
+    router.put("/sales/:id", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          sales_id: Joi.number().required(),
+          accounts_id: Joi.number().optional(),
+          person_type: Joi.number().optional(),
+          payment_type: Joi.number().optional(),
+          person_id: Joi.number().optional(),
+          description: Joi.string().optional(),
+          amount: Joi.number().optional(),
+          receipt_path: Joi.string().allow("").allow(null).optional(),
+          is_checked: Joi.boolean().optional(),
+        });
+
+        const sale = { ...req.body, sales_id: parseInt(req.params.id) };
+        const isValid = schema.validate(sale);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const result = await this.accountsUsecase.updateSale(sale);
+        res.json(result);
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: err.message });
+        }
+      }
+    });
   }
 
   getRouter() {
