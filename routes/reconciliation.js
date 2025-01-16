@@ -36,6 +36,31 @@ class ReconciliationRoutes {
         }
       }
     });
+
+    router.get("/sales", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          from_date: Joi.date().optional(),
+          to_date: Joi.date().optional(),
+          store_id: Joi.number().optional(),
+        });
+
+        const isValid = schema.validate(req.query);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const result = await this.reconciliationUsecase.getSales(req.query);
+        res.json(result);
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: err.message });
+        }
+      }
+    });
   }
 
   getRouter() {

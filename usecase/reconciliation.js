@@ -13,6 +13,15 @@ class ReconciliationUsecase {
       throw error;
     }
   }
+
+  async getSales(filters) {
+    try {
+      const result = await this.reconciliationRepo.getSales(filters);
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
 }
 
 module.exports = (reconciliationRepo) => {
