@@ -93,7 +93,7 @@ class ReconciliationRepository {
           // Format dates and add outlet name
           const formattedDocs = docs.map((doc) => ({
             ...doc,
-            bill_date: doc.bill_date.toISOString().split("T")[0],
+            bill_date: doc.bill_date,
             outlet_name: doc.outlet_name || "",
           }));
 
