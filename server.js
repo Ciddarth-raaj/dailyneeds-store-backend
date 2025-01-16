@@ -129,6 +129,9 @@ class Server {
     this.accountsEbookRepo = require("./repository/accountsEbook")(
       this.mysql.connection
     );
+    this.reconciliationRepo = require("./repository/reconciliation")(
+      this.mysql.connection
+    );
   }
 
   initUsecases() {
@@ -200,6 +203,9 @@ class Server {
       this.accountsEbookUsecase,
       this.outletUsecase
     );
+    this.reconciliationUsecase = require("./usecase/reconciliation")(
+      this.reconciliationRepo
+    );
   }
 
   initRoutes() {
@@ -250,6 +256,9 @@ class Server {
     const accountsEbookRouter = require("./routes/accountsEbook")(
       this.accountsEbookUsecase
     );
+    const reconciliationRouter = require("./routes/reconciliation")(
+      this.reconciliationUsecase
+    );
 
     app.use("/document", documentRouter.getRouter());
     app.use("/whatsapp", whatsappRouter.getRouter());
@@ -281,6 +290,7 @@ class Server {
     app.use("/people", peopleRouter.getRouter());
     app.use("/accounts-ebook", accountsEbookRouter.getRouter());
     app.use("/accounts", accountsRouter.getRouter());
+    app.use("/reconciliation", reconciliationRouter.getRouter());
   }
 
   initServices() {

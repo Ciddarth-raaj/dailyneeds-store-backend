@@ -1114,7 +1114,7 @@ class AccountsRepository {
                       'description', IFNULL(s.description, ''),
                       'amount', IFNULL(s.amount, 0),
                       'receipt_path', IFNULL(s.receipt_path, ''),
-                      'is_checked', s2.is_checked
+                      'is_checked', s.is_checked
                     )
                   )
                   FROM accounts_sales s
