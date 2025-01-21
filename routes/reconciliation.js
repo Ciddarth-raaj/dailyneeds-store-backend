@@ -37,6 +37,37 @@ class ReconciliationRoutes {
       }
     });
 
+    router.post("/epayment", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          bill_date: Joi.date().required(),
+          store_id: Joi.number().required(),
+          paytm_tid: Joi.string().required(),
+          card_diff: Joi.number().allow(null).required(),
+          upi_diff: Joi.number().allow(null).required(),
+          sodexo_diff: Joi.number().allow(null).required(),
+          paytm_diff: Joi.number().allow(null).required(),
+        });
+
+        const isValid = schema.validate(req.body);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const result = await this.reconciliationUsecase.createOrUpdateEpayment(
+          req.body
+        );
+        res.json(result);
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: err.message });
+        }
+      }
+    });
+
     router.get("/sales", async (req, res) => {
       try {
         const schema = Joi.object({

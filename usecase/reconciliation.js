@@ -14,6 +14,17 @@ class ReconciliationUsecase {
     }
   }
 
+  async createOrUpdateEpayment(reconciliation) {
+    try {
+      const result = await this.reconciliationRepo.createOrUpdateEpayment(
+        reconciliation
+      );
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
+
   async getSales(filters) {
     try {
       const result = await this.reconciliationRepo.getSales(filters);

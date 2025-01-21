@@ -46,6 +46,51 @@ class ReconciliationRepository {
     });
   }
 
+  createOrUpdateEpayment(reconciliation) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `INSERT INTO accounts_reconciliation_epayment 
+        (bill_date, store_id, card_diff, upi_diff, sodexo_diff, paytm_diff, paytm_tid)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+        card_diff = VALUES(card_diff),
+        upi_diff = VALUES(upi_diff),
+        sodexo_diff = VALUES(sodexo_diff),
+        paytm_diff = VALUES(paytm_diff),
+        paytm_tid = VALUES(paytm_tid)`,
+        [
+          reconciliation.bill_date,
+          reconciliation.store_id,
+          reconciliation.card_diff,
+          reconciliation.upi_diff,
+          reconciliation.sodexo_diff,
+          reconciliation.paytm_diff,
+          reconciliation.paytm_tid,
+        ],
+        (err, res) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.RECONCILIATION",
+              code: "REPOSITORY.RECONCILIATION.EPAYMENT-CREATE-OR-UPDATE",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve({
+            code: 200,
+            id: res.insertId,
+            inserted: res.affectedRows - res.changedRows,
+            updated: res.changedRows,
+          });
+        }
+      );
+    });
+  }
+
   getSales(filters = {}) {
     return new Promise((resolve, reject) => {
       let filterConditions = [];

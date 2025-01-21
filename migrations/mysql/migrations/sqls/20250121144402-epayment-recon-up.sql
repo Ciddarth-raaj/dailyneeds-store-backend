@@ -1,0 +1,3 @@
+CREATE TABLE `accounts_reconciliation_epayment` (`bill_date` DATE NOT NULL , `store_id` INT NOT NULL , `card_diff` INT NULL DEFAULT NULL , `upi_diff` INT NULL DEFAULT NULL , `sodexo_diff` INT NULL DEFAULT NULL , `paytm_diff` INT NULL DEFAULT NULL , `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ) ENGINE = InnoDB;
+ALTER TABLE `accounts_reconciliation_epayment` ADD `paytm_tid` VARCHAR(100) NOT NULL AFTER `bill_date`;
+ALTER TABLE `accounts_reconciliation_epayment` ADD UNIQUE(`bill_date`, `store_id`, `paytm_tid`);
