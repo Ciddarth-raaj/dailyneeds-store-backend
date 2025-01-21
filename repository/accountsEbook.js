@@ -137,9 +137,10 @@ class AccountsEbookRepository {
           : "";
 
       this.db.query(
-        `SELECT ae.*, o.outlet_name as store_name
+        `SELECT ae.*, o.outlet_name as store_name, dp.payment_mid as paytm_mid, dp.pluxe_outlet_id
          FROM accounts_ebook ae
          LEFT JOIN outlets o ON o.outlet_id = ae.store_id
+         LEFT JOIN digital_payments dp ON dp.payment_tid = ae.paytm_tid
          ${whereClause}
          ORDER BY ae.date DESC`,
         filterValues,
