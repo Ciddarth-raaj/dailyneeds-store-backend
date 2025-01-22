@@ -33,6 +33,15 @@ class ReconciliationUsecase {
       throw error;
     }
   }
+
+  async getEpayment(filters) {
+    try {
+      const result = await this.reconciliationRepo.getEpayment(filters);
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
 }
 
 module.exports = (reconciliationRepo) => {

@@ -43,10 +43,16 @@ class ReconciliationRoutes {
           bill_date: Joi.date().required(),
           store_id: Joi.number().required(),
           paytm_tid: Joi.string().required(),
-          card_diff: Joi.number().allow(null).required(),
-          upi_diff: Joi.number().allow(null).required(),
-          sodexo_diff: Joi.number().allow(null).required(),
-          paytm_diff: Joi.number().allow(null).required(),
+
+          card_diff: Joi.number().allow(null).optional(),
+          upi_diff: Joi.number().allow(null).optional(),
+          sodexo_diff: Joi.number().allow(null).optional(),
+          paytm_diff: Joi.number().allow(null).optional(),
+
+          card_settled: Joi.boolean().optional(),
+          upi_settled: Joi.boolean().optional(),
+          sodexo_settled: Joi.boolean().optional(),
+          paytm_settled: Joi.boolean().optional(),
         });
 
         const isValid = schema.validate(req.body);
@@ -82,6 +88,31 @@ class ReconciliationRoutes {
         }
 
         const result = await this.reconciliationUsecase.getSales(req.query);
+        res.json(result);
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: err.message });
+        }
+      }
+    });
+
+    router.get("/epayment", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          from_date: Joi.date().optional(),
+          to_date: Joi.date().optional(),
+          store_id: Joi.number().optional(),
+        });
+
+        const isValid = schema.validate(req.query);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const result = await this.reconciliationUsecase.getEpayment(req.query);
         res.json(result);
       } catch (err) {
         if (err.name === "ValidationError") {
