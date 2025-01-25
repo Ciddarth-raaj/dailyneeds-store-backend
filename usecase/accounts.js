@@ -1,8 +1,12 @@
+const { ALERTS_TELEGRAM_CHAT_ID } = require("../constants/telegram");
+const moment = require("moment");
+
 class AccountsUsecase {
   constructor(accountsRepo, accountsEbookUsecase, outletUsecase) {
     this.accountsRepo = accountsRepo;
     this.accountsEbookUsecase = accountsEbookUsecase;
     this.outletUsecase = outletUsecase;
+    this.telegram = require("../services/telegram")();
   }
 
   async createAccount(account) {
@@ -67,6 +71,7 @@ class AccountsUsecase {
         filters
       );
       let outlet_data = null;
+      let is_saved = false;
 
       if (filters.store_id) {
         const outletResponse = await this.outletUsecase.getOutletByOutletId(
@@ -78,10 +83,21 @@ class AccountsUsecase {
         }
       }
 
+      const is_saved_response = await this.checkSheetSaved(
+        moment(filters.from_date).format("YYYY-MM-DD"),
+        filters.store_id
+      );
+
+      if (is_saved_response.code === 200) {
+        is_saved = is_saved_response.is_saved;
+      }
+
+      const { data } = result;
       result.data = {
-        account: result.data,
+        account: data,
         ebook: accountsEbook.data,
         outlet: outlet_data,
+        is_saved,
       };
 
       return result;
@@ -102,6 +118,20 @@ class AccountsUsecase {
   async saveAccount(sheetData) {
     try {
       const result = await this.accountsRepo.saveAccount(sheetData);
+
+      try {
+        const formattedDate = new Date(sheetData.sheet_date)
+          .toISOString()
+          .split("T")[0];
+        await this.telegram.sendMessage(
+          ALERTS_TELEGRAM_CHAT_ID,
+          `✅ Account sheet saved for date: ${formattedDate}`
+        );
+      } catch (telegramErr) {
+        console.log("Failed to send Telegram notification:", telegramErr);
+        // Don't throw here as the data was saved successfully
+      }
+
       return result;
     } catch (error) {
       throw error;

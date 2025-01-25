@@ -1,0 +1,5 @@
+const ALERTS_TELEGRAM_CHAT_ID = -4668457497;
+
+module.exports = {
+  ALERTS_TELEGRAM_CHAT_ID,
+};

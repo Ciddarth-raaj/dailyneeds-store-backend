@@ -13,6 +13,7 @@ const bodyParser = require("body-parser");
 const HttpServer = require("http").createServer(app);
 
 const logger = require("./utils/logger");
+const { ALERTS_TELEGRAM_CHAT_ID } = require("./constants/telegram");
 
 class Server {
   constructor() {
@@ -313,8 +314,8 @@ class Server {
     );
     this.synker.syncProducts();
 
-    // this.telegram = require("./services/telegram")();
-    // this.telegram.sendMessage(chat_id, msg)
+    this.telegram = require("./services/telegram")();
+    this.telegram.sendMessage(ALERTS_TELEGRAM_CHAT_ID, "Hello");
   }
 
   onClose() {

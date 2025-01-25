@@ -288,12 +288,7 @@ class AccountsRepository {
            FROM accounts_sales s2 
            LEFT JOIN people_list pl ON pl.person_id = s2.person_id
            WHERE s2.accounts_id = a.accounts_id
-         ) as sales,
-         EXISTS(
-           SELECT 1 FROM accounts_saved acs 
-           WHERE DATE(acs.sheet_date) = DATE(a.date)
-           AND acs.store_id = ne.store_id
-         ) as is_saved
+         ) as sales
          FROM accounts a
          LEFT JOIN new_employee ne ON ne.employee_id = a.cashier_id
          ${whereClause}
@@ -313,20 +308,14 @@ class AccountsRepository {
             return;
           }
 
-          // Parse the sales JSON string into an array or set to null
           const accounts = docs.map((account) => ({
             ...account,
-            is_saved: account.is_saved === 1,
             sales: account.sales ? JSON.parse(account.sales) : null,
           }));
 
-          // Get is_saved from first record if exists
-          const is_saved = docs.length > 0 ? docs[0].is_saved === 1 : false;
-
           resolve({
             code: 200,
-            is_saved,
-            data: accounts.map(({ is_saved, ...account }) => account), // Remove is_saved from individual records
+            data: accounts,
           });
         }
       );
