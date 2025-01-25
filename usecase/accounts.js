@@ -120,12 +120,19 @@ class AccountsUsecase {
       const result = await this.accountsRepo.saveAccount(sheetData);
 
       try {
-        const formattedDate = new Date(sheetData.sheet_date)
-          .toISOString()
-          .split("T")[0];
+        // Get outlet name
+        const outletResponse = await this.outletUsecase.getOutletByOutletId(
+          sheetData.store_id
+        );
+        const outletName =
+          outletResponse.length > 0
+            ? outletResponse[0].outlet_name
+            : "Unknown Outlet";
+
+        const formattedDate = moment(sheetData.sheet_date).format("DD-MM-YYYY");
         await this.telegram.sendMessage(
           ALERTS_TELEGRAM_CHAT_ID,
-          `✅ Account sheet saved for date: ${formattedDate}`
+          `✅ Account sheet saved for ${outletName} (Date: ${formattedDate})`
         );
       } catch (telegramErr) {
         console.log("Failed to send Telegram notification:", telegramErr);
