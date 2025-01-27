@@ -148,6 +148,30 @@ class AccountsUsecase {
   async deleteSavedAccount(sheetId) {
     try {
       const result = await this.accountsRepo.deleteSavedAccount(sheetId);
+
+      if (result.code === 200) {
+        try {
+          // Get outlet name
+          const outletResponse = await this.outletUsecase.getOutletByOutletId(
+            sheetId.store_id
+          );
+          const outletName =
+            outletResponse.length > 0
+              ? outletResponse[0].outlet_name
+              : "Unknown Outlet";
+
+          const formattedDate = moment(sheetId.sheet_date).format("DD-MM-YYYY");
+
+          await this.telegram.sendMessage(
+            ALERTS_TELEGRAM_CHAT_ID,
+            `❌ Account sheet unsaved for ${outletName} (Date: ${formattedDate})`
+          );
+        } catch (telegramErr) {
+          console.log("Failed to send Telegram notification:", telegramErr);
+          // Don't throw here as the data was deleted successfully
+        }
+      }
+
       return result;
     } catch (error) {
       throw error;
