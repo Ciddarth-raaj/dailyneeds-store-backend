@@ -164,7 +164,7 @@ class AccountsUsecase {
 
           await this.telegram.sendMessage(
             ALERTS_TELEGRAM_CHAT_ID,
-            `❌ Account sheet unsaved for ${outletName} (Date: ${formattedDate})`
+            `❌ Account sheet unlocked for ${outletName} (Date: ${formattedDate})`
           );
         } catch (telegramErr) {
           console.log("Failed to send Telegram notification:", telegramErr);
