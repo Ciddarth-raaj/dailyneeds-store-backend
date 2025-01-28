@@ -1,0 +1,1 @@
+ALTER TABLE `people_list` ADD `status` BOOLEAN NOT NULL DEFAULT TRUE AFTER `person_type`;

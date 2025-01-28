@@ -44,9 +44,10 @@ class PeopleRoutes {
 
         const bodySchema = {
           name: Joi.string().required(),
-          primary_phone: Joi.string().allow(null),
-          secondary_phone: Joi.string().allow(null),
+          primary_phone: Joi.string().allow("").allow(null).optional(),
+          secondary_phone: Joi.string().allow("").allow(null).optional(),
           person_type: Joi.number().required(),
+          status: Joi.boolean().required(),
         };
 
         const isValidId = Joi.validate(

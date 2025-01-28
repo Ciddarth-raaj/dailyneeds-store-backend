@@ -313,9 +313,6 @@ class Server {
       this.brandUsecase
     );
     this.synker.syncProducts();
-
-    this.telegram = require("./services/telegram")();
-    this.telegram.sendMessage(ALERTS_TELEGRAM_CHAT_ID, "Hello");
   }
 
   onClose() {

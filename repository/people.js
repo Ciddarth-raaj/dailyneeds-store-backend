@@ -61,13 +61,13 @@ class PeopleRepository {
   update(person) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "UPDATE people_list SET name = ?, primary_phone = ?, secondary_phone = ?, person_type = ?, store_id = ? WHERE person_id = ?",
+        "UPDATE people_list SET name = ?, primary_phone = ?, secondary_phone = ?, person_type = ?, status = ? WHERE person_id = ?",
         [
           person.name,
           person.primary_phone,
           person.secondary_phone,
           person.person_type,
-          person.store_id,
+          person.status,
           person.person_id,
         ],
         (err, res) => {
