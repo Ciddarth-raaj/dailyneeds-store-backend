@@ -107,6 +107,32 @@ class PeopleRoutes {
         res.status(500).json({ error: error.message });
       }
     });
+
+    // Get person by ID
+    router.get("/:id", async (req, res) => {
+      try {
+        const schema = {
+          id: Joi.number().required(),
+        };
+
+        const isValid = Joi.validate({ id: parseInt(req.params.id) }, schema);
+
+        if (isValid.error !== null) {
+          console.log(isValid.error);
+          throw isValid.error;
+        }
+
+        const result = await this.peopleUsecase.getPersonById(req.params.id);
+
+        if (result.code === 404) {
+          res.status(404).json(result);
+        } else {
+          res.status(200).json(result);
+        }
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
   }
 
   getRouter() {

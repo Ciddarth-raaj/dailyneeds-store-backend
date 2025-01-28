@@ -48,6 +48,15 @@ class PeopleUsecase {
       throw error;
     }
   }
+
+  async getPersonById(personId) {
+    try {
+      const result = await this.peopleRepo.getById(personId);
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
 }
 
 module.exports = (peopleRepo) => {

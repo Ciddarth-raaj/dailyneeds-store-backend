@@ -149,6 +149,49 @@ class PeopleRepository {
       );
     });
   }
+
+  getById(personId) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT people_list.*, 
+         GROUP_CONCAT(people_list_outlets_map.store_id) as store_ids 
+         FROM people_list 
+         LEFT JOIN people_list_outlets_map ON people_list_outlets_map.person_id = people_list.person_id 
+         WHERE people_list.person_id = ?
+         GROUP BY people_list.person_id`,
+        [personId],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PEOPLE",
+              code: "REPOSITORY.PEOPLE.GET-BY-ID",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+
+          if (docs.length === 0) {
+            resolve({ code: 404, message: "Person not found" });
+            return;
+          }
+
+          // Convert comma-separated store_ids string to array of numbers
+          const person = {
+            ...docs[0],
+            store_ids: docs[0].store_ids
+              ? docs[0].store_ids.split(",").map(Number)
+              : null,
+          };
+
+          resolve({ code: 200, data: person });
+        }
+      );
+    });
+  }
 }
 
 module.exports = (db) => {
