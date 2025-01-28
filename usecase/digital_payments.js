@@ -20,6 +20,24 @@ class DigitalPaymentsUsecase {
       throw error;
     }
   }
+
+  async getById(paymentId) {
+    try {
+      const result = await this.digitalPaymentsRepo.getById(paymentId);
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  async update(payment) {
+    try {
+      const result = await this.digitalPaymentsRepo.update(payment);
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
 }
 
 module.exports = (digitalPaymentsRepo) => {
