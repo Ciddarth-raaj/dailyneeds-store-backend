@@ -123,6 +123,32 @@ class ReconciliationRoutes {
         }
       }
     });
+
+    // Delete epayment reconciliation records by date
+    router.delete("/epayment/:date", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          date: Joi.date().required(),
+        });
+
+        const isValid = schema.validate({ date: req.params.date });
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const result = await this.reconciliationUsecase.deleteEpaymentByDate(
+          req.params.date
+        );
+        res.json(result);
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: err.message });
+        }
+      }
+    });
   }
 
   getRouter() {

@@ -42,6 +42,17 @@ class ReconciliationUsecase {
       throw error;
     }
   }
+
+  async deleteEpaymentByDate(bill_date) {
+    try {
+      const result = await this.reconciliationRepo.deleteEpaymentByDate(
+        bill_date
+      );
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
 }
 
 module.exports = (reconciliationRepo) => {

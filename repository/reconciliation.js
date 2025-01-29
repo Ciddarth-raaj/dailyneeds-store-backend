@@ -234,6 +234,35 @@ class ReconciliationRepository {
       );
     });
   }
+
+  deleteEpaymentByDate(bill_date) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "DELETE FROM accounts_reconciliation_epayment WHERE DATE(bill_date) = ?",
+        [bill_date],
+        (err, result) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.RECONCILIATION",
+              code: "REPOSITORY.RECONCILIATION.DELETE-EPAYMENT-BY-DATE",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+
+          resolve({
+            code: 200,
+            message: `Deleted ${result.affectedRows} epayment reconciliation records`,
+            affectedRows: result.affectedRows,
+          });
+        }
+      );
+    });
+  }
 }
 
 module.exports = (db) => {
