@@ -84,7 +84,7 @@ class AccountsUsecase {
       }
 
       const is_saved_response = await this.checkSheetSaved(
-        moment(filters.from_date).format("YYYY-MM-DD"),
+        moment(filters.to_date).format("YYYY-MM-DD"),
         filters.store_id
       );
 
