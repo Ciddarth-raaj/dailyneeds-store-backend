@@ -1,5 +1,6 @@
 const { ALERTS_TELEGRAM_CHAT_ID } = require("../constants/telegram");
 const moment = require("moment");
+const { uuid } = require("uuidv4");
 
 class AccountsUsecase {
   constructor(accountsRepo, accountsEbookUsecase, outletUsecase) {
@@ -347,6 +348,146 @@ class AccountsUsecase {
       return result;
     } catch (error) {
       throw error;
+    }
+  }
+
+  getLedgerObject(ledgerName, ledgetAmount, storeName, isCredit) {
+    return {
+      LedgerName: ledgerName,
+      LedgerGroup: "$$GroupCurrentAssets",
+      IsPartyLedger: null,
+      LedgerAmount: ledgetAmount,
+      IsDeemedPositive: isCredit ? "No" : "Yes",
+      BillsAllocation: [],
+      LedgerDescription: [],
+      GSTClassification: " ",
+      IGSTRate: null,
+      AppropriateOnValue: "Yes",
+      CategoryAllocation: [
+        {
+          Category: "Primary Cost Category",
+          IsDeemedPositive: "Yes",
+          CostCentreAllocation: [
+            {
+              Name: storeName,
+              Amount: ledgetAmount,
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  async getTallyExpenses(from_date, to_date) {
+    try {
+      const accounts = await this.getAllAccounts({
+        from_date: new Date(from_date),
+        to_date: new Date(to_date),
+      });
+      const ebook = accounts.data.ebook;
+      const ledgerEntries = [];
+      let totalCardSales = {};
+
+      ebook.forEach((item) => {
+        if (!totalCardSales[item.store_name]) {
+          totalCardSales[item.store_name] = 0;
+        }
+
+        if (item.hdur) {
+          totalCardSales[item.store_name] += item.hdur;
+          ledgerEntries.push(
+            this.getLedgerObject(
+              "HDFC - UPI",
+              item.hdur,
+              item.store_name,
+              false
+            )
+          );
+        }
+
+        if (item.hfpp) {
+          totalCardSales[item.store_name] += item.hfpp;
+          ledgerEntries.push(
+            this.getLedgerObject(
+              "HDFC (Card)",
+              item.hfpp,
+              item.store_name,
+              false
+            )
+          );
+        }
+
+        if (item.sedc) {
+          totalCardSales[item.store_name] += item.sedc;
+          ledgerEntries.push(
+            this.getLedgerObject("Sodexo", item.sedc, item.store_name, false)
+          );
+        }
+
+        if (item.ppbl) {
+          totalCardSales[item.store_name] += item.ppbl;
+          ledgerEntries.push(
+            this.getLedgerObject("Paytm", item.ppbl, item.store_name, false)
+          );
+        }
+      });
+
+      Object.keys(totalCardSales).forEach((key) => {
+        const cardSales = totalCardSales[key];
+
+        ledgerEntries.push(
+          this.getLedgerObject("Card Sales", cardSales, key, true)
+        );
+      });
+
+      const date = moment(new Date(to_date)).format("YYYYMMDD");
+
+      return {
+        error: "false",
+        data: [
+          {
+            MasterID: uuid(),
+            SellerGSTIN: null,
+            VoucherState: "Puducherry",
+            ShipFromState: "Puducherry",
+            VoucherNumber: null,
+            VoucherDate: date,
+            VoucherType: "Journal",
+            VoucherBaseType: "Journal ",
+            Reference: null,
+            ReferenceDate: date,
+            IsCancelled: null,
+            PartyName: null,
+            GSTREGISTRATIONTYPE: null,
+            Voucher_Total: null,
+            DeliveryNoteNo: null,
+            DeliveryNoteDate: null,
+            DispatchDocNo: null,
+            DispatchThrough: null,
+            Destination: null,
+            CarrierName: null,
+            LRNo: null,
+            LRDate: null,
+            MotorVehicleNo: null,
+            OrderNo: "",
+            OrderDate: "",
+            TermsOfPayment: null,
+            OtherReferences: null,
+            TermsOfDelivery: null,
+            PlaceOfSupply: " ",
+            IsInvoice: "No",
+            IsDeleted: "No",
+            Narration: null,
+            VoucherCostCentre: null,
+            ledgerentries: ledgerEntries,
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        error: error.toString(),
+        data: [],
+      };
     }
   }
 }
