@@ -397,7 +397,7 @@ class AccountsUsecase {
 
   getLedgerObject(
     ledgerName,
-    ledgetAmount,
+    ledgerAmount,
     storeName,
     isCredit,
     ledgerGroup = "$$GroupCurrentAssets"
@@ -406,7 +406,7 @@ class AccountsUsecase {
       LedgerName: ledgerName,
       LedgerGroup: ledgerGroup,
       IsPartyLedger: null,
-      LedgerAmount: ledgetAmount,
+      LedgerAmount: ledgerAmount,
       IsDeemedPositive: isCredit ? "No" : "Yes",
       BillsAllocation: [],
       LedgerDescription: [],
@@ -420,7 +420,7 @@ class AccountsUsecase {
           CostCentreAllocation: [
             {
               Name: storeName,
-              Amount: ledgetAmount,
+              Amount: ledgerAmount,
             },
           ],
         },
@@ -463,37 +463,55 @@ class AccountsUsecase {
           OUTLET_CASH_ID_MAP[item.store_id] ?? "N/A"
         })`;
 
-        data[item.outlet_name][date].ledgerentries.push(
-          this.getLedgerObject(
-            accountName,
-            parseInt(cash_sales) +
-              parseInt(item.loyalty) -
-              parseInt(item.sales_return),
-            item.outlet_name,
-            false
-          )
-        );
+        const cashSales =
+          parseInt(cash_sales) +
+          parseInt(item.loyalty) -
+          parseInt(item.sales_return);
 
-        data[item.outlet_name][date].ledgerentries.push(
-          this.getLedgerObject(
-            "Card Sales",
-            item.card_sales,
-            item.outlet_name,
-            false
-          )
-        );
+        const checkAndInsert = (
+          ledgerName,
+          ledgerAmount,
+          storeName,
+          isCredit,
+          index,
+          ledgerGroup
+        ) => {
+          if (!data[item.outlet_name][date].ledgerentries[index]) {
+            data[item.outlet_name][date].ledgerentries[index] =
+              this.getLedgerObject(
+                ledgerName,
+                parseInt(ledgerAmount),
+                storeName,
+                isCredit,
+                ledgerGroup
+              );
+          } else {
+            data[item.outlet_name][date].ledgerentries[index].LedgerAmount +=
+              parseInt(ledgerAmount);
 
-        data[item.outlet_name][date].ledgerentries.push(
-          this.getLedgerObject(
-            "sales",
-            parseInt(item.card_sales) +
-              (cash_sales +
-                parseInt(item.loyalty) -
-                parseInt(item.sales_return)),
-            item.outlet_name,
-            true,
-            "$$GroupSales"
-          )
+            data[item.outlet_name][date].ledgerentries[
+              index
+            ].CategoryAllocation[0].CostCentreAllocation[0].Amount +=
+              parseInt(ledgerAmount);
+          }
+        };
+
+        checkAndInsert(accountName, cashSales, item.outlet_name, false, 0);
+        checkAndInsert(
+          "Card Sales",
+          item.card_sales,
+          item.outlet_name,
+          false,
+          1
+        );
+        checkAndInsert(
+          "sales",
+          parseInt(item.card_sales) +
+            (cash_sales + parseInt(item.loyalty) - parseInt(item.sales_return)),
+          item.outlet_name,
+          true,
+          2,
+          "$$GroupSales"
         );
       });
 
@@ -604,6 +622,38 @@ class AccountsUsecase {
         error: "false",
         data: finalData,
       };
+    } catch (error) {
+      console.log(error);
+      return {
+        error: error.toString(),
+        data: [],
+      };
+    }
+  }
+
+  async getTallyExpenses(from_date, to_date) {
+    try {
+      const data = {};
+      const filter = {
+        from_date: new Date(from_date),
+        to_date: new Date(to_date),
+      };
+      const accounts = await this.getAllAccounts(filter);
+      const expenses = accounts.data.account.flatMap((accountItem) => {
+        if (!accountItem.sales) {
+          return [];
+        }
+
+        return accountItem.sales.map((item) => ({
+          ...item,
+          outlet_name: accountItem.outlet_name,
+          store_id: accountItem.store_id,
+          date: accountItem.date,
+        }));
+      });
+      const warehouseExpenses = await this.getWarehouseSales(filter);
+
+      return { expenses, warehouseExpenses };
     } catch (error) {
       console.log(error);
       return {
