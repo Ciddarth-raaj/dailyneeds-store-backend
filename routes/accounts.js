@@ -706,7 +706,7 @@ class AccountsRoutes {
       }
     });
 
-    router.get("/tally/expenses", async (req, res) => {
+    router.get("/tally/card-to-bank", async (req, res) => {
       try {
         const schema = Joi.object({
           from_date: Joi.date().required(),
@@ -718,7 +718,7 @@ class AccountsRoutes {
           throw isValid.error;
         }
 
-        const result = await this.accountsUsecase.getTallyExpenses(
+        const result = await this.accountsUsecase.getTallyCardToBank(
           req.query.from_date,
           req.query.to_date
         );

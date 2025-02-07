@@ -378,7 +378,7 @@ class AccountsUsecase {
     };
   }
 
-  async getTallyExpenses(from_date, to_date) {
+  async getTallyCardToBank(from_date, to_date) {
     try {
       const data = {};
       const accounts = await this.getAllAccounts({
@@ -387,11 +387,16 @@ class AccountsUsecase {
       });
       const ebook = accounts.data.ebook;
       let totalCardSales = {};
-      const date = moment(new Date(to_date)).format("YYYYMMDD");
 
       ebook.forEach((item) => {
+        const date = moment(new Date(item.date)).format("YYYYMMDD");
+
         if (!data[item.store_name]) {
-          data[item.store_name] = {
+          data[item.store_name] = {};
+        }
+
+        if (!data[item.store_name][date]) {
+          data[item.store_name][date] = {
             MasterID: uuid(),
             SellerGSTIN: null,
             VoucherState: "Puducherry",
@@ -430,12 +435,16 @@ class AccountsUsecase {
         }
 
         if (!totalCardSales[item.store_name]) {
-          totalCardSales[item.store_name] = 0;
+          totalCardSales[item.store_name] = {};
+        }
+
+        if (!totalCardSales[item.store_name][date]) {
+          totalCardSales[item.store_name][date] = 0;
         }
 
         if (item.hdur) {
-          totalCardSales[item.store_name] += item.hdur;
-          data[item.store_name].ledgerentries.push(
+          totalCardSales[item.store_name][date] += item.hdur;
+          data[item.store_name][date].ledgerentries.push(
             this.getLedgerObject(
               "HDFC - UPI",
               item.hdur,
@@ -446,8 +455,8 @@ class AccountsUsecase {
         }
 
         if (item.hfpp) {
-          totalCardSales[item.store_name] += item.hfpp;
-          data[item.store_name].ledgerentries.push(
+          totalCardSales[item.store_name][date] += item.hfpp;
+          data[item.store_name][date].ledgerentries.push(
             this.getLedgerObject(
               "HDFC (Card)",
               item.hfpp,
@@ -458,37 +467,42 @@ class AccountsUsecase {
         }
 
         if (item.sedc) {
-          totalCardSales[item.store_name] += item.sedc;
-          data[item.store_name].ledgerentries.push(
+          totalCardSales[item.store_name][date] += item.sedc;
+          data[item.store_name][date].ledgerentries.push(
             this.getLedgerObject("Sodexo", item.sedc, item.store_name, false)
           );
         }
 
         if (item.ppbl) {
-          totalCardSales[item.store_name] += item.ppbl;
-          data[item.store_name].ledgerentries.push(
+          totalCardSales[item.store_name][date] += item.ppbl;
+          data[item.store_name][date].ledgerentries.push(
             this.getLedgerObject("Paytm", item.ppbl, item.store_name, false)
           );
         }
       });
 
-      Object.keys(totalCardSales).forEach((key) => {
-        const cardSales = totalCardSales[key];
+      Object.keys(totalCardSales).forEach((storeNameKey) => {
+        Object.keys(totalCardSales[storeNameKey]).forEach((dateKey) => {
+          const cardSales = totalCardSales[storeNameKey][dateKey];
 
-        data[key].ledgerentries.push(
-          this.getLedgerObject("Card Sales", cardSales, key, true)
-        );
+          data[storeNameKey][dateKey].ledgerentries.push(
+            this.getLedgerObject("Card Sales", cardSales, storeNameKey, true)
+          );
+        });
       });
 
-      const finalData = Object.keys(data).map((key) => ({
-        ...data[key],
-      }));
+      const finalData = Object.keys(data).flatMap((storeNameKey) =>
+        Object.keys(data[storeNameKey]).map(
+          (dateKey) => data[storeNameKey][dateKey]
+        )
+      );
 
       return {
         error: "false",
         data: finalData,
       };
     } catch (error) {
+      console.log(error);
       return {
         error: error.toString(),
         data: [],
