@@ -246,13 +246,9 @@ class AccountsRepository {
       let filterValues = [];
 
       // Add date range filter if provided
-      if (filters?.from_date) {
-        filterConditions.push("DATE(a.date) >= ?");
-        filterValues.push(filters.from_date);
-      }
-      if (filters?.to_date) {
-        filterConditions.push("DATE(a.date) <= ?");
-        filterValues.push(filters.to_date);
+      if (filters?.from_date && filters?.to_date) {
+        filterConditions.push("a.date BETWEEN ? AND ?");
+        filterValues.push(filters.from_date, filters.to_date);
       }
 
       // Add store filter if provided
