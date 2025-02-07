@@ -444,6 +444,9 @@ class AccountsUsecase {
         from_date: new Date(from_date),
         to_date: new Date(to_date),
       };
+      filter.from_date.setHours(0, 0, 0, 0);
+      filter.to_date.setHours(23, 59, 59, 999);
+
       const accounts = await this.getAllAccounts(filter);
       const sales = accounts.data.account;
 
@@ -541,10 +544,15 @@ class AccountsUsecase {
   async getTallyCardToBank(from_date, to_date) {
     try {
       const data = {};
-      const accounts = await this.getAllAccounts({
+
+      const filter = {
         from_date: new Date(from_date),
         to_date: new Date(to_date),
-      });
+      };
+      filter.from_date.setHours(0, 0, 0, 0);
+      filter.to_date.setHours(23, 59, 59, 999);
+
+      const accounts = await this.getAllAccounts(filter);
       const ebook = accounts.data.ebook;
       let totalCardSales = {};
 
@@ -631,6 +639,56 @@ class AccountsUsecase {
     }
   }
 
+  getAmmountDifference(values, totalCashHandover) {
+    try {
+      const {
+        total_sales,
+        card_sales,
+        loyalty,
+        sales_return,
+        accounts,
+        sales,
+      } = values;
+
+      let calculated_sales =
+        totalCashHandover +
+        (card_sales ? parseFloat(card_sales) : 0) +
+        (loyalty ? parseFloat(loyalty) : 0) +
+        (sales_return ? parseFloat(sales_return) : 0);
+
+      if (accounts || sales) {
+        (accounts ?? sales).forEach((item) => {
+          if (item.payment_type == 1) {
+            // Payment
+            calculated_sales += item.amount ? parseFloat(item.amount) : 0;
+          } else {
+            // Receipt
+            calculated_sales -= item.amount ? parseFloat(item.amount) : 0;
+          }
+        });
+      }
+
+      return parseInt(total_sales) - calculated_sales;
+    } catch (err) {
+      console.log(err);
+      return 0;
+    }
+  }
+
+  getTotalCashHandover(accountItem) {
+    return (
+      accountItem.cash_handover_500 * 500 +
+      accountItem.cash_handover_200 * 200 +
+      accountItem.cash_handover_100 * 100 +
+      accountItem.cash_handover_50 * 50 +
+      accountItem.cash_handover_20 * 20 +
+      accountItem.cash_handover_10 * 10 +
+      accountItem.cash_handover_5 * 5 +
+      accountItem.cash_handover_2 * 2 +
+      accountItem.cash_handover_1 * 1
+    );
+  }
+
   async getTallyExpenses(from_date, to_date) {
     try {
       const data = {};
@@ -638,44 +696,54 @@ class AccountsUsecase {
         from_date: new Date(from_date),
         to_date: new Date(to_date),
       };
+      filter.from_date.setHours(0, 0, 0, 0);
+      filter.to_date.setHours(23, 59, 59, 999);
       const accounts = await this.getAllAccounts(filter);
 
-      const totalLoyalty = {};
-      const totalCash = {};
+      const totals = {};
 
       const expenses = accounts.data.account.flatMap((accountItem) => {
         const date = moment(new Date(accountItem.date)).format("YYYYMMDD");
 
-        if (!totalLoyalty[accountItem.outlet_name]) {
-          totalLoyalty[accountItem.outlet_name] = {};
+        if (!totals[accountItem.outlet_name]) {
+          totals[accountItem.outlet_name] = {};
         }
 
-        if (!totalLoyalty[accountItem.outlet_name][date]) {
-          totalLoyalty[accountItem.outlet_name][date] = 0;
+        if (!totals[accountItem.outlet_name][date]) {
+          totals[accountItem.outlet_name][date] = {
+            loyalty: 0,
+            cash: 0,
+            difference: 0,
+            difference_excess_list: [],
+          };
         }
 
-        totalLoyalty[accountItem.outlet_name][date] += parseInt(
+        totals[accountItem.outlet_name][date].loyalty += parseInt(
           accountItem.loyalty
         );
 
-        if (!totalCash[accountItem.outlet_name]) {
-          totalCash[accountItem.outlet_name] = {};
-        }
+        const totalCash = this.getTotalCashHandover(accountItem);
 
-        if (!totalCash[accountItem.outlet_name][date]) {
-          totalCash[accountItem.outlet_name][date] = 0;
-        }
+        totals[accountItem.outlet_name][date].cash += totalCash;
 
-        totalCash[accountItem.outlet_name][date] +=
-          accountItem.cash_handover_500 * 500 +
-          accountItem.cash_handover_200 * 200 +
-          accountItem.cash_handover_100 * 100 +
-          accountItem.cash_handover_50 * 50 +
-          accountItem.cash_handover_20 * 20 +
-          accountItem.cash_handover_10 * 10 +
-          accountItem.cash_handover_5 * 5 +
-          accountItem.cash_handover_2 * 2 +
-          accountItem.cash_handover_1 * 1;
+        const currentDifference = this.getAmmountDifference(
+          accountItem,
+          totalCash
+        );
+
+        if (currentDifference < 0) {
+          totals[accountItem.outlet_name][date].difference +=
+            Math.abs(currentDifference);
+        } else if (currentDifference > 0) {
+          totals[accountItem.outlet_name][date].difference_excess_list.push(
+            this.getLedgerObject(
+              accountItem.cashier_name,
+              currentDifference,
+              accountItem.outlet_name,
+              false
+            )
+          );
+        }
 
         if (!accountItem.sales) {
           return [];
@@ -707,32 +775,51 @@ class AccountsUsecase {
           if (!data[item.outlet_name][date]) {
             data[item.outlet_name][date] = INIT_JOURNAL_ENTRY(date);
 
-            if (
-              totalLoyalty[item.outlet_name] &&
-              totalLoyalty[item.outlet_name][date]
-            ) {
-              data[item.outlet_name][date].ledgerentries.push(
-                this.getLedgerObject(
-                  "Loyalty",
-                  totalLoyalty[item.outlet_name][date],
-                  item.outlet_name,
-                  false
-                )
-              );
-            }
+            if (totals[item.outlet_name] && totals[item.outlet_name][date]) {
+              if (totals[item.outlet_name][date].loyalty) {
+                data[item.outlet_name][date].ledgerentries.push(
+                  this.getLedgerObject(
+                    "Loyalty",
+                    totals[item.outlet_name][date].loyalty,
+                    item.outlet_name,
+                    false,
+                    "$$GroupIndirectExpenses"
+                  )
+                );
+              }
 
-            if (
-              totalCash[item.outlet_name] &&
-              totalCash[item.outlet_name][date]
-            ) {
-              data[item.outlet_name][date].ledgerentries.push(
-                this.getLedgerObject(
-                  "Cash",
-                  totalCash[item.outlet_name][date],
-                  item.outlet_name,
-                  false
-                )
-              );
+              if (totals[item.outlet_name][date].cash) {
+                data[item.outlet_name][date].ledgerentries.push(
+                  this.getLedgerObject(
+                    "Cash",
+                    totals[item.outlet_name][date].cash,
+                    item.outlet_name,
+                    false,
+                    "$$GroupCurrentAssets"
+                  )
+                );
+              }
+
+              if (totals[item.outlet_name][date].difference_excess_list) {
+                data[item.outlet_name][date].ledgerentries = [
+                  ...data[item.outlet_name][date].ledgerentries,
+                  ...totals[item.outlet_name][date].difference_excess_list,
+                ];
+              }
+
+              if (
+                totals[item.outlet_name][date].difference &&
+                totals[item.outlet_name][date].difference > 0
+              ) {
+                data[item.outlet_name][date].ledgerentries.push(
+                  this.getLedgerObject(
+                    "Cash Excess",
+                    totals[item.outlet_name][date].difference,
+                    item.outlet_name,
+                    true
+                  )
+                );
+              }
             }
           }
 
@@ -752,7 +839,9 @@ class AccountsUsecase {
 
       const finalData = this.getFinalData(data);
 
-      return { error: "false", data: finalData, expenses, warehouseExpenses };
+      console.log("CIDD", totals);
+
+      return { error: "false", data: finalData };
     } catch (error) {
       console.log(error);
       return {
