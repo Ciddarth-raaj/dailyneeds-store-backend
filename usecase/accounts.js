@@ -639,7 +639,24 @@ class AccountsUsecase {
         to_date: new Date(to_date),
       };
       const accounts = await this.getAllAccounts(filter);
+
+      const totalLoyalty = {};
+
       const expenses = accounts.data.account.flatMap((accountItem) => {
+        const date = moment(new Date(accountItem.date)).format("YYYYMMDD");
+
+        if (!totalLoyalty[accountItem.outlet_name]) {
+          totalLoyalty[accountItem.outlet_name] = {};
+        }
+
+        if (!totalLoyalty[accountItem.outlet_name][date]) {
+          totalLoyalty[accountItem.outlet_name][date] = 0;
+        }
+
+        totalLoyalty[accountItem.outlet_name][date] += parseInt(
+          accountItem.loyalty
+        );
+
         if (!accountItem.sales) {
           return [];
         }
@@ -651,9 +668,57 @@ class AccountsUsecase {
           date: accountItem.date,
         }));
       });
-      const warehouseExpenses = await this.getWarehouseSales(filter);
 
-      return { expenses, warehouseExpenses };
+      const warehouseExpensesRes = await this.getWarehouseSales(filter);
+      const warehouseExpenses = warehouseExpensesRes.data;
+
+      const parseList = (list, defaultOutletName) => {
+        list.forEach((item) => {
+          if (defaultOutletName) {
+            item.outlet_name = defaultOutletName;
+          }
+
+          const date = moment(new Date(item.date)).format("YYYYMMDD");
+
+          if (!data[item.outlet_name]) {
+            data[item.outlet_name] = {};
+          }
+
+          if (!data[item.outlet_name][date]) {
+            data[item.outlet_name][date] = INIT_JOURNAL_ENTRY(date);
+
+            if (
+              totalLoyalty[item.outlet_name] &&
+              totalLoyalty[item.outlet_name][date]
+            ) {
+              data[item.outlet_name][date].ledgerentries.push(
+                this.getLedgerObject(
+                  "Loyalty",
+                  totalLoyalty[item.outlet_name][date],
+                  item.outlet_name,
+                  false
+                )
+              );
+            }
+          }
+
+          data[item.outlet_name][date].ledgerentries.push(
+            this.getLedgerObject(
+              item.person_name,
+              item.amount,
+              item.outlet_name,
+              item.payment_type === 2
+            )
+          );
+        });
+      };
+
+      parseList(expenses, undefined);
+      parseList(warehouseExpenses, "Warehouse");
+
+      const finalData = this.getFinalData(data);
+
+      return { error: "false", data: finalData, expenses, warehouseExpenses };
     } catch (error) {
       console.log(error);
       return {
