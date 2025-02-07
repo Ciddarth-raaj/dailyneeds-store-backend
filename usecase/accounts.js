@@ -491,7 +491,7 @@ class AccountsUsecase {
                 parseInt(item.loyalty) -
                 parseInt(item.sales_return)),
             item.outlet_name,
-            false,
+            true,
             "$$GroupSales"
           )
         );
