@@ -853,6 +853,7 @@ class AccountsUsecase {
           finalData.push(
             tmpLedgerEntries.map((item) => ({
               ...tmpMasterData,
+              MasterID: uuid(),
               ledgerentries: [
                 this.getLedgerObject(
                   item.LedgerName,
