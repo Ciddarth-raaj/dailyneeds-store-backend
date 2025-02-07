@@ -2,6 +2,50 @@ const { ALERTS_TELEGRAM_CHAT_ID } = require("../constants/telegram");
 const moment = require("moment");
 const { uuid } = require("uuidv4");
 
+const OUTLET_CASH_ID_MAP = {
+  4: "Dn1",
+  3: "Dn2",
+  5: "Dn3",
+  6: "Dn4",
+};
+
+const INIT_JOURNAL_ENTRY = (date) => ({
+  MasterID: uuid(),
+  SellerGSTIN: null,
+  VoucherState: "Puducherry",
+  ShipFromState: "Puducherry",
+  VoucherNumber: null,
+  VoucherDate: date,
+  VoucherType: "Journal",
+  VoucherBaseType: "Journal ",
+  Reference: null,
+  ReferenceDate: date,
+  IsCancelled: null,
+  PartyName: null,
+  GSTREGISTRATIONTYPE: null,
+  Voucher_Total: null,
+  DeliveryNoteNo: null,
+  DeliveryNoteDate: null,
+  DispatchDocNo: null,
+  DispatchThrough: null,
+  Destination: null,
+  CarrierName: null,
+  LRNo: null,
+  LRDate: null,
+  MotorVehicleNo: null,
+  OrderNo: "",
+  OrderDate: "",
+  TermsOfPayment: null,
+  OtherReferences: null,
+  TermsOfDelivery: null,
+  PlaceOfSupply: " ",
+  IsInvoice: "No",
+  IsDeleted: "No",
+  Narration: null,
+  VoucherCostCentre: null,
+  ledgerentries: [],
+});
+
 class AccountsUsecase {
   constructor(accountsRepo, accountsEbookUsecase, outletUsecase) {
     this.accountsRepo = accountsRepo;
@@ -351,10 +395,16 @@ class AccountsUsecase {
     }
   }
 
-  getLedgerObject(ledgerName, ledgetAmount, storeName, isCredit) {
+  getLedgerObject(
+    ledgerName,
+    ledgetAmount,
+    storeName,
+    isCredit,
+    ledgerGroup = "$$GroupCurrentAssets"
+  ) {
     return {
       LedgerName: ledgerName,
-      LedgerGroup: "$$GroupCurrentAssets",
+      LedgerGroup: ledgerGroup,
       IsPartyLedger: null,
       LedgerAmount: ledgetAmount,
       IsDeemedPositive: isCredit ? "No" : "Yes",
@@ -378,6 +428,98 @@ class AccountsUsecase {
     };
   }
 
+  getCashSales(accountData) {
+    const { total_sales, card_sales, loyalty } = accountData;
+    const totalSales = parseFloat(total_sales);
+    const cardSales = parseFloat(card_sales);
+    const parsedLoyalty = parseFloat(loyalty);
+
+    return totalSales - cardSales - parsedLoyalty;
+  }
+
+  async getTallySalesEntry(from_date, to_date) {
+    try {
+      const data = {};
+      const filter = {
+        from_date: new Date(from_date),
+        to_date: new Date(to_date),
+      };
+      const accounts = await this.getAllAccounts(filter);
+      const sales = accounts.data.account;
+
+      sales.forEach((item) => {
+        const date = moment(new Date(item.date)).format("YYYYMMDD");
+
+        if (!data[item.outlet_name]) {
+          data[item.outlet_name] = {};
+        }
+
+        if (!data[item.outlet_name][date]) {
+          data[item.outlet_name][date] = INIT_JOURNAL_ENTRY(date);
+        }
+
+        const cash_sales = this.getCashSales(item);
+        const accountName = `Cash (${
+          OUTLET_CASH_ID_MAP[item.store_id] ?? "N/A"
+        })`;
+
+        data[item.outlet_name][date].ledgerentries.push(
+          this.getLedgerObject(
+            accountName,
+            parseInt(cash_sales) +
+              parseInt(item.loyalty) -
+              parseInt(item.sales_return),
+            item.outlet_name,
+            false
+          )
+        );
+
+        data[item.outlet_name][date].ledgerentries.push(
+          this.getLedgerObject(
+            "Card Sales",
+            item.card_sales,
+            item.outlet_name,
+            false
+          )
+        );
+
+        data[item.outlet_name][date].ledgerentries.push(
+          this.getLedgerObject(
+            "sales",
+            parseInt(item.card_sales) +
+              (cash_sales +
+                parseInt(item.loyalty) -
+                parseInt(item.sales_return)),
+            item.outlet_name,
+            false,
+            "$$GroupSales"
+          )
+        );
+      });
+
+      const finalData = this.getFinalData(data);
+
+      return {
+        error: "false",
+        data: finalData,
+      };
+    } catch (error) {
+      console.log(error);
+      return {
+        error: error.toString(),
+        data: [],
+      };
+    }
+  }
+
+  getFinalData(data) {
+    return Object.keys(data).flatMap((storeNameKey) =>
+      Object.keys(data[storeNameKey]).map(
+        (dateKey) => data[storeNameKey][dateKey]
+      )
+    );
+  }
+
   async getTallyCardToBank(from_date, to_date) {
     try {
       const data = {};
@@ -396,42 +538,7 @@ class AccountsUsecase {
         }
 
         if (!data[item.store_name][date]) {
-          data[item.store_name][date] = {
-            MasterID: uuid(),
-            SellerGSTIN: null,
-            VoucherState: "Puducherry",
-            ShipFromState: "Puducherry",
-            VoucherNumber: null,
-            VoucherDate: date,
-            VoucherType: "Journal",
-            VoucherBaseType: "Journal ",
-            Reference: null,
-            ReferenceDate: date,
-            IsCancelled: null,
-            PartyName: null,
-            GSTREGISTRATIONTYPE: null,
-            Voucher_Total: null,
-            DeliveryNoteNo: null,
-            DeliveryNoteDate: null,
-            DispatchDocNo: null,
-            DispatchThrough: null,
-            Destination: null,
-            CarrierName: null,
-            LRNo: null,
-            LRDate: null,
-            MotorVehicleNo: null,
-            OrderNo: "",
-            OrderDate: "",
-            TermsOfPayment: null,
-            OtherReferences: null,
-            TermsOfDelivery: null,
-            PlaceOfSupply: " ",
-            IsInvoice: "No",
-            IsDeleted: "No",
-            Narration: null,
-            VoucherCostCentre: null,
-            ledgerentries: [],
-          };
+          data[item.store_name][date] = INIT_JOURNAL_ENTRY(date);
         }
 
         if (!totalCardSales[item.store_name]) {
@@ -491,11 +598,7 @@ class AccountsUsecase {
         });
       });
 
-      const finalData = Object.keys(data).flatMap((storeNameKey) =>
-        Object.keys(data[storeNameKey]).map(
-          (dateKey) => data[storeNameKey][dateKey]
-        )
-      );
+      const finalData = this.getFinalData(data);
 
       return {
         error: "false",

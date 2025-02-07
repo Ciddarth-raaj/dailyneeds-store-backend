@@ -271,6 +271,7 @@ class AccountsRepository {
         `SELECT a.*, 
          ne.employee_name as cashier_name,
          ne.store_id,
+         o.outlet_name,
          (
            SELECT JSON_ARRAYAGG(
              JSON_OBJECT(
@@ -291,6 +292,7 @@ class AccountsRepository {
          ) as sales
          FROM accounts a
          LEFT JOIN new_employee ne ON ne.employee_id = a.cashier_id
+         LEFT JOIN outlets o ON o.outlet_id = ne.store_id
          ${whereClause}
          ORDER BY a.date DESC`,
         filterValues,
