@@ -783,8 +783,7 @@ class AccountsUsecase {
                     "Loyalty",
                     totals[item.outlet_name][date].loyalty,
                     item.outlet_name,
-                    false,
-                    "$$GroupIndirectExpenses"
+                    false
                   )
                 );
               }
@@ -861,7 +860,7 @@ class AccountsUsecase {
                     item.LedgerAmount,
                     item.CategoryAllocation[0].CostCentreAllocation[0].Name,
                     item.IsDeemedPositive === "No",
-                    item.LedgerGroup
+                    "$$GroupIndirectExpenses"
                   ),
 
                   this.getLedgerObject(
