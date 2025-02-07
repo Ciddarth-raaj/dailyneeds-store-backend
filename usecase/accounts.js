@@ -641,6 +641,7 @@ class AccountsUsecase {
       const accounts = await this.getAllAccounts(filter);
 
       const totalLoyalty = {};
+      const totalCash = {};
 
       const expenses = accounts.data.account.flatMap((accountItem) => {
         const date = moment(new Date(accountItem.date)).format("YYYYMMDD");
@@ -656,6 +657,25 @@ class AccountsUsecase {
         totalLoyalty[accountItem.outlet_name][date] += parseInt(
           accountItem.loyalty
         );
+
+        if (!totalCash[accountItem.outlet_name]) {
+          totalCash[accountItem.outlet_name] = {};
+        }
+
+        if (!totalCash[accountItem.outlet_name][date]) {
+          totalCash[accountItem.outlet_name][date] = 0;
+        }
+
+        totalCash[accountItem.outlet_name][date] +=
+          accountItem.cash_handover_500 * 500 +
+          accountItem.cash_handover_200 * 200 +
+          accountItem.cash_handover_100 * 100 +
+          accountItem.cash_handover_50 * 50 +
+          accountItem.cash_handover_20 * 20 +
+          accountItem.cash_handover_10 * 10 +
+          accountItem.cash_handover_5 * 5 +
+          accountItem.cash_handover_2 * 2 +
+          accountItem.cash_handover_1 * 1;
 
         if (!accountItem.sales) {
           return [];
@@ -695,6 +715,20 @@ class AccountsUsecase {
                 this.getLedgerObject(
                   "Loyalty",
                   totalLoyalty[item.outlet_name][date],
+                  item.outlet_name,
+                  false
+                )
+              );
+            }
+
+            if (
+              totalCash[item.outlet_name] &&
+              totalCash[item.outlet_name][date]
+            ) {
+              data[item.outlet_name][date].ledgerentries.push(
+                this.getLedgerObject(
+                  "Cash",
+                  totalCash[item.outlet_name][date],
                   item.outlet_name,
                   false
                 )
