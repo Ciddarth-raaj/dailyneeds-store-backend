@@ -416,7 +416,7 @@ class AccountsUsecase {
       CategoryAllocation: [
         {
           Category: "Primary Cost Category",
-          IsDeemedPositive: "Yes",
+          IsDeemedPositive: isCredit ? "No" : "Yes",
           CostCentreAllocation: [
             {
               Name: storeName,
@@ -774,6 +774,7 @@ class AccountsUsecase {
 
           if (!data[item.outlet_name][date]) {
             data[item.outlet_name][date] = INIT_JOURNAL_ENTRY(date);
+            data[item.outlet_name][date].store_id = item.store_id;
 
             if (totals[item.outlet_name] && totals[item.outlet_name][date]) {
               if (totals[item.outlet_name][date].loyalty) {
@@ -794,8 +795,7 @@ class AccountsUsecase {
                     "Cash",
                     totals[item.outlet_name][date].cash,
                     item.outlet_name,
-                    false,
-                    "$$GroupCurrentAssets"
+                    false
                   )
                 );
               }
@@ -837,11 +837,49 @@ class AccountsUsecase {
       parseList(expenses, undefined);
       parseList(warehouseExpenses, "Warehouse");
 
-      const finalData = this.getFinalData(data);
+      const finalData = [];
+      const index = 0;
 
-      console.log("CIDD", totals);
+      Object.keys(data).map((outlet_name) => {
+        Object.keys(data[outlet_name]).map((date) => {
+          const tmpMasterData = data[outlet_name][date];
+          const tmpLedgerEntries = tmpMasterData.ledgerentries;
+          tmpMasterData.ledgerentries = [];
 
-      return { error: "false", data: finalData };
+          const accountName = `Cash (${
+            OUTLET_CASH_ID_MAP[tmpMasterData.store_id] ?? "N/A"
+          })`;
+
+          finalData.push(
+            tmpLedgerEntries.map((item) => ({
+              ...tmpMasterData,
+              ledgerentries: [
+                this.getLedgerObject(
+                  item.LedgerName,
+                  item.LedgerAmount,
+                  item.CategoryAllocation[0].CostCentreAllocation[0].Name,
+                  item.IsDeemedPositive,
+                  item.LedgerGroup
+                ),
+
+                this.getLedgerObject(
+                  accountName,
+                  item.LedgerAmount,
+                  item.CategoryAllocation[0].CostCentreAllocation[0].Name,
+                  true,
+                  "$$GroupCurrentAssets"
+                ),
+              ],
+            }))
+          );
+        });
+      });
+
+      return finalData;
+
+      // const finalData = this.getFinalData(data);
+
+      // return { error: "false", data: finalData };
     } catch (error) {
       console.log(error);
       return {
