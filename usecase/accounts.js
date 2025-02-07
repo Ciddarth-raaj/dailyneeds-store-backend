@@ -380,72 +380,18 @@ class AccountsUsecase {
 
   async getTallyExpenses(from_date, to_date) {
     try {
+      const data = {};
       const accounts = await this.getAllAccounts({
         from_date: new Date(from_date),
         to_date: new Date(to_date),
       });
       const ebook = accounts.data.ebook;
-      const ledgerEntries = [];
       let totalCardSales = {};
-
-      ebook.forEach((item) => {
-        if (!totalCardSales[item.store_name]) {
-          totalCardSales[item.store_name] = 0;
-        }
-
-        if (item.hdur) {
-          totalCardSales[item.store_name] += item.hdur;
-          ledgerEntries.push(
-            this.getLedgerObject(
-              "HDFC - UPI",
-              item.hdur,
-              item.store_name,
-              false
-            )
-          );
-        }
-
-        if (item.hfpp) {
-          totalCardSales[item.store_name] += item.hfpp;
-          ledgerEntries.push(
-            this.getLedgerObject(
-              "HDFC (Card)",
-              item.hfpp,
-              item.store_name,
-              false
-            )
-          );
-        }
-
-        if (item.sedc) {
-          totalCardSales[item.store_name] += item.sedc;
-          ledgerEntries.push(
-            this.getLedgerObject("Sodexo", item.sedc, item.store_name, false)
-          );
-        }
-
-        if (item.ppbl) {
-          totalCardSales[item.store_name] += item.ppbl;
-          ledgerEntries.push(
-            this.getLedgerObject("Paytm", item.ppbl, item.store_name, false)
-          );
-        }
-      });
-
-      Object.keys(totalCardSales).forEach((key) => {
-        const cardSales = totalCardSales[key];
-
-        ledgerEntries.push(
-          this.getLedgerObject("Card Sales", cardSales, key, true)
-        );
-      });
-
       const date = moment(new Date(to_date)).format("YYYYMMDD");
 
-      return {
-        error: "false",
-        data: [
-          {
+      ebook.forEach((item) => {
+        if (!data[item.store_name]) {
+          data[item.store_name] = {
             MasterID: uuid(),
             SellerGSTIN: null,
             VoucherState: "Puducherry",
@@ -479,9 +425,68 @@ class AccountsUsecase {
             IsDeleted: "No",
             Narration: null,
             VoucherCostCentre: null,
-            ledgerentries: ledgerEntries,
-          },
-        ],
+            ledgerentries: [],
+          };
+        }
+
+        if (!totalCardSales[item.store_name]) {
+          totalCardSales[item.store_name] = 0;
+        }
+
+        if (item.hdur) {
+          totalCardSales[item.store_name] += item.hdur;
+          data[item.store_name].ledgerentries.push(
+            this.getLedgerObject(
+              "HDFC - UPI",
+              item.hdur,
+              item.store_name,
+              false
+            )
+          );
+        }
+
+        if (item.hfpp) {
+          totalCardSales[item.store_name] += item.hfpp;
+          data[item.store_name].ledgerentries.push(
+            this.getLedgerObject(
+              "HDFC (Card)",
+              item.hfpp,
+              item.store_name,
+              false
+            )
+          );
+        }
+
+        if (item.sedc) {
+          totalCardSales[item.store_name] += item.sedc;
+          data[item.store_name].ledgerentries.push(
+            this.getLedgerObject("Sodexo", item.sedc, item.store_name, false)
+          );
+        }
+
+        if (item.ppbl) {
+          totalCardSales[item.store_name] += item.ppbl;
+          data[item.store_name].ledgerentries.push(
+            this.getLedgerObject("Paytm", item.ppbl, item.store_name, false)
+          );
+        }
+      });
+
+      Object.keys(totalCardSales).forEach((key) => {
+        const cardSales = totalCardSales[key];
+
+        data[key].ledgerentries.push(
+          this.getLedgerObject("Card Sales", cardSales, key, true)
+        );
+      });
+
+      const finalData = Object.keys(data).map((key) => ({
+        ...data[key],
+      }));
+
+      return {
+        error: "false",
+        data: finalData,
       };
     } catch (error) {
       return {
