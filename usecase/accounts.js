@@ -851,27 +851,33 @@ class AccountsUsecase {
           })`;
 
           finalData.push(
-            tmpLedgerEntries.map((item) => ({
-              ...tmpMasterData,
-              MasterID: uuid(),
-              ledgerentries: [
-                this.getLedgerObject(
-                  item.LedgerName,
-                  item.LedgerAmount,
-                  item.CategoryAllocation[0].CostCentreAllocation[0].Name,
-                  item.IsDeemedPositive,
-                  item.LedgerGroup
-                ),
+            tmpLedgerEntries.map((item) => {
+              const tmpObject = {
+                ...tmpMasterData,
+                MasterID: uuid(),
+                ledgerentries: [
+                  this.getLedgerObject(
+                    item.LedgerName,
+                    item.LedgerAmount,
+                    item.CategoryAllocation[0].CostCentreAllocation[0].Name,
+                    item.IsDeemedPositive === "No",
+                    item.LedgerGroup
+                  ),
 
-                this.getLedgerObject(
-                  accountName,
-                  item.LedgerAmount,
-                  item.CategoryAllocation[0].CostCentreAllocation[0].Name,
-                  true,
-                  "$$GroupCurrentAssets"
-                ),
-              ],
-            }))
+                  this.getLedgerObject(
+                    accountName,
+                    item.LedgerAmount,
+                    item.CategoryAllocation[0].CostCentreAllocation[0].Name,
+                    item.IsDeemedPositive === "Yes",
+                    "$$GroupCurrentAssets"
+                  ),
+                ],
+              };
+
+              delete tmpObject.store_id;
+
+              return tmpObject;
+            })
           );
         });
       });
