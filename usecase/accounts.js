@@ -773,8 +773,10 @@ class AccountsUsecase {
           }
 
           if (!data[item.outlet_name][date]) {
+            console.log(item);
             data[item.outlet_name][date] = INIT_JOURNAL_ENTRY(date);
             data[item.outlet_name][date].store_id = item.store_id;
+            data[item.outlet_name][date].Narration = item.description;
 
             if (totals[item.outlet_name] && totals[item.outlet_name][date]) {
               if (totals[item.outlet_name][date].loyalty) {
@@ -837,7 +839,6 @@ class AccountsUsecase {
       parseList(warehouseExpenses, "Warehouse");
 
       const finalData = [];
-      const index = 0;
 
       Object.keys(data).map((outlet_name) => {
         Object.keys(data[outlet_name]).map((date) => {
@@ -845,9 +846,9 @@ class AccountsUsecase {
           const tmpLedgerEntries = tmpMasterData.ledgerentries;
           tmpMasterData.ledgerentries = [];
 
-          const accountName = `Cash (${
-            OUTLET_CASH_ID_MAP[tmpMasterData.store_id] ?? "N/A"
-          })`;
+          const accountName = OUTLET_CASH_ID_MAP[tmpMasterData.store_id]
+            ? `Cash (${OUTLET_CASH_ID_MAP[tmpMasterData.store_id]})`
+            : "Cash";
 
           finalData.push(
             ...tmpLedgerEntries.map((item) => {
