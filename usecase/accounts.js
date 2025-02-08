@@ -850,7 +850,7 @@ class AccountsUsecase {
           })`;
 
           finalData.push(
-            tmpLedgerEntries.map((item) => {
+            ...tmpLedgerEntries.map((item) => {
               const tmpObject = {
                 ...tmpMasterData,
                 MasterID: uuid(),
@@ -881,11 +881,9 @@ class AccountsUsecase {
         });
       });
 
-      return finalData;
-
       // const finalData = this.getFinalData(data);
 
-      // return { error: "false", data: finalData };
+      return { error: "false", data: finalData };
     } catch (error) {
       console.log(error);
       return {
