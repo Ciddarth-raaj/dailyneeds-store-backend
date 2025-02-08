@@ -773,32 +773,32 @@ class AccountsUsecase {
           }
 
           if (!data[item.outlet_name][date]) {
-            console.log(item);
             data[item.outlet_name][date] = INIT_JOURNAL_ENTRY(date);
             data[item.outlet_name][date].store_id = item.store_id;
-            data[item.outlet_name][date].Narration = item.description;
 
             if (totals[item.outlet_name] && totals[item.outlet_name][date]) {
               if (totals[item.outlet_name][date].loyalty) {
-                data[item.outlet_name][date].ledgerentries.push(
-                  this.getLedgerObject(
+                data[item.outlet_name][date].ledgerentries.push({
+                  ...this.getLedgerObject(
                     "Loyalty",
                     totals[item.outlet_name][date].loyalty,
                     item.outlet_name,
                     false
-                  )
-                );
+                  ),
+                  Narration: "",
+                });
               }
 
               if (totals[item.outlet_name][date].cash) {
-                data[item.outlet_name][date].ledgerentries.push(
-                  this.getLedgerObject(
+                data[item.outlet_name][date].ledgerentries.push({
+                  ...this.getLedgerObject(
                     "Cash",
                     totals[item.outlet_name][date].cash,
                     item.outlet_name,
                     false
-                  )
-                );
+                  ),
+                  Narration: "Handover",
+                });
               }
 
               if (totals[item.outlet_name][date].difference_excess_list) {
@@ -812,26 +812,28 @@ class AccountsUsecase {
                 totals[item.outlet_name][date].difference &&
                 totals[item.outlet_name][date].difference > 0
               ) {
-                data[item.outlet_name][date].ledgerentries.push(
-                  this.getLedgerObject(
+                data[item.outlet_name][date].ledgerentries.push({
+                  ...this.getLedgerObject(
                     "Cash Excess",
                     totals[item.outlet_name][date].difference,
                     item.outlet_name,
                     true
-                  )
-                );
+                  ),
+                  Narration: "",
+                });
               }
             }
           }
 
-          data[item.outlet_name][date].ledgerentries.push(
-            this.getLedgerObject(
+          data[item.outlet_name][date].ledgerentries.push({
+            ...this.getLedgerObject(
               item.person_name,
               item.amount,
               item.outlet_name,
               item.payment_type === 2
-            )
-          );
+            ),
+            Narration: item.description,
+          });
         });
       };
 
@@ -855,6 +857,7 @@ class AccountsUsecase {
               const tmpObject = {
                 ...tmpMasterData,
                 MasterID: uuid(),
+                Narration: item.Narration ?? "",
                 ledgerentries: [
                   this.getLedgerObject(
                     item.LedgerName,
