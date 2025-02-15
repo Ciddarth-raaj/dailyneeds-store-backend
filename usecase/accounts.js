@@ -1,6 +1,7 @@
 const { ALERTS_TELEGRAM_CHAT_ID } = require("../constants/telegram");
 const moment = require("moment");
 const { uuid } = require("uuidv4");
+const simpleEncrypt = require("../utils/encrypt");
 
 const OUTLET_CASH_ID_MAP = {
   4: "Dn1",
@@ -735,14 +736,15 @@ class AccountsUsecase {
           totals[accountItem.outlet_name][date].difference +=
             Math.abs(currentDifference);
         } else if (currentDifference > 0) {
-          totals[accountItem.outlet_name][date].difference_excess_list.push(
-            this.getLedgerObject(
+          totals[accountItem.outlet_name][date].difference_excess_list.push({
+            ...this.getLedgerObject(
               accountItem.cashier_name,
               currentDifference,
               accountItem.outlet_name,
               false
-            )
-          );
+            ),
+            itemId: `${accountItem.accounts_id}-accounts-${accountItem.outlet_name}`,
+          });
         }
 
         if (!accountItem.sales) {
@@ -766,6 +768,7 @@ class AccountsUsecase {
             item.outlet_name = defaultOutletName;
           }
 
+          const uniqueId = `${item.sales_id}-sales-${item.outlet_name}`;
           const date = moment(new Date(item.date)).format("YYYYMMDD");
 
           if (!data[item.outlet_name]) {
@@ -786,6 +789,7 @@ class AccountsUsecase {
                     false
                   ),
                   Narration: "",
+                  itemId: `${uniqueId}-loyalty`,
                 });
               }
 
@@ -798,6 +802,7 @@ class AccountsUsecase {
                     false
                   ),
                   Narration: "Handover",
+                  itemId: `${uniqueId}-cash-handover`,
                 });
               }
 
@@ -820,10 +825,13 @@ class AccountsUsecase {
                     true
                   ),
                   Narration: "",
+                  itemId: `${uniqueId}-cash-excess`,
                 });
               }
             }
           }
+
+          console.log(item.person_name, uniqueId);
 
           data[item.outlet_name][date].ledgerentries.push({
             ...this.getLedgerObject(
@@ -833,6 +841,7 @@ class AccountsUsecase {
               item.payment_type === 2
             ),
             Narration: item.description,
+            itemId: uniqueId,
           });
         });
       };
@@ -856,7 +865,7 @@ class AccountsUsecase {
             ...tmpLedgerEntries.map((item) => {
               const tmpObject = {
                 ...tmpMasterData,
-                MasterID: uuid(),
+                MasterID: simpleEncrypt(item.itemId),
                 Narration: item.Narration ?? "",
                 ledgerentries: [
                   this.getLedgerObject(
