@@ -459,7 +459,10 @@ class AccountsUsecase {
         }
 
         if (!data[item.outlet_name][date]) {
-          data[item.outlet_name][date] = INIT_JOURNAL_ENTRY(date);
+          data[item.outlet_name][date] = {
+            ...INIT_JOURNAL_ENTRY(date),
+            MasterID: simpleEncrypt(`${item.accounts_id}-sales-entry`),
+          };
         }
 
         const cash_sales = this.getCashSales(item);
@@ -565,7 +568,10 @@ class AccountsUsecase {
         }
 
         if (!data[item.store_name][date]) {
-          data[item.store_name][date] = INIT_JOURNAL_ENTRY(date);
+          data[item.store_name][date] = {
+            ...INIT_JOURNAL_ENTRY(date),
+            MasterID: simpleEncrypt(`${item.ebook_id}-ebook`),
+          };
         }
 
         if (!totalCardSales[item.store_name]) {
