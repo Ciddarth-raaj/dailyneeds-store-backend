@@ -754,7 +754,13 @@ class AccountsUsecase {
         }
 
         if (!accountItem.sales) {
-          return [];
+          return [
+            {
+              outlet_name: accountItem.outlet_name,
+              store_id: accountItem.store_id,
+              date: accountItem.date,
+            },
+          ];
         }
 
         return accountItem.sales.map((item) => ({
@@ -837,18 +843,18 @@ class AccountsUsecase {
             }
           }
 
-          console.log(item.person_name, uniqueId);
-
-          data[item.outlet_name][date].ledgerentries.push({
-            ...this.getLedgerObject(
-              item.person_name,
-              item.amount,
-              item.outlet_name,
-              item.payment_type === 2
-            ),
-            Narration: item.description,
-            itemId: uniqueId,
-          });
+          if (item.person_name) {
+            data[item.outlet_name][date].ledgerentries.push({
+              ...this.getLedgerObject(
+                item.person_name,
+                item.amount,
+                item.outlet_name,
+                item.payment_type === 2
+              ),
+              Narration: item.description,
+              itemId: uniqueId,
+            });
+          }
         });
       };
 
