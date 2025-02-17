@@ -50,10 +50,23 @@ class AccountsEbookUsecase {
 
   async bulkCreateEbook(ebookList, store_id, date) {
     try {
+      await this.deleteEbooksByDateAndStore(date, store_id);
       const result = await this.accountsEbookRepo.bulkCreate(
         ebookList,
         store_id,
         date
+      );
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  async deleteEbooksByDateAndStore(date, store_id) {
+    try {
+      const result = await this.accountsEbookRepo.deleteByDateAndStore(
+        date,
+        store_id
       );
       return result;
     } catch (error) {

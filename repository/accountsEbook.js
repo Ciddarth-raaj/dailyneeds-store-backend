@@ -241,6 +241,33 @@ class AccountsEbookRepository {
       );
     });
   }
+
+  deleteByDateAndStore(date, store_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "DELETE FROM accounts_ebook WHERE DATE(date) = ? AND store_id = ?",
+        [date, store_id],
+        (err, res) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.ACCOUNTS_EBOOK",
+              code: "REPOSITORY.ACCOUNTS_EBOOK.DELETE_BY_DATE_AND_STORE",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve({
+            code: 200,
+            deletedCount: res.affectedRows,
+          });
+        }
+      );
+    });
+  }
 }
 
 module.exports = (db) => {
