@@ -39,12 +39,37 @@ class PurchaseRoutes {
       cess: Joi.array().items(taxItemSchema).required(),
     });
 
+    // Define bulk purchase schema with uppercase keys
+    const bulkPurchaseSchema = Joi.array().items(
+      Joi.object({
+        RETAIL_OUTLET_ID: Joi.number().required(),
+        SUPPLIER_ID: Joi.string().max(20).required(),
+        SUPPLIER_NAME: Joi.string().max(100).required(),
+        SUPPLIER_GSTN: Joi.string().max(20).required(),
+        MMH_MRC_NO: Joi.number().required(),
+        MMH_MRC_DT: Joi.date().required(),
+        MMH_MRC_AMT: Joi.number().precision(2).required(),
+        MMH_DIST_BILL_DT: Joi.date().required(),
+        MMH_DIST_BILL_NO: Joi.string().max(50).required(),
+        MMH_MRC_REFNO: Joi.string().max(20).required(),
+        MMH_MANUAL_DISC: Joi.number().precision(2).required(),
+        TOT_SGST_AMT: Joi.number().precision(2).required(),
+        TOT_CGST_AMT: Joi.number().precision(2).required(),
+        TOT_IGST_AMT: Joi.number().precision(2).required(),
+        TOT_GST_CESS_AMT: Joi.number().precision(2).required(),
+        MMD_GOODS_TCS_AMT: Joi.number().precision(2).required(),
+        TS: Joi.number().required(),
+        SGST: Joi.array().items(taxItemSchema).required(),
+        CGST: Joi.array().items(taxItemSchema).required(),
+        IGST: Joi.array().items(taxItemSchema).required(),
+        CESS: Joi.array().items(taxItemSchema).required(),
+      })
+    );
+
     // Bulk create purchases
     router.post("/bulk", async (req, res) => {
       try {
-        const schema = Joi.array().items(purchaseSchema);
-
-        const { error, value } = schema.validate(req.body);
+        const { error, value } = bulkPurchaseSchema.validate(req.body);
         if (error) {
           return res.json({ code: 422, msg: error.toString() });
         }
@@ -57,7 +82,7 @@ class PurchaseRoutes {
       }
     });
 
-    // Create purchase
+    // Create purchase (keep lowercase schema for single create)
     router.post("/", async (req, res) => {
       try {
         const { error, value } = purchaseSchema.validate(req.body);

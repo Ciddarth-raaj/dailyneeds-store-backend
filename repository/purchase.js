@@ -225,7 +225,38 @@ class PurchaseRepository {
         let unchangedCount = 0;
 
         // Process each purchase one by one
-        for (const purchase of purchaseList) {
+        for (let purchase of purchaseList) {
+          // Convert keys to lowercase
+          purchase = Object.keys(purchase).reduce((newObj, key) => {
+            const lowerKey =
+              {
+                RETAIL_OUTLET_ID: "retail_outlet_id",
+                SUPPLIER_ID: "supplier_id",
+                SUPPLIER_NAME: "supplier_name",
+                SUPPLIER_GSTN: "supplier_gstn",
+                MMH_MRC_NO: "mmh_mrc_no",
+                MMH_MRC_DT: "mmh_mrc_dt",
+                MMH_MRC_AMT: "mmh_mrc_amt",
+                MMH_DIST_BILL_DT: "mmh_dist_bill_dt",
+                MMH_DIST_BILL_NO: "mmh_dist_bill_no",
+                MMH_MRC_REFNO: "mmh_mrc_refno",
+                MMH_MANUAL_DISC: "mmh_manual_disc",
+                TOT_SGST_AMT: "tot_sgst_amt",
+                TOT_CGST_AMT: "tot_cgst_amt",
+                TOT_IGST_AMT: "tot_igst_amt",
+                TOT_GST_CESS_AMT: "tot_gst_cess_amt",
+                MMD_GOODS_TCS_AMT: "mmd_goods_tcs_amt",
+                TS: "ts",
+                SGST: "sgst",
+                CGST: "cgst",
+                IGST: "igst",
+                CESS: "cess",
+              }[key] || key.toLowerCase();
+
+            newObj[lowerKey] = purchase[key];
+            return newObj;
+          }, {});
+
           // Format dates using moment
           const formattedPurchase = {
             ...purchase,
@@ -308,8 +339,6 @@ class PurchaseRepository {
                 JSON.parse(existing.cess),
                 formattedPurchase.cess
               );
-
-            console.log(hasChanges);
 
             if (hasChanges) {
               // Update if values are different
