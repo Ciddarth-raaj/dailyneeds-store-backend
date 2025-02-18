@@ -42,7 +42,7 @@ class PurchaseRoutes {
     // Define bulk purchase schema with uppercase keys
     const bulkPurchaseSchema = Joi.array().items(
       Joi.object({
-        RETAIL_OUTLET_ID: Joi.number().required(),
+        STORE_ID: Joi.number().required(),
         SUPPLIER_ID: Joi.string().max(20).required(),
         SUPPLIER_NAME: Joi.string().max(100).required(),
         SUPPLIER_GSTN: Joi.string().max(20).required(),

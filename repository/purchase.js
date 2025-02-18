@@ -230,7 +230,7 @@ class PurchaseRepository {
           purchase = Object.keys(purchase).reduce((newObj, key) => {
             const lowerKey =
               {
-                RETAIL_OUTLET_ID: "retail_outlet_id",
+                STORE_ID: "retail_outlet_id",
                 SUPPLIER_ID: "supplier_id",
                 SUPPLIER_NAME: "supplier_name",
                 SUPPLIER_GSTN: "supplier_gstn",
