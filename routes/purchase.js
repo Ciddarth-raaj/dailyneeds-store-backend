@@ -10,8 +10,9 @@ class PurchaseRoutes {
   init() {
     // Define tax object schema
     const taxItemSchema = Joi.object({
-      perc: Joi.number().required(),
-      value: Joi.number().required(),
+      PERC: Joi.number().required(),
+      TAXABLE: Joi.number().required(),
+      VALUE: Joi.number().required(),
     });
 
     // Define purchase schema with tax arrays
@@ -46,18 +47,19 @@ class PurchaseRoutes {
         SUPPLIER_ID: Joi.string().max(20).required(),
         SUPPLIER_NAME: Joi.string().max(100).required(),
         SUPPLIER_GSTN: Joi.string().max(20).required(),
-        MMH_MRC_NO: Joi.number().required(),
-        MMH_MRC_DT: Joi.date().required(),
-        MMH_MRC_AMT: Joi.number().precision(2).required(),
-        MMH_DIST_BILL_DT: Joi.date().required(),
-        MMH_DIST_BILL_NO: Joi.string().max(50).required(),
-        MMH_MRC_REFNO: Joi.string().max(20).required(),
-        MMH_MANUAL_DISC: Joi.number().precision(2).required(),
+        MRC_NO: Joi.number().required(),
+        MRC_DATE: Joi.date().required(),
+        MRC_AMT: Joi.number().precision(2).required(),
+        DIST_BILL_DT: Joi.date().required(),
+        DIST_BILL_NO: Joi.string().max(50).required(),
+        MRC_REF: Joi.string().max(20).required(),
+        MANUAL_DISC: Joi.number().precision(2).required(),
         TOT_SGST_AMT: Joi.number().precision(2).required(),
         TOT_CGST_AMT: Joi.number().precision(2).required(),
         TOT_IGST_AMT: Joi.number().precision(2).required(),
         TOT_GST_CESS_AMT: Joi.number().precision(2).required(),
-        MMD_GOODS_TCS_AMT: Joi.number().precision(2).required(),
+        GOODS_TCS_AMT: Joi.number().precision(2).required(),
+        TOT_PUR_TAX_AMT: Joi.number().precision(2).required(), // have to add to db
         TS: Joi.number().required(),
         SGST: Joi.array().items(taxItemSchema).required(),
         CGST: Joi.array().items(taxItemSchema).required(),
