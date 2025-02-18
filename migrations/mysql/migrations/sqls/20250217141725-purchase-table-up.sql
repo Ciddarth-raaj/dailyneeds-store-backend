@@ -23,3 +23,5 @@ CREATE TABLE purchase (
     cess JSON,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE `purchase` ADD `has_updated` BOOLEAN NOT NULL DEFAULT FALSE AFTER `cess`;

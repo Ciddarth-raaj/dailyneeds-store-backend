@@ -334,7 +334,8 @@ class PurchaseRepository {
                     sgst = ?,
                     cgst = ?,
                     igst = ?,
-                    cess = ?
+                    cess = ?,
+                    has_updated = 1
                   WHERE ts = ? AND retail_outlet_id = ?`,
                   [
                     formattedPurchase.supplier_id,
