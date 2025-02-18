@@ -136,6 +136,7 @@ class Server {
     this.digitalPaymentsRepo = require("./repository/digital_payments")(
       this.mysql.connection
     );
+    this.purchaseRepo = require("./repository/purchase")(this.mysql.connection);
   }
 
   initUsecases() {
@@ -213,6 +214,7 @@ class Server {
     this.digitalPaymentsUsecase = require("./usecase/digital_payments")(
       this.digitalPaymentsRepo
     );
+    this.purchaseUsecase = require("./usecase/purchase")(this.purchaseRepo);
   }
 
   initRoutes() {
@@ -269,6 +271,7 @@ class Server {
     const digitalPaymentsRouter = require("./routes/digital_payments")(
       this.digitalPaymentsUsecase
     );
+    const purchaseRouter = require("./routes/purchase")(this.purchaseUsecase);
 
     app.use("/document", documentRouter.getRouter());
     app.use("/whatsapp", whatsappRouter.getRouter());
@@ -302,6 +305,7 @@ class Server {
     app.use("/accounts", accountsRouter.getRouter());
     app.use("/reconciliation", reconciliationRouter.getRouter());
     app.use("/digital-payments", digitalPaymentsRouter.getRouter());
+    app.use("/purchase", purchaseRouter.getRouter());
   }
 
   initServices() {
