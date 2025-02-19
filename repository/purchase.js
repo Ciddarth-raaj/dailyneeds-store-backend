@@ -181,7 +181,18 @@ class PurchaseRepository {
             reject(err);
             return;
           }
-          resolve({ code: 200, data: docs });
+
+          const parsedDocs = docs.map((doc) => {
+            return {
+              ...doc,
+              sgst: JSON.parse(doc.sgst),
+              cgst: JSON.parse(doc.cgst),
+              igst: JSON.parse(doc.igst),
+              cess: JSON.parse(doc.cess),
+            };
+          });
+
+          resolve({ code: 200, data: parsedDocs });
         }
       );
     });
