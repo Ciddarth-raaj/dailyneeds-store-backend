@@ -146,17 +146,17 @@ class PurchaseRepository {
       let filterValues = [];
 
       if (filters.retail_outlet_id) {
-        filterConditions.push("retail_outlet_id = ?");
+        filterConditions.push("p.retail_outlet_id = ?");
         filterValues.push(filters.retail_outlet_id);
       }
 
       if (filters.from_date) {
-        filterConditions.push("DATE(mmh_mrc_dt) >= ?");
+        filterConditions.push("DATE(p.mmh_mrc_dt) >= ?");
         filterValues.push(filters.from_date);
       }
 
       if (filters.to_date) {
-        filterConditions.push("DATE(mmh_mrc_dt) <= ?");
+        filterConditions.push("DATE(p.mmh_mrc_dt) <= ?");
         filterValues.push(filters.to_date);
       }
 
@@ -166,7 +166,19 @@ class PurchaseRepository {
           : "";
 
       this.db.query(
-        `SELECT * FROM purchase ${whereClause} ORDER BY created_at DESC`,
+        `SELECT p.*, 
+          pi.cash_discount,
+          pi.scheme_difference,
+          pi.cost_difference,
+          pi.due,
+          pi.freight_charges,
+          pi.round_off,
+          pi.jv_ledger,
+          pi.narration
+        FROM purchase p
+        LEFT JOIN purchase_internal pi ON p.purchase_id = pi.purchase_id
+        ${whereClause} 
+        ORDER BY p.created_at DESC`,
         filterValues,
         (err, docs) => {
           if (err) {
@@ -182,15 +194,22 @@ class PurchaseRepository {
             return;
           }
 
-          const parsedDocs = docs.map((doc) => {
-            return {
-              ...doc,
-              sgst: JSON.parse(doc.sgst),
-              cgst: JSON.parse(doc.cgst),
-              igst: JSON.parse(doc.igst),
-              cess: JSON.parse(doc.cess),
-            };
-          });
+          const parsedDocs = docs.map((doc) => ({
+            ...doc,
+            sgst: JSON.parse(doc.sgst),
+            cgst: JSON.parse(doc.cgst),
+            igst: JSON.parse(doc.igst),
+            cess: JSON.parse(doc.cess),
+            // Set default values for internal fields if they don't exist
+            cash_discount: doc.cash_discount || 0.0,
+            scheme_difference: doc.scheme_difference || 0.0,
+            cost_difference: doc.cost_difference || 0.0,
+            due: doc.due || 0.0,
+            freight_charges: doc.freight_charges || 0.0,
+            round_off: doc.round_off || 0.0,
+            jv_ledger: doc.jv_ledger || 0.0,
+            narration: doc.narration || "",
+          }));
 
           resolve({ code: 200, data: parsedDocs });
         }
@@ -201,7 +220,18 @@ class PurchaseRepository {
   getById(purchaseId) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "SELECT * FROM purchase WHERE purchase_id = ?",
+        `SELECT p.*, 
+          pi.cash_discount,
+          pi.scheme_difference,
+          pi.cost_difference,
+          pi.due,
+          pi.freight_charges,
+          pi.round_off,
+          pi.jv_ledger,
+          pi.narration
+        FROM purchase p
+        LEFT JOIN purchase_internal pi ON p.purchase_id = pi.purchase_id
+        WHERE p.purchase_id = ?`,
         [purchaseId],
         (err, docs) => {
           if (err) {
@@ -222,7 +252,25 @@ class PurchaseRepository {
             return;
           }
 
-          resolve({ code: 200, data: docs[0] });
+          const doc = docs[0];
+          const parsedDoc = {
+            ...doc,
+            sgst: JSON.parse(doc.sgst),
+            cgst: JSON.parse(doc.cgst),
+            igst: JSON.parse(doc.igst),
+            cess: JSON.parse(doc.cess),
+            // Set default values for internal fields if they don't exist
+            cash_discount: doc.cash_discount || 0.0,
+            scheme_difference: doc.scheme_difference || 0.0,
+            cost_difference: doc.cost_difference || 0.0,
+            due: doc.due || 0.0,
+            freight_charges: doc.freight_charges || 0.0,
+            round_off: doc.round_off || 0.0,
+            jv_ledger: doc.jv_ledger || 0.0,
+            narration: doc.narration || "",
+          };
+
+          resolve({ code: 200, data: parsedDoc });
         }
       );
     });

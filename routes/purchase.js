@@ -128,7 +128,11 @@ class PurchaseRoutes {
           req.body.purchase
         );
         if (purchaseError) {
-          return res.json({ code: 422, msg: purchaseError.toString() });
+          return res.json({
+            code: 422,
+            msg: purchaseError.toString(),
+            tag: "PURCHASE-ERROR",
+          });
         }
 
         // Validate purchase_internal
@@ -136,7 +140,11 @@ class PurchaseRoutes {
           req.body.purchase_internal
         );
         if (internalError) {
-          return res.json({ code: 422, msg: internalError.toString() });
+          return res.json({
+            code: 422,
+            msg: internalError.toString(),
+            tag: "PURCHASE-INTERNAL-ERROR",
+          });
         }
 
         const purchase = { ...req.body.purchase, purchase_id: req.params.id };
