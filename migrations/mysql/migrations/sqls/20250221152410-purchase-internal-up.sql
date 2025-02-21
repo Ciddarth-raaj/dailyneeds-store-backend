@@ -11,3 +11,5 @@ CREATE TABLE purchase_internal (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (purchase_id) REFERENCES purchase(purchase_id)
 );
+
+ALTER TABLE `purchase` ADD `updated_at` TIMESTAMP on update CURRENT_TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER `has_updated`;

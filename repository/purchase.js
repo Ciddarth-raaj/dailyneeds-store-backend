@@ -351,8 +351,11 @@ class PurchaseRepository {
           // Check if record exists
           const [existingRows] = await new Promise((resolve, reject) => {
             this.db.query(
-              `SELECT * FROM purchase WHERE ts = ? AND retail_outlet_id = ?`,
-              [formattedPurchase.ts, formattedPurchase.retail_outlet_id],
+              `SELECT * FROM purchase WHERE mmh_mrc_refno = ? AND retail_outlet_id = ?`,
+              [
+                formattedPurchase.mmh_mrc_refno,
+                formattedPurchase.retail_outlet_id,
+              ],
               (err, result) => {
                 if (err) reject(err);
                 resolve([result]);
@@ -363,41 +366,7 @@ class PurchaseRepository {
           if (existingRows.length > 0) {
             const existing = existingRows[0];
 
-            const hasChanges =
-              existing.supplier_id != formattedPurchase.supplier_id ||
-              existing.supplier_name != formattedPurchase.supplier_name ||
-              existing.supplier_gstn != formattedPurchase.supplier_gstn ||
-              existing.mmh_mrc_no != formattedPurchase.mmh_mrc_no ||
-              moment(existing.mmh_mrc_dt).format("YYYY-MM-DD") !=
-                formattedPurchase.mmh_mrc_dt ||
-              existing.mmh_mrc_amt != formattedPurchase.mmh_mrc_amt ||
-              moment(existing.mmh_dist_bill_dt).format("YYYY-MM-DD") !=
-                formattedPurchase.mmh_dist_bill_dt ||
-              existing.mmh_dist_bill_no != formattedPurchase.mmh_dist_bill_no ||
-              existing.mmh_mrc_refno != formattedPurchase.mmh_mrc_refno ||
-              existing.mmh_manual_disc != formattedPurchase.mmh_manual_disc ||
-              existing.tot_sgst_amt != formattedPurchase.tot_sgst_amt ||
-              existing.tot_cgst_amt != formattedPurchase.tot_cgst_amt ||
-              existing.tot_igst_amt != formattedPurchase.tot_igst_amt ||
-              existing.tot_gst_cess_amt != formattedPurchase.tot_gst_cess_amt ||
-              existing.mmd_goods_tcs_amt !=
-                formattedPurchase.mmd_goods_tcs_amt ||
-              !this.compareTaxArrays(
-                JSON.parse(existing.sgst),
-                formattedPurchase.sgst
-              ) ||
-              !this.compareTaxArrays(
-                JSON.parse(existing.cgst),
-                formattedPurchase.cgst
-              ) ||
-              !this.compareTaxArrays(
-                JSON.parse(existing.igst),
-                formattedPurchase.igst
-              ) ||
-              !this.compareTaxArrays(
-                JSON.parse(existing.cess),
-                formattedPurchase.cess
-              );
+            const hasChanges = existing.ts != formattedPurchase.ts;
 
             if (hasChanges) {
               // Update if values are different
@@ -412,7 +381,7 @@ class PurchaseRepository {
                     mmh_mrc_amt = ?,
                     mmh_dist_bill_dt = ?,
                     mmh_dist_bill_no = ?,
-                    mmh_mrc_refno = ?,
+                    ts = ?,
                     mmh_manual_disc = ?,
                     tot_sgst_amt = ?,
                     tot_cgst_amt = ?,
@@ -424,7 +393,7 @@ class PurchaseRepository {
                     igst = ?,
                     cess = ?,
                     has_updated = 1
-                  WHERE ts = ? AND retail_outlet_id = ?`,
+                  WHERE mmh_mrc_refno = ? AND retail_outlet_id = ?`,
                   [
                     formattedPurchase.supplier_id,
                     formattedPurchase.supplier_name,
@@ -434,7 +403,7 @@ class PurchaseRepository {
                     formattedPurchase.mmh_mrc_amt,
                     formattedPurchase.mmh_dist_bill_dt,
                     formattedPurchase.mmh_dist_bill_no,
-                    formattedPurchase.mmh_mrc_refno,
+                    formattedPurchase.ts,
                     formattedPurchase.mmh_manual_disc,
                     formattedPurchase.tot_sgst_amt,
                     formattedPurchase.tot_cgst_amt,
@@ -445,11 +414,15 @@ class PurchaseRepository {
                     JSON.stringify(formattedPurchase.cgst),
                     JSON.stringify(formattedPurchase.igst),
                     JSON.stringify(formattedPurchase.cess),
-                    formattedPurchase.ts,
+                    formattedPurchase.mmh_mrc_refno,
                     formattedPurchase.retail_outlet_id,
                   ],
                   (err, result) => {
-                    if (err) reject(err);
+                    if (err) {
+                      reject(err);
+                    }
+
+                    console.log(result);
                     resolve(result);
                   }
                 );
