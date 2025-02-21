@@ -228,6 +228,29 @@ class PurchaseRepository {
     });
   }
 
+  // Helper function to compare tax arrays
+  compareTaxArrays = (existing, updated) => {
+    if (!Array.isArray(existing) || !Array.isArray(updated)) {
+      return false;
+    }
+    if (existing.length !== updated.length) {
+      return false;
+    }
+
+    // Sort arrays by perc to ensure consistent comparison
+    const sortedExisting = existing.sort((a, b) => a.perc - b.perc);
+    const sortedUpdated = updated.sort((a, b) => a.perc - b.perc);
+
+    // Compare each item in the arrays
+    return sortedExisting.every((existingItem, index) => {
+      const updatedItem = sortedUpdated[index];
+      return (
+        existingItem.perc === updatedItem.perc &&
+        existingItem.value === updatedItem.value
+      );
+    });
+  };
+
   async bulkCreate(purchaseList) {
     return new Promise(async (resolve, reject) => {
       try {
@@ -292,29 +315,6 @@ class PurchaseRepository {
           if (existingRows.length > 0) {
             const existing = existingRows[0];
 
-            // Helper function to compare tax arrays
-            const compareTaxArrays = (existing, updated) => {
-              if (!Array.isArray(existing) || !Array.isArray(updated)) {
-                return false;
-              }
-              if (existing.length !== updated.length) {
-                return false;
-              }
-
-              // Sort arrays by perc to ensure consistent comparison
-              const sortedExisting = existing.sort((a, b) => a.perc - b.perc);
-              const sortedUpdated = updated.sort((a, b) => a.perc - b.perc);
-
-              // Compare each item in the arrays
-              return sortedExisting.every((existingItem, index) => {
-                const updatedItem = sortedUpdated[index];
-                return (
-                  existingItem.perc === updatedItem.perc &&
-                  existingItem.value === updatedItem.value
-                );
-              });
-            };
-
             const hasChanges =
               existing.supplier_id != formattedPurchase.supplier_id ||
               existing.supplier_name != formattedPurchase.supplier_name ||
@@ -334,19 +334,19 @@ class PurchaseRepository {
               existing.tot_gst_cess_amt != formattedPurchase.tot_gst_cess_amt ||
               existing.mmd_goods_tcs_amt !=
                 formattedPurchase.mmd_goods_tcs_amt ||
-              !compareTaxArrays(
+              !this.compareTaxArrays(
                 JSON.parse(existing.sgst),
                 formattedPurchase.sgst
               ) ||
-              !compareTaxArrays(
+              !this.compareTaxArrays(
                 JSON.parse(existing.cgst),
                 formattedPurchase.cgst
               ) ||
-              !compareTaxArrays(
+              !this.compareTaxArrays(
                 JSON.parse(existing.igst),
                 formattedPurchase.igst
               ) ||
-              !compareTaxArrays(
+              !this.compareTaxArrays(
                 JSON.parse(existing.cess),
                 formattedPurchase.cess
               );
@@ -465,6 +465,216 @@ class PurchaseRepository {
           level: logger.LEVEL.ERROR,
           component: "REPOSITORY.PURCHASE",
           code: "REPOSITORY.PURCHASE.BULK-CREATE",
+          description: err.toString(),
+          category: "",
+          ref: {},
+        });
+        reject(err);
+      }
+    });
+  }
+
+  async updatePurchaseWithInternal(purchase, purchaseInternal) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        // First check if purchase values have changed
+        const [existingPurchase] = await new Promise((resolve, reject) => {
+          this.db.query(
+            `SELECT * FROM purchase WHERE purchase_id = ?`,
+            [purchase.purchase_id],
+            (err, result) => {
+              if (err) reject(err);
+              resolve([result[0]]);
+            }
+          );
+        });
+
+        if (!existingPurchase) {
+          reject(new Error("Purchase not found"));
+          return;
+        }
+
+        // Compare values to check if update is needed
+        const hasChanges =
+          existingPurchase.supplier_id != purchase.supplier_id ||
+          existingPurchase.supplier_name != purchase.supplier_name ||
+          existingPurchase.supplier_gstn != purchase.supplier_gstn ||
+          existingPurchase.mmh_mrc_no != purchase.mmh_mrc_no ||
+          moment(existingPurchase.mmh_mrc_dt).format("YYYY-MM-DD") !=
+            moment(purchase.mmh_mrc_dt).format("YYYY-MM-DD") ||
+          existingPurchase.mmh_mrc_amt != purchase.mmh_mrc_amt ||
+          moment(existingPurchase.mmh_dist_bill_dt).format("YYYY-MM-DD") !=
+            moment(purchase.mmh_dist_bill_dt).format("YYYY-MM-DD") ||
+          existingPurchase.mmh_dist_bill_no != purchase.mmh_dist_bill_no ||
+          existingPurchase.mmh_mrc_refno != purchase.mmh_mrc_refno ||
+          existingPurchase.mmh_manual_disc != purchase.mmh_manual_disc ||
+          existingPurchase.tot_sgst_amt != purchase.tot_sgst_amt ||
+          existingPurchase.tot_cgst_amt != purchase.tot_cgst_amt ||
+          existingPurchase.tot_igst_amt != purchase.tot_igst_amt ||
+          existingPurchase.tot_gst_cess_amt != purchase.tot_gst_cess_amt ||
+          existingPurchase.mmd_goods_tcs_amt != purchase.mmd_goods_tcs_amt ||
+          !this.compareTaxArrays(
+            JSON.parse(existingPurchase.sgst),
+            purchase.sgst
+          ) ||
+          !this.compareTaxArrays(
+            JSON.parse(existingPurchase.cgst),
+            purchase.cgst
+          ) ||
+          !this.compareTaxArrays(
+            JSON.parse(existingPurchase.igst),
+            purchase.igst
+          ) ||
+          !this.compareTaxArrays(
+            JSON.parse(existingPurchase.cess),
+            purchase.cess
+          );
+
+        // Update purchase if values changed
+        if (hasChanges) {
+          await new Promise((resolve, reject) => {
+            this.db.query(
+              `UPDATE purchase SET
+                supplier_id = ?,
+                supplier_name = ?,
+                supplier_gstn = ?,
+                mmh_mrc_no = ?,
+                mmh_mrc_dt = ?,
+                mmh_mrc_amt = ?,
+                mmh_dist_bill_dt = ?,
+                mmh_dist_bill_no = ?,
+                mmh_mrc_refno = ?,
+                mmh_manual_disc = ?,
+                tot_sgst_amt = ?,
+                tot_cgst_amt = ?,
+                tot_igst_amt = ?,
+                tot_gst_cess_amt = ?,
+                mmd_goods_tcs_amt = ?,
+                sgst = ?,
+                cgst = ?,
+                igst = ?,
+                cess = ?
+              WHERE purchase_id = ?`,
+              [
+                purchase.supplier_id,
+                purchase.supplier_name,
+                purchase.supplier_gstn,
+                purchase.mmh_mrc_no,
+                moment(purchase.mmh_mrc_dt).format("YYYY-MM-DD"),
+                purchase.mmh_mrc_amt,
+                moment(purchase.mmh_dist_bill_dt).format("YYYY-MM-DD"),
+                purchase.mmh_dist_bill_no,
+                purchase.mmh_mrc_refno,
+                purchase.mmh_manual_disc,
+                purchase.tot_sgst_amt,
+                purchase.tot_cgst_amt,
+                purchase.tot_igst_amt,
+                purchase.tot_gst_cess_amt,
+                purchase.mmd_goods_tcs_amt,
+                JSON.stringify(purchase.sgst),
+                JSON.stringify(purchase.cgst),
+                JSON.stringify(purchase.igst),
+                JSON.stringify(purchase.cess),
+                purchase.purchase_id,
+              ],
+              (err, result) => {
+                if (err) reject(err);
+                resolve(result);
+              }
+            );
+          });
+        }
+
+        // Handle purchase_internal
+        if (purchaseInternal) {
+          // Check if internal record exists
+          const [existingInternal] = await new Promise((resolve, reject) => {
+            this.db.query(
+              `SELECT * FROM purchase_internal WHERE purchase_id = ?`,
+              [purchase.purchase_id],
+              (err, result) => {
+                if (err) reject(err);
+                resolve([result[0]]);
+              }
+            );
+          });
+
+          if (existingInternal) {
+            // Update existing internal record
+            await new Promise((resolve, reject) => {
+              this.db.query(
+                `UPDATE purchase_internal SET
+                  cash_discount = ?,
+                  scheme_difference = ?,
+                  cost_difference = ?,
+                  due = ?,
+                  freight_charges = ?,
+                  round_off = ?,
+                  jv_ledger = ?,
+                  narration = ?
+                WHERE purchase_id = ?`,
+                [
+                  purchaseInternal.cash_discount || 0.0,
+                  purchaseInternal.scheme_difference || 0.0,
+                  purchaseInternal.cost_difference || 0.0,
+                  purchaseInternal.due || 0.0,
+                  purchaseInternal.freight_charges || 0.0,
+                  purchaseInternal.round_off || 0.0,
+                  purchaseInternal.jv_ledger || 0.0,
+                  purchaseInternal.narration || "",
+                  purchase.purchase_id,
+                ],
+                (err, result) => {
+                  if (err) reject(err);
+                  resolve(result);
+                }
+              );
+            });
+          } else {
+            // Insert new internal record
+            await new Promise((resolve, reject) => {
+              this.db.query(
+                `INSERT INTO purchase_internal (
+                  purchase_id,
+                  cash_discount,
+                  scheme_difference,
+                  cost_difference,
+                  due,
+                  freight_charges,
+                  round_off,
+                  jv_ledger,
+                  narration
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [
+                  purchase.purchase_id,
+                  purchaseInternal.cash_discount || 0.0,
+                  purchaseInternal.scheme_difference || 0.0,
+                  purchaseInternal.cost_difference || 0.0,
+                  purchaseInternal.due || 0.0,
+                  purchaseInternal.freight_charges || 0.0,
+                  purchaseInternal.round_off || 0.0,
+                  purchaseInternal.jv_ledger || 0.0,
+                  purchaseInternal.narration || "",
+                ],
+                (err, result) => {
+                  if (err) reject(err);
+                  resolve(result);
+                }
+              );
+            });
+          }
+        }
+
+        resolve({
+          code: 200,
+          purchaseUpdated: hasChanges,
+          internalUpdated: !!purchaseInternal,
+        });
+      } catch (err) {
+        logger.Log({
+          level: logger.LEVEL.ERROR,
+          component: "REPOSITORY.PURCHASE",
+          code: "REPOSITORY.PURCHASE.UPDATE-WITH-INTERNAL",
           description: err.toString(),
           category: "",
           ref: {},

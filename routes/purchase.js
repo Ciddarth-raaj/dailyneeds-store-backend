@@ -68,6 +68,18 @@ class PurchaseRoutes {
       })
     );
 
+    // Schema for purchase_internal
+    const internalSchema = Joi.object({
+      cash_discount: Joi.number().precision(2).default(0.0),
+      scheme_difference: Joi.number().precision(2).default(0.0),
+      cost_difference: Joi.number().precision(2).default(0.0),
+      due: Joi.number().precision(2).default(0.0),
+      freight_charges: Joi.number().precision(2).default(0.0),
+      round_off: Joi.number().precision(2).default(0.0),
+      jv_ledger: Joi.number().precision(2).default(0.0),
+      narration: Joi.string().allow("").optional(),
+    });
+
     // Bulk create purchases
     router.post("/bulk", async (req, res) => {
       try {
@@ -103,37 +115,37 @@ class PurchaseRoutes {
     // Update purchase
     router.put("/:id", async (req, res) => {
       try {
-        const schema = Joi.object({
-          retail_outlet_id: Joi.number().required(),
-          supplier_id: Joi.string().max(20).required(),
-          supplier_name: Joi.string().max(100).required(),
-          supplier_gstn: Joi.string().max(20).required(),
-          mmh_mrc_no: Joi.number().required(),
-          mmh_mrc_dt: Joi.date().required(),
-          mmh_mrc_amt: Joi.number().precision(2).required(),
-          mmh_dist_bill_dt: Joi.date().required(),
-          mmh_dist_bill_no: Joi.string().max(50).required(),
-          mmh_mrc_refno: Joi.string().max(20).required(),
-          mmh_manual_disc: Joi.number().precision(2).required(),
-          tot_sgst_amt: Joi.number().precision(2).required(),
-          tot_cgst_amt: Joi.number().precision(2).required(),
-          tot_igst_amt: Joi.number().precision(2).required(),
-          tot_gst_cess_amt: Joi.number().precision(2).required(),
-          mmd_goods_tcs_amt: Joi.number().precision(2).required(),
-          ts: Joi.number().required(),
-          sgst: Joi.array().items(taxItemSchema).required(),
-          cgst: Joi.array().items(taxItemSchema).required(),
-          igst: Joi.array().items(taxItemSchema).required(),
-          cess: Joi.array().items(taxItemSchema).required(),
-        });
-
-        const purchase = { ...req.body, purchase_id: req.params.id };
-        const { error, value } = schema.validate(req.body);
-        if (error) {
-          return res.json({ code: 422, msg: error.toString() });
+        // Check if both objects exist
+        if (!req.body.purchase || !req.body.purchase_internal) {
+          return res.json({
+            code: 422,
+            msg: "Both purchase and purchase_internal must be provided",
+          });
         }
 
-        const result = await this.purchaseUsecase.updatePurchase(purchase);
+        // Validate purchase
+        const { error: purchaseError } = purchaseSchema.validate(
+          req.body.purchase
+        );
+        if (purchaseError) {
+          return res.json({ code: 422, msg: purchaseError.toString() });
+        }
+
+        // Validate purchase_internal
+        const { error: internalError } = internalSchema.validate(
+          req.body.purchase_internal
+        );
+        if (internalError) {
+          return res.json({ code: 422, msg: internalError.toString() });
+        }
+
+        const purchase = { ...req.body.purchase, purchase_id: req.params.id };
+        const purchase_internal = req.body.purchase_internal;
+
+        const result = await this.purchaseUsecase.updatePurchaseWithInternal(
+          purchase,
+          purchase_internal
+        );
         res.json(result);
       } catch (err) {
         console.log(err);

@@ -12,9 +12,12 @@ class PurchaseUsecase {
     }
   }
 
-  async updatePurchase(purchase) {
+  async updatePurchaseWithInternal(purchase, purchaseInternal) {
     try {
-      const result = await this.purchaseRepo.update(purchase);
+      const result = await this.purchaseRepo.updatePurchaseWithInternal(
+        purchase,
+        purchaseInternal
+      );
       return result;
     } catch (error) {
       throw error;
