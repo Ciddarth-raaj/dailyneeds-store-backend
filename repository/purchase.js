@@ -371,7 +371,8 @@ class PurchaseRepository {
             const existing = existingRows[0];
 
             const hasChanges = existing.ts != formattedPurchase.ts;
-            const has_updated = existing.is_approved;
+            const has_updated = existing.is_approved == 0 ? false : true;
+            const is_approved = false;
 
             if (hasChanges) {
               // Update if values are different
@@ -397,7 +398,8 @@ class PurchaseRepository {
                     cgst = ?,
                     igst = ?,
                     cess = ?,
-                    has_updated = ?
+                    has_updated = ?,
+                    is_approved = ?
                   WHERE mmh_mrc_refno = ? AND retail_outlet_id = ?`,
                   [
                     formattedPurchase.supplier_id,
@@ -420,6 +422,7 @@ class PurchaseRepository {
                     JSON.stringify(formattedPurchase.igst),
                     JSON.stringify(formattedPurchase.cess),
                     has_updated,
+                    is_approved,
                     formattedPurchase.mmh_mrc_refno,
                     formattedPurchase.retail_outlet_id,
                   ],
