@@ -78,6 +78,8 @@ class PurchaseRoutes {
       round_off: Joi.number().precision(2).default(0.0),
       jv_ledger: Joi.number().precision(2).default(0.0),
       narration: Joi.string().allow("").optional(),
+      supplier_credit_note: Joi.number().precision(2).default(0.0),
+      total_amount: Joi.number().precision(2).default(0.0),
     });
 
     // Bulk create purchases

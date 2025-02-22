@@ -174,7 +174,9 @@ class PurchaseRepository {
           pi.freight_charges,
           pi.round_off,
           pi.jv_ledger,
-          pi.narration
+          pi.narration,
+          pi.supplier_credit_note,
+          pi.total_amount
         FROM purchase p
         LEFT JOIN purchase_internal pi ON p.purchase_id = pi.purchase_id
         ${whereClause} 
@@ -200,7 +202,7 @@ class PurchaseRepository {
             cgst: JSON.parse(doc.cgst),
             igst: JSON.parse(doc.igst),
             cess: JSON.parse(doc.cess),
-            // Set default values for internal fields if they don't exist
+            // Set default values for internal fields
             cash_discount: doc.cash_discount || 0.0,
             scheme_difference: doc.scheme_difference || 0.0,
             cost_difference: doc.cost_difference || 0.0,
@@ -209,6 +211,8 @@ class PurchaseRepository {
             round_off: doc.round_off || 0.0,
             jv_ledger: doc.jv_ledger || 0.0,
             narration: doc.narration || "",
+            supplier_credit_note: doc.supplier_credit_note || 0.0,
+            total_amount: doc.total_amount || 0.0,
           }));
 
           resolve({ code: 200, data: parsedDocs });
@@ -632,7 +636,9 @@ class PurchaseRepository {
                   freight_charges = ?,
                   round_off = ?,
                   jv_ledger = ?,
-                  narration = ?
+                  narration = ?,
+                  supplier_credit_note = ?,
+                  total_amount = ?
                 WHERE purchase_id = ?`,
                 [
                   purchaseInternal.cash_discount || 0.0,
@@ -643,6 +649,8 @@ class PurchaseRepository {
                   purchaseInternal.round_off || 0.0,
                   purchaseInternal.jv_ledger || 0.0,
                   purchaseInternal.narration || "",
+                  purchaseInternal.supplier_credit_note || 0.0,
+                  purchaseInternal.total_amount || 0.0,
                   purchase.purchase_id,
                 ],
                 (err, result) => {
@@ -664,8 +672,10 @@ class PurchaseRepository {
                   freight_charges,
                   round_off,
                   jv_ledger,
-                  narration
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                  narration,
+                  supplier_credit_note,
+                  total_amount
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                   purchase.purchase_id,
                   purchaseInternal.cash_discount || 0.0,
@@ -676,6 +686,8 @@ class PurchaseRepository {
                   purchaseInternal.round_off || 0.0,
                   purchaseInternal.jv_ledger || 0.0,
                   purchaseInternal.narration || "",
+                  purchaseInternal.supplier_credit_note || 0.0,
+                  purchaseInternal.total_amount || 0.0,
                 ],
                 (err, result) => {
                   if (err) reject(err);
