@@ -704,6 +704,73 @@ class PurchaseRepository {
       }
     });
   }
+
+  async updateFlags(purchaseId, flags) {
+    return new Promise((resolve, reject) => {
+      try {
+        // Build update query dynamically based on provided flags
+        const updates = [];
+        const values = [];
+
+        if (flags.has_updated !== undefined) {
+          updates.push("has_updated = ?");
+          values.push(flags.has_updated);
+        }
+
+        if (flags.is_approved !== undefined) {
+          updates.push("is_approved = ?");
+          values.push(flags.is_approved);
+        }
+
+        if (updates.length === 0) {
+          resolve({ code: 400, msg: "No flags to update" });
+          return;
+        }
+
+        values.push(purchaseId);
+
+        this.db.query(
+          `UPDATE purchase SET ${updates.join(", ")} WHERE purchase_id = ?`,
+          values,
+          (err, result) => {
+            if (err) {
+              logger.Log({
+                level: logger.LEVEL.ERROR,
+                component: "REPOSITORY.PURCHASE",
+                code: "REPOSITORY.PURCHASE.UPDATE-FLAGS",
+                description: err.toString(),
+                category: "",
+                ref: {},
+              });
+              reject(err);
+              return;
+            }
+
+            if (result.affectedRows === 0) {
+              resolve({ code: 404, msg: "Purchase not found" });
+              return;
+            }
+
+            resolve({
+              code: 200,
+              msg: "Flags updated successfully",
+              updatedFlags: flags,
+            });
+          }
+        );
+      } catch (err) {
+        logger.Log({
+          level: logger.LEVEL.ERROR,
+          component: "REPOSITORY.PURCHASE",
+          code: "REPOSITORY.PURCHASE.UPDATE-FLAGS",
+          description: err.toString(),
+          category: "",
+          ref: {},
+        });
+        reject(err);
+      }
+    });
+  }
 }
 
 module.exports = (db) => {

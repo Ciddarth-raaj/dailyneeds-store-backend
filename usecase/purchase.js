@@ -59,6 +59,15 @@ class PurchaseUsecase {
       throw error;
     }
   }
+
+  async updatePurchaseFlags(purchaseId, flags) {
+    try {
+      const result = await this.purchaseRepo.updateFlags(purchaseId, flags);
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
 }
 
 module.exports = (purchaseRepo) => {

@@ -112,6 +112,35 @@ class PurchaseRoutes {
       }
     });
 
+    // Update purchase flags
+    router.patch("/:id/flags", async (req, res) => {
+      try {
+        // Schema for flags update
+        const flagsSchema = Joi.object({
+          has_updated: Joi.boolean(),
+          is_approved: Joi.boolean(),
+        }).or("has_updated", "is_approved"); // At least one must be present
+
+        const { error } = flagsSchema.validate(req.body);
+        if (error) {
+          return res.json({
+            code: 422,
+            msg: error.toString(),
+            tag: "FLAGS-ERROR",
+          });
+        }
+
+        const result = await this.purchaseUsecase.updatePurchaseFlags(
+          req.params.id,
+          req.body
+        );
+        res.json(result);
+      } catch (err) {
+        console.log(err);
+        res.json({ code: 500, msg: err.message });
+      }
+    });
+
     // Update purchase
     router.put("/:id", async (req, res) => {
       try {
