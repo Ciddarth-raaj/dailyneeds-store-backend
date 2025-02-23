@@ -214,7 +214,10 @@ class Server {
     this.digitalPaymentsUsecase = require("./usecase/digital_payments")(
       this.digitalPaymentsRepo
     );
-    this.purchaseUsecase = require("./usecase/purchase")(this.purchaseRepo);
+    this.purchaseUsecase = require("./usecase/purchase")(
+      this.purchaseRepo,
+      this.outletUsecase
+    );
   }
 
   initRoutes() {

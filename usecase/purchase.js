@@ -1,8 +1,9 @@
 const { PURCHASE_TELEGRAM_CHAT_ID } = require("../constants/telegram");
 
 class PurchaseUsecase {
-  constructor(purchaseRepo) {
+  constructor(purchaseRepo, outletUsecase) {
     this.purchaseRepo = purchaseRepo;
+    this.outletUsecase = outletUsecase;
     this.telegram = require("../services/telegram")();
   }
 
@@ -27,9 +28,13 @@ class PurchaseUsecase {
       );
 
       if (send_not_matched_notification) {
+        const outlet = await this.outletUsecase.getOutletById(
+          purchase.retail_outlet_id
+        );
+        const outletName = outlet.length > 0 ? outlet[0].outlet_name : "N/A";
         await this.telegram.sendMessage(
           PURCHASE_TELEGRAM_CHAT_ID,
-          `✅ Purchase #${purchase.mmh_mrc_refno} has been updated with ${purchaseInternal.total_amount} (MRC Amount: ${purchase.mmh_mrc_amt})`
+          `✅ Purchase #${purchase.mmh_mrc_refno} (${outletName}) has been updated with ${purchaseInternal.total_amount} (MRC Amount: ${purchase.mmh_mrc_amt})`
         );
       }
       return result;
@@ -84,6 +89,6 @@ class PurchaseUsecase {
   }
 }
 
-module.exports = (purchaseRepo) => {
-  return new PurchaseUsecase(purchaseRepo);
+module.exports = (purchaseRepo, outletUsecase) => {
+  return new PurchaseUsecase(purchaseRepo, outletUsecase);
 };
