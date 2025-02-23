@@ -180,10 +180,13 @@ class PurchaseRoutes {
 
         const purchase = { ...req.body.purchase, purchase_id: req.params.id };
         const purchase_internal = req.body.purchase_internal;
+        const send_not_matched_notification =
+          req.body.send_not_matched_notification ?? false;
 
         const result = await this.purchaseUsecase.updatePurchaseWithInternal(
           purchase,
-          purchase_internal
+          purchase_internal,
+          send_not_matched_notification
         );
         res.json(result);
       } catch (err) {

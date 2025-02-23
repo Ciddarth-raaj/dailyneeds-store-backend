@@ -15,3 +15,4 @@ CREATE TABLE purchase_internal (
 ALTER TABLE `purchase` ADD `updated_at` TIMESTAMP on update CURRENT_TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER `has_updated`;
 ALTER TABLE `purchase` ADD `is_approved` BOOLEAN NOT NULL DEFAULT FALSE AFTER `has_updated`;
 ALTER TABLE `purchase_internal` ADD `supplier_credit_note` DECIMAL(10, 2) NOT NULL AFTER `narration`, ADD `total_amount` DECIMAL(10, 2) NOT NULL AFTER `supplier_credit_note`;
+ALTER TABLE `purchase_internal` CHANGE `jv_ledger` `jv_ledger` INT NULL DEFAULT NULL;

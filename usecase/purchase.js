@@ -1,6 +1,9 @@
+const { PURCHASE_TELEGRAM_CHAT_ID } = require("../constants/telegram");
+
 class PurchaseUsecase {
   constructor(purchaseRepo) {
     this.purchaseRepo = purchaseRepo;
+    this.telegram = require("../services/telegram")();
   }
 
   async createPurchase(purchase) {
@@ -12,12 +15,23 @@ class PurchaseUsecase {
     }
   }
 
-  async updatePurchaseWithInternal(purchase, purchaseInternal) {
+  async updatePurchaseWithInternal(
+    purchase,
+    purchaseInternal,
+    send_not_matched_notification
+  ) {
     try {
       const result = await this.purchaseRepo.updatePurchaseWithInternal(
         purchase,
         purchaseInternal
       );
+
+      if (send_not_matched_notification) {
+        await this.telegram.sendMessage(
+          PURCHASE_TELEGRAM_CHAT_ID,
+          `✅ Purchase #${purchase.mmh_mrc_refno} has been updated with ${purchaseInternal.total_amount} (MRC Amount: ${purchase.mmh_mrc_amt})`
+        );
+      }
       return result;
     } catch (error) {
       throw error;
