@@ -160,6 +160,16 @@ class PurchaseRepository {
         filterValues.push(filters.to_date);
       }
 
+      if (filters.has_updated !== undefined) {
+        filterConditions.push("p.has_updated = ?");
+        filterValues.push(filters.has_updated);
+      }
+
+      if (filters.is_approved !== undefined) {
+        filterConditions.push("p.is_approved = ?");
+        filterValues.push(filters.is_approved);
+      }
+
       const whereClause =
         filterConditions.length > 0
           ? `WHERE ${filterConditions.join(" AND ")}`
