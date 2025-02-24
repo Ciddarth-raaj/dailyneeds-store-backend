@@ -54,7 +54,7 @@ class Server {
 
     //Enable request compression
     app.use(compression());
-    app.use(bodyParser.json({ limit: "50mb" }));
+    app.use(bodyParser.json({ limit: "120mb" }));
     app.use(
       bodyParser.urlencoded({
         // to support URL-encoded bodies
