@@ -186,7 +186,8 @@ class PurchaseRepository {
           pi.jv_ledger,
           pi.narration,
           pi.supplier_credit_note,
-          pi.total_amount
+          pi.total_amount,
+          pi.invoice_amount
         FROM purchase p
         LEFT JOIN purchase_internal pi ON p.purchase_id = pi.purchase_id
         ${whereClause} 
@@ -223,6 +224,7 @@ class PurchaseRepository {
             narration: doc.narration || "",
             supplier_credit_note: doc.supplier_credit_note || 0.0,
             total_amount: doc.total_amount || 0.0,
+            invoice_amount: doc.invoice_amount || 0.0,
           }));
 
           resolve({ code: 200, data: parsedDocs });
@@ -654,7 +656,8 @@ class PurchaseRepository {
                   jv_ledger = ?,
                   narration = ?,
                   supplier_credit_note = ?,
-                  total_amount = ?
+                  total_amount = ?,
+                  invoice_amount = ?
                 WHERE purchase_id = ?`,
                 [
                   purchaseInternal.cash_discount || 0.0,
@@ -667,6 +670,7 @@ class PurchaseRepository {
                   purchaseInternal.narration || "",
                   purchaseInternal.supplier_credit_note || 0.0,
                   purchaseInternal.total_amount || 0.0,
+                  purchaseInternal.invoice_amount || 0.0,
                   purchase.purchase_id,
                 ],
                 (err, result) => {
@@ -690,8 +694,9 @@ class PurchaseRepository {
                   jv_ledger,
                   narration,
                   supplier_credit_note,
-                  total_amount
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                  total_amount,
+                  invoice_amount
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                   purchase.purchase_id,
                   purchaseInternal.cash_discount || 0.0,
@@ -704,6 +709,7 @@ class PurchaseRepository {
                   purchaseInternal.narration || "",
                   purchaseInternal.supplier_credit_note || 0.0,
                   purchaseInternal.total_amount || 0.0,
+                  purchaseInternal.invoice_amount || 0.0,
                 ],
                 (err, result) => {
                   if (err) reject(err);
