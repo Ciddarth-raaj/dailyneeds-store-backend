@@ -308,7 +308,8 @@ class PurchaseRepository {
       const updatedItem = sortedUpdated[index];
       return (
         existingItem.perc === updatedItem.perc &&
-        existingItem.value === updatedItem.value
+        existingItem.value === updatedItem.value &&
+        existingItem.TAXABLE === updatedItem.TAXABLE
       );
     });
   };

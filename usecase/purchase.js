@@ -28,17 +28,18 @@ class PurchaseUsecase {
       );
 
       if (send_not_matched_notification) {
-        const outlet = await this.outletUsecase.getOutletById(
-          purchase.retail_outlet_id
-        );
-        const outletName = outlet.length > 0 ? outlet[0].outlet_name : "N/A";
         try {
+          const outlet = await this.outletUsecase.getOutletById(
+            purchase.retail_outlet_id
+          );
+          const outletName = outlet.length > 0 ? outlet[0].outlet_name : "N/A";
+
           await this.telegram.sendMessage(
             PURCHASE_TELEGRAM_CHAT_ID,
             `✅ Purchase #${purchase.mmh_mrc_refno} (${outletName}) has been updated with ${purchaseInternal.total_amount} (MRC Amount: ${purchase.mmh_mrc_amt})`
           );
         } catch (error) {
-          console.log("Failed to send Telegram notification:", error);
+          // do nothing
         }
       }
       return result;
