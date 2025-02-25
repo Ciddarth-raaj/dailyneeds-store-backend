@@ -263,7 +263,7 @@ class TallyUsecase {
                   AgstType: "New Ref",
                   Reference: purchase.mmh_dist_bill_no,
                   CreditPeriod: 0,
-                  Amount: purchase.total_amount,
+                  Amount: -1 * parseFloat(purchase.total_amount),
                 },
               ],
             })
@@ -470,7 +470,7 @@ class TallyUsecase {
                   {
                     AgstType: "New Ref",
                     Reference: purchase.mmh_dist_bill_no,
-                    Amount: purchase.total_amount,
+                    Amount: -1 * parseFloat(purchase.total_amount),
                   },
                 ],
                 CategoryAllocation: [
