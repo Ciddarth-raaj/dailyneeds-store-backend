@@ -399,50 +399,52 @@ class TallyUsecase {
             );
           }
 
-          const journalEntry = INIT_JOURNAL_ENTRY(
-            moment(purchase.mmh_mrc_dt).format("YYYYMMDD")
-          );
-
-          journalEntry.MasterID = simpleEncrypt(
-            `${purchase.purchase_id}-journal-entry`
-          );
-          journalEntry.VoucherNumber = purchase.mmh_mrc_refno;
-          journalEntry.Reference = purchase.mmh_dist_bill_no;
-          journalEntry.ReferenceDate = moment(purchase.dist_bill_dt).format(
-            "YYYY-MM-DD"
-          );
-          journalEntry.PartyName = purchase.supplier_name;
-          journalEntry.Voucher_Total = purchase.total_amount;
-          journalEntry.Narration = purchase.narration;
-
-          journalEntry.ledgerentries.push(
-            GET_JOURNAL_LEDGER({
-              LedgerName: purchase.supplier_name,
-              Amount: purchase.total_amount,
-              IsDeemedPositive: "Yes",
-              BillAllocations: [
-                {
-                  AgstType: "New Ref",
-                  Reference: purchase.mmh_dist_bill_no,
-                  Amount: purchase.total_amount,
-                },
-              ],
-              CategoryAllocation: [
-                {
-                  Name: "Primary Cost Category",
-                  Amount: purchase.total_amount,
-                  CostCentreAllocations: [
-                    {
-                      Name: purchase.outlet_name,
-                      Amount: purchase.total_amount,
-                    },
-                  ],
-                },
-              ],
-            })
-          );
+          let journalEntry = null;
 
           if (purchase.jv_ledger === 1) {
+            const journalEntry = INIT_JOURNAL_ENTRY(
+              moment(purchase.mmh_mrc_dt).format("YYYYMMDD")
+            );
+
+            journalEntry.MasterID = simpleEncrypt(
+              `${purchase.purchase_id}-journal-entry`
+            );
+            journalEntry.VoucherNumber = purchase.mmh_mrc_refno;
+            journalEntry.Reference = purchase.mmh_dist_bill_no;
+            journalEntry.ReferenceDate = moment(purchase.dist_bill_dt).format(
+              "YYYY-MM-DD"
+            );
+            journalEntry.PartyName = purchase.supplier_name;
+            journalEntry.Voucher_Total = purchase.total_amount;
+            journalEntry.Narration = purchase.narration;
+
+            journalEntry.ledgerentries.push(
+              GET_JOURNAL_LEDGER({
+                LedgerName: purchase.supplier_name,
+                Amount: purchase.total_amount,
+                IsDeemedPositive: "Yes",
+                BillAllocations: [
+                  {
+                    AgstType: "New Ref",
+                    Reference: purchase.mmh_dist_bill_no,
+                    Amount: purchase.total_amount,
+                  },
+                ],
+                CategoryAllocation: [
+                  {
+                    Name: "Primary Cost Category",
+                    Amount: purchase.total_amount,
+                    CostCentreAllocations: [
+                      {
+                        Name: purchase.outlet_name,
+                        Amount: purchase.total_amount,
+                      },
+                    ],
+                  },
+                ],
+              })
+            );
+
             journalEntry.ledgerentries.push(
               GET_JOURNAL_LEDGER({
                 LedgerName: "Ready To Pay",
@@ -466,7 +468,11 @@ class TallyUsecase {
             );
           }
 
-          return [purchaseEntry, journalEntry];
+          if (journalEntry) {
+            return [purchaseEntry, journalEntry];
+          }
+
+          return [purchaseEntry];
         });
 
         return { error: "false", data: tallyData };
