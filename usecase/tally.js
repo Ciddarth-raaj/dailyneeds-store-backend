@@ -316,7 +316,7 @@ class TallyUsecase {
             });
           }
 
-          if (purchase.cash_discount) {
+          if (purchase.cash_discount && purchase.cash_discount != 0) {
             purchaseEntry.ledgerentries.push(
               GET_LEDGER({
                 LedgerName: `Cash Discount`,
@@ -326,7 +326,7 @@ class TallyUsecase {
             );
           }
 
-          if (purchase.scheme_difference) {
+          if (purchase.scheme_difference && purchase.scheme_difference != 0) {
             purchaseEntry.ledgerentries.push(
               GET_LEDGER({
                 LedgerName: `Scheme Difference`,
@@ -336,7 +336,7 @@ class TallyUsecase {
             );
           }
 
-          if (purchase.cost_difference) {
+          if (purchase.cost_difference && purchase.cost_difference != 0) {
             purchaseEntry.ledgerentries.push(
               GET_LEDGER({
                 LedgerName: `Cost Difference`,
@@ -346,7 +346,7 @@ class TallyUsecase {
             );
           }
 
-          if (purchase.due) {
+          if (purchase.due && purchase.due != 0) {
             purchaseEntry.ledgerentries.push(
               GET_LEDGER({
                 LedgerName: `Due`,
@@ -356,7 +356,7 @@ class TallyUsecase {
             );
           }
 
-          if (purchase.freight_charges) {
+          if (purchase.freight_charges && purchase.freight_charges != 0) {
             purchaseEntry.ledgerentries.push(
               GET_LEDGER({
                 LedgerName: `Freight Charges`,
@@ -366,7 +366,7 @@ class TallyUsecase {
             );
           }
 
-          if (purchase.round_off) {
+          if (purchase.round_off && purchase.round_off != 0) {
             purchaseEntry.ledgerentries.push(
               GET_LEDGER({
                 LedgerName: `Round Off`,
@@ -376,7 +376,10 @@ class TallyUsecase {
             );
           }
 
-          if (purchase.supplier_credit_note) {
+          if (
+            purchase.supplier_credit_note &&
+            purchase.supplier_credit_note != 0
+          ) {
             purchaseEntry.ledgerentries.push(
               GET_LEDGER({
                 LedgerName: `Supplier Credit Note`,
