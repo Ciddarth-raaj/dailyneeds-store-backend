@@ -401,7 +401,7 @@ class TallyUsecase {
 
           let journalEntry = null;
 
-          if (purchase.jv_ledger === 1) {
+          if (purchase.jv_ledger == 1) {
             const journalEntry = INIT_JOURNAL_ENTRY(
               moment(purchase.mmh_mrc_dt).format("YYYYMMDD")
             );
