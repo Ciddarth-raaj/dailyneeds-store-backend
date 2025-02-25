@@ -142,22 +142,22 @@ const GET_LEDGER = ({
 
 const GET_JOURNAL_LEDGER = ({
   LedgerName = "",
-  Amount = "",
+  LedgerAmount = "",
   GroupName = "",
   IsDeemedPositive = "",
   IsPartyLedger = "",
-  GSTRate = "",
+  IGSTRate = "",
   HSNCode = "",
   Cess_Rate = "",
   BillAllocations = [],
   CategoryAllocation = [],
 }) => ({
   LedgerName,
-  Amount,
+  LedgerAmount,
   GroupName,
   IsDeemedPositive,
   IsPartyLedger,
-  GSTRate,
+  IGSTRate,
   HSNCode,
   Cess_Rate,
   BillAllocations,
@@ -411,9 +411,6 @@ class TallyUsecase {
             );
             journalEntry.VoucherNumber = purchase.mmh_mrc_refno;
             journalEntry.Reference = purchase.mmh_dist_bill_no;
-            journalEntry.ReferenceDate = moment(purchase.dist_bill_dt).format(
-              "YYYY-MM-DD"
-            );
             journalEntry.PartyName = purchase.supplier_name;
             journalEntry.Voucher_Total = purchase.total_amount;
             journalEntry.Narration = purchase.narration;
@@ -421,8 +418,9 @@ class TallyUsecase {
             journalEntry.ledgerentries.push(
               GET_JOURNAL_LEDGER({
                 LedgerName: purchase.supplier_name,
-                Amount: purchase.total_amount,
+                LedgerAmount: purchase.total_amount,
                 IsDeemedPositive: "Yes",
+                LedgerGroup: "$$GroupSundryCreditors",
                 BillAllocations: [
                   {
                     AgstType: "New Ref",
@@ -432,7 +430,7 @@ class TallyUsecase {
                 ],
                 CategoryAllocation: [
                   {
-                    Name: "Primary Cost Category",
+                    Category: "Primary Cost Category",
                     Amount: purchase.total_amount,
                     CostCentreAllocations: [
                       {
@@ -448,13 +446,13 @@ class TallyUsecase {
             journalEntry.ledgerentries.push(
               GET_JOURNAL_LEDGER({
                 LedgerName: "Ready To Pay",
-                Amount: purchase.total_amount,
+                LedgerAmount: purchase.total_amount,
                 GroupName: "Bank Accounts",
                 IsDeemedPositive: "No",
                 IsPartyLedger: "Yes",
                 CategoryAllocation: [
                   {
-                    Name: "Primary Cost Category",
+                    Category: "Primary Cost Category",
                     Amount: purchase.total_amount,
                     CostCentreAllocations: [
                       {
