@@ -193,7 +193,7 @@ const GET_JOURNAL_LEDGER = ({
   IGSTRate = "",
   HSNCode = "",
   Cess_Rate = "",
-  BillAllocations = [],
+  BillsAllocation = [],
   CategoryAllocation = [],
 }) => ({
   LedgerName,
@@ -204,7 +204,7 @@ const GET_JOURNAL_LEDGER = ({
   IGSTRate,
   HSNCode,
   Cess_Rate,
-  BillAllocations,
+  BillsAllocation,
   CategoryAllocation,
 });
 
@@ -466,7 +466,7 @@ class TallyUsecase {
                 LedgerAmount: purchase.total_amount,
                 IsDeemedPositive: "Yes",
                 LedgerGroup: "$$GroupSundryCreditors",
-                BillAllocations: [
+                BillsAllocation: [
                   {
                     AgstType: "New Ref",
                     Reference: purchase.mmh_dist_bill_no,
@@ -476,8 +476,8 @@ class TallyUsecase {
                 CategoryAllocation: [
                   {
                     Category: "Primary Cost Category",
-                    Amount: purchase.total_amount,
-                    CostCentreAllocations: [
+                    isDeeemedPositive: "Yes",
+                    CostCentreAllocation: [
                       {
                         Name: purchase.outlet_name,
                         Amount: purchase.total_amount,
@@ -498,8 +498,8 @@ class TallyUsecase {
                 CategoryAllocation: [
                   {
                     Category: "Primary Cost Category",
-                    Amount: purchase.total_amount,
-                    CostCentreAllocations: [
+                    isDeeemedPositive: "Yes",
+                    CostCentreAllocation: [
                       {
                         Name: purchase.outlet_name,
                         Amount: purchase.total_amount,
