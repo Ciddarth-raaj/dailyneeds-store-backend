@@ -70,7 +70,7 @@ const INIT_PURCHASE_ENTRY = (date) => ({
   OtherReferences: "",
   TermsOfDelivery: "",
   PlaceOfSupply: "",
-  IsInvoice: "",
+  IsInvoice: "Yes",
   IsDeleted: "",
   BuyerName: "", // supplier_name
   BuyerAlias: "",
@@ -92,6 +92,7 @@ const INIT_PURCHASE_ENTRY = (date) => ({
   EWayBillDetails: "",
   EInvoiceDetails: "",
   item_total: "",
+  SVViewName: "InvVchView",
   ledgerentries: [],
 });
 
@@ -145,6 +146,7 @@ const INIT_JOURNAL_ENTRY = (date) => ({
   WorkOrder: "",
   WorkOrderID: "",
   ledgerentries: [],
+  SVViewName: "AccVchView",
 });
 
 const shouldShowIGST = (supplier_gstn) => {
@@ -1012,6 +1014,10 @@ class TallyUsecase {
                 ...tmpMasterData,
                 MasterID: simpleEncrypt(item.itemId),
                 Narration: item.Narration ?? "",
+                VoucherType:
+                  item.IsDeemedPositive === "No" ? "Receipt" : "Payment",
+                VoucherBaseType:
+                  item.IsDeemedPositive === "No" ? "Receipt" : "Payment",
                 ledgerentries: [
                   this.getLedgerObject(
                     item.LedgerName,
