@@ -221,7 +221,8 @@ class Server {
     );
     this.tallyUsecase = require("./usecase/tally")(
       this.tallyRepo,
-      this.purchaseUsecase
+      this.purchaseUsecase,
+      this.accountsUsecase
     );
   }
 

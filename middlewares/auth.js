@@ -451,9 +451,9 @@ const unProtectedRoutes = {
 
   //user
   "/user/login": { methods: { post: true } },
-  "/accounts/tally/card-to-bank": { methods: { get: true } },
-  "/accounts/tally/sales-entry": { methods: { get: true } },
-  "/accounts/tally/expenses": { methods: { get: true } },
+  "/tally/card-to-bank": { methods: { get: true } },
+  "/tally/sales-entry": { methods: { get: true } },
+  "/tally/expenses": { methods: { get: true } },
   "/tally/purchase": { methods: { get: true } },
 };
 

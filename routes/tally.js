@@ -38,6 +38,87 @@ class TallyRoutes {
 
       res.end();
     });
+
+    router.get("/card-to-bank", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          from_date: Joi.date().required(),
+          to_date: Joi.date().required(),
+        });
+
+        const isValid = schema.validate(req.query);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const result = await this.tallyUsecase.getTallyCardToBank(
+          req.query.from_date,
+          req.query.to_date
+        );
+        res.json(result);
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: err.message });
+        }
+      }
+    });
+
+    router.get("/sales-entry", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          from_date: Joi.date().required(),
+          to_date: Joi.date().required(),
+        });
+
+        const isValid = schema.validate(req.query);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const result = await this.tallyUsecase.getTallySalesEntry(
+          req.query.from_date,
+          req.query.to_date
+        );
+        res.json(result);
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: err.message });
+        }
+      }
+    });
+
+    router.get("/expenses", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          from_date: Joi.date().required(),
+          to_date: Joi.date().required(),
+        });
+
+        const isValid = schema.validate(req.query);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const result = await this.tallyUsecase.getTallyExpenses(
+          req.query.from_date,
+          req.query.to_date
+        );
+        res.json(result);
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else {
+          console.log(err);
+          res.json({ code: 500, msg: err.message });
+        }
+      }
+    });
   }
   getRouter() {
     return router;
