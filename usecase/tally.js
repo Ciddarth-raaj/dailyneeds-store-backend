@@ -1,7 +1,8 @@
 const moment = require("moment");
 const { uuid } = require("uuidv4");
+const simpleEncrypt = require("../utils/encrypt");
 
-const INIT_JOURNAL_ENTRY = (date) => ({
+const INIT_PURCHASE_ENTRY = (date) => ({
   MasterID: uuid(),
   VoucherNumber: "", // mmh_mrc_refno
   VoucherDate: date, // mmh_mrc_dt
@@ -50,6 +51,58 @@ const INIT_JOURNAL_ENTRY = (date) => ({
   ledgerentries: [],
 });
 
+const INIT_JOURNAL_ENTRY = (date) => ({
+  MasterID: uuid(),
+  VoucherNumber: "",
+  VoucherDate: date,
+  Reference: "",
+  ReferenceDate: date,
+  PartyName: "",
+  VoucherType: "Journal",
+  DeliveryNoteNo: "",
+  Voucher_Total: "",
+  DeliveryNoteDate: "",
+  DispatchDocNo: "",
+  DispatchThrough: "",
+  Destination: "",
+  CarrierName: "",
+  LRNo: "",
+  LRDate: "",
+  MotorVehicleNo: "",
+  OrderNo: "",
+  OrderDate: "",
+  TermsOfPayment: "",
+  OtherReferences: "",
+  TermsOfDelivery: "",
+  Place_of_Supply: "",
+  IsInvoice: "No",
+  BuyerName: "",
+  BuyerAlias: "",
+  BuyerGSTIN: "",
+  BuyerAddress: "",
+  BuyerPinCode: "",
+  BuyerState: "",
+  BuyerCountryName: "",
+  Buyer_Registration_Type: "",
+  BuyerEmail: "",
+  BuyerMobile: "",
+  ConsigneeName: "",
+  ConsigneeAddress: "",
+  ConsigneeGSTIN: "",
+  ConsigneeTallyGroup: "",
+  ConsigneePinCode: "",
+  ConsigneeState: "",
+  ConsigneeCountryName: "",
+  VoucherCostCentre: "",
+  Consignee_Registration_Type: "Unregistered/Consumer",
+  Narration: "",
+  PurOrder: "",
+  PurOrderID: "",
+  WorkOrder: "",
+  WorkOrderID: "",
+  ledgerentries: [],
+});
+
 const shouldShowIGST = (supplier_gstn) => {
   if (
     !supplier_gstn ||
@@ -87,6 +140,30 @@ const GET_LEDGER = ({
   };
 };
 
+const GET_JOURNAL_LEDGER = ({
+  LedgerName = "",
+  Amount = "",
+  GroupName = "",
+  IsDeemedPositive = "",
+  IsPartyLedger = "",
+  GSTRate = "",
+  HSNCode = "",
+  Cess_Rate = "",
+  BillAllocations = [],
+  CategoryAllocation = [],
+}) => ({
+  LedgerName,
+  Amount,
+  GroupName,
+  IsDeemedPositive,
+  IsPartyLedger,
+  GSTRate,
+  HSNCode,
+  Cess_Rate,
+  BillAllocations,
+  CategoryAllocation,
+});
+
 class TallyUsecase {
   constructor(tallyRepo, purchaseUsecase) {
     this.tallyRepo = tallyRepo;
@@ -111,21 +188,27 @@ class TallyUsecase {
       const data = await this.purchaseUsecase.getAllPurchases(filters);
 
       if (data.code === 200) {
-        const tallyData = data.data.map((purchase) => {
-          const journalEntry = INIT_JOURNAL_ENTRY(purchase.mmh_mrc_dt);
+        const tallyData = data.data.flatMap((purchase) => {
+          const purchaseEntry = INIT_PURCHASE_ENTRY(
+            moment(purchase.mmh_mrc_dt).format("YYYYMMDD")
+          );
 
-          journalEntry.VoucherNumber = purchase.mmh_mrc_refno;
-          journalEntry.Reference = purchase.mmh_dist_bill_no;
-          journalEntry.PartyName = purchase.supplier_name;
-          journalEntry.PartyCode = purchase.supplier_id;
-          journalEntry.BuyerName = purchase.supplier_name;
-          journalEntry.BuyerGSTIN = purchase.supplier_gstn;
-          journalEntry.VoucherType = "Purchase";
-          journalEntry.VoucherCostCentre = "outlet Name"; //TODO
+          purchaseEntry.MasterID = simpleEncrypt(
+            `${purchase.purchase_id}-purchase-entry`
+          );
+          purchaseEntry.VoucherNumber = purchase.mmh_mrc_refno;
+          purchaseEntry.Reference = purchase.mmh_dist_bill_no;
+          purchaseEntry.PartyName = purchase.supplier_name;
+          purchaseEntry.PartyCode = purchase.supplier_id;
+          purchaseEntry.BuyerName = purchase.supplier_name;
+          purchaseEntry.BuyerGSTIN = purchase.supplier_gstn;
+          purchaseEntry.VoucherType = "Purchase";
+          purchaseEntry.VoucherCostCentre = purchase.outlet_name; //TODO
+          purchaseEntry.Voucher_Total = purchase.total_amount;
 
-          journalEntry.Narration = purchase.narration;
+          purchaseEntry.Narration = purchase.narration;
 
-          journalEntry.ledgerentries.push(
+          purchaseEntry.ledgerentries.push(
             GET_LEDGER({
               LedgerName: purchase.supplier_name,
               LedgerAmount: purchase.total_amount,
@@ -144,7 +227,7 @@ class TallyUsecase {
           if (!shouldShowIGST(purchase.supplier_gstn)) {
             purchase.sgst.forEach((item) => {
               if (item.PERC === 0) {
-                journalEntry.ledgerentries.push(
+                purchaseEntry.ledgerentries.push(
                   GET_LEDGER({
                     LedgerName: `Local GST Purchase Nil Rated`,
                     LedgerAmount: item.TAXABLE,
@@ -159,7 +242,7 @@ class TallyUsecase {
               }
 
               if (item.TAXABLE) {
-                journalEntry.ledgerentries.push(
+                purchaseEntry.ledgerentries.push(
                   GET_LEDGER({
                     LedgerName: `LOCAL PURCHASE ${item.PERC * 2}%`,
                     LedgerAmount: item.TAXABLE,
@@ -172,7 +255,7 @@ class TallyUsecase {
               }
 
               if (item.VALUE) {
-                journalEntry.ledgerentries.push(
+                purchaseEntry.ledgerentries.push(
                   GET_LEDGER({
                     LedgerName: `CGST ${item.PERC}% INPUT`,
                     LedgerAmount: item.VALUE,
@@ -182,7 +265,7 @@ class TallyUsecase {
               }
 
               if (item.VALUE) {
-                journalEntry.ledgerentries.push(
+                purchaseEntry.ledgerentries.push(
                   GET_LEDGER({
                     LedgerName: `SGST ${item.PERC}% INPUT`,
                     LedgerAmount: item.VALUE,
@@ -194,7 +277,7 @@ class TallyUsecase {
           } else {
             purchase.igst.forEach((item) => {
               if (item.PERC === 0) {
-                journalEntry.ledgerentries.push(
+                purchaseEntry.ledgerentries.push(
                   GET_LEDGER({
                     LedgerName: `IGST GST Purchase Nil Rated`,
                     LedgerAmount: item.TAXABLE,
@@ -209,7 +292,7 @@ class TallyUsecase {
               }
 
               if (item.TAXABLE) {
-                journalEntry.ledgerentries.push(
+                purchaseEntry.ledgerentries.push(
                   GET_LEDGER({
                     LedgerName: `IGST PURCHASE ${item.PERC * 2}%`,
                     LedgerAmount: item.TAXABLE,
@@ -222,7 +305,7 @@ class TallyUsecase {
               }
 
               if (item.VALUE) {
-                journalEntry.ledgerentries.push(
+                purchaseEntry.ledgerentries.push(
                   GET_LEDGER({
                     LedgerName: `IGST ${item.PERC}% INPUT`,
                     LedgerAmount: item.VALUE,
@@ -234,7 +317,7 @@ class TallyUsecase {
           }
 
           if (purchase.cash_discount) {
-            journalEntry.ledgerentries.push(
+            purchaseEntry.ledgerentries.push(
               GET_LEDGER({
                 LedgerName: `Cash Discount`,
                 LedgerAmount: purchase.cash_discount,
@@ -244,7 +327,7 @@ class TallyUsecase {
           }
 
           if (purchase.scheme_difference) {
-            journalEntry.ledgerentries.push(
+            purchaseEntry.ledgerentries.push(
               GET_LEDGER({
                 LedgerName: `Scheme Difference`,
                 LedgerAmount: purchase.scheme_difference,
@@ -254,7 +337,7 @@ class TallyUsecase {
           }
 
           if (purchase.cost_difference) {
-            journalEntry.ledgerentries.push(
+            purchaseEntry.ledgerentries.push(
               GET_LEDGER({
                 LedgerName: `Cost Difference`,
                 LedgerAmount: purchase.cost_difference,
@@ -264,7 +347,7 @@ class TallyUsecase {
           }
 
           if (purchase.due) {
-            journalEntry.ledgerentries.push(
+            purchaseEntry.ledgerentries.push(
               GET_LEDGER({
                 LedgerName: `Due`,
                 LedgerAmount: purchase.due,
@@ -274,7 +357,7 @@ class TallyUsecase {
           }
 
           if (purchase.freight_charges) {
-            journalEntry.ledgerentries.push(
+            purchaseEntry.ledgerentries.push(
               GET_LEDGER({
                 LedgerName: `Freight Charges`,
                 LedgerAmount: purchase.freight_charges,
@@ -284,7 +367,7 @@ class TallyUsecase {
           }
 
           if (purchase.round_off) {
-            journalEntry.ledgerentries.push(
+            purchaseEntry.ledgerentries.push(
               GET_LEDGER({
                 LedgerName: `Round Off`,
                 LedgerAmount: purchase.round_off,
@@ -294,7 +377,7 @@ class TallyUsecase {
           }
 
           if (purchase.supplier_credit_note) {
-            journalEntry.ledgerentries.push(
+            purchaseEntry.ledgerentries.push(
               GET_LEDGER({
                 LedgerName: `Supplier Credit Note`,
                 LedgerAmount: purchase.round_off,
@@ -304,7 +387,7 @@ class TallyUsecase {
           }
 
           if (purchase.tot_gst_cess_amt && purchase.tot_gst_cess_amt != 0) {
-            journalEntry.ledgerentries.push(
+            purchaseEntry.ledgerentries.push(
               GET_LEDGER({
                 LedgerName: `CESS 12% INPUT`,
                 LedgerAmount: purchase.tot_gst_cess_amt,
@@ -313,7 +396,74 @@ class TallyUsecase {
             );
           }
 
-          return journalEntry;
+          const journalEntry = INIT_JOURNAL_ENTRY(
+            moment(purchase.mmh_mrc_dt).format("YYYYMMDD")
+          );
+
+          journalEntry.MasterID = simpleEncrypt(
+            `${purchase.purchase_id}-journal-entry`
+          );
+          journalEntry.VoucherNumber = purchase.mmh_mrc_refno;
+          journalEntry.Reference = purchase.mmh_dist_bill_no;
+          journalEntry.ReferenceDate = moment(purchase.dist_bill_dt).format(
+            "YYYY-MM-DD"
+          );
+          journalEntry.PartyName = purchase.supplier_name;
+          journalEntry.Voucher_Total = purchase.total_amount;
+          journalEntry.Narration = purchase.narration;
+
+          journalEntry.ledgerentries.push(
+            GET_JOURNAL_LEDGER({
+              LedgerName: purchase.supplier_name,
+              Amount: purchase.total_amount,
+              IsDeemedPositive: "Yes",
+              BillAllocations: [
+                {
+                  AgstType: "New Ref",
+                  Reference: purchase.mmh_dist_bill_no,
+                  Amount: purchase.total_amount,
+                },
+              ],
+              CategoryAllocation: [
+                {
+                  Name: "Primary Cost Category",
+                  Amount: purchase.total_amount,
+                  CostCentreAllocations: [
+                    {
+                      Name: purchase.outlet_name,
+                      Amount: purchase.total_amount,
+                    },
+                  ],
+                },
+              ],
+            })
+          );
+
+          if (purchase.jv_ledger === 1) {
+            journalEntry.ledgerentries.push(
+              GET_JOURNAL_LEDGER({
+                LedgerName: "Ready To Pay",
+                Amount: purchase.total_amount,
+                GroupName: "Bank Accounts",
+                IsDeemedPositive: "No",
+                IsPartyLedger: "Yes",
+                CategoryAllocation: [
+                  {
+                    Name: "Primary Cost Category",
+                    Amount: purchase.total_amount,
+                    CostCentreAllocations: [
+                      {
+                        Name: purchase.outlet_name,
+                        Amount: purchase.total_amount,
+                      },
+                    ],
+                  },
+                ],
+              })
+            );
+          }
+
+          return [purchaseEntry, journalEntry];
         });
 
         return { error: "false", data: tallyData };

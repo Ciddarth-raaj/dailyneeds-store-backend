@@ -187,9 +187,11 @@ class PurchaseRepository {
           pi.narration,
           pi.supplier_credit_note,
           pi.total_amount,
-          pi.invoice_amount
+          pi.invoice_amount,
+          o.outlet_name
         FROM purchase p
         LEFT JOIN purchase_internal pi ON p.purchase_id = pi.purchase_id
+        LEFT JOIN outlets o ON p.retail_outlet_id = o.outlet_id
         ${whereClause} 
         ORDER BY p.created_at DESC`,
         filterValues,
