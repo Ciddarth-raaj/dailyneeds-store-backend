@@ -455,6 +455,26 @@ class TallyUsecase {
             );
           }
 
+          if (purchase.mmd_goods_tcs_amt && purchase.mmd_goods_tcs_amt != 0) {
+            purchaseEntry.ledgerentries.push(
+              GET_LEDGER({
+                LedgerName: `TCS @ 0.1%`,
+                LedgerAmount: purchase.mmd_goods_tcs_amt,
+                IsDeemedPositive: "Yes",
+              })
+            );
+          }
+
+          if (purchase.mmh_manual_disc && purchase.mmh_manual_disc != 0) {
+            purchaseEntry.ledgerentries.push(
+              GET_LEDGER({
+                LedgerName: `Discount on Purchase`,
+                LedgerAmount: purchase.mmh_manual_disc,
+                IsDeemedPositive: "No",
+              })
+            );
+          }
+
           let journalEntry = null;
 
           if (purchase.jv_ledger == 1) {
