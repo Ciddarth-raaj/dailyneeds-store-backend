@@ -188,7 +188,8 @@ class PurchaseRepository {
           pi.supplier_credit_note,
           pi.total_amount,
           pi.invoice_amount,
-          o.outlet_name
+          o.outlet_name,
+          o.outlet_id,
         FROM purchase p
         LEFT JOIN purchase_internal pi ON p.purchase_id = pi.purchase_id
         LEFT JOIN outlets o ON p.retail_outlet_id = o.outlet_id

@@ -210,6 +210,14 @@ const GET_JOURNAL_LEDGER = ({
   CategoryAllocation,
 });
 
+const OUTLET_VOUCHER_TYPE_MAP = {
+  2: "Purchase",
+  3: "PurchaseDN2",
+  4: "PurchaseDN1",
+  5: "PurchaseDN3",
+  6: "PurchaseDN4",
+};
+
 class TallyUsecase {
   constructor(tallyRepo, purchaseUsecase, accountsUsecase) {
     this.tallyRepo = tallyRepo;
@@ -249,8 +257,9 @@ class TallyUsecase {
           purchaseEntry.PartyCode = purchase.supplier_id;
           purchaseEntry.BuyerName = purchase.supplier_name;
           purchaseEntry.BuyerGSTIN = purchase.supplier_gstn;
-          purchaseEntry.VoucherType = "Purchase";
-          purchaseEntry.VoucherCostCentre = purchase.outlet_name; //TODO
+          purchaseEntry.VoucherType =
+            OUTLET_VOUCHER_TYPE_MAP[purchase.outlet_id] || "Purchase";
+          purchaseEntry.VoucherCostCentre = purchase.outlet_name;
           purchaseEntry.Voucher_Total = purchase.total_amount;
 
           purchaseEntry.Narration = purchase.narration;
@@ -368,7 +377,7 @@ class TallyUsecase {
               GET_LEDGER({
                 LedgerName: `Cash Discount`,
                 LedgerAmount: purchase.cash_discount,
-                IsDeemedPositive: "Yes",
+                IsDeemedPositive: "No",
               })
             );
           }
@@ -378,7 +387,7 @@ class TallyUsecase {
               GET_LEDGER({
                 LedgerName: `Scheme Difference`,
                 LedgerAmount: purchase.scheme_difference,
-                IsDeemedPositive: "Yes",
+                IsDeemedPositive: "No",
               })
             );
           }
@@ -388,7 +397,7 @@ class TallyUsecase {
               GET_LEDGER({
                 LedgerName: `Cost Difference`,
                 LedgerAmount: purchase.cost_difference,
-                IsDeemedPositive: "Yes",
+                IsDeemedPositive: "No",
               })
             );
           }
@@ -398,7 +407,7 @@ class TallyUsecase {
               GET_LEDGER({
                 LedgerName: `Due`,
                 LedgerAmount: purchase.due,
-                IsDeemedPositive: "Yes",
+                IsDeemedPositive: "No",
               })
             );
           }
@@ -430,8 +439,8 @@ class TallyUsecase {
             purchaseEntry.ledgerentries.push(
               GET_LEDGER({
                 LedgerName: `Supplier Credit Note`,
-                LedgerAmount: purchase.round_off,
-                IsDeemedPositive: "Yes",
+                LedgerAmount: purchase.supplier_credit_note,
+                IsDeemedPositive: "No",
               })
             );
           }
