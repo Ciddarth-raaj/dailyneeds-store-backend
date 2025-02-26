@@ -397,7 +397,7 @@ class TallyUsecase {
               GET_LEDGER({
                 LedgerName: `Cash Discount`,
                 LedgerAmount: -1 * parseFloat(purchase.cash_discount),
-                IsDeemedPositive: "No",
+                IsDeemedPositive: "Yes",
               })
             );
           }
@@ -407,7 +407,7 @@ class TallyUsecase {
               GET_LEDGER({
                 LedgerName: `Scheme Difference`,
                 LedgerAmount: -1 * parseFloat(purchase.scheme_difference),
-                IsDeemedPositive: "No",
+                IsDeemedPositive: "Yes",
               })
             );
           }
@@ -417,7 +417,7 @@ class TallyUsecase {
               GET_LEDGER({
                 LedgerName: `Cost Difference`,
                 LedgerAmount: -1 * parseFloat(purchase.cost_difference),
-                IsDeemedPositive: "No",
+                IsDeemedPositive: "Yes",
               })
             );
           }
@@ -427,7 +427,7 @@ class TallyUsecase {
               GET_LEDGER({
                 LedgerName: `Due`,
                 LedgerAmount: -1 * parseFloat(purchase.due),
-                IsDeemedPositive: "No",
+                IsDeemedPositive: "Yes",
               })
             );
           }
@@ -450,7 +450,7 @@ class TallyUsecase {
               GET_LEDGER({
                 LedgerName: `Supplier Credit Note`,
                 LedgerAmount: -1 * parseFloat(purchase.supplier_credit_note),
-                IsDeemedPositive: "No",
+                IsDeemedPositive: "Yes",
               })
             );
           }
@@ -460,7 +460,7 @@ class TallyUsecase {
               GET_LEDGER({
                 LedgerName: `Discount on Purchase`,
                 LedgerAmount: -1 * parseFloat(purchase.mmh_manual_disc),
-                IsDeemedPositive: "No",
+                IsDeemedPositive: "Yes",
               })
             );
           }
