@@ -372,6 +372,26 @@ class TallyUsecase {
             });
           }
 
+          if (purchase.tot_gst_cess_amt && purchase.tot_gst_cess_amt != 0) {
+            purchaseEntry.ledgerentries.push(
+              GET_LEDGER({
+                LedgerName: `CESS 12% INPUT`,
+                LedgerAmount: purchase.tot_gst_cess_amt,
+                IsDeemedPositive: "Yes",
+              })
+            );
+          }
+
+          if (purchase.mmd_goods_tcs_amt && purchase.mmd_goods_tcs_amt != 0) {
+            purchaseEntry.ledgerentries.push(
+              GET_LEDGER({
+                LedgerName: `TCS @ 0.1%`,
+                LedgerAmount: purchase.mmd_goods_tcs_amt,
+                IsDeemedPositive: "Yes",
+              })
+            );
+          }
+
           if (purchase.cash_discount && purchase.cash_discount != 0) {
             purchaseEntry.ledgerentries.push(
               GET_LEDGER({
@@ -422,16 +442,6 @@ class TallyUsecase {
             );
           }
 
-          if (purchase.round_off && purchase.round_off != 0) {
-            purchaseEntry.ledgerentries.push(
-              GET_LEDGER({
-                LedgerName: `Round Off`,
-                LedgerAmount: purchase.round_off,
-                IsDeemedPositive: "Yes",
-              })
-            );
-          }
-
           if (
             purchase.supplier_credit_note &&
             purchase.supplier_credit_note != 0
@@ -445,32 +455,22 @@ class TallyUsecase {
             );
           }
 
-          if (purchase.tot_gst_cess_amt && purchase.tot_gst_cess_amt != 0) {
-            purchaseEntry.ledgerentries.push(
-              GET_LEDGER({
-                LedgerName: `CESS 12% INPUT`,
-                LedgerAmount: purchase.tot_gst_cess_amt,
-                IsDeemedPositive: "Yes",
-              })
-            );
-          }
-
-          if (purchase.mmd_goods_tcs_amt && purchase.mmd_goods_tcs_amt != 0) {
-            purchaseEntry.ledgerentries.push(
-              GET_LEDGER({
-                LedgerName: `TCS @ 0.1%`,
-                LedgerAmount: purchase.mmd_goods_tcs_amt,
-                IsDeemedPositive: "Yes",
-              })
-            );
-          }
-
           if (purchase.mmh_manual_disc && purchase.mmh_manual_disc != 0) {
             purchaseEntry.ledgerentries.push(
               GET_LEDGER({
                 LedgerName: `Discount on Purchase`,
                 LedgerAmount: purchase.mmh_manual_disc,
                 IsDeemedPositive: "No",
+              })
+            );
+          }
+
+          if (purchase.round_off && purchase.round_off != 0) {
+            purchaseEntry.ledgerentries.push(
+              GET_LEDGER({
+                LedgerName: `Round Off`,
+                LedgerAmount: purchase.round_off,
+                IsDeemedPositive: "Yes",
               })
             );
           }
