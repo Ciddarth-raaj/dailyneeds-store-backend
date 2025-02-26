@@ -1,0 +1,1 @@
+CREATE TABLE `purchase_tally_response` (`MasterID` VARCHAR(200) NOT NULL , `VoucherNo` VARCHAR(100) NOT NULL , `InvoiceValue` FLOAT NOT NULL , `SupplierName` TEXT NOT NULL , `CostCentre` TEXT NOT NULL , `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP , PRIMARY KEY (`MasterID`)) ENGINE = InnoDB;

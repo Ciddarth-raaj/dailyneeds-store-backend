@@ -137,7 +137,9 @@ class Server {
       this.mysql.connection
     );
     this.purchaseRepo = require("./repository/purchase")(this.mysql.connection);
-    this.tallyRepo = require("./repository/tally")(this.mysql.connection);
+    this.purchaseTallyRepo = require("./repository/purchase_tally")(
+      this.mysql.connection
+    );
   }
 
   initUsecases() {
@@ -219,10 +221,8 @@ class Server {
       this.purchaseRepo,
       this.outletUsecase
     );
-    this.tallyUsecase = require("./usecase/tally")(
-      this.tallyRepo,
-      this.purchaseUsecase,
-      this.accountsUsecase
+    this.purchaseTallyUsecase = require("./usecase/purchase_tally")(
+      this.purchaseTallyRepo
     );
   }
 
@@ -281,7 +281,9 @@ class Server {
       this.digitalPaymentsUsecase
     );
     const purchaseRouter = require("./routes/purchase")(this.purchaseUsecase);
-    const tallyRouter = require("./routes/tally")(this.tallyUsecase);
+    const purchaseTallyRouter = require("./routes/purchase_tally")(
+      this.purchaseTallyUsecase
+    );
 
     app.use("/document", documentRouter.getRouter());
     app.use("/whatsapp", whatsappRouter.getRouter());
@@ -316,7 +318,7 @@ class Server {
     app.use("/reconciliation", reconciliationRouter.getRouter());
     app.use("/digital-payments", digitalPaymentsRouter.getRouter());
     app.use("/purchase", purchaseRouter.getRouter());
-    app.use("/tally", tallyRouter.getRouter());
+    app.use("/purchase-tally", purchaseTallyRouter.getRouter());
   }
 
   initServices() {
