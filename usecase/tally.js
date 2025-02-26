@@ -396,7 +396,7 @@ class TallyUsecase {
             purchaseEntry.ledgerentries.push(
               GET_LEDGER({
                 LedgerName: `Cash Discount`,
-                LedgerAmount: purchase.cash_discount,
+                LedgerAmount: -1 * parseFloat(purchase.cash_discount),
                 IsDeemedPositive: "No",
               })
             );
@@ -406,7 +406,7 @@ class TallyUsecase {
             purchaseEntry.ledgerentries.push(
               GET_LEDGER({
                 LedgerName: `Scheme Difference`,
-                LedgerAmount: purchase.scheme_difference,
+                LedgerAmount: -1 * parseFloat(purchase.scheme_difference),
                 IsDeemedPositive: "No",
               })
             );
@@ -416,7 +416,7 @@ class TallyUsecase {
             purchaseEntry.ledgerentries.push(
               GET_LEDGER({
                 LedgerName: `Cost Difference`,
-                LedgerAmount: purchase.cost_difference,
+                LedgerAmount: -1 * parseFloat(purchase.cost_difference),
                 IsDeemedPositive: "No",
               })
             );
@@ -426,7 +426,7 @@ class TallyUsecase {
             purchaseEntry.ledgerentries.push(
               GET_LEDGER({
                 LedgerName: `Due`,
-                LedgerAmount: purchase.due,
+                LedgerAmount: -1 * parseFloat(purchase.due),
                 IsDeemedPositive: "No",
               })
             );
@@ -449,7 +449,7 @@ class TallyUsecase {
             purchaseEntry.ledgerentries.push(
               GET_LEDGER({
                 LedgerName: `Supplier Credit Note`,
-                LedgerAmount: purchase.supplier_credit_note,
+                LedgerAmount: -1 * parseFloat(purchase.supplier_credit_note),
                 IsDeemedPositive: "No",
               })
             );
@@ -459,7 +459,7 @@ class TallyUsecase {
             purchaseEntry.ledgerentries.push(
               GET_LEDGER({
                 LedgerName: `Discount on Purchase`,
-                LedgerAmount: purchase.mmh_manual_disc,
+                LedgerAmount: -1 * parseFloat(purchase.mmh_manual_disc),
                 IsDeemedPositive: "No",
               })
             );
