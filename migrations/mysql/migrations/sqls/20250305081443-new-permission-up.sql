@@ -1,0 +1,2 @@
+INSERT INTO `all_permissions` (`permission_id`, `permission_key`, `status`) VALUES (NULL, 'view_purchases_difference', '1');
+ALTER TABLE `purchase_tally_response` ADD `updated_at` TIMESTAMP on update CURRENT_TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER `CostCentre`;

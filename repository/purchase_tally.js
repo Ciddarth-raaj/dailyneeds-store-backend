@@ -47,10 +47,42 @@ class PurchaseTallyRepository {
     });
   }
 
-  getAll() {
+  getAll(filters = {}) {
     return new Promise((resolve, reject) => {
+      let filterConditions = [];
+      let filterValues = [];
+
+      // Filter by outlet_id
+      if (filters.outlet_id) {
+        filterConditions.push("o.outlet_id = ?");
+        filterValues.push(filters.outlet_id);
+      }
+
+      // Filter by date range
+      if (filters.from_date) {
+        filterConditions.push("p.mmh_mrc_dt >= ?");
+        filterValues.push(filters.from_date);
+      }
+
+      if (filters.to_date) {
+        filterConditions.push("p.mmh_mrc_dt <= ?");
+        filterValues.push(filters.to_date);
+      }
+
+      const whereClause =
+        filterConditions.length > 0
+          ? `WHERE ${filterConditions.join(" AND ")}`
+          : "";
+
       this.db.query(
-        "SELECT * FROM purchase_tally_response ORDER BY created_at DESC",
+        `SELECT tr.*, pi.total_amount, p.purchase_id, p.supplier_name, p.mmh_mrc_dt
+        FROM purchase_tally_response tr
+        LEFT JOIN outlets o ON tr.CostCentre = o.outlet_name
+        LEFT JOIN purchase p ON tr.VoucherNo = p.mmh_mrc_refno AND tr.CostCentre = o.outlet_name
+        LEFT JOIN purchase_internal pi ON p.purchase_id = pi.purchase_id
+        ${whereClause} 
+        ORDER BY tr.created_at DESC`,
+        filterValues,
         (err, docs) => {
           if (err) {
             logger.Log({
@@ -64,6 +96,7 @@ class PurchaseTallyRepository {
             reject(err);
             return;
           }
+
           resolve({ code: 200, data: docs });
         }
       );

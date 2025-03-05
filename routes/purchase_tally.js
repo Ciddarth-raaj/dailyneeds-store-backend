@@ -35,7 +35,18 @@ class PurchaseTallyRoutes {
     // Get all entries
     router.get("/", async (req, res) => {
       try {
-        const result = await this.purchaseTallyUsecase.getAll();
+        const schema = Joi.object({
+          outlet_id: Joi.number(),
+          from_date: Joi.date(),
+          to_date: Joi.date(),
+        });
+
+        const { error, value } = schema.validate(req.query);
+        if (error) {
+          return res.json({ code: 422, msg: error.toString() });
+        }
+
+        const result = await this.purchaseTallyUsecase.getAll(value);
         res.json(result);
       } catch (err) {
         console.log(err);

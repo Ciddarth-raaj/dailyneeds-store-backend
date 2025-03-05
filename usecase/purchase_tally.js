@@ -12,9 +12,9 @@ class PurchaseTallyUsecase {
     }
   }
 
-  async getAll() {
+  async getAll(filters) {
     try {
-      const result = await this.purchaseTallyRepo.getAll();
+      const result = await this.purchaseTallyRepo.getAll(filters);
       return result;
     } catch (error) {
       throw error;
