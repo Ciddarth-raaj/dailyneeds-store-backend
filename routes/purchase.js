@@ -225,6 +225,7 @@ class PurchaseRoutes {
           to_date: Joi.date(),
           has_updated: Joi.boolean(),
           is_approved: Joi.boolean(),
+          is_pushed: Joi.boolean(),
         });
 
         const { error, value } = schema.validate(req.query);

@@ -166,8 +166,15 @@ class PurchaseRepository {
       }
 
       if (filters.is_approved !== undefined) {
-        filterConditions.push("p.is_approved = ?");
+        const conditionString = filters.is_approved
+          ? "p.is_approved = ? AND tr.VoucherNo IS NULL"
+          : "p.is_approved = ?";
+        filterConditions.push(conditionString);
         filterValues.push(filters.is_approved);
+      }
+
+      if (filters.is_pushed === true) {
+        filterConditions.push("tr.VoucherNo IS NOT NULL");
       }
 
       const whereClause =
@@ -188,11 +195,16 @@ class PurchaseRepository {
           pi.supplier_credit_note,
           pi.total_amount,
           pi.invoice_amount,
+          tr.VoucherNo,
+          tr.InvoiceValue,
+          tr.SupplierName,
+          tr.CostCentre,
           o.outlet_name,
           o.outlet_id
         FROM purchase p
         LEFT JOIN purchase_internal pi ON p.purchase_id = pi.purchase_id
         LEFT JOIN outlets o ON p.retail_outlet_id = o.outlet_id
+        LEFT JOIN purchase_tally_response tr ON tr.VoucherNo = p.mmh_mrc_refno AND tr.CostCentre = o.outlet_name
         ${whereClause} 
         ORDER BY p.created_at DESC`,
         filterValues,
@@ -228,6 +240,13 @@ class PurchaseRepository {
             supplier_credit_note: doc.supplier_credit_note || 0.0,
             total_amount: doc.total_amount || 0.0,
             invoice_amount: doc.invoice_amount || 0.0,
+            // Add fields from purchase_tally_response
+            tally_response: {
+              voucher_no: doc.VoucherNo || null,
+              invoice_value: doc.InvoiceValue || null,
+              supplier_name: doc.SupplierName || null,
+              cost_centre: doc.CostCentre || null,
+            },
           }));
 
           resolve({ code: 200, data: parsedDocs });
@@ -247,9 +266,15 @@ class PurchaseRepository {
           pi.freight_charges,
           pi.round_off,
           pi.jv_ledger,
-          pi.narration
+          pi.narration,
+          tr.VoucherNo,
+          tr.InvoiceValue,
+          tr.SupplierName,
+          tr.CostCentre
         FROM purchase p
         LEFT JOIN purchase_internal pi ON p.purchase_id = pi.purchase_id
+        LEFT JOIN purchase_tally_response tr ON tr.VoucherNo = p.mmh_mrc_refno
+        LEFT JOIN outlets o ON p.retail_outlet_id = o.outlet_id
         WHERE p.purchase_id = ?`,
         [purchaseId],
         (err, docs) => {
@@ -287,6 +312,11 @@ class PurchaseRepository {
             round_off: doc.round_off || 0.0,
             jv_ledger: doc.jv_ledger || 0.0,
             narration: doc.narration || "",
+            // Add fields from purchase_tally_response
+            voucher_no: doc.VoucherNo || null,
+            invoice_value: doc.InvoiceValue || null,
+            supplier_name: doc.SupplierName || null,
+            cost_centre: doc.CostCentre || null,
           };
 
           resolve({ code: 200, data: parsedDoc });
