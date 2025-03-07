@@ -355,7 +355,7 @@ class TallyUsecase {
               if (item.TAXABLE) {
                 purchaseEntry.ledgerentries.push(
                   GET_LEDGER({
-                    LedgerName: `IGST PURCHASE ${item.PERC * 2}%`,
+                    LedgerName: `IGST PURCHASE ${item.PERC}%`,
                     LedgerAmount: parseFloat(item.TAXABLE).toFixed(2),
                     GSTClassification: "Purchase Taxable",
                     IsDeemedPositive: "Yes",
@@ -368,7 +368,7 @@ class TallyUsecase {
               if (item.VALUE) {
                 purchaseEntry.ledgerentries.push(
                   GET_LEDGER({
-                    LedgerName: `IGST ${item.PERC * 2}% INPUT`,
+                    LedgerName: `IGST ${item.PERC}% INPUT`,
                     LedgerAmount: parseFloat(item.VALUE).toFixed(2),
                     IsDeemedPositive: "Yes",
                   })
