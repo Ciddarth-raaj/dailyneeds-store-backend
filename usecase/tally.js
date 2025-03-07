@@ -291,7 +291,7 @@ class TallyUsecase {
                 purchaseEntry.ledgerentries.push(
                   GET_LEDGER({
                     LedgerName: `Local GST Purchase Nil Rated`,
-                    LedgerAmount: item.TAXABLE,
+                    LedgerAmount: parseFloat(item.TAXABLE).toFixed(2),
                     GSTClassification: "Purchase Taxable",
                     IsDeemedPositive: "Yes",
                     LedgerGroup: "$$GroupPurchase",
@@ -306,7 +306,7 @@ class TallyUsecase {
                 purchaseEntry.ledgerentries.push(
                   GET_LEDGER({
                     LedgerName: `LOCAL PURCHASE ${item.PERC * 2}%`,
-                    LedgerAmount: item.TAXABLE,
+                    LedgerAmount: parseFloat(item.TAXABLE).toFixed(2),
                     GSTClassification: "Purchase Taxable",
                     IsDeemedPositive: "Yes",
                     LedgerGroup: "$$GroupPurchase",
@@ -319,7 +319,7 @@ class TallyUsecase {
                 purchaseEntry.ledgerentries.push(
                   GET_LEDGER({
                     LedgerName: `CGST ${item.PERC}% INPUT`,
-                    LedgerAmount: item.VALUE,
+                    LedgerAmount: parseFloat(item.VALUE).toFixed(2),
                     IsDeemedPositive: "Yes",
                   })
                 );
@@ -329,7 +329,7 @@ class TallyUsecase {
                 purchaseEntry.ledgerentries.push(
                   GET_LEDGER({
                     LedgerName: `SGST ${item.PERC}% INPUT`,
-                    LedgerAmount: item.VALUE,
+                    LedgerAmount: parseFloat(item.VALUE).toFixed(2),
                     IsDeemedPositive: "Yes",
                   })
                 );
