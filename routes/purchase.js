@@ -116,7 +116,7 @@ class PurchaseRoutes {
     });
 
     // Update purchase flags
-    router.patch("/:id/flags", async (req, res) => {
+    router.put("/:id/flags", async (req, res) => {
       try {
         // Schema for flags update
         const flagsSchema = Joi.object({
