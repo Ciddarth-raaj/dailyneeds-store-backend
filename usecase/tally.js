@@ -369,7 +369,7 @@ class TallyUsecase {
                 purchaseEntry.ledgerentries.push(
                   GET_LEDGER({
                     LedgerName: `IGST ${item.PERC * 2}% INPUT`,
-                    LedgerAmount: parseFloat(item.VALUE).toFixed(2),
+                    LedgerAmount: parseFloat(item.VALUE * 2).toFixed(2),
                     IsDeemedPositive: "Yes",
                   })
                 );
