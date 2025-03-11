@@ -83,7 +83,7 @@ class PurchaseTallyRepository {
          LEFT JOIN purchase p ON tr.VoucherNo = p.mmh_mrc_refno 
            AND p.retail_outlet_id = o.outlet_id
          LEFT JOIN purchase_internal pi ON p.purchase_id = pi.purchase_id
-         ${whereClause ? "WHERE " + whereClause : ""}
+         WHERE p.is_approved = 1 AND ${whereClause}
          ORDER BY tr.created_at DESC`,
         filterValues,
         (err, docs) => {
