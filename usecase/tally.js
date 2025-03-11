@@ -355,12 +355,12 @@ class TallyUsecase {
               if (item.TAXABLE) {
                 purchaseEntry.ledgerentries.push(
                   GET_LEDGER({
-                    LedgerName: `IGST PURCHASE ${item.PERC * 2}%`,
+                    LedgerName: `IGST PURCHASE ${item.PERC}%`,
                     LedgerAmount: parseFloat(item.TAXABLE).toFixed(2),
                     GSTClassification: "Purchase Taxable",
                     IsDeemedPositive: "Yes",
                     LedgerGroup: "$$GroupPurchase",
-                    IGSTRate: item.PERC * 2,
+                    IGSTRate: item.PERC,
                   })
                 );
               }
@@ -368,8 +368,8 @@ class TallyUsecase {
               if (item.VALUE) {
                 purchaseEntry.ledgerentries.push(
                   GET_LEDGER({
-                    LedgerName: `IGST ${item.PERC * 2}% INPUT`,
-                    LedgerAmount: parseFloat(item.VALUE * 2).toFixed(2),
+                    LedgerName: `IGST ${item.PERC}% INPUT`,
+                    LedgerAmount: parseFloat(item.VALUE).toFixed(2),
                     IsDeemedPositive: "Yes",
                   })
                 );
