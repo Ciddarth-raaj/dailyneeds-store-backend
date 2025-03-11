@@ -70,18 +70,21 @@ class PurchaseTallyRepository {
       }
 
       const whereClause =
-        filterConditions.length > 0
-          ? `WHERE ${filterConditions.join(" AND ")}`
-          : "";
+        filterConditions.length > 0 ? `${filterConditions.join(" AND ")}` : "";
 
       this.db.query(
-        `SELECT tr.*, pi.total_amount, p.purchase_id, p.supplier_name, p.mmh_mrc_dt
-        FROM purchase_tally_response tr
-        LEFT JOIN outlets o ON tr.CostCentre = o.outlet_name
-        LEFT JOIN purchase p ON tr.VoucherNo = p.mmh_mrc_refno AND tr.CostCentre = o.outlet_name
-        LEFT JOIN purchase_internal pi ON p.purchase_id = pi.purchase_id
-        ${whereClause} 
-        ORDER BY tr.created_at DESC`,
+        `SELECT tr.*,
+               pi.total_amount,
+               p.purchase_id,
+               p.supplier_name,
+               p.mmh_mrc_dt
+         FROM purchase_tally_response tr
+         JOIN outlets o ON tr.CostCentre = o.outlet_name
+         LEFT JOIN purchase p ON tr.VoucherNo = p.mmh_mrc_refno 
+           AND p.retail_outlet_id = o.outlet_id
+         LEFT JOIN purchase_internal pi ON p.purchase_id = pi.purchase_id
+         ${whereClause ? "WHERE " + whereClause : ""}
+         ORDER BY tr.created_at DESC`,
         filterValues,
         (err, docs) => {
           if (err) {
