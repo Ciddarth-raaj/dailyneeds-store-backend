@@ -175,6 +175,8 @@ class PurchaseRepository {
 
       if (filters.is_pushed === true) {
         filterConditions.push("tr.VoucherNo IS NOT NULL");
+      } else if (filters.is_pushed === false) {
+        filterConditions.push("tr.VoucherNo IS NULL");
       }
 
       const whereClause =
