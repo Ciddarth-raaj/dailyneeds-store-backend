@@ -72,6 +72,7 @@ const INIT_PURCHASE_ENTRY = (date) => ({
   PlaceOfSupply: "Puducherry",
   IsInvoice: "Yes",
   IsDeleted: "",
+  BuyerGSTRegistrationType: "",
   BuyerName: "", // supplier_name
   BuyerAlias: "",
   BuyerGSTIN: "", // supplier_gstn
@@ -121,6 +122,7 @@ const INIT_JOURNAL_ENTRY = (date) => ({
   TermsOfDelivery: "",
   Place_of_Supply: "",
   IsInvoice: "No",
+  BuyerGSTRegistrationType: "",
   BuyerName: "",
   BuyerAlias: "",
   BuyerGSTIN: "",
@@ -256,6 +258,9 @@ class TallyUsecase {
           purchaseEntry.PartyName = purchase.supplier_name;
           purchaseEntry.PartyCode = purchase.supplier_id;
           purchaseEntry.BuyerName = purchase.supplier_name;
+          purchaseEntry.BuyerGSTRegistrationType = purchase.supplier_gstn
+            ? "Regular"
+            : "";
           purchaseEntry.BuyerGSTIN = purchase.supplier_gstn;
           purchaseEntry.VoucherType =
             OUTLET_VOUCHER_TYPE_MAP[purchase.outlet_id] || "Purchase";
@@ -263,9 +268,6 @@ class TallyUsecase {
           purchaseEntry.Voucher_Total = parseFloat(
             purchase.total_amount
           ).toFixed(2);
-          purchaseEntry.Buyer_Registration_Type = purchase.supplier_gstn
-            ? "Regular"
-            : "";
 
           purchaseEntry.Narration = purchase.narration;
 
@@ -497,14 +499,14 @@ class TallyUsecase {
             );
             journalEntry.VoucherNumber = purchase.mmh_mrc_refno;
             journalEntry.Reference = purchase.mmh_dist_bill_no;
+            journalEntry.BuyerGSTRegistrationType = purchase.supplier_gstn
+              ? "Regular"
+              : "";
             journalEntry.PartyName = purchase.supplier_name;
             journalEntry.Voucher_Total = parseFloat(
               purchase.total_amount
             ).toFixed(2);
             journalEntry.Narration = purchase.narration;
-            journalEntry.Buyer_Registration_Type = purchase.supplier_gstn
-              ? "Regular"
-              : "";
 
             journalEntry.ledgerentries.push(
               GET_JOURNAL_LEDGER({
