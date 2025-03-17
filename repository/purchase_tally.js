@@ -77,7 +77,8 @@ class PurchaseTallyRepository {
                pi.total_amount,
                p.purchase_id,
                p.supplier_name,
-               p.mmh_mrc_dt
+               p.mmh_mrc_dt,
+               p.mmh_mrc_amt
          FROM purchase_tally_response tr
          JOIN outlets o ON tr.CostCentre = o.outlet_name
          LEFT JOIN purchase p ON tr.VoucherNo = p.mmh_mrc_refno 
