@@ -70,7 +70,9 @@ class PurchaseTallyRepository {
       }
 
       const whereClause =
-        filterConditions.length > 0 ? `${filterConditions.join(" AND ")}` : "";
+        filterConditions.length > 0
+          ? `WHERE ${filterConditions.join(" AND ")}`
+          : "";
 
       this.db.query(
         `SELECT tr.*,
@@ -84,7 +86,7 @@ class PurchaseTallyRepository {
          LEFT JOIN purchase p ON tr.VoucherNo = p.mmh_mrc_refno 
            AND p.retail_outlet_id = o.outlet_id
          LEFT JOIN purchase_internal pi ON p.purchase_id = pi.purchase_id
-         WHERE p.is_approved = 1 AND ${whereClause}
+         ${whereClause}
          ORDER BY tr.created_at DESC`,
         filterValues,
         (err, docs) => {
