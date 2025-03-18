@@ -503,6 +503,7 @@ class TallyUsecase {
               ? "Regular"
               : "";
             journalEntry.PartyName = purchase.supplier_name;
+            journalEntry.BuyerGSTIN = purchase.supplier_gstn;
             journalEntry.Voucher_Total = parseFloat(
               purchase.total_amount
             ).toFixed(2);
