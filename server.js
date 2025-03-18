@@ -141,6 +141,9 @@ class Server {
       this.mysql.connection
     );
     this.tallyRepo = require("./repository/tally")(this.mysql.connection);
+    this.debitNoteRepo = require("./repository/debit_note")(
+      this.mysql.connection
+    );
   }
 
   initUsecases() {
@@ -230,6 +233,7 @@ class Server {
       this.purchaseUsecase,
       this.accountsUsecase
     );
+    this.debitNoteUsecase = require("./usecase/debit_note")(this.debitNoteRepo);
   }
 
   initRoutes() {
@@ -291,6 +295,9 @@ class Server {
       this.purchaseTallyUsecase
     );
     const tallyRouter = require("./routes/tally")(this.tallyUsecase);
+    const debitNoteRouter = require("./routes/debit_note")(
+      this.debitNoteUsecase
+    );
     app.use("/document", documentRouter.getRouter());
     app.use("/whatsapp", whatsappRouter.getRouter());
     app.use("/budget", budgetRouter.getRouter());
@@ -326,6 +333,7 @@ class Server {
     app.use("/purchase", purchaseRouter.getRouter());
     app.use("/purchase-tally", purchaseTallyRouter.getRouter());
     app.use("/tally", tallyRouter.getRouter());
+    app.use("/debit-note", debitNoteRouter.getRouter());
   }
 
   initServices() {
