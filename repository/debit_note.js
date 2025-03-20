@@ -488,7 +488,7 @@ class DebitNoteRepository {
                   narration = ?,
                   tcs_value = ?,
                   total_amount = ?,
-                  mmh_mrc_refno = ?
+                  mmh_mrc_refno = ?,
                   round_off = ?
                 WHERE debit_note_id = ?`,
                 [
