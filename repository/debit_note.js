@@ -1,4 +1,5 @@
 const logger = require("../utils/logger");
+const moment = require("moment");
 
 class DebitNoteRepository {
   constructor(db) {
@@ -99,13 +100,48 @@ class DebitNoteRepository {
         filterValues.push(filters.to_date);
       }
 
+      if (filters.has_updated !== undefined) {
+        filterConditions.push("dn.has_updated = ?");
+        filterValues.push(filters.has_updated);
+      }
+
+      if (filters.is_approved !== undefined) {
+        const conditionString = filters.is_approved
+          ? "dn.is_approved = ? AND tr.VoucherNo IS NULL"
+          : "dn.is_approved = ?";
+        filterConditions.push(conditionString);
+        filterValues.push(filters.is_approved);
+      }
+
+      if (filters.is_pushed === true) {
+        filterConditions.push("tr.VoucherNo IS NOT NULL");
+      } else if (filters.is_pushed === false) {
+        filterConditions.push("tr.VoucherNo IS NULL");
+      }
+
       const whereClause =
         filterConditions.length > 0
           ? `WHERE ${filterConditions.join(" AND ")}`
           : "";
 
       this.db.query(
-        `SELECT * FROM debit_note ${whereClause} ORDER BY created_at DESC`,
+        `SELECT dn.*,
+          pi.scheme_difference,
+          pi.narration,
+          pi.tcs_value,
+          pi.total_amount,
+          tr.VoucherNo,
+          tr.InvoiceValue,
+          tr.SupplierName,
+          tr.CostCentre,
+          o.outlet_name,
+          o.outlet_id
+        FROM debit_note dn
+        LEFT JOIN debit_note_internal pi ON dn.debit_note_id = pi.debit_note_id
+        LEFT JOIN outlets o ON dn.store_id = o.outlet_id
+        LEFT JOIN debit_note_tally_response tr ON tr.VoucherNo = dn.mprh_pr_refno AND tr.CostCentre = o.outlet_name
+        ${whereClause}
+        ORDER BY created_at DESC`,
         filterValues,
         (err, docs) => {
           if (err) {
@@ -127,6 +163,18 @@ class DebitNoteRepository {
             cgst: JSON.parse(doc.cgst),
             igst: JSON.parse(doc.igst),
             cess: JSON.parse(doc.cess),
+            // Set default values for internal fields
+            scheme_difference: doc.scheme_difference || 0.0,
+            narration: doc.narration || "",
+            tcs_value: doc.tcs_value || 0.0,
+            total_amount: doc.total_amount || 0.0,
+            // Add fields from purchase_tally_response
+            tally_response: {
+              voucher_no: doc.VoucherNo || null,
+              invoice_value: doc.InvoiceValue || null,
+              supplier_name: doc.SupplierName || null,
+              cost_centre: doc.CostCentre || null,
+            },
           }));
 
           resolve({ code: 200, data: parsedDocs });
@@ -211,6 +259,283 @@ class DebitNoteRepository {
           });
         }
       );
+    });
+  }
+
+  async updateFlags(purchaseId, flags) {
+    return new Promise((resolve, reject) => {
+      try {
+        // Build update query dynamically based on provided flags
+        const updates = [];
+        const values = [];
+
+        if (flags.has_updated !== undefined) {
+          updates.push("has_updated = ?");
+          values.push(flags.has_updated);
+        }
+
+        if (flags.is_approved !== undefined) {
+          updates.push("is_approved = ?");
+          values.push(flags.is_approved);
+        }
+
+        if (updates.length === 0) {
+          resolve({ code: 400, msg: "No flags to update" });
+          return;
+        }
+
+        values.push(purchaseId);
+
+        this.db.query(
+          `UPDATE debit_note SET ${updates.join(", ")} WHERE debit_note_id = ?`,
+          values,
+          (err, result) => {
+            if (err) {
+              logger.Log({
+                level: logger.LEVEL.ERROR,
+                component: "REPOSITORY.PURCHASE",
+                code: "REPOSITORY.PURCHASE.UPDATE-FLAGS",
+                description: err.toString(),
+                category: "",
+                ref: {},
+              });
+              reject(err);
+              return;
+            }
+
+            if (result.affectedRows === 0) {
+              resolve({ code: 404, msg: "Purchase not found" });
+              return;
+            }
+
+            resolve({
+              code: 200,
+              msg: "Flags updated successfully",
+              updatedFlags: flags,
+            });
+          }
+        );
+      } catch (err) {
+        logger.Log({
+          level: logger.LEVEL.ERROR,
+          component: "REPOSITORY.DEBIT-NOTE",
+          code: "REPOSITORY.DEBIT-NOTE.UPDATE-FLAGS",
+          description: err.toString(),
+          category: "",
+          ref: {},
+        });
+        reject(err);
+      }
+    });
+  }
+
+  // Helper function to compare tax arrays
+  compareTaxArrays = (existing, updated) => {
+    if (!Array.isArray(existing) || !Array.isArray(updated)) {
+      return false;
+    }
+    if (existing.length !== updated.length) {
+      return false;
+    }
+
+    // Sort arrays by perc to ensure consistent comparison
+    const sortedExisting = existing.sort((a, b) => a.perc - b.perc);
+    const sortedUpdated = updated.sort((a, b) => a.perc - b.perc);
+
+    // Compare each item in the arrays
+    return sortedExisting.every((existingItem, index) => {
+      const updatedItem = sortedUpdated[index];
+      return (
+        existingItem.perc === updatedItem.perc &&
+        existingItem.value === updatedItem.value &&
+        existingItem.TAXABLE === updatedItem.TAXABLE
+      );
+    });
+  };
+
+  async updateDebitNoteWithInternal(debitNote, debitNoteInternal) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        // Check if debit note exists
+        const [existingDebitNote] = await new Promise((resolve, reject) => {
+          this.db.query(
+            `SELECT * FROM debit_note WHERE debit_note_id = ?`,
+            [debitNote.id],
+            (err, result) => {
+              if (err) reject(err);
+              resolve([result[0]]);
+            }
+          );
+        });
+
+        if (!existingDebitNote) {
+          reject(new Error("Debit Note not found"));
+          return;
+        }
+
+        // Compare values to check if update is needed
+        const hasChanges =
+          existingDebitNote.store_id != debitNote.store_id ||
+          existingDebitNote.mprh_pr_no != debitNote.mprh_pr_no ||
+          existingDebitNote.mprh_pr_refno != debitNote.mprh_pr_refno ||
+          moment(existingDebitNote.mprh_pr_dt).format("YYYY-MM-DD") !=
+            moment(debitNote.mprh_pr_dt).format("YYYY-MM-DD") ||
+          existingDebitNote.mprh_dist_code != debitNote.mprh_dist_code ||
+          existingDebitNote.supplier_id != debitNote.supplier_id ||
+          existingDebitNote.supplier_name != debitNote.supplier_name ||
+          existingDebitNote.supplier_gstn != debitNote.supplier_gstn ||
+          existingDebitNote.tot_sgst_amt != debitNote.tot_sgst_amt ||
+          existingDebitNote.tot_cgst_amt != debitNote.tot_cgst_amt ||
+          existingDebitNote.tot_igst_amt != debitNote.tot_igst_amt ||
+          existingDebitNote.tot_gst_cess_amt != debitNote.tot_gst_cess_amt ||
+          existingDebitNote.tot_item_qty != debitNote.tot_item_qty ||
+          existingDebitNote.tot_item_value != debitNote.tot_item_value ||
+          !this.compareTaxArrays(
+            JSON.parse(existingDebitNote.sgst),
+            debitNote.sgst
+          ) ||
+          !this.compareTaxArrays(
+            JSON.parse(existingDebitNote.cgst),
+            debitNote.cgst
+          ) ||
+          !this.compareTaxArrays(
+            JSON.parse(existingDebitNote.igst),
+            debitNote.igst
+          ) ||
+          !this.compareTaxArrays(
+            JSON.parse(existingDebitNote.cess),
+            debitNote.cess
+          );
+
+        if (hasChanges) {
+          await new Promise((resolve, reject) => {
+            this.db.query(
+              `UPDATE debit_note SET
+                store_id = ?,
+                mprh_pr_no = ?,
+                mprh_pr_refno = ?,
+                mprh_pr_dt = ?,
+                mprh_dist_code = ?,
+                supplier_id = ?,
+                supplier_name = ?,
+                supplier_gstn = ?,
+                tot_sgst_amt = ?,
+                tot_cgst_amt = ?,
+                tot_igst_amt = ?,
+                tot_gst_cess_amt = ?,
+                tot_item_qty = ?,
+                tot_item_value = ?,
+                sgst = ?,
+                cgst = ?,
+                igst = ?,
+                cess = ?
+              WHERE debit_note_id = ?`,
+              [
+                debitNote.store_id,
+                debitNote.mprh_pr_no,
+                debitNote.mprh_pr_refno,
+                moment(debitNote.mprh_pr_dt).format("YYYY-MM-DD"),
+                debitNote.mprh_dist_code,
+                debitNote.supplier_id,
+                debitNote.supplier_name,
+                debitNote.supplier_gstn,
+                debitNote.tot_sgst_amt,
+                debitNote.tot_cgst_amt,
+                debitNote.tot_igst_amt,
+                debitNote.tot_gst_cess_amt,
+                debitNote.tot_item_qty,
+                debitNote.tot_item_value,
+                JSON.stringify(debitNote.sgst),
+                JSON.stringify(debitNote.cgst),
+                JSON.stringify(debitNote.igst),
+                JSON.stringify(debitNote.cess),
+                debitNote.id,
+              ],
+              (err, result) => {
+                if (err) reject(err);
+                resolve(result);
+              }
+            );
+          });
+        }
+
+        // Handle debit_note_internal
+        if (debitNoteInternal) {
+          const [existingInternal] = await new Promise((resolve, reject) => {
+            this.db.query(
+              `SELECT * FROM debit_note_internal WHERE debit_note_id = ?`,
+              [debitNote.id],
+              (err, result) => {
+                if (err) reject(err);
+                resolve([result[0]]);
+              }
+            );
+          });
+
+          if (existingInternal) {
+            await new Promise((resolve, reject) => {
+              this.db.query(
+                `UPDATE debit_note_internal SET
+                  scheme_difference = ?,
+                  narration = ?,
+                  tcs_value = ?,
+                  total_amount = ?
+                WHERE debit_note_id = ?`,
+                [
+                  debitNoteInternal.scheme_difference || 0.0,
+                  debitNoteInternal.narration || "",
+                  debitNoteInternal.tcs_value || 0.0,
+                  debitNoteInternal.total_amount || 0.0,
+                  debitNote.id,
+                ],
+                (err, result) => {
+                  if (err) reject(err);
+                  resolve(result);
+                }
+              );
+            });
+          } else {
+            await new Promise((resolve, reject) => {
+              this.db.query(
+                `INSERT INTO debit_note_internal (
+                  debit_note_id,
+                  scheme_difference,
+                  narration,
+                  tcs_value,
+                  total_amount
+                ) VALUES (?, ?, ?, ?, ?)`,
+                [
+                  debitNote.id,
+                  debitNoteInternal.scheme_difference || 0.0,
+                  debitNoteInternal.narration || "",
+                  debitNoteInternal.tcs_value || 0.0,
+                  debitNoteInternal.total_amount || 0.0,
+                ],
+                (err, result) => {
+                  if (err) reject(err);
+                  resolve(result);
+                }
+              );
+            });
+          }
+        }
+
+        resolve({
+          code: 200,
+          debitNoteUpdated: hasChanges,
+          internalUpdated: !!debitNoteInternal,
+        });
+      } catch (err) {
+        logger.Log({
+          level: logger.LEVEL.ERROR,
+          component: "REPOSITORY.DEBIT_NOTE",
+          code: "REPOSITORY.DEBIT_NOTE.UPDATE-WITH-INTERNAL",
+          description: err.toString(),
+          category: "",
+          ref: {},
+        });
+        reject(err);
+      }
     });
   }
 }

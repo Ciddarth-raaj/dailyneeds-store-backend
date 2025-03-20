@@ -60,6 +60,9 @@ class DebitNoteRoutes {
           store_id: Joi.number(),
           from_date: Joi.date(),
           to_date: Joi.date(),
+          has_updated: Joi.boolean(),
+          is_approved: Joi.boolean(),
+          is_pushed: Joi.boolean(),
         });
 
         const { error, value } = schema.validate(req.query);
@@ -114,6 +117,122 @@ class DebitNoteRoutes {
         }
 
         const result = await this.debitNoteUsecase.bulkCreate(value);
+        res.json(result);
+      } catch (err) {
+        console.log(err);
+        res.json({ code: 500, msg: err.message });
+      }
+    });
+
+    // Update purchase flags
+    router.put("/:id/flags", async (req, res) => {
+      try {
+        // Schema for flags update
+        const flagsSchema = Joi.object({
+          has_updated: Joi.boolean(),
+          is_approved: Joi.boolean(),
+        }).or("has_updated", "is_approved"); // At least one must be present
+
+        const { error } = flagsSchema.validate(req.body);
+        if (error) {
+          return res.json({
+            code: 422,
+            msg: error.toString(),
+            tag: "FLAGS-ERROR",
+          });
+        }
+
+        const result = await this.debitNoteUsecase.updatePurchaseFlags(
+          req.params.id,
+          req.body
+        );
+        res.json(result);
+      } catch (err) {
+        console.log(err);
+        res.json({ code: 500, msg: err.message });
+      }
+    });
+
+    // Update purchase
+    router.put("/:id", async (req, res) => {
+      try {
+        // Check if both objects exist
+        if (!req.body.purchase || !req.body.purchase_internal) {
+          return res.json({
+            code: 422,
+            msg: "Both purchase and purchase_internal must be provided",
+          });
+        }
+
+        // Define purchase schema with tax arrays
+        const purchaseSchema = Joi.object({
+          store_id: Joi.number().required(),
+          mprh_pr_no: Joi.string().max(20).required(),
+          mprh_pr_refno: Joi.string().max(20).required(),
+          mprh_pr_dt: Joi.date().required(),
+          mprh_dist_code: Joi.string().max(20).required(),
+          supplier_id: Joi.string().max(20).required(),
+          supplier_name: Joi.string().max(100).required(),
+          supplier_gstn: Joi.string().max(20).required(),
+          tot_sgst_amt: Joi.number().precision(2).required(),
+          tot_cgst_amt: Joi.number().precision(2).required(),
+          tot_igst_amt: Joi.number().precision(2).required(),
+          tot_gst_cess_amt: Joi.number().precision(2).required(),
+          tot_item_qty: Joi.number().precision(2).required(),
+          tot_item_value: Joi.number().precision(2).required(),
+          ts: Joi.number().required(),
+          sgst: Joi.array().items(taxItemSchema).required(),
+          cgst: Joi.array().items(taxItemSchema).required(),
+          igst: Joi.array().items(taxItemSchema).required(),
+          cess: Joi.array().items(taxItemSchema).required(),
+        });
+
+        // Validate purchase
+        const { error: purchaseError } = purchaseSchema.validate(
+          req.body.purchase
+        );
+        if (purchaseError) {
+          return res.json({
+            code: 422,
+            msg: purchaseError.toString(),
+            tag: "DEBIT-NOTE-ERROR",
+          });
+        }
+
+        // Schema for purchase_internal
+        const internalSchema = Joi.object({
+          tcs_value: Joi.number().precision(2).default(0.0),
+          scheme_difference: Joi.number().precision(2).default(0.0),
+          narration: Joi.string().allow("").optional(),
+          total_amount: Joi.number().precision(2).default(0.0),
+        });
+
+        // Validate purchase_internal
+        const { error: internalError } = internalSchema.validate(
+          req.body.purchase_internal
+        );
+        if (internalError) {
+          return res.json({
+            code: 422,
+            msg: internalError.toString(),
+            tag: "DEBIT-NOTE-INTERNAL-ERROR",
+          });
+        }
+
+        const purchase = {
+          ...req.body.purchase,
+          id: req.params.id,
+          debit_note_id: req.params.id,
+        };
+        const purchase_internal = req.body.purchase_internal;
+        const send_not_matched_notification =
+          req.body.send_not_matched_notification ?? false;
+
+        const result = await this.debitNoteUsecase.updatePurchaseWithInternal(
+          purchase,
+          purchase_internal,
+          send_not_matched_notification
+        );
         res.json(result);
       } catch (err) {
         console.log(err);
