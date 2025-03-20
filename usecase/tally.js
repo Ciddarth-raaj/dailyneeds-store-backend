@@ -220,6 +220,14 @@ const OUTLET_VOUCHER_TYPE_MAP = {
   6: "PurchaseDN4",
 };
 
+const OUTLET_VOUCHER_TYPE_MAP_DEBIT_NOTE = {
+  2: "Debit Note",
+  3: "Debit Note DN2",
+  4: "Debit Note DN1",
+  5: "Debit Note DN3",
+  6: "Debit Note DN4",
+};
+
 class TallyUsecase {
   constructor(tallyRepo, purchaseUsecase, accountsUsecase, debitNoteUsecase) {
     this.tallyRepo = tallyRepo;
@@ -264,7 +272,8 @@ class TallyUsecase {
             : "";
           purchaseEntry.BuyerGSTIN = purchase.supplier_gstn;
           purchaseEntry.VoucherType =
-            OUTLET_VOUCHER_TYPE_MAP[purchase.outlet_id] || "Purchase";
+            OUTLET_VOUCHER_TYPE_MAP_DEBIT_NOTE[purchase.outlet_id] ||
+            "Debit Note";
           purchaseEntry.VoucherCostCentre = purchase.outlet_name;
           purchaseEntry.Voucher_Total = parseFloat(
             purchase.total_amount
