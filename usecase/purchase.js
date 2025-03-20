@@ -92,6 +92,15 @@ class PurchaseUsecase {
       throw error;
     }
   }
+
+  async deleteTallyResponse(VoucherNo) {
+    try {
+      const result = await this.purchaseRepo.deleteTallyResponse(VoucherNo);
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
 }
 
 module.exports = (purchaseRepo, outletUsecase) => {
