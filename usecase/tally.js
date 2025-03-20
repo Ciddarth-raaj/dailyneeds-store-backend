@@ -272,21 +272,39 @@ class TallyUsecase {
 
           purchaseEntry.Narration = purchase.narration;
 
-          purchaseEntry.ledgerentries.push(
-            GET_LEDGER({
-              LedgerName: purchase.supplier_name,
-              LedgerAmount: parseFloat(purchase.total_amount).toFixed(2),
-              IsDeemedPositive: "No",
-              BillsAllocation: [
-                {
-                  AgstType: "New Ref",
-                  Reference: purchase.mmh_dist_bill_no || "",
-                  CreditPeriod: 0,
-                  Amount: parseFloat(purchase.total_amount).toFixed(2),
-                },
-              ],
-            })
-          );
+          if (purchase.mmh_dist_bill_no) {
+            purchaseEntry.ledgerentries.push(
+              GET_LEDGER({
+                LedgerName: purchase.supplier_name,
+                LedgerAmount: parseFloat(purchase.total_amount).toFixed(2),
+                IsDeemedPositive: "No",
+                BillsAllocation: [
+                  {
+                    AgstType: "Agst Ref",
+                    Reference: purchase.mmh_dist_bill_no || "",
+                    CreditPeriod: 0,
+                    Amount: parseFloat(purchase.total_amount).toFixed(2),
+                  },
+                ],
+              })
+            );
+          } else {
+            purchaseEntry.ledgerentries.push(
+              GET_LEDGER({
+                LedgerName: purchase.mprh_pr_refno,
+                LedgerAmount: parseFloat(purchase.total_amount).toFixed(2),
+                IsDeemedPositive: "No",
+                BillsAllocation: [
+                  {
+                    AgstType: "New Ref",
+                    Reference: purchase.mprh_pr_refno || "",
+                    CreditPeriod: 0,
+                    Amount: parseFloat(purchase.total_amount).toFixed(2),
+                  },
+                ],
+              })
+            );
+          }
 
           if (!shouldShowIGST(purchase.supplier_gstn)) {
             purchase.sgst.forEach((item) => {

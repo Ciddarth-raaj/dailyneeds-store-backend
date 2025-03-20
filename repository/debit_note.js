@@ -143,7 +143,7 @@ class DebitNoteRepository {
         LEFT JOIN debit_note_internal pi ON dn.debit_note_id = pi.debit_note_id
         LEFT JOIN outlets o ON dn.store_id = o.outlet_id
         LEFT JOIN debit_note_tally_response tr ON tr.VoucherNo = dn.mprh_pr_refno AND tr.CostCentre = o.outlet_name
-        LEFT JOIN purchase p ON p.mmh_mrc_refno = pi.mmh_mrc_refno
+        LEFT JOIN purchase p ON p.mmh_mrc_refno = pi.mmh_mrc_refno AND p.retail_outlet_id = o.outlet_id
         ${whereClause}
         ORDER BY created_at DESC`,
         filterValues,

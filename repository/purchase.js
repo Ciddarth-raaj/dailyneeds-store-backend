@@ -277,7 +277,7 @@ class PurchaseRepository {
         LEFT JOIN purchase_internal pi ON p.purchase_id = pi.purchase_id
         LEFT JOIN purchase_tally_response tr ON tr.VoucherNo = p.mmh_mrc_refno
         LEFT JOIN outlets o ON p.retail_outlet_id = o.outlet_id
-        WHERE p.purchase_id = ?`,
+        WHERE p.mmh_mrc_refno = ?`,
         [purchaseId],
         (err, docs) => {
           if (err) {
