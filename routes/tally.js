@@ -39,6 +39,35 @@ class TallyRoutes {
       res.end();
     });
 
+    router.get("/debit-note", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          from_date: Joi.date().required(),
+          to_date: Joi.date().required(),
+        });
+
+        const isValid = schema.validate(req.query);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const debitNote = await this.tallyUsecase.getDebitNote(
+          req.query.from_date,
+          req.query.to_date
+        );
+        res.json(debitNote);
+      } catch (err) {
+        console.log(err);
+        if (err.name === "ValidationError") {
+          res.json({ error: err.toString(), data: [] });
+        } else {
+          res.json({ error: "An error occurred !", data: [] });
+        }
+      }
+
+      res.end();
+    });
+
     router.get("/card-to-bank", async (req, res) => {
       try {
         const schema = Joi.object({

@@ -204,6 +204,7 @@ class DebitNoteRoutes {
           tcs_value: Joi.number().precision(2).default(0.0),
           scheme_difference: Joi.number().precision(2).default(0.0),
           narration: Joi.string().allow("").optional(),
+          mmh_mrc_refno: Joi.string().allow("").optional(),
           total_amount: Joi.number().precision(2).default(0.0),
         });
 

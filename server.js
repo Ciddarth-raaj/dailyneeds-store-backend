@@ -228,12 +228,13 @@ class Server {
     this.purchaseTallyUsecase = require("./usecase/purchase_tally")(
       this.purchaseTallyRepo
     );
+    this.debitNoteUsecase = require("./usecase/debit_note")(this.debitNoteRepo);
     this.tallyUsecase = require("./usecase/tally")(
       this.tallyRepo,
       this.purchaseUsecase,
-      this.accountsUsecase
+      this.accountsUsecase,
+      this.debitNoteUsecase
     );
-    this.debitNoteUsecase = require("./usecase/debit_note")(this.debitNoteRepo);
   }
 
   initRoutes() {

@@ -130,16 +130,20 @@ class DebitNoteRepository {
           pi.narration,
           pi.tcs_value,
           pi.total_amount,
+          pi.mmh_mrc_refno,
           tr.VoucherNo,
           tr.InvoiceValue,
           tr.SupplierName,
           tr.CostCentre,
           o.outlet_name,
-          o.outlet_id
+          o.outlet_id,
+          p.mmh_dist_bill_dt,
+          p.mmh_dist_bill_no
         FROM debit_note dn
         LEFT JOIN debit_note_internal pi ON dn.debit_note_id = pi.debit_note_id
         LEFT JOIN outlets o ON dn.store_id = o.outlet_id
         LEFT JOIN debit_note_tally_response tr ON tr.VoucherNo = dn.mprh_pr_refno AND tr.CostCentre = o.outlet_name
+        LEFT JOIN purchase p ON p.mmh_mrc_refno = pi.mmh_mrc_refno
         ${whereClause}
         ORDER BY created_at DESC`,
         filterValues,
@@ -175,6 +179,8 @@ class DebitNoteRepository {
               supplier_name: doc.SupplierName || null,
               cost_centre: doc.CostCentre || null,
             },
+            mmh_dist_bill_no: doc.mmh_dist_bill_no || null,
+            mmh_dist_bill_dt: doc.mmh_dist_bill_dt || null,
           }));
 
           resolve({ code: 200, data: parsedDocs });
@@ -479,13 +485,15 @@ class DebitNoteRepository {
                   scheme_difference = ?,
                   narration = ?,
                   tcs_value = ?,
-                  total_amount = ?
+                  total_amount = ?,
+                  mmh_mrc_refno = ?
                 WHERE debit_note_id = ?`,
                 [
                   debitNoteInternal.scheme_difference || 0.0,
                   debitNoteInternal.narration || "",
                   debitNoteInternal.tcs_value || 0.0,
                   debitNoteInternal.total_amount || 0.0,
+                  debitNoteInternal.mmh_mrc_refno || "",
                   debitNote.id,
                 ],
                 (err, result) => {
@@ -502,14 +510,16 @@ class DebitNoteRepository {
                   scheme_difference,
                   narration,
                   tcs_value,
-                  total_amount
-                ) VALUES (?, ?, ?, ?, ?)`,
+                  total_amount,
+                  mmh_mrc_refno
+                ) VALUES (?, ?, ?, ?, ?, ?)`,
                 [
                   debitNote.id,
                   debitNoteInternal.scheme_difference || 0.0,
                   debitNoteInternal.narration || "",
                   debitNoteInternal.tcs_value || 0.0,
                   debitNoteInternal.total_amount || 0.0,
+                  debitNoteInternal.mmh_mrc_refno || "",
                 ],
                 (err, result) => {
                   if (err) reject(err);

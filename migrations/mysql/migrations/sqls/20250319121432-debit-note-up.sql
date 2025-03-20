@@ -48,3 +48,5 @@ ALTER TABLE `debit_note_internal` CHANGE `purchase_id` `debit_note_id` BIGINT NO
 
 ALTER TABLE `debit_note_internal` ADD `total_amount` DECIMAL NOT NULL AFTER `tcs_value`;
 ALTER TABLE `debit_note_internal` CHANGE `total_amount` `total_amount` DECIMAL(10,2) NOT NULL;
+
+ALTER TABLE `debit_note_internal` ADD `mmh_mrc_refno` VARCHAR(100) NOT NULL AFTER `total_amount`;

@@ -221,10 +221,283 @@ const OUTLET_VOUCHER_TYPE_MAP = {
 };
 
 class TallyUsecase {
-  constructor(tallyRepo, purchaseUsecase, accountsUsecase) {
+  constructor(tallyRepo, purchaseUsecase, accountsUsecase, debitNoteUsecase) {
     this.tallyRepo = tallyRepo;
     this.purchaseUsecase = purchaseUsecase;
     this.accountsUsecase = accountsUsecase;
+    this.debitNoteUsecase = debitNoteUsecase;
+  }
+
+  async getDebitNote(from_date, to_date) {
+    try {
+      let formatted_from_date = moment(from_date, "MM-DD-YYYY").format(
+        "YYYY-MM-DD"
+      );
+      let formatted_to_date = moment(to_date, "MM-DD-YYYY").format(
+        "YYYY-MM-DD"
+      );
+
+      const filters = {
+        from_date: formatted_from_date,
+        to_date: formatted_to_date,
+        is_approved: 1,
+      };
+
+      const data = await this.debitNoteUsecase.getAll(filters);
+
+      if (data.code === 200) {
+        const tallyData = data.data.flatMap((purchase) => {
+          const purchaseEntry = INIT_PURCHASE_ENTRY(
+            moment(purchase.mmh_mrc_dt).format("YYYYMMDD")
+          );
+
+          purchaseEntry.MasterID = simpleEncrypt(
+            `${purchase.debit_note_id}-purchase-entry`
+          );
+          purchaseEntry.VoucherNumber = purchase.mprh_pr_refno;
+          purchaseEntry.Reference = purchase.mmh_dist_bill_no || "";
+          purchaseEntry.PartyName = purchase.supplier_name;
+          purchaseEntry.PartyCode = purchase.supplier_id;
+          purchaseEntry.BuyerName = purchase.supplier_name;
+          purchaseEntry.BuyerGSTRegistrationType = purchase.supplier_gstn
+            ? "Regular"
+            : "";
+          purchaseEntry.BuyerGSTIN = purchase.supplier_gstn;
+          purchaseEntry.VoucherType =
+            OUTLET_VOUCHER_TYPE_MAP[purchase.outlet_id] || "Purchase";
+          purchaseEntry.VoucherCostCentre = purchase.outlet_name;
+          purchaseEntry.Voucher_Total = parseFloat(
+            purchase.total_amount
+          ).toFixed(2);
+
+          purchaseEntry.Narration = purchase.narration;
+
+          purchaseEntry.ledgerentries.push(
+            GET_LEDGER({
+              LedgerName: purchase.supplier_name,
+              LedgerAmount: parseFloat(purchase.total_amount).toFixed(2),
+              IsDeemedPositive: "No",
+              BillsAllocation: [
+                {
+                  AgstType: "New Ref",
+                  Reference: purchase.mmh_dist_bill_no || "",
+                  CreditPeriod: 0,
+                  Amount: parseFloat(purchase.total_amount).toFixed(2),
+                },
+              ],
+            })
+          );
+
+          if (!shouldShowIGST(purchase.supplier_gstn)) {
+            purchase.sgst.forEach((item) => {
+              if (item.PERC === 0) {
+                purchaseEntry.ledgerentries.push(
+                  GET_LEDGER({
+                    LedgerName: `Local GST Purchase Nil Rated`,
+                    LedgerAmount: parseFloat(item.TAXABLE).toFixed(2),
+                    GSTClassification: "Purchase Taxable",
+                    IsDeemedPositive: "Yes",
+                    LedgerGroup: "$$GroupPurchase",
+                    IGSTRate: 0,
+                  })
+                );
+
+                return;
+              }
+
+              if (item.TAXABLE) {
+                purchaseEntry.ledgerentries.push(
+                  GET_LEDGER({
+                    LedgerName: `LOCAL PURCHASE ${item.PERC * 2}%`,
+                    LedgerAmount: parseFloat(item.TAXABLE).toFixed(2),
+                    GSTClassification: "Purchase Taxable",
+                    IsDeemedPositive: "Yes",
+                    LedgerGroup: "$$GroupPurchase",
+                    IGSTRate: item.PERC * 2,
+                  })
+                );
+              }
+
+              if (item.VALUE) {
+                purchaseEntry.ledgerentries.push(
+                  GET_LEDGER({
+                    LedgerName: `CGST ${item.PERC}% INPUT`,
+                    LedgerAmount: parseFloat(item.VALUE).toFixed(2),
+                    IsDeemedPositive: "Yes",
+                  })
+                );
+              }
+
+              if (item.VALUE) {
+                purchaseEntry.ledgerentries.push(
+                  GET_LEDGER({
+                    LedgerName: `SGST ${item.PERC}% INPUT`,
+                    LedgerAmount: parseFloat(item.VALUE).toFixed(2),
+                    IsDeemedPositive: "Yes",
+                  })
+                );
+              }
+            });
+          } else {
+            purchase.igst.forEach((item) => {
+              if (item.PERC === 0) {
+                purchaseEntry.ledgerentries.push(
+                  GET_LEDGER({
+                    LedgerName: `IGST Purchase Nil Rated`,
+                    LedgerAmount: parseFloat(item.TAXABLE).toFixed(2),
+                    GSTClassification: "Purchase Taxable",
+                    IsDeemedPositive: "Yes",
+                    LedgerGroup: "$$GroupPurchase",
+                    IGSTRate: 0,
+                  })
+                );
+
+                return;
+              }
+
+              if (item.TAXABLE) {
+                purchaseEntry.ledgerentries.push(
+                  GET_LEDGER({
+                    LedgerName: `IGST PURCHASE ${item.PERC}%`,
+                    LedgerAmount: parseFloat(item.TAXABLE).toFixed(2),
+                    GSTClassification: "Purchase Taxable",
+                    IsDeemedPositive: "Yes",
+                    LedgerGroup: "$$GroupPurchase",
+                    IGSTRate: item.PERC,
+                  })
+                );
+              }
+
+              if (item.VALUE) {
+                purchaseEntry.ledgerentries.push(
+                  GET_LEDGER({
+                    LedgerName: `IGST ${item.PERC}% INPUT`,
+                    LedgerAmount: parseFloat(item.VALUE).toFixed(2),
+                    IsDeemedPositive: "Yes",
+                  })
+                );
+              }
+            });
+          }
+
+          // if (purchase.tot_gst_cess_amt && purchase.tot_gst_cess_amt != 0) {
+          //   purchaseEntry.ledgerentries.push(
+          //     GET_LEDGER({
+          //       LedgerName: `CESS 12% INPUT`,
+          //       LedgerAmount: parseFloat(purchase.tot_gst_cess_amt).toFixed(2),
+          //       IsDeemedPositive: "Yes",
+          //     })
+          //   );
+          // }
+
+          if (purchase.tcs_value && purchase.tcs_value != 0) {
+            purchaseEntry.ledgerentries.push(
+              GET_LEDGER({
+                LedgerName: `TCS @ 0.1%`,
+                LedgerAmount: parseFloat(purchase.tcs_value).toFixed(2),
+                IsDeemedPositive: "Yes",
+              })
+            );
+          }
+
+          if (purchase.scheme_difference && purchase.scheme_difference != 0) {
+            purchaseEntry.ledgerentries.push(
+              GET_LEDGER({
+                LedgerName: `Scheme Difference`,
+                LedgerAmount:
+                  -1 * parseFloat(purchase.scheme_difference).toFixed(2),
+                IsDeemedPositive: "Yes",
+              })
+            );
+          }
+
+          let journalEntry = null;
+
+          if (purchase.jv_ledger == 1) {
+            journalEntry = INIT_JOURNAL_ENTRY(
+              moment(purchase.mmh_mrc_dt).format("YYYYMMDD")
+            );
+
+            journalEntry.MasterID = simpleEncrypt(
+              `${purchase.debit_note_id}-journal-entry`
+            );
+            journalEntry.VoucherNumber = purchase.mprh_pr_refno;
+            journalEntry.Reference = purchase.mmh_dist_bill_no;
+            journalEntry.BuyerGSTRegistrationType = purchase.supplier_gstn
+              ? "Regular"
+              : "";
+            journalEntry.PartyName = purchase.supplier_name;
+            journalEntry.BuyerGSTIN = purchase.supplier_gstn;
+            journalEntry.Voucher_Total = parseFloat(
+              purchase.total_amount
+            ).toFixed(2);
+            journalEntry.Narration = purchase.narration;
+
+            journalEntry.ledgerentries.push(
+              GET_JOURNAL_LEDGER({
+                LedgerName: purchase.supplier_name,
+                LedgerAmount: parseFloat(purchase.total_amount).toFixed(2),
+                IsDeemedPositive: "Yes",
+                LedgerGroup: "$$GroupSundryCreditors",
+                BillsAllocation: [
+                  {
+                    AgstType: "New Ref",
+                    Reference: purchase.mmh_dist_bill_no,
+                    Amount: -1 * parseFloat(purchase.total_amount),
+                  },
+                ],
+                CategoryAllocation: [
+                  {
+                    Category: "Primary Cost Category",
+                    isDeeemedPositive: "Yes",
+                    CostCentreAllocation: [
+                      {
+                        Name: purchase.outlet_name,
+                        Amount: parseFloat(purchase.total_amount).toFixed(2),
+                      },
+                    ],
+                  },
+                ],
+              })
+            );
+
+            journalEntry.ledgerentries.push(
+              GET_JOURNAL_LEDGER({
+                LedgerName: "Ready To Pay",
+                LedgerAmount: parseFloat(purchase.total_amount).toFixed(2),
+                GroupName: "Bank Accounts",
+                IsDeemedPositive: "No",
+                IsPartyLedger: "Yes",
+                CategoryAllocation: [
+                  {
+                    Category: "Primary Cost Category",
+                    isDeeemedPositive: "Yes",
+                    CostCentreAllocation: [
+                      {
+                        Name: purchase.outlet_name,
+                        Amount: parseFloat(purchase.total_amount).toFixed(2),
+                      },
+                    ],
+                  },
+                ],
+              })
+            );
+          }
+
+          if (journalEntry) {
+            return [purchaseEntry, journalEntry];
+          }
+
+          return [purchaseEntry];
+        });
+
+        return { error: "false", data: tallyData };
+      }
+
+      return { error: "true", data: [] };
+    } catch (err) {
+      throw err;
+    }
   }
 
   async getPurchase(from_date, to_date) {
@@ -1105,6 +1378,16 @@ class TallyUsecase {
   }
 }
 
-module.exports = (tallyRepo, purchaseUsecase, accountsUsecase) => {
-  return new TallyUsecase(tallyRepo, purchaseUsecase, accountsUsecase);
+module.exports = (
+  tallyRepo,
+  purchaseUsecase,
+  accountsUsecase,
+  debitNoteUsecase
+) => {
+  return new TallyUsecase(
+    tallyRepo,
+    purchaseUsecase,
+    accountsUsecase,
+    debitNoteUsecase
+  );
 };
