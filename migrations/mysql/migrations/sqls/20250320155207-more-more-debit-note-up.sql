@@ -1,0 +1,1 @@
+ALTER TABLE `debit_note_internal` ADD `round_off` FLOAT NOT NULL AFTER `mmh_mrc_refno`;

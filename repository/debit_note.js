@@ -130,6 +130,7 @@ class DebitNoteRepository {
           pi.narration,
           pi.tcs_value,
           pi.total_amount,
+          pi.round_off,
           pi.mmh_mrc_refno,
           tr.VoucherNo,
           tr.InvoiceValue,
@@ -172,6 +173,7 @@ class DebitNoteRepository {
             narration: doc.narration || "",
             tcs_value: doc.tcs_value || 0.0,
             total_amount: doc.total_amount || 0.0,
+            round_off: doc.round_off || 0.0,
             // Add fields from purchase_tally_response
             tally_response: {
               voucher_no: doc.VoucherNo || null,
@@ -487,6 +489,7 @@ class DebitNoteRepository {
                   tcs_value = ?,
                   total_amount = ?,
                   mmh_mrc_refno = ?
+                  round_off = ?
                 WHERE debit_note_id = ?`,
                 [
                   debitNoteInternal.scheme_difference || 0.0,
@@ -494,6 +497,7 @@ class DebitNoteRepository {
                   debitNoteInternal.tcs_value || 0.0,
                   debitNoteInternal.total_amount || 0.0,
                   debitNoteInternal.mmh_mrc_refno || "",
+                  debitNoteInternal.round_off || 0.0,
                   debitNote.id,
                 ],
                 (err, result) => {

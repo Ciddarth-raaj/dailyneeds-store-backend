@@ -1,5 +1,5 @@
 CREATE TABLE `debit_note` (
-  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `debit_note_id` int(11) NOT NULL AUTO_INCREMENT,
   `store_id` int(11) NOT NULL,
   `mprh_pr_no` varchar(20) NOT NULL,
   `mprh_pr_refno` varchar(20) NOT NULL,

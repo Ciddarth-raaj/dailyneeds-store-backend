@@ -206,6 +206,7 @@ class DebitNoteRoutes {
           narration: Joi.string().allow("").optional(),
           mmh_mrc_refno: Joi.string().allow("").optional(),
           total_amount: Joi.number().precision(2).default(0.0),
+          round_off: Joi.number().precision(2).default(0.0),
         });
 
         // Validate purchase_internal

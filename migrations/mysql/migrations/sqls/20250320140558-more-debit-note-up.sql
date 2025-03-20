@@ -3,10 +3,10 @@ CREATE TABLE `debit_note_tally_response` (
   `VoucherNo` varchar(100) NOT NULL,
   `InvoiceValue` float NOT NULL,
   `SupplierName` text NOT NULL,
-  `CostCentre` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `CostCentre` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL,
   `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 ALTER TABLE `debit_note` ADD `has_updated` BOOLEAN NOT NULL AFTER `cess`, ADD `is_approved` BOOLEAN NOT NULL AFTER `has_updated`;
 
@@ -16,7 +16,7 @@ CREATE TABLE `debit_note_internal` (
   `narration` text,
   `tcs_value` decimal(10,2) NOT NULL DEFAULT '0.00',
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 ALTER TABLE `debit_note_internal` CHANGE `purchase_id` `debit_note_id` BIGINT NOT NULL AUTO_INCREMENT, add PRIMARY KEY (`debit_note_id`);
 
