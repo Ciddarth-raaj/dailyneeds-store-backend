@@ -50,3 +50,5 @@ ALTER TABLE `debit_note_internal` ADD `total_amount` DECIMAL NOT NULL AFTER `tcs
 ALTER TABLE `debit_note_internal` CHANGE `total_amount` `total_amount` DECIMAL(10,2) NOT NULL;
 
 ALTER TABLE `debit_note_internal` ADD `mmh_mrc_refno` VARCHAR(100) NOT NULL AFTER `total_amount`;
+
+INSERT INTO `all_permissions` (`permission_id`, `permission_key`, `status`) VALUES (NULL, 'view_debit_note', '1');
