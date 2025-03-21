@@ -261,6 +261,9 @@ class TallyUsecase {
               : ""
           );
 
+          purchaseEntry.VoucherDate = moment(purchase.mmh_mrc_dt).format(
+            "YYYYMMDD"
+          );
           purchaseEntry.MasterID = simpleEncrypt(
             `${purchase.debit_note_id}-purchase-entry`
           );
