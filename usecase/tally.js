@@ -438,6 +438,16 @@ class TallyUsecase {
             );
           }
 
+          if (purchase.round_off && purchase.round_off != 0) {
+            purchaseEntry.ledgerentries.push(
+              GET_LEDGER({
+                LedgerName: `Round Off`,
+                LedgerAmount: parseFloat(purchase.round_off).toFixed(2),
+                IsDeemedPositive: "Yes",
+              })
+            );
+          }
+
           let journalEntry = null;
 
           if (purchase.jv_ledger == 1) {
