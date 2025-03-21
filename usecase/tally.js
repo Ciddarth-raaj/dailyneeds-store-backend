@@ -291,7 +291,7 @@ class TallyUsecase {
               GET_LEDGER({
                 LedgerName: purchase.supplier_name,
                 LedgerAmount: parseFloat(purchase.total_amount).toFixed(2),
-                IsDeemedPositive: "No",
+                IsDeemedPositive: "Yes",
                 BillsAllocation: [
                   {
                     AgstType: "Agst Ref",
@@ -307,7 +307,7 @@ class TallyUsecase {
               GET_LEDGER({
                 LedgerName: purchase.mprh_pr_refno,
                 LedgerAmount: parseFloat(purchase.total_amount).toFixed(2),
-                IsDeemedPositive: "No",
+                IsDeemedPositive: "Yes",
                 BillsAllocation: [
                   {
                     AgstType: "New Ref",
@@ -328,7 +328,7 @@ class TallyUsecase {
                     LedgerName: `Local GST Purchase Nil Rated`,
                     LedgerAmount: parseFloat(item.TAXABLE).toFixed(2),
                     GSTClassification: "Purchase Taxable",
-                    IsDeemedPositive: "Yes",
+                    IsDeemedPositive: "No",
                     LedgerGroup: "$$GroupPurchase",
                     IGSTRate: 0,
                   })
@@ -343,7 +343,7 @@ class TallyUsecase {
                     LedgerName: `LOCAL PURCHASE ${item.PERC * 2}%`,
                     LedgerAmount: parseFloat(item.TAXABLE).toFixed(2),
                     GSTClassification: "Purchase Taxable",
-                    IsDeemedPositive: "Yes",
+                    IsDeemedPositive: "No",
                     LedgerGroup: "$$GroupPurchase",
                     IGSTRate: item.PERC * 2,
                   })
@@ -355,7 +355,7 @@ class TallyUsecase {
                   GET_LEDGER({
                     LedgerName: `CGST ${item.PERC}% INPUT`,
                     LedgerAmount: parseFloat(item.VALUE).toFixed(2),
-                    IsDeemedPositive: "Yes",
+                    IsDeemedPositive: "No",
                   })
                 );
               }
@@ -365,7 +365,7 @@ class TallyUsecase {
                   GET_LEDGER({
                     LedgerName: `SGST ${item.PERC}% INPUT`,
                     LedgerAmount: parseFloat(item.VALUE).toFixed(2),
-                    IsDeemedPositive: "Yes",
+                    IsDeemedPositive: "No",
                   })
                 );
               }
@@ -378,7 +378,7 @@ class TallyUsecase {
                     LedgerName: `IGST Purchase Nil Rated`,
                     LedgerAmount: parseFloat(item.TAXABLE).toFixed(2),
                     GSTClassification: "Purchase Taxable",
-                    IsDeemedPositive: "Yes",
+                    IsDeemedPositive: "No",
                     LedgerGroup: "$$GroupPurchase",
                     IGSTRate: 0,
                   })
@@ -393,7 +393,7 @@ class TallyUsecase {
                     LedgerName: `IGST PURCHASE ${item.PERC}%`,
                     LedgerAmount: parseFloat(item.TAXABLE).toFixed(2),
                     GSTClassification: "Purchase Taxable",
-                    IsDeemedPositive: "Yes",
+                    IsDeemedPositive: "No",
                     LedgerGroup: "$$GroupPurchase",
                     IGSTRate: item.PERC,
                   })
@@ -405,7 +405,7 @@ class TallyUsecase {
                   GET_LEDGER({
                     LedgerName: `IGST ${item.PERC}% INPUT`,
                     LedgerAmount: parseFloat(item.VALUE).toFixed(2),
-                    IsDeemedPositive: "Yes",
+                    IsDeemedPositive: "No",
                   })
                 );
               }
@@ -427,7 +427,7 @@ class TallyUsecase {
               GET_LEDGER({
                 LedgerName: `TCS @ 0.1%`,
                 LedgerAmount: parseFloat(purchase.tcs_value).toFixed(2),
-                IsDeemedPositive: "Yes",
+                IsDeemedPositive: "No",
               })
             );
           }
@@ -438,7 +438,7 @@ class TallyUsecase {
                 LedgerName: `Scheme Difference`,
                 LedgerAmount:
                   -1 * parseFloat(purchase.scheme_difference).toFixed(2),
-                IsDeemedPositive: "Yes",
+                IsDeemedPositive: "No",
               })
             );
           }
@@ -448,7 +448,7 @@ class TallyUsecase {
               GET_LEDGER({
                 LedgerName: `Round Off`,
                 LedgerAmount: parseFloat(purchase.round_off).toFixed(2),
-                IsDeemedPositive: "Yes",
+                IsDeemedPositive: "No",
               })
             );
           }
@@ -479,7 +479,7 @@ class TallyUsecase {
               GET_JOURNAL_LEDGER({
                 LedgerName: purchase.supplier_name,
                 LedgerAmount: parseFloat(purchase.total_amount).toFixed(2),
-                IsDeemedPositive: "Yes",
+                IsDeemedPositive: "No",
                 LedgerGroup: "$$GroupSundryCreditors",
                 BillsAllocation: [
                   {
@@ -508,7 +508,7 @@ class TallyUsecase {
                 LedgerName: "Ready To Pay",
                 LedgerAmount: parseFloat(purchase.total_amount).toFixed(2),
                 GroupName: "Bank Accounts",
-                IsDeemedPositive: "No",
+                IsDeemedPositive: "Yes",
                 IsPartyLedger: "Yes",
                 CategoryAllocation: [
                   {
