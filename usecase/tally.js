@@ -256,7 +256,9 @@ class TallyUsecase {
       if (data.code === 200) {
         const tallyData = data.data.flatMap((purchase) => {
           const purchaseEntry = INIT_PURCHASE_ENTRY(
-            moment(purchase.mmh_mrc_dt).format("YYYYMMDD")
+            purchase.mmh_dist_bill_dt
+              ? moment(purchase.mmh_dist_bill_dt).format("YYYYMMDD")
+              : ""
           );
 
           purchaseEntry.MasterID = simpleEncrypt(
