@@ -241,6 +241,27 @@ class DebitNoteRoutes {
         res.json({ code: 500, msg: err.message });
       }
     });
+
+    router.delete("/delete-tally/:id", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          id: Joi.number().required(),
+        });
+
+        const { error } = schema.validate({ id: parseInt(req.params.id) });
+        if (error) {
+          return res.json({ code: 422, msg: error.toString() });
+        }
+
+        const result = await this.debitNoteUsecase.deleteTallyResponse(
+          req.params.id
+        );
+        res.json(result);
+      } catch (err) {
+        console.log(err);
+        res.json({ code: 500, msg: err.message });
+      }
+    });
   }
 
   getRouter() {

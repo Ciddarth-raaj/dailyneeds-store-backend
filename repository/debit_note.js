@@ -552,6 +552,46 @@ class DebitNoteRepository {
       }
     });
   }
+
+  async deleteTallyResponse(VoucherNo) {
+    return new Promise((resolve, reject) => {
+      try {
+        this.db.query(
+          `DELETE FROM debit_note_tally_response WHERE VoucherNo = ?`,
+          [VoucherNo],
+          (err, result) => {
+            if (err) {
+              logger.Log({
+                level: logger.LEVEL.ERROR,
+                component: "REPOSITORY.PURCHASE",
+                code: "REPOSITORY.PURCHASE.DELETE-TALLY",
+                description: err.toString(),
+                category: "",
+                ref: {},
+              });
+              reject(err);
+              return;
+            }
+
+            resolve({
+              code: 200,
+              msg: "Tally response deleted!",
+            });
+          }
+        );
+      } catch (err) {
+        logger.Log({
+          level: logger.LEVEL.ERROR,
+          component: "REPOSITORY.PURCHASE",
+          code: "REPOSITORY.PURCHASE.DELETE-TALLY",
+          description: err.toString(),
+          category: "",
+          ref: {},
+        });
+        reject(err);
+      }
+    });
+  }
 }
 
 module.exports = (db) => {

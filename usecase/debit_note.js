@@ -72,6 +72,15 @@ class DebitNoteUsecase {
       throw error;
     }
   }
+
+  async deleteTallyResponse(VoucherNo) {
+    try {
+      const result = await this.debitNoteRepo.deleteTallyResponse(VoucherNo);
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
 }
 
 module.exports = (debitNoteRepo, outletUsecase) => {
