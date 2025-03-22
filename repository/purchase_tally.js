@@ -9,12 +9,13 @@ class PurchaseTallyRepository {
     return new Promise((resolve, reject) => {
       this.db.query(
         `INSERT INTO purchase_tally_response 
-        (MasterID, VoucherNo, InvoiceValue, SupplierName, CostCentre) 
-        VALUES (?, ?, ?, ?, ?)
+        (MasterID, VoucherNo, InvoiceValue, SupplierName, CostCentre, GSTIN) 
+        VALUES (?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
         VoucherNo = VALUES(VoucherNo),
         InvoiceValue = VALUES(InvoiceValue),
         SupplierName = VALUES(SupplierName),
+        GSTIN = VALUES(GSTIN),
         CostCentre = VALUES(CostCentre)`,
         [
           data.MasterID,
@@ -22,6 +23,7 @@ class PurchaseTallyRepository {
           data.InvoiceValue,
           data.SupplierName,
           data.CostCentre,
+          data.GSTIN,
         ],
         (err, result) => {
           if (err) {
@@ -79,6 +81,7 @@ class PurchaseTallyRepository {
                pi.total_amount,
                p.purchase_id,
                p.supplier_name,
+               p.supplier_gstn,
                p.mmh_mrc_dt,
                p.mmh_mrc_amt
          FROM purchase_tally_response tr

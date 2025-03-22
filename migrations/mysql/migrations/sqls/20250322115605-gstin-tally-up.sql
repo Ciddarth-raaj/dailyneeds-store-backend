@@ -1,0 +1,1 @@
+ALTER TABLE `debit_note_tally_response` ADD `GSTIN` VARCHAR(50) NOT NULL AFTER `CostCentre`;

@@ -9,12 +9,13 @@ class PurchaseTallyRepository {
     return new Promise((resolve, reject) => {
       this.db.query(
         `INSERT INTO debit_note_tally_response 
-        (MasterID, VoucherNo, InvoiceValue, SupplierName, CostCentre) 
-        VALUES (?, ?, ?, ?, ?)
+        (MasterID, VoucherNo, InvoiceValue, SupplierName, CostCentre, GSTIN) 
+        VALUES (?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
         VoucherNo = VALUES(VoucherNo),
         InvoiceValue = VALUES(InvoiceValue),
         SupplierName = VALUES(SupplierName),
+        GSTIN = VALUES(GSTIN),
         CostCentre = VALUES(CostCentre)`,
         [
           data.MasterID,
@@ -22,6 +23,7 @@ class PurchaseTallyRepository {
           data.InvoiceValue,
           data.SupplierName,
           data.CostCentre,
+          data.GSTIN,
         ],
         (err, result) => {
           if (err) {
@@ -60,12 +62,12 @@ class PurchaseTallyRepository {
 
       // Filter by date range
       if (filters.from_date) {
-        filterConditions.push("p.mmh_mrc_dt >= ?");
+        filterConditions.push("p.mprh_pr_dt >= ?");
         filterValues.push(filters.from_date);
       }
 
       if (filters.to_date) {
-        filterConditions.push("p.mmh_mrc_dt <= ?");
+        filterConditions.push("p.mprh_pr_dt <= ?");
         filterValues.push(filters.to_date);
       }
 
@@ -77,15 +79,16 @@ class PurchaseTallyRepository {
       this.db.query(
         `SELECT tr.*,
                pi.total_amount,
-               p.purchase_id,
+               p.debit_note_id,
                p.supplier_name,
-               p.mmh_mrc_dt,
-               p.mmh_mrc_amt
-         FROM purchase_tally_response tr
+               p.supplier_gstn,
+               p.mprh_pr_dt,
+               p.tot_item_value
+         FROM debit_note_tally_response tr
          JOIN outlets o ON tr.CostCentre = o.outlet_name
-         LEFT JOIN purchase p ON tr.VoucherNo = p.mmh_mrc_refno 
-           AND p.retail_outlet_id = o.outlet_id
-         LEFT JOIN purchase_internal pi ON p.purchase_id = pi.purchase_id
+         LEFT JOIN debit_note p ON tr.VoucherNo = p.mprh_pr_refno 
+           AND p.store_id = o.outlet_id
+         LEFT JOIN debit_note_internal pi ON p.debit_note_id = pi.debit_note_id
          ${whereClause}
          ORDER BY tr.created_at DESC`,
         filterValues,
