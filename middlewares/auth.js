@@ -457,6 +457,7 @@ const unProtectedRoutes = {
   "/tally/purchase": { methods: { get: true } },
   "/tally/debit-note": { methods: { get: true } },
   "/purchase-tally": { methods: { post: true } },
+  "/debit-note-tally": { methods: { post: true } },
 };
 
 async function auth(req, res, next) {

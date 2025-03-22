@@ -140,6 +140,9 @@ class Server {
     this.purchaseTallyRepo = require("./repository/purchase_tally")(
       this.mysql.connection
     );
+    this.debitNoteTallyRepo = require("./repository/debit_note_tally")(
+      this.mysql.connection
+    );
     this.tallyRepo = require("./repository/tally")(this.mysql.connection);
     this.debitNoteRepo = require("./repository/debit_note")(
       this.mysql.connection
@@ -228,6 +231,9 @@ class Server {
     this.purchaseTallyUsecase = require("./usecase/purchase_tally")(
       this.purchaseTallyRepo
     );
+    this.debitNoteTallyUsecase = require("./usecase/debit_note_tally")(
+      this.debitNoteTallyRepo
+    );
     this.debitNoteUsecase = require("./usecase/debit_note")(this.debitNoteRepo);
     this.tallyUsecase = require("./usecase/tally")(
       this.tallyRepo,
@@ -295,6 +301,9 @@ class Server {
     const purchaseTallyRouter = require("./routes/purchase_tally")(
       this.purchaseTallyUsecase
     );
+    const debitNoteTallyRouter = require("./routes/debit_note_tally")(
+      this.debitNoteTallyUsecase
+    );
     const tallyRouter = require("./routes/tally")(this.tallyUsecase);
     const debitNoteRouter = require("./routes/debit_note")(
       this.debitNoteUsecase
@@ -333,6 +342,7 @@ class Server {
     app.use("/digital-payments", digitalPaymentsRouter.getRouter());
     app.use("/purchase", purchaseRouter.getRouter());
     app.use("/purchase-tally", purchaseTallyRouter.getRouter());
+    app.use("/debit-note-tally", debitNoteTallyRouter.getRouter());
     app.use("/tally", tallyRouter.getRouter());
     app.use("/debit-note", debitNoteRouter.getRouter());
   }

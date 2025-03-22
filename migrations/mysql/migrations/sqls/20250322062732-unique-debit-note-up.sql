@@ -1,0 +1,1 @@
+ALTER TABLE `debit_note_tally_response` ADD UNIQUE(`VoucherNo`, `CostCentre`);
