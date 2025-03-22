@@ -17,6 +17,7 @@ class PurchaseTallyRoutes {
           InvoiceValue: Joi.number().required(),
           SupplierName: Joi.string().required(),
           CostCentre: Joi.string().required(),
+          GSTIN: Joi.string().required(),
         });
 
         const { error, value } = schema.validate(req.body);
