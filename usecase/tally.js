@@ -297,7 +297,7 @@ class TallyUsecase {
                     AgstType: "Agst Ref",
                     Reference: purchase.mmh_dist_bill_no || "",
                     CreditPeriod: 0,
-                    Amount: parseFloat(purchase.total_amount).toFixed(2),
+                    Amount: parseFloat(purchase.total_amount * -1).toFixed(2),
                   },
                 ],
               })
@@ -313,7 +313,7 @@ class TallyUsecase {
                     AgstType: "New Ref",
                     Reference: purchase.mprh_pr_refno || "",
                     CreditPeriod: 0,
-                    Amount: parseFloat(purchase.total_amount).toFixed(2),
+                    Amount: parseFloat(purchase.total_amount * -1).toFixed(2),
                   },
                 ],
               })
