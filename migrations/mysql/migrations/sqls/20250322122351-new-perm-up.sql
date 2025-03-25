@@ -1,1 +1,2 @@
 INSERT INTO `all_permissions` (`permission_id`, `permission_key`, `status`) VALUES (NULL, 'view_debit_note_difference', '1');
+ALTER TABLE `purchase_tally_response` ADD `GSTIN` VARCHAR(50) NOT NULL AFTER `CostCentre`;

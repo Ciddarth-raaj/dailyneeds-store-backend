@@ -515,8 +515,9 @@ class DebitNoteRepository {
                   narration,
                   tcs_value,
                   total_amount,
-                  mmh_mrc_refno
-                ) VALUES (?, ?, ?, ?, ?, ?)`,
+                  mmh_mrc_refno,
+                  round_off
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
                 [
                   debitNote.id,
                   debitNoteInternal.scheme_difference || 0.0,
@@ -524,6 +525,7 @@ class DebitNoteRepository {
                   debitNoteInternal.tcs_value || 0.0,
                   debitNoteInternal.total_amount || 0.0,
                   debitNoteInternal.mmh_mrc_refno || "",
+                  debitNoteInternal.round_off || 0.0,
                 ],
                 (err, result) => {
                   if (err) reject(err);
