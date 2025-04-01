@@ -10,6 +10,9 @@ CREATE TABLE `debit_note_tally_response` (
 
 ALTER TABLE `debit_note` ADD `has_updated` BOOLEAN NOT NULL AFTER `cess`, ADD `is_approved` BOOLEAN NOT NULL AFTER `has_updated`;
 
+ALTER TABLE `debit_note` CHANGE `has_updated` `has_updated` TINYINT(1) NOT NULL DEFAULT '0';
+ALTER TABLE `debit_note` CHANGE `is_approved` `is_approved` TINYINT(1) NOT NULL DEFAULT '0';
+
 CREATE TABLE `debit_note_internal` (
   `purchase_id` bigint NOT NULL,
   `scheme_difference` decimal(10,2) DEFAULT '0.00',

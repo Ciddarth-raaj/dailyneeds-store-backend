@@ -1,0 +1,1 @@
+INSERT INTO `all_permissions` (`permission_id`, `permission_key`, `status`) VALUES (NULL, 'view_qr_generator', '1');

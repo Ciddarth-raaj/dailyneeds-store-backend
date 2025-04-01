@@ -422,7 +422,7 @@ class PurchaseRepository {
             const has_updated = existing.is_approved == 0 ? false : true;
             const is_approved = false;
 
-            if (hasChanges) {
+            if (hasChanges && !existing.is_approved) {
               // Update if values are different
               await new Promise((resolve, reject) => {
                 this.db.query(
