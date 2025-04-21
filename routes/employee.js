@@ -465,15 +465,19 @@ class EmployeeRoutes {
         };
 
         const employee = req.body;
-        for (
-          let i = 0;
-          i <= employee.employee_details.docupdate.length - 1;
-          i++
-        ) {
-          if (employee.employee_details.docupdate[i].file === "") {
-            delete employee.employee_details.docupdate[i].file;
+
+        if (employee.employee_details.docupdate) {
+          for (
+            let i = 0;
+            i <= employee.employee_details.docupdate.length - 1;
+            i++
+          ) {
+            if (employee.employee_details.docupdate[i].file === "") {
+              delete employee.employee_details.docupdate[i].file;
+            }
           }
         }
+
         const isValid = Joi.validate(employee, schema);
         if (isValid.error !== null) {
           console.log(isValid.error);

@@ -148,7 +148,10 @@ class EmployeeUsecase {
     return new Promise(async (resolve, reject) => {
       try {
         const employee_id = employee.employee_id;
-        if (employee.employee_details.docupdate.length !== 0) {
+        if (
+          employee.employee_details.docupdate &&
+          employee.employee_details.docupdate.length !== 0
+        ) {
           for (let i = 0; i < employee.employee_details.docupdate.length; i++) {
             await this.documentUsecase.update({
               data: employee.employee_details.docupdate[i],
@@ -157,8 +160,9 @@ class EmployeeUsecase {
             });
           }
         }
-        const id_card_name = employee.employee_details.files[0].id_card_name;
-        if (id_card_name !== "") {
+
+        const id_card_name = employee.employee_details.files?.[0]?.id_card_name;
+        if (employee.employee_details.files && id_card_name !== "") {
           for (
             let i = 0;
             i <= employee.employee_details.files.length - 1;
@@ -179,12 +183,17 @@ class EmployeeUsecase {
             });
           }
         }
-        if (employee.employee_details.modified_employee_image !== "") {
+
+        if (
+          employee.employee_details.modified_employee_image &&
+          employee.employee_details.modified_employee_image !== ""
+        ) {
           await this.employeeRepo.updateEmployeeImage(
             employee.employee_details.modified_employee_image,
             employee_id
           );
         }
+
         delete employee.employee_details.docupdate;
         delete employee.employee_details.modified_employee_image;
         const { code } = await this.employeeRepo.updateEmployeeDetails(
