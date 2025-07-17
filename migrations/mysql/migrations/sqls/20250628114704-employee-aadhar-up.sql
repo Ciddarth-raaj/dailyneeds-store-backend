@@ -1,0 +1,1 @@
+ALTER TABLE `new_employee` ADD `aadhaar_card_no` VARCHAR(20) NULL AFTER `telegram_username`, ADD `aadhaar_card_name` VARCHAR(100) NULL AFTER `aadhaar_card_no`, ADD `aadhaar_card_image` TEXT NULL AFTER `aadhaar_card_name`;

@@ -396,6 +396,9 @@ class EmployeeRoutes {
           employee_details: Joi.object({
             employee_id: Joi.string().allow("").allow(null).optional(),
             telegram_username: Joi.string().allow("").allow(null).optional(),
+            aadhaar_card_no: Joi.string().allow("").allow(null).optional(),
+            aadhaar_card_name: Joi.string().allow("").allow(null).optional(),
+            aadhaar_card_image: Joi.string().allow("").allow(null).optional(),
             employee_name: Joi.string().allow("").allow(null).optional(),
             father_name: Joi.string().allow("").allow(null).optional(),
             dob: Joi.string().allow("").allow(null).optional(),
