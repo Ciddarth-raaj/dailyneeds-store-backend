@@ -147,6 +147,10 @@ class Server {
     this.debitNoteRepo = require("./repository/debit_note")(
       this.mysql.connection
     );
+    // Add materials repository
+    this.materialsRepo = require("./repository/materials")(
+      this.mysql.connection
+    );
   }
 
   initUsecases() {
@@ -241,6 +245,8 @@ class Server {
       this.accountsUsecase,
       this.debitNoteUsecase
     );
+    // Add materials usecase
+    this.materialsUsecase = require("./usecase/materials")(this.materialsRepo);
   }
 
   initRoutes() {
@@ -308,6 +314,10 @@ class Server {
     const debitNoteRouter = require("./routes/debit_note")(
       this.debitNoteUsecase
     );
+    // Add materials router
+    const materialsRouter = require("./routes/materials")(
+      this.materialsUsecase
+    );
     app.use("/document", documentRouter.getRouter());
     app.use("/whatsapp", whatsappRouter.getRouter());
     app.use("/budget", budgetRouter.getRouter());
@@ -345,6 +355,8 @@ class Server {
     app.use("/debit-note-tally", debitNoteTallyRouter.getRouter());
     app.use("/tally", tallyRouter.getRouter());
     app.use("/debit-note", debitNoteRouter.getRouter());
+    // Register materials route at /materials
+    app.use("/materials", materialsRouter.getRouter());
   }
 
   initServices() {
