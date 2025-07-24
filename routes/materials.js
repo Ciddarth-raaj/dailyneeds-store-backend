@@ -45,8 +45,8 @@ class MaterialsRoutes {
       try {
         const schema = {
           name: Joi.string().required(),
-          sku_code: Joi.string().allow(null).optional(),
-          unit_id: Joi.number().required(),
+          description: Joi.string().allow(null).optional(),
+          unit_id: Joi.number().allow(null).optional(),
           material_category_id: Joi.number().allow(null).optional(),
           is_active: Joi.boolean().optional(),
         };
@@ -67,8 +67,8 @@ class MaterialsRoutes {
         if (isNaN(material_id)) throw new Error("Invalid material_id");
         const schema = {
           name: Joi.string().optional(),
-          sku_code: Joi.string().allow(null).optional(),
-          unit_id: Joi.number().optional(),
+          description: Joi.string().allow(null).optional(),
+          unit_id: Joi.number().allow(null).optional(),
           material_category_id: Joi.number().allow(null).optional(),
           is_active: Joi.boolean().optional(),
         };

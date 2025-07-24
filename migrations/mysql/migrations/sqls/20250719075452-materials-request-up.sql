@@ -21,3 +21,9 @@ ALTER TABLE `material_request` ADD `outlet_id` INT NOT NULL AFTER `created_by`, 
 
 ALTER TABLE `material_request` ADD FOREIGN KEY (outlet_id) REFERENCES outlets(outlet_id);
 ALTER TABLE `material_request` ADD FOREIGN KEY (created_by) REFERENCES new_employee(employee_id);
+
+ALTER TABLE `materials_latest` DROP `sku_code`;
+ALTER TABLE `materials_latest` ADD `description` TEXT NOT NULL AFTER `name`;
+ALTER TABLE `materials_latest` CHANGE `unit_id` `unit_id` INT NULL;
+
+ALTER TABLE `materials_latest` CHANGE `description` `description` TEXT CHARACTER SET utf8 COLLATE utf8_general_ci NULL;

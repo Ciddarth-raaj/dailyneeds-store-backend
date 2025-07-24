@@ -102,10 +102,10 @@ class MaterialsRepository {
   createMaterial(material) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `INSERT INTO materials_latest (name, sku_code, unit_id, material_category_id, is_active) VALUES (?, ?, ?, ?, ?)`,
+        `INSERT INTO materials_latest (name, description, unit_id, material_category_id, is_active) VALUES (?, ?, ?, ?, ?)`,
         [
           material.name,
-          material.sku_code,
+          material.description,
           material.unit_id,
           material.material_category_id,
           material.is_active ?? true,
