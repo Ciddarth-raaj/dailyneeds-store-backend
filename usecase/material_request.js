@@ -1,9 +1,7 @@
-// usecase/material_request.js
-const materialRequestRepo = require("../repository/material_request");
-
 class MaterialRequestUsecase {
-  constructor(materialRequestRepo) {
+  constructor(materialRequestRepo, outletRepo) {
     this.materialRequestRepo = materialRequestRepo;
+    this.outletRepo = outletRepo;
   }
 
   createMaterialRequest(data, items) {
@@ -24,7 +22,17 @@ class MaterialRequestUsecase {
     return new Promise(async (resolve, reject) => {
       try {
         const data = await this.materialRequestRepo.getMaterialRequestById(id);
-        resolve(data);
+        if (!data) return resolve(undefined);
+        let outlet = null;
+        try {
+          const outletData = await this.outletRepo.getOutletByOutletId(
+            data.outlet_id
+          );
+          outlet = outletData && outletData.length > 0 ? outletData[0] : null;
+        } catch (outletErr) {
+          // Optionally log error
+        }
+        resolve({ ...data, outlet });
       } catch (err) {
         reject(err);
       }
@@ -35,7 +43,20 @@ class MaterialRequestUsecase {
     return new Promise(async (resolve, reject) => {
       try {
         const data = await this.materialRequestRepo.getAllMaterialRequests();
-        resolve(data);
+        const results = [];
+        for (const req of data) {
+          let outlet = null;
+          try {
+            const outletData = await this.outletRepo.getOutletByOutletId(
+              req.outlet_id
+            );
+            outlet = outletData && outletData.length > 0 ? outletData[0] : null;
+          } catch (outletErr) {
+            // Optionally log error
+          }
+          results.push({ ...req, outlet });
+        }
+        resolve(results);
       } catch (err) {
         reject(err);
       }
@@ -69,6 +90,6 @@ class MaterialRequestUsecase {
   }
 }
 
-module.exports = (materialRequestRepo) => {
-  return new MaterialRequestUsecase(materialRequestRepo);
+module.exports = (materialRequestRepo, outletRepo) => {
+  return new MaterialRequestUsecase(materialRequestRepo, outletRepo);
 };

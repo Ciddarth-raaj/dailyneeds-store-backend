@@ -251,7 +251,8 @@ class Server {
     // Add materials usecase
     this.materialsUsecase = require("./usecase/materials")(this.materialsRepo);
     this.materialRequestUsecase = require("./usecase/material_request")(
-      this.materialRequestRepo
+      this.materialRequestRepo,
+      this.outletRepo
     );
   }
 

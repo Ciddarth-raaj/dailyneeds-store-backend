@@ -10,8 +10,8 @@ class MaterialRequestRepository {
     return new Promise(async (resolve, reject) => {
       try {
         this.db.query(
-          "INSERT INTO material_request (created_by) VALUES (?)",
-          [data.created_by],
+          "INSERT INTO material_request (created_by, outlet_id, is_approved) VALUES (?, ?, ?)",
+          [data.created_by, data.outlet_id, data.is_approved],
           async (err, result) => {
             if (err) {
               logger.Log({
@@ -108,6 +108,7 @@ class MaterialRequestRepository {
               resolve({
                 material_request_id: request.material_request_id,
                 created_by: request.created_by,
+                outlet_id: request.outlet_id,
                 created_at: request.created_at,
                 updated_at: request.updated_at,
                 creator_data: {
@@ -177,6 +178,7 @@ class MaterialRequestRepository {
                 results.push({
                   material_request_id: request.material_request_id,
                   created_by: request.created_by,
+                  outlet_id: request.outlet_id,
                   created_at: request.created_at,
                   updated_at: request.updated_at,
                   creator_data: {
@@ -209,8 +211,8 @@ class MaterialRequestRepository {
   updateMaterialRequest(id, data, items) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "UPDATE material_request SET created_by = ?, updated_at = NOW() WHERE material_request_id = ?",
-        [data.created_by, id],
+        "UPDATE material_request SET created_by = ?, outlet_id = ?, is_approved = ?, updated_at = NOW() WHERE material_request_id = ?",
+        [data.created_by, data.outlet_id, data.is_approved, id],
         (err) => {
           if (err) {
             logger.Log({

@@ -23,14 +23,17 @@ class MaterialRequestRoutes {
               })
             )
             .required(),
+          outlet_id: Joi.number().optional(),
         };
         const body = req.body;
         const isValid = Joi.validate(body, schema);
         if (isValid.error !== null) throw isValid.error;
-        console.log(req.decoded);
+
         const created_by = req.decoded.id;
+        const outlet_id = body.outlet_id || req.decoded.store_id;
+        const is_approved = 0;
         const id = await this.materialRequestUsecase.createMaterialRequest(
-          { created_by },
+          { created_by, outlet_id, is_approved },
           body.items
         );
         res.status(201).json({ material_request_id: id });
@@ -89,9 +92,11 @@ class MaterialRequestRoutes {
         const isValid = Joi.validate(body, schema);
         if (isValid.error !== null) throw isValid.error;
         const created_by = req.decoded.id;
+        const outlet_id = req.decoded.store_id;
+        const is_approved = 0;
         await this.materialRequestUsecase.updateMaterialRequest(
           material_request_id,
-          { created_by },
+          { created_by, outlet_id, is_approved },
           body.items
         );
         res.json({ success: true });
