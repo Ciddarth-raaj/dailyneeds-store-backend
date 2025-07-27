@@ -22,8 +22,9 @@ class MaterialRequestRoutes {
                 remark: Joi.string().allow(null, "").optional(),
               })
             )
-            .required(),
+            .optional(),
           outlet_id: Joi.number().optional(),
+          is_approved: Joi.number().valid(0, 1).optional(),
         };
         const body = req.body;
         const isValid = Joi.validate(body, schema);
@@ -31,10 +32,11 @@ class MaterialRequestRoutes {
 
         const created_by = req.decoded.id;
         const outlet_id = body.outlet_id || req.decoded.store_id;
-        const is_approved = 0;
+        const is_approved =
+          body.is_approved !== undefined ? body.is_approved : 0;
         const id = await this.materialRequestUsecase.createMaterialRequest(
           { created_by, outlet_id, is_approved },
-          body.items
+          body.items || []
         );
         res.status(201).json({ material_request_id: id });
       } catch (err) {
@@ -86,18 +88,20 @@ class MaterialRequestRoutes {
                 remark: Joi.string().allow(null, "").optional(),
               })
             )
-            .required(),
+            .optional(),
+          is_approved: Joi.number().valid(0, 1).optional(),
         };
         const body = req.body;
         const isValid = Joi.validate(body, schema);
         if (isValid.error !== null) throw isValid.error;
         const created_by = req.decoded.id;
         const outlet_id = req.decoded.store_id;
-        const is_approved = 0;
+        const is_approved =
+          body.is_approved !== undefined ? body.is_approved : 0;
         await this.materialRequestUsecase.updateMaterialRequest(
           material_request_id,
           { created_by, outlet_id, is_approved },
-          body.items
+          body.items || []
         );
         res.json({ success: true });
       } catch (err) {
