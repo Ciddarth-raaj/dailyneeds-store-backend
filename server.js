@@ -154,6 +154,9 @@ class Server {
     this.materialRequestRepo = require("./repository/material_request")(
       this.mysql.connection
     );
+    this.purchaseOrderRepo = require("./repository/purchase_order")(
+      this.mysql.connection
+    );
   }
 
   initUsecases() {
@@ -254,6 +257,9 @@ class Server {
       this.materialRequestRepo,
       this.outletRepo
     );
+    this.purchaseOrderUsecase = require("./usecase/purchase_order")(
+      this.purchaseOrderRepo
+    );
   }
 
   initRoutes() {
@@ -328,6 +334,9 @@ class Server {
     const materialRequestRoutes = require("./routes/material_request")(
       this.materialRequestUsecase
     );
+    const purchaseOrderRouter = require("./routes/purchase_order")(
+      this.purchaseOrderUsecase
+    );
     app.use("/document", documentRouter.getRouter());
     app.use("/whatsapp", whatsappRouter.getRouter());
     app.use("/budget", budgetRouter.getRouter());
@@ -368,6 +377,7 @@ class Server {
     // Register materials route at /materials
     app.use("/materials", materialsRouter.getRouter());
     app.use("/material_request", materialRequestRoutes.getRouter());
+    app.use("/purchase-order", purchaseOrderRouter.getRouter());
   }
 
   initServices() {
