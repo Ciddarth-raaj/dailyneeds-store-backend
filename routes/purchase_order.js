@@ -17,9 +17,11 @@ class PurchaseOrderRoutes {
 
     // Purchase Order Schema
     const purchaseOrderSchema = Joi.object({
-      purchase_order_ref: Joi.string().max(255).optional(),
-      date: Joi.date().optional(),
-      delivery_date: Joi.date().optional(),
+      purchase_order_id: Joi.number().integer().min(1).optional(),
+      purchase_order_ref: Joi.string().max(255).optional().allow(null),
+      vendor_id: Joi.number().required(),
+      date: Joi.date().optional().allow(null),
+      delivery_date: Joi.date().optional().allow(null),
       discount: Joi.number().precision(2).min(0).default(0.0),
       adjustment: Joi.number().precision(2).min(0).default(0.0),
       status: Joi.string()
@@ -30,9 +32,11 @@ class PurchaseOrderRoutes {
 
     // Purchase Order Update Schema
     const purchaseOrderUpdateSchema = Joi.object({
-      purchase_order_ref: Joi.string().max(255).optional(),
-      date: Joi.date().optional(),
-      delivery_date: Joi.date().optional(),
+      purchase_order_id: Joi.number().integer().min(1).optional(),
+      purchase_order_ref: Joi.string().max(255).optional().allow(null),
+      vendor_id: Joi.number().optional(),
+      date: Joi.date().optional().allow(null),
+      delivery_date: Joi.date().optional().allow(null),
       discount: Joi.number().precision(2).min(0).optional(),
       adjustment: Joi.number().precision(2).min(0).optional(),
       status: Joi.string()

@@ -8,37 +8,57 @@ class PurchaseOrderRepository {
   // Create purchase order
   createPurchaseOrder(purchaseOrder) {
     return new Promise((resolve, reject) => {
-      this.db.query(
-        `INSERT INTO purchase_order (
-          purchase_order_ref, date, delivery_date, discount, adjustment, status
-        ) VALUES (?, ?, ?, ?, ?, ?)`,
-        [
+      let query, params;
+
+      if (purchaseOrder.purchase_order_id) {
+        // If purchase_order_id is provided, include it in the INSERT
+        query = `INSERT INTO purchase_order (
+          purchase_order_id, purchase_order_ref, vendor_id, date, delivery_date, discount, adjustment, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
+        params = [
+          purchaseOrder.purchase_order_id,
           purchaseOrder.purchase_order_ref,
+          purchaseOrder.vendor_id,
           purchaseOrder.date,
           purchaseOrder.delivery_date,
           purchaseOrder.discount || 0.0,
           purchaseOrder.adjustment || 0.0,
           purchaseOrder.status || "active",
-        ],
-        (err, res) => {
-          if (err) {
-            logger.Log({
-              level: logger.LEVEL.ERROR,
-              component: "REPOSITORY.PURCHASE_ORDER",
-              code: "REPOSITORY.PURCHASE_ORDER.CREATE",
-              description: err.toString(),
-              category: "",
-              ref: {},
-            });
-            reject(err);
-            return;
-          }
-          resolve({
-            code: 200,
-            id: res.insertId,
+        ];
+      } else {
+        // If purchase_order_id is not provided, let MySQL auto-generate
+        query = `INSERT INTO purchase_order (
+          purchase_order_ref, vendor_id, date, delivery_date, discount, adjustment, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`;
+        params = [
+          purchaseOrder.purchase_order_ref,
+          purchaseOrder.vendor_id,
+          purchaseOrder.date,
+          purchaseOrder.delivery_date,
+          purchaseOrder.discount || 0.0,
+          purchaseOrder.adjustment || 0.0,
+          purchaseOrder.status || "active",
+        ];
+      }
+
+      this.db.query(query, params, (err, res) => {
+        if (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "REPOSITORY.PURCHASE_ORDER",
+            code: "REPOSITORY.PURCHASE_ORDER.CREATE",
+            description: err.toString(),
+            category: "",
+            ref: {},
           });
+          reject(err);
+          return;
         }
-      );
+        resolve({
+          code: 200,
+          id: purchaseOrder.purchase_order_id || res.insertId,
+        });
+      });
     });
   }
 
@@ -48,9 +68,12 @@ class PurchaseOrderRepository {
       let query = `
         SELECT po.*, 
                COUNT(poi.purchase_order_item_id) as item_count,
-               SUM(poi.quantity * poi.rate) as total_amount
+               SUM(poi.quantity * poi.rate) as total_amount,
+               pl.name as vendor_name,
+               pl.primary_phone as vendor_phone
         FROM purchase_order po
         LEFT JOIN purchase_order_items poi ON po.purchase_order_id = poi.purchase_order_id
+        LEFT JOIN people_list pl ON po.vendor_id = pl.person_id
       `;
 
       const conditions = [];
@@ -114,7 +137,12 @@ class PurchaseOrderRepository {
   getPurchaseOrderById(purchaseOrderId) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT * FROM purchase_order WHERE purchase_order_id = ?`,
+        `SELECT po.*, 
+               pl.name as vendor_name,
+               pl.primary_phone as vendor_phone
+         FROM purchase_order po
+         LEFT JOIN people_list pl ON po.vendor_id = pl.person_id
+         WHERE po.purchase_order_id = ?`,
         [purchaseOrderId],
         (err, docs) => {
           if (err) {
@@ -140,11 +168,12 @@ class PurchaseOrderRepository {
     return new Promise((resolve, reject) => {
       this.db.query(
         `UPDATE purchase_order SET
-          purchase_order_ref = ?, date = ?, delivery_date = ?, 
+          purchase_order_ref = ?, vendor_id = ?, date = ?, delivery_date = ?, 
           discount = ?, adjustment = ?, status = ?
         WHERE purchase_order_id = ?`,
         [
           purchaseOrder.purchase_order_ref,
+          purchaseOrder.vendor_id,
           purchaseOrder.date,
           purchaseOrder.delivery_date,
           purchaseOrder.discount || 0.0,
@@ -338,10 +367,13 @@ class PurchaseOrderRepository {
                poi.quantity,
                poi.rate,
                m.name as material_name,
-               m.description as material_description
+               m.description as material_description,
+               pl.name as vendor_name,
+               pl.primary_phone as vendor_phone
          FROM purchase_order po
          LEFT JOIN purchase_order_items poi ON po.purchase_order_id = poi.purchase_order_id
          LEFT JOIN materials_latest m ON poi.material_id = m.material_id
+         LEFT JOIN people_list pl ON po.vendor_id = pl.person_id
          WHERE po.purchase_order_id = ?`,
         [purchaseOrderId],
         (err, docs) => {
@@ -366,6 +398,7 @@ class PurchaseOrderRepository {
           const purchaseOrder = {
             purchase_order_id: docs[0].purchase_order_id,
             purchase_order_ref: docs[0].purchase_order_ref,
+            vendor_id: docs[0].vendor_id,
             date: docs[0].date,
             delivery_date: docs[0].delivery_date,
             discount: docs[0].discount,
@@ -373,6 +406,8 @@ class PurchaseOrderRepository {
             status: docs[0].status,
             created_at: docs[0].created_at,
             updated_at: docs[0].updated_at,
+            vendor_name: docs[0].vendor_name,
+            vendor_phone: docs[0].vendor_phone,
             items: [],
           };
 

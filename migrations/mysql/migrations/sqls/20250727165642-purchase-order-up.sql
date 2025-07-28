@@ -33,3 +33,5 @@ CREATE INDEX idx_purchase_order_date ON purchase_order(date);
 CREATE INDEX idx_purchase_order_status ON purchase_order(status);
 CREATE INDEX idx_purchase_order_items_po_id ON purchase_order_items(purchase_order_id);
 CREATE INDEX idx_purchase_order_items_material_id ON purchase_order_items(material_id);
+
+ALTER TABLE `purchase_order` ADD `vendor_id` INT NOT NULL AFTER `purchase_order_ref`;
