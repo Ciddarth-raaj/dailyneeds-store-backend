@@ -74,7 +74,12 @@ class PDFService {
     const formatDate = (dateString) => {
       if (!dateString) return "N/A";
       const date = new Date(dateString);
-      return date.toLocaleDateString("en-GB");
+      return date.toLocaleDateString("en-GB", {
+        weekday: "short",
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+      });
     };
 
     const formatCurrency = (amount) => {
@@ -83,23 +88,19 @@ class PDFService {
 
     const itemsHTML = items
       .map(
-        (item) => `
+        (item, index) => `
       <tr>
-        <td style="padding: 16px 12px; border-bottom: 1px solid #e0e0e0; font-size: 14px;">${
-          item.material_name || `Material ${item.material_id}`
+        <td style="padding: 8px 12px; border: 1px solid #ddd; font-size: 12px; text-align: left;">${
+          index + 1
+        }. [${item.material_id || "N/A"}] ${
+          item.material_name || `Material ${index + 1}`
         }</td>
-        <td style="padding: 16px 12px; border-bottom: 1px solid #e0e0e0; text-align: center; font-size: 14px;">${
-          item.quantity
-        }</td>
-        <td style="padding: 16px 12px; border-bottom: 1px solid #e0e0e0; text-align: center; font-size: 14px;">${
-          item.stock || ""
-        }</td>
-        <td style="padding: 16px 12px; border-bottom: 1px solid #e0e0e0; text-align: right; font-size: 14px;">₹${formatCurrency(
+        <td style="padding: 8px 12px; border: 1px solid #ddd; font-size: 12px; text-align: right;">₹${formatCurrency(
           item.rate
         )}</td>
-        <td style="padding: 16px 12px; border-bottom: 1px solid #e0e0e0; text-align: right; font-size: 14px;">₹${formatCurrency(
-          item.quantity * item.rate
-        )}</td>
+        <td style="padding: 8px 12px; border: 1px solid #ddd; font-size: 12px; text-align: right;">${
+          item.quantity
+        }</td>
       </tr>
     `
       )
@@ -121,378 +122,357 @@ class PDFService {
           body {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             margin: 0;
-            padding: 40px;
-            color: #2d3748;
+            padding: 0;
+            color: #000;
             background-color: #ffffff;
-            line-height: 1.6;
+            line-height: 1.4;
+            font-size: 12px;
           }
           
-          .container {
-            max-width: 800px;
+          .page {
+            width: 210mm;
+            height: 297mm;
             margin: 0 auto;
             background: white;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
-            border-radius: 12px;
-            overflow: hidden;
-            word-wrap: break-word;
-            overflow-wrap: break-word;
+            position: relative;
+            page-break-after: always;
+          }
+          
+          .page:last-child {
+            page-break-after: avoid;
           }
           
           .header {
-            background: #667eea;
-            color: white;
-            padding: 40px;
-            text-align: center;
-            position: relative;
+            padding: 15px 20px;
+            border-bottom: 1px solid #ddd;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+          }
+          
+          .header-left {
+            flex: 1;
+          }
+          
+          .logo-section {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
           }
           
           .logo {
-            width: 120px;
+            width: 200px;
             height: auto;
-            margin-bottom: 20px;
-            filter: brightness(0) invert(1);
+            margin-right: 10px;
           }
           
-          .header h1 {
-            margin: 0;
-            font-size: 32px;
-            font-weight: 700;
-            letter-spacing: 1px;
-            text-transform: uppercase;
+          .header-right {
+            text-align: right;
+            flex: 1;
           }
           
-          .header-subtitle {
-            margin-top: 8px;
-            font-size: 16px;
-            font-weight: 300;
-            opacity: 0.9;
+          .warehouse-info {
+            font-size: 10px;
+            color: #666;
+            margin-bottom: 15px;
           }
           
-          .content {
-            padding: 40px;
-            word-wrap: break-word;
-            overflow-wrap: break-word;
+          .po-details {
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 4px;
+            font-size: 11px;
           }
           
-          .order-info {
+          .po-detail-row {
             display: flex;
             justify-content: space-between;
-            gap: 40px;
-            margin-bottom: 40px;
-            background: #f8fafc;
-            padding: 30px;
-            border-radius: 8px;
-            border-left: 4px solid #667eea;
+            margin-bottom: 4px;
           }
           
-          .order-details {
-            flex: 1;
-            min-width: 0;
-            word-wrap: break-word;
-            overflow-wrap: break-word;
+          .po-detail-row:last-child {
+            margin-bottom: 0;
           }
           
-          .order-details h3 {
-            margin: 0 0 20px 0;
-            color: #667eea;
-            font-size: 18px;
+          .po-label {
             font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
+            color: #333;
           }
           
-          .detail-row {
+          .po-value {
+            color: #000;
+          }
+          
+          .address-section {
+            padding: 20px;
             display: flex;
-            margin-bottom: 12px;
-            gap: 10px;
+            justify-content: space-between;
+            gap: 20px;
           }
           
-          .detail-label {
-            font-weight: 600;
-            color: #4a5568;
+          .address-box {
+            flex: 0.5;
+            border: 1px solid #ddd;
+            padding: 15px;
+            border-radius: 4px;
+          }
+          
+          .address-title {
             font-size: 14px;
-            flex-shrink: 0;
+            font-weight: 700;
+            color: #000;
+            margin-bottom: 10px;
+            text-transform: uppercase;
           }
           
-          .detail-value {
+          .address-content {
+            font-size: 11px;
+            line-height: 1.4;
+          }
+          
+          .address-line {
+            margin-bottom: 4px;
+          }
+          
+          .order-summary {
+            padding: 0 20px 20px;
+            display: flex;
+            gap: 20px;
+          }
+          
+          .intent-box {
+            flex: 2;
+            background: #e3f2fd;
+            padding: 15px;
+            border-radius: 4px;
+            font-size: 11px;
+            line-height: 1.4;
+          }
+          
+          .cost-summary {
             flex: 1;
-            color: #2d3748;
-            font-weight: 500;
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+          }
+          
+          .cost-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            font-size: 12px;
+          }
+          
+          .cost-row:last-child {
+            margin-bottom: 0;
+            font-weight: 700;
             font-size: 14px;
-            word-wrap: break-word;
-            overflow-wrap: break-word;
-            hyphens: auto;
           }
           
           .items-section {
-            margin-bottom: 40px;
-          }
-          
-          .section-title {
-            font-size: 20px;
-            font-weight: 600;
-            color: #667eea;
-            margin-bottom: 20px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
+            padding: 0 20px 20px;
           }
           
           .items-table {
             width: 100%;
             border-collapse: collapse;
-            background: white;
-            border-radius: 8px;
-            overflow: hidden;
-            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+            border: 1px solid #ddd;
           }
           
           .items-table th {
-            background: #f8fafc;
-            color: #4a5568;
-            padding: 16px 12px;
+            background: #495057;
+            color: white;
+            padding: 10px 12px;
             text-align: left;
             font-weight: 600;
-            font-size: 14px;
+            font-size: 11px;
             text-transform: uppercase;
-            letter-spacing: 0.5px;
-            word-wrap: break-word;
-            overflow-wrap: break-word;
-            border-bottom: 1px solid #e2e8f0;
           }
           
           .items-table td {
-            padding: 16px 12px;
-            border-bottom: 1px solid #f1f5f9;
-            font-size: 14px;
-            word-wrap: break-word;
-            overflow-wrap: break-word;
-            hyphens: auto;
-            max-width: 0;
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            font-size: 11px;
           }
           
-          .items-table tr:hover {
-            background-color: #f8fafc;
+          .items-table tr:nth-child(even) {
+            background-color: #f8f9fa;
           }
           
-          .summary-section {
-            display: flex;
-            justify-content: flex-end;
-            margin-top: 40px;
-          }
-          
-          .summary {
-            width: 350px;
-            background: #f8fafc;
-            padding: 30px;
-            border-radius: 12px;
-            border: 2px solid #e2e8f0;
-            word-wrap: break-word;
-            overflow-wrap: break-word;
-          }
-          
-          .summary-title {
-            font-size: 18px;
-            font-weight: 600;
-            color: #667eea;
-            margin-bottom: 20px;
-            text-align: center;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-          }
-          
-          .summary-row {
+          .signature-section {
+            padding: 20px;
             display: flex;
             justify-content: space-between;
-            margin-bottom: 16px;
-            padding-bottom: 8px;
-            border-bottom: 1px solid #e2e8f0;
+            gap: 40px;
+            margin-top: 20px;
           }
           
-          .summary-row:last-child {
-            border-bottom: none;
-          }
-          
-          .summary-label {
-            font-weight: 500;
-            color: #4a5568;
+          .signature-box {
+            flex: 1;
+            border: 2px solid #ddd;
+            height: 80px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
             font-size: 14px;
-            word-wrap: break-word;
-            overflow-wrap: break-word;
-            flex-shrink: 0;
-          }
-          
-          .summary-value {
-            text-align: right;
             font-weight: 600;
-            color: #2d3748;
-            font-size: 14px;
-            word-wrap: break-word;
-            overflow-wrap: break-word;
-            flex-shrink: 0;
+            color: #666;
           }
           
-          .total {
+          .signature-label {
+            text-align: center;
+            margin-top: 10px;
+            font-size: 11px;
+            color: #333;
+          }
+          
+          .important-section {
+            padding: 20px;
+            margin-top: 20px;
+          }
+          
+          .important-box {
+            background: #e3f2fd;
+            padding: 20px;
+            border-radius: 4px;
+          }
+          
+          .important-title {
+            font-size: 14px;
             font-weight: 700;
-            font-size: 20px;
-            color: #667eea;
-            border-top: 2px solid #667eea;
-            padding-top: 16px;
-            margin-top: 16px;
+            color: #000;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+          }
+          
+          .important-content {
+            font-size: 11px;
+            line-height: 1.4;
           }
           
           .footer {
-            margin-top: 40px;
-            padding: 20px;
-            background: #f8fafc;
-            border-radius: 8px;
-            text-align: center;
-            color: #718096;
-            font-size: 12px;
+            position: absolute;
+            bottom: 15px;
+            left: 20px;
+            font-size: 10px;
+            color: #666;
           }
           
           @media print {
-            body {
-              padding: 0;
+            .page {
+              page-break-after: always;
             }
-            .container {
-              box-shadow: none;
-              border-radius: 0;
+            .page:last-child {
+              page-break-after: avoid;
             }
-          }
-          
-          /* Page break handling */
-          .header {
-            page-break-inside: avoid;
-            break-inside: avoid;
-          }
-          
-          .order-info {
-            page-break-inside: avoid;
-            break-inside: avoid;
-          }
-          
-          .items-section {
-            page-break-inside: auto;
-            break-inside: auto;
-          }
-          
-          .items-table {
-            page-break-inside: auto;
-            break-inside: auto;
-          }
-          
-          .items-table tr {
-            page-break-inside: avoid;
-            break-inside: avoid;
-          }
-          
-          .summary-section {
-            page-break-inside: avoid;
-            break-inside: avoid;
-          }
-          
-          .footer {
-            page-break-inside: avoid;
-            break-inside: avoid;
           }
         </style>
       </head>
       <body>
-        <div class="container">
+        <!-- Page 1 -->
+        <div class="page">
           <div class="header">
-            <img src="https://www.dailyneeds.in/assets/logo.png" alt="DailyNeeds Logo" class="logo">
-            <h1>Purchase Order</h1>
-            <div class="header-subtitle">Professional Business Document</div>
-          </div>
-          
-          <div class="content">
-            <div class="order-info">
-              <div class="order-details">
-                <h3>Vendor Information</h3>
-                <div class="detail-row">
-                  <span class="detail-label">Vendor Name:</span>
-                  <span class="detail-value">${vendor_name || "N/A"}</span>
-                </div>
-              </div>
-              
-              <div class="order-details">
-                <h3>Order Information</h3>
-                <div class="detail-row">
-                  <span class="detail-label">Purchase Order #:</span>
-                  <span class="detail-value">${purchase_order_id}</span>
-                </div>
-                <div class="detail-row">
-                  <span class="detail-label">Date:</span>
-                  <span class="detail-value">${formatDate(date)}</span>
-                </div>
-                <div class="detail-row">
-                  <span class="detail-label">Purchase Reference #:</span>
-                  <span class="detail-value">${
-                    purchase_order_ref || "N/A"
-                  }</span>
-                </div>
-                <div class="detail-row">
-                  <span class="detail-label">Delivery Date:</span>
-                  <span class="detail-value">${formatDate(delivery_date)}</span>
-                </div>
-              </div>
-            </div>
-
-            <div class="items-section">
-              <div class="section-title">Order Items</div>
-              <table class="items-table">
-                <thead>
-                  <tr>
-                    <th>Item</th>
-                    <th style="text-align: center;">Quantity</th>
-                    <th style="text-align: center;">Stock</th>
-                    <th style="text-align: right;">Rate</th>
-                    <th style="text-align: right;">Amount</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${itemsHTML}
-                </tbody>
-              </table>
-            </div>
-
-            <div class="summary-section">
-              <div class="summary">
-                <div class="summary-title">Order Summary</div>
-                <div class="summary-row">
-                  <span class="summary-label">Sub Total:</span>
-                  <span class="summary-value">₹${formatCurrency(
-                    subtotal
-                  )}</span>
-                </div>
-                <div class="summary-row">
-                  <span class="summary-label">Discount:</span>
-                  <span class="summary-value">₹${formatCurrency(
-                    discount
-                  )}</span>
-                </div>
-                <div class="summary-row">
-                  <span class="summary-label">Tax:</span>
-                  <span class="summary-value">₹${formatCurrency(tax)}</span>
-                </div>
-                <div class="summary-row">
-                  <span class="summary-label">Adjustment:</span>
-                  <span class="summary-value">₹${formatCurrency(
-                    adjustment
-                  )}</span>
-                </div>
-                <div class="summary-row total">
-                  <span class="summary-label">Total:</span>
-                  <span class="summary-value">₹${formatCurrency(
-                    total_amount
-                  )}</span>
-                </div>
+            <div class="header-left">
+              <div class="logo-section">
+                <img src="https://www.dailyneeds.in/assets/logo.png" alt="DailyNeeds Logo" class="logo">
               </div>
             </div>
             
-            <div class="footer">
-              <p>Thank you for your business! This document was generated by DailyNeeds.</p>
+            <div class="header-right">
+              <div class="warehouse-info">#${purchase_order_id} ${
+      purchase_order_ref ? `[${purchase_order_ref}]` : ""
+    }, warehouse</div>
+              <div class="po-details">
+                <div class="po-detail-row">
+                  <span class="po-label">Date:</span>
+                  <span class="po-value">${formatDate(date)}</span>
+                </div>
+                <div class="po-detail-row">
+                  <span class="po-label">Phone:</span>
+                  <span class="po-value">9788599944</span>
+                </div>
+                <div class="po-detail-row">
+                  <span class="po-label">Email:</span>
+                  <span class="po-value">Info@dailyneeds.co.in</span>
+                </div>
+              </div>
             </div>
+          </div>
+          
+          <div class="address-section">
+            <div class="address-box">
+              <div class="address-title">Bill To</div>
+              <div class="address-content">
+                <div class="address-line">DailyNeeds Warehouse</div>
+                <div class="address-line">188/1,Iyyanar Koil Street, Muthirapalayam</div>
+                <div class="address-line">Puducherry, Pondicherry-605009</div>
+                <div class="address-code">34AAJFD4987C1ZD</div>
+              </div>
+            </div>
+          </div>
+          
+          <div class="order-summary">
+            <div class="intent-box">
+              This purchase order is an intent to procure ${
+                items.length
+              } articles listed in the following pages. PS: GST and Landing Cost (Net Cost) consider discounts seen in the last delivery.
+            </div>
+            
+            <div class="cost-summary">
+              <div class="cost-row">
+                <span>Gross:</span>
+                <span>₹ ${formatCurrency(subtotal)}</span>
+              </div>
+              <div class="cost-row">
+                <span>GST:</span>
+                <span>₹ ${formatCurrency(tax)}</span>
+              </div>
+              <div class="cost-row">
+                <span>Net:</span>
+                <span>₹ ${formatCurrency(total_amount)}</span>
+              </div>
+            </div>
+          </div>
+          
+          <div class="items-section">
+            <table class="items-table">
+              <thead>
+                <tr>
+                  <th>PRODUCT NAME</th>
+                  <th>COST</th>
+                  <th>QTY</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${itemsHTML}
+              </tbody>
+            </table>
+          </div>
+          
+          <div class="signature-section">
+            <div style="flex: 1;">
+              <div class="signature-box">SIGN HERE</div>
+              <div class="signature-label">Prepared By<br>(Purchase Head)</div>
+            </div>
+            <div style="flex: 1;">
+              <div class="signature-box">SIGN HERE</div>
+              <div class="signature-label">Approved By<br>(Business Head)</div>
+            </div>
+          </div>
+          
+          <div class="important-section">
+            <div class="important-box">
+              <div class="important-title">Important - Please Read</div>
+              <div class="important-content">
+                Make sure to follow the purchase terms and conditions to avoid unwanted misunderstanding at a later point in time. Reach out to us in case of any clarifications or modifications to this purchase order.
+              </div>
+            </div>
+          </div>
+          
+          <div class="footer">
+            Generated using DailyNeeds System - #${purchase_order_id} [${
+      purchase_order_ref || "N/A"
+    }], Created: ${formatDate(date)}
           </div>
         </div>
       </body>

@@ -31,6 +31,28 @@ class Telegram {
       }
     });
   }
+
+  async sendDocument(chat_id, fileUrl, caption = "") {
+    return new Promise(async (resolve, reject) => {
+      try {
+        await client.sendDocument(chat_id, fileUrl, {
+          caption,
+          disableNotification: false,
+        });
+        resolve({ code: 200 });
+      } catch (err) {
+        logger.Log({
+          level: logger.LEVEL.ERROR,
+          component: "SERVICE.TELEGRAM",
+          code: "SERVICE.TELEGRAM.SEND-DOCUMENT",
+          description: err.toString(),
+          category: "",
+          ref: { chat_id, fileUrl, caption },
+        });
+        reject(err);
+      }
+    });
+  }
 }
 
 module.exports = () => {

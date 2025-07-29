@@ -1,6 +1,8 @@
 const PDFService = require("../services/pdf");
 const S3 = require("../services/s3");
 const logger = require("../utils/logger");
+const Telegram = require("../services/telegram")();
+const { ALERTS_TELEGRAM_CHAT_ID } = require("../constants/telegram");
 
 class PurchaseOrderUsecase {
   constructor(purchaseOrderRepo) {
@@ -195,7 +197,7 @@ class PurchaseOrderUsecase {
   }
 
   // Generate PDF for purchase order
-  async generatePurchaseOrderPDF(purchaseOrderId) {
+  async generatePurchaseOrderPDF(purchaseOrderId, telegramOptions = {}) {
     try {
       // Get purchase order with items
       const purchaseOrder =
@@ -224,6 +226,24 @@ class PurchaseOrderUsecase {
         purchaseOrderId,
         s3Url
       );
+
+      // Send to Telegram if requested
+      const chat_id = telegramOptions.chat_id || ALERTS_TELEGRAM_CHAT_ID;
+      if (telegramOptions.send_to_telegram) {
+        try {
+          const caption = `Purchase Order #${purchaseOrderId}`;
+          await Telegram.sendDocument(chat_id, s3Url, caption);
+        } catch (err) {
+          logger.Log({
+            level: logger.LEVEL.WARN,
+            component: "USECASE.PURCHASE_ORDER",
+            code: "USECASE.PURCHASE_ORDER.SEND_TELEGRAM",
+            description: `Telegram send failed: ${err.toString()}`,
+            category: "",
+            ref: { purchase_order_id: purchaseOrderId, chat_id },
+          });
+        }
+      }
 
       return {
         code: 200,
@@ -254,7 +274,9 @@ class PurchaseOrderUsecase {
       // Generate PDF if requested
       if (should_generate_pdf && result.id) {
         try {
-          await this.generatePurchaseOrderPDF(result.id);
+          await this.generatePurchaseOrderPDF(result.id, {
+            send_to_telegram: true,
+          });
         } catch (pdfError) {
           logger.Log({
             level: logger.LEVEL.WARN,
@@ -288,7 +310,9 @@ class PurchaseOrderUsecase {
       // Generate PDF if requested
       if (should_generate_pdf) {
         try {
-          await this.generatePurchaseOrderPDF(purchaseOrderId);
+          await this.generatePurchaseOrderPDF(purchaseOrderId, {
+            send_to_telegram: true,
+          });
         } catch (pdfError) {
           logger.Log({
             level: logger.LEVEL.WARN,
