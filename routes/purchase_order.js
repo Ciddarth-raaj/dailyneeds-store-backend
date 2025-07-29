@@ -13,6 +13,7 @@ class PurchaseOrderRoutes {
       material_id: Joi.number().required(),
       quantity: Joi.number().integer().min(1).required(),
       rate: Joi.number().precision(2).min(0).required(),
+      stock: Joi.number().integer().min(0).default(0),
     });
 
     // Purchase Order Schema
@@ -24,6 +25,7 @@ class PurchaseOrderRoutes {
       delivery_date: Joi.date().optional().allow(null),
       discount: Joi.number().precision(2).min(0).default(0.0),
       adjustment: Joi.number().precision(2).default(0.0),
+      tax: Joi.number().precision(2).min(0).default(0.0),
       status: Joi.string()
         .valid("active", "inactive", "completed", "cancelled")
         .default("active"),
@@ -39,6 +41,7 @@ class PurchaseOrderRoutes {
       delivery_date: Joi.date().optional().allow(null),
       discount: Joi.number().precision(2).min(0).optional(),
       adjustment: Joi.number().precision(2).optional(),
+      tax: Joi.number().precision(2).min(0).optional(),
       status: Joi.string()
         .valid("active", "inactive", "completed", "cancelled")
         .optional(),
@@ -50,6 +53,7 @@ class PurchaseOrderRoutes {
       material_id: Joi.number().required(),
       quantity: Joi.number().integer().min(1).required(),
       rate: Joi.number().precision(2).min(0).required(),
+      stock: Joi.number().integer().min(0).optional(),
     });
 
     // Create purchase order

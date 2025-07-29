@@ -13,8 +13,8 @@ class PurchaseOrderRepository {
       if (purchaseOrder.purchase_order_id) {
         // If purchase_order_id is provided, include it in the INSERT
         query = `INSERT INTO purchase_order (
-          purchase_order_id, purchase_order_ref, vendor_id, date, delivery_date, discount, adjustment, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
+          purchase_order_id, purchase_order_ref, vendor_id, date, delivery_date, discount, adjustment, tax, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
         params = [
           purchaseOrder.purchase_order_id,
           purchaseOrder.purchase_order_ref,
@@ -23,13 +23,14 @@ class PurchaseOrderRepository {
           purchaseOrder.delivery_date,
           purchaseOrder.discount || 0.0,
           purchaseOrder.adjustment || 0.0,
+          purchaseOrder.tax || 0.0,
           purchaseOrder.status || "active",
         ];
       } else {
         // If purchase_order_id is not provided, let MySQL auto-generate
         query = `INSERT INTO purchase_order (
-          purchase_order_ref, vendor_id, date, delivery_date, discount, adjustment, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)`;
+          purchase_order_ref, vendor_id, date, delivery_date, discount, adjustment, tax, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
         params = [
           purchaseOrder.purchase_order_ref,
           purchaseOrder.vendor_id,
@@ -37,6 +38,7 @@ class PurchaseOrderRepository {
           purchaseOrder.delivery_date,
           purchaseOrder.discount || 0.0,
           purchaseOrder.adjustment || 0.0,
+          purchaseOrder.tax || 0.0,
           purchaseOrder.status || "active",
         ];
       }
@@ -62,14 +64,37 @@ class PurchaseOrderRepository {
     });
   }
 
+  // Helper functions for calculations
+  calculateSubTotal(items = []) {
+    return items.reduce(
+      (sum, item) =>
+        sum + parseFloat(item.quantity || 0) * parseFloat(item.rate || 0),
+      0
+    );
+  }
+
+  calculateDiscountAmount(subTotal, discountPercent) {
+    return subTotal * (parseFloat(discountPercent || 0) / 100);
+  }
+
+  calculateTaxAmount(subTotal, taxPercent) {
+    return subTotal * (parseFloat(taxPercent || 0) / 100);
+  }
+
+  calculateAdjustment(adjustment) {
+    return parseFloat(adjustment || 0);
+  }
+
+  calculateTotal(subTotal, discount, tax, adjustment) {
+    return subTotal - discount + tax + adjustment;
+  }
+
   // Get all purchase orders with optional filters
   getAllPurchaseOrders(filters = {}) {
     return new Promise((resolve, reject) => {
       let query = `
         SELECT po.*, 
                COUNT(poi.purchase_order_item_id) as item_count,
-               SUM(poi.quantity * poi.rate) as subtotal,
-               (SUM(poi.quantity * poi.rate) * (1 - COALESCE(po.discount, 0) / 100) + COALESCE(po.adjustment, 0)) as total_amount,
                pl.name as vendor_name,
                pl.primary_phone as vendor_phone
         FROM purchase_order po
@@ -129,7 +154,76 @@ class PurchaseOrderRepository {
           reject(err);
           return;
         }
-        resolve(docs);
+
+        // Calculate totals using JavaScript for each purchase order
+        const calculateTotalsForPurchaseOrder = async (po) => {
+          try {
+            // Fetch items for this purchase order
+            const items = await this.getPurchaseOrderItems(
+              po.purchase_order_id
+            );
+
+            const subTotal = this.calculateSubTotal(items);
+            const discountAmount = this.calculateDiscountAmount(
+              subTotal,
+              po.discount
+            );
+            const taxAmount = this.calculateTaxAmount(subTotal, po.tax);
+            const adjustment = this.calculateAdjustment(po.adjustment);
+            const total = this.calculateTotal(
+              subTotal,
+              discountAmount,
+              taxAmount,
+              adjustment
+            );
+
+            return {
+              ...po,
+              subtotal: subTotal,
+              discount_amount: discountAmount,
+              tax_amount: taxAmount,
+              adjustment_amount: adjustment,
+              total_amount: total,
+              item_count: items.length,
+            };
+          } catch (error) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PURCHASE_ORDER",
+              code: "REPOSITORY.PURCHASE_ORDER.GET_ALL.CALCULATE_TOTALS",
+              description: error.toString(),
+              category: "",
+              ref: { purchase_order_id: po.purchase_order_id },
+            });
+            // Return purchase order without calculated totals if there's an error
+            return {
+              ...po,
+              subtotal: 0,
+              discount_amount: 0,
+              tax_amount: 0,
+              adjustment_amount: 0,
+              total_amount: 0,
+              item_count: 0,
+            };
+          }
+        };
+
+        // Process all purchase orders with their totals
+        Promise.all(docs.map(calculateTotalsForPurchaseOrder))
+          .then((purchaseOrdersWithTotals) => {
+            resolve(purchaseOrdersWithTotals);
+          })
+          .catch((error) => {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PURCHASE_ORDER",
+              code: "REPOSITORY.PURCHASE_ORDER.GET_ALL",
+              description: error.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(error);
+          });
       });
     });
   }
@@ -170,7 +264,7 @@ class PurchaseOrderRepository {
       this.db.query(
         `UPDATE purchase_order SET
           purchase_order_ref = ?, vendor_id = ?, date = ?, delivery_date = ?, 
-          discount = ?, adjustment = ?, status = ?
+          discount = ?, adjustment = ?, tax = ?, status = ?
         WHERE purchase_order_id = ?`,
         [
           purchaseOrder.purchase_order_ref,
@@ -179,6 +273,7 @@ class PurchaseOrderRepository {
           purchaseOrder.delivery_date,
           purchaseOrder.discount || 0.0,
           purchaseOrder.adjustment || 0.0,
+          purchaseOrder.tax || 0.0,
           purchaseOrder.status || "active",
           purchaseOrderId,
         ],
@@ -237,13 +332,14 @@ class PurchaseOrderRepository {
     return new Promise((resolve, reject) => {
       this.db.query(
         `INSERT INTO purchase_order_items (
-          purchase_order_id, material_id, quantity, rate
-        ) VALUES (?, ?, ?, ?)`,
+          purchase_order_id, material_id, quantity, rate, stock
+        ) VALUES (?, ?, ?, ?, ?)`,
         [
           purchaseOrderItem.purchase_order_id,
           purchaseOrderItem.material_id,
           purchaseOrderItem.quantity,
           purchaseOrderItem.rate,
+          purchaseOrderItem.stock || 0,
         ],
         (err, res) => {
           if (err) {
@@ -300,12 +396,13 @@ class PurchaseOrderRepository {
     return new Promise((resolve, reject) => {
       this.db.query(
         `UPDATE purchase_order_items SET
-          material_id = ?, quantity = ?, rate = ?
+          material_id = ?, quantity = ?, rate = ?, stock = ?
         WHERE purchase_order_item_id = ?`,
         [
           purchaseOrderItem.material_id,
           purchaseOrderItem.quantity,
           purchaseOrderItem.rate,
+          purchaseOrderItem.stock || 0,
           itemId,
         ],
         (err, res) => {
@@ -367,6 +464,7 @@ class PurchaseOrderRepository {
                poi.material_id,
                poi.quantity,
                poi.rate,
+               poi.stock,
                m.name as material_name,
                m.description as material_description,
                pl.name as vendor_name,
@@ -404,6 +502,7 @@ class PurchaseOrderRepository {
             delivery_date: docs[0].delivery_date,
             discount: docs[0].discount,
             adjustment: docs[0].adjustment,
+            tax: docs[0].tax,
             status: docs[0].status,
             created_at: docs[0].created_at,
             updated_at: docs[0].updated_at,
@@ -419,11 +518,37 @@ class PurchaseOrderRepository {
                 material_id: row.material_id,
                 quantity: row.quantity,
                 rate: row.rate,
+                stock: row.stock,
                 material_name: row.material_name,
                 material_description: row.material_description,
               });
             }
           });
+
+          // Calculate totals using JavaScript
+          const subTotal = this.calculateSubTotal(purchaseOrder.items);
+          const discountAmount = this.calculateDiscountAmount(
+            subTotal,
+            purchaseOrder.discount
+          );
+          const taxAmount = this.calculateTaxAmount(
+            subTotal,
+            purchaseOrder.tax
+          );
+          const adjustment = this.calculateAdjustment(purchaseOrder.adjustment);
+          const total = this.calculateTotal(
+            subTotal,
+            discountAmount,
+            taxAmount,
+            adjustment
+          );
+
+          // Add calculated fields to the purchase order
+          purchaseOrder.subtotal = subTotal;
+          purchaseOrder.discount_amount = discountAmount;
+          purchaseOrder.tax_amount = taxAmount;
+          purchaseOrder.adjustment_amount = adjustment;
+          purchaseOrder.total_amount = total;
 
           resolve(purchaseOrder);
         }

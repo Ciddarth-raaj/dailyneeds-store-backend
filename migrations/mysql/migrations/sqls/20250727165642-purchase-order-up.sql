@@ -35,3 +35,7 @@ CREATE INDEX idx_purchase_order_items_po_id ON purchase_order_items(purchase_ord
 CREATE INDEX idx_purchase_order_items_material_id ON purchase_order_items(material_id);
 
 ALTER TABLE `purchase_order` ADD `vendor_id` INT NOT NULL AFTER `purchase_order_ref`;
+
+ALTER TABLE purchase_order_items ADD COLUMN stock INT DEFAULT 0 AFTER rate;
+
+ALTER TABLE purchase_order ADD COLUMN tax DECIMAL(10,2) DEFAULT 0.00 AFTER adjustment;
