@@ -10,6 +10,7 @@ class PDFService {
       browser = await puppeteer.launch({
         headless: "new",
         executablePath: "/usr/bin/google-chrome-stable",
+        dumpio: true,
         args: [
           "--no-sandbox",
           "--disable-setuid-sandbox",
