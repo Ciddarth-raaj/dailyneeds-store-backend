@@ -42,4 +42,4 @@ ALTER TABLE purchase_order ADD COLUMN tax DECIMAL(10,2) DEFAULT 0.00 AFTER adjus
 
 ALTER TABLE purchase_order ADD COLUMN pdf_url TEXT NULL COMMENT 'URL of the generated PDF file'; 
 
-ALTER TABLE `purchase_order` CHANGE `pdf_url` `pdf_url` TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT 'URL of the generated PDF file' AFTER `tax`
+ALTER TABLE `purchase_order` CHANGE `pdf_url` `pdf_url` TEXT CHARACTER SET utf8 COLLATE utf8_general_ci NULL DEFAULT NULL COMMENT 'URL of the generated PDF file' AFTER `tax`
