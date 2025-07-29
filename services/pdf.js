@@ -4,23 +4,14 @@ const path = require("path");
 const logger = require("../utils/logger");
 
 class PDFService {
-  constructor() {
-    this.browser = null;
-  }
-
-  async initializeBrowser() {
-    if (!this.browser) {
-      this.browser = await puppeteer.launch({
+  async generatePurchaseOrderPDF(purchaseOrderData) {
+    let browser;
+    try {
+      browser = await puppeteer.launch({
         headless: "new",
         args: ["--no-sandbox", "--disable-setuid-sandbox"],
+        timeout: 120000, // 2 minutes
       });
-    }
-    return this.browser;
-  }
-
-  async generatePurchaseOrderPDF(purchaseOrderData) {
-    try {
-      const browser = await this.initializeBrowser();
       const page = await browser.newPage();
 
       // Generate HTML content for the purchase order
@@ -42,8 +33,14 @@ class PDFService {
       });
 
       await page.close();
+      await browser.close();
       return pdfBuffer;
     } catch (error) {
+      if (browser) {
+        try {
+          await browser.close();
+        } catch (e) {}
+      }
       logger.Log({
         level: logger.LEVEL.ERROR,
         component: "SERVICE",
@@ -478,13 +475,6 @@ class PDFService {
       </body>
       </html>
     `;
-  }
-
-  async closeBrowser() {
-    if (this.browser) {
-      await this.browser.close();
-      this.browser = null;
-    }
   }
 }
 
