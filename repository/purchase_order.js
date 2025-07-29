@@ -68,7 +68,8 @@ class PurchaseOrderRepository {
       let query = `
         SELECT po.*, 
                COUNT(poi.purchase_order_item_id) as item_count,
-               SUM(poi.quantity * poi.rate) as total_amount,
+               SUM(poi.quantity * poi.rate) as subtotal,
+               (SUM(poi.quantity * poi.rate) * (1 - COALESCE(po.discount, 0) / 100) + COALESCE(po.adjustment, 0)) as total_amount,
                pl.name as vendor_name,
                pl.primary_phone as vendor_phone
         FROM purchase_order po

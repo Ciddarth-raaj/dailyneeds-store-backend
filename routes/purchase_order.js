@@ -23,7 +23,7 @@ class PurchaseOrderRoutes {
       date: Joi.date().optional().allow(null),
       delivery_date: Joi.date().optional().allow(null),
       discount: Joi.number().precision(2).min(0).default(0.0),
-      adjustment: Joi.number().precision(2).min(0).default(0.0),
+      adjustment: Joi.number().precision(2).default(0.0),
       status: Joi.string()
         .valid("active", "inactive", "completed", "cancelled")
         .default("active"),
@@ -38,7 +38,7 @@ class PurchaseOrderRoutes {
       date: Joi.date().optional().allow(null),
       delivery_date: Joi.date().optional().allow(null),
       discount: Joi.number().precision(2).min(0).optional(),
-      adjustment: Joi.number().precision(2).min(0).optional(),
+      adjustment: Joi.number().precision(2).optional(),
       status: Joi.string()
         .valid("active", "inactive", "completed", "cancelled")
         .optional(),
