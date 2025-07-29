@@ -1,9 +1,9 @@
 require("dotenv").config();
 
-// const ALERTS_TELEGRAM_CHAT_ID =
-//   process.env.IS_TEST === "true" ? 0 : -1002381170220;
+const ALERTS_TELEGRAM_CHAT_ID =
+  process.env.IS_TEST === "true" ? 0 : -1002381170220;
 
-const ALERTS_TELEGRAM_CHAT_ID = -1002722070031;
+// const ALERTS_TELEGRAM_CHAT_ID = -1002722070031;
 
 const PURCHASE_TELEGRAM_CHAT_ID =
   process.env.IS_TEST === "true" ? 0 : -4668439381;
