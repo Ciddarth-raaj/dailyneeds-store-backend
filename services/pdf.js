@@ -9,8 +9,29 @@ class PDFService {
     try {
       browser = await puppeteer.launch({
         headless: "new",
-        args: ["--no-sandbox", "--disable-setuid-sandbox"],
-        timeout: 300000, // 2 minutes
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--single-process",
+          "--disable-background-timer-throttling",
+          "--disable-background-networking",
+          "--disable-breakpad",
+          "--disable-default-apps",
+          "--disable-extensions",
+          "--disable-gpu",
+          "--disable-sync",
+          "--disable-translate",
+          "--hide-scrollbars",
+          "--metrics-recording-only",
+          "--mute-audio",
+          "--no-first-run",
+          "--no-zygote",
+          "--disable-features=site-per-process",
+          "--disable-features=IsolateOrigins",
+          "--js-flags=--lite-mode",
+        ],
+        timeout: 300000,
       });
       const page = await browser.newPage();
 
