@@ -231,8 +231,27 @@ class PurchaseOrderUsecase {
       const chat_id = telegramOptions.chat_id || ALERTS_TELEGRAM_CHAT_ID;
       if (telegramOptions.send_to_telegram) {
         try {
-          const caption = `Purchase Order #${purchaseOrderId}`;
-          await Telegram.sendDocument(chat_id, s3Url, caption);
+          await Telegram.sendDocument(chat_id, s3Url);
+          const detailsMessage = `Purchase Order #${purchaseOrderId}\nVendor: ${
+            purchaseOrder.vendor_name || "N/A"
+          }\nTotal: ₹${(purchaseOrder.total_amount || 0).toFixed(2)}`;
+          await Telegram.sendMessage(chat_id, detailsMessage);
+          await Telegram.sendMessage(chat_id, "Approve this order?", {
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  {
+                    text: "Approve",
+                    callback_data: `approve_po_${purchaseOrderId}`,
+                  },
+                  {
+                    text: "View",
+                    url: `http://dnds.co.in/purchase-order/view?id=${purchaseOrderId}`,
+                  },
+                ],
+              ],
+            },
+          });
         } catch (err) {
           logger.Log({
             level: logger.LEVEL.WARN,

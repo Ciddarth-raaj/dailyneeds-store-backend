@@ -9,13 +9,14 @@ const client = new TelegramClient({
 class Telegram {
   constructor() {}
 
-  async sendMessage(chat_id, msg) {
+  async sendMessage(chat_id, msg, options = {}) {
     //test-chat-id = 800863889
     return new Promise(async (resolve, reject) => {
       try {
         await client.sendMessage(chat_id, msg, {
           disableWebPagePreview: true,
           disableNotification: true,
+          ...options,
         });
         resolve({ code: 200 });
       } catch (err) {
