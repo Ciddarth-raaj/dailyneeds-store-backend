@@ -1,3 +1,7 @@
+const PDFService = require("../services/pdf");
+const S3 = require("../services/s3");
+const logger = require("../utils/logger");
+
 class PurchaseOrderUsecase {
   constructor(purchaseOrderRepo) {
     this.purchaseOrderRepo = purchaseOrderRepo;
@@ -185,6 +189,120 @@ class PurchaseOrderUsecase {
       }
 
       return { code: 200, message: "Purchase order updated successfully" };
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  // Generate PDF for purchase order
+  async generatePurchaseOrderPDF(purchaseOrderId) {
+    try {
+      // Get purchase order with items
+      const purchaseOrder =
+        await this.purchaseOrderRepo.getPurchaseOrderWithItems(purchaseOrderId);
+
+      if (!purchaseOrder) {
+        throw new Error("Purchase order not found");
+      }
+
+      // Generate PDF
+      const pdfBuffer = await PDFService.generatePurchaseOrderPDF(
+        purchaseOrder
+      );
+
+      // Upload to S3
+      const fileName = `purchase_orders/PO_${purchaseOrderId}_${Date.now()}.pdf`;
+      const s3Url = await S3.uploadFile(
+        undefined,
+        fileName,
+        "application/pdf",
+        pdfBuffer
+      );
+
+      // Update purchase order with PDF URL
+      await this.purchaseOrderRepo.updatePurchaseOrderPDF(
+        purchaseOrderId,
+        s3Url
+      );
+
+      return {
+        code: 200,
+        message: "PDF generated and uploaded successfully",
+        pdf_url: s3Url,
+      };
+    } catch (error) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "USECASE.PURCHASE_ORDER",
+        code: "USECASE.PURCHASE_ORDER.GENERATE_PDF",
+        description: error.toString(),
+        category: "",
+        ref: { purchase_order_id: purchaseOrderId },
+      });
+      throw error;
+    }
+  }
+
+  // Create purchase order with PDF generation
+  async createPurchaseOrderWithPDF(purchaseOrderData) {
+    try {
+      const { should_generate_pdf, ...purchaseOrder } = purchaseOrderData;
+
+      // Create the purchase order
+      const result = await this.createPurchaseOrderWithItems(purchaseOrder);
+
+      // Generate PDF if requested
+      if (should_generate_pdf && result.id) {
+        try {
+          await this.generatePurchaseOrderPDF(result.id);
+        } catch (pdfError) {
+          logger.Log({
+            level: logger.LEVEL.WARN,
+            component: "USECASE.PURCHASE_ORDER",
+            code: "USECASE.PURCHASE_ORDER.CREATE_WITH_PDF",
+            description: `PDF generation failed: ${pdfError.toString()}`,
+            category: "",
+            ref: { purchase_order_id: result.id },
+          });
+          // Don't fail the entire operation if PDF generation fails
+        }
+      }
+
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  // Update purchase order with PDF generation
+  async updatePurchaseOrderWithPDF(purchaseOrderId, purchaseOrderData) {
+    try {
+      const { should_generate_pdf, ...purchaseOrder } = purchaseOrderData;
+
+      // Update the purchase order
+      const result = await this.updatePurchaseOrderWithItems(
+        purchaseOrderId,
+        purchaseOrder
+      );
+
+      // Generate PDF if requested
+      if (should_generate_pdf) {
+        try {
+          await this.generatePurchaseOrderPDF(purchaseOrderId);
+        } catch (pdfError) {
+          logger.Log({
+            level: logger.LEVEL.WARN,
+            component: "USECASE.PURCHASE_ORDER",
+            code: "USECASE.PURCHASE_ORDER.UPDATE_WITH_PDF",
+            description: `PDF generation failed: ${pdfError.toString()}`,
+            category: "",
+            ref: { purchase_order_id: purchaseOrderId },
+          });
+          // Don't fail the entire operation if PDF generation fails
+        }
+      }
+
+      return result;
     } catch (error) {
       throw error;
     }

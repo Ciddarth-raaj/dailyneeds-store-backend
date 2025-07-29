@@ -30,6 +30,7 @@ class PurchaseOrderRoutes {
         .valid("active", "inactive", "completed", "cancelled")
         .default("active"),
       items: Joi.array().items(purchaseOrderItemSchema).optional(),
+      should_generate_pdf: Joi.boolean().optional().default(false),
     });
 
     // Purchase Order Update Schema
@@ -46,6 +47,7 @@ class PurchaseOrderRoutes {
         .valid("active", "inactive", "completed", "cancelled")
         .optional(),
       items: Joi.array().items(purchaseOrderItemSchema).optional(),
+      should_generate_pdf: Joi.boolean().optional().default(false),
     });
 
     // Purchase Order Item Update Schema
@@ -84,6 +86,23 @@ class PurchaseOrderRoutes {
 
         const result =
           await this.purchaseOrderUsecase.createPurchaseOrderWithItems(value);
+        res.json(result);
+      } catch (err) {
+        console.log(err);
+        res.json({ code: 500, msg: err.message });
+      }
+    });
+
+    // Create purchase order with PDF generation
+    router.post("/with-pdf", async (req, res) => {
+      try {
+        const { error, value } = purchaseOrderSchema.validate(req.body);
+        if (error) {
+          return res.json({ code: 422, msg: error.toString() });
+        }
+
+        const result =
+          await this.purchaseOrderUsecase.createPurchaseOrderWithPDF(value);
         res.json(result);
       } catch (err) {
         console.log(err);
@@ -207,6 +226,31 @@ class PurchaseOrderRoutes {
       }
     });
 
+    // Update purchase order with PDF generation
+    router.put("/:id/with-pdf", async (req, res) => {
+      try {
+        const purchaseOrderId = parseInt(req.params.id);
+        if (isNaN(purchaseOrderId)) {
+          return res.json({ code: 400, msg: "Invalid purchase order ID" });
+        }
+
+        const { error, value } = purchaseOrderUpdateSchema.validate(req.body);
+        if (error) {
+          return res.json({ code: 422, msg: error.toString() });
+        }
+
+        const result =
+          await this.purchaseOrderUsecase.updatePurchaseOrderWithPDF(
+            purchaseOrderId,
+            value
+          );
+        res.json(result);
+      } catch (err) {
+        console.log(err);
+        res.json({ code: 500, msg: err.message });
+      }
+    });
+
     // Delete purchase order
     router.delete("/:id", async (req, res) => {
       try {
@@ -311,6 +355,24 @@ class PurchaseOrderRoutes {
 
         const result = await this.purchaseOrderUsecase.deletePurchaseOrderItem(
           itemId
+        );
+        res.json(result);
+      } catch (err) {
+        console.log(err);
+        res.json({ code: 500, msg: err.message });
+      }
+    });
+
+    // Generate PDF for existing purchase order
+    router.post("/:id/generate-pdf", async (req, res) => {
+      try {
+        const purchaseOrderId = parseInt(req.params.id);
+        if (isNaN(purchaseOrderId)) {
+          return res.json({ code: 400, msg: "Invalid purchase order ID" });
+        }
+
+        const result = await this.purchaseOrderUsecase.generatePurchaseOrderPDF(
+          purchaseOrderId
         );
         res.json(result);
       } catch (err) {

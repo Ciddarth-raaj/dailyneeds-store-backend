@@ -508,6 +508,7 @@ class PurchaseOrderRepository {
             updated_at: docs[0].updated_at,
             vendor_name: docs[0].vendor_name,
             vendor_phone: docs[0].vendor_phone,
+            pdf_url: docs[0].pdf_url,
             items: [],
           };
 
@@ -551,6 +552,34 @@ class PurchaseOrderRepository {
           purchaseOrder.total_amount = total;
 
           resolve(purchaseOrder);
+        }
+      );
+    });
+  }
+
+  // Update purchase order PDF URL
+  updatePurchaseOrderPDF(purchaseOrderId, pdfUrl) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `UPDATE purchase_order SET pdf_url = ? WHERE purchase_order_id = ?`,
+        [pdfUrl, purchaseOrderId],
+        (err, res) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PURCHASE_ORDER",
+              code: "REPOSITORY.PURCHASE_ORDER.UPDATE_PDF",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve({
+            code: 200,
+            affectedRows: res.affectedRows,
+          });
         }
       );
     });
