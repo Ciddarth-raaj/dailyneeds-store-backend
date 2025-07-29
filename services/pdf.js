@@ -32,7 +32,7 @@ class PDFService {
           "--disable-features=IsolateOrigins",
           "--js-flags=--lite-mode",
         ],
-        timeout: 300000,
+        timeout: 0,
       });
       const page = await browser.newPage();
 
