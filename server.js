@@ -65,6 +65,7 @@ class Server {
   }
 
   initServer() {
+    HttpServer.timeout = 300000; // 5 minutes
     HttpServer.listen(PORT, () => {
       console.log(`Server Running ${PORT}`);
     });

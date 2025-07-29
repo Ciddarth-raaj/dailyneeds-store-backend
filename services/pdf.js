@@ -10,7 +10,7 @@ class PDFService {
       browser = await puppeteer.launch({
         headless: "new",
         args: ["--no-sandbox", "--disable-setuid-sandbox"],
-        timeout: 120000, // 2 minutes
+        timeout: 300000, // 2 minutes
       });
       const page = await browser.newPage();
 
