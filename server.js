@@ -158,6 +158,7 @@ class Server {
     this.purchaseOrderRepo = require("./repository/purchase_order")(
       this.mysql.connection
     );
+    this.invoiceRepo = require("./repository/invoice")(this.mysql.connection);
   }
 
   initUsecases() {
@@ -261,6 +262,7 @@ class Server {
     this.purchaseOrderUsecase = require("./usecase/purchase_order")(
       this.purchaseOrderRepo
     );
+    this.invoiceUsecase = require("./usecase/invoice")(this.invoiceRepo);
   }
 
   initRoutes() {
@@ -338,6 +340,7 @@ class Server {
     const purchaseOrderRouter = require("./routes/purchase_order")(
       this.purchaseOrderUsecase
     );
+    const invoiceRouter = require("./routes/invoice")(this.invoiceUsecase);
     app.use("/document", documentRouter.getRouter());
     app.use("/whatsapp", whatsappRouter.getRouter());
     app.use("/budget", budgetRouter.getRouter());
@@ -379,6 +382,7 @@ class Server {
     app.use("/materials", materialsRouter.getRouter());
     app.use("/material_request", materialRequestRoutes.getRouter());
     app.use("/purchase-order", purchaseOrderRouter.getRouter());
+    app.use("/invoice", invoiceRouter.getRouter());
   }
 
   initServices() {
