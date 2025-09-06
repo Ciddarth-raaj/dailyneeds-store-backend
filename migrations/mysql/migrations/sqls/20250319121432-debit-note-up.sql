@@ -20,6 +20,6 @@ CREATE TABLE `debit_note` (
   `igst` json NOT NULL,
   `cess` json NOT NULL,
   `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
-  PRIMARY KEY (`id`),
+  PRIMARY KEY (`debit_note_id`),
   UNIQUE KEY `mprh_pr_refno` (`mprh_pr_refno`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
