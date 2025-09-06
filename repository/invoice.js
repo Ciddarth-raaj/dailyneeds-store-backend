@@ -448,14 +448,28 @@ class InvoiceRepository {
               throw new Error(invoiceResult.msg || "Failed to update invoice");
             }
 
-            // Handle invoice items
+            // Handle invoice items - implement replace all logic
             if (
               invoiceData.invoice_items &&
               Array.isArray(invoiceData.invoice_items)
             ) {
+              // Get all existing items for this invoice
+              const existingItems = await this.getAllInvoiceItemsWithConnection(
+                connection,
+                invoiceId
+              );
+
+              // Create a set of product_ids from the new items
+              const newProductIds = new Set();
+              const newInvoiceItemIds = new Set();
+
+              // Process new items
               for (const item of invoiceData.invoice_items) {
                 if (item.invoice_item_id) {
-                  // Update existing item
+                  // Track items being updated by ID
+                  newInvoiceItemIds.add(item.invoice_item_id);
+                  
+                  // Update existing item by ID
                   const updateResult =
                     await this.updateInvoiceItemWithConnection(
                       connection,
@@ -468,15 +482,61 @@ class InvoiceRepository {
                     );
                   }
                 } else {
-                  // Create new item
-                  item.invoice_id = invoiceId;
-                  const createResult =
-                    await this.createInvoiceItemWithConnection(
-                      connection,
-                      item
+                  // Track product IDs being added/updated
+                  newProductIds.add(item.product_id);
+                  
+                  // Check if product already exists in this invoice
+                  const existingItem = await this.getInvoiceItemByProductWithConnection(
+                    connection,
+                    invoiceId,
+                    item.product_id
+                  );
+                  
+                  if (existingItem) {
+                    // Update existing item by product_id
+                    item.invoice_id = invoiceId;
+                    const updateResult =
+                      await this.updateInvoiceItemByProductWithConnection(
+                        connection,
+                        invoiceId,
+                        item.product_id,
+                        item
+                      );
+                    if (updateResult.code !== 200) {
+                      throw new Error(
+                        `Failed to update existing invoice item for product: ${item.product_id}`
+                      );
+                    }
+                  } else {
+                    // Create new item
+                    item.invoice_id = invoiceId;
+                    const createResult =
+                      await this.createInvoiceItemWithConnection(
+                        connection,
+                        item
+                      );
+                    if (createResult.code !== 200) {
+                      throw new Error("Failed to create invoice item");
+                    }
+                  }
+                }
+              }
+
+              // Delete items that are not in the new list
+              for (const existingItem of existingItems) {
+                const shouldDelete = !newInvoiceItemIds.has(existingItem.invoice_item_id) && 
+                                   !newProductIds.has(existingItem.product_id);
+                
+                if (shouldDelete) {
+                  const deleteResult = await this.deleteInvoiceItemByProductWithConnection(
+                    connection,
+                    invoiceId,
+                    existingItem.product_id
+                  );
+                  if (deleteResult.code !== 200) {
+                    throw new Error(
+                      `Failed to delete invoice item for product: ${existingItem.product_id}`
                     );
-                  if (createResult.code !== 200) {
-                    throw new Error("Failed to create invoice item");
                   }
                 }
               }
@@ -724,6 +784,127 @@ class InvoiceRepository {
             return;
           }
           resolve({ code: 200, msg: "Invoice item deleted successfully" });
+        }
+      );
+    });
+  }
+
+  // Get invoice item by product_id with connection (for transactions)
+  getInvoiceItemByProductWithConnection(connection, invoiceId, productId) {
+    return new Promise((resolve, reject) => {
+      connection.query(
+        `SELECT * FROM invoice_items WHERE invoice_id = ? AND product_id = ?`,
+        [invoiceId, productId],
+        (err, results) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.INVOICE",
+              code: "REPOSITORY.INVOICE.GET_ITEM_BY_PRODUCT",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(results.length > 0 ? results[0] : null);
+        }
+      );
+    });
+  }
+
+  // Get all invoice items for an invoice with connection (for transactions)
+  getAllInvoiceItemsWithConnection(connection, invoiceId) {
+    return new Promise((resolve, reject) => {
+      connection.query(
+        `SELECT * FROM invoice_items WHERE invoice_id = ?`,
+        [invoiceId],
+        (err, results) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.INVOICE",
+              code: "REPOSITORY.INVOICE.GET_ALL_ITEMS",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(results);
+        }
+      );
+    });
+  }
+
+  // Delete invoice item by product_id with connection (for transactions)
+  deleteInvoiceItemByProductWithConnection(connection, invoiceId, productId) {
+    return new Promise((resolve, reject) => {
+      connection.query(
+        `DELETE FROM invoice_items WHERE invoice_id = ? AND product_id = ?`,
+        [invoiceId, productId],
+        (err, results) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.INVOICE",
+              code: "REPOSITORY.INVOICE.DELETE_ITEM_BY_PRODUCT",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve({ code: 200, msg: "Invoice item deleted successfully" });
+        }
+      );
+    });
+  }
+
+  // Update invoice item by product_id with connection (for transactions)
+  updateInvoiceItemByProductWithConnection(connection, invoiceId, productId, invoiceItemData) {
+    return new Promise((resolve, reject) => {
+      connection.query(
+        `UPDATE invoice_items SET 
+         product_id = ?, quantity = ?, cost = ?, discount = ?, tax = ?, 
+         tax_amount = ?, markup_percentage = ?, final_selling_price = ?, 
+         puom = ?, suom = ?, updated_at = NOW()
+         WHERE invoice_id = ? AND product_id = ?`,
+        [
+          invoiceItemData.product_id,
+          invoiceItemData.quantity || 0,
+          invoiceItemData.cost || 0,
+          invoiceItemData.discount || 0,
+          invoiceItemData.tax || 0,
+          invoiceItemData.tax_amount || 0,
+          invoiceItemData.markup_percentage || 0,
+          invoiceItemData.final_selling_price || 0,
+          invoiceItemData.puom || null,
+          invoiceItemData.suom || null,
+          invoiceId,
+          productId,
+        ],
+        (err, results) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.INVOICE",
+              code: "REPOSITORY.INVOICE.UPDATE_ITEM_BY_PRODUCT",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          if (results.affectedRows === 0) {
+            resolve({ code: 404, msg: "Invoice item not found" });
+            return;
+          }
+          resolve({ code: 200, msg: "Invoice item updated successfully" });
         }
       );
     });
