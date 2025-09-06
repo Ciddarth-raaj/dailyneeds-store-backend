@@ -86,7 +86,7 @@ class InvoiceRoutes {
     router.get("/", async (req, res) => {
       try {
         const schema = {
-          limit: Joi.number().min(1).max(100).optional(),
+          limit: Joi.number().min(1).optional(),
           offset: Joi.number().min(0).optional(),
         };
 
