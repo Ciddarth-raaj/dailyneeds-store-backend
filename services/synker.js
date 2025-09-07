@@ -51,24 +51,28 @@ class Synker {
         };
         await this.productUsecase.create(formattedProduct[i]);
       }
+      console.log("INSERTING PRODUCTS Done");
 
       for (const i in categories) {
         await this.categoryUsecase.upsert(categories[i]);
       }
+      console.log("INSERTING CATEGORIES Done");
 
       for (const i of Object.keys(subcategories)) {
         await this.subcategoryUsecase.upsert(subcategories[i]);
       }
+      console.log("INSERTING SUBCATEGORIES Done");
 
       for (const i of Object.keys(brands)) {
         await this.brandUsecase.upsert(brands[i]);
       }
+      console.log("INSERTING BRANDS Done");
 
       for (const i in departments) {
         await this.departmentUsecase.upsert(departments[i]);
       }
+      console.log("INSERTING DEPARTMENTS Done");
 
-      console.log("Done");
     } catch (err) {
       console.log(err);
     }
@@ -157,7 +161,6 @@ class Synker {
       const products = {};
 
       for (const item of goFrugalItems) {
-        console.log(item);
 
         products[item.itemId] = {
           gf_item_name: item.itemName,
