@@ -14,6 +14,7 @@ class InvoiceRoutes {
       try {
         const schema = {
           invoice_id: Joi.string().min(1).optional(),
+          supplier_id: Joi.number().min(1).optional(),
           invoice_items: Joi.array()
             .items(
               Joi.object({
@@ -189,15 +190,25 @@ class InvoiceRoutes {
           invoiceId: Joi.string().required(),
         };
 
+        const updateSchema = {
+          supplier_id: Joi.number().min(1).optional(),
+        };
+
         const data = req.params;
         const isValid = Joi.validate(data, schema);
         if (isValid.error !== null) {
           throw isValid.error;
         }
 
+        const updateData = req.body;
+        const isUpdateValid = Joi.validate(updateData, updateSchema);
+        if (isUpdateValid.error !== null) {
+          throw isUpdateValid.error;
+        }
+
         const response = await this.invoiceUsecase.updateInvoice(
           data.invoiceId,
-          req.body
+          updateData
         );
         res.json(response);
       } catch (err) {

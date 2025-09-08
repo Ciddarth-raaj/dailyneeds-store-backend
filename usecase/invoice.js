@@ -37,6 +37,16 @@ class InvoiceUsecase {
           return;
         }
 
+        // Validate supplier_id if provided
+        if (
+          invoiceData.supplier_id &&
+          (typeof invoiceData.supplier_id !== "number" ||
+            invoiceData.supplier_id < 1)
+        ) {
+          resolve({ code: 400, msg: "Supplier ID must be a positive number" });
+          return;
+        }
+
         const result = await this.invoiceRepo.createInvoiceWithItems(
           invoiceData
         );
