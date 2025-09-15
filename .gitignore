@@ -4,3 +4,4 @@ config.json
 .DS_Store
 migrations/*/database.json 
 .env
+logs/

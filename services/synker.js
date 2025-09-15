@@ -1,6 +1,7 @@
 const axios = require("axios");
 const cron = require("node-cron");
-const moment = require("moment");
+const fs = require("fs");
+const path = require("path");
 
 const logger = require("../utils/logger");
 
@@ -9,8 +10,6 @@ const GOFRUGAL_API_KEY =
   "92389031420AEF2B22174FA933F178040AFD9395A5E9C3F013A74C4CA152CE786116998975B7AF31";
 
 const CRON_SYNTAX_PRODUCT = "0 6 * * *";
-const CRON_SYNTAX_PRODUCT_PREF = "0 6 * * *";
-const CRON_SYNTAX_GENERAL = "0 7,16 * * *";
 
 class Synker {
   constructor(
@@ -25,6 +24,85 @@ class Synker {
     this.departmentUsecase = departmentUsecase;
     this.subcategoryUsecase = subcategoryUsecase;
     this.brandUsecase = brandUsecase;
+  }
+
+  initCronJobs() {
+    // Schedule CRON job for product sync
+    cron.schedule(CRON_SYNTAX_PRODUCT, () => {
+      console.log(`Running scheduled product sync at ${new Date().toISOString()}`);
+      this.syncProductsWithLogging();
+    });
+    
+    console.log(`Product sync CRON job scheduled with syntax: ${CRON_SYNTAX_PRODUCT}`);
+  }
+
+  async syncProductsWithLogging() {
+    const startTime = new Date();
+    const logEntry = {
+      timestamp: startTime.toISOString(),
+      startTime: startTime.toLocaleString(),
+      status: 'started'
+    };
+
+    try {
+      console.log(`Product sync started at ${logEntry.startTime}`);
+      
+      // Call the original syncProducts method
+      const result = await this.syncProducts();
+      
+      const endTime = new Date();
+      const timeTaken = endTime - startTime;
+      
+      logEntry.endTime = endTime.toLocaleString();
+      logEntry.timeTakenMs = timeTaken;
+      logEntry.timeTakenSeconds = Math.round(timeTaken / 1000);
+      logEntry.status = 'completed';
+      logEntry.productsProcessed = result?.productsProcessed || 0;
+      logEntry.categoriesProcessed = result?.categoriesProcessed || 0;
+      logEntry.subcategoriesProcessed = result?.subcategoriesProcessed || 0;
+      logEntry.brandsProcessed = result?.brandsProcessed || 0;
+      logEntry.departmentsProcessed = result?.departmentsProcessed || 0;
+      
+      console.log(`Product sync completed in ${logEntry.timeTakenSeconds} seconds. Products: ${logEntry.productsProcessed}`);
+      
+      // Write to log file
+      this.writeToLogFile(logEntry);
+      
+    } catch (error) {
+      const endTime = new Date();
+      const timeTaken = endTime - startTime;
+      
+      logEntry.endTime = endTime.toLocaleString();
+      logEntry.timeTakenMs = timeTaken;
+      logEntry.timeTakenSeconds = Math.round(timeTaken / 1000);
+      logEntry.status = 'failed';
+      logEntry.error = error.message;
+      
+      console.error(`Product sync failed after ${logEntry.timeTakenSeconds} seconds: ${error.message}`);
+      
+      // Write error to log file
+      this.writeToLogFile(logEntry);
+    }
+  }
+
+  writeToLogFile(logEntry) {
+    try {
+      const logDir = path.join(__dirname, '..', 'logs');
+      
+      // Create logs directory if it doesn't exist
+      if (!fs.existsSync(logDir)) {
+        fs.mkdirSync(logDir, { recursive: true });
+      }
+      
+      const logFile = path.join(logDir, 'product-sync.log');
+      const logLine = JSON.stringify(logEntry) + '\n';
+      
+      // Append to log file
+      fs.appendFileSync(logFile, logLine);
+      
+    } catch (error) {
+      console.error('Failed to write to log file:', error.message);
+    }
   }
 
   async syncProducts() {
@@ -44,37 +122,57 @@ class Synker {
         formattedProduct,
       } = this.formatProducts(deliumItems);
 
+      let productsProcessed = 0;
+      let categoriesProcessed = 0;
+      let subcategoriesProcessed = 0;
+      let brandsProcessed = 0;
+      let departmentsProcessed = 0;
+
       for (const i in formattedProduct) {
         formattedProduct[i] = {
           ...formattedProduct[i],
           ...products[formattedProduct[i].product_id],
         };
         await this.productUsecase.create(formattedProduct[i]);
+        productsProcessed++;
       }
       console.log("INSERTING PRODUCTS Done");
 
       for (const i in categories) {
         await this.categoryUsecase.upsert(categories[i]);
+        categoriesProcessed++;
       }
       console.log("INSERTING CATEGORIES Done");
 
       for (const i of Object.keys(subcategories)) {
         await this.subcategoryUsecase.upsert(subcategories[i]);
+        subcategoriesProcessed++;
       }
       console.log("INSERTING SUBCATEGORIES Done");
 
       for (const i of Object.keys(brands)) {
         await this.brandUsecase.upsert(brands[i]);
+        brandsProcessed++;
       }
       console.log("INSERTING BRANDS Done");
 
       for (const i in departments) {
         await this.departmentUsecase.upsert(departments[i]);
+        departmentsProcessed++;
       }
       console.log("INSERTING DEPARTMENTS Done");
 
+      return {
+        productsProcessed,
+        categoriesProcessed,
+        subcategoriesProcessed,
+        brandsProcessed,
+        departmentsProcessed
+      };
+
     } catch (err) {
       console.log(err);
+      throw err;
     }
   }
 

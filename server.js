@@ -393,7 +393,9 @@ class Server {
       this.departmentUsecase,
       this.brandUsecase
     );
-    this.synker.syncProducts();
+    
+    this.synker.syncProductsWithLogging();
+    this.synker.initCronJobs();
   }
 
   onClose() {
