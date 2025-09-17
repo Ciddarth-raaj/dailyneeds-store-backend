@@ -159,6 +159,7 @@ class Server {
       this.mysql.connection
     );
     this.invoiceRepo = require("./repository/invoice")(this.mysql.connection);
+    this.repackItemRepo = require("./repository/repack_item")(this.mysql.connection);
   }
 
   initUsecases() {
@@ -263,6 +264,7 @@ class Server {
       this.purchaseOrderRepo
     );
     this.invoiceUsecase = require("./usecase/invoice")(this.invoiceRepo);
+    this.repackItemUsecase = require("./usecase/repack_item")(this.repackItemRepo);
   }
 
   initRoutes() {
@@ -341,6 +343,7 @@ class Server {
       this.purchaseOrderUsecase
     );
     const invoiceRouter = require("./routes/invoice")(this.invoiceUsecase);
+    const repackItemRouter = require("./routes/repack_item")(this.repackItemUsecase);
     app.use("/document", documentRouter.getRouter());
     app.use("/whatsapp", whatsappRouter.getRouter());
     app.use("/budget", budgetRouter.getRouter());
@@ -383,6 +386,7 @@ class Server {
     app.use("/material_request", materialRequestRoutes.getRouter());
     app.use("/purchase-order", purchaseOrderRouter.getRouter());
     app.use("/invoice", invoiceRouter.getRouter());
+    app.use("/repack-item", repackItemRouter.getRouter());
   }
 
   initServices() {
