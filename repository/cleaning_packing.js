@@ -112,7 +112,7 @@ class CleaningPackingRepository {
 
       query += ` ORDER BY 
           pi.num_stores_oos DESC,
-          pi.chain_bill_count_level DESC,
+          pi.chain_bill_count_level ASC,
           pi.priority_score DESC,
           CASE 
             WHEN pi.planner = 'mass' THEN 1
