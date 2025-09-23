@@ -33,17 +33,21 @@ class Synker {
   initCronJobs() {
     // Schedule CRON job for product sync
     cron.schedule(CRON_SYNTAX_PRODUCT, () => {
-      console.log(`Running scheduled product sync at ${new Date().toISOString()}`);
+      console.log(
+        `Running scheduled product sync at ${new Date().toISOString()}`
+      );
       this.syncProductsWithLogging();
     });
-    
-    cron.schedule(CRON_SYNTAX_CLEANING_PACKING, () => {
-      console.log(`Running scheduled cleaning packing sync at ${new Date().toISOString()}`);
-      this.syncCleaningPacking();
-    });
-    
-    console.log(`Product sync CRON job scheduled with syntax: ${CRON_SYNTAX_PRODUCT}`);
-    console.log(`Cleaning packing sync CRON job scheduled with syntax: ${CRON_SYNTAX_CLEANING_PACKING}`);
+
+    // cron.schedule(CRON_SYNTAX_CLEANING_PACKING, () => {
+    //   console.log(`Running scheduled cleaning packing sync at ${new Date().toISOString()}`);
+    //   this.syncCleaningPacking();
+    // });
+
+    console.log(
+      `Product sync CRON job scheduled with syntax: ${CRON_SYNTAX_PRODUCT}`
+    );
+    // console.log(`Cleaning packing sync CRON job scheduled with syntax: ${CRON_SYNTAX_CLEANING_PACKING}`);
   }
 
   async syncProductsWithLogging() {
@@ -51,45 +55,48 @@ class Synker {
     const logEntry = {
       timestamp: startTime.toISOString(),
       startTime: startTime.toLocaleString(),
-      status: 'started'
+      status: "started",
     };
 
     try {
       console.log(`Product sync started at ${logEntry.startTime}`);
-      
+
       // Call the original syncProducts method
       const result = await this.syncProducts();
-      
+
       const endTime = new Date();
       const timeTaken = endTime - startTime;
-      
+
       logEntry.endTime = endTime.toLocaleString();
       logEntry.timeTakenMs = timeTaken;
       logEntry.timeTakenSeconds = Math.round(timeTaken / 1000);
-      logEntry.status = 'completed';
+      logEntry.status = "completed";
       logEntry.productsProcessed = result?.productsProcessed || 0;
       logEntry.categoriesProcessed = result?.categoriesProcessed || 0;
       logEntry.subcategoriesProcessed = result?.subcategoriesProcessed || 0;
       logEntry.brandsProcessed = result?.brandsProcessed || 0;
       logEntry.departmentsProcessed = result?.departmentsProcessed || 0;
-      
-      console.log(`Product sync completed in ${logEntry.timeTakenSeconds} seconds. Products: ${logEntry.productsProcessed}`);
-      
+
+      console.log(
+        `Product sync completed in ${logEntry.timeTakenSeconds} seconds. Products: ${logEntry.productsProcessed}`
+      );
+
       // Write to log file
       this.writeToLogFile(logEntry);
-      
     } catch (error) {
       const endTime = new Date();
       const timeTaken = endTime - startTime;
-      
+
       logEntry.endTime = endTime.toLocaleString();
       logEntry.timeTakenMs = timeTaken;
       logEntry.timeTakenSeconds = Math.round(timeTaken / 1000);
-      logEntry.status = 'failed';
+      logEntry.status = "failed";
       logEntry.error = error.message;
-      
-      console.error(`Product sync failed after ${logEntry.timeTakenSeconds} seconds: ${error.message}`);
-      
+
+      console.error(
+        `Product sync failed after ${logEntry.timeTakenSeconds} seconds: ${error.message}`
+      );
+
       // Write error to log file
       this.writeToLogFile(logEntry);
     }
@@ -97,21 +104,20 @@ class Synker {
 
   writeToLogFile(logEntry) {
     try {
-      const logDir = path.join(__dirname, '..', 'logs');
-      
+      const logDir = path.join(__dirname, "..", "logs");
+
       // Create logs directory if it doesn't exist
       if (!fs.existsSync(logDir)) {
         fs.mkdirSync(logDir, { recursive: true });
       }
-      
-      const logFile = path.join(logDir, 'product-sync.log');
-      const logLine = JSON.stringify(logEntry) + '\n';
-      
+
+      const logFile = path.join(logDir, "product-sync.log");
+      const logLine = JSON.stringify(logEntry) + "\n";
+
       // Append to log file
       fs.appendFileSync(logFile, logLine);
-      
     } catch (error) {
-      console.error('Failed to write to log file:', error.message);
+      console.error("Failed to write to log file:", error.message);
     }
   }
 
@@ -121,21 +127,21 @@ class Synker {
       const deliumCleaningPacking = await this._fetchDeliumCleaningPacking();
       for (const item of deliumCleaningPacking) {
         await this.cleaningPackingUsecase.create({
-          "purchase_item": item.purchase_item,
-          "purchase_item_name": item.purchase_item_name,
-          "article_id": item.article_id,
-          "article_name": item.article_name,
-          "priority_score": item.priority_score ,
-          "repackage_conversion": item.repackage_conversion,
-          "planner": item.planner,
-          "repack_quantity": item.repack_quantity,
-          "forecast_quantity": item.forecast_quantity,
-          "order_date": moment(item.order_date).format("YYYY-MM-DD"),
-          "child_stock_in_hand": item.child_stock_in_hand,
-          "parent_stock": item.parent_stock,
-          "store_uom": item.store_uom,
-          "num_stores_oos": item.num_stores_oos,
-          "chain_bill_count_level": item.chain_bill_count_level
+          purchase_item: item.purchase_item,
+          purchase_item_name: item.purchase_item_name,
+          article_id: item.article_id,
+          article_name: item.article_name,
+          priority_score: item.priority_score,
+          repackage_conversion: item.repackage_conversion,
+          planner: item.planner,
+          repack_quantity: item.repack_quantity,
+          forecast_quantity: item.forecast_quantity,
+          order_date: moment(item.order_date).format("YYYY-MM-DD"),
+          child_stock_in_hand: item.child_stock_in_hand,
+          parent_stock: item.parent_stock,
+          store_uom: item.store_uom,
+          num_stores_oos: item.num_stores_oos,
+          chain_bill_count_level: item.chain_bill_count_level,
         });
       }
       console.log("INSERTING CLEANING PACKING Done");
@@ -207,9 +213,8 @@ class Synker {
         categoriesProcessed,
         subcategoriesProcessed,
         brandsProcessed,
-        departmentsProcessed
+        departmentsProcessed,
       };
-
     } catch (err) {
       console.log(err);
       throw err;
@@ -299,7 +304,6 @@ class Synker {
       const products = {};
 
       for (const item of goFrugalItems) {
-
         products[item.itemId] = {
           gf_item_name: item.itemName,
           gf_description: item.description,
@@ -364,7 +368,7 @@ class Synker {
       }
     });
   }
-  
+
   _fetchDeliumCleaningPacking(forDate = moment().format("YYYY-MM-DD")) {
     return new Promise(async (resolve, reject) => {
       try {
