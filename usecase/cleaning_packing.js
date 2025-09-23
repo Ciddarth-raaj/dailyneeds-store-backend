@@ -1,6 +1,11 @@
 class CleaningPackingUsecase {
   constructor(cleaningPackingRepo) {
     this.cleaningPackingRepo = cleaningPackingRepo;
+    this.synker = null;
+  }
+
+  setSynker(synker) {
+    this.synker = synker;
   }
 
   create(purchaseItem) {
@@ -40,6 +45,20 @@ class CleaningPackingUsecase {
       try {
         const result = await this.cleaningPackingRepo.deleteAll();
         resolve(result);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
+  sync() {
+    return new Promise(async (resolve, reject) => {
+      try {
+        if (!this.synker || !this.synker.syncCleaningPacking) {
+          throw new Error("Synker service not initialised");
+        }
+        await this.synker.syncCleaningPacking();
+        resolve({ code: 200 });
       } catch (err) {
         reject(err);
       }

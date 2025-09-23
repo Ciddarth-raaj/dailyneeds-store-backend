@@ -26,7 +26,7 @@ class CleaningPackingRoutes {
           parent_stock: Joi.number().allow(null),
           store_uom: Joi.number().allow(null),
           num_stores_oos: Joi.number().allow(null),
-          chain_bill_count_level: Joi.string().allow(null, "")
+          chain_bill_count_level: Joi.string().allow(null, ""),
         };
 
         const purchaseItem = req.body;
@@ -38,7 +38,11 @@ class CleaningPackingRoutes {
         }
 
         const result = await this.cleaningPackingUsecase.create(purchaseItem);
-        res.json({ code: 200, msg: "Purchase item created successfully", data: result });
+        res.json({
+          code: 200,
+          msg: "Purchase item created successfully",
+          data: result,
+        });
       } catch (err) {
         console.log(err);
         if (err.name === "ValidationError") {
@@ -53,37 +57,53 @@ class CleaningPackingRoutes {
     router.get("/", async (req, res) => {
       try {
         const filters = {};
-        
+
         // Date filter
         if (req.query.date) {
           filters.date = req.query.date;
         }
-        
+
         // Cleaning filter
         if (req.query.cleaning !== undefined) {
-          filters.cleaning = req.query.cleaning === 'true' ? true : req.query.cleaning === 'false' ? false : null;
+          filters.cleaning =
+            req.query.cleaning === "true"
+              ? true
+              : req.query.cleaning === "false"
+              ? false
+              : null;
         }
-        
+
         // Packing type filter
         if (req.query.packing_type !== undefined) {
-          filters.packing_type = req.query.packing_type ? parseInt(req.query.packing_type) : null;
+          filters.packing_type = req.query.packing_type
+            ? parseInt(req.query.packing_type)
+            : null;
         }
-        
+
         // Packing material filter
         if (req.query.packing_material !== undefined) {
-          filters.packing_material = req.query.packing_material ? parseInt(req.query.packing_material) : null;
+          filters.packing_material = req.query.packing_material
+            ? parseInt(req.query.packing_material)
+            : null;
         }
-        
+
         // Packing material size filter
         if (req.query.packing_material_size !== undefined) {
-          filters.packing_material_size = req.query.packing_material_size ? parseInt(req.query.packing_material_size) : null;
+          filters.packing_material_size = req.query.packing_material_size
+            ? parseInt(req.query.packing_material_size)
+            : null;
         }
-        
+
         // Sticker filter
         if (req.query.sticker !== undefined) {
-          filters.sticker = req.query.sticker === 'true' ? true : req.query.sticker === 'false' ? false : null;
+          filters.sticker =
+            req.query.sticker === "true"
+              ? true
+              : req.query.sticker === "false"
+              ? false
+              : null;
         }
-        
+
         const purchaseItems = await this.cleaningPackingUsecase.getAll(filters);
         res.json({ code: 200, data: purchaseItems });
       } catch (err) {
@@ -96,7 +116,22 @@ class CleaningPackingRoutes {
     router.delete("/", async (req, res) => {
       try {
         const result = await this.cleaningPackingUsecase.deleteAll();
-        res.json({ code: 200, msg: "All purchase items deleted successfully", data: result });
+        res.json({
+          code: 200,
+          msg: "All purchase items deleted successfully",
+          data: result,
+        });
+      } catch (err) {
+        console.log(err);
+        res.json({ code: 500, msg: "An error occurred!" });
+      }
+    });
+
+    // Sync all data
+    router.post("/sync", async (req, res) => {
+      try {
+        const result = await this.cleaningPackingUsecase.sync();
+        res.json({ code: 200, msg: "Data successfully synced!" });
       } catch (err) {
         console.log(err);
         res.json({ code: 500, msg: "An error occurred!" });

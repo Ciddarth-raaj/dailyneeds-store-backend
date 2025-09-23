@@ -415,6 +415,10 @@ class Server {
       this.cleaningPackingUsecase
     );
     this.synker.initCronJobs();
+    // Wire synker back into cleaningPackingUsecase after service creation
+    if (this.cleaningPackingUsecase && this.cleaningPackingUsecase.setSynker) {
+      this.cleaningPackingUsecase.setSynker(this.synker);
+    }
   }
 
   onClose() {
