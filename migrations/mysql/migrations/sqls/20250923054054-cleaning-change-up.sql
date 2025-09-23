@@ -1,0 +1,2 @@
+ALTER TABLE `purchase_item` DROP PRIMARY KEY;
+ALTER TABLE `purchase_item` ADD COLUMN `packing_cleaning_id` BIGINT AUTO_INCREMENT PRIMARY KEY FIRST;
