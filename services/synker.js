@@ -2,6 +2,7 @@ const axios = require("axios");
 const cron = require("node-cron");
 const fs = require("fs");
 const path = require("path");
+const moment = require("moment");
 
 const logger = require("../utils/logger");
 
@@ -10,6 +11,7 @@ const GOFRUGAL_API_KEY =
   "92389031420AEF2B22174FA933F178040AFD9395A5E9C3F013A74C4CA152CE786116998975B7AF31";
 
 const CRON_SYNTAX_PRODUCT = "0 6 * * *";
+const CRON_SYNTAX_CLEANING_PACKING = "0 9 * * *";
 
 class Synker {
   constructor(
@@ -17,13 +19,15 @@ class Synker {
     categoryUsecase,
     subcategoryUsecase,
     departmentUsecase,
-    brandUsecase
+    brandUsecase,
+    cleaningPackingUsecase
   ) {
     this.productUsecase = productUsecase;
     this.categoryUsecase = categoryUsecase;
     this.departmentUsecase = departmentUsecase;
     this.subcategoryUsecase = subcategoryUsecase;
     this.brandUsecase = brandUsecase;
+    this.cleaningPackingUsecase = cleaningPackingUsecase;
   }
 
   initCronJobs() {
@@ -33,7 +37,13 @@ class Synker {
       this.syncProductsWithLogging();
     });
     
+    cron.schedule(CRON_SYNTAX_CLEANING_PACKING, () => {
+      console.log(`Running scheduled cleaning packing sync at ${new Date().toISOString()}`);
+      this.syncCleaningPacking();
+    });
+    
     console.log(`Product sync CRON job scheduled with syntax: ${CRON_SYNTAX_PRODUCT}`);
+    console.log(`Cleaning packing sync CRON job scheduled with syntax: ${CRON_SYNTAX_CLEANING_PACKING}`);
   }
 
   async syncProductsWithLogging() {
@@ -102,6 +112,36 @@ class Synker {
       
     } catch (error) {
       console.error('Failed to write to log file:', error.message);
+    }
+  }
+
+  async syncCleaningPacking() {
+    try {
+      await this.cleaningPackingUsecase.deleteAll();
+      const deliumCleaningPacking = await this._fetchDeliumCleaningPacking();
+      for (const item of deliumCleaningPacking) {
+        await this.cleaningPackingUsecase.create({
+          "purchase_item": item.purchase_item,
+          "purchase_item_name": item.purchase_item_name,
+          "article_id": item.article_id,
+          "article_name": item.article_name,
+          "priority_score": item.priority_score ,
+          "repackage_conversion": item.repackage_conversion,
+          "planner": item.planner,
+          "repack_quantity": item.repack_quantity,
+          "forecast_quantity": item.forecast_quantity,
+          "order_date": moment(item.order_date).format("YYYY-MM-DD"),
+          "child_stock_in_hand": item.child_stock_in_hand,
+          "parent_stock": item.parent_stock,
+          "store_uom": item.store_uom,
+          "num_stores_oos": item.num_stores_oos,
+          "chain_bill_count_level": item.chain_bill_count_level
+        });
+      }
+      console.log("INSERTING CLEANING PACKING Done");
+    } catch (err) {
+      console.log(err);
+      throw err;
     }
   }
 
@@ -324,6 +364,43 @@ class Synker {
       }
     });
   }
+  
+  _fetchDeliumCleaningPacking(forDate = moment().format("YYYY-MM-DD")) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const response = await axios({
+          method: "GET",
+          url: `https://dailyneeds.delium.io/api/api/repackaging?for_date=${forDate}`,
+          headers: {
+            "X-DELIUM-KEY": DELIUM_API_KEY,
+          },
+        });
+        if (response.status !== 200) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "SERVICE.SYNKER",
+            code: "SERVICE.SYNKER.DELIUM-CLEANING-PACKING-FETCH",
+            description: err.toString(),
+            category: "",
+            ref: {},
+          });
+          reject();
+          return;
+        }
+        resolve(response.data);
+      } catch (err) {
+        logger.Log({
+          level: logger.LEVEL.ERROR,
+          component: "SERVICE.SYNKER",
+          code: "SERVICE.SYNKER.DELIUM-CLEANING-PACKING-FETCH",
+          description: err.toString(),
+          category: "",
+          ref: {},
+        });
+        reject(err);
+      }
+    });
+  }
 
   formatProducts(products) {
     const brands = {};
@@ -428,13 +505,15 @@ module.exports = (
   categoryUsecase,
   subcategoryUsecase,
   departmentUsecase,
-  brandUsecase
+  brandUsecase,
+  cleaningPackingUsecase
 ) => {
   return new Synker(
     productUsecase,
     categoryUsecase,
     subcategoryUsecase,
     departmentUsecase,
-    brandUsecase
+    brandUsecase,
+    cleaningPackingUsecase
   );
 };

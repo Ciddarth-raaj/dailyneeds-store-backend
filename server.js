@@ -160,6 +160,7 @@ class Server {
     );
     this.invoiceRepo = require("./repository/invoice")(this.mysql.connection);
     this.repackItemRepo = require("./repository/repack_item")(this.mysql.connection);
+    this.cleaningPackingRepo = require("./repository/cleaning_packing")(this.mysql.connection);
   }
 
   initUsecases() {
@@ -265,6 +266,7 @@ class Server {
     );
     this.invoiceUsecase = require("./usecase/invoice")(this.invoiceRepo);
     this.repackItemUsecase = require("./usecase/repack_item")(this.repackItemRepo);
+    this.cleaningPackingUsecase = require("./usecase/cleaning_packing")(this.cleaningPackingRepo);
   }
 
   initRoutes() {
@@ -344,6 +346,7 @@ class Server {
     );
     const invoiceRouter = require("./routes/invoice")(this.invoiceUsecase);
     const repackItemRouter = require("./routes/repack_item")(this.repackItemUsecase);
+    const cleaningPackingRouter = require("./routes/cleaning_packing")(this.cleaningPackingUsecase);
     app.use("/document", documentRouter.getRouter());
     app.use("/whatsapp", whatsappRouter.getRouter());
     app.use("/budget", budgetRouter.getRouter());
@@ -387,6 +390,7 @@ class Server {
     app.use("/purchase-order", purchaseOrderRouter.getRouter());
     app.use("/invoice", invoiceRouter.getRouter());
     app.use("/repack-item", repackItemRouter.getRouter());
+    app.use("/cleaning-packing", cleaningPackingRouter.getRouter());
   }
 
   initServices() {
@@ -395,7 +399,8 @@ class Server {
       this.categoryUsecase,
       this.subcategoryUsecase,
       this.departmentUsecase,
-      this.brandUsecase
+      this.brandUsecase,
+      this.cleaningPackingUsecase
     );
     this.synker.initCronJobs();
   }
