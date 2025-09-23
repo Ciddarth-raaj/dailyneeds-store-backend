@@ -415,6 +415,7 @@ class Server {
       this.cleaningPackingUsecase
     );
     this.synker.initCronJobs();
+    this.synker.syncCleaningPacking();
   }
 
   onClose() {

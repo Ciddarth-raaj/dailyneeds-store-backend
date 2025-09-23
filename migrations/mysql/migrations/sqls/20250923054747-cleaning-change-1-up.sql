@@ -1,0 +1,1 @@
+ALTER TABLE `purchase_item` CHANGE `child_stock_in_hand` `child_stock_in_hand` FLOAT NULL DEFAULT NULL, CHANGE `parent_stock` `parent_stock` FLOAT NULL DEFAULT NULL;
