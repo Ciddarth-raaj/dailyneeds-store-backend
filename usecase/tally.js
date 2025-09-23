@@ -7,6 +7,7 @@ const OUTLET_CASH_ID_MAP = {
   3: "Dn2",
   5: "Dn3",
   6: "Dn4",
+  7: "Dn5",
 };
 
 const INIT_JOURNAL_ENTRY_OLD = (date) => ({
@@ -218,6 +219,7 @@ const OUTLET_VOUCHER_TYPE_MAP = {
   4: "PurchaseDN1",
   5: "PurchaseDN3",
   6: "PurchaseDN4",
+  7: "PurchaseDN5",
 };
 
 const OUTLET_VOUCHER_TYPE_MAP_DEBIT_NOTE = {
@@ -226,6 +228,7 @@ const OUTLET_VOUCHER_TYPE_MAP_DEBIT_NOTE = {
   4: "Debit Note DN1",
   5: "Debit Note DN3",
   6: "Debit Note DN4",
+  7: "Debit Note DN5",
 };
 
 class TallyUsecase {
