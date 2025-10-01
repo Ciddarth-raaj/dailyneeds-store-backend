@@ -210,8 +210,9 @@ class EmployeeUsecase {
     return new Promise(async (resolve, reject) => {
       try {
         const { code, id } = await this.employeeRepo.create(employee);
-        const id_card = employee.files[0].id_card;
-        if (id_card !== "") {
+        const id_card = employee?.files ? employee?.files[0]?.id_card : null;
+
+        if (id_card && id_card !== "") {
           for (let i = 0; i <= employee.files.length - 1; i++) {
             await this.documentUsecase.create({
               card_type: employee.files[i].id_card,
@@ -226,6 +227,7 @@ class EmployeeUsecase {
             });
           }
         }
+
         const data = await this.userRepo.createLogin(
           employee.primary_contact_number,
           "1",

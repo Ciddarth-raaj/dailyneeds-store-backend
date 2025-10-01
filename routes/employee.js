@@ -51,7 +51,7 @@ class EmployeeRoutes {
           department_id: Joi.number().required(),
           marital_status: Joi.string().optional(),
           marriage_date: Joi.string().allow("").allow(null).optional(),
-          employee_image: Joi.string().required(),
+          employee_image: Joi.string().allow("").allow(null).optional(),
           pan_no: Joi.string().allow("").allow(null).optional(),
           bank_name: Joi.string().allow("").allow(null).optional(),
           ifsc: Joi.string().allow("").optional(),
@@ -65,6 +65,9 @@ class EmployeeRoutes {
           spouse_name: Joi.string().allow("").allow(null).optional(),
           telegram_username: Joi.string().allow("").allow(null).optional(),
           online_portal: Joi.number().optional(),
+          aadhaar_card_no: Joi.string().allow("").allow(null).optional(),
+          aadhaar_card_name: Joi.string().allow("").allow(null).optional(),
+          aadhaar_card_image: Joi.string().allow("").allow(null).optional(),
           files: Joi.array()
             .items({
               id_card: Joi.string().allow("").allow(null).required(),

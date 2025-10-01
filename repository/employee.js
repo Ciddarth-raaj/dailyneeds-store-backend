@@ -8,7 +8,7 @@ class EmployeeRepository {
   create(employee) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "INSERT INTO new_employee (employee_id, employee_name, father_name, dob, permanent_address, residential_address, primary_contact_number, alternate_contact_number, email_id, qualification, introducer_name, introducer_details, salary, uniform_qty, previous_experience, date_of_joining, gender, blood_group, designation_id, store_id, shift_id, department_id, marital_status, marriage_date, employee_image, bank_name, ifsc, account_no, esi, esi_number, pf, pan_no, payment_type, pf_number, UAN, additional_course, spouse_name, online_portal, telegram_username) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO new_employee (employee_id, employee_name, father_name, dob, permanent_address, residential_address, primary_contact_number, alternate_contact_number, email_id, qualification, introducer_name, introducer_details, salary, uniform_qty, previous_experience, date_of_joining, gender, blood_group, designation_id, store_id, shift_id, department_id, marital_status, marriage_date, employee_image, bank_name, ifsc, account_no, esi, esi_number, pf, pan_no, payment_type, pf_number, UAN, additional_course, spouse_name, online_portal, telegram_username, aadhaar_card_no, aadhaar_card_name, aadhaar_card_image) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
           employee.employee_id,
           employee.employee_name,
@@ -49,6 +49,9 @@ class EmployeeRepository {
           employee.spouse_name,
           employee.online_portal,
           employee.telegram_username,
+          employee.aadhaar_card_no,
+          employee.aadhaar_card_name,
+          employee.aadhaar_card_image,
         ],
         (err, res) => {
           if (err) {
