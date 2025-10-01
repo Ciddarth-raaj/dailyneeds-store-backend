@@ -37,18 +37,37 @@ class DesignationUsecase {
     return new Promise(async (resolve, reject) => {
       try {
         const designation_id = designation.designation_id;
-        const { code } = await this.designationRepo.updateDesignationDetails(designation.designation_details, designation_id);  
+        const { code } = await this.designationRepo.updateDesignationDetails(
+          designation.designation_details,
+          designation_id
+        );
+
+        if (designation.permissions) {
+          await this.designationRepo.deletePermissions(designation_id);
+
+          for (let permission of designation.permissions) {
+            await this.designationRepo.createPermission(
+              permission,
+              designation_id
+            );
+          }
+        }
+
         resolve(code);
       } catch (err) {
         reject(err);
       }
     });
   }
-getDesignationById(designation_id) {
+  getDesignationById(designation_id) {
     return new Promise(async (resolve, reject) => {
       try {
         const data = await this.designationRepo.getById(designation_id);
-        resolve(data);
+        const resp = {
+          designations: data,
+        };
+        resp.permissions = await this.getPermissionById(designation_id, 1);
+        resolve(resp);
       } catch (err) {
         console.log(err);
         reject(err);
@@ -59,10 +78,13 @@ getDesignationById(designation_id) {
     return new Promise(async (resolve, reject) => {
       let data = [];
       try {
-        if(designation_id !== 4) {
-            data = await this.designationRepo.getPermissionById(designation_id, user_type);
+        if (designation_id !== 4) {
+          data = await this.designationRepo.getPermissionById(
+            designation_id,
+            user_type
+          );
         } else {
-            data = await this.designationRepo.getAllPermissions();
+          data = await this.designationRepo.getAllPermissions();
         }
         // console.log({data:data})
         resolve(data);
@@ -75,12 +97,12 @@ getDesignationById(designation_id) {
   getDesignationCount() {
     return new Promise(async (resolve, reject) => {
       try {
-        const data = await this.designationRepo.getDesignationCount()
-        resolve(data)
+        const data = await this.designationRepo.getDesignationCount();
+        resolve(data);
       } catch (err) {
         reject(err);
       }
-    })
+    });
   }
   create(designation) {
     return new Promise(async (resolve, reject) => {

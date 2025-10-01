@@ -26,21 +26,25 @@ class DesignationRepository {
   }
   getDesignationByBudget() {
     return new Promise((resolve, reject) => {
-      this.db.query("select designation.designation_id, designation.designation_name, budget.budget_id, budget.budget from designation LEFT JOIN budget ON budget.designation_name = designation.designation_name", [], (err, docs) => {
-        if (err) {
-          logger.Log({
-            level: logger.LEVEL.ERROR,
-            component: "REPOSITORY.DESIGNATION",
-            code: "REPOSITORY.DESIGNATION.GET",
-            description: err.toString(),
-            category: "",
-            ref: {},
-          });
-          reject(err);
-          return;
+      this.db.query(
+        "select designation.designation_id, designation.designation_name, budget.budget_id, budget.budget from designation LEFT JOIN budget ON budget.designation_name = designation.designation_name",
+        [],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.DESIGNATION",
+              code: "REPOSITORY.DESIGNATION.GET",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
         }
-        resolve(docs);
-      });
+      );
     });
   }
   getPermissions() {
@@ -81,35 +85,36 @@ class DesignationRepository {
             return;
           }
           resolve(docs);
-        });
+        }
+      );
     });
   }
   getById(designation_id) {
     return new Promise((resolve, reject) => {
-      this.db.query("SELECT * FROM designation where designation_id = ?",
-      [designation_id], 
-      (err, docs) => {
-        if (err) {
-          logger.Log({
-            level: logger.LEVEL.ERROR,
-            component: "REPOSITORY.DESIGNATION",
-            code: "REPOSITORY.DESIGNATION.GET-ID",
-            description: err.toString(),
-            category: "",
-            ref: {},
-          });
-          reject(err);
-          return;
+      this.db.query(
+        "SELECT * FROM designation where designation_id = ?",
+        [designation_id],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.DESIGNATION",
+              code: "REPOSITORY.DESIGNATION.GET-ID",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
         }
-        resolve(docs);
-      });
+      );
     });
   }
   getAllPermissions() {
     return new Promise((resolve, reject) => {
-      this.db.query("SELECT * FROM all_permissions",
-      [], 
-      (err, docs) => {
+      this.db.query("SELECT * FROM all_permissions", [], (err, docs) => {
         if (err) {
           logger.Log({
             level: logger.LEVEL.ERROR,
@@ -127,19 +132,16 @@ class DesignationRepository {
     });
   }
   getQuery(user_type) {
-    if(user_type === 2) {
-      return `SELECT * FROM all_permissions`
+    if (user_type === 2) {
+      return `SELECT * FROM all_permissions`;
     }
-    if(user_type === 1) {
-      return `SELECT permission_key FROM permissions WHERE designation_id = ?`
+    if (user_type === 1) {
+      return `SELECT permission_key FROM permissions WHERE designation_id = ?`;
     }
   }
   getPermissionById(designation_id, user_type) {
     return new Promise((resolve, reject) => {
-      this.db.query(
-        this.getQuery(user_type),
-      [designation_id], 
-      (err, docs) => {
+      this.db.query(this.getQuery(user_type), [designation_id], (err, docs) => {
         if (err) {
           logger.Log({
             level: logger.LEVEL.ERROR,
@@ -163,14 +165,14 @@ class DesignationRepository {
         [data, designation_id],
         (err, res) => {
           if (err) {
-              logger.Log({
-                level: logger.LEVEL.ERROR,
-                component: "REPOSITORY.DESIGNATION",
-                code: "REPOSITORY.DESIGNATION.UPDATE-DESIGNATION-DETAILS",
-                description: err.toString(),
-                category: "",
-                ref: {},
-              });
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.DESIGNATION",
+              code: "REPOSITORY.DESIGNATION.UPDATE-DESIGNATION-DETAILS",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
             reject(err);
             return;
           }
@@ -187,7 +189,7 @@ class DesignationRepository {
           designation.status,
           designation.designation_name,
           designation.online_portal,
-          designation.login_access
+          designation.login_access,
         ],
         (err, res) => {
           if (err) {
@@ -257,6 +259,30 @@ class DesignationRepository {
             return;
           }
           resolve({ code: 200, id: res.insertId });
+        }
+      );
+    });
+  }
+
+  deletePermissions(designation_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "DELETE FROM permissions where designation_id = ?",
+        [designation_id],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.DESIGNATION",
+              code: "REPOSITORY.DESIGNATION.DELETE-PERMISSIONS",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
         }
       );
     });

@@ -21,12 +21,13 @@ class DesignationRoutes {
         } else {
           res.json({ code: 500, msg: "An error occurred !" });
         }
-      }    
+      }
       res.end();
     });
     router.get("/budget", async (req, res) => {
       try {
-        const designation = await this.designationUsecase.getDesignationByBudget();
+        const designation =
+          await this.designationUsecase.getDesignationByBudget();
         res.json(designation);
       } catch (err) {
         console.log(err);
@@ -35,7 +36,7 @@ class DesignationRoutes {
         } else {
           res.json({ code: 500, msg: "An error occurred !" });
         }
-      }    
+      }
       res.end();
     });
     router.post("/update-status", async (req, res) => {
@@ -65,13 +66,16 @@ class DesignationRoutes {
     });
     router.get("/permissions", async (req, res) => {
       try {
-      const designation_id = req.decoded.designation_id;
-      const user_type = req.decoded.user_type;
-      const isValid = Joi.validate(designation_id);
-      if (isValid.error !== null) {
-        throw isValid.error;
-      }
-        const permission = await this.designationUsecase.getPermissionById(designation_id, user_type);
+        const designation_id = req.decoded.designation_id;
+        const user_type = req.decoded.user_type;
+        const isValid = Joi.validate(designation_id);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+        const permission = await this.designationUsecase.getPermissionById(
+          designation_id,
+          user_type
+        );
         res.json(permission);
       } catch (err) {
         console.log(err);
@@ -88,7 +92,7 @@ class DesignationRoutes {
         const designation = await this.designationUsecase.getDesignationCount();
         res.json(designation);
       } catch (err) {
-          console.log(err);
+        console.log(err);
         if (err.name === "ValidationError") {
           res.json({ code: 422, msg: err.toString() });
         } else {
@@ -100,7 +104,7 @@ class DesignationRoutes {
       try {
         const schema = {
           designation_id: Joi.number().required(),
-
+          permissions: Joi.array().items(Joi.string()).required(),
           designation_details: Joi.object({
             online_portal: Joi.number().required(),
             designation_name: Joi.string().required(),
@@ -115,7 +119,9 @@ class DesignationRoutes {
           throw isValid.error;
         }
 
-        const code = await this.designationUsecase.updateDesignationDetails(designation);
+        const code = await this.designationUsecase.updateDesignationDetails(
+          designation
+        );
         res.json({ code: code });
       } catch (err) {
         if (err.name === "ValidationError") {
@@ -131,13 +137,16 @@ class DesignationRoutes {
       try {
         const schema = {
           designation_id: Joi.string().required(),
-        }
+        };
         const designation = req.query;
         const isValid = Joi.validate(designation, schema);
         if (isValid.error !== null) {
           throw isValid.error;
         }
-        const data = await this.designationUsecase.getDesignationById(designation.designation_id);
+        const data = await this.designationUsecase.getDesignationById(
+          designation.designation_id
+        );
+        console.log(data);
         res.json(data);
       } catch (err) {
         console.log(err);
