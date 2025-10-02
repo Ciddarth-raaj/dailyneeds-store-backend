@@ -1,0 +1,1 @@
+ALTER TABLE `accounts` ADD `store_id` INT NULL AFTER `cashier_id`;

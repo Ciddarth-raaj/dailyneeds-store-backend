@@ -12,8 +12,8 @@ class AccountsRepository {
           date, total_sales, cash_handover_1, cash_handover_2, cash_handover_5, 
           cash_handover_10, cash_handover_20, cash_handover_50, cash_handover_100, 
           cash_handover_200, cash_handover_500, card_sales, loyalty, sales_return, 
-          cashier_id, user_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          cashier_id, user_id, store_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           account.date,
           account.total_sales,
@@ -31,6 +31,7 @@ class AccountsRepository {
           account.sales_return,
           account.cashier_id,
           account.user_id,
+          account.store_id,
         ],
         (err, res) => {
           if (err) {
@@ -257,7 +258,7 @@ class AccountsRepository {
 
       // Add store filter if provided
       if (filters?.store_id) {
-        filterConditions.push("ne.store_id = ?");
+        filterConditions.push("a.store_id = ?");
         filterValues.push(filters.store_id);
       }
 
@@ -270,7 +271,6 @@ class AccountsRepository {
       this.db.query(
         `SELECT a.*, 
          ne.employee_name as cashier_name,
-         ne.store_id,
          o.outlet_name,
          (
            SELECT JSON_ARRAYAGG(
@@ -292,7 +292,7 @@ class AccountsRepository {
          ) as sales
          FROM accounts a
          LEFT JOIN new_employee ne ON ne.employee_id = a.cashier_id
-         LEFT JOIN outlets o ON o.outlet_id = ne.store_id
+         LEFT JOIN outlets o ON o.outlet_id = a.store_id
          ${whereClause}
          ORDER BY a.date DESC`,
         filterValues,
@@ -328,8 +328,7 @@ class AccountsRepository {
     return new Promise((resolve, reject) => {
       this.db.query(
         `SELECT a.*, 
-         ne.employee_name as cashier_name,
-         ne.store_id,
+         ne.employee_name as cashier_name
          (
            SELECT JSON_ARRAYAGG(
              JSON_OBJECT(
@@ -351,7 +350,7 @@ class AccountsRepository {
          EXISTS(
            SELECT 1 FROM accounts_saved acs 
            WHERE DATE(acs.sheet_date) = DATE(a.date)
-           AND acs.store_id = ne.store_id
+           AND acs.store_id = a.store_id
          ) as is_saved
          FROM accounts a
          LEFT JOIN new_employee ne ON ne.employee_id = a.cashier_id
@@ -923,7 +922,7 @@ class AccountsRepository {
       this.db.query(
         `SELECT 
           a.date,
-          ne.store_id,
+          a.store_id,
           o.outlet_name,
           a.cash_handover_1,
           a.cash_handover_2,
@@ -936,9 +935,9 @@ class AccountsRepository {
           a.cash_handover_500
          FROM accounts a
          LEFT JOIN new_employee ne ON ne.employee_id = a.cashier_id
-         LEFT JOIN outlets o ON o.outlet_id = ne.store_id
+         LEFT JOIN outlets o ON o.outlet_id = a.store_id
          ${whereClause}
-         ORDER BY a.date DESC, ne.store_id`,
+         ORDER BY a.date DESC, a.store_id`,
         filterValues,
         (err, docs) => {
           if (err) {
@@ -1082,7 +1081,7 @@ class AccountsRepository {
 
       this.db.query(
         `SELECT 
-          ne.store_id,
+          a.store_id,
           o.outlet_name,
           JSON_ARRAYAGG(
             JSON_OBJECT(
@@ -1118,10 +1117,10 @@ class AccountsRepository {
           ) as accounts
          FROM accounts a
          LEFT JOIN new_employee ne ON ne.employee_id = a.cashier_id
-         LEFT JOIN outlets o ON o.outlet_id = ne.store_id
+         LEFT JOIN outlets o ON o.outlet_id = a.store_id
          ${whereClause}
-         GROUP BY ne.store_id, o.outlet_name
-         ORDER BY ne.store_id`,
+         GROUP BY a.store_id, o.outlet_name
+         ORDER BY a.store_id`,
         filterValues,
         (err, docs) => {
           if (err) {

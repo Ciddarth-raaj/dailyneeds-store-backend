@@ -3,15 +3,25 @@ const moment = require("moment");
 const { uuid } = require("uuidv4");
 
 class AccountsUsecase {
-  constructor(accountsRepo, accountsEbookUsecase, outletUsecase) {
+  constructor(
+    accountsRepo,
+    accountsEbookUsecase,
+    outletUsecase,
+    employeeUsecase
+  ) {
     this.accountsRepo = accountsRepo;
     this.accountsEbookUsecase = accountsEbookUsecase;
     this.outletUsecase = outletUsecase;
+    this.employeeUsecase = employeeUsecase;
     this.telegram = require("../services/telegram")();
   }
 
   async createAccount(account) {
     try {
+      const employeeData = await this.employeeUsecase.getEmployeeById(
+        account.cashier_id
+      );
+      account.store_id = employeeData[0].store_id;
       const result = await this.accountsRepo.create(account);
 
       if (result.code === 200 && account.sales) {
@@ -352,6 +362,16 @@ class AccountsUsecase {
   }
 }
 
-module.exports = (accountsRepo, accountsEbookUsecase, outletUsecase) => {
-  return new AccountsUsecase(accountsRepo, accountsEbookUsecase, outletUsecase);
+module.exports = (
+  accountsRepo,
+  accountsEbookUsecase,
+  outletUsecase,
+  employeeUsecase
+) => {
+  return new AccountsUsecase(
+    accountsRepo,
+    accountsEbookUsecase,
+    outletUsecase,
+    employeeUsecase
+  );
 };

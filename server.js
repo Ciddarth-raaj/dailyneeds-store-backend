@@ -234,7 +234,8 @@ class Server {
     this.accountsUsecase = require("./usecase/accounts")(
       this.accountsRepo,
       this.accountsEbookUsecase,
-      this.outletUsecase
+      this.outletUsecase,
+      this.employeeUsecase
     );
     this.reconciliationUsecase = require("./usecase/reconciliation")(
       this.reconciliationRepo
