@@ -328,7 +328,7 @@ class AccountsRepository {
     return new Promise((resolve, reject) => {
       this.db.query(
         `SELECT a.*, 
-         ne.employee_name as cashier_name
+         ne.employee_name as cashier_name,
          (
            SELECT JSON_ARRAYAGG(
              JSON_OBJECT(
