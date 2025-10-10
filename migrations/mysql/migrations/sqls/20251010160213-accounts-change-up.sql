@@ -1,0 +1,1 @@
+ALTER TABLE `accounts` ADD `no_of_bills` INT NULL DEFAULT NULL AFTER `date`;
