@@ -91,6 +91,7 @@ class AccountsRoutes {
       try {
         const schema = {
           date: Joi.date().required(),
+          no_of_bills: Joi.number().required(),
           total_sales: Joi.number().required(),
           cash_handover_1: Joi.number().default(0),
           cash_handover_2: Joi.number().default(0),
@@ -142,6 +143,7 @@ class AccountsRoutes {
         const schema = {
           accounts_id: Joi.number().required(),
           date: Joi.date().required(),
+          no_of_bills: Joi.number().required(),
           total_sales: Joi.number().required(),
           cash_handover_1: Joi.number().default(0),
           cash_handover_2: Joi.number().default(0),

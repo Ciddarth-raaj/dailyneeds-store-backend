@@ -9,13 +9,14 @@ class AccountsRepository {
     return new Promise((resolve, reject) => {
       this.db.query(
         `INSERT INTO accounts (
-          date, total_sales, cash_handover_1, cash_handover_2, cash_handover_5, 
+          date, no_of_bills, total_sales, cash_handover_1, cash_handover_2, cash_handover_5, 
           cash_handover_10, cash_handover_20, cash_handover_50, cash_handover_100, 
           cash_handover_200, cash_handover_500, card_sales, loyalty, sales_return, 
           cashier_id, user_id, store_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           account.date,
+          account.no_of_bills,
           account.total_sales,
           account.cash_handover_1,
           account.cash_handover_2,
@@ -173,7 +174,7 @@ class AccountsRepository {
     return new Promise((resolve, reject) => {
       this.db.query(
         `UPDATE accounts SET 
-          date = ?, total_sales = ?, cash_handover_1 = ?, cash_handover_2 = ?, 
+          date = ?, no_of_bills = ?, total_sales = ?, cash_handover_1 = ?, cash_handover_2 = ?, 
           cash_handover_5 = ?, cash_handover_10 = ?, cash_handover_20 = ?, 
           cash_handover_50 = ?, cash_handover_100 = ?, cash_handover_200 = ?, 
           cash_handover_500 = ?, card_sales = ?, loyalty = ?, sales_return = ?, 
@@ -181,6 +182,7 @@ class AccountsRepository {
         WHERE accounts_id = ?`,
         [
           account.date,
+          account.no_of_bills,
           account.total_sales,
           account.cash_handover_1,
           account.cash_handover_2,
@@ -1087,6 +1089,7 @@ class AccountsRepository {
             JSON_OBJECT(
               'accounts_id', IFNULL(a.accounts_id, ''),
               'date', DATE_FORMAT(a.date, '%Y-%m-%d'),
+              'no_of_bills', IFNULL(a.no_of_bills, 0),
               'total_sales', IFNULL(a.total_sales, 0),
               'card_sales', IFNULL(a.card_sales, 0),
               'loyalty', IFNULL(a.loyalty, 0),
