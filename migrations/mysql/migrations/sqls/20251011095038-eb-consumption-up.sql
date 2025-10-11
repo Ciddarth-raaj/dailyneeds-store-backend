@@ -17,6 +17,6 @@ CREATE TABLE `eb_consumption` (
   KEY `fk_eb_consumption_user` (`created_by`),
   CONSTRAINT `fk_eb_consumption_branch` FOREIGN KEY (`branch_id`) REFERENCES `outlets` (`outlet_id`),
   CONSTRAINT `fk_eb_consumption_user` FOREIGN KEY (`created_by`) REFERENCES `new_employee` (`employee_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 COMMIT;
