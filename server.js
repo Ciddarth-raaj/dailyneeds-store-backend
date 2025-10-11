@@ -165,6 +165,9 @@ class Server {
     this.cleaningPackingRepo = require("./repository/cleaning_packing")(
       this.mysql.connection
     );
+    this.ebConsumptionRepo = require("./repository/eb_consumption")(
+      this.mysql.connection
+    );
   }
 
   initUsecases() {
@@ -276,6 +279,9 @@ class Server {
     this.cleaningPackingUsecase = require("./usecase/cleaning_packing")(
       this.cleaningPackingRepo
     );
+    this.ebConsumptionUsecase = require("./usecase/eb_consumption")(
+      this.ebConsumptionRepo
+    );
   }
 
   initRoutes() {
@@ -360,6 +366,9 @@ class Server {
     const cleaningPackingRouter = require("./routes/cleaning_packing")(
       this.cleaningPackingUsecase
     );
+    const ebConsumptionRouter = require("./routes/eb_consumption")(
+      this.ebConsumptionUsecase
+    );
     app.use("/document", documentRouter.getRouter());
     app.use("/whatsapp", whatsappRouter.getRouter());
     app.use("/budget", budgetRouter.getRouter());
@@ -404,6 +413,7 @@ class Server {
     app.use("/invoice", invoiceRouter.getRouter());
     app.use("/repack-item", repackItemRouter.getRouter());
     app.use("/cleaning-packing", cleaningPackingRouter.getRouter());
+    app.use("/eb-consumption", ebConsumptionRouter.getRouter());
   }
 
   initServices() {

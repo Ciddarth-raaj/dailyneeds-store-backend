@@ -481,6 +481,7 @@ async function auth(req, res, next) {
       req.decoded.store_id = decoded.store_id;
       req.decoded.user_type = decoded.user_type;
       req.decoded.designation_id = decoded.designation_id;
+      req.decoded.employee_id = decoded.employee_id;
 
       // if (decoded.role !== "ADMIN") {
       //   res.json({ code: 403, msg: "Access Denied" });
