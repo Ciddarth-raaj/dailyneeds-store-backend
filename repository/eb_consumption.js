@@ -64,10 +64,10 @@ class EbConsumptionRepository {
   getAll() {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT ec.*, b.branch_name, u.username as created_by_name 
+        `SELECT ec.*, b.outlet_name, u.employee_name as created_by_name 
          FROM eb_consumption ec 
-         LEFT JOIN branches b ON ec.branch_id = b.branch_id 
-         LEFT JOIN user u ON ec.created_by = u.user_id 
+         LEFT JOIN outlets b ON ec.branch_id = b.outlet_id 
+         LEFT JOIN new_employee u ON ec.created_by = u.employee_id 
          ORDER BY ec.created_at DESC`,
         [],
         (err, docs) => {
@@ -92,10 +92,10 @@ class EbConsumptionRepository {
   getById(consumptionId) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT ec.*, b.branch_name, u.username as created_by_name 
+        `SELECT ec.*, b.outlet_name, u.employee_name as created_by_name 
          FROM eb_consumption ec 
-         LEFT JOIN branches b ON ec.branch_id = b.branch_id 
-         LEFT JOIN user u ON ec.created_by = u.user_id 
+         LEFT JOIN outlets b ON ec.branch_id = b.outlet_id 
+         LEFT JOIN new_employee u ON ec.created_by = u.employee_id 
          WHERE ec.consumption_id = ?`,
         [consumptionId],
         (err, docs) => {
