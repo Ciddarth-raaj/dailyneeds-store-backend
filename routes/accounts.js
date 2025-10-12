@@ -41,6 +41,8 @@ class AccountsRoutes {
         const schema = {
           sheet_date: Joi.date().required(),
           store_id: Joi.number().required(),
+          no_of_bills: Joi.number().required(),
+          total_sales: Joi.number().required(),
         };
 
         const isValid = Joi.validate(req.body, schema);

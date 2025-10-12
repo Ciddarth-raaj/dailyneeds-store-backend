@@ -141,6 +141,8 @@ class AccountsUsecase {
     try {
       const result = await this.accountsRepo.saveAccount(sheetData);
 
+      await this.saveAccountMessage(sheetData);
+
       try {
         // Get outlet name
         const outletResponse = await this.outletUsecase.getOutletByOutletId(
