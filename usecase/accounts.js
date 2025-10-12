@@ -83,6 +83,7 @@ class AccountsUsecase {
       );
       let outlet_data = null;
       let is_saved = false;
+      let is_closed = false;
 
       if (filters.store_id) {
         const outletResponse = await this.outletUsecase.getOutletByOutletId(
@@ -103,12 +104,22 @@ class AccountsUsecase {
         is_saved = is_saved_response.is_saved;
       }
 
+      const is_closed_response = await this.checkCounterClosed(
+        moment(filters.to_date).format("YYYY-MM-DD"),
+        filters.store_id
+      );
+
+      if (is_closed_response.code === 200) {
+        is_closed = is_closed_response.is_closed;
+      }
+
       const { data } = result;
       result.data = {
         account: data,
         ebook: accountsEbook.data,
         outlet: outlet_data,
         is_saved,
+        is_closed,
       };
 
       return result;
@@ -144,6 +155,44 @@ class AccountsUsecase {
         await this.telegram.sendMessage(
           ALERTS_TELEGRAM_CHAT_ID,
           `✅ Account sheet saved for ${outletName} (Date: ${formattedDate})`
+        );
+      } catch (telegramErr) {
+        console.log("Failed to send Telegram notification:", telegramErr);
+        // Don't throw here as the data was saved successfully
+      }
+
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  async saveAccountMessage(sheetData) {
+    try {
+      const result = await this.accountsRepo.saveAccountMessage(sheetData);
+      if (result.code === 400) {
+        return result;
+      }
+
+      try {
+        // Get outlet name
+        const outletResponse = await this.outletUsecase.getOutletByOutletId(
+          sheetData.store_id
+        );
+        const outletName =
+          outletResponse.length > 0
+            ? outletResponse[0].outlet_name
+            : "Unknown Outlet";
+
+        const formattedDate = moment(sheetData.sheet_date).format("DD-MM-YYYY");
+        const average_sales =
+          sheetData.no_of_bills > 0
+            ? (sheetData.total_sales / sheetData.no_of_bills).toFixed(2)
+            : "0.00";
+
+        await this.telegram.sendMessage(
+          ALERTS_TELEGRAM_CHAT_ID,
+          `✅ Counter *closed*\n\n🏬 Outlet: ${outletName}\n📅 Date: ${formattedDate}\n\n━━━━━━━━━━━━━━━━━━\n• 🧾 No of Bills: ${sheetData.no_of_bills}\n• 💰 Total Sales: ₹${sheetData.total_sales}\n• 🟡 Average Sales: ₹${average_sales}\n━━━━━━━━━━━━━━━━━━`
         );
       } catch (telegramErr) {
         console.log("Failed to send Telegram notification:", telegramErr);
@@ -192,6 +241,15 @@ class AccountsUsecase {
   async checkSheetSaved(date, store_id) {
     try {
       const result = await this.accountsRepo.checkSheetSaved(date, store_id);
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  async checkCounterClosed(date, store_id) {
+    try {
+      const result = await this.accountsRepo.checkCounterClosed(date, store_id);
       return result;
     } catch (error) {
       throw error;

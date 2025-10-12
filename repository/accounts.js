@@ -422,6 +422,34 @@ class AccountsRepository {
     });
   }
 
+  saveAccountMessage(sheetData) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "INSERT INTO accounts_message (sheet_date, store_id) VALUES (?, ?)",
+        [sheetData.sheet_date, sheetData.store_id],
+        (err, res) => {
+          if (err) {
+            if (err.code === "ER_DUP_ENTRY") {
+              resolve({ code: 400 });
+              return;
+            }
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.ACCOUNTS",
+              code: "REPOSITORY.ACCOUNTS.SAVE-SHEET-MESSAGE",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve({ code: 200 });
+        }
+      );
+    });
+  }
+
   deleteSavedAccount(sheetData) {
     return new Promise((resolve, reject) => {
       this.db.query(
@@ -470,6 +498,36 @@ class AccountsRepository {
           resolve({
             code: 200,
             is_saved: docs[0].exists_count > 0,
+          });
+        }
+      );
+    });
+  }
+
+  checkCounterClosed(date, store_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT COUNT(*) as exists_count 
+         FROM accounts_message 
+         WHERE DATE(sheet_date) = DATE(?) 
+         AND store_id = ?`,
+        [date, store_id],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.ACCOUNTS",
+              code: "REPOSITORY.ACCOUNTS.CHECK-COUNTER-CLOSED",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve({
+            code: 200,
+            is_closed: docs[0].exists_count > 0,
           });
         }
       );
