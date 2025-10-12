@@ -192,7 +192,7 @@ class AccountsUsecase {
 
         await this.telegram.sendMessage(
           ALERTS_TELEGRAM_CHAT_ID,
-          `✅ Counter *closed*\n\n🏬 Outlet: ${outletName}\n📅 Date: ${formattedDate}\n\n━━━━━━━━━━━━━━━━━━\n• 🧾 No of Bills: ${sheetData.no_of_bills}\n• 💰 Total Sales: ₹${sheetData.total_sales}\n• 🟡 Average Sales: ₹${average_sales}\n━━━━━━━━━━━━━━━━━━`
+          `✅ Counter *closed*\n\n🏬 Outlet: ${outletName}\n📅 Date: ${formattedDate}\n\n━━━━━━━━━━━━━━━━━━\n• 🧾 No of Bills: ${sheetData.no_of_bills}\n• 💰 Total Sales: ₹${sheetData.total_sales}\n• 🟡 ABV: ₹${average_sales}\n━━━━━━━━━━━━━━━━━━`
         );
       } catch (telegramErr) {
         console.log("Failed to send Telegram notification:", telegramErr);
