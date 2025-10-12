@@ -1,6 +1,8 @@
-const { ALERTS_TELEGRAM_CHAT_ID } = require("../constants/telegram");
+const {
+  ALERTS_TELEGRAM_CHAT_ID,
+  ABV_TELEGRAM_CHAT_ID,
+} = require("../constants/telegram");
 const moment = require("moment");
-const { uuid } = require("uuidv4");
 
 class AccountsUsecase {
   constructor(
@@ -193,7 +195,7 @@ class AccountsUsecase {
             : "0.00";
 
         await this.telegram.sendMessage(
-          ALERTS_TELEGRAM_CHAT_ID,
+          ABV_TELEGRAM_CHAT_ID,
           `✅ Counter *closed*\n\n🏬 Outlet: ${outletName}\n📅 Date: ${formattedDate}\n\n━━━━━━━━━━━━━━━━━━\n• 🧾 No of Bills: ${sheetData.no_of_bills}\n• 💰 Total Sales: ₹${sheetData.total_sales}\n• 🟡 ABV: ₹${average_sales}\n━━━━━━━━━━━━━━━━━━`
         );
       } catch (telegramErr) {
