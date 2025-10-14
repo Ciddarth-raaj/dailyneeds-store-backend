@@ -173,6 +173,10 @@ class AccountsUsecase {
 
   async saveAccountMessage(sheetData) {
     try {
+      if (sheetData.no_of_bills === null || sheetData.total_sales === null) {
+        return;
+      }
+
       const result = await this.accountsRepo.saveAccountMessage(sheetData);
       if (result.code === 400) {
         return result;

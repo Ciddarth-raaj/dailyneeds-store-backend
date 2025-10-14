@@ -41,8 +41,8 @@ class AccountsRoutes {
         const schema = {
           sheet_date: Joi.date().required(),
           store_id: Joi.number().required(),
-          no_of_bills: Joi.number().required(),
-          total_sales: Joi.number().required(),
+          no_of_bills: Joi.number().allow(null),
+          total_sales: Joi.number().allow(null),
         };
 
         const isValid = Joi.validate(req.body, schema);
@@ -67,8 +67,8 @@ class AccountsRoutes {
         const schema = {
           sheet_date: Joi.date().required(),
           store_id: Joi.number().required(),
-          no_of_bills: Joi.number().required(),
-          total_sales: Joi.number().required(),
+          no_of_bills: Joi.number().allow(null),
+          total_sales: Joi.number().allow(null),
         };
 
         const isValid = Joi.validate(req.body, schema);
