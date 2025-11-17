@@ -269,7 +269,7 @@ class EmployeeUsecase {
             namePass.toUpperCase().slice(0, 4);
 
           await this.userRepo.createLoginIfNeeded(
-            item.primary_contact_number,
+            item.employee_id,
             "1",
             item.employee_id,
             password
