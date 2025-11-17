@@ -13,6 +13,8 @@ const publicKey = fs.readFileSync(
 
 const algorithm = "RS256";
 
+const TOKEN_CUTOFF = 1763398436;
+
 module.exports = class JWT {
   static sign(payload, expiresIn) {
     return new Promise((resolve, reject) => {
@@ -39,10 +41,14 @@ module.exports = class JWT {
         { algorithm: [algorithm] },
         (err, decoded) => {
           if (err) {
-            reject(err);
-          } else {
-            resolve(decoded);
+            return reject(err);
           }
+
+          if (decoded.iat < TOKEN_CUTOFF) {
+            return reject(new Error("Token expired due to global logout"));
+          }
+
+          resolve(decoded);
         }
       );
     });
