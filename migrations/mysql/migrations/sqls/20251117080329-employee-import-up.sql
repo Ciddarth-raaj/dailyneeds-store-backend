@@ -1,10 +1,10 @@
 START TRANSACTION;
 
-TRUNCATE TABLE `designation`
+TRUNCATE TABLE `designation`;
 ALTER TABLE `designation` ADD `designation_code` VARCHAR(20) NULL DEFAULT NULL AFTER `designation_id`;
 ALTER TABLE `designation` ADD UNIQUE(`designation_code`);
 
-TRUNCATE TABLE `department`
+TRUNCATE TABLE `department`;
 ALTER TABLE `department` ADD `department_code` VARCHAR(20) NULL DEFAULT NULL AFTER `department_id`;
 ALTER TABLE `department` ADD UNIQUE(`department_code`);
 
@@ -21,7 +21,7 @@ UPDATE `outlets` SET `outlet_code` = 'DN5' WHERE `outlets`.`outlet_id` = 7;
 
 UPDATE `new_employee` SET status = 0;
 
-DELETE FROM `user` WHERE `user_type` = 1
+DELETE FROM `user` WHERE `user_type` = 1;
 
 ALTER TABLE `new_employee` ADD `updated_at` TIMESTAMP on update CURRENT_TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER `created_at`;
 
