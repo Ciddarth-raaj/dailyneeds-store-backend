@@ -139,6 +139,7 @@ class Synker {
           department_code: employee.DepartmentCode,
           designation_code: employee.DesignationCode,
           outlet_code: employee.CategoryCode,
+          shift_code: employee.ShiftCode,
           primary_contact_number: employee.MobileNo
             ? employee.MobileNo.replace("91-", "")
             : null,

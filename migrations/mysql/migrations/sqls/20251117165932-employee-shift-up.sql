@@ -1,0 +1,1 @@
+ALTER TABLE `new_employee` ADD `shift_code` VARCHAR(20) NULL AFTER `shift_id`;
