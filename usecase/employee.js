@@ -254,24 +254,7 @@ class EmployeeUsecase {
 
       for (const item of rows) {
         if (item.primary_contact_number) {
-          const splitName = item.employee_name.split(" ");
-          let namePass = "";
-
-          if (splitName.length <= 1) {
-            namePass = item.employee_name;
-          } else if (splitName[0] && splitName[0].length >= 2) {
-            namePass = splitName[0];
-          } else if (splitName[1] && splitName[1].length >= 2) {
-            namePass = splitName[1];
-          } else if (splitName[2] && splitName[2].length >= 2) {
-            namePass = splitName[2];
-          } else {
-            namePass = item.employee_name;
-          }
-
-          const password =
-            item.primary_contact_number.slice(0, 4) +
-            namePass.toUpperCase().slice(0, 4);
+          const password = item.employee_id + "@123";
 
           await this.userRepo.createLoginIfNeeded(
             item.employee_id,
