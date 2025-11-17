@@ -433,6 +433,11 @@ class Server {
     if (this.cleaningPackingUsecase && this.cleaningPackingUsecase.setSynker) {
       this.cleaningPackingUsecase.setSynker(this.synker);
     }
+
+    // Wire synker back into employeesUsecase after service creation
+    if (this.employeeUsecase && this.employeeUsecase.setSynker) {
+      this.employeeUsecase.setSynker(this.synker);
+    }
   }
 
   onClose() {

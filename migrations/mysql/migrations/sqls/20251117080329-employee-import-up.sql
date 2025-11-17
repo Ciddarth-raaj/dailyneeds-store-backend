@@ -23,4 +23,6 @@ UPDATE `new_employee` SET status = 0;
 
 DELETE FROM `user` WHERE `user_type` = 1
 
+ALTER TABLE `new_employee` ADD `updated_at` TIMESTAMP on update CURRENT_TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER `created_at`;
+
 COMMIT;

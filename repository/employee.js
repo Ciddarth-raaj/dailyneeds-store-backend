@@ -201,8 +201,10 @@ class EmployeeRepository {
         new_employee.esi_number, new_employee.pf_number, new_employee.uan, new_employee.uniform_qty, new_employee.store_id, new_employee.department_id, 
         new_employee.designation_id, new_employee.shift_id, new_employee.previous_experience, new_employee.additional_course, new_employee.date_of_joining,
         new_employee.pan_no, new_employee.payment_type, new_employee.status, designation.designation_name, outlets.outlet_name as store_name, 
-        department.department_name, shift_master.shift_name FROM new_employee LEFT JOIN department ON department.department_id = new_employee.department_id
-        LEFT JOIN outlets ON outlets.outlet_id = new_employee.store_id LEFT JOIN designation ON designation.designation_id  = new_employee.designation_id
+        department.department_name, shift_master.shift_name, new_employee.updated_at FROM new_employee
+        LEFT JOIN department ON department.department_id = new_employee.department_id
+        LEFT JOIN outlets ON outlets.outlet_id = new_employee.store_id
+        LEFT JOIN designation ON designation.designation_id  = new_employee.designation_id
         LEFT JOIN shift_master ON shift_master.shift_id = new_employee.shift_id WHERE new_employee.status = 1 AND new_employee.employee_name LIKE "%${filter}%" OR new_employee.employee_id 
         LIKE "%${filter}%" OR outlets.outlet_name LIKE "%${filter}%"`,
         [filter],
@@ -264,7 +266,7 @@ class EmployeeRepository {
         new_employee.esi_number, new_employee.pf_number, new_employee.uan, new_employee.uniform_qty, new_employee.store_id, new_employee.department_id, 
         new_employee.designation_id, new_employee.shift_id, new_employee.previous_experience, new_employee.additional_course, new_employee.date_of_joining,
         new_employee.pan_no, new_employee.payment_type, new_employee.status, designation.designation_name, outlets.outlet_name as store_name, 
-        department.department_name, shift_master.shift_name, resignation.resignation_date 
+        department.department_name, shift_master.shift_name, resignation.resignation_date, new_employee.updated_at
         FROM new_employee 
         LEFT JOIN designation ON designation.designation_id = new_employee.designation_id
         LEFT JOIN department ON department.department_id = new_employee.department_id 

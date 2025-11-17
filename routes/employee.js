@@ -501,6 +501,17 @@ class EmployeeRoutes {
       }
       res.end();
     });
+
+    // Sync all data
+    router.post("/sync", async (req, res) => {
+      try {
+        await this.employeeUsecase.sync();
+        res.json({ code: 200, msg: "Data successfully synced!" });
+      } catch (err) {
+        console.log(err);
+        res.json({ code: 500, msg: "An error occurred!" });
+      }
+    });
   }
   getRouter() {
     return router;
