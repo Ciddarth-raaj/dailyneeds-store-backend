@@ -346,7 +346,7 @@ class EmployeeRoutes {
         const schema = {
           employee_id: Joi.number().required(),
         };
-        const employee_id = req.decoded.id;
+        const employee_id = req.decoded.employee_id;
         const isValid = Joi.validate({ employee_id }, schema);
         if (isValid.error !== null) {
           throw isValid.error;

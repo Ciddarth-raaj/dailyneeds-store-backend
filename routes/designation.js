@@ -72,6 +72,7 @@ class DesignationRoutes {
         if (isValid.error !== null) {
           throw isValid.error;
         }
+
         const permission = await this.designationUsecase.getPermissionById(
           designation_id,
           user_type

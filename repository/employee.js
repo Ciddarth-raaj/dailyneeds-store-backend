@@ -575,7 +575,7 @@ class EmployeeRepository {
       const sql =
         `INSERT INTO new_employee (${tickedColumns}) VALUES ${placeholders}` +
         (updateAssignments.length > 0
-          ? ` ON DUPLICATE KEY UPDATE ${updateAssignments}`
+          ? ` ON DUPLICATE KEY UPDATE ${updateAssignments}, updated_at = CURRENT_TIME()`
           : "");
 
       this.db.query(sql, flat, (err, result) => {
