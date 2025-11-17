@@ -1,14 +1,14 @@
 START TRANSACTION;
 
 TRUNCATE TABLE `designation`;
-ALTER TABLE `designation` ADD `designation_code` VARCHAR(20) NULL DEFAULT NULL AFTER `designation_id`;
-ALTER TABLE `designation` ADD UNIQUE(`designation_code`);
+-- ALTER TABLE `designation` ADD `designation_code` VARCHAR(20) NULL DEFAULT NULL AFTER `designation_id`;
+-- ALTER TABLE `designation` ADD UNIQUE(`designation_code`);
 
 TRUNCATE TABLE `department`;
-ALTER TABLE `department` ADD `department_code` VARCHAR(20) NULL DEFAULT NULL AFTER `department_id`;
-ALTER TABLE `department` ADD UNIQUE(`department_code`);
+-- ALTER TABLE `department` ADD `department_code` VARCHAR(20) NULL DEFAULT NULL AFTER `department_id`;
+-- ALTER TABLE `department` ADD UNIQUE(`department_code`);
 
-ALTER TABLE `outlets` ADD `outlet_code` VARCHAR(20) NOT NULL AFTER `outlet_id`;
+-- ALTER TABLE `outlets` ADD `outlet_code` VARCHAR(20) NOT NULL AFTER `outlet_id`;
 ALTER TABLE `outlets` ADD UNIQUE(`outlet_code`);
 ALTER TABLE `outlets` CHANGE `opening_cash` `opening_cash` FLOAT NULL DEFAULT NULL;
 
