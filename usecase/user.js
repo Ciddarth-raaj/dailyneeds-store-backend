@@ -28,7 +28,7 @@ class UserUsecase {
         info.designation = name[0]?.designation_name;
         info.employee_image = name[0]?.employee_image;
 
-        const token = await jwt.sign(info, "30d");
+        const token = await jwt.sign(info, "1d");
         resolve({
           code: 200,
           token: token,
