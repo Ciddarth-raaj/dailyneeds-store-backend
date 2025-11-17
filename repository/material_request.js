@@ -39,6 +39,10 @@ class MaterialRequestRepository {
         const sql = `INSERT INTO material_request (${fields.join(
           ", "
         )}) VALUES (${fields.map(() => "?").join(", ")})`;
+
+        console.log(sql);
+        console.log(values);
+
         this.db.query(sql, values, async (err, result) => {
           if (err) {
             logger.Log({
@@ -72,12 +76,16 @@ class MaterialRequestRepository {
                 item.remark !== undefined &&
                 item.remark !== null &&
                 item.remark !== ""
-              )
+              ) {
                 arr.push(item.remark);
+              } else {
+                arr.push(null);
+              }
               return arr;
             });
             // Only insert if all required fields are present
             const validItems = filteredItems.filter((arr) => arr.length >= 3);
+
             if (validItems.length > 0) {
               this.db.query(
                 `INSERT INTO material_request_list (material_request_id, material_id, quantity, remark) VALUES ?`,
