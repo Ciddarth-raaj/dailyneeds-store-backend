@@ -423,7 +423,10 @@ class Server {
       this.subcategoryUsecase,
       this.departmentUsecase,
       this.brandUsecase,
-      this.cleaningPackingUsecase
+      this.cleaningPackingUsecase,
+      this.designationUsecase,
+      this.outletUsecase,
+      this.employeeUsecase
     );
     this.synker.initCronJobs();
     // Wire synker back into cleaningPackingUsecase after service creation

@@ -287,6 +287,53 @@ class DesignationRepository {
       );
     });
   }
+
+  bulkCreate(rows) {
+    return new Promise((resolve, reject) => {
+      if (!Array.isArray(rows) || rows.length === 0) {
+        resolve({ affectedRows: 0 });
+        return;
+      }
+
+      const columns = Object.keys(rows[0]);
+      const values = rows.map((r) => columns.map((c) => r[c]));
+      const placeholders = values
+        .map(() => `(${columns.map(() => "?").join(",")})`)
+        .join(",");
+      const flat = [].concat(...values);
+
+      const updateAssignments = columns
+        .map((c) => `\`${c}\` = VALUES(\`${c}\`)`)
+        .join(", ");
+
+      const sql =
+        `INSERT INTO designation (${columns.join(
+          ","
+        )}) VALUES ${placeholders}` +
+        (updateAssignments.length > 0
+          ? ` ON DUPLICATE KEY UPDATE ${updateAssignments}`
+          : "");
+
+      this.db.query(sql, flat, (err, result) => {
+        if (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "REPOSITORY.DESIGNATIONS",
+            code: "REPOSITORY.DESIGNATIONS.BULKCREATE.ERROR",
+            description: err.toString(),
+            category: "",
+            ref: {},
+          });
+          reject(err);
+          return;
+        }
+        resolve({
+          affectedRows: result.affectedRows,
+          insertedId: result.insertId,
+        });
+      });
+    });
+  }
 }
 
 module.exports = (db) => {

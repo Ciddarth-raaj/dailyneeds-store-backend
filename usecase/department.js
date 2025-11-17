@@ -1,4 +1,3 @@
-
 class DepartmentUsecase {
   constructor(departmentRepo) {
     this.departmentRepo = departmentRepo;
@@ -25,15 +24,18 @@ class DepartmentUsecase {
     });
   }
   uploadDepartmentImage(image_url, department_id) {
-		return new Promise(async (resolve, reject) => {
-			try {
-				const { code } = await this.departmentRepo.uploadDepartmentImage(image_url, department_id);
-				resolve(code);
-			} catch (err) {
-				reject(err);
-			}
-		});
-	}
+    return new Promise(async (resolve, reject) => {
+      try {
+        const { code } = await this.departmentRepo.uploadDepartmentImage(
+          image_url,
+          department_id
+        );
+        resolve(code);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
   updateStatus(file) {
     return new Promise(async (resolve, reject) => {
       try {
@@ -58,7 +60,10 @@ class DepartmentUsecase {
     return new Promise(async (resolve, reject) => {
       try {
         const department_id = department.department_id;
-        const { code } = await this.departmentRepo.updateDepartmentDetails(department.department_details, department_id);
+        const { code } = await this.departmentRepo.updateDepartmentDetails(
+          department.department_details,
+          department_id
+        );
         resolve(code);
       } catch (err) {
         reject(err);
@@ -98,6 +103,17 @@ class DepartmentUsecase {
         reject(err);
       }
     });
+  }
+
+  async bulkCreate(rows) {
+    try {
+      const response = await this.departmentRepo.bulkCreate(rows);
+      const departments = await this.get();
+      response.departments = departments;
+      return response;
+    } catch (err) {
+      throw err;
+    }
   }
 }
 

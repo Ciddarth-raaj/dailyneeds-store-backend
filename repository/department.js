@@ -1,11 +1,11 @@
-const logger = require("../utils/logger")
+const logger = require("../utils/logger");
 
 class DepartmentRepository {
-  constructor (db) {
-    this.db = db
+  constructor(db) {
+    this.db = db;
   }
 
-  get () {
+  get() {
     return new Promise((resolve, reject) => {
       this.db.query("SELECT * FROM department", [], (err, docs) => {
         if (err) {
@@ -15,17 +15,17 @@ class DepartmentRepository {
             code: "REPOSITORY.DEPARTMENT.GET",
             description: err.toString(),
             category: "",
-            ref: {}
-          })
-          reject(err)
-          return
+            ref: {},
+          });
+          reject(err);
+          return;
         }
-        resolve(docs)
-      })
-    })
+        resolve(docs);
+      });
+    });
   }
 
-  getProductDepartment () {
+  getProductDepartment() {
     return new Promise((resolve, reject) => {
       this.db.query("SELECT * FROM product_department", [], (err, docs) => {
         if (err) {
@@ -35,17 +35,17 @@ class DepartmentRepository {
             code: "REPOSITORY.DEPARTMENT.GET-DEPARTMENT-TABLE",
             description: err.toString(),
             category: "",
-            ref: {}
-          })
-          reject(err)
-          return
+            ref: {},
+          });
+          reject(err);
+          return;
         }
-        resolve(docs)
-      })
-    })
+        resolve(docs);
+      });
+    });
   }
 
-  uploadDepartmentImage (image_url, department_id) {
+  uploadDepartmentImage(image_url, department_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
         "UPDATE product_department SET image_url = ? WHERE department_id = ?",
@@ -58,17 +58,17 @@ class DepartmentRepository {
               code: "REPOSITORY.DEPARTMENT.UPLOAD-IMAGE",
               description: err.toString(),
               category: "",
-              ref: {}
-            })
-            reject(err)
-            return
+              ref: {},
+            });
+            reject(err);
+            return;
           }
-          resolve({ code: 200, id: res.insertId })
+          resolve({ code: 200, id: res.insertId });
         }
-      )
-    })
+      );
+    });
   }
-  getById (department_id) {
+  getById(department_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
         "SELECT * FROM department where department_id = ?",
@@ -81,17 +81,17 @@ class DepartmentRepository {
               code: "REPOSITORY.DEPARTMENT.GET-ID",
               description: err.toString(),
               category: "",
-              ref: {}
-            })
-            reject(err)
-            return
+              ref: {},
+            });
+            reject(err);
+            return;
           }
-          resolve(docs)
+          resolve(docs);
         }
-      )
-    })
+      );
+    });
   }
-  updateStatus (file) {
+  updateStatus(file) {
     return new Promise((resolve, reject) => {
       this.db.query(
         "UPDATE department SET status = ? WHERE department_id = ?",
@@ -104,17 +104,17 @@ class DepartmentRepository {
               code: "REPOSITORY.DEPARTMENT.UPDATE-STATUS",
               description: err.toString(),
               category: "",
-              ref: {}
-            })
-            reject(err)
-            return
+              ref: {},
+            });
+            reject(err);
+            return;
           }
-          resolve(docs)
+          resolve(docs);
         }
-      )
-    })
+      );
+    });
   }
-  updateProductDepartmentStatus (file) {
+  updateProductDepartmentStatus(file) {
     return new Promise((resolve, reject) => {
       this.db.query(
         "UPDATE product_department SET status = ? WHERE department_id = ?",
@@ -127,17 +127,17 @@ class DepartmentRepository {
               code: "REPOSITORY.DEPARTMENT.UPDATE-DEPARTMENT-STATUS",
               description: err.toString(),
               category: "",
-              ref: {}
-            })
-            reject(err)
-            return
+              ref: {},
+            });
+            reject(err);
+            return;
           }
-          resolve(docs)
+          resolve(docs);
         }
-      )
-    })
+      );
+    });
   }
-  updateDepartmentDetails (data, department_id) {
+  updateDepartmentDetails(data, department_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
         `UPDATE department SET ? WHERE department_id = ?`,
@@ -150,17 +150,17 @@ class DepartmentRepository {
               code: "REPOSITORY.DEPARTMENT.UPDATE-DEPARTMENT-DETAILS",
               description: err.toString(),
               category: "",
-              ref: {}
-            })
-            reject(err)
-            return
+              ref: {},
+            });
+            reject(err);
+            return;
           }
-          resolve({ code: 200 })
+          resolve({ code: 200 });
         }
-      )
-    })
+      );
+    });
   }
-  create (department) {
+  create(department) {
     return new Promise((resolve, reject) => {
       this.db.query(
         "INSERT INTO department (status, department_name) VALUES (?, ?)",
@@ -168,8 +168,8 @@ class DepartmentRepository {
         (err, res) => {
           if (err) {
             if (err.code === "ER_DUP_ENTRY") {
-              resolve({ code: 101 })
-              return
+              resolve({ code: 101 });
+              return;
             }
             logger.Log({
               level: logger.LEVEL.ERROR,
@@ -177,18 +177,18 @@ class DepartmentRepository {
               code: "REPOSITORY.DEPARTMENT.CREATE",
               description: err.toString(),
               category: "",
-              ref: {}
-            })
-            reject(err)
-            return
+              ref: {},
+            });
+            reject(err);
+            return;
           }
-          resolve({ code: 200, id: res.insertId })
+          resolve({ code: 200, id: res.insertId });
         }
-      )
-    })
+      );
+    });
   }
 
-  upsert (department) {
+  upsert(department) {
     return new Promise((resolve, reject) => {
       this.db.query(
         `INSERT INTO product_department (department_id, department_name) 
@@ -197,9 +197,9 @@ class DepartmentRepository {
         [
           department.department_id,
           department.department_name,
-          department.department_name
+          department.department_name,
         ],
-        err => {
+        (err) => {
           if (err) {
             logger.Log({
               level: logger.LEVEL.ERROR,
@@ -207,18 +207,63 @@ class DepartmentRepository {
               code: "REPOSITORY.DEPARTMENT.CREATE",
               description: err.toString(),
               category: "",
-              ref: {}
-            })
-            reject(err)
-            return
+              ref: {},
+            });
+            reject(err);
+            return;
           }
-          resolve()
+          resolve();
         }
-      )
-    })
+      );
+    });
+  }
+
+  bulkCreate(rows) {
+    return new Promise((resolve, reject) => {
+      if (!Array.isArray(rows) || rows.length === 0) {
+        resolve({ affectedRows: 0 });
+        return;
+      }
+
+      const columns = Object.keys(rows[0]);
+      const values = rows.map((r) => columns.map((c) => r[c]));
+      const placeholders = values
+        .map(() => `(${columns.map(() => "?").join(",")})`)
+        .join(",");
+      const flat = [].concat(...values);
+
+      const updateAssignments = columns
+        .map((c) => `\`${c}\` = VALUES(\`${c}\`)`)
+        .join(", ");
+
+      const sql =
+        `INSERT INTO department (${columns.join(",")}) VALUES ${placeholders}` +
+        (updateAssignments.length > 0
+          ? ` ON DUPLICATE KEY UPDATE ${updateAssignments}`
+          : "");
+
+      this.db.query(sql, flat, (err, result) => {
+        if (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "REPOSITORY.DEPARTMENTS",
+            code: "REPOSITORY.DEPARTMENTS.BULKCREATE.ERROR",
+            description: err.toString(),
+            category: "",
+            ref: {},
+          });
+          reject(err);
+          return;
+        }
+        resolve({
+          affectedRows: result.affectedRows,
+          insertedId: result.insertId,
+        });
+      });
+    });
   }
 }
 
-module.exports = db => {
-  return new DepartmentRepository(db)
-}
+module.exports = (db) => {
+  return new DepartmentRepository(db);
+};

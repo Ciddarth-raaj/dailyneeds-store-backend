@@ -3,6 +3,9 @@ const cron = require("node-cron");
 const fs = require("fs");
 const path = require("path");
 const moment = require("moment");
+const encryptAES = require("../utils/encryptAES");
+const { exec } = require("child_process");
+const { capitalizeWords } = require("../utils/string");
 
 const logger = require("../utils/logger");
 
@@ -10,7 +13,13 @@ const DELIUM_API_KEY = "d29f2c2a-ffc5-11e8-baeb-de5a505def9c";
 const GOFRUGAL_API_KEY =
   "92389031420AEF2B22174FA933F178040AFD9395A5E9C3F013A74C4CA152CE786116998975B7AF31";
 
+const DIGISME_API_KEY =
+  "87961db9-7af8-472f-bf20-41c4f8ba117d:6eGalmciCUs09JToTitdJeOJzO4VZr";
+const DIGISME_CUSTOM_KEY =
+  "RO9XC34ub5YjttUlD08VuP3Q6JIldpNCRAwLm+YovhbOWC/BNGJ45VNGegryFBvCy30m+r1ocix8CwhULO7SWQ==";
+
 const CRON_SYNTAX_PRODUCT = "0 6 * * *";
+const CRON_SYNTAX_EMPLOYEE = "0 7 * * *";
 const CRON_SYNTAX_CLEANING_PACKING = "0 9 * * *";
 
 class Synker {
@@ -20,7 +29,10 @@ class Synker {
     subcategoryUsecase,
     departmentUsecase,
     brandUsecase,
-    cleaningPackingUsecase
+    cleaningPackingUsecase,
+    designationUsecase,
+    outletUsecase,
+    employeeUsecase
   ) {
     this.productUsecase = productUsecase;
     this.categoryUsecase = categoryUsecase;
@@ -28,6 +40,9 @@ class Synker {
     this.subcategoryUsecase = subcategoryUsecase;
     this.brandUsecase = brandUsecase;
     this.cleaningPackingUsecase = cleaningPackingUsecase;
+    this.designationUsecase = designationUsecase;
+    this.outletUsecase = outletUsecase;
+    this.employeeUsecase = employeeUsecase;
   }
 
   initCronJobs() {
@@ -40,6 +55,15 @@ class Synker {
     });
 
     // cron.schedule(CRON_SYNTAX_CLEANING_PACKING, () => {
+
+    cron.schedule(CRON_SYNTAX_EMPLOYEE, () => {
+      console.log(
+        `Running scheduled employee sync at ${new Date().toISOString()}`
+      );
+      this.syncDigismeEmployees();
+    });
+
+    // cron.schedule(CRON_SYNTAX_CLEANING_PACKING, () => {
     //   console.log(`Running scheduled cleaning packing sync at ${new Date().toISOString()}`);
     //   this.syncCleaningPacking();
     // });
@@ -47,7 +71,131 @@ class Synker {
     console.log(
       `Product sync CRON job scheduled with syntax: ${CRON_SYNTAX_PRODUCT}`
     );
+    console.log(
+      `Employee sync CRON job scheduled with syntax: ${CRON_SYNTAX_EMPLOYEE}`
+    );
     // console.log(`Cleaning packing sync CRON job scheduled with syntax: ${CRON_SYNTAX_CLEANING_PACKING}`);
+  }
+
+  async getDigismeToken() {
+    try {
+      const response = await this._authenticateDigisme();
+      return response.access_token;
+    } catch (error) {
+      console.error(error);
+      throw err;
+    }
+  }
+
+  async syncDigismeEmployees() {
+    try {
+      const GENDER_MAP = {
+        FEMALE: "F",
+        MALE: "M",
+      };
+
+      const MARITAL_STATUS_MAP = {
+        MARRIED: "M",
+        SINGLE: "S",
+      };
+
+      const employees = await this._fetchDigismeEmployees();
+      const parsedDesignations = {};
+      const parsedDepartments = {};
+      const parsedBranches = {};
+
+      let formattedEmployees = employees.map((employee) => {
+        if (!parsedDesignations[employee.DesignationCode]) {
+          parsedDesignations[employee.DesignationCode] = {
+            designation_code: employee.DesignationCode,
+            designation_name: capitalizeWords(employee.DesignationName),
+            online_portal: 1,
+            login_access: 1,
+          };
+        }
+
+        if (!parsedBranches[employee.CategoryCode]) {
+          parsedBranches[employee.CategoryCode] = {
+            outlet_name: capitalizeWords(employee.CategoryName),
+            outlet_code: employee.CategoryCode,
+          };
+        }
+
+        if (
+          employee.DepartmentCode !== "NONE" &&
+          !parsedDepartments[employee.DepartmentCode]
+        ) {
+          parsedDepartments[employee.DepartmentCode] = {
+            department_code: employee.DepartmentCode,
+            department_name: capitalizeWords(employee.DepartmentName),
+          };
+        }
+
+        return {
+          employee_id: employee.EmployeeCode,
+          employee_name: capitalizeWords(employee.EmployeeName),
+          gender: GENDER_MAP[employee.Gender] ?? null,
+          marital_status: MARITAL_STATUS_MAP[employee.MartialStatus] ?? null,
+          department_code: employee.DepartmentCode,
+          designation_code: employee.DesignationCode,
+          outlet_code: employee.CategoryCode,
+          primary_contact_number: employee.MobileNo
+            ? employee.MobileNo.replace("91-", "")
+            : null,
+          status:
+            employee.IsTerminated &&
+            employee.IsTerminated.toLowerCase() === "yes"
+              ? 0
+              : 1,
+          resignation_date:
+            employee.IsTerminated &&
+            employee.IsTerminated.toLowerCase() === "yes"
+              ? new Date(employee.TerminateDate)
+              : null,
+        };
+      });
+
+      const designationsRes = await this.designationUsecase.bulkCreate(
+        Object.values(parsedDesignations)
+      );
+      const departmentsRes = await this.departmentUsecase.bulkCreate(
+        Object.values(parsedDepartments)
+      );
+      const branchesRes = await this.outletUsecase.bulkCreate(
+        Object.values(parsedBranches)
+      );
+
+      const designations = Object.fromEntries(
+        (designationsRes.designations || []).map((d) => [d.designation_code, d])
+      );
+      const departments = Object.fromEntries(
+        (departmentsRes.departments || []).map((d) => [d.department_code, d])
+      );
+      const branches = Object.fromEntries(
+        (branchesRes.branches || []).map((d) => [d.outlet_code, d])
+      );
+
+      formattedEmployees = formattedEmployees.map((employee) => {
+        const data = {
+          ...employee,
+          designation_id:
+            designations[employee.designation_code]?.designation_id,
+          department_id: departments[employee.department_code]?.department_id,
+          store_id: branches[employee.outlet_code]?.outlet_id,
+        };
+
+        delete data.designation_code;
+        delete data.department_code;
+        delete data.outlet_code;
+
+        return data;
+      });
+
+      await this.employeeUsecase.bulkCreate(formattedEmployees);
+      console.log("Employee sync completed");
+    } catch (err) {
+      console.error(err);
+    }
   }
 
   async syncProductsWithLogging() {
@@ -502,6 +650,102 @@ class Synker {
 
     return product;
   }
+
+  _authenticateDigisme() {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const curlCommand = `curl -s --location --request GET 'https://indhrmsgateway.azurewebsites.net/Authenticate' \
+--header 'Authorization: ${DIGISME_API_KEY}' \
+--header 'customKey: ${DIGISME_CUSTOM_KEY}' \
+--header 'Content-Type: application/x-www-form-urlencoded' \
+--header 'Cookie: ARRAffinity=9a42df7877699a1820bb3aff0e46053675d3b7c9cb3150938bf21e214337c56e; ARRAffinitySameSite=9a42df7877699a1820bb3aff0e46053675d3b7c9cb3150938bf21e214337c56e' \
+--data-urlencode 'Grant_type=password'`;
+
+        exec(curlCommand, (error, stdout, stderr) => {
+          if (error) {
+            console.error(`Error executing curl: ${error.message}`);
+            reject(error);
+            return;
+          }
+          if (stderr) {
+            console.error(`Curl stderr: ${stderr}`);
+            reject(stderr);
+            return;
+          }
+
+          console.log(`Curl stdout: ${stdout}`);
+          // Process the 'stdout' which contains the response from the curl command
+          resolve(JSON.parse(stdout));
+        });
+      } catch (err) {
+        logger.Log({
+          level: logger.LEVEL.ERROR,
+          component: "SERVICE.SYNKER",
+          code: "SERVICE.SYNKER.DIGISME-AUTHENTICATE",
+          description: err.toString(),
+          category: "",
+          ref: {},
+        });
+        reject(err);
+      }
+    });
+  }
+
+  async getDigismeToken() {
+    try {
+      const response = await this._authenticateDigisme();
+      return response.access_token;
+    } catch (error) {
+      console.error(error);
+      throw err;
+    }
+  }
+
+  _fetchDigismeEmployees() {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const str = encryptAES({
+          CompanyId: "1",
+          IsActive: "2",
+        });
+        const token = await this.getDigismeToken();
+
+        const response = await axios({
+          method: "GET",
+          url: "https://indhrmsgateway.azurewebsites.net/api/GetEmployeeDetails",
+          headers: {
+            Authorization: `bearer ${token}`,
+          },
+          data: {
+            str,
+          },
+        });
+        if (response.status !== 200) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "SERVICE.SYNKER",
+            code: "SERVICE.SYNKER.DIGISME-EMPLOYEES-FETCH",
+            description: err.toString(),
+            category: "",
+            ref: {},
+          });
+          reject();
+          return;
+        }
+        resolve(response.data);
+      } catch (err) {
+        logger.Log({
+          level: logger.LEVEL.ERROR,
+          component: "SERVICE.SYNKER",
+          code: "SERVICE.SYNKER.DIGISME-EMPLOYEES-FETCH",
+          description: err.toString(),
+          category: "",
+          ref: {},
+        });
+        reject(err);
+      }
+    });
+  }
 }
 
 module.exports = (
@@ -510,7 +754,10 @@ module.exports = (
   subcategoryUsecase,
   departmentUsecase,
   brandUsecase,
-  cleaningPackingUsecase
+  cleaningPackingUsecase,
+  designationUsecase,
+  outletUsecase,
+  employeeUsecase
 ) => {
   return new Synker(
     productUsecase,
@@ -518,6 +765,9 @@ module.exports = (
     subcategoryUsecase,
     departmentUsecase,
     brandUsecase,
-    cleaningPackingUsecase
+    cleaningPackingUsecase,
+    designationUsecase,
+    outletUsecase,
+    employeeUsecase
   );
 };

@@ -124,6 +124,17 @@ class DesignationUsecase {
       }
     });
   }
+
+  async bulkCreate(rows) {
+    try {
+      const response = await this.designationRepo.bulkCreate(rows);
+      const designations = await this.get();
+      response.designations = designations;
+      return response;
+    } catch (err) {
+      throw err;
+    }
+  }
 }
 
 module.exports = (designationRepo) => {

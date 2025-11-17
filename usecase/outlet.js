@@ -109,6 +109,22 @@ class OutletUsecase {
       }
     });
   }
+
+  bulkCreate(rows) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const response = await this.outletRepo.bulkCreate(rows);
+        const branches = await this.get();
+        resolve({
+          code: 200,
+          message: "Branches bulk insert completed successfully",
+          branches: branches,
+        });
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
 }
 module.exports = (outletRepo, budgetRepo) => {
   return new OutletUsecase(outletRepo, budgetRepo);
