@@ -2,8 +2,9 @@ const router = require("express").Router();
 const Joi = require("@hapi/joi");
 
 class AccountsRoutes {
-  constructor(accountsUsecase) {
+  constructor(accountsUsecase, tallyUsecase) {
     this.accountsUsecase = accountsUsecase;
+    this.tallyUsecase = tallyUsecase;
     this.init();
   }
 
@@ -748,7 +749,7 @@ class AccountsRoutes {
           throw isValid.error;
         }
 
-        const result = await this.accountsUsecase.getTallyCardToBank(
+        const result = await this.tallyUsecase.getTallyCardToBank(
           req.query.from_date,
           req.query.to_date
         );
@@ -775,7 +776,7 @@ class AccountsRoutes {
           throw isValid.error;
         }
 
-        const result = await this.accountsUsecase.getTallySalesEntry(
+        const result = await this.tallyUsecase.getTallySalesEntry(
           req.query.from_date,
           req.query.to_date
         );
@@ -802,7 +803,7 @@ class AccountsRoutes {
           throw isValid.error;
         }
 
-        const result = await this.accountsUsecase.getTallyExpenses(
+        const result = await this.tallyUsecase.getTallyExpenses(
           req.query.from_date,
           req.query.to_date
         );
@@ -823,6 +824,6 @@ class AccountsRoutes {
   }
 }
 
-module.exports = (accountsUsecase) => {
-  return new AccountsRoutes(accountsUsecase);
+module.exports = (accountsUsecase, tallyUsecase) => {
+  return new AccountsRoutes(accountsUsecase, tallyUsecase);
 };

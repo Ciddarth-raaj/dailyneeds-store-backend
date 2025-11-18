@@ -328,7 +328,10 @@ class Server {
     const despatchRouter = require("./routes/despatch")(this.despatchUsecase);
     const userRouter = require("./routes/user")(this.userUsecase);
     const peopleRouter = require("./routes/people")(this.peopleUsecase);
-    const accountsRouter = require("./routes/accounts")(this.accountsUsecase);
+    const accountsRouter = require("./routes/accounts")(
+      this.accountsUsecase,
+      this.tallyUsecase
+    );
     const accountsEbookRouter = require("./routes/accountsEbook")(
       this.accountsEbookUsecase
     );
