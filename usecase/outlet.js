@@ -61,22 +61,27 @@ class OutletUsecase {
 
         if (outlet.budget) {
           await Promise.all(
-            outlet.budget.map(async (budget) => {
-              if (budget.budget_id) {
-                await this.budgetRepo.update({
-                  budget: budget.count,
-                  budget_id: budget.budget_id,
-                  designation_id: budget.designation_id,
-                });
-              } else {
-                await this.budgetRepo.create({
-                  store_id: outlet_id,
-                  designation_name: budget.designation,
-                  designation_id: budget.designation_id,
-                  budget: budget.count,
-                });
-              }
-            })
+            outlet.budget
+              .filter(
+                (item) =>
+                  item.count !== undefined && item.designation_id !== undefined
+              )
+              .map(async (budget) => {
+                if (budget.budget_id) {
+                  await this.budgetRepo.update({
+                    budget: budget.count,
+                    budget_id: budget.budget_id,
+                    designation_id: budget.designation_id,
+                  });
+                } else {
+                  await this.budgetRepo.create({
+                    store_id: outlet_id,
+                    designation_name: budget.designation,
+                    designation_id: budget.designation_id,
+                    budget: budget.count,
+                  });
+                }
+              })
           );
         }
 

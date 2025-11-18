@@ -116,7 +116,7 @@ class Synker {
 
         if (!parsedBranches[employee.CategoryCode]) {
           parsedBranches[employee.CategoryCode] = {
-            outlet_name: capitalizeWords(employee.CategoryName),
+            outlet_nickname: capitalizeWords(employee.CategoryName),
             outlet_code: employee.CategoryCode,
           };
         }
