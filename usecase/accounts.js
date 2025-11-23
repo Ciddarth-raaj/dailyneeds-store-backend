@@ -172,7 +172,7 @@ class AccountsUsecase {
     }
   }
 
-  async sendMTD(sheetData, outletName) {
+  async getMTDMessage(sheetData, outletName) {
     try {
       const filters = accountsUtil.getFilter(sheetData);
       const accounts = await this.getAllAccounts(filters);
@@ -189,16 +189,13 @@ class AccountsUsecase {
           "DD/MM/YYYY"
         )} - ${moment(filters.to_date).format("DD/MM/YYYY")})`;
 
-        await this.telegram.sendMessage(
-          ABV_TELEGRAM_CHAT_ID,
-          `✅ ${title}\n\n🏬 Outlet: ${outletName}\n\n━━━━━━━━━━━━━━━━━━\n• 🧾 No of Bills: ${
-            mtdTotals.no_of_bills
-          }\n• 💰 Total Sales: ₹${accountsUtil.currencyFormatter(
-            mtdTotals.total_sales
-          )}\n• 🟡 ABV: ₹${accountsUtil.currencyFormatter(
-            average_sales
-          )}\n━━━━━━━━━━━━━━━━━━`
-        );
+        return `📈 ${title}\n\n🏬 Outlet: ${outletName}\n\n━━━━━━━━━━━━━━━━━━\n• 🧾 No of Bills: ${
+          mtdTotals.no_of_bills
+        }\n• 💰 Total Sales: ₹${accountsUtil.currencyFormatter(
+          mtdTotals.total_sales
+        )}\n• 🟡 ABV: ₹${accountsUtil.currencyFormatter(
+          average_sales
+        )}\n━━━━━━━━━━━━━━━━━━`;
       }
     } catch (err) {
       throw err;
@@ -232,6 +229,8 @@ class AccountsUsecase {
             ? (sheetData.total_sales / sheetData.no_of_bills).toFixed(2)
             : "0.00";
 
+        const MTDMessage = await this.getMTDMessage(sheetData, outletName);
+
         await this.telegram.sendMessage(
           ABV_TELEGRAM_CHAT_ID,
           `✅ Counter *closed*\n\n🏬 Outlet: ${outletName}\n📅 Date: ${formattedDate}\n\n━━━━━━━━━━━━━━━━━━\n• 🧾 No of Bills: ${
@@ -240,9 +239,8 @@ class AccountsUsecase {
             sheetData.total_sales
           )}\n• 🟡 ABV: ₹${accountsUtil.currencyFormatter(
             average_sales
-          )}\n━━━━━━━━━━━━━━━━━━`
+          )}\n\n━━━━━━━━━━━━━━━━━━\n\n${MTDMessage}`
         );
-        await this.sendMTD(sheetData, outletName);
       } catch (telegramErr) {
         console.log("Failed to send Telegram notification:", telegramErr);
         // Don't throw here as the data was saved successfully
