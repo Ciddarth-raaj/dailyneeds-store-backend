@@ -1,6 +1,11 @@
+const ticketsUtil = require("../utils/tickets");
+const { TEST_TELEGRAM_CHAT_ID } = require("../constants/telegram");
+const telegram = require("../services/telegram")();
+
 class TicketUsecase {
-  constructor(ticketRepo) {
+  constructor(ticketRepo, employeeUsecase) {
     this.ticketRepo = ticketRepo;
+    this.employeeUsecase = employeeUsecase;
   }
 
   create(ticket) {
@@ -33,7 +38,13 @@ class TicketUsecase {
           const ticketImages = await this.ticketRepo.getImagesByTicketId(
             result.id
           );
-          resolve({ ...createdTicket, images: ticketImages });
+
+          createdTicket.images = ticketImages;
+          await this.handleTelegramMessage(
+            createdTicket,
+            "New Ticket Created!"
+          );
+          resolve(createdTicket);
         } else {
           resolve(result);
         }
@@ -136,10 +147,19 @@ class TicketUsecase {
         const updatedTicket = await this.ticketRepo.getById(id);
         if (updatedTicket) {
           const ticketImages = await this.ticketRepo.getImagesByTicketId(id);
-          resolve({
-            code: 200,
-            ticket: { ...updatedTicket, images: ticketImages },
-          });
+          updatedTicket.images = ticketImages;
+
+          if (Object.keys(ticket).length === 1 && ticket.status) {
+            await this.handleStatusUpdate(updatedTicket);
+          } else {
+            await this.handleTelegramMessage(
+              updatedTicket,
+              "Ticket Updated!",
+              false
+            );
+          }
+
+          resolve(updatedTicket);
         } else {
           resolve({ code: 200 });
         }
@@ -147,6 +167,40 @@ class TicketUsecase {
         reject(err);
       }
     });
+  }
+
+  async handleTelegramMessage(ticket, title = "", includeImages = true) {
+    try {
+      const message = await ticketsUtil.formatTicketMessage(
+        this.employeeUsecase,
+        ticket,
+        includeImages
+      );
+
+      if (includeImages && ticket.images.length > 0) {
+        await telegram.sendImages(
+          TEST_TELEGRAM_CHAT_ID,
+          ticket.images.map((item) => ({ type: "photo", media: item.s3_url }))
+        );
+      }
+
+      await telegram.sendMessage(
+        TEST_TELEGRAM_CHAT_ID,
+        `✅ ${title}\n\n${message}`
+      );
+    } catch (err) {
+      throw err;
+    }
+  }
+
+  async handleStatusUpdate(ticket) {
+    try {
+      const message = await ticketsUtil.formatStatusUpdateMessage(ticket);
+
+      await telegram.sendMessage(TEST_TELEGRAM_CHAT_ID, message);
+    } catch (err) {
+      throw err;
+    }
   }
 
   delete(id) {
@@ -206,6 +260,6 @@ class TicketUsecase {
   }
 }
 
-module.exports = (ticketRepo) => {
-  return new TicketUsecase(ticketRepo);
+module.exports = (ticketRepo, employeeUsecase) => {
+  return new TicketUsecase(ticketRepo, employeeUsecase);
 };

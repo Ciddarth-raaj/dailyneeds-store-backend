@@ -17,6 +17,7 @@ class Telegram {
           disableWebPagePreview: true,
           disableNotification: true,
           ...options,
+          parseMode: "Markdown",
         });
         resolve({ code: 200 });
       } catch (err) {
@@ -49,6 +50,29 @@ class Telegram {
           description: err.toString(),
           category: "",
           ref: { chat_id, fileUrl, caption },
+        });
+        reject(err);
+      }
+    });
+  }
+
+  async sendImages(chat_id, images, caption = "") {
+    return new Promise(async (resolve, reject) => {
+      try {
+        console.log("CIDD", images);
+        await client.sendMediaGroup(chat_id, images, {
+          caption,
+          disableNotification: false,
+        });
+        resolve({ code: 200 });
+      } catch (err) {
+        logger.Log({
+          level: logger.LEVEL.ERROR,
+          component: "SERVICE.TELEGRAM",
+          code: "SERVICE.TELEGRAM.SEND-DOCUMENT",
+          description: err.toString(),
+          category: "",
+          ref: { chat_id, images, caption },
         });
         reject(err);
       }

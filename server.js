@@ -286,7 +286,10 @@ class Server {
     this.ebConsumptionUsecase = require("./usecase/eb_consumption")(
       this.ebConsumptionRepo
     );
-    this.ticketUsecase = require("./usecase/ticket")(this.ticketRepo);
+    this.ticketUsecase = require("./usecase/ticket")(
+      this.ticketRepo,
+      this.employeeUsecase
+    );
     this.telegramDepartmentsUsecase = require("./usecase/telegram_departments")(
       this.telegramDepartmentsRepo
     );
