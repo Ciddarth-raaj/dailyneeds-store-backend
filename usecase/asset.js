@@ -23,6 +23,7 @@ const ALLOWED_FOLDERS = {
   dashboard_file: true,
   receipts: true,
   employee_image: true,
+  tickets: true,
 };
 
 class AssetUsecase {

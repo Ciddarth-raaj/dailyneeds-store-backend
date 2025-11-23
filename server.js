@@ -168,6 +168,10 @@ class Server {
     this.ebConsumptionRepo = require("./repository/eb_consumption")(
       this.mysql.connection
     );
+    this.ticketRepo = require("./repository/ticket")(this.mysql.connection);
+    this.telegramDepartmentsRepo = require("./repository/telegram_departments")(
+      this.mysql.connection
+    );
   }
 
   initUsecases() {
@@ -282,6 +286,10 @@ class Server {
     this.ebConsumptionUsecase = require("./usecase/eb_consumption")(
       this.ebConsumptionRepo
     );
+    this.ticketUsecase = require("./usecase/ticket")(this.ticketRepo);
+    this.telegramDepartmentsUsecase = require("./usecase/telegram_departments")(
+      this.telegramDepartmentsRepo
+    );
   }
 
   initRoutes() {
@@ -372,6 +380,10 @@ class Server {
     const ebConsumptionRouter = require("./routes/eb_consumption")(
       this.ebConsumptionUsecase
     );
+    const ticketRouter = require("./routes/ticket")(this.ticketUsecase);
+    const telegramDepartmentsRouter = require("./routes/telegram_departments")(
+      this.telegramDepartmentsUsecase
+    );
     app.use("/document", documentRouter.getRouter());
     app.use("/whatsapp", whatsappRouter.getRouter());
     app.use("/budget", budgetRouter.getRouter());
@@ -417,6 +429,8 @@ class Server {
     app.use("/repack-item", repackItemRouter.getRouter());
     app.use("/cleaning-packing", cleaningPackingRouter.getRouter());
     app.use("/eb-consumption", ebConsumptionRouter.getRouter());
+    app.use("/ticket", ticketRouter.getRouter());
+    app.use("/telegram-departments", telegramDepartmentsRouter.getRouter());
   }
 
   initServices() {
