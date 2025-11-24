@@ -1,5 +1,8 @@
+require("dotenv").config();
+
 const { TelegramClient } = require("messaging-api-telegram");
 const logger = require("../utils/logger");
+const { TEST_TELEGRAM_CHAT_ID } = require("../constants/telegram");
 
 const BOT_TOKEN = "8069311027:AAE64F15h8FZY_jqnlOSzQGmzeKAR-MDYbI";
 const client = new TelegramClient({
@@ -9,7 +12,13 @@ const client = new TelegramClient({
 class Telegram {
   constructor() {}
 
-  async sendMessage(chat_id, msg, options = {}) {
+  async sendMessage(chat_id_param, msg, options = {}) {
+    let chat_id = chat_id_param;
+
+    if (process.env.IS_TEST === "true") {
+      chat_id = TEST_TELEGRAM_CHAT_ID;
+    }
+
     //test-chat-id = 800863889
     return new Promise(async (resolve, reject) => {
       try {
@@ -59,7 +68,6 @@ class Telegram {
   async sendImages(chat_id, images, caption = "") {
     return new Promise(async (resolve, reject) => {
       try {
-        console.log("CIDD", images);
         await client.sendMediaGroup(chat_id, images, {
           caption,
           disableNotification: false,

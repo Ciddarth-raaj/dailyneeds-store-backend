@@ -225,14 +225,52 @@ class TicketUsecase {
         }
       }
 
+      const options = {
+        reply_markup: {
+          inline_keyboard: [],
+        },
+      };
+
+      if (!ticket.assigned_to) {
+        options.reply_markup.inline_keyboard.push([
+          {
+            text: "📌 Assign Ticket",
+            switch_inline_query_current_chat: `/assign ${ticket.id} @`,
+          },
+        ]);
+      }
+
+      if (!ticket.outlet_id) {
+        options.reply_markup.inline_keyboard.push([
+          {
+            text: "🏪 Outlet",
+            switch_inline_query_current_chat: `/change_outlet ${ticket.id}`,
+          },
+        ]);
+      }
+
+      if (!ticket.department_id) {
+        options.reply_markup.inline_keyboard.push([
+          {
+            text: "🏢 Department",
+            switch_inline_query_current_chat: `/assign_department ${ticket.id}`,
+          },
+        ]);
+      }
+
       if (outletChatId) {
-        await telegram.sendMessage(outletChatId, `✅ ${title}\n\n${message}`);
+        await telegram.sendMessage(
+          outletChatId,
+          `✅ ${title}\n\n${message}`,
+          options
+        );
       }
 
       if (departmentChatId) {
         await telegram.sendMessage(
           departmentChatId,
-          `✅ ${title}\n\n${message}`
+          `✅ ${title}\n\n${message}`,
+          options
         );
       }
     } catch (err) {
