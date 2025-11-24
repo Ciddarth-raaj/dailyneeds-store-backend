@@ -282,7 +282,31 @@ class TicketUsecase {
     try {
       const message = await ticketsUtil.formatStatusUpdateMessage(ticket);
 
-      await telegram.sendMessage(TEST_TELEGRAM_CHAT_ID, message);
+      let outletChatId = null;
+      let departmentChatId = null;
+
+      if (ticket.outlet_id) {
+        const outlet = await this.outletUsecase.getOutletById(ticket.outlet_id);
+        if (outlet.length > 0) {
+          outletChatId = outlet[0].telegram_chat_id;
+        }
+      }
+
+      if (ticket.department_id) {
+        const department = await this.telegramDepartmentsUsecase.getById(
+          ticket.department_id
+        );
+        if (department.id) {
+          departmentChatId = department.telegram_chat_id;
+        }
+      }
+
+      if (outletChatId) {
+        await telegram.sendMessage(outletChatId, message);
+      }
+      if (departmentChatId) {
+        await telegram.sendMessage(departmentChatId, message);
+      }
     } catch (err) {
       throw err;
     }
