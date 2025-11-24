@@ -15,9 +15,9 @@ class Telegram {
   async sendMessage(chat_id_param, msg, options = {}) {
     let chat_id = chat_id_param;
 
-    if (process.env.IS_TEST === "true") {
-      chat_id = TEST_TELEGRAM_CHAT_ID;
-    }
+    // if (process.env.IS_TEST === "true") {
+    //   chat_id = TEST_TELEGRAM_CHAT_ID;
+    // }
 
     //test-chat-id = 800863889
     return new Promise(async (resolve, reject) => {
