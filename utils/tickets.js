@@ -103,8 +103,6 @@ ticketsUtil.formatTicketMessage = async (
     creatorUsername = "ID: " + ticket.created_by;
   }
 
-  console.log("CREATOR USERNAME", assigneeDetails);
-
   // Format assignee info
   let assigneeUsername = "Not assigned";
   if (assigneeDetails && assigneeDetails.telegram_username) {

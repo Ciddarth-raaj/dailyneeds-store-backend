@@ -3,9 +3,16 @@ const { TEST_TELEGRAM_CHAT_ID } = require("../constants/telegram");
 const telegram = require("../services/telegram")();
 
 class TicketUsecase {
-  constructor(ticketRepo, employeeUsecase) {
+  constructor(
+    ticketRepo,
+    employeeUsecase,
+    outletUsecase,
+    telegramDepartmentsUsecase
+  ) {
     this.ticketRepo = ticketRepo;
     this.employeeUsecase = employeeUsecase;
+    this.outletUsecase = outletUsecase;
+    this.telegramDepartmentsUsecase = telegramDepartmentsUsecase;
   }
 
   create(ticket) {
@@ -177,17 +184,50 @@ class TicketUsecase {
         includeImages
       );
 
-      if (includeImages && ticket.images.length > 0) {
-        await telegram.sendImages(
-          TEST_TELEGRAM_CHAT_ID,
-          ticket.images.map((item) => ({ type: "photo", media: item.s3_url }))
-        );
+      let outletChatId = null;
+      let departmentChatId = null;
+
+      if (ticket.outlet_id) {
+        const outlet = await this.outletUsecase.getOutletById(ticket.outlet_id);
+        if (outlet.length > 0) {
+          outletChatId = outlet[0].telegram_chat_id;
+        }
       }
 
-      await telegram.sendMessage(
-        TEST_TELEGRAM_CHAT_ID,
-        `✅ ${title}\n\n${message}`
-      );
+      if (ticket.department_id) {
+        const department = await this.telegramDepartmentsUsecase.getById(
+          ticket.department_id
+        );
+        if (department.id) {
+          departmentChatId = department.telegram_chat_id;
+        }
+      }
+
+      if (includeImages && ticket.images.length > 0) {
+        if (outletChatId) {
+          await telegram.sendImages(
+            outletChatId,
+            ticket.images.map((item) => ({ type: "photo", media: item.s3_url }))
+          );
+        }
+        if (departmentChatId) {
+          await telegram.sendImages(
+            departmentChatId,
+            ticket.images.map((item) => ({ type: "photo", media: item.s3_url }))
+          );
+        }
+      }
+
+      if (outletChatId) {
+        await telegram.sendMessage(outletChatId, `✅ ${title}\n\n${message}`);
+      }
+
+      if (departmentChatId) {
+        await telegram.sendMessage(
+          departmentChatId,
+          `✅ ${title}\n\n${message}`
+        );
+      }
     } catch (err) {
       throw err;
     }
@@ -260,6 +300,16 @@ class TicketUsecase {
   }
 }
 
-module.exports = (ticketRepo, employeeUsecase) => {
-  return new TicketUsecase(ticketRepo, employeeUsecase);
+module.exports = (
+  ticketRepo,
+  employeeUsecase,
+  outletUsecase,
+  telegramDepartmentsUsecase
+) => {
+  return new TicketUsecase(
+    ticketRepo,
+    employeeUsecase,
+    outletUsecase,
+    telegramDepartmentsUsecase
+  );
 };

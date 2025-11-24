@@ -131,7 +131,7 @@ class OutletRepository {
   getOutletById(outlet_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "SELECT outlet_id, outlet_name FROM outlets WHERE outlet_id = ?",
+        "SELECT outlet_id, outlet_name, telegram_chat_id FROM outlets WHERE outlet_id = ?",
         [outlet_id],
         (err, docs) => {
           if (err) {
