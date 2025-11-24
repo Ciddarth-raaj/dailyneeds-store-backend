@@ -51,6 +51,11 @@ class TicketUsecase {
             createdTicket,
             "New Ticket Created!"
           );
+
+          if (createdTicket.assigned_to) {
+            await this.handleAssigned(createdTicket);
+          }
+
           resolve(createdTicket);
         } else {
           resolve(result);
@@ -158,6 +163,8 @@ class TicketUsecase {
 
           if (Object.keys(ticket).length === 1 && ticket.status) {
             await this.handleStatusUpdate(updatedTicket);
+          } else if (Object.keys(ticket).length === 1 && ticket.assigned_to) {
+            await this.handleAssigned(updatedTicket);
           } else {
             await this.handleTelegramMessage(
               updatedTicket,
@@ -238,6 +245,42 @@ class TicketUsecase {
       const message = await ticketsUtil.formatStatusUpdateMessage(ticket);
 
       await telegram.sendMessage(TEST_TELEGRAM_CHAT_ID, message);
+    } catch (err) {
+      throw err;
+    }
+  }
+
+  async handleAssigned(ticket) {
+    try {
+      const message = `Ticket #${ticket.id} has been assigned to @${
+        ticket.assigned_to_telegram_username ?? ticket.assigned_to_name
+      }`;
+
+      let outletChatId = null;
+      let departmentChatId = null;
+
+      if (ticket.outlet_id) {
+        const outlet = await this.outletUsecase.getOutletById(ticket.outlet_id);
+        if (outlet.length > 0) {
+          outletChatId = outlet[0].telegram_chat_id;
+        }
+      }
+
+      if (ticket.department_id) {
+        const department = await this.telegramDepartmentsUsecase.getById(
+          ticket.department_id
+        );
+        if (department.id) {
+          departmentChatId = department.telegram_chat_id;
+        }
+      }
+
+      if (outletChatId) {
+        await telegram.sendMessage(outletChatId, message);
+      }
+      if (departmentChatId) {
+        await telegram.sendMessage(departmentChatId, message);
+      }
     } catch (err) {
       throw err;
     }

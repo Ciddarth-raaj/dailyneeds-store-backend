@@ -45,7 +45,8 @@ class TicketRepository {
                    new_employee.employee_name as created_by_name,
                    outlets.outlet_name,
                    telegram_departments.department as department_name,
-                   assigned_employee.employee_name as assigned_to_name
+                   assigned_employee.employee_name as assigned_to_name,
+                   new_employee.telegram_username as assigned_to_telegram_username
                    FROM tickets 
                    LEFT JOIN new_employee ON new_employee.employee_id = tickets.created_by
                    LEFT JOIN outlets ON outlets.outlet_id = tickets.outlet_id
@@ -117,7 +118,8 @@ class TicketRepository {
                      new_employee.employee_name as created_by_name,
                      outlets.outlet_name,
                      telegram_departments.department as department_name,
-                     assigned_employee.employee_name as assigned_to_name
+                     assigned_employee.employee_name as assigned_to_name,
+                     assigned_employee.telegram_username as assigned_to_telegram_username
                      FROM tickets 
                      LEFT JOIN new_employee ON new_employee.employee_id = tickets.created_by
                      LEFT JOIN outlets ON outlets.outlet_id = tickets.outlet_id
