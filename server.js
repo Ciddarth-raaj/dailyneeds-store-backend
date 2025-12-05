@@ -168,6 +168,9 @@ class Server {
     this.ebConsumptionRepo = require("./repository/eb_consumption")(
       this.mysql.connection
     );
+    this.ebMasterListRepo = require("./repository/eb_master_list")(
+      this.mysql.connection
+    );
     this.ticketRepo = require("./repository/ticket")(this.mysql.connection);
     this.telegramDepartmentsRepo = require("./repository/telegram_departments")(
       this.mysql.connection
@@ -286,6 +289,9 @@ class Server {
     this.ebConsumptionUsecase = require("./usecase/eb_consumption")(
       this.ebConsumptionRepo
     );
+    this.ebMasterListUsecase = require("./usecase/eb_master_list")(
+      this.ebMasterListRepo
+    );
     this.telegramDepartmentsUsecase = require("./usecase/telegram_departments")(
       this.telegramDepartmentsRepo
     );
@@ -385,6 +391,9 @@ class Server {
     const ebConsumptionRouter = require("./routes/eb_consumption")(
       this.ebConsumptionUsecase
     );
+    const ebMasterListRouter = require("./routes/eb_master_list")(
+      this.ebMasterListUsecase
+    );
     const ticketRouter = require("./routes/ticket")(this.ticketUsecase);
     const telegramDepartmentsRouter = require("./routes/telegram_departments")(
       this.telegramDepartmentsUsecase
@@ -434,6 +443,7 @@ class Server {
     app.use("/repack-item", repackItemRouter.getRouter());
     app.use("/cleaning-packing", cleaningPackingRouter.getRouter());
     app.use("/eb-consumption", ebConsumptionRouter.getRouter());
+    app.use("/eb-master-list", ebMasterListRouter.getRouter());
     app.use("/ticket", ticketRouter.getRouter());
     app.use("/telegram-departments", telegramDepartmentsRouter.getRouter());
   }
