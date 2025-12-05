@@ -16,9 +16,18 @@ class EbConsumptionRoutes {
           consumption_id: Joi.number().integer().positive().optional(),
           date: Joi.date().required(),
           branch_id: Joi.number().integer().positive().required(),
-          closing_units: Joi.number().precision(2).required(),
-          opening_units: Joi.number().precision(2).required(),
-        });
+          closing_units: Joi.number().precision(2).optional(),
+          opening_units: Joi.number().precision(2).optional(),
+          eb_machines: Joi.array()
+            .items(
+              Joi.object({
+                eb_machine_id: Joi.number().integer().positive().required(),
+                opening_units: Joi.number().precision(2).required(),
+                closing_units: Joi.number().precision(2).required(),
+              })
+            )
+            .optional(),
+        }).or("eb_machines", "closing_units", "opening_units"); // At least one of these must be present
 
         const { error, value } = schema.validate(req.body);
         if (error) {
@@ -30,7 +39,14 @@ class EbConsumptionRoutes {
           created_by: req.decoded.employee_id,
         };
 
-        console.log(data, req.decoded);
+        // If eb_machines is not provided but old format is used, keep backward compatibility
+        if (
+          !data.eb_machines &&
+          data.opening_units !== undefined &&
+          data.closing_units !== undefined
+        ) {
+          // Legacy format - keep as is
+        }
 
         const result = await this.usecase.create(data);
         res.status(result.code === 200 ? 200 : 400).json(result);
@@ -81,10 +97,20 @@ class EbConsumptionRoutes {
         });
 
         const bodySchema = Joi.object({
-          date: Joi.date(),
-          branch_id: Joi.number().integer().positive(),
-          closing_units: Joi.number().precision(2).allow(null, ""),
-          opening_units: Joi.number().precision(2).allow(null, ""),
+          date: Joi.date().optional(),
+          branch_id: Joi.number().integer().positive().optional(),
+          closing_units: Joi.number().precision(2).allow(null, "").optional(),
+          opening_units: Joi.number().precision(2).allow(null, "").optional(),
+          eb_machine_id: Joi.number().integer().positive().optional(),
+          eb_machines: Joi.array()
+            .items(
+              Joi.object({
+                eb_machine_id: Joi.number().integer().positive().required(),
+                opening_units: Joi.number().precision(2).required(),
+                closing_units: Joi.number().precision(2).required(),
+              })
+            )
+            .optional(),
         }).min(1); // At least one field must be provided
 
         const paramsValidation = paramsSchema.validate({
@@ -99,13 +125,82 @@ class EbConsumptionRoutes {
           throw bodyValidation.error;
         }
 
+        const updateData = {
+          ...bodyValidation.value,
+        };
+
+        // If eb_machines is provided, include created_by for bulk operations
+        if (updateData.eb_machines) {
+          updateData.created_by = req.decoded.employee_id;
+        }
+
         const result = await this.usecase.update(
           paramsValidation.value.consumptionId,
-          bodyValidation.value
+          updateData
         );
         res
           .status(result.code === 200 ? 200 : result.code === 404 ? 404 : 400)
           .json(result);
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
+    // Update EB Consumption records by date and branch (new format)
+    router.put("/by-date-branch", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          date: Joi.date().required(),
+          branch_id: Joi.number().integer().positive().required(),
+          eb_machines: Joi.array()
+            .items(
+              Joi.object({
+                eb_machine_id: Joi.number().integer().positive().required(),
+                opening_units: Joi.number().precision(2).required(),
+                closing_units: Joi.number().precision(2).required(),
+              })
+            )
+            .min(1)
+            .required(),
+        });
+
+        const { error, value } = schema.validate(req.body);
+        if (error) {
+          throw error;
+        }
+
+        const data = {
+          ...value,
+          created_by: req.decoded.employee_id,
+        };
+
+        const result = await this.usecase.create(data);
+        res.status(result.code === 200 ? 200 : 400).json(result);
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
+    // Get EB Consumption records by date and branch
+    router.get("/by-date-branch", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          date: Joi.date().required(),
+          branch_id: Joi.number().integer().positive().required(),
+        });
+
+        const { error, value } = schema.validate(req.query);
+        if (error) {
+          throw error;
+        }
+
+        const result = await this.usecase.getByDateAndBranch(
+          value.date,
+          value.branch_id
+        );
+        res.status(result.code === 200 ? 200 : 400).json(result);
       } catch (err) {
         respondError(res, err);
       }

@@ -2,3 +2,6 @@ CREATE TABLE `eb_master_list` (`eb_machine_id` INT NOT NULL AUTO_INCREMENT , `ma
 
 INSERT INTO `all_permissions` (`permission_key`) VALUES ('view_eb_machine_master');
 INSERT INTO `all_permissions` (`permission_key`) VALUES ('add_eb_machine_master');
+
+ALTER TABLE `eb_consumption` ADD `eb_machine_id` INT NULL DEFAULT NULL AFTER `branch_id`;
+ALTER TABLE `eb_consumption` ADD UNIQUE(`date`, `eb_machine_id`);
