@@ -1,0 +1,1 @@
+ALTER TABLE `product_images` CHANGE `image_id` `image_id` INT(11) NOT NULL AUTO_INCREMENT;
