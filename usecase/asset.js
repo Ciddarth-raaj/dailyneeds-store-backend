@@ -16,6 +16,7 @@ const ALLOWED_FILE_TYPES = {
 const ALLOWED_FOLDERS = {
   products: true,
   products_t: true,
+  "products/image": true,
   categories: true,
   subcategories: true,
   departments: true,
