@@ -15,6 +15,7 @@ const ALLOWED_FILE_TYPES = {
 
 const ALLOWED_FOLDERS = {
   products: true,
+  products_t: true,
   categories: true,
   subcategories: true,
   departments: true,
@@ -79,14 +80,25 @@ class AssetUsecase {
           return;
         }
 
-        const fileName =
-          fields.folder +
-          "/" +
-          slug(fields.name) +
-          "-" +
-          uuid() +
-          "." +
-          fileExtenion;
+        // actualName: optional param without UUID, used to create a stable file name
+        // If provided, we overwrite any existing asset with the same key in S3.
+        let baseName;
+        if (fields.actualName && String(fields.actualName).trim() !== "") {
+          // Strip any extension from actualName.
+          // We keep underscores as-is and only normalise spaces and special chars.
+          const rawActualName = String(fields.actualName).trim();
+          const withoutExt = rawActualName.replace(/\.[^/.]+$/, "");
+          // Normalise: lowercase, spaces -> '-', remove invalid chars except '_' and '-'
+          baseName = withoutExt
+            .toLowerCase()
+            .replace(/\s+/g, "-")
+            .replace(/[^a-z0-9_-]/g, "");
+        } else {
+          // Backwards-compatible: keep UUID-based unique name
+          baseName = slug(fields.name) + "-" + uuid();
+        }
+
+        const fileName = fields.folder + "/" + baseName + "." + fileExtenion;
 
         try {
           if (fileExtenion != "webp" && fileExtenion != "pdf")
@@ -100,6 +112,14 @@ class AssetUsecase {
         }
       });
     });
+  }
+
+  /**
+   * Delete an asset from S3 using its full URL.
+   * This is used when product images are removed during update.
+   */
+  deleteByUrl(url) {
+    return S3.deleteFileByUrl(url);
   }
 }
 

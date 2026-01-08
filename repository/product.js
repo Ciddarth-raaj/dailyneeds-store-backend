@@ -107,13 +107,13 @@ class ProductRepository {
         `SELECT 
           product_table.product_id, 
           product_table.de_name,
-          CASE WHEN product_images.image_id IS NOT NULL THEN 1 ELSE 0 END as has_images
+          COALESCE(pi.has_images, 0) as has_images
         FROM product_table 
         LEFT JOIN (
-          SELECT DISTINCT product_id, MIN(image_id) as image_id
+          SELECT product_id, 1 as has_images
           FROM product_images
           GROUP BY product_id
-        ) as product_images ON product_images.product_id = product_table.product_id
+        ) as pi ON pi.product_id = product_table.product_id
         LIMIT 0, 30`,
         [],
         (err, docs) => {
@@ -133,7 +133,10 @@ class ProductRepository {
           const formatted = docs.map((doc) => ({
             product_id: doc.product_id,
             de_name: doc.de_name,
-            has_images: doc.has_images === 1 || doc.has_images === true,
+            has_images:
+              doc.has_images === 1 ||
+              doc.has_images === "1" ||
+              doc.has_images === true,
           }));
           resolve(formatted);
         }
@@ -179,18 +182,18 @@ class ProductRepository {
           subcategories.subcategory_name, 
           department.department_name, 
           brands.brand_name,
-          CASE WHEN product_images.image_id IS NOT NULL THEN 1 ELSE 0 END as has_images
+          COALESCE(pi.has_images, 0) as has_images
         FROM product_table
         LEFT JOIN categories ON categories.category_id = product_table.category_id
         LEFT JOIN subcategories ON subcategories.subcategory_id = product_table.subcategory_id
         LEFT JOIN product_department AS department ON department.department_id = product_table.department_id
         LEFT JOIN brands ON brands.brand_id = product_table.brand_id
         LEFT JOIN (
-          SELECT DISTINCT product_id, MIN(image_id) as image_id
+          SELECT product_id, 1 as has_images
           FROM product_images
           GROUP BY product_id
-        ) as product_images ON product_images.product_id = product_table.product_id
-         WHERE gf_applies_online = 1
+        ) as pi ON pi.product_id = product_table.product_id
+        WHERE gf_applies_online = 1
         ORDER BY product_table.product_id DESC
         LIMIT ${offset}, ${limit}`,
         [],
@@ -211,9 +214,9 @@ class ProductRepository {
           const formatted = docs.map((doc) => {
             const product = { ...doc };
             product.has_images =
-              doc.has_images === 1 || doc.has_images === true;
-            // Remove the image_id field from product_images join
-            delete product.image_id;
+              doc.has_images === 1 ||
+              doc.has_images === "1" ||
+              doc.has_images === true;
             return product;
           });
           resolve(formatted);
@@ -260,17 +263,17 @@ class ProductRepository {
           subcategories.*, 
           department.*, 
           brands.*,
-          CASE WHEN product_images.image_id IS NOT NULL THEN 1 ELSE 0 END as has_images
+          COALESCE(pi.has_images, 0) as has_images
         FROM product_table
         JOIN categories ON categories.category_id = product_table.category_id
         JOIN subcategories ON subcategories.subcategory_id = product_table.subcategory_id
         JOIN product_department as department ON department.department_id = product_table.department_id
         JOIN brands ON brands.brand_id = product_table.brand_id
         LEFT JOIN (
-          SELECT DISTINCT product_id, MIN(image_id) as image_id
+          SELECT product_id, 1 as has_images
           FROM product_images
           GROUP BY product_id
-        ) as product_images ON product_images.product_id = product_table.product_id
+        ) as pi ON pi.product_id = product_table.product_id
         WHERE (gf_item_name LIKE "%${filter}%" OR product_table.product_id LIKE "%${filter}%" OR de_distributor LIKE "%${filter}%" OR de_display_name LIKE "%${filter}%" OR de_name LIKE "%${filter}%")
         LIMIT ${offset}, ${limit}`,
         [filter, offset, limit],
@@ -291,9 +294,9 @@ class ProductRepository {
           const formatted = docs.map((doc) => {
             const product = { ...doc };
             product.has_images =
-              doc.has_images === 1 || doc.has_images === true;
-            // Remove the image_id field from product_images join
-            delete product.image_id;
+              doc.has_images === 1 ||
+              doc.has_images === "1" ||
+              doc.has_images === true;
             return product;
           });
           resolve(formatted);
