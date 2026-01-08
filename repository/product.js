@@ -176,25 +176,23 @@ class ProductRepository {
   get(limit, offset) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT 
-          product_table.*, 
-          categories.category_name, 
-          subcategories.subcategory_name, 
-          department.department_name, 
-          brands.brand_name,
-          COALESCE(pi.has_images, 0) as has_images
-        FROM product_table
-        LEFT JOIN categories ON categories.category_id = product_table.category_id
-        LEFT JOIN subcategories ON subcategories.subcategory_id = product_table.subcategory_id
-        LEFT JOIN product_department AS department ON department.department_id = product_table.department_id
-        LEFT JOIN brands ON brands.brand_id = product_table.brand_id
-        LEFT JOIN (
-          SELECT product_id, 1 as has_images
-          FROM product_images
-          GROUP BY product_id
-        ) as pi ON pi.product_id = product_table.product_id
-        WHERE gf_applies_online = 1
-        ORDER BY product_table.product_id DESC
+        `SELECT
+            p.product_id,
+            p.de_display_name,
+            p.de_distributor,
+            p.category_id,
+            p.subcategory_id,
+            p.department_id,
+            p.brand_id,
+            EXISTS (
+                SELECT 1
+                FROM product_images pi
+                WHERE pi.product_id = p.product_id
+                LIMIT 1
+            ) AS has_images
+        FROM product_table p
+        WHERE p.gf_applies_online = 1
+        ORDER BY p.product_id DESC
         LIMIT ${offset}, ${limit}`,
         [],
         (err, docs) => {
