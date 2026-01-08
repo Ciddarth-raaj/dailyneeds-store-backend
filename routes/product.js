@@ -1,6 +1,6 @@
 const router = require("express").Router();
 const Joi = require("@hapi/joi");
-const respondError = require("../utils/http")
+const respondError = require("../utils/http");
 
 class ProductRoutes {
   constructor(productUsecase) {
@@ -21,7 +21,6 @@ class ProductRoutes {
 
         res.json(response);
       } catch (err) {
-
         if (err.name === "ValidationError") {
           res.json({ code: 422, msg: err.toString() });
         } else {
@@ -44,7 +43,7 @@ class ProductRoutes {
         } else {
           res.json({ code: 500, msg: "An error occurred !" });
         }
-      }    
+      }
       res.end();
     });
 
@@ -77,19 +76,31 @@ class ProductRoutes {
           product_id: Joi.number().required(),
 
           product_details: Joi.object({
-            product_id: Joi.number().allow(null).allow('').optional(),
-            return_prod: Joi.number().allow(null).allow('').optional(),
-            de_packaging_type: Joi.string().allow(null).allow('').optional(),
-            cleaning: Joi.number().allow(null).allow('').optional(),
-            sticker: Joi.number().allow(null).allow('').optional(),
-            grinding: Joi.number().allow(null).allow('').optional(),
-            cover_type: Joi.string().allow(null).allow('').optional(),
-            cover_sizes: Joi.string().allow(null).allow('').optional(),
-            gf_description: Joi.string().allow(null).allow('').optional(),
-            gf_detailed_description: Joi.string().allow(null).allow('').optional(),
-            de_distributor: Joi.string().allow(null).allow('').optional(),
-            keywords: Joi.string().allow(null).allow('').optional(),
+            product_id: Joi.number().allow(null).allow("").optional(),
+            return_prod: Joi.number().allow(null).allow("").optional(),
+            de_packaging_type: Joi.string().allow(null).allow("").optional(),
+            cleaning: Joi.number().allow(null).allow("").optional(),
+            sticker: Joi.number().allow(null).allow("").optional(),
+            grinding: Joi.number().allow(null).allow("").optional(),
+            cover_type: Joi.string().allow(null).allow("").optional(),
+            cover_sizes: Joi.string().allow(null).allow("").optional(),
+            gf_description: Joi.string().allow(null).allow("").optional(),
+            gf_detailed_description: Joi.string()
+              .allow(null)
+              .allow("")
+              .optional(),
+            de_distributor: Joi.string().allow(null).allow("").optional(),
+            keywords: Joi.string().allow(null).allow("").optional(),
           }).optional(),
+
+          images: Joi.array()
+            .items(
+              Joi.object({
+                image_url: Joi.string().required(),
+                priority: Joi.number().optional().default(0),
+              })
+            )
+            .optional(),
         };
 
         const product = req.body;
@@ -111,13 +122,13 @@ class ProductRoutes {
       }
       res.end();
     });
-    
+
     router.get("/prodcount", async (req, res) => {
       try {
         const product = await this.productUsecase.getProductCount();
         res.json(product);
       } catch (err) {
-          console.log(err);
+        console.log(err);
         if (err.name === "ValidationError") {
           res.json({ code: 422, msg: err.toString() });
         } else {
@@ -132,13 +143,17 @@ class ProductRoutes {
           filter: Joi.string().required(),
           limit: Joi.number().required(),
           offset: Joi.number().required(),
-        }
+        };
         const product = req.query;
         const isValid = Joi.validate(product, schema);
         if (isValid.error !== null) {
           throw isValid.error;
         }
-        const data = await this.productUsecase.getProductByFilter(product.filter, product.limit, product.offset);
+        const data = await this.productUsecase.getProductByFilter(
+          product.filter,
+          product.limit,
+          product.offset
+        );
         res.json(data);
       } catch (err) {
         console.log(err);
@@ -155,13 +170,15 @@ class ProductRoutes {
       try {
         const schema = {
           product_id: Joi.string().required(),
-        }
+        };
         const product = req.query;
         const isValid = Joi.validate(product, schema);
         if (isValid.error !== null) {
           throw isValid.error;
         }
-        const data = await this.productUsecase.getProductById(product.product_id);
+        const data = await this.productUsecase.getProductById(
+          product.product_id
+        );
         res.json(data);
       } catch (err) {
         console.log(err);

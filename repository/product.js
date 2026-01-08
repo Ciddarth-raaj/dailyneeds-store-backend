@@ -103,7 +103,18 @@ class ProductRepository {
   }
   getAllProductData() {
     return new Promise((resolve, reject) => {
-      this.db.query(`SELECT product_id, de_name FROM product_table limit 0,30`,
+      this.db.query(
+        `SELECT 
+          product_table.product_id, 
+          product_table.de_name,
+          CASE WHEN product_images.image_id IS NOT NULL THEN 1 ELSE 0 END as has_images
+        FROM product_table 
+        LEFT JOIN (
+          SELECT DISTINCT product_id, MIN(image_id) as image_id
+          FROM product_images
+          GROUP BY product_id
+        ) as product_images ON product_images.product_id = product_table.product_id
+        LIMIT 0, 30`,
         [],
         (err, docs) => {
           if (err) {
@@ -118,13 +129,21 @@ class ProductRepository {
             reject(err);
             return;
           }
-          resolve(docs);
-        });
+          // Convert has_images to boolean
+          const formatted = docs.map((doc) => ({
+            product_id: doc.product_id,
+            de_name: doc.de_name,
+            has_images: doc.has_images === 1 || doc.has_images === true,
+          }));
+          resolve(formatted);
+        }
+      );
     });
   }
   getById(limit, offset, product_id) {
     return new Promise((resolve, reject) => {
-      this.db.query(`SELECT product_table.product_id, categories.category_name, subcategories.subcategory_name, department.department_name, brands.brand_name FROM product_table, categories, subcategories, department, brands
+      this.db.query(
+        `SELECT product_table.product_id, categories.category_name, subcategories.subcategory_name, department.department_name, brands.brand_name FROM product_table, categories, subcategories, department, brands
       WHERE categories.category_id = product_table.category_id
       AND subcategories.subcategory_id = product_table.subcategory_id
       AND department.department_id = product_table.department_id
@@ -146,18 +165,33 @@ class ProductRepository {
             return;
           }
           resolve(docs);
-        });
+        }
+      );
     });
   }
 
   get(limit, offset) {
     return new Promise((resolve, reject) => {
-      this.db.query(`SELECT *, categories.category_name, subcategories.subcategory_name, department.department_name, brands.brand_name FROM product_table, categories, subcategories, product_department as department, brands
-      WHERE categories.category_id = product_table.category_id
-      AND subcategories.subcategory_id = product_table.subcategory_id
-      AND department.department_id = product_table.department_id
-      AND brands.brand_id = product_table.brand_id
-      LIMIT ${offset}, ${limit}`,
+      this.db.query(
+        `SELECT 
+          product_table.*, 
+          categories.category_name, 
+          subcategories.subcategory_name, 
+          department.department_name, 
+          brands.brand_name,
+          CASE WHEN product_images.image_id IS NOT NULL THEN 1 ELSE 0 END as has_images
+        FROM product_table
+        LEFT JOIN categories ON categories.category_id = product_table.category_id
+        LEFT JOIN subcategories ON subcategories.subcategory_id = product_table.subcategory_id
+        LEFT JOIN product_department AS department ON department.department_id = product_table.department_id
+        LEFT JOIN brands ON brands.brand_id = product_table.brand_id
+        LEFT JOIN (
+          SELECT DISTINCT product_id, MIN(image_id) as image_id
+          FROM product_images
+          GROUP BY product_id
+        ) as product_images ON product_images.product_id = product_table.product_id
+        ORDER BY product_table.product_id DESC
+        LIMIT ${offset}, ${limit}`,
         [],
         (err, docs) => {
           if (err) {
@@ -172,14 +206,25 @@ class ProductRepository {
             reject(err);
             return;
           }
-          resolve(docs);
-        });
+          // Convert has_images to boolean
+          const formatted = docs.map((doc) => {
+            const product = { ...doc };
+            product.has_images =
+              doc.has_images === 1 || doc.has_images === true;
+            // Remove the image_id field from product_images join
+            delete product.image_id;
+            return product;
+          });
+          resolve(formatted);
+        }
+      );
     });
   }
 
   getProductById(product_id) {
     return new Promise((resolve, reject) => {
-      this.db.query(`select *, categories.category_name, subcategories.subcategory_name, department.department_name, brands.brand_name from product_table
+      this.db.query(
+        `select *, categories.category_name, subcategories.subcategory_name, department.department_name, brands.brand_name from product_table
       LEFT JOIN categories on product_table.category_id = categories.category_id 
       LEFT JOIN subcategories on subcategories.subcategory_id = product_table.subcategory_id
       LEFT JOIN department on department.department_id = product_table.department_id
@@ -200,19 +245,33 @@ class ProductRepository {
             return;
           }
           resolve(docs);
-        });
+        }
+      );
     });
   }
   getProductByFilter(filter, limit, offset) {
     return new Promise((resolve, reject) => {
-      this.db.query(`SELECT DISTINCT product_table.product_id, product_table.*, categories.*, subcategories.*, department.*, brands.* 
-      FROM product_table
-      JOIN categories ON categories.category_id = product_table.category_id
-      JOIN subcategories ON subcategories.subcategory_id = product_table.subcategory_id
-      JOIN product_department as department ON department.department_id = product_table.department_id
-      JOIN brands ON brands.brand_id = product_table.brand_id
-      WHERE (gf_item_name LIKE "%${filter}%" OR product_table.product_id LIKE "%${filter}%" OR de_distributor LIKE "%${filter}%" OR de_display_name LIKE "%${filter}%" OR de_name LIKE "%${filter}%")
-      LIMIT ${offset}, ${limit}`,
+      this.db.query(
+        `SELECT DISTINCT 
+          product_table.product_id, 
+          product_table.*, 
+          categories.*, 
+          subcategories.*, 
+          department.*, 
+          brands.*,
+          CASE WHEN product_images.image_id IS NOT NULL THEN 1 ELSE 0 END as has_images
+        FROM product_table
+        JOIN categories ON categories.category_id = product_table.category_id
+        JOIN subcategories ON subcategories.subcategory_id = product_table.subcategory_id
+        JOIN product_department as department ON department.department_id = product_table.department_id
+        JOIN brands ON brands.brand_id = product_table.brand_id
+        LEFT JOIN (
+          SELECT DISTINCT product_id, MIN(image_id) as image_id
+          FROM product_images
+          GROUP BY product_id
+        ) as product_images ON product_images.product_id = product_table.product_id
+        WHERE (gf_item_name LIKE "%${filter}%" OR product_table.product_id LIKE "%${filter}%" OR de_distributor LIKE "%${filter}%" OR de_display_name LIKE "%${filter}%" OR de_name LIKE "%${filter}%")
+        LIMIT ${offset}, ${limit}`,
         [filter, offset, limit],
         (err, docs) => {
           if (err) {
@@ -227,8 +286,18 @@ class ProductRepository {
             reject(err);
             return;
           }
-          resolve(docs);
-        });
+          // Convert has_images to boolean
+          const formatted = docs.map((doc) => {
+            const product = { ...doc };
+            product.has_images =
+              doc.has_images === 1 || doc.has_images === true;
+            // Remove the image_id field from product_images join
+            delete product.image_id;
+            return product;
+          });
+          resolve(formatted);
+        }
+      );
     });
   }
   getProductCount() {
@@ -274,6 +343,133 @@ class ProductRepository {
             return;
           }
           resolve({ code: 200 });
+        }
+      );
+    });
+  }
+
+  createProductImages(product_id, images) {
+    return new Promise((resolve, reject) => {
+      if (!images || images.length === 0) {
+        resolve({ code: 200 });
+        return;
+      }
+
+      const values = images.map((img) => [
+        product_id,
+        img.image_url,
+        img.priority || 0,
+      ]);
+      const query = `INSERT INTO product_images (product_id, image_url, priority) VALUES ?`;
+
+      this.db.query(query, [values], (err, res) => {
+        if (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "REPOSITORY.PRODUCT",
+            code: "REPOSITORY.PRODUCT.CREATE-IMAGES",
+            description: err.toString(),
+            category: "",
+            ref: {},
+          });
+          reject(err);
+          return;
+        }
+        resolve({ code: 200 });
+      });
+    });
+  }
+
+  deleteProductImages(product_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `DELETE FROM product_images WHERE product_id = ?`,
+        [product_id],
+        (err, res) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PRODUCT",
+              code: "REPOSITORY.PRODUCT.DELETE-IMAGES",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve({ code: 200 });
+        }
+      );
+    });
+  }
+
+  getProductImages(product_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT image_id, product_id, image_url, priority, created_at, updated_at 
+         FROM product_images 
+         WHERE product_id = ? 
+         ORDER BY priority ASC, image_id ASC`,
+        [product_id],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PRODUCT",
+              code: "REPOSITORY.PRODUCT.GET-IMAGES",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs || []);
+        }
+      );
+    });
+  }
+
+  getProductImagesBatch(product_ids) {
+    return new Promise((resolve, reject) => {
+      if (!product_ids || product_ids.length === 0) {
+        resolve({});
+        return;
+      }
+
+      const placeholders = product_ids.map(() => "?").join(",");
+      this.db.query(
+        `SELECT image_id, product_id, image_url, priority, created_at, updated_at 
+         FROM product_images 
+         WHERE product_id IN (${placeholders})
+         ORDER BY product_id, priority ASC, image_id ASC`,
+        product_ids,
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PRODUCT",
+              code: "REPOSITORY.PRODUCT.GET-IMAGES-BATCH",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+
+          // Group images by product_id
+          const imagesByProduct = {};
+          if (docs && docs.length > 0) {
+            docs.forEach((img) => {
+              if (!imagesByProduct[img.product_id]) {
+                imagesByProduct[img.product_id] = [];
+              }
+              imagesByProduct[img.product_id].push(img);
+            });
+          }
+          resolve(imagesByProduct);
         }
       );
     });

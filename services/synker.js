@@ -46,6 +46,7 @@ class Synker {
   }
 
   initCronJobs() {
+    this.syncProductsWithLogging();
     // Schedule CRON job for product sync
     cron.schedule(CRON_SYNTAX_PRODUCT, () => {
       console.log(
