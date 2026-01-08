@@ -190,6 +190,7 @@ class ProductRepository {
           FROM product_images
           GROUP BY product_id
         ) as product_images ON product_images.product_id = product_table.product_id
+         WHERE gf_applies_online = 1
         ORDER BY product_table.product_id DESC
         LIMIT ${offset}, ${limit}`,
         [],
