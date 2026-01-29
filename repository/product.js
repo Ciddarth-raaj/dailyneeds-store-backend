@@ -107,7 +107,8 @@ class ProductRepository {
         `SELECT 
           product_table.product_id, 
           product_table.de_name,
-          COALESCE(pi.has_images, 0) as has_images
+          COALESCE(pi.has_images, 0) as has_images,
+          product_table.de_preparation_type
         FROM product_table 
         LEFT JOIN (
           SELECT product_id, 1 as has_images
@@ -179,11 +180,13 @@ class ProductRepository {
         `SELECT
             p.product_id,
             p.de_display_name,
+            p.gf_item_name,
             p.de_distributor,
             p.category_id,
             p.subcategory_id,
             p.department_id,
             p.brand_id,
+            p.de_preparation_type,
             EXISTS (
                 SELECT 1
                 FROM product_images pi
