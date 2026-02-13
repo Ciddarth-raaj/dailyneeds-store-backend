@@ -30,7 +30,7 @@ class MaterialRequestRoutes {
         const isValid = Joi.validate(body, schema);
         if (isValid.error !== null) throw isValid.error;
 
-        const created_by = req.decoded.id;
+        const created_by = req.decoded.employee_id;
         const outlet_id = body.outlet_id || req.decoded.store_id;
         const is_approved =
           body.is_approved !== undefined ? body.is_approved : 0;
@@ -94,7 +94,7 @@ class MaterialRequestRoutes {
         const body = req.body;
         const isValid = Joi.validate(body, schema);
         if (isValid.error !== null) throw isValid.error;
-        const created_by = req.decoded.id;
+        const created_by = req.decoded.employee_id;
         const outlet_id = req.decoded.store_id;
         const is_approved =
           body.is_approved !== undefined ? body.is_approved : 0;

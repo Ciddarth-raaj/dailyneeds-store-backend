@@ -40,9 +40,6 @@ class MaterialRequestRepository {
           ", "
         )}) VALUES (${fields.map(() => "?").join(", ")})`;
 
-        console.log(sql);
-        console.log(values);
-
         this.db.query(sql, values, async (err, result) => {
           if (err) {
             logger.Log({
