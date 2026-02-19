@@ -108,7 +108,14 @@ class ProductRepository {
           product_table.product_id, 
           product_table.de_name,
           COALESCE(pi.has_images, 0) as has_images,
-          product_table.de_preparation_type
+          product_table.de_preparation_type,
+          (
+            SELECT image_url
+            FROM product_images
+            WHERE product_id = product_table.product_id
+            ORDER BY priority ASC, image_id ASC
+            LIMIT 1
+          ) as image_url
         FROM product_table 
         LEFT JOIN (
           SELECT product_id, 1 as has_images
@@ -130,7 +137,7 @@ class ProductRepository {
             reject(err);
             return;
           }
-          // Convert has_images to boolean
+          // Convert has_images to boolean and include first image link
           const formatted = docs.map((doc) => ({
             product_id: doc.product_id,
             de_name: doc.de_name,
@@ -138,6 +145,7 @@ class ProductRepository {
               doc.has_images === 1 ||
               doc.has_images === "1" ||
               doc.has_images === true,
+            image_url: doc.image_url || null,
           }));
           resolve(formatted);
         }
@@ -192,7 +200,14 @@ class ProductRepository {
                 FROM product_images pi
                 WHERE pi.product_id = p.product_id
                 LIMIT 1
-            ) AS has_images
+            ) AS has_images,
+            (
+                SELECT image_url
+                FROM product_images
+                WHERE product_id = p.product_id
+                ORDER BY priority ASC, image_id ASC
+                LIMIT 1
+            ) AS image_url
         FROM product_table p
         WHERE p.gf_applies_online = 1
         ORDER BY p.product_id DESC
@@ -211,13 +226,14 @@ class ProductRepository {
             reject(err);
             return;
           }
-          // Convert has_images to boolean
+          // Convert has_images to boolean and include first image link
           const formatted = docs.map((doc) => {
             const product = { ...doc };
             product.has_images =
               doc.has_images === 1 ||
               doc.has_images === "1" ||
               doc.has_images === true;
+            product.image_url = doc.image_url || null;
             return product;
           });
           resolve(formatted);

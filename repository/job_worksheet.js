@@ -33,10 +33,7 @@ class JobWorksheetRepository {
   getJobWorksheetById(jobWorksheetId) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT jw.*, pl.name as supplier_name, pl.primary_phone as supplier_phone
-         FROM job_worksheet jw
-         LEFT JOIN people_list pl ON jw.supplier_id = pl.person_id
-         WHERE jw.job_worksheet_id = ?`,
+        `SELECT jw.* FROM job_worksheet jw WHERE jw.job_worksheet_id = ?`,
         [jobWorksheetId],
         (err, docs) => {
           if (err) {
@@ -60,10 +57,11 @@ class JobWorksheetRepository {
   getAllJobWorksheets(filters = {}) {
     return new Promise((resolve, reject) => {
       let query = `
-        SELECT jw.*, pl.name as supplier_name, pl.primary_phone as supplier_phone,
-               (SELECT COUNT(*) FROM job_worksheet_item WHERE job_worksheet_id = jw.job_worksheet_id) as item_count
+        SELECT jw.*,
+               (SELECT COUNT(*) FROM job_worksheet_item WHERE job_worksheet_id = jw.job_worksheet_id) as item_count,
+               (SELECT COUNT(*) FROM job_worksheet_item WHERE job_worksheet_id = jw.job_worksheet_id AND status = 'open') as open_count,
+               (SELECT COUNT(*) FROM job_worksheet_item WHERE job_worksheet_id = jw.job_worksheet_id AND status = 'done') as done_count
         FROM job_worksheet jw
-        LEFT JOIN people_list pl ON jw.supplier_id = pl.person_id
       `;
       const conditions = [];
       const params = [];
@@ -112,7 +110,17 @@ class JobWorksheetRepository {
           reject(err);
           return;
         }
-        resolve(docs);
+        const formatted = docs.map((row) => {
+          const { open_count, done_count, ...rest } = row;
+          return {
+            ...rest,
+            status_count: {
+              open: parseInt(open_count, 10) || 0,
+              done: parseInt(done_count, 10) || 0,
+            },
+          };
+        });
+        resolve(formatted);
       });
     });
   }
@@ -168,14 +176,19 @@ class JobWorksheetRepository {
 
   createJobWorksheetItem(item) {
     return new Promise((resolve, reject) => {
+      const status = item.status === "done" ? "done" : "open";
       this.db.query(
-        `INSERT INTO job_worksheet_item (job_worksheet_id, product_id, qty, mrp)
-         VALUES (?, ?, ?, ?)`,
+        `INSERT INTO job_worksheet_item (job_worksheet_id, product_id, qty, mrp, material_type, sticker_type_1, sticker_type_2, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           item.job_worksheet_id,
           item.product_id,
           item.qty,
           item.mrp,
+          item.material_type ?? null,
+          item.sticker_type_1 ?? null,
+          item.sticker_type_2 ?? null,
+          status,
         ],
         (err, res) => {
           if (err) {
@@ -199,9 +212,13 @@ class JobWorksheetRepository {
   getJobWorksheetItems(jobWorksheetId) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT jwi.*, pt.gf_item_name as product_name
+        `SELECT jwi.*, pt.gf_item_name as product_name,
+                st1.label as sticker_type_1_label,
+                st2.label as sticker_type_2_label
          FROM job_worksheet_item jwi
          LEFT JOIN product_table pt ON jwi.product_id = pt.product_id
+         LEFT JOIN sticker_types st1 ON jwi.sticker_type_1 = st1.sticker_id
+         LEFT JOIN sticker_types st2 ON jwi.sticker_type_2 = st2.sticker_id
          WHERE jwi.job_worksheet_id = ?`,
         [jobWorksheetId],
         (err, docs) => {
@@ -231,7 +248,13 @@ class JobWorksheetRepository {
           return;
         }
         this.getJobWorksheetItems(jobWorksheetId).then((items) => {
-          resolve({ ...worksheet, items });
+          const openCount = items.filter((i) => i.status === "open").length;
+          const doneCount = items.filter((i) => i.status === "done").length;
+          resolve({
+            ...worksheet,
+            items,
+            status_count: { open: openCount, done: doneCount },
+          });
         }).catch(reject);
       }).catch(reject);
     });
@@ -239,10 +262,23 @@ class JobWorksheetRepository {
 
   updateJobWorksheetItem(itemId, item) {
     return new Promise((resolve, reject) => {
-      this.db.query(
-        `UPDATE job_worksheet_item SET product_id = ?, qty = ?, mrp = ?
-         WHERE job_worksheet_item_id = ?`,
-        [item.product_id, item.qty, item.mrp, itemId],
+      const status = item.status === "done" ? "done" : (item.status === "open" ? "open" : undefined);
+      const updates = [
+        item.product_id,
+        item.qty,
+        item.mrp,
+        item.material_type ?? null,
+        item.sticker_type_1 ?? null,
+        item.sticker_type_2 ?? null,
+      ];
+      let query = `UPDATE job_worksheet_item SET product_id = ?, qty = ?, mrp = ?, material_type = ?, sticker_type_1 = ?, sticker_type_2 = ?`;
+      if (status !== undefined) {
+        query += `, status = ?`;
+        updates.push(status);
+      }
+      query += ` WHERE job_worksheet_item_id = ?`;
+      updates.push(itemId);
+      this.db.query(query, updates,
         (err, res) => {
           if (err) {
             logger.Log({

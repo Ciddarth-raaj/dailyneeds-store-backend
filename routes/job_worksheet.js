@@ -12,19 +12,23 @@ class JobWorksheetRoutes {
       product_id: Joi.number().integer().min(1).required(),
       qty: Joi.number().integer().min(0).required(),
       mrp: Joi.number().precision(2).min(0).required(),
+      material_type: Joi.string().max(255).allow(null).optional(),
+      sticker_type_1: Joi.number().integer().min(1).allow(null).optional(),
+      sticker_type_2: Joi.number().integer().min(1).allow(null).optional(),
+      status: Joi.string().valid("open", "done").optional(),
     });
 
     const createSchema = Joi.object({
       grn_no: Joi.string().max(255).required(),
       date: Joi.date().required(),
-      supplier_id: Joi.number().integer().min(1).required(),
+      supplier_id: Joi.string().max(255).required(),
       items: Joi.array().items(itemSchema).optional(),
     });
 
     const updateSchema = Joi.object({
       grn_no: Joi.string().max(255).optional(),
       date: Joi.date().optional(),
-      supplier_id: Joi.number().integer().min(1).optional(),
+      supplier_id: Joi.string().max(255).optional(),
       items: Joi.array().items(itemSchema).optional(),
     });
 
@@ -49,9 +53,7 @@ class JobWorksheetRoutes {
       try {
         const filters = {
           grn_no: req.query.grn_no,
-          supplier_id: req.query.supplier_id
-            ? parseInt(req.query.supplier_id)
-            : undefined,
+          supplier_id: req.query.supplier_id,
           date_from: req.query.date_from,
           date_to: req.query.date_to,
           limit: req.query.limit ? parseInt(req.query.limit) : undefined,
