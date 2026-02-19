@@ -175,6 +175,12 @@ class Server {
     this.telegramDepartmentsRepo = require("./repository/telegram_departments")(
       this.mysql.connection
     );
+    this.jobWorksheetRepo = require("./repository/job_worksheet")(
+      this.mysql.connection
+    );
+    this.stickerTypesRepo = require("./repository/sticker_types")(
+      this.mysql.connection
+    );
   }
 
   initUsecases() {
@@ -300,6 +306,12 @@ class Server {
       this.employeeUsecase,
       this.outletUsecase,
       this.telegramDepartmentsUsecase
+    );
+    this.jobWorksheetUsecase = require("./usecase/job_worksheet")(
+      this.jobWorksheetRepo
+    );
+    this.stickerTypesUsecase = require("./usecase/sticker_types")(
+      this.stickerTypesRepo
     );
   }
 
@@ -446,6 +458,14 @@ class Server {
     app.use("/eb-master-list", ebMasterListRouter.getRouter());
     app.use("/ticket", ticketRouter.getRouter());
     app.use("/telegram-departments", telegramDepartmentsRouter.getRouter());
+    const jobWorksheetRouter = require("./routes/job_worksheet")(
+      this.jobWorksheetUsecase
+    );
+    app.use("/job-worksheet", jobWorksheetRouter.getRouter());
+    const stickerTypesRouter = require("./routes/sticker_types")(
+      this.stickerTypesUsecase
+    );
+    app.use("/sticker-types", stickerTypesRouter.getRouter());
   }
 
   initServices() {
