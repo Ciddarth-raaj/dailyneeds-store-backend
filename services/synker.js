@@ -146,12 +146,12 @@ class Synker {
             : null,
           status:
             employee.IsTerminated &&
-            employee.IsTerminated.toLowerCase() === "yes"
+              employee.IsTerminated.toLowerCase() === "yes"
               ? 0
               : 1,
           resignation_date:
             employee.IsTerminated &&
-            employee.IsTerminated.toLowerCase() === "yes"
+              employee.IsTerminated.toLowerCase() === "yes"
               ? new Date(employee.TerminateDate)
               : null,
         };
@@ -479,7 +479,7 @@ class Synker {
         }
       }
       return { itemPrices, outlets, products };
-    } catch (err) {}
+    } catch (err) { }
   }
 
   _fetchDeliumItems() {
@@ -617,6 +617,8 @@ class Synker {
         de_packaging_type: product.packaging_type,
         de_preparation_type: product.preparation_type,
         de_combo_name: product.combo_name,
+        purchase_uom: product.purchase_uom,
+        store_uom: product.store_uom,
       });
     }
 

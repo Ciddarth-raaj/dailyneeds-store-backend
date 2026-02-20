@@ -91,6 +91,8 @@ class ProductRoutes {
               .optional(),
             de_distributor: Joi.string().allow(null).allow("").optional(),
             keywords: Joi.string().allow(null).allow("").optional(),
+            purchase_uom: Joi.number().integer().allow(null).optional(),
+            store_uom: Joi.number().integer().allow(null).optional(),
           }).optional(),
 
           images: Joi.array()
