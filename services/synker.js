@@ -619,6 +619,7 @@ class Synker {
         de_combo_name: product.combo_name,
         purchase_uom: product.purchase_uom,
         store_uom: product.store_uom,
+        repln_mode: product.repln_mode,
       });
     }
 

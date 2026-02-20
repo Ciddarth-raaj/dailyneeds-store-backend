@@ -93,6 +93,7 @@ class ProductRoutes {
             keywords: Joi.string().allow(null).allow("").optional(),
             purchase_uom: Joi.number().integer().allow(null).optional(),
             store_uom: Joi.number().integer().allow(null).optional(),
+            repln_mode: Joi.string().max(255).allow(null).allow("").optional(),
           }).optional(),
 
           images: Joi.array()
