@@ -11,3 +11,5 @@ CREATE TABLE product_image_log (
 CREATE INDEX idx_product_image_log_product_id ON product_image_log(product_id);
 CREATE INDEX idx_product_image_log_created_by ON product_image_log(created_by);
 CREATE INDEX idx_product_image_log_created_at ON product_image_log(created_at);
+
+INSERT INTO `all_permissions` (`permission_key`) VALUES ('view_products_dashboard');
