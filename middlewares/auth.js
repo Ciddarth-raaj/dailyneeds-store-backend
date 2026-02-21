@@ -204,12 +204,6 @@ const unProtectedRoutes = {
   },
 
   //product
-  "/product/create": {
-    methods: { post: true },
-  },
-  "/product/updatedata": {
-    methods: { post: true },
-  },
   "/product": {
     methods: { get: true },
   },

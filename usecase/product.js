@@ -1,14 +1,14 @@
 const AssetUsecase = require("./asset");
 
 class ProductUsecase {
-  constructor(productRepo) {
+  constructor(productRepo, productImageLogUsecase) {
     this.productRepo = productRepo;
+    this.productImageLogUsecase = productImageLogUsecase;
   }
-  updateProductDetails(product) {
+  updateProductDetails(product, createdBy) {
     return new Promise(async (resolve, reject) => {
       try {
         const product_id = product.product_id;
-        const images = product.images || [];
 
         let code = { code: 200 };
 
@@ -22,41 +22,73 @@ class ProductUsecase {
           code = result;
         }
 
-        // Update images if provided
-        if (product.hasOwnProperty("images")) {
-          // Fetch existing images to clean up from S3
+        // Update images only when an images array was explicitly sent (not when key is missing/undefined)
+        if (Array.isArray(product.images)) {
+          const images = product.images;
           const existingImages =
             (await this.productRepo.getProductImages(product_id)) || [];
 
-          // Build a set of new image URLs to avoid deleting ones still in use
-          const newImageUrls = new Set(
-            images
-              .filter((img) => img && img.image_url)
-              .map((img) => img.image_url)
-          );
+          const existingNormalized = existingImages
+            .map((img) => ({ url: img.image_url, priority: img.priority || 0 }))
+            .sort((a, b) => a.priority - b.priority || (a.url || "").localeCompare(b.url || ""));
+          const newNormalized = images
+            .filter((img) => img && img.image_url)
+            .map((img) => ({ url: img.image_url, priority: img.priority || 0 }))
+            .sort((a, b) => a.priority - b.priority || (a.url || "").localeCompare(b.url || ""));
+          const same =
+            existingNormalized.length === newNormalized.length &&
+            existingNormalized.every(
+              (e, i) =>
+                e.url === newNormalized[i].url && e.priority === newNormalized[i].priority
+            );
 
-          // Delete from S3 only images that are being removed
-          for (const img of existingImages) {
-            if (img.image_url && !newImageUrls.has(img.image_url)) {
-              try {
-                await AssetUsecase.deleteByUrl(img.image_url);
-              } catch (e) {
-                // Log and continue; do not block the update
-                console.error(
-                  "Failed to delete image from S3:",
-                  img.image_url,
-                  e.toString()
-                );
+          if (!same) {
+            const newImageUrls = new Set(
+              images
+                .filter((img) => img && img.image_url)
+                .map((img) => img.image_url)
+            );
+            for (const img of existingImages) {
+              if (img.image_url && !newImageUrls.has(img.image_url)) {
+                try {
+                  await AssetUsecase.deleteByUrl(img.image_url);
+                } catch (e) {
+                  console.error(
+                    "Failed to delete image from S3:",
+                    img.image_url,
+                    e.toString()
+                  );
+                }
               }
             }
-          }
-
-          // Delete existing image records in DB
-          await this.productRepo.deleteProductImages(product_id);
-
-          // Insert new images if any
-          if (images.length > 0) {
-            await this.productRepo.createProductImages(product_id, images);
+            await this.productRepo.deleteProductImages(product_id);
+            if (images.length > 0) {
+              await this.productRepo.createProductImages(product_id, images);
+            }
+            const existingUrls = new Set(
+              (existingImages || []).map((i) => i.image_url).filter(Boolean)
+            );
+            const newUrls = new Set(
+              images.filter((i) => i && i.image_url).map((i) => i.image_url)
+            );
+            const urlsChanged =
+              existingUrls.size !== newUrls.size ||
+              [...newUrls].some((u) => !existingUrls.has(u));
+            if (
+              images.length > 0 &&
+              urlsChanged &&
+              this.productImageLogUsecase
+            ) {
+              try {
+                await this.productImageLogUsecase.logImageUpdate(
+                  product_id,
+                  images,
+                  createdBy
+                );
+              } catch (e) {
+                console.error("Failed to log product image update:", e);
+              }
+            }
           }
         }
 
@@ -129,24 +161,65 @@ class ProductUsecase {
     });
   }
 
-  create(product) {
+  create(product, createdBy) {
     return new Promise(async (resolve, reject) => {
       try {
-        const images = product.images || [];
         const productData = { ...product };
         delete productData.images;
 
         const code = await this.productRepo.create(productData);
 
-        // If product was created/updated successfully and we have images
-        if ((code.code === 200 || code.code === 101) && images.length > 0) {
-          // Use product_id from request, or from insertId if new product
+        // Only touch images when an images array was explicitly sent (sync often omits images)
+        if ((code.code === 200 || code.code === 101) && Array.isArray(product.images)) {
+          const images = product.images;
           const productId = product.product_id || code.id;
           if (productId) {
-            // Delete existing images for this product
-            await this.productRepo.deleteProductImages(productId);
-            // Insert new images
-            await this.productRepo.createProductImages(productId, images);
+            const existingImages =
+              (await this.productRepo.getProductImages(productId)) || [];
+            const existingNormalized = existingImages
+              .map((img) => ({ url: img.image_url, priority: img.priority || 0 }))
+              .sort((a, b) => a.priority - b.priority || (a.url || "").localeCompare(b.url || ""));
+            const newNormalized = images
+              .filter((img) => img && img.image_url)
+              .map((img) => ({ url: img.image_url, priority: img.priority || 0 }))
+              .sort((a, b) => a.priority - b.priority || (a.url || "").localeCompare(b.url || ""));
+            const same =
+              existingNormalized.length === newNormalized.length &&
+              existingNormalized.every(
+                (e, i) =>
+                  e.url === newNormalized[i].url && e.priority === newNormalized[i].priority
+              );
+
+            if (!same) {
+              await this.productRepo.deleteProductImages(productId);
+              if (images.length > 0) {
+                await this.productRepo.createProductImages(productId, images);
+              }
+              const existingUrls = new Set(
+                (existingImages || []).map((i) => i.image_url).filter(Boolean)
+              );
+              const newUrls = new Set(
+                images.filter((i) => i && i.image_url).map((i) => i.image_url)
+              );
+              const urlsChanged =
+                existingUrls.size !== newUrls.size ||
+                [...newUrls].some((u) => !existingUrls.has(u));
+              if (
+                images.length > 0 &&
+                urlsChanged &&
+                this.productImageLogUsecase
+              ) {
+                try {
+                  await this.productImageLogUsecase.logImageUpdate(
+                    productId,
+                    images,
+                    createdBy
+                  );
+                } catch (e) {
+                  console.error("Failed to log product image create:", e);
+                }
+              }
+            }
           }
         }
 
@@ -159,6 +232,6 @@ class ProductUsecase {
   }
 }
 
-module.exports = (productRepo) => {
-  return new ProductUsecase(productRepo);
+module.exports = (productRepo, productImageLogUsecase) => {
+  return new ProductUsecase(productRepo, productImageLogUsecase);
 };

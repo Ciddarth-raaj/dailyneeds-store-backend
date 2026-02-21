@@ -181,6 +181,9 @@ class Server {
     this.stickerTypesRepo = require("./repository/sticker_types")(
       this.mysql.connection
     );
+    this.productImageLogRepo = require("./repository/product_image_log")(
+      this.mysql.connection
+    );
   }
 
   initUsecases() {
@@ -225,7 +228,13 @@ class Server {
       this.employeeRepo,
       this.userRepo
     );
-    this.productUsecase = require("./usecase/product")(this.productRepo);
+    this.productImageLogUsecase = require("./usecase/product_image_log")(
+      this.productImageLogRepo
+    );
+    this.productUsecase = require("./usecase/product")(
+      this.productRepo,
+      this.productImageLogUsecase
+    );
     this.imageUsecase = require("./usecase/image")(this.imageRepo);
     this.assetUsecase = require("./usecase/asset");
     this.categoryUsecase = require("./usecase/category")(this.categoryRepo);
@@ -466,6 +475,10 @@ class Server {
       this.stickerTypesUsecase
     );
     app.use("/sticker-types", stickerTypesRouter.getRouter());
+    const productImageLogRouter = require("./routes/product_image_log")(
+      this.productImageLogUsecase
+    );
+    app.use("/product-image-log", productImageLogRouter.getRouter());
   }
 
   initServices() {

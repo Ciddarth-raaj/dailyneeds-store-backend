@@ -17,7 +17,11 @@ class ProductRoutes {
         // if (isValid.error !== null) {
         //   throw isValid.error;
         // }
-        const response = await this.productUsecase.create(product);
+        const createdBy =
+          req.decoded && req.decoded.employee_id
+            ? req.decoded.employee_id
+            : null;
+        const response = await this.productUsecase.create(product, createdBy);
 
         res.json(response);
       } catch (err) {
@@ -113,7 +117,14 @@ class ProductRoutes {
           throw isValid.error;
         }
 
-        const code = await this.productUsecase.updateProductDetails(product);
+        const createdBy =
+          req.decoded && req.decoded.employee_id
+            ? req.decoded.employee_id
+            : null;
+        const code = await this.productUsecase.updateProductDetails(
+          product,
+          createdBy
+        );
         res.json({ code: code });
       } catch (err) {
         if (err.name === "ValidationError") {
