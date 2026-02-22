@@ -31,17 +31,20 @@ class GofrugalSynkerRepository {
       }
 
       const escapedTable = escapeIdentifier(tableName);
+      // Build column defs without PRIMARY KEY on columns - we use unique_keys as the table key
+      // so that composite unique_keys (e.g. PR_NO + SNO) define one row, not a single column.
       const columnDefs = tableConfig.map((col) => {
         const escaped = escapeIdentifier(col.name);
         let def = `${escaped} ${col.type || "VARCHAR(255)"}`;
-        if (col.primaryKey) def += " PRIMARY KEY";
         if (col.autoIncrement) def += " AUTO_INCREMENT";
         if (col.nullable === false) def += " NOT NULL";
         return def;
       });
 
       const uniqueKeyCols = uniqueKeys.map((k) => escapeIdentifier(k)).join(", ");
-      columnDefs.push(`UNIQUE KEY \`gofrugal_uk_${tableName}\` (${uniqueKeyCols})`);
+      // Use unique_keys as PRIMARY KEY so one row per (key1, key2, ...). Do not add
+      // single-column PRIMARY KEY from table_config, which would allow only one row per PR_NO.
+      columnDefs.push(`PRIMARY KEY (${uniqueKeyCols})`);
 
       const sql = `CREATE TABLE IF NOT EXISTS ${escapedTable} (${columnDefs.join(", ")})`;
       this.db.query(sql, (err) => {

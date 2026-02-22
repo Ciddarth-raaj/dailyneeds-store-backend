@@ -44,8 +44,10 @@ Example: `http://localhost:8080/gofrugal-synker/sync`
 |----------------|----------|----------|-------------|
 | `table_name`   | string   | Yes      | Table name (alphanumeric + underscore only). |
 | `table_config` | array    | Yes      | Column definitions (see below). |
-| `unique_keys`  | string[] | Yes      | Column names that form the unique key (must be a subset of `table_config` names). Used for “create if not exists” and for ON DUPLICATE KEY UPDATE. |
+| `unique_keys`  | string[] | Yes      | Column names that form the **table key** (must be a subset of `table_config` names). The table is created with **PRIMARY KEY (unique_keys)**. One row is identified by the combination of these columns (e.g. `["PR_NO", "SNO"]` = one row per PR_NO+SNO pair). Used for ON DUPLICATE KEY UPDATE. |
 | `table_items`  | array    | No       | Rows to insert/update. Default: `[]`. Can be empty to only ensure table exists. |
+
+**Important:** The table has exactly one key: **PRIMARY KEY (unique_keys)**. Do not rely on `primaryKey` in `table_config` for the table key—it is ignored. If you need multiple rows per value (e.g. same `PR_NO` with different `SNO`), use **composite** `unique_keys`, e.g. `["PR_NO", "SNO"]`.
 
 ### 3.1 `table_config` item
 
@@ -53,7 +55,7 @@ Example: `http://localhost:8080/gofrugal-synker/sync`
 |----------------|---------|----------|-------------|
 | `name`         | string  | Yes      | Column name. |
 | `type`         | string  | No       | SQL type, e.g. `INT`, `VARCHAR(255)`, `TEXT`, `DECIMAL(10,2)`, `DATETIME`. Default: `VARCHAR(255)`. |
-| `primaryKey`   | boolean | No       | Add PRIMARY KEY for this column. |
+| `primaryKey`   | boolean | No       | **Ignored** for table key; the key is always `unique_keys`. Kept for schema documentation only. |
 | `autoIncrement`| boolean | No       | Add AUTO_INCREMENT. |
 | `nullable`     | boolean | No       | If `false`, column is NOT NULL. |
 
@@ -126,7 +128,18 @@ Send the same `table_name`, `table_config`, and `unique_keys`; only `table_items
 
 ---
 
-## 7. Suggested usage from your other tool
+## 7. Troubleshooting: table already created with wrong key
+
+If a table was created earlier with a **single-column** key (e.g. only `PR_NO` as primary key) and you need **multiple rows per PR_NO** (e.g. different `SNO`), the existing table will not be altered (we only run `CREATE TABLE IF NOT EXISTS`). You must:
+
+1. **Drop the table** in the sync database (`dailyneeds_gofrugal_sync`), e.g. `DROP TABLE <table_name>;`
+2. Call **POST `/gofrugal-synker/sync`** again with the same `table_name`, `table_config`, and **composite** `unique_keys` (e.g. `["PR_NO", "SNO"]`). The table will be recreated with `PRIMARY KEY (PR_NO, SNO)` and sync will work correctly.
+
+No change is required in the tool that sends the request—use `unique_keys: ["PR_NO", "SNO"]` and omit or ignore `primaryKey` on `PR_NO` in `table_config`.
+
+---
+
+## 8. Suggested usage from your other tool
 
 1. **One-time (or when adding a new table):**  
    Call `/gofrugal-synker/sync` with `table_name`, `table_config`, `unique_keys`, and optionally `table_items` to create the table and optionally load initial data.
@@ -146,14 +159,14 @@ Send the same `table_name`, `table_config`, and `unique_keys`; only `table_items
 
 ---
 
-## 8. Config
+## 9. Config
 
 - **Gofrugal DB:** `config.json` → `db.mysql_gofrugal.[environment]`.
 - Same host/port/user/password as main DB; **database** is `dailyneeds_gofrugal_sync` (by default). Create this database on your MySQL server before the first sync.
 
 ---
 
-## 9. File reference
+## 10. File reference
 
 | Purpose              | File |
 |----------------------|------|
