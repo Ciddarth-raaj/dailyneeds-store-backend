@@ -6,14 +6,30 @@
         "port": 8889,
         "username": "root",
         "password": "root",
-        "database": "Bus"
+        "database": "dailyneeds-store"
       },
       "production": {
         "host": "localhost",
         "port": 8889,
         "username": "root",
         "password": "root",
-        "database": "db"
+        "database": "dailyneeds-store"
+      }
+    },
+    "mysql_gofrugal": {
+      "development": {
+        "host": "localhost",
+        "port": 8889,
+        "username": "root",
+        "password": "root",
+        "database": "dailyneeds_gofrugal_sync"
+      },
+      "production": {
+        "host": "localhost",
+        "port": 8889,
+        "username": "root",
+        "password": "root",
+        "database": "dailyneeds_gofrugal_sync"
       }
     },
     "mongo": {
@@ -32,10 +48,7 @@
         "database": "db"
       }
     },
-    "redis": {
-      "dev": "localhost",
-      "prod": "localhost"
-    }
+    "redis": { "dev": "localhost", "prod": "localhost" }
   },
   "keys": {}
 }

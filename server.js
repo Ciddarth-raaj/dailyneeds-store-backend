@@ -75,9 +75,11 @@ class Server {
     return new Promise(async (resolve, reject) => {
       try {
         this.mysql = await require("./drivers/mysql")().connect();
+        this.mysqlGofrugal = await require("./drivers/mysql_gofrugal")().connect();
         //this.mongo = require('./models/mongo')().connect();
 
         this.drivers.push(this.mysql);
+        this.drivers.push(this.mysqlGofrugal);
         //this.models.push(this.mongo);
 
         resolve();
@@ -183,6 +185,9 @@ class Server {
     );
     this.productImageLogRepo = require("./repository/product_image_log")(
       this.mysql.connection
+    );
+    this.gofrugalSynkerRepo = require("./repository/gofrugal_synker")(
+      this.mysqlGofrugal.connection
     );
   }
 
@@ -321,6 +326,9 @@ class Server {
     );
     this.stickerTypesUsecase = require("./usecase/sticker_types")(
       this.stickerTypesRepo
+    );
+    this.gofrugalSynkerUsecase = require("./usecase/gofrugal_synker")(
+      this.gofrugalSynkerRepo
     );
   }
 
@@ -479,6 +487,10 @@ class Server {
       this.productImageLogUsecase
     );
     app.use("/product-image-log", productImageLogRouter.getRouter());
+    const gofrugalSynkerRouter = require("./routes/gofrugal_synker")(
+      this.gofrugalSynkerUsecase
+    );
+    app.use("/gofrugal-synker", gofrugalSynkerRouter.getRouter());
   }
 
   initServices() {
