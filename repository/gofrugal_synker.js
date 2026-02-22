@@ -82,7 +82,6 @@ class GofrugalSynkerRepository {
 
       const escapedTable = escapeIdentifier(tableName);
       const escapedCols = columns.map((c) => escapeIdentifier(c));
-      const placeholders = columns.map(() => "?").join(", ");
       const updateClause = columns
         .filter((c) => !uniqueKeys.includes(c))
         .map((c) => `${escapeIdentifier(c)} = VALUES(${escapeIdentifier(c)})`)
@@ -92,11 +91,13 @@ class GofrugalSynkerRepository {
         return reject(new Error("At least one non-unique column is required for update"));
       }
 
-      const insertSql = `INSERT INTO ${escapedTable} (${escapedCols.join(", ")}) VALUES (${placeholders}) ON DUPLICATE KEY UPDATE ${updateClause}`;
-
       const runBatch = (rows) => {
         return new Promise((res, rej) => {
           if (rows.length === 0) return res();
+          // One (?,?,...) per row so all rows are inserted/upserted
+          const oneRowPlaceholders = "(" + columns.map(() => "?").join(", ") + ")";
+          const allPlaceholders = rows.map(() => oneRowPlaceholders).join(", ");
+          const insertSql = `INSERT INTO ${escapedTable} (${escapedCols.join(", ")}) VALUES ${allPlaceholders} ON DUPLICATE KEY UPDATE ${updateClause}`;
           const values = rows.flatMap((row) => columns.map((col) => row[col] ?? null));
           this.db.query(insertSql, values, (err, result) => {
             if (err) {

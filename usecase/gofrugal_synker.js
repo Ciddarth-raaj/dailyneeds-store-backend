@@ -9,7 +9,7 @@ class GofrugalSynkerUsecase {
    * Sync a table: create if not exists, then upsert table_items.
    * @param {string} table_name
    * @param {Array<{name: string, type?: string, primaryKey?: boolean, autoIncrement?: boolean, nullable?: boolean}>} table_config
-   * @param {string[]} unique_keys - Column names for unique constraint (required for upsert)
+   * @param {string[]} unique_keys - Column names for primary key (required for upsert)
    * @param {Array<Object>} table_items - Rows to insert/update
    */
   async syncTable(table_name, table_config, unique_keys, table_items) {
