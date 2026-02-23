@@ -1,13 +1,17 @@
 const logger = require("../utils/logger");
 
 const BATCH_SIZE = 1000;
-const TABLE_NAME_REGEX = /^[a-zA-Z0-9_]+$/;
+// Allow letters, digits, underscore, space, hyphen, dot (common in column names). No backtick.
+const IDENTIFIER_REGEX = /^[a-zA-Z0-9_\s.\-]+$/;
 
 function escapeIdentifier(name) {
-  if (!TABLE_NAME_REGEX.test(name)) {
-    throw new Error(`Invalid identifier: ${name}`);
+  if (typeof name !== "string" || !name.length) {
+    throw new Error("Identifier cannot be empty");
   }
-  return "`" + name + "`";
+  if (!IDENTIFIER_REGEX.test(name)) {
+    throw new Error(`Invalid identifier (allowed: letters, digits, underscore, space, hyphen, dot): ${name}`);
+  }
+  return "`" + name.replace(/`/g, "``") + "`";
 }
 
 class GofrugalSynkerRepository {
