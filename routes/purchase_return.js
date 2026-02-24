@@ -38,8 +38,7 @@ class PurchaseReturnRoutes {
     const extraSchema = Joi.object({
       mprh_pr_no: Joi.string().required().max(50),
       no_of_boxes: Joi.number().integer().min(0).optional().default(0),
-      status: Joi.string().valid("open", "done").optional().default("open"),
-      distributor_id: Joi.string().max(50).optional().allow(null, "")
+      status: Joi.string().valid("open", "done").optional().default("open")
     });
 
     router.post("/extra", async (req, res) => {
@@ -50,7 +49,8 @@ class PurchaseReturnRoutes {
           res.end();
           return;
         }
-        const result = await this.purchaseReturnUsecase.createExtra(req.body);
+        const created_by = req.decoded && req.decoded.employee_id ? req.decoded.employee_id : null;
+        const result = await this.purchaseReturnUsecase.createExtra({ ...req.body, created_by });
         res.json(result);
       } catch (err) {
         respondError(res, err);
@@ -62,8 +62,7 @@ class PurchaseReturnRoutes {
       try {
         const updateSchema = Joi.object({
           no_of_boxes: Joi.number().integer().min(0).optional(),
-          status: Joi.string().valid("open", "done").optional(),
-          distributor_id: Joi.string().max(50).optional().allow(null, "")
+          status: Joi.string().valid("open", "done").optional()
         });
         const isValid = Joi.validate(req.body, updateSchema);
         if (isValid.error) {

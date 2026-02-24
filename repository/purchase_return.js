@@ -1,5 +1,27 @@
 const logger = require("../utils/logger");
 
+function aggregateItemsByProductCode(items) {
+  if (!items || items.length === 0) return [];
+  const byCode = {};
+  items.forEach((row) => {
+    const code = String(row.MPR_ITEM_CODE);
+    if (!byCode[code]) {
+      byCode[code] = {
+        MPR_PR_NO: row.MPR_PR_NO,
+        MPR_MRC_NO: row.MPR_MRC_NO,
+        MPR_ITEM_CODE: row.MPR_ITEM_CODE,
+        MPR_ITEM_QTY: Number(row.MPR_ITEM_QTY) || 0,
+        MPR_ITEM_AMOUNT: parseFloat(row.MPR_ITEM_AMOUNT) || 0,
+        product: row.product
+      };
+    } else {
+      byCode[code].MPR_ITEM_QTY += Number(row.MPR_ITEM_QTY) || 0;
+      byCode[code].MPR_ITEM_AMOUNT += parseFloat(row.MPR_ITEM_AMOUNT) || 0;
+    }
+  });
+  return Object.values(byCode);
+}
+
 class PurchaseReturnRepository {
   constructor(db, dbGofrugal) {
     this.db = db;
@@ -9,7 +31,7 @@ class PurchaseReturnRepository {
   getHeadersFromGofrugal() {
     return new Promise((resolve, reject) => {
       this.dbGofrugal.query(
-        `SELECT mprh_pr_no, mprh_pr_refno, mprh_pr_dt, mprh_basic_amount, mprh_net_amount, mprh_locaid
+        `SELECT mprh_pr_no, mprh_pr_refno, mprh_pr_dt, mprh_basic_amount, mprh_net_amount, mprh_locaid, mprh_dist_code
          FROM medishopdb_med_pur_return_hdr
          WHERE mprh_locaid = 2
          ORDER BY mprh_pr_dt DESC, mprh_pr_no`,
@@ -57,7 +79,10 @@ class PurchaseReturnRepository {
   getExtrasFromMain() {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT mprh_pr_no, no_of_boxes, status, distributor_id, created_at, updated_at FROM purchase_return_extra`,
+        `SELECT pre.mprh_pr_no, pre.no_of_boxes, pre.status, pre.created_by, pre.created_at, pre.updated_at,
+         ne.employee_name AS created_by_name
+         FROM purchase_return_extra pre
+         LEFT JOIN new_employee ne ON ne.employee_id = pre.created_by`,
         (err, rows) => {
           if (err) {
             logger.Log({
@@ -80,21 +105,21 @@ class PurchaseReturnRepository {
     });
   }
 
-  getDistributorsByPersonIds(personIds) {
-    if (!personIds || personIds.length === 0) return Promise.resolve({});
-    const ids = [...new Set(personIds.map((id) => (typeof id === "string" ? parseInt(id, 10) : id)).filter((n) => !isNaN(n)))];
-    if (ids.length === 0) return Promise.resolve({});
+  getDistributorMastByDistCodes(distCodes) {
+    if (!distCodes || distCodes.length === 0) return Promise.resolve({});
+    const codes = [...new Set(distCodes.map((c) => (c != null && c !== "" ? String(c) : null)).filter(Boolean))];
+    if (codes.length === 0) return Promise.resolve({});
     return new Promise((resolve, reject) => {
-      const placeholders = ids.map(() => "?").join(",");
-      this.db.query(
-        `SELECT person_id, name, primary_phone, secondary_phone, person_type FROM people_list WHERE person_id IN (${placeholders})`,
-        ids,
+      const placeholders = codes.map(() => "?").join(",");
+      this.dbGofrugal.query(
+        `SELECT MDM_DIST_CODE, MDM_DIST_NAME, MDM_SHORT_NAME FROM medishopdb_MED_DISTRIBUTOR_MAST WHERE MDM_DIST_CODE IN (${placeholders})`,
+        codes,
         (err, rows) => {
           if (err) {
             logger.Log({
               level: logger.LEVEL.ERROR,
               component: "REPOSITORY.PURCHASE_RETURN",
-              code: "REPOSITORY.PURCHASE_RETURN.DISTRIBUTORS",
+              code: "REPOSITORY.PURCHASE_RETURN.DISTRIBUTOR_MAST",
               description: err.toString(),
               category: "",
               ref: {}
@@ -103,7 +128,11 @@ class PurchaseReturnRepository {
           }
           const map = {};
           (rows || []).forEach((r) => {
-            map[String(r.person_id)] = r;
+            map[String(r.MDM_DIST_CODE)] = {
+              MDM_DIST_CODE: r.MDM_DIST_CODE,
+              MDM_DIST_NAME: r.MDM_DIST_NAME,
+              MDM_SHORT_NAME: r.MDM_SHORT_NAME
+            };
           });
           resolve(map);
         }
@@ -188,12 +217,12 @@ class PurchaseReturnRepository {
       ])
         .then(([headers, items, extrasMap]) => {
           const itemCodes = [...new Set(items.map((i) => i.MPR_ITEM_CODE).filter(Boolean))];
-          const distributorIds = [...new Set(Object.values(extrasMap).map((e) => e.distributor_id).filter(Boolean))];
+          const distCodesFromHeaders = [...new Set(headers.map((h) => h.mprh_dist_code).filter(Boolean))];
           return Promise.all([
             this.getProductsByProductIds(itemCodes),
-            this.getDistributorsByPersonIds(distributorIds),
+            this.getDistributorMastByDistCodes(distCodesFromHeaders),
             this.getProductImagesByProductIds(itemCodes)
-          ]).then(([productsMap, distributorsMap, imagesByProduct]) => {
+          ]).then(([productsMap, distributorMastMap, imagesByProduct]) => {
             const itemsByPrNo = {};
             items.forEach((item) => {
               const prNo = String(item.MPR_PR_NO);
@@ -219,9 +248,7 @@ class PurchaseReturnRepository {
             const result = headers.map((h) => {
               const prNo = String(h.mprh_pr_no);
               const extra = extrasMap[prNo] || null;
-              const distributor = extra && extra.distributor_id
-                ? (distributorsMap[String(extra.distributor_id)] || null)
-                : null;
+              const headerDist = h.mprh_dist_code != null ? distributorMastMap[String(h.mprh_dist_code)] : null;
               return {
                 mprh_pr_no: h.mprh_pr_no,
                 mprh_pr_refno: h.mprh_pr_refno,
@@ -229,13 +256,15 @@ class PurchaseReturnRepository {
                 mprh_basic_amount: h.mprh_basic_amount,
                 mprh_net_amount: h.mprh_net_amount,
                 mprh_locaid: h.mprh_locaid,
+                mprh_dist_code: h.mprh_dist_code,
+                distributor_name: headerDist ? headerDist.MDM_DIST_NAME : null,
                 no_of_boxes: extra ? extra.no_of_boxes : null,
                 status: extra ? extra.status : null,
-                distributor_id: extra ? extra.distributor_id : null,
-                distributor,
+                created_by: extra ? extra.created_by : null,
+                created_by_name: extra ? extra.created_by_name : null,
                 created_at: extra ? extra.created_at : null,
                 updated_at: extra ? extra.updated_at : null,
-                items: itemsByPrNo[prNo] || []
+                items: aggregateItemsByProductCode(itemsByPrNo[prNo] || [])
               };
             });
             resolve(result);
@@ -249,7 +278,7 @@ class PurchaseReturnRepository {
     return new Promise((resolve, reject) => {
       const prNo = String(mprh_pr_no);
       this.dbGofrugal.query(
-        `SELECT mprh_pr_no, mprh_pr_refno, mprh_pr_dt, mprh_basic_amount, mprh_net_amount, mprh_locaid
+        `SELECT mprh_pr_no, mprh_pr_refno, mprh_pr_dt, mprh_basic_amount, mprh_net_amount, mprh_locaid, mprh_dist_code
          FROM medishopdb_med_pur_return_hdr WHERE mprh_pr_no = ?`,
         [prNo],
         (err, headerRows) => {
@@ -297,12 +326,11 @@ class PurchaseReturnRepository {
                     product
                   };
                 });
+                const aggregatedItems = aggregateItemsByProductCode(itemsWithProduct);
                 this.getExtraByPrNo(prNo).then((extra) => {
-                  const distributorId = extra ? extra.distributor_id : null;
-                  const distributorPromise = distributorId
-                    ? this.getDistributorsByPersonIds([distributorId]).then((map) => map[String(distributorId)] || null)
-                    : Promise.resolve(null);
-                distributorPromise.then((distributor) => {
+                  const distCodes = header.mprh_dist_code != null ? [header.mprh_dist_code] : [];
+                  this.getDistributorMastByDistCodes(distCodes).then((distributorMastMap) => {
+                    const headerDist = header.mprh_dist_code != null ? distributorMastMap[String(header.mprh_dist_code)] : null;
                     resolve({
                       mprh_pr_no: header.mprh_pr_no,
                       mprh_pr_refno: header.mprh_pr_refno,
@@ -310,13 +338,15 @@ class PurchaseReturnRepository {
                       mprh_basic_amount: header.mprh_basic_amount,
                       mprh_net_amount: header.mprh_net_amount,
                       mprh_locaid: header.mprh_locaid,
+                      mprh_dist_code: header.mprh_dist_code,
+                      distributor_name: headerDist ? headerDist.MDM_DIST_NAME : null,
                       no_of_boxes: extra ? extra.no_of_boxes : null,
                       status: extra ? extra.status : null,
-                      distributor_id: extra ? extra.distributor_id : null,
-                      distributor,
+                      created_by: extra ? extra.created_by : null,
+                      created_by_name: extra ? extra.created_by_name : null,
                       created_at: extra ? extra.created_at : null,
                       updated_at: extra ? extra.updated_at : null,
-                      items: itemsWithProduct
+                      items: aggregatedItems
                     });
                   }).catch(reject);
                 }).catch(reject);
@@ -331,9 +361,9 @@ class PurchaseReturnRepository {
   createExtra(data) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `INSERT INTO purchase_return_extra (mprh_pr_no, no_of_boxes, status, distributor_id)
+        `INSERT INTO purchase_return_extra (mprh_pr_no, no_of_boxes, status, created_by)
          VALUES (?, ?, ?, ?)`,
-        [data.mprh_pr_no, data.no_of_boxes ?? 0, data.status ?? "open", data.distributor_id ?? null],
+        [data.mprh_pr_no, data.no_of_boxes ?? 0, data.status ?? "open", data.created_by ?? null],
         (err, res) => {
           if (err) {
             logger.Log({
@@ -364,10 +394,6 @@ class PurchaseReturnRepository {
         sets.push("status = ?");
         values.push(data.status);
       }
-      if (data.distributor_id !== undefined) {
-        sets.push("distributor_id = ?");
-        values.push(data.distributor_id);
-      }
       if (values.length === 0) return resolve({ code: 200, affectedRows: 0 });
       values.push(mprh_pr_no);
       this.db.query(
@@ -394,8 +420,11 @@ class PurchaseReturnRepository {
   getExtraByPrNo(mprh_pr_no) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT mprh_pr_no, no_of_boxes, status, distributor_id, created_at, updated_at
-         FROM purchase_return_extra WHERE mprh_pr_no = ?`,
+        `SELECT pre.mprh_pr_no, pre.no_of_boxes, pre.status, pre.created_by, pre.created_at, pre.updated_at,
+         ne.employee_name AS created_by_name
+         FROM purchase_return_extra pre
+         LEFT JOIN new_employee ne ON ne.employee_id = pre.created_by
+         WHERE pre.mprh_pr_no = ?`,
         [mprh_pr_no],
         (err, rows) => {
           if (err) return reject(err);

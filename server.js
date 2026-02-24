@@ -193,6 +193,9 @@ class Server {
       this.mysql.connection,
       this.mysqlGofrugal.connection
     );
+    this.productDistributorsRepo = require("./repository/product_distributors")(
+      this.mysqlGofrugal.connection
+    );
   }
 
   initUsecases() {
@@ -337,6 +340,9 @@ class Server {
     this.purchaseReturnUsecase = require("./usecase/purchase_return")(
       this.purchaseReturnRepo
     );
+    this.productDistributorsUsecase = require("./usecase/product_distributors")(
+      this.productDistributorsRepo
+    );
   }
 
   initRoutes() {
@@ -434,6 +440,25 @@ class Server {
     const telegramDepartmentsRouter = require("./routes/telegram_departments")(
       this.telegramDepartmentsUsecase
     );
+    const jobWorksheetRouter = require("./routes/job_worksheet")(
+      this.jobWorksheetUsecase
+    );
+    const stickerTypesRouter = require("./routes/sticker_types")(
+      this.stickerTypesUsecase
+    );
+    const productImageLogRouter = require("./routes/product_image_log")(
+      this.productImageLogUsecase
+    );
+    const gofrugalSynkerRouter = require("./routes/gofrugal_synker")(
+      this.gofrugalSynkerUsecase
+    );
+    const purchaseReturnRouter = require("./routes/purchase_return")(
+      this.purchaseReturnUsecase
+    );
+    const productDistributorsRouter = require("./routes/product_distributors")(
+      this.productDistributorsUsecase
+    );
+
     app.use("/document", documentRouter.getRouter());
     app.use("/whatsapp", whatsappRouter.getRouter());
     app.use("/budget", budgetRouter.getRouter());
@@ -482,26 +507,12 @@ class Server {
     app.use("/eb-master-list", ebMasterListRouter.getRouter());
     app.use("/ticket", ticketRouter.getRouter());
     app.use("/telegram-departments", telegramDepartmentsRouter.getRouter());
-    const jobWorksheetRouter = require("./routes/job_worksheet")(
-      this.jobWorksheetUsecase
-    );
     app.use("/job-worksheet", jobWorksheetRouter.getRouter());
-    const stickerTypesRouter = require("./routes/sticker_types")(
-      this.stickerTypesUsecase
-    );
     app.use("/sticker-types", stickerTypesRouter.getRouter());
-    const productImageLogRouter = require("./routes/product_image_log")(
-      this.productImageLogUsecase
-    );
     app.use("/product-image-log", productImageLogRouter.getRouter());
-    const gofrugalSynkerRouter = require("./routes/gofrugal_synker")(
-      this.gofrugalSynkerUsecase
-    );
     app.use("/gofrugal-synker", gofrugalSynkerRouter.getRouter());
-    const purchaseReturnRouter = require("./routes/purchase_return")(
-      this.purchaseReturnUsecase
-    );
     app.use("/purchase-return", purchaseReturnRouter.getRouter());
+    app.use("/product-distributors", productDistributorsRouter.getRouter());
   }
 
   initServices() {
