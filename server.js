@@ -189,6 +189,10 @@ class Server {
     this.gofrugalSynkerRepo = require("./repository/gofrugal_synker")(
       this.mysqlGofrugal.connection
     );
+    this.purchaseReturnRepo = require("./repository/purchase_return")(
+      this.mysql.connection,
+      this.mysqlGofrugal.connection
+    );
   }
 
   initUsecases() {
@@ -329,6 +333,9 @@ class Server {
     );
     this.gofrugalSynkerUsecase = require("./usecase/gofrugal_synker")(
       this.gofrugalSynkerRepo
+    );
+    this.purchaseReturnUsecase = require("./usecase/purchase_return")(
+      this.purchaseReturnRepo
     );
   }
 
@@ -491,6 +498,10 @@ class Server {
       this.gofrugalSynkerUsecase
     );
     app.use("/gofrugal-synker", gofrugalSynkerRouter.getRouter());
+    const purchaseReturnRouter = require("./routes/purchase_return")(
+      this.purchaseReturnUsecase
+    );
+    app.use("/purchase-return", purchaseReturnRouter.getRouter());
   }
 
   initServices() {
