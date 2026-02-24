@@ -1,5 +1,7 @@
 const logger = require("../utils/logger");
 
+const PUR_RETURN_DT_CUTOFF = "2026-02-01 00:00:00";
+
 function aggregateItemsByProductCode(items) {
   if (!items || items.length === 0) return [];
   const byCode = {};
@@ -33,8 +35,9 @@ class PurchaseReturnRepository {
       this.dbGofrugal.query(
         `SELECT mprh_pr_no, mprh_pr_refno, mprh_pr_dt, mprh_basic_amount, mprh_net_amount, mprh_locaid, mprh_dist_code
          FROM medishopdb_med_pur_return_hdr
-         WHERE mprh_locaid = 2
+         WHERE mprh_locaid = 2 AND mprh_pr_dt >= ?
          ORDER BY mprh_pr_dt DESC, mprh_pr_no`,
+        [PUR_RETURN_DT_CUTOFF],
         (err, rows) => {
           if (err) {
             logger.Log({
@@ -231,10 +234,10 @@ class PurchaseReturnRepository {
               const images = productRow ? (imagesByProduct[String(productRow.product_id)] || []) : [];
               const product = productRow
                 ? {
-                    ...productRow,
-                    images,
-                    image_url: images.length > 0 ? images[0].image_url : null
-                  }
+                  ...productRow,
+                  images,
+                  image_url: images.length > 0 ? images[0].image_url : null
+                }
                 : null;
               itemsByPrNo[prNo].push({
                 MPR_PR_NO: item.MPR_PR_NO,
@@ -279,8 +282,8 @@ class PurchaseReturnRepository {
       const prNo = String(mprh_pr_no);
       this.dbGofrugal.query(
         `SELECT mprh_pr_no, mprh_pr_refno, mprh_pr_dt, mprh_basic_amount, mprh_net_amount, mprh_locaid, mprh_dist_code
-         FROM medishopdb_med_pur_return_hdr WHERE mprh_pr_no = ?`,
-        [prNo],
+         FROM medishopdb_med_pur_return_hdr WHERE mprh_pr_no = ? AND mprh_pr_dt >= ?`,
+        [prNo, PUR_RETURN_DT_CUTOFF],
         (err, headerRows) => {
           if (err) {
             logger.Log({
@@ -312,10 +315,10 @@ class PurchaseReturnRepository {
                   const images = productRow ? (imagesByProduct[String(productRow.product_id)] || []) : [];
                   const product = productRow
                     ? {
-                        ...productRow,
-                        images,
-                        image_url: images.length > 0 ? images[0].image_url : null
-                      }
+                      ...productRow,
+                      images,
+                      image_url: images.length > 0 ? images[0].image_url : null
+                    }
                     : null;
                   return {
                     MPR_PR_NO: item.MPR_PR_NO,
