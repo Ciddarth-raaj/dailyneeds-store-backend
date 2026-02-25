@@ -36,7 +36,7 @@ class PurchaseReturnRepository {
         `SELECT mprh_pr_no, mprh_pr_refno, mprh_pr_dt, mprh_basic_amount, mprh_net_amount, mprh_locaid, mprh_dist_code
          FROM medishopdb_med_pur_return_hdr
          WHERE mprh_locaid = 2 AND mprh_pr_dt >= ?
-         ORDER BY mprh_pr_dt DESC, mprh_pr_no`,
+         ORDER BY mprh_pr_refno DESC`,
         [PUR_RETURN_DT_CUTOFF],
         (err, rows) => {
           if (err) {
@@ -269,6 +269,11 @@ class PurchaseReturnRepository {
                 updated_at: extra ? extra.updated_at : null,
                 items: aggregateItemsByProductCode(itemsByPrNo[prNo] || [])
               };
+            });
+            result.sort((a, b) => {
+              const refA = a.mprh_pr_refno != null ? String(a.mprh_pr_refno) : "";
+              const refB = b.mprh_pr_refno != null ? String(b.mprh_pr_refno) : "";
+              return refB.localeCompare(refA, undefined, { numeric: true });
             });
             resolve(result);
           });
