@@ -24,3 +24,5 @@ ALTER TABLE purchase_return_extra
   ADD COLUMN purchase_acknowledgement_id INT NULL COMMENT 'FK to purchase_acknowledgement' AFTER created_by,
   ADD CONSTRAINT fk_purchase_return_extra_purchase_acknowledgement
     FOREIGN KEY (purchase_acknowledgement_id) REFERENCES purchase_acknowledgement(purchase_acknowledgement_id) ON DELETE SET NULL;
+
+INSERT INTO `all_permissions` (`permission_key`) VALUES ('update_purchase_return_status');
