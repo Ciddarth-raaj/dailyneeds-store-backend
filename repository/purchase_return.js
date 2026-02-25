@@ -1,7 +1,7 @@
 const logger = require("../utils/logger");
 
-// const PUR_RETURN_DT_CUTOFF = "2026-02-01 00:00:00";
-const PUR_RETURN_DT_CUTOFF = "2023-02-01 00:00:00";
+const PUR_RETURN_DT_CUTOFF = "2026-02-01 00:00:00";
+// const PUR_RETURN_DT_CUTOFF = "2023-02-01 00:00:00";
 
 function aggregateItemsByProductCode(items) {
   if (!items || items.length === 0) return [];
