@@ -10,7 +10,7 @@ class ProductDistributorsRepository {
   getAll() {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT MDM_DIST_CODE, MDM_DIST_NAME, MDM_SHORT_NAME FROM ${TABLE} ORDER BY MDM_DIST_NAME`,
+        `SELECT MDM_DIST_CODE, MDM_DIST_NAME, MDM_SHORT_NAME FROM ${TABLE} WHERE MDM_TAG = 'a' ORDER BY MDM_DIST_NAME`,
         (err, rows) => {
           if (err) {
             logger.Log({
