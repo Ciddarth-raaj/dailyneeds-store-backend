@@ -19,6 +19,17 @@ class PurchaseReturnRoutes {
       res.end();
     });
 
+    router.get("/by-distributor/:distributor_id", async (req, res) => {
+      try {
+        const { distributor_id } = req.params;
+        const list = await this.purchaseReturnUsecase.getOpenByDistributorId(distributor_id);
+        res.json({ code: 200, data: list });
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
     router.get("/:mprh_pr_no", async (req, res) => {
       try {
         const { mprh_pr_no } = req.params;

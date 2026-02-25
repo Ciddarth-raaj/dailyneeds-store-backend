@@ -21,6 +21,22 @@ class PurchaseReturnUsecase {
     }
   }
 
+  async getOpenByDistributorId(distributor_id) {
+    try {
+      return await this.purchaseReturnRepo.getAllByDistributorIdOpenStatus(distributor_id);
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "USECASE.PURCHASE_RETURN",
+        code: "USECASE.PURCHASE_RETURN.GET_OPEN_BY_DISTRIBUTOR",
+        description: err.toString(),
+        category: "",
+        ref: {}
+      });
+      throw err;
+    }
+  }
+
   async getById(mprh_pr_no) {
     try {
       return await this.purchaseReturnRepo.getById(mprh_pr_no);

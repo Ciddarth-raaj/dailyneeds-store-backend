@@ -196,6 +196,10 @@ class Server {
     this.productDistributorsRepo = require("./repository/product_distributors")(
       this.mysqlGofrugal.connection
     );
+    this.purchaseAcknowledgementRepo = require("./repository/purchase_acknowledgement")(
+      this.mysql.connection,
+      this.mysqlGofrugal.connection
+    );
   }
 
   initUsecases() {
@@ -343,6 +347,9 @@ class Server {
     this.productDistributorsUsecase = require("./usecase/product_distributors")(
       this.productDistributorsRepo
     );
+    this.purchaseAcknowledgementUsecase = require("./usecase/purchase_acknowledgement")(
+      this.purchaseAcknowledgementRepo
+    );
   }
 
   initRoutes() {
@@ -458,6 +465,9 @@ class Server {
     const productDistributorsRouter = require("./routes/product_distributors")(
       this.productDistributorsUsecase
     );
+    const purchaseAcknowledgementRouter = require("./routes/purchase_acknowledgement")(
+      this.purchaseAcknowledgementUsecase
+    );
 
     app.use("/document", documentRouter.getRouter());
     app.use("/whatsapp", whatsappRouter.getRouter());
@@ -513,6 +523,7 @@ class Server {
     app.use("/gofrugal-synker", gofrugalSynkerRouter.getRouter());
     app.use("/purchase-return", purchaseReturnRouter.getRouter());
     app.use("/product-distributors", productDistributorsRouter.getRouter());
+    app.use("/purchase-acknowledgement", purchaseAcknowledgementRouter.getRouter());
   }
 
   initServices() {
