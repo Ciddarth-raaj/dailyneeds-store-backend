@@ -40,10 +40,15 @@ class PurchaseAcknowledgementRoutes {
       res.end();
     });
 
-    const createSchema = Joi.object({
-      distributor_id: Joi.string().required().max(50),
+    const invoiceItemSchema = Joi.object({
+      invoice_no: Joi.string().max(100).optional().allow(null, ""),
       invoice_date: Joi.date().required(),
       amount: Joi.number().min(0).optional().default(0)
+    });
+
+    const createSchema = Joi.object({
+      distributor_id: Joi.string().required().max(50),
+      invoices: Joi.array().items(invoiceItemSchema).min(1).required()
     });
 
     router.post("/", async (req, res) => {
@@ -65,8 +70,7 @@ class PurchaseAcknowledgementRoutes {
 
     const updateSchema = Joi.object({
       distributor_id: Joi.string().max(50).optional(),
-      invoice_date: Joi.date().optional(),
-      amount: Joi.number().min(0).optional()
+      invoices: Joi.array().items(invoiceItemSchema).min(1).optional()
     });
 
     router.put("/:purchase_acknowledgement_id", async (req, res) => {

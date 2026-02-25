@@ -1,7 +1,7 @@
 const logger = require("../utils/logger");
 
-const PUR_RETURN_DT_CUTOFF = "2026-02-01 00:00:00";
-// const PUR_RETURN_DT_CUTOFF = "2023-02-01 00:00:00";
+// const PUR_RETURN_DT_CUTOFF = "2026-02-01 00:00:00";
+const PUR_RETURN_DT_CUTOFF = "2023-02-01 00:00:00";
 
 function aggregateItemsByProductCode(items) {
   if (!items || items.length === 0) return [];
@@ -109,7 +109,7 @@ class PurchaseReturnRepository {
   getExtrasFromMain() {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT pre.mprh_pr_no, pre.no_of_boxes, pre.status, pre.created_by, pre.created_at, pre.updated_at,
+        `SELECT pre.mprh_pr_no, pre.no_of_boxes, pre.status, pre.created_by, pre.purchase_acknowledgement_id, pre.created_at, pre.updated_at,
          ne.employee_name AS created_by_name
          FROM purchase_return_extra pre
          LEFT JOIN new_employee ne ON ne.employee_id = pre.created_by`,
@@ -292,6 +292,7 @@ class PurchaseReturnRepository {
                 status: extra ? extra.status : null,
                 created_by: extra ? extra.created_by : null,
                 created_by_name: extra ? extra.created_by_name : null,
+                purchase_acknowledgement_id: extra ? extra.purchase_acknowledgement_id : null,
                 created_at: extra ? extra.created_at : null,
                 updated_at: extra ? extra.updated_at : null,
                 items: aggregateItemsByProductCode(itemsByPrNo[prNo] || [])
@@ -309,7 +310,7 @@ class PurchaseReturnRepository {
     });
   }
 
-  getAllByDistributorIdOpenStatus(distributor_id) {
+  getAllByDistributorIdOpenStatus(distributor_id, purchase_acknowledgement_id = null) {
     return new Promise((resolve, reject) => {
       Promise.all([
         this.getHeadersFromGofrugalByDistCode(distributor_id),
@@ -319,7 +320,9 @@ class PurchaseReturnRepository {
         .then(([headers, items, extrasMap]) => {
           const openHeaders = headers.filter((h) => {
             const extra = extrasMap[String(h.mprh_pr_no)];
-            return !extra || extra.status === "open";
+            const isOpen = !extra || extra.status === "open";
+            const matchesAck = purchase_acknowledgement_id != null && extra && Number(extra.purchase_acknowledgement_id) === purchase_acknowledgement_id;
+            return isOpen || matchesAck;
           });
           if (openHeaders.length === 0) return resolve([]);
           const prNoSet = new Set(openHeaders.map((h) => String(h.mprh_pr_no)));
@@ -370,6 +373,7 @@ class PurchaseReturnRepository {
                 status: extra ? extra.status : null,
                 created_by: extra ? extra.created_by : null,
                 created_by_name: extra ? extra.created_by_name : null,
+                purchase_acknowledgement_id: extra ? extra.purchase_acknowledgement_id : null,
                 created_at: extra ? extra.created_at : null,
                 updated_at: extra ? extra.updated_at : null,
                 items: aggregateItemsByProductCode(itemsByPrNo[prNo] || [])
@@ -457,6 +461,7 @@ class PurchaseReturnRepository {
                       status: extra ? extra.status : null,
                       created_by: extra ? extra.created_by : null,
                       created_by_name: extra ? extra.created_by_name : null,
+                      purchase_acknowledgement_id: extra ? extra.purchase_acknowledgement_id : null,
                       created_at: extra ? extra.created_at : null,
                       updated_at: extra ? extra.updated_at : null,
                       items: aggregatedItems
@@ -474,9 +479,9 @@ class PurchaseReturnRepository {
   createExtra(data) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `INSERT INTO purchase_return_extra (mprh_pr_no, no_of_boxes, status, created_by)
-         VALUES (?, ?, ?, ?)`,
-        [data.mprh_pr_no, data.no_of_boxes ?? 0, data.status ?? "open", data.created_by ?? null],
+        `INSERT INTO purchase_return_extra (mprh_pr_no, no_of_boxes, status, created_by, purchase_acknowledgement_id)
+         VALUES (?, ?, ?, ?, ?)`,
+        [data.mprh_pr_no, data.no_of_boxes ?? 0, data.status ?? "open", data.created_by ?? null, data.purchase_acknowledgement_id ?? null],
         (err, res) => {
           if (err) {
             logger.Log({
@@ -507,6 +512,10 @@ class PurchaseReturnRepository {
         sets.push("status = ?");
         values.push(data.status);
       }
+      if (data.purchase_acknowledgement_id !== undefined) {
+        sets.push("purchase_acknowledgement_id = ?");
+        values.push(data.purchase_acknowledgement_id);
+      }
       if (values.length === 0) return resolve({ code: 200, affectedRows: 0 });
       values.push(mprh_pr_no);
       this.db.query(
@@ -533,7 +542,7 @@ class PurchaseReturnRepository {
   getExtraByPrNo(mprh_pr_no) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT pre.mprh_pr_no, pre.no_of_boxes, pre.status, pre.created_by, pre.created_at, pre.updated_at,
+        `SELECT pre.mprh_pr_no, pre.no_of_boxes, pre.status, pre.created_by, pre.purchase_acknowledgement_id, pre.created_at, pre.updated_at,
          ne.employee_name AS created_by_name
          FROM purchase_return_extra pre
          LEFT JOIN new_employee ne ON ne.employee_id = pre.created_by

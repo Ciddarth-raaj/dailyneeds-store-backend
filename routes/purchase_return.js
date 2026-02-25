@@ -22,7 +22,10 @@ class PurchaseReturnRoutes {
     router.get("/by-distributor/:distributor_id", async (req, res) => {
       try {
         const { distributor_id } = req.params;
-        const list = await this.purchaseReturnUsecase.getOpenByDistributorId(distributor_id);
+        const purchase_acknowledgement_id = req.query.purchase_acknowledgement_id != null
+          ? parseInt(req.query.purchase_acknowledgement_id, 10)
+          : null;
+        const list = await this.purchaseReturnUsecase.getOpenByDistributorId(distributor_id, isNaN(purchase_acknowledgement_id) ? null : purchase_acknowledgement_id);
         res.json({ code: 200, data: list });
       } catch (err) {
         respondError(res, err);
@@ -49,7 +52,8 @@ class PurchaseReturnRoutes {
     const extraSchema = Joi.object({
       mprh_pr_no: Joi.string().required().max(50),
       no_of_boxes: Joi.number().integer().min(0).optional().default(0),
-      status: Joi.string().valid("open", "done").optional().default("open")
+      status: Joi.string().valid("open", "done").optional().default("open"),
+      purchase_acknowledgement_id: Joi.number().integer().min(1).optional().allow(null)
     });
 
     router.post("/extra", async (req, res) => {
@@ -73,7 +77,8 @@ class PurchaseReturnRoutes {
       try {
         const updateSchema = Joi.object({
           no_of_boxes: Joi.number().integer().min(0).optional(),
-          status: Joi.string().valid("open", "done").optional()
+          status: Joi.string().valid("open", "done").optional(),
+          purchase_acknowledgement_id: Joi.number().integer().min(1).optional().allow(null)
         });
         const isValid = Joi.validate(req.body, updateSchema);
         if (isValid.error) {

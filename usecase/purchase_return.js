@@ -21,9 +21,9 @@ class PurchaseReturnUsecase {
     }
   }
 
-  async getOpenByDistributorId(distributor_id) {
+  async getOpenByDistributorId(distributor_id, purchase_acknowledgement_id = null) {
     try {
-      return await this.purchaseReturnRepo.getAllByDistributorIdOpenStatus(distributor_id);
+      return await this.purchaseReturnRepo.getAllByDistributorIdOpenStatus(distributor_id, purchase_acknowledgement_id);
     } catch (err) {
       logger.Log({
         level: logger.LEVEL.ERROR,

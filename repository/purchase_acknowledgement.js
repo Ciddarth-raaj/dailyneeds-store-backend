@@ -1,6 +1,7 @@
 const logger = require("../utils/logger");
 
 const TABLE = "purchase_acknowledgement";
+const TABLE_INVOICE = "purchase_acknowledgement_invoice";
 const DIST_MAST = "medishopdb_MED_DISTRIBUTOR_MAST";
 
 class PurchaseAcknowledgementRepository {
@@ -33,8 +34,11 @@ class PurchaseAcknowledgementRepository {
   getAll() {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT purchase_acknowledgement_id, distributor_id, invoice_date, amount, created_by, created_at, updated_at
-         FROM ${TABLE} ORDER BY invoice_date DESC, purchase_acknowledgement_id DESC`,
+        `SELECT pa.purchase_acknowledgement_id, pa.distributor_id, pa.created_by, pa.created_at, pa.updated_at,
+                pai.purchase_acknowledgement_invoice_id, pai.invoice_no, pai.invoice_date, pai.amount
+         FROM ${TABLE} pa
+         LEFT JOIN ${TABLE_INVOICE} pai ON pai.purchase_acknowledgement_id = pa.purchase_acknowledgement_id
+         ORDER BY pa.purchase_acknowledgement_id DESC, pai.purchase_acknowledgement_invoice_id ASC`,
         (err, rows) => {
           if (err) {
             logger.Log({
@@ -47,20 +51,36 @@ class PurchaseAcknowledgementRepository {
             });
             return reject(err);
           }
-          const list = rows || [];
-          const distCodes = [...new Set(list.map((r) => r.distributor_id).filter(Boolean))];
+          const byId = {};
+          (rows || []).forEach((r) => {
+            const id = r.purchase_acknowledgement_id;
+            if (!byId[id]) {
+              byId[id] = {
+                purchase_acknowledgement_id: id,
+                distributor_id: r.distributor_id,
+                distributor_name: null,
+                invoices: [],
+                created_by: r.created_by,
+                created_at: r.created_at,
+                updated_at: r.updated_at
+              };
+            }
+            if (r.purchase_acknowledgement_invoice_id != null) {
+              byId[id].invoices.push({
+                purchase_acknowledgement_invoice_id: r.purchase_acknowledgement_invoice_id,
+                invoice_no: r.invoice_no,
+                invoice_date: r.invoice_date,
+                amount: r.amount
+              });
+            }
+          });
+          const list = Object.values(byId);
+          const distCodes = [...new Set(list.map((l) => l.distributor_id).filter(Boolean))];
           this._getDistributorNameMap(distCodes).then((nameMap) => {
-            const data = list.map((r) => ({
-              purchase_acknowledgement_id: r.purchase_acknowledgement_id,
-              distributor_id: r.distributor_id,
-              distributor_name: nameMap[String(r.distributor_id)] || null,
-              invoice_date: r.invoice_date,
-              amount: r.amount,
-              created_by: r.created_by,
-              created_at: r.created_at,
-              updated_at: r.updated_at
-            }));
-            resolve(data);
+            list.forEach((l) => {
+              l.distributor_name = nameMap[String(l.distributor_id)] || null;
+            });
+            resolve(list);
           }).catch(reject);
         }
       );
@@ -70,20 +90,30 @@ class PurchaseAcknowledgementRepository {
   getById(purchase_acknowledgement_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT purchase_acknowledgement_id, distributor_id, invoice_date, amount, created_by, created_at, updated_at
-         FROM ${TABLE} WHERE purchase_acknowledgement_id = ?`,
+        `SELECT pa.purchase_acknowledgement_id, pa.distributor_id, pa.created_by, pa.created_at, pa.updated_at,
+                pai.purchase_acknowledgement_invoice_id, pai.invoice_no, pai.invoice_date, pai.amount
+         FROM ${TABLE} pa
+         LEFT JOIN ${TABLE_INVOICE} pai ON pai.purchase_acknowledgement_id = pa.purchase_acknowledgement_id
+         WHERE pa.purchase_acknowledgement_id = ?`,
         [purchase_acknowledgement_id],
         (err, rows) => {
           if (err) return reject(err);
           const row = rows && rows[0];
           if (!row) return resolve(null);
+          const invoices = (rows || [])
+            .filter((r) => r.purchase_acknowledgement_invoice_id != null)
+            .map((r) => ({
+              purchase_acknowledgement_invoice_id: r.purchase_acknowledgement_invoice_id,
+              invoice_no: r.invoice_no,
+              invoice_date: r.invoice_date,
+              amount: r.amount
+            }));
           this._getDistributorNameMap([row.distributor_id]).then((nameMap) => {
             resolve({
               purchase_acknowledgement_id: row.purchase_acknowledgement_id,
               distributor_id: row.distributor_id,
               distributor_name: nameMap[String(row.distributor_id)] || null,
-              invoice_date: row.invoice_date,
-              amount: row.amount,
+              invoices,
               created_by: row.created_by,
               created_at: row.created_at,
               updated_at: row.updated_at
@@ -95,16 +125,11 @@ class PurchaseAcknowledgementRepository {
   }
 
   create(data) {
+    const invoices = data.invoices || [];
     return new Promise((resolve, reject) => {
       this.db.query(
-        `INSERT INTO ${TABLE} (distributor_id, invoice_date, amount, created_by)
-         VALUES (?, ?, ?, ?)`,
-        [
-          data.distributor_id,
-          data.invoice_date,
-          data.amount ?? 0,
-          data.created_by ?? null
-        ],
+        `INSERT INTO ${TABLE} (distributor_id, created_by) VALUES (?, ?)`,
+        [data.distributor_id, data.created_by ?? null],
         (err, res) => {
           if (err) {
             logger.Log({
@@ -117,7 +142,35 @@ class PurchaseAcknowledgementRepository {
             });
             return reject(err);
           }
-          resolve({ code: 200, purchase_acknowledgement_id: res.insertId });
+          const purchase_acknowledgement_id = res.insertId;
+          if (invoices.length === 0) {
+            return resolve({ code: 200, purchase_acknowledgement_id });
+          }
+          const placeholders = invoices.map(() => "(?, ?, ?, ?)").join(", ");
+          const values = invoices.flatMap((inv) => [
+            purchase_acknowledgement_id,
+            inv.invoice_no ?? null,
+            inv.invoice_date,
+            inv.amount ?? 0
+          ]);
+          this.db.query(
+            `INSERT INTO ${TABLE_INVOICE} (purchase_acknowledgement_id, invoice_no, invoice_date, amount) VALUES ${placeholders}`,
+            values,
+            (errInv) => {
+              if (errInv) {
+                logger.Log({
+                  level: logger.LEVEL.ERROR,
+                  component: "REPOSITORY.PURCHASE_ACKNOWLEDGEMENT",
+                  code: "REPOSITORY.PURCHASE_ACKNOWLEDGEMENT.CREATE_INVOICES",
+                  description: errInv.toString(),
+                  category: "",
+                  ref: {}
+                });
+                return reject(errInv);
+              }
+              resolve({ code: 200, purchase_acknowledgement_id });
+            }
+          );
         }
       );
     });
@@ -131,34 +184,71 @@ class PurchaseAcknowledgementRepository {
         sets.push("distributor_id = ?");
         values.push(data.distributor_id);
       }
-      if (data.invoice_date !== undefined) {
-        sets.push("invoice_date = ?");
-        values.push(data.invoice_date);
-      }
-      if (data.amount !== undefined) {
-        sets.push("amount = ?");
-        values.push(data.amount);
-      }
-      if (values.length === 0) return resolve({ code: 200, affectedRows: 0 });
-      values.push(purchase_acknowledgement_id);
-      this.db.query(
-        `UPDATE ${TABLE} SET ${sets.join(", ")} WHERE purchase_acknowledgement_id = ?`,
-        values,
-        (err, res) => {
-          if (err) {
-            logger.Log({
-              level: logger.LEVEL.ERROR,
-              component: "REPOSITORY.PURCHASE_ACKNOWLEDGEMENT",
-              code: "REPOSITORY.PURCHASE_ACKNOWLEDGEMENT.UPDATE",
-              description: err.toString(),
-              category: "",
-              ref: {}
-            });
-            return reject(err);
-          }
-          resolve({ code: 200, affectedRows: res.affectedRows });
+      const hasMainUpdate = values.length > 0;
+
+      const finish = (err, res) => {
+        if (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "REPOSITORY.PURCHASE_ACKNOWLEDGEMENT",
+            code: "REPOSITORY.PURCHASE_ACKNOWLEDGEMENT.UPDATE",
+            description: err.toString(),
+            category: "",
+            ref: {}
+          });
+          return reject(err);
         }
-      );
+        resolve({ code: 200, affectedRows: res ? res.affectedRows : 0 });
+      };
+
+      const runInvoiceReplace = (cb) => {
+        const invoices = data.invoices || [];
+        this.db.query(
+          `DELETE FROM ${TABLE_INVOICE} WHERE purchase_acknowledgement_id = ?`,
+          [purchase_acknowledgement_id],
+          (errDel) => {
+            if (errDel) return cb(errDel);
+            if (invoices.length === 0) return cb(null, { affectedRows: 0 });
+            const placeholders = invoices.map(() => "(?, ?, ?, ?)").join(", ");
+            const invValues = invoices.flatMap((inv) => [
+              purchase_acknowledgement_id,
+              inv.invoice_no ?? null,
+              inv.invoice_date,
+              inv.amount ?? 0
+            ]);
+            this.db.query(
+              `INSERT INTO ${TABLE_INVOICE} (purchase_acknowledgement_id, invoice_no, invoice_date, amount) VALUES ${placeholders}`,
+              invValues,
+              (errIns) => cb(errIns, errIns ? null : { affectedRows: 1 })
+            );
+          }
+        );
+      };
+
+      if (data.invoices !== undefined) {
+        if (hasMainUpdate) {
+          values.push(purchase_acknowledgement_id);
+          this.db.query(
+            `UPDATE ${TABLE} SET ${sets.join(", ")} WHERE purchase_acknowledgement_id = ?`,
+            values,
+            (err, res) => {
+              if (err) return finish(err);
+              runInvoiceReplace((errInv) => finish(errInv, res));
+            }
+          );
+        } else {
+          runInvoiceReplace(finish);
+        }
+      } else if (hasMainUpdate) {
+        values.push(purchase_acknowledgement_id);
+        this.db.query(
+          `UPDATE ${TABLE} SET ${sets.join(", ")} WHERE purchase_acknowledgement_id = ?`,
+          values,
+          (err, res) => finish(err, res)
+        );
+      } else {
+        return resolve({ code: 200, affectedRows: 0 });
+      }
     });
   }
 
