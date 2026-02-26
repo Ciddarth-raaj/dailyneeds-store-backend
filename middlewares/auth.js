@@ -453,6 +453,7 @@ const unProtectedRoutes = {
   "/purchase-tally": { methods: { post: true } },
   "/debit-note-tally": { methods: { post: true } },
   "/gofrugal-synker/sync": { methods: { post: true } },
+  "/gofrugal-synker/table": { methods: { delete: true } },
 };
 
 async function auth(req, res, next) {

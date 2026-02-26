@@ -137,6 +137,34 @@ class GofrugalSynkerRepository {
       })();
     });
   }
+
+  /**
+   * Drop a table if it exists.
+   * @param {string} tableName - Table name (validated via escapeIdentifier)
+   */
+  deleteTable(tableName) {
+    return new Promise((resolve, reject) => {
+      if (!tableName || typeof tableName !== "string" || !tableName.trim()) {
+        return reject(new Error("table_name is required"));
+      }
+      const escapedTable = escapeIdentifier(tableName.trim());
+      const sql = `DROP TABLE IF EXISTS ${escapedTable}`;
+      this.db.query(sql, (err, result) => {
+        if (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "REPOSITORY.GOFRUGAL_SYNKER",
+            code: "REPOSITORY.GOFRUGAL_SYNKER.DELETE_TABLE",
+            description: err.toString(),
+            category: "",
+            ref: { tableName, sql }
+          });
+          return reject(err);
+        }
+        resolve({ affectedRows: result?.affectedRows ?? 0 });
+      });
+    });
+  }
 }
 
 module.exports = (db) => {

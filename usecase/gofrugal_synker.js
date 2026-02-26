@@ -37,6 +37,27 @@ class GofrugalSynkerUsecase {
       throw err;
     }
   }
+
+  /**
+   * Delete (drop) a table by name.
+   * @param {string} table_name
+   */
+  async deleteTable(table_name) {
+    try {
+      const result = await this.gofrugalSynkerRepo.deleteTable(table_name);
+      return { code: 200, msg: "Table deleted", table: table_name, ...result };
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "USECASE.GOFRUGAL_SYNKER",
+        code: "USECASE.GOFRUGAL_SYNKER.DELETE_TABLE",
+        description: err.toString(),
+        category: "",
+        ref: { table_name }
+      });
+      throw err;
+    }
+  }
 }
 
 module.exports = (gofrugalSynkerRepo) => {

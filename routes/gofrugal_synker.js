@@ -62,6 +62,27 @@ class GofrugalSynkerRoutes {
       }
       res.end();
     });
+
+    const deleteSchema = Joi.object({
+      table_name: Joi.string().required().max(64).trim()
+    });
+
+    router.delete("/table", async (req, res) => {
+      try {
+        const isValid = Joi.validate(req.body, deleteSchema);
+        if (isValid.error) {
+          res.status(400).json({ code: 400, msg: isValid.error.message });
+          res.end();
+          return;
+        }
+        const { table_name } = req.body;
+        const result = await this.usecase.deleteTable(table_name);
+        res.json(result);
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
   }
 
   getRouter() {
