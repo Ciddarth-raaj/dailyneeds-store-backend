@@ -53,7 +53,9 @@ class PurchaseReturnRoutes {
       mprh_pr_no: Joi.string().required().max(50),
       no_of_boxes: Joi.number().integer().min(0).optional().default(0),
       status: Joi.string().valid("open", "done").optional().default("open"),
-      purchase_acknowledgement_id: Joi.number().integer().min(1).optional().allow(null)
+      purchase_acknowledgement_id: Joi.number().integer().min(1).optional().allow(null),
+      remark_id: Joi.number().integer().min(1).optional().allow(null),
+      remark: Joi.string().max(500).optional().allow(null, "")
     });
 
     router.post("/extra", async (req, res) => {
@@ -78,7 +80,9 @@ class PurchaseReturnRoutes {
         const updateSchema = Joi.object({
           no_of_boxes: Joi.number().integer().min(0).optional(),
           status: Joi.string().valid("open", "done").optional(),
-          purchase_acknowledgement_id: Joi.number().integer().min(1).optional().allow(null)
+          purchase_acknowledgement_id: Joi.number().integer().min(1).optional().allow(null),
+          remark_id: Joi.number().integer().min(1).optional().allow(null),
+          remark: Joi.string().max(500).optional().allow(null, "")
         });
         const isValid = Joi.validate(req.body, updateSchema);
         if (isValid.error) {

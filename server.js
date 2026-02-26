@@ -200,6 +200,9 @@ class Server {
       this.mysql.connection,
       this.mysqlGofrugal.connection
     );
+    this.remarksMasterRepo = require("./repository/remarks_master")(
+      this.mysql.connection
+    );
   }
 
   initUsecases() {
@@ -350,6 +353,9 @@ class Server {
     this.purchaseAcknowledgementUsecase = require("./usecase/purchase_acknowledgement")(
       this.purchaseAcknowledgementRepo
     );
+    this.remarksMasterUsecase = require("./usecase/remarks_master")(
+      this.remarksMasterRepo
+    );
   }
 
   initRoutes() {
@@ -468,6 +474,9 @@ class Server {
     const purchaseAcknowledgementRouter = require("./routes/purchase_acknowledgement")(
       this.purchaseAcknowledgementUsecase
     );
+    const remarksMasterRouter = require("./routes/remarks_master")(
+      this.remarksMasterUsecase
+    );
 
     app.use("/document", documentRouter.getRouter());
     app.use("/whatsapp", whatsappRouter.getRouter());
@@ -524,6 +533,7 @@ class Server {
     app.use("/purchase-return", purchaseReturnRouter.getRouter());
     app.use("/product-distributors", productDistributorsRouter.getRouter());
     app.use("/purchase-acknowledgement", purchaseAcknowledgementRouter.getRouter());
+    app.use("/remarks-master", remarksMasterRouter.getRouter());
   }
 
   initServices() {

@@ -25,6 +25,15 @@ function aggregateItemsByProductCode(items) {
   return Object.values(byCode);
 }
 
+function resolveRemark(extra) {
+  if (!extra) return null;
+  const hasRemark = extra.remark != null && String(extra.remark).trim() !== "";
+  const noRemarkId = extra.remark_id == null || extra.remark_id === undefined;
+  if (hasRemark && noRemarkId) return extra.remark;
+  if (extra.remark_label != null) return extra.remark_label;
+  return extra.remark;
+}
+
 class PurchaseReturnRepository {
   constructor(db, dbGofrugal) {
     this.db = db;
@@ -109,10 +118,12 @@ class PurchaseReturnRepository {
   getExtrasFromMain() {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT pre.mprh_pr_no, pre.no_of_boxes, pre.status, pre.created_by, pre.purchase_acknowledgement_id, pre.created_at, pre.updated_at,
-         ne.employee_name AS created_by_name
+        `SELECT pre.mprh_pr_no, pre.no_of_boxes, pre.status, pre.created_by, pre.purchase_acknowledgement_id, pre.remark_id, pre.remark, pre.created_at, pre.updated_at,
+         ne.employee_name AS created_by_name,
+         rm.label AS remark_label
          FROM purchase_return_extra pre
-         LEFT JOIN new_employee ne ON ne.employee_id = pre.created_by`,
+         LEFT JOIN new_employee ne ON ne.employee_id = pre.created_by
+         LEFT JOIN remarks_master rm ON rm.remark_id = pre.remark_id`,
         (err, rows) => {
           if (err) {
             logger.Log({
@@ -293,6 +304,8 @@ class PurchaseReturnRepository {
                 created_by: extra ? extra.created_by : null,
                 created_by_name: extra ? extra.created_by_name : null,
                 purchase_acknowledgement_id: extra ? extra.purchase_acknowledgement_id : null,
+                remark_id: extra ? extra.remark_id : null,
+                remark: resolveRemark(extra),
                 created_at: extra ? extra.created_at : null,
                 updated_at: extra ? extra.updated_at : null,
                 items: aggregateItemsByProductCode(itemsByPrNo[prNo] || [])
@@ -374,6 +387,8 @@ class PurchaseReturnRepository {
                 created_by: extra ? extra.created_by : null,
                 created_by_name: extra ? extra.created_by_name : null,
                 purchase_acknowledgement_id: extra ? extra.purchase_acknowledgement_id : null,
+                remark_id: extra ? extra.remark_id : null,
+                remark: resolveRemark(extra),
                 created_at: extra ? extra.created_at : null,
                 updated_at: extra ? extra.updated_at : null,
                 items: aggregateItemsByProductCode(itemsByPrNo[prNo] || [])
@@ -462,6 +477,8 @@ class PurchaseReturnRepository {
                       created_by: extra ? extra.created_by : null,
                       created_by_name: extra ? extra.created_by_name : null,
                       purchase_acknowledgement_id: extra ? extra.purchase_acknowledgement_id : null,
+                      remark_id: extra ? extra.remark_id : null,
+                      remark: resolveRemark(extra),
                       created_at: extra ? extra.created_at : null,
                       updated_at: extra ? extra.updated_at : null,
                       items: aggregatedItems
@@ -479,9 +496,9 @@ class PurchaseReturnRepository {
   createExtra(data) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `INSERT INTO purchase_return_extra (mprh_pr_no, no_of_boxes, status, created_by, purchase_acknowledgement_id)
-         VALUES (?, ?, ?, ?, ?)`,
-        [data.mprh_pr_no, data.no_of_boxes ?? 0, data.status ?? "open", data.created_by ?? null, data.purchase_acknowledgement_id ?? null],
+        `INSERT INTO purchase_return_extra (mprh_pr_no, no_of_boxes, status, created_by, purchase_acknowledgement_id, remark_id, remark)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [data.mprh_pr_no, data.no_of_boxes ?? 0, data.status ?? "open", data.created_by ?? null, data.purchase_acknowledgement_id ?? null, data.remark_id ?? null, data.remark ?? null],
         (err, res) => {
           if (err) {
             logger.Log({
@@ -516,6 +533,14 @@ class PurchaseReturnRepository {
         sets.push("purchase_acknowledgement_id = ?");
         values.push(data.purchase_acknowledgement_id);
       }
+      if (data.remark_id !== undefined) {
+        sets.push("remark_id = ?");
+        values.push(data.remark_id);
+      }
+      if (data.remark !== undefined) {
+        sets.push("remark = ?");
+        values.push(data.remark);
+      }
       if (values.length === 0) return resolve({ code: 200, affectedRows: 0 });
       values.push(mprh_pr_no);
       this.db.query(
@@ -542,10 +567,12 @@ class PurchaseReturnRepository {
   getExtraByPrNo(mprh_pr_no) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT pre.mprh_pr_no, pre.no_of_boxes, pre.status, pre.created_by, pre.purchase_acknowledgement_id, pre.created_at, pre.updated_at,
-         ne.employee_name AS created_by_name
+        `SELECT pre.mprh_pr_no, pre.no_of_boxes, pre.status, pre.created_by, pre.purchase_acknowledgement_id, pre.remark_id, pre.remark, pre.created_at, pre.updated_at,
+         ne.employee_name AS created_by_name,
+         rm.label AS remark_label
          FROM purchase_return_extra pre
          LEFT JOIN new_employee ne ON ne.employee_id = pre.created_by
+         LEFT JOIN remarks_master rm ON rm.remark_id = pre.remark_id
          WHERE pre.mprh_pr_no = ?`,
         [mprh_pr_no],
         (err, rows) => {
