@@ -307,6 +307,20 @@ class StockCheckerRepository {
     });
   }
 
+  getItemCountByStockCheckerId(stock_checker_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT COUNT(*) AS cnt FROM ${TABLE_ITEMS} WHERE stock_checker_id = ?`,
+        [stock_checker_id],
+        (err, rows) => {
+          if (err) return reject(err);
+          const r = rows && rows[0];
+          resolve(r ? Number(r.cnt) : 0);
+        }
+      );
+    });
+  }
+
   upsertItem(data) {
     return new Promise((resolve, reject) => {
       const isVerified = data.is_verified === true ? 1 : 0;

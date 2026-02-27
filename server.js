@@ -360,7 +360,8 @@ class Server {
       this.remarksMasterRepo
     );
     this.stockCheckerUsecase = require("./usecase/stock_checker")(
-      this.stockCheckerRepo
+      this.stockCheckerRepo,
+      this.outletRepo
     );
   }
 
