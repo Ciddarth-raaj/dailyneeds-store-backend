@@ -45,7 +45,8 @@ class StockCheckerRoutes {
       stock_checker_id: Joi.number().integer().required(),
       branch_id: Joi.number().integer().required(),
       physical_stock: Joi.number().required(),
-      system_stock: Joi.number().required()
+      system_stock: Joi.number().required(),
+      is_verified: Joi.boolean().optional().default(false)
     });
 
     router.post("/items", async (req, res) => {

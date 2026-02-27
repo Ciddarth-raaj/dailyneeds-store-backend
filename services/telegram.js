@@ -10,12 +10,10 @@ const client = new TelegramClient({
 });
 
 class Telegram {
-  constructor() {}
+  constructor() { }
 
   async sendMessage(chat_id_param, msg, options = {}) {
     let chat_id = chat_id_param;
-
-    console.log("ENV VAL", process.env.IS_TEST);
 
     if (process.env.IS_TEST === "true") {
       chat_id = TEST_TELEGRAM_CHAT_ID;

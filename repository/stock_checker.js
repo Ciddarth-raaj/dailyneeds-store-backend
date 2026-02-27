@@ -211,6 +211,7 @@ class StockCheckerRepository {
       created_by: r.created_by,
       created_at: r.created_at,
       updated_at: r.updated_at,
+      is_verified: Boolean(r.is_verified),
       branch:
         r.outlet_id != null
           ? {
@@ -232,7 +233,7 @@ class StockCheckerRepository {
   getItemsByStockCheckerId(stock_checker_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT sci.stock_checker_id, sci.branch_id, sci.physical_stock, sci.system_stock, sci.created_by, sci.created_at, sci.updated_at,
+        `SELECT sci.stock_checker_id, sci.branch_id, sci.physical_stock, sci.system_stock, sci.created_by, sci.created_at, sci.updated_at, sci.is_verified,
                 o.outlet_id, o.outlet_name, o.outlet_code,
                 ne.employee_id AS created_by_employee_id, ne.employee_name AS created_by_employee_name
          FROM ${TABLE_ITEMS} sci
@@ -265,7 +266,7 @@ class StockCheckerRepository {
     const placeholders = stock_checker_ids.map(() => "?").join(", ");
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT sci.stock_checker_id, sci.branch_id, sci.physical_stock, sci.system_stock, sci.created_by, sci.created_at, sci.updated_at,
+        `SELECT sci.stock_checker_id, sci.branch_id, sci.physical_stock, sci.system_stock, sci.created_by, sci.created_at, sci.updated_at, sci.is_verified,
                 o.outlet_id, o.outlet_name, o.outlet_code,
                 ne.employee_id AS created_by_employee_id, ne.employee_name AS created_by_employee_name
          FROM ${TABLE_ITEMS} sci
@@ -289,7 +290,7 @@ class StockCheckerRepository {
   getItemByStockCheckerIdAndBranchId(stock_checker_id, branch_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT sci.stock_checker_id, sci.branch_id, sci.physical_stock, sci.system_stock, sci.created_by, sci.created_at, sci.updated_at,
+        `SELECT sci.stock_checker_id, sci.branch_id, sci.physical_stock, sci.system_stock, sci.created_by, sci.created_at, sci.updated_at, sci.is_verified,
                 o.outlet_id, o.outlet_name, o.outlet_code,
                 ne.employee_id AS created_by_employee_id, ne.employee_name AS created_by_employee_name
          FROM ${TABLE_ITEMS} sci
@@ -308,20 +309,23 @@ class StockCheckerRepository {
 
   upsertItem(data) {
     return new Promise((resolve, reject) => {
+      const isVerified = data.is_verified === true ? 1 : 0;
       this.db.query(
-        `INSERT INTO ${TABLE_ITEMS} (stock_checker_id, branch_id, physical_stock, system_stock, created_by)
-         VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO ${TABLE_ITEMS} (stock_checker_id, branch_id, physical_stock, system_stock, created_by, is_verified)
+         VALUES (?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE
            physical_stock = VALUES(physical_stock),
            system_stock = VALUES(system_stock),
            created_by = VALUES(created_by),
+           is_verified = VALUES(is_verified),
            updated_at = CURRENT_TIMESTAMP`,
         [
           data.stock_checker_id,
           data.branch_id,
           data.physical_stock,
           data.system_stock,
-          data.created_by
+          data.created_by,
+          isVerified
         ],
         (err, res) => {
           if (err) {
@@ -351,22 +355,24 @@ class StockCheckerRepository {
         return resolve({ code: 200, affectedRows: 0 });
       }
       const placeholders = items
-        .map(() => "(?, ?, ?, ?, ?)")
+        .map(() => "(?, ?, ?, ?, ?, ?)")
         .join(", ");
       const values = items.flatMap((d) => [
         d.stock_checker_id,
         d.branch_id,
         d.physical_stock,
         d.system_stock,
-        d.created_by
+        d.created_by,
+        d.is_verified === true ? 1 : 0
       ]);
       this.db.query(
-        `INSERT INTO ${TABLE_ITEMS} (stock_checker_id, branch_id, physical_stock, system_stock, created_by)
+        `INSERT INTO ${TABLE_ITEMS} (stock_checker_id, branch_id, physical_stock, system_stock, created_by, is_verified)
          VALUES ${placeholders}
          ON DUPLICATE KEY UPDATE
            physical_stock = VALUES(physical_stock),
            system_stock = VALUES(system_stock),
            created_by = VALUES(created_by),
+           is_verified = VALUES(is_verified),
            updated_at = CURRENT_TIMESTAMP`,
         values,
         (err, res) => {
