@@ -214,7 +214,7 @@ class StockCheckerUsecase {
       const diffEmoji = diff === 0 ? "✅" : diff > 0 ? "📈" : "📉";
       return (
         `🏪 ${escapeMarkdown(branchName)}\n` +
-        `   💻 Sys: ${sys}  •  📦 Phy: ${phy}  •  ${diffEmoji} Diff: ${diff}`
+        `💻 Sys: ${sys}  •  📦 Phy: ${phy}  •  ${diffEmoji} Diff: ${diff}`
       );
     });
     const doneMsg =
