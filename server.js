@@ -203,6 +203,9 @@ class Server {
     this.remarksMasterRepo = require("./repository/remarks_master")(
       this.mysql.connection
     );
+    this.stockCheckerRepo = require("./repository/stock_checker")(
+      this.mysql.connection
+    );
   }
 
   initUsecases() {
@@ -356,6 +359,9 @@ class Server {
     this.remarksMasterUsecase = require("./usecase/remarks_master")(
       this.remarksMasterRepo
     );
+    this.stockCheckerUsecase = require("./usecase/stock_checker")(
+      this.stockCheckerRepo
+    );
   }
 
   initRoutes() {
@@ -477,6 +483,9 @@ class Server {
     const remarksMasterRouter = require("./routes/remarks_master")(
       this.remarksMasterUsecase
     );
+    const stockCheckerRouter = require("./routes/stock_checker")(
+      this.stockCheckerUsecase
+    );
 
     app.use("/document", documentRouter.getRouter());
     app.use("/whatsapp", whatsappRouter.getRouter());
@@ -534,6 +543,7 @@ class Server {
     app.use("/product-distributors", productDistributorsRouter.getRouter());
     app.use("/purchase-acknowledgement", purchaseAcknowledgementRouter.getRouter());
     app.use("/remarks-master", remarksMasterRouter.getRouter());
+    app.use("/stock-checker", stockCheckerRouter.getRouter());
   }
 
   initServices() {
