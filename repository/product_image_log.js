@@ -92,11 +92,11 @@ class ProductImageLogRepository {
       }
       if (filters.date_from) {
         conditions.push("pil.created_at >= ?");
-        params.push(filters.date_from);
+        params.push(`${filters.date_from} 00:00:00`);
       }
       if (filters.date_to) {
         conditions.push("pil.created_at <= ?");
-        params.push(filters.date_to);
+        params.push(`${filters.date_to} 23:59:59`);
       }
 
       if (conditions.length > 0) {
