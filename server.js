@@ -206,6 +206,9 @@ class Server {
     this.stockCheckerRepo = require("./repository/stock_checker")(
       this.mysql.connection
     );
+    this.productsExpiryCheckerRepo = require("./repository/products_expiry_checker")(
+      this.mysql.connection
+    );
   }
 
   initUsecases() {
@@ -363,6 +366,9 @@ class Server {
       this.stockCheckerRepo,
       this.outletRepo
     );
+    this.productsExpiryCheckerUsecase = require("./usecase/products_expiry_checker")(
+      this.productsExpiryCheckerRepo
+    );
   }
 
   initRoutes() {
@@ -487,6 +493,9 @@ class Server {
     const stockCheckerRouter = require("./routes/stock_checker")(
       this.stockCheckerUsecase
     );
+    const productsExpiryCheckerRouter = require("./routes/products_expiry_checker")(
+      this.productsExpiryCheckerUsecase
+    );
 
     app.use("/document", documentRouter.getRouter());
     app.use("/whatsapp", whatsappRouter.getRouter());
@@ -545,6 +554,7 @@ class Server {
     app.use("/purchase-acknowledgement", purchaseAcknowledgementRouter.getRouter());
     app.use("/remarks-master", remarksMasterRouter.getRouter());
     app.use("/stock-checker", stockCheckerRouter.getRouter());
+    app.use("/products-expiry-checker", productsExpiryCheckerRouter.getRouter());
   }
 
   initServices() {

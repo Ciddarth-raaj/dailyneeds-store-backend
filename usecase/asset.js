@@ -26,10 +26,11 @@ const ALLOWED_FOLDERS = {
   receipts: true,
   employee_image: true,
   tickets: true,
+  "expiry-checker": true
 };
 
 class AssetUsecase {
-  constructor() {}
+  constructor() { }
 
   upload(req) {
     return new Promise((resolve, reject) => {
