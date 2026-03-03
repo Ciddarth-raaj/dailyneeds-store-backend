@@ -14,7 +14,8 @@ class ProductsExpiryCheckerRepository {
     return new Promise((resolve, reject) => {
       this.db.query(
         `SELECT pec.products_expiry_checker_id, pec.product_id, pec.expiry_date, pec.ref_file, pec.created_at, pec.updated_at,
-                p.product_id AS product_product_id, p.de_display_name AS product_de_display_name, p.gf_item_name AS product_gf_item_name
+                p.product_id AS product_product_id, p.de_display_name AS product_de_display_name, p.gf_item_name AS product_gf_item_name,
+                (SELECT image_url FROM product_images WHERE product_id = pec.product_id ORDER BY priority ASC, image_id ASC LIMIT 1) AS product_image_url
          FROM ${TABLE} pec
          LEFT JOIN product_table p ON p.product_id = pec.product_id
          ORDER BY pec.products_expiry_checker_id DESC`,
@@ -42,7 +43,8 @@ class ProductsExpiryCheckerRepository {
                 ? {
                     product_id: r.product_product_id,
                     de_display_name: r.product_de_display_name,
-                    gf_item_name: r.product_gf_item_name
+                    gf_item_name: r.product_gf_item_name,
+                    image_url: r.product_image_url || null
                   }
                 : null
           }));
@@ -67,7 +69,8 @@ class ProductsExpiryCheckerRepository {
     return new Promise((resolve, reject) => {
       this.db.query(
         `SELECT pec.products_expiry_checker_id, pec.product_id, pec.expiry_date, pec.ref_file, pec.created_at, pec.updated_at,
-                p.product_id AS product_product_id, p.de_display_name AS product_de_display_name, p.gf_item_name AS product_gf_item_name
+                p.product_id AS product_product_id, p.de_display_name AS product_de_display_name, p.gf_item_name AS product_gf_item_name,
+                (SELECT image_url FROM product_images WHERE product_id = pec.product_id ORDER BY priority ASC, image_id ASC LIMIT 1) AS product_image_url
          FROM ${TABLE} pec
          LEFT JOIN product_table p ON p.product_id = pec.product_id
          WHERE pec.products_expiry_checker_id = ?`,
@@ -88,7 +91,8 @@ class ProductsExpiryCheckerRepository {
                 ? {
                     product_id: r.product_product_id,
                     de_display_name: r.product_de_display_name,
-                    gf_item_name: r.product_gf_item_name
+                    gf_item_name: r.product_gf_item_name,
+                    image_url: r.product_image_url || null
                   }
                 : null
           };
