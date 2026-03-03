@@ -620,6 +620,7 @@ class Synker {
         purchase_uom: product.purchase_uom,
         store_uom: product.store_uom,
         repln_mode: product.repln_mode,
+        de_is_online_allowed: product.is_online_allowed,
       });
     }
 
