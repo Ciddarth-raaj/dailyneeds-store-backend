@@ -50,7 +50,7 @@ class ProductsChangesRoutes {
       is_approved: Joi.boolean().required()
     });
 
-    router.patch("/:products_change_id/approve", async (req, res) => {
+    router.put("/:products_change_id/approve", async (req, res) => {
       try {
         const id = parseInt(req.params.products_change_id, 10);
         if (Number.isNaN(id) || id < 1) {
