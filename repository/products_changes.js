@@ -36,8 +36,12 @@ class ProductsChangesRepository {
   getById(products_change_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT products_change_id, product_id, changes, is_approved, created_at, updated_at
-         FROM products_changes WHERE products_change_id = ?`,
+        `SELECT pc.products_change_id, pc.product_id, pc.changes, pc.is_approved, pc.created_at, pc.updated_at,
+                pt.gf_item_name,
+                (SELECT image_url FROM product_images WHERE product_id = pc.product_id ORDER BY priority ASC, image_id ASC LIMIT 1) AS product_image_url
+         FROM products_changes pc
+         LEFT JOIN product_table pt ON pt.product_id = pc.product_id
+         WHERE pc.products_change_id = ?`,
         [products_change_id],
         (err, rows) => {
           if (err) {
@@ -63,19 +67,23 @@ class ProductsChangesRepository {
       const conditions = [];
       const values = [];
       if (filters.product_id != null && filters.product_id !== "") {
-        conditions.push("product_id = ?");
+        conditions.push("pc.product_id = ?");
         values.push(filters.product_id);
       }
       if (filters.is_approved !== undefined) {
-        conditions.push("is_approved = ?");
+        conditions.push("pc.is_approved = ?");
         values.push(filters.is_approved ? 1 : 0);
       }
       const where = conditions.length ? " WHERE " + conditions.join(" AND ") : "";
       const limit = filters.limit != null ? Math.max(0, parseInt(filters.limit, 10) || 0) : 100;
       const offset = filters.offset != null ? Math.max(0, parseInt(filters.offset, 10) || 0) : 0;
-      const sql = `SELECT products_change_id, product_id, changes, is_approved, created_at, updated_at
-                   FROM products_changes ${where}
-                   ORDER BY created_at DESC
+      const sql = `SELECT pc.products_change_id, pc.product_id, pc.changes, pc.is_approved, pc.created_at, pc.updated_at,
+                          pt.gf_item_name,
+                          (SELECT image_url FROM product_images WHERE product_id = pc.product_id ORDER BY priority ASC, image_id ASC LIMIT 1) AS product_image_url
+                   FROM products_changes pc
+                   LEFT JOIN product_table pt ON pt.product_id = pc.product_id
+                   ${where}
+                   ORDER BY pc.created_at DESC
                    LIMIT ? OFFSET ?`;
       this.db.query(sql, [...values, limit, offset], (err, rows) => {
         if (err) {
@@ -122,6 +130,8 @@ class ProductsChangesRepository {
     return {
       products_change_id: row.products_change_id,
       product_id: row.product_id,
+      gf_item_name: row.gf_item_name ?? null,
+      product_image_url: row.product_image_url ?? null,
       changes: typeof changes === "string" ? (() => { try { return JSON.parse(changes); } catch (_) { return changes; } })() : changes,
       is_approved: Boolean(row.is_approved),
       created_at: row.created_at,

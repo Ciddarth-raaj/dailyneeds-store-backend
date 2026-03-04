@@ -73,15 +73,38 @@ class Synker {
     return row;
   }
 
-  /** Build changes object with only changed columns: { [column]: { old, new } }. */
+  /**
+   * Normalise value for comparison so type mismatches (e.g. 3598 vs "3598") are treated as equal.
+   * Returns undefined for null/undefined/empty. Numbers and numeric strings compare by value.
+   */
+  _normalizeForCompare(val) {
+    if (val === null || val === undefined) return undefined;
+    if (Buffer.isBuffer(val)) val = val.toString("utf8");
+    if (typeof val === "string") {
+      const s = val.trim();
+      if (s === "") return undefined;
+      const n = Number(s);
+      return Number.isNaN(n) ? s : n;
+    }
+    if (typeof val === "number" && !Number.isFinite(val)) return undefined;
+    return val;
+  }
+
+  /**
+   * Build changes object with only columns that actually changed.
+   * Uses loose equality so 3598 and "3598" are not stored as changed.
+   * Skips when old is null and there is no new value. Only stores real changes.
+   */
   _buildProductChanges(existing, incoming) {
     const changes = {};
     for (const col of SYNCED_PRODUCT_COLUMNS) {
       const oldVal = existing && col in existing ? existing[col] : undefined;
       const newVal = incoming && col in incoming ? incoming[col] : undefined;
-      if (oldVal !== newVal && (oldVal !== undefined || newVal !== undefined)) {
-        changes[col] = { old: oldVal, new: newVal };
-      }
+      const oldNorm = this._normalizeForCompare(oldVal);
+      const newNorm = this._normalizeForCompare(newVal);
+      if (oldVal == null && (newVal == null || newVal === "")) continue;
+      if (oldNorm == newNorm) continue;
+      changes[col] = { old: oldVal, new: newVal };
     }
     return Object.keys(changes).length ? changes : null;
   }
@@ -383,22 +406,22 @@ class Synker {
             const incoming = this._incomingRowForSync(formattedProduct[i]);
             const changes = this._buildProductChanges(existing, incoming);
             if (changes) {
-            try {
-              await this.productsChangesRepo.insert({
-                product_id: productId,
-                changes,
-                is_approved: false
-              });
-            } catch (err) {
-              logger.Log({
-                level: logger.LEVEL.ERROR,
-                component: "SERVICE.SYNKER",
-                code: "SERVICE.SYNKER.PRODUCTS_CHANGES_INSERT",
-                description: err.toString(),
-                category: "",
-                ref: { product_id: productId }
-              });
-            }
+              try {
+                await this.productsChangesRepo.insert({
+                  product_id: productId,
+                  changes,
+                  is_approved: false
+                });
+              } catch (err) {
+                logger.Log({
+                  level: logger.LEVEL.ERROR,
+                  component: "SERVICE.SYNKER",
+                  code: "SERVICE.SYNKER.PRODUCTS_CHANGES_INSERT",
+                  description: err.toString(),
+                  category: "",
+                  ref: { product_id: productId }
+                });
+              }
             }
           }
         }
@@ -836,7 +859,9 @@ module.exports = (
   cleaningPackingUsecase,
   designationUsecase,
   outletUsecase,
-  employeeUsecase
+  employeeUsecase,
+  productRepo,
+  productsChangesRepo
 ) => {
   return new Synker(
     productUsecase,
@@ -847,6 +872,8 @@ module.exports = (
     cleaningPackingUsecase,
     designationUsecase,
     outletUsecase,
-    employeeUsecase
+    employeeUsecase,
+    productRepo,
+    productsChangesRepo
   );
 };
