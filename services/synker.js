@@ -22,6 +22,17 @@ const CRON_SYNTAX_PRODUCT = "0 6 * * *";
 const CRON_SYNTAX_EMPLOYEE = "0 7 * * *";
 const CRON_SYNTAX_CLEANING_PACKING = "0 9 * * *";
 
+// Columns on product_table that are updated by sync (for change detection). Excludes product_id.
+const SYNCED_PRODUCT_COLUMNS = [
+  "variant", "variant_of", "gf_item_name", "gf_description", "gf_detailed_description",
+  "gf_weight_grams", "gf_applies_online", "gf_item_product_type", "gf_manufacturer",
+  "gf_food_type", "gf_tax_id", "gf_status", "de_distributor", "brand_id", "category_id",
+  "subcategory_id", "measure", "measure_in", "packaging_type", "cleaning", "sticker",
+  "grinding", "cover_type", "cover_sizes", "return_prod", "de_display_name", "department_id",
+  "de_name", "de_packaging_type", "de_preparation_type", "de_combo_name",
+  "purchase_uom", "store_uom", "repln_mode", "de_is_online_allowed"
+];
+
 class Synker {
   constructor(
     productUsecase,
@@ -32,7 +43,9 @@ class Synker {
     cleaningPackingUsecase,
     designationUsecase,
     outletUsecase,
-    employeeUsecase
+    employeeUsecase,
+    productRepo,
+    productsChangesRepo
   ) {
     this.productUsecase = productUsecase;
     this.categoryUsecase = categoryUsecase;
@@ -43,6 +56,34 @@ class Synker {
     this.designationUsecase = designationUsecase;
     this.outletUsecase = outletUsecase;
     this.employeeUsecase = employeeUsecase;
+    this.productRepo = productRepo;
+    this.productsChangesRepo = productsChangesRepo;
+  }
+
+  /** Build incoming row for comparison (same keys as DB). product has .return for return_prod. */
+  _incomingRowForSync(product) {
+    const row = {};
+    for (const col of SYNCED_PRODUCT_COLUMNS) {
+      if (col === "return_prod") {
+        row[col] = product.return !== undefined ? product.return : product.return_prod;
+      } else {
+        row[col] = product[col];
+      }
+    }
+    return row;
+  }
+
+  /** Build changes object with only changed columns: { [column]: { old, new } }. */
+  _buildProductChanges(existing, incoming) {
+    const changes = {};
+    for (const col of SYNCED_PRODUCT_COLUMNS) {
+      const oldVal = existing && col in existing ? existing[col] : undefined;
+      const newVal = incoming && col in incoming ? incoming[col] : undefined;
+      if (oldVal !== newVal && (oldVal !== undefined || newVal !== undefined)) {
+        changes[col] = { old: oldVal, new: newVal };
+      }
+    }
+    return Object.keys(changes).length ? changes : null;
   }
 
   initCronJobs() {
@@ -324,11 +365,43 @@ class Synker {
       let brandsProcessed = 0;
       let departmentsProcessed = 0;
 
+      const productIds = formattedProduct.map((p) => p.product_id);
+      const existingByProductId =
+        this.productRepo && productIds.length > 0
+          ? await this.productRepo.getProductRowForSync(productIds)
+          : {};
+
       for (const i in formattedProduct) {
         formattedProduct[i] = {
           ...formattedProduct[i],
           ...products[formattedProduct[i].product_id],
         };
+        const productId = formattedProduct[i].product_id;
+        if (this.productsChangesRepo && this.productRepo) {
+          const existing = existingByProductId[String(productId)];
+          if (existing) {
+            const incoming = this._incomingRowForSync(formattedProduct[i]);
+            const changes = this._buildProductChanges(existing, incoming);
+            if (changes) {
+            try {
+              await this.productsChangesRepo.insert({
+                product_id: productId,
+                changes,
+                is_approved: false
+              });
+            } catch (err) {
+              logger.Log({
+                level: logger.LEVEL.ERROR,
+                component: "SERVICE.SYNKER",
+                code: "SERVICE.SYNKER.PRODUCTS_CHANGES_INSERT",
+                description: err.toString(),
+                category: "",
+                ref: { product_id: productId }
+              });
+            }
+            }
+          }
+        }
         await this.productUsecase.create(formattedProduct[i]);
         productsProcessed++;
       }

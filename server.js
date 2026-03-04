@@ -189,6 +189,9 @@ class Server {
     this.gofrugalSynkerRepo = require("./repository/gofrugal_synker")(
       this.mysqlGofrugal.connection
     );
+    this.productsChangesRepo = require("./repository/products_changes")(
+      this.mysql.connection
+    );
     this.purchaseReturnRepo = require("./repository/purchase_return")(
       this.mysql.connection,
       this.mysqlGofrugal.connection
@@ -350,6 +353,9 @@ class Server {
     this.gofrugalSynkerUsecase = require("./usecase/gofrugal_synker")(
       this.gofrugalSynkerRepo
     );
+    this.productsChangesUsecase = require("./usecase/products_changes")(
+      this.productsChangesRepo
+    );
     this.purchaseReturnUsecase = require("./usecase/purchase_return")(
       this.purchaseReturnRepo
     );
@@ -368,6 +374,19 @@ class Server {
     );
     this.productsExpiryCheckerUsecase = require("./usecase/products_expiry_checker")(
       this.productsExpiryCheckerRepo
+    );
+    this.synker = require("./services/synker")(
+      this.productUsecase,
+      this.categoryUsecase,
+      this.subcategoryUsecase,
+      this.departmentUsecase,
+      this.brandUsecase,
+      this.cleaningPackingUsecase,
+      this.designationUsecase,
+      this.outletUsecase,
+      this.employeeUsecase,
+      this.productRepo,
+      this.productsChangesRepo
     );
   }
 
@@ -405,7 +424,10 @@ class Server {
       this.resignationUsecase
     );
     const imageRouter = require("./routes/image")(this.imageUsecase);
-    const productRouter = require("./routes/product")(this.productUsecase);
+    const productRouter = require("./routes/product")(
+      this.productUsecase,
+      this.synker
+    );
     const categoryRouter = require("./routes/category")(this.categoryUsecase);
     const subcategoryRouter = require("./routes/subcategory")(
       this.subcategoryUsecase
@@ -478,6 +500,9 @@ class Server {
     const gofrugalSynkerRouter = require("./routes/gofrugal_synker")(
       this.gofrugalSynkerUsecase
     );
+    const productsChangesRouter = require("./routes/products_changes")(
+      this.productsChangesUsecase
+    );
     const purchaseReturnRouter = require("./routes/purchase_return")(
       this.purchaseReturnUsecase
     );
@@ -549,6 +574,7 @@ class Server {
     app.use("/sticker-types", stickerTypesRouter.getRouter());
     app.use("/product-image-log", productImageLogRouter.getRouter());
     app.use("/gofrugal-synker", gofrugalSynkerRouter.getRouter());
+    app.use("/products-changes", productsChangesRouter.getRouter());
     app.use("/purchase-return", purchaseReturnRouter.getRouter());
     app.use("/product-distributors", productDistributorsRouter.getRouter());
     app.use("/purchase-acknowledgement", purchaseAcknowledgementRouter.getRouter());
@@ -558,17 +584,6 @@ class Server {
   }
 
   initServices() {
-    this.synker = require("./services/synker")(
-      this.productUsecase,
-      this.categoryUsecase,
-      this.subcategoryUsecase,
-      this.departmentUsecase,
-      this.brandUsecase,
-      this.cleaningPackingUsecase,
-      this.designationUsecase,
-      this.outletUsecase,
-      this.employeeUsecase
-    );
     this.synker.initCronJobs();
     // Wire synker back into cleaningPackingUsecase after service creation
     if (this.cleaningPackingUsecase && this.cleaningPackingUsecase.setSynker) {

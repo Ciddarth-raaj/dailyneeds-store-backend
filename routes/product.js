@@ -3,9 +3,9 @@ const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
 
 class ProductRoutes {
-  constructor(productUsecase) {
+  constructor(productUsecase, synker) {
     this.productUsecase = productUsecase;
-
+    this.synker = synker;
     this.init();
   }
 
@@ -137,6 +137,29 @@ class ProductRoutes {
       res.end();
     });
 
+    router.post("/sync", async (req, res) => {
+      try {
+        if (!this.synker || typeof this.synker.syncProducts !== "function") {
+          res.status(503).json({
+            code: 503,
+            msg: "Product sync is not available"
+          });
+          res.end();
+          return;
+        }
+        const result = await this.synker.syncProducts();
+        res.json({
+          code: 200,
+          msg: "Sync completed",
+          ...result
+        });
+      } catch (err) {
+        console.error(err);
+        respondError(res, err);
+      }
+      res.end();
+    });
+
     router.get("/prodcount", async (req, res) => {
       try {
         const product = await this.productUsecase.getProductCount();
@@ -211,6 +234,6 @@ class ProductRoutes {
   }
 }
 
-module.exports = (productUsecase) => {
-  return new ProductRoutes(productUsecase);
+module.exports = (productUsecase, synker) => {
+  return new ProductRoutes(productUsecase, synker);
 };

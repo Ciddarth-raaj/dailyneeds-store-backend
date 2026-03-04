@@ -69,6 +69,62 @@ class GofrugalSynkerRepository {
   }
 
   /**
+   * Fetch existing rows from the table by unique key values.
+   * @param {string} tableName
+   * @param {string[]} uniqueKeys
+   * @param {Array<Object>} tableItems - Rows containing unique key columns
+   * @returns {Promise<Array<Object>>}
+   */
+  getExistingRows(tableName, uniqueKeys, tableItems) {
+    return new Promise((resolve, reject) => {
+      if (!tableName || !uniqueKeys?.length || !Array.isArray(tableItems) || tableItems.length === 0) {
+        return resolve([]);
+      }
+      const escapedTable = escapeIdentifier(tableName);
+      const keyCols = uniqueKeys.map((k) => escapeIdentifier(k)).join(", ");
+      if (uniqueKeys.length === 1) {
+        const col = escapeIdentifier(uniqueKeys[0]);
+        const values = tableItems.map((r) => r[uniqueKeys[0]] ?? null).filter((v) => v != null);
+        if (values.length === 0) return resolve([]);
+        const placeholders = values.map(() => "?").join(", ");
+        const sql = `SELECT * FROM ${escapedTable} WHERE ${col} IN (${placeholders})`;
+        this.db.query(sql, values, (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.GOFRUGAL_SYNKER",
+              code: "REPOSITORY.GOFRUGAL_SYNKER.GET_EXISTING",
+              description: err.toString(),
+              category: "",
+              ref: { tableName }
+            });
+            return reject(err);
+          }
+          resolve(rows || []);
+        });
+      } else {
+        const placeholders = tableItems.map(() => "(" + uniqueKeys.map(() => "?").join(", ") + ")").join(", ");
+        const values = tableItems.flatMap((row) => uniqueKeys.map((k) => row[k] ?? null));
+        const sql = `SELECT * FROM ${escapedTable} WHERE (${keyCols}) IN (${placeholders})`;
+        this.db.query(sql, values, (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.GOFRUGAL_SYNKER",
+              code: "REPOSITORY.GOFRUGAL_SYNKER.GET_EXISTING",
+              description: err.toString(),
+              category: "",
+              ref: { tableName }
+            });
+            return reject(err);
+          }
+          resolve(rows || []);
+        });
+      }
+    });
+  }
+
+  /**
    * Upsert rows in batches (INSERT ... ON DUPLICATE KEY UPDATE).
    * @param {string} tableName
    * @param {string[]} columns - Column names (order must match table_items)
