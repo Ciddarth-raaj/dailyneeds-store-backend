@@ -66,6 +66,35 @@ class PurchaseReturnRepository {
     });
   }
 
+  /** Headers with distributor name in one query (Gofrugal). */
+  getHeadersFromGofrugalWithDistributor() {
+    return new Promise((resolve, reject) => {
+      this.dbGofrugal.query(
+        `SELECT h.mprh_pr_no, h.mprh_pr_refno, h.mprh_pr_dt, h.mprh_basic_amount, h.mprh_net_amount, h.mprh_locaid, h.mprh_dist_code,
+                d.MDM_DIST_NAME AS distributor_name
+         FROM medishopdb_med_pur_return_hdr h
+         LEFT JOIN medishopdb_MED_DISTRIBUTOR_MAST d ON d.MDM_DIST_CODE = h.mprh_dist_code
+         WHERE h.mprh_locaid = 2 AND h.mprh_pr_dt >= ?
+         ORDER BY h.mprh_pr_refno DESC`,
+        [PUR_RETURN_DT_CUTOFF],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PURCHASE_RETURN",
+              code: "REPOSITORY.PURCHASE_RETURN.HEADERS_WITH_DIST",
+              description: err.toString(),
+              category: "",
+              ref: {}
+            });
+            return reject(err);
+          }
+          resolve(rows || []);
+        }
+      );
+    });
+  }
+
   getHeadersFromGofrugalByDistCode(distributor_id) {
     return new Promise((resolve, reject) => {
       this.dbGofrugal.query(
@@ -80,6 +109,35 @@ class PurchaseReturnRepository {
               level: logger.LEVEL.ERROR,
               component: "REPOSITORY.PURCHASE_RETURN",
               code: "REPOSITORY.PURCHASE_RETURN.HEADERS_BY_DIST",
+              description: err.toString(),
+              category: "",
+              ref: {}
+            });
+            return reject(err);
+          }
+          resolve(rows || []);
+        }
+      );
+    });
+  }
+
+  /** Headers by dist code with distributor name in one query (Gofrugal). */
+  getHeadersFromGofrugalByDistCodeWithDistributor(distributor_id) {
+    return new Promise((resolve, reject) => {
+      this.dbGofrugal.query(
+        `SELECT h.mprh_pr_no, h.mprh_pr_refno, h.mprh_pr_dt, h.mprh_basic_amount, h.mprh_net_amount, h.mprh_locaid, h.mprh_dist_code,
+                d.MDM_DIST_NAME AS distributor_name
+         FROM medishopdb_med_pur_return_hdr h
+         LEFT JOIN medishopdb_MED_DISTRIBUTOR_MAST d ON d.MDM_DIST_CODE = h.mprh_dist_code
+         WHERE h.mprh_locaid = 2 AND h.mprh_pr_dt >= ? AND h.mprh_dist_code = ?
+         ORDER BY h.mprh_pr_refno DESC`,
+        [PUR_RETURN_DT_CUTOFF, distributor_id],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PURCHASE_RETURN",
+              code: "REPOSITORY.PURCHASE_RETURN.HEADERS_BY_DIST_WITH_DIST",
               description: err.toString(),
               category: "",
               ref: {}
@@ -249,34 +307,78 @@ class PurchaseReturnRepository {
     });
   }
 
+  /** Products with images in one query (main DB). Returns map of product_id -> { ...product, images, image_url }. */
+  getProductsWithImagesByProductIds(productIds) {
+    if (!productIds || productIds.length === 0) return Promise.resolve({});
+    return new Promise((resolve, reject) => {
+      const placeholders = productIds.map(() => "?").join(",");
+      this.db.query(
+        `SELECT pt.product_id, pt.gf_item_name, pt.de_display_name,
+                pi.image_id, pi.image_url, pi.priority, pi.created_at AS img_created_at, pi.updated_at AS img_updated_at
+         FROM product_table pt
+         LEFT JOIN product_images pi ON pi.product_id = pt.product_id
+         WHERE pt.product_id IN (${placeholders})
+         ORDER BY pt.product_id, pi.priority ASC, pi.image_id ASC`,
+        productIds,
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PURCHASE_RETURN",
+              code: "REPOSITORY.PURCHASE_RETURN.PRODUCTS_WITH_IMAGES",
+              description: err.toString(),
+              category: "",
+              ref: {}
+            });
+            return reject(err);
+          }
+          const byProduct = {};
+          (rows || []).forEach((r) => {
+            const key = String(r.product_id);
+            if (!byProduct[key]) {
+              byProduct[key] = {
+                product_id: r.product_id,
+                gf_item_name: r.gf_item_name,
+                de_display_name: r.de_display_name,
+                images: [],
+                image_url: null
+              };
+            }
+            if (r.image_id != null) {
+              byProduct[key].images.push({
+                image_id: r.image_id,
+                image_url: r.image_url,
+                priority: r.priority,
+                created_at: r.img_created_at,
+                updated_at: r.img_updated_at
+              });
+            }
+          });
+          Object.keys(byProduct).forEach((k) => {
+            const p = byProduct[k];
+            p.image_url = p.images.length > 0 ? p.images[0].image_url : null;
+          });
+          resolve(byProduct);
+        }
+      );
+    });
+  }
+
   getAll() {
     return new Promise((resolve, reject) => {
       Promise.all([
-        this.getHeadersFromGofrugal(),
+        this.getHeadersFromGofrugalWithDistributor(),
         this.getItemsFromGofrugal(),
         this.getExtrasFromMain()
       ])
         .then(([headers, items, extrasMap]) => {
           const itemCodes = [...new Set(items.map((i) => i.MPR_ITEM_CODE).filter(Boolean))];
-          const distCodesFromHeaders = [...new Set(headers.map((h) => h.mprh_dist_code).filter(Boolean))];
-          return Promise.all([
-            this.getProductsByProductIds(itemCodes),
-            this.getDistributorMastByDistCodes(distCodesFromHeaders),
-            this.getProductImagesByProductIds(itemCodes)
-          ]).then(([productsMap, distributorMastMap, imagesByProduct]) => {
+          return this.getProductsWithImagesByProductIds(itemCodes).then((productsMap) => {
             const itemsByPrNo = {};
             items.forEach((item) => {
               const prNo = String(item.MPR_PR_NO);
               if (!itemsByPrNo[prNo]) itemsByPrNo[prNo] = [];
-              const productRow = productsMap[String(item.MPR_ITEM_CODE)] || null;
-              const images = productRow ? (imagesByProduct[String(productRow.product_id)] || []) : [];
-              const product = productRow
-                ? {
-                  ...productRow,
-                  images,
-                  image_url: images.length > 0 ? images[0].image_url : null
-                }
-                : null;
+              const product = productsMap[String(item.MPR_ITEM_CODE)] || null;
               itemsByPrNo[prNo].push({
                 MPR_PR_NO: item.MPR_PR_NO,
                 MPR_MRC_NO: item.MPR_MRC_NO,
@@ -289,7 +391,6 @@ class PurchaseReturnRepository {
             const result = headers.map((h) => {
               const prNo = String(h.mprh_pr_no);
               const extra = extrasMap[prNo] || null;
-              const headerDist = h.mprh_dist_code != null ? distributorMastMap[String(h.mprh_dist_code)] : null;
               return {
                 mprh_pr_no: h.mprh_pr_no,
                 mprh_pr_refno: h.mprh_pr_refno,
@@ -298,7 +399,7 @@ class PurchaseReturnRepository {
                 mprh_net_amount: h.mprh_net_amount,
                 mprh_locaid: h.mprh_locaid,
                 mprh_dist_code: h.mprh_dist_code,
-                distributor_name: headerDist ? headerDist.MDM_DIST_NAME : null,
+                distributor_name: h.distributor_name ?? null,
                 no_of_boxes: extra ? extra.no_of_boxes : null,
                 status: extra ? extra.status : null,
                 created_by: extra ? extra.created_by : null,
@@ -326,7 +427,7 @@ class PurchaseReturnRepository {
   getAllByDistributorIdOpenStatus(distributor_id, purchase_acknowledgement_id = null) {
     return new Promise((resolve, reject) => {
       Promise.all([
-        this.getHeadersFromGofrugalByDistCode(distributor_id),
+        this.getHeadersFromGofrugalByDistCodeWithDistributor(distributor_id),
         this.getItemsFromGofrugal(),
         this.getExtrasFromMain()
       ])
@@ -340,26 +441,13 @@ class PurchaseReturnRepository {
           if (openHeaders.length === 0) return resolve([]);
           const prNoSet = new Set(openHeaders.map((h) => String(h.mprh_pr_no)));
           const itemCodes = [...new Set(items.filter((i) => prNoSet.has(String(i.MPR_PR_NO))).map((i) => i.MPR_ITEM_CODE).filter(Boolean))];
-          const distCodesFromHeaders = [...new Set(openHeaders.map((h) => h.mprh_dist_code).filter(Boolean))];
-          return Promise.all([
-            this.getProductsByProductIds(itemCodes),
-            this.getDistributorMastByDistCodes(distCodesFromHeaders),
-            this.getProductImagesByProductIds(itemCodes)
-          ]).then(([productsMap, distributorMastMap, imagesByProduct]) => {
+          return this.getProductsWithImagesByProductIds(itemCodes).then((productsMap) => {
             const itemsByPrNo = {};
             items.forEach((item) => {
               const prNo = String(item.MPR_PR_NO);
               if (!prNoSet.has(prNo)) return;
               if (!itemsByPrNo[prNo]) itemsByPrNo[prNo] = [];
-              const productRow = productsMap[String(item.MPR_ITEM_CODE)] || null;
-              const images = productRow ? (imagesByProduct[String(productRow.product_id)] || []) : [];
-              const product = productRow
-                ? {
-                  ...productRow,
-                  images,
-                  image_url: images.length > 0 ? images[0].image_url : null
-                }
-                : null;
+              const product = productsMap[String(item.MPR_ITEM_CODE)] || null;
               itemsByPrNo[prNo].push({
                 MPR_PR_NO: item.MPR_PR_NO,
                 MPR_MRC_NO: item.MPR_MRC_NO,
@@ -372,7 +460,6 @@ class PurchaseReturnRepository {
             const result = openHeaders.map((h) => {
               const prNo = String(h.mprh_pr_no);
               const extra = extrasMap[prNo] || null;
-              const headerDist = h.mprh_dist_code != null ? distributorMastMap[String(h.mprh_dist_code)] : null;
               return {
                 mprh_pr_no: h.mprh_pr_no,
                 mprh_pr_refno: h.mprh_pr_refno,
@@ -381,7 +468,7 @@ class PurchaseReturnRepository {
                 mprh_net_amount: h.mprh_net_amount,
                 mprh_locaid: h.mprh_locaid,
                 mprh_dist_code: h.mprh_dist_code,
-                distributor_name: headerDist ? headerDist.MDM_DIST_NAME : null,
+                distributor_name: h.distributor_name ?? null,
                 no_of_boxes: extra ? extra.no_of_boxes : null,
                 status: extra ? extra.status : null,
                 created_by: extra ? extra.created_by : null,
