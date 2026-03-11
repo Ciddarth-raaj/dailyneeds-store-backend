@@ -79,7 +79,7 @@ class StockCheckerUsecase {
     const header = await this.stockCheckerRepo.getById(stock_checker_id);
     if (!header) return;
     const productName =
-      (header.product && (header.product.de_display_name || header.product.gf_item_name)) ||
+      (header.product && (header.product.gf_item_name || header.product.de_display_name)) ||
       `Product ${header.product_id}`;
     const raisedMsg =
       "📋 *Stock check raised*\n\n" +
@@ -201,7 +201,7 @@ class StockCheckerUsecase {
     const header = await this.stockCheckerRepo.getById(stock_checker_id);
     if (!header) return;
     const productName =
-      (header.product && (header.product.de_display_name || header.product.gf_item_name)) ||
+      (header.product && (header.product.gf_item_name || header.product.de_display_name)) ||
       `Product ${header.product_id}`;
     const items = await this.stockCheckerRepo.getItemsByStockCheckerId(
       stock_checker_id
