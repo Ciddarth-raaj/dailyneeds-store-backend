@@ -1,0 +1,2 @@
+ALTER TABLE `outlets`
+ADD COLUMN `gofrugal_id` VARCHAR(255) NULL DEFAULT NULL;

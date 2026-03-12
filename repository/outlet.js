@@ -73,7 +73,7 @@ class OutletRepository {
   create(outlet) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "INSERT INTO outlets (outlet_name, outlet_address, outlet_phone, phone, outlet_nickname, telegram_username, opening_cash) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO outlets (outlet_name, outlet_address, outlet_phone, phone, outlet_nickname, telegram_username, opening_cash, gofrugal_id, outlet_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
           outlet.outlet_name,
           outlet.outlet_address,
@@ -82,6 +82,8 @@ class OutletRepository {
           outlet.outlet_nickname,
           outlet.telegram_username,
           outlet.opening_cash,
+          outlet.gofrugal_id ?? null,
+          outlet.outlet_code ?? null,
         ],
         (err, res) => {
           if (err) {
@@ -131,7 +133,7 @@ class OutletRepository {
   getOutletById(outlet_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "SELECT outlet_id, outlet_name, telegram_chat_id FROM outlets WHERE outlet_id = ?",
+        "SELECT outlet_id, outlet_name, outlet_code, telegram_chat_id, gofrugal_id FROM outlets WHERE outlet_id = ?",
         [outlet_id],
         (err, docs) => {
           if (err) {

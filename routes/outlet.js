@@ -117,6 +117,8 @@ class OutletRoutes {
             outlet_nickname: Joi.string().required(),
             telegram_username: Joi.string().allow(null).allow("").optional(),
             opening_cash: Joi.number().required(),
+            gofrugal_id: Joi.string().allow(null).allow("").optional(),
+            outlet_code: Joi.string().allow(null).allow("").optional(),
           }).optional(),
           budget: Joi.array().allow(null).allow("").optional(),
         };
@@ -156,6 +158,8 @@ class OutletRoutes {
             outlet_nickname: Joi.string().required(),
             telegram_username: Joi.string().allow(null).allow("").optional(),
             opening_cash: Joi.number().required(),
+            gofrugal_id: Joi.string().allow(null).allow("").optional(),
+            outlet_code: Joi.string().allow(null).allow("").optional(),
           }).optional(),
           budget: Joi.array().allow(null).allow("").required(),
         };
