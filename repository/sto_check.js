@@ -37,7 +37,11 @@ class StoCheckRepository {
   getByDnRefNo(dn_ref_no) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT dn_ref_no, product_id, file_qty, created_at, updated_at FROM \`${TABLE}\` WHERE dn_ref_no = ? ORDER BY product_id ASC`,
+        `SELECT sc.dn_ref_no, sc.product_id, sc.file_qty, sc.created_at, sc.updated_at,
+                pt.gf_item_name
+         FROM \`${TABLE}\` sc
+         LEFT JOIN product_table pt ON pt.product_id = sc.product_id
+         WHERE sc.dn_ref_no = ? ORDER BY sc.product_id ASC`,
         [dn_ref_no],
         (err, rows) => {
           if (err) {
