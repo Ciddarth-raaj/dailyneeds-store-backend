@@ -216,6 +216,9 @@ class Server {
       this.mysqlGofrugal.connection
     );
     this.stoCheckRepo = require("./repository/sto_check")(this.mysql.connection);
+    this.productOffersRepo = require("./repository/product_offers")(
+      this.mysql.connection
+    );
   }
 
   initUsecases() {
@@ -385,6 +388,9 @@ class Server {
       this.outletUsecase,
       this.stoCheckUsecase
     );
+    this.productOffersUsecase = require("./usecase/product_offers")(
+      this.productOffersRepo
+    );
     this.synker = require("./services/synker")(
       this.productUsecase,
       this.categoryUsecase,
@@ -537,6 +543,9 @@ class Server {
     const stoCheckRouter = require("./routes/sto_check")(
       this.stoCheckUsecase
     );
+    const productOffersRouter = require("./routes/product_offers")(
+      this.productOffersUsecase
+    );
 
     app.use("/document", documentRouter.getRouter());
     app.use("/whatsapp", whatsappRouter.getRouter());
@@ -599,6 +608,7 @@ class Server {
     app.use("/products-expiry-checker", productsExpiryCheckerRouter.getRouter());
     app.use("/stock-transfer-out", stockTransferOutRouter.getRouter());
     app.use("/sto-check", stoCheckRouter.getRouter());
+    app.use("/product-offers", productOffersRouter.getRouter());
   }
 
   initServices() {
