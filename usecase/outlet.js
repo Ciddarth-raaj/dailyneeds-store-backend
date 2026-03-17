@@ -50,6 +50,16 @@ class OutletUsecase {
       }
     });
   }
+  getOutletByGofrugalId(gofrugal_id) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const outlet = await this.outletRepo.getOutletByGofrugalId(gofrugal_id);
+        resolve(outlet);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
   updateOutletDetails(outlet) {
     return new Promise(async (resolve, reject) => {
       try {

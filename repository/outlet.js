@@ -154,6 +154,34 @@ class OutletRepository {
     });
   }
 
+  getOutletByGofrugalId(gofrugal_id) {
+    return new Promise((resolve, reject) => {
+      if (gofrugal_id == null || gofrugal_id === "") {
+        resolve(null);
+        return;
+      }
+      this.db.query(
+        "SELECT * FROM outlets WHERE gofrugal_id = ?",
+        [String(gofrugal_id)],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.OUTLET",
+              code: "REPOSITORY.OUTLET.GET-BY-GOFRUGAL-ID",
+              description: err.toString(),
+              category: "",
+              ref: { gofrugal_id },
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs && docs[0] ? docs[0] : null);
+        }
+      );
+    });
+  }
+
   bulkCreate(rows) {
     return new Promise((resolve, reject) => {
       if (!Array.isArray(rows) || rows.length === 0) {

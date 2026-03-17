@@ -212,6 +212,10 @@ class Server {
     this.productsExpiryCheckerRepo = require("./repository/products_expiry_checker")(
       this.mysql.connection
     );
+    this.stockTransferOutRepo = require("./repository/stock_transfer_out")(
+      this.mysqlGofrugal.connection
+    );
+    this.stoCheckRepo = require("./repository/sto_check")(this.mysql.connection);
   }
 
   initUsecases() {
@@ -375,6 +379,12 @@ class Server {
     this.productsExpiryCheckerUsecase = require("./usecase/products_expiry_checker")(
       this.productsExpiryCheckerRepo
     );
+    this.stoCheckUsecase = require("./usecase/sto_check")(this.stoCheckRepo);
+    this.stockTransferOutUsecase = require("./usecase/stock_transfer_out")(
+      this.stockTransferOutRepo,
+      this.outletUsecase,
+      this.stoCheckUsecase
+    );
     this.synker = require("./services/synker")(
       this.productUsecase,
       this.categoryUsecase,
@@ -521,6 +531,12 @@ class Server {
     const productsExpiryCheckerRouter = require("./routes/products_expiry_checker")(
       this.productsExpiryCheckerUsecase
     );
+    const stockTransferOutRouter = require("./routes/stock_transfer_out")(
+      this.stockTransferOutUsecase
+    );
+    const stoCheckRouter = require("./routes/sto_check")(
+      this.stoCheckUsecase
+    );
 
     app.use("/document", documentRouter.getRouter());
     app.use("/whatsapp", whatsappRouter.getRouter());
@@ -581,6 +597,8 @@ class Server {
     app.use("/remarks-master", remarksMasterRouter.getRouter());
     app.use("/stock-checker", stockCheckerRouter.getRouter());
     app.use("/products-expiry-checker", productsExpiryCheckerRouter.getRouter());
+    app.use("/stock-transfer-out", stockTransferOutRouter.getRouter());
+    app.use("/sto-check", stoCheckRouter.getRouter());
   }
 
   initServices() {
