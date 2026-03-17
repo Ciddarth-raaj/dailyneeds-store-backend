@@ -36,6 +36,7 @@ function buildFileQtyMap(stoRows) {
 async function attachFileQtyToItems(header, stoCheckUsecase) {
   if (!stoCheckUsecase || header.Dn_Ref_no == null) {
     header.is_checked = false;
+    header.file_items = [];
     if (header.items) {
       header.items.forEach((item) => {
         item.file_qty = null;
@@ -45,11 +46,13 @@ async function attachFileQtyToItems(header, stoCheckUsecase) {
   }
   if (!header.items) {
     header.is_checked = false;
+    header.file_items = [];
     return header;
   }
   try {
     const rows = await stoCheckUsecase.getByDnRefNo(header.Dn_Ref_no);
-    header.is_checked = Array.isArray(rows) && rows.length > 0;
+    header.file_items = Array.isArray(rows) ? rows : [];
+    header.is_checked = header.file_items.length > 0;
     const map = buildFileQtyMap(rows);
     header.items.forEach((item) => {
       const val = map[String(item.Item_Code)];
@@ -57,6 +60,7 @@ async function attachFileQtyToItems(header, stoCheckUsecase) {
     });
   } catch (_) {
     header.is_checked = false;
+    header.file_items = [];
     header.items.forEach((item) => {
       item.file_qty = null;
     });
