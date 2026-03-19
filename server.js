@@ -615,7 +615,7 @@ class Server {
     const CronService = require("./services/cron_service");
     this.cronService = new CronService();
     // Edit schedule here if needed (node-cron: minute hour day month weekday)
-    const PURCHASE_ACK_GOFRUGAL_CRON = "*/30 * * * *";
+    const PURCHASE_ACK_GOFRUGAL_CRON = "*/5 * * * *";
     this.cronService.register(
       "purchase_acknowledgement_gofrugal_sync",
       PURCHASE_ACK_GOFRUGAL_CRON,
