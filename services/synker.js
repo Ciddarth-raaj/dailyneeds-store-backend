@@ -109,37 +109,23 @@ class Synker {
     return Object.keys(changes).length ? changes : null;
   }
 
-  initCronJobs() {
-    this.syncProductsWithLogging();
+  initCronJobs(cronService) {
     // Schedule CRON job for product sync
-    cron.schedule(CRON_SYNTAX_PRODUCT, () => {
-      console.log(
-        `Running scheduled product sync at ${new Date().toISOString()}`
-      );
-      this.syncProductsWithLogging();
-    });
-
-    // cron.schedule(CRON_SYNTAX_CLEANING_PACKING, () => {
-
-    cron.schedule(CRON_SYNTAX_EMPLOYEE, () => {
-      console.log(
-        `Running scheduled employee sync at ${new Date().toISOString()}`
-      );
-      this.syncDigismeEmployees();
-    });
-
-    // cron.schedule(CRON_SYNTAX_CLEANING_PACKING, () => {
-    //   console.log(`Running scheduled cleaning packing sync at ${new Date().toISOString()}`);
-    //   this.syncCleaningPacking();
-    // });
-
-    console.log(
-      `Product sync CRON job scheduled with syntax: ${CRON_SYNTAX_PRODUCT}`
+    cronService.register(
+      "product_sync",
+      CRON_SYNTAX_PRODUCT,
+      async () => {
+        await this.syncProductsWithLogging();
+      }
     );
-    console.log(
-      `Employee sync CRON job scheduled with syntax: ${CRON_SYNTAX_EMPLOYEE}`
+
+    cronService.register(
+      "employee_sync",
+      CRON_SYNTAX_EMPLOYEE,
+      async () => {
+        await this.syncDigismeEmployees();
+      }
     );
-    // console.log(`Cleaning packing sync CRON job scheduled with syntax: ${CRON_SYNTAX_CLEANING_PACKING}`);
   }
 
   async getDigismeToken() {

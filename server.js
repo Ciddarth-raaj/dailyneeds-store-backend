@@ -623,9 +623,10 @@ class Server {
         await this.purchaseAcknowledgementUsecase.syncFromGofrugal(null);
       }
     );
+
+    this.synker.initCronJobs(this.cronService);
     this.cronService.start();
 
-    this.synker.initCronJobs();
     // Wire synker back into cleaningPackingUsecase after service creation
     if (this.cleaningPackingUsecase && this.cleaningPackingUsecase.setSynker) {
       this.cleaningPackingUsecase.setSynker(this.synker);
