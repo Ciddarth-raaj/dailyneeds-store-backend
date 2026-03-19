@@ -150,10 +150,10 @@ class ProductUsecase {
     });
   }
 
-  get(limit, offset) {
+  get(limit, offset, fetchAll = false) {
     return new Promise(async (resolve, reject) => {
       try {
-        const data = await this.productRepo.get(limit, offset);
+        const data = await this.productRepo.get(limit, offset, fetchAll);
         resolve(data);
       } catch (err) {
         reject(err);

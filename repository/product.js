@@ -233,7 +233,7 @@ class ProductRepository {
     });
   }
 
-  get(limit, offset) {
+  get(limit, offset, fetchAll = false) {
     return new Promise((resolve, reject) => {
       this.db.query(
         `SELECT
@@ -263,7 +263,7 @@ class ProductRepository {
                 LIMIT 1
             ) AS image_url
         FROM product_table p
-        WHERE p.gf_applies_online = 1
+        ${fetchAll == "true" ? "" : "WHERE p.gf_applies_online = 1"}
         ORDER BY p.product_id DESC
         LIMIT ${offset}, ${limit}`,
         [],
