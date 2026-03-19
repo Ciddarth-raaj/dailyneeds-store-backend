@@ -612,6 +612,19 @@ class Server {
   }
 
   initServices() {
+    const CronService = require("./services/cron_service");
+    this.cronService = new CronService();
+    // Edit schedule here if needed (node-cron: minute hour day month weekday)
+    const PURCHASE_ACK_GOFRUGAL_CRON = "*/30 * * * *";
+    this.cronService.register(
+      "purchase_acknowledgement_gofrugal_sync",
+      PURCHASE_ACK_GOFRUGAL_CRON,
+      async () => {
+        await this.purchaseAcknowledgementUsecase.syncFromGofrugal(null);
+      }
+    );
+    this.cronService.start();
+
     this.synker.initCronJobs();
     // Wire synker back into cleaningPackingUsecase after service creation
     if (this.cleaningPackingUsecase && this.cleaningPackingUsecase.setSynker) {
@@ -625,6 +638,9 @@ class Server {
   }
 
   onClose() {
+    if (this.cronService) {
+      this.cronService.stopAll();
+    }
     //Close all DB Connections
     this.drivers.map((m) => {
       m.close();

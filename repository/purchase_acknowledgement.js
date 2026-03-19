@@ -2,7 +2,57 @@ const logger = require("../utils/logger");
 
 const TABLE = "purchase_acknowledgement";
 const TABLE_INVOICE = "purchase_acknowledgement_invoice";
+const TABLE_IMPORTED = "purchase_acknowledgement_imported";
 const DIST_MAST = "medishopdb_MED_DISTRIBUTOR_MAST";
+const GOFRUGAL_MRC_MEMO = "medishopdb_med_mrc_memo";
+
+function _normalizeMemoSno(mmm_sno) {
+  if (mmm_sno == null || mmm_sno === "") {
+    return 0;
+  }
+  const n = Number(mmm_sno);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function _memoImportKey(mmm_no, mmm_sno) {
+  return `${mmm_no}:${_normalizeMemoSno(mmm_sno)}`;
+}
+
+function _parseAmount(v) {
+  if (v == null || v === "") {
+    return 0;
+  }
+  const n = parseFloat(String(v).replace(/,/g, "").trim());
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** YYYY-MM-DD for purchase_acknowledgement_invoice.invoice_date */
+function _invoiceDateFromMemoRow(row) {
+  const raw = row.mmm_invoice_date != null ? row.mmm_invoice_date : row.mmm_date;
+  if (raw == null) {
+    return null;
+  }
+  if (raw instanceof Date) {
+    if (Number.isNaN(raw.getTime())) return null;
+    const y = raw.getFullYear();
+    const m = String(raw.getMonth() + 1).padStart(2, "0");
+    const day = String(raw.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+  const s = String(raw);
+  const dateMatch = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (dateMatch) {
+    return dateMatch[1];
+  }
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) {
+    return null;
+  }
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
 
 class PurchaseAcknowledgementRepository {
   constructor(db, dbGofrugal) {
@@ -273,6 +323,232 @@ class PurchaseAcknowledgementRepository {
         }
       );
     });
+  }
+
+  _getImportedMemoKeySet() {
+    return new Promise((resolve, reject) => {
+      this.db.query(`SELECT mmm_no, mmm_sno FROM ${TABLE_IMPORTED}`, (err, rows) => {
+        if (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "REPOSITORY.PURCHASE_ACKNOWLEDGEMENT",
+            code: "REPOSITORY.PURCHASE_ACKNOWLEDGEMENT.IMPORTED_KEYS",
+            description: err.toString(),
+            category: "",
+            ref: {}
+          });
+          return reject(err);
+        }
+        const set = new Set();
+        (rows || []).forEach((r) => {
+          set.add(_memoImportKey(r.mmm_no, r.mmm_sno));
+        });
+        resolve(set);
+      });
+    });
+  }
+
+  _fetchAllMrcMemoFromGofrugal() {
+    return new Promise((resolve, reject) => {
+      if (!this.dbGofrugal) {
+        return reject(new Error("Gofrugal DB connection is not configured"));
+      }
+      this.dbGofrugal.query(
+        `SELECT mmm_no, mmm_sno, mmm_dist_code, mmm_invoice_no, mmm_invoice_date, mmm_invoice_amount, mmm_date
+         FROM ${GOFRUGAL_MRC_MEMO}`,
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PURCHASE_ACKNOWLEDGEMENT",
+              code: "REPOSITORY.PURCHASE_ACKNOWLEDGEMENT.GOFRUGAL_MEMO_FETCH",
+              description: err.toString(),
+              category: "",
+              ref: {}
+            });
+            return reject(err);
+          }
+          resolve(rows || []);
+        }
+      );
+    });
+  }
+
+  async _importOneMemoGroupFromGofrugal(memoRows, createdBy) {
+    memoRows.sort((a, b) => _normalizeMemoSno(a.mmm_sno) - _normalizeMemoSno(b.mmm_sno));
+    const dist = memoRows[0].mmm_dist_code;
+    if (dist == null || dist === "") {
+      return { skipped: true, reason: "missing_distributor" };
+    }
+    const distributor_id = String(dist);
+
+    const rowsWithDate = [];
+    const invoices = [];
+    memoRows.forEach((r) => {
+      const invoice_date = _invoiceDateFromMemoRow(r);
+      if (!invoice_date) {
+        return;
+      }
+      rowsWithDate.push(r);
+      invoices.push({
+        invoice_no: r.mmm_invoice_no != null ? String(r.mmm_invoice_no) : null,
+        invoice_date,
+        amount: _parseAmount(r.mmm_invoice_amount)
+      });
+    });
+
+    if (invoices.length === 0) {
+      return { skipped: true, reason: "no_valid_invoice_date" };
+    }
+
+    const connection = await new Promise((resolve, reject) => {
+      this.db.getConnection((err, conn) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(conn);
+        }
+      });
+    });
+
+    let purchase_acknowledgement_id;
+    try {
+      await new Promise((resolve, reject) => {
+        connection.beginTransaction((err) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve();
+          }
+        });
+      });
+
+      const resPa = await new Promise((resolve, reject) => {
+        connection.query(
+          `INSERT INTO ${TABLE} (distributor_id, created_by) VALUES (?, ?)`,
+          [distributor_id, createdBy ?? null],
+          (err, res) => {
+            if (err) {
+              reject(err);
+            } else {
+              resolve(res);
+            }
+          }
+        );
+      });
+      purchase_acknowledgement_id = resPa.insertId;
+
+      const placeholders = invoices.map(() => "(?, ?, ?, ?)").join(", ");
+      const invValues = invoices.flatMap((inv) => [
+        purchase_acknowledgement_id,
+        inv.invoice_no ?? null,
+        inv.invoice_date,
+        inv.amount ?? 0
+      ]);
+      await new Promise((resolve, reject) => {
+        connection.query(
+          `INSERT INTO ${TABLE_INVOICE} (purchase_acknowledgement_id, invoice_no, invoice_date, amount) VALUES ${placeholders}`,
+          invValues,
+          (err) => {
+            if (err) {
+              reject(err);
+            } else {
+              resolve();
+            }
+          }
+        );
+      });
+
+      const impPlaceholders = rowsWithDate.map(() => "(?, ?)").join(", ");
+      const impValues = rowsWithDate.flatMap((r) => [r.mmm_no, _normalizeMemoSno(r.mmm_sno)]);
+      await new Promise((resolve, reject) => {
+        connection.query(
+          `INSERT IGNORE INTO ${TABLE_IMPORTED} (mmm_no, mmm_sno) VALUES ${impPlaceholders}`,
+          impValues,
+          (err) => {
+            if (err) {
+              reject(err);
+            } else {
+              resolve();
+            }
+          }
+        );
+      });
+
+      await new Promise((resolve, reject) => {
+        connection.commit((err) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve();
+          }
+        });
+      });
+    } catch (err) {
+      await new Promise((resolve) => {
+        connection.rollback(() => resolve());
+      });
+      connection.release();
+      throw err;
+    }
+
+    connection.release();
+    return {
+      skipped: false,
+      purchase_acknowledgement_id,
+      rows_marked: rowsWithDate.length
+    };
+  }
+
+  /**
+   * Pull new rows from gofrugal medishopdb_med_mrc_memo into purchase_acknowledgement (+ invoices),
+   * then record (mmm_no, mmm_sno) in purchase_acknowledgement_imported so they are skipped next time.
+   */
+  async syncFromGofrugalMrcMemo(createdBy) {
+    const importedKeys = await this._getImportedMemoKeySet();
+    const rows = await this._fetchAllMrcMemoFromGofrugal();
+
+    const pendingKeys = new Set();
+    const pending = rows.filter((r) => {
+      if (r.mmm_no == null) {
+        return false;
+      }
+      const k = _memoImportKey(r.mmm_no, r.mmm_sno);
+      if (importedKeys.has(k) || pendingKeys.has(k)) {
+        return false;
+      }
+      pendingKeys.add(k);
+      return true;
+    });
+
+    const byMemo = new Map();
+    pending.forEach((r) => {
+      const no = r.mmm_no;
+      if (!byMemo.has(no)) {
+        byMemo.set(no, []);
+      }
+      byMemo.get(no).push(r);
+    });
+
+    const purchase_acknowledgement_ids = [];
+    let groups_imported = 0;
+    let rows_marked_imported = 0;
+
+    for (const [, memoRows] of byMemo.entries()) {
+      const result = await this._importOneMemoGroupFromGofrugal(memoRows, createdBy);
+      if (!result.skipped) {
+        groups_imported += 1;
+        rows_marked_imported += result.rows_marked;
+        purchase_acknowledgement_ids.push(result.purchase_acknowledgement_id);
+      }
+    }
+
+    return {
+      code: 200,
+      groups_imported,
+      rows_marked_imported,
+      purchase_acknowledgement_ids
+    };
   }
 }
 

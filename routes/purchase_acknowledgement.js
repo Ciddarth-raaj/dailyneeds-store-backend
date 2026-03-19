@@ -19,6 +19,17 @@ class PurchaseAcknowledgementRoutes {
       res.end();
     });
 
+    router.post("/sync", async (req, res) => {
+      try {
+        const created_by = req.decoded && req.decoded.employee_id ? req.decoded.employee_id : null;
+        const result = await this.purchaseAcknowledgementUsecase.syncFromGofrugal(created_by);
+        res.json({ code: 200, data: result });
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
     router.get("/:purchase_acknowledgement_id", async (req, res) => {
       try {
         const id = parseInt(req.params.purchase_acknowledgement_id, 10);

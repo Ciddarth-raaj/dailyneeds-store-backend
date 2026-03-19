@@ -84,6 +84,22 @@ class PurchaseAcknowledgementUsecase {
       throw err;
     }
   }
+
+  async syncFromGofrugal(createdBy) {
+    try {
+      return await this.purchaseAcknowledgementRepo.syncFromGofrugalMrcMemo(createdBy);
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "USECASE.PURCHASE_ACKNOWLEDGEMENT",
+        code: "USECASE.PURCHASE_ACKNOWLEDGEMENT.SYNC",
+        description: err.toString(),
+        category: "",
+        ref: {}
+      });
+      throw err;
+    }
+  }
 }
 
 module.exports = (purchaseAcknowledgementRepo) => {
