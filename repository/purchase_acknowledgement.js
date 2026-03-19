@@ -18,6 +18,15 @@ function _memoImportKey(mmm_no, mmm_sno) {
   return `${mmm_no}:${_normalizeMemoSno(mmm_sno)}`;
 }
 
+/** One purchase_acknowledgement per mmm_refno; lines differ by mmm_sno. */
+function _memoGroupKey(row) {
+  if (row.mmm_refno != null && row.mmm_refno !== "") {
+    return `ref:${row.mmm_refno}`;
+  }
+  // mmm_no is unique per row — no refno → single-line group
+  return `noref:${row.mmm_no}`;
+}
+
 function _parseAmount(v) {
   if (v == null || v === "") {
     return 0;
@@ -354,7 +363,7 @@ class PurchaseAcknowledgementRepository {
         return reject(new Error("Gofrugal DB connection is not configured"));
       }
       this.dbGofrugal.query(
-        `SELECT mmm_no, mmm_sno, mmm_dist_code, mmm_invoice_no, mmm_invoice_date, mmm_invoice_amount, mmm_date
+        `SELECT mmm_no, mmm_refno, mmm_sno, mmm_dist_code, mmm_invoice_no, mmm_invoice_date, mmm_invoice_amount, mmm_date
          FROM ${GOFRUGAL_MRC_MEMO}`,
         (err, rows) => {
           if (err) {
@@ -501,8 +510,9 @@ class PurchaseAcknowledgementRepository {
   }
 
   /**
-   * Pull new rows from gofrugal medishopdb_med_mrc_memo into purchase_acknowledgement (+ invoices),
-   * then record (mmm_no, mmm_sno) in purchase_acknowledgement_imported so they are skipped next time.
+   * Pull new rows from gofrugal medishopdb_med_mrc_memo into purchase_acknowledgement (+ invoices).
+   * Rows with the same mmm_refno are one memo (invoice lines = mmm_sno). mmm_no is unique per source row.
+   * Tracks (mmm_no, mmm_sno) in purchase_acknowledgement_imported so imported rows are skipped.
    */
   async syncFromGofrugalMrcMemo(createdBy) {
     const importedKeys = await this._getImportedMemoKeySet();
@@ -521,20 +531,20 @@ class PurchaseAcknowledgementRepository {
       return true;
     });
 
-    const byMemo = new Map();
+    const byRefno = new Map();
     pending.forEach((r) => {
-      const no = r.mmm_no;
-      if (!byMemo.has(no)) {
-        byMemo.set(no, []);
+      const gk = _memoGroupKey(r);
+      if (!byRefno.has(gk)) {
+        byRefno.set(gk, []);
       }
-      byMemo.get(no).push(r);
+      byRefno.get(gk).push(r);
     });
 
     const purchase_acknowledgement_ids = [];
     let groups_imported = 0;
     let rows_marked_imported = 0;
 
-    for (const [, memoRows] of byMemo.entries()) {
+    for (const [, memoRows] of byRefno.entries()) {
       const result = await this._importOneMemoGroupFromGofrugal(memoRows, createdBy);
       if (!result.skipped) {
         groups_imported += 1;
