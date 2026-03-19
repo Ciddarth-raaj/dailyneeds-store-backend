@@ -63,6 +63,25 @@ function _invoiceDateFromMemoRow(row) {
   return `${y}-${m}-${day}`;
 }
 
+/** Value for purchase_acknowledgement.mmm_date (DATETIME); null if missing/invalid. */
+function _mmmDateForDb(value) {
+  if (value == null || value === "") {
+    return null;
+  }
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+  return value;
+}
+
+function _mmmRefnoForDb(row) {
+  if (row.mmm_refno == null || row.mmm_refno === "") {
+    return null;
+  }
+  const n = Number(row.mmm_refno);
+  return Number.isFinite(n) ? n : null;
+}
+
 class PurchaseAcknowledgementRepository {
   constructor(db, dbGofrugal) {
     this.db = db;
@@ -93,11 +112,11 @@ class PurchaseAcknowledgementRepository {
   getAll() {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT pa.purchase_acknowledgement_id, pa.distributor_id, pa.created_by, pa.created_at, pa.updated_at,
+        `SELECT pa.purchase_acknowledgement_id, pa.distributor_id, pa.mmm_refno, pa.mmm_date, pa.created_by, pa.created_at, pa.updated_at,
                 pai.purchase_acknowledgement_invoice_id, pai.invoice_no, pai.invoice_date, pai.amount
          FROM ${TABLE} pa
          LEFT JOIN ${TABLE_INVOICE} pai ON pai.purchase_acknowledgement_id = pa.purchase_acknowledgement_id
-         ORDER BY pa.purchase_acknowledgement_id DESC, pai.purchase_acknowledgement_invoice_id ASC`,
+         ORDER BY pa.purchase_acknowledgement_id DESC, pai.purchase_acknowledgement_invoice_id DESC`,
         (err, rows) => {
           if (err) {
             logger.Log({
@@ -117,6 +136,8 @@ class PurchaseAcknowledgementRepository {
               byId[id] = {
                 purchase_acknowledgement_id: id,
                 distributor_id: r.distributor_id,
+                mmm_refno: r.mmm_refno,
+                mmm_date: r.mmm_date,
                 distributor_name: null,
                 invoices: [],
                 created_by: r.created_by,
@@ -149,7 +170,7 @@ class PurchaseAcknowledgementRepository {
   getById(purchase_acknowledgement_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT pa.purchase_acknowledgement_id, pa.distributor_id, pa.created_by, pa.created_at, pa.updated_at,
+        `SELECT pa.purchase_acknowledgement_id, pa.distributor_id, pa.mmm_refno, pa.mmm_date, pa.created_by, pa.created_at, pa.updated_at,
                 pai.purchase_acknowledgement_invoice_id, pai.invoice_no, pai.invoice_date, pai.amount
          FROM ${TABLE} pa
          LEFT JOIN ${TABLE_INVOICE} pai ON pai.purchase_acknowledgement_id = pa.purchase_acknowledgement_id
@@ -171,6 +192,8 @@ class PurchaseAcknowledgementRepository {
             resolve({
               purchase_acknowledgement_id: row.purchase_acknowledgement_id,
               distributor_id: row.distributor_id,
+              mmm_refno: row.mmm_refno,
+              mmm_date: row.mmm_date,
               distributor_name: nameMap[String(row.distributor_id)] || null,
               invoices,
               created_by: row.created_by,
@@ -385,7 +408,10 @@ class PurchaseAcknowledgementRepository {
 
   async _importOneMemoGroupFromGofrugal(memoRows, createdBy) {
     memoRows.sort((a, b) => _normalizeMemoSno(a.mmm_sno) - _normalizeMemoSno(b.mmm_sno));
-    const dist = memoRows[0].mmm_dist_code;
+    const head = memoRows[0];
+    const mmm_refno = _mmmRefnoForDb(head);
+    const mmm_date = _mmmDateForDb(head.mmm_date);
+    const dist = head.mmm_dist_code;
     if (dist == null || dist === "") {
       return { skipped: true, reason: "missing_distributor" };
     }
@@ -434,8 +460,8 @@ class PurchaseAcknowledgementRepository {
 
       const resPa = await new Promise((resolve, reject) => {
         connection.query(
-          `INSERT INTO ${TABLE} (distributor_id, created_by) VALUES (?, ?)`,
-          [distributor_id, createdBy ?? null],
+          `INSERT INTO ${TABLE} (distributor_id, created_by, mmm_refno, mmm_date) VALUES (?, ?, ?, ?)`,
+          [distributor_id, createdBy ?? null, mmm_refno, mmm_date],
           (err, res) => {
             if (err) {
               reject(err);
