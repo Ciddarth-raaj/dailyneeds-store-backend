@@ -206,6 +206,9 @@ class Server {
     this.remarksMasterRepo = require("./repository/remarks_master")(
       this.mysql.connection
     );
+    this.pickPackRemarksRepo = require("./repository/pick_pack_remarks")(
+      this.mysql.connection
+    );
     this.stockCheckerRepo = require("./repository/stock_checker")(
       this.mysql.connection
     );
@@ -375,6 +378,9 @@ class Server {
     this.remarksMasterUsecase = require("./usecase/remarks_master")(
       this.remarksMasterRepo
     );
+    this.pickPackRemarksUsecase = require("./usecase/pick_pack_remarks")(
+      this.pickPackRemarksRepo
+    );
     this.stockCheckerUsecase = require("./usecase/stock_checker")(
       this.stockCheckerRepo,
       this.outletRepo
@@ -531,6 +537,9 @@ class Server {
     const remarksMasterRouter = require("./routes/remarks_master")(
       this.remarksMasterUsecase
     );
+    const pickPackRemarksRouter = require("./routes/pick_pack_remarks")(
+      this.pickPackRemarksUsecase
+    );
     const stockCheckerRouter = require("./routes/stock_checker")(
       this.stockCheckerUsecase
     );
@@ -604,6 +613,7 @@ class Server {
     app.use("/product-distributors", productDistributorsRouter.getRouter());
     app.use("/purchase-acknowledgement", purchaseAcknowledgementRouter.getRouter());
     app.use("/remarks-master", remarksMasterRouter.getRouter());
+    app.use("/pick-pack-remarks", pickPackRemarksRouter.getRouter());
     app.use("/stock-checker", stockCheckerRouter.getRouter());
     app.use("/products-expiry-checker", productsExpiryCheckerRouter.getRouter());
     app.use("/stock-transfer-out", stockTransferOutRouter.getRouter());
