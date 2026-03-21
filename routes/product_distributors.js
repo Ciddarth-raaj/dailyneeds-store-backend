@@ -1,4 +1,5 @@
 const router = require("express").Router();
+const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
 
 class ProductDistributorsRoutes {
@@ -8,6 +9,51 @@ class ProductDistributorsRoutes {
   }
 
   init() {
+    const upsertSchema = Joi.object({
+      MDM_DIST_CODE: Joi.alternatives().try(Joi.string(), Joi.number()).required(),
+      buyer_id: Joi.number().integer().allow(null).optional()
+    });
+
+    const bulkUpsertSchema = Joi.object({
+      items: Joi.array().items(upsertSchema).min(1).max(2000).required()
+    });
+
+    router.post("/", async (req, res) => {
+      try {
+        const isValid = Joi.validate(req.body, upsertSchema);
+        if (isValid.error) {
+          res.status(400).json({ code: 400, msg: isValid.error.message });
+          res.end();
+          return;
+        }
+        const result = await this.productDistributorsUsecase.upsertBuyerMap(
+          req.body
+        );
+        res.json(result);
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
+    router.post("/bulk", async (req, res) => {
+      try {
+        const isValid = Joi.validate(req.body, bulkUpsertSchema);
+        if (isValid.error) {
+          res.status(400).json({ code: 400, msg: isValid.error.message });
+          res.end();
+          return;
+        }
+        const result = await this.productDistributorsUsecase.bulkUpsertBuyerMap(
+          req.body.items
+        );
+        res.json(result);
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
     router.get("/", async (req, res) => {
       try {
         const list = await this.productDistributorsUsecase.getAll();

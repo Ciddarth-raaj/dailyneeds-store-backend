@@ -52,6 +52,41 @@ class ProductDistributorsUsecase {
       throw err;
     }
   }
+
+  async upsertBuyerMap(payload) {
+    try {
+      return await this.productDistributorsRepo.upsertBuyerMap(
+        payload.MDM_DIST_CODE,
+        payload.buyer_id
+      );
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "USECASE.PRODUCT_DISTRIBUTORS",
+        code: "USECASE.PRODUCT_DISTRIBUTORS.UPSERT_BUYER_MAP",
+        description: err.toString(),
+        category: "",
+        ref: {}
+      });
+      throw err;
+    }
+  }
+
+  async bulkUpsertBuyerMap(items) {
+    try {
+      return await this.productDistributorsRepo.bulkUpsertBuyerMap(items);
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "USECASE.PRODUCT_DISTRIBUTORS",
+        code: "USECASE.PRODUCT_DISTRIBUTORS.BULK_UPSERT_BUYER_MAP",
+        description: err.toString(),
+        category: "",
+        ref: {}
+      });
+      throw err;
+    }
+  }
 }
 
 module.exports = (productDistributorsRepo) => {

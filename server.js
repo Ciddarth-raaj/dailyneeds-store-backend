@@ -197,7 +197,8 @@ class Server {
       this.mysqlGofrugal.connection
     );
     this.productDistributorsRepo = require("./repository/product_distributors")(
-      this.mysqlGofrugal.connection
+      this.mysqlGofrugal.connection,
+      this.mysql.connection
     );
     this.purchaseAcknowledgementRepo = require("./repository/purchase_acknowledgement")(
       this.mysql.connection,
