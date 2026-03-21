@@ -2,6 +2,14 @@ const logger = require("../utils/logger");
 
 const TABLE = "pick_pack_write_off";
 
+function mapWriteOffRow(r) {
+  if (!r) return null;
+  return {
+    ...r,
+    is_verified: Boolean(r.is_verified)
+  };
+}
+
 class PickPackWriteOffRepository {
   constructor(db) {
     this.db = db;
@@ -43,11 +51,15 @@ class PickPackWriteOffRepository {
             WHEN ppwo.remark_id IS NOT NULL THEN ppr.label
             ELSE ppwo.remark_str
           END AS remark_value,
+          ppwo.reason_employee_id,
+          ne.employee_name AS reason_employee_name,
+          ppwo.is_verified,
           ppwo.created_at,
           ppwo.updated_at
         FROM ${TABLE} ppwo
         LEFT JOIN product_table pt ON pt.product_id = ppwo.product_id
         LEFT JOIN pick_pack_remarks ppr ON ppr.remark_id = ppwo.remark_id
+        LEFT JOIN new_employee ne ON ne.employee_id = ppwo.reason_employee_id
         ${whereClause}
         ORDER BY ppwo.date DESC, ppwo.pick_pack_write_off_id DESC`,
         params,
@@ -63,7 +75,7 @@ class PickPackWriteOffRepository {
             });
             return reject(err);
           }
-          resolve(rows || []);
+          resolve((rows || []).map(mapWriteOffRow));
         }
       );
     });
@@ -91,16 +103,20 @@ class PickPackWriteOffRepository {
             WHEN ppwo.remark_id IS NOT NULL THEN ppr.label
             ELSE ppwo.remark_str
           END AS remark_value,
+          ppwo.reason_employee_id,
+          ne.employee_name AS reason_employee_name,
+          ppwo.is_verified,
           ppwo.created_at,
           ppwo.updated_at
         FROM ${TABLE} ppwo
         LEFT JOIN product_table pt ON pt.product_id = ppwo.product_id
         LEFT JOIN pick_pack_remarks ppr ON ppr.remark_id = ppwo.remark_id
+        LEFT JOIN new_employee ne ON ne.employee_id = ppwo.reason_employee_id
         WHERE ppwo.pick_pack_write_off_id = ?`,
         [pick_pack_write_off_id],
         (err, rows) => {
           if (err) return reject(err);
-          resolve((rows && rows[0]) || null);
+          resolve(mapWriteOffRow((rows && rows[0]) || null));
         }
       );
     });
@@ -108,15 +124,19 @@ class PickPackWriteOffRepository {
 
   create(data) {
     return new Promise((resolve, reject) => {
+      const isVerified =
+        data.is_verified !== undefined ? (data.is_verified ? 1 : 0) : 0;
       this.db.query(
-        `INSERT INTO ${TABLE} (product_id, mismatch_qty, date, remark_id, remark_str)
-         VALUES (?, ?, ?, ?, ?)`,
+        `INSERT INTO ${TABLE} (product_id, mismatch_qty, date, remark_id, remark_str, reason_employee_id, is_verified)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [
           data.product_id,
           data.mismatch_qty,
           data.date,
           data.remark_id || null,
-          data.remark_str || null
+          data.remark_str || null,
+          data.reason_employee_id != null ? data.reason_employee_id : null,
+          isVerified
         ],
         (err, res) => {
           if (err) {
@@ -160,6 +180,14 @@ class PickPackWriteOffRepository {
       if (data.remark_str !== undefined) {
         sets.push("remark_str = ?");
         values.push(data.remark_str || null);
+      }
+      if (data.reason_employee_id !== undefined) {
+        sets.push("reason_employee_id = ?");
+        values.push(data.reason_employee_id == null ? null : data.reason_employee_id);
+      }
+      if (data.is_verified !== undefined) {
+        sets.push("is_verified = ?");
+        values.push(data.is_verified ? 1 : 0);
       }
 
       if (values.length === 0) return resolve({ code: 200, affectedRows: 0 });

@@ -60,7 +60,9 @@ class PickPackWriteOffRoutes {
       mismatch_qty: Joi.number().integer().required(),
       date: Joi.date().required(),
       remark_id: Joi.number().integer().allow(null).optional(),
-      remark_str: Joi.string().max(500).allow(null, "").optional()
+      remark_str: Joi.string().max(500).allow(null, "").optional(),
+      reason_employee_id: Joi.number().integer().allow(null).optional(),
+      is_verified: Joi.boolean().optional().default(false)
     });
 
     router.post("/", async (req, res) => {
@@ -84,7 +86,9 @@ class PickPackWriteOffRoutes {
       mismatch_qty: Joi.number().integer().optional(),
       date: Joi.date().optional(),
       remark_id: Joi.number().integer().allow(null).optional(),
-      remark_str: Joi.string().max(500).allow(null, "").optional()
+      remark_str: Joi.string().max(500).allow(null, "").optional(),
+      reason_employee_id: Joi.number().integer().allow(null).optional(),
+      is_verified: Joi.boolean().optional()
     });
 
     router.put("/:pick_pack_write_off_id", async (req, res) => {
