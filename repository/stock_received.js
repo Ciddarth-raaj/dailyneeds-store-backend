@@ -2,6 +2,8 @@ const logger = require("../utils/logger");
 
 const TABLE = "stock_received";
 const GOFRUGAL_DTL = "medishopdb_MED_MRC_DTL";
+const GOFRUGAL_HDR = "medishopdb_MED_MRC_HDR";
+const PRODUCT_OFFERS = "product_offers";
 
 function normalizeItemCode(value) {
   if (value === null || value === undefined || value === "") {
@@ -26,7 +28,20 @@ function dtlRow(row) {
     MMD_MRC_SL_NO: row.MMD_MRC_SL_NO ?? row.mmd_mrc_sl_no,
     MMD_ITEM_CODE: row.MMD_ITEM_CODE ?? row.mmd_item_code,
     MMD_RECD_QTY: row.MMD_RECD_QTY ?? row.mmd_recd_qty,
+    MMH_DIST_BILL_DT: row.MMH_DIST_BILL_DT ?? row.mmh_dist_bill_dt,
   };
+}
+
+function billDateGteOfferCreated(billDt, offerCreatedAt) {
+  if (billDt == null || billDt === "" || offerCreatedAt == null || offerCreatedAt === "") {
+    return false;
+  }
+  const b = new Date(billDt);
+  const o = new Date(offerCreatedAt);
+  if (Number.isNaN(b.getTime()) || Number.isNaN(o.getTime())) {
+    return false;
+  }
+  return b >= o;
 }
 
 function stockReceivedToApi(row, productMap) {
@@ -62,22 +77,27 @@ class StockReceivedRepository {
     this.gofrugalDb = gofrugalDb;
   }
 
-  _queryGofrugalDtl() {
+  _queryGofrugalDtlWithHdr() {
     return new Promise((resolve, reject) => {
       if (!this.gofrugalDb) {
         return reject(new Error("Gofrugal DB connection is not configured"));
       }
       this.gofrugalDb.query(
-        `SELECT MMD_MRC_NO, MMD_MRC_SL_NO, MMD_ITEM_CODE, MMD_RECD_QTY
-         FROM \`${GOFRUGAL_DTL}\`
-         ORDER BY MMD_MRC_NO DESC, MMD_MRC_SL_NO ASC`,
+        `SELECT d.MMD_MRC_NO,
+            d.MMD_MRC_SL_NO,
+            d.MMD_ITEM_CODE,
+            d.MMD_RECD_QTY,
+            h.MMH_DIST_BILL_DT
+         FROM \`${GOFRUGAL_DTL}\` d
+         LEFT JOIN \`${GOFRUGAL_HDR}\` h ON h.MMH_MRC_NO = d.MMD_MRC_NO
+         ORDER BY d.MMD_MRC_NO DESC, d.MMD_MRC_SL_NO ASC`,
         [],
         (err, rows) => {
           if (err) {
             logger.Log({
               level: logger.LEVEL.ERROR,
               component: "REPOSITORY.STOCK_RECEIVED",
-              code: "REPOSITORY.STOCK_RECEIVED.GOFRUGAL_DTL",
+              code: "REPOSITORY.STOCK_RECEIVED.GOFRUGAL_DTL_HDR",
               description: err.toString(),
               category: "",
               ref: {},
@@ -126,22 +146,69 @@ class StockReceivedRepository {
     });
   }
 
+  _fetchProductOffersCreatedAtMap() {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT product_id, created_at FROM \`${PRODUCT_OFFERS}\``,
+        [],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.STOCK_RECEIVED",
+              code: "REPOSITORY.STOCK_RECEIVED.PRODUCT_OFFERS_MAP",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            return reject(err);
+          }
+          const map = new Map();
+          (rows || []).forEach((row) => {
+            map.set(row.product_id, row.created_at);
+          });
+          resolve(map);
+        }
+      );
+    });
+  }
+
+  _lineMatchesProductOfferAndBillDate(r, offerCreatedAtMap) {
+    const productId = normalizeItemCode(r.MMD_ITEM_CODE);
+    if (productId == null) {
+      return false;
+    }
+    const offerCreated = offerCreatedAtMap.get(productId);
+    if (offerCreated == null) {
+      return false;
+    }
+    return billDateGteOfferCreated(r.MMH_DIST_BILL_DT, offerCreated);
+  }
+
   /**
-   * Rows from Gofrugal MED_MRC_DTL with optional join to stock_received; `product` is a slim payload (see shapeStockReceivedProduct).
+   * Rows from Gofrugal MED_MRC_DTL (+ HDR bill date) with optional join to stock_received.
+   * List includes only lines whose product exists in product_offers and MMH_DIST_BILL_DT >= that offer's created_at.
    * @param {{ pendingOnly: boolean }} opts
    */
   async listGofrugalDtlWithSync(opts) {
     const { pendingOnly } = opts;
-    const rawDtl = await this._queryGofrugalDtl();
+    const [rawDtl, offerCreatedAtMap] = await Promise.all([
+      this._queryGofrugalDtlWithHdr(),
+      this._fetchProductOffersCreatedAtMap(),
+    ]);
     const dtlRows = rawDtl.map(dtlRow);
-    const pairs = dtlRows.map((r) => ({
+    const filteredRows = dtlRows.filter((r) =>
+      this._lineMatchesProductOfferAndBillDate(r, offerCreatedAtMap)
+    );
+
+    const pairs = filteredRows.map((r) => ({
       mmd_mrc_no: r.MMD_MRC_NO,
       mmd_mrc_sl_no: r.MMD_MRC_SL_NO,
     }));
     const stockMap = await this._fetchStockReceivedMap(pairs);
 
     const allProductIds = new Set();
-    dtlRows.forEach((r) => {
+    filteredRows.forEach((r) => {
       const pid = normalizeItemCode(r.MMD_ITEM_CODE);
       if (pid != null) {
         allProductIds.add(pid);
@@ -155,7 +222,7 @@ class StockReceivedRepository {
     const productMap = await this._fetchProductsMap([...allProductIds]);
 
     const data = [];
-    for (const r of dtlRows) {
+    for (const r of filteredRows) {
       const mrcNo = r.MMD_MRC_NO;
       const mrcSl = r.MMD_MRC_SL_NO;
       const key = `${mrcNo}:${mrcSl}`;
@@ -173,6 +240,7 @@ class StockReceivedRepository {
           MMD_MRC_SL_NO: mrcSl,
           MMD_ITEM_CODE: r.MMD_ITEM_CODE,
           MMD_RECD_QTY: r.MMD_RECD_QTY,
+          MMH_DIST_BILL_DT: r.MMH_DIST_BILL_DT ?? null,
         },
         product,
         stock_received: stockReceivedToApi(stockReceivedRaw, productMap),
