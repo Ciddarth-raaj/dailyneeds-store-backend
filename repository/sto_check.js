@@ -101,6 +101,40 @@ class StoCheckRepository {
     });
   }
 
+  /**
+   * Returns product_ids from the given list that are not present in product_table.
+   */
+  getMissingProductIds(productIds) {
+    return new Promise((resolve, reject) => {
+      const unique = [...new Set(productIds)];
+      if (unique.length === 0) {
+        resolve([]);
+        return;
+      }
+      const placeholders = unique.map(() => "?").join(", ");
+      this.db.query(
+        `SELECT product_id FROM product_table WHERE product_id IN (${placeholders})`,
+        unique,
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.STO_CHECK",
+              code: "REPOSITORY.STO_CHECK.GET_MISSING_PRODUCT_IDS",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            return reject(err);
+          }
+          const existing = new Set((rows || []).map((r) => r.product_id));
+          const missing = unique.filter((id) => !existing.has(id)).sort((a, b) => a - b);
+          resolve(missing);
+        }
+      );
+    });
+  }
+
   insertMany(rows) {
     return new Promise((resolve, reject) => {
       if (!Array.isArray(rows) || rows.length === 0) {
@@ -137,20 +171,40 @@ class StoCheckRepository {
 
   replaceByDnRefNo(dn_ref_no, items) {
     return new Promise((resolve, reject) => {
-      this.deleteByDnRefNo(dn_ref_no)
-        .then(() => {
-          if (!Array.isArray(items) || items.length === 0) {
+      if (!Array.isArray(items) || items.length === 0) {
+        this.deleteByDnRefNo(dn_ref_no)
+          .then(() => {
             resolve({ code: 200, dn_ref_no: dn_ref_no, inserted: 0 });
+          })
+          .catch(reject);
+        return;
+      }
+      const productIds = items.map((it) => it.product_id);
+      this.getMissingProductIds(productIds)
+        .then((missing) => {
+          if (missing.length > 0) {
+            const err = new Error(
+              "Cannot save STO check: one or more product_id values are not present in product_table"
+            );
+            err.name = "MissingProductIdsError";
+            err.missing_product_ids = missing;
+            err.dn_ref_no = dn_ref_no;
+            reject(err);
             return;
           }
-          const rows = items.map((it) => ({
-            dn_ref_no,
-            product_id: it.product_id,
-            file_qty: it.file_qty !== undefined && it.file_qty !== null ? it.file_qty : null,
-          }));
-          return this.insertMany(rows).then((result) => {
-            resolve({ code: 200, dn_ref_no, inserted: result.affectedRows });
+          return this.deleteByDnRefNo(dn_ref_no).then(() => {
+            const rows = items.map((it) => ({
+              dn_ref_no,
+              product_id: it.product_id,
+              file_qty: it.file_qty !== undefined && it.file_qty !== null ? it.file_qty : null,
+            }));
+            return this.insertMany(rows);
           });
+        })
+        .then((insertResult) => {
+          if (insertResult) {
+            resolve({ code: 200, dn_ref_no, inserted: insertResult.affectedRows });
+          }
         })
         .catch(reject);
     });
