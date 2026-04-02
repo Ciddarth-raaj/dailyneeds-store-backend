@@ -40,6 +40,22 @@ function stockReceivedToApi(row, productMap) {
   };
 }
 
+/** Product payload for stock_received APIs: limited fields + first image. */
+function shapeStockReceivedProduct(row) {
+  if (!row) {
+    return null;
+  }
+  const link =
+    row.image_link != null && row.image_link !== "" ? row.image_link : null;
+  return {
+    product_id: row.product_id,
+    gf_item_name: row.gf_item_name != null ? row.gf_item_name : null,
+    de_name: row.de_name != null ? row.de_name : null,
+    de_display_name: row.de_display_name != null ? row.de_display_name : null,
+    image_link: link,
+  };
+}
+
 class StockReceivedRepository {
   constructor(mainDb, gofrugalDb) {
     this.db = mainDb;
@@ -111,7 +127,7 @@ class StockReceivedRepository {
   }
 
   /**
-   * Rows from Gofrugal MED_MRC_DTL with optional join to stock_received; `product` from product_table.
+   * Rows from Gofrugal MED_MRC_DTL with optional join to stock_received; `product` is a slim payload (see shapeStockReceivedProduct).
    * @param {{ pendingOnly: boolean }} opts
    */
   async listGofrugalDtlWithSync(opts) {
@@ -178,17 +194,19 @@ class StockReceivedRepository {
       let pending = chunks.length;
       chunks.forEach((ids) => {
         const ph = ids.map(() => "?").join(", ");
-        const sql = `SELECT product_table.*,
-            categories.category_name,
-            subcategories.subcategory_name,
-            department.department_name,
-            brands.brand_name
-          FROM product_table
-          LEFT JOIN categories ON product_table.category_id = categories.category_id
-          LEFT JOIN subcategories ON subcategories.subcategory_id = product_table.subcategory_id
-          LEFT JOIN department ON department.department_id = product_table.department_id
-          LEFT JOIN brands ON brands.brand_id = product_table.brand_id
-          WHERE product_table.product_id IN (${ph})`;
+        const sql = `SELECT pt.product_id,
+            pt.gf_item_name,
+            pt.de_name,
+            pt.de_display_name,
+            (
+              SELECT pi.image_url
+              FROM product_images pi
+              WHERE pi.product_id = pt.product_id
+              ORDER BY pi.priority ASC, pi.image_id ASC
+              LIMIT 1
+            ) AS image_link
+          FROM product_table pt
+          WHERE pt.product_id IN (${ph})`;
         this.db.query(sql, ids, (err, rows) => {
           if (err) {
             logger.Log({
@@ -202,7 +220,7 @@ class StockReceivedRepository {
             return reject(err);
           }
           (rows || []).forEach((row) => {
-            map.set(row.product_id, row);
+            map.set(row.product_id, shapeStockReceivedProduct(row));
           });
           pending -= 1;
           if (pending === 0) {
@@ -328,6 +346,57 @@ class StockReceivedRepository {
           resolve({ affectedRows: res.affectedRows });
         }
       );
+    });
+  }
+
+  /**
+   * Sum received qty from stock_received per product, split by is_offer.
+   * @returns {Promise<Map<number, { non_offer_stock: number, offer_stock: number }>>}
+   */
+  getQtyAggregatesForProductIds(productIds) {
+    return new Promise((resolve, reject) => {
+      const unique = [...new Set((productIds || []).filter((id) => id != null))];
+      if (!unique.length) {
+        resolve(new Map());
+        return;
+      }
+      const chunks = chunkArray(unique, 500);
+      const combined = new Map();
+      let pending = chunks.length;
+      chunks.forEach((ids) => {
+        const ph = ids.map(() => "?").join(", ");
+        const sql = `SELECT product_id,
+            COALESCE(SUM(CASE WHEN IFNULL(is_offer, 0) = 0 THEN recd_qty ELSE 0 END), 0) AS non_offer_stock,
+            COALESCE(SUM(CASE WHEN is_offer = 1 THEN recd_qty ELSE 0 END), 0) AS offer_stock
+          FROM \`${TABLE}\`
+          WHERE product_id IN (${ph})
+          GROUP BY product_id`;
+        this.db.query(sql, ids, (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.STOCK_RECEIVED",
+              code: "REPOSITORY.STOCK_RECEIVED.QTY_AGGREGATES",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            return reject(err);
+          }
+          (rows || []).forEach((r) => {
+            const no = Number(r.non_offer_stock);
+            const off = Number(r.offer_stock);
+            combined.set(r.product_id, {
+              non_offer_stock: Number.isFinite(no) ? no : 0,
+              offer_stock: Number.isFinite(off) ? off : 0,
+            });
+          });
+          pending -= 1;
+          if (pending === 0) {
+            resolve(combined);
+          }
+        });
+      });
     });
   }
 }
