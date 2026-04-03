@@ -28,20 +28,41 @@ function dtlRow(row) {
     MMD_MRC_SL_NO: row.MMD_MRC_SL_NO ?? row.mmd_mrc_sl_no,
     MMD_ITEM_CODE: row.MMD_ITEM_CODE ?? row.mmd_item_code,
     MMD_RECD_QTY: row.MMD_RECD_QTY ?? row.mmd_recd_qty,
-    MMH_DIST_BILL_DT: row.MMH_DIST_BILL_DT ?? row.mmh_dist_bill_dt,
+    MMD_PUR_PRICE: row.MMD_PUR_PRICE ?? row.mmd_pur_price,
+    MMD_MRP: row.MMD_MRP ?? row.MMD_MAX_RATE ?? row.mmd_max_rate ?? row.mmd_mrp,
+    MMD_SALE_RATE: row.MMD_SALE_RATE ?? row.mmd_sale_rate,
+    MMH_MRC_DT: row.MMH_MRC_DT ?? row.mmh_mrc_dt,
+    MMH_MRC_REFNO: row.MMH_MRC_REFNO ?? row.mmh_mrc_refno,
   };
 }
 
-function billDateGteOfferCreated(billDt, offerCreatedAt) {
-  if (billDt == null || billDt === "" || offerCreatedAt == null || offerCreatedAt === "") {
+function subtractCalendarDays(dateInput, daysBuffer) {
+  const buf = Math.max(0, Math.floor(Number(daysBuffer)) || 0);
+  if (dateInput == null || dateInput === "") {
+    return null;
+  }
+  const d = new Date(dateInput);
+  if (Number.isNaN(d.getTime())) {
+    return null;
+  }
+  d.setDate(d.getDate() - buf);
+  return d;
+}
+
+/** MMH_MRC_DT >= (offer created_at - days_buffer calendar days) */
+function memoDateGteOfferCreatedMinusBuffer(mmhMrcDt, offerCreatedAt, daysBuffer) {
+  if (mmhMrcDt == null || mmhMrcDt === "" || offerCreatedAt == null || offerCreatedAt === "") {
     return false;
   }
-  const b = new Date(billDt);
-  const o = new Date(offerCreatedAt);
-  if (Number.isNaN(b.getTime()) || Number.isNaN(o.getTime())) {
+  const threshold = subtractCalendarDays(offerCreatedAt, daysBuffer);
+  if (threshold == null) {
     return false;
   }
-  return b >= o;
+  const m = new Date(mmhMrcDt);
+  if (Number.isNaN(m.getTime())) {
+    return false;
+  }
+  return m >= threshold;
 }
 
 function stockReceivedToApi(row, productMap) {
@@ -87,7 +108,11 @@ class StockReceivedRepository {
             d.MMD_MRC_SL_NO,
             d.MMD_ITEM_CODE,
             d.MMD_RECD_QTY,
-            h.MMH_DIST_BILL_DT
+            d.MMD_PUR_PRICE,
+            d.MMD_MAX_RATE AS MMD_MRP,
+            d.MMD_SALE_RATE,
+            h.MMH_MRC_DT,
+            h.MMH_MRC_REFNO
          FROM \`${GOFRUGAL_DTL}\` d
          LEFT JOIN \`${GOFRUGAL_HDR}\` h ON h.MMH_MRC_NO = d.MMD_MRC_NO
          ORDER BY d.MMD_MRC_NO DESC, d.MMD_MRC_SL_NO ASC`,
@@ -173,7 +198,7 @@ class StockReceivedRepository {
     });
   }
 
-  _lineMatchesProductOfferAndBillDate(r, offerCreatedAtMap) {
+  _lineMatchesProductOfferAndMemoDate(r, offerCreatedAtMap, daysBuffer) {
     const productId = normalizeItemCode(r.MMD_ITEM_CODE);
     if (productId == null) {
       return false;
@@ -182,23 +207,23 @@ class StockReceivedRepository {
     if (offerCreated == null) {
       return false;
     }
-    return billDateGteOfferCreated(r.MMH_DIST_BILL_DT, offerCreated);
+    return memoDateGteOfferCreatedMinusBuffer(r.MMH_MRC_DT, offerCreated, daysBuffer);
   }
 
   /**
-   * Rows from Gofrugal MED_MRC_DTL (+ HDR bill date) with optional join to stock_received.
-   * List includes only lines whose product exists in product_offers and MMH_DIST_BILL_DT >= that offer's created_at.
-   * @param {{ pendingOnly: boolean }} opts
+   * Rows from Gofrugal MED_MRC_DTL (+ HDR) with optional join to stock_received.
+   * List includes only lines whose product exists in product_offers and MMH_MRC_DT >= (offer created_at - daysBuffer).
+   * @param {{ pendingOnly: boolean, daysBuffer?: number }} opts
    */
   async listGofrugalDtlWithSync(opts) {
-    const { pendingOnly } = opts;
+    const { pendingOnly, daysBuffer = 0 } = opts;
     const [rawDtl, offerCreatedAtMap] = await Promise.all([
       this._queryGofrugalDtlWithHdr(),
       this._fetchProductOffersCreatedAtMap(),
     ]);
     const dtlRows = rawDtl.map(dtlRow);
     const filteredRows = dtlRows.filter((r) =>
-      this._lineMatchesProductOfferAndBillDate(r, offerCreatedAtMap)
+      this._lineMatchesProductOfferAndMemoDate(r, offerCreatedAtMap, daysBuffer)
     );
 
     const pairs = filteredRows.map((r) => ({
@@ -240,7 +265,11 @@ class StockReceivedRepository {
           MMD_MRC_SL_NO: mrcSl,
           MMD_ITEM_CODE: r.MMD_ITEM_CODE,
           MMD_RECD_QTY: r.MMD_RECD_QTY,
-          MMH_DIST_BILL_DT: r.MMH_DIST_BILL_DT ?? null,
+          MMD_PUR_PRICE: r.MMD_PUR_PRICE ?? null,
+          MMD_MRP: r.MMD_MRP ?? null,
+          MMD_SALE_RATE: r.MMD_SALE_RATE ?? null,
+          MMH_MRC_DT: r.MMH_MRC_DT ?? null,
+          MMH_MRC_REFNO: r.MMH_MRC_REFNO ?? null,
         },
         product,
         stock_received: stockReceivedToApi(stockReceivedRaw, productMap),

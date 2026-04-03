@@ -19,6 +19,18 @@ function parsePendingOnly(raw) {
   return true;
 }
 
+/** Optional query param: calendar days subtracted from offer created_at; line qualifies if MMH_MRC_DT >= (created_at - buffer). */
+function parseDaysBuffer(raw) {
+  if (raw === undefined || raw === null || raw === "") {
+    return 0;
+  }
+  const n = parseInt(String(raw), 10);
+  if (Number.isNaN(n) || n < 0) {
+    return 0;
+  }
+  return Math.min(n, 3650);
+}
+
 class StockReceivedRoutes {
   constructor(stockReceivedUsecase) {
     this.stockReceivedUsecase = stockReceivedUsecase;
@@ -29,14 +41,17 @@ class StockReceivedRoutes {
     router.get("/gofrugal-dtl", async (req, res) => {
       try {
         const pendingOnly = parsePendingOnly(req.query.pending_only);
+        const daysBuffer = parseDaysBuffer(req.query.days_buffer);
         const data = await this.stockReceivedUsecase.listGofrugalDtl({
           pendingOnly,
+          daysBuffer,
         });
         res.json({
           code: 200,
           data,
           meta: {
             pending_only: pendingOnly,
+            days_buffer: daysBuffer,
             count: data.length,
           },
         });
