@@ -279,8 +279,7 @@ class Server {
     );
     this.productUsecase = require("./usecase/product")(
       this.productRepo,
-      this.productImageLogUsecase,
-      this.stockReceivedRepo
+      this.productImageLogUsecase
     );
     this.imageUsecase = require("./usecase/image")(this.imageRepo);
     this.assetUsecase = require("./usecase/asset");

@@ -6,6 +6,7 @@ const itemSchema = Joi.object({
   product_id: Joi.number().integer().required(),
   mrp: Joi.number().min(0).allow(null).optional(),
   selling_price: Joi.number().min(0).allow(null).optional(),
+  opening_stock: Joi.number().optional().default(0),
   is_active: Joi.boolean().optional().default(true),
 });
 
@@ -73,7 +74,7 @@ class ProductOffersRoutes {
           res.end();
           return;
         }
-        const result = await this.productOffersUsecase.create(req.body);
+        const result = await this.productOffersUsecase.create(isValid.value);
         if (result.code === 400) {
           res.status(400).json(result);
           res.end();
@@ -96,7 +97,7 @@ class ProductOffersRoutes {
           res.end();
           return;
         }
-        const result = await this.productOffersUsecase.bulkInsert(req.body);
+        const result = await this.productOffersUsecase.bulkInsert(isValid.value);
         res.json(result);
       } catch (err) {
         respondError(res, err);
@@ -107,6 +108,7 @@ class ProductOffersRoutes {
     const updateSchema = Joi.object({
       mrp: Joi.number().min(0).allow(null).optional(),
       selling_price: Joi.number().min(0).allow(null).optional(),
+      opening_stock: Joi.number().optional().allow(null),
       is_active: Joi.boolean().optional(),
     }).min(1);
 
@@ -124,7 +126,7 @@ class ProductOffersRoutes {
           res.end();
           return;
         }
-        const result = await this.productOffersUsecase.update(product_id, req.body);
+        const result = await this.productOffersUsecase.update(product_id, isValid.value);
         res.json(result);
       } catch (err) {
         respondError(res, err);

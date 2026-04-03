@@ -92,6 +92,15 @@ function shapeStockReceivedProduct(row) {
   };
 }
 
+function stockReceivedIsOffer(row) {
+  return row && (row.is_offer === 1 || row.is_offer === true);
+}
+
+function numericRecdQty(q) {
+  const n = Number(q);
+  return Number.isFinite(n) ? n : 0;
+}
+
 class StockReceivedRepository {
   constructor(mainDb, gofrugalDb) {
     this.db = mainDb;
@@ -375,123 +384,222 @@ class StockReceivedRepository {
     });
   }
 
+  /**
+   * Delta applied to product_offers.stock_input (only rows that exist for product_id are updated).
+   */
+  _adjustOfferStockInputConn(conn, productId, delta, callback) {
+    const d = Number(delta);
+    if (!Number.isFinite(d) || d === 0) {
+      return setImmediate(() => callback(null));
+    }
+    conn.query(
+      `UPDATE \`${PRODUCT_OFFERS}\` SET stock_input = stock_input + ? WHERE product_id = ?`,
+      [d, productId],
+      callback
+    );
+  }
+
+  _fetchUpsertResult(mmd_mrc_no, mmd_mrc_sl_no, resolve, reject) {
+    this.db.query(
+      `SELECT * FROM \`${TABLE}\` WHERE mmd_mrc_no = ? AND mmd_mrc_sl_no = ?`,
+      [mmd_mrc_no, mmd_mrc_sl_no],
+      (err2, rows) => {
+        if (err2) {
+          return reject(err2);
+        }
+        const saved = rows && rows[0] ? rows[0] : null;
+        if (!saved) {
+          resolve(null);
+          return;
+        }
+        this._fetchProductsMap([saved.product_id])
+          .then((productMap) => {
+            resolve(stockReceivedToApi(saved, productMap));
+          })
+          .catch(reject);
+      }
+    );
+  }
+
   upsert(row) {
     return new Promise((resolve, reject) => {
       const isOffer = row.is_offer ? 1 : 0;
-      this.db.query(
-        `INSERT INTO \`${TABLE}\` (mmd_mrc_no, mmd_mrc_sl_no, product_id, recd_qty, is_offer)
-         VALUES (?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE
-           product_id = VALUES(product_id),
-           recd_qty = VALUES(recd_qty),
-           is_offer = VALUES(is_offer),
-           updated_at = CURRENT_TIMESTAMP`,
-        [row.mmd_mrc_no, row.mmd_mrc_sl_no, row.product_id, row.recd_qty, isOffer],
-        (err) => {
-          if (err) {
-            logger.Log({
-              level: logger.LEVEL.ERROR,
-              component: "REPOSITORY.STOCK_RECEIVED",
-              code: "REPOSITORY.STOCK_RECEIVED.UPSERT",
-              description: err.toString(),
-              category: "",
-              ref: { mmd_mrc_no: row.mmd_mrc_no, mmd_mrc_sl_no: row.mmd_mrc_sl_no },
-            });
-            return reject(err);
+      const mrc = row.mmd_mrc_no;
+      const sl = row.mmd_mrc_sl_no;
+      const newQty = numericRecdQty(row.recd_qty);
+
+      this.db.getConnection((errConn, conn) => {
+        if (errConn) {
+          return reject(errConn);
+        }
+        const rollback = (e) => {
+          conn.rollback(() => {
+            conn.release();
+            reject(e);
+          });
+        };
+
+        conn.beginTransaction((errTx) => {
+          if (errTx) {
+            conn.release();
+            return reject(errTx);
           }
-          this.db.query(
-            `SELECT * FROM \`${TABLE}\` WHERE mmd_mrc_no = ? AND mmd_mrc_sl_no = ?`,
-            [row.mmd_mrc_no, row.mmd_mrc_sl_no],
-            (err2, rows) => {
-              if (err2) {
-                return reject(err2);
+
+          conn.query(
+            `SELECT * FROM \`${TABLE}\` WHERE mmd_mrc_no = ? AND mmd_mrc_sl_no = ? FOR UPDATE`,
+            [mrc, sl],
+            (errSel, oldRows) => {
+              if (errSel) {
+                return rollback(errSel);
               }
-              const saved = rows && rows[0] ? rows[0] : null;
-              if (!saved) {
-                resolve(null);
-                return;
-              }
-              this._fetchProductsMap([saved.product_id])
-                .then((productMap) => {
-                  resolve(stockReceivedToApi(saved, productMap));
-                })
-                .catch(reject);
+              const old = oldRows && oldRows[0] ? oldRows[0] : null;
+
+              conn.query(
+                `INSERT INTO \`${TABLE}\` (mmd_mrc_no, mmd_mrc_sl_no, product_id, recd_qty, is_offer)
+                 VALUES (?, ?, ?, ?, ?)
+                 ON DUPLICATE KEY UPDATE
+                   product_id = VALUES(product_id),
+                   recd_qty = VALUES(recd_qty),
+                   is_offer = VALUES(is_offer),
+                   updated_at = CURRENT_TIMESTAMP`,
+                [mrc, sl, row.product_id, row.recd_qty, isOffer],
+                (errIns) => {
+                  if (errIns) {
+                    logger.Log({
+                      level: logger.LEVEL.ERROR,
+                      component: "REPOSITORY.STOCK_RECEIVED",
+                      code: "REPOSITORY.STOCK_RECEIVED.UPSERT",
+                      description: errIns.toString(),
+                      category: "",
+                      ref: { mmd_mrc_no: mrc, mmd_mrc_sl_no: sl },
+                    });
+                    return rollback(errIns);
+                  }
+
+                  const afterSubtractOld = () => {
+                    if (isOffer && newQty !== 0) {
+                      this._adjustOfferStockInputConn(conn, row.product_id, newQty, (errAdd) => {
+                        if (errAdd) {
+                          return rollback(errAdd);
+                        }
+                        conn.commit((errC) => {
+                          if (errC) {
+                            return rollback(errC);
+                          }
+                          conn.release();
+                          this._fetchUpsertResult(mrc, sl, resolve, reject);
+                        });
+                      });
+                    } else {
+                      conn.commit((errC) => {
+                        if (errC) {
+                          return rollback(errC);
+                        }
+                        conn.release();
+                        this._fetchUpsertResult(mrc, sl, resolve, reject);
+                      });
+                    }
+                  };
+
+                  if (old && stockReceivedIsOffer(old)) {
+                    const oldQty = numericRecdQty(old.recd_qty);
+                    if (oldQty !== 0) {
+                      this._adjustOfferStockInputConn(conn, old.product_id, -oldQty, (errSub) => {
+                        if (errSub) {
+                          return rollback(errSub);
+                        }
+                        afterSubtractOld();
+                      });
+                      return;
+                    }
+                  }
+                  afterSubtractOld();
+                }
+              );
             }
           );
-        }
-      );
+        });
+      });
     });
   }
 
   deleteById(stock_received_id) {
     return new Promise((resolve, reject) => {
-      this.db.query(
-        `DELETE FROM \`${TABLE}\` WHERE stock_received_id = ?`,
-        [stock_received_id],
-        (err, res) => {
-          if (err) {
-            logger.Log({
-              level: logger.LEVEL.ERROR,
-              component: "REPOSITORY.STOCK_RECEIVED",
-              code: "REPOSITORY.STOCK_RECEIVED.DELETE",
-              description: err.toString(),
-              category: "",
-              ref: { stock_received_id },
-            });
-            return reject(err);
-          }
-          resolve({ affectedRows: res.affectedRows });
+      this.db.getConnection((errConn, conn) => {
+        if (errConn) {
+          return reject(errConn);
         }
-      );
-    });
-  }
-
-  /**
-   * Sum received qty from stock_received per product, split by is_offer.
-   * @returns {Promise<Map<number, { non_offer_stock: number, offer_stock: number }>>}
-   */
-  getQtyAggregatesForProductIds(productIds) {
-    return new Promise((resolve, reject) => {
-      const unique = [...new Set((productIds || []).filter((id) => id != null))];
-      if (!unique.length) {
-        resolve(new Map());
-        return;
-      }
-      const chunks = chunkArray(unique, 500);
-      const combined = new Map();
-      let pending = chunks.length;
-      chunks.forEach((ids) => {
-        const ph = ids.map(() => "?").join(", ");
-        const sql = `SELECT product_id,
-            COALESCE(SUM(CASE WHEN IFNULL(is_offer, 0) = 0 THEN recd_qty ELSE 0 END), 0) AS non_offer_stock,
-            COALESCE(SUM(CASE WHEN is_offer = 1 THEN recd_qty ELSE 0 END), 0) AS offer_stock
-          FROM \`${TABLE}\`
-          WHERE product_id IN (${ph})
-          GROUP BY product_id`;
-        this.db.query(sql, ids, (err, rows) => {
-          if (err) {
-            logger.Log({
-              level: logger.LEVEL.ERROR,
-              component: "REPOSITORY.STOCK_RECEIVED",
-              code: "REPOSITORY.STOCK_RECEIVED.QTY_AGGREGATES",
-              description: err.toString(),
-              category: "",
-              ref: {},
-            });
-            return reject(err);
-          }
-          (rows || []).forEach((r) => {
-            const no = Number(r.non_offer_stock);
-            const off = Number(r.offer_stock);
-            combined.set(r.product_id, {
-              non_offer_stock: Number.isFinite(no) ? no : 0,
-              offer_stock: Number.isFinite(off) ? off : 0,
-            });
+        const rollback = (e) => {
+          conn.rollback(() => {
+            conn.release();
+            reject(e);
           });
-          pending -= 1;
-          if (pending === 0) {
-            resolve(combined);
+        };
+
+        conn.beginTransaction((errTx) => {
+          if (errTx) {
+            conn.release();
+            return reject(errTx);
           }
+
+          conn.query(
+            `SELECT * FROM \`${TABLE}\` WHERE stock_received_id = ? FOR UPDATE`,
+            [stock_received_id],
+            (errSel, rows) => {
+              if (errSel) {
+                return rollback(errSel);
+              }
+              const row = rows && rows[0] ? rows[0] : null;
+              if (!row) {
+                return conn.rollback(() => {
+                  conn.release();
+                  resolve({ affectedRows: 0 });
+                });
+              }
+
+              conn.query(
+                `DELETE FROM \`${TABLE}\` WHERE stock_received_id = ?`,
+                [stock_received_id],
+                (errDel, res) => {
+                  if (errDel) {
+                    logger.Log({
+                      level: logger.LEVEL.ERROR,
+                      component: "REPOSITORY.STOCK_RECEIVED",
+                      code: "REPOSITORY.STOCK_RECEIVED.DELETE",
+                      description: errDel.toString(),
+                      category: "",
+                      ref: { stock_received_id },
+                    });
+                    return rollback(errDel);
+                  }
+
+                  const finishCommit = () => {
+                    conn.commit((errC) => {
+                      if (errC) {
+                        return rollback(errC);
+                      }
+                      conn.release();
+                      resolve({ affectedRows: res.affectedRows });
+                    });
+                  };
+
+                  if (stockReceivedIsOffer(row)) {
+                    const q = numericRecdQty(row.recd_qty);
+                    if (q !== 0) {
+                      this._adjustOfferStockInputConn(conn, row.product_id, -q, (errAdj) => {
+                        if (errAdj) {
+                          return rollback(errAdj);
+                        }
+                        finishCommit();
+                      });
+                      return;
+                    }
+                  }
+                  finishCommit();
+                }
+              );
+            }
+          );
         });
       });
     });

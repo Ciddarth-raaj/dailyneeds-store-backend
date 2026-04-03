@@ -1,45 +1,9 @@
 const AssetUsecase = require("./asset");
 
 class ProductUsecase {
-  constructor(productRepo, productImageLogUsecase, stockReceivedRepo) {
+  constructor(productRepo, productImageLogUsecase) {
     this.productRepo = productRepo;
     this.productImageLogUsecase = productImageLogUsecase;
-    this.stockReceivedRepo = stockReceivedRepo || null;
-  }
-
-  async mergeStockReceivedQty(products) {
-    const list = Array.isArray(products) ? products : [];
-    if (!list.length) {
-      return;
-    }
-    if (!this.stockReceivedRepo) {
-      list.forEach((p) => {
-        if (p && typeof p === "object") {
-          p.non_offer_stock = 0;
-          p.offer_stock = 0;
-        }
-      });
-      return;
-    }
-    const ids = [...new Set(list.map((p) => p.product_id).filter((id) => id != null))];
-    if (!ids.length) {
-      list.forEach((p) => {
-        if (p && typeof p === "object") {
-          p.non_offer_stock = 0;
-          p.offer_stock = 0;
-        }
-      });
-      return;
-    }
-    const map = await this.stockReceivedRepo.getQtyAggregatesForProductIds(ids);
-    list.forEach((p) => {
-      if (!p || typeof p !== "object") {
-        return;
-      }
-      const row = map.get(p.product_id);
-      p.non_offer_stock = row != null ? row.non_offer_stock : 0;
-      p.offer_stock = row != null ? row.offer_stock : 0;
-    });
   }
   updateProductDetails(product, createdBy) {
     return new Promise(async (resolve, reject) => {
@@ -138,7 +102,6 @@ class ProductUsecase {
     return new Promise(async (resolve, reject) => {
       try {
         const data = await this.productRepo.getAllProductData();
-        await this.mergeStockReceivedQty(data);
         resolve(data);
       } catch (err) {
         reject(err);
@@ -154,7 +117,6 @@ class ProductUsecase {
           const images = await this.productRepo.getProductImages(product_id);
           product.images = images || [];
         }
-        await this.mergeStockReceivedQty(data || []);
         resolve(data);
       } catch (err) {
         reject(err);
@@ -170,7 +132,6 @@ class ProductUsecase {
           limit,
           offset
         );
-        await this.mergeStockReceivedQty(data);
         resolve(data);
       } catch (err) {
         reject(err);
@@ -193,7 +154,6 @@ class ProductUsecase {
     return new Promise(async (resolve, reject) => {
       try {
         const data = await this.productRepo.get(limit, offset, fetchAll);
-        await this.mergeStockReceivedQty(data);
         resolve(data);
       } catch (err) {
         reject(err);
@@ -272,6 +232,6 @@ class ProductUsecase {
   }
 }
 
-module.exports = (productRepo, productImageLogUsecase, stockReceivedRepo) => {
-  return new ProductUsecase(productRepo, productImageLogUsecase, stockReceivedRepo);
+module.exports = (productRepo, productImageLogUsecase) => {
+  return new ProductUsecase(productRepo, productImageLogUsecase);
 };
