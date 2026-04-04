@@ -7,6 +7,19 @@ function escapeMarkdown(text) {
   return String(text).replace(/\*/g, "\\*").replace(/_/g, "\\_").replace(/\[/g, "\\[");
 }
 
+function formatBranchSummaryLine(it) {
+  const branchName =
+    (it.branch && it.branch.outlet_name) || `Branch ${it.branch_id}`;
+  const sys = Number(it.system_stock);
+  const phy = Number(it.physical_stock);
+  const diff = sys - phy;
+  const diffEmoji = diff === 0 ? "✅" : diff > 0 ? "📈" : "📉";
+  return (
+    `🏪 ${escapeMarkdown(branchName)}\n` +
+    `💻 Sys: ${sys}  •  📦 Phy: ${phy}  •  ${diffEmoji} Diff: ${diff}`
+  );
+}
+
 class StockCheckerUsecase {
   constructor(stockCheckerRepo, outletRepo) {
     this.stockCheckerRepo = stockCheckerRepo;
@@ -81,6 +94,10 @@ class StockCheckerUsecase {
     const productName =
       (header.product && (header.product.gf_item_name || header.product.de_display_name)) ||
       `Product ${header.product_id}`;
+    const branchName =
+      header.created_by_branch && header.created_by_branch.outlet_name
+        ? escapeMarkdown(String(header.created_by_branch.outlet_name))
+        : escapeMarkdown("—");
     const raisedMsg =
       "📋 *Stock check raised*\n\n" +
       "A new stock check has been raised for the below item\.\n\n" +
@@ -88,7 +105,10 @@ class StockCheckerUsecase {
       escapeMarkdown(String(header.product_id)) +
       "\n" +
       "📦 *Product:* " +
-      escapeMarkdown(productName);
+      escapeMarkdown(productName) +
+      "\n\n" +
+      "🏪 *Created At Branch :* " +
+      branchName;
     await telegram.sendMessage(STOCK_CHECKER_TELEGRAM_CHAT_ID, raisedMsg);
   }
 
@@ -166,15 +186,9 @@ class StockCheckerUsecase {
   async upsertItem(data) {
     try {
       const result = await this.stockCheckerRepo.upsertItem(data);
-      this.notifyStockCheckDoneIfConditionMet(data.stock_checker_id).catch((err) =>
-        logger.Log({
-          level: logger.LEVEL.ERROR,
-          component: "USECASE.STOCK_CHECKER",
-          code: "USECASE.STOCK_CHECKER.TELEGRAM_DONE",
-          description: err.toString(),
-          category: "",
-          ref: { stock_checker_id: data.stock_checker_id }
-        })
+      void this.handleUpsertTelegramNotifications(
+        data.stock_checker_id,
+        data.branch_id
       );
       return result;
     } catch (err) {
@@ -188,6 +202,50 @@ class StockCheckerUsecase {
       });
       throw err;
     }
+  }
+
+  async handleUpsertTelegramNotifications(stock_checker_id, branch_id) {
+    try {
+      await this.notifyStockCheckBranchUpserted(stock_checker_id, branch_id);
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "USECASE.STOCK_CHECKER",
+        code: "USECASE.STOCK_CHECKER.TELEGRAM_BRANCH_UPSERT",
+        description: err.toString(),
+        category: "",
+        ref: { stock_checker_id, branch_id }
+      });
+    }
+    try {
+      await this.notifyStockCheckDoneIfConditionMet(stock_checker_id);
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "USECASE.STOCK_CHECKER",
+        code: "USECASE.STOCK_CHECKER.TELEGRAM_DONE",
+        description: err.toString(),
+        category: "",
+        ref: { stock_checker_id }
+      });
+    }
+  }
+
+  async notifyStockCheckBranchUpserted(stock_checker_id, branch_id) {
+    const header = await this.stockCheckerRepo.getById(stock_checker_id);
+    const item = await this.stockCheckerRepo.getItemByStockCheckerIdAndBranchId(
+      stock_checker_id,
+      branch_id
+    );
+    if (!header || !item) return;
+    const productName =
+      (header.product && (header.product.gf_item_name || header.product.de_display_name)) ||
+      `Product ${header.product_id}`;
+    const msg =
+      "📝 *Stock check updated*\n\n" +
+      `📦 *Product:* ${escapeMarkdown(productName)}\n\n` +
+      formatBranchSummaryLine(item);
+    await telegram.sendMessage(STOCK_CHECKER_TELEGRAM_CHAT_ID, msg);
   }
 
   async notifyStockCheckDoneIfConditionMet(stock_checker_id) {
@@ -206,17 +264,7 @@ class StockCheckerUsecase {
     const items = await this.stockCheckerRepo.getItemsByStockCheckerId(
       stock_checker_id
     );
-    const lines = (items || []).map((it) => {
-      const branchName = (it.branch && it.branch.outlet_name) || `Branch ${it.branch_id}`;
-      const sys = Number(it.system_stock);
-      const phy = Number(it.physical_stock);
-      const diff = sys - phy;
-      const diffEmoji = diff === 0 ? "✅" : diff > 0 ? "📈" : "📉";
-      return (
-        `🏪 ${escapeMarkdown(branchName)}\n` +
-        `💻 Sys: ${sys}  •  📦 Phy: ${phy}  •  ${diffEmoji} Diff: ${diff}`
-      );
-    });
+    const lines = (items || []).map((it) => formatBranchSummaryLine(it));
     const doneMsg =
       "✅ *Stock check complete*\n\n" +
       `📦 *Product:* ${escapeMarkdown(productName)}\n\n` +

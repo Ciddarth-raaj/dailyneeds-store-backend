@@ -15,9 +15,11 @@ class StockCheckerRepository {
       this.db.query(
         `SELECT sc.stock_checker_id, sc.product_id, sc.created_by, sc.created_at, sc.updated_at,
                 ne.employee_id AS created_by_employee_id, ne.employee_name AS created_by_employee_name,
+                cre_o.outlet_id AS creator_branch_outlet_id, cre_o.outlet_name AS creator_branch_outlet_name,
                 p.product_id AS product_product_id, p.de_display_name AS product_de_display_name, p.gf_item_name AS product_gf_item_name
          FROM ${TABLE} sc
          LEFT JOIN new_employee ne ON ne.employee_id = sc.created_by
+         LEFT JOIN outlets cre_o ON cre_o.outlet_id = ne.store_id
          LEFT JOIN product_table p ON p.product_id = sc.product_id
          ORDER BY sc.stock_checker_id DESC`,
         (err, rows) => {
@@ -43,6 +45,13 @@ class StockCheckerRepository {
                 ? {
                     employee_id: r.created_by_employee_id,
                     employee_name: r.created_by_employee_name
+                  }
+                : null,
+            created_by_branch:
+              r.creator_branch_outlet_id != null
+                ? {
+                    outlet_id: r.creator_branch_outlet_id,
+                    outlet_name: r.creator_branch_outlet_name
                   }
                 : null,
             product:
@@ -76,9 +85,11 @@ class StockCheckerRepository {
       this.db.query(
         `SELECT sc.stock_checker_id, sc.product_id, sc.created_by, sc.created_at, sc.updated_at,
                 ne.employee_id AS created_by_employee_id, ne.employee_name AS created_by_employee_name,
+                cre_o.outlet_id AS creator_branch_outlet_id, cre_o.outlet_name AS creator_branch_outlet_name,
                 p.product_id AS product_product_id, p.de_display_name AS product_de_display_name, p.gf_item_name AS product_gf_item_name
          FROM ${TABLE} sc
          LEFT JOIN new_employee ne ON ne.employee_id = sc.created_by
+         LEFT JOIN outlets cre_o ON cre_o.outlet_id = ne.store_id
          LEFT JOIN product_table p ON p.product_id = sc.product_id
          WHERE sc.stock_checker_id = ?`,
         [stock_checker_id],
@@ -97,6 +108,13 @@ class StockCheckerRepository {
                 ? {
                     employee_id: r.created_by_employee_id,
                     employee_name: r.created_by_employee_name
+                  }
+                : null,
+            created_by_branch:
+              r.creator_branch_outlet_id != null
+                ? {
+                    outlet_id: r.creator_branch_outlet_id,
+                    outlet_name: r.creator_branch_outlet_name
                   }
                 : null,
             product:
