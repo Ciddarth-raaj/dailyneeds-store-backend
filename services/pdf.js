@@ -1,33 +1,63 @@
 const puppeteer = require("puppeteer");
 const fs = require("fs");
-const path = require("path");
 const logger = require("../utils/logger");
+const { IS_PROD } = require("../constants");
+
+const PUPPETEER_ARGS = [
+  "--no-sandbox",
+  "--disable-setuid-sandbox",
+  "--disable-dev-shm-usage",
+  "--disable-gpu",
+  "--no-zygote",
+  "--disable-background-networking",
+  "--disable-extensions",
+  "--disable-software-rasterizer",
+  "--disable-sync",
+  "--disable-translate",
+  "--disable-default-apps",
+  "--disable-features=site-per-process,IsolateOrigins",
+  "--js-flags=--lite-mode",
+];
+
+/**
+ * Production (`IS_PROD`): fixed Chrome path on the server (previous behaviour).
+ * Development (`IS_PROD` false): `PUPPETEER_EXECUTABLE_PATH` / `CHROME_PATH` if present, else bundled Chromium.
+ */
+function buildPuppeteerLaunchOptions() {
+  if (IS_PROD) {
+    return {
+      headless: "new",
+      executablePath: "/usr/bin/google-chrome-stable",
+      dumpio: true,
+      args: PUPPETEER_ARGS,
+      timeout: 0,
+    };
+  }
+  const opts = {
+    headless: "new",
+    dumpio: true,
+    args: PUPPETEER_ARGS,
+    timeout: 0,
+  };
+  const fromEnv =
+    process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_PATH || "";
+  if (fromEnv) {
+    try {
+      if (fs.existsSync(fromEnv)) {
+        opts.executablePath = fromEnv;
+      }
+    } catch (e) {
+      /* use bundled */
+    }
+  }
+  return opts;
+}
 
 class PDFService {
   async generatePurchaseOrderPDF(purchaseOrderData) {
     let browser;
     try {
-      browser = await puppeteer.launch({
-        headless: "new",
-        executablePath: "/usr/bin/google-chrome-stable",
-        dumpio: true,
-        args: [
-          "--no-sandbox",
-          "--disable-setuid-sandbox",
-          "--disable-dev-shm-usage",
-          "--disable-gpu",
-          "--no-zygote",
-          "--disable-background-networking",
-          "--disable-extensions",
-          "--disable-software-rasterizer",
-          "--disable-sync",
-          "--disable-translate",
-          "--disable-default-apps",
-          "--disable-features=site-per-process,IsolateOrigins",
-          "--js-flags=--lite-mode",
-        ],
-        timeout: 0,
-      });
+      browser = await puppeteer.launch(buildPuppeteerLaunchOptions());
       const page = await browser.newPage();
 
       // Generate HTML content for the purchase order
@@ -387,7 +417,7 @@ class PDFService {
           <div class="header">
             <div class="header-left">
               <div class="logo-section">
-                <img src="https://www.dailyneeds.in/assets/logo.png" alt="DailyNeeds Logo" class="logo">
+                <img src="https://dnds.co.in/assets/dnds-logo.png" alt="DNDS Logo" class="logo">
               </div>
             </div>
             
@@ -486,6 +516,288 @@ class PDFService {
             Generated using DailyNeeds System - #${purchase_order_id} [${
       purchase_order_ref || "N/A"
     }], Created: ${formatDate(date)}
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+  }
+
+  async generateProductSalesOffersBulkPDF(data) {
+    let browser;
+    try {
+      browser = await puppeteer.launch(buildPuppeteerLaunchOptions());
+      const page = await browser.newPage();
+      const htmlContent = this.generateProductSalesOffersBulkHTML(data);
+      await page.setContent(htmlContent, { waitUntil: "networkidle0" });
+      const pdfBuffer = await page.pdf({
+        format: "A4",
+        printBackground: true,
+        margin: {
+          top: "10mm",
+          right: "10mm",
+          bottom: "10mm",
+          left: "10mm",
+        },
+        preferCSSPageSize: true,
+      });
+      await page.close();
+      await browser.close();
+      return pdfBuffer;
+    } catch (error) {
+      if (browser) {
+        try {
+          await browser.close();
+        } catch (e) {}
+      }
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "SERVICE",
+        code: "SERVICE.PDF.GENERATE_PRODUCT_SALES_OFFERS",
+        description: error.toString(),
+        category: "",
+        ref: {},
+      });
+      throw error;
+    }
+  }
+
+  generateProductSalesOffersBulkHTML(data) {
+    const { generatedAt, belowBufferRows = [], otherRows = [] } = data;
+
+    const escapeHtml = (s) =>
+      String(s == null ? "" : s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+
+    const formatQty = (n) => {
+      const x = Number(n);
+      if (!Number.isFinite(x)) return "—";
+      if (Math.abs(x - Math.round(x)) < 1e-9) return String(Math.round(x));
+      return String(x);
+    };
+
+    const formatDateTime = (d) => {
+      const dt = d instanceof Date ? d : new Date(d);
+      if (Number.isNaN(dt.getTime())) return "N/A";
+      return dt.toLocaleString("en-GB", {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    };
+
+    const sortByRemainingAsc = (rows) =>
+      [...(rows || [])].sort((a, b) => {
+        const ra = Number(a.remaining);
+        const rb = Number(b.remaining);
+        const fa = Number.isFinite(ra);
+        const fb = Number.isFinite(rb);
+        if (!fa && !fb) return 0;
+        if (!fa) return 1;
+        if (!fb) return -1;
+        return ra - rb;
+      });
+
+    const buildRows = (rows) => {
+      if (!rows.length) {
+        return `<tr>
+          <td colspan="5" style="padding: 12px; border: 1px solid #ddd; font-size: 11px; color: #666; text-align: center;">
+            No products in this category.
+          </td>
+        </tr>`;
+      }
+      return rows
+        .map((r) => {
+          const remNum = Number(r.remaining);
+          const remNeg =
+            Number.isFinite(remNum) && remNum < 0
+              ? "color: #c62828; font-weight: 600;"
+              : "";
+          return `
+        <tr>
+          <td style="padding: 8px 12px; border: 1px solid #ddd; font-size: 11px; text-align: left;">${escapeHtml(
+            r.item_code != null ? String(r.item_code) : "—"
+          )}</td>
+          <td style="padding: 8px 12px; border: 1px solid #ddd; font-size: 11px; text-align: left;">${escapeHtml(
+            r.product_name || "—"
+          )}</td>
+          <td style="padding: 8px 12px; border: 1px solid #ddd; font-size: 11px; text-align: right;">${escapeHtml(
+            formatQty(
+              r.purchased_stock != null ? r.purchased_stock : r.stock_input
+            )
+          )}</td>
+          <td style="padding: 8px 12px; border: 1px solid #ddd; font-size: 11px; text-align: right;">${escapeHtml(
+            formatQty(r.stock_output)
+          )}</td>
+          <td style="padding: 8px 12px; border: 1px solid #ddd; font-size: 11px; text-align: right; ${remNeg}">${escapeHtml(
+            formatQty(r.remaining)
+          )}</td>
+        </tr>`;
+        })
+        .join("");
+    };
+
+    const belowHtml = buildRows(sortByRemainingAsc(belowBufferRows));
+    const otherHtml = buildRows(sortByRemainingAsc(otherRows));
+
+    return `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <title>Product offers — sales bulk summary</title>
+        <style>
+          @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+          * { box-sizing: border-box; }
+          body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 0;
+            color: #000;
+            background: #ffffff;
+            line-height: 1.4;
+            font-size: 12px;
+          }
+          .page {
+            width: 210mm;
+            margin: 0 auto;
+            background: white;
+            position: relative;
+            padding-bottom: 40px;
+          }
+          .header {
+            padding: 15px 20px;
+            border-bottom: 1px solid #ddd;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+          }
+          .header-left {
+            flex: 1;
+          }
+          .logo-section {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+          }
+          .logo { width: 200px; height: auto; margin-right: 10px; }
+          .header-right { text-align: right; flex: 1; }
+          .warehouse-info { font-size: 10px; color: #666; margin-bottom: 8px; }
+          .po-details {
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 4px;
+            font-size: 11px;
+          }
+          .po-detail-row { display: flex; justify-content: space-between; margin-bottom: 4px; }
+          .po-detail-row:last-child { margin-bottom: 0; }
+          .po-label { font-weight: 600; color: #333; }
+          .po-value { color: #000; }
+          .section-title {
+            font-size: 14px;
+            font-weight: 700;
+            color: #000;
+            margin: 20px 20px 10px;
+            text-transform: uppercase;
+          }
+          .items-section { padding: 0 20px 16px; }
+          .items-table {
+            width: 100%;
+            border-collapse: collapse;
+            border: 1px solid #ddd;
+          }
+          .items-table th {
+            background: #495057;
+            color: white;
+            padding: 10px 12px;
+            text-align: left;
+            font-weight: 600;
+            font-size: 11px;
+            text-transform: uppercase;
+          }
+          .items-table th.num { text-align: right; }
+          .items-table td { padding: 8px 12px; border: 1px solid #ddd; font-size: 11px; }
+          .items-table tr:nth-child(even) { background-color: #f8f9fa; }
+          .intent-box {
+            margin: 0 20px 16px;
+            background: #e3f2fd;
+            padding: 12px 15px;
+            border-radius: 4px;
+            font-size: 11px;
+            line-height: 1.4;
+          }
+          .footer {
+            position: absolute;
+            bottom: 12px;
+            left: 20px;
+            right: 20px;
+            font-size: 10px;
+            color: #666;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="page">
+          <div class="header">
+            <div class="header-left">
+              <div class="logo-section">
+                <img src="https://dnds.co.in/assets/dnds-logo.png" alt="DNDS Logo" class="logo">
+              </div>
+            </div>
+            <div class="header-right">
+              <div class="warehouse-info">Product offers — bulk sales</div>
+              <div class="po-details">
+                <div class="po-detail-row">
+                  <span class="po-label">Generated:</span>
+                  <span class="po-value">${escapeHtml(formatDateTime(generatedAt))}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="intent-box">
+            Summary of products affected by this sales bulk upload. Purchased stock is opening stock plus received into the offer (opening_stock + stock_input). Remaining is purchased stock minus sold stock. Table 1 lists products at or below the offer stock buffer; table 2 lists other products updated in the same batch.
+          </div>
+
+          <div class="section-title">Below buffer threshold</div>
+          <div class="items-section">
+            <table class="items-table">
+              <thead>
+                <tr>
+                  <th>Item code</th>
+                  <th>Product name</th>
+                  <th class="num">Purchased stock</th>
+                  <th class="num">Sold stock</th>
+                  <th class="num">Remaining stock</th>
+                </tr>
+              </thead>
+              <tbody>${belowHtml}</tbody>
+            </table>
+          </div>
+
+          <div class="section-title">Other updates (this bulk)</div>
+          <div class="items-section">
+            <table class="items-table">
+              <thead>
+                <tr>
+                  <th>Item code</th>
+                  <th>Product name</th>
+                  <th class="num">Purchased stock</th>
+                  <th class="num">Sold stock</th>
+                  <th class="num">Remaining stock</th>
+                </tr>
+              </thead>
+              <tbody>${otherHtml}</tbody>
+            </table>
+          </div>
+
+          <div class="footer">
+            Generated using DailyNeeds System — Product offers sales bulk summary
           </div>
         </div>
       </body>
