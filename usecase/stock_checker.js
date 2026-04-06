@@ -206,7 +206,7 @@ class StockCheckerUsecase {
 
   async handleUpsertTelegramNotifications(stock_checker_id, branch_id) {
     try {
-      await this.notifyStockCheckBranchUpserted(stock_checker_id, branch_id);
+      await this.notifyStockCheckBranchUpserted(stock_checker_id);
     } catch (err) {
       logger.Log({
         level: logger.LEVEL.ERROR,
@@ -231,20 +231,21 @@ class StockCheckerUsecase {
     }
   }
 
-  async notifyStockCheckBranchUpserted(stock_checker_id, branch_id) {
+  async notifyStockCheckBranchUpserted(stock_checker_id) {
     const header = await this.stockCheckerRepo.getById(stock_checker_id);
-    const item = await this.stockCheckerRepo.getItemByStockCheckerIdAndBranchId(
-      stock_checker_id,
-      branch_id
+    const items = await this.stockCheckerRepo.getItemsByStockCheckerId(
+      stock_checker_id
     );
-    if (!header || !item) return;
+    if (!header || !items || items.length === 0) return;
     const productName =
       (header.product && (header.product.gf_item_name || header.product.de_display_name)) ||
       `Product ${header.product_id}`;
+    const lines = items.map((it) => formatBranchSummaryLine(it));
     const msg =
       "📝 *Stock check updated*\n\n" +
       `📦 *Product:* ${escapeMarkdown(productName)}\n\n` +
-      formatBranchSummaryLine(item);
+      "📊 *Summary by branch:*\n\n" +
+      (lines.length ? lines.join("\n\n") : "No branch entries");
     await telegram.sendMessage(STOCK_CHECKER_TELEGRAM_CHAT_ID, msg);
   }
 
