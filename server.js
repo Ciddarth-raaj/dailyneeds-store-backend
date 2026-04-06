@@ -412,7 +412,8 @@ class Server {
       this.productOffersRepo
     );
     this.productSalesUsecase = require("./usecase/product_sales")(
-      this.productSalesRepo
+      this.productSalesRepo,
+      this.productOffersRepo
     );
     this.stockReceivedUsecase = require("./usecase/stock_received")(
       this.stockReceivedRepo

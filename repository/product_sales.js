@@ -114,7 +114,11 @@ class ProductSalesRepository {
                   const entries = [...deltas.entries()];
                   const runUpdate = (idx) => {
                     if (idx >= entries.length) {
-                      return finishOk({ code: 200, inserted: normalized.length });
+                      return finishOk({
+                        code: 200,
+                        inserted: normalized.length,
+                        product_ids: productIds,
+                      });
                     }
                     const [pid, delta] = entries[idx];
                     conn.query(

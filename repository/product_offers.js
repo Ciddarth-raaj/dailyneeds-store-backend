@@ -60,6 +60,35 @@ class ProductOffersRepository {
     });
   }
 
+  listOffersStockByProductIds(product_ids) {
+    return new Promise((resolve, reject) => {
+      if (!Array.isArray(product_ids) || product_ids.length === 0) {
+        resolve([]);
+        return;
+      }
+      const ph = product_ids.map(() => "?").join(", ");
+      this.db.query(
+        `SELECT po.product_id, po.stock_input, po.stock_output, pt.gf_item_name
+         FROM \`${TABLE}\` po
+         LEFT JOIN product_table pt ON pt.product_id = po.product_id
+         WHERE po.product_id IN (${ph})`,
+        product_ids,
+        (err, rows) => {
+          if (err) {
+            logError(
+              "REPOSITORY.PRODUCT_OFFERS",
+              "REPOSITORY.PRODUCT_OFFERS.LIST_STOCK_BY_PRODUCT_IDS",
+              err.toString(),
+              {}
+            );
+            return reject(err);
+          }
+          resolve(rows || []);
+        }
+      );
+    });
+  }
+
   create(data) {
     return new Promise((resolve, reject) => {
       const mrp = data.mrp !== undefined && data.mrp !== null ? data.mrp : null;
