@@ -8,7 +8,15 @@ class UserRepository {
   login(username, password) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "SELECT user.user_id AS `user_id`, user.employee_id AS `employee_id`, user.user_type AS `user_type`, (SELECT new_employee.store_id FROM new_employee WHERE new_employee.employee_id = user.employee_id) AS `store_id`, (SELECT new_employee.department_id FROM new_employee WHERE new_employee.employee_id = user.employee_id) AS `department_id`, (SELECT new_employee.designation_id FROM new_employee WHERE new_employee.employee_id = user.employee_id) AS `designation_id` FROM user WHERE status = 1 AND username = ? AND password = SHA1(?) group by user.user_id",
+        `SELECT u.user_id AS user_id,
+                u.employee_id AS employee_id,
+                u.user_type AS user_type,
+                ne.store_id AS store_id,
+                ne.department_id AS department_id,
+                ne.designation_id AS designation_id
+         FROM \`user\` u
+         LEFT JOIN new_employee ne ON ne.employee_id = u.employee_id
+         WHERE u.status = 1 AND ne.status = 1 AND u.username = ? AND u.password = SHA1(?)`,
         [username, password],
         (err, docs) => {
           if (err) {

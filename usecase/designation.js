@@ -78,7 +78,7 @@ class DesignationUsecase {
     return new Promise(async (resolve, reject) => {
       let data = [];
       try {
-        if (designation_id !== 4) {
+        if (designation_id !== null) {
           data = await this.designationRepo.getPermissionById(
             designation_id,
             user_type
