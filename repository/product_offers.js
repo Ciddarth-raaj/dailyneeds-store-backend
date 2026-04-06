@@ -23,7 +23,7 @@ class ProductOffersRepository {
   getAll() {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT po.product_id, po.mrp, po.selling_price, po.opening_stock, po.stock_input, po.is_active, po.created_at, po.updated_at,
+        `SELECT po.product_id, po.mrp, po.selling_price, po.opening_stock, po.stock_input, po.stock_output, po.is_active, po.created_at, po.updated_at,
                 pt.gf_item_name
          FROM \`${TABLE}\` po
          LEFT JOIN product_table pt ON pt.product_id = po.product_id
@@ -43,7 +43,7 @@ class ProductOffersRepository {
   getByProductId(product_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT po.product_id, po.mrp, po.selling_price, po.opening_stock, po.stock_input, po.is_active, po.created_at, po.updated_at,
+        `SELECT po.product_id, po.mrp, po.selling_price, po.opening_stock, po.stock_input, po.stock_output, po.is_active, po.created_at, po.updated_at,
                 pt.gf_item_name
          FROM \`${TABLE}\` po
          LEFT JOIN product_table pt ON pt.product_id = po.product_id
@@ -111,6 +111,7 @@ class ProductOffersRepository {
         ON DUPLICATE KEY UPDATE mrp = VALUES(mrp), selling_price = VALUES(selling_price),
           opening_stock = IF(VALUES(is_active) = 0, 0, VALUES(opening_stock)),
           stock_input = IF(VALUES(is_active) = 0, 0, stock_input),
+          stock_output = IF(VALUES(is_active) = 0, 0, stock_output),
           is_active = VALUES(is_active), updated_at = CURRENT_TIMESTAMP`;
       this.db.query(sql, flat, (err, res) => {
         if (err) {
@@ -143,7 +144,7 @@ class ProductOffersRepository {
         }
       });
       if (deactivate) {
-        sets.push("`opening_stock` = 0", "`stock_input` = 0");
+        sets.push("`opening_stock` = 0", "`stock_input` = 0", "`stock_output` = 0");
       }
       if (values.length === 0 && !deactivate) {
         return resolve({ code: 200, affectedRows: 0 });
