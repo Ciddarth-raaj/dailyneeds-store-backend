@@ -358,12 +358,11 @@ class StockCheckerUsecase {
 
   /**
    * Pending = missing item for any active outlet except outlet_id 1.
-   * PDF + Telegram to STOCK_CHECKER_TELEGRAM_CHAT_ID (cron 20:00 or manual).
+   * One PDF per branch with pending rows; each sent via Telegram to STOCK_CHECKER_TELEGRAM_CHAT_ID (cron 20:00 or manual).
    * @returns {Promise<{ code: number, pending_count?: number, skipped?: string, message?: string }>}
    */
   async runDailyPendingStockCheckReport() {
     try {
-      console.log("PENDING STOCK CHECKER REPORT INITIATED");
       const outlets = await this.outletRepo.get();
       const requiredOutlets = requiredOutletsForStockCheck(outlets);
       if (requiredOutlets.length === 0) {
@@ -444,26 +443,34 @@ class StockCheckerUsecase {
         })
         .filter((sec) => (sec.rows || []).length > 0);
 
-      const pdfBuffer = await PDFService.generateStockCheckerPendingReportPDF({
-        generatedAt: new Date(),
-        sections,
-      });
-      const fileName = `stock_checker/pending_report_${Date.now()}.pdf`;
-      const s3Url = await S3.uploadFile(
-        undefined,
-        fileName,
-        "application/pdf",
-        pdfBuffer
-      );
-      await telegram.sendDocument(
-        STOCK_CHECKER_TELEGRAM_CHAT_ID,
-        s3Url,
-        `📋 Pending stock checks - ${pendingRows.length} product(s).`
-      );
+      const generatedAt = new Date();
+      const baseTs = Date.now();
+      for (let i = 0; i < sections.length; i++) {
+        const sec = sections[i];
+        const pdfBuffer = await PDFService.generateStockCheckerPendingReportPDF({
+          generatedAt,
+          sections: [sec],
+        });
+        const fileName = `stock_checker/pending_report_branch_${sec.branch_id}_${baseTs}_${i}.pdf`;
+        const s3Url = await S3.uploadFile(
+          undefined,
+          fileName,
+          "application/pdf",
+          pdfBuffer
+        );
+        const rowCount = (sec.rows || []).length;
+        await telegram.sendDocument(
+          STOCK_CHECKER_TELEGRAM_CHAT_ID,
+          s3Url,
+          `📋 Pending stock checks - ${sec.branch_name} (${rowCount} product(s)).`
+        );
+      }
+
       return {
         code: 200,
         pending_count: pendingRows.length,
-        message: "PDF generated and sent to Telegram",
+        branch_reports: sections.length,
+        message: `${sections.length} PDF(s) generated and sent to Telegram`,
       };
     } catch (err) {
       logger.Log({

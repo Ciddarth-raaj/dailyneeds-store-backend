@@ -949,7 +949,11 @@ class PDFService {
               </div>
             </div>
             <div class="header-right">
-              <div class="warehouse-info">Pending stock checks - daily report</div>
+              <div class="warehouse-info">${
+                (sections || []).length === 1 && sections[0] && sections[0].branch_name
+                  ? `Pending stock checks - ${escapeHtml(String(sections[0].branch_name))}`
+                  : "Pending stock checks - daily report"
+              }</div>
               <div class="po-details">
                 <div class="po-detail-row">
                   <span class="po-label">Generated:</span>
