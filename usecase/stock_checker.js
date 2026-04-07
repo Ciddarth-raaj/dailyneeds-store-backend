@@ -243,6 +243,7 @@ class StockCheckerUsecase {
     const lines = items.map((it) => formatBranchSummaryLine(it));
     const msg =
       "📝 *Stock check updated*\n\n" +
+      `🆔 *Product ID:* ${escapeMarkdown(String(header.product_id))}\n` +
       `📦 *Product:* ${escapeMarkdown(productName)}\n\n` +
       "📊 *Summary by branch:*\n\n" +
       (lines.length ? lines.join("\n\n") : "No branch entries");
@@ -268,6 +269,7 @@ class StockCheckerUsecase {
     const lines = (items || []).map((it) => formatBranchSummaryLine(it));
     const doneMsg =
       "✅ *Stock check complete*\n\n" +
+      `🆔 *Product ID:* ${escapeMarkdown(String(header.product_id))}\n` +
       `📦 *Product:* ${escapeMarkdown(productName)}\n\n` +
       "📊 *Summary by branch:*\n\n" +
       (lines.length ? lines.join("\n\n") : "No branch entries");
