@@ -363,6 +363,7 @@ class StockCheckerUsecase {
    */
   async runDailyPendingStockCheckReport() {
     try {
+      console.log("PENDING STOCK CHECKER REPORT INITIATED");
       const outlets = await this.outletRepo.get();
       const requiredOutlets = requiredOutletsForStockCheck(outlets);
       if (requiredOutlets.length === 0) {
@@ -387,7 +388,7 @@ class StockCheckerUsecase {
         await telegram.sendMessage(
           STOCK_CHECKER_TELEGRAM_CHAT_ID,
           "📋 *Daily pending stock checks* (20:00)\n\n" +
-            "No pending stock checks - every open check has entries for all required branches."
+          "No pending stock checks - every open check has entries for all required branches."
         );
         return {
           code: 200,

@@ -667,8 +667,8 @@ class Server {
       }
     );
 
-    // 8PM everyday
-    const STOCK_CHECKER_PENDING_CRON = "0 20 * * *";
+    // 11PM everyday
+    const STOCK_CHECKER_PENDING_CRON = "0 23 * * *";
     this.cronService.register(
       "stock_checker_pending_daily_report",
       STOCK_CHECKER_PENDING_CRON,
