@@ -19,6 +19,16 @@ class StockCheckerRoutes {
       res.end();
     });
 
+    router.post("/pending-daily-report", async (req, res) => {
+      try {
+        const result = await this.stockCheckerUsecase.runDailyPendingStockCheckReport();
+        res.json({ code: 200, data: result });
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
     router.get("/:stock_checker_id", async (req, res) => {
       try {
         const id = parseInt(req.params.stock_checker_id, 10);

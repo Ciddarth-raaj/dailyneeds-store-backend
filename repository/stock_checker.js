@@ -470,6 +470,48 @@ class StockCheckerRepository {
       );
     });
   }
+
+  /**
+   * Stock checks missing at least one stock_checker_items row for an active outlet
+   * other than outlet_id = 1.
+   */
+  listPendingStockCheckerHeaders() {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT sc.stock_checker_id, sc.product_id, sc.created_at,
+                p.gf_item_name AS product_gf_item_name, p.de_display_name AS product_de_display_name
+         FROM ${TABLE} sc
+         LEFT JOIN product_table p ON p.product_id = sc.product_id
+         WHERE EXISTS (
+           SELECT 1
+           FROM outlets o
+           WHERE o.outlet_id <> 1
+             AND COALESCE(o.is_active, 1) = 1
+             AND NOT EXISTS (
+               SELECT 1 FROM ${TABLE_ITEMS} sci
+               WHERE sci.stock_checker_id = sc.stock_checker_id
+                 AND sci.branch_id = o.outlet_id
+             )
+         )
+         ORDER BY sc.stock_checker_id DESC`,
+        [],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.STOCK_CHECKER",
+              code: "REPOSITORY.STOCK_CHECKER.LIST_PENDING_HEADERS",
+              description: err.toString(),
+              category: "",
+              ref: {}
+            });
+            return reject(err);
+          }
+          resolve(rows || []);
+        }
+      );
+    });
+  }
 }
 
 module.exports = (db) => {

@@ -85,7 +85,7 @@ class PDFService {
       if (browser) {
         try {
           await browser.close();
-        } catch (e) {}
+        } catch (e) { }
       }
       logger.Log({
         level: logger.LEVEL.ERROR,
@@ -133,17 +133,14 @@ class PDFService {
       .map(
         (item, index) => `
       <tr>
-        <td style="padding: 8px 12px; border: 1px solid #ddd; font-size: 12px; text-align: left;">${
-          index + 1
-        }. [${item.material_id || "N/A"}] ${
-          item.material_name || `Material ${index + 1}`
-        }</td>
+        <td style="padding: 8px 12px; border: 1px solid #ddd; font-size: 12px; text-align: left;">${index + 1
+          }. [${item.material_id || "N/A"}] ${item.material_name || `Material ${index + 1}`
+          }</td>
         <td style="padding: 8px 12px; border: 1px solid #ddd; font-size: 12px; text-align: right;">₹${formatCurrency(
-          item.rate
-        )}</td>
-        <td style="padding: 8px 12px; border: 1px solid #ddd; font-size: 12px; text-align: right;">${
-          item.quantity
-        }</td>
+            item.rate
+          )}</td>
+        <td style="padding: 8px 12px; border: 1px solid #ddd; font-size: 12px; text-align: right;">${item.quantity
+          }</td>
       </tr>
     `
       )
@@ -422,9 +419,8 @@ class PDFService {
             </div>
             
             <div class="header-right">
-              <div class="warehouse-info">#${purchase_order_id} ${
-      purchase_order_ref ? `[${purchase_order_ref}]` : ""
-    }, warehouse</div>
+              <div class="warehouse-info">#${purchase_order_id} ${purchase_order_ref ? `[${purchase_order_ref}]` : ""
+      }, warehouse</div>
               <div class="po-details">
                 <div class="po-detail-row">
                   <span class="po-label">Date:</span>
@@ -456,9 +452,8 @@ class PDFService {
           
           <div class="order-summary">
             <div class="intent-box">
-              This purchase order is an intent to procure ${
-                items.length
-              } articles listed in the following pages. PS: GST and Landing Cost (Net Cost) consider discounts seen in the last delivery.
+              This purchase order is an intent to procure ${items.length
+      } articles listed in the following pages. PS: GST and Landing Cost (Net Cost) consider discounts seen in the last delivery.
             </div>
             
             <div class="cost-summary">
@@ -513,9 +508,8 @@ class PDFService {
           </div>
           
           <div class="footer">
-            Generated using DailyNeeds System - #${purchase_order_id} [${
-      purchase_order_ref || "N/A"
-    }], Created: ${formatDate(date)}
+            Generated using DailyNeeds System - #${purchase_order_id} [${purchase_order_ref || "N/A"
+      }], Created: ${formatDate(date)}
           </div>
         </div>
       </body>
@@ -548,7 +542,7 @@ class PDFService {
       if (browser) {
         try {
           await browser.close();
-        } catch (e) {}
+        } catch (e) { }
       }
       logger.Log({
         level: logger.LEVEL.ERROR,
@@ -798,6 +792,193 @@ class PDFService {
 
           <div class="footer">
             Generated using DailyNeeds System — Product offers sales bulk summary
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+  }
+
+  async generateStockCheckerPendingReportPDF(data) {
+    let browser;
+    try {
+      browser = await puppeteer.launch(buildPuppeteerLaunchOptions());
+      const page = await browser.newPage();
+      const htmlContent = this.generateStockCheckerPendingReportHTML(data);
+      await page.setContent(htmlContent, { waitUntil: "networkidle0" });
+      const pdfBuffer = await page.pdf({
+        format: "A4",
+        printBackground: true,
+        margin: {
+          top: "10mm",
+          right: "10mm",
+          bottom: "10mm",
+          left: "10mm",
+        },
+        preferCSSPageSize: true,
+      });
+      await page.close();
+      await browser.close();
+      return pdfBuffer;
+    } catch (error) {
+      if (browser) {
+        try {
+          await browser.close();
+        } catch (e) { }
+      }
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "SERVICE",
+        code: "SERVICE.PDF.GENERATE_STOCK_CHECKER_PENDING",
+        description: error.toString(),
+        category: "",
+        ref: {},
+      });
+      throw error;
+    }
+  }
+
+  generateStockCheckerPendingReportHTML(data) {
+    const { generatedAt, sections = [] } = data;
+
+    const escapeHtml = (s) =>
+      String(s == null ? "" : s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+
+    const formatNum = (n) => {
+      if (n === null || n === undefined) return "-";
+      const x = Number(n);
+      if (!Number.isFinite(x)) return "-";
+      if (Math.abs(x - Math.round(x)) < 1e-9) return String(Math.round(x));
+      return String(x);
+    };
+
+    const formatDateTime = (d) => {
+      const dt = d instanceof Date ? d : new Date(d);
+      if (Number.isNaN(dt.getTime())) return "N/A";
+      return dt.toLocaleString("en-GB", {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    };
+
+    const sectionBlocks = (sections || [])
+      .map((sec) => {
+        const rowsHtml = (sec.rows || [])
+          .map(
+            (r) => `
+        <tr>
+          <td style="padding: 8px 12px; border: 1px solid #ddd; font-size: 11px; text-align: left;">${escapeHtml(
+              r.branch_name || "-"
+            )}</td>
+          <td style="padding: 8px 12px; border: 1px solid #ddd; font-size: 11px; text-align: right;">${escapeHtml(
+              formatNum(r.system_stock)
+            )}</td>
+          <td style="padding: 8px 12px; border: 1px solid #ddd; font-size: 11px; text-align: right;">${escapeHtml(
+              formatNum(r.physical_stock)
+            )}</td>
+          <td style="padding: 8px 12px; border: 1px solid #ddd; font-size: 11px; text-align: right;">${escapeHtml(
+              formatNum(r.difference)
+            )}</td>
+        </tr>`
+          )
+          .join("");
+        return `
+          <div class="sc-block" style="margin-bottom: 24px; page-break-inside: avoid; padding: 0 20px;">
+            <div style="margin: 16px 0 10px 0; font-size: 14px; font-weight: 700; color: #000; text-transform: uppercase;">
+              #${escapeHtml(String(sec.product_id))} - ${escapeHtml(
+          sec.product_name || "-"
+        )}
+            </div>
+            <div class="items-section" style="padding: 0 0 8px 0;">
+              <table class="items-table" style="width: 100%; border-collapse: collapse; border: 1px solid #ddd;">
+                <thead>
+                  <tr>
+                    <th style="background: #495057; color: white; padding: 10px 12px; text-align: left; font-weight: 600; font-size: 11px; text-transform: uppercase;">Branch name</th>
+                    <th style="background: #495057; color: white; padding: 10px 12px; text-align: right; font-weight: 600; font-size: 11px; text-transform: uppercase;">System stock</th>
+                    <th style="background: #495057; color: white; padding: 10px 12px; text-align: right; font-weight: 600; font-size: 11px; text-transform: uppercase;">Physical stock</th>
+                    <th style="background: #495057; color: white; padding: 10px 12px; text-align: right; font-weight: 600; font-size: 11px; text-transform: uppercase;">Difference</th>
+                  </tr>
+                </thead>
+                <tbody>${rowsHtml}</tbody>
+              </table>
+            </div>
+          </div>`;
+      })
+      .join("");
+
+    return `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <title>Pending stock checks</title>
+        <style>
+          @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+          * { box-sizing: border-box; }
+          body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 0;
+            color: #000;
+            background: #ffffff;
+            line-height: 1.4;
+            font-size: 12px;
+          }
+          .page { width: 210mm; margin: 0 auto; background: white; position: relative; padding-bottom: 36px; }
+          .header {
+            padding: 15px 20px;
+            border-bottom: 1px solid #ddd;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+          }
+          .header-left { flex: 1; }
+          .logo-section { display: flex; align-items: center; margin-bottom: 10px; }
+          .logo { width: 200px; height: auto; margin-right: 10px; }
+          .header-right { text-align: right; flex: 1; }
+          .warehouse-info { font-size: 10px; color: #666; margin-bottom: 8px; }
+          .po-details { background: #f8f9fa; padding: 10px; border-radius: 4px; font-size: 11px; }
+          .po-detail-row { display: flex; justify-content: space-between; margin-bottom: 4px; }
+          .po-label { font-weight: 600; color: #333; }
+          .items-table tr:nth-child(even) { background-color: #f8f9fa; }
+          .footer {
+            position: absolute;
+            bottom: 12px;
+            left: 20px;
+            right: 20px;
+            font-size: 10px;
+            color: #666;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="page">
+          <div class="header">
+            <div class="header-left">
+              <div class="logo-section">
+                <img src="https://dnds.co.in/assets/dnds-logo.png" alt="DNDS Logo" class="logo">
+              </div>
+            </div>
+            <div class="header-right">
+              <div class="warehouse-info">Pending stock checks - daily report</div>
+              <div class="po-details">
+                <div class="po-detail-row">
+                  <span class="po-label">Generated:</span>
+                  <span>${escapeHtml(formatDateTime(generatedAt))}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          ${sectionBlocks}
+          <div class="footer">
+            Generated using DailyNeeds System - Pending stock checks
           </div>
         </div>
       </body>
