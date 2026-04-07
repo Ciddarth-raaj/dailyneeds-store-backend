@@ -848,14 +848,6 @@ class PDFService {
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;");
 
-    const formatNum = (n) => {
-      if (n === null || n === undefined) return "-";
-      const x = Number(n);
-      if (!Number.isFinite(x)) return "-";
-      if (Math.abs(x - Math.round(x)) < 1e-9) return String(Math.round(x));
-      return String(x);
-    };
-
     const formatDateTime = (d) => {
       const dt = d instanceof Date ? d : new Date(d);
       if (Number.isNaN(dt.getTime())) return "N/A";
@@ -875,35 +867,25 @@ class PDFService {
             (r) => `
         <tr>
           <td style="padding: 8px 12px; border: 1px solid #ddd; font-size: 11px; text-align: left;">${escapeHtml(
-              r.branch_name || "-"
+              r.product_id == null ? "-" : String(r.product_id)
             )}</td>
-          <td style="padding: 8px 12px; border: 1px solid #ddd; font-size: 11px; text-align: right;">${escapeHtml(
-              formatNum(r.system_stock)
-            )}</td>
-          <td style="padding: 8px 12px; border: 1px solid #ddd; font-size: 11px; text-align: right;">${escapeHtml(
-              formatNum(r.physical_stock)
-            )}</td>
-          <td style="padding: 8px 12px; border: 1px solid #ddd; font-size: 11px; text-align: right;">${escapeHtml(
-              formatNum(r.difference)
+          <td style="padding: 8px 12px; border: 1px solid #ddd; font-size: 11px; text-align: left;">${escapeHtml(
+              r.product_name || "-"
             )}</td>
         </tr>`
           )
           .join("");
         return `
           <div class="sc-block" style="margin-bottom: 24px; page-break-inside: avoid; padding: 0 20px;">
-            <div style="margin: 16px 0 10px 0; font-size: 14px; font-weight: 700; color: #000; text-transform: uppercase;">
-              #${escapeHtml(String(sec.product_id))} - ${escapeHtml(
-          sec.product_name || "-"
-        )}
+            <div style="margin: 16px 0 10px 0; font-size: 14px; color: #000; text-transform: uppercase;">
+              Branch: <span style="font-weight: 700;">${escapeHtml(sec.branch_name || "-")}</span>
             </div>
             <div class="items-section" style="padding: 0 0 8px 0;">
               <table class="items-table" style="width: 100%; border-collapse: collapse; border: 1px solid #ddd;">
                 <thead>
                   <tr>
-                    <th style="background: #495057; color: white; padding: 10px 12px; text-align: left; font-weight: 600; font-size: 11px; text-transform: uppercase;">Branch name</th>
-                    <th style="background: #495057; color: white; padding: 10px 12px; text-align: right; font-weight: 600; font-size: 11px; text-transform: uppercase;">System stock</th>
-                    <th style="background: #495057; color: white; padding: 10px 12px; text-align: right; font-weight: 600; font-size: 11px; text-transform: uppercase;">Physical stock</th>
-                    <th style="background: #495057; color: white; padding: 10px 12px; text-align: right; font-weight: 600; font-size: 11px; text-transform: uppercase;">Difference</th>
+                    <th style="background: #495057; color: white; padding: 10px 12px; text-align: left; font-weight: 600; font-size: 11px; text-transform: uppercase;">Product Id</th>
+                    <th style="background: #495057; color: white; padding: 10px 12px; text-align: left; font-weight: 600; font-size: 11px; text-transform: uppercase;">Name</th>
                   </tr>
                 </thead>
                 <tbody>${rowsHtml}</tbody>

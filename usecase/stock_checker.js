@@ -399,23 +399,49 @@ class StockCheckerUsecase {
       const ids = pendingRows.map((r) => r.stock_checker_id);
       const itemsById = await this.stockCheckerRepo.getItemsByStockCheckerIds(ids);
 
-      const sections = pendingRows.map((r) => {
+      // Build report grouped by branch: for each required outlet, list products not yet filled.
+      const outletNameById = new Map(
+        requiredOutlets.map((o) => [
+          Number(o.outlet_id),
+          (o.outlet_name && String(o.outlet_name).trim()) || `Branch ${Number(o.outlet_id)}`,
+        ])
+      );
+
+      const missingByBranch = new Map(); // branch_id -> [{ product_id, product_name }]
+      for (const r of pendingRows) {
         const productName =
           (r.product_gf_item_name && String(r.product_gf_item_name).trim()) ||
-          (r.product_de_display_name &&
-            String(r.product_de_display_name).trim()) ||
+          (r.product_de_display_name && String(r.product_de_display_name).trim()) ||
           `Product ${r.product_id}`;
         const items =
           itemsById[r.stock_checker_id] ||
           itemsById[String(r.stock_checker_id)] ||
           [];
-        return {
-          stock_checker_id: r.stock_checker_id,
-          product_id: r.product_id,
-          product_name: productName,
-          rows: buildPendingReportRowsForStockCheck(requiredOutlets, items),
-        };
-      });
+        const presentBranchIds = new Set(
+          (items || []).map((it) => Number(it.branch_id)).filter((x) => Number.isFinite(x))
+        );
+
+        for (const o of requiredOutlets) {
+          const bid = Number(o.outlet_id);
+          if (!presentBranchIds.has(bid)) {
+            const arr = missingByBranch.get(bid) || [];
+            arr.push({ product_id: r.product_id, product_name: productName });
+            missingByBranch.set(bid, arr);
+          }
+        }
+      }
+
+      const sections = requiredOutlets
+        .map((o) => {
+          const bid = Number(o.outlet_id);
+          const rows = missingByBranch.get(bid) || [];
+          return {
+            branch_id: bid,
+            branch_name: outletNameById.get(bid) || `Branch ${bid}`,
+            rows,
+          };
+        })
+        .filter((sec) => (sec.rows || []).length > 0);
 
       const pdfBuffer = await PDFService.generateStockCheckerPendingReportPDF({
         generatedAt: new Date(),
