@@ -876,8 +876,8 @@ class PDFService {
           )
           .join("");
         return `
-          <div class="sc-block" style="margin-bottom: 24px; page-break-inside: avoid; padding: 0 20px;">
-            <div style="margin: 16px 0 10px 0; font-size: 14px; color: #000; text-transform: uppercase;">
+          <div class="sc-block" style="margin-bottom: 24px; padding: 0 20px;">
+            <div class="sc-branch-title" style="margin: 16px 0 10px 0; font-size: 14px; color: #000; text-transform: uppercase;">
               Branch: <span style="font-weight: 700;">${escapeHtml(sec.branch_name || "-")}</span>
             </div>
             <div class="items-section" style="padding: 0 0 8px 0;">
@@ -929,6 +929,8 @@ class PDFService {
           .po-details { background: #f8f9fa; padding: 10px; border-radius: 4px; font-size: 11px; }
           .po-detail-row { display: flex; justify-content: space-between; margin-bottom: 4px; }
           .po-label { font-weight: 600; color: #333; }
+          .items-table thead { display: table-header-group; }
+          .items-table tbody tr { page-break-inside: avoid; }
           .items-table tr:nth-child(even) { background-color: #f8f9fa; }
           .footer {
             position: absolute;
