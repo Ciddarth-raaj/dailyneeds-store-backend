@@ -913,7 +913,7 @@ class PDFService {
             line-height: 1.4;
             font-size: 12px;
           }
-          .page { width: 210mm; margin: 0 auto; background: white; position: relative; padding-bottom: 36px; }
+          .page { width: 210mm; margin: 0 auto; background: white; padding-bottom: 16px; }
           .header {
             padding: 15px 20px;
             border-bottom: 1px solid #ddd;
@@ -929,16 +929,19 @@ class PDFService {
           .po-details { background: #f8f9fa; padding: 10px; border-radius: 4px; font-size: 11px; }
           .po-detail-row { display: flex; justify-content: space-between; margin-bottom: 4px; }
           .po-label { font-weight: 600; color: #333; }
+          .sc-block { page-break-inside: auto; break-inside: auto; }
+          .sc-branch-title { page-break-after: avoid; break-after: avoid; }
+          .items-table { page-break-inside: auto; break-inside: auto; }
           .items-table thead { display: table-header-group; }
-          .items-table tbody tr { page-break-inside: avoid; }
-          .items-table tr:nth-child(even) { background-color: #f8f9fa; }
+          .items-table tbody { display: table-row-group; }
+          .items-table tbody tr { page-break-inside: avoid; break-inside: avoid; }
+          .items-table tbody tr:nth-child(even) { background-color: #f8f9fa; }
           .footer {
-            position: absolute;
-            bottom: 12px;
-            left: 20px;
-            right: 20px;
+            margin-top: 20px;
+            padding: 12px 20px 0;
             font-size: 10px;
             color: #666;
+            border-top: 1px solid #eee;
           }
         </style>
       </head>
