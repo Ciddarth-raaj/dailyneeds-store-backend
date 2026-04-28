@@ -65,7 +65,9 @@ class Server {
   }
 
   initServer() {
-    HttpServer.timeout = 300000; // 5 minutes
+    // Large ZIP downloads can take much longer; avoid cutting active streams.
+    HttpServer.timeout = 0;
+    HttpServer.requestTimeout = 0;
     HttpServer.listen(PORT, () => {
       console.log(`Server Running ${PORT}`);
     });

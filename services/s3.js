@@ -244,6 +244,8 @@ const createFolderZipInTmp = async (folderName, options = {}) => {
     await new Promise(async (resolve, reject) => {
       const output = fs.createWriteStream(zipPath);
       const archive = archiver("zip", {
+        // Required for very large archives/files (>4GB).
+        forceZip64: true,
         // images are already compressed; storing avoids high CPU deflate.
         store: compressionLevel === 0,
         zlib: { level: compressionLevel },
