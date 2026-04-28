@@ -3,10 +3,11 @@ const fs = require("fs");
 const path = require("path");
 const S3 = require("../services/s3");
 
-const PRODUCT_IMAGES_FOLDER = "products/image";
-// const PRODUCT_IMAGES_FOLDER = "products_t/";
-const DOWNLOAD_JOB_TTL_MS = 10 * 60 * 1000;
+// const PRODUCT_IMAGES_FOLDER = "products/image";
+const PRODUCT_IMAGES_FOLDER = "products_t/";
+const DOWNLOAD_JOB_TTL_MS = 6 * 60 * 60 * 1000;
 const PRODUCT_IMAGE_DOWNLOAD_CONCURRENCY = 2;
+const PRODUCT_IMAGE_ZIP_COMPRESSION_LEVEL = 0;
 const DOWNLOAD_TMP_ROOT = path.join(process.cwd(), "tmp", "downloads");
 let activeDownloadJob = null;
 const downloadJobsById = new Map();
@@ -414,6 +415,7 @@ class ProductUsecase {
       tmpRoot: tempRoot,
       zipRootFolder: job.zipRootFolder,
       downloadConcurrency: PRODUCT_IMAGE_DOWNLOAD_CONCURRENCY,
+      compressionLevel: PRODUCT_IMAGE_ZIP_COMPRESSION_LEVEL,
       isCancelled: () => Boolean(job.cancelled),
       onProgress: (progress) => {
         job.stage = progress.stage || job.stage;

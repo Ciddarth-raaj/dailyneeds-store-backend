@@ -2,8 +2,6 @@ const AWS = require("aws-sdk");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
-const { pipeline } = require("stream");
-const { promisify } = require("util");
 const archiver = require("archiver");
 
 const logger = require("../utils/logger");
@@ -18,7 +16,6 @@ const s3 = new AWS.S3({
   accessKeyId: ID,
   secretAccessKey: SECRET,
 });
-const pipelineAsync = promisify(pipeline);
 
 const uploadFile = (filePath, fileName, contentType, fileData) => {
   return new Promise((resolve, reject) => {
@@ -181,26 +178,6 @@ const removePathSafe = async (targetPath) => {
   }
 };
 
-const zipDirectoryToFile = async (
-  sourceDir,
-  zipPath,
-  zipRootFolder = "Images"
-) => {
-  await ensureDir(path.dirname(zipPath));
-  await new Promise((resolve, reject) => {
-    const output = fs.createWriteStream(zipPath);
-    const archive = archiver("zip", { zlib: { level: 9 } });
-
-    output.on("close", resolve);
-    output.on("error", reject);
-    archive.on("error", reject);
-
-    archive.pipe(output);
-    archive.directory(sourceDir, zipRootFolder);
-    archive.finalize();
-  });
-};
-
 const toSafeRelativePath = (prefix, key) => {
   const normalizedPrefix = String(prefix || "").replace(/^\/+/, "");
   const normalizedKey = String(key || "").replace(/^\/+/, "");
@@ -213,25 +190,6 @@ const toSafeRelativePath = (prefix, key) => {
     .filter((part) => part && part !== "." && part !== "..")
     .join("/");
   return relative;
-};
-
-const resolveUniquePath = async (targetPath) => {
-  const parsed = path.parse(targetPath);
-  let resolvedPath = targetPath;
-  let index = 1;
-  while (true) {
-    try {
-      await fs.promises.access(resolvedPath);
-      resolvedPath = path.join(
-        parsed.dir,
-        `${parsed.name}_${index}${parsed.ext || ""}`
-      );
-      index += 1;
-    } catch (err) {
-      break;
-    }
-  }
-  return resolvedPath;
 };
 
 const ensureNotCancelled = (options) => {
@@ -248,9 +206,10 @@ const createFolderZipInTmp = async (folderName, options = {}) => {
     options.tmpRoot || path.join(os.tmpdir(), "dailyneeds-downloads");
   const zipRootFolder =
     String(options.zipRootFolder || "Images").trim() || "Images";
-  const downloadConcurrency = Math.max(
-    1,
-    Math.min(Number(options.downloadConcurrency) || 2, 4)
+  const rawCompressionLevel = Number(options.compressionLevel);
+  const compressionLevel = Math.max(
+    0,
+    Math.min(Number.isFinite(rawCompressionLevel) ? rawCompressionLevel : 0, 9)
   );
   const { prefix, objects } = await listAllObjectsByFolder(folderName, {
     onProgress,
@@ -265,13 +224,12 @@ const createFolderZipInTmp = async (folderName, options = {}) => {
   const baseName = prefix.replace(/\/+$/, "").split("/").pop() || "files";
   const stamp = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const workDir = path.join(tmpRoot, `${baseName}_${stamp}`);
-  const extractedDir = path.join(workDir, "files");
   const zipPath = path.join(workDir, `${baseName}_${stamp}.zip`);
 
-  await ensureDir(extractedDir);
+  await ensureDir(workDir);
   if (typeof onProgress === "function") {
     onProgress({
-      stage: "downloading",
+      stage: "zipping",
       tmpDir: workDir,
       totalFiles,
       downloadedFiles: 0,
@@ -283,67 +241,64 @@ const createFolderZipInTmp = async (folderName, options = {}) => {
   let downloadedFiles = 0;
   let downloadedBytes = 0;
   try {
-    let cursor = 0;
-    const downloadOneObject = async (item) => {
-      ensureNotCancelled(options);
-      const normalizedRelativeKey = toSafeRelativePath(prefix, item.Key);
-      const fileRelPath =
-        normalizedRelativeKey && normalizedRelativeKey.length > 0
-          ? normalizedRelativeKey
-          : path.basename(item.Key);
-      const targetFile = path.join(extractedDir, fileRelPath);
-      const localFile = await resolveUniquePath(targetFile);
-      await ensureDir(path.dirname(localFile));
-      const readStream = s3
-        .getObject({ Bucket: BUCKET_NAME, Key: item.Key })
-        .createReadStream();
-      const writeStream = fs.createWriteStream(localFile);
-      await pipelineAsync(readStream, writeStream);
-      ensureNotCancelled(options);
+    await new Promise(async (resolve, reject) => {
+      const output = fs.createWriteStream(zipPath);
+      const archive = archiver("zip", {
+        // images are already compressed; storing avoids high CPU deflate.
+        store: compressionLevel === 0,
+        zlib: { level: compressionLevel },
+      });
 
-      downloadedFiles += 1;
-      downloadedBytes += Number(item.Size) || 0;
-      if (typeof onProgress === "function") {
-        onProgress({
-          stage: "downloading",
-          totalFiles,
-          downloadedFiles,
-          totalBytes,
-          downloadedBytes,
-          currentKey: item.Key,
-        });
-      }
-    };
+      output.on("close", resolve);
+      output.on("error", reject);
+      archive.on("error", reject);
+      archive.pipe(output);
 
-    const workerCount = Math.min(
-      downloadConcurrency,
-      Math.max(objects.length, 1)
-    );
-    const workers = Array.from({ length: workerCount }).map(async () => {
-      while (true) {
+      const appendOneObject = async (item) => {
         ensureNotCancelled(options);
-        const index = cursor;
-        cursor += 1;
-        if (index >= objects.length) break;
-        await downloadOneObject(objects[index]);
+        const normalizedRelativeKey = toSafeRelativePath(prefix, item.Key);
+        const fileRelPath =
+          normalizedRelativeKey && normalizedRelativeKey.length > 0
+            ? normalizedRelativeKey
+            : path.basename(item.Key);
+        const zipEntryName = `${zipRootFolder}/${fileRelPath}`;
+        const readStream = s3
+          .getObject({ Bucket: BUCKET_NAME, Key: item.Key })
+          .createReadStream();
+        await new Promise((res, rej) => {
+          readStream.once("error", rej);
+          archive.append(readStream, { name: zipEntryName });
+          readStream.once("end", res);
+        });
+      };
+
+      try {
+        for (const item of objects) {
+          ensureNotCancelled(options);
+          await appendOneObject(item);
+
+          downloadedFiles += 1;
+          downloadedBytes += Number(item.Size) || 0;
+          if (typeof onProgress === "function") {
+            onProgress({
+              stage: "zipping",
+              totalFiles,
+              downloadedFiles,
+              totalBytes,
+              downloadedBytes,
+              currentKey: item.Key,
+            });
+          }
+        }
+        ensureNotCancelled(options);
+        await archive.finalize();
+      } catch (err) {
+        try {
+          archive.abort();
+        } catch (e) {}
+        reject(err);
       }
     });
-    await Promise.all(workers);
-
-    if (typeof onProgress === "function") {
-      onProgress({
-        stage: "zipping",
-        totalFiles,
-        downloadedFiles,
-        totalBytes,
-        downloadedBytes,
-      });
-    }
-
-    ensureNotCancelled(options);
-
-    await zipDirectoryToFile(extractedDir, zipPath, zipRootFolder);
-    await removePathSafe(extractedDir);
 
     if (typeof onProgress === "function") {
       onProgress({
