@@ -61,7 +61,11 @@ class ProductRoutes {
 
         const data = req.query;
 
-        const product = await this.productUsecase.get(data.limit, data.offset, data.fetchAll);
+        const product = await this.productUsecase.get(
+          data.limit,
+          data.offset,
+          data.fetchAll
+        );
         res.json(product);
       } catch (err) {
         console.log(err);
@@ -143,7 +147,7 @@ class ProductRoutes {
         if (!this.synker || typeof this.synker.syncProducts !== "function") {
           res.status(503).json({
             code: 503,
-            msg: "Product sync is not available"
+            msg: "Product sync is not available",
           });
           res.end();
           return;
@@ -152,7 +156,7 @@ class ProductRoutes {
         res.json({
           code: 200,
           msg: "Sync completed",
-          ...result
+          ...result,
         });
       } catch (err) {
         console.error(err);
@@ -227,6 +231,177 @@ class ProductRoutes {
         }
       }
 
+      res.end();
+    });
+
+    router.post("/images/download/start", async (req, res) => {
+      try {
+        const schema = {
+          zipFolderName: Joi.string().trim().max(100).optional(),
+          keepFileDownloadCount: Joi.number().integer().min(1).max(20).optional(),
+        };
+        const isValid = Joi.validate(req.body || {}, schema);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+        const sessionKey = this.productUsecase.getDownloadSessionKey(
+          req.decoded
+        );
+        const result = await this.productUsecase.startProductImagesDownload(
+          sessionKey,
+          {
+            zipRootFolder: (req.body && req.body.zipFolderName) || "Images",
+            maxDownloads:
+              req.body && req.body.keepFileDownloadCount != null
+                ? req.body.keepFileDownloadCount
+                : 3,
+          }
+        );
+        res.status(202).json(result);
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.status(422).json({ code: 422, msg: err.toString() });
+        } else if (err && err.statusCode === 409) {
+          res.status(409).json({
+            code: 409,
+            message: err.message,
+            active_job_id: err.active_job_id || null,
+          });
+        } else {
+          respondError(res, err);
+        }
+      }
+      res.end();
+    });
+
+    router.get("/images/download/status", async (req, res) => {
+      try {
+        const schema = {
+          jobId: Joi.string().required(),
+        };
+        const isValid = Joi.validate(req.query, schema);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const sessionKey = this.productUsecase.getDownloadSessionKey(
+          req.decoded
+        );
+        const result = await this.productUsecase.getProductImagesDownloadStatus(
+          req.query.jobId,
+          sessionKey
+        );
+        res.json(result);
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else if (err.statusCode) {
+          res
+            .status(err.statusCode)
+            .json({ code: err.statusCode, msg: err.message });
+        } else {
+          respondError(res, err);
+        }
+      }
+      res.end();
+    });
+
+    router.get("/images/download/active-job", async (req, res) => {
+      try {
+        const sessionKey = this.productUsecase.getDownloadSessionKey(req.decoded);
+        const result = await this.productUsecase.getActiveProductImagesDownloadJob(
+          sessionKey
+        );
+        res.json(result);
+      } catch (err) {
+        if (err.statusCode) {
+          res.status(err.statusCode).json({ code: err.statusCode, msg: err.message });
+        } else {
+          respondError(res, err);
+        }
+      }
+      res.end();
+    });
+
+    router.get("/images/download/file", async (req, res) => {
+      try {
+        const schema = {
+          jobId: Joi.string().required(),
+        };
+        const isValid = Joi.validate(req.query, schema);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const sessionKey = this.productUsecase.getDownloadSessionKey(
+          req.decoded
+        );
+        const fileMeta = await this.productUsecase.getProductImagesDownloadFile(
+          req.query.jobId,
+          sessionKey
+        );
+
+        res.download(fileMeta.zipPath, fileMeta.fileName, async (err) => {
+          await this.productUsecase.finalizeProductImagesDownload(
+            fileMeta.jobId,
+            !err
+          );
+          if (err && !res.headersSent) {
+            res.status(500).json({ code: 500, msg: "Failed to send archive" });
+          }
+        });
+        return;
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.json({ code: 422, msg: err.toString() });
+        } else if (err.statusCode === 409 && err.progress) {
+          res.status(409).json({
+            code: 409,
+            msg: err.message,
+            progress: err.progress,
+          });
+        } else if (err.statusCode) {
+          res
+            .status(err.statusCode)
+            .json({ code: err.statusCode, msg: err.message });
+        } else {
+          respondError(res, err);
+        }
+      }
+      res.end();
+    });
+
+    router.post("/images/download/cancel", async (req, res) => {
+      try {
+        const schema = {
+          jobId: Joi.string().required(),
+        };
+        const isValid = Joi.validate(req.body || {}, schema);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const sessionKey = this.productUsecase.getDownloadSessionKey(req.decoded);
+        const result = await this.productUsecase.cancelProductImagesDownload(
+          req.body.jobId,
+          sessionKey
+        );
+        res.status(202).json(result);
+      } catch (err) {
+        if (err.name === "ValidationError") {
+          res.status(422).json({ code: 422, msg: err.toString() });
+        } else if (err.statusCode === 409 && err.progress) {
+          res.status(409).json({
+            code: 409,
+            msg: err.message,
+            progress: err.progress,
+          });
+        } else if (err.statusCode) {
+          res.status(err.statusCode).json({ code: err.statusCode, msg: err.message });
+        } else {
+          respondError(res, err);
+        }
+      }
       res.end();
     });
   }

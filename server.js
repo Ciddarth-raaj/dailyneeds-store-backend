@@ -677,6 +677,16 @@ class Server {
       }
     );
 
+    // 12AM everyday - cleanup stale download tmp folders/files.
+    const PRODUCT_IMAGE_TMP_CLEANUP_CRON = "0 0 * * *";
+    this.cronService.register(
+      "product_image_download_tmp_cleanup",
+      PRODUCT_IMAGE_TMP_CLEANUP_CRON,
+      async () => {
+        await this.productUsecase.cleanupDownloadTmpDirectoryKeepingActiveJobs();
+      }
+    );
+
     this.synker.initCronJobs(this.cronService);
     this.cronService.start();
 

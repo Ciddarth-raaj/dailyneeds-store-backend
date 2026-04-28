@@ -5,3 +5,4 @@ config.json
 migrations/*/database.json 
 .env
 logs/
+tmp/
