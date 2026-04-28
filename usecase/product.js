@@ -5,12 +5,13 @@ const S3 = require("../services/s3");
 
 const PRODUCT_IMAGES_FOLDER = "products/image";
 // const PRODUCT_IMAGES_FOLDER = "products_t/";
-const DOWNLOAD_JOB_TTL_MS = 6 * 60 * 60 * 1000;
+const DOWNLOAD_JOB_TTL_MS = 24 * 60 * 60 * 1000;
 const PRODUCT_IMAGE_DOWNLOAD_CONCURRENCY = 2;
 const PRODUCT_IMAGE_ZIP_COMPRESSION_LEVEL = 0;
 const DOWNLOAD_TMP_ROOT = path.join(process.cwd(), "tmp", "downloads");
 let activeDownloadJob = null;
 const downloadJobsById = new Map();
+let bootstrapDone = false;
 
 const now = () => Date.now();
 
@@ -29,9 +30,10 @@ const normalizeKeepFileDownloadCount = (value) => {
 };
 
 class ProductUsecase {
-  constructor(productRepo, productImageLogUsecase) {
+  constructor(productRepo, productImageLogUsecase, productImageDownloadJobRepo) {
     this.productRepo = productRepo;
     this.productImageLogUsecase = productImageLogUsecase;
+    this.productImageDownloadJobRepo = productImageDownloadJobRepo;
   }
   updateProductDetails(product, createdBy) {
     return new Promise(async (resolve, reject) => {
@@ -338,8 +340,176 @@ class ProductUsecase {
     };
   }
 
+  hydrateJobFromStoreRow(row) {
+    if (!row) return null;
+    return {
+      id: row.job_id,
+      userSession: row.user_session,
+      status: row.status,
+      stage: row.stage || "queued",
+      folder: row.folder || PRODUCT_IMAGES_FOLDER,
+      zipRootFolder: row.zip_root_folder || "Images",
+      tmpDir: row.tmp_dir || null,
+      zipPath: row.zip_path || null,
+      fileName: row.file_name || null,
+      totalFiles: Number(row.total_files || 0),
+      downloadedFiles: Number(row.downloaded_files || 0),
+      totalBytes: Number(row.total_bytes || 0),
+      downloadedBytes: Number(row.downloaded_bytes || 0),
+      listedFiles: Number(row.listed_files || 0),
+      scannedPages: Number(row.scanned_pages || 0),
+      successfulDownloads: Number(row.successful_downloads || 0),
+      maxDownloads: normalizeKeepFileDownloadCount(row.max_downloads),
+      cancelled: Boolean(row.cancelled),
+      message: row.message || "",
+      error: row.error || null,
+      startedAt: Number(row.started_at || Date.now()),
+      updatedAt: Number(row.updated_at || Date.now()),
+    };
+  }
+
+  async persistJob(job) {
+    if (!job) return;
+    if (
+      this.productImageDownloadJobRepo &&
+      typeof this.productImageDownloadJobRepo.upsert === "function"
+    ) {
+      await this.productImageDownloadJobRepo.upsert(job);
+    }
+  }
+
+  async removePersistedJob(jobId) {
+    if (!jobId) return;
+    if (
+      this.productImageDownloadJobRepo &&
+      typeof this.productImageDownloadJobRepo.removeByJobId === "function"
+    ) {
+      await this.productImageDownloadJobRepo.removeByJobId(jobId);
+    }
+  }
+
+  startOrResumeDownloadWorker(job) {
+    if (!job) return;
+    activeDownloadJob = job;
+    downloadJobsById.set(job.id, job);
+    const tempRoot = DOWNLOAD_TMP_ROOT;
+    const persistProgress = async () => {
+      job.updatedAt = now();
+      await this.persistJob(job);
+    };
+
+    S3.createFolderZipInTmp(PRODUCT_IMAGES_FOLDER, {
+      tmpRoot: tempRoot,
+      workDir: job.tmpDir || undefined,
+      jobId: job.id,
+      zipRootFolder: job.zipRootFolder,
+      downloadConcurrency: PRODUCT_IMAGE_DOWNLOAD_CONCURRENCY,
+      compressionLevel: PRODUCT_IMAGE_ZIP_COMPRESSION_LEVEL,
+      isCancelled: () => Boolean(job.cancelled),
+      onProgress: (progress) => {
+        job.stage = progress.stage || job.stage;
+        job.totalFiles = Number(progress.totalFiles || job.totalFiles || 0);
+        job.downloadedFiles = Number(
+          progress.downloadedFiles || job.downloadedFiles || 0
+        );
+        job.totalBytes = Number(progress.totalBytes || job.totalBytes || 0);
+        job.downloadedBytes = Number(
+          progress.downloadedBytes || job.downloadedBytes || 0
+        );
+        if (progress.tmpDir) {
+          job.tmpDir = progress.tmpDir;
+        }
+        job.listedFiles = Number(progress.listedFiles || job.listedFiles || 0);
+        job.scannedPages = Number(progress.scannedPages || job.scannedPages || 0);
+        job.updatedAt = now();
+        if (progress.stage === "listing") {
+          job.message = `Preparing file list (${job.listedFiles} found so far)`;
+        } else if (progress.stage === "downloading") {
+          job.message = `Downloading files (${job.downloadedFiles}/${job.totalFiles})`;
+        } else if (progress.stage === "zipping") {
+          job.message = "Creating zip archive";
+        } else if (progress.stage === "ready") {
+          job.message = "Archive is ready";
+        }
+        this.persistJob(job).catch(() => {});
+      },
+    })
+      .then(async (result) => {
+        job.status = "ready";
+        job.stage = "ready";
+        job.updatedAt = now();
+        job.fileName = result.fileName;
+        job.zipPath = result.zipPath;
+        job.tmpDir = result.tmpDir;
+        job.totalFiles = result.totalFiles;
+        job.totalBytes = result.totalBytes;
+        await persistProgress();
+      })
+      .catch(async (err) => {
+        if (err && err.code === "DOWNLOAD_CANCELLED") {
+          job.status = "cancelled";
+          job.stage = "cancelled";
+          job.updatedAt = now();
+          job.message = "Download was cancelled";
+          if (job.tmpDir) {
+            await S3.removePathSafe(job.tmpDir);
+            job.tmpDir = null;
+          }
+          downloadJobsById.delete(job.id);
+          await this.removePersistedJob(job.id);
+          return;
+        }
+        job.status = "failed";
+        job.stage = "failed";
+        job.updatedAt = now();
+        job.error = err.message || err.toString();
+        job.message = "Failed to generate archive";
+        if (job.tmpDir) {
+          await S3.removePathSafe(job.tmpDir);
+        }
+        await persistProgress();
+      })
+      .finally(() => {
+        if (activeDownloadJob && activeDownloadJob.id === job.id) {
+          activeDownloadJob = null;
+        }
+      });
+  }
+
+  async bootstrapDownloadJobsFromStore() {
+    if (bootstrapDone) return;
+    bootstrapDone = true;
+    if (
+      !this.productImageDownloadJobRepo ||
+      typeof this.productImageDownloadJobRepo.getAllNotExpired !== "function"
+    ) {
+      return;
+    }
+    const minUpdatedAt = now() - DOWNLOAD_JOB_TTL_MS;
+    const rows = await this.productImageDownloadJobRepo.getAllNotExpired(minUpdatedAt);
+    for (const row of rows || []) {
+      const job = this.hydrateJobFromStoreRow(row);
+      if (!job) continue;
+      downloadJobsById.set(job.id, job);
+      if (job.status === "in_progress") {
+        this.startOrResumeDownloadWorker(job);
+      } else if (activeDownloadJob == null && job.status === "ready") {
+        // keep latest ready job discoverable in memory.
+        activeDownloadJob = null;
+      }
+    }
+  }
+
   async cleanupExpiredDownloadJobs() {
+    await this.bootstrapDownloadJobsFromStore();
     const ts = now();
+    const minUpdatedAt = ts - DOWNLOAD_JOB_TTL_MS;
+    if (
+      this.productImageDownloadJobRepo &&
+      typeof this.productImageDownloadJobRepo.deleteOlderThan === "function"
+    ) {
+      await this.productImageDownloadJobRepo.deleteOlderThan(minUpdatedAt);
+    }
     const ids = Array.from(downloadJobsById.keys());
     for (const id of ids) {
       const job = downloadJobsById.get(id);
@@ -350,6 +520,7 @@ class ProductUsecase {
         await S3.removePathSafe(job.tmpDir);
       }
       downloadJobsById.delete(id);
+      await this.removePersistedJob(id);
       if (activeDownloadJob && activeDownloadJob.id === id) {
         activeDownloadJob = null;
       }
@@ -357,6 +528,7 @@ class ProductUsecase {
   }
 
   async startProductImagesDownload(sessionKey, options = {}) {
+    await this.bootstrapDownloadJobsFromStore();
     await this.cleanupExpiredDownloadJobs();
 
     const existingUserJob = Array.from(downloadJobsById.values()).find(
@@ -410,79 +582,8 @@ class ProductUsecase {
 
     activeDownloadJob = job;
     downloadJobsById.set(jobId, job);
-
-    S3.createFolderZipInTmp(PRODUCT_IMAGES_FOLDER, {
-      tmpRoot: tempRoot,
-      zipRootFolder: job.zipRootFolder,
-      downloadConcurrency: PRODUCT_IMAGE_DOWNLOAD_CONCURRENCY,
-      compressionLevel: PRODUCT_IMAGE_ZIP_COMPRESSION_LEVEL,
-      isCancelled: () => Boolean(job.cancelled),
-      onProgress: (progress) => {
-        job.stage = progress.stage || job.stage;
-        job.totalFiles = Number(progress.totalFiles || job.totalFiles || 0);
-        job.downloadedFiles = Number(
-          progress.downloadedFiles || job.downloadedFiles || 0
-        );
-        job.totalBytes = Number(progress.totalBytes || job.totalBytes || 0);
-        job.downloadedBytes = Number(
-          progress.downloadedBytes || job.downloadedBytes || 0
-        );
-        if (progress.tmpDir) {
-          job.tmpDir = progress.tmpDir;
-        }
-        job.listedFiles = Number(progress.listedFiles || job.listedFiles || 0);
-        job.scannedPages = Number(
-          progress.scannedPages || job.scannedPages || 0
-        );
-        job.updatedAt = now();
-        if (progress.stage === "listing") {
-          job.message = `Preparing file list (${job.listedFiles} found so far)`;
-        } else if (progress.stage === "downloading") {
-          job.message = `Downloading files (${job.downloadedFiles}/${job.totalFiles})`;
-        } else if (progress.stage === "zipping") {
-          job.message = "Creating zip archive";
-        } else if (progress.stage === "ready") {
-          job.message = "Archive is ready";
-        }
-      },
-    })
-      .then((result) => {
-        job.status = "ready";
-        job.stage = "ready";
-        job.updatedAt = now();
-        job.fileName = result.fileName;
-        job.zipPath = result.zipPath;
-        job.tmpDir = result.tmpDir;
-        job.totalFiles = result.totalFiles;
-        job.totalBytes = result.totalBytes;
-      })
-      .catch(async (err) => {
-        if (err && err.code === "DOWNLOAD_CANCELLED") {
-          job.status = "cancelled";
-          job.stage = "cancelled";
-          job.updatedAt = now();
-          job.message = "Download was cancelled";
-          if (job.tmpDir) {
-            await S3.removePathSafe(job.tmpDir);
-            job.tmpDir = null;
-          }
-          downloadJobsById.delete(job.id);
-          return;
-        }
-        job.status = "failed";
-        job.stage = "failed";
-        job.updatedAt = now();
-        job.error = err.message || err.toString();
-        job.message = "Failed to generate archive";
-        if (job.tmpDir) {
-          await S3.removePathSafe(job.tmpDir);
-        }
-      })
-      .finally(() => {
-        if (activeDownloadJob && activeDownloadJob.id === job.id) {
-          activeDownloadJob = null;
-        }
-      });
+    await this.persistJob(job);
+    this.startOrResumeDownloadWorker(job);
 
     return {
       code: 202,
@@ -492,6 +593,7 @@ class ProductUsecase {
   }
 
   async cancelProductImagesDownload(jobId, sessionKey) {
+    await this.bootstrapDownloadJobsFromStore();
     await this.cleanupExpiredDownloadJobs();
     const job = downloadJobsById.get(jobId);
     if (!job) {
@@ -514,12 +616,19 @@ class ProductUsecase {
     }
 
     job.cancelled = true;
+    job.status = "cancelled";
+    job.stage = "cancelled";
     job.updatedAt = now();
     job.message = "Cancelling download...";
     if (job.tmpDir) {
       await S3.removePathSafe(job.tmpDir);
       job.tmpDir = null;
     }
+    downloadJobsById.delete(job.id);
+    if (activeDownloadJob && activeDownloadJob.id === job.id) {
+      activeDownloadJob = null;
+    }
+    await this.removePersistedJob(job.id);
 
     return {
       code: 202,
@@ -529,6 +638,7 @@ class ProductUsecase {
   }
 
   async getProductImagesDownloadStatus(jobId, sessionKey) {
+    await this.bootstrapDownloadJobsFromStore();
     await this.cleanupExpiredDownloadJobs();
     const job = downloadJobsById.get(jobId);
     if (!job) {
@@ -550,6 +660,7 @@ class ProductUsecase {
   }
 
   async getActiveProductImagesDownloadJob(sessionKey) {
+    await this.bootstrapDownloadJobsFromStore();
     await this.cleanupExpiredDownloadJobs();
     const activeForUser = Array.from(downloadJobsById.values()).find(
       (job) => job.userSession === sessionKey && job.status === "in_progress"
@@ -571,7 +682,38 @@ class ProductUsecase {
     };
   }
 
+  async listProductImagesDownloads(sessionKey) {
+    await this.bootstrapDownloadJobsFromStore();
+    await this.cleanupExpiredDownloadJobs();
+    const minUpdatedAt = now() - DOWNLOAD_JOB_TTL_MS;
+
+    if (
+      this.productImageDownloadJobRepo &&
+      typeof this.productImageDownloadJobRepo.getAllNotExpired === "function"
+    ) {
+      const rows = await this.productImageDownloadJobRepo.getAllNotExpired(
+        minUpdatedAt
+      );
+      return {
+        code: 200,
+        downloads: (rows || []).map((row) =>
+          this.createDownloadProgressSnapshot(this.hydrateJobFromStoreRow(row))
+        ),
+      };
+    }
+
+    const jobs = Array.from(downloadJobsById.values())
+      .filter((job) => now() - Number(job.updatedAt || 0) < DOWNLOAD_JOB_TTL_MS)
+      .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))
+      .map((job) => this.createDownloadProgressSnapshot(job));
+    return {
+      code: 200,
+      downloads: jobs,
+    };
+  }
+
   async getProductImagesDownloadFile(jobId, sessionKey) {
+    await this.bootstrapDownloadJobsFromStore();
     await this.cleanupExpiredDownloadJobs();
     const job = downloadJobsById.get(jobId);
     if (!job) {
@@ -601,6 +743,7 @@ class ProductUsecase {
   }
 
   async finalizeProductImagesDownload(jobId, wasSuccessful = true) {
+    await this.bootstrapDownloadJobsFromStore();
     const job = downloadJobsById.get(jobId);
     if (!job) return;
 
@@ -610,6 +753,7 @@ class ProductUsecase {
       const remaining = Math.max(0, job.maxDownloads - job.successfulDownloads);
       if (remaining > 0) {
         job.message = `Archive downloaded ${job.successfulDownloads}/${job.maxDownloads} times`;
+        await this.persistJob(job);
         return;
       }
     }
@@ -618,9 +762,12 @@ class ProductUsecase {
       await S3.removePathSafe(job.tmpDir);
     }
     downloadJobsById.delete(jobId);
+    await this.removePersistedJob(jobId);
   }
 
   async cleanupDownloadTmpDirectoryKeepingActiveJobs() {
+    await this.bootstrapDownloadJobsFromStore();
+    await this.cleanupExpiredDownloadJobs();
     let entries = [];
     try {
       entries = await fs.promises.readdir(DOWNLOAD_TMP_ROOT, {
@@ -652,7 +799,14 @@ class ProductUsecase {
         keptCount += 1;
         continue;
       }
+      const linkedJob = Array.from(downloadJobsById.values()).find(
+        (job) => job && job.tmpDir && path.resolve(job.tmpDir) === entryPath
+      );
       await S3.removePathSafe(entryPath);
+      if (linkedJob) {
+        downloadJobsById.delete(linkedJob.id);
+        await this.removePersistedJob(linkedJob.id);
+      }
       cleanedCount += 1;
     }
 
@@ -665,6 +819,10 @@ class ProductUsecase {
   }
 }
 
-module.exports = (productRepo, productImageLogUsecase) => {
-  return new ProductUsecase(productRepo, productImageLogUsecase);
+module.exports = (productRepo, productImageLogUsecase, productImageDownloadJobRepo) => {
+  return new ProductUsecase(
+    productRepo,
+    productImageLogUsecase,
+    productImageDownloadJobRepo
+  );
 };

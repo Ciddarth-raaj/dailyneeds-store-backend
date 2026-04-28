@@ -323,6 +323,25 @@ class ProductRoutes {
       res.end();
     });
 
+    router.get("/images/download/list", async (req, res) => {
+      try {
+        const sessionKey = this.productUsecase.getDownloadSessionKey(req.decoded);
+        const result = await this.productUsecase.listProductImagesDownloads(
+          sessionKey
+        );
+        res.json(result);
+      } catch (err) {
+        if (err.statusCode) {
+          res
+            .status(err.statusCode)
+            .json({ code: err.statusCode, msg: err.message });
+        } else {
+          respondError(res, err);
+        }
+      }
+      res.end();
+    });
+
     router.get("/images/download/file", async (req, res) => {
       try {
         const schema = {

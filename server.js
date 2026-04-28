@@ -188,6 +188,9 @@ class Server {
     this.productImageLogRepo = require("./repository/product_image_log")(
       this.mysql.connection
     );
+    this.productImageDownloadJobRepo = require("./repository/product_image_download_job")(
+      this.mysql.connection
+    );
     this.gofrugalSynkerRepo = require("./repository/gofrugal_synker")(
       this.mysqlGofrugal.connection
     );
@@ -284,7 +287,8 @@ class Server {
     );
     this.productUsecase = require("./usecase/product")(
       this.productRepo,
-      this.productImageLogUsecase
+      this.productImageLogUsecase,
+      this.productImageDownloadJobRepo
     );
     this.imageUsecase = require("./usecase/image")(this.imageRepo);
     this.assetUsecase = require("./usecase/asset");
@@ -659,6 +663,21 @@ class Server {
   initServices() {
     const CronService = require("./services/cron_service");
     this.cronService = new CronService();
+    if (
+      this.productUsecase &&
+      typeof this.productUsecase.bootstrapDownloadJobsFromStore === "function"
+    ) {
+      this.productUsecase.bootstrapDownloadJobsFromStore().catch((err) => {
+        logger.Log({
+          level: logger.LEVEL.ERROR,
+          component: "SERVER",
+          code: "SERVER.PRODUCT_DOWNLOAD_BOOTSTRAP",
+          description: err.toString(),
+          category: "",
+          ref: {},
+        });
+      });
+    }
     // Edit schedule here if needed (node-cron: minute hour day month weekday)
     const PURCHASE_ACK_GOFRUGAL_CRON = "*/5 * * * *";
     this.cronService.register(

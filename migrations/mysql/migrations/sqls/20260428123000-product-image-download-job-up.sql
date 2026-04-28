@@ -1,0 +1,31 @@
+CREATE TABLE IF NOT EXISTS product_image_download_job (
+  job_id VARCHAR(64) PRIMARY KEY,
+  user_session VARCHAR(64) NOT NULL,
+  status VARCHAR(32) NOT NULL,
+  stage VARCHAR(32) NULL,
+  folder VARCHAR(255) NULL,
+  zip_root_folder VARCHAR(128) NULL,
+  tmp_dir VARCHAR(1024) NULL,
+  zip_path VARCHAR(1024) NULL,
+  file_name VARCHAR(255) NULL,
+  total_files INT NOT NULL DEFAULT 0,
+  downloaded_files INT NOT NULL DEFAULT 0,
+  total_bytes BIGINT NOT NULL DEFAULT 0,
+  downloaded_bytes BIGINT NOT NULL DEFAULT 0,
+  listed_files INT NOT NULL DEFAULT 0,
+  scanned_pages INT NOT NULL DEFAULT 0,
+  successful_downloads INT NOT NULL DEFAULT 0,
+  max_downloads INT NOT NULL DEFAULT 3,
+  cancelled TINYINT(1) NOT NULL DEFAULT 0,
+  message TEXT NULL,
+  error TEXT NULL,
+  started_at BIGINT NULL,
+  updated_at BIGINT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  modified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_pidj_user_status (user_session, status),
+  KEY idx_pidj_status (status),
+  KEY idx_pidj_updated_at (updated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+INSERT INTO `all_permissions` (`permission_key`) VALUES ('view_images_download_log');
