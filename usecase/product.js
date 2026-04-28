@@ -9,6 +9,7 @@ const DOWNLOAD_JOB_TTL_MS = 24 * 60 * 60 * 1000;
 const PRODUCT_IMAGE_DOWNLOAD_CONCURRENCY = 2;
 const PRODUCT_IMAGE_ZIP_COMPRESSION_LEVEL = 0;
 const DOWNLOAD_TMP_ROOT = path.join(process.cwd(), "tmp", "downloads");
+const JOB_PROGRESS_DB_FLUSH_INTERVAL_MS = 60 * 1000;
 let activeDownloadJob = null;
 const downloadJobsById = new Map();
 let bootstrapDone = false;
@@ -354,16 +355,24 @@ class ProductUsecase {
       error: row.error || null,
       startedAt: Number(row.started_at || Date.now()),
       updatedAt: Number(row.updated_at || Date.now()),
+      lastPersistedAt: Number(row.updated_at || 0),
     };
   }
 
-  async persistJob(job) {
+  async persistJob(job, options = {}) {
     if (!job) return;
+    const force = Boolean(options.force);
+    const currentTs = now();
+    const lastPersistedAt = Number(job.lastPersistedAt || 0);
+    if (!force && currentTs - lastPersistedAt < JOB_PROGRESS_DB_FLUSH_INTERVAL_MS) {
+      return;
+    }
     if (
       this.productImageDownloadJobRepo &&
       typeof this.productImageDownloadJobRepo.upsert === "function"
     ) {
       await this.productImageDownloadJobRepo.upsert(job);
+      job.lastPersistedAt = currentTs;
     }
   }
 
@@ -384,7 +393,7 @@ class ProductUsecase {
     const tempRoot = DOWNLOAD_TMP_ROOT;
     const persistProgress = async () => {
       job.updatedAt = now();
-      await this.persistJob(job);
+      await this.persistJob(job, { force: true });
     };
 
     S3.createFolderZipInTmp(PRODUCT_IMAGES_FOLDER, {
@@ -570,7 +579,7 @@ class ProductUsecase {
 
     activeDownloadJob = job;
     downloadJobsById.set(jobId, job);
-    await this.persistJob(job);
+    await this.persistJob(job, { force: true });
     this.startOrResumeDownloadWorker(job);
 
     return {
@@ -739,7 +748,7 @@ class ProductUsecase {
       job.successfulDownloads = Number(job.successfulDownloads || 0) + 1;
       job.updatedAt = now();
       job.message = `Archive downloaded ${job.successfulDownloads} time(s)`;
-      await this.persistJob(job);
+      await this.persistJob(job, { force: true });
     }
   }
 
