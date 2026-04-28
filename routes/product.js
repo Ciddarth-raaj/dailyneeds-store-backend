@@ -238,7 +238,6 @@ class ProductRoutes {
       try {
         const schema = {
           zipFolderName: Joi.string().trim().max(100).optional(),
-          keepFileDownloadCount: Joi.number().integer().min(1).max(20).optional(),
         };
         const isValid = Joi.validate(req.body || {}, schema);
         if (isValid.error !== null) {
@@ -251,10 +250,6 @@ class ProductRoutes {
           sessionKey,
           {
             zipRootFolder: (req.body && req.body.zipFolderName) || "Images",
-            maxDownloads:
-              req.body && req.body.keepFileDownloadCount != null
-                ? req.body.keepFileDownloadCount
-                : 3,
           }
         );
         res.status(202).json(result);

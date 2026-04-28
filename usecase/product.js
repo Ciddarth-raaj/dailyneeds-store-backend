@@ -23,11 +23,6 @@ const createUsecaseError = (message, statusCode, code, extra = {}) => {
   return err;
 };
 
-const normalizeKeepFileDownloadCount = (value) => {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return 3;
-  return Math.max(1, Math.min(20, Math.floor(parsed)));
-};
 
 class ProductUsecase {
   constructor(productRepo, productImageLogUsecase, productImageDownloadJobRepo) {
@@ -325,11 +320,6 @@ class ProductUsecase {
       listed_files: job.listedFiles || 0,
       scanned_pages: job.scannedPages || 0,
       successful_downloads: job.successfulDownloads || 0,
-      max_downloads: job.maxDownloads || 3,
-      remaining_downloads: Math.max(
-        0,
-        (job.maxDownloads || 3) - (job.successfulDownloads || 0)
-      ),
       stage: job.stage || "queued",
       message: job.message || "",
       ready: job.status === "ready",
@@ -359,7 +349,6 @@ class ProductUsecase {
       listedFiles: Number(row.listed_files || 0),
       scannedPages: Number(row.scanned_pages || 0),
       successfulDownloads: Number(row.successful_downloads || 0),
-      maxDownloads: normalizeKeepFileDownloadCount(row.max_downloads),
       cancelled: Boolean(row.cancelled),
       message: row.message || "",
       error: row.error || null,
@@ -575,7 +564,6 @@ class ProductUsecase {
       tmpDir: null,
       cancelled: false,
       successfulDownloads: 0,
-      maxDownloads: normalizeKeepFileDownloadCount(options.maxDownloads),
       message: "Preparing file list",
       error: null,
     };
@@ -750,19 +738,9 @@ class ProductUsecase {
     if (wasSuccessful) {
       job.successfulDownloads = Number(job.successfulDownloads || 0) + 1;
       job.updatedAt = now();
-      const remaining = Math.max(0, job.maxDownloads - job.successfulDownloads);
-      if (remaining > 0) {
-        job.message = `Archive downloaded ${job.successfulDownloads}/${job.maxDownloads} times`;
-        await this.persistJob(job);
-        return;
-      }
+      job.message = `Archive downloaded ${job.successfulDownloads} time(s)`;
+      await this.persistJob(job);
     }
-
-    if (job.tmpDir) {
-      await S3.removePathSafe(job.tmpDir);
-    }
-    downloadJobsById.delete(jobId);
-    await this.removePersistedJob(jobId);
   }
 
   async cleanupDownloadTmpDirectoryKeepingActiveJobs() {
