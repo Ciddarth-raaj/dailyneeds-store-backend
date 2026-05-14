@@ -58,7 +58,10 @@ class GstRoutes {
     });
 
     const otpBodySchema = {
-      otp: Joi.string().trim().regex(/^[0-9]{4,10}$/).required(),
+      otp: Joi.string()
+        .trim()
+        .regex(/^[0-9]{4,10}$/)
+        .required(),
     };
 
     router.post("/taxpayer/otp/verify", async (req, res) => {
@@ -90,6 +93,18 @@ class GstRoutes {
         );
         const http =
           payload.axios_http_status != null ? payload.axios_http_status : 502;
+        res.status(http).json(payload);
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
+    router.get("/vendor-filing-dates", async (req, res) => {
+      try {
+        const payload = await this.gstUsecase.getAllVendorFilingDates();
+        const http =
+          payload.code === 200 ? 200 : payload.code === 503 ? 503 : 500;
         res.status(http).json(payload);
       } catch (err) {
         respondError(res, err);
@@ -144,10 +159,10 @@ class GstRoutes {
             result.code === 422
               ? 422
               : result.code === 503
-                ? 503
-                : result.code >= 400 && result.code < 600
-                  ? result.code
-                  : 502;
+              ? 503
+              : result.code >= 400 && result.code < 600
+              ? result.code
+              : 502;
           res.status(http).json(result);
         } else {
           res.json(result);

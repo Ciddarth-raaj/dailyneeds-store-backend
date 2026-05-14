@@ -38,6 +38,51 @@ class GstVendorRepository {
     this.db = db;
   }
 
+  getAllWithLatestFilingDate() {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT v.gst_vendor_id, v.gstin, v.vendor_name, v.is_active, v.created_at, v.updated_at,
+                lf.last_filing_date
+         FROM ${TABLE} v
+         LEFT JOIN (
+           SELECT vfd.gst_vendor_id, vfd.last_filing_date
+           FROM vendor_filing_date vfd
+           INNER JOIN (
+             SELECT gst_vendor_id, MAX(year * 100 + month) AS max_ym
+             FROM vendor_filing_date
+             GROUP BY gst_vendor_id
+           ) t ON t.gst_vendor_id = vfd.gst_vendor_id
+              AND (vfd.year * 100 + vfd.month) = t.max_ym
+         ) lf ON lf.gst_vendor_id = v.gst_vendor_id
+         ORDER BY v.gst_vendor_id ASC`,
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.GST_VENDOR",
+              code: "REPOSITORY.GST_VENDOR.GET_ALL_WITH_FILING",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            return reject(err);
+          }
+          resolve(
+            (rows || []).map((r) => ({
+              gst_vendor_id: r.gst_vendor_id,
+              gstin: r.gstin,
+              vendor_name: r.vendor_name,
+              is_active: Boolean(r.is_active),
+              created_at: r.created_at,
+              updated_at: r.updated_at,
+              last_filing_date: r.last_filing_date,
+            }))
+          );
+        }
+      );
+    });
+  }
+
   getAll() {
     return new Promise((resolve, reject) => {
       this.db.query(
@@ -57,6 +102,38 @@ class GstVendorRepository {
             return reject(err);
           }
           resolve((rows || []).map((r) => mapRow(r)));
+        }
+      );
+    });
+  }
+
+  /**
+   * @returns {Promise<number>} insertId (gst_vendor_id)
+   */
+  create({ gstin, vendor_name, sandbox_search_response = null, is_active = true }) {
+    const cache =
+      sandbox_search_response == null
+        ? null
+        : typeof sandbox_search_response === "string"
+          ? sandbox_search_response
+          : JSON.stringify(sandbox_search_response);
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `INSERT INTO ${TABLE} (gstin, vendor_name, sandbox_search_response, is_active) VALUES (?, ?, ?, ?)`,
+        [gstin, vendor_name, cache, is_active ? 1 : 0],
+        (err, res) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.GST_VENDOR",
+              code: "REPOSITORY.GST_VENDOR.CREATE",
+              description: err.toString(),
+              category: "",
+              ref: { gstin },
+            });
+            return reject(err);
+          }
+          resolve(res.insertId);
         }
       );
     });

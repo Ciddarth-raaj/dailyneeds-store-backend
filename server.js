@@ -82,7 +82,8 @@ class Server {
     return new Promise(async (resolve, reject) => {
       try {
         this.mysql = await require("./drivers/mysql")().connect();
-        this.mysqlGofrugal = await require("./drivers/mysql_gofrugal")().connect();
+        this.mysqlGofrugal =
+          await require("./drivers/mysql_gofrugal")().connect();
         //this.mongo = require('./models/mongo')().connect();
 
         this.drivers.push(this.mysql);
@@ -102,11 +103,26 @@ class Server {
     this.budgetRepo = require("./repository/budget")(this.mysql.connection);
     this.issueRepo = require("./repository/issue")(this.mysql.connection);
     this.exampleRepo = require("./repository/example")(this.mysql.connection);
-    this.gstVendorRepo = require("./repository/gst_vendor")(this.mysql.connection);
-    this.gstFetchLogRepo = require("./repository/gst_fetch_log")(this.mysql.connection);
-    this.sandboxGstTaxpayerSessionRepo = require("./repository/sandbox_gst_taxpayer_session")(
+    this.gstVendorRepo = require("./repository/gst_vendor")(
       this.mysql.connection
     );
+    this.gstFetchLogRepo = require("./repository/gst_fetch_log")(
+      this.mysql.connection
+    );
+    this.gstB2bRepo = require("./repository/gst_b2b")(this.mysql.connection);
+    this.gstB2bInvoiceRepo = require("./repository/gst_b2b_invoice")(
+      this.mysql.connection
+    );
+    this.gstB2bInvoiceItemRepo = require("./repository/gst_b2b_invoice_item")(
+      this.mysql.connection
+    );
+    this.vendorFilingDateRepo = require("./repository/vendor_filing_date")(
+      this.mysql.connection
+    );
+    this.sandboxGstTaxpayerSessionRepo =
+      require("./repository/sandbox_gst_taxpayer_session")(
+        this.mysql.connection
+      );
     this.departmentRepo = require("./repository/department")(
       this.mysql.connection
     );
@@ -198,9 +214,8 @@ class Server {
     this.productImageLogRepo = require("./repository/product_image_log")(
       this.mysql.connection
     );
-    this.productImageDownloadJobRepo = require("./repository/product_image_download_job")(
-      this.mysql.connection
-    );
+    this.productImageDownloadJobRepo =
+      require("./repository/product_image_download_job")(this.mysql.connection);
     this.gofrugalSynkerRepo = require("./repository/gofrugal_synker")(
       this.mysqlGofrugal.connection
     );
@@ -215,10 +230,11 @@ class Server {
       this.mysqlGofrugal.connection,
       this.mysql.connection
     );
-    this.purchaseAcknowledgementRepo = require("./repository/purchase_acknowledgement")(
-      this.mysql.connection,
-      this.mysqlGofrugal.connection
-    );
+    this.purchaseAcknowledgementRepo =
+      require("./repository/purchase_acknowledgement")(
+        this.mysql.connection,
+        this.mysqlGofrugal.connection
+      );
     this.remarksMasterRepo = require("./repository/remarks_master")(
       this.mysql.connection
     );
@@ -231,13 +247,14 @@ class Server {
     this.stockCheckerRepo = require("./repository/stock_checker")(
       this.mysql.connection
     );
-    this.productsExpiryCheckerRepo = require("./repository/products_expiry_checker")(
-      this.mysql.connection
-    );
+    this.productsExpiryCheckerRepo =
+      require("./repository/products_expiry_checker")(this.mysql.connection);
     this.stockTransferOutRepo = require("./repository/stock_transfer_out")(
       this.mysqlGofrugal.connection
     );
-    this.stoCheckRepo = require("./repository/sto_check")(this.mysql.connection);
+    this.stoCheckRepo = require("./repository/sto_check")(
+      this.mysql.connection
+    );
     this.productOffersRepo = require("./repository/product_offers")(
       this.mysql.connection
     );
@@ -260,10 +277,18 @@ class Server {
     );
     this.vehicleUsecase = require("./usecase/vehicle")(this.vehicleRepo);
     this.exampleUsecase = require("./usecase/example")(this.exampleRepo);
+    const { GstB2bSyncService } = require("./services/gst_b2b_sync");
+    this.gstB2bSyncService = new GstB2bSyncService({
+      gstB2bRepo: this.gstB2bRepo,
+      gstB2bInvoiceRepo: this.gstB2bInvoiceRepo,
+      gstB2bInvoiceItemRepo: this.gstB2bInvoiceItemRepo,
+      vendorFilingDateRepo: this.vendorFilingDateRepo,
+    });
     this.gstUsecase = require("./usecase/gst")(
       this.sandboxService,
       this.gstVendorRepo,
-      this.gstFetchLogRepo
+      this.gstFetchLogRepo,
+      this.gstB2bSyncService
     );
     this.departmentUsecase = require("./usecase/department")(
       this.departmentRepo
@@ -404,9 +429,10 @@ class Server {
     this.productDistributorsUsecase = require("./usecase/product_distributors")(
       this.productDistributorsRepo
     );
-    this.purchaseAcknowledgementUsecase = require("./usecase/purchase_acknowledgement")(
-      this.purchaseAcknowledgementRepo
-    );
+    this.purchaseAcknowledgementUsecase =
+      require("./usecase/purchase_acknowledgement")(
+        this.purchaseAcknowledgementRepo
+      );
     this.remarksMasterUsecase = require("./usecase/remarks_master")(
       this.remarksMasterRepo
     );
@@ -420,9 +446,10 @@ class Server {
       this.stockCheckerRepo,
       this.outletRepo
     );
-    this.productsExpiryCheckerUsecase = require("./usecase/products_expiry_checker")(
-      this.productsExpiryCheckerRepo
-    );
+    this.productsExpiryCheckerUsecase =
+      require("./usecase/products_expiry_checker")(
+        this.productsExpiryCheckerRepo
+      );
     this.stoCheckUsecase = require("./usecase/sto_check")(this.stoCheckRepo);
     this.stockTransferOutUsecase = require("./usecase/stock_transfer_out")(
       this.stockTransferOutRepo,
@@ -574,9 +601,10 @@ class Server {
     const productDistributorsRouter = require("./routes/product_distributors")(
       this.productDistributorsUsecase
     );
-    const purchaseAcknowledgementRouter = require("./routes/purchase_acknowledgement")(
-      this.purchaseAcknowledgementUsecase
-    );
+    const purchaseAcknowledgementRouter =
+      require("./routes/purchase_acknowledgement")(
+        this.purchaseAcknowledgementUsecase
+      );
     const remarksMasterRouter = require("./routes/remarks_master")(
       this.remarksMasterUsecase
     );
@@ -589,15 +617,14 @@ class Server {
     const stockCheckerRouter = require("./routes/stock_checker")(
       this.stockCheckerUsecase
     );
-    const productsExpiryCheckerRouter = require("./routes/products_expiry_checker")(
-      this.productsExpiryCheckerUsecase
-    );
+    const productsExpiryCheckerRouter =
+      require("./routes/products_expiry_checker")(
+        this.productsExpiryCheckerUsecase
+      );
     const stockTransferOutRouter = require("./routes/stock_transfer_out")(
       this.stockTransferOutUsecase
     );
-    const stoCheckRouter = require("./routes/sto_check")(
-      this.stoCheckUsecase
-    );
+    const stoCheckRouter = require("./routes/sto_check")(this.stoCheckUsecase);
     const productOffersRouter = require("./routes/product_offers")(
       this.productOffersUsecase
     );
@@ -664,12 +691,18 @@ class Server {
     app.use("/products-changes", productsChangesRouter.getRouter());
     app.use("/purchase-return", purchaseReturnRouter.getRouter());
     app.use("/product-distributors", productDistributorsRouter.getRouter());
-    app.use("/purchase-acknowledgement", purchaseAcknowledgementRouter.getRouter());
+    app.use(
+      "/purchase-acknowledgement",
+      purchaseAcknowledgementRouter.getRouter()
+    );
     app.use("/remarks-master", remarksMasterRouter.getRouter());
     app.use("/pick-pack-remarks", pickPackRemarksRouter.getRouter());
     app.use("/pick-pack-write-off", pickPackWriteOffRouter.getRouter());
     app.use("/stock-checker", stockCheckerRouter.getRouter());
-    app.use("/products-expiry-checker", productsExpiryCheckerRouter.getRouter());
+    app.use(
+      "/products-expiry-checker",
+      productsExpiryCheckerRouter.getRouter()
+    );
     app.use("/stock-transfer-out", stockTransferOutRouter.getRouter());
     app.use("/sto-check", stoCheckRouter.getRouter());
     app.use("/product-offers", productOffersRouter.getRouter());

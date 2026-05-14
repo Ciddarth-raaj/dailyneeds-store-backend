@@ -30,10 +30,11 @@ function pickGstr2aB2bArrayFromSandboxBody(body) {
 }
 
 class GstUsecase {
-  constructor(sandboxService, gstVendorRepo, gstFetchLogRepo) {
+  constructor(sandboxService, gstVendorRepo, gstFetchLogRepo, gstB2bSyncService) {
     this.sandboxService = sandboxService;
     this.gstVendorRepo = gstVendorRepo;
     this.gstFetchLogRepo = gstFetchLogRepo;
+    this.gstB2bSyncService = gstB2bSyncService || null;
   }
 
   _gstAuth() {
@@ -134,8 +135,74 @@ class GstUsecase {
     return null;
   }
 
+  /**
+   * Ensures a `gst_vendors` row exists for this CTIN.
+   * For **new** vendors, the legal/trade name is read from Sandbox via
+   * `this.sandboxService.searchGstin` (see `services/sandbox.js`), not from the app’s
+   * `POST /gst/search` route or `GstUsecase.searchGstin` (DB cache / upsert side effects).
+   */
+  async ensureVendorForB2bSync(ctin) {
+    const normalized = String(ctin).trim().toUpperCase();
+    const existing = await this.gstVendorRepo.getByGstin(normalized);
+    if (existing) {
+      return existing.gst_vendor_id;
+    }
+
+    let vendorName = `Supplier ${normalized}`;
+    let cache = null;
+
+    if (this.sandboxService.isEnabled()) {
+      try {
+        const acceptCache =
+          process.env.SANDBOX_GST_ACCEPT_CACHE === "true";
+        const axiosRes = await this.sandboxService.searchGstin(
+          normalized,
+          { acceptCache }
+        );
+        const body = axiosRes.data;
+        if (axiosRes.status === 200 && body && body.code === 200) {
+          const name = vendorNameFromSandboxBody(body);
+          if (name) {
+            vendorName = name;
+          }
+          if (shouldPersistSandboxSearch(body)) {
+            cache = body;
+          } else if (body.data && body.data.data) {
+            cache = body;
+          }
+        }
+      } catch (_) {
+        /* keep placeholder name */
+      }
+    }
+
+    const safeName = vendorName.slice(0, 512);
+    try {
+      return await this.gstVendorRepo.create({
+        gstin: normalized,
+        vendor_name: safeName,
+        sandbox_search_response: cache,
+        is_active: true,
+      });
+    } catch (err) {
+      const again = await this.gstVendorRepo.getByGstin(normalized);
+      if (again) {
+        return again.gst_vendor_id;
+      }
+      throw err;
+    }
+  }
+
   async getAllVendors() {
-    const rows = await this.gstVendorRepo.getAll();
+    const rows = await this.gstVendorRepo.getAllWithLatestFilingDate();
+    return { code: 200, data: rows };
+  }
+
+  async getAllVendorFilingDates() {
+    if (!this.gstB2bSyncService || !this.gstB2bSyncService.vendorFilingDateRepo) {
+      return { code: 503, msg: "GST B2B storage is not configured" };
+    }
+    const rows = await this.gstB2bSyncService.vendorFilingDateRepo.getAll();
     return { code: 200, data: rows };
   }
 
@@ -191,6 +258,48 @@ class GstUsecase {
     }
 
     const b2bAll = pickGstr2aB2bArrayFromSandboxBody(body);
+    const yearNum = parseInt(y, 10);
+    const monthNum = parseInt(m, 10);
+
+    const ctinSet = new Set();
+    for (const blk of b2bAll) {
+      const c =
+        blk && blk.ctin != null ? String(blk.ctin).trim().toUpperCase() : "";
+      if (c) {
+        ctinSet.add(c);
+      }
+    }
+
+    const ctinToVendorId = new Map();
+    for (const ctin of ctinSet) {
+      const vid = await this.ensureVendorForB2bSync(ctin);
+      ctinToVendorId.set(ctin, vid);
+    }
+
+    if (this.gstB2bSyncService) {
+      try {
+        await this.gstB2bSyncService.syncFromB2bArray(
+          b2bAll,
+          yearNum,
+          monthNum,
+          ctinToVendorId
+        );
+      } catch (syncErr) {
+        logger.Log({
+          level: logger.LEVEL.ERROR,
+          component: "USECASE.GST",
+          code: "USECASE.GST.GSTR2A_B2B_SYNC",
+          description: syncErr.toString(),
+          category: "",
+          ref: { year: y, month: m },
+        });
+        return {
+          code: 500,
+          msg: syncErr.message || "Failed to persist GSTR-2A B2B data",
+        };
+      }
+    }
+
     const byCtin = new Map();
     for (const row of b2bAll) {
       const ctin =
@@ -202,7 +311,9 @@ class GstUsecase {
       byCtin.get(ctin).push(row);
     }
 
-    const vendors = (await this.gstVendorRepo.getAll()).filter((v) => v.is_active);
+    const vendors = (await this.gstVendorRepo.getAll()).filter(
+      (v) => v.is_active
+    );
     const data = vendors.map((v) => {
       const gstin = String(v.gstin).trim().toUpperCase();
       return {
@@ -215,16 +326,13 @@ class GstUsecase {
 
     if (this.gstFetchLogRepo) {
       const uid =
-        createdById != null && createdById !== ""
-          ? Number(createdById)
-          : null;
-      const createdBy =
-        uid != null && Number.isFinite(uid) ? uid : null;
+        createdById != null && createdById !== "" ? Number(createdById) : null;
+      const createdBy = uid != null && Number.isFinite(uid) ? uid : null;
       try {
         await this.gstFetchLogRepo.create({
           type: "gstr-2a-b2b",
-          year: parseInt(y, 10),
-          month: parseInt(m, 10),
+          year: yearNum,
+          month: monthNum,
           created_by: createdBy,
         });
       } catch (err) {
@@ -255,8 +363,7 @@ class GstUsecase {
     if (!this.sandboxService.isEnabled()) {
       return {
         code: 503,
-        msg:
-          "Sandbox API is not configured and no cached search exists for this GSTIN (set SANDBOX_API_KEY and SANDBOX_API_SECRET)",
+        msg: "Sandbox API is not configured and no cached search exists for this GSTIN (set SANDBOX_API_KEY and SANDBOX_API_SECRET)",
       };
     }
 
@@ -285,8 +392,7 @@ class GstUsecase {
 
       const body = axiosRes.data;
       if (shouldPersistSandboxSearch(body)) {
-        const vendorName =
-          vendorNameFromSandboxBody(body) || normalized;
+        const vendorName = vendorNameFromSandboxBody(body) || normalized;
         await this.gstVendorRepo.upsertSearchCache(
           normalized,
           vendorName,
@@ -304,6 +410,11 @@ class GstUsecase {
   }
 }
 
-module.exports = (sandboxService, gstVendorRepo, gstFetchLogRepo) => {
-  return new GstUsecase(sandboxService, gstVendorRepo, gstFetchLogRepo);
+module.exports = (sandboxService, gstVendorRepo, gstFetchLogRepo, gstB2bSyncService) => {
+  return new GstUsecase(
+    sandboxService,
+    gstVendorRepo,
+    gstFetchLogRepo,
+    gstB2bSyncService
+  );
 };
