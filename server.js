@@ -103,6 +103,7 @@ class Server {
     this.issueRepo = require("./repository/issue")(this.mysql.connection);
     this.exampleRepo = require("./repository/example")(this.mysql.connection);
     this.gstVendorRepo = require("./repository/gst_vendor")(this.mysql.connection);
+    this.gstFetchLogRepo = require("./repository/gst_fetch_log")(this.mysql.connection);
     this.sandboxGstTaxpayerSessionRepo = require("./repository/sandbox_gst_taxpayer_session")(
       this.mysql.connection
     );
@@ -261,7 +262,8 @@ class Server {
     this.exampleUsecase = require("./usecase/example")(this.exampleRepo);
     this.gstUsecase = require("./usecase/gst")(
       this.sandboxService,
-      this.gstVendorRepo
+      this.gstVendorRepo,
+      this.gstFetchLogRepo
     );
     this.departmentUsecase = require("./usecase/department")(
       this.departmentRepo

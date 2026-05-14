@@ -124,9 +124,12 @@ class GstRoutes {
           throw isValid.error;
         }
 
+        const createdBy =
+          req.decoded && req.decoded.id != null ? req.decoded.id : null;
         const result = await this.gstUsecase.getGstr2aB2bGroupedByVendors(
           isValid.value.year,
-          isValid.value.month
+          isValid.value.month,
+          createdBy
         );
 
         if (result && result._block) {

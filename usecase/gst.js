@@ -1,3 +1,5 @@
+const logger = require("../utils/logger");
+
 function vendorNameFromSandboxBody(body) {
   const inner = body && body.data && body.data.data;
   if (!inner) return "";
@@ -28,9 +30,10 @@ function pickGstr2aB2bArrayFromSandboxBody(body) {
 }
 
 class GstUsecase {
-  constructor(sandboxService, gstVendorRepo) {
+  constructor(sandboxService, gstVendorRepo, gstFetchLogRepo) {
     this.sandboxService = sandboxService;
     this.gstVendorRepo = gstVendorRepo;
+    this.gstFetchLogRepo = gstFetchLogRepo;
   }
 
   _gstAuth() {
@@ -139,9 +142,10 @@ class GstUsecase {
   /**
    * Fetches GSTR-2A B2B for a return period from Sandbox, keeps only `data.data.b2b`,
    * and groups entries by configured vendors (active GSTINs).
+   * @param {number | string | null | undefined} createdById from `req.decoded.id`
    * @returns {Promise<{ code: number, data: object[] } | { _block: object } | { code: number, msg: string, sandbox?: object }>}
    */
-  async getGstr2aB2bGroupedByVendors(year, month) {
+  async getGstr2aB2bGroupedByVendors(year, month, createdById) {
     const block = await this.assertTaxpayerSessionForGstApis();
     if (block) {
       return { _block: block };
@@ -209,6 +213,32 @@ class GstUsecase {
       };
     });
 
+    if (this.gstFetchLogRepo) {
+      const uid =
+        createdById != null && createdById !== ""
+          ? Number(createdById)
+          : null;
+      const createdBy =
+        uid != null && Number.isFinite(uid) ? uid : null;
+      try {
+        await this.gstFetchLogRepo.create({
+          type: "gstr-2a-b2b",
+          year: parseInt(y, 10),
+          month: parseInt(m, 10),
+          created_by: createdBy,
+        });
+      } catch (err) {
+        logger.Log({
+          level: logger.LEVEL.ERROR,
+          component: "USECASE.GST",
+          code: "USECASE.GST.GSTR2A_B2B_FETCH_LOG",
+          description: err.toString(),
+          category: "",
+          ref: { year: y, month: m },
+        });
+      }
+    }
+
     return { code: 200, data };
   }
 
@@ -274,6 +304,6 @@ class GstUsecase {
   }
 }
 
-module.exports = (sandboxService, gstVendorRepo) => {
-  return new GstUsecase(sandboxService, gstVendorRepo);
+module.exports = (sandboxService, gstVendorRepo, gstFetchLogRepo) => {
+  return new GstUsecase(sandboxService, gstVendorRepo, gstFetchLogRepo);
 };
