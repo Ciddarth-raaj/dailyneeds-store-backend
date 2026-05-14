@@ -161,11 +161,19 @@ class GSTAuthentication {
     const revalidationAfter =
       last != null ? last + REVALIDATION_REQUIRED_AFTER_MS : null;
     const wallPast = this.isSessionWallExpired();
-    /** 30-day wall passed for an OTP-backed session (not "no JWT yet"). */
-    const sessionExpired =
-      wallPast && (hasToken || (last != null && Number.isFinite(last)));
+    /**
+     * True if the taxpayer session cannot be used: no JWT stored, or the 30-day
+     * `session_expires_at_ms` wall has passed. (Initial / cleared DB rows have no token,
+     * so this is true until OTP verify succeeds.)
+     */
+    const sessionExpired = !hasToken || wallPast;
+    /**
+     * True if the client should run request-OTP + verify (or revalidate): no usable JWT,
+     * or JWT still present but the 29-day GST revalidation window has been reached.
+     */
     const needsRevalidation =
-      !sessionExpired && this.requiresGstTaxpayerRevalidation();
+      !hasToken ||
+      (hasToken && this.requiresGstTaxpayerRevalidation());
     return {
       has_taxpayer_token: hasToken,
       token_expires_at_ms: this._taxpayerTokenExpiresAtMs,
