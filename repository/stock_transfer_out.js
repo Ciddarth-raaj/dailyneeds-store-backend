@@ -3,6 +3,9 @@ const logger = require("../utils/logger");
 const HDR_TABLE = "medishopdb_Vw_StockTransferOut_hdr";
 const DTL_TABLE = "medishopdb_Vw_StockTransferOut_dtl";
 
+/** Calendar column on the hdr view for `from_date` / `to_date` filters (change if your view differs). */
+const HDR_DATE_COLUMN = "Dn_Date";
+
 function groupDetailsByDnNo(dtlRows) {
   const byDnNo = {};
   (dtlRows || []).forEach((row) => {
@@ -28,9 +31,34 @@ class StockTransferOutRepository {
     this.db = dbGofrugal;
   }
 
-  get() {
+  /**
+   * @param {{ from_date?: string, to_date?: string }} [filters] — `from_date` / `to_date` as `YYYY-MM-DD` (inclusive on `HDR_DATE_COLUMN`).
+   */
+  get(filters = {}) {
+    const fromDate =
+      filters.from_date != null && String(filters.from_date).trim() !== ""
+        ? String(filters.from_date).trim()
+        : null;
+    const toDate =
+      filters.to_date != null && String(filters.to_date).trim() !== ""
+        ? String(filters.to_date).trim()
+        : null;
+
     return new Promise((resolve, reject) => {
-      this.db.query(`SELECT * FROM \`${HDR_TABLE}\` ORDER BY Dn_no DESC`, [], (err, headers) => {
+      const conditions = [];
+      const params = [];
+      if (fromDate) {
+        conditions.push(`DATE(\`${HDR_DATE_COLUMN}\`) >= DATE(?)`);
+        params.push(fromDate);
+      }
+      if (toDate) {
+        conditions.push(`DATE(\`${HDR_DATE_COLUMN}\`) <= DATE(?)`);
+        params.push(toDate);
+      }
+      const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+      const hdrSql = `SELECT * FROM \`${HDR_TABLE}\` ${where} ORDER BY Dn_no DESC`;
+
+      this.db.query(hdrSql, params, (err, headers) => {
         if (err) {
           logger.Log({
             level: logger.LEVEL.ERROR,
@@ -38,25 +66,60 @@ class StockTransferOutRepository {
             code: "REPOSITORY.STOCK_TRANSFER_OUT.GET",
             description: err.toString(),
             category: "",
-            ref: {},
+            ref: { from_date: fromDate, to_date: toDate },
           });
           return reject(err);
         }
-        this.db.query(`SELECT * FROM \`${DTL_TABLE}\` ORDER BY Dn_no, Dn_sl_no`, [], (err2, dtlRows) => {
-          if (err2) {
-            logger.Log({
-              level: logger.LEVEL.ERROR,
-              component: "REPOSITORY.STOCK_TRANSFER_OUT",
-              code: "REPOSITORY.STOCK_TRANSFER_OUT.GET_DTL",
-              description: err2.toString(),
-              category: "",
-              ref: {},
-            });
-            return reject(err2);
+        const hdrList = headers || [];
+        if (hdrList.length === 0) {
+          return resolve([]);
+        }
+
+        const hasDateFilter = Boolean(fromDate || toDate);
+        if (!hasDateFilter) {
+          this.db.query(
+            `SELECT * FROM \`${DTL_TABLE}\` ORDER BY Dn_no, Dn_sl_no`,
+            [],
+            (err2, dtlRows) => {
+              if (err2) {
+                logger.Log({
+                  level: logger.LEVEL.ERROR,
+                  component: "REPOSITORY.STOCK_TRANSFER_OUT",
+                  code: "REPOSITORY.STOCK_TRANSFER_OUT.GET_DTL",
+                  description: err2.toString(),
+                  category: "",
+                  ref: {},
+                });
+                return reject(err2);
+              }
+              const detailsByDnNo = groupDetailsByDnNo(dtlRows);
+              resolve(buildList(hdrList, detailsByDnNo));
+            }
+          );
+          return;
+        }
+
+        const dnNos = hdrList.map((h) => h.Dn_no);
+        const placeholders = dnNos.map(() => "?").join(",");
+        this.db.query(
+          `SELECT * FROM \`${DTL_TABLE}\` WHERE Dn_no IN (${placeholders}) ORDER BY Dn_no, Dn_sl_no`,
+          dnNos,
+          (err2, dtlRows) => {
+            if (err2) {
+              logger.Log({
+                level: logger.LEVEL.ERROR,
+                component: "REPOSITORY.STOCK_TRANSFER_OUT",
+                code: "REPOSITORY.STOCK_TRANSFER_OUT.GET_DTL",
+                description: err2.toString(),
+                category: "",
+                ref: {},
+              });
+              return reject(err2);
+            }
+            const detailsByDnNo = groupDetailsByDnNo(dtlRows);
+            resolve(buildList(hdrList, detailsByDnNo));
           }
-          const detailsByDnNo = groupDetailsByDnNo(dtlRows);
-          resolve(buildList(headers || [], detailsByDnNo));
-        });
+        );
       });
     });
   }

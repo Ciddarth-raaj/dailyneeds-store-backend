@@ -83,7 +83,10 @@ class StockTransferOutUsecase {
 
   async get(options = {}) {
     try {
-      const list = await this.stockTransferOutRepo.get();
+      const list = await this.stockTransferOutRepo.get({
+        from_date: options.from_date,
+        to_date: options.to_date,
+      });
       await attachBranches(list, this.outletUsecase);
       await attachFileQtyToList(list, this.stoCheckUsecase);
       if (options.is_checked === true) {
