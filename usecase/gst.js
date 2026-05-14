@@ -18,8 +18,102 @@ class GstUsecase {
     this.gstVendorRepo = gstVendorRepo;
   }
 
+  _gstAuth() {
+    return this.sandboxService && this.sandboxService.gstAuthentication;
+  }
+
+  _sandboxDisabledResponse() {
+    return {
+      code: 503,
+      msg: "Sandbox API is not configured (set SANDBOX_API_KEY and SANDBOX_API_SECRET)",
+    };
+  }
+
+  _noGstAuthResponse() {
+    return {
+      code: 503,
+      msg: "GST taxpayer authentication is not configured on this server",
+    };
+  }
+
   _cloneJson(obj) {
     return JSON.parse(JSON.stringify(obj));
+  }
+
+  async getTaxpayerSessionStatus() {
+    const ga = this._gstAuth();
+    if (!ga) {
+      return { ...this._noGstAuthResponse(), session: null };
+    }
+    await ga.loadFromDatabase();
+    return {
+      code: 200,
+      session: ga.getTaxpayerSessionStatusPayload(),
+    };
+  }
+
+  async requestTaxpayerOtp() {
+    if (!this.sandboxService.isEnabled()) {
+      return this._sandboxDisabledResponse();
+    }
+    const ga = this._gstAuth();
+    if (!ga) {
+      return this._noGstAuthResponse();
+    }
+    await ga.loadFromDatabase();
+    const sessionBefore = ga.getTaxpayerSessionStatusPayload();
+    const res = await ga.requestTaxpayerOtp();
+    await ga.loadFromDatabase();
+    const sessionAfter = ga.getTaxpayerSessionStatusPayload();
+    return {
+      code: res.data && res.data.code != null ? res.data.code : res.status,
+      axios_http_status: res.status,
+      sandbox: res.data,
+      session_before: sessionBefore,
+      session: sessionAfter,
+    };
+  }
+
+  async verifyTaxpayerOtp(otp) {
+    if (!this.sandboxService.isEnabled()) {
+      return this._sandboxDisabledResponse();
+    }
+    const ga = this._gstAuth();
+    if (!ga) {
+      return this._noGstAuthResponse();
+    }
+    const res = await ga.verifyTaxpayerOtp(otp);
+    await ga.loadFromDatabase();
+    const session = ga.getTaxpayerSessionStatusPayload();
+    return {
+      code: res.data && res.data.code != null ? res.data.code : res.status,
+      axios_http_status: res.status,
+      sandbox: res.data,
+      session,
+    };
+  }
+
+  async revalidateTaxpayerWithOtp(otp) {
+    return this.verifyTaxpayerOtp(otp);
+  }
+
+  /**
+   * For future GST taxpayer–authenticated Sandbox calls. GSTIN search does not use this.
+   * @returns {Promise<null | { code: number, requires_gst_taxpayer_otp: boolean }>}
+   */
+  async assertTaxpayerSessionForGstApis() {
+    if (!this.sandboxService.isEnabled()) {
+      return { code: 503, msg: this._sandboxDisabledResponse().msg };
+    }
+    const ga = this._gstAuth();
+    if (!ga) {
+      return this._noGstAuthResponse();
+    }
+    const err = await ga.ensureTaxpayerTokenUsableForGstApis();
+    if (err) {
+      return err;
+    }
+    return null;
   }
 
   async getAllVendors() {

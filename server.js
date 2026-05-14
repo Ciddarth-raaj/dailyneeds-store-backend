@@ -27,7 +27,9 @@ class Server {
 
       this.initRepositories();
       const SandboxService = require("./services/sandbox");
-      this.sandboxService = new SandboxService();
+      this.sandboxService = new SandboxService({
+        gstTaxpayerSessionRepo: this.sandboxGstTaxpayerSessionRepo,
+      });
       await this.sandboxService.initialize();
       this.initUsecases();
       this.initExpress();
@@ -101,6 +103,9 @@ class Server {
     this.issueRepo = require("./repository/issue")(this.mysql.connection);
     this.exampleRepo = require("./repository/example")(this.mysql.connection);
     this.gstVendorRepo = require("./repository/gst_vendor")(this.mysql.connection);
+    this.sandboxGstTaxpayerSessionRepo = require("./repository/sandbox_gst_taxpayer_session")(
+      this.mysql.connection
+    );
     this.departmentRepo = require("./repository/department")(
       this.mysql.connection
     );
@@ -715,6 +720,57 @@ class Server {
       PRODUCT_IMAGE_TMP_CLEANUP_CRON,
       async () => {
         await this.productUsecase.cleanupDownloadTmpDirectoryKeepingActiveJobs();
+      }
+    );
+
+    const SANDBOX_GST_TAXPAYER_REFRESH_CRON = "*/2 * * * *";
+    this.cronService.register(
+      "sandbox_gst_taxpayer_session_refresh",
+      SANDBOX_GST_TAXPAYER_REFRESH_CRON,
+      async () => {
+        if (
+          !this.sandboxService ||
+          !this.sandboxService.isEnabled() ||
+          !this.sandboxService.gstAuthentication
+        ) {
+          return;
+        }
+        try {
+          await this.sandboxService.gstAuthentication.refreshIfWithinRenewalWindow();
+        } catch (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "SERVER",
+            code: "SERVER.SANDBOX_GST_TAXPAYER_REFRESH_CRON",
+            description: err.toString(),
+            category: "",
+            ref: {},
+          });
+        }
+      }
+    );
+
+    const SANDBOX_GST_TAXPAYER_DAILY_CRON = "30 3 * * *";
+    this.cronService.register(
+      "sandbox_gst_taxpayer_daily_maintenance",
+      SANDBOX_GST_TAXPAYER_DAILY_CRON,
+      async () => {
+        if (!this.sandboxService || !this.sandboxService.gstAuthentication) {
+          return;
+        }
+        try {
+          await this.sandboxService.gstAuthentication.applySessionWallExpiryCleanup();
+          await this.sandboxService.gstAuthentication.applyDay29RevalidationJwtClear();
+        } catch (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "SERVER",
+            code: "SERVER.SANDBOX_GST_TAXPAYER_DAILY_CRON",
+            description: err.toString(),
+            category: "",
+            ref: {},
+          });
+        }
       }
     );
 

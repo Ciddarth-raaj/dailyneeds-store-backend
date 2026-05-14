@@ -1,6 +1,7 @@
 const router = require("express").Router();
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
+const { REQUIRES_OTP_CODE } = require("../services/gst_authentication");
 
 const GSTIN_PATTERN = /^[0-9A-Z]{15}$/;
 
@@ -11,6 +12,91 @@ class GstRoutes {
   }
 
   init() {
+    router.get("/taxpayer/session", async (req, res) => {
+      try {
+        const payload = await this.gstUsecase.getTaxpayerSessionStatus();
+        res.json(payload);
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
+    router.get("/taxpayer/session/check", async (req, res) => {
+      try {
+        const block = await this.gstUsecase.assertTaxpayerSessionForGstApis();
+        if (block) {
+          if (block.requires_gst_taxpayer_otp) {
+            res.status(REQUIRES_OTP_CODE).json(block);
+          } else {
+            res.status(block.code === 503 ? 503 : 500).json(block);
+          }
+        } else {
+          const st = await this.gstUsecase.getTaxpayerSessionStatus();
+          res.json({
+            code: 200,
+            ok: true,
+            session: st.session,
+          });
+        }
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
+    router.post("/taxpayer/otp/request", async (req, res) => {
+      try {
+        const payload = await this.gstUsecase.requestTaxpayerOtp();
+        const http =
+          payload.axios_http_status != null ? payload.axios_http_status : 502;
+        res.status(http).json(payload);
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
+    const otpBodySchema = {
+      otp: Joi.string().trim().regex(/^[0-9]{4,10}$/).required(),
+    };
+
+    router.post("/taxpayer/otp/verify", async (req, res) => {
+      try {
+        const isValid = Joi.validate(req.body, otpBodySchema);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+        const payload = await this.gstUsecase.verifyTaxpayerOtp(
+          isValid.value.otp
+        );
+        const http =
+          payload.axios_http_status != null ? payload.axios_http_status : 502;
+        res.status(http).json(payload);
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
+    router.post("/taxpayer/revalidate", async (req, res) => {
+      try {
+        const isValid = Joi.validate(req.body, otpBodySchema);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+        const payload = await this.gstUsecase.revalidateTaxpayerWithOtp(
+          isValid.value.otp
+        );
+        const http =
+          payload.axios_http_status != null ? payload.axios_http_status : 502;
+        res.status(http).json(payload);
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
     router.get("/vendors", async (req, res) => {
       try {
         const payload = await this.gstUsecase.getAllVendors();

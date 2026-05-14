@@ -3,6 +3,7 @@ require("dotenv").config();
 const axios = require("axios");
 const jwt = require("jsonwebtoken");
 const logger = require("../utils/logger");
+const GSTAuthentication = require("./gst_authentication");
 
 const DEFAULT_BASE_URL = "https://test-api.sandbox.co.in";
 const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
@@ -10,6 +11,7 @@ const FALLBACK_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 
 class SandboxService {
   constructor(options = {}) {
+    this.gstTaxpayerSessionRepo = options.gstTaxpayerSessionRepo || null;
     this.apiKey = options.apiKey ?? process.env.SANDBOX_API_KEY;
     this.apiSecret = options.apiSecret ?? process.env.SANDBOX_API_SECRET;
     this.baseUrl = (
@@ -21,14 +23,21 @@ class SandboxService {
       options.apiVersion ?? process.env.SANDBOX_API_VERSION ?? "1.0";
     /** GST compliance public APIs (e.g. GSTIN search) use a separate version header in Sandbox docs. */
     this.gstApiVersion =
-      options.gstApiVersion ??
-      process.env.SANDBOX_GST_API_VERSION ??
-      "1.0.0";
+      options.gstApiVersion ?? process.env.SANDBOX_GST_API_VERSION ?? "1.0.0";
     this.accessToken = null;
     /** @type {number} epoch ms — refresh when within TOKEN_REFRESH_BUFFER_MS of this */
     this.tokenExpiresAt = 0;
     this._refreshPromise = null;
     this._disabled = false;
+    this.gstAuthentication = this.gstTaxpayerSessionRepo
+      ? new GSTAuthentication({
+          baseUrl: this.baseUrl,
+          apiKey: this.apiKey,
+          gstApiVersion: this.gstApiVersion,
+          getSandboxAccessToken: () => this.getAccessToken(),
+          sessionRepo: this.gstTaxpayerSessionRepo,
+        })
+      : null;
   }
 
   _credentialsConfigured() {
@@ -117,6 +126,9 @@ class SandboxService {
       return;
     }
     await this.refreshAccessToken();
+    if (this.gstAuthentication) {
+      await this.gstAuthentication.loadFromDatabase();
+    }
   }
 
   /**
