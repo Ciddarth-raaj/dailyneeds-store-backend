@@ -26,6 +26,9 @@ class Server {
       await this.initDrivers();
 
       this.initRepositories();
+      const SandboxService = require("./services/sandbox");
+      this.sandboxService = new SandboxService();
+      await this.sandboxService.initialize();
       this.initUsecases();
       this.initExpress();
       this.initRoutes();
@@ -97,6 +100,7 @@ class Server {
     this.budgetRepo = require("./repository/budget")(this.mysql.connection);
     this.issueRepo = require("./repository/issue")(this.mysql.connection);
     this.exampleRepo = require("./repository/example")(this.mysql.connection);
+    this.gstVendorRepo = require("./repository/gst_vendor")(this.mysql.connection);
     this.departmentRepo = require("./repository/department")(
       this.mysql.connection
     );
@@ -250,6 +254,10 @@ class Server {
     );
     this.vehicleUsecase = require("./usecase/vehicle")(this.vehicleRepo);
     this.exampleUsecase = require("./usecase/example")(this.exampleRepo);
+    this.gstUsecase = require("./usecase/gst")(
+      this.sandboxService,
+      this.gstVendorRepo
+    );
     this.departmentUsecase = require("./usecase/department")(
       this.departmentRepo
     );
@@ -451,6 +459,7 @@ class Server {
     const familyRouter = require("./routes/family")(this.familyUsecase);
     const assetRouter = require("./routes/asset")(this.assetUsecase);
     const exampleRouter = require("./routes/example")(this.exampleUsecase);
+    const gstRouter = require("./routes/gst")(this.gstUsecase);
     const departmentRouter = require("./routes/department")(
       this.departmentUsecase
     );
@@ -600,6 +609,7 @@ class Server {
     app.use("/family", familyRouter.getRouter());
     app.use("/asset", assetRouter.getRouter());
     app.use("/example", exampleRouter.getRouter());
+    app.use("/gst", gstRouter.getRouter());
     app.use("/department", departmentRouter.getRouter());
     app.use("/designation", designationRouter.getRouter());
     app.use("/employee", employeeRouter.getRouter());
