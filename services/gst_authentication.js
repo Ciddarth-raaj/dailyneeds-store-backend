@@ -148,21 +148,26 @@ class GSTAuthentication {
   }
 
   isSessionWallExpired() {
-    if (this._sessionExpiresAtMs == null) {
+    const exp = this._sessionExpiresAtMs;
+    if (exp == null || !Number.isFinite(exp) || exp <= 0) {
       return false;
     }
-    return Date.now() >= this._sessionExpiresAtMs;
+    return Date.now() >= exp;
   }
 
   getTaxpayerSessionStatusPayload() {
+    const hasToken = Boolean(this._taxpayerToken);
     const last = this._lastOtpVerifiedAtMs;
     const revalidationAfter =
       last != null ? last + REVALIDATION_REQUIRED_AFTER_MS : null;
-    const sessionExpired = this.isSessionWallExpired();
+    const wallPast = this.isSessionWallExpired();
+    /** 30-day wall passed for an OTP-backed session (not "no JWT yet"). */
+    const sessionExpired =
+      wallPast && (hasToken || (last != null && Number.isFinite(last)));
     const needsRevalidation =
       !sessionExpired && this.requiresGstTaxpayerRevalidation();
     return {
-      has_taxpayer_token: Boolean(this._taxpayerToken),
+      has_taxpayer_token: hasToken,
       token_expires_at_ms: this._taxpayerTokenExpiresAtMs,
       session_expires_at_ms: this._sessionExpiresAtMs,
       last_otp_verified_at_ms: last,
@@ -198,9 +203,7 @@ class GSTAuthentication {
     const now = Date.now();
 
     if (this.isSessionWallExpired()) {
-      if (this._taxpayerToken || this._lastOtpVerifiedAtMs) {
-        await this._clearFullSession();
-      }
+      await this._clearFullSession();
       return this.buildRequiresOtpError({
         session_expired: true,
         msg: "GST taxpayer session (30 days) has expired. Run request OTP + verify to start a new session.",

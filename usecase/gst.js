@@ -12,6 +12,21 @@ function shouldPersistSandboxSearch(body) {
   return Boolean(body.data.data);
 }
 
+/**
+ * GSTR-2A B2B payload: only the `b2b` array from Sandbox (`data.data.b2b` on success body).
+ * @param {object} body parsed JSON from Sandbox
+ * @returns {object[]}
+ */
+function pickGstr2aB2bArrayFromSandboxBody(body) {
+  if (!body || typeof body !== "object") return [];
+  const d = body.data;
+  if (!d || typeof d !== "object") return [];
+  const inner = d.data;
+  if (!inner || typeof inner !== "object") return [];
+  const arr = inner.b2b;
+  return Array.isArray(arr) ? arr : [];
+}
+
 class GstUsecase {
   constructor(sandboxService, gstVendorRepo) {
     this.sandboxService = sandboxService;
@@ -119,6 +134,82 @@ class GstUsecase {
   async getAllVendors() {
     const rows = await this.gstVendorRepo.getAll();
     return { code: 200, data: rows };
+  }
+
+  /**
+   * Fetches GSTR-2A B2B for a return period from Sandbox, keeps only `data.data.b2b`,
+   * and groups entries by configured vendors (active GSTINs).
+   * @returns {Promise<{ code: number, data: object[] } | { _block: object } | { code: number, msg: string, sandbox?: object }>}
+   */
+  async getGstr2aB2bGroupedByVendors(year, month) {
+    const block = await this.assertTaxpayerSessionForGstApis();
+    if (block) {
+      return { _block: block };
+    }
+
+    if (!this.sandboxService.isEnabled()) {
+      return { code: 503, msg: this._sandboxDisabledResponse().msg };
+    }
+
+    const y = String(year).trim();
+    const m = String(month).trim().padStart(2, "0");
+
+    let axiosRes;
+    try {
+      axiosRes = await this.sandboxService.getGstr2aB2b(y, m);
+    } catch (err) {
+      if (err && err.gstOtpPayload) {
+        return { _block: err.gstOtpPayload };
+      }
+      return {
+        code: 500,
+        msg: err.message || String(err),
+      };
+    }
+
+    const body = axiosRes.data;
+    if (axiosRes.status !== 200) {
+      return {
+        code: axiosRes.status === 422 ? 422 : 502,
+        msg: `Sandbox GSTR-2A B2B failed (HTTP ${axiosRes.status})`,
+        sandbox: body,
+      };
+    }
+
+    if (body && body.code != null && Number(body.code) !== 200) {
+      return {
+        code: 502,
+        msg:
+          (body && (body.message || body.msg)) ||
+          "Sandbox returned an error for GSTR-2A B2B",
+        sandbox: body,
+      };
+    }
+
+    const b2bAll = pickGstr2aB2bArrayFromSandboxBody(body);
+    const byCtin = new Map();
+    for (const row of b2bAll) {
+      const ctin =
+        row && row.ctin != null ? String(row.ctin).trim().toUpperCase() : "";
+      if (!ctin) continue;
+      if (!byCtin.has(ctin)) {
+        byCtin.set(ctin, []);
+      }
+      byCtin.get(ctin).push(row);
+    }
+
+    const vendors = (await this.gstVendorRepo.getAll()).filter((v) => v.is_active);
+    const data = vendors.map((v) => {
+      const gstin = String(v.gstin).trim().toUpperCase();
+      return {
+        gst_vendor_id: v.gst_vendor_id,
+        gstin,
+        vendor_name: v.vendor_name,
+        b2b: byCtin.get(gstin) || [],
+      };
+    });
+
+    return { code: 200, data };
   }
 
   async searchGstin(gstin) {

@@ -197,6 +197,58 @@ class SandboxService {
     }
     return res;
   }
+
+  /**
+   * GET /gst/compliance/tax-payer/gstrs/gstr-2a/b2b/{year}/{month}
+   * Requires GST taxpayer session (JWT in Authorization, raw — no Bearer).
+   * @see https://developer.sandbox.co.in/api-reference/gst/compliance/endpoints/taxpayer/gstr-2a/b2b
+   * @param {string} year e.g. "2024"
+   * @param {string} month e.g. "04" or "4"
+   * @param {{ counterparty_gstin?: string, from?: string }} [query]
+   */
+  async getGstr2aB2b(year, month, query = {}) {
+    if (this._disabled || !this._credentialsConfigured()) {
+      throw new Error(
+        "SandboxService is disabled or missing SANDBOX_API_KEY / SANDBOX_API_SECRET"
+      );
+    }
+    if (!this.gstAuthentication) {
+      throw new Error(
+        "GST taxpayer authentication is not configured on this server"
+      );
+    }
+
+    const y = String(year).trim();
+    const m = String(month).trim().padStart(2, "0");
+    const url = `${this.baseUrl}/gst/compliance/tax-payer/gstrs/gstr-2a/b2b/${encodeURIComponent(y)}/${encodeURIComponent(m)}`;
+
+    const token = await this.gstAuthentication.getTaxpayerAccessTokenForGstApis();
+
+    const params = {};
+    if (query.counterparty_gstin) {
+      params.counterparty_gstin = String(query.counterparty_gstin)
+        .trim()
+        .toUpperCase();
+    }
+    if (query.from) {
+      params.from = String(query.from).trim();
+    }
+
+    const headers = {
+      accept: "application/json",
+      Authorization: token,
+      "content-type": "application/json",
+      "x-api-key": this.apiKey,
+      "x-api-version": this.gstApiVersion,
+    };
+
+    return axios.get(url, {
+      headers,
+      params,
+      timeout: 120000,
+      validateStatus: () => true,
+    });
+  }
 }
 
 module.exports = SandboxService;

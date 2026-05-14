@@ -107,6 +107,58 @@ class GstRoutes {
       res.end();
     });
 
+    router.get("/gstr-2a/b2b/:year/:month", async (req, res) => {
+      try {
+        const paramsSchema = {
+          year: Joi.string()
+            .trim()
+            .regex(/^[0-9]{4}$/)
+            .required(),
+          month: Joi.string()
+            .trim()
+            .regex(/^(0[1-9]|1[0-2]|[1-9])$/)
+            .required(),
+        };
+        const isValid = Joi.validate(req.params, paramsSchema);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const result = await this.gstUsecase.getGstr2aB2bGroupedByVendors(
+          isValid.value.year,
+          isValid.value.month
+        );
+
+        if (result && result._block) {
+          const b = result._block;
+          if (b.requires_gst_taxpayer_otp) {
+            res.status(REQUIRES_OTP_CODE).json(b);
+          } else {
+            res.status(b.code === 503 ? 503 : 500).json(b);
+          }
+        } else if (result && result.code != null && result.code !== 200) {
+          const http =
+            result.code === 422
+              ? 422
+              : result.code === 503
+                ? 503
+                : result.code >= 400 && result.code < 600
+                  ? result.code
+                  : 502;
+          res.status(http).json(result);
+        } else {
+          res.json(result);
+        }
+      } catch (err) {
+        if (err && err.gstOtpPayload) {
+          res.status(REQUIRES_OTP_CODE).json(err.gstOtpPayload);
+        } else {
+          respondError(res, err);
+        }
+      }
+      res.end();
+    });
+
     router.post("/search", async (req, res) => {
       try {
         const schema = {
