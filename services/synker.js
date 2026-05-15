@@ -140,7 +140,6 @@ class Synker {
   }
 
   initCronJobs(cronService) {
-    this.syncProductsWithLogging();
     // Schedule CRON job for product sync
     cronService.register("product_sync", CRON_SYNTAX_PRODUCT, async () => {
       await this.syncProductsWithLogging();
