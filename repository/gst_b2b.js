@@ -33,6 +33,32 @@ class GstB2bRepository {
     });
   }
 
+  getByReturnPeriod(year, month) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT gst_b2b_id, year, month, b2b_index, gst_vendor_id, ctin, cfs, created_at
+         FROM ${TABLE}
+         WHERE year = ? AND month = ?
+         ORDER BY b2b_index ASC`,
+        [year, month],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.GST_B2B",
+              code: "REPOSITORY.GST_B2B.GET_BY_PERIOD",
+              description: err.toString(),
+              category: "",
+              ref: { year, month },
+            });
+            return reject(err);
+          }
+          resolve(rows || []);
+        }
+      );
+    });
+  }
+
   insert(row) {
     return new Promise((resolve, reject) => {
       this.db.query(

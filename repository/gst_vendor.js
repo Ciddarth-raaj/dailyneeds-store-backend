@@ -108,6 +108,46 @@ class GstVendorRepository {
   }
 
   /**
+   * @param {number[]} ids `gst_vendor_id` values
+   * @returns {Promise<object[]>}
+   */
+  getByIds(ids) {
+    const uniq = [
+      ...new Set(
+        (ids || [])
+          .map((id) => Number(id))
+          .filter((n) => Number.isInteger(n) && n > 0)
+      ),
+    ];
+    if (!uniq.length) {
+      return Promise.resolve([]);
+    }
+    const placeholders = uniq.map(() => "?").join(",");
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT gst_vendor_id, gstin, vendor_name, is_active, created_at, updated_at
+         FROM ${TABLE}
+         WHERE gst_vendor_id IN (${placeholders})`,
+        uniq,
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.GST_VENDOR",
+              code: "REPOSITORY.GST_VENDOR.GET_BY_IDS",
+              description: err.toString(),
+              category: "",
+              ref: { count: uniq.length },
+            });
+            return reject(err);
+          }
+          resolve((rows || []).map((r) => mapRow(r)));
+        }
+      );
+    });
+  }
+
+  /**
    * @param {{ vendor_name?: string | null, sandbox_search_response?: object | string | null }} patch
    */
   updateVendorByGstin(gstin, patch) {
@@ -121,11 +161,7 @@ class GstVendorRepository {
       sets.push("sandbox_search_response = ?");
       const c = patch.sandbox_search_response;
       vals.push(
-        c == null
-          ? null
-          : typeof c === "string"
-            ? c
-            : JSON.stringify(c)
+        c == null ? null : typeof c === "string" ? c : JSON.stringify(c)
       );
     }
     if (sets.length === 0) {
@@ -134,7 +170,9 @@ class GstVendorRepository {
     vals.push(gstin);
     return new Promise((resolve, reject) => {
       this.db.query(
-        `UPDATE ${TABLE} SET ${sets.join(", ")}, updated_at = CURRENT_TIMESTAMP WHERE gstin = ?`,
+        `UPDATE ${TABLE} SET ${sets.join(
+          ", "
+        )}, updated_at = CURRENT_TIMESTAMP WHERE gstin = ?`,
         vals,
         (err) => {
           if (err) {
@@ -157,13 +195,18 @@ class GstVendorRepository {
   /**
    * @returns {Promise<number>} insertId (gst_vendor_id)
    */
-  create({ gstin, vendor_name = null, sandbox_search_response = null, is_active = true }) {
+  create({
+    gstin,
+    vendor_name = null,
+    sandbox_search_response = null,
+    is_active = true,
+  }) {
     const cache =
       sandbox_search_response == null
         ? null
         : typeof sandbox_search_response === "string"
-          ? sandbox_search_response
-          : JSON.stringify(sandbox_search_response);
+        ? sandbox_search_response
+        : JSON.stringify(sandbox_search_response);
     return new Promise((resolve, reject) => {
       this.db.query(
         `INSERT INTO ${TABLE} (gstin, vendor_name, sandbox_search_response, is_active) VALUES (?, ?, ?, ?)`,
@@ -216,7 +259,10 @@ class GstVendorRepository {
       typeof sandboxResponseBody === "string"
         ? sandboxResponseBody
         : JSON.stringify(sandboxResponseBody);
-    const name = vendorName != null && String(vendorName).trim() !== "" ? String(vendorName).trim().slice(0, 512) : null;
+    const name =
+      vendorName != null && String(vendorName).trim() !== ""
+        ? String(vendorName).trim().slice(0, 512)
+        : null;
     return new Promise((resolve, reject) => {
       this.db.query(
         `INSERT INTO ${TABLE} (gstin, vendor_name, sandbox_search_response)

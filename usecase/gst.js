@@ -110,11 +110,22 @@ function pickGstr2aB2bArrayFromSandboxBody(body) {
 }
 
 class GstUsecase {
-  constructor(sandboxService, gstVendorRepo, gstFetchLogRepo, gstB2bSyncService) {
+  constructor(
+    sandboxService,
+    gstVendorRepo,
+    gstFetchLogRepo,
+    gstB2bSyncService,
+    gstB2bRepo,
+    gstB2bInvoiceRepo,
+    gstB2bInvoiceItemRepo
+  ) {
     this.sandboxService = sandboxService;
     this.gstVendorRepo = gstVendorRepo;
     this.gstFetchLogRepo = gstFetchLogRepo;
     this.gstB2bSyncService = gstB2bSyncService || null;
+    this.gstB2bRepo = gstB2bRepo || null;
+    this.gstB2bInvoiceRepo = gstB2bInvoiceRepo || null;
+    this.gstB2bInvoiceItemRepo = gstB2bInvoiceItemRepo || null;
   }
 
   _gstAuth() {
@@ -277,6 +288,125 @@ class GstUsecase {
     }
     const rows = await this.gstB2bSyncService.vendorFilingDateRepo.getAll();
     return { code: 200, data: rows };
+  }
+
+  /**
+   * Stored GSTR-2A B2B invoices + line items for a return period (from MySQL after sync).
+   * @param {number|string} year
+   * @param {number|string} month 1–12
+   */
+  async getStoredB2bInvoicesForReturnPeriod(year, month) {
+    if (
+      !this.gstB2bRepo ||
+      !this.gstB2bInvoiceRepo ||
+      !this.gstB2bInvoiceItemRepo
+    ) {
+      return { code: 503, msg: "GST B2B storage is not configured" };
+    }
+    const y = Number(year);
+    const m = Number(month);
+    if (!Number.isFinite(y) || !Number.isFinite(m) || m < 1 || m > 12) {
+      return { code: 400, msg: "year and month must be valid (month 1–12)" };
+    }
+    try {
+      const b2bRows = await this.gstB2bRepo.getByReturnPeriod(y, m);
+      if (!b2bRows.length) {
+        return {
+          code: 200,
+          data: [],
+          meta: {
+            year: y,
+            month: m,
+            b2b_block_count: 0,
+            invoice_count: 0,
+            item_count: 0,
+          },
+        };
+      }
+      const gstB2bIds = b2bRows.map((r) => r.gst_b2b_id);
+      const invoices = await this.gstB2bInvoiceRepo.listByGstB2bIds(gstB2bIds);
+      const invIds = invoices.map((i) => i.gst_b2b_invoice_id);
+      const allItems = await this.gstB2bInvoiceItemRepo.listByInvoiceIds(invIds);
+      const vendorIds = [
+        ...new Set(
+          b2bRows
+            .map((b) => b.gst_vendor_id)
+            .filter((id) => id != null && Number.isFinite(Number(id)))
+            .map((id) => Number(id))
+        ),
+      ];
+      const vendorById = new Map();
+      if (vendorIds.length && this.gstVendorRepo) {
+        const vrows = await this.gstVendorRepo.getByIds(vendorIds);
+        for (const v of vrows) {
+          vendorById.set(v.gst_vendor_id, v);
+        }
+      }
+      const itemsByInvoiceId = new Map();
+      for (const it of allItems) {
+        const k = it.gst_b2b_invoice_id;
+        if (!itemsByInvoiceId.has(k)) {
+          itemsByInvoiceId.set(k, []);
+        }
+        itemsByInvoiceId.get(k).push(it);
+      }
+      const b2bById = new Map(b2bRows.map((b) => [b.gst_b2b_id, b]));
+      const data = invoices.map((inv) => {
+        const hdr = b2bById.get(inv.gst_b2b_id) || {};
+        const vid =
+          hdr.gst_vendor_id != null && Number.isFinite(Number(hdr.gst_vendor_id))
+            ? Number(hdr.gst_vendor_id)
+            : null;
+        const vend = vid != null ? vendorById.get(vid) : null;
+        return {
+          gst_b2b_id: inv.gst_b2b_id,
+          gst_b2b_invoice_id: inv.gst_b2b_invoice_id,
+          year: hdr.year,
+          month: hdr.month,
+          b2b_index: hdr.b2b_index,
+          gst_vendor_id: vid,
+          vendor_name: vend ? vend.vendor_name : null,
+          ctin: hdr.ctin,
+          cfs: hdr.cfs,
+          b2b_created_at: hdr.created_at,
+          inv_index: inv.inv_index,
+          inum: inv.inum,
+          idt: inv.idt,
+          oinum: inv.oinum,
+          oidt: inv.oidt,
+          val: inv.val,
+          pos: inv.pos,
+          rchrg: inv.rchrg,
+          inv_typ: inv.inv_typ,
+          etin: inv.etin,
+          fldtr1: inv.fldtr1,
+          diff_percent: inv.diff_percent,
+          invoice_created_at: inv.created_at,
+          items: itemsByInvoiceId.get(inv.gst_b2b_invoice_id) || [],
+        };
+      });
+      return {
+        code: 200,
+        data,
+        meta: {
+          year: y,
+          month: m,
+          b2b_block_count: b2bRows.length,
+          invoice_count: invoices.length,
+          item_count: allItems.length,
+        },
+      };
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "USECASE.GST",
+        code: "USECASE.GST.STORED_B2B_INVOICES",
+        description: err.toString(),
+        category: "",
+        ref: { year: y, month: m },
+      });
+      return { code: 500, msg: err.message || String(err) };
+    }
   }
 
   /**
@@ -494,11 +624,22 @@ class GstUsecase {
   }
 }
 
-module.exports = (sandboxService, gstVendorRepo, gstFetchLogRepo, gstB2bSyncService) => {
+module.exports = (
+  sandboxService,
+  gstVendorRepo,
+  gstFetchLogRepo,
+  gstB2bSyncService,
+  gstB2bRepo,
+  gstB2bInvoiceRepo,
+  gstB2bInvoiceItemRepo
+) => {
   return new GstUsecase(
     sandboxService,
     gstVendorRepo,
     gstFetchLogRepo,
-    gstB2bSyncService
+    gstB2bSyncService,
+    gstB2bRepo,
+    gstB2bInvoiceRepo,
+    gstB2bInvoiceItemRepo
   );
 };

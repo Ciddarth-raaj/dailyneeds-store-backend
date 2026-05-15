@@ -122,6 +122,49 @@ class GstRoutes {
       res.end();
     });
 
+    router.get("/b2b/invoices/:year/:month", async (req, res) => {
+      try {
+        const paramsSchema = {
+          year: Joi.string()
+            .trim()
+            .regex(/^[0-9]{4}$/)
+            .required(),
+          month: Joi.string()
+            .trim()
+            .regex(/^(0[1-9]|1[0-2]|[1-9])$/)
+            .required(),
+        };
+        const isValid = Joi.validate(req.params, paramsSchema);
+        if (isValid.error !== null) {
+          res.status(400).json({
+            code: 400,
+            msg: isValid.error.message || "Invalid year or month",
+          });
+          res.end();
+          return;
+        }
+        const yearNum = parseInt(isValid.value.year, 10);
+        const monthNum = parseInt(isValid.value.month, 10);
+        const payload =
+          await this.gstUsecase.getStoredB2bInvoicesForReturnPeriod(
+            yearNum,
+            monthNum
+          );
+        const http =
+          payload.code === 200
+            ? 200
+            : payload.code === 400
+              ? 400
+              : payload.code === 503
+                ? 503
+                : 500;
+        res.status(http).json(payload);
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
     router.get("/gstr-2a/b2b/:year/:month", async (req, res) => {
       try {
         const paramsSchema = {

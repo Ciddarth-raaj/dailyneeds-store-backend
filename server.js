@@ -288,7 +288,10 @@ class Server {
       this.sandboxService,
       this.gstVendorRepo,
       this.gstFetchLogRepo,
-      this.gstB2bSyncService
+      this.gstB2bSyncService,
+      this.gstB2bRepo,
+      this.gstB2bInvoiceRepo,
+      this.gstB2bInvoiceItemRepo
     );
     this.departmentUsecase = require("./usecase/department")(
       this.departmentRepo
