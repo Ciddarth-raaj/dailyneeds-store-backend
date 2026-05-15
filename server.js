@@ -261,6 +261,9 @@ class Server {
     this.productSalesRepo = require("./repository/product_sales")(
       this.mysql.connection
     );
+    this.deadStockItemsRepo = require("./repository/dead_stock_items")(
+      this.mysql.connection
+    );
     this.stockReceivedRepo = require("./repository/stock_received")(
       this.mysql.connection,
       this.mysqlGofrugal.connection
@@ -466,6 +469,9 @@ class Server {
       this.productSalesRepo,
       this.productOffersRepo
     );
+    this.deadStockItemsUsecase = require("./usecase/dead_stock_items")(
+      this.deadStockItemsRepo
+    );
     this.stockReceivedUsecase = require("./usecase/stock_received")(
       this.stockReceivedRepo
     );
@@ -634,6 +640,9 @@ class Server {
     const productSalesRouter = require("./routes/product_sales")(
       this.productSalesUsecase
     );
+    const deadStockItemsRouter = require("./routes/dead_stock_items")(
+      this.deadStockItemsUsecase
+    );
     const stockReceivedRouter = require("./routes/stock_received")(
       this.stockReceivedUsecase
     );
@@ -710,6 +719,7 @@ class Server {
     app.use("/sto-check", stoCheckRouter.getRouter());
     app.use("/product-offers", productOffersRouter.getRouter());
     app.use("/product-sales", productSalesRouter.getRouter());
+    app.use("/dead-stock-items", deadStockItemsRouter.getRouter());
     app.use("/stock-received", stockReceivedRouter.getRouter());
   }
 
