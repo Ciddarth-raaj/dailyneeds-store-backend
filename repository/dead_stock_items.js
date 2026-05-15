@@ -18,7 +18,6 @@ class DeadStockItemsRepository {
                 MAX(pt.gf_item_name) AS gf_item_name,
                 MAX(pt.de_name) AS de_name,
                 MAX(pt.de_distributor) AS de_distributor,
-                MAX(pt.buyer_name) AS buyer_name,
                 MAX(pt.department_id) AS department_id,
                 MAX(d.department_name) AS department_name,
                 dsi.\`type\`,
