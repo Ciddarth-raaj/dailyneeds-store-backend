@@ -24,13 +24,42 @@ const CRON_SYNTAX_CLEANING_PACKING = "0 9 * * *";
 
 // Columns on product_table that are updated by sync (for change detection). Excludes product_id.
 const SYNCED_PRODUCT_COLUMNS = [
-  "variant", "variant_of", "gf_item_name", "gf_description", "gf_detailed_description",
-  "gf_weight_grams", "gf_applies_online", "gf_item_product_type", "gf_manufacturer",
-  "gf_food_type", "gf_tax_id", "gf_status", "de_distributor", "brand_id", "category_id",
-  "subcategory_id", "measure", "measure_in", "packaging_type", "cleaning", "sticker",
-  "grinding", "cover_type", "cover_sizes", "return_prod", "de_display_name", "department_id",
-  "de_name", "de_packaging_type", "de_preparation_type", "de_combo_name",
-  "purchase_uom", "store_uom", "repln_mode", "de_is_online_allowed"
+  "variant",
+  "variant_of",
+  "gf_item_name",
+  "gf_description",
+  "gf_detailed_description",
+  "gf_weight_grams",
+  "gf_applies_online",
+  "gf_item_product_type",
+  "gf_manufacturer",
+  "gf_food_type",
+  "gf_tax_id",
+  "gf_status",
+  "de_distributor",
+  "brand_id",
+  "category_id",
+  "subcategory_id",
+  "measure",
+  "measure_in",
+  "packaging_type",
+  "cleaning",
+  "sticker",
+  "grinding",
+  "cover_type",
+  "cover_sizes",
+  "return_prod",
+  "de_display_name",
+  "department_id",
+  "de_name",
+  "de_packaging_type",
+  "de_preparation_type",
+  "de_combo_name",
+  "purchase_uom",
+  "store_uom",
+  "repln_mode",
+  "de_is_online_allowed",
+  "buyer_name",
 ];
 
 class Synker {
@@ -65,7 +94,8 @@ class Synker {
     const row = {};
     for (const col of SYNCED_PRODUCT_COLUMNS) {
       if (col === "return_prod") {
-        row[col] = product.return !== undefined ? product.return : product.return_prod;
+        row[col] =
+          product.return !== undefined ? product.return : product.return_prod;
       } else {
         row[col] = product[col];
       }
@@ -110,22 +140,15 @@ class Synker {
   }
 
   initCronJobs(cronService) {
+    this.syncProductsWithLogging();
     // Schedule CRON job for product sync
-    cronService.register(
-      "product_sync",
-      CRON_SYNTAX_PRODUCT,
-      async () => {
-        await this.syncProductsWithLogging();
-      }
-    );
+    cronService.register("product_sync", CRON_SYNTAX_PRODUCT, async () => {
+      await this.syncProductsWithLogging();
+    });
 
-    cronService.register(
-      "employee_sync",
-      CRON_SYNTAX_EMPLOYEE,
-      async () => {
-        await this.syncDigismeEmployees();
-      }
-    );
+    cronService.register("employee_sync", CRON_SYNTAX_EMPLOYEE, async () => {
+      await this.syncDigismeEmployees();
+    });
   }
 
   async getDigismeToken() {
@@ -196,12 +219,12 @@ class Synker {
             : null,
           status:
             employee.IsTerminated &&
-              employee.IsTerminated.toLowerCase() === "yes"
+            employee.IsTerminated.toLowerCase() === "yes"
               ? 0
               : 1,
           resignation_date:
             employee.IsTerminated &&
-              employee.IsTerminated.toLowerCase() === "yes"
+            employee.IsTerminated.toLowerCase() === "yes"
               ? new Date(employee.TerminateDate)
               : null,
         };
@@ -396,7 +419,7 @@ class Synker {
                 await this.productsChangesRepo.insert({
                   product_id: productId,
                   changes,
-                  is_approved: false
+                  is_approved: false,
                 });
               } catch (err) {
                 logger.Log({
@@ -405,7 +428,7 @@ class Synker {
                   code: "SERVICE.SYNKER.PRODUCTS_CHANGES_INSERT",
                   description: err.toString(),
                   category: "",
-                  ref: { product_id: productId }
+                  ref: { product_id: productId },
                 });
               }
             }
@@ -561,7 +584,7 @@ class Synker {
         }
       }
       return { itemPrices, outlets, products };
-    } catch (err) { }
+    } catch (err) {}
   }
 
   _fetchDeliumItems() {
@@ -703,6 +726,7 @@ class Synker {
         store_uom: product.store_uom,
         repln_mode: product.repln_mode,
         de_is_online_allowed: product.is_online_allowed,
+        buyer_name: product.buyer_name ?? null,
       });
     }
 

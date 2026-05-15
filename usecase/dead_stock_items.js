@@ -34,6 +34,12 @@ class DeadStockItemsUsecase {
           product_id: row.product_id,
           outlet_id: row.outlet_id,
           outlet_name: row.outlet_name,
+          gf_item_name: row.gf_item_name,
+          de_name: row.de_name,
+          de_distributor: row.de_distributor,
+          buyer_name: row.buyer_name,
+          department_id: row.department_id,
+          department_name: row.department_name,
           thirty_days: EMPTY_BUCKET(),
           ninety_days: EMPTY_BUCKET(),
           one_twenty_days: EMPTY_BUCKET(),
@@ -43,6 +49,24 @@ class DeadStockItemsUsecase {
       const entry = byKey.get(key);
       if (row.outlet_name != null && entry.outlet_name == null) {
         entry.outlet_name = row.outlet_name;
+      }
+      if (row.gf_item_name != null && entry.gf_item_name == null) {
+        entry.gf_item_name = row.gf_item_name;
+      }
+      if (row.de_name != null && entry.de_name == null) {
+        entry.de_name = row.de_name;
+      }
+      if (row.de_distributor != null && entry.de_distributor == null) {
+        entry.de_distributor = row.de_distributor;
+      }
+      if (row.buyer_name != null && entry.buyer_name == null) {
+        entry.buyer_name = row.buyer_name;
+      }
+      if (row.department_id != null && entry.department_id == null) {
+        entry.department_id = row.department_id;
+      }
+      if (row.department_name != null && entry.department_name == null) {
+        entry.department_name = row.department_name;
       }
       const respKey = TYPE_TO_RESPONSE_KEY[row.type];
       if (!respKey) {
@@ -110,14 +134,27 @@ class DeadStockItemsUsecase {
     }
 
     try {
-      const check = await this.deadStockItemsRepo.validateProductIdsAndOutletIds(
-        [...productIds],
-        [...outletIds]
+      const { validProductIds, validOutletIds } =
+        await this.deadStockItemsRepo.resolveValidProductAndOutletIds(
+          [...productIds],
+          [...outletIds]
+        );
+
+      const rowsToInsert = insertRows.filter(
+        (r) => validProductIds.has(r.product_id) && validOutletIds.has(r.outlet_id)
       );
-      if (check.code !== 200) {
-        return check;
+
+      const skippedUnknownProducts = [...productIds].filter((id) => !validProductIds.has(id));
+      const skippedUnknownOutlets = [...outletIds].filter((id) => !validOutletIds.has(id));
+
+      const result = await this.deadStockItemsRepo.truncateAndBulkInsert(rowsToInsert);
+      if (skippedUnknownProducts.length) {
+        result.skipped_unknown_products = skippedUnknownProducts.sort((a, b) => a - b);
       }
-      return await this.deadStockItemsRepo.truncateAndBulkInsert(insertRows);
+      if (skippedUnknownOutlets.length) {
+        result.skipped_unknown_outlets = skippedUnknownOutlets.sort((a, b) => a - b);
+      }
+      return result;
     } catch (err) {
       logger.Log({
         level: logger.LEVEL.ERROR,
