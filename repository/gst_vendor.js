@@ -108,9 +108,56 @@ class GstVendorRepository {
   }
 
   /**
+   * @param {{ vendor_name?: string | null, sandbox_search_response?: object | string | null }} patch
+   */
+  updateVendorByGstin(gstin, patch) {
+    const sets = [];
+    const vals = [];
+    if (patch.vendor_name !== undefined) {
+      sets.push("vendor_name = ?");
+      vals.push(patch.vendor_name);
+    }
+    if (patch.sandbox_search_response !== undefined) {
+      sets.push("sandbox_search_response = ?");
+      const c = patch.sandbox_search_response;
+      vals.push(
+        c == null
+          ? null
+          : typeof c === "string"
+            ? c
+            : JSON.stringify(c)
+      );
+    }
+    if (sets.length === 0) {
+      return Promise.resolve({ code: 200 });
+    }
+    vals.push(gstin);
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `UPDATE ${TABLE} SET ${sets.join(", ")}, updated_at = CURRENT_TIMESTAMP WHERE gstin = ?`,
+        vals,
+        (err) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.GST_VENDOR",
+              code: "REPOSITORY.GST_VENDOR.UPDATE_BY_GSTIN",
+              description: err.toString(),
+              category: "",
+              ref: { gstin },
+            });
+            return reject(err);
+          }
+          resolve({ code: 200 });
+        }
+      );
+    });
+  }
+
+  /**
    * @returns {Promise<number>} insertId (gst_vendor_id)
    */
-  create({ gstin, vendor_name, sandbox_search_response = null, is_active = true }) {
+  create({ gstin, vendor_name = null, sandbox_search_response = null, is_active = true }) {
     const cache =
       sandbox_search_response == null
         ? null
@@ -169,6 +216,7 @@ class GstVendorRepository {
       typeof sandboxResponseBody === "string"
         ? sandboxResponseBody
         : JSON.stringify(sandboxResponseBody);
+    const name = vendorName != null && String(vendorName).trim() !== "" ? String(vendorName).trim().slice(0, 512) : null;
     return new Promise((resolve, reject) => {
       this.db.query(
         `INSERT INTO ${TABLE} (gstin, vendor_name, sandbox_search_response)
@@ -177,7 +225,7 @@ class GstVendorRepository {
            vendor_name = VALUES(vendor_name),
            sandbox_search_response = VALUES(sandbox_search_response),
            updated_at = CURRENT_TIMESTAMP`,
-        [gstin, vendorName, payload],
+        [gstin, name, payload],
         (err) => {
           if (err) {
             logger.Log({

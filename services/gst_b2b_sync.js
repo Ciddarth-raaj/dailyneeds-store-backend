@@ -31,6 +31,14 @@ function parseGstDateToEpochMs(value) {
   if (typeof value !== "string") return null;
   const t = value.trim();
   if (!t) return null;
+  const ymdCompact = /^(\d{4})(\d{2})(\d{2})$/.exec(t);
+  if (ymdCompact) {
+    const yyyy = parseInt(ymdCompact[1], 10);
+    const mm = parseInt(ymdCompact[2], 10) - 1;
+    const dd = parseInt(ymdCompact[3], 10);
+    const d = new Date(yyyy, mm, dd);
+    return Number.isNaN(d.getTime()) ? null : d.getTime();
+  }
   const iso = /^\d{4}-\d{2}-\d{2}/.exec(t);
   if (iso) {
     const d = new Date(t.slice(0, 10));
@@ -61,32 +69,31 @@ function epochMsToSqlDate(epochMs) {
   return `${y}-${m}-${day}`;
 }
 
-/** GSTR-2A B2B invoice filing date field (GSTN naming varies). */
+/**
+ * Top-level `fldtr1` on each Sandbox `data.data.b2b[n]` object only (not under `inv[]`).
+ * Used exclusively for `vendor_filing_date.last_filing_date`.
+ */
+function pickFldtr1RawFromB2bBlock(block) {
+  if (!block || typeof block !== "object") return null;
+  const v = block.fldtr1 ?? block.FLDTR1;
+  if (v == null || String(v).trim() === "") return null;
+  return String(v).trim();
+}
+
+/** Invoice-line filing string from `inv[]` (stored on `gst_b2b_invoices` only). */
 function pickFilingRawFromInv(inv) {
   if (!inv || typeof inv !== "object") return null;
-  const direct = [
-    inv.fldtr1,
-    inv.FLDTR1,
-    inv.fldt,
-    inv.FLDT,
-  ];
+  const direct = [inv.fldtr1, inv.FLDTR1, inv.fldt, inv.FLDT];
   for (const d of direct) {
     if (d != null && String(d).trim() !== "") return String(d).trim();
   }
   for (const key of Object.keys(inv)) {
-    if (/^fldtr/i.test(key)) {
+    if (/fldtr/i.test(key)) {
       const v = inv[key];
       if (v != null && String(v).trim() !== "") return String(v).trim();
     }
   }
   return null;
-}
-
-function pickIdtRawFromInv(inv) {
-  if (!inv || typeof inv !== "object") return null;
-  const v = inv.idt ?? inv.IDT;
-  if (v == null || String(v).trim() === "") return null;
-  return String(v).trim();
 }
 
 function splitItmDet(itm_det) {
@@ -134,7 +141,7 @@ function bumpMaxDate(map, key, raw) {
 
 /**
  * Persists GSTR-2A B2B payload into gst_b2b / gst_b2b_invoices / gst_b2b_invoice_items
- * and vendor_filing_date. For the same return period, existing rows are removed first.
+ * and vendor_filing_date when `b2b[n].fldtr1` is present and parseable (no other source, no row otherwise).
  *
  * @param {Map<string, number>} ctinToVendorId — uppercased CTIN → gst_vendor_id (all vendors must exist before call)
  */
@@ -175,24 +182,15 @@ class GstB2bSyncService {
     }
 
     if (!Array.isArray(b2bArray) || b2bArray.length === 0) {
-      for (const [, gstVendorId] of ctinToVendorId) {
-        await this.vendorFilingDateRepo.insert({
-          gst_vendor_id: gstVendorId,
-          last_filing_date: null,
-          year,
-          month,
-        });
-      }
       return {
         inserted_b2b: 0,
         inserted_invoices: 0,
         inserted_items: 0,
-        vendor_filings: ctinToVendorId.size,
+        vendor_filings: 0,
       };
     }
 
-    const maxFldEpochByCtin = new Map();
-    const maxIdtEpochByCtin = new Map();
+    const maxBlockFldtr1EpochByCtin = new Map();
 
     let insertedB2b = 0;
     let insertedInvoices = 0;
@@ -226,16 +224,17 @@ class GstB2bSyncService {
       });
       insertedB2b += 1;
 
+      const blockFldtr1Raw = pickFldtr1RawFromB2bBlock(block);
+      if (blockFldtr1Raw != null) {
+        bumpMaxDate(maxBlockFldtr1EpochByCtin, ctin, blockFldtr1Raw);
+      }
+
       const invList = Array.isArray(block.inv) ? block.inv : [];
       for (let ii = 0; ii < invList.length; ii++) {
         const inv = invList[ii];
         if (!inv || typeof inv !== "object") continue;
 
         const filingRaw = pickFilingRawFromInv(inv);
-        bumpMaxDate(maxFldEpochByCtin, ctin, filingRaw);
-
-        const idtRaw = pickIdtRawFromInv(inv);
-        bumpMaxDate(maxIdtEpochByCtin, ctin, idtRaw);
 
         const invoiceId = await this.gstB2bInvoiceRepo.insert({
           gst_b2b_id: gstB2bId,
@@ -247,12 +246,14 @@ class GstB2bSyncService {
           val: toDecimalOrNull(inv.val),
           pos: inv.pos != null ? String(inv.pos).slice(0, 8) : null,
           rchrg: inv.rchrg != null ? String(inv.rchrg).slice(0, 8) : null,
-          inv_typ: inv.inv_typ != null ? String(inv.inv_typ).slice(0, 16) : null,
+          inv_typ:
+            inv.inv_typ != null ? String(inv.inv_typ).slice(0, 16) : null,
           etin: inv.etin != null ? String(inv.etin).slice(0, 16) : null,
-          fldtr1:
-            filingRaw != null ? String(filingRaw).slice(0, 64) : null,
+          fldtr1: filingRaw != null ? String(filingRaw).slice(0, 64) : null,
           diff_percent:
-            inv.diff_percent != null ? String(inv.diff_percent).slice(0, 16) : null,
+            inv.diff_percent != null
+              ? String(inv.diff_percent).slice(0, 16)
+              : null,
         });
         insertedInvoices += 1;
 
@@ -275,12 +276,11 @@ class GstB2bSyncService {
 
     let vendorFilings = 0;
     for (const [ctin, gstVendorId] of ctinToVendorId) {
-      const fldEp = maxFldEpochByCtin.get(ctin);
-      const idtEp = maxIdtEpochByCtin.get(ctin);
-      const chosenEp =
-        fldEp != null ? fldEp : idtEp != null ? idtEp : null;
-      const sqlDate = epochMsToSqlDate(chosenEp);
-
+      const fldEp = maxBlockFldtr1EpochByCtin.get(ctin);
+      const sqlDate = epochMsToSqlDate(fldEp);
+      if (sqlDate == null) {
+        continue;
+      }
       await this.vendorFilingDateRepo.insert({
         gst_vendor_id: gstVendorId,
         last_filing_date: sqlDate,
@@ -304,6 +304,6 @@ module.exports = {
   parseGstDateToEpochMs,
   epochMsToSqlDate,
   splitItmDet,
+  pickFldtr1RawFromB2bBlock,
   pickFilingRawFromInv,
-  pickIdtRawFromInv,
 };

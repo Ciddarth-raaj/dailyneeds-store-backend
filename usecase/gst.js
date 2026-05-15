@@ -1,10 +1,19 @@
 const logger = require("../utils/logger");
 
+/** Sandbox GSTIN search: wait after HTTP 429 before retrying (B2B vendor resolution). */
+const SANDBOX_GSTIN_SEARCH_429_WAIT_MS = 60 * 1000;
+/** Max number of waits (each followed by a retry); avoids unbounded stalls if rate limit persists. */
+const SANDBOX_GSTIN_SEARCH_429_MAX_WAITS = 10;
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function vendorNameFromSandboxBody(body) {
   const inner = body && body.data && body.data.data;
   if (!inner) return "";
   const tn = String(inner.tradeNam || inner.lgnm || "").trim();
-  return tn || String(inner.gstin || "").trim() || "";
+  return tn || "";
 }
 
 function shouldPersistSandboxSearch(body) {
@@ -12,6 +21,77 @@ function shouldPersistSandboxSearch(body) {
   if (body.data.error) return false;
   if (String(body.data.status_cd) !== "1") return false;
   return Boolean(body.data.data);
+}
+
+function isSupplierGstinPlaceholderName(vendorName, gstinUpper) {
+  if (vendorName == null || gstinUpper == null) return false;
+  const n = String(vendorName).trim();
+  const g = String(gstinUpper).trim().toUpperCase();
+  return new RegExp(`^supplier\\s+${g}$`, "i").test(n);
+}
+
+/** True when we have a real display name (not empty, not legacy `Supplier <GSTIN>`). */
+function hasResolvedVendorName(row, normalizedGstin) {
+  if (!row || row.vendor_name == null) return false;
+  const n = String(row.vendor_name).trim();
+  if (!n) return false;
+  return !isSupplierGstinPlaceholderName(n, normalizedGstin);
+}
+
+async function sandboxSearchVendorNameAndCache(sandboxService, normalized) {
+  let vendorName = null;
+  let cache = null;
+  if (!sandboxService || !sandboxService.isEnabled()) {
+    return { vendorName, cache };
+  }
+  try {
+    const acceptCache = process.env.SANDBOX_GST_ACCEPT_CACHE === "true";
+    let axiosRes;
+    for (let rateWait = 0; ; rateWait++) {
+      axiosRes = await sandboxService.searchGstin(normalized, {
+        acceptCache,
+      });
+      if (axiosRes.status !== 429) {
+        break;
+      }
+      if (rateWait >= SANDBOX_GSTIN_SEARCH_429_MAX_WAITS) {
+        logger.Log({
+          level: logger.LEVEL.WARN,
+          component: "USECASE.GST",
+          code: "USECASE.GST.SANDBOX_GSTIN_SEARCH_429_EXHAUSTED",
+          description: `Sandbox GSTIN search returned 429 after ${SANDBOX_GSTIN_SEARCH_429_MAX_WAITS} wait(s); giving up for ${normalized}`,
+          category: "",
+          ref: { gstin: normalized, waits: rateWait },
+        });
+        return { vendorName, cache };
+      }
+      logger.Log({
+        level: logger.LEVEL.WARN,
+        component: "USECASE.GST",
+        code: "USECASE.GST.SANDBOX_GSTIN_SEARCH_429",
+        description: `Sandbox GSTIN search 429 Too Many Requests for ${normalized}; waiting ${SANDBOX_GSTIN_SEARCH_429_WAIT_MS}ms before retry`,
+        category: "",
+        ref: { gstin: normalized, wait_index: rateWait + 1 },
+      });
+      await delay(SANDBOX_GSTIN_SEARCH_429_WAIT_MS);
+    }
+
+    const body = axiosRes.data;
+    if (axiosRes.status === 200 && body && body.code === 200) {
+      const name = vendorNameFromSandboxBody(body);
+      if (name) {
+        vendorName = name.slice(0, 512);
+      }
+      if (shouldPersistSandboxSearch(body)) {
+        cache = body;
+      } else if (body.data && body.data.data) {
+        cache = body;
+      }
+    }
+  } catch (_) {
+    /* leave nulls */
+  }
+  return { vendorName, cache };
 }
 
 /**
@@ -137,60 +217,53 @@ class GstUsecase {
 
   /**
    * Ensures a `gst_vendors` row exists for this CTIN.
-   * For **new** vendors, the legal/trade name is read from Sandbox via
-   * `this.sandboxService.searchGstin` (see `services/sandbox.js`), not from the app’s
-   * `POST /gst/search` route or `GstUsecase.searchGstin` (DB cache / upsert side effects).
+   * Names come from Sandbox `searchGstin` only; if none, `vendor_name` stays `NULL`.
+   * Existing rows with missing or legacy placeholder names are refreshed from Sandbox.
    */
   async ensureVendorForB2bSync(ctin) {
     const normalized = String(ctin).trim().toUpperCase();
-    const existing = await this.gstVendorRepo.getByGstin(normalized);
-    if (existing) {
-      return existing.gst_vendor_id;
+    const row = await this.gstVendorRepo.getByGstin(normalized);
+
+    if (row && hasResolvedVendorName(row, normalized)) {
+      return row.gst_vendor_id;
     }
 
-    let vendorName = `Supplier ${normalized}`;
-    let cache = null;
+    const { vendorName, cache } = await sandboxSearchVendorNameAndCache(
+      this.sandboxService,
+      normalized
+    );
 
-    if (this.sandboxService.isEnabled()) {
+    if (!row) {
       try {
-        const acceptCache =
-          process.env.SANDBOX_GST_ACCEPT_CACHE === "true";
-        const axiosRes = await this.sandboxService.searchGstin(
-          normalized,
-          { acceptCache }
-        );
-        const body = axiosRes.data;
-        if (axiosRes.status === 200 && body && body.code === 200) {
-          const name = vendorNameFromSandboxBody(body);
-          if (name) {
-            vendorName = name;
+        return await this.gstVendorRepo.create({
+          gstin: normalized,
+          vendor_name: vendorName,
+          sandbox_search_response: cache,
+          is_active: true,
+        });
+      } catch (err) {
+        const again = await this.gstVendorRepo.getByGstin(normalized);
+        if (again) {
+          if (
+            !hasResolvedVendorName(again, normalized) &&
+            (vendorName != null || cache != null)
+          ) {
+            const patch = { vendor_name: vendorName };
+            if (cache != null) patch.sandbox_search_response = cache;
+            await this.gstVendorRepo.updateVendorByGstin(normalized, patch);
           }
-          if (shouldPersistSandboxSearch(body)) {
-            cache = body;
-          } else if (body.data && body.data.data) {
-            cache = body;
-          }
+          return again.gst_vendor_id;
         }
-      } catch (_) {
-        /* keep placeholder name */
+        throw err;
       }
     }
 
-    const safeName = vendorName.slice(0, 512);
-    try {
-      return await this.gstVendorRepo.create({
-        gstin: normalized,
-        vendor_name: safeName,
-        sandbox_search_response: cache,
-        is_active: true,
-      });
-    } catch (err) {
-      const again = await this.gstVendorRepo.getByGstin(normalized);
-      if (again) {
-        return again.gst_vendor_id;
-      }
-      throw err;
+    if (vendorName != null || cache != null) {
+      const patch = { vendor_name: vendorName };
+      if (cache != null) patch.sandbox_search_response = cache;
+      await this.gstVendorRepo.updateVendorByGstin(normalized, patch);
     }
+    return row.gst_vendor_id;
   }
 
   async getAllVendors() {
@@ -354,8 +427,15 @@ class GstUsecase {
     const normalized = String(gstin).trim().toUpperCase();
 
     const local = await this.gstVendorRepo.getByGstin(normalized);
-    if (local && local.sandbox_search_response != null) {
-      return this._cloneJson(local.sandbox_search_response);
+    if (
+      local &&
+      local.sandbox_search_response != null &&
+      hasResolvedVendorName(local, normalized)
+    ) {
+      return {
+        ...this._cloneJson(local.sandbox_search_response),
+        search_source: "database",
+      };
     }
 
     const acceptCache = process.env.SANDBOX_GST_ACCEPT_CACHE === "true";
@@ -364,6 +444,7 @@ class GstUsecase {
       return {
         code: 503,
         msg: "Sandbox API is not configured and no cached search exists for this GSTIN (set SANDBOX_API_KEY and SANDBOX_API_SECRET)",
+        search_source: null,
       };
     }
 
@@ -379,6 +460,7 @@ class GstUsecase {
           msg: d.message || "Invalid GSTIN pattern",
           timestamp: d.timestamp,
           transaction_id: d.transaction_id,
+          search_source: null,
         };
       }
 
@@ -387,12 +469,13 @@ class GstUsecase {
           code: 502,
           msg: `Sandbox GSTIN search failed (HTTP ${axiosRes.status})`,
           detail: axiosRes.data,
+          search_source: null,
         };
       }
 
       const body = axiosRes.data;
       if (shouldPersistSandboxSearch(body)) {
-        const vendorName = vendorNameFromSandboxBody(body) || normalized;
+        const vendorName = vendorNameFromSandboxBody(body) || null;
         await this.gstVendorRepo.upsertSearchCache(
           normalized,
           vendorName,
@@ -400,11 +483,12 @@ class GstUsecase {
         );
       }
 
-      return body;
+      return { ...body, search_source: "sandbox" };
     } catch (err) {
       return {
         code: 500,
         msg: err.message || String(err),
+        search_source: null,
       };
     }
   }

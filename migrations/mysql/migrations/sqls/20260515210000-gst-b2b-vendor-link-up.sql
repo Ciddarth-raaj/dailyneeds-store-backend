@@ -1,4 +1,4 @@
--- Link B2B blocks to gst_vendors; widen fldtr1; allow filing date unknown until GSTN returns fldtr1
+-- Link B2B blocks to gst_vendors; widen fldtr1 (last_filing_date stays NOT NULL — app uses fldtr1, idt, or period end).
 
 ALTER TABLE gst_b2b
   ADD COLUMN gst_vendor_id INT UNSIGNED NULL AFTER b2b_index,
@@ -7,6 +7,3 @@ ALTER TABLE gst_b2b
 
 ALTER TABLE gst_b2b_invoices
   MODIFY COLUMN fldtr1 VARCHAR(64) NULL COMMENT 'Filing / return date string from GSTN';
-
-ALTER TABLE vendor_filing_date
-  MODIFY COLUMN last_filing_date DATE NULL COMMENT 'Max fldtr1 (or fallback idt) for vendor in this sync';
