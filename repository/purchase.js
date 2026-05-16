@@ -186,6 +186,7 @@ class PurchaseRepository {
 
       this.db.query(
         `SELECT p.*, 
+          p.mmh_dist_bill_no,
           pi.cash_discount,
           pi.scheme_difference,
           pi.cost_difference,
@@ -249,6 +250,7 @@ class PurchaseRepository {
               supplier_name: doc.SupplierName || null,
               cost_centre: doc.CostCentre || null,
             },
+            mmh_dist_bill_no: doc.mmh_dist_bill_no || null,
           }));
 
           resolve({ code: 200, data: parsedDocs });
@@ -261,6 +263,7 @@ class PurchaseRepository {
     return new Promise((resolve, reject) => {
       this.db.query(
         `SELECT p.*, 
+          p.mmh_dist_bill_no,
           pi.cash_discount,
           pi.scheme_difference,
           pi.cost_difference,
@@ -319,6 +322,7 @@ class PurchaseRepository {
             invoice_value: doc.InvoiceValue || null,
             supplier_name: doc.SupplierName || null,
             cost_centre: doc.CostCentre || null,
+            mmh_dist_bill_no: doc.mmh_dist_bill_no || null,
           };
 
           resolve({ code: 200, data: parsedDoc });
