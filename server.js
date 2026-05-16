@@ -178,6 +178,9 @@ class Server {
     this.gstTallyPurchaseRepo = require("./repository/gst_tally_purchase")(
       this.mysql.connection
     );
+    this.purchaseGstRepo = require("./repository/purchase_gst")(
+      this.mysql.connection
+    );
     this.debitNoteRepo = require("./repository/debit_note")(
       this.mysql.connection
     );
@@ -393,6 +396,9 @@ class Server {
       this.purchaseRepo,
       this.gstTallyPurchaseRepo
     );
+    this.purchaseGstUsecase = require("./usecase/purchase_gst")(
+      this.purchaseGstRepo
+    );
     // Add materials usecase
     this.materialsUsecase = require("./usecase/materials")(this.materialsRepo);
     this.materialRequestUsecase = require("./usecase/material_request")(
@@ -560,6 +566,9 @@ class Server {
       this.digitalPaymentsUsecase
     );
     const purchaseRouter = require("./routes/purchase")(this.purchaseUsecase);
+    const purchaseGstRouter = require("./routes/purchase_gst")(
+      this.purchaseGstUsecase
+    );
     const purchaseTallyRouter = require("./routes/purchase_tally")(
       this.purchaseTallyUsecase
     );
@@ -692,6 +701,7 @@ class Server {
     app.use("/reconciliation", reconciliationRouter.getRouter());
     app.use("/digital-payments", digitalPaymentsRouter.getRouter());
     app.use("/purchase", purchaseRouter.getRouter());
+    app.use("/purchase-gst", purchaseGstRouter.getRouter());
     app.use("/purchase-tally", purchaseTallyRouter.getRouter());
     app.use("/debit-note-tally", debitNoteTallyRouter.getRouter());
     app.use("/tally", tallyRouter.getRouter());
