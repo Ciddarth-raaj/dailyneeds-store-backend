@@ -897,7 +897,9 @@ class PurchaseRepository {
               (k) => purchase[k] !== undefined
             );
             if (purchaseFields.length > 0) {
-              const setClause = purchaseFields.map((k) => `${k} = ?`).join(", ");
+              const setClause = purchaseFields
+                .map((k) => `${k} = ?`)
+                .join(", ");
               const values = purchaseFields.map((k) => purchase[k]);
               await new Promise((res, rej) => {
                 this.db.query(
@@ -941,7 +943,9 @@ class PurchaseRepository {
                 ];
                 await new Promise((res, rej) => {
                   this.db.query(
-                    `INSERT INTO purchase_internal (${cols.join(", ")}) VALUES (${placeholders})`,
+                    `INSERT INTO purchase_internal (${cols.join(
+                      ", "
+                    )}) VALUES (${placeholders})`,
                     values,
                     (e) => (e ? rej(e) : res())
                   );

@@ -45,7 +45,9 @@ class TallyRoutes {
 
     router.post("/gst-purchase", async (req, res) => {
       try {
-        const { error, value } = gstTallyPurchaseRequestSchema.validate(req.body);
+        const { error, value } = gstTallyPurchaseRequestSchema.validate(
+          req.body
+        );
         if (error) {
           res.status(422).json({ code: 422, msg: error.toString() });
           res.end();

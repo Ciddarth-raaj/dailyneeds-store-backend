@@ -68,7 +68,7 @@ Sync a single Tally purchase (or journal) voucher: **create**, **update**, or **
 | `MasterID`      | Unique identifier for this Tally entry (stable across updates) |
 | `VoucherNumber` | Purchase reference number (`mmh_mrc_refno` in DailyNeeds)      |
 
-Send as much detail as available, especially `ledgerentries` for tax breakdown.
+Send all fields below on every request (use `""` where not applicable). Fields are validated only; empty values are not stored unless noted in action behaviour. Include `ledgerentries` with real lines when tax breakdown applies.
 
 ---
 
@@ -204,32 +204,72 @@ Deletes the row from `gst_tally_purchase` (internal row removed via cascade).
 }
 ```
 
-### Voucher header fields
+### Voucher header fields (purchase)
 
-| Field                      | Type            | Description                                  |
-| -------------------------- | --------------- | -------------------------------------------- |
-| `MasterID`                 | string          | **Required.** Unique Tally master id         |
-| `VoucherNumber`            | string          | **Required.** MRC reference / voucher number |
-| `VoucherDate`              | string          | `YYYYMMDD` or `YYYY-MM-DD`                   |
-| `Reference`                | string          | Distributor bill number                      |
-| `ReferenceDate`            | string          | Bill date                                    |
-| `PartyName`                | string          | Supplier name                                |
-| `PartyCode`                | string          | Supplier code                                |
-| `BuyerName`                | string          | Buyer display name                           |
-| `BuyerGSTIN`               | string          | Supplier GSTIN                               |
-| `BuyerGSTRegistrationType` | string          | e.g. `Regular`                               |
-| `VoucherType`              | string          | See outlet table below                       |
-| `VoucherCostCentre`        | string          | Outlet / cost centre name                    |
-| `Voucher_Total`            | string / number | Total voucher amount                         |
-| `Narration`                | string          | Narration text                               |
-| `PlaceOfSupply`            | string          | e.g. `Puducherry`                            |
-| `IsInvoice`                | string          | e.g. `Yes`                                   |
-| `IsDeleted`                | string          |                                              |
-| `ConsigneeName`            | string          |                                              |
-| `ConsigneeGSTIN`           | string          |                                              |
-| `ledgerentries`            | array           | Ledger lines (see below)                     |
+| Field | Description |
+|-------|-------------|
+| `MasterID` | **Required.** Unique Tally master id |
+| `VoucherNumber` | **Required.** MRC reference / voucher number |
+| `VoucherDate` | `YYYYMMDD` or `YYYY-MM-DD` |
+| `Reference` | Distributor bill number |
+| `ReferenceDate` | Bill date |
+| `PartyName` | Supplier name |
+| `PartyCode` | Supplier code |
+| `VoucherType` | See outlet table below |
+| `DeliveryNoteNo` | |
+| `Voucher_Total` | Total voucher amount |
+| `DeliveryNoteDate` | |
+| `DispatchThrough` | |
+| `Destination` | |
+| `CarrierName` | |
+| `LRNo` | |
+| `LRDate` | |
+| `MotorVehicleNo` | |
+| `OrderNo` | |
+| `OrderDate` | |
+| `TermsOfPayment` | |
+| `OtherReferences` | |
+| `TermsOfDelivery` | |
+| `PlaceOfSupply` | e.g. `Puducherry` |
+| `IsInvoice` | e.g. `Yes` |
+| `IsDeleted` | |
+| `BuyerGSTRegistrationType` | e.g. `Regular` |
+| `BuyerName` | |
+| `BuyerAlias` | |
+| `BuyerGSTIN` | Supplier GSTIN |
+| `BuyerAddress` | |
+| `BuyerPinCode` | |
+| `BuyerState` | |
+| `BuyerCountryName` | |
+| `BuyerEmail` | |
+| `BuyerMobile` | |
+| `ConsigneeName` | |
+| `ConsigneeGSTIN` | |
+| `ConsigneeAddress` | |
+| `ConsigneePinCode` | |
+| `ConsigneeState` | |
+| `ConsigneeCountryName` | |
+| `VoucherCostCentre` | Outlet / cost centre name |
+| `Narration` | |
+| `EWayBillDetails` | |
+| `EInvoiceDetails` | |
+| `item_total` | |
+| `SVViewName` | e.g. `InvVchView` |
+| `ledgerentries` | Ledger lines (see below) |
 
-Additional header fields are accepted if present.
+### Additional fields (journal vouchers)
+
+| Field | Description |
+|-------|-------------|
+| `DispatchDocNo` | |
+| `Place_of_Supply` | |
+| `Buyer_Registration_Type` | |
+| `ConsigneeTallyGroup` | |
+| `Consignee_Registration_Type` | e.g. `Unregistered/Consumer` |
+| `PurOrder` | |
+| `PurOrderID` | |
+| `WorkOrder` | |
+| `WorkOrderID` | |
 
 ### `VoucherType` values (outlet mapping)
 
@@ -270,77 +310,229 @@ When `VoucherType` is `Journal`, use the same top-level shape; journal-specific 
 
 ---
 
-## Example requests
+## Example request bodies
 
-### Create
+### Create (purchase)
 
-```bash
-curl -X POST "https://api.dnds.co.in/tally/gst-purchase" \
-  -H "x-access-token: YOUR_ACCESS_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "action": "create",
-    "data": {
-      "MasterID": "ext-001-purchase",
-      "VoucherNumber": "MRC99901",
-      "VoucherDate": "20260115",
-      "Reference": "BILL-9001",
-      "PartyName": "ABC Distributors",
-      "PartyCode": "ABC01",
-      "BuyerGSTIN": "34AAAAA0000A1Z5",
-      "VoucherType": "PurchaseDN1",
-      "VoucherCostCentre": "Dailyneeds 1",
-      "Voucher_Total": "10000.00",
-      "Narration": "GST purchase sync",
-      "ledgerentries": [
-        {
-          "LedgerName": "ABC Distributors",
-          "LedgerAmount": "10000.00",
-          "IsDeemedPositive": "No",
-          "BillsAllocation": [
-            {
-              "AgstType": "New Ref",
-              "Reference": "BILL-9001",
-              "Amount": "10000.00"
-            }
-          ]
-        }
-      ]
-    }
-  }'
+```json
+{
+  "action": "create",
+  "data": {
+    "MasterID": "ext-001-purchase",
+    "VoucherNumber": "MRC99901",
+    "VoucherDate": "20260115",
+    "Reference": "BILL-9001",
+    "ReferenceDate": "20260115",
+    "PartyName": "ABC Distributors",
+    "PartyCode": "ABC01",
+    "VoucherType": "PurchaseDN1",
+    "DeliveryNoteNo": "",
+    "Voucher_Total": "10000.00",
+    "DeliveryNoteDate": "",
+    "DispatchThrough": "",
+    "Destination": "",
+    "CarrierName": "",
+    "LRNo": "",
+    "LRDate": "",
+    "MotorVehicleNo": "",
+    "OrderNo": "",
+    "OrderDate": "",
+    "TermsOfPayment": "",
+    "OtherReferences": "",
+    "TermsOfDelivery": "",
+    "PlaceOfSupply": "Puducherry",
+    "IsInvoice": "Yes",
+    "IsDeleted": "",
+    "BuyerGSTRegistrationType": "Regular",
+    "BuyerName": "ABC Distributors",
+    "BuyerAlias": "",
+    "BuyerGSTIN": "34AAAAA0000A1Z5",
+    "BuyerAddress": "",
+    "BuyerPinCode": "",
+    "BuyerState": " ",
+    "BuyerCountryName": "India",
+    "BuyerEmail": "",
+    "BuyerMobile": "",
+    "ConsigneeName": "Dailyneeds Department Store",
+    "ConsigneeGSTIN": "34AAJFD4987C1ZD",
+    "ConsigneeAddress": ",",
+    "ConsigneePinCode": "",
+    "ConsigneeState": "Puducherry",
+    "ConsigneeCountryName": "India",
+    "VoucherCostCentre": "Dailyneeds 1",
+    "Narration": "GST purchase sync",
+    "EWayBillDetails": "",
+    "EInvoiceDetails": "",
+    "item_total": "",
+    "SVViewName": "InvVchView",
+    "ledgerentries": [
+      {
+        "LedgerName": "ABC Distributors",
+        "LedgerGroup": "",
+        "LedgerAmount": "10000.00",
+        "IsDeemedPositive": "No",
+        "GSTClassification": "",
+        "IGSTRate": "",
+        "IsPartyLedger": "No",
+        "BillsAllocation": [
+          {
+            "AgstType": "New Ref",
+            "Reference": "BILL-9001",
+            "CreditPeriod": 0,
+            "Amount": "10000.00"
+          }
+        ],
+        "CategoryAllocation": "",
+        "LedgerDescription": "",
+        "BillRefType": ""
+      }
+    ]
+  }
+}
 ```
 
-### Update
+### Create (journal)
 
-```bash
-curl -X POST "https://api.dnds.co.in/tally/gst-purchase" \
-  -H "x-access-token: YOUR_ACCESS_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "action": "update",
-    "data": {
-      "MasterID": "ext-001-purchase",
-      "VoucherNumber": "MRC99901",
-      "Voucher_Total": "10500.00",
-      "Narration": "Updated total",
-      "ledgerentries": []
-    }
-  }'
+```json
+{
+  "action": "create",
+  "data": {
+    "MasterID": "ext-001-journal",
+    "VoucherNumber": "MRC99901",
+    "VoucherDate": "20260115",
+    "Reference": "BILL-9001",
+    "ReferenceDate": "20260115",
+    "PartyName": "ABC Distributors",
+    "VoucherType": "Journal",
+    "DeliveryNoteNo": "",
+    "Voucher_Total": "10000.00",
+    "DeliveryNoteDate": "",
+    "DispatchDocNo": "",
+    "DispatchThrough": "",
+    "Destination": "",
+    "CarrierName": "",
+    "LRNo": "",
+    "LRDate": "",
+    "MotorVehicleNo": "",
+    "OrderNo": "",
+    "OrderDate": "",
+    "TermsOfPayment": "",
+    "OtherReferences": "",
+    "TermsOfDelivery": "",
+    "Place_of_Supply": "",
+    "IsInvoice": "No",
+    "BuyerGSTRegistrationType": "",
+    "BuyerName": "",
+    "BuyerAlias": "",
+    "BuyerGSTIN": "",
+    "BuyerAddress": "",
+    "BuyerPinCode": "",
+    "BuyerState": "",
+    "BuyerCountryName": "",
+    "Buyer_Registration_Type": "",
+    "BuyerEmail": "",
+    "BuyerMobile": "",
+    "ConsigneeName": "",
+    "ConsigneeAddress": "",
+    "ConsigneeGSTIN": "",
+    "ConsigneeTallyGroup": "",
+    "ConsigneePinCode": "",
+    "ConsigneeState": "",
+    "ConsigneeCountryName": "",
+    "VoucherCostCentre": "",
+    "Consignee_Registration_Type": "Unregistered/Consumer",
+    "Narration": "",
+    "PurOrder": "",
+    "PurOrderID": "",
+    "WorkOrder": "",
+    "WorkOrderID": "",
+    "SVViewName": "AccVchView",
+    "ledgerentries": [
+      {
+        "LedgerName": "ABC Distributors",
+        "LedgerAmount": "10000.00",
+        "GroupName": "$$GroupSundryCreditors",
+        "IsDeemedPositive": "Yes",
+        "IsPartyLedger": "",
+        "IGSTRate": "",
+        "HSNCode": "",
+        "Cess_Rate": "",
+        "BillsAllocation": [],
+        "CategoryAllocation": []
+      }
+    ]
+  }
+}
+```
+
+### Update (purchase — same field list; change values as needed)
+
+```json
+{
+  "action": "update",
+  "data": {
+    "MasterID": "ext-001-purchase",
+    "VoucherNumber": "MRC99901",
+    "VoucherDate": "20260115",
+    "Reference": "BILL-9001",
+    "ReferenceDate": "20260115",
+    "PartyName": "ABC Distributors",
+    "PartyCode": "ABC01",
+    "VoucherType": "PurchaseDN1",
+    "DeliveryNoteNo": "",
+    "Voucher_Total": "10500.00",
+    "DeliveryNoteDate": "",
+    "DispatchThrough": "",
+    "Destination": "",
+    "CarrierName": "",
+    "LRNo": "",
+    "LRDate": "",
+    "MotorVehicleNo": "",
+    "OrderNo": "",
+    "OrderDate": "",
+    "TermsOfPayment": "",
+    "OtherReferences": "",
+    "TermsOfDelivery": "",
+    "PlaceOfSupply": "Puducherry",
+    "IsInvoice": "Yes",
+    "IsDeleted": "",
+    "BuyerGSTRegistrationType": "Regular",
+    "BuyerName": "ABC Distributors",
+    "BuyerAlias": "",
+    "BuyerGSTIN": "34AAAAA0000A1Z5",
+    "BuyerAddress": "",
+    "BuyerPinCode": "",
+    "BuyerState": " ",
+    "BuyerCountryName": "India",
+    "BuyerEmail": "",
+    "BuyerMobile": "",
+    "ConsigneeName": "Dailyneeds Department Store",
+    "ConsigneeGSTIN": "34AAJFD4987C1ZD",
+    "ConsigneeAddress": ",",
+    "ConsigneePinCode": "",
+    "ConsigneeState": "Puducherry",
+    "ConsigneeCountryName": "India",
+    "VoucherCostCentre": "Dailyneeds 1",
+    "Narration": "Updated total",
+    "EWayBillDetails": "",
+    "EInvoiceDetails": "",
+    "item_total": "",
+    "SVViewName": "InvVchView",
+    "ledgerentries": []
+  }
+}
 ```
 
 ### Delete
 
-```bash
-curl -X POST "https://api.dnds.co.in/tally/gst-purchase" \
-  -H "x-access-token: YOUR_ACCESS_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "action": "delete",
-    "data": {
-      "MasterID": "ext-001-purchase",
-      "VoucherNumber": "MRC99901"
-    }
-  }'
+```json
+{
+  "action": "delete",
+  "data": {
+    "MasterID": "ext-001-purchase",
+    "VoucherNumber": "MRC99901"
+  }
+}
 ```
 
 ---
