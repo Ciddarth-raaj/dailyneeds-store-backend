@@ -1,10 +1,14 @@
 const router = require("express").Router();
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
+const {
+  gstTallyPurchaseRequestSchema,
+} = require("../utils/tally_purchase_schema");
 
 class TallyRoutes {
-  constructor(tallyUsecase) {
+  constructor(tallyUsecase, gstTallyPurchaseUsecase) {
     this.tallyUsecase = tallyUsecase;
+    this.gstTallyPurchaseUsecase = gstTallyPurchaseUsecase;
 
     this.init();
   }
@@ -36,6 +40,29 @@ class TallyRoutes {
         }
       }
 
+      res.end();
+    });
+
+    router.post("/gst-purchase", async (req, res) => {
+      try {
+        const { error, value } = gstTallyPurchaseRequestSchema.validate(req.body);
+        if (error) {
+          res.status(422).json({ code: 422, msg: error.toString() });
+          res.end();
+          return;
+        }
+
+        const result = await this.gstTallyPurchaseUsecase.sync(value);
+        if (result.code === 404) {
+          res.status(404).json(result);
+        } else if (result.code === 400 || result.code === 422) {
+          res.status(result.code).json(result);
+        } else {
+          res.json(result);
+        }
+      } catch (err) {
+        respondError(res, err);
+      }
       res.end();
     });
 
@@ -154,6 +181,6 @@ class TallyRoutes {
   }
 }
 
-module.exports = (tallyUsecase) => {
-  return new TallyRoutes(tallyUsecase);
+module.exports = (tallyUsecase, gstTallyPurchaseUsecase) => {
+  return new TallyRoutes(tallyUsecase, gstTallyPurchaseUsecase);
 };

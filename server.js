@@ -175,6 +175,9 @@ class Server {
       this.mysql.connection
     );
     this.tallyRepo = require("./repository/tally")(this.mysql.connection);
+    this.gstTallyPurchaseRepo = require("./repository/gst_tally_purchase")(
+      this.mysql.connection
+    );
     this.debitNoteRepo = require("./repository/debit_note")(
       this.mysql.connection
     );
@@ -386,6 +389,10 @@ class Server {
       this.accountsUsecase,
       this.debitNoteUsecase
     );
+    this.gstTallyPurchaseUsecase = require("./usecase/gst_tally_purchase")(
+      this.purchaseRepo,
+      this.gstTallyPurchaseRepo
+    );
     // Add materials usecase
     this.materialsUsecase = require("./usecase/materials")(this.materialsRepo);
     this.materialRequestUsecase = require("./usecase/material_request")(
@@ -559,7 +566,10 @@ class Server {
     const debitNoteTallyRouter = require("./routes/debit_note_tally")(
       this.debitNoteTallyUsecase
     );
-    const tallyRouter = require("./routes/tally")(this.tallyUsecase);
+    const tallyRouter = require("./routes/tally")(
+      this.tallyUsecase,
+      this.gstTallyPurchaseUsecase
+    );
     const debitNoteRouter = require("./routes/debit_note")(
       this.debitNoteUsecase
     );
