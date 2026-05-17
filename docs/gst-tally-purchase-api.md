@@ -125,12 +125,12 @@ Inserts a new record in `gst_tally_purchase` (and `gst_tally_purchase_internal`)
 
 ### `update`
 
-Updates data based on whether `VoucherNumber` exists in the main `purchase` table.
+Updates data based on whether `MasterID` exists in `purchase_tally_response` and is linked to a `purchase` row.
 
-| Condition                            | Behaviour                                                      |
-| ------------------------------------ | -------------------------------------------------------------- |
-| `VoucherNumber` exists in `purchase` | Updates `purchase` and `purchase_internal`                     |
-| `VoucherNumber` not in `purchase`    | Updates `gst_tally_purchase` and `gst_tally_purchase_internal` |
+| Condition | Behaviour |
+| --------- | --------- |
+| `MasterID` in `purchase_tally_response` with linked `purchase` (via `VoucherNo` + outlet `CostCentre`) | Updates `purchase` and `purchase_internal` |
+| Otherwise | Updates `gst_tally_purchase` and `gst_tally_purchase_internal` |
 
 **Per-item result (200) — updated in main purchase table**
 
@@ -643,8 +643,8 @@ Per-item codes inside `results` (HTTP status remains 200):
 
 ## Integration notes
 
-1. **Stable `MasterID`** — Use a fixed id per Tally voucher so updates and deletes target the same row.
-2. **`VoucherNumber`** — Maps to `mmh_mrc_refno`; drives update routing between `purchase` and `gst_tally_purchase`.
+1. **Stable `MasterID`** — Use a fixed id per Tally voucher. On **update**, routes to `purchase` when this id exists in `purchase_tally_response` and joins to a purchase row; otherwise updates `gst_tally_purchase`. Used for **delete** on `gst_tally_purchase`.
+2. **`VoucherNumber`** — Maps to `mmh_mrc_refno` on stored rows.
 3. **`Action` per item** — Each voucher in `data` must include its own `Action`; different actions can be sent in one request.
 4. **Tax lines** — Include `ledgerentries` on create/update so SGST/CGST/IGST amounts are stored correctly.
 5. **Token** — The issued token does not expire; rotate only if compromised (contact DailyNeeds).

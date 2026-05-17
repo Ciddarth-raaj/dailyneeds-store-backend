@@ -855,128 +855,120 @@ class PurchaseRepository {
     });
   }
 
-  existsByMmhMrcRefno(mmh_mrc_refno) {
+  _findPurchaseIdByTallyMasterId(masterId) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT purchase_id FROM purchase WHERE mmh_mrc_refno = ? LIMIT 1`,
-        [String(mmh_mrc_refno).trim()],
+        `SELECT p.purchase_id
+         FROM purchase_tally_response tr
+         INNER JOIN outlets o ON tr.CostCentre = o.outlet_name
+         INNER JOIN purchase p
+           ON p.mmh_mrc_refno = tr.VoucherNo
+          AND p.retail_outlet_id = o.outlet_id
+         WHERE tr.MasterID = ?
+         LIMIT 1`,
+        [String(masterId).trim()],
         (err, rows) => {
           if (err) {
             logger.Log({
               level: logger.LEVEL.ERROR,
               component: "REPOSITORY.PURCHASE",
-              code: "REPOSITORY.PURCHASE.EXISTS_BY_REFNO",
+              code: "REPOSITORY.PURCHASE.FIND_BY_TALLY_MASTER_ID",
               description: err.toString(),
               category: "",
-              ref: {},
+              ref: { masterId },
             });
             return reject(err);
           }
-          resolve(Boolean(rows && rows.length > 0));
+          resolve(rows && rows[0] ? rows[0].purchase_id : null);
         }
       );
     });
   }
 
-  updateFromTallyData(mmh_mrc_refno, { purchase = {}, internal = {} }) {
-    return new Promise((resolve, reject) => {
-      this.db.query(
-        `SELECT purchase_id FROM purchase WHERE mmh_mrc_refno = ? LIMIT 1`,
-        [String(mmh_mrc_refno).trim()],
-        async (err, rows) => {
-          if (err) {
-            logger.Log({
-              level: logger.LEVEL.ERROR,
-              component: "REPOSITORY.PURCHASE",
-              code: "REPOSITORY.PURCHASE.UPDATE_FROM_TALLY",
-              description: err.toString(),
-              category: "",
-              ref: {},
-            });
-            return reject(err);
-          }
+  existsByTallyMasterId(masterId) {
+    return this._findPurchaseIdByTallyMasterId(masterId).then(Boolean);
+  }
 
-          if (!rows || !rows.length) {
-            return resolve({ code: 404, msg: "Purchase not found" });
-          }
-
-          const purchaseId = rows[0].purchase_id;
-
-          try {
-            const purchaseFields = Object.keys(purchase).filter(
-              (k) => purchase[k] !== undefined
+  _applyTallyPurchaseUpdate(purchaseId, { purchase = {}, internal = {} }) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const purchaseFields = Object.keys(purchase).filter(
+          (k) => purchase[k] !== undefined
+        );
+        if (purchaseFields.length > 0) {
+          const setClause = purchaseFields.map((k) => `${k} = ?`).join(", ");
+          const values = purchaseFields.map((k) => purchase[k]);
+          await new Promise((res, rej) => {
+            this.db.query(
+              `UPDATE purchase SET ${setClause} WHERE purchase_id = ?`,
+              [...values, purchaseId],
+              (e) => (e ? rej(e) : res())
             );
-            if (purchaseFields.length > 0) {
-              const setClause = purchaseFields
-                .map((k) => `${k} = ?`)
-                .join(", ");
-              const values = purchaseFields.map((k) => purchase[k]);
-              await new Promise((res, rej) => {
-                this.db.query(
-                  `UPDATE purchase SET ${setClause} WHERE purchase_id = ?`,
-                  [...values, purchaseId],
-                  (e) => (e ? rej(e) : res())
-                );
-              });
-            }
+          });
+        }
 
-            const internalFields = Object.keys(internal).filter(
-              (k) => internal[k] !== undefined
+        const internalFields = Object.keys(internal).filter(
+          (k) => internal[k] !== undefined
+        );
+        if (internalFields.length > 0) {
+          const [existingInternal] = await new Promise((res, rej) => {
+            this.db.query(
+              `SELECT purchase_id FROM purchase_internal WHERE purchase_id = ?`,
+              [purchaseId],
+              (e, result) => (e ? rej(e) : res([result[0]]))
             );
-            if (internalFields.length > 0) {
-              const [existingInternal] = await new Promise((res, rej) => {
-                this.db.query(
-                  `SELECT purchase_id FROM purchase_internal WHERE purchase_id = ?`,
-                  [purchaseId],
-                  (e, result) => (e ? rej(e) : res([result[0]]))
-                );
-              });
+          });
 
-              if (existingInternal) {
-                const setClause = internalFields
-                  .map((k) => `${k} = ?`)
-                  .join(", ");
-                const values = internalFields.map((k) => internal[k]);
-                await new Promise((res, rej) => {
-                  this.db.query(
-                    `UPDATE purchase_internal SET ${setClause} WHERE purchase_id = ?`,
-                    [...values, purchaseId],
-                    (e) => (e ? rej(e) : res())
-                  );
-                });
-              } else {
-                const cols = ["purchase_id", ...internalFields];
-                const placeholders = cols.map(() => "?").join(", ");
-                const values = [
-                  purchaseId,
-                  ...internalFields.map((k) => internal[k]),
-                ];
-                await new Promise((res, rej) => {
-                  this.db.query(
-                    `INSERT INTO purchase_internal (${cols.join(
-                      ", "
-                    )}) VALUES (${placeholders})`,
-                    values,
-                    (e) => (e ? rej(e) : res())
-                  );
-                });
-              }
-            }
-
-            resolve({ code: 200, purchase_id: purchaseId });
-          } catch (updateErr) {
-            logger.Log({
-              level: logger.LEVEL.ERROR,
-              component: "REPOSITORY.PURCHASE",
-              code: "REPOSITORY.PURCHASE.UPDATE_FROM_TALLY",
-              description: updateErr.toString(),
-              category: "",
-              ref: {},
+          if (existingInternal) {
+            const setClause = internalFields.map((k) => `${k} = ?`).join(", ");
+            const values = internalFields.map((k) => internal[k]);
+            await new Promise((res, rej) => {
+              this.db.query(
+                `UPDATE purchase_internal SET ${setClause} WHERE purchase_id = ?`,
+                [...values, purchaseId],
+                (e) => (e ? rej(e) : res())
+              );
             });
-            reject(updateErr);
+          } else {
+            const cols = ["purchase_id", ...internalFields];
+            const placeholders = cols.map(() => "?").join(", ");
+            const values = [
+              purchaseId,
+              ...internalFields.map((k) => internal[k]),
+            ];
+            await new Promise((res, rej) => {
+              this.db.query(
+                `INSERT INTO purchase_internal (${cols.join(
+                  ", "
+                )}) VALUES (${placeholders})`,
+                values,
+                (e) => (e ? rej(e) : res())
+              );
+            });
           }
         }
-      );
+
+        resolve({ code: 200, purchase_id: purchaseId });
+      } catch (updateErr) {
+        logger.Log({
+          level: logger.LEVEL.ERROR,
+          component: "REPOSITORY.PURCHASE",
+          code: "REPOSITORY.PURCHASE.UPDATE_FROM_TALLY",
+          description: updateErr.toString(),
+          category: "",
+          ref: {},
+        });
+        reject(updateErr);
+      }
+    });
+  }
+
+  updateFromTallyDataByMasterId(masterId, payload) {
+    return this._findPurchaseIdByTallyMasterId(masterId).then((purchaseId) => {
+      if (!purchaseId) {
+        return { code: 404, msg: "Purchase not found for MasterID" };
+      }
+      return this._applyTallyPurchaseUpdate(purchaseId, payload);
     });
   }
 

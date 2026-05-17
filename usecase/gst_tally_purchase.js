@@ -57,17 +57,31 @@ class GstTallyPurchaseUsecase {
       }
 
       if (action === "update") {
-        const existsInPurchase = await this.purchaseRepo.existsByMmhMrcRefno(refno);
+        const existsInPurchase =
+          await this.purchaseRepo.existsByTallyMasterId(masterId);
 
         if (existsInPurchase) {
           const mapped = mapTallyDataToPurchaseUpdate(data);
-          await this.purchaseRepo.updateFromTallyData(refno, mapped);
+          const updated = await this.purchaseRepo.updateFromTallyDataByMasterId(
+            masterId,
+            mapped
+          );
+          if (updated.code === 404) {
+            return {
+              code: 404,
+              msg: updated.msg,
+              Action: item.Action,
+              master_id: masterId,
+              mmh_mrc_refno: refno,
+            };
+          }
           return {
             code: 200,
             Action: item.Action,
             source: "purchase",
             mmh_mrc_refno: refno,
             master_id: masterId,
+            purchase_id: updated.purchase_id,
           };
         }
 
