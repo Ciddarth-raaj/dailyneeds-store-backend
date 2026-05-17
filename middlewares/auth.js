@@ -445,13 +445,13 @@ const unProtectedRoutes = {
 
   //user
   "/user/login": { methods: { post: true } },
-  "/tally/card-to-bank": { methods: { get: true } },
-  "/tally/sales-entry": { methods: { get: true } },
-  "/tally/expenses": { methods: { get: true } },
-  "/tally/purchase": { methods: { get: true } },
-  "/tally/debit-note": { methods: { get: true } },
-  "/purchase-tally": { methods: { post: true } },
-  "/debit-note-tally": { methods: { post: true } },
+  // "/tally/card-to-bank": { methods: { get: true } },
+  // "/tally/sales-entry": { methods: { get: true } },
+  // "/tally/expenses": { methods: { get: true } },
+  // "/tally/purchase": { methods: { get: true } },
+  // "/tally/debit-note": { methods: { get: true } },
+  // "/purchase-tally": { methods: { post: true } },
+  // "/debit-note-tally": { methods: { post: true } },
   "/gofrugal-synker/sync": { methods: { post: true } },
   "/gofrugal-synker/table": { methods: { delete: true } },
 };
