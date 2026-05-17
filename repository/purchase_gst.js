@@ -76,6 +76,14 @@ class PurchaseGstRepository {
         conditions.push("DATE(p.mmh_mrc_dt) <= ?");
         values.push(filters.to_date);
       }
+      if (filters.dist_bill_from_date) {
+        conditions.push("DATE(p.mmh_dist_bill_dt) >= ?");
+        values.push(filters.dist_bill_from_date);
+      }
+      if (filters.dist_bill_to_date) {
+        conditions.push("DATE(p.mmh_dist_bill_dt) <= ?");
+        values.push(filters.dist_bill_to_date);
+      }
       if (filters.mmh_mrc_refno) {
         conditions.push("p.mmh_mrc_refno = ?");
         values.push(filters.mmh_mrc_refno);

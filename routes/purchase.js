@@ -223,6 +223,8 @@ class PurchaseRoutes {
           retail_outlet_id: Joi.number(),
           from_date: Joi.date(),
           to_date: Joi.date(),
+          dist_bill_from_date: Joi.date(),
+          dist_bill_to_date: Joi.date(),
           has_updated: Joi.boolean(),
           is_approved: Joi.boolean(),
           is_pushed: Joi.boolean(),

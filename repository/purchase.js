@@ -160,6 +160,16 @@ class PurchaseRepository {
         filterValues.push(filters.to_date);
       }
 
+      if (filters.dist_bill_from_date) {
+        filterConditions.push("DATE(p.mmh_dist_bill_dt) >= ?");
+        filterValues.push(filters.dist_bill_from_date);
+      }
+
+      if (filters.dist_bill_to_date) {
+        filterConditions.push("DATE(p.mmh_dist_bill_dt) <= ?");
+        filterValues.push(filters.dist_bill_to_date);
+      }
+
       if (filters.has_updated !== undefined) {
         filterConditions.push("p.has_updated = ?");
         filterValues.push(filters.has_updated);

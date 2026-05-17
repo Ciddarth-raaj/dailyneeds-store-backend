@@ -15,6 +15,8 @@ class PurchaseGstRoutes {
           retail_outlet_id: Joi.number(),
           from_date: Joi.date(),
           to_date: Joi.date(),
+          dist_bill_from_date: Joi.date(),
+          dist_bill_to_date: Joi.date(),
           mmh_mrc_refno: Joi.string(),
           master_id: Joi.string(),
         }).validate(req.query);
