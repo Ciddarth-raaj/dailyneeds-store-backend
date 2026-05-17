@@ -28,6 +28,85 @@ class GstB2bInvoiceRepository {
     this.db = db;
   }
 
+  deleteUnmatchedForReturnPeriod(year, month, matchedInvoiceIds) {
+    return new Promise((resolve, reject) => {
+      const baseSql = `DELETE bi FROM ${TABLE} bi
+        INNER JOIN gst_b2b b ON b.gst_b2b_id = bi.gst_b2b_id
+        WHERE b.year = ? AND b.month = ?`;
+      const values = [year, month];
+
+      let sql = baseSql;
+      if (matchedInvoiceIds && matchedInvoiceIds.length > 0) {
+        const placeholders = matchedInvoiceIds.map(() => "?").join(",");
+        sql += ` AND bi.gst_b2b_invoice_id NOT IN (${placeholders})`;
+        values.push(...matchedInvoiceIds);
+      }
+
+      this.db.query(sql, values, (err, res) => {
+        if (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "REPOSITORY.GST_B2B_INVOICE",
+            code: "REPOSITORY.GST_B2B_INVOICE.DELETE_UNMATCHED",
+            description: err.toString(),
+            category: "",
+            ref: { year, month },
+          });
+          return reject(err);
+        }
+        resolve({ affectedRows: res.affectedRows });
+      });
+    });
+  }
+
+  findByPeriodCtinInumIdt(year, month, ctin, inum, idt) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT bi.gst_b2b_invoice_id, bi.gst_b2b_id, bi.inv_index, bi.inum, bi.idt
+         FROM ${TABLE} bi
+         INNER JOIN gst_b2b b ON b.gst_b2b_id = bi.gst_b2b_id
+         WHERE b.year = ? AND b.month = ? AND b.ctin = ?
+           AND bi.inum <=> ? AND bi.idt <=> ?`,
+        [year, month, ctin, inum ?? null, idt ?? null],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.GST_B2B_INVOICE",
+              code: "REPOSITORY.GST_B2B_INVOICE.FIND_BY_PERIOD_CTIN",
+              description: err.toString(),
+              category: "",
+              ref: { year, month, ctin },
+            });
+            return reject(err);
+          }
+          resolve(rows && rows[0] ? rows[0] : null);
+        }
+      );
+    });
+  }
+
+  getNextInvIndex(gst_b2b_id, preferredIndex) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT inv_index FROM ${TABLE} WHERE gst_b2b_id = ?`,
+        [gst_b2b_id],
+        (err, rows) => {
+          if (err) return reject(err);
+          const taken = new Set((rows || []).map((r) => r.inv_index));
+          if (!taken.has(preferredIndex)) {
+            return resolve(preferredIndex);
+          }
+          let max = -1;
+          for (const idx of taken) {
+            if (idx > max) max = idx;
+          }
+          resolve(max + 1);
+        }
+      );
+    });
+  }
+
   listByGstB2bIds(gstB2bIds) {
     if (!gstB2bIds || gstB2bIds.length === 0) {
       return Promise.resolve([]);

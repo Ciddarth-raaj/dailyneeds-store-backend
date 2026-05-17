@@ -56,6 +56,33 @@ class GstPurchaseMatchRepository {
     return { whereClause, values };
   }
 
+  listMatchedInvoiceIdsByReturnPeriod(year, month) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT DISTINCT m.gst_b2b_invoice_id
+         FROM ${TABLE} m
+         INNER JOIN gst_b2b_invoices bi ON bi.gst_b2b_invoice_id = m.gst_b2b_invoice_id
+         INNER JOIN gst_b2b b ON b.gst_b2b_id = bi.gst_b2b_id
+         WHERE b.year = ? AND b.month = ?`,
+        [year, month],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.GST_PURCHASE_MATCH",
+              code: "REPOSITORY.GST_PURCHASE_MATCH.LIST_MATCHED_BY_PERIOD",
+              description: err.toString(),
+              category: "",
+              ref: { year, month },
+            });
+            return reject(err);
+          }
+          resolve((rows || []).map((r) => r.gst_b2b_invoice_id));
+        }
+      );
+    });
+  }
+
   getAll(filters = {}) {
     return new Promise((resolve, reject) => {
       const { whereClause, values } = this._buildListFilterConditions(filters);

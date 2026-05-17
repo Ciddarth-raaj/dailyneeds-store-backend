@@ -139,9 +139,22 @@ function bumpMaxDate(map, key, raw) {
   }
 }
 
+function normalizeInumIdt(inv) {
+  const inum =
+    inv.inum != null && String(inv.inum).trim() !== ""
+      ? String(inv.inum).trim()
+      : null;
+  const idt =
+    inv.idt != null && String(inv.idt).trim() !== ""
+      ? String(inv.idt).trim()
+      : null;
+  return { inum, idt };
+}
+
 /**
- * Persists GSTR-2A B2B payload into gst_b2b / gst_b2b_invoices / gst_b2b_invoice_items
- * and vendor_filing_date when `b2b[n].fldtr1` is present and parseable (no other source, no row otherwise).
+ * Persists GSTR-2A B2B payload into gst_b2b / gst_b2b_invoices / gst_b2b_invoice_items.
+ * Invoices linked in gst_purchase_match are never deleted on re-sync.
+ * Invoices and line items already stored for the period are skipped (insert-only).
  *
  * @param {Map<string, number>} ctinToVendorId — uppercased CTIN → gst_vendor_id (all vendors must exist before call)
  */
@@ -151,16 +164,49 @@ class GstB2bSyncService {
     gstB2bInvoiceRepo,
     gstB2bInvoiceItemRepo,
     vendorFilingDateRepo,
+    gstPurchaseMatchRepo,
   }) {
     this.gstB2bRepo = gstB2bRepo;
     this.gstB2bInvoiceRepo = gstB2bInvoiceRepo;
     this.gstB2bInvoiceItemRepo = gstB2bInvoiceItemRepo;
     this.vendorFilingDateRepo = vendorFilingDateRepo;
+    this.gstPurchaseMatchRepo = gstPurchaseMatchRepo;
   }
 
-  async deleteReturnPeriodData(year, month) {
+  /**
+   * Remove unmatched invoices for the period; keep rows referenced by gst_purchase_match.
+   */
+  async pruneUnmatchedReturnPeriodData(year, month) {
+    const matchedInvoiceIds =
+      this.gstPurchaseMatchRepo != null
+        ? await this.gstPurchaseMatchRepo.listMatchedInvoiceIdsByReturnPeriod(
+            year,
+            month
+          )
+        : [];
+
+    await this.gstB2bInvoiceRepo.deleteUnmatchedForReturnPeriod(
+      year,
+      month,
+      matchedInvoiceIds
+    );
+    await this.gstB2bRepo.deleteOrphansForReturnPeriod(year, month);
     await this.vendorFilingDateRepo.deleteByReturnPeriod(year, month);
-    await this.gstB2bRepo.deleteByReturnPeriod(year, month);
+  }
+
+  async findOrCreateB2bBlock({ year, month, b2b_index, gst_vendor_id, ctin, cfs }) {
+    const existing = await this.gstB2bRepo.findByPeriodAndCtin(year, month, ctin);
+    if (existing) {
+      return existing.gst_b2b_id;
+    }
+    return this.gstB2bRepo.insert({
+      year,
+      month,
+      b2b_index,
+      gst_vendor_id,
+      ctin,
+      cfs,
+    });
   }
 
   /**
@@ -170,13 +216,14 @@ class GstB2bSyncService {
    * @param {Map<string, number>} ctinToVendorId
    */
   async syncFromB2bArray(b2bArray, year, month, ctinToVendorId) {
-    await this.deleteReturnPeriodData(year, month);
+    await this.pruneUnmatchedReturnPeriodData(year, month);
 
     if (!ctinToVendorId || ctinToVendorId.size === 0) {
       return {
         inserted_b2b: 0,
         inserted_invoices: 0,
         inserted_items: 0,
+        skipped_invoices: 0,
         vendor_filings: 0,
       };
     }
@@ -186,6 +233,7 @@ class GstB2bSyncService {
         inserted_b2b: 0,
         inserted_invoices: 0,
         inserted_items: 0,
+        skipped_invoices: 0,
         vendor_filings: 0,
       };
     }
@@ -195,6 +243,7 @@ class GstB2bSyncService {
     let insertedB2b = 0;
     let insertedInvoices = 0;
     let insertedItems = 0;
+    let skippedInvoices = 0;
 
     for (let bi = 0; bi < b2bArray.length; bi++) {
       const block = b2bArray[bi];
@@ -214,7 +263,8 @@ class GstB2bSyncService {
           ? String(block.cfs).slice(0, 8)
           : null;
 
-      const gstB2bId = await this.gstB2bRepo.insert({
+      const hadB2b = await this.gstB2bRepo.findByPeriodAndCtin(year, month, ctin);
+      const gstB2bId = await this.findOrCreateB2bBlock({
         year,
         month,
         b2b_index: bi,
@@ -222,7 +272,9 @@ class GstB2bSyncService {
         ctin,
         cfs,
       });
-      insertedB2b += 1;
+      if (!hadB2b) {
+        insertedB2b += 1;
+      }
 
       const blockFldtr1Raw = pickFldtr1RawFromB2bBlock(block);
       if (blockFldtr1Raw != null) {
@@ -234,13 +286,31 @@ class GstB2bSyncService {
         const inv = invList[ii];
         if (!inv || typeof inv !== "object") continue;
 
+        const { inum, idt } = normalizeInumIdt(inv);
+        const existingInvoice =
+          await this.gstB2bInvoiceRepo.findByPeriodCtinInumIdt(
+            year,
+            month,
+            ctin,
+            inum,
+            idt
+          );
+        if (existingInvoice) {
+          skippedInvoices += 1;
+          continue;
+        }
+
         const filingRaw = pickFilingRawFromInv(inv);
+        const invIndex = await this.gstB2bInvoiceRepo.getNextInvIndex(
+          gstB2bId,
+          ii
+        );
 
         const invoiceId = await this.gstB2bInvoiceRepo.insert({
           gst_b2b_id: gstB2bId,
-          inv_index: ii,
-          inum: inv.inum != null ? String(inv.inum) : null,
-          idt: inv.idt != null ? String(inv.idt) : null,
+          inv_index: invIndex,
+          inum,
+          idt,
           oinum: inv.oinum != null ? String(inv.oinum) : null,
           oidt: inv.oidt != null ? String(inv.oidt) : null,
           val: toDecimalOrNull(inv.val),
@@ -294,6 +364,7 @@ class GstB2bSyncService {
       inserted_b2b: insertedB2b,
       inserted_invoices: insertedInvoices,
       inserted_items: insertedItems,
+      skipped_invoices: skippedInvoices,
       vendor_filings: vendorFilings,
     };
   }

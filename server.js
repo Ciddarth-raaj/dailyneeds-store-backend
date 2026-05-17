@@ -295,6 +295,7 @@ class Server {
       gstB2bInvoiceRepo: this.gstB2bInvoiceRepo,
       gstB2bInvoiceItemRepo: this.gstB2bInvoiceItemRepo,
       vendorFilingDateRepo: this.vendorFilingDateRepo,
+      gstPurchaseMatchRepo: this.gstPurchaseMatchRepo,
     });
     this.gstUsecase = require("./usecase/gst")(
       this.sandboxService,
