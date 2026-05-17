@@ -54,14 +54,8 @@ class TallyRoutes {
           return;
         }
 
-        const result = await this.gstTallyPurchaseUsecase.sync(value);
-        if (result.code === 404) {
-          res.status(404).json(result);
-        } else if (result.code === 400 || result.code === 422) {
-          res.status(result.code).json(result);
-        } else {
-          res.json(result);
-        }
+        const result = await this.gstTallyPurchaseUsecase.syncBatch(value);
+        res.json(result);
       } catch (err) {
         respondError(res, err);
       }

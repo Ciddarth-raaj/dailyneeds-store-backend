@@ -10,12 +10,31 @@ class GstTallyPurchaseUsecase {
     this.gstTallyPurchaseRepo = gstTallyPurchaseRepo;
   }
 
-  async sync({ action, data }) {
-    const refno = String(data.VoucherNumber).trim();
-    const masterId = String(data.MasterID).trim();
+  async syncOne(item) {
+    const action = String(item.Action || "").toLowerCase();
+    const { Action: _action, ...data } = item;
+
+    const refno = String(data.VoucherNumber || "").trim();
+    const masterId = String(data.MasterID || "").trim();
 
     if (!refno || !masterId) {
-      return { code: 400, msg: "VoucherNumber and MasterID are required" };
+      return {
+        code: 400,
+        msg: "VoucherNumber and MasterID are required",
+        Action: item.Action,
+        master_id: masterId || null,
+        mmh_mrc_refno: refno || null,
+      };
+    }
+
+    if (!["create", "update", "delete"].includes(action)) {
+      return {
+        code: 400,
+        msg: "Invalid Action",
+        Action: item.Action,
+        master_id: masterId,
+        mmh_mrc_refno: refno,
+      };
     }
 
     try {
@@ -25,7 +44,7 @@ class GstTallyPurchaseUsecase {
         await this.gstTallyPurchaseRepo.upsertFromRows(rows);
         return {
           code: 200,
-          action,
+          Action: item.Action,
           source: "gst_tally_purchase",
           mmh_mrc_refno: refno,
           master_id: masterId,
@@ -33,7 +52,8 @@ class GstTallyPurchaseUsecase {
       }
 
       if (action === "delete") {
-        return await this.gstTallyPurchaseRepo.deleteByMasterId(masterId);
+        const del = await this.gstTallyPurchaseRepo.deleteByMasterId(masterId);
+        return { ...del, Action: item.Action, master_id: masterId, mmh_mrc_refno: refno };
       }
 
       if (action === "update") {
@@ -44,7 +64,7 @@ class GstTallyPurchaseUsecase {
           await this.purchaseRepo.updateFromTallyData(refno, mapped);
           return {
             code: 200,
-            action,
+            Action: item.Action,
             source: "purchase",
             mmh_mrc_refno: refno,
             master_id: masterId,
@@ -54,14 +74,20 @@ class GstTallyPurchaseUsecase {
         await this.gstTallyPurchaseRepo.upsertFromRows(rows);
         return {
           code: 200,
-          action,
+          Action: item.Action,
           source: "gst_tally_purchase",
           mmh_mrc_refno: refno,
           master_id: masterId,
         };
       }
 
-      return { code: 400, msg: "Invalid action" };
+      return {
+        code: 400,
+        msg: "Invalid Action",
+        Action: item.Action,
+        master_id: masterId,
+        mmh_mrc_refno: refno,
+      };
     } catch (err) {
       logger.Log({
         level: logger.LEVEL.ERROR,
@@ -69,10 +95,30 @@ class GstTallyPurchaseUsecase {
         code: "USECASE.GST_TALLY_PURCHASE.SYNC",
         description: err.toString(),
         category: "",
-        ref: { action, mmh_mrc_refno: refno, master_id: masterId },
+        ref: { Action: item.Action, mmh_mrc_refno: refno, master_id: masterId },
       });
       throw err;
     }
+  }
+
+  async syncBatch({ data }) {
+    const results = [];
+    for (let i = 0; i < data.length; i++) {
+      try {
+        const result = await this.syncOne(data[i]);
+        results.push({ index: i, ...result });
+      } catch (err) {
+        results.push({
+          index: i,
+          code: 500,
+          msg: err.message || "Sync failed",
+          Action: data[i].Action,
+          master_id: data[i].MasterID ?? null,
+          mmh_mrc_refno: data[i].VoucherNumber ?? null,
+        });
+      }
+    }
+    return { code: 200, results };
   }
 }
 

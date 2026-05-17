@@ -2,6 +2,8 @@
 
 Integration guide for third-party systems syncing purchase vouchers with DailyNeeds.
 
+**Recent changes:** [gst-tally-purchase-api-changes.md](./gst-tally-purchase-api-changes.md)
+
 ---
 
 ## Server
@@ -45,30 +47,55 @@ Content-Type: application/json
 
 ## POST /tally/gst-purchase
 
-Sync a single Tally purchase (or journal) voucher: **create**, **update**, or **delete**.
+Sync one or more Tally purchase (or journal) vouchers in a single request. Each item in `data` has its own **`Action`**: `create`, `update`, or `delete`.
 
 ### Request body
 
 ```json
 {
-  "action": "create",
-  "data": {}
+  "data": [
+    {
+      "Action": "create",
+      "MasterID": "ext-001-purchase",
+      "VoucherNumber": "MRC99901"
+    }
+  ]
 }
 ```
 
-| Field    | Type   | Required | Description                             |
-| -------- | ------ | -------- | --------------------------------------- |
-| `action` | string | Yes      | `create`, `update`, or `delete`         |
-| `data`   | object | Yes      | Tally voucher object (see schema below) |
+| Field  | Type    | Required | Description                                      |
+| ------ | ------- | -------- | ------------------------------------------------ |
+| `data` | array   | Yes      | One or more Tally voucher objects (min length 1) |
 
-### Required fields in `data`
+### Required fields on each item in `data`
 
 | Field           | Description                                                    |
 | --------------- | -------------------------------------------------------------- |
+| `Action`        | `create`, `update`, or `delete` (case-insensitive)             |
 | `MasterID`      | Unique identifier for this Tally entry (stable across updates) |
 | `VoucherNumber` | Purchase reference number (`mmh_mrc_refno` in DailyNeeds)      |
 
-Send all fields below on every request (use `""` where not applicable). Fields are validated only; empty values are not stored unless noted in action behaviour. Include `ledgerentries` with real lines when tax breakdown applies.
+Send all voucher fields on every item (use `""` where not applicable). Fields are validated only; empty values are not stored unless noted in action behaviour. Include `ledgerentries` with real lines when tax breakdown applies.
+
+### Success response (200)
+
+```json
+{
+  "code": 200,
+  "results": [
+    {
+      "index": 0,
+      "code": 200,
+      "Action": "create",
+      "source": "gst_tally_purchase",
+      "mmh_mrc_refno": "MRC12345",
+      "master_id": "your-master-id"
+    }
+  ]
+}
+```
+
+Each element in `results` corresponds to the same index in `data`. Per-item `code` may be `200`, `400`, `404`, or `500` without changing the top-level HTTP status (always `200` when the request body is valid).
 
 ---
 
@@ -81,12 +108,13 @@ Inserts a new record in `gst_tally_purchase` (and `gst_tally_purchase_internal`)
 - Does **not** modify the main `purchase` table.
 - If `MasterID` already exists, the row is updated (upsert on `master_id`).
 
-**Success response (200)**
+**Per-item result (200)**
 
 ```json
 {
+  "index": 0,
   "code": 200,
-  "action": "create",
+  "Action": "create",
   "source": "gst_tally_purchase",
   "mmh_mrc_refno": "MRC12345",
   "master_id": "your-master-id"
@@ -104,24 +132,26 @@ Updates data based on whether `VoucherNumber` exists in the main `purchase` tabl
 | `VoucherNumber` exists in `purchase` | Updates `purchase` and `purchase_internal`                     |
 | `VoucherNumber` not in `purchase`    | Updates `gst_tally_purchase` and `gst_tally_purchase_internal` |
 
-**Success response (200) — updated in main purchase table**
+**Per-item result (200) — updated in main purchase table**
 
 ```json
 {
+  "index": 0,
   "code": 200,
-  "action": "update",
+  "Action": "update",
   "source": "purchase",
   "mmh_mrc_refno": "MRC12345",
   "master_id": "your-master-id"
 }
 ```
 
-**Success response (200) — updated in GST tally table only**
+**Per-item result (200) — updated in GST tally table only**
 
 ```json
 {
+  "index": 0,
   "code": 200,
-  "action": "update",
+  "Action": "update",
   "source": "gst_tally_purchase",
   "mmh_mrc_refno": "MRC12345",
   "master_id": "your-master-id"
@@ -134,35 +164,44 @@ Updates data based on whether `VoucherNumber` exists in the main `purchase` tabl
 
 Deletes the row from `gst_tally_purchase` (internal row removed via cascade).
 
-- Identified by `data.MasterID`.
+- Identified by `MasterID` on the item.
 - Does **not** delete rows from the main `purchase` table.
 
-**Success response (200)**
+**Per-item result (200)**
 
 ```json
 {
+  "index": 0,
   "code": 200,
-  "msg": "Deleted"
+  "Action": "delete",
+  "msg": "Deleted",
+  "master_id": "your-master-id",
+  "mmh_mrc_refno": "MRC12345"
 }
 ```
 
-**Not found (404)**
+**Per-item not found (404)**
 
 ```json
 {
+  "index": 0,
   "code": 404,
-  "msg": "GST tally purchase entry not found"
+  "Action": "delete",
+  "msg": "GST tally purchase entry not found",
+  "master_id": "your-master-id",
+  "mmh_mrc_refno": "MRC12345"
 }
 ```
 
 ---
 
-## `data` object schema
+## Voucher item schema (each element of `data`)
 
 ### Example voucher
 
 ```json
 {
+  "Action": "create",
   "MasterID": "ext-001-purchase",
   "VoucherNumber": "MRC12345",
   "VoucherDate": "20260115",
@@ -208,8 +247,11 @@ Deletes the row from `gst_tally_purchase` (internal row removed via cascade).
 
 | Field | Description |
 |-------|-------------|
+| `Action` | **Required.** `create`, `update`, or `delete` |
 | `MasterID` | **Required.** Unique Tally master id |
 | `VoucherNumber` | **Required.** MRC reference / voucher number |
+| `AlterID` | Accepted; not stored |
+| `ConsigneeGSTRegistrationType` | Accepted; not stored |
 | `VoucherDate` | `YYYYMMDD` or `YYYY-MM-DD` |
 | `Reference` | Distributor bill number |
 | `ReferenceDate` | Bill date |
@@ -237,7 +279,7 @@ Deletes the row from `gst_tally_purchase` (internal row removed via cascade).
 | `BuyerName` | |
 | `BuyerAlias` | |
 | `BuyerGSTIN` | Supplier GSTIN |
-| `BuyerAddress` | |
+| `BuyerAddress` | Plain string, or array `[{ "BuyerAddress": "line 1" }, ...]` |
 | `BuyerPinCode` | |
 | `BuyerState` | |
 | `BuyerCountryName` | |
@@ -265,6 +307,7 @@ Deletes the row from `gst_tally_purchase` (internal row removed via cascade).
 | `Place_of_Supply` | |
 | `Buyer_Registration_Type` | |
 | `ConsigneeTallyGroup` | |
+| `ConsigneeGSTRegistrationType` | Accepted; not stored (use `Consignee_Registration_Type` for journal) |
 | `Consignee_Registration_Type` | e.g. `Unregistered/Consumer` |
 | `PurOrder` | |
 | `PurOrderID` | |
@@ -316,9 +359,10 @@ When `VoucherType` is `Journal`, use the same top-level shape; journal-specific 
 
 ```json
 {
-  "action": "create",
-  "data": {
-    "MasterID": "ext-001-purchase",
+  "data": [
+    {
+      "Action": "create",
+      "MasterID": "ext-001-purchase",
     "VoucherNumber": "MRC99901",
     "VoucherDate": "20260115",
     "Reference": "BILL-9001",
@@ -387,7 +431,8 @@ When `VoucherType` is `Journal`, use the same top-level shape; journal-specific 
         "BillRefType": ""
       }
     ]
-  }
+    }
+  ]
 }
 ```
 
@@ -395,9 +440,10 @@ When `VoucherType` is `Journal`, use the same top-level shape; journal-specific 
 
 ```json
 {
-  "action": "create",
-  "data": {
-    "MasterID": "ext-001-journal",
+  "data": [
+    {
+      "Action": "create",
+      "MasterID": "ext-001-journal",
     "VoucherNumber": "MRC99901",
     "VoucherDate": "20260115",
     "Reference": "BILL-9001",
@@ -461,7 +507,8 @@ When `VoucherType` is `Journal`, use the same top-level shape; journal-specific 
         "CategoryAllocation": []
       }
     ]
-  }
+    }
+  ]
 }
 ```
 
@@ -469,9 +516,10 @@ When `VoucherType` is `Journal`, use the same top-level shape; journal-specific 
 
 ```json
 {
-  "action": "update",
-  "data": {
-    "MasterID": "ext-001-purchase",
+  "data": [
+    {
+      "Action": "update",
+      "MasterID": "ext-001-purchase",
     "VoucherNumber": "MRC99901",
     "VoucherDate": "20260115",
     "Reference": "BILL-9001",
@@ -519,7 +567,8 @@ When `VoucherType` is `Journal`, use the same top-level shape; journal-specific 
     "item_total": "",
     "SVViewName": "InvVchView",
     "ledgerentries": []
-  }
+    }
+  ]
 }
 ```
 
@@ -527,11 +576,37 @@ When `VoucherType` is `Journal`, use the same top-level shape; journal-specific 
 
 ```json
 {
-  "action": "delete",
-  "data": {
-    "MasterID": "ext-001-purchase",
-    "VoucherNumber": "MRC99901"
-  }
+  "data": [
+    {
+      "Action": "delete",
+      "MasterID": "ext-001-purchase",
+      "VoucherNumber": "MRC99901"
+    }
+  ]
+}
+```
+
+### Batch (mixed actions)
+
+```json
+{
+  "data": [
+    {
+      "Action": "create",
+      "MasterID": "ext-002-purchase",
+      "VoucherNumber": "MRC99902",
+      "VoucherDate": "20260115",
+      "PartyName": "ABC Distributors",
+      "VoucherType": "PurchaseDN1",
+      "Voucher_Total": "5000.00",
+      "ledgerentries": []
+    },
+    {
+      "Action": "delete",
+      "MasterID": "ext-001-purchase",
+      "VoucherNumber": "MRC99901"
+    }
+  ]
 }
 ```
 
@@ -539,14 +614,21 @@ When `VoucherType` is `Journal`, use the same top-level shape; journal-specific 
 
 ## HTTP status codes
 
-| Status | When                                                      |
-| ------ | --------------------------------------------------------- |
-| 200    | Success                                                   |
-| 400    | Missing `VoucherNumber` / `MasterID`, or invalid `action` |
-| 403    | Authentication failed                                     |
-| 404    | Delete: no row for `MasterID`                             |
-| 422    | Request body validation failed                            |
-| 500    | Server error                                              |
+| Status | When                                                                 |
+| ------ | -------------------------------------------------------------------- |
+| 200    | Request accepted; see `results[]` for per-item outcomes              |
+| 403    | Authentication failed                                              |
+| 422    | Request body validation failed (e.g. missing `data`, invalid shape)  |
+| 500    | Server error before batch processing                               |
+
+Per-item codes inside `results` (HTTP status remains 200):
+
+| `results[].code` | When                                                      |
+| ---------------- | --------------------------------------------------------- |
+| 200              | Item processed successfully                               |
+| 400              | Missing `VoucherNumber` / `MasterID`, or invalid `Action` |
+| 404              | Delete: no row for `MasterID`                             |
+| 500              | Item failed during processing                             |
 
 **Validation error (422)**
 
@@ -563,8 +645,9 @@ When `VoucherType` is `Journal`, use the same top-level shape; journal-specific 
 
 1. **Stable `MasterID`** — Use a fixed id per Tally voucher so updates and deletes target the same row.
 2. **`VoucherNumber`** — Maps to `mmh_mrc_refno`; drives update routing between `purchase` and `gst_tally_purchase`.
-3. **Tax lines** — Include `ledgerentries` on create/update so SGST/CGST/IGST amounts are stored correctly.
-4. **Token** — The issued token does not expire; rotate only if compromised (contact DailyNeeds).
+3. **`Action` per item** — Each voucher in `data` must include its own `Action`; different actions can be sent in one request.
+4. **Tax lines** — Include `ledgerentries` on create/update so SGST/CGST/IGST amounts are stored correctly.
+5. **Token** — The issued token does not expire; rotate only if compromised (contact DailyNeeds).
 
 ---
 

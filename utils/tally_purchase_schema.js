@@ -25,6 +25,15 @@ const categoryAllocationSchema = Joi.object({
     .optional(),
 }).unknown(false);
 
+const buyerAddressLineSchema = Joi.object({
+  BuyerAddress: emptyStr(),
+}).unknown(false);
+
+/** Tally may send a plain string or `[{ "BuyerAddress": "..." }]`. */
+const buyerAddressField = Joi.alternatives()
+  .try(emptyStr(), Joi.array().items(buyerAddressLineSchema).allow(null))
+  .optional();
+
 const ledgerEntrySchema = Joi.object({
   LedgerName: emptyStr(),
   LedgerGroup: emptyStr(),
@@ -56,6 +65,7 @@ const ledgerEntrySchema = Joi.object({
 const tallyPurchaseDataSchema = Joi.object({
   MasterID: Joi.string().required(),
   VoucherNumber: Joi.string().required(),
+  AlterID: Joi.alternatives().try(Joi.number(), Joi.string()).allow(null, "").optional(),
   VoucherDate: Joi.alternatives().try(Joi.string(), Joi.number()).allow("", null).optional(),
   Reference: emptyStr(),
   ReferenceDate: Joi.alternatives().try(Joi.string(), Joi.number()).allow("", null).optional(),
@@ -86,7 +96,7 @@ const tallyPurchaseDataSchema = Joi.object({
   BuyerName: emptyStr(),
   BuyerAlias: emptyStr(),
   BuyerGSTIN: emptyStr(),
-  BuyerAddress: emptyStr(),
+  BuyerAddress: buyerAddressField,
   BuyerPinCode: emptyStr(),
   BuyerState: emptyStr(),
   BuyerCountryName: emptyStr(),
@@ -100,6 +110,7 @@ const tallyPurchaseDataSchema = Joi.object({
   ConsigneeState: emptyStr(),
   ConsigneeCountryName: emptyStr(),
   ConsigneeTallyGroup: emptyStr(),
+  ConsigneeGSTRegistrationType: emptyStr(),
   Consignee_Registration_Type: emptyStr(),
   VoucherCostCentre: emptyStr(),
   Narration: emptyStr(),
@@ -115,9 +126,15 @@ const tallyPurchaseDataSchema = Joi.object({
   ledgerentries: Joi.array().items(ledgerEntrySchema).default([]),
 }).unknown(false);
 
+const tallyPurchaseDataItemSchema = tallyPurchaseDataSchema.keys({
+  Action: Joi.string()
+    .valid("create", "update", "delete")
+    .insensitive()
+    .required(),
+});
+
 const gstTallyPurchaseRequestSchema = Joi.object({
-  action: Joi.string().valid("create", "update", "delete").required(),
-  data: tallyPurchaseDataSchema.required(),
+  data: Joi.array().items(tallyPurchaseDataItemSchema).min(1).required(),
 });
 
 /** Default empty purchase voucher payload (validation reference). */
@@ -229,6 +246,7 @@ const TALLY_JOURNAL_DATA_TEMPLATE = {
 
 module.exports = {
   tallyPurchaseDataSchema,
+  tallyPurchaseDataItemSchema,
   gstTallyPurchaseRequestSchema,
   TALLY_PURCHASE_DATA_TEMPLATE,
   TALLY_JOURNAL_DATA_TEMPLATE,
