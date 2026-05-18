@@ -290,6 +290,14 @@ class GstUsecase {
     return { code: 200, data: rows };
   }
 
+  async getLatestFetchLog() {
+    if (!this.gstFetchLogRepo) {
+      return { code: 503, msg: "GST fetch log is not configured" };
+    }
+    const row = await this.gstFetchLogRepo.getLatest();
+    return { code: 200, data: row };
+  }
+
   /**
    * Stored GSTR-2A B2B invoices + line items for a return period (from MySQL after sync).
    * @param {number|string} year

@@ -112,6 +112,18 @@ class GstRoutes {
       res.end();
     });
 
+    router.get("/fetch-log/latest", async (req, res) => {
+      try {
+        const payload = await this.gstUsecase.getLatestFetchLog();
+        const http =
+          payload.code === 200 ? 200 : payload.code === 503 ? 503 : 500;
+        res.status(http).json(payload);
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
     router.get("/vendors", async (req, res) => {
       try {
         const payload = await this.gstUsecase.getAllVendors();
