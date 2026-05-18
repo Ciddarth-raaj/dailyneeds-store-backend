@@ -37,6 +37,17 @@ class GstPurchaseMatchRepository {
       values.push(filters.gst_b2b_invoice_id);
     }
 
+    if (filters.year != null && filters.month != null) {
+      conditions.push(`EXISTS (
+        SELECT 1 FROM gst_b2b_invoices bi
+        INNER JOIN gst_b2b b ON b.gst_b2b_id = bi.gst_b2b_id
+        WHERE bi.gst_b2b_invoice_id = m.gst_b2b_invoice_id
+          AND b.year = ?
+          AND b.month = ?
+      )`);
+      values.push(filters.year, filters.month);
+    }
+
     if (filters.from_date && filters.to_date) {
       conditions.push(`(
         (m.purchase_id IS NOT NULL AND DATE(p.mmh_mrc_dt) >= ? AND DATE(p.mmh_mrc_dt) <= ?)

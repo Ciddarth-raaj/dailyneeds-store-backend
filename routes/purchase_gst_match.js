@@ -22,11 +22,14 @@ class PurchaseGstMatchRoutes {
         const { error, value } = Joi.object({
           from_date: Joi.date(),
           to_date: Joi.date(),
+          year: Joi.number().integer(),
+          month: Joi.number().integer().min(1).max(12),
           purchase_id: Joi.number().integer(),
           gst_tally_purchase_id: Joi.number().integer(),
           gst_b2b_invoice_id: Joi.number().integer(),
         })
           .and("from_date", "to_date")
+          .and("year", "month")
           .validate(req.query, { abortEarly: false });
 
         if (error) {
@@ -36,16 +39,17 @@ class PurchaseGstMatchRoutes {
         }
 
         const hasDateRange = value.from_date && value.to_date;
+        const hasReturnPeriod = value.year != null && value.month != null;
         const hasIdFilter =
           value.purchase_id != null ||
           value.gst_tally_purchase_id != null ||
           value.gst_b2b_invoice_id != null;
 
-        if (!hasDateRange && !hasIdFilter) {
+        if (!hasDateRange && !hasReturnPeriod && !hasIdFilter) {
           res.status(422).json({
             code: 422,
             msg:
-              "Provide from_date and to_date together, or at least one of purchase_id, gst_tally_purchase_id, gst_b2b_invoice_id",
+              "Provide from_date and to_date together, year and month together, or at least one of purchase_id, gst_tally_purchase_id, gst_b2b_invoice_id",
           });
           res.end();
           return;
