@@ -1,9 +1,46 @@
 const logger = require("../utils/logger");
 const moment = require("moment");
+const {
+  purchaseOverlaySelectList,
+  purchaseOverlayJoins,
+  mergedDateExpr,
+} = require("../utils/purchase_overlay_sql");
 
 class PurchaseRepository {
   constructor(db) {
     this.db = db;
+    this.updatedPurchaseRepo = require("./updated_purchase")(db);
+  }
+
+  _parsePurchaseDoc(doc) {
+    const parseJson = (val) => {
+      if (val == null || val === "") return [];
+      if (typeof val === "object") return val;
+      try {
+        return JSON.parse(val);
+      } catch {
+        return [];
+      }
+    };
+    return {
+      ...doc,
+      sgst: parseJson(doc.sgst),
+      cgst: parseJson(doc.cgst),
+      igst: parseJson(doc.igst),
+      cess: parseJson(doc.cess),
+      cash_discount: doc.cash_discount ?? 0,
+      scheme_difference: doc.scheme_difference ?? 0,
+      cost_difference: doc.cost_difference ?? 0,
+      due: doc.due ?? 0,
+      freight_charges: doc.freight_charges ?? 0,
+      round_off: doc.round_off ?? 0,
+      jv_ledger: doc.jv_ledger ?? 0,
+      narration: doc.narration ?? "",
+      supplier_credit_note: doc.supplier_credit_note ?? 0,
+      total_amount: doc.total_amount ?? 0,
+      invoice_amount: doc.invoice_amount ?? 0,
+      mmh_dist_bill_no: doc.mmh_dist_bill_no ?? null,
+    };
   }
 
   create(purchase) {
@@ -146,33 +183,42 @@ class PurchaseRepository {
       let filterValues = [];
 
       if (filters.retail_outlet_id) {
-        filterConditions.push("p.retail_outlet_id = ?");
+        filterConditions.push(
+          "COALESCE(up.retail_outlet_id, p.retail_outlet_id) = ?"
+        );
         filterValues.push(filters.retail_outlet_id);
       }
 
       if (filters.from_date) {
-        filterConditions.push("DATE(p.mmh_mrc_dt) >= ?");
+        filterConditions.push(`${mergedDateExpr("mmh_mrc_dt")} >= ?`);
         filterValues.push(filters.from_date);
       }
 
       if (filters.to_date) {
-        filterConditions.push("DATE(p.mmh_mrc_dt) <= ?");
+        filterConditions.push(`${mergedDateExpr("mmh_mrc_dt")} <= ?`);
         filterValues.push(filters.to_date);
       }
 
       if (filters.dist_bill_from_date) {
-        filterConditions.push("DATE(p.mmh_dist_bill_dt) >= ?");
+        filterConditions.push(`${mergedDateExpr("mmh_dist_bill_dt")} >= ?`);
         filterValues.push(filters.dist_bill_from_date);
       }
 
       if (filters.dist_bill_to_date) {
-        filterConditions.push("DATE(p.mmh_dist_bill_dt) <= ?");
+        filterConditions.push(`${mergedDateExpr("mmh_dist_bill_dt")} <= ?`);
         filterValues.push(filters.dist_bill_to_date);
       }
 
       if (filters.has_updated !== undefined) {
-        filterConditions.push("p.has_updated = ?");
-        filterValues.push(filters.has_updated);
+        if (filters.has_updated) {
+          filterConditions.push(
+            "(p.has_updated = 1 OR up.purchase_id IS NOT NULL)"
+          );
+        } else {
+          filterConditions.push(
+            "(p.has_updated = 0 AND up.purchase_id IS NULL)"
+          );
+        }
       }
 
       if (filters.is_approved !== undefined) {
@@ -195,19 +241,8 @@ class PurchaseRepository {
           : "";
 
       this.db.query(
-        `SELECT p.*, 
-          p.mmh_dist_bill_no,
-          pi.cash_discount,
-          pi.scheme_difference,
-          pi.cost_difference,
-          pi.due,
-          pi.freight_charges,
-          pi.round_off,
-          pi.jv_ledger,
-          pi.narration,
-          pi.supplier_credit_note,
-          pi.total_amount,
-          pi.invoice_amount,
+        `SELECT
+          ${purchaseOverlaySelectList()},
           tr.VoucherNo,
           tr.InvoiceValue,
           tr.SupplierName,
@@ -215,10 +250,10 @@ class PurchaseRepository {
           o.outlet_name,
           o.outlet_id
         FROM purchase p
-        LEFT JOIN purchase_internal pi ON p.purchase_id = pi.purchase_id
-        LEFT JOIN outlets o ON p.retail_outlet_id = o.outlet_id
+        ${purchaseOverlayJoins()}
+        LEFT JOIN outlets o ON o.outlet_id = COALESCE(up.retail_outlet_id, p.retail_outlet_id)
         LEFT JOIN purchase_tally_response tr ON tr.VoucherNo = p.mmh_mrc_refno AND tr.CostCentre = o.outlet_name
-        ${whereClause} 
+        ${whereClause}
         ORDER BY p.created_at DESC`,
         filterValues,
         (err, docs) => {
@@ -236,31 +271,13 @@ class PurchaseRepository {
           }
 
           const parsedDocs = docs.map((doc) => ({
-            ...doc,
-            sgst: JSON.parse(doc.sgst),
-            cgst: JSON.parse(doc.cgst),
-            igst: JSON.parse(doc.igst),
-            cess: JSON.parse(doc.cess),
-            // Set default values for internal fields
-            cash_discount: doc.cash_discount || 0.0,
-            scheme_difference: doc.scheme_difference || 0.0,
-            cost_difference: doc.cost_difference || 0.0,
-            due: doc.due || 0.0,
-            freight_charges: doc.freight_charges || 0.0,
-            round_off: doc.round_off || 0.0,
-            jv_ledger: doc.jv_ledger || 0.0,
-            narration: doc.narration || "",
-            supplier_credit_note: doc.supplier_credit_note || 0.0,
-            total_amount: doc.total_amount || 0.0,
-            invoice_amount: doc.invoice_amount || 0.0,
-            // Add fields from purchase_tally_response
+            ...this._parsePurchaseDoc(doc),
             tally_response: {
               voucher_no: doc.VoucherNo || null,
               invoice_value: doc.InvoiceValue || null,
               supplier_name: doc.SupplierName || null,
               cost_centre: doc.CostCentre || null,
             },
-            mmh_dist_bill_no: doc.mmh_dist_bill_no || null,
           }));
 
           resolve({ code: 200, data: parsedDocs });
@@ -272,25 +289,17 @@ class PurchaseRepository {
   getById(purchaseId) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT p.*, 
-          p.mmh_dist_bill_no,
-          pi.cash_discount,
-          pi.scheme_difference,
-          pi.cost_difference,
-          pi.due,
-          pi.freight_charges,
-          pi.round_off,
-          pi.jv_ledger,
-          pi.narration,
+        `SELECT
+          ${purchaseOverlaySelectList()},
           tr.VoucherNo,
           tr.InvoiceValue,
           tr.SupplierName,
           tr.CostCentre
         FROM purchase p
-        LEFT JOIN purchase_internal pi ON p.purchase_id = pi.purchase_id
-        LEFT JOIN purchase_tally_response tr ON tr.VoucherNo = p.mmh_mrc_refno
-        LEFT JOIN outlets o ON p.retail_outlet_id = o.outlet_id
-        WHERE p.mmh_mrc_refno = ?`,
+        ${purchaseOverlayJoins()}
+        LEFT JOIN outlets o ON o.outlet_id = COALESCE(up.retail_outlet_id, p.retail_outlet_id)
+        LEFT JOIN purchase_tally_response tr ON tr.VoucherNo = p.mmh_mrc_refno AND tr.CostCentre = o.outlet_name
+        WHERE p.purchase_id = ?`,
         [purchaseId],
         (err, docs) => {
           if (err) {
@@ -313,26 +322,11 @@ class PurchaseRepository {
 
           const doc = docs[0];
           const parsedDoc = {
-            ...doc,
-            sgst: JSON.parse(doc.sgst),
-            cgst: JSON.parse(doc.cgst),
-            igst: JSON.parse(doc.igst),
-            cess: JSON.parse(doc.cess),
-            // Set default values for internal fields if they don't exist
-            cash_discount: doc.cash_discount || 0.0,
-            scheme_difference: doc.scheme_difference || 0.0,
-            cost_difference: doc.cost_difference || 0.0,
-            due: doc.due || 0.0,
-            freight_charges: doc.freight_charges || 0.0,
-            round_off: doc.round_off || 0.0,
-            jv_ledger: doc.jv_ledger || 0.0,
-            narration: doc.narration || "",
-            // Add fields from purchase_tally_response
+            ...this._parsePurchaseDoc(doc),
             voucher_no: doc.VoucherNo || null,
             invoice_value: doc.InvoiceValue || null,
             supplier_name: doc.SupplierName || null,
             cost_centre: doc.CostCentre || null,
-            mmh_dist_bill_no: doc.mmh_dist_bill_no || null,
           };
 
           resolve({ code: 200, data: parsedDoc });
@@ -889,86 +883,12 @@ class PurchaseRepository {
     return this._findPurchaseIdByTallyMasterId(masterId).then(Boolean);
   }
 
-  _applyTallyPurchaseUpdate(purchaseId, { purchase = {}, internal = {} }) {
-    return new Promise(async (resolve, reject) => {
-      try {
-        const purchaseFields = Object.keys(purchase).filter(
-          (k) => purchase[k] !== undefined
-        );
-        if (purchaseFields.length > 0) {
-          const setClause = purchaseFields.map((k) => `${k} = ?`).join(", ");
-          const values = purchaseFields.map((k) => purchase[k]);
-          await new Promise((res, rej) => {
-            this.db.query(
-              `UPDATE purchase SET ${setClause} WHERE purchase_id = ?`,
-              [...values, purchaseId],
-              (e) => (e ? rej(e) : res())
-            );
-          });
-        }
-
-        const internalFields = Object.keys(internal).filter(
-          (k) => internal[k] !== undefined
-        );
-        if (internalFields.length > 0) {
-          const [existingInternal] = await new Promise((res, rej) => {
-            this.db.query(
-              `SELECT purchase_id FROM purchase_internal WHERE purchase_id = ?`,
-              [purchaseId],
-              (e, result) => (e ? rej(e) : res([result[0]]))
-            );
-          });
-
-          if (existingInternal) {
-            const setClause = internalFields.map((k) => `${k} = ?`).join(", ");
-            const values = internalFields.map((k) => internal[k]);
-            await new Promise((res, rej) => {
-              this.db.query(
-                `UPDATE purchase_internal SET ${setClause} WHERE purchase_id = ?`,
-                [...values, purchaseId],
-                (e) => (e ? rej(e) : res())
-              );
-            });
-          } else {
-            const cols = ["purchase_id", ...internalFields];
-            const placeholders = cols.map(() => "?").join(", ");
-            const values = [
-              purchaseId,
-              ...internalFields.map((k) => internal[k]),
-            ];
-            await new Promise((res, rej) => {
-              this.db.query(
-                `INSERT INTO purchase_internal (${cols.join(
-                  ", "
-                )}) VALUES (${placeholders})`,
-                values,
-                (e) => (e ? rej(e) : res())
-              );
-            });
-          }
-        }
-
-        resolve({ code: 200, purchase_id: purchaseId });
-      } catch (updateErr) {
-        logger.Log({
-          level: logger.LEVEL.ERROR,
-          component: "REPOSITORY.PURCHASE",
-          code: "REPOSITORY.PURCHASE.UPDATE_FROM_TALLY",
-          description: updateErr.toString(),
-          category: "",
-          ref: {},
-        });
-        reject(updateErr);
-      }
-    });
-  }
-
   updateFromTallyDataByMasterId(masterId, payload) {
     return this._findPurchaseIdByTallyMasterId(masterId).then((purchaseId) => {
       if (!purchaseId) {
         return { code: 404, msg: "Purchase not found for MasterID" };
       }
-      return this._applyTallyPurchaseUpdate(purchaseId, payload);
+      return this.updatedPurchaseRepo.upsertFromTally(purchaseId, payload);
     });
   }
 

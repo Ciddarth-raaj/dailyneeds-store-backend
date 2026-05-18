@@ -78,7 +78,7 @@ class GstTallyPurchaseUsecase {
           return {
             code: 200,
             Action: item.Action,
-            source: "purchase",
+            source: "updated_purchase",
             mmh_mrc_refno: refno,
             master_id: masterId,
             purchase_id: updated.purchase_id,
