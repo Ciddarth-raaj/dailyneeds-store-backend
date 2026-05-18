@@ -57,14 +57,19 @@ function purchaseOverlaySelectList() {
   ].join(",\n          ");
 }
 
-function purchaseOverlayJoins() {
-  return `LEFT JOIN updated_purchase up ON up.purchase_id = p.purchase_id
-        LEFT JOIN purchase_internal pi ON pi.purchase_id = p.purchase_id
-        LEFT JOIN updated_purchase_internal upi ON upi.purchase_id = p.purchase_id`;
+function purchaseOverlayJoins(pAlias = "p") {
+  const idExpr = `${pAlias}.purchase_id`;
+  return `LEFT JOIN updated_purchase up ON up.purchase_id = ${idExpr}
+        LEFT JOIN purchase_internal pi ON pi.purchase_id = ${idExpr}
+        LEFT JOIN updated_purchase_internal upi ON upi.purchase_id = ${idExpr}`;
 }
 
-function mergedDateExpr(col) {
-  return `DATE(COALESCE(up.${col}, p.${col}))`;
+function mergedCol(col, pAlias = "p") {
+  return `COALESCE(up.${col}, ${pAlias}.${col})`;
+}
+
+function mergedDateExpr(col, pAlias = "p") {
+  return `DATE(COALESCE(up.${col}, ${pAlias}.${col}))`;
 }
 
 module.exports = {
@@ -72,5 +77,6 @@ module.exports = {
   INTERNAL_OVERLAY_COLUMNS,
   purchaseOverlaySelectList,
   purchaseOverlayJoins,
+  mergedCol,
   mergedDateExpr,
 };

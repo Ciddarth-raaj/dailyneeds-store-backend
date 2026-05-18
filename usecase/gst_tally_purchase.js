@@ -53,12 +53,18 @@ class GstTallyPurchaseUsecase {
 
       if (action === "delete") {
         const del = await this.gstTallyPurchaseRepo.deleteByMasterId(masterId);
-        return { ...del, Action: item.Action, master_id: masterId, mmh_mrc_refno: refno };
+        return {
+          ...del,
+          Action: item.Action,
+          master_id: masterId,
+          mmh_mrc_refno: refno,
+        };
       }
 
       if (action === "update") {
-        const existsInPurchase =
-          await this.purchaseRepo.existsByTallyMasterId(masterId);
+        const existsInPurchase = await this.purchaseRepo.existsByTallyMasterId(
+          masterId
+        );
 
         if (existsInPurchase) {
           const mapped = mapTallyDataToPurchaseUpdate(data);

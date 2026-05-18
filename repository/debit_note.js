@@ -1,4 +1,5 @@
 const logger = require("../utils/logger");
+const { mergedCol, purchaseOverlayJoins } = require("../utils/purchase_overlay_sql");
 const moment = require("moment");
 
 class DebitNoteRepository {
@@ -138,13 +139,14 @@ class DebitNoteRepository {
           tr.CostCentre,
           o.outlet_name,
           o.outlet_id,
-          p.mmh_dist_bill_dt,
-          p.mmh_dist_bill_no
+          ${mergedCol("mmh_dist_bill_dt")} AS mmh_dist_bill_dt,
+          ${mergedCol("mmh_dist_bill_no")} AS mmh_dist_bill_no
         FROM debit_note dn
         LEFT JOIN debit_note_internal pi ON dn.debit_note_id = pi.debit_note_id
         LEFT JOIN outlets o ON dn.store_id = o.outlet_id
         LEFT JOIN debit_note_tally_response tr ON tr.VoucherNo = dn.mprh_pr_refno AND tr.CostCentre = o.outlet_name
         LEFT JOIN purchase p ON p.mmh_mrc_refno = pi.mmh_mrc_refno AND p.retail_outlet_id = o.outlet_id
+        ${purchaseOverlayJoins("p")}
         ${whereClause}
         ORDER BY created_at DESC`,
         filterValues,

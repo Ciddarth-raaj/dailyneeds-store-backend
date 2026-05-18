@@ -12,6 +12,13 @@ class PurchaseRepository {
     this.updatedPurchaseRepo = require("./updated_purchase")(db);
   }
 
+  _clearOverlayBeforeNativeUpdate(purchaseId) {
+    if (purchaseId == null) {
+      return Promise.resolve();
+    }
+    return this.updatedPurchaseRepo.deleteByPurchaseId(purchaseId);
+  }
+
   _parsePurchaseDoc(doc) {
     const parseJson = (val) => {
       if (val == null || val === "") return [];
@@ -431,6 +438,8 @@ class PurchaseRepository {
             const is_approved = false;
 
             if (hasChanges && !existing.is_approved) {
+              await this._clearOverlayBeforeNativeUpdate(existing.purchase_id);
+
               // Update if values are different
               await new Promise((resolve, reject) => {
                 this.db.query(
@@ -563,6 +572,8 @@ class PurchaseRepository {
   async updatePurchaseWithInternal(purchase, purchaseInternal) {
     return new Promise(async (resolve, reject) => {
       try {
+        await this._clearOverlayBeforeNativeUpdate(purchase.purchase_id);
+
         // First check if purchase values have changed
         const [existingPurchase] = await new Promise((resolve, reject) => {
           this.db.query(
@@ -783,8 +794,10 @@ class PurchaseRepository {
   }
 
   async updateFlags(purchaseId, flags) {
-    return new Promise((resolve, reject) => {
+    return new Promise(async (resolve, reject) => {
       try {
+        await this._clearOverlayBeforeNativeUpdate(purchaseId);
+
         // Build update query dynamically based on provided flags
         const updates = [];
         const values = [];

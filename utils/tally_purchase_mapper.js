@@ -10,7 +10,10 @@ const OUTLET_VOUCHER_TYPE_MAP = {
 };
 
 const VOUCHER_TYPE_TO_OUTLET_ID = Object.fromEntries(
-  Object.entries(OUTLET_VOUCHER_TYPE_MAP).map(([id, name]) => [name, Number(id)])
+  Object.entries(OUTLET_VOUCHER_TYPE_MAP).map(([id, name]) => [
+    name,
+    Number(id),
+  ])
 );
 
 function parseTallyVoucherDate(value) {
@@ -72,7 +75,16 @@ function extractTaxArraysFromLedgerEntries(ledgerentries, supplierGstn) {
   const useIgst = shouldUseIgst(supplierGstn);
 
   if (!Array.isArray(ledgerentries)) {
-    return { sgst, cgst, igst, cess, tot_sgst_amt: 0, tot_cgst_amt: 0, tot_igst_amt: 0, tot_gst_cess_amt: 0 };
+    return {
+      sgst,
+      cgst,
+      igst,
+      cess,
+      tot_sgst_amt: 0,
+      tot_cgst_amt: 0,
+      tot_igst_amt: 0,
+      tot_gst_cess_amt: 0,
+    };
   }
 
   const taxableByRate = new Map();
@@ -86,7 +98,10 @@ function extractTaxArraysFromLedgerEntries(ledgerentries, supplierGstn) {
     }
     const absAmt = Math.abs(amount);
 
-    if (name === "Local GST Purchase Nil Rated" || name === "IGST Purchase Nil Rated") {
+    if (
+      name === "Local GST Purchase Nil Rated" ||
+      name === "IGST Purchase Nil Rated"
+    ) {
       taxableByRate.set(0, (taxableByRate.get(0) || 0) + absAmt);
       continue;
     }
@@ -109,21 +124,30 @@ function extractTaxArraysFromLedgerEntries(ledgerentries, supplierGstn) {
     match = name.match(/^CGST (\d+(?:\.\d+)?)% INPUT$/i);
     if (match && !useIgst) {
       const perc = parseFloat(match[1]);
-      taxValueByRate.set(`cgst-${perc}`, (taxValueByRate.get(`cgst-${perc}`) || 0) + absAmt);
+      taxValueByRate.set(
+        `cgst-${perc}`,
+        (taxValueByRate.get(`cgst-${perc}`) || 0) + absAmt
+      );
       continue;
     }
 
     match = name.match(/^SGST (\d+(?:\.\d+)?)% INPUT$/i);
     if (match && !useIgst) {
       const perc = parseFloat(match[1]);
-      taxValueByRate.set(`sgst-${perc}`, (taxValueByRate.get(`sgst-${perc}`) || 0) + absAmt);
+      taxValueByRate.set(
+        `sgst-${perc}`,
+        (taxValueByRate.get(`sgst-${perc}`) || 0) + absAmt
+      );
       continue;
     }
 
     match = name.match(/^IGST (\d+(?:\.\d+)?)% INPUT$/i);
     if (match && useIgst) {
       const perc = parseFloat(match[1]);
-      taxValueByRate.set(`igst-${perc}`, (taxValueByRate.get(`igst-${perc}`) || 0) + absAmt);
+      taxValueByRate.set(
+        `igst-${perc}`,
+        (taxValueByRate.get(`igst-${perc}`) || 0) + absAmt
+      );
     }
   }
 
@@ -146,12 +170,22 @@ function extractTaxArraysFromLedgerEntries(ledgerentries, supplierGstn) {
     }
   }
 
-  const tot_gst_cess_amt = ledgerAmountByName(ledgerentries, "CESS 12% INPUT") || 0;
+  const tot_gst_cess_amt =
+    ledgerAmountByName(ledgerentries, "CESS 12% INPUT") || 0;
   if (tot_gst_cess_amt) {
     cess.push({ PERC: 12, TAXABLE: 0, VALUE: tot_gst_cess_amt });
   }
 
-  return { sgst, cgst, igst, cess, tot_sgst_amt, tot_cgst_amt, tot_igst_amt, tot_gst_cess_amt };
+  return {
+    sgst,
+    cgst,
+    igst,
+    cess,
+    tot_sgst_amt,
+    tot_cgst_amt,
+    tot_igst_amt,
+    tot_gst_cess_amt,
+  };
 }
 
 /**
@@ -169,7 +203,8 @@ function mapTallyDataToPurchaseRows(tallyData) {
 
   const internal = {
     cash_discount: ledgerAmountByName(ledgerentries, "Cash Discount") || 0,
-    scheme_difference: ledgerAmountByName(ledgerentries, "Scheme Difference") || 0,
+    scheme_difference:
+      ledgerAmountByName(ledgerentries, "Scheme Difference") || 0,
     cost_difference: ledgerAmountByName(ledgerentries, "Cost Difference") || 0,
     due: ledgerAmountByName(ledgerentries, "Due") || 0,
     freight_charges: ledgerAmountByName(ledgerentries, "Freight Charges") || 0,
@@ -246,8 +281,15 @@ function mapTallyDataToPurchaseRows(tallyData) {
 /** Partial fields for updating an existing purchase row from tally data. */
 function mapTallyDataToPurchaseUpdate(tallyData) {
   const { purchase, internal } = mapTallyDataToPurchaseRows(tallyData);
-  const { master_id, mmh_mrc_refno, sgst, cgst, igst, cess, ...purchaseFields } =
-    purchase;
+  const {
+    master_id,
+    mmh_mrc_refno,
+    sgst,
+    cgst,
+    igst,
+    cess,
+    ...purchaseFields
+  } = purchase;
 
   return {
     purchase: {

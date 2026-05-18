@@ -1,4 +1,5 @@
 const logger = require("../utils/logger");
+const { mergedCol, mergedDateExpr, purchaseOverlayJoins } = require("../utils/purchase_overlay_sql");
 
 class PurchaseTallyRepository {
   constructor(db) {
@@ -60,14 +61,14 @@ class PurchaseTallyRepository {
         filterValues.push(filters.outlet_id);
       }
 
-      // Filter by date range
+      // Filter by date range (merged purchase / updated_purchase)
       if (filters.from_date) {
-        filterConditions.push("p.mmh_mrc_dt >= ?");
+        filterConditions.push(`${mergedDateExpr("mmh_mrc_dt")} >= ?`);
         filterValues.push(filters.from_date);
       }
 
       if (filters.to_date) {
-        filterConditions.push("p.mmh_mrc_dt <= ?");
+        filterConditions.push(`${mergedDateExpr("mmh_mrc_dt")} <= ?`);
         filterValues.push(filters.to_date);
       }
 
@@ -78,17 +79,17 @@ class PurchaseTallyRepository {
 
       this.db.query(
         `SELECT tr.*,
-               pi.total_amount,
+               COALESCE(upi.total_amount, pi.total_amount) AS total_amount,
                p.purchase_id,
-               p.supplier_name,
-               p.supplier_gstn,
-               p.mmh_mrc_dt,
-               p.mmh_mrc_amt
+               ${mergedCol("supplier_name")} AS supplier_name,
+               ${mergedCol("supplier_gstn")} AS supplier_gstn,
+               ${mergedCol("mmh_mrc_dt")} AS mmh_mrc_dt,
+               ${mergedCol("mmh_mrc_amt")} AS mmh_mrc_amt
          FROM purchase_tally_response tr
          JOIN outlets o ON tr.CostCentre = o.outlet_name
          LEFT JOIN purchase p ON tr.VoucherNo = p.mmh_mrc_refno 
            AND p.retail_outlet_id = o.outlet_id
-         LEFT JOIN purchase_internal pi ON p.purchase_id = pi.purchase_id
+         ${purchaseOverlayJoins("p")}
          ${whereClause}
          ORDER BY tr.created_at DESC`,
         filterValues,
