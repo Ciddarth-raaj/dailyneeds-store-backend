@@ -7,6 +7,62 @@ class GstB2bRepository {
     this.db = db;
   }
 
+  findByPeriodAndB2bIndex(year, month, b2b_index) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT gst_b2b_id, year, month, b2b_index, gst_vendor_id, ctin, cfs, created_at
+         FROM ${TABLE}
+         WHERE year = ? AND month = ? AND b2b_index = ?
+         LIMIT 1`,
+        [year, month, b2b_index],
+        (err, rows) => {
+          if (err) return reject(err);
+          resolve(rows && rows[0] ? rows[0] : null);
+        }
+      );
+    });
+  }
+
+  getMaxB2bIndex(year, month) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT COALESCE(MAX(b2b_index), -1) AS max_index
+         FROM ${TABLE}
+         WHERE year = ? AND month = ?`,
+        [year, month],
+        (err, rows) => {
+          if (err) return reject(err);
+          resolve(rows && rows[0] ? Number(rows[0].max_index) : -1);
+        }
+      );
+    });
+  }
+
+  updateBlock(gst_b2b_id, { gst_vendor_id, ctin, cfs }) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `UPDATE ${TABLE}
+         SET gst_vendor_id = ?, ctin = ?, cfs = ?
+         WHERE gst_b2b_id = ?`,
+        [gst_vendor_id ?? null, ctin, cfs ?? null, gst_b2b_id],
+        (err) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.GST_B2B",
+              code: "REPOSITORY.GST_B2B.UPDATE_BLOCK",
+              description: err.toString(),
+              category: "",
+              ref: { gst_b2b_id },
+            });
+            return reject(err);
+          }
+          resolve();
+        }
+      );
+    });
+  }
+
   findByPeriodAndCtin(year, month, ctin) {
     return new Promise((resolve, reject) => {
       this.db.query(
@@ -115,15 +171,29 @@ class GstB2bRepository {
           row.ctin,
           row.cfs ?? null,
         ],
-        (err, res) => {
+        async (err, res) => {
           if (err) {
+            if (err.code === "ER_DUP_ENTRY") {
+              try {
+                const existing = await this.findByPeriodAndB2bIndex(
+                  row.year,
+                  row.month,
+                  row.b2b_index
+                );
+                if (existing) {
+                  return resolve(existing.gst_b2b_id);
+                }
+              } catch (_) {
+                /* fall through */
+              }
+            }
             logger.Log({
               level: logger.LEVEL.ERROR,
               component: "REPOSITORY.GST_B2B",
               code: "REPOSITORY.GST_B2B.INSERT",
               description: err.toString(),
               category: "",
-              ref: { year: row.year, month: row.month },
+              ref: { year: row.year, month: row.month, b2b_index: row.b2b_index },
             });
             return reject(err);
           }

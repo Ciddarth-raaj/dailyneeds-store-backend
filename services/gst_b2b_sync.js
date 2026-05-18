@@ -194,12 +194,58 @@ class GstB2bSyncService {
     await this.vendorFilingDateRepo.deleteByReturnPeriod(year, month);
   }
 
-  async findOrCreateB2bBlock({ year, month, b2b_index, gst_vendor_id, ctin, cfs }) {
-    const existing = await this.gstB2bRepo.findByPeriodAndCtin(year, month, ctin);
-    if (existing) {
-      return existing.gst_b2b_id;
+  /**
+   * Resolve gst_b2b_id without violating uq_gst_b2b_period_index (year, month, b2b_index).
+   * Lookup by ctin first; then by API array index. If index is held by another ctin with
+   * matched purchase rows, allocate max(b2b_index)+1 instead of inserting a duplicate.
+   */
+  async resolveGstB2bId({ year, month, b2b_index, gst_vendor_id, ctin, cfs }) {
+    const byCtin = await this.gstB2bRepo.findByPeriodAndCtin(year, month, ctin);
+    if (byCtin) {
+      return { gst_b2b_id: byCtin.gst_b2b_id, created: false };
     }
-    return this.gstB2bRepo.insert({
+
+    const byIndex = await this.gstB2bRepo.findByPeriodAndB2bIndex(
+      year,
+      month,
+      b2b_index
+    );
+    if (byIndex) {
+      const sameCtin =
+        String(byIndex.ctin || "").toUpperCase() === String(ctin).toUpperCase();
+      if (sameCtin) {
+        return { gst_b2b_id: byIndex.gst_b2b_id, created: false };
+      }
+
+      const indexBlocked =
+        this.gstPurchaseMatchRepo != null &&
+        (await this.gstPurchaseMatchRepo.hasMatchedInvoicesForB2bId(
+          byIndex.gst_b2b_id
+        ));
+
+      if (!indexBlocked) {
+        await this.gstB2bRepo.updateBlock(byIndex.gst_b2b_id, {
+          gst_vendor_id,
+          ctin,
+          cfs,
+        });
+        return { gst_b2b_id: byIndex.gst_b2b_id, created: false };
+      }
+
+      const overflowIndex =
+        (await this.gstB2bRepo.getMaxB2bIndex(year, month)) + 1;
+      const gst_b2b_id = await this.gstB2bRepo.insert({
+        year,
+        month,
+        b2b_index: overflowIndex,
+        gst_vendor_id,
+        ctin,
+        cfs,
+      });
+      return { gst_b2b_id, created: true, overflow_index: overflowIndex };
+    }
+
+    const gst_b2b_id = await this.gstB2bRepo.insert({
       year,
       month,
       b2b_index,
@@ -207,6 +253,7 @@ class GstB2bSyncService {
       ctin,
       cfs,
     });
+    return { gst_b2b_id, created: true };
   }
 
   /**
@@ -263,16 +310,16 @@ class GstB2bSyncService {
           ? String(block.cfs).slice(0, 8)
           : null;
 
-      const hadB2b = await this.gstB2bRepo.findByPeriodAndCtin(year, month, ctin);
-      const gstB2bId = await this.findOrCreateB2bBlock({
-        year,
-        month,
-        b2b_index: bi,
-        gst_vendor_id: gstVendorId,
-        ctin,
-        cfs,
-      });
-      if (!hadB2b) {
+      const { gst_b2b_id: gstB2bId, created: createdB2b } =
+        await this.resolveGstB2bId({
+          year,
+          month,
+          b2b_index: bi,
+          gst_vendor_id: gstVendorId,
+          ctin,
+          cfs,
+        });
+      if (createdB2b) {
         insertedB2b += 1;
       }
 

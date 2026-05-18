@@ -67,6 +67,23 @@ class GstPurchaseMatchRepository {
     return { whereClause, values };
   }
 
+  hasMatchedInvoicesForB2bId(gst_b2b_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT 1 AS ok
+         FROM ${TABLE} m
+         INNER JOIN gst_b2b_invoices bi ON bi.gst_b2b_invoice_id = m.gst_b2b_invoice_id
+         WHERE bi.gst_b2b_id = ?
+         LIMIT 1`,
+        [gst_b2b_id],
+        (err, rows) => {
+          if (err) return reject(err);
+          resolve(Boolean(rows && rows.length > 0));
+        }
+      );
+    });
+  }
+
   listMatchedInvoiceIdsByReturnPeriod(year, month) {
     return new Promise((resolve, reject) => {
       this.db.query(
