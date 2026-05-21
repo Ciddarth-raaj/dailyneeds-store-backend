@@ -4,48 +4,64 @@ class PurchaseTallyUsecase {
   }
 
   async create(data) {
-    try {
-      const result = await this.purchaseTallyRepo.create(data);
-      return result;
-    } catch (error) {
-      throw error;
+    const purchaseId =
+      await this.purchaseTallyRepo.findPurchaseIdForTallyResponse(data);
+
+    if (purchaseId == null || purchaseId === "") {
+      return {
+        code: 404,
+        msg: "Purchase does not exist for the provided voucher number, supplier name, GSTIN, and cost centre",
+      };
     }
+
+    const existingByPurchase =
+      await this.purchaseTallyRepo.findByPurchaseId(purchaseId);
+    if (
+      existingByPurchase &&
+      String(existingByPurchase.MasterID) !== String(data.MasterID)
+    ) {
+      return {
+        code: 409,
+        msg: "This purchase already has a Tally response linked with a different MasterID",
+        purchase_id: purchaseId,
+        existing_master_id: existingByPurchase.MasterID,
+      };
+    }
+
+    const existingByMaster = await this.purchaseTallyRepo.findByMasterId(
+      data.MasterID
+    );
+    if (
+      existingByMaster &&
+      Number(existingByMaster.purchase_id) !== Number(purchaseId)
+    ) {
+      return {
+        code: 409,
+        msg: "MasterID is already linked to a different purchase",
+        purchase_id: existingByMaster.purchase_id,
+      };
+    }
+
+    return this.purchaseTallyRepo.create({
+      ...data,
+      purchase_id: purchaseId,
+    });
   }
 
   async getAll(filters) {
-    try {
-      const result = await this.purchaseTallyRepo.getAll(filters);
-      return result;
-    } catch (error) {
-      throw error;
-    }
+    return this.purchaseTallyRepo.getAll(filters);
   }
 
   async getById(id) {
-    try {
-      const result = await this.purchaseTallyRepo.getById(id);
-      return result;
-    } catch (error) {
-      throw error;
-    }
+    return this.purchaseTallyRepo.getById(id);
   }
 
   async update(id, data) {
-    try {
-      const result = await this.purchaseTallyRepo.update(id, data);
-      return result;
-    } catch (error) {
-      throw error;
-    }
+    return this.purchaseTallyRepo.update(id, data);
   }
 
   async delete(id) {
-    try {
-      const result = await this.purchaseTallyRepo.delete(id);
-      return result;
-    } catch (error) {
-      throw error;
-    }
+    return this.purchaseTallyRepo.delete(id);
   }
 }
 

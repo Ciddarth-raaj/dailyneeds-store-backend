@@ -259,7 +259,7 @@ class PurchaseRepository {
         FROM purchase p
         ${purchaseOverlayJoins()}
         LEFT JOIN outlets o ON o.outlet_id = COALESCE(up.retail_outlet_id, p.retail_outlet_id)
-        LEFT JOIN purchase_tally_response tr ON tr.VoucherNo = p.mmh_mrc_refno AND tr.CostCentre = o.outlet_name
+        LEFT JOIN purchase_tally_response tr ON tr.purchase_id = p.purchase_id
         ${whereClause}
         ORDER BY p.created_at DESC`,
         filterValues,
@@ -305,7 +305,7 @@ class PurchaseRepository {
         FROM purchase p
         ${purchaseOverlayJoins()}
         LEFT JOIN outlets o ON o.outlet_id = COALESCE(up.retail_outlet_id, p.retail_outlet_id)
-        LEFT JOIN purchase_tally_response tr ON tr.VoucherNo = p.mmh_mrc_refno AND tr.CostCentre = o.outlet_name
+        LEFT JOIN purchase_tally_response tr ON tr.purchase_id = p.purchase_id
         WHERE p.purchase_id = ?`,
         [purchaseId],
         (err, docs) => {
@@ -865,13 +865,9 @@ class PurchaseRepository {
   _findPurchaseIdByTallyMasterId(masterId) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT p.purchase_id
-         FROM purchase_tally_response tr
-         INNER JOIN outlets o ON tr.CostCentre = o.outlet_name
-         INNER JOIN purchase p
-           ON p.mmh_mrc_refno = tr.VoucherNo
-          AND p.retail_outlet_id = o.outlet_id
-         WHERE tr.MasterID = ?
+        `SELECT purchase_id
+         FROM purchase_tally_response
+         WHERE MasterID = ?
          LIMIT 1`,
         [String(masterId).trim()],
         (err, rows) => {
@@ -909,10 +905,7 @@ class PurchaseRepository {
       this.db.query(
         `SELECT p.supplier_id
          FROM purchase_tally_response tr
-         INNER JOIN outlets o ON tr.CostCentre = o.outlet_name
-         INNER JOIN purchase p
-           ON p.mmh_mrc_refno = tr.VoucherNo
-          AND p.retail_outlet_id = o.outlet_id
+         INNER JOIN purchase p ON p.purchase_id = tr.purchase_id
          WHERE tr.MasterID = ?
            AND p.supplier_id IS NOT NULL
            AND TRIM(p.supplier_id) != ''
@@ -1027,7 +1020,9 @@ class PurchaseRepository {
     return new Promise((resolve, reject) => {
       try {
         this.db.query(
-          `DELETE FROM purchase_tally_response WHERE VoucherNo = ?`,
+          `DELETE tr FROM purchase_tally_response tr
+           INNER JOIN purchase p ON p.purchase_id = tr.purchase_id
+           WHERE p.mmh_mrc_refno = ?`,
           [VoucherNo],
           (err, result) => {
             if (err) {

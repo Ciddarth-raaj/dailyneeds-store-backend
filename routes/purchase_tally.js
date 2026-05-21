@@ -26,10 +26,19 @@ class PurchaseTallyRoutes {
         }
 
         const result = await this.purchaseTallyUsecase.create(value);
-        res.json(result);
+        const status =
+          result.code >= 400 && result.code < 600 ? result.code : 200;
+        return res.status(status).json(result);
       } catch (err) {
         console.log(err);
-        res.json({ code: 500, msg: err.message });
+        const status = err.statusCode === 404 ? 404 : 500;
+        return res.status(status).json({
+          code: status,
+          msg:
+            err.statusCode === 404
+              ? err.message
+              : err.message || "An error occurred",
+        });
       }
     });
 

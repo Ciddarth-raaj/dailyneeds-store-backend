@@ -6,19 +6,113 @@ class PurchaseTallyRepository {
     this.db = db;
   }
 
-  create(data) {
+  /**
+   * Resolve purchase_id from tally response fields against purchase + outlet.
+   */
+  findPurchaseIdForTallyResponse({ VoucherNo, SupplierName, GSTIN, CostCentre }) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `INSERT INTO purchase_tally_response 
-        (MasterID, VoucherNo, InvoiceValue, SupplierName, CostCentre, GSTIN) 
-        VALUES (?, ?, ?, ?, ?, ?)
+        `SELECT p.purchase_id
+         FROM purchase p
+         INNER JOIN outlets o ON o.outlet_id = p.retail_outlet_id
+         WHERE TRIM(p.mmh_mrc_refno) = TRIM(?)
+           AND TRIM(o.outlet_name) = TRIM(?)
+           AND UPPER(TRIM(p.supplier_gstn)) = UPPER(TRIM(?))
+           AND LOWER(TRIM(p.supplier_name)) = LOWER(TRIM(?))
+         ORDER BY p.purchase_id DESC
+         LIMIT 1`,
+        [VoucherNo, CostCentre, GSTIN, SupplierName],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PURCHASE_TALLY",
+              code: "REPOSITORY.PURCHASE_TALLY.FIND-PURCHASE-ID",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(rows && rows[0] ? rows[0].purchase_id : null);
+        }
+      );
+    });
+  }
+
+  findByPurchaseId(purchaseId) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "SELECT * FROM purchase_tally_response WHERE purchase_id = ? LIMIT 1",
+        [purchaseId],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PURCHASE_TALLY",
+              code: "REPOSITORY.PURCHASE_TALLY.FIND-BY-PURCHASE-ID",
+              description: err.toString(),
+              category: "",
+              ref: { purchaseId },
+            });
+            reject(err);
+            return;
+          }
+          resolve(rows && rows[0] ? rows[0] : null);
+        }
+      );
+    });
+  }
+
+  findByMasterId(masterId) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "SELECT * FROM purchase_tally_response WHERE MasterID = ? LIMIT 1",
+        [masterId],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PURCHASE_TALLY",
+              code: "REPOSITORY.PURCHASE_TALLY.FIND-BY-MASTER-ID",
+              description: err.toString(),
+              category: "",
+              ref: { masterId },
+            });
+            reject(err);
+            return;
+          }
+          resolve(rows && rows[0] ? rows[0] : null);
+        }
+      );
+    });
+  }
+
+  create(data) {
+    const purchaseId = data.purchase_id;
+    if (purchaseId == null || purchaseId === "") {
+      const err = new Error(
+        "Purchase does not exist for the provided voucher number, supplier name, GSTIN, and cost centre"
+      );
+      err.statusCode = 404;
+      return Promise.reject(err);
+    }
+
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `INSERT INTO purchase_tally_response
+        (purchase_id, MasterID, VoucherNo, InvoiceValue, SupplierName, CostCentre, GSTIN)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
+        MasterID = VALUES(MasterID),
         VoucherNo = VALUES(VoucherNo),
         InvoiceValue = VALUES(InvoiceValue),
         SupplierName = VALUES(SupplierName),
         GSTIN = VALUES(GSTIN),
         CostCentre = VALUES(CostCentre)`,
         [
+          data.purchase_id,
           data.MasterID,
           data.VoucherNo,
           data.InvoiceValue,
@@ -44,6 +138,7 @@ class PurchaseTallyRepository {
             message: result.insertId
               ? "Inserted successfully"
               : "Updated successfully",
+            purchase_id: data.purchase_id,
           });
         }
       );
@@ -55,13 +150,11 @@ class PurchaseTallyRepository {
       let filterConditions = [];
       let filterValues = [];
 
-      // Filter by outlet_id
       if (filters.outlet_id) {
         filterConditions.push("o.outlet_id = ?");
         filterValues.push(filters.outlet_id);
       }
 
-      // Filter by date range (merged purchase / updated_purchase)
       if (filters.from_date) {
         filterConditions.push(`${mergedDateExpr("mmh_mrc_dt")} >= ?`);
         filterValues.push(filters.from_date);
@@ -86,9 +179,8 @@ class PurchaseTallyRepository {
                ${mergedCol("mmh_mrc_dt")} AS mmh_mrc_dt,
                ${mergedCol("mmh_mrc_amt")} AS mmh_mrc_amt
          FROM purchase_tally_response tr
-         JOIN outlets o ON tr.CostCentre = o.outlet_name
-         LEFT JOIN purchase p ON tr.VoucherNo = p.mmh_mrc_refno 
-           AND p.retail_outlet_id = o.outlet_id
+         INNER JOIN purchase p ON p.purchase_id = tr.purchase_id
+         INNER JOIN outlets o ON o.outlet_id = p.retail_outlet_id
          ${purchaseOverlayJoins("p")}
          ${whereClause}
          ORDER BY tr.created_at DESC`,
@@ -166,6 +258,11 @@ class PurchaseTallyRepository {
       if (data.CostCentre !== undefined) {
         updates.push("CostCentre = ?");
         values.push(data.CostCentre);
+      }
+
+      if (data.GSTIN !== undefined) {
+        updates.push("GSTIN = ?");
+        values.push(data.GSTIN);
       }
 
       if (updates.length === 0) {
