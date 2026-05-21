@@ -3,9 +3,129 @@ const logger = require("../utils/logger");
 const TABLE = "gst_tally_purchase";
 const INTERNAL_TABLE = "gst_tally_purchase_internal";
 
+function parseTaxJson(val) {
+  if (val == null || val === "") return [];
+  if (typeof val === "object") return val;
+  try {
+    return JSON.parse(val);
+  } catch {
+    return [];
+  }
+}
+
 class GstTallyPurchaseRepository {
   constructor(db) {
     this.db = db;
+  }
+
+  getSupplierIdByMasterId(master_id) {
+    const id = String(master_id || "").trim();
+    if (!id) {
+      return Promise.resolve(null);
+    }
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT supplier_id FROM ${TABLE}
+         WHERE master_id = ?
+           AND supplier_id IS NOT NULL
+           AND TRIM(supplier_id) != ''
+         LIMIT 1`,
+        [id],
+        (err, rows) => {
+          if (err) return reject(err);
+          const sid = rows && rows[0] ? rows[0].supplier_id : null;
+          resolve(sid != null && String(sid).trim() !== "" ? String(sid) : null);
+        }
+      );
+    });
+  }
+
+  /**
+   * Snapshot purchase + purchase_internal into gst_tally_purchase when pushed to Tally.
+   */
+  copyFromPurchase(purchase_id, master_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT p.*,
+                pi.cash_discount,
+                pi.scheme_difference,
+                pi.cost_difference,
+                pi.due,
+                pi.freight_charges,
+                pi.round_off,
+                pi.jv_ledger,
+                pi.narration,
+                pi.supplier_credit_note,
+                pi.total_amount,
+                pi.invoice_amount
+         FROM purchase p
+         LEFT JOIN purchase_internal pi ON pi.purchase_id = p.purchase_id
+         WHERE p.purchase_id = ?
+         LIMIT 1`,
+        [purchase_id],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.GST_TALLY_PURCHASE",
+              code: "REPOSITORY.GST_TALLY_PURCHASE.COPY_FROM_PURCHASE",
+              description: err.toString(),
+              category: "",
+              ref: { purchase_id, master_id },
+            });
+            return reject(err);
+          }
+          if (!rows || !rows.length) {
+            return reject(
+              Object.assign(new Error("Purchase not found"), { statusCode: 404 })
+            );
+          }
+
+          const row = rows[0];
+          const purchase = {
+            master_id: String(master_id).trim(),
+            retail_outlet_id: row.retail_outlet_id,
+            supplier_id: row.supplier_id,
+            supplier_name: row.supplier_name,
+            supplier_gstn: row.supplier_gstn,
+            mmh_mrc_no: row.mmh_mrc_no,
+            mmh_mrc_dt: row.mmh_mrc_dt,
+            mmh_mrc_amt: row.mmh_mrc_amt,
+            mmh_dist_bill_dt: row.mmh_dist_bill_dt,
+            mmh_dist_bill_no: row.mmh_dist_bill_no,
+            mmh_mrc_refno: row.mmh_mrc_refno,
+            mmh_manual_disc: row.mmh_manual_disc ?? 0,
+            tot_sgst_amt: row.tot_sgst_amt ?? 0,
+            tot_cgst_amt: row.tot_cgst_amt ?? 0,
+            tot_igst_amt: row.tot_igst_amt ?? 0,
+            tot_gst_cess_amt: row.tot_gst_cess_amt ?? 0,
+            mmd_goods_tcs_amt: row.mmd_goods_tcs_amt ?? 0,
+            ts: row.ts,
+            sgst: parseTaxJson(row.sgst),
+            cgst: parseTaxJson(row.cgst),
+            igst: parseTaxJson(row.igst),
+            cess: parseTaxJson(row.cess),
+          };
+          const internal = {
+            cash_discount: row.cash_discount ?? 0,
+            scheme_difference: row.scheme_difference ?? 0,
+            cost_difference: row.cost_difference ?? 0,
+            due: row.due ?? 0,
+            freight_charges: row.freight_charges ?? 0,
+            round_off: row.round_off ?? 0,
+            jv_ledger: row.jv_ledger ?? null,
+            narration: row.narration ?? "",
+            supplier_credit_note: row.supplier_credit_note ?? 0,
+            total_amount: row.total_amount ?? 0,
+            invoice_amount: row.invoice_amount ?? 0,
+          };
+
+          this.upsertFromRows({ purchase, internal })
+            .then(resolve)
+            .catch(reject);
+        }
+      );
+    });
   }
 
   upsertFromRows({ purchase, internal }) {

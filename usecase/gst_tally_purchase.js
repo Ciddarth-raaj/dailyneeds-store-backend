@@ -1,8 +1,5 @@
 const logger = require("../utils/logger");
-const {
-  mapTallyDataToPurchaseRows,
-  mapTallyDataToPurchaseUpdate,
-} = require("../utils/tally_purchase_mapper");
+const { mapTallyDataToPurchaseRows } = require("../utils/tally_purchase_mapper");
 
 function normalizeGstin(gstin) {
   return String(gstin || "")
@@ -11,8 +8,7 @@ function normalizeGstin(gstin) {
 }
 
 class GstTallyPurchaseUsecase {
-  constructor(purchaseRepo, gstTallyPurchaseRepo, gstVendorRepo) {
-    this.purchaseRepo = purchaseRepo;
+  constructor(gstTallyPurchaseRepo, gstVendorRepo) {
     this.gstTallyPurchaseRepo = gstTallyPurchaseRepo;
     this.gstVendorRepo = gstVendorRepo;
     this._gstinToVendorId = null;
@@ -37,35 +33,16 @@ class GstTallyPurchaseUsecase {
     return map;
   }
 
-  /**
-   * supplier_id: purchase (linked MasterID, then GSTIN, then name), else gst_vendors by GSTIN.
-   */
+  /** supplier_id from existing gst_tally_purchase row, else gst_vendors by GSTIN. */
   async resolveSupplierId(masterId, supplierGstn, supplierName) {
-    const fromLinked =
-      await this.purchaseRepo.getSupplierIdByTallyMasterId(masterId);
-    if (fromLinked) {
-      return fromLinked;
+    const fromGst = await this.gstTallyPurchaseRepo.getSupplierIdByMasterId(
+      masterId
+    );
+    if (fromGst) {
+      return fromGst;
     }
 
     const gstn = normalizeGstin(supplierGstn);
-    if (gstn) {
-      const fromPurchaseGstn =
-        await this.purchaseRepo.findSupplierIdBySupplierGstn(gstn);
-      if (fromPurchaseGstn) {
-        return fromPurchaseGstn;
-      }
-    }
-
-    const name =
-      supplierName != null ? String(supplierName).trim() : "";
-    if (name) {
-      const fromPurchaseName =
-        await this.purchaseRepo.findSupplierIdBySupplierName(name);
-      if (fromPurchaseName) {
-        return fromPurchaseName;
-      }
-    }
-
     if (gstn) {
       const map = await this._loadGstinToVendorIdMap();
       const gstVendorId = map.get(gstn);
@@ -82,14 +59,10 @@ class GstTallyPurchaseUsecase {
       rows.purchase.supplier_gstn != null
         ? rows.purchase.supplier_gstn
         : tallyData.BuyerGSTIN;
-    const supplierName =
-      rows.purchase.supplier_name != null
-        ? rows.purchase.supplier_name
-        : tallyData.PartyName;
     rows.purchase.supplier_id = await this.resolveSupplierId(
       masterId,
       supplierGstn,
-      supplierName
+      tallyData.PartyName
     );
   }
 
@@ -121,20 +94,6 @@ class GstTallyPurchaseUsecase {
     }
 
     try {
-      const rows = mapTallyDataToPurchaseRows(data);
-      await this.applyResolvedSupplierId(rows, data, masterId);
-
-      if (action === "create") {
-        await this.gstTallyPurchaseRepo.upsertFromRows(rows);
-        return {
-          code: 200,
-          Action: item.Action,
-          source: "gst_tally_purchase",
-          mmh_mrc_refno: refno,
-          master_id: masterId,
-        };
-      }
-
       if (action === "delete") {
         const del = await this.gstTallyPurchaseRepo.deleteByMasterId(masterId);
         return {
@@ -145,51 +104,16 @@ class GstTallyPurchaseUsecase {
         };
       }
 
-      if (action === "update") {
-        const existsInPurchase =
-          await this.purchaseRepo.existsByTallyMasterId(masterId);
-
-        if (existsInPurchase) {
-          const mapped = mapTallyDataToPurchaseUpdate(data);
-          const updated = await this.purchaseRepo.updateFromTallyDataByMasterId(
-            masterId,
-            mapped
-          );
-          if (updated.code === 404) {
-            return {
-              code: 404,
-              msg: updated.msg,
-              Action: item.Action,
-              master_id: masterId,
-              mmh_mrc_refno: refno,
-            };
-          }
-          return {
-            code: 200,
-            Action: item.Action,
-            source: "updated_purchase",
-            mmh_mrc_refno: refno,
-            master_id: masterId,
-            purchase_id: updated.purchase_id,
-          };
-        }
-
-        await this.gstTallyPurchaseRepo.upsertFromRows(rows);
-        return {
-          code: 200,
-          Action: item.Action,
-          source: "gst_tally_purchase",
-          mmh_mrc_refno: refno,
-          master_id: masterId,
-        };
-      }
+      const rows = mapTallyDataToPurchaseRows(data);
+      await this.applyResolvedSupplierId(rows, data, masterId);
+      await this.gstTallyPurchaseRepo.upsertFromRows(rows);
 
       return {
-        code: 400,
-        msg: "Invalid Action",
+        code: 200,
         Action: item.Action,
-        master_id: masterId,
+        source: "gst_tally_purchase",
         mmh_mrc_refno: refno,
+        master_id: masterId,
       };
     } catch (err) {
       logger.Log({
@@ -226,10 +150,6 @@ class GstTallyPurchaseUsecase {
   }
 }
 
-module.exports = (purchaseRepo, gstTallyPurchaseRepo, gstVendorRepo) => {
-  return new GstTallyPurchaseUsecase(
-    purchaseRepo,
-    gstTallyPurchaseRepo,
-    gstVendorRepo
-  );
+module.exports = (gstTallyPurchaseRepo, gstVendorRepo) => {
+  return new GstTallyPurchaseUsecase(gstTallyPurchaseRepo, gstVendorRepo);
 };

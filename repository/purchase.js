@@ -9,14 +9,6 @@ const {
 class PurchaseRepository {
   constructor(db) {
     this.db = db;
-    this.updatedPurchaseRepo = require("./updated_purchase")(db);
-  }
-
-  _clearOverlayBeforeNativeUpdate(purchaseId) {
-    if (purchaseId == null) {
-      return Promise.resolve();
-    }
-    return this.updatedPurchaseRepo.deleteByPurchaseId(purchaseId);
   }
 
   _parsePurchaseDoc(doc) {
@@ -191,7 +183,7 @@ class PurchaseRepository {
 
       if (filters.retail_outlet_id) {
         filterConditions.push(
-          "COALESCE(up.retail_outlet_id, p.retail_outlet_id) = ?"
+          "COALESCE(g.retail_outlet_id, p.retail_outlet_id) = ?"
         );
         filterValues.push(filters.retail_outlet_id);
       }
@@ -219,11 +211,11 @@ class PurchaseRepository {
       if (filters.has_updated !== undefined) {
         if (filters.has_updated) {
           filterConditions.push(
-            "(p.has_updated = 1 OR up.purchase_id IS NOT NULL)"
+            "(p.has_updated = 1 OR g.gst_tally_purchase_id IS NOT NULL)"
           );
         } else {
           filterConditions.push(
-            "(p.has_updated = 0 AND up.purchase_id IS NULL)"
+            "(p.has_updated = 0 AND g.gst_tally_purchase_id IS NULL)"
           );
         }
       }
@@ -258,8 +250,7 @@ class PurchaseRepository {
           o.outlet_id
         FROM purchase p
         ${purchaseOverlayJoins()}
-        LEFT JOIN outlets o ON o.outlet_id = COALESCE(up.retail_outlet_id, p.retail_outlet_id)
-        LEFT JOIN purchase_tally_response tr ON tr.purchase_id = p.purchase_id
+        LEFT JOIN outlets o ON o.outlet_id = COALESCE(g.retail_outlet_id, p.retail_outlet_id)
         ${whereClause}
         ORDER BY p.created_at DESC`,
         filterValues,
@@ -304,8 +295,7 @@ class PurchaseRepository {
           tr.CostCentre
         FROM purchase p
         ${purchaseOverlayJoins()}
-        LEFT JOIN outlets o ON o.outlet_id = COALESCE(up.retail_outlet_id, p.retail_outlet_id)
-        LEFT JOIN purchase_tally_response tr ON tr.purchase_id = p.purchase_id
+        LEFT JOIN outlets o ON o.outlet_id = COALESCE(g.retail_outlet_id, p.retail_outlet_id)
         WHERE p.purchase_id = ?`,
         [purchaseId],
         (err, docs) => {
@@ -438,8 +428,6 @@ class PurchaseRepository {
             const is_approved = false;
 
             if (hasChanges && !existing.is_approved) {
-              await this._clearOverlayBeforeNativeUpdate(existing.purchase_id);
-
               // Update if values are different
               await new Promise((resolve, reject) => {
                 this.db.query(
@@ -572,8 +560,6 @@ class PurchaseRepository {
   async updatePurchaseWithInternal(purchase, purchaseInternal) {
     return new Promise(async (resolve, reject) => {
       try {
-        await this._clearOverlayBeforeNativeUpdate(purchase.purchase_id);
-
         // First check if purchase values have changed
         const [existingPurchase] = await new Promise((resolve, reject) => {
           this.db.query(
@@ -796,8 +782,6 @@ class PurchaseRepository {
   async updateFlags(purchaseId, flags) {
     return new Promise(async (resolve, reject) => {
       try {
-        await this._clearOverlayBeforeNativeUpdate(purchaseId);
-
         // Build update query dynamically based on provided flags
         const updates = [];
         const values = [];
@@ -1004,15 +988,6 @@ class PurchaseRepository {
           resolve(sid != null && String(sid).trim() !== "" ? String(sid) : null);
         }
       );
-    });
-  }
-
-  updateFromTallyDataByMasterId(masterId, payload) {
-    return this._findPurchaseIdByTallyMasterId(masterId).then((purchaseId) => {
-      if (!purchaseId) {
-        return { code: 404, msg: "Purchase not found for MasterID" };
-      }
-      return this.updatedPurchaseRepo.upsertFromTally(purchaseId, payload);
     });
   }
 

@@ -137,7 +137,8 @@ These fields are **accepted** on each voucher in `data` but **not stored** or us
 | Topic | Still the same |
 |-------|----------------|
 | **Create** | Upserts `gst_tally_purchase` by `master_id` |
-| **Update** | Updates `purchase` when `MasterID` exists in `purchase_tally_response` and links to a purchase row; else `gst_tally_purchase` |
+| **Update** | Always upserts `gst_tally_purchase` only; never modifies `purchase` |
+| **Push to Tally** | `POST /purchase-tally` copies `purchase` → `gst_tally_purchase` with `MasterID` from `purchase_tally_response` |
 | **Delete** | Deletes `gst_tally_purchase` by `MasterID` only |
 | **Required per item** | `Action`, `MasterID`, `VoucherNumber` |
 | **Tax lines** | `ledgerentries` still drive SGST/CGST/IGST mapping on create/update |
@@ -177,19 +178,12 @@ These fields are **accepted** on each voucher in `data` but **not stored** or us
 
 ---
 
-## 6. Update routing — `MasterID` via `purchase_tally_response`
+## 6. Data split — `purchase` vs `gst_tally_purchase`
 
-### Before
-
-`update` checked whether `VoucherNumber` existed in `purchase.mmh_mrc_refno` and updated by refno.
-
-### After
-
-`update` checks `purchase_tally_response.MasterID` and resolves the purchase row via:
-
-`purchase_tally_response` → `VoucherNo` + `CostCentre` (outlet) → `purchase`
-
-If no linked purchase is found for that `MasterID`, the update applies to `gst_tally_purchase` instead.
+- **`purchase` / `purchase_internal`**: Source of truth for store purchases; updated only via purchase APIs.
+- **`purchase_tally_response`**: Written on push to Tally; links `purchase_id` + `MasterID`.
+- **`gst_tally_purchase`**: Snapshot at push + all Tally sync (`create` / `update` / `delete` on `POST /tally/gst-purchase`).
+- **`updated_purchase` tables**: Removed; use `gst_tally_purchase` instead.
 
 ---
 

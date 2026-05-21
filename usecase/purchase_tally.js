@@ -1,6 +1,7 @@
 class PurchaseTallyUsecase {
-  constructor(purchaseTallyRepo) {
+  constructor(purchaseTallyRepo, gstTallyPurchaseRepo) {
     this.purchaseTallyRepo = purchaseTallyRepo;
+    this.gstTallyPurchaseRepo = gstTallyPurchaseRepo;
   }
 
   async create(data) {
@@ -42,10 +43,34 @@ class PurchaseTallyUsecase {
       };
     }
 
-    return this.purchaseTallyRepo.create({
+    const result = await this.purchaseTallyRepo.create({
       ...data,
       purchase_id: purchaseId,
     });
+
+    if (result.code === 200 && this.gstTallyPurchaseRepo) {
+      try {
+        const gstCopy = await this.gstTallyPurchaseRepo.copyFromPurchase(
+          purchaseId,
+          data.MasterID
+        );
+        return {
+          ...result,
+          purchase_id: purchaseId,
+          gst_tally_purchase_id: gstCopy.gst_tally_purchase_id,
+        };
+      } catch (err) {
+        return {
+          code: 500,
+          msg:
+            err.message ||
+            "Tally response saved but failed to copy purchase to GST tally table",
+          purchase_id: purchaseId,
+        };
+      }
+    }
+
+    return result;
   }
 
   async getAll(filters) {
@@ -65,6 +90,6 @@ class PurchaseTallyUsecase {
   }
 }
 
-module.exports = (purchaseTallyRepo) => {
-  return new PurchaseTallyUsecase(purchaseTallyRepo);
+module.exports = (purchaseTallyRepo, gstTallyPurchaseRepo) => {
+  return new PurchaseTallyUsecase(purchaseTallyRepo, gstTallyPurchaseRepo);
 };

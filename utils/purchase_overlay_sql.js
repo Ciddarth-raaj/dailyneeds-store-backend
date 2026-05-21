@@ -1,4 +1,5 @@
-/** Purchase header columns overlaid from updated_purchase when present. */
+/** Purchase columns overlaid from gst_tally_purchase when pushed to Tally (via purchase_tally_response). */
+
 const PURCHASE_OVERLAY_COLUMNS = [
   "retail_outlet_id",
   "supplier_id",
@@ -36,40 +37,44 @@ const INTERNAL_OVERLAY_COLUMNS = [
   "invoice_amount",
 ];
 
-function coalescePurchaseCol(col) {
-  return `COALESCE(up.${col}, p.${col}) AS ${col}`;
+function coalescePurchaseCol(col, pAlias = "p") {
+  return `COALESCE(g.${col}, ${pAlias}.${col}) AS ${col}`;
 }
 
 function coalesceInternalCol(col) {
-  return `COALESCE(upi.${col}, pi.${col}) AS ${col}`;
+  return `COALESCE(gi.${col}, pi.${col}) AS ${col}`;
 }
 
-function purchaseOverlaySelectList() {
+function purchaseOverlaySelectList(pAlias = "p") {
   return [
-    "p.purchase_id",
-    "p.mmh_mrc_refno",
-    "p.created_at",
-    "p.is_approved",
-    "(p.has_updated = 1 OR up.purchase_id IS NOT NULL) AS has_updated",
-    "COALESCE(up.updated_at, p.updated_at) AS updated_at",
-    ...PURCHASE_OVERLAY_COLUMNS.map(coalescePurchaseCol),
+    `${pAlias}.purchase_id`,
+    `${pAlias}.mmh_mrc_refno`,
+    `${pAlias}.created_at`,
+    `${pAlias}.is_approved`,
+    `(${pAlias}.has_updated = 1 OR g.gst_tally_purchase_id IS NOT NULL) AS has_updated`,
+    `COALESCE(g.updated_at, ${pAlias}.updated_at) AS updated_at`,
+    ...PURCHASE_OVERLAY_COLUMNS.map((col) => coalescePurchaseCol(col, pAlias)),
     ...INTERNAL_OVERLAY_COLUMNS.map(coalesceInternalCol),
   ].join(",\n          ");
 }
 
 function purchaseOverlayJoins(pAlias = "p") {
   const idExpr = `${pAlias}.purchase_id`;
-  return `LEFT JOIN updated_purchase up ON up.purchase_id = ${idExpr}
-        LEFT JOIN purchase_internal pi ON pi.purchase_id = ${idExpr}
-        LEFT JOIN updated_purchase_internal upi ON upi.purchase_id = ${idExpr}`;
+  return `LEFT JOIN purchase_internal pi ON pi.purchase_id = ${idExpr}
+        LEFT JOIN purchase_tally_response tr ON tr.purchase_id = ${idExpr}
+        LEFT JOIN gst_tally_purchase g ON g.master_id = tr.MasterID
+        LEFT JOIN gst_tally_purchase_internal gi ON gi.gst_tally_purchase_id = g.gst_tally_purchase_id`;
 }
 
 function mergedCol(col, pAlias = "p") {
-  return `COALESCE(up.${col}, ${pAlias}.${col})`;
+  if (INTERNAL_OVERLAY_COLUMNS.includes(col)) {
+    return `COALESCE(gi.${col}, pi.${col})`;
+  }
+  return `COALESCE(g.${col}, ${pAlias}.${col})`;
 }
 
 function mergedDateExpr(col, pAlias = "p") {
-  return `DATE(COALESCE(up.${col}, ${pAlias}.${col}))`;
+  return `DATE(COALESCE(g.${col}, ${pAlias}.${col}))`;
 }
 
 module.exports = {

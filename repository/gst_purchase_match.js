@@ -1,5 +1,4 @@
 const logger = require("../utils/logger");
-const { mergedDateExpr } = require("../utils/purchase_overlay_sql");
 
 const TABLE = "gst_purchase_match";
 
@@ -11,7 +10,6 @@ class GstPurchaseMatchRepository {
   _selectFromJoin() {
     return `FROM ${TABLE} m
       LEFT JOIN purchase p ON p.purchase_id = m.purchase_id
-      LEFT JOIN updated_purchase up ON up.purchase_id = p.purchase_id
       LEFT JOIN gst_tally_purchase g ON g.gst_tally_purchase_id = m.gst_tally_purchase_id
       LEFT JOIN gst_b2b_invoices bi ON bi.gst_b2b_invoice_id = m.gst_b2b_invoice_id`;
   }
@@ -52,7 +50,7 @@ class GstPurchaseMatchRepository {
 
     if (filters.from_date && filters.to_date) {
       conditions.push(`(
-        (m.purchase_id IS NOT NULL AND ${mergedDateExpr("mmh_mrc_dt")} >= ? AND ${mergedDateExpr("mmh_mrc_dt")} <= ?)
+        (m.purchase_id IS NOT NULL AND DATE(p.mmh_mrc_dt) >= ? AND DATE(p.mmh_mrc_dt) <= ?)
         OR (m.gst_tally_purchase_id IS NOT NULL AND DATE(g.mmh_mrc_dt) >= ? AND DATE(g.mmh_mrc_dt) <= ?)
       )`);
       values.push(

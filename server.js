@@ -384,7 +384,8 @@ class Server {
       this.outletUsecase
     );
     this.purchaseTallyUsecase = require("./usecase/purchase_tally")(
-      this.purchaseTallyRepo
+      this.purchaseTallyRepo,
+      this.gstTallyPurchaseRepo
     );
     this.debitNoteTallyUsecase = require("./usecase/debit_note_tally")(
       this.debitNoteTallyRepo
@@ -397,7 +398,6 @@ class Server {
       this.debitNoteUsecase
     );
     this.gstTallyPurchaseUsecase = require("./usecase/gst_tally_purchase")(
-      this.purchaseRepo,
       this.gstTallyPurchaseRepo,
       this.gstVendorRepo
     );

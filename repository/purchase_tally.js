@@ -172,7 +172,7 @@ class PurchaseTallyRepository {
 
       this.db.query(
         `SELECT tr.*,
-               COALESCE(upi.total_amount, pi.total_amount) AS total_amount,
+               COALESCE(gi.total_amount, pi.total_amount) AS total_amount,
                p.purchase_id,
                ${mergedCol("supplier_name")} AS supplier_name,
                ${mergedCol("supplier_gstn")} AS supplier_gstn,

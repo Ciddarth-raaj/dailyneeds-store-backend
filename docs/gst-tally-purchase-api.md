@@ -107,7 +107,8 @@ Inserts a new record in `gst_tally_purchase` (and `gst_tally_purchase_internal`)
 
 - Does **not** modify the main `purchase` table.
 - If `MasterID` already exists, the row is updated (upsert on `master_id`).
-- `supplier_id` resolution (in order): non-empty `supplier_id` from linked `purchase` (via `MasterID` → `purchase_tally_response`); else latest `purchase.supplier_id` matching `supplier_gstn` (`BuyerGSTIN`), then matching `supplier_name` (`PartyName`); else `gst_vendors.gst_vendor_id` for that GSTIN; otherwise `null`. `PartyCode` is not used.
+- `supplier_id` resolution (in order): non-empty `supplier_id` on existing `gst_tally_purchase` for this `MasterID`; else `gst_vendors.gst_vendor_id` for `BuyerGSTIN`; otherwise `null`. `PartyCode` is not used.
+- When a purchase is **pushed to Tally** (`POST /purchase-tally`), a snapshot is copied from `purchase` + `purchase_internal` into `gst_tally_purchase` using `MasterID` from `purchase_tally_response`. The main `purchase` table is not modified by this endpoint.
 
 **Per-item result (200)**
 
@@ -126,27 +127,9 @@ Inserts a new record in `gst_tally_purchase` (and `gst_tally_purchase_internal`)
 
 ### `update`
 
-Updates data based on whether `MasterID` exists in `purchase_tally_response` and is linked to a `purchase` row.
+Upserts `gst_tally_purchase` and `gst_tally_purchase_internal` by `MasterID`. Does **not** modify `purchase`, `purchase_internal`, or `updated_purchase` (removed).
 
-| Condition | Behaviour |
-| --------- | --------- |
-| `MasterID` in `purchase_tally_response` with linked `purchase` (via `VoucherNo` + outlet `CostCentre`) | Updates `purchase` and `purchase_internal` |
-| Otherwise | Updates `gst_tally_purchase` and `gst_tally_purchase_internal` |
-
-**Per-item result (200) — updated in main purchase table**
-
-```json
-{
-  "index": 0,
-  "code": 200,
-  "Action": "update",
-  "source": "purchase",
-  "mmh_mrc_refno": "MRC12345",
-  "master_id": "your-master-id"
-}
-```
-
-**Per-item result (200) — updated in GST tally table only**
+**Per-item result (200)**
 
 ```json
 {
@@ -644,7 +627,7 @@ Per-item codes inside `results` (HTTP status remains 200):
 
 ## Integration notes
 
-1. **Stable `MasterID`** — Use a fixed id per Tally voucher. On **update**, routes to `purchase` when this id exists in `purchase_tally_response` and joins to a purchase row; otherwise updates `gst_tally_purchase`. Used for **delete** on `gst_tally_purchase`.
+1. **Stable `MasterID`** — Use a fixed id per Tally voucher. On **push** (`POST /purchase-tally`), copy `purchase` into `gst_tally_purchase` with this `MasterID`. On **update** / **delete** via `POST /tally/gst-purchase`, only `gst_tally_purchase` rows are changed; `purchase` is read-only for listing/matching.
 2. **`VoucherNumber`** — Maps to `mmh_mrc_refno` on stored rows.
 3. **`Action` per item** — Each voucher in `data` must include its own `Action`; different actions can be sent in one request.
 4. **Tax lines** — Include `ledgerentries` on create/update so SGST/CGST/IGST amounts are stored correctly.
