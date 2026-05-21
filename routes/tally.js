@@ -4,6 +4,7 @@ const respondError = require("../utils/http");
 const {
   gstTallyPurchaseRequestSchema,
 } = require("../utils/tally_purchase_schema");
+const gstTallyPurchaseFileLog = require("../utils/gst_tally_purchase_file_log");
 
 class TallyRoutes {
   constructor(tallyUsecase, gstTallyPurchaseUsecase) {
@@ -44,19 +45,44 @@ class TallyRoutes {
     });
 
     router.post("/gst-purchase", async (req, res) => {
+      gstTallyPurchaseFileLog.clearPreviousLogs();
+      gstTallyPurchaseFileLog.writeInput(req.body);
+
       try {
         const { error, value } = gstTallyPurchaseRequestSchema.validate(
           req.body
         );
         if (error) {
-          res.status(422).json({ code: 422, msg: error.toString() });
+          const payload = { code: 422, msg: error.toString() };
+          gstTallyPurchaseFileLog.writeError(payload, 422);
+          res.status(422).json(payload);
           res.end();
           return;
         }
 
         const result = await this.gstTallyPurchaseUsecase.syncBatch(value);
+        gstTallyPurchaseFileLog.writeResponse(result);
         res.json(result);
       } catch (err) {
+        let httpStatus = 500;
+        let payload = { code: 500, msg: "An error occurred !" };
+        if (err.name === "ValidationError") {
+          httpStatus = 400;
+          payload = { code: 422, msg: err.toString() };
+        } else if (err.name === "MissingProductIdsError") {
+          httpStatus = 400;
+          payload = {
+            code: 400,
+            msg: err.message,
+            missing_product_ids: err.missing_product_ids || [],
+          };
+          if (err.dn_ref_no != null) {
+            payload.dn_ref_no = err.dn_ref_no;
+          }
+        } else if (global.isDev()) {
+          payload = { code: 500, msg: err.toString() };
+        }
+        gstTallyPurchaseFileLog.writeError(payload, httpStatus);
         respondError(res, err);
       }
       res.end();
