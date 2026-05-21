@@ -1,5 +1,8 @@
 const logger = require("../utils/logger");
-const { mapTallyDataToPurchaseRows } = require("../utils/tally_purchase_mapper");
+const {
+  mapTallyDataToPurchaseRows,
+  resolveRetailOutletIdFromVoucherType,
+} = require("../utils/tally_purchase_mapper");
 
 function normalizeGstin(gstin) {
   return String(gstin || "")
@@ -54,6 +57,22 @@ class GstTallyPurchaseUsecase {
     return null;
   }
 
+  async applyRetailOutletId(rows, tallyData) {
+    const costCentre = String(tallyData.VoucherCostCentre || "").trim();
+    if (costCentre) {
+      const outletId =
+        await this.gstTallyPurchaseRepo.findOutletIdByCostCentre(costCentre);
+      if (outletId != null) {
+        rows.purchase.retail_outlet_id = outletId;
+        return;
+      }
+    }
+    const fromVoucherType = resolveRetailOutletIdFromVoucherType(tallyData);
+    if (fromVoucherType != null) {
+      rows.purchase.retail_outlet_id = fromVoucherType;
+    }
+  }
+
   async applyResolvedSupplierId(rows, tallyData, masterId) {
     const supplierGstn =
       rows.purchase.supplier_gstn != null
@@ -105,6 +124,7 @@ class GstTallyPurchaseUsecase {
       }
 
       const rows = mapTallyDataToPurchaseRows(data);
+      await this.applyRetailOutletId(rows, data);
       await this.applyResolvedSupplierId(rows, data, masterId);
       await this.gstTallyPurchaseRepo.upsertFromRows(rows);
 

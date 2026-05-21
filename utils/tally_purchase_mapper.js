@@ -52,12 +52,17 @@ function isJournalEntry(tallyData) {
   return String(tallyData.VoucherType || "").trim() === "Journal";
 }
 
-function resolveRetailOutletId(tallyData) {
+/** Fallback when VoucherCostCentre does not match an outlet (PurchaseDN* voucher types). */
+function resolveRetailOutletIdFromVoucherType(tallyData) {
   const voucherType = String(tallyData.VoucherType || "").trim();
   if (voucherType && VOUCHER_TYPE_TO_OUTLET_ID[voucherType] != null) {
     return VOUCHER_TYPE_TO_OUTLET_ID[voucherType];
   }
   return null;
+}
+
+function resolveRetailOutletId(tallyData) {
+  return resolveRetailOutletIdFromVoucherType(tallyData);
 }
 
 function shouldUseIgst(supplierGstn) {
@@ -308,4 +313,5 @@ module.exports = {
   mapTallyDataToPurchaseRows,
   mapTallyDataToPurchaseUpdate,
   isJournalEntry,
+  resolveRetailOutletIdFromVoucherType,
 };

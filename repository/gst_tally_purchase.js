@@ -18,6 +18,34 @@ class GstTallyPurchaseRepository {
     this.db = db;
   }
 
+  findOutletIdByCostCentre(costCentre) {
+    const name = costCentre != null ? String(costCentre).trim() : "";
+    if (!name) {
+      return Promise.resolve(null);
+    }
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT outlet_id FROM outlets WHERE TRIM(outlet_name) = TRIM(?) LIMIT 1`,
+        [name],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.GST_TALLY_PURCHASE",
+              code: "REPOSITORY.GST_TALLY_PURCHASE.FIND-OUTLET-BY-COST-CENTRE",
+              description: err.toString(),
+              category: "",
+              ref: { costCentre: name },
+            });
+            return reject(err);
+          }
+          const id = rows && rows[0] ? rows[0].outlet_id : null;
+          resolve(id != null && id !== "" ? Number(id) : null);
+        }
+      );
+    });
+  }
+
   getSupplierIdByMasterId(master_id) {
     const id = String(master_id || "").trim();
     if (!id) {
