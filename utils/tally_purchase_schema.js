@@ -15,7 +15,8 @@ const costCentreAllocationSchema = Joi.object({
   Amount: Joi.alternatives().try(Joi.number(), Joi.string()).allow(null, ""),
 }).unknown(false);
 
-const categoryAllocationSchema = Joi.object({
+/** Journal / legacy ledger cost-centre line. */
+const categoryAllocationLegacySchema = Joi.object({
   Category: emptyStr(),
   IsDeemedPositive: emptyStr(),
   isDeeemedPositive: emptyStr(),
@@ -25,14 +26,58 @@ const categoryAllocationSchema = Joi.object({
     .optional(),
 }).unknown(false);
 
+/** Purchase-Exp style: Name + Amount + CostCentreAllocations (plural). */
+const categoryAllocationPurchaseExpSchema = Joi.object({
+  Name: emptyStr(),
+  Amount: Joi.alternatives().try(Joi.number(), Joi.string()).allow(null, ""),
+  CostCentreAllocations: Joi.array()
+    .items(costCentreAllocationSchema)
+    .allow(null)
+    .optional(),
+}).unknown(false);
+
+const categoryAllocationItemSchema = Joi.alternatives().try(
+  categoryAllocationLegacySchema,
+  categoryAllocationPurchaseExpSchema
+);
+
 const buyerAddressLineSchema = Joi.object({
   BuyerAddress: emptyStr(),
+}).unknown(false);
+
+const consigneeAddressLineSchema = Joi.object({
+  ConsigneeAddress: emptyStr(),
 }).unknown(false);
 
 /** Tally may send a plain string or `[{ "BuyerAddress": "..." }]`. */
 const buyerAddressField = Joi.alternatives()
   .try(emptyStr(), Joi.array().items(buyerAddressLineSchema).allow(null))
   .optional();
+
+/** Tally may send a plain string or `[{ "ConsigneeAddress": "..." }]`. */
+const consigneeAddressField = Joi.alternatives()
+  .try(emptyStr(), Joi.array().items(consigneeAddressLineSchema).allow(null))
+  .optional();
+
+const payHeadAllocationSchema = Joi.object({
+  Payhead: emptyStr(),
+  IsDeemedPositive: emptyStr(),
+  Amount: Joi.alternatives().try(Joi.number(), Joi.string()).allow(null, ""),
+}).unknown(false);
+
+const employeeEntrySchema = Joi.object({
+  EmployeeName: emptyStr(),
+  Amount: Joi.alternatives().try(Joi.number(), Joi.string()).allow(null, ""),
+  PayHeadAllocations: Joi.array()
+    .items(payHeadAllocationSchema)
+    .allow(null)
+    .optional(),
+}).unknown(false);
+
+const categoryEntrySchema = Joi.object({
+  CATEGORY: emptyStr(),
+  EmployeeEntries: Joi.array().items(employeeEntrySchema).allow(null).optional(),
+}).unknown(false);
 
 const ledgerEntrySchema = Joi.object({
   LedgerName: emptyStr(),
@@ -49,7 +94,7 @@ const ledgerEntrySchema = Joi.object({
     .try(Joi.array().items(billsAllocationSchema), Joi.string().allow(""))
     .optional(),
   CategoryAllocation: Joi.alternatives()
-    .try(Joi.array().items(categoryAllocationSchema), Joi.string().allow(""))
+    .try(Joi.array().items(categoryAllocationItemSchema), Joi.string().allow(""))
     .optional(),
   LedgerDescription: Joi.alternatives()
     .try(Joi.array(), Joi.string().allow(""))
@@ -105,7 +150,7 @@ const tallyPurchaseDataSchema = Joi.object({
   BuyerMobile: emptyStr(),
   ConsigneeName: emptyStr(),
   ConsigneeGSTIN: emptyStr(),
-  ConsigneeAddress: emptyStr(),
+  ConsigneeAddress: consigneeAddressField,
   ConsigneePinCode: emptyStr(),
   ConsigneeState: emptyStr(),
   ConsigneeCountryName: emptyStr(),
@@ -124,6 +169,7 @@ const tallyPurchaseDataSchema = Joi.object({
   WorkOrder: emptyStr(),
   WorkOrderID: emptyStr(),
   ledgerentries: Joi.array().items(ledgerEntrySchema).default([]),
+  CategoryEntries: Joi.array().items(categoryEntrySchema).allow(null).optional(),
 }).unknown(false);
 
 const tallyPurchaseDataItemSchema = tallyPurchaseDataSchema.keys({
