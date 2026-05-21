@@ -1,0 +1,1 @@
+-- Data migration is not reversed (purchase_id cannot be restored reliably from gst_tally_purchase alone).
