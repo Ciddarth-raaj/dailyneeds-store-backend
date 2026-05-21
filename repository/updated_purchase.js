@@ -3,7 +3,8 @@ const logger = require("../utils/logger");
 const TABLE = "updated_purchase";
 const INTERNAL_TABLE = "updated_purchase_internal";
 
-const SUPPLIER_FIELDS_FROM_PURCHASE = [
+const FIELDS_FROM_PURCHASE = [
+  "retail_outlet_id",
   "supplier_id",
   "supplier_name",
   "supplier_gstn",
@@ -57,7 +58,7 @@ class UpdatedPurchaseRepository {
   _loadSupplierFromPurchase(purchase_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT supplier_id, supplier_name, supplier_gstn
+        `SELECT retail_outlet_id, supplier_id, supplier_name, supplier_gstn
          FROM purchase
          WHERE purchase_id = ?`,
         [purchase_id],
@@ -71,7 +72,7 @@ class UpdatedPurchaseRepository {
 
   _applySupplierFromPurchase(purchase, fromPurchase) {
     const merged = { ...purchase };
-    for (const key of SUPPLIER_FIELDS_FROM_PURCHASE) {
+    for (const key of FIELDS_FROM_PURCHASE) {
       if (fromPurchase[key] !== undefined) {
         merged[key] = fromPurchase[key];
       }
@@ -106,10 +107,19 @@ class UpdatedPurchaseRepository {
             );
           });
         } else {
+          const cols = ["purchase_id", "retail_outlet_id"];
+          const values = [
+            purchase_id,
+            fromPurchase.retail_outlet_id ?? null,
+          ];
           await new Promise((res, rej) => {
             this.db.query(
-              `INSERT IGNORE INTO ${TABLE} (purchase_id) VALUES (?)`,
-              [purchase_id],
+              `INSERT INTO ${TABLE} (${cols.join(", ")})
+               VALUES (?, ?)
+               ON DUPLICATE KEY UPDATE
+                 retail_outlet_id = COALESCE(VALUES(retail_outlet_id), retail_outlet_id),
+                 updated_at = CURRENT_TIMESTAMP`,
+              values,
               (e) => (e ? rej(e) : res())
             );
           });
