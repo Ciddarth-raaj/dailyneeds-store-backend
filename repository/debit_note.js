@@ -127,12 +127,12 @@ class DebitNoteRepository {
 
       this.db.query(
         `SELECT dn.*,
-          pi.scheme_difference,
-          pi.narration,
-          pi.tcs_value,
-          pi.total_amount,
-          pi.round_off,
-          pi.mmh_mrc_refno,
+          dni.scheme_difference,
+          dni.narration,
+          dni.tcs_value,
+          dni.total_amount,
+          dni.round_off,
+          dni.mmh_mrc_refno,
           tr.VoucherNo,
           tr.InvoiceValue,
           tr.SupplierName,
@@ -142,10 +142,10 @@ class DebitNoteRepository {
           ${mergedCol("mmh_dist_bill_dt")} AS mmh_dist_bill_dt,
           ${mergedCol("mmh_dist_bill_no")} AS mmh_dist_bill_no
         FROM debit_note dn
-        LEFT JOIN debit_note_internal pi ON dn.debit_note_id = pi.debit_note_id
+        LEFT JOIN debit_note_internal dni ON dn.debit_note_id = dni.debit_note_id
         LEFT JOIN outlets o ON dn.store_id = o.outlet_id
         LEFT JOIN debit_note_tally_response tr ON tr.VoucherNo = dn.mprh_pr_refno AND tr.CostCentre = o.outlet_name
-        LEFT JOIN purchase p ON p.mmh_mrc_refno = pi.mmh_mrc_refno AND p.retail_outlet_id = o.outlet_id
+        LEFT JOIN purchase p ON p.mmh_mrc_refno = dni.mmh_mrc_refno AND p.retail_outlet_id = o.outlet_id
         ${purchaseOverlayJoins("p")}
         ${whereClause}
         ORDER BY created_at DESC`,
