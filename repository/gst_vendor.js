@@ -229,6 +229,43 @@ class GstVendorRepository {
     });
   }
 
+  /**
+   * Active vendor match by exact name (trimmed, case-insensitive).
+   * @returns {Promise<number|null>} gst_vendor_id
+   */
+  findIdByVendorName(vendorName) {
+    const name = vendorName != null ? String(vendorName).trim() : "";
+    if (!name) {
+      return Promise.resolve(null);
+    }
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT gst_vendor_id
+         FROM ${TABLE}
+         WHERE LOWER(TRIM(vendor_name)) = LOWER(?)
+           AND is_active = 1
+         ORDER BY gst_vendor_id ASC
+         LIMIT 1`,
+        [name],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.GST_VENDOR",
+              code: "REPOSITORY.GST_VENDOR.FIND_BY_NAME",
+              description: err.toString(),
+              category: "",
+              ref: { vendorName: name },
+            });
+            return reject(err);
+          }
+          const id = rows && rows[0] ? rows[0].gst_vendor_id : null;
+          resolve(id != null ? Number(id) : null);
+        }
+      );
+    });
+  }
+
   getByGstin(gstin) {
     return new Promise((resolve, reject) => {
       this.db.query(

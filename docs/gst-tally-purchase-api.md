@@ -107,6 +107,7 @@ Inserts a new record in `gst_tally_purchase` (and `gst_tally_purchase_internal`)
 
 - Does **not** modify the main `purchase` table.
 - If `MasterID` already exists, the row is updated (upsert on `master_id`).
+- `supplier_id` resolution (in order): non-empty `supplier_id` from linked `purchase` (via `MasterID` → `purchase_tally_response`); else latest `purchase.supplier_id` matching `supplier_gstn` (`BuyerGSTIN`), then matching `supplier_name` (`PartyName`); else `gst_vendors.gst_vendor_id` for that GSTIN; otherwise `null`. `PartyCode` is not used.
 
 **Per-item result (200)**
 
@@ -256,7 +257,7 @@ Deletes the row from `gst_tally_purchase` (internal row removed via cascade).
 | `Reference` | Distributor bill number |
 | `ReferenceDate` | Bill date |
 | `PartyName` | Supplier name |
-| `PartyCode` | Supplier code |
+| `PartyCode` | Accepted; not stored as `supplier_id` |
 | `VoucherType` | See outlet table below |
 | `DeliveryNoteNo` | |
 | `Voucher_Total` | Total voucher amount |

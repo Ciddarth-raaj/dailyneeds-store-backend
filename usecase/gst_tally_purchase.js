@@ -4,10 +4,93 @@ const {
   mapTallyDataToPurchaseUpdate,
 } = require("../utils/tally_purchase_mapper");
 
+function normalizeGstin(gstin) {
+  return String(gstin || "")
+    .trim()
+    .toUpperCase();
+}
+
 class GstTallyPurchaseUsecase {
-  constructor(purchaseRepo, gstTallyPurchaseRepo) {
+  constructor(purchaseRepo, gstTallyPurchaseRepo, gstVendorRepo) {
     this.purchaseRepo = purchaseRepo;
     this.gstTallyPurchaseRepo = gstTallyPurchaseRepo;
+    this.gstVendorRepo = gstVendorRepo;
+    this._gstinToVendorId = null;
+  }
+
+  async _loadGstinToVendorIdMap() {
+    if (this._gstinToVendorId) {
+      return this._gstinToVendorId;
+    }
+    const map = new Map();
+    if (this.gstVendorRepo) {
+      const vendors = await this.gstVendorRepo.getAll();
+      for (const v of vendors) {
+        if (!v.is_active) continue;
+        const key = normalizeGstin(v.gstin);
+        if (key && !map.has(key)) {
+          map.set(key, v.gst_vendor_id);
+        }
+      }
+    }
+    this._gstinToVendorId = map;
+    return map;
+  }
+
+  /**
+   * supplier_id: purchase (linked MasterID, then GSTIN, then name), else gst_vendors by GSTIN.
+   */
+  async resolveSupplierId(masterId, supplierGstn, supplierName) {
+    const fromLinked =
+      await this.purchaseRepo.getSupplierIdByTallyMasterId(masterId);
+    if (fromLinked) {
+      return fromLinked;
+    }
+
+    const gstn = normalizeGstin(supplierGstn);
+    if (gstn) {
+      const fromPurchaseGstn =
+        await this.purchaseRepo.findSupplierIdBySupplierGstn(gstn);
+      if (fromPurchaseGstn) {
+        return fromPurchaseGstn;
+      }
+    }
+
+    const name =
+      supplierName != null ? String(supplierName).trim() : "";
+    if (name) {
+      const fromPurchaseName =
+        await this.purchaseRepo.findSupplierIdBySupplierName(name);
+      if (fromPurchaseName) {
+        return fromPurchaseName;
+      }
+    }
+
+    if (gstn) {
+      const map = await this._loadGstinToVendorIdMap();
+      const gstVendorId = map.get(gstn);
+      if (gstVendorId != null) {
+        return String(gstVendorId);
+      }
+    }
+
+    return null;
+  }
+
+  async applyResolvedSupplierId(rows, tallyData, masterId) {
+    const supplierGstn =
+      rows.purchase.supplier_gstn != null
+        ? rows.purchase.supplier_gstn
+        : tallyData.BuyerGSTIN;
+    const supplierName =
+      rows.purchase.supplier_name != null
+        ? rows.purchase.supplier_name
+        : tallyData.PartyName;
+    rows.purchase.supplier_id = await this.resolveSupplierId(
+      masterId,
+      supplierGstn,
+      supplierName
+    );
   }
 
   async syncOne(item) {
@@ -39,6 +122,7 @@ class GstTallyPurchaseUsecase {
 
     try {
       const rows = mapTallyDataToPurchaseRows(data);
+      await this.applyResolvedSupplierId(rows, data, masterId);
 
       if (action === "create") {
         await this.gstTallyPurchaseRepo.upsertFromRows(rows);
@@ -62,9 +146,8 @@ class GstTallyPurchaseUsecase {
       }
 
       if (action === "update") {
-        const existsInPurchase = await this.purchaseRepo.existsByTallyMasterId(
-          masterId
-        );
+        const existsInPurchase =
+          await this.purchaseRepo.existsByTallyMasterId(masterId);
 
         if (existsInPurchase) {
           const mapped = mapTallyDataToPurchaseUpdate(data);
@@ -122,6 +205,7 @@ class GstTallyPurchaseUsecase {
   }
 
   async syncBatch({ data }) {
+    this._gstinToVendorId = null;
     const results = [];
     for (let i = 0; i < data.length; i++) {
       try {
@@ -142,6 +226,10 @@ class GstTallyPurchaseUsecase {
   }
 }
 
-module.exports = (purchaseRepo, gstTallyPurchaseRepo) => {
-  return new GstTallyPurchaseUsecase(purchaseRepo, gstTallyPurchaseRepo);
+module.exports = (purchaseRepo, gstTallyPurchaseRepo, gstVendorRepo) => {
+  return new GstTallyPurchaseUsecase(
+    purchaseRepo,
+    gstTallyPurchaseRepo,
+    gstVendorRepo
+  );
 };

@@ -896,6 +896,124 @@ class PurchaseRepository {
     return this._findPurchaseIdByTallyMasterId(masterId).then(Boolean);
   }
 
+  /**
+   * Linked purchase supplier_id for a Tally MasterID (non-empty only).
+   * @returns {Promise<string|null>}
+   */
+  getSupplierIdByTallyMasterId(masterId) {
+    const id = String(masterId || "").trim();
+    if (!id) {
+      return Promise.resolve(null);
+    }
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT p.supplier_id
+         FROM purchase_tally_response tr
+         INNER JOIN outlets o ON tr.CostCentre = o.outlet_name
+         INNER JOIN purchase p
+           ON p.mmh_mrc_refno = tr.VoucherNo
+          AND p.retail_outlet_id = o.outlet_id
+         WHERE tr.MasterID = ?
+           AND p.supplier_id IS NOT NULL
+           AND TRIM(p.supplier_id) != ''
+         LIMIT 1`,
+        [id],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PURCHASE",
+              code: "REPOSITORY.PURCHASE.SUPPLIER_ID_BY_MASTER_ID",
+              description: err.toString(),
+              category: "",
+              ref: { masterId: id },
+            });
+            return reject(err);
+          }
+          const sid = rows && rows[0] ? rows[0].supplier_id : null;
+          resolve(sid != null && String(sid).trim() !== "" ? String(sid) : null);
+        }
+      );
+    });
+  }
+
+  /**
+   * Most recent non-empty supplier_id on purchase for a supplier GSTIN.
+   * @returns {Promise<string|null>}
+   */
+  findSupplierIdBySupplierGstn(supplierGstn) {
+    const gstn =
+      supplierGstn != null ? String(supplierGstn).trim().toUpperCase() : "";
+    if (!gstn) {
+      return Promise.resolve(null);
+    }
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT supplier_id
+         FROM purchase
+         WHERE UPPER(TRIM(supplier_gstn)) = ?
+           AND supplier_id IS NOT NULL
+           AND TRIM(supplier_id) != ''
+         ORDER BY purchase_id DESC
+         LIMIT 1`,
+        [gstn],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PURCHASE",
+              code: "REPOSITORY.PURCHASE.SUPPLIER_ID_BY_GSTN",
+              description: err.toString(),
+              category: "",
+              ref: { supplierGstn: gstn },
+            });
+            return reject(err);
+          }
+          const sid = rows && rows[0] ? rows[0].supplier_id : null;
+          resolve(sid != null && String(sid).trim() !== "" ? String(sid) : null);
+        }
+      );
+    });
+  }
+
+  /**
+   * Most recent non-empty supplier_id on purchase for a supplier name.
+   * @returns {Promise<string|null>}
+   */
+  findSupplierIdBySupplierName(supplierName) {
+    const name = supplierName != null ? String(supplierName).trim() : "";
+    if (!name) {
+      return Promise.resolve(null);
+    }
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT supplier_id
+         FROM purchase
+         WHERE LOWER(TRIM(supplier_name)) = LOWER(?)
+           AND supplier_id IS NOT NULL
+           AND TRIM(supplier_id) != ''
+         ORDER BY purchase_id DESC
+         LIMIT 1`,
+        [name],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PURCHASE",
+              code: "REPOSITORY.PURCHASE.SUPPLIER_ID_BY_NAME",
+              description: err.toString(),
+              category: "",
+              ref: { supplierName: name },
+            });
+            return reject(err);
+          }
+          const sid = rows && rows[0] ? rows[0].supplier_id : null;
+          resolve(sid != null && String(sid).trim() !== "" ? String(sid) : null);
+        }
+      );
+    });
+  }
+
   updateFromTallyDataByMasterId(masterId, payload) {
     return this._findPurchaseIdByTallyMasterId(masterId).then((purchaseId) => {
       if (!purchaseId) {

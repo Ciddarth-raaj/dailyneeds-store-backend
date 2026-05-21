@@ -398,7 +398,8 @@ class Server {
     );
     this.gstTallyPurchaseUsecase = require("./usecase/gst_tally_purchase")(
       this.purchaseRepo,
-      this.gstTallyPurchaseRepo
+      this.gstTallyPurchaseRepo,
+      this.gstVendorRepo
     );
     this.purchaseGstUsecase = require("./usecase/purchase_gst")(
       this.purchaseGstRepo
