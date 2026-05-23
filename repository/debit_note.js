@@ -108,16 +108,16 @@ class DebitNoteRepository {
 
       if (filters.is_approved !== undefined) {
         const conditionString = filters.is_approved
-          ? "dn.is_approved = ? AND tr.VoucherNo IS NULL"
+          ? "dn.is_approved = ? AND dntr.VoucherNo IS NULL"
           : "dn.is_approved = ?";
         filterConditions.push(conditionString);
         filterValues.push(filters.is_approved);
       }
 
       if (filters.is_pushed === true) {
-        filterConditions.push("tr.VoucherNo IS NOT NULL");
+        filterConditions.push("dntr.VoucherNo IS NOT NULL");
       } else if (filters.is_pushed === false) {
-        filterConditions.push("tr.VoucherNo IS NULL");
+        filterConditions.push("dntr.VoucherNo IS NULL");
       }
 
       const whereClause =
@@ -133,10 +133,10 @@ class DebitNoteRepository {
           dni.total_amount,
           dni.round_off,
           dni.mmh_mrc_refno,
-          tr.VoucherNo,
-          tr.InvoiceValue,
-          tr.SupplierName,
-          tr.CostCentre,
+          dntr.VoucherNo,
+          dntr.InvoiceValue,
+          dntr.SupplierName,
+          dntr.CostCentre,
           o.outlet_name,
           o.outlet_id,
           ${mergedCol("mmh_dist_bill_dt")} AS mmh_dist_bill_dt,
@@ -144,7 +144,7 @@ class DebitNoteRepository {
         FROM debit_note dn
         LEFT JOIN debit_note_internal dni ON dn.debit_note_id = dni.debit_note_id
         LEFT JOIN outlets o ON dn.store_id = o.outlet_id
-        LEFT JOIN debit_note_tally_response tr ON tr.VoucherNo = dn.mprh_pr_refno AND tr.CostCentre = o.outlet_name
+        LEFT JOIN debit_note_tally_response dntr ON dntr.VoucherNo = dn.mprh_pr_refno AND dntr.CostCentre = o.outlet_name
         LEFT JOIN purchase p ON p.mmh_mrc_refno = dni.mmh_mrc_refno AND p.retail_outlet_id = o.outlet_id
         ${purchaseOverlayJoins("p")}
         ${whereClause}
