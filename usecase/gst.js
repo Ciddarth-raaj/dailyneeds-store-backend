@@ -135,7 +135,7 @@ class GstUsecase {
   _sandboxDisabledResponse() {
     return {
       code: 503,
-      msg: "Sandbox API is not configured (set SANDBOX_API_KEY and SANDBOX_API_SECRET)",
+      msg: "Service unavailable",
     };
   }
 
@@ -581,7 +581,7 @@ class GstUsecase {
     if (!this.sandboxService.isEnabled()) {
       return {
         code: 503,
-        msg: "Sandbox API is not configured and no cached search exists for this GSTIN (set SANDBOX_API_KEY and SANDBOX_API_SECRET)",
+        msg: "Service unavailable",
         search_source: null,
       };
     }

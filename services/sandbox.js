@@ -109,7 +109,8 @@ class SandboxService {
   }
 
   /**
-   * Obtain a token on startup when credentials are set. If unset, service stays disabled.
+   * Obtain a token on startup when credentials are set. If unset or auth fails,
+   * service stays disabled and the server continues running.
    */
   async initialize() {
     if (!this._credentialsConfigured()) {
@@ -125,9 +126,23 @@ class SandboxService {
       });
       return;
     }
-    await this.refreshAccessToken();
-    if (this.gstAuthentication) {
-      await this.gstAuthentication.loadFromDatabase();
+    try {
+      await this.refreshAccessToken();
+      if (this.gstAuthentication) {
+        await this.gstAuthentication.loadFromDatabase();
+      }
+    } catch (err) {
+      this._disabled = true;
+      this.accessToken = null;
+      this.tokenExpiresAt = 0;
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "SERVICE.SANDBOX",
+        code: "SERVICE.SANDBOX.INIT-FAILED",
+        description: err.message || String(err),
+        category: "",
+        ref: { err },
+      });
     }
   }
 
