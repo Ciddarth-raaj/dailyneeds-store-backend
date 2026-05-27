@@ -1,5 +1,9 @@
 const logger = require("../utils/logger");
-const { mergedCol, mergedDateExpr, purchaseOverlayJoins } = require("../utils/purchase_overlay_sql");
+const {
+  mergedCol,
+  mergedDateExpr,
+  purchaseOverlayJoins,
+} = require("../utils/purchase_overlay_sql");
 
 class PurchaseTallyRepository {
   constructor(db) {
@@ -9,7 +13,12 @@ class PurchaseTallyRepository {
   /**
    * Resolve purchase_id from tally response fields against purchase + outlet.
    */
-  findPurchaseIdForTallyResponse({ VoucherNo, SupplierName, GSTIN, CostCentre }) {
+  findPurchaseIdForTallyResponse({
+    VoucherNo,
+    SupplierName,
+    GSTIN,
+    CostCentre,
+  }) {
     return new Promise((resolve, reject) => {
       this.db.query(
         `SELECT p.purchase_id
@@ -18,7 +27,6 @@ class PurchaseTallyRepository {
          WHERE TRIM(p.mmh_mrc_refno) = TRIM(?)
            AND TRIM(o.outlet_name) = TRIM(?)
            AND UPPER(TRIM(p.supplier_gstn)) = UPPER(TRIM(?))
-           AND LOWER(TRIM(p.supplier_name)) = LOWER(TRIM(?))
          ORDER BY p.purchase_id DESC
          LIMIT 1`,
         [VoucherNo, CostCentre, GSTIN, SupplierName],
