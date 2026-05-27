@@ -21,13 +21,17 @@ class PurchaseTallyRoutes {
         });
 
         const { error, value } = schema.validate(req.body);
+        console.log(error);
+        console.log(value);
         if (error) {
           return res.json({ code: 422, msg: error.toString() });
         }
 
         const result = await this.purchaseTallyUsecase.create(value);
+        console.log(result);
         const status =
           result.code >= 400 && result.code < 600 ? result.code : 200;
+        console.log(status);
         return res.status(status).json(result);
       } catch (err) {
         console.log(err);
