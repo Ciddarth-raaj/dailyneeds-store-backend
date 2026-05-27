@@ -2,6 +2,8 @@ const logger = require("../utils/logger");
 
 const TABLE = "gst_tally_purchase";
 const INTERNAL_TABLE = "gst_tally_purchase_internal";
+const SOURCE_TALLY = "tally";
+const SOURCE_SYSTEM = "system";
 
 function parseTaxJson(val) {
   if (val == null || val === "") return [];
@@ -148,7 +150,11 @@ class GstTallyPurchaseRepository {
             invoice_amount: row.invoice_amount ?? 0,
           };
 
-          this.upsertFromRows({ purchase, internal })
+          this.upsertFromRows({
+            purchase,
+            internal,
+            source: SOURCE_SYSTEM,
+          })
             .then(resolve)
             .catch(reject);
         }
@@ -156,17 +162,20 @@ class GstTallyPurchaseRepository {
     });
   }
 
-  upsertFromRows({ purchase, internal }) {
+  upsertFromRows({ purchase, internal, source = SOURCE_TALLY }) {
+    const rowSource =
+      source === SOURCE_SYSTEM ? SOURCE_SYSTEM : SOURCE_TALLY;
     return new Promise((resolve, reject) => {
       const p = purchase;
       this.db.query(
         `INSERT INTO ${TABLE} (
-          master_id, retail_outlet_id, supplier_id, supplier_name, supplier_gstn,
+          master_id, source, retail_outlet_id, supplier_id, supplier_name, supplier_gstn,
           mmh_mrc_no, mmh_mrc_dt, mmh_mrc_amt, mmh_dist_bill_dt, mmh_dist_bill_no,
           mmh_mrc_refno, mmh_manual_disc, tot_sgst_amt, tot_cgst_amt, tot_igst_amt,
           tot_gst_cess_amt, mmd_goods_tcs_amt, ts, sgst, cgst, igst, cess
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
+          source = VALUES(source),
           retail_outlet_id = VALUES(retail_outlet_id),
           supplier_id = VALUES(supplier_id),
           supplier_name = VALUES(supplier_name),
@@ -191,6 +200,7 @@ class GstTallyPurchaseRepository {
           updated_at = CURRENT_TIMESTAMP`,
         [
           p.master_id,
+          rowSource,
           p.retail_outlet_id,
           p.supplier_id,
           p.supplier_name,

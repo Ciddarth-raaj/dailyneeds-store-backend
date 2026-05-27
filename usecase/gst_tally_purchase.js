@@ -126,7 +126,10 @@ class GstTallyPurchaseUsecase {
       const rows = mapTallyDataToPurchaseRows(data);
       await this.applyRetailOutletId(rows, data);
       await this.applyResolvedSupplierId(rows, data, masterId);
-      await this.gstTallyPurchaseRepo.upsertFromRows(rows);
+      await this.gstTallyPurchaseRepo.upsertFromRows({
+        ...rows,
+        source: "tally",
+      });
 
       return {
         code: 200,
