@@ -75,6 +75,17 @@ class PurchaseUsecase {
     }
   }
 
+  async getPurchaseByMmhMrcRefno(mmh_mrc_refno, retail_outlet_id = null) {
+    try {
+      return await this.purchaseRepo.getByMmhMrcRefno(
+        mmh_mrc_refno,
+        retail_outlet_id
+      );
+    } catch (error) {
+      throw error;
+    }
+  }
+
   async bulkCreatePurchase(purchaseList) {
     try {
       const result = await this.purchaseRepo.bulkCreate(purchaseList);

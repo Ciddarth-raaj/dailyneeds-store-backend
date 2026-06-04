@@ -332,6 +332,63 @@ class PurchaseRepository {
     });
   }
 
+  getByMmhMrcRefno(mmh_mrc_refno, retail_outlet_id = null) {
+    const conditions = ["TRIM(p.mmh_mrc_refno) = TRIM(?)"];
+    const values = [mmh_mrc_refno];
+    if (retail_outlet_id != null && retail_outlet_id !== "") {
+      conditions.push("p.retail_outlet_id = ?");
+      values.push(retail_outlet_id);
+    }
+
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT
+          ${purchaseOverlaySelectList()},
+          tr.VoucherNo,
+          tr.InvoiceValue,
+          tr.SupplierName,
+          tr.CostCentre
+        FROM purchase p
+        ${purchaseOverlayJoins()}
+        LEFT JOIN outlets o ON o.outlet_id = COALESCE(g.retail_outlet_id, p.retail_outlet_id)
+        WHERE ${conditions.join(" AND ")}
+        ORDER BY p.purchase_id DESC
+        LIMIT 1`,
+        values,
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PURCHASE",
+              code: "REPOSITORY.PURCHASE.GET-BY-MMH-MRC-REFNO",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+
+          if (docs.length === 0) {
+            resolve({ code: 404 });
+            return;
+          }
+
+          const doc = docs[0];
+          const parsedDoc = {
+            ...this._parsePurchaseDoc(doc),
+            voucher_no: doc.VoucherNo || null,
+            invoice_value: doc.InvoiceValue || null,
+            supplier_name: doc.SupplierName || null,
+            cost_centre: doc.CostCentre || null,
+          };
+
+          resolve({ code: 200, data: parsedDoc });
+        }
+      );
+    });
+  }
+
   // Helper function to compare tax arrays
   compareTaxArrays = (existing, updated) => {
     if (!Array.isArray(existing) || !Array.isArray(updated)) {

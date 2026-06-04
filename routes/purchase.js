@@ -243,6 +243,36 @@ class PurchaseRoutes {
       }
     });
 
+    // Get purchase by MRC reference number (optional retail_outlet_id to disambiguate)
+    router.get("/refno/:mmh_mrc_refno", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          mmh_mrc_refno: Joi.string().max(20).required(),
+          retail_outlet_id: Joi.number().integer().optional(),
+        });
+
+        const { error, value } = schema.validate({
+          mmh_mrc_refno: req.params.mmh_mrc_refno,
+          retail_outlet_id:
+            req.query.retail_outlet_id != null
+              ? parseInt(req.query.retail_outlet_id, 10)
+              : undefined,
+        });
+        if (error) {
+          return res.json({ code: 422, msg: error.toString() });
+        }
+
+        const result = await this.purchaseUsecase.getPurchaseByMmhMrcRefno(
+          value.mmh_mrc_refno,
+          value.retail_outlet_id
+        );
+        res.json(result);
+      } catch (err) {
+        console.log(err);
+        res.json({ code: 500, msg: err.message });
+      }
+    });
+
     // Get purchase by ID
     router.get("/:id", async (req, res) => {
       try {
