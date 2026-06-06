@@ -1,4 +1,5 @@
 const moment = require("moment");
+const { normalizePurchaseTaxArrays } = require("./purchase_tax");
 
 const OUTLET_VOUCHER_TYPE_MAP = {
   2: "Purchase",
@@ -178,10 +179,15 @@ function extractTaxArraysFromLedgerEntries(ledgerentries, supplierGstn) {
   const tot_gst_cess_amt =
     ledgerAmountByName(ledgerentries, "CESS 12% INPUT") || 0;
   if (tot_gst_cess_amt) {
-    cess.push({ PERC: 12, TAXABLE: 0, VALUE: tot_gst_cess_amt });
+    const legacyTaxable = sgst.find((entry) => Number(entry.PERC) === 14);
+    cess.push({
+      PERC: 12,
+      TAXABLE: legacyTaxable ? legacyTaxable.TAXABLE : 0,
+      VALUE: tot_gst_cess_amt,
+    });
   }
 
-  return {
+  return normalizePurchaseTaxArrays({
     sgst,
     cgst,
     igst,
@@ -190,7 +196,7 @@ function extractTaxArraysFromLedgerEntries(ledgerentries, supplierGstn) {
     tot_cgst_amt,
     tot_igst_amt,
     tot_gst_cess_amt,
-  };
+  });
 }
 
 /**

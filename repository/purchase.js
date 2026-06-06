@@ -5,6 +5,7 @@ const {
   purchaseOverlayJoins,
   mergedDateExpr,
 } = require("../utils/purchase_overlay_sql");
+const { normalizePurchaseTaxArrays } = require("../utils/purchase_tax");
 
 class PurchaseRepository {
   constructor(db) {
@@ -21,7 +22,7 @@ class PurchaseRepository {
         return [];
       }
     };
-    return {
+    const parsed = {
       ...doc,
       sgst: parseJson(doc.sgst),
       cgst: parseJson(doc.cgst),
@@ -40,6 +41,8 @@ class PurchaseRepository {
       invoice_amount: doc.invoice_amount ?? 0,
       mmh_dist_bill_no: doc.mmh_dist_bill_no ?? null,
     };
+
+    return normalizePurchaseTaxArrays(parsed);
   }
 
   create(purchase) {
@@ -454,13 +457,13 @@ class PurchaseRepository {
           }, {});
 
           // Format dates using moment
-          const formattedPurchase = {
+          const formattedPurchase = normalizePurchaseTaxArrays({
             ...purchase,
             mmh_mrc_dt: moment(purchase.mmh_mrc_dt).format("YYYY-MM-DD"),
             mmh_dist_bill_dt: moment(purchase.mmh_dist_bill_dt).format(
               "YYYY-MM-DD"
             ),
-          };
+          });
 
           // Check if record exists
           const [existingRows] = await new Promise((resolve, reject) => {

@@ -1,4 +1,5 @@
 const { PURCHASE_TELEGRAM_CHAT_ID } = require("../constants/telegram");
+const { normalizePurchaseTaxArrays } = require("../utils/purchase_tax");
 
 class PurchaseUsecase {
   constructor(purchaseRepo, outletUsecase) {
@@ -9,7 +10,9 @@ class PurchaseUsecase {
 
   async createPurchase(purchase) {
     try {
-      const result = await this.purchaseRepo.create(purchase);
+      const result = await this.purchaseRepo.create(
+        normalizePurchaseTaxArrays(purchase)
+      );
       return result;
     } catch (error) {
       throw error;
@@ -23,7 +26,7 @@ class PurchaseUsecase {
   ) {
     try {
       const result = await this.purchaseRepo.updatePurchaseWithInternal(
-        purchase,
+        normalizePurchaseTaxArrays(purchase),
         purchaseInternal
       );
 
