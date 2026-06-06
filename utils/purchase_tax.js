@@ -80,8 +80,9 @@ function findMatchingCessEntry(cess, taxable) {
 }
 
 /**
- * Merge legacy 14% CGST/SGST (28% local purchase) + 12% cess into 20% CGST/SGST (40% local purchase).
- * Clears merged cess rows and recalculates tax totals.
+ * When matching cess exists: merge 14% CGST/SGST (28% local purchase) + 12% cess
+ * into 20% CGST/SGST (40% local purchase) and clear the cess row.
+ * When cess does not exist: keep 14% (28% local purchase) unchanged.
  */
 function normalizePurchaseTaxArrays(purchase) {
   if (!purchase) {
