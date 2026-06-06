@@ -1,5 +1,8 @@
 const logger = require("../utils/logger");
-const { mergedCol, purchaseOverlayJoins } = require("../utils/purchase_overlay_sql");
+const {
+  mergedCol,
+  purchaseOverlayJoins,
+} = require("../utils/purchase_overlay_sql");
 const moment = require("moment");
 
 class DebitNoteRepository {
@@ -231,24 +234,24 @@ class DebitNoteRepository {
           tot_item_qty, tot_item_value, ts, sgst, cgst, igst, cess
       ) VALUES ${placeholders}
       ON DUPLICATE KEY UPDATE
-          store_id = CASE WHEN is_approved = 1 OR ts = VALUES(ts) THEN store_id ELSE VALUES(store_id) END,
-          mprh_pr_no = CASE WHEN is_approved = 1 OR ts = VALUES(ts) THEN mprh_pr_no ELSE VALUES(mprh_pr_no) END,
-          mprh_pr_dt = CASE WHEN is_approved = 1 OR ts = VALUES(ts) THEN mprh_pr_dt ELSE VALUES(mprh_pr_dt) END,
-          mprh_dist_code = CASE WHEN is_approved = 1 OR ts = VALUES(ts) THEN mprh_dist_code ELSE VALUES(mprh_dist_code) END,
-          supplier_id = CASE WHEN is_approved = 1 OR ts = VALUES(ts) THEN supplier_id ELSE VALUES(supplier_id) END,
-          supplier_name = CASE WHEN is_approved = 1 OR ts = VALUES(ts) THEN supplier_name ELSE VALUES(supplier_name) END,
-          supplier_gstn = CASE WHEN is_approved = 1 OR ts = VALUES(ts) THEN supplier_gstn ELSE VALUES(supplier_gstn) END,
-          tot_sgst_amt = CASE WHEN is_approved = 1 OR ts = VALUES(ts) THEN tot_sgst_amt ELSE VALUES(tot_sgst_amt) END,
-          tot_cgst_amt = CASE WHEN is_approved = 1 OR ts = VALUES(ts) THEN tot_cgst_amt ELSE VALUES(tot_cgst_amt) END,
-          tot_igst_amt = CASE WHEN is_approved = 1 OR ts = VALUES(ts) THEN tot_igst_amt ELSE VALUES(tot_igst_amt) END,
-          tot_gst_cess_amt = CASE WHEN is_approved = 1 OR ts = VALUES(ts) THEN tot_gst_cess_amt ELSE VALUES(tot_gst_cess_amt) END,
-          tot_item_qty = CASE WHEN is_approved = 1 OR ts = VALUES(ts) THEN tot_item_qty ELSE VALUES(tot_item_qty) END,
-          tot_item_value = CASE WHEN is_approved = 1 OR ts = VALUES(ts) THEN tot_item_value ELSE VALUES(tot_item_value) END,
-          ts = CASE WHEN is_approved = 1 OR ts = VALUES(ts) THEN ts ELSE VALUES(ts) END,
-          sgst = CASE WHEN is_approved = 1 OR ts = VALUES(ts) THEN sgst ELSE VALUES(sgst) END,
-          cgst = CASE WHEN is_approved = 1 OR ts = VALUES(ts) THEN cgst ELSE VALUES(cgst) END,
-          igst = CASE WHEN is_approved = 1 OR ts = VALUES(ts) THEN igst ELSE VALUES(igst) END,
-          cess = CASE WHEN is_approved = 1 OR ts = VALUES(ts) THEN cess ELSE VALUES(cess) END;
+          store_id = CASE WHEN is_approved = 1  THEN store_id ELSE VALUES(store_id) END,
+          mprh_pr_no = CASE WHEN is_approved = 1  THEN mprh_pr_no ELSE VALUES(mprh_pr_no) END,
+          mprh_pr_dt = CASE WHEN is_approved = 1  THEN mprh_pr_dt ELSE VALUES(mprh_pr_dt) END,
+          mprh_dist_code = CASE WHEN is_approved = 1  THEN mprh_dist_code ELSE VALUES(mprh_dist_code) END,
+          supplier_id = CASE WHEN is_approved = 1  THEN supplier_id ELSE VALUES(supplier_id) END,
+          supplier_name = CASE WHEN is_approved = 1  THEN supplier_name ELSE VALUES(supplier_name) END,
+          supplier_gstn = CASE WHEN is_approved = 1  THEN supplier_gstn ELSE VALUES(supplier_gstn) END,
+          tot_sgst_amt = CASE WHEN is_approved = 1  THEN tot_sgst_amt ELSE VALUES(tot_sgst_amt) END,
+          tot_cgst_amt = CASE WHEN is_approved = 1  THEN tot_cgst_amt ELSE VALUES(tot_cgst_amt) END,
+          tot_igst_amt = CASE WHEN is_approved = 1  THEN tot_igst_amt ELSE VALUES(tot_igst_amt) END,
+          tot_gst_cess_amt = CASE WHEN is_approved = 1  THEN tot_gst_cess_amt ELSE VALUES(tot_gst_cess_amt) END,
+          tot_item_qty = CASE WHEN is_approved = 1  THEN tot_item_qty ELSE VALUES(tot_item_qty) END,
+          tot_item_value = CASE WHEN is_approved = 1  THEN tot_item_value ELSE VALUES(tot_item_value) END,
+          ts = CASE WHEN is_approved = 1  THEN ts ELSE VALUES(ts) END,
+          sgst = CASE WHEN is_approved = 1  THEN sgst ELSE VALUES(sgst) END,
+          cgst = CASE WHEN is_approved = 1  THEN cgst ELSE VALUES(cgst) END,
+          igst = CASE WHEN is_approved = 1  THEN igst ELSE VALUES(igst) END,
+          cess = CASE WHEN is_approved = 1  THEN cess ELSE VALUES(cess) END;
 
 `,
         values,
