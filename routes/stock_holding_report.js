@@ -32,7 +32,7 @@ class StockHoldingReportRoutes {
     });
 
     const paginationSchema = Joi.object({
-      limit: Joi.number().integer().min(1).max(15000).default(15000),
+      limit: Joi.number().integer().min(1).max(5000).default(5000),
       offset: Joi.number().integer().min(0).default(0),
     });
 
@@ -89,7 +89,7 @@ class StockHoldingReportRoutes {
       try {
         const latestSchema = Joi.object({
           date: Joi.date().required(),
-          limit: Joi.number().integer().min(1).max(15000).default(15000),
+          limit: Joi.number().integer().min(1).max(5000).default(5000),
           offset: Joi.number().integer().min(0).default(0),
         });
         const { error, value } = latestSchema.validate(req.query);

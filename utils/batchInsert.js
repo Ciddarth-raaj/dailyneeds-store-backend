@@ -1,4 +1,4 @@
-const DEFAULT_INSERT_BATCH_SIZE = 15000;
+const DEFAULT_INSERT_BATCH_SIZE = 5000;
 
 function queryAsync(connection, sql, params) {
   return new Promise((resolve, reject) => {

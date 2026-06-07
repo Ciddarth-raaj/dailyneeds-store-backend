@@ -275,7 +275,7 @@ class StockHoldingReportRepository {
     const { limit, offset = 0, slim = false } = options;
     const hasPagination =
       limit != null && Number.isFinite(Number(limit)) && Number(limit) > 0;
-    const safeLimit = hasPagination ? Math.min(Number(limit), 15000) : null;
+    const safeLimit = hasPagination ? Math.min(Number(limit), 5000) : null;
     const safeOffset = hasPagination ? Math.max(Number(offset) || 0, 0) : 0;
 
     return new Promise((resolve, reject) => {
