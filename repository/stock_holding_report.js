@@ -9,15 +9,69 @@ const {
   rollbackAsync,
 } = require("../utils/batchInsert");
 
-const ITEMS_LOOKUP_JOINS_SQL = `LEFT JOIN product_department pd_dept ON p.department_id = pd_dept.department_id
-         LEFT JOIN categories cat ON p.category_id = cat.category_id
-         LEFT JOIN subcategories sub ON p.subcategory_id = sub.category_id
-         LEFT JOIN outlets o ON shi.outlet_id = o.outlet_id
-         LEFT JOIN product_distributor_master pdm ON p.distributor_id = pdm.cid
-         LEFT JOIN product_distributor pd_map ON pd_map.cid = p.distributor_id
-         LEFT JOIN new_employee ne ON ne.employee_id = pd_map.buyer_id`;
+const ENRICH_SNAPSHOT_SQL = `UPDATE stock_holding_items shi
+INNER JOIN product_table p ON shi.product_id = p.product_id
+LEFT JOIN product_department pd_dept ON p.department_id = pd_dept.department_id
+LEFT JOIN categories cat ON p.category_id = cat.category_id
+LEFT JOIN subcategories sub ON p.subcategory_id = sub.category_id
+LEFT JOIN outlets o ON shi.outlet_id = o.outlet_id
+LEFT JOIN product_distributor_master pdm ON p.distributor_id = pdm.cid
+LEFT JOIN product_distributor pd_map ON pd_map.cid = p.distributor_id
+LEFT JOIN new_employee ne ON ne.employee_id = pd_map.buyer_id
+LEFT JOIN (
+  SELECT pi.product_id, pi.image_url
+  FROM product_images pi
+  INNER JOIN (
+    SELECT product_id, MIN(priority) AS min_priority
+    FROM product_images
+    WHERE product_id IN (
+      SELECT product_id FROM (
+        SELECT DISTINCT product_id
+        FROM stock_holding_items
+        WHERE stock_holding_report_id = ?
+          AND product_name IS NULL
+      ) pending_products
+    )
+    GROUP BY product_id
+  ) mp ON mp.product_id = pi.product_id AND pi.priority = mp.min_priority
+  INNER JOIN (
+    SELECT product_id, priority, MIN(image_id) AS min_image_id
+    FROM product_images
+    WHERE product_id IN (
+      SELECT product_id FROM (
+        SELECT DISTINCT product_id
+        FROM stock_holding_items
+        WHERE stock_holding_report_id = ?
+          AND product_name IS NULL
+      ) pending_products
+    )
+    GROUP BY product_id, priority
+  ) mi ON mi.product_id = pi.product_id
+    AND mi.priority = pi.priority
+    AND pi.image_id = mi.min_image_id
+) img ON img.product_id = p.product_id
+SET
+  shi.product_name = p.de_name,
+  shi.purchase_type = p.repln_mode,
+  shi.department_id = p.department_id,
+  shi.category_id = p.category_id,
+  shi.subcategory_id = p.subcategory_id,
+  shi.department_name = pd_dept.department_name,
+  shi.category_name = cat.category_name,
+  shi.subcategory_name = sub.subcategory_name,
+  shi.supplier_name = p.de_manufacturer_name,
+  shi.distributor_id = p.distributor_id,
+  shi.distributor_name = COALESCE(pdm.mdm_dist_name, p.de_distributor),
+  shi.buyer_id = pd_map.buyer_id,
+  shi.buyer_name = ne.employee_name,
+  shi.chain_bill_count_level = p.de_bill_count_level,
+  shi.holding_days = pdm.holding_days,
+  shi.outlet_name = o.outlet_name,
+  shi.product_image = img.image_url
+WHERE shi.stock_holding_report_id = ?
+  AND shi.product_name IS NULL`;
 
-const ITEMS_CORE_COLUMNS_SQL = `shi.stock_holding_item_id,
+const ITEMS_SNAPSHOT_COLUMNS_SQL = `shi.stock_holding_item_id,
                 shi.stock_holding_report_id,
                 shi.product_id,
                 shi.outlet_id,
@@ -28,165 +82,30 @@ const ITEMS_CORE_COLUMNS_SQL = `shi.stock_holding_item_id,
                 shi.status,
                 shi.created_at,
                 shi.updated_at,
-                p.de_name AS product_name,
-                p.de_name,
-                p.repln_mode AS purchase_type,
-                p.department_id,
-                p.category_id,
-                p.subcategory_id,
-                p.de_manufacturer_name AS supplier_name,
-                p.de_distributor,
-                p.distributor_id,
-                pd_dept.department_name,
-                cat.category_name,
-                sub.subcategory_name,
-                o.outlet_name AS branch_name,
-                pdm.mdm_dist_name AS distributor_master_name,
-                COALESCE(pdm.mdm_dist_name, p.de_distributor) AS distributor_name,
-                pd_map.buyer_id AS buyer_id,
-                ne.employee_name AS buyer_name,
-                p.de_bill_count_level AS chain_bill_count_level,
-                pdm.holding_days AS holding_days`;
+                shi.product_name,
+                shi.product_name AS de_name,
+                shi.purchase_type,
+                shi.department_id,
+                shi.category_id,
+                shi.subcategory_id,
+                shi.supplier_name,
+                shi.distributor_id,
+                shi.department_name,
+                shi.category_name,
+                shi.subcategory_name,
+                shi.outlet_name AS branch_name,
+                shi.product_image AS image_url,
+                shi.distributor_name AS distributor_master_name,
+                shi.distributor_name,
+                shi.buyer_id,
+                shi.buyer_name,
+                shi.chain_bill_count_level,
+                shi.holding_days`;
 
-const ITEMS_PAGE_SELECT_SQL = `SELECT ${ITEMS_CORE_COLUMNS_SQL}
+const ITEMS_SNAPSHOT_SELECT_SQL = `SELECT ${ITEMS_SNAPSHOT_COLUMNS_SQL}
          FROM stock_holding_items shi
-         INNER JOIN (
-           SELECT stock_holding_item_id
-           FROM stock_holding_items
-           WHERE stock_holding_report_id = ?
-           ORDER BY stock_holding_item_id ASC
-           LIMIT ? OFFSET ?
-         ) page ON page.stock_holding_item_id = shi.stock_holding_item_id
-         INNER JOIN product_table p ON shi.product_id = p.product_id
-         ${ITEMS_LOOKUP_JOINS_SQL}
+         WHERE shi.stock_holding_report_id = ?
          ORDER BY shi.stock_holding_item_id ASC`;
-
-const ITEMS_FROM_JOINS_SQL = `FROM stock_holding_items shi
-         INNER JOIN product_table p ON shi.product_id = p.product_id
-         ${ITEMS_LOOKUP_JOINS_SQL}`;
-
-const ITEMS_SELECT_COLUMNS_SQL = `SELECT ${ITEMS_CORE_COLUMNS_SQL},
-                img.image_url`;
-
-const ITEMS_IMAGE_JOIN_REPORT_SQL = `LEFT JOIN (
-           SELECT
-             pi.product_id,
-             SUBSTRING_INDEX(
-               GROUP_CONCAT(
-                 pi.image_url
-                 ORDER BY pi.priority ASC, pi.image_id ASC
-                 SEPARATOR CHAR(0)
-               ),
-               CHAR(0),
-               1
-             ) AS image_url
-           FROM product_images pi
-           INNER JOIN stock_holding_items shi_img
-             ON shi_img.product_id = pi.product_id
-            AND shi_img.stock_holding_report_id = ?
-           GROUP BY pi.product_id
-         ) img ON img.product_id = p.product_id`;
-
-const ITEMS_IMAGE_COLUMN_CORRELATED_SQL = `(
-                  SELECT pi.image_url
-                  FROM product_images pi
-                  WHERE pi.product_id = p.product_id
-                  ORDER BY pi.priority ASC, pi.image_id ASC
-                  LIMIT 1
-                ) AS image_url`;
-
-function buildItemsSelectSql({ imageStrategy = "none" } = {}) {
-  const imageSelect =
-    imageStrategy === "correlated"
-      ? ITEMS_IMAGE_COLUMN_CORRELATED_SQL
-      : "img.image_url";
-
-  const imageJoin =
-    imageStrategy === "report"
-      ? `\n         ${ITEMS_IMAGE_JOIN_REPORT_SQL}`
-      : "";
-
-  return `${ITEMS_SELECT_COLUMNS_SQL.replace("img.image_url", imageSelect)}
-         ${ITEMS_FROM_JOINS_SQL}${imageJoin}`;
-}
-
-function collectUniqueProductIds(rows) {
-  const ids = [];
-  const seen = new Set();
-  for (let i = 0; i < rows.length; i++) {
-    const productId = rows[i].product_id;
-    if (productId != null && !seen.has(productId)) {
-      seen.add(productId);
-      ids.push(productId);
-    }
-  }
-  return ids;
-}
-
-function attachPrimaryImages(rows, imageMap) {
-  for (let i = 0; i < rows.length; i++) {
-    rows[i].image_url = imageMap.get(rows[i].product_id) ?? null;
-  }
-}
-
-function fetchPrimaryImageMap(db, productIds) {
-  if (!productIds?.length) {
-    return Promise.resolve(new Map());
-  }
-
-  const placeholders = productIds.map(() => "?").join(",");
-  return new Promise((resolve, reject) => {
-    db.query(
-      `SELECT product_id, image_url
-       FROM product_images
-       WHERE product_id IN (${placeholders})
-       ORDER BY product_id ASC, priority ASC, image_id ASC`,
-      productIds,
-      (err, imageRows) => {
-        if (err) {
-          reject(err);
-          return;
-        }
-
-        const imageMap = new Map();
-        for (let i = 0; i < (imageRows || []).length; i++) {
-          const row = imageRows[i];
-          if (!imageMap.has(row.product_id)) {
-            imageMap.set(row.product_id, row.image_url);
-          }
-        }
-        resolve(imageMap);
-      }
-    );
-  });
-}
-
-function queryItemsPageFast(db, stockHoldingReportId, limit, offset) {
-  return new Promise((resolve, reject) => {
-    db.query(
-      ITEMS_PAGE_SELECT_SQL,
-      [stockHoldingReportId, limit, offset],
-      (err, rows) => {
-        if (err) reject(err);
-        else resolve(rows || []);
-      }
-    );
-  });
-}
-
-function getItemsPageFast(db, stockHoldingReportId, limit, offset) {
-  return queryItemsPageFast(db, stockHoldingReportId, limit, offset).then(
-    (rows) => {
-      if (!rows.length) return rows;
-      return fetchPrimaryImageMap(db, collectUniqueProductIds(rows)).then(
-        (imageMap) => {
-          attachPrimaryImages(rows, imageMap);
-          return rows;
-        }
-      );
-    }
-  );
-}
 
 const LATEST_REPORT_HEADER_SQL = `SELECT shr.*,
                 e.employee_name AS created_by_name
@@ -199,6 +118,104 @@ const LATEST_REPORT_ID_BY_DATE_SQL = `SELECT stock_holding_report_id
          WHERE date <= DATE(?)
          ORDER BY date DESC, stock_holding_report_id DESC
          LIMIT 1`;
+
+function enrichItemsSnapshot(dbOrConnection, stockHoldingReportId) {
+  return queryAsync(dbOrConnection, ENRICH_SNAPSHOT_SQL, [
+    stockHoldingReportId,
+    stockHoldingReportId,
+    stockHoldingReportId,
+  ]);
+}
+
+function collectUniqueDistributorIds(rows) {
+  const ids = [];
+  const seen = new Set();
+  for (let i = 0; i < rows.length; i++) {
+    const distributorId = rows[i].distributor_id;
+    if (distributorId != null && distributorId !== "" && !seen.has(distributorId)) {
+      seen.add(distributorId);
+      ids.push(distributorId);
+    }
+  }
+  return ids;
+}
+
+function applyLiveDistributorMeta(rows, metaMap) {
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const meta = metaMap.get(row.distributor_id);
+    if (!meta) continue;
+    if (meta.holding_days != null) row.holding_days = meta.holding_days;
+    if (meta.buyer_id != null) row.buyer_id = meta.buyer_id;
+    if (meta.buyer_name != null) row.buyer_name = meta.buyer_name;
+  }
+}
+
+function fetchLiveDistributorMeta(db, distributorIds) {
+  if (!distributorIds?.length) {
+    return Promise.resolve(new Map());
+  }
+
+  const placeholders = distributorIds.map(() => "?").join(",");
+  return new Promise((resolve, reject) => {
+    db.query(
+      `SELECT pdm.cid AS distributor_id,
+              pdm.holding_days,
+              pd_map.buyer_id,
+              ne.employee_name AS buyer_name
+       FROM product_distributor_master pdm
+       LEFT JOIN product_distributor pd_map ON pd_map.cid = pdm.cid
+       LEFT JOIN new_employee ne ON ne.employee_id = pd_map.buyer_id
+       WHERE pdm.cid IN (${placeholders})`,
+      distributorIds,
+      (err, metaRows) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+
+        const metaMap = new Map();
+        for (let i = 0; i < (metaRows || []).length; i++) {
+          const row = metaRows[i];
+          metaMap.set(row.distributor_id, row);
+        }
+        resolve(metaMap);
+      }
+    );
+  });
+}
+
+function querySnapshotItems(db, stockHoldingReportId, limit, offset) {
+  return new Promise((resolve, reject) => {
+    const params = [stockHoldingReportId];
+    let sql = ITEMS_SNAPSHOT_SELECT_SQL;
+
+    if (limit != null) {
+      sql += " LIMIT ? OFFSET ?";
+      params.push(limit, offset);
+    }
+
+    db.query(sql, params, (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows || []);
+    });
+  });
+}
+
+function getSnapshotItems(db, stockHoldingReportId, limit, offset) {
+  return querySnapshotItems(db, stockHoldingReportId, limit, offset).then(
+    (rows) => {
+      if (!rows.length) return rows;
+      return fetchLiveDistributorMeta(
+        db,
+        collectUniqueDistributorIds(rows)
+      ).then((metaMap) => {
+        applyLiveDistributorMeta(rows, metaMap);
+        return rows;
+      });
+    }
+  );
+}
 
 function mapItemRowSlim(item) {
   return {
@@ -376,6 +393,7 @@ class StockHoldingReportRepository {
         if (items.length > 0) {
           const rows = buildItemInsertRows(reportId, items);
           await insertRowsInBatches(connection, INSERT_ITEMS_SQL, rows);
+          await enrichItemsSnapshot(connection, reportId);
         }
 
         await commitAsync(connection);
@@ -407,6 +425,7 @@ class StockHoldingReportRepository {
         await beginTransactionAsync(connection);
         const rows = buildItemInsertRows(stockHoldingReportId, items);
         await insertRowsInBatches(connection, INSERT_ITEMS_SQL, rows);
+        await enrichItemsSnapshot(connection, stockHoldingReportId);
         await commitAsync(connection);
         connection.release();
         const item_count = await this.getItemCountByReportId(
@@ -428,59 +447,24 @@ class StockHoldingReportRepository {
     const safeLimit = hasPagination ? Math.min(Number(limit), 5000) : null;
     const safeOffset = hasPagination ? Math.max(Number(offset) || 0, 0) : 0;
 
-    if (hasPagination && slim) {
-      return getItemsPageFast(
-        this.db,
-        stockHoldingReportId,
-        safeLimit,
-        safeOffset
-      )
-        .then((items) => mapItemsRows(items, true))
-        .catch((err) => {
-          logger.Log({
-            level: logger.LEVEL.ERROR,
-            component: "REPOSITORY.STOCK_HOLDING_REPORT",
-            code: "REPOSITORY.STOCK_HOLDING_REPORT.GET_ITEMS_BY_REPORT_ID",
-            description: err.toString(),
-            category: "",
-            ref: { stockHoldingReportId, limit: safeLimit, offset: safeOffset },
-          });
-          throw err;
+    return getSnapshotItems(
+      this.db,
+      stockHoldingReportId,
+      hasPagination ? safeLimit : null,
+      hasPagination ? safeOffset : 0
+    )
+      .then((items) => mapItemsRows(items, slim))
+      .catch((err) => {
+        logger.Log({
+          level: logger.LEVEL.ERROR,
+          component: "REPOSITORY.STOCK_HOLDING_REPORT",
+          code: "REPOSITORY.STOCK_HOLDING_REPORT.GET_ITEMS_BY_REPORT_ID",
+          description: err.toString(),
+          category: "",
+          ref: { stockHoldingReportId, limit: safeLimit, offset: safeOffset },
         });
-    }
-
-    return new Promise((resolve, reject) => {
-      const imageStrategy = hasPagination ? "correlated" : "report";
-      const params =
-        imageStrategy === "report"
-          ? [stockHoldingReportId, stockHoldingReportId]
-          : [stockHoldingReportId];
-      let sql = `${buildItemsSelectSql({ imageStrategy })}
-         WHERE shi.stock_holding_report_id = ?
-         ORDER BY shi.stock_holding_item_id ASC`;
-
-      if (hasPagination) {
-        sql += " LIMIT ? OFFSET ?";
-        params.push(safeLimit, safeOffset);
-      }
-
-      this.db.query(sql, params, (err, items) => {
-        if (err) {
-          logger.Log({
-            level: logger.LEVEL.ERROR,
-            component: "REPOSITORY.STOCK_HOLDING_REPORT",
-            code: "REPOSITORY.STOCK_HOLDING_REPORT.GET_ITEMS_BY_REPORT_ID",
-            description: err.toString(),
-            category: "",
-            ref: { stockHoldingReportId, limit: safeLimit, offset: safeOffset },
-          });
-          reject(err);
-          return;
-        }
-
-        resolve(mapItemsRows(items, slim));
+        throw err;
       });
-    });
   }
 
   getItemsPageByReportId(stockHoldingReportId, limit, offset = 0) {
