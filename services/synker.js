@@ -61,6 +61,8 @@ const SYNCED_PRODUCT_COLUMNS = [
   "repln_mode",
   "de_is_online_allowed",
   "buyer_name",
+  "distributor_id",
+  "de_manufacturer_name",
 ];
 
 class Synker {
@@ -141,6 +143,7 @@ class Synker {
   }
 
   initCronJobs(cronService) {
+    this.syncProductsWithLogging();
     // Schedule CRON job for product sync
     cronService.register("product_sync", CRON_SYNTAX_PRODUCT, async () => {
       await this.syncProductsWithLogging();
@@ -727,6 +730,12 @@ class Synker {
         repln_mode: product.repln_mode,
         de_is_online_allowed: product.is_online_allowed,
         buyer_name: product.buyer_name ?? null,
+        distributor_id:
+          product.distributor != null &&
+          String(product.distributor).trim() !== ""
+            ? String(product.distributor).trim()
+            : null,
+        de_manufacturer_name: product.manufacturer_name ?? null,
       });
     }
 
