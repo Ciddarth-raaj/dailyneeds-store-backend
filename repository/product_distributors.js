@@ -2,6 +2,7 @@ const logger = require("../utils/logger");
 
 const GF_TABLE = "medishopdb_MED_DISTRIBUTOR_MAST";
 const MAP_TABLE = "product_distributor";
+const MASTER_TABLE = "product_distributor_master";
 
 class ProductDistributorsRepository {
   constructor(gofrugalDb, mainDb) {
@@ -166,6 +167,55 @@ class ProductDistributorsRepository {
             return reject(err);
           }
           resolve({ code: 200, count: pairs.length });
+        }
+      );
+    });
+  }
+
+  /**
+   * Bulk insert/update HQ distributor master rows (main DB).
+   * Expects one row per cid (merged upstream).
+   */
+  bulkHqImport(items) {
+    return new Promise((resolve, reject) => {
+      if (!items || items.length === 0) {
+        return resolve({ code: 200, count: 0 });
+      }
+
+      const rows = items;
+      const placeholders = rows.map(() => "(?, ?, ?, ?, ?)").join(", ");
+      const values = rows.flatMap((row) => [
+        row.cid,
+        row.mdm_dist_code,
+        row.mdm_dist_name ?? null,
+        row.mdm_short_name ?? null,
+        row.mdm_tag ?? null,
+      ]);
+
+      this.mainDb.query(
+        `INSERT INTO ${MASTER_TABLE}
+          (cid, mdm_dist_code, mdm_dist_name, mdm_short_name, mdm_tag)
+         VALUES ${placeholders}
+         ON DUPLICATE KEY UPDATE
+          mdm_dist_code = VALUES(mdm_dist_code),
+          mdm_dist_name = VALUES(mdm_dist_name),
+          mdm_short_name = VALUES(mdm_short_name),
+          mdm_tag = VALUES(mdm_tag),
+          updated_at = CURRENT_TIMESTAMP`,
+        values,
+        (err) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PRODUCT_DISTRIBUTORS",
+              code: "REPOSITORY.PRODUCT_DISTRIBUTORS.BULK_HQ_IMPORT",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            return reject(err);
+          }
+          resolve({ code: 200, count: rows.length });
         }
       );
     });
