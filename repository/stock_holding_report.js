@@ -9,22 +9,15 @@ const {
   rollbackAsync,
 } = require("../utils/batchInsert");
 
-const ITEMS_FROM_JOINS_SQL = `FROM stock_holding_items shi
-         INNER JOIN product_table p ON shi.product_id = p.product_id
-         LEFT JOIN product_department pd_dept ON p.department_id = pd_dept.department_id
+const ITEMS_LOOKUP_JOINS_SQL = `LEFT JOIN product_department pd_dept ON p.department_id = pd_dept.department_id
          LEFT JOIN categories cat ON p.category_id = cat.category_id
          LEFT JOIN subcategories sub ON p.subcategory_id = sub.category_id
          LEFT JOIN outlets o ON shi.outlet_id = o.outlet_id
          LEFT JOIN product_distributor_master pdm ON p.distributor_id = pdm.cid
-         LEFT JOIN product_distributor pd_map_cid ON pd_map_cid.cid = p.distributor_id
-         LEFT JOIN product_distributor pd_map_code
-           ON pd_map_cid.cid IS NULL
-          AND pdm.mdm_dist_code IS NOT NULL
-          AND pd_map_code.mdm_dist_code = CAST(pdm.mdm_dist_code AS CHAR)
-         LEFT JOIN new_employee ne
-           ON ne.employee_id = COALESCE(pd_map_cid.buyer_id, pd_map_code.buyer_id)`;
+         LEFT JOIN product_distributor pd_map ON pd_map.cid = p.distributor_id
+         LEFT JOIN new_employee ne ON ne.employee_id = pd_map.buyer_id`;
 
-const ITEMS_SELECT_COLUMNS_SQL = `SELECT shi.stock_holding_item_id,
+const ITEMS_CORE_COLUMNS_SQL = `shi.stock_holding_item_id,
                 shi.stock_holding_report_id,
                 shi.product_id,
                 shi.outlet_id,
@@ -48,13 +41,32 @@ const ITEMS_SELECT_COLUMNS_SQL = `SELECT shi.stock_holding_item_id,
                 cat.category_name,
                 sub.subcategory_name,
                 o.outlet_name AS branch_name,
-                img.image_url,
                 pdm.mdm_dist_name AS distributor_master_name,
                 COALESCE(pdm.mdm_dist_name, p.de_distributor) AS distributor_name,
-                COALESCE(pd_map_cid.buyer_id, pd_map_code.buyer_id) AS buyer_id,
+                pd_map.buyer_id AS buyer_id,
                 ne.employee_name AS buyer_name,
                 p.de_bill_count_level AS chain_bill_count_level,
                 pdm.holding_days AS holding_days`;
+
+const ITEMS_PAGE_SELECT_SQL = `SELECT ${ITEMS_CORE_COLUMNS_SQL}
+         FROM stock_holding_items shi
+         INNER JOIN (
+           SELECT stock_holding_item_id
+           FROM stock_holding_items
+           WHERE stock_holding_report_id = ?
+           ORDER BY stock_holding_item_id ASC
+           LIMIT ? OFFSET ?
+         ) page ON page.stock_holding_item_id = shi.stock_holding_item_id
+         INNER JOIN product_table p ON shi.product_id = p.product_id
+         ${ITEMS_LOOKUP_JOINS_SQL}
+         ORDER BY shi.stock_holding_item_id ASC`;
+
+const ITEMS_FROM_JOINS_SQL = `FROM stock_holding_items shi
+         INNER JOIN product_table p ON shi.product_id = p.product_id
+         ${ITEMS_LOOKUP_JOINS_SQL}`;
+
+const ITEMS_SELECT_COLUMNS_SQL = `SELECT ${ITEMS_CORE_COLUMNS_SQL},
+                img.image_url`;
 
 const ITEMS_IMAGE_JOIN_REPORT_SQL = `LEFT JOIN (
            SELECT
@@ -83,7 +95,7 @@ const ITEMS_IMAGE_COLUMN_CORRELATED_SQL = `(
                   LIMIT 1
                 ) AS image_url`;
 
-function buildItemsSelectSql({ imageStrategy = "correlated" } = {}) {
+function buildItemsSelectSql({ imageStrategy = "none" } = {}) {
   const imageSelect =
     imageStrategy === "correlated"
       ? ITEMS_IMAGE_COLUMN_CORRELATED_SQL
@@ -96,6 +108,84 @@ function buildItemsSelectSql({ imageStrategy = "correlated" } = {}) {
 
   return `${ITEMS_SELECT_COLUMNS_SQL.replace("img.image_url", imageSelect)}
          ${ITEMS_FROM_JOINS_SQL}${imageJoin}`;
+}
+
+function collectUniqueProductIds(rows) {
+  const ids = [];
+  const seen = new Set();
+  for (let i = 0; i < rows.length; i++) {
+    const productId = rows[i].product_id;
+    if (productId != null && !seen.has(productId)) {
+      seen.add(productId);
+      ids.push(productId);
+    }
+  }
+  return ids;
+}
+
+function attachPrimaryImages(rows, imageMap) {
+  for (let i = 0; i < rows.length; i++) {
+    rows[i].image_url = imageMap.get(rows[i].product_id) ?? null;
+  }
+}
+
+function fetchPrimaryImageMap(db, productIds) {
+  if (!productIds?.length) {
+    return Promise.resolve(new Map());
+  }
+
+  const placeholders = productIds.map(() => "?").join(",");
+  return new Promise((resolve, reject) => {
+    db.query(
+      `SELECT product_id, image_url
+       FROM product_images
+       WHERE product_id IN (${placeholders})
+       ORDER BY product_id ASC, priority ASC, image_id ASC`,
+      productIds,
+      (err, imageRows) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+
+        const imageMap = new Map();
+        for (let i = 0; i < (imageRows || []).length; i++) {
+          const row = imageRows[i];
+          if (!imageMap.has(row.product_id)) {
+            imageMap.set(row.product_id, row.image_url);
+          }
+        }
+        resolve(imageMap);
+      }
+    );
+  });
+}
+
+function queryItemsPageFast(db, stockHoldingReportId, limit, offset) {
+  return new Promise((resolve, reject) => {
+    db.query(
+      ITEMS_PAGE_SELECT_SQL,
+      [stockHoldingReportId, limit, offset],
+      (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows || []);
+      }
+    );
+  });
+}
+
+function getItemsPageFast(db, stockHoldingReportId, limit, offset) {
+  return queryItemsPageFast(db, stockHoldingReportId, limit, offset).then(
+    (rows) => {
+      if (!rows.length) return rows;
+      return fetchPrimaryImageMap(db, collectUniqueProductIds(rows)).then(
+        (imageMap) => {
+          attachPrimaryImages(rows, imageMap);
+          return rows;
+        }
+      );
+    }
+  );
 }
 
 const LATEST_REPORT_HEADER_SQL = `SELECT shr.*,
@@ -338,6 +428,27 @@ class StockHoldingReportRepository {
     const safeLimit = hasPagination ? Math.min(Number(limit), 5000) : null;
     const safeOffset = hasPagination ? Math.max(Number(offset) || 0, 0) : 0;
 
+    if (hasPagination && slim) {
+      return getItemsPageFast(
+        this.db,
+        stockHoldingReportId,
+        safeLimit,
+        safeOffset
+      )
+        .then((items) => mapItemsRows(items, true))
+        .catch((err) => {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "REPOSITORY.STOCK_HOLDING_REPORT",
+            code: "REPOSITORY.STOCK_HOLDING_REPORT.GET_ITEMS_BY_REPORT_ID",
+            description: err.toString(),
+            category: "",
+            ref: { stockHoldingReportId, limit: safeLimit, offset: safeOffset },
+          });
+          throw err;
+        });
+    }
+
     return new Promise((resolve, reject) => {
       const imageStrategy = hasPagination ? "correlated" : "report";
       const params =
@@ -514,26 +625,37 @@ class StockHoldingReportRepository {
     });
   }
 
-  getLatestItemsPageByDate(date, limit, offset = 0) {
+  getLatestItemsPageByDate(date, limit, offset = 0, reportId = null) {
     const safeOffset = Math.max(Number(offset) || 0, 0);
-    return this.getLatestReportIdByDate(date).then((reportId) => {
-      if (!reportId) return null;
+    const reportIdPromise = reportId
+      ? Promise.resolve(Number(reportId))
+      : this.getLatestReportIdByDate(date);
 
-      const pagePromise = this.getItemsPageByReportId(reportId, limit, safeOffset);
+    return reportIdPromise.then((resolvedReportId) => {
+      if (!resolvedReportId) return null;
+
+      const pagePromise = this.getItemsPageByReportId(
+        resolvedReportId,
+        limit,
+        safeOffset
+      );
 
       if (safeOffset > 0) {
         return pagePromise.then((page) => ({
-          stock_holding_report_id: reportId,
+          stock_holding_report_id: resolvedReportId,
           ...page,
         }));
       }
 
-      return this.getReportHeaderById(reportId).then((report) => {
+      return Promise.all([
+        this.getReportHeaderById(resolvedReportId),
+        pagePromise,
+      ]).then(([report, page]) => {
         if (!report) return null;
-        return pagePromise.then((page) => ({
+        return {
           ...report,
           ...page,
-        }));
+        };
       });
     });
   }

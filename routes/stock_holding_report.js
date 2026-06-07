@@ -89,6 +89,7 @@ class StockHoldingReportRoutes {
       try {
         const latestSchema = Joi.object({
           date: Joi.date().required(),
+          report_id: Joi.number().integer().optional(),
           limit: Joi.number().integer().min(1).max(5000).default(5000),
           offset: Joi.number().integer().min(0).default(0),
         });
@@ -98,7 +99,8 @@ class StockHoldingReportRoutes {
         const result = await this.stockHoldingReportUsecase.getLatestItemsPage(
           value.date,
           value.limit,
-          value.offset
+          value.offset,
+          value.report_id ?? null
         );
         res
           .status(result.code === 200 ? 200 : result.code === 404 ? 404 : 400)

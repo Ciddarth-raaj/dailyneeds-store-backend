@@ -134,13 +134,14 @@ class StockHoldingReportUsecase {
     });
   }
 
-  getLatestItemsPage(date, limit, offset) {
+  getLatestItemsPage(date, limit, offset, reportId = null) {
     return new Promise(async (resolve, reject) => {
       try {
         const data = await this.stockHoldingReportRepo.getLatestItemsPageByDate(
           date,
           limit,
-          offset
+          offset,
+          reportId
         );
         if (!data) {
           resolve({
