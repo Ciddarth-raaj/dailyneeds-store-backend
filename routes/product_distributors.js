@@ -85,6 +85,45 @@ class ProductDistributorsRoutes {
       res.end();
     });
 
+    const holdingDaysImportItemSchema = Joi.object({
+      cid: Joi.string().trim().min(1).required(),
+      holding_days: Joi.alternatives()
+        .try(Joi.number().integer(), Joi.string().trim().min(1))
+        .required(),
+    });
+
+    const holdingDaysImportSchema = Joi.object({
+      items: Joi.array()
+        .items(holdingDaysImportItemSchema)
+        .min(1)
+        .max(2000)
+        .required(),
+    });
+
+    router.post("/bulk/holding-days", async (req, res) => {
+      try {
+        const isValid = Joi.validate(req.body, holdingDaysImportSchema);
+        if (isValid.error) {
+          res.status(400).json({ code: 400, msg: isValid.error.message });
+          res.end();
+          return;
+        }
+        const result = await this.productDistributorsUsecase.bulkUpdateHoldingDays(
+          isValid.value.items
+        );
+        res.json(result);
+      } catch (err) {
+        if (err.statusCode) {
+          res
+            .status(err.statusCode)
+            .json({ code: err.statusCode, msg: err.message });
+        } else {
+          respondError(res, err);
+        }
+      }
+      res.end();
+    });
+
     router.post("/bulk/hq-import", async (req, res) => {
       try {
         const isValid = Joi.validate(req.body, hqImportSchema);

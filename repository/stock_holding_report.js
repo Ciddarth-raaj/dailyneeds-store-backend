@@ -44,7 +44,8 @@ const ITEMS_SELECT_SQL = `SELECT shi.stock_holding_item_id,
                 COALESCE(pdm.mdm_dist_name, p.de_distributor) AS distributor_name,
                 COALESCE(pd_map_cid.buyer_id, pd_map_code.buyer_id) AS buyer_id,
                 ne.employee_name AS buyer_name,
-                p.de_bill_count_level AS chain_bill_count_level
+                p.de_bill_count_level AS chain_bill_count_level,
+                pdm.holding_days AS holding_days
          FROM stock_holding_items shi
          LEFT JOIN product_table p ON shi.product_id = p.product_id
          LEFT JOIN product_department pd_dept ON p.department_id = pd_dept.department_id
@@ -72,7 +73,7 @@ function mapItemRowSlim(item) {
     current_stock_value: item.current_stock_value,
     stock_on_order: null,
     stock_duration: item.stock_duration,
-    holding_days: null,
+    holding_days: item.holding_days ?? null,
     status: item.status,
     chain_bill_count_level: item.chain_bill_count_level ?? null,
     supplier_name: item.supplier_name ?? null,

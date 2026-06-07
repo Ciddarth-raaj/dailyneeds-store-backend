@@ -19,6 +19,7 @@ class ProductDistributorsRepository {
       MDM_SHORT_NAME: row.mdm_short_name,
       buyer_id: row.buyer_id ?? null,
       buyer_name: row.buyer_name ?? null,
+      holding_days: row.holding_days ?? null,
     };
   }
 
@@ -107,7 +108,7 @@ class ProductDistributorsRepository {
   getAll() {
     return new Promise((resolve, reject) => {
       this.mainDb.query(
-        `SELECT pdm.cid, pdm.mdm_dist_code, pdm.mdm_dist_name, pdm.mdm_short_name
+        `SELECT pdm.cid, pdm.mdm_dist_code, pdm.mdm_dist_name, pdm.mdm_short_name, pdm.holding_days
          FROM ${MASTER_TABLE} pdm
          ORDER BY pdm.mdm_dist_name`,
         (err, masterRows) => {
@@ -159,7 +160,7 @@ class ProductDistributorsRepository {
     const key = String(cid).trim();
     return new Promise((resolve, reject) => {
       this.mainDb.query(
-        `SELECT pdm.cid, pdm.mdm_dist_code, pdm.mdm_dist_name, pdm.mdm_short_name,
+        `SELECT pdm.cid, pdm.mdm_dist_code, pdm.mdm_dist_name, pdm.mdm_short_name, pdm.holding_days,
                 pd.buyer_id, ne.employee_name AS buyer_name
          FROM ${MASTER_TABLE} pdm
          LEFT JOIN ${MAP_TABLE} pd ON pd.cid = pdm.cid
@@ -297,6 +298,43 @@ class ProductDistributorsRepository {
           resolve({ code: 200, count: rows.length });
         }
       );
+    });
+  }
+
+  bulkUpdateHoldingDays(items) {
+    return new Promise((resolve, reject) => {
+      if (!items || items.length === 0) {
+        return resolve({ code: 200, count: 0, skipped: 0 });
+      }
+
+      (async () => {
+        try {
+          const byCid = new Map();
+          items.forEach((row) => {
+            const key = String(row.cid).trim();
+            byCid.set(key, row.holding_days);
+          });
+
+          let count = 0;
+          let skipped = 0;
+          for (const [cid, holdingDays] of byCid.entries()) {
+            const updated = await new Promise((res, rej) => {
+              this.mainDb.query(
+                `UPDATE ${MASTER_TABLE}
+                 SET holding_days = ?, updated_at = CURRENT_TIMESTAMP
+                 WHERE cid = ?`,
+                [holdingDays, cid],
+                (err, result) => (err ? rej(err) : res(result))
+              );
+            });
+            if (updated.affectedRows > 0) count += 1;
+            else skipped += 1;
+          }
+          resolve({ code: 200, count, skipped });
+        } catch (err) {
+          reject(err);
+        }
+      })();
     });
   }
 

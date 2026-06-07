@@ -167,6 +167,55 @@ class ProductDistributorsUsecase {
       throw err;
     }
   }
+
+  _parseHoldingDays(value) {
+    const { parseDaysValue } = require("../utils/parseDaysValue");
+    const parsed = parseDaysValue(value);
+    if (parsed == null) {
+      const err = new Error(`Invalid holding days: ${value}`);
+      err.statusCode = 400;
+      throw err;
+    }
+    return parsed;
+  }
+
+  _parseHoldingDaysImportRow(row) {
+    return {
+      cid: this._parseCid(row.cid ?? row.CID),
+      holding_days: this._parseHoldingDays(row.holding_days),
+    };
+  }
+
+  _mergeHoldingDaysByCid(items) {
+    const byCid = new Map();
+    items.forEach((row) => {
+      const parsed = this._parseHoldingDaysImportRow(row);
+      byCid.set(parsed.cid, parsed.holding_days);
+    });
+    return Array.from(byCid.entries()).map(([cid, holding_days]) => ({
+      cid,
+      holding_days,
+    }));
+  }
+
+  async bulkUpdateHoldingDays(items) {
+    try {
+      const merged = this._mergeHoldingDaysByCid(items);
+      return await this.productDistributorsRepo.bulkUpdateHoldingDays(merged);
+    } catch (err) {
+      if (!err.statusCode) {
+        logger.Log({
+          level: logger.LEVEL.ERROR,
+          component: "USECASE.PRODUCT_DISTRIBUTORS",
+          code: "USECASE.PRODUCT_DISTRIBUTORS.BULK_UPDATE_HOLDING_DAYS",
+          description: err.toString(),
+          category: "",
+          ref: {},
+        });
+      }
+      throw err;
+    }
+  }
 }
 
 module.exports = (productDistributorsRepo) => {
