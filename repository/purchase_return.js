@@ -1,4 +1,5 @@
 const logger = require("../utils/logger");
+const { resolveByMedishopDistCodes } = require("./lib/distributor_master_lookup");
 
 const PUR_RETURN_DT_CUTOFF = "2026-02-01 00:00:00";
 // const PUR_RETURN_DT_CUTOFF = "2023-02-01 00:00:00";
@@ -66,33 +67,11 @@ class PurchaseReturnRepository {
     });
   }
 
-  /** Headers with distributor name in one query (Gofrugal). */
+  /** Headers with distributor name resolved via medishop cid -> product_distributor_master. */
   getHeadersFromGofrugalWithDistributor() {
-    return new Promise((resolve, reject) => {
-      this.dbGofrugal.query(
-        `SELECT h.mprh_pr_no, h.mprh_pr_refno, h.mprh_pr_dt, h.mprh_basic_amount, h.mprh_net_amount, h.mprh_locaid, h.mprh_dist_code,
-                d.MDM_DIST_NAME AS distributor_name
-         FROM medishopdb_med_pur_return_hdr h
-         LEFT JOIN medishopdb_MED_DISTRIBUTOR_MAST d ON d.MDM_DIST_CODE = h.mprh_dist_code
-         WHERE h.mprh_locaid = 2 AND h.mprh_pr_dt >= ?
-         ORDER BY h.mprh_pr_refno DESC`,
-        [PUR_RETURN_DT_CUTOFF],
-        (err, rows) => {
-          if (err) {
-            logger.Log({
-              level: logger.LEVEL.ERROR,
-              component: "REPOSITORY.PURCHASE_RETURN",
-              code: "REPOSITORY.PURCHASE_RETURN.HEADERS_WITH_DIST",
-              description: err.toString(),
-              category: "",
-              ref: {}
-            });
-            return reject(err);
-          }
-          resolve(rows || []);
-        }
-      );
-    });
+    return this.getHeadersFromGofrugal().then((rows) =>
+      this._attachDistributorNames(rows)
+    );
   }
 
   getHeadersFromGofrugalByDistCode(distributor_id) {
@@ -121,33 +100,28 @@ class PurchaseReturnRepository {
     });
   }
 
-  /** Headers by dist code with distributor name in one query (Gofrugal). */
+  /** Headers by dist code with distributor name resolved via cid bridge. */
   getHeadersFromGofrugalByDistCodeWithDistributor(distributor_id) {
-    return new Promise((resolve, reject) => {
-      this.dbGofrugal.query(
-        `SELECT h.mprh_pr_no, h.mprh_pr_refno, h.mprh_pr_dt, h.mprh_basic_amount, h.mprh_net_amount, h.mprh_locaid, h.mprh_dist_code,
-                d.MDM_DIST_NAME AS distributor_name
-         FROM medishopdb_med_pur_return_hdr h
-         LEFT JOIN medishopdb_MED_DISTRIBUTOR_MAST d ON d.MDM_DIST_CODE = h.mprh_dist_code
-         WHERE h.mprh_locaid = 2 AND h.mprh_pr_dt >= ? AND h.mprh_dist_code = ?
-         ORDER BY h.mprh_pr_refno DESC`,
-        [PUR_RETURN_DT_CUTOFF, distributor_id],
-        (err, rows) => {
-          if (err) {
-            logger.Log({
-              level: logger.LEVEL.ERROR,
-              component: "REPOSITORY.PURCHASE_RETURN",
-              code: "REPOSITORY.PURCHASE_RETURN.HEADERS_BY_DIST_WITH_DIST",
-              description: err.toString(),
-              category: "",
-              ref: {}
-            });
-            return reject(err);
-          }
-          resolve(rows || []);
-        }
-      );
-    });
+    return this.getHeadersFromGofrugalByDistCode(distributor_id).then((rows) =>
+      this._attachDistributorNames(rows)
+    );
+  }
+
+  _attachDistributorNames(rows) {
+    const distCodes = (rows || [])
+      .map((r) => r.mprh_dist_code)
+      .filter((c) => c != null && c !== "");
+    return resolveByMedishopDistCodes(
+      this.dbGofrugal,
+      this.db,
+      distCodes
+    ).then((map) =>
+      (rows || []).map((row) => ({
+        ...row,
+        distributor_name:
+          map[String(row.mprh_dist_code)]?.MDM_DIST_NAME ?? null,
+      }))
+    );
   }
 
   getItemsFromGofrugal() {
@@ -205,37 +179,22 @@ class PurchaseReturnRepository {
   }
 
   getDistributorMastByDistCodes(distCodes) {
-    if (!distCodes || distCodes.length === 0) return Promise.resolve({});
-    const codes = [...new Set(distCodes.map((c) => (c != null && c !== "" ? String(c) : null)).filter(Boolean))];
-    if (codes.length === 0) return Promise.resolve({});
-    return new Promise((resolve, reject) => {
-      const placeholders = codes.map(() => "?").join(",");
-      this.dbGofrugal.query(
-        `SELECT MDM_DIST_CODE, MDM_DIST_NAME, MDM_SHORT_NAME FROM medishopdb_MED_DISTRIBUTOR_MAST WHERE MDM_DIST_CODE IN (${placeholders})`,
-        codes,
-        (err, rows) => {
-          if (err) {
-            logger.Log({
-              level: logger.LEVEL.ERROR,
-              component: "REPOSITORY.PURCHASE_RETURN",
-              code: "REPOSITORY.PURCHASE_RETURN.DISTRIBUTOR_MAST",
-              description: err.toString(),
-              category: "",
-              ref: {}
-            });
-            return reject(err);
-          }
-          const map = {};
-          (rows || []).forEach((r) => {
-            map[String(r.MDM_DIST_CODE)] = {
-              MDM_DIST_CODE: r.MDM_DIST_CODE,
-              MDM_DIST_NAME: r.MDM_DIST_NAME,
-              MDM_SHORT_NAME: r.MDM_SHORT_NAME
-            };
-          });
-          resolve(map);
-        }
-      );
+    return resolveByMedishopDistCodes(
+      this.dbGofrugal,
+      this.db,
+      distCodes
+    ).then((map) => {
+      const result = {};
+      Object.keys(map).forEach((code) => {
+        const row = map[code];
+        if (!row) return;
+        result[code] = {
+          MDM_DIST_CODE: row.MDM_DIST_CODE,
+          MDM_DIST_NAME: row.MDM_DIST_NAME,
+          MDM_SHORT_NAME: row.MDM_SHORT_NAME,
+        };
+      });
+      return result;
     });
   }
 

@@ -1,6 +1,10 @@
 const logger = require("../utils/logger");
+const {
+  GF_TABLE,
+  resolveByMedishopDistCodes,
+  getActiveWithMedishopCodes,
+} = require("./lib/distributor_master_lookup");
 
-const GF_TABLE = "medishopdb_MED_DISTRIBUTOR_MAST";
 const MAP_TABLE = "product_distributor";
 const MASTER_TABLE = "product_distributor_master";
 
@@ -10,100 +14,101 @@ class ProductDistributorsRepository {
     this.mainDb = mainDb;
   }
 
+  _getBuyerMapByDistCodes(distCodes) {
+    return new Promise((resolve, reject) => {
+      const codes = [
+        ...new Set(
+          (distCodes || [])
+            .map((c) => (c != null && c !== "" ? String(c) : null))
+            .filter(Boolean)
+        ),
+      ];
+      if (codes.length === 0) return resolve({});
+
+      const placeholders = codes.map(() => "?").join(",");
+      this.mainDb.query(
+        `SELECT pd.mdm_dist_code, pd.buyer_id, ne.employee_name AS buyer_name
+         FROM ${MAP_TABLE} pd
+         LEFT JOIN new_employee ne ON ne.employee_id = pd.buyer_id
+         WHERE pd.mdm_dist_code IN (${placeholders})`,
+        codes,
+        (err, buyerRows) => {
+          if (err) return reject(err);
+          const byCode = {};
+          (buyerRows || []).forEach((b) => {
+            byCode[String(b.mdm_dist_code)] = b;
+          });
+          resolve(byCode);
+        }
+      );
+    });
+  }
+
+  _attachBuyer(rows, buyerByCode) {
+    return rows.map((row) => {
+      const code = String(row.MDM_DIST_CODE);
+      const buyer = buyerByCode[code];
+      return {
+        ...row,
+        buyer_id: buyer ? buyer.buyer_id : null,
+        buyer_name: buyer ? buyer.buyer_name : null,
+      };
+    });
+  }
+
   /**
-   * Merge Gofrugal distributor rows with buyer mapping from main DB (product_distributor + new_employee).
+   * Active distributors: master details via cid, medishop MDM_DIST_CODE for external keys.
    */
   getAll() {
     return new Promise((resolve, reject) => {
-      this.gofrugalDb.query(
-        `SELECT MDM_DIST_CODE, MDM_DIST_NAME, MDM_SHORT_NAME FROM ${GF_TABLE} WHERE MDM_TAG = 'a' ORDER BY MDM_DIST_NAME`,
-        (err, dists) => {
-          if (err) {
-            logger.Log({
-              level: logger.LEVEL.ERROR,
-              component: "REPOSITORY.PRODUCT_DISTRIBUTORS",
-              code: "REPOSITORY.PRODUCT_DISTRIBUTORS.GET_ALL",
-              description: err.toString(),
-              category: "",
-              ref: {}
-            });
-            return reject(err);
-          }
-          this.mainDb.query(
-            `SELECT pd.mdm_dist_code, pd.buyer_id, ne.employee_name AS buyer_name
-             FROM ${MAP_TABLE} pd
-             LEFT JOIN new_employee ne ON ne.employee_id = pd.buyer_id`,
-            (err2, buyerRows) => {
-              if (err2) {
-                logger.Log({
-                  level: logger.LEVEL.ERROR,
-                  component: "REPOSITORY.PRODUCT_DISTRIBUTORS",
-                  code: "REPOSITORY.PRODUCT_DISTRIBUTORS.GET_ALL_MAP",
-                  description: err2.toString(),
-                  category: "",
-                  ref: {}
-                });
-                return reject(err2);
-              }
-              const byCode = {};
-              (buyerRows || []).forEach((b) => {
-                byCode[String(b.mdm_dist_code)] = b;
-              });
-              const data = (dists || []).map((d) => {
-                const code = String(d.MDM_DIST_CODE);
-                const m = byCode[code];
-                return {
-                  MDM_DIST_CODE: d.MDM_DIST_CODE,
-                  MDM_DIST_NAME: d.MDM_DIST_NAME,
-                  MDM_SHORT_NAME: d.MDM_SHORT_NAME,
-                  buyer_id: m ? m.buyer_id : null,
-                  buyer_name: m ? m.buyer_name : null
-                };
-              });
-              resolve(data);
-            }
+      getActiveWithMedishopCodes(this.gofrugalDb, this.mainDb)
+        .then((rows) => {
+          const codes = rows.map((r) => String(r.MDM_DIST_CODE));
+          return this._getBuyerMapByDistCodes(codes).then((buyerByCode) =>
+            this._attachBuyer(rows, buyerByCode)
           );
-        }
-      );
+        })
+        .then(resolve)
+        .catch((err) => {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "REPOSITORY.PRODUCT_DISTRIBUTORS",
+            code: "REPOSITORY.PRODUCT_DISTRIBUTORS.GET_ALL",
+            description: err.toString(),
+            category: "",
+            ref: {},
+          });
+          reject(err);
+        });
     });
   }
 
   getByCode(MDM_DIST_CODE) {
     return new Promise((resolve, reject) => {
       const code = String(MDM_DIST_CODE);
-      this.gofrugalDb.query(
-        `SELECT MDM_DIST_CODE, MDM_DIST_NAME, MDM_SHORT_NAME FROM ${GF_TABLE} WHERE MDM_DIST_CODE = ?`,
-        [code],
-        (err, rows) => {
-          if (err) return reject(err);
-          const dist = rows && rows[0] ? rows[0] : null;
+      resolveByMedishopDistCodes(this.gofrugalDb, this.mainDb, [code])
+        .then((map) => {
+          const dist = map[code];
           if (!dist) return resolve(null);
-
-          this.mainDb.query(
-            `SELECT pd.buyer_id, ne.employee_name AS buyer_name
-             FROM ${MAP_TABLE} pd
-             LEFT JOIN new_employee ne ON ne.employee_id = pd.buyer_id
-             WHERE pd.mdm_dist_code = ?`,
-            [code],
-            (err2, mapRows) => {
-              if (err2) return reject(err2);
-              const m = mapRows && mapRows[0] ? mapRows[0] : null;
-              resolve({
-                MDM_DIST_CODE: dist.MDM_DIST_CODE,
-                MDM_DIST_NAME: dist.MDM_DIST_NAME,
-                MDM_SHORT_NAME: dist.MDM_SHORT_NAME,
-                buyer_id: m ? m.buyer_id : null,
-                buyer_name: m ? m.buyer_name : null
-              });
-            }
-          );
-        }
-      );
+          return this._getBuyerMapByDistCodes([code]).then((buyerByCode) => {
+            const buyer = buyerByCode[code];
+            resolve({
+              MDM_DIST_CODE: dist.MDM_DIST_CODE,
+              CID: dist.CID,
+              MDM_DIST_NAME: dist.MDM_DIST_NAME,
+              MDM_SHORT_NAME: dist.MDM_SHORT_NAME,
+              buyer_id: buyer ? buyer.buyer_id : null,
+              buyer_name: buyer ? buyer.buyer_name : null,
+            });
+          });
+        })
+        .catch(reject);
     });
   }
 
   /**
    * Insert or update buyer mapping for a distributor code (main DB).
+   * mdm_dist_code is the medishop MDM_DIST_CODE.
    */
   upsertBuyerMap(MDM_DIST_CODE, buyer_id) {
     return new Promise((resolve, reject) => {
@@ -121,7 +126,7 @@ class ProductDistributorsRepository {
               code: "REPOSITORY.PRODUCT_DISTRIBUTORS.UPSERT_BUYER_MAP",
               description: err.toString(),
               category: "",
-              ref: {}
+              ref: {},
             });
             return reject(err);
           }
@@ -162,7 +167,7 @@ class ProductDistributorsRepository {
               code: "REPOSITORY.PRODUCT_DISTRIBUTORS.BULK_UPSERT_BUYER_MAP",
               description: err.toString(),
               category: "",
-              ref: {}
+              ref: {},
             });
             return reject(err);
           }
@@ -235,7 +240,7 @@ class ProductDistributorsRepository {
               code: "REPOSITORY.PRODUCT_DISTRIBUTORS.DELETE_MAP",
               description: mapErr.toString(),
               category: "",
-              ref: {}
+              ref: {},
             });
             return reject(mapErr);
           }
@@ -250,7 +255,7 @@ class ProductDistributorsRepository {
                   code: "REPOSITORY.PRODUCT_DISTRIBUTORS.DELETE",
                   description: err.toString(),
                   category: "",
-                  ref: {}
+                  ref: {},
                 });
                 return reject(err);
               }

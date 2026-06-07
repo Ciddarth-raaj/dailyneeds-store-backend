@@ -1,9 +1,9 @@
 const logger = require("../utils/logger");
+const { resolveByMedishopDistCodes } = require("./lib/distributor_master_lookup");
 
 const TABLE = "purchase_acknowledgement";
 const TABLE_INVOICE = "purchase_acknowledgement_invoice";
 const TABLE_IMPORTED = "purchase_acknowledgement_imported";
-const DIST_MAST = "medishopdb_MED_DISTRIBUTOR_MAST";
 const GOFRUGAL_MRC_MEMO = "medishopdb_med_mrc_memo";
 
 function _normalizeMemoSno(mmm_sno) {
@@ -89,23 +89,16 @@ class PurchaseAcknowledgementRepository {
   }
 
   _getDistributorNameMap(distCodes) {
-    if (!distCodes || distCodes.length === 0) return Promise.resolve({});
-    const codes = [...new Set(distCodes.map((c) => String(c)).filter(Boolean))];
-    if (codes.length === 0) return Promise.resolve({});
-    return new Promise((resolve, reject) => {
-      const placeholders = codes.map(() => "?").join(",");
-      this.dbGofrugal.query(
-        `SELECT MDM_DIST_CODE, MDM_DIST_NAME FROM ${DIST_MAST} WHERE MDM_DIST_CODE IN (${placeholders})`,
-        codes,
-        (err, rows) => {
-          if (err) return reject(err);
-          const map = {};
-          (rows || []).forEach((r) => {
-            map[String(r.MDM_DIST_CODE)] = r.MDM_DIST_NAME;
-          });
-          resolve(map);
-        }
-      );
+    return resolveByMedishopDistCodes(
+      this.dbGofrugal,
+      this.db,
+      distCodes
+    ).then((map) => {
+      const nameMap = {};
+      Object.keys(map).forEach((code) => {
+        nameMap[code] = map[code]?.MDM_DIST_NAME ?? null;
+      });
+      return nameMap;
     });
   }
 
