@@ -63,6 +63,7 @@ const SYNCED_PRODUCT_COLUMNS = [
   "buyer_name",
   "distributor_id",
   "de_manufacturer_name",
+  "de_bill_count_level",
 ];
 
 class Synker {
@@ -736,6 +737,11 @@ class Synker {
             ? String(product.distributor).trim()
             : null,
         de_manufacturer_name: product.manufacturer_name ?? null,
+        de_bill_count_level:
+          product.bill_count_level != null &&
+          String(product.bill_count_level).trim() !== ""
+            ? String(product.bill_count_level).trim()
+            : null,
       });
     }
 

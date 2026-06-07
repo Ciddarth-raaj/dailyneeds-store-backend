@@ -22,8 +22,6 @@ const ITEMS_SELECT_SQL = `SELECT shi.stock_holding_item_id,
                 shi.updated_at,
                 p.de_name AS product_name,
                 p.de_name,
-                p.de_buyer_name,
-                p.buyer_name,
                 p.repln_mode AS purchase_type,
                 p.department_id,
                 p.category_id,
@@ -42,11 +40,11 @@ const ITEMS_SELECT_SQL = `SELECT shi.stock_holding_item_id,
                   ORDER BY pi.priority ASC, pi.image_id ASC
                   LIMIT 1
                 ) AS image_url,
-                p.distributor_id,
                 pdm.mdm_dist_name AS distributor_master_name,
                 COALESCE(pdm.mdm_dist_name, p.de_distributor) AS distributor_name,
-                pd_map.buyer_id,
-                ne.employee_name AS buyer_name
+                COALESCE(pd_map_cid.buyer_id, pd_map_code.buyer_id) AS buyer_id,
+                ne.employee_name AS buyer_name,
+                p.de_bill_count_level AS chain_bill_count_level
          FROM stock_holding_items shi
          LEFT JOIN product_table p ON shi.product_id = p.product_id
          LEFT JOIN product_department pd_dept ON p.department_id = pd_dept.department_id
@@ -54,8 +52,13 @@ const ITEMS_SELECT_SQL = `SELECT shi.stock_holding_item_id,
          LEFT JOIN subcategories sub ON p.subcategory_id = sub.category_id
          LEFT JOIN outlets o ON shi.outlet_id = o.outlet_id
          LEFT JOIN product_distributor_master pdm ON p.distributor_id = pdm.cid
-         LEFT JOIN product_distributor pd_map ON pd_map.cid = p.distributor_id
-         LEFT JOIN new_employee ne ON ne.employee_id = pd_map.buyer_id`;
+         LEFT JOIN product_distributor pd_map_cid ON pd_map_cid.cid = p.distributor_id
+         LEFT JOIN product_distributor pd_map_code
+           ON pd_map_cid.cid IS NULL
+          AND pdm.mdm_dist_code IS NOT NULL
+          AND TRIM(pd_map_code.mdm_dist_code) = TRIM(pdm.mdm_dist_code)
+         LEFT JOIN new_employee ne
+           ON ne.employee_id = COALESCE(pd_map_cid.buyer_id, pd_map_code.buyer_id)`;
 
 function mapItemRowSlim(item) {
   return {
@@ -71,7 +74,7 @@ function mapItemRowSlim(item) {
     stock_duration: item.stock_duration,
     holding_days: null,
     status: item.status,
-    chain_bill_count_level: null,
+    chain_bill_count_level: item.chain_bill_count_level ?? null,
     supplier_name: item.supplier_name ?? null,
     distributor_name: item.distributor_name ?? null,
     created_at: item.created_at,
@@ -103,7 +106,7 @@ function mapItemRow(item) {
           product_id: item.product_id,
           de_name: item.de_name ?? null,
           image_url: item.image_url ?? null,
-          de_buyer_name: item.de_buyer_name ?? item.buyer_name ?? null,
+          de_buyer_name: slim.buyer_name ?? null,
         }
       : null,
     branch: item.outlet_id
