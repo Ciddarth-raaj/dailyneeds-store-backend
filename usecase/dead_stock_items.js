@@ -9,41 +9,6 @@ const TYPE_TO_RESPONSE_KEY = {
 
 const EMPTY_BUCKET = () => ({ stock: 0, stock_value: 0 });
 
-function normalizeDistName(name) {
-  if (name == null) {
-    return "";
-  }
-  return String(name).trim().toLowerCase();
-}
-
-/**
- * Maps normalized distributor name (MDM_DIST_NAME / MDM_SHORT_NAME) to buyer_name
- * from product_distributor + new_employee (via product distributors usecase).
- */
-function buildBuyerNameByDistributorName(distributors) {
-  const byName = new Map();
-  for (const d of distributors || []) {
-    const buyerName = d.buyer_name ?? null;
-    const distName = normalizeDistName(d.MDM_DIST_NAME);
-    if (distName && !byName.has(distName)) {
-      byName.set(distName, buyerName);
-    }
-    const shortName = normalizeDistName(d.MDM_SHORT_NAME);
-    if (shortName && !byName.has(shortName)) {
-      byName.set(shortName, buyerName);
-    }
-  }
-  return byName;
-}
-
-function resolveBuyerName(deDistributor, buyerByDistributorName) {
-  const key = normalizeDistName(deDistributor);
-  if (!key || !buyerByDistributorName.has(key)) {
-    return null;
-  }
-  return buyerByDistributorName.get(key);
-}
-
 function msaNameToDbType(msaName) {
   const n = String(msaName).trim().toLowerCase();
   if (n === "30 days") return "thirty-days";
@@ -54,17 +19,12 @@ function msaNameToDbType(msaName) {
 }
 
 class DeadStockItemsUsecase {
-  constructor(deadStockItemsRepo, productDistributorsUsecase) {
+  constructor(deadStockItemsRepo) {
     this.deadStockItemsRepo = deadStockItemsRepo;
-    this.productDistributorsUsecase = productDistributorsUsecase;
   }
 
   async listForClient() {
-    const [rows, distributors] = await Promise.all([
-      this.deadStockItemsRepo.listAggregatedByProductOutletType(),
-      this.productDistributorsUsecase.getAll(),
-    ]);
-    const buyerByDistributorName = buildBuyerNameByDistributorName(distributors);
+    const rows = await this.deadStockItemsRepo.listAggregatedByProductOutletType();
     const byKey = new Map();
 
     for (const row of rows) {
@@ -75,8 +35,8 @@ class DeadStockItemsUsecase {
           outlet_id: row.outlet_id,
           outlet_name: row.outlet_name,
           de_name: row.de_name,
-          de_distributor: row.de_distributor,
-          buyer_name: null,
+          de_distributor: row.de_distributor ?? null,
+          buyer_name: row.buyer_name ?? null,
           department_id: row.department_id,
           department_name: row.department_name,
           thirty_days: EMPTY_BUCKET(),
@@ -95,6 +55,9 @@ class DeadStockItemsUsecase {
       if (row.de_distributor != null && entry.de_distributor == null) {
         entry.de_distributor = row.de_distributor;
       }
+      if (row.buyer_name != null && entry.buyer_name == null) {
+        entry.buyer_name = row.buyer_name;
+      }
       if (row.department_id != null && entry.department_id == null) {
         entry.department_id = row.department_id;
       }
@@ -110,12 +73,6 @@ class DeadStockItemsUsecase {
       const bucket = entry[respKey];
       bucket.stock += Number.isFinite(st) ? st : 0;
       bucket.stock_value += Number.isFinite(sv) ? sv : 0;
-    }
-
-    for (const entry of byKey.values()) {
-      if (entry.de_distributor != null) {
-        entry.buyer_name = resolveBuyerName(entry.de_distributor, buyerByDistributorName);
-      }
     }
 
     return { code: 200, data: [...byKey.values()] };
@@ -206,9 +163,8 @@ class DeadStockItemsUsecase {
       throw err;
     }
   }
-
 }
 
-module.exports = (deadStockItemsRepo, productDistributorsUsecase) => {
-  return new DeadStockItemsUsecase(deadStockItemsRepo, productDistributorsUsecase);
+module.exports = (deadStockItemsRepo) => {
+  return new DeadStockItemsUsecase(deadStockItemsRepo);
 };

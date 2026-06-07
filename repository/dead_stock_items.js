@@ -16,7 +16,8 @@ class DeadStockItemsRepository {
                 dsi.outlet_id,
                 MAX(o.outlet_name) AS outlet_name,
                 MAX(pt.de_name) AS de_name,
-                MAX(pt.de_distributor) AS de_distributor,
+                MAX(pdm.mdm_dist_name) AS de_distributor,
+                MAX(ne.employee_name) AS buyer_name,
                 MAX(pt.department_id) AS department_id,
                 MAX(d.department_name) AS department_name,
                 dsi.\`type\`,
@@ -25,6 +26,9 @@ class DeadStockItemsRepository {
          FROM \`${TABLE}\` dsi
          LEFT JOIN outlets o ON o.outlet_id = dsi.outlet_id
          LEFT JOIN product_table pt ON pt.product_id = dsi.product_id
+         LEFT JOIN product_distributor_master pdm ON pt.distributor_id = pdm.cid
+         LEFT JOIN product_distributor pd_map ON pd_map.cid = pt.distributor_id
+         LEFT JOIN new_employee ne ON ne.employee_id = pd_map.buyer_id
          LEFT JOIN product_department d ON d.department_id = pt.department_id
          GROUP BY dsi.product_id, dsi.outlet_id, dsi.\`type\`
          ORDER BY dsi.product_id, dsi.outlet_id, dsi.\`type\``,
