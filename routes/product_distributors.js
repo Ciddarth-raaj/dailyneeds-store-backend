@@ -10,9 +10,7 @@ class ProductDistributorsRoutes {
 
   init() {
     const upsertSchema = Joi.object({
-      MDM_DIST_CODE: Joi.alternatives()
-        .try(Joi.string(), Joi.number())
-        .required(),
+      CID: Joi.string().trim().min(1).required(),
       buyer_id: Joi.number().integer().allow(null).optional(),
     });
 
@@ -121,12 +119,10 @@ class ProductDistributorsRoutes {
       res.end();
     });
 
-    router.get("/:MDM_DIST_CODE", async (req, res) => {
+    router.get("/:cid", async (req, res) => {
       try {
-        const { MDM_DIST_CODE } = req.params;
-        const row = await this.productDistributorsUsecase.getByCode(
-          MDM_DIST_CODE
-        );
+        const { cid } = req.params;
+        const row = await this.productDistributorsUsecase.getByCid(cid);
         if (!row) {
           res.status(404).json({ code: 404, msg: "Distributor not found" });
           res.end();
@@ -139,12 +135,10 @@ class ProductDistributorsRoutes {
       res.end();
     });
 
-    router.delete("/:MDM_DIST_CODE", async (req, res) => {
+    router.delete("/:cid", async (req, res) => {
       try {
-        const { MDM_DIST_CODE } = req.params;
-        const result = await this.productDistributorsUsecase.delete(
-          MDM_DIST_CODE
-        );
+        const { cid } = req.params;
+        const result = await this.productDistributorsUsecase.delete(cid);
         res.json(result);
       } catch (err) {
         respondError(res, err);

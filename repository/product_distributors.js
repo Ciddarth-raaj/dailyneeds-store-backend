@@ -1,10 +1,6 @@
 const logger = require("../utils/logger");
-const {
-  GF_TABLE,
-  resolveByMedishopDistCodes,
-  getActiveWithMedishopCodes,
-} = require("./lib/distributor_master_lookup");
 
+const GF_TABLE = "medishopdb_MED_DISTRIBUTOR_MAST";
 const MAP_TABLE = "product_distributor";
 const MASTER_TABLE = "product_distributor_master";
 
@@ -14,173 +10,251 @@ class ProductDistributorsRepository {
     this.mainDb = mainDb;
   }
 
-  _getBuyerMapByDistCodes(distCodes) {
-    return new Promise((resolve, reject) => {
-      const codes = [
-        ...new Set(
-          (distCodes || [])
-            .map((c) => (c != null && c !== "" ? String(c) : null))
-            .filter(Boolean)
-        ),
-      ];
-      if (codes.length === 0) return resolve({});
+  _formatRow(row, medishopCode = null) {
+    return {
+      CID: row.cid,
+      MDM_DIST_CODE: medishopCode,
+      HQ_DIST_CODE: row.mdm_dist_code,
+      MDM_DIST_NAME: row.mdm_dist_name,
+      MDM_SHORT_NAME: row.mdm_short_name,
+      buyer_id: row.buyer_id ?? null,
+      buyer_name: row.buyer_name ?? null,
+    };
+  }
 
-      const placeholders = codes.map(() => "?").join(",");
-      this.mainDb.query(
-        `SELECT pd.mdm_dist_code, pd.buyer_id, ne.employee_name AS buyer_name
-         FROM ${MAP_TABLE} pd
-         LEFT JOIN new_employee ne ON ne.employee_id = pd.buyer_id
-         WHERE pd.mdm_dist_code IN (${placeholders})`,
-        codes,
-        (err, buyerRows) => {
+  _getMedishopDistCodeByCid(cid) {
+    return new Promise((resolve, reject) => {
+      const key = String(cid).trim();
+      this.gofrugalDb.query(
+        `SELECT MDM_DIST_CODE FROM ${GF_TABLE} WHERE TRIM(cid) = ? LIMIT 1`,
+        [key],
+        (err, rows) => {
           if (err) return reject(err);
-          const byCode = {};
-          (buyerRows || []).forEach((b) => {
-            byCode[String(b.mdm_dist_code)] = b;
-          });
-          resolve(byCode);
+          const code =
+            rows && rows[0] && rows[0].MDM_DIST_CODE != null
+              ? String(rows[0].MDM_DIST_CODE)
+              : null;
+          resolve(code);
         }
       );
     });
   }
 
-  _attachBuyer(rows, buyerByCode) {
-    return rows.map((row) => {
-      const code = String(row.MDM_DIST_CODE);
-      const buyer = buyerByCode[code];
-      return {
-        ...row,
-        buyer_id: buyer ? buyer.buyer_id : null,
-        buyer_name: buyer ? buyer.buyer_name : null,
-      };
+  _getMedishopCodesByCids(cids) {
+    return new Promise((resolve, reject) => {
+      const keys = [
+        ...new Set(
+          (cids || [])
+            .map((c) => (c != null ? String(c).trim() : ""))
+            .filter(Boolean)
+        ),
+      ];
+      if (keys.length === 0) return resolve({});
+
+      const placeholders = keys.map(() => "?").join(",");
+      this.gofrugalDb.query(
+        `SELECT MDM_DIST_CODE, cid FROM ${GF_TABLE} WHERE TRIM(cid) IN (${placeholders})`,
+        keys,
+        (err, rows) => {
+          if (err) return reject(err);
+          const map = {};
+          (rows || []).forEach((r) => {
+            const cid = r.cid != null ? String(r.cid).trim() : "";
+            if (!cid || map[cid]) return;
+            map[cid] = String(r.MDM_DIST_CODE);
+          });
+          resolve(map);
+        }
+      );
+    });
+  }
+
+  _getBuyerMapByCids(cids) {
+    return new Promise((resolve, reject) => {
+      const keys = [
+        ...new Set(
+          (cids || [])
+            .map((c) => (c != null ? String(c).trim() : ""))
+            .filter(Boolean)
+        ),
+      ];
+      if (keys.length === 0) return resolve({});
+
+      const placeholders = keys.map(() => "?").join(",");
+      this.mainDb.query(
+        `SELECT pd.cid, pd.buyer_id, ne.employee_name AS buyer_name
+         FROM ${MAP_TABLE} pd
+         LEFT JOIN new_employee ne ON ne.employee_id = pd.buyer_id
+         WHERE pd.cid IN (${placeholders})`,
+        keys,
+        (err, rows) => {
+          if (err) return reject(err);
+          const map = {};
+          (rows || []).forEach((b) => {
+            const cid = b.cid != null ? String(b.cid).trim() : "";
+            if (cid) map[cid] = b;
+          });
+          resolve(map);
+        }
+      );
     });
   }
 
   /**
-   * Active distributors: master details via cid, medishop MDM_DIST_CODE for external keys.
+   * All distributors from product_distributor_master with buyer map via cid.
+   * MDM_DIST_CODE is the medishop code (for purchase ack/return); HQ_DIST_CODE is from master import.
    */
   getAll() {
     return new Promise((resolve, reject) => {
-      getActiveWithMedishopCodes(this.gofrugalDb, this.mainDb)
-        .then((rows) => {
-          const codes = rows.map((r) => String(r.MDM_DIST_CODE));
-          return this._getBuyerMapByDistCodes(codes).then((buyerByCode) =>
-            this._attachBuyer(rows, buyerByCode)
-          );
-        })
-        .then(resolve)
-        .catch((err) => {
-          logger.Log({
-            level: logger.LEVEL.ERROR,
-            component: "REPOSITORY.PRODUCT_DISTRIBUTORS",
-            code: "REPOSITORY.PRODUCT_DISTRIBUTORS.GET_ALL",
-            description: err.toString(),
-            category: "",
-            ref: {},
-          });
-          reject(err);
-        });
-    });
-  }
-
-  getByCode(MDM_DIST_CODE) {
-    return new Promise((resolve, reject) => {
-      const code = String(MDM_DIST_CODE);
-      resolveByMedishopDistCodes(this.gofrugalDb, this.mainDb, [code])
-        .then((map) => {
-          const dist = map[code];
-          if (!dist) return resolve(null);
-          return this._getBuyerMapByDistCodes([code]).then((buyerByCode) => {
-            const buyer = buyerByCode[code];
-            resolve({
-              MDM_DIST_CODE: dist.MDM_DIST_CODE,
-              CID: dist.CID,
-              MDM_DIST_NAME: dist.MDM_DIST_NAME,
-              MDM_SHORT_NAME: dist.MDM_SHORT_NAME,
-              buyer_id: buyer ? buyer.buyer_id : null,
-              buyer_name: buyer ? buyer.buyer_name : null,
-            });
-          });
-        })
-        .catch(reject);
-    });
-  }
-
-  /**
-   * Insert or update buyer mapping for a distributor code (main DB).
-   * mdm_dist_code is the medishop MDM_DIST_CODE.
-   */
-  upsertBuyerMap(MDM_DIST_CODE, buyer_id) {
-    return new Promise((resolve, reject) => {
-      const code = String(MDM_DIST_CODE);
-      const bid = buyer_id == null ? null : buyer_id;
       this.mainDb.query(
-        `INSERT INTO ${MAP_TABLE} (mdm_dist_code, buyer_id) VALUES (?, ?)
-         ON DUPLICATE KEY UPDATE buyer_id = VALUES(buyer_id), updated_at = CURRENT_TIMESTAMP`,
-        [code, bid],
-        (err) => {
+        `SELECT pdm.cid, pdm.mdm_dist_code, pdm.mdm_dist_name, pdm.mdm_short_name
+         FROM ${MASTER_TABLE} pdm
+         ORDER BY pdm.mdm_dist_name`,
+        (err, masterRows) => {
           if (err) {
             logger.Log({
               level: logger.LEVEL.ERROR,
               component: "REPOSITORY.PRODUCT_DISTRIBUTORS",
-              code: "REPOSITORY.PRODUCT_DISTRIBUTORS.UPSERT_BUYER_MAP",
+              code: "REPOSITORY.PRODUCT_DISTRIBUTORS.GET_ALL",
               description: err.toString(),
               category: "",
               ref: {},
             });
             return reject(err);
           }
-          resolve({ code: 200, MDM_DIST_CODE: code, buyer_id: bid });
+
+          const rows = masterRows || [];
+          const cids = rows
+            .map((r) => (r.cid != null ? String(r.cid).trim() : ""))
+            .filter(Boolean);
+
+          if (cids.length === 0) return resolve([]);
+
+          Promise.all([
+            this._getBuyerMapByCids(cids),
+            this._getMedishopCodesByCids(cids),
+          ])
+            .then(([buyerByCid, medishopByCid]) => {
+              const data = rows.map((row) => {
+                const cid = String(row.cid).trim();
+                const buyer = buyerByCid[cid];
+                return this._formatRow(
+                  {
+                    ...row,
+                    buyer_id: buyer ? buyer.buyer_id : null,
+                    buyer_name: buyer ? buyer.buyer_name : null,
+                  },
+                  medishopByCid[cid] ?? null
+                );
+              });
+              resolve(data);
+            })
+            .catch(reject);
+        }
+      );
+    });
+  }
+
+  getByCid(cid) {
+    const key = String(cid).trim();
+    return new Promise((resolve, reject) => {
+      this.mainDb.query(
+        `SELECT pdm.cid, pdm.mdm_dist_code, pdm.mdm_dist_name, pdm.mdm_short_name,
+                pd.buyer_id, ne.employee_name AS buyer_name
+         FROM ${MASTER_TABLE} pdm
+         LEFT JOIN ${MAP_TABLE} pd ON pd.cid = pdm.cid
+         LEFT JOIN new_employee ne ON ne.employee_id = pd.buyer_id
+         WHERE pdm.cid = ?`,
+        [key],
+        (err, rows) => {
+          if (err) return reject(err);
+          const row = rows && rows[0] ? rows[0] : null;
+          if (!row) return resolve(null);
+
+          this._getMedishopDistCodeByCid(key)
+            .then((medishopCode) => resolve(this._formatRow(row, medishopCode)))
+            .catch(reject);
         }
       );
     });
   }
 
   /**
-   * Bulk insert/update buyer mappings. Later entries win if MDM_DIST_CODE repeats.
+   * Insert or update buyer mapping keyed by cid.
    */
+  upsertBuyerMap(cid, buyer_id) {
+    const key = String(cid).trim();
+    const bid = buyer_id == null ? null : buyer_id;
+
+    return new Promise((resolve, reject) => {
+      this.mainDb.query(
+        `UPDATE ${MAP_TABLE}
+         SET buyer_id = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE cid = ?`,
+        [bid, key],
+        (updateErr, updateRes) => {
+          if (updateErr) return reject(updateErr);
+          if (updateRes.affectedRows > 0) {
+            return resolve({ code: 200, CID: key, buyer_id: bid });
+          }
+
+          this._getMedishopDistCodeByCid(key)
+            .then((medishopCode) => {
+              if (!medishopCode) {
+                const err = new Error(
+                  `No medishop distributor found for CID: ${key}`
+                );
+                err.statusCode = 404;
+                throw err;
+              }
+
+              return new Promise((res, rej) => {
+                this.mainDb.query(
+                  `INSERT INTO ${MAP_TABLE} (mdm_dist_code, cid, buyer_id) VALUES (?, ?, ?)
+                   ON DUPLICATE KEY UPDATE
+                    cid = VALUES(cid),
+                    buyer_id = VALUES(buyer_id),
+                    updated_at = CURRENT_TIMESTAMP`,
+                  [medishopCode, key, bid],
+                  (insertErr) => (insertErr ? rej(insertErr) : res())
+                );
+              });
+            })
+            .then(() => resolve({ code: 200, CID: key, buyer_id: bid }))
+            .catch(reject);
+        }
+      );
+    });
+  }
+
   bulkUpsertBuyerMap(items) {
     return new Promise((resolve, reject) => {
       if (!items || items.length === 0) {
         return resolve({ code: 200, count: 0 });
       }
 
-      const byCode = new Map();
-      items.forEach((row) => {
-        const code = String(row.MDM_DIST_CODE);
-        const bid = row.buyer_id == null ? null : row.buyer_id;
-        byCode.set(code, bid);
-      });
-      const pairs = Array.from(byCode.entries());
-      const placeholders = pairs.map(() => "(?, ?)").join(", ");
-      const values = pairs.flatMap(([code, bid]) => [code, bid]);
+      (async () => {
+        try {
+          const byCid = new Map();
+          items.forEach((row) => {
+            const key = String(row.CID).trim();
+            const bid = row.buyer_id == null ? null : row.buyer_id;
+            byCid.set(key, bid);
+          });
 
-      this.mainDb.query(
-        `INSERT INTO ${MAP_TABLE} (mdm_dist_code, buyer_id) VALUES ${placeholders}
-         ON DUPLICATE KEY UPDATE buyer_id = VALUES(buyer_id), updated_at = CURRENT_TIMESTAMP`,
-        values,
-        (err) => {
-          if (err) {
-            logger.Log({
-              level: logger.LEVEL.ERROR,
-              component: "REPOSITORY.PRODUCT_DISTRIBUTORS",
-              code: "REPOSITORY.PRODUCT_DISTRIBUTORS.BULK_UPSERT_BUYER_MAP",
-              description: err.toString(),
-              category: "",
-              ref: {},
-            });
-            return reject(err);
+          let count = 0;
+          for (const [key, bid] of byCid.entries()) {
+            await this.upsertBuyerMap(key, bid);
+            count++;
           }
-          resolve({ code: 200, count: pairs.length });
+          resolve({ code: 200, count });
+        } catch (err) {
+          reject(err);
         }
-      );
+      })();
     });
   }
 
-  /**
-   * Bulk insert/update HQ distributor master rows (main DB).
-   * Expects one row per cid (merged upstream).
-   */
   bulkHqImport(items) {
     return new Promise((resolve, reject) => {
       if (!items || items.length === 0) {
@@ -226,44 +300,30 @@ class ProductDistributorsRepository {
     });
   }
 
-  delete(MDM_DIST_CODE) {
-    return new Promise((resolve, reject) => {
-      const code = String(MDM_DIST_CODE);
-      this.mainDb.query(
-        `DELETE FROM ${MAP_TABLE} WHERE mdm_dist_code = ?`,
-        [code],
-        (mapErr) => {
-          if (mapErr) {
+  delete(cid) {
+    const key = String(cid).trim();
+    return this._getMedishopDistCodeByCid(key).then((medishopCode) => {
+      const sql = medishopCode
+        ? `DELETE FROM ${MAP_TABLE} WHERE cid = ? OR mdm_dist_code = ?`
+        : `DELETE FROM ${MAP_TABLE} WHERE cid = ?`;
+      const params = medishopCode ? [key, medishopCode] : [key];
+
+      return new Promise((resolve, reject) => {
+        this.mainDb.query(sql, params, (err, res) => {
+          if (err) {
             logger.Log({
               level: logger.LEVEL.ERROR,
               component: "REPOSITORY.PRODUCT_DISTRIBUTORS",
-              code: "REPOSITORY.PRODUCT_DISTRIBUTORS.DELETE_MAP",
-              description: mapErr.toString(),
+              code: "REPOSITORY.PRODUCT_DISTRIBUTORS.DELETE",
+              description: err.toString(),
               category: "",
               ref: {},
             });
-            return reject(mapErr);
+            return reject(err);
           }
-          this.gofrugalDb.query(
-            `DELETE FROM ${GF_TABLE} WHERE MDM_DIST_CODE = ?`,
-            [code],
-            (err, res) => {
-              if (err) {
-                logger.Log({
-                  level: logger.LEVEL.ERROR,
-                  component: "REPOSITORY.PRODUCT_DISTRIBUTORS",
-                  code: "REPOSITORY.PRODUCT_DISTRIBUTORS.DELETE",
-                  description: err.toString(),
-                  category: "",
-                  ref: {},
-                });
-                return reject(err);
-              }
-              resolve({ code: 200, affectedRows: res.affectedRows });
-            }
-          );
-        }
-      );
+          resolve({ code: 200, affectedRows: res.affectedRows });
+        });
+      });
     });
   }
 }

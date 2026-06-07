@@ -21,14 +21,14 @@ class ProductDistributorsUsecase {
     }
   }
 
-  async getByCode(MDM_DIST_CODE) {
+  async getByCid(cid) {
     try {
-      return await this.productDistributorsRepo.getByCode(MDM_DIST_CODE);
+      return await this.productDistributorsRepo.getByCid(cid);
     } catch (err) {
       logger.Log({
         level: logger.LEVEL.ERROR,
         component: "USECASE.PRODUCT_DISTRIBUTORS",
-        code: "USECASE.PRODUCT_DISTRIBUTORS.GET_BY_CODE",
+        code: "USECASE.PRODUCT_DISTRIBUTORS.GET_BY_CID",
         description: err.toString(),
         category: "",
         ref: {}
@@ -37,9 +37,9 @@ class ProductDistributorsUsecase {
     }
   }
 
-  async delete(MDM_DIST_CODE) {
+  async delete(cid) {
     try {
-      return await this.productDistributorsRepo.delete(MDM_DIST_CODE);
+      return await this.productDistributorsRepo.delete(cid);
     } catch (err) {
       logger.Log({
         level: logger.LEVEL.ERROR,
@@ -56,7 +56,7 @@ class ProductDistributorsUsecase {
   async upsertBuyerMap(payload) {
     try {
       return await this.productDistributorsRepo.upsertBuyerMap(
-        payload.MDM_DIST_CODE,
+        payload.CID,
         payload.buyer_id
       );
     } catch (err) {
