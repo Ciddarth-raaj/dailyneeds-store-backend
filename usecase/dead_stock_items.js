@@ -1,13 +1,38 @@
 const logger = require("../utils/logger");
 
-const TYPE_TO_RESPONSE_KEY = {
-  "thirty-days": "thirty_days",
-  "ninety-days": "ninety_days",
-  "one-twenty-days": "one_twenty_days",
-  "more-than-one-twenty-days": "more_thanone_twenty_days",
-};
+function toNum(v) {
+  const n = Number(v ?? 0);
+  return Number.isFinite(n) ? n : 0;
+}
 
-const EMPTY_BUCKET = () => ({ stock: 0, stock_value: 0 });
+function mapPivotedRow(row) {
+  return {
+    product_id: row.product_id,
+    outlet_id: row.outlet_id,
+    outlet_name: row.outlet_name ?? null,
+    de_name: row.de_name ?? null,
+    de_distributor: row.de_distributor ?? null,
+    buyer_name: row.buyer_name ?? null,
+    department_id: row.department_id ?? null,
+    department_name: row.department_name ?? null,
+    thirty_days: {
+      stock: toNum(row.thirty_days_stock),
+      stock_value: toNum(row.thirty_days_stock_value),
+    },
+    ninety_days: {
+      stock: toNum(row.ninety_days_stock),
+      stock_value: toNum(row.ninety_days_stock_value),
+    },
+    one_twenty_days: {
+      stock: toNum(row.one_twenty_days_stock),
+      stock_value: toNum(row.one_twenty_days_stock_value),
+    },
+    more_thanone_twenty_days: {
+      stock: toNum(row.more_thanone_twenty_days_stock),
+      stock_value: toNum(row.more_thanone_twenty_days_stock_value),
+    },
+  };
+}
 
 function msaNameToDbType(msaName) {
   const n = String(msaName).trim().toLowerCase();
@@ -24,58 +49,12 @@ class DeadStockItemsUsecase {
   }
 
   async listForClient() {
-    const rows = await this.deadStockItemsRepo.listAggregatedByProductOutletType();
-    const byKey = new Map();
-
-    for (const row of rows) {
-      const key = `${row.product_id}|${row.outlet_id}`;
-      if (!byKey.has(key)) {
-        byKey.set(key, {
-          product_id: row.product_id,
-          outlet_id: row.outlet_id,
-          outlet_name: row.outlet_name,
-          de_name: row.de_name,
-          de_distributor: row.de_distributor ?? null,
-          buyer_name: row.buyer_name ?? null,
-          department_id: row.department_id,
-          department_name: row.department_name,
-          thirty_days: EMPTY_BUCKET(),
-          ninety_days: EMPTY_BUCKET(),
-          one_twenty_days: EMPTY_BUCKET(),
-          more_thanone_twenty_days: EMPTY_BUCKET(),
-        });
-      }
-      const entry = byKey.get(key);
-      if (row.outlet_name != null && entry.outlet_name == null) {
-        entry.outlet_name = row.outlet_name;
-      }
-      if (row.de_name != null && entry.de_name == null) {
-        entry.de_name = row.de_name;
-      }
-      if (row.de_distributor != null && entry.de_distributor == null) {
-        entry.de_distributor = row.de_distributor;
-      }
-      if (row.buyer_name != null && entry.buyer_name == null) {
-        entry.buyer_name = row.buyer_name;
-      }
-      if (row.department_id != null && entry.department_id == null) {
-        entry.department_id = row.department_id;
-      }
-      if (row.department_name != null && entry.department_name == null) {
-        entry.department_name = row.department_name;
-      }
-      const respKey = TYPE_TO_RESPONSE_KEY[row.type];
-      if (!respKey) {
-        continue;
-      }
-      const st = Number(row.stock);
-      const sv = Number(row.stock_value);
-      const bucket = entry[respKey];
-      bucket.stock += Number.isFinite(st) ? st : 0;
-      bucket.stock_value += Number.isFinite(sv) ? sv : 0;
+    const rows = await this.deadStockItemsRepo.listPivotedForClient();
+    const data = new Array(rows.length);
+    for (let i = 0; i < rows.length; i++) {
+      data[i] = mapPivotedRow(rows[i]);
     }
-
-    return { code: 200, data: [...byKey.values()] };
+    return { code: 200, data };
   }
 
   /**

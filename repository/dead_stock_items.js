@@ -1,52 +1,62 @@
 const TABLE = "dead_stock_items";
 
+const ENRICH_SNAPSHOT_SQL = `UPDATE dead_stock_items dsi
+INNER JOIN product_table pt ON dsi.product_id = pt.product_id
+LEFT JOIN outlets o ON dsi.outlet_id = o.outlet_id
+LEFT JOIN product_distributor_master pdm ON pt.distributor_id = pdm.cid
+LEFT JOIN product_distributor pd_map ON pd_map.cid = pt.distributor_id
+LEFT JOIN new_employee ne ON ne.employee_id = pd_map.buyer_id
+LEFT JOIN product_department d ON pt.department_id = d.department_id
+SET
+  dsi.de_name = pt.de_name,
+  dsi.de_distributor = pdm.mdm_dist_name,
+  dsi.buyer_name = ne.employee_name,
+  dsi.outlet_name = o.outlet_name,
+  dsi.department_id = pt.department_id,
+  dsi.department_name = d.department_name`;
+
+const LIST_PIVOTED_SQL = `SELECT dsi.product_id,
+                dsi.outlet_id,
+                MAX(dsi.outlet_name) AS outlet_name,
+                MAX(dsi.de_name) AS de_name,
+                MAX(dsi.de_distributor) AS de_distributor,
+                MAX(dsi.buyer_name) AS buyer_name,
+                MAX(dsi.department_id) AS department_id,
+                MAX(dsi.department_name) AS department_name,
+                SUM(CASE WHEN dsi.\`type\` = 'thirty-days' THEN dsi.stock ELSE 0 END) AS thirty_days_stock,
+                SUM(CASE WHEN dsi.\`type\` = 'thirty-days' THEN dsi.stock_value ELSE 0 END) AS thirty_days_stock_value,
+                SUM(CASE WHEN dsi.\`type\` = 'ninety-days' THEN dsi.stock ELSE 0 END) AS ninety_days_stock,
+                SUM(CASE WHEN dsi.\`type\` = 'ninety-days' THEN dsi.stock_value ELSE 0 END) AS ninety_days_stock_value,
+                SUM(CASE WHEN dsi.\`type\` = 'one-twenty-days' THEN dsi.stock ELSE 0 END) AS one_twenty_days_stock,
+                SUM(CASE WHEN dsi.\`type\` = 'one-twenty-days' THEN dsi.stock_value ELSE 0 END) AS one_twenty_days_stock_value,
+                SUM(CASE WHEN dsi.\`type\` = 'more-than-one-twenty-days' THEN dsi.stock ELSE 0 END) AS more_thanone_twenty_days_stock,
+                SUM(CASE WHEN dsi.\`type\` = 'more-than-one-twenty-days' THEN dsi.stock_value ELSE 0 END) AS more_thanone_twenty_days_stock_value
+         FROM \`${TABLE}\` dsi
+         GROUP BY dsi.product_id, dsi.outlet_id`;
+
 class DeadStockItemsRepository {
   constructor(db) {
     this.db = db;
   }
 
-  /**
-   * Aggregated rows: one row per (product_id, outlet_id, type) with summed stock / stock_value.
-   * @returns {Promise<Array<{ product_id: number, outlet_id: number, outlet_name: string|null, type: string, stock: string, stock_value: string }>>}
-   */
-  listAggregatedByProductOutletType() {
+  enrichSnapshots() {
     return new Promise((resolve, reject) => {
-      this.db.query(
-        `SELECT dsi.product_id,
-                dsi.outlet_id,
-                MAX(o.outlet_name) AS outlet_name,
-                MAX(pt.de_name) AS de_name,
-                MAX(pdm.mdm_dist_name) AS de_distributor,
-                MAX(ne.employee_name) AS buyer_name,
-                MAX(pt.department_id) AS department_id,
-                MAX(d.department_name) AS department_name,
-                dsi.\`type\`,
-                SUM(dsi.stock) AS stock,
-                SUM(dsi.stock_value) AS stock_value
-         FROM \`${TABLE}\` dsi
-         LEFT JOIN outlets o ON o.outlet_id = dsi.outlet_id
-         LEFT JOIN product_table pt ON pt.product_id = dsi.product_id
-         LEFT JOIN product_distributor_master pdm ON pt.distributor_id = pdm.cid
-         LEFT JOIN product_distributor pd_map ON pd_map.cid = pt.distributor_id
-         LEFT JOIN new_employee ne ON ne.employee_id = pd_map.buyer_id
-         LEFT JOIN product_department d ON d.department_id = pt.department_id
-         GROUP BY dsi.product_id, dsi.outlet_id, dsi.\`type\`
-         ORDER BY dsi.product_id, dsi.outlet_id, dsi.\`type\``,
-        (err, rows) => {
-          if (err) {
-            reject(err);
-            return;
-          }
-          resolve(rows || []);
-        }
-      );
+      this.db.query(ENRICH_SNAPSHOT_SQL, [], (err, result) => {
+        if (err) reject(err);
+        else resolve(result);
+      });
     });
   }
 
-  /**
-   * Resolves which product/outlet ids exist. Missing ids are omitted (not an error).
-   * @returns {Promise<{ code: 200, validProductIds: Set<number>, validOutletIds: Set<number> }>}
-   */
+  listPivotedForClient() {
+    return new Promise((resolve, reject) => {
+      this.db.query(LIST_PIVOTED_SQL, [], (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows || []);
+      });
+    });
+  }
+
   resolveValidProductAndOutletIds(productIds, outletIds) {
     return new Promise((resolve, reject) => {
       const validProductIds = new Set();
@@ -127,7 +137,9 @@ class DeadStockItemsRepository {
               reject(errIns);
               return;
             }
-            resolve({ code: 200, inserted: rows.length });
+            this.enrichSnapshots()
+              .then(() => resolve({ code: 200, inserted: rows.length }))
+              .catch(reject);
           }
         );
       });
