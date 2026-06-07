@@ -1,4 +1,4 @@
-USE `dailyneeds-store`;
+USE `dnds_prod`;
 
 ALTER TABLE `product_distributor`
   DROP INDEX `idx_product_distributor_cid`,
