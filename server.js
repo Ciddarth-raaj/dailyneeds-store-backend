@@ -277,6 +277,9 @@ class Server {
       this.mysql.connection,
       this.mysqlGofrugal.connection
     );
+    this.stockHoldingReportRepo = require("./repository/stock_holding_report")(
+      this.mysql.connection
+    );
   }
 
   initUsecases() {
@@ -497,6 +500,9 @@ class Server {
     this.stockReceivedUsecase = require("./usecase/stock_received")(
       this.stockReceivedRepo
     );
+    this.stockHoldingReportUsecase = require("./usecase/stock_holding_report")(
+      this.stockHoldingReportRepo
+    );
     this.synker = require("./services/synker")(
       this.productUsecase,
       this.categoryUsecase,
@@ -677,6 +683,9 @@ class Server {
     const stockReceivedRouter = require("./routes/stock_received")(
       this.stockReceivedUsecase
     );
+    const stockHoldingReportRouter = require("./routes/stock_holding_report")(
+      this.stockHoldingReportUsecase
+    );
 
     app.use("/document", documentRouter.getRouter());
     app.use("/whatsapp", whatsappRouter.getRouter());
@@ -754,6 +763,7 @@ class Server {
     app.use("/product-sales", productSalesRouter.getRouter());
     app.use("/dead-stock-items", deadStockItemsRouter.getRouter());
     app.use("/stock-received", stockReceivedRouter.getRouter());
+    app.use("/stock-holding-report", stockHoldingReportRouter.getRouter());
   }
 
   initServices() {
