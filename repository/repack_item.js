@@ -47,10 +47,10 @@ class RepackItemRepository {
   getByItemId(item_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT rim.*, pt.product_id as item_id, pt.de_display_name, pt.gf_item_name, pt.measure 
+        `SELECT rim.*, pt.product_id as item_id, pt.de_display_name, pt.de_name, pt.measure 
          FROM repack_items_master rim
          RIGHT JOIN product_table pt ON pt.product_id = rim.item_id
-         WHERE rim.item_id = ? AND pt.de_preparation_type = 'R' AND pt.gf_status = 'R'`,
+         WHERE rim.item_id = ? AND pt.de_preparation_type = 'R'`,
         [item_id],
         (err, result) => {
           if (err) {
@@ -74,10 +74,10 @@ class RepackItemRepository {
   getAll(limit = 100, offset = 0) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT rim.*, pt.product_id as item_id, pt.de_display_name, pt.gf_item_name, pt.measure 
+        `SELECT rim.*, pt.product_id as item_id, pt.de_display_name, pt.de_name, pt.measure 
          FROM repack_items_master rim
          RIGHT JOIN product_table pt ON pt.product_id = rim.item_id
-         WHERE pt.de_preparation_type = 'R' AND pt.gf_status = 'R'
+         WHERE pt.de_preparation_type = 'R'
          ORDER BY rim.created_at DESC LIMIT ? OFFSET ?`,
         [limit, offset],
         (err, result) => {
@@ -193,7 +193,7 @@ class RepackItemRepository {
         `SELECT COUNT(*) as count 
          FROM repack_items_master rim
          RIGHT JOIN product_table pt ON pt.product_id = rim.item_id
-         WHERE pt.de_preparation_type = 'R' AND pt.gf_status = 'R'`,
+         WHERE pt.de_preparation_type = 'R'`,
         [],
         (err, result) => {
           if (err) {

@@ -16,7 +16,7 @@ class StockCheckerRepository {
         `SELECT sc.stock_checker_id, sc.product_id, sc.created_by, sc.created_at, sc.updated_at,
                 ne.employee_id AS created_by_employee_id, ne.employee_name AS created_by_employee_name,
                 cre_o.outlet_id AS creator_branch_outlet_id, cre_o.outlet_name AS creator_branch_outlet_name,
-                p.product_id AS product_product_id, p.de_display_name AS product_de_display_name, p.gf_item_name AS product_gf_item_name
+                p.product_id AS product_product_id, p.de_name AS product_de_name, p.de_display_name AS product_de_display_name
          FROM ${TABLE} sc
          LEFT JOIN new_employee ne ON ne.employee_id = sc.created_by
          LEFT JOIN outlets cre_o ON cre_o.outlet_id = ne.store_id
@@ -58,8 +58,8 @@ class StockCheckerRepository {
               r.product_product_id != null
                 ? {
                     product_id: r.product_product_id,
-                    de_display_name: r.product_de_display_name,
-                    gf_item_name: r.product_gf_item_name
+                    de_name: r.product_de_name,
+                    de_display_name: r.product_de_display_name
                   }
                 : null
           }));
@@ -86,7 +86,7 @@ class StockCheckerRepository {
         `SELECT sc.stock_checker_id, sc.product_id, sc.created_by, sc.created_at, sc.updated_at,
                 ne.employee_id AS created_by_employee_id, ne.employee_name AS created_by_employee_name,
                 cre_o.outlet_id AS creator_branch_outlet_id, cre_o.outlet_name AS creator_branch_outlet_name,
-                p.product_id AS product_product_id, p.de_display_name AS product_de_display_name, p.gf_item_name AS product_gf_item_name
+                p.product_id AS product_product_id, p.de_name AS product_de_name, p.de_display_name AS product_de_display_name
          FROM ${TABLE} sc
          LEFT JOIN new_employee ne ON ne.employee_id = sc.created_by
          LEFT JOIN outlets cre_o ON cre_o.outlet_id = ne.store_id
@@ -121,8 +121,8 @@ class StockCheckerRepository {
               r.product_product_id != null
                 ? {
                     product_id: r.product_product_id,
-                    de_display_name: r.product_de_display_name,
-                    gf_item_name: r.product_gf_item_name
+                    de_name: r.product_de_name,
+                    de_display_name: r.product_de_display_name
                   }
                 : null
           };
@@ -479,7 +479,7 @@ class StockCheckerRepository {
     return new Promise((resolve, reject) => {
       this.db.query(
         `SELECT sc.stock_checker_id, sc.product_id, sc.created_at,
-                p.gf_item_name AS product_gf_item_name, p.de_display_name AS product_de_display_name
+                p.de_name AS product_de_name, p.de_display_name AS product_de_display_name
          FROM ${TABLE} sc
          LEFT JOIN product_table p ON p.product_id = sc.product_id
          WHERE EXISTS (

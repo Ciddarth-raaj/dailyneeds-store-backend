@@ -23,19 +23,20 @@ const CRON_SYNTAX_EMPLOYEE = "0 7 * * *";
 const CRON_SYNTAX_CLEANING_PACKING = "0 9 * * *";
 
 // Columns on product_table that are updated by sync (for change detection). Excludes product_id.
+// gf_* columns are deprecated for application use; still synced from GoFrugal for legacy data.
 const SYNCED_PRODUCT_COLUMNS = [
   "variant",
   "variant_of",
-  "gf_item_name",
-  "gf_description",
-  "gf_detailed_description",
-  "gf_weight_grams",
-  "gf_applies_online",
-  "gf_item_product_type",
-  "gf_manufacturer",
-  "gf_food_type",
-  "gf_tax_id",
-  "gf_status",
+  "gf_item_name", // @deprecated use de_name
+  "gf_description", // @deprecated
+  "gf_detailed_description", // @deprecated
+  "gf_weight_grams", // @deprecated
+  "gf_applies_online", // @deprecated
+  "gf_item_product_type", // @deprecated
+  "gf_manufacturer", // @deprecated use de_distributor
+  "gf_food_type", // @deprecated
+  "gf_tax_id", // @deprecated
+  "gf_status", // @deprecated
   "de_distributor",
   "brand_id",
   "category_id",

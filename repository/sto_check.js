@@ -11,7 +11,7 @@ class StoCheckRepository {
     return new Promise((resolve, reject) => {
       this.db.query(
         `SELECT sc.dn_ref_no, sc.product_id, sc.file_qty, sc.created_at, sc.updated_at,
-                pt.gf_item_name AS product_name
+                pt.de_name AS product_name
          FROM \`${TABLE}\` sc
          LEFT JOIN product_table pt ON pt.product_id = sc.product_id
          ORDER BY sc.dn_ref_no DESC, sc.product_id ASC`,
@@ -38,7 +38,7 @@ class StoCheckRepository {
     return new Promise((resolve, reject) => {
       this.db.query(
         `SELECT sc.dn_ref_no, sc.product_id, sc.file_qty, sc.created_at, sc.updated_at,
-                pt.gf_item_name, pt.de_display_name
+                pt.de_name, pt.de_display_name
          FROM \`${TABLE}\` sc
          LEFT JOIN product_table pt ON pt.product_id = sc.product_id
          WHERE sc.dn_ref_no = ? ORDER BY sc.product_id ASC`,
@@ -65,7 +65,7 @@ class StoCheckRepository {
     return new Promise((resolve, reject) => {
       this.db.query(
         `SELECT sc.dn_ref_no, sc.product_id, sc.file_qty, sc.created_at, sc.updated_at,
-                pt.gf_item_name AS product_name, pt.de_display_name
+                pt.de_name AS product_name, pt.de_display_name
          FROM \`${TABLE}\` sc
          LEFT JOIN product_table pt ON pt.product_id = sc.product_id
          WHERE sc.dn_ref_no = ? AND sc.product_id = ?`,

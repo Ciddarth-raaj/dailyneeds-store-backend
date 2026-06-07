@@ -244,7 +244,7 @@ class PurchaseReturnRepository {
     return new Promise((resolve, reject) => {
       const placeholders = productIds.map(() => "?").join(",");
       this.db.query(
-        `SELECT product_id, gf_item_name, de_display_name FROM product_table WHERE product_id IN (${placeholders})`,
+        `SELECT product_id, de_name, de_display_name FROM product_table WHERE product_id IN (${placeholders})`,
         productIds,
         (err, rows) => {
           if (err) {
@@ -313,7 +313,7 @@ class PurchaseReturnRepository {
     return new Promise((resolve, reject) => {
       const placeholders = productIds.map(() => "?").join(",");
       this.db.query(
-        `SELECT pt.product_id, pt.gf_item_name, pt.de_display_name,
+        `SELECT pt.product_id, pt.de_name, pt.de_display_name,
                 pi.image_id, pi.image_url, pi.priority, pi.created_at AS img_created_at, pi.updated_at AS img_updated_at
          FROM product_table pt
          LEFT JOIN product_images pi ON pi.product_id = pt.product_id
@@ -338,7 +338,7 @@ class PurchaseReturnRepository {
             if (!byProduct[key]) {
               byProduct[key] = {
                 product_id: r.product_id,
-                gf_item_name: r.gf_item_name,
+                de_name: r.de_name,
                 de_display_name: r.de_display_name,
                 images: [],
                 image_url: null

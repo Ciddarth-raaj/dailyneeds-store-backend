@@ -24,7 +24,7 @@ class ProductOffersRepository {
     return new Promise((resolve, reject) => {
       this.db.query(
         `SELECT po.product_id, po.mrp, po.selling_price, po.opening_stock, po.stock_input, po.stock_output, po.is_active, po.created_at, po.updated_at,
-                pt.gf_item_name
+                pt.de_name
          FROM \`${TABLE}\` po
          LEFT JOIN product_table pt ON pt.product_id = po.product_id
          ORDER BY po.product_id ASC`,
@@ -44,7 +44,7 @@ class ProductOffersRepository {
     return new Promise((resolve, reject) => {
       this.db.query(
         `SELECT po.product_id, po.mrp, po.selling_price, po.opening_stock, po.stock_input, po.stock_output, po.is_active, po.created_at, po.updated_at,
-                pt.gf_item_name
+                pt.de_name
          FROM \`${TABLE}\` po
          LEFT JOIN product_table pt ON pt.product_id = po.product_id
          WHERE po.product_id = ?`,
@@ -68,7 +68,7 @@ class ProductOffersRepository {
       }
       const ph = product_ids.map(() => "?").join(", ");
       this.db.query(
-        `SELECT po.product_id, po.stock_input, po.opening_stock, po.stock_output, pt.gf_item_name
+        `SELECT po.product_id, po.stock_input, po.opening_stock, po.stock_output, pt.de_name
          FROM \`${TABLE}\` po
          LEFT JOIN product_table pt ON pt.product_id = po.product_id
          WHERE po.product_id IN (${ph})`,

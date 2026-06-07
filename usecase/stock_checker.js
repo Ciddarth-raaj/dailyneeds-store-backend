@@ -137,7 +137,7 @@ class StockCheckerUsecase {
     const header = await this.stockCheckerRepo.getById(stock_checker_id);
     if (!header) return;
     const productName =
-      (header.product && (header.product.gf_item_name || header.product.de_display_name)) ||
+      (header.product && (header.product.de_name || header.product.de_display_name)) ||
       `Product ${header.product_id}`;
     const branchName =
       header.created_by_branch && header.created_by_branch.outlet_name
@@ -283,7 +283,7 @@ class StockCheckerUsecase {
     );
     if (!header || !items || items.length === 0) return;
     const productName =
-      (header.product && (header.product.gf_item_name || header.product.de_display_name)) ||
+      (header.product && (header.product.de_name || header.product.de_display_name)) ||
       `Product ${header.product_id}`;
     const lines = items.map((it) => formatBranchSummaryLine(it));
     const msg =
@@ -306,7 +306,7 @@ class StockCheckerUsecase {
     const header = await this.stockCheckerRepo.getById(stock_checker_id);
     if (!header) return;
     const productName =
-      (header.product && (header.product.gf_item_name || header.product.de_display_name)) ||
+      (header.product && (header.product.de_name || header.product.de_display_name)) ||
       `Product ${header.product_id}`;
     const items = await this.stockCheckerRepo.getItemsByStockCheckerId(
       stock_checker_id
@@ -410,7 +410,7 @@ class StockCheckerUsecase {
       const missingByBranch = new Map(); // branch_id -> [{ product_id, product_name }]
       for (const r of pendingRows) {
         const productName =
-          (r.product_gf_item_name && String(r.product_gf_item_name).trim()) ||
+          (r.product_de_name && String(r.product_de_name).trim()) ||
           (r.product_de_display_name && String(r.product_de_display_name).trim()) ||
           `Product ${r.product_id}`;
         const items =

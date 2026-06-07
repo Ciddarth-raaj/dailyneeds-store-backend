@@ -23,7 +23,7 @@ function rowToPdfShape(row) {
         ? String(row.product_id)
         : "—",
     product_name:
-      (row.gf_item_name && String(row.gf_item_name).trim()) ||
+      (row.de_name && String(row.de_name).trim()) ||
       `Product ${row.product_id}`,
     purchased_stock: purchased,
     stock_output: Number.isFinite(so) ? so : 0,

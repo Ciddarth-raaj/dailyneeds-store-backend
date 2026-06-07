@@ -37,7 +37,7 @@ class ProductsChangesRepository {
     return new Promise((resolve, reject) => {
       this.db.query(
         `SELECT pc.products_change_id, pc.product_id, pc.changes, pc.is_approved, pc.created_at, pc.updated_at,
-                pt.gf_item_name,
+                pt.de_name,
                 (SELECT image_url FROM product_images WHERE product_id = pc.product_id ORDER BY priority ASC, image_id ASC LIMIT 1) AS product_image_url
          FROM products_changes pc
          LEFT JOIN product_table pt ON pt.product_id = pc.product_id
@@ -78,7 +78,7 @@ class ProductsChangesRepository {
       const limit = filters.limit != null ? Math.max(0, parseInt(filters.limit, 10) || 0) : 100;
       const offset = filters.offset != null ? Math.max(0, parseInt(filters.offset, 10) || 0) : 0;
       const sql = `SELECT pc.products_change_id, pc.product_id, pc.changes, pc.is_approved, pc.created_at, pc.updated_at,
-                          pt.gf_item_name,
+                          pt.de_name,
                           (SELECT image_url FROM product_images WHERE product_id = pc.product_id ORDER BY priority ASC, image_id ASC LIMIT 1) AS product_image_url
                    FROM products_changes pc
                    LEFT JOIN product_table pt ON pt.product_id = pc.product_id
@@ -130,7 +130,7 @@ class ProductsChangesRepository {
     return {
       products_change_id: row.products_change_id,
       product_id: row.product_id,
-      gf_item_name: row.gf_item_name ?? null,
+      de_name: row.de_name ?? null,
       product_image_url: row.product_image_url ?? null,
       changes: typeof changes === "string" ? (() => { try { return JSON.parse(changes); } catch (_) { return changes; } })() : changes,
       is_approved: Boolean(row.is_approved),

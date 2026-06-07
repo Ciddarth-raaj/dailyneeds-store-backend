@@ -151,9 +151,9 @@ class ProductImageLogRepository {
       product: row.product_id
         ? {
             product_id: row.product_id,
-            gf_item_name: row.gf_item_name,
-            de_display_name: row.de_display_name,
             de_name: row.de_name,
+            de_display_name: row.de_display_name,
+            gf_item_name: row.gf_item_name, // @deprecated — use de_name
           }
         : null,
       created_by_employee: row.created_by_employee_code

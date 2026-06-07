@@ -74,7 +74,6 @@ class DeadStockItemsUsecase {
           product_id: row.product_id,
           outlet_id: row.outlet_id,
           outlet_name: row.outlet_name,
-          gf_item_name: row.gf_item_name,
           de_name: row.de_name,
           de_distributor: row.de_distributor,
           buyer_name: null,
@@ -89,9 +88,6 @@ class DeadStockItemsUsecase {
       const entry = byKey.get(key);
       if (row.outlet_name != null && entry.outlet_name == null) {
         entry.outlet_name = row.outlet_name;
-      }
-      if (row.gf_item_name != null && entry.gf_item_name == null) {
-        entry.gf_item_name = row.gf_item_name;
       }
       if (row.de_name != null && entry.de_name == null) {
         entry.de_name = row.de_name;

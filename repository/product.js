@@ -5,6 +5,7 @@ class ProductRepository {
     this.db = db;
   }
 
+  // gf_* columns are deprecated for application use; still written for GoFrugal sync / API compatibility.
   create(product) {
     return new Promise((resolve, reject) => {
       this.db.query(
@@ -240,6 +241,7 @@ class ProductRepository {
       this.db.query(
         `SELECT
             p.product_id,
+            p.de_name,
             p.de_display_name,
             p.gf_item_name,
             p.de_distributor,
@@ -265,7 +267,6 @@ class ProductRepository {
                 LIMIT 1
             ) AS image_url
         FROM product_table p
-        ${fetchAll == "true" ? "" : "WHERE p.gf_applies_online = 1"}
         ORDER BY p.product_id DESC
         LIMIT ${offset}, ${limit}`,
         [],
@@ -347,7 +348,7 @@ class ProductRepository {
           FROM product_images
           GROUP BY product_id
         ) as pi ON pi.product_id = product_table.product_id
-        WHERE (gf_item_name LIKE "%${filter}%" OR product_table.product_id LIKE "%${filter}%" OR de_distributor LIKE "%${filter}%" OR de_display_name LIKE "%${filter}%" OR de_name LIKE "%${filter}%")
+        WHERE (product_table.product_id LIKE "%${filter}%" OR de_distributor LIKE "%${filter}%" OR de_display_name LIKE "%${filter}%" OR de_name LIKE "%${filter}%")
         LIMIT ${offset}, ${limit}`,
         [filter, offset, limit],
         (err, docs) => {

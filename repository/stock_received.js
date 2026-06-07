@@ -85,7 +85,6 @@ function shapeStockReceivedProduct(row) {
     row.image_link != null && row.image_link !== "" ? row.image_link : null;
   return {
     product_id: row.product_id,
-    gf_item_name: row.gf_item_name != null ? row.gf_item_name : null,
     de_name: row.de_name != null ? row.de_name : null,
     de_display_name: row.de_display_name != null ? row.de_display_name : null,
     image_link: link,
@@ -301,7 +300,6 @@ class StockReceivedRepository {
       chunks.forEach((ids) => {
         const ph = ids.map(() => "?").join(", ");
         const sql = `SELECT pt.product_id,
-            pt.gf_item_name,
             pt.de_name,
             pt.de_display_name,
             (

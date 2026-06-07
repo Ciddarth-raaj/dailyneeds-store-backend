@@ -212,7 +212,7 @@ class JobWorksheetRepository {
   getJobWorksheetItems(jobWorksheetId) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT jwi.*, pt.gf_item_name as product_name,
+        `SELECT jwi.*, pt.de_name as product_name,
                 st1.label as sticker_type_1_label,
                 st2.label as sticker_type_2_label
          FROM job_worksheet_item jwi

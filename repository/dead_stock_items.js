@@ -15,7 +15,6 @@ class DeadStockItemsRepository {
         `SELECT dsi.product_id,
                 dsi.outlet_id,
                 MAX(o.outlet_name) AS outlet_name,
-                MAX(pt.gf_item_name) AS gf_item_name,
                 MAX(pt.de_name) AS de_name,
                 MAX(pt.de_distributor) AS de_distributor,
                 MAX(pt.department_id) AS department_id,

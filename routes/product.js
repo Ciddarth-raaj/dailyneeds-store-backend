@@ -93,6 +93,7 @@ class ProductRoutes {
             grinding: Joi.number().allow(null).allow("").optional(),
             cover_type: Joi.string().allow(null).allow("").optional(),
             cover_sizes: Joi.string().allow(null).allow("").optional(),
+            // @deprecated gf_description / gf_detailed_description — kept for API compatibility
             gf_description: Joi.string().allow(null).allow("").optional(),
             gf_detailed_description: Joi.string()
               .allow(null)

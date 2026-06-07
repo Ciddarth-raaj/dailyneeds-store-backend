@@ -35,7 +35,7 @@ class PickPackWriteOffRepository {
         `SELECT
           ppwo.pick_pack_write_off_id,
           ppwo.product_id,
-          pt.gf_item_name AS product_name,
+          pt.de_name AS product_name,
           (
             SELECT pi.image_url
             FROM product_images pi
@@ -87,7 +87,7 @@ class PickPackWriteOffRepository {
         `SELECT
           ppwo.pick_pack_write_off_id,
           ppwo.product_id,
-          pt.gf_item_name AS product_name,
+          pt.de_name AS product_name,
           (
             SELECT pi.image_url
             FROM product_images pi
