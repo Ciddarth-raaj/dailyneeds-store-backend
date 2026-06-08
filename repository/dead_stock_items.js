@@ -7,13 +7,19 @@ LEFT JOIN product_distributor_master pdm ON pt.distributor_id = pdm.cid
 LEFT JOIN product_distributor pd_map ON pd_map.cid = pt.distributor_id
 LEFT JOIN new_employee ne ON ne.employee_id = pd_map.buyer_id
 LEFT JOIN product_department d ON pt.department_id = d.department_id
+LEFT JOIN categories cat ON pt.category_id = cat.category_id
+LEFT JOIN subcategories sub ON pt.subcategory_id = sub.category_id
 SET
   dsi.de_name = pt.de_name,
   dsi.de_distributor = pdm.mdm_dist_name,
   dsi.buyer_name = ne.employee_name,
   dsi.outlet_name = o.outlet_name,
   dsi.department_id = pt.department_id,
-  dsi.department_name = d.department_name`;
+  dsi.department_name = d.department_name,
+  dsi.category_id = pt.category_id,
+  dsi.category_name = cat.category_name,
+  dsi.subcategory_id = pt.subcategory_id,
+  dsi.subcategory_name = sub.subcategory_name`;
 
 const LIST_PIVOTED_SQL = `SELECT dsi.product_id,
                 dsi.outlet_id,
@@ -23,6 +29,10 @@ const LIST_PIVOTED_SQL = `SELECT dsi.product_id,
                 MAX(dsi.buyer_name) AS buyer_name,
                 MAX(dsi.department_id) AS department_id,
                 MAX(dsi.department_name) AS department_name,
+                MAX(dsi.category_id) AS category_id,
+                MAX(dsi.category_name) AS category_name,
+                MAX(dsi.subcategory_id) AS subcategory_id,
+                MAX(dsi.subcategory_name) AS subcategory_name,
                 SUM(CASE WHEN dsi.\`type\` = 'thirty-days' THEN dsi.stock ELSE 0 END) AS thirty_days_stock,
                 SUM(CASE WHEN dsi.\`type\` = 'thirty-days' THEN dsi.stock_value ELSE 0 END) AS thirty_days_stock_value,
                 SUM(CASE WHEN dsi.\`type\` = 'ninety-days' THEN dsi.stock ELSE 0 END) AS ninety_days_stock,

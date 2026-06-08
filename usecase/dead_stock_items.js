@@ -15,6 +15,10 @@ function mapPivotedRow(row) {
     buyer_name: row.buyer_name ?? null,
     department_id: row.department_id ?? null,
     department_name: row.department_name ?? null,
+    category_id: row.category_id ?? null,
+    category_name: row.category_name ?? null,
+    subcategory_id: row.subcategory_id ?? null,
+    subcategory_name: row.subcategory_name ?? null,
     thirty_days: {
       stock: toNum(row.thirty_days_stock),
       stock_value: toNum(row.thirty_days_stock_value),

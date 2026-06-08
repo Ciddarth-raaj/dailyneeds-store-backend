@@ -255,7 +255,9 @@ class ProductRepository {
             p.de_manufacturer_name,
             pdm.mdm_dist_name AS distributor_name,
             p.category_id,
+            cat.category_name,
             p.subcategory_id,
+            sub.subcategory_name,
             p.department_id,
             p.brand_id,
             p.de_preparation_type,
@@ -277,6 +279,8 @@ class ProductRepository {
             ) AS image_url
         FROM product_table p
         LEFT JOIN product_distributor_master pdm ON pdm.cid = p.distributor_id
+        LEFT JOIN categories cat ON p.category_id = cat.category_id
+        LEFT JOIN subcategories sub ON p.subcategory_id = sub.category_id
         ORDER BY p.product_id DESC
         LIMIT ${offset}, ${limit}`,
         [],
