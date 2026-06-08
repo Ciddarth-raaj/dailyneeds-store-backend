@@ -3,10 +3,20 @@ class StockHoldingReportUsecase {
     this.stockHoldingReportRepo = stockHoldingReportRepo;
   }
 
+  async finalizeUpload(stockHoldingReportId) {
+    const cleanup = await this.stockHoldingReportRepo.deleteAllExceptReportId(
+      stockHoldingReportId
+    );
+    return cleanup;
+  }
+
   create(payload) {
     return new Promise(async (resolve, reject) => {
       try {
         const data = await this.stockHoldingReportRepo.create(payload);
+        if ((payload.items || []).length > 0) {
+          await this.finalizeUpload(data.stock_holding_report_id);
+        }
         resolve({
           code: 200,
           message: "Stock holding report created successfully",
@@ -40,7 +50,8 @@ class StockHoldingReportUsecase {
     });
   }
 
-  appendItems(stockHoldingReportId, items) {
+  appendItems(stockHoldingReportId, items, options = {}) {
+    const { finalize = false } = options;
     return new Promise(async (resolve, reject) => {
       try {
         const exists = await this.stockHoldingReportRepo.reportExists(
@@ -57,6 +68,9 @@ class StockHoldingReportUsecase {
           stockHoldingReportId,
           items
         );
+        if (finalize) {
+          await this.finalizeUpload(stockHoldingReportId);
+        }
         resolve({
           code: 200,
           message: "Stock holding items appended successfully",

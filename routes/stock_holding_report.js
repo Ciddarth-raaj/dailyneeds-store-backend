@@ -29,6 +29,7 @@ class StockHoldingReportRoutes {
 
     const appendItemsSchema = Joi.object({
       items: Joi.array().items(itemSchema).min(1).required(),
+      finalize: Joi.boolean().default(false),
     });
 
     const paginationSchema = Joi.object({
@@ -64,7 +65,8 @@ class StockHoldingReportRoutes {
 
         const result = await this.stockHoldingReportUsecase.appendItems(
           id,
-          value.items
+          value.items,
+          { finalize: value.finalize }
         );
         res
           .status(result.code === 200 ? 200 : result.code === 404 ? 404 : 400)

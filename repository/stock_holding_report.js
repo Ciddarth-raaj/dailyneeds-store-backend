@@ -667,6 +667,31 @@ class StockHoldingReportRepository {
       );
     });
   }
+
+  deleteAllExceptReportId(stockHoldingReportId) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `DELETE FROM stock_holding_report
+         WHERE stock_holding_report_id != ?`,
+        [stockHoldingReportId],
+        (err, result) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.STOCK_HOLDING_REPORT",
+              code: "REPOSITORY.STOCK_HOLDING_REPORT.DELETE_ALL_EXCEPT",
+              description: err.toString(),
+              category: "",
+              ref: { stockHoldingReportId },
+            });
+            reject(err);
+            return;
+          }
+          resolve({ deletedReports: result.affectedRows });
+        }
+      );
+    });
+  }
 }
 
 module.exports = (db) => {
