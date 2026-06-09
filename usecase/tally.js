@@ -1,6 +1,6 @@
 const moment = require("moment");
 const { uuid } = require("uuidv4");
-const simpleEncrypt = require("../utils/encrypt");
+const { purchaseEntryMasterId } = require("../utils/tally_master_id");
 
 const OUTLET_CASH_ID_MAP = {
   4: "Dn1",
@@ -267,9 +267,7 @@ class TallyUsecase {
           purchaseEntry.VoucherDate = moment(purchase.mprh_pr_dt).format(
             "YYYYMMDD"
           );
-          purchaseEntry.MasterID = simpleEncrypt(
-            `${purchase.debit_note_id}-purchase-entry`
-          );
+          purchaseEntry.MasterID = `${purchase.debit_note_id}-purchase-entry`;
           purchaseEntry.VoucherNumber = purchase.mprh_pr_refno;
           purchaseEntry.Reference = purchase.mmh_dist_bill_no || "";
           purchaseEntry.PartyName = purchase.supplier_name;
@@ -463,9 +461,7 @@ class TallyUsecase {
               moment(purchase.mmh_mrc_dt).format("YYYYMMDD")
             );
 
-            journalEntry.MasterID = simpleEncrypt(
-              `${purchase.debit_note_id}-journal-entry`
-            );
+            journalEntry.MasterID = `${purchase.debit_note_id}-journal-entry`;
             journalEntry.VoucherNumber = purchase.mprh_pr_refno;
             journalEntry.Reference = purchase.mmh_dist_bill_no;
             journalEntry.BuyerGSTRegistrationType = purchase.supplier_gstn
@@ -568,9 +564,7 @@ class TallyUsecase {
             moment(purchase.mmh_mrc_dt).format("YYYYMMDD")
           );
 
-          purchaseEntry.MasterID = simpleEncrypt(
-            `${purchase.purchase_id}-purchase-entry`
-          );
+          purchaseEntry.MasterID = purchaseEntryMasterId(purchase.purchase_id);
           purchaseEntry.VoucherNumber = purchase.mmh_mrc_refno;
           purchaseEntry.Reference = purchase.mmh_dist_bill_no;
           purchaseEntry.PartyName = purchase.supplier_name;
@@ -812,9 +806,7 @@ class TallyUsecase {
               moment(purchase.mmh_mrc_dt).format("YYYYMMDD")
             );
 
-            journalEntry.MasterID = simpleEncrypt(
-              `${purchase.purchase_id}-journal-entry`
-            );
+            journalEntry.MasterID = `${purchase.purchase_id}-journal-entry`;
             journalEntry.VoucherNumber = purchase.mmh_mrc_refno;
             journalEntry.Reference = purchase.mmh_dist_bill_no;
             journalEntry.BuyerGSTRegistrationType = purchase.supplier_gstn
@@ -959,7 +951,7 @@ class TallyUsecase {
         if (!data[item.outlet_name][date]) {
           data[item.outlet_name][date] = {
             ...INIT_JOURNAL_ENTRY_OLD(date),
-            MasterID: simpleEncrypt(`${item.accounts_id}-sales-entry`),
+            MasterID: `${item.accounts_id}-sales-entry`,
           };
         }
 
@@ -1068,7 +1060,7 @@ class TallyUsecase {
         if (!data[item.store_name][date]) {
           data[item.store_name][date] = {
             ...INIT_JOURNAL_ENTRY_OLD(date),
-            MasterID: simpleEncrypt(`${item.ebook_id}-ebook`),
+            MasterID: `${item.ebook_id}-ebook`,
           };
         }
 
@@ -1377,7 +1369,7 @@ class TallyUsecase {
             ...tmpLedgerEntries.map((item) => {
               const tmpObject = {
                 ...tmpMasterData,
-                MasterID: simpleEncrypt(item.itemId),
+                MasterID: item.itemId,
                 Narration: item.Narration ?? "",
                 VoucherType:
                   item.IsDeemedPositive === "No" ? "Receipt" : "Payment",

@@ -1,3 +1,5 @@
+const { purchaseEntryMasterId } = require("../utils/tally_master_id");
+
 class PurchaseTallyUsecase {
   constructor(purchaseTallyRepo, gstTallyPurchaseRepo) {
     this.purchaseTallyRepo = purchaseTallyRepo;
@@ -15,11 +17,13 @@ class PurchaseTallyUsecase {
       };
     }
 
+    const masterId = purchaseEntryMasterId(purchaseId);
+
     const existingByPurchase =
       await this.purchaseTallyRepo.findByPurchaseId(purchaseId);
     if (
       existingByPurchase &&
-      String(existingByPurchase.MasterID) !== String(data.MasterID)
+      String(existingByPurchase.MasterID) !== String(masterId)
     ) {
       return {
         code: 409,
@@ -30,7 +34,7 @@ class PurchaseTallyUsecase {
     }
 
     const existingByMaster = await this.purchaseTallyRepo.findByMasterId(
-      data.MasterID
+      masterId
     );
     if (
       existingByMaster &&
@@ -45,6 +49,7 @@ class PurchaseTallyUsecase {
 
     const result = await this.purchaseTallyRepo.create({
       ...data,
+      MasterID: masterId,
       purchase_id: purchaseId,
     });
 
@@ -52,7 +57,7 @@ class PurchaseTallyUsecase {
       try {
         const gstCopy = await this.gstTallyPurchaseRepo.copyFromPurchase(
           purchaseId,
-          data.MasterID
+          masterId
         );
         return {
           ...result,
