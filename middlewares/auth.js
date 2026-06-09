@@ -450,7 +450,7 @@ const unProtectedRoutes = {
   // "/tally/expenses": { methods: { get: true } },
   // "/tally/purchase": { methods: { get: true } },
   // "/tally/debit-note": { methods: { get: true } },
-  // "/purchase-tally": { methods: { post: true } },
+  "/purchase-tally": { methods: { post: true } },
   // "/debit-note-tally": { methods: { post: true } },
   "/gofrugal-synker/sync": { methods: { post: true } },
   "/gofrugal-synker/table": { methods: { delete: true } },
