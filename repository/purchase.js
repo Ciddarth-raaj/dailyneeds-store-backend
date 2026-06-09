@@ -245,6 +245,7 @@ class PurchaseRepository {
       this.db.query(
         `SELECT
           ${purchaseOverlaySelectList()},
+          p.is_new,
           tr.VoucherNo,
           tr.InvoiceValue,
           tr.SupplierName,

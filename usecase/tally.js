@@ -1,6 +1,12 @@
 const moment = require("moment");
 const { uuid } = require("uuidv4");
-const { purchaseEntryMasterId } = require("../utils/tally_master_id");
+const {
+  purchaseEntryMasterId,
+  purchaseJournalEntryMasterId,
+  debitNoteEntryMasterId,
+  debitNoteJournalEntryMasterId,
+  toTallyOutboundMasterId,
+} = require("../utils/tally_master_id");
 
 const OUTLET_CASH_ID_MAP = {
   4: "Dn1",
@@ -267,7 +273,10 @@ class TallyUsecase {
           purchaseEntry.VoucherDate = moment(purchase.mprh_pr_dt).format(
             "YYYYMMDD"
           );
-          purchaseEntry.MasterID = `${purchase.debit_note_id}-purchase-entry`;
+          purchaseEntry.MasterID = toTallyOutboundMasterId(
+            debitNoteEntryMasterId(purchase.debit_note_id),
+            purchase.is_new
+          );
           purchaseEntry.VoucherNumber = purchase.mprh_pr_refno;
           purchaseEntry.Reference = purchase.mmh_dist_bill_no || "";
           purchaseEntry.PartyName = purchase.supplier_name;
@@ -461,7 +470,10 @@ class TallyUsecase {
               moment(purchase.mmh_mrc_dt).format("YYYYMMDD")
             );
 
-            journalEntry.MasterID = `${purchase.debit_note_id}-journal-entry`;
+            journalEntry.MasterID = toTallyOutboundMasterId(
+              debitNoteJournalEntryMasterId(purchase.debit_note_id),
+              purchase.is_new
+            );
             journalEntry.VoucherNumber = purchase.mprh_pr_refno;
             journalEntry.Reference = purchase.mmh_dist_bill_no;
             journalEntry.BuyerGSTRegistrationType = purchase.supplier_gstn
@@ -564,7 +576,10 @@ class TallyUsecase {
             moment(purchase.mmh_mrc_dt).format("YYYYMMDD")
           );
 
-          purchaseEntry.MasterID = purchaseEntryMasterId(purchase.purchase_id);
+          purchaseEntry.MasterID = toTallyOutboundMasterId(
+            purchaseEntryMasterId(purchase.purchase_id),
+            purchase.is_new
+          );
           purchaseEntry.VoucherNumber = purchase.mmh_mrc_refno;
           purchaseEntry.Reference = purchase.mmh_dist_bill_no;
           purchaseEntry.PartyName = purchase.supplier_name;
@@ -806,7 +821,10 @@ class TallyUsecase {
               moment(purchase.mmh_mrc_dt).format("YYYYMMDD")
             );
 
-            journalEntry.MasterID = `${purchase.purchase_id}-journal-entry`;
+            journalEntry.MasterID = toTallyOutboundMasterId(
+              purchaseJournalEntryMasterId(purchase.purchase_id),
+              purchase.is_new
+            );
             journalEntry.VoucherNumber = purchase.mmh_mrc_refno;
             journalEntry.Reference = purchase.mmh_dist_bill_no;
             journalEntry.BuyerGSTRegistrationType = purchase.supplier_gstn
