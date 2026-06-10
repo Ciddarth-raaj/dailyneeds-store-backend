@@ -668,6 +668,56 @@ class StockHoldingReportRepository {
     });
   }
 
+  resolveValidProductAndOutletIds(productIds, outletIds) {
+    return new Promise((resolve, reject) => {
+      const validProductIds = new Set();
+      const validOutletIds = new Set();
+
+      const loadOutlets = () => {
+        if (!outletIds.length) {
+          resolve({ validProductIds, validOutletIds });
+          return;
+        }
+        const phO = outletIds.map(() => "?").join(", ");
+        this.db.query(
+          `SELECT outlet_id FROM outlets WHERE outlet_id IN (${phO})`,
+          outletIds,
+          (errO, outRows) => {
+            if (errO) {
+              reject(errO);
+              return;
+            }
+            for (const x of outRows || []) {
+              validOutletIds.add(x.outlet_id);
+            }
+            resolve({ validProductIds, validOutletIds });
+          }
+        );
+      };
+
+      if (!productIds.length) {
+        loadOutlets();
+        return;
+      }
+
+      const phP = productIds.map(() => "?").join(", ");
+      this.db.query(
+        `SELECT product_id FROM product_table WHERE product_id IN (${phP})`,
+        productIds,
+        (errP, prodRows) => {
+          if (errP) {
+            reject(errP);
+            return;
+          }
+          for (const x of prodRows || []) {
+            validProductIds.add(x.product_id);
+          }
+          loadOutlets();
+        }
+      );
+    });
+  }
+
   deleteAllExceptReportId(stockHoldingReportId) {
     return new Promise((resolve, reject) => {
       this.db.query(

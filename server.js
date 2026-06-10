@@ -503,7 +503,8 @@ class Server {
       this.stockReceivedRepo
     );
     this.stockHoldingReportUsecase = require("./usecase/stock_holding_report")(
-      this.stockHoldingReportRepo
+      this.stockHoldingReportRepo,
+      this.outletRepo
     );
     this.priceCheckerUsecase = require("./usecase/price_checker")(
       this.priceCheckerRepo
@@ -519,7 +520,8 @@ class Server {
       this.outletUsecase,
       this.employeeUsecase,
       this.productRepo,
-      this.productsChangesRepo
+      this.productsChangesRepo,
+      this.stockHoldingReportUsecase
     );
   }
 

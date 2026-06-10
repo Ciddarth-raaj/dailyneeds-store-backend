@@ -8,8 +8,7 @@ const { exec } = require("child_process");
 const { capitalizeWords } = require("../utils/string");
 
 const logger = require("../utils/logger");
-
-const DELIUM_API_KEY = "d29f2c2a-ffc5-11e8-baeb-de5a505def9c";
+const deliumConfig = require("../config/delium");
 const GOFRUGAL_API_KEY =
   "92389031420AEF2B22174FA933F178040AFD9395A5E9C3F013A74C4CA152CE786116998975B7AF31";
 
@@ -20,6 +19,7 @@ const DIGISME_CUSTOM_KEY =
 
 const CRON_SYNTAX_PRODUCT = "0 6 * * *";
 const CRON_SYNTAX_EMPLOYEE = "0 7 * * *";
+const CRON_SYNTAX_STOCK_HOLDING = "30 7 * * *";
 const CRON_SYNTAX_CLEANING_PACKING = "0 9 * * *";
 
 // Columns on product_table that are updated by sync (for change detection). Excludes product_id.
@@ -78,7 +78,8 @@ class Synker {
     outletUsecase,
     employeeUsecase,
     productRepo,
-    productsChangesRepo
+    productsChangesRepo,
+    stockHoldingReportUsecase
   ) {
     this.productUsecase = productUsecase;
     this.categoryUsecase = categoryUsecase;
@@ -91,6 +92,7 @@ class Synker {
     this.employeeUsecase = employeeUsecase;
     this.productRepo = productRepo;
     this.productsChangesRepo = productsChangesRepo;
+    this.stockHoldingReportUsecase = stockHoldingReportUsecase;
   }
 
   /** Build incoming row for comparison (same keys as DB). product has .return for return_prod. */
@@ -145,6 +147,16 @@ class Synker {
 
   initCronJobs(cronService) {
     // this.syncProductsWithLogging();
+    this.syncStockHoldingReportWithLogging().catch((err) => {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "SERVICE.SYNKER",
+        code: "SERVICE.SYNKER.STOCK-HOLDING-SYNC",
+        description: err.toString(),
+        category: "",
+        ref: { phase: "startup" },
+      });
+    });
     // Schedule CRON job for product sync
     cronService.register("product_sync", CRON_SYNTAX_PRODUCT, async () => {
       await this.syncProductsWithLogging();
@@ -153,6 +165,60 @@ class Synker {
     cronService.register("employee_sync", CRON_SYNTAX_EMPLOYEE, async () => {
       await this.syncDigismeEmployees();
     });
+
+    cronService.register(
+      "stock_holding_report_sync",
+      CRON_SYNTAX_STOCK_HOLDING,
+      async () => {
+        await this.syncStockHoldingReportWithLogging();
+      }
+    );
+  }
+
+  async syncStockHoldingReportWithLogging() {
+    logger.Log({
+      level: logger.LEVEL.INFO,
+      component: "SERVICE.SYNKER",
+      code: "SERVICE.SYNKER.STOCK-HOLDING-SYNC",
+      description: "Syncing stock holding report",
+      category: "",
+      ref: {},
+    });
+
+    if (!this.stockHoldingReportUsecase) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "SERVICE.SYNKER",
+        code: "SERVICE.SYNKER.STOCK-HOLDING-SYNC",
+        description: "stockHoldingReportUsecase not configured",
+        category: "",
+        ref: {},
+      });
+      return;
+    }
+
+    try {
+      const result = await this.stockHoldingReportUsecase.syncFromDeliumApi();
+      logger.Log({
+        level: logger.LEVEL.INFO,
+        component: "SERVICE.SYNKER",
+        code: "SERVICE.SYNKER.STOCK-HOLDING-SYNC",
+        description: JSON.stringify(result),
+        category: "",
+        ref: {},
+      });
+      return result;
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "SERVICE.SYNKER",
+        code: "SERVICE.SYNKER.STOCK-HOLDING-SYNC",
+        description: err.toString(),
+        category: "",
+        ref: {},
+      });
+      throw err;
+    }
   }
 
   async getDigismeToken() {
@@ -596,9 +662,9 @@ class Synker {
       try {
         const response = await axios({
           method: "GET",
-          url: "https://dailyneeds.delium.io/api/api/articles",
+          url: deliumConfig.apiUrl(deliumConfig.paths.articles),
           headers: {
-            "X-DELIUM-KEY": DELIUM_API_KEY,
+            "X-DELIUM-KEY": deliumConfig.apiKey,
           },
         });
         if (response.status !== 200) {
@@ -633,9 +699,11 @@ class Synker {
       try {
         const response = await axios({
           method: "GET",
-          url: `https://dailyneeds.delium.io/api/api/repackaging?for_date=${forDate}`,
+          url: deliumConfig.apiUrl(
+            `${deliumConfig.paths.repackaging}?for_date=${forDate}`
+          ),
           headers: {
-            "X-DELIUM-KEY": DELIUM_API_KEY,
+            "X-DELIUM-KEY": deliumConfig.apiKey,
           },
         });
         if (response.status !== 200) {
@@ -886,7 +954,8 @@ module.exports = (
   outletUsecase,
   employeeUsecase,
   productRepo,
-  productsChangesRepo
+  productsChangesRepo,
+  stockHoldingReportUsecase
 ) => {
   return new Synker(
     productUsecase,
@@ -899,6 +968,7 @@ module.exports = (
     outletUsecase,
     employeeUsecase,
     productRepo,
-    productsChangesRepo
+    productsChangesRepo,
+    stockHoldingReportUsecase
   );
 };

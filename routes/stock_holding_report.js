@@ -77,6 +77,21 @@ class StockHoldingReportRoutes {
       res.end();
     });
 
+    router.post("/sync", async (req, res) => {
+      try {
+        const created_by = req.decoded?.employee_id ?? null;
+        const result = await this.stockHoldingReportUsecase.syncFromDeliumApi({
+          created_by,
+        });
+        res
+          .status(result.code === 200 ? 200 : 400)
+          .json(result);
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
     router.get("/", async (_req, res) => {
       try {
         const result = await this.stockHoldingReportUsecase.getAllReports();
