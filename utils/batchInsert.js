@@ -46,7 +46,8 @@ function insertRowsInBatches(
   connection,
   insertSql,
   rows,
-  batchSize = DEFAULT_INSERT_BATCH_SIZE
+  batchSize = DEFAULT_INSERT_BATCH_SIZE,
+  onProgress
 ) {
   return new Promise((resolve, reject) => {
     if (!rows || rows.length === 0) {
@@ -71,6 +72,9 @@ function insertRowsInBatches(
         if (err) {
           reject(err);
           return;
+        }
+        if (typeof onProgress === "function") {
+          onProgress(inserted, rows.length);
         }
         runNext();
       });
