@@ -119,6 +119,12 @@ const LATEST_REPORT_ID_BY_DATE_SQL = `SELECT stock_holding_report_id
          ORDER BY date DESC, stock_holding_report_id DESC
          LIMIT 1`;
 
+const EXACT_REPORT_ID_BY_DATE_SQL = `SELECT stock_holding_report_id
+         FROM stock_holding_report
+         WHERE date = DATE(?)
+         ORDER BY stock_holding_report_id DESC
+         LIMIT 1`;
+
 function enrichItemsSnapshot(dbOrConnection, stockHoldingReportId) {
   return queryAsync(dbOrConnection, ENRICH_SNAPSHOT_SQL, [
     stockHoldingReportId,
@@ -544,7 +550,10 @@ class StockHoldingReportRepository {
     return new Promise((resolve, reject) => {
       this.db.query(
         `SELECT shr.*,
-                e.employee_name AS created_by_name
+                e.employee_name AS created_by_name,
+                (SELECT COUNT(*)
+                 FROM stock_holding_items shi
+                 WHERE shi.stock_holding_report_id = shr.stock_holding_report_id) AS item_count
          FROM stock_holding_report shr
          LEFT JOIN new_employee e ON shr.created_by = e.employee_id
          ORDER BY shr.date DESC, shr.stock_holding_report_id DESC`,
@@ -592,9 +601,12 @@ class StockHoldingReportRepository {
     });
   }
 
-  getLatestReportIdByDate(date) {
+  getLatestReportIdByDate(date, options = {}) {
+    const { exact = false } = options;
+    const sql = exact ? EXACT_REPORT_ID_BY_DATE_SQL : LATEST_REPORT_ID_BY_DATE_SQL;
+
     return new Promise((resolve, reject) => {
-      this.db.query(LATEST_REPORT_ID_BY_DATE_SQL, [date], (err, rows) => {
+      this.db.query(sql, [date], (err, rows) => {
         if (err) reject(err);
         else resolve(rows?.[0]?.stock_holding_report_id ?? null);
       });
@@ -602,18 +614,19 @@ class StockHoldingReportRepository {
   }
 
   getLatestReportByDate(date, options = {}) {
-    const { includeItems = false, limit, offset } = options;
-    return this.getLatestReportIdByDate(date).then((reportId) => {
+    const { includeItems = false, limit, offset, exact = false } = options;
+    return this.getLatestReportIdByDate(date, { exact }).then((reportId) => {
       if (!reportId) return null;
       return this.getById(reportId, { includeItems, limit, offset });
     });
   }
 
-  getLatestItemsPageByDate(date, limit, offset = 0, reportId = null) {
+  getLatestItemsPageByDate(date, limit, offset = 0, reportId = null, options = {}) {
+    const { exact = false } = options;
     const safeOffset = Math.max(Number(offset) || 0, 0);
     const reportIdPromise = reportId
       ? Promise.resolve(Number(reportId))
-      : this.getLatestReportIdByDate(date);
+      : this.getLatestReportIdByDate(date, { exact });
 
     return reportIdPromise.then((resolvedReportId) => {
       if (!resolvedReportId) return null;

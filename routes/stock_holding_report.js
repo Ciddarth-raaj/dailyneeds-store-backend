@@ -102,6 +102,32 @@ class StockHoldingReportRoutes {
       res.end();
     });
 
+    router.get("/latest/status", async (req, res) => {
+      try {
+        const statusSchema = Joi.object({
+          date: Joi.date().required(),
+          report_id: Joi.number().integer().optional(),
+          report_created_at: Joi.string().optional().allow(""),
+          client_fetched_at: Joi.string().optional().allow(""),
+        });
+        const { error, value } = statusSchema.validate(req.query);
+        if (error) throw error;
+
+        const result = await this.stockHoldingReportUsecase.getLatestStatus(
+          value.date,
+          {
+            report_id: value.report_id ?? null,
+            report_created_at: value.report_created_at ?? null,
+            client_fetched_at: value.client_fetched_at ?? null,
+          }
+        );
+        res.status(result.code === 200 ? 200 : 400).json(result);
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
     router.get("/latest/items", async (req, res) => {
       try {
         const latestSchema = Joi.object({

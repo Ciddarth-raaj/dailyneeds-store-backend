@@ -142,9 +142,10 @@ class StockHoldingReportUsecase {
   getReportById(date, options = {}) {
     return new Promise(async (resolve, reject) => {
       try {
+        const { exact } = this.getReportLookupOptions(date);
         const data = await this.stockHoldingReportRepo.getLatestReportByDate(
           date,
-          options
+          { ...options, exact }
         );
         if (!data) {
           resolve({
@@ -165,14 +166,149 @@ class StockHoldingReportUsecase {
     });
   }
 
+  getReportLookupOptions(date) {
+    const currentDate = moment().format("YYYY-MM-DD");
+    const requestedDate = moment(date).format("YYYY-MM-DD");
+
+    return {
+      currentDate,
+      requestedDate,
+      exact: requestedDate === currentDate,
+    };
+  }
+
+  normalizeReportTimestamp(value) {
+    if (!value) return null;
+    const m = moment(value);
+    return m.isValid() ? m.toISOString() : null;
+  }
+
+  shouldRefreshByClientFetchTime(clientFetchedAt, now = moment()) {
+    if (!clientFetchedAt) return true;
+    const fetched = moment(clientFetchedAt);
+    if (!fetched.isValid()) return true;
+    if (fetched.isSame(now, "day")) return false;
+    return now.hour() >= 6;
+  }
+
+  getLatestStatus(date, clientMeta = {}) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const { currentDate, requestedDate, exact } =
+          this.getReportLookupOptions(date);
+        const clientReportId =
+          clientMeta.report_id != null && clientMeta.report_id !== ""
+            ? Number(clientMeta.report_id)
+            : null;
+        const clientCreatedAt = this.normalizeReportTimestamp(
+          clientMeta.report_created_at
+        );
+        const clientFetchedAt = clientMeta.client_fetched_at ?? null;
+
+        const reportId =
+          await this.stockHoldingReportRepo.getLatestReportIdByDate(
+            requestedDate,
+            { exact }
+          );
+
+        if (!reportId) {
+          resolve({
+            code: 200,
+            message: "Stock holding report status fetched successfully",
+            data: {
+              has_report: false,
+              needs_refresh: this.shouldRefreshByClientFetchTime(clientFetchedAt),
+              is_current_date: false,
+              current_date: currentDate,
+              requested_date: requestedDate,
+              report: null,
+            },
+          });
+          return;
+        }
+
+        const report =
+          await this.stockHoldingReportRepo.getReportHeaderById(reportId);
+        if (!report) {
+          resolve({
+            code: 200,
+            message: "Stock holding report status fetched successfully",
+            data: {
+              has_report: false,
+              needs_refresh: true,
+              is_current_date: false,
+              current_date: currentDate,
+              requested_date: requestedDate,
+              report: null,
+            },
+          });
+          return;
+        }
+
+        const reportDate = moment(report.date).format("YYYY-MM-DD");
+        const serverReportId = Number(report.stock_holding_report_id);
+        const serverCreatedAt = this.normalizeReportTimestamp(report.created_at);
+        const isCurrentDate = reportDate === currentDate;
+
+        let needsRefresh = false;
+
+        if (clientReportId == null || Number.isNaN(clientReportId)) {
+          needsRefresh = true;
+        } else if (clientReportId !== serverReportId) {
+          needsRefresh = true;
+        } else if (
+          clientCreatedAt &&
+          serverCreatedAt &&
+          clientCreatedAt !== serverCreatedAt
+        ) {
+          needsRefresh = true;
+        }
+
+        if (requestedDate === currentDate && !isCurrentDate) {
+          needsRefresh = true;
+        }
+
+        if (
+          !needsRefresh &&
+          this.shouldRefreshByClientFetchTime(clientFetchedAt)
+        ) {
+          needsRefresh = true;
+        }
+
+        resolve({
+          code: 200,
+          message: "Stock holding report status fetched successfully",
+          data: {
+            has_report: true,
+            needs_refresh: needsRefresh,
+            is_current_date: isCurrentDate,
+            current_date: currentDate,
+            requested_date: requestedDate,
+            report: {
+              stock_holding_report_id: serverReportId,
+              report_name: report.report_name,
+              date: reportDate,
+              created_at: serverCreatedAt,
+              item_count: report.item_count ?? null,
+            },
+          },
+        });
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
   getLatestItemsPage(date, limit, offset, reportId = null) {
     return new Promise(async (resolve, reject) => {
       try {
+        const { exact } = this.getReportLookupOptions(date);
         const data = await this.stockHoldingReportRepo.getLatestItemsPageByDate(
           date,
           limit,
           offset,
-          reportId
+          reportId,
+          { exact }
         );
         if (!data) {
           resolve({
