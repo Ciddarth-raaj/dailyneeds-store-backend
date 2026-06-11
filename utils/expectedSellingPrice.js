@@ -10,7 +10,26 @@ function parseNum(v) {
 
 function formatPrice(n) {
   if (n == null) return null;
-  return (Math.round(n * 100) / 100).toFixed(2);
+  return (Math.round(n * 100 + Number.EPSILON) / 100).toFixed(2);
+}
+
+function normalizeMarkupDownKey(value) {
+  return trimStr(value).toLowerCase().replace(/\s+/g, "");
+}
+
+function isPercentageMode(amtPerc) {
+  const normalized = trimStr(amtPerc).toLowerCase();
+  if (!normalized) return false;
+  if (
+    normalized === "amount" ||
+    normalized === "amt" ||
+    normalized === "value"
+  ) {
+    return false;
+  }
+  return (
+    normalized.includes("perc") || normalized === "%" || normalized === "pct"
+  );
 }
 
 function normalizeMrpKey(v) {
@@ -28,11 +47,12 @@ function buildIssueMrpSet(issueMrps) {
 }
 
 function isMarkup(markupDown) {
-  return trimStr(markupDown).toLowerCase().includes("markup");
+  const key = normalizeMarkupDownKey(markupDown);
+  return key.includes("markup") && !key.includes("markdown");
 }
 
 function isMarkdown(markupDown) {
-  return trimStr(markupDown).toLowerCase().includes("markdown");
+  return normalizeMarkupDownKey(markupDown).includes("markdown");
 }
 
 function parseMarkupdownRule(row) {
@@ -50,15 +70,16 @@ function applyRoundoff(raw, roundoffType, roundoffValue) {
   const type = trimStr(roundoffType).toLowerCase();
   if (!type || type === "none") return raw;
 
-  const increment =
-    roundoffValue != null ? Number(roundoffValue) / 100 : null;
-  if (!increment || increment <= 0) return raw;
+  const incrementPaise = Math.round(Number(roundoffValue));
+  if (!Number.isFinite(incrementPaise) || incrementPaise <= 0) return raw;
 
-  if (type === "upper") {
-    return Math.ceil(raw / increment) * increment;
+  const rawPaise = Math.round(raw * 100 + Number.EPSILON);
+
+  if (type.includes("upper")) {
+    return (Math.ceil(rawPaise / incrementPaise) * incrementPaise) / 100;
   }
-  if (type === "near") {
-    return Math.round(raw / increment) * increment;
+  if (type.includes("near")) {
+    return (Math.round(rawPaise / incrementPaise) * incrementPaise) / 100;
   }
   return raw;
 }
@@ -71,7 +92,7 @@ function calculateExpectedSelling({ rule, purchasePrice, mrp }) {
   const { markupDown, amtPerc, value, roundoffType, roundoffValue } = parsed;
   if (value == null) return null;
 
-  const isPercentage = trimStr(amtPerc).toLowerCase() === "percentage";
+  const isPercentage = isPercentageMode(amtPerc);
   let raw = null;
 
   if (isMarkup(markupDown)) {
