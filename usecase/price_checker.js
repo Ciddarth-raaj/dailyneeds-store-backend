@@ -49,7 +49,7 @@ function mapLineItem(row) {
   };
 }
 
-function buildIncorrectSellingPrices(rows) {
+function buildProducts(rows) {
   const groupedByItem = {};
 
   for (const row of rows) {
@@ -65,7 +65,9 @@ function buildIncorrectSellingPrices(rows) {
         distributor_id: row.distributor_id ?? "",
         buyer_name: row.buyer_name ?? "",
         items: [],
+        allSellingPrices: [],
         incorrectSellingPrices: [],
+        hasIssue: false,
       };
     }
 
@@ -88,7 +90,7 @@ function buildIncorrectSellingPrices(rows) {
     }
   }
 
-  const issues = [];
+  const products = [];
 
   Object.values(groupedByItem).forEach((itemData) => {
     const mrpGroups = itemData.items.reduce((acc, item) => {
@@ -98,17 +100,21 @@ function buildIncorrectSellingPrices(rows) {
       return acc;
     }, {});
 
-    let hasIssue = false;
-
     Object.keys(mrpGroups).forEach((mrp) => {
       const sellingPricesForMrp = mrpGroups[mrp]
         .map((item) => trimStr(item.Old_Selling_Price))
         .filter((price) => price !== "");
 
       const uniqueSellingPrices = [...new Set(sellingPricesForMrp)];
+      if (!uniqueSellingPrices.length) return;
+
+      itemData.allSellingPrices.push({
+        mrp,
+        sellingPrices: uniqueSellingPrices,
+      });
 
       if (uniqueSellingPrices.length > 1) {
-        hasIssue = true;
+        itemData.hasIssue = true;
         itemData.incorrectSellingPrices.push({
           mrp,
           sellingPrices: uniqueSellingPrices,
@@ -116,12 +122,10 @@ function buildIncorrectSellingPrices(rows) {
       }
     });
 
-    if (hasIssue) {
-      issues.push(itemData);
-    }
+    products.push(itemData);
   });
 
-  return issues;
+  return products;
 }
 
 function mapUploadRow(row) {
@@ -152,6 +156,10 @@ function attachExpectedSellingPrices(products, rulesByItemCode) {
     const rule = rulesByItemCode.get(product.Item_Code) ?? null;
     const issueMrps = (product.incorrectSellingPrices || []).map(
       (entry) => entry.mrp
+    );
+    product.allExpectedSellingPrices = buildExpectedSellingPrices(
+      product.items,
+      rule
     );
     product.expectedSellingPrices = buildExpectedSellingPrices(
       product.items,
@@ -192,7 +200,8 @@ class PriceCheckerUsecase {
       this.priceCheckerRepo.getMeta(),
     ]);
 
-    const products = buildIncorrectSellingPrices(rows || []);
+    const products = buildProducts(rows || []);
+    const issueProductCount = products.filter((product) => product.hasIssue).length;
     const itemCodes = products
       .map((product) => parseIntId(product.Item_Code))
       .filter((code) => code != null);
@@ -230,7 +239,8 @@ class PriceCheckerUsecase {
             uploaded_at: meta.uploaded_at,
             uploaded_by: meta.uploaded_by,
             total_rows: meta.total_rows,
-            issue_product_count: products.length,
+            issue_product_count: issueProductCount,
+            total_product_count: products.length,
           }
         : null,
       data: products,
