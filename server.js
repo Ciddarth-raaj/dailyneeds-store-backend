@@ -283,6 +283,9 @@ class Server {
     this.priceCheckerRepo = require("./repository/price_checker")(
       this.mysql.connection
     );
+    this.itemMarkupdownRepo = require("./repository/item_markupdown")(
+      this.mysql.connection
+    );
   }
 
   initUsecases() {
@@ -509,6 +512,9 @@ class Server {
     this.priceCheckerUsecase = require("./usecase/price_checker")(
       this.priceCheckerRepo
     );
+    this.itemMarkupdownUsecase = require("./usecase/item_markupdown")(
+      this.itemMarkupdownRepo
+    );
     this.synker = require("./services/synker")(
       this.productUsecase,
       this.categoryUsecase,
@@ -696,6 +702,9 @@ class Server {
     const priceCheckerRouter = require("./routes/price_checker")(
       this.priceCheckerUsecase
     );
+    const itemMarkupdownRouter = require("./routes/item_markupdown")(
+      this.itemMarkupdownUsecase
+    );
 
     app.use("/document", documentRouter.getRouter());
     app.use("/whatsapp", whatsappRouter.getRouter());
@@ -772,6 +781,7 @@ class Server {
     app.use("/product-offers", productOffersRouter.getRouter());
     app.use("/product-sales", productSalesRouter.getRouter());
     app.use("/dead-stock-items", deadStockItemsRouter.getRouter());
+    app.use("/item-markupdown", itemMarkupdownRouter.getRouter());
     app.use("/stock-received", stockReceivedRouter.getRouter());
     app.use("/stock-holding-report", stockHoldingReportRouter.getRouter());
     app.use("/price-checker", priceCheckerRouter.getRouter());
