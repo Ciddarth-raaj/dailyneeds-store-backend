@@ -4,6 +4,16 @@ const TABLE = "product_offers";
 
 const ALLOWED_UPDATE_KEYS = ["mrp", "selling_price", "opening_stock", "is_active"];
 
+const PRODUCT_JOINS = `
+LEFT JOIN product_table pt ON pt.product_id = po.product_id
+LEFT JOIN product_distributor_master pdm ON pt.distributor_id = pdm.cid
+LEFT JOIN product_distributor pd_map ON pd_map.cid = pdm.cid
+LEFT JOIN new_employee ne ON ne.employee_id = pd_map.buyer_id`;
+
+const PRODUCT_SELECT = `po.product_id, po.mrp, po.selling_price, po.opening_stock, po.stock_input, po.stock_output, po.is_active, po.created_at, po.updated_at,
+                pt.de_name,
+                COALESCE(ne.employee_name, pt.buyer_name) AS buyer_name`;
+
 function logError(component, code, description, ref = {}) {
   logger.Log({
     level: logger.LEVEL.ERROR,
@@ -23,10 +33,9 @@ class ProductOffersRepository {
   getAll() {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT po.product_id, po.mrp, po.selling_price, po.opening_stock, po.stock_input, po.stock_output, po.is_active, po.created_at, po.updated_at,
-                pt.de_name
+        `SELECT ${PRODUCT_SELECT}
          FROM \`${TABLE}\` po
-         LEFT JOIN product_table pt ON pt.product_id = po.product_id
+         ${PRODUCT_JOINS}
          ORDER BY po.product_id ASC`,
         [],
         (err, rows) => {
@@ -43,10 +52,9 @@ class ProductOffersRepository {
   getByProductId(product_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT po.product_id, po.mrp, po.selling_price, po.opening_stock, po.stock_input, po.stock_output, po.is_active, po.created_at, po.updated_at,
-                pt.de_name
+        `SELECT ${PRODUCT_SELECT}
          FROM \`${TABLE}\` po
-         LEFT JOIN product_table pt ON pt.product_id = po.product_id
+         ${PRODUCT_JOINS}
          WHERE po.product_id = ?`,
         [product_id],
         (err, rows) => {
