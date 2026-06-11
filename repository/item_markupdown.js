@@ -84,6 +84,40 @@ class ItemMarkupdownRepository {
     });
   }
 
+  listByItemCodes(itemCodes) {
+    return new Promise((resolve, reject) => {
+      if (!Array.isArray(itemCodes) || itemCodes.length === 0) {
+        resolve([]);
+        return;
+      }
+
+      const ph = itemCodes.map(() => "?").join(", ");
+      this.db.query(
+        `SELECT
+          item_code,
+          mpfd_class_type,
+          mpfd_id,
+          mpfd_markup_down,
+          mpfd_price_parameter,
+          mpfd_value,
+          mpfd_amt_perc,
+          mpfd_roundoff_type,
+          mpfd_roundoff_value,
+          mpfd_status,
+          mpfd_mrp_price_param,
+          mpfd_mrp_value,
+          mpfd_mrp_amt_perc
+        FROM \`${TABLE}\`
+        WHERE item_code IN (${ph})`,
+        itemCodes,
+        (err, rows) => {
+          if (err) reject(err);
+          else resolve(rows || []);
+        }
+      );
+    });
+  }
+
   truncateAndBulkInsert(rows) {
     return new Promise((resolve, reject) => {
       this.db.query(`TRUNCATE TABLE \`${TABLE}\``, async (errTrunc) => {

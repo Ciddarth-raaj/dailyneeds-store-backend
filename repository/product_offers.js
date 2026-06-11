@@ -60,6 +60,34 @@ class ProductOffersRepository {
     });
   }
 
+  listActiveSellingPricesByProductIds(product_ids) {
+    return new Promise((resolve, reject) => {
+      if (!Array.isArray(product_ids) || product_ids.length === 0) {
+        resolve([]);
+        return;
+      }
+      const ph = product_ids.map(() => "?").join(", ");
+      this.db.query(
+        `SELECT product_id, selling_price
+         FROM \`${TABLE}\`
+         WHERE product_id IN (${ph}) AND is_active = 1`,
+        product_ids,
+        (err, rows) => {
+          if (err) {
+            logError(
+              "REPOSITORY.PRODUCT_OFFERS",
+              "REPOSITORY.PRODUCT_OFFERS.LIST_ACTIVE_SELLING_BY_PRODUCT_IDS",
+              err.toString(),
+              {}
+            );
+            return reject(err);
+          }
+          resolve(rows || []);
+        }
+      );
+    });
+  }
+
   listOffersStockByProductIds(product_ids) {
     return new Promise((resolve, reject) => {
       if (!Array.isArray(product_ids) || product_ids.length === 0) {

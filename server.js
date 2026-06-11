@@ -510,7 +510,9 @@ class Server {
       this.outletRepo
     );
     this.priceCheckerUsecase = require("./usecase/price_checker")(
-      this.priceCheckerRepo
+      this.priceCheckerRepo,
+      this.itemMarkupdownRepo,
+      this.productOffersRepo
     );
     this.itemMarkupdownUsecase = require("./usecase/item_markupdown")(
       this.itemMarkupdownRepo

@@ -1,5 +1,9 @@
 const logger = require("../utils/logger");
 const priceCheckerJobs = require("../services/price_checker_jobs");
+const {
+  buildExpectedSellingPrices,
+  enrichLineItemExpectedSelling,
+} = require("../utils/expectedSellingPrice");
 
 function trimStr(v) {
   if (v == null) return "";
@@ -143,9 +147,43 @@ function mapUploadRow(row) {
   ];
 }
 
+function attachExpectedSellingPrices(products, rulesByItemCode) {
+  for (const product of products) {
+    const rule = rulesByItemCode.get(product.Item_Code) ?? null;
+    const issueMrps = (product.incorrectSellingPrices || []).map(
+      (entry) => entry.mrp
+    );
+    product.expectedSellingPrices = buildExpectedSellingPrices(
+      product.items,
+      rule,
+      issueMrps
+    );
+    product.items = product.items.map((item) =>
+      enrichLineItemExpectedSelling(item, rule)
+    );
+  }
+  return products;
+}
+
+function attachOfferPrices(products, offersByProductId) {
+  for (const product of products) {
+    const sellingPrice = offersByProductId.get(product.Item_Code);
+    const offerPrice =
+      sellingPrice != null && sellingPrice !== "" ? sellingPrice : null;
+    product.offerPrice = offerPrice;
+    product.items = product.items.map((item) => ({
+      ...item,
+      offer_price: offerPrice ?? "",
+    }));
+  }
+  return products;
+}
+
 class PriceCheckerUsecase {
-  constructor(priceCheckerRepo) {
+  constructor(priceCheckerRepo, itemMarkupdownRepo, productOffersRepo) {
     this.priceCheckerRepo = priceCheckerRepo;
+    this.itemMarkupdownRepo = itemMarkupdownRepo;
+    this.productOffersRepo = productOffersRepo;
   }
 
   async listForClient() {
@@ -155,6 +193,35 @@ class PriceCheckerUsecase {
     ]);
 
     const products = buildIncorrectSellingPrices(rows || []);
+    const itemCodes = products
+      .map((product) => parseIntId(product.Item_Code))
+      .filter((code) => code != null);
+
+    if (itemCodes.length && this.itemMarkupdownRepo) {
+      const rules = await this.itemMarkupdownRepo.listByItemCodes(itemCodes);
+      const rulesByItemCode = new Map(
+        (rules || []).map((rule) => [String(rule.item_code), rule])
+      );
+      attachExpectedSellingPrices(products, rulesByItemCode);
+    } else {
+      attachExpectedSellingPrices(products, new Map());
+    }
+
+    if (itemCodes.length && this.productOffersRepo) {
+      const offers =
+        await this.productOffersRepo.listActiveSellingPricesByProductIds(
+          itemCodes
+        );
+      const offersByProductId = new Map(
+        (offers || []).map((offer) => [
+          String(offer.product_id),
+          offer.selling_price,
+        ])
+      );
+      attachOfferPrices(products, offersByProductId);
+    } else {
+      attachOfferPrices(products, new Map());
+    }
 
     return {
       code: 200,
@@ -283,4 +350,9 @@ class PriceCheckerUsecase {
   }
 }
 
-module.exports = (priceCheckerRepo) => new PriceCheckerUsecase(priceCheckerRepo);
+module.exports = (priceCheckerRepo, itemMarkupdownRepo, productOffersRepo) =>
+  new PriceCheckerUsecase(
+    priceCheckerRepo,
+    itemMarkupdownRepo,
+    productOffersRepo
+  );
