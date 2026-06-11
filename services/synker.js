@@ -147,16 +147,6 @@ class Synker {
 
   initCronJobs(cronService) {
     // this.syncProductsWithLogging();
-    this.syncStockHoldingReportWithLogging().catch((err) => {
-      logger.Log({
-        level: logger.LEVEL.ERROR,
-        component: "SERVICE.SYNKER",
-        code: "SERVICE.SYNKER.STOCK-HOLDING-SYNC",
-        description: err.toString(),
-        category: "",
-        ref: { phase: "startup" },
-      });
-    });
     // Schedule CRON job for product sync
     cronService.register("product_sync", CRON_SYNTAX_PRODUCT, async () => {
       await this.syncProductsWithLogging();
