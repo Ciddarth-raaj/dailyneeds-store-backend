@@ -118,6 +118,9 @@ function buildProducts(rows) {
         itemData.incorrectSellingPrices.push({
           mrp,
           sellingPrices: uniqueSellingPrices,
+          hasConflict: true,
+          mismatchesExpected: false,
+          hasIssue: true,
         });
       }
     });
@@ -126,6 +129,61 @@ function buildProducts(rows) {
   });
 
   return products;
+}
+
+function sellingPricesMatch(actual, expected) {
+  const actualValue = parseDecimal(actual);
+  const expectedValue = parseDecimal(expected);
+  if (actualValue == null || expectedValue == null) {
+    return trimStr(actual) === trimStr(expected);
+  }
+  return Math.round(actualValue * 100) === Math.round(expectedValue * 100);
+}
+
+function enrichSellingPriceIssues(product) {
+  const mrpGroups = {};
+
+  for (const item of product.items || []) {
+    const mrp = trimStr(item.Old_MRP);
+    const selling = trimStr(item.Old_Selling_Price);
+    const expected = trimStr(item.Expected_Selling);
+    if (!mrp || !selling) continue;
+
+    if (!mrpGroups[mrp]) {
+      mrpGroups[mrp] = {
+        mrp,
+        sellingPriceSet: new Set(),
+        mismatchesExpected: false,
+      };
+    }
+
+    mrpGroups[mrp].sellingPriceSet.add(selling);
+
+    if (expected && !sellingPricesMatch(selling, expected)) {
+      mrpGroups[mrp].mismatchesExpected = true;
+    }
+  }
+
+  product.allSellingPrices = Object.values(mrpGroups)
+    .map((group) => {
+      const sellingPrices = [...group.sellingPriceSet];
+      const hasConflict = sellingPrices.length > 1;
+      const mismatchesExpected = group.mismatchesExpected;
+
+      return {
+        mrp: group.mrp,
+        sellingPrices,
+        hasConflict,
+        mismatchesExpected,
+        hasIssue: hasConflict || mismatchesExpected,
+      };
+    })
+    .sort((a, b) => trimStr(a.mrp).localeCompare(trimStr(b.mrp)));
+
+  product.incorrectSellingPrices = product.allSellingPrices.filter(
+    (group) => group.hasIssue
+  );
+  product.hasIssue = product.incorrectSellingPrices.length > 0;
 }
 
 function mapUploadRow(row) {
@@ -154,20 +212,21 @@ function mapUploadRow(row) {
 function attachExpectedSellingPrices(products, rulesByItemCode) {
   for (const product of products) {
     const rule = rulesByItemCode.get(product.Item_Code) ?? null;
-    const issueMrps = (product.incorrectSellingPrices || []).map(
-      (entry) => entry.mrp
+    product.items = product.items.map((item) =>
+      enrichLineItemExpectedSelling(item, rule)
     );
     product.allExpectedSellingPrices = buildExpectedSellingPrices(
       product.items,
       rule
     );
+    enrichSellingPriceIssues(product);
+    const issueMrps = (product.incorrectSellingPrices || []).map(
+      (entry) => entry.mrp
+    );
     product.expectedSellingPrices = buildExpectedSellingPrices(
       product.items,
       rule,
       issueMrps
-    );
-    product.items = product.items.map((item) =>
-      enrichLineItemExpectedSelling(item, rule)
     );
   }
   return products;
@@ -201,7 +260,6 @@ class PriceCheckerUsecase {
     ]);
 
     const products = buildProducts(rows || []);
-    const issueProductCount = products.filter((product) => product.hasIssue).length;
     const itemCodes = products
       .map((product) => parseIntId(product.Item_Code))
       .filter((code) => code != null);
@@ -231,6 +289,8 @@ class PriceCheckerUsecase {
     } else {
       attachOfferPrices(products, new Map());
     }
+
+    const issueProductCount = products.filter((product) => product.hasIssue).length;
 
     return {
       code: 200,
