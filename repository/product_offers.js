@@ -12,7 +12,8 @@ LEFT JOIN new_employee ne ON ne.employee_id = pd_map.buyer_id`;
 
 const PRODUCT_SELECT = `po.product_id, po.mrp, po.selling_price, po.opening_stock, po.stock_input, po.stock_output, po.is_active, po.created_at, po.updated_at,
                 pt.de_name,
-                COALESCE(ne.employee_name, pt.buyer_name) AS buyer_name`;
+                COALESCE(ne.employee_name, pt.buyer_name) AS buyer_name,
+                COALESCE(pdm.mdm_dist_name, pt.de_distributor) AS distributor_name`;
 
 function logError(component, code, description, ref = {}) {
   logger.Log({
