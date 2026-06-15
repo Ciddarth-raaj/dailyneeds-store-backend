@@ -286,6 +286,9 @@ class Server {
     this.itemMarkupdownRepo = require("./repository/item_markupdown")(
       this.mysql.connection
     );
+    this.apiSyncLogRepo = require("./repository/api_sync_log")(
+      this.mysql.connection
+    );
   }
 
   initUsecases() {
@@ -517,6 +520,11 @@ class Server {
     this.itemMarkupdownUsecase = require("./usecase/item_markupdown")(
       this.itemMarkupdownRepo
     );
+    this.apiSyncLogUsecase = require("./usecase/api_sync_log")(
+      this.apiSyncLogRepo
+    );
+    const ApiSyncLogger = require("./utils/api_sync_logger");
+    this.apiSyncLogger = new ApiSyncLogger(this.apiSyncLogRepo);
     this.synker = require("./services/synker")(
       this.productUsecase,
       this.categoryUsecase,
@@ -534,6 +542,10 @@ class Server {
   }
 
   initRoutes() {
+    if (this.apiSyncLogger) {
+      app.use(this.apiSyncLogger.middleware());
+    }
+
     const authMiddleWare = require("./middlewares/auth");
     app.use(authMiddleWare);
 
@@ -707,6 +719,9 @@ class Server {
     const itemMarkupdownRouter = require("./routes/item_markupdown")(
       this.itemMarkupdownUsecase
     );
+    const apiSyncLogRouter = require("./routes/api_sync_log")(
+      this.apiSyncLogUsecase
+    );
 
     app.use("/document", documentRouter.getRouter());
     app.use("/whatsapp", whatsappRouter.getRouter());
@@ -787,6 +802,7 @@ class Server {
     app.use("/stock-received", stockReceivedRouter.getRouter());
     app.use("/stock-holding-report", stockHoldingReportRouter.getRouter());
     app.use("/price-checker", priceCheckerRouter.getRouter());
+    app.use("/api-sync-log", apiSyncLogRouter.getRouter());
   }
 
   initServices() {
@@ -888,7 +904,7 @@ class Server {
       }
     );
 
-    this.synker.initCronJobs(this.cronService);
+    this.synker.initCronJobs(this.cronService, this.apiSyncLogger);
     this.cronService.start();
 
     // Wire synker back into cleaningPackingUsecase after service creation

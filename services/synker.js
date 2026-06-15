@@ -9,8 +9,8 @@ const { capitalizeWords } = require("../utils/string");
 
 const logger = require("../utils/logger");
 const deliumConfig = require("../config/delium");
-const GOFRUGAL_API_KEY =
-  "92389031420AEF2B22174FA933F178040AFD9395A5E9C3F013A74C4CA152CE786116998975B7AF31";
+// const GOFRUGAL_API_KEY =
+//   "92389031420AEF2B22174FA933F178040AFD9395A5E9C3F013A74C4CA152CE786116998975B7AF31";
 
 const DIGISME_API_KEY =
   "87961db9-7af8-472f-bf20-41c4f8ba117d:6eGalmciCUs09JToTitdJeOJzO4VZr";
@@ -145,23 +145,49 @@ class Synker {
     return Object.keys(changes).length ? changes : null;
   }
 
-  initCronJobs(cronService) {
-    // this.syncProductsWithLogging();
-    // Schedule CRON job for product sync
-    cronService.register("product_sync", CRON_SYNTAX_PRODUCT, async () => {
-      await this.syncProductsWithLogging();
+  initCronJobs(cronService, apiSyncLogger) {
+    const wrap = (logType, path, fn) =>
+      apiSyncLogger ? apiSyncLogger.wrapCron(logType, path, fn) : fn;
+
+    const productSyncJob = wrap("product_sync", "/product/sync", async () => {
+      return await this.syncProductsWithLogging();
     });
 
-    cronService.register("employee_sync", CRON_SYNTAX_EMPLOYEE, async () => {
-      await this.syncDigismeEmployees();
+    productSyncJob().catch((err) => {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "SERVICE.SYNKER",
+        code: "SERVICE.SYNKER.PRODUCT-SYNC-INIT",
+        description: err?.message || String(err),
+        category: "",
+        ref: {},
+      });
     });
+
+    cronService.register(
+      "product_sync",
+      CRON_SYNTAX_PRODUCT,
+      productSyncJob
+    );
+
+    cronService.register(
+      "employee_sync",
+      CRON_SYNTAX_EMPLOYEE,
+      wrap("employee_sync", "/employee/sync", async () => {
+        await this.syncDigismeEmployees();
+      })
+    );
 
     cronService.register(
       "stock_holding_report_sync",
       CRON_SYNTAX_STOCK_HOLDING,
-      async () => {
-        await this.syncStockHoldingReportWithLogging();
-      }
+      wrap(
+        "stock_holding_report_sync",
+        "/stock-holding-report/sync",
+        async () => {
+          await this.syncStockHoldingReportWithLogging();
+        }
+      )
     );
   }
 
@@ -366,6 +392,7 @@ class Synker {
 
       // Write to log file
       this.writeToLogFile(logEntry);
+      return result;
     } catch (error) {
       const endTime = new Date();
       const timeTaken = endTime - startTime;
@@ -382,6 +409,7 @@ class Synker {
 
       // Write error to log file
       this.writeToLogFile(logEntry);
+      throw error;
     }
   }
 
@@ -436,12 +464,34 @@ class Synker {
 
   async syncProducts() {
     try {
-      const goFrugalItemsCount = await this._fetchGoFrugalItemsCount();
-      const goFrugalItems = await this._fetchGoFrugalItems(goFrugalItemsCount);
+      const warnings = [];
+      // const goFrugalItems = [];
+      // GoFrugal REST API disabled — not used anymore
+      // try {
+      //   const goFrugalItemsCount = await this._fetchGoFrugalItemsCount();
+      //   goFrugalItems = await this._fetchGoFrugalItems(goFrugalItemsCount);
+      // } catch (err) {
+      //   const status = err?.response?.status;
+      //   if (status === 401 || status === 403) {
+      //     const warning = `GoFrugal API auth failed (${status}); continuing without gf_* enrichment`;
+      //     warnings.push(warning);
+      //     logger.Log({
+      //       level: logger.LEVEL.WARN,
+      //       component: "SERVICE.SYNKER",
+      //       code: "SERVICE.SYNKER.GOFRUGAL-AUTH",
+      //       description: warning,
+      //       category: "",
+      //       ref: { status },
+      //     });
+      //   } else {
+      //     throw err;
+      //   }
+      // }
       const deliumItems = await this._fetchDeliumItems();
 
-      const { itemPrices, outlets, products } =
-        this._transformGofrugalItems(goFrugalItems);
+      // const { itemPrices, outlets, products } =
+      //   this._transformGofrugalItems(goFrugalItems);
+      const products = {};
       const {
         brands,
         categories,
@@ -529,6 +579,7 @@ class Synker {
         subcategoriesProcessed,
         brandsProcessed,
         departmentsProcessed,
+        warnings: warnings.length ? warnings : undefined,
       };
     } catch (err) {
       console.log(err);
@@ -536,116 +587,116 @@ class Synker {
     }
   }
 
-  _fetchGoFrugalItems(limit) {
-    return new Promise(async (resolve, reject) => {
-      try {
-        const response = await axios({
-          method: "GET",
-          url: `http://dailyneeds.gofrugal.com/RayMedi_HQ/api/v1/items?limit=${limit}`,
-          headers: {
-            "X-Auth-Token": GOFRUGAL_API_KEY,
-          },
-        });
-        if (response.status !== 200) {
-          logger.Log({
-            level: logger.LEVEL.ERROR,
-            component: "SERVICE.SYNKER",
-            code: "SERVICE.SYNKER.GOFRUGAL-FETCH",
-            description: err.toString(),
-            category: "",
-            ref: {},
-          });
-          reject();
-          return;
-        }
-        const items = response.data.items;
-        resolve(items);
-      } catch (err) {
-        logger.Log({
-          level: logger.LEVEL.ERROR,
-          component: "SERVICE.SYNKER",
-          code: "SERVICE.SYNKER.GOFRUGAL-FETCH",
-          description: err.toString(),
-          category: "",
-          ref: {},
-        });
-        reject(err);
-      }
-    });
-  }
+  // _fetchGoFrugalItems(limit) {
+  //   return new Promise(async (resolve, reject) => {
+  //     try {
+  //       const response = await axios({
+  //         method: "GET",
+  //         url: `http://dailyneeds.gofrugal.com/RayMedi_HQ/api/v1/items?limit=${limit}`,
+  //         headers: {
+  //           "X-Auth-Token": GOFRUGAL_API_KEY,
+  //         },
+  //       });
+  //       if (response.status !== 200) {
+  //         logger.Log({
+  //           level: logger.LEVEL.ERROR,
+  //           component: "SERVICE.SYNKER",
+  //           code: "SERVICE.SYNKER.GOFRUGAL-FETCH",
+  //           description: err.toString(),
+  //           category: "",
+  //           ref: {},
+  //         });
+  //         reject();
+  //         return;
+  //       }
+  //       const items = response.data.items;
+  //       resolve(items);
+  //     } catch (err) {
+  //       logger.Log({
+  //         level: logger.LEVEL.ERROR,
+  //         component: "SERVICE.SYNKER",
+  //         code: "SERVICE.SYNKER.GOFRUGAL-FETCH",
+  //         description: err.toString(),
+  //         category: "",
+  //         ref: {},
+  //       });
+  //       reject(err);
+  //     }
+  //   });
+  // }
 
-  _fetchGoFrugalItemsCount() {
-    return new Promise(async (resolve, reject) => {
-      try {
-        const response = await axios({
-          method: "GET",
-          url: "http://dailyneeds.gofrugal.com/RayMedi_HQ/api/v1/items?limit=1",
-          headers: {
-            "X-Auth-Token": GOFRUGAL_API_KEY,
-          },
-        });
-        if (response.status !== 200) {
-          logger.Log({
-            level: logger.LEVEL.ERROR,
-            component: "SERVICE.SYNKER",
-            code: "SERVICE.SYNKER.GOFRUGAL-FETCH",
-            description: err.toString(),
-            category: "",
-            ref: {},
-          });
-          reject();
-          return;
-        }
-        const totalItems = Number(response.data.total_records);
-        resolve(totalItems);
-      } catch (err) {
-        logger.Log({
-          level: logger.LEVEL.ERROR,
-          component: "SERVICE.SYNKER",
-          code: "SERVICE.SYNKER.GOFRUGAL-FETCH",
-          description: err.toString(),
-          category: "",
-          ref: {},
-        });
-        reject(err);
-      }
-    });
-  }
+  // _fetchGoFrugalItemsCount() {
+  //   return new Promise(async (resolve, reject) => {
+  //     try {
+  //       const response = await axios({
+  //         method: "GET",
+  //         url: "http://dailyneeds.gofrugal.com/RayMedi_HQ/api/v1/items?limit=1",
+  //         headers: {
+  //           "X-Auth-Token": GOFRUGAL_API_KEY,
+  //         },
+  //       });
+  //       if (response.status !== 200) {
+  //         logger.Log({
+  //           level: logger.LEVEL.ERROR,
+  //           component: "SERVICE.SYNKER",
+  //           code: "SERVICE.SYNKER.GOFRUGAL-FETCH",
+  //           description: err.toString(),
+  //           category: "",
+  //           ref: {},
+  //         });
+  //         reject();
+  //         return;
+  //       }
+  //       const totalItems = Number(response.data.total_records);
+  //       resolve(totalItems);
+  //     } catch (err) {
+  //       logger.Log({
+  //         level: logger.LEVEL.ERROR,
+  //         component: "SERVICE.SYNKER",
+  //         code: "SERVICE.SYNKER.GOFRUGAL-FETCH",
+  //         description: err.toString(),
+  //         category: "",
+  //         ref: {},
+  //       });
+  //       reject(err);
+  //     }
+  //   });
+  // }
 
-  _transformGofrugalItems(goFrugalItems) {
-    try {
-      const itemPrices = [];
-      const outlets = {};
-      const products = {};
-
-      for (const item of goFrugalItems) {
-        products[item.itemId] = {
-          gf_item_name: item.itemName,
-          gf_description: item.description,
-          gf_detailed_description: item.detailedDescription,
-          gf_weight_grams: item.weightGrams,
-          gf_applies_online: item.appliesOnline,
-          gf_item_product_type: item.itemProductType,
-          gf_manufacturer: item.manufacturer,
-          gf_food_type: item.foodType,
-          gf_tax_id: item.taxId,
-          gf_status: item.status,
-        };
-
-        for (const stock of item.stock) {
-          itemPrices.push({
-            product_id: item.itemId,
-            outlet_id: stock.outletId,
-            stock: stock.stock,
-            cost_price: stock.mrp,
-            selling_price: stock.salePrice,
-          });
-          outlets[stock.outletId] = true;
-        }
-      }
-      return { itemPrices, outlets, products };
-    } catch (err) {}
-  }
+  // _transformGofrugalItems(goFrugalItems) {
+  //   try {
+  //     const itemPrices = [];
+  //     const outlets = {};
+  //     const products = {};
+  //
+  //     for (const item of goFrugalItems) {
+  //       products[item.itemId] = {
+  //         gf_item_name: item.itemName,
+  //         gf_description: item.description,
+  //         gf_detailed_description: item.detailedDescription,
+  //         gf_weight_grams: item.weightGrams,
+  //         gf_applies_online: item.appliesOnline,
+  //         gf_item_product_type: item.itemProductType,
+  //         gf_manufacturer: item.manufacturer,
+  //         gf_food_type: item.foodType,
+  //         gf_tax_id: item.taxId,
+  //         gf_status: item.status,
+  //       };
+  //
+  //       for (const stock of item.stock) {
+  //         itemPrices.push({
+  //           product_id: item.itemId,
+  //           outlet_id: stock.outletId,
+  //           stock: stock.stock,
+  //           cost_price: stock.mrp,
+  //           selling_price: stock.salePrice,
+  //         });
+  //         outlets[stock.outletId] = true;
+  //       }
+  //     }
+  //     return { itemPrices, outlets, products };
+  //   } catch (err) {}
+  // }
 
   _fetchDeliumItems() {
     return new Promise(async (resolve, reject) => {
