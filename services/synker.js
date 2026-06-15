@@ -149,25 +149,12 @@ class Synker {
     const wrap = (logType, path, fn) =>
       apiSyncLogger ? apiSyncLogger.wrapCron(logType, path, fn) : fn;
 
-    const productSyncJob = wrap("product_sync", "/product/sync", async () => {
-      return await this.syncProductsWithLogging();
-    });
-
-    productSyncJob().catch((err) => {
-      logger.Log({
-        level: logger.LEVEL.ERROR,
-        component: "SERVICE.SYNKER",
-        code: "SERVICE.SYNKER.PRODUCT-SYNC-INIT",
-        description: err?.message || String(err),
-        category: "",
-        ref: {},
-      });
-    });
-
     cronService.register(
       "product_sync",
       CRON_SYNTAX_PRODUCT,
-      productSyncJob
+      wrap("product_sync", "/product/sync", async () => {
+        return await this.syncProductsWithLogging();
+      })
     );
 
     cronService.register(
