@@ -1,4 +1,5 @@
 const logger = require("../utils/logger");
+const { formatJsonParseError } = require("../utils/jsonParseErrorContext");
 
 function errorHandler(err, req, res, next) {
   if (err.type === "request.aborted" || err.message === "request aborted") {
@@ -11,10 +12,7 @@ function errorHandler(err, req, res, next) {
   }
 
   if (err.type === "entity.parse.failed") {
-    const detail =
-      err.message && err.message !== "Unexpected token"
-        ? err.message
-        : "Request body is not valid JSON";
+    const { detail, position, context } = formatJsonParseError(err);
 
     logger.Log({
       level: logger.LEVEL.WARN,
@@ -22,13 +20,21 @@ function errorHandler(err, req, res, next) {
       code: "MIDDLEWARE.ERROR_HANDLER.PARSE_FAILED",
       description: `${req.method} ${req.originalUrl}: ${detail}`,
       category: "",
-      ref: {},
+      ref: { position, parse_context: context },
     });
 
-    return res.status(400).json({
+    const response = {
       code: 400,
       msg: `Invalid JSON body: ${detail}. Ensure Content-Type is application/json and the payload is valid JSON (no trailing commas, NaN, or truncated data).`,
-    });
+    };
+
+    if (context) {
+      response.parse_context = context;
+    } else if (position != null) {
+      response.parse_position = position;
+    }
+
+    return res.status(400).json(response);
   }
 
   if (err.type === "entity.too.large") {
