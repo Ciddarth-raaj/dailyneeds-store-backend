@@ -1,0 +1,6 @@
+ALTER TABLE `product_sales`
+  ADD COLUMN `tran_amt` DECIMAL(16, 2) NULL DEFAULT NULL AFTER `tran_qty`,
+  ADD COLUMN `disc_amt` DECIMAL(16, 2) NULL DEFAULT NULL AFTER `tran_amt`,
+  ADD COLUMN `gross_amt` DECIMAL(16, 2) NULL DEFAULT NULL AFTER `disc_amt`,
+  ADD COLUMN `net_amt` DECIMAL(16, 2) NULL DEFAULT NULL AFTER `gross_amt`,
+  ADD COLUMN `profit` DECIMAL(16, 2) NULL DEFAULT NULL AFTER `net_amt`;

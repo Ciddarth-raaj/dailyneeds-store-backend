@@ -25,12 +25,19 @@ function tranDateDdMmYyyyToMysql(s) {
 }
 
 const saleRowSchema = Joi.object({
-  RETAIL_OUTLET_ID: Joi.number().integer().required(),
+  RETAIL_OUTLET_ID: Joi.alternatives()
+    .try(Joi.string(), Joi.number())
+    .required(),
   ITEM_CODE: Joi.alternatives().try(Joi.string(), Joi.number()).required(),
   TRAN_DATE: Joi.string()
     .regex(/^\d{2}-\d{2}-\d{4}$/)
     .required(),
   TRAN_QTY: Joi.number().required(),
+  TRAN_AMT: Joi.number().required(),
+  DISC_AMT: Joi.number().required(),
+  GROSS_AMT: Joi.number().required(),
+  NET_AMT: Joi.number().required(),
+  PROFIT: Joi.number().required(),
 });
 
 const bulkSchema = Joi.array().items(saleRowSchema).min(1).required();
@@ -52,6 +59,16 @@ class ProductSalesRoutes {
         }
         const rows = [];
         for (const r of isValid.value) {
+          const retail_outlet_id = parseInt(String(r.RETAIL_OUTLET_ID).trim(), 10);
+          if (!Number.isFinite(retail_outlet_id) || retail_outlet_id <= 0) {
+            res.status(400).json({
+              code: 400,
+              msg: `Invalid RETAIL_OUTLET_ID: ${r.RETAIL_OUTLET_ID}`,
+            });
+            res.end();
+            return;
+          }
+
           const tran_date = tranDateDdMmYyyyToMysql(r.TRAN_DATE);
           if (!tran_date) {
             res.status(400).json({
@@ -62,10 +79,15 @@ class ProductSalesRoutes {
             return;
           }
           rows.push({
-            retail_outlet_id: r.RETAIL_OUTLET_ID,
+            retail_outlet_id,
             item_code: r.ITEM_CODE,
             tran_date,
             tran_qty: r.TRAN_QTY,
+            tran_amt: r.TRAN_AMT,
+            disc_amt: r.DISC_AMT,
+            gross_amt: r.GROSS_AMT,
+            net_amt: r.NET_AMT,
+            profit: r.PROFIT,
           });
         }
         const result = await this.productSalesUsecase.bulkCreate(rows);

@@ -2,7 +2,7 @@ const TABLE = "product_sales";
 const PRODUCT_OFFERS = "product_offers";
 
 /**
- * @param {Array<{ retail_outlet_id: number, item_code: string|number, tran_date: string, tran_qty: number }>} rows
+ * @param {Array<{ retail_outlet_id: number, item_code: string|number, tran_date: string, tran_qty: number, tran_amt: number, disc_amt: number, gross_amt: number, net_amt: number, profit: number }>} rows
  */
 class ProductSalesRepository {
   constructor(db) {
@@ -21,6 +21,11 @@ class ProductSalesRepository {
         item_code: String(r.item_code),
         tran_date: r.tran_date,
         tran_qty: Number(r.tran_qty),
+        tran_amt: Number(r.tran_amt),
+        disc_amt: Number(r.disc_amt),
+        gross_amt: Number(r.gross_amt),
+        net_amt: Number(r.net_amt),
+        profit: Number(r.profit),
       }));
 
       const productIds = [
@@ -89,13 +94,25 @@ class ProductSalesRepository {
 
               const valueTuples = normalized.map((r) => {
                 const pid = parseInt(String(r.item_code), 10);
-                return [r.retail_outlet_id, pid, r.tran_date, r.tran_qty];
+                return [
+                  r.retail_outlet_id,
+                  pid,
+                  r.tran_date,
+                  r.tran_qty,
+                  r.tran_amt,
+                  r.disc_amt,
+                  r.gross_amt,
+                  r.net_amt,
+                  r.profit,
+                ];
               });
-              const insPh = valueTuples.map(() => "(?, ?, ?, ?)").join(", ");
+              const insPh = valueTuples
+                .map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                .join(", ");
               const flatIns = valueTuples.flat();
 
               conn.query(
-                `INSERT INTO \`${TABLE}\` (retail_outlet_id, product_id, tran_date, tran_qty) VALUES ${insPh}`,
+                `INSERT INTO \`${TABLE}\` (retail_outlet_id, product_id, tran_date, tran_qty, tran_amt, disc_amt, gross_amt, net_amt, profit) VALUES ${insPh}`,
                 flatIns,
                 (errIns) => {
                   if (errIns) {
