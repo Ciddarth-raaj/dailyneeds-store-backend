@@ -803,6 +803,8 @@ class Server {
     app.use("/stock-holding-report", stockHoldingReportRouter.getRouter());
     app.use("/price-checker", priceCheckerRouter.getRouter());
     app.use("/api-sync-log", apiSyncLogRouter.getRouter());
+
+    app.use(require("./middlewares/errorHandler"));
   }
 
   initServices() {
