@@ -12,6 +12,25 @@ const {
 class ApiSyncLogger {
   constructor(repo) {
     this.repo = repo;
+    this.cronConfigByType = null;
+    this.cronConfigLoadedAt = 0;
+  }
+
+  async getCronExpression(logType) {
+    if (!this.repo) return "";
+    const ttlMs = 5 * 60 * 1000;
+    if (
+      !this.cronConfigByType ||
+      Date.now() - this.cronConfigLoadedAt > ttlMs
+    ) {
+      const configs = await this.repo.getAllCronConfigs();
+      this.cronConfigByType = configs.reduce((acc, config) => {
+        acc[config.log_type] = config;
+        return acc;
+      }, {});
+      this.cronConfigLoadedAt = Date.now();
+    }
+    return this.cronConfigByType[logType]?.cron_expression || "";
   }
 
   write(entry) {
@@ -50,27 +69,42 @@ class ApiSyncLogger {
         const row_count =
           metadata?.row_count ?? extractRowCount(req, responsePayload);
         const success = isSuccess(res.statusCode, responsePayload);
+        const postedAt = new Date(startedAt);
 
-        this.write({
-          log_type: typeDef.type,
-          method: req.method,
-          path: fullPath,
-          status: success ? "success" : "failed",
-          status_code: res.statusCode,
-          duration_ms,
-          row_count,
-          source: inferSource(req),
-          employee_id: req.decoded?.employee_id ?? null,
-          metadata_json: metadata,
-          error_message: success
-            ? null
-            : formatSyncError({
-                message:
-                  responsePayload?.msg ||
-                  responsePayload?.message ||
-                  "Request failed",
-                response: { status: res.statusCode, data: responsePayload },
-              }).slice(0, 512),
+        const writeEntry = async () => {
+          const cronExpression = await this.getCronExpression(typeDef.type);
+          await this.write({
+            log_type: typeDef.type,
+            method: req.method,
+            path: fullPath,
+            status: success ? "success" : "failed",
+            status_code: res.statusCode,
+            duration_ms,
+            row_count,
+            source: inferSource(req, typeDef, cronExpression, postedAt),
+            employee_id: req.decoded?.employee_id ?? null,
+            metadata_json: metadata,
+            error_message: success
+              ? null
+              : formatSyncError({
+                  message:
+                    responsePayload?.msg ||
+                    responsePayload?.message ||
+                    "Request failed",
+                  response: { status: res.statusCode, data: responsePayload },
+                }).slice(0, 512),
+          });
+        };
+
+        writeEntry().catch((err) => {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "API_SYNC_LOGGER",
+            code: "API_SYNC_LOGGER.WRITE",
+            description: err.toString(),
+            category: "",
+            ref: { log_type: typeDef.type },
+          });
         });
       });
 

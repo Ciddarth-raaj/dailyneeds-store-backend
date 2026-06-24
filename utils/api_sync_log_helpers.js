@@ -1,5 +1,56 @@
 const cron = require("node-cron");
 
+const CRON_TZ_OFFSET_MS = 330 * 60 * 1000;
+const BULK_CRON_WINDOW_MS = 10 * 60 * 1000;
+
+function toIstParts(date) {
+  const istMs = date.getTime() + CRON_TZ_OFFSET_MS;
+  const d = new Date(istMs);
+  return {
+    year: d.getUTCFullYear(),
+    month: d.getUTCMonth() + 1,
+    date: d.getUTCDate(),
+    dayOfWeek: d.getUTCDay(),
+    hour: d.getUTCHours(),
+    minute: d.getUTCMinutes(),
+  };
+}
+
+function istToUtcDate(year, month, date, hour, minute) {
+  const istMs = Date.UTC(year, month - 1, date, hour, minute, 0, 0);
+  return new Date(istMs - CRON_TZ_OFFSET_MS);
+}
+
+function startOfIstDay(date) {
+  const parts = toIstParts(date);
+  return istToUtcDate(parts.year, parts.month, parts.date, 0, 0);
+}
+
+function parseSimpleCronField(field) {
+  if (!/^\d+$/.test(String(field || "").trim())) return null;
+  const value = Number(field);
+  return Number.isFinite(value) ? value : null;
+}
+
+function isWithinCronWindow(at, cronExpression, toleranceMs = BULK_CRON_WINDOW_MS) {
+  const expr = cronExpression?.trim().split(/\s+/);
+  if (!expr || expr.length < 2) return false;
+
+  const hour = parseSimpleCronField(expr[1]);
+  const minute = parseSimpleCronField(expr[0]);
+  if (hour == null || minute == null) return false;
+
+  const parts = toIstParts(at);
+  const expectedRun = istToUtcDate(
+    parts.year,
+    parts.month,
+    parts.date,
+    hour,
+    minute
+  );
+  return Math.abs(at.getTime() - expectedRun.getTime()) <= toleranceMs;
+}
+
 function safeJsonParse(value) {
   if (value == null) return null;
   if (typeof value === "object") return value;
@@ -65,7 +116,14 @@ function extractMetadata(logType, req, payload) {
   return Object.keys(metadata).length ? metadata : null;
 }
 
-function inferSource(req) {
+function inferSource(req, typeDef, cronExpression, postedAt = new Date()) {
+  if (typeDef?.category === "bulk") {
+    if (cronExpression && isWithinCronWindow(postedAt, cronExpression)) {
+      return "cron";
+    }
+    return "manual";
+  }
+
   if (req.decoded?.employee_id) return "manual";
   const path = `${req.baseUrl || ""}${req.path || ""}`;
   if (path.includes("/gofrugal-synker/")) return "external";
@@ -80,24 +138,53 @@ function isSuccess(statusCode, payload) {
   return true;
 }
 
+function getNextCronRunIst(cronExpression, fromDate = new Date()) {
+  const expr = cronExpression.trim().split(/\s+/);
+  if (expr.length < 5) return null;
+
+  const hour = parseSimpleCronField(expr[1]);
+  const minute = parseSimpleCronField(expr[0]);
+  if (hour == null || minute == null) return null;
+
+  let cursor = startOfIstDay(fromDate);
+  const end = new Date(fromDate.getTime() + 14 * 24 * 60 * 60 * 1000);
+
+  while (cursor <= end) {
+    const parts = toIstParts(cursor);
+    if (
+      matchesCronField(expr[2], parts.date, 1, 31) &&
+      matchesCronField(expr[3], parts.month, 1, 12) &&
+      matchesCronField(expr[4], parts.dayOfWeek, 0, 6)
+    ) {
+      const runAt = istToUtcDate(
+        parts.year,
+        parts.month,
+        parts.date,
+        hour,
+        minute
+      );
+      if (runAt > fromDate) return runAt;
+    }
+    cursor = new Date(cursor.getTime() + 24 * 60 * 60 * 1000);
+  }
+  return null;
+}
+
 /**
- * Brute-force next cron run within 14 days (minute granularity).
+ * Brute-force next cron run within 14 days (minute granularity, IST).
  */
 function getNextCronRun(cronExpression, fromDate = new Date()) {
   if (!cronExpression || !cron.validate(cronExpression)) return null;
+
+  const istNext = getNextCronRunIst(cronExpression, fromDate);
+  if (istNext) return istNext;
 
   const start = new Date(fromDate.getTime());
   start.setSeconds(0, 0);
 
   for (let i = 1; i <= 14 * 24 * 60; i++) {
     const candidate = new Date(start.getTime() + i * 60000);
-    const parts = {
-      minute: candidate.getMinutes(),
-      hour: candidate.getHours(),
-      date: candidate.getDate(),
-      month: candidate.getMonth() + 1,
-      dayOfWeek: candidate.getDay(),
-    };
+    const parts = toIstParts(candidate);
     const expr = cronExpression.trim().split(/\s+/);
     if (expr.length < 5) continue;
     if (!matchesCronField(expr[0], parts.minute, 0, 59)) continue;
@@ -131,8 +218,48 @@ function matchesCronField(field, value, min, max) {
   });
 }
 
+function getExpectedRunsIst(cronExpression, daysBack = 7) {
+  const expr = cronExpression.trim().split(/\s+/);
+  if (expr.length < 5) return [];
+
+  const hour = parseSimpleCronField(expr[1]);
+  const minute = parseSimpleCronField(expr[0]);
+  if (hour == null || minute == null) return null;
+
+  const runs = [];
+  const now = new Date();
+  let cursor = startOfIstDay(
+    new Date(now.getTime() - daysBack * 24 * 60 * 60 * 1000)
+  );
+  const endDay = startOfIstDay(now);
+
+  while (cursor <= endDay) {
+    const parts = toIstParts(cursor);
+    if (
+      matchesCronField(expr[2], parts.date, 1, 31) &&
+      matchesCronField(expr[3], parts.month, 1, 12) &&
+      matchesCronField(expr[4], parts.dayOfWeek, 0, 6)
+    ) {
+      const runAt = istToUtcDate(
+        parts.year,
+        parts.month,
+        parts.date,
+        hour,
+        minute
+      );
+      if (runAt <= now) runs.push(runAt);
+    }
+    cursor = new Date(cursor.getTime() + 24 * 60 * 60 * 1000);
+  }
+  return runs;
+}
+
 function getExpectedRuns(cronExpression, daysBack = 7) {
   if (!cronExpression || !cron.validate(cronExpression)) return [];
+
+  const istRuns = getExpectedRunsIst(cronExpression, daysBack);
+  if (istRuns) return istRuns;
+
   const runs = [];
   const now = new Date();
   const start = new Date(now.getTime() - daysBack * 24 * 60 * 60 * 1000);
@@ -140,13 +267,7 @@ function getExpectedRuns(cronExpression, daysBack = 7) {
 
   for (let i = 0; i <= daysBack * 24 * 60; i++) {
     const candidate = new Date(start.getTime() + i * 60000);
-    const parts = {
-      minute: candidate.getMinutes(),
-      hour: candidate.getHours(),
-      date: candidate.getDate(),
-      month: candidate.getMonth() + 1,
-      dayOfWeek: candidate.getDay(),
-    };
+    const parts = toIstParts(candidate);
     const expr = cronExpression.trim().split(/\s+/);
     if (expr.length < 5) continue;
     if (!matchesCronField(expr[0], parts.minute, 0, 59)) continue;
@@ -159,7 +280,7 @@ function getExpectedRuns(cronExpression, daysBack = 7) {
   return runs;
 }
 
-function findMatchingLog(logs, expectedAt, toleranceMs = 20 * 60 * 1000) {
+function findMatchingLog(logs, expectedAt, toleranceMs = BULK_CRON_WINDOW_MS) {
   if (!logs?.length) return null;
   const target = expectedAt.getTime();
   let best = null;
@@ -197,10 +318,12 @@ module.exports = {
   extractRowCount,
   extractMetadata,
   inferSource,
+  isWithinCronWindow,
   isSuccess,
   formatSyncError,
   collectSyncWarnings,
   getNextCronRun,
   getExpectedRuns,
   findMatchingLog,
+  BULK_CRON_WINDOW_MS,
 };
