@@ -1,0 +1,22 @@
+CREATE TABLE `offer_issue` (
+  `moi_offer_id` BIGINT NOT NULL,
+  `moi_offer_sl_no` BIGINT NOT NULL DEFAULT 0,
+  `moi_offer_on` VARCHAR(15) NULL DEFAULT NULL,
+  `moi_offer_satisfied` VARCHAR(10) NULL DEFAULT NULL,
+  `moi_offer_type` BIGINT NULL DEFAULT NULL,
+  `moi_item_code` INT(11) NULL DEFAULT NULL,
+  `moi_offer_value` DECIMAL(20, 4) NULL DEFAULT NULL,
+  `moi_offer_extra_condition` BIGINT NULL DEFAULT NULL,
+  `moi_offer_extra_condition_qty` DECIMAL(20, 4) NULL DEFAULT NULL,
+  `ts` DATE NULL DEFAULT NULL,
+  `tsid` BIGINT NULL DEFAULT NULL,
+  `retail_outlet_id` INT(11) NOT NULL,
+  `timestamp` VARCHAR(30) NULL DEFAULT NULL,
+  `hq_timestamp_id` BIGINT NOT NULL DEFAULT 0,
+  `moi_conv_type` VARCHAR(50) NULL DEFAULT NULL,
+  `moi_conv_factor` DECIMAL(20, 4) NULL DEFAULT NULL,
+  `moi_batch_no` VARCHAR(100) NULL DEFAULT NULL,
+  PRIMARY KEY (`moi_offer_id`, `moi_offer_sl_no`, `retail_outlet_id`),
+  CONSTRAINT `fk_offer_issue_offer_hdr` FOREIGN KEY (`moi_offer_id`, `retail_outlet_id`) REFERENCES `offer_hdr` (`moh_offer_id`, `retail_outlet_id`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `fk_offer_issue_outlet` FOREIGN KEY (`retail_outlet_id`) REFERENCES `outlets` (`outlet_id`) ON DELETE RESTRICT ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

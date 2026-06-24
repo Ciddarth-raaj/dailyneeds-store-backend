@@ -292,6 +292,9 @@ class Server {
     this.apiSyncLogRepo = require("./repository/api_sync_log")(
       this.mysql.connection
     );
+    this.hqOffersRepo = require("./repository/hq_offers")(
+      this.mysql.connection
+    );
   }
 
   initUsecases() {
@@ -526,6 +529,9 @@ class Server {
     this.itemMarkupdownUsecase = require("./usecase/item_markupdown")(
       this.itemMarkupdownRepo
     );
+    this.hqOffersUsecase = require("./usecase/hq_offers")(
+      this.hqOffersRepo
+    );
     this.apiSyncLogUsecase = require("./usecase/api_sync_log")(
       this.apiSyncLogRepo
     );
@@ -731,6 +737,9 @@ class Server {
     const apiSyncLogRouter = require("./routes/api_sync_log")(
       this.apiSyncLogUsecase
     );
+    const hqOffersRouter = require("./routes/hq_offers")(
+      this.hqOffersUsecase
+    );
 
     app.use("/document", documentRouter.getRouter());
     app.use("/whatsapp", whatsappRouter.getRouter());
@@ -813,6 +822,7 @@ class Server {
     app.use("/stock-holding-report", stockHoldingReportRouter.getRouter());
     app.use("/price-checker", priceCheckerRouter.getRouter());
     app.use("/api-sync-log", apiSyncLogRouter.getRouter());
+    app.use("/hq-offers", hqOffersRouter.getRouter());
 
     app.use(require("./middlewares/errorHandler"));
   }
