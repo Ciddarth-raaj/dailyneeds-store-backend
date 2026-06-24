@@ -122,6 +122,151 @@ VALUES ?
 ON DUPLICATE KEY UPDATE ${ISSUE_UPDATE_ASSIGNMENTS}`;
 
 const LOOKUP_BATCH_SIZE = 1000;
+const LIST_ALL_CAP = 50000;
+
+const HDR_SORT_COLUMNS = {
+  moh_offer_id: "h.moh_offer_id",
+  moh_offer_name: "h.moh_offer_name",
+  moh_offer_st_date: "h.moh_offer_st_date",
+  moh_offer_end_date: "h.moh_offer_end_date",
+  branch_name: "o.outlet_name",
+  product_count: "product_count",
+};
+
+function statusWhereClause(status) {
+  if (status === "inactive") {
+    return "(h.moh_offer_status IS NULL OR h.moh_offer_status != 1)";
+  }
+  if (status === "active") {
+    return "h.moh_offer_status = 1";
+  }
+  return "1=1";
+}
+
+function resolveSort(sortBy, sortDir) {
+  const column = HDR_SORT_COLUMNS[sortBy] || HDR_SORT_COLUMNS.moh_offer_id;
+  const dir = String(sortDir || "desc").toLowerCase() === "asc" ? "ASC" : "DESC";
+  return { column, dir };
+}
+
+function productCountSubquery() {
+  return `(
+    SELECT COUNT(*)
+    FROM offer_products op
+    WHERE op.mosp_offer_id = h.moh_offer_id
+      AND op.retail_outlet_id = h.retail_outlet_id
+  )`;
+}
+
+function buildHdrFilterWhere(filterModel = {}) {
+  const clauses = [];
+  const params = [];
+
+  const idFilter = filterModel.moh_offer_id;
+  if (idFilter?.filter != null && String(idFilter.filter).trim() !== "") {
+    const like = `%${String(idFilter.filter).trim()}%`;
+    clauses.push(
+      "(CAST(h.moh_offer_id AS CHAR) LIKE ? OR CAST(COALESCE(h.moh_offer_hq_id, h.moh_offer_id) AS CHAR) LIKE ?)"
+    );
+    params.push(like, like);
+  }
+
+  const nameFilter = filterModel.moh_offer_name;
+  if (nameFilter?.filter != null && String(nameFilter.filter).trim() !== "") {
+    clauses.push("h.moh_offer_name LIKE ?");
+    params.push(`%${String(nameFilter.filter).trim()}%`);
+  }
+
+  const branchFilter = filterModel.branch_name;
+  if (branchFilter?.filter != null && String(branchFilter.filter).trim() !== "") {
+    clauses.push("o.outlet_name LIKE ?");
+    params.push(`%${String(branchFilter.filter).trim()}%`);
+  }
+
+  const countFilter = filterModel.product_count;
+  if (countFilter?.filter != null && countFilter.filter !== "") {
+    const n = Number(countFilter.filter);
+    if (!Number.isNaN(n)) {
+      const sub = productCountSubquery();
+      const type = countFilter.type || "equals";
+      if (type === "equals") {
+        clauses.push(`${sub} = ?`);
+        params.push(n);
+      } else if (type === "greaterThan") {
+        clauses.push(`${sub} > ?`);
+        params.push(n);
+      } else if (type === "lessThan") {
+        clauses.push(`${sub} < ?`);
+        params.push(n);
+      } else if (type === "greaterThanOrEqual") {
+        clauses.push(`${sub} >= ?`);
+        params.push(n);
+      } else if (type === "lessThanOrEqual") {
+        clauses.push(`${sub} <= ?`);
+        params.push(n);
+      }
+    }
+  }
+
+  const applyDateFilter = (column, filterDef) => {
+    if (!filterDef) return;
+    if (filterDef.type === "equals" && filterDef.filter) {
+      clauses.push(`DATE(${column}) = DATE(?)`);
+      params.push(filterDef.filter);
+      return;
+    }
+    if (filterDef.type === "inRange") {
+      if (filterDef.dateFrom) {
+        clauses.push(`DATE(${column}) >= DATE(?)`);
+        params.push(filterDef.dateFrom);
+      }
+      if (filterDef.dateTo) {
+        clauses.push(`DATE(${column}) <= DATE(?)`);
+        params.push(filterDef.dateTo);
+      }
+      return;
+    }
+    if (filterDef.type === "greaterThan" && filterDef.filter) {
+      clauses.push(`DATE(${column}) > DATE(?)`);
+      params.push(filterDef.filter);
+      return;
+    }
+    if (filterDef.type === "lessThan" && filterDef.filter) {
+      clauses.push(`DATE(${column}) < DATE(?)`);
+      params.push(filterDef.filter);
+    }
+  };
+
+  applyDateFilter("h.moh_offer_st_date", filterModel.moh_offer_st_date);
+  applyDateFilter("h.moh_offer_end_date", filterModel.moh_offer_end_date);
+
+  return {
+    sql: clauses.length ? clauses.join(" AND ") : "1=1",
+    params,
+  };
+}
+
+function hdrListBaseSql(status, filterModel = {}) {
+  const { sql: filterSql, params: filterParams } = buildHdrFilterWhere(filterModel);
+  return {
+    sql: `
+    SELECT
+      h.moh_offer_id,
+      h.moh_offer_name,
+      h.moh_offer_status,
+      h.moh_offer_st_date,
+      h.moh_offer_end_date,
+      h.moh_offer_hq_id,
+      h.retail_outlet_id,
+      o.outlet_name AS branch_name,
+      ${productCountSubquery()} AS product_count
+    FROM offer_hdr h
+    INNER JOIN outlets o ON o.outlet_id = h.retail_outlet_id
+    WHERE ${statusWhereClause(status)} AND (${filterSql})
+  `,
+    params: filterParams,
+  };
+}
 
 function offerHdrKey(offerId, outletId) {
   return `${offerId}:${outletId}`;
@@ -287,6 +432,87 @@ class HqOffersRepository {
       );
     }
     return valid;
+  }
+
+  async countHdr({ status = "active", filterModel = {} } = {}) {
+    const { sql: baseSql, params: filterParams } = hdrListBaseSql(status, filterModel);
+    const rows = await queryAsync(
+      this.db,
+      `SELECT COUNT(*) AS total FROM (${baseSql}) AS filtered_hdr`,
+      filterParams
+    );
+    return rows?.[0]?.total ?? 0;
+  }
+
+  async listHdr({
+    limit = 20,
+    offset = 0,
+    sortBy = "moh_offer_id",
+    sortDir = "desc",
+    status = "active",
+    filterModel = {},
+  } = {}) {
+    const { column, dir } = resolveSort(sortBy, sortDir);
+    const { sql: baseSql, params: filterParams } = hdrListBaseSql(status, filterModel);
+    const sql = `${baseSql}
+      ORDER BY ${column} ${dir}
+      LIMIT ? OFFSET ?`;
+    return queryAsync(this.db, sql, [...filterParams, limit, offset]);
+  }
+
+  async listHdrAll({
+    sortBy = "moh_offer_id",
+    sortDir = "desc",
+    status = "active",
+    filterModel = {},
+  } = {}) {
+    const { column, dir } = resolveSort(sortBy, sortDir);
+    const { sql: baseSql, params: filterParams } = hdrListBaseSql(status, filterModel);
+    const sql = `${baseSql}
+      ORDER BY ${column} ${dir}
+      LIMIT ?`;
+    return queryAsync(this.db, sql, [...filterParams, LIST_ALL_CAP]);
+  }
+
+  async getHdrByKey(moh_offer_id, retail_outlet_id) {
+    const { sql: baseSql, params: filterParams } = hdrListBaseSql("all");
+    const rows = await queryAsync(
+      this.db,
+      `${baseSql}
+        AND h.moh_offer_id = ?
+        AND h.retail_outlet_id = ?
+      LIMIT 1`,
+      [...filterParams, moh_offer_id, retail_outlet_id]
+    );
+    return rows?.[0] ?? null;
+  }
+
+  async listOfferLinesByKey(moh_offer_id, retail_outlet_id) {
+    return queryAsync(
+      this.db,
+      `SELECT
+        op.mosp_item_code AS product_id,
+        pt.de_name,
+        (
+          SELECT image_url
+          FROM product_images pi
+          WHERE pi.product_id = op.mosp_item_code
+          ORDER BY pi.priority ASC, pi.image_id ASC
+          LIMIT 1
+        ) AS image_url,
+        oi.moi_offer_on,
+        oi.moi_offer_value
+      FROM offer_issue oi
+      INNER JOIN offer_products op
+        ON oi.moi_offer_id = op.mosp_offer_id
+       AND oi.moi_offer_sl_no = op.mosp_sub_id
+       AND oi.retail_outlet_id = op.retail_outlet_id
+      LEFT JOIN product_table pt ON pt.product_id = op.mosp_item_code
+      WHERE oi.moi_offer_id = ?
+        AND oi.retail_outlet_id = ?
+      ORDER BY op.mosp_item_code ASC`,
+      [moh_offer_id, retail_outlet_id]
+    );
   }
 
   insertHdr(row) {

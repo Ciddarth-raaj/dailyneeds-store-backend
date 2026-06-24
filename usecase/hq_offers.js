@@ -169,6 +169,64 @@ function mapIssueImportRow(row) {
   };
 }
 
+function formatDbDate(value) {
+  if (value == null || value === "") return null;
+  const dateOnly = String(value).slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateOnly)) return dateOnly;
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    const y = value.getFullYear();
+    const m = String(value.getMonth() + 1).padStart(2, "0");
+    const d = String(value.getDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+  return null;
+}
+
+function roundToTwoDecimals(value) {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  if (Number.isNaN(n)) return null;
+  return Number(n.toFixed(2));
+}
+
+const HDR_SORT_COLUMNS = {
+  moh_offer_id: true,
+  moh_offer_name: true,
+  moh_offer_st_date: true,
+  moh_offer_end_date: true,
+  branch_name: true,
+  product_count: true,
+};
+
+const HDR_FILTER_COLUMNS = {
+  moh_offer_id: true,
+  moh_offer_name: true,
+  moh_offer_st_date: true,
+  moh_offer_end_date: true,
+  branch_name: true,
+  product_count: true,
+};
+
+function parseFilterModel(raw) {
+  if (!raw) return {};
+  let model = raw;
+  if (typeof raw === "string") {
+    try {
+      model = JSON.parse(raw);
+    } catch (_e) {
+      return {};
+    }
+  }
+  if (!model || typeof model !== "object" || Array.isArray(model)) return {};
+  const safe = {};
+  for (const [key, value] of Object.entries(model)) {
+    if (HDR_FILTER_COLUMNS[key] && value && typeof value === "object") {
+      safe[key] = value;
+    }
+  }
+  return safe;
+}
+
 class HqOffersUsecase {
   constructor(hqOffersRepo) {
     this.hqOffersRepo = hqOffersRepo;
@@ -549,6 +607,118 @@ class HqOffersUsecase {
       });
       throw err;
     }
+  }
+
+  mapHdrListRow(row) {
+    if (!row) return null;
+    const moh_offer_status = row.moh_offer_status;
+    return {
+      moh_offer_id: row.moh_offer_id,
+      retail_outlet_id: row.retail_outlet_id,
+      display_offer_id: row.moh_offer_hq_id ?? row.moh_offer_id,
+      moh_offer_hq_id: row.moh_offer_hq_id,
+      moh_offer_name: row.moh_offer_name,
+      product_count: Number(row.product_count) || 0,
+      moh_offer_st_date: formatDbDate(row.moh_offer_st_date),
+      moh_offer_end_date: formatDbDate(row.moh_offer_end_date),
+      branch_name: row.branch_name,
+      moh_offer_status,
+      status: Number(moh_offer_status) === 1 ? "active" : "inactive",
+    };
+  }
+
+  async listHdr({
+    limit = 20,
+    offset = 0,
+    sortBy = "moh_offer_id",
+    sortDir = "desc",
+    status = "active",
+    filterModel = {},
+  } = {}) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 500);
+    const safeOffset = Math.max(Number(offset) || 0, 0);
+    const safeStatus = status === "inactive" ? "inactive" : "active";
+    const safeSortBy = HDR_SORT_COLUMNS[sortBy] ? sortBy : "moh_offer_id";
+    const safeSortDir =
+      String(sortDir || "desc").toLowerCase() === "asc" ? "asc" : "desc";
+    const safeFilterModel = parseFilterModel(filterModel);
+
+    const [rows, total] = await Promise.all([
+      this.hqOffersRepo.listHdr({
+        limit: safeLimit,
+        offset: safeOffset,
+        sortBy: safeSortBy,
+        sortDir: safeSortDir,
+        status: safeStatus,
+        filterModel: safeFilterModel,
+      }),
+      this.hqOffersRepo.countHdr({ status: safeStatus, filterModel: safeFilterModel }),
+    ]);
+
+    return {
+      code: 200,
+      data: (rows || []).map((row) => this.mapHdrListRow(row)),
+      total: Number(total) || 0,
+      limit: safeLimit,
+      offset: safeOffset,
+      sort_by: safeSortBy,
+      sort_dir: safeSortDir,
+      status: safeStatus,
+    };
+  }
+
+  async listHdrAll({
+    sortBy = "moh_offer_id",
+    sortDir = "desc",
+    status = "active",
+    filterModel = {},
+  } = {}) {
+    const safeStatus = status === "inactive" ? "inactive" : "active";
+    const safeSortBy = HDR_SORT_COLUMNS[sortBy] ? sortBy : "moh_offer_id";
+    const safeSortDir =
+      String(sortDir || "desc").toLowerCase() === "asc" ? "asc" : "desc";
+    const safeFilterModel = parseFilterModel(filterModel);
+
+    const rows = await this.hqOffersRepo.listHdrAll({
+      sortBy: safeSortBy,
+      sortDir: safeSortDir,
+      status: safeStatus,
+      filterModel: safeFilterModel,
+    });
+
+    return {
+      code: 200,
+      data: (rows || []).map((row) => this.mapHdrListRow(row)),
+      sort_by: safeSortBy,
+      sort_dir: safeSortDir,
+      status: safeStatus,
+    };
+  }
+
+  async getOfferDetail(moh_offer_id, retail_outlet_id) {
+    const offerRow = await this.hqOffersRepo.getHdrByKey(
+      moh_offer_id,
+      retail_outlet_id
+    );
+    if (!offerRow) {
+      return { code: 404, msg: "Offer not found" };
+    }
+
+    const products = await this.hqOffersRepo.listOfferLinesByKey(
+      moh_offer_id,
+      retail_outlet_id
+    );
+
+    return {
+      code: 200,
+      data: {
+        offer: this.mapHdrListRow(offerRow),
+        products: (products || []).map((line) => ({
+          ...line,
+          moi_offer_value: roundToTwoDecimals(line.moi_offer_value),
+        })),
+      },
+    };
   }
 }
 
