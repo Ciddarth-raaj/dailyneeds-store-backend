@@ -117,13 +117,20 @@ function extractMetadata(logType, req, payload) {
 }
 
 function inferSource(req, typeDef, cronExpression, postedAt = new Date()) {
-  if (typeDef?.category === "bulk") {
+  if (typeDef?.category === "bulk" || typeDef?.category === "sync") {
     if (cronExpression && isWithinCronWindow(postedAt, cronExpression)) {
       return "cron";
     }
-    return "manual";
+    return typeDef?.category === "bulk" ? "manual" : inferSyncSource(req);
   }
 
+  if (req.decoded?.employee_id) return "manual";
+  const path = `${req.baseUrl || ""}${req.path || ""}`;
+  if (path.includes("/gofrugal-synker/")) return "external";
+  return "external";
+}
+
+function inferSyncSource(req) {
   if (req.decoded?.employee_id) return "manual";
   const path = `${req.baseUrl || ""}${req.path || ""}`;
   if (path.includes("/gofrugal-synker/")) return "external";

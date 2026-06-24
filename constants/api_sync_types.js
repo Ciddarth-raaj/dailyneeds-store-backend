@@ -65,6 +65,27 @@ const API_SYNC_TYPES = [
     match: "/item-markupdown/bulk",
     server_script: "/home/delium/cron-dnds/item-markdown/run_query.sh",
   },
+  {
+    type: "hq_offers_hdr_bulk",
+    category: "bulk",
+    label: "HQ Offers Header Bulk",
+    match: "/hq-offers/hdr/bulk",
+    server_script: "/home/delium/cron-dnds/offers/run_query.sh",
+  },
+  {
+    type: "hq_offers_products_bulk",
+    category: "bulk",
+    label: "HQ Offers Products Bulk",
+    match: "/hq-offers/products/bulk",
+    server_script: "/home/delium/cron-dnds/offers/run_query.sh",
+  },
+  {
+    type: "hq_offers_issue_bulk",
+    category: "bulk",
+    label: "HQ Offers Issue Bulk",
+    match: "/hq-offers/issue/bulk",
+    server_script: "/home/delium/cron-dnds/offers/run_query.sh",
+  },
 ];
 
 const TYPE_BY_MATCH = API_SYNC_TYPES.reduce((acc, item) => {
