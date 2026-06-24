@@ -148,6 +148,48 @@ class HqOffersRoutes {
       res.end();
     });
 
+    router.get("/products", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          limit: Joi.alternatives()
+            .try(Joi.number().integer().min(1).max(500), Joi.string().valid("all"))
+            .optional(),
+          offset: Joi.number().integer().min(0).optional(),
+          sort_by: Joi.string().optional(),
+          sort_dir: Joi.string().valid("asc", "desc").optional(),
+          status: Joi.string().valid("active", "inactive").optional(),
+          filter: Joi.alternatives().try(Joi.string(), Joi.object()).optional(),
+        });
+        const { error, value } = schema.validate(req.query);
+        if (error) {
+          res.status(400).json({ code: 400, msg: error.message });
+          res.end();
+          return;
+        }
+
+        const result =
+          value.limit === "all"
+            ? await this.hqOffersUsecase.listProductLinesAll({
+                sortBy: value.sort_by,
+                sortDir: value.sort_dir,
+                status: value.status,
+                filterModel: value.filter,
+              })
+            : await this.hqOffersUsecase.listProductLines({
+                limit: value.limit ?? 20,
+                offset: value.offset ?? 0,
+                sortBy: value.sort_by,
+                sortDir: value.sort_dir,
+                status: value.status,
+                filterModel: value.filter,
+              });
+        res.json(result);
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
     router.get("/hdr/:moh_offer_id/:retail_outlet_id", async (req, res) => {
       try {
         const moh_offer_id = Number(req.params.moh_offer_id);

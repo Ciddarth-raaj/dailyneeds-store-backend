@@ -268,6 +268,131 @@ function hdrListBaseSql(status, filterModel = {}) {
   };
 }
 
+const PRODUCT_LINE_SORT_COLUMNS = {
+  moh_offer_id: "h.moh_offer_id",
+  moh_offer_name: "h.moh_offer_name",
+  product_id: "op.mosp_item_code",
+  de_name: "pt.de_name",
+  moi_offer_on: "oi.moi_offer_on",
+  moi_offer_value: "oi.moi_offer_value",
+};
+
+function resolveProductLineSort(sortBy, sortDir) {
+  const column =
+    PRODUCT_LINE_SORT_COLUMNS[sortBy] || PRODUCT_LINE_SORT_COLUMNS.moh_offer_id;
+  const dir = String(sortDir || "desc").toLowerCase() === "asc" ? "ASC" : "DESC";
+  return { column, dir };
+}
+
+function productImageSubquery() {
+  return `(
+    SELECT image_url
+    FROM product_images pi
+    WHERE pi.product_id = op.mosp_item_code
+    ORDER BY pi.priority ASC, pi.image_id ASC
+    LIMIT 1
+  )`;
+}
+
+function buildProductLineFilterWhere(filterModel = {}) {
+  const clauses = [];
+  const params = [];
+
+  const offerIdFilter = filterModel.moh_offer_id;
+  if (offerIdFilter?.filter != null && String(offerIdFilter.filter).trim() !== "") {
+    const like = `%${String(offerIdFilter.filter).trim()}%`;
+    clauses.push(
+      "(CAST(h.moh_offer_id AS CHAR) LIKE ? OR CAST(COALESCE(h.moh_offer_hq_id, h.moh_offer_id) AS CHAR) LIKE ?)"
+    );
+    params.push(like, like);
+  }
+
+  const offerNameFilter = filterModel.moh_offer_name;
+  if (offerNameFilter?.filter != null && String(offerNameFilter.filter).trim() !== "") {
+    clauses.push("h.moh_offer_name LIKE ?");
+    params.push(`%${String(offerNameFilter.filter).trim()}%`);
+  }
+
+  const productIdFilter = filterModel.product_id;
+  if (productIdFilter?.filter != null && String(productIdFilter.filter).trim() !== "") {
+    clauses.push("CAST(op.mosp_item_code AS CHAR) LIKE ?");
+    params.push(`%${String(productIdFilter.filter).trim()}%`);
+  }
+
+  const productNameFilter = filterModel.de_name;
+  if (productNameFilter?.filter != null && String(productNameFilter.filter).trim() !== "") {
+    clauses.push("pt.de_name LIKE ?");
+    params.push(`%${String(productNameFilter.filter).trim()}%`);
+  }
+
+  const offerOnFilter = filterModel.moi_offer_on;
+  if (offerOnFilter?.filter != null && String(offerOnFilter.filter).trim() !== "") {
+    clauses.push("oi.moi_offer_on LIKE ?");
+    params.push(`%${String(offerOnFilter.filter).trim()}%`);
+  }
+
+  const offerValueFilter = filterModel.moi_offer_value;
+  if (offerValueFilter?.filter != null && offerValueFilter.filter !== "") {
+    const n = Number(offerValueFilter.filter);
+    if (!Number.isNaN(n)) {
+      const type = offerValueFilter.type || "equals";
+      if (type === "equals") {
+        clauses.push("oi.moi_offer_value = ?");
+        params.push(n);
+      } else if (type === "greaterThan") {
+        clauses.push("oi.moi_offer_value > ?");
+        params.push(n);
+      } else if (type === "lessThan") {
+        clauses.push("oi.moi_offer_value < ?");
+        params.push(n);
+      } else if (type === "greaterThanOrEqual") {
+        clauses.push("oi.moi_offer_value >= ?");
+        params.push(n);
+      } else if (type === "lessThanOrEqual") {
+        clauses.push("oi.moi_offer_value <= ?");
+        params.push(n);
+      }
+    }
+  }
+
+  return {
+    sql: clauses.length ? clauses.join(" AND ") : "1=1",
+    params,
+  };
+}
+
+function productLinesListBaseSql(status, filterModel = {}) {
+  const { sql: filterSql, params: filterParams } = buildProductLineFilterWhere(
+    filterModel
+  );
+  return {
+    sql: `
+    SELECT
+      h.moh_offer_id,
+      h.retail_outlet_id,
+      h.moh_offer_hq_id,
+      h.moh_offer_name,
+      op.mosp_item_code AS product_id,
+      oi.moi_offer_sl_no,
+      pt.de_name,
+      ${productImageSubquery()} AS image_url,
+      oi.moi_offer_on,
+      oi.moi_offer_value
+    FROM offer_issue oi
+    INNER JOIN offer_products op
+      ON oi.moi_offer_id = op.mosp_offer_id
+     AND oi.moi_offer_sl_no = op.mosp_sub_id
+     AND oi.retail_outlet_id = op.retail_outlet_id
+    INNER JOIN offer_hdr h
+      ON h.moh_offer_id = oi.moi_offer_id
+     AND h.retail_outlet_id = oi.retail_outlet_id
+    LEFT JOIN product_table pt ON pt.product_id = op.mosp_item_code
+    WHERE ${statusWhereClause(status)} AND (${filterSql})
+  `,
+    params: filterParams,
+  };
+}
+
 function offerHdrKey(offerId, outletId) {
   return `${offerId}:${outletId}`;
 }
@@ -513,6 +638,55 @@ class HqOffersRepository {
       ORDER BY op.mosp_item_code ASC`,
       [moh_offer_id, retail_outlet_id]
     );
+  }
+
+  async countProductLines({ status = "active", filterModel = {} } = {}) {
+    const { sql: baseSql, params: filterParams } = productLinesListBaseSql(
+      status,
+      filterModel
+    );
+    const rows = await queryAsync(
+      this.db,
+      `SELECT COUNT(*) AS total FROM (${baseSql}) AS filtered_lines`,
+      filterParams
+    );
+    return rows?.[0]?.total ?? 0;
+  }
+
+  async listProductLines({
+    limit = 20,
+    offset = 0,
+    sortBy = "moh_offer_id",
+    sortDir = "desc",
+    status = "active",
+    filterModel = {},
+  } = {}) {
+    const { column, dir } = resolveProductLineSort(sortBy, sortDir);
+    const { sql: baseSql, params: filterParams } = productLinesListBaseSql(
+      status,
+      filterModel
+    );
+    const sql = `${baseSql}
+      ORDER BY ${column} ${dir}
+      LIMIT ? OFFSET ?`;
+    return queryAsync(this.db, sql, [...filterParams, limit, offset]);
+  }
+
+  async listProductLinesAll({
+    sortBy = "moh_offer_id",
+    sortDir = "desc",
+    status = "active",
+    filterModel = {},
+  } = {}) {
+    const { column, dir } = resolveProductLineSort(sortBy, sortDir);
+    const { sql: baseSql, params: filterParams } = productLinesListBaseSql(
+      status,
+      filterModel
+    );
+    const sql = `${baseSql}
+      ORDER BY ${column} ${dir}
+      LIMIT ?`;
+    return queryAsync(this.db, sql, [...filterParams, LIST_ALL_CAP]);
   }
 
   insertHdr(row) {

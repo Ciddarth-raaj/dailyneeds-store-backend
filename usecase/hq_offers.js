@@ -207,7 +207,25 @@ const HDR_FILTER_COLUMNS = {
   product_count: true,
 };
 
-function parseFilterModel(raw) {
+const PRODUCT_SORT_COLUMNS = {
+  moh_offer_id: true,
+  moh_offer_name: true,
+  product_id: true,
+  de_name: true,
+  moi_offer_on: true,
+  moi_offer_value: true,
+};
+
+const PRODUCT_FILTER_COLUMNS = {
+  moh_offer_id: true,
+  moh_offer_name: true,
+  product_id: true,
+  de_name: true,
+  moi_offer_on: true,
+  moi_offer_value: true,
+};
+
+function parseFilterModel(raw, allowedColumns) {
   if (!raw) return {};
   let model = raw;
   if (typeof raw === "string") {
@@ -220,7 +238,7 @@ function parseFilterModel(raw) {
   if (!model || typeof model !== "object" || Array.isArray(model)) return {};
   const safe = {};
   for (const [key, value] of Object.entries(model)) {
-    if (HDR_FILTER_COLUMNS[key] && value && typeof value === "object") {
+    if (allowedColumns[key] && value && typeof value === "object") {
       safe[key] = value;
     }
   }
@@ -627,6 +645,22 @@ class HqOffersUsecase {
     };
   }
 
+  mapProductLineRow(row) {
+    if (!row) return null;
+    return {
+      moh_offer_id: row.moh_offer_id,
+      retail_outlet_id: row.retail_outlet_id,
+      display_offer_id: row.moh_offer_hq_id ?? row.moh_offer_id,
+      moh_offer_name: row.moh_offer_name,
+      product_id: row.product_id,
+      moi_offer_sl_no: row.moi_offer_sl_no,
+      de_name: row.de_name,
+      image_url: row.image_url,
+      moi_offer_on: row.moi_offer_on,
+      moi_offer_value: roundToTwoDecimals(row.moi_offer_value),
+    };
+  }
+
   async listHdr({
     limit = 20,
     offset = 0,
@@ -641,7 +675,7 @@ class HqOffersUsecase {
     const safeSortBy = HDR_SORT_COLUMNS[sortBy] ? sortBy : "moh_offer_id";
     const safeSortDir =
       String(sortDir || "desc").toLowerCase() === "asc" ? "asc" : "desc";
-    const safeFilterModel = parseFilterModel(filterModel);
+    const safeFilterModel = parseFilterModel(filterModel, HDR_FILTER_COLUMNS);
 
     const [rows, total] = await Promise.all([
       this.hqOffersRepo.listHdr({
@@ -667,6 +701,77 @@ class HqOffersUsecase {
     };
   }
 
+  async listProductLines({
+    limit = 20,
+    offset = 0,
+    sortBy = "moh_offer_id",
+    sortDir = "desc",
+    status = "active",
+    filterModel = {},
+  } = {}) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 500);
+    const safeOffset = Math.max(Number(offset) || 0, 0);
+    const safeStatus = status === "inactive" ? "inactive" : "active";
+    const safeSortBy = PRODUCT_SORT_COLUMNS[sortBy] ? sortBy : "moh_offer_id";
+    const safeSortDir =
+      String(sortDir || "desc").toLowerCase() === "asc" ? "asc" : "desc";
+    const safeFilterModel = parseFilterModel(filterModel, PRODUCT_FILTER_COLUMNS);
+
+    const [rows, total] = await Promise.all([
+      this.hqOffersRepo.listProductLines({
+        limit: safeLimit,
+        offset: safeOffset,
+        sortBy: safeSortBy,
+        sortDir: safeSortDir,
+        status: safeStatus,
+        filterModel: safeFilterModel,
+      }),
+      this.hqOffersRepo.countProductLines({
+        status: safeStatus,
+        filterModel: safeFilterModel,
+      }),
+    ]);
+
+    return {
+      code: 200,
+      data: (rows || []).map((row) => this.mapProductLineRow(row)),
+      total: Number(total) || 0,
+      limit: safeLimit,
+      offset: safeOffset,
+      sort_by: safeSortBy,
+      sort_dir: safeSortDir,
+      status: safeStatus,
+    };
+  }
+
+  async listProductLinesAll({
+    sortBy = "moh_offer_id",
+    sortDir = "desc",
+    status = "active",
+    filterModel = {},
+  } = {}) {
+    const safeStatus = status === "inactive" ? "inactive" : "active";
+    const safeSortBy = PRODUCT_SORT_COLUMNS[sortBy] ? sortBy : "moh_offer_id";
+    const safeSortDir =
+      String(sortDir || "desc").toLowerCase() === "asc" ? "asc" : "desc";
+    const safeFilterModel = parseFilterModel(filterModel, PRODUCT_FILTER_COLUMNS);
+
+    const rows = await this.hqOffersRepo.listProductLinesAll({
+      sortBy: safeSortBy,
+      sortDir: safeSortDir,
+      status: safeStatus,
+      filterModel: safeFilterModel,
+    });
+
+    return {
+      code: 200,
+      data: (rows || []).map((row) => this.mapProductLineRow(row)),
+      sort_by: safeSortBy,
+      sort_dir: safeSortDir,
+      status: safeStatus,
+    };
+  }
+
   async listHdrAll({
     sortBy = "moh_offer_id",
     sortDir = "desc",
@@ -677,7 +782,7 @@ class HqOffersUsecase {
     const safeSortBy = HDR_SORT_COLUMNS[sortBy] ? sortBy : "moh_offer_id";
     const safeSortDir =
       String(sortDir || "desc").toLowerCase() === "asc" ? "asc" : "desc";
-    const safeFilterModel = parseFilterModel(filterModel);
+    const safeFilterModel = parseFilterModel(filterModel, HDR_FILTER_COLUMNS);
 
     const rows = await this.hqOffersRepo.listHdrAll({
       sortBy: safeSortBy,
