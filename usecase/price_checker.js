@@ -246,11 +246,25 @@ function attachOfferPrices(products, offersByProductId) {
   return products;
 }
 
+function attachHqOfferStatus(products, activeProductIds) {
+  const activeSet = new Set(activeProductIds || []);
+  for (const product of products) {
+    product.hasActiveOffer = activeSet.has(String(product.Item_Code));
+  }
+  return products;
+}
+
 class PriceCheckerUsecase {
-  constructor(priceCheckerRepo, itemMarkupdownRepo, productOffersRepo) {
+  constructor(
+    priceCheckerRepo,
+    itemMarkupdownRepo,
+    productOffersRepo,
+    hqOffersRepo
+  ) {
     this.priceCheckerRepo = priceCheckerRepo;
     this.itemMarkupdownRepo = itemMarkupdownRepo;
     this.productOffersRepo = productOffersRepo;
+    this.hqOffersRepo = hqOffersRepo;
   }
 
   async listForClient() {
@@ -288,6 +302,14 @@ class PriceCheckerUsecase {
       attachOfferPrices(products, offersByProductId);
     } else {
       attachOfferPrices(products, new Map());
+    }
+
+    if (itemCodes.length && this.hqOffersRepo) {
+      const activeOfferProductIds =
+        await this.hqOffersRepo.listActiveOfferProductIds(itemCodes);
+      attachHqOfferStatus(products, activeOfferProductIds);
+    } else {
+      attachHqOfferStatus(products, []);
     }
 
     const issueProductCount = products.filter((product) => product.hasIssue).length;
@@ -420,9 +442,15 @@ class PriceCheckerUsecase {
   }
 }
 
-module.exports = (priceCheckerRepo, itemMarkupdownRepo, productOffersRepo) =>
+module.exports = (
+  priceCheckerRepo,
+  itemMarkupdownRepo,
+  productOffersRepo,
+  hqOffersRepo
+) =>
   new PriceCheckerUsecase(
     priceCheckerRepo,
     itemMarkupdownRepo,
-    productOffersRepo
+    productOffersRepo,
+    hqOffersRepo
   );

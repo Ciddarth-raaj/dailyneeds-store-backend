@@ -524,7 +524,8 @@ class Server {
     this.priceCheckerUsecase = require("./usecase/price_checker")(
       this.priceCheckerRepo,
       this.itemMarkupdownRepo,
-      this.productOffersRepo
+      this.productOffersRepo,
+      this.hqOffersRepo
     );
     this.itemMarkupdownUsecase = require("./usecase/item_markupdown")(
       this.itemMarkupdownRepo
