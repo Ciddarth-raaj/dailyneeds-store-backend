@@ -876,7 +876,7 @@ class HqOffersUsecase {
       moh_offer_hq_id: branches[0].moh_offer_hq_id,
       moh_offer_name: branches[0].moh_offer_name,
       branch_count: branches.length,
-      product_count: branches.reduce((sum, b) => sum + (b.product_count || 0), 0),
+      product_count: [...new Set((productRows || []).map((line) => line.product_id))].length,
       moh_offer_st_date: branches.reduce(
         (min, b) =>
           !min || (b.moh_offer_st_date && b.moh_offer_st_date < min)

@@ -177,11 +177,47 @@ function resolveSort(sortBy, sortDir) {
 
 function productCountSubquery() {
   return `(
-    SELECT COUNT(*)
+    SELECT COUNT(DISTINCT op.mosp_item_code)
     FROM offer_products op
     WHERE op.mosp_offer_id = h.moh_offer_id
       AND op.retail_outlet_id = h.retail_outlet_id
   )`;
+}
+
+function offerIssueToProductJoinSql(opAlias = "op", oiAlias = "oi") {
+  return `(
+    (${oiAlias}.moi_item_code IS NOT NULL AND ${oiAlias}.moi_item_code = ${opAlias}.mosp_item_code)
+    OR ${oiAlias}.moi_offer_sl_no = ${opAlias}.mosp_sub_id
+  )`;
+}
+
+function offerProductLinesSelectSql({ hqIdFilter = null } = {}) {
+  const hqFilterSql = hqIdFilter ? `AND ${hqIdFilter}` : "";
+  return `
+    SELECT
+      op.retail_outlet_id,
+      op.mosp_item_code AS product_id,
+      pt.de_name,
+      (
+        SELECT image_url
+        FROM product_images pi
+        WHERE pi.product_id = op.mosp_item_code
+        ORDER BY pi.priority ASC, pi.image_id ASC
+        LIMIT 1
+      ) AS image_url,
+      oi.moi_offer_on,
+      oi.moi_offer_value
+    FROM offer_products op
+    INNER JOIN offer_hdr h
+      ON h.moh_offer_id = op.mosp_offer_id
+     AND h.retail_outlet_id = op.retail_outlet_id
+    LEFT JOIN offer_issue oi
+      ON oi.moi_offer_id = op.mosp_offer_id
+     AND oi.retail_outlet_id = op.retail_outlet_id
+     AND ${offerIssueToProductJoinSql("op", "oi")}
+    LEFT JOIN product_table pt ON pt.product_id = op.mosp_item_code
+    WHERE 1=1 ${hqFilterSql}
+  `;
 }
 
 function buildHdrFilterWhere(filterModel = {}) {
@@ -316,7 +352,6 @@ function hdrGroupedListBaseSql(status, filterModel = {}) {
   const { sql: aggregateSql, params: aggregateParams } = buildGroupedAggregateWhere(
     filterModel
   );
-  const branchProductCount = productCountSubquery();
   return {
     sql: `
       SELECT * FROM (
@@ -327,10 +362,13 @@ function hdrGroupedListBaseSql(status, filterModel = {}) {
           MIN(h.moh_offer_st_date) AS moh_offer_st_date,
           MAX(h.moh_offer_end_date) AS moh_offer_end_date,
           COUNT(DISTINCT h.retail_outlet_id) AS branch_count,
-          SUM(${branchProductCount}) AS product_count,
+          COUNT(DISTINCT op.mosp_item_code) AS product_count,
           SUM(CASE WHEN ${branchIsActiveSql("h")} THEN 1 ELSE 0 END) AS active_branch_count
         FROM offer_hdr h
         INNER JOIN outlets o ON o.outlet_id = h.retail_outlet_id
+        LEFT JOIN offer_products op
+          ON op.mosp_offer_id = h.moh_offer_id
+         AND op.retail_outlet_id = h.retail_outlet_id
         WHERE (${filterSql})
         GROUP BY ${OFFER_HQ_ID_EXPR}
         HAVING ${groupedStatusHavingClause(status)}
@@ -470,16 +508,16 @@ function productLinesListBaseSql(status, filterModel = {}) {
       ${productImageSubquery()} AS image_url,
       oi.moi_offer_on,
       oi.moi_offer_value
-    FROM offer_issue oi
-    INNER JOIN offer_products op
-      ON oi.moi_offer_id = op.mosp_offer_id
-     AND oi.moi_item_code = op.mosp_item_code
-     AND oi.retail_outlet_id = op.retail_outlet_id
+    FROM offer_products op
     INNER JOIN offer_hdr h
-      ON h.moh_offer_id = oi.moi_offer_id
-     AND h.retail_outlet_id = oi.retail_outlet_id
+      ON h.moh_offer_id = op.mosp_offer_id
+     AND h.retail_outlet_id = op.retail_outlet_id
+    LEFT JOIN offer_issue oi
+      ON oi.moi_offer_id = op.mosp_offer_id
+     AND oi.retail_outlet_id = op.retail_outlet_id
+     AND ${offerIssueToProductJoinSql("op", "oi")}
     LEFT JOIN product_table pt ON pt.product_id = op.mosp_item_code
-    WHERE ${statusWhereClause(status)} AND (${filterSql})
+    WHERE ${statusWhereClause(status, "h")} AND (${filterSql})
   `,
     params: filterParams,
   };
@@ -714,30 +752,8 @@ class HqOffersRepository {
   async listOfferLinesByOfferHqId(moh_offer_hq_id) {
     return queryAsync(
       this.db,
-      `SELECT
-        oi.retail_outlet_id,
-        op.mosp_item_code AS product_id,
-        pt.de_name,
-        (
-          SELECT image_url
-          FROM product_images pi
-          WHERE pi.product_id = op.mosp_item_code
-          ORDER BY pi.priority ASC, pi.image_id ASC
-          LIMIT 1
-        ) AS image_url,
-        oi.moi_offer_on,
-        oi.moi_offer_value
-      FROM offer_issue oi
-      INNER JOIN offer_products op
-        ON oi.moi_offer_id = op.mosp_offer_id
-       AND oi.moi_item_code = op.mosp_item_code
-       AND oi.retail_outlet_id = op.retail_outlet_id
-      INNER JOIN offer_hdr h
-        ON h.moh_offer_id = oi.moi_offer_id
-       AND h.retail_outlet_id = oi.retail_outlet_id
-      LEFT JOIN product_table pt ON pt.product_id = op.mosp_item_code
-      WHERE ${OFFER_HQ_ID_EXPR} = ?
-      ORDER BY oi.retail_outlet_id ASC, op.mosp_item_code ASC`,
+      `${offerProductLinesSelectSql({ hqIdFilter: `${OFFER_HQ_ID_EXPR} = ?` })}
+      ORDER BY op.retail_outlet_id ASC, op.mosp_item_code ASC`,
       [moh_offer_hq_id]
     );
   }
@@ -758,26 +774,9 @@ class HqOffersRepository {
   async listOfferLinesByKey(moh_offer_id, retail_outlet_id) {
     return queryAsync(
       this.db,
-      `SELECT
-        op.mosp_item_code AS product_id,
-        pt.de_name,
-        (
-          SELECT image_url
-          FROM product_images pi
-          WHERE pi.product_id = op.mosp_item_code
-          ORDER BY pi.priority ASC, pi.image_id ASC
-          LIMIT 1
-        ) AS image_url,
-        oi.moi_offer_on,
-        oi.moi_offer_value
-      FROM offer_issue oi
-      INNER JOIN offer_products op
-        ON oi.moi_offer_id = op.mosp_offer_id
-       AND oi.moi_item_code = op.mosp_item_code
-       AND oi.retail_outlet_id = op.retail_outlet_id
-      LEFT JOIN product_table pt ON pt.product_id = op.mosp_item_code
-      WHERE oi.moi_offer_id = ?
-        AND oi.retail_outlet_id = ?
+      `${offerProductLinesSelectSql()}
+        AND op.mosp_offer_id = ?
+        AND op.retail_outlet_id = ?
       ORDER BY op.mosp_item_code ASC`,
       [moh_offer_id, retail_outlet_id]
     );
