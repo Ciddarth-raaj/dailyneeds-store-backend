@@ -190,6 +190,31 @@ class HqOffersRoutes {
       res.end();
     });
 
+    router.get("/hdr/:moh_offer_hq_id", async (req, res) => {
+      try {
+        const moh_offer_hq_id = Number(req.params.moh_offer_hq_id);
+        if (!Number.isFinite(moh_offer_hq_id)) {
+          res.status(400).json({
+            code: 400,
+            msg: "moh_offer_hq_id must be a valid number",
+          });
+          res.end();
+          return;
+        }
+
+        const result = await this.hqOffersUsecase.getOfferDetailByHqId(moh_offer_hq_id);
+        if (result.code === 404) {
+          res.status(404).json(result);
+          res.end();
+          return;
+        }
+        res.json(result);
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
     router.get("/hdr/:moh_offer_id/:retail_outlet_id", async (req, res) => {
       try {
         const moh_offer_id = Number(req.params.moh_offer_id);

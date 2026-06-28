@@ -169,17 +169,37 @@ function mapIssueImportRow(row) {
   };
 }
 
+const SENTINEL_NULL_DATE = "1900-01-01";
+
 function formatDbDate(value) {
   if (value == null || value === "") return null;
   const dateOnly = String(value).slice(0, 10);
-  if (/^\d{4}-\d{2}-\d{2}$/.test(dateOnly)) return dateOnly;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateOnly)) {
+    return dateOnly === SENTINEL_NULL_DATE ? null : dateOnly;
+  }
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
     const y = value.getFullYear();
     const m = String(value.getMonth() + 1).padStart(2, "0");
     const d = String(value.getDate()).padStart(2, "0");
-    return `${y}-${m}-${d}`;
+    const formatted = `${y}-${m}-${d}`;
+    return formatted === SENTINEL_NULL_DATE ? null : formatted;
   }
   return null;
+}
+
+function todayDateString() {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function resolveOfferStatus(mohOfferStatus, mohOfferEndDate) {
+  const dbActive = Number(mohOfferStatus) === 1;
+  if (!dbActive) return "inactive";
+  if (mohOfferEndDate && mohOfferEndDate < todayDateString()) return "inactive";
+  return "active";
 }
 
 function roundToTwoDecimals(value) {
@@ -190,25 +210,26 @@ function roundToTwoDecimals(value) {
 }
 
 const HDR_SORT_COLUMNS = {
-  moh_offer_id: true,
+  moh_offer_hq_id: true,
   moh_offer_name: true,
   moh_offer_st_date: true,
   moh_offer_end_date: true,
-  branch_name: true,
+  branch_count: true,
   product_count: true,
 };
 
 const HDR_FILTER_COLUMNS = {
-  moh_offer_id: true,
+  moh_offer_hq_id: true,
   moh_offer_name: true,
   moh_offer_st_date: true,
   moh_offer_end_date: true,
   branch_name: true,
+  branch_count: true,
   product_count: true,
 };
 
 const PRODUCT_SORT_COLUMNS = {
-  moh_offer_id: true,
+  moh_offer_hq_id: true,
   moh_offer_name: true,
   product_id: true,
   de_name: true,
@@ -217,7 +238,7 @@ const PRODUCT_SORT_COLUMNS = {
 };
 
 const PRODUCT_FILTER_COLUMNS = {
-  moh_offer_id: true,
+  moh_offer_hq_id: true,
   moh_offer_name: true,
   product_id: true,
   de_name: true,
@@ -630,27 +651,43 @@ class HqOffersUsecase {
   mapHdrListRow(row) {
     if (!row) return null;
     const moh_offer_status = row.moh_offer_status;
+    const moh_offer_st_date = formatDbDate(row.moh_offer_st_date);
+    const moh_offer_end_date = formatDbDate(row.moh_offer_end_date);
     return {
-      moh_offer_id: row.moh_offer_id,
+      moh_offer_hq_id: row.moh_offer_hq_id ?? row.moh_offer_id,
       retail_outlet_id: row.retail_outlet_id,
-      display_offer_id: row.moh_offer_hq_id ?? row.moh_offer_id,
-      moh_offer_hq_id: row.moh_offer_hq_id,
       moh_offer_name: row.moh_offer_name,
       product_count: Number(row.product_count) || 0,
-      moh_offer_st_date: formatDbDate(row.moh_offer_st_date),
-      moh_offer_end_date: formatDbDate(row.moh_offer_end_date),
+      branch_count: Number(row.branch_count) || 0,
+      moh_offer_st_date,
+      moh_offer_end_date,
       branch_name: row.branch_name,
       moh_offer_status,
-      status: Number(moh_offer_status) === 1 ? "active" : "inactive",
+      status: resolveOfferStatus(moh_offer_status, moh_offer_end_date),
+    };
+  }
+
+  mapHdrGroupedListRow(row) {
+    if (!row) return null;
+    const mapped = this.mapHdrListRow(row);
+    if (!mapped) return null;
+    const {
+      retail_outlet_id: _outlet,
+      branch_name: _branch,
+      status: _status,
+      ...grouped
+    } = mapped;
+    return {
+      ...grouped,
+      status: Number(row.active_branch_count) > 0 ? "active" : "inactive",
     };
   }
 
   mapProductLineRow(row) {
     if (!row) return null;
     return {
-      moh_offer_id: row.moh_offer_id,
+      moh_offer_hq_id: row.moh_offer_hq_id ?? row.moh_offer_id,
       retail_outlet_id: row.retail_outlet_id,
-      display_offer_id: row.moh_offer_hq_id ?? row.moh_offer_id,
       moh_offer_name: row.moh_offer_name,
       product_id: row.product_id,
       moi_offer_sl_no: row.moi_offer_sl_no,
@@ -664,7 +701,7 @@ class HqOffersUsecase {
   async listHdr({
     limit = 20,
     offset = 0,
-    sortBy = "moh_offer_id",
+    sortBy = "moh_offer_hq_id",
     sortDir = "desc",
     status = "active",
     filterModel = {},
@@ -672,7 +709,7 @@ class HqOffersUsecase {
     const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 500);
     const safeOffset = Math.max(Number(offset) || 0, 0);
     const safeStatus = status === "inactive" ? "inactive" : "active";
-    const safeSortBy = HDR_SORT_COLUMNS[sortBy] ? sortBy : "moh_offer_id";
+    const safeSortBy = HDR_SORT_COLUMNS[sortBy] ? sortBy : "moh_offer_hq_id";
     const safeSortDir =
       String(sortDir || "desc").toLowerCase() === "asc" ? "asc" : "desc";
     const safeFilterModel = parseFilterModel(filterModel, HDR_FILTER_COLUMNS);
@@ -691,7 +728,7 @@ class HqOffersUsecase {
 
     return {
       code: 200,
-      data: (rows || []).map((row) => this.mapHdrListRow(row)),
+      data: (rows || []).map((row) => this.mapHdrGroupedListRow(row)),
       total: Number(total) || 0,
       limit: safeLimit,
       offset: safeOffset,
@@ -704,7 +741,7 @@ class HqOffersUsecase {
   async listProductLines({
     limit = 20,
     offset = 0,
-    sortBy = "moh_offer_id",
+    sortBy = "moh_offer_hq_id",
     sortDir = "desc",
     status = "active",
     filterModel = {},
@@ -712,7 +749,7 @@ class HqOffersUsecase {
     const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 500);
     const safeOffset = Math.max(Number(offset) || 0, 0);
     const safeStatus = status === "inactive" ? "inactive" : "active";
-    const safeSortBy = PRODUCT_SORT_COLUMNS[sortBy] ? sortBy : "moh_offer_id";
+    const safeSortBy = PRODUCT_SORT_COLUMNS[sortBy] ? sortBy : "moh_offer_hq_id";
     const safeSortDir =
       String(sortDir || "desc").toLowerCase() === "asc" ? "asc" : "desc";
     const safeFilterModel = parseFilterModel(filterModel, PRODUCT_FILTER_COLUMNS);
@@ -745,13 +782,13 @@ class HqOffersUsecase {
   }
 
   async listProductLinesAll({
-    sortBy = "moh_offer_id",
+    sortBy = "moh_offer_hq_id",
     sortDir = "desc",
     status = "active",
     filterModel = {},
   } = {}) {
     const safeStatus = status === "inactive" ? "inactive" : "active";
-    const safeSortBy = PRODUCT_SORT_COLUMNS[sortBy] ? sortBy : "moh_offer_id";
+    const safeSortBy = PRODUCT_SORT_COLUMNS[sortBy] ? sortBy : "moh_offer_hq_id";
     const safeSortDir =
       String(sortDir || "desc").toLowerCase() === "asc" ? "asc" : "desc";
     const safeFilterModel = parseFilterModel(filterModel, PRODUCT_FILTER_COLUMNS);
@@ -773,13 +810,13 @@ class HqOffersUsecase {
   }
 
   async listHdrAll({
-    sortBy = "moh_offer_id",
+    sortBy = "moh_offer_hq_id",
     sortDir = "desc",
     status = "active",
     filterModel = {},
   } = {}) {
     const safeStatus = status === "inactive" ? "inactive" : "active";
-    const safeSortBy = HDR_SORT_COLUMNS[sortBy] ? sortBy : "moh_offer_id";
+    const safeSortBy = HDR_SORT_COLUMNS[sortBy] ? sortBy : "moh_offer_hq_id";
     const safeSortDir =
       String(sortDir || "desc").toLowerCase() === "asc" ? "asc" : "desc";
     const safeFilterModel = parseFilterModel(filterModel, HDR_FILTER_COLUMNS);
@@ -793,10 +830,70 @@ class HqOffersUsecase {
 
     return {
       code: 200,
-      data: (rows || []).map((row) => this.mapHdrListRow(row)),
+      data: (rows || []).map((row) => this.mapHdrGroupedListRow(row)),
       sort_by: safeSortBy,
       sort_dir: safeSortDir,
       status: safeStatus,
+    };
+  }
+
+  async getOfferDetailByHqId(moh_offer_hq_id) {
+    const branchRows = await this.hqOffersRepo.listHdrByOfferHqId(moh_offer_hq_id);
+    if (!branchRows?.length) {
+      return { code: 404, msg: "Offer not found" };
+    }
+
+    const productRows = await this.hqOffersRepo.listOfferLinesByOfferHqId(
+      moh_offer_hq_id
+    );
+    const productsByOutlet = new Map();
+    for (const line of productRows || []) {
+      const outletId = line.retail_outlet_id;
+      if (!productsByOutlet.has(outletId)) {
+        productsByOutlet.set(outletId, []);
+      }
+      productsByOutlet.get(outletId).push({
+        product_id: line.product_id,
+        de_name: line.de_name,
+        image_url: line.image_url,
+        moi_offer_on: line.moi_offer_on,
+        moi_offer_value: roundToTwoDecimals(line.moi_offer_value),
+      });
+    }
+
+    const branches = branchRows.map((row) => {
+      const branch = this.mapHdrListRow(row);
+      return {
+        ...branch,
+        products: productsByOutlet.get(row.retail_outlet_id) ?? [],
+      };
+    });
+
+    const offer = {
+      moh_offer_hq_id: branches[0].moh_offer_hq_id,
+      moh_offer_name: branches[0].moh_offer_name,
+      branch_count: branches.length,
+      product_count: branches.reduce((sum, b) => sum + (b.product_count || 0), 0),
+      moh_offer_st_date: branches.reduce(
+        (min, b) =>
+          !min || (b.moh_offer_st_date && b.moh_offer_st_date < min)
+            ? b.moh_offer_st_date
+            : min,
+        null
+      ),
+      moh_offer_end_date: branches.reduce(
+        (max, b) =>
+          !max || (b.moh_offer_end_date && b.moh_offer_end_date > max)
+            ? b.moh_offer_end_date
+            : max,
+        null
+      ),
+      status: branches.some((b) => b.status === "active") ? "active" : "inactive",
+    };
+
+    return {
+      code: 200,
+      data: { offer, branches },
     };
   }
 
