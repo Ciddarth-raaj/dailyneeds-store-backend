@@ -235,20 +235,45 @@ function offerIssueToProductJoinSql(opAlias = "op", oiAlias = "oi") {
   )`;
 }
 
-function offerProductLinesSelectSql({ hqIdFilter = null } = {}) {
+function offerProductLinesSelectSql({ hqIdFilter = null, groupByBranch = false } = {}) {
   const hqFilterSql = hqIdFilter ? `AND ${hqIdFilter}` : "";
+  const imageSql = `(
+    SELECT image_url
+    FROM product_images pi
+    WHERE pi.product_id = op.mosp_item_code
+    ORDER BY pi.priority ASC, pi.image_id ASC
+    LIMIT 1
+  )`;
+
+  if (groupByBranch) {
+    return `
+      SELECT
+        op.retail_outlet_id,
+        op.mosp_item_code AS product_id,
+        MAX(pt.de_name) AS de_name,
+        MAX(${imageSql}) AS image_url,
+        MAX(oi.moi_offer_on) AS moi_offer_on,
+        MAX(oi.moi_offer_value) AS moi_offer_value
+      FROM offer_products op
+      INNER JOIN offer_hdr h
+        ON h.moh_offer_id = op.mosp_offer_id
+       AND h.retail_outlet_id = op.retail_outlet_id
+      LEFT JOIN offer_issue oi
+        ON oi.moi_offer_id = op.mosp_offer_id
+       AND oi.retail_outlet_id = op.retail_outlet_id
+       AND ${offerIssueToProductJoinSql("op", "oi")}
+      LEFT JOIN product_table pt ON pt.product_id = op.mosp_item_code
+      WHERE 1=1 ${hqFilterSql}
+      GROUP BY op.retail_outlet_id, op.mosp_item_code
+    `;
+  }
+
   return `
     SELECT
       op.retail_outlet_id,
       op.mosp_item_code AS product_id,
       pt.de_name,
-      (
-        SELECT image_url
-        FROM product_images pi
-        WHERE pi.product_id = op.mosp_item_code
-        ORDER BY pi.priority ASC, pi.image_id ASC
-        LIMIT 1
-      ) AS image_url,
+      ${imageSql} AS image_url,
       oi.moi_offer_on,
       oi.moi_offer_value
     FROM offer_products op
@@ -445,12 +470,12 @@ function hdrListBaseSql(status, filterModel = {}) {
 }
 
 const PRODUCT_LINE_SORT_COLUMNS = {
-  moh_offer_hq_id: OFFER_HQ_ID_EXPR,
-  moh_offer_name: "h.moh_offer_name",
-  product_id: "op.mosp_item_code",
-  de_name: "pt.de_name",
-  moi_offer_on: "oi.moi_offer_on",
-  moi_offer_value: "oi.moi_offer_value",
+  moh_offer_hq_id: "moh_offer_hq_id",
+  moh_offer_name: "moh_offer_name",
+  product_id: "product_id",
+  de_name: "de_name",
+  moi_offer_on: "moi_offer_on",
+  moi_offer_value: "moi_offer_value",
 };
 
 function resolveProductLineSort(sortBy, sortDir) {
@@ -539,18 +564,17 @@ function productLinesListBaseSql(status, filterModel = {}) {
   const { sql: filterSql, params: filterParams } = buildProductLineFilterWhere(
     filterModel
   );
+  const imageSql = productImageSubquery();
   return {
     sql: `
     SELECT
-      h.moh_offer_id,
-      h.retail_outlet_id,
       ${OFFER_HQ_ID_EXPR} AS moh_offer_hq_id,
-      h.moh_offer_name,
+      MAX(h.moh_offer_name) AS moh_offer_name,
       op.mosp_item_code AS product_id,
-      pt.de_name,
-      ${productImageSubquery()} AS image_url,
-      oi.moi_offer_on,
-      oi.moi_offer_value
+      MAX(pt.de_name) AS de_name,
+      MAX(${imageSql}) AS image_url,
+      MAX(oi.moi_offer_on) AS moi_offer_on,
+      MAX(oi.moi_offer_value) AS moi_offer_value
     FROM offer_products op
     INNER JOIN offer_hdr h
       ON h.moh_offer_id = op.mosp_offer_id
@@ -561,6 +585,7 @@ function productLinesListBaseSql(status, filterModel = {}) {
      AND ${offerIssueToProductJoinSql("op", "oi")}
     LEFT JOIN product_table pt ON pt.product_id = op.mosp_item_code
     WHERE ${statusWhereClause(status, "h")} AND (${filterSql})
+    GROUP BY ${OFFER_HQ_ID_EXPR}, op.mosp_item_code
   `,
     params: filterParams,
   };
@@ -795,7 +820,10 @@ class HqOffersRepository {
   async listOfferLinesByOfferHqId(moh_offer_hq_id) {
     return queryAsync(
       this.db,
-      `${offerProductLinesSelectSql({ hqIdFilter: `${OFFER_HQ_ID_EXPR} = ?` })}
+      `${offerProductLinesSelectSql({
+        hqIdFilter: `${OFFER_HQ_ID_EXPR} = ?`,
+        groupByBranch: true,
+      })}
       ORDER BY op.retail_outlet_id ASC, op.mosp_item_code ASC`,
       [moh_offer_hq_id]
     );
@@ -817,7 +845,7 @@ class HqOffersRepository {
   async listOfferLinesByKey(moh_offer_id, retail_outlet_id) {
     return queryAsync(
       this.db,
-      `${offerProductLinesSelectSql()}
+      `${offerProductLinesSelectSql({ groupByBranch: true })}
         AND op.mosp_offer_id = ?
         AND op.retail_outlet_id = ?
       ORDER BY op.mosp_item_code ASC`,

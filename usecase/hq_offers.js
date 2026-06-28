@@ -701,9 +701,8 @@ class HqOffersUsecase {
 
   mapProductLineRow(row) {
     if (!row) return null;
-    return {
+    const mapped = {
       moh_offer_hq_id: row.moh_offer_hq_id ?? row.moh_offer_id,
-      retail_outlet_id: row.retail_outlet_id,
       moh_offer_name: row.moh_offer_name,
       product_id: row.product_id,
       de_name: row.de_name,
@@ -711,6 +710,10 @@ class HqOffersUsecase {
       moi_offer_on: row.moi_offer_on,
       moi_offer_value: roundToTwoDecimals(row.moi_offer_value),
     };
+    if (row.retail_outlet_id != null) {
+      mapped.retail_outlet_id = row.retail_outlet_id;
+    }
+    return mapped;
   }
 
   async listHdr({
