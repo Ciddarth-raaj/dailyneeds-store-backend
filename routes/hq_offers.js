@@ -148,6 +148,51 @@ class HqOffersRoutes {
       res.end();
     });
 
+    router.get("/products/groups", async (req, res) => {
+      try {
+        const schema = Joi.object({
+          limit: Joi.alternatives()
+            .try(Joi.number().integer().min(1).max(500), Joi.string().valid("all"))
+            .optional(),
+          offset: Joi.number().integer().min(0).optional(),
+          sort_by: Joi.string().optional(),
+          sort_dir: Joi.string().valid("asc", "desc").optional(),
+          status: Joi.string().valid("active", "inactive").optional(),
+          group_by: Joi.string().valid("distributor", "buyer").optional(),
+          filter: Joi.alternatives().try(Joi.string(), Joi.object()).optional(),
+        });
+        const { error, value } = schema.validate(req.query);
+        if (error) {
+          res.status(400).json({ code: 400, msg: error.message });
+          res.end();
+          return;
+        }
+
+        const result =
+          value.limit === "all"
+            ? await this.hqOffersUsecase.listProductGroupsAll({
+                sortBy: value.sort_by,
+                sortDir: value.sort_dir,
+                status: value.status,
+                filterModel: value.filter,
+                groupBy: value.group_by,
+              })
+            : await this.hqOffersUsecase.listProductGroups({
+                limit: value.limit ?? 20,
+                offset: value.offset ?? 0,
+                sortBy: value.sort_by,
+                sortDir: value.sort_dir,
+                status: value.status,
+                filterModel: value.filter,
+                groupBy: value.group_by,
+              });
+        res.json(result);
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
     router.get("/products", async (req, res) => {
       try {
         const schema = Joi.object({

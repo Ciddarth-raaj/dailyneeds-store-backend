@@ -240,6 +240,11 @@ function normalizeProductGroupBy(groupBy) {
   return null;
 }
 
+function normalizeProductGroupsGroupBy(groupBy) {
+  if (groupBy === "buyer") return "buyer";
+  return "distributor";
+}
+
 const HDR_SORT_COLUMNS = {
   moh_offer_hq_id: true,
   moh_offer_name: true,
@@ -281,6 +286,18 @@ const PRODUCT_FILTER_COLUMNS = {
   moi_offer_type: true,
   distributor_name: true,
   buyer_name: true,
+};
+
+const PRODUCT_GROUP_SORT_COLUMNS = {
+  distributor_name: true,
+  buyer_name: true,
+  product_count: true,
+};
+
+const PRODUCT_GROUP_FILTER_COLUMNS = {
+  distributor_name: true,
+  buyer_name: true,
+  product_count: true,
 };
 
 function parseFilterModel(raw, allowedColumns) {
@@ -741,6 +758,15 @@ class HqOffersUsecase {
     return mapped;
   }
 
+  mapProductGroupRow(row, groupBy) {
+    if (!row) return null;
+    const nameField = groupBy === "buyer" ? "buyer_name" : "distributor_name";
+    return {
+      [nameField]: row[nameField] ?? null,
+      product_count: Number(row.product_count) || 0,
+    };
+  }
+
   async listHdr({
     limit = 20,
     offset = 0,
@@ -778,6 +804,90 @@ class HqOffersUsecase {
       sort_by: safeSortBy,
       sort_dir: safeSortDir,
       status: safeStatus,
+    };
+  }
+
+  async listProductGroups({
+    limit = 20,
+    offset = 0,
+    sortBy,
+    sortDir = "asc",
+    status = "active",
+    filterModel = {},
+    groupBy = "distributor",
+  } = {}) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 500);
+    const safeOffset = Math.max(Number(offset) || 0, 0);
+    const safeStatus = status === "inactive" ? "inactive" : "active";
+    const safeGroupBy = normalizeProductGroupsGroupBy(groupBy);
+    const defaultSortBy =
+      safeGroupBy === "buyer" ? "buyer_name" : "distributor_name";
+    const safeSortBy = PRODUCT_GROUP_SORT_COLUMNS[sortBy] ? sortBy : defaultSortBy;
+    const safeSortDir =
+      String(sortDir || "asc").toLowerCase() === "desc" ? "desc" : "asc";
+    const safeFilterModel = parseFilterModel(filterModel, PRODUCT_GROUP_FILTER_COLUMNS);
+
+    const [rows, total] = await Promise.all([
+      this.hqOffersRepo.listProductGroups({
+        limit: safeLimit,
+        offset: safeOffset,
+        sortBy: safeSortBy,
+        sortDir: safeSortDir,
+        status: safeStatus,
+        filterModel: safeFilterModel,
+        groupBy: safeGroupBy,
+      }),
+      this.hqOffersRepo.countProductGroups({
+        status: safeStatus,
+        filterModel: safeFilterModel,
+        groupBy: safeGroupBy,
+      }),
+    ]);
+
+    return {
+      code: 200,
+      data: (rows || []).map((row) => this.mapProductGroupRow(row, safeGroupBy)),
+      total: Number(total) || 0,
+      limit: safeLimit,
+      offset: safeOffset,
+      sort_by: safeSortBy,
+      sort_dir: safeSortDir,
+      status: safeStatus,
+      group_by: safeGroupBy,
+    };
+  }
+
+  async listProductGroupsAll({
+    sortBy,
+    sortDir = "asc",
+    status = "active",
+    filterModel = {},
+    groupBy = "distributor",
+  } = {}) {
+    const safeStatus = status === "inactive" ? "inactive" : "active";
+    const safeGroupBy = normalizeProductGroupsGroupBy(groupBy);
+    const defaultSortBy =
+      safeGroupBy === "buyer" ? "buyer_name" : "distributor_name";
+    const safeSortBy = PRODUCT_GROUP_SORT_COLUMNS[sortBy] ? sortBy : defaultSortBy;
+    const safeSortDir =
+      String(sortDir || "asc").toLowerCase() === "desc" ? "desc" : "asc";
+    const safeFilterModel = parseFilterModel(filterModel, PRODUCT_GROUP_FILTER_COLUMNS);
+
+    const rows = await this.hqOffersRepo.listProductGroupsAll({
+      sortBy: safeSortBy,
+      sortDir: safeSortDir,
+      status: safeStatus,
+      filterModel: safeFilterModel,
+      groupBy: safeGroupBy,
+    });
+
+    return {
+      code: 200,
+      data: (rows || []).map((row) => this.mapProductGroupRow(row, safeGroupBy)),
+      sort_by: safeSortBy,
+      sort_dir: safeSortDir,
+      status: safeStatus,
+      group_by: safeGroupBy,
     };
   }
 

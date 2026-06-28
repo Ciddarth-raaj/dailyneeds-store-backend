@@ -627,14 +627,28 @@ function buildProductLineFilterWhere(filterModel = {}) {
     distributorFilter?.filter != null &&
     String(distributorFilter.filter).trim() !== ""
   ) {
-    clauses.push(`${productDistributorNameExpr()} LIKE ?`);
-    params.push(`%${String(distributorFilter.filter).trim()}%`);
+    const distValue = String(distributorFilter.filter).trim();
+    const distType = distributorFilter.type || "contains";
+    if (distType === "equals") {
+      clauses.push(`${productDistributorNameExpr()} = ?`);
+      params.push(distValue);
+    } else {
+      clauses.push(`${productDistributorNameExpr()} LIKE ?`);
+      params.push(`%${distValue}%`);
+    }
   }
 
   const buyerFilter = filterModel.buyer_name;
   if (buyerFilter?.filter != null && String(buyerFilter.filter).trim() !== "") {
-    clauses.push(`${productBuyerNameExpr()} LIKE ?`);
-    params.push(`%${String(buyerFilter.filter).trim()}%`);
+    const buyerValue = String(buyerFilter.filter).trim();
+    const buyerType = buyerFilter.type || "contains";
+    if (buyerType === "equals") {
+      clauses.push(`${productBuyerNameExpr()} = ?`);
+      params.push(buyerValue);
+    } else {
+      clauses.push(`${productBuyerNameExpr()} LIKE ?`);
+      params.push(`%${buyerValue}%`);
+    }
   }
 
   const offerTypeFilter = filterModel.moi_offer_type;
@@ -647,6 +661,106 @@ function buildProductLineFilterWhere(filterModel = {}) {
   return {
     sql: clauses.length ? clauses.join(" AND ") : "1=1",
     params,
+  };
+}
+
+function resolveProductGroupExpr(groupBy) {
+  return groupBy === "buyer" ? productBuyerNameExpr() : productDistributorNameExpr();
+}
+
+function resolveProductGroupNameField(groupBy) {
+  return groupBy === "buyer" ? "buyer_name" : "distributor_name";
+}
+
+function buildProductGroupAggregateWhere(groupBy, filterModel = {}) {
+  const clauses = [];
+  const params = [];
+  const nameField = resolveProductGroupNameField(groupBy);
+
+  const nameFilter = filterModel[nameField];
+  if (nameFilter?.filter != null && String(nameFilter.filter).trim() !== "") {
+    clauses.push(`${nameField} LIKE ?`);
+    params.push(`%${String(nameFilter.filter).trim()}%`);
+  }
+
+  const countFilter = filterModel.product_count;
+  if (countFilter?.filter != null && countFilter.filter !== "") {
+    const n = Number(countFilter.filter);
+    if (!Number.isNaN(n)) {
+      const type = countFilter.type || "equals";
+      if (type === "equals") {
+        clauses.push("product_count = ?");
+        params.push(n);
+      } else if (type === "greaterThan") {
+        clauses.push("product_count > ?");
+        params.push(n);
+      } else if (type === "lessThan") {
+        clauses.push("product_count < ?");
+        params.push(n);
+      } else if (type === "greaterThanOrEqual") {
+        clauses.push("product_count >= ?");
+        params.push(n);
+      } else if (type === "lessThanOrEqual") {
+        clauses.push("product_count <= ?");
+        params.push(n);
+      }
+    }
+  }
+
+  return {
+    sql: clauses.length ? clauses.join(" AND ") : "1=1",
+    params,
+  };
+}
+
+const PRODUCT_GROUP_SORT_COLUMNS = {
+  distributor_name: "distributor_name",
+  buyer_name: "buyer_name",
+  product_count: "product_count",
+};
+
+function resolveProductGroupSort(groupBy, sortBy, sortDir) {
+  const nameField = resolveProductGroupNameField(groupBy);
+  const column =
+    PRODUCT_GROUP_SORT_COLUMNS[sortBy] ||
+    (groupBy === "buyer"
+      ? PRODUCT_GROUP_SORT_COLUMNS.buyer_name
+      : PRODUCT_GROUP_SORT_COLUMNS.distributor_name);
+  const safeColumn = column === nameField || column === "product_count" ? column : nameField;
+  const dir = String(sortDir || "asc").toLowerCase() === "desc" ? "DESC" : "ASC";
+  return { column: safeColumn, dir };
+}
+
+function productGroupsListBaseSql(status, groupBy, filterModel = {}) {
+  const groupExpr = resolveProductGroupExpr(groupBy);
+  const nameAlias = resolveProductGroupNameField(groupBy);
+  const { sql: aggregateSql, params: aggregateParams } = buildProductGroupAggregateWhere(
+    groupBy,
+    filterModel
+  );
+
+  return {
+    sql: `
+      SELECT * FROM (
+        SELECT
+          ${groupExpr} AS ${nameAlias},
+          COUNT(DISTINCT CONCAT(${OFFER_HQ_ID_EXPR}, ':', op.mosp_item_code)) AS product_count
+        FROM offer_products op
+        INNER JOIN offer_hdr h
+          ON h.moh_offer_id = op.mosp_offer_id
+         AND h.retail_outlet_id = op.retail_outlet_id
+        LEFT JOIN offer_issue oi
+          ON oi.moi_offer_id = op.mosp_offer_id
+         AND oi.retail_outlet_id = op.retail_outlet_id
+         AND ${offerIssueToProductJoinSql("op", "oi")}
+        LEFT JOIN product_table pt ON pt.product_id = op.mosp_item_code
+        ${productEnrichmentJoinsSql()}
+        WHERE ${excludedRetailOutletWhereClause("h")} AND ${statusWhereClause(status, "h")}
+        GROUP BY ${groupExpr}
+      ) grouped
+      WHERE (${aggregateSql})
+    `,
+    params: aggregateParams,
   };
 }
 
@@ -964,6 +1078,74 @@ class HqOffersRepository {
       filterParams
     );
     return rows?.[0]?.total ?? 0;
+  }
+
+  async countProductGroups({
+    status = "active",
+    filterModel = {},
+    groupBy = "distributor",
+  } = {}) {
+    const { sql: baseSql, params: filterParams } = productGroupsListBaseSql(
+      status,
+      groupBy,
+      filterModel
+    );
+    const rows = await queryAsync(
+      this.db,
+      `SELECT COUNT(*) AS total FROM (${baseSql}) AS filtered_groups`,
+      filterParams
+    );
+    return rows?.[0]?.total ?? 0;
+  }
+
+  async listProductGroups({
+    limit = 20,
+    offset = 0,
+    sortBy,
+    sortDir = "asc",
+    status = "active",
+    filterModel = {},
+    groupBy = "distributor",
+  } = {}) {
+    const nameField = resolveProductGroupNameField(groupBy);
+    const { column, dir } = resolveProductGroupSort(
+      groupBy,
+      sortBy || nameField,
+      sortDir
+    );
+    const { sql: baseSql, params: filterParams } = productGroupsListBaseSql(
+      status,
+      groupBy,
+      filterModel
+    );
+    const sql = `${baseSql}
+      ORDER BY ${column} ${dir}
+      LIMIT ? OFFSET ?`;
+    return queryAsync(this.db, sql, [...filterParams, limit, offset]);
+  }
+
+  async listProductGroupsAll({
+    sortBy,
+    sortDir = "asc",
+    status = "active",
+    filterModel = {},
+    groupBy = "distributor",
+  } = {}) {
+    const nameField = resolveProductGroupNameField(groupBy);
+    const { column, dir } = resolveProductGroupSort(
+      groupBy,
+      sortBy || nameField,
+      sortDir
+    );
+    const { sql: baseSql, params: filterParams } = productGroupsListBaseSql(
+      status,
+      groupBy,
+      filterModel
+    );
+    const sql = `${baseSql}
+      ORDER BY ${column} ${dir}
+      LIMIT ?`;
+    return queryAsync(this.db, sql, [...filterParams, LIST_ALL_CAP]);
   }
 
   async listProductLines({
