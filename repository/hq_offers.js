@@ -93,7 +93,6 @@ const HDR_UPDATE_ASSIGNMENTS = HDR_COLUMNS.filter(
 const PRODUCT_UPDATE_ASSIGNMENTS = PRODUCT_COLUMNS.filter(
   (c) =>
     c !== "mosp_offer_id" &&
-    c !== "mosp_sub_id" &&
     c !== "mosp_item_code" &&
     c !== "retail_outlet_id"
 )
@@ -467,7 +466,6 @@ function productLinesListBaseSql(status, filterModel = {}) {
       ${OFFER_HQ_ID_EXPR} AS moh_offer_hq_id,
       h.moh_offer_name,
       op.mosp_item_code AS product_id,
-      oi.moi_offer_sl_no,
       pt.de_name,
       ${productImageSubquery()} AS image_url,
       oi.moi_offer_on,
@@ -475,7 +473,7 @@ function productLinesListBaseSql(status, filterModel = {}) {
     FROM offer_issue oi
     INNER JOIN offer_products op
       ON oi.moi_offer_id = op.mosp_offer_id
-     AND oi.moi_offer_sl_no = op.mosp_sub_id
+     AND oi.moi_item_code = op.mosp_item_code
      AND oi.retail_outlet_id = op.retail_outlet_id
     INNER JOIN offer_hdr h
       ON h.moh_offer_id = oi.moi_offer_id
@@ -491,8 +489,8 @@ function offerHdrKey(offerId, outletId) {
   return `${offerId}:${outletId}`;
 }
 
-function offerProductLineKey(offerId, subId, outletId) {
-  return `${offerId}:${subId}:${outletId}`;
+function offerProductLineKey(offerId, itemCode, outletId) {
+  return `${offerId}:${itemCode}:${outletId}`;
 }
 
 function rowToHdrTuple(row) {
@@ -620,7 +618,7 @@ class HqOffersRepository {
     for (const key of keys) {
       const token = offerProductLineKey(
         key.mosp_offer_id,
-        key.mosp_sub_id,
+        key.mosp_item_code,
         key.retail_outlet_id
       );
       if (seen.has(token)) continue;
@@ -634,18 +632,18 @@ class HqOffersRepository {
       this.db,
       (chunk) => {
         const ph = chunk.map(() => "(?, ?, ?)").join(", ");
-        return `SELECT mosp_offer_id, mosp_sub_id, retail_outlet_id
+        return `SELECT mosp_offer_id, mosp_item_code, retail_outlet_id
           FROM offer_products
-          WHERE (mosp_offer_id, mosp_sub_id, retail_outlet_id) IN (${ph})`;
+          WHERE (mosp_offer_id, mosp_item_code, retail_outlet_id) IN (${ph})`;
       },
-      unique.map((k) => [k.mosp_offer_id, k.mosp_sub_id, k.retail_outlet_id])
+      unique.map((k) => [k.mosp_offer_id, k.mosp_item_code, k.retail_outlet_id])
     );
 
     for (const row of rows) {
       valid.add(
         offerProductLineKey(
           row.mosp_offer_id,
-          row.mosp_sub_id,
+          row.mosp_item_code,
           row.retail_outlet_id
         )
       );
@@ -732,7 +730,7 @@ class HqOffersRepository {
       FROM offer_issue oi
       INNER JOIN offer_products op
         ON oi.moi_offer_id = op.mosp_offer_id
-       AND oi.moi_offer_sl_no = op.mosp_sub_id
+       AND oi.moi_item_code = op.mosp_item_code
        AND oi.retail_outlet_id = op.retail_outlet_id
       INNER JOIN offer_hdr h
         ON h.moh_offer_id = oi.moi_offer_id
@@ -775,7 +773,7 @@ class HqOffersRepository {
       FROM offer_issue oi
       INNER JOIN offer_products op
         ON oi.moi_offer_id = op.mosp_offer_id
-       AND oi.moi_offer_sl_no = op.mosp_sub_id
+       AND oi.moi_item_code = op.mosp_item_code
        AND oi.retail_outlet_id = op.retail_outlet_id
       LEFT JOIN product_table pt ON pt.product_id = op.mosp_item_code
       WHERE oi.moi_offer_id = ?

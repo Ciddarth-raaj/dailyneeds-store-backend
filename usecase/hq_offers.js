@@ -112,8 +112,8 @@ function offerHdrKey(offerId, outletId) {
   return `${offerId}:${outletId}`;
 }
 
-function offerProductLineKey(offerId, subId, outletId) {
-  return `${offerId}:${subId}:${outletId}`;
+function offerProductLineKey(offerId, itemCode, outletId) {
+  return `${offerId}:${itemCode}:${outletId}`;
 }
 
 const FK_SKIP_REASON = {
@@ -123,7 +123,7 @@ const FK_SKIP_REASON = {
     "offer_hdr not found for MOSP_OFFER_ID and RETAIL_OUTLET_ID",
   OFFER_HDR_ISSUE: "offer_hdr not found for MOI_OFFER_ID and RETAIL_OUTLET_ID",
   OFFER_PRODUCTS_LINE:
-    "offer_products line not found for MOI_OFFER_ID, MOI_OFFER_SL_NO, and RETAIL_OUTLET_ID",
+    "offer_products line not found for MOI_OFFER_ID, MOI_ITEM_CODE, and RETAIL_OUTLET_ID",
 };
 
 function uniqueFkSkipReasons(reasons) {
@@ -341,11 +341,13 @@ class HqOffersUsecase {
       }))
     );
     const validProductLines = await this.hqOffersRepo.resolveValidOfferProductLineKeys(
-      rows.map((r) => ({
-        mosp_offer_id: r.moi_offer_id,
-        mosp_sub_id: r.moi_offer_sl_no,
-        retail_outlet_id: r.retail_outlet_id,
-      }))
+      rows
+        .filter((r) => r.moi_item_code != null)
+        .map((r) => ({
+          mosp_offer_id: r.moi_offer_id,
+          mosp_item_code: r.moi_item_code,
+          retail_outlet_id: r.retail_outlet_id,
+        }))
     );
 
     const accepted = [];
@@ -357,13 +359,15 @@ class HqOffersUsecase {
       const offerOk = validOffers.has(
         offerHdrKey(row.moi_offer_id, row.retail_outlet_id)
       );
-      const productLineOk = validProductLines.has(
-        offerProductLineKey(
-          row.moi_offer_id,
-          row.moi_offer_sl_no,
-          row.retail_outlet_id
-        )
-      );
+      const productLineOk =
+        row.moi_item_code != null &&
+        validProductLines.has(
+          offerProductLineKey(
+            row.moi_offer_id,
+            row.moi_item_code,
+            row.retail_outlet_id
+          )
+        );
 
       if (!outletOk || !offerOk || !productLineOk) {
         skippedFk += 1;
@@ -513,7 +517,7 @@ class HqOffersUsecase {
         continue;
       }
       byKey.set(
-        `${mapped.mosp_offer_id}:${mapped.mosp_sub_id}:${mapped.mosp_item_code}:${mapped.retail_outlet_id}`,
+        `${mapped.mosp_offer_id}:${mapped.mosp_item_code}:${mapped.retail_outlet_id}`,
         mapped
       );
     }
@@ -690,7 +694,6 @@ class HqOffersUsecase {
       retail_outlet_id: row.retail_outlet_id,
       moh_offer_name: row.moh_offer_name,
       product_id: row.product_id,
-      moi_offer_sl_no: row.moi_offer_sl_no,
       de_name: row.de_name,
       image_url: row.image_url,
       moi_offer_on: row.moi_offer_on,
