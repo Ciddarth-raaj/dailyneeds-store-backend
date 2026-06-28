@@ -253,7 +253,7 @@ class ProductRepository {
             p.de_distributor,
             p.distributor_id,
             p.de_manufacturer_name,
-            pdm.mdm_dist_name AS distributor_name,
+            COALESCE(pdm.mdm_dist_name, p.de_distributor) AS distributor_name,
             p.category_id,
             cat.category_name,
             p.subcategory_id,
@@ -317,7 +317,7 @@ class ProductRepository {
     return new Promise((resolve, reject) => {
       this.db.query(
         `SELECT product_table.*, categories.category_name, subcategories.subcategory_name, department.department_name, brands.brand_name,
-              pdm.mdm_dist_name AS distributor_name
+              COALESCE(pdm.mdm_dist_name, product_table.de_distributor) AS distributor_name
       FROM product_table
       LEFT JOIN categories ON product_table.category_id = categories.category_id
       LEFT JOIN subcategories ON subcategories.subcategory_id = product_table.subcategory_id
@@ -354,7 +354,7 @@ class ProductRepository {
           subcategories.*, 
           department.*, 
           brands.*,
-          pdm.mdm_dist_name AS distributor_name,
+          COALESCE(pdm.mdm_dist_name, product_table.de_distributor) AS distributor_name,
           COALESCE(pi.has_images, 0) as has_images
         FROM product_table
         JOIN categories ON categories.category_id = product_table.category_id

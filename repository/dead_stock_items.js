@@ -11,7 +11,7 @@ LEFT JOIN categories cat ON pt.category_id = cat.category_id
 LEFT JOIN subcategories sub ON pt.subcategory_id = sub.category_id
 SET
   dsi.de_name = pt.de_name,
-  dsi.de_distributor = pdm.mdm_dist_name,
+  dsi.de_distributor = COALESCE(pdm.mdm_dist_name, pt.de_distributor),
   dsi.buyer_name = ne.employee_name,
   dsi.outlet_name = o.outlet_name,
   dsi.department_id = pt.department_id,

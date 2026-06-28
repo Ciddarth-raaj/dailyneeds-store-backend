@@ -8,8 +8,8 @@ const ENRICH_SNAPSHOT_SET = `
   pci.de_name = pt.de_name,
   pci.de_display_name = pt.de_display_name,
   pci.de_preparation_type = pt.de_preparation_type,
-  pci.distributor_id = pdm.cid,
-  pci.de_distributor = pdm.mdm_dist_name,
+  pci.distributor_id = pt.distributor_id,
+  pci.de_distributor = COALESCE(pdm.mdm_dist_name, pt.de_distributor),
   pci.buyer_id = pd_map.buyer_id,
   pci.buyer_name = ne.employee_name`;
 
