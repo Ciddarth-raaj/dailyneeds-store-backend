@@ -125,6 +125,14 @@ const LIST_ALL_CAP = 50000;
 
 const OFFER_HQ_ID_EXPR = "COALESCE(h.moh_offer_hq_id, h.moh_offer_id)";
 
+const EXCLUDED_RETAIL_OUTLET_IDS = [2];
+
+function excludedRetailOutletWhereClause(alias = "h") {
+  return EXCLUDED_RETAIL_OUTLET_IDS.map(
+    (outletId) => `${alias}.retail_outlet_id != ${Number(outletId)}`
+  ).join(" AND ");
+}
+
 const HDR_SORT_COLUMNS = {
   moh_offer_hq_id: "moh_offer_hq_id",
   moh_offer_name: "moh_offer_name",
@@ -237,6 +245,7 @@ function offerIssueToProductJoinSql(opAlias = "op", oiAlias = "oi") {
 
 function offerProductLinesSelectSql({ hqIdFilter = null, groupByBranch = false } = {}) {
   const hqFilterSql = hqIdFilter ? `AND ${hqIdFilter}` : "";
+  const outletFilterSql = excludedRetailOutletWhereClause("h");
   const imageSql = `(
     SELECT image_url
     FROM product_images pi
@@ -263,7 +272,7 @@ function offerProductLinesSelectSql({ hqIdFilter = null, groupByBranch = false }
        AND oi.retail_outlet_id = op.retail_outlet_id
        AND ${offerIssueToProductJoinSql("op", "oi")}
       LEFT JOIN product_table pt ON pt.product_id = op.mosp_item_code
-      WHERE 1=1 ${hqFilterSql}
+      WHERE ${outletFilterSql} ${hqFilterSql}
       GROUP BY op.retail_outlet_id, op.mosp_item_code
     `;
   }
@@ -285,7 +294,7 @@ function offerProductLinesSelectSql({ hqIdFilter = null, groupByBranch = false }
      AND oi.retail_outlet_id = op.retail_outlet_id
      AND ${offerIssueToProductJoinSql("op", "oi")}
     LEFT JOIN product_table pt ON pt.product_id = op.mosp_item_code
-    WHERE 1=1 ${hqFilterSql}
+    WHERE ${outletFilterSql} ${hqFilterSql}
   `;
 }
 
@@ -437,7 +446,7 @@ function hdrGroupedListBaseSql(status, filterModel = {}) {
         LEFT JOIN offer_products op
           ON op.mosp_offer_id = h.moh_offer_id
          AND op.retail_outlet_id = h.retail_outlet_id
-        WHERE (${filterSql})
+        WHERE ${excludedRetailOutletWhereClause("h")} AND (${filterSql})
         GROUP BY ${OFFER_HQ_ID_EXPR}
         HAVING ${groupedStatusHavingClause(status)}
       ) grouped
@@ -463,7 +472,7 @@ function hdrListBaseSql(status, filterModel = {}) {
       ${productCountSubquery()} AS product_count
     FROM offer_hdr h
     INNER JOIN outlets o ON o.outlet_id = h.retail_outlet_id
-    WHERE ${statusWhereClause(status)} AND (${filterSql})
+    WHERE ${excludedRetailOutletWhereClause("h")} AND ${statusWhereClause(status)} AND (${filterSql})
   `,
     params: filterParams,
   };
@@ -584,7 +593,7 @@ function productLinesListBaseSql(status, filterModel = {}) {
      AND oi.retail_outlet_id = op.retail_outlet_id
      AND ${offerIssueToProductJoinSql("op", "oi")}
     LEFT JOIN product_table pt ON pt.product_id = op.mosp_item_code
-    WHERE ${statusWhereClause(status, "h")} AND (${filterSql})
+    WHERE ${excludedRetailOutletWhereClause("h")} AND ${statusWhereClause(status, "h")} AND (${filterSql})
     GROUP BY ${OFFER_HQ_ID_EXPR}, op.mosp_item_code
   `,
     params: filterParams,
