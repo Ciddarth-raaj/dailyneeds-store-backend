@@ -225,6 +225,21 @@ function roundToTwoDecimals(value) {
   return Number(n.toFixed(2));
 }
 
+function mapOfferTypeLabel(moiOfferType) {
+  if (moiOfferType == null || moiOfferType === "") return null;
+  const n = Number(moiOfferType);
+  if (Number.isNaN(n)) return String(moiOfferType);
+  if (n === 1) return "Percentage";
+  if (n === 4) return "Value";
+  if (n === 2 || n === 3) return String(n);
+  return String(moiOfferType);
+}
+
+function normalizeProductGroupBy(groupBy) {
+  if (groupBy === "distributor" || groupBy === "buyer") return groupBy;
+  return null;
+}
+
 const HDR_SORT_COLUMNS = {
   moh_offer_hq_id: true,
   moh_offer_name: true,
@@ -251,6 +266,9 @@ const PRODUCT_SORT_COLUMNS = {
   de_name: true,
   moi_offer_on: true,
   moi_offer_value: true,
+  moi_offer_type: true,
+  distributor_name: true,
+  buyer_name: true,
 };
 
 const PRODUCT_FILTER_COLUMNS = {
@@ -260,6 +278,9 @@ const PRODUCT_FILTER_COLUMNS = {
   de_name: true,
   moi_offer_on: true,
   moi_offer_value: true,
+  moi_offer_type: true,
+  distributor_name: true,
+  buyer_name: true,
 };
 
 function parseFilterModel(raw, allowedColumns) {
@@ -709,6 +730,10 @@ class HqOffersUsecase {
       image_url: row.image_url,
       moi_offer_on: row.moi_offer_on,
       moi_offer_value: roundToTwoDecimals(row.moi_offer_value),
+      moi_offer_type: row.moi_offer_type != null ? Number(row.moi_offer_type) : null,
+      moi_offer_type_label: mapOfferTypeLabel(row.moi_offer_type),
+      distributor_name: row.distributor_name,
+      buyer_name: row.buyer_name,
     };
     if (row.retail_outlet_id != null) {
       mapped.retail_outlet_id = row.retail_outlet_id;
@@ -763,6 +788,7 @@ class HqOffersUsecase {
     sortDir = "desc",
     status = "active",
     filterModel = {},
+    groupBy = null,
   } = {}) {
     const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 500);
     const safeOffset = Math.max(Number(offset) || 0, 0);
@@ -771,6 +797,7 @@ class HqOffersUsecase {
     const safeSortDir =
       String(sortDir || "desc").toLowerCase() === "asc" ? "asc" : "desc";
     const safeFilterModel = parseFilterModel(filterModel, PRODUCT_FILTER_COLUMNS);
+    const safeGroupBy = normalizeProductGroupBy(groupBy);
 
     const [rows, total] = await Promise.all([
       this.hqOffersRepo.listProductLines({
@@ -780,10 +807,12 @@ class HqOffersUsecase {
         sortDir: safeSortDir,
         status: safeStatus,
         filterModel: safeFilterModel,
+        groupBy: safeGroupBy,
       }),
       this.hqOffersRepo.countProductLines({
         status: safeStatus,
         filterModel: safeFilterModel,
+        groupBy: safeGroupBy,
       }),
     ]);
 
@@ -796,6 +825,7 @@ class HqOffersUsecase {
       sort_by: safeSortBy,
       sort_dir: safeSortDir,
       status: safeStatus,
+      group_by: safeGroupBy,
     };
   }
 
@@ -804,18 +834,21 @@ class HqOffersUsecase {
     sortDir = "desc",
     status = "active",
     filterModel = {},
+    groupBy = null,
   } = {}) {
     const safeStatus = status === "inactive" ? "inactive" : "active";
     const safeSortBy = PRODUCT_SORT_COLUMNS[sortBy] ? sortBy : "moh_offer_hq_id";
     const safeSortDir =
       String(sortDir || "desc").toLowerCase() === "asc" ? "asc" : "desc";
     const safeFilterModel = parseFilterModel(filterModel, PRODUCT_FILTER_COLUMNS);
+    const safeGroupBy = normalizeProductGroupBy(groupBy);
 
     const rows = await this.hqOffersRepo.listProductLinesAll({
       sortBy: safeSortBy,
       sortDir: safeSortDir,
       status: safeStatus,
       filterModel: safeFilterModel,
+      groupBy: safeGroupBy,
     });
 
     return {
@@ -824,6 +857,7 @@ class HqOffersUsecase {
       sort_by: safeSortBy,
       sort_dir: safeSortDir,
       status: safeStatus,
+      group_by: safeGroupBy,
     };
   }
 
@@ -870,13 +904,7 @@ class HqOffersUsecase {
       if (!productsByOutlet.has(outletId)) {
         productsByOutlet.set(outletId, []);
       }
-      productsByOutlet.get(outletId).push({
-        product_id: line.product_id,
-        de_name: line.de_name,
-        image_url: line.image_url,
-        moi_offer_on: line.moi_offer_on,
-        moi_offer_value: roundToTwoDecimals(line.moi_offer_value),
-      });
+      productsByOutlet.get(outletId).push(this.mapProductLineRow(line));
     }
 
     const branches = branchRows.map((row) => {

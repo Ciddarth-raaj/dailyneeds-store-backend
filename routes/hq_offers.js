@@ -158,6 +158,7 @@ class HqOffersRoutes {
           sort_by: Joi.string().optional(),
           sort_dir: Joi.string().valid("asc", "desc").optional(),
           status: Joi.string().valid("active", "inactive").optional(),
+          group_by: Joi.string().valid("distributor", "buyer").optional(),
           filter: Joi.alternatives().try(Joi.string(), Joi.object()).optional(),
         });
         const { error, value } = schema.validate(req.query);
@@ -174,6 +175,7 @@ class HqOffersRoutes {
                 sortDir: value.sort_dir,
                 status: value.status,
                 filterModel: value.filter,
+                groupBy: value.group_by,
               })
             : await this.hqOffersUsecase.listProductLines({
                 limit: value.limit ?? 20,
@@ -182,6 +184,7 @@ class HqOffersRoutes {
                 sortDir: value.sort_dir,
                 status: value.status,
                 filterModel: value.filter,
+                groupBy: value.group_by,
               });
         res.json(result);
       } catch (err) {

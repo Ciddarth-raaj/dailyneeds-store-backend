@@ -243,6 +243,54 @@ function offerIssueToProductJoinSql(opAlias = "op", oiAlias = "oi") {
   )`;
 }
 
+function productDistributorNameExpr() {
+  return "COALESCE(pdm.mdm_dist_name, pt.de_distributor)";
+}
+
+function productBuyerNameExpr() {
+  return "COALESCE(ne.employee_name, pt.buyer_name)";
+}
+
+const OFFER_TYPE_LABEL_TO_ID = {
+  Percentage: 1,
+  Value: 4,
+  "2": 2,
+  "3": 3,
+};
+
+function resolveOfferTypeIdsFromFilter(filterDef) {
+  if (
+    !filterDef ||
+    filterDef.filterType !== "badge" ||
+    !Array.isArray(filterDef.values) ||
+    filterDef.values.length === 0
+  ) {
+    return null;
+  }
+  const ids = filterDef.values
+    .map((label) => OFFER_TYPE_LABEL_TO_ID[label])
+    .filter((id) => id != null);
+  return ids.length ? ids : null;
+}
+
+function productEnrichmentJoinsSql() {
+  return `
+    LEFT JOIN product_distributor_master pdm ON pt.distributor_id = pdm.cid
+    LEFT JOIN product_distributor pd_map ON pd_map.cid = pt.distributor_id
+    LEFT JOIN new_employee ne ON ne.employee_id = pd_map.buyer_id
+  `;
+}
+
+function resolveProductLineGroupBy(groupBy) {
+  if (groupBy === "distributor") {
+    return `${productDistributorNameExpr()}, ${OFFER_HQ_ID_EXPR}, op.mosp_item_code`;
+  }
+  if (groupBy === "buyer") {
+    return `${productBuyerNameExpr()}, ${OFFER_HQ_ID_EXPR}, op.mosp_item_code`;
+  }
+  return `${OFFER_HQ_ID_EXPR}, op.mosp_item_code`;
+}
+
 function offerProductLinesSelectSql({ hqIdFilter = null, groupByBranch = false } = {}) {
   const hqFilterSql = hqIdFilter ? `AND ${hqIdFilter}` : "";
   const outletFilterSql = excludedRetailOutletWhereClause("h");
@@ -262,7 +310,10 @@ function offerProductLinesSelectSql({ hqIdFilter = null, groupByBranch = false }
         MAX(pt.de_name) AS de_name,
         MAX(${imageSql}) AS image_url,
         MAX(oi.moi_offer_on) AS moi_offer_on,
-        MAX(oi.moi_offer_value) AS moi_offer_value
+        MAX(oi.moi_offer_value) AS moi_offer_value,
+        MAX(oi.moi_offer_type) AS moi_offer_type,
+        MAX(${productDistributorNameExpr()}) AS distributor_name,
+        MAX(${productBuyerNameExpr()}) AS buyer_name
       FROM offer_products op
       INNER JOIN offer_hdr h
         ON h.moh_offer_id = op.mosp_offer_id
@@ -272,6 +323,7 @@ function offerProductLinesSelectSql({ hqIdFilter = null, groupByBranch = false }
        AND oi.retail_outlet_id = op.retail_outlet_id
        AND ${offerIssueToProductJoinSql("op", "oi")}
       LEFT JOIN product_table pt ON pt.product_id = op.mosp_item_code
+      ${productEnrichmentJoinsSql()}
       WHERE ${outletFilterSql} ${hqFilterSql}
       GROUP BY op.retail_outlet_id, op.mosp_item_code
     `;
@@ -284,7 +336,10 @@ function offerProductLinesSelectSql({ hqIdFilter = null, groupByBranch = false }
       pt.de_name,
       ${imageSql} AS image_url,
       oi.moi_offer_on,
-      oi.moi_offer_value
+      oi.moi_offer_value,
+      oi.moi_offer_type,
+      ${productDistributorNameExpr()} AS distributor_name,
+      ${productBuyerNameExpr()} AS buyer_name
     FROM offer_products op
     INNER JOIN offer_hdr h
       ON h.moh_offer_id = op.mosp_offer_id
@@ -294,6 +349,7 @@ function offerProductLinesSelectSql({ hqIdFilter = null, groupByBranch = false }
      AND oi.retail_outlet_id = op.retail_outlet_id
      AND ${offerIssueToProductJoinSql("op", "oi")}
     LEFT JOIN product_table pt ON pt.product_id = op.mosp_item_code
+    ${productEnrichmentJoinsSql()}
     WHERE ${outletFilterSql} ${hqFilterSql}
   `;
 }
@@ -485,6 +541,9 @@ const PRODUCT_LINE_SORT_COLUMNS = {
   de_name: "de_name",
   moi_offer_on: "moi_offer_on",
   moi_offer_value: "moi_offer_value",
+  moi_offer_type: "moi_offer_type",
+  distributor_name: "distributor_name",
+  buyer_name: "buyer_name",
 };
 
 function resolveProductLineSort(sortBy, sortDir) {
@@ -563,17 +622,40 @@ function buildProductLineFilterWhere(filterModel = {}) {
     }
   }
 
+  const distributorFilter = filterModel.distributor_name;
+  if (
+    distributorFilter?.filter != null &&
+    String(distributorFilter.filter).trim() !== ""
+  ) {
+    clauses.push(`${productDistributorNameExpr()} LIKE ?`);
+    params.push(`%${String(distributorFilter.filter).trim()}%`);
+  }
+
+  const buyerFilter = filterModel.buyer_name;
+  if (buyerFilter?.filter != null && String(buyerFilter.filter).trim() !== "") {
+    clauses.push(`${productBuyerNameExpr()} LIKE ?`);
+    params.push(`%${String(buyerFilter.filter).trim()}%`);
+  }
+
+  const offerTypeFilter = filterModel.moi_offer_type;
+  const offerTypeIds = resolveOfferTypeIdsFromFilter(offerTypeFilter);
+  if (offerTypeIds) {
+    clauses.push(`oi.moi_offer_type IN (${offerTypeIds.map(() => "?").join(", ")})`);
+    params.push(...offerTypeIds);
+  }
+
   return {
     sql: clauses.length ? clauses.join(" AND ") : "1=1",
     params,
   };
 }
 
-function productLinesListBaseSql(status, filterModel = {}) {
+function productLinesListBaseSql(status, filterModel = {}, groupBy = null) {
   const { sql: filterSql, params: filterParams } = buildProductLineFilterWhere(
     filterModel
   );
   const imageSql = productImageSubquery();
+  const groupBySql = resolveProductLineGroupBy(groupBy);
   return {
     sql: `
     SELECT
@@ -583,7 +665,10 @@ function productLinesListBaseSql(status, filterModel = {}) {
       MAX(pt.de_name) AS de_name,
       MAX(${imageSql}) AS image_url,
       MAX(oi.moi_offer_on) AS moi_offer_on,
-      MAX(oi.moi_offer_value) AS moi_offer_value
+      MAX(oi.moi_offer_value) AS moi_offer_value,
+      MAX(oi.moi_offer_type) AS moi_offer_type,
+      MAX(${productDistributorNameExpr()}) AS distributor_name,
+      MAX(${productBuyerNameExpr()}) AS buyer_name
     FROM offer_products op
     INNER JOIN offer_hdr h
       ON h.moh_offer_id = op.mosp_offer_id
@@ -593,8 +678,9 @@ function productLinesListBaseSql(status, filterModel = {}) {
      AND oi.retail_outlet_id = op.retail_outlet_id
      AND ${offerIssueToProductJoinSql("op", "oi")}
     LEFT JOIN product_table pt ON pt.product_id = op.mosp_item_code
+    ${productEnrichmentJoinsSql()}
     WHERE ${excludedRetailOutletWhereClause("h")} AND ${statusWhereClause(status, "h")} AND (${filterSql})
-    GROUP BY ${OFFER_HQ_ID_EXPR}, op.mosp_item_code
+    GROUP BY ${groupBySql}
   `,
     params: filterParams,
   };
@@ -862,10 +948,15 @@ class HqOffersRepository {
     );
   }
 
-  async countProductLines({ status = "active", filterModel = {} } = {}) {
+  async countProductLines({
+    status = "active",
+    filterModel = {},
+    groupBy = null,
+  } = {}) {
     const { sql: baseSql, params: filterParams } = productLinesListBaseSql(
       status,
-      filterModel
+      filterModel,
+      groupBy
     );
     const rows = await queryAsync(
       this.db,
@@ -882,11 +973,13 @@ class HqOffersRepository {
     sortDir = "desc",
     status = "active",
     filterModel = {},
+    groupBy = null,
   } = {}) {
     const { column, dir } = resolveProductLineSort(sortBy, sortDir);
     const { sql: baseSql, params: filterParams } = productLinesListBaseSql(
       status,
-      filterModel
+      filterModel,
+      groupBy
     );
     const sql = `${baseSql}
       ORDER BY ${column} ${dir}
@@ -899,11 +992,13 @@ class HqOffersRepository {
     sortDir = "desc",
     status = "active",
     filterModel = {},
+    groupBy = null,
   } = {}) {
     const { column, dir } = resolveProductLineSort(sortBy, sortDir);
     const { sql: baseSql, params: filterParams } = productLinesListBaseSql(
       status,
-      filterModel
+      filterModel,
+      groupBy
     );
     const sql = `${baseSql}
       ORDER BY ${column} ${dir}
