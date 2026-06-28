@@ -195,11 +195,27 @@ function todayDateString() {
   return `${y}-${m}-${d}`;
 }
 
-function resolveOfferStatus(mohOfferStatus, mohOfferEndDate) {
+function resolveOfferStatus(mohOfferStatus, mohOfferStDate, mohOfferEndDate) {
   const dbActive = Number(mohOfferStatus) === 1;
   if (!dbActive) return "inactive";
-  if (mohOfferEndDate && mohOfferEndDate < todayDateString()) return "inactive";
+  const today = todayDateString();
+
+  if (mohOfferStDate && mohOfferStDate > today) return "inactive";
+  // Applies when start is missing but a real end date exists
+  if (mohOfferEndDate && mohOfferEndDate < today) return "inactive";
+
   return "active";
+}
+
+function aggregateOfferEndDate(branches) {
+  if (!branches?.length) return null;
+  const hasNullEnd = branches.some((b) => !b.moh_offer_end_date);
+  const endDates = branches.map((b) => b.moh_offer_end_date).filter(Boolean);
+  if (!endDates.length) return null;
+  if (hasNullEnd) {
+    return endDates.reduce((min, date) => (date < min ? date : min));
+  }
+  return endDates.reduce((max, date) => (date > max ? date : max));
 }
 
 function roundToTwoDecimals(value) {
@@ -667,7 +683,7 @@ class HqOffersUsecase {
       moh_offer_end_date,
       branch_name: row.branch_name,
       moh_offer_status,
-      status: resolveOfferStatus(moh_offer_status, moh_offer_end_date),
+      status: resolveOfferStatus(moh_offer_status, moh_offer_st_date, moh_offer_end_date),
     };
   }
 
@@ -678,13 +694,9 @@ class HqOffersUsecase {
     const {
       retail_outlet_id: _outlet,
       branch_name: _branch,
-      status: _status,
       ...grouped
     } = mapped;
-    return {
-      ...grouped,
-      status: Number(row.active_branch_count) > 0 ? "active" : "inactive",
-    };
+    return grouped;
   }
 
   mapProductLineRow(row) {
@@ -872,26 +884,26 @@ class HqOffersUsecase {
       };
     });
 
-    const offer = {
-      moh_offer_hq_id: branches[0].moh_offer_hq_id,
-      moh_offer_name: branches[0].moh_offer_name,
-      branch_count: branches.length,
-      product_count: [...new Set((productRows || []).map((line) => line.product_id))].length,
-      moh_offer_st_date: branches.reduce(
+    const moh_offer_st_date = branches.reduce(
         (min, b) =>
           !min || (b.moh_offer_st_date && b.moh_offer_st_date < min)
             ? b.moh_offer_st_date
             : min,
         null
-      ),
-      moh_offer_end_date: branches.reduce(
-        (max, b) =>
-          !max || (b.moh_offer_end_date && b.moh_offer_end_date > max)
-            ? b.moh_offer_end_date
-            : max,
-        null
-      ),
-      status: branches.some((b) => b.status === "active") ? "active" : "inactive",
+      );
+    const moh_offer_end_date = aggregateOfferEndDate(branches);
+    const moh_offer_status = branches.some((b) => Number(b.moh_offer_status) === 1)
+      ? 1
+      : 0;
+
+    const offer = {
+      moh_offer_hq_id: branches[0].moh_offer_hq_id,
+      moh_offer_name: branches[0].moh_offer_name,
+      branch_count: branches.length,
+      product_count: [...new Set((productRows || []).map((line) => line.product_id))].length,
+      moh_offer_st_date,
+      moh_offer_end_date,
+      status: resolveOfferStatus(moh_offer_status, moh_offer_st_date, moh_offer_end_date),
     };
 
     return {

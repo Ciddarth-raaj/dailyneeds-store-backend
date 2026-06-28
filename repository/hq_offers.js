@@ -136,9 +136,53 @@ const HDR_SORT_COLUMNS = {
 
 const SENTINEL_NULL_DATE = "1900-01-01";
 
+function realEndDateExpr(alias = "h") {
+  return `CASE
+    WHEN ${alias}.moh_offer_end_date IS NOT NULL
+     AND DATE(${alias}.moh_offer_end_date) != '${SENTINEL_NULL_DATE}'
+    THEN ${alias}.moh_offer_end_date
+  END`;
+}
+
+function groupedHasNullEndDateSql() {
+  return `SUM(CASE
+    WHEN h.moh_offer_end_date IS NULL OR DATE(h.moh_offer_end_date) = '${SENTINEL_NULL_DATE}'
+    THEN 1 ELSE 0 END) > 0`;
+}
+
+function groupedEffectiveEndDateSql() {
+  const realEnd = realEndDateExpr("h");
+  return `CASE
+    WHEN ${groupedHasNullEndDateSql()}
+    THEN MIN(${realEnd})
+    ELSE MAX(${realEnd})
+  END`;
+}
+
+function groupedOfferIsActiveSql() {
+  const effectiveEnd = groupedEffectiveEndDateSql();
+  return `(
+    MAX(h.moh_offer_status) = 1
+    AND (
+      MIN(h.moh_offer_st_date) IS NULL
+      OR DATE(MIN(h.moh_offer_st_date)) = '${SENTINEL_NULL_DATE}'
+      OR DATE(MIN(h.moh_offer_st_date)) <= CURDATE()
+    )
+    AND (
+      ${effectiveEnd} IS NULL
+      OR DATE(${effectiveEnd}) >= CURDATE()
+    )
+  )`;
+}
+
 function branchIsActiveSql(alias = "h") {
   return `(
     ${alias}.moh_offer_status = 1
+    AND (
+      ${alias}.moh_offer_st_date IS NULL
+      OR DATE(${alias}.moh_offer_st_date) = '${SENTINEL_NULL_DATE}'
+      OR DATE(${alias}.moh_offer_st_date) <= CURDATE()
+    )
     AND (
       ${alias}.moh_offer_end_date IS NULL
       OR DATE(${alias}.moh_offer_end_date) = '${SENTINEL_NULL_DATE}'
@@ -159,12 +203,12 @@ function statusWhereClause(status, alias = "h") {
 }
 
 function groupedStatusHavingClause(status) {
-  const activeBranchCount = `SUM(CASE WHEN ${branchIsActiveSql("h")} THEN 1 ELSE 0 END)`;
+  const offerActive = groupedOfferIsActiveSql();
   if (status === "inactive") {
-    return `${activeBranchCount} = 0`;
+    return `NOT (${offerActive})`;
   }
   if (status === "active") {
-    return `${activeBranchCount} > 0`;
+    return offerActive;
   }
   return "1=1";
 }
@@ -360,10 +404,9 @@ function hdrGroupedListBaseSql(status, filterModel = {}) {
           MAX(h.moh_offer_name) AS moh_offer_name,
           MAX(h.moh_offer_status) AS moh_offer_status,
           MIN(h.moh_offer_st_date) AS moh_offer_st_date,
-          MAX(h.moh_offer_end_date) AS moh_offer_end_date,
+          ${groupedEffectiveEndDateSql()} AS moh_offer_end_date,
           COUNT(DISTINCT h.retail_outlet_id) AS branch_count,
-          COUNT(DISTINCT op.mosp_item_code) AS product_count,
-          SUM(CASE WHEN ${branchIsActiveSql("h")} THEN 1 ELSE 0 END) AS active_branch_count
+          COUNT(DISTINCT op.mosp_item_code) AS product_count
         FROM offer_hdr h
         INNER JOIN outlets o ON o.outlet_id = h.retail_outlet_id
         LEFT JOIN offer_products op
