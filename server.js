@@ -253,6 +253,12 @@ class Server {
     this.pickPackWriteOffRepo = require("./repository/pick_pack_write_off")(
       this.mysql.connection
     );
+    this.pickPackVerificationRemarksRepo = require("./repository/pick_pack_verification_remarks")(
+      this.mysql.connection
+    );
+    this.pickPackVerificationsRepo = require("./repository/pick_pack_verifications")(
+      this.mysql.connection
+    );
     this.stockCheckerRepo = require("./repository/stock_checker")(
       this.mysql.connection
     );
@@ -487,6 +493,12 @@ class Server {
     this.pickPackWriteOffUsecase = require("./usecase/pick_pack_write_off")(
       this.pickPackWriteOffRepo
     );
+    this.pickPackVerificationRemarksUsecase = require("./usecase/pick_pack_verification_remarks")(
+      this.pickPackVerificationRemarksRepo
+    );
+    this.pickPackVerificationsUsecase = require("./usecase/pick_pack_verifications")(
+      this.pickPackVerificationsRepo
+    );
     this.stockCheckerUsecase = require("./usecase/stock_checker")(
       this.stockCheckerRepo,
       this.outletRepo
@@ -700,6 +712,12 @@ class Server {
     const pickPackWriteOffRouter = require("./routes/pick_pack_write_off")(
       this.pickPackWriteOffUsecase
     );
+    const pickPackVerificationRemarksRouter = require("./routes/pick_pack_verification_remarks")(
+      this.pickPackVerificationRemarksUsecase
+    );
+    const pickPackVerificationsRouter = require("./routes/pick_pack_verifications")(
+      this.pickPackVerificationsUsecase
+    );
     const stockCheckerRouter = require("./routes/stock_checker")(
       this.stockCheckerUsecase
     );
@@ -807,6 +825,8 @@ class Server {
     app.use("/remarks-master", remarksMasterRouter.getRouter());
     app.use("/pick-pack-remarks", pickPackRemarksRouter.getRouter());
     app.use("/pick-pack-write-off", pickPackWriteOffRouter.getRouter());
+    app.use("/pick-pack-verification-remarks", pickPackVerificationRemarksRouter.getRouter());
+    app.use("/pick-pack-verifications", pickPackVerificationsRouter.getRouter());
     app.use("/stock-checker", stockCheckerRouter.getRouter());
     app.use(
       "/products-expiry-checker",
