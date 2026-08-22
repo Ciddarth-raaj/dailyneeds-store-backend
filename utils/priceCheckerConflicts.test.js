@@ -1,5 +1,7 @@
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const {
   SP_TOLERANCE,
   MARKDOWN_PP_TOLERANCE,
@@ -268,7 +270,7 @@ describe("priceCheckerConflicts", () => {
     assert.equal(result.conflictExportClass, "markup_verify");
   });
 
-  it("does not mark multi-MRP-only purchase item as markup_verify", () => {
+  it("marks multi-MRP purchase item as markup_verify when not conflict", () => {
     const result = analyzeProductItems([
       row({
         Batch_No: "B1",
@@ -287,6 +289,185 @@ describe("priceCheckerConflicts", () => {
     ]);
 
     assert.equal(result.hasConflict, false);
+    assert.equal(result.conflictExportClass, "markup_verify");
+  });
+
+  it("marks SP near-tie purchase item as markup_verify", () => {
+    const result = analyzeProductItems([
+      row({
+        Batch_No: "B1",
+        mpfd_price_parameter: "Landing cost",
+        Purchase_Price: "8.85",
+        Old_MRP: "27",
+        Old_Selling_Price: "12",
+      }),
+      row({
+        Batch_No: "B2",
+        mpfd_price_parameter: "Landing cost",
+        Purchase_Price: "8.85",
+        Old_MRP: "27",
+        Old_Selling_Price: "11.9",
+      }),
+    ]);
+
+    assert.equal(result.hasConflict, false);
+    assert.equal(result.conflictExportClass, "markup_verify");
+  });
+
+  it("does not mark frozen-SP PP-gap item with all expected mismatches as verify", () => {
+    const result = analyzeProductItems([
+      row({
+        Batch_No: "B1",
+        mpfd_price_parameter: "Landing cost",
+        Purchase_Price: "36.05",
+        Old_MRP: "55",
+        Old_Selling_Price: "39",
+        Expected_Selling: "48.7",
+      }),
+      row({
+        Batch_No: "B2",
+        mpfd_price_parameter: "Landing cost",
+        Purchase_Price: "30.05",
+        Old_MRP: "55",
+        Old_Selling_Price: "39",
+        Expected_Selling: "40.6",
+      }),
+    ]);
+
+    assert.equal(result.hasConflict, false);
     assert.equal(result.conflictExportClass, null);
+  });
+
+  it("marks combined PP-gap and multi-MRP purchase item as markup_verify", () => {
+    const result = analyzeProductItems([
+      row({
+        Batch_No: "B1",
+        mpfd_price_parameter: "Landing cost",
+        Purchase_Price: "158.33",
+        Old_MRP: "187",
+        Old_Selling_Price: "167.8",
+      }),
+      row({
+        Batch_No: "B2",
+        mpfd_price_parameter: "Landing cost",
+        Purchase_Price: "164.24",
+        Old_MRP: "197",
+        Old_Selling_Price: "174.1",
+      }),
+      row({
+        Batch_No: "B3",
+        mpfd_price_parameter: "Landing cost",
+        Purchase_Price: "148.32",
+        Old_MRP: "208",
+        Old_Selling_Price: "157.2",
+      }),
+    ]);
+
+    assert.equal(result.hasConflict, false);
+    assert.equal(result.conflictExportClass, "markup_verify");
+  });
+});
+
+describe("priceCheckerConflicts golden regression", () => {
+  const inputPath = "/Users/ciddarth/Downloads/Price_Checker230820260403.csv";
+  const goldenPath =
+    "/Users/ciddarth/Downloads/MarkDown_Conflicts_Latest (10).xlsx";
+
+  it("matches golden conflict and verify Item_Codes when files are present", (t) => {
+    if (!fs.existsSync(inputPath) || !fs.existsSync(goldenPath)) {
+      t.skip("Golden input/output files not available");
+      return;
+    }
+
+    let XLSX;
+    try {
+      XLSX = require("xlsx");
+    } catch {
+      t.skip("xlsx package not available");
+      return;
+    }
+
+    const { analyzeProductItems } = require("../utils/priceCheckerConflicts");
+
+    const inputWb = XLSX.readFile(inputPath);
+    const inputRows = XLSX.utils.sheet_to_json(
+      inputWb.Sheets[inputWb.SheetNames[0]],
+      { defval: "" }
+    );
+    const goldenWb = XLSX.readFile(goldenPath);
+    const goldenConflictCodes = new Set(
+      XLSX.utils
+        .sheet_to_json(goldenWb.Sheets["Conflicts (All Batches)"], {
+          defval: null,
+        })
+        .map((row) => String(row.Item_Code))
+    );
+    const goldenVerifyCodes = new Set(
+      XLSX.utils
+        .sheet_to_json(goldenWb.Sheets["Markup Based - For Verify"], {
+          defval: null,
+        })
+        .map((row) => String(row.Item_Code))
+    );
+
+    const byItem = new Map();
+    for (const row of inputRows) {
+      const code = String(row.Item_Code).trim();
+      if (!byItem.has(code)) byItem.set(code, []);
+      byItem.get(code).push({
+        Purchase_Price: row.Purchase_Price,
+        Old_MRP: row.Old_MRP,
+        New_MRP: row.New_MRP,
+        Old_Selling_Price: row.Old_Selling_Price,
+        New_Selling_Price: row.New_Selling_Price,
+        mpfd_price_parameter: row.mpfd_price_parameter,
+        Expected_Selling: row["Expected Selling"],
+      });
+    }
+
+    const conflictCodes = new Set();
+    const verifyCodes = new Set();
+    for (const [code, items] of byItem) {
+      const analysis = analyzeProductItems(items);
+      if (analysis.conflictExportClass === "conflict") conflictCodes.add(code);
+      if (analysis.conflictExportClass === "markup_verify") verifyCodes.add(code);
+    }
+
+    assert.equal(
+      [...goldenConflictCodes].filter((code) => conflictCodes.has(code)).length,
+      goldenConflictCodes.size
+    );
+
+    const goldenVerifyRows = XLSX.utils.sheet_to_json(
+      goldenWb.Sheets["Markup Based - For Verify"],
+      { defval: null }
+    );
+    const goldenVerifyByItem = new Map();
+    for (const row of goldenVerifyRows) {
+      const code = String(row.Item_Code);
+      if (!goldenVerifyByItem.has(code)) goldenVerifyByItem.set(code, []);
+      goldenVerifyByItem.get(code).push({
+        Purchase_Price: row.Purchase_Price,
+        Old_MRP: row.Old_MRP,
+        New_MRP: row.New_MRP,
+        Old_Selling_Price: row.Old_Selling_Price,
+        New_Selling_Price: row.New_Selling_Price,
+        mpfd_price_parameter: row.mpfd_price_parameter,
+        Expected_Selling: row["Expected Selling"],
+      });
+    }
+
+    let verifyMatches = 0;
+    for (const code of goldenVerifyCodes) {
+      const items = goldenVerifyByItem.get(code) || [];
+      const analysis = analyzeProductItems(items);
+      if (analysis.conflictExportClass === "markup_verify") verifyMatches++;
+    }
+
+    assert.equal(verifyMatches, goldenVerifyCodes.size);
+    assert.equal(
+      [...goldenVerifyCodes].filter((code) => verifyCodes.has(code)).length,
+      goldenVerifyCodes.size - [...goldenVerifyCodes].filter((code) => !byItem.has(code)).length
+    );
   });
 });

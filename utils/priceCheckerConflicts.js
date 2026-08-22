@@ -209,8 +209,24 @@ function evaluateGlobalSpGap(items = []) {
   return { sps, gap: numericGap(sps) };
 }
 
+function getExpectedSelling(item) {
+  return parseNum(item.Expected_Selling);
+}
+
+function allPurchaseBatchesMismatchExpected(purchaseItems) {
+  if (!purchaseItems.length) return false;
+
+  return purchaseItems.every((item) => {
+    const sp = getEffectiveSp(item);
+    const expected = getExpectedSelling(item);
+    if (sp == null || expected == null) return false;
+    return Math.round(sp * 100) !== Math.round(expected * 100);
+  });
+}
+
 /**
- * Purchase/Landing basis, not a conflict, PP gap > ₹0.10 across batches.
+ * Purchase/Landing basis, not a conflict. Flag when PP gap, multi-MRP, or SP
+ * near-tie across purchase batches warrants manual markup verification.
  */
 function isMarkupVerify(items = []) {
   const purchaseItems = items.filter(
@@ -223,7 +239,36 @@ function isMarkupVerify(items = []) {
     .filter((value) => value != null)
     .map(round2);
 
-  return exceeds(numericGap(purchases), SP_TOLERANCE);
+  const sellingPrices = purchaseItems
+    .map(getEffectiveSp)
+    .filter((value) => value != null)
+    .map(round2);
+
+  const mrps = [
+    ...new Set(
+      purchaseItems
+        .map(getEffectiveMrp)
+        .filter((value) => value != null)
+        .map(round2)
+    ),
+  ];
+
+  const ppGap = numericGap(purchases);
+  const spGap = numericGap(sellingPrices);
+
+  if (
+    exceeds(ppGap, SP_TOLERANCE) &&
+    mrps.length < 2 &&
+    spGap <= FLOAT_EPS &&
+    allPurchaseBatchesMismatchExpected(purchaseItems)
+  ) {
+    return false;
+  }
+
+  if (exceeds(ppGap, SP_TOLERANCE)) return true;
+  if (mrps.length >= 2) return true;
+  if (spGap > FLOAT_EPS && withinTolerance(spGap, SP_TOLERANCE)) return true;
+  return false;
 }
 
 /**
