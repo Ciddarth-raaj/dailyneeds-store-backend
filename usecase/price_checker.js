@@ -126,7 +126,7 @@ function enrichSellingPriceIssues(product) {
   product.allSellingPrices = analysis.groups.map((group) => {
     const key = `${group.basisType}|${group.basisValue}`;
     const mismatchesExpected = mismatchesByGroupKey.get(key) === true;
-    const hasConflict = group.hasConflict === true;
+    const hasGroupConflict = group.hasConflict === true;
 
     return {
       mrp: group.mrp,
@@ -134,18 +134,47 @@ function enrichSellingPriceIssues(product) {
       basisValue: group.basisValue,
       basisLabel: group.basisLabel,
       sellingPrices: group.sellingPrices,
-      hasConflict,
+      hasConflict: hasGroupConflict,
       mismatchesExpected,
-      hasIssue: hasConflict || mismatchesExpected,
+      hasIssue: hasGroupConflict || mismatchesExpected,
     };
   });
 
   product.hasConflict = analysis.hasConflict;
+  product.rule1Conflict = analysis.rule1Conflict;
+  product.rule2Conflict = analysis.rule2Conflict;
+  product.overriddenByStableSp = analysis.overriddenByStableSp;
+  product.conflictReasons = analysis.conflictReasons;
   product.conflictExportClass = analysis.conflictExportClass;
+
   product.incorrectSellingPrices = product.allSellingPrices.filter(
     (group) => group.hasIssue
   );
-  product.hasIssue = product.incorrectSellingPrices.length > 0;
+
+  if (
+    analysis.hasConflict &&
+    !product.incorrectSellingPrices.some((group) => group.hasConflict)
+  ) {
+    product.incorrectSellingPrices = [
+      {
+        mrp: "",
+        basisType: "MRP",
+        basisValue: null,
+        basisLabel: "MRP",
+        sellingPrices: [],
+        hasConflict: true,
+        rule2Only: true,
+        mismatchesExpected: false,
+        hasIssue: true,
+      },
+      ...product.incorrectSellingPrices,
+    ];
+  }
+
+  const hasExpectedMismatch = product.allSellingPrices.some(
+    (group) => group.mismatchesExpected
+  );
+  product.hasIssue = analysis.hasConflict || hasExpectedMismatch;
 }
 
 function mapUploadRow(row) {

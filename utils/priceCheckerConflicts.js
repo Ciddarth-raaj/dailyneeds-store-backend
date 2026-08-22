@@ -1,4 +1,6 @@
 const SP_TOLERANCE = 0.1;
+const MARKDOWN_PP_TOLERANCE = 0.2;
+const FLOAT_EPS = 1e-6;
 
 function trimStr(v) {
   if (v == null) return "";
@@ -16,6 +18,19 @@ function parseNum(v) {
 
 function round2(n) {
   return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+
+function exceeds(gap, threshold) {
+  return gap > threshold + FLOAT_EPS;
+}
+
+function withinTolerance(gap, threshold) {
+  return gap <= threshold + FLOAT_EPS;
+}
+
+function numericGap(values) {
+  if (!Array.isArray(values) || values.length < 2) return 0;
+  return round2(Math.max(...values) - Math.min(...values));
 }
 
 /** Prefer New_* when filled; otherwise Old_*. */
@@ -73,18 +88,17 @@ function formatPriceKey(n) {
   return fixed;
 }
 
-/**
- * Analyze line items for one product (Item_Code).
- * Items should already include mpfd_price_parameter when available.
- *
- * @param {Array<object>} items
- * @returns {{
- *   groups: Array<object>,
- *   hasConflict: boolean,
- *   conflictExportClass: "conflict"|"markup_verify"|null
- * }}
- */
-function analyzeProductItems(items = []) {
+function computeMarkdownPct(mrp, sp) {
+  if (mrp == null || sp == null || mrp === 0) return null;
+  return round2(100 - (sp / mrp) * 100);
+}
+
+function computeFlatDiff(mrp, sp) {
+  if (mrp == null || sp == null) return null;
+  return round2(mrp - sp);
+}
+
+function buildBasisGroups(items = []) {
   const groupsMap = new Map();
 
   for (const item of items) {
@@ -127,7 +141,7 @@ function analyzeProductItems(items = []) {
       sellingPrices.length >= 2
         ? round2(sellingPrices[sellingPrices.length - 1] - sellingPrices[0])
         : 0;
-    const hasConflict = spGap > SP_TOLERANCE;
+    const hasConflict = exceeds(spGap, SP_TOLERANCE);
 
     return {
       basisType: group.basisType,
@@ -151,83 +165,126 @@ function analyzeProductItems(items = []) {
     return a.basisValue - b.basisValue;
   });
 
-  const hasConflict = groups.some((g) => g.hasConflict);
+  return groups;
+}
 
-  let conflictExportClass = null;
-  if (hasConflict) {
-    conflictExportClass = "conflict";
-  } else if (isMarkupVerify(items, groups)) {
-    conflictExportClass = "markup_verify";
+function evaluateRule1(groups) {
+  return groups.some((group) => group.hasConflict);
+}
+
+function evaluateRule2(items = []) {
+  const markdownValues = [];
+  const flatValues = [];
+
+  for (const item of items) {
+    if (resolveBasisType(item.mpfd_price_parameter) !== "MRP") continue;
+
+    const mrp = getEffectiveMrp(item);
+    const sp = getEffectiveSp(item);
+    if (mrp == null || sp == null || mrp === 0) continue;
+
+    const markdownPct = computeMarkdownPct(mrp, sp);
+    const flatDiff = computeFlatDiff(mrp, sp);
+    if (markdownPct != null) markdownValues.push(markdownPct);
+    if (flatDiff != null) flatValues.push(flatDiff);
   }
 
-  return {
-    groups,
-    hasConflict,
-    conflictExportClass,
-  };
+  if (markdownValues.length < 2 || flatValues.length < 2) {
+    return false;
+  }
+
+  const markdownGap = numericGap(markdownValues);
+  const flatGap = numericGap(flatValues);
+
+  return (
+    exceeds(markdownGap, MARKDOWN_PP_TOLERANCE) && exceeds(flatGap, SP_TOLERANCE)
+  );
+}
+
+function evaluateGlobalSpGap(items = []) {
+  const sps = items
+    .map(getEffectiveSp)
+    .filter((value) => value != null)
+    .map(round2);
+  return { sps, gap: numericGap(sps) };
 }
 
 /**
- * Purchase/Landing basis, not a conflict, and interesting for spot-check:
- * PP gap > 0.10 OR 0 < SP gap <= 0.10 OR >= 2 distinct effective MRPs.
+ * Purchase/Landing basis, not a conflict, PP gap > ₹0.10 across batches.
  */
-function isMarkupVerify(items, groups) {
-  const purchaseItems = (items || []).filter(
+function isMarkupVerify(items = []) {
+  const purchaseItems = items.filter(
     (item) => resolveBasisType(item.mpfd_price_parameter) === "Purchase"
   );
   if (purchaseItems.length < 2) return false;
 
   const purchases = purchaseItems
     .map(getEffectivePurchase)
-    .filter((v) => v != null)
+    .filter((value) => value != null)
     .map(round2);
-  const sps = purchaseItems
-    .map(getEffectiveSp)
-    .filter((v) => v != null)
-    .map(round2);
-  const mrps = [
-    ...new Set(
-      purchaseItems
-        .map(getEffectiveMrp)
-        .filter((v) => v != null)
-        .map(round2)
-    ),
-  ];
 
-  const ppGap =
-    purchases.length >= 2 ? round2(Math.max(...purchases) - Math.min(...purchases)) : 0;
-  const spGap = sps.length >= 2 ? round2(Math.max(...sps) - Math.min(...sps)) : 0;
+  return exceeds(numericGap(purchases), SP_TOLERANCE);
+}
 
-  if (ppGap > SP_TOLERANCE) return true;
-  if (spGap > 0 && spGap <= SP_TOLERANCE) return true;
-  if (mrps.length >= 2) return true;
+/**
+ * Analyze line items for one product (Item_Code).
+ * Items should already include mpfd_price_parameter when available.
+ */
+function analyzeProductItems(items = []) {
+  const groups = buildBasisGroups(items);
+  const rule1Conflict = evaluateRule1(groups);
+  const rule2Conflict = evaluateRule2(items);
+  const { sps: allSps, gap: globalSpGap } = evaluateGlobalSpGap(items);
 
-  // Also accept near-ties within a same-basis group from analyze output
-  if (
-    (groups || []).some(
-      (g) =>
-        g.basisType === "Purchase" &&
-        g.spGap > 0 &&
-        g.spGap <= SP_TOLERANCE
-    )
-  ) {
-    return true;
+  const stableSpOverride =
+    allSps.length >= 2 && withinTolerance(globalSpGap, SP_TOLERANCE);
+  const rawConflict = rule1Conflict || rule2Conflict;
+  const overriddenByStableSp = rawConflict && stableSpOverride;
+  const hasConflict = rawConflict && !stableSpOverride;
+
+  const conflictReasons = [];
+  if (rule1Conflict) conflictReasons.push("rule1");
+  if (rule2Conflict) conflictReasons.push("rule2");
+
+  let conflictExportClass = null;
+  if (hasConflict) {
+    conflictExportClass = "conflict";
+  } else if (isMarkupVerify(items)) {
+    conflictExportClass = "markup_verify";
   }
 
-  return false;
+  return {
+    groups,
+    hasConflict,
+    rule1Conflict,
+    rule2Conflict,
+    rawConflict,
+    globalSpGap,
+    stableSpOverride,
+    overriddenByStableSp,
+    conflictReasons,
+    conflictExportClass,
+  };
 }
 
 module.exports = {
   SP_TOLERANCE,
+  MARKDOWN_PP_TOLERANCE,
+  FLOAT_EPS,
   trimStr,
   parseNum,
   round2,
+  exceeds,
+  withinTolerance,
+  numericGap,
   preferFilled,
   resolveBasisType,
   getEffectiveMrp,
   getEffectiveSp,
   getEffectivePurchase,
   getBasisValue,
+  computeMarkdownPct,
+  computeFlatDiff,
   analyzeProductItems,
   isMarkupVerify,
 };
