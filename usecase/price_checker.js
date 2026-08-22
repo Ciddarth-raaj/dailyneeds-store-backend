@@ -4,17 +4,17 @@ const {
   buildExpectedSellingPrices,
   enrichLineItemExpectedSelling,
 } = require("../utils/expectedSellingPrice");
-
-function trimStr(v) {
-  if (v == null) return "";
-  return String(v).trim();
-}
+const {
+  analyzeProductItems,
+  getBasisValue,
+  getEffectiveSp,
+  parseNum,
+  resolveBasisType,
+  trimStr,
+} = require("../utils/priceCheckerConflicts");
 
 function parseDecimal(v) {
-  const s = trimStr(v);
-  if (!s) return null;
-  const n = Number(s);
-  return Number.isFinite(n) ? n : null;
+  return parseNum(v);
 }
 
 function parseIntId(v) {
@@ -90,45 +90,7 @@ function buildProducts(rows) {
     }
   }
 
-  const products = [];
-
-  Object.values(groupedByItem).forEach((itemData) => {
-    const mrpGroups = itemData.items.reduce((acc, item) => {
-      const mrp = trimStr(item.Old_MRP);
-      if (!acc[mrp]) acc[mrp] = [];
-      acc[mrp].push(item);
-      return acc;
-    }, {});
-
-    Object.keys(mrpGroups).forEach((mrp) => {
-      const sellingPricesForMrp = mrpGroups[mrp]
-        .map((item) => trimStr(item.Old_Selling_Price))
-        .filter((price) => price !== "");
-
-      const uniqueSellingPrices = [...new Set(sellingPricesForMrp)];
-      if (!uniqueSellingPrices.length) return;
-
-      itemData.allSellingPrices.push({
-        mrp,
-        sellingPrices: uniqueSellingPrices,
-      });
-
-      if (uniqueSellingPrices.length > 1) {
-        itemData.hasIssue = true;
-        itemData.incorrectSellingPrices.push({
-          mrp,
-          sellingPrices: uniqueSellingPrices,
-          hasConflict: true,
-          mismatchesExpected: false,
-          hasIssue: true,
-        });
-      }
-    });
-
-    products.push(itemData);
-  });
-
-  return products;
+  return Object.values(groupedByItem);
 }
 
 function sellingPricesMatch(actual, expected) {
@@ -141,45 +103,45 @@ function sellingPricesMatch(actual, expected) {
 }
 
 function enrichSellingPriceIssues(product) {
-  const mrpGroups = {};
+  const analysis = analyzeProductItems(product.items || []);
 
+  const mismatchesByGroupKey = new Map();
   for (const item of product.items || []) {
-    const mrp = trimStr(item.Old_MRP);
-    const selling = trimStr(item.Old_Selling_Price);
+    const basisType = resolveBasisType(item.mpfd_price_parameter);
+    const basisValue = getBasisValue(item, basisType);
+    const selling = getEffectiveSp(item);
     const expected = trimStr(item.Expected_Selling);
-    if (!mrp || !selling) continue;
+    if (basisValue == null || selling == null) continue;
 
-    if (!mrpGroups[mrp]) {
-      mrpGroups[mrp] = {
-        mrp,
-        sellingPriceSet: new Set(),
-        mismatchesExpected: false,
-      };
+    const key = `${basisType}|${basisValue}`;
+    if (!mismatchesByGroupKey.has(key)) {
+      mismatchesByGroupKey.set(key, false);
     }
 
-    mrpGroups[mrp].sellingPriceSet.add(selling);
-
     if (expected && !sellingPricesMatch(selling, expected)) {
-      mrpGroups[mrp].mismatchesExpected = true;
+      mismatchesByGroupKey.set(key, true);
     }
   }
 
-  product.allSellingPrices = Object.values(mrpGroups)
-    .map((group) => {
-      const sellingPrices = [...group.sellingPriceSet];
-      const hasConflict = sellingPrices.length > 1;
-      const mismatchesExpected = group.mismatchesExpected;
+  product.allSellingPrices = analysis.groups.map((group) => {
+    const key = `${group.basisType}|${group.basisValue}`;
+    const mismatchesExpected = mismatchesByGroupKey.get(key) === true;
+    const hasConflict = group.hasConflict === true;
 
-      return {
-        mrp: group.mrp,
-        sellingPrices,
-        hasConflict,
-        mismatchesExpected,
-        hasIssue: hasConflict || mismatchesExpected,
-      };
-    })
-    .sort((a, b) => trimStr(a.mrp).localeCompare(trimStr(b.mrp)));
+    return {
+      mrp: group.mrp,
+      basisType: group.basisType,
+      basisValue: group.basisValue,
+      basisLabel: group.basisLabel,
+      sellingPrices: group.sellingPrices,
+      hasConflict,
+      mismatchesExpected,
+      hasIssue: hasConflict || mismatchesExpected,
+    };
+  });
 
+  product.hasConflict = analysis.hasConflict;
+  product.conflictExportClass = analysis.conflictExportClass;
   product.incorrectSellingPrices = product.allSellingPrices.filter(
     (group) => group.hasIssue
   );
@@ -220,13 +182,32 @@ function attachExpectedSellingPrices(products, rulesByItemCode) {
       rule
     );
     enrichSellingPriceIssues(product);
-    const issueMrps = (product.incorrectSellingPrices || []).map(
-      (entry) => entry.mrp
-    );
+    const issueMrps = [
+      ...new Set(
+        (product.incorrectSellingPrices || [])
+          .map((entry) => trimStr(entry.mrp))
+          .filter(Boolean)
+      ),
+    ];
+    // Also include Old_MRP from lines in issue groups so expected filter still works for Purchase basis
+    if (product.hasIssue) {
+      for (const item of product.items || []) {
+        const basisType = resolveBasisType(item.mpfd_price_parameter);
+        const basisValue = getBasisValue(item, basisType);
+        if (basisValue == null) continue;
+        const key = `${basisType}|${basisValue}`;
+        const group = (product.allSellingPrices || []).find(
+          (g) => `${g.basisType}|${g.basisValue}` === key && g.hasIssue
+        );
+        if (group && trimStr(item.Old_MRP)) {
+          issueMrps.push(trimStr(item.Old_MRP));
+        }
+      }
+    }
     product.expectedSellingPrices = buildExpectedSellingPrices(
       product.items,
       rule,
-      issueMrps
+      [...new Set(issueMrps)]
     );
   }
   return products;
