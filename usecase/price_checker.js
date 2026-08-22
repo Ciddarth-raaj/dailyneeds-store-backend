@@ -174,7 +174,10 @@ function enrichSellingPriceIssues(product) {
   const hasExpectedMismatch = product.allSellingPrices.some(
     (group) => group.mismatchesExpected
   );
-  product.hasIssue = analysis.hasConflict || hasExpectedMismatch;
+  product.hasIssue =
+    analysis.hasConflict ||
+    hasExpectedMismatch ||
+    analysis.conflictExportClass === "markup_verify";
 }
 
 function mapUploadRow(row) {
@@ -464,3 +467,4 @@ module.exports = (
     productOffersRepo,
     hqOffersRepo
   );
+module.exports.enrichSellingPriceIssues = enrichSellingPriceIssues;
