@@ -31,6 +31,21 @@ function parseDaysBuffer(raw) {
   return Math.min(n, 3650);
 }
 
+function parseOptionalIsoDate(raw, label) {
+  if (raw === undefined || raw === null || raw === "") {
+    return { ok: true, value: undefined };
+  }
+  const s = String(raw).trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    return { ok: false, msg: `${label} must be YYYY-MM-DD` };
+  }
+  const d = new Date(`${s}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) {
+    return { ok: false, msg: `${label} is not a valid calendar date` };
+  }
+  return { ok: true, value: s };
+}
+
 class StockReceivedRoutes {
   constructor(stockReceivedUsecase) {
     this.stockReceivedUsecase = stockReceivedUsecase;
@@ -63,12 +78,42 @@ class StockReceivedRoutes {
 
     router.get("/grn-list", async (req, res) => {
       try {
-        const data = await this.stockReceivedUsecase.listGrnHeaders();
+        const fromParsed = parseOptionalIsoDate(req.query.from_date, "from_date");
+        const toParsed = parseOptionalIsoDate(req.query.to_date, "to_date");
+        if (!fromParsed.ok) {
+          res.status(400).json({ code: 400, msg: fromParsed.msg });
+          res.end();
+          return;
+        }
+        if (!toParsed.ok) {
+          res.status(400).json({ code: 400, msg: toParsed.msg });
+          res.end();
+          return;
+        }
+        if (
+          fromParsed.value &&
+          toParsed.value &&
+          fromParsed.value > toParsed.value
+        ) {
+          res.status(400).json({
+            code: 400,
+            msg: "from_date must be on or before to_date",
+          });
+          res.end();
+          return;
+        }
+
+        const data = await this.stockReceivedUsecase.listGrnHeaders({
+          from_date: fromParsed.value,
+          to_date: toParsed.value,
+        });
         res.json({
           code: 200,
           data,
           meta: {
             count: data.length,
+            from_date: fromParsed.value ?? null,
+            to_date: toParsed.value ?? null,
           },
         });
       } catch (err) {

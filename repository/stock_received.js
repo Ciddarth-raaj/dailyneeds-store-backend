@@ -37,6 +37,20 @@ function dtlRow(row) {
   };
 }
 
+function normalizeCalendarDate(value) {
+  if (value == null || value === "") return null;
+  const s = String(value).trim();
+  const match = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (match) return match[1];
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    const y = value.getUTCFullYear();
+    const m = String(value.getUTCMonth() + 1).padStart(2, "0");
+    const d = String(value.getUTCDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+  return null;
+}
+
 function grnHeaderRow(row) {
   const countRaw = row.product_count ?? row.PRODUCT_COUNT ?? 0;
   const count = Number(countRaw);
@@ -45,6 +59,7 @@ function grnHeaderRow(row) {
     row.supplier_name ?? row.MDM_DIST_NAME ?? row.mdm_dist_name ?? null;
   const amtRaw = row.mmh_mrc_amt ?? row.MMH_MRC_AMT;
   const amt = amtRaw != null && amtRaw !== "" ? Number(amtRaw) : null;
+  const mrcDt = normalizeCalendarDate(row.mmh_mrc_dt ?? row.MMH_MRC_DT);
   const supplierName =
     distName != null && String(distName).trim() !== ""
       ? distName
@@ -54,6 +69,7 @@ function grnHeaderRow(row) {
   return {
     mmh_mrc_no: row.mmh_mrc_no ?? row.MMH_MRC_NO,
     mmh_mrc_refno: row.mmh_mrc_refno ?? row.MMH_MRC_REFNO,
+    mmh_mrc_dt: mrcDt,
     mmh_dist_code:
       distCode != null && distCode !== "" ? String(distCode) : null,
     supplier_name: supplierName,
@@ -132,15 +148,38 @@ class StockReceivedRepository {
     this.gofrugalDb = gofrugalDb;
   }
 
-  listGrnHeaders() {
+  listGrnHeaders(filters = {}) {
+    const fromDate =
+      filters.from_date != null && String(filters.from_date).trim() !== ""
+        ? String(filters.from_date).trim()
+        : null;
+    const toDate =
+      filters.to_date != null && String(filters.to_date).trim() !== ""
+        ? String(filters.to_date).trim()
+        : null;
+
     return new Promise((resolve, reject) => {
       if (!this.gofrugalDb) {
         return reject(new Error("Gofrugal DB connection is not configured"));
       }
+
+      const conditions = [];
+      const params = [];
+      if (fromDate) {
+        conditions.push("DATE(h.MMH_MRC_DT) >= DATE(?)");
+        params.push(fromDate);
+      }
+      if (toDate) {
+        conditions.push("DATE(h.MMH_MRC_DT) <= DATE(?)");
+        params.push(toDate);
+      }
+      const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+
       this.gofrugalDb.query(
         `SELECT
             h.MMH_MRC_NO AS mmh_mrc_no,
             h.MMH_MRC_REFNO AS mmh_mrc_refno,
+            DATE_FORMAT(h.MMH_MRC_DT, '%Y-%m-%d') AS mmh_mrc_dt,
             h.MMH_DIST_CODE AS mmh_dist_code,
             h.MMH_MRC_AMT AS mmh_mrc_amt,
             MAX(dist.MDM_DIST_NAME) AS supplier_name,
@@ -149,9 +188,10 @@ class StockReceivedRepository {
          LEFT JOIN \`${GOFRUGAL_DTL}\` d ON d.MMD_MRC_NO = h.MMH_MRC_NO
          LEFT JOIN \`${GOFRUGAL_DIST}\` dist
            ON TRIM(CAST(dist.MDM_DIST_CODE AS CHAR)) = TRIM(CAST(h.MMH_DIST_CODE AS CHAR))
-         GROUP BY h.MMH_MRC_NO, h.MMH_MRC_REFNO, h.MMH_DIST_CODE, h.MMH_MRC_AMT
-         ORDER BY h.MMH_MRC_NO DESC`,
-        [],
+         ${where}
+         GROUP BY h.MMH_MRC_NO, h.MMH_MRC_REFNO, h.MMH_MRC_DT, h.MMH_DIST_CODE, h.MMH_MRC_AMT
+         ORDER BY h.MMH_MRC_DT DESC, h.MMH_MRC_NO DESC`,
+        params,
         (err, rows) => {
           if (err) {
             logger.Log({
@@ -160,7 +200,7 @@ class StockReceivedRepository {
               code: "REPOSITORY.STOCK_RECEIVED.LIST_GRN_HEADERS",
               description: err.toString(),
               category: "",
-              ref: {},
+              ref: { from_date: fromDate, to_date: toDate },
             });
             return reject(err);
           }

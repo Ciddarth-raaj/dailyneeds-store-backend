@@ -21,9 +21,9 @@ class StockReceivedUsecase {
     }
   }
 
-  async listGrnHeaders() {
+  async listGrnHeaders(filters = {}) {
     try {
-      return await this.stockReceivedRepo.listGrnHeaders();
+      return await this.stockReceivedRepo.listGrnHeaders(filters);
     } catch (err) {
       logger.Log({
         level: logger.LEVEL.ERROR,
