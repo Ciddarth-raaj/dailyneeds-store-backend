@@ -61,6 +61,22 @@ class StockReceivedRoutes {
       res.end();
     });
 
+    router.get("/grn-list", async (req, res) => {
+      try {
+        const data = await this.stockReceivedUsecase.listGrnHeaders();
+        res.json({
+          code: 200,
+          data,
+          meta: {
+            count: data.length,
+          },
+        });
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
     const upsertSchema = Joi.object({
       mmd_mrc_no: Joi.number().integer().required(),
       mmd_mrc_sl_no: Joi.number().integer().required(),

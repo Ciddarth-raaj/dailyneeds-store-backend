@@ -36,6 +36,16 @@ function dtlRow(row) {
   };
 }
 
+function grnHeaderRow(row) {
+  const countRaw = row.product_count ?? row.PRODUCT_COUNT ?? 0;
+  const count = Number(countRaw);
+  return {
+    mmh_mrc_no: row.mmh_mrc_no ?? row.MMH_MRC_NO,
+    mmh_mrc_refno: row.mmh_mrc_refno ?? row.MMH_MRC_REFNO,
+    product_count: Number.isFinite(count) ? count : 0,
+  };
+}
+
 function subtractCalendarDays(dateInput, daysBuffer) {
   const buf = Math.max(0, Math.floor(Number(daysBuffer)) || 0);
   if (dateInput == null || dateInput === "") {
@@ -104,6 +114,39 @@ class StockReceivedRepository {
   constructor(mainDb, gofrugalDb) {
     this.db = mainDb;
     this.gofrugalDb = gofrugalDb;
+  }
+
+  listGrnHeaders() {
+    return new Promise((resolve, reject) => {
+      if (!this.gofrugalDb) {
+        return reject(new Error("Gofrugal DB connection is not configured"));
+      }
+      this.gofrugalDb.query(
+        `SELECT
+            h.MMH_MRC_NO AS mmh_mrc_no,
+            h.MMH_MRC_REFNO AS mmh_mrc_refno,
+            COUNT(d.MMD_MRC_SL_NO) AS product_count
+         FROM \`${GOFRUGAL_HDR}\` h
+         LEFT JOIN \`${GOFRUGAL_DTL}\` d ON d.MMD_MRC_NO = h.MMH_MRC_NO
+         GROUP BY h.MMH_MRC_NO, h.MMH_MRC_REFNO
+         ORDER BY h.MMH_MRC_NO DESC`,
+        [],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.STOCK_RECEIVED",
+              code: "REPOSITORY.STOCK_RECEIVED.LIST_GRN_HEADERS",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            return reject(err);
+          }
+          resolve((rows || []).map(grnHeaderRow));
+        }
+      );
+    });
   }
 
   _queryGofrugalDtlWithHdr() {
