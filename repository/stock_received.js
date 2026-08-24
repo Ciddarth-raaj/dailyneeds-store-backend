@@ -3,6 +3,7 @@ const logger = require("../utils/logger");
 const TABLE = "stock_received";
 const GOFRUGAL_DTL = "medishopdb_MED_MRC_DTL";
 const GOFRUGAL_HDR = "medishopdb_MED_MRC_HDR";
+const GOFRUGAL_DIST = "medishopdb_MED_DISTRIBUTOR_MAST";
 const PRODUCT_OFFERS = "product_offers";
 
 function normalizeItemCode(value) {
@@ -39,9 +40,24 @@ function dtlRow(row) {
 function grnHeaderRow(row) {
   const countRaw = row.product_count ?? row.PRODUCT_COUNT ?? 0;
   const count = Number(countRaw);
+  const distCode = row.mmh_dist_code ?? row.MMH_DIST_CODE;
+  const distName =
+    row.supplier_name ?? row.MDM_DIST_NAME ?? row.mdm_dist_name ?? null;
+  const amtRaw = row.mmh_mrc_amt ?? row.MMH_MRC_AMT;
+  const amt = amtRaw != null && amtRaw !== "" ? Number(amtRaw) : null;
+  const supplierName =
+    distName != null && String(distName).trim() !== ""
+      ? distName
+      : distCode != null && distCode !== ""
+        ? String(distCode)
+        : null;
   return {
     mmh_mrc_no: row.mmh_mrc_no ?? row.MMH_MRC_NO,
     mmh_mrc_refno: row.mmh_mrc_refno ?? row.MMH_MRC_REFNO,
+    mmh_dist_code:
+      distCode != null && distCode !== "" ? String(distCode) : null,
+    supplier_name: supplierName,
+    mmh_mrc_amt: Number.isFinite(amt) ? amt : null,
     product_count: Number.isFinite(count) ? count : 0,
   };
 }
@@ -125,10 +141,15 @@ class StockReceivedRepository {
         `SELECT
             h.MMH_MRC_NO AS mmh_mrc_no,
             h.MMH_MRC_REFNO AS mmh_mrc_refno,
+            h.MMH_DIST_CODE AS mmh_dist_code,
+            h.MMH_MRC_AMT AS mmh_mrc_amt,
+            MAX(dist.MDM_DIST_NAME) AS supplier_name,
             COUNT(d.MMD_MRC_SL_NO) AS product_count
          FROM \`${GOFRUGAL_HDR}\` h
          LEFT JOIN \`${GOFRUGAL_DTL}\` d ON d.MMD_MRC_NO = h.MMH_MRC_NO
-         GROUP BY h.MMH_MRC_NO, h.MMH_MRC_REFNO
+         LEFT JOIN \`${GOFRUGAL_DIST}\` dist
+           ON TRIM(CAST(dist.MDM_DIST_CODE AS CHAR)) = TRIM(CAST(h.MMH_DIST_CODE AS CHAR))
+         GROUP BY h.MMH_MRC_NO, h.MMH_MRC_REFNO, h.MMH_DIST_CODE, h.MMH_MRC_AMT
          ORDER BY h.MMH_MRC_NO DESC`,
         [],
         (err, rows) => {
