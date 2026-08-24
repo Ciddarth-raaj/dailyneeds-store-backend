@@ -122,6 +122,37 @@ class StockReceivedRoutes {
       res.end();
     });
 
+    router.get("/grn-detail", async (req, res) => {
+      try {
+        const refno =
+          req.query.refno != null ? String(req.query.refno).trim() : "";
+        if (!refno) {
+          res.status(400).json({ code: 400, msg: "refno is required" });
+          res.end();
+          return;
+        }
+
+        const data = await this.stockReceivedUsecase.getGrnDetailByRefno(refno);
+        if (!data) {
+          res.status(404).json({ code: 404, msg: "GRN not found" });
+          res.end();
+          return;
+        }
+
+        res.json({
+          code: 200,
+          data,
+          meta: {
+            refno,
+            item_count: data.items?.length ?? 0,
+          },
+        });
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
     const upsertSchema = Joi.object({
       mmd_mrc_no: Joi.number().integer().required(),
       mmd_mrc_sl_no: Joi.number().integer().required(),

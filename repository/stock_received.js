@@ -142,6 +142,65 @@ function numericRecdQty(q) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function parseOptionalNumber(value) {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function computeGrnDiscount(mrpRaw, saleRateRaw) {
+  const mrp = parseOptionalNumber(mrpRaw);
+  const saleRate = parseOptionalNumber(saleRateRaw);
+  if (mrp == null || saleRate == null) {
+    return { discount_amount: null, discount_pct: null };
+  }
+  const discount_amount = mrp - saleRate;
+  const discount_pct = mrp !== 0 ? 100 - (saleRate / mrp) * 100 : null;
+  const roundedPct =
+    discount_pct != null && Number.isFinite(discount_pct)
+      ? Math.round(discount_pct * 100) / 100
+      : null;
+  return {
+    discount_amount: Number.isFinite(discount_amount) ? discount_amount : null,
+    discount_pct: roundedPct,
+  };
+}
+
+function grnDetailItemRow(row, productMap) {
+  const productId = normalizeItemCode(
+    row.MMD_ITEM_CODE ?? row.mmd_item_code ?? row.product_id
+  );
+  const mrpRaw =
+    row.MMD_MAX_RATE ?? row.mmd_max_rate ?? row.mrp ?? row.MMD_MRP ?? row.mmd_mrp;
+  const saleRateRaw = row.MMD_SALE_RATE ?? row.mmd_sale_rate;
+  const { discount_amount, discount_pct } = computeGrnDiscount(mrpRaw, saleRateRaw);
+  const product =
+    productId != null ? productMap.get(productId) || null : null;
+
+  return {
+    mmd_mrc_sl_no: row.MMD_MRC_SL_NO ?? row.mmd_mrc_sl_no,
+    product_id: productId,
+    mmd_recd_qty: parseOptionalNumber(row.MMD_RECD_QTY ?? row.mmd_recd_qty),
+    mmd_free_qty: parseOptionalNumber(row.MMD_FREE_QTY ?? row.mmd_free_qty),
+    mrp: parseOptionalNumber(mrpRaw),
+    mmd_pur_rate: parseOptionalNumber(row.MMD_PUR_RATE ?? row.mmd_pur_rate),
+    mmd_pur_tax_per: parseOptionalNumber(
+      row.MMD_PUR_TAX_PER ?? row.mmd_pur_tax_per
+    ),
+    mmd_pur_tax_amt: parseOptionalNumber(
+      row.MMD_PUR_TAX_AMT ?? row.mmd_pur_tax_amt
+    ),
+    mmd_pur_price: parseOptionalNumber(row.MMD_PUR_PRICE ?? row.mmd_pur_price),
+    mmd_sale_rate: parseOptionalNumber(saleRateRaw),
+    mmd_pur_amount: parseOptionalNumber(
+      row.MMD_PUR_AMOUNT ?? row.mmd_pur_amount
+    ),
+    discount_amount,
+    discount_pct,
+    product,
+  };
+}
+
 class StockReceivedRepository {
   constructor(mainDb, gofrugalDb) {
     this.db = mainDb;
@@ -205,6 +264,117 @@ class StockReceivedRepository {
             return reject(err);
           }
           resolve((rows || []).map(grnHeaderRow));
+        }
+      );
+    });
+  }
+
+  listGrnDetailByRefno(refno) {
+    const refnoKey =
+      refno != null && String(refno).trim() !== "" ? String(refno).trim() : null;
+    if (!refnoKey) {
+      return Promise.resolve(null);
+    }
+
+    return new Promise((resolve, reject) => {
+      if (!this.gofrugalDb) {
+        return reject(new Error("Gofrugal DB connection is not configured"));
+      }
+
+      this.gofrugalDb.query(
+        `SELECT
+            h.MMH_MRC_NO AS mmh_mrc_no,
+            h.MMH_MRC_REFNO AS mmh_mrc_refno,
+            DATE_FORMAT(h.MMH_MRC_DT, '%Y-%m-%d') AS mmh_mrc_dt,
+            h.MMH_DIST_CODE AS mmh_dist_code,
+            h.MMH_MRC_AMT AS mmh_mrc_amt,
+            dist.MDM_DIST_NAME AS supplier_name
+         FROM \`${GOFRUGAL_HDR}\` h
+         LEFT JOIN \`${GOFRUGAL_DIST}\` dist
+           ON TRIM(CAST(dist.MDM_DIST_CODE AS CHAR)) = TRIM(CAST(h.MMH_DIST_CODE AS CHAR))
+         WHERE h.MMH_MRC_REFNO = ?
+         LIMIT 1`,
+        [refnoKey],
+        async (err, headerRows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.STOCK_RECEIVED",
+              code: "REPOSITORY.STOCK_RECEIVED.GRN_DETAIL_HDR",
+              description: err.toString(),
+              category: "",
+              ref: { refno: refnoKey },
+            });
+            return reject(err);
+          }
+
+          const headerRaw = headerRows && headerRows[0] ? headerRows[0] : null;
+          if (!headerRaw) {
+            return resolve(null);
+          }
+
+          const header = grnHeaderRow({
+            ...headerRaw,
+            product_count: 0,
+          });
+          const mrcNo = header.mmh_mrc_no;
+          if (mrcNo == null) {
+            return resolve(null);
+          }
+
+          this.gofrugalDb.query(
+            `SELECT
+                d.MMD_MRC_SL_NO,
+                d.MMD_ITEM_CODE,
+                d.MMD_RECD_QTY,
+                d.MMD_FREE_QTY,
+                d.MMD_MAX_RATE,
+                d.MMD_PUR_RATE,
+                d.MMD_PUR_TAX_PER,
+                d.MMD_PUR_TAX_AMT,
+                d.MMD_PUR_PRICE,
+                d.MMD_SALE_RATE,
+                d.MMD_PUR_AMOUNT
+             FROM \`${GOFRUGAL_DTL}\` d
+             WHERE d.MMD_MRC_NO = ?
+             ORDER BY d.MMD_MRC_SL_NO ASC`,
+            [mrcNo],
+            async (errDtl, dtlRows) => {
+              if (errDtl) {
+                logger.Log({
+                  level: logger.LEVEL.ERROR,
+                  component: "REPOSITORY.STOCK_RECEIVED",
+                  code: "REPOSITORY.STOCK_RECEIVED.GRN_DETAIL_DTL",
+                  description: errDtl.toString(),
+                  category: "",
+                  ref: { refno: refnoKey, mmh_mrc_no: mrcNo },
+                });
+                return reject(errDtl);
+              }
+
+              try {
+                const rawItems = dtlRows || [];
+                const productIds = rawItems
+                  .map((row) => normalizeItemCode(row.MMD_ITEM_CODE ?? row.mmd_item_code))
+                  .filter((id) => id != null);
+                const productMap = await this._fetchProductsMap(productIds);
+                const items = rawItems.map((row) =>
+                  grnDetailItemRow(row, productMap)
+                );
+                resolve({ header, items });
+              } catch (lookupErr) {
+                logger.Log({
+                  level: logger.LEVEL.ERROR,
+                  component: "REPOSITORY.STOCK_RECEIVED",
+                  code: "REPOSITORY.STOCK_RECEIVED.GRN_DETAIL_ENRICH",
+                  description: lookupErr.toString(),
+                  category: "",
+                  ref: { refno: refnoKey, mmh_mrc_no: mrcNo },
+                });
+                reject(lookupErr);
+              }
+            }
+          );
         }
       );
     });

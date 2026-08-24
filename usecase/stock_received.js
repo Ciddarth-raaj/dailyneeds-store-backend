@@ -37,6 +37,22 @@ class StockReceivedUsecase {
     }
   }
 
+  async getGrnDetailByRefno(refno) {
+    try {
+      return await this.stockReceivedRepo.listGrnDetailByRefno(refno);
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "USECASE.STOCK_RECEIVED",
+        code: "USECASE.STOCK_RECEIVED.GRN_DETAIL",
+        description: err.toString(),
+        category: "",
+        ref: { refno },
+      });
+      throw err;
+    }
+  }
+
   async getById(stock_received_id) {
     try {
       return await this.stockReceivedRepo.getById(stock_received_id);
