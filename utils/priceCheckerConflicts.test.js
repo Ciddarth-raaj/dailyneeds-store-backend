@@ -49,10 +49,10 @@ describe("priceCheckerConflicts", () => {
     assert.equal(exceeds(0.100002, SP_TOLERANCE), true);
     assert.equal(withinTolerance(0.1, SP_TOLERANCE), true);
     assert.equal(
-      exceeds(0.20000000000000018, MARKDOWN_PP_TOLERANCE),
+      exceeds(0.40000000000000018, MARKDOWN_PP_TOLERANCE),
       false
     );
-    assert.equal(exceeds(0.200002, MARKDOWN_PP_TOLERANCE), true);
+    assert.equal(exceeds(0.400002, MARKDOWN_PP_TOLERANCE), true);
     assert.ok(FLOAT_EPS > 0);
   });
 
@@ -180,6 +180,48 @@ describe("priceCheckerConflicts", () => {
 
     assert.equal(result.hasConflict, true);
     assert.equal(result.groups[0].basisValue, 100);
+  });
+
+  it("does not flag Rule 2 when markdown gap is within 0.40pp", () => {
+    const result = analyzeProductItems([
+      row({
+        Batch_No: "B1",
+        mpfd_price_parameter: "MRP",
+        Old_MRP: "100",
+        Old_Selling_Price: "90",
+      }),
+      row({
+        Batch_No: "B2",
+        mpfd_price_parameter: "MRP",
+        Old_MRP: "90",
+        Old_Selling_Price: "80.64",
+      }),
+    ]);
+
+    assert.equal(result.rule1Conflict, false);
+    assert.equal(result.rule2Conflict, false);
+  });
+
+  it("flags Rule 2 when markdown gap exceeds 0.40pp and flat gap exceeds SP tolerance", () => {
+    const result = analyzeProductItems([
+      row({
+        Batch_No: "B1",
+        mpfd_price_parameter: "MRP",
+        Old_MRP: "100",
+        Old_Selling_Price: "90",
+      }),
+      row({
+        Batch_No: "B2",
+        mpfd_price_parameter: "MRP",
+        Old_MRP: "90",
+        Old_Selling_Price: "80.63",
+      }),
+    ]);
+
+    assert.equal(result.rule1Conflict, false);
+    assert.equal(result.rule2Conflict, true);
+    assert.equal(result.hasConflict, true);
+    assert.ok(result.conflictReasons.includes("rule2"));
   });
 
   it("flags Rule 2 markdown outlier on MRP-basis items", () => {

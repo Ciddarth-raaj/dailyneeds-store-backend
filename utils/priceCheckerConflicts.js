@@ -1,5 +1,5 @@
 const SP_TOLERANCE = 0.1;
-const MARKDOWN_PP_TOLERANCE = 0.2;
+const MARKDOWN_PP_TOLERANCE = 0.4;
 const FLOAT_EPS = 1e-6;
 
 function trimStr(v) {
