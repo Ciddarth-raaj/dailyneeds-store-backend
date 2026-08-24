@@ -59,6 +59,74 @@ function queryAsync(db, sql, params = []) {
   });
 }
 
+function parseOptionalNumber(value) {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseProductId(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const n = parseInt(String(value).trim(), 10);
+  return Number.isFinite(n) ? n : null;
+}
+
+function computeGrnDiscount(mrpRaw, saleRateRaw) {
+  const mrp = parseOptionalNumber(mrpRaw);
+  const saleRate = parseOptionalNumber(saleRateRaw);
+  if (mrp == null || saleRate == null) {
+    return { discount_amount: null, discount_pct: null };
+  }
+  const discount_amount = mrp - saleRate;
+  const discount_pct = mrp !== 0 ? 100 - (saleRate / mrp) * 100 : null;
+  const roundedPct =
+    discount_pct != null && Number.isFinite(discount_pct)
+      ? Math.round(discount_pct * 100) / 100
+      : null;
+  return {
+    discount_amount: Number.isFinite(discount_amount) ? discount_amount : null,
+    discount_pct: roundedPct,
+  };
+}
+
+function mapGroupedItemRow(row) {
+  const batchCount = parseOptionalNumber(row.batch_count) ?? 0;
+  const distinctPurchasePrices =
+    parseOptionalNumber(row.distinct_purchase_prices) ?? 0;
+  const nullPurchaseCount = parseOptionalNumber(row.null_purchase_count) ?? 0;
+  const allSameNonNull =
+    nullPurchaseCount === 0 && distinctPurchasePrices === 1;
+  const { discount_amount, discount_pct } = computeGrnDiscount(
+    row.old_mrp,
+    row.old_selling_price
+  );
+
+  return {
+    purchase_price: allSameNonNull
+      ? parseOptionalNumber(row.purchase_price)
+      : null,
+    old_mrp: parseOptionalNumber(row.old_mrp),
+    old_selling_price: parseOptionalNumber(row.old_selling_price),
+    discount_amount,
+    discount_pct,
+    batch_count: batchCount,
+  };
+}
+
+const LIST_GROUPED_BY_PRODUCT_SQL = `SELECT
+  old_mrp,
+  old_selling_price,
+  COUNT(*) AS batch_count,
+  COUNT(DISTINCT purchase_price) AS distinct_purchase_prices,
+  SUM(CASE WHEN purchase_price IS NULL THEN 1 ELSE 0 END) AS null_purchase_count,
+  MIN(purchase_price) AS purchase_price
+FROM \`${ITEMS_TABLE}\`
+WHERE product_id = ?
+GROUP BY old_mrp, old_selling_price
+ORDER BY old_mrp ASC, old_selling_price ASC`;
+
 function getConnectionAsync(db) {
   return new Promise((resolve, reject) => {
     db.getConnection((err, connection) => {
@@ -152,6 +220,17 @@ class PriceCheckerRepository {
 
   listItems() {
     return queryAsync(this.db, LIST_ITEMS_SQL);
+  }
+
+  listGroupedItemsByProductId(productId) {
+    const id = parseProductId(productId);
+    if (id == null) {
+      return Promise.resolve([]);
+    }
+
+    return queryAsync(this.db, LIST_GROUPED_BY_PRODUCT_SQL, [id]).then((rows) =>
+      (rows || []).map(mapGroupedItemRow)
+    );
   }
 
   getMeta() {

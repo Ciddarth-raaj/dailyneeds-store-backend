@@ -280,6 +280,10 @@ class PriceCheckerUsecase {
     this.hqOffersRepo = hqOffersRepo;
   }
 
+  listGroupedItemsByProductId(productId) {
+    return this.priceCheckerRepo.listGroupedItemsByProductId(productId);
+  }
+
   async listForClient() {
     const [rows, meta] = await Promise.all([
       this.priceCheckerRepo.listItems(),
