@@ -1,0 +1,98 @@
+# Deploy backend to dnds-be on push to main-autodeploy.
+#
+# Required GitHub Actions secrets:
+#   SSH_PRIVATE_KEY  - private key with access to dnds-be (e.g. ~/.ssh/dnds-gha-deploy)
+#   SSH_HOST         - 3.109.76.230
+#   SSH_USER         - ec2-user
+#
+# One-time setup:
+#   1. Install the matching public key in ec2-user's authorized_keys on dnds-be.
+#   2. On the server, ensure ~/dailyneeds-store-backend can git fetch/pull (existing
+#      GitHub credentials on the server — separate from the Actions→server key).
+#   3. First deploy checks out main-autodeploy; create/push that branch before relying on it.
+#
+# DB credentials stay on the server (migrations/mysql/database.json) — not in Actions.
+
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main-autodeploy
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/dnds_gha_deploy
+          chmod 600 ~/.ssh/dnds_gha_deploy
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Deploy on server
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/dnds_gha_deploy \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "${SSH_USER}@${SSH_HOST}" bash -s <<'EOF'
+          set -euo pipefail
+
+          GREEN='\033[0;32m'
+          RED='\033[0;31m'
+          YELLOW='\033[1;33m'
+          NC='\033[0m'
+
+          print_status() {
+            if [ "$1" -eq 0 ]; then
+              echo -e "${GREEN}$2 - SUCCESS${NC}"
+            else
+              echo -e "${RED}$2 - FAILED${NC}"
+              exit 1
+            fi
+          }
+
+          echo -e "${YELLOW}Changing directory to dailyneeds-store-backend...${NC}"
+          cd ~/dailyneeds-store-backend
+          print_status $? "Changed directory"
+
+          echo -e "${YELLOW}Fetching and checking out main-autodeploy...${NC}"
+          git fetch origin
+          print_status $? "Git fetch"
+
+          git checkout main-autodeploy
+          print_status $? "Checkout main-autodeploy"
+
+          git pull origin main-autodeploy
+          print_status $? "Git pull"
+
+          echo -e "${YELLOW}Installing npm packages...${NC}"
+          npm i
+          print_status $? "npm install"
+
+          echo -e "${YELLOW}Changing directory to migrations/mysql...${NC}"
+          cd migrations/mysql
+          print_status $? "Changed directory to migrations/mysql"
+
+          echo -e "${YELLOW}Running database migrations...${NC}"
+          db-migrate up
+          print_status $? "DB migration"
+
+          echo -e "${YELLOW}Reloading PM2 app (id: 0)...${NC}"
+          pm2 reload 0
+          print_status $? "PM2 reload"
+          EOF
