@@ -421,33 +421,77 @@ class StockReceivedRepository {
   }
 
   /**
-   * Latest MRP (MMD_MAX_RATE) and net cost (MMD_PUR_PRICE) per product,
-   * taken from that product's most recent GRN line by actual GRN date
-   * (MMH_MRC_DT), not by MMD_MRC_NO insertion order — GRNs can be entered
-   * out of chronological order (e.g. backdated), so insertion order alone
-   * can pick a stale line. MMD_MRC_NO is used only as a tiebreak.
+   * Latest MRP (MMD_MAX_RATE) and net cost (MMD_PUR_PRICE) for the given
+   * product ids, taken from each product's most recent GRN line by actual
+   * GRN date (MMH_MRC_DT) — not MMD_MRC_NO insertion order, since GRNs can
+   * be entered out of chronological order (e.g. backdated). MMD_MRC_NO is
+   * used only as a tiebreak.
+   *
+   * Scoped to `productIds` and chunked, rather than scanning the entire
+   * GRN detail history table (which can span years of receipts) — this
+   * was previously the page's main slowdown.
    * Returns a Map keyed by product_id.
    */
-  async listLatestGrnPricingByProduct() {
-    const rawDtl = await this._queryGofrugalDtlWithHdr();
-    const sorted = [...rawDtl].sort((a, b) => {
-      const dateA = new Date(a.MMH_MRC_DT ?? 0).getTime() || 0;
-      const dateB = new Date(b.MMH_MRC_DT ?? 0).getTime() || 0;
-      if (dateB !== dateA) return dateB - dateA;
-      return (b.MMD_MRC_NO ?? 0) - (a.MMD_MRC_NO ?? 0);
-    });
-    const map = new Map();
-    for (const row of sorted) {
-      const productId = normalizeItemCode(row.MMD_ITEM_CODE);
-      if (productId == null || map.has(productId)) {
-        continue;
+  listLatestGrnPricingByProduct(productIds) {
+    return new Promise((resolve, reject) => {
+      if (!this.gofrugalDb) {
+        return reject(new Error("Gofrugal DB connection is not configured"));
       }
-      map.set(productId, {
-        mrp: parseOptionalNumber(row.MMD_MRP),
-        net_cost: parseOptionalNumber(row.MMD_PUR_PRICE),
+      const unique = [...new Set((productIds || []).filter((id) => id != null))];
+      if (!unique.length) {
+        resolve(new Map());
+        return;
+      }
+      const chunks = chunkArray(unique, 200);
+      const map = new Map();
+      let pending = chunks.length;
+      let settled = false;
+      chunks.forEach((ids) => {
+        const ph = ids.map(() => "?").join(", ");
+        this.gofrugalDb.query(
+          `SELECT
+              d.MMD_ITEM_CODE,
+              d.MMD_MRC_NO,
+              d.MMD_PUR_PRICE,
+              d.MMD_MAX_RATE AS MMD_MRP,
+              h.MMH_MRC_DT
+           FROM \`${GOFRUGAL_DTL}\` d
+           LEFT JOIN \`${GOFRUGAL_HDR}\` h ON h.MMH_MRC_NO = d.MMD_MRC_NO
+           WHERE d.MMD_ITEM_CODE IN (${ph})
+           ORDER BY h.MMH_MRC_DT DESC, d.MMD_MRC_NO DESC`,
+          ids,
+          (err, rows) => {
+            if (settled) return;
+            if (err) {
+              settled = true;
+              logger.Log({
+                level: logger.LEVEL.ERROR,
+                component: "REPOSITORY.STOCK_RECEIVED",
+                code: "REPOSITORY.STOCK_RECEIVED.LATEST_GRN_PRICING",
+                description: err.toString(),
+                category: "",
+                ref: {},
+              });
+              return reject(err);
+            }
+            (rows || []).forEach((row) => {
+              const productId = normalizeItemCode(row.MMD_ITEM_CODE);
+              if (productId == null || map.has(productId)) {
+                return;
+              }
+              map.set(productId, {
+                mrp: parseOptionalNumber(row.MMD_MRP),
+                net_cost: parseOptionalNumber(row.MMD_PUR_PRICE),
+              });
+            });
+            pending -= 1;
+            if (pending === 0) {
+              resolve(map);
+            }
+          }
+        );
       });
-    }
-    return map;
+    });
   }
 
   _fetchStockReceivedMap(pairs) {

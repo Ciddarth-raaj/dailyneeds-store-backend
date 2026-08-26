@@ -25,7 +25,7 @@ class PurchaseRefUsecase {
 
       const [productMap, grnPricingMap, currentStockMap] = await Promise.all([
         this.purchaseRefRepo.listProductsWithSupplierByIds(productIds),
-        this.stockReceivedRepo.listLatestGrnPricingByProduct(),
+        this.stockReceivedRepo.listLatestGrnPricingByProduct(productIds),
         this.stockHoldingReportRepo.getCurrentStockTotalsByDate(new Date()),
       ]);
 
