@@ -422,13 +422,22 @@ class StockReceivedRepository {
 
   /**
    * Latest MRP (MMD_MAX_RATE) and net cost (MMD_PUR_PRICE) per product,
-   * taken from that product's most recent GRN line (by MMD_MRC_NO desc).
+   * taken from that product's most recent GRN line by actual GRN date
+   * (MMH_MRC_DT), not by MMD_MRC_NO insertion order — GRNs can be entered
+   * out of chronological order (e.g. backdated), so insertion order alone
+   * can pick a stale line. MMD_MRC_NO is used only as a tiebreak.
    * Returns a Map keyed by product_id.
    */
   async listLatestGrnPricingByProduct() {
     const rawDtl = await this._queryGofrugalDtlWithHdr();
+    const sorted = [...rawDtl].sort((a, b) => {
+      const dateA = new Date(a.MMH_MRC_DT ?? 0).getTime() || 0;
+      const dateB = new Date(b.MMH_MRC_DT ?? 0).getTime() || 0;
+      if (dateB !== dateA) return dateB - dateA;
+      return (b.MMD_MRC_NO ?? 0) - (a.MMD_MRC_NO ?? 0);
+    });
     const map = new Map();
-    for (const row of rawDtl) {
+    for (const row of sorted) {
       const productId = normalizeItemCode(row.MMD_ITEM_CODE);
       if (productId == null || map.has(productId)) {
         continue;
