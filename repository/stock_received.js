@@ -420,6 +420,27 @@ class StockReceivedRepository {
     });
   }
 
+  /**
+   * Latest MRP (MMD_MAX_RATE) and net cost (MMD_PUR_PRICE) per product,
+   * taken from that product's most recent GRN line (by MMD_MRC_NO desc).
+   * Returns a Map keyed by product_id.
+   */
+  async listLatestGrnPricingByProduct() {
+    const rawDtl = await this._queryGofrugalDtlWithHdr();
+    const map = new Map();
+    for (const row of rawDtl) {
+      const productId = normalizeItemCode(row.MMD_ITEM_CODE);
+      if (productId == null || map.has(productId)) {
+        continue;
+      }
+      map.set(productId, {
+        mrp: parseOptionalNumber(row.MMD_MRP),
+        net_cost: parseOptionalNumber(row.MMD_PUR_PRICE),
+      });
+    }
+    return map;
+  }
+
   _fetchStockReceivedMap(pairs) {
     return new Promise((resolve, reject) => {
       if (!pairs.length) {

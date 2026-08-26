@@ -44,6 +44,35 @@ class ProductSalesRepository {
     this.db = db;
   }
 
+  /**
+   * Total quantity sold per product over the trailing 3 calendar months,
+   * divided by 3. Only products with at least one sale in the window are
+   * returned.
+   */
+  listAvgSalesLast3Months() {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT product_id, SUM(tran_qty) AS total_qty
+         FROM \`${TABLE}\`
+         WHERE tran_date >= DATE_SUB(CURDATE(), INTERVAL 3 MONTH)
+         GROUP BY product_id`,
+        [],
+        (err, rows) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+          resolve(
+            (rows || []).map((row) => ({
+              product_id: row.product_id,
+              avg_sales: Number(row.total_qty || 0) / 3,
+            }))
+          );
+        }
+      );
+    });
+  }
+
   updateAmounts(conn, row) {
     return new Promise((resolve, reject) => {
       conn.query(

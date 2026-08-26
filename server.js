@@ -286,6 +286,9 @@ class Server {
       this.mysql.connection,
       this.mysqlGofrugal.connection
     );
+    this.purchaseRefRepo = require("./repository/purchase_ref")(
+      this.mysql.connection
+    );
     this.stockHoldingReportRepo = require("./repository/stock_holding_report")(
       this.mysql.connection
     );
@@ -529,6 +532,11 @@ class Server {
     this.stockReceivedUsecase = require("./usecase/stock_received")(
       this.stockReceivedRepo
     );
+    this.purchaseRefUsecase = require("./usecase/purchase_ref")(
+      this.purchaseRefRepo,
+      this.productSalesRepo,
+      this.stockReceivedRepo
+    );
     this.stockHoldingReportUsecase = require("./usecase/stock_holding_report")(
       this.stockHoldingReportRepo,
       this.outletRepo
@@ -744,6 +752,9 @@ class Server {
     const stockReceivedRouter = require("./routes/stock_received")(
       this.stockReceivedUsecase
     );
+    const purchaseRefRouter = require("./routes/purchase_ref")(
+      this.purchaseRefUsecase
+    );
     const stockHoldingReportRouter = require("./routes/stock_holding_report")(
       this.stockHoldingReportUsecase
     );
@@ -840,6 +851,7 @@ class Server {
     app.use("/dead-stock-items", deadStockItemsRouter.getRouter());
     app.use("/item-markupdown", itemMarkupdownRouter.getRouter());
     app.use("/stock-received", stockReceivedRouter.getRouter());
+    app.use("/purchase-ref", purchaseRefRouter.getRouter());
     app.use("/stock-holding-report", stockHoldingReportRouter.getRouter());
     app.use("/price-checker", priceCheckerRouter.getRouter());
     app.use("/api-sync-log", apiSyncLogRouter.getRouter());
