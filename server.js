@@ -535,7 +535,8 @@ class Server {
     this.purchaseRefUsecase = require("./usecase/purchase_ref")(
       this.purchaseRefRepo,
       this.productSalesRepo,
-      this.stockReceivedRepo
+      this.stockReceivedRepo,
+      this.stockHoldingReportRepo
     );
     this.stockHoldingReportUsecase = require("./usecase/stock_holding_report")(
       this.stockHoldingReportRepo,

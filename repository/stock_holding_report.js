@@ -326,6 +326,46 @@ class StockHoldingReportRepository {
     this.db = db;
   }
 
+  /**
+   * Current stock per product, summed across all outlets, from the latest
+   * stock holding snapshot at or before `date`. Returns a Map<product_id, number>.
+   */
+  getCurrentStockTotalsByDate(date) {
+    return this.getLatestReportIdByDate(date).then((reportId) => {
+      if (!reportId) {
+        return new Map();
+      }
+      return new Promise((resolve, reject) => {
+        this.db.query(
+          `SELECT product_id, SUM(current_stock) AS current_stock
+           FROM stock_holding_items
+           WHERE stock_holding_report_id = ?
+           GROUP BY product_id`,
+          [reportId],
+          (err, rows) => {
+            if (err) {
+              logger.Log({
+                level: logger.LEVEL.ERROR,
+                component: "REPOSITORY.STOCK_HOLDING_REPORT",
+                code: "REPOSITORY.STOCK_HOLDING_REPORT.CURRENT_STOCK_TOTALS",
+                description: err.toString(),
+                category: "",
+                ref: { reportId },
+              });
+              reject(err);
+              return;
+            }
+            const map = new Map();
+            (rows || []).forEach((row) => {
+              map.set(row.product_id, Number(row.current_stock || 0));
+            });
+            resolve(map);
+          }
+        );
+      });
+    });
+  }
+
   createReportHeader({ report_name, date, created_by }) {
     return new Promise((resolve, reject) => {
       this.db.query(
