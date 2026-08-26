@@ -12,8 +12,8 @@ class AccountsRoutes {
     router.get("/check-saved", async (req, res) => {
       try {
         const schema = {
-          store_id: Joi.string().required(),
           date: Joi.date().required(),
+          store_id: Joi.string().required(),
         };
 
         const isValid = Joi.validate(req.query, schema);
