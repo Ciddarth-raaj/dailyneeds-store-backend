@@ -22,50 +22,6 @@ const CRON_SYNTAX_EMPLOYEE = "0 7 * * *";
 const CRON_SYNTAX_STOCK_HOLDING = "30 7 * * *";
 const CRON_SYNTAX_CLEANING_PACKING = "0 9 * * *";
 
-// Columns on product_table that are updated by sync (for change detection). Excludes product_id.
-// gf_* columns are deprecated for application use; still synced from GoFrugal for legacy data.
-const SYNCED_PRODUCT_COLUMNS = [
-  "variant",
-  "variant_of",
-  "gf_item_name", // @deprecated use de_name
-  "gf_description", // @deprecated
-  "gf_detailed_description", // @deprecated
-  "gf_weight_grams", // @deprecated
-  "gf_applies_online", // @deprecated
-  "gf_item_product_type", // @deprecated
-  "gf_manufacturer", // @deprecated use de_distributor
-  "gf_food_type", // @deprecated
-  "gf_tax_id", // @deprecated
-  "gf_status", // @deprecated
-  "de_distributor",
-  "brand_id",
-  "category_id",
-  "subcategory_id",
-  "measure",
-  "measure_in",
-  "packaging_type",
-  "cleaning",
-  "sticker",
-  "grinding",
-  "cover_type",
-  "cover_sizes",
-  "return_prod",
-  "de_display_name",
-  "department_id",
-  "de_name",
-  "de_packaging_type",
-  "de_preparation_type",
-  "de_combo_name",
-  "purchase_uom",
-  "store_uom",
-  "repln_mode",
-  "de_is_online_allowed",
-  "buyer_name",
-  "distributor_id",
-  "de_manufacturer_name",
-  "de_bill_count_level",
-];
-
 class Synker {
   constructor(
     productUsecase,
@@ -78,7 +34,6 @@ class Synker {
     outletUsecase,
     employeeUsecase,
     productRepo,
-    productsChangesRepo,
     stockHoldingReportUsecase
   ) {
     this.productUsecase = productUsecase;
@@ -91,58 +46,7 @@ class Synker {
     this.outletUsecase = outletUsecase;
     this.employeeUsecase = employeeUsecase;
     this.productRepo = productRepo;
-    this.productsChangesRepo = productsChangesRepo;
     this.stockHoldingReportUsecase = stockHoldingReportUsecase;
-  }
-
-  /** Build incoming row for comparison (same keys as DB). product has .return for return_prod. */
-  _incomingRowForSync(product) {
-    const row = {};
-    for (const col of SYNCED_PRODUCT_COLUMNS) {
-      if (col === "return_prod") {
-        row[col] =
-          product.return !== undefined ? product.return : product.return_prod;
-      } else {
-        row[col] = product[col];
-      }
-    }
-    return row;
-  }
-
-  /**
-   * Normalise value for comparison so type mismatches (e.g. 3598 vs "3598") are treated as equal.
-   * Returns undefined for null/undefined/empty. Numbers and numeric strings compare by value.
-   */
-  _normalizeForCompare(val) {
-    if (val === null || val === undefined) return undefined;
-    if (Buffer.isBuffer(val)) val = val.toString("utf8");
-    if (typeof val === "string") {
-      const s = val.trim();
-      if (s === "") return undefined;
-      const n = Number(s);
-      return Number.isNaN(n) ? s : n;
-    }
-    if (typeof val === "number" && !Number.isFinite(val)) return undefined;
-    return val;
-  }
-
-  /**
-   * Build changes object with only columns that actually changed.
-   * Uses loose equality so 3598 and "3598" are not stored as changed.
-   * Skips when old is null and there is no new value. Only stores real changes.
-   */
-  _buildProductChanges(existing, incoming) {
-    const changes = {};
-    for (const col of SYNCED_PRODUCT_COLUMNS) {
-      const oldVal = existing && col in existing ? existing[col] : undefined;
-      const newVal = incoming && col in incoming ? incoming[col] : undefined;
-      const oldNorm = this._normalizeForCompare(oldVal);
-      const newNorm = this._normalizeForCompare(newVal);
-      if (oldVal == null && (newVal == null || newVal === "")) continue;
-      if (oldNorm == newNorm) continue;
-      changes[col] = { old: oldVal, new: newVal };
-    }
-    return Object.keys(changes).length ? changes : null;
   }
 
   initCronJobs(cronService, apiSyncLogger) {
@@ -494,43 +398,11 @@ class Synker {
       let brandsProcessed = 0;
       let departmentsProcessed = 0;
 
-      const productIds = formattedProduct.map((p) => p.product_id);
-      const existingByProductId =
-        this.productRepo && productIds.length > 0
-          ? await this.productRepo.getProductRowForSync(productIds)
-          : {};
-
       for (const i in formattedProduct) {
         formattedProduct[i] = {
           ...formattedProduct[i],
           ...products[formattedProduct[i].product_id],
         };
-        const productId = formattedProduct[i].product_id;
-        if (this.productsChangesRepo && this.productRepo) {
-          const existing = existingByProductId[String(productId)];
-          if (existing) {
-            const incoming = this._incomingRowForSync(formattedProduct[i]);
-            const changes = this._buildProductChanges(existing, incoming);
-            if (changes) {
-              try {
-                await this.productsChangesRepo.insert({
-                  product_id: productId,
-                  changes,
-                  is_approved: false,
-                });
-              } catch (err) {
-                logger.Log({
-                  level: logger.LEVEL.ERROR,
-                  component: "SERVICE.SYNKER",
-                  code: "SERVICE.SYNKER.PRODUCTS_CHANGES_INSERT",
-                  description: err.toString(),
-                  category: "",
-                  ref: { product_id: productId },
-                });
-              }
-            }
-          }
-        }
         await this.productUsecase.create(formattedProduct[i]);
         productsProcessed++;
       }
@@ -982,7 +854,6 @@ module.exports = (
   outletUsecase,
   employeeUsecase,
   productRepo,
-  productsChangesRepo,
   stockHoldingReportUsecase
 ) => {
   return new Synker(
@@ -996,7 +867,6 @@ module.exports = (
     outletUsecase,
     employeeUsecase,
     productRepo,
-    productsChangesRepo,
     stockHoldingReportUsecase
   );
 };
