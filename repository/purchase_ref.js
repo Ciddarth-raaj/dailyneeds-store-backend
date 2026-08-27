@@ -29,7 +29,14 @@ class PurchaseRefRepository {
         this.db.query(
           `SELECT p.product_id,
               p.de_name,
-              COALESCE(pdm.mdm_dist_name, p.de_distributor) AS supplier_name
+              COALESCE(pdm.mdm_dist_name, p.de_distributor) AS supplier_name,
+              (
+                SELECT pi.image_url
+                FROM product_images pi
+                WHERE pi.product_id = p.product_id
+                ORDER BY pi.priority ASC, pi.image_id ASC
+                LIMIT 1
+              ) AS image_link
            FROM product_table p
            LEFT JOIN product_distributor_master pdm ON pdm.cid = p.distributor_id
            WHERE p.product_id IN (${ph})`,
@@ -51,6 +58,7 @@ class PurchaseRefRepository {
                 product_id: row.product_id,
                 name: row.de_name ?? null,
                 supplier_name: row.supplier_name ?? null,
+                image_link: row.image_link ?? null,
               });
             });
             pending -= 1;

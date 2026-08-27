@@ -35,6 +35,7 @@ class PurchaseRefUsecase {
         return {
           product_id: row.product_id,
           name: product?.name ?? null,
+          image_url: product?.image_link ?? null,
           supplier_name: product?.supplier_name ?? null,
           mrp: pricing?.mrp ?? null,
           net_cost: pricing?.net_cost ?? null,
