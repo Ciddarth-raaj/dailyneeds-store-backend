@@ -159,12 +159,13 @@ class OffersV3Usecase {
       const result = await this.offersV3Repo.createItemOffer({ ...data, created_by });
       if (result.code === 200) {
         const created = await this.offersV3Repo.getItemOfferById(result.id);
-        await notifyOffersV3(
+        const notifyResult = await notifyOffersV3(
           `🟢 *New item-level offer created*\n` +
             `Item: ${escapeMarkdown(created?.item_name)} (${data.item_code})\n` +
             `Type: ${data.offer_type} | Value: ${data.value}\n` +
             `Threshold Qty: ${data.threshold_qty}`
         );
+        result._telegramNotify = notifyResult;
       }
       return result;
     } catch (err) {
@@ -278,12 +279,13 @@ class OffersV3Usecase {
       if (result.code === 200) {
         await this.offersV3Repo.resolveUntaggedBatchAlertByKey(data.item_code, data.outlet_id, data.batch_no);
         const created = await this.offersV3Repo.getBatchOfferById(result.id);
-        await notifyOffersV3(
+        const notifyResult = await notifyOffersV3(
           `🟢 *New batch-specific offer created*\n` +
             `Item: ${escapeMarkdown(created?.item_name)} (${data.item_code})\n` +
             `Outlet: ${escapeMarkdown(created?.outlet_name ?? data.outlet_id)} | Batch: ${escapeMarkdown(data.batch_no)}\n` +
             `Type: ${data.offer_type} | Value: ${data.value}`
         );
+        result._telegramNotify = notifyResult;
       }
       return result;
     } catch (err) {
