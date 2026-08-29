@@ -477,7 +477,7 @@ class OffersV3Repository {
   getPriceForBatch(item_code, outlet_id, batch_no) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT item_code, outlet_id, batch_no, mrp, selling_price, stock_qty
+        `SELECT item_code, outlet_id, batch_no, mrp, selling_price, landing_cost, stock_qty
          FROM \`${DATA_TABLE}\`
          WHERE item_code = ? AND outlet_id = ? AND batch_no = ?`,
         [item_code, outlet_id, batch_no],
@@ -500,7 +500,7 @@ class OffersV3Repository {
   getPricesForItem(item_code) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT bd.item_code, bd.outlet_id, o.outlet_name, bd.batch_no, bd.mrp, bd.selling_price, bd.stock_qty
+        `SELECT bd.item_code, bd.outlet_id, o.outlet_name, bd.batch_no, bd.mrp, bd.selling_price, bd.landing_cost, bd.stock_qty
          FROM \`${DATA_TABLE}\` bd
          LEFT JOIN outlets o ON o.outlet_id = bd.outlet_id
          WHERE bd.item_code = ?`,
@@ -545,16 +545,27 @@ class OffersV3Repository {
   // Price upload: touches only mrp/selling_price/price_uploaded_at. Inserts a
   // new row (stock columns left NULL) if this item/outlet/batch has never been
   // seen; never touches stock_qty on an existing row.
+  // landing_cost is optional per row; when a row omits it (null), the
+  // existing stored value is kept rather than being wiped out by a re-upload
+  // that doesn't carry that column.
   async upsertBatchPrice(rows) {
     if (!Array.isArray(rows) || rows.length === 0) return { code: 200, upserted: 0 };
     for (const batch of chunk(rows, BULK_CHUNK_SIZE)) {
-      const values = batch.map((r) => [r.item_code, r.outlet_id, r.batch_no, r.mrp, r.selling_price]);
-      const placeholders = values.map(() => "(?, ?, ?, ?, ?, CURRENT_TIMESTAMP)").join(", ");
+      const values = batch.map((r) => [
+        r.item_code,
+        r.outlet_id,
+        r.batch_no,
+        r.mrp,
+        r.selling_price,
+        r.landing_cost ?? null,
+      ]);
+      const placeholders = values.map(() => "(?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)").join(", ");
       const flat = values.flat();
       try {
         await this._queryAsync(
-          `INSERT INTO \`${DATA_TABLE}\` (item_code, outlet_id, batch_no, mrp, selling_price, price_uploaded_at) VALUES ${placeholders}
-           ON DUPLICATE KEY UPDATE mrp = VALUES(mrp), selling_price = VALUES(selling_price), price_uploaded_at = VALUES(price_uploaded_at)`,
+          `INSERT INTO \`${DATA_TABLE}\` (item_code, outlet_id, batch_no, mrp, selling_price, landing_cost, price_uploaded_at) VALUES ${placeholders}
+           ON DUPLICATE KEY UPDATE mrp = VALUES(mrp), selling_price = VALUES(selling_price),
+             landing_cost = IFNULL(VALUES(landing_cost), landing_cost), price_uploaded_at = VALUES(price_uploaded_at)`,
           flat
         );
       } catch (err) {

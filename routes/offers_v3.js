@@ -67,6 +67,7 @@ const priceUploadRowSchema = Joi.object({
   batch_no: uploadCellSchema,
   mrp: uploadCellSchema,
   selling_price: uploadCellSchema,
+  landing_cost: uploadCellSchema,
 });
 const priceUploadSchema = Joi.array().items(priceUploadRowSchema).min(1);
 

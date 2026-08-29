@@ -524,20 +524,25 @@ class OffersV3Usecase {
 
   /**
    * Process an uploaded price file (Price Checker-style export: Item Code,
-   * Outlet, Batch No, MRP, Selling Price — MRP/Selling Price are always the
-   * Old_MRP/Old_Selling_Price columns per the fixed mapping rule, resolved on
-   * the frontend before this is called). Updates only mrp/selling_price for
+   * Outlet, Batch No, MRP, Selling Price, optional Landing Cost —
+   * MRP/Selling Price are always the Old_MRP/Old_Selling_Price columns per
+   * the fixed mapping rule, resolved on the frontend before this is
+   * called). Updates mrp/selling_price (and landing_cost, when present) for
    * matching rows; also detects untagged new batches.
    */
   async processPriceUpload(rows, created_by) {
     const { resolved: withKeys, skippedRows: keySkippedRows, unresolvedOutlets } = await this.resolveUploadRows(
       rows
     );
-    const withNumericPrice = withKeys.map((row) => ({
-      ...row,
-      mrp: Number(row.mrp),
-      selling_price: Number(row.selling_price),
-    }));
+    const withNumericPrice = withKeys.map((row) => {
+      const landing_cost = Number(row.landing_cost);
+      return {
+        ...row,
+        mrp: Number(row.mrp),
+        selling_price: Number(row.selling_price),
+        landing_cost: Number.isNaN(landing_cost) ? null : landing_cost,
+      };
+    });
     const resolved = withNumericPrice.filter((row) => !Number.isNaN(row.mrp) && !Number.isNaN(row.selling_price));
     const numericSkippedRows = withNumericPrice
       .filter((row) => Number.isNaN(row.mrp) || Number.isNaN(row.selling_price))
@@ -655,7 +660,10 @@ class OffersV3Usecase {
             expected_selling_price: roundedExpected,
             actual_selling_price: actual,
             stock_qty: price.stock_qty,
-            landing_cost: landingCostMap.get(`${offer.item_code}|${price.outlet_id}|${price.batch_no}`) ?? null,
+            landing_cost:
+              price.landing_cost ??
+              landingCostMap.get(`${offer.item_code}|${price.outlet_id}|${price.batch_no}`) ??
+              null,
           });
         }
       }
@@ -683,7 +691,10 @@ class OffersV3Usecase {
           expected_selling_price: roundedExpected,
           actual_selling_price: actual,
           stock_qty: price.stock_qty,
-          landing_cost: landingCostMap.get(`${offer.item_code}|${offer.outlet_id}|${offer.batch_no}`) ?? null,
+          landing_cost:
+            price.landing_cost ??
+            landingCostMap.get(`${offer.item_code}|${offer.outlet_id}|${offer.batch_no}`) ??
+            null,
         });
       }
     }
