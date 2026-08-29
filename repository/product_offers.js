@@ -2,7 +2,14 @@ const logger = require("../utils/logger");
 
 const TABLE = "product_offers";
 
-const ALLOWED_UPDATE_KEYS = ["mrp", "selling_price", "opening_stock", "is_active"];
+const ALLOWED_UPDATE_KEYS = [
+  "mrp",
+  "selling_price",
+  "offer_type",
+  "offer_value",
+  "opening_stock",
+  "is_active",
+];
 
 const PRODUCT_JOINS = `
 LEFT JOIN product_table pt ON pt.product_id = po.product_id
@@ -10,7 +17,7 @@ LEFT JOIN product_distributor_master pdm ON pt.distributor_id = pdm.cid
 LEFT JOIN product_distributor pd_map ON pd_map.cid = pdm.cid
 LEFT JOIN new_employee ne ON ne.employee_id = pd_map.buyer_id`;
 
-const PRODUCT_SELECT = `po.product_id, po.mrp, po.selling_price, po.opening_stock, po.stock_input, po.stock_output, po.is_active, po.created_at, po.updated_at,
+const PRODUCT_SELECT = `po.product_id, po.mrp, po.selling_price, po.offer_type, po.offer_value, po.opening_stock, po.stock_input, po.stock_output, po.is_active, po.created_at, po.updated_at,
                 pt.de_name,
                 COALESCE(ne.employee_name, pt.buyer_name) AS buyer_name,
                 COALESCE(pdm.mdm_dist_name, pt.de_distributor) AS distributor_name`;
@@ -130,6 +137,8 @@ class ProductOffersRepository {
     return new Promise((resolve, reject) => {
       const mrp = data.mrp !== undefined && data.mrp !== null ? data.mrp : null;
       const selling_price = data.selling_price !== undefined && data.selling_price !== null ? data.selling_price : null;
+      const offer_type = data.offer_type !== undefined && data.offer_type !== null ? data.offer_type : null;
+      const offer_value = data.offer_value !== undefined && data.offer_value !== null ? data.offer_value : null;
       const is_active = data.is_active !== undefined ? (data.is_active ? 1 : 0) : 1;
       let opening_stock =
         data.opening_stock !== undefined && data.opening_stock !== null ? data.opening_stock : 0;
@@ -137,8 +146,8 @@ class ProductOffersRepository {
         opening_stock = 0;
       }
       this.db.query(
-        `INSERT INTO \`${TABLE}\` (product_id, mrp, selling_price, opening_stock, is_active) VALUES (?, ?, ?, ?, ?)`,
-        [data.product_id, mrp, selling_price, opening_stock, is_active],
+        `INSERT INTO \`${TABLE}\` (product_id, mrp, selling_price, offer_type, offer_value, opening_stock, is_active) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [data.product_id, mrp, selling_price, offer_type, offer_value, opening_stock, is_active],
         (err, res) => {
           if (err) {
             if (err.code === "ER_DUP_ENTRY") {
@@ -163,18 +172,21 @@ class ProductOffersRepository {
       const values = rows.map((r) => {
         const mrp = r.mrp !== undefined && r.mrp !== null ? r.mrp : null;
         const selling_price = r.selling_price !== undefined && r.selling_price !== null ? r.selling_price : null;
+        const offer_type = r.offer_type !== undefined && r.offer_type !== null ? r.offer_type : null;
+        const offer_value = r.offer_value !== undefined && r.offer_value !== null ? r.offer_value : null;
         const is_active = r.is_active !== undefined ? (r.is_active ? 1 : 0) : 1;
         let opening_stock =
           r.opening_stock !== undefined && r.opening_stock !== null ? r.opening_stock : 0;
         if (!is_active) {
           opening_stock = 0;
         }
-        return [r.product_id, mrp, selling_price, opening_stock, is_active];
+        return [r.product_id, mrp, selling_price, offer_type, offer_value, opening_stock, is_active];
       });
-      const placeholders = values.map(() => "(?, ?, ?, ?, ?)").join(", ");
+      const placeholders = values.map(() => "(?, ?, ?, ?, ?, ?, ?)").join(", ");
       const flat = values.flat();
-      const sql = `INSERT INTO \`${TABLE}\` (product_id, mrp, selling_price, opening_stock, is_active) VALUES ${placeholders}
+      const sql = `INSERT INTO \`${TABLE}\` (product_id, mrp, selling_price, offer_type, offer_value, opening_stock, is_active) VALUES ${placeholders}
         ON DUPLICATE KEY UPDATE mrp = VALUES(mrp), selling_price = VALUES(selling_price),
+          offer_type = VALUES(offer_type), offer_value = VALUES(offer_value),
           opening_stock = IF(VALUES(is_active) = 0, 0, VALUES(opening_stock)),
           stock_input = IF(VALUES(is_active) = 0, 0, stock_input),
           stock_output = IF(VALUES(is_active) = 0, 0, stock_output),

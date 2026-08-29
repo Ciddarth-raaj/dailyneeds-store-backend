@@ -6,6 +6,8 @@ const itemSchema = Joi.object({
   product_id: Joi.number().integer().required(),
   mrp: Joi.number().min(0).allow(null).optional(),
   selling_price: Joi.number().min(0).allow(null).optional(),
+  offer_type: Joi.string().valid("save", "percent_off").allow(null).optional(),
+  offer_value: Joi.number().min(0).allow(null).optional(),
   opening_stock: Joi.number().optional().default(0),
   is_active: Joi.boolean().optional().default(true),
 });
@@ -108,6 +110,8 @@ class ProductOffersRoutes {
     const updateSchema = Joi.object({
       mrp: Joi.number().min(0).allow(null).optional(),
       selling_price: Joi.number().min(0).allow(null).optional(),
+      offer_type: Joi.string().valid("save", "percent_off").allow(null).optional(),
+      offer_value: Joi.number().min(0).allow(null).optional(),
       opening_stock: Joi.number().optional().allow(null),
       is_active: Joi.boolean().optional(),
     }).min(1);
