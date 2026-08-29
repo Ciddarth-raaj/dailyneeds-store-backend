@@ -245,20 +245,6 @@ function attachExpectedSellingPrices(products, rulesByItemCode) {
   return products;
 }
 
-function attachOfferPrices(products, offersByProductId) {
-  for (const product of products) {
-    const sellingPrice = offersByProductId.get(product.Item_Code);
-    const offerPrice =
-      sellingPrice != null && sellingPrice !== "" ? sellingPrice : null;
-    product.offerPrice = offerPrice;
-    product.items = product.items.map((item) => ({
-      ...item,
-      offer_price: offerPrice ?? "",
-    }));
-  }
-  return products;
-}
-
 // activeProductIds may mix numeric item_codes (Offers V3) and string HQ
 // product ids, so compare as strings either way.
 function attachHqOfferStatus(products, activeProductIds) {
@@ -273,13 +259,11 @@ class PriceCheckerUsecase {
   constructor(
     priceCheckerRepo,
     itemMarkupdownRepo,
-    productOffersRepo,
     hqOffersRepo,
     offersV3Repo
   ) {
     this.priceCheckerRepo = priceCheckerRepo;
     this.itemMarkupdownRepo = itemMarkupdownRepo;
-    this.productOffersRepo = productOffersRepo;
     this.hqOffersRepo = hqOffersRepo;
     this.offersV3Repo = offersV3Repo;
   }
@@ -309,23 +293,6 @@ class PriceCheckerUsecase {
       attachExpectedSellingPrices(products, new Map());
     }
 
-    let offersV2Offers = [];
-    if (itemCodes.length && this.productOffersRepo) {
-      offersV2Offers =
-        await this.productOffersRepo.listActiveSellingPricesByProductIds(
-          itemCodes
-        );
-      const offersByProductId = new Map(
-        (offersV2Offers || []).map((offer) => [
-          String(offer.product_id),
-          offer.selling_price,
-        ])
-      );
-      attachOfferPrices(products, offersByProductId);
-    } else {
-      attachOfferPrices(products, new Map());
-    }
-
     if (itemCodes.length && (this.hqOffersRepo || this.offersV3Repo)) {
       const [hqActiveIds, offersV3ActiveIds] = await Promise.all([
         this.hqOffersRepo
@@ -335,12 +302,7 @@ class PriceCheckerUsecase {
           ? this.offersV3Repo.getItemCodesWithAnyActiveOffer(itemCodes)
           : [],
       ]);
-      const offersV2ActiveIds = (offersV2Offers || []).map((o) => o.product_id);
-      attachHqOfferStatus(products, [
-        ...hqActiveIds,
-        ...offersV3ActiveIds,
-        ...offersV2ActiveIds,
-      ]);
+      attachHqOfferStatus(products, [...hqActiveIds, ...offersV3ActiveIds]);
     } else {
       attachHqOfferStatus(products, []);
     }
@@ -478,14 +440,12 @@ class PriceCheckerUsecase {
 module.exports = (
   priceCheckerRepo,
   itemMarkupdownRepo,
-  productOffersRepo,
   hqOffersRepo,
   offersV3Repo
 ) =>
   new PriceCheckerUsecase(
     priceCheckerRepo,
     itemMarkupdownRepo,
-    productOffersRepo,
     hqOffersRepo,
     offersV3Repo
   );

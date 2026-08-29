@@ -1,5 +1,4 @@
 const TABLE = "product_sales";
-const PRODUCT_OFFERS = "product_offers";
 
 function normalizeTranDate(tran_date) {
   if (tran_date == null) {
@@ -127,31 +126,6 @@ class ProductSalesRepository {
     });
   }
 
-  applyStockOutputDeltas(conn, deltas) {
-    const entries = [...deltas.entries()];
-    return new Promise((resolve, reject) => {
-      const runUpdate = (idx) => {
-        if (idx >= entries.length) {
-          resolve();
-          return;
-        }
-        const [pid, delta] = entries[idx];
-        conn.query(
-          `UPDATE \`${PRODUCT_OFFERS}\` SET stock_output = stock_output + ? WHERE product_id = ?`,
-          [delta, pid],
-          (errUp) => {
-            if (errUp) {
-              reject(errUp);
-              return;
-            }
-            runUpdate(idx + 1);
-          }
-        );
-      };
-      runUpdate(0);
-    });
-  }
-
   bulkCreate(rows) {
     return new Promise((resolve, reject) => {
       if (!Array.isArray(rows) || rows.length === 0) {
@@ -226,8 +200,6 @@ class ProductSalesRepository {
               });
             }
 
-            const stockDeltas = new Map();
-            const insertedProductIds = new Set();
             let inserted = 0;
             let updated = 0;
 
@@ -241,25 +213,12 @@ class ProductSalesRepository {
 
               await this.insertRow(conn, row);
               inserted += 1;
-              insertedProductIds.add(row.product_id);
-
-              if (Number.isFinite(row.tran_qty)) {
-                stockDeltas.set(
-                  row.product_id,
-                  (stockDeltas.get(row.product_id) || 0) + row.tran_qty
-                );
-              }
-            }
-
-            if (stockDeltas.size > 0) {
-              await this.applyStockOutputDeltas(conn, stockDeltas);
             }
 
             finishOk({
               code: 200,
               inserted,
               updated,
-              product_ids: [...insertedProductIds],
             });
           } catch (err) {
             finishErr(err);

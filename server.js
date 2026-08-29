@@ -267,9 +267,6 @@ class Server {
     this.stoCheckRepo = require("./repository/sto_check")(
       this.mysql.connection
     );
-    this.productOffersRepo = require("./repository/product_offers")(
-      this.mysql.connection
-    );
     this.offersV3Repo = require("./repository/offers_v3")(
       this.mysql.connection
     );
@@ -513,17 +510,13 @@ class Server {
       this.outletUsecase,
       this.stoCheckUsecase
     );
-    this.productOffersUsecase = require("./usecase/product_offers")(
-      this.productOffersRepo
-    );
     this.offersV3Usecase = require("./usecase/offers_v3")(
       this.offersV3Repo,
       this.outletRepo,
       this.priceCheckerRepo
     );
     this.productSalesUsecase = require("./usecase/product_sales")(
-      this.productSalesRepo,
-      this.productOffersRepo
+      this.productSalesRepo
     );
     this.salesDashboardUsecase = require("./usecase/sales_dashboard")(
       this.salesDashboardRepo
@@ -545,7 +538,6 @@ class Server {
     this.priceCheckerUsecase = require("./usecase/price_checker")(
       this.priceCheckerRepo,
       this.itemMarkupdownRepo,
-      this.productOffersRepo,
       this.hqOffersRepo,
       this.offersV3Repo
     );
@@ -735,9 +727,6 @@ class Server {
       this.stockTransferOutUsecase
     );
     const stoCheckRouter = require("./routes/sto_check")(this.stoCheckUsecase);
-    const productOffersRouter = require("./routes/product_offers")(
-      this.productOffersUsecase
-    );
     const offersV3Router = require("./routes/offers_v3")(
       this.offersV3Usecase
     );
@@ -843,7 +832,6 @@ class Server {
     );
     app.use("/stock-transfer-out", stockTransferOutRouter.getRouter());
     app.use("/sto-check", stoCheckRouter.getRouter());
-    app.use("/product-offers", productOffersRouter.getRouter());
     app.use("/offers-v3", offersV3Router.getRouter());
     app.use("/product-sales", productSalesRouter.getRouter());
     app.use("/sales-report", salesDashboardRouter.getRouter());
