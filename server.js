@@ -518,7 +518,8 @@ class Server {
     );
     this.offersV3Usecase = require("./usecase/offers_v3")(
       this.offersV3Repo,
-      this.outletRepo
+      this.outletRepo,
+      this.priceCheckerRepo
     );
     this.productSalesUsecase = require("./usecase/product_sales")(
       this.productSalesRepo,

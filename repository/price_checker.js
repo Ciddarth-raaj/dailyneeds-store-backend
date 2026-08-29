@@ -237,6 +237,21 @@ class PriceCheckerRepository {
     return queryAsync(this.db, GET_META_SQL).then((rows) => rows?.[0] ?? null);
   }
 
+  // Landing cost per product/outlet/batch, for the given product_ids only
+  // (used by other features, e.g. Offers V3 mismatch checks, that need cost
+  // context without pulling the whole uploaded snapshot).
+  listLandingCostsByProductIds(productIds) {
+    if (!Array.isArray(productIds) || productIds.length === 0) {
+      return Promise.resolve([]);
+    }
+    const placeholders = productIds.map(() => "?").join(",");
+    return queryAsync(
+      this.db,
+      `SELECT product_id, outlet_id, batch_no, landing_cost FROM \`${ITEMS_TABLE}\` WHERE product_id IN (${placeholders})`,
+      productIds
+    );
+  }
+
   async replaceAll(rows, meta, onProgress) {
     const totalRows = rows?.length ?? 0;
     const connection = await getConnectionAsync(this.db);

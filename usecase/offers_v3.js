@@ -78,9 +78,10 @@ function validateThresholdQty(value) {
 }
 
 class OffersV3Usecase {
-  constructor(offersV3Repo, outletRepo) {
+  constructor(offersV3Repo, outletRepo, priceCheckerRepo) {
     this.offersV3Repo = offersV3Repo;
     this.outletRepo = outletRepo;
+    this.priceCheckerRepo = priceCheckerRepo;
   }
 
   // ---------------------------------------------------------------------
@@ -624,6 +625,13 @@ class OffersV3Usecase {
     const mismatches = [];
 
     const itemOffers = await this.offersV3Repo.listItemOffers({ status: "active" });
+    const batchOffers = await this.offersV3Repo.listBatchOffers({ status: "active" });
+
+    const landingCostMap = await this.getLandingCostMap([
+      ...itemOffers.map((o) => o.item_code),
+      ...batchOffers.map((o) => o.item_code),
+    ]);
+
     for (const offer of itemOffers) {
       const prices = await this.offersV3Repo.getPricesForItem(offer.item_code);
       for (const price of prices) {
@@ -646,12 +654,13 @@ class OffersV3Usecase {
             mrp: price.mrp,
             expected_selling_price: roundedExpected,
             actual_selling_price: actual,
+            stock_qty: price.stock_qty,
+            landing_cost: landingCostMap.get(`${offer.item_code}|${price.outlet_id}|${price.batch_no}`) ?? null,
           });
         }
       }
     }
 
-    const batchOffers = await this.offersV3Repo.listBatchOffers({ status: "active" });
     for (const offer of batchOffers) {
       const price = await this.offersV3Repo.getPriceForBatch(offer.item_code, offer.outlet_id, offer.batch_no);
       if (!price || price.mrp == null || price.selling_price == null) continue;
@@ -673,11 +682,29 @@ class OffersV3Usecase {
           mrp: price.mrp,
           expected_selling_price: roundedExpected,
           actual_selling_price: actual,
+          stock_qty: price.stock_qty,
+          landing_cost: landingCostMap.get(`${offer.item_code}|${offer.outlet_id}|${offer.batch_no}`) ?? null,
         });
       }
     }
 
     return mismatches;
+  }
+
+  // Landing cost per item/outlet/batch, sourced from the latest Price
+  // Checker upload (its own separate data feed) rather than Offers V3's own
+  // price/stock tables, which don't carry cost.
+  async getLandingCostMap(itemCodes) {
+    const map = new Map();
+    if (!this.priceCheckerRepo) return map;
+    const uniqueCodes = [...new Set(itemCodes)];
+    if (uniqueCodes.length === 0) return map;
+    const rows = await this.priceCheckerRepo.listLandingCostsByProductIds(uniqueCodes);
+    (rows || []).forEach((r) => {
+      if (r.landing_cost == null) return;
+      map.set(`${r.product_id}|${r.outlet_id}|${r.batch_no}`, Number(r.landing_cost));
+    });
+    return map;
   }
 
   // ---------------------------------------------------------------------
@@ -786,8 +813,8 @@ class OffersV3Usecase {
   }
 }
 
-module.exports = (offersV3Repo, outletRepo) => {
-  return new OffersV3Usecase(offersV3Repo, outletRepo);
+module.exports = (offersV3Repo, outletRepo, priceCheckerRepo) => {
+  return new OffersV3Usecase(offersV3Repo, outletRepo, priceCheckerRepo);
 };
 
 module.exports.computeExpectedSelling = computeExpectedSelling;

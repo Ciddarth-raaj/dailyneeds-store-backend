@@ -477,7 +477,7 @@ class OffersV3Repository {
   getPriceForBatch(item_code, outlet_id, batch_no) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT item_code, outlet_id, batch_no, mrp, selling_price
+        `SELECT item_code, outlet_id, batch_no, mrp, selling_price, stock_qty
          FROM \`${DATA_TABLE}\`
          WHERE item_code = ? AND outlet_id = ? AND batch_no = ?`,
         [item_code, outlet_id, batch_no],
@@ -500,7 +500,7 @@ class OffersV3Repository {
   getPricesForItem(item_code) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT bd.item_code, bd.outlet_id, o.outlet_name, bd.batch_no, bd.mrp, bd.selling_price
+        `SELECT bd.item_code, bd.outlet_id, o.outlet_name, bd.batch_no, bd.mrp, bd.selling_price, bd.stock_qty
          FROM \`${DATA_TABLE}\` bd
          LEFT JOIN outlets o ON o.outlet_id = bd.outlet_id
          WHERE bd.item_code = ?`,
