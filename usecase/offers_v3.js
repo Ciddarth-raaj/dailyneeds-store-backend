@@ -15,11 +15,13 @@ function logError(code, description, ref = {}) {
   });
 }
 
-// Legacy Telegram Markdown treats _ * ` [ as formatting -- an unescaped one
-// in a product/outlet/batch name breaks entity parsing and Telegram rejects
-// the whole message, so escape dynamic values before interpolating them.
-function escapeMarkdown(value) {
-  return String(value ?? "").replace(/([_*`[])/g, "\\$1");
+// Legacy Telegram Markdown treats _ * ` [ as formatting and rejects the
+// whole message if one is unmatched -- backslash-escaping them is
+// documented to work but proved unreliable in practice (a real product
+// name still triggered "can't parse entities"), so strip them outright
+// instead. Safer than a parse error silently killing the alert.
+function stripMarkdown(value) {
+  return String(value ?? "").replace(/[_*`[\]]/g, "");
 }
 
 // Telegram alerts are best-effort: a failure here must never break the
@@ -161,7 +163,7 @@ class OffersV3Usecase {
         const created = await this.offersV3Repo.getItemOfferById(result.id);
         const notifyResult = await notifyOffersV3(
           `🟢 *New item-level offer created*\n` +
-            `Item: ${escapeMarkdown(created?.item_name)} (${data.item_code})\n` +
+            `Item: ${stripMarkdown(created?.item_name)} (${data.item_code})\n` +
             `Type: ${data.offer_type} | Value: ${data.value}\n` +
             `Threshold Qty: ${data.threshold_qty}`
         );
@@ -211,17 +213,24 @@ class OffersV3Usecase {
         await this.offersV3Repo.clearLowStockWarningsByItemCode(existing.item_code);
         const notifyResult = await notifyOffersV3(
           `🔴 *Item-level offer made inactive*\n` +
-            `Item: ${escapeMarkdown(existing.item_name)} (${existing.item_code})\n` +
+            `Item: ${stripMarkdown(existing.item_name)} (${existing.item_code})\n` +
             `Type: ${existing.offer_type} | Value: ${existing.value}`
         );
         result._telegramNotify = notifyResult;
       } else if (nextStatus === "active" && existing.status !== "active") {
         const notifyResult = await notifyOffersV3(
           `🟢 *Item-level offer reactivated*\n` +
-            `Item: ${escapeMarkdown(existing.item_name)} (${existing.item_code})\n` +
+            `Item: ${stripMarkdown(existing.item_name)} (${existing.item_code})\n` +
             `Type: ${nextOfferType} | Value: ${nextValue}`
         );
         result._telegramNotify = notifyResult;
+      } else if (data.status !== undefined) {
+        // A status was sent but it didn't actually change anything --
+        // this is the "silently no alert" case, made explicit for debugging.
+        result._telegramNotify = {
+          skipped: true,
+          reason: `requested status "${data.status}" but offer #${id} was already "${existing.status}"`,
+        };
       }
       return result;
     } catch (err) {
@@ -288,8 +297,8 @@ class OffersV3Usecase {
         const created = await this.offersV3Repo.getBatchOfferById(result.id);
         const notifyResult = await notifyOffersV3(
           `🟢 *New batch-specific offer created*\n` +
-            `Item: ${escapeMarkdown(created?.item_name)} (${data.item_code})\n` +
-            `Outlet: ${escapeMarkdown(created?.outlet_name ?? data.outlet_id)} | Batch: ${escapeMarkdown(data.batch_no)}\n` +
+            `Item: ${stripMarkdown(created?.item_name)} (${data.item_code})\n` +
+            `Outlet: ${stripMarkdown(created?.outlet_name ?? data.outlet_id)} | Batch: ${stripMarkdown(data.batch_no)}\n` +
             `Type: ${data.offer_type} | Value: ${data.value}`
         );
         result._telegramNotify = notifyResult;
@@ -356,19 +365,24 @@ class OffersV3Usecase {
       if (nextStatus === "inactive" && existing.status !== "inactive") {
         const notifyResult = await notifyOffersV3(
           `🔴 *Batch-specific offer made inactive*\n` +
-            `Item: ${escapeMarkdown(existing.item_name)} (${existing.item_code})\n` +
-            `Outlet: ${escapeMarkdown(existing.outlet_name ?? existing.outlet_id)} | Batch: ${escapeMarkdown(existing.batch_no)}\n` +
+            `Item: ${stripMarkdown(existing.item_name)} (${existing.item_code})\n` +
+            `Outlet: ${stripMarkdown(existing.outlet_name ?? existing.outlet_id)} | Batch: ${stripMarkdown(existing.batch_no)}\n` +
             `Type: ${existing.offer_type} | Value: ${existing.value}`
         );
         result._telegramNotify = notifyResult;
       } else if (nextStatus === "active" && existing.status !== "active") {
         const notifyResult = await notifyOffersV3(
           `🟢 *Batch-specific offer reactivated*\n` +
-            `Item: ${escapeMarkdown(existing.item_name)} (${existing.item_code})\n` +
-            `Outlet: ${escapeMarkdown(existing.outlet_name ?? existing.outlet_id)} | Batch: ${escapeMarkdown(existing.batch_no)}\n` +
+            `Item: ${stripMarkdown(existing.item_name)} (${existing.item_code})\n` +
+            `Outlet: ${stripMarkdown(existing.outlet_name ?? existing.outlet_id)} | Batch: ${stripMarkdown(existing.batch_no)}\n` +
             `Type: ${nextOfferType} | Value: ${nextValue}`
         );
         result._telegramNotify = notifyResult;
+      } else if (data.status !== undefined) {
+        result._telegramNotify = {
+          skipped: true,
+          reason: `requested status "${data.status}" but offer #${id} was already "${existing.status}"`,
+        };
       }
       return result;
     } catch (err) {
