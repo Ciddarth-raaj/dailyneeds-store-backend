@@ -5,8 +5,7 @@ const respondError = require("../utils/http");
 const OFFER_TYPES = ["percentage", "flat", "fixed_price"];
 
 const itemSchema = Joi.object({
-  item_code: Joi.string().trim().min(1).required(),
-  item_name: Joi.string().trim().min(1).required(),
+  item_code: Joi.number().integer().required(),
   offer_type: Joi.string().valid(...OFFER_TYPES).required(),
   value: Joi.number().min(0).required(),
   is_active: Joi.boolean().optional().default(true),
@@ -90,8 +89,7 @@ class OffersV3Routes {
     });
 
     const updateSchema = Joi.object({
-      item_code: Joi.string().trim().min(1).optional(),
-      item_name: Joi.string().trim().min(1).optional(),
+      item_code: Joi.number().integer().optional(),
       offer_type: Joi.string().valid(...OFFER_TYPES).optional(),
       value: Joi.number().min(0).optional(),
       is_active: Joi.boolean().optional(),

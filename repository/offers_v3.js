@@ -2,10 +2,12 @@ const logger = require("../utils/logger");
 
 const TABLE = "offers_v3";
 
-const SELECT_COLS =
-  "id, item_code, item_name, offer_type, value, is_active, created_at, updated_at";
+const SELECT_COLS = `ov.id, ov.item_code, pt.de_name AS item_name, ov.offer_type, ov.value,
+                ov.is_active, ov.created_at, ov.updated_at`;
 
-const ALLOWED_UPDATE_KEYS = ["item_code", "item_name", "offer_type", "value", "is_active"];
+const JOINS = `LEFT JOIN product_table pt ON pt.product_id = ov.item_code`;
+
+const ALLOWED_UPDATE_KEYS = ["item_code", "offer_type", "value", "is_active"];
 
 function logError(component, code, description, ref = {}) {
   logger.Log({
@@ -26,7 +28,7 @@ class OffersV3Repository {
   getAll() {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT ${SELECT_COLS} FROM \`${TABLE}\` ORDER BY id DESC`,
+        `SELECT ${SELECT_COLS} FROM \`${TABLE}\` ov ${JOINS} ORDER BY ov.id DESC`,
         [],
         (err, rows) => {
           if (err) {
@@ -42,7 +44,7 @@ class OffersV3Repository {
   getById(id) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT ${SELECT_COLS} FROM \`${TABLE}\` WHERE id = ?`,
+        `SELECT ${SELECT_COLS} FROM \`${TABLE}\` ov ${JOINS} WHERE ov.id = ?`,
         [id],
         (err, rows) => {
           if (err) {
@@ -59,12 +61,16 @@ class OffersV3Repository {
     return new Promise((resolve, reject) => {
       const is_active = data.is_active !== undefined ? (data.is_active ? 1 : 0) : 1;
       this.db.query(
-        `INSERT INTO \`${TABLE}\` (item_code, item_name, offer_type, value, is_active) VALUES (?, ?, ?, ?, ?)`,
-        [data.item_code, data.item_name, data.offer_type, data.value, is_active],
+        `INSERT INTO \`${TABLE}\` (item_code, offer_type, value, is_active) VALUES (?, ?, ?, ?)`,
+        [data.item_code, data.offer_type, data.value, is_active],
         (err, res) => {
           if (err) {
             if (err.code === "ER_DUP_ENTRY") {
               resolve({ code: 400, msg: "Duplicate item_code: offer already exists for this item" });
+              return;
+            }
+            if (err.code === "ER_NO_REFERENCED_ROW" || err.code === "ER_NO_REFERENCED_ROW_2") {
+              resolve({ code: 400, msg: "Unknown item_code: no matching product" });
               return;
             }
             logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.CREATE", err.toString());
@@ -84,15 +90,19 @@ class OffersV3Repository {
       }
       const values = rows.map((r) => {
         const is_active = r.is_active !== undefined ? (r.is_active ? 1 : 0) : 1;
-        return [r.item_code, r.item_name, r.offer_type, r.value, is_active];
+        return [r.item_code, r.offer_type, r.value, is_active];
       });
-      const placeholders = values.map(() => "(?, ?, ?, ?, ?)").join(", ");
+      const placeholders = values.map(() => "(?, ?, ?, ?)").join(", ");
       const flat = values.flat();
-      const sql = `INSERT INTO \`${TABLE}\` (item_code, item_name, offer_type, value, is_active) VALUES ${placeholders}
-        ON DUPLICATE KEY UPDATE item_name = VALUES(item_name), offer_type = VALUES(offer_type),
+      const sql = `INSERT INTO \`${TABLE}\` (item_code, offer_type, value, is_active) VALUES ${placeholders}
+        ON DUPLICATE KEY UPDATE offer_type = VALUES(offer_type),
           value = VALUES(value), is_active = VALUES(is_active), updated_at = CURRENT_TIMESTAMP`;
       this.db.query(sql, flat, (err, res) => {
         if (err) {
+          if (err.code === "ER_NO_REFERENCED_ROW" || err.code === "ER_NO_REFERENCED_ROW_2") {
+            resolve({ code: 400, msg: "One or more item_code values have no matching product" });
+            return;
+          }
           logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.BULK_INSERT", err.toString());
           return reject(err);
         }
@@ -121,6 +131,10 @@ class OffersV3Repository {
           if (err) {
             if (err.code === "ER_DUP_ENTRY") {
               resolve({ code: 400, msg: "Duplicate item_code: offer already exists for this item" });
+              return;
+            }
+            if (err.code === "ER_NO_REFERENCED_ROW" || err.code === "ER_NO_REFERENCED_ROW_2") {
+              resolve({ code: 400, msg: "Unknown item_code: no matching product" });
               return;
             }
             logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.UPDATE", err.toString(), { id });
