@@ -677,11 +677,10 @@ class OffersV3Repository {
       const where = status ? "WHERE lw.status = ?" : "";
       const params = status ? [status] : [];
       this.db.query(
-        `SELECT lw.id, lw.item_code, pt.de_name AS item_name, lw.outlet_id, o.outlet_name,
-                lw.batch_no, lw.stock_qty, lw.threshold_qty, lw.status, lw.detected_at
+        `SELECT lw.id, lw.item_code, pt.de_name AS item_name,
+                lw.total_stock_qty, lw.threshold_qty, lw.status, lw.detected_at
          FROM \`${LOW_STOCK_TABLE}\` lw
          LEFT JOIN product_table pt ON pt.product_id = lw.item_code
-         LEFT JOIN outlets o ON o.outlet_id = lw.outlet_id
          ${where}
          ORDER BY lw.detected_at DESC`,
         params,
@@ -696,17 +695,18 @@ class OffersV3Repository {
     });
   }
 
-  // Bulk upsert: rows at/under their item's threshold. Resurfaces a
-  // previously-dismissed warning if the same outlet/batch drops low again.
+  // Bulk upsert: one row per item whose stock, summed across every outlet
+  // and batch, is at/under that item's threshold. Resurfaces a
+  // previously-dismissed warning if the item's total drops low again.
   async upsertLowStockWarnings(rows) {
     if (!Array.isArray(rows) || rows.length === 0) return { code: 200, upserted: 0 };
     for (const batch of chunk(rows, BULK_CHUNK_SIZE)) {
-      const placeholders = batch.map(() => "(?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)").join(", ");
-      const params = batch.flatMap((r) => [r.item_code, r.outlet_id, r.batch_no, r.stock_qty, r.threshold_qty]);
+      const placeholders = batch.map(() => "(?, ?, ?, 'pending', CURRENT_TIMESTAMP)").join(", ");
+      const params = batch.flatMap((r) => [r.item_code, r.total_stock_qty, r.threshold_qty]);
       try {
         await this._queryAsync(
-          `INSERT INTO \`${LOW_STOCK_TABLE}\` (item_code, outlet_id, batch_no, stock_qty, threshold_qty, status, detected_at) VALUES ${placeholders}
-           ON DUPLICATE KEY UPDATE stock_qty = VALUES(stock_qty), threshold_qty = VALUES(threshold_qty), status = 'pending', detected_at = VALUES(detected_at)`,
+          `INSERT INTO \`${LOW_STOCK_TABLE}\` (item_code, total_stock_qty, threshold_qty, status, detected_at) VALUES ${placeholders}
+           ON DUPLICATE KEY UPDATE total_stock_qty = VALUES(total_stock_qty), threshold_qty = VALUES(threshold_qty), status = 'pending', detected_at = VALUES(detected_at)`,
           params
         );
       } catch (err) {
@@ -717,26 +717,50 @@ class OffersV3Repository {
     return { code: 200, upserted: rows.length };
   }
 
-  // Bulk clear: stock is back above threshold (or the offer is no longer
-  // active), so the warning no longer applies.
-  async clearLowStockWarningsByKeys(keys) {
-    if (!Array.isArray(keys) || keys.length === 0) return { code: 200, affectedRows: 0 };
+  // Bulk clear: an item's total stock (across all outlets/batches) is back
+  // above threshold, or the offer is no longer active, so the warning no
+  // longer applies.
+  async clearLowStockWarningsByItemCodes(itemCodes) {
+    if (!Array.isArray(itemCodes) || itemCodes.length === 0) return { code: 200, affectedRows: 0 };
     let affectedRows = 0;
-    for (const batch of chunk(keys, BULK_CHUNK_SIZE)) {
-      const tuplePlaceholders = batch.map(() => "(?, ?, ?)").join(", ");
-      const tupleParams = batch.flatMap((k) => [k.item_code, k.outlet_id, k.batch_no]);
+    for (const batch of chunk(itemCodes, BULK_CHUNK_SIZE)) {
+      const placeholders = batch.map(() => "?").join(",");
       try {
         const res = await this._queryAsync(
-          `DELETE FROM \`${LOW_STOCK_TABLE}\` WHERE (item_code, outlet_id, batch_no) IN (${tuplePlaceholders})`,
-          tupleParams
+          `DELETE FROM \`${LOW_STOCK_TABLE}\` WHERE item_code IN (${placeholders})`,
+          batch
         );
         affectedRows += res.affectedRows;
       } catch (err) {
-        logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.CLEAR_LOW_STOCK_WARNINGS_BY_KEYS", err.toString());
+        logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.CLEAR_LOW_STOCK_WARNINGS_BY_ITEM_CODES", err.toString());
         throw err;
       }
     }
     return { code: 200, affectedRows };
+  }
+
+  // Sum of current stock_qty (from the latest stock upload) across every
+  // outlet/batch of each item, for the given item_codes.
+  async getTotalStockByItemCodes(itemCodes) {
+    const uniqueCodes = [...new Set(itemCodes)];
+    if (uniqueCodes.length === 0) return new Map();
+    const map = new Map();
+    for (const batch of chunk(uniqueCodes, BULK_CHUNK_SIZE)) {
+      const placeholders = batch.map(() => "?").join(",");
+      try {
+        const rows = await this._queryAsync(
+          `SELECT item_code, SUM(stock_qty) AS total_stock_qty FROM \`${DATA_TABLE}\`
+           WHERE item_code IN (${placeholders}) AND stock_qty IS NOT NULL
+           GROUP BY item_code`,
+          batch
+        );
+        (rows || []).forEach((r) => map.set(r.item_code, Number(r.total_stock_qty)));
+      } catch (err) {
+        logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.GET_TOTAL_STOCK_BY_ITEM_CODES", err.toString());
+        throw err;
+      }
+    }
+    return map;
   }
 
   dismissLowStockWarning(id) {

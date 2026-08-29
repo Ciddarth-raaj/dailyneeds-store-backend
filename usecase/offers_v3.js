@@ -483,35 +483,40 @@ class OffersV3Usecase {
   }
 
   /**
-   * Item-level offers only: for every row of an item that currently has an
-   * active item-level offer, check its stock against that offer's
-   * Threshold Qty. A row with stock > 0 and <= threshold is upserted into
-   * the low-stock warning queue; a row back above threshold clears any
-   * existing warning for that exact outlet/batch. Zero stock is left alone
-   * here — item-level offers have no zero-stock trigger, only Threshold Qty.
+   * Item-level offers only: for every item touched by this upload that
+   * currently has an active item-level offer, sum its stock across every
+   * outlet and batch (not just the rows in this upload) and check that
+   * total against the offer's Threshold Qty — the offer applies everywhere,
+   * so the signal is whether the item overall is running low, not any one
+   * store/batch. A total > 0 and <= threshold is upserted into the
+   * low-stock warning queue; a total back above threshold clears any
+   * existing warning for that item. A total of exactly 0 is left alone here
+   * — item-level offers have no zero-stock trigger, only Threshold Qty.
    */
   async detectLowStockWarningsBulk(resolvedRows) {
     if (resolvedRows.length === 0) return [];
-    const itemCodes = resolvedRows.map((r) => r.item_code);
+    const itemCodes = [...new Set(resolvedRows.map((r) => r.item_code))];
     const thresholds = await this.offersV3Repo.getActiveItemOfferThresholds(itemCodes);
     if (thresholds.size === 0) return [];
 
+    const relevantItemCodes = itemCodes.filter((code) => thresholds.has(code));
+    const totals = await this.offersV3Repo.getTotalStockByItemCodes(relevantItemCodes);
+
     const toWarn = [];
     const toClear = [];
-    for (const row of resolvedRows) {
-      const threshold = thresholds.get(row.item_code);
-      if (threshold === undefined) continue;
-      const key = { item_code: row.item_code, outlet_id: row.outlet_id, batch_no: row.batch_no };
-      if (row.stock_qty > 0 && row.stock_qty <= threshold) {
-        toWarn.push({ ...key, stock_qty: row.stock_qty, threshold_qty: threshold });
+    for (const item_code of relevantItemCodes) {
+      const threshold = thresholds.get(item_code);
+      const total = totals.get(item_code) ?? 0;
+      if (total > 0 && total <= threshold) {
+        toWarn.push({ item_code, total_stock_qty: total, threshold_qty: threshold });
       } else {
-        toClear.push(key);
+        toClear.push(item_code);
       }
     }
 
     await Promise.all([
       this.offersV3Repo.upsertLowStockWarnings(toWarn),
-      this.offersV3Repo.clearLowStockWarningsByKeys(toClear),
+      this.offersV3Repo.clearLowStockWarningsByItemCodes(toClear),
     ]);
     return toWarn;
   }
