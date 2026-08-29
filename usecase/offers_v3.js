@@ -565,6 +565,7 @@ class OffersV3Usecase {
     let itemInserted = 0;
     let batchInserted = 0;
     const skipped = [];
+    const failed = [];
 
     for (const row of rows) {
       const item_code = parseInt(row.item_code, 10);
@@ -576,44 +577,55 @@ class OffersV3Usecase {
       }
 
       const scope = String(row.scope ?? "").trim().toLowerCase();
-      if (scope === "batch") {
-        const batch_no = String(row.batch_no ?? "").trim();
-        const outlet_id = await this.resolveOutletId(row.outlet);
-        if (!batch_no || !outlet_id) {
-          skipped.push(row);
-          continue;
+      try {
+        if (scope === "batch") {
+          const batch_no = String(row.batch_no ?? "").trim();
+          const outlet_id = await this.resolveOutletId(row.outlet);
+          if (!batch_no || !outlet_id) {
+            skipped.push(row);
+            continue;
+          }
+          const status = ["active", "zero_stock_flagged", "batch_zero_ended", "inactive"].includes(
+            String(row.status ?? "").trim().toLowerCase()
+          )
+            ? String(row.status).trim().toLowerCase()
+            : "active";
+          await this.offersV3Repo.createBatchOffer({
+            item_code,
+            outlet_id,
+            batch_no,
+            offer_type,
+            value,
+            status,
+            created_by,
+          });
+          batchInserted += 1;
+        } else {
+          const status = ["active", "inactive"].includes(String(row.status ?? "").trim().toLowerCase())
+            ? String(row.status).trim().toLowerCase()
+            : "active";
+          await this.offersV3Repo.createItemOffer({
+            item_code,
+            offer_type,
+            value,
+            status,
+            created_by,
+          });
+          itemInserted += 1;
         }
-        const status = ["active", "zero_stock_flagged", "batch_zero_ended", "inactive"].includes(
-          String(row.status ?? "").trim().toLowerCase()
-        )
-          ? String(row.status).trim().toLowerCase()
-          : "active";
-        await this.offersV3Repo.createBatchOffer({
-          item_code,
-          outlet_id,
-          batch_no,
-          offer_type,
-          value,
-          status,
-          created_by,
-        });
-        batchInserted += 1;
-      } else {
-        const status = ["active", "inactive"].includes(String(row.status ?? "").trim().toLowerCase())
-          ? String(row.status).trim().toLowerCase()
-          : "active";
-        await this.offersV3Repo.createItemOffer({
-          item_code,
-          offer_type,
-          value,
-          status,
-          created_by,
-        });
-        itemInserted += 1;
+      } catch (err) {
+        const reason =
+          err.code === "ER_NO_REFERENCED_ROW_2" || err.code === "ER_NO_REFERENCED_ROW"
+            ? "item_code not found in product master"
+            : err.code === "ER_DUP_ENTRY"
+              ? "duplicate row"
+              : err.message || String(err);
+        logError("USECASE.OFFERS_V3.IMPORT_OFFERS.ROW_FAILED", reason, { item_code, scope });
+        failed.push({ item_code, scope: scope === "batch" ? "batch" : "item", reason });
       }
     }
 
-    return { code: 200, itemInserted, batchInserted, skipped: skipped.length };
+    return { code: 200, itemInserted, batchInserted, skipped: skipped.length, failed };
   }
 }
 
