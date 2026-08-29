@@ -686,6 +686,19 @@ class OffersV3Usecase {
     return this.offersV3Repo.getUploadMeta();
   }
 
+  // Diagnostic only: unlike notifyOffersV3, this does NOT swallow the
+  // Telegram error -- it's meant to surface the real API error (e.g. "bot
+  // was kicked", "chat not found") back to the caller for debugging why
+  // alerts aren't arriving.
+  async sendTelegramTestAlert() {
+    await telegram.sendMessage(
+      OFFERS_V3_TELEGRAM_CHAT_ID,
+      "🧪 Offers V3 test alert — if you can see this, the Telegram group is wired up correctly.",
+      { disableNotification: false }
+    );
+    return { code: 200, chat_id: OFFERS_V3_TELEGRAM_CHAT_ID };
+  }
+
   // ---------------------------------------------------------------------
   // Selling-price mismatch check
   // ---------------------------------------------------------------------
