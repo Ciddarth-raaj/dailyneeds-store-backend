@@ -547,7 +547,8 @@ class Server {
       this.priceCheckerRepo,
       this.itemMarkupdownRepo,
       this.productOffersRepo,
-      this.hqOffersRepo
+      this.hqOffersRepo,
+      this.offersV3Repo
     );
     this.itemMarkupdownUsecase = require("./usecase/item_markupdown")(
       this.itemMarkupdownRepo

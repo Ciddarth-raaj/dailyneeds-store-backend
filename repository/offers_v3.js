@@ -337,6 +337,32 @@ class OffersV3Repository {
     return set;
   }
 
+  // Union of item_codes (from the given list) that currently have an active
+  // item-level offer or an occupying batch-specific offer. Used by other
+  // features (e.g. Price Checker export) to mark items as carrying an
+  // Offers V3 offer, without needing to know which scope it's in.
+  async getItemCodesWithAnyActiveOffer(itemCodes) {
+    const uniqueCodes = [...new Set(itemCodes)];
+    if (uniqueCodes.length === 0) return new Set();
+    const set = new Set();
+    for (const batch of chunk(uniqueCodes, BULK_CHUNK_SIZE)) {
+      const placeholders = batch.map(() => "?").join(",");
+      try {
+        const rows = await this._queryAsync(
+          `SELECT item_code FROM \`${ITEM_TABLE}\` WHERE item_code IN (${placeholders}) AND status = 'active'
+           UNION
+           SELECT item_code FROM \`${BATCH_TABLE}\` WHERE item_code IN (${placeholders}) AND status IN (${BATCH_OCCUPYING_STATUSES.map(() => "?").join(",")})`,
+          [...batch, ...batch, ...BATCH_OCCUPYING_STATUSES]
+        );
+        (rows || []).forEach((r) => set.add(r.item_code));
+      } catch (err) {
+        logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.GET_ITEM_CODES_WITH_ANY_ACTIVE_OFFER", err.toString());
+        throw err;
+      }
+    }
+    return set;
+  }
+
   // Bulk upsert of untagged-batch alerts (used after a large upload instead
   // of one INSERT per detected batch).
   async upsertUntaggedBatchAlerts(keys) {

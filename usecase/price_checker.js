@@ -259,8 +259,10 @@ function attachOfferPrices(products, offersByProductId) {
   return products;
 }
 
+// activeProductIds may mix numeric item_codes (Offers V3) and string HQ
+// product ids, so compare as strings either way.
 function attachHqOfferStatus(products, activeProductIds) {
-  const activeSet = new Set(activeProductIds || []);
+  const activeSet = new Set([...(activeProductIds || [])].map(String));
   for (const product of products) {
     product.hasActiveOffer = activeSet.has(String(product.Item_Code));
   }
@@ -272,12 +274,14 @@ class PriceCheckerUsecase {
     priceCheckerRepo,
     itemMarkupdownRepo,
     productOffersRepo,
-    hqOffersRepo
+    hqOffersRepo,
+    offersV3Repo
   ) {
     this.priceCheckerRepo = priceCheckerRepo;
     this.itemMarkupdownRepo = itemMarkupdownRepo;
     this.productOffersRepo = productOffersRepo;
     this.hqOffersRepo = hqOffersRepo;
+    this.offersV3Repo = offersV3Repo;
   }
 
   listGroupedItemsByProductId(productId) {
@@ -321,10 +325,16 @@ class PriceCheckerUsecase {
       attachOfferPrices(products, new Map());
     }
 
-    if (itemCodes.length && this.hqOffersRepo) {
-      const activeOfferProductIds =
-        await this.hqOffersRepo.listActiveOfferProductIds(itemCodes);
-      attachHqOfferStatus(products, activeOfferProductIds);
+    if (itemCodes.length && (this.hqOffersRepo || this.offersV3Repo)) {
+      const [hqActiveIds, offersV3ActiveIds] = await Promise.all([
+        this.hqOffersRepo
+          ? this.hqOffersRepo.listActiveOfferProductIds(itemCodes)
+          : [],
+        this.offersV3Repo
+          ? this.offersV3Repo.getItemCodesWithAnyActiveOffer(itemCodes)
+          : [],
+      ]);
+      attachHqOfferStatus(products, [...hqActiveIds, ...offersV3ActiveIds]);
     } else {
       attachHqOfferStatus(products, []);
     }
@@ -463,12 +473,14 @@ module.exports = (
   priceCheckerRepo,
   itemMarkupdownRepo,
   productOffersRepo,
-  hqOffersRepo
+  hqOffersRepo,
+  offersV3Repo
 ) =>
   new PriceCheckerUsecase(
     priceCheckerRepo,
     itemMarkupdownRepo,
     productOffersRepo,
-    hqOffersRepo
+    hqOffersRepo,
+    offersV3Repo
   );
 module.exports.enrichSellingPriceIssues = enrichSellingPriceIssues;
