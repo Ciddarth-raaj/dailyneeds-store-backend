@@ -15,11 +15,18 @@ function logError(code, description, ref = {}) {
   });
 }
 
+// Legacy Telegram Markdown treats _ * ` [ as formatting -- an unescaped one
+// in a product/outlet/batch name breaks entity parsing and Telegram rejects
+// the whole message, so escape dynamic values before interpolating them.
+function escapeMarkdown(value) {
+  return String(value ?? "").replace(/([_*`[])/g, "\\$1");
+}
+
 // Telegram alerts are best-effort: a failure here must never break the
 // offer create/update/upload flow that triggered it.
 async function notifyOffersV3(message) {
   try {
-    await telegram.sendMessage(OFFERS_V3_TELEGRAM_CHAT_ID, message);
+    await telegram.sendMessage(OFFERS_V3_TELEGRAM_CHAT_ID, message, { disableNotification: false });
   } catch (err) {
     logError("USECASE.OFFERS_V3.TELEGRAM_NOTIFY_FAILED", err.toString(), { message });
   }
@@ -150,7 +157,7 @@ class OffersV3Usecase {
         const created = await this.offersV3Repo.getItemOfferById(result.id);
         await notifyOffersV3(
           `🟢 *New item-level offer created*\n` +
-            `Item: ${created?.item_name ?? ""} (${data.item_code})\n` +
+            `Item: ${escapeMarkdown(created?.item_name)} (${data.item_code})\n` +
             `Type: ${data.offer_type} | Value: ${data.value}\n` +
             `Threshold Qty: ${data.threshold_qty}`
         );
@@ -199,7 +206,7 @@ class OffersV3Usecase {
         await this.offersV3Repo.clearLowStockWarningsByItemCode(existing.item_code);
         await notifyOffersV3(
           `🔴 *Item-level offer made inactive*\n` +
-            `Item: ${existing.item_name ?? ""} (${existing.item_code})\n` +
+            `Item: ${escapeMarkdown(existing.item_name)} (${existing.item_code})\n` +
             `Type: ${existing.offer_type} | Value: ${existing.value}`
         );
       }
@@ -268,8 +275,8 @@ class OffersV3Usecase {
         const created = await this.offersV3Repo.getBatchOfferById(result.id);
         await notifyOffersV3(
           `🟢 *New batch-specific offer created*\n` +
-            `Item: ${created?.item_name ?? ""} (${data.item_code})\n` +
-            `Outlet: ${created?.outlet_name ?? data.outlet_id} | Batch: ${data.batch_no}\n` +
+            `Item: ${escapeMarkdown(created?.item_name)} (${data.item_code})\n` +
+            `Outlet: ${escapeMarkdown(created?.outlet_name ?? data.outlet_id)} | Batch: ${escapeMarkdown(data.batch_no)}\n` +
             `Type: ${data.offer_type} | Value: ${data.value}`
         );
       }
@@ -335,8 +342,8 @@ class OffersV3Usecase {
       if (nextStatus === "inactive" && existing.status !== "inactive") {
         await notifyOffersV3(
           `🔴 *Batch-specific offer made inactive*\n` +
-            `Item: ${existing.item_name ?? ""} (${existing.item_code})\n` +
-            `Outlet: ${existing.outlet_name ?? existing.outlet_id} | Batch: ${existing.batch_no}\n` +
+            `Item: ${escapeMarkdown(existing.item_name)} (${existing.item_code})\n` +
+            `Outlet: ${escapeMarkdown(existing.outlet_name ?? existing.outlet_id)} | Batch: ${escapeMarkdown(existing.batch_no)}\n` +
             `Type: ${existing.offer_type} | Value: ${existing.value}`
         );
       }
