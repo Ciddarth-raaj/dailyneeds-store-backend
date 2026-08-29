@@ -23,12 +23,16 @@ function escapeMarkdown(value) {
 }
 
 // Telegram alerts are best-effort: a failure here must never break the
-// offer create/update/upload flow that triggered it.
+// offer create/update/upload flow that triggered it. Returns the outcome
+// (rather than throwing) so callers can optionally surface it for
+// debugging without the alert itself ever failing the request.
 async function notifyOffersV3(message) {
   try {
     await telegram.sendMessage(OFFERS_V3_TELEGRAM_CHAT_ID, message, { disableNotification: false });
+    return { sent: true };
   } catch (err) {
     logError("USECASE.OFFERS_V3.TELEGRAM_NOTIFY_FAILED", err.toString(), { message });
+    return { sent: false, error: err.message || err.toString() };
   }
 }
 
@@ -204,11 +208,12 @@ class OffersV3Usecase {
       const result = await this.offersV3Repo.updateItemOffer(id, data);
       if (nextStatus === "inactive" && existing.status !== "inactive") {
         await this.offersV3Repo.clearLowStockWarningsByItemCode(existing.item_code);
-        await notifyOffersV3(
+        const notifyResult = await notifyOffersV3(
           `🔴 *Item-level offer made inactive*\n` +
             `Item: ${escapeMarkdown(existing.item_name)} (${existing.item_code})\n` +
             `Type: ${existing.offer_type} | Value: ${existing.value}`
         );
+        result._telegramNotify = notifyResult;
       }
       return result;
     } catch (err) {
@@ -340,12 +345,13 @@ class OffersV3Usecase {
 
       const result = await this.offersV3Repo.updateBatchOffer(id, data);
       if (nextStatus === "inactive" && existing.status !== "inactive") {
-        await notifyOffersV3(
+        const notifyResult = await notifyOffersV3(
           `🔴 *Batch-specific offer made inactive*\n` +
             `Item: ${escapeMarkdown(existing.item_name)} (${existing.item_code})\n` +
             `Outlet: ${escapeMarkdown(existing.outlet_name ?? existing.outlet_id)} | Batch: ${escapeMarkdown(existing.batch_no)}\n` +
             `Type: ${existing.offer_type} | Value: ${existing.value}`
         );
+        result._telegramNotify = notifyResult;
       }
       return result;
     } catch (err) {
