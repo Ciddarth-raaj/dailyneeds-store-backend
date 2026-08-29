@@ -5,6 +5,7 @@ const BATCH_TABLE = "offers_v3_batch";
 const DATA_TABLE = "offers_v3_batch_data";
 const UNTAGGED_TABLE = "offers_v3_untagged_batches";
 const LOW_STOCK_TABLE = "offers_v3_low_stock_warnings";
+const UPLOAD_META_TABLE = "offers_v3_upload_meta";
 
 const ITEM_SELECT = `oi.id, oi.item_code, pt.de_name AS item_name, oi.offer_type, oi.value,
                 oi.threshold_qty, oi.status, oi.created_by, COALESCE(ne.employee_name, '') AS created_by_name,
@@ -729,6 +730,31 @@ class OffersV3Repository {
         resolve({ code: 200, affectedRows: res.affectedRows });
       });
     });
+  }
+
+  // ---------------------------------------------------------------------
+  // Upload meta (rows/products/last-uploaded-at summary shown per upload type)
+  // ---------------------------------------------------------------------
+
+  async getUploadMeta() {
+    const rows = await this._queryAsync(
+      `SELECT upload_type, total_rows, total_products, uploaded_at, uploaded_by FROM \`${UPLOAD_META_TABLE}\``
+    );
+    const map = {};
+    (rows || []).forEach((r) => {
+      map[r.upload_type] = r;
+    });
+    return map;
+  }
+
+  async upsertUploadMeta(uploadType, { total_rows, total_products, uploaded_by }) {
+    await this._queryAsync(
+      `INSERT INTO \`${UPLOAD_META_TABLE}\` (upload_type, total_rows, total_products, uploaded_at, uploaded_by) VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?)
+       ON DUPLICATE KEY UPDATE total_rows = VALUES(total_rows), total_products = VALUES(total_products),
+         uploaded_at = VALUES(uploaded_at), uploaded_by = VALUES(uploaded_by)`,
+      [uploadType, total_rows, total_products, uploaded_by ?? null]
+    );
+    return { code: 200 };
   }
 }
 

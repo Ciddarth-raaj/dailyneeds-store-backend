@@ -233,7 +233,7 @@ class OffersV3Routes {
           res.end();
           return;
         }
-        const result = await this.offersV3Usecase.processStockUpload(isValid.value);
+        const result = await this.offersV3Usecase.processStockUpload(isValid.value, getCreatedBy(req));
         sendResult(res, result);
       } catch (err) {
         respondError(res, err);
@@ -251,7 +251,7 @@ class OffersV3Routes {
           res.end();
           return;
         }
-        const result = await this.offersV3Usecase.processPriceUpload(isValid.value);
+        const result = await this.offersV3Usecase.processPriceUpload(isValid.value, getCreatedBy(req));
         sendResult(res, result);
       } catch (err) {
         respondError(res, err);
@@ -297,6 +297,17 @@ class OffersV3Routes {
         const id = parseInt(req.params.id, 10);
         const result = await this.offersV3Usecase.dismissLowStockWarning(id);
         sendResult(res, result);
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
+    // Rows/products/last-uploaded-at summary per upload type (stock/price/import)
+    router.get("/upload-meta", async (req, res) => {
+      try {
+        const data = await this.offersV3Usecase.getUploadMeta();
+        res.json({ code: 200, data });
       } catch (err) {
         respondError(res, err);
       }

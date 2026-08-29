@@ -13,6 +13,10 @@ function logError(code, description, ref = {}) {
   });
 }
 
+function distinctCount(rows, key) {
+  return new Set(rows.map((r) => r[key])).size;
+}
+
 function computeExpectedSelling(offer_type, value, mrp) {
   const v = Number(value);
   const m = Number(mrp);
@@ -404,7 +408,7 @@ class OffersV3Usecase {
    * zero-stock on matched batch offers, and detect untagged new batches of
    * items that already carry an active offer elsewhere.
    */
-  async processStockUpload(rows) {
+  async processStockUpload(rows, created_by) {
     const { resolved: withKeys, skippedRows: keySkippedRows, unresolvedOutlets } = await this.resolveUploadRows(
       rows
     );
@@ -458,6 +462,12 @@ class OffersV3Usecase {
     ]);
     const untagged = await this.detectUntaggedBatchesBulk(untaggedCandidates);
     const lowStock = await this.detectLowStockWarningsBulk(resolved);
+
+    await this.offersV3Repo.upsertUploadMeta("stock", {
+      total_rows: resolved.length,
+      total_products: distinctCount(resolved, "item_code"),
+      uploaded_by: created_by,
+    });
 
     return {
       code: 200,
@@ -513,7 +523,7 @@ class OffersV3Usecase {
    * the frontend before this is called). Updates only mrp/selling_price for
    * matching rows; also detects untagged new batches.
    */
-  async processPriceUpload(rows) {
+  async processPriceUpload(rows, created_by) {
     const { resolved: withKeys, skippedRows: keySkippedRows, unresolvedOutlets } = await this.resolveUploadRows(
       rows
     );
@@ -549,6 +559,12 @@ class OffersV3Usecase {
       .map((row) => ({ item_code: row.item_code, outlet_id: row.outlet_id, batch_no: row.batch_no }));
     const untagged = await this.detectUntaggedBatchesBulk(untaggedCandidates);
 
+    await this.offersV3Repo.upsertUploadMeta("price", {
+      total_rows: resolved.length,
+      total_products: distinctCount(resolved, "item_code"),
+      uploaded_by: created_by,
+    });
+
     return {
       code: 200,
       upserted: resolved.length,
@@ -581,6 +597,14 @@ class OffersV3Usecase {
 
   async dismissLowStockWarning(id) {
     return this.offersV3Repo.dismissLowStockWarning(id);
+  }
+
+  // ---------------------------------------------------------------------
+  // Upload meta (rows/products/last-uploaded-at summary per upload type)
+  // ---------------------------------------------------------------------
+
+  async getUploadMeta() {
+    return this.offersV3Repo.getUploadMeta();
   }
 
   // ---------------------------------------------------------------------
@@ -657,6 +681,7 @@ class OffersV3Usecase {
     let batchInserted = 0;
     const skipped = [];
     const failed = [];
+    const insertedItemCodes = [];
 
     for (const row of rows) {
       const item_code = parseInt(row.item_code, 10);
@@ -703,6 +728,7 @@ class OffersV3Usecase {
             created_by,
           });
           batchInserted += 1;
+          insertedItemCodes.push(item_code);
         } else {
           const status = ["active", "inactive"].includes(String(row.status ?? "").trim().toLowerCase())
             ? String(row.status).trim().toLowerCase()
@@ -718,6 +744,7 @@ class OffersV3Usecase {
             created_by,
           });
           itemInserted += 1;
+          insertedItemCodes.push(item_code);
         }
       } catch (err) {
         const reason =
@@ -729,6 +756,14 @@ class OffersV3Usecase {
         logError("USECASE.OFFERS_V3.IMPORT_OFFERS.ROW_FAILED", reason, { item_code, scope });
         failed.push({ ...row, item_code, scope: scope === "batch" ? "batch" : "item", _reason: reason });
       }
+    }
+
+    if (itemInserted + batchInserted > 0) {
+      await this.offersV3Repo.upsertUploadMeta("import", {
+        total_rows: itemInserted + batchInserted,
+        total_products: new Set(insertedItemCodes).size,
+        uploaded_by: created_by,
+      });
     }
 
     return {
