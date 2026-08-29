@@ -281,6 +281,16 @@ class OffersV3Routes {
       res.end();
     });
 
+    router.post("/untagged-batches/dismiss-all", async (req, res) => {
+      try {
+        const result = await this.offersV3Usecase.dismissAllUntaggedBatches();
+        sendResult(res, result);
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
     // Low-stock warnings (item-level offers only)
     router.get("/low-stock-warnings", async (req, res) => {
       try {

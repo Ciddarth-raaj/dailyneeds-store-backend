@@ -652,6 +652,22 @@ class OffersV3Repository {
     });
   }
 
+  dismissAllUntaggedBatches() {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `UPDATE \`${UNTAGGED_TABLE}\` SET status = 'dismissed' WHERE status = 'pending'`,
+        [],
+        (err, res) => {
+          if (err) {
+            logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.DISMISS_ALL_UNTAGGED_BATCHES", err.toString());
+            return reject(err);
+          }
+          resolve({ code: 200, affectedRows: res.affectedRows });
+        }
+      );
+    });
+  }
+
   // ---------------------------------------------------------------------
   // Low-stock warnings (item-level offers only)
   // ---------------------------------------------------------------------

@@ -587,6 +587,10 @@ class OffersV3Usecase {
     return this.offersV3Repo.dismissUntaggedBatchAlert(id);
   }
 
+  async dismissAllUntaggedBatches() {
+    return this.offersV3Repo.dismissAllUntaggedBatches();
+  }
+
   // ---------------------------------------------------------------------
   // Low-stock warnings (item-level offers only)
   // ---------------------------------------------------------------------
