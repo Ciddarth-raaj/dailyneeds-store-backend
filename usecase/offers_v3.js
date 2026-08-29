@@ -300,11 +300,29 @@ class OffersV3Usecase {
   }
 
   /**
-   * Process an uploaded batch-stock file: upsert stock, revert/flag
-   * zero-stock on matched batch offers, and detect untagged new batches of
-   * items that already carry an active offer elsewhere.
+   * If this item/outlet/batch has no offer of its own yet, but the item
+   * already carries an active offer elsewhere, surface it as an untagged
+   * batch instead of assuming inheritance.
    */
-  async processStockUpload(rows) {
+  async detectUntaggedBatch(item_code, outlet_id, batch_no) {
+    const existingOffer = await this.offersV3Repo.findOccupyingBatchOffer(item_code, outlet_id, batch_no);
+    if (existingOffer) return null;
+
+    const activeItemOffer = await this.offersV3Repo.getActiveItemOfferByItemCode(item_code);
+    const activeBatchOffers = await this.offersV3Repo.getActiveBatchOffersByItemCode(item_code);
+    const itemHasActiveOfferElsewhere = !!activeItemOffer || activeBatchOffers.length > 0;
+    if (!itemHasActiveOfferElsewhere) return null;
+
+    await this.offersV3Repo.upsertUntaggedBatchAlert(item_code, outlet_id, batch_no);
+    return { item_code, outlet_id, batch_no };
+  }
+
+  /**
+   * Resolve item_code/outlet/batch_no on each row of an upload; rows failing
+   * to resolve a numeric item_code, a batch_no, or a matching outlet are
+   * dropped (with the unresolved outlet values reported back).
+   */
+  async resolveUploadRows(rows) {
     this._outletsCache = null;
     const resolved = [];
     const unresolvedOutlets = [];
@@ -312,21 +330,34 @@ class OffersV3Usecase {
     for (const row of rows) {
       const item_code = parseInt(row.item_code, 10);
       const batch_no = String(row.batch_no ?? "").trim();
-      const stock_qty = Number(row.stock_qty);
       const outlet_id = await this.resolveOutletId(row.outlet);
-      if (!item_code || !batch_no || Number.isNaN(stock_qty)) continue;
+      if (!item_code || !batch_no) continue;
       if (!outlet_id) {
         unresolvedOutlets.push(row.outlet);
         continue;
       }
-      resolved.push({ item_code, outlet_id, batch_no, stock_qty });
+      resolved.push({ ...row, item_code, outlet_id, batch_no });
     }
+
+    return { resolved, unresolvedOutlets: [...new Set(unresolvedOutlets)] };
+  }
+
+  /**
+   * Process an uploaded batch-stock file: upsert stock, revert/flag
+   * zero-stock on matched batch offers, and detect untagged new batches of
+   * items that already carry an active offer elsewhere.
+   */
+  async processStockUpload(rows) {
+    const { resolved: withKeys, unresolvedOutlets } = await this.resolveUploadRows(rows);
+    const resolved = withKeys
+      .map((row) => ({ ...row, stock_qty: Number(row.stock_qty) }))
+      .filter((row) => !Number.isNaN(row.stock_qty));
 
     if (resolved.length === 0) {
       return {
         code: 400,
         msg: "No valid rows to import (need a numeric Item Code, a matching Outlet, a Batch No, and a numeric Stock Qty).",
-        unresolvedOutlets: [...new Set(unresolvedOutlets)],
+        unresolvedOutlets,
       };
     }
 
@@ -349,21 +380,53 @@ class OffersV3Usecase {
         continue;
       }
 
-      const activeItemOffer = await this.offersV3Repo.getActiveItemOfferByItemCode(row.item_code);
-      const activeBatchOffers = await this.offersV3Repo.getActiveBatchOffersByItemCode(row.item_code);
-      const itemHasActiveOfferElsewhere = !!activeItemOffer || activeBatchOffers.length > 0;
-      if (itemHasActiveOfferElsewhere) {
-        await this.offersV3Repo.upsertUntaggedBatchAlert(row.item_code, row.outlet_id, row.batch_no);
-        untagged.push({ item_code: row.item_code, outlet_id: row.outlet_id, batch_no: row.batch_no });
-      }
+      const alert = await this.detectUntaggedBatch(row.item_code, row.outlet_id, row.batch_no);
+      if (alert) untagged.push(alert);
     }
 
     return {
       code: 200,
       upserted: resolved.length,
-      unresolvedOutlets: [...new Set(unresolvedOutlets)],
+      unresolvedOutlets,
       flagged,
       reverted,
+      untagged,
+    };
+  }
+
+  /**
+   * Process an uploaded price file (Price Checker-style export: Item Code,
+   * Outlet, Batch No, MRP, Selling Price — MRP/Selling Price are always the
+   * Old_MRP/Old_Selling_Price columns per the fixed mapping rule, resolved on
+   * the frontend before this is called). Updates only mrp/selling_price for
+   * matching rows; also detects untagged new batches.
+   */
+  async processPriceUpload(rows) {
+    const { resolved: withKeys, unresolvedOutlets } = await this.resolveUploadRows(rows);
+    const resolved = withKeys
+      .map((row) => ({ ...row, mrp: Number(row.mrp), selling_price: Number(row.selling_price) }))
+      .filter((row) => !Number.isNaN(row.mrp) && !Number.isNaN(row.selling_price));
+
+    if (resolved.length === 0) {
+      return {
+        code: 400,
+        msg: "No valid rows to import (need a numeric Item Code, a matching Outlet, a Batch No, and numeric MRP/Selling Price).",
+        unresolvedOutlets,
+      };
+    }
+
+    await this.offersV3Repo.upsertBatchPrice(resolved);
+
+    const untagged = [];
+    for (const row of resolved) {
+      const alert = await this.detectUntaggedBatch(row.item_code, row.outlet_id, row.batch_no);
+      if (alert) untagged.push(alert);
+    }
+
+    return {
+      code: 200,
+      upserted: resolved.length,
+      unresolvedOutlets,
       untagged,
     };
   }

@@ -1,5 +1,5 @@
 DROP TABLE IF EXISTS `offers_v3_untagged_batches`;
-DROP TABLE IF EXISTS `offers_v3_batch_stock`;
+DROP TABLE IF EXISTS `offers_v3_batch_data`;
 DROP TABLE IF EXISTS `offers_v3_batch`;
 DROP TABLE IF EXISTS `offers_v3_item`;
 

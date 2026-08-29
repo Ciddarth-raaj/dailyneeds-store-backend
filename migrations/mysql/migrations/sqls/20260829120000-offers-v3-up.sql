@@ -38,15 +38,23 @@ CREATE TABLE `offers_v3_batch` (
   CONSTRAINT `fk_offers_v3_batch_outlet` FOREIGN KEY (`outlet_id`) REFERENCES `outlets` (`outlet_id`) ON DELETE RESTRICT ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- Latest uploaded batch stock snapshot (admin Excel upload, no fixed schedule).
--- Not FK'd to product_table/outlets: an upload can reference a batch before/without
--- a matching offer, and rows are just overwritten per key on the next upload.
-CREATE TABLE `offers_v3_batch_stock` (
+-- Latest known price + stock per item/outlet/batch. Two independent uploads feed
+-- this table: a Price Checker-style Excel (Item Code, Outlet, Batch No, MRP,
+-- Selling Price) updates only mrp/selling_price/price_uploaded_at, and a stock
+-- Excel (Item Code, Outlet, Batch No, Stock Qty) updates only
+-- stock_qty/stock_uploaded_at — each upsert inserts a new row when none existed
+-- and otherwise leaves the other upload's columns untouched.
+-- Not FK'd to product_table/outlets: a row can exist before/without a matching
+-- offer, and rows are just overwritten per key on the next upload.
+CREATE TABLE `offers_v3_batch_data` (
   `item_code` INT(11) NOT NULL,
   `outlet_id` INT(11) NOT NULL,
   `batch_no` VARCHAR(100) NOT NULL,
-  `stock_qty` DECIMAL(14,3) NOT NULL DEFAULT 0,
-  `uploaded_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `mrp` DECIMAL(12,2) NULL DEFAULT NULL,
+  `selling_price` DECIMAL(12,2) NULL DEFAULT NULL,
+  `price_uploaded_at` DATETIME NULL DEFAULT NULL,
+  `stock_qty` DECIMAL(14,3) NULL DEFAULT NULL,
+  `stock_uploaded_at` DATETIME NULL DEFAULT NULL,
   PRIMARY KEY (`item_code`, `outlet_id`, `batch_no`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 

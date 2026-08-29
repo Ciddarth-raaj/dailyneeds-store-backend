@@ -2,9 +2,8 @@ const logger = require("../utils/logger");
 
 const ITEM_TABLE = "offers_v3_item";
 const BATCH_TABLE = "offers_v3_batch";
-const STOCK_TABLE = "offers_v3_batch_stock";
+const DATA_TABLE = "offers_v3_batch_data";
 const UNTAGGED_TABLE = "offers_v3_untagged_batches";
-const PRICE_TABLE = "price_checker_items";
 
 const ITEM_SELECT = `oi.id, oi.item_code, pt.de_name AS item_name, oi.offer_type, oi.value,
                 oi.status, oi.created_by, COALESCE(ne.employee_name, '') AS created_by_name,
@@ -287,15 +286,15 @@ class OffersV3Repository {
   }
 
   // ---------------------------------------------------------------------
-  // Price lookups (price_checker_items — latest uploaded outlet/batch pricing)
+  // Price lookups (offers_v3_batch_data — latest uploaded outlet/batch pricing)
   // ---------------------------------------------------------------------
 
   getMrpsForItem(item_code) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT DISTINCT COALESCE(new_mrp, old_mrp) AS mrp
-         FROM \`${PRICE_TABLE}\`
-         WHERE product_id = ? AND COALESCE(new_mrp, old_mrp) IS NOT NULL`,
+        `SELECT DISTINCT mrp
+         FROM \`${DATA_TABLE}\`
+         WHERE item_code = ? AND mrp IS NOT NULL`,
         [item_code],
         (err, rows) => {
           if (err) {
@@ -311,12 +310,9 @@ class OffersV3Repository {
   getPriceForBatch(item_code, outlet_id, batch_no) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT product_id, outlet_id, batch_no,
-                COALESCE(new_mrp, old_mrp) AS mrp,
-                COALESCE(new_selling_price, old_selling_price) AS selling_price
-         FROM \`${PRICE_TABLE}\`
-         WHERE product_id = ? AND outlet_id = ? AND batch_no = ?
-         ORDER BY id DESC LIMIT 1`,
+        `SELECT item_code, outlet_id, batch_no, mrp, selling_price
+         FROM \`${DATA_TABLE}\`
+         WHERE item_code = ? AND outlet_id = ? AND batch_no = ?`,
         [item_code, outlet_id, batch_no],
         (err, rows) => {
           if (err) {
@@ -337,12 +333,10 @@ class OffersV3Repository {
   getPricesForItem(item_code) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT pci.product_id, pci.outlet_id, o.outlet_name, pci.batch_no,
-                COALESCE(pci.new_mrp, pci.old_mrp) AS mrp,
-                COALESCE(pci.new_selling_price, pci.old_selling_price) AS selling_price
-         FROM \`${PRICE_TABLE}\` pci
-         LEFT JOIN outlets o ON o.outlet_id = pci.outlet_id
-         WHERE pci.product_id = ?`,
+        `SELECT bd.item_code, bd.outlet_id, o.outlet_name, bd.batch_no, bd.mrp, bd.selling_price
+         FROM \`${DATA_TABLE}\` bd
+         LEFT JOIN outlets o ON o.outlet_id = bd.outlet_id
+         WHERE bd.item_code = ?`,
         [item_code],
         (err, rows) => {
           if (err) {
@@ -359,6 +353,8 @@ class OffersV3Repository {
   // Batch stock uploads
   // ---------------------------------------------------------------------
 
+  // Stock upload: touches only stock_qty/stock_uploaded_at. Inserts a new row
+  // (price columns left NULL) if this item/outlet/batch has never been seen.
   upsertBatchStock(rows) {
     return new Promise((resolve, reject) => {
       if (!Array.isArray(rows) || rows.length === 0) {
@@ -366,13 +362,37 @@ class OffersV3Repository {
         return;
       }
       const values = rows.map((r) => [r.item_code, r.outlet_id, r.batch_no, r.stock_qty]);
-      const placeholders = values.map(() => "(?, ?, ?, ?)").join(", ");
+      const placeholders = values.map(() => "(?, ?, ?, ?, CURRENT_TIMESTAMP)").join(", ");
       const flat = values.flat();
-      const sql = `INSERT INTO \`${STOCK_TABLE}\` (item_code, outlet_id, batch_no, stock_qty) VALUES ${placeholders}
-        ON DUPLICATE KEY UPDATE stock_qty = VALUES(stock_qty), uploaded_at = CURRENT_TIMESTAMP`;
+      const sql = `INSERT INTO \`${DATA_TABLE}\` (item_code, outlet_id, batch_no, stock_qty, stock_uploaded_at) VALUES ${placeholders}
+        ON DUPLICATE KEY UPDATE stock_qty = VALUES(stock_qty), stock_uploaded_at = VALUES(stock_uploaded_at)`;
       this.db.query(sql, flat, (err, res) => {
         if (err) {
           logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.UPSERT_BATCH_STOCK", err.toString());
+          return reject(err);
+        }
+        resolve({ code: 200, upserted: rows.length, affectedRows: res.affectedRows });
+      });
+    });
+  }
+
+  // Price upload: touches only mrp/selling_price/price_uploaded_at. Inserts a
+  // new row (stock columns left NULL) if this item/outlet/batch has never been
+  // seen; never touches stock_qty on an existing row.
+  upsertBatchPrice(rows) {
+    return new Promise((resolve, reject) => {
+      if (!Array.isArray(rows) || rows.length === 0) {
+        resolve({ code: 200, upserted: 0 });
+        return;
+      }
+      const values = rows.map((r) => [r.item_code, r.outlet_id, r.batch_no, r.mrp, r.selling_price]);
+      const placeholders = values.map(() => "(?, ?, ?, ?, ?, CURRENT_TIMESTAMP)").join(", ");
+      const flat = values.flat();
+      const sql = `INSERT INTO \`${DATA_TABLE}\` (item_code, outlet_id, batch_no, mrp, selling_price, price_uploaded_at) VALUES ${placeholders}
+        ON DUPLICATE KEY UPDATE mrp = VALUES(mrp), selling_price = VALUES(selling_price), price_uploaded_at = VALUES(price_uploaded_at)`;
+      this.db.query(sql, flat, (err, res) => {
+        if (err) {
+          logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.UPSERT_BATCH_PRICE", err.toString());
           return reject(err);
         }
         resolve({ code: 200, upserted: rows.length, affectedRows: res.affectedRows });

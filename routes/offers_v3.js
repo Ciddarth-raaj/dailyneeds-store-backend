@@ -54,6 +54,15 @@ const stockUploadRowSchema = Joi.object({
 });
 const stockUploadSchema = Joi.array().items(stockUploadRowSchema).min(1);
 
+const priceUploadRowSchema = Joi.object({
+  item_code: Joi.alternatives(Joi.number(), Joi.string()).required(),
+  outlet: Joi.alternatives(Joi.number(), Joi.string()).required(),
+  batch_no: Joi.alternatives(Joi.number(), Joi.string()).required(),
+  mrp: Joi.alternatives(Joi.number(), Joi.string()).required(),
+  selling_price: Joi.alternatives(Joi.number(), Joi.string()).required(),
+});
+const priceUploadSchema = Joi.array().items(priceUploadRowSchema).min(1);
+
 const importRowSchema = Joi.object({
   scope: Joi.string().valid("item", "batch").optional(),
   item_code: Joi.alternatives(Joi.number(), Joi.string()).required(),
@@ -217,6 +226,24 @@ class OffersV3Routes {
           return;
         }
         const result = await this.offersV3Usecase.processStockUpload(isValid.value);
+        sendResult(res, result);
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
+    // Batch price upload (Price Checker-style export; Old_MRP/Old_Selling_Price
+    // resolved to mrp/selling_price by the caller per the fixed mapping rule)
+    router.post("/price-upload", async (req, res) => {
+      try {
+        const isValid = Joi.validate(req.body, priceUploadSchema);
+        if (isValid.error) {
+          res.status(400).json({ code: 400, msg: isValid.error.message });
+          res.end();
+          return;
+        }
+        const result = await this.offersV3Usecase.processPriceUpload(isValid.value);
         sendResult(res, result);
       } catch (err) {
         respondError(res, err);
