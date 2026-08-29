@@ -1,4 +1,6 @@
 const logger = require("../utils/logger");
+const telegram = require("../services/telegram")();
+const { OFFERS_V3_TELEGRAM_CHAT_ID } = require("../constants/telegram");
 
 const OFFER_TYPES = ["percentage", "flat", "fixed_price"];
 
@@ -11,6 +13,16 @@ function logError(code, description, ref = {}) {
     category: "",
     ref,
   });
+}
+
+// Telegram alerts are best-effort: a failure here must never break the
+// offer create/update/upload flow that triggered it.
+async function notifyOffersV3(message) {
+  try {
+    await telegram.sendMessage(OFFERS_V3_TELEGRAM_CHAT_ID, message);
+  } catch (err) {
+    logError("USECASE.OFFERS_V3.TELEGRAM_NOTIFY_FAILED", err.toString(), { message });
+  }
 }
 
 function distinctCount(rows, key) {
@@ -134,6 +146,15 @@ class OffersV3Usecase {
       validateThresholdQty(data.threshold_qty);
 
       const result = await this.offersV3Repo.createItemOffer({ ...data, created_by });
+      if (result.code === 200) {
+        const created = await this.offersV3Repo.getItemOfferById(result.id);
+        await notifyOffersV3(
+          `🟢 *New item-level offer created*\n` +
+            `Item: ${created?.item_name ?? ""} (${data.item_code})\n` +
+            `Type: ${data.offer_type} | Value: ${data.value}\n` +
+            `Threshold Qty: ${data.threshold_qty}`
+        );
+      }
       return result;
     } catch (err) {
       if (err.code === 400) return { code: 400, msg: err.message };
@@ -176,6 +197,11 @@ class OffersV3Usecase {
       const result = await this.offersV3Repo.updateItemOffer(id, data);
       if (nextStatus === "inactive" && existing.status !== "inactive") {
         await this.offersV3Repo.clearLowStockWarningsByItemCode(existing.item_code);
+        await notifyOffersV3(
+          `🔴 *Item-level offer made inactive*\n` +
+            `Item: ${existing.item_name ?? ""} (${existing.item_code})\n` +
+            `Type: ${existing.offer_type} | Value: ${existing.value}`
+        );
       }
       return result;
     } catch (err) {
@@ -239,6 +265,13 @@ class OffersV3Usecase {
       const result = await this.offersV3Repo.createBatchOffer({ ...data, created_by });
       if (result.code === 200) {
         await this.offersV3Repo.resolveUntaggedBatchAlertByKey(data.item_code, data.outlet_id, data.batch_no);
+        const created = await this.offersV3Repo.getBatchOfferById(result.id);
+        await notifyOffersV3(
+          `🟢 *New batch-specific offer created*\n` +
+            `Item: ${created?.item_name ?? ""} (${data.item_code})\n` +
+            `Outlet: ${created?.outlet_name ?? data.outlet_id} | Batch: ${data.batch_no}\n` +
+            `Type: ${data.offer_type} | Value: ${data.value}`
+        );
       }
       return result;
     } catch (err) {
@@ -298,7 +331,16 @@ class OffersV3Usecase {
         }
       }
 
-      return await this.offersV3Repo.updateBatchOffer(id, data);
+      const result = await this.offersV3Repo.updateBatchOffer(id, data);
+      if (nextStatus === "inactive" && existing.status !== "inactive") {
+        await notifyOffersV3(
+          `🔴 *Batch-specific offer made inactive*\n` +
+            `Item: ${existing.item_name ?? ""} (${existing.item_code})\n` +
+            `Outlet: ${existing.outlet_name ?? existing.outlet_id} | Batch: ${existing.batch_no}\n` +
+            `Type: ${existing.offer_type} | Value: ${existing.value}`
+        );
+      }
+      return result;
     } catch (err) {
       if (err.code === 400) return { code: 400, msg: err.message };
       logError("USECASE.OFFERS_V3.UPDATE_BATCH_OFFER", err.toString(), { id });
@@ -515,10 +557,25 @@ class OffersV3Usecase {
       }
     }
 
+    // Only alert on items newly crossing into low-stock this run, not ones
+    // that were already pending (which would spam the group on every
+    // subsequent upload while an item stays low).
+    const existingPending = await this.offersV3Repo.listLowStockWarnings("pending");
+    const alreadyPending = new Set(existingPending.map((w) => w.item_code));
+    const newlyWarned = toWarn.filter((w) => !alreadyPending.has(w.item_code));
+
     await Promise.all([
       this.offersV3Repo.upsertLowStockWarnings(toWarn),
       this.offersV3Repo.clearLowStockWarningsByItemCodes(toClear),
     ]);
+
+    if (newlyWarned.length > 0) {
+      const lines = newlyWarned
+        .map((w) => `• Item ${w.item_code}: total stock ${w.total_stock_qty} / threshold ${w.threshold_qty}`)
+        .join("\n");
+      await notifyOffersV3(`🟡 *Low stock warning* — item(s) at or below threshold (total across all stores):\n${lines}`);
+    }
+
     return toWarn;
   }
 
