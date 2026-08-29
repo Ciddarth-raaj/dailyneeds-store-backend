@@ -270,6 +270,9 @@ class Server {
     this.productOffersRepo = require("./repository/product_offers")(
       this.mysql.connection
     );
+    this.offersV3Repo = require("./repository/offers_v3")(
+      this.mysql.connection
+    );
     this.salesDashboardRepo = require("./repository/sales_dashboard")(
       this.mysql.connection
     );
@@ -513,6 +516,9 @@ class Server {
     this.productOffersUsecase = require("./usecase/product_offers")(
       this.productOffersRepo
     );
+    this.offersV3Usecase = require("./usecase/offers_v3")(
+      this.offersV3Repo
+    );
     this.productSalesUsecase = require("./usecase/product_sales")(
       this.productSalesRepo,
       this.productOffersRepo
@@ -731,6 +737,9 @@ class Server {
     const productOffersRouter = require("./routes/product_offers")(
       this.productOffersUsecase
     );
+    const offersV3Router = require("./routes/offers_v3")(
+      this.offersV3Usecase
+    );
     const productSalesRouter = require("./routes/product_sales")(
       this.productSalesUsecase
     );
@@ -836,6 +845,7 @@ class Server {
     app.use("/stock-transfer-out", stockTransferOutRouter.getRouter());
     app.use("/sto-check", stoCheckRouter.getRouter());
     app.use("/product-offers", productOffersRouter.getRouter());
+    app.use("/offers-v3", offersV3Router.getRouter());
     app.use("/product-sales", productSalesRouter.getRouter());
     app.use("/sales-report", salesDashboardRouter.getRouter());
     app.use("/dead-stock-items", deadStockItemsRouter.getRouter());
