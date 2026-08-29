@@ -205,7 +205,7 @@ class OffersV3Usecase {
       const result = await this.offersV3Repo.createItemOffer({ ...data, created_by });
       if (result.code === 200) {
         const created = await this.offersV3Repo.getItemOfferById(result.id);
-        const notifyResult = await notifyOffersV3(
+        await notifyOffersV3(
           buildItemOfferTelegramMessage("🟢 ITEM-LEVEL OFFER CREATED", {
             item_code: data.item_code,
             item_name: created?.item_name,
@@ -214,7 +214,6 @@ class OffersV3Usecase {
             threshold_qty: data.threshold_qty,
           })
         );
-        result._telegramNotify = notifyResult;
       }
       return result;
     } catch (err) {
@@ -258,7 +257,7 @@ class OffersV3Usecase {
       const result = await this.offersV3Repo.updateItemOffer(id, data);
       if (nextStatus === "inactive" && existing.status !== "inactive") {
         await this.offersV3Repo.clearLowStockWarningsByItemCode(existing.item_code);
-        const notifyResult = await notifyOffersV3(
+        await notifyOffersV3(
           buildItemOfferTelegramMessage("🔴 ITEM-LEVEL OFFER MADE INACTIVE", {
             item_code: existing.item_code,
             item_name: existing.item_name,
@@ -266,9 +265,8 @@ class OffersV3Usecase {
             value: existing.value,
           })
         );
-        result._telegramNotify = notifyResult;
       } else if (nextStatus === "active" && existing.status !== "active") {
-        const notifyResult = await notifyOffersV3(
+        await notifyOffersV3(
           buildItemOfferTelegramMessage("🟢 ITEM-LEVEL OFFER REACTIVATED", {
             item_code: existing.item_code,
             item_name: existing.item_name,
@@ -276,14 +274,6 @@ class OffersV3Usecase {
             value: nextValue,
           })
         );
-        result._telegramNotify = notifyResult;
-      } else if (data.status !== undefined) {
-        // A status was sent but it didn't actually change anything --
-        // this is the "silently no alert" case, made explicit for debugging.
-        result._telegramNotify = {
-          skipped: true,
-          reason: `requested status "${data.status}" but offer #${id} was already "${existing.status}"`,
-        };
       }
       return result;
     } catch (err) {
@@ -348,7 +338,7 @@ class OffersV3Usecase {
       if (result.code === 200) {
         await this.offersV3Repo.resolveUntaggedBatchAlertByKey(data.item_code, data.outlet_id, data.batch_no);
         const created = await this.offersV3Repo.getBatchOfferById(result.id);
-        const notifyResult = await notifyOffersV3(
+        await notifyOffersV3(
           buildBatchOfferTelegramMessage("🟢 BATCH-SPECIFIC OFFER CREATED", {
             item_code: data.item_code,
             item_name: created?.item_name,
@@ -358,7 +348,6 @@ class OffersV3Usecase {
             value: data.value,
           })
         );
-        result._telegramNotify = notifyResult;
       }
       return result;
     } catch (err) {
@@ -420,7 +409,7 @@ class OffersV3Usecase {
 
       const result = await this.offersV3Repo.updateBatchOffer(id, data);
       if (nextStatus === "inactive" && existing.status !== "inactive") {
-        const notifyResult = await notifyOffersV3(
+        await notifyOffersV3(
           buildBatchOfferTelegramMessage("🔴 BATCH-SPECIFIC OFFER MADE INACTIVE", {
             item_code: existing.item_code,
             item_name: existing.item_name,
@@ -430,9 +419,8 @@ class OffersV3Usecase {
             value: existing.value,
           })
         );
-        result._telegramNotify = notifyResult;
       } else if (nextStatus === "active" && existing.status !== "active") {
-        const notifyResult = await notifyOffersV3(
+        await notifyOffersV3(
           buildBatchOfferTelegramMessage("🟢 BATCH-SPECIFIC OFFER REACTIVATED", {
             item_code: existing.item_code,
             item_name: existing.item_name,
@@ -442,12 +430,6 @@ class OffersV3Usecase {
             value: nextValue,
           })
         );
-        result._telegramNotify = notifyResult;
-      } else if (data.status !== undefined) {
-        result._telegramNotify = {
-          skipped: true,
-          reason: `requested status "${data.status}" but offer #${id} was already "${existing.status}"`,
-        };
       }
       return result;
     } catch (err) {
@@ -786,19 +768,6 @@ class OffersV3Usecase {
 
   async getUploadMeta() {
     return this.offersV3Repo.getUploadMeta();
-  }
-
-  // Diagnostic only: unlike notifyOffersV3, this does NOT swallow the
-  // Telegram error -- it's meant to surface the real API error (e.g. "bot
-  // was kicked", "chat not found") back to the caller for debugging why
-  // alerts aren't arriving.
-  async sendTelegramTestAlert() {
-    await telegram.sendMessage(
-      OFFERS_V3_TELEGRAM_CHAT_ID,
-      "🧪 Offers V3 test alert — if you can see this, the Telegram group is wired up correctly.",
-      { disableNotification: false }
-    );
-    return { code: 200, chat_id: OFFERS_V3_TELEGRAM_CHAT_ID };
   }
 
   // ---------------------------------------------------------------------

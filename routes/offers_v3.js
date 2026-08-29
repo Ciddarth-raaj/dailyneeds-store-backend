@@ -314,19 +314,6 @@ class OffersV3Routes {
       res.end();
     });
 
-    // Diagnostic: sends a real Telegram message and surfaces the actual
-    // API error (bot not in group, chat not found, etc.) instead of just
-    // logging it, so misconfiguration can be debugged from the UI.
-    router.post("/telegram-test", async (req, res) => {
-      try {
-        const result = await this.offersV3Usecase.sendTelegramTestAlert();
-        res.json(result);
-      } catch (err) {
-        res.status(500).json({ code: 500, msg: err.message || err.toString() });
-      }
-      res.end();
-    });
-
     // Rows/products/last-uploaded-at summary per upload type (stock/price/import)
     router.get("/upload-meta", async (req, res) => {
       try {
