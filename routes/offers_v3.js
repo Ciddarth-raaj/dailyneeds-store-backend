@@ -46,31 +46,36 @@ const batchUpdateSchema = Joi.object({
   status: Joi.string().valid(...BATCH_STATUSES).optional(),
 }).min(1);
 
+// Row-level fields are intentionally lenient (allow blank/null/missing)
+// rather than required: a bad or incomplete row in a large upload should be
+// skipped by the usecase layer, not fail the entire batch.
+const uploadCellSchema = Joi.alternatives(Joi.number(), Joi.string()).allow("", null).optional();
+
 const stockUploadRowSchema = Joi.object({
-  item_code: Joi.alternatives(Joi.number(), Joi.string()).required(),
-  outlet: Joi.alternatives(Joi.number(), Joi.string()).required(),
-  batch_no: Joi.alternatives(Joi.number(), Joi.string()).required(),
-  stock_qty: Joi.alternatives(Joi.number(), Joi.string()).required(),
+  item_code: uploadCellSchema,
+  outlet: uploadCellSchema,
+  batch_no: uploadCellSchema,
+  stock_qty: uploadCellSchema,
 });
 const stockUploadSchema = Joi.array().items(stockUploadRowSchema).min(1);
 
 const priceUploadRowSchema = Joi.object({
-  item_code: Joi.alternatives(Joi.number(), Joi.string()).required(),
-  outlet: Joi.alternatives(Joi.number(), Joi.string()).required(),
-  batch_no: Joi.alternatives(Joi.number(), Joi.string()).required(),
-  mrp: Joi.alternatives(Joi.number(), Joi.string()).required(),
-  selling_price: Joi.alternatives(Joi.number(), Joi.string()).required(),
+  item_code: uploadCellSchema,
+  outlet: uploadCellSchema,
+  batch_no: uploadCellSchema,
+  mrp: uploadCellSchema,
+  selling_price: uploadCellSchema,
 });
 const priceUploadSchema = Joi.array().items(priceUploadRowSchema).min(1);
 
 const importRowSchema = Joi.object({
-  scope: Joi.string().valid("item", "batch").optional(),
-  item_code: Joi.alternatives(Joi.number(), Joi.string()).required(),
-  outlet: Joi.alternatives(Joi.number(), Joi.string()).allow("").optional(),
-  batch_no: Joi.alternatives(Joi.number(), Joi.string()).allow("").optional(),
-  offer_type: Joi.string().required(),
-  value: Joi.alternatives(Joi.number(), Joi.string()).required(),
-  status: Joi.string().allow("").optional(),
+  scope: Joi.string().allow("", null).optional(),
+  item_code: uploadCellSchema,
+  outlet: uploadCellSchema,
+  batch_no: uploadCellSchema,
+  offer_type: Joi.string().allow("", null).optional(),
+  value: uploadCellSchema,
+  status: Joi.string().allow("", null).optional(),
 });
 const importSchema = Joi.array().items(importRowSchema).min(1);
 

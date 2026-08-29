@@ -318,20 +318,46 @@ class OffersV3Usecase {
   }
 
   /**
-   * Resolve item_code/outlet/batch_no on each row of an upload; rows failing
-   * to resolve a numeric item_code, a batch_no, or a matching outlet are
-   * dropped (with the unresolved outlet values reported back).
+   * Bulk variant of detectUntaggedBatch for large uploads: a fixed number of
+   * queries regardless of row count, instead of several per row.
+   * `candidateRows` are rows already known to have no occupying offer of
+   * their own.
+   */
+  async detectUntaggedBatchesBulk(candidateRows) {
+    if (candidateRows.length === 0) return [];
+    const itemCodes = candidateRows.map((r) => r.item_code);
+    const [itemCodesWithItemOffer, itemCodesWithBatchOffer] = await Promise.all([
+      this.offersV3Repo.getItemCodesWithActiveItemOffer(itemCodes),
+      this.offersV3Repo.getItemCodesWithActiveBatchOffers(itemCodes),
+    ]);
+    const untagged = candidateRows.filter(
+      (r) => itemCodesWithItemOffer.has(r.item_code) || itemCodesWithBatchOffer.has(r.item_code)
+    );
+    if (untagged.length === 0) return [];
+    await this.offersV3Repo.upsertUntaggedBatchAlerts(untagged);
+    return untagged;
+  }
+
+  /**
+   * Resolve item_code/outlet/batch_no on each row of an upload. Rows missing
+   * a numeric item_code or a batch_no are simply skipped (counted, not
+   * fatal) rather than failing the whole upload; rows with an unresolvable
+   * outlet are skipped and that outlet value reported back.
    */
   async resolveUploadRows(rows) {
     this._outletsCache = null;
     const resolved = [];
     const unresolvedOutlets = [];
+    let skippedInvalidRows = 0;
 
     for (const row of rows) {
       const item_code = parseInt(row.item_code, 10);
       const batch_no = String(row.batch_no ?? "").trim();
+      if (!item_code || !batch_no) {
+        skippedInvalidRows += 1;
+        continue;
+      }
       const outlet_id = await this.resolveOutletId(row.outlet);
-      if (!item_code || !batch_no) continue;
       if (!outlet_id) {
         unresolvedOutlets.push(row.outlet);
         continue;
@@ -339,7 +365,7 @@ class OffersV3Usecase {
       resolved.push({ ...row, item_code, outlet_id, batch_no });
     }
 
-    return { resolved, unresolvedOutlets: [...new Set(unresolvedOutlets)] };
+    return { resolved, unresolvedOutlets: [...new Set(unresolvedOutlets)], skippedInvalidRows };
   }
 
   /**
@@ -348,46 +374,59 @@ class OffersV3Usecase {
    * items that already carry an active offer elsewhere.
    */
   async processStockUpload(rows) {
-    const { resolved: withKeys, unresolvedOutlets } = await this.resolveUploadRows(rows);
-    const resolved = withKeys
-      .map((row) => ({ ...row, stock_qty: Number(row.stock_qty) }))
-      .filter((row) => !Number.isNaN(row.stock_qty));
+    const { resolved: withKeys, unresolvedOutlets, skippedInvalidRows: skippedKeys } =
+      await this.resolveUploadRows(rows);
+    const withNumericStock = withKeys.map((row) => ({ ...row, stock_qty: Number(row.stock_qty) }));
+    const resolved = withNumericStock.filter((row) => !Number.isNaN(row.stock_qty));
+    const skippedInvalidRows = skippedKeys + (withNumericStock.length - resolved.length);
 
     if (resolved.length === 0) {
       return {
         code: 400,
         msg: "No valid rows to import (need a numeric Item Code, a matching Outlet, a Batch No, and a numeric Stock Qty).",
         unresolvedOutlets,
+        skippedInvalidRows,
       };
     }
 
     await this.offersV3Repo.upsertBatchStock(resolved);
 
+    // One bulk lookup for all rows' offers instead of one query per row.
+    const keys = resolved.map((r) => ({ item_code: r.item_code, outlet_id: r.outlet_id, batch_no: r.batch_no }));
+    const occupyingByKey = await this.offersV3Repo.findOccupyingBatchOffersByKeys(keys);
+
+    const toFlag = [];
+    const toRevert = [];
     const flagged = [];
     const reverted = [];
-    const untagged = [];
+    const untaggedCandidates = [];
 
     for (const row of resolved) {
-      const offer = await this.offersV3Repo.findOccupyingBatchOffer(row.item_code, row.outlet_id, row.batch_no);
+      const offer = occupyingByKey.get(`${row.item_code}|${row.outlet_id}|${row.batch_no}`);
       if (offer) {
         if (row.stock_qty <= 0 && offer.status === "active") {
-          await this.offersV3Repo.updateBatchOffer(offer.id, { status: "zero_stock_flagged" });
+          toFlag.push(offer.id);
           flagged.push({ id: offer.id, item_code: row.item_code, outlet_id: row.outlet_id, batch_no: row.batch_no });
         } else if (row.stock_qty > 0 && offer.status === "zero_stock_flagged") {
-          await this.offersV3Repo.updateBatchOffer(offer.id, { status: "active" });
+          toRevert.push(offer.id);
           reverted.push({ id: offer.id, item_code: row.item_code, outlet_id: row.outlet_id, batch_no: row.batch_no });
         }
         continue;
       }
-
-      const alert = await this.detectUntaggedBatch(row.item_code, row.outlet_id, row.batch_no);
-      if (alert) untagged.push(alert);
+      untaggedCandidates.push({ item_code: row.item_code, outlet_id: row.outlet_id, batch_no: row.batch_no });
     }
+
+    await Promise.all([
+      this.offersV3Repo.updateBatchOffersStatusByIds(toFlag, "zero_stock_flagged"),
+      this.offersV3Repo.updateBatchOffersStatusByIds(toRevert, "active"),
+    ]);
+    const untagged = await this.detectUntaggedBatchesBulk(untaggedCandidates);
 
     return {
       code: 200,
       upserted: resolved.length,
       unresolvedOutlets,
+      skippedInvalidRows,
       flagged,
       reverted,
       untagged,
@@ -402,31 +441,41 @@ class OffersV3Usecase {
    * matching rows; also detects untagged new batches.
    */
   async processPriceUpload(rows) {
-    const { resolved: withKeys, unresolvedOutlets } = await this.resolveUploadRows(rows);
-    const resolved = withKeys
-      .map((row) => ({ ...row, mrp: Number(row.mrp), selling_price: Number(row.selling_price) }))
-      .filter((row) => !Number.isNaN(row.mrp) && !Number.isNaN(row.selling_price));
+    const { resolved: withKeys, unresolvedOutlets, skippedInvalidRows: skippedKeys } =
+      await this.resolveUploadRows(rows);
+    const withNumericPrice = withKeys.map((row) => ({
+      ...row,
+      mrp: Number(row.mrp),
+      selling_price: Number(row.selling_price),
+    }));
+    const resolved = withNumericPrice.filter((row) => !Number.isNaN(row.mrp) && !Number.isNaN(row.selling_price));
+    const skippedInvalidRows = skippedKeys + (withNumericPrice.length - resolved.length);
 
     if (resolved.length === 0) {
       return {
         code: 400,
         msg: "No valid rows to import (need a numeric Item Code, a matching Outlet, a Batch No, and numeric MRP/Selling Price).",
         unresolvedOutlets,
+        skippedInvalidRows,
       };
     }
 
     await this.offersV3Repo.upsertBatchPrice(resolved);
 
-    const untagged = [];
-    for (const row of resolved) {
-      const alert = await this.detectUntaggedBatch(row.item_code, row.outlet_id, row.batch_no);
-      if (alert) untagged.push(alert);
-    }
+    // One bulk lookup instead of one query per row to find which rows
+    // already have their own occupying batch offer.
+    const keys = resolved.map((r) => ({ item_code: r.item_code, outlet_id: r.outlet_id, batch_no: r.batch_no }));
+    const occupyingByKey = await this.offersV3Repo.findOccupyingBatchOffersByKeys(keys);
+    const untaggedCandidates = resolved
+      .filter((row) => !occupyingByKey.has(`${row.item_code}|${row.outlet_id}|${row.batch_no}`))
+      .map((row) => ({ item_code: row.item_code, outlet_id: row.outlet_id, batch_no: row.batch_no }));
+    const untagged = await this.detectUntaggedBatchesBulk(untaggedCandidates);
 
     return {
       code: 200,
       upserted: resolved.length,
       unresolvedOutlets,
+      skippedInvalidRows,
       untagged,
     };
   }

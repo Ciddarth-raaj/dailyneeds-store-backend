@@ -21,6 +21,18 @@ const BATCH_JOINS = `LEFT JOIN product_table pt ON pt.product_id = ob.item_code
 const ITEM_ACTIVE_STATUSES = ["active"];
 const BATCH_OCCUPYING_STATUSES = ["active", "zero_stock_flagged"];
 
+// Large uploads (tens of thousands of rows) are processed in chunks so no
+// single query's parameter list / statement size can grow unbounded.
+const BULK_CHUNK_SIZE = 1000;
+
+function chunk(arr, size) {
+  const chunks = [];
+  for (let i = 0; i < arr.length; i += size) {
+    chunks.push(arr.slice(i, i + size));
+  }
+  return chunks;
+}
+
 function logError(component, code, description, ref = {}) {
   logger.Log({
     level: logger.LEVEL.ERROR,
@@ -238,6 +250,105 @@ class OffersV3Repository {
     });
   }
 
+  _queryAsync(sql, params) {
+    return new Promise((resolve, reject) => {
+      this.db.query(sql, params, (err, res) => (err ? reject(err) : resolve(res)));
+    });
+  }
+
+  // Bulk variant of findOccupyingBatchOffer for large uploads: a handful of
+  // chunked queries instead of one per row. Returns a Map keyed by
+  // "item_code|outlet_id|batch_no".
+  async findOccupyingBatchOffersByKeys(keys) {
+    if (!Array.isArray(keys) || keys.length === 0) return new Map();
+    const map = new Map();
+    const statusPlaceholders = BATCH_OCCUPYING_STATUSES.map(() => "?").join(",");
+    for (const batch of chunk(keys, BULK_CHUNK_SIZE)) {
+      const tuplePlaceholders = batch.map(() => "(?, ?, ?)").join(", ");
+      const tupleParams = batch.flatMap((k) => [k.item_code, k.outlet_id, k.batch_no]);
+      try {
+        const rows = await this._queryAsync(
+          `SELECT ${BATCH_SELECT} FROM \`${BATCH_TABLE}\` ob ${BATCH_JOINS}
+           WHERE (ob.item_code, ob.outlet_id, ob.batch_no) IN (${tuplePlaceholders})
+             AND ob.status IN (${statusPlaceholders})`,
+          [...tupleParams, ...BATCH_OCCUPYING_STATUSES]
+        );
+        (rows || []).forEach((r) => map.set(`${r.item_code}|${r.outlet_id}|${r.batch_no}`, r));
+      } catch (err) {
+        logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.FIND_OCCUPYING_BATCH_OFFERS_BY_KEYS", err.toString());
+        throw err;
+      }
+    }
+    return map;
+  }
+
+  // Bulk variant of getActiveItemOfferByItemCode: returns the Set of
+  // item_codes (from the given list) that currently have an active
+  // item-level offer.
+  async getItemCodesWithActiveItemOffer(itemCodes) {
+    const uniqueCodes = [...new Set(itemCodes)];
+    if (uniqueCodes.length === 0) return new Set();
+    const set = new Set();
+    for (const batch of chunk(uniqueCodes, BULK_CHUNK_SIZE)) {
+      const placeholders = batch.map(() => "?").join(",");
+      try {
+        const rows = await this._queryAsync(
+          `SELECT DISTINCT item_code FROM \`${ITEM_TABLE}\` WHERE item_code IN (${placeholders}) AND status IN (${ITEM_ACTIVE_STATUSES.map(() => "?").join(",")})`,
+          [...batch, ...ITEM_ACTIVE_STATUSES]
+        );
+        (rows || []).forEach((r) => set.add(r.item_code));
+      } catch (err) {
+        logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.GET_ITEM_CODES_WITH_ACTIVE_ITEM_OFFER", err.toString());
+        throw err;
+      }
+    }
+    return set;
+  }
+
+  // Bulk variant of getActiveBatchOffersByItemCode: returns the Set of
+  // item_codes (from the given list) that currently have at least one
+  // occupying batch-specific offer.
+  async getItemCodesWithActiveBatchOffers(itemCodes) {
+    const uniqueCodes = [...new Set(itemCodes)];
+    if (uniqueCodes.length === 0) return new Set();
+    const set = new Set();
+    for (const batch of chunk(uniqueCodes, BULK_CHUNK_SIZE)) {
+      const placeholders = batch.map(() => "?").join(",");
+      try {
+        const rows = await this._queryAsync(
+          `SELECT DISTINCT item_code FROM \`${BATCH_TABLE}\` WHERE item_code IN (${placeholders}) AND status IN (${BATCH_OCCUPYING_STATUSES.map(() => "?").join(",")})`,
+          [...batch, ...BATCH_OCCUPYING_STATUSES]
+        );
+        (rows || []).forEach((r) => set.add(r.item_code));
+      } catch (err) {
+        logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.GET_ITEM_CODES_WITH_ACTIVE_BATCH_OFFERS", err.toString());
+        throw err;
+      }
+    }
+    return set;
+  }
+
+  // Bulk upsert of untagged-batch alerts (used after a large upload instead
+  // of one INSERT per detected batch).
+  async upsertUntaggedBatchAlerts(keys) {
+    if (!Array.isArray(keys) || keys.length === 0) return { code: 200, upserted: 0 };
+    for (const batch of chunk(keys, BULK_CHUNK_SIZE)) {
+      const placeholders = batch.map(() => "(?, ?, ?, 'pending')").join(", ");
+      const params = batch.flatMap((k) => [k.item_code, k.outlet_id, k.batch_no]);
+      try {
+        await this._queryAsync(
+          `INSERT INTO \`${UNTAGGED_TABLE}\` (item_code, outlet_id, batch_no, status) VALUES ${placeholders}
+           ON DUPLICATE KEY UPDATE status = 'pending', detected_at = CURRENT_TIMESTAMP`,
+          params
+        );
+      } catch (err) {
+        logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.UPSERT_UNTAGGED_BATCH_ALERTS", err.toString());
+        throw err;
+      }
+    }
+    return { code: 200, upserted: keys.length };
+  }
+
   createBatchOffer(data) {
     return new Promise((resolve, reject) => {
       this.db.query(
@@ -261,6 +372,27 @@ class OffersV3Repository {
         }
       );
     });
+  }
+
+  // Bulk status update (used to flag/revert many batch offers from one
+  // stock upload in chunked queries instead of one UPDATE per offer).
+  async updateBatchOffersStatusByIds(ids, status) {
+    if (!Array.isArray(ids) || ids.length === 0) return { code: 200, affectedRows: 0 };
+    let affectedRows = 0;
+    for (const idsBatch of chunk(ids, BULK_CHUNK_SIZE)) {
+      const placeholders = idsBatch.map(() => "?").join(",");
+      try {
+        const res = await this._queryAsync(
+          `UPDATE \`${BATCH_TABLE}\` SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`,
+          [status, ...idsBatch]
+        );
+        affectedRows += res.affectedRows;
+      } catch (err) {
+        logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.UPDATE_BATCH_OFFERS_STATUS_BY_IDS", err.toString());
+        throw err;
+      }
+    }
+    return { code: 200, affectedRows };
   }
 
   updateBatchOffer(id, data) {
@@ -355,49 +487,47 @@ class OffersV3Repository {
 
   // Stock upload: touches only stock_qty/stock_uploaded_at. Inserts a new row
   // (price columns left NULL) if this item/outlet/batch has never been seen.
-  upsertBatchStock(rows) {
-    return new Promise((resolve, reject) => {
-      if (!Array.isArray(rows) || rows.length === 0) {
-        resolve({ code: 200, upserted: 0 });
-        return;
-      }
-      const values = rows.map((r) => [r.item_code, r.outlet_id, r.batch_no, r.stock_qty]);
+  async upsertBatchStock(rows) {
+    if (!Array.isArray(rows) || rows.length === 0) return { code: 200, upserted: 0 };
+    for (const batch of chunk(rows, BULK_CHUNK_SIZE)) {
+      const values = batch.map((r) => [r.item_code, r.outlet_id, r.batch_no, r.stock_qty]);
       const placeholders = values.map(() => "(?, ?, ?, ?, CURRENT_TIMESTAMP)").join(", ");
       const flat = values.flat();
-      const sql = `INSERT INTO \`${DATA_TABLE}\` (item_code, outlet_id, batch_no, stock_qty, stock_uploaded_at) VALUES ${placeholders}
-        ON DUPLICATE KEY UPDATE stock_qty = VALUES(stock_qty), stock_uploaded_at = VALUES(stock_uploaded_at)`;
-      this.db.query(sql, flat, (err, res) => {
-        if (err) {
-          logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.UPSERT_BATCH_STOCK", err.toString());
-          return reject(err);
-        }
-        resolve({ code: 200, upserted: rows.length, affectedRows: res.affectedRows });
-      });
-    });
+      try {
+        await this._queryAsync(
+          `INSERT INTO \`${DATA_TABLE}\` (item_code, outlet_id, batch_no, stock_qty, stock_uploaded_at) VALUES ${placeholders}
+           ON DUPLICATE KEY UPDATE stock_qty = VALUES(stock_qty), stock_uploaded_at = VALUES(stock_uploaded_at)`,
+          flat
+        );
+      } catch (err) {
+        logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.UPSERT_BATCH_STOCK", err.toString());
+        throw err;
+      }
+    }
+    return { code: 200, upserted: rows.length };
   }
 
   // Price upload: touches only mrp/selling_price/price_uploaded_at. Inserts a
   // new row (stock columns left NULL) if this item/outlet/batch has never been
   // seen; never touches stock_qty on an existing row.
-  upsertBatchPrice(rows) {
-    return new Promise((resolve, reject) => {
-      if (!Array.isArray(rows) || rows.length === 0) {
-        resolve({ code: 200, upserted: 0 });
-        return;
-      }
-      const values = rows.map((r) => [r.item_code, r.outlet_id, r.batch_no, r.mrp, r.selling_price]);
+  async upsertBatchPrice(rows) {
+    if (!Array.isArray(rows) || rows.length === 0) return { code: 200, upserted: 0 };
+    for (const batch of chunk(rows, BULK_CHUNK_SIZE)) {
+      const values = batch.map((r) => [r.item_code, r.outlet_id, r.batch_no, r.mrp, r.selling_price]);
       const placeholders = values.map(() => "(?, ?, ?, ?, ?, CURRENT_TIMESTAMP)").join(", ");
       const flat = values.flat();
-      const sql = `INSERT INTO \`${DATA_TABLE}\` (item_code, outlet_id, batch_no, mrp, selling_price, price_uploaded_at) VALUES ${placeholders}
-        ON DUPLICATE KEY UPDATE mrp = VALUES(mrp), selling_price = VALUES(selling_price), price_uploaded_at = VALUES(price_uploaded_at)`;
-      this.db.query(sql, flat, (err, res) => {
-        if (err) {
-          logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.UPSERT_BATCH_PRICE", err.toString());
-          return reject(err);
-        }
-        resolve({ code: 200, upserted: rows.length, affectedRows: res.affectedRows });
-      });
-    });
+      try {
+        await this._queryAsync(
+          `INSERT INTO \`${DATA_TABLE}\` (item_code, outlet_id, batch_no, mrp, selling_price, price_uploaded_at) VALUES ${placeholders}
+           ON DUPLICATE KEY UPDATE mrp = VALUES(mrp), selling_price = VALUES(selling_price), price_uploaded_at = VALUES(price_uploaded_at)`,
+          flat
+        );
+      } catch (err) {
+        logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.UPSERT_BATCH_PRICE", err.toString());
+        throw err;
+      }
+    }
+    return { code: 200, upserted: rows.length };
   }
 
   // ---------------------------------------------------------------------
