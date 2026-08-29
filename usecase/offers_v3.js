@@ -24,6 +24,50 @@ function stripMarkdown(value) {
   return String(value ?? "").replace(/[_*`[\]]/g, "");
 }
 
+const OFFER_TYPE_TELEGRAM_LABELS = {
+  percentage: "Percentage Discount",
+  flat: "Flat Discount",
+  fixed_price: "Fixed Price",
+};
+
+function formatOfferValueForTelegram(offer_type, value) {
+  const v = Number(value);
+  if (offer_type === "percentage") return `${v}%`;
+  return `₹${v.toFixed(2)}`;
+}
+
+function formatOfferTypeForTelegram(offer_type) {
+  return OFFER_TYPE_TELEGRAM_LABELS[offer_type] ?? stripMarkdown(offer_type);
+}
+
+function buildItemOfferTelegramMessage(headline, { item_code, item_name, offer_type, value, threshold_qty }) {
+  const lines = [
+    headline,
+    "",
+    `🔢 Item Code: ${item_code}`,
+    `📦 Item: ${stripMarkdown(item_name)}`,
+    `🏷️ Offer Type: ${formatOfferTypeForTelegram(offer_type)}`,
+    `💰 Offer Value: ${formatOfferValueForTelegram(offer_type, value)}`,
+  ];
+  if (threshold_qty !== undefined) {
+    lines.push(`🎯 Threshold Qty: ${threshold_qty}`);
+  }
+  return lines.join("\n");
+}
+
+function buildBatchOfferTelegramMessage(headline, { item_code, item_name, outlet_name, batch_no, offer_type, value }) {
+  return [
+    headline,
+    "",
+    `🔢 Item Code: ${item_code}`,
+    `📦 Item: ${stripMarkdown(item_name)}`,
+    `🏬 Outlet: ${stripMarkdown(outlet_name)}`,
+    `🔖 Batch No: ${stripMarkdown(batch_no)}`,
+    `🏷️ Offer Type: ${formatOfferTypeForTelegram(offer_type)}`,
+    `💰 Offer Value: ${formatOfferValueForTelegram(offer_type, value)}`,
+  ].join("\n");
+}
+
 // Telegram alerts are best-effort: a failure here must never break the
 // offer create/update/upload flow that triggered it. Returns the outcome
 // (rather than throwing) so callers can optionally surface it for
@@ -162,10 +206,13 @@ class OffersV3Usecase {
       if (result.code === 200) {
         const created = await this.offersV3Repo.getItemOfferById(result.id);
         const notifyResult = await notifyOffersV3(
-          `🟢 *New item-level offer created*\n` +
-            `Item: ${stripMarkdown(created?.item_name)} (${data.item_code})\n` +
-            `Type: ${stripMarkdown(data.offer_type)} | Value: ${data.value}\n` +
-            `Threshold Qty: ${data.threshold_qty}`
+          buildItemOfferTelegramMessage("🟢 ITEM-LEVEL OFFER CREATED", {
+            item_code: data.item_code,
+            item_name: created?.item_name,
+            offer_type: data.offer_type,
+            value: data.value,
+            threshold_qty: data.threshold_qty,
+          })
         );
         result._telegramNotify = notifyResult;
       }
@@ -212,16 +259,22 @@ class OffersV3Usecase {
       if (nextStatus === "inactive" && existing.status !== "inactive") {
         await this.offersV3Repo.clearLowStockWarningsByItemCode(existing.item_code);
         const notifyResult = await notifyOffersV3(
-          `🔴 *Item-level offer made inactive*\n` +
-            `Item: ${stripMarkdown(existing.item_name)} (${existing.item_code})\n` +
-            `Type: ${stripMarkdown(existing.offer_type)} | Value: ${existing.value}`
+          buildItemOfferTelegramMessage("🔴 ITEM-LEVEL OFFER MADE INACTIVE", {
+            item_code: existing.item_code,
+            item_name: existing.item_name,
+            offer_type: existing.offer_type,
+            value: existing.value,
+          })
         );
         result._telegramNotify = notifyResult;
       } else if (nextStatus === "active" && existing.status !== "active") {
         const notifyResult = await notifyOffersV3(
-          `🟢 *Item-level offer reactivated*\n` +
-            `Item: ${stripMarkdown(existing.item_name)} (${existing.item_code})\n` +
-            `Type: ${stripMarkdown(nextOfferType)} | Value: ${nextValue}`
+          buildItemOfferTelegramMessage("🟢 ITEM-LEVEL OFFER REACTIVATED", {
+            item_code: existing.item_code,
+            item_name: existing.item_name,
+            offer_type: nextOfferType,
+            value: nextValue,
+          })
         );
         result._telegramNotify = notifyResult;
       } else if (data.status !== undefined) {
@@ -296,10 +349,14 @@ class OffersV3Usecase {
         await this.offersV3Repo.resolveUntaggedBatchAlertByKey(data.item_code, data.outlet_id, data.batch_no);
         const created = await this.offersV3Repo.getBatchOfferById(result.id);
         const notifyResult = await notifyOffersV3(
-          `🟢 *New batch-specific offer created*\n` +
-            `Item: ${stripMarkdown(created?.item_name)} (${data.item_code})\n` +
-            `Outlet: ${stripMarkdown(created?.outlet_name ?? data.outlet_id)} | Batch: ${stripMarkdown(data.batch_no)}\n` +
-            `Type: ${stripMarkdown(data.offer_type)} | Value: ${data.value}`
+          buildBatchOfferTelegramMessage("🟢 BATCH-SPECIFIC OFFER CREATED", {
+            item_code: data.item_code,
+            item_name: created?.item_name,
+            outlet_name: created?.outlet_name ?? data.outlet_id,
+            batch_no: data.batch_no,
+            offer_type: data.offer_type,
+            value: data.value,
+          })
         );
         result._telegramNotify = notifyResult;
       }
@@ -364,18 +421,26 @@ class OffersV3Usecase {
       const result = await this.offersV3Repo.updateBatchOffer(id, data);
       if (nextStatus === "inactive" && existing.status !== "inactive") {
         const notifyResult = await notifyOffersV3(
-          `🔴 *Batch-specific offer made inactive*\n` +
-            `Item: ${stripMarkdown(existing.item_name)} (${existing.item_code})\n` +
-            `Outlet: ${stripMarkdown(existing.outlet_name ?? existing.outlet_id)} | Batch: ${stripMarkdown(existing.batch_no)}\n` +
-            `Type: ${stripMarkdown(existing.offer_type)} | Value: ${existing.value}`
+          buildBatchOfferTelegramMessage("🔴 BATCH-SPECIFIC OFFER MADE INACTIVE", {
+            item_code: existing.item_code,
+            item_name: existing.item_name,
+            outlet_name: existing.outlet_name ?? existing.outlet_id,
+            batch_no: existing.batch_no,
+            offer_type: existing.offer_type,
+            value: existing.value,
+          })
         );
         result._telegramNotify = notifyResult;
       } else if (nextStatus === "active" && existing.status !== "active") {
         const notifyResult = await notifyOffersV3(
-          `🟢 *Batch-specific offer reactivated*\n` +
-            `Item: ${stripMarkdown(existing.item_name)} (${existing.item_code})\n` +
-            `Outlet: ${stripMarkdown(existing.outlet_name ?? existing.outlet_id)} | Batch: ${stripMarkdown(existing.batch_no)}\n` +
-            `Type: ${stripMarkdown(nextOfferType)} | Value: ${nextValue}`
+          buildBatchOfferTelegramMessage("🟢 BATCH-SPECIFIC OFFER REACTIVATED", {
+            item_code: existing.item_code,
+            item_name: existing.item_name,
+            outlet_name: existing.outlet_name ?? existing.outlet_id,
+            batch_no: existing.batch_no,
+            offer_type: nextOfferType,
+            value: nextValue,
+          })
         );
         result._telegramNotify = notifyResult;
       } else if (data.status !== undefined) {
@@ -614,10 +679,10 @@ class OffersV3Usecase {
     ]);
 
     if (newlyWarned.length > 0) {
-      const lines = newlyWarned
-        .map((w) => `• Item ${w.item_code}: total stock ${w.total_stock_qty} / threshold ${w.threshold_qty}`)
-        .join("\n");
-      await notifyOffersV3(`🟡 *Low stock warning* — item(s) at or below threshold (total across all stores):\n${lines}`);
+      const lines = newlyWarned.map(
+        (w) => `🔢 Item Code: ${w.item_code} | 📊 Total Stock: ${w.total_stock_qty} / Threshold: ${w.threshold_qty}`
+      );
+      await notifyOffersV3(["🟡 LOW STOCK WARNING (total across all stores)", "", ...lines].join("\n"));
     }
 
     return toWarn;
