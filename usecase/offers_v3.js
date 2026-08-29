@@ -301,17 +301,22 @@ class OffersV3Usecase {
 
   /**
    * If this item/outlet/batch has no offer of its own yet, but the item
-   * already carries an active offer elsewhere, surface it as an untagged
-   * batch instead of assuming inheritance.
+   * already carries an active BATCH-SPECIFIC offer elsewhere, surface it as
+   * an untagged batch instead of assuming inheritance. An active item-level
+   * offer does NOT trigger this: item-level offers already apply to all
+   * current and future stock automatically, so a new batch under one is
+   * already covered (its selling price already reflects the item-level
+   * offer) and needs no separate tagging — that's the whole point of
+   * item scope. A batch-specific offer, by contrast, only ever covers the
+   * exact batch it was created for, so a sibling batch genuinely needs its
+   * own explicit offer or an admin decision to leave it untouched.
    */
   async detectUntaggedBatch(item_code, outlet_id, batch_no) {
     const existingOffer = await this.offersV3Repo.findOccupyingBatchOffer(item_code, outlet_id, batch_no);
     if (existingOffer) return null;
 
-    const activeItemOffer = await this.offersV3Repo.getActiveItemOfferByItemCode(item_code);
     const activeBatchOffers = await this.offersV3Repo.getActiveBatchOffersByItemCode(item_code);
-    const itemHasActiveOfferElsewhere = !!activeItemOffer || activeBatchOffers.length > 0;
-    if (!itemHasActiveOfferElsewhere) return null;
+    if (activeBatchOffers.length === 0) return null;
 
     await this.offersV3Repo.upsertUntaggedBatchAlert(item_code, outlet_id, batch_no);
     return { item_code, outlet_id, batch_no };
@@ -321,18 +326,15 @@ class OffersV3Usecase {
    * Bulk variant of detectUntaggedBatch for large uploads: a fixed number of
    * queries regardless of row count, instead of several per row.
    * `candidateRows` are rows already known to have no occupying offer of
-   * their own.
+   * their own. Only items with an active BATCH-SPECIFIC offer elsewhere
+   * are flagged — see detectUntaggedBatch for why item-level offers are
+   * excluded.
    */
   async detectUntaggedBatchesBulk(candidateRows) {
     if (candidateRows.length === 0) return [];
     const itemCodes = candidateRows.map((r) => r.item_code);
-    const [itemCodesWithItemOffer, itemCodesWithBatchOffer] = await Promise.all([
-      this.offersV3Repo.getItemCodesWithActiveItemOffer(itemCodes),
-      this.offersV3Repo.getItemCodesWithActiveBatchOffers(itemCodes),
-    ]);
-    const untagged = candidateRows.filter(
-      (r) => itemCodesWithItemOffer.has(r.item_code) || itemCodesWithBatchOffer.has(r.item_code)
-    );
+    const itemCodesWithBatchOffer = await this.offersV3Repo.getItemCodesWithActiveBatchOffers(itemCodes);
+    const untagged = candidateRows.filter((r) => itemCodesWithBatchOffer.has(r.item_code));
     if (untagged.length === 0) return [];
     await this.offersV3Repo.upsertUntaggedBatchAlerts(untagged);
     return untagged;

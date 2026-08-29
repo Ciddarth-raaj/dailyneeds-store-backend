@@ -282,29 +282,6 @@ class OffersV3Repository {
     return map;
   }
 
-  // Bulk variant of getActiveItemOfferByItemCode: returns the Set of
-  // item_codes (from the given list) that currently have an active
-  // item-level offer.
-  async getItemCodesWithActiveItemOffer(itemCodes) {
-    const uniqueCodes = [...new Set(itemCodes)];
-    if (uniqueCodes.length === 0) return new Set();
-    const set = new Set();
-    for (const batch of chunk(uniqueCodes, BULK_CHUNK_SIZE)) {
-      const placeholders = batch.map(() => "?").join(",");
-      try {
-        const rows = await this._queryAsync(
-          `SELECT DISTINCT item_code FROM \`${ITEM_TABLE}\` WHERE item_code IN (${placeholders}) AND status IN (${ITEM_ACTIVE_STATUSES.map(() => "?").join(",")})`,
-          [...batch, ...ITEM_ACTIVE_STATUSES]
-        );
-        (rows || []).forEach((r) => set.add(r.item_code));
-      } catch (err) {
-        logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.GET_ITEM_CODES_WITH_ACTIVE_ITEM_OFFER", err.toString());
-        throw err;
-      }
-    }
-    return set;
-  }
-
   // Bulk variant of getActiveBatchOffersByItemCode: returns the Set of
   // item_codes (from the given list) that currently have at least one
   // occupying batch-specific offer.
