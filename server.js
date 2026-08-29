@@ -531,6 +531,7 @@ class Server {
     this.deadStockItemsUsecase = require("./usecase/dead_stock_items")(
       this.deadStockItemsRepo
     );
+    this.grnUsecase = require("./usecase/grn")(this.stockReceivedRepo);
     this.purchaseRefUsecase = require("./usecase/purchase_ref")(
       this.purchaseRefRepo,
       this.productSalesRepo,
@@ -749,6 +750,7 @@ class Server {
     const deadStockItemsRouter = require("./routes/dead_stock_items")(
       this.deadStockItemsUsecase
     );
+    const grnRouter = require("./routes/grn")(this.grnUsecase);
     const purchaseRefRouter = require("./routes/purchase_ref")(
       this.purchaseRefUsecase
     );
@@ -847,6 +849,7 @@ class Server {
     app.use("/sales-report", salesDashboardRouter.getRouter());
     app.use("/dead-stock-items", deadStockItemsRouter.getRouter());
     app.use("/item-markupdown", itemMarkupdownRouter.getRouter());
+    app.use("/grn", grnRouter.getRouter());
     app.use("/purchase-ref", purchaseRefRouter.getRouter());
     app.use("/stock-holding-report", stockHoldingReportRouter.getRouter());
     app.use("/price-checker", priceCheckerRouter.getRouter());
