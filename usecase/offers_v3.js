@@ -164,7 +164,7 @@ class OffersV3Usecase {
         const notifyResult = await notifyOffersV3(
           `🟢 *New item-level offer created*\n` +
             `Item: ${stripMarkdown(created?.item_name)} (${data.item_code})\n` +
-            `Type: ${data.offer_type} | Value: ${data.value}\n` +
+            `Type: ${stripMarkdown(data.offer_type)} | Value: ${data.value}\n` +
             `Threshold Qty: ${data.threshold_qty}`
         );
         result._telegramNotify = notifyResult;
@@ -214,14 +214,14 @@ class OffersV3Usecase {
         const notifyResult = await notifyOffersV3(
           `🔴 *Item-level offer made inactive*\n` +
             `Item: ${stripMarkdown(existing.item_name)} (${existing.item_code})\n` +
-            `Type: ${existing.offer_type} | Value: ${existing.value}`
+            `Type: ${stripMarkdown(existing.offer_type)} | Value: ${existing.value}`
         );
         result._telegramNotify = notifyResult;
       } else if (nextStatus === "active" && existing.status !== "active") {
         const notifyResult = await notifyOffersV3(
           `🟢 *Item-level offer reactivated*\n` +
             `Item: ${stripMarkdown(existing.item_name)} (${existing.item_code})\n` +
-            `Type: ${nextOfferType} | Value: ${nextValue}`
+            `Type: ${stripMarkdown(nextOfferType)} | Value: ${nextValue}`
         );
         result._telegramNotify = notifyResult;
       } else if (data.status !== undefined) {
@@ -299,7 +299,7 @@ class OffersV3Usecase {
           `🟢 *New batch-specific offer created*\n` +
             `Item: ${stripMarkdown(created?.item_name)} (${data.item_code})\n` +
             `Outlet: ${stripMarkdown(created?.outlet_name ?? data.outlet_id)} | Batch: ${stripMarkdown(data.batch_no)}\n` +
-            `Type: ${data.offer_type} | Value: ${data.value}`
+            `Type: ${stripMarkdown(data.offer_type)} | Value: ${data.value}`
         );
         result._telegramNotify = notifyResult;
       }
@@ -367,7 +367,7 @@ class OffersV3Usecase {
           `🔴 *Batch-specific offer made inactive*\n` +
             `Item: ${stripMarkdown(existing.item_name)} (${existing.item_code})\n` +
             `Outlet: ${stripMarkdown(existing.outlet_name ?? existing.outlet_id)} | Batch: ${stripMarkdown(existing.batch_no)}\n` +
-            `Type: ${existing.offer_type} | Value: ${existing.value}`
+            `Type: ${stripMarkdown(existing.offer_type)} | Value: ${existing.value}`
         );
         result._telegramNotify = notifyResult;
       } else if (nextStatus === "active" && existing.status !== "active") {
@@ -375,7 +375,7 @@ class OffersV3Usecase {
           `🟢 *Batch-specific offer reactivated*\n` +
             `Item: ${stripMarkdown(existing.item_name)} (${existing.item_code})\n` +
             `Outlet: ${stripMarkdown(existing.outlet_name ?? existing.outlet_id)} | Batch: ${stripMarkdown(existing.batch_no)}\n` +
-            `Type: ${nextOfferType} | Value: ${nextValue}`
+            `Type: ${stripMarkdown(nextOfferType)} | Value: ${nextValue}`
         );
         result._telegramNotify = notifyResult;
       } else if (data.status !== undefined) {
