@@ -215,6 +215,13 @@ class OffersV3Usecase {
             `Type: ${existing.offer_type} | Value: ${existing.value}`
         );
         result._telegramNotify = notifyResult;
+      } else if (nextStatus === "active" && existing.status !== "active") {
+        const notifyResult = await notifyOffersV3(
+          `🟢 *Item-level offer reactivated*\n` +
+            `Item: ${escapeMarkdown(existing.item_name)} (${existing.item_code})\n` +
+            `Type: ${nextOfferType} | Value: ${nextValue}`
+        );
+        result._telegramNotify = notifyResult;
       }
       return result;
     } catch (err) {
@@ -352,6 +359,14 @@ class OffersV3Usecase {
             `Item: ${escapeMarkdown(existing.item_name)} (${existing.item_code})\n` +
             `Outlet: ${escapeMarkdown(existing.outlet_name ?? existing.outlet_id)} | Batch: ${escapeMarkdown(existing.batch_no)}\n` +
             `Type: ${existing.offer_type} | Value: ${existing.value}`
+        );
+        result._telegramNotify = notifyResult;
+      } else if (nextStatus === "active" && existing.status !== "active") {
+        const notifyResult = await notifyOffersV3(
+          `🟢 *Batch-specific offer reactivated*\n` +
+            `Item: ${escapeMarkdown(existing.item_name)} (${existing.item_code})\n` +
+            `Outlet: ${escapeMarkdown(existing.outlet_name ?? existing.outlet_id)} | Batch: ${escapeMarkdown(existing.batch_no)}\n` +
+            `Type: ${nextOfferType} | Value: ${nextValue}`
         );
         result._telegramNotify = notifyResult;
       }
