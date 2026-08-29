@@ -53,6 +53,26 @@ function validateOfferValue(offer_type, value, mrp) {
   }
 }
 
+/**
+ * Threshold Qty (item-level offers only) must be a non-negative whole
+ * number. Required at creation — margin protection: a new, costlier batch
+ * bought after the offer started could otherwise sell at the old discount
+ * unnoticed, since item-level offers cover all current and future stock.
+ */
+function validateThresholdQty(value) {
+  if (value === undefined || value === null || value === "") {
+    const err = new Error("Threshold Qty is required for item-level offers");
+    err.code = 400;
+    throw err;
+  }
+  const v = Number(value);
+  if (!Number.isInteger(v) || v < 0) {
+    const err = new Error("Threshold Qty must be a whole number 0 or greater");
+    err.code = 400;
+    throw err;
+  }
+}
+
 class OffersV3Usecase {
   constructor(offersV3Repo, outletRepo) {
     this.offersV3Repo = offersV3Repo;
@@ -106,6 +126,7 @@ class OffersV3Usecase {
       } else {
         validateOfferValue(data.offer_type, data.value, null);
       }
+      validateThresholdQty(data.threshold_qty);
 
       const result = await this.offersV3Repo.createItemOffer({ ...data, created_by });
       return result;
@@ -143,8 +164,15 @@ class OffersV3Usecase {
           validateOfferValue(nextOfferType, nextValue, null);
         }
       }
+      if (data.threshold_qty !== undefined) {
+        validateThresholdQty(data.threshold_qty);
+      }
 
-      return await this.offersV3Repo.updateItemOffer(id, data);
+      const result = await this.offersV3Repo.updateItemOffer(id, data);
+      if (nextStatus === "inactive" && existing.status !== "inactive") {
+        await this.offersV3Repo.clearLowStockWarningsByItemCode(existing.item_code);
+      }
+      return result;
     } catch (err) {
       if (err.code === 400) return { code: 400, msg: err.message };
       logError("USECASE.OFFERS_V3.UPDATE_ITEM_OFFER", err.toString(), { id });
@@ -429,6 +457,7 @@ class OffersV3Usecase {
       this.offersV3Repo.updateBatchOffersStatusByIds(toRevert, "active"),
     ]);
     const untagged = await this.detectUntaggedBatchesBulk(untaggedCandidates);
+    const lowStock = await this.detectLowStockWarningsBulk(resolved);
 
     return {
       code: 200,
@@ -439,7 +468,42 @@ class OffersV3Usecase {
       flagged,
       reverted,
       untagged,
+      lowStock,
     };
+  }
+
+  /**
+   * Item-level offers only: for every row of an item that currently has an
+   * active item-level offer, check its stock against that offer's
+   * Threshold Qty. A row with stock > 0 and <= threshold is upserted into
+   * the low-stock warning queue; a row back above threshold clears any
+   * existing warning for that exact outlet/batch. Zero stock is left alone
+   * here — item-level offers have no zero-stock trigger, only Threshold Qty.
+   */
+  async detectLowStockWarningsBulk(resolvedRows) {
+    if (resolvedRows.length === 0) return [];
+    const itemCodes = resolvedRows.map((r) => r.item_code);
+    const thresholds = await this.offersV3Repo.getActiveItemOfferThresholds(itemCodes);
+    if (thresholds.size === 0) return [];
+
+    const toWarn = [];
+    const toClear = [];
+    for (const row of resolvedRows) {
+      const threshold = thresholds.get(row.item_code);
+      if (threshold === undefined) continue;
+      const key = { item_code: row.item_code, outlet_id: row.outlet_id, batch_no: row.batch_no };
+      if (row.stock_qty > 0 && row.stock_qty <= threshold) {
+        toWarn.push({ ...key, stock_qty: row.stock_qty, threshold_qty: threshold });
+      } else {
+        toClear.push(key);
+      }
+    }
+
+    await Promise.all([
+      this.offersV3Repo.upsertLowStockWarnings(toWarn),
+      this.offersV3Repo.clearLowStockWarningsByKeys(toClear),
+    ]);
+    return toWarn;
   }
 
   /**
@@ -505,6 +569,18 @@ class OffersV3Usecase {
 
   async dismissUntaggedBatch(id) {
     return this.offersV3Repo.dismissUntaggedBatchAlert(id);
+  }
+
+  // ---------------------------------------------------------------------
+  // Low-stock warnings (item-level offers only)
+  // ---------------------------------------------------------------------
+
+  async listLowStockWarnings(status = "pending") {
+    return this.offersV3Repo.listLowStockWarnings(status);
+  }
+
+  async dismissLowStockWarning(id) {
+    return this.offersV3Repo.dismissLowStockWarning(id);
   }
 
   // ---------------------------------------------------------------------
@@ -631,10 +707,13 @@ class OffersV3Usecase {
           const status = ["active", "inactive"].includes(String(row.status ?? "").trim().toLowerCase())
             ? String(row.status).trim().toLowerCase()
             : "active";
+          const parsedThreshold = parseInt(row.threshold_qty, 10);
+          const threshold_qty = Number.isInteger(parsedThreshold) && parsedThreshold >= 0 ? parsedThreshold : 0;
           await this.offersV3Repo.createItemOffer({
             item_code,
             offer_type,
             value,
+            threshold_qty,
             status,
             created_by,
           });

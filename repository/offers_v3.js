@@ -4,9 +4,10 @@ const ITEM_TABLE = "offers_v3_item";
 const BATCH_TABLE = "offers_v3_batch";
 const DATA_TABLE = "offers_v3_batch_data";
 const UNTAGGED_TABLE = "offers_v3_untagged_batches";
+const LOW_STOCK_TABLE = "offers_v3_low_stock_warnings";
 
 const ITEM_SELECT = `oi.id, oi.item_code, pt.de_name AS item_name, oi.offer_type, oi.value,
-                oi.status, oi.created_by, COALESCE(ne.employee_name, '') AS created_by_name,
+                oi.threshold_qty, oi.status, oi.created_by, COALESCE(ne.employee_name, '') AS created_by_name,
                 oi.created_at, oi.updated_at`;
 const ITEM_JOINS = `LEFT JOIN product_table pt ON pt.product_id = oi.item_code
                 LEFT JOIN new_employee ne ON ne.employee_id = oi.created_by`;
@@ -115,11 +116,41 @@ class OffersV3Repository {
     });
   }
 
+  // Bulk variant for stock-upload low-stock detection: returns a Map of
+  // item_code -> threshold_qty for items (from the given list) that
+  // currently have an active item-level offer.
+  async getActiveItemOfferThresholds(itemCodes) {
+    const uniqueCodes = [...new Set(itemCodes)];
+    if (uniqueCodes.length === 0) return new Map();
+    const map = new Map();
+    for (const batch of chunk(uniqueCodes, BULK_CHUNK_SIZE)) {
+      const placeholders = batch.map(() => "?").join(",");
+      try {
+        const rows = await this._queryAsync(
+          `SELECT item_code, threshold_qty FROM \`${ITEM_TABLE}\` WHERE item_code IN (${placeholders}) AND status IN (${ITEM_ACTIVE_STATUSES.map(() => "?").join(",")})`,
+          [...batch, ...ITEM_ACTIVE_STATUSES]
+        );
+        (rows || []).forEach((r) => map.set(r.item_code, r.threshold_qty));
+      } catch (err) {
+        logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.GET_ACTIVE_ITEM_OFFER_THRESHOLDS", err.toString());
+        throw err;
+      }
+    }
+    return map;
+  }
+
   createItemOffer(data) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `INSERT INTO \`${ITEM_TABLE}\` (item_code, offer_type, value, status, created_by) VALUES (?, ?, ?, ?, ?)`,
-        [data.item_code, data.offer_type, data.value, data.status || "active", data.created_by ?? null],
+        `INSERT INTO \`${ITEM_TABLE}\` (item_code, offer_type, value, threshold_qty, status, created_by) VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          data.item_code,
+          data.offer_type,
+          data.value,
+          data.threshold_qty,
+          data.status || "active",
+          data.created_by ?? null,
+        ],
         (err, res) => {
           if (err) {
             logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.CREATE_ITEM_OFFER", err.toString());
@@ -133,7 +164,7 @@ class OffersV3Repository {
 
   updateItemOffer(id, data) {
     return new Promise((resolve, reject) => {
-      const keys = ["offer_type", "value", "status"].filter((k) => data[k] !== undefined);
+      const keys = ["offer_type", "value", "threshold_qty", "status"].filter((k) => data[k] !== undefined);
       if (keys.length === 0) {
         return resolve({ code: 200, affectedRows: 0 });
       }
@@ -591,6 +622,112 @@ class OffersV3Repository {
           resolve({ code: 200, affectedRows: res.affectedRows });
         }
       );
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // Low-stock warnings (item-level offers only)
+  // ---------------------------------------------------------------------
+
+  listLowStockWarnings(status) {
+    return new Promise((resolve, reject) => {
+      const where = status ? "WHERE lw.status = ?" : "";
+      const params = status ? [status] : [];
+      this.db.query(
+        `SELECT lw.id, lw.item_code, pt.de_name AS item_name, lw.outlet_id, o.outlet_name,
+                lw.batch_no, lw.stock_qty, lw.threshold_qty, lw.status, lw.detected_at
+         FROM \`${LOW_STOCK_TABLE}\` lw
+         LEFT JOIN product_table pt ON pt.product_id = lw.item_code
+         LEFT JOIN outlets o ON o.outlet_id = lw.outlet_id
+         ${where}
+         ORDER BY lw.detected_at DESC`,
+        params,
+        (err, rows) => {
+          if (err) {
+            logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.LIST_LOW_STOCK_WARNINGS", err.toString());
+            return reject(err);
+          }
+          resolve(rows || []);
+        }
+      );
+    });
+  }
+
+  // Bulk upsert: rows at/under their item's threshold. Resurfaces a
+  // previously-dismissed warning if the same outlet/batch drops low again.
+  async upsertLowStockWarnings(rows) {
+    if (!Array.isArray(rows) || rows.length === 0) return { code: 200, upserted: 0 };
+    for (const batch of chunk(rows, BULK_CHUNK_SIZE)) {
+      const placeholders = batch.map(() => "(?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)").join(", ");
+      const params = batch.flatMap((r) => [r.item_code, r.outlet_id, r.batch_no, r.stock_qty, r.threshold_qty]);
+      try {
+        await this._queryAsync(
+          `INSERT INTO \`${LOW_STOCK_TABLE}\` (item_code, outlet_id, batch_no, stock_qty, threshold_qty, status, detected_at) VALUES ${placeholders}
+           ON DUPLICATE KEY UPDATE stock_qty = VALUES(stock_qty), threshold_qty = VALUES(threshold_qty), status = 'pending', detected_at = VALUES(detected_at)`,
+          params
+        );
+      } catch (err) {
+        logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.UPSERT_LOW_STOCK_WARNINGS", err.toString());
+        throw err;
+      }
+    }
+    return { code: 200, upserted: rows.length };
+  }
+
+  // Bulk clear: stock is back above threshold (or the offer is no longer
+  // active), so the warning no longer applies.
+  async clearLowStockWarningsByKeys(keys) {
+    if (!Array.isArray(keys) || keys.length === 0) return { code: 200, affectedRows: 0 };
+    let affectedRows = 0;
+    for (const batch of chunk(keys, BULK_CHUNK_SIZE)) {
+      const tuplePlaceholders = batch.map(() => "(?, ?, ?)").join(", ");
+      const tupleParams = batch.flatMap((k) => [k.item_code, k.outlet_id, k.batch_no]);
+      try {
+        const res = await this._queryAsync(
+          `DELETE FROM \`${LOW_STOCK_TABLE}\` WHERE (item_code, outlet_id, batch_no) IN (${tuplePlaceholders})`,
+          tupleParams
+        );
+        affectedRows += res.affectedRows;
+      } catch (err) {
+        logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.CLEAR_LOW_STOCK_WARNINGS_BY_KEYS", err.toString());
+        throw err;
+      }
+    }
+    return { code: 200, affectedRows };
+  }
+
+  dismissLowStockWarning(id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `UPDATE \`${LOW_STOCK_TABLE}\` SET status = 'dismissed' WHERE id = ?`,
+        [id],
+        (err, res) => {
+          if (err) {
+            logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.DISMISS_LOW_STOCK_WARNING", err.toString(), { id });
+            return reject(err);
+          }
+          resolve({ code: 200, affectedRows: res.affectedRows });
+        }
+      );
+    });
+  }
+
+  // Used when an item-level offer is made inactive: its low-stock warnings
+  // no longer apply to anything.
+  clearLowStockWarningsByItemCode(item_code) {
+    return new Promise((resolve, reject) => {
+      this.db.query(`DELETE FROM \`${LOW_STOCK_TABLE}\` WHERE item_code = ?`, [item_code], (err, res) => {
+        if (err) {
+          logError(
+            "REPOSITORY.OFFERS_V3",
+            "REPOSITORY.OFFERS_V3.CLEAR_LOW_STOCK_WARNINGS_BY_ITEM_CODE",
+            err.toString(),
+            { item_code }
+          );
+          return reject(err);
+        }
+        resolve({ code: 200, affectedRows: res.affectedRows });
+      });
     });
   }
 }

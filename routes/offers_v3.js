@@ -24,11 +24,13 @@ const itemCreateSchema = Joi.object({
   item_code: Joi.number().integer().required(),
   offer_type: Joi.string().valid(...OFFER_TYPES).required(),
   value: Joi.number().min(0).required(),
+  threshold_qty: Joi.number().integer().min(0).required(),
 });
 
 const itemUpdateSchema = Joi.object({
   offer_type: Joi.string().valid(...OFFER_TYPES).optional(),
   value: Joi.number().min(0).optional(),
+  threshold_qty: Joi.number().integer().min(0).optional(),
   status: Joi.string().valid(...ITEM_STATUSES).optional(),
 }).min(1);
 
@@ -75,6 +77,7 @@ const importRowSchema = Joi.object({
   batch_no: uploadCellSchema,
   offer_type: Joi.string().allow("", null).optional(),
   value: uploadCellSchema,
+  threshold_qty: uploadCellSchema,
   status: Joi.string().allow("", null).optional(),
 });
 const importSchema = Joi.array().items(importRowSchema).min(1);
@@ -271,6 +274,28 @@ class OffersV3Routes {
       try {
         const id = parseInt(req.params.id, 10);
         const result = await this.offersV3Usecase.dismissUntaggedBatch(id);
+        sendResult(res, result);
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
+    // Low-stock warnings (item-level offers only)
+    router.get("/low-stock-warnings", async (req, res) => {
+      try {
+        const data = await this.offersV3Usecase.listLowStockWarnings(req.query.status || "pending");
+        res.json({ code: 200, data });
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
+    router.post("/low-stock-warnings/:id/dismiss", async (req, res) => {
+      try {
+        const id = parseInt(req.params.id, 10);
+        const result = await this.offersV3Usecase.dismissLowStockWarning(id);
         sendResult(res, result);
       } catch (err) {
         respondError(res, err);
