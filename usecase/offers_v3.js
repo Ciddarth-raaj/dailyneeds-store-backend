@@ -347,25 +347,26 @@ class OffersV3Usecase {
   async resolveUploadRows(rows) {
     this._outletsCache = null;
     const resolved = [];
+    const skippedRows = [];
     const unresolvedOutlets = [];
-    let skippedInvalidRows = 0;
 
     for (const row of rows) {
       const item_code = parseInt(row.item_code, 10);
       const batch_no = String(row.batch_no ?? "").trim();
       if (!item_code || !batch_no) {
-        skippedInvalidRows += 1;
+        skippedRows.push({ ...row, _reason: "Missing or invalid Item Code / Batch No" });
         continue;
       }
       const outlet_id = await this.resolveOutletId(row.outlet);
       if (!outlet_id) {
         unresolvedOutlets.push(row.outlet);
+        skippedRows.push({ ...row, _reason: `Outlet not found: "${row.outlet ?? ""}"` });
         continue;
       }
       resolved.push({ ...row, item_code, outlet_id, batch_no });
     }
 
-    return { resolved, unresolvedOutlets: [...new Set(unresolvedOutlets)], skippedInvalidRows };
+    return { resolved, skippedRows, unresolvedOutlets: [...new Set(unresolvedOutlets)] };
   }
 
   /**
@@ -374,18 +375,23 @@ class OffersV3Usecase {
    * items that already carry an active offer elsewhere.
    */
   async processStockUpload(rows) {
-    const { resolved: withKeys, unresolvedOutlets, skippedInvalidRows: skippedKeys } =
-      await this.resolveUploadRows(rows);
+    const { resolved: withKeys, skippedRows: keySkippedRows, unresolvedOutlets } = await this.resolveUploadRows(
+      rows
+    );
     const withNumericStock = withKeys.map((row) => ({ ...row, stock_qty: Number(row.stock_qty) }));
     const resolved = withNumericStock.filter((row) => !Number.isNaN(row.stock_qty));
-    const skippedInvalidRows = skippedKeys + (withNumericStock.length - resolved.length);
+    const numericSkippedRows = withNumericStock
+      .filter((row) => Number.isNaN(row.stock_qty))
+      .map((row) => ({ ...row, _reason: "Stock Qty is not numeric" }));
+    const skippedRows = [...keySkippedRows, ...numericSkippedRows];
 
     if (resolved.length === 0) {
       return {
         code: 400,
         msg: "No valid rows to import (need a numeric Item Code, a matching Outlet, a Batch No, and a numeric Stock Qty).",
         unresolvedOutlets,
-        skippedInvalidRows,
+        skippedInvalidRows: skippedRows.length,
+        skippedRows,
       };
     }
 
@@ -426,7 +432,8 @@ class OffersV3Usecase {
       code: 200,
       upserted: resolved.length,
       unresolvedOutlets,
-      skippedInvalidRows,
+      skippedInvalidRows: skippedRows.length,
+      skippedRows,
       flagged,
       reverted,
       untagged,
@@ -441,22 +448,27 @@ class OffersV3Usecase {
    * matching rows; also detects untagged new batches.
    */
   async processPriceUpload(rows) {
-    const { resolved: withKeys, unresolvedOutlets, skippedInvalidRows: skippedKeys } =
-      await this.resolveUploadRows(rows);
+    const { resolved: withKeys, skippedRows: keySkippedRows, unresolvedOutlets } = await this.resolveUploadRows(
+      rows
+    );
     const withNumericPrice = withKeys.map((row) => ({
       ...row,
       mrp: Number(row.mrp),
       selling_price: Number(row.selling_price),
     }));
     const resolved = withNumericPrice.filter((row) => !Number.isNaN(row.mrp) && !Number.isNaN(row.selling_price));
-    const skippedInvalidRows = skippedKeys + (withNumericPrice.length - resolved.length);
+    const numericSkippedRows = withNumericPrice
+      .filter((row) => Number.isNaN(row.mrp) || Number.isNaN(row.selling_price))
+      .map((row) => ({ ...row, _reason: "MRP / Selling Price is not numeric" }));
+    const skippedRows = [...keySkippedRows, ...numericSkippedRows];
 
     if (resolved.length === 0) {
       return {
         code: 400,
         msg: "No valid rows to import (need a numeric Item Code, a matching Outlet, a Batch No, and numeric MRP/Selling Price).",
         unresolvedOutlets,
-        skippedInvalidRows,
+        skippedInvalidRows: skippedRows.length,
+        skippedRows,
       };
     }
 
@@ -475,7 +487,8 @@ class OffersV3Usecase {
       code: 200,
       upserted: resolved.length,
       unresolvedOutlets,
-      skippedInvalidRows,
+      skippedInvalidRows: skippedRows.length,
+      skippedRows,
       untagged,
     };
   }
@@ -571,8 +584,16 @@ class OffersV3Usecase {
       const item_code = parseInt(row.item_code, 10);
       const offer_type = String(row.offer_type ?? "").trim().toLowerCase();
       const value = Number(row.value);
-      if (!item_code || !OFFER_TYPES.includes(offer_type) || Number.isNaN(value)) {
-        skipped.push(row);
+      if (!item_code) {
+        skipped.push({ ...row, _reason: "Missing or invalid Item Code" });
+        continue;
+      }
+      if (!OFFER_TYPES.includes(offer_type)) {
+        skipped.push({ ...row, _reason: `Unrecognized Offer Type: "${row.offer_type ?? ""}"` });
+        continue;
+      }
+      if (Number.isNaN(value)) {
+        skipped.push({ ...row, _reason: "Value is not numeric" });
         continue;
       }
 
@@ -581,8 +602,12 @@ class OffersV3Usecase {
         if (scope === "batch") {
           const batch_no = String(row.batch_no ?? "").trim();
           const outlet_id = await this.resolveOutletId(row.outlet);
-          if (!batch_no || !outlet_id) {
-            skipped.push(row);
+          if (!batch_no) {
+            skipped.push({ ...row, _reason: "Missing Batch No" });
+            continue;
+          }
+          if (!outlet_id) {
+            skipped.push({ ...row, _reason: `Outlet not found: "${row.outlet ?? ""}"` });
             continue;
           }
           const status = ["active", "zero_stock_flagged", "batch_zero_ended", "inactive"].includes(
@@ -621,11 +646,18 @@ class OffersV3Usecase {
               ? "duplicate row"
               : err.message || String(err);
         logError("USECASE.OFFERS_V3.IMPORT_OFFERS.ROW_FAILED", reason, { item_code, scope });
-        failed.push({ item_code, scope: scope === "batch" ? "batch" : "item", reason });
+        failed.push({ ...row, item_code, scope: scope === "batch" ? "batch" : "item", _reason: reason });
       }
     }
 
-    return { code: 200, itemInserted, batchInserted, skipped: skipped.length, failed };
+    return {
+      code: 200,
+      itemInserted,
+      batchInserted,
+      skipped: skipped.length,
+      failed,
+      skippedRows: [...skipped, ...failed],
+    };
   }
 }
 
