@@ -309,13 +309,14 @@ class PriceCheckerUsecase {
       attachExpectedSellingPrices(products, new Map());
     }
 
+    let offersV2Offers = [];
     if (itemCodes.length && this.productOffersRepo) {
-      const offers =
+      offersV2Offers =
         await this.productOffersRepo.listActiveSellingPricesByProductIds(
           itemCodes
         );
       const offersByProductId = new Map(
-        (offers || []).map((offer) => [
+        (offersV2Offers || []).map((offer) => [
           String(offer.product_id),
           offer.selling_price,
         ])
@@ -334,7 +335,12 @@ class PriceCheckerUsecase {
           ? this.offersV3Repo.getItemCodesWithAnyActiveOffer(itemCodes)
           : [],
       ]);
-      attachHqOfferStatus(products, [...hqActiveIds, ...offersV3ActiveIds]);
+      const offersV2ActiveIds = (offersV2Offers || []).map((o) => o.product_id);
+      attachHqOfferStatus(products, [
+        ...hqActiveIds,
+        ...offersV3ActiveIds,
+        ...offersV2ActiveIds,
+      ]);
     } else {
       attachHqOfferStatus(products, []);
     }
