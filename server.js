@@ -524,7 +524,10 @@ class Server {
     this.deadStockItemsUsecase = require("./usecase/dead_stock_items")(
       this.deadStockItemsRepo
     );
-    this.grnUsecase = require("./usecase/grn")(this.stockReceivedRepo);
+    this.grnUsecase = require("./usecase/grn")(
+      this.stockReceivedRepo,
+      this.priceCheckerRepo
+    );
     this.purchaseRefUsecase = require("./usecase/purchase_ref")(
       this.purchaseRefRepo,
       this.productSalesRepo,

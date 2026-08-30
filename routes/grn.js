@@ -99,6 +99,52 @@ class GrnRoutes {
       }
       res.end();
     });
+
+    router.get("/issues", async (req, res) => {
+      try {
+        const fromParsed = parseOptionalIsoDate(req.query.from_date, "from_date");
+        const toParsed = parseOptionalIsoDate(req.query.to_date, "to_date");
+        if (!fromParsed.ok) {
+          res.status(400).json({ code: 400, msg: fromParsed.msg });
+          res.end();
+          return;
+        }
+        if (!toParsed.ok) {
+          res.status(400).json({ code: 400, msg: toParsed.msg });
+          res.end();
+          return;
+        }
+        if (
+          fromParsed.value &&
+          toParsed.value &&
+          fromParsed.value > toParsed.value
+        ) {
+          res.status(400).json({
+            code: 400,
+            msg: "from_date must be on or before to_date",
+          });
+          res.end();
+          return;
+        }
+
+        const data = await this.grnUsecase.listGrnIssues({
+          from_date: fromParsed.value,
+          to_date: toParsed.value,
+        });
+        res.json({
+          code: 200,
+          data,
+          meta: {
+            item_count: data.items?.length ?? 0,
+            from_date: fromParsed.value ?? null,
+            to_date: toParsed.value ?? null,
+          },
+        });
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
   }
 
   getRouter() {
