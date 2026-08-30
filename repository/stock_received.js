@@ -393,6 +393,95 @@ class StockReceivedRepository {
     });
   }
 
+  /**
+   * All GRN detail item rows (with header fields attached) for GRNs whose
+   * MRC date falls in [fromDate, toDate], in one query -- used by the Issue
+   * GRN page so it doesn't fire one /grn/detail request per GRN in the
+   * range.
+   */
+  listGrnDetailItemsByDateRange(fromDate, toDate) {
+    return new Promise((resolve, reject) => {
+      if (!this.gofrugalDb) {
+        return reject(new Error("Gofrugal DB connection is not configured"));
+      }
+
+      const conditions = [];
+      const params = [];
+      if (fromDate) {
+        conditions.push("DATE(h.MMH_MRC_DT) >= DATE(?)");
+        params.push(fromDate);
+      }
+      if (toDate) {
+        conditions.push("DATE(h.MMH_MRC_DT) <= DATE(?)");
+        params.push(toDate);
+      }
+      const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+
+      this.gofrugalDb.query(
+        `SELECT
+            h.MMH_MRC_REFNO AS mmh_mrc_refno,
+            DATE_FORMAT(h.MMH_MRC_DT, '%Y-%m-%d') AS mmh_mrc_dt,
+            dist.MDM_DIST_NAME AS supplier_name,
+            d.MMD_MRC_SL_NO,
+            d.MMD_ITEM_CODE,
+            d.MMD_RECD_QTY,
+            d.MMD_FREE_QTY,
+            d.MMD_MAX_RATE,
+            d.MMD_PUR_RATE,
+            d.MMD_PUR_TAX_PER,
+            d.MMD_PUR_TAX_AMT,
+            d.MMD_PUR_PRICE,
+            d.MMD_SALE_RATE,
+            d.MMD_PUR_AMOUNT
+         FROM \`${GOFRUGAL_HDR}\` h
+         JOIN \`${GOFRUGAL_DTL}\` d ON d.MMD_MRC_NO = h.MMH_MRC_NO
+         LEFT JOIN \`${GOFRUGAL_DIST}\` dist
+           ON TRIM(CAST(dist.MDM_DIST_CODE AS CHAR)) = TRIM(CAST(h.MMH_DIST_CODE AS CHAR))
+         ${where}
+         ORDER BY h.MMH_MRC_DT DESC, h.MMH_MRC_NO DESC, d.MMD_MRC_SL_NO ASC`,
+        params,
+        async (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.STOCK_RECEIVED",
+              code: "REPOSITORY.STOCK_RECEIVED.GRN_ISSUES_RANGE",
+              description: err.toString(),
+              category: "",
+              ref: { from_date: fromDate, to_date: toDate },
+            });
+            return reject(err);
+          }
+
+          try {
+            const rawItems = rows || [];
+            const productIds = rawItems
+              .map((row) => normalizeItemCode(row.MMD_ITEM_CODE))
+              .filter((id) => id != null);
+            const productMap = await this._fetchProductsMap(productIds);
+            const items = rawItems.map((row) => ({
+              mmh_mrc_refno: row.mmh_mrc_refno,
+              mmh_mrc_dt: row.mmh_mrc_dt,
+              supplier_name: row.supplier_name,
+              ...grnDetailItemRow(row, productMap),
+            }));
+            resolve(items);
+          } catch (lookupErr) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.STOCK_RECEIVED",
+              code: "REPOSITORY.STOCK_RECEIVED.GRN_ISSUES_RANGE_ENRICH",
+              description: lookupErr.toString(),
+              category: "",
+              ref: { from_date: fromDate, to_date: toDate },
+            });
+            reject(lookupErr);
+          }
+        }
+      );
+    });
+  }
+
   _queryGofrugalDtlWithHdr() {
     return new Promise((resolve, reject) => {
       if (!this.gofrugalDb) {
