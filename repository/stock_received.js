@@ -204,6 +204,9 @@ function grnDetailItemRow(row, productMap) {
       row.MMD_PPUR_RATE ?? row.mmd_ppur_rate
     ),
     mmd_pmrp: parseOptionalNumber(row.MMD_PMRP ?? row.mmd_pmrp),
+    mmd_prev_pur_price: parseOptionalNumber(
+      row.MMD_PREV_PUR_PRICE ?? row.mmd_prev_pur_price
+    ),
     discount_amount,
     discount_pct,
     product,
@@ -347,7 +350,8 @@ class StockReceivedRepository {
                 d.MMD_DISC_PER,
                 d.MMD_DISC_AMT,
                 d.MMD_PPUR_RATE,
-                d.MMD_PMRP
+                d.MMD_PMRP,
+                d.MMD_PREV_PUR_PRICE
              FROM \`${GOFRUGAL_DTL}\` d
              WHERE d.MMD_MRC_NO = ?
              ORDER BY d.MMD_MRC_SL_NO ASC`,
