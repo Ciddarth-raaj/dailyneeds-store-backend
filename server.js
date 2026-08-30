@@ -526,7 +526,9 @@ class Server {
     );
     this.grnUsecase = require("./usecase/grn")(
       this.stockReceivedRepo,
-      this.priceCheckerRepo
+      this.priceCheckerRepo,
+      this.hqOffersRepo,
+      this.offersV3Repo
     );
     this.purchaseRefUsecase = require("./usecase/purchase_ref")(
       this.purchaseRefRepo,
