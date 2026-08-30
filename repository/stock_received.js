@@ -198,6 +198,12 @@ function grnDetailItemRow(row, productMap) {
     mmd_pur_amount: parseOptionalNumber(
       row.MMD_PUR_AMOUNT ?? row.mmd_pur_amount
     ),
+    mmd_disc_per: parseOptionalNumber(row.MMD_DISC_PER ?? row.mmd_disc_per),
+    mmd_disc_amt: parseOptionalNumber(row.MMD_DISC_AMT ?? row.mmd_disc_amt),
+    mmd_ppur_rate: parseOptionalNumber(
+      row.MMD_PPUR_RATE ?? row.mmd_ppur_rate
+    ),
+    mmd_pmrp: parseOptionalNumber(row.MMD_PMRP ?? row.mmd_pmrp),
     discount_amount,
     discount_pct,
     product,
@@ -337,7 +343,11 @@ class StockReceivedRepository {
                 d.MMD_PUR_TAX_AMT,
                 d.MMD_PUR_PRICE,
                 d.MMD_SALE_RATE,
-                d.MMD_PUR_AMOUNT
+                d.MMD_PUR_AMOUNT,
+                d.MMD_DISC_PER,
+                d.MMD_DISC_AMT,
+                d.MMD_PPUR_RATE,
+                d.MMD_PMRP
              FROM \`${GOFRUGAL_DTL}\` d
              WHERE d.MMD_MRC_NO = ?
              ORDER BY d.MMD_MRC_SL_NO ASC`,
