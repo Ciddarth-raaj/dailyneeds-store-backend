@@ -185,6 +185,55 @@ class OffersV3TalkerRepository {
     return { affectedRows: res.affectedRows };
   }
 
+  /**
+   * What deleting these groups would take with them. Groups cascade to their
+   * articles, their per-outlet shelf locations, and every photo round attached
+   * to those locations - so the count has to be shown before anyone confirms,
+   * not reported after the fact.
+   */
+  async countGroupCascade(ids) {
+    if (!ids || !ids.length) {
+      return { groups: 0, items: 0, locations: 0, proofs: 0, images: 0 };
+    }
+    const rows = await this._query(
+      `SELECT
+        (SELECT COUNT(*) FROM \`${GROUPS_TABLE}\` WHERE id IN (?)) AS groups,
+        (SELECT COUNT(*) FROM \`${GROUP_ITEMS_TABLE}\` WHERE group_id IN (?)) AS items,
+        (SELECT COUNT(*) FROM \`${LOCATIONS_TABLE}\` WHERE group_id IN (?)) AS locations,
+        (SELECT COUNT(*) FROM \`${PROOFS_TABLE}\` p
+           JOIN \`${LOCATIONS_TABLE}\` l ON l.id = p.location_id
+          WHERE l.group_id IN (?)) AS proofs,
+        (SELECT COUNT(*) FROM \`${PROOF_IMAGES_TABLE}\` pi
+           JOIN \`${PROOFS_TABLE}\` p ON p.id = pi.proof_id
+           JOIN \`${LOCATIONS_TABLE}\` l ON l.id = p.location_id
+          WHERE l.group_id IN (?)) AS images`,
+      [ids, ids, ids, ids, ids],
+      "COUNT_GROUP_CASCADE"
+    );
+    return rows[0];
+  }
+
+  /**
+   * Unlike deleteGroup this does not care about status: a full reset has to be
+   * able to clear published and ended groups too.
+   */
+  async deleteGroups(ids) {
+    if (!ids || !ids.length) return { affectedRows: 0 };
+    // No foreign key ties the edit log to a group, so its rows would survive as
+    // history pointing at groups that no longer exist.
+    await this._query(
+      `DELETE FROM \`${EDIT_LOG_TABLE}\` WHERE group_id IN (?)`,
+      [ids],
+      "DELETE_EDIT_LOG"
+    );
+    const res = await this._query(
+      `DELETE FROM \`${GROUPS_TABLE}\` WHERE id IN (?)`,
+      [ids],
+      "DELETE_GROUPS"
+    );
+    return { affectedRows: res.affectedRows };
+  }
+
   // ---------------------------------------------------------------------
   // Group membership
   // ---------------------------------------------------------------------

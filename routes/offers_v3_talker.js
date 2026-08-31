@@ -271,6 +271,18 @@ class OffersV3TalkerRoutes {
       res.end();
     });
 
+    router.post("/groups/bulk-delete", async (req, res) => {
+      try {
+        const data = await this.talkerUsecase.deleteGroups(req.body?.group_ids, {
+          dry_run: Boolean(req.body?.dry_run),
+        });
+        sendResult(res, data);
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
     router.post("/groups/merge", async (req, res) => {
       try {
         const schema = Joi.object({

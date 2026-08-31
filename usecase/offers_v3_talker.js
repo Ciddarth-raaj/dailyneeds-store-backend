@@ -262,6 +262,28 @@ class OffersV3TalkerUsecase {
     return { code: 200 };
   }
 
+  /**
+   * Deletes the chosen groups outright, whatever their status.
+   *
+   * `dry_run` answers "what would this take?" without touching anything, so the
+   * confirmation can name the shelf maps and photo rounds that go with the
+   * groups rather than surprising someone after the fact. None of it is
+   * recoverable: an outlet's location map only exists because staff walked the
+   * aisles and recorded it.
+   */
+  async deleteGroups(group_ids, { dry_run = false } = {}) {
+    const ids = [...new Set((Array.isArray(group_ids) ? group_ids : [])
+      .map((n) => Number(n))
+      .filter(Number.isInteger))];
+    if (!ids.length) return { code: 422, msg: "No groups selected" };
+
+    const counts = await this.talkerRepo.countGroupCascade(ids);
+    if (dry_run) return { code: 200, dry_run: true, counts };
+
+    const res = await this.talkerRepo.deleteGroups(ids);
+    return { code: 200, deleted: res.affectedRows, counts };
+  }
+
   async mergeGroups(from_group_id, to_group_id, changed_by) {
     const [from, to] = await Promise.all([
       this.talkerRepo.getGroupById(from_group_id),
