@@ -1,5 +1,11 @@
 const logger = require("../utils/logger");
 const { checkTalkerPhoto } = require("../services/talker_check");
+const {
+  DEFAULT_PRINT_SETTINGS,
+  LOGO_POSITIONS,
+  PRINT_SETTING_LIMITS,
+  sheetLayout,
+} = require("../constants/talker_print");
 
 /** Standing talkers are re-shot on roughly this cycle. */
 const ROTATION_DAYS = 10;
@@ -906,6 +912,29 @@ class OffersV3TalkerUsecase {
     }
     return { code: 200, updated, skipped: [...skipped] };
   }
+
+  /**
+   * The shared look of the printed card. Always answers with a complete,
+   * printable set - an unsaved chain gets the defaults.
+   */
+  async getPrintSettings() {
+    const row = await this.talkerRepo.getPrintSettings();
+    const stored = row ? safeParse(row.settings, "PARSE_PRINT_SETTINGS") : null;
+    const settings = normalisePrintSettings(stored);
+    return {
+      code: 200,
+      settings,
+      layout: sheetLayout(settings),
+      updated_at: row ? row.updated_at : null,
+      is_default: !row,
+    };
+  }
+
+  async savePrintSettings(input, updated_by) {
+    const settings = normalisePrintSettings(input);
+    await this.talkerRepo.savePrintSettings(settings, updated_by);
+    return { code: 200, settings, layout: sheetLayout(settings) };
+  }
 }
 
 /**
@@ -948,11 +977,42 @@ function printedText({ lead, big, trail, subline }) {
 }
 
 
-function safeParse(json) {
+const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+
+/**
+ * Folds a stored or submitted settings object onto the defaults, dropping
+ * anything that would print a broken card: an out-of-range size is clamped
+ * rather than rejected, and an unrecognised colour or logo position falls back.
+ *
+ * Coercing rather than erroring matters on read - a bad row saved by an older
+ * version of the page must still yield a printable sign.
+ */
+function normalisePrintSettings(input) {
+  const raw = input && typeof input === "object" ? input : {};
+  const out = { ...DEFAULT_PRINT_SETTINGS };
+
+  for (const [key, { min, max }] of Object.entries(PRINT_SETTING_LIMITS)) {
+    const n = Number(raw[key]);
+    if (Number.isFinite(n)) {
+      out[key] = Math.min(max, Math.max(min, n));
+    }
+  }
+  if (LOGO_POSITIONS.includes(raw.logo_position)) {
+    out.logo_position = raw.logo_position;
+  }
+  for (const key of ["brand_color", "offer_color"]) {
+    if (HEX_COLOR.test(String(raw[key] ?? ""))) out[key] = raw[key];
+  }
+  if (raw.show_border !== undefined) out.show_border = Boolean(raw.show_border);
+
+  return out;
+}
+
+function safeParse(json, code = "PARSE_AI_JSON") {
   try {
     return JSON.parse(json);
   } catch (err) {
-    logError("PARSE_AI_JSON", err.toString(), {});
+    logError(code, err.toString(), {});
     return null;
   }
 }
@@ -964,3 +1024,4 @@ module.exports = (talkerRepo, outletRepo) => {
 module.exports.deriveGroupingKey = groupingKey;
 module.exports.displayOutletName = displayOutletName;
 module.exports.talkerWording = talkerWording;
+module.exports.normalisePrintSettings = normalisePrintSettings;

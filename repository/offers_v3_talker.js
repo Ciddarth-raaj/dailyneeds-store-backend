@@ -7,6 +7,7 @@ const LOCATIONS_TABLE = "offers_v3_talker_group_locations";
 const PROOFS_TABLE = "offers_v3_talker_proofs";
 const PROOF_IMAGES_TABLE = "offers_v3_talker_proof_images";
 const EDIT_LOG_TABLE = "offers_v3_talker_group_edit_log";
+const PRINT_SETTINGS_TABLE = "offers_v3_talker_print_settings";
 
 const BULK_CHUNK_SIZE = 1000;
 
@@ -430,6 +431,27 @@ class OffersV3TalkerRepository {
        ORDER BY g.label ASC, pt.de_name ASC`,
       params,
       "LIST_PRINT_DATA"
+    );
+  }
+
+  async getPrintSettings() {
+    const rows = await this._query(
+      `SELECT settings, updated_at FROM \`${PRINT_SETTINGS_TABLE}\` WHERE id = 1`,
+      [],
+      "GET_PRINT_SETTINGS"
+    );
+    return rows && rows[0] ? rows[0] : null;
+  }
+
+  savePrintSettings(settings, updated_by) {
+    // Pinned to id = 1: this is one shared look for the whole chain, not a
+    // row per save.
+    return this._query(
+      `INSERT INTO \`${PRINT_SETTINGS_TABLE}\` (id, settings, updated_by)
+       VALUES (1, ?, ?)
+       ON DUPLICATE KEY UPDATE settings = VALUES(settings), updated_by = VALUES(updated_by)`,
+      [JSON.stringify(settings), updated_by ?? null],
+      "SAVE_PRINT_SETTINGS"
     );
   }
 

@@ -110,6 +110,28 @@ class OffersV3TalkerRoutes {
     // Printing the physical talkers
     // -----------------------------------------------------------------
 
+    router.get("/print-settings", async (req, res) => {
+      try {
+        res.json(await this.talkerUsecase.getPrintSettings());
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
+    router.put("/print-settings", async (req, res) => {
+      try {
+        const data = await this.talkerUsecase.savePrintSettings(
+          req.body,
+          getActingUser(req)
+        );
+        res.json(data);
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
     router.get("/print-cards", async (req, res) => {
       try {
         const data = await this.talkerUsecase.getPrintCards({
