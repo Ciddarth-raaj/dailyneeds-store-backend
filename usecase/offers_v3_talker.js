@@ -845,13 +845,14 @@ class OffersV3TalkerUsecase {
       const mixed = offers.size > 1;
       for (const offer of offers.values()) {
         const text = printedText(offer.wording);
-        // A brand sign is read as that supplier's block, so it carries the
-        // supplier name. An individual sign covers one article, so it carries
-        // the product name instead.
-        const title =
+        // Falls back to the supplier or the product only when a group somehow
+        // has no label at all.
+        const title = titleFromLabel(
+          meta.label,
           meta.group_type === "individual"
-            ? offer.items[0]?.item_name || meta.label
-            : meta.supplier || meta.label;
+            ? offer.items[0]?.item_name
+            : meta.supplier
+        );
         cards.push({
           group_id: meta.group_id,
           group_type: meta.group_type,
@@ -972,6 +973,24 @@ function talkerWording(offer_type, value) {
 }
 
 /** The whole sign as one line - what the photo check compares against. */
+/**
+ * What the sign is headed with. The label is the only name anyone can edit, so
+ * it wins - reading the supplier or the product master instead meant renaming a
+ * group changed nothing on the printed card.
+ *
+ * Auto-derive names a brand group "Cadbury - 22% off". The offer is already the
+ * largest thing on the card, so that tail is dropped rather than printed twice;
+ * a label typed by hand is printed exactly as written.
+ */
+function titleFromLabel(label, fallback) {
+  const text = String(label ?? "").trim();
+  if (!text) return String(fallback ?? "").trim();
+  const trimmed = text
+    .replace(/\s*[\u2014\u2013-]\s*\d+(\.\d+)?\s*%\s*off\s*$/i, "")
+    .trim();
+  return trimmed || text;
+}
+
 function printedText({ lead, big, trail, subline }) {
   return [lead, big, trail, subline].filter(Boolean).join(" ");
 }
@@ -1030,3 +1049,4 @@ module.exports.deriveGroupingKey = groupingKey;
 module.exports.displayOutletName = displayOutletName;
 module.exports.talkerWording = talkerWording;
 module.exports.normalisePrintSettings = normalisePrintSettings;
+module.exports.titleFromLabel = titleFromLabel;
