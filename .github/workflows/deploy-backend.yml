@@ -5,6 +5,12 @@
 #   SSH_HOST         - 3.109.76.230
 #   SSH_USER         - ec2-user
 #
+# Optional GitHub Actions secrets:
+#   ANTHROPIC_API_KEY - used by the offer talker photo check. Synced into the
+#     server's .env on every deploy, so rotating it means updating the secret
+#     and re-running this workflow - no SSH session needed. Leave it unset and
+#     the sync step is skipped, leaving any hand-set value on the server alone.
+#
 # One-time setup:
 #   1. Install the matching public key in ec2-user's authorized_keys on dnds-be.
 #   2. On the server, ensure ~/dailyneeds-store-backend can git fetch/pull (private
@@ -41,6 +47,34 @@ jobs:
           chmod 600 ~/.ssh/dnds_gha_deploy
           ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
+
+      # Sent over stdin rather than as an argument, so the key never appears in
+      # the server's process list. Rewrites just its own line in .env and
+      # leaves every other variable untouched.
+      - name: Sync ANTHROPIC_API_KEY to server
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ANTHROPIC_API_KEY}" ]; then
+            echo "ANTHROPIC_API_KEY secret not set - leaving the server's .env as it is."
+            exit 0
+          fi
+          printf '%s\n' "$ANTHROPIC_API_KEY" | ssh -i ~/.ssh/dnds_gha_deploy \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "${SSH_USER}@${SSH_HOST}" \
+            'set -euo pipefail
+             read -r NEW_KEY
+             cd ~/dailyneeds-store-backend
+             touch .env
+             grep -v "^ANTHROPIC_API_KEY=" .env > .env.tmp || true
+             printf "ANTHROPIC_API_KEY=%s\n" "$NEW_KEY" >> .env.tmp
+             mv .env.tmp .env
+             chmod 600 .env
+             echo "ANTHROPIC_API_KEY written to .env"'
 
       - name: Deploy on server
         env:
