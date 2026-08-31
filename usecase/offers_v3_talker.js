@@ -960,7 +960,7 @@ function normalisePrintSettings(input) {
   for (const key of ["brand_color", "offer_color"]) {
     if (HEX_COLOR.test(String(raw[key] ?? ""))) out[key] = raw[key];
   }
-  for (const key of ["show_border", "show_logo"]) {
+  for (const key of ["show_border", "show_logo", "show_price"]) {
     if (raw[key] !== undefined) out[key] = Boolean(raw[key]);
   }
 

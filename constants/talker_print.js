@@ -10,7 +10,7 @@
  */
 
 /** Every element that can be placed on the card, and where it starts. */
-const ELEMENTS = ["logo", "title", "lead", "big", "subline"];
+const ELEMENTS = ["logo", "title", "lead", "big", "subline", "price"];
 
 const DEFAULT_PRINT_SETTINGS = {
   card_w_mm: 104,
@@ -21,23 +21,28 @@ const DEFAULT_PRINT_SETTINGS = {
   logo_x: 16,
   logo_y: 10,
 
-  title_mm: 4.6,
+  title_mm: 4.0,
   title_x: 50,
-  title_y: 40,
+  title_y: 33,
 
   lead_mm: 5.2,
   lead_x: 50,
-  lead_y: 55,
+  lead_y: 50,
 
-  big_mm: 18,
+  big_mm: 15,
   big_x: 50,
-  big_y: 71,
+  big_y: 64,
 
   trail_mm: 9,
 
   subline_mm: 4.4,
   subline_x: 50,
-  subline_y: 87,
+  subline_y: 80,
+
+  show_price: true,
+  price_mm: 4.0,
+  price_x: 50,
+  price_y: 92,
 
   brand_color: "#732f8d",
   offer_color: "#f15a22",
@@ -59,6 +64,7 @@ const PRINT_SETTING_LIMITS = {
   big_mm: { min: 4, max: 45 },
   trail_mm: { min: 2, max: 25 },
   subline_mm: { min: 2, max: 14 },
+  price_mm: { min: 2, max: 14 },
 };
 for (const el of ELEMENTS) {
   PRINT_SETTING_LIMITS[`${el}_x`] = { min: 0, max: 100 };
