@@ -89,6 +89,13 @@ jobs:
             'set -euo pipefail
              cd ~/dailyneeds-store-backend
              git fetch origin
+             # npm i rewrites package-lock.json on the server, leaving the clone
+             # permanently dirty. That is harmless until a commit touches the
+             # lockfile - then the pull refuses to overwrite it and the deploy
+             # dies. The committed lockfile is the authoritative one, so drop
+             # the local rewrite. Drift in any other tracked file is not
+             # expected, and is deliberately left to fail loudly.
+             git checkout -- package-lock.json || true
              git checkout main-autodeploy
              git pull origin main-autodeploy
              npm i
