@@ -195,9 +195,12 @@ class OffersV3TalkerRepository {
     if (!ids || !ids.length) {
       return { groups: 0, items: 0, locations: 0, proofs: 0, images: 0 };
     }
+    // Aliased group_count, not groups: GROUPS is a reserved word in MySQL 8 and
+    // an unquoted alias is a parse error there. MariaDB accepts it, so this only
+    // ever failed in production.
     const rows = await this._query(
       `SELECT
-        (SELECT COUNT(*) FROM \`${GROUPS_TABLE}\` WHERE id IN (?)) AS groups,
+        (SELECT COUNT(*) FROM \`${GROUPS_TABLE}\` WHERE id IN (?)) AS group_count,
         (SELECT COUNT(*) FROM \`${GROUP_ITEMS_TABLE}\` WHERE group_id IN (?)) AS items,
         (SELECT COUNT(*) FROM \`${LOCATIONS_TABLE}\` WHERE group_id IN (?)) AS locations,
         (SELECT COUNT(*) FROM \`${PROOFS_TABLE}\` p
@@ -210,7 +213,14 @@ class OffersV3TalkerRepository {
       [ids, ids, ids, ids, ids],
       "COUNT_GROUP_CASCADE"
     );
-    return rows[0];
+    const row = rows[0];
+    return {
+      groups: row.group_count,
+      items: row.items,
+      locations: row.locations,
+      proofs: row.proofs,
+      images: row.images,
+    };
   }
 
   /**
