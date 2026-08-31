@@ -1,10 +1,29 @@
 const logger = require("../utils/logger");
+const { mapWithConcurrency } = require("../utils/concurrency");
+const {
+  LATEST_GRN_LINE_EXPR,
+  parseLatestGrnLine,
+} = require("../utils/grnLatestLine");
 
 const TABLE = "stock_received";
 const GOFRUGAL_DTL = "medishopdb_MED_MRC_DTL";
 const GOFRUGAL_HDR = "medishopdb_MED_MRC_HDR";
 const GOFRUGAL_DIST = "medishopdb_MED_DISTRIBUTOR_MAST";
 const PRODUCT_OFFERS = "product_offers";
+
+/**
+ * Products per `IN (...)` chunk in listLatestGrnPricingByProduct. Kept at or
+ * below MySQL's eq_range_index_dive_limit (200 by default): past that the
+ * optimizer costs the range from index statistics instead of dives and can
+ * abandon idx_med_mrc_dtl_item_code_mrc_no for a full table scan.
+ */
+const GRN_PRICING_CHUNK_SIZE = 200;
+/**
+ * Chunks in flight at once. The GoFrugal pool holds 10 connections
+ * (drivers/mysql_gofrugal.js); leaving most of them free keeps a Purchase Ref
+ * rebuild from blocking every other GoFrugal-backed request.
+ */
+const GOFRUGAL_QUERY_CONCURRENCY = 4;
 
 function normalizeItemCode(value) {
   if (value === null || value === undefined || value === "") {
@@ -530,69 +549,87 @@ class StockReceivedRepository {
    * be entered out of chronological order (e.g. backdated). MMD_MRC_NO is
    * used only as a tiebreak.
    *
-   * Scoped to `productIds` and chunked, rather than scanning the entire
-   * GRN detail history table (which can span years of receipts) — this
-   * was previously the page's main slowdown.
+   * The "pick the newest line" step runs in SQL (see utils/grnLatestLine),
+   * so each chunk returns one row per product instead of that product's
+   * entire GRN history. On the Purchase Ref page that is ~14k rows total
+   * rather than the hundreds of thousands of history rows the old version
+   * sorted in Node — the bulk of the page's load time.
+   *
    * Returns a Map keyed by product_id.
    */
-  listLatestGrnPricingByProduct(productIds) {
-    return new Promise((resolve, reject) => {
-      if (!this.gofrugalDb) {
-        return reject(new Error("Gofrugal DB connection is not configured"));
-      }
-      const unique = [...new Set((productIds || []).filter((id) => id != null))];
-      if (!unique.length) {
-        resolve(new Map());
-        return;
-      }
-      const chunks = chunkArray(unique, 200);
-      const map = new Map();
-      let pending = chunks.length;
-      let settled = false;
-      chunks.forEach((ids) => {
-        const ph = ids.map(() => "?").join(", ");
-        this.gofrugalDb.query(
-          `SELECT
-              d.MMD_ITEM_CODE,
-              d.MMD_MRC_NO,
-              d.MMD_PUR_PRICE,
-              d.MMD_MAX_RATE AS MMD_MRP,
-              h.MMH_MRC_DT
-           FROM \`${GOFRUGAL_DTL}\` d
-           LEFT JOIN \`${GOFRUGAL_HDR}\` h ON h.MMH_MRC_NO = d.MMD_MRC_NO
-           WHERE d.MMD_ITEM_CODE IN (${ph})
-           ORDER BY h.MMH_MRC_DT DESC, d.MMD_MRC_NO DESC`,
-          ids,
-          (err, rows) => {
-            if (settled) return;
-            if (err) {
-              settled = true;
-              logger.Log({
-                level: logger.LEVEL.ERROR,
-                component: "REPOSITORY.STOCK_RECEIVED",
-                code: "REPOSITORY.STOCK_RECEIVED.LATEST_GRN_PRICING",
-                description: err.toString(),
-                category: "",
-                ref: {},
-              });
-              return reject(err);
-            }
-            (rows || []).forEach((row) => {
-              const productId = normalizeItemCode(row.MMD_ITEM_CODE);
-              if (productId == null || map.has(productId)) {
-                return;
-              }
-              map.set(productId, {
-                mrp: parseOptionalNumber(row.MMD_MRP),
-                net_cost: parseOptionalNumber(row.MMD_PUR_PRICE),
-              });
-            });
-            pending -= 1;
-            if (pending === 0) {
-              resolve(map);
-            }
+  async listLatestGrnPricingByProduct(productIds) {
+    if (!this.gofrugalDb) {
+      throw new Error("Gofrugal DB connection is not configured");
+    }
+    const unique = [...new Set((productIds || []).filter((id) => id != null))];
+    if (!unique.length) return new Map();
+
+    const chunks = chunkArray(unique, GRN_PRICING_CHUNK_SIZE);
+    const map = new Map();
+
+    try {
+      const chunkRows = await mapWithConcurrency(
+        chunks,
+        GOFRUGAL_QUERY_CONCURRENCY,
+        (ids) =>
+          this._queryGofrugal(
+            `SELECT d.MMD_ITEM_CODE AS item_code,
+                    MAX(${LATEST_GRN_LINE_EXPR}) AS latest_line
+             FROM \`${GOFRUGAL_DTL}\` d
+             LEFT JOIN \`${GOFRUGAL_HDR}\` h ON h.MMH_MRC_NO = d.MMD_MRC_NO
+             WHERE d.MMD_ITEM_CODE IN (${ids.map(() => "?").join(", ")})
+             GROUP BY d.MMD_ITEM_CODE`,
+            ids
+          )
+      );
+
+      // Two MMD_ITEM_CODE spellings can normalize to the same product id, so
+      // keep the highest encoded line per product rather than the first seen —
+      // the encoding sorts newest-last, same as the comparison MAX() did.
+      const bestLine = new Map();
+      chunkRows.forEach((rows) => {
+        (rows || []).forEach((row) => {
+          const productId = normalizeItemCode(
+            row.item_code ?? row.MMD_ITEM_CODE
+          );
+          if (productId == null) return;
+          const encoded = row.latest_line ?? row.LATEST_LINE;
+          if (encoded == null) return;
+          const current = bestLine.get(productId);
+          if (current == null || String(encoded) > current) {
+            bestLine.set(productId, String(encoded));
           }
-        );
+        });
+      });
+
+      bestLine.forEach((encoded, productId) => {
+        const line = parseLatestGrnLine(encoded);
+        if (!line) return;
+        map.set(productId, {
+          mrp: parseOptionalNumber(line.mrp),
+          net_cost: parseOptionalNumber(line.net_cost),
+        });
+      });
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "REPOSITORY.STOCK_RECEIVED",
+        code: "REPOSITORY.STOCK_RECEIVED.LATEST_GRN_PRICING",
+        description: err.toString(),
+        category: "",
+        ref: {},
+      });
+      throw err;
+    }
+
+    return map;
+  }
+
+  _queryGofrugal(sql, params) {
+    return new Promise((resolve, reject) => {
+      this.gofrugalDb.query(sql, params, (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows || []);
       });
     });
   }

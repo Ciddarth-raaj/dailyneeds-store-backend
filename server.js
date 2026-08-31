@@ -900,6 +900,18 @@ class Server {
       }
     );
 
+    // 8:15AM everyday - just after the stock holding sync (7:30AM), so the
+    // first person to open Purchase Ref gets a warm cache instead of paying
+    // for the full rebuild.
+    const PURCHASE_REF_WARM_CRON = "15 8 * * *";
+    this.cronService.register(
+      "purchase_ref_cache_warm",
+      PURCHASE_REF_WARM_CRON,
+      async () => {
+        await this.purchaseRefUsecase.refresh();
+      }
+    );
+
     const SANDBOX_GST_TAXPAYER_REFRESH_CRON = "*/2 * * * *";
     this.cronService.register(
       "sandbox_gst_taxpayer_session_refresh",
