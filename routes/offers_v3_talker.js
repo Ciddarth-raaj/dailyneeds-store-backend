@@ -106,6 +106,35 @@ class OffersV3TalkerRoutes {
       res.end();
     });
 
+    // -----------------------------------------------------------------
+    // Printing the physical talkers
+    // -----------------------------------------------------------------
+
+    router.get("/print-cards", async (req, res) => {
+      try {
+        const data = await this.talkerUsecase.getPrintCards({
+          status: req.query.status,
+          group_type: req.query.group_type,
+        });
+        res.json(data);
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
+    router.post("/print-cards/sync-text", async (req, res) => {
+      try {
+        const data = await this.talkerUsecase.syncExpectedText(
+          req.body?.group_ids
+        );
+        res.json(data);
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
     router.get("/groups/:id(\\d+)", async (req, res) => {
       try {
         const data = await this.talkerUsecase.getGroup(

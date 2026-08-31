@@ -388,6 +388,60 @@ class OffersV3TalkerRepository {
     );
   }
 
+  /**
+   * Everything a printed shelf talker needs, one row per article in a group.
+   *
+   * The three printed wordings are all derived from the offer itself - a
+   * percentage, a rupees-off, or a special price - so none of them needs the
+   * per-outlet selling price. That is what makes one print run valid for every
+   * outlet: nothing outlet-specific ends up on the card.
+   *
+   * offer_type and value are taken as a pair from the item-level offer when
+   * there is one, falling back to the batch offer, rather than maxed
+   * independently - a type from one offer and a value from another would print
+   * a wrong sign.
+   */
+  listPrintData({ status, group_type } = {}) {
+    const where = ["g.status <> 'ended'"];
+    const params = [];
+    if (status) {
+      where.push("g.status = ?");
+      params.push(status);
+    }
+    if (group_type) {
+      where.push("g.group_type = ?");
+      params.push(group_type);
+    }
+    return this._query(
+      `SELECT g.id AS group_id, g.label, g.group_type, g.status, g.supplier,
+              g.talker_text, g.active_to,
+              gi.item_code, pt.de_name AS item_name,
+              COALESCE(MAX(oi.offer_type), MAX(ob.offer_type)) AS offer_type,
+              COALESCE(MAX(oi.value), MAX(ob.value)) AS value
+       FROM \`${GROUPS_TABLE}\` g
+       JOIN \`${GROUP_ITEMS_TABLE}\` gi ON gi.group_id = g.id
+       LEFT JOIN product_table pt ON pt.product_id = gi.item_code
+       LEFT JOIN \`offers_v3_item\` oi ON oi.item_code = gi.item_code AND oi.status = 'active'
+       LEFT JOIN \`offers_v3_batch\` ob ON ob.item_code = gi.item_code
+            AND ob.status IN ('active', 'zero_stock_flagged')
+       WHERE ${where.join(" AND ")}
+       GROUP BY g.id, g.label, g.group_type, g.status, g.supplier, g.talker_text,
+                g.active_to, gi.item_code, pt.de_name
+       ORDER BY g.label ASC, pt.de_name ASC`,
+      params,
+      "LIST_PRINT_DATA"
+    );
+  }
+
+  setTalkerText(group_id, talker_text) {
+    return this._query(
+      `UPDATE \`${GROUPS_TABLE}\` SET talker_text = ? WHERE id = ?`,
+      [talker_text, group_id],
+      "SET_TALKER_TEXT",
+      { group_id }
+    );
+  }
+
   // ---------------------------------------------------------------------
   // Locations
   // ---------------------------------------------------------------------

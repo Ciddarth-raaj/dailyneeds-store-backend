@@ -791,6 +791,154 @@ class OffersV3TalkerUsecase {
     });
     return { code: 200 };
   }
+
+  // ---------------------------------------------------------------------
+  // Printing the physical talkers
+  // ---------------------------------------------------------------------
+
+  /**
+   * One card per sign to print. A group normally yields exactly one card; a
+   * group whose articles carry different offers yields one card per distinct
+   * offer and is flagged mixed, because a single sign cannot honestly
+   * advertise two different discounts.
+   *
+   * Articles whose offer has since ended are dropped rather than printed - a
+   * talker for a dead offer is worse than no talker at all.
+   */
+  async getPrintCards({ status, group_type } = {}) {
+    const rows = await this.talkerRepo.listPrintData({ status, group_type });
+
+    const groups = new Map();
+    for (const row of rows) {
+      if (!groups.has(row.group_id)) {
+        groups.set(row.group_id, { meta: row, offers: new Map(), dropped: [] });
+      }
+      const g = groups.get(row.group_id);
+      const wording = talkerWording(row.offer_type, row.value);
+      if (!wording) {
+        g.dropped.push(row.item_name || `Item ${row.item_code}`);
+        continue;
+      }
+      const key = `${row.offer_type}|${row.value}`;
+      if (!g.offers.has(key)) {
+        g.offers.set(key, {
+          offer_type: row.offer_type,
+          value: row.value,
+          wording,
+          items: [],
+        });
+      }
+      g.offers.get(key).items.push({
+        item_code: row.item_code,
+        item_name: row.item_name,
+      });
+    }
+
+    const cards = [];
+    for (const { meta, offers, dropped } of groups.values()) {
+      const mixed = offers.size > 1;
+      for (const offer of offers.values()) {
+        const text = printedText(offer.wording);
+        // A brand sign is read as that supplier's block, so it carries the
+        // supplier name. An individual sign covers one article, so it carries
+        // the product name instead.
+        const title =
+          meta.group_type === "individual"
+            ? offer.items[0]?.item_name || meta.label
+            : meta.supplier || meta.label;
+        cards.push({
+          group_id: meta.group_id,
+          group_type: meta.group_type,
+          status: meta.status,
+          label: meta.label,
+          title,
+          headline: offer.wording.headline,
+          subline: offer.wording.subline,
+          offer_type: offer.offer_type,
+          value: offer.value,
+          active_to: meta.active_to,
+          item_count: offer.items.length,
+          items: offer.items,
+          printed_text: text,
+          // The photo check compares what is on the shelf against talker_text.
+          // If those two disagree, every photo of a correctly-placed sign
+          // fails, so the mismatch has to be visible before anything prints.
+          expected_text: meta.talker_text || null,
+          expected_text_matches:
+            !meta.talker_text || String(meta.talker_text).trim() === text,
+          mixed,
+          dropped_items: dropped,
+        });
+      }
+    }
+    return { code: 200, cards };
+  }
+
+  /**
+   * Records what the printed sign actually says, so the photo check has
+   * something true to compare against. Skips mixed groups: there is no single
+   * expected text for a group printing two different signs.
+   */
+  async syncExpectedText(group_ids) {
+    const ids = Array.isArray(group_ids) ? group_ids : [];
+    if (!ids.length) return { code: 422, msg: "No groups selected" };
+
+    const { cards } = await this.getPrintCards({});
+    const chosen = cards.filter((c) => ids.includes(c.group_id));
+
+    let updated = 0;
+    // A mixed group yields several cards, so it would otherwise be reported
+    // skipped once per card.
+    const skipped = new Set();
+    for (const card of chosen) {
+      if (card.mixed) {
+        skipped.add(card.label);
+        continue;
+      }
+      if (card.expected_text === card.printed_text) continue;
+      await this.talkerRepo.setTalkerText(card.group_id, card.printed_text);
+      updated += 1;
+    }
+    return { code: 200, updated, skipped: [...skipped] };
+  }
+}
+
+/**
+ * Offer values are DECIMAL(12,2), so a 22% offer arrives as "22.00". A shelf
+ * talker reading "22.00% OFF" looks like a mistake, so trailing zeros go.
+ */
+function printNumber(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return n % 1 === 0 ? String(n) : n.toFixed(2);
+}
+
+/**
+ * The wording for each kind of offer, fixed by the people who read the sign:
+ * a percentage is "% off on MRP", a flat discount is what you save off MRP,
+ * and a fixed price is a special price - it carries no MRP reference because
+ * the offer replaces the price rather than discounting it.
+ *
+ * None of the three needs the outlet's selling price, which is what makes one
+ * print run valid across every outlet.
+ */
+function talkerWording(offer_type, value) {
+  const num = printNumber(value);
+  if (num === null) return null;
+  if (offer_type === "percentage") {
+    return { headline: `${num}% OFF`, subline: "ON MRP" };
+  }
+  if (offer_type === "flat") {
+    return { headline: `SAVE \u20b9${num}`, subline: "ON MRP" };
+  }
+  if (offer_type === "fixed_price") {
+    return { headline: `SPL PRICE \u20b9${num}`, subline: null };
+  }
+  return null;
+}
+
+function printedText({ headline, subline }) {
+  return subline ? `${headline} ${subline}` : headline;
 }
 
 function safeParse(json) {
@@ -808,3 +956,4 @@ module.exports = (talkerRepo, outletRepo) => {
 
 module.exports.deriveGroupingKey = groupingKey;
 module.exports.displayOutletName = displayOutletName;
+module.exports.talkerWording = talkerWording;
