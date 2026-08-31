@@ -21,6 +21,29 @@ const ACTIVE_OFFER_ARTICLES_SQL = `
   SELECT item_code FROM \`offers_v3_batch\` WHERE status IN ('active', 'zero_stock_flagged')
 `;
 
+/**
+ * The one offer an article is shown as carrying, as a single sortable string.
+ *
+ * An article can hold an item-level offer and several batch offers at once, so
+ * the type and the value have to be picked from the *same* offer: maxed
+ * independently they could pair a type from one with a value from another and
+ * report an offer nobody made. MySQL 5.7 has no window functions, so the row
+ * is chosen by encoding it - item-level first, then type, then value - and
+ * taking MAX(), the same trick used for latest-GRN pricing.
+ *
+ * CONCAT yields NULL if any part is NULL, so a row with no offer simply loses.
+ */
+const OFFER_PICK_SQL = `
+  MAX(CONCAT(
+    IF(oi.offer_type IS NOT NULL, '1', '0'),
+    RPAD(COALESCE(oi.offer_type, ob.offer_type), 12, ' '),
+    LPAD(CAST(ROUND(COALESCE(oi.value, ob.value) * 100) AS CHAR), 14, '0')
+  ))
+`;
+
+const OFFER_TYPE_FROM_PICK = `TRIM(SUBSTRING(${OFFER_PICK_SQL}, 2, 12))`;
+const OFFER_VALUE_FROM_PICK = `CAST(SUBSTRING(${OFFER_PICK_SQL}, 14) AS DECIMAL(16, 2)) / 100`;
+
 function chunk(arr, size) {
   const chunks = [];
   for (let i = 0; i < arr.length; i += size) {
@@ -325,18 +348,17 @@ class OffersV3TalkerRepository {
    * again would silently move it out of that draft.
    */
   listUngroupedArticles() {
-    // An article can carry several batch offers at once, so the offer columns
-    // are aggregated - the list only needs to show what kind of offer it is,
-    // not enumerate every one.
     return this._query(
       `SELECT a.item_code, pt.de_name AS item_name,
-              MAX(COALESCE(oi.offer_type, ob.offer_type)) AS offer_type,
-              MAX(COALESCE(oi.value, ob.value)) AS value
+              MAX(pci.de_distributor) AS supplier,
+              ${OFFER_TYPE_FROM_PICK} AS offer_type,
+              ${OFFER_VALUE_FROM_PICK} AS value
        FROM (${ACTIVE_OFFER_ARTICLES_SQL}) a
        LEFT JOIN product_table pt ON pt.product_id = a.item_code
        LEFT JOIN \`offers_v3_item\` oi ON oi.item_code = a.item_code AND oi.status = 'active'
        LEFT JOIN \`offers_v3_batch\` ob ON ob.item_code = a.item_code
             AND ob.status IN ('active', 'zero_stock_flagged')
+       LEFT JOIN price_checker_items pci ON pci.product_id = a.item_code
        LEFT JOIN \`${GROUP_ITEMS_TABLE}\` gi ON gi.item_code = a.item_code
        WHERE gi.group_id IS NULL
        GROUP BY a.item_code, pt.de_name
@@ -358,8 +380,8 @@ class OffersV3TalkerRepository {
     return this._query(
       `SELECT a.item_code, pt.de_name AS item_name,
               MAX(pci.de_distributor) AS supplier,
-              MAX(COALESCE(oi.offer_type, ob.offer_type)) AS offer_type,
-              MAX(COALESCE(oi.value, ob.value)) AS value,
+              ${OFFER_TYPE_FROM_PICK} AS offer_type,
+              ${OFFER_VALUE_FROM_PICK} AS value,
               MAX(gi.group_id) AS group_id,
               MAX(g.label) AS group_label,
               MAX(g.status) AS group_status
