@@ -852,7 +852,12 @@ class OffersV3TalkerUsecase {
           status: meta.status,
           label: meta.label,
           title,
-          headline: offer.wording.headline,
+          // The sign is set in three parts: a small lead word, the number
+          // itself as large as the card allows, and a small line under it.
+          // One long string at that size runs off a 105mm card.
+          lead: offer.wording.lead,
+          big: offer.wording.big,
+          trail: offer.wording.trail,
           subline: offer.wording.subline,
           offer_type: offer.offer_type,
           value: offer.value,
@@ -926,20 +931,22 @@ function talkerWording(offer_type, value) {
   const num = printNumber(value);
   if (num === null) return null;
   if (offer_type === "percentage") {
-    return { headline: `${num}% OFF`, subline: "ON MRP" };
+    return { lead: null, big: `${num}%`, trail: "OFF", subline: "ON MRP" };
   }
   if (offer_type === "flat") {
-    return { headline: `SAVE \u20b9${num}`, subline: "ON MRP" };
+    return { lead: "SAVE", big: `\u20b9${num}`, trail: null, subline: "ON MRP" };
   }
   if (offer_type === "fixed_price") {
-    return { headline: `SPL PRICE \u20b9${num}`, subline: null };
+    return { lead: "SPL PRICE", big: `\u20b9${num}`, trail: null, subline: null };
   }
   return null;
 }
 
-function printedText({ headline, subline }) {
-  return subline ? `${headline} ${subline}` : headline;
+/** The whole sign as one line - what the photo check compares against. */
+function printedText({ lead, big, trail, subline }) {
+  return [lead, big, trail, subline].filter(Boolean).join(" ");
 }
+
 
 function safeParse(json) {
   try {
