@@ -341,13 +341,22 @@ class OffersV3TalkerRepository {
    * An offer live with no talker and no check is exactly what this catches.
    */
   listUngroupedArticles() {
+    // An article can carry several batch offers at once, so the offer columns
+    // are aggregated - the list only needs to show what kind of offer it is,
+    // not enumerate every one.
     return this._query(
-      `SELECT a.item_code, pt.de_name AS item_name
+      `SELECT a.item_code, pt.de_name AS item_name,
+              MAX(COALESCE(oi.offer_type, ob.offer_type)) AS offer_type,
+              MAX(COALESCE(oi.value, ob.value)) AS value
        FROM (${ACTIVE_OFFER_ARTICLES_SQL}) a
        LEFT JOIN product_table pt ON pt.product_id = a.item_code
+       LEFT JOIN \`offers_v3_item\` oi ON oi.item_code = a.item_code AND oi.status = 'active'
+       LEFT JOIN \`offers_v3_batch\` ob ON ob.item_code = a.item_code
+            AND ob.status IN ('active', 'zero_stock_flagged')
        LEFT JOIN \`${GROUP_ITEMS_TABLE}\` gi ON gi.item_code = a.item_code
        LEFT JOIN \`${GROUPS_TABLE}\` g ON g.id = gi.group_id AND g.status = 'published'
        WHERE g.id IS NULL
+       GROUP BY a.item_code, pt.de_name
        ORDER BY a.item_code ASC`,
       [],
       "LIST_UNGROUPED"
