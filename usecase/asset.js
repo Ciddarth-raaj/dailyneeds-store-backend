@@ -26,7 +26,8 @@ const ALLOWED_FOLDERS = {
   receipts: true,
   employee_image: true,
   tickets: true,
-  "expiry-checker": true
+  "expiry-checker": true,
+  offer_talkers: true,
 };
 
 class AssetUsecase {
