@@ -145,11 +145,46 @@ function deriveVerdict(observation) {
   };
 }
 
-function getClient() {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    throw new Error("ANTHROPIC_API_KEY is not configured");
+/**
+ * Whether any credential source is configured. Checked only to fail with a
+ * useful message - the SDK does the actual resolution.
+ */
+function hasCredentials() {
+  if (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN) {
+    return true;
   }
-  return new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  // Workload identity federation: the SDK exchanges the identity token itself
+  // and refreshes it, but only when the whole set is present.
+  return Boolean(
+    process.env.ANTHROPIC_FEDERATION_RULE_ID &&
+      process.env.ANTHROPIC_ORGANIZATION_ID &&
+      process.env.ANTHROPIC_SERVICE_ACCOUNT_ID &&
+      (process.env.ANTHROPIC_IDENTITY_TOKEN_FILE ||
+        process.env.ANTHROPIC_IDENTITY_TOKEN)
+  );
+}
+
+function getClient() {
+  // Constructed with no arguments on purpose: the SDK resolves credentials
+  // itself, so this works with a static API key, an auth token, or workload
+  // identity federation without a code change.
+  //
+  // Careful: ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN outrank federation even
+  // when set to an empty string, which silently stops federation activating.
+  if (
+    process.env.ANTHROPIC_API_KEY === "" ||
+    process.env.ANTHROPIC_AUTH_TOKEN === ""
+  ) {
+    throw new Error(
+      "ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN is set but empty - unset it, or federation will not activate"
+    );
+  }
+  if (!hasCredentials()) {
+    throw new Error(
+      "No Anthropic credentials configured (set ANTHROPIC_API_KEY, or the federation environment variables)"
+    );
+  }
+  return new Anthropic();
 }
 
 async function runCheck(client, model, imageUrl, expectationText) {
