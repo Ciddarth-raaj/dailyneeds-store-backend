@@ -416,6 +416,11 @@ class OffersV3TalkerUsecase {
     return this.talkerRepo.listUngroupedArticles();
   }
 
+  /** The pool a group's articles can be picked from: things actually on offer. */
+  listOfferArticles() {
+    return this.talkerRepo.listOfferArticles();
+  }
+
   async resolveSuggestedItem(id, accept, resolved_by) {
     const row = await this.talkerRepo.resolveSuggestedItem(
       id,

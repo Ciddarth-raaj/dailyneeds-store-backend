@@ -95,6 +95,16 @@ class OffersV3TalkerRoutes {
       res.end();
     });
 
+    router.get("/offer-articles", async (req, res) => {
+      try {
+        const data = await this.talkerUsecase.listOfferArticles();
+        res.json({ code: 200, data, meta: { count: data.length } });
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
     router.get("/groups/:id(\\d+)", async (req, res) => {
       try {
         const data = await this.talkerUsecase.getGroup(

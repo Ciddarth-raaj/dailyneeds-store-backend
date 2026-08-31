@@ -10,6 +10,17 @@ const EDIT_LOG_TABLE = "offers_v3_talker_group_edit_log";
 
 const BULK_CHUNK_SIZE = 1000;
 
+/**
+ * Articles currently carrying an offer, from both routes an offer can arrive
+ * by: an item-level offer, or a batch-level price drop. UNION dedupes an
+ * article that has both, so this is one row per item_code.
+ */
+const ACTIVE_OFFER_ARTICLES_SQL = `
+  SELECT item_code FROM \`offers_v3_item\` WHERE status = 'active'
+  UNION
+  SELECT item_code FROM \`offers_v3_batch\` WHERE status IN ('active', 'zero_stock_flagged')
+`;
+
 function chunk(arr, size) {
   const chunks = [];
   for (let i = 0; i < arr.length; i += size) {
@@ -331,15 +342,34 @@ class OffersV3TalkerRepository {
    */
   listUngroupedArticles() {
     return this._query(
-      `SELECT oi.item_code, pt.de_name AS item_name, oi.offer_type, oi.value
-       FROM \`offers_v3_item\` oi
-       LEFT JOIN product_table pt ON pt.product_id = oi.item_code
-       LEFT JOIN \`${GROUP_ITEMS_TABLE}\` gi ON gi.item_code = oi.item_code
+      `SELECT a.item_code, pt.de_name AS item_name
+       FROM (${ACTIVE_OFFER_ARTICLES_SQL}) a
+       LEFT JOIN product_table pt ON pt.product_id = a.item_code
+       LEFT JOIN \`${GROUP_ITEMS_TABLE}\` gi ON gi.item_code = a.item_code
        LEFT JOIN \`${GROUPS_TABLE}\` g ON g.id = gi.group_id AND g.status = 'published'
-       WHERE oi.status = 'active' AND g.id IS NULL
-       ORDER BY oi.item_code ASC`,
+       WHERE g.id IS NULL
+       ORDER BY a.item_code ASC`,
       [],
       "LIST_UNGROUPED"
+    );
+  }
+
+  /**
+   * Every article currently on offer, with the group it already belongs to (if
+   * any). This is the only valid pool for talker group membership - a talker
+   * advertises an offer, so an article with no offer has no sign.
+   */
+  listOfferArticles() {
+    return this._query(
+      `SELECT a.item_code, pt.de_name AS item_name,
+              gi.group_id, g.label AS group_label, g.status AS group_status
+       FROM (${ACTIVE_OFFER_ARTICLES_SQL}) a
+       LEFT JOIN product_table pt ON pt.product_id = a.item_code
+       LEFT JOIN \`${GROUP_ITEMS_TABLE}\` gi ON gi.item_code = a.item_code
+       LEFT JOIN \`${GROUPS_TABLE}\` g ON g.id = gi.group_id
+       ORDER BY pt.de_name ASC`,
+      [],
+      "LIST_OFFER_ARTICLES"
     );
   }
 
