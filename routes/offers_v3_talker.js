@@ -18,7 +18,7 @@ function sendResult(res, result) {
 
 const groupSchema = Joi.object({
   label: Joi.string().required(),
-  group_type: Joi.string().valid("brand", "individual").optional(),
+  group_type: Joi.string().valid("individual", "group").optional(),
   supplier: Joi.string().allow("", null).optional(),
   markdown_pct: Joi.number().allow(null).optional(),
   talker_text: Joi.string().allow("", null).optional(),
@@ -31,7 +31,7 @@ const groupSchema = Joi.object({
 
 const groupUpdateSchema = Joi.object({
   label: Joi.string().optional(),
-  group_type: Joi.string().valid("brand", "individual").optional(),
+  group_type: Joi.string().valid("individual", "group").optional(),
   supplier: Joi.string().allow("", null).optional(),
   markdown_pct: Joi.number().allow(null).optional(),
   talker_text: Joi.string().allow("", null).optional(),
@@ -137,6 +137,9 @@ class OffersV3TalkerRoutes {
         const data = await this.talkerUsecase.getPrintCards({
           status: req.query.status,
           group_type: req.query.group_type,
+          outlet_id: req.query.outlet_id
+            ? Number(req.query.outlet_id)
+            : undefined,
         });
         res.json(data);
       } catch (err) {
@@ -233,19 +236,6 @@ class OffersV3TalkerRoutes {
       res.end();
     });
 
-    router.post("/groups/:id(\\d+)/publish", async (req, res) => {
-      try {
-        const result = await this.talkerUsecase.publishGroup(
-          parseInt(req.params.id, 10),
-          getActingUser(req)
-        );
-        sendResult(res, result);
-      } catch (err) {
-        respondError(res, err);
-      }
-      res.end();
-    });
-
     router.post("/groups/:id(\\d+)/end", async (req, res) => {
       try {
         const result = await this.talkerUsecase.endGroup(
@@ -276,6 +266,23 @@ class OffersV3TalkerRoutes {
         const data = await this.talkerUsecase.deleteGroups(req.body?.group_ids, {
           dry_run: Boolean(req.body?.dry_run),
         });
+        sendResult(res, data);
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
+    router.post("/talkers/bulk-create", async (req, res) => {
+      try {
+        const data = await this.talkerUsecase.bulkCreateTalkers(
+          {
+            item_codes: req.body?.item_codes,
+            mode: req.body?.mode,
+            label: req.body?.label,
+          },
+          getActingUser(req)
+        );
         sendResult(res, data);
       } catch (err) {
         respondError(res, err);
@@ -331,33 +338,6 @@ class OffersV3TalkerRoutes {
       res.end();
     });
 
-    router.post("/groups/auto-derive", async (req, res) => {
-      try {
-        const result = await this.talkerUsecase.autoDeriveGroups(
-          getActingUser(req)
-        );
-        sendResult(res, result);
-      } catch (err) {
-        respondError(res, err);
-      }
-      res.end();
-    });
-
-    router.post("/suggested/:id(\\d+)/resolve", async (req, res) => {
-      try {
-        const accept = req.body && req.body.accept === true;
-        const result = await this.talkerUsecase.resolveSuggestedItem(
-          parseInt(req.params.id, 10),
-          accept,
-          getActingUser(req)
-        );
-        sendResult(res, result);
-      } catch (err) {
-        respondError(res, err);
-      }
-      res.end();
-    });
-
     // -----------------------------------------------------------------
     // Queue + capture (outlet staff)
     // -----------------------------------------------------------------
@@ -386,7 +366,10 @@ class OffersV3TalkerRoutes {
         const schema = Joi.object({
           group_id: Joi.number().integer().required(),
           outlet_id: Joi.number().integer().required(),
-          label: Joi.string().required(),
+          label: Joi.string().allow("").optional(),
+          location_type: Joi.string()
+            .valid("aisle", "floor_display", "end_cap", "other")
+            .required(),
         });
         const isValid = Joi.validate(req.body, schema);
         if (isValid.error) {

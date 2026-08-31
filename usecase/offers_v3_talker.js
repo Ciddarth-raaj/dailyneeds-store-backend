@@ -7,15 +7,11 @@ const {
   sheetLayout,
 } = require("../constants/talker_print");
 
+/** Where a card can sit on the shelf. Mirrors the location_type enum. */
+const LOCATION_TYPES = ["aisle", "floor_display", "end_cap", "other"];
+
 /** Standing talkers are re-shot on roughly this cycle. */
 const ROTATION_DAYS = 10;
-
-/**
- * Smallest cluster worth a brand group. A supplier with one article on offer
- * isn't a brand block, so it gets no sign at all - an article on offer is
- * individual by default, and only earns a sign when someone decides it does.
- */
-const MIN_BRAND_GROUP_ARTICLES = 2;
 
 /**
  * How many not-yet-mapped groups an outlet is asked to find in one day.
@@ -70,26 +66,6 @@ function daysBetween(fromIso, toIso) {
   return Math.floor((b - a) / 86400000);
 }
 
-/**
- * Auto-grouping key. Articles sharing a supplier and the same markdown rule are
- * one brand sign; anything that doesn't cluster (special price, flat rupee-off)
- * stands alone as an individual group.
- *
- * NOTE: this is the one place the clustering rule lives - the mpfd_* value
- * vocabulary comes from the Gofrugal markup/markdown master, so tune only here
- * once it has been run against production data.
- */
-function groupingKey(row) {
-  const supplier = String(row.supplier ?? "").trim();
-  const isPercentage = /perc|%/i.test(String(row.mpfd_amt_perc ?? ""));
-  const markdownValue = String(row.mpfd_value ?? "").trim();
-
-  if (!supplier || !markdownValue || !isPercentage) {
-    return null; // individual
-  }
-  return `${supplier.toLowerCase()}|${markdownValue}`;
-}
-
 class OffersV3TalkerUsecase {
   constructor(talkerRepo, outletRepo) {
     this.talkerRepo = talkerRepo;
@@ -109,10 +85,9 @@ class OffersV3TalkerUsecase {
     if (!group) {
       return null;
     }
-    const [items, locations, suggested, editLog] = await Promise.all([
+    const [items, locations, editLog] = await Promise.all([
       this.talkerRepo.listGroupItems(id),
       this.talkerRepo.listLocations({ group_id: id }),
-      this.talkerRepo.listSuggestedItems(id),
       this.talkerRepo.listGroupEditLog(id),
     ]);
     return {
@@ -122,7 +97,6 @@ class OffersV3TalkerUsecase {
         ...l,
         outlet_name: displayOutletName(l.outlet_name),
       })),
-      suggested,
       edit_log: editLog,
     };
   }
@@ -131,7 +105,7 @@ class OffersV3TalkerUsecase {
     const id = await this.talkerRepo.createGroup({
       ...data,
       origin: "manual",
-      status: "draft",
+      status: "published",
       created_by,
     });
     if (data.item_codes && data.item_codes.length) {
@@ -209,25 +183,6 @@ class OffersV3TalkerUsecase {
         await this.talkerRepo.flagGroupLocationsTier1(id);
       }
     }
-    return { code: 200 };
-  }
-
-  async publishGroup(id, changed_by) {
-    const group = await this.talkerRepo.getGroupById(id);
-    if (!group) {
-      return { code: 404, msg: "Group not found" };
-    }
-    const items = await this.talkerRepo.listGroupItems(id);
-    if (!items.length) {
-      return { code: 400, msg: "Cannot publish a group with no articles" };
-    }
-    await this.talkerRepo.updateGroup(id, { status: "published" });
-    await this.talkerRepo.logGroupEdit({
-      group_id: id,
-      changed_by,
-      change_type: "publish",
-      detail: { item_count: items.length },
-    });
     return { code: 200 };
   }
 
@@ -347,105 +302,78 @@ class OffersV3TalkerUsecase {
     return { code: 200, id: newId };
   }
 
-  // ---------------------------------------------------------------------
-  // Auto-derivation
-  // ---------------------------------------------------------------------
-
   /**
-   * Clusters active offer articles into draft brand groups by supplier +
-   * markdown. Brand blocks only: an article that doesn't join one is left
-   * alone, because being individual is the normal state and needs no sign.
-   * Making one is a deliberate act, from Ungrouped or by hand.
+   * The two ways a talker gets made, both deliberate:
    *
-   * Articles already in a group are left alone - once published, auto-grouping
-   * stops touching membership, and anything new lands in that group's suggested
-   * tray instead of being added silently.
+   *   individual - one talker per article, named after the product
+   *   group      - one talker over the whole selection, named after the supplier
+   *
+   * Same selection, two intents, so the caller states which rather than the
+   * count deciding for them. A talker is live the moment it exists - nothing
+   * proposes talkers any more, so there is nothing to review.
    */
-  async autoDeriveGroups(created_by) {
-    const rows = await this.talkerRepo.listOfferArticlesForGrouping();
-    const existingGroups = await this.talkerRepo.listGroups({});
-    const existingByKey = new Map();
-    for (const g of existingGroups) {
-      if (g.supplier && g.markdown_pct !== null) {
-        existingByKey.set(
-          `${String(g.supplier).toLowerCase()}|${g.markdown_pct}`,
-          g
+  async bulkCreateTalkers({ item_codes, mode, label }, created_by) {
+    const codes = [...new Set((Array.isArray(item_codes) ? item_codes : [])
+      .map((n) => Number(n))
+      .filter(Number.isInteger))];
+    if (!codes.length) return { code: 422, msg: "No articles selected" };
+    if (mode !== "individual" && mode !== "group") {
+      return { code: 422, msg: "mode must be 'individual' or 'group'" };
+    }
+
+    const pool = await this.talkerRepo.listOfferArticles();
+    const byCode = new Map(pool.map((r) => [r.item_code, r]));
+    const unknown = codes.filter((c) => !byCode.has(c));
+    if (unknown.length) {
+      return {
+        code: 400,
+        msg: `${unknown.length} article(s) are not on offer, so they cannot have a talker`,
+      };
+    }
+
+    if (mode === "individual") {
+      const ids = [];
+      for (const code of codes) {
+        const row = byCode.get(code);
+        const res = await this.createGroup(
+          {
+            label: row.item_name || `Item ${code}`,
+            group_type: "individual",
+            item_codes: [code],
+          },
+          created_by
         );
+        ids.push(res.id);
       }
+      return { code: 200, created: ids.length, ids };
     }
 
-    const grouped = new Map();
-    // Articles that are not part of a brand block. They are counted, not acted
-    // on: an article on offer needs no sign of its own unless someone decides
-    // it does.
-    let leftIndividual = 0;
-    for (const row of rows) {
-      const key = groupingKey(row);
-      if (!key) {
-        leftIndividual += 1;
-        continue;
-      }
-      if (!grouped.has(key)) {
-        grouped.set(key, []);
-      }
-      grouped.get(key).push(row);
+    // One card cannot honestly advertise two different discounts, so a mixed
+    // selection is refused rather than silently printing one of them.
+    const offers = new Set(
+      codes.map((c) => {
+        const row = byCode.get(c);
+        return `${row.offer_type}|${row.value}`;
+      })
+    );
+    if (offers.size > 1) {
+      return {
+        code: 400,
+        msg: `These articles carry ${offers.size} different offers. A group talker shows one offer, so make separate talkers or narrow the selection.`,
+      };
     }
 
-    let createdBrandGroups = 0;
-    let suggested = 0;
-    const suggestions = [];
-
-    for (const [key, members] of grouped.entries()) {
-      // A supplier with one article on offer is not a brand block, so it is
-      // left as an individual article with no sign.
-      if (members.length < MIN_BRAND_GROUP_ARTICLES) {
-        leftIndividual += members.length;
-        continue;
-      }
-      const existing = existingByKey.get(key);
-      if (existing) {
-        // Never add silently to an existing group.
-        for (const m of members) {
-          suggestions.push({ group_id: existing.id, item_code: m.item_code });
-        }
-        continue;
-      }
-      const first = members[0];
-      const id = await this.talkerRepo.createGroup({
-        label: `${first.supplier} — ${first.mpfd_value}% off`,
-        group_type: "brand",
-        origin: "auto",
-        status: "draft",
-        supplier: first.supplier,
-        markdown_pct: Number(first.mpfd_value) || null,
-        expected_pct_off: Number(first.mpfd_value) || null,
-        created_by,
-      });
-      await this.talkerRepo.addItemsToGroup(
-        id,
-        members.map((m) => m.item_code)
-      );
-      await this.talkerRepo.logGroupEdit({
-        group_id: id,
-        changed_by: created_by,
-        change_type: "create",
-        detail: { origin: "auto", item_count: members.length },
-      });
-      createdBrandGroups += 1;
-    }
-
-    if (suggestions.length) {
-      const res = await this.talkerRepo.addSuggestedItems(suggestions);
-      suggested = res.added;
-    }
-
-    return {
-      code: 200,
-      createdGroups: createdBrandGroups,
-      createdBrandGroups,
-      leftIndividual,
-      suggested,
-    };
+    const first = byCode.get(codes[0]);
+    const res = await this.createGroup(
+      {
+        label: label || first.supplier || first.item_name || "New talker",
+        group_type: "group",
+        supplier: first.supplier ?? null,
+        item_codes: codes,
+      },
+      created_by
+    );
+    return { code: 200, created: 1, ids: [res.id] };
   }
 
   listUngrouped() {
@@ -455,31 +383,6 @@ class OffersV3TalkerUsecase {
   /** The pool a group's articles can be picked from: things actually on offer. */
   listOfferArticles() {
     return this.talkerRepo.listOfferArticles();
-  }
-
-  async resolveSuggestedItem(id, accept, resolved_by) {
-    const row = await this.talkerRepo.resolveSuggestedItem(
-      id,
-      accept ? "accepted" : "rejected",
-      resolved_by
-    );
-    if (!row) {
-      return { code: 404, msg: "Suggestion not found" };
-    }
-    if (accept) {
-      await this.talkerRepo.addItemsToGroup(row.group_id, [row.item_code]);
-      await this.talkerRepo.logGroupEdit({
-        group_id: row.group_id,
-        changed_by: resolved_by,
-        change_type: "items_added",
-        detail: { added: [row.item_code], via: "suggestion" },
-      });
-      const group = await this.talkerRepo.getGroupById(row.group_id);
-      if (group && group.status === "published") {
-        await this.talkerRepo.flagGroupLocationsTier1(row.group_id);
-      }
-    }
-    return { code: 200 };
   }
 
   // ---------------------------------------------------------------------
@@ -589,21 +492,23 @@ class OffersV3TalkerUsecase {
     };
   }
 
-  async addLocation({ group_id, outlet_id, label }, created_by) {
+  async addLocation({ group_id, outlet_id, label, location_type }, created_by) {
     const group = await this.talkerRepo.getGroupById(group_id);
     if (!group) {
-      return { code: 404, msg: "Group not found" };
+      return { code: 404, msg: "Talker not found" };
     }
+    const type = LOCATION_TYPES.includes(location_type) ? location_type : "other";
     const id = await this.talkerRepo.createLocation({
       group_id,
       outlet_id,
       label,
+      location_type: type,
     });
     await this.talkerRepo.logGroupEdit({
       group_id,
       changed_by: created_by,
       change_type: "location_added",
-      detail: { outlet_id, label },
+      detail: { outlet_id, label, location_type: type },
     });
     return { code: 200, id };
   }
@@ -821,8 +726,20 @@ class OffersV3TalkerUsecase {
    * Articles whose offer has since ended are dropped rather than printed - a
    * talker for a dead offer is worse than no talker at all.
    */
-  async getPrintCards({ status, group_type } = {}) {
+  async getPrintCards({ status, group_type, outlet_id } = {}) {
     const rows = await this.talkerRepo.listPrintData({ status, group_type });
+
+    // The card carries MRP and price, and both are per outlet - which is why
+    // the outlet prints its own. Without an outlet there is no honest price to
+    // put on a card, so the price lines are simply left off.
+    let priceByCode = new Map();
+    if (outlet_id) {
+      const prices = await this.talkerRepo.listPrintPrices(
+        outlet_id,
+        [...new Set(rows.map((r) => r.item_code))]
+      );
+      priceByCode = new Map(prices.map((p) => [p.item_code, p]));
+    }
 
     const groups = new Map();
     for (const row of rows) {
@@ -847,6 +764,7 @@ class OffersV3TalkerUsecase {
       g.offers.get(key).items.push({
         item_code: row.item_code,
         item_name: row.item_name,
+        ...(priceByCode.get(row.item_code) ?? {}),
       });
     }
 
@@ -881,6 +799,13 @@ class OffersV3TalkerUsecase {
           active_to: meta.active_to,
           item_count: offer.items.length,
           items: offer.items,
+          // An individual card quotes its own article. A group card covers many
+          // articles at different prices, so it quotes none - the offer line is
+          // the whole message there.
+          mrp: offer.items.length === 1 ? offer.items[0].mrp ?? null : null,
+          price: offer.items.length === 1 ? offer.items[0].price ?? null : null,
+          price_out_of_stock:
+            offer.items.length === 1 ? offer.items[0].in_stock === false : false,
           printed_text: text,
           // The photo check compares what is on the shelf against talker_text.
           // If those two disagree, every photo of a correctly-placed sign
@@ -1055,7 +980,6 @@ module.exports = (talkerRepo, outletRepo) => {
   return new OffersV3TalkerUsecase(talkerRepo, outletRepo);
 };
 
-module.exports.deriveGroupingKey = groupingKey;
 module.exports.displayOutletName = displayOutletName;
 module.exports.talkerWording = talkerWording;
 module.exports.normalisePrintSettings = normalisePrintSettings;

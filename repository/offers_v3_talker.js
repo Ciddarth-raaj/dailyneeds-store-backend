@@ -2,7 +2,6 @@ const logger = require("../utils/logger");
 
 const GROUPS_TABLE = "offers_v3_talker_groups";
 const GROUP_ITEMS_TABLE = "offers_v3_talker_group_items";
-const SUGGESTED_TABLE = "offers_v3_talker_group_suggested_items";
 const LOCATIONS_TABLE = "offers_v3_talker_group_locations";
 const PROOFS_TABLE = "offers_v3_talker_proofs";
 const PROOF_IMAGES_TABLE = "offers_v3_talker_proof_images";
@@ -83,8 +82,7 @@ class OffersV3TalkerRepository {
     return this._query(
       `SELECT g.*,
               (SELECT COUNT(*) FROM \`${GROUP_ITEMS_TABLE}\` gi WHERE gi.group_id = g.id) AS item_count,
-              (SELECT COUNT(*) FROM \`${LOCATIONS_TABLE}\` gl WHERE gl.group_id = g.id AND gl.active = 1) AS location_count,
-              (SELECT COUNT(*) FROM \`${SUGGESTED_TABLE}\` gs WHERE gs.group_id = g.id AND gs.status = 'pending') AS suggested_count
+              (SELECT COUNT(*) FROM \`${LOCATIONS_TABLE}\` gl WHERE gl.group_id = g.id AND gl.active = 1) AS location_count
        FROM \`${GROUPS_TABLE}\` g
        ${whereSql}
        ORDER BY g.status ASC, g.label ASC`,
@@ -124,7 +122,7 @@ class OffersV3TalkerRepository {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         data.label,
-        data.group_type || "brand",
+        data.group_type || "group",
         data.origin || "manual",
         data.status || "draft",
         data.supplier ?? null,
@@ -314,93 +312,8 @@ class OffersV3TalkerRepository {
   }
 
   // ---------------------------------------------------------------------
-  // Suggested additions tray
-  // ---------------------------------------------------------------------
-
-  listSuggestedItems(group_id) {
-    return this._query(
-      `SELECT s.id, s.group_id, s.item_code, s.status, s.suggested_at, pt.de_name AS item_name
-       FROM \`${SUGGESTED_TABLE}\` s
-       LEFT JOIN product_table pt ON pt.product_id = s.item_code
-       WHERE s.group_id = ? AND s.status = 'pending'
-       ORDER BY s.suggested_at DESC`,
-      [group_id],
-      "LIST_SUGGESTED",
-      { group_id }
-    );
-  }
-
-  async addSuggestedItems(rows) {
-    if (!rows || !rows.length) {
-      return { added: 0 };
-    }
-    let added = 0;
-    for (const batch of chunk(rows, BULK_CHUNK_SIZE)) {
-      const placeholders = batch.map(() => "(?, ?)").join(", ");
-      const params = batch.flatMap((r) => [r.group_id, r.item_code]);
-      const res = await this._query(
-        `INSERT INTO \`${SUGGESTED_TABLE}\` (group_id, item_code) VALUES ${placeholders}
-         ON DUPLICATE KEY UPDATE suggested_at = suggested_at`,
-        params,
-        "ADD_SUGGESTED"
-      );
-      added += res.affectedRows;
-    }
-    return { added };
-  }
-
-  async resolveSuggestedItem(id, status, resolved_by) {
-    const rows = await this._query(
-      `SELECT * FROM \`${SUGGESTED_TABLE}\` WHERE id = ?`,
-      [id],
-      "GET_SUGGESTED",
-      { id }
-    );
-    const row = rows && rows[0] ? rows[0] : null;
-    if (!row) {
-      return null;
-    }
-    await this._query(
-      `UPDATE \`${SUGGESTED_TABLE}\` SET status = ?, resolved_by = ?, resolved_at = NOW() WHERE id = ?`,
-      [status, resolved_by ?? null, id],
-      "RESOLVE_SUGGESTED",
-      { id }
-    );
-    return row;
-  }
-
-  // ---------------------------------------------------------------------
   // Auto-derivation inputs
   // ---------------------------------------------------------------------
-
-  /**
-   * Active Offers V3 articles with the Price Checker classification used for
-   * auto-grouping: supplier (distributor) and the item's markup/markdown rule.
-   * price_checker_items holds one row per outlet/batch, so the distributor is
-   * collapsed to one value per article.
-   */
-  listOfferArticlesForGrouping() {
-    return this._query(
-      `SELECT oi.item_code,
-              pt.de_name AS item_name,
-              MAX(pci.de_distributor) AS supplier,
-              MAX(im.mpfd_class_type) AS mpfd_class_type,
-              MAX(im.mpfd_markup_down) AS mpfd_markup_down,
-              MAX(im.mpfd_value) AS mpfd_value,
-              MAX(im.mpfd_amt_perc) AS mpfd_amt_perc,
-              oi.offer_type,
-              oi.value
-       FROM \`offers_v3_item\` oi
-       LEFT JOIN product_table pt ON pt.product_id = oi.item_code
-       LEFT JOIN price_checker_items pci ON pci.product_id = oi.item_code
-       LEFT JOIN item_markupdown im ON im.item_code = oi.item_code
-       WHERE oi.status = 'active'
-       GROUP BY oi.item_code, pt.de_name, oi.offer_type, oi.value
-       ORDER BY oi.item_code ASC`,
-      [],
-      "LIST_ARTICLES_FOR_GROUPING"
-    );
-  }
 
   /**
    * The pool a group can be built from: articles on offer that aren't already
@@ -439,13 +352,26 @@ class OffersV3TalkerRepository {
    * advertises an offer, so an article with no offer has no sign.
    */
   listOfferArticles() {
+    // Carries the offer itself, not just the article: a group talker shows one
+    // offer, so whoever builds one has to be able to see - and the server has
+    // to be able to check - that the selection agrees.
     return this._query(
       `SELECT a.item_code, pt.de_name AS item_name,
-              gi.group_id, g.label AS group_label, g.status AS group_status
+              MAX(pci.de_distributor) AS supplier,
+              MAX(COALESCE(oi.offer_type, ob.offer_type)) AS offer_type,
+              MAX(COALESCE(oi.value, ob.value)) AS value,
+              MAX(gi.group_id) AS group_id,
+              MAX(g.label) AS group_label,
+              MAX(g.status) AS group_status
        FROM (${ACTIVE_OFFER_ARTICLES_SQL}) a
        LEFT JOIN product_table pt ON pt.product_id = a.item_code
+       LEFT JOIN \`offers_v3_item\` oi ON oi.item_code = a.item_code AND oi.status = 'active'
+       LEFT JOIN \`offers_v3_batch\` ob ON ob.item_code = a.item_code
+            AND ob.status IN ('active', 'zero_stock_flagged')
+       LEFT JOIN price_checker_items pci ON pci.product_id = a.item_code
        LEFT JOIN \`${GROUP_ITEMS_TABLE}\` gi ON gi.item_code = a.item_code
        LEFT JOIN \`${GROUPS_TABLE}\` g ON g.id = gi.group_id
+       GROUP BY a.item_code, pt.de_name
        ORDER BY pt.de_name ASC`,
       [],
       "LIST_OFFER_ARTICLES"
@@ -527,6 +453,52 @@ class OffersV3TalkerRepository {
     );
   }
 
+  /**
+   * The MRP and price a card should carry, per article, for one outlet.
+   *
+   * Batch data holds a row per outlet per batch, so an article can have several
+   * MRPs at one store. The newest batch that still has stock is the one a
+   * customer will actually pick up, so that is what the shelf card must quote -
+   * a sold-out batch would print a price nobody can buy at.
+   *
+   * Falls back to the newest batch outright when nothing is in stock, so a card
+   * still prints; the caller flags those rather than showing a blank.
+   */
+  listPrintPrices(outlet_id, item_codes) {
+    if (!item_codes || !item_codes.length) return Promise.resolve([]);
+    // MySQL 5.7 has no window functions, so "newest with stock" is encoded as a
+    // sortable string and picked with MAX().
+    return this._query(
+      `SELECT item_code,
+              MAX(CONCAT(
+                IF(COALESCE(stock_qty, 0) > 0, '1', '0'),
+                DATE_FORMAT(COALESCE(price_uploaded_at, '1970-01-01'), '%Y%m%d%H%i%s'),
+                LPAD(CAST(ROUND(COALESCE(mrp, 0) * 100) AS CHAR), 12, '0'),
+                LPAD(CAST(ROUND(COALESCE(selling_price, 0) * 100) AS CHAR), 12, '0')
+              )) AS pick
+       FROM \`offers_v3_batch_data\`
+       WHERE outlet_id = ? AND item_code IN (?)
+       GROUP BY item_code`,
+      [outlet_id, item_codes],
+      "LIST_PRINT_PRICES",
+      { outlet_id }
+    ).then((rows) =>
+      rows.map((r) => {
+        // in_stock(1) + uploaded_at(14) + mrp paise(12) + price paise(12).
+        // Paise rather than a formatted decimal: FORMAT() inserts thousands
+        // separators, which would shift every field after it.
+        const pick = String(r.pick || "");
+        const paise = (from) => Number(pick.slice(from, from + 12)) / 100;
+        return {
+          item_code: r.item_code,
+          in_stock: pick.slice(0, 1) === "1",
+          mrp: paise(15) || null,
+          price: paise(27) || null,
+        };
+      })
+    );
+  }
+
   // ---------------------------------------------------------------------
   // Locations
   // ---------------------------------------------------------------------
@@ -574,11 +546,17 @@ class OffersV3TalkerRepository {
     return rows && rows[0] ? rows[0] : null;
   }
 
-  async createLocation({ group_id, outlet_id, label, pending_tier = 1 }) {
+  async createLocation({
+    group_id,
+    outlet_id,
+    label,
+    location_type = "other",
+    pending_tier = 1,
+  }) {
     const res = await this._query(
-      `INSERT INTO \`${LOCATIONS_TABLE}\` (group_id, outlet_id, label, pending_tier, pending_since)
-       VALUES (?, ?, ?, ?, NOW())`,
-      [group_id, outlet_id, label, pending_tier],
+      `INSERT INTO \`${LOCATIONS_TABLE}\` (group_id, outlet_id, label, location_type, pending_tier, pending_since)
+       VALUES (?, ?, ?, ?, ?, NOW())`,
+      [group_id, outlet_id, label, location_type, pending_tier],
       "CREATE_LOCATION",
       { group_id, outlet_id }
     );
