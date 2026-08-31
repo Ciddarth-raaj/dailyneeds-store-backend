@@ -11,10 +11,9 @@ const {
 const ROTATION_DAYS = 10;
 
 /**
- * Smallest cluster worth a *brand* group. A supplier with one article on offer
- * isn't a brand block, so it doesn't get a "Supplier - 22% off" sign; it falls
- * through and gets an individual sign named after the product instead. Either
- * way it is created for you - making one by hand per article doesn't scale.
+ * Smallest cluster worth a brand group. A supplier with one article on offer
+ * isn't a brand block, so it gets no sign at all - an article on offer is
+ * individual by default, and only earns a sign when someone decides it does.
  */
 const MIN_BRAND_GROUP_ARTICLES = 2;
 
@@ -353,7 +352,11 @@ class OffersV3TalkerUsecase {
   // ---------------------------------------------------------------------
 
   /**
-   * Cluster active offer articles into draft groups by supplier + markdown.
+   * Clusters active offer articles into draft brand groups by supplier +
+   * markdown. Brand blocks only: an article that doesn't join one is left
+   * alone, because being individual is the normal state and needs no sign.
+   * Making one is a deliberate act, from Ungrouped or by hand.
+   *
    * Articles already in a group are left alone - once published, auto-grouping
    * stops touching membership, and anything new lands in that group's suggested
    * tray instead of being added silently.
@@ -372,11 +375,14 @@ class OffersV3TalkerUsecase {
     }
 
     const grouped = new Map();
-    const individuals = [];
+    // Articles that are not part of a brand block. They are counted, not acted
+    // on: an article on offer needs no sign of its own unless someone decides
+    // it does.
+    let leftIndividual = 0;
     for (const row of rows) {
       const key = groupingKey(row);
       if (!key) {
-        individuals.push(row);
+        leftIndividual += 1;
         continue;
       }
       if (!grouped.has(key)) {
@@ -386,15 +392,14 @@ class OffersV3TalkerUsecase {
     }
 
     let createdBrandGroups = 0;
-    let createdIndividualGroups = 0;
     let suggested = 0;
     const suggestions = [];
 
     for (const [key, members] of grouped.entries()) {
-      // A supplier with one article on offer is not a brand block - it drops
-      // down to an individual sign below rather than becoming a brand group.
+      // A supplier with one article on offer is not a brand block, so it is
+      // left as an individual article with no sign.
       if (members.length < MIN_BRAND_GROUP_ARTICLES) {
-        individuals.push(...members);
+        leftIndividual += members.length;
         continue;
       }
       const existing = existingByKey.get(key);
@@ -429,23 +434,6 @@ class OffersV3TalkerUsecase {
       createdBrandGroups += 1;
     }
 
-    // Everything that didn't join a brand block - a lone supplier, a flat
-    // rupee-off, a special price - gets its own sign named after the product.
-    // These are created rather than left for someone to make by hand: there
-    // can be hundreds, and one sign per article is the normal case for them.
-    for (const row of individuals) {
-      const id = await this.talkerRepo.createGroup({
-        label: row.item_name || `Item ${row.item_code}`,
-        group_type: "individual",
-        origin: "auto",
-        status: "draft",
-        supplier: row.supplier ?? null,
-        created_by,
-      });
-      await this.talkerRepo.addItemsToGroup(id, [row.item_code]);
-      createdIndividualGroups += 1;
-    }
-
     if (suggestions.length) {
       const res = await this.talkerRepo.addSuggestedItems(suggestions);
       suggested = res.added;
@@ -453,9 +441,9 @@ class OffersV3TalkerUsecase {
 
     return {
       code: 200,
-      createdGroups: createdBrandGroups + createdIndividualGroups,
+      createdGroups: createdBrandGroups,
       createdBrandGroups,
-      createdIndividualGroups,
+      leftIndividual,
       suggested,
     };
   }

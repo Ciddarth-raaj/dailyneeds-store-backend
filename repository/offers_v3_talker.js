@@ -403,8 +403,13 @@ class OffersV3TalkerRepository {
   }
 
   /**
-   * Safety net: active offer articles not covered by any published group.
-   * An offer live with no talker and no check is exactly what this catches.
+   * The pool a group can be built from: articles on offer that aren't already
+   * in one. Not a gap to be closed - an article on offer is individual by
+   * default and needs no sign - so this is a picker, not an alert.
+   *
+   * Excludes membership of any group, draft included: an article sitting in a
+   * draft someone is still assembling is already spoken for, and offering it
+   * again would silently move it out of that draft.
    */
   listUngroupedArticles() {
     // An article can carry several batch offers at once, so the offer columns
@@ -420,8 +425,7 @@ class OffersV3TalkerRepository {
        LEFT JOIN \`offers_v3_batch\` ob ON ob.item_code = a.item_code
             AND ob.status IN ('active', 'zero_stock_flagged')
        LEFT JOIN \`${GROUP_ITEMS_TABLE}\` gi ON gi.item_code = a.item_code
-       LEFT JOIN \`${GROUPS_TABLE}\` g ON g.id = gi.group_id AND g.status = 'published'
-       WHERE g.id IS NULL
+       WHERE gi.group_id IS NULL
        GROUP BY a.item_code, pt.de_name
        ORDER BY a.item_code ASC`,
       [],
