@@ -3,6 +3,17 @@ const { checkTalkerPhoto } = require("../services/talker_check");
 
 /** Standing talkers are re-shot on roughly this cycle. */
 const ROTATION_DAYS = 10;
+
+/**
+ * How many not-yet-mapped groups an outlet is asked to find in one day.
+ *
+ * Without this, day one of a full rollout shows every store a list of all
+ * 300-400 published groups at once, every one of them pinned as mandatory.
+ * Nobody works that list. Capping it lets the location map build a bit at a
+ * time on its own, instead of depending on someone remembering to phase the
+ * rollout by hand.
+ */
+const DISCOVERY_PER_DAY = 15;
 /** Outlets whose photos keep failing get sampled harder. */
 const POOR_HIT_RATE = 0.8;
 const POOR_HIT_RATE_ROTATION_DAYS = 5;
@@ -498,7 +509,9 @@ class OffersV3TalkerUsecase {
 
     // Discovery rows: the first time a group reaches this outlet, staff
     // photograph each place the brand sits, creating locations as they go.
-    for (const g of undiscovered) {
+    // Only a day's worth is offered - the rest wait their turn, so a full
+    // rollout doesn't open with an unworkable list.
+    for (const g of undiscovered.slice(0, DISCOVERY_PER_DAY)) {
       queue.push({
         location_id: null,
         location_label: null,
@@ -527,6 +540,10 @@ class OffersV3TalkerUsecase {
       round_date: day,
       rotation_days: rotationDays,
       accept_rate: acceptRate,
+      // What's left to map, so staff can see the job is finite and HQ can see
+      // how far the rollout has got.
+      discovery_remaining: Math.max(0, undiscovered.length - DISCOVERY_PER_DAY),
+      discovery_total: undiscovered.length,
       data: queue,
     };
   }
