@@ -2,7 +2,7 @@ const logger = require("../utils/logger");
 const { checkTalkerPhoto } = require("../services/talker_check");
 const {
   DEFAULT_PRINT_SETTINGS,
-  LOGO_POSITIONS,
+  LEGACY_LOGO_POSITIONS,
   PRINT_SETTING_LIMITS,
   sheetLayout,
 } = require("../constants/talker_print");
@@ -991,19 +991,24 @@ function normalisePrintSettings(input) {
   const raw = input && typeof input === "object" ? input : {};
   const out = { ...DEFAULT_PRINT_SETTINGS };
 
+  // A setting saved when the logo had a dropdown rather than a position still
+  // has to put the logo where its author left it.
+  if (raw.logo_x === undefined && LEGACY_LOGO_POSITIONS[raw.logo_position]) {
+    Object.assign(out, LEGACY_LOGO_POSITIONS[raw.logo_position]);
+  }
+
   for (const [key, { min, max }] of Object.entries(PRINT_SETTING_LIMITS)) {
     const n = Number(raw[key]);
     if (Number.isFinite(n)) {
       out[key] = Math.min(max, Math.max(min, n));
     }
   }
-  if (LOGO_POSITIONS.includes(raw.logo_position)) {
-    out.logo_position = raw.logo_position;
-  }
   for (const key of ["brand_color", "offer_color"]) {
     if (HEX_COLOR.test(String(raw[key] ?? ""))) out[key] = raw[key];
   }
-  if (raw.show_border !== undefined) out.show_border = Boolean(raw.show_border);
+  for (const key of ["show_border", "show_logo"]) {
+    if (raw[key] !== undefined) out[key] = Boolean(raw[key]);
+  }
 
   return out;
 }
