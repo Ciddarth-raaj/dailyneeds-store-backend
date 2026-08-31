@@ -5,6 +5,14 @@ const { checkTalkerPhoto } = require("../services/talker_check");
 const ROTATION_DAYS = 10;
 
 /**
+ * Smallest cluster worth its own group. A supplier with a single article on
+ * offer isn't a brand block, and auto-creating a group per article buries the
+ * real ones under hundreds of one-article entries. Singletons are left
+ * ungrouped instead, where the Ungrouped tab surfaces them for a decision.
+ */
+const MIN_GROUP_ARTICLES = 2;
+
+/**
  * How many not-yet-mapped groups an outlet is asked to find in one day.
  *
  * Without this, day one of a full rollout shows every store a list of all
@@ -351,9 +359,15 @@ class OffersV3TalkerUsecase {
 
     let createdGroups = 0;
     let suggested = 0;
+    let leftUngrouped = individuals.length;
     const suggestions = [];
 
     for (const [key, members] of grouped.entries()) {
+      // A supplier with one article on offer is not a brand block.
+      if (members.length < MIN_GROUP_ARTICLES) {
+        leftUngrouped += members.length;
+        continue;
+      }
       const existing = existingByKey.get(key);
       if (existing) {
         // Never add silently to an existing group.
@@ -386,18 +400,9 @@ class OffersV3TalkerUsecase {
       createdGroups += 1;
     }
 
-    for (const row of individuals) {
-      const id = await this.talkerRepo.createGroup({
-        label: row.item_name || `Item ${row.item_code}`,
-        group_type: "individual",
-        origin: "auto",
-        status: "draft",
-        supplier: row.supplier ?? null,
-        created_by,
-      });
-      await this.talkerRepo.addItemsToGroup(id, [row.item_code]);
-      createdGroups += 1;
-    }
+    // Articles that don't cluster (no supplier, a flat rupee-off, a special
+    // price) are deliberately NOT turned into one-article groups. They stay in
+    // the Ungrouped list so someone decides whether they need a sign at all.
 
     if (suggestions.length) {
       const res = await this.talkerRepo.addSuggestedItems(suggestions);
@@ -408,7 +413,7 @@ class OffersV3TalkerUsecase {
       code: 200,
       createdGroups,
       suggested,
-      individuals: individuals.length,
+      leftUngrouped,
     };
   }
 
