@@ -77,6 +77,7 @@ class OffersV3TalkerRoutes {
         const data = await this.talkerUsecase.listGroups({
           status: req.query.status,
           search: req.query.search,
+          group_type: req.query.group_type,
         });
         res.json({ code: 200, data });
       } catch (err) {

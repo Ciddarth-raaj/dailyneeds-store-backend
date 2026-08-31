@@ -61,12 +61,18 @@ class OffersV3TalkerRepository {
   // Groups
   // ---------------------------------------------------------------------
 
-  async listGroups({ status, search } = {}) {
+  async listGroups({ status, search, group_type } = {}) {
     const where = [];
     const params = [];
     if (status) {
       where.push("g.status = ?");
       params.push(status);
+    }
+    // Individual signs can outnumber brand groups many times over, so the list
+    // has to be filterable by type or the brand blocks get lost in them.
+    if (group_type) {
+      where.push("g.group_type = ?");
+      params.push(group_type);
     }
     if (search) {
       where.push("(g.label LIKE ? OR g.supplier LIKE ?)");
