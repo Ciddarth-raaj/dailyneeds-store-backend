@@ -10,6 +10,10 @@ class PurchaseGstUsecase {
   async getById(gst_tally_purchase_id) {
     return this.purchaseGstRepo.getById(gst_tally_purchase_id);
   }
+
+  async deleteTallyRow(gst_tally_purchase_id) {
+    return this.purchaseGstRepo.deleteTallyRow(gst_tally_purchase_id);
+  }
 }
 
 module.exports = (purchaseGstRepo) => {

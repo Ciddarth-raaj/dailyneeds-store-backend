@@ -52,6 +52,26 @@ class PurchaseGstRoutes {
       }
       res.end();
     });
+
+    router.delete("/:id", async (req, res) => {
+      try {
+        const id = parseInt(req.params.id, 10);
+        if (!Number.isFinite(id)) {
+          res.status(422).json({ code: 422, msg: "Invalid id" });
+          res.end();
+          return;
+        }
+        const result = await this.purchaseGstUsecase.deleteTallyRow(id);
+        if (result.code === 404 || result.code === 409) {
+          res.status(result.code).json(result);
+        } else {
+          res.json(result);
+        }
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
   }
 
   getRouter() {
