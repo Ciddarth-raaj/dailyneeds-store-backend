@@ -11,7 +11,28 @@ const S3 = require("../services/s3");
 const ALLOWED_FILE_TYPES = {
   image: true,
   pdf: true,
+  video: true,
 };
+
+const MB = 1024 * 1024;
+
+/**
+ * Size ceiling per folder. Tickets carry phone video of a problem on the shop
+ * floor, which no still image budget covers; everything else stays where it was.
+ */
+const DEFAULT_MAX_UPLOAD_BYTES = 10 * MB;
+const MAX_UPLOAD_BYTES_BY_FOLDER = {
+  tickets: 50 * MB,
+};
+
+const maxBytesForFolder = (folder) =>
+  MAX_UPLOAD_BYTES_BY_FOLDER[folder] || DEFAULT_MAX_UPLOAD_BYTES;
+
+/** The parser has to accept the largest allowance; per-folder limits apply after. */
+const PARSER_MAX_FILE_SIZE = Math.max(
+  DEFAULT_MAX_UPLOAD_BYTES,
+  ...Object.values(MAX_UPLOAD_BYTES_BY_FOLDER)
+);
 
 const ALLOWED_FOLDERS = {
   products: true,
@@ -37,8 +58,7 @@ class AssetUsecase {
     return new Promise((resolve, reject) => {
       const form = new formidable.IncomingForm();
       form.multiples = false;
-      //5 MB
-      form.maxFileSize = 10 * 1024 * 1024;
+      form.maxFileSize = PARSER_MAX_FILE_SIZE;
       form.parse(req, async (err, fields, files) => {
         if (err) {
           logger.Log({
@@ -75,6 +95,20 @@ class AssetUsecase {
 
         const file = files.file;
 
+        // formidable can only be given one ceiling up front, so the folder's
+        // own limit is checked here rather than silently accepting 50MB
+        // everywhere.
+        const maxBytes = maxBytesForFolder(fields.folder);
+        if (file.size > maxBytes) {
+          resolve({
+            code: 422,
+            msg: `File is too large. The limit for this upload is ${Math.round(
+              maxBytes / MB
+            )}MB.`,
+          });
+          return;
+        }
+
         const { ext: fileExtenion, mime } = await FileType.fromFile(file.path);
         const fileType = IMAGE.getFileType(mime);
 
@@ -104,7 +138,13 @@ class AssetUsecase {
         const fileName = fields.folder + "/" + baseName + "." + fileExtenion;
 
         try {
-          if (fileExtenion != "webp" && fileExtenion != "pdf")
+          // Jimp reads images only — handing it a video throws, and a video
+          // has nothing to compress here anyway.
+          if (
+            fileType === "image" &&
+            fileExtenion != "webp" &&
+            fileExtenion != "pdf"
+          )
             await IMAGE.compress(file.path, file.path);
           const remoteUrl = await S3.uploadFile(file.path, fileName, mime);
           resolve({ code: 200, remoteUrl });

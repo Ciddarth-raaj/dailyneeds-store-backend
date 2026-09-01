@@ -589,10 +589,7 @@ class TicketUsecase {
       ]);
 
       if (includeImages && ticket.images && ticket.images.length > 0) {
-        const media = ticket.images.map((item) => ({
-          type: "photo",
-          media: item.s3_url,
-        }));
+        const media = ticketsUtil.toTelegramMedia(ticket.images);
         for (const chatId of [outletChatId, departmentChatId]) {
           if (!chatId) continue;
           try {
