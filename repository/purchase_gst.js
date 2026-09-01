@@ -1,7 +1,9 @@
 const logger = require("../utils/logger");
+const { WAREHOUSE_OUTLET_ID } = require("../constants/outlets");
 
 const TABLE = "gst_tally_purchase";
 const INTERNAL_TABLE = "gst_tally_purchase_internal";
+const SOURCE_SYSTEM = "system";
 
 function parseTaxJson(val) {
   if (val == null) return [];
@@ -63,6 +65,14 @@ class PurchaseGstRepository {
     return new Promise((resolve, reject) => {
       const conditions = [];
       const values = [];
+
+      // An invoice reaches this table twice: once as `system` when the purchase is
+      // pushed to Tally (master_id `<purchase_id>-purchase-entry`) and again as
+      // `tally` when Tally syncs it back under its own MasterID, so master_id never
+      // dedupes the pair. Outside the warehouse the Tally row is the record of
+      // truth, so drop the `system` copy for every other outlet.
+      conditions.push(`(p.source != ? OR p.retail_outlet_id = ?)`);
+      values.push(SOURCE_SYSTEM, WAREHOUSE_OUTLET_ID);
 
       if (filters.retail_outlet_id) {
         conditions.push("p.retail_outlet_id = ?");
