@@ -674,7 +674,13 @@ class Server {
     const ebMasterListRouter = require("./routes/eb_master_list")(
       this.ebMasterListUsecase
     );
-    const ticketRouter = require("./routes/ticket")(this.ticketUsecase);
+    this.permissions = require("./middlewares/permissions")(
+      this.designationUsecase
+    );
+    const ticketRouter = require("./routes/ticket")(
+      this.ticketUsecase,
+      this.permissions
+    );
     const telegramDepartmentsRouter = require("./routes/telegram_departments")(
       this.telegramDepartmentsUsecase
     );
@@ -883,6 +889,26 @@ class Server {
       STOCK_CHECKER_PENDING_CRON,
       async () => {
         await this.stockCheckerUsecase.runDailyPendingStockCheckReport();
+      }
+    );
+
+    // 6AM everyday - materialise recurring tasks that fall due today.
+    const RECURRING_TASKS_CRON = "0 6 * * *";
+    this.cronService.register(
+      "recurring_task_generation",
+      RECURRING_TASKS_CRON,
+      async () => {
+        await this.ticketUsecase.runRecurringTaskGeneration();
+      }
+    );
+
+    // 9AM everyday - nudge each chat about work that is past its due date.
+    const OVERDUE_REMINDER_CRON = "0 9 * * *";
+    this.cronService.register(
+      "ticket_overdue_reminders",
+      OVERDUE_REMINDER_CRON,
+      async () => {
+        await this.ticketUsecase.runOverdueReminders();
       }
     );
 
