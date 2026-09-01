@@ -1,5 +1,15 @@
 const moment = require("moment");
+const logger = require("./logger");
 const { normalizePurchaseTaxArrays } = require("./purchase_tax");
+
+/**
+ * A ledger line that looks like it carries tax or taxable value. Used only to
+ * decide whether an unrecognised line is worth reporting: party, rounding and
+ * charge ledgers are expected not to match and are not interesting.
+ */
+function looksLikeTaxLedger(name) {
+  return /purchase|gst|cess/i.test(name);
+}
 
 const OUTLET_VOUCHER_TYPE_MAP = {
   2: "Purchase",
@@ -95,6 +105,7 @@ function extractTaxArraysFromLedgerEntries(ledgerentries, supplierGstn) {
 
   const taxableByRate = new Map();
   const taxValueByRate = new Map();
+  const unrecognised = [];
 
   for (const entry of ledgerentries) {
     const name = String(entry.LedgerName || "");
@@ -103,12 +114,14 @@ function extractTaxArraysFromLedgerEntries(ledgerentries, supplierGstn) {
       continue;
     }
     const absAmt = Math.abs(amount);
+    let recognised = false;
 
     if (
       name === "Local GST Purchase Nil Rated" ||
       name === "IGST Purchase Nil Rated"
     ) {
       taxableByRate.set(0, (taxableByRate.get(0) || 0) + absAmt);
+      recognised = true;
       continue;
     }
 
@@ -117,6 +130,7 @@ function extractTaxArraysFromLedgerEntries(ledgerentries, supplierGstn) {
       const combinedRate = parseFloat(match[1]);
       const perc = combinedRate / 2;
       taxableByRate.set(perc, (taxableByRate.get(perc) || 0) + absAmt);
+      recognised = true;
       continue;
     }
 
@@ -124,6 +138,7 @@ function extractTaxArraysFromLedgerEntries(ledgerentries, supplierGstn) {
     if (match && useIgst) {
       const perc = parseFloat(match[1]);
       taxableByRate.set(perc, (taxableByRate.get(perc) || 0) + absAmt);
+      recognised = true;
       continue;
     }
 
@@ -134,6 +149,7 @@ function extractTaxArraysFromLedgerEntries(ledgerentries, supplierGstn) {
         `cgst-${perc}`,
         (taxValueByRate.get(`cgst-${perc}`) || 0) + absAmt
       );
+      recognised = true;
       continue;
     }
 
@@ -144,6 +160,7 @@ function extractTaxArraysFromLedgerEntries(ledgerentries, supplierGstn) {
         `sgst-${perc}`,
         (taxValueByRate.get(`sgst-${perc}`) || 0) + absAmt
       );
+      recognised = true;
       continue;
     }
 
@@ -154,6 +171,16 @@ function extractTaxArraysFromLedgerEntries(ledgerentries, supplierGstn) {
         `igst-${perc}`,
         (taxValueByRate.get(`igst-${perc}`) || 0) + absAmt
       );
+      recognised = true;
+    }
+
+    // Nothing claimed this line. Silently dropping it is how a voucher ends up
+    // stored with no taxable value and no tax at all, so keep the name to
+    // report - the two ways that happens are a ledger named unlike any pattern
+    // here, and a local/interstate line arriving on a voucher classified the
+    // other way by its GSTIN.
+    if (!recognised && looksLikeTaxLedger(name)) {
+      unrecognised.push(name);
     }
   }
 
@@ -187,16 +214,20 @@ function extractTaxArraysFromLedgerEntries(ledgerentries, supplierGstn) {
     });
   }
 
-  return normalizePurchaseTaxArrays({
-    sgst,
-    cgst,
-    igst,
-    cess,
-    tot_sgst_amt,
-    tot_cgst_amt,
-    tot_igst_amt,
-    tot_gst_cess_amt,
-  });
+  return {
+    ...normalizePurchaseTaxArrays({
+      sgst,
+      cgst,
+      igst,
+      cess,
+      tot_sgst_amt,
+      tot_cgst_amt,
+      tot_igst_amt,
+      tot_gst_cess_amt,
+    }),
+    // Read by the caller for reporting only; not a stored column.
+    unrecognisedTaxLedgers: unrecognised,
+  };
 }
 
 /**
@@ -211,6 +242,29 @@ function mapTallyDataToPurchaseRows(tallyData) {
   );
   const supplierGstn = tallyData.BuyerGSTIN || null;
   const taxes = extractTaxArraysFromLedgerEntries(ledgerentries, supplierGstn);
+
+  // A voucher that stores no taxable value and no tax is not obviously broken
+  // once it is a row on a page - the amount still looks right. Report it at
+  // import, naming the lines that were not understood and which way the GSTIN
+  // classified the voucher, so the cause is visible without the raw payload.
+  if (taxes.unrecognisedTaxLedgers.length) {
+    logger.Log({
+      level: logger.LEVEL.WARN,
+      component: "UTILS.TALLY_PURCHASE_MAPPER",
+      code: "UTILS.TALLY_PURCHASE_MAPPER.UNRECOGNISED_TAX_LEDGER",
+      description: `Tax ledger lines not understood: ${taxes.unrecognisedTaxLedgers.join(
+        ", "
+      )}`,
+      category: "",
+      ref: {
+        MasterID: tallyData.MasterID ?? null,
+        VoucherNumber: tallyData.VoucherNumber ?? null,
+        BuyerGSTIN: supplierGstn,
+        treated_as: shouldUseIgst(supplierGstn) ? "interstate" : "local",
+        unrecognised: taxes.unrecognisedTaxLedgers,
+      },
+    });
+  }
 
   const internal = {
     cash_discount: ledgerAmountByName(ledgerentries, "Cash Discount") || 0,
