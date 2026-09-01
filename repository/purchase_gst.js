@@ -214,6 +214,102 @@ class PurchaseGstRepository {
     });
   }
 
+  /**
+   * Delete several at once. Same rule as one: only rows Tally owns go, and
+   * their matches go with them. Ids that are not deletable are reported back
+   * rather than failing the batch - one system row in a selection should not
+   * stop the rest.
+   */
+  deleteTallyRows(ids) {
+    const list = [
+      ...new Set(
+        (ids || []).map((id) => Number(id)).filter((id) => Number.isFinite(id))
+      ),
+    ];
+    if (!list.length) {
+      return Promise.resolve({ code: 422, msg: "No purchases given" });
+    }
+
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT gst_tally_purchase_id, source
+         FROM ${TABLE}
+         WHERE gst_tally_purchase_id IN (?)`,
+        [list],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PURCHASE_GST",
+              code: "REPOSITORY.PURCHASE_GST.BULK_DELETE_LOOKUP",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            return reject(err);
+          }
+
+          const found = new Map(
+            (rows || []).map((r) => [Number(r.gst_tally_purchase_id), r.source])
+          );
+          const deletable = list.filter((id) => found.get(id) === SOURCE_TALLY);
+          const skipped = list.filter((id) => found.get(id) !== SOURCE_TALLY);
+
+          if (!deletable.length) {
+            return resolve({
+              code: 200,
+              deleted: 0,
+              matches_removed: 0,
+              skipped,
+            });
+          }
+
+          this.db.query(
+            `DELETE FROM gst_purchase_match WHERE gst_tally_purchase_id IN (?)`,
+            [deletable],
+            (matchErr, matchRes) => {
+              if (matchErr) {
+                logger.Log({
+                  level: logger.LEVEL.ERROR,
+                  component: "REPOSITORY.PURCHASE_GST",
+                  code: "REPOSITORY.PURCHASE_GST.BULK_DELETE_MATCH",
+                  description: matchErr.toString(),
+                  category: "",
+                  ref: {},
+                });
+                return reject(matchErr);
+              }
+
+              this.db.query(
+                `DELETE FROM ${TABLE} WHERE gst_tally_purchase_id IN (?)`,
+                [deletable],
+                (delErr, delRes) => {
+                  if (delErr) {
+                    logger.Log({
+                      level: logger.LEVEL.ERROR,
+                      component: "REPOSITORY.PURCHASE_GST",
+                      code: "REPOSITORY.PURCHASE_GST.BULK_DELETE",
+                      description: delErr.toString(),
+                      category: "",
+                      ref: {},
+                    });
+                    return reject(delErr);
+                  }
+                  resolve({
+                    code: 200,
+                    deleted: delRes ? delRes.affectedRows : 0,
+                    matches_removed: matchRes ? matchRes.affectedRows : 0,
+                    skipped,
+                  });
+                }
+              );
+            }
+          );
+        }
+      );
+    });
+  }
+
   getById(gst_tally_purchase_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
