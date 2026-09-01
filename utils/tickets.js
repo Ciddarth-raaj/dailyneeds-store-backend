@@ -19,6 +19,25 @@ const itemTypeLabels = {
   task: { emoji: "✅", label: "Task" },
 };
 
+const VIDEO_EXTENSIONS = ["mp4", "mov", "m4v", "webm", "avi", "mkv", "3gp"];
+
+/**
+ * Attachments are stored as bare S3 urls with no media-type column, so the
+ * extension is what tells a clip from a photo.
+ */
+ticketsUtil.isVideoUrl = (url) => {
+  if (!url) return false;
+  const path = String(url).split("?")[0].toLowerCase();
+  return VIDEO_EXTENSIONS.some((ext) => path.endsWith(`.${ext}`));
+};
+
+/** Telegram rejects a media group that labels a video as a photo. */
+ticketsUtil.toTelegramMedia = (attachments = []) =>
+  attachments.map((item) => ({
+    type: ticketsUtil.isVideoUrl(item.s3_url) ? "video" : "photo",
+    media: item.s3_url,
+  }));
+
 ticketsUtil.escapeMarkdown = (text) => {
   if (!text) return "";
   // Escape special markdown characters for Telegram
@@ -179,7 +198,14 @@ ticketsUtil.formatTicketMessage = async (
   }
 
   if (includeImages && ticket.images && ticket.images.length > 0) {
-    message += `📸 *Images:* ${ticket.images.length}\n`;
+    const videos = ticket.images.filter((item) =>
+      ticketsUtil.isVideoUrl(item.s3_url)
+    ).length;
+    const photos = ticket.images.length - videos;
+    const parts = [];
+    if (photos > 0) parts.push(`${photos} photo${photos === 1 ? "" : "s"}`);
+    if (videos > 0) parts.push(`${videos} video${videos === 1 ? "" : "s"}`);
+    message += `📸 *Attachments:* ${parts.join(", ")}\n`;
   }
 
   message += `\n📄 *Description:*\n${ticketsUtil.escapeMarkdown(
