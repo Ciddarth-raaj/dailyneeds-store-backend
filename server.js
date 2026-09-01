@@ -184,6 +184,9 @@ class Server {
     this.gstPurchaseMatchRepo = require("./repository/gst_purchase_match")(
       this.mysql.connection
     );
+    this.gstPurchaseNo2aRepo = require("./repository/gst_purchase_no_2a")(
+      this.mysql.connection
+    );
     this.debitNoteRepo = require("./repository/debit_note")(
       this.mysql.connection
     );
@@ -434,6 +437,9 @@ class Server {
     this.gstPurchaseMatchUsecase = require("./usecase/gst_purchase_match")(
       this.gstPurchaseMatchRepo
     );
+    this.gstPurchaseNo2aUsecase = require("./usecase/gst_purchase_no_2a")(
+      this.gstPurchaseNo2aRepo
+    );
     // Add materials usecase
     this.materialsUsecase = require("./usecase/materials")(this.materialsRepo);
     this.materialRequestUsecase = require("./usecase/material_request")(
@@ -651,6 +657,9 @@ class Server {
     const purchaseGstMatchRouter = require("./routes/purchase_gst_match")(
       this.gstPurchaseMatchUsecase
     );
+    const purchaseGstNo2aRouter = require("./routes/purchase_gst_no_2a")(
+      this.gstPurchaseNo2aUsecase
+    );
     const purchaseTallyRouter = require("./routes/purchase_tally")(
       this.purchaseTallyUsecase
     );
@@ -816,6 +825,7 @@ class Server {
     app.use("/purchase", purchaseRouter.getRouter());
     app.use("/purchase-gst", purchaseGstRouter.getRouter());
     app.use("/purchase-gst-match", purchaseGstMatchRouter.getRouter());
+    app.use("/purchase-gst-no-2a", purchaseGstNo2aRouter.getRouter());
     app.use("/purchase-tally", purchaseTallyRouter.getRouter());
     app.use("/debit-note-tally", debitNoteTallyRouter.getRouter());
     app.use("/tally", tallyRouter.getRouter());
