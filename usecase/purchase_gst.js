@@ -14,6 +14,10 @@ class PurchaseGstUsecase {
   async deleteTallyRow(gst_tally_purchase_id) {
     return this.purchaseGstRepo.deleteTallyRow(gst_tally_purchase_id);
   }
+
+  async deleteTallyRows(ids) {
+    return this.purchaseGstRepo.deleteTallyRows(ids);
+  }
 }
 
 module.exports = (purchaseGstRepo) => {

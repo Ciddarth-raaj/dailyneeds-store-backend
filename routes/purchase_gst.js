@@ -53,6 +53,33 @@ class PurchaseGstRoutes {
       res.end();
     });
 
+    router.post("/bulk-delete", async (req, res) => {
+      try {
+        const { error, value } = Joi.object({
+          gst_tally_purchase_ids: Joi.array()
+            .items(Joi.number().integer().required())
+            .min(1)
+            .required(),
+        }).validate(req.body);
+        if (error) {
+          res.status(422).json({ code: 422, msg: error.toString() });
+          res.end();
+          return;
+        }
+        const result = await this.purchaseGstUsecase.deleteTallyRows(
+          value.gst_tally_purchase_ids
+        );
+        if (result.code === 422) {
+          res.status(422).json(result);
+        } else {
+          res.json(result);
+        }
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
     router.delete("/:id", async (req, res) => {
       try {
         const id = parseInt(req.params.id, 10);
