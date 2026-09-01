@@ -174,6 +174,30 @@ function extractTaxArraysFromLedgerEntries(ledgerentries, supplierGstn) {
       recognised = true;
     }
 
+    // An expense booked as a purchase is named after the expense account with
+    // the rate in brackets - "Printing & Stationery Expenses (18%IGST)" -
+    // rather than as one of the standard purchase ledgers above. The rate and
+    // tax type next to each other are what identify it; a tax-value line reads
+    // the other way round ("IGST 18% INPUT") and has already been taken above.
+    if (!recognised) {
+      match = name.match(/(\d+(?:\.\d+)?)\s*%\s*(IGST|CGST|SGST|GST)\b/i);
+      if (match) {
+        const rate = parseFloat(match[1]);
+        const kind = match[2].toUpperCase();
+        const isIgstLedger = kind === "IGST";
+        if (isIgstLedger && useIgst) {
+          taxableByRate.set(rate, (taxableByRate.get(rate) || 0) + absAmt);
+          recognised = true;
+        } else if (!isIgstLedger && !useIgst) {
+          // Local ledgers carry the combined rate, halved per component - the
+          // same convention as "LOCAL PURCHASE 18%" above.
+          const perc = rate / 2;
+          taxableByRate.set(perc, (taxableByRate.get(perc) || 0) + absAmt);
+          recognised = true;
+        }
+      }
+    }
+
     // Nothing claimed this line. Silently dropping it is how a voucher ends up
     // stored with no taxable value and no tax at all, so keep the name to
     // report - the two ways that happens are a ledger named unlike any pattern
