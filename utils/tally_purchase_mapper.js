@@ -180,7 +180,18 @@ function extractTaxArraysFromLedgerEntries(ledgerentries, supplierGstn) {
     // tax type next to each other are what identify it; a tax-value line reads
     // the other way round ("IGST 18% INPUT") and has already been taken above.
     if (!recognised) {
-      match = name.match(/(\d+(?:\.\d+)?)\s*%\s*(IGST|CGST|SGST|GST)\b/i);
+      // Both orders are in use: "(18%IGST)" on one voucher, "Mobile@GST 18%"
+      // on the next. A tax-value line reads the same way round as the second
+      // ("IGST 18% INPUT") but has already been taken and skipped above, and
+      // in the mode where it was not taken the guard below rejects it anyway.
+      match =
+        name.match(/(\d+(?:\.\d+)?)\s*%\s*(IGST|CGST|SGST|GST)\b/i) ||
+        (() => {
+          const m = name.match(
+            /\b(IGST|CGST|SGST|GST)\s*@?\s*(\d+(?:\.\d+)?)\s*%/i
+          );
+          return m ? [m[0], m[2], m[1]] : null;
+        })();
       if (match) {
         const rate = parseFloat(match[1]);
         const kind = match[2].toUpperCase();
