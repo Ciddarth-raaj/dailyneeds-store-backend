@@ -159,6 +159,39 @@ class GstB2bRepository {
     });
   }
 
+  /**
+   * B2B blocks for an inclusive range of return periods.
+   * Periods are compared as year*100 + month so a range spanning a year end
+   * (e.g. 2025-11 to 2026-02) stays a single ordered comparison.
+   */
+  getByReturnPeriodRange(fromYear, fromMonth, toYear, toMonth) {
+    const from = Number(fromYear) * 100 + Number(fromMonth);
+    const to = Number(toYear) * 100 + Number(toMonth);
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT gst_b2b_id, year, month, b2b_index, gst_vendor_id, ctin, cfs, created_at
+         FROM ${TABLE}
+         WHERE (year * 100 + month) BETWEEN ? AND ?
+         ORDER BY year ASC, month ASC, b2b_index ASC`,
+        [from, to],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.GST_B2B",
+              code: "REPOSITORY.GST_B2B.GET_BY_PERIOD_RANGE",
+              description: err.toString(),
+              category: "",
+              ref: { fromYear, fromMonth, toYear, toMonth },
+            });
+            return reject(err);
+          }
+          resolve(rows || []);
+        }
+      );
+    });
+  }
+
   insert(row) {
     return new Promise((resolve, reject) => {
       this.db.query(

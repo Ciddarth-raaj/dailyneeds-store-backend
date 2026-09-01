@@ -2,6 +2,12 @@ const router = require("express").Router();
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
 
+/** "YYYY-MM" -> year*100 + month, the form the repository compares on. */
+function periodToNumber(period) {
+  const [year, month] = String(period).split("-");
+  return parseInt(year, 10) * 100 + parseInt(month, 10);
+}
+
 class PurchaseGstMatchRoutes {
   constructor(gstPurchaseMatchUsecase) {
     this.gstPurchaseMatchUsecase = gstPurchaseMatchUsecase;
@@ -24,12 +30,19 @@ class PurchaseGstMatchRoutes {
           to_date: Joi.date(),
           year: Joi.number().integer(),
           month: Joi.number().integer().min(1).max(12),
+          from_period: Joi.string()
+            .trim()
+            .regex(/^[0-9]{4}-(0[1-9]|1[0-2])$/),
+          to_period: Joi.string()
+            .trim()
+            .regex(/^[0-9]{4}-(0[1-9]|1[0-2])$/),
           purchase_id: Joi.number().integer(),
           gst_tally_purchase_id: Joi.number().integer(),
           gst_b2b_invoice_id: Joi.number().integer(),
         })
           .and("from_date", "to_date")
           .and("year", "month")
+          .and("from_period", "to_period")
           .validate(req.query, { abortEarly: false });
 
         if (error) {
@@ -40,22 +53,38 @@ class PurchaseGstMatchRoutes {
 
         const hasDateRange = value.from_date && value.to_date;
         const hasReturnPeriod = value.year != null && value.month != null;
+        const hasPeriodRange = value.from_period && value.to_period;
         const hasIdFilter =
           value.purchase_id != null ||
           value.gst_tally_purchase_id != null ||
           value.gst_b2b_invoice_id != null;
 
-        if (!hasDateRange && !hasReturnPeriod && !hasIdFilter) {
+        if (!hasDateRange && !hasReturnPeriod && !hasPeriodRange && !hasIdFilter) {
           res.status(422).json({
             code: 422,
             msg:
-              "Provide from_date and to_date together, year and month together, or at least one of purchase_id, gst_tally_purchase_id, gst_b2b_invoice_id",
+              "Provide from_date and to_date together, year and month together, from_period and to_period together, or at least one of purchase_id, gst_tally_purchase_id, gst_b2b_invoice_id",
           });
           res.end();
           return;
         }
 
-        const result = await this.gstPurchaseMatchUsecase.getAll(value);
+        const filters = { ...value };
+        if (hasPeriodRange) {
+          // The repository compares periods as year*100 + month.
+          filters.from_period = periodToNumber(value.from_period);
+          filters.to_period = periodToNumber(value.to_period);
+          if (filters.from_period > filters.to_period) {
+            res.status(422).json({
+              code: 422,
+              msg: "from_period must not be after to_period",
+            });
+            res.end();
+            return;
+          }
+        }
+
+        const result = await this.gstPurchaseMatchUsecase.getAll(filters);
         res.json(result);
       } catch (err) {
         respondError(res, err);
