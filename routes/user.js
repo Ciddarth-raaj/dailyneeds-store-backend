@@ -1,6 +1,6 @@
 const router = require("express").Router();
 const Joi = require("@hapi/joi");
-const { getClientIp } = require("../utils/ip");
+const { getClientIp, isLoopbackIp, isPrivateIp } = require("../utils/ip");
 
 class UserRoutes {
   constructor(userUsecase, permissions, ipRestriction) {
@@ -62,8 +62,25 @@ class UserRoutes {
 
     // The address this request came from, so an admin configuring a store's
     // static IP can read it off the screen instead of guessing.
+    //
+    // It also reports whether that address is believable. Behind a reverse
+    // proxy that does not set X-Forwarded-For, every request looks like it
+    // came from localhost; an admin allow-listing that would match every
+    // user on every network. The screen needs to be able to say so rather
+    // than presenting the wrong address as fact.
     router.get("/my-ip", async (req, res) => {
-      res.json({ code: 200, ip: getClientIp(req) });
+      const ip = getClientIp(req);
+      const forwardedFor = req.headers["x-forwarded-for"];
+
+      res.json({
+        code: 200,
+        ip,
+        is_loopback: isLoopbackIp(ip),
+        is_private: isPrivateIp(ip),
+        // Present tells an admin the proxy is passing something through;
+        // absent on a loopback address is the signature of the misconfig.
+        has_forwarded_header: typeof forwardedFor === "string" && forwardedFor.trim() !== "",
+      });
     });
 
     router.get(

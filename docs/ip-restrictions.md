@@ -54,6 +54,39 @@ If the app is ever exposed directly to the internet, set `TRUST_PROXY=false`
 — otherwise a client can spoof `X-Forwarded-For` and defeat the restriction.
 `TRUST_PROXY` also accepts anything Express accepts (a hop count, a subnet).
 
+## Troubleshooting: the screen shows 127.0.0.1
+
+That is the server talking to itself, and it means the reverse proxy in
+front of Node is not sending `X-Forwarded-For`. Express then has nothing to
+read and falls back to the socket address, which is the proxy on localhost.
+
+**Do not allow-list it.** Every request looks identical in this state, so an
+allow-list containing a loopback address matches every user on every
+network — a restriction that reads as configured while enforcing nothing.
+`validateIpPolicy` refuses to save one, and the admin screen shows a banner
+instead of offering the address.
+
+nginx needs, in the `location` block that proxies to the app:
+
+```nginx
+proxy_set_header X-Real-IP       $remote_addr;
+proxy_set_header X-Forwarded-For $remote_addr;
+```
+
+Use `$remote_addr` rather than the more common `$proxy_add_x_forwarded_for`.
+That variable *appends* to whatever the client sent, and `trust proxy: true`
+reads the left-most entry — so a client could send an `X-Forwarded-For` of
+their own and walk straight through the restriction. Overwriting means the
+header only ever carries what the proxy actually saw.
+
+If the appending form is needed (a CDN or load balancer in front that must
+be preserved), set `TRUST_PROXY` to the number of proxy hops instead, so
+Express counts in from the right and ignores anything the client injected.
+
+`GET /user/my-ip` reports `is_loopback`, `is_private` and
+`has_forwarded_header` alongside the address, which is what the banner keys
+off and what to check after changing the proxy config.
+
 ## Allow-list format
 
 Entries are stored comma separated in `user.allowed_ips` and may be:
