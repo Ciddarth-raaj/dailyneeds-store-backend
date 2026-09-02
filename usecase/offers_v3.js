@@ -68,6 +68,63 @@ function buildBatchOfferTelegramMessage(headline, { item_code, item_name, outlet
   ].join("\n");
 }
 
+/**
+ * The terms of an offer that were actually changed by an edit, as old -> new.
+ *
+ * An update carries only the fields the form submitted, and a field can be
+ * submitted holding the value it already had, so "present in the payload" is
+ * not the same as changed. Compared as numbers where both sides are numeric,
+ * since a value arrives as "10" from a form and comes back as 10.00 from a
+ * DECIMAL column - the same offer, spelled differently.
+ */
+function changedOfferTerms(existing, data, fields) {
+  const beforeType = existing.offer_type;
+  const afterType = data.offer_type ?? existing.offer_type;
+  const changes = [];
+  for (const { key, label, format } of fields) {
+    if (data[key] === undefined) continue;
+    const before = existing[key];
+    const after = data[key];
+    const bothNumeric =
+      before != null &&
+      after != null &&
+      !Number.isNaN(Number(before)) &&
+      !Number.isNaN(Number(after));
+    const same = bothNumeric
+      ? Number(before) === Number(after)
+      : String(before ?? "") === String(after ?? "");
+    if (same) continue;
+    changes.push({
+      label,
+      // Each side is formatted with its own offer type: switching a flat
+      // discount to a percentage makes "20 -> 5" read as a cut when it is
+      // "Rs20 off -> 5% off", which may be either.
+      from: format ? format(before, beforeType) : String(before ?? "—"),
+      to: format ? format(after, afterType) : String(after ?? "—"),
+    });
+  }
+  return changes;
+}
+
+const ITEM_OFFER_TERMS = [
+  { key: "offer_type", label: "Offer Type", format: (v) => formatOfferTypeForTelegram(v) },
+  {
+    key: "value",
+    label: "Offer Value",
+    format: (v, offer_type) => formatOfferValueForTelegram(offer_type, v),
+  },
+  { key: "threshold_qty", label: "Threshold Qty" },
+];
+
+const BATCH_OFFER_TERMS = ITEM_OFFER_TERMS.filter(
+  (f) => f.key !== "threshold_qty"
+);
+
+/** The change list appended to an edit alert, one line per changed term. */
+function buildChangeLines(changes) {
+  return ["", "✏️ Changed:", ...changes.map((c) => `• ${c.label}: ${c.from} → ${c.to}`)];
+}
+
 // Telegram alerts are best-effort: a failure here must never break the
 // offer create/update/upload flow that triggered it. Returns the outcome
 // (rather than throwing) so callers can optionally surface it for
@@ -274,6 +331,29 @@ class OffersV3Usecase {
             value: nextValue,
           })
         );
+      } else {
+        // The status did not move, so an alert here is about the terms
+        // themselves changing - a shopper sees a different price and nobody
+        // was told. The two status branches above already carry the terms
+        // they end on, so this stays in the else and never doubles up.
+        const changes = changedOfferTerms(existing, data, ITEM_OFFER_TERMS);
+        if (changes.length) {
+          await notifyOffersV3(
+            [
+              buildItemOfferTelegramMessage("✏️ ITEM-LEVEL OFFER EDITED", {
+                item_code: existing.item_code,
+                item_name: existing.item_name,
+                offer_type: nextOfferType,
+                value: nextValue,
+                threshold_qty:
+                  data.threshold_qty !== undefined
+                    ? data.threshold_qty
+                    : existing.threshold_qty,
+              }),
+              ...buildChangeLines(changes),
+            ].join("\n")
+          );
+        }
       }
       return result;
     } catch (err) {
@@ -430,6 +510,23 @@ class OffersV3Usecase {
             value: nextValue,
           })
         );
+      } else {
+        const changes = changedOfferTerms(existing, data, BATCH_OFFER_TERMS);
+        if (changes.length) {
+          await notifyOffersV3(
+            [
+              buildBatchOfferTelegramMessage("✏️ BATCH-SPECIFIC OFFER EDITED", {
+                item_code: existing.item_code,
+                item_name: existing.item_name,
+                outlet_name: existing.outlet_name ?? existing.outlet_id,
+                batch_no: existing.batch_no,
+                offer_type: nextOfferType,
+                value: nextValue,
+              }),
+              ...buildChangeLines(changes),
+            ].join("\n")
+          );
+        }
       }
       return result;
     } catch (err) {
@@ -1011,3 +1108,6 @@ module.exports = (offersV3Repo, outletRepo, priceCheckerRepo) => {
 
 module.exports.computeExpectedSelling = computeExpectedSelling;
 module.exports.validateOfferValue = validateOfferValue;
+module.exports.changedOfferTerms = changedOfferTerms;
+module.exports.ITEM_OFFER_TERMS = ITEM_OFFER_TERMS;
+module.exports.BATCH_OFFER_TERMS = BATCH_OFFER_TERMS;
