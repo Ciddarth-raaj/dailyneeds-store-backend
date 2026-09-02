@@ -214,6 +214,9 @@ class Server {
       this.mysql.connection
     );
     this.ticketRepo = require("./repository/ticket")(this.mysql.connection);
+    this.advanceRequestRepo = require("./repository/advance_request")(
+      this.mysql.connection
+    );
     this.telegramDepartmentsRepo = require("./repository/telegram_departments")(
       this.mysql.connection
     );
@@ -465,6 +468,9 @@ class Server {
     this.telegramDepartmentsUsecase = require("./usecase/telegram_departments")(
       this.telegramDepartmentsRepo
     );
+    this.advanceRequestUsecase = require("./usecase/advance_request")(
+      this.advanceRequestRepo
+    );
     this.ticketUsecase = require("./usecase/ticket")(
       this.ticketRepo,
       this.employeeUsecase,
@@ -699,6 +705,10 @@ class Server {
     this.permissions = require("./middlewares/permissions")(
       this.designationUsecase
     );
+    const advanceRequestRouter = require("./routes/advance_request")(
+      this.advanceRequestUsecase,
+      this.permissions
+    );
     const ticketRouter = require("./routes/ticket")(
       this.ticketUsecase,
       this.permissions
@@ -840,6 +850,7 @@ class Server {
     app.use("/eb-consumption", ebConsumptionRouter.getRouter());
     app.use("/eb-master-list", ebMasterListRouter.getRouter());
     app.use("/ticket", ticketRouter.getRouter());
+    app.use("/advance-request", advanceRequestRouter.getRouter());
     app.use("/telegram-departments", telegramDepartmentsRouter.getRouter());
     app.use("/job-worksheet", jobWorksheetRouter.getRouter());
     app.use("/sticker-types", stickerTypesRouter.getRouter());
