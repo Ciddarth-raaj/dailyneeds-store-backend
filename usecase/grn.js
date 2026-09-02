@@ -152,8 +152,8 @@ class GrnUsecase {
         ),
       ];
       const [batches, offerDetailsByProductId] = await Promise.all([
-        this.priceCheckerRepo
-          ? this.priceCheckerRepo.listGroupedItemsByProductIds(productIds)
+        this.offersV3Repo
+          ? this.offersV3Repo.listGroupedItemsByProductIds(productIds)
           : [],
         findActiveOfferDetails(productIds, this.hqOffersRepo, this.offersV3Repo),
       ]);

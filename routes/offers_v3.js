@@ -260,6 +260,31 @@ class OffersV3Routes {
       res.end();
     });
 
+    // Grouped batches for one item from the latest Price Upload -- used by
+    // the GRN Price Checker modal.
+    router.get("/items-by-product", async (req, res) => {
+      try {
+        const raw =
+          req.query.product_id != null ? String(req.query.product_id).trim() : "";
+        const productId = parseInt(raw, 10);
+        if (!raw || !Number.isFinite(productId)) {
+          res.status(400).json({ code: 400, msg: "product_id is required" });
+          res.end();
+          return;
+        }
+
+        const data = await this.offersV3Usecase.listGroupedItemsByProductId(productId);
+        res.json({
+          code: 200,
+          data,
+          meta: { product_id: productId, count: data?.length ?? 0 },
+        });
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
     // Untagged-batch alerts
     router.get("/untagged-batches", async (req, res) => {
       try {
