@@ -1,31 +1,58 @@
 const logger = require("../utils/logger");
 
-/**
- * Union of HQ (Offers V2) and Offers V3 active-offer product ids, mirroring
- * Price Checker's attachHqOfferStatus. Returns a Set of string product ids.
- */
-async function findActiveOfferProductIds(
-  productIds,
-  hqOffersRepo,
-  offersV3Repo
-) {
-  if (!productIds.length || (!hqOffersRepo && !offersV3Repo)) {
-    return new Set();
-  }
-  const [hqActiveIds, v3ActiveIds] = await Promise.all([
-    hqOffersRepo ? hqOffersRepo.listActiveOfferProductIds(productIds) : [],
-    offersV3Repo
-      ? offersV3Repo.getItemCodesWithAnyActiveOffer(productIds)
-      : [],
-  ]);
-  return new Set([...hqActiveIds, ...v3ActiveIds].map(String));
-}
-
 function tagOfferProducts(items, activeOfferProductIds) {
   items.forEach((item) => {
     item.is_offer_product =
       item.product_id != null &&
       activeOfferProductIds.has(String(item.product_id));
+  });
+  return items;
+}
+
+/**
+ * Fetches a hover-tooltip-friendly summary of each active offer (HQ/Offers
+ * V2 name, Offers V3 item/batch offer_type+value) for the given product
+ * ids. Returns a Map of string product id -> array of detail objects.
+ */
+async function findActiveOfferDetails(productIds, hqOffersRepo, offersV3Repo) {
+  const map = new Map();
+  if (!productIds.length) return map;
+
+  const [hqDetails, v3Details] = await Promise.all([
+    hqOffersRepo?.listActiveOfferDetailsForProductIds
+      ? hqOffersRepo.listActiveOfferDetailsForProductIds(productIds)
+      : [],
+    offersV3Repo?.listActiveOfferDetailsForItemCodes
+      ? offersV3Repo.listActiveOfferDetailsForItemCodes(productIds)
+      : [],
+  ]);
+
+  (hqDetails || []).forEach((row) => {
+    const key = String(row.product_id);
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push({ source: "hq", offer_name: row.offer_name });
+  });
+
+  (v3Details || []).forEach((row) => {
+    const key = String(row.item_code);
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push({
+      source: "v3",
+      scope: row.scope,
+      offer_type: row.offer_type,
+      value: row.value,
+    });
+  });
+
+  return map;
+}
+
+function tagOfferDetails(items, offerDetailsByProductId) {
+  items.forEach((item) => {
+    item.offer_details =
+      item.product_id != null
+        ? offerDetailsByProductId.get(String(item.product_id)) ?? []
+        : [];
   });
   return items;
 }
@@ -74,15 +101,12 @@ class GrnUsecase {
           detail.items.map((item) => item.product_id).filter((id) => id != null)
         ),
       ];
-      const [activeOfferProductIds, ignoredRows] = await Promise.all([
-        findActiveOfferProductIds(
-          productIds,
-          this.hqOffersRepo,
-          this.offersV3Repo
-        ),
+      const [offerDetailsByProductId, ignoredRows] = await Promise.all([
+        findActiveOfferDetails(productIds, this.hqOffersRepo, this.offersV3Repo),
         this.stockReceivedRepo.listIgnoredGrnIssueKeysByRefno(refno),
       ]);
-      tagOfferProducts(detail.items, activeOfferProductIds);
+      tagOfferProducts(detail.items, new Set(offerDetailsByProductId.keys()));
+      tagOfferDetails(detail.items, offerDetailsByProductId);
       tagIgnoredItems(
         detail.items,
         new Set(ignoredRows.map((row) => String(row.mmd_mrc_sl_no)))
@@ -127,17 +151,14 @@ class GrnUsecase {
           items.map((item) => item.product_id).filter((id) => id != null)
         ),
       ];
-      const [batches, activeOfferProductIds] = await Promise.all([
+      const [batches, offerDetailsByProductId] = await Promise.all([
         this.priceCheckerRepo
           ? this.priceCheckerRepo.listGroupedItemsByProductIds(productIds)
           : [],
-        findActiveOfferProductIds(
-          productIds,
-          this.hqOffersRepo,
-          this.offersV3Repo
-        ),
+        findActiveOfferDetails(productIds, this.hqOffersRepo, this.offersV3Repo),
       ]);
-      tagOfferProducts(items, activeOfferProductIds);
+      tagOfferProducts(items, new Set(offerDetailsByProductId.keys()));
+      tagOfferDetails(items, offerDetailsByProductId);
 
       const priceCheckerItemsByProduct = {};
       batches.forEach((batch) => {

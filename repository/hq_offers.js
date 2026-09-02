@@ -1069,6 +1069,42 @@ class HqOffersRepository {
     return (rows || []).map((row) => String(row.product_id));
   }
 
+  // Bulk variant of listActiveOfferProductIds that also returns each active
+  // offer's name, for a hover-tooltip summary alongside the Offer badge.
+  async listActiveOfferDetailsForProductIds(productIds) {
+    if (!Array.isArray(productIds) || !productIds.length) return [];
+
+    const numericIds = [
+      ...new Set(
+        productIds.map((id) => Number(id)).filter((id) => Number.isFinite(id))
+      ),
+    ];
+    if (!numericIds.length) return [];
+
+    const rows = await queryInBatches(
+      this.db,
+      (chunk) => {
+        const ph = chunk.map(() => "?").join(", ");
+        return `
+          SELECT DISTINCT op.mosp_item_code AS product_id, h.moh_offer_name AS offer_name
+          FROM offer_products op
+          INNER JOIN offer_hdr h
+            ON h.moh_offer_id = op.mosp_offer_id
+           AND h.retail_outlet_id = op.retail_outlet_id
+          WHERE ${excludedRetailOutletWhereClause("h")}
+            AND ${statusWhereClause("active", "h")}
+            AND op.mosp_item_code IN (${ph})
+        `;
+      },
+      numericIds
+    );
+
+    return (rows || []).map((row) => ({
+      product_id: String(row.product_id),
+      offer_name: row.offer_name,
+    }));
+  }
+
   async getHdrByKey(moh_offer_id, retail_outlet_id) {
     const { sql: baseSql, params: filterParams } = hdrListBaseSql("all");
     const rows = await queryAsync(
