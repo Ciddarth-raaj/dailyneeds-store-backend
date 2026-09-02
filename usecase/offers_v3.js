@@ -1004,6 +1004,13 @@ class OffersV3Usecase {
     return this.offersV3Repo.listGroupedItemsByProductIds(itemCodes);
   }
 
+  // Outlet/batch-level breakdown of one merged (mrp, selling_price) row from
+  // the grouped price-checker view -- drill-down for the GRN Price Checker
+  // modal.
+  async getOutletStockBreakdown(itemCode, mrp, sellingPrice) {
+    return this.offersV3Repo.getPricesForItem(itemCode, null, mrp, sellingPrice);
+  }
+
   // ---------------------------------------------------------------------
   // One-time go-live import (already-confirmed offers, no validation)
   // ---------------------------------------------------------------------

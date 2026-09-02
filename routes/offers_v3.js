@@ -285,6 +285,51 @@ class OffersV3Routes {
       res.end();
     });
 
+    // Outlet/batch-level breakdown of one merged price group -- drill-down
+    // for the GRN Price Checker modal.
+    router.get("/items-by-product/outlet-breakdown", async (req, res) => {
+      try {
+        const productIdRaw =
+          req.query.product_id != null ? String(req.query.product_id).trim() : "";
+        const productId = parseInt(productIdRaw, 10);
+        const mrp = req.query.mrp != null && req.query.mrp !== "" ? Number(req.query.mrp) : NaN;
+        const sellingPrice =
+          req.query.selling_price != null && req.query.selling_price !== ""
+            ? Number(req.query.selling_price)
+            : NaN;
+
+        if (!productIdRaw || !Number.isFinite(productId)) {
+          res.status(400).json({ code: 400, msg: "product_id is required" });
+          res.end();
+          return;
+        }
+        if (!Number.isFinite(mrp)) {
+          res.status(400).json({ code: 400, msg: "mrp is required" });
+          res.end();
+          return;
+        }
+        if (!Number.isFinite(sellingPrice)) {
+          res.status(400).json({ code: 400, msg: "selling_price is required" });
+          res.end();
+          return;
+        }
+
+        const data = await this.offersV3Usecase.getOutletStockBreakdown(
+          productId,
+          mrp,
+          sellingPrice
+        );
+        res.json({
+          code: 200,
+          data,
+          meta: { product_id: productId, mrp, selling_price: sellingPrice, count: data?.length ?? 0 },
+        });
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
     // Untagged-batch alerts
     router.get("/untagged-batches", async (req, res) => {
       try {
