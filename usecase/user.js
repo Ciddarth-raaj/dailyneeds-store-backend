@@ -1,5 +1,10 @@
 const jwt = require("../services/jwt");
-const { isIpAllowed, parseAllowList, validateAllowList } = require("../utils/ip");
+const {
+  isAccessAllowed,
+  parseAllowList,
+  toBoolean,
+  validateIpPolicy,
+} = require("../utils/ip");
 // const SMS = require("../services/sms");
 
 /** Returned when a valid login is refused because of where it came from. */
@@ -19,9 +24,9 @@ class UserUsecase {
   /**
    * Sign in.
    *
-   * `clientIp` is the address the request came from. When the account has an
-   * IP allow-list configured, a login from anywhere else is refused even
-   * though the credentials are correct.
+   * `clientIp` is the address the request came from. When the account has
+   * outside access turned off, a login from anywhere but its allowed
+   * addresses is refused even though the credentials are correct.
    */
   login(username, password, clientIp) {
     return new Promise(async (resolve, reject) => {
@@ -33,7 +38,7 @@ class UserUsecase {
           return;
         }
 
-        if (!isIpAllowed(clientIp, details[0].allowed_ips)) {
+        if (!isAccessAllowed(details[0], clientIp)) {
           resolve({ ...IP_NOT_ALLOWED, ip: clientIp });
           return;
         }
@@ -66,41 +71,68 @@ class UserUsecase {
     });
   }
 
-  /** The allow-list for one user, as an array. Empty means unrestricted. */
-  async getAllowedIps(userId) {
-    const raw = await this.userRepo.getAllowedIps(userId);
-    return parseAllowList(raw);
+  /**
+   * One user's IP policy, normalized.
+   *
+   * A missing row is treated as unrestricted — there is nothing to enforce
+   * against, and the token check has already established who the caller is.
+   */
+  async getIpPolicy(userId) {
+    const row = await this.userRepo.getIpPolicy(userId);
+    if (!row) return { allowed_ips: [], allow_outside_access: true };
+
+    return {
+      allowed_ips: parseAllowList(row.allowed_ips),
+      allow_outside_access: toBoolean(row.allow_outside_access, true),
+    };
   }
 
-  /** Every active login with its allow-list, for the admin screen. */
+  /** Every active login with its IP policy, for the admin screen. */
   async getIpRestrictions() {
     const rows = await this.userRepo.getIpRestrictions();
-    return (rows || []).map((row) => ({
-      ...row,
-      allowed_ips: parseAllowList(row.allowed_ips),
-      is_restricted: parseAllowList(row.allowed_ips).length > 0,
-    }));
+    return (rows || []).map((row) => {
+      const allowOutside = toBoolean(row.allow_outside_access, true);
+      return {
+        ...row,
+        allowed_ips: parseAllowList(row.allowed_ips),
+        allow_outside_access: allowOutside,
+        is_restricted: !allowOutside,
+      };
+    });
   }
 
   /**
-   * Replace a user's allow-list.
+   * Replace a user's IP policy.
    *
-   * An empty list clears the restriction. Entries are validated first so a
-   * typo cannot silently lock someone out of every network.
+   * `allowOutsideAccess` is the decision — whether this person may work from
+   * anywhere or only from the listed addresses. The list is stored either
+   * way, so letting someone out temporarily does not lose the store's
+   * addresses.
+   *
+   * Entries are validated first, and blocking outside access with an empty
+   * list is refused, so neither a typo nor an oversight can leave someone
+   * unable to sign in from anywhere.
    */
-  async updateAllowedIps(userId, allowedIps) {
-    const { valid, invalid, rules } = validateAllowList(allowedIps);
+  async updateIpPolicy(userId, allowedIps, allowOutsideAccess) {
+    const allowOutside = toBoolean(allowOutsideAccess, true);
+    const { valid, reason, rules } = validateIpPolicy({
+      allowOutsideAccess: allowOutside,
+      allowedIps,
+    });
+
     if (!valid) {
-      const error = new Error(
-        `Invalid IP entries: ${invalid.join(", ")}`
-      );
+      const error = new Error(reason);
       error.name = "ValidationError";
       throw error;
     }
 
     const value = rules.length === 0 ? null : rules.join(", ");
-    await this.userRepo.updateAllowedIps(userId, value);
-    return { code: 200, allowed_ips: rules };
+    await this.userRepo.updateIpPolicy(userId, value, allowOutside);
+    return {
+      code: 200,
+      allowed_ips: rules,
+      allow_outside_access: allowOutside,
+    };
   }
 }
 

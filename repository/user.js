@@ -12,6 +12,7 @@ class UserRepository {
                 u.employee_id AS employee_id,
                 u.user_type AS user_type,
                 u.allowed_ips AS allowed_ips,
+                u.allow_outside_access AS allow_outside_access,
                 ne.store_id AS store_id,
                 ne.department_id AS department_id,
                 ne.designation_id AS designation_id
@@ -61,22 +62,22 @@ class UserRepository {
     });
   }
   /**
-   * The IP allow-list for one user, or null when there is no such row.
+   * The IP policy for one user, or null when there is no such row.
    *
    * Deliberately not filtered by status: a deactivated account still holds a
-   * valid token until it expires, and its allow-list must keep applying.
+   * valid token until it expires, and its policy must keep applying.
    */
-  getAllowedIps(userId) {
+  getIpPolicy(userId) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "SELECT `allowed_ips` FROM `user` WHERE `user_id` = ?",
+        "SELECT `allowed_ips`, `allow_outside_access` FROM `user` WHERE `user_id` = ?",
         [userId],
         (err, docs) => {
           if (err) {
             logger.Log({
               level: logger.LEVEL.ERROR,
               component: "REPOSITORY.USER",
-              code: "REPOSITORY.USER.GET-ALLOWED-IPS",
+              code: "REPOSITORY.USER.GET-IP-POLICY",
               description: err.toString(),
               category: "",
               ref: { userId },
@@ -84,7 +85,7 @@ class UserRepository {
             reject(err);
             return;
           }
-          resolve(docs.length === 0 ? null : docs[0].allowed_ips);
+          resolve(docs.length === 0 ? null : docs[0]);
         }
       );
     });
@@ -98,6 +99,7 @@ class UserRepository {
                 u.username AS username,
                 u.user_type AS user_type,
                 u.allowed_ips AS allowed_ips,
+                u.allow_outside_access AS allow_outside_access,
                 u.employee_id AS employee_id,
                 ne.employee_name AS employee_name,
                 ne.store_id AS store_id,
@@ -129,18 +131,24 @@ class UserRepository {
     });
   }
 
-  /** Replace a user's allow-list. `null` clears the restriction. */
-  updateAllowedIps(userId, allowedIps) {
+  /**
+   * Replace a user's IP policy.
+   *
+   * Both fields are written together: the allow-list is kept even when
+   * outside access is on, so switching a user back to restricted does not
+   * mean retyping the store's addresses.
+   */
+  updateIpPolicy(userId, allowedIps, allowOutsideAccess) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "UPDATE `user` SET `allowed_ips` = ? WHERE `user_id` = ?",
-        [allowedIps, userId],
+        "UPDATE `user` SET `allowed_ips` = ?, `allow_outside_access` = ? WHERE `user_id` = ?",
+        [allowedIps, allowOutsideAccess ? 1 : 0, userId],
         (err, docs) => {
           if (err) {
             logger.Log({
               level: logger.LEVEL.ERROR,
               component: "REPOSITORY.USER",
-              code: "REPOSITORY.USER.UPDATE-ALLOWED-IPS",
+              code: "REPOSITORY.USER.UPDATE-IP-POLICY",
               description: err.toString(),
               category: "",
               ref: { userId },

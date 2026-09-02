@@ -15,14 +15,22 @@ const makeRes = () => {
   return res;
 };
 
+const OPEN = { allowed_ips: [], allow_outside_access: true };
+
+/** Confined to `ips`, i.e. outside access switched off. */
+const restrictedTo = (ips) => ({
+  allowed_ips: ips,
+  allow_outside_access: false,
+});
+
 /** Minimal stand-in for the user usecase, counting DB reads. */
 const makeUsecase = (byUser) => {
   const calls = [];
   return {
     calls,
-    async getAllowedIps(userId) {
+    async getIpPolicy(userId) {
       calls.push(userId);
-      return byUser[userId] || [];
+      return byUser[userId] || OPEN;
     },
   };
 };
@@ -47,8 +55,8 @@ describe("ip restriction middleware", () => {
     assert.deepEqual(usecase.calls, []);
   });
 
-  it("allows a user with no allow-list", async () => {
-    const middleware = buildIpRestriction(makeUsecase({ 7: [] }));
+  it("allows a user who may work outside", async () => {
+    const middleware = buildIpRestriction(makeUsecase({ 7: OPEN }));
 
     const { nextCalled } = await run(middleware, {
       decoded: { id: 7 },
@@ -60,7 +68,7 @@ describe("ip restriction middleware", () => {
 
   it("allows a restricted user on an allowed address", async () => {
     const middleware = buildIpRestriction(
-      makeUsecase({ 7: ["203.0.113.0/24"] })
+      makeUsecase({ 7: restrictedTo(["203.0.113.0/24"]) })
     );
 
     const { nextCalled } = await run(middleware, {
@@ -72,7 +80,9 @@ describe("ip restriction middleware", () => {
   });
 
   it("blocks a restricted user off-network with 403", async () => {
-    const middleware = buildIpRestriction(makeUsecase({ 7: ["203.0.113.10"] }));
+    const middleware = buildIpRestriction(
+      makeUsecase({ 7: restrictedTo(["203.0.113.10"]) })
+    );
 
     const { res, nextCalled } = await run(middleware, {
       decoded: { id: 7 },
@@ -87,7 +97,9 @@ describe("ip restriction middleware", () => {
   });
 
   it("blocks when the client IP cannot be resolved", async () => {
-    const middleware = buildIpRestriction(makeUsecase({ 7: ["203.0.113.10"] }));
+    const middleware = buildIpRestriction(
+      makeUsecase({ 7: restrictedTo(["203.0.113.10"]) })
+    );
 
     const { res, nextCalled } = await run(middleware, {
       decoded: { id: 7 },
@@ -99,7 +111,7 @@ describe("ip restriction middleware", () => {
   });
 
   it("caches the allow-list instead of reading it per request", async () => {
-    const usecase = makeUsecase({ 7: ["203.0.113.10"] });
+    const usecase = makeUsecase({ 7: restrictedTo(["203.0.113.10"]) });
     const middleware = buildIpRestriction(usecase);
     const req = { decoded: { id: 7 }, ip: "203.0.113.10" };
 
@@ -111,14 +123,14 @@ describe("ip restriction middleware", () => {
   });
 
   it("re-reads after invalidate so an edit takes effect at once", async () => {
-    const byUser = { 7: [] };
+    const byUser = { 7: OPEN };
     const usecase = makeUsecase(byUser);
     const middleware = buildIpRestriction(usecase);
     const req = { decoded: { id: 7 }, ip: "49.207.1.1" };
 
     assert.equal((await run(middleware, req)).nextCalled, true);
 
-    byUser[7] = ["203.0.113.10"];
+    byUser[7] = restrictedTo(["203.0.113.10"]);
     middleware.invalidate(7);
 
     const { res, nextCalled } = await run(middleware, req);
@@ -126,9 +138,35 @@ describe("ip restriction middleware", () => {
     assert.equal(res.statusCode, 403);
   });
 
+  it("lets a user back out when the switch is turned on again", async () => {
+    const byUser = { 7: restrictedTo(["203.0.113.10"]) };
+    const middleware = buildIpRestriction(makeUsecase(byUser));
+    const req = { decoded: { id: 7 }, ip: "49.207.1.1" };
+
+    assert.equal((await run(middleware, req)).nextCalled, false);
+
+    // The addresses stay on the row; only the switch moved.
+    byUser[7] = { allowed_ips: ["203.0.113.10"], allow_outside_access: true };
+    middleware.invalidate(7);
+
+    assert.equal((await run(middleware, req)).nextCalled, true);
+  });
+
+  it("blocks a restricted user whose list was emptied behind our back", async () => {
+    const middleware = buildIpRestriction(makeUsecase({ 7: restrictedTo([]) }));
+
+    const { res, nextCalled } = await run(middleware, {
+      decoded: { id: 7 },
+      ip: "203.0.113.10",
+    });
+
+    assert.equal(nextCalled, false);
+    assert.equal(res.statusCode, 403);
+  });
+
   it("does not fall open when the lookup fails", async () => {
     const middleware = buildIpRestriction({
-      async getAllowedIps() {
+      async getIpPolicy() {
         throw new Error("db down");
       },
     });

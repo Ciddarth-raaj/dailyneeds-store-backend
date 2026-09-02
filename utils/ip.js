@@ -145,10 +145,10 @@ function matchesRule(ip, rule) {
 }
 
 /**
- * True when the user may be served from this address.
+ * True when the address satisfies at least one entry of the allow-list.
  *
- * An empty allow-list means "no restriction configured", so the user is
- * allowed. A configured list with an unresolvable client IP is denied —
+ * An empty allow-list means "nothing to match against", so the caller is
+ * allowed. A non-empty list with an unresolvable client IP is denied —
  * failing open there would defeat the restriction entirely.
  */
 function isIpAllowed(ip, allowList) {
@@ -159,6 +159,48 @@ function isIpAllowed(ip, allowList) {
   if (candidate === "") return false;
 
   return rules.some((rule) => matchesRule(candidate, rule));
+}
+
+/** A `1`/`true`/`"1"` style flag from MySQL or JSON, read as a boolean. */
+function toBoolean(value, fallback = false) {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  const text = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(text)) return true;
+  if (["0", "false", "no", "off"].includes(text)) return false;
+  return fallback;
+}
+
+/**
+ * Whether a user may be served from this address.
+ *
+ * Two independent settings decide it, so an admin can lock someone down and
+ * later let them out again without retyping the store's addresses:
+ *
+ *   allow_outside_access = 1  the user works from anywhere; the list is kept
+ *                             but not enforced
+ *   allow_outside_access = 0  the user is confined to `allowed_ips`
+ *
+ * An empty list combined with outside access turned off would lock the user
+ * out of every network, so `validateIpPolicy` refuses to save that pairing.
+ * If a row somehow reaches that state, it is treated as blocked rather than
+ * quietly opened up.
+ */
+function isAccessAllowed(policy, ip) {
+  const allowOutside = toBoolean(
+    policy && policy.allow_outside_access,
+    true
+  );
+  if (allowOutside) return true;
+
+  // `validateIpPolicy` refuses to save this pairing, but a row edited
+  // straight in SQL could still reach it. Block rather than silently hand
+  // back unrestricted access.
+  const rules = parseAllowList(policy && policy.allowed_ips);
+  if (rules.length === 0) return false;
+
+  return isIpAllowed(ip, rules);
 }
 
 /** Reject entries an admin typed that we could never match against. */
@@ -187,9 +229,41 @@ function validateAllowList(raw) {
   return { valid: invalid.length === 0, invalid, rules };
 }
 
+/**
+ * Check a policy an admin is about to save.
+ *
+ * Confining a user to an empty list would lock them out of every network,
+ * which is never what someone means to do — so that pairing is rejected
+ * rather than saved.
+ */
+function validateIpPolicy({ allowOutsideAccess, allowedIps }) {
+  const { valid, invalid, rules } = validateAllowList(allowedIps);
+  if (!valid) {
+    return {
+      valid: false,
+      reason: `Invalid IP entries: ${invalid.join(", ")}`,
+      rules,
+    };
+  }
+
+  if (!allowOutsideAccess && rules.length === 0) {
+    return {
+      valid: false,
+      reason:
+        "Add at least one allowed IP before blocking outside access, otherwise this user could not sign in from anywhere.",
+      rules,
+    };
+  }
+
+  return { valid: true, reason: null, rules };
+}
+
 module.exports = {
   getClientIp,
+  isAccessAllowed,
   isIpAllowed,
+  toBoolean,
+  validateIpPolicy,
   matchesRule,
   normalizeIp,
   parseAllowList,

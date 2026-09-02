@@ -90,6 +90,7 @@ class UserRoutes {
             allowed_ips: Joi.alternatives()
               .try(Joi.string().trim().allow(""), Joi.array().items(Joi.string()))
               .required(),
+            allow_outside_access: Joi.boolean().required(),
           };
 
           const isValid = Joi.validate(req.body, schema);
@@ -97,12 +98,13 @@ class UserRoutes {
             throw isValid.error;
           }
 
-          const data = await this.userUsecase.updateAllowedIps(
+          const data = await this.userUsecase.updateIpPolicy(
             req.body.user_id,
-            req.body.allowed_ips
+            req.body.allowed_ips,
+            req.body.allow_outside_access
           );
 
-          // The middleware caches allow-lists for a minute; drop this user's
+          // The middleware caches policies for a minute; drop this user's
           // entry so the change applies to their next request.
           if (this.ipRestriction && this.ipRestriction.invalidate) {
             this.ipRestriction.invalidate(req.body.user_id);

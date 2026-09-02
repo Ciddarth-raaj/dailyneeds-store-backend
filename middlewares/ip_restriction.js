@@ -1,7 +1,7 @@
 const logger = require("../utils/logger");
-const { getClientIp, isIpAllowed } = require("../utils/ip");
+const { getClientIp, isAccessAllowed } = require("../utils/ip");
 
-/** How long a user's allow-list is trusted before re-reading it. */
+/** How long a user's IP policy is trusted before re-reading it. */
 const CACHE_TTL_MS = 60 * 1000;
 
 /**
@@ -12,21 +12,21 @@ const CACHE_TTL_MS = 60 * 1000;
  * after `auth`, on every request that carries a decoded token, and cuts the
  * session off the moment the caller is outside their allowed network.
  *
- * Users with no allow-list configured are unrestricted, so this is a no-op
- * for every account until an admin sets one.
+ * Accounts allowed outside access — the default — are a no-op here, so this
+ * only costs a cached lookup until an admin restricts someone.
  */
 module.exports = (userUsecase) => {
   const cache = new Map();
 
-  const loadAllowList = async (userId) => {
+  const loadPolicy = async (userId) => {
     const cached = cache.get(userId);
     if (cached && Date.now() - cached.at < CACHE_TTL_MS) {
-      return cached.rules;
+      return cached.policy;
     }
 
-    const rules = await userUsecase.getAllowedIps(userId);
-    cache.set(userId, { rules, at: Date.now() });
-    return rules;
+    const policy = await userUsecase.getIpPolicy(userId);
+    cache.set(userId, { policy, at: Date.now() });
+    return policy;
   };
 
   const middleware = async (req, res, next) => {
@@ -35,11 +35,11 @@ module.exports = (userUsecase) => {
     if (!req.decoded || req.decoded.id === undefined) return next();
 
     try {
-      const rules = await loadAllowList(req.decoded.id);
-      if (rules.length === 0) return next();
+      const policy = await loadPolicy(req.decoded.id);
+      if (policy.allow_outside_access) return next();
 
       const clientIp = getClientIp(req);
-      if (isIpAllowed(clientIp, rules)) return next();
+      if (isAccessAllowed(policy, clientIp)) return next();
 
       logger.Log({
         level: logger.LEVEL.WARN,
@@ -70,7 +70,7 @@ module.exports = (userUsecase) => {
     }
   };
 
-  /** Drop a user's cached list so an edit takes effect immediately. */
+  /** Drop a user's cached policy so an edit takes effect immediately. */
   middleware.invalidate = (userId) => {
     if (userId === undefined || userId === null) {
       cache.clear();
