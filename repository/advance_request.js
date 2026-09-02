@@ -197,29 +197,6 @@ class AdvanceRequestRepository {
     ).then((res) => ({ code: 200, affectedRows: res.affectedRows }));
   }
 
-  /** Edits the A1 fields in place, without touching the status. */
-  updateDetails(id, expectedStatus, fields) {
-    const assignments = [];
-    const params = [];
-
-    Object.keys(fields).forEach((column) => {
-      assignments.push(`${column} = ?`);
-      params.push(fields[column] === undefined ? null : fields[column]);
-    });
-
-    if (assignments.length === 0) return Promise.resolve({ affectedRows: 0 });
-
-    assignments.push("updated_at = NOW()");
-
-    return this.run(
-      "UPDATEDETAILS",
-      `UPDATE advance_requests
-          SET ${assignments.join(", ")}
-        WHERE advance_request_id = ? AND status = ?`,
-      [...params, id, expectedStatus]
-    ).then((res) => ({ code: 200, affectedRows: res.affectedRows }));
-  }
-
   // -------------------------------------------------------------- documents
 
   createDocument(requestId, stage, fileUrl, uploadedBy) {

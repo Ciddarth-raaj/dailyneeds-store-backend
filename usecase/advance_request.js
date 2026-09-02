@@ -11,12 +11,19 @@
 /** Terminal statuses. Nothing moves a request out of these. */
 const TERMINAL = ["rejected", "paid"];
 
-/** The status each stage is allowed to act on. */
+/**
+ * The statuses each stage may act on.
+ *
+ * More than one where a request can arrive at the same stage by different
+ * routes: accounts run the balance check on a fresh request and re-run it on
+ * one they are holding, and the A1 details stay correctable for as long as
+ * nobody downstream has acted on them.
+ */
 const ACTS_ON = {
-  balanceCheck: "submitted",
-  approval: "verified",
-  payment: "approved",
-  edit: "submitted",
+  balanceCheck: ["submitted", "on_hold"],
+  approval: ["verified"],
+  payment: ["approved"],
+  edit: ["submitted", "on_hold"],
 };
 
 /**
@@ -88,18 +95,19 @@ class AdvanceRequestUsecase {
    * second caller racing the first changes nothing and is told why.
    */
   async applyStage(id, stage, nextStatus, fields, employeeId) {
-    const expectedStatus = ACTS_ON[stage];
-
     const existing = await this.advanceRequestRepo.getById(id);
     if (!existing) throw notFound("Advance request not found");
 
-    if (existing.status !== expectedStatus) {
+    if (!ACTS_ON[stage].includes(existing.status)) {
       throw conflict(describeStatus(existing.status));
     }
 
+    // The update matches on the status just read, not on a fixed one: a stage
+    // that accepts several starting statuses must still only write over the
+    // exact row state this caller saw.
     const result = await this.advanceRequestRepo.updateStage(
       id,
-      expectedStatus,
+      existing.status,
       nextStatus,
       fields
     );
@@ -114,7 +122,7 @@ class AdvanceRequestUsecase {
       id,
       employeeId,
       "status",
-      expectedStatus,
+      existing.status,
       nextStatus
     );
 
@@ -185,17 +193,22 @@ class AdvanceRequestUsecase {
   }
 
   /**
-   * Corrects the A1 fields before anyone has acted on them. Once accounts
-   * has checked the balance the figures have been reviewed, so changing the
-   * amount underneath that review is not an edit but a new request.
+   * Corrects the A1 fields.
+   *
+   * Allowed while the request is still submitted, and while it is on hold -
+   * clarifying a held request is the whole point of the hold. Editing a held
+   * request clears the hold and sends it straight to the approver, so a
+   * clarification does not sit waiting for a second balance check. A request
+   * anyone downstream has acted on is not editable: changing the amount under
+   * an approval already given would be a new request, not an edit.
    */
   async updateDetails(id, data, employeeId) {
     const existing = await this.advanceRequestRepo.getById(id);
     if (!existing) throw notFound("Advance request not found");
 
-    if (existing.status !== ACTS_ON.edit) {
+    if (!ACTS_ON.edit.includes(existing.status)) {
       throw conflict(
-        `Only a submitted request can be edited. ${describeStatus(
+        `Only a submitted or on-hold request can be edited. ${describeStatus(
           existing.status
         )}`
       );
@@ -210,9 +223,14 @@ class AdvanceRequestUsecase {
 
     if (Object.keys(fields).length === 0) return this.getById(id);
 
-    const result = await this.advanceRequestRepo.updateDetails(
+    // Editing releases a hold; a submitted request keeps the status it has.
+    const nextStatus =
+      existing.status === "on_hold" ? "verified" : existing.status;
+
+    const result = await this.advanceRequestRepo.updateStage(
       id,
-      ACTS_ON.edit,
+      existing.status,
+      nextStatus,
       fields
     );
 
@@ -236,6 +254,18 @@ class AdvanceRequestUsecase {
           )
         )
     );
+
+    // The release is a transition in its own right, so the history says why a
+    // held request became approvable rather than only what text changed.
+    if (nextStatus !== existing.status) {
+      await this.advanceRequestRepo.createActivity(
+        id,
+        employeeId,
+        "status",
+        existing.status,
+        nextStatus
+      );
+    }
 
     return this.getById(id);
   }

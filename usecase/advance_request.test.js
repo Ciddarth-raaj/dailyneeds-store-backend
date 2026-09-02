@@ -4,9 +4,9 @@ const buildUsecase = require("./advance_request");
 
 /**
  * Stands in for the repository, and in particular reproduces the one thing
- * the stage guards depend on: updateStage/updateDetails only touch a row
- * that still holds the status the caller acted on, so a stale call reports
- * zero affected rows rather than overwriting someone else's transition.
+ * the stage guards depend on: updateStage only touches a row that still
+ * holds the status the caller acted on, so a stale call reports zero
+ * affected rows rather than overwriting someone else's transition.
  */
 function fakeRepo(row) {
   const state = { ...row };
@@ -32,14 +32,6 @@ function fakeRepo(row) {
         return Promise.resolve({ affectedRows: 0 });
       }
       Object.assign(state, fields, { status: nextStatus });
-      return Promise.resolve({ affectedRows: 1 });
-    },
-
-    updateDetails(id, expectedStatus, fields) {
-      if (state.status !== expectedStatus) {
-        return Promise.resolve({ affectedRows: 0 });
-      }
-      Object.assign(state, fields);
       return Promise.resolve({ affectedRows: 1 });
     },
 
@@ -286,6 +278,109 @@ describe("advance request: editing the A1 fields", () => {
 
     assert.equal(repo.state.status, "submitted", "status is not editable here");
     assert.equal(repo.activity.length, 0);
+  });
+});
+
+describe("advance request: getting out of a hold", () => {
+  it("lets accounts re-check a held request and release it", async () => {
+    const repo = at("on_hold");
+    const usecase = buildUsecase(repo);
+
+    await usecase.balanceCheck(
+      7,
+      {
+        pending_bills: 0,
+        previous_advance_balance: 0,
+        balance_remarks: "supplier cleared their bills",
+      },
+      9
+    );
+
+    assert.equal(repo.state.status, "verified");
+    assert.deepEqual(repo.activity, [
+      { field: "status", old_value: "on_hold", new_value: "verified" },
+    ]);
+  });
+
+  it("lets accounts re-check and keep holding it", async () => {
+    const repo = at("on_hold");
+    const usecase = buildUsecase(repo);
+
+    await usecase.balanceCheck(
+      7,
+      {
+        pending_bills: 4,
+        previous_advance_balance: 30000,
+        balance_remarks: "still too high",
+        on_hold: true,
+      },
+      9
+    );
+
+    assert.equal(repo.state.status, "on_hold");
+  });
+
+  it("releases the hold when the team edits and clarifies it", async () => {
+    const repo = at("on_hold");
+    repo.state.reason = "advance";
+    const usecase = buildUsecase(repo);
+
+    await usecase.updateDetails(7, { reason: "advance against PO-991, part 2" }, 4);
+
+    assert.equal(repo.state.status, "verified", "goes straight to the approver");
+    assert.equal(repo.state.reason, "advance against PO-991, part 2");
+    assert.deepEqual(repo.activity, [
+      { field: "reason", old_value: "advance", new_value: "advance against PO-991, part 2" },
+      { field: "status", old_value: "on_hold", new_value: "verified" },
+    ]);
+  });
+
+  it("does not promote a submitted request that is merely edited", async () => {
+    const repo = at("submitted");
+    repo.state.reason = "advance";
+    const usecase = buildUsecase(repo);
+
+    await usecase.updateDetails(7, { reason: "clearer wording" }, 4);
+
+    assert.equal(repo.state.status, "submitted");
+    assert.deepEqual(
+      repo.activity.map((a) => a.field),
+      ["reason"],
+      "no status entry, because nothing moved"
+    );
+  });
+
+  it("still refuses to release a request nobody is holding", async () => {
+    for (const status of ["verified", "approved", "rejected", "paid"]) {
+      const repo = at(status);
+      const usecase = buildUsecase(repo);
+
+      await rejectsWith("ConflictError", () =>
+        usecase.updateDetails(7, { reason: "too late" }, 4)
+      );
+      assert.equal(repo.state.status, status);
+    }
+  });
+
+  it("keeps the race guard when starting from a hold", async () => {
+    const repo = at("on_hold");
+    const usecase = buildUsecase(repo);
+
+    // Accounts release it between this caller's read and its write.
+    const realUpdate = repo.updateStage;
+    repo.updateStage = (...args) => {
+      repo.state.status = "verified";
+      return realUpdate.call(repo, ...args);
+    };
+
+    await rejectsWith("ConflictError", () =>
+      usecase.balanceCheck(
+        7,
+        { pending_bills: 1, previous_advance_balance: 1, balance_remarks: "x" },
+        9
+      )
+    );
+    assert.equal(repo.state.status, "verified", "the first write stands");
   });
 });
 
