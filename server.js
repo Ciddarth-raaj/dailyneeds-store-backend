@@ -42,6 +42,18 @@ class Server {
   }
 
   initExpress() {
+    // In production the app sits behind a reverse proxy, so the socket
+    // address is the proxy's. `trust proxy` makes Express read the real
+    // client from X-Forwarded-For, which is what the IP restriction checks.
+    // Set TRUST_PROXY=false if the app is ever exposed directly, otherwise
+    // a client could spoof the header.
+    app.set(
+      "trust proxy",
+      process.env.TRUST_PROXY === "false"
+        ? false
+        : process.env.TRUST_PROXY || true
+    );
+
     app.use(require("cors")());
 
     const colours = {
@@ -599,6 +611,18 @@ class Server {
     const authMiddleWare = require("./middlewares/auth");
     app.use(authMiddleWare);
 
+    this.permissions = require("./middlewares/permissions")(
+      this.designationUsecase
+    );
+
+    // Runs after auth so it can see the decoded user: an account with an IP
+    // allow-list is cut off the moment it is used outside that network, not
+    // just at login.
+    this.ipRestriction = require("./middlewares/ip_restriction")(
+      this.userUsecase
+    );
+    app.use(this.ipRestriction);
+
     const documentRouter = require("./routes/document")(this.documentUsecase);
     const whatsappRouter = require("./routes/whatsapp")(this.whatsappUsecase);
     const budgetRouter = require("./routes/budget")(this.budgetUsecase);
@@ -641,7 +665,11 @@ class Server {
     const brandRouter = require("./routes/brand")(this.brandUsecase);
     const indentRouter = require("./routes/indent")(this.indentUsecase);
     const despatchRouter = require("./routes/despatch")(this.despatchUsecase);
-    const userRouter = require("./routes/user")(this.userUsecase);
+    const userRouter = require("./routes/user")(
+      this.userUsecase,
+      this.permissions,
+      this.ipRestriction
+    );
     const peopleRouter = require("./routes/people")(this.peopleUsecase);
     const accountsRouter = require("./routes/accounts")(
       this.accountsUsecase,
@@ -701,9 +729,6 @@ class Server {
     );
     const ebMasterListRouter = require("./routes/eb_master_list")(
       this.ebMasterListUsecase
-    );
-    this.permissions = require("./middlewares/permissions")(
-      this.designationUsecase
     );
     const advanceRequestRouter = require("./routes/advance_request")(
       this.advanceRequestUsecase,
