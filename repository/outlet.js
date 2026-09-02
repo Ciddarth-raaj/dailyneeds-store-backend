@@ -5,6 +5,11 @@ class OutletRepository {
     this.db = db;
   }
 
+  /**
+   * Every column, IP policy included. `GET /outlet` needs no token, so the
+   * usecase strips `allowed_ips` / `ip_restriction_enabled` before the rows
+   * leave the server; any new caller must do the same.
+   */
   get() {
     return new Promise((resolve, reject) => {
       this.db.query("SELECT * FROM outlets", [], (err, docs) => {
@@ -107,6 +112,7 @@ class OutletRepository {
       );
     });
   }
+  /** Every column — see `get()` for why callers must strip the IP fields. */
   getOutletByOutletId(outlet_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
@@ -149,6 +155,102 @@ class OutletRepository {
             return;
           }
           resolve(docs);
+        }
+      );
+    });
+  }
+
+  /**
+   * Every branch with its IP rule and how many active logins it binds.
+   *
+   * An employee belongs to the branch whose outlet_id their
+   * new_employee.store_id names (there is no FK; that is how every join in
+   * the app reads it).
+   */
+  getIpRestrictions() {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT o.outlet_id, o.outlet_name, o.outlet_nickname, o.is_active,
+                o.ip_restriction_enabled, o.allowed_ips,
+                (SELECT COUNT(*) FROM new_employee ne
+                   INNER JOIN \`user\` u ON u.employee_id = ne.employee_id
+                 WHERE ne.store_id = o.outlet_id AND ne.status = 1 AND u.status = 1) AS employee_count
+         FROM outlets o
+         ORDER BY o.outlet_name ASC`,
+        [],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.OUTLET",
+              code: "REPOSITORY.OUTLET.GET-IP-RESTRICTIONS",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        }
+      );
+    });
+  }
+
+  /** One branch's IP rule, or null when there is no such outlet. */
+  getIpRestriction(outlet_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT o.outlet_id, o.outlet_name, o.outlet_nickname, o.is_active,
+                o.ip_restriction_enabled, o.allowed_ips,
+                (SELECT COUNT(*) FROM new_employee ne
+                   INNER JOIN \`user\` u ON u.employee_id = ne.employee_id
+                 WHERE ne.store_id = o.outlet_id AND ne.status = 1 AND u.status = 1) AS employee_count
+         FROM outlets o
+         WHERE o.outlet_id = ?`,
+        [outlet_id],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.OUTLET",
+              code: "REPOSITORY.OUTLET.GET-IP-RESTRICTION",
+              description: err.toString(),
+              category: "",
+              ref: { outlet_id },
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs.length === 0 ? null : docs[0]);
+        }
+      );
+    });
+  }
+
+  /**
+   * Replace a branch's IP rule. Both columns are written together: the list
+   * is kept while the switch is off so it need not be retyped later.
+   */
+  updateIpRestriction(outlet_id, allowed_ips, enabled) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "UPDATE outlets SET allowed_ips = ?, ip_restriction_enabled = ? WHERE outlet_id = ?",
+        [allowed_ips, enabled ? 1 : 0, outlet_id],
+        (err, res) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.OUTLET",
+              code: "REPOSITORY.OUTLET.UPDATE-IP-RESTRICTION",
+              description: err.toString(),
+              category: "",
+              ref: { outlet_id },
+            });
+            reject(err);
+            return;
+          }
+          resolve(res);
         }
       );
     });

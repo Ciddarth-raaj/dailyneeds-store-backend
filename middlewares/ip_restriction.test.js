@@ -15,13 +15,11 @@ const makeRes = () => {
   return res;
 };
 
-const OPEN = { allowed_ips: [], allow_outside_access: true };
+/** What `resolveIpPolicy` returns for an admin, or a branch with its switch off. */
+const OPEN = { exempt: true, rules: [], source: "branch-open" };
 
-/** Confined to `ips`, i.e. outside access switched off. */
-const restrictedTo = (ips) => ({
-  allowed_ips: ips,
-  allow_outside_access: false,
-});
+/** What it returns for someone confined to `ips`. */
+const restrictedTo = (ips) => ({ exempt: false, rules: ips, source: "branch" });
 
 /** Minimal stand-in for the user usecase, counting DB reads. */
 const makeUsecase = (byUser) => {
@@ -138,18 +136,38 @@ describe("ip restriction middleware", () => {
     assert.equal(res.statusCode, 403);
   });
 
-  it("lets a user back out when the switch is turned on again", async () => {
+  it("lets a user back out when they are made exempt again", async () => {
     const byUser = { 7: restrictedTo(["203.0.113.10"]) };
     const middleware = buildIpRestriction(makeUsecase(byUser));
     const req = { decoded: { id: 7 }, ip: "49.207.1.1" };
 
     assert.equal((await run(middleware, req)).nextCalled, false);
 
-    // The addresses stay on the row; only the switch moved.
-    byUser[7] = { allowed_ips: ["203.0.113.10"], allow_outside_access: true };
+    byUser[7] = { exempt: true, rules: [], source: "unrestricted" };
     middleware.invalidate(7);
 
     assert.equal((await run(middleware, req)).nextCalled, true);
+  });
+
+  it("re-reads every user after a no-argument invalidate (a branch save)", async () => {
+    const byUser = { 7: OPEN, 8: OPEN };
+    const usecase = makeUsecase(byUser);
+    const middleware = buildIpRestriction(usecase);
+
+    await run(middleware, { decoded: { id: 7 }, ip: "49.207.1.1" });
+    await run(middleware, { decoded: { id: 8 }, ip: "49.207.1.1" });
+    assert.deepEqual(usecase.calls, [7, 8]);
+
+    // The branch both belong to was just restricted.
+    byUser[7] = restrictedTo(["203.0.113.10"]);
+    byUser[8] = restrictedTo(["203.0.113.10"]);
+    middleware.invalidate();
+
+    const a = await run(middleware, { decoded: { id: 7 }, ip: "49.207.1.1" });
+    const b = await run(middleware, { decoded: { id: 8 }, ip: "49.207.1.1" });
+    assert.deepEqual(usecase.calls, [7, 8, 7, 8]);
+    assert.equal(a.res.statusCode, 403);
+    assert.equal(b.res.statusCode, 403);
   });
 
   it("blocks a restricted user whose list was emptied behind our back", async () => {

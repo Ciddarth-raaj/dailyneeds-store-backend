@@ -11,13 +11,16 @@ class UserRepository {
         `SELECT u.user_id AS user_id,
                 u.employee_id AS employee_id,
                 u.user_type AS user_type,
+                u.ip_policy AS ip_policy,
                 u.allowed_ips AS allowed_ips,
-                u.allow_outside_access AS allow_outside_access,
+                o.ip_restriction_enabled AS branch_enabled,
+                o.allowed_ips AS branch_ips,
                 ne.store_id AS store_id,
                 ne.department_id AS department_id,
                 ne.designation_id AS designation_id
          FROM \`user\` u
          LEFT JOIN new_employee ne ON ne.employee_id = u.employee_id
+         LEFT JOIN outlets o ON o.outlet_id = ne.store_id
          WHERE u.status = 1 AND ne.status = 1 AND u.username = ? AND u.password = SHA1(?)`,
         [username, password],
         (err, docs) => {
@@ -62,7 +65,12 @@ class UserRepository {
     });
   }
   /**
-   * The IP policy for one user, or null when there is no such row.
+   * The inputs to `resolveIpPolicy` for one user — their own setting and
+   * their branch's rule — or null when there is no such row.
+   *
+   * The branch is read live rather than from the token's store_id, so an
+   * employee moved between branches picks up the new rule within the
+   * middleware's cache window instead of at their next login.
    *
    * Deliberately not filtered by status: a deactivated account still holds a
    * valid token until it expires, and its policy must keep applying.
@@ -70,7 +78,15 @@ class UserRepository {
   getIpPolicy(userId) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "SELECT `allowed_ips`, `allow_outside_access` FROM `user` WHERE `user_id` = ?",
+        `SELECT u.user_type AS user_type,
+                u.ip_policy AS ip_policy,
+                u.allowed_ips AS allowed_ips,
+                o.ip_restriction_enabled AS branch_enabled,
+                o.allowed_ips AS branch_ips
+         FROM \`user\` u
+         LEFT JOIN new_employee ne ON ne.employee_id = u.employee_id
+         LEFT JOIN outlets o ON o.outlet_id = ne.store_id
+         WHERE u.user_id = ?`,
         [userId],
         (err, docs) => {
           if (err) {
@@ -98,16 +114,18 @@ class UserRepository {
         `SELECT u.user_id AS user_id,
                 u.username AS username,
                 u.user_type AS user_type,
+                u.ip_policy AS ip_policy,
                 u.allowed_ips AS allowed_ips,
-                u.allow_outside_access AS allow_outside_access,
                 u.employee_id AS employee_id,
                 ne.employee_name AS employee_name,
                 ne.store_id AS store_id,
-                s.store_name AS store_name,
+                o.outlet_name AS store_name,
+                o.ip_restriction_enabled AS branch_enabled,
+                o.allowed_ips AS branch_ips,
                 d.designation_name AS designation_name
          FROM \`user\` u
          LEFT JOIN new_employee ne ON ne.employee_id = u.employee_id
-         LEFT JOIN store s ON s.store_id = ne.store_id
+         LEFT JOIN outlets o ON o.outlet_id = ne.store_id
          LEFT JOIN designation d ON d.designation_id = ne.designation_id
          WHERE u.status = 1
          ORDER BY ne.employee_name ASC, u.username ASC`,
@@ -134,15 +152,15 @@ class UserRepository {
   /**
    * Replace a user's IP policy.
    *
-   * Both fields are written together: the allow-list is kept even when
-   * outside access is on, so switching a user back to restricted does not
-   * mean retyping the store's addresses.
+   * Both fields are written together: the personal list is kept under
+   * `branch` and `unrestricted` too, so moving someone back to `custom`
+   * does not mean retyping their addresses.
    */
-  updateIpPolicy(userId, allowedIps, allowOutsideAccess) {
+  updateIpPolicy(userId, allowedIps, ipPolicy) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "UPDATE `user` SET `allowed_ips` = ?, `allow_outside_access` = ? WHERE `user_id` = ?",
-        [allowedIps, allowOutsideAccess ? 1 : 0, userId],
+        "UPDATE `user` SET `allowed_ips` = ?, `ip_policy` = ? WHERE `user_id` = ?",
+        [allowedIps, ipPolicy, userId],
         (err, docs) => {
           if (err) {
             logger.Log({

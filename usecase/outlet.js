@@ -1,3 +1,32 @@
+const { parseAllowList, toBoolean, validateIpPolicy } = require("../utils/ip");
+
+/**
+ * Columns that must never leave through the token-less outlet reads.
+ *
+ * `GET /outlet` and `GET /outlet/id` need no token, and a branch's allow-list
+ * is not something to hand to anyone who asks. The IP rule has its own
+ * permission-gated endpoints.
+ */
+const IP_FIELDS = ["allowed_ips", "ip_restriction_enabled"];
+
+function stripIpFields(row) {
+  if (!row || typeof row !== "object") return row;
+  const copy = { ...row };
+  for (const field of IP_FIELDS) delete copy[field];
+  return copy;
+}
+
+/** A repository row with its list parsed and its flag read as a boolean. */
+function shapeIpRestriction(row) {
+  if (!row) return null;
+  return {
+    ...row,
+    allowed_ips: parseAllowList(row.allowed_ips),
+    ip_restriction_enabled: toBoolean(row.ip_restriction_enabled, false),
+    employee_count: Number(row.employee_count) || 0,
+  };
+}
+
 class OutletUsecase {
   constructor(outletRepo, budgetRepo) {
     this.outletRepo = outletRepo;
@@ -8,7 +37,7 @@ class OutletUsecase {
     return new Promise(async (resolve, reject) => {
       try {
         const data = await this.outletRepo.get();
-        resolve(data);
+        resolve((data || []).map(stripIpFields));
       } catch (err) {
         reject(err);
       }
@@ -37,9 +66,10 @@ class OutletUsecase {
   getOutletByOutletId(outlet_id) {
     return new Promise(async (resolve, reject) => {
       try {
-        const data = await this.outletRepo.getOutletByOutletId(outlet_id);
+        const rows = await this.outletRepo.getOutletByOutletId(outlet_id);
         const budget = await this.budgetRepo.getBudgetByStoreId(outlet_id);
 
+        const data = (rows || []).map(stripIpFields);
         if (data.length > 0) {
           data[0].budget = budget;
         }
@@ -123,6 +153,53 @@ class OutletUsecase {
         reject(err);
       }
     });
+  }
+
+  /** Every branch with its IP rule, for the admin screens. */
+  async getIpRestrictions() {
+    const rows = await this.outletRepo.getIpRestrictions();
+    return (rows || []).map(shapeIpRestriction);
+  }
+
+  /** One branch's IP rule, or null when there is no such outlet. */
+  async getIpRestriction(outlet_id) {
+    const row = await this.outletRepo.getIpRestriction(outlet_id);
+    return shapeIpRestriction(row);
+  }
+
+  /**
+   * Replace a branch's IP rule.
+   *
+   * Switching the rule on with an empty list is refused — it would lock every
+   * employee of the branch out of every network — as is a loopback entry
+   * (the sign of a proxy that is not forwarding the client address).
+   */
+  async updateIpRestriction(outlet_id, allowed_ips, enabled) {
+    const on = toBoolean(enabled, false);
+    const { valid, reason, rules } = validateIpPolicy({
+      restricted: on,
+      allowedIps: allowed_ips,
+    });
+    if (!valid) {
+      const error = new Error(reason);
+      error.name = "ValidationError";
+      throw error;
+    }
+
+    const value = rules.length === 0 ? null : rules.join(", ");
+    const res = await this.outletRepo.updateIpRestriction(outlet_id, value, on);
+    if (!res || res.affectedRows === 0) {
+      const error = new Error(`No branch with outlet_id ${outlet_id}`);
+      error.name = "NotFoundError";
+      throw error;
+    }
+
+    return {
+      code: 200,
+      outlet_id: Number(outlet_id),
+      allowed_ips: rules,
+      ip_restriction_enabled: on,
+    };
   }
 
   bulkCreate(rows) {

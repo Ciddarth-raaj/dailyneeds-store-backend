@@ -12,8 +12,12 @@ const CACHE_TTL_MS = 60 * 1000;
  * after `auth`, on every request that carries a decoded token, and cuts the
  * session off the moment the caller is outside their allowed network.
  *
- * Accounts allowed outside access — the default — are a no-op here, so this
- * only costs a cached lookup until an admin restricts someone.
+ * The policy is the user's own setting folded together with their branch's
+ * rule (`resolveIpPolicy`). Most accounts resolve to exempt — admins, anyone
+ * on `unrestricted`, and every employee of a branch whose switch is off — so
+ * this only costs a cached lookup until an admin restricts a branch or a
+ * person. A branch save clears the whole cache, since every employee of the
+ * branch shares that rule.
  */
 module.exports = (userUsecase) => {
   const cache = new Map();
@@ -36,7 +40,9 @@ module.exports = (userUsecase) => {
 
     try {
       const policy = await loadPolicy(req.decoded.id);
-      if (policy.allow_outside_access) return next();
+      // Only a resolved `exempt === true` opens the door: admins, users on
+      // `unrestricted`, and anyone following a branch whose switch is off.
+      if (policy && policy.exempt === true) return next();
 
       const clientIp = getClientIp(req);
       if (isAccessAllowed(policy, clientIp)) return next();
