@@ -1083,6 +1083,29 @@ class StockReceivedRepository {
     });
   }
 
+  listIgnoredGrnIssueKeysByRefno(refno) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT mmh_mrc_refno, mmd_mrc_sl_no FROM grn_issue_ignores WHERE mmh_mrc_refno = ?`,
+        [String(refno)],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.STOCK_RECEIVED",
+              code: "REPOSITORY.STOCK_RECEIVED.LIST_IGNORED_GRN_ISSUES_BY_REFNO",
+              description: err.toString(),
+              category: "",
+              ref: { refno },
+            });
+            return reject(err);
+          }
+          resolve(rows || []);
+        }
+      );
+    });
+  }
+
   ignoreGrnIssueItems(items, ignoredBy) {
     return new Promise((resolve, reject) => {
       if (!Array.isArray(items) || items.length === 0) {
