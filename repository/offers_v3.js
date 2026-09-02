@@ -474,13 +474,17 @@ class OffersV3Repository {
     });
   }
 
-  getPriceForBatch(item_code, outlet_id, batch_no) {
+  getPriceForBatch(item_code, outlet_id, batch_no, upload_id = null) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT item_code, outlet_id, batch_no, mrp, selling_price, landing_cost, stock_qty
+        `SELECT item_code, outlet_id, batch_no, mrp, selling_price, landing_cost, stock_qty, price_uploaded_at
          FROM \`${DATA_TABLE}\`
-         WHERE item_code = ? AND outlet_id = ? AND batch_no = ?`,
-        [item_code, outlet_id, batch_no],
+         WHERE item_code = ? AND outlet_id = ? AND batch_no = ?${
+           upload_id ? " AND price_upload_id = ?" : ""
+         }`,
+        upload_id
+          ? [item_code, outlet_id, batch_no, upload_id]
+          : [item_code, outlet_id, batch_no],
         (err, rows) => {
           if (err) {
             logError(
@@ -497,14 +501,16 @@ class OffersV3Repository {
     });
   }
 
-  getPricesForItem(item_code) {
+  // upload_id limits the result to the batches one price sheet carried; null
+  // means every row ever uploaded for the item.
+  getPricesForItem(item_code, upload_id = null) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT bd.item_code, bd.outlet_id, o.outlet_name, bd.batch_no, bd.mrp, bd.selling_price, bd.landing_cost, bd.stock_qty
+        `SELECT bd.item_code, bd.outlet_id, o.outlet_name, bd.batch_no, bd.mrp, bd.selling_price, bd.landing_cost, bd.stock_qty, bd.price_uploaded_at
          FROM \`${DATA_TABLE}\` bd
          LEFT JOIN outlets o ON o.outlet_id = bd.outlet_id
-         WHERE bd.item_code = ?`,
-        [item_code],
+         WHERE bd.item_code = ?${upload_id ? " AND bd.price_upload_id = ?" : ""}`,
+        upload_id ? [item_code, upload_id] : [item_code],
         (err, rows) => {
           if (err) {
             logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.GET_PRICES_FOR_ITEM", err.toString(), { item_code });
@@ -548,7 +554,11 @@ class OffersV3Repository {
   // landing_cost is optional per row; when a row omits it (null), the
   // existing stored value is kept rather than being wiped out by a re-upload
   // that doesn't carry that column.
-  async upsertBatchPrice(rows) {
+  // upload_id stamps every row this sheet wrote, so a later read can tell the
+  // current sheet from the rows left behind by older ones. It spans the chunks
+  // below - CURRENT_TIMESTAMP is per statement, so the timestamps alone would
+  // split one upload into several.
+  async upsertBatchPrice(rows, upload_id = null) {
     if (!Array.isArray(rows) || rows.length === 0) return { code: 200, upserted: 0 };
     for (const batch of chunk(rows, BULK_CHUNK_SIZE)) {
       const values = batch.map((r) => [
@@ -558,14 +568,16 @@ class OffersV3Repository {
         r.mrp,
         r.selling_price,
         r.landing_cost ?? null,
+        upload_id,
       ]);
-      const placeholders = values.map(() => "(?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)").join(", ");
+      const placeholders = values.map(() => "(?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)").join(", ");
       const flat = values.flat();
       try {
         await this._queryAsync(
-          `INSERT INTO \`${DATA_TABLE}\` (item_code, outlet_id, batch_no, mrp, selling_price, landing_cost, price_uploaded_at) VALUES ${placeholders}
+          `INSERT INTO \`${DATA_TABLE}\` (item_code, outlet_id, batch_no, mrp, selling_price, landing_cost, price_uploaded_at, price_upload_id) VALUES ${placeholders}
            ON DUPLICATE KEY UPDATE mrp = VALUES(mrp), selling_price = VALUES(selling_price),
-             landing_cost = IFNULL(VALUES(landing_cost), landing_cost), price_uploaded_at = VALUES(price_uploaded_at)`,
+             landing_cost = IFNULL(VALUES(landing_cost), landing_cost), price_uploaded_at = VALUES(price_uploaded_at),
+             price_upload_id = VALUES(price_upload_id)`,
           flat
         );
       } catch (err) {
@@ -812,6 +824,18 @@ class OffersV3Repository {
   // ---------------------------------------------------------------------
   // Upload meta (rows/products/last-uploaded-at summary shown per upload type)
   // ---------------------------------------------------------------------
+
+  /**
+   * The most recent price upload's id. Ids sort by the time they were made, so
+   * MAX over the indexed column is the latest run; NULL means no upload has
+   * been stamped yet, and every caller then falls back to reading all rows.
+   */
+  async getLatestPriceUploadId() {
+    const rows = await this._queryAsync(
+      `SELECT MAX(price_upload_id) AS upload_id FROM \`${DATA_TABLE}\``
+    );
+    return rows && rows[0] ? rows[0].upload_id ?? null : null;
+  }
 
   async getUploadMeta() {
     const rows = await this._queryAsync(
