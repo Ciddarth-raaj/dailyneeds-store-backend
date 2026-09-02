@@ -826,6 +826,35 @@ class OffersV3Repository {
   // ---------------------------------------------------------------------
 
   /**
+   * Drop every batch the given price upload did not carry.
+   *
+   * The sheet is the complete list of live batches, so anything it leaves out
+   * is not sold any more: its price is whatever an older sheet happened to
+   * leave behind, and correcting a price and re-uploading would otherwise
+   * never clear the row it was corrected from.
+   *
+   * Deleted in bounded passes rather than one statement - this table has a row
+   * per item, outlet and batch, and a single delete over all of it holds locks
+   * long enough to stall the uploads and reads happening beside it.
+   */
+  async deleteBatchDataNotInUpload(upload_id) {
+    if (!upload_id) return 0;
+    let removed = 0;
+    for (;;) {
+      const result = await this._queryAsync(
+        `DELETE FROM \`${DATA_TABLE}\`
+         WHERE price_upload_id IS NULL OR price_upload_id <> ?
+         LIMIT 5000`,
+        [upload_id]
+      );
+      const affected = result?.affectedRows ?? 0;
+      removed += affected;
+      if (affected < 5000) break;
+    }
+    return removed;
+  }
+
+  /**
    * The most recent price upload's id. Ids sort by the time they were made, so
    * MAX over the indexed column is the latest run; NULL means no upload has
    * been stamped yet, and every caller then falls back to reading all rows.

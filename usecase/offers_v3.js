@@ -715,6 +715,14 @@ class OffersV3Usecase {
       .slice(0, 17)}${Math.random().toString(36).slice(2, 8)}`;
     await this.offersV3Repo.upsertBatchPrice(resolved, priceUploadId);
 
+    // The sheet replaces the table rather than adding to it. A batch it leaves
+    // out is not sold any more, so its price - and the stock recorded against
+    // it - describe nothing; keeping them means a price you corrected and
+    // re-uploaded goes on being reported from the row you corrected it from.
+    const removedBatches = await this.offersV3Repo.deleteBatchDataNotInUpload(
+      priceUploadId
+    );
+
     // One bulk lookup instead of one query per row to find which rows
     // already have their own occupying batch offer.
     const keys = resolved.map((r) => ({ item_code: r.item_code, outlet_id: r.outlet_id, batch_no: r.batch_no }));
@@ -733,6 +741,7 @@ class OffersV3Usecase {
     return {
       code: 200,
       upserted: resolved.length,
+      removedBatches,
       unresolvedOutlets,
       skippedInvalidRows: skippedRows.length,
       skippedRows,
