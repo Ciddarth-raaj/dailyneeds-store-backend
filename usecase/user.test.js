@@ -110,7 +110,6 @@ describe("updateIpPolicy", () => {
     const result = await build(EMPLOYEE, updates).updateIpPolicy(7, " 203.0.113.10 ,\n10.0.0.0/8 ", "custom");
     assert.equal(result.code, 200);
     assert.equal(result.ip_policy, "custom");
-    assert.equal(result.allow_outside_access, false);
     assert.deepEqual(updates, [{ userId: 7, allowedIps: "203.0.113.10, 10.0.0.0/8", ipPolicy: "custom" }]);
   });
 
@@ -184,7 +183,6 @@ describe("getIpRestrictions", () => {
     assert.deepEqual(entry.branch_ips, ["203.0.113.0/24"]);
     assert.equal(entry.effective.exempt, false);
     assert.equal(entry.is_restricted, true);
-    assert.equal(entry.allow_outside_access, false);
   });
 
   it("marks an employee of an unrestricted branch as open", async () => {
@@ -192,7 +190,6 @@ describe("getIpRestrictions", () => {
     assert.equal(entry.ip_policy, "branch");
     assert.equal(entry.is_restricted, false);
     assert.equal(entry.effective.source, "branch-open");
-    assert.equal(entry.allow_outside_access, true);
   });
 
   it("treats a NULL policy as branch", async () => {

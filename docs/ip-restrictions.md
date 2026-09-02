@@ -8,8 +8,6 @@ request is checked against both at once:
 | **Branch** | `outlets.ip_restriction_enabled`, `outlets.allowed_ips` | while the switch is on, every employee assigned to the outlet (`new_employee.store_id = outlets.outlet_id`) is confined to these addresses — typically the branch's static IP. The list is kept while the switch is off so it need not be retyped. |
 | **User** | `user.ip_policy`, `user.allowed_ips` | one of `branch` (default: follow the branch rule; personal list ignored), `custom` (personal list enforced, unioned with the branch list while that is on) or `unrestricted` (explicit exemption, no check). |
 
-`user.allow_outside_access` from the previous release is still present but no
-longer read or written; a later cleanup migration drops it.
 
 ## Resolution
 
@@ -132,7 +130,7 @@ unless noted.
 | --- | --- |
 | `GET /user/my-ip` | the caller's address plus `is_loopback` / `is_private` / `has_forwarded_header` (token only, no permission) |
 | `GET /user/ip-restrictions` | every active login with `ip_policy`, `allowed_ips`, its branch's `branch_enabled` / `branch_ips`, and the resolved `effective` policy |
-| `POST /user/ip-restrictions` | `{ user_id, allowed_ips, ip_policy }` — `allowed_ips` is a comma-separated string or an array; `ip_policy` is `branch` / `custom` / `unrestricted`. The previous release's `allow_outside_access` boolean is still accepted in place of `ip_policy` (true → `branch`, false → `custom`) |
+| `POST /user/ip-restrictions` | `{ user_id, allowed_ips, ip_policy }` — `allowed_ips` is a comma-separated string or an array; `ip_policy` is `branch` / `custom` / `unrestricted` |
 | `GET /outlet/ip-restrictions` | every branch with `ip_restriction_enabled`, `allowed_ips` and `employee_count` |
 | `GET /outlet/ip-restriction?outlet_id=` | one branch's rule (404 when missing) |
 | `POST /outlet/ip-restriction` | `{ outlet_id, allowed_ips, ip_restriction_enabled }` — clears the whole policy cache on success |
@@ -186,8 +184,11 @@ Nothing else needs restarting; the cache expires within a minute.
 - `20260902150000-user-ip-restriction` — `user.allowed_ips` and the
   `manage_ip_restrictions` permission.
 - `20260902160000-user-outside-access-switch` — `user.allow_outside_access`
-  (now superseded, column retained for the moment).
+  (superseded by `ip_policy`; dropped by `20260902190000`).
 - `20260902170000-branch-ip-restriction` — `outlets.allowed_ips`,
   `outlets.ip_restriction_enabled`, `user.ip_policy` (backfilled: admins →
   `unrestricted`, previously restricted users → `custom`, everyone else →
   `branch`), and the `view_branch` permission.
+- `20260902190000-drop-user-outside-access` — drops the superseded column
+  once no running code referenced it (reversible: the down rebuilds it from
+  `ip_policy`).
