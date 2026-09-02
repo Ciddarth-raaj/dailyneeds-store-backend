@@ -3,6 +3,8 @@ const assert = require("node:assert/strict");
 const {
   getClientIp,
   isAccessAllowed,
+  isLoopbackIp,
+  isPrivateIp,
   isIpAllowed,
   matchesRule,
   normalizeIp,
@@ -244,5 +246,94 @@ describe("validateIpPolicy", () => {
     });
     assert.equal(result.valid, false);
     assert.match(result.reason, /office-wifi/);
+  });
+});
+
+describe("isLoopbackIp", () => {
+  it("matches the loopback range and IPv6 loopback", () => {
+    assert.equal(isLoopbackIp("127.0.0.1"), true);
+    assert.equal(isLoopbackIp("127.1.2.3"), true);
+    assert.equal(isLoopbackIp("::1"), true);
+    assert.equal(isLoopbackIp("::ffff:127.0.0.1"), true);
+  });
+
+  it("does not match a routable address", () => {
+    assert.equal(isLoopbackIp("203.0.113.10"), false);
+    assert.equal(isLoopbackIp("10.0.0.1"), false);
+    assert.equal(isLoopbackIp(""), false);
+  });
+});
+
+describe("isPrivateIp", () => {
+  it("matches RFC1918, link-local and loopback", () => {
+    assert.equal(isPrivateIp("10.1.2.3"), true);
+    assert.equal(isPrivateIp("172.16.0.1"), true);
+    assert.equal(isPrivateIp("172.31.255.254"), true);
+    assert.equal(isPrivateIp("192.168.1.5"), true);
+    assert.equal(isPrivateIp("169.254.1.1"), true);
+    assert.equal(isPrivateIp("127.0.0.1"), true);
+  });
+
+  it("does not match public space just outside those ranges", () => {
+    assert.equal(isPrivateIp("172.15.0.1"), false);
+    assert.equal(isPrivateIp("172.32.0.1"), false);
+    assert.equal(isPrivateIp("192.169.1.1"), false);
+    assert.equal(isPrivateIp("203.0.113.10"), false);
+  });
+});
+
+describe("validateIpPolicy loopback guard", () => {
+  it("refuses a loopback address the broken-proxy bug would produce", () => {
+    const result = validateIpPolicy({
+      allowOutsideAccess: false,
+      allowedIps: "127.0.0.1",
+    });
+    assert.equal(result.valid, false);
+    assert.match(result.reason, /talking to itself/);
+    assert.match(result.reason, /X-Forwarded-For/);
+  });
+
+  it("refuses loopback even mixed in with a real address", () => {
+    const result = validateIpPolicy({
+      allowOutsideAccess: false,
+      allowedIps: "203.0.113.10, 127.0.0.1",
+    });
+    assert.equal(result.valid, false);
+  });
+
+  it("refuses a loopback CIDR too", () => {
+    const result = validateIpPolicy({
+      allowOutsideAccess: false,
+      allowedIps: "127.0.0.0/8",
+    });
+    assert.equal(result.valid, false);
+  });
+
+  it("refuses loopback even when outside access stays on", () => {
+    // The list is kept for later, so a bad entry saved now would bite the
+    // moment someone flips the switch.
+    const result = validateIpPolicy({
+      allowOutsideAccess: true,
+      allowedIps: "127.0.0.1",
+    });
+    assert.equal(result.valid, false);
+  });
+
+  it("still accepts a private LAN address", () => {
+    // An app reached only over a LAN legitimately sees these, so this is a
+    // warning on screen rather than a refusal.
+    const result = validateIpPolicy({
+      allowOutsideAccess: false,
+      allowedIps: "192.168.1.50",
+    });
+    assert.equal(result.valid, true);
+  });
+
+  it("still accepts a normal public address", () => {
+    const result = validateIpPolicy({
+      allowOutsideAccess: false,
+      allowedIps: "203.0.113.10",
+    });
+    assert.equal(result.valid, true);
   });
 });

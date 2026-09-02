@@ -49,6 +49,44 @@ function ipv4ToLong(value) {
 }
 
 /**
+ * True for an address that can never belong to a remote client: the
+ * loopback range and IPv6 `::1`.
+ *
+ * Seeing one of these as "the client" always means the reverse proxy is not
+ * forwarding the real address — the request came from the proxy itself over
+ * localhost.
+ */
+function isLoopbackIp(value) {
+  const ip = normalizeIp(value);
+  if (ip === "") return false;
+  if (ip === "::1") return true;
+  if (!isIpv4(ip)) return false;
+  return ip.split(".")[0] === "127";
+}
+
+/**
+ * True for an address that is not routable on the public internet:
+ * loopback, RFC1918 private space, and link-local.
+ *
+ * Unlike loopback this is not automatically wrong — an app reached only
+ * over a LAN would legitimately see these — so callers warn rather than
+ * refuse.
+ */
+function isPrivateIp(value) {
+  const ip = normalizeIp(value);
+  if (ip === "") return false;
+  if (isLoopbackIp(ip)) return true;
+  if (!isIpv4(ip)) return false;
+
+  const [a, b] = ip.split(".").map(Number);
+  if (a === 10) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 169 && b === 254) return true;
+  return false;
+}
+
+/**
  * The address the request actually came from.
  *
  * Express fills `req.ip` from the socket, or from the left-most untrusted
@@ -246,6 +284,23 @@ function validateIpPolicy({ allowOutsideAccess, allowedIps }) {
     };
   }
 
+  // A loopback entry only ever gets typed in because the reverse proxy is
+  // not forwarding the client address, so the screen reported the server
+  // talking to itself. Saving it would match every request from every
+  // network — a restriction that reads as configured while enforcing
+  // nothing — so refuse it and say what is actually wrong.
+  const loopback = rules.filter((rule) => isLoopbackIp(rule.split("/")[0]));
+  if (loopback.length > 0) {
+    return {
+      valid: false,
+      reason:
+        `${loopback.join(", ")} is this server talking to itself, not a network address. ` +
+        "It means the reverse proxy is not sending the real client IP, so every user would match it. " +
+        "Fix the proxy's X-Forwarded-For header first.",
+      rules,
+    };
+  }
+
   if (!allowOutsideAccess && rules.length === 0) {
     return {
       valid: false,
@@ -260,6 +315,8 @@ function validateIpPolicy({ allowOutsideAccess, allowedIps }) {
 
 module.exports = {
   getClientIp,
+  isLoopbackIp,
+  isPrivateIp,
   isAccessAllowed,
   isIpAllowed,
   toBoolean,
