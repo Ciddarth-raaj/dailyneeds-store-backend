@@ -102,19 +102,15 @@ class UserRoutes {
       needs("manage_ip_restrictions"),
       async (req, res) => {
         try {
-          // `ip_policy` is the decision. The previous release's
-          // `allow_outside_access` boolean is still accepted so the old
-          // screen keeps working in the minutes between the backend and
-          // frontend deploys; the usecase maps it (true → branch, false →
-          // custom). One of the two must be present.
-          const schema = Joi.object({
+          const schema = {
             user_id: Joi.number().integer().required(),
             allowed_ips: Joi.alternatives()
               .try(Joi.string().trim().allow(""), Joi.array().items(Joi.string()))
               .required(),
-            ip_policy: Joi.string().valid("branch", "custom", "unrestricted"),
-            allow_outside_access: Joi.boolean(),
-          }).or("ip_policy", "allow_outside_access");
+            ip_policy: Joi.string()
+              .valid("branch", "custom", "unrestricted")
+              .required(),
+          };
 
           const isValid = Joi.validate(req.body, schema);
           if (isValid.error !== null) {
@@ -124,9 +120,7 @@ class UserRoutes {
           const data = await this.userUsecase.updateIpPolicy(
             req.body.user_id,
             req.body.allowed_ips,
-            req.body.ip_policy !== undefined
-              ? req.body.ip_policy
-              : req.body.allow_outside_access
+            req.body.ip_policy
           );
 
           // The middleware caches policies for a minute; drop this user's

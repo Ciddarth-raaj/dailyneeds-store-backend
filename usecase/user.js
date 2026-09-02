@@ -101,8 +101,6 @@ class UserUsecase {
         branch_ips: parseAllowList(row.branch_ips),
         effective,
         is_restricted: !effective.exempt,
-        // Read by the previous release's screen during rollout; drop with it.
-        allow_outside_access: policy !== "custom",
       };
     });
   }
@@ -112,8 +110,6 @@ class UserUsecase {
    *
    * `ipPolicy` is the decision: `branch` (follow their branch's rule),
    * `custom` (their own list, unioned with the branch's) or `unrestricted`.
-   * The previous release's boolean is still accepted so the old screen keeps
-   * working in the minutes between the backend and frontend deploys.
    *
    * The list is stored under every policy, so moving someone back to
    * `custom` does not mean retyping their addresses. Entries are validated,
@@ -146,7 +142,6 @@ class UserUsecase {
       code: 200,
       allowed_ips: rules,
       ip_policy: policy,
-      allow_outside_access: policy !== "custom",
     };
   }
 }
