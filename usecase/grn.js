@@ -30,6 +30,16 @@ function tagOfferProducts(items, activeOfferProductIds) {
   return items;
 }
 
+// `detail.items` from listGrnDetailByRefno don't carry mmh_mrc_refno per row
+// (they're all implicitly the one refno requested), so ignoredSlNos is scoped
+// to that refno and keyed on mmd_mrc_sl_no alone.
+function tagIgnoredItems(items, ignoredSlNos) {
+  items.forEach((item) => {
+    item.is_ignored = ignoredSlNos.has(String(item.mmd_mrc_sl_no));
+  });
+  return items;
+}
+
 class GrnUsecase {
   constructor(stockReceivedRepo, priceCheckerRepo, hqOffersRepo, offersV3Repo) {
     this.stockReceivedRepo = stockReceivedRepo;
@@ -64,12 +74,19 @@ class GrnUsecase {
           detail.items.map((item) => item.product_id).filter((id) => id != null)
         ),
       ];
-      const activeOfferProductIds = await findActiveOfferProductIds(
-        productIds,
-        this.hqOffersRepo,
-        this.offersV3Repo
-      );
+      const [activeOfferProductIds, ignoredRows] = await Promise.all([
+        findActiveOfferProductIds(
+          productIds,
+          this.hqOffersRepo,
+          this.offersV3Repo
+        ),
+        this.stockReceivedRepo.listIgnoredGrnIssueKeysByRefno(refno),
+      ]);
       tagOfferProducts(detail.items, activeOfferProductIds);
+      tagIgnoredItems(
+        detail.items,
+        new Set(ignoredRows.map((row) => String(row.mmd_mrc_sl_no)))
+      );
 
       return detail;
     } catch (err) {
