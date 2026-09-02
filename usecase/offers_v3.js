@@ -996,6 +996,14 @@ class OffersV3Usecase {
     return map;
   }
 
+  async listGroupedItemsByProductId(itemCode) {
+    return this.offersV3Repo.listGroupedItemsByProductId(itemCode);
+  }
+
+  async listGroupedItemsByProductIds(itemCodes) {
+    return this.offersV3Repo.listGroupedItemsByProductIds(itemCodes);
+  }
+
   // ---------------------------------------------------------------------
   // One-time go-live import (already-confirmed offers, no validation)
   // ---------------------------------------------------------------------

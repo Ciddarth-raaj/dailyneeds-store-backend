@@ -35,6 +35,56 @@ function chunk(arr, size) {
   return chunks;
 }
 
+function parseOptionalNumber(value) {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function computeDiscount(mrpRaw, sellingPriceRaw) {
+  const mrp = parseOptionalNumber(mrpRaw);
+  const sellingPrice = parseOptionalNumber(sellingPriceRaw);
+  if (mrp == null || sellingPrice == null) {
+    return { discount_amount: null, discount_pct: null };
+  }
+  const discount_amount = mrp - sellingPrice;
+  const discount_pct = mrp !== 0 ? 100 - (sellingPrice / mrp) * 100 : null;
+  return {
+    discount_amount: Number.isFinite(discount_amount) ? discount_amount : null,
+    discount_pct:
+      discount_pct != null && Number.isFinite(discount_pct)
+        ? Math.round(discount_pct * 100) / 100
+        : null,
+  };
+}
+
+function mapGroupedBatchRow(row) {
+  const batchCount = parseOptionalNumber(row.batch_count) ?? 0;
+  const distinctLandingCosts = parseOptionalNumber(row.distinct_landing_costs) ?? 0;
+  const nullLandingCostCount = parseOptionalNumber(row.null_landing_cost_count) ?? 0;
+  const allSameNonNull = nullLandingCostCount === 0 && distinctLandingCosts === 1;
+  const { discount_amount, discount_pct } = computeDiscount(row.mrp, row.selling_price);
+
+  return {
+    product_id: parseOptionalNumber(row.product_id),
+    purchase_price: allSameNonNull ? parseOptionalNumber(row.landing_cost) : null,
+    old_mrp: parseOptionalNumber(row.mrp),
+    old_selling_price: parseOptionalNumber(row.selling_price),
+    discount_amount,
+    discount_pct,
+    batch_count: batchCount,
+  };
+}
+
+const GROUPED_BATCH_SELECT = `
+  item_code AS product_id,
+  mrp,
+  selling_price,
+  COUNT(*) AS batch_count,
+  COUNT(DISTINCT landing_cost) AS distinct_landing_costs,
+  SUM(CASE WHEN landing_cost IS NULL THEN 1 ELSE 0 END) AS null_landing_cost_count,
+  MIN(landing_cost) AS landing_cost`;
+
 function logError(component, code, description, ref = {}) {
   logger.Log({
     level: logger.LEVEL.ERROR,
@@ -897,6 +947,49 @@ class OffersV3Repository {
       if (affected < 5000) break;
     }
     return removed;
+  }
+
+  // Grouped batches for one item, sourced from the latest Offers V3 Price
+  // Upload -- the GRN Price Checker modal's data source. Mirrors
+  // repository/price_checker.js's listGroupedItemsByProductId, but reads
+  // offers_v3_batch_data (mrp/selling_price, single current value per
+  // batch) instead of price_checker_items (old/new pair from a separate
+  // upload).
+  async listGroupedItemsByProductId(itemCode) {
+    const uploadId = await this.getLatestPriceUploadId();
+    const rows = await this._queryAsync(
+      `SELECT ${GROUPED_BATCH_SELECT}
+       FROM \`${DATA_TABLE}\`
+       WHERE item_code = ?${uploadId ? " AND price_upload_id = ?" : ""}
+         AND mrp IS NOT NULL AND selling_price IS NOT NULL
+       GROUP BY item_code, mrp, selling_price
+       ORDER BY mrp ASC, selling_price ASC`,
+      uploadId ? [itemCode, uploadId] : [itemCode]
+    );
+    return (rows || []).map(mapGroupedBatchRow);
+  }
+
+  // Bulk variant of listGroupedItemsByProductId, one query for many products
+  // (used by GRN Issues, which needs this for every item on the page).
+  async listGroupedItemsByProductIds(itemCodes) {
+    const uniqueCodes = [...new Set((itemCodes || []).filter((id) => id != null))];
+    if (uniqueCodes.length === 0) return [];
+    const uploadId = await this.getLatestPriceUploadId();
+    const rows = [];
+    for (const batch of chunk(uniqueCodes, BULK_CHUNK_SIZE)) {
+      const placeholders = batch.map(() => "?").join(",");
+      const result = await this._queryAsync(
+        `SELECT ${GROUPED_BATCH_SELECT}
+         FROM \`${DATA_TABLE}\`
+         WHERE item_code IN (${placeholders})${uploadId ? " AND price_upload_id = ?" : ""}
+           AND mrp IS NOT NULL AND selling_price IS NOT NULL
+         GROUP BY item_code, mrp, selling_price
+         ORDER BY mrp ASC, selling_price ASC`,
+        uploadId ? [...batch, uploadId] : batch
+      );
+      rows.push(...(result || []));
+    }
+    return rows.map(mapGroupedBatchRow);
   }
 
   /**
