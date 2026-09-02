@@ -363,6 +363,51 @@ class OffersV3Repository {
     return set;
   }
 
+  // Bulk variant returning the offer_type/value of each active item-level
+  // or occupying batch-specific offer (from the given item codes), for a
+  // hover-tooltip summary alongside the Offer badge.
+  async listActiveOfferDetailsForItemCodes(itemCodes) {
+    const uniqueCodes = [...new Set(itemCodes)];
+    if (uniqueCodes.length === 0) return [];
+    const details = [];
+    for (const batch of chunk(uniqueCodes, BULK_CHUNK_SIZE)) {
+      const placeholders = batch.map(() => "?").join(",");
+      try {
+        const itemRows = await this._queryAsync(
+          `SELECT item_code, offer_type, value FROM \`${ITEM_TABLE}\`
+           WHERE item_code IN (${placeholders}) AND status IN (${ITEM_ACTIVE_STATUSES.map(() => "?").join(",")})`,
+          [...batch, ...ITEM_ACTIVE_STATUSES]
+        );
+        (itemRows || []).forEach((r) =>
+          details.push({
+            item_code: r.item_code,
+            scope: "item",
+            offer_type: r.offer_type,
+            value: r.value,
+          })
+        );
+
+        const batchRows = await this._queryAsync(
+          `SELECT item_code, offer_type, value FROM \`${BATCH_TABLE}\`
+           WHERE item_code IN (${placeholders}) AND status IN (${BATCH_OCCUPYING_STATUSES.map(() => "?").join(",")})`,
+          [...batch, ...BATCH_OCCUPYING_STATUSES]
+        );
+        (batchRows || []).forEach((r) =>
+          details.push({
+            item_code: r.item_code,
+            scope: "batch",
+            offer_type: r.offer_type,
+            value: r.value,
+          })
+        );
+      } catch (err) {
+        logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.LIST_ACTIVE_OFFER_DETAILS_FOR_ITEM_CODES", err.toString());
+        throw err;
+      }
+    }
+    return details;
+  }
+
   // Bulk upsert of untagged-batch alerts (used after a large upload instead
   // of one INSERT per detected batch).
   async upsertUntaggedBatchAlerts(keys) {
