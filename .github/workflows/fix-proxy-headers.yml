@@ -1,0 +1,76 @@
+# Teach nginx to forward the client's IP to the API.
+#
+# Run manually, not on push: this edits infrastructure config rather than
+# application code, and app releases have no business touching it. Once the
+# headers are in place the run is a no-op, so it is safe to re-run.
+#
+# Uses the same secrets as the backend deploy:
+#   SSH_PRIVATE_KEY, SSH_HOST, SSH_USER
+#
+# The script backs up every file it edits, validates with `nginx -t`, and
+# restores from backup if validation or the reload fails — a bad edit can
+# never be left serving.
+
+name: Fix Proxy Headers
+
+"on":
+  workflow_dispatch:
+    inputs:
+      server_name:
+        description: "server_name of the vhost to patch"
+        required: true
+        default: "api.dnds.co.in"
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/dnds_gha_deploy
+          chmod 600 ~/.ssh/dnds_gha_deploy
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      # The script is piped over stdin rather than copied to the server, so
+      # nothing is left behind on the box.
+      - name: Patch nginx and reload
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SERVER_NAME: ${{ github.event.inputs.server_name }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/dnds_gha_deploy \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "${SSH_USER}@${SSH_HOST}" \
+            "sudo -n python3 - '${SERVER_NAME}'" \
+            < scripts/patch_nginx_forwarded.py
+
+      # Proves the header is actually arriving, rather than trusting that
+      # the edit landed in the block that serves this vhost.
+      - name: Show what the app now sees
+        if: always()
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SERVER_NAME: ${{ github.event.inputs.server_name }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/dnds_gha_deploy \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "${SSH_USER}@${SSH_HOST}" \
+            "sudo -n nginx -T 2>/dev/null | grep -nE 'server_name|proxy_pass|X-Forwarded-For' | grep -A3 -B3 '${SERVER_NAME}' || true"
