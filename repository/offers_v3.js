@@ -73,6 +73,7 @@ function mapGroupedBatchRow(row) {
     discount_amount,
     discount_pct,
     batch_count: batchCount,
+    stock_qty: parseOptionalNumber(row.total_stock_qty),
   };
 }
 
@@ -83,7 +84,8 @@ const GROUPED_BATCH_SELECT = `
   COUNT(*) AS batch_count,
   COUNT(DISTINCT landing_cost) AS distinct_landing_costs,
   SUM(CASE WHEN landing_cost IS NULL THEN 1 ELSE 0 END) AS null_landing_cost_count,
-  MIN(landing_cost) AS landing_cost`;
+  MIN(landing_cost) AS landing_cost,
+  SUM(stock_qty) AS total_stock_qty`;
 
 function logError(component, code, description, ref = {}) {
   logger.Log({
