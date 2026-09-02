@@ -707,7 +707,21 @@ class OffersV3Usecase {
       };
     }
 
-    await this.offersV3Repo.upsertBatchPrice(resolved);
+    // One id for the whole sheet, sortable by when it was made, so the rows it
+    // writes can later be told apart from the ones earlier sheets left behind.
+    const priceUploadId = `${new Date()
+      .toISOString()
+      .replace(/[-:.TZ]/g, "")
+      .slice(0, 17)}${Math.random().toString(36).slice(2, 8)}`;
+    await this.offersV3Repo.upsertBatchPrice(resolved, priceUploadId);
+
+    // The sheet replaces the table rather than adding to it. A batch it leaves
+    // out is not sold any more, so its price - and the stock recorded against
+    // it - describe nothing; keeping them means a price you corrected and
+    // re-uploaded goes on being reported from the row you corrected it from.
+    const removedBatches = await this.offersV3Repo.deleteBatchDataNotInUpload(
+      priceUploadId
+    );
 
     // One bulk lookup instead of one query per row to find which rows
     // already have their own occupying batch offer.
@@ -727,6 +741,7 @@ class OffersV3Usecase {
     return {
       code: 200,
       upserted: resolved.length,
+      removedBatches,
       unresolvedOutlets,
       skippedInvalidRows: skippedRows.length,
       skippedRows,
@@ -777,6 +792,14 @@ class OffersV3Usecase {
   async computeMismatches() {
     const mismatches = [];
 
+    // The price sheet lists every live batch, but this table is never pruned:
+    // a batch that stops appearing keeps its last-known price. Checking it
+    // reports a price nobody uploaded, against stock nobody can sell, so only
+    // the batches in the current sheet are checked. Before the first stamped
+    // upload there is no current sheet to name, and everything is checked as
+    // before rather than nothing at all.
+    const uploadId = await this.offersV3Repo.getLatestPriceUploadId();
+
     const itemOffers = await this.offersV3Repo.listItemOffers({ status: "active" });
     const batchOffers = await this.offersV3Repo.listBatchOffers({ status: "active" });
 
@@ -786,7 +809,7 @@ class OffersV3Usecase {
     ]);
 
     for (const offer of itemOffers) {
-      const prices = await this.offersV3Repo.getPricesForItem(offer.item_code);
+      const prices = await this.offersV3Repo.getPricesForItem(offer.item_code, uploadId);
       for (const price of prices) {
         if (price.mrp == null || price.selling_price == null) continue;
         const expected = computeExpectedSelling(offer.offer_type, offer.value, price.mrp);
@@ -808,6 +831,10 @@ class OffersV3Usecase {
             expected_selling_price: roundedExpected,
             actual_selling_price: actual,
             stock_qty: price.stock_qty,
+            // Which price upload this row's price came from. The table is
+            // never pruned, so a batch that stopped appearing in the sheet
+            // keeps its last-known price and goes on being checked.
+            price_uploaded_at: price.price_uploaded_at ?? null,
             landing_cost:
               price.landing_cost ??
               landingCostMap.get(`${offer.item_code}|${price.outlet_id}|${price.batch_no}`) ??
@@ -818,7 +845,12 @@ class OffersV3Usecase {
     }
 
     for (const offer of batchOffers) {
-      const price = await this.offersV3Repo.getPriceForBatch(offer.item_code, offer.outlet_id, offer.batch_no);
+      const price = await this.offersV3Repo.getPriceForBatch(
+        offer.item_code,
+        offer.outlet_id,
+        offer.batch_no,
+        uploadId
+      );
       if (!price || price.mrp == null || price.selling_price == null) continue;
       const expected = computeExpectedSelling(offer.offer_type, offer.value, price.mrp);
       if (expected == null) continue;
@@ -839,6 +871,7 @@ class OffersV3Usecase {
           expected_selling_price: roundedExpected,
           actual_selling_price: actual,
           stock_qty: price.stock_qty,
+          price_uploaded_at: price.price_uploaded_at ?? null,
           landing_cost:
             price.landing_cost ??
             landingCostMap.get(`${offer.item_code}|${offer.outlet_id}|${offer.batch_no}`) ??
