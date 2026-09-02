@@ -6,3 +6,5 @@ migrations/*/database.json
 .env
 logs/
 tmp/
+__pycache__/
+*.pyc
