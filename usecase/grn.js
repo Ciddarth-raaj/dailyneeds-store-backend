@@ -87,9 +87,22 @@ class GrnUsecase {
 
   async listGrnIssues(filters = {}) {
     try {
-      const items = await this.stockReceivedRepo.listGrnDetailItemsByDateRange(
-        filters.from_date,
-        filters.to_date
+      const [rawItems, ignoredRows] = await Promise.all([
+        this.stockReceivedRepo.listGrnDetailItemsByDateRange(
+          filters.from_date,
+          filters.to_date
+        ),
+        this.stockReceivedRepo.listIgnoredGrnIssueKeys(),
+      ]);
+
+      const ignoredKeys = new Set(
+        ignoredRows.map(
+          (row) => `${row.mmh_mrc_refno}:${row.mmd_mrc_sl_no}`
+        )
+      );
+      const items = rawItems.filter(
+        (item) =>
+          !ignoredKeys.has(`${item.mmh_mrc_refno}:${item.mmd_mrc_sl_no}`)
       );
 
       const productIds = [
@@ -128,6 +141,22 @@ class GrnUsecase {
         description: err.toString(),
         category: "",
         ref: { filters },
+      });
+      throw err;
+    }
+  }
+
+  async ignoreGrnIssueItems(items, ignoredBy) {
+    try {
+      return await this.stockReceivedRepo.ignoreGrnIssueItems(items, ignoredBy);
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "USECASE.GRN",
+        code: "USECASE.GRN.IGNORE_GRN_ISSUES",
+        description: err.toString(),
+        category: "",
+        ref: { items },
       });
       throw err;
     }

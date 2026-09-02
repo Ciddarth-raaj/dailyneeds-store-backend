@@ -1,5 +1,18 @@
 const router = require("express").Router();
+const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
+
+const ignoreItemSchema = Joi.object({
+  refno: Joi.alternatives().try(Joi.string(), Joi.number()).required(),
+  sl_no: Joi.alternatives().try(Joi.string(), Joi.number()).required(),
+  product_id: Joi.alternatives()
+    .try(Joi.string(), Joi.number())
+    .optional()
+    .allow(null),
+});
+const ignoreSchema = Joi.object({
+  items: Joi.array().items(ignoreItemSchema).min(1).required(),
+});
 
 function parseOptionalIsoDate(raw, label) {
   if (raw === undefined || raw === null || raw === "") {
@@ -140,6 +153,35 @@ class GrnRoutes {
             to_date: toParsed.value ?? null,
           },
         });
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
+    router.post("/issues/ignore", async (req, res) => {
+      try {
+        if (!req.decoded || req.decoded.user_type !== 2) {
+          res.status(403).json({ code: 403, msg: "Only admins can ignore GRN issues" });
+          res.end();
+          return;
+        }
+
+        const isValid = Joi.validate(req.body, ignoreSchema);
+        if (isValid.error) {
+          res.status(400).json({ code: 400, msg: isValid.error.message });
+          res.end();
+          return;
+        }
+
+        const items = isValid.value.items.map((item) => ({
+          refno: item.refno,
+          sl_no: item.sl_no,
+          product_id: item.product_id ?? null,
+        }));
+        const ignoredBy = req.decoded.employee_id ?? null;
+        const result = await this.grnUsecase.ignoreGrnIssueItems(items, ignoredBy);
+        res.json({ code: 200, ...result });
       } catch (err) {
         respondError(res, err);
       }

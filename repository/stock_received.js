@@ -1096,6 +1096,68 @@ class StockReceivedRepository {
       });
     });
   }
+
+  listIgnoredGrnIssueKeys() {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT mmh_mrc_refno, mmd_mrc_sl_no FROM grn_issue_ignores`,
+        [],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.STOCK_RECEIVED",
+              code: "REPOSITORY.STOCK_RECEIVED.LIST_IGNORED_GRN_ISSUES",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            return reject(err);
+          }
+          resolve(rows || []);
+        }
+      );
+    });
+  }
+
+  ignoreGrnIssueItems(items, ignoredBy) {
+    return new Promise((resolve, reject) => {
+      if (!Array.isArray(items) || items.length === 0) {
+        return resolve({ ignored: 0 });
+      }
+
+      const values = items.map((item) => [
+        String(item.refno),
+        String(item.sl_no),
+        item.product_id != null ? item.product_id : null,
+        ignoredBy != null ? ignoredBy : null,
+      ]);
+
+      this.db.query(
+        `INSERT INTO grn_issue_ignores
+            (mmh_mrc_refno, mmd_mrc_sl_no, product_id, ignored_by)
+         VALUES ?
+         ON DUPLICATE KEY UPDATE
+            product_id = VALUES(product_id),
+            ignored_by = VALUES(ignored_by)`,
+        [values],
+        (err, result) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.STOCK_RECEIVED",
+              code: "REPOSITORY.STOCK_RECEIVED.IGNORE_GRN_ISSUES",
+              description: err.toString(),
+              category: "",
+              ref: { items },
+            });
+            return reject(err);
+          }
+          resolve({ ignored: items.length });
+        }
+      );
+    });
+  }
 }
 
 module.exports = (mainDb, gofrugalDb) => {
