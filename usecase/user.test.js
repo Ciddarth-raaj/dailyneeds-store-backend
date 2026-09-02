@@ -10,8 +10,8 @@ const makeRepos = (row, updates = []) => ({
     async getIpPolicy() {
       return row;
     },
-    async updateIpPolicy(userId, allowedIps, allowOutsideAccess) {
-      updates.push({ userId, allowedIps, allowOutsideAccess });
+    async updateIpPolicy(userId, allowedIps, ipPolicy) {
+      updates.push({ userId, allowedIps, ipPolicy });
     },
     async getIpRestrictions() {
       return [row];
@@ -24,203 +24,179 @@ const makeRepos = (row, updates = []) => ({
   },
 });
 
-const USER_ROW = {
+const build = (row, updates = []) => {
+  const { userRepo, employeeRepo } = makeRepos(row, updates);
+  return buildUserUsecase(userRepo, null, employeeRepo);
+};
+
+/** An ordinary employee following an unrestricted branch — the default state. */
+const EMPLOYEE = {
   user_id: 7,
   employee_id: 3,
   user_type: 1,
   store_id: 2,
   designation_id: 4,
+  ip_policy: "branch",
   allowed_ips: null,
-  allow_outside_access: 1,
+  branch_enabled: 0,
+  branch_ips: null,
 };
 
-describe("login IP gate", () => {
-  it("signs in an unrestricted user from anywhere", async () => {
-    const { userRepo, employeeRepo } = makeRepos(USER_ROW);
-    const usecase = buildUserUsecase(userRepo, null, employeeRepo);
+const BRANCH_ON = { branch_enabled: 1, branch_ips: "203.0.113.0/24" };
+const ADMIN = { ...EMPLOYEE, user_type: 2, ip_policy: "unrestricted" };
 
-    const result = await usecase.login("u", "p", "49.207.1.1");
+describe("login IP gate", () => {
+  it("signs in an employee of an unrestricted branch from anywhere", async () => {
+    const result = await build(EMPLOYEE).login("u", "p", "49.207.1.1");
     assert.equal(result.code, 200);
     assert.ok(result.token);
   });
 
-  it("signs in a restricted user from an allowed address", async () => {
-    const row = {
-      ...USER_ROW,
-      allowed_ips: "203.0.113.10, 198.51.100.0/24",
-      allow_outside_access: 0,
-    };
-    const { userRepo, employeeRepo } = makeRepos(row);
-    const usecase = buildUserUsecase(userRepo, null, employeeRepo);
-
-    const result = await usecase.login("u", "p", "198.51.100.5");
+  it("signs in an employee of a restricted branch from the branch", async () => {
+    const result = await build({ ...EMPLOYEE, ...BRANCH_ON }).login("u", "p", "203.0.113.44");
     assert.equal(result.code, 200);
   });
 
-  it("refuses correct credentials from an outside address", async () => {
-    const row = {
-      ...USER_ROW,
-      allowed_ips: "203.0.113.10",
-      allow_outside_access: 0,
-    };
-    const { userRepo, employeeRepo } = makeRepos(row);
-    const usecase = buildUserUsecase(userRepo, null, employeeRepo);
-
-    const result = await usecase.login("u", "p", "49.207.1.1");
+  it("refuses an employee of a restricted branch from outside it", async () => {
+    const result = await build({ ...EMPLOYEE, ...BRANCH_ON }).login("u", "p", "49.207.1.1");
     assert.equal(result.code, 403);
     assert.equal(result.error, "IP_NOT_ALLOWED");
     assert.equal(result.token, undefined);
   });
 
-  it("lets a user with outside access on sign in from anywhere, list or not", async () => {
-    const row = {
-      ...USER_ROW,
-      allowed_ips: "203.0.113.10",
-      allow_outside_access: 1,
-    };
-    const { userRepo, employeeRepo } = makeRepos(row);
-    const usecase = buildUserUsecase(userRepo, null, employeeRepo);
+  it("lets an admin of a restricted branch sign in from outside it", async () => {
+    const result = await build({ ...ADMIN, ...BRANCH_ON }).login("u", "p", "49.207.1.1");
+    assert.equal(result.code, 200);
+  });
 
-    const result = await usecase.login("u", "p", "49.207.1.1");
+  it("lets an admin left on the branch policy sign in from outside it too", async () => {
+    const result = await build({ ...ADMIN, ...BRANCH_ON, ip_policy: "branch" }).login("u", "p", "49.207.1.1");
+    assert.equal(result.code, 200);
+  });
+
+  it("signs in a custom user from a personal address", async () => {
+    const row = { ...EMPLOYEE, ...BRANCH_ON, ip_policy: "custom", allowed_ips: "198.51.100.5" };
+    const result = await build(row).login("u", "p", "198.51.100.5");
+    assert.equal(result.code, 200);
+  });
+
+  it("signs in a custom user from the branch as well (union)", async () => {
+    const row = { ...EMPLOYEE, ...BRANCH_ON, ip_policy: "custom", allowed_ips: "198.51.100.5" };
+    const result = await build(row).login("u", "p", "203.0.113.44");
+    assert.equal(result.code, 200);
+  });
+
+  it("refuses a custom user from neither list", async () => {
+    const row = { ...EMPLOYEE, ...BRANCH_ON, ip_policy: "custom", allowed_ips: "198.51.100.5" };
+    const result = await build(row).login("u", "p", "49.207.1.1");
+    assert.equal(result.code, 403);
+  });
+
+  it("signs in an unrestricted user from anywhere despite the branch", async () => {
+    const row = { ...EMPLOYEE, ...BRANCH_ON, ip_policy: "unrestricted" };
+    const result = await build(row).login("u", "p", "49.207.1.1");
     assert.equal(result.code, 200);
   });
 
   it("still reports bad credentials as 204", async () => {
-    const { userRepo, employeeRepo } = makeRepos(null);
-    const usecase = buildUserUsecase(userRepo, null, employeeRepo);
-
-    const result = await usecase.login("u", "wrong", "203.0.113.10");
+    const result = await build(null).login("u", "wrong", "203.0.113.10");
     assert.equal(result.code, 204);
   });
 });
 
 describe("updateIpPolicy", () => {
-  const build = () => {
+  it("stores a normalized list under custom", async () => {
     const updates = [];
-    const { userRepo, employeeRepo } = makeRepos(USER_ROW, updates);
-    return { usecase: buildUserUsecase(userRepo, null, employeeRepo), updates };
-  };
-
-  it("stores a normalized list when blocking outside access", async () => {
-    const { usecase, updates } = build();
-
-    const result = await usecase.updateIpPolicy(
-      7,
-      " 203.0.113.10 ,\n10.0.0.0/8 ",
-      false
-    );
+    const result = await build(EMPLOYEE, updates).updateIpPolicy(7, " 203.0.113.10 ,\n10.0.0.0/8 ", "custom");
     assert.equal(result.code, 200);
+    assert.equal(result.ip_policy, "custom");
     assert.equal(result.allow_outside_access, false);
-    assert.deepEqual(updates, [
-      {
-        userId: 7,
-        allowedIps: "203.0.113.10, 10.0.0.0/8",
-        allowOutsideAccess: false,
-      },
-    ]);
+    assert.deepEqual(updates, [{ userId: 7, allowedIps: "203.0.113.10, 10.0.0.0/8", ipPolicy: "custom" }]);
   });
 
-  it("keeps the list when outside access is turned back on", async () => {
-    const { usecase, updates } = build();
-
-    await usecase.updateIpPolicy(7, "203.0.113.10", true);
-    assert.deepEqual(updates, [
-      { userId: 7, allowedIps: "203.0.113.10", allowOutsideAccess: true },
-    ]);
+  it("keeps the list on file when a user goes back to following the branch", async () => {
+    const updates = [];
+    await build(EMPLOYEE, updates).updateIpPolicy(7, "203.0.113.10", "branch");
+    assert.deepEqual(updates, [{ userId: 7, allowedIps: "203.0.113.10", ipPolicy: "branch" }]);
   });
 
-  it("stores no list when outside access is on and none was given", async () => {
-    const { usecase, updates } = build();
-
-    await usecase.updateIpPolicy(7, "", true);
-    assert.deepEqual(updates, [
-      { userId: 7, allowedIps: null, allowOutsideAccess: true },
-    ]);
+  it("stores no list for an unrestricted user with none given", async () => {
+    const updates = [];
+    await build(EMPLOYEE, updates).updateIpPolicy(7, "", "unrestricted");
+    assert.deepEqual(updates, [{ userId: 7, allowedIps: null, ipPolicy: "unrestricted" }]);
   });
 
-  it("refuses to block outside access with no addresses to fall back on", async () => {
-    const { usecase, updates } = build();
-
+  it("refuses custom with no addresses to fall back on", async () => {
+    const updates = [];
     await assert.rejects(
-      () => usecase.updateIpPolicy(7, "", false),
-      (err) =>
-        err.name === "ValidationError" &&
-        /at least one allowed IP/.test(err.message)
+      () => build(EMPLOYEE, updates).updateIpPolicy(7, "", "custom"),
+      (err) => err.name === "ValidationError" && /at least one allowed IP/.test(err.message)
     );
     assert.deepEqual(updates, []);
   });
 
   it("rejects an unparseable entry rather than locking the user out", async () => {
-    const { usecase, updates } = build();
-
+    const updates = [];
     await assert.rejects(
-      () => usecase.updateIpPolicy(7, "203.0.113.10, office-wifi", false),
+      () => build(EMPLOYEE, updates).updateIpPolicy(7, "203.0.113.10, office-wifi", "custom"),
       (err) => err.name === "ValidationError" && /office-wifi/.test(err.message)
     );
     assert.deepEqual(updates, []);
   });
 
-  it("reads a tinyint flag from the request the same as a boolean", async () => {
-    const { usecase, updates } = build();
+  it("maps the previous release's boolean: false is custom, true is branch", async () => {
+    const updates = [];
+    const usecase = build(EMPLOYEE, updates);
+    await usecase.updateIpPolicy(7, "203.0.113.10", false);
+    await usecase.updateIpPolicy(7, "203.0.113.10", true);
+    assert.deepEqual(updates.map((u) => u.ipPolicy), ["custom", "branch"]);
+  });
 
-    await usecase.updateIpPolicy(7, "203.0.113.10", 0);
-    assert.equal(updates[0].allowOutsideAccess, false);
+  it("rejects an unknown policy", async () => {
+    const updates = [];
+    await assert.rejects(
+      () => build(EMPLOYEE, updates).updateIpPolicy(7, "203.0.113.10", "bogus"),
+      (err) => err.name === "ValidationError" && /ip_policy/.test(err.message)
+    );
+    assert.deepEqual(updates, []);
   });
 });
 
 describe("getIpPolicy", () => {
-  it("normalizes the stored row", async () => {
-    const row = {
-      ...USER_ROW,
-      allowed_ips: "203.0.113.10",
-      allow_outside_access: 0,
-    };
-    const { userRepo, employeeRepo } = makeRepos(row);
-    const usecase = buildUserUsecase(userRepo, null, employeeRepo);
-
-    const policy = await usecase.getIpPolicy(7);
-    assert.deepEqual(policy, {
-      allowed_ips: ["203.0.113.10"],
-      allow_outside_access: false,
-    });
+  it("returns the resolved policy for the row", async () => {
+    const policy = await build({ ...EMPLOYEE, ...BRANCH_ON }).getIpPolicy(7);
+    assert.deepEqual(policy, { exempt: false, rules: ["203.0.113.0/24"], source: "branch" });
   });
 
-  it("treats a missing row as unrestricted", async () => {
-    const { userRepo, employeeRepo } = makeRepos(null);
-    const usecase = buildUserUsecase(userRepo, null, employeeRepo);
-
-    const policy = await usecase.getIpPolicy(7);
-    assert.deepEqual(policy, { allowed_ips: [], allow_outside_access: true });
+  it("treats a missing row as exempt", async () => {
+    const policy = await build(null).getIpPolicy(7);
+    assert.deepEqual(policy, { exempt: true, rules: [], source: "missing" });
   });
 });
 
 describe("getIpRestrictions", () => {
-  it("returns the allow-list as an array with a restricted flag", async () => {
-    const row = {
-      ...USER_ROW,
-      allowed_ips: "203.0.113.10,198.51.100.1",
-      allow_outside_access: 0,
-    };
-    const { userRepo, employeeRepo } = makeRepos(row);
-    const usecase = buildUserUsecase(userRepo, null, employeeRepo);
-
-    const [entry] = await usecase.getIpRestrictions();
+  it("shapes a row for the admin screen", async () => {
+    const row = { ...EMPLOYEE, ...BRANCH_ON, ip_policy: "custom", allowed_ips: "203.0.113.10,198.51.100.1" };
+    const [entry] = await build(row).getIpRestrictions();
+    assert.equal(entry.ip_policy, "custom");
     assert.deepEqual(entry.allowed_ips, ["203.0.113.10", "198.51.100.1"]);
-    assert.equal(entry.allow_outside_access, false);
+    assert.equal(entry.branch_enabled, true);
+    assert.deepEqual(entry.branch_ips, ["203.0.113.0/24"]);
+    assert.equal(entry.effective.exempt, false);
     assert.equal(entry.is_restricted, true);
+    assert.equal(entry.allow_outside_access, false);
   });
 
-  it("marks a user who may work outside as unrestricted, list or not", async () => {
-    const row = {
-      ...USER_ROW,
-      allowed_ips: "203.0.113.10",
-      allow_outside_access: 1,
-    };
-    const { userRepo, employeeRepo } = makeRepos(row);
-    const usecase = buildUserUsecase(userRepo, null, employeeRepo);
-
-    const [entry] = await usecase.getIpRestrictions();
-    assert.deepEqual(entry.allowed_ips, ["203.0.113.10"]);
+  it("marks an employee of an unrestricted branch as open", async () => {
+    const [entry] = await build(EMPLOYEE).getIpRestrictions();
+    assert.equal(entry.ip_policy, "branch");
     assert.equal(entry.is_restricted, false);
+    assert.equal(entry.effective.source, "branch-open");
+    assert.equal(entry.allow_outside_access, true);
+  });
+
+  it("treats a NULL policy as branch", async () => {
+    const [entry] = await build({ ...EMPLOYEE, ip_policy: null }).getIpRestrictions();
+    assert.equal(entry.ip_policy, "branch");
   });
 });

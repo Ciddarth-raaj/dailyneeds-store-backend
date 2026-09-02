@@ -641,7 +641,11 @@ class Server {
     const employeeRouter = require("./routes/employee")(this.employeeUsecase);
     const shiftRouter = require("./routes/shift")(this.shiftUsecase);
     const storeRouter = require("./routes/store")(this.storeUsecase);
-    const outletRouter = require("./routes/outlet")(this.outletUsecase);
+    const outletRouter = require("./routes/outlet")(
+      this.outletUsecase,
+      this.permissions,
+      this.ipRestriction
+    );
     const companyRouter = require("./routes/company")(this.companyUsecase);
     const materialtypeRouter = require("./routes/materialtype")(
       this.materialtypeUsecase

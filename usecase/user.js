@@ -1,7 +1,9 @@
 const jwt = require("../services/jwt");
 const {
   isAccessAllowed,
+  normalizeIpPolicy,
   parseAllowList,
+  resolveIpPolicy,
   toBoolean,
   validateIpPolicy,
 } = require("../utils/ip");
@@ -24,9 +26,10 @@ class UserUsecase {
   /**
    * Sign in.
    *
-   * `clientIp` is the address the request came from. When the account has
-   * outside access turned off, a login from anywhere but its allowed
-   * addresses is refused even though the credentials are correct.
+   * `clientIp` is the address the request came from. The user's own policy
+   * and their branch's rule are folded together (`resolveIpPolicy`); a login
+   * from outside the resulting addresses is refused even though the
+   * credentials are correct.
    */
   login(username, password, clientIp) {
     return new Promise(async (resolve, reject) => {
@@ -38,7 +41,7 @@ class UserUsecase {
           return;
         }
 
-        if (!isAccessAllowed(details[0], clientIp)) {
+        if (!isAccessAllowed(resolveIpPolicy(details[0]), clientIp)) {
           resolve({ ...IP_NOT_ALLOWED, ip: clientIp });
           return;
         }
@@ -72,31 +75,34 @@ class UserUsecase {
   }
 
   /**
-   * One user's IP policy, normalized.
+   * One user's resolved IP policy — `{ exempt, rules, source }`.
    *
-   * A missing row is treated as unrestricted — there is nothing to enforce
-   * against, and the token check has already established who the caller is.
+   * A missing row is treated as exempt: there is nothing to enforce against,
+   * and the token check has already established who the caller is.
    */
   async getIpPolicy(userId) {
     const row = await this.userRepo.getIpPolicy(userId);
-    if (!row) return { allowed_ips: [], allow_outside_access: true };
+    if (!row) return { exempt: true, rules: [], source: "missing" };
 
-    return {
-      allowed_ips: parseAllowList(row.allowed_ips),
-      allow_outside_access: toBoolean(row.allow_outside_access, true),
-    };
+    return resolveIpPolicy(row);
   }
 
-  /** Every active login with its IP policy, for the admin screen. */
+  /** Every active login with its policy and its branch's rule, for the admin screen. */
   async getIpRestrictions() {
     const rows = await this.userRepo.getIpRestrictions();
     return (rows || []).map((row) => {
-      const allowOutside = toBoolean(row.allow_outside_access, true);
+      const policy = normalizeIpPolicy(row.ip_policy) || "branch";
+      const effective = resolveIpPolicy(row);
       return {
         ...row,
+        ip_policy: policy,
         allowed_ips: parseAllowList(row.allowed_ips),
-        allow_outside_access: allowOutside,
-        is_restricted: !allowOutside,
+        branch_enabled: toBoolean(row.branch_enabled, false),
+        branch_ips: parseAllowList(row.branch_ips),
+        effective,
+        is_restricted: !effective.exempt,
+        // Read by the previous release's screen during rollout; drop with it.
+        allow_outside_access: policy !== "custom",
       };
     });
   }
@@ -104,22 +110,30 @@ class UserUsecase {
   /**
    * Replace a user's IP policy.
    *
-   * `allowOutsideAccess` is the decision — whether this person may work from
-   * anywhere or only from the listed addresses. The list is stored either
-   * way, so letting someone out temporarily does not lose the store's
-   * addresses.
+   * `ipPolicy` is the decision: `branch` (follow their branch's rule),
+   * `custom` (their own list, unioned with the branch's) or `unrestricted`.
+   * The previous release's boolean is still accepted so the old screen keeps
+   * working in the minutes between the backend and frontend deploys.
    *
-   * Entries are validated first, and blocking outside access with an empty
-   * list is refused, so neither a typo nor an oversight can leave someone
-   * unable to sign in from anywhere.
+   * The list is stored under every policy, so moving someone back to
+   * `custom` does not mean retyping their addresses. Entries are validated,
+   * and `custom` with an empty list is refused, so neither a typo nor an
+   * oversight can leave someone unable to sign in from anywhere.
    */
-  async updateIpPolicy(userId, allowedIps, allowOutsideAccess) {
-    const allowOutside = toBoolean(allowOutsideAccess, true);
+  async updateIpPolicy(userId, allowedIps, ipPolicy) {
+    const policy = normalizeIpPolicy(ipPolicy);
+    if (!policy) {
+      const error = new Error(
+        "ip_policy must be one of branch, custom or unrestricted"
+      );
+      error.name = "ValidationError";
+      throw error;
+    }
+
     const { valid, reason, rules } = validateIpPolicy({
-      allowOutsideAccess: allowOutside,
+      restricted: policy === "custom",
       allowedIps,
     });
-
     if (!valid) {
       const error = new Error(reason);
       error.name = "ValidationError";
@@ -127,11 +141,12 @@ class UserUsecase {
     }
 
     const value = rules.length === 0 ? null : rules.join(", ");
-    await this.userRepo.updateIpPolicy(userId, value, allowOutside);
+    await this.userRepo.updateIpPolicy(userId, value, policy);
     return {
       code: 200,
       allowed_ips: rules,
-      allow_outside_access: allowOutside,
+      ip_policy: policy,
+      allow_outside_access: policy !== "custom",
     };
   }
 }

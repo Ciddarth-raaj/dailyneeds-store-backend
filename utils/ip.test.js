@@ -5,6 +5,8 @@ const {
   isAccessAllowed,
   isLoopbackIp,
   isPrivateIp,
+  normalizeIpPolicy,
+  resolveIpPolicy,
   isIpAllowed,
   matchesRule,
   normalizeIp,
@@ -175,75 +177,152 @@ describe("toBoolean", () => {
   });
 });
 
+describe("normalizeIpPolicy", () => {
+  it("accepts the three policies, case-insensitively and trimmed", () => {
+    assert.equal(normalizeIpPolicy("branch"), "branch");
+    assert.equal(normalizeIpPolicy(" Custom "), "custom");
+    assert.equal(normalizeIpPolicy("UNRESTRICTED"), "unrestricted");
+  });
+
+  it("maps the previous release's outside-access boolean", () => {
+    assert.equal(normalizeIpPolicy(true), "branch");
+    assert.equal(normalizeIpPolicy(1), "branch");
+    assert.equal(normalizeIpPolicy("1"), "branch");
+    assert.equal(normalizeIpPolicy(false), "custom");
+    assert.equal(normalizeIpPolicy(0), "custom");
+    assert.equal(normalizeIpPolicy("0"), "custom");
+  });
+
+  it("returns null for anything else", () => {
+    assert.equal(normalizeIpPolicy("garbage"), null);
+    assert.equal(normalizeIpPolicy(null), null);
+    assert.equal(normalizeIpPolicy(undefined), null);
+  });
+});
+
+describe("resolveIpPolicy", () => {
+  const EMP = { user_type: 1 };
+  const ADMIN = { user_type: 2 };
+  const B_ON = { branch_enabled: 1, branch_ips: "203.0.113.0/24" };
+  const B_OFF = { branch_enabled: 0, branch_ips: "203.0.113.0/24" };
+
+  it("exempts an employee following an unrestricted branch (the default state)", () => {
+    const r = resolveIpPolicy({ ...EMP, ...B_OFF, ip_policy: "branch" });
+    assert.equal(r.exempt, true);
+  });
+
+  it("confines an employee to a restricted branch's list", () => {
+    const r = resolveIpPolicy({ ...EMP, ...B_ON, ip_policy: "branch" });
+    assert.deepEqual(r, { exempt: false, rules: ["203.0.113.0/24"], source: "branch" });
+  });
+
+  it("fails closed when a restricted branch somehow has no list", () => {
+    const r = resolveIpPolicy({ ...EMP, ip_policy: "branch", branch_enabled: 1, branch_ips: "" });
+    assert.deepEqual(r, { exempt: false, rules: [], source: "branch" });
+  });
+
+  it("ignores a personal list while following the branch", () => {
+    const r = resolveIpPolicy({ ...EMP, ...B_ON, ip_policy: "branch", allowed_ips: "198.51.100.5" });
+    assert.deepEqual(r.rules, ["203.0.113.0/24"]);
+  });
+
+  it("exempts an admin from a restricted branch", () => {
+    const r = resolveIpPolicy({ ...ADMIN, ...B_ON, ip_policy: "branch" });
+    assert.deepEqual(r, { exempt: true, rules: [], source: "admin" });
+  });
+
+  it("enforces an admin who was explicitly set to custom", () => {
+    const r = resolveIpPolicy({ ...ADMIN, ...B_OFF, ip_policy: "custom", allowed_ips: "198.51.100.5" });
+    assert.equal(r.exempt, false);
+    assert.deepEqual(r.rules, ["198.51.100.5"]);
+  });
+
+  it("uses only the personal list under custom when the branch is open", () => {
+    const r = resolveIpPolicy({ ...EMP, ...B_OFF, ip_policy: "custom", allowed_ips: "198.51.100.5" });
+    assert.deepEqual(r.rules, ["198.51.100.5"]);
+  });
+
+  it("unions personal and branch lists under custom, deduplicated", () => {
+    const r = resolveIpPolicy({
+      ...EMP, ...B_ON, ip_policy: "custom",
+      allowed_ips: "198.51.100.5, 203.0.113.0/24",
+    });
+    assert.deepEqual(r.rules, ["198.51.100.5", "203.0.113.0/24"]);
+  });
+
+  it("fails closed under custom with nothing to enforce", () => {
+    const r = resolveIpPolicy({ ...EMP, ...B_OFF, ip_policy: "custom", allowed_ips: "" });
+    assert.deepEqual(r, { exempt: false, rules: [], source: "custom" });
+  });
+
+  it("exempts an unrestricted user regardless of lists or branch", () => {
+    const r = resolveIpPolicy({ ...EMP, ...B_ON, ip_policy: "unrestricted", allowed_ips: "198.51.100.5" });
+    assert.equal(r.exempt, true);
+  });
+
+  it("treats a missing or unknown policy as branch", () => {
+    assert.equal(resolveIpPolicy({ ...EMP, ...B_ON, ip_policy: null }).source, "branch");
+    assert.equal(resolveIpPolicy({ ...EMP, ...B_ON, ip_policy: "bogus" }).source, "branch");
+  });
+
+  it("exempts an employee with no outlet row at all", () => {
+    const r = resolveIpPolicy({ ...EMP, ip_policy: "branch" });
+    assert.deepEqual(r, { exempt: true, rules: [], source: "branch-open" });
+  });
+});
+
 describe("isAccessAllowed", () => {
-  it("allows a user who may work outside, wherever they are", () => {
-    const policy = { allow_outside_access: 1, allowed_ips: "203.0.113.10" };
-    assert.equal(isAccessAllowed(policy, "49.207.1.1"), true);
+  it("admits an exempt policy from anywhere", () => {
+    assert.equal(isAccessAllowed({ exempt: true, rules: [] }, "49.207.1.1"), true);
   });
 
-  it("keeps the list unenforced while outside access is on", () => {
-    const policy = { allow_outside_access: true, allowed_ips: "203.0.113.10" };
-    assert.equal(isAccessAllowed(policy, "10.10.10.10"), true);
+  it("blocks a non-exempt policy with no rules", () => {
+    assert.equal(isAccessAllowed({ exempt: false, rules: [] }, "203.0.113.10"), false);
   });
 
-  it("confines a user with outside access off to the list", () => {
-    const policy = { allow_outside_access: 0, allowed_ips: "203.0.113.0/24" };
-    assert.equal(isAccessAllowed(policy, "203.0.113.44"), true);
-    assert.equal(isAccessAllowed(policy, "49.207.1.1"), false);
+  it("checks the address against the rules", () => {
+    const p = { exempt: false, rules: ["203.0.113.0/24"] };
+    assert.equal(isAccessAllowed(p, "203.0.113.44"), true);
+    assert.equal(isAccessAllowed(p, "49.207.1.1"), false);
   });
 
-  it("defaults to allowed when the flag is missing", () => {
-    assert.equal(isAccessAllowed({}, "49.207.1.1"), true);
-    assert.equal(isAccessAllowed(null, "49.207.1.1"), true);
+  it("fails closed on a malformed or legacy-shaped policy", () => {
+    assert.equal(isAccessAllowed({}, "203.0.113.10"), false);
+    assert.equal(isAccessAllowed(undefined, "203.0.113.10"), false);
+    assert.equal(isAccessAllowed({ allow_outside_access: 1 }, "203.0.113.10"), false);
   });
 
-  it("blocks rather than opens up when the flag is off and the list is empty", () => {
-    const policy = { allow_outside_access: 0, allowed_ips: "" };
-    assert.equal(isAccessAllowed(policy, "203.0.113.10"), false);
+  it("only a strict boolean true counts as exempt", () => {
+    assert.equal(isAccessAllowed({ exempt: "1", rules: [] }, "203.0.113.10"), false);
   });
 });
 
 describe("validateIpPolicy", () => {
-  it("accepts outside access with no list at all", () => {
-    const result = validateIpPolicy({
-      allowOutsideAccess: true,
-      allowedIps: "",
-    });
+  it("accepts an unrestricted save with no list at all", () => {
+    const result = validateIpPolicy({ restricted: false, allowedIps: "" });
     assert.equal(result.valid, true);
     assert.deepEqual(result.rules, []);
   });
 
-  it("accepts outside access with a list kept for later", () => {
-    const result = validateIpPolicy({
-      allowOutsideAccess: true,
-      allowedIps: "203.0.113.10",
-    });
+  it("accepts a list kept on file while not restricted", () => {
+    const result = validateIpPolicy({ restricted: false, allowedIps: "203.0.113.10" });
     assert.equal(result.valid, true);
     assert.deepEqual(result.rules, ["203.0.113.10"]);
   });
 
   it("accepts a restriction backed by a list", () => {
-    const result = validateIpPolicy({
-      allowOutsideAccess: false,
-      allowedIps: "203.0.113.10",
-    });
+    const result = validateIpPolicy({ restricted: true, allowedIps: "203.0.113.10" });
     assert.equal(result.valid, true);
   });
 
   it("refuses a restriction with an empty list", () => {
-    const result = validateIpPolicy({
-      allowOutsideAccess: false,
-      allowedIps: "  ",
-    });
+    const result = validateIpPolicy({ restricted: true, allowedIps: "  " });
     assert.equal(result.valid, false);
     assert.match(result.reason, /at least one allowed IP/);
   });
 
   it("refuses an unparseable entry either way", () => {
-    const result = validateIpPolicy({
-      allowOutsideAccess: true,
-      allowedIps: "office-wifi",
-    });
+    const result = validateIpPolicy({ restricted: false, allowedIps: "office-wifi" });
     assert.equal(result.valid, false);
     assert.match(result.reason, /office-wifi/);
   });
@@ -282,58 +361,39 @@ describe("isPrivateIp", () => {
   });
 });
 
+
 describe("validateIpPolicy loopback guard", () => {
   it("refuses a loopback address the broken-proxy bug would produce", () => {
-    const result = validateIpPolicy({
-      allowOutsideAccess: false,
-      allowedIps: "127.0.0.1",
-    });
+    const result = validateIpPolicy({ restricted: true, allowedIps: "127.0.0.1" });
     assert.equal(result.valid, false);
     assert.match(result.reason, /talking to itself/);
     assert.match(result.reason, /X-Forwarded-For/);
   });
 
   it("refuses loopback even mixed in with a real address", () => {
-    const result = validateIpPolicy({
-      allowOutsideAccess: false,
-      allowedIps: "203.0.113.10, 127.0.0.1",
-    });
+    const result = validateIpPolicy({ restricted: true, allowedIps: "203.0.113.10, 127.0.0.1" });
     assert.equal(result.valid, false);
   });
 
   it("refuses a loopback CIDR too", () => {
-    const result = validateIpPolicy({
-      allowOutsideAccess: false,
-      allowedIps: "127.0.0.0/8",
-    });
+    const result = validateIpPolicy({ restricted: true, allowedIps: "127.0.0.0/8" });
     assert.equal(result.valid, false);
   });
 
-  it("refuses loopback even when outside access stays on", () => {
+  it("refuses loopback even when not restricted", () => {
     // The list is kept for later, so a bad entry saved now would bite the
-    // moment someone flips the switch.
-    const result = validateIpPolicy({
-      allowOutsideAccess: true,
-      allowedIps: "127.0.0.1",
-    });
+    // moment the restriction is switched on.
+    const result = validateIpPolicy({ restricted: false, allowedIps: "127.0.0.1" });
     assert.equal(result.valid, false);
   });
 
   it("still accepts a private LAN address", () => {
-    // An app reached only over a LAN legitimately sees these, so this is a
-    // warning on screen rather than a refusal.
-    const result = validateIpPolicy({
-      allowOutsideAccess: false,
-      allowedIps: "192.168.1.50",
-    });
+    const result = validateIpPolicy({ restricted: true, allowedIps: "192.168.1.50" });
     assert.equal(result.valid, true);
   });
 
   it("still accepts a normal public address", () => {
-    const result = validateIpPolicy({
-      allowOutsideAccess: false,
-      allowedIps: "203.0.113.10",
-    });
+    const result = validateIpPolicy({ restricted: true, allowedIps: "203.0.113.10" });
     assert.equal(result.valid, true);
   });
 });

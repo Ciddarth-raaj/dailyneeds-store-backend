@@ -3,13 +3,17 @@ const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
 
 class OutletRoutes {
-  constructor(outletUsecase) {
+  constructor(outletUsecase, permissions, ipRestriction) {
     this.outletUsecase = outletUsecase;
+    this.permissions = permissions;
+    this.ipRestriction = ipRestriction;
 
     this.init();
   }
 
   init() {
+    const { require: needs } = this.permissions;
+
     router.get("/", async (req, res) => {
       try {
         const outlet = await this.outletUsecase.get();
@@ -183,6 +187,104 @@ class OutletRoutes {
 
       res.end();
     });
+
+    // ------------------------------------------------------------------
+    // Branch IP rule.
+    //
+    // Deliberately separate from /update-outlet and /create, which need no
+    // token: the rule that decides where every employee of a branch may sign
+    // in from must not be settable by anyone who can reach the outlet form.
+    // These are protected by default (not in unProtectedRoutes) and gated on
+    // the same permission as the per-user screen.
+    // ------------------------------------------------------------------
+
+    router.get(
+      "/ip-restrictions",
+      needs("manage_ip_restrictions"),
+      async (req, res) => {
+        try {
+          const data = await this.outletUsecase.getIpRestrictions();
+          res.json({ code: 200, data });
+        } catch (err) {
+          console.log(err);
+          res.status(500).json({ code: 500, msg: "An error occurred !" });
+        }
+      }
+    );
+
+    router.get(
+      "/ip-restriction",
+      needs("manage_ip_restrictions"),
+      async (req, res) => {
+        try {
+          const schema = { outlet_id: Joi.number().integer().required() };
+          const isValid = Joi.validate(req.query, schema);
+          if (isValid.error !== null) {
+            throw isValid.error;
+          }
+
+          const data = await this.outletUsecase.getIpRestriction(
+            req.query.outlet_id
+          );
+          if (!data) {
+            res.status(404).json({ code: 404, msg: "Branch not found" });
+            return;
+          }
+          res.json({ code: 200, data });
+        } catch (err) {
+          console.log(err);
+          if (err.name === "ValidationError") {
+            res.status(422).json({ code: 422, msg: err.message || err.toString() });
+          } else {
+            res.status(500).json({ code: 500, msg: "An error occurred !" });
+          }
+        }
+      }
+    );
+
+    router.post(
+      "/ip-restriction",
+      needs("manage_ip_restrictions"),
+      async (req, res) => {
+        try {
+          const schema = {
+            outlet_id: Joi.number().integer().required(),
+            allowed_ips: Joi.alternatives()
+              .try(Joi.string().trim().allow(""), Joi.array().items(Joi.string()))
+              .required(),
+            ip_restriction_enabled: Joi.boolean().required(),
+          };
+          const isValid = Joi.validate(req.body, schema);
+          if (isValid.error !== null) {
+            throw isValid.error;
+          }
+
+          const data = await this.outletUsecase.updateIpRestriction(
+            req.body.outlet_id,
+            req.body.allowed_ips,
+            req.body.ip_restriction_enabled
+          );
+
+          // Every employee of the branch shares this rule, and the middleware
+          // caches each user's resolved policy for a minute — drop them all
+          // so the change applies to their next request.
+          if (this.ipRestriction && this.ipRestriction.invalidate) {
+            this.ipRestriction.invalidate();
+          }
+
+          res.json(data);
+        } catch (err) {
+          console.log(err);
+          if (err.name === "ValidationError") {
+            res.status(422).json({ code: 422, msg: err.message || err.toString() });
+          } else if (err.name === "NotFoundError") {
+            res.status(404).json({ code: 404, msg: err.message });
+          } else {
+            res.status(500).json({ code: 500, msg: "An error occurred !" });
+          }
+        }
+      }
+    );
   }
 
   getRouter() {
@@ -190,6 +292,6 @@ class OutletRoutes {
   }
 }
 
-module.exports = (outletUsecase) => {
-  return new OutletRoutes(outletUsecase);
+module.exports = (outletUsecase, permissions, ipRestriction) => {
+  return new OutletRoutes(outletUsecase, permissions, ipRestriction);
 };
