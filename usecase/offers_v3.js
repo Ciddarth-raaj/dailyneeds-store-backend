@@ -777,6 +777,14 @@ class OffersV3Usecase {
   async computeMismatches() {
     const mismatches = [];
 
+    // The price sheet lists every live batch, but this table is never pruned:
+    // a batch that stops appearing keeps its last-known price. Checking it
+    // reports a price nobody uploaded, against stock nobody can sell, so only
+    // the batches in the current sheet are checked. Before the first stamped
+    // upload there is no current sheet to name, and everything is checked as
+    // before rather than nothing at all.
+    const uploadId = await this.offersV3Repo.getLatestPriceUploadId();
+
     const itemOffers = await this.offersV3Repo.listItemOffers({ status: "active" });
     const batchOffers = await this.offersV3Repo.listBatchOffers({ status: "active" });
 
@@ -786,7 +794,7 @@ class OffersV3Usecase {
     ]);
 
     for (const offer of itemOffers) {
-      const prices = await this.offersV3Repo.getPricesForItem(offer.item_code);
+      const prices = await this.offersV3Repo.getPricesForItem(offer.item_code, uploadId);
       for (const price of prices) {
         if (price.mrp == null || price.selling_price == null) continue;
         const expected = computeExpectedSelling(offer.offer_type, offer.value, price.mrp);
@@ -818,7 +826,12 @@ class OffersV3Usecase {
     }
 
     for (const offer of batchOffers) {
-      const price = await this.offersV3Repo.getPriceForBatch(offer.item_code, offer.outlet_id, offer.batch_no);
+      const price = await this.offersV3Repo.getPriceForBatch(
+        offer.item_code,
+        offer.outlet_id,
+        offer.batch_no,
+        uploadId
+      );
       if (!price || price.mrp == null || price.selling_price == null) continue;
       const expected = computeExpectedSelling(offer.offer_type, offer.value, price.mrp);
       if (expected == null) continue;
@@ -872,6 +885,13 @@ class OffersV3Usecase {
 
   async listGroupedItemsByProductIds(itemCodes) {
     return this.offersV3Repo.listGroupedItemsByProductIds(itemCodes);
+  }
+
+  // Outlet/batch-level breakdown of one merged (mrp, selling_price) row from
+  // the grouped price-checker view -- drill-down for the GRN Price Checker
+  // modal.
+  async getOutletStockBreakdown(itemCode, mrp, sellingPrice) {
+    return this.offersV3Repo.getPricesForItem(itemCode, null, mrp, sellingPrice);
   }
 
   // ---------------------------------------------------------------------

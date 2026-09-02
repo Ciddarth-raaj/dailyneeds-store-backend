@@ -571,13 +571,17 @@ class OffersV3Repository {
     });
   }
 
-  getPriceForBatch(item_code, outlet_id, batch_no) {
+  getPriceForBatch(item_code, outlet_id, batch_no, upload_id = null) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT item_code, outlet_id, batch_no, mrp, selling_price, landing_cost, stock_qty
+        `SELECT item_code, outlet_id, batch_no, mrp, selling_price, landing_cost, stock_qty, price_uploaded_at
          FROM \`${DATA_TABLE}\`
-         WHERE item_code = ? AND outlet_id = ? AND batch_no = ?`,
-        [item_code, outlet_id, batch_no],
+         WHERE item_code = ? AND outlet_id = ? AND batch_no = ?${
+           upload_id ? " AND price_upload_id = ?" : ""
+         }`,
+        upload_id
+          ? [item_code, outlet_id, batch_no, upload_id]
+          : [item_code, outlet_id, batch_no],
         (err, rows) => {
           if (err) {
             logError(
@@ -594,23 +598,31 @@ class OffersV3Repository {
     });
   }
 
-  getPricesForItem(item_code) {
-    return new Promise((resolve, reject) => {
-      this.db.query(
-        `SELECT bd.item_code, bd.outlet_id, o.outlet_name, bd.batch_no, bd.mrp, bd.selling_price, bd.landing_cost, bd.stock_qty
-         FROM \`${DATA_TABLE}\` bd
-         LEFT JOIN outlets o ON o.outlet_id = bd.outlet_id
-         WHERE bd.item_code = ?`,
-        [item_code],
-        (err, rows) => {
-          if (err) {
-            logError("REPOSITORY.OFFERS_V3", "REPOSITORY.OFFERS_V3.GET_PRICES_FOR_ITEM", err.toString(), { item_code });
-            return reject(err);
-          }
-          resolve(rows || []);
-        }
-      );
-    });
+  // upload_id limits the result to the batches one price sheet carried; when
+  // omitted it resolves to the latest upload rather than every row ever
+  // uploaded for the item, so an outlet/batch drill-down doesn't surface
+  // stock figures from a sheet long since replaced. mrp/selling_price
+  // further narrow to one merged price group, e.g. for the GRN Price
+  // Checker's outlet-wise breakdown.
+  async getPricesForItem(item_code, upload_id = null, mrp = null, selling_price = null) {
+    if (upload_id == null) {
+      upload_id = await this.getLatestPriceUploadId();
+    }
+    const params = [item_code];
+    if (upload_id) params.push(upload_id);
+    if (mrp != null) params.push(mrp);
+    if (selling_price != null) params.push(selling_price);
+    const rows = await this._queryAsync(
+      `SELECT bd.item_code, bd.outlet_id, o.outlet_name, bd.batch_no, bd.mrp, bd.selling_price, bd.landing_cost, bd.stock_qty, bd.price_uploaded_at
+       FROM \`${DATA_TABLE}\` bd
+       LEFT JOIN outlets o ON o.outlet_id = bd.outlet_id
+       WHERE bd.item_code = ?${upload_id ? " AND bd.price_upload_id = ?" : ""}${
+         mrp != null ? " AND bd.mrp = ?" : ""
+       }${selling_price != null ? " AND bd.selling_price = ?" : ""}
+       ORDER BY o.outlet_name ASC, bd.batch_no ASC`,
+      params
+    );
+    return rows || [];
   }
 
   // ---------------------------------------------------------------------
