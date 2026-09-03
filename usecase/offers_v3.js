@@ -155,8 +155,8 @@ function computeExpectedSelling(offer_type, value, mrp) {
 /**
  * Validate an offer value against the offer type's rule.
  * Percentage: 0 < value < 100.
- * Flat / fixed price: 0 < value < the item's current MRP (throws if MRP is
- * unknown rather than silently allowing an unvalidated value).
+ * Flat / fixed price: 0 < value, and below the item's current MRP when one is
+ * known. An item with no price on file is allowed - see below.
  */
 function validateOfferValue(offer_type, value, mrp) {
   const v = Number(value);
@@ -168,15 +168,20 @@ function validateOfferValue(offer_type, value, mrp) {
     }
     return;
   }
-  if (mrp == null) {
-    const err = new Error(
-      "No current MRP found for this item (upload it via Price Checker first); cannot validate the offer value"
-    );
+  if (!(v > 0)) {
+    const err = new Error("Value must be greater than 0");
     err.code = 400;
     throw err;
   }
+  // An item with no price on file yet is not an error. Stock moves out of the
+  // warehouse before it is ever priced at an outlet, and the offer is decided
+  // before then - refusing it would mean the day's offers wait on a spreadsheet
+  // rather than on anyone's decision. The MRP is a ceiling when one is known
+  // and nothing when it is not; the Price Mismatches tab is what catches a
+  // value that turns out to be wrong once the item is priced.
+  if (mrp == null) return;
   const m = Number(mrp);
-  if (!(v > 0 && v < m)) {
+  if (!(v < m)) {
     const err = new Error(`Value must be greater than 0 and less than the item's current MRP (₹${m})`);
     err.code = 400;
     throw err;
