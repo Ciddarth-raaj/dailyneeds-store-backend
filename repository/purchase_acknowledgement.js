@@ -411,7 +411,7 @@ class PurchaseAcknowledgementRepository {
         return reject(new Error("Gofrugal DB connection is not configured"));
       }
 
-      const run = (columns, onUnknownColumn) => {
+      const run = (columns, hasMrcNo, onUnknownColumn) => {
         this.dbGofrugal.query(
           `SELECT ${columns} FROM ${GOFRUGAL_MRC_MEMO}`,
           (err, rows) => {
@@ -429,7 +429,7 @@ class PurchaseAcknowledgementRepository {
               });
               return reject(err);
             }
-            resolve(rows || []);
+            resolve({ rows: rows || [], hasMrcNo });
           }
         );
       };
@@ -437,7 +437,7 @@ class PurchaseAcknowledgementRepository {
       // mmm_mrc_no was added later and is not guaranteed to exist on every
       // Gofrugal install. Falling back keeps the sync working - the memo
       // still imports, just without an MRC number.
-      run(`${BASE_COLUMNS}, mmm_mrc_no`, (err) => {
+      run(`${BASE_COLUMNS}, mmm_mrc_no`, true, (err) => {
         logger.Log({
           level: logger.LEVEL.WARN,
           component: "REPOSITORY.PURCHASE_ACKNOWLEDGEMENT",
@@ -446,7 +446,7 @@ class PurchaseAcknowledgementRepository {
           category: "",
           ref: {}
         });
-        run(BASE_COLUMNS, null);
+        run(BASE_COLUMNS, false, null);
       });
     });
   }
@@ -586,9 +586,75 @@ class PurchaseAcknowledgementRepository {
    * Rows with the same mmm_refno are one memo (invoice lines = mmm_sno). mmm_no is unique per source row.
    * Tracks (mmm_no, mmm_sno) in purchase_acknowledgement_imported so imported rows are skipped.
    */
+  /**
+   * Fill in mmm_mrc_no on acknowledgements imported before the column existed.
+   * The sync never revisits a memo once it is in TABLE_IMPORTED, so without
+   * this every acknowledgement already on file would stay blank forever.
+   * Matched on mmm_refno - the only link back to the memo an acknowledgement
+   * keeps - and only where the value is still missing, so a manually entered
+   * MRC number is never overwritten.
+   */
+  _backfillMrcNo(memoRows) {
+    const byRefno = new Map();
+    memoRows.forEach((r) => {
+      const refno = _mmmRefnoForDb(r);
+      const mrc = _mmmMrcNoForDb(r.mmm_mrc_no);
+      if (refno == null || mrc == null || byRefno.has(refno)) {
+        return;
+      }
+      byRefno.set(refno, mrc);
+    });
+
+    const pairs = [...byRefno.entries()];
+    if (pairs.length === 0) {
+      return Promise.resolve(0);
+    }
+
+    const CHUNK = 200;
+    const chunks = [];
+    for (let i = 0; i < pairs.length; i += CHUNK) {
+      chunks.push(pairs.slice(i, i + CHUNK));
+    }
+
+    return chunks.reduce(
+      (prev, chunk) =>
+        prev.then(
+          (updated) =>
+            new Promise((resolve, reject) => {
+              const cases = chunk.map(() => "WHEN ? THEN ?").join(" ");
+              const placeholders = chunk.map(() => "?").join(", ");
+              const values = [
+                ...chunk.flatMap(([refno, mrc]) => [refno, mrc]),
+                ...chunk.map(([refno]) => refno)
+              ];
+              this.db.query(
+                `UPDATE ${TABLE} SET mmm_mrc_no = CASE mmm_refno ${cases} ELSE mmm_mrc_no END
+                 WHERE mmm_mrc_no IS NULL AND mmm_refno IN (${placeholders})`,
+                values,
+                (err, res) => {
+                  if (err) {
+                    logger.Log({
+                      level: logger.LEVEL.ERROR,
+                      component: "REPOSITORY.PURCHASE_ACKNOWLEDGEMENT",
+                      code: "REPOSITORY.PURCHASE_ACKNOWLEDGEMENT.BACKFILL_MRC_NO",
+                      description: err.toString(),
+                      category: "",
+                      ref: {}
+                    });
+                    return reject(err);
+                  }
+                  resolve(updated + (res ? res.affectedRows : 0));
+                }
+              );
+            })
+        ),
+      Promise.resolve(0)
+    );
+  }
+
   async syncFromGofrugalMrcMemo(createdBy) {
     const importedKeys = await this._getImportedMemoKeySet();
-    const rows = await this._fetchAllMrcMemoFromGofrugal();
+    const { rows, hasMrcNo } = await this._fetchAllMrcMemoFromGofrugal();
 
     const pendingKeys = new Set();
     const pending = rows.filter((r) => {
@@ -625,11 +691,15 @@ class PurchaseAcknowledgementRepository {
       }
     }
 
+    const mrc_no_backfilled = hasMrcNo ? await this._backfillMrcNo(rows) : 0;
+
     return {
       code: 200,
       groups_imported,
       rows_marked_imported,
-      purchase_acknowledgement_ids
+      purchase_acknowledgement_ids,
+      mrc_no_available: hasMrcNo,
+      mrc_no_backfilled
     };
   }
 }
