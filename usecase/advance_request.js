@@ -1,11 +1,15 @@
 /**
  * The advance request approval chain.
  *
- * A request moves A1 (raised) -> A1.1 (balance checked) -> A2 (approved)
- * -> A3 (paid). Each stage may only act on the status the stage before it
- * left behind, so the rules live here rather than in the routes: the route
- * says who may call a stage, this says whether the request is in a state
- * where that stage means anything.
+ * Purchase raise it; accounts record what the supplier already holds; if
+ * there is a balance the request goes back to purchase to decide whether
+ * to less-and-pay or defer; the admin approves, holds or rejects; accounts
+ * pay through Tally and file the advice, which closes it.
+ *
+ * Each stage may only act on the statuses the steps before it can leave
+ * behind, so the rules live here rather than in the routes: the route says
+ * who may call a stage, this says whether the request is in a state where
+ * that stage means anything.
  */
 
 /** Terminal statuses. Nothing moves a request out of these. */
@@ -20,10 +24,20 @@ const TERMINAL = ["rejected", "paid"];
  * nobody downstream has acted on them.
  */
 const ACTS_ON = {
-  balanceCheck: ["submitted", "on_hold"],
-  approval: ["verified"],
+  balanceCheck: ["submitted"],
+  balanceAction: ["pending_purchase_decision"],
+  // The admin acts on a fresh request or on one they are already holding,
+  // which is how a hold is released without a second trip through accounts.
+  approval: ["pending_approval", "on_hold"],
   payment: ["approved"],
-  edit: ["submitted", "on_hold"],
+  edit: ["submitted", "pending_purchase_decision", "on_hold"],
+};
+
+/** What each of the admin's three decisions leaves the request as. */
+const DECISION_STATUS = {
+  approve: "approved",
+  hold: "on_hold",
+  reject: "rejected",
 };
 
 /**
@@ -129,18 +143,21 @@ class AdvanceRequestUsecase {
     return this.getById(id);
   }
 
-  /** A1.1 - accounts records what the supplier already owes and holds. */
+  /**
+   * A1.1 - accounts record what the supplier already holds.
+   *
+   * The figure decides where the request goes, not the person entering it:
+   * anything outstanding has to go back to purchase to be settled one way
+   * or the other, and nothing outstanding has nothing to settle.
+   */
   balanceCheck(id, data, employeeId) {
-    // An on-hold request has been checked but is not cleared to go to
-    // approval; it stays out of the approver's queue until re-checked.
-    const nextStatus = data.on_hold ? "on_hold" : "verified";
+    const balance = Number(data.previous_advance_balance) || 0;
 
     return this.applyStage(
       id,
       "balanceCheck",
-      nextStatus,
+      balance > 0 ? "pending_purchase_decision" : "pending_approval",
       {
-        pending_bills: data.pending_bills,
         previous_advance_balance: data.previous_advance_balance,
         balance_remarks: data.balance_remarks ?? null,
         balance_checked_by: employeeId ?? null,
@@ -150,22 +167,56 @@ class AdvanceRequestUsecase {
     );
   }
 
-  /** A2 - approve or reject. Rejection is terminal. */
-  approval(id, data, employeeId) {
-    const approved = Number(data.approval_status) === 1;
-
+  /**
+   * A1.2 - purchase decide what to do about the balance accounts found:
+   * less-and-pay deducts it from this payment, defer leaves it to be
+   * clarified with the supplier later. Only the decision is recorded -
+   * accounts work the payable figure out in Tally.
+   */
+  balanceAction(id, data, employeeId) {
     return this.applyStage(
       id,
-      "approval",
-      approved ? "approved" : "rejected",
+      "balanceAction",
+      "pending_approval",
       {
-        approval_status: approved ? 1 : 0,
-        approval_note: data.approval_note ?? null,
-        approved_by: employeeId ?? null,
-        approved_at: new Date(),
+        balance_action: data.balance_action,
+        balance_action_note: data.balance_action_note ?? null,
+        balance_action_by: employeeId ?? null,
+        balance_action_at: new Date(),
       },
       employeeId
     );
+  }
+
+  /**
+   * A2 - the admin approves, holds, or rejects. Rejection is terminal; a
+   * hold waits for the admin to come back to it.
+   *
+   * Releasing a hold may carry a balance action, because re-clarifying and
+   * deciding what to do about the old balance is the whole reason a request
+   * gets held - so the admin decides and approves in one step rather than
+   * sending it back round.
+   */
+  async approval(id, data, employeeId) {
+    const nextStatus = DECISION_STATUS[data.decision];
+    if (!nextStatus) {
+      throw conflict(`Unknown decision: ${data.decision}`);
+    }
+
+    const fields = {
+      approval_note: data.approval_note ?? null,
+      approved_by: employeeId ?? null,
+      approved_at: new Date(),
+    };
+
+    if (data.balance_action) {
+      fields.balance_action = data.balance_action;
+      fields.balance_action_note = data.balance_action_note ?? null;
+      fields.balance_action_by = employeeId ?? null;
+      fields.balance_action_at = new Date();
+    }
+
+    return this.applyStage(id, "approval", nextStatus, fields, employeeId);
   }
 
   /**
@@ -195,12 +246,15 @@ class AdvanceRequestUsecase {
   /**
    * Corrects the A1 fields.
    *
-   * Allowed while the request is still submitted, and while it is on hold -
-   * clarifying a held request is the whole point of the hold. Editing a held
-   * request clears the hold and sends it straight to the approver, so a
-   * clarification does not sit waiting for a second balance check. A request
-   * anyone downstream has acted on is not editable: changing the amount under
-   * an approval already given would be a new request, not an edit.
+   * Allowed while the request is still with purchase or accounts, and while
+   * the admin is holding it, since correcting the figures is often what a
+   * hold is waiting for. An edit never moves the request: releasing a hold
+   * is the admin's decision, and an earlier version of this promoted a held
+   * request straight to the approver, which let a raiser change the amount
+   * and reach the admin with the balance figures already stale.
+   *
+   * A request anyone downstream has acted on is not editable: changing the
+   * amount under an approval already given would be a new request.
    */
   async updateDetails(id, data, employeeId) {
     const existing = await this.advanceRequestRepo.getById(id);
@@ -208,7 +262,7 @@ class AdvanceRequestUsecase {
 
     if (!ACTS_ON.edit.includes(existing.status)) {
       throw conflict(
-        `Only a submitted or on-hold request can be edited. ${describeStatus(
+        `This request can no longer be edited. ${describeStatus(
           existing.status
         )}`
       );
@@ -223,14 +277,12 @@ class AdvanceRequestUsecase {
 
     if (Object.keys(fields).length === 0) return this.getById(id);
 
-    // Editing releases a hold; a submitted request keeps the status it has.
-    const nextStatus =
-      existing.status === "on_hold" ? "verified" : existing.status;
-
+    // An edit corrects the request; it does not move it. The status goes
+    // back unchanged so the compare-and-set still guards the write.
     const result = await this.advanceRequestRepo.updateStage(
       id,
       existing.status,
-      nextStatus,
+      existing.status,
       fields
     );
 
@@ -254,18 +306,6 @@ class AdvanceRequestUsecase {
           )
         )
     );
-
-    // The release is a transition in its own right, so the history says why a
-    // held request became approvable rather than only what text changed.
-    if (nextStatus !== existing.status) {
-      await this.advanceRequestRepo.createActivity(
-        id,
-        employeeId,
-        "status",
-        existing.status,
-        nextStatus
-      );
-    }
 
     return this.getById(id);
   }

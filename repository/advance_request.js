@@ -18,7 +18,8 @@ const SORTABLE = {
  * status is ever inserted in the middle.
  */
 const STATUS_RANK = `FIELD(advance_requests.status,
-  'submitted', 'on_hold', 'verified', 'approved', 'rejected', 'paid')`;
+  'submitted', 'pending_purchase_decision', 'pending_approval', 'on_hold',
+  'approved', 'rejected', 'paid')`;
 
 const ITEM_SELECT = `
   advance_requests.*,

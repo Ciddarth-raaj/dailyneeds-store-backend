@@ -8,12 +8,17 @@ const DEFAULT_LIMIT = 20;
 
 const STATUSES = [
   "submitted",
-  "verified",
+  "pending_purchase_decision",
+  "pending_approval",
   "on_hold",
   "approved",
   "rejected",
   "paid",
 ];
+
+/** What the admin may do, and what purchase may decide about a balance. */
+const DECISIONS = ["approve", "hold", "reject"];
+const BALANCE_ACTIONS = ["less_and_pay", "defer"];
 
 const SORT_FIELDS = [
   "advance_request_id",
@@ -39,16 +44,25 @@ const a1Schema = {
   outlet_id: Joi.number().allow(null).optional(),
 };
 
+// 0 is the "nothing outstanding" answer, and it is what sends a request
+// straight to the admin, so the figure is required rather than optional.
 const balanceCheckSchema = {
-  pending_bills: Joi.number().min(0).required(),
   previous_advance_balance: Joi.number().min(0).required(),
-  balance_remarks: Joi.string().max(500).required(),
-  on_hold: Joi.boolean().optional(),
+  balance_remarks: Joi.string().max(500).allow(null, "").optional(),
 };
 
+const balanceActionSchema = {
+  balance_action: Joi.string().valid(BALANCE_ACTIONS).required(),
+  balance_action_note: Joi.string().max(500).allow(null, "").optional(),
+};
+
+// Releasing a hold may carry the balance decision, so the admin can
+// re-clarify and approve in one step.
 const approvalSchema = {
-  approval_status: Joi.number().valid([0, 1]).required(),
+  decision: Joi.string().valid(DECISIONS).required(),
   approval_note: Joi.string().max(500).allow(null, "").optional(),
+  balance_action: Joi.string().valid(BALANCE_ACTIONS).optional(),
+  balance_action_note: Joi.string().max(500).allow(null, "").optional(),
 };
 
 const paymentSchema = {
@@ -111,6 +125,9 @@ class AdvanceRequestRoutes {
     const canCheckBalance = needs("view_old_balance_check");
     const canApprove = needs("approve_advance_request");
     const canPay = needs("pay_advance_request");
+    // Deciding what to do about the balance is the raising team's own step,
+    // so it rides on the permission they already hold to raise one.
+    const canDecideBalance = needs("create_advance_request");
     const canEdit = needs("edit_advance_request");
 
     // ---------------------------------------------------------------- list
@@ -251,6 +268,29 @@ class AdvanceRequestRoutes {
       }
     );
 
+    // ------------------------------------------ A1.2 · balance decision
+
+    router.patch(
+      "/:id(\\d+)/balance-action",
+      canDecideBalance,
+      async (req, res) => {
+        try {
+          const body = this.validate(req.body, balanceActionSchema);
+
+          const data = await this.advanceRequestUsecase.balanceAction(
+            parseInt(req.params.id, 10),
+            body,
+            req.decoded.employee_id
+          );
+
+          res.json(data);
+        } catch (err) {
+          this.fail(res, err);
+        }
+        res.end();
+      }
+    );
+
     // ----------------------------------------------------- A2 · approval
 
     router.patch("/:id(\\d+)/approval", canApprove, async (req, res) => {
@@ -291,9 +331,23 @@ class AdvanceRequestRoutes {
 
     // ----------------------------------------------------------- documents
 
-    router.post("/:id(\\d+)/documents", canCreate, async (req, res) => {
+    // Guarded per stage rather than by one key: accounts file the A3
+    // payment advice, and they do not hold the raiser's permission.
+    router.post(
+      "/:id(\\d+)/documents",
+      needs("create_advance_request", "edit_advance_request", "pay_advance_request"),
+      async (req, res) => {
       try {
         const body = this.validate(req.body, documentSchema);
+
+        if (
+          body.stage === "a3" &&
+          !(await this.permissions.has(req, "pay_advance_request"))
+        ) {
+          return res
+            .status(403)
+            .json({ code: 403, msg: "Only the payer can file a payment advice" });
+        }
 
         const documents = await this.advanceRequestUsecase.addDocument(
           parseInt(req.params.id, 10),
@@ -307,7 +361,8 @@ class AdvanceRequestRoutes {
         this.fail(res, err);
       }
       res.end();
-    });
+      }
+    );
   }
 
   getRouter() {
