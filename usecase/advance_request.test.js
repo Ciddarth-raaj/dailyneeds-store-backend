@@ -67,8 +67,8 @@ describe("advance request: the happy path", () => {
     const usecase = buildUsecase(repo);
 
     const id = await usecase.create({
-      purchase_order_number: "PO-10293487",
-      supplier_id: 12,
+      invoice_number: "26-27GPTC1085",
+      distributor_code: 12,
       amount: 5320,
       reason: "advance against PO",
       created_by: 4,
@@ -244,19 +244,19 @@ describe("advance request: a stage may only act on its own status", () => {
 describe("advance request: editing the A1 fields", () => {
   it("edits a submitted request and logs only what changed", async () => {
     const repo = at("submitted");
-    repo.state.purchase_order_number = "PO-1";
+    repo.state.invoice_number = "26-27GPTC1085";
     repo.state.reason = "same";
     const usecase = buildUsecase(repo);
 
     await usecase.updateDetails(
       7,
-      { purchase_order_number: "PO-2", reason: "same" },
+      { invoice_number: "26-27GPTC1086", reason: "same" },
       4
     );
 
-    assert.equal(repo.state.purchase_order_number, "PO-2");
+    assert.equal(repo.state.invoice_number, "26-27GPTC1086");
     assert.deepEqual(repo.activity, [
-      { field: "purchase_order_number", old_value: "PO-1", new_value: "PO-2" },
+      { field: "invoice_number", old_value: "26-27GPTC1085", new_value: "26-27GPTC1086" },
     ]);
   });
 

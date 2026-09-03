@@ -4,7 +4,7 @@ const logger = require("../utils/logger");
 /** Columns a caller is allowed to sort the list by. */
 const SORTABLE = {
   advance_request_id: "advance_requests.advance_request_id",
-  purchase_order_number: "advance_requests.purchase_order_number",
+  invoice_number: "advance_requests.invoice_number",
   amount: "advance_requests.amount",
   status: "advance_requests.status",
   created_at: "advance_requests.created_at",
@@ -22,7 +22,8 @@ const STATUS_RANK = `FIELD(advance_requests.status,
 
 const ITEM_SELECT = `
   advance_requests.*,
-  supplier.name             AS supplier_name,
+  distributor.mdm_dist_name AS supplier_name,
+  distributor.cid           AS supplier_cid,
   bank.name                 AS bank_name,
   outlets.outlet_name,
   creator.employee_name     AS created_by_name,
@@ -32,7 +33,8 @@ const ITEM_SELECT = `
 
 const ITEM_JOINS = `
   FROM advance_requests
-  LEFT JOIN people_list AS supplier   ON supplier.person_id   = advance_requests.supplier_id
+  LEFT JOIN product_distributor_master AS distributor
+         ON distributor.mdm_dist_code = advance_requests.distributor_code
   LEFT JOIN people_list AS bank       ON bank.person_id       = advance_requests.bank_id
   LEFT JOIN outlets                   ON outlets.outlet_id    = advance_requests.outlet_id
   LEFT JOIN new_employee AS creator   ON creator.employee_id  = advance_requests.created_by
@@ -81,10 +83,10 @@ class AdvanceRequestRepository {
     };
 
     eq("advance_requests.status", filters.status);
-    eq("advance_requests.supplier_id", filters.supplier_id);
+    eq("advance_requests.distributor_code", filters.distributor_code);
     eq("advance_requests.outlet_id", filters.outlet_id);
     eq("advance_requests.created_by", filters.created_by);
-    eq("advance_requests.purchase_order_number", filters.purchase_order_number);
+    eq("advance_requests.invoice_number", filters.invoice_number);
 
     // "Anything still moving" - the default worklist. Rejected and paid are
     // the two terminal statuses.
@@ -93,8 +95,8 @@ class AdvanceRequestRepository {
     }
 
     if (filters.search) {
-      clause += ` AND (advance_requests.purchase_order_number LIKE ?
-                       OR supplier.name LIKE ?
+      clause += ` AND (advance_requests.invoice_number LIKE ?
+                       OR distributor.mdm_dist_name LIKE ?
                        OR advance_requests.reason LIKE ?)`;
       const term = `%${filters.search}%`;
       params.push(term, term, term);
@@ -118,14 +120,14 @@ class AdvanceRequestRepository {
     return this.run(
       "CREATE",
       `INSERT INTO advance_requests
-         (purchase_order_number, supplier_id, amount, reason, outlet_id,
+         (invoice_number, distributor_code, amount, reason, outlet_id,
           status, created_by, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, 'submitted', ?, NOW(), NOW())`,
       [
-        request.purchase_order_number,
-        request.supplier_id,
+        request.invoice_number ?? null,
+        request.distributor_code,
         request.amount,
-        request.reason,
+        request.reason ?? null,
         request.outlet_id ?? null,
         request.created_by,
       ]

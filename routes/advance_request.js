@@ -17,7 +17,7 @@ const STATUSES = [
 
 const SORT_FIELDS = [
   "advance_request_id",
-  "purchase_order_number",
+  "invoice_number",
   "amount",
   "status",
   "created_at",
@@ -30,10 +30,12 @@ const SORT_FIELDS = [
  * convenience; this is what actually decides whether a stage is valid.
  */
 const a1Schema = {
-  purchase_order_number: Joi.string().max(100).required(),
-  supplier_id: Joi.number().required(),
+  // An advance is often asked for before any invoice number exists, so the
+  // reference is optional; the distributor and the amount are not.
+  invoice_number: Joi.string().max(100).allow(null, "").optional(),
+  distributor_code: Joi.number().required(),
   amount: Joi.number().greater(0).required(),
-  reason: Joi.string().max(500).required(),
+  reason: Joi.string().max(500).allow(null, "").optional(),
   outlet_id: Joi.number().allow(null).optional(),
 };
 
@@ -119,10 +121,10 @@ class AdvanceRequestRoutes {
           limit: Joi.number().integer().min(1).optional(),
           offset: Joi.number().integer().min(0).optional(),
           status: Joi.string().valid(STATUSES).optional(),
-          supplier_id: Joi.number().optional(),
+          distributor_code: Joi.number().optional(),
           outlet_id: Joi.number().optional(),
           created_by: Joi.number().optional(),
-          purchase_order_number: Joi.string().max(100).optional(),
+          invoice_number: Joi.string().max(100).allow(null, "").optional(),
           is_open: Joi.boolean().optional(),
           search: Joi.string().max(200).allow("").optional(),
           sort_by: Joi.string().valid(SORT_FIELDS).optional(),
@@ -139,10 +141,10 @@ class AdvanceRequestRoutes {
         const data = await this.advanceRequestUsecase.getAll(
           {
             status: query.status,
-            supplier_id: query.supplier_id,
+            distributor_code: query.distributor_code,
             outlet_id: query.outlet_id,
             created_by: query.created_by,
-            purchase_order_number: query.purchase_order_number,
+            invoice_number: query.invoice_number,
             is_open: query.is_open,
             search: query.search,
           },
@@ -187,10 +189,10 @@ class AdvanceRequestRoutes {
         const outlet_id = body.outlet_id ?? req.decoded.store_id ?? null;
 
         const id = await this.advanceRequestUsecase.create({
-          purchase_order_number: body.purchase_order_number,
-          supplier_id: body.supplier_id,
+          invoice_number: body.invoice_number || null,
+          distributor_code: body.distributor_code,
           amount: body.amount,
-          reason: body.reason,
+          reason: body.reason || null,
           outlet_id,
           created_by: req.decoded.employee_id,
         });
@@ -207,10 +209,10 @@ class AdvanceRequestRoutes {
     router.patch("/:id(\\d+)", canEdit, async (req, res) => {
       try {
         const body = this.validate(req.body, {
-          purchase_order_number: Joi.string().max(100).optional(),
-          supplier_id: Joi.number().optional(),
+          invoice_number: Joi.string().max(100).allow(null, "").optional(),
+          distributor_code: Joi.number().optional(),
           amount: Joi.number().greater(0).optional(),
-          reason: Joi.string().max(500).optional(),
+          reason: Joi.string().max(500).allow(null, "").optional(),
         });
 
         const data = await this.advanceRequestUsecase.updateDetails(

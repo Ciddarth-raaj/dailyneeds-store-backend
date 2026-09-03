@@ -215,7 +215,7 @@ class AdvanceRequestUsecase {
     }
 
     const fields = {};
-    ["purchase_order_number", "supplier_id", "amount", "reason"].forEach(
+    ["invoice_number", "distributor_code", "amount", "reason"].forEach(
       (key) => {
         if (data[key] !== undefined) fields[key] = data[key];
       }
