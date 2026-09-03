@@ -57,8 +57,18 @@ class PurchaseAcknowledgementRoutes {
       amount: Joi.number().min(0).optional().default(0)
     });
 
+    // The memo header fields the form posts alongside the invoice lines. Joi
+    // rejects unknown keys, so anything the client sends has to be declared
+    // here or the whole request is refused.
+    const memoHeaderFields = {
+      mmm_refno: Joi.number().integer().optional().allow(null, ""),
+      mmm_date: Joi.date().optional().allow(null, ""),
+      mmm_mrc_no: Joi.string().max(50).optional().allow(null, "")
+    };
+
     const createSchema = Joi.object({
       distributor_id: Joi.string().required().max(50),
+      ...memoHeaderFields,
       invoices: Joi.array().items(invoiceItemSchema).min(1).required()
     });
 
@@ -81,6 +91,7 @@ class PurchaseAcknowledgementRoutes {
 
     const updateSchema = Joi.object({
       distributor_id: Joi.string().max(50).optional(),
+      ...memoHeaderFields,
       invoices: Joi.array().items(invoiceItemSchema).min(1).optional()
     });
 
