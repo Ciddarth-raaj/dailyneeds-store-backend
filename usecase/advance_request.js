@@ -220,11 +220,11 @@ class AdvanceRequestUsecase {
   }
 
   /**
-   * A3 - record the payment.
+   * A3 - file the payment advice, which closes the request.
    *
-   * paid_amount is stored separately from amount: an advance is sometimes
-   * settled for less than was approved, and overwriting the approved figure
-   * would lose what was actually authorised.
+   * The payment itself is made in Tally, so its figures live there. This step
+   * records only that accounts paid and when; the advice document is attached
+   * separately through addDocument.
    */
   payment(id, data, employeeId) {
     return this.applyStage(
@@ -232,10 +232,6 @@ class AdvanceRequestUsecase {
       "payment",
       "paid",
       {
-        paid_amount: data.paid_amount,
-        utr: data.utr,
-        bank_id: data.bank_id,
-        payment_date: data.payment_date,
         paid_by: employeeId ?? null,
         paid_at: new Date(),
       },

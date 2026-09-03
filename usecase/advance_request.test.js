@@ -105,19 +105,11 @@ describe("advance request: no previous balance", () => {
     assert.equal(repo.state.status, "approved");
     assert.equal(repo.state.approved_by, 3);
 
-    await usecase.payment(
-      7,
-      {
-        paid_amount: 175919,
-        utr: "UTR99001",
-        bank_id: 41,
-        payment_date: "2026-09-02",
-      },
-      5
-    );
+    await usecase.payment(7, {}, 5);
 
     assert.equal(repo.state.status, "paid");
-    assert.equal(repo.state.utr, "UTR99001");
+    assert.equal(repo.state.paid_by, 5);
+    assert.ok(repo.state.paid_at, "paid_at is stamped");
     assert.deepEqual(
       repo.activity.map((a) => a.new_value),
       ["pending_approval", "approved", "paid"]
@@ -165,11 +157,7 @@ describe("advance request: a previous balance goes back to purchase", () => {
     await usecase.balanceCheck(7, { previous_advance_balance: 40000 }, 9);
     await usecase.balanceAction(7, { balance_action: "less_and_pay" }, 4);
     await usecase.approval(7, { decision: "approve" }, 3);
-    await usecase.payment(
-      7,
-      { paid_amount: 135919, utr: "U", bank_id: 41, payment_date: "2026-09-02" },
-      5
-    );
+    await usecase.payment(7, {}, 5);
 
     assert.equal(repo.state.status, "paid");
     assert.deepEqual(
@@ -244,13 +232,7 @@ describe("advance request: a stage may only act on its own status", () => {
   const action = (u) =>
     u.balanceAction(7, { balance_action: "defer" }, 1);
   const approve = (u) => u.approval(7, { decision: "approve" }, 1);
-  const pay = (u) =>
-    u.payment(7, {
-      paid_amount: 1,
-      utr: "U",
-      bank_id: 1,
-      payment_date: "2026-09-02",
-    }, 1);
+  const pay = (u) => u.payment(7, {}, 1);
 
   const cases = [
     ["balanceCheck", "pending_approval", balance],

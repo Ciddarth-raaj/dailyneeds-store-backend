@@ -65,25 +65,24 @@ const approvalSchema = {
   balance_action_note: Joi.string().max(500).allow(null, "").optional(),
 };
 
+/**
+ * A3 carries nothing of its own: the payment is made in Tally and the advice
+ * is attached through the documents route, so this call only closes the
+ * request. The four old fields stay listed as optional and are ignored -
+ * validate() runs Joi without allowUnknown, so a browser tab left open across
+ * a deploy would otherwise be refused on the one action that finishes a
+ * request.
+ */
 const paymentSchema = {
-  paid_amount: Joi.number().greater(0).required(),
-  utr: Joi.string().max(100).required(),
-  bank_id: Joi.number().required(),
-  payment_date: Joi.string().isoDate().required(),
+  paid_amount: Joi.number().optional(),
+  utr: Joi.string().max(100).allow(null, "").optional(),
+  bank_id: Joi.number().optional(),
+  payment_date: Joi.string().allow(null, "").optional(),
 };
 
 const documentSchema = {
   stage: Joi.string().valid(["a1", "a3"]).required(),
   file_url: Joi.string().max(500).required(),
-};
-
-/**
- * The column is a DATE, so a full ISO timestamp would not store cleanly.
- * Same normalisation the ticket routes apply.
- */
-const normaliseDate = (value) => {
-  if (value === "" || value === null || value === undefined) return null;
-  return String(value).slice(0, 10);
 };
 
 class AdvanceRequestRoutes {
@@ -318,7 +317,7 @@ class AdvanceRequestRoutes {
 
         const data = await this.advanceRequestUsecase.payment(
           parseInt(req.params.id, 10),
-          { ...body, payment_date: normaliseDate(body.payment_date) },
+          body,
           req.decoded.employee_id
         );
 
