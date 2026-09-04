@@ -42,6 +42,16 @@ const batchCreateSchema = Joi.object({
   value: Joi.number().min(0).required(),
 });
 
+// One batch reaches many stores, so the same offer is made across the outlets
+// chosen rather than one at a time.
+const batchBulkCreateSchema = Joi.object({
+  item_code: Joi.number().integer().required(),
+  outlet_ids: Joi.array().items(Joi.number().integer()).min(1).required(),
+  batch_no: Joi.string().trim().min(1).required(),
+  offer_type: Joi.string().valid(...OFFER_TYPES).required(),
+  value: Joi.number().min(0).required(),
+});
+
 const batchUpdateSchema = Joi.object({
   offer_type: Joi.string().valid(...OFFER_TYPES).optional(),
   value: Joi.number().min(0).optional(),
@@ -170,13 +180,19 @@ class OffersV3Routes {
     router.get("/available-batches", async (req, res) => {
       try {
         const item_code = parseInt(req.query.item_code, 10);
-        const outlet_id = parseInt(req.query.outlet_id, 10);
-        if (!item_code || !outlet_id) {
-          res.status(400).json({ code: 400, msg: "item_code and outlet_id are required" });
+        // Accepts one outlet or several: outlet_ids=1,2,3, with outlet_id kept
+        // for anything still asking about a single store.
+        const raw = req.query.outlet_ids ?? req.query.outlet_id ?? "";
+        const outlet_ids = String(raw)
+          .split(",")
+          .map((v) => parseInt(v, 10))
+          .filter(Boolean);
+        if (!item_code || !outlet_ids.length) {
+          res.status(400).json({ code: 400, msg: "item_code and at least one outlet are required" });
           res.end();
           return;
         }
-        const data = await this.offersV3Usecase.listBatchesForItemOutlet(item_code, outlet_id);
+        const data = await this.offersV3Usecase.listBatchesForItemOutlets(item_code, outlet_ids);
         res.json({ code: 200, data });
       } catch (err) {
         respondError(res, err);
@@ -194,6 +210,26 @@ class OffersV3Routes {
           return;
         }
         res.json({ code: 200, data: row });
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
+    // The same batch offer across several outlets at once.
+    router.post("/batches/bulk", async (req, res) => {
+      try {
+        const isValid = Joi.validate(req.body, batchBulkCreateSchema);
+        if (isValid.error) {
+          res.status(400).json({ code: 400, msg: isValid.error.message });
+          res.end();
+          return;
+        }
+        const result = await this.offersV3Usecase.createBatchOffersForOutlets(
+          isValid.value,
+          getCreatedBy(req)
+        );
+        sendResult(res, result);
       } catch (err) {
         respondError(res, err);
       }

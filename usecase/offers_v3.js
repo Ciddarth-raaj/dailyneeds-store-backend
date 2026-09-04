@@ -377,24 +377,102 @@ class OffersV3Usecase {
    * from what exists rather than typed from memory. Which batch offer already
    * occupies one rides along, since that batch cannot take another.
    */
-  async listBatchesForItemOutlet(item_code, outlet_id) {
+  async listBatchesForItemOutlets(item_code, outlet_ids) {
     try {
-      const [batches, offers] = await Promise.all([
-        this.offersV3Repo.listBatchesForItemOutlet(item_code, outlet_id),
-        this.offersV3Repo.listBatchOffers({ item_code, outlet_id, status: "active" }),
+      const ids = (outlet_ids || []).map((o) => Number(o)).filter(Boolean);
+      if (!ids.length) return [];
+      const [rows, offers] = await Promise.all([
+        this.offersV3Repo.listBatchesForItemOutlets(item_code, ids),
+        this.offersV3Repo.listBatchOffers({ item_code, status: "active" }),
       ]);
-      const takenBy = new Map(offers.map((o) => [String(o.batch_no), o.id]));
-      return batches.map((b) => ({
-        ...b,
-        occupied_by_offer_id: takenBy.get(String(b.batch_no)) ?? null,
-      }));
+      const takenBy = new Map(
+        offers
+          .filter((o) => ids.includes(Number(o.outlet_id)))
+          .map((o) => [`${o.outlet_id}|${o.batch_no}`, o.id])
+      );
+
+      // One row per batch number, not per outlet: the same batch carries the
+      // same number wherever it landed, and the offer is being made on the
+      // batch. Which outlets hold it, and which of those already have an
+      // offer on it, ride along so the choice is made with both in view.
+      const byBatch = new Map();
+      for (const row of rows) {
+        const key = String(row.batch_no);
+        if (!byBatch.has(key)) {
+          byBatch.set(key, {
+            batch_no: row.batch_no,
+            mrp: row.mrp,
+            selling_price: row.selling_price,
+            total_stock_qty: 0,
+            outlets: [],
+          });
+        }
+        const entry = byBatch.get(key);
+        entry.total_stock_qty += Number(row.stock_qty ?? 0);
+        entry.outlets.push({
+          outlet_id: row.outlet_id,
+          outlet_name: row.outlet_name,
+          stock_qty: row.stock_qty,
+          mrp: row.mrp,
+          selling_price: row.selling_price,
+          occupied_by_offer_id: takenBy.get(`${row.outlet_id}|${row.batch_no}`) ?? null,
+        });
+      }
+
+      return [...byBatch.values()].sort((a, b) => {
+        const aHas = a.total_stock_qty > 0 ? 1 : 0;
+        const bHas = b.total_stock_qty > 0 ? 1 : 0;
+        if (aHas !== bHas) return bHas - aHas;
+        return String(a.batch_no).localeCompare(String(b.batch_no));
+      });
     } catch (err) {
-      logError("USECASE.OFFERS_V3.LIST_BATCHES_FOR_ITEM_OUTLET", err.toString(), {
+      logError("USECASE.OFFERS_V3.LIST_BATCHES_FOR_ITEM_OUTLETS", err.toString(), {
         item_code,
-        outlet_id,
+        outlet_ids,
       });
       throw err;
     }
+  }
+
+  /**
+   * The same batch offer across several outlets.
+   *
+   * A batch number is the supplier's, so one batch reaches many stores and the
+   * offer is decided once for all of them - creating it store by store is the
+   * same decision typed N times. Each outlet is still created through
+   * createBatchOffer, so every rule it enforces holds per outlet, and the
+   * outcomes are reported per outlet rather than collapsed into one failure:
+   * an outlet whose batch already carries an offer should not stop the rest.
+   */
+  async createBatchOffersForOutlets({ item_code, outlet_ids, batch_no, offer_type, value }, created_by) {
+    const ids = [...new Set((outlet_ids || []).map((o) => Number(o)).filter(Boolean))];
+    if (!ids.length) return { code: 400, msg: "Select at least one outlet" };
+
+    const results = [];
+    for (const outlet_id of ids) {
+      // Sequential rather than parallel: these contend for the same rows, and
+      // a per-outlet outcome is more useful than a faster failure.
+      // eslint-disable-next-line no-await-in-loop
+      const result = await this.createBatchOffer(
+        { item_code, outlet_id, batch_no, offer_type, value },
+        created_by
+      );
+      results.push({
+        outlet_id,
+        ok: result.code === 200,
+        id: result.id ?? null,
+        msg: result.code === 200 ? null : result.msg,
+      });
+    }
+
+    const created = results.filter((r) => r.ok).length;
+    return {
+      code: created > 0 ? 200 : 400,
+      created,
+      failed: results.length - created,
+      results,
+      ...(created === 0 ? { msg: results[0]?.msg ?? "No offers could be created" } : {}),
+    };
   }
 
   async listBatchOffers(filters) {

@@ -933,21 +933,26 @@ class OffersV3Repository {
    * typing. Ordered so the ones with stock come first - an offer is almost
    * always meant for a batch that is actually on the shelf.
    */
-  listBatchesForItemOutlet(item_code, outlet_id) {
+  listBatchesForItemOutlets(item_code, outlet_ids) {
+    const ids = (outlet_ids || []).map((o) => parseInt(o, 10)).filter(Boolean);
+    if (!ids.length) return Promise.resolve([]);
+    const placeholders = ids.map(() => "?").join(", ");
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT batch_no, mrp, selling_price, stock_qty, price_uploaded_at
-         FROM \`${DATA_TABLE}\`
-         WHERE item_code = ? AND outlet_id = ?
-         ORDER BY (COALESCE(stock_qty, 0) > 0) DESC, batch_no ASC`,
-        [item_code, outlet_id],
+        `SELECT bd.outlet_id, o.outlet_name, bd.batch_no, bd.mrp, bd.selling_price,
+                bd.stock_qty, bd.price_uploaded_at
+         FROM \`${DATA_TABLE}\` bd
+         LEFT JOIN outlets o ON o.outlet_id = bd.outlet_id
+         WHERE bd.item_code = ? AND bd.outlet_id IN (${placeholders})
+         ORDER BY (COALESCE(bd.stock_qty, 0) > 0) DESC, bd.batch_no ASC`,
+        [item_code, ...ids],
         (err, rows) => {
           if (err) {
             logError(
               "REPOSITORY.OFFERS_V3",
-              "REPOSITORY.OFFERS_V3.LIST_BATCHES_FOR_ITEM_OUTLET",
+              "REPOSITORY.OFFERS_V3.LIST_BATCHES_FOR_ITEM_OUTLETS",
               err.toString(),
-              { item_code, outlet_id }
+              { item_code, outlet_ids: ids }
             );
             return reject(err);
           }
