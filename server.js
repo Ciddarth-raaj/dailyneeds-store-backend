@@ -102,6 +102,9 @@ class Server {
         this.drivers.push(this.mysqlGofrugal);
         //this.models.push(this.mongo);
 
+        const { ensureGofrugalIndexes } = require("./utils/ensureGofrugalIndexes");
+        await ensureGofrugalIndexes(this.mysqlGofrugal.connection);
+
         resolve();
       } catch (err) {
         reject(err);
