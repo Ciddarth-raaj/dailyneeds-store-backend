@@ -372,6 +372,31 @@ class OffersV3Usecase {
   // Batch-specific offers
   // ---------------------------------------------------------------------
 
+  /**
+   * The batches known for an item at an outlet, so a batch offer is picked
+   * from what exists rather than typed from memory. Which batch offer already
+   * occupies one rides along, since that batch cannot take another.
+   */
+  async listBatchesForItemOutlet(item_code, outlet_id) {
+    try {
+      const [batches, offers] = await Promise.all([
+        this.offersV3Repo.listBatchesForItemOutlet(item_code, outlet_id),
+        this.offersV3Repo.listBatchOffers({ item_code, outlet_id, status: "active" }),
+      ]);
+      const takenBy = new Map(offers.map((o) => [String(o.batch_no), o.id]));
+      return batches.map((b) => ({
+        ...b,
+        occupied_by_offer_id: takenBy.get(String(b.batch_no)) ?? null,
+      }));
+    } catch (err) {
+      logError("USECASE.OFFERS_V3.LIST_BATCHES_FOR_ITEM_OUTLET", err.toString(), {
+        item_code,
+        outlet_id,
+      });
+      throw err;
+    }
+  }
+
   async listBatchOffers(filters) {
     try {
       return await this.offersV3Repo.listBatchOffers(filters);

@@ -165,6 +165,25 @@ class OffersV3Routes {
       res.end();
     });
 
+    // The batches on file for one item at one outlet - what the create form
+    // offers instead of a free-text batch number.
+    router.get("/available-batches", async (req, res) => {
+      try {
+        const item_code = parseInt(req.query.item_code, 10);
+        const outlet_id = parseInt(req.query.outlet_id, 10);
+        if (!item_code || !outlet_id) {
+          res.status(400).json({ code: 400, msg: "item_code and outlet_id are required" });
+          res.end();
+          return;
+        }
+        const data = await this.offersV3Usecase.listBatchesForItemOutlet(item_code, outlet_id);
+        res.json({ code: 200, data });
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
     router.get("/batches/:id", async (req, res) => {
       try {
         const id = parseInt(req.params.id, 10);

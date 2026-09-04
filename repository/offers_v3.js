@@ -929,6 +929,35 @@ class OffersV3Repository {
   // ---------------------------------------------------------------------
 
   /**
+   * The batches on file for one item at one outlet, for picking rather than
+   * typing. Ordered so the ones with stock come first - an offer is almost
+   * always meant for a batch that is actually on the shelf.
+   */
+  listBatchesForItemOutlet(item_code, outlet_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT batch_no, mrp, selling_price, stock_qty, price_uploaded_at
+         FROM \`${DATA_TABLE}\`
+         WHERE item_code = ? AND outlet_id = ?
+         ORDER BY (COALESCE(stock_qty, 0) > 0) DESC, batch_no ASC`,
+        [item_code, outlet_id],
+        (err, rows) => {
+          if (err) {
+            logError(
+              "REPOSITORY.OFFERS_V3",
+              "REPOSITORY.OFFERS_V3.LIST_BATCHES_FOR_ITEM_OUTLET",
+              err.toString(),
+              { item_code, outlet_id }
+            );
+            return reject(err);
+          }
+          resolve(rows || []);
+        }
+      );
+    });
+  }
+
+  /**
    * Drop every batch the given price upload did not carry.
    *
    * The sheet is the complete list of live batches, so anything it leaves out
