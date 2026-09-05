@@ -1181,6 +1181,42 @@ class StockReceivedRepository {
       );
     });
   }
+
+  // Refno and sl_no are stored as strings, so the delete coerces them the
+  // same way the insert above does -- a numeric refno would otherwise never
+  // match its own row.
+  unignoreGrnIssueItems(items) {
+    return new Promise((resolve, reject) => {
+      if (!Array.isArray(items) || items.length === 0) {
+        return resolve({ unignored: 0 });
+      }
+
+      const pairs = items.map((item) => [
+        String(item.refno),
+        String(item.sl_no),
+      ]);
+
+      this.db.query(
+        `DELETE FROM grn_issue_ignores
+         WHERE (mmh_mrc_refno, mmd_mrc_sl_no) IN (?)`,
+        [pairs],
+        (err, result) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.STOCK_RECEIVED",
+              code: "REPOSITORY.STOCK_RECEIVED.UNIGNORE_GRN_ISSUES",
+              description: err.toString(),
+              category: "",
+              ref: { items },
+            });
+            return reject(err);
+          }
+          resolve({ unignored: result?.affectedRows ?? 0 });
+        }
+      );
+    });
+  }
 }
 
 module.exports = (mainDb, gofrugalDb) => {

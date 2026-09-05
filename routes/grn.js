@@ -187,6 +187,36 @@ class GrnRoutes {
       }
       res.end();
     });
+
+    // Puts an ignored line back on the Issue GRN list. Same admin gate and
+    // payload as the ignore above; product_id is accepted but unused, since
+    // (refno, sl_no) is the row's key.
+    router.post("/issues/unignore", async (req, res) => {
+      try {
+        if (!req.decoded || req.decoded.user_type !== 2) {
+          res.status(403).json({ code: 403, msg: "Only admins can un-ignore GRN issues" });
+          res.end();
+          return;
+        }
+
+        const isValid = Joi.validate(req.body, ignoreSchema);
+        if (isValid.error) {
+          res.status(400).json({ code: 400, msg: isValid.error.message });
+          res.end();
+          return;
+        }
+
+        const items = isValid.value.items.map((item) => ({
+          refno: item.refno,
+          sl_no: item.sl_no,
+        }));
+        const result = await this.grnUsecase.unignoreGrnIssueItems(items);
+        res.json({ code: 200, ...result });
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
   }
 
   getRouter() {
