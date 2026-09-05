@@ -81,6 +81,16 @@ const priceUploadRowSchema = Joi.object({
 });
 const priceUploadSchema = Joi.array().items(priceUploadRowSchema).min(1);
 
+// Bulk lookup for the GRN pages, which need the grouped batches for every
+// product on a GRN at once. Ids arrive as numbers or numeric strings
+// depending on the caller, so both are accepted and coerced below.
+const itemsByProductBulkSchema = Joi.object({
+  product_ids: Joi.array()
+    .items(Joi.alternatives().try(Joi.number(), Joi.string()))
+    .min(1)
+    .required(),
+});
+
 const importRowSchema = Joi.object({
   scope: Joi.string().allow("", null).optional(),
   item_code: uploadCellSchema,
@@ -333,6 +343,56 @@ class OffersV3Routes {
           code: 200,
           data,
           meta: { product_id: productId, count: data?.length ?? 0 },
+        });
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
+    // Same data as /items-by-product, for many products in one round trip --
+    // the GRN pages need every product on a GRN and were making one request
+    // each. POST rather than GET so a few hundred ids can't overflow the URL,
+    // matching the /batches/bulk precedent above. Returns rows already grouped
+    // by product_id, the same shape GET /grn/issues returns.
+    router.post("/items-by-product/bulk", async (req, res) => {
+      try {
+        const isValid = Joi.validate(req.body, itemsByProductBulkSchema);
+        if (isValid.error) {
+          res.status(400).json({ code: 400, msg: isValid.error.message });
+          res.end();
+          return;
+        }
+
+        const productIds = [
+          ...new Set(
+            isValid.value.product_ids
+              .map((raw) => parseInt(String(raw).trim(), 10))
+              .filter((id) => Number.isFinite(id))
+          ),
+        ];
+        if (productIds.length === 0) {
+          res.status(400).json({ code: 400, msg: "product_ids must contain at least one numeric id" });
+          res.end();
+          return;
+        }
+
+        const rows = await this.offersV3Usecase.listGroupedItemsByProductIds(productIds);
+        const data = {};
+        (rows || []).forEach((row) => {
+          if (row.product_id == null) return;
+          const key = String(row.product_id);
+          if (!data[key]) data[key] = [];
+          data[key].push(row);
+        });
+
+        res.json({
+          code: 200,
+          data,
+          meta: {
+            product_count: productIds.length,
+            count: rows?.length ?? 0,
+          },
         });
       } catch (err) {
         respondError(res, err);
