@@ -800,7 +800,7 @@ class OffersV3Usecase {
       this.offersV3Repo.updateBatchOffersStatusByIds(toRevert, "active"),
     ]);
     const untagged = await this.detectUntaggedBatchesBulk(untaggedCandidates);
-    const lowStock = await this.detectLowStockWarningsBulk(resolved);
+    const lowStock = await this.detectLowStockWarningsBulk();
 
     await this.offersV3Repo.upsertUploadMeta("stock", {
       total_rows: resolved.length,
@@ -824,21 +824,26 @@ class OffersV3Usecase {
   /**
    * Item-level offers only: for every item touched by this upload that
    * currently has an active item-level offer, sum its stock across every
-   * outlet and batch (not just the rows in this upload) and check that
-   * total against the offer's Threshold Qty — the offer applies everywhere,
-   * so the signal is whether the item overall is running low, not any one
-   * store/batch. A total > 0 and <= threshold is upserted into the
-   * low-stock warning queue; a total back above threshold clears any
-   * existing warning for that item. A total of exactly 0 is left alone here
-   * — item-level offers have no zero-stock trigger, only Threshold Qty.
+   * outlet and batch and check that total against the offer's Threshold Qty —
+   * the offer applies everywhere, so the signal is whether the item overall is
+   * running low, not any one store/batch. A total at or below the threshold is
+   * upserted into the low-stock warning queue; a total back above it clears
+   * any existing warning for that item.
+   *
+   * Zero counts, and counts hardest: an offer advertising an item nobody can
+   * buy is the worst version of what this queue is for. It used to be exempt,
+   * on the reading that only a threshold triggers a warning - which meant an
+   * item selling out cleared its own warning on the way past.
+   *
+   * Every active item offer is checked, not only the ones this upload carried.
+   * An item missing from the sheet has no stock anywhere, which is exactly the
+   * case worth reporting and exactly the one a by-upload check cannot see.
    */
-  async detectLowStockWarningsBulk(resolvedRows) {
-    if (resolvedRows.length === 0) return [];
-    const itemCodes = [...new Set(resolvedRows.map((r) => r.item_code))];
-    const thresholds = await this.offersV3Repo.getActiveItemOfferThresholds(itemCodes);
+  async detectLowStockWarningsBulk() {
+    const thresholds = await this.offersV3Repo.getAllActiveItemOfferThresholds();
     if (thresholds.size === 0) return [];
 
-    const relevantItemCodes = itemCodes.filter((code) => thresholds.has(code));
+    const relevantItemCodes = [...thresholds.keys()];
     const totals = await this.offersV3Repo.getTotalStockByItemCodes(relevantItemCodes);
 
     const toWarn = [];
@@ -846,7 +851,7 @@ class OffersV3Usecase {
     for (const item_code of relevantItemCodes) {
       const threshold = thresholds.get(item_code);
       const total = totals.get(item_code) ?? 0;
-      if (total > 0 && total <= threshold) {
+      if (total <= threshold) {
         toWarn.push({ item_code, total_stock_qty: total, threshold_qty: threshold });
       } else {
         toClear.push(item_code);
@@ -866,10 +871,28 @@ class OffersV3Usecase {
     ]);
 
     if (newlyWarned.length > 0) {
-      const lines = newlyWarned.map(
-        (w) => `🔢 Item Code: ${w.item_code} | 📊 Total Stock: ${w.total_stock_qty} / Threshold: ${w.threshold_qty}`
+      // Out of stock is not the same news as running low - an offer with
+      // nothing behind it is live on the shelf edge right now - so the two are
+      // listed apart rather than as one number to read carefully.
+      const out = newlyWarned.filter((w) => Number(w.total_stock_qty) <= 0);
+      const low = newlyWarned.filter((w) => Number(w.total_stock_qty) > 0);
+      const lines = [];
+      if (out.length) {
+        lines.push("🔴 OUT OF STOCK - offer still live:");
+        lines.push(...out.map((w) => `🔢 Item Code: ${w.item_code} | 📊 No stock in any store`));
+      }
+      if (low.length) {
+        if (lines.length) lines.push("");
+        lines.push("🟡 Running low:");
+        lines.push(
+          ...low.map(
+            (w) => `🔢 Item Code: ${w.item_code} | 📊 Total Stock: ${w.total_stock_qty} / Threshold: ${w.threshold_qty}`
+          )
+        );
+      }
+      await notifyOffersV3(
+        ["🟡 LOW STOCK WARNING (total across all stores)", "", ...lines].join("\n")
       );
-      await notifyOffersV3(["🟡 LOW STOCK WARNING (total across all stores)", "", ...lines].join("\n"));
     }
 
     return toWarn;

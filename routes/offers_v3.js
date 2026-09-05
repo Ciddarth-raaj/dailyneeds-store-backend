@@ -418,6 +418,19 @@ class OffersV3Routes {
     });
 
     // Low-stock warnings (item-level offers only)
+    // Re-run the check now. It normally runs off the stock upload, so a
+    // corrected rule or a mid-day question would otherwise wait for tomorrow's
+    // sheet before the list said anything different.
+    router.post("/low-stock-warnings/recheck", async (req, res) => {
+      try {
+        const warnings = await this.offersV3Usecase.detectLowStockWarningsBulk();
+        res.json({ code: 200, warnings: warnings.length });
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
     router.get("/low-stock-warnings", async (req, res) => {
       try {
         const data = await this.offersV3Usecase.listLowStockWarnings(req.query.status || "pending");

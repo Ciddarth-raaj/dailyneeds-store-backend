@@ -172,6 +172,33 @@ class OffersV3Repository {
   // Bulk variant for stock-upload low-stock detection: returns a Map of
   // item_code -> threshold_qty for items (from the given list) that
   // currently have an active item-level offer.
+  /**
+   * The threshold of every active item-level offer.
+   *
+   * The by-code variant answers only for the items a given upload carried,
+   * which cannot see an item that has dropped out of the sheet entirely - and
+   * that item has no stock at all, which is the case most worth reporting.
+   */
+  async getAllActiveItemOfferThresholds() {
+    const map = new Map();
+    try {
+      const rows = await this._queryAsync(
+        `SELECT item_code, threshold_qty FROM \`${ITEM_TABLE}\`
+         WHERE status IN (${ITEM_ACTIVE_STATUSES.map(() => "?").join(",")})`,
+        [...ITEM_ACTIVE_STATUSES]
+      );
+      (rows || []).forEach((r) => map.set(r.item_code, r.threshold_qty));
+    } catch (err) {
+      logError(
+        "REPOSITORY.OFFERS_V3",
+        "REPOSITORY.OFFERS_V3.GET_ALL_ACTIVE_ITEM_OFFER_THRESHOLDS",
+        err.toString()
+      );
+      throw err;
+    }
+    return map;
+  }
+
   async getActiveItemOfferThresholds(itemCodes) {
     const uniqueCodes = [...new Set(itemCodes)];
     if (uniqueCodes.length === 0) return new Map();
