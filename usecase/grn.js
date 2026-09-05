@@ -199,6 +199,22 @@ class GrnUsecase {
       throw err;
     }
   }
+
+  async unignoreGrnIssueItems(items) {
+    try {
+      return await this.stockReceivedRepo.unignoreGrnIssueItems(items);
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "USECASE.GRN",
+        code: "USECASE.GRN.UNIGNORE_GRN_ISSUES",
+        description: err.toString(),
+        category: "",
+        ref: { items },
+      });
+      throw err;
+    }
+  }
 }
 
 module.exports = (stockReceivedRepo, priceCheckerRepo, hqOffersRepo, offersV3Repo) => {
