@@ -746,10 +746,19 @@ STAGE0A_ADMIN_DEFAULTS=~/.stage0a/admin.cnf scripts/auth/gate5-rehearsal.sh
 ```
 
 **Resuming after the 06-09-2026 false failure:** the dumps stamped
-`20260906-174727` are valid and verified; do not start over. After the
-`git pull`, run the same command with `--skip-backup` — stage 3 re-verifies
-those exact artefacts (sha256, trailer, all six auth tables, 144
-`CREATE TABLE`) and then continues into the restore and migration stages.
+`20260906-174727` are valid; do not start over. That run died before the
+manifest was written, so `--skip-backup` now handles a **missing
+manifest**: it takes the artefact set from the newest full dump's stamp
+(auth, full and counts of the *same* stamp, never mixed; filenames are not
+trusted), and rebuilds the manifest only after independent re-verification
+— gzip integrity of both archives, the `Dump completed` trailer on both,
+all six auth tables present, the full dump's `CREATE TABLE` count equal to
+the live schema's base-table count (read-only `information_schema` query),
+no `USE`/`CREATE DATABASE`, the counts file well-formed with exactly the
+live base-table set, then SHA-256 of all three files recorded. Any check
+failing stops the run with nothing written. Reproduced locally (manifest
+deleted → rebuilt → run completed; truncated archive, foreign table in the
+counts file, and a stamp with a missing sibling all refused).
 
 That is all. If the app user turns out to hold global `CREATE` and can
 read every routine, the admin file is simply not used. If you have no
