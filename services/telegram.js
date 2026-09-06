@@ -12,19 +12,24 @@ const BOT_TOKEN =
   "8069311027:AAE64F15h8FZY_jqnlOSzQGmzeKAR-MDYbI";
 
 /**
- * The bot's @name, needed to build `t.me/<name>?start=...` deep links.
- *
- * There is no default: a wrong guess would send users to someone else's bot,
- * which is worse than the link feature reporting that it is not configured.
+ * Optional override for the bot's @name. Normally unset — the bot is asked
+ * for its own name instead, so there is nothing to configure or keep in step
+ * with the token.
  */
-const BOT_USERNAME = (process.env.TELEGRAM_BOT_USERNAME || "").replace(/^@/, "");
+const BOT_USERNAME_OVERRIDE = (process.env.TELEGRAM_BOT_USERNAME || "").replace(
+  /^@/,
+  ""
+);
 
 const client = new TelegramClient({
   accessToken: BOT_TOKEN,
 });
 
 class Telegram {
-  constructor() { }
+  constructor() {
+    /** Cached result of getMe().username — see getBotUsername. */
+    this.botUsername = null;
+  }
 
   async sendMessage(chat_id_param, msg, options = {}) {
     let chat_id = chat_id_param;
@@ -57,9 +62,37 @@ class Telegram {
     });
   }
 
-  /** The bot's @name, or "" when the deployment has not configured one. */
-  getBotUsername() {
-    return BOT_USERNAME;
+  /**
+   * The bot's @name, needed to build `t.me/<name>?start=...` deep links.
+   *
+   * Asked of Telegram rather than configured: the token already identifies
+   * exactly one bot, so a separate setting would only be another thing to
+   * get wrong. The answer cannot change without the token changing, so it is
+   * cached for the life of the process; a failed lookup is not cached, so a
+   * blip does not disable linking until the next restart.
+   *
+   * Returns "" if the bot cannot be reached, which is the caller's signal to
+   * say linking is unavailable rather than hand out a broken link.
+   */
+  async getBotUsername() {
+    if (BOT_USERNAME_OVERRIDE) return BOT_USERNAME_OVERRIDE;
+    if (this.botUsername) return this.botUsername;
+
+    try {
+      const me = await client.getMe();
+      this.botUsername = me?.username || "";
+      return this.botUsername;
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "SERVICE.TELEGRAM",
+        code: "SERVICE.TELEGRAM.GET-ME",
+        description: err.toString(),
+        category: "",
+        ref: {},
+      });
+      return "";
+    }
   }
 
   /**

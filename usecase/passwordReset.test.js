@@ -55,7 +55,7 @@ const makeTelegram = ({ botUsername = "dnds_bot", failSend = false } = {}) => {
   const sent = [];
   return {
     sent,
-    getBotUsername: () => botUsername,
+    getBotUsername: async () => botUsername,
     getUpdates: async () => [],
     sendMessage: async (chatId, msg) => {
       if (failSend) throw new Error("telegram down");
@@ -90,7 +90,7 @@ describe("startLink", () => {
 
   // Guessing at the bot name would send staff to a stranger's bot, which is
   // worse than saying the feature is not set up.
-  it("refuses when no bot username is configured", async () => {
+  it("refuses when the bot cannot be reached", async () => {
     const usecase = buildPasswordReset(
       makeUserRepo(),
       makeResetRepo(),

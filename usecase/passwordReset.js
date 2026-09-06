@@ -76,7 +76,7 @@ class PasswordResetUsecase {
       linked: Boolean(link),
       telegram_username: link?.telegram_username ?? null,
       linked_at: link?.linked_at ?? null,
-      bot_configured: this.telegram.getBotUsername() !== "",
+      bot_configured: (await this.telegram.getBotUsername()) !== "",
     };
   }
 
@@ -88,10 +88,12 @@ class PasswordResetUsecase {
    * table.
    */
   async startLink(userId) {
-    const botUsername = this.telegram.getBotUsername();
+    // The bot names itself (see getBotUsername), so this is a reachability
+    // problem rather than a missing setting — say so, since the fix differs.
+    const botUsername = await this.telegram.getBotUsername();
     if (!botUsername) {
       validationError(
-        "Telegram is not configured on this server. Set TELEGRAM_BOT_USERNAME."
+        "Could not reach Telegram just now. Try again in a moment."
       );
     }
 
