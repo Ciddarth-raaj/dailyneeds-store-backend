@@ -34,7 +34,7 @@ pushed to `main-autodeploy`; nothing was deployed.
 | C1 | Telegram reset wrote SHA-1 | now scrypt via `setModernPassword` + `clearMustChange`; no `updatePassword`/SHA-1 in the reset path |
 | C2 | system-account exclusion was accidental | explicit SQL predicate + `isResettableAccount` + `rejectSystemAccounts` on `/telegram-link`; five named tests + HTTP-level tests |
 | C3 | 6-char minimum, no identity checks | shared `utils/password_policy` first; `PASSWORD_POLICY` with reason, code kept, retry allowed |
-| C4 | committed token fallback + per-minute poller | env-only token; poller no-ops when unconfigured; re-entrancy guard; **rotation is urgent and standalone** |
+| C4 | committed token fallback + per-minute poller | env-only token; poller no-ops when unconfigured; re-entrancy guard. **Production moved to a new bot on 06-09-2026 (readiness §0.6.1); old token still valid, not revocable by us** |
 
 **Ledger consequence.** Gates 1, 2, 3, 7, 11, 20, 21, 22, 24 re-earned on
 the merged tree (evidence in the rows). Gate 23 stays yours. Gate 5's
@@ -86,7 +86,7 @@ Status carried over from the readiness report, then corrected for §0. Every row
 | 3 | Stage-0A-only branch diff | PASS *(post-merge)* | Claude / `git diff` | 06-09-2026 | Backend 65 files vs `origin/main-autodeploy` (45 A, 20 M), frontend 9: all Stage 0A, merge resolution of upstream files, or the 4 accepted docs-only files. Zero payroll/attendance/shift/Digisme/`employee_id` changes (readiness §0.14). |
 | 4 | Deployment trigger fully mapped (webhooks, runners, server hooks) | WAITING FOR ADMIN | | | Both workflows mapped (readiness §3). GitHub Settings → Webhooks / Runners and the host's `.git/hooks` are yours to confirm. |
 | 5 | End-to-end restore rehearsal, snapshot ≤24 h | NOT YET VERIFIED | | | Snapshot must post-date the upstream migration (already applied in production) so the rehearsal schema includes `telegram_links`, `telegram_link_tokens`, `password_reset_codes`. Unchanged by the merge. |
-| 6 | Telegram token rotated, new token live, normal alert received | **WAITING FOR ADMIN — URGENT, do not wait for Deployment A** | | | Readiness §0.6: the current token can impersonate the bot, read all inbound messages and hijack updates → YES it can influence a reset. Production already reads `TELEGRAM_BOT_TOKEN`; rotate now per §3 Step 1. |
+| 6 | Telegram token rotated, new token live, normal alert received | **PARTIAL — WAITING FOR ADMIN (BotFather owner)** | Administrator (production) / Claude (record) | 06-09-2026 | Done: new bot `@DailyNeedsBot`, token in production `.env` (previous `.env` backed up), `pm2 reload 0` online, `getMe` ok, no webhook, pending updates 10→0, no 409, test message received in Dn Daily Sales, old bot webhook deleted and removed from all groups. **Not done and not possible by us: revocation of the old token** (`@dailyneeds_test_bot`, BotFather account not ours) — it remains cryptographically valid. Mitigation: the compiled fallback is removed on the branch (fail closed) and ships with Deployment A. Readiness §0.6.1. |
 | 7 | Break-glass route-level protection | PASS *(merged tree)* | Claude / automated tests | 06-09-2026 | `routes/user.protection.test.js` 14/14: route surface enumerated incl. the five upstream routes; forgot/reset-password against the break-glass username refused with the row unchanged; system session refused `403 EMPLOYEE_REQUIRED` on all `/telegram-link` methods; no `:id` form of either reset route. |
 | 8 | Frontend production build succeeds | PASS *(merged tree)* | Claude | 06-09-2026 | Rebuilt after the merge from a clean `node_modules` / `.next`: `npm ci --legacy-peer-deps` + `next build` (`--openssl-legacy-provider`) exit 0, "Compiled successfully", `/login` and `/setup-password` present, zero `user/login?username` in the bundle. |
 | 9 | Frontend + backend staging login (normal, failed, logout, navigation) | NOT YET VERIFIED | | | |
@@ -99,12 +99,12 @@ Status carried over from the readiness report, then corrected for §0. Every row
 | 16 | Absent-flag defaults reviewed and intentional | PASS | Claude / code audit | 06-09-2026 | commit `859e519`; implementation doc §20b |
 | 17A | External JWT key loading proven **in staging** using the CURRENT key | NOT YET VERIFIED | | | Mechanism proven in tests via env-pointed files. Production equivalent is P3. |
 | 18A | Break-glass login verified **in staging** | NOT YET VERIFIED | | | Production equivalent is P1 |
-| 19A | Break-glass Telegram alert verified **in staging** | NOT YET VERIFIED | | | Depends on gate 6. Production equivalent is P2. |
+| 19A | Break-glass Telegram alert verified **in staging** | NOT YET VERIFIED | | | Now unblocked on the bot side (new bot live). Production equivalent is P2. |
 | 20 | All required tests green with named case mapping | PASS *(merged tree)* | Claude / `node --test` | 06-09-2026 | `IS_TEST=true node --test`: **407 tests / 406 pass / 0 fail / 1 skip** (the skip is the unrelated `priceCheckerConflicts` golden test). New: `usecase/passwordReset.stage0a.test.js` 27, adapted upstream `usecase/passwordReset.test.js` 19, `routes/user.protection.test.js` +5. Mapping in readiness §0.4–0.8, §0.12. |
 | 21 | Frontend reproducible build — `npm ci` outcome understood | **PASS** | Claude | 06-09-2026 | **Cause:** `formik-error-focus@1.1.0` declares peer `formik@^1`; project has `formik@2.4.9` (root `^2.2.9`). A stale peer range on a package unrelated to the auth pages. **Fix, reproducible from the lockfile:** `npm ci --legacy-peer-deps` → exit 0, 1008 packages, **`package-lock.json` unchanged** (re-verified after the merge against both parents). The workflow's `npm install --force` also resolves it but may rewrite the lockfile; prefer `npm ci --legacy-peer-deps` in the workflow when it is next touched. No dependency upgrade performed. Bundle sends credentials in the POST body (gate 8 evidence). |
 | 22 | Migration plan reviewed; all migrations proven additive and idempotent | **PASS (post-merge)** | Claude / `node --test` | 06-09-2026 | `migrations/auth_stage0a_migrations.test.js` (7 cases): the `user` migration is exactly one `ALTER TABLE` with only `ADD COLUMN` / `ADD INDEX` / the widening `MODIFY password NULL`, every column NULL-or-DEFAULT, no `new_employee`; both `CREATE TABLE`s are `IF NOT EXISTS`; all three inserts `WHERE NOT EXISTS`; no standalone `CREATE INDEX`; every down restores exactly; Stage 0A timestamps sort after the upstream `20260906070000` migration. **Upstream migration reviewed too:** three `CREATE TABLE IF NOT EXISTS`, additive, already applied in production — it must be *present on the branch* after the merge so `db-migrate` on the night sees it as applied, not pending. |
 | 23 | Legacy token shape personally confirmed — decoded **locally** | NOT YET VERIFIED | | | Yours. Re-read from the NEW baseline `9d92884`: `id` + `employee_id` + `store_id` + `designation_id` + `user_type`, no `sub`, no `auth_ver`, no `kid` (readiness §0.10). The personal decode is the gate. |
-| 24 | Telegram dependency inventory complete; every live consumer accepts a new token **without unreleased Stage 0A code** | **PASS** (re-checked post-merge) | Claude / deployed-source audit | 06-09-2026 | See §3 Step 1a/1b below. On the merged branch every consumer, the poller included, still goes through the single env-configured client; the poller is a logged no-op when the variable is absent. |
+| 24 | Telegram dependency inventory complete; every live consumer accepts a new token **without unreleased Stage 0A code** | **PASS — confirmed in production** (deployed code took the `.env` token with no code change) | Claude / deployed-source audit | 06-09-2026 | See §3 Step 1a/1b below. On the merged branch every consumer, the poller included, still goes through the single env-configured client; the poller is a logged no-op when the variable is absent. |
 
 ---
 
@@ -114,55 +114,27 @@ Cheap checks before expensive ones. Each step lists what to record.
 
 **Step 0 — §0 resolved.** The branch is merged with production and green; proceed.
 
-**Step 1 — Telegram: check first, revoke second.** Gates 24, 6.
+**Step 1 — Telegram.** Gates 24, 6. **Done in production on 06-09-2026, with
+one residual** — full record in readiness §0.6.1. Outcome: production runs
+on a new bot (`@DailyNeedsBot`) from `.env`; sending and `getUpdates`
+verified; the old bot (`@dailyneeds_test_bot`) has no webhook and is in no
+group, but its token **cannot be revoked by us** (BotFather account not
+ours) and therefore stays valid. Residual actions: obtain BotFather control
+of the old bot and `/revoke` it (owner task, no date); tell staff the old
+bot is retired; retire or re-point `PURCHASE_TELEGRAM_CHAT_ID` (purchase
+notifications now fail by decision). Deployment A removes the compiled
+literal from the running code.
 
-**1a — answered from the deployed source (`origin/main-autodeploy`, commit `9d92884`):**
-the currently deployed production backend **does** read the token from the
-environment: `services/telegram.js` line 10–12 is
-`process.env.TELEGRAM_BOT_TOKEN || "<compiled literal>"`, and
-`.env-sample` documents `TELEGRAM_BOT_TOKEN`. **No hotfix is required.**
-Setting `TELEGRAM_BOT_TOKEN` in the server's `.env` and reloading moves
-production onto the new token *before* the old one is revoked; the
-compiled literal is then dead.
-
-**1b — inventory (gate 24), from the deployed source.** Every consumer goes
-through the single `services/telegram.js` client, so one environment
-variable covers all of them:
-
-| Consumer (deployed) | What it sends |
-| --- | --- |
-| `server.js` (alerts, cron failures, **the new per-minute `telegram_link_poll` → `getUpdates`**) | operational alerts; polls the bot for `/start` messages |
-| `usecase/accounts.js` | accounts-sheet notifications |
-| `usecase/debit_note.js` | debit-note notifications |
-| `usecase/offers_v3.js` | offers / talker checks |
-| `usecase/purchase.js`, `usecase/purchase_order.js` | purchase notifications |
-| `usecase/stock_checker.js` | stock-checker alerts |
-| `usecase/ticket.js` | ticket notifications |
-| `usecase/passwordReset.js` (**new upstream**) | reset codes to linked chats; `getMe` for the bot username |
-
-No consumer holds its own copy of the token. No consumer calls
-`api.telegram.org` directly. **The poller matters:** after revocation, an
-un-rotated process would fail `getUpdates` every minute and the Telegram
-password-reset feature would silently stop delivering codes — a second
-reason the env var goes in *before* the revoke.
-
-**Rotation order:** set `TELEGRAM_BOT_TOKEN=<new>` in `.env` (600) → `pm2
-reload 0` → confirm a normal notification arrives on the new token → confirm
-the poller is healthy (a `/start` link completes) → **then** `/revoke` the old
-token in BotFather → record the time as the revocation confirmation.
-Record: 1a required no hotfix; the table above; revocation time; new token in
-env (never in source); a normal notification received.
-
-**Step 2 — Backup and restore rehearsal.** Gate 5.
-Snapshot ≤24 h old **and taken after the upstream migration ran** (it is in
-production already; confirm `SELECT name FROM migrations ORDER BY run_on DESC
-LIMIT 1` shows `20260906070000-telegram-password-reset` or later). Restore
-into an isolated non-production database. Connect a test client where
-practical. Script: `scripts/auth/backup-user-tables.sh`; procedure and
-recording template: readiness §5.
-Record: snapshot timestamp, backup method, restore command, **restore
-duration**, validation queries, schema version, whether auth tables are
-readable, any manual steps.
+**Step 2 — Backup and restore rehearsal.** Gate 5. **← NEXT.**
+No database backup is known to exist (readiness §5.1): one must be taken
+with `scripts/auth/backup-user-tables.sh`, timestamped, and restored into
+an isolated schema `dnds_rehearsal` on the same MySQL host (or a throwaway
+instance if disk is short). The exact procedure, the evidence table and
+the administrator actions are in **readiness §5.2–5.5**. The restore must
+also carry the Stage 0A `db-migrate up`/`down` dry run, which is what
+turns gate 22 from "plan" into "proven on real data". Snapshot must
+post-date `20260906070000-telegram-password-reset`.
+Record: readiness §5.4 in full.
 
 **Step 3 — Scans on the restored copy only.** Gates 13, 14.
 `scripts/auth/default-password-scan.sql`, `scripts/auth/account-integrity-audit.sql`.
@@ -296,8 +268,10 @@ The rule is roll back first, investigate afterwards.
 | Task | Owner | Due | Done |
 |---|---|---|---|
 | ~~Resolve §0: merge `main-autodeploy` into the feature branch, apply C1–C4, re-run tests, re-diff~~ | Claude | before any other step | 06-09-2026 |
-| **Rotate the Telegram bot token (§3 Step 1) — standalone, before anything else** | | now | |
-| Decide the two-reset-systems reconciliation (readiness §0.7 proposal) | | before any employee-facing workflow is replaced | |
+| ~~Rotate the Telegram bot token (§3 Step 1)~~ moved production to a new bot | Administrator | now | 06-09-2026 (partial: old token not revoked) |
+| Obtain BotFather control of `@dailyneeds_test_bot` and `/revoke` (or delete) it | Owner | as soon as possible; not a Deployment A blocker | |
+| ~~Decide the two-reset-systems reconciliation~~ | Owner | | 06-09-2026 — both kept, one engine (readiness §0.7) |
+| Gate 5: take a timestamped backup and run the isolated restore rehearsal (readiness §5) | Administrator | next | |
 | Disable the seeded weak admin account | | Deployment date `______`, and only after **all four**: P1 PASS, P2 PASS, normal owner/admin login PASS, rollback access confirmed | |
 | Remove query-string login fallback (own GO/NO-GO) | | After 2 full operating days at zero query-string logins, including a shift changeover | |
 | Retire legacy-token resolution + enable `JWT_REQUIRE_KID` | | 36 h after Deployment A, separate change | |
@@ -315,6 +289,7 @@ The seeded admin is the largest live exposure right now: `user_type 2` with a kn
 | 06-09-2026 | `main-autodeploy` (both repos) moved: Telegram password-reset feature deployed to production, incl. migration `20260906070000`. Feature branch conflicts in 6 backend + 1 frontend files. | 3 now; 1, 2, 5, 7, 11, 20, 22 on merge | |
 | 06-09-2026 | Gate 21 investigated: `formik-error-focus` peer range; `npm ci --legacy-peer-deps` reproducible, lockfile unchanged | — (21 → PASS) | |
 | 06-09-2026 | Gate 22 proof added as `migrations/auth_stage0a_migrations.test.js`; upstream migration reviewed | — (22 plan → PASS) | |
+| 06-09-2026 | Production Telegram moved to new bot `@DailyNeedsBot` via `.env`; old bot webhook deleted, removed from groups; old token NOT revoked (BotFather not ours). Owner decision on reset architecture recorded. | 6 → PARTIAL; 24 confirmed; 19A unblocked | 06-09-2026 |
 | 06-09-2026 | **Merged `origin/main-autodeploy` into the feature branch (both repos)**; C1–C4 applied; `passwordReset.stage0a.test.js` added; protection suite extended; frontend rebuilt | 1, 2, 3, 7, 8, 11, 20, 21, 22, 24 re-evaluated → PASS; 23 stays yours; 6 marked URGENT | 06-09-2026 |
 
 ---

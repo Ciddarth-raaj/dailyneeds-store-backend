@@ -29,9 +29,11 @@ the table in §1 is the state at the merge commit.
 Deployment A stays **NO-GO** for the same reason as before: the gates that
 need production access, a restored snapshot, staging, the nginx
 configuration, BotFather or your personal confirmation (4, 5, 6, 9, 10,
-12–14, 17–19, 23) are still open. **One item in §0.6 is urgent and
-independent of Deployment A:** the Telegram bot token. Rotation can and
-should proceed now using production's existing environment support.
+12–14, 17–19, 23) are still open. **Update 06-09-2026 (later):** the Telegram move is done in production
+(§0.6.1) — new bot, `.env` token, old webhook gone — but the old token
+remains valid because its BotFather account is not ours; gate 6 is
+PARTIAL. The reset-architecture decision is recorded in §0.7. Next gate
+to work: **5** (backup + isolated restore rehearsal), prepared in §5.
 
 ---
 
@@ -210,6 +212,48 @@ is configured (`{ code: 503, skipped: "not_configured" }`) instead of
 sixty thrown errors an hour. Tests: "C4" in
 `passwordReset.stage0a.test.js`.
 
+#### 0.6.1 Production outcome (06-09-2026, performed by the administrator, recorded here)
+
+Facts as reported after the manual production work; nothing below was done
+from this environment.
+
+| # | Fact |
+| --- | --- |
+| 1 | Production `.env` and the PM2 environment had **no** `TELEGRAM_BOT_TOKEN`; the deployed backend was running on the **compiled fallback token**. |
+| 2 | Old bot: `@dailyneeds_test_bot`. It had an active webhook at `https://bot.dnds.co.in/src/core/bot.php` (Hostinger, `46.17.172.95`), so production's `getUpdates` poller had been failing with 409 and `/start` link messages were going to the PHP application. |
+| 3 | A **new bot** was created: `@DailyNeedsBot`. Token validated with `getMe`; `getWebhookInfo` shows no webhook. |
+| 4 | New bot added to the live groups: DN Accounts, Dn Daily Sales, Dn Stock Check, Dn Offer. **Purchase Notification is intentionally not used** — `PURCHASE_TELEGRAM_CHAT_ID` in `constants/telegram.js` therefore points at a group the new bot is not in; purchase / purchase-order notifications will fail with a logged `SERVICE.TELEGRAM.SEND-MESSAGE` error until that constant is retired or the bot is added. Accepted, not a Stage 0A change. |
+| 5 | The new token was written to the production Lightsail backend `.env` (previous `.env` backed up first); `pm2 reload 0` succeeded and the process stayed online. |
+| 6 | `getUpdates` polling confirmed on the new bot: no webhook, pending updates 10 → 0, no 409 after the switch. |
+| 7 | A test message through the production `.env` token was received in Dn Daily Sales from the new bot. |
+| 8 | Old bot: webhook **deleted**, bot removed from every Daily Needs group, final `getWebhookInfo` = none. |
+| 9 | **The old bot's BotFather account is not under our control.** The old token has **not** been revoked and the old bot has not been deleted. |
+
+**Security consequence — recorded precisely.** The old token is *still
+cryptographically valid*. It no longer reaches any of our groups and has no
+webhook, but whoever holds it can still call the Bot API as
+`@dailyneeds_test_bot` (including `sendMessage` to any chat id it once saw,
+and `getUpdates` for anyone who still messages that bot). Two things
+follow:
+
+1. Stage 0A **must** ship with the compiled fallback removed and the
+   service failing closed when `TELEGRAM_BOT_TOKEN` is absent — which the
+   merged branch does (`services/telegram.js`: `BOT_TOKEN =
+   process.env.TELEGRAM_BOT_TOKEN || null`, no literal, every call rejects
+   with `NOT_CONFIGURED`, poller no-ops). Until Stage 0A deploys, the
+   deployed source still *contains* the old literal; it is inert only
+   because the `.env` value now takes precedence.
+2. Gate 6 is **not** "token revoked". It is "production moved to a new bot;
+   old token still valid, revocation blocked on BotFather ownership".
+
+Outstanding on the old bot, for whoever gains BotFather access: `/revoke`
+(or `/deletebot`). Until then, employees who still have a chat with
+`@dailyneeds_test_bot` should be told it is retired.
+
+**Not yet verified with the new bot:** employee `/start` linking end to end,
+and a full forgot-password → code → reset cycle. Deferred to staging /
+production verification (gates 9, 10, 19A).
+
 ### 0.7 Two reset systems — reconciliation PROPOSAL (not decided, not implemented)
 
 The merged branch carries two mechanisms:
@@ -221,16 +265,22 @@ The merged branch carries two mechanisms:
 | Redeem | `POST /user/setup-password` | `POST /user/reset-password` |
 | Now shared (this merge) | policy, scrypt, `setModernPassword`, audit, system-account exclusion | same |
 
-**Recommendation (for your decision):** keep both, with distinct roles.
-Telegram self-service remains the *employee-facing* path (it is live, it
-needs no admin, and the linking step from a signed-in session is a real
-possession proof). The admin-issued token remains the *provisioning and
-fallback* path: first login for a new account, an employee with no
-Telegram link, a lost phone, and every break-glass / admin-driven case. A
-single "which do I use" rule in the UI: *Forgot password → Telegram if
-linked, otherwise "ask your manager for a setup link"*. No employee-facing
-workflow is replaced by this merge. **STOP point:** replacing or removing
-either workflow is a product decision and has not been made here.
+**Owner decision (06-09-2026) — recorded:**
+
+- **Keep Telegram self-service reset** for employees.
+- **Keep admin-issued secure reset / setup** as the fallback when Telegram
+  is unavailable, changed, lost, or incorrectly mapped.
+- **Both entry points must use the same Stage 0A password engine**: the
+  shared policy (`utils/password_policy.js`), modern hashing
+  (`services/password.js`, scrypt, via `setModernPassword`), expiry and
+  single-use rules on their proof (setup token / reset code), audit in
+  `user_auth_log`, and explicit system-account exclusion.
+
+State on the merged branch: already true for policy, hashing, audit and
+system-account exclusion (C1–C3). Expiry and single-use are enforced per
+mechanism in their own tables (`user_password_reset` for setup tokens;
+`password_reset_codes` for Telegram codes). No employee-facing workflow is
+replaced.
 
 ### 0.8 Outstanding reset codes across Deployment A
 
@@ -342,7 +392,7 @@ Frontend: 9 files, all Stage 0A (`helper/login.js`, `helper/user.js`,
 | 3 | Stage-0A-only branch diff | **PASS** (re-diffed after the merge, §0.14) | Backend: 65 files vs `origin/main-autodeploy`; **zero** payroll/HR/attendance/shift/Digisme *code*. The four documentation-only files (`docs/hr-schema.md`, `docs/payroll-target-architecture.md`, `docs/payroll-integration-proposal.md`, `docs/authentication-decoupling-audit.md`) remain the accepted exception. Frontend: 9 files, all Stage 0A. |
 | 4 | Deployment workflow / failure semantics reviewed | **WAITING FOR ADMINISTRATOR** | The GitHub Actions workflows in both repositories are fully analysed (§3). Not verifiable from a checkout: whether anything *outside* the repositories also reacts to `main-autodeploy` (GitHub repository webhooks, self-hosted runners, a second CI). Absence in the checkout is not evidence. **Plus a separate HARD GATE**: a migration failure leaves the old process running on a partially migrated schema; a later manual `pm2 reload` would start new code against it. Safer sequence proposed in §3.4 — must be adopted before GO. |
 | 5 | End-to-end restore rehearsal, recent snapshot | **NOT YET TESTED** | No database exists in this environment (no MySQL, no Docker daemon). Runbook and recording template in §5. |
-| 6 | Telegram token rotated | **WAITING FOR ADMINISTRATOR** | Code side done: the committed token is **removed from source**; `services/telegram.js` reads `TELEGRAM_BOT_TOKEN` only and disables itself with a logged error when absent. Revocation via BotFather, the new token in `.env`, a normal-notification receipt and the break-glass alert test are administrator actions (§6). |
+| 6 | Telegram token rotated | **PARTIAL — WAITING FOR ADMINISTRATOR (BotFather owner)** | §0.6.1: production moved to a **new bot** (`@DailyNeedsBot`) via `.env` on 06-09-2026; sending and polling verified; old bot stripped of webhook and groups. **Old token NOT revoked** (BotFather account not under our control) — it remains cryptographically valid. Compiled fallback removal (fail closed) is on the branch and ships with Deployment A. Break-glass alert on the new bot still untested (gate 19). |
 | 7 | Break-glass route-level protection | **PASS** (re-earned post-merge; now covers `forgot-password`, `reset-password`, `telegram-link`) | `routes/user.protection.test.js`: real Express, real auth + permissions middleware, authenticated as a normal `user_type 2` admin; every existing mutation refused with `403 SYSTEM_ACCOUNT`; every mutation the brief lists that does not exist proven to have no route; router surface enumerated exactly; system row byte-for-byte unchanged. |
 | 8 | Frontend production build | **PASS** | `npm install --force` (as the workflow does) then `next build` with `--openssl-legacy-provider`: exit 0, "Compiled successfully", 153 pages, `/login`, `/change-password`, `/setup-password` present. Warnings: pre-existing `moment` deprecation notices during static generation, none from the auth pages. Built bundle: **zero** occurrences of `user/login?username`; `post("/user/login",{username,password})` present. |
 | 9 | Frontend/backend staging login | **NOT YET TESTED** | No staging backend with a database can run here. HTTP-level equivalents pass (`routes/user.login.test.js`, in-memory repository), which is not the same thing. |
@@ -579,36 +629,126 @@ browser — gate 10 stays NOT YET TESTED for that reason.
 
 ## 5. Restore rehearsal runbook and recording template (gate 5)
 
-Run on the database host. Do not run the scan on production (item 9).
+### 5.1 What backup exists today (as far as this environment can tell)
+
+| Item | Finding |
+| --- | --- |
+| Database backups in either repository | **None.** No `mysqldump`, cron, snapshot job or workflow step exists; `scripts/auth/backup-user-tables.sh` is a *tool*, it has never been run for real. |
+| Backups outside the repositories | **Unknown from here**: Lightsail instance / disk snapshots (manual or automatic), an RDS automated backup if the database is on RDS, or a hand-made dump on the server. Only the administrator can see these. |
+| The `.env` backup made on 06-09-2026 | Exists (administrator). It is a **configuration** backup, not a database backup; it does not satisfy gate 5. |
+| Where MySQL runs | Not determinable from the checkout — the connection host lives in the git-ignored config and `migrations/mysql/database.json` (`sample.database.json` shows `localhost`, which suggests MySQL on the Lightsail box itself, unconfirmed). |
+
+**Conclusion:** there is currently **no backup known to be suitable** for
+the rehearsal. One must be *taken*, with a recorded timestamp, as step 1
+below. A pre-existing Lightsail snapshot, if one exists, is useful as a
+second safety net for deployment night but is not the rehearsal artefact:
+the rehearsal must prove a *logical* restore into an isolated schema that
+the application can be pointed at.
+
+**Suitability rules:** taken with `--single-transaction` (consistent, no
+locks on InnoDB); ≤ 24 h old at deployment time (else re-take); taken
+*after* migration `20260906070000-telegram-password-reset` (already in
+production — verify with the `migrations` query below); `gzip -t` passes
+and the dump ends with `Dump completed`.
+
+### 5.2 Where the isolated restore runs
+
+**Recommended: on the same MySQL server, into a separate schema
+`dnds_rehearsal`**, never into the live schema. Reasons: the dump never
+leaves the host (no PII in transit), the same MySQL version guarantees the
+schema restores identically, and the "connect the old code to it" step
+only needs a scratch config pointing at another database name on
+`localhost`. Precondition: free disk ≥ 2.5 × the uncompressed dump size,
+checked with `df -h` first — restoring on a full disk is the one way this
+rehearsal can hurt production. If the disk is tight, restore instead onto
+a temporary Lightsail instance created from a snapshot (isolated by
+construction), and delete it afterwards.
+
+Never: restore over the production schema; run the gate 13/14 scans
+against the production schema; copy the dump off the server to a laptop.
+
+### 5.3 Procedure (nothing here has been run)
 
 ```bash
-# 1. snapshot (record the timestamp)
-scripts/auth/backup-user-tables.sh <db> ~/db-backups        # auth tables + full dump, verified
-# 2. isolated restore
-mysql -e 'CREATE DATABASE dnds_rehearsal'
-time zcat ~/db-backups/<db>-full-<stamp>.sql.gz | mysql dnds_rehearsal
-# 3. validation
-mysql dnds_rehearsal -e "SELECT VERSION(); SELECT COUNT(*) FROM \`user\`; SELECT COUNT(*) FROM new_employee;
-  SELECT COUNT(*) FROM \`user\` WHERE password IS NOT NULL; SHOW CREATE TABLE \`user\`\\G"
-mysql dnds_rehearsal -e "SELECT * FROM migrations ORDER BY run_on DESC LIMIT 3"   # restored schema version
-# 4. connect a client: point a scratch config.json at dnds_rehearsal and start the OLD code on another port;
-#    sign in as a test employee. Then run gates 13 and 14 against dnds_rehearsal, retain only IDs + categories.
-# 5. tear down
-mysql -e 'DROP DATABASE dnds_rehearsal'
+# 0. preconditions — record each
+df -h /                                            # free space vs dump size
+mysql -N -e "SELECT VERSION()"                     # server version
+mysql -N <db> -e "SELECT name, run_on FROM migrations ORDER BY run_on DESC LIMIT 3"   # must include 20260906070000-telegram-password-reset
+
+# 1. backup (auth tables + full dump, verified, timestamped)  — record STAMP and the printed row counts
+scripts/auth/backup-user-tables.sh <db> ~/db-backups
+ls -l ~/db-backups/                                # sizes; files are 600, dir 700
+
+# 2. isolated restore — record wall-clock duration
+mysql -e "CREATE DATABASE dnds_rehearsal CHARACTER SET utf8mb4"
+time (zcat ~/db-backups/<db>-full-<STAMP>.sql.gz | mysql dnds_rehearsal)
+
+# 3. validation — record every result
+mysql dnds_rehearsal -N -e "SELECT COUNT(*) FROM \`user\`; SELECT COUNT(*) FROM new_employee; SELECT COUNT(*) FROM permissions"   # must equal step-1 counts
+mysql dnds_rehearsal -N -e "SELECT COUNT(*) FROM \`user\` WHERE password IS NOT NULL"     # readable auth data
+mysql dnds_rehearsal -e "SHOW CREATE TABLE \`user\`\\G"                                  # pre-Stage-0A shape (no password_hash yet)
+mysql dnds_rehearsal -N -e "SELECT name FROM migrations ORDER BY run_on DESC LIMIT 1"     # restored schema version
+mysql dnds_rehearsal -N -e "SHOW TABLES LIKE 'telegram_%'; SHOW TABLES LIKE 'password_reset_codes'"  # upstream tables present
+mysql dnds_rehearsal -N -e "SELECT COUNT(*) FROM \`user\` u LEFT JOIN new_employee ne ON ne.employee_id = u.employee_id WHERE ne.employee_id IS NULL"  # orphan logins (integrity preview)
+
+# 4. application connect (proves the dump is usable, not just loadable)
+#    copy the production config to a scratch file, change ONLY the database name to dnds_rehearsal and the port to a free one,
+#    start the CURRENTLY DEPLOYED code against it on that port (plain `node`, not pm2), sign in as a test employee via curl,
+#    stop it. Do not start Stage 0A code here yet — that is gate 22's dry run, separate.
+
+# 5. Stage 0A migration dry run on the rehearsal copy (gate 22 evidence, still no production change)
+#    point a scratch migrations/mysql/database.json at dnds_rehearsal; from the feature-branch checkout:
+#    db-migrate up   → expect exactly the four 20260906120000..120300 migrations to run
+#    db-migrate down (x4) → expect clean reversal; re-run the step-3 counts
+#    (this step is where gate 22 stops being "plan" and becomes "proven on real data")
+
+# 6. gates 13 and 14 — against dnds_rehearsal only; keep IDs + categories, destroy output afterwards
+# 7. tear down
+mysql -e "DROP DATABASE dnds_rehearsal"
+#    keep the dump files (600) until Deployment A + 7 days; then shred
 ```
 
-Record: snapshot timestamp · age at rehearsal (≤ 24 h, else why and
-confirmation no auth/schema migration ran since) · backup method
-(`mysqldump --single-transaction`) · restore process · restore duration ·
-validation queries and results · restored schema version (last row of
-`migrations`) · whether `user.password` and the joined `new_employee` data
-were readable · any manual intervention.
+### 5.4 Evidence to record (gate 5 template)
+
+| Field | Value |
+| --- | --- |
+| Backup timestamp (`STAMP`) and age at rehearsal | |
+| Backup method and flags (`mysqldump --single-transaction --quick --routines --triggers --events`) | |
+| Dump sizes (auth / full, compressed) and `gzip -t` result | |
+| Row counts at backup (`user`, `new_employee`, `permissions`) | |
+| Where restored (host, schema) and free disk before/after | |
+| Restore wall-clock duration | |
+| Row counts after restore (must match) | |
+| Restored schema version (last `migrations` row) — must be `20260906070000-…` or later | |
+| `user.password` readable; `new_employee` join readable | |
+| Application connected to the restored copy and a login succeeded (old code) | |
+| Stage 0A `db-migrate up` / `down` on the copy: which migrations ran, duration, errors | |
+| Any manual intervention | |
+| Tear-down time; where dump files are kept and when they are destroyed | |
+| Verified by / date | |
+
+### 5.5 Administrator actions required
+
+All of it — this environment has no database and no server access.
+Specifically: (a) confirm where MySQL runs and whether any Lightsail or
+RDS snapshot already exists (record it, do not rely on it); (b) confirm
+free disk on the database host; (c) run §5.3 steps 0–3 and record §5.4;
+(d) step 4 needs the production config copied to a scratch file — never
+edit the live one; (e) step 5 needs the feature branch checked out
+somewhere on the host *outside* `~/dailyneeds-store-backend` (which is the
+auto-deploy clone), e.g. `~/stage0a-rehearsal/`, pointed at
+`dnds_rehearsal` only.
 
 ---
 
 ## 6. Telegram rotation procedure (gate 6)
 
-In this order, none of it done here:
+> **Superseded 06-09-2026** by what was actually done — see §0.6.1. The
+> old token could not be revoked (step 1 below) because the BotFather
+> account is not ours; production was moved to a new bot instead. Steps
+> 2–4 are done; 5–6 remain (gates 18, 19).
+
+Original plan, in this order:
 
 1. In BotFather: `/revoke` the existing bot token (this invalidates the value
    that was in git history). Record the time — that is the revocation
