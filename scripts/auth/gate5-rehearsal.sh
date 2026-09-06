@@ -101,10 +101,19 @@ if [ ! -r "$MANIFEST" ]; then
   echo "  full dump: $R_CT CREATE TABLE statements = $LIVE_CT live base tables; no USE/CREATE DATABASE"
   # 5. counts file: well-formed, and its table set equals the live base-table set
   [ -s "$COUNTS" ] || { echo "FAIL: counts file is empty" >&2; exit 1; }
-  BAD="$(grep -cvE $'^[A-Za-z0-9_$]+\t[0-9]+$' "$COUNTS" || true)"
-  [ "$BAD" = "0" ] || { echo "FAIL: counts file has $BAD malformed line(s)" >&2; exit 1; }
+  # Structural checks only. Table names are NOT matched against an identifier
+  # regex: production has names such as `purchase-2024-2025`, and any name
+  # MySQL accepts as a quoted identifier is legitimate here. The authoritative
+  # safety check is exact set equality with the live schema, below.
+  CV="$(awk -F'\t' '
+    NF != 2                { bad++; printf "  line %d: expected 2 tab-separated fields, got %d\n", NR, NF; next }
+    $1 == ""               { bad++; printf "  line %d: empty table name\n", NR; next }
+    $2 !~ /^[0-9]+$/       { bad++; printf "  line %d: count is not an unsigned integer\n", NR; next }
+    ($1 in seen)           { bad++; printf "  line %d: duplicate table name\n", NR; next }
+    { seen[$1] = 1 }
+    END { if (bad) exit 1 }' "$COUNTS")" || { echo "FAIL: counts file is malformed:" >&2; echo "$CV" >&2; exit 1; }
   DIFF="$(diff <(cut -f1 "$COUNTS" | sort) <(Q "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA='$LIVE_DB' AND TABLE_TYPE='BASE TABLE'" | sort) || true)"
-  [ -z "$DIFF" ] || { echo "FAIL: counts file table set differs from live base tables:" >&2; echo "$DIFF" >&2; exit 1; }
+  [ -z "$DIFF" ] || { echo "FAIL: counts file table set differs from live base tables (< only in file, > only live):" >&2; echo "$DIFF" >&2; exit 1; }
   echo "  counts file: $(wc -l < "$COUNTS") tables, well-formed, same table set as live $LIVE_DB"
   # 6. SHA-256 — computed now and recorded; from here on every later stage checks against these
   R_MTIME="$(date -r "$FULL" '+%Y-%m-%d %H:%M:%S')"

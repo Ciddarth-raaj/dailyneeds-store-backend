@@ -137,12 +137,19 @@ COUNTS="$OUT/${DB}-counts-${STAMP}.tsv"
 if [ "${COUNT_ALL_TABLES:-1}" = "1" ]; then
   TABLES="$(Q "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA='$DB' AND TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME")"
 else
-  TABLES="user new_employee permissions all_permissions designation outlets migrations"
+  TABLES="$(printf '%s\n' user new_employee permissions all_permissions designation outlets migrations)"
 fi
 echo "== exact row counts -> $COUNTS =="
-for t in $TABLES; do
-  printf '%s\t%s\n' "$t" "$(Q "SELECT COUNT(*) FROM \`$DB\`.\`$t\`")" >> "$COUNTS"
-done
+# One table per LINE, never word-split: production names contain '-' and may
+# contain spaces; the name is always backtick-quoted in SQL. A count that is
+# not an unsigned integer (query error) fails the backup here, not later.
+while IFS= read -r t; do
+  [ -n "$t" ] || continue
+  case "$t" in *\`*) fail "table name contains a backtick: $t";; esac
+  n="$(Q "SELECT COUNT(*) FROM \`$DB\`.\`$t\`")" || fail "COUNT(*) failed for table $t"
+  case "$n" in ''|*[!0-9]*) fail "COUNT(*) for table $t returned '$n'";; esac
+  printf '%s\t%s\n' "$t" "$n" >> "$COUNTS"
+done <<< "$TABLES"
 grep -E $'^(user|new_employee|permissions|migrations)\t' "$COUNTS"
 
 # ---- 2. dumps -----------------------------------------------------------------
