@@ -1,4 +1,5 @@
 const router = require("express").Router();
+const { requireEmployee, employeeIdOrNull } = require("../utils/actor");
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
 
@@ -346,7 +347,7 @@ class EmployeeRoutes {
         const schema = {
           employee_id: Joi.number().required(),
         };
-        const employee_id = req.decoded.employee_id;
+        const employee_id = requireEmployee(req, "Fetching the signed-in employee");
         const isValid = Joi.validate({ employee_id }, schema);
         if (isValid.error !== null) {
           throw isValid.error;
@@ -355,11 +356,16 @@ class EmployeeRoutes {
         const data = await this.employeeUsecase.getEmployeeById(employee_id);
         res.json(data);
       } catch (err) {
-        console.log(err);
-        if (err.name === "ValidationError") {
-          res.json({ code: 422, msg: err.toString() });
+        if (err.name === "SystemAccountError") {
+          // A break-glass session has no employee record to fetch (A3).
+          res.status(403).json({ code: 403, error: err.code, msg: err.message });
         } else {
-          res.json({ code: 500, msg: "An error occurred !" });
+          console.log(err);
+          if (err.name === "ValidationError") {
+            res.json({ code: 422, msg: err.toString() });
+          } else {
+            res.json({ code: 500, msg: "An error occurred !" });
+          }
         }
       }
 

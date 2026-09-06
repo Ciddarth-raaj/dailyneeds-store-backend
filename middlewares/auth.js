@@ -1,4 +1,5 @@
 const jwt = require("../services/jwt");
+const authConfig = require("../config/auth");
 
 const unProtectedRoutes = {
   "/user": {
@@ -445,6 +446,8 @@ const unProtectedRoutes = {
 
   //user
   "/user/login": { methods: { post: true } },
+  // Stage 0A: redeeming a setup/reset token happens before any session exists.
+  "/user/setup-password": { methods: { post: true } },
   // "/tally/card-to-bank": { methods: { get: true } },
   // "/tally/sales-entry": { methods: { get: true } },
   // "/tally/expenses": { methods: { get: true } },
@@ -457,42 +460,143 @@ const unProtectedRoutes = {
   "/gofrugal-synker/table": { methods: { delete: true } },
 };
 
-async function auth(req, res, next) {
-  if (
-    unProtectedRoutes[req.path] &&
-    unProtectedRoutes[req.path]["methods"][req.method.toLowerCase()]
-  ) {
-    next();
-    return;
+/**
+ * Routes a token carrying `pwc` (must change password) may still reach.
+ * Everything else is refused with PASSWORD_CHANGE_REQUIRED until the
+ * password is changed (Deployment B, AUTH_ENFORCE_PASSWORD_CHANGE).
+ */
+const passwordChangeAllowed = {
+  "/user/change-password": { post: true },
+  "/user/logout": { post: true },
+  "/user/my-ip": { get: true },
+  "/employee/get-details": { get: true },
+  "/designation/permissions": { get: true },
+};
+
+const deny = (res, code, msg, extra = {}) => {
+  // Body-level codes with HTTP 200 is the convention util/api.js relies on
+  // for its redirect-to-login; kept for the 403 case, real status otherwise.
+  if (code === 403) {
+    res.json({ code: 403, msg, ...extra });
+  } else {
+    res.status(code).json({ code, msg, ...extra });
   }
-  try {
-    const token = req.headers["x-access-token"];
-    if (token === undefined) {
-      res.json({ code: 403, msg: "Access Denied" });
-      res.end();
+  res.end();
+};
+
+/**
+ * Build the auth middleware.
+ *
+ * `deps.userUsecase` enables the per-request session check (C4): a token
+ * issued before the account's token_valid_from is refused, and a disabled
+ * account's token stops working within the cache window rather than at
+ * expiry. Without deps the middleware behaves as it did before Stage 0A
+ * apart from the identity shape on `req.auth`.
+ */
+function create(deps = {}) {
+  const config = deps.config || authConfig;
+  const userUsecase = deps.userUsecase || null;
+  const cache = new Map();
+  const ttl = config.login.tokenValidFromCacheMs;
+
+  const loadSession = async (userId) => {
+    const hit = cache.get(userId);
+    if (hit && Date.now() - hit.at < ttl) return hit.state;
+    const state = await userUsecase.getSessionState(userId);
+    cache.set(userId, { state, at: Date.now() });
+    return state;
+  };
+
+  const invalidate = (userId) => {
+    if (userId === undefined) cache.clear();
+    else cache.delete(userId);
+  };
+
+  const middleware = async (req, res, next) => {
+    if (
+      unProtectedRoutes[req.path] &&
+      unProtectedRoutes[req.path]["methods"][req.method.toLowerCase()]
+    ) {
+      next();
       return;
-    } else {
-      const decoded = await jwt.verify(token);
-      req.decoded = {};
-      req.decoded.id = decoded.id;
-      req.decoded.store_id = decoded.store_id;
-      req.decoded.user_type = decoded.user_type;
-      req.decoded.designation_id = decoded.designation_id;
-      req.decoded.employee_id = decoded.employee_id;
-
-      // if (decoded.role !== "ADMIN") {
-      //   res.json({ code: 403, msg: "Access Denied" });
-      //   res.end();
-      //   return;
-      // }
     }
-  } catch (err) {
-    res.json({ code: 403, msg: "Access Denied" });
-    res.end();
-    return;
-  }
 
-  next();
+    const token = req.headers["x-access-token"];
+    if (token === undefined) return deny(res, 403, "Access Denied");
+
+    let decoded;
+    try {
+      decoded = await jwt.verify(token);
+    } catch (err) {
+      return deny(res, 403, "Access Denied");
+    }
+
+    // sub is the user-account key (Stage 0A); `id` is the same value on
+    // tokens issued before this release and is read as a fallback until
+    // those expire.
+    const userId = decoded.sub !== undefined ? Number(decoded.sub) : Number(decoded.id);
+    if (!Number.isFinite(userId)) return deny(res, 403, "Access Denied");
+
+    const isSystemAccount = decoded.sys === true;
+    const employeeId =
+      !isSystemAccount && decoded.employee_id !== undefined && decoded.employee_id !== null
+        ? Number(decoded.employee_id)
+        : null;
+
+    req.auth = Object.freeze({
+      userId,
+      employeeId,
+      userType: decoded.user_type,
+      designationId: decoded.designation_id === undefined ? null : decoded.designation_id,
+      storeId: decoded.store_id === undefined ? null : decoded.store_id,
+      isSystemAccount,
+      mustChangePassword: decoded.pwc === true,
+      issuedAt: decoded.iat,
+    });
+
+    // Backward-compatible shape. `employee_id` is null (never undefined,
+    // never a fake) for a system account.
+    req.decoded = {
+      id: userId,
+      store_id: req.auth.storeId,
+      user_type: decoded.user_type,
+      designation_id: req.auth.designationId,
+      employee_id: employeeId,
+      is_system_account: isSystemAccount,
+    };
+
+    if (userUsecase && config.login.tokenValidFromEnabled) {
+      try {
+        const state = await loadSession(userId);
+        if (!state || Number(state.status) !== 1) return deny(res, 403, "Access Denied");
+        if (state.token_valid_from) {
+          const validFrom = Math.floor(new Date(state.token_valid_from).getTime() / 1000);
+          if (typeof decoded.iat === "number" && decoded.iat < validFrom) {
+            return deny(res, 403, "Access Denied", { error: "TOKEN_REVOKED" });
+          }
+        }
+      } catch (err) {
+        // Failing closed: a session check that cannot run must not open the door.
+        return deny(res, 500, "An error occurred !");
+      }
+    }
+
+    if (req.auth.mustChangePassword && config.password.enforcePasswordChange) {
+      const allowed = passwordChangeAllowed[req.path];
+      if (!allowed || !allowed[req.method.toLowerCase()]) {
+        return deny(res, 403, "Password change required", { error: "PASSWORD_CHANGE_REQUIRED" });
+      }
+    }
+
+    next();
+  };
+
+  middleware.invalidate = invalidate;
+  return middleware;
 }
 
-module.exports = auth;
+const defaultMiddleware = create();
+
+module.exports = defaultMiddleware;
+module.exports.create = create;
+module.exports.unProtectedRoutes = unProtectedRoutes;

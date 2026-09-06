@@ -1,105 +1,103 @@
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
 const buildUserUsecase = require("./user");
+const F = require("../test_support/auth_fixtures");
 
-const makeRepos = (row, updates = []) => ({
-  userRepo: {
-    async login() {
-      return row === null ? [] : [row];
-    },
-    async getIpPolicy() {
-      return row;
-    },
-    async updateIpPolicy(userId, allowedIps, ipPolicy) {
-      updates.push({ userId, allowedIps, ipPolicy });
-    },
-    async getIpRestrictions() {
-      return [row];
-    },
-  },
-  employeeRepo: {
-    async getNameById() {
-      return [{ employee_name: "Test User", designation_name: "Cashier" }];
-    },
-  },
-});
+/**
+ * IP-gate and IP-policy tests, carried over from before Stage 0A and moved
+ * onto the new repository surface. The behaviour under test is unchanged:
+ * a correct password from the wrong network is refused, admins are exempt,
+ * custom lists union with the branch list.
+ */
+
+const PASSWORD = "p-1234567";
 
 const build = (row, updates = []) => {
-  const { userRepo, employeeRepo } = makeRepos(row, updates);
-  return buildUserUsecase(userRepo, null, employeeRepo);
+  const rows = row === null ? {} : { [row.username]: row };
+  const userRepo = F.fakeUserRepo(rows);
+  const origUpdate = userRepo.updateIpPolicy;
+  userRepo.updateIpPolicy = async (userId, allowedIps, ipPolicy) => {
+    updates.push({ userId, allowedIps, ipPolicy });
+    return origUpdate(userId, allowedIps, ipPolicy);
+  };
+  const { service: jwt } = F.makeJwt();
+  return buildUserUsecase(userRepo, null, null, { config: F.config(), jwt });
 };
 
 /** An ordinary employee following an unrestricted branch — the default state. */
-const EMPLOYEE = {
-  user_id: 7,
-  employee_id: 3,
-  user_type: 1,
-  store_id: 2,
-  designation_id: 4,
+const EMPLOYEE = F.employeeRow({
+  username: "u",
+  password: F.legacyHash(PASSWORD),
+  password_algo: "sha1",
   ip_policy: "branch",
   allowed_ips: null,
   branch_enabled: 0,
   branch_ips: null,
-};
+});
 
 const BRANCH_ON = { branch_enabled: 1, branch_ips: "203.0.113.0/24" };
 const ADMIN = { ...EMPLOYEE, user_type: 2, ip_policy: "unrestricted" };
 
 describe("login IP gate", () => {
   it("signs in an employee of an unrestricted branch from anywhere", async () => {
-    const result = await build(EMPLOYEE).login("u", "p", "49.207.1.1");
+    const result = await build(EMPLOYEE).login("u", PASSWORD, "49.207.1.1");
     assert.equal(result.code, 200);
     assert.ok(result.token);
   });
 
   it("signs in an employee of a restricted branch from the branch", async () => {
-    const result = await build({ ...EMPLOYEE, ...BRANCH_ON }).login("u", "p", "203.0.113.44");
+    const result = await build({ ...EMPLOYEE, ...BRANCH_ON }).login("u", PASSWORD, "203.0.113.44");
     assert.equal(result.code, 200);
   });
 
   it("refuses an employee of a restricted branch from outside it", async () => {
-    const result = await build({ ...EMPLOYEE, ...BRANCH_ON }).login("u", "p", "49.207.1.1");
+    const result = await build({ ...EMPLOYEE, ...BRANCH_ON }).login("u", PASSWORD, "49.207.1.1");
     assert.equal(result.code, 403);
     assert.equal(result.error, "IP_NOT_ALLOWED");
     assert.equal(result.token, undefined);
   });
 
   it("lets an admin of a restricted branch sign in from outside it", async () => {
-    const result = await build({ ...ADMIN, ...BRANCH_ON }).login("u", "p", "49.207.1.1");
+    const result = await build({ ...ADMIN, ...BRANCH_ON }).login("u", PASSWORD, "49.207.1.1");
     assert.equal(result.code, 200);
   });
 
   it("lets an admin left on the branch policy sign in from outside it too", async () => {
-    const result = await build({ ...ADMIN, ...BRANCH_ON, ip_policy: "branch" }).login("u", "p", "49.207.1.1");
+    const result = await build({ ...ADMIN, ...BRANCH_ON, ip_policy: "branch" }).login("u", PASSWORD, "49.207.1.1");
     assert.equal(result.code, 200);
   });
 
   it("signs in a custom user from a personal address", async () => {
     const row = { ...EMPLOYEE, ...BRANCH_ON, ip_policy: "custom", allowed_ips: "198.51.100.5" };
-    const result = await build(row).login("u", "p", "198.51.100.5");
+    const result = await build(row).login("u", PASSWORD, "198.51.100.5");
     assert.equal(result.code, 200);
   });
 
   it("signs in a custom user from the branch as well (union)", async () => {
     const row = { ...EMPLOYEE, ...BRANCH_ON, ip_policy: "custom", allowed_ips: "198.51.100.5" };
-    const result = await build(row).login("u", "p", "203.0.113.44");
+    const result = await build(row).login("u", PASSWORD, "203.0.113.44");
     assert.equal(result.code, 200);
   });
 
   it("refuses a custom user from neither list", async () => {
     const row = { ...EMPLOYEE, ...BRANCH_ON, ip_policy: "custom", allowed_ips: "198.51.100.5" };
-    const result = await build(row).login("u", "p", "49.207.1.1");
+    const result = await build(row).login("u", PASSWORD, "49.207.1.1");
     assert.equal(result.code, 403);
   });
 
   it("signs in an unrestricted user from anywhere despite the branch", async () => {
     const row = { ...EMPLOYEE, ...BRANCH_ON, ip_policy: "unrestricted" };
-    const result = await build(row).login("u", "p", "49.207.1.1");
+    const result = await build(row).login("u", PASSWORD, "49.207.1.1");
     assert.equal(result.code, 200);
   });
 
   it("still reports bad credentials as 204", async () => {
     const result = await build(null).login("u", "wrong", "203.0.113.10");
+    assert.equal(result.code, 204);
+  });
+
+  it("the IP gate runs after the password check, so a wrong password from a blocked address is still just 204", async () => {
+    const result = await build({ ...EMPLOYEE, ...BRANCH_ON }).login("u", "wrong", "49.207.1.1");
     assert.equal(result.code, 204);
   });
 });

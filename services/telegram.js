@@ -4,7 +4,22 @@ const { TelegramClient } = require("messaging-api-telegram");
 const logger = require("../utils/logger");
 const { TEST_TELEGRAM_CHAT_ID } = require("../constants/telegram");
 
-const BOT_TOKEN = "8069311027:AAE64F15h8FZY_jqnlOSzQGmzeKAR-MDYbI";
+// Stage 0A: the bot token is read from the environment. The committed
+// value below is retained ONLY so an un-rotated deployment keeps working
+// during the transition; it is a known exposure and must be rotated via
+// BotFather, after which TELEGRAM_BOT_TOKEN is set and this fallback is
+// deleted. See docs/auth-stage0a-implementation.md, secret-rotation checklist.
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "8069311027:AAE64F15h8FZY_jqnlOSzQGmzeKAR-MDYbI";
+if (!process.env.TELEGRAM_BOT_TOKEN) {
+  logger.Log({
+    level: logger.LEVEL.INFO,
+    component: "SERVICE.TELEGRAM",
+    code: "SERVICE.TELEGRAM.TOKEN-FALLBACK",
+    description: "TELEGRAM_BOT_TOKEN is not set; using the committed fallback token. Rotate it.",
+    category: "",
+    ref: {},
+  });
+}
 const client = new TelegramClient({
   accessToken: BOT_TOKEN,
 });

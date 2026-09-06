@@ -171,6 +171,7 @@ class Server {
     this.despatchRepo = require("./repository/despatch")(this.mysql.connection);
     this.vehicleRepo = require("./repository/vehicle")(this.mysql.connection);
     this.userRepo = require("./repository/user")(this.mysql.connection);
+    this.authLogRepo = require("./repository/auth_log")(this.mysql.connection);
     this.peopleRepo = require("./repository/people")(this.mysql.connection);
     this.accountsRepo = require("./repository/accounts")(this.mysql.connection);
     this.accountsEbookRepo = require("./repository/accountsEbook")(
@@ -409,7 +410,11 @@ class Server {
     this.userUsecase = require("./usecase/user")(
       this.userRepo,
       this.designationRepo,
-      this.employeeRepo
+      this.employeeRepo,
+      {
+        authLogRepo: this.authLogRepo,
+        telegram: require("./services/telegram")(),
+      }
     );
     this.peopleUsecase = require("./usecase/people")(this.peopleRepo);
     this.accountsEbookUsecase = require("./usecase/accountsEbook")(
@@ -611,7 +616,12 @@ class Server {
       app.use(this.apiSyncLogger.middleware());
     }
 
-    const authMiddleWare = require("./middlewares/auth");
+    // Stage 0A: built with the user usecase so a revoked or disabled
+    // session stops within the cache window rather than at token expiry.
+    const authMiddleWare = require("./middlewares/auth").create({
+      userUsecase: this.userUsecase,
+    });
+    this.authMiddleware = authMiddleWare;
     app.use(authMiddleWare);
 
     this.permissions = require("./middlewares/permissions")(
@@ -675,7 +685,8 @@ class Server {
     const userRouter = require("./routes/user")(
       this.userUsecase,
       this.permissions,
-      this.ipRestriction
+      this.ipRestriction,
+      { authLogRepo: this.authLogRepo, authMiddleware: this.authMiddleware }
     );
     const peopleRouter = require("./routes/people")(this.peopleUsecase);
     const accountsRouter = require("./routes/accounts")(
@@ -1052,6 +1063,33 @@ class Server {
         }
       }
     );
+
+    // Stage 0A / A5: a break-glass credential is due rotation after any use
+    // and on a fixed interval even if unused. Nothing is rotated here — the
+    // job only raises the alert; rotation is the documented manual procedure.
+    this.cronService.register("break_glass_rotation_check", "0 8 * * *", async () => {
+      const authConfig = require("./config/auth");
+      const due = await this.authLogRepo.findSystemAccountsDueRotation(
+        authConfig.breakGlass.rotationDays
+      );
+      if (!due || due.length === 0) return;
+      const telegram = require("./services/telegram")();
+      for (const row of due) {
+        await this.authLogRepo.record({
+          event: "break_glass_rotation_due",
+          userId: row.user_id,
+          username: row.username,
+          detail: row.last_login_at && row.credential_rotated_at && row.last_login_at > row.credential_rotated_at
+            ? "used_since_last_rotation"
+            : "interval_elapsed",
+        });
+        await telegram.sendMessage(
+          authConfig.breakGlass.alertChatId || ALERTS_TELEGRAM_CHAT_ID,
+          `🔐 *Break-glass credential rotation due*\nAccount: \`${row.username}\`\nLast rotated: ${row.credential_rotated_at || "never"}\nLast used: ${row.last_login_at || "never"}\n\nRotate with scripts/auth/break-glass.js rotate.`,
+          { disableNotification: false }
+        );
+      }
+    });
 
     this.synker.initCronJobs(this.cronService, this.apiSyncLogger);
     this.cronService.start();
