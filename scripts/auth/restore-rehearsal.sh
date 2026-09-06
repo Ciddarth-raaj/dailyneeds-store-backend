@@ -13,6 +13,10 @@
 #   KEEP_DEFINERS=1         do not strip DEFINER= clauses (default: strip — RDS refuses foreign definers without SUPER)
 #   SKIP_EVENTS=0           default 1: CREATE EVENT statements are dropped from the stream so a restored
 #                           copy never schedules work on the shared instance
+#   REQUIRE_ROUTINES=1      fail instead of restoring WITHOUT routines/triggers when the server has binary
+#                           logging on and log_bin_trust_function_creators=0 (RDS default): creating a
+#                           FUNCTION/TRIGGER then needs SUPER, which no RDS user has. Default: restore the
+#                           tables and data, skip the routine/trigger blocks, say so loudly, record it.
 set -euo pipefail
 
 FULL="${1:?full dump .sql.gz required}"
@@ -48,7 +52,8 @@ EXISTS="$(Q "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME=
 if [ "$EXISTS" = "1" ]; then
   echo "scratch schema already exists — it will be dropped and recreated"
 fi
-APP_USER="$(Q "SELECT CURRENT_USER()")"
+APP_USER="$(Q "SELECT CURRENT_USER()")"                       # e.g. dnds_app@%
+APP_USER_Q="'${APP_USER%@*}'@'${APP_USER#*@}'"                # quoted for GRANT: 'dnds_app'@'%'
 CAN_CREATE="$(Q "SHOW GRANTS" | grep -ciE 'GRANT (ALL PRIVILEGES|.*\bCREATE\b.*) ON \*\.\*' || true)"
 if [ "$CAN_CREATE" -ge 1 ]; then
   echo "app user $APP_USER has global CREATE — creating $SCRATCH with it"
@@ -58,15 +63,24 @@ else
   [ -n "$ADMIN" ] && [ -r "$ADMIN" ] || fail "set STAGE0A_ADMIN_DEFAULTS to an admin defaults file (node scripts/auth/db-defaults-file.js admin --host … --user …) so the scratch schema can be created"
   QA "DROP DATABASE IF EXISTS \`$SCRATCH\`; CREATE DATABASE \`$SCRATCH\` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci"
   # grant the APP user everything on the scratch schema only — nothing on any other schema changes
-  QA "GRANT ALL PRIVILEGES ON \`$SCRATCH\`.* TO $APP_USER; FLUSH PRIVILEGES"
+  QA "GRANT ALL PRIVILEGES ON \`$SCRATCH\`.* TO $APP_USER_Q; FLUSH PRIVILEGES"
   echo "created $SCRATCH with admin; granted ALL on $SCRATCH.* to $APP_USER"
 fi
 Q "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='$SCRATCH'" | grep -q 1 || fail "scratch schema not visible to app user"
 
 # ---- 2. restore (timed) -------------------------------------------------------
 LOG_BIN="$(Q "SELECT @@log_bin")"; TRUST="$(Q "SELECT @@log_bin_trust_function_creators")"
+ROUTINE_FILTER=(cat); ROUTINES_RESTORED=yes
 if [ "$LOG_BIN" = "1" ] && [ "$TRUST" = "0" ]; then
-  echo "NOTE: log_bin=1 and log_bin_trust_function_creators=0 — creating FUNCTIONs/TRIGGERs needs SUPER or that RDS parameter set to 1. If the restore fails on a CREATE FUNCTION/TRIGGER, that is the cause (parameter group change, admin)." >&2
+  if [ "${REQUIRE_ROUTINES:-0}" = "1" ]; then
+    fail "log_bin=1 and log_bin_trust_function_creators=0: CREATE FUNCTION/TRIGGER needs SUPER (ERROR 1419). Set the RDS parameter log_bin_trust_function_creators=1 (dynamic, no reboot) and re-run."
+  fi
+  echo "WARNING: log_bin=1 and log_bin_trust_function_creators=0 — this server refuses CREATE FUNCTION/TRIGGER without SUPER (ERROR 1419)." >&2
+  echo "         Restoring tables + data only; routine/trigger/event blocks are skipped and this is recorded. To rehearse them too," >&2
+  echo "         set log_bin_trust_function_creators=1 in the RDS parameter group and re-run with REQUIRE_ROUTINES=1." >&2
+  # every routine, trigger and event in a mysqldump lives inside a DELIMITER ;; … DELIMITER ; block; table DDL and data never do
+  ROUTINE_FILTER=(awk 'BEGIN{skip=0} /^DELIMITER ;;/{skip=1; next} skip&&/^DELIMITER ;/{skip=0; next} !skip{print}')
+  ROUTINES_RESTORED="NO (log_bin_trust_function_creators=0)"
 fi
 
 FILTER=(cat)
@@ -84,7 +98,7 @@ fi
 
 echo "== restoring $FULL into $SCRATCH (definers stripped: $([ "${KEEP_DEFINERS:-0}" = "1" ] && echo no || echo yes); events skipped: ${SKIP_EVENTS:-1}) =="
 START=$(date +%s)
-zcat "$FULL" | "${FILTER[@]}" | "${EVENT_FILTER[@]}" \
+zcat "$FULL" | "${FILTER[@]}" | "${EVENT_FILTER[@]}" | "${ROUTINE_FILTER[@]}" \
   | "$MYSQL" --defaults-extra-file="$DEFAULTS" --max-allowed-packet=1G "$SCRATCH"
 RESTORE_SECONDS=$(( $(date +%s) - START ))
 echo "restore took ${RESTORE_SECONDS}s"
@@ -124,6 +138,6 @@ echo "-- InnoDB check of the auth tables:"
 "$MYSQL" --defaults-extra-file="$DEFAULTS" -B -e "CHECK TABLE \`$SCRATCH\`.\`user\`, \`$SCRATCH\`.new_employee, \`$SCRATCH\`.permissions, \`$SCRATCH\`.migrations"
 
 echo
-echo "RESTORE OK: schema=$SCRATCH seconds=$RESTORE_SECONDS tables_checked=$CHECKED mismatches=0"
+echo "RESTORE OK: schema=$SCRATCH seconds=$RESTORE_SECONDS tables_checked=$CHECKED mismatches=0 routines_triggers_restored=$ROUTINES_RESTORED"
 echo "Next: scripts/auth/migration-rehearsal.sh $SCRATCH     (Stage 0A up/down on the copy)"
 echo "Tear down when finished:  $MYSQL --defaults-extra-file=$DEFAULTS -e 'DROP DATABASE \`$SCRATCH\`'"

@@ -125,8 +125,14 @@ const home = os.homedir();
     const port = opt("port", "3306");
     const user = opt("user");
     if (!host || !user) die("admin requires --host and --user (and optionally --port)");
-    if (!process.stdin.isTTY) die("admin needs an interactive terminal to read the password without echo");
-    const password = await promptHidden(`Password for ${user}@${host} (hidden): `);
+    let password;
+    if (args.includes("--password-from-stdin")) {
+      // non-interactive use (piped from a secret store); still never an argument
+      password = fs.readFileSync(0, "utf8").replace(/\r?\n$/, "");
+    } else {
+      if (!process.stdin.isTTY) die("admin needs an interactive terminal to read the password without echo (or --password-from-stdin)");
+      password = await promptHidden(`Password for ${user}@${host} (hidden): `);
+    }
     if (!password) die("empty password");
     const out = opt("out", path.join(home, ".stage0a", "admin.cnf"));
     writeDefaults(out, { host, port, user, password });

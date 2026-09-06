@@ -717,99 +717,170 @@ instance; `log_bin_trust_function_creators=0` with binlog on is detected
 and reported (it blocks `CREATE FUNCTION`/`TRIGGER` and needs a parameter
 group change by the administrator if it bites).
 
-### 5.4 Exact operator commands (Lightsail, as `ec2-user`; nothing runs against `dnds_prod` except reads and the dump)
+### 5.4 Operator sequence (Lightsail, as `ec2-user`) — ONE script, tested end to end
+
+The whole rehearsal is `scripts/auth/gate5-rehearsal.sh`, which runs the
+four tools in order and stops on the first failure. It was executed
+end-to-end in the development environment against a real MySQL 8 server
+(binary logging on, `log_bin_trust_function_creators=0`, a least-privilege
+app user without `CREATE DATABASE`, `caching_sha2`/native auth, routines,
+triggers, an event, a view, 20 000 rows with blobs and quotes): every step
+passed, the refusal guards refused, a tampered manifest was caught, the
+binlog showed **zero write events on the source schema** across eight runs,
+and no credential string appeared in any log or artefact. Findings from
+those runs (`--no-tablespaces`, routine visibility, `ERROR 1419`, driver
+auth plugin, exact pending-set assertion) are built into the scripts.
 
 ```bash
-# 0. checkout of the feature-branch tooling in a SEPARATE directory (the deployment clone is not touched)
-git clone --single-branch --branch claude/dnds-payroll-integration-proposal-3p6hen \
-  "$(git -C ~/dailyneeds-store-backend remote get-url origin)" ~/stage0a-rehearsal
-cd ~/stage0a-rehearsal && npm ci --ignore-scripts --no-audit --no-fund
-cp ~/dailyneeds-store-backend/config.json ~/stage0a-rehearsal/config.json     # read-only copy; chmod 600
+# on Lightsail
+cd ~/stage0a-rehearsal
+git pull --ff-only origin claude/dnds-payroll-integration-proposal-3p6hen   # picks up the gate 5 tooling
 
-# 1. defaults file from the live config block — password never on the command line
-node scripts/auth/db-defaults-file.js app        # prints env/host/port/user/database; writes ~/.stage0a/app.cnf (600)
-#    only if step 3 reports the app user cannot CREATE DATABASE:
-node scripts/auth/db-defaults-file.js admin --host <rds-endpoint> --port 3306 --user <master-user>   # hidden prompt → ~/.stage0a/admin.cnf
+# admin identity for the two things a least-privilege app user cannot do
+# (CREATE DATABASE dnds_rehearsal; SHOW CREATE FUNCTION/PROCEDURE for the dump).
+# Password at a hidden prompt; written to ~/.stage0a/admin.cnf (600). Never an argument.
+node scripts/auth/db-defaults-file.js admin --host <rds-endpoint> --port 3306 --user <rds-master-user>
 
-# 2. backup (auth tables + full dump, exact counts, verification, manifest) — records timing
-MYSQL_BIN_DIR=~/mysql84/bin scripts/auth/backup-user-tables.sh ~/db-backups
-
-# 3. isolated restore into dnds_rehearsal — timed, counts compared, integrity queries
-MYSQL_BIN_DIR=~/mysql84/bin scripts/auth/restore-rehearsal.sh \
-  ~/db-backups/dnds_prod-full-<STAMP>.sql.gz ~/db-backups/dnds_prod-counts-<STAMP>.tsv dnds_rehearsal
-#    (add STAGE0A_ADMIN_DEFAULTS=~/.stage0a/admin.cnf if the app user lacks CREATE)
-
-# 4. Stage 0A migrations UP / idempotent UP / DOWN x4 / UP on the copy (gate 22 on real data)
-MYSQL_BIN_DIR=~/mysql84/bin scripts/auth/migration-rehearsal.sh dnds_rehearsal ~/stage0a-rehearsal
-
-# 5. (gates 13, 14, later) scans against dnds_rehearsal only:
-~/mysql84/bin/mysql --defaults-extra-file=~/.stage0a/app.cnf dnds_rehearsal < scripts/auth/default-password-scan.sql
-~/mysql84/bin/mysql --defaults-extra-file=~/.stage0a/app.cnf dnds_rehearsal < scripts/auth/account-integrity-audit.sql
-
-# 6. cleanup (when the scans and the staging app are done with the copy)
-~/mysql84/bin/mysql --defaults-extra-file=~/.stage0a/app.cnf -e 'DROP DATABASE `dnds_rehearsal`'
-rm -f ~/.stage0a/admin.cnf                          # admin credential gone; app.cnf stays (600) until deployment night + 7 days
+# the rehearsal (defaults: ~/mysql84/bin client, ~/db-backups output, scratch schema dnds_rehearsal)
+STAGE0A_ADMIN_DEFAULTS=~/.stage0a/admin.cnf scripts/auth/gate5-rehearsal.sh
 ```
 
-### 5.5 Expected outputs
+That is all. If the app user turns out to hold global `CREATE` and can
+read every routine, the admin file is simply not used. If you have no
+admin identity at all, run without `STAGE0A_ADMIN_DEFAULTS`: the script
+stops at the exact point one is required and says why.
 
-| Step | Expect |
+What the one command does, in order (each step is also runnable alone):
+
+| Step | Script | Writes to |
+| --- | --- | --- |
+| 1 | `db-defaults-file.js app` — reads `config.db.mysql["development"]` (the live block), writes `~/.stage0a/app.cnf` (600) | home dir only |
+| 2 | `backup-user-tables.sh` — preflight (versions, grants, routine readability, server settings, counts of tables/views/routines/triggers/events, disk), exact row count of every base table, auth-table dump, full dump (`--single-transaction --quick --no-tablespaces --set-gtid-purged=OFF`, no `--databases`), verification (gzip, `Dump completed` trailer, `CREATE TABLE` count = base tables, routine count, no `USE`), sha256 manifest | `~/db-backups` only; **reads** the live schema |
+| 3 | `sha256sum -c --strict` of every artefact against the manifest | nothing |
+| 4 | `restore-rehearsal.sh` — refuses any non-scratch name; creates `dnds_rehearsal` (admin identity only if needed, then `GRANT ALL ON dnds_rehearsal.*` to the app user); strips `DEFINER`; drops the events section; if binlog is on and `log_bin_trust_function_creators=0` restores tables+data only and says so; timed restore; every table's count compared to step 2 (0 mismatches or FAIL); schema/migration-head/Telegram-table/`user`-shape/orphan/duplicate queries; `CHECK TABLE` | `dnds_rehearsal` only |
+| 5 | `migration-rehearsal.sh` — writes a 600 `database.rehearsal.json` (deleted on exit), proves the `mysql` driver connects, asserts the **pending set is exactly the four Stage 0A migrations**, `up` (timed) → columns/tables present, row counts unchanged, `all_permissions` +3 exactly → second `up` is a no-op → `down ×4` (timed) → `user` columns, types, nullability, defaults and indexes byte-for-byte as before, Stage 0A tables gone, counts as before → `up` again | `dnds_rehearsal` only |
+
+Everything is tee'd to `~/db-backups/gate5-<stamp>.log` (600).
+
+### 5.5 What successful output looks like
+
+Abridged from the tested run; your numbers will differ (≈724 MB: expect
+the full dump and the restore to take minutes each, not seconds).
+
+```
+==================== GATE 5 REHEARSAL 2026…  (checkout <sha>, log /home/ec2-user/db-backups/gate5-….log) ====
+client: mysqldump  Ver 8.4.11 for Linux on x86_64 (MySQL Community Server - GPL)
+
+==================== 1/5 defaults file … ====================
+env=development (NOTE: this block is the LIVE database in this deployment — NODE_ENV is unset on the server)
+host=<rds endpoint>   port=3306   user=<app user>   database=dnds_prod
+defaults file written: /home/ec2-user/.stage0a/app.cnf (mode 600; password not shown)
+
+==================== 2/5 backup … ====================
+server: 8.4.9   client: mysqldump  Ver 8.4.11 …
+GRANT … ON `dnds_prod`.* TO `<app user>`@`%`
+dump identity: <master user>@% (admin defaults)
+tables=N views=… routines=… triggers=… events=… size_mb=723.6 last_migration=/20260906070000-telegram-password-reset
+routines: all R readable by the dump identity
+disk: free 28xxxMB, need ~2683MB
+== exact row counts -> …/dnds_prod-counts-<stamp>.tsv ==
+migrations  <n>   new_employee  <n>   permissions  <n>   user  <n>
+full dump took <seconds>s
+  ok: …-auth-<stamp>.sql.gz (…) ends cleanly
+  ok: …-full-<stamp>.sql.gz (…) ends cleanly
+  ok: N CREATE TABLE statements = N base tables
+  ok: R routine definitions present
+  ok: auth dump has all 6 tables
+== manifest == … sha256 lines …   routines_included=yes
+
+==================== 3/5 checksum re-verification … ====================
+…-auth-<stamp>.sql.gz: OK     …-full-<stamp>.sql.gz: OK     …-counts-<stamp>.tsv: OK
+
+==================== 4/5 isolated restore into 'dnds_rehearsal' … ====================
+== target: scratch schema 'dnds_rehearsal' on <host> 8.4.9 (live schema is 'dnds_prod', untouched) ==
+app user <app user>@% has NO global CREATE (expected on a least-privilege RDS user)
+created dnds_rehearsal with admin; granted ALL on dnds_rehearsal.* to <app user>@%
+WARNING: log_bin=1 and log_bin_trust_function_creators=0 — … routine/trigger/event blocks are skipped and this is recorded …   ← expected on RDS defaults
+restore took <seconds>s
+checked N tables, 0 mismatches
+base_tables N / views … / routines 0 / triggers 0 / events 0        ← 0s only because of the WARNING above
+/20260906070000-telegram-password-reset  <run_on>
+password_reset_codes  telegram_link_tokens  telegram_links
+user_id username employee_id password user_type status allowed_ips ip_policy      ← no Stage 0A columns yet
+users_total <n> / users_with_password <n> / users_active <n> / logins_without_employee_row <n> / duplicate_usernames <n> / duplicate_employee_ids <n>
+dnds_rehearsal.user check status OK   (×4)
+RESTORE OK: schema=dnds_rehearsal seconds=<s> tables_checked=N mismatches=0 routines_triggers_restored=NO (log_bin_trust_function_creators=0)
+
+==================== 5/5 Stage 0A migrations on 'dnds_rehearsal' only … ====================
+db-migrate: /usr/…/db-migrate (0.11.x)
+driver connect ok, database=dnds_rehearsal
+== before: user=<n> new_employee=<n> permissions=<n> all_permissions=<a> migrations=<m>
+user.password before: text NOT NULL   (migration assumes TEXT NOT NULL)
+-- pending migrations … must be exactly the four Stage 0A ones:
+   20260906120000-auth-stage0a-user-columns
+   20260906120100-auth-stage0a-auth-log
+   20260906120200-auth-stage0a-password-reset
+   20260906120300-auth-stage0a-permissions
+== UP (timed) ==  …  up took <s>s
+all four Stage 0A migrations recorded
+user columns after up: …,password,password_hash,password_algo,…,is_system_account,credential_rotated_at,…
+auth_metric  user_auth_log  user_password_reset
+after up: user=<n> new_employee=<n> permissions=<n> all_permissions=<a+3> migrations=<m+4>
+users_with_legacy_password <n>   password_algo_sha1 <n>       ← equal to each other and to users_with_password
+== idempotency … ==  [INFO] No migrations to run
+== DOWN x4 (timed) ==  …  down took <s>s
+user table restored to its original column set, definitions and indexes
+after down: user=<n> new_employee=<n> permissions=<n> all_permissions=<a> migrations=<m>
+Stage 0A tables removed by down
+== UP again … ==
+MIGRATION REHEARSAL OK on dnds_rehearsal. …
+
+==================== GATE 5 REHEARSAL COMPLETE in <s>s ====================
+```
+
+Any line beginning `FAIL:` ends the run with a non-zero exit; nothing
+after it ran. The three most likely on RDS and what they mean:
+
+| Line | Meaning / action |
 | --- | --- |
-| 1 | `env=development (NOTE: … LIVE database …)`, `host=<rds endpoint>`, `port=3306`, `user=<app user>`, `database=dnds_prod`; file mode 600 |
-| 2 | `server: 8.4.9 client: … Ver 8.4.x`; `SHOW GRANTS` lines; `tables=N views=… routines=… triggers=… events=…` with `last_migration=20260906070000-telegram-password-reset`; exact counts for `user`, `new_employee`, `permissions`, `migrations`; `full dump took <s>` (expect minutes, not hours, for ≈724 MB); `ok: … ends cleanly` ×2; `ok: N CREATE TABLE statements = N base tables`; manifest with sha256 sums. Compressed full dump ≈ 80–200 MB. |
-| 3 | `target: scratch schema 'dnds_rehearsal' … (live schema is 'dnds_prod', untouched)`; either `has global CREATE` or `created … with admin`; `restore took <s>`; `checked N tables, 0 mismatches`; last migration row = `20260906070000-…`; the three Telegram tables listed; `user` columns **without** `password_hash`; `logins_without_employee_row`, `duplicate_usernames`, `duplicate_employee_ids` numbers (record them — they feed gate 14); `CHECK TABLE` = OK ×4; `RESTORE OK`. |
-| 4 | dry-run lists exactly the four `20260906120000…120300` migrations; `up took <s>`; `all four Stage 0A migrations recorded`; new columns present; `user_auth_log`, `user_password_reset`, `auth_metric` listed; row counts unchanged; `users_with_legacy_password` = `users_with_password` from step 3 and `password_algo_sha1` equal to it; second up prints "No migrations to run"; `down took <s>`; `user table restored to its original column set`; `MIGRATION REHEARSAL OK`. |
-| 6 | `DROP DATABASE` succeeds; `SHOW DATABASES` no longer lists `dnds_rehearsal` |
+| `FAIL: … stored routines cannot be read by the dump identity` | run with `STAGE0A_ADMIN_DEFAULTS` (master user), or `SKIP_ROUTINES=1` to accept a dump without them (recorded) |
+| `FAIL: set STAGE0A_ADMIN_DEFAULTS … so the scratch schema can be created` | app user lacks `CREATE`; provide the admin file |
+| `WARNING: log_bin=1 and log_bin_trust_function_creators=0` (not a FAIL) | RDS default. Tables + data rehearsed; to rehearse routines/triggers too, set that parameter to 1 in the RDS parameter group (dynamic) and re-run with `REQUIRE_ROUTINES=1 … --skip-backup` |
 
-Any `FAIL:` line stops the script with a non-zero exit and gate 5 stays
-NOT YET VERIFIED until the cause is understood.
+**Routines / triggers on RDS:** the deployed application's own behaviour
+does not depend on any stored routine being restorable (the Stage 0A
+migrations create none), so the WARNING path still satisfies gate 5 for
+Deployment A. It is recorded in the manifest and the log.
 
 ### 5.6 Rollback / cleanup
 
-The rehearsal has no rollback because it changes nothing that is live:
-`dnds_prod` receives only `SELECT`s and the consistent-snapshot dump.
-Cleanup is `DROP DATABASE dnds_rehearsal` (step 6), removal of
-`~/.stage0a/admin.cnf`, and — after Deployment A + 7 days — `shred -u` of
-`~/db-backups/*` and `~/.stage0a/app.cnf`. If the app user was granted on
-`dnds_rehearsal.*`, dropping the schema removes the object those grants
-refer to; revoke explicitly with the admin identity if RDS still lists
-them. `~/stage0a-rehearsal` can be deleted at any time; the deployment
-clone was never modified.
+The rehearsal changes nothing live (binlog-verified in test: zero write
+events on the source schema). Afterwards:
 
-If a restore step fails half-way, drop the scratch schema and re-run; there
-is nothing to repair.
+```bash
+~/mysql84/bin/mysql --defaults-extra-file=~/.stage0a/app.cnf -e 'DROP DATABASE `dnds_rehearsal`'   # when gates 13/14 and staging are done with it
+rm -f ~/.stage0a/admin.cnf                                                                     # admin credential gone
+# keep ~/db-backups/* (600) and ~/.stage0a/app.cnf until Deployment A + 7 days, then: shred -u ~/db-backups/* ~/.stage0a/app.cnf
+```
 
-**Deployment-night addition, independent of this rehearsal:** take a
-manual **RDS snapshot** of the instance immediately before `db-migrate up`.
-It is the fastest physical rollback (restore to a new instance, repoint
-`config.json`), and it does not replace the logical dump — the dump is what
-lets the auth tables be restored *in place* without moving the instance.
+A failed run needs no repair: re-run the same command (or with
+`--skip-backup` to reuse a verified dump). `~/stage0a-rehearsal` can be
+deleted at any time; the deployment clone was never touched.
+
+**Deployment night, separately:** take a manual RDS snapshot immediately
+before `db-migrate up` (fastest physical rollback); the logical dump from
+this gate is what allows the auth tables to be restored *in place*.
 
 ### 5.7 Gate 5 PASS criteria
 
-All of the following, recorded with date and verifier:
-
-1. Backup taken with the MySQL 8.4 client, `--single-transaction --quick`,
-   no `--databases`; manifest present with sha256 sums; `Dump completed`
-   trailer; `CREATE TABLE` count equals the server's base-table count.
-2. Backup timestamp recorded; at deployment time it is ≤ 24 h old (else
-   re-run step 2 only) and post-dates `20260906070000-telegram-password-reset`.
-3. Full restore into `dnds_rehearsal` completed with **0 row-count
-   mismatches** across every base table, `CHECK TABLE` OK, restored
-   `migrations` head equal to production's, Telegram tables present.
-4. Restore wall-clock time recorded (this number is the rollback budget on
-   the night).
-5. Stage 0A `up` ran exactly the four migrations; second `up` was a no-op;
-   `down ×4` returned the `user` column set to its original state; row
-   counts unchanged throughout; timing recorded.
-6. The currently deployed backend, started from `~/stage0a-rehearsal` is
-   *not* required for this gate; connecting an application to the copy is
-   gate 9/10 (staging).
-7. `dnds_prod` grants, data and schema unchanged (verify with `SHOW
-   GRANTS` before/after and the live `migrations` head).
-8. No credential printed, typed on a command line, or left outside
-   `~/.stage0a/*.cnf` (600) and the scratch
-   `database.rehearsal.json` (600, deleted by the script on exit).
+1. `GATE 5 REHEARSAL COMPLETE` with no `FAIL:` line; log and manifest kept.
+2. Client `8.4.x` against server `8.4.9`; dump identity and `routines_included` recorded in the manifest.
+3. Backup stamp recorded; at deployment ≤ 24 h old (else re-run step 2 only) and `last_migration=/20260906070000-telegram-password-reset`.
+4. `checked N tables, 0 mismatches`; `CHECK TABLE` OK; Telegram tables present; `user` without Stage 0A columns before migration.
+5. `restore took <s>` recorded — this is the rollback budget on the night.
+6. Pending set exactly the four Stage 0A migrations; `up` clean; second `up` "No migrations to run"; `down ×4` restores the `user` definition and indexes exactly and removes the three tables; counts unchanged.
+7. Live schema untouched: `SHOW GRANTS` and the `migrations` head on `dnds_prod` identical before and after.
+8. No credential printed or on a command line; only `~/.stage0a/*.cnf` (600) hold them; `database.rehearsal.json` removed by the script.
 
 ### 5.8 Other findings from this review (recorded, not all fixed)
 
@@ -820,6 +891,8 @@ All of the following, recorded with date and verifier:
 | `NODE_ENV` unset in production means `global.isDev()` is **true** in production: `middlewares/errorHandler.js` and `utils/http.js` return raw `err.message`/`err.toString()` to clients, and every request is console-logged. Not in the auth path (`config/auth.js`, `middlewares/auth.js`, `services/jwt.js` do not consult it). | **recorded**, out of Stage 0A scope; set `NODE_ENV=production` in `ecosystem.config.js` in a separate change *after* confirming `config.db.mysql["production"]` holds the same RDS values (today "production" may still be the stale sample) |
 | The deploy workflow's `db-migrate up` runs with no `-e`; which `database.json` environment it selects on the server is not visible from the repo | **to confirm** on the host (`cat migrations/mysql/database.json` keys only) — gate 4 |
 | `PURCHASE_TELEGRAM_CHAT_ID` now targets a group the new bot is not in | recorded in §0.6.1 |
+| Found by the end-to-end test of the gate 5 tooling: `mysqldump` 8 needs `PROCESS` for tablespaces (→ `--no-tablespaces`); a least-privilege user cannot `SHOW CREATE FUNCTION` and `mysqldump` silently omits routines (→ preflight + admin dump identity or explicit `SKIP_ROUTINES=1`); `CREATE FUNCTION/TRIGGER` fails with `ERROR 1419` when binlog is on without `log_bin_trust_function_creators` (→ handled, recorded); the `mysql` v2 driver db-migrate uses cannot authenticate `caching_sha2_password` users (→ preflight); db-migrate would run *every* unrecorded migration file (→ exact pending-set assertion before `up`); `GRANT … TO user@host` needs quoting | **all built into the scripts** |
+| `scripts/auth/db-defaults-file.js admin` gained `--password-from-stdin` for non-interactive use (still never an argument) | done |
 
 ---
 

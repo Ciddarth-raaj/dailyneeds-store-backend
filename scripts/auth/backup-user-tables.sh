@@ -20,7 +20,11 @@
 # Usage:
 #   scripts/auth/backup-user-tables.sh [out_dir]
 # Environment:
-#   STAGE0A_DEFAULTS   defaults file (default ~/.stage0a/app.cnf)
+#   STAGE0A_DEFAULTS        app defaults file (default ~/.stage0a/app.cnf) — used for the preflight and counts
+#   STAGE0A_ADMIN_DEFAULTS  optional admin defaults file; when present it is used for the DUMPS themselves
+#                           (read-only), because a least-privilege app user cannot SHOW CREATE FUNCTION/PROCEDURE
+#                           and mysqldump then omits routines. Without it, routines must be explicitly skipped.
+#   SKIP_ROUTINES=1         accept a full dump WITHOUT stored routines (recorded in the manifest)
 #   MYSQL_BIN_DIR      directory holding mysql + mysqldump 8.4 (default ~/mysql84/bin)
 #   STAGE0A_DB         database name (default: read from `db-defaults-file.js show`)
 #   COUNT_ALL_TABLES   1 = exact COUNT(*) for every base table (default 1; 0 = auth tables only)
@@ -28,6 +32,7 @@ set -euo pipefail
 
 OUT="${1:-$HOME/db-backups}"
 DEFAULTS="${STAGE0A_DEFAULTS:-$HOME/.stage0a/app.cnf}"
+ADMIN="${STAGE0A_ADMIN_DEFAULTS:-}"
 BIN="${MYSQL_BIN_DIR:-$HOME/mysql84/bin}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
@@ -59,6 +64,13 @@ DB="${STAGE0A_DB:-$(node "$HERE/db-defaults-file.js" show | awk -F= '$1=="databa
 node "$HERE/db-defaults-file.js" show
 
 Q() { "$MYSQL" --defaults-extra-file="$DEFAULTS" -N -B -e "$1"; }
+# identity used for the dumps (read-only either way)
+DUMP_DEFAULTS="$DEFAULTS"
+if [ -n "$ADMIN" ] && [ -r "$ADMIN" ]; then
+  [ "$(stat -c %a "$ADMIN")" = "600" ] || fail "$ADMIN must be mode 600"
+  DUMP_DEFAULTS="$ADMIN"
+fi
+QD() { "$MYSQL" --defaults-extra-file="$DUMP_DEFAULTS" -N -B -e "$1"; }
 
 echo "== connectivity / server =="
 SERVER_VER="$(Q "SELECT VERSION()")" || fail "cannot connect with $DEFAULTS"
@@ -68,6 +80,7 @@ CUR_DB_EXISTS="$(Q "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEM
 
 echo "== grants (recorded, password hashes are never in SHOW GRANTS) =="
 Q "SHOW GRANTS" | sed 's/IDENTIFIED BY.*//' || true
+echo "dump identity: $(QD "SELECT CURRENT_USER()") ($([ "$DUMP_DEFAULTS" = "$DEFAULTS" ] && echo app defaults || echo admin defaults))"
 
 echo "== server settings that affect restore =="
 Q "SELECT @@version_comment, @@log_bin, @@log_bin_trust_function_creators, @@gtid_mode, @@max_allowed_packet, @@event_scheduler"
@@ -84,6 +97,30 @@ echo "tables=$TABLE_COUNT views=$VIEW_COUNT routines=$ROUTINE_COUNT triggers=$TR
 for t in user new_employee permissions all_permissions designation outlets migrations; do
   Q "SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA='$DB' AND TABLE_NAME='$t'" | grep -q 1 || fail "expected table $t missing in $DB"
 done
+
+# Routines: mysqldump --routines needs SHOW CREATE FUNCTION/PROCEDURE to succeed
+# for every routine, which a least-privilege user is usually denied (it then
+# prints a warning and silently omits them). Prove it up front.
+ROUTINES_FLAG="--routines"
+if [ "$ROUTINE_COUNT" != "0" ]; then
+  MISSING=0
+  while IFS=$'\t' read -r rtype rname; do
+    [ -n "$rname" ] || continue
+    if ! "$MYSQL" --defaults-extra-file="$DUMP_DEFAULTS" -N -B -e "SHOW CREATE $rtype \`$DB\`.\`$rname\`" >/dev/null 2>&1; then
+      echo "  cannot SHOW CREATE $rtype $rname as the dump identity"; MISSING=$((MISSING+1))
+    fi
+  done < <(QD "SELECT ROUTINE_TYPE, ROUTINE_NAME FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA='$DB'")
+  if [ "$MISSING" != "0" ]; then
+    if [ "${SKIP_ROUTINES:-0}" = "1" ]; then
+      echo "WARNING: $MISSING routine(s) not dumpable — proceeding WITHOUT routines (SKIP_ROUTINES=1); recorded in manifest" >&2
+      ROUTINES_FLAG="--skip-routines"
+    else
+      fail "$MISSING of $ROUTINE_COUNT stored routines cannot be read by the dump identity. Provide STAGE0A_ADMIN_DEFAULTS (an identity with SHOW_ROUTINE / global SELECT, e.g. the RDS master user) or set SKIP_ROUTINES=1 to accept a dump without them."
+    fi
+  else
+    echo "routines: all $ROUTINE_COUNT readable by the dump identity"
+  fi
+fi
 
 # Disk: need roughly the uncompressed size twice (dump stream + gzip) — be generous.
 NEED_MB=$(( ${DATA_MB%.*} * 3 + 512 ))
@@ -116,11 +153,12 @@ FULL_FILE="$OUT/${DB}-full-${STAMP}.sql.gz"
 #  --quick               stream rows, no client-side buffering of large tables
 #  --set-gtid-purged=OFF no GTID preamble (RDS; also avoids the RELOAD-privilege requirement)
 #  --skip-lock-tables    never LOCK TABLES on production
+#  --no-tablespaces      mysqldump 8 otherwise queries tablespaces, which needs PROCESS (denied on RDS app users)
 #  NO --databases        the dump carries no CREATE DATABASE / USE, so it restores into
 #                        whatever schema the client selects — this is what makes the
 #                        isolated restore possible and a restore over dnds_prod hard.
-COMMON=(--defaults-extra-file="$DEFAULTS" --single-transaction --quick --skip-lock-tables --set-gtid-purged=OFF --add-drop-table --hex-blob --default-character-set=utf8mb4 --dump-date)
-case "$CLIENT_VER" in *MariaDB*) COMMON=(--defaults-extra-file="$DEFAULTS" --single-transaction --quick --skip-lock-tables --add-drop-table --hex-blob --default-character-set=utf8mb4 --dump-date);; esac
+COMMON=(--defaults-extra-file="$DUMP_DEFAULTS" --single-transaction --quick --skip-lock-tables --no-tablespaces --set-gtid-purged=OFF --add-drop-table --hex-blob --default-character-set=utf8mb4 --dump-date)
+case "$CLIENT_VER" in *MariaDB*) COMMON=(--defaults-extra-file="$DUMP_DEFAULTS" --single-transaction --quick --skip-lock-tables --no-tablespaces --add-drop-table --hex-blob --default-character-set=utf8mb4 --dump-date);; esac
 
 echo "== auth tables ($AUTH_TABLES) -> $AUTH_FILE =="
 # shellcheck disable=SC2086
@@ -128,7 +166,7 @@ echo "== auth tables ($AUTH_TABLES) -> $AUTH_FILE =="
 
 echo "== full database -> $FULL_FILE (this is the long step; ~${DATA_MB}MB over the RDS link) =="
 START=$(date +%s)
-"$MYSQLDUMP" "${COMMON[@]}" --routines --triggers --events "$DB" | gzip -6 > "$FULL_FILE"
+"$MYSQLDUMP" "${COMMON[@]}" $ROUTINES_FLAG --triggers --events "$DB" | gzip -6 > "$FULL_FILE"
 DUMP_SECONDS=$(( $(date +%s) - START ))
 chmod 600 "$AUTH_FILE" "$FULL_FILE"
 echo "full dump took ${DUMP_SECONDS}s"
@@ -149,6 +187,11 @@ if [ "$TRIGGER_COUNT" != "0" ]; then
   TR_IN_DUMP="$(zcat "$FULL_FILE" | grep -c 'CREATE.*TRIGGER' || true)"
   [ "$TR_IN_DUMP" -ge "$TRIGGER_COUNT" ] || fail "full dump has $TR_IN_DUMP triggers, server has $TRIGGER_COUNT"
 fi
+if [ "$ROUTINES_FLAG" = "--routines" ] && [ "$ROUTINE_COUNT" != "0" ]; then
+  RT_IN_DUMP="$(zcat "$FULL_FILE" | grep -cE 'CREATE.*(FUNCTION|PROCEDURE) ' || true)"
+  [ "$RT_IN_DUMP" -ge "$ROUTINE_COUNT" ] || fail "full dump has $RT_IN_DUMP routines, server has $ROUTINE_COUNT"
+  echo "  ok: $RT_IN_DUMP routine definitions present"
+fi
 if zcat "$FULL_FILE" | grep -q '^USE \|^CREATE DATABASE'; then fail "dump contains USE/CREATE DATABASE — must not (isolated restore safety)"; fi
 for t in $AUTH_TABLES; do
   zcat "$AUTH_FILE" | grep -q "^CREATE TABLE \`$t\`" || fail "auth dump missing table $t"
@@ -166,6 +209,8 @@ MANIFEST="$OUT/${DB}-manifest-${STAMP}.txt"
   echo "size_mb_reported=$DATA_MB"
   echo "last_migration=$LAST_MIGRATION"
   echo "full_dump_seconds=$DUMP_SECONDS"
+  echo "dump_identity=$(QD "SELECT CURRENT_USER()")"
+  echo "routines_included=$([ "$ROUTINES_FLAG" = "--routines" ] && echo yes || echo NO)"
   echo "counts_file=$COUNTS"
   sha256sum "$AUTH_FILE" "$FULL_FILE" "$COUNTS"
   ls -l "$AUTH_FILE" "$FULL_FILE"
