@@ -30,7 +30,11 @@ const path = require("path");
 const readline = require("readline");
 
 process.env.NODE_ENV = process.env.NODE_ENV || "production";
-global.env = process.env.NODE_ENV;
+// Mirror server.js exactly: NODE_ENV unset selects "development" — which, on
+// the production host, is the live database block (NODE_ENV is not set
+// there). Without this default the script crashed with
+// `config.db.mysql[undefined]` on the very host it is meant for.
+global.env = process.env.NODE_ENV === undefined ? "development" : process.env.NODE_ENV;
 global.isDev = () => global.env === "development";
 
 const mysql = require("mysql");

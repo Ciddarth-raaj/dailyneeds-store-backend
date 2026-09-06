@@ -627,117 +627,199 @@ browser — gate 10 stays NOT YET TESTED for that reason.
 
 ---
 
-## 5. Restore rehearsal runbook and recording template (gate 5)
+## 5. Backup and isolated restore rehearsal (gate 5) — AWS RDS procedure
 
-### 5.1 What backup exists today (as far as this environment can tell)
+Revised 06-09-2026 after the production inspection. Nothing in this section
+has been executed; every command below is for the administrator to run
+from the Lightsail host.
 
-| Item | Finding |
+### 5.1 The real production database (do not trust the config label)
+
+| Fact | Value |
 | --- | --- |
-| Database backups in either repository | **None.** No `mysqldump`, cron, snapshot job or workflow step exists; `scripts/auth/backup-user-tables.sh` is a *tool*, it has never been run for real. |
-| Backups outside the repositories | **Unknown from here**: Lightsail instance / disk snapshots (manual or automatic), an RDS automated backup if the database is on RDS, or a hand-made dump on the server. Only the administrator can see these. |
-| The `.env` backup made on 06-09-2026 | Exists (administrator). It is a **configuration** backup, not a database backup; it does not satisfy gate 5. |
-| Where MySQL runs | Not determinable from the checkout — the connection host lives in the git-ignored config and `migrations/mysql/database.json` (`sample.database.json` shows `localhost`, which suggests MySQL on the Lightsail box itself, unconfirmed). |
+| Backend process | PM2 id 0, **`NODE_ENV` unset** → `server.js` selects `config.db.mysql["development"]` |
+| What that block actually is | the **live production database**: `dnds_prod` on **AWS RDS**, MySQL **8.4.9**, port 3306, private address `172.26.6.56`, ≈723.6 MB |
+| Lightsail host | ≈28 GB free disk; `/usr/bin/mysqldump` is **MariaDB 10.5.25**, not MySQL |
+| Known backups | **none** in either repository; RDS automated backups / manual snapshots unknown — check the RDS console and record what exists |
+| `.env` backup of 06-09-2026 | configuration only; not a database backup |
 
-**Conclusion:** there is currently **no backup known to be suitable** for
-the rehearsal. One must be *taken*, with a recorded timestamp, as step 1
-below. A pre-existing Lightsail snapshot, if one exists, is useful as a
-second safety net for deployment night but is not the rehearsal artefact:
-the rehearsal must prove a *logical* restore into an isolated schema that
-the application can be pointed at.
+Every tool in `scripts/auth/` now reads the connection from that same
+`config.json` block through `scripts/auth/db-defaults-file.js`, which prints
+`env=development (NOTE: this block is the LIVE database …)` so the misleading
+label is visible every time. The previous version of
+`backup-user-tables.sh` assumed a local socket and would have failed
+outright on this host.
 
-**Suitability rules:** taken with `--single-transaction` (consistent, no
-locks on InnoDB); ≤ 24 h old at deployment time (else re-take); taken
-*after* migration `20260906070000-telegram-password-reset` (already in
-production — verify with the `migrations` query below); `gzip -t` passes
-and the dump ends with `Dump completed`.
+### 5.2 Client compatibility decision
 
-### 5.2 Where the isolated restore runs
+**Do not use the MariaDB 10.5 `mysqldump` for the artefact production will
+be restored from.** Use the official **MySQL 8.4 client**, same major as
+the server. Reasons, in order of weight:
 
-**Recommended: on the same MySQL server, into a separate schema
-`dnds_rehearsal`**, never into the live schema. Reasons: the dump never
-leaves the host (no PII in transit), the same MySQL version guarantees the
-schema restores identically, and the "connect the old code to it" step
-only needs a scratch config pointing at another database name on
-`localhost`. Precondition: free disk ≥ 2.5 × the uncompressed dump size,
-checked with `df -h` first — restoring on a full disk is the one way this
-rehearsal can hurt production. If the disk is tight, restore instead onto
-a temporary Lightsail instance created from a snapshot (isolated by
-construction), and delete it afterwards.
+1. The dump is the only rollback for Deployment A. A cross-vendor client
+   against a newer server is an untested combination for exactly the file
+   we cannot afford to find broken at 02:00.
+2. MariaDB 10.5's `mysqldump` predates MySQL 8 features it may encounter
+   via `SHOW CREATE TABLE` (expression defaults, functional indexes,
+   invisible columns, `utf8mb4_0900_*` collations, `CHECK` syntax
+   differences). It passes DDL through verbatim, so most of it *probably*
+   restores on the same 8.4 server, but "probably" is not a gate.
+3. It has no `--set-gtid-purged`, wraps output in MariaDB-specific
+   `/*M!…*/` conditionals, and authenticates to MySQL 8.4's default
+   `caching_sha2_password` only via its own connector path — each a
+   place to fail silently or partially.
+4. The MySQL 8.4 client is a 30 MB tarball into the home directory; no
+   system package changes, no conflict with the MariaDB package.
 
-Never: restore over the production schema; run the gate 13/14 scans
-against the production schema; copy the dump off the server to a laptop.
+The scripts refuse a MariaDB client unless `ALLOW_MARIADB_CLIENT=1` is set
+explicitly; that escape hatch exists only for a diagnostic dump, never for
+the deployment-night backup.
 
-### 5.3 Procedure (nothing here has been run)
+**Installing the MySQL 8.4 client (home directory, no root):**
 
 ```bash
-# 0. preconditions — record each
-df -h /                                            # free space vs dump size
-mysql -N -e "SELECT VERSION()"                     # server version
-mysql -N <db> -e "SELECT name, run_on FROM migrations ORDER BY run_on DESC LIMIT 3"   # must include 20260906070000-telegram-password-reset
-
-# 1. backup (auth tables + full dump, verified, timestamped)  — record STAMP and the printed row counts
-scripts/auth/backup-user-tables.sh <db> ~/db-backups
-ls -l ~/db-backups/                                # sizes; files are 600, dir 700
-
-# 2. isolated restore — record wall-clock duration
-mysql -e "CREATE DATABASE dnds_rehearsal CHARACTER SET utf8mb4"
-time (zcat ~/db-backups/<db>-full-<STAMP>.sql.gz | mysql dnds_rehearsal)
-
-# 3. validation — record every result
-mysql dnds_rehearsal -N -e "SELECT COUNT(*) FROM \`user\`; SELECT COUNT(*) FROM new_employee; SELECT COUNT(*) FROM permissions"   # must equal step-1 counts
-mysql dnds_rehearsal -N -e "SELECT COUNT(*) FROM \`user\` WHERE password IS NOT NULL"     # readable auth data
-mysql dnds_rehearsal -e "SHOW CREATE TABLE \`user\`\\G"                                  # pre-Stage-0A shape (no password_hash yet)
-mysql dnds_rehearsal -N -e "SELECT name FROM migrations ORDER BY run_on DESC LIMIT 1"     # restored schema version
-mysql dnds_rehearsal -N -e "SHOW TABLES LIKE 'telegram_%'; SHOW TABLES LIKE 'password_reset_codes'"  # upstream tables present
-mysql dnds_rehearsal -N -e "SELECT COUNT(*) FROM \`user\` u LEFT JOIN new_employee ne ON ne.employee_id = u.employee_id WHERE ne.employee_id IS NULL"  # orphan logins (integrity preview)
-
-# 4. application connect (proves the dump is usable, not just loadable)
-#    copy the production config to a scratch file, change ONLY the database name to dnds_rehearsal and the port to a free one,
-#    start the CURRENTLY DEPLOYED code against it on that port (plain `node`, not pm2), sign in as a test employee via curl,
-#    stop it. Do not start Stage 0A code here yet — that is gate 22's dry run, separate.
-
-# 5. Stage 0A migration dry run on the rehearsal copy (gate 22 evidence, still no production change)
-#    point a scratch migrations/mysql/database.json at dnds_rehearsal; from the feature-branch checkout:
-#    db-migrate up   → expect exactly the four 20260906120000..120300 migrations to run
-#    db-migrate down (x4) → expect clean reversal; re-run the step-3 counts
-#    (this step is where gate 22 stops being "plan" and becomes "proven on real data")
-
-# 6. gates 13 and 14 — against dnds_rehearsal only; keep IDs + categories, destroy output afterwards
-# 7. tear down
-mysql -e "DROP DATABASE dnds_rehearsal"
-#    keep the dump files (600) until Deployment A + 7 days; then shred
+ldd --version | head -1                      # glibc ≥ 2.28 → glibc2.28 build; 2.17–2.27 → glibc2.17 build
+cd ~ && mkdir -p mysql84-dl && cd mysql84-dl
+# Download "mysql-8.4.<x>-linux-glibc2.28-x86_64-minimal.tar.xz" (Linux - Generic, "minimal") from
+# https://dev.mysql.com/downloads/mysql/8.4.html and the SHA-256 shown on that page, then:
+sha256sum mysql-8.4.*-linux-glibc2.28-x86_64-minimal.tar.xz     # must equal the published checksum
+tar -xJf mysql-8.4.*-linux-glibc2.28-x86_64-minimal.tar.xz
+mv mysql-8.4.*-linux-glibc2.28-x86_64-minimal ~/mysql84
+~/mysql84/bin/mysql --version && ~/mysql84/bin/mysqldump --version   # both "Ver 8.4.x"
 ```
 
-### 5.4 Evidence to record (gate 5 template)
+(If the RDS parameter group forces TLS, add `ssl-mode=REQUIRED` under
+`[client]` in the defaults file; RDS' CA bundle is only needed for
+`VERIFY_CA`, which is not required for this rehearsal.)
 
-| Field | Value |
+### 5.3 Isolated restore target
+
+**A scratch schema `dnds_rehearsal` on the same RDS instance.** Same
+server version, dump never leaves the VPC, and the application can be
+pointed at it by changing only the database name. The scripts refuse any
+scratch name that equals the live name, contains `prod`, or lacks
+`rehearsal`/`scratch`/`restore_test`; the dump is taken without
+`--databases`, so it carries no `USE dnds_prod` and cannot select the live
+schema by itself.
+
+**Privilege check (requirement 13):** the app user may lack global
+`CREATE`. `restore-rehearsal.sh` checks `SHOW GRANTS`; if `CREATE ON *.*` is
+absent it requires a second defaults file for an admin identity (the RDS
+master user or a dedicated rehearsal role), uses it **only** to `CREATE
+DATABASE dnds_rehearsal` and `GRANT ALL ON dnds_rehearsal.*` to the app
+user, and does everything else as the app user. Nothing about the live
+schema's grants changes.
+
+Restore-time obstacles handled by the script: `DEFINER=` clauses are
+stripped (RDS refuses foreign definers without SUPER); the events section
+is dropped by default so a restored copy never schedules work on the shared
+instance; `log_bin_trust_function_creators=0` with binlog on is detected
+and reported (it blocks `CREATE FUNCTION`/`TRIGGER` and needs a parameter
+group change by the administrator if it bites).
+
+### 5.4 Exact operator commands (Lightsail, as `ec2-user`; nothing runs against `dnds_prod` except reads and the dump)
+
+```bash
+# 0. checkout of the feature-branch tooling in a SEPARATE directory (the deployment clone is not touched)
+git clone --single-branch --branch claude/dnds-payroll-integration-proposal-3p6hen \
+  "$(git -C ~/dailyneeds-store-backend remote get-url origin)" ~/stage0a-rehearsal
+cd ~/stage0a-rehearsal && npm ci --ignore-scripts --no-audit --no-fund
+cp ~/dailyneeds-store-backend/config.json ~/stage0a-rehearsal/config.json     # read-only copy; chmod 600
+
+# 1. defaults file from the live config block — password never on the command line
+node scripts/auth/db-defaults-file.js app        # prints env/host/port/user/database; writes ~/.stage0a/app.cnf (600)
+#    only if step 3 reports the app user cannot CREATE DATABASE:
+node scripts/auth/db-defaults-file.js admin --host <rds-endpoint> --port 3306 --user <master-user>   # hidden prompt → ~/.stage0a/admin.cnf
+
+# 2. backup (auth tables + full dump, exact counts, verification, manifest) — records timing
+MYSQL_BIN_DIR=~/mysql84/bin scripts/auth/backup-user-tables.sh ~/db-backups
+
+# 3. isolated restore into dnds_rehearsal — timed, counts compared, integrity queries
+MYSQL_BIN_DIR=~/mysql84/bin scripts/auth/restore-rehearsal.sh \
+  ~/db-backups/dnds_prod-full-<STAMP>.sql.gz ~/db-backups/dnds_prod-counts-<STAMP>.tsv dnds_rehearsal
+#    (add STAGE0A_ADMIN_DEFAULTS=~/.stage0a/admin.cnf if the app user lacks CREATE)
+
+# 4. Stage 0A migrations UP / idempotent UP / DOWN x4 / UP on the copy (gate 22 on real data)
+MYSQL_BIN_DIR=~/mysql84/bin scripts/auth/migration-rehearsal.sh dnds_rehearsal ~/stage0a-rehearsal
+
+# 5. (gates 13, 14, later) scans against dnds_rehearsal only:
+~/mysql84/bin/mysql --defaults-extra-file=~/.stage0a/app.cnf dnds_rehearsal < scripts/auth/default-password-scan.sql
+~/mysql84/bin/mysql --defaults-extra-file=~/.stage0a/app.cnf dnds_rehearsal < scripts/auth/account-integrity-audit.sql
+
+# 6. cleanup (when the scans and the staging app are done with the copy)
+~/mysql84/bin/mysql --defaults-extra-file=~/.stage0a/app.cnf -e 'DROP DATABASE `dnds_rehearsal`'
+rm -f ~/.stage0a/admin.cnf                          # admin credential gone; app.cnf stays (600) until deployment night + 7 days
+```
+
+### 5.5 Expected outputs
+
+| Step | Expect |
 | --- | --- |
-| Backup timestamp (`STAMP`) and age at rehearsal | |
-| Backup method and flags (`mysqldump --single-transaction --quick --routines --triggers --events`) | |
-| Dump sizes (auth / full, compressed) and `gzip -t` result | |
-| Row counts at backup (`user`, `new_employee`, `permissions`) | |
-| Where restored (host, schema) and free disk before/after | |
-| Restore wall-clock duration | |
-| Row counts after restore (must match) | |
-| Restored schema version (last `migrations` row) — must be `20260906070000-…` or later | |
-| `user.password` readable; `new_employee` join readable | |
-| Application connected to the restored copy and a login succeeded (old code) | |
-| Stage 0A `db-migrate up` / `down` on the copy: which migrations ran, duration, errors | |
-| Any manual intervention | |
-| Tear-down time; where dump files are kept and when they are destroyed | |
-| Verified by / date | |
+| 1 | `env=development (NOTE: … LIVE database …)`, `host=<rds endpoint>`, `port=3306`, `user=<app user>`, `database=dnds_prod`; file mode 600 |
+| 2 | `server: 8.4.9 client: … Ver 8.4.x`; `SHOW GRANTS` lines; `tables=N views=… routines=… triggers=… events=…` with `last_migration=20260906070000-telegram-password-reset`; exact counts for `user`, `new_employee`, `permissions`, `migrations`; `full dump took <s>` (expect minutes, not hours, for ≈724 MB); `ok: … ends cleanly` ×2; `ok: N CREATE TABLE statements = N base tables`; manifest with sha256 sums. Compressed full dump ≈ 80–200 MB. |
+| 3 | `target: scratch schema 'dnds_rehearsal' … (live schema is 'dnds_prod', untouched)`; either `has global CREATE` or `created … with admin`; `restore took <s>`; `checked N tables, 0 mismatches`; last migration row = `20260906070000-…`; the three Telegram tables listed; `user` columns **without** `password_hash`; `logins_without_employee_row`, `duplicate_usernames`, `duplicate_employee_ids` numbers (record them — they feed gate 14); `CHECK TABLE` = OK ×4; `RESTORE OK`. |
+| 4 | dry-run lists exactly the four `20260906120000…120300` migrations; `up took <s>`; `all four Stage 0A migrations recorded`; new columns present; `user_auth_log`, `user_password_reset`, `auth_metric` listed; row counts unchanged; `users_with_legacy_password` = `users_with_password` from step 3 and `password_algo_sha1` equal to it; second up prints "No migrations to run"; `down took <s>`; `user table restored to its original column set`; `MIGRATION REHEARSAL OK`. |
+| 6 | `DROP DATABASE` succeeds; `SHOW DATABASES` no longer lists `dnds_rehearsal` |
 
-### 5.5 Administrator actions required
+Any `FAIL:` line stops the script with a non-zero exit and gate 5 stays
+NOT YET VERIFIED until the cause is understood.
 
-All of it — this environment has no database and no server access.
-Specifically: (a) confirm where MySQL runs and whether any Lightsail or
-RDS snapshot already exists (record it, do not rely on it); (b) confirm
-free disk on the database host; (c) run §5.3 steps 0–3 and record §5.4;
-(d) step 4 needs the production config copied to a scratch file — never
-edit the live one; (e) step 5 needs the feature branch checked out
-somewhere on the host *outside* `~/dailyneeds-store-backend` (which is the
-auto-deploy clone), e.g. `~/stage0a-rehearsal/`, pointed at
-`dnds_rehearsal` only.
+### 5.6 Rollback / cleanup
+
+The rehearsal has no rollback because it changes nothing that is live:
+`dnds_prod` receives only `SELECT`s and the consistent-snapshot dump.
+Cleanup is `DROP DATABASE dnds_rehearsal` (step 6), removal of
+`~/.stage0a/admin.cnf`, and — after Deployment A + 7 days — `shred -u` of
+`~/db-backups/*` and `~/.stage0a/app.cnf`. If the app user was granted on
+`dnds_rehearsal.*`, dropping the schema removes the object those grants
+refer to; revoke explicitly with the admin identity if RDS still lists
+them. `~/stage0a-rehearsal` can be deleted at any time; the deployment
+clone was never modified.
+
+If a restore step fails half-way, drop the scratch schema and re-run; there
+is nothing to repair.
+
+**Deployment-night addition, independent of this rehearsal:** take a
+manual **RDS snapshot** of the instance immediately before `db-migrate up`.
+It is the fastest physical rollback (restore to a new instance, repoint
+`config.json`), and it does not replace the logical dump — the dump is what
+lets the auth tables be restored *in place* without moving the instance.
+
+### 5.7 Gate 5 PASS criteria
+
+All of the following, recorded with date and verifier:
+
+1. Backup taken with the MySQL 8.4 client, `--single-transaction --quick`,
+   no `--databases`; manifest present with sha256 sums; `Dump completed`
+   trailer; `CREATE TABLE` count equals the server's base-table count.
+2. Backup timestamp recorded; at deployment time it is ≤ 24 h old (else
+   re-run step 2 only) and post-dates `20260906070000-telegram-password-reset`.
+3. Full restore into `dnds_rehearsal` completed with **0 row-count
+   mismatches** across every base table, `CHECK TABLE` OK, restored
+   `migrations` head equal to production's, Telegram tables present.
+4. Restore wall-clock time recorded (this number is the rollback budget on
+   the night).
+5. Stage 0A `up` ran exactly the four migrations; second `up` was a no-op;
+   `down ×4` returned the `user` column set to its original state; row
+   counts unchanged throughout; timing recorded.
+6. The currently deployed backend, started from `~/stage0a-rehearsal` is
+   *not* required for this gate; connecting an application to the copy is
+   gate 9/10 (staging).
+7. `dnds_prod` grants, data and schema unchanged (verify with `SHOW
+   GRANTS` before/after and the live `migrations` head).
+8. No credential printed, typed on a command line, or left outside
+   `~/.stage0a/*.cnf` (600) and the scratch
+   `database.rehearsal.json` (600, deleted by the script on exit).
+
+### 5.8 Other findings from this review (recorded, not all fixed)
+
+| Finding | Status |
+| --- | --- |
+| `scripts/auth/backup-user-tables.sh` assumed a local socket, had no host/port/user, no client-version check, no disk check, no table-count or checksum verification, an `--add-drop-table` dump with no guard against being replayed on the live schema, and a `zcat | tail | grep -q` under `pipefail` that could fail spuriously | **rewritten** (this commit) |
+| `scripts/auth/break-glass.js` set `global.env = process.env.NODE_ENV` with no default → on the production host (NODE_ENV unset) it crashed with `config.db.mysql[undefined]` before doing anything | **fixed** to mirror `server.js` |
+| `NODE_ENV` unset in production means `global.isDev()` is **true** in production: `middlewares/errorHandler.js` and `utils/http.js` return raw `err.message`/`err.toString()` to clients, and every request is console-logged. Not in the auth path (`config/auth.js`, `middlewares/auth.js`, `services/jwt.js` do not consult it). | **recorded**, out of Stage 0A scope; set `NODE_ENV=production` in `ecosystem.config.js` in a separate change *after* confirming `config.db.mysql["production"]` holds the same RDS values (today "production" may still be the stale sample) |
+| The deploy workflow's `db-migrate up` runs with no `-e`; which `database.json` environment it selects on the server is not visible from the repo | **to confirm** on the host (`cat migrations/mysql/database.json` keys only) — gate 4 |
+| `PURCHASE_TELEGRAM_CHAT_ID` now targets a group the new bot is not in | recorded in §0.6.1 |
 
 ---
 

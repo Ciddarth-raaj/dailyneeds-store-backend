@@ -125,16 +125,18 @@ bot is retired; retire or re-point `PURCHASE_TELEGRAM_CHAT_ID` (purchase
 notifications now fail by decision). Deployment A removes the compiled
 literal from the running code.
 
-**Step 2 — Backup and restore rehearsal.** Gate 5. **← NEXT.**
-No database backup is known to exist (readiness §5.1): one must be taken
-with `scripts/auth/backup-user-tables.sh`, timestamped, and restored into
-an isolated schema `dnds_rehearsal` on the same MySQL host (or a throwaway
-instance if disk is short). The exact procedure, the evidence table and
-the administrator actions are in **readiness §5.2–5.5**. The restore must
-also carry the Stage 0A `db-migrate up`/`down` dry run, which is what
-turns gate 22 from "plan" into "proven on real data". Snapshot must
-post-date `20260906070000-telegram-password-reset`.
-Record: readiness §5.4 in full.
+**Step 2 — Backup and restore rehearsal.** Gate 5. **← NEXT. Procedure
+revised 06-09-2026 for the real topology** (RDS MySQL 8.4.9 `dnds_prod`,
+reached through the config block labelled "development" because
+`NODE_ENV` is unset): readiness **§5.1–5.8**. Tooling on the branch:
+`scripts/auth/db-defaults-file.js` (credentials → 600 defaults file, never
+on a command line), `backup-user-tables.sh` (MySQL 8.4 client required,
+auth + full dump, exact counts, verified, sha256 manifest),
+`restore-rehearsal.sh` (scratch schema only, admin identity used solely to
+create it if the app user lacks CREATE, timed, 0-mismatch check, integrity
+queries), `migration-rehearsal.sh` (separate checkout, Stage 0A up /
+idempotent up / down×4 / up). MariaDB 10.5 `mysqldump` is **not** to be
+used for the artefact. Record: readiness §5.5 outputs and §5.7 criteria.
 
 **Step 3 — Scans on the restored copy only.** Gates 13, 14.
 `scripts/auth/default-password-scan.sql`, `scripts/auth/account-integrity-audit.sql`.
@@ -271,7 +273,9 @@ The rule is roll back first, investigate afterwards.
 | ~~Rotate the Telegram bot token (§3 Step 1)~~ moved production to a new bot | Administrator | now | 06-09-2026 (partial: old token not revoked) |
 | Obtain BotFather control of `@dailyneeds_test_bot` and `/revoke` (or delete) it | Owner | as soon as possible; not a Deployment A blocker | |
 | ~~Decide the two-reset-systems reconciliation~~ | Owner | | 06-09-2026 — both kept, one engine (readiness §0.7) |
-| Gate 5: take a timestamped backup and run the isolated restore rehearsal (readiness §5) | Administrator | next | |
+| Gate 5: install MySQL 8.4 client in `~/mysql84`, then run readiness §5.4 steps 0–4 and record §5.5/§5.7 | Administrator | next | |
+| Confirm which `database.json` environment the deploy's bare `db-migrate up` selects on the host (keys only) | Administrator | before deployment night (gate 4) | |
+| Set `NODE_ENV=production` in PM2 after verifying the "production" config block — separate change, not Stage 0A | Owner | after Deployment A | |
 | Disable the seeded weak admin account | | Deployment date `______`, and only after **all four**: P1 PASS, P2 PASS, normal owner/admin login PASS, rollback access confirmed | |
 | Remove query-string login fallback (own GO/NO-GO) | | After 2 full operating days at zero query-string logins, including a shift changeover | |
 | Retire legacy-token resolution + enable `JWT_REQUIRE_KID` | | 36 h after Deployment A, separate change | |
@@ -289,6 +293,7 @@ The seeded admin is the largest live exposure right now: `user_type 2` with a kn
 | 06-09-2026 | `main-autodeploy` (both repos) moved: Telegram password-reset feature deployed to production, incl. migration `20260906070000`. Feature branch conflicts in 6 backend + 1 frontend files. | 3 now; 1, 2, 5, 7, 11, 20, 22 on merge | |
 | 06-09-2026 | Gate 21 investigated: `formik-error-focus` peer range; `npm ci --legacy-peer-deps` reproducible, lockfile unchanged | — (21 → PASS) | |
 | 06-09-2026 | Gate 22 proof added as `migrations/auth_stage0a_migrations.test.js`; upstream migration reviewed | — (22 plan → PASS) | |
+| 06-09-2026 | Gate 5 tooling rewritten for RDS (defaults-file credentials, MySQL 8.4 client, verified dump, isolated restore, migration rehearsal); `break-glass.js` NODE_ENV crash fixed; `isDev()`-in-production finding recorded | — (5 unchanged: NOT YET VERIFIED) | |
 | 06-09-2026 | Production Telegram moved to new bot `@DailyNeedsBot` via `.env`; old bot webhook deleted, removed from groups; old token NOT revoked (BotFather not ours). Owner decision on reset architecture recorded. | 6 → PARTIAL; 24 confirmed; 19A unblocked | 06-09-2026 |
 | 06-09-2026 | **Merged `origin/main-autodeploy` into the feature branch (both repos)**; C1–C4 applied; `passwordReset.stage0a.test.js` added; protection suite extended; frontend rebuilt | 1, 2, 3, 7, 8, 11, 20, 21, 22, 24 re-evaluated → PASS; 23 stays yours; 6 marked URGENT | 06-09-2026 |
 
