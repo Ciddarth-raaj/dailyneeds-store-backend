@@ -965,6 +965,104 @@ section C is non-empty or a `user_type 2` duplicate exists on a non-admin
 employee. Either way it must be resolved before the UNIQUE key, not before
 Deployment A.
 
+### 5.10 Gates 13 and 14 — production results, code investigation, verdicts (06-09-2026)
+
+**Gate 13 result (production data, `dnds_rehearsal`):** 471 active SHA-1
+accounts; **468 on the provisioning default `<employee_id>@123`**; 0
+`user_type 2` accounts on any known default.
+
+*How Stage 0A handles them.* Until this change, Stage 0A upgraded a proven
+legacy password to scrypt on login (`AUTH_HASH_ON_LOGIN`, Deployment B)
+but deliberately did **not** judge it; the plan relied on running
+`flag-default-passwords.sql` per branch by hand. That would have meant
+flagging 468 accounts through manual batches. Replaced by **login-time
+detection** (`usecase/user.js`, `AUTH_FLAG_WEAK_ON_LOGIN`, default on):
+after the password is verified, and only then, it is run through the
+shared policy (`<employee_id>@123`, username, mobile, historical defaults,
+too short, too common). A failing verdict sets
+`must_change_password = 1, password_flag_reason = 'weak_at_login'` and
+audits `password_flagged` with a category only. Nothing is reset, nothing
+is stored or logged, a flagging failure cannot fail a correct login, an
+already-flagged account is left alone, the system account is exempt, and a
+*wrong* password is never evaluated. Effect per deployment:
+
+| Deployment | What the 468 experience |
+| --- | --- |
+| A (flag on, enforcement off) | log in as today; the row is flagged silently; `must_change_password: true` is returned in the login response (frontend already shows the forced-change screen when it is set — `pages/_app.js`); token carries no `pwc`, nothing is confined |
+| B (`AUTH_ENFORCE_PASSWORD_CHANGE=true`) | next login confined to change-password until a policy-compliant password is set; the new password is scrypt |
+| Also with `AUTH_HASH_ON_LOGIN` | the default is re-hashed to scrypt *and* flagged in the same login |
+
+Tests: `usecase/user.login.test.js` "gate 13" (12 cases: five categories
+flagged with login still 200, strong not flagged, idempotent, `pwc` only
+with enforcement, flag+hash together, flagging failure harmless, wrong
+password never judged, system account exempt, flag off = no-op).
+`flag-default-passwords.sql` stays as an optional accelerator for accounts
+that never log in.
+
+**Gate 14 result:** one duplicated `employee_id` (1: `user_id 1`
+`9943800000` and `user_id 198` `purchase_api`, both `user_type 2`, both
+active); `active login on inactive employee = 249`; no duplicate
+usernames; no orphans reported.
+
+*`purchase_api`.* The string appears **nowhere** in either repository —
+code, docs, migrations, any branch, any commit. What the code does show:
+`POST /tally/gst-purchase` is a token-protected endpoint documented for an
+external Tally integration (`docs/gst-tally-purchase-api.md`:
+"DailyNeeds will issue a dedicated token … does not expire"), and the
+application's own login issues 1-day tokens. So `purchase_api` is the
+account that non-expiring integration token was minted from (with a
+private key that was, until Stage 0A, committed to git) — a **service
+account** created by hand, attached to employee 1 because `user.employee_id`
+had to point somewhere. Nothing logs in as it; the integration presents
+the pre-minted legacy token. Consequences:
+
+- Through Deployment A it keeps working: the legacy path resolves
+  `id=198`, checks the row is active, employee-linked (1) and, now, that
+  employee 1 is active. `user_type 2` bypasses permission checks.
+- Reclassifying it as a Stage 0A *system* account (`employee_id NULL`,
+  `is_system_account = 1`) would **break the integration**: legacy tokens
+  are refused for system accounts by design, and system-account logins
+  raise break-glass alerts. Do not do that.
+- The right separation, **without touching `employee_id`**, is a distinct
+  service-account kind (Stage 0B): a row with its own long-lived token
+  (issued by a script under `scripts/auth/`, `sub = 198`, no
+  `employee_id` claim), no login, no permission bypass beyond the tally
+  route, and `user.employee_id` set NULL only once the integration holds
+  the new token. Until then: leave the row as is; after Deployment A,
+  re-mint its token under the externalised key and retire the old one
+  (`token_valid_from` on user 198 once `AUTH_TOKEN_VALID_FROM_ENABLED`).
+- Its password is not a known default (gate 13 headline). Its risk today
+  is the non-expiring token minted with a key that was in git — which is
+  the JWT-rotation item already on the ledger, not a data change.
+
+*249 active logins on inactive employees.* Can they authenticate today?
+**No.** The deployed login query is `WHERE u.status = 1 AND ne.status = 1
+…`, so an inactive employee cannot obtain a token; Stage 0A's usecase
+refuses the same case explicitly (`login_inactive;employee_inactive`).
+What neither did: refuse a token that was **already issued** before the
+employee was deactivated (up to 1 day), and Digisme's nightly sync flips
+`new_employee.status` without touching `user.status`, which is why the
+249 rows exist. Smallest fix, now on the branch
+(`middlewares/auth.js`, `AUTH_EMPLOYEE_STATUS_CHECK`, default on): every
+request from an employee-linked account is checked against
+`new_employee.status` through the existing cached session-state lookup
+(`getSessionState` now joins the employee; cache = `tokenValidFromCacheMs`,
+60 s); a departed employee's live session is refused with
+`EMPLOYEE_INACTIVE`; system accounts are judged by `user.status` only;
+the check fails closed. **Reactivation:** because `user.status` is never
+touched, HR setting the employee active again reinstates login and
+sessions with no user-row change (tested). The 249 rows therefore need
+**no production cleanup for security**; disabling them would in fact
+break reactivation. They are listed for the later UNIQUE/hygiene pass.
+Tests: `middlewares/auth.test.js` "gate 14" (8 cases).
+
+**Verdicts**
+
+| Gate | Verdict | Basis |
+| --- | --- | --- |
+| 13 | **PASS (code) — no manual reset required** | 468 defaults are detected and flagged at their next login; enforcement is Deployment B's switch. Production data unchanged. |
+| 14 | **PASS (code) — cleanup deferred, not blocking** | inactive employees cannot log in and, with this change, cannot keep a session; the duplicate is a hand-made service account whose only real risk is its legacy non-expiring token (already a ledger item); `purchase_api` must not be reclassified before Stage 0B; no data change before Deployment A. |
+
 ### 5.8 Other findings from this review (recorded, not all fixed)
 
 | Finding | Status |

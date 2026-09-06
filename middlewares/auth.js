@@ -539,6 +539,13 @@ function resolveIdentity(decoded) {
   return null;
 }
 
+/** Session-state row for a non-system account: the employee must exist and be active. */
+function employeeActive(state) {
+  if (Number(state.is_system_account) === 1) return true;
+  if (state.employee_id === null || state.employee_id === undefined) return false;
+  return Number(state.employee_status) === 1;
+}
+
 function create(deps = {}) {
   const config = deps.config || authConfig;
   const userUsecase = deps.userUsecase || null;
@@ -640,6 +647,26 @@ function create(deps = {}) {
           return deny(res, 403, "Access Denied");
         }
         if (Number(state.employee_id) !== employeeId) return deny(res, 403, "Access Denied");
+        if (config.login.employeeStatusCheck && !employeeActive(state)) {
+          return deny(res, 403, "Access Denied", { error: "EMPLOYEE_INACTIVE" });
+        }
+      } catch (err) {
+        return deny(res, 500, "An error occurred !");
+      }
+    }
+
+    // Gate 14: an employee who has left (new_employee.status <> 1) keeps a
+    // valid token and a user row with status 1 - the login query refuses
+    // them, but nothing refused their existing session. Now every request
+    // from an employee-linked account is checked against the employee's
+    // status (cached for tokenValidFromCacheMs). System accounts have no
+    // employee and are judged by user.status alone. Reactivating the
+    // employee reinstates access with no change to the user row.
+    if (!legacy && userUsecase && config.login.employeeStatusCheck && !isSystemAccount) {
+      try {
+        const state = await loadSession(userId);
+        if (!state || Number(state.status) !== 1) return deny(res, 403, "Access Denied");
+        if (!employeeActive(state)) return deny(res, 403, "Access Denied", { error: "EMPLOYEE_INACTIVE" });
       } catch (err) {
         return deny(res, 500, "An error occurred !");
       }

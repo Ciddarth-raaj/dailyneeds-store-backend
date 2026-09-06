@@ -46,6 +46,7 @@ const makeConfig = (over = {}) => ({
     hashOnLogin: false,
     rejectLegacy: false,
     enforcePasswordChange: false,
+    flagWeakOnLogin: true,
     policy: { minLength: 8, maxLength: 128, breakGlassMinLength: 20 },
     ...(over.password || {}),
   },
@@ -63,6 +64,7 @@ const makeConfig = (over = {}) => ({
     },
     tokenValidFromEnabled: false,
     tokenValidFromCacheMs: 0,
+    employeeStatusCheck: true,
     ...(over.login ? { ...over.login, lockout: undefined } : {}),
     ...(over.login && over.login.lockout === undefined ? {} : {}),
   },
@@ -235,6 +237,7 @@ function fakeUserRepo(rows) {
         token_valid_from: r.token_valid_from,
         must_change_password: r.must_change_password,
         is_system_account: r.is_system_account,
+        employee_status: r.employee_status === undefined ? null : r.employee_status,
       };
     },
     async getIpPolicy(userId) {

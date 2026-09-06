@@ -2,6 +2,18 @@ const crypto = require("crypto");
 const jwt = require("../services/jwt");
 const passwordService = require("../services/password");
 const policy = require("../utils/password_policy");
+
+/** Short audit category for a policy verdict. Reasons never contain the password. */
+function weakCategory(reason) {
+  const r = String(reason || "");
+  if (/known default/i.test(r)) return "known_default";
+  if (/username, employee code, mobile/i.test(r)) return "identity";
+  if (/mobile/i.test(r)) return "mobile";
+  if (/too common/i.test(r)) return "common";
+  if (/at least/i.test(r)) return "too_short";
+  if (/repeated/i.test(r)) return "repeated";
+  return "policy";
+}
 const authConfig = require("../config/auth");
 const {
   isAccessAllowed,
@@ -234,9 +246,33 @@ class UserUsecase {
       return { ...IP_NOT_ALLOWED, ip: clientIp };
     }
 
+    // Gate 13: the password has just been proven, so this is the one moment
+    // it can be judged without storing it. A predictable one (the historical
+    // <employee_id>@123 default, the username, the mobile number, a known
+    // default, too short) flags the account for a change. Only the verdict's
+    // category is audited; the password itself never leaves this function.
+    // Flagging failure must not fail a correct login.
+    if (!isSystem && cfg.password.flagWeakOnLogin && Number(row.must_change_password) !== 1) {
+      const verdict = policy.check(password, {
+        username: row.username,
+        employeeId: row.employee_id,
+        mobile: row.primary_contact_number,
+      });
+      if (!verdict.ok) {
+        try {
+          await this.userRepo.setMustChangePassword(row.user_id, "weak_at_login");
+          row.must_change_password = 1;
+          await this.audit("password_flagged", { ...audited, detail: `weak_at_login;${weakCategory(verdict.reason)}` });
+        } catch (err) {
+          // the account still logs in; the flag is retried on the next login
+        }
+      }
+    }
+
     // B1: upgrade a legacy credential now that it has been proven. The
-    // must_change_password flag is untouched — a predictable password stays
-    // predictable however it is hashed.
+    // must_change_password flag is untouched here — a predictable password
+    // stays predictable however it is hashed (that is what the gate 13
+    // check above is for).
     if (algo === this.passwords.LEGACY_ALGO && cfg.password.hashOnLogin && !isSystem) {
       try {
         const modern = await this.passwords.hash(password);

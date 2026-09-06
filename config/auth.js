@@ -96,6 +96,14 @@ const password = {
   // Deployment B: a token carrying must_change_password is confined to the
   // change-password endpoints.
   enforcePasswordChange: bool("AUTH_ENFORCE_PASSWORD_CHANGE", false),
+  // Gate 13: on every successful login, run the password that was just
+  // proven through the shared policy (provisioning default <employee_id>@123,
+  // username, mobile, historical defaults, too short) and, if it fails,
+  // flag the account must_change_password. Flagging changes nothing until
+  // enforcePasswordChange is on; then the next login is confined to the
+  // change-password screen. Nothing is ever mass-reset and no password is
+  // stored or logged - the check happens in memory during the login.
+  flagWeakOnLogin: bool("AUTH_FLAG_WEAK_ON_LOGIN", true),
   policy: {
     minLength: int("AUTH_PASSWORD_MIN_LENGTH", 8),
     maxLength: 128,
@@ -123,6 +131,11 @@ const login = {
   },
   // C4: reject tokens issued before the user's token_valid_from.
   tokenValidFromEnabled: bool("AUTH_TOKEN_VALID_FROM_ENABLED", false),
+  // Gate 14: an authenticated request from an employee account is refused
+  // when that employee is no longer active in new_employee, even though the
+  // token is still valid and user.status is still 1. Uses the same cached
+  // session-state lookup as token_valid_from (tokenValidFromCacheMs).
+  employeeStatusCheck: bool("AUTH_EMPLOYEE_STATUS_CHECK", true),
   tokenValidFromCacheMs: int("AUTH_TOKEN_VALID_FROM_CACHE_MS", 60 * 1000),
 };
 

@@ -372,3 +372,100 @@ describe("logout and revocation (C4, C5)", () => {
     assert.ok(authLog.has("logout"));
   });
 });
+
+
+describe("gate 13 — a proven-weak password is flagged at login, never reset or logged", () => {
+  const rowsOn = (password, extra = {}) => ({ "1003": F.employeeRow({ username: "1003", employee_id: 1003, primary_contact_number: "9000000000", password: F.legacyHash(password), password_algo: "sha1", ...extra }) });
+
+  for (const [pw, category] of [["1003@123", "known_default"], ["1003", "too_short"], ["9000000000", "identity"], ["short1", "too_short"], ["password", "common"]]) {
+    it(`flags ${JSON.stringify(pw)} (${category}) and the login still succeeds`, async () => {
+      const rows = rowsOn(pw);
+      const { usecase, userRepo, authLog } = build(rows);
+      const r = await usecase.login("1003", pw, IP);
+      assert.equal(r.code, 200, "login must not be blocked by flagging");
+      assert.equal(rows["1003"].must_change_password, 1);
+      assert.equal(rows["1003"].password_flag_reason, "weak_at_login");
+      assert.equal(r.must_change_password, true);
+      const ev = authLog.events.find((e) => e.event === "password_flagged");
+      assert.ok(ev, "audited");
+      assert.equal(ev.detail, `weak_at_login;${category}`);
+      // the literal password must appear nowhere in what was persisted: audit
+      // details and every repository argument (event names are constants)
+      const persisted = JSON.stringify(authLog.events.map((e) => [e.detail, e.userId, e.username])) + JSON.stringify(userRepo.calls.map((c) => c.slice(1)));
+      if (!["1003", "9000000000"].includes(pw)) { // these two ARE the identifiers, which legitimately appear
+        assert.equal(persisted.includes(pw), false, "the password never appears in audit details or repository arguments");
+      }
+    });
+  }
+
+  it("a strong password is not flagged", async () => {
+    const rows = rowsOn("blue-kettle-42");
+    const { usecase, authLog } = build(rows);
+    assert.equal((await usecase.login("1003", "blue-kettle-42", IP)).code, 200);
+    assert.equal(rows["1003"].must_change_password, 0);
+    assert.equal(authLog.has("password_flagged"), false);
+  });
+
+  it("an already-flagged account is not re-flagged (idempotent, no extra audit)", async () => {
+    const rows = rowsOn("1003@123", { must_change_password: 1, password_flag_reason: "default_scan" });
+    const { usecase, userRepo, authLog } = build(rows);
+    assert.equal((await usecase.login("1003", "1003@123", IP)).code, 200);
+    assert.equal(rows["1003"].password_flag_reason, "default_scan");
+    assert.equal(userRepo.calls.some((c) => c[0] === "setMustChangePassword"), false);
+    assert.equal(authLog.has("password_flagged"), false);
+  });
+
+  it("with enforcement on, the issued token carries pwc so the session is confined to change-password", async () => {
+    const rows = rowsOn("1003@123");
+    const { usecase, jwt } = build(rows, { config: { password: { enforcePasswordChange: true } } });
+    const r = await usecase.login("1003", "1003@123", IP);
+    assert.equal(r.code, 200);
+    const decoded = await jwt.verify(r.token);
+    assert.equal(decoded.pwc, true);
+  });
+
+  it("with enforcement off (Deployment A), the token carries no pwc and nothing is confined", async () => {
+    const rows = rowsOn("1003@123");
+    const { usecase, jwt } = build(rows);
+    const r = await usecase.login("1003", "1003@123", IP);
+    const decoded = await jwt.verify(r.token);
+    assert.equal(decoded.pwc, undefined);
+  });
+
+  it("flagging + hash-on-login together: the default is upgraded to scrypt AND flagged", async () => {
+    const rows = rowsOn("1003@123");
+    const { usecase } = build(rows, { config: { password: { hashOnLogin: true } } });
+    assert.equal((await usecase.login("1003", "1003@123", IP)).code, 200);
+    assert.equal(rows["1003"].password_algo, "scrypt");
+    assert.equal(rows["1003"].must_change_password, 1);
+  });
+
+  it("a flagging failure does not fail a correct login", async () => {
+    const rows = rowsOn("1003@123");
+    const { usecase, userRepo } = build(rows);
+    userRepo.setMustChangePassword = async () => { throw new Error("db down"); };
+    assert.equal((await usecase.login("1003", "1003@123", IP)).code, 200);
+  });
+
+  it("a wrong password is never evaluated for weakness (no flag, no audit)", async () => {
+    const rows = rowsOn("blue-kettle-42");
+    const { usecase, authLog } = build(rows);
+    assert.equal((await usecase.login("1003", "1003@123", IP)).code, 204); // BAD_CREDENTIALS keeps the production shape
+    assert.equal(rows["1003"].must_change_password, 0);
+    assert.equal(authLog.has("password_flagged"), false);
+  });
+
+  it("the system account is never flagged (its policy is the break-glass one)", async () => {
+    const rows = { bg: F.systemRow({ user_id: 99, username: "breakglass", password_hash: await F.hashCheap("a-very-long-break-glass-secret-2026") }) };
+    const { usecase, authLog } = build(rows);
+    assert.equal((await usecase.login("breakglass", "a-very-long-break-glass-secret-2026", IP)).code, 200);
+    assert.equal(authLog.has("password_flagged"), false);
+  });
+
+  it("with AUTH_FLAG_WEAK_ON_LOGIN off, nothing is flagged", async () => {
+    const rows = rowsOn("1003@123");
+    const { usecase } = build(rows, { config: { password: { flagWeakOnLogin: false } } });
+    assert.equal((await usecase.login("1003", "1003@123", IP)).code, 200);
+    assert.equal(rows["1003"].must_change_password, 0);
+  });
+});

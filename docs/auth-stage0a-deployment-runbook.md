@@ -93,8 +93,8 @@ Status carried over from the readiness report, then corrected for §0. Every row
 | 10 | Legacy-token staging transition, including ID-collision fixture | NOT YET VERIFIED | | | Isolated equivalent PASS (`legacy_transition.test.js`); staging with a DB and a browser not done. |
 | 11 | NULL-password fail-closed | PASS *(merged tree)* | Claude / automated tests | 06-09-2026 | `services/password.nullable.test.js` 6/6 after the merge. |
 | 12 | trust proxy / forwarded-header spoofing, verified against real nginx | NOT YET VERIFIED | | | Code-level PASS (`routes/proxy.test.js`; `trust proxy` = loopback, `true` refused). Real nginx not verified. |
-| 13 | Default-password scan on restored snapshot | NOT YET VERIFIED — **← NEXT** | | | `scripts/auth/gate13-14-scans.sh dnds_rehearsal` (readiness §5.9). Scratch schema only; identifiers + categories; report 600, destroyed after recording. |
-| 14 | Account-integrity scan on restored snapshot | NOT YET VERIFIED — **← NEXT** | | | Same script. Gate 5 already surfaced `duplicate_employee_ids = 1`: diagnosed by `duplicate-employee-diagnosis.sql`; classification rules in readiness §5.9. |
+| 13 | Default-password scan on restored snapshot | **PASS (code)** | Administrator (scan) / Claude (fix) | 06-09-2026 | 471 active SHA-1, 468 on `<employee_id>@123`, 0 admins on a default. Handled by login-time flagging (`AUTH_FLAG_WEAK_ON_LOGIN`, 12 tests); no manual reset. Readiness §5.10. |
+| 14 | Account-integrity scan on restored snapshot | **PASS (code) — cleanup deferred** | Administrator (scan) / Claude (analysis + fix) | 06-09-2026 | duplicate = `purchase_api` (hand-made Tally service account on employee 1; keep as is until Stage 0B; do not reclassify as system); 249 inactive employees cannot log in and now cannot keep a session (`AUTH_EMPLOYEE_STATUS_CHECK`, 8 tests); reactivation works with no user-row change. Readiness §5.10. |
 | 15 | Feature flags startup-stable | PASS | Claude / code audit | 06-09-2026 | commit `859e519`; implementation doc §20b |
 | 16 | Absent-flag defaults reviewed and intentional | PASS | Claude / code audit | 06-09-2026 | commit `859e519`; implementation doc §20b |
 | 17A | External JWT key loading proven **in staging** using the CURRENT key | NOT YET VERIFIED | | | Mechanism proven in tests via env-pointed files. Production equivalent is P3. |
@@ -276,7 +276,9 @@ The rule is roll back first, investigate afterwards.
 | Obtain BotFather control of `@dailyneeds_test_bot` and `/revoke` (or delete) it | Owner | as soon as possible; not a Deployment A blocker | |
 | ~~Decide the two-reset-systems reconciliation~~ | Owner | | 06-09-2026 — both kept, one engine (readiness §0.7) |
 | ~~Gate 5: run `scripts/auth/gate5-rehearsal.sh`~~ | Administrator | | 06-09-2026 — PASS (restore 143 s, 0 mismatches, migrations up/down clean) |
-| Gates 13 + 14: `scripts/auth/gate13-14-scans.sh dnds_rehearsal`, send back the two headline lines and the duplicate-diagnosis rows | Administrator | next | |
+| ~~Gates 13 + 14 scans~~ | Administrator | | 06-09-2026 — done; verdicts in readiness §5.10 |
+| After Deployment A: re-mint the Tally integration token for `purchase_api` under the externalised key; retire the old one | Owner / Administrator | after Deployment A, with the JWT rotation | |
+| Stage 0B: service-account kind for `purchase_api` (detach from employee 1 without renumbering) | — | Stage 0B | |
 | Confirm which `database.json` environment the deploy's bare `db-migrate up` selects on the host (keys only) | Administrator | before deployment night (gate 4) | |
 | Set `NODE_ENV=production` in PM2 after verifying the "production" config block — separate change, not Stage 0A | Owner | after Deployment A | |
 | Disable the seeded weak admin account | | Deployment date `______`, and only after **all four**: P1 PASS, P2 PASS, normal owner/admin login PASS, rollback access confirmed | |
@@ -296,6 +298,7 @@ The seeded admin is the largest live exposure right now: `user_type 2` with a kn
 | 06-09-2026 | `main-autodeploy` (both repos) moved: Telegram password-reset feature deployed to production, incl. migration `20260906070000`. Feature branch conflicts in 6 backend + 1 frontend files. | 3 now; 1, 2, 5, 7, 11, 20, 22 on merge | |
 | 06-09-2026 | Gate 21 investigated: `formik-error-focus` peer range; `npm ci --legacy-peer-deps` reproducible, lockfile unchanged | — (21 → PASS) | |
 | 06-09-2026 | Gate 22 proof added as `migrations/auth_stage0a_migrations.test.js`; upstream migration reviewed | — (22 plan → PASS) | |
+| 06-09-2026 | Gates 13/14 run on production data; login-time weak-password flagging and per-request employee-status check added (auth code changed) | 1, 2, 7, 11, 20 re-run → PASS (429 tests); 13, 14 → PASS (code) | 06-09-2026 |
 | 06-09-2026 | **Gate 5 PASS on production data** (restore 143 s, 144 tables, 0 mismatches, four migrations up/no-op/down×4/up clean, 184 s total). Gate 22 now proven on real data. Gate 13/14 scan wrapper added and tested locally. | — (5 → PASS, 22 → PASS on data) | 06-09-2026 |
 | 06-09-2026 | First gate 5 run on Lightsail (`a4a79ed`): both dumps created and full dump verified (144 tables, 22 s), then a false `FAIL: auth dump missing table user` from a `grep -q`/SIGPIPE/pipefail verifier bug; no restore ran. Verifier fixed and re-tested; the `20260906-174727` artefacts are reusable with `--skip-backup`. | — | |
 | 06-09-2026 | Gate 5 tooling finalised as one orchestrator (`gate5-rehearsal.sh`) and tested end to end against MySQL 8 with RDS-like restrictions; six real-world failure modes found and handled; MySQL 8.4.11 client confirmed installed on Lightsail | — (5 unchanged until run on Lightsail) | |

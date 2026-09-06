@@ -98,7 +98,7 @@ describe("auth middleware — identity shape (A3, C3)", () => {
 
 describe("auth middleware — token_valid_from (C4)", () => {
   const stateFor = (validFrom, status = 1) => ({
-    getSessionState: async () => ({ user_id: 7, employee_id: 1003, status, token_valid_from: validFrom, must_change_password: 0, is_system_account: 0 }),
+    getSessionState: async () => ({ user_id: 7, employee_id: 1003, status, token_valid_from: validFrom, must_change_password: 0, is_system_account: 0, employee_status: 1 }),
   });
   const cfg = (over) => F.config({ login: { tokenValidFromEnabled: true, tokenValidFromCacheMs: 0 }, ...over });
 
@@ -168,5 +168,79 @@ describe("43. existing designation/store permission behaviour still works", () =
     const adminToken = await jwtService.sign({ auth_ver: 2, id: 99, user_type: 2, sys: true }, "1h", { subject: "99" });
     const admin = await run(auth.create(), reqFor(adminToken));
     assert.equal(await permissions.has(admin.req, "anything"), true, "user_type 2 still bypasses");
+  });
+});
+
+
+describe("auth middleware — employee status on every request (gate 14)", () => {
+  const stateWith = (employee_status, over = {}) => ({
+    getSessionState: async () => ({ user_id: 7, employee_id: 1003, status: 1, token_valid_from: null, must_change_password: 0, is_system_account: 0, employee_status, ...over }),
+  });
+  const v2 = () => jwtService.sign({ auth_ver: 2, id: 7, employee_id: 1003, user_type: 1 }, "1h", { subject: "7" });
+  const legacy = () => jwtService.sign({ id: 7, employee_id: 1003, user_type: 1 }, "1h");
+  const cfg = (over = {}) => F.config({ login: { employeeStatusCheck: true, tokenValidFromCacheMs: 0, ...over } });
+
+  it("an inactive employee's still-valid v2 token is refused with EMPLOYEE_INACTIVE", async () => {
+    const mw = auth.create({ userUsecase: stateWith(0), config: cfg() });
+    const { nexted, res } = await run(mw, reqFor(await v2()));
+    assert.equal(nexted, false);
+    assert.equal(res.body.error, "EMPLOYEE_INACTIVE");
+  });
+
+  it("an inactive employee's legacy token is refused too", async () => {
+    const mw = auth.create({ userUsecase: stateWith(0), config: cfg() });
+    const { nexted, res } = await run(mw, reqFor(await legacy()));
+    assert.equal(nexted, false);
+    assert.equal(res.body.error, "EMPLOYEE_INACTIVE");
+  });
+
+  it("an employee whose row is missing (orphan login) is refused", async () => {
+    const mw = auth.create({ userUsecase: stateWith(null), config: cfg() });
+    assert.equal((await run(mw, reqFor(await v2()))).nexted, false);
+  });
+
+  it("an active employee passes, and reactivation restores access with no user-row change", async () => {
+    let status = 0;
+    const uc = { getSessionState: async () => ({ user_id: 7, employee_id: 1003, status: 1, token_valid_from: null, must_change_password: 0, is_system_account: 0, employee_status: status }) };
+    const mw = auth.create({ userUsecase: uc, config: cfg() });
+    const token = await v2();
+    assert.equal((await run(mw, reqFor(token))).nexted, false);
+    status = 1; // HR reactivates the employee (new_employee.status = 1); user.status was never touched
+    assert.equal((await run(mw, reqFor(token))).nexted, true);
+  });
+
+  it("a system account has no employee and is judged by user.status only", async () => {
+    const uc = { getSessionState: async () => ({ user_id: 99, employee_id: null, status: 1, token_valid_from: null, must_change_password: 0, is_system_account: 1, employee_status: null }) };
+    const mw = auth.create({ userUsecase: uc, config: cfg() });
+    const token = await jwtService.sign({ auth_ver: 2, id: 99, user_type: 2, sys: true }, "1h", { subject: "99" });
+    assert.equal((await run(mw, reqFor(token))).nexted, true);
+  });
+
+  it("the check is cached for tokenValidFromCacheMs and invalidate() clears it", async () => {
+    let calls = 0; let status = 1;
+    const uc = { getSessionState: async () => { calls++; return { user_id: 7, employee_id: 1003, status: 1, token_valid_from: null, must_change_password: 0, is_system_account: 0, employee_status: status }; } };
+    const mw = auth.create({ userUsecase: uc, config: cfg({ tokenValidFromCacheMs: 60000 }) });
+    const token = await v2();
+    assert.equal((await run(mw, reqFor(token))).nexted, true);
+    status = 0;
+    assert.equal((await run(mw, reqFor(token))).nexted, true, "served from cache");
+    assert.equal(calls, 1);
+    mw.invalidate(7);
+    assert.equal((await run(mw, reqFor(token))).nexted, false, "fresh state after invalidate");
+  });
+
+  it("fails closed when the session state cannot be read", async () => {
+    const mw = auth.create({ userUsecase: { getSessionState: async () => { throw new Error("db down"); } }, config: cfg() });
+    const { nexted, res } = await run(mw, reqFor(await v2()));
+    assert.equal(nexted, false);
+    assert.equal(res.statusCode, 500);
+  });
+
+  it("with the flag off, behaviour is exactly as before (no session lookup for a v2 token)", async () => {
+    let calls = 0;
+    const uc = { getSessionState: async () => { calls++; return { employee_status: 0, status: 1, is_system_account: 0, employee_id: 1003 }; } };
+    const mw = auth.create({ userUsecase: uc, config: F.config({ login: { employeeStatusCheck: false, tokenValidFromEnabled: false } }) });
+    assert.equal((await run(mw, reqFor(await v2()))).nexted, true);
+    assert.equal(calls, 0);
   });
 });
