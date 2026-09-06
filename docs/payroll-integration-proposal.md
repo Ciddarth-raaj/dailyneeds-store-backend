@@ -1,5 +1,13 @@
 # Payroll module — integration proposal
 
+> **Superseded by [payroll-target-architecture.md](payroll-target-architecture.md).**
+>
+> This document assumed Digisme stayed in place, and designed payroll around a
+> permanent Digisme integration. That assumption is no longer correct: Digisme
+> is being discontinued and dnds.co.in will own the complete employee
+> lifecycle, attendance, shifts and payroll. Read the target architecture
+> instead. This is kept only as a record of the earlier thinking.
+
 A proposal only. Nothing here is implemented.
 
 Read [hr-schema.md](hr-schema.md) first — this document assumes it. The short
