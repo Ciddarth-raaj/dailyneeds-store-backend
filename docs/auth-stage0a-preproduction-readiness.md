@@ -16,6 +16,15 @@ Vocabulary: **PASS** · **FAIL** · **NOT YET TESTED** · **WAITING FOR ADMINIST
 
 # DEPLOYMENT A = NO-GO
 
+**Update 06-09-2026 (later the same day):** `main-autodeploy` has moved under
+the feature branch in both repositories — a Telegram password-reset feature
+was deployed to production with its own migration — and the feature branch
+now **conflicts** in six backend and one frontend file. Gate 3 is reset to
+NOT YET VERIFIED; gates 1, 2, 7, 11, 20 and 22 reset the moment the merge
+is performed. Details, the four security reconciliations the merge needs,
+and the working ledger are in **`auth-stage0a-deployment-runbook.md` §0**.
+The table below is the state at commit `859e519`, before that drift.
+
 Nine of twenty gates are not PASS. None is FAIL. Every non-PASS gate needs
 either production access this environment does not have (a database
 snapshot, the server, the nginx configuration, BotFather) or an
@@ -30,7 +39,7 @@ code-level gates all pass with raw evidence (§4).
 | --- | --- | --- | --- |
 | 1 | Legacy JWT compatibility | **PASS** | `middlewares/auth.compat.test.js` tests 1–6; `middlewares/legacy_transition.test.js` (token minted by the actual `origin/main-autodeploy` code). Design in implementation doc §7a. |
 | 2 | Legacy token cannot resolve system account | **PASS** | `auth.compat.test.js` test 7 (shape, claim and database refusals, with and without the DB check); `legacy_transition.test.js` case 9. |
-| 3 | Stage-0A-only branch diff | **PASS — with a documented exception** | Backend: 58 files vs `origin/main-autodeploy`; **zero** payroll/HR/attendance/shift/Digisme *code*. Four documentation-only files are not Stage 0A (`docs/hr-schema.md`, `docs/payroll-target-architecture.md`, `docs/payroll-integration-proposal.md`, `docs/authentication-decoupling-audit.md`). Frontend: 9 files, all Stage 0A. Classification and isolation proposal in §2. |
+| 3 | Stage-0A-only branch diff | **NOT YET VERIFIED** (was PASS at `859e519`; reset by upstream drift — runbook §0) | Backend: 58 files vs `origin/main-autodeploy`; **zero** payroll/HR/attendance/shift/Digisme *code*. Four documentation-only files are not Stage 0A (`docs/hr-schema.md`, `docs/payroll-target-architecture.md`, `docs/payroll-integration-proposal.md`, `docs/authentication-decoupling-audit.md`). Frontend: 9 files, all Stage 0A. Classification and isolation proposal in §2. |
 | 4 | Deployment workflow / failure semantics reviewed | **WAITING FOR ADMINISTRATOR** | The GitHub Actions workflows in both repositories are fully analysed (§3). Not verifiable from a checkout: whether anything *outside* the repositories also reacts to `main-autodeploy` (GitHub repository webhooks, self-hosted runners, a second CI). Absence in the checkout is not evidence. **Plus a separate HARD GATE**: a migration failure leaves the old process running on a partially migrated schema; a later manual `pm2 reload` would start new code against it. Safer sequence proposed in §3.4 — must be adopted before GO. |
 | 5 | End-to-end restore rehearsal, recent snapshot | **NOT YET TESTED** | No database exists in this environment (no MySQL, no Docker daemon). Runbook and recording template in §5. |
 | 6 | Telegram token rotated | **WAITING FOR ADMINISTRATOR** | Code side done: the committed token is **removed from source**; `services/telegram.js` reads `TELEGRAM_BOT_TOKEN` only and disables itself with a logged error when absent. Revocation via BotFather, the new token in `.env`, a normal-notification receipt and the break-glass alert test are administrator actions (§6). |
