@@ -900,6 +900,71 @@ this gate is what allows the auth tables to be restored *in place*.
 7. Live schema untouched: `SHOW GRANTS` and the `migrations` head on `dnds_prod` identical before and after.
 8. No credential printed or on a command line; only `~/.stage0a/*.cnf` (600) hold them; `database.rehearsal.json` removed by the script.
 
+### 5.9 Gates 13 and 14 on the rehearsal copy (procedure and reading guide)
+
+**Result of gate 5 on production data (06-09-2026):** restore 143 s, 144
+tables, 0 mismatches, four migrations up / no-op / down×4 / up clean, 184 s
+total — **PASS**. `dnds_rehearsal` is left in the post-Stage-0A state.
+
+**One command** (from `~/stage0a-rehearsal`, after `git pull --ff-only`):
+
+```bash
+MYSQL_BIN_DIR="$HOME/mysql84/bin" scripts/auth/gate13-14-scans.sh dnds_rehearsal
+```
+
+It refuses any non-scratch name and the live schema, checks the copy is
+post-Stage-0A, statically verifies each SQL file neither selects a password
+column nor contains a write statement, then runs read-only:
+`default-password-scan.sql` (gate 13), `account-integrity-audit.sql` and
+`duplicate-employee-diagnosis.sql` (gate 14), plus one headline line per
+gate. The report goes to `~/db-backups/gate13-14-<stamp>.txt` (600); it
+holds account identifiers and categories only, never a password or hash
+(tested locally: zero 40-hex or scrypt strings in the report). Destroy it
+once the gate is recorded.
+
+**What to send back:** the two `headline` lines, the gate-13 per-branch
+summary table, and the duplicate-diagnosis rows (sections A–D). The full
+per-account list stays on the host.
+
+**Reading the duplicate `employee_id` (gate 14).** Facts established from
+the code, before the data is seen:
+
+- Authentication identity is the **`user_id`** (`sub` on v2 tokens, `id`
+  on legacy tokens); `employee_id` is cross-checked against *that* user row
+  (`middlewares/auth.js#resolveIdentity`). Two login rows on one employee
+  therefore cannot resolve to the wrong account and cannot cross into
+  another employee's session. **It is not a token-identity risk.**
+- Permissions are keyed by the employee's `designation_id`, so both rows
+  hold exactly the same permission set; the only privilege difference
+  possible is `user_type` (2 = bypasses permission checks) — section D
+  shows the highest `user_type` among the rows.
+- The Digisme sync cannot have created it: `createLoginIfNeeded` guards on
+  `WHERE NOT EXISTS (… employee_id = ?)`. It came from the manual
+  `POST /employee` path (`createLogin`, unguarded) or a direct database
+  edit — i.e. a second credential was deliberately or accidentally issued
+  for one person.
+- Stage 0A adds only non-unique indexes on `user.employee_id`; the UNIQUE
+  key planned for later (Stage 0.10) would be blocked by this row until
+  it is resolved.
+
+Classification from section B, one row per login:
+
+| Pattern seen | Reading | Action (after Deployment A, via the admin reset flow — never by editing production data now) |
+| --- | --- | --- |
+| both rows `status = 1`, different `username_convention` (one `employee_id_style`, one `mobile_style` / `text`) | the person was re-provisioned under a second username; both doors work | disable the row not in use (the one without `telegram_linked`, or the older `user_id` if neither), keep one |
+| one row on `provisioning_default_employee_id_suffix`, `siblings_with_identical_password = 0` | the unused door is still on the default password — this is the actual exposure | that row goes into the first forced-reset batch or is disabled |
+| `siblings_with_identical_password = 1` | same person, same password set twice | disable one |
+| section C non-empty | a username of this employee equals another employee's code or mobile | **cross-identity** — treat as a real risk, resolve before Deployment A |
+| `highest_user_type_among_rows = 2` while the other row is `1` | a duplicate carries admin bypass | disable the `user_type 2` duplicate first |
+| one row `status = 0` | historical, already closed | no action; note for the UNIQUE-key cleanup |
+
+Verdict rule: **legitimate historical condition** if section C is empty,
+`highest_user_type_among_rows` matches the employee's normal role, and at
+most one row is active or in use; **authentication identity risk** only if
+section C is non-empty or a `user_type 2` duplicate exists on a non-admin
+employee. Either way it must be resolved before the UNIQUE key, not before
+Deployment A.
+
 ### 5.8 Other findings from this review (recorded, not all fixed)
 
 | Finding | Status |
