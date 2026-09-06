@@ -95,7 +95,7 @@ LAST_MIGRATION="$(Q "SELECT name FROM \`$DB\`.migrations ORDER BY run_on DESC, i
 echo "tables=$TABLE_COUNT views=$VIEW_COUNT routines=$ROUTINE_COUNT triggers=$TRIGGER_COUNT events=$EVENT_COUNT size_mb=$DATA_MB last_migration=$LAST_MIGRATION"
 
 for t in user new_employee permissions all_permissions designation outlets migrations; do
-  Q "SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA='$DB' AND TABLE_NAME='$t'" | grep -q 1 || fail "expected table $t missing in $DB"
+  [ "$(Q "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='$DB' AND TABLE_NAME='$t'")" = "1" ] || fail "expected table $t missing in $DB"
 done
 
 # Routines: mysqldump --routines needs SHOW CREATE FUNCTION/PROCEDURE to succeed
@@ -192,11 +192,17 @@ if [ "$ROUTINES_FLAG" = "--routines" ] && [ "$ROUTINE_COUNT" != "0" ]; then
   [ "$RT_IN_DUMP" -ge "$ROUTINE_COUNT" ] || fail "full dump has $RT_IN_DUMP routines, server has $ROUTINE_COUNT"
   echo "  ok: $RT_IN_DUMP routine definitions present"
 fi
-if zcat "$FULL_FILE" | grep -q '^USE \|^CREATE DATABASE'; then fail "dump contains USE/CREATE DATABASE — must not (isolated restore safety)"; fi
+# NOTE: never `zcat | grep -q` here — grep -q exits on the first match, zcat
+# dies of SIGPIPE, and under pipefail the check fails on a perfectly good
+# dump (seen on production 06-09-2026: "auth dump missing table user").
+# Every check reads the whole stream once and compares counts.
+USE_IN_DUMP="$(zcat "$FULL_FILE" | grep -c '^USE \|^CREATE DATABASE' || true)"
+[ "$USE_IN_DUMP" = "0" ] || fail "dump contains USE/CREATE DATABASE — must not (isolated restore safety)"
+AUTH_TABLES_IN_DUMP="$(zcat "$AUTH_FILE" | grep -oE '^CREATE TABLE `[^`]+`' | sed -E 's/^CREATE TABLE `([^`]+)`/\1/' || true)"
 for t in $AUTH_TABLES; do
-  zcat "$AUTH_FILE" | grep -q "^CREATE TABLE \`$t\`" || fail "auth dump missing table $t"
+  [[ $'\n'"$AUTH_TABLES_IN_DUMP"$'\n' == *$'\n'"$t"$'\n'* ]] || fail "auth dump missing table $t (tables found: $(printf '%s' "$AUTH_TABLES_IN_DUMP" | tr '\n' ' '))"
 done
-echo "  ok: auth dump has all $(( $(echo $AUTH_TABLES | wc -w) )) tables"
+echo "  ok: auth dump has all $(( $(echo $AUTH_TABLES | wc -w) )) tables ($(printf '%s' "$AUTH_TABLES_IN_DUMP" | tr '\n' ' '))"
 
 # ---- 4. manifest --------------------------------------------------------------
 MANIFEST="$OUT/${DB}-manifest-${STAMP}.txt"

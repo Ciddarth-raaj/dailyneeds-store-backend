@@ -59,8 +59,21 @@ MANIFEST="$(ls -t "$OUT"/*-manifest-*.txt | head -1)"
 [ -r "$FULL" ] && [ -r "$COUNTS" ] || { echo "FAIL: no dump/counts found in $OUT" >&2; exit 1; }
 echo "using: $FULL"; echo "       $COUNTS"
 
-banner "3/5 checksum re-verification of the artefacts before restoring"
+banner "3/5 re-verification of the artefacts before restoring (checksums; trailer; table lists)"
 ( cd "$OUT" && grep -E '^[0-9a-f]{64}  ' "$MANIFEST" | sha256sum -c --strict )
+AUTH="$(ls -t "$OUT"/*-auth-*.sql.gz | head -1)"
+for f in "$AUTH" "$FULL"; do
+  [ "$(zcat "$f" | tail -n 3 | grep -c 'Dump completed' || true)" = "1" ] || { echo "FAIL: $f does not end with 'Dump completed'" >&2; exit 1; }
+done
+AUTH_TABLES_IN_DUMP="$(zcat "$AUTH" | grep -oE '^CREATE TABLE `[^`]+`' | sed -E 's/^CREATE TABLE `([^`]+)`/\1/' || true)"
+for t in user new_employee permissions all_permissions designation outlets; do
+  [[ $'\n'"$AUTH_TABLES_IN_DUMP"$'\n' == *$'\n'"$t"$'\n'* ]] || { echo "FAIL: auth dump lacks table $t (found: $(printf '%s' "$AUTH_TABLES_IN_DUMP" | tr '\n' ' '))" >&2; exit 1; }
+done
+echo "auth dump tables: $(printf '%s' "$AUTH_TABLES_IN_DUMP" | tr '\n' ' ')"
+EXPECTED_CT="$(grep -oE '^tables=[0-9]+' "$MANIFEST" | cut -d= -f2)"
+ACTUAL_CT="$(zcat "$FULL" | grep -c '^CREATE TABLE ' || true)"
+[ "$ACTUAL_CT" = "$EXPECTED_CT" ] || { echo "FAIL: full dump has $ACTUAL_CT CREATE TABLE statements, manifest says $EXPECTED_CT" >&2; exit 1; }
+echo "full dump: $ACTUAL_CT CREATE TABLE statements = manifest"
 
 banner "4/5 isolated restore into '$SCRATCH' (timed; every table's row count compared; live schema untouched)"
 ( cd "$WT" && scripts/auth/restore-rehearsal.sh "$FULL" "$COUNTS" "$SCRATCH" )

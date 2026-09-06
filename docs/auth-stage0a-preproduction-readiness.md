@@ -745,6 +745,12 @@ node scripts/auth/db-defaults-file.js admin --host <rds-endpoint> --port 3306 --
 STAGE0A_ADMIN_DEFAULTS=~/.stage0a/admin.cnf scripts/auth/gate5-rehearsal.sh
 ```
 
+**Resuming after the 06-09-2026 false failure:** the dumps stamped
+`20260906-174727` are valid and verified; do not start over. After the
+`git pull`, run the same command with `--skip-backup` — stage 3 re-verifies
+those exact artefacts (sha256, trailer, all six auth tables, 144
+`CREATE TABLE`) and then continues into the restore and migration stages.
+
 That is all. If the app user turns out to hold global `CREATE` and can
 read every routine, the admin file is simply not used. If you have no
 admin identity at all, run without `STAGE0A_ADMIN_DEFAULTS`: the script
@@ -893,6 +899,7 @@ this gate is what allows the auth tables to be restored *in place*.
 | `PURCHASE_TELEGRAM_CHAT_ID` now targets a group the new bot is not in | recorded in §0.6.1 |
 | Found by the end-to-end test of the gate 5 tooling: `mysqldump` 8 needs `PROCESS` for tablespaces (→ `--no-tablespaces`); a least-privilege user cannot `SHOW CREATE FUNCTION` and `mysqldump` silently omits routines (→ preflight + admin dump identity or explicit `SKIP_ROUTINES=1`); `CREATE FUNCTION/TRIGGER` fails with `ERROR 1419` when binlog is on without `log_bin_trust_function_creators` (→ handled, recorded); the `mysql` v2 driver db-migrate uses cannot authenticate `caching_sha2_password` users (→ preflight); db-migrate would run *every* unrecorded migration file (→ exact pending-set assertion before `up`); `GRANT … TO user@host` needs quoting | **all built into the scripts** |
 | `scripts/auth/db-defaults-file.js admin` gained `--password-from-stdin` for non-interactive use (still never an argument) | done |
+| **First production run (06-09-2026, commit `a4a79ed`) stopped with `FAIL: auth dump missing table user` after both dumps had been created and the full dump had verified (144 `CREATE TABLE` = 144 base tables).** Root cause: the auth-dump table check was `zcat … \| grep -q`; `grep -q` exits on its first match, `zcat` is killed by SIGPIPE, and under `set -o pipefail` the pipeline reports status 141 — a false failure that always lands on the *first* table in the dump (`user`) once the dump is larger than the pipe buffer (production's is 48 K; reproduced locally on a 36 K dump, exit 141 every time). The dump itself was fine. | **fixed**: every `zcat \| grep -q` / `\| head \| grep -q` / `Q … \| grep -q` replaced by whole-stream counts or shell comparisons in all four scripts; `--skip-backup` now fully re-verifies an existing artefact set (checksums, trailer, auth-dump table list, full-dump `CREATE TABLE` count) before restoring; `migration-rehearsal.sh` no longer pulls its own checkout mid-run (the operator pulls first) |
 
 ---
 

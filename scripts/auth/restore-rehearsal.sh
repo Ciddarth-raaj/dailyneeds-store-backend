@@ -40,7 +40,9 @@ SOURCE_DB="${SOURCE_DB:-$(node "$HERE/db-defaults-file.js" show | awk -F= '$1=="
 [ "$SCRATCH" != "$SOURCE_DB" ] || fail "scratch schema equals the live schema ($SOURCE_DB)"
 case "$SCRATCH" in *prod*|*production*|mysql|sys|information_schema|performance_schema) fail "refusing scratch name '$SCRATCH'";; esac
 case "$SCRATCH" in *rehearsal*|*scratch*|*restore_test*) ;; *) fail "scratch name must contain 'rehearsal', 'scratch' or 'restore_test' (got '$SCRATCH')";; esac
-if zcat "$FULL" | head -n 200 | grep -q '^USE \|^CREATE DATABASE'; then fail "dump carries USE/CREATE DATABASE — refuse; re-take it without --databases"; fi
+# whole-stream count (no grep -q / head on the zcat pipe: SIGPIPE + pipefail = false failure)
+USE_IN_DUMP="$(zcat "$FULL" | grep -c '^USE \|^CREATE DATABASE' || true)"
+[ "$USE_IN_DUMP" = "0" ] || fail "dump carries USE/CREATE DATABASE — refuse; re-take it without --databases"
 
 Q()  { "$MYSQL" --defaults-extra-file="$DEFAULTS" -N -B -e "$1"; }
 QA() { "$MYSQL" --defaults-extra-file="$ADMIN"    -N -B -e "$1"; }
@@ -66,7 +68,7 @@ else
   QA "GRANT ALL PRIVILEGES ON \`$SCRATCH\`.* TO $APP_USER_Q; FLUSH PRIVILEGES"
   echo "created $SCRATCH with admin; granted ALL on $SCRATCH.* to $APP_USER"
 fi
-Q "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='$SCRATCH'" | grep -q 1 || fail "scratch schema not visible to app user"
+[ "$(Q "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='$SCRATCH'")" = "1" ] || fail "scratch schema not visible to app user"
 
 # ---- 2. restore (timed) -------------------------------------------------------
 LOG_BIN="$(Q "SELECT @@log_bin")"; TRUST="$(Q "SELECT @@log_bin_trust_function_creators")"

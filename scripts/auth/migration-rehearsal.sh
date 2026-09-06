@@ -28,12 +28,20 @@ case "$WT" in "$HOME/dailyneeds-store-backend"|"$HOME/dailyneeds-store-backend/"
 Q() { "$MYSQL" --defaults-extra-file="$DEFAULTS" -N -B -e "$1"; }
 
 # ---- 1. separate checkout of the feature branch --------------------------------
+# An existing checkout is used AS IS: the operator pulls before starting the
+# run (readiness §5.4). Updating the checkout from inside a running script
+# would change the code under its own feet, and a dirty tree would abort here.
 if [ ! -d "$WT/.git" ]; then
   REMOTE="$(git -C "$HOME/dailyneeds-store-backend" remote get-url origin)"
   echo "cloning $BRANCH into $WT (single branch, production clone untouched)"
   git clone --quiet --single-branch --branch "$BRANCH" "$REMOTE" "$WT"
 else
-  git -C "$WT" fetch --quiet origin "$BRANCH" && git -C "$WT" checkout --quiet "$BRANCH" && git -C "$WT" pull --quiet --ff-only origin "$BRANCH"
+  CUR="$(git -C "$WT" branch --show-current)"
+  [ "$CUR" = "$BRANCH" ] || fail "checkout $WT is on '$CUR', expected '$BRANCH'"
+  if [ -n "$(git -C "$WT" status --porcelain --untracked-files=no)" ]; then
+    echo "NOTE: $WT has local modifications (listed below); they are used as-is" >&2
+    git -C "$WT" status --short --untracked-files=no >&2
+  fi
 fi
 echo "worktree at $(git -C "$WT" rev-parse --short HEAD) ($(git -C "$WT" branch --show-current))"
 if [ ! -d "$WT/node_modules/db-migrate-mysql" ]; then
@@ -107,12 +115,12 @@ START=$(date +%s)
 ( cd "$WT/migrations/mysql" && "$DBM" up --config "$CFG" -e rehearsal )
 echo "up took $(( $(date +%s) - START ))s"
 for m in "${EXPECTED[@]}"; do
-  Q "SELECT COUNT(*) FROM \`$SCRATCH\`.migrations WHERE name LIKE '%$m%'" | grep -q '^1$' || fail "migration $m not recorded after up"
+  [ "$(Q "SELECT COUNT(*) FROM \`$SCRATCH\`.migrations WHERE name LIKE '%$m%'")" = "1" ] || fail "migration $m not recorded after up"
 done
 echo "all four Stage 0A migrations recorded"
 echo "user columns after up: $(user_cols)"
 for c in password_hash password_algo is_system_account must_change_password failed_login_count locked_until token_valid_from; do
-  user_cols | tr ',' '\n' | grep -qx "$c" || echo "NOTE: expected column $c not present (check migration contents)"
+  [[ ",$(user_cols)," == *",$c,"* ]] || echo "NOTE: expected column $c not present (check migration contents)"
 done
 Q "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA='$SCRATCH' AND TABLE_NAME IN ('user_auth_log','user_password_reset','auth_metric')"
 echo "-- Stage 0A migrations must not change row counts of existing tables (all_permissions gains exactly the new keys):"
@@ -130,7 +138,7 @@ START=$(date +%s)
 ( cd "$WT/migrations/mysql" && "$DBM" down --count 4 --config "$CFG" -e rehearsal )
 echo "down took $(( $(date +%s) - START ))s"
 for m in "${EXPECTED[@]}"; do
-  Q "SELECT COUNT(*) FROM \`$SCRATCH\`.migrations WHERE name LIKE '%$m%'" | grep -q '^0$' || fail "migration $m still recorded after down"
+  [ "$(Q "SELECT COUNT(*) FROM \`$SCRATCH\`.migrations WHERE name LIKE '%$m%'")" = "0" ] || fail "migration $m still recorded after down"
 done
 COLS_AFTER="$(user_cols)"
 [ "$COLS_AFTER" = "$COLS_BEFORE" ] || fail "user columns after down differ from before: $COLS_AFTER"
@@ -143,7 +151,7 @@ echo "user table restored to its original column set, definitions and indexes"
 echo "after down: $(before_counts)"
 [ "$(cnt user)" = "$U0" ] && [ "$(cnt new_employee)" = "$E0" ] && [ "$(cnt permissions)" = "$P0" ] && [ "$(cnt all_permissions)" = "$A0" ] || fail "row counts after down differ from the original"
 for t in user_auth_log user_password_reset auth_metric; do
-  Q "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='$SCRATCH' AND TABLE_NAME='$t'" | grep -q '^0$' || fail "table $t still exists after down"
+  [ "$(Q "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='$SCRATCH' AND TABLE_NAME='$t'")" = "0" ] || fail "table $t still exists after down"
 done
 echo "Stage 0A tables removed by down"
 
