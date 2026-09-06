@@ -1063,6 +1063,89 @@ Tests: `middlewares/auth.test.js` "gate 14" (8 cases).
 | 13 | **PASS (code) — no manual reset required** | 468 defaults are detected and flagged at their next login; enforcement is Deployment B's switch. Production data unchanged. |
 | 14 | **PASS (code) — cleanup deferred, not blocking** | inactive employees cannot log in and, with this change, cannot keep a session; the duplicate is a hand-made service account whose only real risk is its legacy non-expiring token (already a ledger item); `purchase_api` must not be reclassified before Stage 0B; no data change before Deployment A. |
 
+### 5.11 Gates 4 and 12 — repository analysis and the one host check
+
+**Gates 13 and 14 recorded PASS at commit `880f4f7`** (no production data
+change for the 468 default-password accounts, the 249 inactive-employee
+rows, or `purchase_api`).
+
+#### Gate 4 — deployment path (from `.github/workflows/deploy-backend.yml`, identical on `main-autodeploy` and the feature branch)
+
+| Item | Fact from the repository |
+| --- | --- |
+| Trigger | `push` to `main-autodeploy`, plus manual `workflow_dispatch` |
+| Runner → target | GitHub-hosted `ubuntu-latest` → `ssh -i <deploy key> ${SSH_USER}@${SSH_HOST}` (secrets; comments say `ec2-user@3.109.76.230`) |
+| Working directory | `~/dailyneeds-store-backend` on the host |
+| Sequence (one remote shell, `set -euo pipefail`) | `git fetch origin` → `git checkout -- package-lock.json` → `git checkout main-autodeploy` → `git pull origin main-autodeploy` → `npm i` → `cd migrations/mysql` → **`db-migrate up`** (bare: no `-e`, no `--config`) → `cd ../..` → `pm2 reload 0` |
+| Migration failure stops the deploy before reload? | **Yes.** `set -e` in that shell: a non-zero `db-migrate up` ends the SSH session before `pm2 reload 0`. The consequence is the one already recorded as a hard gate: the **old process keeps running on a partially migrated schema** (the Stage 0A `user` migration is one `ALTER TABLE`, so it cannot half-apply; the three `CREATE TABLE IF NOT EXISTS` are each atomic). |
+| Which `database.json` env a bare `db-migrate up` uses | db-migrate 0.11: `--config`/`-e` if given; else the file's `default` key; else `defaultEnv`; else the first of `dev`, `development` that exists. `NODE_ENV` is **not** consulted by this version's config loader. The host's `database.json` is git-ignored, so **which key exists is a host fact** — the host script prints the keys (no credentials) and states the resolved env and whether it points at the same host/database as the app's live block. |
+| Pending migrations at Deployment A | From the gate 5 rehearsal on production data: the pending set for the feature checkout was **exactly the four Stage 0A migrations**; for the deploy clone it is none. The host script re-derives both from the live `migrations` table (read-only `SELECT`). |
+| PM2 target | `pm2 reload 0`: process id 0. Fork mode, single instance (no `instances` in `ecosystem.config.js`), so reload = restart. **Hazard:** `ecosystem.config.js` sets `NODE_ENV=production`, but the running process has it unset; anyone who ever starts the app with `pm2 start ecosystem.config.js` switches it to the `config.json` "production" block, which may still be the stale sample. The host script compares the two blocks' host/database. |
+| Server-side hooks | `.git/hooks` in the deploy clone; the script lists any non-sample hook. |
+| Outside the repository | GitHub → Settings → Webhooks and Actions → Runners for both repos remain **yours** to confirm (screenshot or "empty"). |
+
+#### Gate 12 — proxy topology (from the code)
+
+- Deployed production: `app.set("trust proxy", true)` — Express believes
+  `X-Forwarded-*` from **any** peer. Safe only while the Node port is not
+  reachable except through nginx, and nginx **overwrites** the headers.
+- Stage 0A: default `loopback` (`TRUST_PROXY=true` refused), so only a
+  proxy on the same host is believed; `transportSecure` is `req.secure`
+  only; `getClientIp` reads `req.ip` first (the header is a fallback only
+  when `req.ip` is empty).
+- The upstream `fix-proxy-headers.yml` / `scripts/patch_nginx_forwarded.py`
+  sets `X-Real-IP $remote_addr`, `X-Forwarded-For $remote_addr`
+  (**overwrite, not append**) and `X-Forwarded-Proto $scheme` in the
+  `proxy_pass` location. If that ran, a forged `X-Forwarded-For` from the
+  internet is replaced by nginx before the app sees it.
+- Rate limiting / IP policy (`utils/ip.js` `isAccessAllowed`, lockout's
+  per-IP throttle) key on `getClientIp` → `req.ip`, i.e. the real client
+  **iff** nginx sets the header and the trusted-hop rule matches nginx's
+  address (loopback). If nginx forwarded from a non-loopback address the
+  app would see the proxy's IP for everyone — the host script's probe
+  shows which.
+
+#### The one read-only host command
+
+```bash
+cd ~/stage0a-rehearsal && git pull --ff-only origin claude/dnds-payroll-integration-proposal-3p6hen && \
+MYSQL_BIN_DIR="$HOME/mysql84/bin" scripts/auth/gate4-12-host-check.sh
+```
+
+Optional: prefix `PROBE_TOKEN=<your own session token>` so the three
+`/user/my-ip` probes answer (the deployed route needs a token; Stage 0A
+makes it public). The token is sent as a header and never printed. Send
+back the whole report (`~/db-backups/gate4-12-<stamp>.txt`); it contains
+no secrets.
+
+**Expected / acceptable output**
+
+| Section | PASS looks like |
+| --- | --- |
+| 4/A | remote is the backend repo, branch `main-autodeploy`, HEAD `9d92884`, `dirty files: 0` (or only `package-lock.json`), `active hooks:` empty, "files only in this checkout" = the four `20260906120000…120300` names |
+| 4/B | `db-migrate` on PATH with a version; node/npm present |
+| 4/C | `bare db-migrate up resolves to: <env>` and that env line ends `== app 'development' block (the live DB)`; app config `production` block either same as development or flagged DIFFERENT (then: never start via `ecosystem.config.js` until fixed) |
+| 4/D | head `/20260906070000-telegram-password-reset`; pending for deploy clone: **empty**; pending for this checkout: **the four Stage 0A migrations** |
+| 4/E | one process, `pm_id=0`, `exec_mode=fork_mode`, `instances=1`, `cwd=/home/ec2-user/dailyneeds-store-backend`, `NODE_ENV=(unset)`, `PORT` unset or 8080, `TRUST_PROXY=(unset -> loopback)` |
+| 12/A | a `listen 443 ssl` server for `api.dnds.co.in` with `ssl_certificate`, a `listen 80` server that `return 301 https://…`, and inside the API location: `proxy_pass http://127.0.0.1:8080` (or `localhost`), `proxy_set_header X-Forwarded-For $remote_addr`, `X-Forwarded-Proto $scheme`, `X-Real-IP $remote_addr`; `nginx -t` syntax ok |
+| 12/B | `:80` and `:443` bound by nginx; `:8080` bound by node — if it shows `0.0.0.0:8080`/`*:8080` the **external probe** below must show it unreachable |
+| 12/C | `http://127.0.0.1/` → `HTTP 301 redirect=https://api.dnds.co.in/`; via nginx with forged headers → `"ip":"127.0.0.1"` and `"has_forwarded_header":true` (nginx overwrote); direct to the app with forged headers → `"ip":"203.0.113.9"` (loopback is the trusted hop — by design); direct, no headers → `"ip":"127.0.0.1"` or `::1` |
+
+**External probe (from your laptop, not the host):**
+
+```bash
+curl -sI http://api.dnds.co.in/ | head -n 3                                  # expect 301 → https://
+curl -s -m 5 http://3.109.76.230:8080/user/my-ip || echo "8080 NOT reachable from the internet (good)"
+curl -s https://api.dnds.co.in/user/my-ip -H "x-access-token: <your token>" -H 'X-Forwarded-For: 203.0.113.9'
+#   expect "ip" = YOUR public IP, never 203.0.113.9; "has_forwarded_header": true
+```
+
+Gate 12 is PASS when: 443 serves TLS, 80 redirects, nginx overwrites both
+headers, 8080 is unreachable from outside, the via-nginx probe shows your
+real IP under a forged header, and (after Deployment A) `trust proxy` is
+loopback. Gate 4 is PASS when 4/A–4/E match the table and you have
+confirmed the GitHub webhook/runner pages.
+
 ### 5.8 Other findings from this review (recorded, not all fixed)
 
 | Finding | Status |
