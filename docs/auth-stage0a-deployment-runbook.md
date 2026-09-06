@@ -3,72 +3,42 @@
 Companion to `docs/auth-stage0a-preproduction-readiness.md`.
 This file is the working record. Fill it in as you go; do not fill it in from memory afterwards.
 
-> **Read §0 first.** Between the readiness report and this runbook,
-> `main-autodeploy` moved under the feature branch in **both** repositories.
-> The feature branch no longer merges cleanly. Nothing below can be executed
-> until §0 is resolved, and several gates that were PASS are reset by it.
+> **§0 is RESOLVED (06-09-2026).** `main-autodeploy` was merged into the
+> feature branch in both repositories, C1–C4 applied and tested, and the
+> reset gates re-evaluated (readiness report §0). The ledger below is the
+> post-merge state. **One item does not wait for Deployment A: the Telegram
+> token rotation (Step 1) — readiness §0.6 answers "YES, the current token
+> can influence a reset code".**
 
 ---
 
-## 0. BLOCKING — upstream drift and merge conflicts (found 06-09-2026)
+## 0. RESOLVED — upstream drift and merge (found and integrated 06-09-2026)
 
-**What happened.** After the feature branch was cut (merge-base `974afda`),
-two commits landed on the backend's `main-autodeploy` and three on the
-frontend's, all part of one feature: **"reset a forgotten password over
-Telegram"** (`a98428a`, `9d92884` backend; `3f86694`, `b555de3`, `16cd162`
-frontend). It is **already deployed to production** (auto-deploy) and it
-includes a migration, `20260906070000-telegram-password-reset`, which is
-therefore already applied to the production database.
+**What happened.** After the feature branch was cut (merge-base `974afda`
+backend, `a8090e4` frontend), the Telegram password-reset feature landed on
+`main-autodeploy` (`a98428a`, `9d92884` backend; `3f86694`, `b555de3`,
+`16cd162` frontend), auto-deployed, with migration
+`20260906070000-telegram-password-reset` already applied in production.
 
-**What it touches.** Backend: `middlewares/auth.js`, `repository/user.js`,
-`routes/user.js`, `server.js`, `services/telegram.js`, `.env-sample`, plus
-new `repository/passwordReset.js`, `usecase/passwordReset.js` (+ test) and
-the migration. Frontend: `helper/user.js`, `pages/login.js`,
-`components/header/header.js`, plus new `components/ForgotPassword`,
-`components/TelegramLink`.
+**What was done.** `origin/main-autodeploy` was merged **into** the feature
+branch (`git merge --no-ff`, no rebase) in both repositories, from the
+safety point `ca9c4b3` / `b9f8cd3` (local tags `stage0a-pre-merge-*`,
+`stage0a-prod-baseline-*`). Six backend conflicts and one frontend
+conflict were resolved semantically — the file-by-file record, the four
+security reconciliations, the C4 answer, the outstanding-code analysis and
+the two-reset-systems proposal are in **readiness report §0**. Nothing was
+pushed to `main-autodeploy`; nothing was deployed.
 
-**Trial merge result** (scratch worktree, discarded):
+| # | Reconciliation | Outcome on the branch |
+| --- | --- | --- |
+| C1 | Telegram reset wrote SHA-1 | now scrypt via `setModernPassword` + `clearMustChange`; no `updatePassword`/SHA-1 in the reset path |
+| C2 | system-account exclusion was accidental | explicit SQL predicate + `isResettableAccount` + `rejectSystemAccounts` on `/telegram-link`; five named tests + HTTP-level tests |
+| C3 | 6-char minimum, no identity checks | shared `utils/password_policy` first; `PASSWORD_POLICY` with reason, code kept, retry allowed |
+| C4 | committed token fallback + per-minute poller | env-only token; poller no-ops when unconfigured; re-entrancy guard; **rotation is urgent and standalone** |
 
-| Repo | Conflicting files |
-| --- | --- |
-| backend | `.env-sample`, `middlewares/auth.js`, `repository/user.js`, `routes/user.js`, `server.js`, `services/telegram.js` |
-| frontend | `helper/user.js` |
-
-Per `AGENTS.md` ("On merge conflicts: stop and report") the merge has
-**not** been performed. It must be done deliberately, because the upstream
-feature and Stage 0A disagree on four security-relevant points:
-
-| # | Upstream (now in production) | Stage 0A | Resolution required |
-| --- | --- | --- | --- |
-| C1 | `usecase/passwordReset.js#resetPassword` writes the new password via `userRepo.updatePassword(user_id, plaintext)` → **`SET password = SHA1(?)`** | new credentials are scrypt only; `updatePassword` no longer exists | route the Telegram reset through `setModernPassword` + `password_policy.check` + `clearMustChange`; never SHA-1 |
-| C2 | `getByUsername` excludes system accounts only by accident (`ne.status = 1` inner-join effect on `employee_id NULL`) | every mutation carries `AND is_system_account = 0`, and refusal must not rely on NULL failing to match | add `AND u.is_system_account = 0` to `getByUsername`; add a usecase-level refusal; extend `routes/user.protection.test.js` with `forgot-password` / `reset-password` against the break-glass username |
-| C3 | `MIN_PASSWORD_LENGTH = 6`, no identity/default-pattern checks | policy: 8 minimum, refuses username / employee code / mobile / historical defaults | apply `utils/password_policy.js` in `resetPassword` |
-| C4 | `services/telegram.js` keeps the **committed token as a fallback** and adds a **per-minute `getUpdates` poller** | token removed from source; service disables itself when `TELEGRAM_BOT_TOKEN` is absent | keep Stage 0A's env-only token; make `pollTelegramUpdates` a logged no-op when the client is not configured, so a missing variable does not throw sixty times an hour |
-
-Also to reconcile: the two new unprotected routes upstream added
-(`/user/forgot-password`, `/user/reset-password`) belong in the
-`unProtectedRoutes` map alongside Stage 0A's `/user/setup-password`; the
-`routes/user.js` router-surface test must be updated to list the five
-upstream routes (`GET/POST/DELETE /telegram-link`, `POST /forgot-password`,
-`POST /reset-password`) — and **`DELETE /telegram-link` breaks the current
-"no DELETE on /user" assertion**, which must be narrowed to "no DELETE that
-touches an account"; the upstream `telegram_link_poll` cron must tolerate an
-unconfigured client; and the frontend `helper/user.js` conflict is purely
-additive on both sides (Stage 0A's `setupPassword`/`logout` beside upstream's
-Telegram helpers).
-
-**Consequence for the ledger.** Gate 3 is **reset to NOT YET VERIFIED**
-(the branch base is no longer production). When the merge is done, the
-invalidation rules in §1 reset gates 1, 2, 7, 11, 20 (auth code changed) and
-5, 22 (a migration is now on the branch that was not before, and the
-production schema has a table set the rehearsal snapshot must include).
-The named-test evidence in the readiness report stays valid for the code it
-was run against, but must be **re-run on the merged branch** before any
-gate is re-marked.
-
-**Recommended order:** resolve the merge on the feature branch (a merge
-commit, never a rebase — the branch is pushed), apply C1–C4 with tests,
-re-run `node --test`, re-run gate 3's diff, then continue from §3.
+**Ledger consequence.** Gates 1, 2, 3, 7, 11, 20, 21, 22, 24 re-earned on
+the merged tree (evidence in the rows). Gate 23 stays yours. Gate 5's
+snapshot must post-date the upstream migration.
 
 ---
 
@@ -111,17 +81,17 @@ Status carried over from the readiness report, then corrected for §0. Every row
 
 | # | Gate | Status | Verified by | Date / time | Evidence |
 |---|---|---|---|---|---|
-| 1 | Legacy JWT compatibility (versioned identity resolution) | PASS *(pre-merge code)* | Claude / automated tests | 06-09-2026 | commit `859e519`; `middlewares/auth.compat.test.js` 1–6. **Resets on merge (§0).** |
-| 2 | Legacy token cannot resolve to a system account | PASS *(pre-merge code)* | Claude / automated tests | 06-09-2026 | commit `859e519`; `auth.compat.test.js` 7; transition test 9. **Resets on merge.** |
-| 3 | Stage-0A-only branch diff | **NOT YET VERIFIED** | — | 06-09-2026 | Was PASS at `859e519`; **reset** — production moved (§0). Re-diff after the merge. 4 docs-only files remain the accepted exception. |
+| 1 | Legacy JWT compatibility (versioned identity resolution) | PASS *(merged tree)* | Claude / automated tests | 06-09-2026 | `middlewares/auth.compat.test.js` 10/10, `legacy_transition.test.js` 5/5 after the merge; baseline `usecase/user.js` + `services/jwt.js` byte-identical at `9d92884` (readiness §0.10). |
+| 2 | Legacy token cannot resolve to a system account | PASS *(merged tree)* | Claude / automated tests | 06-09-2026 | `auth.compat.test.js` 7; transition test 9; re-run after the merge. |
+| 3 | Stage-0A-only branch diff | PASS *(post-merge)* | Claude / `git diff` | 06-09-2026 | Backend 65 files vs `origin/main-autodeploy` (45 A, 20 M), frontend 9: all Stage 0A, merge resolution of upstream files, or the 4 accepted docs-only files. Zero payroll/attendance/shift/Digisme/`employee_id` changes (readiness §0.14). |
 | 4 | Deployment trigger fully mapped (webhooks, runners, server hooks) | WAITING FOR ADMIN | | | Both workflows mapped (readiness §3). GitHub Settings → Webhooks / Runners and the host's `.git/hooks` are yours to confirm. |
-| 5 | End-to-end restore rehearsal, snapshot ≤24 h | NOT YET VERIFIED | | | Snapshot must post-date the upstream migration (already applied in production) so the rehearsal schema includes `telegram_links`, `telegram_link_tokens`, `password_reset_codes`. |
-| 6 | Telegram token rotated, new token live, normal alert received | WAITING FOR ADMIN | | | See §3 Step 1 — **1a is answered: no hotfix needed.** |
-| 7 | Break-glass route-level protection | PASS *(pre-merge code)* | Claude / automated tests | 06-09-2026 | `routes/user.protection.test.js`. **Resets on merge**: upstream adds `forgot-password` / `reset-password` / `telegram-link`, which must be added to this suite (§0 C2). |
-| 8 | Frontend production build succeeds | PASS | Claude | 06-09-2026 | Built from `b9f8cd3` via `npm install --force` — exit 0, 153 pages, auth pages present, zero `user/login?username` in the bundle. Gate 21 now understood. |
+| 5 | End-to-end restore rehearsal, snapshot ≤24 h | NOT YET VERIFIED | | | Snapshot must post-date the upstream migration (already applied in production) so the rehearsal schema includes `telegram_links`, `telegram_link_tokens`, `password_reset_codes`. Unchanged by the merge. |
+| 6 | Telegram token rotated, new token live, normal alert received | **WAITING FOR ADMIN — URGENT, do not wait for Deployment A** | | | Readiness §0.6: the current token can impersonate the bot, read all inbound messages and hijack updates → YES it can influence a reset. Production already reads `TELEGRAM_BOT_TOKEN`; rotate now per §3 Step 1. |
+| 7 | Break-glass route-level protection | PASS *(merged tree)* | Claude / automated tests | 06-09-2026 | `routes/user.protection.test.js` 14/14: route surface enumerated incl. the five upstream routes; forgot/reset-password against the break-glass username refused with the row unchanged; system session refused `403 EMPLOYEE_REQUIRED` on all `/telegram-link` methods; no `:id` form of either reset route. |
+| 8 | Frontend production build succeeds | PASS *(merged tree)* | Claude | 06-09-2026 | Rebuilt after the merge from a clean `node_modules` / `.next`: `npm ci --legacy-peer-deps` + `next build` (`--openssl-legacy-provider`) exit 0, "Compiled successfully", `/login` and `/setup-password` present, zero `user/login?username` in the bundle. |
 | 9 | Frontend + backend staging login (normal, failed, logout, navigation) | NOT YET VERIFIED | | | |
 | 10 | Legacy-token staging transition, including ID-collision fixture | NOT YET VERIFIED | | | Isolated equivalent PASS (`legacy_transition.test.js`); staging with a DB and a browser not done. |
-| 11 | NULL-password fail-closed | PASS *(pre-merge code)* | Claude / automated tests | 06-09-2026 | `services/password.nullable.test.js`. **Resets on merge.** |
+| 11 | NULL-password fail-closed | PASS *(merged tree)* | Claude / automated tests | 06-09-2026 | `services/password.nullable.test.js` 6/6 after the merge. |
 | 12 | trust proxy / forwarded-header spoofing, verified against real nginx | NOT YET VERIFIED | | | Code-level PASS (`routes/proxy.test.js`; `trust proxy` = loopback, `true` refused). Real nginx not verified. |
 | 13 | Default-password scan on restored snapshot | NOT YET VERIFIED | | | Snapshot only. Never on production. |
 | 14 | Account-integrity scan on restored snapshot | NOT YET VERIFIED | | | |
@@ -130,11 +100,11 @@ Status carried over from the readiness report, then corrected for §0. Every row
 | 17A | External JWT key loading proven **in staging** using the CURRENT key | NOT YET VERIFIED | | | Mechanism proven in tests via env-pointed files. Production equivalent is P3. |
 | 18A | Break-glass login verified **in staging** | NOT YET VERIFIED | | | Production equivalent is P1 |
 | 19A | Break-glass Telegram alert verified **in staging** | NOT YET VERIFIED | | | Depends on gate 6. Production equivalent is P2. |
-| 20 | All required tests green with named case mapping | PASS *(pre-merge code)* | Claude / `node --test` | 06-09-2026 | 356 tests / 355 pass / 0 fail / 1 skip at this commit (349 + 7 migration-proof cases). **Resets on merge.** |
-| 21 | Frontend reproducible build — `npm ci` outcome understood | **PASS** | Claude | 06-09-2026 | **Cause:** `formik-error-focus@1.1.0` declares peer `formik@^1`; project has `formik@2.4.9` (root `^2.2.9`). A stale peer range on a package unrelated to the auth pages. **Fix, reproducible from the lockfile:** `npm ci --legacy-peer-deps` → exit 0, 1008 packages, **`package-lock.json` unchanged**. The workflow's `npm install --force` also resolves it but may rewrite the lockfile; prefer `npm ci --legacy-peer-deps` in the workflow when it is next touched. No dependency upgrade performed. Bundle sends credentials in the POST body (gate 8 evidence). |
-| 22 | Migration plan reviewed; all migrations proven additive and idempotent | **PASS (plan) — resets on merge** | Claude / `node --test` | 06-09-2026 | `migrations/auth_stage0a_migrations.test.js` (7 cases): the `user` migration is exactly one `ALTER TABLE` with only `ADD COLUMN` / `ADD INDEX` / the widening `MODIFY password NULL`, every column NULL-or-DEFAULT, no `new_employee`; both `CREATE TABLE`s are `IF NOT EXISTS`; all three inserts `WHERE NOT EXISTS`; no standalone `CREATE INDEX`; every down restores exactly; Stage 0A timestamps sort after the upstream `20260906070000` migration. **Upstream migration reviewed too:** three `CREATE TABLE IF NOT EXISTS`, additive, already applied in production — it must be *present on the branch* after the merge so `db-migrate` on the night sees it as applied, not pending. |
-| 23 | Legacy token shape personally confirmed — decoded **locally** | NOT YET VERIFIED | | | Yours. `id` + `employee_id`, no `sub`, no `auth_ver`. What the source says is in implementation doc §7a; the personal confirmation is the gate. |
-| 24 | Telegram dependency inventory complete; every live consumer accepts a new token **without unreleased Stage 0A code** | **PASS** | Claude / deployed-source audit | 06-09-2026 | See §3 Step 1a/1b below. |
+| 20 | All required tests green with named case mapping | PASS *(merged tree)* | Claude / `node --test` | 06-09-2026 | `IS_TEST=true node --test`: **407 tests / 406 pass / 0 fail / 1 skip** (the skip is the unrelated `priceCheckerConflicts` golden test). New: `usecase/passwordReset.stage0a.test.js` 27, adapted upstream `usecase/passwordReset.test.js` 19, `routes/user.protection.test.js` +5. Mapping in readiness §0.4–0.8, §0.12. |
+| 21 | Frontend reproducible build — `npm ci` outcome understood | **PASS** | Claude | 06-09-2026 | **Cause:** `formik-error-focus@1.1.0` declares peer `formik@^1`; project has `formik@2.4.9` (root `^2.2.9`). A stale peer range on a package unrelated to the auth pages. **Fix, reproducible from the lockfile:** `npm ci --legacy-peer-deps` → exit 0, 1008 packages, **`package-lock.json` unchanged** (re-verified after the merge against both parents). The workflow's `npm install --force` also resolves it but may rewrite the lockfile; prefer `npm ci --legacy-peer-deps` in the workflow when it is next touched. No dependency upgrade performed. Bundle sends credentials in the POST body (gate 8 evidence). |
+| 22 | Migration plan reviewed; all migrations proven additive and idempotent | **PASS (post-merge)** | Claude / `node --test` | 06-09-2026 | `migrations/auth_stage0a_migrations.test.js` (7 cases): the `user` migration is exactly one `ALTER TABLE` with only `ADD COLUMN` / `ADD INDEX` / the widening `MODIFY password NULL`, every column NULL-or-DEFAULT, no `new_employee`; both `CREATE TABLE`s are `IF NOT EXISTS`; all three inserts `WHERE NOT EXISTS`; no standalone `CREATE INDEX`; every down restores exactly; Stage 0A timestamps sort after the upstream `20260906070000` migration. **Upstream migration reviewed too:** three `CREATE TABLE IF NOT EXISTS`, additive, already applied in production — it must be *present on the branch* after the merge so `db-migrate` on the night sees it as applied, not pending. |
+| 23 | Legacy token shape personally confirmed — decoded **locally** | NOT YET VERIFIED | | | Yours. Re-read from the NEW baseline `9d92884`: `id` + `employee_id` + `store_id` + `designation_id` + `user_type`, no `sub`, no `auth_ver`, no `kid` (readiness §0.10). The personal decode is the gate. |
+| 24 | Telegram dependency inventory complete; every live consumer accepts a new token **without unreleased Stage 0A code** | **PASS** (re-checked post-merge) | Claude / deployed-source audit | 06-09-2026 | See §3 Step 1a/1b below. On the merged branch every consumer, the poller included, still goes through the single env-configured client; the poller is a logged no-op when the variable is absent. |
 
 ---
 
@@ -142,7 +112,7 @@ Status carried over from the readiness report, then corrected for §0. Every row
 
 Cheap checks before expensive ones. Each step lists what to record.
 
-**Step 0 — Resolve §0 first.** Nothing else proceeds on an unmergeable branch.
+**Step 0 — §0 resolved.** The branch is merged with production and green; proceed.
 
 **Step 1 — Telegram: check first, revoke second.** Gates 24, 6.
 
@@ -201,16 +171,15 @@ pattern categories only.
 Record: snapshot age, counts by pattern category, duplicate/shared-login
 findings, where the output is stored and when it was destroyed.
 
-**Step 4 — Frontend reproducibility.** Gate 21 — **done, see ledger.**
-Re-run after the frontend merge (§0): `rm -rf node_modules && npm ci
---legacy-peer-deps` must still exit 0 with the lockfile unchanged, and the
-built bundle must still contain no `user/login?username`.
+**Step 4 — Frontend reproducibility.** Gate 21 — **done and re-run after
+the merge, see ledger** (clean `npm ci --legacy-peer-deps`, lockfile
+unchanged, bundle free of `user/login?username`).
 
 **Step 5 — Deployment infrastructure.** Gates 4, 22.
 Workflows are mapped in readiness §3. Confirm GitHub webhooks and runners in
 both repos and the host's `.git/hooks`. Gate 22's proof is the migration
-test; re-run it after the merge. **Nothing is run against production at this
-step.**
+test (re-run after the merge: 7/7). **Nothing is run against production at
+this step.**
 
 **Step 6 — nginx / proxy.** Gate 12.
 `sudo nginx -T`. Confirm: TLS on 443; HTTP redirects to HTTPS; the vhost
@@ -326,7 +295,9 @@ The rule is roll back first, investigate afterwards.
 
 | Task | Owner | Due | Done |
 |---|---|---|---|
-| **Resolve §0: merge `main-autodeploy` into the feature branch, apply C1–C4, re-run tests, re-diff** | | before any other step | |
+| ~~Resolve §0: merge `main-autodeploy` into the feature branch, apply C1–C4, re-run tests, re-diff~~ | Claude | before any other step | 06-09-2026 |
+| **Rotate the Telegram bot token (§3 Step 1) — standalone, before anything else** | | now | |
+| Decide the two-reset-systems reconciliation (readiness §0.7 proposal) | | before any employee-facing workflow is replaced | |
 | Disable the seeded weak admin account | | Deployment date `______`, and only after **all four**: P1 PASS, P2 PASS, normal owner/admin login PASS, rollback access confirmed | |
 | Remove query-string login fallback (own GO/NO-GO) | | After 2 full operating days at zero query-string logins, including a shift changeover | |
 | Retire legacy-token resolution + enable `JWT_REQUIRE_KID` | | 36 h after Deployment A, separate change | |
@@ -344,6 +315,7 @@ The seeded admin is the largest live exposure right now: `user_type 2` with a kn
 | 06-09-2026 | `main-autodeploy` (both repos) moved: Telegram password-reset feature deployed to production, incl. migration `20260906070000`. Feature branch conflicts in 6 backend + 1 frontend files. | 3 now; 1, 2, 5, 7, 11, 20, 22 on merge | |
 | 06-09-2026 | Gate 21 investigated: `formik-error-focus` peer range; `npm ci --legacy-peer-deps` reproducible, lockfile unchanged | — (21 → PASS) | |
 | 06-09-2026 | Gate 22 proof added as `migrations/auth_stage0a_migrations.test.js`; upstream migration reviewed | — (22 plan → PASS) | |
+| 06-09-2026 | **Merged `origin/main-autodeploy` into the feature branch (both repos)**; C1–C4 applied; `passwordReset.stage0a.test.js` added; protection suite extended; frontend rebuilt | 1, 2, 3, 7, 8, 11, 20, 21, 22, 24 re-evaluated → PASS; 23 stays yours; 6 marked URGENT | 06-09-2026 |
 
 ---
 
@@ -359,4 +331,4 @@ Not touched in Stage 0A. Do not start these until authentication is finished and
 - Session / device management
 - Dependency vulnerability review; Node 16 on the frontend deploy host; the `formik-error-focus` peer range
 - The four remaining hardcoded secrets — documented for rotation, not yet rotated
-- The upstream Telegram password-reset feature's own design (out of Stage 0A scope except where it intersects C1–C4)
+- The upstream Telegram password-reset feature's own design (out of Stage 0A scope except where it intersects C1–C4); whether it and the admin-issued setup token are kept side by side is proposed in readiness §0.7 and **not decided here**

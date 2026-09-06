@@ -2,7 +2,7 @@ const router = require("express").Router();
 const Joi = require("@hapi/joi");
 const { getClientIp, isLoopbackIp, isPrivateIp } = require("../utils/ip");
 const authConfig = require("../config/auth");
-const { actorUserId } = require("../utils/actor");
+const { actorUserId, rejectSystemAccounts } = require("../utils/actor");
 
 /**
  * User routes — Stage 0A.
@@ -19,6 +19,8 @@ class UserRoutes {
     this.authLog = deps.authLogRepo || null;
     this.authMiddleware = deps.authMiddleware || null;
     this.config = deps.config || authConfig;
+    // Production's Telegram-delivered reset (usecase/passwordReset.js).
+    this.passwordResetUsecase = deps.passwordResetUsecase || null;
     this.init();
   }
 
@@ -189,6 +191,94 @@ class UserRoutes {
           ip: getClientIp(req),
         });
         res.json(data);
+      } catch (err) {
+        this.fail(res, err);
+      }
+    });
+
+    // --- Telegram linking (signed in) ---------------------------------------
+    //
+    // Linking is done from a signed-in session on purpose: it is what proves
+    // the Telegram account on the other end belongs to this login, and the
+    // reset flow later trusts that link completely.
+    //
+    // Stage 0A integration: identity comes from req.auth (the account key),
+    // and a system / break-glass account is refused outright - it must never
+    // acquire a Telegram-delivered reset path (C2).
+
+    const noSystem = rejectSystemAccounts("Linking Telegram");
+
+    router.get("/telegram-link", noSystem, async (req, res) => {
+      try {
+        const data = await this.passwordResetUsecase.getLinkStatus(actorUserId(req));
+        res.json({ code: 200, ...data });
+      } catch (err) {
+        this.fail(res, err);
+      }
+    });
+
+    router.post("/telegram-link", noSystem, async (req, res) => {
+      try {
+        const data = await this.passwordResetUsecase.startLink(actorUserId(req));
+        res.json(data);
+      } catch (err) {
+        this.fail(res, err);
+      }
+    });
+
+    router.delete("/telegram-link", noSystem, async (req, res) => {
+      try {
+        res.json(await this.passwordResetUsecase.unlink(actorUserId(req)));
+      } catch (err) {
+        this.fail(res, err);
+      }
+    });
+
+    // --- Password reset (signed out) -----------------------------------------
+    //
+    // Both routes are reachable without a token — by definition the caller
+    // cannot produce one. What stands in for it is a code delivered to the
+    // Telegram chat the account linked earlier.
+
+    router.post("/forgot-password", async (req, res) => {
+      try {
+        const schema = { username: Joi.string().trim().required() };
+        const isValid = Joi.validate(req.body, schema);
+        if (isValid.error !== null) throw isValid.error;
+
+        // Deliberately the same answer whatever happened — see requestReset.
+        res.json(
+          await this.passwordResetUsecase.requestReset(req.body.username, {
+            ip: getClientIp(req),
+            userAgent: req.headers["user-agent"] || null,
+          })
+        );
+      } catch (err) {
+        this.fail(res, err);
+      }
+    });
+
+    router.post("/reset-password", async (req, res) => {
+      try {
+        const schema = {
+          username: Joi.string().trim().required(),
+          code: Joi.string().trim().required(),
+          new_password: Joi.string().required(),
+        };
+        const isValid = Joi.validate(req.body, schema);
+        if (isValid.error !== null) throw isValid.error;
+
+        const data = await this.passwordResetUsecase.resetPassword(
+          req.body.username,
+          req.body.code,
+          req.body.new_password,
+          { ip: getClientIp(req), userAgent: req.headers["user-agent"] || null }
+        );
+        if (data.code === 200) {
+          res.json(data);
+        } else {
+          res.status(400).json(data);
+        }
       } catch (err) {
         this.fail(res, err);
       }

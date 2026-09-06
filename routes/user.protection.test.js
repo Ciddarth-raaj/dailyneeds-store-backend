@@ -33,13 +33,77 @@ const express = require("express");
 const bodyParser = require("body-parser");
 const F = require("../test_support/auth_fixtures");
 const buildUserUsecase = require("../usecase/user");
+const buildPasswordReset = require("../usecase/passwordReset");
+const passwordService = require("../services/password");
 const jwtService = require("../services/jwt");
 
 const SYSTEM_ID = 99;
 const ADMIN_ID = 7;
 const EMP_ID = 8;
 
-let rows, userRepo, app, server, port, adminToken, systemToken, authLog;
+const sha256 = (v) => crypto.createHash("sha256").update(String(v)).digest("hex");
+
+/**
+ * The guarded `getByUsername` the merged repository/user.js exposes: the SQL
+ * predicates (`status = 1`, `is_system_account = 0`, `employee_id IS NOT
+ * NULL`, employee active) mirrored on the in-memory rows.
+ */
+function withGuardedLookup(repo, rows) {
+  repo.getByUsername = async (username) => {
+    const r = Object.values(rows).find((x) => x.username === username);
+    if (!r) return null;
+    if (Number(r.status) !== 1) return null;
+    if (Number(r.is_system_account) === 1) return null;
+    if (r.employee_id === null || r.employee_id === undefined) return null;
+    if (Number(r.employee_status) !== 1) return null;
+    return { ...r };
+  };
+  return repo;
+}
+
+/** In-memory telegram_links / password_reset_codes. */
+function fakeResetRepo() {
+  const links = {};
+  const codes = [];
+  let nextId = 1;
+  return {
+    links,
+    codes,
+    async getLinkByUserId(userId) { return links[userId] || null; },
+    async saveLink(userId, chatId, username) { links[userId] = { user_id: userId, chat_id: chatId, telegram_username: username }; },
+    async deleteLink(userId) { delete links[userId]; },
+    async createLinkToken(userId, hash, expiresAt) { this.linkTokens = (this.linkTokens || []).concat([{ userId, hash, expiresAt }]); },
+    async consumeLinkToken() { return null; },
+    async createResetCode(userId, codeHash, expiresAt) {
+      codes.push({ id: nextId++, user_id: userId, code_hash: codeHash, expires_at: expiresAt, consumed_at: null, attempts: 0, created_at: new Date() });
+    },
+    async getActiveResetCode(userId) {
+      const live = codes.filter((c) => c.user_id === userId && !c.consumed_at && c.expires_at > new Date());
+      return live.length ? live[live.length - 1] : null;
+    },
+    async countRecentResetCodes(userId, since) { return codes.filter((c) => c.user_id === userId && c.created_at > since).length; },
+    async recordResetAttempt(id) { codes.find((c) => c.id === id).attempts += 1; },
+    async consumeResetCode(id) {
+      const c = codes.find((x) => x.id === id);
+      if (!c || c.consumed_at) return false;
+      c.consumed_at = new Date();
+      return true;
+    },
+  };
+}
+
+function fakeTelegram() {
+  const sent = [];
+  return {
+    sent,
+    isConfigured: () => true,
+    getBotUsername: async () => "dnds_test_bot",
+    async getUpdates() { return []; },
+    async sendMessage(chatId, msg) { sent.push({ chatId, msg }); return { code: 200 }; },
+  };
+}
+
+let rows, userRepo, app, server, port, adminToken, systemToken, authLog, resetRepo, telegram;
 
 before(async () => {
   rows = {
@@ -47,14 +111,20 @@ before(async () => {
     emp: F.employeeRow({ user_id: EMP_ID, username: "emp", employee_id: 1002, user_type: 1, password: F.legacyHash("emp-pass-1") }),
     breakglass: F.systemRow({ user_id: SYSTEM_ID, password_hash: await F.hashCheap("a-very-long-break-glass-secret-2026") }),
   };
-  userRepo = F.fakeUserRepo(rows);
+  userRepo = withGuardedLookup(F.fakeUserRepo(rows), rows);
   authLog = F.fakeAuthLog();
+  resetRepo = fakeResetRepo();
+  telegram = fakeTelegram();
   const config = F.config();
   const usecase = buildUserUsecase(userRepo, null, null, { authLogRepo: authLog, config });
+  const passwordResetUsecase = buildPasswordReset(userRepo, resetRepo, telegram, {
+    authLogRepo: authLog,
+    passwords: { ...passwordService, hash: F.hashCheap },
+  });
   const permissions = require("../middlewares/permissions")({ getPermissionById: async () => [] });
   const authMw = require("../middlewares/auth").create({ userUsecase: usecase, config });
   delete require.cache[require.resolve("./user")];
-  const routes = require("./user")(usecase, permissions, { invalidate() {} }, { authLogRepo: authLog, authMiddleware: authMw, config });
+  const routes = require("./user")(usecase, permissions, { invalidate() {} }, { authLogRepo: authLog, authMiddleware: authMw, config, passwordResetUsecase });
 
   app = express();
   app.set("trust proxy", "loopback");
@@ -146,30 +216,97 @@ describe("14E / §5 — a normal admin cannot touch the system account through a
     assert.equal(JSON.stringify(rows.emp), before);
   });
 
-  it("the /user router exposes no PUT/PATCH/DELETE at all - the mutations that exist are enumerable", () => {
+  it("the /user router's route surface is enumerable; the only DELETE is the caller's own Telegram link", () => {
     delete require.cache[require.resolve("./user")];
     const routes = require("./user")({}, { require: () => (req, res, next) => next() }, null, {});
     const stack = routes.getRouter().stack.filter((l) => l.route);
     const listed = stack.map((l) => `${Object.keys(l.route.methods).join(",").toUpperCase()} ${l.route.path}`).sort();
     assert.deepEqual(listed, [
+      "DELETE /telegram-link",
       "GET /:id(\\d+)/account",
       "GET /auth-log",
       "GET /auth-metrics",
       "GET /ip-restrictions",
       "GET /my-ip",
+      "GET /telegram-link",
       "POST /:id(\\d+)/reset-password",
       "POST /:id(\\d+)/unlock",
       "POST /change-password",
+      "POST /forgot-password",
       "POST /ip-restrictions",
       "POST /login",
       "POST /logout",
+      "POST /reset-password",
       "POST /setup-password",
+      "POST /telegram-link",
     ]);
     for (const l of stack) {
       assert.equal(l.route.methods.put, undefined);
       assert.equal(l.route.methods.patch, undefined);
-      assert.equal(l.route.methods.delete, undefined);
+      // No route deletes or rewrites an account. The one DELETE removes the
+      // caller's own Telegram link (self-scoped via req.auth, no :id).
+      if (l.route.methods.delete) assert.equal(l.route.path, "/telegram-link");
     }
+  });
+
+  // --- Merged Telegram reset routes (integration of main-autodeploy) --------
+
+  it("forgot-password for the break-glass username is neutral, sends nothing, issues no code", async () => {
+    const before = snapshot();
+    const res = await call("POST", "/user/forgot-password", { username: rows.breakglass.username }, "");
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.code, 200);
+    assert.equal(telegram.sent.length, 0);
+    assert.equal(resetRepo.codes.filter((c) => c.user_id === SYSTEM_ID).length, 0);
+    assert.equal(snapshot(), before);
+    const audit = authLog.events.filter((e) => e.event === "reset_requested").pop();
+    assert.ok(audit && /unknown_user|refused_protected_or_inactive/.test(audit.detail), String(audit && audit.detail));
+  });
+
+  it("reset-password for the break-glass username is refused even with a planted valid code, row unchanged", async () => {
+    // Plant a live code for the system row directly (as a DB-level attacker would).
+    await resetRepo.createResetCode(SYSTEM_ID, sha256("123456"), new Date(Date.now() + 5 * 60 * 1000));
+    const before = snapshot();
+    const res = await call("POST", "/user/reset-password", { username: rows.breakglass.username, code: "123456", new_password: "totally-different-secret-99" }, "");
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.notEqual(body.code, 200);
+    assert.equal(snapshot(), before);
+    assert.equal(userRepo.calls.some((c) => c[0] === "setModernPassword" && c[1] === SYSTEM_ID), false);
+  });
+
+  it("a normal admin cannot route a Telegram reset at the break-glass account (no username override, no :id form)", async () => {
+    const before = snapshot();
+    const r1 = await call("POST", "/user/forgot-password", { username: rows.breakglass.username });
+    assert.equal(r1.status, 200); // neutral, and nothing happened
+    assert.equal(telegram.sent.length, 0);
+    const r2 = await call("POST", `/user/${SYSTEM_ID}/forgot-password`, {});
+    assert.equal(r2.status, 404);
+    const r3 = await call("POST", `/user/${SYSTEM_ID}/telegram-link`, {});
+    assert.equal(r3.status, 404);
+    assert.equal(snapshot(), before);
+    assert.equal(Object.keys(resetRepo.links).length, 0);
+  });
+
+  it("a system-account session is refused on every /telegram-link method (403 EMPLOYEE_REQUIRED)", async () => {
+    for (const m of ["GET", "POST", "DELETE"]) {
+      const res = await call(m, "/user/telegram-link", m === "GET" ? undefined : {}, systemToken);
+      assert.equal(res.status, 403, `${m} -> ${res.status}`);
+      assert.equal((await res.json()).error, "EMPLOYEE_REQUIRED");
+    }
+    assert.equal(Object.keys(resetRepo.links).length, 0);
+    assert.equal(resetRepo.linkTokens, undefined, "no link token was created for the system account");
+  });
+
+  it("a normal employee session CAN start a Telegram link (the guard is specific)", async () => {
+    const empToken = await jwtService.sign({ auth_ver: 2, id: EMP_ID, employee_id: 1002, user_type: 1, designation_id: 4, store_id: 2 }, "1h", { subject: String(EMP_ID) });
+    const res = await call("POST", "/user/telegram-link", {}, empToken);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.match(body.link, /^https:\/\/t\.me\/dnds_test_bot\?start=[0-9a-f]{48}$/);
+    assert.equal(resetRepo.linkTokens.length, 1);
+    assert.equal(resetRepo.linkTokens[0].userId, EMP_ID);
   });
 
   it("an admin CAN reset and unlock a normal employee (the guard is specific, not a blanket refusal)", async () => {

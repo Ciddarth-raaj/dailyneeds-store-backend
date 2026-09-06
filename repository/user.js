@@ -280,6 +280,39 @@ class UserRepository {
   }
 
   /**
+   * One active, employee-linked, NON-system login by username, or null.
+   *
+   * Used by the Telegram reset flow, which has no token to work from. The
+   * exclusions are explicit predicates, not side effects of the join:
+   * `is_system_account = 0` and `employee_id IS NOT NULL` are written out,
+   * so a break-glass account can never be selected here even if the join or
+   * the employee status rule changes later (C2). `ne.status = 1` matches
+   * `login`: an account that could not sign in anyway has no business
+   * receiving a reset code.
+   */
+  getByUsername(username) {
+    return this._query(
+      "GET-BY-USERNAME",
+      `SELECT u.user_id AS user_id,
+              u.username AS username,
+              u.employee_id AS employee_id,
+              u.is_system_account AS is_system_account,
+              u.status AS status,
+              ne.employee_name AS employee_name,
+              ne.status AS employee_status,
+              ne.primary_contact_number AS primary_contact_number
+       FROM \`user\` u
+       LEFT JOIN new_employee ne ON ne.employee_id = u.employee_id
+       WHERE u.username = ?
+         AND u.status = 1
+         AND u.is_system_account = 0
+         AND u.employee_id IS NOT NULL
+         AND ne.status = 1`,
+      [username]
+    ).then((docs) => (docs.length === 0 ? null : docs[0]));
+  }
+
+  /**
    * Create a login. `passwordHash` is a modern hash or NULL (account must be
    * set up through a token). SHA-1 is never written by this method.
    * is_system_account is not a parameter and takes its column default of 0.

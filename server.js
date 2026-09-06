@@ -188,6 +188,9 @@ class Server {
     this.vehicleRepo = require("./repository/vehicle")(this.mysql.connection);
     this.userRepo = require("./repository/user")(this.mysql.connection);
     this.authLogRepo = require("./repository/auth_log")(this.mysql.connection);
+    this.passwordResetRepo = require("./repository/passwordReset")(
+      this.mysql.connection
+    );
     this.peopleRepo = require("./repository/people")(this.mysql.connection);
     this.accountsRepo = require("./repository/accounts")(this.mysql.connection);
     this.accountsEbookRepo = require("./repository/accountsEbook")(
@@ -431,6 +434,14 @@ class Server {
         authLogRepo: this.authLogRepo,
         telegram: require("./services/telegram")(),
       }
+    );
+    // Stage 0A integration: the Telegram reset writes through the modern
+    // password service and audits to user_auth_log; it never touches SHA-1.
+    this.passwordResetUsecase = require("./usecase/passwordReset")(
+      this.userRepo,
+      this.passwordResetRepo,
+      require("./services/telegram")(),
+      { authLogRepo: this.authLogRepo }
     );
     this.peopleUsecase = require("./usecase/people")(this.peopleRepo);
     this.accountsEbookUsecase = require("./usecase/accountsEbook")(
@@ -702,7 +713,11 @@ class Server {
       this.userUsecase,
       this.permissions,
       this.ipRestriction,
-      { authLogRepo: this.authLogRepo, authMiddleware: this.authMiddleware }
+      {
+        authLogRepo: this.authLogRepo,
+        authMiddleware: this.authMiddleware,
+        passwordResetUsecase: this.passwordResetUsecase,
+      }
     );
     const peopleRouter = require("./routes/people")(this.peopleUsecase);
     const accountsRouter = require("./routes/accounts")(
@@ -1026,6 +1041,18 @@ class Server {
       PURCHASE_REF_WARM_CRON,
       async () => {
         await this.purchaseRefUsecase.refresh();
+      }
+    );
+
+    // Every minute - pick up `/start <token>` messages sent to the Telegram
+    // bot and finish linking. Polling rather than a webhook, so the API does
+    // not have to be reachable from the internet over HTTPS.
+    const TELEGRAM_LINK_POLL_CRON = "* * * * *";
+    this.cronService.register(
+      "telegram_link_poll",
+      TELEGRAM_LINK_POLL_CRON,
+      async () => {
+        await this.passwordResetUsecase.pollTelegramUpdates();
       }
     );
 
