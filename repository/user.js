@@ -180,6 +180,62 @@ class UserRepository {
     });
   }
 
+  /**
+   * The stored row for one user when `password` is theirs, empty otherwise.
+   *
+   * Used to confirm a user knows their current password before it is
+   * replaced. The comparison happens in SQL against SHA1, the same way
+   * `login` does it, so there is only one notion of "correct password".
+   */
+  verifyPassword(userId, password) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "SELECT `user_id` FROM `user` WHERE `user_id` = ? AND `password` = SHA1(?)",
+        [userId, password],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.USER",
+              code: "REPOSITORY.USER.VERIFY-PASSWORD",
+              description: err.toString(),
+              category: "",
+              ref: { userId },
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        }
+      );
+    });
+  }
+
+  /** Replace one user's password. The caller has already verified the old one. */
+  updatePassword(userId, password) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "UPDATE `user` SET `password` = SHA1(?) WHERE `user_id` = ?",
+        [password, userId],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.USER",
+              code: "REPOSITORY.USER.UPDATE-PASSWORD",
+              description: err.toString(),
+              category: "",
+              ref: { userId },
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        }
+      );
+    });
+  }
+
   createLogin(username, user_type, employee_id, password) {
     return new Promise((resolve, reject) => {
       this.db.query(

@@ -83,6 +83,53 @@ class UserRoutes {
       });
     });
 
+    // A user changing their own password. The account is taken from the
+    // token, never from the body, so this cannot be aimed at someone else;
+    // the current password is still required, so a session left open on a
+    // shared terminal cannot be used to lock its owner out.
+    //
+    // Credentials arrive in the body rather than the query string — unlike
+    // /login, they are not written into access logs or browser history here.
+    router.post("/change-password", async (req, res) => {
+      try {
+        if (!req.decoded || req.decoded.id === undefined) {
+          return res.status(401).json({ code: 401, msg: "Unauthorized" });
+        }
+
+        const schema = {
+          current_password: Joi.string().required(),
+          new_password: Joi.string().required(),
+        };
+
+        const isValid = Joi.validate(req.body, schema);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const data = await this.userUsecase.changePassword(
+          req.decoded.id,
+          req.body.current_password,
+          req.body.new_password
+        );
+
+        if (data.code === 200) {
+          res.json(data);
+        } else {
+          res.status(400).json(data);
+        }
+      } catch (err) {
+        console.log(err);
+        if (err.name === "ValidationError") {
+          res.status(422).json({
+            code: 422,
+            msg: err.message || err.toString(),
+          });
+        } else {
+          res.status(500).json({ code: 500, msg: "An error occurred !" });
+        }
+      }
+    });
+
     router.get(
       "/ip-restrictions",
       needs("manage_ip_restrictions"),

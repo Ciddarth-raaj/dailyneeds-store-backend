@@ -16,6 +16,9 @@ const IP_NOT_ALLOWED = {
   msg: "This account can only be used from an approved network.",
 };
 
+/** Shortest password a user may set for themselves. */
+const MIN_PASSWORD_LENGTH = 6;
+
 class UserUsecase {
   constructor(userRepo, designationRepo, employeeRepo) {
     this.userRepo = userRepo;
@@ -72,6 +75,51 @@ class UserUsecase {
         reject(err);
       }
     });
+  }
+
+  /**
+   * Replace the signed-in user's own password.
+   *
+   * The user proves they know the current one first: a token alone is not
+   * enough, so a borrowed session cannot lock its owner out. `userId` comes
+   * from the token rather than the request body — nobody can aim this at
+   * another account.
+   *
+   * The failure modes are told apart on purpose. A wrong current password is
+   * the user's to correct; a new password that is too short or unchanged is
+   * a validation problem the screen can explain before they try again.
+   */
+  async changePassword(userId, currentPassword, newPassword) {
+    const current = typeof currentPassword === "string" ? currentPassword : "";
+    const next = typeof newPassword === "string" ? newPassword : "";
+
+    if (next.length < MIN_PASSWORD_LENGTH) {
+      const error = new Error(
+        `New password must be at least ${MIN_PASSWORD_LENGTH} characters`
+      );
+      error.name = "ValidationError";
+      throw error;
+    }
+
+    if (next === current) {
+      const error = new Error(
+        "New password must be different from the current password"
+      );
+      error.name = "ValidationError";
+      throw error;
+    }
+
+    const rows = await this.userRepo.verifyPassword(userId, current);
+    if (!rows || rows.length === 0) {
+      return {
+        code: 400,
+        error: "INCORRECT_PASSWORD",
+        msg: "Current password is incorrect",
+      };
+    }
+
+    await this.userRepo.updatePassword(userId, next);
+    return { code: 200, msg: "Password updated" };
   }
 
   /**
