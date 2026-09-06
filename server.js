@@ -171,6 +171,9 @@ class Server {
     this.despatchRepo = require("./repository/despatch")(this.mysql.connection);
     this.vehicleRepo = require("./repository/vehicle")(this.mysql.connection);
     this.userRepo = require("./repository/user")(this.mysql.connection);
+    this.passwordResetRepo = require("./repository/passwordReset")(
+      this.mysql.connection
+    );
     this.peopleRepo = require("./repository/people")(this.mysql.connection);
     this.accountsRepo = require("./repository/accounts")(this.mysql.connection);
     this.accountsEbookRepo = require("./repository/accountsEbook")(
@@ -410,6 +413,11 @@ class Server {
       this.userRepo,
       this.designationRepo,
       this.employeeRepo
+    );
+    this.passwordResetUsecase = require("./usecase/passwordReset")(
+      this.userRepo,
+      this.passwordResetRepo,
+      require("./services/telegram")()
     );
     this.peopleUsecase = require("./usecase/people")(this.peopleRepo);
     this.accountsEbookUsecase = require("./usecase/accountsEbook")(
@@ -675,7 +683,8 @@ class Server {
     const userRouter = require("./routes/user")(
       this.userUsecase,
       this.permissions,
-      this.ipRestriction
+      this.ipRestriction,
+      this.passwordResetUsecase
     );
     const peopleRouter = require("./routes/people")(this.peopleUsecase);
     const accountsRouter = require("./routes/accounts")(
@@ -999,6 +1008,18 @@ class Server {
       PURCHASE_REF_WARM_CRON,
       async () => {
         await this.purchaseRefUsecase.refresh();
+      }
+    );
+
+    // Every minute - pick up `/start <token>` messages sent to the Telegram
+    // bot and finish linking. Polling rather than a webhook, so the API does
+    // not have to be reachable from the internet over HTTPS.
+    const TELEGRAM_LINK_POLL_CRON = "* * * * *";
+    this.cronService.register(
+      "telegram_link_poll",
+      TELEGRAM_LINK_POLL_CRON,
+      async () => {
+        await this.passwordResetUsecase.pollTelegramUpdates();
       }
     );
 

@@ -445,6 +445,11 @@ const unProtectedRoutes = {
 
   //user
   "/user/login": { methods: { post: true } },
+  // Password reset: the caller has forgotten their password, so by
+  // definition they cannot present a token. A code delivered to the
+  // account's linked Telegram chat stands in for one.
+  "/user/forgot-password": { methods: { post: true } },
+  "/user/reset-password": { methods: { post: true } },
   // "/tally/card-to-bank": { methods: { get: true } },
   // "/tally/sales-entry": { methods: { get: true } },
   // "/tally/expenses": { methods: { get: true } },

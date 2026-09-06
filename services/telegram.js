@@ -4,7 +4,21 @@ const { TelegramClient } = require("messaging-api-telegram");
 const logger = require("../utils/logger");
 const { TEST_TELEGRAM_CHAT_ID } = require("../constants/telegram");
 
-const BOT_TOKEN = "8069311027:AAE64F15h8FZY_jqnlOSzQGmzeKAR-MDYbI";
+// The token has always lived in this file. It is read from the environment
+// first so a deployment can rotate it without a code change; the literal
+// stays as the fallback so existing installs keep working.
+const BOT_TOKEN =
+  process.env.TELEGRAM_BOT_TOKEN ||
+  "8069311027:AAE64F15h8FZY_jqnlOSzQGmzeKAR-MDYbI";
+
+/**
+ * The bot's @name, needed to build `t.me/<name>?start=...` deep links.
+ *
+ * There is no default: a wrong guess would send users to someone else's bot,
+ * which is worse than the link feature reporting that it is not configured.
+ */
+const BOT_USERNAME = (process.env.TELEGRAM_BOT_USERNAME || "").replace(/^@/, "");
+
 const client = new TelegramClient({
   accessToken: BOT_TOKEN,
 });
@@ -41,6 +55,25 @@ class Telegram {
         reject(err);
       }
     });
+  }
+
+  /** The bot's @name, or "" when the deployment has not configured one. */
+  getBotUsername() {
+    return BOT_USERNAME;
+  }
+
+  /**
+   * Messages sent *to* the bot since `offset`.
+   *
+   * Passing an offset also acknowledges everything before it, so Telegram
+   * stops resending those; that is what keeps a restart from replaying old
+   * updates forever. Long polling is deliberately not used — this runs on a
+   * cron tick, so it must return promptly rather than hold the connection.
+   */
+  async getUpdates(offset) {
+    const options = { timeout: 0, allowedUpdates: ["message"] };
+    if (offset !== undefined && offset !== null) options.offset = offset;
+    return client.getUpdates(options);
   }
 
   async sendDocument(chat_id, fileUrl, caption = "") {

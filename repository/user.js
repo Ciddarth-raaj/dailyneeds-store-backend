@@ -181,6 +181,43 @@ class UserRepository {
   }
 
   /**
+   * One active login by username, or null.
+   *
+   * Used by the reset flow, which has no token to work from. `status = 1` on
+   * both rows matches `login`: an account that could not sign in anyway has
+   * no business receiving a reset code.
+   */
+  getByUsername(username) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT u.user_id AS user_id,
+                u.username AS username,
+                u.employee_id AS employee_id,
+                ne.employee_name AS employee_name
+         FROM \`user\` u
+         LEFT JOIN new_employee ne ON ne.employee_id = u.employee_id
+         WHERE u.status = 1 AND ne.status = 1 AND u.username = ?`,
+        [username],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.USER",
+              code: "REPOSITORY.USER.GET-BY-USERNAME",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs.length === 0 ? null : docs[0]);
+        }
+      );
+    });
+  }
+
+  /**
    * The stored row for one user when `password` is theirs, empty otherwise.
    *
    * Used to confirm a user knows their current password before it is
