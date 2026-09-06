@@ -3,7 +3,7 @@
 -- Only the SHA-256 of a token is stored. The token itself exists once, in
 -- the response to the admin who requested it, and is never written anywhere
 -- by this system.
-CREATE TABLE `user_password_reset` (
+CREATE TABLE IF NOT EXISTS `user_password_reset` (
   `reset_id` BIGINT NOT NULL AUTO_INCREMENT,
   `user_id` INT NOT NULL,
   `token_hash` CHAR(64) NOT NULL,

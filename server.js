@@ -15,6 +15,22 @@ const HttpServer = require("http").createServer(app);
 const logger = require("./utils/logger");
 const { ALERTS_TELEGRAM_CHAT_ID } = require("./constants/telegram");
 
+/**
+ * Express `trust proxy` from TRUST_PROXY. Default: loopback (nginx on the
+ * same host). Never `true`.
+ */
+function resolveTrustProxy(raw) {
+  if (raw === undefined || raw === "") return "loopback";
+  const v = String(raw).trim();
+  if (v === "false" || v === "0") return false;
+  if (v === "true") {
+    console.warn("TRUST_PROXY=true is not accepted (it lets clients forge X-Forwarded-*); using loopback");
+    return "loopback";
+  }
+  if (/^\d+$/.test(v)) return Number(v);
+  return v; // "loopback", "linklocal", "uniquelocal", or an address/CIDR list
+}
+
 class Server {
   constructor() {
     this.drivers = [];
@@ -47,12 +63,12 @@ class Server {
     // client from X-Forwarded-For, which is what the IP restriction checks.
     // Set TRUST_PROXY=false if the app is ever exposed directly, otherwise
     // a client could spoof the header.
-    app.set(
-      "trust proxy",
-      process.env.TRUST_PROXY === "false"
-        ? false
-        : process.env.TRUST_PROXY || true
-    );
+    // Stage 0A correction: blanket `true` let a client's own X-Forwarded-For
+    // win whenever the proxy appended rather than overwrote the header. The
+    // real topology is nginx on this same host, so only loopback is trusted
+    // by default. TRUST_PROXY accepts Express's forms - "loopback", an
+    // address or CIDR list, a hop count, or "false" - and is read once here.
+    app.set("trust proxy", resolveTrustProxy(process.env.TRUST_PROXY));
 
     app.use(require("cors")());
 

@@ -7,12 +7,11 @@
 -- knew, and is why rollback of this migration must be paired with restoring
 -- the pre-migration backup rather than run on its own once modern hashes
 -- exist. See docs/auth-stage0a-implementation.md.
-DROP INDEX `idx_user_employee_id` ON `user`;
-DROP INDEX `idx_user_username` ON `user`;
-
 UPDATE `user` SET `password` = '' WHERE `password` IS NULL;
 
 ALTER TABLE `user`
+  DROP INDEX `idx_user_employee_id`,
+  DROP INDEX `idx_user_username`,
   DROP COLUMN `credential_rotated_at`,
   DROP COLUMN `is_system_account`,
   DROP COLUMN `token_valid_from`,

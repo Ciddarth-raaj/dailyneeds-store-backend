@@ -1,5 +1,9 @@
 -- Stage 0A / Deployment A: authentication columns on `user`.
 --
+-- Additive only, and ONE statement: a single ALTER TABLE either completes or
+-- does not, on MySQL 5.7 and 8.0 alike, so a failure cannot leave half of
+-- these columns in place (safety correction pass, deployment gate 4).
+--
 -- Additive only. Every new column is NULL or has a default, so nothing that
 -- reads `user` today changes behaviour. The one modification is making the
 -- legacy `password` column nullable: an account whose credential lives in
@@ -23,7 +27,6 @@ ALTER TABLE `user`
   ADD COLUMN `last_login_at` DATETIME NULL AFTER `last_failed_login_at`,
   ADD COLUMN `token_valid_from` DATETIME NULL AFTER `last_login_at`,
   ADD COLUMN `is_system_account` TINYINT(1) NOT NULL DEFAULT 0 AFTER `token_valid_from`,
-  ADD COLUMN `credential_rotated_at` DATETIME NULL AFTER `is_system_account`;
-
-CREATE INDEX `idx_user_username` ON `user` (`username`);
-CREATE INDEX `idx_user_employee_id` ON `user` (`employee_id`);
+  ADD COLUMN `credential_rotated_at` DATETIME NULL AFTER `is_system_account`,
+  ADD INDEX `idx_user_username` (`username`),
+  ADD INDEX `idx_user_employee_id` (`employee_id`);

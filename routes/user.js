@@ -37,11 +37,18 @@ class UserRoutes {
     }
   }
 
-  /** Whether the request reached the app over TLS, as the proxy reports it. */
+  /**
+   * Whether the request reached the app over TLS.
+   *
+   * `req.secure` is Express's answer, and Express consults X-Forwarded-Proto
+   * ONLY when the immediate peer is within `trust proxy`. The raw header is
+   * deliberately not read here: doing so would let any client that reaches
+   * the app directly forge `https`. The proxy must overwrite the header
+   * (`proxy_set_header X-Forwarded-Proto $scheme`), which the nginx patch
+   * script does.
+   */
   transportSecure(req) {
-    if (req.secure) return true;
-    const proto = req.headers["x-forwarded-proto"];
-    return typeof proto === "string" && proto.split(",")[0].trim().toLowerCase() === "https";
+    return req.secure === true;
   }
 
   async metric(name) {

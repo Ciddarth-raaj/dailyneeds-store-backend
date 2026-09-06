@@ -4,26 +4,23 @@ const { TelegramClient } = require("messaging-api-telegram");
 const logger = require("../utils/logger");
 const { TEST_TELEGRAM_CHAT_ID } = require("../constants/telegram");
 
-// Stage 0A: the bot token is read from the environment. The committed
-// value below is retained ONLY so an un-rotated deployment keeps working
-// during the transition; it is a known exposure and must be rotated via
-// BotFather, after which TELEGRAM_BOT_TOKEN is set and this fallback is
-// deleted. See docs/auth-stage0a-implementation.md, secret-rotation checklist.
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "8069311027:AAE64F15h8FZY_jqnlOSzQGmzeKAR-MDYbI";
-if (!process.env.TELEGRAM_BOT_TOKEN) {
+// Stage 0A: the bot token comes from the environment only. The value that
+// used to be committed here is treated as compromised and has been removed;
+// it must be revoked via BotFather. Without TELEGRAM_BOT_TOKEN the service
+// degrades - every send rejects and is logged - rather than the process
+// failing to start, so a missing variable is visible but not an outage.
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || null;
+if (!BOT_TOKEN) {
   logger.Log({
-    level: logger.LEVEL.INFO,
+    level: logger.LEVEL.ERROR,
     component: "SERVICE.TELEGRAM",
-    code: "SERVICE.TELEGRAM.TOKEN-FALLBACK",
-    description: "TELEGRAM_BOT_TOKEN is not set; using the committed fallback token. Rotate it.",
+    code: "SERVICE.TELEGRAM.TOKEN-MISSING",
+    description: "TELEGRAM_BOT_TOKEN is not set; Telegram notifications (including break-glass alerts) are DISABLED.",
     category: "",
     ref: {},
   });
 }
-const client = new TelegramClient({
-  accessToken: BOT_TOKEN,
-});
-
+const client = BOT_TOKEN ? new TelegramClient({ accessToken: BOT_TOKEN }) : null;
 class Telegram {
   constructor() { }
 
@@ -37,6 +34,7 @@ class Telegram {
     //test-chat-id = 800863889
     return new Promise(async (resolve, reject) => {
       try {
+        if (!client) throw new Error("Telegram is not configured (TELEGRAM_BOT_TOKEN missing)");
         await client.sendMessage(chat_id, msg, {
           disableWebPagePreview: true,
           disableNotification: true,
@@ -61,6 +59,7 @@ class Telegram {
   async sendDocument(chat_id, fileUrl, caption = "") {
     return new Promise(async (resolve, reject) => {
       try {
+        if (!client) throw new Error("Telegram is not configured (TELEGRAM_BOT_TOKEN missing)");
         await client.sendDocument(chat_id, fileUrl, {
           caption,
           disableNotification: false,
@@ -83,6 +82,7 @@ class Telegram {
   async sendImages(chat_id, images, caption = "") {
     return new Promise(async (resolve, reject) => {
       try {
+        if (!client) throw new Error("Telegram is not configured (TELEGRAM_BOT_TOKEN missing)");
         await client.sendMediaGroup(chat_id, images, {
           caption,
           disableNotification: false,

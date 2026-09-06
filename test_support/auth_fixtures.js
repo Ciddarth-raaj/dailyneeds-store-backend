@@ -230,6 +230,7 @@ function fakeUserRepo(rows) {
       if (!r) return null;
       return {
         user_id: r.user_id,
+        employee_id: r.employee_id,
         status: r.status,
         token_valid_from: r.token_valid_from,
         must_change_password: r.must_change_password,

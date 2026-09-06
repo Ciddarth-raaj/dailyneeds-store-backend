@@ -213,7 +213,7 @@ class UserRepository {
   getSessionState(userId) {
     return this._query(
       "GET-SESSION-STATE",
-      "SELECT `user_id`, `status`, `token_valid_from`, `must_change_password`, `is_system_account` FROM `user` WHERE `user_id` = ?",
+      "SELECT `user_id`, `employee_id`, `status`, `token_valid_from`, `must_change_password`, `is_system_account` FROM `user` WHERE `user_id` = ?",
       [userId],
       { userId }
     ).then((rows) => (rows.length ? rows[0] : null));

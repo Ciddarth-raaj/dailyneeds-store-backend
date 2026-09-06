@@ -83,7 +83,8 @@ class UserUsecase {
   async audit(event, fields = {}) {
     if (!this.authLog) return;
     try {
-      await this.authLog.record({ event, ...fields });
+      const { transport, ...rest } = fields;
+      await this.authLog.record({ event, ...rest });
     } catch (err) {
       // never let the audit path break authentication
     }
@@ -177,12 +178,15 @@ class UserUsecase {
       // B8: same cost as a real verification.
       await this.passwords.dummyVerify(password);
       this._recordIpFailure(ip);
-      await this.audit("login_failed", { ...base, detail: "unknown_user" });
+      await this.audit("login_failed", {
+        ...base,
+        detail: meta.transport === "query" ? "unknown_user;legacy_query_string" : "unknown_user",
+      });
       return BAD_CREDENTIALS;
     }
 
     const isSystem = Number(row.is_system_account) === 1;
-    const audited = { ...base, userId: row.user_id };
+    const audited = { ...base, userId: row.user_id, transport: meta.transport === "query" ? "legacy_query_string" : undefined };
 
     // Locked accounts still pay for a verification, so the lock is not observable by timing.
     const lockedUntil = row.locked_until ? new Date(row.locked_until).getTime() : 0;
@@ -278,9 +282,11 @@ class UserUsecase {
       // counting must not change the outcome
     }
     this._recordIpFailure(audited.ip);
+    const transport = audited.transport ? `;${audited.transport}` : "";
     await this.audit(isSystem ? "break_glass_login_failed" : "login_failed", {
       ...audited,
-      detail: lockUntil ? "wrong_password;locked" : "wrong_password",
+      transport: undefined,
+      detail: (lockUntil ? "wrong_password;locked" : "wrong_password") + transport,
     });
     if (lockUntil) await this.audit("login_locked", { ...audited, detail: "threshold_reached" });
     if (isSystem) {
@@ -298,6 +304,7 @@ class UserUsecase {
   async _issueSession(row, isSystem) {
     const mustChange = Number(row.must_change_password) === 1 && !isSystem;
     const claims = {
+      auth_ver: 2, // versioned identity: sub is the account key (see middlewares/auth.js)
       id: row.user_id, // kept for pre-Stage-0A readers of req.decoded.id
       user_type: row.user_type,
       designation_id: isSystem ? null : row.designation_id,

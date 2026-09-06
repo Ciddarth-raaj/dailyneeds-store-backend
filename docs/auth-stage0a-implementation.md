@@ -25,7 +25,7 @@ Found by inspection before any code was written. Each changed the approach.
 | --- | --- | --- |
 | F1 | **A push to `main-autodeploy` runs `db-migrate up` and `pm2 reload` unattended** (`.github/workflows/deploy-backend.yml`). A migration committed there is a production schema change with no manual gate. | Nothing in this work is pushed to `main-autodeploy`. Every migration is additive, and the operator runs the backup (§5) *before* merging, because the deploy will not wait. |
 | F2 | **The deploy runs `npm i` on the EC2 box.** A native module (`bcrypt`, `argon2`) would compile there during deploy; a compile failure under `set -euo pipefail` leaves the checkout updated and the process not reloaded. The team has already fought lockfile drift from this step. | Hashing uses `crypto.scrypt` from Node itself. **Zero new dependencies.** `package.json` and `package-lock.json` are untouched. |
-| F3 | **Existing tokens carry `id`, not `sub`, and no `kid`.** Twenty-four hours of them are live at any moment. | The verifier accepts kid-less tokens under the legacy key while `JWT_REQUIRE_KID=false`, and the middleware reads `sub` with `id` as fallback. Nobody is signed out by the deploy. |
+| F3 | **Existing tokens carry `id` (= `user.user_id`) and `employee_id`; no `sub`, no `kid`, no version claim.** Confirmed from `origin/main-autodeploy` (`usecase/user.js`, `services/jwt.js`). Twenty-four hours of them are live at any moment. | Identity resolution is versioned (§7a): tokens with `auth_ver: 2` resolve by `sub`; tokens without it resolve by the legacy rules only, never by `sub`, never to a system account. Nobody is signed out by the deploy. |
 | F4 | **`user.password` is `TEXT NOT NULL`.** A modern-hash-only account has no SHA-1 value. | The migration makes it nullable. The down migration writes `''` before restoring NOT NULL (see §5 for what that means). |
 | F5 | **The login `LEFT JOIN` is an inner join in effect** (`WHERE ne.status = 1`), so an account with no employee cannot sign in. The seeded admin has `employee_id IS NULL`. | The predicate moved out of SQL into the usecase, where it applies to employee accounts only. The seeded admin still cannot sign in: a *non-system* account without an employee row is refused explicitly (`login_inactive`/`no_employee_row`). Nothing widened. |
 | F6 | **`errorHandler.js` logs `req.originalUrl`** on parse failures and aborted requests, and nginx access logs record request lines. | Query-string credentials were in logs already. Confirms A7 as urgent and A7's log-purge guidance (§18). |
@@ -221,8 +221,8 @@ confinement when enabled (B2) → `ip_restriction` → `permissions` (unchanged)
 - `id` = `user.user_id` is still written, because `routes/gst.js`,
   `routes/accounts.js` and the IP-restriction middleware read
   `req.decoded.id`, and because tokens issued before this release have only
-  `id`. The middleware reads `sub`, falling back to `id`. After 24 hours every
-  live token has `sub`.
+  `id`. **The middleware does not fall back from `sub` to `id`**: it resolves
+  by the token's version (§7a). After 24 hours every live token is v2.
 - `employee_id` is present **only** on an employee account's token, and is the
   unchanged `new_employee.employee_id`. A system account's token has `sys:true`
   and no `employee_id` claim. The middleware sets `req.auth.employeeId` and
@@ -230,6 +230,56 @@ confinement when enabled (B2) → `ip_restriction` → `permissions` (unchanged)
   fake value.
 - All claims are built from the database row in `_issueSession`. Nothing the
   client sent contributes.
+
+### 7a. Legacy / v2 token compatibility (safety correction pass, item 1)
+
+**What a legacy token contains** — read from the production source, not
+assumed: `{ id: user.user_id, store_id, designation_id, employee_id,
+user_type, name, designation, employee_image, iat, exp }`. **There is no
+`sub` claim at all**, no `kid` header, and no version or type claim. The
+old middleware read `decoded.id` as the account. So the specific hazard
+described — a legacy `sub` holding an `employee_id` — does not exist in the
+deployed code. What did exist in the first Stage 0A cut was an
+*unversioned* fallback (`sub ?? id`), which is correct in effect but not
+provable, and which would have become wrong the moment any token ever
+carried a `sub` with a different meaning. It has been replaced.
+
+**Resolution is now strictly versioned** (`middlewares/auth.js#resolveIdentity`,
+exported and pure):
+
+| Token | Claims that identify it | How it resolves | Refused when |
+| --- | --- | --- | --- |
+| **v2** (Stage 0A) | `auth_ver: 2`, `sub` | account = `Number(sub)`; `employee_id` claim, if present, must be a positive integer; `sys: true` marks a system account and must carry no `employee_id` | `sub` missing or not a decimal string; `id` present and ≠ `sub`; system token carrying an `employee_id` |
+| **legacy** (pre-Stage 0A) | no `auth_ver` | account = `id`; employee = `employee_id`; **`sub` is never read** | `sub`, `sys` or `pwc` present (the old code never wrote them); `id` or `employee_id` missing or not positive integers |
+| anything else | `auth_ver` = 1, 3, `"2"`, `null`, object … | — | always |
+
+**A legacy token can never resolve to a system account**, by three
+independent means: (1) shape — a system account has `employee_id NULL`,
+and a legacy token without a positive-integer `employee_id` is refused
+before any lookup; (2) claims — `sys` on a legacy-shaped token is refused as
+malformed; (3) database — when the middleware is built with the user
+usecase (it is, in `server.js`), every legacy token is checked against the
+row for its `id`: the row must exist, be active, have `is_system_account = 0`,
+have a non-NULL `employee_id`, and that `employee_id` must equal the token's.
+The check fails closed (500 on error) and is cached 60 s per account. This
+does not rely on NULL failing to match anything.
+
+**Overlapping namespaces.** `user_id` and `employee_id` are different
+sequences and do overlap. A legacy token for employee A (`user_id 7`,
+`employee_id 42`) resolves to user 7 — `employee_id` is never used as an
+account key, so user 42 is unreachable through it. A v2 token for user 42
+resolves to user 42. Tests: `middlewares/auth.compat.test.js` (1–7) and
+`middlewares/legacy_transition.test.js` (a token minted by the actual
+`origin/main-autodeploy` login code, presented to the new middleware).
+
+**Retirement of legacy resolution.** Legacy tokens live at most 24 h
+(`jwt.sign(info, "1d")` in the old code; the global `TOKEN_CUTOFF` bounds
+anything older). Legacy resolution can be removed **after 36 hours of
+continuous new-code operation following Deployment A**, in a separate
+change that (a) makes `resolveIdentity` return `null` for tokens without
+`auth_ver` and (b) sets `JWT_REQUIRE_KID=true`. Do both in the same hotfix:
+they retire the same population of tokens. Record the Deployment A time in
+the readiness log; the earliest retirement time is that plus 36 h.
 
 ---
 
@@ -610,6 +660,153 @@ Login validation errors return the same 400 without naming the field.
 Not defended: the IP-block response is also 204, but the alerts and audit rows
 distinguish it server-side, which is what matters.
 
+### 17a. `trust proxy` and forwarded headers (safety correction pass, item 8)
+
+**Before:** `app.set("trust proxy", process.env.TRUST_PROXY || true)` —
+blanket trust. With blanket trust Express takes the **leftmost**
+`X-Forwarded-For` entry; if any nginx location appends rather than
+overwrites (`$proxy_add_x_forwarded_for`), a client-supplied address wins,
+which is exactly what the IP restriction must not allow.
+
+**Now:** `resolveTrustProxy()` in `server.js` — default **`loopback`**
+(nginx on the same host), `TRUST_PROXY` accepted as `false`, a hop count, or
+an address/CIDR list; **`true` is refused** and falls back to loopback with a
+warning. Read once at startup. `routes/user.js#transportSecure` reads
+**`req.secure` only**: Express consults `X-Forwarded-Proto` only when the
+peer is trusted, so a client that reaches the Node port directly cannot
+forge `https`, and the raw header is never read.
+
+Topology and who supplies what:
+
+```
+browser ──HTTPS──▶ nginx (api.dnds.co.in, same EC2 host)
+                     sets X-Real-IP        $remote_addr   (overwrite)
+                     sets X-Forwarded-For  $remote_addr   (overwrite)
+                     sets X-Forwarded-Proto $scheme       (overwrite)
+                   ──HTTP over loopback──▶ Node :8080  (trust proxy = loopback)
+```
+
+The overwrite semantics come from `scripts/patch_nginx_forwarded.py`; the
+live vhost must be confirmed to have them (§17 item 3). Because the peer is
+loopback, a forged header from a *browser* is only harmless if nginx
+overwrites it — that confirmation is therefore part of gate 12, not just
+gate 17's HTTPS check. Tests: `routes/proxy.test.js`.
+
+### 18a. Two-day observation window for the query-string fallback
+
+Observe **two full operating days, 09:00–22:00, including a complete shift
+changeover**, using `GET /user/auth-metrics` (daily counts) and
+`user_auth_log` rows with `detail` containing `legacy_query_string` (every
+success **and** failure now carries the transport, with `user_agent`, so a
+stale device can be identified without ever logging a credential). Zero
+across the window → the standalone hotfix `AUTH_LEGACY_QUERY_LOGIN=false`
+with its own GO/NO-GO: confirm zero, build/test the frontend, verify
+rollback (set it back to `true`), deploy alone.
+
+### 20a. Deployment mechanism and failure semantics (safety correction pass, item 2)
+
+Both repositories auto-deploy from `main-autodeploy`, each through its own
+GitHub Actions workflow. There is no server-side hook, no other CI, and no
+control panel referenced anywhere in either checkout; the workflows are the
+trigger. **What cannot be seen from the repositories** — and so is not
+proven — is whether anything *outside* them also reacts to that branch
+(a second runner, a webhook on the GitHub repository settings). Gate 4 is
+held at WAITING FOR ADMINISTRATOR for that reason until the repository's
+GitHub Settings → Webhooks and Actions → Runners pages are confirmed empty
+of anything else.
+
+**Backend** — `.github/workflows/deploy-backend.yml`, on push to
+`main-autodeploy` (or manual dispatch), over SSH to the EC2 host, in order:
+
+1. `git checkout -- package-lock.json` (discard local lockfile drift)
+2. `git checkout main-autodeploy && git pull origin main-autodeploy`
+3. `npm i`
+4. `cd migrations/mysql && db-migrate up`
+5. `pm2 reload 0`
+
+under `set -euo pipefail`. **Migrations run before the reload.** If step 4
+fails the script stops: **`pm2 reload` does not run**, the old process keeps
+serving, and the working tree is already on the new commit. `db-migrate`
+records a migration only after its SQL completes, so a failed migration is
+retried on the next run.
+
+**Are migrations transactional?** No. `db-migrate` runs each file's SQL
+through `runSql` with `multipleStatements: true`; MySQL DDL is not
+transactional (MySQL 8 makes a *single* DDL statement atomic; 5.7 does not
+roll back a multi-statement file). A file with several statements can
+therefore half-apply. **Correction applied:** the `user` column migration is
+now **one `ALTER TABLE` statement** (indexes folded in), so it either lands
+entirely or not at all on both versions; the two `CREATE TABLE` files use
+`IF NOT EXISTS`; the permission inserts are `WHERE NOT EXISTS`. Every Stage
+0A file is now idempotent on re-run after a partial failure.
+
+**Can the app run against a half-migrated schema?** After the correction the
+only partial state possible is "some files applied, later ones not" — for
+example `user` altered, `user_auth_log` missing. The **old** process (still
+running, since reload did not happen) never reads the new columns or tables:
+safe. The **new** code would fail loudly on the missing table at first audit
+write — but the new code is never started by the failed deploy. A subsequent
+manual `pm2 reload` before the migration is fixed **would** start the new
+code against the partial schema: that is the residual HARD GATE, and the
+safer sequence below removes it.
+
+**Safer deployment sequence (proposed, gate 4):** run the migrations
+deliberately, not as a side effect of a push.
+
+1. Backup + restore test (§5).
+2. On the server, on the feature branch checkout in a scratch clone (not
+   `~/dailyneeds-store-backend`): `db-migrate up` against production **with
+   the old code still running** — every Stage 0A migration is additive and the
+   old code ignores the new columns, which is exactly why this is safe.
+3. Verify `db-migrate` status shows all four applied; verify logins still
+   work on the old code.
+4. Only then merge to `main-autodeploy`. The workflow's `db-migrate up` is a
+   no-op, and `pm2 reload` brings up code whose schema already exists.
+5. Rollback of step 2 alone: `db-migrate down` ×4 while nobody has a modern
+   hash (true until the break-glass account is created) — or the backup.
+
+**Frontend** — `.github/workflows/deploy.yml`, on push to `main-autodeploy`:
+build on the Actions runner (Node 16, `npm install --force`, `.env.production`
+from the `NEXT_PUBLIC_API_URL` secret, `next build`), rsync `.next/` and
+`public/` to `~/dnds-store-build`, `npm install --omit=dev --force` on the
+server, `pm2 reload fe`. No migrations. Frontend and backend deploy
+**separately** and independently; a push to one repository's
+`main-autodeploy` deploys only that repository.
+
+### 20b. Feature flags — where read, defaults, consequences (item 11)
+
+All flags live in `config/auth.js`, which reads `process.env` **once at
+module load**; every consumer imports the resulting object. Nothing in the
+authentication path reads `process.env` per request (verified by grep;
+the only per-call read left anywhere nearby is the pre-existing
+`IS_TEST` check in `services/telegram.js`, which routes test traffic to a
+test chat and is not security-relevant). **Changing any flag requires
+`pm2 reload`**; a `.env` edit cannot alter behaviour mid-shift.
+
+| Variable | Read in | Absent ⇒ | Consequence of absence | Deployment |
+| --- | --- | --- | --- | --- |
+| `AUTH_HASH_ON_LOGIN` | config/auth.js | **OFF** | legacy accounts stay SHA-1; intended until the A6 scan is recorded | B |
+| `AUTH_REJECT_LEGACY_SHA1` | config/auth.js | **OFF** | SHA-1 accounts can still sign in; intended until coverage verified | C |
+| `AUTH_ENFORCE_PASSWORD_CHANGE` | config/auth.js | **OFF** | flagged accounts are not confined; intended until batch 0 is flagged | B |
+| `AUTH_SECURE_PROVISIONING` | config/auth.js | **OFF** | new accounts still get the historical default, hashed with scrypt and flagged | B |
+| `AUTH_LOCKOUT_ENABLED` | config/auth.js | **OFF** | no per-account lock, no per-IP throttle; intended for A (thresholds are tuned in B) | B |
+| `AUTH_LEGACY_QUERY_LOGIN` | config/auth.js | **ON (fallback enabled)** | query-string credentials accepted and counted; intended until the two-day window is clean; the only flag whose absence *enables* something, deliberately | A → hotfix |
+| `AUTH_REQUIRE_HTTPS` | config/auth.js | **OFF** | plaintext credentials accepted at the app layer; HTTPS is nginx's job until §17 is confirmed | A (after §17) |
+| `AUTH_TOKEN_VALID_FROM_ENABLED` | config/auth.js | **OFF — revocation INACTIVE** | logout and password change stamp `token_valid_from` but nothing checks it; a token stays valid to expiry | C |
+| `JWT_REQUIRE_KID` | config/auth.js | **OFF** | kid-less (legacy) tokens verify with the legacy key; intended for the 36-hour window | rotation step 7 |
+| `JWT_PRIVATE_KEY_PATH`, `JWT_PUBLIC_KEYS`, `JWT_ACTIVE_KID`, `JWT_LEGACY_KID` | config/auth.js | tracked repo keys under kid `legacy`, warning logged | works, but the key is the one in git history | A |
+| `JWT_TOKEN_CUTOFF` | config/auth.js | the existing 2025-11-17 epoch | unchanged global logout | — |
+| `AUTH_RESET_TOKEN_MINUTES` | config/auth.js | 30 | — | B |
+| `AUTH_PASSWORD_MIN_LENGTH` | config/auth.js | 8 | — | B |
+| `AUTH_BREAK_GLASS_ROTATION_DAYS`, `AUTH_SECURITY_ALERT_CHAT_ID` | config/auth.js | 90 / alerts chat | — | A |
+| `TELEGRAM_BOT_TOKEN` | services/telegram.js (module load) | **notifications DISABLED**, error logged at startup | break-glass alerts do not send; gate 19 cannot pass | A |
+| `TRUST_PROXY` | server.js (startup) | **`loopback`** | correct for nginx-on-host; `true` is refused | A |
+
+Every absent default is intentional and is the Deployment A posture, with
+two that must be understood: absence of `AUTH_LEGACY_QUERY_LOGIN` **keeps
+the fallback on**, and absence of `AUTH_TOKEN_VALID_FROM_ENABLED` means
+**server-side logout is not yet enforced**.
+
 ---
 
 ## 21. Secret-rotation checklist (administrator actions)
@@ -623,7 +820,7 @@ treated as compromised.
 | AWS access key + secret | `services/s3.js` | rotate in IAM; move to env or an instance role; out of Stage 0A scope to refactor, in scope to rotate |
 | Digisme API key + custom key | `services/synker.js` | rotate with the vendor; move to env (planned with Sync Stage A) |
 | GST portal username + GSTIN | `services/gst_authentication.js` | identity rather than secret; move to env |
-| **Telegram bot token** | `services/telegram.js` | regenerate via BotFather; set `TELEGRAM_BOT_TOKEN`; then delete the fallback constant — the break-glass alert depends on this token, so do it early |
+| **Telegram bot token** | was in `services/telegram.js`; **removed from source in the correction pass** — the service now reads `TELEGRAM_BOT_TOKEN` only and disables itself (logged) when it is absent | revoke the old token via BotFather (`/revoke`), issue a new one, set it in `.env` **before** deploying this code, send a normal notification, confirm receipt, then test the break-glass alert — in that order (item 4) |
 
 Also on the server: `.env` is `chmod 600` (the deploy workflow does this); put
 `~/db-backups` at `700`.
@@ -690,7 +887,8 @@ before Stage 0A that was still live; hence its place at the end.
 
 ```
 cd dailyneeds-store-backend && IS_TEST=true node --test
-# tests 313   suites 58   pass 312   fail 0   skipped 1 (pre-existing golden-file test)
+# tests 349   suites 63   pass 348   fail 0   skipped 1   cancelled 0   todo 0
+# (the one skip is the pre-existing golden-file test in the price checker)
 ```
 
 New files: `services/password.test.js`, `services/jwt.test.js`,
@@ -699,8 +897,12 @@ New files: `services/password.test.js`, `services/jwt.test.js`,
 (rewritten), `usecase/user.test.js` (rewritten onto the new repository
 surface; same IP-gate behaviours), `middlewares/auth.test.js`,
 `routes/user.login.test.js` (real Express on a loopback port),
-`repository/user.test.js` (SQL contract). Fixtures in
-`test_support/auth_fixtures.js`.
+`repository/user.test.js` (SQL contract), and from the correction pass
+`middlewares/auth.compat.test.js`, `middlewares/legacy_transition.test.js`,
+`routes/user.protection.test.js`, `routes/proxy.test.js`,
+`services/password.nullable.test.js`. Fixtures in
+`test_support/auth_fixtures.js`. The named requirement→test mapping is in
+`docs/auth-stage0a-preproduction-readiness.md`.
 
 Coverage of the 46 required cases (numbers as in the brief):
 

@@ -4,7 +4,7 @@
 -- `detail` is a short free-text reason such as 'unknown_user' or
 -- 'legacy_query_string'; the code that writes it is the only place that
 -- decides what goes in, and it is reviewed for exactly that.
-CREATE TABLE `user_auth_log` (
+CREATE TABLE IF NOT EXISTS `user_auth_log` (
   `log_id` BIGINT NOT NULL AUTO_INCREMENT,
   `user_id` INT NULL,
   `username_attempted` VARCHAR(100) NULL,
@@ -23,7 +23,7 @@ CREATE TABLE `user_auth_log` (
 -- Daily counters with no per-request detail: how many logins arrived with
 -- credentials in the query string, how many in the body. The removal of the
 -- query-string fallback is gated on this reading zero.
-CREATE TABLE `auth_metric` (
+CREATE TABLE IF NOT EXISTS `auth_metric` (
   `metric` VARCHAR(64) NOT NULL,
   `day` DATE NOT NULL,
   `count` INT NOT NULL DEFAULT 0,

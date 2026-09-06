@@ -493,6 +493,47 @@ const deny = (res, code, msg, extra = {}) => {
  * expiry. Without deps the middleware behaves as it did before Stage 0A
  * apart from the identity shape on `req.auth`.
  */
+const isPositiveInt = (v) => typeof v === "number" && Number.isInteger(v) && v > 0;
+
+/**
+ * Turn verified claims into { userId, employeeId, isSystemAccount, legacy }
+ * or null when the token does not fit either shape exactly.
+ */
+function resolveIdentity(decoded) {
+  if (!decoded || typeof decoded !== "object") return null;
+  const ver = decoded.auth_ver;
+
+  if (ver === undefined) {
+    // Legacy shape, strictly.
+    if (decoded.sub !== undefined) return null;
+    if (decoded.sys !== undefined || decoded.pwc !== undefined) return null;
+    if (!isPositiveInt(decoded.id)) return null;
+    if (!isPositiveInt(decoded.employee_id)) return null;
+    return { userId: decoded.id, employeeId: decoded.employee_id, isSystemAccount: false, legacy: true };
+  }
+
+  if (ver === 2) {
+    if (typeof decoded.sub !== "string" || !/^[1-9][0-9]{0,11}$/.test(decoded.sub)) return null;
+    const userId = Number(decoded.sub);
+    if (!isPositiveInt(userId)) return null;
+    // `id` is still written for old readers; it must agree with sub.
+    if (decoded.id !== undefined && decoded.id !== userId) return null;
+    const isSystemAccount = decoded.sys === true;
+    if (isSystemAccount) {
+      if (decoded.employee_id !== undefined && decoded.employee_id !== null) return null;
+      return { userId, employeeId: null, isSystemAccount: true, legacy: false };
+    }
+    if (decoded.employee_id === undefined || decoded.employee_id === null) {
+      return { userId, employeeId: null, isSystemAccount: false, legacy: false };
+    }
+    if (!isPositiveInt(decoded.employee_id)) return null;
+    return { userId, employeeId: decoded.employee_id, isSystemAccount: false, legacy: false };
+  }
+
+  // 1, 3, "2", null, objects - anything else is malformed.
+  return null;
+}
+
 function create(deps = {}) {
   const config = deps.config || authConfig;
   const userUsecase = deps.userUsecase || null;
@@ -531,17 +572,33 @@ function create(deps = {}) {
       return deny(res, 403, "Access Denied");
     }
 
-    // sub is the user-account key (Stage 0A); `id` is the same value on
-    // tokens issued before this release and is read as a fallback until
-    // those expire.
-    const userId = decoded.sub !== undefined ? Number(decoded.sub) : Number(decoded.id);
-    if (!Number.isFinite(userId)) return deny(res, 403, "Access Denied");
-
-    const isSystemAccount = decoded.sys === true;
-    const employeeId =
-      !isSystemAccount && decoded.employee_id !== undefined && decoded.employee_id !== null
-        ? Number(decoded.employee_id)
-        : null;
+    // ------------------------------------------------------------------
+    // Identity resolution is VERSIONED (safety correction pass, item 1).
+    //
+    //   auth_ver 2  (issued by Stage 0A code)
+    //     sub          = user.user_id            -> the account
+    //     employee_id  = new_employee.employee_id (employee accounts only)
+    //     sys: true    = system / break-glass account
+    //
+    //   no auth_ver   (issued by the code deployed before Stage 0A)
+    //     id           = user.user_id            -> the account
+    //     employee_id  = new_employee.employee_id
+    //     no sub, no kid, no sys
+    //
+    // A legacy token is resolved ONLY through its `id` and `employee_id`
+    // claims, both of which must be present and numeric, and it is refused
+    // outright if it carries `sub`, `sys` or `pwc` - claims the old code
+    // never wrote. It can therefore never name a system account, whose
+    // rows have employee_id NULL and did not exist when the token was
+    // issued. When a user usecase is wired in, the legacy account is also
+    // looked up and refused unless it is a genuine, non-system,
+    // employee-linked row (not relying on NULL failing to match).
+    //
+    // Any other auth_ver value is malformed and refused.
+    // ------------------------------------------------------------------
+    const identity = resolveIdentity(decoded);
+    if (!identity) return deny(res, 403, "Access Denied");
+    const { userId, employeeId, isSystemAccount, legacy } = identity;
 
     req.auth = Object.freeze({
       userId,
@@ -550,8 +607,9 @@ function create(deps = {}) {
       designationId: decoded.designation_id === undefined ? null : decoded.designation_id,
       storeId: decoded.store_id === undefined ? null : decoded.store_id,
       isSystemAccount,
-      mustChangePassword: decoded.pwc === true,
+      mustChangePassword: !legacy && decoded.pwc === true,
       issuedAt: decoded.iat,
+      authVersion: legacy ? 1 : 2,
     });
 
     // Backward-compatible shape. `employee_id` is null (never undefined,
@@ -564,6 +622,23 @@ function create(deps = {}) {
       employee_id: employeeId,
       is_system_account: isSystemAccount,
     };
+
+    // A legacy token must resolve to a genuine employee-linked account and
+    // never to a system account. With the usecase available this is
+    // checked against the database, cached briefly, failing closed.
+    if (legacy && userUsecase) {
+      try {
+        const state = await loadSession(userId);
+        if (!state || Number(state.status) !== 1) return deny(res, 403, "Access Denied");
+        if (Number(state.is_system_account) === 1) return deny(res, 403, "Access Denied");
+        if (state.employee_id === null || state.employee_id === undefined) {
+          return deny(res, 403, "Access Denied");
+        }
+        if (Number(state.employee_id) !== employeeId) return deny(res, 403, "Access Denied");
+      } catch (err) {
+        return deny(res, 500, "An error occurred !");
+      }
+    }
 
     if (userUsecase && config.login.tokenValidFromEnabled) {
       try {
@@ -600,3 +675,4 @@ const defaultMiddleware = create();
 module.exports = defaultMiddleware;
 module.exports.create = create;
 module.exports.unProtectedRoutes = unProtectedRoutes;
+module.exports.resolveIdentity = resolveIdentity;

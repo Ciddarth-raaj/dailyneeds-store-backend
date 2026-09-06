@@ -56,7 +56,7 @@ const reqFor = (token, p = "/ticket", method = "GET") => ({
 
 describe("auth middleware — identity shape (A3, C3)", () => {
   it("sets req.auth from sub and keeps req.decoded for existing handlers", async () => {
-    const token = await jwtService.sign({ id: 7, employee_id: 1003, user_type: 1, designation_id: 4, store_id: 2 }, "1h", { subject: "7" });
+    const token = await jwtService.sign({ auth_ver: 2, id: 7, employee_id: 1003, user_type: 1, designation_id: 4, store_id: 2 }, "1h", { subject: "7" });
     const { nexted, req } = await run(auth.create(), reqFor(token));
     assert.equal(nexted, true);
     assert.equal(req.auth.userId, 7);
@@ -68,7 +68,7 @@ describe("auth middleware — identity shape (A3, C3)", () => {
   });
 
   it("44. a system-account token yields employee_id null, never undefined or a fake", async () => {
-    const token = await jwtService.sign({ id: 99, user_type: 2, sys: true }, "1h", { subject: "99" });
+    const token = await jwtService.sign({ auth_ver: 2, id: 99, user_type: 2, sys: true }, "1h", { subject: "99" });
     const { req } = await run(auth.create(), reqFor(token));
     assert.equal(req.auth.userId, 99);
     assert.equal(req.auth.isSystemAccount, true);
@@ -98,12 +98,12 @@ describe("auth middleware — identity shape (A3, C3)", () => {
 
 describe("auth middleware — token_valid_from (C4)", () => {
   const stateFor = (validFrom, status = 1) => ({
-    getSessionState: async () => ({ user_id: 7, status, token_valid_from: validFrom, must_change_password: 0, is_system_account: 0 }),
+    getSessionState: async () => ({ user_id: 7, employee_id: 1003, status, token_valid_from: validFrom, must_change_password: 0, is_system_account: 0 }),
   });
   const cfg = (over) => F.config({ login: { tokenValidFromEnabled: true, tokenValidFromCacheMs: 0 }, ...over });
 
   it("41. a token issued before token_valid_from is rejected", async () => {
-    const token = await jwtService.sign({ id: 7, user_type: 1 }, "1h", { subject: "7" });
+    const token = await jwtService.sign({ auth_ver: 2, id: 7, employee_id: 1003, user_type: 1 }, "1h", { subject: "7" });
     const mw = auth.create({ userUsecase: stateFor(new Date(Date.now() + 5000)), config: cfg() });
     const { nexted, res } = await run(mw, reqFor(token));
     assert.equal(nexted, false);
@@ -112,19 +112,19 @@ describe("auth middleware — token_valid_from (C4)", () => {
 
   it("42. a token issued after token_valid_from succeeds", async () => {
     const mw = auth.create({ userUsecase: stateFor(new Date(Date.now() - 5000)), config: cfg() });
-    const token = await jwtService.sign({ id: 7, user_type: 1 }, "1h", { subject: "7" });
+    const token = await jwtService.sign({ auth_ver: 2, id: 7, employee_id: 1003, user_type: 1 }, "1h", { subject: "7" });
     assert.equal((await run(mw, reqFor(token))).nexted, true);
   });
 
   it("a disabled account's token stops working", async () => {
     const mw = auth.create({ userUsecase: stateFor(null, 0), config: cfg() });
-    const token = await jwtService.sign({ id: 7, user_type: 1 }, "1h", { subject: "7" });
+    const token = await jwtService.sign({ auth_ver: 2, id: 7, employee_id: 1003, user_type: 1 }, "1h", { subject: "7" });
     assert.equal((await run(mw, reqFor(token))).nexted, false);
   });
 
   it("fails closed when the session check errors", async () => {
     const mw = auth.create({ userUsecase: { getSessionState: async () => { throw new Error("db down"); } }, config: cfg() });
-    const token = await jwtService.sign({ id: 7, user_type: 1 }, "1h", { subject: "7" });
+    const token = await jwtService.sign({ auth_ver: 2, id: 7, employee_id: 1003, user_type: 1 }, "1h", { subject: "7" });
     const { nexted, res } = await run(mw, reqFor(token));
     assert.equal(nexted, false);
     assert.equal(res.statusCode, 500);
@@ -132,7 +132,7 @@ describe("auth middleware — token_valid_from (C4)", () => {
 
   it("does nothing when the flag is off", async () => {
     const mw = auth.create({ userUsecase: stateFor(new Date(Date.now() + 5000)), config: F.config() });
-    const token = await jwtService.sign({ id: 7, user_type: 1 }, "1h", { subject: "7" });
+    const token = await jwtService.sign({ auth_ver: 2, id: 7, employee_id: 1003, user_type: 1 }, "1h", { subject: "7" });
     assert.equal((await run(mw, reqFor(token))).nexted, true);
   });
 });
@@ -140,7 +140,7 @@ describe("auth middleware — token_valid_from (C4)", () => {
 describe("auth middleware — must_change_password confinement (B2)", () => {
   it("confines a pwc token to the change-password routes when enforcement is on", async () => {
     const mw = auth.create({ config: F.config({ password: { enforcePasswordChange: true } }) });
-    const token = await jwtService.sign({ id: 7, user_type: 1, pwc: true }, "1h", { subject: "7" });
+    const token = await jwtService.sign({ auth_ver: 2, id: 7, employee_id: 1003, user_type: 1, pwc: true }, "1h", { subject: "7" });
     const blocked = await run(mw, reqFor(token, "/ticket", "GET"));
     assert.equal(blocked.nexted, false);
     assert.equal(blocked.res.body.error, "PASSWORD_CHANGE_REQUIRED");
@@ -150,7 +150,7 @@ describe("auth middleware — must_change_password confinement (B2)", () => {
 
   it("does not confine when enforcement is off", async () => {
     const mw = auth.create({ config: F.config() });
-    const token = await jwtService.sign({ id: 7, user_type: 1, pwc: true }, "1h", { subject: "7" });
+    const token = await jwtService.sign({ auth_ver: 2, id: 7, employee_id: 1003, user_type: 1, pwc: true }, "1h", { subject: "7" });
     assert.equal((await run(mw, reqFor(token, "/ticket", "GET"))).nexted, true);
   });
 });
@@ -160,12 +160,12 @@ describe("43. existing designation/store permission behaviour still works", () =
     const permissions = require("./permissions")({
       getPermissionById: async (designationId) => (designationId === 4 ? [{ permission_key: "view_items" }] : []),
     });
-    const token = await jwtService.sign({ id: 7, employee_id: 1003, user_type: 1, designation_id: 4, store_id: 2 }, "1h", { subject: "7" });
+    const token = await jwtService.sign({ auth_ver: 2, id: 7, employee_id: 1003, user_type: 1, designation_id: 4, store_id: 2 }, "1h", { subject: "7" });
     const { req } = await run(auth.create(), reqFor(token));
     assert.equal(await permissions.has(req, "view_items"), true);
     assert.equal(await permissions.has(req, "view_payroll"), false);
 
-    const adminToken = await jwtService.sign({ id: 99, user_type: 2, sys: true }, "1h", { subject: "99" });
+    const adminToken = await jwtService.sign({ auth_ver: 2, id: 99, user_type: 2, sys: true }, "1h", { subject: "99" });
     const admin = await run(auth.create(), reqFor(adminToken));
     assert.equal(await permissions.has(admin.req, "anything"), true, "user_type 2 still bypasses");
   });
