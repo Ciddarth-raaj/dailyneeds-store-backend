@@ -277,7 +277,8 @@ The rule is roll back first, investigate afterwards.
 | ~~Decide the two-reset-systems reconciliation~~ | Owner | | 06-09-2026 — both kept, one engine (readiness §0.7) |
 | ~~Gate 5: run `scripts/auth/gate5-rehearsal.sh`~~ | Administrator | | 06-09-2026 — PASS (restore 143 s, 0 mismatches, migrations up/down clean) |
 | ~~Gates 13 + 14 scans~~ | Administrator | | 06-09-2026 — PASS at `880f4f7`; verdicts in readiness §5.10 |
-| Gates 4 + 12: run `scripts/auth/gate4-12-host-check.sh` on Lightsail, the external probe from a laptop, and confirm GitHub Webhooks/Runners are empty | Administrator | next | |
+| Gates 4 + 12: run `scripts/auth/gate4-12-host-check.sh` on Lightsail, the external probe from a laptop, and confirm GitHub Webhooks/Runners are empty | Administrator | next | 06-09-2026: external probe done — 8080 not reachable (good); port 80 answers 200 instead of redirecting |
+| Gate 12: apply the HTTP→HTTPS redirect with `sudo python3 scripts/patch_nginx_http_redirect.py` (dry-run first) — nginx only, no app deploy, no DB | Administrator | next | |
 | After Deployment A: re-mint the Tally integration token for `purchase_api` under the externalised key; retire the old one | Owner / Administrator | after Deployment A, with the JWT rotation | |
 | Stage 0B: service-account kind for `purchase_api` (detach from employee 1 without renumbering) | — | Stage 0B | |
 | Confirm which `database.json` environment the deploy's bare `db-migrate up` selects on the host (keys only) | Administrator | before deployment night (gate 4) | |
@@ -299,6 +300,7 @@ The seeded admin is the largest live exposure right now: `user_type 2` with a kn
 | 06-09-2026 | `main-autodeploy` (both repos) moved: Telegram password-reset feature deployed to production, incl. migration `20260906070000`. Feature branch conflicts in 6 backend + 1 frontend files. | 3 now; 1, 2, 5, 7, 11, 20, 22 on merge | |
 | 06-09-2026 | Gate 21 investigated: `formik-error-focus` peer range; `npm ci --legacy-peer-deps` reproducible, lockfile unchanged | — (21 → PASS) | |
 | 06-09-2026 | Gate 22 proof added as `migrations/auth_stage0a_migrations.test.js`; upstream migration reviewed | — (22 plan → PASS) | |
+| 06-09-2026 | External probe: 3.109.76.230:8080 times out from the internet (Node port not public); `http://api.dnds.co.in/` returns 200 (no redirect). `scripts/patch_nginx_http_redirect.py` added (nginx-only, backed up, `nginx -t`, verified, self-restoring). | 12 remains NOT YET VERIFIED until the redirect is applied | |
 | 06-09-2026 | Gates 13/14 recorded PASS at `880f4f7`; gate 4/12 repository analysis done, read-only host check script added | — | |
 | 06-09-2026 | Gates 13/14 run on production data; login-time weak-password flagging and per-request employee-status check added (auth code changed) | 1, 2, 7, 11, 20 re-run → PASS (429 tests); 13, 14 → PASS (code) | 06-09-2026 |
 | 06-09-2026 | **Gate 5 PASS on production data** (restore 143 s, 144 tables, 0 mismatches, four migrations up/no-op/down×4/up clean, 184 s total). Gate 22 now proven on real data. Gate 13/14 scan wrapper added and tested locally. | — (5 → PASS, 22 → PASS on data) | 06-09-2026 |

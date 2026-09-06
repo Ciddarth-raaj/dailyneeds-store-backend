@@ -1140,6 +1140,26 @@ curl -s https://api.dnds.co.in/user/my-ip -H "x-access-token: <your token>" -H '
 #   expect "ip" = YOUR public IP, never 203.0.113.9; "has_forwarded_header": true
 ```
 
+**Port 80 fix (found by the external probe: `http://api.dnds.co.in/` answers 200).**
+`scripts/patch_nginx_http_redirect.py` edits only the server block that
+serves the API name on :80 (plain `return 301 https://$host$request_uri;`
+for an :80-only block; `if ($scheme = http) { return 301 … }` for a
+combined :80/:443 block; a new listen-80 file when only a catch-all
+answers; no-op when a redirect already exists). The :443 configuration is
+never touched. It backs up every edited file, runs `nginx -t`, reloads,
+verifies over loopback that :80 answers 301 to the https URL and :443
+still answers, and restores + reloads the previous configuration on any
+failure. Exercised locally on four nginx layouts (separate blocks,
+combined block, Certbot-style already redirecting, catch-all). Run:
+
+```bash
+cd ~/stage0a-rehearsal && git pull --ff-only origin claude/dnds-payroll-integration-proposal-3p6hen && \
+sudo python3 scripts/patch_nginx_http_redirect.py --dry-run && \
+sudo python3 scripts/patch_nginx_http_redirect.py
+```
+
+Then from the laptop: `curl -sI http://api.dnds.co.in/ | head -n 3` → `301` with `Location: https://api.dnds.co.in/`.
+
 Gate 12 is PASS when: 443 serves TLS, 80 redirects, nginx overwrites both
 headers, 8080 is unreachable from outside, the via-nginx probe shows your
 real IP under a forged header, and (after Deployment A) `trust proxy` is
