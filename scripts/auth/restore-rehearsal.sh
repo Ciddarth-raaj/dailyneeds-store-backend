@@ -28,6 +28,8 @@ BIN="${MYSQL_BIN_DIR:-$HOME/mysql84/bin}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MYSQL="$BIN/mysql"
 fail() { echo "FAIL: $*" >&2; exit 1; }
+# shellcheck source=stream.sh
+. "$HERE/stream.sh"
 
 [ -r "$FULL" ] && [ -r "$COUNTS" ] || fail "dump or counts file not readable"
 [ -x "$MYSQL" ] || fail "mysql not found in $BIN"
@@ -41,7 +43,7 @@ SOURCE_DB="${SOURCE_DB:-$(node "$HERE/db-defaults-file.js" show | awk -F= '$1=="
 case "$SCRATCH" in *prod*|*production*|mysql|sys|information_schema|performance_schema) fail "refusing scratch name '$SCRATCH'";; esac
 case "$SCRATCH" in *rehearsal*|*scratch*|*restore_test*) ;; *) fail "scratch name must contain 'rehearsal', 'scratch' or 'restore_test' (got '$SCRATCH')";; esac
 # whole-stream count (no grep -q / head on the zcat pipe: SIGPIPE + pipefail = false failure)
-USE_IN_DUMP="$(zcat "$FULL" | grep -c '^USE \|^CREATE DATABASE' || true)"
+USE_IN_DUMP="$(gz_count "$FULL" '^USE |^CREATE DATABASE' -E)" || exit 1
 [ "$USE_IN_DUMP" = "0" ] || fail "dump carries USE/CREATE DATABASE — refuse; re-take it without --databases"
 
 Q()  { "$MYSQL" --defaults-extra-file="$DEFAULTS" -N -B -e "$1"; }

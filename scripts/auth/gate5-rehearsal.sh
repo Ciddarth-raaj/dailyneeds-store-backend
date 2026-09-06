@@ -21,6 +21,8 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=stream.sh
+. "$HERE/stream.sh"
 WT="$(cd "$HERE/../.." && pwd)"
 export MYSQL_BIN_DIR="${MYSQL_BIN_DIR:-$HOME/mysql84/bin}"
 OUT="${OUT:-$HOME/db-backups}"
@@ -63,15 +65,17 @@ banner "3/5 re-verification of the artefacts before restoring (checksums; traile
 ( cd "$OUT" && grep -E '^[0-9a-f]{64}  ' "$MANIFEST" | sha256sum -c --strict )
 AUTH="$(ls -t "$OUT"/*-auth-*.sql.gz | head -1)"
 for f in "$AUTH" "$FULL"; do
-  [ "$(zcat "$f" | tail -n 3 | grep -c 'Dump completed' || true)" = "1" ] || { echo "FAIL: $f does not end with 'Dump completed'" >&2; exit 1; }
+  TRAILER="$(gz_tail_count "$f" 3 'Dump completed')" || exit 1
+  [ "$TRAILER" = "1" ] || { echo "FAIL: $f does not end with 'Dump completed'" >&2; exit 1; }
 done
-AUTH_TABLES_IN_DUMP="$(zcat "$AUTH" | grep -oE '^CREATE TABLE `[^`]+`' | sed -E 's/^CREATE TABLE `([^`]+)`/\1/' || true)"
+AUTH_TABLES_IN_DUMP="$(gz_matches "$AUTH" '^CREATE TABLE `[^`]+`' -E)" || exit 1
+AUTH_TABLES_IN_DUMP="${AUTH_TABLES_IN_DUMP//CREATE TABLE \`/}"; AUTH_TABLES_IN_DUMP="${AUTH_TABLES_IN_DUMP//\`/}"
 for t in user new_employee permissions all_permissions designation outlets; do
-  [[ $'\n'"$AUTH_TABLES_IN_DUMP"$'\n' == *$'\n'"$t"$'\n'* ]] || { echo "FAIL: auth dump lacks table $t (found: $(printf '%s' "$AUTH_TABLES_IN_DUMP" | tr '\n' ' '))" >&2; exit 1; }
+  list_has "$AUTH_TABLES_IN_DUMP" "$t" || { echo "FAIL: auth dump lacks table $t (found: $(printf '%s' "$AUTH_TABLES_IN_DUMP" | tr '\n' ' '))" >&2; exit 1; }
 done
 echo "auth dump tables: $(printf '%s' "$AUTH_TABLES_IN_DUMP" | tr '\n' ' ')"
 EXPECTED_CT="$(grep -oE '^tables=[0-9]+' "$MANIFEST" | cut -d= -f2)"
-ACTUAL_CT="$(zcat "$FULL" | grep -c '^CREATE TABLE ' || true)"
+ACTUAL_CT="$(gz_count "$FULL" '^CREATE TABLE ')" || exit 1
 [ "$ACTUAL_CT" = "$EXPECTED_CT" ] || { echo "FAIL: full dump has $ACTUAL_CT CREATE TABLE statements, manifest says $EXPECTED_CT" >&2; exit 1; }
 echo "full dump: $ACTUAL_CT CREATE TABLE statements = manifest"
 

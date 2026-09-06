@@ -42,6 +42,8 @@ MYSQL="$BIN/mysql"
 MYSQLDUMP="$BIN/mysqldump"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
+# shellcheck source=stream.sh
+. "$HERE/stream.sh"
 
 # ---- 0. preconditions --------------------------------------------------------
 [ -r "$DEFAULTS" ] || fail "defaults file $DEFAULTS not found. Run: node scripts/auth/db-defaults-file.js app"
@@ -176,19 +178,19 @@ echo "== verification =="
 for f in "$AUTH_FILE" "$FULL_FILE"; do
   gzip -t "$f" || fail "$f is not a valid gzip stream"
   # tail before grep so the pipe is drained fully (no SIGPIPE under pipefail)
-  TRAILER="$(zcat "$f" | tail -n 3 | grep -c 'Dump completed' || true)"
+  TRAILER="$(gz_tail_count "$f" 3 'Dump completed')" || exit 1
   [ "$TRAILER" = "1" ] || fail "$f does not end with 'Dump completed' (truncated dump)"
   echo "  ok: $f ($(du -h "$f" | cut -f1)) ends cleanly"
 done
-CT_IN_DUMP="$(zcat "$FULL_FILE" | grep -c '^CREATE TABLE ' || true)"
+CT_IN_DUMP="$(gz_count "$FULL_FILE" '^CREATE TABLE ')" || exit 1
 [ "$CT_IN_DUMP" = "$TABLE_COUNT" ] || fail "full dump has $CT_IN_DUMP CREATE TABLE statements, server has $TABLE_COUNT base tables"
 echo "  ok: $CT_IN_DUMP CREATE TABLE statements = $TABLE_COUNT base tables"
 if [ "$TRIGGER_COUNT" != "0" ]; then
-  TR_IN_DUMP="$(zcat "$FULL_FILE" | grep -c 'CREATE.*TRIGGER' || true)"
+  TR_IN_DUMP="$(gz_count "$FULL_FILE" 'CREATE.*TRIGGER')" || exit 1
   [ "$TR_IN_DUMP" -ge "$TRIGGER_COUNT" ] || fail "full dump has $TR_IN_DUMP triggers, server has $TRIGGER_COUNT"
 fi
 if [ "$ROUTINES_FLAG" = "--routines" ] && [ "$ROUTINE_COUNT" != "0" ]; then
-  RT_IN_DUMP="$(zcat "$FULL_FILE" | grep -cE 'CREATE.*(FUNCTION|PROCEDURE) ' || true)"
+  RT_IN_DUMP="$(gz_count "$FULL_FILE" 'CREATE.*(FUNCTION|PROCEDURE) ' -E)" || exit 1
   [ "$RT_IN_DUMP" -ge "$ROUTINE_COUNT" ] || fail "full dump has $RT_IN_DUMP routines, server has $ROUTINE_COUNT"
   echo "  ok: $RT_IN_DUMP routine definitions present"
 fi
@@ -196,11 +198,12 @@ fi
 # dies of SIGPIPE, and under pipefail the check fails on a perfectly good
 # dump (seen on production 06-09-2026: "auth dump missing table user").
 # Every check reads the whole stream once and compares counts.
-USE_IN_DUMP="$(zcat "$FULL_FILE" | grep -c '^USE \|^CREATE DATABASE' || true)"
+USE_IN_DUMP="$(gz_count "$FULL_FILE" '^USE |^CREATE DATABASE' -E)" || exit 1
 [ "$USE_IN_DUMP" = "0" ] || fail "dump contains USE/CREATE DATABASE — must not (isolated restore safety)"
-AUTH_TABLES_IN_DUMP="$(zcat "$AUTH_FILE" | grep -oE '^CREATE TABLE `[^`]+`' | sed -E 's/^CREATE TABLE `([^`]+)`/\1/' || true)"
+AUTH_TABLES_IN_DUMP="$(gz_matches "$AUTH_FILE" '^CREATE TABLE `[^`]+`' -E)" || exit 1
+AUTH_TABLES_IN_DUMP="${AUTH_TABLES_IN_DUMP//CREATE TABLE \`/}"; AUTH_TABLES_IN_DUMP="${AUTH_TABLES_IN_DUMP//\`/}"
 for t in $AUTH_TABLES; do
-  [[ $'\n'"$AUTH_TABLES_IN_DUMP"$'\n' == *$'\n'"$t"$'\n'* ]] || fail "auth dump missing table $t (tables found: $(printf '%s' "$AUTH_TABLES_IN_DUMP" | tr '\n' ' '))"
+  list_has "$AUTH_TABLES_IN_DUMP" "$t" || fail "auth dump missing table $t (tables found: $(printf '%s' "$AUTH_TABLES_IN_DUMP" | tr '\n' ' '))"
 done
 echo "  ok: auth dump has all $(( $(echo $AUTH_TABLES | wc -w) )) tables ($(printf '%s' "$AUTH_TABLES_IN_DUMP" | tr '\n' ' '))"
 
