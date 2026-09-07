@@ -1,4 +1,6 @@
 const moment = require("moment");
+const passwordService = require("../services/password");
+const authConfig = require("../config/auth");
 class EmployeeUsecase {
   constructor(employeeRepo, documentUsecase, userRepo, resignationRepo) {
     this.employeeRepo = employeeRepo;
@@ -234,12 +236,28 @@ class EmployeeUsecase {
           }
         }
 
-        const data = await this.userRepo.createLogin(
-          employee.primary_contact_number,
-          "1",
-          id,
-          "password"
-        );
+        // Stage 0A: a login is provisioned without a usable password when
+        // secure provisioning is on (Deployment B). Before that, the
+        // historical default is still produced — but hashed with scrypt,
+        // never SHA-1, and flagged must_change_password from the start.
+        if (authConfig.provisioning.secure) {
+          await this.userRepo.createLogin(
+            employee.primary_contact_number,
+            "1",
+            id,
+            null,
+            { mustChange: true, flagReason: "setup_pending" }
+          );
+        } else {
+          const hash = await passwordService.hash("password");
+          await this.userRepo.createLogin(
+            employee.primary_contact_number,
+            "1",
+            id,
+            hash,
+            { mustChange: true, flagReason: "provisioning_default" }
+          );
+        }
         resolve(200);
       } catch (err) {
         reject(err);
@@ -254,14 +272,27 @@ class EmployeeUsecase {
 
       for (const item of rows) {
         if (item.primary_contact_number) {
-          const password = item.employee_id + "@123";
-
-          await this.userRepo.createLoginIfNeeded(
-            item.employee_id,
-            "1",
-            item.employee_id,
-            password
-          );
+          if (authConfig.provisioning.secure) {
+            // Deployment B: no password at all until a setup token is redeemed.
+            await this.userRepo.createLoginIfNeeded(
+              item.employee_id,
+              "1",
+              item.employee_id,
+              null,
+              { mustChange: true, flagReason: "setup_pending" }
+            );
+          } else {
+            // Deployment A: the historical default survives for continuity,
+            // but is stored as scrypt and the account is flagged.
+            const hash = await passwordService.hash(item.employee_id + "@123");
+            await this.userRepo.createLoginIfNeeded(
+              item.employee_id,
+              "1",
+              item.employee_id,
+              hash,
+              { mustChange: true, flagReason: "provisioning_default" }
+            );
+          }
         }
       }
 

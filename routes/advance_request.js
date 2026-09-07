@@ -1,5 +1,6 @@
 // routes/advance_request.js
 const router = require("express").Router();
+const { requireEmployee, employeeIdOrNull } = require("../utils/actor");
 const Joi = require("@hapi/joi");
 
 /** Nothing may ask for more than this in one page. */
@@ -94,7 +95,10 @@ class AdvanceRequestRoutes {
 
   /** Turns a thrown error into the response shape the app already expects. */
   fail(res, err) {
-    if (err && err.name === "ValidationError") {
+    if (err && (err.name === "SystemAccountError" || err.name === "UnauthenticatedError")) {
+      // A system (break-glass) account asked to act as an employee (A3/C3).
+      res.status(err.status).json({ code: err.status, error: err.code, msg: err.message });
+    } else if (err && err.name === "ValidationError") {
       res.status(400).json({ code: 422, msg: err.toString() });
     } else if (err && err.name === "NotFoundError") {
       res.status(404).json({ code: 404, msg: err.message });
@@ -210,7 +214,7 @@ class AdvanceRequestRoutes {
           amount: body.amount,
           reason: body.reason || null,
           outlet_id,
-          created_by: req.decoded.employee_id,
+          created_by: requireEmployee(req, "Raising an advance request"),
         });
 
         res.status(201).json({ code: 200, advance_request_id: id });
@@ -234,7 +238,7 @@ class AdvanceRequestRoutes {
         const data = await this.advanceRequestUsecase.updateDetails(
           parseInt(req.params.id, 10),
           body,
-          req.decoded.employee_id
+          requireEmployee(req, "Acting on an advance request")
         );
 
         res.json(data);
@@ -256,7 +260,7 @@ class AdvanceRequestRoutes {
           const data = await this.advanceRequestUsecase.balanceCheck(
             parseInt(req.params.id, 10),
             body,
-            req.decoded.employee_id
+            requireEmployee(req, "Acting on an advance request")
           );
 
           res.json(data);
@@ -279,7 +283,7 @@ class AdvanceRequestRoutes {
           const data = await this.advanceRequestUsecase.balanceAction(
             parseInt(req.params.id, 10),
             body,
-            req.decoded.employee_id
+            requireEmployee(req, "Acting on an advance request")
           );
 
           res.json(data);
@@ -299,7 +303,7 @@ class AdvanceRequestRoutes {
         const data = await this.advanceRequestUsecase.approval(
           parseInt(req.params.id, 10),
           body,
-          req.decoded.employee_id
+          requireEmployee(req, "Acting on an advance request")
         );
 
         res.json(data);
@@ -318,7 +322,7 @@ class AdvanceRequestRoutes {
         const data = await this.advanceRequestUsecase.payment(
           parseInt(req.params.id, 10),
           body,
-          req.decoded.employee_id
+          requireEmployee(req, "Acting on an advance request")
         );
 
         res.json(data);
@@ -352,7 +356,7 @@ class AdvanceRequestRoutes {
           parseInt(req.params.id, 10),
           body.stage,
           body.file_url,
-          req.decoded.employee_id
+          requireEmployee(req, "Acting on an advance request")
         );
 
         res.status(201).json({ code: 200, documents });

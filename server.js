@@ -15,6 +15,22 @@ const HttpServer = require("http").createServer(app);
 const logger = require("./utils/logger");
 const { ALERTS_TELEGRAM_CHAT_ID } = require("./constants/telegram");
 
+/**
+ * Express `trust proxy` from TRUST_PROXY. Default: loopback (nginx on the
+ * same host). Never `true`.
+ */
+function resolveTrustProxy(raw) {
+  if (raw === undefined || raw === "") return "loopback";
+  const v = String(raw).trim();
+  if (v === "false" || v === "0") return false;
+  if (v === "true") {
+    console.warn("TRUST_PROXY=true is not accepted (it lets clients forge X-Forwarded-*); using loopback");
+    return "loopback";
+  }
+  if (/^\d+$/.test(v)) return Number(v);
+  return v; // "loopback", "linklocal", "uniquelocal", or an address/CIDR list
+}
+
 class Server {
   constructor() {
     this.drivers = [];
@@ -47,12 +63,12 @@ class Server {
     // client from X-Forwarded-For, which is what the IP restriction checks.
     // Set TRUST_PROXY=false if the app is ever exposed directly, otherwise
     // a client could spoof the header.
-    app.set(
-      "trust proxy",
-      process.env.TRUST_PROXY === "false"
-        ? false
-        : process.env.TRUST_PROXY || true
-    );
+    // Stage 0A correction: blanket `true` let a client's own X-Forwarded-For
+    // win whenever the proxy appended rather than overwrote the header. The
+    // real topology is nginx on this same host, so only loopback is trusted
+    // by default. TRUST_PROXY accepts Express's forms - "loopback", an
+    // address or CIDR list, a hop count, or "false" - and is read once here.
+    app.set("trust proxy", resolveTrustProxy(process.env.TRUST_PROXY));
 
     app.use(require("cors")());
 
@@ -171,6 +187,7 @@ class Server {
     this.despatchRepo = require("./repository/despatch")(this.mysql.connection);
     this.vehicleRepo = require("./repository/vehicle")(this.mysql.connection);
     this.userRepo = require("./repository/user")(this.mysql.connection);
+    this.authLogRepo = require("./repository/auth_log")(this.mysql.connection);
     this.passwordResetRepo = require("./repository/passwordReset")(
       this.mysql.connection
     );
@@ -412,12 +429,19 @@ class Server {
     this.userUsecase = require("./usecase/user")(
       this.userRepo,
       this.designationRepo,
-      this.employeeRepo
+      this.employeeRepo,
+      {
+        authLogRepo: this.authLogRepo,
+        telegram: require("./services/telegram")(),
+      }
     );
+    // Stage 0A integration: the Telegram reset writes through the modern
+    // password service and audits to user_auth_log; it never touches SHA-1.
     this.passwordResetUsecase = require("./usecase/passwordReset")(
       this.userRepo,
       this.passwordResetRepo,
-      require("./services/telegram")()
+      require("./services/telegram")(),
+      { authLogRepo: this.authLogRepo }
     );
     this.peopleUsecase = require("./usecase/people")(this.peopleRepo);
     this.accountsEbookUsecase = require("./usecase/accountsEbook")(
@@ -619,7 +643,12 @@ class Server {
       app.use(this.apiSyncLogger.middleware());
     }
 
-    const authMiddleWare = require("./middlewares/auth");
+    // Stage 0A: built with the user usecase so a revoked or disabled
+    // session stops within the cache window rather than at token expiry.
+    const authMiddleWare = require("./middlewares/auth").create({
+      userUsecase: this.userUsecase,
+    });
+    this.authMiddleware = authMiddleWare;
     app.use(authMiddleWare);
 
     this.permissions = require("./middlewares/permissions")(
@@ -684,7 +713,11 @@ class Server {
       this.userUsecase,
       this.permissions,
       this.ipRestriction,
-      this.passwordResetUsecase
+      {
+        authLogRepo: this.authLogRepo,
+        authMiddleware: this.authMiddleware,
+        passwordResetUsecase: this.passwordResetUsecase,
+      }
     );
     const peopleRouter = require("./routes/people")(this.peopleUsecase);
     const accountsRouter = require("./routes/accounts")(
@@ -1073,6 +1106,36 @@ class Server {
         }
       }
     );
+
+    // Stage 0A / A5: a break-glass credential is due rotation after any use
+    // and on a fixed interval even if unused. Nothing is rotated here — the
+    // job only raises the alert; rotation is the documented manual procedure.
+    this.cronService.register("break_glass_rotation_check", "0 8 * * *", async () => {
+      const authConfig = require("./config/auth");
+      const due = await this.authLogRepo.findSystemAccountsDueRotation(
+        authConfig.breakGlass.rotationDays
+      );
+      if (!due || due.length === 0) return;
+      const telegram = require("./services/telegram")();
+      for (const row of due) {
+        await this.authLogRepo.record({
+          event: "break_glass_rotation_due",
+          userId: row.user_id,
+          username: row.username,
+          detail: row.last_login_at && row.credential_rotated_at && row.last_login_at > row.credential_rotated_at
+            ? "used_since_last_rotation"
+            : "interval_elapsed",
+        });
+        // Plain text, no parse mode: the username is database text and must
+        // never be able to break the message (gate 19A).
+        const field = (v) => String(v ?? "unknown").replace(/[\u0000-\u001f\u007f]+/g, " ").slice(0, 120);
+        await telegram.sendMessage(
+          authConfig.breakGlass.alertChatId || ALERTS_TELEGRAM_CHAT_ID,
+          `🔐 BREAK-GLASS CREDENTIAL ROTATION DUE\nAccount: ${field(row.username)}\nLast rotated: ${field(row.credential_rotated_at || "never")}\nLast used: ${field(row.last_login_at || "never")}\n\nRotate with scripts/auth/break-glass.js rotate.`,
+          { disableNotification: false, parseMode: null }
+        );
+      }
+    });
 
     this.synker.initCronJobs(this.cronService, this.apiSyncLogger);
     this.cronService.start();

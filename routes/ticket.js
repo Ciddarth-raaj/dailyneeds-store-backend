@@ -1,4 +1,5 @@
 const router = require("express").Router();
+const { requireEmployee, employeeIdOrNull } = require("../utils/actor");
 const Joi = require("@hapi/joi");
 
 /** Nothing may ask for more than this in one page. */
@@ -65,7 +66,10 @@ class TicketRoutes {
 
   /** Turns a thrown error into the response shape the app already expects. */
   fail(res, err) {
-    if (err && err.name === "ValidationError") {
+    if (err && (err.name === "SystemAccountError" || err.name === "UnauthenticatedError")) {
+      // A system (break-glass) account asked to act as an employee (A3/C3).
+      res.status(err.status).json({ code: err.status, error: err.code, msg: err.message });
+    } else if (err && err.name === "ValidationError") {
       res.json({ code: 422, msg: err.toString() });
     } else {
       console.log(err);
@@ -295,9 +299,8 @@ class TicketRoutes {
 
         // created_by joins against new_employee.employee_id, so it must be the
         // employee id — not the user id.
-        if (req.decoded && req.decoded.employee_id) {
-          ticket.created_by = req.decoded.employee_id;
-        }
+        // created_by is a real employee; a system account cannot raise a ticket.
+        ticket.created_by = requireEmployee(req, "Raising a ticket");
 
         // Only default the branch once we know none was supplied.
         if (

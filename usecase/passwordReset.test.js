@@ -11,10 +11,15 @@ const makeUserRepo = () => {
   const calls = { updated: [] };
   return {
     calls,
+    // Stage 0A: the repository already excludes system / employee-less
+    // rows; the fake returns the shape the guarded query returns.
     getByUsername: async (username) =>
-      username === "raj" ? { user_id: 7, username: "raj", employee_name: "Raj" } : null,
-    updatePassword: async (userId, password) => {
-      calls.updated.push({ userId, password });
+      username === "raj"
+        ? { user_id: 7, username: "raj", employee_id: 1007, is_system_account: 0, status: 1, employee_status: 1, employee_name: "Raj", primary_contact_number: "9000000007" }
+        : null,
+    // Stage 0A: the only password writer. Records the hash it was given.
+    setModernPassword: async (userId, passwordHash, opts) => {
+      calls.updated.push({ userId, passwordHash, opts });
     },
   };
 };
@@ -200,7 +205,11 @@ describe("resetPassword", () => {
     const result = await usecase.resetPassword("raj", "123456", "new-secret");
 
     assert.equal(result.code, 200);
-    assert.deepEqual(userRepo.calls.updated, [{ userId: 7, password: "new-secret" }]);
+    // Stage 0A: a modern hash is stored, never the plaintext and never SHA-1.
+    assert.equal(userRepo.calls.updated.length, 1);
+    assert.equal(userRepo.calls.updated[0].userId, 7);
+    assert.match(userRepo.calls.updated[0].passwordHash, /^\$scrypt\$/);
+    assert.deepEqual(userRepo.calls.updated[0].opts, { clearMustChange: true });
     // Spent, so the same code cannot be replayed.
     assert.deepEqual(repo.calls.consumed, [11]);
   });
@@ -237,16 +246,16 @@ describe("resetPassword", () => {
     assert.deepEqual(unknown, noCode);
   });
 
-  it("refuses a new password shorter than the minimum", async () => {
-    const usecase = buildPasswordReset(
-      makeUserRepo(),
-      makeResetRepo({ active: activeFor("123456") }),
-      makeTelegram()
-    );
-    await assert.rejects(
-      () => usecase.resetPassword("raj", "123456", "short"),
-      (err) => err.name === "ValidationError"
-    );
+  it("refuses a new password shorter than the minimum, without spending the code", async () => {
+    const repo = makeResetRepo({ active: activeFor("123456") });
+    const usecase = buildPasswordReset(makeUserRepo(), repo, makeTelegram());
+    const result = await usecase.resetPassword("raj", "123456", "short");
+    // Stage 0A: a policy failure is an answer the employee can act on, and
+    // the code stays valid for the retry.
+    assert.equal(result.error, "PASSWORD_POLICY");
+    assert.match(result.msg, /at least 8 characters/);
+    assert.match(result.msg, /code is still valid/);
+    assert.deepEqual(repo.calls.consumed, []);
   });
 });
 

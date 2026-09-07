@@ -1,74 +1,59 @@
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
 const buildUserUsecase = require("./user");
+const F = require("../test_support/auth_fixtures");
 
 /**
- * A stand-in for the user repository that records what it was asked to do.
- *
- * `correct` is the password the fake account actually has, so
- * `verifyPassword` can answer the way the real SQL comparison would.
+ * Self-service password change, carried over from before Stage 0A onto
+ * the new repository surface. The rules are unchanged in spirit — prove
+ * the current password, refuse a too-short or unchanged new one — with
+ * the policy floor now 8 and the stored result always a modern hash.
  */
-const makeRepo = (correct) => {
-  const calls = { verified: [], updated: [] };
-  return {
-    calls,
-    verifyPassword: async (userId, password) => {
-      calls.verified.push({ userId, password });
-      return password === correct ? [{ user_id: userId }] : [];
-    },
-    updatePassword: async (userId, password) => {
-      calls.updated.push({ userId, password });
-      return { affectedRows: 1 };
-    },
-  };
+const CURRENT = "old-secret-1";
+
+const build = () => {
+  const rows = { u: F.employeeRow({ username: "u", password: F.legacyHash(CURRENT), password_algo: "sha1" }) };
+  const repo = F.fakeUserRepo(rows);
+  return { rows, repo, usecase: buildUserUsecase(repo, {}, {}, { config: F.config() }) };
 };
 
-const usecaseFor = (repo) => buildUserUsecase(repo, {}, {});
-
 describe("changePassword", () => {
-  it("replaces the password when the current one is right", async () => {
-    const repo = makeRepo("old-secret");
-    const result = await usecaseFor(repo).changePassword(7, "old-secret", "new-secret");
-
+  it("replaces the password when the current one is right, storing a modern hash", async () => {
+    const { rows, repo, usecase } = build();
+    const result = await usecase.changePassword(7, CURRENT, "new-secret-9");
     assert.equal(result.code, 200);
-    assert.deepEqual(repo.calls.updated, [{ userId: 7, password: "new-secret" }]);
+    assert.ok(repo.calls.some((c) => c[0] === "setModernPassword" && c[1] === 7));
+    assert.equal(rows.u.password_algo, "scrypt");
+    assert.equal(rows.u.password, null);
   });
 
   it("refuses a wrong current password without writing anything", async () => {
-    const repo = makeRepo("old-secret");
-    const result = await usecaseFor(repo).changePassword(7, "guessed", "new-secret");
-
+    const { repo, usecase } = build();
+    const result = await usecase.changePassword(7, "guessed", "new-secret-9");
     assert.equal(result.code, 400);
     assert.equal(result.error, "INCORRECT_PASSWORD");
-    assert.deepEqual(repo.calls.updated, []);
+    assert.equal(repo.calls.some((c) => c[0] === "setModernPassword"), false);
   });
 
-  // Length and sameness are checked before the current password is looked up,
-  // so a rejected new password never even touches the database.
-  it("refuses a new password shorter than the minimum", async () => {
-    const repo = makeRepo("old-secret");
-    await assert.rejects(
-      () => usecaseFor(repo).changePassword(7, "old-secret", "short"),
-      (err) => err.name === "ValidationError"
-    );
-    assert.deepEqual(repo.calls.verified, []);
-    assert.deepEqual(repo.calls.updated, []);
+  it("refuses a new password shorter than the minimum before touching the credential", async () => {
+    const { repo, usecase } = build();
+    await assert.rejects(() => usecase.changePassword(7, CURRENT, "short"), (err) => err.name === "ValidationError");
+    assert.equal(repo.calls.some((c) => c[0] === "setModernPassword"), false);
   });
 
   it("refuses a new password identical to the current one", async () => {
-    const repo = makeRepo("old-secret");
-    await assert.rejects(
-      () => usecaseFor(repo).changePassword(7, "old-secret", "old-secret"),
-      (err) => err.name === "ValidationError"
-    );
-    assert.deepEqual(repo.calls.updated, []);
+    const { repo, usecase } = build();
+    await assert.rejects(() => usecase.changePassword(7, CURRENT, CURRENT), (err) => err.name === "ValidationError");
+    assert.equal(repo.calls.some((c) => c[0] === "setModernPassword"), false);
   });
 
   it("treats a missing password as an empty one rather than crashing", async () => {
-    const repo = makeRepo("old-secret");
-    await assert.rejects(
-      () => usecaseFor(repo).changePassword(7, undefined, undefined),
-      (err) => err.name === "ValidationError"
-    );
+    const { usecase } = build();
+    await assert.rejects(() => usecase.changePassword(7, undefined, undefined), (err) => err.name === "ValidationError");
+  });
+
+  it("is refused for an unknown account", async () => {
+    const { usecase } = build();
+    await assert.rejects(() => usecase.changePassword(404, CURRENT, "new-secret-9"), (err) => err.status === 404);
   });
 });
