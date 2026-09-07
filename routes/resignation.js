@@ -1,16 +1,18 @@
 const router = require("express").Router();
+const P = require("../constants/hr_permissions");
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http")
 
 class ResignationRoutes {
-  constructor(resignationUsecase) {
+  constructor(resignationUsecase, permissions) {
+    this.permissions = permissions;
     this.resignationUsecase = resignationUsecase;
 
     this.init();
   }
 
   init() {
-    router.get("/", async (req, res) => {
+    router.get("/", this.permissions.require(P.VIEW_RESIGNATION), async (req, res) => {
         try {
           const resignation = await this.resignationUsecase.get();
           res.json(resignation);
@@ -25,7 +27,7 @@ class ResignationRoutes {
   
         res.end();
       });
-      router.post("/resignation_id", async (req, res) => {
+      router.post("/resignation_id", this.permissions.require(P.VIEW_RESIGNATION), async (req, res) => {
         try {
           const schema = {
             resignation_id: Joi.string().required(),
@@ -48,7 +50,7 @@ class ResignationRoutes {
   
         res.end();
       });
-      router.get("/get/resignation_id", async (req, res) => {
+      router.get("/get/resignation_id", this.permissions.require(P.VIEW_RESIGNATION), async (req, res) => {
         try {
           const schema = {
             resignation_id: Joi.string().required(),
@@ -71,7 +73,7 @@ class ResignationRoutes {
   
         res.end();
       });
-      router.get("/employee_name", async (req, res) => {
+      router.get("/employee_name", this.permissions.require(P.VIEW_RESIGNATION), async (req, res) => {
         try {
           const schema = {
             employee_name: Joi.string().required(),
@@ -94,7 +96,7 @@ class ResignationRoutes {
   
         res.end();
       });
-      router.post("/update-resignation", async (req, res) => {
+      router.post("/update-resignation", this.permissions.require(P.ADD_RESIGNATION), async (req, res) => {
         try {
           const schema = {
             resignation_id: Joi.number().required(),
@@ -125,7 +127,7 @@ class ResignationRoutes {
         }
         res.end();
       });
-    router.post("/create", async (req, res) => {
+    router.post("/create", this.permissions.require(P.ADD_RESIGNATION), async (req, res) => {
         try {
           const schema = {
             employee_name: Joi.string().required(),
@@ -163,6 +165,6 @@ class ResignationRoutes {
   }
 }   
 
-module.exports = (resignationUsecase) => {
-  return new ResignationRoutes(resignationUsecase);
+module.exports = (resignationUsecase, permissions) => {
+  return new ResignationRoutes(resignationUsecase, permissions);
 };

@@ -1,16 +1,18 @@
 const router = require("express").Router();
+const P = require("../constants/hr_permissions");
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
 
 class DesignationRoutes {
-  constructor(designationUsecase) {
+  constructor(designationUsecase, permissions) {
+    this.permissions = permissions;
     this.designationUsecase = designationUsecase;
 
     this.init();
   }
 
   init() {
-    router.get("/", async (req, res) => {
+    router.get("/", this.permissions.require(P.VIEW_DESIGNATION), async (req, res) => {
       try {
         const designation = await this.designationUsecase.get();
         res.json(designation);
@@ -24,7 +26,7 @@ class DesignationRoutes {
       }
       res.end();
     });
-    router.get("/budget", async (req, res) => {
+    router.get("/budget", this.permissions.require(P.VIEW_DESIGNATION), async (req, res) => {
       try {
         const designation =
           await this.designationUsecase.getDesignationByBudget();
@@ -39,7 +41,7 @@ class DesignationRoutes {
       }
       res.end();
     });
-    router.post("/update-status", async (req, res) => {
+    router.post("/update-status", this.permissions.require(P.ADD_DESIGNATION), async (req, res) => {
       try {
         const schema = {
           designation_id: Joi.number().required(),
@@ -88,7 +90,7 @@ class DesignationRoutes {
       }
       res.end();
     });
-    router.get("/count", async (req, res) => {
+    router.get("/count", this.permissions.require(P.VIEW_DESIGNATION), async (req, res) => {
       try {
         const designation = await this.designationUsecase.getDesignationCount();
         res.json(designation);
@@ -101,7 +103,7 @@ class DesignationRoutes {
         }
       }
     });
-    router.post("/update-designation", async (req, res) => {
+    router.post("/update-designation", this.permissions.require(P.ADD_DESIGNATION), async (req, res) => {
       try {
         const schema = {
           designation_id: Joi.number().required(),
@@ -123,6 +125,11 @@ class DesignationRoutes {
         const code = await this.designationUsecase.updateDesignationDetails(
           designation
         );
+        // Stage 0B / B2: the permission cache is keyed by designation and
+        // trusted for a minute. Without this, revoking a permission left it
+        // working for up to that long. Dropped here, in the route, so the
+        // usecase and repository never see the request or the middleware.
+        this.permissions.invalidate(designation.designation_id);
         res.json({ code: code });
       } catch (err) {
         if (err.name === "ValidationError") {
@@ -134,7 +141,7 @@ class DesignationRoutes {
       }
       res.end();
     });
-    router.get("/designation_id", async (req, res) => {
+    router.get("/designation_id", this.permissions.require(P.VIEW_DESIGNATION), async (req, res) => {
       try {
         const schema = {
           designation_id: Joi.string().required(),
@@ -160,7 +167,7 @@ class DesignationRoutes {
 
       res.end();
     });
-    router.post("/create", async (req, res) => {
+    router.post("/create", this.permissions.require(P.ADD_DESIGNATION), async (req, res) => {
       try {
         const schema = {
           // status: Joi.number().required(),
@@ -179,6 +186,9 @@ class DesignationRoutes {
         }
 
         const response = await this.designationUsecase.create(designation);
+        // A new designation cannot be cached yet, but an id can be reused
+        // after a delete; clearing costs one query per designation at most.
+        this.permissions.invalidate();
         res.json(response);
       } catch (err) {
         if (err.name === "ValidationError") {
@@ -197,6 +207,6 @@ class DesignationRoutes {
   }
 }
 
-module.exports = (designationUsecase) => {
-  return new DesignationRoutes(designationUsecase);
+module.exports = (designationUsecase, permissions) => {
+  return new DesignationRoutes(designationUsecase, permissions);
 };

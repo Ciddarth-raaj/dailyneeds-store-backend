@@ -1,4 +1,5 @@
 const router = require("express").Router();
+const P = require("../constants/hr_permissions");
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
 
@@ -14,7 +15,7 @@ class OutletRoutes {
   init() {
     const { require: needs } = this.permissions;
 
-    router.get("/", async (req, res) => {
+    router.get("/", this.permissions.require(P.VIEW_STORES), async (req, res) => {
       try {
         const outlet = await this.outletUsecase.get();
         res.json(outlet);
@@ -29,7 +30,7 @@ class OutletRoutes {
 
       res.end();
     });
-    router.get("/outlet_id", async (req, res) => {
+    router.get("/outlet_id", this.permissions.require(P.VIEW_STORES), async (req, res) => {
       try {
         const schema = {
           outlet_id: Joi.string().required(),
@@ -54,7 +55,7 @@ class OutletRoutes {
 
       res.end();
     });
-    router.get("/id", async (req, res) => {
+    router.get("/id", this.permissions.require(P.VIEW_STORES), async (req, res) => {
       try {
         const schema = {
           outlet_id: Joi.string().required(),
@@ -81,7 +82,7 @@ class OutletRoutes {
 
       res.end();
     });
-    router.post("/update-status", async (req, res) => {
+    router.post("/update-status", this.permissions.require(P.ADD_STORES), async (req, res) => {
       try {
         const schema = {
           outlet_id: Joi.number().required(),
@@ -106,7 +107,7 @@ class OutletRoutes {
       }
       res.end();
     });
-    router.post("/update-outlet", async (req, res) => {
+    router.post("/update-outlet", this.permissions.require(P.ADD_STORES), async (req, res) => {
       try {
         const schema = {
           outlet_id: Joi.number().required(),
@@ -148,7 +149,7 @@ class OutletRoutes {
       res.end();
     });
 
-    router.post("/create", async (req, res) => {
+    router.post("/create", this.permissions.require(P.ADD_STORES), async (req, res) => {
       try {
         const schema = {
           outlet_details: Joi.object({

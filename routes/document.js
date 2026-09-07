@@ -1,14 +1,16 @@
 const router = require("express").Router();
+const P = require("../constants/hr_permissions");
 const Joi = require("@hapi/joi");
 
 class DocumentRoutes {
-  constructor(documentUsecase) {
+  constructor(documentUsecase, permissions) {
+    this.permissions = permissions;
     this.documentUsecase = documentUsecase;
     this.init();
   }
 
   init() {
-    router.get("/employee_id", async (req, res) => {
+    router.get("/employee_id", this.permissions.require(P.VIEW_DOCUMENTS), async (req, res) => {
       try {
         const schema = {
           employee_id: Joi.number().required(),
@@ -31,7 +33,7 @@ class DocumentRoutes {
 
       res.end();
     });
-    router.get("/document_id", async (req, res) => {
+    router.get("/document_id", this.permissions.require(P.VIEW_DOCUMENTS), async (req, res) => {
       try {
         const schema = {
           document_id: Joi.number().required(),
@@ -54,7 +56,7 @@ class DocumentRoutes {
 
       res.end();
     });
-    router.post("/update-status", async (req, res) => {
+    router.post("/update-status", this.permissions.require(P.ADD_DOCUMENTS), async (req, res) => {
       try {
         const schema = {
           document_id: Joi.number().required(),
@@ -79,7 +81,7 @@ class DocumentRoutes {
       }
       res.end();
     });
-    router.post("/update-document", async (req, res) => {
+    router.post("/update-document", this.permissions.require(P.ADD_DOCUMENTS), async (req, res) => {
       try {
         const schema = {
           document_id: Joi.number().required(),
@@ -105,7 +107,7 @@ class DocumentRoutes {
       res.end();
     });
   
-    router.get("/adhaar", async (req, res) => {
+    router.get("/adhaar", this.permissions.require(P.VIEW_EMPLOYEE_SENSITIVE), async (req, res) => {
       try {
         const document = await this.documentUsecase.getAdhaar();
         res.json(document);
@@ -120,7 +122,7 @@ class DocumentRoutes {
 
       res.end();
     });
-    router.get("/withoutadhaar", async (req, res) => {
+    router.get("/withoutadhaar", this.permissions.require(P.VIEW_DOCUMENTS), async (req, res) => {
       try {
         const document = await this.documentUsecase.getDocumentsWithoutAdhaar();
         res.json(document);
@@ -135,7 +137,7 @@ class DocumentRoutes {
 
       res.end();
     });
-    router.get("/all", async (req, res) => {
+    router.get("/all", this.permissions.require(P.VIEW_DOCUMENTS), async (req, res) => {
       try {
         const document = await this.documentUsecase.getAllDocuments();
         res.json(document);
@@ -156,6 +158,6 @@ class DocumentRoutes {
   }
 }
 
-module.exports = (documentUsecase) => {
-  return new DocumentRoutes(documentUsecase);
+module.exports = (documentUsecase, permissions) => {
+  return new DocumentRoutes(documentUsecase, permissions);
 };
