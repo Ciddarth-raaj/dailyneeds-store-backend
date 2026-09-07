@@ -1,0 +1,149 @@
+# Run an HR / payroll rehearsal on the SCRATCH copy, from the Actions tab.
+#
+# This workflow is a way to RUN A REHEARSAL, never a way to release anything.
+# It does not pull into the production checkout, does not install packages,
+# does not run migrations, does not reload pm2, and cannot be pointed at a
+# database: the schema is hard-coded to dnds_rehearsal below and there is no
+# input for it. The only things it decides are which commit to rehearse and
+# which rehearsal script to run.
+#
+# Secrets: the same three deploy-backend.yml already uses, and no others.
+#   SSH_PRIVATE_KEY  SSH_HOST  SSH_USER
+#
+# On the server it works only in ~/stage0a-rehearsal - the rehearsal checkout,
+# separate from ~/dailyneeds-store-backend, which is what the deploy uses and
+# what serves production.
+#
+# Note: "on" is quoted so YAML 1.1 does not treat it as a boolean (true).
+
+name: HR / Payroll Rehearsal
+
+"on":
+  workflow_dispatch:
+    inputs:
+      branch_or_commit:
+        description: "Branch or commit to rehearse (e.g. stage0b/hr-sensitive-fields-b3)"
+        required: true
+        type: string
+      rehearsal_script:
+        description: "Rehearsal script, must be under scripts/auth/ and end in .sh"
+        required: true
+        default: scripts/auth/b3-rehearsal.sh
+        type: string
+
+# The schema is here and nowhere else. There is deliberately no input for it,
+# so no run can name a different database however it is dispatched.
+env:
+  REHEARSAL_DB: dnds_rehearsal
+  HR_DESIGNATION: "11"
+  REHEARSAL_DIR: stage0a-rehearsal
+
+jobs:
+  rehearse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # Inputs are validated on the runner BEFORE they reach a shell on the
+      # server, and they are read from the environment rather than pasted into
+      # the script by template expansion - a value like `; rm -rf ~` would
+      # otherwise be executed rather than rejected.
+      - name: Validate inputs
+        env:
+          REF: ${{ inputs.branch_or_commit }}
+          SCRIPT: ${{ inputs.rehearsal_script }}
+        run: |
+          set -euo pipefail
+          case "$REF" in
+            -*|*..*|*" "*|"") echo "::error::refusing branch/commit '$REF'"; exit 1;;
+          esac
+          printf '%s' "$REF" | grep -Eq '^[A-Za-z0-9._/-]{1,200}$' \
+            || { echo "::error::branch/commit may only contain letters, digits and . _ / -"; exit 1; }
+          printf '%s' "$SCRIPT" | grep -Eq '^scripts/auth/[A-Za-z0-9._-]+\.sh$' \
+            || { echo "::error::rehearsal script must be under scripts/auth/ and end in .sh"; exit 1; }
+          case "$SCRIPT" in *..*) echo "::error::refusing a path with .."; exit 1;; esac
+          # Belt and braces: the database is not an input, and neither input
+          # may name production either.
+          case "$REF$SCRIPT" in
+            *dnds_prod*) echo "::error::refusing an input that names dnds_prod"; exit 1;;
+          esac
+          if [ "$REHEARSAL_DB" = "dnds_prod" ]; then
+            echo "::error::REHEARSAL_DB is dnds_prod - refusing"; exit 1
+          fi
+          echo "commit/branch : $REF"
+          echo "script        : $SCRIPT"
+          echo "database      : $REHEARSAL_DB (hard-coded, not an input)"
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/dnds_gha_deploy
+          chmod 600 ~/.ssh/dnds_gha_deploy
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      # The remote script is a quoted heredoc, so nothing in it is expanded by
+      # the runner; the three values it needs arrive as positional arguments,
+      # already validated above. Output is not redirected or filtered, so the
+      # rehearsal's own log - including its restore verification - is the
+      # Actions log, and its exit status is this step's exit status.
+      - name: Run the rehearsal on the scratch copy
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          REF: ${{ inputs.branch_or_commit }}
+          SCRIPT: ${{ inputs.rehearsal_script }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/dnds_gha_deploy \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "${SSH_USER}@${SSH_HOST}" \
+            'bash -s' -- "$REF" "$SCRIPT" "$REHEARSAL_DB" "$HR_DESIGNATION" "$REHEARSAL_DIR" <<'REMOTE'
+          set -euo pipefail
+          REF="$1"; SCRIPT="$2"; DB="$3"; DESIGNATION="$4"; DIR="$5"
+
+          if [ "$DB" = "dnds_prod" ]; then echo "refusing dnds_prod"; exit 1; fi
+          case "$DB" in *rehearsal*|*scratch*) ;; *) echo "refusing '$DB' - not a scratch schema"; exit 1;; esac
+
+          cd "$HOME/$DIR" || { echo "no rehearsal checkout at ~/$DIR"; exit 1; }
+          echo "== rehearsal checkout: $PWD"
+
+          git fetch origin --prune --tags
+
+          # A branch name resolves through origin/, a commit resolves as
+          # itself; anything else stops here rather than rehearsing whatever
+          # the checkout happened to be on.
+          SHA="$(git rev-parse --verify --quiet "origin/${REF}^{commit}" || true)"
+          [ -n "$SHA" ] || SHA="$(git rev-parse --verify --quiet "${REF}^{commit}" || true)"
+          [ -n "$SHA" ] || { echo "cannot resolve '$REF' in this checkout"; exit 1; }
+
+          git checkout --detach "$SHA"
+          echo "== rehearsing commit $(git rev-parse HEAD)"
+          git --no-pager log -1 --format='   %h %s'
+
+          # Re-checked here, on the machine, against the file that will run.
+          case "$SCRIPT" in
+            scripts/auth/*.sh) ;;
+            *) echo "refusing '$SCRIPT' - not a script under scripts/auth/"; exit 1;;
+          esac
+          [ -f "$SCRIPT" ] || { echo "'$SCRIPT' does not exist at $(git rev-parse --short HEAD)"; exit 1; }
+
+          echo "== running: MYSQL_BIN_DIR=\$HOME/mysql84/bin $SCRIPT $DB $DESIGNATION"
+          echo
+          # `set -e` is lifted just here so the status can be reported before
+          # it is re-raised; the rehearsal's own exit code is what leaves this
+          # shell, and therefore what fails the workflow.
+          set +e
+          MYSQL_BIN_DIR="$HOME/mysql84/bin" bash "$SCRIPT" "$DB" "$DESIGNATION"
+          RC=$?
+          set -e
+          echo
+          echo "== rehearsal exit status: $RC"
+          exit "$RC"
+          REMOTE
