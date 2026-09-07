@@ -18,6 +18,11 @@
 #   3. the auth columns of the three users given a staging password
 #   4. the `user_auth_log` rows written by the rehearsal's own logins
 #
+# Exit status: 0 only when the rehearsal passed AND the copy was restored and
+# verified. 130 = interrupted (SIGINT), 143 = terminated (SIGTERM), 3 = the
+# rehearsal passed but the restore did not, any other non-zero = the
+# rehearsal's own failure, which is preserved even if the restore succeeded.
+#
 # The scratch-schema guard is unchanged: the script and the policy SQL both
 # refuse to touch anything not named like a scratch schema, so dnds_prod
 # cannot be reached even by a typo. The app instance runs from THIS checkout
@@ -97,8 +102,43 @@ DELETE FROM \`user_auth_log\` WHERE log_id > $LOG_MAX;" >> "$RESTORE_SQL"
 echo "   snapshot: $SNAP  (permissions $(wc -l < "$SNAP/permissions-before.tsv") rows, non-HR $(wc -l < "$SNAP/non-hr-before.tsv") rows)"
 
 # ------------------------------------------------------------- restore trap
-# Runs on EVERY exit: success, failure, or interrupt.
+# One handler on EXIT does the restoring, exactly once. INT and TERM do NOT
+# restore directly: they record the conventional status for the signal
+# (130 / 143) and exit, which reaches the EXIT handler. Trapping the signals
+# to the same function would have restored twice on a Ctrl-C, and - worse -
+# a plain `trap ... INT` returns to the interrupted line, so the script would
+# have carried on mutating the copy after the operator asked it to stop.
+#
+# Exit status rules:
+#   * the rehearsal's own non-zero status always wins (a failed rehearsal
+#     must not be reported as success because the cleanup went well)
+#   * a clean rehearsal whose RESTORE failed exits 3, never 0: the scratch
+#     copy is left dirty and someone has to know
+#   * a signal exits 130 (INT) or 143 (TERM)
+RESTORE_FAILED_RC=3
 RESTORED=0
+RESTORE_RC=0
+SIGNAL_RC=0
+
+on_signal() {
+  echo
+  echo "== $1 received - stopping before any further change to $SCRATCH"
+  SIGNAL_RC="$2"
+  exit "$2"     # reaches on_exit, which restores exactly once
+}
+
+on_exit() {
+  local rc=$?
+  [ "$SIGNAL_RC" != "0" ] && rc="$SIGNAL_RC"
+  restore_all
+  if [ "$RESTORE_RC" != "0" ]; then
+    echo "  the scratch copy is NOT back to its pre-rehearsal state - see above"
+    [ "$rc" = "0" ] && rc="$RESTORE_FAILED_RC"
+  fi
+  trap - EXIT
+  exit "$rc"
+}
+
 restore_all() {
   [ "$RESTORED" = "1" ] && return
   RESTORED=1
@@ -114,6 +154,7 @@ restore_all() {
   else
     echo "   RESTORE FAILED - the undo script is $RESTORE_SQL; run it by hand:"
     echo "     $MYSQL --defaults-extra-file=$DEFAULTS $SCRATCH < $RESTORE_SQL"
+    RESTORE_RC=1
     return
   fi
 
@@ -140,12 +181,18 @@ restore_all() {
     fi
   fi
   [ -n "$LOG_MAX" ] && echo "  info  user_auth_log rows above $LOG_MAX removed (now max $(Q "SELECT IFNULL(MAX(log_id),0) FROM user_auth_log"))"
-  [ "$bad" = "0" ] && echo "  RESTORE VERIFIED: $SCRATCH is byte-identical to its pre-rehearsal state" \
-                   || echo "  RESTORE INCOMPLETE - see the differences above; undo script: $RESTORE_SQL"
+  if [ "$bad" = "0" ]; then
+    echo "  RESTORE VERIFIED: $SCRATCH is byte-identical to its pre-rehearsal state"
+  else
+    echo "  RESTORE INCOMPLETE - see the differences above; undo script: $RESTORE_SQL"
+    RESTORE_RC=1
+  fi
 }
 AUTH_COLS=""; TOUCHED_IDS=""
 : > "$SNAP/user-auth-before.tsv"
-trap restore_all EXIT INT TERM
+trap on_exit EXIT
+trap 'on_signal SIGINT 130' INT
+trap 'on_signal SIGTERM 143' TERM
 
 # ------------------------------------- migration keys + policy (idempotent)
 echo
@@ -248,4 +295,5 @@ CHECKS=$?
 echo
 echo "report: $LOG   app log: $APPLOG"
 [ "$CHECKS" = "0" ] && echo "B2 REHEARSAL: ALL CHECKS PASSED" || echo "B2 REHEARSAL: CHECKS FAILED"
+# on_exit runs from here: it restores, then applies the status rules above.
 exit "$CHECKS"
