@@ -141,6 +141,17 @@ class EmployeeUsecase {
       }
     });
   }
+  /** Active employees at one outlet, id and name only. See the route. */
+  getDirectory(store_id) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const data = await this.employeeRepo.getDirectoryByStore(store_id);
+        resolve(data);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
   getEmployeeById(employee_id) {
     return new Promise(async (resolve, reject) => {
       try {

@@ -360,6 +360,48 @@ class EmployeeRoutes {
       res.end();
     });
 
+    // Stage 0B follow-up: the operational employee directory.
+    //
+    // B2 put `view_employees` in front of /employee/employees, which is right
+    // - that route returns the whole employee record. But the accounts sheet
+    // only ever needed a name to put in a dropdown, and taking the HR
+    // permission away emptied it. Granting `view_employees` back to every
+    // outlet user to fix a dropdown would undo B2; this returns the two
+    // columns the dropdown actually uses instead.
+    //
+    // Authenticated (B1 covers it - the path is not in unProtectedRoutes) and
+    // deliberately NOT gated on `view_employees`. What keeps it safe is what
+    // it can return, not who may call it:
+    //
+    //   * two columns, employee_id and employee_name, named in the SQL
+    //   * active employees only
+    //   * the caller's OWN outlet, taken from the token, never from the query
+    //
+    // A non-admin's `store_id` parameter is ignored rather than rejected, so
+    // a stale frontend cannot read another branch's staff list by asking. An
+    // admin (user_type 2) may name a store, because the accounts screens let
+    // an admin work on a branch that is not their own; without one they get
+    // their own, and an account with no store gets an empty list rather than
+    // everybody.
+    router.get("/directory", async (req, res) => {
+      try {
+        const isAdmin = Number(req.auth && req.auth.userType) === this.permissions.ADMIN_USER_TYPE;
+        const requested = Number(req.query.store_id);
+        const ownStore = req.auth ? req.auth.storeId : null;
+        const storeId = isAdmin && Number.isInteger(requested) && requested > 0 ? requested : ownStore;
+
+        if (storeId === null || storeId === undefined || storeId === "") {
+          return res.json([]);
+        }
+
+        const data = await this.employeeUsecase.getDirectory(storeId);
+        res.json(data);
+      } catch (err) {
+        console.log(err);
+        res.json({ code: 500, msg: "An error occurred !" });
+      }
+    });
+
     router.get("/get-details", async (req, res) => {
       try {
         const schema = {
