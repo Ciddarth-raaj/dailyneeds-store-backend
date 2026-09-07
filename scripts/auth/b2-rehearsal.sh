@@ -149,6 +149,15 @@ restore_all() {
     cp -p "$WT/config.b2bak.json" "$WT/config.json" && rm -f "$WT/config.b2bak.json"
     echo "   config.json restored -> $(node -e 'console.log(require(process.argv[1]).db.mysql.development.database)' "$WT/config.json")"
   fi
+  if [ -s "${AUTH_SNAPSHOT:-}" ]; then
+    if node "$WT/scripts/auth/b2-user-auth.js" restore --db "$SCRATCH" --in "$AUTH_SNAPSHOT" --defaults "$DEFAULTS"; then
+      echo "   user auth columns restored and verified"
+    else
+      echo "   USER AUTH RESTORE FAILED - recover with:"
+      echo "     node $WT/scripts/auth/b2-user-auth.js restore --db $SCRATCH --in $AUTH_SNAPSHOT"
+      RESTORE_RC=1
+    fi
+  fi
   if RUN < "$RESTORE_SQL"; then
     echo "   database statements applied"
   else
@@ -238,25 +247,19 @@ TOUCHED_IDS="${HR_USER%%|*},${OTHER_USER%%|*},${ADMIN_U%%|*}"
 AUTH_COLS="$(Q "SELECT GROUP_CONCAT(CONCAT('\`', COLUMN_NAME, '\`') ORDER BY ORDINAL_POSITION) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='$SCRATCH' AND TABLE_NAME='user' AND COLUMN_NAME IN ('user_id','password','password_hash','password_algo','must_change_password','password_flag_reason','failed_login_count','locked_until','last_login_at','token_valid_from','credential_rotated_at')")"
 [ -n "$AUTH_COLS" ] || fail "could not read the user table's auth columns"
 Q "SELECT $AUTH_COLS FROM \`user\` WHERE user_id IN ($TOUCHED_IDS) ORDER BY user_id" > "$SNAP/user-auth-before.tsv"
-{
-  echo "-- (4) user: restore the auth columns of the users given a staging password"
-  Q "SELECT CONCAT('UPDATE \`user\` SET ',
-       GROUP_CONCAT(CONCAT(c.col, '=', c.val) SEPARATOR ', '),
-       ' WHERE user_id=', c.user_id, ';')
-     FROM (
-       SELECT user_id, 'password' AS col, QUOTE(password) AS val FROM \`user\` WHERE user_id IN ($TOUCHED_IDS)
-       UNION ALL SELECT user_id, 'password_hash', QUOTE(password_hash) FROM \`user\` WHERE user_id IN ($TOUCHED_IDS)
-       UNION ALL SELECT user_id, 'password_algo', QUOTE(password_algo) FROM \`user\` WHERE user_id IN ($TOUCHED_IDS)
-       UNION ALL SELECT user_id, 'must_change_password', QUOTE(must_change_password) FROM \`user\` WHERE user_id IN ($TOUCHED_IDS)
-       UNION ALL SELECT user_id, 'password_flag_reason', QUOTE(password_flag_reason) FROM \`user\` WHERE user_id IN ($TOUCHED_IDS)
-       UNION ALL SELECT user_id, 'failed_login_count', QUOTE(failed_login_count) FROM \`user\` WHERE user_id IN ($TOUCHED_IDS)
-       UNION ALL SELECT user_id, 'locked_until', QUOTE(locked_until) FROM \`user\` WHERE user_id IN ($TOUCHED_IDS)
-       UNION ALL SELECT user_id, 'last_login_at', QUOTE(last_login_at) FROM \`user\` WHERE user_id IN ($TOUCHED_IDS)
-       UNION ALL SELECT user_id, 'token_valid_from', QUOTE(token_valid_from) FROM \`user\` WHERE user_id IN ($TOUCHED_IDS)
-     ) c
-     GROUP BY c.user_id"
-} >> "$RESTORE_SQL"
-echo "   auth snapshot taken for user_id in ($TOUCHED_IDS); undo statements appended to $RESTORE_SQL"
+
+# The undo data for these rows is captured through the mysql DRIVER, into
+# JSON, and written back as bound parameters. The previous version built
+# UPDATE statements in SQL with CONCAT(QUOTE(col), ...), which on the real
+# database failed with `ERROR 1270 Illegal mix of collations` - and it failed
+# AFTER the passwords had been changed, leaving the copy dirty. Capturing
+# BEFORE any password is touched, and aborting here if it does not work, is
+# what makes that impossible.
+AUTH_SNAPSHOT="$SNAP/user-auth-before.json"
+node "$WT/scripts/auth/b2-user-auth.js" capture --db "$SCRATCH" --users "$TOUCHED_IDS" --out "$AUTH_SNAPSHOT" --defaults "$DEFAULTS" \
+  || fail "could not capture the users' auth columns - NO password has been changed"
+[ -s "$AUTH_SNAPSHOT" ] || fail "auth snapshot is empty - NO password has been changed"
+echo "   auth snapshot taken for user_id in ($TOUCHED_IDS)"
 
 SECRETS="$HOME/.stage0a/b2-secrets.env"
 umask 077
