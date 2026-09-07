@@ -85,13 +85,17 @@ describe("B2 migration — down", () => {
 });
 
 describe("B2 migration — ordering and boilerplate", () => {
-  it("sorts after every Stage 0A migration, so db-migrate runs it last", () => {
+  it("sorts after every Stage 0A migration, so db-migrate runs it after them", () => {
     const files = fs
       .readdirSync(path.join(__dirname, "mysql/migrations"))
       .filter((f) => f.endsWith(".js"))
       .map((f) => f.replace(/\.js$/, ""))
       .sort();
-    assert.equal(files[files.length - 1], NAME, "the B2 migration must be the newest");
+    // This used to assert B2 was the LAST migration in the directory, which
+    // was true the day it was written and false the moment another migration
+    // was added (Stage 0C / C1a). The property that actually matters is the
+    // one below: B2 runs after the Stage 0A migrations it depends on.
+    assert.ok(files.includes(NAME), "the B2 migration must be present");
     for (const stage0a of [
       "20260906120000-auth-stage0a-user-columns",
       "20260906120300-auth-stage0a-permissions",
