@@ -1,16 +1,18 @@
 const router = require("express").Router();
+const P = require("../constants/hr_permissions");
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http")
 
 class FamilyRoutes {
-  constructor(familyUsecase) {
+  constructor(familyUsecase, permissions) {
+    this.permissions = permissions;
     this.familyUsecase = familyUsecase;
 
     this.init();
   }
 
   init() {
-    router.get("/", async (req, res) => {
+    router.get("/", this.permissions.require(P.VIEW_FAMILY), async (req, res) => {
         try {
           const family = await this.familyUsecase.get();
           res.json(family);
@@ -25,7 +27,7 @@ class FamilyRoutes {
   
         res.end();
       });
-      router.get("/family_id", async (req, res) => {
+      router.get("/family_id", this.permissions.require(P.VIEW_FAMILY), async (req, res) => {
         try {
           const schema = {
             family_id: Joi.string().required(),
@@ -48,7 +50,7 @@ class FamilyRoutes {
   
         res.end();
       });
-      router.get("/employee_name", async (req, res) => {
+      router.get("/employee_name", this.permissions.require(P.VIEW_FAMILY), async (req, res) => {
         try {
           const schema = {
             employee_name: Joi.string().required(),
@@ -71,7 +73,7 @@ class FamilyRoutes {
   
         res.end();
       });
-      router.post("/update-family", async (req, res) => {
+      router.post("/update-family", this.permissions.require(P.ADD_FAMILY), async (req, res) => {
         try {
           const schema = {
             family_id: Joi.number().required(),
@@ -108,7 +110,7 @@ class FamilyRoutes {
         }
         res.end();
       });
-    router.post("/create", async (req, res) => {
+    router.post("/create", this.permissions.require(P.ADD_FAMILY), async (req, res) => {
         try {
           const schema = {
             name: Joi.string().required(),
@@ -150,6 +152,6 @@ class FamilyRoutes {
   }
 }   
 
-module.exports = (familyUsecase) => {
-  return new FamilyRoutes(familyUsecase);
+module.exports = (familyUsecase, permissions) => {
+  return new FamilyRoutes(familyUsecase, permissions);
 };

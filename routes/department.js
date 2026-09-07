@@ -1,16 +1,18 @@
 const router = require("express").Router();
+const P = require("../constants/hr_permissions");
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http")
 
 class DepartmentRoutes {
-  constructor(departmentUsecase) {
+  constructor(departmentUsecase, permissions) {
+    this.permissions = permissions;
     this.departmentUsecase = departmentUsecase;
 
     this.init();
   }
 
   init() {
-    router.get("/", async (req, res) => {
+    router.get("/", this.permissions.require(P.VIEW_DEPARTMENT), async (req, res) => {
         try {
           const department = await this.departmentUsecase.get();
           res.json(department);
@@ -25,7 +27,7 @@ class DepartmentRoutes {
   
         res.end();
       });
-      router.get("/product-department", async (req, res) => {
+      router.get("/product-department", this.permissions.require(P.VIEW_DEPARTMENT), async (req, res) => {
         try {
           const department = await this.departmentUsecase.getProductDepartment();
           res.json(department);
@@ -40,7 +42,7 @@ class DepartmentRoutes {
   
         res.end();
       });
-      router.post("/imageupload", async (req, res) => {
+      router.post("/imageupload", this.permissions.require(P.ADD_DEPARTMENT), async (req, res) => {
         try {
           const schema = {
             image_url: Joi.string().required(),
@@ -65,7 +67,7 @@ class DepartmentRoutes {
           }
         }
       });
-      router.post("/update-status", async (req, res) => {
+      router.post("/update-status", this.permissions.require(P.ADD_DEPARTMENT), async (req, res) => {
         try {
           const schema = {
             department_id: Joi.number().required(),
@@ -91,7 +93,7 @@ class DepartmentRoutes {
         res.end();
       });
       
-      router.post("/update-prodstatus", async (req, res) => {
+      router.post("/update-prodstatus", this.permissions.require(P.ADD_DEPARTMENT), async (req, res) => {
         try {
           const schema = {
             department_id: Joi.number().required(),
@@ -116,7 +118,7 @@ class DepartmentRoutes {
         }
         res.end();
       });
-      router.post("/update-department", async (req, res) => {
+      router.post("/update-department", this.permissions.require(P.ADD_DEPARTMENT), async (req, res) => {
         try {
           const schema = {
             department_id: Joi.number().required(),
@@ -145,7 +147,7 @@ class DepartmentRoutes {
         }
         res.end();
       });
-      router.get("/department_id", async (req, res) => {
+      router.get("/department_id", this.permissions.require(P.VIEW_DEPARTMENT), async (req, res) => {
         try {
           const schema = {
             department_id: Joi.string().required(),
@@ -168,7 +170,7 @@ class DepartmentRoutes {
   
         res.end();
       });
-    router.post("/create", async (req, res) => {
+    router.post("/create", this.permissions.require(P.ADD_DEPARTMENT), async (req, res) => {
         try {
           const schema = {
             // status: Joi.string().required(),
@@ -203,6 +205,6 @@ class DepartmentRoutes {
   }
 }   
 
-module.exports = (departmentUsecase) => {
-  return new DepartmentRoutes(departmentUsecase);
+module.exports = (departmentUsecase, permissions) => {
+  return new DepartmentRoutes(departmentUsecase, permissions);
 };

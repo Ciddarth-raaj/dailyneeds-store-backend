@@ -663,23 +663,34 @@ class Server {
     );
     app.use(this.ipRestriction);
 
-    const documentRouter = require("./routes/document")(this.documentUsecase);
+    const documentRouter = require("./routes/document")(
+      this.documentUsecase,
+      this.permissions
+    );
     const whatsappRouter = require("./routes/whatsapp")(this.whatsappUsecase);
     const budgetRouter = require("./routes/budget")(this.budgetUsecase);
     const issueRouter = require("./routes/issue")(this.issueUsecase);
     const vehicleRouter = require("./routes/vehicle")(this.vehicleUsecase);
-    const familyRouter = require("./routes/family")(this.familyUsecase);
+    const familyRouter = require("./routes/family")(
+      this.familyUsecase,
+      this.permissions
+    );
     const assetRouter = require("./routes/asset")(this.assetUsecase);
     const exampleRouter = require("./routes/example")(this.exampleUsecase);
     const gstRouter = require("./routes/gst")(this.gstUsecase);
     const departmentRouter = require("./routes/department")(
-      this.departmentUsecase
+      this.departmentUsecase,
+      this.permissions
     );
     const designationRouter = require("./routes/designation")(
-      this.designationUsecase
+      this.designationUsecase,
+      this.permissions
     );
-    const employeeRouter = require("./routes/employee")(this.employeeUsecase);
-    const shiftRouter = require("./routes/shift")(this.shiftUsecase);
+    const employeeRouter = require("./routes/employee")(
+      this.employeeUsecase,
+      this.permissions
+    );
+    const shiftRouter = require("./routes/shift")(this.shiftUsecase, this.permissions);
     const storeRouter = require("./routes/store")(this.storeUsecase);
     const outletRouter = require("./routes/outlet")(
       this.outletUsecase,
@@ -693,9 +704,13 @@ class Server {
     const materialsizeRouter = require("./routes/materialsize")(
       this.materialsizeUsecase
     );
-    const salaryRouter = require("./routes/salary")(this.salaryUsecase);
+    const salaryRouter = require("./routes/salary")(
+      this.salaryUsecase,
+      this.permissions
+    );
     const resignationRouter = require("./routes/resignation")(
-      this.resignationUsecase
+      this.resignationUsecase,
+      this.permissions
     );
     const imageRouter = require("./routes/image")(this.imageUsecase);
     const productRouter = require("./routes/product")(

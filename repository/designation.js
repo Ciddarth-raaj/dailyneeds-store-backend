@@ -136,7 +136,11 @@ class DesignationRepository {
       return `SELECT * FROM all_permissions`;
     }
     if (user_type === 1) {
-      return `SELECT permission_key FROM permissions WHERE designation_id = ?`;
+      // Stage 0B / B2: `is_active` exists on this table but was never read,
+      // so a permission switched off still granted access. It is a filter
+      // now — for the authorisation check AND for the bootstrap the frontend
+      // uses to decide which screens to show, which must agree.
+      return `SELECT permission_key FROM permissions WHERE designation_id = ? AND is_active = 1`;
     }
   }
   getPermissionById(designation_id, user_type) {

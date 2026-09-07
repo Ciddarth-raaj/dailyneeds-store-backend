@@ -1,17 +1,19 @@
 const router = require("express").Router();
+const P = require("../constants/hr_permissions");
 const { requireEmployee, employeeIdOrNull } = require("../utils/actor");
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
 
 class EmployeeRoutes {
-  constructor(employeeUsecase) {
+  constructor(employeeUsecase, permissions) {
+    this.permissions = permissions;
     this.employeeUsecase = employeeUsecase;
 
     this.init();
   }
 
   init() {
-    router.post("/", async (req, res) => {
+    router.post("/", this.permissions.require(P.ADD_EMPLOYEES), async (req, res) => {
       try {
         const schema = {
           employee_id: Joi.number().required(),
@@ -101,7 +103,7 @@ class EmployeeRoutes {
       res.end();
     });
 
-    router.get("/employees", async (req, res) => {
+    router.get("/employees", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
       try {
         const schema = {
           store_ids: Joi.array().items(Joi.number().required()).optional(),
@@ -130,7 +132,7 @@ class EmployeeRoutes {
       res.end();
     });
 
-    router.get("/headcount", async (req, res) => {
+    router.get("/headcount", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
       try {
         const employee = await this.employeeUsecase.getHeadCount();
         res.json(employee);
@@ -145,7 +147,7 @@ class EmployeeRoutes {
 
       res.end();
     });
-    router.get("/familydet", async (req, res) => {
+    router.get("/familydet", this.permissions.require(P.VIEW_FAMILY), async (req, res) => {
       try {
         const employee = await this.employeeUsecase.getFamilyDet();
         res.json(employee);
@@ -160,7 +162,7 @@ class EmployeeRoutes {
 
       res.end();
     });
-    router.get("/bank", async (req, res) => {
+    router.get("/bank", this.permissions.require(P.VIEW_BANKS), async (req, res) => {
       try {
         const employee = await this.employeeUsecase.getBankDetails();
         res.json(employee);
@@ -175,7 +177,7 @@ class EmployeeRoutes {
 
       res.end();
     });
-    router.get("/resignedemp", async (req, res) => {
+    router.get("/resignedemp", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
       try {
         const employee = await this.employeeUsecase.getResignedEmployee();
         res.json(employee);
@@ -190,7 +192,7 @@ class EmployeeRoutes {
 
       res.end();
     });
-    router.get("/newjoinee", async (req, res) => {
+    router.get("/newjoinee", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
       try {
         const schema = {
           limit: Joi.number().required(),
@@ -219,7 +221,7 @@ class EmployeeRoutes {
 
       res.end();
     });
-    router.get("/newjoiner", async (req, res) => {
+    router.get("/newjoiner", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
       try {
         const employee = await this.employeeUsecase.getNewJoiner();
         res.json(employee);
@@ -235,7 +237,7 @@ class EmployeeRoutes {
       res.end();
     });
 
-    router.get("/birthday", async (req, res) => {
+    router.get("/birthday", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
       try {
         const employee = await this.employeeUsecase.getEmployeeBirthday();
         res.json(employee);
@@ -250,7 +252,7 @@ class EmployeeRoutes {
 
       res.end();
     });
-    router.get("/filter", async (req, res) => {
+    router.get("/filter", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
       try {
         const schema = {
           filter: Joi.string().required(),
@@ -275,7 +277,7 @@ class EmployeeRoutes {
 
       res.end();
     });
-    router.get("/anniversary", async (req, res) => {
+    router.get("/anniversary", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
       try {
         const employee = await this.employeeUsecase.getJoiningAnniversary();
         res.json(employee);
@@ -291,7 +293,7 @@ class EmployeeRoutes {
       res.end();
     });
 
-    router.get("/store_id", async (req, res) => {
+    router.get("/store_id", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
       try {
         const schema = {
           store_id: Joi.number().required(),
@@ -316,7 +318,7 @@ class EmployeeRoutes {
       res.end();
     });
 
-    router.get("/employee_id", async (req, res) => {
+    router.get("/employee_id", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
       try {
         const schema = {
           employee_id: Joi.number().required(),
@@ -372,7 +374,7 @@ class EmployeeRoutes {
       res.end();
     });
 
-    router.post("/update-status", async (req, res) => {
+    router.post("/update-status", this.permissions.require(P.ADD_EMPLOYEES), async (req, res) => {
       try {
         const schema = {
           employee_id: Joi.number().required(),
@@ -397,7 +399,7 @@ class EmployeeRoutes {
       }
       res.end();
     });
-    router.post("/updatedata", async (req, res) => {
+    router.post("/updatedata", this.permissions.require(P.ADD_EMPLOYEES), async (req, res) => {
       try {
         const schema = {
           employee_id: Joi.number().required(),
@@ -509,7 +511,7 @@ class EmployeeRoutes {
     });
 
     // Sync all data
-    router.post("/sync", async (req, res) => {
+    router.post("/sync", this.permissions.require(P.ADD_EMPLOYEES), async (req, res) => {
       try {
         await this.employeeUsecase.sync();
         res.json({ code: 200, msg: "Data successfully synced!" });
@@ -524,6 +526,6 @@ class EmployeeRoutes {
   }
 }
 
-module.exports = (employeeUsecase) => {
-  return new EmployeeRoutes(employeeUsecase);
+module.exports = (employeeUsecase, permissions) => {
+  return new EmployeeRoutes(employeeUsecase, permissions);
 };
