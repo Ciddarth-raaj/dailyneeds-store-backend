@@ -29,7 +29,8 @@ DEFAULTS="${STAGE0A_DEFAULTS:-$HOME/.stage0a/app.cnf}"
 OUT="${OUT:-$HOME/db-backups}"
 JWTENV="$HOME/.stage0a/jwt.env"
 EXPECT_PROD_HEAD="${EXPECT_PROD_HEAD:-9d92884}"
-EXPECT_BACKEND_TARGET="${EXPECT_BACKEND_TARGET:-c8d4c7b}"
+EXPECT_BACKEND_TARGET="${EXPECT_BACKEND_TARGET:-}"   # default: the branch head on origin
+CODE_FROZEN_AT="${CODE_FROZEN_AT:-ffe6a4c}"           # last commit that changed application code
 EXPECT_MIGRATIONS="${EXPECT_MIGRATIONS:-234}"
 LIVE_DB="${LIVE_DB:-dnds_prod}"
 BRANCH="claude/dnds-payroll-integration-proposal-3p6hen"
@@ -139,11 +140,13 @@ fi
 section "6. deploy targets"
 RH="$(git -C "$WT" rev-parse --short HEAD)"; RB="$(git -C "$WT" branch --show-current)"
 check "this checkout ($WT) is on $BRANCH (is: $RB)" [ "$RB" = "$BRANCH" ]
-check "this checkout is at $EXPECT_BACKEND_TARGET (is: $RH)" [ "$RH" = "$EXPECT_BACKEND_TARGET" ]
-check "this checkout has no modified tracked files" [ -z "$(git -C "$WT" status --porcelain -uno)" ]
 REMOTE_FEAT="$(git -C "$WT" ls-remote origin "refs/heads/$BRANCH" 2>/dev/null | cut -c1-7)"
 REMOTE_MAIN="$(git -C "$WT" ls-remote origin refs/heads/main-autodeploy 2>/dev/null | cut -c1-7)"
-check "origin/$BRANCH is $EXPECT_BACKEND_TARGET (is: ${REMOTE_FEAT:-unreachable})" [ "$REMOTE_FEAT" = "$EXPECT_BACKEND_TARGET" ]
+TARGET="${EXPECT_BACKEND_TARGET:-$REMOTE_FEAT}"
+check "this checkout is at the backend deploy target ${TARGET:-?} (is: $RH)" [ "$RH" = "${TARGET:-none}" ]
+check "origin/$BRANCH is the same commit (is: ${REMOTE_FEAT:-unreachable})" [ "$REMOTE_FEAT" = "$RH" ]
+check "this checkout has no modified tracked files" [ -z "$(git -C "$WT" status --porcelain -uno)" ]
+check "application code unchanged since $CODE_FROZEN_AT (only docs/ and scripts/ differ)" git -C "$WT" diff --quiet "$CODE_FROZEN_AT" HEAD -- . ':(exclude)docs' ':(exclude)scripts'
 check "origin/main-autodeploy is still $EXPECT_PROD_HEAD (is: ${REMOTE_MAIN:-unreachable})" [ "$REMOTE_MAIN" = "$EXPECT_PROD_HEAD" ]
 info "frontend target 59f7ded on the same branch name is verified from the repository, not from this host"
 
