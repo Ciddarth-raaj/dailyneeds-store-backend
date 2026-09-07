@@ -34,13 +34,39 @@ process.env.JWT_ACTIVE_KID = "legacy";
 process.env.JWT_LEGACY_KID = "legacy";
 process.env.JWT_TOKEN_CUTOFF = "0";
 
+/**
+ * The commit the OLD backend is read from.
+ *
+ * This used to be `origin/main-autodeploy`, which was correct only while
+ * Stage 0A was unreleased. Deployment A merged Stage 0A into that branch on
+ * 07-09-2026, so the ref started yielding the NEW code: the fixture below
+ * then built a "old" usecase that calls findByUsername, the stub repository
+ * here does not have it, the before hook threw and all five subtests were
+ * cancelled rather than failed.
+ *
+ * `9d92884` is the last pre-Stage-0A production commit - the code that
+ * issued the tokens still in employees' browsers - so it is pinned, not
+ * tracked. It must never follow a branch again.
+ */
+const OLD_BACKEND_COMMIT = "9d92884";
+
 let oldAvailable = true;
 let oldReason = "";
 try {
   for (const f of ["services/jwt.js", "usecase/user.js", "utils/ip.js", "utils/logger.js"]) {
-    const src = execFileSync("git", ["show", `origin/main-autodeploy:${f}`], { cwd: root, encoding: "utf8" });
+    const src = execFileSync("git", ["show", `${OLD_BACKEND_COMMIT}:${f}`], { cwd: root, encoding: "utf8" });
     fs.mkdirSync(path.dirname(path.join(tmp, f)), { recursive: true });
     fs.writeFileSync(path.join(tmp, f), src);
+  }
+  // Guard against the same drift returning by another route: the old usecase
+  // must be the pre-Stage-0A shape (repo.login(...)), never the new one
+  // (repo.findByUsername(...)). A mismatch is a broken fixture, not a
+  // finding about the code under test, so say so loudly.
+  const oldUser = fs.readFileSync(path.join(tmp, "usecase/user.js"), "utf8");
+  if (oldUser.includes("findByUsername")) {
+    throw new Error(
+      `${OLD_BACKEND_COMMIT} is not a pre-Stage-0A commit: usecase/user.js already calls findByUsername`
+    );
   }
   // the old jwt.js has a hardcoded global-logout cutoff; neutralise it for a fresh keypair
   const j = path.join(tmp, "services/jwt.js");
