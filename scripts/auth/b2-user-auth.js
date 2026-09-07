@@ -19,14 +19,27 @@
  *   b2-user-auth.js restore --db <scratch> --in  <file.json>
  *   b2-user-auth.js verify  --db <scratch> --in  <file.json>
  *
- * Credentials come from a MySQL defaults file (default ~/.stage0a/app.cnf).
+ * Options: --config <config.json> (default: the checkout's own), --env <block>.
+ *
+ * Credentials come from the APPLICATION's own config.json - the same file,
+ * the same block (`db.mysql[NODE_ENV || "development"]`) and the same driver
+ * the server itself connects with. An earlier version parsed the MySQL
+ * defaults file by hand and got `ER_ACCESS_DENIED_ERROR` on the real host,
+ * because option-file syntax is not `key=value`: values may be quoted, may
+ * contain `#`, and escapes are interpreted. Reusing the config the app is
+ * already proven to connect with removes that whole class of bug; a JSON
+ * string needs no parsing rules of its own.
+ *
+ * The DATABASE from that config is deliberately ignored and replaced with
+ * the scratch schema given on the command line, which must look like a
+ * scratch copy - so pointing this at dnds_prod is impossible even though the
+ * credentials it uses are the ones that could reach it.
+ *
  * No column value is ever printed: output is column NAMES, row counts and
- * PASS/FAIL only. The scratch-schema guard from the rehearsal applies here
- * too - the database name must look like a scratch copy.
+ * PASS/FAIL only.
  */
 const fs = require("fs");
 const path = require("path");
-const os = require("os");
 
 /** The columns a login or a staging password can change. */
 const AUTH_COLUMNS = [
@@ -54,31 +67,43 @@ const arg = (name, fallback) => {
   return undefined;
 };
 
-/** Parse a MySQL defaults file. Values are used, never logged. */
-function readDefaults(file) {
-  let text;
+/**
+ * The application's own database credentials, from its config.json.
+ * `global.env` follows server.js exactly: NODE_ENV unset means "development",
+ * which on the production host IS the live block. Values are used, never
+ * logged - not even the user name.
+ */
+function readAppConfig(file, envName) {
+  let config;
   try {
-    text = fs.readFileSync(file, "utf8");
+    config = JSON.parse(fs.readFileSync(file, "utf8"));
   } catch (err) {
-    die(`cannot read defaults file ${file}`);
+    die(`cannot read the application config ${file}: ${err.message}`);
   }
-  const cfg = {};
-  for (const line of text.split("\n")) {
-    const m = line.match(/^\s*([a-z_-]+)\s*=\s*(.*)\s*$/i);
-    if (m) cfg[m[1].toLowerCase()] = m[2];
-  }
-  if (!cfg.user) die(`no user= in ${file}`);
-  return cfg;
+  const env = envName || (process.env.NODE_ENV === undefined ? "development" : process.env.NODE_ENV);
+  const block = config && config.db && config.db.mysql && config.db.mysql[env];
+  if (!block) die(`${file} has no db.mysql.${env} block`);
+  if (!block.username) die(`db.mysql.${env} in ${file} has no username`);
+  return {
+    host: block.host,
+    port: Number(block.port || 3306),
+    user: block.username,
+    password: block.password === undefined || block.password === null ? "" : String(block.password),
+    env: env,
+  };
 }
 
 function connect(db) {
-  const defaults = readDefaults(arg("defaults", path.join(os.homedir(), ".stage0a", "app.cnf")));
+  const cfg = readAppConfig(arg("config", path.join(__dirname, "../../config.json")), arg("env"));
   const mysql = require(path.join(__dirname, "../../node_modules/mysql"));
   return mysql.createConnection({
-    host: defaults.host || "127.0.0.1",
-    port: Number(defaults.port || 3306),
-    user: defaults.user,
-    password: defaults.password || "",
+    host: cfg.host,
+    port: cfg.port,
+    user: cfg.user,
+    password: cfg.password,
+    // The scratch schema from the command line ALWAYS wins over the database
+    // named in the config, which is how these production credentials are kept
+    // pointed at a copy.
     database: db,
     // Read datetimes as the strings MySQL printed, so the value written back
     // is byte-identical rather than a re-formatted Date.
@@ -113,7 +138,7 @@ async function presentColumns(db) {
 async function main() {
   const command = process.argv[2];
   const dbName = arg("db");
-  if (!command || !dbName) die("usage: b2-user-auth.js capture|restore|verify --db <scratch> [--users 1,2] [--out|--in file]");
+  if (!command || !dbName) die("usage: b2-user-auth.js capture|restore|verify --db <scratch> [--users 1,2] [--out|--in file] [--config config.json] [--env block]");
   requireScratch(dbName);
 
   const conn = connect(dbName);

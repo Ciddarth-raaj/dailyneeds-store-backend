@@ -150,11 +150,11 @@ restore_all() {
     echo "   config.json restored -> $(node -e 'console.log(require(process.argv[1]).db.mysql.development.database)' "$WT/config.json")"
   fi
   if [ -s "${AUTH_SNAPSHOT:-}" ]; then
-    if node "$WT/scripts/auth/b2-user-auth.js" restore --db "$SCRATCH" --in "$AUTH_SNAPSHOT" --defaults "$DEFAULTS"; then
+    if node "$WT/scripts/auth/b2-user-auth.js" restore --db "$SCRATCH" --in "$AUTH_SNAPSHOT" --config "$WT/config.json"; then
       echo "   user auth columns restored and verified"
     else
       echo "   USER AUTH RESTORE FAILED - recover with:"
-      echo "     node $WT/scripts/auth/b2-user-auth.js restore --db $SCRATCH --in $AUTH_SNAPSHOT"
+      echo "     node $WT/scripts/auth/b2-user-auth.js restore --db $SCRATCH --in $AUTH_SNAPSHOT --config $WT/config.json"
       RESTORE_RC=1
     fi
   fi
@@ -256,7 +256,7 @@ Q "SELECT $AUTH_COLS FROM \`user\` WHERE user_id IN ($TOUCHED_IDS) ORDER BY user
 # BEFORE any password is touched, and aborting here if it does not work, is
 # what makes that impossible.
 AUTH_SNAPSHOT="$SNAP/user-auth-before.json"
-node "$WT/scripts/auth/b2-user-auth.js" capture --db "$SCRATCH" --users "$TOUCHED_IDS" --out "$AUTH_SNAPSHOT" --defaults "$DEFAULTS" \
+node "$WT/scripts/auth/b2-user-auth.js" capture --db "$SCRATCH" --users "$TOUCHED_IDS" --out "$AUTH_SNAPSHOT" --config "$WT/config.json" \
   || fail "could not capture the users' auth columns - NO password has been changed"
 [ -s "$AUTH_SNAPSHOT" ] || fail "auth snapshot is empty - NO password has been changed"
 echo "   auth snapshot taken for user_id in ($TOUCHED_IDS)"
