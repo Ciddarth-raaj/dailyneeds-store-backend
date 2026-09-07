@@ -113,12 +113,21 @@ Status carried over from the readiness report, then corrected for §0. Every row
 | Class | Gates |
 |---|---|
 | **PASS** | 1, 2, 3, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17A, 18A, 19A, 20, 21, 22, 23, 24 |
-| **PARTIAL / accepted exception** | **6** — old `@dailyneeds_test_bot` token cannot be revoked by us (BotFather account not ours); production already runs on `@DailyNeedsBot`, the compiled fallback is removed on the branch (fail closed). **4** — trigger, target, sequence, failure semantics, env resolution, pending set, host facts and GitHub-hosted runners all evidenced; stale `deploy.yml` on `master` accepted (inert for pushes); **Settings → Webhooks NOT VERIFIED** on either repository: the administrator's account has no repository-admin access and the API path is refused (403) for the tool access used here. Accepted as an *admin-access exception*, not converted to PASS. |
+| **PARTIAL / accepted exception** | **6** — old `@dailyneeds_test_bot` token cannot be revoked by us (BotFather account not ours); production already runs on `@DailyNeedsBot`, the compiled fallback is removed on the branch (fail closed). **4** — trigger, target, sequence, failure semantics, env resolution, pending set, host facts and GitHub-hosted runners all evidenced; stale `deploy.yml` on `master` accepted (inert for pushes); **Settings → Webhooks NOT VERIFIED** on either repository: the administrator's account has no repository-admin access and the API path is refused (403) for the tool access used here. Residual risk: an unknown external automation may receive repository events and could potentially act on them; repository-admin confirmation remains pending. Accepted as an *admin-access exception*, not converted to PASS. |
 | **NOT VERIFIED / blocker** | none |
 
 Backend commit to deploy from: `7a77b52` (code last changed at `ffe6a4c`; `7a77b52` is docs only). Frontend commit: `59f7ded`. Both on `claude/dnds-payroll-integration-proposal-3p6hen`. `origin/main-autodeploy` unchanged at `9d92884` (backend).
 
-Residual risk of the Webhooks exception, in plain words: a repository webhook can only *notify* an outside system when something happens in the repository; it cannot run the deploy, change the workflow file, or change where the workflow runs — all of which are proven from the repository and the Actions API. The one thing an unknown webhook could do is tell some outside system about a push (including the deployment push). The owner confirms the page is empty when available; if a webhook is found it is reviewed then, and nothing about Deployment A itself changes.
+Residual risk of the Webhooks exception, stated accurately: **an unknown
+external automation may receive repository events and could potentially
+act on them; repository-admin confirmation remains pending.** A webhook
+itself only delivers events, but the system receiving them could be
+configured to deploy or run automation of its own. What is independently
+verified: the workflow trigger, the GitHub-hosted runner, the SSH target
+and the full deployment path. What is not: whether any webhook exists.
+There is no evidence that one does. The owner confirms Settings → Webhooks
+on both repositories when available; until then the item stays
+unverified and is not marked PASS.
 
 ## 3. Execution sequence
 
@@ -137,19 +146,21 @@ bot is retired; retire or re-point `PURCHASE_TELEGRAM_CHAT_ID` (purchase
 notifications now fail by decision). Deployment A removes the compiled
 literal from the running code.
 
-**Step 2 — Backup and restore rehearsal.** Gate 5. **← NEXT — ready to run.**
+**Step 2 — Backup and restore rehearsal.** Gate 5. **PASS 06-09-2026; re-run the day before deployment.**
 One command from `~/stage0a-rehearsal` (readiness **§5.4**):
-`STAGE0A_ADMIN_DEFAULTS=~/.stage0a/admin.cnf scripts/auth/gate5-rehearsal.sh`,
-after `node scripts/auth/db-defaults-file.js admin --host <rds> --user <master>`
-has written the admin identity (hidden prompt). The orchestrator runs
+`scripts/auth/gate5-rehearsal.sh`
+with **no** `STAGE0A_ADMIN_DEFAULTS`. The credential file this host has
+actually proven is `~/.stage0a/app.cnf` (the application identity): the
+06-09-2026 PASS created `dnds_rehearsal`, took both dumps (dump identity =
+app defaults, routines readable) and restored with it alone. No
+`~/.stage0a/admin.cnf` was created and none is needed; the script only
+asks for one if the app user turns out to lack global `CREATE`, and then
+stops with a clear `FAIL:` before touching anything. The orchestrator runs
 defaults → backup (auth + full, verified, manifest) → checksum check →
 isolated restore into `dnds_rehearsal` with 0-mismatch count comparison →
 Stage 0A up / idempotent up / down×4 / up, and stops on the first `FAIL:`.
-Tested end to end against a real MySQL 8 server with RDS-like restrictions
-(no `CREATE DATABASE`, binlog on without `log_bin_trust_function_creators`,
-routines/triggers/events present): pass; zero writes to the source schema
-in the binlog; no credential in any artefact. Expected output and the
-three RDS-specific messages: readiness **§5.5**. PASS criteria: **§5.7**.
+Expected output and the three RDS-specific messages: readiness **§5.5**.
+PASS criteria: **§5.7**.
 Record: the `gate5-<stamp>.log` and manifest paths, the restore seconds.
 
 **Step 3 — Scans on the restored copy only.** Gates 13, 14.
