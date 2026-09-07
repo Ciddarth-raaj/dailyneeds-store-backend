@@ -9,32 +9,6 @@ const unProtectedRoutes = {
     methods: { get: true },
   },
 
-  //department
-  "/department": {
-    methods: { get: true },
-  },
-  "/department/create": {
-    methods: { post: true },
-  },
-  "/department/department_id": {
-    methods: { get: true },
-  },
-  "/department/update-department": {
-    methods: { post: true },
-  },
-  "/department/update-status": {
-    methods: { post: true },
-  },
-  "/department/imageupload": {
-    methods: { post: true },
-  },
-  "/department/product-department": {
-    methods: { get: true },
-  },
-  "/department/update-prodstatus": {
-    methods: { post: true },
-  },
-
   //indents
   "/indent": {
     methods: { get: true },
@@ -91,118 +65,9 @@ const unProtectedRoutes = {
     methods: { post: true },
   },
 
-  //designation
-  "/designation": {
-    methods: { get: true },
-  },
-  "/designation/create": {
-    methods: { post: true },
-  },
-  "/designation/update-designation": {
-    methods: { post: true },
-  },
-  "/designation/designation_id": {
-    methods: { get: true },
-  },
-  "/designation/update-status": {
-    methods: { post: true },
-  },
-  "/designation/count": {
-    methods: { get: true },
-  },
-  "/designation/budget": {
-    methods: { get: true },
-  },
   // "/designation/permissions": {
   //   methods: { get: true }
   // },
-
-  //employee
-  "/employee": {
-    methods: { post: true },
-  },
-  "/employee/employees": {
-    methods: { get: true },
-  },
-  "/employee/updatedata": {
-    methods: { post: true },
-  },
-  "/employee/employee_id": {
-    methods: { get: true },
-  },
-  "/employee/resignedemp": {
-    methods: { get: true },
-  },
-  "/employee/newjoiner": {
-    methods: { get: true },
-  },
-  "/employee/headcount": {
-    methods: { get: true },
-  },
-  "/employee/birthday": {
-    methods: { get: true },
-  },
-  "/employee/anniversary": {
-    methods: { get: true },
-  },
-  "/employee/bank": {
-    methods: { get: true },
-  },
-  "/employee/familydet": {
-    methods: { get: true },
-  },
-  "/employee/update-status": {
-    methods: { post: true },
-  },
-  "/employee/store_id": {
-    methods: { get: true },
-  },
-  "/employee/newjoinee": {
-    methods: { get: true },
-  },
-  "/employee/filter": {
-    methods: { get: true },
-  },
-
-  //salary
-  "/salary": {
-    methods: { get: true },
-  },
-  "/salary/create": {
-    methods: { post: true },
-  },
-  "/salary/update-payment": {
-    methods: { post: true },
-  },
-  "/salary/update-status": {
-    methods: { post: true },
-  },
-  "/salary/payment_id": {
-    methods: { get: true },
-  },
-  "/salary/update-paidstatus": {
-    methods: { post: true },
-  },
-
-  //resignation
-  "/resignation": {
-    methods: { get: true },
-  },
-  "/resignation/create": {
-    methods: { post: true },
-  },
-  "/resignation/employee_name": {
-    methods: { get: true },
-  },
-  "/resignation/update-resignation": {
-    methods: { post: true },
-  },
-  "/resignation/resignation_id": {
-    methods: { post: true },
-  },
-  "/resignation/get/resignation_id": {
-    methods: { get: true },
-  },
 
   //product
   "/product": {
@@ -224,23 +89,6 @@ const unProtectedRoutes = {
     methods: { get: true },
   },
 
-  //shift
-  "/shift": {
-    methods: { get: true },
-  },
-  "/shift/shift_id": {
-    methods: { get: true },
-  },
-  "/shift/update-shift": {
-    methods: { post: true },
-  },
-  "/shift/create": {
-    methods: { post: true },
-  },
-  "/shift/update-status": {
-    methods: { post: true },
-  },
-
   //image
   "/image/product_id": {
     methods: { get: true },
@@ -260,29 +108,6 @@ const unProtectedRoutes = {
   //assets
   "/asset": {
     methods: { post: true },
-  },
-
-  //document
-  "/document/employee_id": {
-    methods: { get: true },
-  },
-  "/document/adhaar": {
-    methods: { get: true },
-  },
-  "/document/update-status": {
-    methods: { post: true },
-  },
-  "/document/all": {
-    methods: { get: true },
-  },
-  "/document/document_id": {
-    methods: { get: true },
-  },
-  "/document/update-document": {
-    methods: { post: true },
-  },
-  "/document/withoutadhaar": {
-    methods: { get: true },
   },
 
   //store
@@ -348,26 +173,6 @@ const unProtectedRoutes = {
     methods: { get: true },
   },
 
-  //outlet
-  "/outlet": {
-    methods: { get: true },
-  },
-  "/outlet/update-outlet": {
-    methods: { post: true },
-  },
-  "/outlet/create": {
-    methods: { post: true },
-  },
-  "/outlet/update-status": {
-    methods: { post: true },
-  },
-  "/outlet/outlet_id": {
-    methods: { get: true },
-  },
-  "/outlet/id": {
-    methods: { get: true },
-  },
-
   //brand
   "/brand": {
     methods: { get: true },
@@ -427,23 +232,6 @@ const unProtectedRoutes = {
     methods: { get: true },
   },
 
-  //family
-  "/family": {
-    methods: { get: true },
-  },
-  "/family/create": {
-    methods: { post: true },
-  },
-  "/family/family_id": {
-    methods: { get: true },
-  },
-  "/family/update-family": {
-    methods: { post: true },
-  },
-  "/family/employee_name": {
-    methods: { get: true },
-  },
-
   //user
   "/user/login": { methods: { post: true } },
   // Stage 0A: redeeming a setup/reset token happens before any session exists.
@@ -463,7 +251,15 @@ const unProtectedRoutes = {
   // "/debit-note-tally": { methods: { post: true } },
   "/gofrugal-synker/sync": { methods: { post: true } },
   "/gofrugal-synker/table": { methods: { delete: true } },
+  // Stage 0B / B1 (07-09-2026): every HR endpoint - employee, designation,
+  // department, shift, outlet, resignation, family, document and salary -
+  // was removed from this map. They now require a valid session like any
+  // other route. Authorisation (permission keys) is deliberately NOT part of
+  // B1: any authenticated user still reaches them, exactly as before, so an
+  // authentication regression cannot be confused with an authorisation one.
+  // Permission checks land in B2; sensitive-field filtering in B3.
 };
+
 
 /**
  * Routes a token carrying `pwc` (must change password) may still reach.
