@@ -209,6 +209,29 @@ class UserRepository {
     );
   }
 
+  /**
+   * C1c: revoke every token issued so far for the login attached to an
+   * employee, addressed by `employee_id` because that is what the lifecycle
+   * reconciler knows.
+   *
+   * This exists for the rejoin case. When an employee's `status` returns to
+   * 1, the only thing that had been refusing their pre-resignation token was
+   * the employee-active check in the auth middleware; without this bump that
+   * old token would start working again. It is the same `token_valid_from`
+   * mechanism C4/C5 already use - no second session system.
+   *
+   * The system guard is present as everywhere else: the break-glass account
+   * is never attached to an employee and must never be locked out by a sync.
+   */
+  bumpTokenValidFromByEmployeeId(employeeId) {
+    return this._query(
+      "BUMP-TOKEN-VALID-FROM-BY-EMPLOYEE",
+      `UPDATE \`user\` SET \`token_valid_from\` = NOW() WHERE \`employee_id\` = ? ${SYSTEM_GUARD}`,
+      [employeeId],
+      { employeeId }
+    );
+  }
+
   /** The columns the per-request session check needs. */
   getSessionState(userId) {
     return this._query(

@@ -161,6 +161,10 @@ class Server {
       this.mysql.connection
     );
     this.employeeRepo = require("./repository/employee")(this.mysql.connection);
+    // Stage 0C / C1c: employment periods and lifecycle events.
+    this.employeeLifecycleRepo = require("./repository/employee_lifecycle")(
+      this.mysql.connection
+    );
     this.shiftRepo = require("./repository/shift")(this.mysql.connection);
     this.storeRepo = require("./repository/store")(this.mysql.connection);
     this.outletRepo = require("./repository/outlet")(this.mysql.connection);
@@ -385,6 +389,12 @@ class Server {
       this.documentUsecase,
       this.userRepo,
       this.resignationRepo
+    );
+    // Stage 0C / C1c. userRepo is here only so a rejoin can revoke old
+    // sessions through the existing Stage 0A token_valid_from mechanism.
+    this.employeeLifecycleUsecase = require("./usecase/employee_lifecycle")(
+      this.employeeLifecycleRepo,
+      this.userRepo
     );
     this.shiftUsecase = require("./usecase/shift")(this.shiftRepo);
     this.storeUsecase = require("./usecase/store")(this.storeRepo);
@@ -1169,6 +1179,13 @@ class Server {
     // Wire synker back into employeesUsecase after service creation
     if (this.employeeUsecase && this.employeeUsecase.setSynker) {
       this.employeeUsecase.setSynker(this.synker);
+    }
+
+    // Stage 0C / C1c: the lifecycle reconciler runs after every Digisme
+    // employee sync - the 07:00 cron and POST /employee/sync alike, since
+    // both reach syncDigismeEmployees.
+    if (this.synker && this.synker.setEmployeeLifecycleUsecase) {
+      this.synker.setEmployeeLifecycleUsecase(this.employeeLifecycleUsecase);
     }
   }
 
