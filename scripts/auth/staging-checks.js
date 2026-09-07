@@ -168,7 +168,8 @@ async function gate19() {
   const sendErr = log.match(/SERVICE\.TELEGRAM\.SEND-MESSAGE[^\n]*/);
   if (missing) { console.log("  INFO  instance ran WITHOUT a bot token — alert path exercised up to the transport only (SKIP_TELEGRAM or no token in the deploy .env)"); return; }
   ok("no Telegram send error logged after the break-glass login (the alert was delivered by the bot)", !sendErr, sendErr ? sendErr[0].slice(0, 160) : "");
-  console.log("  CONFIRM in Telegram: a '🚨 BREAK-GLASS LOGIN' message for account '" + BG.username + "' from @DailyNeedsBot in the alerts chat (with sound).");
+  ok("no Telegram parse-mode rejection logged (plain-text alert, gate 19A regression)", !/can't parse entities/.test(log));
+  console.log("  CONFIRM in Telegram: a plain-text '🚨 BREAK-GLASS LOGIN' message for account '" + BG.username + "' (user_id " + BG.user_id + ") from @DailyNeedsBot in the alerts chat (with sound).");
 }
 
 async function enforceOnly() {

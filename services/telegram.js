@@ -49,6 +49,17 @@ class Telegram {
     return Boolean(client);
   }
 
+  /**
+   * Send a text message.
+   *
+   * `options.parseMode` defaults to "Markdown" (every existing caller relies
+   * on that). Pass `parseMode: null` to send PLAIN TEXT with no parse mode at
+   * all — required for any message that interpolates user-controlled or
+   * database text (usernames, IPs, ...), because Telegram's legacy Markdown
+   * rejects the whole message when such text contains an unbalanced `_`, `*`
+   * or backtick ("Bad Request: can't parse entities: Can't find end of the
+   * entity ..."). Security alerts use the plain path: see usecase/user.js.
+   */
   async sendMessage(chat_id_param, msg, options = {}) {
     let chat_id = chat_id_param;
 
@@ -56,14 +67,17 @@ class Telegram {
       chat_id = TEST_TELEGRAM_CHAT_ID;
     }
 
+    const { parseMode = "Markdown", ...rest } = options || {};
+    const params = {
+      disableWebPagePreview: true,
+      disableNotification: true,
+      ...rest,
+    };
+    if (parseMode) params.parseMode = parseMode;
+
     return new Promise(async (resolve, reject) => {
       try {
-        await requireClient().sendMessage(chat_id, msg, {
-          disableWebPagePreview: true,
-          disableNotification: true,
-          ...options,
-          parseMode: "Markdown",
-        });
+        await requireClient().sendMessage(chat_id, msg, params);
         resolve({ code: 200 });
       } catch (err) {
         // `msg` is deliberately NOT logged: it may carry a reset code or an

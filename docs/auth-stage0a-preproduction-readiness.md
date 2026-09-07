@@ -1232,7 +1232,7 @@ outlet user already on the provisioning default, one admin with a
 generated staging password, one inactive-employee login, and the
 break-glass account `stage0a_breakglass` (via `break-glass.js` with a
 600 password file — a staging-only option; production stays
-interactive). Then `staging-checks.js` runs 41 checks over HTTP and the
+interactive). Then `staging-checks.js` runs 42 checks over HTTP and the
 database, a second instance with `AUTH_ENFORCE_PASSWORD_CHANGE=true`
 covers confinement, and everything is torn down (instances identified by
 exact process identity: `node`, argv `server.js`, cwd = this checkout —
@@ -1240,7 +1240,7 @@ the production process can never match). No credential or token is
 printed; reports are 600.
 
 Verified locally against a MySQL 8 copy shaped like production
-(41/41). What it proves, per gate:
+(42/42 after the gate 19A fix; 41/41 before). What it proves, per gate:
 
 | Gate | Checks |
 | --- | --- |
@@ -1248,7 +1248,55 @@ Verified locally against a MySQL 8 copy shaped like production
 | 10 | legacy token `{id, employee_id}` (no sub/kid/auth_ver, signed with the current key): accepted and resolves to the **same user_id**; mismatched `employee_id`: 403; inactive employee, legacy and v2: `EMPLOYEE_INACTIVE`; legacy token naming the break-glass id, with null or a borrowed employee_id: 403; fresh v2 token: `sub` = user_id, `id` agrees, `kid` header present |
 | 18A | row `employee_id NULL`, `is_system_account=1`, `password NULL`, scrypt hash; login 200 with `is_system_account:true`, token `sys=true`, no `employee_id` claim, audited; wrong password refused and audited; Telegram forgot-password neutral with **no code row**; Telegram reset refused; admin reset → `403 SYSTEM_ACCOUNT`; admin unlock 403; all three `/telegram-link` methods → `403 EMPLOYEE_REQUIRED`; row unchanged |
 | forced change (Deployment B posture) | login still 200; token `pwc=true`; ordinary route → `PASSWORD_CHANGE_REQUIRED`; allow-listed routes answer; change-password reachable and still policy-checked; an unflagged admin is not confined |
-| 19A | with the bot token taken from the deploy clone's `.env` (never printed) the break-glass login sends the real `🚨 BREAK-GLASS LOGIN` alert through `services/telegram` (the new bot); the check confirms no send error was logged and asks you to confirm receipt in Telegram |
+| 19A | with the bot token taken from the deploy clone's `.env` (never printed) the break-glass login sends the real `🚨 BREAK-GLASS LOGIN` alert through `services/telegram` (the new bot); the check confirms no send error and no parse-mode rejection was logged and asks you to confirm receipt in Telegram |
+
+**Lightsail result, 07-09-2026 (commit `da4445e`):** gates 9, 10, 17A,
+18A PASS and the forced-change checks 6/6. **Gate 19A failed**: the bot
+reached Telegram, but Telegram rejected the alert with
+`400 Bad Request: can't parse entities: Can't find end of the entity`.
+Cause: `services/telegram.js#sendMessage` forced `parseMode: "Markdown"`
+after the caller's options, so no caller could opt out, and the alert
+body interpolated database text into Markdown. Telegram's legacy Markdown
+treats a lone `_` as the start of an italic entity; the literal `user_id`
+in the template (outside any code span) and the username
+`stage0a_breakglass` both qualify, so the message would have failed for
+any break-glass name. The alert was silently lost — the login itself
+succeeded, which is the correct precedence, but the one alert the
+break-glass design depends on never arrived.
+
+**Fix (smallest safe change):**
+
+- `services/telegram.js`: `parseMode` now defaults to Markdown but an
+  explicit `parseMode: null` sends plain text with no parse mode at all.
+  No existing caller passes `parseMode`, so every other consumer
+  (purchase, stock checker, offers, tickets, password-reset codes) is
+  byte-for-byte unchanged.
+- `usecase/user.js`: both break-glass alerts (login, failed attempt) are
+  plain text, no formatting characters, `parseMode: null`; `username`,
+  `user_id` and IP go through `alertField()` (control characters and
+  newlines collapsed, 120 chars max) so a hostile username cannot forge
+  extra alert lines. Body carries no password, token or key.
+- `server.js`: the daily rotation-due alert is plain text the same way.
+- `services/telegram.security_alerts.test.js` (9 cases): drives the real
+  service with a fake client that applies Telegram's legacy-Markdown
+  entity rule; the pre-fix message for `stage0a_breakglass` fails with the
+  exact production error, the new alert goes out with no `parse_mode`
+  key, a username of `evil_*\`[x](y)<b>_\n...` still delivers on one
+  line, the failed-attempt alert is plain, and Markdown is still the
+  default for everyone else.
+- `staging-checks.js` gate 19A additionally asserts no
+  `can't parse entities` line in the instance log.
+
+Rerun on Lightsail (the harness re-proves 9/10/17A/18A in the same
+minute; nothing production-side changes):
+
+```bash
+cd ~/stage0a-rehearsal && git pull --ff-only origin claude/dnds-payroll-integration-proposal-3p6hen && MYSQL_BIN_DIR="$HOME/mysql84/bin" scripts/auth/staging-rehearsal.sh dnds_rehearsal
+```
+
+Gate 19A is PASS when the run ends `STAGING REHEARSAL: ALL CHECKS
+PASSED` (36 + 6) **and** one plain-text `🚨 BREAK-GLASS LOGIN` message
+naming `stage0a_breakglass` arrives from `@DailyNeedsBot` with sound.
 
 **Two defects found by the local run and fixed:** `password_flagged`
 was missing from the audit repository's event allow-list, so production
@@ -1266,10 +1314,10 @@ MYSQL_BIN_DIR="$HOME/mysql84/bin" scripts/auth/staging-rehearsal.sh dnds_rehears
 
 Optional: `ALERT_CHAT_ID=<chat id>` to direct the alert to a specific
 group the new bot is in; `SKIP_TELEGRAM=1` to run without the token.
-Expected: `STAGING REHEARSAL: ALL CHECKS PASSED` with `35 passed` and
+Expected: `STAGING REHEARSAL: ALL CHECKS PASSED` with `36 passed` and
 `6 passed`, `instances` stopped, `config.json restored`, and one
-`🚨 BREAK-GLASS LOGIN` message for `stage0a_breakglass` in the alerts
-chat. Send back the report (`~/db-backups/staging-<stamp>.txt`, no
+plain-text `🚨 BREAK-GLASS LOGIN` message for `stage0a_breakglass` in
+the alerts chat. Send back the report (`~/db-backups/staging-<stamp>.txt`, no
 secrets) and whether the alert arrived.
 
 #### Gate 23 — personal legacy-token decode (no token leaves your machine)

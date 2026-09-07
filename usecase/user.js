@@ -14,6 +14,17 @@ function weakCategory(reason) {
   if (/repeated/i.test(r)) return "repeated";
   return "policy";
 }
+/**
+ * A dynamic value for a plain-text security alert: one line, control
+ * characters (newlines included) collapsed, bounded length. With no parse
+ * mode there is no formatting to break; this only stops a hostile value from
+ * forging extra alert lines.
+ */
+function alertField(value) {
+  return String(value === undefined || value === null || value === "" ? "unknown" : value)
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .slice(0, 120);
+}
 const authConfig = require("../config/auth");
 const {
   isAccessAllowed,
@@ -102,12 +113,19 @@ class UserUsecase {
     }
   }
 
+  /**
+   * Security alert to the alerts chat. Sent as PLAIN TEXT (no parse mode):
+   * the body carries database/user-controlled fields (username, IP) and a
+   * Markdown parse failure would silently lose the alert — exactly what
+   * happened on staging with `stage0a_breakglass` / `user_id` (gate 19A).
+   * Never put a password, token or key in `message`.
+   */
   async alert(message) {
     if (!this.telegram) return;
     try {
       const chatId =
         this.config.breakGlass.alertChatId || require("../constants/telegram").ALERTS_TELEGRAM_CHAT_ID;
-      await this.telegram.sendMessage(chatId, message, { disableNotification: false });
+      await this.telegram.sendMessage(chatId, message, { disableNotification: false, parseMode: null });
     } catch (err) {
       // alert delivery must not affect the login outcome
     }
@@ -296,7 +314,7 @@ class UserUsecase {
     if (isSystem) {
       await this.audit("break_glass_login", { ...audited, detail: "rotate_credential_now" });
       await this.alert(
-        `🚨 *BREAK-GLASS LOGIN*\nAccount: \`${row.username}\` (user_id ${row.user_id})\nFrom: \`${ip || "unknown"}\`\nAt: ${this.now().toISOString()}\n\nThis credential must be rotated after use: see docs/auth-stage0a-implementation.md.`
+        `🚨 BREAK-GLASS LOGIN\nAccount: ${alertField(row.username)} (user_id ${alertField(row.user_id)})\nFrom: ${alertField(ip)}\nAt: ${this.now().toISOString()}\n\nThis credential must be rotated after use: see docs/auth-stage0a-implementation.md`
       );
     }
 
@@ -327,7 +345,7 @@ class UserUsecase {
     if (lockUntil) await this.audit("login_locked", { ...audited, detail: "threshold_reached" });
     if (isSystem) {
       await this.alert(
-        `⚠️ *Failed break-glass login attempt*\nAccount: \`${row.username}\`\nFrom: \`${audited.ip || "unknown"}\``
+        `⚠️ FAILED BREAK-GLASS LOGIN ATTEMPT\nAccount: ${alertField(row.username)}\nFrom: ${alertField(audited.ip)}`
       );
     }
   }

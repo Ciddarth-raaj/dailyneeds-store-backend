@@ -1126,10 +1126,13 @@ class Server {
             ? "used_since_last_rotation"
             : "interval_elapsed",
         });
+        // Plain text, no parse mode: the username is database text and must
+        // never be able to break the message (gate 19A).
+        const field = (v) => String(v ?? "unknown").replace(/[\u0000-\u001f\u007f]+/g, " ").slice(0, 120);
         await telegram.sendMessage(
           authConfig.breakGlass.alertChatId || ALERTS_TELEGRAM_CHAT_ID,
-          `🔐 *Break-glass credential rotation due*\nAccount: \`${row.username}\`\nLast rotated: ${row.credential_rotated_at || "never"}\nLast used: ${row.last_login_at || "never"}\n\nRotate with scripts/auth/break-glass.js rotate.`,
-          { disableNotification: false }
+          `🔐 BREAK-GLASS CREDENTIAL ROTATION DUE\nAccount: ${field(row.username)}\nLast rotated: ${field(row.credential_rotated_at || "never")}\nLast used: ${field(row.last_login_at || "never")}\n\nRotate with scripts/auth/break-glass.js rotate.`,
+          { disableNotification: false, parseMode: null }
         );
       }
     });
