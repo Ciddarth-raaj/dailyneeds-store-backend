@@ -5,14 +5,29 @@ const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
 
 class EmployeeRoutes {
-  constructor(employeeUsecase, permissions) {
+  constructor(employeeUsecase, permissions, sensitive) {
     this.permissions = permissions;
+    this.sensitive = sensitive;
     this.employeeUsecase = employeeUsecase;
 
     this.init();
   }
 
   init() {
+    // Stage 0B / B3. Every route below returns employee rows, and several of
+    // them do it with SELECT *, so the field-level guard is mounted once for
+    // the whole router rather than repeated per route - a route added later
+    // is covered by construction instead of by remembering.
+    //
+    //   filterResponse  strips salary, bank, PAN, Aadhaar, UAN, PF and ESI
+    //                   from the response unless the caller holds
+    //                   view_employee_sensitive
+    //   guardWrite      403s a body that mentions any of them unless the
+    //                   caller holds edit_employee_sensitive (a no-op on
+    //                   requests with no body, so GETs are unaffected)
+    router.use(this.sensitive.filterResponse);
+    router.use(this.sensitive.guardWrite);
+
     router.post("/", this.permissions.require(P.ADD_EMPLOYEES), async (req, res) => {
       try {
         const schema = {
@@ -526,6 +541,6 @@ class EmployeeRoutes {
   }
 }
 
-module.exports = (employeeUsecase, permissions) => {
-  return new EmployeeRoutes(employeeUsecase, permissions);
+module.exports = (employeeUsecase, permissions, sensitive) => {
+  return new EmployeeRoutes(employeeUsecase, permissions, sensitive);
 };

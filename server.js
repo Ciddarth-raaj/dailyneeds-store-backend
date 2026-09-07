@@ -655,6 +655,10 @@ class Server {
       this.designationUsecase
     );
 
+    // Stage 0B / B3: field-level protection for sensitive employee data,
+    // built on the same permission lookup so the admin bypass is shared.
+    this.sensitive = require("./middlewares/sensitive")(this.permissions);
+
     // Runs after auth so it can see the decoded user: an account with an IP
     // allow-list is cut off the moment it is used outside that network, not
     // just at login.
@@ -665,7 +669,8 @@ class Server {
 
     const documentRouter = require("./routes/document")(
       this.documentUsecase,
-      this.permissions
+      this.permissions,
+      this.sensitive
     );
     const whatsappRouter = require("./routes/whatsapp")(this.whatsappUsecase);
     const budgetRouter = require("./routes/budget")(this.budgetUsecase);
@@ -688,7 +693,8 @@ class Server {
     );
     const employeeRouter = require("./routes/employee")(
       this.employeeUsecase,
-      this.permissions
+      this.permissions,
+      this.sensitive
     );
     const shiftRouter = require("./routes/shift")(this.shiftUsecase, this.permissions);
     const storeRouter = require("./routes/store")(this.storeUsecase);
