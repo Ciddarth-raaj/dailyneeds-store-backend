@@ -1166,6 +1166,125 @@ real IP under a forged header, and (after Deployment A) `trust proxy` is
 loopback. Gate 4 is PASS when 4/A–4/E match the table and you have
 confirmed the GitHub webhook/runner pages.
 
+### 5.12 Remaining pre-deployment gates — what was done (06/07-09-2026)
+
+**Gate 12 recorded PASS** (external check: `http://api.dnds.co.in/` → 301 to https; 8080 unreachable from the internet).
+
+#### Gate 4 — what remains manual, and what the API already proved
+
+| Item | Evidence | Status |
+| --- | --- | --- |
+| Deployment trigger | `deploy-backend.yml`: push to `main-autodeploy` + manual dispatch (repo, identical on both branches). Run #101 for `9d92884` executed the four expected steps and succeeded. | **PASS** (repository + Actions API) |
+| Runners | Every run of the deploy workflow executed on `runner_group_name: GitHub Actions`, labels `ubuntu-latest` (job 101441751149 inspected); all four workflow files in both repos declare `runs-on: ubuntu-latest`. A self-hosted runner, if any is registered, is therefore never used by a deploy. | **PASS** (Actions API) |
+| A third backend workflow | The repo's **default branch `master`** carries an older `.github/workflows/deploy.yml` ("Deploy", also `push: branches: [main-autodeploy]`). It is inert for pushes to `main-autodeploy` because GitHub runs the workflow file from the pushed commit, which no longer contains it (its last run was #3 in August; every deploy since is "Deploy Backend" only). It can still be started **manually** from `master` and would run the older deploy script. | **accepted exception** — recommend deleting it from `master` (or disabling it under Actions → Deploy) at any convenient time; not a Deployment A blocker |
+| Repository webhooks | Not readable through the API scope available here. | **needs you**: Settings → Webhooks on both repositories — expected empty (only the GitHub Actions app). One screenshot or "empty" is the evidence. |
+| Host side | `gate4-12-host-check.sh` run by you: deploy clone, toolchain, `database.json` env resolution, pending set, PM2 process 0 | **complete** (your report) |
+
+#### Gates 15 and 16 — feature flags
+
+`config/auth.flags.test.js` loads `config/auth.js` in a child process per
+scenario: every flag has its documented default with an empty
+environment; the Deployment A posture is exactly {`allowQueryString`
+on, `rejectLegacy` off, `enforcePasswordChange` off, lockout off,
+`tokenValidFrom` off, `requireKid` off, `requireHttps` off,
+`flagWeakOnLogin` on, `employeeStatusCheck` on}; the parser accepts only
+the literal strings `true` / `1` as true and treats any other non-empty
+value as false (so a typo can only ever turn a flag off — record flags
+as the literal `true`/`false`); integers fall back on garbage; values are
+read once at load and later environment changes do nothing; a malformed
+`JWT_PUBLIC_KEYS` fails startup loudly. `usecase/user.flags.test.js`
+then logs a legacy SHA-1 employee on the provisioning default in under
+**all 128 combinations** of the seven Deployment-A-legal boolean flags
+and proves the only flag that refuses such a login is
+`AUTH_REJECT_LEGACY_SHA1` (Deployment B, off), that lockout bites only
+after real failures, and that the system account logs in under every
+combination. 150 cases, all pass. **Gates 15 and 16: PASS.**
+
+#### Gate 17A — external JWT key (staging)
+
+`scripts/auth/jwt-keys-setup.sh` copies (never moves or rotates) the
+current pair from the deploy clone to `~/.stage0a/jwt/` (700/600),
+writes `~/.stage0a/jwt.env` (`JWT_PRIVATE_KEY_PATH`, `JWT_PUBLIC_KEYS`,
+`JWT_ACTIVE_KID=legacy`), prints only the public key's fingerprint, and
+proves: external private → tracked public verifies; tracked private
+(legacy-shaped token, no kid) → external public verifies; optionally a
+real `PROBE_TOKEN` of your own session verifies with the external public
+key (proving production signs with this key — the token is never
+printed). The staging instance below runs entirely on the external key
+(no "tracked key fallback" warning). Locally verified; on Lightsail it
+runs as step 1 of the staging harness. **Gate 17A: PASS in staging once
+the harness has run on Lightsail.** Production still uses the tracked
+file until Deployment A's environment carries `jwt.env` — no key is
+replaced.
+
+#### Gates 9, 10, 18A, 19A — the staging harness
+
+`scripts/auth/staging-rehearsal.sh` (one command) starts the Stage 0A
+application **from the rehearsal checkout** on `127.0.0.1:18080` with
+`CRON_DISABLED=true` (no Digisme sync, no Telegram poller, no GST or
+purchase jobs — every registered job is listed but none scheduled; a
+new, production-inert switch in `services/cron_service.js`), the
+external key, Deployment A flags, and a `config.json` that is the
+production copy with only the main database name replaced by
+`dnds_rehearsal` (the original is kept as `config.prod.json` and restored
+on exit, also on a crash). It prepares, on the scratch schema only, one
+outlet user already on the provisioning default, one admin with a
+generated staging password, one inactive-employee login, and the
+break-glass account `stage0a_breakglass` (via `break-glass.js` with a
+600 password file — a staging-only option; production stays
+interactive). Then `staging-checks.js` runs 41 checks over HTTP and the
+database, a second instance with `AUTH_ENFORCE_PASSWORD_CHANGE=true`
+covers confinement, and everything is torn down (instances identified by
+exact process identity: `node`, argv `server.js`, cwd = this checkout —
+the production process can never match). No credential or token is
+printed; reports are 600.
+
+Verified locally against a MySQL 8 copy shaped like production
+(41/41). What it proves, per gate:
+
+| Gate | Checks |
+| --- | --- |
+| 9 | outlet user on the default: 200 + token, `must_change_password:true`, row flagged `weak_at_login`, audit category only, token `auth_ver=2`/`sub`/`employee_id`/no `pwc`; admin strong password: 200, not flagged; wrong password: HTTP 400 "Incorrect credentials" (production shape), audited; inactive employee with the right password: 400, audited `employee_inactive`; protected route with the v2 token: 200 and the audit names the same `user_id` |
+| 10 | legacy token `{id, employee_id}` (no sub/kid/auth_ver, signed with the current key): accepted and resolves to the **same user_id**; mismatched `employee_id`: 403; inactive employee, legacy and v2: `EMPLOYEE_INACTIVE`; legacy token naming the break-glass id, with null or a borrowed employee_id: 403; fresh v2 token: `sub` = user_id, `id` agrees, `kid` header present |
+| 18A | row `employee_id NULL`, `is_system_account=1`, `password NULL`, scrypt hash; login 200 with `is_system_account:true`, token `sys=true`, no `employee_id` claim, audited; wrong password refused and audited; Telegram forgot-password neutral with **no code row**; Telegram reset refused; admin reset → `403 SYSTEM_ACCOUNT`; admin unlock 403; all three `/telegram-link` methods → `403 EMPLOYEE_REQUIRED`; row unchanged |
+| forced change (Deployment B posture) | login still 200; token `pwc=true`; ordinary route → `PASSWORD_CHANGE_REQUIRED`; allow-listed routes answer; change-password reachable and still policy-checked; an unflagged admin is not confined |
+| 19A | with the bot token taken from the deploy clone's `.env` (never printed) the break-glass login sends the real `🚨 BREAK-GLASS LOGIN` alert through `services/telegram` (the new bot); the check confirms no send error was logged and asks you to confirm receipt in Telegram |
+
+**Two defects found by the local run and fixed:** `password_flagged`
+was missing from the audit repository's event allow-list, so production
+would have flagged the row but silently dropped the audit (the test
+fixture now enforces the same allow-list); and `break-glass.js` forced
+`NODE_ENV=production`, which on the host would have pointed it at the
+stale "production" config block.
+
+**Lightsail commands (in this order, from `~/stage0a-rehearsal`):**
+
+```bash
+git pull --ff-only origin claude/dnds-payroll-integration-proposal-3p6hen
+MYSQL_BIN_DIR="$HOME/mysql84/bin" scripts/auth/staging-rehearsal.sh dnds_rehearsal
+```
+
+Optional: `ALERT_CHAT_ID=<chat id>` to direct the alert to a specific
+group the new bot is in; `SKIP_TELEGRAM=1` to run without the token.
+Expected: `STAGING REHEARSAL: ALL CHECKS PASSED` with `35 passed` and
+`6 passed`, `instances` stopped, `config.json restored`, and one
+`🚨 BREAK-GLASS LOGIN` message for `stage0a_breakglass` in the alerts
+chat. Send back the report (`~/db-backups/staging-<stamp>.txt`, no
+secrets) and whether the alert arrived.
+
+#### Gate 23 — personal legacy-token decode (no token leaves your machine)
+
+On your own PC with node installed, with your **current production**
+session token in an environment variable (never on the command line):
+
+```powershell
+$env:T = "<paste your token here>"; node -e "const [h,p]=process.env.T.split('.');const d=s=>JSON.parse(Buffer.from(s,'base64url').toString());console.log('header:',JSON.stringify(d(h)));console.log('payload fields:',Object.keys(d(p)).join(','));console.log('has sub:',('sub' in d(p)),' has auth_ver:',('auth_ver' in d(p)),' has kid:',('kid' in d(h)))"; Remove-Item Env:T
+```
+
+Report back only the three printed lines. Expected for a token issued by
+today's production: header `{"alg":"RS256","typ":"JWT"}`, fields
+`id,user_type,store_id,designation_id,name,designation,employee_image,employee_id,iat,exp` (order may differ), `has sub: false  has auth_ver: false  has kid: false`.
+
 ### 5.8 Other findings from this review (recorded, not all fixed)
 
 | Finding | Status |

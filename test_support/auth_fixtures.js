@@ -299,9 +299,14 @@ function fakeUserRepo(rows) {
 
 function fakeAuthLog() {
   const events = [];
+  // the REAL repository refuses an event name that is not on its allow-list
+  // (and the caller swallows the rejection) — enforce the same here so a new
+  // event that was never registered fails in tests, not silently in production
+  const { EVENTS } = require("../repository/auth_log");
   return {
     events,
     async record(e) {
+      if (!EVENTS.includes(e.event)) throw new Error(`Unknown auth log event: ${e.event}`);
       events.push(e);
     },
     async bumpMetric(m) {

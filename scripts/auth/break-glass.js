@@ -27,9 +27,13 @@
  */
 
 const path = require("path");
+const fs = require("fs");
 const readline = require("readline");
 
-process.env.NODE_ENV = process.env.NODE_ENV || "production";
+// NOTE: an earlier version forced NODE_ENV to "production" here. On the
+// production host NODE_ENV is unset and the live database is the
+// "development" block, so that default would have pointed this script at
+// the wrong (stale) config block. Mirror server.js exactly instead.
 // Mirror server.js exactly: NODE_ENV unset selects "development" — which, on
 // the production host, is the live database block (NODE_ENV is not set
 // there). Without this default the script crashed with
@@ -90,6 +94,20 @@ const promptHidden = (label) =>
   });
 
 const readPasswordTwice = async () => {
+  // Staging automation only: --password-file <path> reads the credential
+  // from a file that must be mode 600 and owned by the caller. The file is
+  // never printed. Production use stays interactive (hidden prompt, twice).
+  const pf = opt("password-file");
+  if (pf) {
+    const st = fs.statSync(pf);
+    if ((st.mode & 0o077) !== 0) die(`${pf} must be mode 600 (owner only).`);
+    if (st.uid !== process.getuid()) die(`${pf} must be owned by the current user.`);
+    const p = fs.readFileSync(pf, "utf8").replace(/\r?\n$/, "");
+    const verdict = policy.check(p, { minLength: authConfig.password.policy.breakGlassMinLength });
+    if (!verdict.ok) die(`Rejected: ${verdict.reason}`);
+    console.log(`(password read from ${pf})`);
+    return p;
+  }
   if (!process.stdin.isTTY) die("Refusing to read a break-glass password from a non-interactive stdin.");
   const a = await promptHidden("New break-glass password (hidden): ");
   const b = await promptHidden("Repeat it (hidden): ");

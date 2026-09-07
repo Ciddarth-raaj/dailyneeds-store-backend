@@ -18,6 +18,7 @@ const EVENTS = Object.freeze([
   "login_inactive",
   "account_unlocked",
   "password_migrated",
+  "password_flagged",
   "password_changed",
   "password_setup_completed",
   "reset_requested",
