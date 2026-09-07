@@ -41,6 +41,7 @@ cat > "$ENVF" <<EOF
 JWT_PRIVATE_KEY_PATH=$DEST/private.key
 JWT_PUBLIC_KEYS='{"legacy":"$DEST/public.key"}'
 JWT_ACTIVE_KID=legacy
+JWT_LEGACY_KID=legacy
 EOF
 chmod 600 "$ENVF"
 echo "env file written: $ENVF"
