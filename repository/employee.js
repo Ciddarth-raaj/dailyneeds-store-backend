@@ -361,6 +361,38 @@ class EmployeeRepository {
       );
     });
   }
+  /**
+   * The names of the active employees at ONE outlet, and nothing else.
+   *
+   * This exists so an operational screen - the accounts sheet's cashier
+   * dropdown - can label a person without holding `view_employees`. Two
+   * columns, chosen explicitly: adding one here would widen what every
+   * signed-in user can read, so the list is the whole security boundary and
+   * `SELECT *` is not an option.
+   */
+  getDirectoryByStore(store_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "SELECT employee_id, employee_name FROM new_employee WHERE status = 1 AND store_id = ? ORDER BY employee_name",
+        [store_id],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.EMPLOYEE",
+              code: "REPOSITORY.EMPLOYEE.GET-DIRECTORY",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        }
+      );
+    });
+  }
   getEmployeeIdByName(employee_name) {
     return new Promise((resolve, reject) => {
       this.db.query(
