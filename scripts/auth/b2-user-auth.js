@@ -53,6 +53,10 @@ const AUTH_COLUMNS = [
   "last_login_at",
   "token_valid_from",
   "credential_rotated_at",
+  // Stage 0B / B2: the staging login also has to clear an IP restriction, so
+  // these are part of the state that must come back exactly.
+  "ip_policy",
+  "allowed_ips",
 ];
 
 const die = (msg) => {

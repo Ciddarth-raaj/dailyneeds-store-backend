@@ -136,6 +136,18 @@ const permissionDenied = (r) =>
 /** Authentication refusal (B1): body code 403 delivered with HTTP 200. */
 const authDenied = (r) => r.status === 200 && r.body && r.body.code === 403;
 
+/**
+ * An authenticated caller REACHED the route: neither refused for lacking a
+ * session nor for lacking the permission.
+ *
+ * The earlier version tested only `!permissionDenied`, so a request made with
+ * a null token - which B1 answers with an authentication refusal - counted as
+ * "reached". A run where the HR login failed still reported those ten checks
+ * as PASS. Both refusals now fail the check, and a missing token fails it
+ * before any request is made.
+ */
+const reached = (r, token) => Boolean(token) && !authDenied(r) && !permissionDenied(r);
+
 async function run() {
   console.log(`\n== B2 rehearsal API checks against ${BASE}`);
   console.log(`   node ${process.version}, built-in http (no global fetch required)`);
@@ -155,24 +167,37 @@ async function run() {
   console.log("\n-- HR user (designation with all 22 keys)");
   const hrToken = await login(HR.username, secrets.B2_HR_PASSWORD);
   ok("HR user can sign in", Boolean(hrToken));
-  for (const m of HR_MODULES) {
-    const r = await request(m[1], m[2], { token: hrToken });
-    ok(`${m[0]}: reached (not permission-denied)`, !permissionDenied(r), `status=${r.status} ${r.text.slice(0, 60)}`);
+  if (!hrToken) {
+    console.log("        without an HR session none of the HR checks below can pass; they are counted as failures.");
   }
-  const w = await request("POST", "/employee/updatedata", { token: hrToken, body: {} });
-  ok("HR user is not permission-denied on an employee write", !permissionDenied(w));
+  for (const m of HR_MODULES) {
+    // No token means no request: nothing can be learned from one, and a B1
+    // authentication refusal must never be mistaken for reaching the route.
+    const r = hrToken ? await request(m[1], m[2], { token: hrToken }) : { status: 0, body: {}, text: "no HR session" };
+    ok(
+      `${m[0]}: reached with an HR session`,
+      reached(r, hrToken),
+      hrToken ? `status=${r.status} ${r.text.slice(0, 60)}` : "HR login failed"
+    );
+  }
+  const w = hrToken
+    ? await request("POST", "/employee/updatedata", { token: hrToken, body: {} })
+    : { status: 0, body: {}, text: "no HR session" };
+  ok("HR user is not permission-denied on an employee write", reached(w, hrToken), hrToken ? "" : "HR login failed");
 
   console.log("\n-- non-HR user (designation with zero HR keys)");
   const otherToken = await login(OTHER.username, secrets.B2_OTHER_PASSWORD);
   ok("non-HR user can sign in", Boolean(otherToken));
   for (const m of HR_MODULES) {
-    const r = await request(m[1], m[2], { token: otherToken });
-    ok(`${m[0]}: refused with 403`, permissionDenied(r), `status=${r.status} ${r.text.slice(0, 60)}`);
+    // Here the PERMISSION refusal is the expected outcome; an authentication
+    // refusal would mean the session never existed and proves nothing.
+    const r = otherToken ? await request(m[1], m[2], { token: otherToken }) : { status: 0, body: {}, text: "no session" };
+    ok(`${m[0]}: refused with 403`, Boolean(otherToken) && permissionDenied(r), `status=${r.status} ${r.text.slice(0, 60)}`);
   }
-  const gd = await request("GET", "/employee/get-details", { token: otherToken });
-  ok("/employee/get-details still works for a non-HR user", !permissionDenied(gd) && !authDenied(gd), `status=${gd.status}`);
-  const perms = await request("GET", "/designation/permissions", { token: otherToken });
-  ok("/designation/permissions still works for a non-HR user", !permissionDenied(perms) && !authDenied(perms), `status=${perms.status}`);
+  const gd = otherToken ? await request("GET", "/employee/get-details", { token: otherToken }) : { status: 0, body: {}, text: "no session" };
+  ok("/employee/get-details still works for a non-HR user", reached(gd, otherToken), `status=${gd.status}`);
+  const perms = otherToken ? await request("GET", "/designation/permissions", { token: otherToken }) : { status: 0, body: {}, text: "no session" };
+  ok("/designation/permissions still works for a non-HR user", reached(perms, otherToken), `status=${perms.status}`);
   ok(
     "  and it reports no HR permission for that designation",
     !/view_employees|view_salary_advance|view_documents/.test(perms.text),
@@ -183,8 +208,8 @@ async function run() {
   const adminToken = await login(ADMIN.username, secrets.B2_ADMIN_PASSWORD);
   ok("admin can sign in", Boolean(adminToken));
   for (const m of HR_MODULES) {
-    const r = await request(m[1], m[2], { token: adminToken });
-    ok(`${m[0]}: admin not permission-denied`, !permissionDenied(r), `status=${r.status}`);
+    const r = adminToken ? await request(m[1], m[2], { token: adminToken }) : { status: 0, body: {}, text: "no admin session" };
+    ok(`${m[0]}: admin reached with a session`, reached(r, adminToken), adminToken ? `status=${r.status}` : "admin login failed");
   }
 }
 

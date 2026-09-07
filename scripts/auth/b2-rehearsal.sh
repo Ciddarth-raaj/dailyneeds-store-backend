@@ -270,10 +270,27 @@ umask 077
 } > "$SECRETS"
 chmod 600 "$SECRETS"
 set -a; . "$SECRETS"; set +a
+# The three staging logins must be deterministic. A copy of production carries
+# whatever state those accounts happen to be in, and the first real run failed
+# exactly there: the HR account is IP-restricted (ip_policy 'branch', its
+# outlet enforcing an allow-list), so the app correctly refused a login from
+# 127.0.0.1 with login_ip_blocked. user_type 2 is exempt, which is why the
+# admin signed in and the HR user did not - the runtime was right, the test
+# account's state was not usable from a loopback instance.
+#
+# So the temporary auth state is normalised for exactly these three users:
+# credential, the lockout counters, any token cut-off, the forced-change flag
+# and the IP policy. Every one of those columns is in the snapshot taken
+# above, and the restore puts them back exactly.
 for pair in "${HR_USER%%|*}:$B2_HR_PASSWORD" "${OTHER_USER%%|*}:$B2_OTHER_PASSWORD" "${ADMIN_U%%|*}:$B2_ADMIN_PASSWORD"; do
   uid="${pair%%:*}"; pw="${pair#*:}"
-  Q "UPDATE \`user\` SET password = SHA1('$pw'), password_hash = NULL, password_algo = 'sha1', must_change_password = 0 WHERE user_id = $uid AND is_system_account = 0" || fail "could not set a staging password"
+  Q "UPDATE \`user\` SET password = SHA1('$pw'), password_hash = NULL, password_algo = 'sha1',
+       must_change_password = 0, password_flag_reason = NULL,
+       failed_login_count = 0, locked_until = NULL, token_valid_from = NULL,
+       ip_policy = 'unrestricted', allowed_ips = NULL
+     WHERE user_id = $uid AND is_system_account = 0" || fail "could not set the staging login state"
 done
+echo "   staging login state normalised for $TOUCHED_IDS (credential, lockout counters, token cut-off, forced-change flag, IP policy)"
 ACCOUNTS="$HOME/.stage0a/b2-accounts.env"
 { echo "B2_HR=$HR_USER"; echo "B2_OTHER=$OTHER_USER"; echo "B2_ADMIN=$ADMIN_U"; } > "$ACCOUNTS"
 chmod 600 "$ACCOUNTS"
@@ -294,6 +311,27 @@ curl -sS -m 5 -o /dev/null "http://127.0.0.1:$PORT/user/my-ip" || { tail -5 "$AP
 
 BASE_URL="http://127.0.0.1:$PORT" ACCOUNTS="$ACCOUNTS" SECRETS="$SECRETS" node scripts/auth/b2-rehearsal-checks.js
 CHECKS=$?
+
+if [ "$CHECKS" != "0" ]; then
+  # Non-secret auth state for the three staging accounts, so a login failure
+  # can be diagnosed without reading a password or a hash out of the copy.
+  echo
+  echo "-- diagnosis: non-secret auth state of the staging accounts"
+  QT "SELECT u.user_id, u.username, u.status AS user_status, u.user_type, u.is_system_account,
+             ne.status AS employee_status, ne.designation_id,
+             u.failed_login_count, u.locked_until, u.must_change_password, u.password_algo,
+             u.ip_policy, (u.allowed_ips IS NOT NULL) AS has_allowed_ips,
+             o.ip_restriction_enabled AS branch_ip_restriction
+        FROM \`user\` u
+        LEFT JOIN new_employee ne ON ne.employee_id = u.employee_id
+        LEFT JOIN outlets o ON o.outlet_id = ne.store_id
+       WHERE u.user_id IN ($TOUCHED_IDS) ORDER BY u.user_id"
+  echo "-- diagnosis: most recent auth-log reason per staging account"
+  QT "SELECT user_id, username_attempted, event, detail, created_at
+        FROM user_auth_log
+       WHERE (user_id IN ($TOUCHED_IDS) OR username_attempted IN ('${HR_USER#*|}', '${OTHER_USER#*|}', '${ADMIN_U#*|}'))
+       ORDER BY log_id DESC LIMIT 12" 2>/dev/null || echo "   (no user_auth_log on this copy)"
+fi
 
 echo
 echo "report: $LOG   app log: $APPLOG"
