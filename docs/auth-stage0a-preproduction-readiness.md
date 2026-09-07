@@ -363,7 +363,7 @@ successfully", `/login` and `/setup-password` present; built bundle has
 | 20 | tests changed | 407 / 406 / 0 / 1 skip | **PASS** |
 | 21 | lockfile could have moved | unchanged vs both parents | **PASS** |
 | 22 | migration added to branch | §0.9, 7/7 | **PASS** |
-| 23 | baseline moved | §0.10 — source unchanged; personal decode still required | **NOT YET VERIFIED** (yours) |
+| 23 | baseline moved | §0.10 — source unchanged; personal decode done 07-09-2026 | **PASS** |
 | 24 | upstream added a consumer (poller) | all consumers go through the one env-configured client; poller no-ops when unconfigured | **PASS** |
 | 5 | migration set on branch changed | snapshot must post-date `20260906070000` | **NOT YET TESTED** (unchanged) |
 
@@ -409,7 +409,7 @@ Frontend: 9 files, all Stage 0A (`helper/login.js`, `helper/user.js`,
 | 20 | All required auth tests: raw green evidence + named mappings | **PASS** (re-earned post-merge) | §0.12: 407 tests / 406 pass / 0 fail / 1 unrelated skip. Named mappings in §4 remain valid; the reset-flow additions are named in §0.4–0.8. |
 | 21 | Frontend reproducible build (`npm ci`) | **PASS** | §0.12: `npm ci --legacy-peer-deps` exit 0, lockfile unchanged vs both parents. |
 | 22 | Migrations additive, idempotent, reconciled with upstream | **PASS** (re-earned post-merge) | §0.9. |
-| 23 | Legacy token shape personally confirmed (local decode) | **NOT YET VERIFIED** — yours | §0.10: source re-read from the new baseline, unchanged. |
+| 23 | Legacy token shape personally confirmed (local decode) | **PASS** 07-09-2026 — real production token: `alg=RS256`, fields `id,store_id,designation_id,employee_id,user_type,iat,exp`, no `sub`/`auth_ver`/`kid` | §0.10: source re-read from the new baseline, unchanged. |
 | 24 | Telegram consumers all via the env-configured client | **PASS** | §0.6, §0.13. |
 
 ---
@@ -1294,9 +1294,10 @@ minute; nothing production-side changes):
 cd ~/stage0a-rehearsal && git pull --ff-only origin claude/dnds-payroll-integration-proposal-3p6hen && MYSQL_BIN_DIR="$HOME/mysql84/bin" scripts/auth/staging-rehearsal.sh dnds_rehearsal
 ```
 
-Gate 19A is PASS when the run ends `STAGING REHEARSAL: ALL CHECKS
-PASSED` (36 + 6) **and** one plain-text `🚨 BREAK-GLASS LOGIN` message
-naming `stage0a_breakglass` arrives from `@DailyNeedsBot` with sound.
+**Gate 19A: PASS, 07-09-2026.** Rerun at `7a77b52`: 37/37 + 6/6,
+`STAGING REHEARSAL: ALL CHECKS PASSED`; the administrator received both
+the `🚨 BREAK-GLASS LOGIN` alert and the failed-attempt alert in DN
+Accounts from `@DailyNeedsBot`.
 
 **Two defects found by the local run and fixed:** `password_flagged`
 was missing from the audit repository's event allow-list, so production
