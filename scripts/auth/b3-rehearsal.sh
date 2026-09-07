@@ -91,18 +91,57 @@ TARGET_EMPLOYEE="$(Q "SELECT employee_id FROM new_employee WHERE status = 1 AND 
 [ -n "$TARGET_EMPLOYEE" ] || fail "no active employee with a salary to use as the write target"
 TARGET_SALARY="$(Q "SELECT IFNULL(salary, 0) FROM new_employee WHERE employee_id = $TARGET_EMPLOYEE")"
 
-# The documents the by-id write checks act on. Their current status and
-# verification flag are written back unchanged, and restored regardless.
-# A restored copy may hold only Aadhaar rows - card_type 1 is the only type
-# the UI offers - so the ordinary document is optional and the checker counts
-# its check only when there is one.
-SENSITIVE_DOC="$(Q "SELECT document_id FROM new_employee_documents WHERE card_type IN (1,4) ORDER BY document_id LIMIT 1")"
-[ -n "$SENSITIVE_DOC" ] || fail "this copy has no Aadhaar or PAN document - the by-id write checks cannot run"
-SENSITIVE_DOC_STATUS="$(Q "SELECT IFNULL(status,0) FROM new_employee_documents WHERE document_id = $SENSITIVE_DOC")"
-SENSITIVE_DOC_VERIFIED="$(Q "SELECT IFNULL(is_verified,0) FROM new_employee_documents WHERE document_id = $SENSITIVE_DOC")"
-ORDINARY_DOC="$(Q "SELECT document_id FROM new_employee_documents WHERE card_type NOT IN (1,4) ORDER BY document_id LIMIT 1")"
-ORDINARY_DOC_STATUS=""
-[ -n "$ORDINARY_DOC" ] && ORDINARY_DOC_STATUS="$(Q "SELECT IFNULL(status,0) FROM new_employee_documents WHERE document_id = $ORDINARY_DOC")"
+# ------------------------------------------------------- documents by id
+# The by-id write checks need one document the guard treats as sensitive and,
+# ideally, one it does not. A restored copy is not guaranteed to have either:
+# card_type 1 is the only type the UI offers, and the first real run of this
+# script found dnds_rehearsal with no Aadhaar or PAN row at all, so it exited
+# before testing anything.
+#
+# Three modes, in order of preference, all of them fully reversible:
+#
+#   existing  a card_type 1 or 4 row is already there - use it, change nothing
+#   borrowed  no sensitive row but an ordinary one exists - flip ONLY that
+#             row's card_type to 1 for the duration, and put the whole row
+#             back afterwards. If a SECOND ordinary row exists it serves as
+#             the ordinary document, so both halves run in one pass; if not,
+#             the ordinary check runs in a second pass AFTER the borrowed row
+#             has been given its own type back.
+#   created   the copy has no documents at all - insert one temporary row for
+#             an existing employee, use it, then delete exactly that row and
+#             put the table's AUTO_INCREMENT counter back where it was, so
+#             the restore verification is not quietly untrue.
+#
+# card_type is a VARCHAR, so it is compared the way the application compares
+# it - numerically, matching Number() in constants/sensitive_fields.js.
+SENSITIVE_CARD_SQL="CAST(card_type AS UNSIGNED) IN (1,4)"
+DOC_MODE=""
+BORROWED_DOC=""
+BORROWED_CARD_TYPE=""
+CREATED_DOC=""
+DOC_AI_BEFORE=""
+ORDINARY_DOC=""
+ORDINARY_SECOND_PASS=0
+
+SENSITIVE_DOC="$(Q "SELECT document_id FROM new_employee_documents WHERE $SENSITIVE_CARD_SQL ORDER BY document_id LIMIT 1")"
+if [ -n "$SENSITIVE_DOC" ]; then
+  DOC_MODE="existing"
+  ORDINARY_DOC="$(Q "SELECT document_id FROM new_employee_documents WHERE NOT ($SENSITIVE_CARD_SQL) ORDER BY document_id LIMIT 1")"
+else
+  FIRST_ORDINARY="$(Q "SELECT document_id FROM new_employee_documents WHERE NOT ($SENSITIVE_CARD_SQL) ORDER BY document_id LIMIT 1")"
+  if [ -n "$FIRST_ORDINARY" ]; then
+    DOC_MODE="borrowed"
+    BORROWED_DOC="$FIRST_ORDINARY"
+    SENSITIVE_DOC="$FIRST_ORDINARY"
+    # A different ordinary row keeps both halves in one pass.
+    ORDINARY_DOC="$(Q "SELECT document_id FROM new_employee_documents WHERE NOT ($SENSITIVE_CARD_SQL) AND document_id <> $BORROWED_DOC ORDER BY document_id LIMIT 1")"
+    [ -z "$ORDINARY_DOC" ] && ORDINARY_SECOND_PASS=1
+  else
+    ANY_DOC="$(Q "SELECT COUNT(*) FROM new_employee_documents")"
+    [ "$ANY_DOC" = "0" ] || fail "documents exist but none could be classified - refusing to guess"
+    DOC_MODE="created"
+  fi
+fi
 
 echo "   HR designation: $(Q "SELECT designation_name FROM designation WHERE designation_id = $HR_DESIGNATION")"
 echo "   directory-only designation for this run: $DIR_DESIGNATION ($(Q "SELECT IFNULL(designation_name,'?') FROM designation WHERE designation_id = $DIR_DESIGNATION"))"
@@ -146,18 +185,58 @@ Q "SELECT employee_id, salary, blood_group FROM new_employee WHERE employee_id =
   Q "SELECT CONCAT('UPDATE \`new_employee\` SET \`salary\` = ', QUOTE(salary), ', \`blood_group\` = ', QUOTE(blood_group), ' WHERE employee_id = ', employee_id, ';') FROM new_employee WHERE employee_id = $TARGET_EMPLOYEE"
 } >> "$RESTORE_SQL"
 
-# (6) the document rows the by-id write checks act on: status and the
-#     verification flag, exactly as they were.
-DOC_IDS="$SENSITIVE_DOC"
-[ -n "$ORDINARY_DOC" ] && DOC_IDS="$DOC_IDS,$ORDINARY_DOC"
-Q "SELECT document_id, status, is_verified FROM new_employee_documents WHERE document_id IN ($DOC_IDS) ORDER BY document_id" > "$SNAP/documents-before.tsv"
-{
-  echo "-- (6) the documents acted on by id"
-  Q "SELECT CONCAT('UPDATE \`new_employee_documents\` SET \`status\` = ', QUOTE(status), ', \`is_verified\` = ', QUOTE(is_verified), ' WHERE document_id = ', document_id, ';') FROM new_employee_documents WHERE document_id IN ($DOC_IDS)"
-} >> "$RESTORE_SQL"
+# (6) the documents the by-id write checks act on.
+#
+# Values are read out as plain columns and the UPDATE is composed here, NOT
+# with CONCAT(QUOTE(...)) inside MySQL: that is what produced
+# `ERROR 1270 Illegal mix of collations` on this host during B2, and `file` is
+# a LONGTEXT that would go through the same path. Only the columns the
+# rehearsal can actually change are written back - card_type, status,
+# is_verified - plus updated_at, which the table bumps on its own on any
+# UPDATE and would otherwise be a real, unrestored difference.
+#
+# A whole-table checksum is taken as well, so "nothing else in this table
+# moved" is proved rather than assumed.
+DOC_MARKER="B3-REHEARSAL-$STAMP"
+lit() { [ "$1" = "NULL" ] && printf 'NULL' || printf "'%s'" "$1"; }
+doc_restore_line() {
+  local id="$1"
+  local row ct st iv ua
+  row="$(Q "SELECT IFNULL(card_type,'NULL'), IFNULL(status,'NULL'), IFNULL(is_verified,'NULL'), IFNULL(updated_at,'NULL') FROM new_employee_documents WHERE document_id = $id")"
+  ct="$(echo "$row" | cut -f1)"; st="$(echo "$row" | cut -f2)"
+  iv="$(echo "$row" | cut -f3)"; ua="$(echo "$row" | cut -f4)"
+  [ -n "$ct$st$iv$ua" ] || fail "could not read document $id for the snapshot"
+  echo "UPDATE \`new_employee_documents\` SET \`card_type\` = $(lit "$ct"), \`status\` = $(lit "$st"), \`is_verified\` = $(lit "$iv"), \`updated_at\` = $(lit "$ua") WHERE document_id = $id;"
+}
+
+DOC_IDS=""
+DOC_CHECKSUM_BEFORE="$(Q "CHECKSUM TABLE new_employee_documents" | cut -f2)"
+echo "-- (6) the documents acted on by id" >> "$RESTORE_SQL"
+if [ "$DOC_MODE" = "created" ]; then
+  # Written BEFORE the insert, and keyed on a marker rather than on an id, so
+  # the row is removed even if the script dies between the two statements.
+  DOC_AI_BEFORE="$(Q "SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA='$SCRATCH' AND TABLE_NAME='new_employee_documents'")"
+  {
+    echo "DELETE FROM \`new_employee_documents\` WHERE \`card_no\` = '$DOC_MARKER';"
+    [ -n "$DOC_AI_BEFORE" ] && [ "$DOC_AI_BEFORE" != "NULL" ] && echo "ALTER TABLE \`new_employee_documents\` AUTO_INCREMENT = $DOC_AI_BEFORE;"
+  } >> "$RESTORE_SQL"
+else
+  DOC_IDS="$SENSITIVE_DOC"
+  [ -n "$ORDINARY_DOC" ] && DOC_IDS="$DOC_IDS,$ORDINARY_DOC"
+  Q "SELECT document_id, card_type, status, is_verified FROM new_employee_documents WHERE document_id IN ($DOC_IDS) ORDER BY document_id" > "$SNAP/documents-before.tsv"
+  doc_restore_line "$SENSITIVE_DOC" >> "$RESTORE_SQL"
+  [ -n "$ORDINARY_DOC" ] && doc_restore_line "$ORDINARY_DOC" >> "$RESTORE_SQL"
+  # The borrowed row's own type, so the ordinary second pass can put it back
+  # before that check runs rather than only at the end.
+  [ "$DOC_MODE" = "borrowed" ] && BORROWED_CARD_TYPE="$(Q "SELECT IFNULL(card_type,'NULL') FROM new_employee_documents WHERE document_id = $BORROWED_DOC")"
+fi
 
 echo "   snapshot: $SNAP  (permissions $(wc -l < "$SNAP/permissions-before.tsv") rows, non-HR $(wc -l < "$SNAP/non-hr-before.tsv") rows)"
-echo "   documents acted on by id: sensitive $SENSITIVE_DOC, ordinary ${ORDINARY_DOC:-none in this copy}"
+case "$DOC_MODE" in
+  existing) echo "   documents: sensitive $SENSITIVE_DOC (already Aadhaar/PAN), ordinary ${ORDINARY_DOC:-none in this copy}";;
+  borrowed) echo "   documents: no Aadhaar/PAN row in this copy - borrowing document $BORROWED_DOC (card_type $BORROWED_CARD_TYPE) for the sensitive checks; ordinary ${ORDINARY_DOC:-the same row, in a second pass after its type is restored}";;
+  created)  echo "   documents: this copy has none - one temporary row will be created and deleted (marker $DOC_MARKER)";;
+esac
 
 # ------------------------------------------------------------- restore trap
 # Identical discipline to B2: ONE handler on EXIT restores exactly once; INT
@@ -236,11 +315,35 @@ restore_all() {
   else
     echo "  FAIL  the write target's row differs:"; diff "$SNAP/employee-before.tsv" "$SNAP/employee-after.tsv" | head -5; bad=1
   fi
-  Q "SELECT document_id, status, is_verified FROM new_employee_documents WHERE document_id IN ($DOC_IDS) ORDER BY document_id" > "$SNAP/documents-after.tsv"
-  if diff -q "$SNAP/documents-before.tsv" "$SNAP/documents-after.tsv" >/dev/null; then
-    echo "  PASS  the documents acted on by id are identical to before"
+  if [ "$DOC_MODE" = "created" ]; then
+    local left ai_now
+    left="$(Q "SELECT COUNT(*) FROM new_employee_documents WHERE card_no = '$DOC_MARKER'")"
+    if [ "$left" = "0" ]; then
+      echo "  PASS  the temporary document is gone"
+    else
+      echo "  FAIL  $left temporary document row(s) remain (card_no = $DOC_MARKER)"; bad=1
+    fi
+    ai_now="$(Q "SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA='$SCRATCH' AND TABLE_NAME='new_employee_documents'")"
+    if [ "$ai_now" = "$DOC_AI_BEFORE" ]; then
+      echo "  PASS  new_employee_documents AUTO_INCREMENT is back at $DOC_AI_BEFORE"
+    else
+      echo "  FAIL  AUTO_INCREMENT is $ai_now, was $DOC_AI_BEFORE"; bad=1
+    fi
+  elif [ -n "$DOC_IDS" ]; then
+    Q "SELECT document_id, card_type, status, is_verified FROM new_employee_documents WHERE document_id IN ($DOC_IDS) ORDER BY document_id" > "$SNAP/documents-after.tsv"
+    if diff -q "$SNAP/documents-before.tsv" "$SNAP/documents-after.tsv" >/dev/null; then
+      echo "  PASS  the documents acted on by id are identical to before (card_type included)"
+    else
+      echo "  FAIL  a document row differs:"; diff "$SNAP/documents-before.tsv" "$SNAP/documents-after.tsv" | head -5; bad=1
+    fi
+  fi
+  # Nothing ELSE in the table moved either.
+  local checksum_now
+  checksum_now="$(Q "CHECKSUM TABLE new_employee_documents" | cut -f2)"
+  if [ "$checksum_now" = "$DOC_CHECKSUM_BEFORE" ]; then
+    echo "  PASS  new_employee_documents checksum unchanged ($checksum_now)"
   else
-    echo "  FAIL  a document row differs:"; diff "$SNAP/documents-before.tsv" "$SNAP/documents-after.tsv" | head -5; bad=1
+    echo "  FAIL  new_employee_documents checksum $DOC_CHECKSUM_BEFORE -> $checksum_now"; bad=1
   fi
   if [ -s "$SNAP/user-auth-before.tsv" ]; then
     Q "SELECT $AUTH_COLS FROM \`user\` WHERE user_id IN ($TOUCHED_IDS) ORDER BY user_id" > "$SNAP/user-auth-after.tsv"
@@ -261,6 +364,36 @@ restore_all() {
 trap on_exit EXIT
 trap 'on_signal SIGINT 130' INT
 trap 'on_signal SIGTERM 143' TERM
+
+# ------------------------------------------ make a sensitive document exist
+# Only now, with the undo already written and the trap armed.
+case "$DOC_MODE" in
+  borrowed)
+    Q "UPDATE \`new_employee_documents\` SET card_type = '1' WHERE document_id = $BORROWED_DOC" \
+      || fail "could not borrow document $BORROWED_DOC"
+    echo "   document $BORROWED_DOC temporarily reads as Aadhaar (was card_type $BORROWED_CARD_TYPE)"
+    ;;
+  created)
+    EMP_FOR_DOC="$(Q "SELECT employee_id FROM new_employee WHERE status = 1 ORDER BY employee_id LIMIT 1")"
+    [ -n "$EMP_FOR_DOC" ] || fail "no active employee to attach a temporary document to"
+    # `file` is the only NOT NULL column without a default; everything else
+    # takes the schema's own defaults. The marker in card_no is what the undo
+    # statement already written above deletes on.
+    Q "INSERT INTO \`new_employee_documents\` (employee_id, card_type, card_no, card_name, file, is_verified, status)
+       VALUES ($EMP_FOR_DOC, '1', '$DOC_MARKER', 'B3 rehearsal', 'rehearsal-only://no-file', 0, 1)" \
+      || fail "could not create the temporary document"
+    CREATED_DOC="$(Q "SELECT document_id FROM new_employee_documents WHERE card_no = '$DOC_MARKER' ORDER BY document_id LIMIT 1")"
+    [ -n "$CREATED_DOC" ] || fail "the temporary document was not created"
+    SENSITIVE_DOC="$CREATED_DOC"
+    DOC_IDS="$CREATED_DOC"
+    echo "   temporary Aadhaar document $CREATED_DOC created for employee $EMP_FOR_DOC (auto_increment was ${DOC_AI_BEFORE:-unknown})"
+    ;;
+esac
+
+SENSITIVE_DOC_STATUS="$(Q "SELECT IFNULL(status,0) FROM new_employee_documents WHERE document_id = $SENSITIVE_DOC")"
+SENSITIVE_DOC_VERIFIED="$(Q "SELECT IFNULL(is_verified,0) FROM new_employee_documents WHERE document_id = $SENSITIVE_DOC")"
+ORDINARY_DOC_STATUS=""
+[ -n "$ORDINARY_DOC" ] && ORDINARY_DOC_STATUS="$(Q "SELECT IFNULL(status,0) FROM new_employee_documents WHERE document_id = $ORDINARY_DOC")"
 
 # --------------------------------------------- keys, B2 policy, B3 overlay
 echo
@@ -360,6 +493,26 @@ echo
 BASE_URL="http://127.0.0.1:$PORT" ACCOUNTS="$ACCOUNTS" SECRETS="$SECRETS" node scripts/auth/b3-rehearsal-checks.js
 CHECKS=$?
 
+# The ordinary-document half, when the only ordinary row had to be borrowed
+# for the sensitive half. Its own type goes back FIRST, so the check runs
+# against a genuinely non-sensitive document rather than against a row the
+# guard still considers Aadhaar.
+if [ "$ORDINARY_SECOND_PASS" = "1" ]; then
+  echo
+  echo "== second pass: the borrowed document is given its own type back, then checked as an ordinary document"
+  Q "UPDATE \`new_employee_documents\` SET card_type = $(lit "$BORROWED_CARD_TYPE") WHERE document_id = $BORROWED_DOC" \
+    || fail "could not restore the borrowed document's card_type"
+  NOW_TYPE="$(Q "SELECT IFNULL(card_type,'NULL') FROM new_employee_documents WHERE document_id = $BORROWED_DOC")"
+  [ "$NOW_TYPE" = "$BORROWED_CARD_TYPE" ] || fail "the borrowed document still reads as $NOW_TYPE, not $BORROWED_CARD_TYPE"
+  {
+    echo "B3_ORDINARY_DOCUMENT=$BORROWED_DOC"
+    echo "B3_ORDINARY_DOCUMENT_STATUS=$(Q "SELECT IFNULL(status,0) FROM new_employee_documents WHERE document_id = $BORROWED_DOC")"
+  } >> "$ACCOUNTS"
+  BASE_URL="http://127.0.0.1:$PORT" ACCOUNTS="$ACCOUNTS" SECRETS="$SECRETS" B3_PHASE=ordinary node scripts/auth/b3-rehearsal-checks.js
+  SECOND=$?
+  [ "$SECOND" = "0" ] || CHECKS=1
+fi
+
 # The refusal has to be visible in the data, not only in the HTTP status: the
 # unauthorised write must have left the stored salary alone.
 SALARY_NOW="$(Q "SELECT IFNULL(salary,0) FROM new_employee WHERE employee_id = $TARGET_EMPLOYEE")"
@@ -387,5 +540,6 @@ fi
 
 echo
 echo "report: $LOG   app log: $APPLOG"
+echo "document mode: $DOC_MODE$([ "$ORDINARY_SECOND_PASS" = "1" ] && echo " (ordinary check ran as a second pass)")"
 [ "$CHECKS" = "0" ] && echo "B3 REHEARSAL: ALL CHECKS PASSED" || echo "B3 REHEARSAL: CHECKS FAILED"
 exit "$CHECKS"

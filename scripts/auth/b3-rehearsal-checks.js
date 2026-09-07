@@ -63,6 +63,15 @@ const SENSITIVE_DOC_VERIFIED = accounts.B3_SENSITIVE_DOCUMENT_VERIFIED;
 const ORDINARY_DOC = accounts.B3_ORDINARY_DOCUMENT;
 const ORDINARY_DOC_STATUS = accounts.B3_ORDINARY_DOCUMENT_STATUS;
 
+/**
+ * "all" (default) runs everything. "ordinary" runs ONLY the ordinary-document
+ * check, and exists for the case where the copy's single document had to be
+ * borrowed as the sensitive one: the orchestrator gives that row its own type
+ * back and calls this again, so both halves are still covered. The login it
+ * needs is not counted twice - a login failure fails the one check.
+ */
+const PHASE = process.env.B3_PHASE === "ordinary" ? "ordinary" : "all";
+
 /** Any of these appearing as a JSON key is a leak. */
 const SENSITIVE_KEY_RE =
   /"(salary|payment_type|bank_name|ifsc|account_no|pan_no|aadhaar_card_no|aadhaar_card_name|aadhaar_card_image|uan|pf|pf_number|esi|esi_number)"\s*:/i;
@@ -86,8 +95,10 @@ const DOCUMENT_READS = [
 //   1 when the copy has a non-sensitive document to act on.
 const DOCUMENT_TARGET_CHECKS = 3 + (ORDINARY_DOC ? 1 : 0);
 const EXPECTED_CHECKS =
-  3 + EMPLOYEE_READS.length + 1 + EMPLOYEE_READS.length * 2 + 1 +
-  DOCUMENT_READS.length * 2 + 2 + 3 + DOCUMENT_TARGET_CHECKS + 1 + 1;
+  PHASE === "ordinary"
+    ? 1
+    : 3 + EMPLOYEE_READS.length + 1 + EMPLOYEE_READS.length * 2 + 1 +
+      DOCUMENT_READS.length * 2 + 2 + 3 + DOCUMENT_TARGET_CHECKS + 1 + 1;
 
 let pass = 0;
 let fail = 0;
@@ -162,6 +173,21 @@ async function run() {
     throw new Error("ACCOUNTS is missing one of B3_HR / B3_DIRECTORY / B3_ADMIN");
   }
   if (!TARGET_EMPLOYEE) throw new Error("ACCOUNTS is missing B3_TARGET_EMPLOYEE");
+
+  if (PHASE === "ordinary") {
+    if (!ORDINARY_DOC) throw new Error("B3_PHASE=ordinary needs B3_ORDINARY_DOCUMENT");
+    console.log("\n-- second pass: the ordinary-document check only");
+    const token = await login(DIRECTORY.username, secrets.B3_DIRECTORY_PASSWORD);
+    const r = token
+      ? await request("POST", "/document/update-status", {
+          token,
+          body: { document_id: Number(ORDINARY_DOC), status: Number(ORDINARY_DOC_STATUS) },
+        })
+      : { status: 0, body: {}, text: "the directory login failed" };
+    ok("an ordinary document still updates on add_documents alone",
+      reached(r, token), `status=${r.status} ${r.text.slice(0, 80)}`);
+    return;
+  }
 
   const hrToken = await login(HR.username, secrets.B3_HR_PASSWORD);
   const dirToken = await login(DIRECTORY.username, secrets.B3_DIRECTORY_PASSWORD);
