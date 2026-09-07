@@ -166,8 +166,12 @@ before(async () => {
   };
   // Each router registers on its own module-level express Router, so they are
   // mounted one per app exactly as server.js does.
-  mount("/employee", "employee");
-  mount("/document", "document");
+  // Stage 0B / B3 added a third constructor argument to these two routers.
+  // It is passed here so this file keeps testing the wiring that ships; what
+  // it asserts is unchanged, and B3 has its own tests.
+  const sensitive = require("./sensitive")(permissions);
+  mount("/employee", "employee", [sensitive]);
+  mount("/document", "document", [sensitive]);
   mount("/family", "family");
   mount("/salary", "salary");
   mount("/resignation", "resignation");

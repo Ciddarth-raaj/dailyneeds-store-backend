@@ -3,13 +3,23 @@ const P = require("../constants/hr_permissions");
 const Joi = require("@hapi/joi");
 
 class DocumentRoutes {
-  constructor(documentUsecase, permissions) {
+  constructor(documentUsecase, permissions, sensitive) {
     this.permissions = permissions;
+    this.sensitive = sensitive;
     this.documentUsecase = documentUsecase;
     this.init();
   }
 
   init() {
+    // Stage 0B / B3. Ordinary document access stays under view_documents;
+    // an Aadhaar or PAN row - card_type 1 or 4 - is dropped entirely for a
+    // caller without view_employee_sensitive, because its `file` is the S3
+    // path to a scan of the document itself. Two of these queries are
+    // SELECT * joined onto new_employee, so the same guard also removes the
+    // employee's salary and bank columns from the joined rows.
+    router.use(this.sensitive.filterResponse);
+    router.use(this.sensitive.guardWrite);
+
     router.get("/employee_id", this.permissions.require(P.VIEW_DOCUMENTS), async (req, res) => {
       try {
         const schema = {
@@ -158,6 +168,6 @@ class DocumentRoutes {
   }
 }
 
-module.exports = (documentUsecase, permissions) => {
-  return new DocumentRoutes(documentUsecase, permissions);
+module.exports = (documentUsecase, permissions, sensitive) => {
+  return new DocumentRoutes(documentUsecase, permissions, sensitive);
 };
