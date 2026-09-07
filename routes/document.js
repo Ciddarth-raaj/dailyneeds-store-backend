@@ -20,6 +20,15 @@ class DocumentRoutes {
     router.use(this.sensitive.filterResponse);
     router.use(this.sensitive.guardWrite);
 
+    // A request that names an Aadhaar or PAN document by id says nothing
+    // sensitive in its body, so the body-level guard above cannot see it.
+    // This one asks the repository for that document's TYPE only - never its
+    // number or its S3 path - and requires edit_employee_sensitive on top of
+    // the route's own add_documents. Ordinary document types are untouched.
+    const sensitiveTarget = this.sensitive.guardTarget((document_id) =>
+      this.documentUsecase.getCardTypeById(document_id)
+    );
+
     router.get("/employee_id", this.permissions.require(P.VIEW_DOCUMENTS), async (req, res) => {
       try {
         const schema = {
@@ -66,7 +75,7 @@ class DocumentRoutes {
 
       res.end();
     });
-    router.post("/update-status", this.permissions.require(P.ADD_DOCUMENTS), async (req, res) => {
+    router.post("/update-status", this.permissions.require(P.ADD_DOCUMENTS), sensitiveTarget, async (req, res) => {
       try {
         const schema = {
           document_id: Joi.number().required(),
@@ -91,7 +100,7 @@ class DocumentRoutes {
       }
       res.end();
     });
-    router.post("/update-document", this.permissions.require(P.ADD_DOCUMENTS), async (req, res) => {
+    router.post("/update-document", this.permissions.require(P.ADD_DOCUMENTS), sensitiveTarget, async (req, res) => {
       try {
         const schema = {
           document_id: Joi.number().required(),

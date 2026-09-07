@@ -57,8 +57,10 @@ RUN() { "$MYSQL" --defaults-extra-file="$DEFAULTS" "$SCRATCH"; }
 HR_LIST="'view_employees','add_employees','view_banks','add_banks','view_family','add_family','view_documents','add_documents','view_employee_sensitive','edit_employee_sensitive','view_salary_advance','add_salary_advance','view_resignation','add_resignation','view_designation','add_designation','view_department','add_department','view_shift','add_shifts','view_stores','add_stores'"
 B2_KEYS="'view_employee_sensitive','edit_employee_sensitive','add_documents','add_stores'"
 # What the directory-only caller gets: enough to run the staff list and the
-# document screen, and nothing that touches sensitive data.
-DIRECTORY_KEYS="'view_employees','add_employees','view_documents'"
+# document screen INCLUDING its writes, and nothing that touches sensitive
+# data. add_documents matters - without it B2 would refuse the document write
+# checks and the B3 refusals would pass for the wrong reason.
+DIRECTORY_KEYS="'view_employees','add_employees','view_documents','add_documents'"
 
 echo "== Stage 0B / B3 rehearsal on '$SCRATCH', HR designation $HR_DESIGNATION  ($(date '+%F %T'))"
 echo "   checkout $(git -C "$WT" rev-parse --short HEAD) on $(git -C "$WT" branch --show-current)"
@@ -88,6 +90,19 @@ DIR_DESIGNATION="${DIR_USER##*|}"
 TARGET_EMPLOYEE="$(Q "SELECT employee_id FROM new_employee WHERE status = 1 AND salary IS NOT NULL ORDER BY employee_id LIMIT 1")"
 [ -n "$TARGET_EMPLOYEE" ] || fail "no active employee with a salary to use as the write target"
 TARGET_SALARY="$(Q "SELECT IFNULL(salary, 0) FROM new_employee WHERE employee_id = $TARGET_EMPLOYEE")"
+
+# The documents the by-id write checks act on. Their current status and
+# verification flag are written back unchanged, and restored regardless.
+# A restored copy may hold only Aadhaar rows - card_type 1 is the only type
+# the UI offers - so the ordinary document is optional and the checker counts
+# its check only when there is one.
+SENSITIVE_DOC="$(Q "SELECT document_id FROM new_employee_documents WHERE card_type IN (1,4) ORDER BY document_id LIMIT 1")"
+[ -n "$SENSITIVE_DOC" ] || fail "this copy has no Aadhaar or PAN document - the by-id write checks cannot run"
+SENSITIVE_DOC_STATUS="$(Q "SELECT IFNULL(status,0) FROM new_employee_documents WHERE document_id = $SENSITIVE_DOC")"
+SENSITIVE_DOC_VERIFIED="$(Q "SELECT IFNULL(is_verified,0) FROM new_employee_documents WHERE document_id = $SENSITIVE_DOC")"
+ORDINARY_DOC="$(Q "SELECT document_id FROM new_employee_documents WHERE card_type NOT IN (1,4) ORDER BY document_id LIMIT 1")"
+ORDINARY_DOC_STATUS=""
+[ -n "$ORDINARY_DOC" ] && ORDINARY_DOC_STATUS="$(Q "SELECT IFNULL(status,0) FROM new_employee_documents WHERE document_id = $ORDINARY_DOC")"
 
 echo "   HR designation: $(Q "SELECT designation_name FROM designation WHERE designation_id = $HR_DESIGNATION")"
 echo "   directory-only designation for this run: $DIR_DESIGNATION ($(Q "SELECT IFNULL(designation_name,'?') FROM designation WHERE designation_id = $DIR_DESIGNATION"))"
@@ -131,7 +146,18 @@ Q "SELECT employee_id, salary, blood_group FROM new_employee WHERE employee_id =
   Q "SELECT CONCAT('UPDATE \`new_employee\` SET \`salary\` = ', QUOTE(salary), ', \`blood_group\` = ', QUOTE(blood_group), ' WHERE employee_id = ', employee_id, ';') FROM new_employee WHERE employee_id = $TARGET_EMPLOYEE"
 } >> "$RESTORE_SQL"
 
+# (6) the document rows the by-id write checks act on: status and the
+#     verification flag, exactly as they were.
+DOC_IDS="$SENSITIVE_DOC"
+[ -n "$ORDINARY_DOC" ] && DOC_IDS="$DOC_IDS,$ORDINARY_DOC"
+Q "SELECT document_id, status, is_verified FROM new_employee_documents WHERE document_id IN ($DOC_IDS) ORDER BY document_id" > "$SNAP/documents-before.tsv"
+{
+  echo "-- (6) the documents acted on by id"
+  Q "SELECT CONCAT('UPDATE \`new_employee_documents\` SET \`status\` = ', QUOTE(status), ', \`is_verified\` = ', QUOTE(is_verified), ' WHERE document_id = ', document_id, ';') FROM new_employee_documents WHERE document_id IN ($DOC_IDS)"
+} >> "$RESTORE_SQL"
+
 echo "   snapshot: $SNAP  (permissions $(wc -l < "$SNAP/permissions-before.tsv") rows, non-HR $(wc -l < "$SNAP/non-hr-before.tsv") rows)"
+echo "   documents acted on by id: sensitive $SENSITIVE_DOC, ordinary ${ORDINARY_DOC:-none in this copy}"
 
 # ------------------------------------------------------------- restore trap
 # Identical discipline to B2: ONE handler on EXIT restores exactly once; INT
@@ -210,6 +236,12 @@ restore_all() {
   else
     echo "  FAIL  the write target's row differs:"; diff "$SNAP/employee-before.tsv" "$SNAP/employee-after.tsv" | head -5; bad=1
   fi
+  Q "SELECT document_id, status, is_verified FROM new_employee_documents WHERE document_id IN ($DOC_IDS) ORDER BY document_id" > "$SNAP/documents-after.tsv"
+  if diff -q "$SNAP/documents-before.tsv" "$SNAP/documents-after.tsv" >/dev/null; then
+    echo "  PASS  the documents acted on by id are identical to before"
+  else
+    echo "  FAIL  a document row differs:"; diff "$SNAP/documents-before.tsv" "$SNAP/documents-after.tsv" | head -5; bad=1
+  fi
   if [ -s "$SNAP/user-auth-before.tsv" ]; then
     Q "SELECT $AUTH_COLS FROM \`user\` WHERE user_id IN ($TOUCHED_IDS) ORDER BY user_id" > "$SNAP/user-auth-after.tsv"
     if diff -q "$SNAP/user-auth-before.tsv" "$SNAP/user-auth-after.tsv" >/dev/null; then
@@ -241,7 +273,8 @@ for pass in 1 2; do
 DELETE FROM \`permissions\` WHERE designation_id = $DIR_DESIGNATION AND permission_key IN ($HR_LIST);
 INSERT INTO \`permissions\` (\`permission_key\`, \`designation_id\`, \`is_active\`)
 SELECT k.permission_key, $DIR_DESIGNATION, 1 FROM (
-  SELECT 'view_employees' AS permission_key UNION ALL SELECT 'add_employees' UNION ALL SELECT 'view_documents'
+  SELECT 'view_employees' AS permission_key UNION ALL SELECT 'add_employees'
+  UNION ALL SELECT 'view_documents' UNION ALL SELECT 'add_documents'
 ) k;
 SQL
   echo "   pass $pass: HR keys $(Q "SELECT COUNT(*) FROM permissions WHERE designation_id = $HR_DESIGNATION AND permission_key IN ($HR_LIST)"), directory keys $(Q "SELECT COUNT(*) FROM permissions WHERE designation_id = $DIR_DESIGNATION AND permission_key IN ($HR_LIST)")"
@@ -303,6 +336,11 @@ ACCOUNTS="$HOME/.stage0a/b3-accounts.env"
   echo "B3_ADMIN=$ADMIN_U"
   echo "B3_TARGET_EMPLOYEE=$TARGET_EMPLOYEE"
   echo "B3_TARGET_SALARY=$TARGET_SALARY"
+  echo "B3_SENSITIVE_DOCUMENT=$SENSITIVE_DOC"
+  echo "B3_SENSITIVE_DOCUMENT_STATUS=$SENSITIVE_DOC_STATUS"
+  echo "B3_SENSITIVE_DOCUMENT_VERIFIED=$SENSITIVE_DOC_VERIFIED"
+  echo "B3_ORDINARY_DOCUMENT=$ORDINARY_DOC"
+  echo "B3_ORDINARY_DOCUMENT_STATUS=$ORDINARY_DOC_STATUS"
 } > "$ACCOUNTS"
 chmod 600 "$ACCOUNTS"
 echo "   accounts: HR=${HR_USER#*|} directory=${DIR_USER#*|} admin=${ADMIN_U#*|} (passwords in $SECRETS, 600, never printed)"

@@ -66,6 +66,9 @@ const GRANTS = [
   { designation_id: DIRECTORY_DESIGNATION, permission_key: P.VIEW_EMPLOYEES, is_active: 1 },
   { designation_id: DIRECTORY_DESIGNATION, permission_key: P.ADD_EMPLOYEES, is_active: 1 },
   { designation_id: DIRECTORY_DESIGNATION, permission_key: P.VIEW_DOCUMENTS, is_active: 1 },
+  // add_documents matters: without it B2 would refuse the document writes
+  // below, and the B3 refusals would pass for the wrong reason.
+  { designation_id: DIRECTORY_DESIGNATION, permission_key: P.ADD_DOCUMENTS, is_active: 1 },
   { designation_id: DIRECTORY_DESIGNATION, permission_key: P.VIEW_BANKS, is_active: 1 },
 ];
 
@@ -146,6 +149,9 @@ const employeeUsecase = new Proxy(
   }
 );
 
+/** What the write guard's type lookup sees, by document_id. */
+const CARD_TYPE_BY_ID = { 1: 1, 2: 4, 3: 3 };
+
 const documentUsecase = new Proxy(
   {},
   {
@@ -153,6 +159,11 @@ const documentUsecase = new Proxy(
       if (String(name).startsWith("update") || name === "create") {
         lastWrite = arg;
         return 200;
+      }
+      if (name === "getCardTypeById") {
+        // one column, as the repository method returns it
+        const found = CARD_TYPE_BY_ID[String(arg)];
+        return found === undefined ? null : found;
       }
       if (name === "getDocumentsWithoutAdhaar") {
         // JSON_ARRAYAGG comes back as a string, not an array.
@@ -439,6 +450,62 @@ describe("B3 writes: changing sensitive data", () => {
         await call("POST", "/employee", DIRECTORY(), { employee_name: "x", salary: 1 })
       )
     );
+  });
+});
+
+describe("B3 writes: acting on a sensitive document by id", () => {
+  // The bodies say nothing sensitive; the TARGET is what makes them so.
+  const statusOf = (document_id) => ({ document_id, status: 0 });
+  const verifyOf = (document_id) => ({ document_id, is_verified: 1 });
+
+  it("an Aadhaar status update is denied without edit_employee_sensitive", async () => {
+    const r = await call("POST", "/document/update-status", DIRECTORY(), statusOf(AADHAAR_DOC.document_id));
+    assert.ok(isPermissionRefusal(r), r.text);
+    assert.equal(lastWrite, undefined, "the usecase must never have been called");
+  });
+
+  it("a PAN verification update is denied without it", async () => {
+    const r = await call("POST", "/document/update-document", DIRECTORY(), verifyOf(PAN_DOC.document_id));
+    assert.ok(isPermissionRefusal(r), r.text);
+    assert.equal(lastWrite, undefined);
+  });
+
+  it("HR Executive succeeds on both", async () => {
+    const a = await call("POST", "/document/update-status", HR(), statusOf(AADHAAR_DOC.document_id));
+    assert.equal(a.status, 200);
+    const b = await call("POST", "/document/update-document", HR(), verifyOf(PAN_DOC.document_id));
+    assert.equal(b.status, 200);
+    assert.equal(lastWrite.document_id, PAN_DOC.document_id);
+  });
+
+  it("admin succeeds through the same bypass", async () => {
+    const r = await call("POST", "/document/update-status", ADMIN(), statusOf(AADHAAR_DOC.document_id));
+    assert.equal(r.status, 200);
+  });
+
+  it("an ordinary document still works on add_documents alone", async () => {
+    const a = await call("POST", "/document/update-status", DIRECTORY(), statusOf(ORDINARY_DOC.document_id));
+    assert.equal(a.status, 200);
+    assert.equal(lastWrite.document_id, ORDINARY_DOC.document_id);
+    const b = await call("POST", "/document/update-document", DIRECTORY(), verifyOf(ORDINARY_DOC.document_id));
+    assert.equal(b.status, 200);
+  });
+
+  it("a document_id that names nothing is left to the handler, not refused", async () => {
+    const r = await call("POST", "/document/update-status", DIRECTORY(), statusOf(9999));
+    assert.equal(r.status, 200);
+  });
+
+  it("the check never loads the document itself", async () => {
+    // The guard's resolver is the type-only lookup; if it ever reached
+    // getDocumentById the S3 path would be in play. Assert the narrow method
+    // exists on the repository and returns a scalar, not a row.
+    const repo = require("../repository/document")({ query: (sql, params, cb) => {
+      assert.ok(/SELECT card_type FROM new_employee_documents/.test(sql));
+      assert.ok(!/\*/.test(sql), "the type lookup must not select the whole row");
+      cb(null, [{ card_type: 1 }]);
+    } });
+    assert.equal(await repo.getCardTypeById(1), 1);
   });
 });
 

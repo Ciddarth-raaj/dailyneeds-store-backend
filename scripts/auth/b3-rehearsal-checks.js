@@ -53,6 +53,15 @@ const DIRECTORY = split(accounts.B3_DIRECTORY);
 const ADMIN = split(accounts.B3_ADMIN);
 const TARGET_EMPLOYEE = accounts.B3_TARGET_EMPLOYEE;
 const TARGET_SALARY = accounts.B3_TARGET_SALARY;
+// Documents acted on BY ID. Their current status and verification flag are
+// written back unchanged, so the checks prove the guard without editing the
+// copy. The ordinary document is optional: a restored copy may contain only
+// Aadhaar rows, since that is the only type the UI offers.
+const SENSITIVE_DOC = accounts.B3_SENSITIVE_DOCUMENT;
+const SENSITIVE_DOC_STATUS = accounts.B3_SENSITIVE_DOCUMENT_STATUS;
+const SENSITIVE_DOC_VERIFIED = accounts.B3_SENSITIVE_DOCUMENT_VERIFIED;
+const ORDINARY_DOC = accounts.B3_ORDINARY_DOCUMENT;
+const ORDINARY_DOC_STATUS = accounts.B3_ORDINARY_DOCUMENT_STATUS;
 
 /** Any of these appearing as a JSON key is a leak. */
 const SENSITIVE_KEY_RE =
@@ -72,10 +81,13 @@ const DOCUMENT_READS = [
 
 // 3 logins + HR reads(4) + HR sensitive present + directory reads(4x2:
 // reachable and clean) + directory ordinary fields + document reads(2x2)
-// + admin reads(2) + write checks(3) + B1 + B2
+// + admin reads(2) + employee write checks(3) + B1 + B2
+// + document-target checks: 3 always (two refusals and the HR success), plus
+//   1 when the copy has a non-sensitive document to act on.
+const DOCUMENT_TARGET_CHECKS = 3 + (ORDINARY_DOC ? 1 : 0);
 const EXPECTED_CHECKS =
   3 + EMPLOYEE_READS.length + 1 + EMPLOYEE_READS.length * 2 + 1 +
-  DOCUMENT_READS.length * 2 + 2 + 3 + 1 + 1;
+  DOCUMENT_READS.length * 2 + 2 + 3 + DOCUMENT_TARGET_CHECKS + 1 + 1;
 
 let pass = 0;
 let fail = 0;
@@ -225,6 +237,50 @@ async function run() {
     ? await request("POST", "/employee/updatedata", { token: hrToken, body: sensitiveWrite })
     : { status: 0, body: {}, text: "" };
   ok("authorised sensitive write succeeds", reached(allowed, hrToken), `status=${allowed.status} ${allowed.text.slice(0, 80)}`);
+
+  console.log("\n-- writes whose TARGET is a sensitive document");
+  if (!SENSITIVE_DOC) throw new Error("ACCOUNTS is missing B3_SENSITIVE_DOCUMENT");
+  const statusBody = (id, status) => ({ document_id: Number(id), status: Number(status) });
+  const verifyBody = (id, v) => ({ document_id: Number(id), is_verified: Number(v) });
+
+  const docDenied = dirToken
+    ? await request("POST", "/document/update-status", {
+        token: dirToken,
+        body: statusBody(SENSITIVE_DOC, SENSITIVE_DOC_STATUS),
+      })
+    : { status: 0, body: {}, text: "" };
+  ok("Aadhaar/PAN status update is refused without edit_employee_sensitive",
+    Boolean(dirToken) && permissionDenied(docDenied), `status=${docDenied.status} ${docDenied.text.slice(0, 80)}`);
+
+  const verDenied = dirToken
+    ? await request("POST", "/document/update-document", {
+        token: dirToken,
+        body: verifyBody(SENSITIVE_DOC, SENSITIVE_DOC_VERIFIED),
+      })
+    : { status: 0, body: {}, text: "" };
+  ok("Aadhaar/PAN verification update is refused without it",
+    Boolean(dirToken) && permissionDenied(verDenied), `status=${verDenied.status} ${verDenied.text.slice(0, 80)}`);
+
+  const docAllowed = hrToken
+    ? await request("POST", "/document/update-status", {
+        token: hrToken,
+        body: statusBody(SENSITIVE_DOC, SENSITIVE_DOC_STATUS),
+      })
+    : { status: 0, body: {}, text: "" };
+  ok("HR succeeds on the same document", reached(docAllowed, hrToken), `status=${docAllowed.status}`);
+
+  if (ORDINARY_DOC) {
+    const ordinaryDoc = dirToken
+      ? await request("POST", "/document/update-status", {
+          token: dirToken,
+          body: statusBody(ORDINARY_DOC, ORDINARY_DOC_STATUS),
+        })
+      : { status: 0, body: {}, text: "" };
+    ok("an ordinary document still updates on add_documents alone",
+      reached(ordinaryDoc, dirToken), `status=${ordinaryDoc.status} ${ordinaryDoc.text.slice(0, 80)}`);
+  } else {
+    console.log("  INFO  this copy has no non-sensitive document; that check is not counted");
+  }
 
   console.log("\n-- B1 / B2 unchanged");
   const anon = await request("GET", "/employee/employees");

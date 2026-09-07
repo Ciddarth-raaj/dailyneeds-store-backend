@@ -182,7 +182,49 @@ module.exports = (permissions) => {
     });
   };
 
-  return { filterResponse, guardWrite };
+  /**
+   * Express middleware: refuse a write whose TARGET is a sensitive document,
+   * even though the request body says nothing sensitive itself.
+   *
+   * `/document/update-status` and `/document/update-document` carry only a
+   * document_id and a flag, so `guardWrite` above sees nothing to object to -
+   * but changing the status or the verification of someone's Aadhaar record
+   * is a sensitive action, and `add_documents` alone should not carry it.
+   *
+   * `resolveCardType(document_id)` must return the document's TYPE and
+   * nothing else: the point of the check is to keep the row's card number
+   * and S3 path away from a caller who may not see them, so it cannot be
+   * implemented by loading the document. A document_id that resolves to
+   * nothing is left to the handler, which answers for a missing row as it
+   * always did.
+   */
+  const guardTarget = (resolveCardType) => async (req, res, next) => {
+    const documentId = req.body && req.body.document_id;
+    if (documentId === undefined || documentId === null) return next();
+
+    let cardType;
+    try {
+      cardType = await resolveCardType(documentId);
+    } catch (err) {
+      return res.status(500).json({ code: 500, msg: "An error occurred !" });
+    }
+    if (!isSensitiveCardType(cardType)) return next();
+
+    let allowed = false;
+    try {
+      allowed = await permissions.has(req, P.EDIT_EMPLOYEE_SENSITIVE);
+    } catch (err) {
+      return res.status(500).json({ code: 500, msg: "An error occurred !" });
+    }
+    if (allowed) return next();
+
+    return res.status(403).json({
+      code: 403,
+      msg: "You do not have permission to perform this action",
+    });
+  };
+
+  return { filterResponse, guardWrite, guardTarget };
 };
 
 // Exposed for tests; the middleware above is the supported entry point.

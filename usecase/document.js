@@ -23,6 +23,17 @@ class DocumentUsecase {
       }
     });
   }
+  /** Stage 0B / B3: the document's type alone, for the write guard. */
+  getCardTypeById(document_id) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const data = await this.documentRepo.getCardTypeById(document_id);
+        resolve(data);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
   getAllDocuments() {
     return new Promise(async (resolve, reject) => {
       try {
