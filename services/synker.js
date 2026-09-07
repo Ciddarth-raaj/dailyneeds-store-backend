@@ -9,6 +9,7 @@ const { capitalizeWords } = require("../utils/string");
 
 const logger = require("../utils/logger");
 const deliumConfig = require("../config/delium");
+const lifecycleConfig = require("../config/lifecycle");
 // const GOFRUGAL_API_KEY =
 //   "92389031420AEF2B22174FA933F178040AFD9395A5E9C3F013A74C4CA152CE786116998975B7AF31";
 
@@ -61,13 +62,23 @@ class Synker {
       })
     );
 
-    cronService.register(
-      "employee_sync",
-      CRON_SYNTAX_EMPLOYEE,
-      wrap("employee_sync", "/employee/sync", async () => {
-        await this.syncDigismeEmployees();
-      })
-    );
+    // Stage 0C: while the pause is on, the employee job is not registered at
+    // all, so it is neither scheduled nor listed as skipped by CRON_DISABLED.
+    // The startup line below is the operator's proof. Every other job here is
+    // unaffected.
+    if (lifecycleConfig.digisme.employeeSync) {
+      cronService.register(
+        "employee_sync",
+        CRON_SYNTAX_EMPLOYEE,
+        wrap("employee_sync", "/employee/sync", async () => {
+          await this.syncDigismeEmployees();
+        })
+      );
+    } else {
+      console.log(
+        `[CRON] "employee_sync" NOT REGISTERED - ${lifecycleConfig.PAUSED_MESSAGE}. Set DIGISME_EMPLOYEE_SYNC=on to resume.`
+      );
+    }
 
     cronService.register(
       "stock_holding_report_sync",
@@ -139,6 +150,26 @@ class Synker {
   }
 
   async syncDigismeEmployees() {
+    // Stage 0C: paused. This returns BEFORE the Digisme token request, the
+    // employee fetch, and every write the routine performs - designation,
+    // department, outlet, employee and login provisioning alike - so a
+    // paused sync cannot touch the network or the database at all.
+    //
+    // It is checked here as well as at the cron registration because this
+    // function is also reachable from POST /employee/sync. One guard at the
+    // choke point is what makes both callers safe.
+    if (!lifecycleConfig.digisme.employeeSync) {
+      logger.Log({
+        level: logger.LEVEL.INFO,
+        component: "SERVICE.SYNKER",
+        code: "SERVICE.SYNKER.DIGISME-EMPLOYEES-PAUSED",
+        description: lifecycleConfig.PAUSED_MESSAGE,
+        category: "",
+        ref: {},
+      });
+      return { code: 423, msg: lifecycleConfig.PAUSED_MESSAGE, paused: true };
+    }
+
     try {
       const GENDER_MAP = {
         FEMALE: "F",
