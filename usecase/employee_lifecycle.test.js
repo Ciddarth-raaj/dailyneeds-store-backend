@@ -722,6 +722,39 @@ describe("reconcileAll", () => {
 });
 
 /* ============================================ the shared date-parsing rule */
+describe("the dry-run reporter", () => {
+  const src = () => fs.readFileSync(path.join(__dirname, "..", "scripts/auth/c1c-dry-run.js"), "utf8");
+
+  it("issues no statement that could write, and opens no transaction", () => {
+    // Comments and log strings are stripped first, so the check is about SQL
+    // the script could actually run - not about the word "UPDATE" appearing
+    // in a line it prints.
+    const code = src()
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "")
+      .replace(/`[^`]*`/g, "``")
+      .replace(/"[^"]*"/g, '""')
+      .replace(/'[^']*'/g, "''");
+    for (const verb of [
+      "INSERT", "UPDATE", "DELETE", "ALTER", "DROP", "TRUNCATE", "REPLACE",
+      "beginTransaction", "START TRANSACTION",
+    ]) {
+      assert.ok(!new RegExp(`\\b${verb}\\b`, "i").test(code), `dry run must not contain ${verb}`);
+    }
+  });
+
+  it("reuses the real decide(), so it cannot drift from the reconciler", () => {
+    assert.match(src(), /require\(path\.join\(ROOT, "usecase\/employee_lifecycle"\)\)/);
+    assert.match(src(), /\bdecide\(employee, latest\)/);
+    // and the same date rule the backfill used
+    assert.match(src(), /require\(path\.join\(ROOT, "utils\/joining_date"\)\)/);
+  });
+
+  it("prints no employee name", () => {
+    assert.ok(!/employee_name/.test(src()), "the report is by id and date only");
+  });
+});
+
 describe("the joining-date rule is the same one C1b ran against production", () => {
   it("utils/joining_date.js and scripts/auth/c1b-backfill.js agree character for character", () => {
     const util = require("../utils/joining_date");
