@@ -41,6 +41,12 @@ module.exports = {
   // twelve digits. Declared by the C2 Aadhaar migration, granted to nobody.
   VIEW_AADHAAR_FULL: "view_aadhaar_full",
 
+  // Stage 0C / C2. Running a paid external bank check, and accepting a name
+  // that did not quite match, are separate decisions from editing an
+  // employee. Declared by the C2 Sandbox migration, granted to nobody.
+  VERIFY_EMPLOYEE_BANK: "verify_employee_bank",
+  CONFIRM_BANK_NAME_MISMATCH: "confirm_bank_name_mismatch",
+
   ADD_EMPLOYEES: "add_employees",
   VIEW_BANKS: "view_banks",
   ADD_BANKS: "add_banks",

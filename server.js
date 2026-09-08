@@ -172,6 +172,9 @@ class Server {
     this.employeeAadhaarRepo = require("./repository/employee_aadhaar")(
       this.mysql.connection
     );
+    this.employeeBankRepo = require("./repository/employee_bank")(
+      this.mysql.connection
+    );
     this.shiftRepo = require("./repository/shift")(this.mysql.connection);
     this.storeRepo = require("./repository/store")(this.mysql.connection);
     this.outletRepo = require("./repository/outlet")(this.mysql.connection);
@@ -406,7 +409,20 @@ class Server {
     // Stage 0C / C2. The lifecycle usecase and its repository are both here
     // so the four HR actions can run C1c on their OWN transaction - the
     // master change and the period it implies commit or roll back together.
+    // Stage 0C / C2. Aadhaar and Bank share the GST integration's Sandbox
+    // authentication - one token cache, one set of credentials - while their
+    // business logic stays in separate modules. GST is untouched.
+    this.sandboxClient = require("./services/sandbox_client")(this.sandboxService);
+    this.sandboxAadhaarService = require("./services/sandbox_aadhaar")(this.sandboxClient);
+    this.sandboxBankService = require("./services/sandbox_bank")(this.sandboxClient);
+
     this.employeeAadhaarUsecase = require("./usecase/employee_aadhaar")(
+      this.employeeAadhaarRepo,
+      this.sandboxAadhaarService
+    );
+    this.employeeBankUsecase = require("./usecase/employee_bank")(
+      this.employeeBankRepo,
+      this.sandboxBankService,
       this.employeeAadhaarRepo
     );
     this.employeeMasterUsecase = require("./usecase/employee_master")(
@@ -730,7 +746,8 @@ class Server {
       this.employeeMasterUsecase,
       this.permissions,
       this.sensitive,
-      this.employeeAadhaarUsecase
+      this.employeeAadhaarUsecase,
+      this.employeeBankUsecase
     );
     const shiftRouter = require("./routes/shift")(this.shiftUsecase, this.permissions);
     const storeRouter = require("./routes/store")(this.storeUsecase);

@@ -1,6 +1,9 @@
+const nodeCrypto = require("crypto");
 const logger = require("../utils/logger");
 const crypto = require("../services/aadhaar_crypto");
 const config = require("../config/aadhaar");
+const kycConfig = require("../config/sandbox_kyc");
+const { SandboxError, FAILURE } = require("../services/sandbox_client");
 
 /**
  * Stage 0C / C2 — Aadhaar verification, and what it is for.
@@ -35,7 +38,12 @@ const config = require("../config/aadhaar");
  * about a person.
  */
 const DEMOGRAPHIC_MAP = {
+  // Sandbox's field names, verbatim, so the mapping needs no translation
+  // layer in between to get out of step. `date_of_birth` is what the OKYC
+  // verify response actually carries; `dob` is accepted too because the
+  // manual path uses the column name.
   name: "employee_name",
+  date_of_birth: "dob",
   dob: "dob",
   gender: "gender",
   address: "permanent_address",
@@ -70,8 +78,255 @@ const isoDate = (value) => {
 };
 
 class EmployeeAadhaarUsecase {
-  constructor(aadhaarRepo) {
+  /**
+   * `sandboxAadhaar` is the provider boundary. When it is absent or disabled
+   * the OTP flow refuses rather than falling back to anything: a Sandbox
+   * outage must never quietly become a manual attestation.
+   */
+  constructor(aadhaarRepo, sandboxAadhaar) {
     this.repo = aadhaarRepo;
+    this.provider = sandboxAadhaar || null;
+  }
+
+  /** An opaque handle. The numeric id is a sequence, and therefore guessable. */
+  static newSessionToken() {
+    return nodeCrypto.randomBytes(32).toString("hex");
+  }
+
+  _assertProvider() {
+    if (!this.provider || !this.provider.isEnabled()) {
+      throw new SandboxError(
+        FAILURE.NOT_CONFIGURED,
+        "Aadhaar verification is not available: the Sandbox KYC provider is not configured on this server",
+        503
+      );
+    }
+  }
+
+  /**
+   * Step 1. Sends an OTP to the mobile registered against the Aadhaar and
+   * opens a local session.
+   *
+   * The number is validated and checksummed BEFORE the provider is called, so
+   * a typo costs nothing, and is reduced to fingerprint + ciphertext + last
+   * four immediately afterwards. Nothing downstream holds it.
+   */
+  async initiate(input, { actorEmployeeId = null, ip = null } = {}) {
+    this.assertEnabled();
+    this._assertProvider();
+
+    if (input.consent_given !== true) {
+      throw new ValidationError(
+        "consent_given must be true: an Aadhaar may not be sent for verification without the holder's consent"
+      );
+    }
+
+    // Throws a ValidationError naming the problem and never the number.
+    const digits = crypto.normalise(input.aadhaar_number);
+    const derived = crypto.derive(digits);
+
+    // The provider call happens before anything is written, so a refusal
+    // leaves no half-open session behind.
+    const started = await this.provider.generateOtp(digits);
+
+    const expiresAt = new Date(Date.now() + config.verificationTtlMinutes * 60 * 1000);
+    const sessionToken = EmployeeAadhaarUsecase.newSessionToken();
+    const verificationId = await this.repo.createVerification({
+      aadhaar_fingerprint: derived.fingerprint,
+      aadhaar_last4: derived.last4,
+      aadhaar_ciphertext: derived.ciphertext,
+      aadhaar_iv: derived.iv,
+      aadhaar_auth_tag: derived.auth_tag,
+      key_version: derived.key_version,
+      status: "initiated",
+      provider: "sandbox",
+      provider_reference_id: started.reference_id,
+      provider_transaction_id: started.transaction_id,
+      consent_given: 1,
+      consent_version: config.consentVersion,
+      consent_actor_employee_id: actorEmployeeId,
+      consent_ip: ip,
+      consent_at: new Date(),
+      initiated_by_employee_id: actorEmployeeId,
+      initiated_at: new Date(),
+      session_token: sessionToken,
+      expires_at: expiresAt,
+    });
+
+    this._log(
+      logger.LEVEL.INFO,
+      "OTP-SENT",
+      `verification ${verificationId} initiated for Aadhaar ending ${derived.last4}`,
+      { verificationId, last4: derived.last4, actorEmployeeId }
+    );
+
+    return {
+      code: 200,
+      verification_token: sessionToken,
+      aadhaar_last4: derived.last4,
+      masked_aadhaar: crypto.mask(digits),
+      status: "initiated",
+      expires_at: expiresAt.toISOString(),
+      message: "An OTP has been sent to the mobile number registered against this Aadhaar.",
+    };
+  }
+
+  /**
+   * Step 2. Exchanges the OTP for verified demographics, and only then
+   * answers the duplicate question.
+   *
+   * THE OTP IS NEVER STORED, NEVER LOGGED AND NEVER ECHOED. It exists as an
+   * argument to one provider call and nowhere else - not on the session row,
+   * not in an error message, not in a log line.
+   */
+  async verifyOtp(input, { actorEmployeeId = null } = {}) {
+    this.assertEnabled();
+    this._assertProvider();
+
+    const token = String(input.verification_token || "").trim();
+    if (!/^[0-9a-f]{64}$/.test(token)) throw new ValidationError("verification_token is required");
+    if (input.otp === undefined || input.otp === null || String(input.otp).trim() === "") {
+      throw new ValidationError("otp is required");
+    }
+
+    const session = await this.repo.findVerificationByToken(token);
+    if (!session) throw new ValidationError("that verification session does not exist", 404);
+    if (session.status !== "initiated") {
+      throw new ConflictError(`that verification session has already been ${session.status}`);
+    }
+    if (new Date(session.expires_at).getTime() < Date.now()) {
+      await this.repo.updateVerification(session.verification_id, "initiated", {
+        status: "expired",
+        failure_category: "session_expired",
+      });
+      throw new ValidationError("that verification session has expired; start again");
+    }
+    // The session belongs to whoever started it. Another HR user cannot
+    // finish somebody else's Aadhaar check.
+    if (
+      session.initiated_by_employee_id !== null &&
+      actorEmployeeId !== null &&
+      Number(session.initiated_by_employee_id) !== Number(actorEmployeeId)
+    ) {
+      throw new ConflictError("that verification session was started by another user");
+    }
+    if (Number(session.otp_attempts) >= 5) {
+      await this.repo.updateVerification(session.verification_id, "initiated", {
+        status: "failed",
+        failure_category: "too_many_otp_attempts",
+      });
+      throw new ValidationError("too many OTP attempts; start the verification again");
+    }
+
+    await this.repo.incrementOtpAttempts(session.verification_id);
+
+    let verified;
+    try {
+      verified = await this.provider.verifyOtp(session.provider_reference_id, String(input.otp).trim());
+    } catch (err) {
+      const category = err instanceof SandboxError ? err.category : "provider_error";
+      // A failure is recorded but the session is only CLOSED when it cannot
+      // be retried; a wrong digit should let HR try again.
+      const terminal = category !== FAILURE.INVALID_REQUEST;
+      if (terminal) {
+        await this.repo.updateVerification(session.verification_id, "initiated", {
+          status: "failed",
+          failure_category: category,
+        });
+      }
+      this._log(
+        logger.LEVEL.ERROR,
+        "OTP-VERIFY-FAILED",
+        `verification ${session.verification_id} failed: ${category}`,
+        { verificationId: session.verification_id, category, actorEmployeeId }
+      );
+      throw err;
+    }
+
+    const demographics = EmployeeAadhaarUsecase.stripAadhaarKeys(verified.demographics);
+    const updated = await this.repo.updateVerification(session.verification_id, "initiated", {
+      status: "verified",
+      verified_at: new Date(),
+      provider_transaction_id: verified.transaction_id,
+      demographics_json: JSON.stringify(demographics),
+    });
+    if (updated === 0) throw new ConflictError("that verification session changed while it was being verified");
+
+    const existing = await this.repo.findByFingerprint(session.aadhaar_fingerprint);
+    if (existing) {
+      // There is nobody to create, so there is no reason to keep holding an
+      // encrypted Aadhaar on this session until it expires.
+      await this.repo.updateVerification(session.verification_id, "verified", {
+        aadhaar_ciphertext: null,
+        aadhaar_iv: null,
+        aadhaar_auth_tag: null,
+      });
+    }
+    this._log(
+      logger.LEVEL.INFO,
+      "VERIFIED",
+      `verification ${session.verification_id} verified for Aadhaar ending ${session.aadhaar_last4}` +
+        (existing ? `; already held by employee ${existing.employee_id}` : ""),
+      { verificationId: session.verification_id, last4: session.aadhaar_last4, actorEmployeeId }
+    );
+
+    return EmployeeAadhaarUsecase.decision({
+      verificationId: session.verification_id,
+      last4: session.aadhaar_last4,
+      demographics,
+      existing,
+    });
+  }
+
+  /** Drops anything that looks like it carries the number itself. */
+  static stripAadhaarKeys(demographics) {
+    const out = { ...(demographics || {}) };
+    for (const k of Object.keys(out)) {
+      if (/aadhaar|uid|vid/i.test(k)) delete out[k];
+    }
+    return out;
+  }
+
+  /**
+   * The create / rejoin / already_employed answer. Only ever produced after a
+   * verification the provider confirmed - there is no path to this from an
+   * unverified session.
+   */
+  static decision({ verificationId, last4, demographics, existing }) {
+    const suggested = EmployeeAadhaarUsecase.mapDemographics(demographics);
+    const base = {
+      code: 200,
+      verification_id: verificationId,
+      aadhaar_last4: last4,
+      status: "verified",
+      verified_demographics: demographics,
+      suggested_employee_fields: suggested,
+    };
+    if (!existing) {
+      return {
+        ...base,
+        duplicate: false,
+        next_action: "create",
+        message: "No existing employee holds this Aadhaar. Confirm the details and create the employee.",
+      };
+    }
+    const active = Number(existing.employee_status) === 1;
+    return {
+      ...base,
+      duplicate: true,
+      employee_id: existing.employee_id,
+      existing_employee: {
+        employee_id: existing.employee_id,
+        is_active: active,
+        latest_period_no: existing.period_no,
+        latest_period_state: existing.period_state,
+        last_ended_on: existing.last_ended_on,
+      },
+      next_action: active ? "already_employed" : "rejoin",
+      message: active
+        ? `This Aadhaar already belongs to employee ${existing.employee_id}, who is currently employed. Do not create a second record.`
+        : `This Aadhaar already belongs to employee ${existing.employee_id}, who has left. Use Rejoin on that employee_id rather than creating a new one.`,
+    };
   }
 
   _log(level, code, description, ref = {}) {
@@ -103,6 +358,7 @@ class EmployeeAadhaarUsecase {
       const value = demographics[from];
       if (value === undefined || value === null || String(value).trim() === "") continue;
       if (to === "dob") {
+        if (out.dob) continue; // date_of_birth wins; dob is the fallback spelling
         const d = isoDate(value);
         if (d) out.dob = d;
         continue;
@@ -118,14 +374,20 @@ class EmployeeAadhaarUsecase {
   }
 
   /**
-   * Records a verification and answers the duplicate question.
-   *
-   * The number is normalised and checksummed, then immediately reduced to a
-   * fingerprint, last four, and ciphertext. From this point on nothing in the
-   * process holds it.
+   * The MANUAL path: an authorised HR user attests to an Aadhaar they checked
+   * themselves. OFF unless AADHAAR_ALLOW_MANUAL is set, never a fallback for
+   * a Sandbox outage, and stored with `provider = 'manual'` so it can never
+   * be mistaken for a Sandbox-verified record.
    */
   async verify(input, { actorEmployeeId = null, ip = null } = {}) {
     this.assertEnabled();
+    if (!kycConfig.allowManualAadhaar) {
+      throw new ValidationError(
+        "Manual Aadhaar attestation is disabled on this server. Use the Sandbox OTP flow: " +
+          "POST /hr/aadhaar/initiate then POST /hr/aadhaar/verify-otp.",
+        409
+      );
+    }
 
     if (input.consent_given !== true) {
       throw new ValidationError(
@@ -154,7 +416,7 @@ class EmployeeAadhaarUsecase {
       aadhaar_auth_tag: existing ? null : derived.auth_tag,
       key_version: derived.key_version,
       status: "verified",
-      provider: input.provider || config.provider,
+      provider: "manual",
       provider_reference: input.provider_reference || null,
       verified_at: new Date(),
       consent_given: 1,
@@ -289,6 +551,33 @@ class EmployeeAadhaarUsecase {
     };
   }
 
+  /**
+   * The mappable demographics of a verification, WITHOUT consuming it.
+   *
+   * Create Employee needs these BEFORE it inserts the row, not after:
+   * `new_employee.employee_name` is NOT NULL, so an HR user who verified an
+   * Aadhaar and let the name come from it would otherwise be inserting a NULL
+   * name and only filling it in a moment later. Reading them up front is what
+   * makes "verify, then create without retyping the name" actually work.
+   *
+   * This validates nothing and changes nothing; `attachToEmployee` remains the
+   * only thing that may consume a verification, and it re-reads the same row
+   * under a lock.
+   */
+  async previewDemographics(verificationId) {
+    const v = await this.repo.getVerificationDemographics(verificationId);
+    if (!v) return {};
+    let demographics = v.demographics_json;
+    if (typeof demographics === "string") {
+      try {
+        demographics = JSON.parse(demographics);
+      } catch (err) {
+        demographics = null;
+      }
+    }
+    return EmployeeAadhaarUsecase.mapDemographics(demographics);
+  }
+
   /** The display record. Last four and provenance; never the number. */
   async getIdentity(employeeId) {
     return this.repo.getIdentity(employeeId);
@@ -322,7 +611,8 @@ class EmployeeAadhaarUsecase {
   }
 }
 
-module.exports = (aadhaarRepo) => new EmployeeAadhaarUsecase(aadhaarRepo);
+module.exports = (aadhaarRepo, sandboxAadhaar) =>
+  new EmployeeAadhaarUsecase(aadhaarRepo, sandboxAadhaar);
 module.exports.EmployeeAadhaarUsecase = EmployeeAadhaarUsecase;
 module.exports.DEMOGRAPHIC_MAP = DEMOGRAPHIC_MAP;
 module.exports.ValidationError = ValidationError;

@@ -49,6 +49,43 @@ class EmployeeAadhaarRepository {
 
   /* ------------------------------------------------------- verification -- */
 
+  /** A session by its opaque token; the numeric id is never the client's handle. */
+  async findVerificationByToken(sessionToken) {
+    const rows = await this._read(
+      "FIND-VERIFICATION-BY-TOKEN",
+      `SELECT verification_id, aadhaar_fingerprint, aadhaar_last4,
+              aadhaar_ciphertext, aadhaar_iv, aadhaar_auth_tag, key_version,
+              status, provider, provider_reference_id, provider_transaction_id,
+              verified_at, consent_given, demographics_json, employee_id,
+              otp_attempts, initiated_by_employee_id, expires_at
+         FROM employee_aadhaar_verification WHERE session_token = ?`,
+      [sessionToken]
+    );
+    return rows[0] || null;
+  }
+
+  /** Records the outcome of an OTP exchange. Guarded on the state it expects. */
+  async updateVerification(verificationId, expectedStatus, patch) {
+    const columns = Object.keys(patch);
+    const rows = await this._read(
+      "UPDATE-VERIFICATION",
+      `UPDATE employee_aadhaar_verification
+          SET ${columns.map((c) => `\`${c}\` = ?`).join(", ")}
+        WHERE verification_id = ? AND status = ?`,
+      [...columns.map((c) => patch[c]), verificationId, expectedStatus]
+    );
+    return rows.affectedRows;
+  }
+
+  async incrementOtpAttempts(verificationId) {
+    const rows = await this._read(
+      "INCREMENT-OTP-ATTEMPTS",
+      "UPDATE employee_aadhaar_verification SET otp_attempts = otp_attempts + 1 WHERE verification_id = ?",
+      [verificationId]
+    );
+    return rows.affectedRows;
+  }
+
   async createVerification(row) {
     const columns = Object.keys(row);
     const rows = await this._read(
@@ -97,6 +134,24 @@ class EmployeeAadhaarRepository {
   }
 
   /** The audit view. No ciphertext, no fingerprint - last four only. */
+  /**
+   * Just the verified demographic payload, for Create Employee's pre-fill.
+   *
+   * `getVerification` above is the DISPLAY read and deliberately does not
+   * select this column - a status screen has no business carrying somebody's
+   * address. Keeping the two apart is why this is its own query rather than
+   * one more column on that one.
+   */
+  async getVerificationDemographics(verificationId) {
+    const rows = await this._read(
+      "GET-VERIFICATION-DEMOGRAPHICS",
+      `SELECT verification_id, status, demographics_json
+         FROM employee_aadhaar_verification WHERE verification_id = ?`,
+      [verificationId]
+    );
+    return rows[0] || null;
+  }
+
   async getVerification(verificationId) {
     const rows = await this._read(
       "GET-VERIFICATION",

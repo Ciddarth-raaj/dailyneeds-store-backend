@@ -43,6 +43,7 @@ class World {
     this.nextEventId = 1;
     this.nextResignationId = 1;
     this.resignations = [];
+    this.inserts = [];
     this.failNextEvent = false;
     this.failNextReconcile = false;
   }
@@ -90,6 +91,13 @@ function makeMasterRepo(world) {
     },
     async createEmployee(tx, fields) {
       if ("employee_id" in fields) throw new Error("createEmployee must not be given an employee_id");
+      // new_employee.employee_name is NOT NULL. Enforcing it here is what
+      // stops a create that means to take the name from a verified Aadhaar
+      // from passing in a fake and failing against MySQL.
+      if (fields.employee_name === undefined || fields.employee_name === null) {
+        throw new Error("ER_BAD_NULL_ERROR: Column 'employee_name' cannot be null");
+      }
+      world.inserts.push({ ...fields });
       const id = world.nextEmployeeId++;
       world.employees.set(id, { employee_id: id, ...fields });
       record(tx, () => world.employees.delete(id));
@@ -822,7 +830,15 @@ describe("Create with a verified Aadhaar", () => {
         return 1;
       },
       async getVerification(id) {
-        return world.verifications.find((x) => x.verification_id === Number(id)) || null;
+        // The DISPLAY read: deliberately narrow, exactly as the real query is.
+        const v = world.verifications.find((x) => x.verification_id === Number(id));
+        if (!v) return null;
+        const { demographics_json, aadhaar_ciphertext, aadhaar_iv, aadhaar_auth_tag, ...display } = v;
+        return display;
+      },
+      async getVerificationDemographics(id) {
+        const v = world.verifications.find((x) => x.verification_id === Number(id));
+        return v ? { verification_id: v.verification_id, status: v.status, demographics_json: v.demographics_json } : null;
       },
       async findByFingerprint(fp) {
         const i = world.identities.find((x) => x.aadhaar_fingerprint === fp);
@@ -851,8 +867,35 @@ describe("Create with a verified Aadhaar", () => {
       async getIdentityForDecrypt(employeeId) {
         return world.identities.find((x) => x.employee_id === Number(employeeId)) || null;
       },
+      async findVerificationByToken(token) {
+        const v = world.verifications.find((x) => x.session_token === token);
+        return v ? { ...v } : null;
+      },
+      async updateVerification(id, expectedStatus, patch) {
+        const v = world.verifications.find((x) => x.verification_id === Number(id));
+        if (!v || v.status !== expectedStatus) return 0;
+        Object.assign(v, patch);
+        return 1;
+      },
+      async incrementOtpAttempts(id) {
+        const v = world.verifications.find((x) => x.verification_id === Number(id));
+        if (v) v.otp_attempts = Number(v.otp_attempts || 0) + 1;
+        return 1;
+      },
     };
-    return aadhaarUsecaseFactory(repo);
+    // A stand-in for services/sandbox_aadhaar.js. No HTTP, no OTP delivery -
+    // what is under test here is the create, not the provider.
+    const provider = {
+      isEnabled: () => true,
+      demographics: { name: "Verified Person", date_of_birth: "01-02-1990", gender: "MALE", address: "12 Main Road" },
+      async generateOtp() {
+        return { reference_id: "REF-TEST", transaction_id: "TXN-TEST" };
+      },
+      async verifyOtp() {
+        return { transaction_id: "TXN-TEST", demographics: this.demographics };
+      },
+    };
+    return aadhaarUsecaseFactory(repo, provider);
   };
 
   const buildWithAadhaar = () => {
@@ -864,15 +907,25 @@ describe("Create with a verified Aadhaar", () => {
     return { world, uc, aadhaar };
   };
 
-  const VERIFY = {
-    aadhaar_number: AADHAAR,
-    consent_given: true,
-    demographics: { name: "Verified Person", dob: "01-02-1990", gender: "MALE", address: "12 Main Road" },
+  const VERIFY = { aadhaar_number: AADHAAR, consent_given: true };
+
+  /**
+   * A verification produced the way production produces one: OTP out, OTP
+   * back. The manual attestation path is off by default now, so a test that
+   * used it would be testing something no deployment runs.
+   */
+  const verified = async (aadhaar, { actorEmployeeId, demographics } = {}) => {
+    if (demographics) aadhaar.provider.demographics = demographics;
+    const started = await aadhaar.initiate(VERIFY, { actorEmployeeId });
+    return aadhaar.verifyOtp(
+      { verification_token: started.verification_token, otp: "123456" },
+      { actorEmployeeId }
+    );
   };
 
   it("attaches the identity and auto-fills only the mapped fields", async () => {
     const { world, uc, aadhaar } = buildWithAadhaar();
-    const v = await aadhaar.verify(VERIFY, { actorEmployeeId: 7 });
+    const v = await verified(aadhaar, { actorEmployeeId: 7 });
     assert.equal(v.duplicate, false);
 
     const res = await uc.createEmployee(
@@ -892,9 +945,34 @@ describe("Create with a verified Aadhaar", () => {
     assert.deepEqual(shapeOf(world, res.employee_id), [[1, "open", "2026-01-05", null]]);
   });
 
+  it("the verified name is on the INSERT itself, not on a later update", async () => {
+    // `new_employee.employee_name` is NOT NULL, so "verify the Aadhaar, then
+    // create without retyping the name" only works if the demographics are
+    // read BEFORE the insert. Filling them afterwards inserts a NULL name and
+    // fails against real MySQL - which is exactly how this was found.
+    const { world, uc, aadhaar } = buildWithAadhaar();
+    const v = await verified(aadhaar);
+    const res = await uc.createEmployee({
+      ...VALID,
+      employee_name: undefined,
+      date_of_joining: "2026-01-05",
+      aadhaar_verification_id: v.verification_id,
+    });
+    assert.equal(world.inserts.length, 1);
+    assert.equal(world.inserts[0].employee_name, "Verified Person");
+    assert.ok(res.aadhaar.demographic_fields_applied.includes("employee_name"));
+  });
+
+  it("an empty string is not a supplied name either", async () => {
+    const { world, uc, aadhaar } = buildWithAadhaar();
+    const v = await verified(aadhaar);
+    await uc.createEmployee({ ...VALID, employee_name: "   ", aadhaar_verification_id: v.verification_id });
+    assert.equal(world.inserts[0].employee_name, "Verified Person");
+  });
+
   it("a field HR supplied is not overwritten by the verified payload", async () => {
     const { world, uc, aadhaar } = buildWithAadhaar();
-    const v = await aadhaar.verify(VERIFY);
+    const v = await verified(aadhaar);
     const res = await uc.createEmployee({
       ...VALID,
       employee_name: "Name HR Typed",
@@ -907,8 +985,7 @@ describe("Create with a verified Aadhaar", () => {
 
   it("the verified payload can never set a designation, store, salary or status", async () => {
     const { world, uc, aadhaar } = buildWithAadhaar();
-    const v = await aadhaar.verify({
-      ...VERIFY,
+    const v = await verified(aadhaar, {
       demographics: { name: "X", designation_id: 99, store_id: 99, salary: "9", status: 0 },
     });
     const res = await uc.createEmployee({ ...VALID, employee_name: undefined, aadhaar_verification_id: v.verification_id });
@@ -921,13 +998,13 @@ describe("Create with a verified Aadhaar", () => {
 
   it("ONE TRANSACTION: a duplicate Aadhaar rolls the whole create back", async () => {
     const { world, uc, aadhaar } = buildWithAadhaar();
-    const first = await aadhaar.verify(VERIFY);
+    const first = await verified(aadhaar);
     const created = await uc.createEmployee({ ...VALID, aadhaar_verification_id: first.verification_id });
     const employeesBefore = world.employees.size;
 
     // The same person again. Verify now reports the duplicate and holds no
     // ciphertext, so the create cannot proceed.
-    const second = await aadhaar.verify(VERIFY);
+    const second = await verified(aadhaar);
     assert.equal(second.duplicate, true);
     assert.equal(second.existing_employee.employee_id, created.employee_id);
 
@@ -938,7 +1015,7 @@ describe("Create with a verified Aadhaar", () => {
 
   it("ONE TRANSACTION: a lifecycle failure rolls the Aadhaar identity back too", async () => {
     const { world, uc, aadhaar } = buildWithAadhaar();
-    const v = await aadhaar.verify(VERIFY);
+    const v = await verified(aadhaar);
     world.failNextReconcile = true;
     await assert.rejects(
       () => uc.createEmployee({ ...VALID, aadhaar_verification_id: v.verification_id }),
@@ -964,7 +1041,7 @@ describe("Create with a verified Aadhaar", () => {
 
   it("the response carries last4, never the number", async () => {
     const { uc, aadhaar } = buildWithAadhaar();
-    const v = await aadhaar.verify(VERIFY);
+    const v = await verified(aadhaar);
     const res = await uc.createEmployee({ ...VALID, aadhaar_verification_id: v.verification_id });
     assert.ok(!JSON.stringify(res).includes(AADHAAR));
     assert.ok(!JSON.stringify(await uc.getLifecycleHistory(res.employee_id)).includes(AADHAAR));

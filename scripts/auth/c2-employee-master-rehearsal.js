@@ -126,6 +126,47 @@ const cutoffOf = async (id) =>
 
 const STORE = 4242; // a store id no production employee uses
 
+/* ------------------------------------------------------- the fake provider --
+ * NO EXTERNAL CALL IS MADE BY THIS SCRIPT.
+ *
+ * What is being rehearsed is our side: the OTP session state machine, the
+ * fingerprint that invalidates a stale verification, the transaction
+ * boundaries - all of it against REAL MySQL and the real constraints. The
+ * provider itself is a stand-in for `services/sandbox_client.js`, so
+ * `services/sandbox_aadhaar.js` and `services/sandbox_bank.js` run unmodified
+ * (path building, entity strings, local IFSC validation and the 404-is-an-
+ * answer rule are all exercised) while nothing leaves this host.
+ *
+ * A real Sandbox smoke test is a separate, deliberate exercise against the
+ * test base URL with entitled credentials, and is not this script's job.
+ */
+function makeStubClient(state) {
+  const kycConfig = require(path.join(ROOT, "config/sandbox_kyc"));
+  const { SandboxError, FAILURE, SAFE_MESSAGE } = require(path.join(ROOT, "services/sandbox_client"));
+  return {
+    isEnabled: () => true,
+    async request({ path: p }) {
+      if (p === kycConfig.aadhaar.generateOtpPath) {
+        state.otpsSent += 1;
+        return { data: { reference_id: `REF-REHEARSAL-${state.otpsSent}` }, transaction_id: "TXN-OTP" };
+      }
+      if (p === kycConfig.aadhaar.verifyOtpPath) {
+        return { data: { status: "VALID", ...state.demographics }, transaction_id: "TXN-VERIFY" };
+      }
+      if (/penniless-verify$/.test(p)) {
+        state.bankPaths.push(p);
+        const next = state.bankResponse;
+        if (next instanceof Error) throw next;
+        if (next && next.notFound) {
+          throw new SandboxError(FAILURE.NOT_FOUND, SAFE_MESSAGE[FAILURE.NOT_FOUND]);
+        }
+        return { data: next, transaction_id: "TXN-BANK" };
+      }
+      throw new Error(`the rehearsal stub was asked for an unexpected path: ${p}`);
+    },
+  };
+}
+
 async function main() {
   console.log(`\n== Stage 0C / C2 employee-master rehearsal on '${DB}'   ${new Date().toISOString()}`);
 
@@ -157,6 +198,12 @@ async function main() {
     aadhaarVerifications: Number(
       await scalar("SELECT COUNT(*) c FROM employee_aadhaar_verification").catch(() => 0)
     ),
+    bankVerifications: Number(
+      await scalar("SELECT COUNT(*) c FROM employee_bank_verification").catch(() => 0)
+    ),
+    bankAttempts: Number(
+      await scalar("SELECT COUNT(*) c FROM employee_bank_verification_attempt").catch(() => 0)
+    ),
     // A watermark, so cleanup removes only what this run wrote.
     maxVerificationId: Number(
       await scalar("SELECT IFNULL(MAX(verification_id), 0) m FROM employee_aadhaar_verification").catch(() => 0)
@@ -183,13 +230,50 @@ async function main() {
     const aadhaarConfig = require(path.join(ROOT, "config/aadhaar"));
     const aadhaarCrypto = require(path.join(ROOT, "services/aadhaar_crypto"));
     const aadhaarRepo = require(path.join(ROOT, "repository/employee_aadhaar"))(pool);
+    const bankRepo = require(path.join(ROOT, "repository/employee_bank"))(pool);
+
+    const provider = {
+      otpsSent: 0,
+      bankPaths: [],
+      demographics: {
+        name: "C2 Aadhaar Subject",
+        date_of_birth: "01-02-1990",
+        gender: "MALE",
+        address: { house: "9", street: "Test Road", district: "Chennai", state: "TN", pincode: "600001" },
+      },
+      bankResponse: { account_exists: true, name_at_bank: "C2 AADHAAR SUBJECT" },
+    };
+    const stubClient = makeStubClient(provider);
+    const sandboxAadhaar = require(path.join(ROOT, "services/sandbox_aadhaar"))(stubClient);
+    const sandboxBank = require(path.join(ROOT, "services/sandbox_bank"))(stubClient);
+
     const aadhaar = aadhaarConfig.enabled
-      ? require(path.join(ROOT, "usecase/employee_aadhaar"))(aadhaarRepo)
+      ? require(path.join(ROOT, "usecase/employee_aadhaar"))(aadhaarRepo, sandboxAadhaar)
+      : null;
+    const bank = aadhaarConfig.enabled
+      ? require(path.join(ROOT, "usecase/employee_bank"))(bankRepo, sandboxBank, aadhaarRepo)
       : null;
     const hr = require(path.join(ROOT, "usecase/employee_master"))(masterRepo, lifecycle, lifecycleRepo, aadhaar);
     if (!aadhaar) {
-      console.log("\n   NOTE: AADHAAR_ENCRYPTION_KEY / AADHAAR_FINGERPRINT_KEY not set - Aadhaar section skipped");
+      console.log("\n   NOTE: AADHAAR_ENCRYPTION_KEY / AADHAAR_FINGERPRINT_KEY not set - Aadhaar and bank sections skipped");
+    } else {
+      console.log("\n   NOTE: the Sandbox provider is STUBBED - no external call is made by this script");
     }
+
+    /** Runs the real two-step OTP flow against the stub provider. */
+    const verifyAadhaar = async (aadhaarNumber, opts = {}) => {
+      const started = await aadhaar.initiate(
+        { aadhaar_number: aadhaarNumber, consent_given: true },
+        { actorEmployeeId: opts.actorEmployeeId || null, ip: "127.0.0.1" }
+      );
+      return {
+        started,
+        decision: await aadhaar.verifyOtp(
+          { verification_token: started.verification_token, otp: "123456" },
+          { actorEmployeeId: opts.actorEmployeeId || null }
+        ),
+      };
+    };
 
     const base = {
       employee_name: "C2 Rehearsal Subject",
@@ -391,13 +475,25 @@ async function main() {
       };
       const AADHAAR = withCheckDigit("28888888888");
 
-      const v1 = await aadhaar.verify(
-        {
-          aadhaar_number: AADHAAR,
-          consent_given: true,
-          demographics: { name: "C2 Aadhaar Subject", dob: "01-02-1990", gender: "MALE", address: "9 Test Road" },
-        },
-        { actorEmployeeId: null, ip: "127.0.0.1" }
+      const first = await verifyAadhaar(AADHAAR);
+      const v1 = first.decision;
+      eq("initiate returns an opaque 64-hex session token", /^[0-9a-f]{64}$/.test(first.started.verification_token), true);
+      eq("and the OTP went out exactly once", provider.otpsSent, 1);
+      eq(
+        "the session row is stored against that token",
+        Number(
+          await scalar("SELECT COUNT(*) c FROM employee_aadhaar_verification WHERE session_token = ?", [
+            first.started.verification_token,
+          ])
+        ),
+        1
+      );
+      eq(
+        "and the OTP itself was never written anywhere on it",
+        JSON.stringify(
+          (await q("SELECT * FROM employee_aadhaar_verification WHERE verification_id = ?", [v1.verification_id]))[0]
+        ).includes("123456"),
+        false
       );
       eq("a first verification finds no duplicate", v1.duplicate, false);
       eq("and says to create", v1.next_action, "create");
@@ -418,7 +514,7 @@ async function main() {
             [aid]
           )
         ).map((r) => [r.d, r.gender, r.permanent_address]),
-        [["1990-02-01", "M", "9 Test Road"]]
+        [["1990-02-01", "M", "9, Test Road, Chennai, TN, 600001"]]
       );
 
       // The number is not in new_employee at all.
@@ -456,7 +552,7 @@ async function main() {
 
       // THE DUPLICATE CONTROL: the same person again.
       await hr.resignEmployee(aid, { resignation_date: "2026-03-31" });
-      const v2 = await aadhaar.verify({ aadhaar_number: AADHAAR, consent_given: true });
+      const v2 = (await verifyAadhaar(AADHAAR)).decision;
       eq("a second verification detects the same person", v2.duplicate, true);
       eq("and names the existing employee", v2.existing_employee.employee_id, aid);
       eq("and directs HR to Rejoin", v2.next_action, "rejoin");
@@ -490,16 +586,128 @@ async function main() {
       // A number that fails its checksum never reaches the database.
       const verificationsBefore = Number(await scalar("SELECT COUNT(*) c FROM employee_aadhaar_verification"));
       let refusedBad = false;
+      const otpsBefore = provider.otpsSent;
       try {
-        await aadhaar.verify({ aadhaar_number: AADHAAR.slice(0, 11) + String((Number(AADHAAR[11]) + 1) % 10), consent_given: true });
+        await aadhaar.initiate({
+          aadhaar_number: AADHAAR.slice(0, 11) + String((Number(AADHAAR[11]) + 1) % 10),
+          consent_given: true,
+        });
       } catch (err) {
         refusedBad = /checksum/.test(err.message);
       }
       eq("a checksum failure is refused", refusedBad, true);
+      eq("and no OTP was sent for it", provider.otpsSent, otpsBefore);
       eq(
         "and wrote no verification row",
         Number(await scalar("SELECT COUNT(*) c FROM employee_aadhaar_verification")),
         verificationsBefore
+      );
+
+      /* --------------------------- bank verification -------------------- */
+      console.log("\n== Penny-Less bank verification, invalidation and re-verification");
+
+      const ACCOUNT = "50100123456789";
+      const IFSC = "HDFC0001234";
+
+      eq("with no account on file the status is NOT_PROVIDED", (await bank.getStatus(aid)).status, "NOT_PROVIDED");
+      eq("and payroll is not ready", (await bank.isBankPayrollReady(aid)).bank_payroll_ready, false);
+
+      await q("UPDATE new_employee SET account_no = ?, ifsc = ?, bank_name = ? WHERE employee_id = ?", [
+        ACCOUNT,
+        IFSC,
+        "HDFC Bank",
+        aid,
+      ]);
+      const pending = await bank.getStatus(aid);
+      eq("an unverified account is PENDING, not VERIFIED", pending.status, "PENDING");
+      eq("and the status endpoint spent no provider call", provider.bankPaths.length, 0);
+      eq("the account is masked in the status", /^\**\d{4}$|X|\*/.test(String(pending.masked_account)), true);
+      eq("the full account number is not in the status", JSON.stringify(pending).includes(ACCOUNT), false);
+
+      const verifiedBank = await bank.verify(aid, { actorEmployeeId: null });
+      eq("a matching name verifies", verifiedBank.status, "VERIFIED");
+      eq("the provider was called once", provider.bankPaths.length, 1);
+      eq("with both parameters in the documented path", provider.bankPaths[0], `/bank/${IFSC}/accounts/${ACCOUNT}/penniless-verify`);
+      eq("payroll is now ready", (await bank.isBankPayrollReady(aid)).bank_payroll_ready, true);
+      eq(
+        "the stored row holds a fingerprint and a last four, never the number",
+        (await q("SELECT * FROM employee_bank_verification WHERE employee_id = ?", [aid])).map(
+          (r) => [Boolean(r.account_fingerprint), r.account_last4, JSON.stringify(r).includes(ACCOUNT)]
+        ),
+        [[true, ACCOUNT.slice(-4), false]]
+      );
+
+      // INVALIDATION: change the account, and the old verification stops
+      // applying - without any provider call being needed to notice.
+      const OTHER = "50100987654321";
+      await q("UPDATE new_employee SET account_no = ? WHERE employee_id = ?", [OTHER, aid]);
+      const stale = await bank.getStatus(aid);
+      eq("changing the account invalidates the verification", stale.status, "PENDING");
+      eq("and says so explicitly", stale.stale, true);
+      eq("the superseded result is still reported, marked as such", Boolean(stale.superseded_verification), true);
+      eq("payroll is not ready on a stale verification", (await bank.isBankPayrollReady(aid)).bank_payroll_ready, false);
+      eq("noticing that cost no provider call", provider.bankPaths.length, 1);
+
+      // Re-verify the new account.
+      const reVerified = await bank.verify(aid, { actorEmployeeId: null });
+      eq("re-verification against the new account succeeds", reVerified.status, "VERIFIED");
+      eq("and used the new account in the path", provider.bankPaths[1], `/bank/${IFSC}/accounts/${OTHER}/penniless-verify`);
+      eq("payroll is ready again", (await bank.isBankPayrollReady(aid)).bank_payroll_ready, true);
+
+      // A name that is close but not identical needs a human.
+      provider.bankResponse = { account_exists: true, name_at_bank: "C2 AADHAAR NAIR" };
+      const review = await bank.verify(aid, { actorEmployeeId: null });
+      eq("a near-miss name is NAME_MISMATCH, never a silent pass", review.status, "NAME_MISMATCH");
+      eq("payroll is not ready while it waits", (await bank.isBankPayrollReady(aid)).bank_payroll_ready, false);
+      const confirmed = await bank.confirmNameMismatch(aid, { actorEmployeeId: null, note: "checked the passbook" });
+      eq("an authorised confirmation makes it VERIFIED", confirmed.status, "VERIFIED");
+      eq("and payroll is ready", (await bank.isBankPayrollReady(aid)).bank_payroll_ready, true);
+
+      // A name belonging to somebody else can never be confirmed.
+      provider.bankResponse = { account_exists: true, name_at_bank: "ACME TRADING COMPANY" };
+      const mismatch = await bank.verify(aid, { actorEmployeeId: null });
+      eq("a different person is NAME_MISMATCH with a MISMATCH verdict", mismatch.name_match.verdict, "MISMATCH");
+      let refusedConfirm = false;
+      try {
+        await bank.confirmNameMismatch(aid, { actorEmployeeId: null });
+      } catch (err) {
+        refusedConfirm = /cannot be confirmed/.test(err.message);
+      }
+      eq("and it cannot be confirmed", refusedConfirm, true);
+
+      // The bank saying "no such account" is an answer, and it is FAILED.
+      provider.bankResponse = { notFound: true };
+      const notFound = await bank.verify(aid, { actorEmployeeId: null });
+      eq("an unknown account is FAILED, not an exception", notFound.status, "FAILED");
+      eq("with a reason naming the cause", notFound.failure_category, "account_not_found");
+      eq("and no previous VERIFIED is left standing", (await bank.getStatus(aid)).status, "FAILED");
+
+      // A provider outage never verifies anything.
+      provider.bankResponse = new Error("simulated provider outage");
+      let providerFailed = false;
+      try {
+        await bank.verify(aid, { actorEmployeeId: null });
+      } catch (err) {
+        providerFailed = true;
+      }
+      eq("a provider failure is raised, not swallowed", providerFailed, true);
+      eq("and the status is FAILED, never VERIFIED", (await bank.getStatus(aid)).status, "FAILED");
+      provider.bankResponse = { account_exists: true, name_at_bank: "C2 AADHAAR SUBJECT" };
+
+      eq(
+        "every attempt was appended to the audit trail",
+        Number(await scalar("SELECT COUNT(*) c FROM employee_bank_verification_attempt WHERE employee_id = ?", [aid])) >= 6,
+        true
+      );
+      eq(
+        "and no attempt row carries the account number",
+        Number(
+          await scalar(
+            "SELECT COUNT(*) c FROM employee_bank_verification_attempt WHERE employee_id = ? AND account_last4 = ?",
+            [aid, OTHER]
+          )
+        ),
+        0
       );
     }
 
@@ -561,6 +769,8 @@ async function main() {
       console.log("\n== cleanup");
       try {
         if (created.length) {
+          await q("DELETE FROM employee_bank_verification_attempt WHERE employee_id IN (?)", [created]).catch(() => {});
+          await q("DELETE FROM employee_bank_verification WHERE employee_id IN (?)", [created]).catch(() => {});
           await q("DELETE FROM employee_aadhaar_identity WHERE employee_id IN (?)", [created]).catch(() => {});
           await q("DELETE FROM employee_aadhaar_verification WHERE verification_id > ?", [before.maxVerificationId]).catch(() => {});
           const r = await q("DELETE FROM resignation WHERE employee_id IN (?)", [created]);
@@ -592,6 +802,16 @@ async function main() {
         "no Aadhaar verification remains",
         Number(await scalar("SELECT COUNT(*) c FROM employee_aadhaar_verification")),
         before.aadhaarVerifications
+      );
+      eq(
+        "no bank verification remains",
+        Number(await scalar("SELECT COUNT(*) c FROM employee_bank_verification")),
+        before.bankVerifications
+      );
+      eq(
+        "no bank attempt row remains",
+        Number(await scalar("SELECT COUNT(*) c FROM employee_bank_verification_attempt")),
+        before.bankAttempts
       );
       eq("review flag count restored", Number(await scalar("SELECT COUNT(*) c FROM employee_employment_period WHERE needs_review = 1")), before.review);
       eq(

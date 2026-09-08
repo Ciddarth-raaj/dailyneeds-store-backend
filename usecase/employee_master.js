@@ -173,6 +173,11 @@ class EmployeeMasterUsecase {
     rejectFutureDate(joinedOn, "date_of_joining");
 
     const fields = { ...input };
+    // A key present with no value is not a value. The route's schema strips
+    // these, but a direct caller - the rehearsal, a script - may pass
+    // `employee_name: undefined` meaning "take it from the Aadhaar", and that
+    // must not become an INSERT of NULL into a NOT NULL column.
+    for (const k of Object.keys(fields)) if (fields[k] === undefined) delete fields[k];
     for (const f of LIFECYCLE_CONTROLLED_FIELDS) delete fields[f];
     // The lifecycle owns these two, and sets them to exactly this.
     fields.date_of_joining = joinedOn;
@@ -186,6 +191,23 @@ class EmployeeMasterUsecase {
     delete fields.aadhaar_verification_id;
 
     return this.repo.withTransaction(async (tx) => {
+      // The verified demographics are read BEFORE the insert and fill only the
+      // fields HR left blank. `employee_name` is NOT NULL, so filling it after
+      // the insert would be too late; and the allowlist is the Aadhaar layer's
+      // own, so a provider payload still cannot reach a designation, a store,
+      // a salary or a status.
+      let prefilled = [];
+      if (verificationId !== undefined && verificationId !== null) {
+        const preview = await this.aadhaar.previewDemographics(verificationId);
+        for (const [key, value] of Object.entries(preview)) {
+          const supplied = fields[key] !== undefined && fields[key] !== null && String(fields[key]).trim() !== "";
+          if (!supplied) {
+            fields[key] = value;
+            prefilled.push(key);
+          }
+        }
+      }
+
       const employeeId = await this.repo.createEmployee(tx, fields);
 
       // The Aadhaar identity is written INSIDE this transaction, so an
@@ -197,11 +219,13 @@ class EmployeeMasterUsecase {
         const attached = await this.aadhaar.attachToEmployee(tx, verificationId, employeeId, {
           actorEmployeeId,
         });
-        // The verified demographics are applied to the employee AFTER the
-        // insert and only through the Aadhaar layer's own allowlist, so a
-        // provider payload can never reach a designation, a store or a date.
+        // Anything the pre-fill above did not already apply - a field the
+        // locked row turns out to carry that the preview did not - is applied
+        // here, through the same allowlist.
         const demographic = attached.demographic_fields || {};
-        const applicable = Object.keys(demographic).filter((k) => !(k in input));
+        const applicable = Object.keys(demographic).filter(
+          (k) => !prefilled.includes(k) && (fields[k] === undefined || fields[k] === null || String(fields[k]).trim() === "")
+        );
         if (applicable.length) {
           await this.repo.updateEmployee(
             tx,
@@ -213,7 +237,7 @@ class EmployeeMasterUsecase {
           aadhaar_last4: attached.aadhaar_last4,
           verified_at: attached.verified_at,
           verification_id: verificationId,
-          demographic_fields_applied: applicable,
+          demographic_fields_applied: [...prefilled, ...applicable],
         };
       }
 

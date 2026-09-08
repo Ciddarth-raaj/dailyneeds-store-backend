@@ -43,6 +43,7 @@ const EMPLOYEE_ID = 501;
 const HR_DESIGNATION = 7;
 const OUTLET_DESIGNATION = 8;
 const PF_DESIGNATION = 9; // holds view_aadhaar_full and nothing else
+const FINANCE_DESIGNATION = 10; // holds the two bank keys plus sensitive access
 
 /** Only the HR designation holds the C2 keys. */
 const GRANTS = {
@@ -53,6 +54,12 @@ const GRANTS = {
   [OUTLET_DESIGNATION]: ["view_stores"],
   // Reading a full Aadhaar takes BOTH: sensitive access, and the specific key.
   [PF_DESIGNATION]: [P.VIEW_EMPLOYEE_SENSITIVE, P.VIEW_AADHAAR_FULL],
+  // Running the paid check and accepting a near-miss name are both above
+  // ordinary HR, and both also need sensitive access to see the result.
+  [FINANCE_DESIGNATION]: [
+    P.VIEW_EMPLOYEE_SENSITIVE, P.VERIFY_EMPLOYEE_BANK, P.CONFIRM_BANK_NAME_MISMATCH,
+    P.VIEW_EMPLOYEE_LIFECYCLE,
+  ],
 };
 
 const sessionState = {
@@ -80,14 +87,45 @@ const usecase = {
 
 const aadhaarCalls = [];
 const aadhaarUsecase = {
-  verify: async (input, opts) => {
-    aadhaarCalls.push(["verify", input, opts]);
-    return { code: 200, verification_id: 55, aadhaar_last4: "4321", duplicate: false, next_action: "create" };
+  initiate: async (input, opts) => {
+    aadhaarCalls.push(["initiate", input, opts]);
+    return { code: 200, verification_token: "a".repeat(64), aadhaar_last4: "2229", expires_in_seconds: 600 };
+  },
+  verifyOtp: async (input, opts) => {
+    aadhaarCalls.push(["verify-otp", input, opts]);
+    return {
+      code: 200,
+      verification_id: 55,
+      aadhaar_last4: "2229",
+      duplicate: false,
+      next_action: "create",
+      demographics: { employee_name: "Ramesh Kumar", dob: "1990-02-01", gender: "M" },
+    };
   },
   getIdentity: async (id) => ({ employee_id: id, aadhaar_last4: "4321", verified_at: "2026-01-01" }),
   revealFullNumber: async (id, opts) => {
     aadhaarCalls.push(["reveal", id, opts]);
     return { employee_id: id, aadhaar_number: "222222222229", aadhaar_last4: "2229" };
+  },
+};
+
+const bankCalls = [];
+const bankUsecase = {
+  verify: async (id, opts) => {
+    bankCalls.push(["verify", id, opts]);
+    return {
+      code: 200, employee_id: id, status: "VERIFIED",
+      account_last4: "6789", ifsc: "HDFC0001234", name_at_bank: "RAMESH KUMAR",
+      name_match_verdict: "MATCH",
+    };
+  },
+  getStatus: async (id) => {
+    bankCalls.push(["status", id]);
+    return { employee_id: id, status: "VERIFIED", account_last4: "6789", ifsc: "HDFC0001234" };
+  },
+  confirmNameMismatch: async (id, opts) => {
+    bankCalls.push(["confirm", id, opts]);
+    return { code: 200, employee_id: id, status: "VERIFIED", confirmed: true };
   },
 };
 
@@ -105,7 +143,7 @@ before(async () => {
   app.use(bodyParser.json());
   app.use(authMiddleware.create({ userUsecase: { getSessionState: async () => ({ ...sessionState }) } }));
   delete require.cache[require.resolve("./employee_master")];
-  const routes = require("./employee_master")(usecase, permissions, sensitive, aadhaarUsecase);
+  const routes = require("./employee_master")(usecase, permissions, sensitive, aadhaarUsecase, bankUsecase);
   app.use("/hr", routes.getRouter());
 
   server = await new Promise((r) => {
@@ -410,40 +448,81 @@ describe("the C2 migration", () => {
 /* ============================================================== Aadhaar == */
 describe("the Aadhaar surface", () => {
   const AADHAAR = "222222222229"; // shape only; the usecase is stubbed here
-  const VERIFY_BODY = { aadhaar_number: AADHAAR, consent_given: true };
+  const INITIATE_BODY = { aadhaar_number: AADHAAR, consent_given: true };
+  const TOKEN = "a".repeat(64);
 
-  it("is refused to an anonymous caller", async () => {
-    const r = await call("POST", "/hr/aadhaar/verify", null, VERIFY_BODY);
-    assert.equal(r.body.code, 403);
-    assert.equal(r.body.msg, "Access Denied");
+  it("is refused to an anonymous caller, at both steps", async () => {
+    for (const [p, body] of [
+      ["/hr/aadhaar/initiate", INITIATE_BODY],
+      ["/hr/aadhaar/verify-otp", { verification_token: TOKEN, otp: "123456" }],
+    ]) {
+      const r = await call("POST", p, null, body);
+      assert.equal(r.body.code, 403, p);
+      assert.equal(r.body.msg, "Access Denied");
+    }
   });
 
-  it("B3 refuses the verify body from a caller without edit_employee_sensitive", async () => {
+  it("B3 refuses the initiate body from a caller without edit_employee_sensitive", async () => {
     // aadhaar_number is a sensitive field, so guardWrite refuses the request
     // before the route body ever runs - the same mechanism, not a new one.
-    const r = await call("POST", "/hr/aadhaar/verify", tokenFor(), VERIFY_BODY);
+    aadhaarCalls.length = 0;
+    const r = await call("POST", "/hr/aadhaar/initiate", tokenFor(), INITIATE_BODY);
     assert.equal(r.status, 403);
     assert.equal(r.body.msg, "You do not have permission to perform this action");
-    assert.ok(!aadhaarCalls.some((c) => c[0] === "verify"), "the usecase never saw the number");
+    assert.ok(!aadhaarCalls.some((c) => c[0] === "initiate"), "the usecase never saw the number");
   });
 
   it("an outlet user is refused even before B3", async () => {
-    const r = await call("POST", "/hr/aadhaar/verify", tokenFor({ designationId: OUTLET_DESIGNATION }), VERIFY_BODY);
+    const r = await call("POST", "/hr/aadhaar/initiate", tokenFor({ designationId: OUTLET_DESIGNATION }), INITIATE_BODY);
     assert.equal(r.status, 403);
   });
 
-  it("admin may verify, and the actor and IP are recorded", async () => {
+  it("admin may initiate, and the actor and IP are recorded", async () => {
     aadhaarCalls.length = 0;
-    const r = await call("POST", "/hr/aadhaar/verify", tokenFor({ userType: 2 }), VERIFY_BODY);
+    const r = await call("POST", "/hr/aadhaar/initiate", tokenFor({ userType: 2 }), INITIATE_BODY);
     assert.equal(r.body.code, 200);
-    const verify = aadhaarCalls.find((c) => c[0] === "verify");
-    assert.equal(verify[2].actorEmployeeId, EMPLOYEE_ID);
-    assert.ok("ip" in verify[2]);
+    const initiate = aadhaarCalls.find((c) => c[0] === "initiate");
+    assert.equal(initiate[2].actorEmployeeId, EMPLOYEE_ID);
+    assert.ok("ip" in initiate[2]);
+  });
+
+  it("initiate answers with an opaque session token and the last four, never the number", async () => {
+    const r = await call("POST", "/hr/aadhaar/initiate", tokenFor({ userType: 2 }), INITIATE_BODY);
+    assert.equal(r.body.verification_token.length, 64);
+    assert.equal(r.body.aadhaar_last4, "2229");
+    assert.ok(!r.text.includes(AADHAAR), "the twelve digits are not echoed back");
   });
 
   it("consent is required by the schema", async () => {
-    const r = await call("POST", "/hr/aadhaar/verify", tokenFor({ userType: 2 }), { aadhaar_number: AADHAAR });
+    const r = await call("POST", "/hr/aadhaar/initiate", tokenFor({ userType: 2 }), { aadhaar_number: AADHAAR });
     assert.equal(r.body.code, 422);
+  });
+
+  it("verify-otp needs both the session token and the OTP", async () => {
+    const token = tokenFor({ userType: 2 });
+    assert.equal((await call("POST", "/hr/aadhaar/verify-otp", token, { otp: "123456" })).body.code, 422);
+    assert.equal((await call("POST", "/hr/aadhaar/verify-otp", token, { verification_token: TOKEN })).body.code, 422);
+  });
+
+  it("verify-otp returns the demographics and the duplicate decision, and no OTP", async () => {
+    aadhaarCalls.length = 0;
+    const r = await call("POST", "/hr/aadhaar/verify-otp", tokenFor({ userType: 2 }), {
+      verification_token: TOKEN,
+      otp: "123456",
+    });
+    assert.equal(r.body.code, 200);
+    assert.equal(r.body.verification_id, 55);
+    assert.equal(r.body.next_action, "create");
+    assert.equal(r.body.demographics.employee_name, "Ramesh Kumar");
+    assert.ok(!/"otp"/.test(r.text), "the OTP is never echoed back");
+    const call_ = aadhaarCalls.find((c) => c[0] === "verify-otp");
+    assert.equal(call_[2].actorEmployeeId, EMPLOYEE_ID, "who exchanged the OTP is recorded");
+  });
+
+  it("the OTP is never written to the route's log line", () => {
+    const src = fs.readFileSync(path.join(__dirname, "employee_master.js"), "utf8");
+    const route = src.slice(src.indexOf('router.post("/aadhaar/verify-otp"'), src.indexOf('router.get(\n      "/employee/:employee_id/aadhaar"'));
+    assert.ok(!/logger|console\.log\(req\.body/.test(route), "no logging of the OTP body");
   });
 
   it("the display record is available to HR and carries no number", async () => {
@@ -519,6 +598,178 @@ describe("the Aadhaar surface", () => {
     } finally {
       s.close();
       delete require.cache[require.resolve("./employee_master")];
+    }
+  });
+});
+
+/* ================================================================= bank == */
+describe("the bank verification surface", () => {
+  it("is refused to an anonymous caller on all three routes", async () => {
+    for (const [method, p] of [
+      ["POST", "/hr/employee/9/bank/verify"],
+      ["GET", "/hr/employee/9/bank/verification"],
+      ["POST", "/hr/employee/9/bank/confirm-name"],
+    ]) {
+      const r = await call(method, p, null, method === "POST" ? {} : null);
+      assert.equal(r.body.code, 403, p);
+      assert.equal(r.body.msg, "Access Denied");
+    }
+  });
+
+  it("HR alone may not spend a paid check, nor override a name", async () => {
+    // The HR designation holds every lifecycle key and still does not hold
+    // these two: running a chargeable external call and accepting a name that
+    // did not match are separate decisions from editing an employee.
+    bankCalls.length = 0;
+    const token = tokenFor();
+    for (const p of ["/hr/employee/9/bank/verify", "/hr/employee/9/bank/confirm-name"]) {
+      const r = await call("POST", p, token, {});
+      assert.equal(r.status, 403, p);
+      assert.equal(r.body.msg, "You do not have permission to perform this action");
+    }
+    assert.equal(bankCalls.length, 0, "no provider call was reached");
+  });
+
+  it("verify_employee_bank without sensitive access is still refused", async () => {
+    // requireAll, not require: the check returns a name and an IFSC, which B3
+    // would strip anyway, so a caller who cannot read the answer must not be
+    // able to spend the call.
+    GRANTS[OUTLET_DESIGNATION] = ["view_stores", P.VERIFY_EMPLOYEE_BANK];
+    try {
+      const r = await call("POST", "/hr/employee/9/bank/verify", tokenFor({ designationId: OUTLET_DESIGNATION }), {});
+      assert.equal(r.status, 403);
+    } finally {
+      GRANTS[OUTLET_DESIGNATION] = ["view_stores"];
+    }
+  });
+
+  it("a finance designation holding both keys may verify, and the actor is recorded", async () => {
+    bankCalls.length = 0;
+    const r = await call("POST", "/hr/employee/9/bank/verify", tokenFor({ designationId: FINANCE_DESIGNATION }), {});
+    assert.equal(r.body.code, 200);
+    assert.equal(r.body.status, "VERIFIED");
+    const verify = bankCalls.find((c) => c[0] === "verify");
+    assert.equal(verify[1], 9, "the employee id comes from the path, not the body");
+    assert.equal(verify[2].actorEmployeeId, EMPLOYEE_ID);
+  });
+
+  it("the account number is never in the response - only the last four", async () => {
+    const r = await call("POST", "/hr/employee/9/bank/verify", tokenFor({ designationId: FINANCE_DESIGNATION }), {});
+    assert.ok(!/"account_no"/.test(r.text), "no full account number");
+    assert.ok(!/"account_fingerprint"/.test(r.text), "no fingerprint either");
+    assert.equal(r.body.account_last4, "6789");
+  });
+
+  it("the route accepts no account number in the body; it reads what was saved", () => {
+    const src = fs.readFileSync(path.join(__dirname, "employee_master.js"), "utf8");
+    const route = src.slice(
+      src.indexOf('"/employee/:employee_id/bank/verify"'),
+      src.indexOf('"/employee/:employee_id/bank/verification"')
+    );
+    assert.ok(!/account_no|account_number/.test(route), "the account number never crosses this boundary");
+    assert.match(route, /this\.bank\.verify\(Number\(req\.params\.employee_id\)/);
+  });
+
+  it("the status is readable by HR, and B3 still strips the IFSC from it", async () => {
+    const r = await call("GET", "/hr/employee/9/bank/verification", tokenFor());
+    assert.equal(r.status, 200);
+    assert.equal(r.body.status, "VERIFIED");
+    assert.equal(r.body.account_last4, "6789", "the display value survives");
+    assert.ok(!/"ifsc"/i.test(r.text), "the IFSC is a sensitive field and HR does not hold that key");
+  });
+
+  it("reading the status never calls the provider", () => {
+    const uc = fs.readFileSync(path.join(__dirname, "..", "usecase/employee_bank.js"), "utf8");
+    const getStatus = uc.slice(uc.indexOf("async getStatus("), uc.indexOf("async verify("));
+    assert.ok(!/provider|sandbox/i.test(getStatus.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "")),
+      "getStatus must be read-only");
+  });
+
+  it("confirming a name mismatch takes its own key and records the actor", async () => {
+    bankCalls.length = 0;
+    const r = await call("POST", "/hr/employee/9/bank/confirm-name", tokenFor({ designationId: FINANCE_DESIGNATION }), {
+      note: "matches the passbook",
+    });
+    assert.equal(r.body.code, 200);
+    const confirm = bankCalls.find((c) => c[0] === "confirm");
+    assert.equal(confirm[2].actorEmployeeId, EMPLOYEE_ID);
+    assert.equal(confirm[2].note, "matches the passbook");
+  });
+
+  it("admin (user_type 2) keeps its bypass here too", async () => {
+    const token = tokenFor({ designationId: OUTLET_DESIGNATION, userType: 2 });
+    assert.equal((await call("POST", "/hr/employee/9/bank/verify", token, {})).body.code, 200);
+  });
+
+  it("a deployment without the bank usecase answers 503, not 500", async () => {
+    const permissionsAll = buildPermissions({
+      getPermissionById: async () => [
+        { permission_key: P.VERIFY_EMPLOYEE_BANK, is_active: 1 },
+        { permission_key: P.VIEW_EMPLOYEE_SENSITIVE, is_active: 1 },
+      ],
+    });
+    delete require.cache[require.resolve("./employee_master")];
+    const routes = require("./employee_master")(usecase, permissionsAll, buildSensitive(permissionsAll), null, null);
+    const app = express();
+    app.use(bodyParser.json());
+    app.use(require("../middlewares/auth").create({ userUsecase: { getSessionState: async () => ({ ...sessionState }) } }));
+    app.use("/hr", routes.getRouter());
+    const s = await new Promise((r) => {
+      const srv = app.listen(0, "127.0.0.1", () => r(srv));
+    });
+    try {
+      const res = await fetch(`http://127.0.0.1:${s.address().port}/hr/employee/9/bank/verify`, {
+        method: "POST",
+        headers: { "x-access-token": await tokenFor(), "content-type": "application/json" },
+        body: "{}",
+      });
+      assert.equal((await res.json()).code, 503);
+    } finally {
+      s.close();
+      delete require.cache[require.resolve("./employee_master")];
+    }
+  });
+});
+
+describe("the Sandbox KYC and bank migration", () => {
+  const sql = fs.readFileSync(
+    path.join(__dirname, "..", "migrations/mysql/migrations/sqls/20260908160000-c2-sandbox-kyc-and-bank-up.sql"),
+    "utf8"
+  );
+  /** The statements alone; the comments are free to explain what is elsewhere. */
+  const statements = sql.replace(/^\s*--.*$/gm, "");
+
+  it("declares the two new keys and grants them to nobody", () => {
+    assert.match(sql, /'verify_employee_bank'/);
+    assert.match(sql, /'confirm_bank_name_mismatch'/);
+    assert.ok(!/INSERT INTO `permissions`/.test(sql), "no designation is granted either key by the migration");
+  });
+
+  it("stores a fingerprint and a last four, never a full account number", () => {
+    assert.match(sql, /`account_fingerprint`\s+CHAR\(64\)/);
+    assert.match(sql, /`account_last4`/);
+    assert.ok(!/`account_no`/.test(statements), "the account number stays where it already lives");
+  });
+
+  it("one verification row per employee, and an append-only attempt log", () => {
+    assert.match(sql, /CREATE TABLE IF NOT EXISTS `employee_bank_verification`/);
+    assert.match(sql, /UNIQUE KEY `uq_bank_verification_employee` \(`employee_id`\)/);
+    assert.match(sql, /CREATE TABLE IF NOT EXISTS `employee_bank_verification_attempt`/);
+  });
+
+  it("gives the Aadhaar session a token, a status and an attempt count", () => {
+    assert.match(sql, /`session_token`\s+CHAR\(64\)/);
+    assert.match(sql, /`otp_attempts`/);
+    assert.match(sql, /'initiated'/);
+    assert.match(sql, /'consumed'/);
+  });
+
+  it("writes no employee row and deletes nothing", () => {
+    // `ON DELETE RESTRICT` is a constraint, not a deletion; a DELETE statement
+    // is what must not be here.
+    assert.ok(!/DELETE\s+FROM/i.test(statements), "the up migration must delete nothing");
+    for (const forbidden of ["INSERT INTO `new_employee`", "UPDATE `new_employee`"]) {
+      assert.ok(!statements.includes(forbidden), `must not touch ${forbidden}`);
     }
   });
 });

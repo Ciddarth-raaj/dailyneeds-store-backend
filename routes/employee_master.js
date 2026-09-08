@@ -21,11 +21,12 @@ const router = express.Router();
  * employee record does not make HR entitled to everything on it.
  */
 class EmployeeMasterRoutes {
-  constructor(employeeMasterUsecase, permissions, sensitive, aadhaarUsecase) {
+  constructor(employeeMasterUsecase, permissions, sensitive, aadhaarUsecase, bankUsecase) {
     this.usecase = employeeMasterUsecase;
     this.permissions = permissions;
     this.sensitive = sensitive;
     this.aadhaar = aadhaarUsecase || null;
+    this.bank = bankUsecase || null;
     this.setupRoutes();
   }
 
@@ -186,14 +187,14 @@ class EmployeeMasterRoutes {
 
     /* ------------------------------------------------------------ Aadhaar */
     /**
-     * Verify an Aadhaar and find out whether we already know this person.
+     * Step 1: send the OTP.
      *
      * Gated on `employee_create` at the route, and on `edit_employee_sensitive`
      * by B3 - the body carries `aadhaar_number`, which is a sensitive field,
      * so `guardWrite` refuses the request outright without that permission.
      * Two layers, neither of them new.
      */
-    router.post("/aadhaar/verify", this.permissions.require(P.EMPLOYEE_CREATE), async (req, res) => {
+    router.post("/aadhaar/initiate", this.permissions.require(P.EMPLOYEE_CREATE), async (req, res) => {
       try {
         if (!this.aadhaar) {
           res.json({ code: 503, msg: "Aadhaar verification is not configured on this server" });
@@ -203,26 +204,42 @@ class EmployeeMasterRoutes {
         const schema = {
           aadhaar_number: Joi.string().required(),
           consent_given: Joi.boolean().required(),
-          provider: Joi.string().allow("", null).optional(),
-          provider_reference: Joi.string().allow("", null).optional(),
-          demographics: Joi.object()
-            .keys({
-              name: Joi.string().allow("", null).optional(),
-              dob: Joi.string().allow("", null).optional(),
-              gender: Joi.string().allow("", null).optional(),
-              address: Joi.string().allow("", null).optional(),
-            })
-            .optional(),
         };
         const isValid = Joi.validate(req.body, schema);
         if (isValid.error !== null) throw isValid.error;
 
         res.json(
-          await this.aadhaar.verify(req.body, {
+          await this.aadhaar.initiate(req.body, {
             actorEmployeeId: this._actor(req),
             ip: getClientIp(req),
           })
         );
+      } catch (err) {
+        this._fail(res, err);
+      }
+      res.end();
+    });
+
+    /**
+     * Step 2: exchange the OTP for verified demographics and the duplicate
+     * decision. The OTP is an argument to one provider call and is never
+     * stored, logged or echoed.
+     */
+    router.post("/aadhaar/verify-otp", this.permissions.require(P.EMPLOYEE_CREATE), async (req, res) => {
+      try {
+        if (!this.aadhaar) {
+          res.json({ code: 503, msg: "Aadhaar verification is not configured on this server" });
+          res.end();
+          return;
+        }
+        const schema = {
+          verification_token: Joi.string().required(),
+          otp: Joi.string().required(),
+        };
+        const isValid = Joi.validate(req.body, schema);
+        if (isValid.error !== null) throw isValid.error;
+
+        res.json(await this.aadhaar.verifyOtp(req.body, { actorEmployeeId: this._actor(req) }));
       } catch (err) {
         this._fail(res, err);
       }
@@ -284,6 +301,86 @@ class EmployeeMasterRoutes {
       }
     );
 
+    /* --------------------------------------------------------------- bank */
+    /**
+     * Run a Penny-Less check against the account already on the employee.
+     *
+     * The account number is NOT accepted in the body: it is read from the
+     * employee record inside the usecase, so a full account number never
+     * needs to cross this boundary, and a verification can never be run
+     * against details that were not saved.
+     *
+     * This is the ONLY route that calls the provider. Displaying an employee,
+     * or polling the status endpoint below, never does.
+     */
+    router.post(
+      "/employee/:employee_id/bank/verify",
+      this.permissions.requireAll(P.VERIFY_EMPLOYEE_BANK, P.VIEW_EMPLOYEE_SENSITIVE),
+      async (req, res) => {
+        try {
+          if (!this.bank) {
+            res.json({ code: 503, msg: "Bank verification is not configured on this server" });
+            res.end();
+            return;
+          }
+          res.json(
+            await this.bank.verify(Number(req.params.employee_id), { actorEmployeeId: this._actor(req) })
+          );
+        } catch (err) {
+          this._fail(res, err);
+        }
+        res.end();
+      }
+    );
+
+    /** The current status. Read-only, and never calls the provider. */
+    router.get(
+      "/employee/:employee_id/bank/verification",
+      this.permissions.require(P.VIEW_EMPLOYEE_LIFECYCLE),
+      async (req, res) => {
+        try {
+          if (!this.bank) {
+            res.json({ code: 503, msg: "Bank verification is not configured on this server" });
+            res.end();
+            return;
+          }
+          res.json(await this.bank.getStatus(Number(req.params.employee_id)));
+        } catch (err) {
+          this._fail(res, err);
+        }
+        res.end();
+      }
+    );
+
+    /**
+     * Accept a name the bank spelled differently. Its own permission, because
+     * this is the one place a human overrides a check.
+     */
+    router.post(
+      "/employee/:employee_id/bank/confirm-name",
+      this.permissions.requireAll(P.CONFIRM_BANK_NAME_MISMATCH, P.VIEW_EMPLOYEE_SENSITIVE),
+      async (req, res) => {
+        try {
+          if (!this.bank) {
+            res.json({ code: 503, msg: "Bank verification is not configured on this server" });
+            res.end();
+            return;
+          }
+          const isValid = Joi.validate(req.body || {}, { note: Joi.string().allow("", null).optional() });
+          if (isValid.error !== null) throw isValid.error;
+          res.json(
+            await this.bank.confirmNameMismatch(Number(req.params.employee_id), {
+              actorEmployeeId: this._actor(req),
+              note: (req.body || {}).note,
+            })
+          );
+        } catch (err) {
+          this._fail(res, err);
+        }
+        res.end();
+      }
+    );
+
     router.get("/lifecycle/review", this.permissions.require(P.VIEW_EMPLOYEE_LIFECYCLE), async (req, res) => {
       try {
         const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 500);
@@ -301,5 +398,5 @@ class EmployeeMasterRoutes {
   }
 }
 
-module.exports = (employeeMasterUsecase, permissions, sensitive, aadhaarUsecase) =>
-  new EmployeeMasterRoutes(employeeMasterUsecase, permissions, sensitive, aadhaarUsecase);
+module.exports = (employeeMasterUsecase, permissions, sensitive, aadhaarUsecase, bankUsecase) =>
+  new EmployeeMasterRoutes(employeeMasterUsecase, permissions, sensitive, aadhaarUsecase, bankUsecase);

@@ -49,8 +49,24 @@ class Store {
 const makeRepo = (store) => ({
   async createVerification(row) {
     const id = store.nextVerification++;
-    store.verifications.push({ verification_id: id, ...row });
+    store.verifications.push({ verification_id: id, otp_attempts: 0, ...row });
     return id;
+  },
+  async findVerificationByToken(token) {
+    const v = store.verifications.find((x) => x.session_token === token);
+    return v ? { ...v } : null;
+  },
+  async updateVerification(id, expectedStatus, patch) {
+    const v = store.verifications.find((x) => x.verification_id === Number(id));
+    if (!v || v.status !== expectedStatus) return 0;
+    Object.assign(v, patch);
+    return 1;
+  },
+  async incrementOtpAttempts(id) {
+    const v = store.verifications.find((x) => x.verification_id === Number(id));
+    if (!v) return 0;
+    v.otp_attempts = Number(v.otp_attempts || 0) + 1;
+    return 1;
   },
   async lockVerificationForUse(_tx, id) {
     const v = store.verifications.find((x) => x.verification_id === Number(id));
@@ -106,16 +122,64 @@ const makeRepo = (store) => ({
   },
 });
 
-const build = () => {
-  const store = new Store();
-  return { store, uc: aadhaarUsecase(makeRepo(store)) };
+/**
+ * Stands in for services/sandbox_aadhaar.js. Every provider behaviour the
+ * usecase must handle is a switch on this object, so none of these tests
+ * touches the network.
+ */
+const makeProvider = () => {
+  const calls = [];
+  const provider = {
+    calls,
+    enabled: true,
+    nextGenerate: null,
+    nextVerify: null,
+    isEnabled: () => provider.enabled,
+    async generateOtp(aadhaarNumber) {
+      calls.push(["generateOtp", aadhaarNumber]);
+      if (provider.nextGenerate) {
+        const e = provider.nextGenerate;
+        provider.nextGenerate = null;
+        throw e;
+      }
+      return { reference_id: "REF-" + calls.length, transaction_id: "TXN-" + calls.length };
+    },
+    async verifyOtp(referenceId, otp) {
+      calls.push(["verifyOtp", referenceId, otp]);
+      if (provider.nextVerify) {
+        const e = provider.nextVerify;
+        provider.nextVerify = null;
+        throw e;
+      }
+      return {
+        transaction_id: "TXN-V",
+        reference_id: referenceId,
+        provider_status: "valid",
+        demographics: {
+          name: "Verified Person",
+          date_of_birth: "01-02-1990",
+          gender: "MALE",
+          address: "12 Main Road",
+        },
+      };
+    },
+  };
+  return provider;
 };
 
-const VERIFY = {
-  aadhaar_number: AADHAAR_A,
-  consent_given: true,
-  demographics: { name: "Verified Person", dob: "01-02-1990", gender: "MALE", address: "12 Main Road" },
+const build = () => {
+  const store = new Store();
+  const provider = makeProvider();
+  return { store, provider, uc: aadhaarUsecase(makeRepo(store), provider) };
 };
+
+/** initiate + verify-otp, which is what "verify this Aadhaar" now means. */
+const runFlow = async (uc, input, opts = {}) => {
+  const started = await uc.initiate(input, opts);
+  return uc.verifyOtp({ verification_token: started.verification_token, otp: "123456" }, opts);
+};
+
+const VERIFY = { aadhaar_number: AADHAAR_A, consent_given: true };
 
 /* ===================================================== the number itself = */
 describe("validation", () => {
@@ -221,7 +285,7 @@ describe("the crypto", () => {
 describe("verify", () => {
   it("records the verification and says to create when nobody holds this Aadhaar", async () => {
     const { store, uc } = build();
-    const res = await uc.verify(VERIFY, { actorEmployeeId: 7, ip: "10.0.0.1" });
+    const res = await runFlow(uc, VERIFY, { actorEmployeeId: 7, ip: "10.0.0.1" });
     assert.equal(res.duplicate, false);
     assert.equal(res.next_action, "create");
     assert.equal(res.aadhaar_last4, AADHAAR_A.slice(-4));
@@ -231,8 +295,8 @@ describe("verify", () => {
 
   it("refuses without consent, and records consent when given", async () => {
     const { store, uc } = build();
-    await assert.rejects(() => uc.verify({ ...VERIFY, consent_given: false }), /consent_given must be true/);
-    await uc.verify(VERIFY, { actorEmployeeId: 7, ip: "10.0.0.1" });
+    await assert.rejects(() => uc.initiate({ ...VERIFY, consent_given: false }), /consent_given must be true/);
+    await runFlow(uc, VERIFY, { actorEmployeeId: 7, ip: "10.0.0.1" });
     const v = store.verifications[0];
     assert.equal(v.consent_given, 1);
     assert.equal(v.consent_actor_employee_id, 7);
@@ -243,10 +307,11 @@ describe("verify", () => {
 
   it("captures the provider, its reference and the verified timestamp", async () => {
     const { store, uc } = build();
-    await uc.verify({ ...VERIFY, provider: "somekyc", provider_reference: "REF-991" });
+    await runFlow(uc, VERIFY);
     const v = store.verifications[0];
-    assert.equal(v.provider, "somekyc");
-    assert.equal(v.provider_reference, "REF-991");
+    assert.equal(v.provider, "sandbox");
+    assert.ok(v.provider_reference_id, "Sandbox's OTP reference is stored, not returned");
+    assert.ok(v.provider_transaction_id);
     assert.ok(v.verified_at);
     assert.ok(v.expires_at);
   });
@@ -254,7 +319,7 @@ describe("verify", () => {
   it("maps only the allowed demographic fields", () => {
     const mapped = EmployeeAadhaarUsecase.mapDemographics({
       name: "Verified Person",
-      dob: "01-02-1990",
+      date_of_birth: "01-02-1990",
       gender: "FEMALE",
       address: "12 Main Road",
       // None of these may ever be honoured:
@@ -273,17 +338,18 @@ describe("verify", () => {
   });
 
   it("reads dd-mm-yyyy and yyyy-mm-dd, and drops an unreadable date", () => {
-    assert.equal(EmployeeAadhaarUsecase.mapDemographics({ dob: "1990-02-01" }).dob, "1990-02-01");
-    assert.equal(EmployeeAadhaarUsecase.mapDemographics({ dob: "01/02/1990" }).dob, "1990-02-01");
-    assert.equal(EmployeeAadhaarUsecase.mapDemographics({ dob: "sometime in 1990" }).dob, undefined);
+    assert.equal(EmployeeAadhaarUsecase.mapDemographics({ date_of_birth: "1990-02-01" }).dob, "1990-02-01");
+    assert.equal(EmployeeAadhaarUsecase.mapDemographics({ date_of_birth: "01/02/1990" }).dob, "1990-02-01");
+    assert.equal(EmployeeAadhaarUsecase.mapDemographics({ date_of_birth: "sometime in 1990" }).dob, undefined);
   });
 
   it("strips any Aadhaar-looking key from the demographics payload", async () => {
-    const { store, uc } = build();
-    await uc.verify({
-      ...VERIFY,
+    const { store, uc, provider } = build();
+    provider.verifyOtp = async () => ({
+      transaction_id: "T", reference_id: "R", provider_status: "valid",
       demographics: { name: "X", aadhaar_number: AADHAAR_A, uid: AADHAAR_A, aadhaar: AADHAAR_A },
     });
+    await runFlow(uc, VERIFY);
     const stored = store.verifications[0].demographics_json;
     assert.ok(!stored.includes(AADHAAR_A), "the number must never reach demographics_json");
     assert.ok(stored.includes("X"));
@@ -301,7 +367,7 @@ describe("verify", () => {
       last_ended_on: "2024-05-31",
     });
 
-    const res = await uc.verify(VERIFY);
+    const res = await runFlow(uc, VERIFY);
     assert.equal(res.duplicate, true);
     assert.equal(res.next_action, "rejoin");
     assert.equal(res.existing_employee.employee_id, 412);
@@ -323,7 +389,7 @@ describe("verify", () => {
       period_no: 2,
       period_state: "open",
     });
-    const res = await uc.verify(VERIFY);
+    const res = await runFlow(uc, VERIFY);
     assert.equal(res.next_action, "already_employed");
     assert.match(res.message, /Do not create a second record/);
   });
@@ -333,7 +399,7 @@ describe("verify", () => {
 describe("attachToEmployee", () => {
   const attached = async () => {
     const { store, uc } = build();
-    const v = await uc.verify(VERIFY, { actorEmployeeId: 7 });
+    const v = await runFlow(uc, VERIFY, { actorEmployeeId: 7 });
     const res = await uc.attachToEmployee({}, v.verification_id, 900, { actorEmployeeId: 7 });
     return { store, uc, verificationId: v.verification_id, res };
   };
@@ -368,16 +434,16 @@ describe("attachToEmployee", () => {
 
   it("an expired verification is refused", async () => {
     const { store, uc } = build();
-    const v = await uc.verify(VERIFY);
+    const v = await runFlow(uc, VERIFY);
     store.verifications[0].expires_at = new Date(Date.now() - 1000);
     await assert.rejects(() => uc.attachToEmployee({}, v.verification_id, 900), /has expired/);
   });
 
   it("a second employee cannot take an Aadhaar that is already attached", async () => {
     const { store, uc } = build();
-    const first = await uc.verify(VERIFY);
+    const first = await runFlow(uc, VERIFY);
     await uc.attachToEmployee({}, first.verification_id, 900);
-    const second = await uc.verify(VERIFY); // duplicate: no ciphertext held
+    const second = await runFlow(uc, VERIFY); // duplicate: no ciphertext held
     await assert.rejects(
       () => uc.attachToEmployee({}, second.verification_id, 901),
       /already belongs to employee 900|carries no Aadhaar/
@@ -390,7 +456,7 @@ describe("attachToEmployee", () => {
 describe("the number never escapes", () => {
   it("the display record carries last4 and provenance, never the number", async () => {
     const { uc } = build();
-    const v = await uc.verify(VERIFY);
+    const v = await runFlow(uc, VERIFY);
     await uc.attachToEmployee({}, v.verification_id, 900);
     const shown = await uc.getIdentity(900);
     const text = JSON.stringify(shown);
@@ -401,7 +467,7 @@ describe("the number never escapes", () => {
 
   it("the audit view of a verification carries no ciphertext or fingerprint", async () => {
     const { uc } = build();
-    const v = await uc.verify(VERIFY);
+    const v = await runFlow(uc, VERIFY);
     const audit = await uc.getVerification(v.verification_id);
     const text = JSON.stringify(audit);
     assert.ok(!text.includes(AADHAAR_A));
@@ -413,14 +479,14 @@ describe("the number never escapes", () => {
     const src = fs.readFileSync(path.join(__dirname, "..", "repository/employee_aadhaar.js"), "utf8");
     const selects = src.match(/SELECT[\s\S]*?FROM/g) || [];
     const withCiphertext = selects.filter((s) => /aadhaar_ciphertext/.test(s));
-    assert.equal(withCiphertext.length, 2, "the decrypt read and the locked verification, and nothing else");
+    assert.equal(withCiphertext.length, 3, "the decrypt read, the locked verification and the session lookup");
     assert.match(src, /getIdentityForDecrypt/);
     assert.ok(!/SELECT \*/.test(src), "no SELECT * anywhere");
   });
 
   it("revealing the full number is logged with who read it", async () => {
     const { uc } = build();
-    const v = await uc.verify(VERIFY);
+    const v = await runFlow(uc, VERIFY);
     await uc.attachToEmployee({}, v.verification_id, 900);
     const revealed = await uc.revealFullNumber(900, { actorEmployeeId: 7 });
     assert.equal(revealed.aadhaar_number, AADHAAR_A);
@@ -446,5 +512,207 @@ describe("the number never escapes", () => {
       assert.equal(isSensitiveField(f), true, `${f} must be sensitive`);
     }
     assert.equal(isSensitiveField("aadhaar_last4"), false, "last4 exists to be displayed");
+  });
+});
+
+/* ============================================== the OTP session ========= */
+describe("the Sandbox OTP flow", () => {
+  const { SandboxError, FAILURE } = require("../services/sandbox_client");
+
+  it("3/5. an invalid Verhoeff number is rejected BEFORE the provider is called", async () => {
+    const { provider, store, uc } = build();
+    const wrong = AADHAAR_A.slice(0, 11) + String((Number(AADHAAR_A[11]) + 1) % 10);
+    await assert.rejects(() => uc.initiate({ aadhaar_number: wrong, consent_given: true }), /checksum/);
+    assert.equal(provider.calls.length, 0, "no paid call is spent on a typo");
+    assert.equal(store.verifications.length, 0, "and no session is opened");
+  });
+
+  it("4. consent is required before the provider is called", async () => {
+    const { provider, uc } = build();
+    await assert.rejects(() => uc.initiate({ ...VERIFY, consent_given: false }), /consent_given must be true/);
+    assert.equal(provider.calls.length, 0);
+  });
+
+  it("6/7. initiate returns an opaque token and never the Aadhaar", async () => {
+    const { store, uc } = build();
+    const started = await uc.initiate(VERIFY, { actorEmployeeId: 7 });
+    assert.match(started.verification_token, /^[0-9a-f]{64}$/, "opaque, not the row id");
+    assert.equal(started.status, "initiated");
+    assert.equal(started.aadhaar_last4, AADHAAR_A.slice(-4));
+    assert.equal(started.masked_aadhaar, `XXXX XXXX ${AADHAAR_A.slice(-4)}`);
+    const text = JSON.stringify(started);
+    assert.ok(!text.includes(AADHAAR_A), "the number is never returned");
+    assert.ok(!/verification_id/.test(text), "nor the guessable row id");
+    assert.equal(store.verifications[0].status, "initiated");
+    // Sandbox's reference is stored, not handed to the browser.
+    assert.ok(store.verifications[0].provider_reference_id);
+    assert.ok(!text.includes(store.verifications[0].provider_reference_id));
+  });
+
+  it("8/9. the OTP is never stored, and never appears in a log line or an error", async () => {
+    const OTP = "987654";
+    const { store, uc } = build();
+    const started = await uc.initiate(VERIFY);
+    await uc.verifyOtp({ verification_token: started.verification_token, otp: OTP });
+    assert.ok(!JSON.stringify(store.verifications).includes(OTP), "no OTP on the session row");
+
+    // And the source cannot log it: the provider module has no logger, and
+    // the usecase never puts the OTP into a message.
+    const providerSrc = fs
+      .readFileSync(path.join(__dirname, "..", "services/sandbox_aadhaar.js"), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "");
+    assert.ok(!/logger|console\./.test(providerSrc), "the provider module cannot log: it has no logger");
+    const ucSrc = fs.readFileSync(path.join(__dirname, "employee_aadhaar.js"), "utf8");
+    const verifyBlock = ucSrc.slice(ucSrc.indexOf("async verifyOtp"), ucSrc.indexOf("static stripAadhaarKeys"));
+    assert.ok(!/\$\{[^}]*otp[^}]*\}/i.test(verifyBlock), "no OTP interpolated into any string");
+  });
+
+  it("10. a successful OTP produces verified demographics and the create decision", async () => {
+    const { store, uc } = build();
+    const res = await runFlow(uc, VERIFY);
+    assert.equal(res.status, "verified");
+    assert.equal(res.next_action, "create");
+    assert.deepEqual(res.suggested_employee_fields, {
+      employee_name: "Verified Person",
+      dob: "1990-02-01",
+      gender: "M",
+      permanent_address: "12 Main Road",
+    });
+    assert.equal(store.verifications[0].status, "verified");
+  });
+
+  it("11. a rejected OTP cannot mark the session verified, and can be retried", async () => {
+    const { store, uc, provider } = build();
+    const started = await uc.initiate(VERIFY);
+    provider.nextVerify = new SandboxError(FAILURE.INVALID_REQUEST, "The OTP could not be verified", 422);
+    await assert.rejects(
+      () => uc.verifyOtp({ verification_token: started.verification_token, otp: "000000" }),
+      /could not be verified/
+    );
+    assert.equal(store.verifications[0].status, "initiated", "a wrong digit leaves the session open");
+    assert.equal(store.verifications[0].otp_attempts, 1);
+
+    // and the right one still works
+    const res = await uc.verifyOtp({ verification_token: started.verification_token, otp: "123456" });
+    assert.equal(res.status, "verified");
+  });
+
+  it("11. repeated wrong OTPs close the session rather than allowing forever", async () => {
+    const { store, uc, provider } = build();
+    const started = await uc.initiate(VERIFY);
+    for (let i = 0; i < 5; i++) {
+      provider.nextVerify = new SandboxError(FAILURE.INVALID_REQUEST, "The OTP could not be verified", 422);
+      await assert.rejects(() => uc.verifyOtp({ verification_token: started.verification_token, otp: "000000" }));
+    }
+    await assert.rejects(
+      () => uc.verifyOtp({ verification_token: started.verification_token, otp: "123456" }),
+      /too many OTP attempts/
+    );
+    assert.equal(store.verifications[0].status, "failed");
+    assert.equal(store.verifications[0].failure_category, "too_many_otp_attempts");
+  });
+
+  it("12. an expired session is refused and marked expired", async () => {
+    const { store, uc } = build();
+    const started = await uc.initiate(VERIFY);
+    store.verifications[0].expires_at = new Date(Date.now() - 1000);
+    await assert.rejects(
+      () => uc.verifyOtp({ verification_token: started.verification_token, otp: "123456" }),
+      /has expired/
+    );
+    assert.equal(store.verifications[0].status, "expired");
+  });
+
+  it("13/14/15. provider timeout, auth failure and missing entitlement each fail closed", async () => {
+    for (const [category, pattern] of [
+      [FAILURE.TIMEOUT, /did not respond in time/],
+      [FAILURE.AUTH_FAILED, /rejected our credentials/],
+      [FAILURE.NOT_ENTITLED, /not enabled on the provider account/],
+    ]) {
+      const { store, uc, provider } = build();
+      const started = await uc.initiate(VERIFY);
+      const { SAFE_MESSAGE } = require("../services/sandbox_client");
+      provider.nextVerify = new SandboxError(category, SAFE_MESSAGE[category]);
+      await assert.rejects(
+        () => uc.verifyOtp({ verification_token: started.verification_token, otp: "123456" }),
+        pattern
+      );
+      assert.equal(store.verifications[0].status, "failed", `${category} must not verify`);
+      assert.equal(store.verifications[0].failure_category, category);
+    }
+  });
+
+  it("a failure at initiate leaves no session behind", async () => {
+    const { store, uc, provider } = build();
+    provider.nextGenerate = new SandboxError(FAILURE.UNAVAILABLE, "The verification provider is unavailable");
+    await assert.rejects(() => uc.initiate(VERIFY), /unavailable/);
+    assert.equal(store.verifications.length, 0);
+  });
+
+  it("the session belongs to whoever started it", async () => {
+    const { uc } = build();
+    const started = await uc.initiate(VERIFY, { actorEmployeeId: 7 });
+    await assert.rejects(
+      () => uc.verifyOtp({ verification_token: started.verification_token, otp: "123456" }, { actorEmployeeId: 9 }),
+      /started by another user/
+    );
+  });
+
+  it("a session can only be verified once", async () => {
+    const { uc } = build();
+    const started = await uc.initiate(VERIFY);
+    await uc.verifyOtp({ verification_token: started.verification_token, otp: "123456" });
+    await assert.rejects(
+      () => uc.verifyOtp({ verification_token: started.verification_token, otp: "123456" }),
+      /already been verified/
+    );
+  });
+
+  it("an unknown token is refused", async () => {
+    const { uc } = build();
+    await assert.rejects(() => uc.verifyOtp({ verification_token: "f".repeat(64), otp: "1" }), /does not exist/);
+    await assert.rejects(() => uc.verifyOtp({ verification_token: "short", otp: "1" }), /verification_token is required/);
+  });
+
+  it("24. the duplicate answer exists only after a successful verification", async () => {
+    const { store, uc } = build();
+    store.identities.push({
+      employee_id: 412,
+      aadhaar_fingerprint: aadhaarCrypto.fingerprint(AADHAAR_A),
+      aadhaar_last4: AADHAAR_A.slice(-4),
+      employee_status: 0,
+      period_state: "closed",
+      last_ended_on: "2024-05-31",
+    });
+    // initiate says nothing about duplicates - it has not verified anything yet
+    const started = await uc.initiate(VERIFY);
+    assert.equal(started.duplicate, undefined);
+    assert.equal(started.next_action, undefined);
+    assert.equal(started.employee_id, undefined);
+
+    const res = await uc.verifyOtp({ verification_token: started.verification_token, otp: "123456" });
+    assert.equal(res.duplicate, true);
+    assert.equal(res.next_action, "rejoin");
+    assert.equal(res.employee_id, 412);
+  });
+
+  it("the manual path is OFF and cannot be reached by a Sandbox failure", async () => {
+    const kycConfig = require("../config/sandbox_kyc");
+    assert.equal(kycConfig.allowManualAadhaar, false, "manual attestation is not the default");
+    const { uc } = build();
+    await assert.rejects(() => uc.verify(VERIFY), /Manual Aadhaar attestation is disabled/);
+
+    // And a provider outage raises the outage, never a manual fallback.
+    const { uc: uc2, provider } = build();
+    provider.nextGenerate = new SandboxError(FAILURE.UNAVAILABLE, "The verification provider is unavailable");
+    await assert.rejects(() => uc2.initiate(VERIFY), /unavailable/);
+  });
+
+  it("with no provider configured, the flow refuses rather than degrading", async () => {
+    const { store, uc, provider } = build();
+    provider.enabled = false;
+    await assert.rejects(() => uc.initiate(VERIFY), /not configured on this server/);
+    assert.equal(store.verifications.length, 0);
   });
 });
