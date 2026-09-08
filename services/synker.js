@@ -48,6 +48,8 @@ class Synker {
     this.employeeUsecase = employeeUsecase;
     this.productRepo = productRepo;
     this.stockHoldingReportUsecase = stockHoldingReportUsecase;
+    // Stage 0C / C1c. Set by setEmployeeLifecycleUsecase after construction.
+    this.employeeLifecycleUsecase = null;
   }
 
   initCronJobs(cronService, apiSyncLogger) {
@@ -278,7 +280,61 @@ class Synker {
       console.log("Employee sync completed");
     } catch (err) {
       console.error(err);
+      // The employee master did not finish syncing, so reconciling periods
+      // against a half-written master would draw conclusions from data
+      // Digisme never confirmed. Stop here; the next run repairs both.
+      return { code: 500, msg: "Employee sync failed", error: err.message };
     }
+
+    // Stage 0C / C1c. The employee master is now as Digisme left it, so the
+    // employment periods can be brought into agreement with it.
+    //
+    // Deliberately AFTER the sync and outside its try/catch: the sync's own
+    // success is not conditional on this, and a lifecycle failure must not
+    // make a successful master sync look failed. It is reconciliation, not
+    // event handling, so a failure here is repaired by the next run rather
+    // than lost - which is why it is logged loudly and then returned rather
+    // than thrown.
+    return await this.reconcileEmployeeLifecycle();
+  }
+
+  /**
+   * Runs the lifecycle reconciler if it has been wired in. Split out so that
+   * the scheduled cron and POST /employee/sync - which both reach
+   * syncDigismeEmployees above - take exactly the same path, and so a
+   * deployment where the reconciler is not wired still syncs.
+   */
+  async reconcileEmployeeLifecycle() {
+    if (!this.employeeLifecycleUsecase) {
+      console.log("Employee lifecycle reconciler not wired; skipping");
+      return { code: 200, lifecycle: { skipped: "not_wired" } };
+    }
+
+    try {
+      const summary = await this.employeeLifecycleUsecase.reconcileAll();
+      console.log(
+        `Employee lifecycle reconciled: ${summary.candidates} candidate(s), ` +
+          `${summary.open_initial} opened, ${summary.open_rejoin} rejoined, ` +
+          `${summary.close} closed, ${summary.fill} filled, ${summary.failed} failed`
+      );
+      return { code: summary.failed > 0 ? 207 : 200, lifecycle: summary };
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "SERVICE.SYNKER",
+        code: "SERVICE.SYNKER.LIFECYCLE-RECONCILE-FAILED",
+        description: err.toString(),
+        category: "",
+        ref: {},
+      });
+      console.error("Employee lifecycle reconciliation failed:", err.message);
+      return { code: 207, msg: "Employee sync completed; lifecycle reconciliation failed", error: err.message };
+    }
+  }
+
+  /** Wired after construction, like setSynker elsewhere, to avoid a 12th positional argument. */
+  setEmployeeLifecycleUsecase(employeeLifecycleUsecase) {
+    this.employeeLifecycleUsecase = employeeLifecycleUsecase;
   }
 
   async syncProductsWithLogging() {
