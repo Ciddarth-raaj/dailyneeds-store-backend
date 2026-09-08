@@ -30,6 +30,34 @@ class OutletRoutes {
 
       res.end();
     });
+    /**
+     * The outlet dropdown. Authenticated, and gated on nothing else.
+     *
+     * `GET /outlet` above returns the whole outlet record and rightly needs
+     * `view_stores`. That made a permission for administering stores a
+     * prerequisite for FILTERING BY one, so Accounts Executive - which holds
+     * `view_purchases` and is meant to work across every branch - got an empty
+     * selector on /purchase and could not scope to any outlet.
+     *
+     * The answer is to return less rather than to hand back the permission:
+     * an outlet id and an outlet name, which is all a picker ever used. This
+     * is the same shape as `GET /employee/directory`, added when B2 emptied
+     * the cashier dropdown for the same reason.
+     *
+     * It grants nothing about store administration: no address, no phone, no
+     * Telegram chat id, no GoFrugal id, no opening cash, no IP policy, and no
+     * write of any kind.
+     */
+    router.get("/directory", async (req, res) => {
+      try {
+        res.json(await this.outletUsecase.getDirectory());
+      } catch (err) {
+        console.log(err);
+        res.json({ code: 500, msg: "An error occurred !" });
+      }
+      res.end();
+    });
+
     router.get("/outlet_id", this.permissions.require(P.VIEW_STORES), async (req, res) => {
       try {
         const schema = {

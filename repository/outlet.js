@@ -29,6 +29,44 @@ class OutletRepository {
       });
     });
   }
+  /**
+   * The dropdown projection: an id and a name, and nothing else.
+   *
+   * `get()` above returns `SELECT *`, which carries an address, phone numbers,
+   * a Telegram chat id, a GoFrugal id, opening cash and the IP policy. That is
+   * store administration, and `view_stores` is the right gate for it. But a
+   * date-and-outlet picker only ever needed two columns, so requiring that
+   * permission to render a dropdown made every screen with an outlet filter
+   * an administration screen.
+   *
+   * Same rows as `get()`, deliberately - including inactive outlets, because
+   * historical purchases belong to outlets that may since have closed, and a
+   * filter that cannot name them cannot find that data.
+   */
+  getDirectory() {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "SELECT outlet_id, outlet_name FROM outlets ORDER BY outlet_name ASC",
+        [],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.OUTLET",
+              code: "REPOSITORY.OUTLET.GET-DIRECTORY",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        }
+      );
+    });
+  }
+
   updateStatus(file) {
     return new Promise((resolve, reject) => {
       this.db.query(
