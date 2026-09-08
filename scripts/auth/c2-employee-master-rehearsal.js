@@ -151,6 +151,16 @@ async function main() {
     events: Number(await scalar("SELECT COUNT(*) c FROM employee_lifecycle_event")),
     review: Number(await scalar("SELECT COUNT(*) c FROM employee_employment_period WHERE needs_review = 1")),
     resignations: Number(await scalar("SELECT COUNT(*) c FROM resignation")),
+    aadhaarIdentities: Number(
+      await scalar("SELECT COUNT(*) c FROM employee_aadhaar_identity").catch(() => 0)
+    ),
+    aadhaarVerifications: Number(
+      await scalar("SELECT COUNT(*) c FROM employee_aadhaar_verification").catch(() => 0)
+    ),
+    // A watermark, so cleanup removes only what this run wrote.
+    maxVerificationId: Number(
+      await scalar("SELECT IFNULL(MAX(verification_id), 0) m FROM employee_aadhaar_verification").catch(() => 0)
+    ),
     autoInc: Number(
       await scalar(
         "SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME='new_employee'",
@@ -170,7 +180,16 @@ async function main() {
     const lifecycleRepo = require(path.join(ROOT, "repository/employee_lifecycle"))(pool);
     const userRepo = require(path.join(ROOT, "repository/user"))(pool);
     const lifecycle = require(path.join(ROOT, "usecase/employee_lifecycle"))(lifecycleRepo, userRepo);
-    const hr = require(path.join(ROOT, "usecase/employee_master"))(masterRepo, lifecycle, lifecycleRepo);
+    const aadhaarConfig = require(path.join(ROOT, "config/aadhaar"));
+    const aadhaarCrypto = require(path.join(ROOT, "services/aadhaar_crypto"));
+    const aadhaarRepo = require(path.join(ROOT, "repository/employee_aadhaar"))(pool);
+    const aadhaar = aadhaarConfig.enabled
+      ? require(path.join(ROOT, "usecase/employee_aadhaar"))(aadhaarRepo)
+      : null;
+    const hr = require(path.join(ROOT, "usecase/employee_master"))(masterRepo, lifecycle, lifecycleRepo, aadhaar);
+    if (!aadhaar) {
+      console.log("\n   NOTE: AADHAAR_ENCRYPTION_KEY / AADHAAR_FINGERPRINT_KEY not set - Aadhaar section skipped");
+    }
 
     const base = {
       employee_name: "C2 Rehearsal Subject",
@@ -358,6 +377,132 @@ async function main() {
       0
     );
 
+
+    /* ------------------------------ Aadhaar ----------------------------- */
+    if (aadhaar) {
+      console.log("\n== Aadhaar verification, storage and duplicate detection");
+
+      const withCheckDigit = (eleven) => {
+        for (let d = 0; d <= 9; d++) {
+          const c = eleven + String(d);
+          if (aadhaarCrypto.verhoeffValid(c)) return c;
+        }
+        throw new Error("no valid check digit");
+      };
+      const AADHAAR = withCheckDigit("28888888888");
+
+      const v1 = await aadhaar.verify(
+        {
+          aadhaar_number: AADHAAR,
+          consent_given: true,
+          demographics: { name: "C2 Aadhaar Subject", dob: "01-02-1990", gender: "MALE", address: "9 Test Road" },
+        },
+        { actorEmployeeId: null, ip: "127.0.0.1" }
+      );
+      eq("a first verification finds no duplicate", v1.duplicate, false);
+      eq("and says to create", v1.next_action, "create");
+      eq("last four only", v1.aadhaar_last4, AADHAAR.slice(-4));
+
+      const withAadhaar = await hr.createEmployee(
+        { ...base, employee_name: undefined, date_of_joining: "2026-02-01", aadhaar_verification_id: v1.verification_id }
+      );
+      created.push(withAadhaar.employee_id);
+      const aid = withAadhaar.employee_id;
+      eq("the employee was created with an identity attached", withAadhaar.aadhaar.aadhaar_last4, AADHAAR.slice(-4));
+      eq(
+        "the verified demographics were auto-filled",
+        (
+          await q(
+            `SELECT DATE_FORMAT(dob, '%Y-%m-%d') d, gender, permanent_address
+               FROM new_employee WHERE employee_id = ?`,
+            [aid]
+          )
+        ).map((r) => [r.d, r.gender, r.permanent_address]),
+        [["1990-02-01", "M", "9 Test Road"]]
+      );
+
+      // The number is not in new_employee at all.
+      const masterRow = JSON.stringify(
+        await q("SELECT * FROM new_employee WHERE employee_id = ?", [aid])
+      );
+      eq("the number appears nowhere in new_employee", masterRow.includes(AADHAAR), false);
+
+      // Stored encrypted, and it round-trips.
+      const stored = (await q("SELECT * FROM employee_aadhaar_identity WHERE employee_id = ?", [aid]))[0];
+      eq("a ciphertext row exists", Boolean(stored && stored.aadhaar_ciphertext), true);
+      eq("with no plaintext column", JSON.stringify(stored).includes(AADHAAR), false);
+      eq("last four stored for display", stored.aadhaar_last4, AADHAAR.slice(-4));
+      const revealed = await aadhaar.revealFullNumber(aid, { actorEmployeeId: null });
+      eq("and decrypts back to the original", revealed.aadhaar_number, AADHAAR);
+
+      // The display record and the lifecycle history never carry it.
+      eq(
+        "the display record carries no number",
+        JSON.stringify(await aadhaar.getIdentity(aid)).includes(AADHAAR),
+        false
+      );
+      eq(
+        "the lifecycle history carries no number",
+        JSON.stringify(await hr.getLifecycleHistory(aid)).includes(AADHAAR),
+        false
+      );
+      eq(
+        "the directory carries no number",
+        JSON.stringify(
+          await q("SELECT employee_id, employee_name FROM new_employee WHERE status = 1 AND store_id = ?", [STORE])
+        ).includes(AADHAAR),
+        false
+      );
+
+      // THE DUPLICATE CONTROL: the same person again.
+      await hr.resignEmployee(aid, { resignation_date: "2026-03-31" });
+      const v2 = await aadhaar.verify({ aadhaar_number: AADHAAR, consent_given: true });
+      eq("a second verification detects the same person", v2.duplicate, true);
+      eq("and names the existing employee", v2.existing_employee.employee_id, aid);
+      eq("and directs HR to Rejoin", v2.next_action, "rejoin");
+      eq("with the date they left", v2.existing_employee.last_ended_on, "2026-03-31");
+
+      let refusedDuplicate = false;
+      try {
+        await hr.createEmployee({ ...base, date_of_joining: "2026-04-01", aadhaar_verification_id: v2.verification_id });
+      } catch (err) {
+        refusedDuplicate = true;
+      }
+      eq("a create on that verification is refused", refusedDuplicate, true);
+      eq(
+        "and no second employee row survived",
+        Number(await scalar("SELECT COUNT(*) c FROM employee_aadhaar_identity WHERE aadhaar_fingerprint = ?", [
+          stored.aadhaar_fingerprint,
+        ])),
+        1
+      );
+
+      // Rejoin the SAME employee_id, as the verification told HR to.
+      const rejoined = await hr.rejoinEmployee(aid, { date_of_joining: "2026-05-01" });
+      eq("the rejoin used the same employee_id", rejoined.employee_id, aid);
+      eq("and opened period 2", rejoined.new_period_no, 2);
+      eq(
+        "the Aadhaar identity is still theirs, once",
+        Number(await scalar("SELECT COUNT(*) c FROM employee_aadhaar_identity WHERE employee_id = ?", [aid])),
+        1
+      );
+
+      // A number that fails its checksum never reaches the database.
+      const verificationsBefore = Number(await scalar("SELECT COUNT(*) c FROM employee_aadhaar_verification"));
+      let refusedBad = false;
+      try {
+        await aadhaar.verify({ aadhaar_number: AADHAAR.slice(0, 11) + String((Number(AADHAAR[11]) + 1) % 10), consent_given: true });
+      } catch (err) {
+        refusedBad = /checksum/.test(err.message);
+      }
+      eq("a checksum failure is refused", refusedBad, true);
+      eq(
+        "and wrote no verification row",
+        Number(await scalar("SELECT COUNT(*) c FROM employee_aadhaar_verification")),
+        verificationsBefore
+      );
+    }
+
     /* -------------------------- history endpoint ------------------------ */
     console.log("\n== lifecycle history");
     const history = await hr.getLifecycleHistory(id);
@@ -416,6 +561,8 @@ async function main() {
       console.log("\n== cleanup");
       try {
         if (created.length) {
+          await q("DELETE FROM employee_aadhaar_identity WHERE employee_id IN (?)", [created]).catch(() => {});
+          await q("DELETE FROM employee_aadhaar_verification WHERE verification_id > ?", [before.maxVerificationId]).catch(() => {});
           const r = await q("DELETE FROM resignation WHERE employee_id IN (?)", [created]);
           const e = await q("DELETE FROM employee_lifecycle_event WHERE employee_id IN (?)", [created]);
           const p = await q("DELETE FROM employee_employment_period WHERE employee_id IN (?)", [created]);
@@ -436,6 +583,16 @@ async function main() {
       eq("period count restored", Number(await scalar("SELECT COUNT(*) c FROM employee_employment_period")), before.periods);
       eq("event count restored", Number(await scalar("SELECT COUNT(*) c FROM employee_lifecycle_event")), before.events);
       eq("resignation count restored", Number(await scalar("SELECT COUNT(*) c FROM resignation")), before.resignations);
+      eq(
+        "no Aadhaar identity remains",
+        Number(await scalar("SELECT COUNT(*) c FROM employee_aadhaar_identity")),
+        before.aadhaarIdentities
+      );
+      eq(
+        "no Aadhaar verification remains",
+        Number(await scalar("SELECT COUNT(*) c FROM employee_aadhaar_verification")),
+        before.aadhaarVerifications
+      );
       eq("review flag count restored", Number(await scalar("SELECT COUNT(*) c FROM employee_employment_period WHERE needs_review = 1")), before.review);
       eq(
         "AUTO_INCREMENT restored",

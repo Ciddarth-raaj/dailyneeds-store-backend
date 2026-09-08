@@ -35,6 +35,12 @@ module.exports = {
   EMPLOYEE_REJOIN: "employee_rejoin",
   VIEW_EMPLOYEE_LIFECYCLE: "view_employee_lifecycle",
 
+  // Stage 0C / C2. Reading a stored Aadhaar back in full - which PF and ESI
+  // filing will need - is a decision above `view_employee_sensitive`: seeing
+  // that someone has an Aadhaar ending 4321 is not the same as reading all
+  // twelve digits. Declared by the C2 Aadhaar migration, granted to nobody.
+  VIEW_AADHAAR_FULL: "view_aadhaar_full",
+
   ADD_EMPLOYEES: "add_employees",
   VIEW_BANKS: "view_banks",
   ADD_BANKS: "add_banks",

@@ -25,6 +25,8 @@ process.env.JWT_PRIVATE_KEY_PATH = path.join(dir, "priv.key");
 process.env.JWT_PUBLIC_KEYS = JSON.stringify({ legacy: path.join(dir, "pub.key") });
 process.env.JWT_ACTIVE_KID = "legacy";
 process.env.JWT_LEGACY_KID = "legacy";
+process.env.AADHAAR_ENCRYPTION_KEY = "0".repeat(63) + "1";
+process.env.AADHAAR_FINGERPRINT_KEY = "test-fingerprint-key-at-least-32-chars-long";
 
 const { describe, it, before, after } = require("node:test");
 const assert = require("node:assert/strict");
@@ -40,6 +42,7 @@ const USER_ID = 21;
 const EMPLOYEE_ID = 501;
 const HR_DESIGNATION = 7;
 const OUTLET_DESIGNATION = 8;
+const PF_DESIGNATION = 9; // holds view_aadhaar_full and nothing else
 
 /** Only the HR designation holds the C2 keys. */
 const GRANTS = {
@@ -48,6 +51,8 @@ const GRANTS = {
     P.VIEW_EMPLOYEE_LIFECYCLE,
   ],
   [OUTLET_DESIGNATION]: ["view_stores"],
+  // Reading a full Aadhaar takes BOTH: sensitive access, and the specific key.
+  [PF_DESIGNATION]: [P.VIEW_EMPLOYEE_SENSITIVE, P.VIEW_AADHAAR_FULL],
 };
 
 const sessionState = {
@@ -73,6 +78,19 @@ const usecase = {
   getReviewList: async () => ({ total: 518, count: 1, items: [{ employee_id: 9, period_no: 1, warning_type: "missing_joining_date" }] }),
 };
 
+const aadhaarCalls = [];
+const aadhaarUsecase = {
+  verify: async (input, opts) => {
+    aadhaarCalls.push(["verify", input, opts]);
+    return { code: 200, verification_id: 55, aadhaar_last4: "4321", duplicate: false, next_action: "create" };
+  },
+  getIdentity: async (id) => ({ employee_id: id, aadhaar_last4: "4321", verified_at: "2026-01-01" }),
+  revealFullNumber: async (id, opts) => {
+    aadhaarCalls.push(["reveal", id, opts]);
+    return { employee_id: id, aadhaar_number: "222222222229", aadhaar_last4: "2229" };
+  },
+};
+
 let server, port;
 
 before(async () => {
@@ -87,7 +105,7 @@ before(async () => {
   app.use(bodyParser.json());
   app.use(authMiddleware.create({ userUsecase: { getSessionState: async () => ({ ...sessionState }) } }));
   delete require.cache[require.resolve("./employee_master")];
-  const routes = require("./employee_master")(usecase, permissions, sensitive);
+  const routes = require("./employee_master")(usecase, permissions, sensitive, aadhaarUsecase);
   app.use("/hr", routes.getRouter());
 
   server = await new Promise((r) => {
@@ -386,5 +404,151 @@ describe("the C2 migration", () => {
   it("seeds AUTO_INCREMENT from the real maximum rather than a literal", () => {
     assert.match(sql, /MAX\(`employee_id`\)/);
     assert.ok(!/AUTO_INCREMENT = \d/.test(sql), "no hard-coded next id");
+  });
+});
+
+/* ============================================================== Aadhaar == */
+describe("the Aadhaar surface", () => {
+  const AADHAAR = "222222222229"; // shape only; the usecase is stubbed here
+  const VERIFY_BODY = { aadhaar_number: AADHAAR, consent_given: true };
+
+  it("is refused to an anonymous caller", async () => {
+    const r = await call("POST", "/hr/aadhaar/verify", null, VERIFY_BODY);
+    assert.equal(r.body.code, 403);
+    assert.equal(r.body.msg, "Access Denied");
+  });
+
+  it("B3 refuses the verify body from a caller without edit_employee_sensitive", async () => {
+    // aadhaar_number is a sensitive field, so guardWrite refuses the request
+    // before the route body ever runs - the same mechanism, not a new one.
+    const r = await call("POST", "/hr/aadhaar/verify", tokenFor(), VERIFY_BODY);
+    assert.equal(r.status, 403);
+    assert.equal(r.body.msg, "You do not have permission to perform this action");
+    assert.ok(!aadhaarCalls.some((c) => c[0] === "verify"), "the usecase never saw the number");
+  });
+
+  it("an outlet user is refused even before B3", async () => {
+    const r = await call("POST", "/hr/aadhaar/verify", tokenFor({ designationId: OUTLET_DESIGNATION }), VERIFY_BODY);
+    assert.equal(r.status, 403);
+  });
+
+  it("admin may verify, and the actor and IP are recorded", async () => {
+    aadhaarCalls.length = 0;
+    const r = await call("POST", "/hr/aadhaar/verify", tokenFor({ userType: 2 }), VERIFY_BODY);
+    assert.equal(r.body.code, 200);
+    const verify = aadhaarCalls.find((c) => c[0] === "verify");
+    assert.equal(verify[2].actorEmployeeId, EMPLOYEE_ID);
+    assert.ok("ip" in verify[2]);
+  });
+
+  it("consent is required by the schema", async () => {
+    const r = await call("POST", "/hr/aadhaar/verify", tokenFor({ userType: 2 }), { aadhaar_number: AADHAAR });
+    assert.equal(r.body.code, 422);
+  });
+
+  it("the display record is available to HR and carries no number", async () => {
+    const r = await call("GET", "/hr/employee/9/aadhaar", tokenFor());
+    assert.equal(r.status, 200);
+    assert.equal(r.body.aadhaar_last4, "4321");
+    assert.ok(!/"aadhaar_number"/.test(r.text));
+  });
+
+  it("the FULL number needs its own permission, which HR does not hold", async () => {
+    const r = await call("GET", "/hr/employee/9/aadhaar/full", tokenFor());
+    assert.equal(r.status, 403);
+    assert.equal(r.body.msg, "You do not have permission to perform this action");
+  });
+
+  it("and sensitive access ALONE is not enough either", async () => {
+    // A designation with view_employee_sensitive but not view_aadhaar_full
+    // may see that an Aadhaar exists; it may not read the twelve digits.
+    GRANTS[OUTLET_DESIGNATION] = ["view_stores", P.VIEW_EMPLOYEE_SENSITIVE];
+    try {
+      const r = await call("GET", "/hr/employee/9/aadhaar/full", tokenFor({ designationId: OUTLET_DESIGNATION }));
+      assert.equal(r.status, 403);
+    } finally {
+      GRANTS[OUTLET_DESIGNATION] = ["view_stores"];
+    }
+  });
+
+  it("a designation holding both keys may read it, and nothing else", async () => {
+    const token = tokenFor({ designationId: PF_DESIGNATION });
+    const full = await call("GET", "/hr/employee/9/aadhaar/full", token);
+    assert.equal(full.status, 200);
+    assert.equal(full.body.aadhaar_number, "222222222229");
+    // but that key alone opens no lifecycle action
+    assert.equal((await call("POST", "/hr/employee", token, CREATE_BODY)).status, 403);
+    assert.equal((await call("POST", "/hr/employee/9/resign", token, { resignation_date: "2026-01-01" })).status, 403);
+  });
+
+  it("every full-number read records who read it", async () => {
+    aadhaarCalls.length = 0;
+    await call("GET", "/hr/employee/9/aadhaar/full", tokenFor({ designationId: PF_DESIGNATION }));
+    const reveal = aadhaarCalls.find((c) => c[0] === "reveal");
+    assert.equal(reveal[2].actorEmployeeId, EMPLOYEE_ID);
+  });
+
+  it("the create schema accepts a verification id and still refuses an employee_id", async () => {
+    const r = await call("POST", "/hr/employee", tokenFor(), { ...CREATE_BODY, aadhaar_verification_id: 55 });
+    assert.equal(r.body.code, 200);
+    const bad = await call("POST", "/hr/employee", tokenFor(), { ...CREATE_BODY, employee_id: 1 });
+    assert.equal(bad.body.code, 422);
+  });
+
+  it("a deployment without Aadhaar configured answers 503, not 500", async () => {
+    const permissionsAll = buildPermissions({
+      getPermissionById: async () => [
+        { permission_key: P.EMPLOYEE_CREATE, is_active: 1 },
+        { permission_key: P.VIEW_EMPLOYEE_LIFECYCLE, is_active: 1 },
+      ],
+    });
+    delete require.cache[require.resolve("./employee_master")];
+    const routes = require("./employee_master")(usecase, permissionsAll, buildSensitive(permissionsAll), null);
+    const app = express();
+    app.use(bodyParser.json());
+    app.use(require("../middlewares/auth").create({ userUsecase: { getSessionState: async () => ({ ...sessionState }) } }));
+    app.use("/hr", routes.getRouter());
+    const s = await new Promise((r) => {
+      const srv = app.listen(0, "127.0.0.1", () => r(srv));
+    });
+    try {
+      const res = await fetch(`http://127.0.0.1:${s.address().port}/hr/employee/9/aadhaar`, {
+        headers: { "x-access-token": await tokenFor() },
+      });
+      assert.equal((await res.json()).code, 503);
+    } finally {
+      s.close();
+      delete require.cache[require.resolve("./employee_master")];
+    }
+  });
+});
+
+describe("the Aadhaar migration", () => {
+  const sql = fs.readFileSync(
+    path.join(__dirname, "..", "migrations/mysql/migrations/sqls/20260908140000-c2-aadhaar-identity-up.sql"),
+    "utf8"
+  );
+
+  it("keeps the number out of new_employee entirely", () => {
+    assert.ok(!/ALTER TABLE `new_employee`/.test(sql), "no Aadhaar column is added to the employee master");
+    assert.match(sql, /CREATE TABLE IF NOT EXISTS `employee_aadhaar_identity`/);
+    assert.match(sql, /CREATE TABLE IF NOT EXISTS `employee_aadhaar_verification`/);
+  });
+
+  it("makes the fingerprint unique, which is the duplicate-person control", () => {
+    assert.match(sql, /UNIQUE KEY `uq_aadhaar_identity_fingerprint` \(`aadhaar_fingerprint`\)/);
+    assert.match(sql, /UNIQUE KEY `uq_aadhaar_identity_employee` \(`employee_id`\)/);
+  });
+
+  it("stores ciphertext, IV and tag - never a plaintext column", () => {
+    assert.match(sql, /`aadhaar_ciphertext`\s+VARBINARY/);
+    assert.match(sql, /`aadhaar_iv`\s+VARBINARY/);
+    assert.match(sql, /`aadhaar_auth_tag`\s+VARBINARY/);
+    assert.ok(!/aadhaar_number/.test(sql), "there is no plaintext column at all");
+  });
+
+  it("declares view_aadhaar_full and grants it to nobody", () => {
+    assert.match(sql, /'view_aadhaar_full'/);
+    assert.ok(!/INSERT INTO `permissions`/.test(sql), "no designation is granted the key by the migration");
   });
 });

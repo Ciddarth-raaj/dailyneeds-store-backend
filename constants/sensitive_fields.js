@@ -31,6 +31,12 @@ const SENSITIVE_EMPLOYEE_FIELDS = [
   "aadhaar_card_no",
   "aadhaar_card_name",
   "aadhaar_card_image",
+  // Stage 0C / C2. The verification flow's own names. `aadhaar_last4` is
+  // deliberately absent: it exists precisely so a screen has something safe
+  // to show, and listing it here would hide the very field meant for display.
+  "aadhaar_number",
+  "aadhaar_ciphertext",
+  "aadhaar_fingerprint",
   "uan",
   // statutory
   "pf",

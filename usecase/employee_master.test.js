@@ -16,6 +16,9 @@
  * with the invariants checked after every step: one permanent employee_id,
  * periods 1/2/3, exactly one open period, and earlier periods byte-identical.
  */
+process.env.AADHAAR_ENCRYPTION_KEY = "0".repeat(63) + "1";
+process.env.AADHAAR_FINGERPRINT_KEY = "test-fingerprint-key-at-least-32-chars-long";
+
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("fs");
@@ -774,5 +777,196 @@ describe("lifecycle history and the review list", () => {
     for (const verb of ["UPDATE", "INSERT", "DELETE"]) {
       assert.ok(!new RegExp(`\\b${verb}\\b`).test(block), `the review query must not ${verb}`);
     }
+  });
+});
+
+/* ================================================ create with Aadhaar === */
+describe("Create with a verified Aadhaar", () => {
+  const aadhaarCrypto = require("../services/aadhaar_crypto");
+  const aadhaarUsecaseFactory = require("./employee_aadhaar");
+
+  const withCheckDigit = (eleven) => {
+    for (let d = 0; d <= 9; d++) {
+      const c = eleven + String(d);
+      if (aadhaarCrypto.verhoeffValid(c)) return c;
+    }
+    throw new Error("no valid check digit");
+  };
+  const AADHAAR = withCheckDigit("22222222222");
+
+  /** An Aadhaar store that shares the master transaction's undo log. */
+  const makeAadhaar = (world) => {
+    world.verifications = [];
+    world.identities = [];
+    let nextV = 1;
+    let nextI = 1;
+    const repo = {
+      async createVerification(row) {
+        const id = nextV++;
+        world.verifications.push({ verification_id: id, ...row });
+        return id;
+      },
+      async lockVerificationForUse(_tx, id) {
+        const v = world.verifications.find((x) => x.verification_id === Number(id));
+        return v ? { ...v } : null;
+      },
+      async consumeVerification(tx, id, employeeId) {
+        const v = world.verifications.find((x) => x.verification_id === Number(id));
+        if (!v || v.status !== "verified") return 0;
+        const before = { ...v };
+        Object.assign(v, {
+          status: "consumed", employee_id: employeeId,
+          aadhaar_ciphertext: null, aadhaar_iv: null, aadhaar_auth_tag: null,
+        });
+        record(tx, () => Object.assign(v, before));
+        return 1;
+      },
+      async getVerification(id) {
+        return world.verifications.find((x) => x.verification_id === Number(id)) || null;
+      },
+      async findByFingerprint(fp) {
+        const i = world.identities.find((x) => x.aadhaar_fingerprint === fp);
+        if (!i) return null;
+        const e = world.employees.get(Number(i.employee_id));
+        return {
+          employee_id: i.employee_id, aadhaar_last4: i.aadhaar_last4,
+          employee_status: e ? e.status : 1, period_no: 1, period_state: "open", last_ended_on: null,
+        };
+      },
+      async createIdentity(tx, row) {
+        if (world.identities.some((x) => x.aadhaar_fingerprint === row.aadhaar_fingerprint)) {
+          throw new Error("uq_aadhaar_identity_fingerprint");
+        }
+        const id = nextI++;
+        const stored = { aadhaar_identity_id: id, ...row };
+        world.identities.push(stored);
+        record(tx, () => {
+          world.identities = world.identities.filter((x) => x.aadhaar_identity_id !== id);
+        });
+        return id;
+      },
+      async getIdentity(employeeId) {
+        return world.identities.find((x) => x.employee_id === Number(employeeId)) || null;
+      },
+      async getIdentityForDecrypt(employeeId) {
+        return world.identities.find((x) => x.employee_id === Number(employeeId)) || null;
+      },
+    };
+    return aadhaarUsecaseFactory(repo);
+  };
+
+  const buildWithAadhaar = () => {
+    const world = new World();
+    const lifecycleRepo = makeLifecycleRepo(world);
+    const lifecycle = lifecycleUsecase(lifecycleRepo, null);
+    const aadhaar = makeAadhaar(world);
+    const uc = masterUsecaseFactory(makeMasterRepo(world), lifecycle, lifecycleRepo, aadhaar);
+    return { world, uc, aadhaar };
+  };
+
+  const VERIFY = {
+    aadhaar_number: AADHAAR,
+    consent_given: true,
+    demographics: { name: "Verified Person", dob: "01-02-1990", gender: "MALE", address: "12 Main Road" },
+  };
+
+  it("attaches the identity and auto-fills only the mapped fields", async () => {
+    const { world, uc, aadhaar } = buildWithAadhaar();
+    const v = await aadhaar.verify(VERIFY, { actorEmployeeId: 7 });
+    assert.equal(v.duplicate, false);
+
+    const res = await uc.createEmployee(
+      { ...VALID, employee_name: undefined, date_of_joining: "2026-01-05", aadhaar_verification_id: v.verification_id },
+      { actorEmployeeId: 7 }
+    );
+    assert.equal(res.code, 200);
+    assert.equal(res.aadhaar.aadhaar_last4, AADHAAR.slice(-4));
+    assert.equal(world.identities.length, 1);
+    assert.equal(world.identities[0].employee_id, res.employee_id);
+
+    const employee = world.employees.get(res.employee_id);
+    assert.equal(employee.dob, "1990-02-01", "the verified date of birth was applied");
+    assert.equal(employee.gender, "M");
+    assert.equal(employee.permanent_address, "12 Main Road");
+    // And the period still opened normally.
+    assert.deepEqual(shapeOf(world, res.employee_id), [[1, "open", "2026-01-05", null]]);
+  });
+
+  it("a field HR supplied is not overwritten by the verified payload", async () => {
+    const { world, uc, aadhaar } = buildWithAadhaar();
+    const v = await aadhaar.verify(VERIFY);
+    const res = await uc.createEmployee({
+      ...VALID,
+      employee_name: "Name HR Typed",
+      date_of_joining: "2026-01-05",
+      aadhaar_verification_id: v.verification_id,
+    });
+    assert.equal(world.employees.get(res.employee_id).employee_name, "Name HR Typed");
+    assert.ok(!res.aadhaar.demographic_fields_applied.includes("employee_name"));
+  });
+
+  it("the verified payload can never set a designation, store, salary or status", async () => {
+    const { world, uc, aadhaar } = buildWithAadhaar();
+    const v = await aadhaar.verify({
+      ...VERIFY,
+      demographics: { name: "X", designation_id: 99, store_id: 99, salary: "9", status: 0 },
+    });
+    const res = await uc.createEmployee({ ...VALID, employee_name: undefined, aadhaar_verification_id: v.verification_id });
+    const e = world.employees.get(res.employee_id);
+    assert.equal(e.designation_id, VALID.designation_id);
+    assert.equal(e.store_id, VALID.store_id);
+    assert.equal(e.status, 1);
+    assert.equal(e.salary, undefined);
+  });
+
+  it("ONE TRANSACTION: a duplicate Aadhaar rolls the whole create back", async () => {
+    const { world, uc, aadhaar } = buildWithAadhaar();
+    const first = await aadhaar.verify(VERIFY);
+    const created = await uc.createEmployee({ ...VALID, aadhaar_verification_id: first.verification_id });
+    const employeesBefore = world.employees.size;
+
+    // The same person again. Verify now reports the duplicate and holds no
+    // ciphertext, so the create cannot proceed.
+    const second = await aadhaar.verify(VERIFY);
+    assert.equal(second.duplicate, true);
+    assert.equal(second.existing_employee.employee_id, created.employee_id);
+
+    await assert.rejects(() => uc.createEmployee({ ...VALID, aadhaar_verification_id: second.verification_id }));
+    assert.equal(world.employees.size, employeesBefore, "no second employee row survived");
+    assert.equal(world.identities.length, 1);
+  });
+
+  it("ONE TRANSACTION: a lifecycle failure rolls the Aadhaar identity back too", async () => {
+    const { world, uc, aadhaar } = buildWithAadhaar();
+    const v = await aadhaar.verify(VERIFY);
+    world.failNextReconcile = true;
+    await assert.rejects(
+      () => uc.createEmployee({ ...VALID, aadhaar_verification_id: v.verification_id }),
+      /simulated lifecycle failure/
+    );
+    assert.equal(world.employees.size, 0, "no employee");
+    assert.equal(world.identities.length, 0, "and no orphan identity");
+    assert.equal(world.verifications[0].status, "verified", "the verification is reusable");
+  });
+
+  it("a create without Aadhaar still works, and reports none", async () => {
+    const { uc } = buildWithAadhaar();
+    const res = await uc.createEmployee({ ...VALID });
+    assert.equal(res.code, 200);
+    assert.equal(res.aadhaar, null);
+  });
+
+  it("a create quoting an unknown verification is refused", async () => {
+    const { world, uc } = buildWithAadhaar();
+    await assert.rejects(() => uc.createEmployee({ ...VALID, aadhaar_verification_id: 999 }), /does not exist/);
+    assert.equal(world.employees.size, 0);
+  });
+
+  it("the response carries last4, never the number", async () => {
+    const { uc, aadhaar } = buildWithAadhaar();
+    const v = await aadhaar.verify(VERIFY);
+    const res = await uc.createEmployee({ ...VALID, aadhaar_verification_id: v.verification_id });
+    assert.ok(!JSON.stringify(res).includes(AADHAAR));
+    assert.ok(!JSON.stringify(await uc.getLifecycleHistory(res.employee_id)).includes(AADHAAR));
   });
 });

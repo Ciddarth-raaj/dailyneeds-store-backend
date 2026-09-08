@@ -109,10 +109,13 @@ class EmployeeMasterUsecase {
    * the newest period to validate a date against, and filling a previously
    * unknown end date through C1c's own NULL-only path.
    */
-  constructor(employeeMasterRepo, lifecycleUsecase, lifecycleRepo) {
+  constructor(employeeMasterRepo, lifecycleUsecase, lifecycleRepo, aadhaarUsecase) {
     this.repo = employeeMasterRepo;
     this.lifecycle = lifecycleUsecase;
     this.lifecycleRepo = lifecycleRepo;
+    // Optional: a deployment with no Aadhaar keys configured still creates
+    // employees, it just cannot attach an identity.
+    this.aadhaar = aadhaarUsecase || null;
   }
 
   _log(level, code, description, ref = {}) {
@@ -176,8 +179,44 @@ class EmployeeMasterUsecase {
     fields.status = STATUS.ACTIVE;
     fields.resignation_date = null;
 
+    const verificationId = input.aadhaar_verification_id;
+    if (verificationId !== undefined && verificationId !== null && !this.aadhaar) {
+      throw new ValidationError("Aadhaar verification is not configured on this server");
+    }
+    delete fields.aadhaar_verification_id;
+
     return this.repo.withTransaction(async (tx) => {
       const employeeId = await this.repo.createEmployee(tx, fields);
+
+      // The Aadhaar identity is written INSIDE this transaction, so an
+      // employee cannot exist with a half-attached identity, and a duplicate
+      // caught under the unique fingerprint rolls the whole create back
+      // rather than leaving a stray employee behind.
+      let aadhaar = null;
+      if (verificationId !== undefined && verificationId !== null) {
+        const attached = await this.aadhaar.attachToEmployee(tx, verificationId, employeeId, {
+          actorEmployeeId,
+        });
+        // The verified demographics are applied to the employee AFTER the
+        // insert and only through the Aadhaar layer's own allowlist, so a
+        // provider payload can never reach a designation, a store or a date.
+        const demographic = attached.demographic_fields || {};
+        const applicable = Object.keys(demographic).filter((k) => !(k in input));
+        if (applicable.length) {
+          await this.repo.updateEmployee(
+            tx,
+            employeeId,
+            Object.fromEntries(applicable.map((k) => [k, demographic[k]]))
+          );
+        }
+        aadhaar = {
+          aadhaar_last4: attached.aadhaar_last4,
+          verified_at: attached.verified_at,
+          verification_id: verificationId,
+          demographic_fields_applied: applicable,
+        };
+      }
+
       const outcome = await this._reconcile(tx, employeeId, "create", actorEmployeeId);
       const periods = await this.lifecycleRepo.getLatestPeriod(tx, employeeId);
 
@@ -190,6 +229,7 @@ class EmployeeMasterUsecase {
         employee_id: employeeId,
         lifecycle_action: outcome.action,
         period: periods ? { period_no: periods.period_no, period_state: periods.period_state } : null,
+        aadhaar,
       };
     });
   }
@@ -454,8 +494,8 @@ class EmployeeMasterUsecase {
   }
 }
 
-module.exports = (employeeMasterRepo, lifecycleUsecase, lifecycleRepo) =>
-  new EmployeeMasterUsecase(employeeMasterRepo, lifecycleUsecase, lifecycleRepo);
+module.exports = (employeeMasterRepo, lifecycleUsecase, lifecycleRepo, aadhaarUsecase) =>
+  new EmployeeMasterUsecase(employeeMasterRepo, lifecycleUsecase, lifecycleRepo, aadhaarUsecase);
 module.exports.EmployeeMasterUsecase = EmployeeMasterUsecase;
 module.exports.effectiveDate = effectiveDate;
 module.exports.rejectFutureDate = rejectFutureDate;

@@ -2,6 +2,7 @@ const express = require("express");
 const Joi = require("@hapi/joi");
 const P = require("../constants/hr_permissions");
 const { EDITABLE_FIELDS } = require("../repository/employee_master");
+const { getClientIp } = require("../utils/ip");
 
 const router = express.Router();
 
@@ -20,10 +21,11 @@ const router = express.Router();
  * employee record does not make HR entitled to everything on it.
  */
 class EmployeeMasterRoutes {
-  constructor(employeeMasterUsecase, permissions, sensitive) {
+  constructor(employeeMasterUsecase, permissions, sensitive, aadhaarUsecase) {
     this.usecase = employeeMasterUsecase;
     this.permissions = permissions;
     this.sensitive = sensitive;
+    this.aadhaar = aadhaarUsecase || null;
     this.setupRoutes();
   }
 
@@ -83,6 +85,9 @@ class EmployeeMasterRoutes {
             employee_image: Joi.string().allow("", null).optional(),
             telegram_username: Joi.string().allow("", null).optional(),
             online_portal: Joi.number().optional(),
+            // Stage 0C / C2. When present, the employee is created with a
+            // verified Aadhaar identity attached in the same transaction.
+            aadhaar_verification_id: Joi.number().integer().positive().optional(),
           })
           // employee_id is absent on purpose: the database allocates it, and
           // accepting one from a client is what would make identity guessable.
@@ -179,6 +184,106 @@ class EmployeeMasterRoutes {
       }
     );
 
+    /* ------------------------------------------------------------ Aadhaar */
+    /**
+     * Verify an Aadhaar and find out whether we already know this person.
+     *
+     * Gated on `employee_create` at the route, and on `edit_employee_sensitive`
+     * by B3 - the body carries `aadhaar_number`, which is a sensitive field,
+     * so `guardWrite` refuses the request outright without that permission.
+     * Two layers, neither of them new.
+     */
+    router.post("/aadhaar/verify", this.permissions.require(P.EMPLOYEE_CREATE), async (req, res) => {
+      try {
+        if (!this.aadhaar) {
+          res.json({ code: 503, msg: "Aadhaar verification is not configured on this server" });
+          res.end();
+          return;
+        }
+        const schema = {
+          aadhaar_number: Joi.string().required(),
+          consent_given: Joi.boolean().required(),
+          provider: Joi.string().allow("", null).optional(),
+          provider_reference: Joi.string().allow("", null).optional(),
+          demographics: Joi.object()
+            .keys({
+              name: Joi.string().allow("", null).optional(),
+              dob: Joi.string().allow("", null).optional(),
+              gender: Joi.string().allow("", null).optional(),
+              address: Joi.string().allow("", null).optional(),
+            })
+            .optional(),
+        };
+        const isValid = Joi.validate(req.body, schema);
+        if (isValid.error !== null) throw isValid.error;
+
+        res.json(
+          await this.aadhaar.verify(req.body, {
+            actorEmployeeId: this._actor(req),
+            ip: getClientIp(req),
+          })
+        );
+      } catch (err) {
+        this._fail(res, err);
+      }
+      res.end();
+    });
+
+    /** The display record: last four and provenance. Never the number. */
+    router.get(
+      "/employee/:employee_id/aadhaar",
+      this.permissions.require(P.VIEW_EMPLOYEE_LIFECYCLE),
+      async (req, res) => {
+        try {
+          if (!this.aadhaar) {
+            res.json({ code: 503, msg: "Aadhaar verification is not configured on this server" });
+            res.end();
+            return;
+          }
+          const row = await this.aadhaar.getIdentity(Number(req.params.employee_id));
+          res.json(row || { code: 404, msg: "no Aadhaar on record for this employee" });
+        } catch (err) {
+          this._fail(res, err);
+        }
+        res.end();
+      }
+    );
+
+    /**
+     * The full number, for PF and ESI filing.
+     *
+     * BOTH keys, not either: `view_employee_sensitive` is what B3 requires to
+     * let an Aadhaar value through `filterResponse` at all, and
+     * `view_aadhaar_full` is the additional, specific decision that this
+     * caller may read all twelve digits rather than the last four. Requiring
+     * only the second would mean B3 silently stripped the very field the
+     * route exists to return - the two layers must agree, and `requireAll`
+     * is how that is said.
+     *
+     * Every read is logged with who read it.
+     */
+    router.get(
+      "/employee/:employee_id/aadhaar/full",
+      this.permissions.requireAll(P.VIEW_EMPLOYEE_SENSITIVE, P.VIEW_AADHAAR_FULL),
+      async (req, res) => {
+        try {
+          if (!this.aadhaar) {
+            res.json({ code: 503, msg: "Aadhaar verification is not configured on this server" });
+            res.end();
+            return;
+          }
+          res.json(
+            await this.aadhaar.revealFullNumber(Number(req.params.employee_id), {
+              actorEmployeeId: this._actor(req),
+            })
+          );
+        } catch (err) {
+          this._fail(res, err);
+        }
+        res.end();
+      }
+    );
+
     router.get("/lifecycle/review", this.permissions.require(P.VIEW_EMPLOYEE_LIFECYCLE), async (req, res) => {
       try {
         const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 500);
@@ -196,5 +301,5 @@ class EmployeeMasterRoutes {
   }
 }
 
-module.exports = (employeeMasterUsecase, permissions, sensitive) =>
-  new EmployeeMasterRoutes(employeeMasterUsecase, permissions, sensitive);
+module.exports = (employeeMasterUsecase, permissions, sensitive, aadhaarUsecase) =>
+  new EmployeeMasterRoutes(employeeMasterUsecase, permissions, sensitive, aadhaarUsecase);
