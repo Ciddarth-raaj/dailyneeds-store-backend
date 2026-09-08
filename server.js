@@ -431,6 +431,15 @@ class Server {
       this.employeeLifecycleRepo,
       this.employeeAadhaarUsecase
     );
+    // Stage 0C / C3: Aadhaar and bank status for a whole employee list at
+    // once. It takes the employee usecase itself rather than a repository, so
+    // the population it summarises is literally the one `GET
+    // /employee/employees` returns and cannot drift from it.
+    this.employeeStatusSummaryUsecase = require("./usecase/employee_status_summary")(
+      this.employeeUsecase,
+      this.employeeAadhaarRepo,
+      this.employeeBankRepo
+    );
     this.shiftUsecase = require("./usecase/shift")(this.shiftRepo);
     this.storeUsecase = require("./usecase/store")(this.storeRepo);
     this.outletUsecase = require("./usecase/outlet")(
@@ -747,7 +756,8 @@ class Server {
       this.permissions,
       this.sensitive,
       this.employeeAadhaarUsecase,
-      this.employeeBankUsecase
+      this.employeeBankUsecase,
+      this.employeeStatusSummaryUsecase
     );
     const shiftRouter = require("./routes/shift")(this.shiftUsecase, this.permissions);
     const storeRouter = require("./routes/store")(this.storeUsecase);

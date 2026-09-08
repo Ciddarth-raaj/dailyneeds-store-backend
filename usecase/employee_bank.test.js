@@ -394,9 +394,28 @@ describe("47/48/63. the account number never escapes", () => {
 
   it("63. the repository selects a full account only where the check needs it", () => {
     const repo = fs.readFileSync(path.join(__dirname, "..", "repository/employee_bank.js"), "utf8");
-    const selects = repo.match(/SELECT[\s\S]*?FROM/g) || [];
-    const withAccount = selects.filter((s) => /account_no\b/.test(s));
-    assert.equal(withAccount.length, 1, "only getBankDetails reads the account itself");
+
+    // The account number is read in exactly two places, both named, and both
+    // for the same reason: the fingerprint of the account currently on file
+    // cannot be computed without it. `getBankDetails` serves one employee,
+    // `getBankDetailsMany` serves an employee list without becoming 630
+    // queries. NEITHER returns it upward - what leaves is a fingerprint
+    // comparison and a masked or last-four value.
+    //
+    // Naming them rather than counting them is the point: a third reader
+    // fails this test with the name of the method that introduced it.
+    const READERS = ["getBankDetails", "getBankDetailsMany"];
+
+    const methods = repo.split(/\n  (?:async )?(?=\w+\()/);
+    const found = [];
+    for (const body of methods) {
+      const name = (body.match(/^(\w+)\(/) || [])[1];
+      if (!name) continue;
+      const selects = body.match(/SELECT[\s\S]*?FROM/g) || [];
+      if (selects.some((s) => /account_no\b/.test(s))) found.push(name);
+    }
+
+    assert.deepEqual(found.sort(), [...READERS].sort(), "only these methods may read the account itself");
     assert.ok(!/SELECT \*/.test(repo));
   });
 

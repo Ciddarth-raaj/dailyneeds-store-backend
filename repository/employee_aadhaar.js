@@ -213,6 +213,27 @@ class EmployeeAadhaarRepository {
   }
 
   /**
+   * WHICH of these employees have an attached Aadhaar identity - nothing else.
+   *
+   * For the HR employee list, which needs 630 answers and must not ask 630
+   * times. One set-based query, and it selects ONLY the employee id: no last
+   * four digits, no fingerprint, no ciphertext, no verification id. The list
+   * shows a badge, and a badge needs a boolean.
+   *
+   * Employees who skipped Aadhaar have no row here at all, which is why this
+   * returns the ids that DO have one rather than a status per employee.
+   */
+  async findEmployeeIdsWithIdentity(employeeIds) {
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
+    const rows = await this._read(
+      "FIND-EMPLOYEE-IDS-WITH-IDENTITY",
+      "SELECT employee_id FROM employee_aadhaar_identity WHERE employee_id IN (?)",
+      [employeeIds]
+    );
+    return rows.map((r) => r.employee_id);
+  }
+
+  /**
    * The ONE query that returns ciphertext, for the one caller entitled to
    * decrypt - PF and ESI filing, behind `view_aadhaar_full`. Named so that a
    * reviewer grepping for the ciphertext finds exactly this.

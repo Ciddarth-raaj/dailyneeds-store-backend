@@ -21,12 +21,13 @@ const router = express.Router();
  * employee record does not make HR entitled to everything on it.
  */
 class EmployeeMasterRoutes {
-  constructor(employeeMasterUsecase, permissions, sensitive, aadhaarUsecase, bankUsecase) {
+  constructor(employeeMasterUsecase, permissions, sensitive, aadhaarUsecase, bankUsecase, statusSummaryUsecase) {
     this.usecase = employeeMasterUsecase;
     this.permissions = permissions;
     this.sensitive = sensitive;
     this.aadhaar = aadhaarUsecase || null;
     this.bank = bankUsecase || null;
+    this.statusSummary = statusSummaryUsecase || null;
     this.setupRoutes();
   }
 
@@ -192,6 +193,47 @@ class EmployeeMasterRoutes {
         res.end();
       }
     );
+
+    /* ---------------------------------------------- the list status columns */
+    /**
+     * Aadhaar and bank status for a whole employee list, in one request.
+     *
+     * WHY IT IS GATED ON `view_employees` AND NOTHING ELSE. It shows exactly
+     * the employees `GET /employee/employees` already shows the same caller -
+     * the population comes from that very call - and it adds two badges to
+     * them. It is a column on a list somebody can already see, so it is the
+     * list's permission.
+     *
+     * It is deliberately NOT gated on `view_employee_sensitive`: knowing that
+     * an employee's bank details are unverified is what HR needs in order to
+     * chase them, and it discloses nothing about the account. Nothing here
+     * is sensitive under B3 - there is no account number, no last four
+     * digits, no IFSC, no Aadhaar digits, no fingerprint - so B3's
+     * `filterResponse` has nothing to strip, which is the point.
+     *
+     * The same `store_ids` / `designation_ids` filters as the employee list,
+     * so a filtered list asks for a filtered summary.
+     */
+    router.get("/employees/status-summary", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
+      try {
+        if (!this.statusSummary) {
+          res.json({ code: 503, msg: "The employee status summary is not configured on this server" });
+          res.end();
+          return;
+        }
+        const schema = {
+          store_ids: Joi.array().items(Joi.number().required()).optional(),
+          designation_ids: Joi.array().items(Joi.number().required()).optional(),
+        };
+        const isValid = Joi.validate(req.query, schema);
+        if (isValid.error !== null) throw isValid.error;
+
+        res.json(await this.statusSummary.list(req.query));
+      } catch (err) {
+        this._fail(res, err);
+      }
+      res.end();
+    });
 
     /**
      * "Have we got this person already?" - for a create with no Aadhaar.
@@ -498,5 +540,19 @@ class EmployeeMasterRoutes {
   }
 }
 
-module.exports = (employeeMasterUsecase, permissions, sensitive, aadhaarUsecase, bankUsecase) =>
-  new EmployeeMasterRoutes(employeeMasterUsecase, permissions, sensitive, aadhaarUsecase, bankUsecase);
+module.exports = (
+  employeeMasterUsecase,
+  permissions,
+  sensitive,
+  aadhaarUsecase,
+  bankUsecase,
+  statusSummaryUsecase
+) =>
+  new EmployeeMasterRoutes(
+    employeeMasterUsecase,
+    permissions,
+    sensitive,
+    aadhaarUsecase,
+    bankUsecase,
+    statusSummaryUsecase
+  );

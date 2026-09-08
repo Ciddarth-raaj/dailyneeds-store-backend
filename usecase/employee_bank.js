@@ -134,6 +134,58 @@ class EmployeeBankUsecase {
   }
 
   /**
+   * THE STATUS DECISION, as a pure function of what was read.
+   *
+   * Extracted so that `getStatus` below and the bulk status summary used by
+   * the HR employee list cannot drift apart. Every rule C2 established lives
+   * here and nowhere else:
+   *
+   *   no account on file                        NOT_PROVIDED
+   *   no verification, or one run against a
+   *     different account                       PENDING
+   *   otherwise                                 whatever the bank said
+   *   DUPLICATE_ACCOUNT whose clash has since
+   *     gone (the other employee left)          VERIFIED, or NAME_MISMATCH
+   *                                             if the name never matched
+   *
+   * The duplicate is resolved on READ rather than frozen at verification
+   * time, because it is a fact about other employees and they change without
+   * this row being touched. A bulk caller must therefore pass the CURRENT
+   * count of active duplicates, not a stored one.
+   *
+   * `bank_payroll_ready` is deliberately not a separate rule: it is
+   * VERIFIED and nothing else, so it can never disagree with the status
+   * beside it.
+   */
+  static resolveEffectiveStatus({ hasAccount, stored, fingerprintMatches, activeDuplicateCount = 0 }) {
+    if (!hasAccount) return { status: STATUS.NOT_PROVIDED, bank_payroll_ready: false };
+    if (!stored || !fingerprintMatches) return { status: STATUS.PENDING, bank_payroll_ready: false };
+
+    let status = stored.status;
+    if (status === STATUS.DUPLICATE_ACCOUNT && activeDuplicateCount === 0) {
+      status = stored.name_match_verdict === "MISMATCH" ? STATUS.NAME_MISMATCH : STATUS.VERIFIED;
+    }
+    return { status, bank_payroll_ready: status === STATUS.VERIFIED };
+  }
+
+  /** Whether an employee row carries a usable account at all. */
+  static hasBankAccount(employee) {
+    return Boolean(
+      employee &&
+        employee.account_no && String(employee.account_no).trim() !== "" &&
+        employee.ifsc && String(employee.ifsc).trim() !== ""
+    );
+  }
+
+  /** The fingerprint of the account currently on the employee row. */
+  static currentFingerprintOf(employee) {
+    return EmployeeBankUsecase.fingerprint(
+      String(employee.account_no).replace(/[\s-]/g, ""),
+      String(employee.ifsc).replace(/\s/g, "").toUpperCase()
+    );
+  }
+
+  /**
    * The current status, recomputed against the details on file.
    *
    * This NEVER calls the provider. Displaying an employee, or polling this
@@ -144,17 +196,13 @@ class EmployeeBankUsecase {
     const employee = await this.repo.getBankDetails(employeeId);
     if (!employee) throw new NotFoundError(`employee ${employeeId} does not exist`);
 
-    const hasAccount = Boolean(
-      employee.account_no && String(employee.account_no).trim() !== "" &&
-      employee.ifsc && String(employee.ifsc).trim() !== ""
-    );
+    const hasAccount = EmployeeBankUsecase.hasBankAccount(employee);
     const stored = await this.repo.getVerification(employeeId);
 
     if (!hasAccount) {
       return {
         employee_id: employeeId,
-        status: STATUS.NOT_PROVIDED,
-        bank_payroll_ready: false,
+        ...EmployeeBankUsecase.resolveEffectiveStatus({ hasAccount: false }),
         masked_account: null,
         ifsc: null,
         bank_name: employee.bank_name || null,
@@ -163,10 +211,7 @@ class EmployeeBankUsecase {
       };
     }
 
-    const currentFingerprint = EmployeeBankUsecase.fingerprint(
-      String(employee.account_no).replace(/[\s-]/g, ""),
-      String(employee.ifsc).replace(/\s/g, "").toUpperCase()
-    );
+    const currentFingerprint = EmployeeBankUsecase.currentFingerprintOf(employee);
 
     // The heart of invalidation: a stored verification that was run against a
     // different account is not this account's verification.
@@ -176,8 +221,6 @@ class EmployeeBankUsecase {
     const storedFp = await this.repo.getStoredFingerprint(employeeId);
     const matchesCurrent = Boolean(storedFp && storedFp.account_fingerprint === currentFingerprint);
 
-    let effectiveStatus = !stored || !matchesCurrent ? STATUS.PENDING : stored.status;
-
     // A duplicate is a fact about OTHER employees, and other employees change
     // without this row being touched. So it is resolved on read, not frozen at
     // verification time: when the employee it clashed with has since left, the
@@ -186,20 +229,23 @@ class EmployeeBankUsecase {
     // until somebody spent another paid call on an account nothing changed
     // about.
     let duplicateOf = null;
-    if (effectiveStatus === STATUS.DUPLICATE_ACCOUNT) {
+    if (matchesCurrent && stored && stored.status === STATUS.DUPLICATE_ACCOUNT) {
       duplicateOf = await this.repo.findActiveDuplicates(currentFingerprint, employeeId);
-      if (duplicateOf.length === 0) {
-        // The provider said the account exists and the name was acceptable;
-        // only the clash held it back, and the clash is gone.
-        effectiveStatus =
-          stored && stored.name_match_verdict === "MISMATCH" ? STATUS.NAME_MISMATCH : STATUS.VERIFIED;
-      }
     }
+
+    // The decision itself is the shared rule, so this and the bulk summary
+    // cannot answer differently about the same employee.
+    const { status: effectiveStatus, bank_payroll_ready } = EmployeeBankUsecase.resolveEffectiveStatus({
+      hasAccount: true,
+      stored,
+      fingerprintMatches: matchesCurrent,
+      activeDuplicateCount: duplicateOf ? duplicateOf.length : 0,
+    });
 
     return {
       employee_id: employeeId,
       status: effectiveStatus,
-      bank_payroll_ready: effectiveStatus === STATUS.VERIFIED,
+      bank_payroll_ready,
       masked_account: maskAccount(String(employee.account_no).replace(/[\s-]/g, "")),
       ifsc: String(employee.ifsc).replace(/\s/g, "").toUpperCase(),
       bank_name: employee.bank_name || null,
