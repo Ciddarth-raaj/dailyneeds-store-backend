@@ -4,6 +4,9 @@
 DROP TABLE IF EXISTS `employee_bank_verification_attempt`;
 DROP TABLE IF EXISTS `employee_bank_verification`;
 
+-- Only the two keys this migration introduced, by name. Every other grant -
+-- including the C2 lifecycle keys, `add_employees` and anything an
+-- administrator granted by hand - is untouched.
 DELETE FROM `permissions` WHERE `permission_key` IN ('verify_employee_bank','confirm_bank_name_mismatch');
 DELETE FROM `all_permissions` WHERE `permission_key` IN ('verify_employee_bank','confirm_bank_name_mismatch');
 

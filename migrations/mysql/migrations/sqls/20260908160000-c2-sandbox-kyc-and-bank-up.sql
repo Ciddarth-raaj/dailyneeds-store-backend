@@ -190,11 +190,53 @@ CREATE TABLE IF NOT EXISTS `employee_bank_verification_attempt` (
 
 -- ------------------------------------------------------------ permissions
 -- Running a paid external verification, and accepting a name that did not
--- quite match, are separate decisions from editing an employee. Declared
--- only; granted to nobody, so no designation gains anything when this runs.
+-- quite match, are separate decisions from editing an employee, so they are
+-- their own keys. Declared first; `all_permissions` has no unique key on
+-- permission_key, so each insert guards itself.
 INSERT INTO `all_permissions` (`permission_key`)
   SELECT 'verify_employee_bank' FROM DUAL
    WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'verify_employee_bank');
 INSERT INTO `all_permissions` (`permission_key`)
   SELECT 'confirm_bank_name_mismatch' FROM DUAL
    WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'confirm_bank_name_mismatch');
+
+-- The grants: HR EXECUTIVE AND NOBODY ELSE.
+--
+-- Unlike the C2 lifecycle keys, these are NOT derived from `add_employees`.
+-- Whoever can create an employee is a wider set than whoever should be able
+-- to spend a chargeable external check or overrule a bank's own record of
+-- whose account it is, so the designation is named rather than inferred.
+--
+-- Named by `designation.designation_name`, not by a literal id: ids differ
+-- between the production schema and any restored copy, and a hard-coded one
+-- would grant these to whatever designation happened to hold that number.
+-- The comparison is case- and whitespace-insensitive because the row was
+-- typed by a human. If no such designation exists the join matches nothing
+-- and NOTHING IS GRANTED - the failure mode is "the feature is unavailable",
+-- never "the wrong people can run it".
+--
+-- `user_type = 2` is deliberately absent: the permission middleware bypasses
+-- this table for administrators, so an admin grant would be a second, weaker
+-- copy of a rule that already holds.
+--
+-- Each insert is guarded on (permission_key, designation_id) because
+-- `permissions` has no unique key either, so a re-run adds nothing. A row
+-- that exists but is INACTIVE is left alone: re-enabling a permission an
+-- administrator switched off is their decision, not a migration's.
+INSERT INTO `permissions` (`permission_key`, `designation_id`, `is_active`)
+  SELECT k.`permission_key`, d.`designation_id`, TRUE
+    FROM ( SELECT 'verify_employee_bank' AS `permission_key`
+           UNION ALL SELECT 'confirm_bank_name_mismatch' ) k
+    JOIN ( SELECT `designation_id` FROM `designation`
+            WHERE UPPER(TRIM(`designation_name`)) = 'HR EXECUTIVE' ) d
+   WHERE NOT EXISTS (
+     SELECT 1 FROM `permissions` p
+      WHERE p.`permission_key` = k.`permission_key`
+        AND p.`designation_id` = d.`designation_id` );
+
+-- `view_aadhaar_full` is NOT granted here, and is not granted anywhere.
+-- Reading all twelve digits is a statutory-filing decision that HR does not
+-- need in order to onboard somebody: HR verifies the Aadhaar, creates the
+-- employee from it and sees the last four. Whoever files PF and ESI is
+-- granted this key deliberately, by an administrator, one designation at a
+-- time.

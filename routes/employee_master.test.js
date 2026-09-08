@@ -731,6 +731,136 @@ describe("the bank verification surface", () => {
   });
 });
 
+/* ============================================== the permission layering == */
+describe("permission layering after the C2 bank grant", () => {
+  const DENIED = "You do not have permission to perform this action";
+
+  // HR Executive as the migrations leave it: the C2 lifecycle keys (from
+  // `add_employees`), the two bank keys (from this migration), and the
+  // sensitive-field access an administrator grants so the answers are
+  // readable. NOT view_aadhaar_full.
+  const HR_EXEC = 30;
+  const HR_EXEC_KEYS = [
+    P.EMPLOYEE_CREATE, P.EMPLOYEE_EDIT, P.EMPLOYEE_RESIGN, P.EMPLOYEE_REJOIN,
+    P.VIEW_EMPLOYEE_LIFECYCLE,
+    P.VERIFY_EMPLOYEE_BANK, P.CONFIRM_BANK_NAME_MISMATCH,
+    P.VIEW_EMPLOYEE_SENSITIVE, P.EDIT_EMPLOYEE_SENSITIVE,
+  ];
+
+  // Every other designation, with the ordinary keys each really holds.
+  const OTHERS = {
+    21: ["view_stores", "view_employees"],            // Store Manager
+    22: ["view_employees"],                            // Supervisor
+    23: ["view_employees", "view_salary_advance"],     // Accounts
+    24: ["view_stores", "view_shift"],                 // Operations
+    25: ["view_stores"],                               // Procurement
+    26: [],                                            // Loader
+    27: ["view_stores"],                               // Cashier
+  };
+
+  before(() => {
+    GRANTS[HR_EXEC] = HR_EXEC_KEYS;
+    for (const [id, keys] of Object.entries(OTHERS)) GRANTS[id] = keys;
+  });
+  after(() => {
+    delete GRANTS[HR_EXEC];
+    for (const id of Object.keys(OTHERS)) delete GRANTS[id];
+  });
+
+  const hr = () => tokenFor({ designationId: HR_EXEC });
+
+  it("1/2/11/12. HR Executive may verify a bank account and confirm a near-miss name", async () => {
+    const verify = await call("POST", "/hr/employee/9/bank/verify", hr(), {});
+    assert.equal(verify.body.code, 200);
+    assert.equal(verify.body.status, "VERIFIED");
+
+    const confirm = await call("POST", "/hr/employee/9/bank/confirm-name", hr(), { note: "passbook checked" });
+    assert.equal(confirm.body.code, 200);
+  });
+
+  it("HR Executive keeps all four lifecycle actions and the review queue", async () => {
+    assert.equal((await call("POST", "/hr/employee", hr(), CREATE_BODY)).body.code, 200);
+    assert.equal((await call("POST", "/hr/employee/9/edit", hr(), { employee_name: "x" })).body.code, 200);
+    assert.equal((await call("POST", "/hr/employee/9/resign", hr(), { resignation_date: "2026-01-01" })).body.code, 200);
+    assert.equal((await call("POST", "/hr/employee/9/rejoin", hr(), { date_of_joining: "2026-02-01" })).body.code, 200);
+    assert.equal((await call("GET", "/hr/employee/9/lifecycle", hr())).status, 200);
+    assert.equal((await call("GET", "/hr/lifecycle/review", hr())).status, 200);
+  });
+
+  it("9. and the Aadhaar flow: initiate, verify OTP, and the masked record", async () => {
+    const AADHAAR = "222222222229";
+    const initiate = await call("POST", "/hr/aadhaar/initiate", hr(), {
+      aadhaar_number: AADHAAR,
+      consent_given: true,
+    });
+    assert.equal(initiate.body.code, 200, "edit_employee_sensitive lets the body through B3");
+    const otp = await call("POST", "/hr/aadhaar/verify-otp", hr(), {
+      verification_token: initiate.body.verification_token,
+      otp: "123456",
+    });
+    assert.equal(otp.body.code, 200);
+
+    const masked = await call("GET", "/hr/employee/9/aadhaar", hr());
+    assert.equal(masked.status, 200);
+    assert.equal(masked.body.aadhaar_last4, "4321");
+    assert.ok(!/"aadhaar_number"/.test(masked.text), "still only the last four");
+  });
+
+  it("3/10. HR Executive still cannot read a full Aadhaar", async () => {
+    // Sensitive access is not the same decision as reading twelve digits.
+    const r = await call("GET", "/hr/employee/9/aadhaar/full", hr());
+    assert.equal(r.status, 403);
+    assert.equal(r.body.msg, DENIED);
+    assert.ok(!HR_EXEC_KEYS.includes(P.VIEW_AADHAAR_FULL), "the key is not in HR Executive's set at all");
+  });
+
+  it("4/5/6/7/13. no other designation may reach any of it", async () => {
+    for (const id of Object.keys(OTHERS)) {
+      const token = tokenFor({ designationId: Number(id) });
+      for (const [method, p, body] of [
+        ["POST", "/hr/employee/9/bank/verify", {}],
+        ["POST", "/hr/employee/9/bank/confirm-name", {}],
+        ["GET", "/hr/employee/9/bank/verification", null],
+        ["POST", "/hr/aadhaar/initiate", { aadhaar_number: "222222222229", consent_given: true }],
+        ["POST", "/hr/aadhaar/verify-otp", { verification_token: "a".repeat(64), otp: "123456" }],
+        ["GET", "/hr/employee/9/aadhaar", null],
+        ["GET", "/hr/employee/9/aadhaar/full", null],
+        ["POST", "/hr/employee", CREATE_BODY],
+        ["POST", "/hr/employee/9/resign", { resignation_date: "2026-01-01" }],
+        ["GET", "/hr/employee/9/lifecycle", null],
+      ]) {
+        const r = await call(method, p, token, body);
+        assert.equal(r.status, 403, `designation ${id}: ${method} ${p}`);
+        assert.equal(r.body.msg, DENIED, `designation ${id}: ${method} ${p}`);
+      }
+    }
+  });
+
+  it("the bank keys alone are not enough - requireAll is what gates them", async () => {
+    // If an administrator grants the two bank keys without
+    // view_employee_sensitive, the routes stay shut: a caller who cannot
+    // read the name at the bank must not be able to spend the call.
+    GRANTS[28] = [P.VERIFY_EMPLOYEE_BANK, P.CONFIRM_BANK_NAME_MISMATCH];
+    try {
+      const token = tokenFor({ designationId: 28 });
+      assert.equal((await call("POST", "/hr/employee/9/bank/verify", token, {})).status, 403);
+      assert.equal((await call("POST", "/hr/employee/9/bank/confirm-name", token, {})).status, 403);
+    } finally {
+      delete GRANTS[28];
+    }
+  });
+
+  it("8. the admin bypass is unchanged by the grant", async () => {
+    // user_type 2 holds no key in the table and reaches everything, which is
+    // why the migration grants an administrator nothing.
+    const admin = tokenFor({ designationId: 26, userType: 2 }); // Loader: no keys at all
+    assert.equal((await call("POST", "/hr/employee/9/bank/verify", admin, {})).body.code, 200);
+    assert.equal((await call("POST", "/hr/employee/9/bank/confirm-name", admin, {})).body.code, 200);
+    assert.equal((await call("GET", "/hr/employee/9/aadhaar/full", admin)).status, 200);
+    assert.equal(GRANTS[26].length, 0, "and it came from no grant");
+  });
+});
+
 describe("the Sandbox KYC and bank migration", () => {
   const sql = fs.readFileSync(
     path.join(__dirname, "..", "migrations/mysql/migrations/sqls/20260908160000-c2-sandbox-kyc-and-bank-up.sql"),
@@ -739,10 +869,68 @@ describe("the Sandbox KYC and bank migration", () => {
   /** The statements alone; the comments are free to explain what is elsewhere. */
   const statements = sql.replace(/^\s*--.*$/gm, "");
 
-  it("declares the two new keys and grants them to nobody", () => {
+  it("1/2. declares the two new keys and grants them to HR Executive", () => {
     assert.match(sql, /'verify_employee_bank'/);
     assert.match(sql, /'confirm_bank_name_mismatch'/);
-    assert.ok(!/INSERT INTO `permissions`/.test(sql), "no designation is granted either key by the migration");
+    const grant = statements.slice(statements.indexOf("INSERT INTO `permissions`"));
+    assert.ok(grant, "the migration must grant the keys");
+    assert.match(grant, /'verify_employee_bank' AS `permission_key`/);
+    assert.match(grant, /UNION ALL SELECT 'confirm_bank_name_mismatch'/);
+    assert.match(grant, /UPPER\(TRIM\(`designation_name`\)\) = 'HR EXECUTIVE'/);
+  });
+
+  it("4/5/6/7. and to nobody else - no other designation is named, and none is inferred", () => {
+    const grant = statements.slice(statements.indexOf("INSERT INTO `permissions`"));
+    for (const other of [
+      "Store Manager", "Supervisor", "Accounts", "Operations",
+      "Procurement", "Loader", "Cashier", "Manager", "Admin",
+    ]) {
+      assert.ok(
+        !new RegExp(other, "i").test(grant),
+        `${other} must not appear in the grant`
+      );
+    }
+    // Not derived from add_employees either: that set is wider than the
+    // people who should be able to spend a paid check.
+    assert.ok(!/add_employees/.test(grant), "the grant must not be inferred from add_employees");
+    // And no literal designation id, which would grant these to whatever
+    // designation happens to hold that number in a restored copy.
+    assert.ok(
+      !/designation_id`?\s*(=|IN)\s*\(?\s*\d/.test(grant),
+      "the designation must be named, never a hard-coded id"
+    );
+  });
+
+  it("3. does not grant view_aadhaar_full to HR Executive, or to anyone", () => {
+    // Onboarding needs the last four. Reading all twelve digits is a
+    // statutory-filing decision an administrator makes deliberately.
+    assert.ok(!/view_aadhaar_full/.test(statements), "this migration must not touch view_aadhaar_full");
+    const aadhaarSql = fs.readFileSync(
+      path.join(__dirname, "..", "migrations/mysql/migrations/sqls/20260908140000-c2-aadhaar-identity-up.sql"),
+      "utf8"
+    );
+    assert.match(aadhaarSql, /'view_aadhaar_full'/, "it is still declared");
+    assert.ok(
+      !/INSERT INTO `permissions`/.test(aadhaarSql.replace(/^\s*--.*$/gm, "")),
+      "and still granted to nobody"
+    );
+  });
+
+  it("the down migration removes only these two keys", () => {
+    const down = fs
+      .readFileSync(
+        path.join(__dirname, "..", "migrations/mysql/migrations/sqls/20260908160000-c2-sandbox-kyc-and-bank-down.sql"),
+        "utf8"
+      )
+      .replace(/^\s*--.*$/gm, "");
+    const deletes = down.match(/DELETE FROM[^;]+;/g) || [];
+    assert.equal(deletes.length, 2, "two deletes: one per permission table");
+    for (const d of deletes) {
+      assert.match(d, /IN \('verify_employee_bank','confirm_bank_name_mismatch'\)/);
+    }
+    for (const key of ["employee_create", "employee_resign", "add_employees", "view_employee_sensitive", "view_aadhaar_full"]) {
+      assert.ok(!new RegExp(key).test(down), `${key} must survive the down migration`);
+    }
   });
 
   it("stores a fingerprint and a last four, never a full account number", () => {
