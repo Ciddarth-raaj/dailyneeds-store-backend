@@ -31,7 +31,36 @@ const enabled = (() => {
   return v === "on" || v === "true" || v === "1";
 })();
 
+/**
+ * Stage 0C / C2 — dnds.co.in is the employee master.
+ *
+ * `LOCAL_EMPLOYEE_MASTER=off` is the only way back, and it exists so the
+ * switch is auditable rather than because anyone should use it. Default ON,
+ * for the same reason the pause defaults on: a lost .env must fail towards
+ * the safe state, and after C2 the safe state is "local HR writes win".
+ *
+ * This is deliberately a second, independent guard. The Digisme employee
+ * sync is already paused, but a future operator setting DIGISME_EMPLOYEE_SYNC
+ * =on would otherwise silently overwrite every local Create / Edit / Resign /
+ * Rejoin from a Digisme payload. With this on, the employee master write is
+ * refused whatever that flag says. It is not a dual-master system: there is
+ * one master, and it is this one.
+ */
+const localEmployeeMaster = (() => {
+  const raw = process.env.LOCAL_EMPLOYEE_MASTER;
+  if (raw === undefined || raw === "") return true;
+  const v = String(raw).trim().toLowerCase();
+  return !(v === "off" || v === "false" || v === "0");
+})();
+
 module.exports = {
+  /** C2: when true, no legacy sync may write the employee master. */
+  localEmployeeMaster,
+
+  /** The message the local-master guard reports. */
+  LOCAL_MASTER_MESSAGE:
+    "dnds.co.in is the employee master (Stage 0C / C2); the legacy Digisme employee sync may not write employee data",
+
   digisme: {
     /**
      * When false: the `employee_sync` cron is never registered, and

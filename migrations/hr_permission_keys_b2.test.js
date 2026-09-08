@@ -115,10 +115,14 @@ describe("B2 migration — ordering and boilerplate", () => {
   it("every key the B2 mapping uses either already exists or is declared here", () => {
     const P = require("../constants/hr_permissions");
     const declared = new Set(KEYS);
+    // Every up-migration, not only the ones with "permission" in the name:
+    // C2 declares its five lifecycle keys in a migration called
+    // `c2-local-employee-master`, and where a key is declared matters less
+    // than that it is declared somewhere.
     const preexisting = new Set(
       fs
         .readdirSync(dir)
-        .filter((f) => f.includes("permission") && f.endsWith("-up.sql"))
+        .filter((f) => f.endsWith("-up.sql"))
         .flatMap((f) => [...read(f).matchAll(/'([a-z_]+)'/g)].map((m) => m[1]))
     );
     for (const key of Object.values(P)) {

@@ -165,6 +165,16 @@ class Server {
     this.employeeLifecycleRepo = require("./repository/employee_lifecycle")(
       this.mysql.connection
     );
+    // Stage 0C / C2: the local employee master.
+    this.employeeMasterRepo = require("./repository/employee_master")(
+      this.mysql.connection
+    );
+    this.employeeAadhaarRepo = require("./repository/employee_aadhaar")(
+      this.mysql.connection
+    );
+    this.employeeBankRepo = require("./repository/employee_bank")(
+      this.mysql.connection
+    );
     this.shiftRepo = require("./repository/shift")(this.mysql.connection);
     this.storeRepo = require("./repository/store")(this.mysql.connection);
     this.outletRepo = require("./repository/outlet")(this.mysql.connection);
@@ -395,6 +405,31 @@ class Server {
     this.employeeLifecycleUsecase = require("./usecase/employee_lifecycle")(
       this.employeeLifecycleRepo,
       this.userRepo
+    );
+    // Stage 0C / C2. The lifecycle usecase and its repository are both here
+    // so the four HR actions can run C1c on their OWN transaction - the
+    // master change and the period it implies commit or roll back together.
+    // Stage 0C / C2. Aadhaar and Bank share the GST integration's Sandbox
+    // authentication - one token cache, one set of credentials - while their
+    // business logic stays in separate modules. GST is untouched.
+    this.sandboxClient = require("./services/sandbox_client")(this.sandboxService);
+    this.sandboxAadhaarService = require("./services/sandbox_aadhaar")(this.sandboxClient);
+    this.sandboxBankService = require("./services/sandbox_bank")(this.sandboxClient);
+
+    this.employeeAadhaarUsecase = require("./usecase/employee_aadhaar")(
+      this.employeeAadhaarRepo,
+      this.sandboxAadhaarService
+    );
+    this.employeeBankUsecase = require("./usecase/employee_bank")(
+      this.employeeBankRepo,
+      this.sandboxBankService,
+      this.employeeAadhaarRepo
+    );
+    this.employeeMasterUsecase = require("./usecase/employee_master")(
+      this.employeeMasterRepo,
+      this.employeeLifecycleUsecase,
+      this.employeeLifecycleRepo,
+      this.employeeAadhaarUsecase
     );
     this.shiftUsecase = require("./usecase/shift")(this.shiftRepo);
     this.storeUsecase = require("./usecase/store")(this.storeRepo);
@@ -706,6 +741,14 @@ class Server {
       this.permissions,
       this.sensitive
     );
+    // Stage 0C / C2: the local employee-master lifecycle actions.
+    const employeeMasterRouter = require("./routes/employee_master")(
+      this.employeeMasterUsecase,
+      this.permissions,
+      this.sensitive,
+      this.employeeAadhaarUsecase,
+      this.employeeBankUsecase
+    );
     const shiftRouter = require("./routes/shift")(this.shiftUsecase, this.permissions);
     const storeRouter = require("./routes/store")(this.storeUsecase);
     const outletRouter = require("./routes/outlet")(
@@ -916,6 +959,9 @@ class Server {
     app.use("/department", departmentRouter.getRouter());
     app.use("/designation", designationRouter.getRouter());
     app.use("/employee", employeeRouter.getRouter());
+    // Stage 0C / C2. Mounted at /hr so the lifecycle actions do not collide
+    // with the existing employee routes and C3 can find them in one place.
+    app.use("/hr", employeeMasterRouter.getRouter());
     app.use("/shift", shiftRouter.getRouter());
     app.use("/store", storeRouter.getRouter());
     app.use("/outlet", outletRouter.getRouter());

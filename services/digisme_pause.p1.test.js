@@ -28,9 +28,18 @@ const bodyParser = require("body-parser");
 const MODULES = ["../config/lifecycle", "../services/synker", "../routes/employee"];
 
 /** Reload the flag and everything that reads it, under `value`. */
-const loadWith = (value) => {
+/**
+ * `localMaster` defaults to "off" because these tests are about P1's own
+ * switch. Stage 0C / C2 added a SECOND, independent guard - dnds.co.in is
+ * now the employee master - so turning DIGISME_EMPLOYEE_SYNC on no longer
+ * restores the legacy behaviour by itself. The last test in this file pins
+ * that, and the rest disable the C2 guard so they still test what they were
+ * written to test.
+ */
+const loadWith = (value, localMaster = "off") => {
   if (value === undefined) delete process.env.DIGISME_EMPLOYEE_SYNC;
   else process.env.DIGISME_EMPLOYEE_SYNC = value;
+  process.env.LOCAL_EMPLOYEE_MASTER = localMaster;
   for (const m of MODULES) delete require.cache[require.resolve(m)];
   return {
     lifecycle: require("../config/lifecycle"),
@@ -165,6 +174,21 @@ describe("P1: flag ON restores the existing behaviour", () => {
       const { lifecycle } = loadWith(v);
       assert.equal(lifecycle.digisme.employeeSync, true, `value ${JSON.stringify(v)}`);
     }
+  });
+
+  it("but C2's local-master guard still blocks the employee write", async () => {
+    // After Stage 0C / C2 the employee master is local. Turning the Digisme
+    // sync back on is no longer enough to let it write employees, which is
+    // the whole point of that second guard.
+    const { buildSynker } = loadWith("on", "on");
+    const calls = [];
+    const res = await makeSynker(buildSynker, calls).syncDigismeEmployees();
+    assert.equal(res.code, 423);
+    assert.equal(res.localEmployeeMaster, true);
+    assert.ok(
+      !calls.includes("network._fetchDigismeEmployees"),
+      `Digisme must not even be contacted, calls: ${calls.join(", ") || "none"}`
+    );
   });
 
   it("a direct call proceeds past the guard and reaches the fetch", async () => {

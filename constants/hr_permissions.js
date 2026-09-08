@@ -22,6 +22,38 @@
 module.exports = {
   // employee master
   VIEW_EMPLOYEES: "view_employees",
+
+  // Stage 0C / C2 - the local lifecycle actions. Separate keys because they
+  // are separate decisions: recording that somebody has left is not the same
+  // authority as correcting their phone number, and `add_employees` cannot
+  // express the difference. A designation that holds `add_employees` today
+  // receives all four in the C2 migration, so nobody's effective access
+  // changes on deploy.
+  EMPLOYEE_CREATE: "employee_create",
+  EMPLOYEE_EDIT: "employee_edit",
+  EMPLOYEE_RESIGN: "employee_resign",
+  EMPLOYEE_REJOIN: "employee_rejoin",
+  VIEW_EMPLOYEE_LIFECYCLE: "view_employee_lifecycle",
+
+  // Stage 0C / C2. Reading a stored Aadhaar back in full - which PF and ESI
+  // filing will need - is a decision above `view_employee_sensitive`: seeing
+  // that someone has an Aadhaar ending 4321 is not the same as reading all
+  // twelve digits. Declared by the C2 Aadhaar migration, granted to nobody.
+  VIEW_AADHAAR_FULL: "view_aadhaar_full",
+
+  // Stage 0C / C2. Running a paid external bank check, and accepting a name
+  // that did not quite match, are separate decisions from editing an
+  // employee. Declared by the C2 Sandbox migration, granted to nobody.
+  VERIFY_EMPLOYEE_BANK: "verify_employee_bank",
+  CONFIRM_BANK_NAME_MISMATCH: "confirm_bank_name_mismatch",
+
+  // Stage 0C / C2. Allowing two ACTIVE employees to share one bank account.
+  // Declared and granted to NOBODY, including HR Executive: the usual cause
+  // of a duplicate is a typo, and whoever typed it should not be the one who
+  // waves it through. In practice an administrator, through the user_type 2
+  // bypass, with a stated reason that is audited.
+  OVERRIDE_DUPLICATE_BANK_ACCOUNT: "override_duplicate_bank_account",
+
   ADD_EMPLOYEES: "add_employees",
   VIEW_BANKS: "view_banks",
   ADD_BANKS: "add_banks",
