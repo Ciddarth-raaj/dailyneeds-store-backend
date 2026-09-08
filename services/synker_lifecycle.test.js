@@ -25,7 +25,13 @@ const serverSource = read("server.js");
 /** A Synker with the network and the master sync stubbed out. */
 function makeSynker({ syncFails = false, lifecycle = null } = {}) {
   delete require.cache[require.resolve("./synker")];
-  process.env.DIGISME_EMPLOYEE_SYNC = "on"; // P1 pause off, for these tests only
+  // Both guards off, for these tests only: P1's pause and C2's local-master
+  // guard each block this path on their own, and what is under test here is
+  // what happens AFTER them - that the reconciler runs once, at the right
+  // moment. That C2 blocks the path is pinned in routes/employee_master.test.js
+  // and services/digisme_pause.p1.test.js.
+  process.env.DIGISME_EMPLOYEE_SYNC = "on";
+  process.env.LOCAL_EMPLOYEE_MASTER = "off";
   delete require.cache[require.resolve("../config/lifecycle")];
   const build = require("./synker");
 

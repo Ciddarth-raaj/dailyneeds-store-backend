@@ -22,6 +22,19 @@
 module.exports = {
   // employee master
   VIEW_EMPLOYEES: "view_employees",
+
+  // Stage 0C / C2 - the local lifecycle actions. Separate keys because they
+  // are separate decisions: recording that somebody has left is not the same
+  // authority as correcting their phone number, and `add_employees` cannot
+  // express the difference. A designation that holds `add_employees` today
+  // receives all four in the C2 migration, so nobody's effective access
+  // changes on deploy.
+  EMPLOYEE_CREATE: "employee_create",
+  EMPLOYEE_EDIT: "employee_edit",
+  EMPLOYEE_RESIGN: "employee_resign",
+  EMPLOYEE_REJOIN: "employee_rejoin",
+  VIEW_EMPLOYEE_LIFECYCLE: "view_employee_lifecycle",
+
   ADD_EMPLOYEES: "add_employees",
   VIEW_BANKS: "view_banks",
   ADD_BANKS: "add_banks",

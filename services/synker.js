@@ -172,6 +172,27 @@ class Synker {
       return { code: 423, msg: lifecycleConfig.PAUSED_MESSAGE, paused: true };
     }
 
+    // Stage 0C / C2. Even if the pause above were lifted, the employee
+    // master is no longer Digisme's to write. This guard sits at the same
+    // choke point, so the cron and POST /employee/sync are both covered, and
+    // it is checked independently of DIGISME_EMPLOYEE_SYNC so that turning
+    // that flag back on cannot overwrite a local Create/Edit/Resign/Rejoin.
+    if (lifecycleConfig.localEmployeeMaster) {
+      logger.Log({
+        level: logger.LEVEL.INFO,
+        component: "SERVICE.SYNKER",
+        code: "SERVICE.SYNKER.DIGISME-EMPLOYEES-LOCAL-MASTER",
+        description: lifecycleConfig.LOCAL_MASTER_MESSAGE,
+        category: "",
+        ref: {},
+      });
+      return {
+        code: 423,
+        msg: lifecycleConfig.LOCAL_MASTER_MESSAGE,
+        localEmployeeMaster: true,
+      };
+    }
+
     try {
       const GENDER_MAP = {
         FEMALE: "F",

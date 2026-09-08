@@ -315,7 +315,20 @@ class EmployeeLifecycleUsecase {
   async reconcileEmployee(employeeId, options = {}) {
     const actor = options.actorEmployeeId === undefined ? null : options.actorEmployeeId;
 
-    const outcome = await this.lifecycleRepo.withTransaction(async (tx) => {
+    /**
+     * C2. A caller that has already changed `new_employee` inside its own
+     * transaction passes that transaction in, so the master change and the
+     * period it implies commit or roll back together. Without this the two
+     * would be separate transactions and a failure between them would leave
+     * an employee marked inactive with their period still open.
+     *
+     * `withTransaction` is used only when nobody supplied one, so the
+     * standalone path - the Digisme sync, reconcileAll - is unchanged.
+     */
+    const run = (fn) =>
+      options.tx ? fn(options.tx) : this.lifecycleRepo.withTransaction(fn);
+
+    const outcome = await run(async (tx) => {
       await this.lifecycleRepo.assertDateLocale(tx);
 
       const employee = await this.lifecycleRepo.lockAndReadEmployee(tx, employeeId);
@@ -382,9 +395,18 @@ class EmployeeLifecycleUsecase {
       return { action: "fill", period_id: plan.period_id, revokeSessions: false };
     });
 
-    // Outside the transaction on purpose: revoking a session is a `user`
-    // table write, and holding the employee lock across it would widen the
-    // lock for no benefit. A failure here must not undo a correct period.
+    // Standalone, this runs outside the transaction on purpose: revoking a
+    // session is a `user` table write, and holding the employee lock across
+    // it would widen the lock for no benefit, while a failure here must not
+    // undo a correct period.
+    //
+    // C2 is the opposite case. When the caller owns the transaction the
+    // revocation belongs inside it, so that a resignation which later rolls
+    // back does not leave the employee logged out of a job they still have.
+    // It is therefore performed by the caller in that case, and reported
+    // here so the caller knows it is owed.
+    if (options.tx) return { ...outcome, revocationOwedFor: outcome.revokeSessions ? employeeId : null };
+
     if (outcome.revokeSessions && this.userRepo && this.userRepo.bumpTokenValidFromByEmployeeId) {
       try {
         await this.userRepo.bumpTokenValidFromByEmployeeId(employeeId);
