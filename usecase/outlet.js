@@ -43,6 +43,20 @@ class OutletUsecase {
       }
     });
   }
+  /**
+   * The outlet list for a picker. No IP fields to strip, because the query
+   * selects two columns and neither is one.
+   */
+  getDirectory() {
+    return new Promise(async (resolve, reject) => {
+      try {
+        resolve(await this.outletRepo.getDirectory());
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
   updateStatus(file) {
     return new Promise(async (resolve, reject) => {
       try {
