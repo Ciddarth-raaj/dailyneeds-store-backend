@@ -128,6 +128,67 @@ class EmployeeBankRepository {
     );
   }
 
+  /**
+   * The bank details for MANY employees, for the status summary the HR list
+   * needs. The single-employee `getBankDetails` above cannot be looped 630
+   * times, which is the whole reason this exists.
+   *
+   * It selects the full account number for the same reason that one does:
+   * the fingerprint of the current account can only be computed from it. It
+   * is compared in memory and discarded - no caller of this method returns
+   * an account number, and the summary endpoint returns a status and nothing
+   * else.
+   */
+  async getBankDetailsMany(employeeIds) {
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
+    return this._query(
+      "GET-BANK-DETAILS-MANY",
+      `SELECT employee_id, account_no, ifsc
+         FROM new_employee WHERE employee_id IN (?)`,
+      [employeeIds]
+    );
+  }
+
+  /**
+   * The stored verifications for MANY employees. `account_fingerprint` is
+   * included - it is not returned anywhere, it is what decides whether a
+   * stored VERIFIED still describes the account on file.
+   */
+  async getVerificationsMany(employeeIds) {
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
+    return this._query(
+      "GET-VERIFICATIONS-MANY",
+      `SELECT employee_id, status, account_fingerprint, name_match_verdict
+         FROM employee_bank_verification WHERE employee_id IN (?)`,
+      [employeeIds]
+    );
+  }
+
+  /**
+   * For each of these fingerprints, which STILL-EMPLOYED employees are
+   * verified against it. The bulk form of `findActiveDuplicates`, and it
+   * applies the same three conditions - active employee, VERIFIED
+   * verification, matching fingerprint - so the summary resolves a stale
+   * duplicate exactly as the single-employee read does.
+   *
+   * Returns `{ account_fingerprint, employee_id }` pairs so the caller can
+   * exclude the employee being judged, as the single-employee query does in
+   * SQL. No account column is selected.
+   */
+  async findActiveVerifiedByFingerprints(fingerprints) {
+    if (!Array.isArray(fingerprints) || fingerprints.length === 0) return [];
+    return this._query(
+      "FIND-ACTIVE-VERIFIED-BY-FINGERPRINTS",
+      `SELECT v.account_fingerprint, v.employee_id
+         FROM employee_bank_verification v
+         JOIN new_employee ne ON ne.employee_id = v.employee_id
+        WHERE v.account_fingerprint IN (?)
+          AND ne.status = 1
+          AND v.status = 'VERIFIED'`,
+      [fingerprints]
+    );
+  }
+
   /** One row per employee: inserted the first time, replaced thereafter. */
   async upsertVerification(row) {
     const columns = Object.keys(row);

@@ -44,6 +44,7 @@ const HR_DESIGNATION = 7;
 const OUTLET_DESIGNATION = 8;
 const PF_DESIGNATION = 9; // holds view_aadhaar_full and nothing else
 const FINANCE_DESIGNATION = 10; // holds the two bank keys plus sensitive access
+const LIST_DESIGNATION = 11; // holds `view_employees` and nothing else
 
 /** Only the HR designation holds the C2 keys. */
 const GRANTS = {
@@ -52,6 +53,8 @@ const GRANTS = {
     P.VIEW_EMPLOYEE_LIFECYCLE,
   ],
   [OUTLET_DESIGNATION]: ["view_stores"],
+  // C3: whoever can see the employee list, and nothing more.
+  [LIST_DESIGNATION]: [P.VIEW_EMPLOYEES],
   // Reading a full Aadhaar takes BOTH: sensitive access, and the specific key.
   [PF_DESIGNATION]: [P.VIEW_EMPLOYEE_SENSITIVE, P.VIEW_AADHAAR_FULL],
   // Running the paid check and accepting a near-miss name are both above
@@ -166,6 +169,17 @@ const bankUsecase = {
   },
 };
 
+const summaryCalls = [];
+const statusSummaryUsecase = {
+  list: async (filters) => {
+    summaryCalls.push(filters);
+    return [
+      { employee_id: 501, aadhaar_status: "VERIFIED", bank_status: "VERIFIED", bank_payroll_ready: true },
+      { employee_id: 502, aadhaar_status: "PENDING", bank_status: "DUPLICATE_ACCOUNT", bank_payroll_ready: false },
+    ];
+  },
+};
+
 let server, port;
 
 before(async () => {
@@ -180,7 +194,9 @@ before(async () => {
   app.use(bodyParser.json());
   app.use(authMiddleware.create({ userUsecase: { getSessionState: async () => ({ ...sessionState }) } }));
   delete require.cache[require.resolve("./employee_master")];
-  const routes = require("./employee_master")(usecase, permissions, sensitive, aadhaarUsecase, bankUsecase);
+  const routes = require("./employee_master")(
+    usecase, permissions, sensitive, aadhaarUsecase, bankUsecase, statusSummaryUsecase
+  );
   app.use("/hr", routes.getRouter());
 
   server = await new Promise((r) => {
@@ -231,6 +247,7 @@ describe("the /hr surface is authenticated", () => {
       ["POST", "/hr/employee/1/rejoin", { date_of_joining: "2026-01-01" }],
       ["GET", "/hr/employee/1/lifecycle", null],
       ["GET", "/hr/lifecycle/review", null],
+      ["GET", "/hr/employees/status-summary", null],
     ]) {
       const r = await call(method, p, null, body);
       assert.equal(r.body.code, 403, `${method} ${p}`);
@@ -252,6 +269,7 @@ describe("9/10/11. each action needs its own permission", () => {
       ["POST", "/hr/employee/1/rejoin", { date_of_joining: "2026-01-01" }],
       ["GET", "/hr/employee/1/lifecycle", null],
       ["GET", "/hr/lifecycle/review", null],
+      ["GET", "/hr/employees/status-summary", null],
     ]) {
       const r = await call(method, p, token, body);
       assert.equal(r.status, 403, `${method} ${p}`);
@@ -1210,5 +1228,85 @@ describe("the Aadhaar migration", () => {
   it("declares view_aadhaar_full and grants it to nobody", () => {
     assert.match(sql, /'view_aadhaar_full'/);
     assert.ok(!/INSERT INTO `permissions`/.test(sql), "no designation is granted the key by the migration");
+  });
+});
+
+/* ====================================== C3: the list status summary ===== */
+describe("GET /hr/employees/status-summary", () => {
+  const DENIED = "You do not have permission to perform this action";
+
+  it("is answered for a caller holding `view_employees`", async () => {
+    const r = await call("GET", "/hr/employees/status-summary", tokenFor({ designationId: LIST_DESIGNATION }));
+    assert.equal(r.status, 200);
+    assert.equal(r.body.length, 2);
+    assert.deepEqual(r.body[0], {
+      employee_id: 501,
+      aadhaar_status: "VERIFIED",
+      bank_status: "VERIFIED",
+      bank_payroll_ready: true,
+    });
+  });
+
+  it("refuses the C2 HR keys on their own - this is the LIST's permission", async () => {
+    // HR_DESIGNATION holds create, edit, resign, rejoin and lifecycle, and
+    // none of them is permission to read the employee list.
+    const r = await call("GET", "/hr/employees/status-summary", tokenFor({ designationId: HR_DESIGNATION }));
+    assert.equal(r.status, 403);
+    assert.equal(r.body.msg, DENIED);
+  });
+
+  it("an administrator is answered through the existing user_type bypass", async () => {
+    const r = await call(
+      "GET",
+      "/hr/employees/status-summary",
+      tokenFor({ designationId: OUTLET_DESIGNATION, userType: 2 })
+    );
+    assert.equal(r.status, 200);
+    assert.equal(r.body.length, 2);
+  });
+
+  it("passes the employee list's own filters through unchanged", async () => {
+    summaryCalls.length = 0;
+    const r = await call(
+      "GET",
+      "/hr/employees/status-summary?store_ids[]=2&store_ids[]=3&designation_ids[]=15",
+      tokenFor({ designationId: LIST_DESIGNATION })
+    );
+    assert.equal(r.status, 200);
+    assert.deepEqual(summaryCalls[0], { store_ids: ["2", "3"], designation_ids: ["15"] });
+  });
+
+  it("refuses a filter that is not a list of numbers", async () => {
+    const r = await call(
+      "GET",
+      "/hr/employees/status-summary?store_ids[]=not-a-number",
+      tokenFor({ designationId: LIST_DESIGNATION })
+    );
+    assert.equal(r.body.code, 422);
+  });
+
+  it("returns four scalars per employee and nothing else", async () => {
+    const r = await call("GET", "/hr/employees/status-summary", tokenFor({ designationId: LIST_DESIGNATION }));
+    for (const row of r.body) {
+      assert.deepEqual(Object.keys(row).sort(), [
+        "aadhaar_status",
+        "bank_payroll_ready",
+        "bank_status",
+        "employee_id",
+      ]);
+    }
+    // Nothing B3 would have had to strip is in here in the first place.
+    for (const forbidden of ["account_no", "account_last4", "ifsc", "aadhaar_last4", "fingerprint", "salary"]) {
+      assert.ok(!r.text.includes(forbidden), `${forbidden} must not appear`);
+    }
+  });
+
+  it("does not shadow the single-employee routes beside it", async () => {
+    // `/employees/status-summary` and `/employee/:id/...` are different
+    // paths; a regression that made one swallow the other would be invisible
+    // until the profile page broke.
+    const r = await call("GET", "/hr/employee/1/lifecycle", tokenFor({ designationId: HR_DESIGNATION }));
+    assert.equal(r.status, 200);
+    assert.equal(r.body.employee_id, 1);
   });
 });
