@@ -250,15 +250,25 @@ async function main() {
     const aadhaar = aadhaarConfig.enabled
       ? require(path.join(ROOT, "usecase/employee_aadhaar"))(aadhaarRepo, sandboxAadhaar)
       : null;
-    const bank = aadhaarConfig.enabled
+    // Bank verification has its OWN key and does NOT depend on Aadhaar being
+    // configured - that independence is the point, so it is constructed on its
+    // own condition rather than Aadhaar's.
+    const bankConfig = require(path.join(ROOT, "config/bank"));
+    const bank = bankConfig.enabled
       ? require(path.join(ROOT, "usecase/employee_bank"))(bankRepo, sandboxBank, aadhaarRepo)
       : null;
     const hr = require(path.join(ROOT, "usecase/employee_master"))(masterRepo, lifecycle, lifecycleRepo, aadhaar);
+    if (!bank) {
+      console.log(`\n   NOTE: ${bankConfig.describe()} - the bank section is skipped`);
+    }
     if (!aadhaar) {
-      console.log("\n   NOTE: AADHAAR_ENCRYPTION_KEY / AADHAAR_FINGERPRINT_KEY not set - Aadhaar and bank sections skipped");
+      console.log("\n   NOTE: AADHAAR_ENCRYPTION_KEY / AADHAAR_FINGERPRINT_KEY not set - the Aadhaar section is skipped");
     } else {
       console.log("\n   NOTE: the Sandbox provider is STUBBED - no external call is made by this script");
     }
+
+    /** A second Aadhaar, for the attach-after-creation case. */
+    let withCheckDigitLater = null;
 
     /** Runs the real two-step OTP flow against the stub provider. */
     const verifyAadhaar = async (aadhaarNumber, opts = {}) => {
@@ -474,6 +484,7 @@ async function main() {
         throw new Error("no valid check digit");
       };
       const AADHAAR = withCheckDigit("28888888888");
+      withCheckDigitLater = withCheckDigit("27777777777");
 
       const first = await verifyAadhaar(AADHAAR);
       const v1 = first.decision;
@@ -605,6 +616,7 @@ async function main() {
 
       /* --------------------------- bank verification -------------------- */
       console.log("\n== Penny-Less bank verification, invalidation and re-verification");
+      if (!bank) throw new Error("the bank usecase is not configured; set BANK_FINGERPRINT_KEY");
 
       const ACCOUNT = "50100123456789";
       const IFSC = "HDFC0001234";
@@ -709,6 +721,146 @@ async function main() {
         ),
         0
       );
+    }
+
+    /* ------------------- Skip for now, and attaching later -------------- */
+    console.log("\n== Aadhaar is preferred, not mandatory");
+    {
+      const skipped = await hr.createEmployee({
+        ...base,
+        employee_name: "C2 Skipped Aadhaar",
+        date_of_joining: "2026-01-10",
+        primary_contact_number: "9812345678",
+        dob: "1992-07-15",
+      });
+      created.push(skipped.employee_id);
+      const sid = skipped.employee_id;
+
+      eq("an employee can be created with no Aadhaar", skipped.code, 200);
+      eq("and is reported PENDING", skipped.aadhaar_status, "PENDING");
+      eq("with no identity row", Number(await scalar(
+        "SELECT COUNT(*) c FROM employee_aadhaar_identity WHERE employee_id = ?", [sid])), 0);
+      eq("the period opened normally", await shapeOf(sid), [[1, "open", "2026-01-10", null]]);
+      eq("the status endpoint says PENDING", (await hr.getAadhaarStatus(sid)).aadhaar_status, "PENDING");
+      eq("and bank setup is not blocked by the missing Aadhaar",
+        (await bank.getStatus(sid)).status, "NOT_PROVIDED");
+
+      // NON-AADHAAR DUPLICATE WARNING, against a real query.
+      const warning = await hr.findPossibleDuplicates({
+        employee_name: "C2 Skipped Aadhaar",
+        primary_contact_number: "9812345678",
+        dob: "1992-07-15",
+      });
+      eq("an exact mobile finds the existing employee", warning.possible_duplicates, true);
+      eq("named", warning.matches[0].employee_id, sid);
+      eq("with high confidence", warning.matches[0].confidence, "high");
+      eq("it is advisory only", warning.blocking, false);
+      eq("and it wrote nothing", Number(await scalar(
+        "SELECT COUNT(*) c FROM employee_lifecycle_event WHERE employee_id = ?", [sid])), 1);
+
+      // An unrelated person is not flagged.
+      const clean = await hr.findPossibleDuplicates({
+        employee_name: "Someone Entirely Different",
+        primary_contact_number: "9000000001",
+      });
+      eq("an unrelated person is not flagged", clean.possible_duplicates, false);
+
+      // A resigned match routes to Rejoin rather than a second employee_id.
+      await hr.resignEmployee(sid, { resignation_date: "2026-02-28" });
+      const rejoinable = await hr.findPossibleDuplicates({
+        employee_name: "C2 Skipped Aadhaar",
+        dob: "1992-07-15",
+      });
+      eq("a resigned match routes to Rejoin", rejoinable.matches[0].suggested_action, "rejoin");
+      eq("naming the same permanent id", rejoinable.matches[0].employee_id, sid);
+      await hr.rejoinEmployee(sid, { date_of_joining: "2026-03-15" });
+
+      // LATER ATTACHMENT, to the same permanent employee_id.
+      const employeesBefore = Number(await scalar("SELECT COUNT(*) c FROM new_employee"));
+      const later = await verifyAadhaar(withCheckDigitLater);
+      const attached = await hr.attachAadhaar(sid, { aadhaar_verification_id: later.decision.verification_id });
+      eq("the Aadhaar attached to the SAME employee_id", attached.employee_id, sid);
+      eq("and it is now VERIFIED", (await hr.getAadhaarStatus(sid)).aadhaar_status, "VERIFIED");
+      eq("no second employee was created", Number(await scalar("SELECT COUNT(*) c FROM new_employee")), employeesBefore);
+      eq("one identity, on that employee", Number(await scalar(
+        "SELECT COUNT(*) c FROM employee_aadhaar_identity WHERE employee_id = ?", [sid])), 1);
+      eq("the periods are untouched by the attach", await shapeOf(sid), [
+        [1, "closed", "2026-01-10", "2026-02-28"],
+        [2, "open", "2026-03-15", null],
+      ]);
+
+      // The same Aadhaar cannot then be attached to somebody else.
+      const another = await hr.createEmployee({ ...base, employee_name: "C2 Another Person", date_of_joining: "2026-04-01" });
+      created.push(another.employee_id);
+      const clash = await verifyAadhaar(withCheckDigitLater);
+      let refusedAttach = false;
+      let namedExisting = null;
+      try {
+        await hr.attachAadhaar(another.employee_id, { aadhaar_verification_id: clash.decision.verification_id });
+      } catch (err) {
+        refusedAttach = /already belongs to employee/.test(err.message);
+        namedExisting = err.detail ? err.detail.existing_employee_id : null;
+      }
+      eq("attaching one Aadhaar to a second employee is refused", refusedAttach, true);
+      eq("and the refusal names who holds it", namedExisting, sid);
+      eq("one Aadhaar, one employee_id - still", Number(await scalar(
+        "SELECT COUNT(*) c FROM employee_aadhaar_identity WHERE aadhaar_last4 = ?",
+        [withCheckDigitLater.slice(-4)])), 1);
+
+      /* --------------- two active employees, one bank account ----------- */
+      console.log("\n== a bank account already used by another active employee");
+      const SHARED = "50100555666777";
+      await q("UPDATE new_employee SET account_no = ?, ifsc = ?, bank_name = ? WHERE employee_id = ?",
+        [SHARED, "HDFC0001234", "HDFC Bank", sid]);
+      provider.bankResponse = { account_exists: true, name_at_bank: "C2 SKIPPED AADHAAR" };
+      eq("the first employee verifies normally", (await bank.verify(sid)).status, "VERIFIED");
+
+      await q("UPDATE new_employee SET account_no = ?, ifsc = ?, bank_name = ? WHERE employee_id = ?",
+        [SHARED, "HDFC0001234", "HDFC Bank", another.employee_id]);
+      provider.bankResponse = { account_exists: true, name_at_bank: "C2 ANOTHER PERSON" };
+      const dup = await bank.verify(another.employee_id);
+      eq("the second is DUPLICATE_ACCOUNT, not VERIFIED", dup.status, "DUPLICATE_ACCOUNT");
+      eq("and not payroll ready", (await bank.isBankPayrollReady(another.employee_id)).bank_payroll_ready, false);
+      eq("the other employee is named", dup.duplicate_of[0].employee_id, sid);
+      eq("the response carries no account number", JSON.stringify(dup).includes(SHARED), false);
+      eq("the first employee is untouched", (await bank.getStatus(sid)).status, "VERIFIED");
+
+      let refusedNoReason = false;
+      try {
+        await bank.overrideDuplicate(another.employee_id, { actorEmployeeId: null, reason: "  " });
+      } catch (err) {
+        refusedNoReason = /reason is required/.test(err.message);
+      }
+      eq("an override with no stated reason is refused", refusedNoReason, true);
+
+      const overridden = await bank.overrideDuplicate(another.employee_id, {
+        actorEmployeeId: null,
+        reason: "shared household account, letter on file",
+      });
+      eq("an audited override makes it payroll ready", overridden.status, "VERIFIED");
+      eq(
+        "and the override is recorded on the row",
+        String(await scalar("SELECT override_reason FROM employee_bank_verification WHERE employee_id = ?",
+          [another.employee_id])),
+        "shared household account, letter on file"
+      );
+      eq(
+        "and in the append-only audit trail",
+        Number(await scalar(
+          "SELECT COUNT(*) c FROM employee_bank_verification_attempt WHERE employee_id = ? AND outcome = 'ADMIN_OVERRIDE'",
+          [another.employee_id])),
+        1
+      );
+      eq("no attempt row holds the account number", Number(await scalar(
+        "SELECT COUNT(*) c FROM employee_bank_verification_attempt WHERE account_last4 = ?", [SHARED])), 0);
+
+      // A leaver sharing the account is not a permanent block.
+      await hr.resignEmployee(sid, { resignation_date: "2026-06-30" });
+      await q("UPDATE employee_bank_verification SET status='PENDING', override_by_employee_id=NULL, override_at=NULL, override_reason=NULL WHERE employee_id = ?", [another.employee_id]);
+      provider.bankResponse = { account_exists: true, name_at_bank: "C2 ANOTHER PERSON" };
+      const afterLeaver = await bank.verify(another.employee_id);
+      eq("once the other employee has left, the account verifies normally", afterLeaver.status, "VERIFIED");
+      provider.bankResponse = { account_exists: true, name_at_bank: "C2 AADHAAR SUBJECT" };
     }
 
     /* -------------------------- history endpoint ------------------------ */

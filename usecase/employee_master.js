@@ -1,5 +1,11 @@
 const logger = require("../utils/logger");
 const masterRepo = require("../repository/employee_master");
+const {
+  normaliseContact,
+  normaliseDob,
+  searchableNameTokens,
+  rankCandidates,
+} = require("../utils/duplicate_person");
 
 const { EDITABLE_FIELDS, SECURITY_RELEVANT_FIELDS, LIFECYCLE_CONTROLLED_FIELDS, STATUS } = masterRepo;
 
@@ -254,6 +260,10 @@ class EmployeeMasterUsecase {
         lifecycle_action: outcome.action,
         period: periods ? { period_no: periods.period_no, period_state: periods.period_state } : null,
         aadhaar,
+        // "Skip for now" is not an error state and not a separate code path -
+        // it is simply this employee having no Aadhaar yet. Nothing was
+        // written to say so.
+        aadhaar_status: aadhaar ? "VERIFIED" : "PENDING",
       };
     });
   }
@@ -476,6 +486,181 @@ class EmployeeMasterUsecase {
         sessions_revoked: sessionsRevoked,
       };
     });
+  }
+
+  /* ==================================================================== */
+  /*  Aadhaar, after the fact                                             */
+  /* ==================================================================== */
+  /**
+   * Attaches a verified Aadhaar to an employee who already exists.
+   *
+   * This is the other half of "Skip for now". An employee created without an
+   * Aadhaar is a complete employee - they can be paid, rostered and resigned -
+   * and their Aadhaar can arrive a week or a year later. It attaches to the
+   * SAME permanent employee_id; nothing here creates an employee.
+   *
+   * The duplicate check runs again, under the same unique index Create uses,
+   * so an Aadhaar can never end up on two employee_ids by coming in through
+   * this door instead.
+   */
+  async attachAadhaar(employeeId, input, { actorEmployeeId = null } = {}) {
+    if (!this.aadhaar) throw new ValidationError("Aadhaar verification is not configured on this server");
+    const verificationId = input && input.aadhaar_verification_id;
+    if (verificationId === undefined || verificationId === null) {
+      throw new ValidationError("aadhaar_verification_id is required");
+    }
+
+    return this.repo.withTransaction(async (tx) => {
+      const employee = await this.repo.lockEmployee(tx, employeeId);
+      if (!employee) throw new NotFoundError(`employee ${employeeId} does not exist`);
+
+      const already = await this.aadhaar.getIdentity(employeeId);
+      if (already) {
+        throw new ConflictError(
+          `employee ${employeeId} already has a verified Aadhaar on record (ending ${already.aadhaar_last4}). ` +
+            "Nothing was changed."
+        );
+      }
+
+      // Throws a ConflictError carrying `existing_employee_id` when this
+      // Aadhaar belongs to somebody else - the fingerprint is unique, and the
+      // check runs inside this transaction under that index.
+      const attached = await this.aadhaar.attachToEmployee(tx, verificationId, employeeId, {
+        actorEmployeeId,
+      });
+
+      // The verified demographics fill only what is still blank. An employee
+      // who has been working for a year has a name, a date of birth and an
+      // address that HR has since corrected; a KYC payload does not overwrite
+      // them.
+      const demographic = attached.demographic_fields || {};
+      const applicable = Object.keys(demographic).filter((k) => {
+        const current = employee[k];
+        return current === undefined || current === null || String(current).trim() === "";
+      });
+      if (applicable.length) {
+        await this.repo.updateEmployee(
+          tx,
+          employeeId,
+          Object.fromEntries(applicable.map((k) => [k, demographic[k]]))
+        );
+      }
+
+      this._log(logger.LEVEL.INFO, "AADHAAR-ATTACHED", `employee ${employeeId}: Aadhaar attached after creation`, {
+        employeeId,
+        actorEmployeeId,
+      });
+
+      return {
+        code: 200,
+        employee_id: employeeId,
+        aadhaar_status: "VERIFIED",
+        aadhaar: {
+          aadhaar_last4: attached.aadhaar_last4,
+          verified_at: attached.verified_at,
+          verification_id: verificationId,
+          demographic_fields_applied: applicable,
+        },
+      };
+    });
+  }
+
+  /**
+   * VERIFIED or PENDING, derived - never stored.
+   *
+   * There is no "Aadhaar pending" row anywhere, because a pending Aadhaar is
+   * the ABSENCE of one. Writing a placeholder verification row for every
+   * employee who skipped would mean a table of rows that verify nothing, and
+   * an existing employee who never had an Aadhaar would need one backfilled.
+   * Deriving it means the 630 employees already in the master answer PENDING
+   * correctly today, with no migration and no invented data.
+   */
+  async getAadhaarStatus(employeeId) {
+    const header = await this.repo.getEmployeeHeader(employeeId);
+    if (!header) throw new NotFoundError(`employee ${employeeId} does not exist`);
+    if (!this.aadhaar) {
+      return {
+        employee_id: header.employee_id,
+        employee_name: header.employee_name,
+        aadhaar_status: "PENDING",
+        aadhaar_last4: null,
+        verified_at: null,
+        can_verify_now: false,
+        message: "Aadhaar verification is not configured on this server.",
+      };
+    }
+
+    const identity = await this.aadhaar.getIdentity(employeeId);
+    if (!identity) {
+      return {
+        employee_id: header.employee_id,
+        employee_name: header.employee_name,
+        aadhaar_status: "PENDING",
+        aadhaar_last4: null,
+        verified_at: null,
+        can_verify_now: true,
+        message: "No Aadhaar on record. It can be verified at any time and attached to this employee.",
+      };
+    }
+    return {
+      employee_id: header.employee_id,
+      employee_name: header.employee_name,
+      aadhaar_status: "VERIFIED",
+      aadhaar_last4: identity.aadhaar_last4,
+      verified_at: identity.verified_at || null,
+      can_verify_now: false,
+      message: `Aadhaar ending ${identity.aadhaar_last4} is verified against this employee.`,
+    };
+  }
+
+  /* ==================================================================== */
+  /*  the pre-create duplicate warning                                    */
+  /* ==================================================================== */
+  /**
+   * "Have we got this person already?", for a create with no Aadhaar.
+   *
+   * ADVISORY ONLY. It returns what it found and a suggested action; it never
+   * merges, never rejoins, and never prevents a create. HR reviews and
+   * decides, which is why the response is shaped for a screen rather than for
+   * a branch.
+   */
+  async findPossibleDuplicates(input, { limit = 25 } = {}) {
+    const name = input && input.employee_name ? String(input.employee_name) : "";
+    const contact = normaliseContact(input && input.primary_contact_number);
+    const dob = normaliseDob(input && input.dob);
+    const tokens = searchableNameTokens(name);
+
+    if (!contact && !dob && tokens.length === 0) {
+      throw new ValidationError(
+        "at least one of employee_name, primary_contact_number or dob is needed to check for duplicates"
+      );
+    }
+
+    const candidates = await this.repo.findPossibleDuplicates(
+      { name_tokens: tokens, contact, dob },
+      limit
+    );
+    const matches = rankCandidates({ employee_name: name, primary_contact_number: contact, dob }, candidates);
+    const inactive = matches.filter((m) => !m.is_active);
+
+    return {
+      code: 200,
+      searched_on: {
+        employee_name: name || null,
+        // Whether a mobile was searched, never the number back again.
+        primary_contact_number: contact ? true : false,
+        dob: dob ? true : false,
+      },
+      possible_duplicates: matches.length > 0,
+      // Always false. Said explicitly so C3 cannot mistake this for a gate.
+      blocking: false,
+      count: matches.length,
+      suggested_action: inactive.length ? "rejoin" : matches.length ? "review" : "create",
+      message: matches.length
+        ? "Possible existing employee found. Review before creating a new employee ID."
+        : "No possible duplicate found.",
+      matches,
+    };
   }
 
   /* ==================================================================== */

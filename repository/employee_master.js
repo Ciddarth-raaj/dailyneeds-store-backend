@@ -300,6 +300,65 @@ class EmployeeMasterRepository {
   }
 
   /**
+   * Candidates for the pre-create duplicate warning.
+   *
+   * A COARSE FILTER, not the decision. It casts a slightly wide net in SQL -
+   * exact mobile, exact date of birth, or any employee sharing a name token -
+   * and the usecase scores what comes back. Doing the judging in SQL would
+   * mean encoding the weighting in a WHERE clause, where it cannot be tested
+   * or explained to HR.
+   *
+   * Active AND inactive employees are searched: an inactive match is the more
+   * important one, because that is the case where a second employee_id would
+   * otherwise be created for somebody who should be rejoined.
+   *
+   * Selects only what the warning shows. No salary, no bank, no Aadhaar - a
+   * warning about a possible duplicate is not an excuse to read somebody's
+   * record.
+   */
+  async findPossibleDuplicates({ name_tokens = [], contact = null, dob = null }, limit = 25) {
+    const clauses = [];
+    const params = [];
+
+    if (contact) {
+      clauses.push("REPLACE(REPLACE(ne.primary_contact_number, ' ', ''), '-', '') = ?");
+      params.push(contact);
+    }
+    if (dob) {
+      clauses.push("DATE_FORMAT(ne.dob, '%Y-%m-%d') = ?");
+      params.push(dob);
+    }
+    for (const token of name_tokens) {
+      clauses.push("ne.employee_name LIKE ?");
+      params.push(`%${token}%`);
+    }
+    if (clauses.length === 0) return [];
+
+    return this._read(
+      "FIND-POSSIBLE-DUPLICATES",
+      `SELECT ne.employee_id, ne.employee_name, ne.status,
+              DATE_FORMAT(ne.dob, '%Y-%m-%d') AS dob,
+              ne.primary_contact_number,
+              ne.store_id, ne.designation_id,
+              o.outlet_nickname, d.designation_name,
+              p.period_no  AS latest_period_no,
+              p.period_state AS latest_period_state,
+              DATE_FORMAT(p.ended_on, '%Y-%m-%d') AS last_ended_on
+         FROM new_employee ne
+         LEFT JOIN outlets o     ON o.outlet_id = ne.store_id
+         LEFT JOIN designation d ON d.designation_id = ne.designation_id
+         LEFT JOIN employee_employment_period p
+                ON p.employee_id = ne.employee_id
+               AND p.period_no = ( SELECT MAX(period_no) FROM employee_employment_period
+                                    WHERE employee_id = ne.employee_id )
+        WHERE ${clauses.join(" OR ")}
+        ORDER BY ne.employee_id
+        LIMIT ?`,
+      [...params, Number(limit)]
+    );
+  }
+
+  /**
    * The review queue: periods C1b or C1c could not date. Read-only, and
    * nothing here repairs anything - the 518 historical rows stay exactly as
    * they are until the archived Digisme export is imported.

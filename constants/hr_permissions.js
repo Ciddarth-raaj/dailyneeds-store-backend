@@ -47,6 +47,13 @@ module.exports = {
   VERIFY_EMPLOYEE_BANK: "verify_employee_bank",
   CONFIRM_BANK_NAME_MISMATCH: "confirm_bank_name_mismatch",
 
+  // Stage 0C / C2. Allowing two ACTIVE employees to share one bank account.
+  // Declared and granted to NOBODY, including HR Executive: the usual cause
+  // of a duplicate is a typo, and whoever typed it should not be the one who
+  // waves it through. In practice an administrator, through the user_type 2
+  // bypass, with a stated reason that is audited.
+  OVERRIDE_DUPLICATE_BANK_ACCOUNT: "override_duplicate_bank_account",
+
   ADD_EMPLOYEES: "add_employees",
   VIEW_BANKS: "view_banks",
   ADD_BANKS: "add_banks",

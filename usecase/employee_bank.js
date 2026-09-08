@@ -1,6 +1,6 @@
 const nodeCrypto = require("crypto");
 const logger = require("../utils/logger");
-const aadhaarConfig = require("../config/aadhaar");
+const bankConfig = require("../config/bank");
 const { compareNameAtBank } = require("../utils/name_match");
 const { SandboxError, FAILURE } = require("../services/sandbox_client");
 
@@ -38,6 +38,7 @@ const STATUS = {
   PENDING: "PENDING",
   VERIFIED: "VERIFIED",
   NAME_MISMATCH: "NAME_MISMATCH",
+  DUPLICATE_ACCOUNT: "DUPLICATE_ACCOUNT",
   FAILED: "FAILED",
 };
 
@@ -64,6 +65,20 @@ class ConflictError extends Error {
 }
 
 const last4 = (account) => String(account).slice(-4);
+
+/**
+ * What may be said about the OTHER employee on a shared account: who they are,
+ * so HR can resolve it, and nothing about the account beyond its last four -
+ * which the caller already sees for their own employee anyway. No fingerprint,
+ * no account number.
+ */
+const presentDuplicate = (row) => ({
+  employee_id: row.employee_id,
+  employee_name: row.employee_name,
+  bank_verification_status: row.status,
+  verified_on: row.verified_on || null,
+});
+
 /** What any screen or log may show. */
 const maskAccount = (account) => {
   const a = String(account);
@@ -94,21 +109,26 @@ class EmployeeBankUsecase {
   }
 
   /**
-   * The keyed fingerprint of one account. Reuses the Aadhaar fingerprint key
-   * rather than adding a third secret to manage: it is used the same way, to
-   * make a value comparable without being readable, and one fewer key is one
-   * fewer key to lose. Domain-separated by a prefix so a bank fingerprint can
-   * never collide with an Aadhaar one.
+   * The keyed fingerprint of one account.
+   *
+   * Keyed on `BANK_FINGERPRINT_KEY` and NOTHING ELSE: bank verification does
+   * not depend on Aadhaar being configured, enabled, or present. A deployment
+   * that never touches Aadhaar can still run Penny-Less.
+   *
+   * The `bank:` prefix keeps the input domain-separated, so this can never
+   * collide with a fingerprint computed for anything else even if a key were
+   * ever shared by accident.
    */
   static fingerprint(accountNumber, ifsc) {
-    if (!aadhaarConfig.enabled) {
+    if (!bankConfig.enabled) {
       throw new ValidationError(
-        "Bank verification is not configured on this server (AADHAAR_FINGERPRINT_KEY)",
+        "Bank verification is not configured on this server: BANK_FINGERPRINT_KEY is missing or " +
+          `shorter than ${bankConfig.MIN_KEY_LENGTH} characters`,
         503
       );
     }
     return nodeCrypto
-      .createHmac("sha256", aadhaarConfig.fingerprintSecret)
+      .createHmac("sha256", bankConfig.fingerprintSecret)
       .update(`bank:${String(ifsc).toUpperCase()}:${String(accountNumber)}`, "utf8")
       .digest("hex");
   }
@@ -156,7 +176,25 @@ class EmployeeBankUsecase {
     const storedFp = await this.repo.getStoredFingerprint(employeeId);
     const matchesCurrent = Boolean(storedFp && storedFp.account_fingerprint === currentFingerprint);
 
-    const effectiveStatus = !stored || !matchesCurrent ? STATUS.PENDING : stored.status;
+    let effectiveStatus = !stored || !matchesCurrent ? STATUS.PENDING : stored.status;
+
+    // A duplicate is a fact about OTHER employees, and other employees change
+    // without this row being touched. So it is resolved on read, not frozen at
+    // verification time: when the employee it clashed with has since left, the
+    // clash is over and the provider's own result stands. Otherwise a
+    // colleague's resignation would leave this employee permanently blocked
+    // until somebody spent another paid call on an account nothing changed
+    // about.
+    let duplicateOf = null;
+    if (effectiveStatus === STATUS.DUPLICATE_ACCOUNT) {
+      duplicateOf = await this.repo.findActiveDuplicates(currentFingerprint, employeeId);
+      if (duplicateOf.length === 0) {
+        // The provider said the account exists and the name was acceptable;
+        // only the clash held it back, and the clash is gone.
+        effectiveStatus =
+          stored && stored.name_match_verdict === "MISMATCH" ? STATUS.NAME_MISMATCH : STATUS.VERIFIED;
+      }
+    }
 
     return {
       employee_id: employeeId,
@@ -171,6 +209,7 @@ class EmployeeBankUsecase {
       verification: stored && matchesCurrent ? stored : null,
       superseded_verification: stored && !matchesCurrent ? { ...stored, applies_to_current_account: false } : null,
       stale: Boolean(stored) && !matchesCurrent,
+      duplicate_of: duplicateOf && duplicateOf.length ? duplicateOf.map(presentDuplicate) : null,
     };
   }
 
@@ -238,6 +277,10 @@ class EmployeeBankUsecase {
         confirmed_by_employee_id: null,
         confirmed_at: null,
         confirmation_note: null,
+        duplicate_of_employee_id: null,
+        override_by_employee_id: null,
+        override_at: null,
+        override_reason: null,
       });
       await this.repo.recordAttempt({
         employee_id: employeeId,
@@ -274,6 +317,10 @@ class EmployeeBankUsecase {
         confirmed_by_employee_id: null,
         confirmed_at: null,
         confirmation_note: null,
+        duplicate_of_employee_id: null,
+        override_by_employee_id: null,
+        override_at: null,
+        override_reason: null,
       };
       await this.repo.upsertVerification(row);
       await this.repo.recordAttempt({
@@ -304,10 +351,22 @@ class EmployeeBankUsecase {
       aadhaarName,
     });
 
-    const status = comparison.verdict === "MATCH" ? STATUS.VERIFIED : STATUS.NAME_MISMATCH;
+    let status = comparison.verdict === "MATCH" ? STATUS.VERIFIED : STATUS.NAME_MISMATCH;
+
+    // AND IS IT ALREADY SOMEBODY ELSE'S? A name matching is not sufficient to
+    // be payroll-ready: two active employees on one account is either a
+    // data-entry error or one person drawing two salaries, and paying both is
+    // not recoverable by an apology. The clash does not overwrite either
+    // employee's details and does not touch the other row at all - it only
+    // stops THIS one short of VERIFIED until a human decides.
+    const duplicates = status === STATUS.VERIFIED
+      ? await this.repo.findActiveDuplicates(fingerprint, employeeId)
+      : [];
+    if (duplicates.length) status = STATUS.DUPLICATE_ACCOUNT;
 
     await this.repo.upsertVerification({
       ...base,
+      duplicate_of_employee_id: duplicates.length ? duplicates[0].employee_id : null,
       status,
       account_exists: 1,
       name_at_bank: result.name_at_bank,
@@ -318,11 +377,16 @@ class EmployeeBankUsecase {
       provider_status: result.provider_status || null,
       failure_category: null,
       verified_at: status === STATUS.VERIFIED ? new Date() : null,
-      // A fresh check clears any previous confirmation: a name accepted for
-      // the old result has not been accepted for this one.
+      // A fresh check clears any previous confirmation AND any previous
+      // override: a name accepted for the old result has not been accepted
+      // for this one, and an administrator who allowed a shared account last
+      // month has not allowed whatever this check just found.
       confirmed_by_employee_id: null,
       confirmed_at: null,
       confirmation_note: null,
+      override_by_employee_id: null,
+      override_at: null,
+      override_reason: null,
     });
     await this.repo.recordAttempt({
       employee_id: employeeId,
@@ -352,13 +416,81 @@ class EmployeeBankUsecase {
       account_exists: true,
       name_at_bank: result.name_at_bank,
       name_match: comparison,
+      duplicate_of: duplicates.length ? duplicates.map(presentDuplicate) : null,
+      requires_admin_override: status === STATUS.DUPLICATE_ACCOUNT,
       message:
-        status === STATUS.VERIFIED
+        status === STATUS.DUPLICATE_ACCOUNT
+          ? `The account exists and the name matches, but employee ${duplicates[0].employee_id} is currently ` +
+            "employed and already verified against this same account. Check whether this is a data-entry " +
+            "error before an administrator allows it."
+          : status === STATUS.VERIFIED
           ? "The account exists and the name matches."
           : comparison.verdict === "MISMATCH"
           ? "The account exists, but the name at the bank does not match this employee. Check the account belongs to them."
           : "The account exists and the name is close but not identical. An authorised user must confirm it.",
     });
+  }
+
+  /**
+   * An administrator allowing a genuinely shared account.
+   *
+   * Rare but real: a spouse's account, or a worker with no account of their
+   * own. It is deliberately NOT available to HR, requires a stated reason,
+   * and leaves both an updated row naming who allowed it and an append-only
+   * attempt row. Neither employee's bank details are touched, and the other
+   * employee's verification is not altered in any way.
+   */
+  async overrideDuplicate(employeeId, { actorEmployeeId = null, reason = null } = {}) {
+    const stated = String(reason === null || reason === undefined ? "" : reason).trim();
+    if (stated === "") {
+      throw new ValidationError(
+        "a reason is required to allow two active employees to share a bank account"
+      );
+    }
+
+    const current = await this.getStatus(employeeId);
+    if (current.status !== STATUS.DUPLICATE_ACCOUNT) {
+      throw new ConflictError(
+        `employee ${employeeId}'s bank verification is ${current.status}, not DUPLICATE_ACCOUNT; ` +
+          "there is nothing to override"
+      );
+    }
+
+    const employee = await this.repo.getBankDetails(employeeId);
+    const fingerprint = EmployeeBankUsecase.fingerprint(
+      String(employee.account_no).replace(/[\s-]/g, ""),
+      String(employee.ifsc).replace(/\s/g, "").toUpperCase()
+    );
+    const affected = await this.repo.overrideDuplicate(employeeId, fingerprint, {
+      actorEmployeeId,
+      reason: stated,
+    });
+    if (affected === 0) {
+      throw new ConflictError("the bank details or the verification changed; re-run the verification");
+    }
+
+    // The audit trail proper: append-only, and it survives a later
+    // re-verification that clears the override columns on the current row.
+    await this.repo.recordAttempt({
+      employee_id: employeeId,
+      account_fingerprint: fingerprint,
+      account_last4: last4(String(employee.account_no).replace(/[\s-]/g, "")),
+      ifsc: String(employee.ifsc).replace(/\s/g, "").toUpperCase(),
+      outcome: "ADMIN_OVERRIDE",
+      failure_category: null,
+      provider: null,
+      requested_by_employee_id: actorEmployeeId,
+      override_reason: stated,
+    });
+
+    this._log(
+      logger.LEVEL.INFO,
+      "DUPLICATE-OVERRIDDEN",
+      `employee ${employeeId}: shared bank account allowed by employee ${actorEmployeeId}`,
+      { employeeId, actorEmployeeId, duplicate_of: (current.duplicate_of || []).map((d) => d.employee_id) }
+    );
+
+    return this.getStatus(employeeId);
   }
 
   /**
@@ -422,7 +554,10 @@ class EmployeeBankUsecase {
           ? "the bank account has not been verified since it was last changed"
           : status.status === STATUS.NAME_MISMATCH
           ? "the name at the bank needs confirmation"
+          : status.status === STATUS.DUPLICATE_ACCOUNT
+          ? "another active employee is already verified against this bank account"
           : "the last verification failed",
+      duplicate_of: status.duplicate_of || null,
     };
   }
 
@@ -432,7 +567,10 @@ class EmployeeBankUsecase {
     try {
       const identity = await this.aadhaarRepo.getIdentity(employeeId);
       if (!identity || !identity.verification_id) return null;
-      const verification = await this.aadhaarRepo.getVerification(identity.verification_id);
+      // The demographics read, not the display read: `getVerification` is
+      // deliberately narrow and does not select the payload, so asking it for
+      // the name would silently always answer null.
+      const verification = await this.aadhaarRepo.getVerificationDemographics(identity.verification_id);
       if (!verification) return null;
       let demographics = verification.demographics_json;
       if (typeof demographics === "string") {

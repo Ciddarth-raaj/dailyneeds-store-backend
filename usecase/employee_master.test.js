@@ -164,6 +164,17 @@ function makeMasterRepo(world) {
       const e = world.employees.get(Number(id));
       return e ? { ...e, outlet_nickname: "Branch", designation_name: "Cashier", department_name: "Ops" } : null;
     },
+    async findPossibleDuplicates({ name_tokens = [], contact = null, dob = null }) {
+      // The coarse SQL net, in JS: exact mobile, exact dob, or any shared
+      // name token. Deliberately wide - the scoring is what narrows it.
+      return [...world.employees.values()].filter((e) => {
+        const eContact = String(e.primary_contact_number || "").replace(/\D/g, "").slice(-10);
+        if (contact && eContact && eContact === contact) return true;
+        if (dob && e.dob && String(e.dob).slice(0, 10) === dob) return true;
+        const name = String(e.employee_name || "").toLowerCase();
+        return name_tokens.some((t) => name.includes(t));
+      });
+    },
     async getReviewList() {
       return world.periods.filter((p) => p.needs_review === 1);
     },
@@ -1026,11 +1037,122 @@ describe("Create with a verified Aadhaar", () => {
     assert.equal(world.verifications[0].status, "verified", "the verification is reusable");
   });
 
-  it("a create without Aadhaar still works, and reports none", async () => {
-    const { uc } = buildWithAadhaar();
+  it("SKIP FOR NOW: a create without Aadhaar works, and writes no Aadhaar row", async () => {
+    // Aadhaar is preferred, not mandatory. An employee created without one is
+    // a complete employee - the only difference is that their Aadhaar status
+    // is PENDING, which is derived from the absence rather than stored.
+    const { world, uc } = buildWithAadhaar();
     const res = await uc.createEmployee({ ...VALID });
     assert.equal(res.code, 200);
     assert.equal(res.aadhaar, null);
+    assert.equal(res.aadhaar_status, "PENDING");
+    assert.equal(world.identities.length, 0, "no identity row");
+    assert.equal(world.verifications.length, 0, "and no placeholder verification row either");
+    // The lifecycle happened normally: skipping Aadhaar blocks nothing.
+    assert.deepEqual(shapeOf(world, res.employee_id), [[1, "open", VALID.date_of_joining, null]]);
+  });
+
+  it("and the status endpoint reports PENDING for them", async () => {
+    const { uc } = buildWithAadhaar();
+    const res = await uc.createEmployee({ ...VALID });
+    const status = await uc.getAadhaarStatus(res.employee_id);
+    assert.equal(status.aadhaar_status, "PENDING");
+    assert.equal(status.aadhaar_last4, null);
+    assert.equal(status.can_verify_now, true);
+  });
+
+  it("a create WITH Aadhaar reports VERIFIED", async () => {
+    const { uc, aadhaar } = buildWithAadhaar();
+    const v = await verified(aadhaar);
+    const res = await uc.createEmployee({ ...VALID, aadhaar_verification_id: v.verification_id });
+    assert.equal(res.aadhaar_status, "VERIFIED");
+    const status = await uc.getAadhaarStatus(res.employee_id);
+    assert.equal(status.aadhaar_status, "VERIFIED");
+    assert.equal(status.aadhaar_last4, AADHAAR.slice(-4));
+  });
+
+  it("an employee who skipped can resign and rejoin without ever having one", async () => {
+    const { world, uc } = buildWithAadhaar();
+    const res = await uc.createEmployee({ ...VALID, date_of_joining: "2022-03-01" });
+    await uc.resignEmployee(res.employee_id, { resignation_date: "2024-05-31" });
+    await uc.rejoinEmployee(res.employee_id, { date_of_joining: "2025-02-01" });
+    assert.deepEqual(shapeOf(world, res.employee_id), [
+      [1, "closed", "2022-03-01", "2024-05-31"],
+      [2, "open", "2025-02-01", null],
+    ]);
+    assert.equal((await uc.getAadhaarStatus(res.employee_id)).aadhaar_status, "PENDING");
+  });
+
+  it("LATER: the Aadhaar attaches to the SAME employee_id, creating nobody", async () => {
+    const { world, uc, aadhaar } = buildWithAadhaar();
+    const created = await uc.createEmployee({ ...VALID, employee_name: "Name HR Typed" });
+    const employeesBefore = world.employees.size;
+
+    const v = await verified(aadhaar);
+    const attached = await uc.attachAadhaar(created.employee_id, { aadhaar_verification_id: v.verification_id });
+
+    assert.equal(attached.employee_id, created.employee_id, "the same permanent id");
+    assert.equal(attached.aadhaar_status, "VERIFIED");
+    assert.equal(world.employees.size, employeesBefore, "no second employee row");
+    assert.equal(world.identities.length, 1);
+    assert.equal(world.identities[0].employee_id, created.employee_id);
+    assert.equal((await uc.getAadhaarStatus(created.employee_id)).aadhaar_status, "VERIFIED");
+  });
+
+  it("a later attach fills only the fields still blank", async () => {
+    const { world, uc, aadhaar } = buildWithAadhaar();
+    const created = await uc.createEmployee({ ...VALID, employee_name: "Name HR Typed" });
+    const v = await verified(aadhaar);
+    const attached = await uc.attachAadhaar(created.employee_id, { aadhaar_verification_id: v.verification_id });
+
+    const employee = world.employees.get(created.employee_id);
+    assert.equal(employee.employee_name, "Name HR Typed", "a name HR already corrected is kept");
+    assert.ok(!attached.aadhaar.demographic_fields_applied.includes("employee_name"));
+    assert.equal(employee.dob, "1990-02-01", "but a blank field is filled");
+    assert.ok(attached.aadhaar.demographic_fields_applied.includes("dob"));
+  });
+
+  it("a later attach REFUSES an Aadhaar that belongs to another employee", async () => {
+    const { world, uc, aadhaar } = buildWithAadhaar();
+    // Employee A is created with the Aadhaar.
+    const first = await verified(aadhaar);
+    const a = await uc.createEmployee({ ...VALID, aadhaar_verification_id: first.verification_id });
+    // Employee B skipped, and somebody now tries to attach the same Aadhaar.
+    const b = await uc.createEmployee({ ...VALID });
+    const second = await verified(aadhaar);
+    assert.equal(second.duplicate, true, "the OTP flow already knows");
+
+    await assert.rejects(
+      () => uc.attachAadhaar(b.employee_id, { aadhaar_verification_id: second.verification_id }),
+      (err) => {
+        assert.match(err.message, /already belongs to employee/);
+        return true;
+      }
+    );
+    assert.equal(world.identities.length, 1, "one Aadhaar, one employee_id - still");
+    assert.equal(world.identities[0].employee_id, a.employee_id);
+  });
+
+  it("and refuses to attach a second Aadhaar to somebody who already has one", async () => {
+    const { uc, aadhaar } = buildWithAadhaar();
+    const v = await verified(aadhaar);
+    const created = await uc.createEmployee({ ...VALID, aadhaar_verification_id: v.verification_id });
+    const another = await verified(aadhaar, { });
+    await assert.rejects(
+      () => uc.attachAadhaar(created.employee_id, { aadhaar_verification_id: another.verification_id }),
+      /already has a verified Aadhaar/
+    );
+  });
+
+  it("attaching to an employee who does not exist is a 404, not a create", async () => {
+    const { world, uc, aadhaar } = buildWithAadhaar();
+    const v = await verified(aadhaar);
+    await assert.rejects(
+      () => uc.attachAadhaar(999999, { aadhaar_verification_id: v.verification_id }),
+      /does not exist/
+    );
+    assert.equal(world.employees.size, 0);
+    assert.equal(world.identities.length, 0);
   });
 
   it("a create quoting an unknown verification is refused", async () => {
@@ -1045,5 +1167,134 @@ describe("Create with a verified Aadhaar", () => {
     const res = await uc.createEmployee({ ...VALID, aadhaar_verification_id: v.verification_id });
     assert.ok(!JSON.stringify(res).includes(AADHAAR));
     assert.ok(!JSON.stringify(await uc.getLifecycleHistory(res.employee_id)).includes(AADHAAR));
+  });
+});
+
+/* ================================ the non-Aadhaar duplicate warning ===== */
+describe("checking for a possible duplicate before creating without Aadhaar", () => {
+  const build = () => {
+    const world = new World();
+    const lifecycleRepo = makeLifecycleRepo(world);
+    const lifecycle = lifecycleUsecase(lifecycleRepo, null);
+    const uc = masterUsecaseFactory(makeMasterRepo(world), lifecycle, lifecycleRepo, null);
+    return { world, uc };
+  };
+
+  /** An existing employee, created through the real create path. */
+  const existing = async (uc, fields) =>
+    uc.createEmployee({
+      employee_name: "Ramesh Kumar",
+      date_of_joining: "2022-03-01",
+      store_id: 2,
+      designation_id: 3,
+      department_id: 4,
+      primary_contact_number: "9876543210",
+      dob: "1990-02-01",
+      ...fields,
+    });
+
+  it("finds an exact mobile match and reports it as high confidence", async () => {
+    const { uc } = build();
+    const them = await existing(uc);
+    const res = await uc.findPossibleDuplicates({
+      employee_name: "R K Sharma",
+      primary_contact_number: "98765 43210",
+    });
+    assert.equal(res.possible_duplicates, true);
+    assert.equal(res.count, 1);
+    assert.equal(res.matches[0].employee_id, them.employee_id);
+    assert.equal(res.matches[0].confidence, "high");
+    assert.match(res.message, /Review before creating a new employee ID/);
+  });
+
+  it("finds a name + date of birth match", async () => {
+    const { uc } = build();
+    const them = await existing(uc, { primary_contact_number: null });
+    const res = await uc.findPossibleDuplicates({ employee_name: "Ramesh Kumar", dob: "01-02-1990" });
+    assert.equal(res.matches[0].employee_id, them.employee_id);
+    assert.equal(res.matches[0].confidence, "high");
+  });
+
+  it("an ACTIVE match says review, and warns against a second employee ID", async () => {
+    const { uc } = build();
+    await existing(uc);
+    const res = await uc.findPossibleDuplicates({ employee_name: "Ramesh Kumar", dob: "1990-02-01" });
+    assert.equal(res.matches[0].employment_status, "active");
+    assert.equal(res.matches[0].suggested_action, "review_already_employed");
+    assert.equal(res.suggested_action, "review");
+  });
+
+  it("an INACTIVE match routes to Rejoin", async () => {
+    const { uc } = build();
+    const them = await existing(uc);
+    await uc.resignEmployee(them.employee_id, { resignation_date: "2024-05-31" });
+
+    const res = await uc.findPossibleDuplicates({ employee_name: "Ramesh Kumar", dob: "1990-02-01" });
+    assert.equal(res.matches[0].employment_status, "inactive");
+    assert.equal(res.matches[0].suggested_action, "rejoin");
+    assert.equal(res.suggested_action, "rejoin");
+    assert.match(res.matches[0].message, /use Rejoin on that employee ID/);
+  });
+
+  it("a weak name-only match is reported, ranked low, and blocks nothing", async () => {
+    const { uc } = build();
+    await existing(uc, { primary_contact_number: null, dob: null, employee_name: "Ramesh Sharma" });
+    const res = await uc.findPossibleDuplicates({ employee_name: "Ramesh Kumar" });
+    assert.equal(res.matches[0].confidence, "low");
+    assert.equal(res.blocking, false);
+  });
+
+  it("IT NEVER BLOCKS: HR can review the warning and create anyway", async () => {
+    const { world, uc } = build();
+    const them = await existing(uc);
+    const warning = await uc.findPossibleDuplicates({
+      employee_name: "Ramesh Kumar",
+      primary_contact_number: "9876543210",
+    });
+    assert.equal(warning.possible_duplicates, true);
+    assert.equal(warning.blocking, false);
+
+    // HR looks, decides it really is a different person, and proceeds.
+    const created = await existing(uc);
+    assert.equal(created.code, 200);
+    assert.notEqual(created.employee_id, them.employee_id);
+    assert.equal(world.employees.size, 2);
+  });
+
+  it("nothing similar is a clean answer, not an error", async () => {
+    const { uc } = build();
+    await existing(uc);
+    const res = await uc.findPossibleDuplicates({ employee_name: "Priya Nair", primary_contact_number: "9000000000" });
+    assert.equal(res.possible_duplicates, false);
+    assert.equal(res.count, 0);
+    assert.equal(res.suggested_action, "create");
+  });
+
+  it("it writes nothing at all - it is a read", async () => {
+    const { world, uc } = build();
+    await existing(uc);
+    const before = world.snapshot();
+    await uc.findPossibleDuplicates({ employee_name: "Ramesh Kumar", primary_contact_number: "9876543210" });
+    assert.equal(world.snapshot(), before);
+  });
+
+  it("refuses when there is nothing to search on", async () => {
+    const { uc } = build();
+    await assert.rejects(() => uc.findPossibleDuplicates({}), /at least one of/);
+    await assert.rejects(() => uc.findPossibleDuplicates({ employee_name: "R K" }), /at least one of/);
+  });
+
+  it("does not echo the searched mobile number back", async () => {
+    const { uc } = build();
+    await existing(uc);
+    const res = await uc.findPossibleDuplicates({
+      employee_name: "Ramesh Kumar",
+      primary_contact_number: "9876543210",
+    });
+    assert.equal(res.searched_on.primary_contact_number, true, "it says THAT one was searched");
+    assert.ok(
+      !JSON.stringify(res.searched_on).includes("9876543210"),
+      "but does not repeat the number back"
+    );
   });
 });

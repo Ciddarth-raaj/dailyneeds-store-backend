@@ -33,7 +33,15 @@ class EmployeeMasterRoutes {
   /** Errors carry their own status; anything else is a 500 without detail. */
   _fail(res, err) {
     if (err && err.httpCode) {
-      res.json({ code: err.httpCode, msg: err.message });
+      // A refusal that knows WHICH employee already holds this Aadhaar is far
+      // more useful than one that does not - it is what turns "refused" into
+      // "use Rejoin on 412". Allowlisted by key rather than spread, so an
+      // error can never widen this response by attaching something else.
+      const detail =
+        err.detail && Number.isInteger(Number(err.detail.existing_employee_id))
+          ? { existing_employee_id: Number(err.detail.existing_employee_id) }
+          : {};
+      res.json({ code: err.httpCode, msg: err.message, ...detail });
       return;
     }
     if (err && err.name === "ValidationError") {
@@ -185,6 +193,30 @@ class EmployeeMasterRoutes {
       }
     );
 
+    /**
+     * "Have we got this person already?" - for a create with no Aadhaar.
+     *
+     * ADVISORY. It writes nothing, blocks nothing and is not a precondition
+     * of POST /employee; HR may review the answer and create anyway. Gated on
+     * `employee_create` because it is part of that screen and it reads other
+     * employees' names, contact numbers and dates of birth.
+     */
+    router.post("/employee/check-duplicate", this.permissions.require(P.EMPLOYEE_CREATE), async (req, res) => {
+      try {
+        const isValid = Joi.validate(req.body || {}, {
+          employee_name: Joi.string().allow("", null).optional(),
+          primary_contact_number: Joi.string().allow("", null).optional(),
+          dob: Joi.string().allow("", null).optional(),
+        });
+        if (isValid.error !== null) throw isValid.error;
+
+        res.json(await this.usecase.findPossibleDuplicates(req.body || {}));
+      } catch (err) {
+        this._fail(res, err);
+      }
+      res.end();
+    });
+
     /* ------------------------------------------------------------ Aadhaar */
     /**
      * Step 1: send the OTP.
@@ -246,10 +278,35 @@ class EmployeeMasterRoutes {
       res.end();
     });
 
-    /** The display record: last four and provenance. Never the number. */
+    /**
+     * VERIFIED or PENDING, and the last four when there is one.
+     *
+     * Never 404: an employee with no Aadhaar is PENDING, not missing. That is
+     * what lets C3 render one badge for every employee, including the 630 who
+     * predate any of this, without special-casing an absence.
+     */
     router.get(
       "/employee/:employee_id/aadhaar",
       this.permissions.require(P.VIEW_EMPLOYEE_LIFECYCLE),
+      async (req, res) => {
+        try {
+          res.json(await this.usecase.getAadhaarStatus(Number(req.params.employee_id)));
+        } catch (err) {
+          this._fail(res, err);
+        }
+        res.end();
+      }
+    );
+
+    /**
+     * Attach a verified Aadhaar to an employee who already exists - the other
+     * half of "Skip for now". Same permanent employee_id; no employee is
+     * created here, and an Aadhaar already held by somebody else is refused
+     * with that employee's id rather than attached.
+     */
+    router.post(
+      "/employee/:employee_id/aadhaar/attach",
+      this.permissions.require(P.EMPLOYEE_EDIT),
       async (req, res) => {
         try {
           if (!this.aadhaar) {
@@ -257,8 +314,16 @@ class EmployeeMasterRoutes {
             res.end();
             return;
           }
-          const row = await this.aadhaar.getIdentity(Number(req.params.employee_id));
-          res.json(row || { code: 404, msg: "no Aadhaar on record for this employee" });
+          const isValid = Joi.validate(req.body || {}, {
+            aadhaar_verification_id: Joi.number().integer().positive().required(),
+          });
+          if (isValid.error !== null) throw isValid.error;
+
+          res.json(
+            await this.usecase.attachAadhaar(Number(req.params.employee_id), req.body, {
+              actorEmployeeId: this._actor(req),
+            })
+          );
         } catch (err) {
           this._fail(res, err);
         }
@@ -372,6 +437,41 @@ class EmployeeMasterRoutes {
             await this.bank.confirmNameMismatch(Number(req.params.employee_id), {
               actorEmployeeId: this._actor(req),
               note: (req.body || {}).note,
+            })
+          );
+        } catch (err) {
+          this._fail(res, err);
+        }
+        res.end();
+      }
+    );
+
+    /**
+     * Allow two active employees to share one bank account.
+     *
+     * Its own key, held by nobody by default, so in practice this is an
+     * administrator through the `user_type = 2` bypass. Deliberately out of
+     * HR's reach: the normal resolution to a duplicate is that somebody typed
+     * the wrong account, and the person who typed it should not be the person
+     * who waves it through. A stated reason is required and audited.
+     */
+    router.post(
+      "/employee/:employee_id/bank/override-duplicate",
+      this.permissions.requireAll(P.OVERRIDE_DUPLICATE_BANK_ACCOUNT, P.VIEW_EMPLOYEE_SENSITIVE),
+      async (req, res) => {
+        try {
+          if (!this.bank) {
+            res.json({ code: 503, msg: "Bank verification is not configured on this server" });
+            res.end();
+            return;
+          }
+          const isValid = Joi.validate(req.body || {}, { reason: Joi.string().min(3).required() });
+          if (isValid.error !== null) throw isValid.error;
+
+          res.json(
+            await this.bank.overrideDuplicate(Number(req.params.employee_id), {
+              actorEmployeeId: this._actor(req),
+              reason: (req.body || {}).reason,
             })
           );
         } catch (err) {

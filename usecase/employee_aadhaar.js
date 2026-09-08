@@ -493,22 +493,25 @@ class EmployeeAadhaarUsecase {
     if (new Date(v.expires_at).getTime() < Date.now()) {
       throw new ValidationError(`verification ${verificationId} has expired; verify the Aadhaar again`);
     }
-    if (!v.aadhaar_ciphertext) {
-      throw new ConflictError(
-        `verification ${verificationId} carries no Aadhaar to store; it was raised against an employee who already exists`
-      );
-    }
     if (Number(v.consent_given) !== 1) {
       throw new ValidationError(`verification ${verificationId} has no recorded consent`);
     }
 
-    // Checked again here, inside the transaction and under the unique index,
-    // so two creates racing on the same Aadhaar cannot both succeed.
+    // FIRST, because it is the answer worth giving. Checked here, inside the
+    // transaction and under the unique index, so two creates racing on the
+    // same Aadhaar cannot both succeed - and so a caller learns WHICH
+    // employee_id already holds it rather than being told something true but
+    // useless about the row's ciphertext having been cleared.
     const clash = await this.repo.findByFingerprint(v.aadhaar_fingerprint, tx);
     if (clash) {
       throw new ConflictError(
         `this Aadhaar already belongs to employee ${clash.employee_id}; use Rejoin on that employee_id`,
         { existing_employee_id: clash.employee_id }
+      );
+    }
+    if (!v.aadhaar_ciphertext) {
+      throw new ConflictError(
+        `verification ${verificationId} carries no Aadhaar to store; it was raised against an employee who already exists`
       );
     }
 

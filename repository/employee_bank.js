@@ -27,6 +27,8 @@ const PUBLIC_COLUMNS = `
   name_match_score, provider, provider_transaction_id, provider_status,
   failure_category, verified_at, last_attempted_at,
   confirmed_by_employee_id, confirmed_at, confirmation_note,
+  duplicate_of_employee_id,
+  override_by_employee_id, override_at, override_reason,
   created_at, updated_at`;
 
 class EmployeeBankRepository {
@@ -96,6 +98,36 @@ class EmployeeBankRepository {
     return rows[0] || null;
   }
 
+  /**
+   * Other employees whose VERIFIED bank verification was run against this
+   * exact account, and who are STILL EMPLOYED.
+   *
+   * Two active employees sharing one account is the case worth catching: it
+   * is either a data-entry error or one person collecting two salaries. A
+   * former employee sharing it is not - a spouse taking over an account, or
+   * the same person rejoining, are ordinary - so `new_employee.status = 1`
+   * is part of the query rather than something the caller filters afterwards.
+   *
+   * Returns the other employee's id and name so authorised HR can resolve it.
+   * NO ACCOUNT COLUMN IS SELECTED: the fingerprint is the only thing compared,
+   * and it is not returned either.
+   */
+  async findActiveDuplicates(fingerprint, exceptEmployeeId) {
+    return this._query(
+      "FIND-ACTIVE-DUPLICATES",
+      `SELECT v.employee_id, ne.employee_name, v.status, v.account_last4,
+              DATE_FORMAT(v.verified_at, '%Y-%m-%d') AS verified_on
+         FROM employee_bank_verification v
+         JOIN new_employee ne ON ne.employee_id = v.employee_id
+        WHERE v.account_fingerprint = ?
+          AND v.employee_id <> ?
+          AND ne.status = 1
+          AND v.status = 'VERIFIED'
+        ORDER BY v.employee_id`,
+      [fingerprint, exceptEmployeeId]
+    );
+  }
+
   /** One row per employee: inserted the first time, replaced thereafter. */
   async upsertVerification(row) {
     const columns = Object.keys(row);
@@ -146,6 +178,26 @@ class EmployeeBankRepository {
               confirmed_by_employee_id = ?, confirmed_at = NOW(), confirmation_note = ?
         WHERE employee_id = ? AND status = 'NAME_MISMATCH' AND account_fingerprint = ?`,
       [actorEmployeeId, note || null, employeeId, fingerprint]
+    );
+    return rows.affectedRows;
+  }
+
+  /**
+   * An administrator accepting a shared account. Guarded on the status AND
+   * the fingerprint, so an override cannot land on a different account or on
+   * a row that has since stopped being a duplicate.
+   *
+   * The reason is stored, not optional: an override nobody can be named for,
+   * with no stated reason, is not an audit trail.
+   */
+  async overrideDuplicate(employeeId, fingerprint, { actorEmployeeId, reason }) {
+    const rows = await this._query(
+      "OVERRIDE-DUPLICATE",
+      `UPDATE employee_bank_verification
+          SET status = 'VERIFIED', verified_at = NOW(),
+              override_by_employee_id = ?, override_at = NOW(), override_reason = ?
+        WHERE employee_id = ? AND status = 'DUPLICATE_ACCOUNT' AND account_fingerprint = ?`,
+      [actorEmployeeId, reason, employeeId, fingerprint]
     );
     return rows.affectedRows;
   }

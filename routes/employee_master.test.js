@@ -83,6 +83,39 @@ const usecase = {
     salary: "50000", account_no: "1234567890", pan_no: "ABCDE1234F",
   }),
   getReviewList: async () => ({ total: 518, count: 1, items: [{ employee_id: 9, period_no: 1, warning_type: "missing_joining_date" }] }),
+  getAadhaarStatus: async (id) => ({
+    employee_id: id,
+    employee_name: "Someone",
+    aadhaar_status: "VERIFIED",
+    aadhaar_last4: "4321",
+    verified_at: "2026-01-01",
+    can_verify_now: false,
+  }),
+  attachAadhaar: async (id, input, opts) => (calls.push(["attach", id, input, opts]), {
+    code: 200,
+    employee_id: id,
+    aadhaar_status: "VERIFIED",
+    aadhaar: { aadhaar_last4: "4321", verification_id: input.aadhaar_verification_id },
+  }),
+  findPossibleDuplicates: async (input) => (calls.push(["check-duplicate", input]), {
+    code: 200,
+    possible_duplicates: true,
+    blocking: false,
+    count: 1,
+    suggested_action: "rejoin",
+    message: "Possible existing employee found. Review before creating a new employee ID.",
+    matches: [
+      {
+        employee_id: 412,
+        employee_name: "Ramesh Kumar",
+        employment_status: "inactive",
+        is_active: false,
+        confidence: "high",
+        matched_on: ["mobile"],
+        suggested_action: "rejoin",
+      },
+    ],
+  }),
 };
 
 const aadhaarCalls = [];
@@ -126,6 +159,10 @@ const bankUsecase = {
   confirmNameMismatch: async (id, opts) => {
     bankCalls.push(["confirm", id, opts]);
     return { code: 200, employee_id: id, status: "VERIFIED", confirmed: true };
+  },
+  overrideDuplicate: async (id, opts) => {
+    bankCalls.push(["override", id, opts]);
+    return { employee_id: id, status: "VERIFIED", bank_payroll_ready: true, account_last4: "6789" };
   },
 };
 
@@ -525,9 +562,10 @@ describe("the Aadhaar surface", () => {
     assert.ok(!/logger|console\.log\(req\.body/.test(route), "no logging of the OTP body");
   });
 
-  it("the display record is available to HR and carries no number", async () => {
+  it("the status record is available to HR and carries no number", async () => {
     const r = await call("GET", "/hr/employee/9/aadhaar", tokenFor());
     assert.equal(r.status, 200);
+    assert.equal(r.body.aadhaar_status, "VERIFIED");
     assert.equal(r.body.aadhaar_last4, "4321");
     assert.ok(!/"aadhaar_number"/.test(r.text));
   });
@@ -579,6 +617,9 @@ describe("the Aadhaar surface", () => {
       getPermissionById: async () => [
         { permission_key: P.EMPLOYEE_CREATE, is_active: 1 },
         { permission_key: P.VIEW_EMPLOYEE_LIFECYCLE, is_active: 1 },
+        // B3 still guards the body first, so without this the request is
+        // refused for the wrong reason and the 503 is never reached.
+        { permission_key: P.EDIT_EMPLOYEE_SENSITIVE, is_active: 1 },
       ],
     });
     delete require.cache[require.resolve("./employee_master")];
@@ -591,8 +632,13 @@ describe("the Aadhaar surface", () => {
       const srv = app.listen(0, "127.0.0.1", () => r(srv));
     });
     try {
-      const res = await fetch(`http://127.0.0.1:${s.address().port}/hr/employee/9/aadhaar`, {
-        headers: { "x-access-token": await tokenFor() },
+      // The STATUS endpoint is not one of these: an employee with no Aadhaar
+      // is PENDING whether or not a provider is configured. The routes that
+      // genuinely need the provider are the ones that answer 503.
+      const res = await fetch(`http://127.0.0.1:${s.address().port}/hr/aadhaar/initiate`, {
+        method: "POST",
+        headers: { "x-access-token": await tokenFor(), "content-type": "application/json" },
+        body: JSON.stringify({ aadhaar_number: "222222222229", consent_given: true }),
       });
       assert.equal((await res.json()).code, 503);
     } finally {
@@ -731,6 +777,180 @@ describe("the bank verification surface", () => {
   });
 });
 
+/* ================================ the new C2 hardening endpoints ========= */
+describe("the pre-create duplicate warning", () => {
+  it("is refused to an anonymous caller", async () => {
+    const r = await call("POST", "/hr/employee/check-duplicate", null, { employee_name: "X" });
+    assert.equal(r.body.code, 403);
+    assert.equal(r.body.msg, "Access Denied");
+  });
+
+  it("needs employee_create - an outlet user cannot fish for staff details", async () => {
+    const r = await call("POST", "/hr/employee/check-duplicate", tokenFor({ designationId: OUTLET_DESIGNATION }), {
+      employee_name: "Ramesh Kumar",
+    });
+    assert.equal(r.status, 403);
+    assert.equal(r.body.msg, "You do not have permission to perform this action");
+  });
+
+  it("HR gets the matches, and the response says plainly that it blocks nothing", async () => {
+    calls.length = 0;
+    const r = await call("POST", "/hr/employee/check-duplicate", tokenFor(), {
+      employee_name: "Ramesh Kumar",
+      primary_contact_number: "9876543210",
+      dob: "1990-02-01",
+    });
+    assert.equal(r.body.code, 200);
+    assert.equal(r.body.blocking, false);
+    assert.equal(r.body.possible_duplicates, true);
+    assert.equal(r.body.matches[0].suggested_action, "rejoin");
+    assert.match(r.body.message, /Review before creating a new employee ID/);
+    assert.ok(calls.some((c) => c[0] === "check-duplicate"), "it reached the usecase");
+  });
+
+  it("and creating afterwards is not gated on having called it", async () => {
+    const created = await call("POST", "/hr/employee", tokenFor(), CREATE_BODY);
+    assert.equal(created.body.code, 200);
+  });
+});
+
+describe("attaching an Aadhaar later", () => {
+  it("is refused to an anonymous caller", async () => {
+    const r = await call("POST", "/hr/employee/9/aadhaar/attach", null, { aadhaar_verification_id: 55 });
+    assert.equal(r.body.code, 403);
+    assert.equal(r.body.msg, "Access Denied");
+  });
+
+  it("needs employee_edit", async () => {
+    const r = await call("POST", "/hr/employee/9/aadhaar/attach", tokenFor({ designationId: OUTLET_DESIGNATION }), {
+      aadhaar_verification_id: 55,
+    });
+    assert.equal(r.status, 403);
+  });
+
+  it("HR attaches to the SAME employee_id and gets VERIFIED back", async () => {
+    calls.length = 0;
+    const r = await call("POST", "/hr/employee/9/aadhaar/attach", tokenFor(), { aadhaar_verification_id: 55 });
+    assert.equal(r.body.code, 200);
+    assert.equal(r.body.employee_id, 9, "the id came from the path, not the body");
+    assert.equal(r.body.aadhaar_status, "VERIFIED");
+    const attach = calls.find((c) => c[0] === "attach");
+    assert.equal(attach[1], 9);
+    assert.equal(attach[3].actorEmployeeId, EMPLOYEE_ID, "who attached it is recorded");
+    assert.ok(!/"aadhaar_number"/.test(r.text), "and no number comes back");
+  });
+
+  it("the verification id is required and must be a number", async () => {
+    const token = tokenFor();
+    assert.equal((await call("POST", "/hr/employee/9/aadhaar/attach", token, {})).body.code, 422);
+    assert.equal(
+      (await call("POST", "/hr/employee/9/aadhaar/attach", token, { aadhaar_verification_id: "abc" })).body.code,
+      422
+    );
+  });
+
+  it("a refusal names the employee who already holds that Aadhaar", async () => {
+    // The usecase raises a ConflictError carrying existing_employee_id; the
+    // route is what turns it into something HR can act on.
+    const saved = usecase.attachAadhaar;
+    usecase.attachAadhaar = async () => {
+      const err = new Error("this Aadhaar already belongs to employee 412; use Rejoin on that employee_id");
+      err.httpCode = 409;
+      err.detail = { existing_employee_id: 412 };
+      throw err;
+    };
+    try {
+      const r = await call("POST", "/hr/employee/9/aadhaar/attach", tokenFor(), { aadhaar_verification_id: 55 });
+      assert.equal(r.body.code, 409);
+      assert.equal(r.body.existing_employee_id, 412);
+      assert.match(r.body.msg, /use Rejoin/);
+    } finally {
+      usecase.attachAadhaar = saved;
+    }
+  });
+
+  it("and an error's other properties are not spread into the response", async () => {
+    const saved = usecase.attachAadhaar;
+    usecase.attachAadhaar = async () => {
+      const err = new Error("nope");
+      err.httpCode = 409;
+      err.detail = { existing_employee_id: 412, aadhaar_number: "222222222229", sql: "SELECT ..." };
+      throw err;
+    };
+    try {
+      const r = await call("POST", "/hr/employee/9/aadhaar/attach", tokenFor(), { aadhaar_verification_id: 55 });
+      assert.equal(r.body.existing_employee_id, 412);
+      assert.ok(!r.text.includes("222222222229"), "the allowlist held");
+      assert.ok(!/"sql"/.test(r.text));
+    } finally {
+      usecase.attachAadhaar = saved;
+    }
+  });
+});
+
+describe("the duplicate bank account override", () => {
+  it("is refused to an anonymous caller", async () => {
+    const r = await call("POST", "/hr/employee/9/bank/override-duplicate", null, { reason: "x" });
+    assert.equal(r.body.code, 403);
+    assert.equal(r.body.msg, "Access Denied");
+  });
+
+  it("HR may NOT override, even holding both bank keys", async () => {
+    // The usual cause of a duplicate is a mistyped account, and the person who
+    // typed it should not be the person who waves it through.
+    bankCalls.length = 0;
+    const r = await call("POST", "/hr/employee/9/bank/override-duplicate", tokenFor({ designationId: FINANCE_DESIGNATION }), {
+      reason: "spouse's account",
+    });
+    assert.equal(r.status, 403);
+    assert.equal(r.body.msg, "You do not have permission to perform this action");
+    assert.equal(bankCalls.length, 0);
+  });
+
+  it("admin may, and the actor and reason are passed through for the audit", async () => {
+    bankCalls.length = 0;
+    const r = await call("POST", "/hr/employee/9/bank/override-duplicate", tokenFor({ userType: 2 }), {
+      reason: "spouse's account, letter on file",
+    });
+    assert.equal(r.status, 200);
+    const override = bankCalls.find((c) => c[0] === "override");
+    assert.equal(override[1], 9);
+    assert.equal(override[2].actorEmployeeId, EMPLOYEE_ID);
+    assert.equal(override[2].reason, "spouse's account, letter on file");
+  });
+
+  it("a reason is required by the schema", async () => {
+    const token = tokenFor({ userType: 2 });
+    assert.equal((await call("POST", "/hr/employee/9/bank/override-duplicate", token, {})).body.code, 422);
+    assert.equal((await call("POST", "/hr/employee/9/bank/override-duplicate", token, { reason: "" })).body.code, 422);
+  });
+
+  it("the override key is granted to nobody by any migration", () => {
+    const sqls = fs
+      .readdirSync(path.join(__dirname, "..", "migrations/mysql/migrations/sqls"))
+      .filter((f) => f.endsWith("-up.sql"))
+      .map((f) => fs.readFileSync(path.join(__dirname, "..", "migrations/mysql/migrations/sqls", f), "utf8"))
+      .join("\n")
+      .replace(/^\s*--.*$/gm, "");
+    assert.match(sqls, /'override_duplicate_bank_account'/, "declared");
+    // Statement by statement: the key may appear in an all_permissions
+    // declaration, never in a grant into `permissions`. Splitting on the
+    // INSERT and keeping the tail was wrong - across concatenated files that
+    // tail swallows every later statement, including the declaration.
+    const grants = sqls
+      .split(";")
+      .map((stmt) => stmt.trim())
+      .filter((stmt) => /^INSERT INTO `permissions`/.test(stmt));
+    assert.ok(grants.length >= 1, "there is at least one grant statement to check");
+    for (const grant of grants) {
+      assert.ok(
+        !/override_duplicate_bank_account/.test(grant),
+        "no designation is granted the override key"
+      );
+    }
+  });
+});
+
 /* ============================================== the permission layering == */
 describe("permission layering after the C2 bank grant", () => {
   const DENIED = "You do not have permission to perform this action";
@@ -802,6 +1022,7 @@ describe("permission layering after the C2 bank grant", () => {
 
     const masked = await call("GET", "/hr/employee/9/aadhaar", hr());
     assert.equal(masked.status, 200);
+    assert.equal(masked.body.aadhaar_status, "VERIFIED");
     assert.equal(masked.body.aadhaar_last4, "4321");
     assert.ok(!/"aadhaar_number"/.test(masked.text), "still only the last four");
   });
