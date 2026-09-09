@@ -114,8 +114,16 @@ class SandboxClient {
    * request body and the response payload are never logged, because between
    * them they carry an Aadhaar number, an OTP, a bank account and a person's
    * address.
+   *
+   * `rawResponse` opts ONE call into accepting a bare JSON object at HTTP 200
+   * as the answer. Sandbox wraps most products in `{ code, data }` but returns
+   * the IFSC record itself; without this such a response would be classified
+   * as unexpected and a perfectly valid branch code would look broken. It is
+   * deliberately per-request: Aadhaar and Penny-Less rely on `code: 200`
+   * meaning success, and relaxing that globally would let an error body
+   * missing its envelope read as a good result on the paid paths.
    */
-  async request({ method, path, body = null, logRef = {} }) {
+  async request({ method, path, body = null, logRef = {}, rawResponse = false }) {
     this._assertEnabled();
 
     const url = `${this.sandbox.baseUrl}${path}`;
@@ -154,11 +162,37 @@ class SandboxClient {
     }
 
     const body_ = res.data;
-    const ok = res.status === 200 && body_ && typeof body_ === "object" && Number(body_.code) === 200;
+    const isObject = body_ && typeof body_ === "object";
+    // Some products answer with the `{ code, data }` envelope; the IFSC lookup
+    // answers with the record itself. `envelope` distinguishes them by what
+    // actually arrived rather than by which caller asked, so an endpoint that
+    // sends one shape today and the other tomorrow needs no change here.
+    const envelope = isObject && Number.isFinite(Number(body_.code));
+
+    // A NARROW EXEMPTION, AND ONLY FOR CALLERS THAT ASK FOR IT.
+    //
+    // Aadhaar and Penny-Less depend on `code: 200` meaning success, and
+    // loosening that for everybody would mean an error body missing its
+    // envelope silently read as a good result on the paid paths. So the
+    // exemption is per request: `rawResponse` says "a bare object at HTTP 200
+    // is the answer here".
+    //
+    // Even then an ENVELOPE STILL WINS: a body carrying `code: 404` is a
+    // not-found whether or not the caller expected raw JSON, so a provider
+    // error can never be mistaken for a record.
+    const ok =
+      res.status === 200 && isObject && (envelope ? Number(body_.code) === 200 : Boolean(rawResponse));
+
     if (!ok) {
       const category = SandboxClient.classify(res.status, body_);
       this._log(category, path, { ...logRef, http_status: res.status });
       throw new SandboxError(category, SAFE_MESSAGE[category], category === FAILURE.NOT_ENTITLED ? 503 : 502);
+    }
+
+    if (!envelope) {
+      // The record is the body. There is no transaction id to report, and
+      // inventing one would be worse than admitting there is none.
+      return { data: body_, transaction_id: null, timestamp: null };
     }
 
     return {

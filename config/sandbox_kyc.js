@@ -74,6 +74,52 @@ module.exports = {
       "/bank/{ifsc}/accounts/{account_number}/penniless-verify"
     ),
     method: str("SANDBOX_BANK_PENNYLESS_METHOD", "GET").toUpperCase(),
+
+    /**
+     * IFSC lookup — the sibling of the Penny-Less path above.
+     *
+     *   GET {base}/bank/{ifsc}
+     *   https://developer.sandbox.co.in/api-reference/kyc/bank/endpoints/ifsc
+     *
+     * This is a REFERENCE lookup, not a verification: it resolves a branch
+     * code to a bank and a branch name so a form can be filled in. It costs
+     * a provider call, which is exactly why its answers are cached in
+     * `ifsc_master` - but it spends no Penny-Less verification and touches no
+     * employee record.
+     */
+    ifscPathTemplate: str("SANDBOX_BANK_IFSC_PATH", "/bank/{ifsc}"),
+    ifscMethod: str("SANDBOX_BANK_IFSC_METHOD", "GET").toUpperCase(),
+
+    /**
+     * Which response keys carry the two names, in order of preference.
+     *
+     * Sandbox's IFSC payload has been published with upper-case keys (`BANK`,
+     * `BRANCH`, the shape the public IFSC dataset uses) and with ordinary
+     * snake_case. Rather than guess once and fail silently on the other, the
+     * service tries each in turn and the list is configurable - so a provider
+     * rename is an environment variable, not a deploy.
+     */
+    ifscBankNameKeys: str("SANDBOX_BANK_IFSC_BANK_KEYS", "BANK,bank,bank_name,BANK_NAME")
+      .split(",")
+      .map((k) => k.trim())
+      .filter(Boolean),
+    ifscBranchNameKeys: str("SANDBOX_BANK_IFSC_BRANCH_KEYS", "BRANCH,branch,branch_name,BRANCH_NAME")
+      .split(",")
+      .map((k) => k.trim())
+      .filter(Boolean),
+
+    /**
+     * How long a cached IFSC stays trustworthy, in days.
+     *
+     * An IFSC-to-branch mapping changes when a branch is merged, moved or
+     * renamed - a few times a year across the whole country, and essentially
+     * never for a given branch. Half a year is long enough that the second
+     * and subsequent employees at a branch cost nothing, and short enough
+     * that a merged branch corrects itself without anybody noticing.
+     *
+     * It lives here, once, so that no comparison anywhere reads `180`.
+     */
+    ifscCacheDays: int("SANDBOX_BANK_IFSC_CACHE_DAYS", 180),
   },
 
   /**
