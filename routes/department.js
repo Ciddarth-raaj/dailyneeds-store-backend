@@ -125,7 +125,16 @@ class DepartmentRoutes {
 
             department_details: Joi.object({
               department_name: Joi.string().required(),
-              // status: Joi.number().required(),
+              // Active (1) or Inactive (0). Commented out until now, which is
+              // why the master screen could rename a department but not retire
+              // one: Joi rejects unknown keys, so a body carrying `status` was
+              // refused outright and the only way to change it was the separate
+              // `/update-status` call.
+              //
+              // Optional rather than required, unlike the designation route's
+              // equivalent, so a caller sending only a name still validates -
+              // `UPDATE department SET ?` simply leaves the column alone.
+              status: Joi.number().valid(0, 1).optional(),
             }).optional(),
           };
 
