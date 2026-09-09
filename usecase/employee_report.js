@@ -179,10 +179,30 @@ const positiveIds = (raw, name) => {
  * hand-crafted body naming a field the caller may not use is refused with the
  * same message an unknown field gets.
  *
+ * ==================================== AND IT MUST BE A COLUMN OF THE REPORT ==
+ *
+ * A dynamic filter must also be SELECTED. Authorization alone is not enough:
+ * a crafted request naming a field the caller may see but has not put in the
+ * report would narrow the result by something the report does not show, and
+ * the number on screen could not be explained from the definition beside it.
+ * A filter you cannot see is a filter you cannot check.
+ *
+ * The COMMON filters are the exception, and deliberately so: employment
+ * status, outlet, department, designation and search are operational controls
+ * that predate this and belong to the report run rather than to a column.
+ * Filtering a Bank/KYC report to one branch does not require Outlet to be one
+ * of its columns. They are recognised by `maps_to` - they ride the filter
+ * keys the API already had - and are exempt from the selected-column rule
+ * only, never from authorization.
+ *
  * `strict` throws; `reconcile` drops with a warning, for a saved template
  * whose author could see more than the current reader.
+ *
+ * @param selectedKeys the report's resolved field keys. Passing none means
+ *   no dynamic filter can be applied - which is the safe direction, and is
+ *   what a caller that forgot to resolve its fields first would get.
  */
-function resolveFieldFilters(raw, actor, mode = "strict") {
+function resolveFieldFilters(raw, actor, mode = "strict", selectedKeys = []) {
   const list = Array.isArray(raw) ? raw : [];
   const resolved = [];
   const warnings = [];
@@ -196,13 +216,22 @@ function resolveFieldFilters(raw, actor, mode = "strict") {
     );
   }
 
+  const selected = new Set(Array.isArray(selectedKeys) ? selectedKeys : []);
+
   for (const entry of list) {
     const key = entry && typeof entry === "object" ? entry.field : null;
     const field = catalogue.getField(typeof key === "string" ? key : "");
 
-    // Unknown, disabled, not permitted, or not filterable - one message for
-    // all four, because distinguishing them tells a caller what exists.
-    if (!field || !field.enabled || !mayUseField(field, actor) || !field.filter) {
+    // A common filter is exempt from the selected-column rule; a dynamic one
+    // is not. `maps_to` is what tells them apart, and it is set in the
+    // catalogue rather than by the caller.
+    const isCommon = Boolean(field && field.filter && field.filter.maps_to);
+    const unselected = Boolean(field && field.filter && !isCommon && !selected.has(field.key));
+
+    // Unknown, disabled, not permitted, not filterable, or not a column of
+    // this report - ONE message for all five, because distinguishing them
+    // tells a caller which fields exist and which they are missing.
+    if (!field || !field.enabled || !mayUseField(field, actor) || !field.filter || unselected) {
       if (mode === "strict") {
         throw new ReportValidationError(
           "UNKNOWN_FILTER_FIELD",
@@ -299,13 +328,18 @@ function normaliseFilterValue(field, entry) {
  * grammar is a query builder, and a query builder eventually needs to accept
  * an operator from the caller.
  */
-function resolveFilters(raw = {}, actor = null, mode = "strict") {
+function resolveFilters(raw = {}, actor = null, mode = "strict", selectedKeys = []) {
   const filters = raw && typeof raw === "object" ? raw : {};
 
   // Per-field filters first: the four that ride an existing key fold into
   // `mapped` and are applied below, so there is still exactly one predicate
   // per concept however the caller expressed it.
-  const perField = resolveFieldFilters(filters.field_filters, actor, mode);
+  //
+  // The selected columns are passed through because a DYNAMIC filter has to
+  // be one of them - see `resolveFieldFilters`. The common filters below are
+  // unaffected: they are the report run's own controls and never had to be
+  // columns.
+  const perField = resolveFieldFilters(filters.field_filters, actor, mode, selectedKeys);
 
   const rawStatus = perField.mapped.status ?? filters.status ?? "active";
   const status = String(rawStatus).toLowerCase();

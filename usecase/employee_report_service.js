@@ -186,7 +186,15 @@ class EmployeeReportService {
     }
 
     const { fields } = resolver.resolveFields(body.field_keys, actor, "strict");
-    const filters = resolver.resolveFilters(body.filters, actor);
+    // Fields first, then filters WITH those fields: a dynamic filter has to be
+    // one of the report's own columns, so the filters cannot be validated
+    // until it is known what the columns are.
+    const filters = resolver.resolveFilters(
+      body.filters,
+      actor,
+      "strict",
+      fields.map((f) => f.key)
+    );
 
     return {
       dataset_key: datasetKey,
@@ -307,7 +315,16 @@ class EmployeeReportService {
     // yours. A filter dropped this way WIDENS the result - the warning says
     // so, and the export path already makes a widening warning
     // acknowledgeable before anything leaves the building.
-    const perField = resolver.resolveFieldFilters(saved.field_filters, actor, "reconcile");
+    // Reconciled against the columns that SURVIVED reconciliation, not the
+    // ones the template names: a saved dynamic filter whose column the reader
+    // may no longer see is dropped for the same reason the column was, and
+    // with the same widening warning.
+    const perField = resolver.resolveFieldFilters(
+      saved.field_filters,
+      actor,
+      "reconcile",
+      fields.map((f) => f.key)
+    );
     warnings.push(...perField.warnings);
     for (const [key, value] of Object.entries(perField.mapped)) {
       // A saved report expressing its outlet or status filter as a field
@@ -331,20 +348,30 @@ class EmployeeReportService {
       const template = await this._loadFor(body.template_id, actor, "canRun");
       const resolved = await this.reconcile(template, actor);
 
-      // An ad-hoc override on top of a saved template - the user changed a
-      // filter in the UI before running it. The override replaces the saved
-      // filter wholesale and is validated strictly, so it cannot smuggle a
-      // stale value past reconciliation.
-      if (body.filters !== undefined && body.filters !== null) {
-        resolved.filters = resolver.resolveFilters(body.filters, actor);
-        // Reconciliation warnings about filters no longer apply once the user
-        // has replaced the filters; field warnings still do.
-        resolved.warnings = resolved.warnings.filter((w) => !String(w.type).startsWith("filter_"));
-      }
+      // An ad-hoc override on top of a saved template - the user changed the
+      // columns or the filters in the UI before running it. Each override
+      // replaces the saved value wholesale and is validated strictly, so it
+      // cannot smuggle a stale value past reconciliation.
+      //
+      // COLUMNS ARE RESOLVED FIRST, and that order is load-bearing: a dynamic
+      // filter has to be one of the report's columns, so the columns in force
+      // must be known - and themselves validated - before a filter can be
+      // judged against them.
       if (Array.isArray(body.field_keys) && body.field_keys.length > 0) {
         const override = resolver.resolveFields(body.field_keys, actor, "strict");
         resolved.fields = override.fields;
         resolved.warnings = resolved.warnings.filter((w) => w.type !== "field_unavailable");
+      }
+      if (body.filters !== undefined && body.filters !== null) {
+        resolved.filters = resolver.resolveFilters(
+          body.filters,
+          actor,
+          "strict",
+          resolved.fields.map((f) => f.key)
+        );
+        // Reconciliation warnings about filters no longer apply once the user
+        // has replaced the filters; field warnings still do.
+        resolved.warnings = resolved.warnings.filter((w) => !String(w.type).startsWith("filter_"));
       }
       return { ...resolved, template };
     }
@@ -352,7 +379,7 @@ class EmployeeReportService {
     const { fields } = resolver.resolveFields(body.field_keys, actor, "strict");
     return {
       fields,
-      filters: resolver.resolveFilters(body.filters, actor),
+      filters: resolver.resolveFilters(body.filters, actor, "strict", fields.map((f) => f.key)),
       // An ad-hoc request has nothing saved to go stale, so nothing to warn
       // about and nothing to acknowledge.
       warnings: [],

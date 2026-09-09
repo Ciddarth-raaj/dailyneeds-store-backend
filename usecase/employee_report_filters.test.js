@@ -41,7 +41,20 @@ const sensitive = {
 };
 
 const fieldsFor = (keys, actor = admin) => resolver.resolveFields(keys, actor).fields;
-const filtersFor = (raw, actor = admin) => resolver.resolveFilters(raw, actor);
+
+/**
+ * Filters are always resolved AGAINST A COLUMN LIST, because a dynamic filter
+ * has to be one of the report's own columns. `selected` defaults to every
+ * field key mentioned by the filters, which is the ordinary case - a filter
+ * the user set on a column they are looking at.
+ */
+const filtersFor = (raw, actor = admin, selected) =>
+  resolver.resolveFilters(
+    raw,
+    actor,
+    "strict",
+    selected || ((raw && raw.field_filters) || []).map((f) => f.field)
+  );
 
 /* ==================== 13-14. selected column = eligible filter =========== */
 
@@ -169,14 +182,15 @@ test("the count and the page apply the same filters", () => {
   assert.deepStrictEqual(page.params.slice(0, count.params.length), count.params);
 });
 
-test("A FILTERED COLUMN THAT IS NOT SELECTED STILL BRINGS ITS JOIN", () => {
-  // Filtering by Bank Verification Status without showing the column needs
-  // the table it lives in. Without this the query is invalid SQL rather than
-  // wrong - but it is exactly the kind of thing that is missed.
-  const fields = fieldsFor(["employee_id", "employee_name"], sensitive);
+test("A DYNAMIC FILTER BRINGS THE JOIN ITS COLUMN NEEDS", () => {
+  // `bank_status` lives in another table. Selecting and filtering it must add
+  // that table once; without the join the query is invalid SQL rather than
+  // merely wrong, and that is exactly the kind of thing that is missed.
+  const fields = fieldsFor(["employee_id", "bank_status"], sensitive);
   const filters = filtersFor(
     { field_filters: [{ field: "bank_status", value: "VERIFIED" }] },
-    sensitive
+    sensitive,
+    ["employee_id", "bank_status"]
   );
   const { sql } = resolver.buildQuery(fields, filters, { actor: sensitive });
   assert.match(sql, /LEFT JOIN employee_bank_verification/);
@@ -423,4 +437,193 @@ test("the same field twice is one filter, not two predicates", () => {
   );
   assert.strictEqual(filters.field_filters.length, 1);
   assert.strictEqual(filters.field_filters[0].value, "State Bank of India");
+});
+
+/* ============ a dynamic filter must be a column of the report =========== */
+
+test("1. SELECTED + AUTHORIZED + FILTERABLE IS ACCEPTED", () => {
+  const filters = filtersFor(
+    { field_filters: [{ field: "bank_name", value: "State Bank of India" }] },
+    sensitive,
+    ["employee_id", "bank_name"]
+  );
+  assert.strictEqual(filters.field_filters.length, 1);
+  assert.strictEqual(filters.field_filters[0].field.key, "bank_name");
+});
+
+test("2. AUTHORIZED AND FILTERABLE BUT UNSELECTED IS REJECTED", () => {
+  // The blocker this rule closes. A crafted body naming a field the caller
+  // MAY see, but which is not a column of the report, would narrow the result
+  // by something the report does not show - a count nobody could explain from
+  // the definition beside it.
+  assert.throws(
+    () =>
+      filtersFor(
+        { field_filters: [{ field: "bank_name", value: "State Bank of India" }] },
+        sensitive,
+        ["employee_id", "employee_name"]
+      ),
+    (err) => err.code === "UNKNOWN_FILTER_FIELD"
+  );
+});
+
+test("3. UNAUTHORIZED IS REJECTED, EVEN WHEN NAMED AS A COLUMN", () => {
+  // Selection is an ADDITIONAL requirement, never a substitute for the
+  // permission - so claiming the field as a column must not buy access to it.
+  assert.throws(
+    () =>
+      filtersFor(
+        { field_filters: [{ field: "bank_name", value: "State Bank of India" }] },
+        plain,
+        ["bank_name"]
+      ),
+    (err) => err.code === "UNKNOWN_FILTER_FIELD"
+  );
+});
+
+test("the refusal does not say WHICH of the five reasons applied", () => {
+  // Unauthorized, unselected, unfilterable, disabled and non-existent all
+  // answer identically. Telling them apart tells a caller what exists and
+  // what they are missing.
+  const bodies = [
+    [{ field: "bank_name", value: "x" }, plain, ["bank_name"]], // unauthorized
+    [{ field: "bank_name", value: "x" }, sensitive, ["employee_id"]], // unselected
+    [{ field: "account_no", value: "x" }, sensitive, ["account_no"]], // unfilterable
+    [{ field: "no_such_field", value: "x" }, sensitive, ["no_such_field"]], // unknown
+  ];
+  const messages = new Set();
+  for (const [entry, actor, selected] of bodies) {
+    try {
+      filtersFor({ field_filters: [entry] }, actor, selected);
+      assert.fail(`should have been refused: ${entry.field}`);
+    } catch (err) {
+      assert.strictEqual(err.code, "UNKNOWN_FILTER_FIELD");
+      messages.add(err.message.replace(/'[^']*'/, "'X'"));
+    }
+  }
+  assert.strictEqual(messages.size, 1, "one message shape for every reason");
+});
+
+/* ============ 4-7. the common filters need no column =================== */
+
+test("4-7. THE COMMON FILTERS WORK WITHOUT THEIR COLUMN BEING SELECTED", () => {
+  // Operational controls belonging to the report RUN, not to a column.
+  // Filtering a Bank/KYC report to one branch does not require Outlet to be
+  // one of its columns.
+  const columns = ["employee_id", "employee_name", "bank_status"];
+
+  const filters = filtersFor(
+    {
+      field_filters: [
+        { field: "outlet", value: [2] },
+        { field: "department", value: [7] },
+        { field: "designation", value: [15] },
+        { field: "employment_status", value: "active" },
+      ],
+    },
+    admin,
+    columns
+  );
+
+  assert.deepStrictEqual(filters.outlet_ids, [2], "Outlet without the column");
+  assert.deepStrictEqual(filters.department_ids, [7], "Department without the column");
+  assert.deepStrictEqual(filters.designation_ids, [15], "Designation without the column");
+  assert.strictEqual(filters.status, "active", "Employment Status without the column");
+  // None of them becomes a dynamic predicate.
+  assert.strictEqual(filters.field_filters.length, 0);
+});
+
+test("each common filter, one at a time, with no columns at all selected", () => {
+  for (const [entry, check] of [
+    [{ field: "outlet", value: [4] }, (f) => assert.deepStrictEqual(f.outlet_ids, [4])],
+    [{ field: "department", value: [9] }, (f) => assert.deepStrictEqual(f.department_ids, [9])],
+    [{ field: "designation", value: [3] }, (f) => assert.deepStrictEqual(f.designation_ids, [3])],
+    [{ field: "employment_status", value: "inactive" }, (f) => assert.strictEqual(f.status, "inactive")],
+  ]) {
+    check(filtersFor({ field_filters: [entry] }, admin, []));
+  }
+  // And search, which was never a field filter at all.
+  assert.strictEqual(filtersFor({ search: "Ravi" }, admin, []).search, "Ravi");
+});
+
+test("a common filter is still refused if the actor may not use its field", () => {
+  // The exemption is from the SELECTED rule only, never from authorization.
+  // These four happen to need no special permission, so the check is that the
+  // exemption is expressed as `maps_to` rather than as a bypass of the guard.
+  const src = require("fs").readFileSync(__dirname + "/employee_report.js", "utf8");
+  // A bounded window from the guard itself - `seen.has(...)` also appears in
+  // resolveFields further up, so slicing to it would land before the start.
+  const at = src.indexOf("const isCommon =");
+  const guard = src.slice(at, at + 700);
+  assert.match(guard, /!mayUseField\(field, actor\)/, "authorization is still in the same guard");
+  assert.match(guard, /field\.filter\.maps_to/, "and the exemption is the catalogue's own flag");
+});
+
+/* ============ 8. reconciliation still warns ============================= */
+
+test("8. A SAVED DYNAMIC FILTER WHOSE COLUMN IS GONE IS DROPPED, AND WARNS", () => {
+  // Two ways a saved dynamic filter can stop being usable, and both must
+  // reconcile rather than refuse - a template is an instruction, not a
+  // promise. Both WIDEN the result, which is what the warning says and what
+  // the export acknowledgement is for.
+  const saved = [{ field: "bank_name", value: "State Bank of India" }];
+
+  // (a) the reader lost the permission
+  const lostPermission = resolver.resolveFieldFilters(saved, plain, "reconcile", ["bank_name"]);
+  assert.strictEqual(lostPermission.field_filters.length, 0);
+  assert.strictEqual(lostPermission.warnings[0].type, "filter_unavailable");
+  assert.strictEqual(lostPermission.warnings[0].widens_result_set, true);
+
+  // (b) the column is no longer part of the report
+  const lostColumn = resolver.resolveFieldFilters(saved, sensitive, "reconcile", ["employee_id"]);
+  assert.strictEqual(lostColumn.field_filters.length, 0);
+  assert.strictEqual(lostColumn.warnings[0].type, "filter_unavailable");
+  assert.strictEqual(lostColumn.warnings[0].widens_result_set, true);
+
+  // A common filter is NOT dropped by either - it never depended on a column.
+  const common = resolver.resolveFieldFilters(
+    [{ field: "outlet", value: [2] }],
+    sensitive,
+    "reconcile",
+    []
+  );
+  assert.deepStrictEqual(common.mapped.outlet_ids, [2]);
+  assert.strictEqual(common.warnings.length, 0);
+});
+
+/* ============ 9. one resolved definition ================================ */
+
+test("9. PREVIEW, COUNT AND EXPORT ALL BUILD FROM THE SAME RESOLVED DEFINITION", () => {
+  // The invariant the whole feature rests on. One resolver call, one builder,
+  // three uses - so a filtered count cannot disagree with the filtered page or
+  // with the spreadsheet.
+  const columns = ["employee_id", "employee_name", "bank_status", "bank_name"];
+  const fields = fieldsFor(columns, sensitive);
+  const filters = filtersFor(
+    {
+      status: "active",
+      field_filters: [
+        { field: "bank_status", value: "VERIFIED" },
+        { field: "bank_name", value: "State Bank of India" },
+        { field: "outlet", value: [2] },
+      ],
+    },
+    sensitive,
+    columns
+  );
+
+  const count = resolver.buildQuery(fields, filters, { count: true, actor: sensitive });
+  const page = resolver.buildQuery(fields, filters, { limit: 25, offset: 0, actor: sensitive });
+  const exportAll = resolver.buildQuery(fields, filters, { actor: sensitive });
+
+  const whereOf = (sql) => {
+    const from = sql.indexOf("WHERE");
+    const to = sql.indexOf("ORDER BY");
+    return sql.slice(from, to === -1 ? undefined : to).trim();
+  };
+  assert.strictEqual(whereOf(count.sql), whereOf(page.sql));
+  assert.strictEqual(whereOf(count.sql), whereOf(exportAll.sql));
+  // The common outlet filter and both dynamic ones are all in it.
+  assert.deepStrictEqual(exportAll.params, count.params);
+  assert.deepStrictEqual(page.params.slice(0, count.params.length), count.params);
 });
