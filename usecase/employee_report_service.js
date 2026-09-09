@@ -186,13 +186,24 @@ class EmployeeReportService {
     }
 
     const { fields } = resolver.resolveFields(body.field_keys, actor, "strict");
-    const filters = resolver.resolveFilters(body.filters);
+    // Fields first, then filters WITH those fields: a dynamic filter has to be
+    // one of the report's own columns, so the filters cannot be validated
+    // until it is known what the columns are.
+    const filters = resolver.resolveFilters(
+      body.filters,
+      actor,
+      "strict",
+      fields.map((f) => f.key)
+    );
 
     return {
       dataset_key: datasetKey,
       // Stored in the caller's order, which IS the column order.
       field_keys: fields.map((f) => f.key),
-      filters,
+      // Keys and values, never the catalogue entries the resolver works with:
+      // a template stores an instruction, and re-reads the catalogue on every
+      // run rather than carrying a stale copy of it.
+      filters: resolver.persistableFilters(filters),
     };
   }
 
@@ -298,6 +309,30 @@ class EmployeeReportService {
 
     filters.search = String(saved.search || "").trim().slice(0, 100);
 
+    // The per-field filters a saved report carries. Reconciled rather than
+    // refused, for the same reason the fields are: a template is an
+    // instruction, not a promise that its author's permissions are still
+    // yours. A filter dropped this way WIDENS the result - the warning says
+    // so, and the export path already makes a widening warning
+    // acknowledgeable before anything leaves the building.
+    // Reconciled against the columns that SURVIVED reconciliation, not the
+    // ones the template names: a saved dynamic filter whose column the reader
+    // may no longer see is dropped for the same reason the column was, and
+    // with the same widening warning.
+    const perField = resolver.resolveFieldFilters(
+      saved.field_filters,
+      actor,
+      "reconcile",
+      fields.map((f) => f.key)
+    );
+    warnings.push(...perField.warnings);
+    for (const [key, value] of Object.entries(perField.mapped)) {
+      // A saved report expressing its outlet or status filter as a field
+      // filter lands on the same key the block above populated.
+      filters[key] = value;
+    }
+    filters.field_filters = perField.field_filters.filter((f) => !f.mapped_to);
+
     return { fields, filters, warnings };
   }
 
@@ -313,20 +348,30 @@ class EmployeeReportService {
       const template = await this._loadFor(body.template_id, actor, "canRun");
       const resolved = await this.reconcile(template, actor);
 
-      // An ad-hoc override on top of a saved template - the user changed a
-      // filter in the UI before running it. The override replaces the saved
-      // filter wholesale and is validated strictly, so it cannot smuggle a
-      // stale value past reconciliation.
-      if (body.filters !== undefined && body.filters !== null) {
-        resolved.filters = resolver.resolveFilters(body.filters);
-        // Reconciliation warnings about filters no longer apply once the user
-        // has replaced the filters; field warnings still do.
-        resolved.warnings = resolved.warnings.filter((w) => !String(w.type).startsWith("filter_"));
-      }
+      // An ad-hoc override on top of a saved template - the user changed the
+      // columns or the filters in the UI before running it. Each override
+      // replaces the saved value wholesale and is validated strictly, so it
+      // cannot smuggle a stale value past reconciliation.
+      //
+      // COLUMNS ARE RESOLVED FIRST, and that order is load-bearing: a dynamic
+      // filter has to be one of the report's columns, so the columns in force
+      // must be known - and themselves validated - before a filter can be
+      // judged against them.
       if (Array.isArray(body.field_keys) && body.field_keys.length > 0) {
         const override = resolver.resolveFields(body.field_keys, actor, "strict");
         resolved.fields = override.fields;
         resolved.warnings = resolved.warnings.filter((w) => w.type !== "field_unavailable");
+      }
+      if (body.filters !== undefined && body.filters !== null) {
+        resolved.filters = resolver.resolveFilters(
+          body.filters,
+          actor,
+          "strict",
+          resolved.fields.map((f) => f.key)
+        );
+        // Reconciliation warnings about filters no longer apply once the user
+        // has replaced the filters; field warnings still do.
+        resolved.warnings = resolved.warnings.filter((w) => !String(w.type).startsWith("filter_"));
       }
       return { ...resolved, template };
     }
@@ -334,7 +379,7 @@ class EmployeeReportService {
     const { fields } = resolver.resolveFields(body.field_keys, actor, "strict");
     return {
       fields,
-      filters: resolver.resolveFilters(body.filters),
+      filters: resolver.resolveFilters(body.filters, actor, "strict", fields.map((f) => f.key)),
       // An ad-hoc request has nothing saved to go stale, so nothing to warn
       // about and nothing to acknowledge.
       warnings: [],
@@ -511,6 +556,10 @@ class EmployeeReportService {
         // Whether a search was used, never WHAT was searched for: a search
         // string is often a person's name, and this table must not hold one.
         search_used: Boolean(prepared.filters.search),
+        // The per-field filters by KEY only, for exactly the same reason: a
+        // filter on Employee Name carries a person's name, so the audit
+        // records WHICH columns narrowed the export and never the values.
+        field_filters_used: (prepared.filters.field_filters || []).map((f) => f.field.key),
       },
       row_count: prepared.row_count,
       format: prepared.format,

@@ -61,8 +61,30 @@ const { DATASET } = require("../constants/report_datasets");
  */
 
 /** Filter VALUES. No operators: this is a form, not a query language. */
+/**
+ * One per-field filter. The client sends a field KEY and a VALUE and never an
+ * operator: the catalogue's type for that field decides the comparison, which
+ * is what keeps this a filter rather than a query language. The key itself is
+ * checked against the catalogue - and against this caller's permissions - in
+ * the resolver, so this schema only has to reject the obviously malformed.
+ */
+const fieldFilterSchema = Joi.object({
+  field: Joi.string().max(60).required(),
+  value: Joi.alternatives()
+    .try(
+      Joi.string().max(100).allow(""),
+      Joi.number(),
+      Joi.array().items(Joi.number().integer().positive()).max(200)
+    )
+    .optional(),
+  values: Joi.array().items(Joi.number().integer().positive()).max(200).optional(),
+  from: Joi.string().max(10).allow("").optional(),
+  to: Joi.string().max(10).allow("").optional(),
+});
+
 const filterSchema = Joi.object({
   status: Joi.string().valid(["active", "inactive", "all"]).optional(),
+  field_filters: Joi.array().items(fieldFilterSchema).max(60).optional(),
   outlet_ids: Joi.array().items(Joi.number().integer().positive()).max(200).optional(),
   department_ids: Joi.array().items(Joi.number().integer().positive()).max(200).optional(),
   designation_ids: Joi.array().items(Joi.number().integer().positive()).max(200).optional(),

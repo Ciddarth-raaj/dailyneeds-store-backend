@@ -63,6 +63,16 @@ function discoverFields(actor) {
     sensitive: Boolean(f.sensitive),
     history_backed: Boolean(f.history_backed),
     default_selected: Boolean(f.default_selected),
+    // The filter control the frontend renders. Absent means this field is not
+    // filterable at all - `account_no` and `aadhaar_last4` are masked, and a
+    // filter on a masked column would be an oracle for the unmasked one.
+    filter: f.filter
+      ? {
+          type: f.filter.type,
+          ...(f.filter.options ? { options: f.filter.options } : {}),
+          ...(f.filter.master ? { master: f.filter.master } : {}),
+        }
+      : null,
   }));
 }
 
@@ -154,16 +164,185 @@ const positiveIds = (raw, name) => {
 };
 
 /**
+ * Resolve the per-field filters.
+ *
+ * ============================================ THE SAME GATE AS THE COLUMNS ==
+ *
+ * A filter field goes through EXACTLY the check a selected field goes
+ * through: it must exist in the catalogue, be enabled, and be permitted to
+ * this actor. That is the point - a caller who may not SEE `bank_name` may
+ * not filter on it either, because a filter they cannot see the result of is
+ * still an oracle: ask for `bank_name = X` and read the count.
+ *
+ * So this is deliberately not "the frontend only offers what you may use". It
+ * re-derives permission from the catalogue for every request, and a
+ * hand-crafted body naming a field the caller may not use is refused with the
+ * same message an unknown field gets.
+ *
+ * ==================================== AND IT MUST BE A COLUMN OF THE REPORT ==
+ *
+ * A dynamic filter must also be SELECTED. Authorization alone is not enough:
+ * a crafted request naming a field the caller may see but has not put in the
+ * report would narrow the result by something the report does not show, and
+ * the number on screen could not be explained from the definition beside it.
+ * A filter you cannot see is a filter you cannot check.
+ *
+ * The COMMON filters are the exception, and deliberately so: employment
+ * status, outlet, department, designation and search are operational controls
+ * that predate this and belong to the report run rather than to a column.
+ * Filtering a Bank/KYC report to one branch does not require Outlet to be one
+ * of its columns. They are recognised by `maps_to` - they ride the filter
+ * keys the API already had - and are exempt from the selected-column rule
+ * only, never from authorization.
+ *
+ * `strict` throws; `reconcile` drops with a warning, for a saved template
+ * whose author could see more than the current reader.
+ *
+ * @param selectedKeys the report's resolved field keys. Passing none means
+ *   no dynamic filter can be applied - which is the safe direction, and is
+ *   what a caller that forgot to resolve its fields first would get.
+ */
+function resolveFieldFilters(raw, actor, mode = "strict", selectedKeys = []) {
+  const list = Array.isArray(raw) ? raw : [];
+  const resolved = [];
+  const warnings = [];
+  const mapped = {};
+  const seen = new Set();
+
+  if (list.length > reportConfig.MAX_FIELDS) {
+    throw new ReportValidationError(
+      "TOO_MANY_FILTERS",
+      `Use at most ${reportConfig.MAX_FIELDS} filters; ${list.length} were sent`
+    );
+  }
+
+  const selected = new Set(Array.isArray(selectedKeys) ? selectedKeys : []);
+
+  for (const entry of list) {
+    const key = entry && typeof entry === "object" ? entry.field : null;
+    const field = catalogue.getField(typeof key === "string" ? key : "");
+
+    // A common filter is exempt from the selected-column rule; a dynamic one
+    // is not. `maps_to` is what tells them apart, and it is set in the
+    // catalogue rather than by the caller.
+    const isCommon = Boolean(field && field.filter && field.filter.maps_to);
+    const unselected = Boolean(field && field.filter && !isCommon && !selected.has(field.key));
+
+    // Unknown, disabled, not permitted, not filterable, or not a column of
+    // this report - ONE message for all five, because distinguishing them
+    // tells a caller which fields exist and which they are missing.
+    if (!field || !field.enabled || !mayUseField(field, actor) || !field.filter || unselected) {
+      if (mode === "strict") {
+        throw new ReportValidationError(
+          "UNKNOWN_FILTER_FIELD",
+          `'${String(key).slice(0, 40)}' is not a field you can filter on`,
+          { field: String(key).slice(0, 40) }
+        );
+      }
+      warnings.push({
+        type: "filter_unavailable",
+        field: String(key).slice(0, 40),
+        message: "This filter is no longer available to you and was not applied.",
+        // Dropping a filter returns MORE rows than the template asked for,
+        // and the caller has to be told that before an export.
+        widens_result_set: true,
+      });
+      continue;
+    }
+
+    if (seen.has(field.key)) continue;
+    seen.add(field.key);
+
+    const value = normaliseFilterValue(field, entry);
+    if (value === null) continue; // an empty filter is not a filter
+
+    // The four that ride an existing filter key are folded into it rather
+    // than becoming a second predicate that says the same thing.
+    if (field.filter.maps_to) {
+      mapped[field.filter.maps_to] = value;
+      resolved.push({ field, value, mapped_to: field.filter.maps_to });
+      continue;
+    }
+    resolved.push({ field, value });
+  }
+
+  return { field_filters: resolved, mapped, warnings };
+}
+
+/** Type-driven, never operator-driven: the catalogue decides the comparison. */
+function normaliseFilterValue(field, entry) {
+  const type = field.filter.type;
+
+  if (type === catalogue.FILTER.MASTER) {
+    const ids = positiveIds(entry.value === undefined ? entry.values : entry.value, field.label);
+    return ids.length ? ids : null;
+  }
+
+  if (type === catalogue.FILTER.ENUM) {
+    const raw = String(entry.value === undefined || entry.value === null ? "" : entry.value).trim();
+    if (raw === "") return null;
+    const allowed = (field.filter.options || []).map((o) => o.value);
+    if (!allowed.includes(raw)) {
+      // The option list is this file's, so an unlisted value is a crafted
+      // request rather than a typo.
+      throw new ReportValidationError(
+        "BAD_FILTER_VALUE",
+        `'${field.label}' must be one of: ${allowed.join(", ")}`,
+        { filter: field.key }
+      );
+    }
+    return raw;
+  }
+
+  if (type === catalogue.FILTER.DATE) {
+    const from = String(entry.from ?? "").trim().slice(0, 10);
+    const to = String(entry.to ?? "").trim().slice(0, 10);
+    const iso = /^\d{4}-\d{2}-\d{2}$/;
+    for (const [name, v] of [["from", from], ["to", to]]) {
+      if (v !== "" && !iso.test(v)) {
+        throw new ReportValidationError(
+          "BAD_FILTER_VALUE",
+          `'${field.label}' ${name} must be a date as YYYY-MM-DD`,
+          { filter: field.key }
+        );
+      }
+    }
+    if (from === "" && to === "") return null;
+    return { from, to };
+  }
+
+  if (type === catalogue.FILTER.ID) {
+    const raw = String(entry.value === undefined || entry.value === null ? "" : entry.value).trim().slice(0, 40);
+    return raw === "" ? null : raw;
+  }
+
+  // TEXT
+  const raw = String(entry.value === undefined || entry.value === null ? "" : entry.value).trim().slice(0, 100);
+  return raw === "" ? null : raw;
+}
+
+/**
  * Normalize the filters. These mirror the HR directory's own controls -
  * status, outlet, department, designation, search - rather than a generic
  * field/operator/value language, which is what §12 rules out: an operator
  * grammar is a query builder, and a query builder eventually needs to accept
  * an operator from the caller.
  */
-function resolveFilters(raw = {}) {
+function resolveFilters(raw = {}, actor = null, mode = "strict", selectedKeys = []) {
   const filters = raw && typeof raw === "object" ? raw : {};
 
-  const status = String(filters.status ?? "active").toLowerCase();
+  // Per-field filters first: the four that ride an existing key fold into
+  // `mapped` and are applied below, so there is still exactly one predicate
+  // per concept however the caller expressed it.
+  //
+  // The selected columns are passed through because a DYNAMIC filter has to
+  // be one of them - see `resolveFieldFilters`. The common filters below are
+  // unaffected: they are the report run's own controls and never had to be
+  // columns.
+  const perField = resolveFieldFilters(filters.field_filters, actor, mode, selectedKeys);
+
+  const rawStatus = perField.mapped.status ?? filters.status ?? "active";
+  const status = String(rawStatus).toLowerCase();
   if (!STATUS_VALUES.includes(status)) {
     throw new ReportValidationError(
       "BAD_STATUS",
@@ -175,10 +354,20 @@ function resolveFilters(raw = {}) {
 
   return {
     status,
-    outlet_ids: positiveIds(filters.outlet_ids, "Outlet"),
-    department_ids: positiveIds(filters.department_ids, "Department"),
-    designation_ids: positiveIds(filters.designation_ids, "Designation"),
+    outlet_ids: positiveIds(perField.mapped.outlet_ids ?? filters.outlet_ids, "Outlet"),
+    department_ids: positiveIds(
+      perField.mapped.department_ids ?? filters.department_ids,
+      "Department"
+    ),
+    designation_ids: positiveIds(
+      perField.mapped.designation_ids ?? filters.designation_ids,
+      "Designation"
+    ),
     search,
+    // Only the ones that did NOT map onto an existing key become their own
+    // predicate; the mapped ones are already accounted for above.
+    field_filters: perField.field_filters.filter((f) => !f.mapped_to),
+    filter_warnings: perField.warnings,
   };
 }
 
@@ -227,9 +416,50 @@ function buildQuery(fields, filters, { count = false, limit = null, offset = 0, 
     params.push(`%${filters.search}%`, filters.search);
   }
 
-  // Joins are added only for the fields actually selected, and only from the
-  // fixed table in the catalogue.
-  const needed = [...new Set(fields.map((f) => f.join).filter(Boolean))];
+  // ------------------------------------------------- the per-field filters
+  //
+  // AND, always. Each is one predicate built from the catalogue's own `select`
+  // expression - the very text the column is read with, so a filter can never
+  // address a column the report cannot show - with the value bound.
+  for (const applied of filters.field_filters || []) {
+    const expr = applied.field.select;
+    const type = applied.field.filter.type;
+
+    if (type === catalogue.FILTER.MASTER) {
+      where.push(`${expr} IN (?)`);
+      params.push(applied.value);
+    } else if (type === catalogue.FILTER.TEXT) {
+      // Contains. The wildcards are added here, so a `%` the user typed is a
+      // literal percent and not SQL structure.
+      where.push(`${expr} LIKE ?`);
+      params.push(`%${applied.value}%`);
+    } else if (type === catalogue.FILTER.DATE) {
+      if (applied.value.from) {
+        where.push(`${expr} >= ?`);
+        params.push(applied.value.from);
+      }
+      if (applied.value.to) {
+        where.push(`${expr} <= ?`);
+        params.push(applied.value.to);
+      }
+    } else {
+      // ID and ENUM are both exact.
+      where.push(`${expr} = ?`);
+      params.push(applied.value);
+    }
+  }
+
+  // Joins are added for the fields actually selected AND for any field only
+  // filtered on - filtering by Bank Verification Status without showing the
+  // column still needs the table it lives in - and only from the fixed text
+  // in the catalogue.
+  const needed = [
+    ...new Set(
+      [...fields, ...(filters.field_filters || []).map((f) => f.field)]
+        .map((f) => f.join)
+        .filter(Boolean)
+    ),
+  ];
   const joins = needed.map((name) => catalogue.JOINS[name]).filter(Boolean).join("\n     ");
 
   // "All" with no filters legitimately constrains nothing, and `WHERE` with
@@ -265,6 +495,34 @@ function buildQuery(fields, filters, { count = false, limit = null, offset = 0, 
   };
 }
 
+/**
+ * The storable form of resolved filters.
+ *
+ * `resolveFilters` returns the CATALOGUE ENTRY for each filtered field,
+ * because the query builder needs its `select` and its type. None of that
+ * belongs in a saved template or an audit row: what is stored is the field
+ * KEY and the value, so a template records an instruction rather than a
+ * snapshot of the catalogue, and re-reads whatever the catalogue says today.
+ */
+function persistableFilters(resolved) {
+  const filters = resolved && typeof resolved === "object" ? resolved : {};
+  const out = {
+    status: filters.status,
+    outlet_ids: filters.outlet_ids || [],
+    department_ids: filters.department_ids || [],
+    designation_ids: filters.designation_ids || [],
+    search: filters.search || "",
+  };
+  const perField = (filters.field_filters || []).map((f) => ({
+    field: f.field.key,
+    ...(f.field.filter.type === catalogue.FILTER.DATE
+      ? { from: f.value.from || "", to: f.value.to || "" }
+      : { value: f.value }),
+  }));
+  if (perField.length) out.field_filters = perField;
+  return out;
+}
+
 /** Turn a database row into the ordered, transformed values for one report row. */
 function presentRow(row, fields) {
   const out = {};
@@ -280,6 +538,8 @@ module.exports = {
   discoverFields,
   resolveFields,
   resolveFilters,
+  resolveFieldFilters,
+  persistableFilters,
   buildQuery,
   presentRow,
   mayUseField,

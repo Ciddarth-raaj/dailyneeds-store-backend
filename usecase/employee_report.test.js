@@ -111,8 +111,26 @@ test("sensitive access reveals the gated fields, and admin too", () => {
 test("discovery never leaks the SQL behind a field", () => {
   for (const entry of discoverFields(sensitiveActor)) {
     assert.deepStrictEqual(Object.keys(entry).sort(), [
-      "default_selected", "group", "history_backed", "key", "label", "sensitive",
+      "default_selected", "filter", "group", "history_backed", "key", "label", "sensitive",
     ]);
+
+    // `filter` describes the CONTROL to render - a type, and where its options
+    // come from. The catalogue entry it is derived from also holds the SQL
+    // expression, the join and the permission key, and none of those may ride
+    // out with it.
+    if (entry.filter) {
+      for (const key of Object.keys(entry.filter)) {
+        assert.ok(
+          ["type", "options", "master"].includes(key),
+          `filter must not expose ${key}`
+        );
+      }
+      assert.ok(!("maps_to" in entry.filter), "how a filter is applied is the backend's business");
+      const serialised = JSON.stringify(entry.filter);
+      for (const sql of ["new_employee", "SELECT", "JOIN", "COALESCE", "employee_bank_verification"]) {
+        assert.ok(!serialised.includes(sql), `filter metadata must not contain ${sql}`);
+      }
+    }
   }
 });
 
