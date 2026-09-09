@@ -229,10 +229,14 @@ class EmployeeRepository {
   }
   get(resignation, filters) {
     return new Promise((resolve, reject) => {
-      // The population - who is in this list at all - now lives in
-      // `employee_scope.js`, so that the C3 status summary and Reports can
-      // ask the same question rather than each restating the rule. The SQL
-      // and the parameter order are unchanged; only their home moved.
+      // The population - who is in this list at all - lives in
+      // `employee_scope.js`, so the C3 status summary and Reports can ask the
+      // same question rather than each restating the rule.
+      //
+      // The hotfix deployed as 1f7c11a moved INTO that module: the resigned
+      // -name exclusion is omitted entirely when there is nothing to exclude,
+      // rather than written as `(... NOT IN (?) OR ? IS NULL)` with the same
+      // array bound twice - a shape MySQL rejects at two or more names.
       const { where: whereClause, params: filterValues } = buildEmployeeScope(
         resignation,
         filters

@@ -64,16 +64,23 @@ function accessScope(actor) {
  *
  * Directory-only. Reports must not use this.
  *
- * The `(... NOT IN (?) OR ? IS NULL)` idiom is preserved verbatim: when the
- * list is empty both placeholders are NULL, `NOT IN (NULL)` yields NULL, and
- * the second arm makes the predicate true, so nobody is excluded.
+ * This carries the hotfix deployed to production as `1f7c11a`. The clause used
+ * to read `(... NOT IN (?) OR ? IS NULL)` with the SAME array bound to both
+ * placeholders; the `mysql` driver expands an array into a comma list, so at
+ * two or more names the second arm rendered as `'Ada', 'Grace' IS NULL`, which
+ * MySQL rejects with ER_OPERAND_COLUMNS (1241). Nothing needs the second arm:
+ * when there is nobody to exclude, the predicate is simply omitted.
+ *
+ * The `employee_name` keying is deliberately left alone - see KNOWN DEBT.
  */
 function directoryPopulation(resignedNames) {
   const names = Array.isArray(resignedNames) ? resignedNames : [];
-  const value = names.length ? names : null;
+  if (names.length === 0) {
+    return { conditions: [], params: [] };
+  }
   return {
-    conditions: ["(new_employee.employee_name NOT IN (?) OR ? IS NULL)"],
-    params: [value, value],
+    conditions: ["new_employee.employee_name NOT IN (?)"],
+    params: [names],
   };
 }
 
@@ -117,12 +124,14 @@ function compose(parts) {
 /**
  * The HR directory's scope: access + the legacy population + lookup filters.
  *
- * BYTE-FOR-BYTE UNCHANGED. The string this returns, and the order of its
- * parameters, are identical to what `repository/employee.js#get` built inline
- * before any of this was extracted. Swapping the store and designation
- * parameters would filter stores by designation ids and vice versa - a
- * silently wrong population rather than an error - so the order is pinned by
- * a test.
+ * The string this returns, and the order of its parameters, are identical to
+ * what `repository/employee.js#get` builds inline in production after the
+ * `1f7c11a` hotfix. Swapping the store and designation parameters would filter
+ * stores by designation ids and vice versa - a silently wrong population
+ * rather than an error - so the order is pinned by a test.
+ *
+ * With nothing to exclude and no filters there are no conditions at all, and
+ * the clause is empty: `WHERE` on its own is a syntax error, not a wide query.
  */
 function buildEmployeeScope(resignedNames = [], filters = {}, actor = null) {
   const { conditions, params } = compose([
@@ -131,10 +140,7 @@ function buildEmployeeScope(resignedNames = [], filters = {}, actor = null) {
     lookupFilters(filters),
   ]);
 
-  // Reproduces the original template exactly: the first condition, then the
-  // rest ANDed on, with the same spacing.
-  const [first, ...rest] = conditions;
-  const where = `WHERE ${first} ${rest.length > 0 ? "AND " + rest.join(" AND ") : ""}`;
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
   return { where, params };
 }

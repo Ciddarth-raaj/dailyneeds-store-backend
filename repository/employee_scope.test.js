@@ -5,10 +5,16 @@
  *
  * This is a REFACTOR test before it is a feature test. The clause and the
  * parameter order below are transcribed from what `repository/employee.js#get`
- * built inline before the extraction, so if the move altered the population
- * even slightly - a reordered parameter, a dropped arm of the resignation
- * predicate - this fails rather than the HR directory quietly showing a
- * different set of people.
+ * builds inline in production, so if the move altered the population even
+ * slightly - a reordered parameter, a dropped condition - this fails rather
+ * than the HR directory quietly showing a different set of people.
+ *
+ * The reference is production AFTER the `1f7c11a` hotfix: the resigned-name
+ * exclusion is omitted entirely when there is nothing to exclude, rather than
+ * written as `(... NOT IN (?) OR ? IS NULL)` with the same array bound twice -
+ * a shape MySQL rejects at two or more names. `employee_directory_filter.test.js`
+ * pins that defect specifically, against rendered SQL; this file pins the
+ * clause and the separation of concepts.
  */
 const test = require("node:test");
 const assert = require("node:assert");
@@ -26,46 +32,31 @@ const {
 /** Whitespace differs between a template literal and a joined string. */
 const norm = (s) => s.replace(/\s+/g, " ").trim();
 
-/* ===================================== the clause, exactly as it was ==== */
-test("with no resignations and no filters, nobody is excluded", () => {
+/* ===================================== the clause, exactly as it is ===== */
+test("with no resignations and no filters, there is no clause at all", () => {
   const { where, params } = buildEmployeeScope([], {});
-  assert.strictEqual(
-    norm(where),
-    "WHERE (new_employee.employee_name NOT IN (?) OR ? IS NULL)"
-  );
-  // Both NULL: `NOT IN (NULL)` is NULL, and the `? IS NULL` arm makes the
-  // predicate true. That is how the original made an empty list a no-op.
-  assert.deepStrictEqual(params, [null, null]);
+  // Not a wide predicate - no predicate. A bare `WHERE` is a syntax error, so
+  // the clause has to be empty rather than trivially true.
+  assert.strictEqual(norm(where), "");
+  assert.deepStrictEqual(params, []);
 });
 
-test("resigned names are excluded, and passed twice in order", () => {
+test("resigned names are excluded, bound once", () => {
   const { where, params } = buildEmployeeScope(["Ramesh Kumar", "Suresh"], {});
-  assert.strictEqual(
-    norm(where),
-    "WHERE (new_employee.employee_name NOT IN (?) OR ? IS NULL)"
-  );
-  assert.deepStrictEqual(params, [
-    ["Ramesh Kumar", "Suresh"],
-    ["Ramesh Kumar", "Suresh"],
-  ]);
+  assert.strictEqual(norm(where), "WHERE new_employee.employee_name NOT IN (?)");
+  assert.deepStrictEqual(params, [["Ramesh Kumar", "Suresh"]]);
 });
 
-test("a store filter is ANDed on, after the resignation parameters", () => {
+test("a store filter stands alone when nobody has resigned", () => {
   const { where, params } = buildEmployeeScope([], { store_ids: [2, 3] });
-  assert.strictEqual(
-    norm(where),
-    "WHERE (new_employee.employee_name NOT IN (?) OR ? IS NULL) AND new_employee.store_id IN (?)"
-  );
-  assert.deepStrictEqual(params, [null, null, [2, 3]]);
+  assert.strictEqual(norm(where), "WHERE new_employee.store_id IN (?)");
+  assert.deepStrictEqual(params, [[2, 3]]);
 });
 
 test("a designation filter likewise", () => {
   const { where, params } = buildEmployeeScope([], { designation_ids: [15] });
-  assert.strictEqual(
-    norm(where),
-    "WHERE (new_employee.employee_name NOT IN (?) OR ? IS NULL) AND new_employee.designation_id IN (?)"
-  );
-  assert.deepStrictEqual(params, [null, null, [15]]);
+  assert.strictEqual(norm(where), "WHERE new_employee.designation_id IN (?)");
+  assert.deepStrictEqual(params, [[15]]);
 });
 
 test("BOTH FILTERS KEEP STORE BEFORE DESIGNATION", () => {
@@ -78,27 +69,47 @@ test("BOTH FILTERS KEEP STORE BEFORE DESIGNATION", () => {
   });
   assert.strictEqual(
     norm(where),
-    "WHERE (new_employee.employee_name NOT IN (?) OR ? IS NULL) " +
+    "WHERE new_employee.employee_name NOT IN (?) " +
       "AND new_employee.store_id IN (?) AND new_employee.designation_id IN (?)"
   );
-  assert.deepStrictEqual(params, [["Gone"], ["Gone"], [2], [15]]);
+  assert.deepStrictEqual(params, [["Gone"], [2], [15]]);
 });
 
 test("empty or absent filter arrays add nothing", () => {
   for (const filters of [{}, null, undefined, { store_ids: [] }, { designation_ids: [] }]) {
     const { where, params } = buildEmployeeScope([], filters);
-    assert.strictEqual(
-      norm(where),
-      "WHERE (new_employee.employee_name NOT IN (?) OR ? IS NULL)",
-      JSON.stringify(filters)
-    );
-    assert.deepStrictEqual(params, [null, null]);
+    assert.strictEqual(norm(where), "", JSON.stringify(filters));
+    assert.deepStrictEqual(params, []);
   }
 });
 
 test("a non-array resignation list is tolerated, as the original was", () => {
-  const { params } = buildEmployeeScope(undefined, {});
-  assert.deepStrictEqual(params, [null, null]);
+  for (const odd of [undefined, null, "Ada", 7]) {
+    const { where, params } = buildEmployeeScope(odd, {});
+    assert.strictEqual(norm(where), "");
+    assert.deepStrictEqual(params, []);
+  }
+});
+
+test("EVERY PLACEHOLDER HAS EXACTLY ONE PARAMETER", () => {
+  // The pre-hotfix clause bound one logical value to two placeholders, which
+  // is what let the mismatch hide until the second resignation.
+  const cases = [
+    [[], {}],
+    [["A"], {}],
+    [["A", "B"], {}],
+    [["A", "B", "C"], { store_ids: [1] }],
+    [[], { store_ids: [1], designation_ids: [2] }],
+    [["A"], { store_ids: [1], designation_ids: [2] }],
+  ];
+  for (const [names, filters] of cases) {
+    const { where, params } = buildEmployeeScope(names, filters);
+    assert.strictEqual(
+      params.length,
+      (where.match(/\?/g) || []).length,
+      `${names.length} name(s), filters ${JSON.stringify(filters)}`
+    );
+  }
 });
 
 /* ============================== the rule is stated once, not twice ====== */
@@ -115,12 +126,13 @@ test("THE DIRECTORY QUERY USES THE SHARED SCOPE RATHER THAN ITS OWN CLAUSE", () 
 
 test("no caller-supplied string can reach the clause", () => {
   // Filters contribute bound parameters only; the SQL text is fixed.
-  const { where } = buildEmployeeScope(["'; DROP TABLE new_employee; --"], {
+  const { where, params } = buildEmployeeScope(["'; DROP TABLE new_employee; --"], {
     store_ids: ["2 OR 1=1"],
   });
   assert.ok(!where.includes("DROP"), "no value is interpolated into SQL");
   assert.ok(!where.includes("1=1"));
-  assert.strictEqual((where.match(/\?/g) || []).length, 3, "values travel as placeholders");
+  assert.strictEqual((where.match(/\?/g) || []).length, 2, "values travel as placeholders");
+  assert.strictEqual(params.length, 2);
 });
 
 /* ============== access scope and directory population are separate ====== */
@@ -136,10 +148,19 @@ test("ACCESS SCOPE AND DIRECTORY POPULATION ARE DIFFERENT CONCEPTS", () => {
 
   // Population: a legacy rule belonging to one screen.
   const pop = directoryPopulation(["Gone"]);
-  assert.deepStrictEqual(pop.conditions, [
-    "(new_employee.employee_name NOT IN (?) OR ? IS NULL)",
-  ]);
-  assert.deepStrictEqual(pop.params, [["Gone"], ["Gone"]]);
+  assert.deepStrictEqual(pop.conditions, ["new_employee.employee_name NOT IN (?)"]);
+  assert.deepStrictEqual(pop.params, [["Gone"]]);
+
+  // And nothing to exclude means no condition, not a true one.
+  assert.deepStrictEqual(directoryPopulation([]), { conditions: [], params: [] });
+});
+
+test("THE POPULATION RULE IS STILL KEYED BY NAME, DELIBERATELY", () => {
+  // Pre-existing debt, recorded rather than fixed here: re-keying `resignation`
+  // by the permanent `employee_id` is a data migration and a behaviour change.
+  const { conditions } = directoryPopulation(["Gone"]);
+  assert.match(conditions[0], /employee_name/);
+  assert.ok(!/employee_id/.test(conditions[0]));
 });
 
 test("lookup filters are narrowing, and belong to neither concept", () => {
@@ -170,17 +191,15 @@ test("an unfiltered report constrains nothing at all", () => {
   assert.deepStrictEqual(scope, { conditions: [], params: [] });
 });
 
-test("THE DIRECTORY STILL COMPOSES BOTH, UNCHANGED", () => {
-  // Composed from the units now, but the clause and parameter order are
-  // identical to the inline original.
+test("THE DIRECTORY STILL COMPOSES BOTH", () => {
   const { where, params } = buildEmployeeScope(["Gone"], {
     store_ids: [2],
     designation_ids: [15],
   });
   assert.strictEqual(
     norm(where),
-    "WHERE (new_employee.employee_name NOT IN (?) OR ? IS NULL) " +
+    "WHERE new_employee.employee_name NOT IN (?) " +
       "AND new_employee.store_id IN (?) AND new_employee.designation_id IN (?)"
   );
-  assert.deepStrictEqual(params, [["Gone"], ["Gone"], [2], [15]]);
+  assert.deepStrictEqual(params, [["Gone"], [2], [15]]);
 });
