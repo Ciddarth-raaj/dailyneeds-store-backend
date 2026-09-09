@@ -136,5 +136,48 @@ module.exports = (designationUsecase) => {
     cache.delete(String(designationId));
   };
 
-  return { require: require_, requireAll, has, hasAll, invalidate, ADMIN_USER_TYPE };
+  /**
+   * The caller's permission keys as an array, for code that must make MANY
+   * decisions from one request.
+   *
+   * `has`/`hasAll` answer one question per call, which is right for a route
+   * guard. Reports asks a different question for every field in a 30-column
+   * catalogue, and doing that as 30 awaited calls would be 30 cache lookups
+   * to answer one request - and, worse, 30 chances for the answers to come
+   * from different cache generations mid-request. This returns the set once,
+   * so a request is decided against ONE snapshot.
+   *
+   * An administrator gets `null` from `loadPermissions` ("allow all"); this
+   * reports that as `isAdmin`, and callers must honour it rather than reading
+   * an empty array as "no permissions".
+   */
+  const actorFor = async (req) => {
+    const auth = (req && req.auth) || {};
+    const decoded = (req && req.decoded) || {};
+    const userType = auth.userType !== undefined ? auth.userType : decoded.user_type;
+    const allowed = await loadPermissions(
+      auth.designationId !== undefined ? auth.designationId : decoded.designation_id,
+      userType
+    );
+    return {
+      userId: auth.userId !== undefined ? auth.userId : decoded.user_id,
+      employeeId: auth.employeeId !== undefined ? auth.employeeId : decoded.employee_id,
+      storeId: auth.storeId !== undefined ? auth.storeId : decoded.store_id,
+      designationId:
+        auth.designationId !== undefined ? auth.designationId : decoded.designation_id,
+      userType,
+      isAdmin: allowed === null,
+      permissions: allowed === null ? [] : [...allowed],
+    };
+  };
+
+  return {
+    require: require_,
+    requireAll,
+    has,
+    hasAll,
+    actorFor,
+    invalidate,
+    ADMIN_USER_TYPE,
+  };
 };

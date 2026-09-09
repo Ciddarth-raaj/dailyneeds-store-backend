@@ -83,4 +83,17 @@ module.exports = {
   ADD_SHIFTS: "add_shifts",
   VIEW_STORES: "view_stores",
   ADD_STORES: "add_stores",
+
+  // Reports. Declared by the reports-foundation migration and granted to
+  // NOBODY by it.
+  //
+  // `VIEW_REPORTS` is discovery and preview, and confers no field access of
+  // its own: a caller sees exactly the columns their existing B2/B3
+  // permissions already allow, so a report cannot become a way around
+  // `view_employee_sensitive`. `EXPORT_REPORTS` is the separate decision to
+  // take data out of the building in bulk - somebody may reasonably be
+  // trusted to look at a screen and not to email a spreadsheet.
+  VIEW_REPORTS: "view_reports",
+  EXPORT_REPORTS: "export_reports",
+  MANAGE_SHARED_REPORT_TEMPLATES: "manage_shared_report_templates",
 };

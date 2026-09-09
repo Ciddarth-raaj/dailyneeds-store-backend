@@ -1,4 +1,5 @@
 const logger = require("../utils/logger");
+const { buildEmployeeScope } = require("./employee_scope");
 
 class EmployeeRepository {
   constructor(db) {
@@ -228,59 +229,18 @@ class EmployeeRepository {
   }
   get(resignation, filters) {
     return new Promise((resolve, reject) => {
-      let filterConditions = [];
-      let filterValues = [];
-
-      // HOTFIX: the resigned-name exclusion used to be written as
+      // The population - who is in this list at all - lives in
+      // `employee_scope.js`, so the C3 status summary and Reports can ask the
+      // same question rather than each restating the rule.
       //
-      //     (new_employee.employee_name NOT IN (?) OR ? IS NULL)
-      //
-      // with the SAME array bound to both placeholders. The driver expands an
-      // array into a comma list, so the second arm became
-      //
-      //     'Ada', 'Grace' IS NULL
-      //
-      // which MySQL rejects with ER_OPERAND_COLUMNS (1241). It survived only
-      // because the list was empty or held one name: `NULL IS NULL` and
-      // `'Ada' IS NULL` are both valid. At TWO resigned names the whole
-      // employee directory started returning a 500 - and C2's Resign action
-      // writes a row to `resignation` every time it is used, so the second
-      // resignation would have broken the list.
-      //
-      // The fix is to stop expressing "no exclusion" as a predicate at all:
-      // when there is nothing to exclude, the condition is simply absent.
-      // The name-based matching itself is UNCHANGED and deliberately so -
-      // `resignation` is still keyed by `employee_name`, with all the
-      // ambiguity that carries for people who share a name. That is recorded
-      // as debt and is not this hotfix's to change.
-      const resignedNames = Array.isArray(resignation) ? resignation : [];
-      if (resignedNames.length > 0) {
-        filterConditions.push("new_employee.employee_name NOT IN (?)");
-        filterValues.push(resignedNames);
-      }
-
-      // Add store filter condition if store_ids are provided
-      if (filters && filters.store_ids && filters.store_ids.length > 0) {
-        filterConditions.push("new_employee.store_id IN (?)");
-        filterValues.push(filters.store_ids);
-      }
-
-      // Add designation filter condition if designation_ids are provided
-      if (
-        filters &&
-        filters.designation_ids &&
-        filters.designation_ids.length > 0
-      ) {
-        filterConditions.push("new_employee.designation_id IN (?)");
-        filterValues.push(filters.designation_ids);
-      }
-
-      // Combine all filter conditions. With nothing to constrain - no
-      // resignations recorded and no filters chosen - there is no predicate,
-      // and `WHERE` with an empty condition is a syntax error rather than a
-      // wide query.
-      const whereClause =
-        filterConditions.length > 0 ? `WHERE ${filterConditions.join(" AND ")}` : "";
+      // The hotfix deployed as 1f7c11a moved INTO that module: the resigned
+      // -name exclusion is omitted entirely when there is nothing to exclude,
+      // rather than written as `(... NOT IN (?) OR ? IS NULL)` with the same
+      // array bound twice - a shape MySQL rejects at two or more names.
+      const { where: whereClause, params: filterValues } = buildEmployeeScope(
+        resignation,
+        filters
+      );
 
       const query = `
         SELECT new_employee.employee_id, new_employee.employee_name, new_employee.father_name, new_employee.dob, new_employee.gender, new_employee.marital_status, 

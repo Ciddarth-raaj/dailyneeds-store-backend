@@ -175,6 +175,11 @@ class Server {
     this.employeeBankRepo = require("./repository/employee_bank")(
       this.mysql.connection
     );
+    // Reports: saved templates, the export audit trail, and the lookups
+    // reconciliation needs. It builds no report SQL - that is the resolver's.
+    this.reportTemplateRepo = require("./repository/report_template")(
+      this.mysql.connection
+    );
     this.shiftRepo = require("./repository/shift")(this.mysql.connection);
     this.storeRepo = require("./repository/store")(this.mysql.connection);
     this.outletRepo = require("./repository/outlet")(this.mysql.connection);
@@ -435,6 +440,13 @@ class Server {
     // once. It takes the employee usecase itself rather than a repository, so
     // the population it summarises is literally the one `GET
     // /employee/employees` returns and cannot drift from it.
+    // Reports: the Employee Master service. It takes the shared connection
+    // for the one report query and the template repository for everything
+    // saved, so preview and export resolve a request the same way.
+    this.employeeReportService = require("./usecase/employee_report_service")(
+      this.mysql.connection,
+      this.reportTemplateRepo
+    );
     this.employeeStatusSummaryUsecase = require("./usecase/employee_status_summary")(
       this.employeeUsecase,
       this.employeeAadhaarRepo,
@@ -759,6 +771,11 @@ class Server {
       this.employeeBankUsecase,
       this.employeeStatusSummaryUsecase
     );
+    // Reports: discovery, saved templates, preview and the two exports.
+    const employeeReportRouter = require("./routes/employee_report")(
+      this.employeeReportService,
+      this.permissions
+    );
     const shiftRouter = require("./routes/shift")(this.shiftUsecase, this.permissions);
     const storeRouter = require("./routes/store")(this.storeUsecase);
     const outletRouter = require("./routes/outlet")(
@@ -972,6 +989,9 @@ class Server {
     // Stage 0C / C2. Mounted at /hr so the lifecycle actions do not collide
     // with the existing employee routes and C3 can find them in one place.
     app.use("/hr", employeeMasterRouter.getRouter());
+    // Mounted under /reports rather than /hr: the machinery is per-dataset
+    // and Attendance and Payroll will mount beside this one, not inside HR.
+    app.use("/reports/employee-master", employeeReportRouter.getRouter());
     app.use("/shift", shiftRouter.getRouter());
     app.use("/store", storeRouter.getRouter());
     app.use("/outlet", outletRouter.getRouter());
