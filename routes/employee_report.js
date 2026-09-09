@@ -295,6 +295,35 @@ class EmployeeReportRoutes {
     return { prepared, actor };
   }
 
+  /**
+   * Make a mid-stream write failure survivable.
+   *
+   * ============================ WHY ONE BROKEN EXPORT TOOK THE API WITH IT ==
+   *
+   * Once headers are sent, `fail()` destroys the response rather than
+   * appending an error to a half-written spreadsheet - which is right. But a
+   * writer that is still going (ExcelJS's archiver keeps pushing) then writes
+   * to a destroyed socket, and Node emits `ERR_STREAM_WRITE_AFTER_END` as an
+   * `error` EVENT on the ServerResponse. A ServerResponse with no `error`
+   * listener is an UNHANDLED error event, and an unhandled error event
+   * terminates the process - so a single failed Excel export did not fail
+   * alone: it restarted the whole backend, and every other request in flight,
+   * a CSV export among them, died with it.
+   *
+   * One listener turns that back into what it should always have been: this
+   * download fails, and nothing else notices.
+   */
+  _guardStream(res) {
+    res.on("error", (err) => {
+      // Deliberately no payload and no rethrow. The client has already lost
+      // this response; the only thing left to get right is not taking the
+      // process down with it.
+      console.log(
+        `REPORT.EXPORT.STREAM_ABORTED ${err && err.code ? err.code : "unknown"}`
+      );
+    });
+  }
+
   _sendHeaders(res, prepared, contentType) {
     res.setHeader("Content-Type", contentType);
     res.setHeader(
@@ -315,6 +344,7 @@ class EmployeeReportRoutes {
    */
   async exportXlsx(req, res) {
     let timer = null;
+    this._guardStream(res);
     try {
       const { prepared, actor } = await this._prepare(req, res, "xlsx");
 
@@ -330,10 +360,19 @@ class EmployeeReportRoutes {
       timer = setTimeout(() => res.destroy(), reportConfig.EXPORT_TIMEOUT_MS);
 
       const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({ stream: res, useStyles: true });
-      const sheet = workbook.addWorksheet("Report");
+
+      // The frozen header row is declared HERE, as an option, and not assigned
+      // afterwards. `WorksheetWriter.views` is a getter with no setter, and
+      // this method is a class method - so a class body, so strict mode - in
+      // which assigning to a getter-only property throws a TypeError rather
+      // than being the silent no-op it is in sloppy mode. That threw AFTER the
+      // response headers had gone out, which is what made this so damaging;
+      // see `_guardStream` below.
+      const sheet = workbook.addWorksheet("Report", {
+        views: [{ state: "frozen", ySplit: 1 }],
+      });
 
       sheet.addRow(prepared.fields.map((f) => f.label)).font = { bold: true };
-      sheet.views = [{ state: "frozen", ySplit: 1 }];
 
       const written = await this.service.streamRows(prepared, (rows) => {
         for (const row of rows) {
@@ -372,6 +411,7 @@ class EmployeeReportRoutes {
    */
   async exportCsv(req, res) {
     let timer = null;
+    this._guardStream(res);
     try {
       const { prepared, actor } = await this._prepare(req, res, "csv");
 
