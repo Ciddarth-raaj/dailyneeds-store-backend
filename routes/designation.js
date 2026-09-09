@@ -107,7 +107,18 @@ class DesignationRoutes {
       try {
         const schema = {
           designation_id: Joi.number().required(),
-          permissions: Joi.array().items(Joi.string()).required(),
+          // OPTIONAL, and this matters. `usecase.updateDesignationDetails`
+          // DELETES every permission row for the designation and recreates it
+          // from this array - but only `if (designation.permissions)`. The
+          // usecase has always handled an absent list correctly; the schema was
+          // the only thing forcing one.
+          //
+          // Requiring it meant any caller that wanted to change just the name
+          // or the status had to send the full permission set back, and getting
+          // that wrong - an empty array from a screen that never loaded them -
+          // silently revoked every permission the designation had. A master
+          // screen editing a name should not be able to do that.
+          permissions: Joi.array().items(Joi.string()).optional(),
           designation_details: Joi.object({
             online_portal: Joi.number().required(),
             designation_name: Joi.string().required(),
