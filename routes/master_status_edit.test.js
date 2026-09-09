@@ -96,6 +96,33 @@ test("only 0 and 1 are accepted as a department status", () => {
   assert.match(schema.slice(0, 600), /valid\(0, 1\)/);
 });
 
+/* ============== a name/status edit must not revoke permissions ========== */
+
+test("DESIGNATION: `permissions` IS OPTIONAL, SO A NAME EDIT CANNOT WIPE THEM", () => {
+  // `usecase.updateDesignationDetails` DELETES every permission row for the
+  // designation and recreates it from this array - but only when the array is
+  // present. Requiring it meant a caller changing just the name had to send
+  // the full set back, and an empty array from a screen that never loaded them
+  // silently revoked everything that designation could do.
+  const schema = desigRoute.slice(
+    desigRoute.indexOf("update-designation"),
+    desigRoute.indexOf("updateDesignationDetails")
+  );
+  assert.match(schema, /permissions: Joi\.array\(\)\.items\(Joi\.string\(\)\)\.optional\(\)/);
+  assert.ok(
+    !/permissions: Joi\.array\(\)\.items\(Joi\.string\(\)\)\.required\(\)/.test(schema),
+    "permissions must not be mandatory on an update"
+  );
+});
+
+test("the usecase only rewrites permissions when it is given some", () => {
+  // The guard this change relies on. If it ever became unconditional, an
+  // absent list would wipe the set instead of leaving it alone.
+  const usecase = strip(read("usecase/designation.js"));
+  const body = usecase.slice(usecase.indexOf("updateDesignationDetails"));
+  assert.match(body.slice(0, 700), /if \(designation\.permissions\) \{[\s\S]{0,200}deletePermissions/);
+});
+
 /* ============================================ permissions are unchanged == */
 
 test("BOTH UPDATES KEEP THE EXISTING MANAGE PERMISSION", () => {
