@@ -21,13 +21,22 @@ const router = express.Router();
  * employee record does not make HR entitled to everything on it.
  */
 class EmployeeMasterRoutes {
-  constructor(employeeMasterUsecase, permissions, sensitive, aadhaarUsecase, bankUsecase, statusSummaryUsecase) {
+  constructor(
+    employeeMasterUsecase,
+    permissions,
+    sensitive,
+    aadhaarUsecase,
+    bankUsecase,
+    statusSummaryUsecase,
+    ifscLookupUsecase
+  ) {
     this.usecase = employeeMasterUsecase;
     this.permissions = permissions;
     this.sensitive = sensitive;
     this.aadhaar = aadhaarUsecase || null;
     this.bank = bankUsecase || null;
     this.statusSummary = statusSummaryUsecase || null;
+    this.ifsc = ifscLookupUsecase || null;
     this.setupRoutes();
   }
 
@@ -523,6 +532,49 @@ class EmployeeMasterRoutes {
       }
     );
 
+    /**
+     * Resolve an IFSC to its bank and branch name, for the Bank Details form.
+     *
+     * NOT a verification, and deliberately not under `/employee/:id`: it takes
+     * no employee, spends no Penny-Less check and writes nothing to the
+     * employee master. It answers a question about a branch code, from a
+     * local cache where possible.
+     *
+     * THE PERMISSION IS THE ONE THAT MAY ENTER BANK DETAILS, and both halves
+     * are load-bearing:
+     *
+     *   `edit_employee_sensitive`  this exists to help fill in a form only
+     *                              these users can submit. Anything looser
+     *                              would be an endpoint that spends provider
+     *                              money for anyone who is merely signed in.
+     *   `view_employee_sensitive`  because `ifsc` and `bank_name` are B3
+     *                              sensitive keys, and `filterResponse` on
+     *                              this router STRIPS them from any response
+     *                              to a caller without it. Requiring the key
+     *                              is the difference between a clear refusal
+     *                              and a 200 that silently arrives with the
+     *                              two fields missing.
+     *
+     * No new permission is introduced.
+     */
+    router.get(
+      "/bank/ifsc/:ifsc",
+      this.permissions.requireAll(P.EDIT_EMPLOYEE_SENSITIVE, P.VIEW_EMPLOYEE_SENSITIVE),
+      async (req, res) => {
+        try {
+          if (!this.ifsc) {
+            res.json({ code: 503, msg: "Bank lookup is not configured on this server" });
+            res.end();
+            return;
+          }
+          res.json(await this.ifsc.lookup(req.params.ifsc));
+        } catch (err) {
+          this._fail(res, err);
+        }
+        res.end();
+      }
+    );
+
     router.get("/lifecycle/review", this.permissions.require(P.VIEW_EMPLOYEE_LIFECYCLE), async (req, res) => {
       try {
         const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 500);
@@ -546,7 +598,8 @@ module.exports = (
   sensitive,
   aadhaarUsecase,
   bankUsecase,
-  statusSummaryUsecase
+  statusSummaryUsecase,
+  ifscLookupUsecase
 ) =>
   new EmployeeMasterRoutes(
     employeeMasterUsecase,
@@ -554,5 +607,6 @@ module.exports = (
     sensitive,
     aadhaarUsecase,
     bankUsecase,
-    statusSummaryUsecase
+    statusSummaryUsecase,
+    ifscLookupUsecase
   );

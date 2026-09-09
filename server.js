@@ -175,6 +175,12 @@ class Server {
     this.employeeBankRepo = require("./repository/employee_bank")(
       this.mysql.connection
     );
+    // A cache of public reference data - which bank and branch an IFSC
+    // belongs to - so the same branch code is bought from the provider once
+    // rather than once per employee. It holds no employee data.
+    this.ifscMasterRepo = require("./repository/ifsc_master")(
+      this.mysql.connection
+    );
     // Reports: saved templates, the export audit trail, and the lookups
     // reconciliation needs. It builds no report SQL - that is the resolver's.
     this.reportTemplateRepo = require("./repository/report_template")(
@@ -429,6 +435,13 @@ class Server {
       this.employeeBankRepo,
       this.sandboxBankService,
       this.employeeAadhaarRepo
+    );
+    // Resolving an IFSC while bank details are being entered. It shares the
+    // Sandbox bank service, and therefore the one token cache, but spends no
+    // Penny-Less verification and never touches the employee master.
+    this.ifscLookupUsecase = require("./usecase/ifsc_lookup")(
+      this.ifscMasterRepo,
+      this.sandboxBankService
     );
     this.employeeMasterUsecase = require("./usecase/employee_master")(
       this.employeeMasterRepo,
@@ -769,7 +782,8 @@ class Server {
       this.sensitive,
       this.employeeAadhaarUsecase,
       this.employeeBankUsecase,
-      this.employeeStatusSummaryUsecase
+      this.employeeStatusSummaryUsecase,
+      this.ifscLookupUsecase
     );
     // Reports: discovery, saved templates, preview and the two exports.
     const employeeReportRouter = require("./routes/employee_report")(

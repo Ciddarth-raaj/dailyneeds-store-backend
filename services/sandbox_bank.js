@@ -1,5 +1,5 @@
 const kycConfig = require("../config/sandbox_kyc");
-const { SandboxError, FAILURE } = require("./sandbox_client");
+const { SandboxError, FAILURE, SAFE_MESSAGE } = require("./sandbox_client");
 
 /**
  * Stage 0C / C2 — Sandbox bank account verification (Penny-Less).
@@ -108,6 +108,94 @@ class SandboxBankService {
       provider_status: data.status ? String(data.status) : null,
       transaction_id: res.transaction_id,
     };
+  }
+
+  /**
+   * Normalises an IFSC on its own, for the lookup below.
+   *
+   * Separate from `normalise` because an IFSC lookup has no account number
+   * to check, and demanding one to reuse that method would be contorting the
+   * contract to save six lines.
+   */
+  static normaliseIfsc(ifsc) {
+    const code = String(ifsc === undefined || ifsc === null ? "" : ifsc).replace(/[\s-]/g, "").toUpperCase();
+    if (code === "") throw new SandboxError(FAILURE.INVALID_REQUEST, "ifsc is required", 422);
+    if (!IFSC_PATTERN.test(code)) {
+      throw new SandboxError(
+        FAILURE.INVALID_REQUEST,
+        `ifsc '${code}' is not a valid IFSC (four letters, a zero, then six characters)`,
+        422
+      );
+    }
+    return code;
+  }
+
+  /** The first of `keys` present on `data` as a non-empty string. */
+  static _pick(data, keys) {
+    for (const key of keys || []) {
+      const raw = data[key];
+      if (raw === undefined || raw === null) continue;
+      const value = String(raw).trim();
+      if (value !== "") return value;
+    }
+    return null;
+  }
+
+  /**
+   * Resolves one IFSC to its bank and branch name.
+   *
+   * NOT A VERIFICATION. This spends no Penny-Less check and reads no employee
+   * record; it answers a question about a branch code. The caller caches the
+   * answer, because the same branch code will be asked about again.
+   *
+   * AN UNKNOWN IFSC IS A RESULT, NOT A FAULT, and the distinction is the
+   * whole point: "there is no such branch code" must reach the user as a
+   * correctable typo, while "the provider is down" must not, because telling
+   * somebody their correct IFSC is invalid is how they end up retyping a
+   * right answer. So a 404 returns `exists: false`, and everything else
+   * throws.
+   *
+   * Only the two names are returned. Sandbox sends city, district, state,
+   * address, MICR and the payment-rail flags as well; none of it is read.
+   */
+  async lookupIfsc(ifsc) {
+    const code = SandboxBankService.normaliseIfsc(ifsc);
+
+    const path = kycConfig.bank.ifscPathTemplate.replace("{ifsc}", encodeURIComponent(code));
+
+    let res;
+    try {
+      res = await this.client.request({
+        method: kycConfig.bank.ifscMethod,
+        path,
+        // An IFSC is a public branch code and identifies no person, so unlike
+        // the account number it is safe to record against a failure.
+        logRef: { product: "bank_ifsc", ifsc: code },
+      });
+    } catch (err) {
+      if (err instanceof SandboxError && err.category === FAILURE.NOT_FOUND) {
+        return { exists: false, ifsc: code, bank_name: null, branch_name: null };
+      }
+      throw err;
+    }
+
+    const data = res.data || {};
+    const bankName = SandboxBankService._pick(data, kycConfig.bank.ifscBankNameKeys);
+    const branchName = SandboxBankService._pick(data, kycConfig.bank.ifscBranchNameKeys);
+
+    // A 200 with neither name is not an answer we can fill a form from, and
+    // caching it would poison the master with blanks. It is reported as an
+    // unexpected provider response - not as an invalid IFSC, because we have
+    // no evidence the code is wrong.
+    if (!bankName || !branchName) {
+      throw new SandboxError(
+        FAILURE.UNEXPECTED,
+        SAFE_MESSAGE[FAILURE.UNEXPECTED],
+        502
+      );
+    }
+
+    return { exists: true, ifsc: code, bank_name: bankName, branch_name: branchName };
   }
 }
 
