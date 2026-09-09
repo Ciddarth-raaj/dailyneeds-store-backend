@@ -186,13 +186,16 @@ class EmployeeReportService {
     }
 
     const { fields } = resolver.resolveFields(body.field_keys, actor, "strict");
-    const filters = resolver.resolveFilters(body.filters);
+    const filters = resolver.resolveFilters(body.filters, actor);
 
     return {
       dataset_key: datasetKey,
       // Stored in the caller's order, which IS the column order.
       field_keys: fields.map((f) => f.key),
-      filters,
+      // Keys and values, never the catalogue entries the resolver works with:
+      // a template stores an instruction, and re-reads the catalogue on every
+      // run rather than carrying a stale copy of it.
+      filters: resolver.persistableFilters(filters),
     };
   }
 
@@ -298,6 +301,21 @@ class EmployeeReportService {
 
     filters.search = String(saved.search || "").trim().slice(0, 100);
 
+    // The per-field filters a saved report carries. Reconciled rather than
+    // refused, for the same reason the fields are: a template is an
+    // instruction, not a promise that its author's permissions are still
+    // yours. A filter dropped this way WIDENS the result - the warning says
+    // so, and the export path already makes a widening warning
+    // acknowledgeable before anything leaves the building.
+    const perField = resolver.resolveFieldFilters(saved.field_filters, actor, "reconcile");
+    warnings.push(...perField.warnings);
+    for (const [key, value] of Object.entries(perField.mapped)) {
+      // A saved report expressing its outlet or status filter as a field
+      // filter lands on the same key the block above populated.
+      filters[key] = value;
+    }
+    filters.field_filters = perField.field_filters.filter((f) => !f.mapped_to);
+
     return { fields, filters, warnings };
   }
 
@@ -318,7 +336,7 @@ class EmployeeReportService {
       // filter wholesale and is validated strictly, so it cannot smuggle a
       // stale value past reconciliation.
       if (body.filters !== undefined && body.filters !== null) {
-        resolved.filters = resolver.resolveFilters(body.filters);
+        resolved.filters = resolver.resolveFilters(body.filters, actor);
         // Reconciliation warnings about filters no longer apply once the user
         // has replaced the filters; field warnings still do.
         resolved.warnings = resolved.warnings.filter((w) => !String(w.type).startsWith("filter_"));
@@ -334,7 +352,7 @@ class EmployeeReportService {
     const { fields } = resolver.resolveFields(body.field_keys, actor, "strict");
     return {
       fields,
-      filters: resolver.resolveFilters(body.filters),
+      filters: resolver.resolveFilters(body.filters, actor),
       // An ad-hoc request has nothing saved to go stale, so nothing to warn
       // about and nothing to acknowledge.
       warnings: [],
@@ -511,6 +529,10 @@ class EmployeeReportService {
         // Whether a search was used, never WHAT was searched for: a search
         // string is often a person's name, and this table must not hold one.
         search_used: Boolean(prepared.filters.search),
+        // The per-field filters by KEY only, for exactly the same reason: a
+        // filter on Employee Name carries a person's name, so the audit
+        // records WHICH columns narrowed the export and never the values.
+        field_filters_used: (prepared.filters.field_filters || []).map((f) => f.field.key),
       },
       row_count: prepared.row_count,
       format: prepared.format,
