@@ -131,12 +131,36 @@ test("THE EXPORT ROUTES USE THE EXPORT PERMISSION, AND ONLY THEY DO", () => {
   assert.strictEqual(canExportUses, 3, "the definition plus the two export routes");
 });
 
+test("EVERY ROUTE REQUIRES view_employees, NOT ONLY view_reports", () => {
+  // `view_reports` is a reporting CAPABILITY, not a doorway into a dataset.
+  // Granted alone it would otherwise let somebody who may not see the employee
+  // master preview ID, name and outlet through Reports - ordinary fields, and
+  // so exactly the kind of exposure nobody notices.
+  assert.match(CODE, /const canView = needsAll\(P\.VIEW_REPORTS, P\.VIEW_EMPLOYEES\)/);
+  assert.match(
+    CODE,
+    /const canExport = needsAll\(P\.VIEW_REPORTS, P\.VIEW_EMPLOYEES, P\.EXPORT_REPORTS\)/
+  );
+});
+
+test("THE GUARDS ARE AND, NOT OR", () => {
+  // `require(a, b)` is OR: it would open the route to anyone holding EITHER
+  // key, which is the opposite of a prerequisite. Only `requireAll` is used.
+  assert.match(CODE, /const \{ requireAll: needsAll \} = this\.permissions/);
+  assert.ok(!/\bneeds\(/.test(CODE), "no route may be guarded by the OR form");
+  assert.ok(
+    !/this\.permissions\.require\b/.test(CODE),
+    "the OR form must not be reached around the destructure either"
+  );
+});
+
 test("the guards are the declared permission constants, not typed strings", () => {
-  assert.match(CODE, /needs\(P\.VIEW_REPORTS\)/);
-  assert.match(CODE, /needs\(P\.EXPORT_REPORTS\)/);
   // A typo in a string literal is a silently open route; a typo in a constant
   // is a crash on boot.
-  assert.ok(!/needs\("/.test(CODE), "no route guard names a permission as a literal");
+  assert.ok(!/needsAll\("/.test(CODE), "no route guard names a permission as a literal");
+  for (const key of ["VIEW_REPORTS", "VIEW_EMPLOYEES", "EXPORT_REPORTS"]) {
+    assert.match(CODE, new RegExp(`P\\.${key}`));
+  }
 });
 
 /* ================================================== nothing logs a row == */
@@ -193,7 +217,7 @@ test("the response is not cacheable", () => {
 
 test("the module exposes a router per instance", () => {
   const permissions = {
-    require: () => (req, res, next) => next(),
+    requireAll: () => (req, res, next) => next(),
     actorFor: async () => ({ userId: 1, isAdmin: true, permissions: [] }),
   };
   const a = routes({}, permissions);

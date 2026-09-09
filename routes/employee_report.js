@@ -19,13 +19,30 @@ const { DATASET } = require("../constants/report_datasets");
  * invents one is refused rather than ignored. The SQL is assembled entirely
  * from catalogue text in `usecase/employee_report.js`.
  *
- * ============================================ TWO PERMISSIONS, TWO VERBS ==
+ * ====================================== THE DATASET'S OWN PERMISSION FIRST ==
  *
- * `view_reports` guards discovery, templates and preview. `export_reports`
- * guards the two export routes, and is checked AGAIN inside the service - the
- * middleware protects the route, the service protects the operation, and the
- * export path is the one place where being wrong means data leaves the
- * building. Neither key confers field access: sensitive columns still need
+ * `view_reports` is a REPORTING CAPABILITY, not a doorway into a dataset. On
+ * its own it says somebody may use the reporting machinery; it says nothing
+ * about which data they may point it at. So every route here requires
+ * `view_employees` as well - the same key that guards the HR directory - and
+ * requires it with `requireAll`, which is AND. `require(a, b)` is OR and would
+ * silently weaken this to either-of, which is the exact mistake this file
+ * would be making if it passed both keys to it.
+ *
+ * Without that, granting `view_reports` alone to somebody who was never meant
+ * to see the employee master would let them preview ID, name and outlet
+ * through Reports. B3 still protects the sensitive columns, so the leak would
+ * be of ordinary fields - which is precisely the kind that goes unnoticed.
+ *
+ * ========================================== THEN THE VERB'S OWN PERMISSION ==
+ *
+ * Discovery, templates and preview: `view_reports` + `view_employees`.
+ * The two exports: those two AND `export_reports`, checked again inside the
+ * service - the middleware protects the route, the service protects the
+ * operation, and the export path is the one place where being wrong means data
+ * leaves the building.
+ *
+ * None of these three keys confers field access. Sensitive columns still need
  * `view_employee_sensitive`, so a report cannot become a way around B3.
  *
  * ================================================== STREAMING AND ERRORS ==
@@ -142,9 +159,12 @@ class EmployeeReportRoutes {
   }
 
   init() {
-    const { require: needs } = this.permissions;
-    const canView = needs(P.VIEW_REPORTS);
-    const canExport = needs(P.EXPORT_REPORTS);
+    // `requireAll` is AND. `require` is OR, and passing several keys to it
+    // here would mean any ONE of them opened the route - the opposite of what
+    // a prerequisite is.
+    const { requireAll: needsAll } = this.permissions;
+    const canView = needsAll(P.VIEW_REPORTS, P.VIEW_EMPLOYEES);
+    const canExport = needsAll(P.VIEW_REPORTS, P.VIEW_EMPLOYEES, P.EXPORT_REPORTS);
 
     const actor = (req) => this.permissions.actorFor(req);
     const router = this.router;

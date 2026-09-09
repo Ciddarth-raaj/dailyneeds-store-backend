@@ -71,8 +71,25 @@ class EmployeeReportService {
 
   /* ---------------------------------------------------------- discovery */
 
+  /**
+   * Refuse anyone who may not reach this dataset at all.
+   *
+   * A 403 rather than a 404: unlike a template id, the existence of the
+   * Employee Master dataset is not a secret, and pretending it is absent would
+   * send somebody hunting for a bug instead of asking for the permission.
+   */
+  _assertDataset(actor) {
+    if (this.canReachDataset(actor)) return;
+    throw new ReportError(
+      403,
+      "DATASET_FORBIDDEN",
+      "You do not have permission to report on employees"
+    );
+  }
+
   /** The field catalogue as this caller may see it, grouped for the picker. */
   describe(actor) {
+    this._assertDataset(actor);
     const fields = resolver.discoverFields(actor);
     return {
       dataset_key: DATASET.EMPLOYEE_MASTER,
@@ -86,14 +103,34 @@ class EmployeeReportService {
     };
   }
 
+  /**
+   * The dataset's OWN permission, which every verb here needs before its own.
+   *
+   * `view_reports` says somebody may use the reporting machinery; it says
+   * nothing about which data they may point it at. The Employee Master dataset
+   * is HR's, so reaching it through Reports requires the same key that guards
+   * the HR directory. The routes enforce this too, with `requireAll`; it is
+   * repeated here because the route protects a URL and this protects the
+   * operation, and only one of the two survives a future call site.
+   */
+  canReachDataset(actor) {
+    if (actor && actor.isAdmin) return true;
+    return resolver.has(actor && actor.permissions, P.VIEW_EMPLOYEES);
+  }
+
   canExport(actor) {
     if (actor && actor.isAdmin) return true;
-    return resolver.has(actor && actor.permissions, P.EXPORT_REPORTS);
+    // AND, not OR: the prerequisite is not satisfied by the verb.
+    return (
+      this.canReachDataset(actor) &&
+      resolver.has(actor && actor.permissions, P.EXPORT_REPORTS)
+    );
   }
 
   /* --------------------------------------------------------- templates */
 
   async listTemplates(actor) {
+    this._assertDataset(actor);
     const rows = await this.templates.listVisible(DATASET.EMPLOYEE_MASTER, actor);
     return rows
       .filter((t) => rules.canSeeTemplate(t, actor))
@@ -113,6 +150,9 @@ class EmployeeReportService {
 
   /** Load a template and assert the verb the caller wants to use on it. */
   async _loadFor(templateId, actor, verb) {
+    // Every template verb funnels through here, so the dataset prerequisite is
+    // stated once rather than repeated on each of the five.
+    this._assertDataset(actor);
     const template = await this.templates.findById(templateId);
     if (!template) throw notFound();
     if (!rules.canSeeTemplate(template, actor)) throw notFound();
@@ -139,6 +179,7 @@ class EmployeeReportService {
    * reconciles away to nothing every time it runs.
    */
   _validateDefinition(body, actor) {
+    this._assertDataset(actor);
     const datasetKey = body.dataset_key || DATASET.EMPLOYEE_MASTER;
     if (!isEnabledDataset(datasetKey)) {
       throw new ReportError(422, "UNKNOWN_DATASET", "That report type is not available");
@@ -317,6 +358,7 @@ class EmployeeReportService {
    * they then get.
    */
   async preview(body, actor) {
+    this._assertDataset(actor);
     const { fields, filters, warnings, template } = await this.resolveRequest(body, actor);
 
     const pageSize = Math.min(
@@ -368,6 +410,9 @@ class EmployeeReportService {
    * larger than this box will stream.
    */
   async prepareExport(body, actor, format) {
+    // The dataset first, so somebody without it is told that rather than being
+    // told they cannot export - two different things to ask for.
+    this._assertDataset(actor);
     if (!this.canExport(actor)) {
       throw new ReportError(
         403,

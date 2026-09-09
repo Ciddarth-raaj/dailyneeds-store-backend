@@ -150,11 +150,22 @@ const hrActor = {
   isAdmin: false,
   permissions: ["view_employees", "view_reports", "export_reports"],
 };
+// May look at the employee master and use Reports, but may not export and
+// holds no sensitive-field permission.
 const viewerActor = {
   userId: 22,
   employeeId: 632,
   isAdmin: false,
-  permissions: ["view_reports"],
+  permissions: ["view_reports", "view_employees"],
+};
+
+// Holds the reporting capability and NOTHING about employees. Reports must not
+// be the doorway that lets them in.
+const reportsOnlyActor = {
+  userId: 23,
+  employeeId: 633,
+  isAdmin: false,
+  permissions: ["view_reports", "export_reports"],
 };
 
 const svc = (db, templates) => build(db, templates);
@@ -566,4 +577,81 @@ test("a ReportError carries an HTTP status the route can use", () => {
   const err = new ReportError(409, "X", "message");
   assert.strictEqual(err.name, "ReportError");
   assert.strictEqual(err.httpCode, 409);
+});
+
+/* ============================ the dataset's own permission comes first === */
+
+test("view_reports ALONE REACHES NOTHING IN THE EMPLOYEE MASTER", () => {
+  // The prerequisite, checked as a predicate. `view_reports` is a reporting
+  // capability; the Employee Master dataset is HR's, and reaching it needs the
+  // same key that guards the HR directory.
+  const service = svc(fakeDb(), fakeTemplates());
+  assert.strictEqual(service.canReachDataset(reportsOnlyActor), false);
+  assert.strictEqual(service.canReachDataset(viewerActor), true);
+  // And the verb does not satisfy the prerequisite.
+  assert.strictEqual(service.canExport(reportsOnlyActor), false);
+});
+
+test("EVERY VERB REFUSES A CALLER WITHOUT view_employees", async () => {
+  const templates = fakeTemplates([systemTemplate]);
+  const service = svc(fakeDb(), templates);
+  const body = { field_keys: FIELDS, filters: { status: "active" } };
+
+  const calls = [
+    ["describe", () => service.describe(reportsOnlyActor)],
+    ["listTemplates", () => service.listTemplates(reportsOnlyActor)],
+    ["preview", () => service.preview(body, reportsOnlyActor)],
+    ["createTemplate", () => service.createTemplate({ template_name: "T", ...body }, reportsOnlyActor)],
+    ["updateTemplate", () => service.updateTemplate(10, { template_name: "T", ...body }, reportsOnlyActor)],
+    ["deleteTemplate", () => service.deleteTemplate(10, reportsOnlyActor)],
+    ["copyTemplate", () => service.copyTemplate(10, "T", reportsOnlyActor)],
+    ["prepareExport", () => service.prepareExport(body, reportsOnlyActor, "csv")],
+  ];
+
+  for (const [name, call] of calls) {
+    await assert.rejects(
+      async () => call(),
+      (err) => {
+        assert.strictEqual(err.code, "DATASET_FORBIDDEN", name);
+        assert.strictEqual(err.httpCode, 403, name);
+        return true;
+      },
+      name
+    );
+  }
+});
+
+test("the refusal happens BEFORE any query is issued", async () => {
+  // Not "runs and returns nothing" - never runs. A query that executes and is
+  // then discarded has already read the rows.
+  const db = fakeDb();
+  const service = svc(db, fakeTemplates());
+  await assert.rejects(
+    () => service.preview({ field_keys: FIELDS, filters: { status: "all" } }, reportsOnlyActor),
+    (err) => err.code === "DATASET_FORBIDDEN"
+  );
+  assert.strictEqual(db.calls.length, 0, "no SQL may be sent for a refused caller");
+});
+
+test("missing the DATASET is reported differently from missing the EXPORT verb", async () => {
+  // Two different things to ask an administrator for, so they are two
+  // different answers.
+  const service = svc(fakeDb(), fakeTemplates());
+  const body = { field_keys: FIELDS, filters: { status: "active" } };
+
+  await assert.rejects(
+    () => service.prepareExport(body, reportsOnlyActor, "csv"),
+    (err) => err.code === "DATASET_FORBIDDEN"
+  );
+  await assert.rejects(
+    () => service.prepareExport(body, viewerActor, "csv"),
+    (err) => err.code === "EXPORT_FORBIDDEN"
+  );
+});
+
+test("THE ADMIN BYPASS IS UNCHANGED", () => {
+  const service = svc(fakeDb(), fakeTemplates());
+  const admin = { userId: 1, employeeId: 1, isAdmin: true, permissions: [] };
+  assert.strictEqual(service.canReachDataset(admin), true);
+  assert.strictEqual(service.canExport(admin), true);
 });

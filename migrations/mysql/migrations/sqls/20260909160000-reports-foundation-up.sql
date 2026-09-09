@@ -4,11 +4,16 @@
 -- existing is altered: no employee row, no employee ID, no lifecycle period,
 -- no Aadhaar or bank record, no permission grant.
 --
--- Timestamped after 20260909120000 (the last migration in production) and
--- after 20260910120000, which is the FROZEN effective-dated history migration
--- on stage0c/c3-hr-master-final. That file is not on this branch and is not
--- deployed; the gap is left so that if it is ever adopted the two do not
--- collide, and so this one applies cleanly whether or not it exists.
+-- Timestamped after 20260909120000, the last migration actually in production,
+-- and dated today.
+--
+-- It previously carried a future date, 20260911120000, to sit after
+-- 20260910120000 - the effective-dated history migration on the FROZEN branch
+-- stage0c/c3-hr-master-final. That was the wrong trade: reserving ordering
+-- around an undeployed branch dates this file into the future for a collision
+-- that may never happen, and db-migrate orders by what has actually run. If
+-- that redesign is ever revived, it is the one to renumber, since it will then
+-- be the newer change.
 --
 -- Guarded so the whole file can be re-run without error.
 
