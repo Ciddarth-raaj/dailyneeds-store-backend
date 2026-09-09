@@ -15,7 +15,7 @@ exports.setup = function(options, seedLink) {
 };
 
 exports.up = function(db) {
-  var filePath = path.join(__dirname, 'sqls', '20260909120000-shift-master-phase1-up.sql');
+  var filePath = path.join(__dirname, 'sqls', '20260909200000-work-shift-phase1-up.sql');
   return new Promise( function( resolve, reject ) {
     fs.readFile(filePath, {encoding: 'utf-8'}, function(err,data){
       if (err) return reject(err);
@@ -30,7 +30,7 @@ exports.up = function(db) {
 };
 
 exports.down = function(db) {
-  var filePath = path.join(__dirname, 'sqls', '20260909120000-shift-master-phase1-down.sql');
+  var filePath = path.join(__dirname, 'sqls', '20260909200000-work-shift-phase1-down.sql');
   return new Promise( function( resolve, reject ) {
     fs.readFile(filePath, {encoding: 'utf-8'}, function(err,data){
       if (err) return reject(err);

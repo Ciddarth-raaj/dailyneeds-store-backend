@@ -52,19 +52,16 @@ class ShiftRoutes {
         }
         res.end();
       });
-      // Configuration and weekly schedule save atomically: send either half,
-      // or both, and a failure in one leaves neither written.
-      //
-      // Joi checks the shape only. The field-by-field rules - allowed enums,
-      // OT rates, non-negative minutes, and the authoritative
-      // normal_work_minutes calculation - live in utils/shiftSchedule.js so
-      // there is one copy of them rather than one here and one there.
       router.post("/update-shift", this.permissions.require(P.ADD_SHIFTS), async (req, res) => {
         try {
           const schema = {
             shift_id: Joi.number().required(),
-            shift_details: Joi.object().optional(),
-            weekly_schedule: Joi.array().items(Joi.object()).optional(),
+
+            shift_details: Joi.object({
+              shift_name: Joi.string().required(),
+              shift_in_time: Joi.string().required(),
+              shift_out_time: Joi.string().required(),
+            }).optional(),
           };
 
           const shift = req.body;
@@ -108,15 +105,24 @@ class ShiftRoutes {
   
         res.end();
       }); 
-      // Accepts the legacy body (shift_name / shift_in_time / shift_out_time /
-      // status) and the Phase 1 one (shift_code, start_time, end_time, active
-      // and the lateness, OT, attendance and regularization settings), plus an
-      // optional weekly_schedule saved in the same transaction. Validation is
-      // in utils/shiftSchedule.js rather than a Joi schema listing every field
-      // twice.
       router.post("/create", this.permissions.require(P.ADD_SHIFTS), async (req, res) => {
         try {
-          const response = await this.shiftUsecase.create(req.body);
+          const schema = {
+            shift_name: Joi.string().required(),
+            shift_in_time: Joi.string().required(),
+            status: Joi.number().optional(),
+            shift_out_time: Joi.string().required(),
+          };
+  
+          const shift = req.body;
+          console.log(shift);
+          const isValid = Joi.validate(shift, schema);
+          
+          if (isValid.error !== null) {
+            throw isValid.error;
+          }
+  
+          const response = await this.shiftUsecase.create(shift);
           res.json(response);
         } catch (err) {
           if (err.name === "ValidationError") {
@@ -126,76 +132,7 @@ class ShiftRoutes {
             res.json({ code: 500, msg: err.message });
           }
         }
-
-        res.end();
-      });
-
-      // Full configuration plus the weekly schedule, in one read.
-      router.get("/details", this.permissions.require(P.VIEW_SHIFT), async (req, res) => {
-        try {
-          const schema = {
-            shift_id: Joi.number().required(),
-          };
-          const isValid = Joi.validate(req.query, schema);
-          if (isValid.error !== null) {
-            throw isValid.error;
-          }
-
-          const data = await this.shiftUsecase.getShiftWithSchedule(req.query.shift_id);
-          if (!data) {
-            res.status(404).json({ code: 404, msg: "Shift not found" });
-            res.end();
-            return;
-          }
-          res.json({ code: 200, data });
-        } catch (err) {
-          respondError(res, err);
-        }
-
-        res.end();
-      });
-
-      router.get("/weekly-schedule", this.permissions.require(P.VIEW_SHIFT), async (req, res) => {
-        try {
-          const schema = {
-            shift_id: Joi.number().required(),
-          };
-          const isValid = Joi.validate(req.query, schema);
-          if (isValid.error !== null) {
-            throw isValid.error;
-          }
-
-          const data = await this.shiftUsecase.getWeeklySchedule(req.query.shift_id);
-          res.json({ code: 200, data });
-        } catch (err) {
-          respondError(res, err);
-        }
-
-        res.end();
-      });
-
-      // The rows sent are the shift's whole week: a weekday present is
-      // written, a weekday left out is removed.
-      router.post("/weekly-schedule", this.permissions.require(P.ADD_SHIFTS), async (req, res) => {
-        try {
-          const schema = {
-            shift_id: Joi.number().required(),
-            weekly_schedule: Joi.array().items(Joi.object()).required(),
-          };
-          const isValid = Joi.validate(req.body, schema);
-          if (isValid.error !== null) {
-            throw isValid.error;
-          }
-
-          const result = await this.shiftUsecase.saveWeeklySchedule(
-            req.body.shift_id,
-            req.body.weekly_schedule
-          );
-          res.json(result);
-        } catch (err) {
-          respondError(res, err);
-        }
-
+  
         res.end();
       });
     }

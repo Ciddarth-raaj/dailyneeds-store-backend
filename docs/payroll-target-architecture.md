@@ -276,7 +276,7 @@ semantic change · `A` = add.
 | Employment type | **A** | `employment_type ENUM('permanent','probation','contract','temporary','trainee','part_time')` |
 | Probation status | **A** | `probation_status ENUM('not_applicable','on_probation','confirmed','extended')`, `probation_end_date DATE`, `confirmation_date DATE` |
 | Reporting manager | **A** | `reporting_manager_id INT NULL` → `new_employee(employee_id)`, `ON DELETE SET NULL`. Self-referencing. Needed for OT approval routing (§7). Guard against cycles in the usecase. |
-| Default shift | **E\*** | `shift_id` exists but is stale and unreconciled; `shift_code` is a Digisme string. Replace both with `default_shift_id INT` → `shift_master(shift_id)` with a real FK. Backfill by matching `shift_code` → `shift_master.shift_code` (§4), reporting unmatched rows for manual assignment. Drop `shift_code` after Stage C. |
+| Default shift | **A** | `shift_id` exists but is stale and unreconciled, and it stays where it is, pointing at the legacy `shift_master` (§4). Payroll reads a new `default_work_shift_id INT` → `work_shift(work_shift_id)` instead. **No automatic backfill**: the mapping from employee to work shift is done by hand by HR, in its own phase, because there is nothing trustworthy to join on. |
 | Weekly off rule | **A** | `weekly_off_rule_id INT NULL` → `payroll_weekly_off_rule` (§5.1) |
 | PF applicability | **E\*** | `pf VARCHAR(45)` is free text → `pf_applicable TINYINT(1) NOT NULL DEFAULT 0`, plus `pf_joining_date DATE NULL` |
 | ESI applicability | **E\*** | `esi VARCHAR(45)` free text → `esi_applicable TINYINT(1) NOT NULL DEFAULT 0` |
@@ -330,58 +330,98 @@ something leaks.
 
 ## 4. Shift master
 
-`shift_master` exists (`shift_id`, `shift_name`, `shift_in_time TIME`,
-`shift_out_time TIME`, `status`). **Extend it in place** — the `shift_id` PK
-is already referenced from `new_employee` and there is no reason to create a
-second shift table.
+> **Superseded design.** An earlier version of this section said to extend
+> `shift_master` in place. That is no longer the plan and should not be
+> followed. Payroll gets its own tables; the legacy one is left alone.
+
+`shift_master` (`shift_id`, `shift_name`, `shift_in_time TIME`,
+`shift_out_time TIME`, `status`) **stays exactly as it is**. It serves the
+current live system, `new_employee.shift_id` keeps pointing at it, and the
+`/shift` API keeps its present behaviour. Nothing in payroll reads, extends,
+renames or backfills it.
+
+Payroll and attendance read a clean, separate pair of tables instead:
 
 ```
-shift_master  (extended)
-  shift_id                    INT PK                    existing
-  shift_code                  VARCHAR(20) UNIQUE        ADD - matches the
-                                                        Digisme ShiftCode
-                                                        values already sitting
-                                                        in new_employee.shift_code,
-                                                        so the backfill can join
-  shift_name                  VARCHAR(150)              existing
-  start_time                  TIME                      existing shift_in_time
-  end_time                    TIME                      existing shift_out_time
-  crosses_midnight            TINYINT(1) DEFAULT 0      ADD
-  break_minutes               INT DEFAULT 0             ADD
-  paid_hours                  DECIMAL(4,2)              ADD
-  late_grace_minutes          INT DEFAULT 0             ADD
-  early_exit_grace_minutes    INT DEFAULT 0             ADD
-  minimum_full_day_minutes    INT                       ADD
-  minimum_half_day_minutes    INT                       ADD
-  overtime_allowed            TINYINT(1) DEFAULT 0      ADD
-  overtime_start_after_minutes INT NULL                 ADD
-  maximum_ot_minutes_per_day  INT NULL                  ADD
-  active                      TINYINT(1) DEFAULT 1      existing `status`
-  created_at, updated_at                                ADD
+work_shift
+  work_shift_id               INT PK
+  shift_code                  VARCHAR(20) NOT NULL UNIQUE  entered by hand,
+                                                           never derived from
+                                                           the old shift master
+  shift_name                  VARCHAR(150) NOT NULL
+  active                      TINYINT(1) DEFAULT 1
+  -- lateness settings
+  late_grace_minutes, late_deduction_interval_minutes,
+  late_deduct_minutes, late_exclude_grace_from_deduction,
+  late_offset_against_overtime
+  -- early-out settings
+  early_exit_grace_minutes, early_exit_deduction_interval_minutes,
+  early_exit_deduct_minutes, early_exit_offset_against_overtime
+  -- post-shift OT
+  overtime_allowed, overtime_minimum_minutes,
+  overtime_rounding_method ENUM('NONE','UP','DOWN','NEAREST'),
+  overtime_rounding_interval_minutes,
+  overtime_minimum_threshold_only, maximum_ot_minutes_per_day
+  -- pre-shift OT
+  pre_shift_overtime_allowed, pre_shift_overtime_minimum_minutes,
+  pre_shift_overtime_rounding_method, pre_shift_overtime_rounding_interval_minutes
+  -- general attendance
+  missed_clock_in_rule_enabled,
+  missed_clock_in_treatment ENUM('FULL_DAY','HALF_DAY','LEAVE'),
+  minimum_hours_rule_enabled, minimum_half_day_minutes, minimum_full_day_minutes
+  -- regularization (settings only, no workflow)
+  regularization_allowed, regularization_control_enabled,
+  regularization_limit_per_month, regularization_require_existing_punch,
+  regularization_requires_approval
+  created_at, updated_at
+
+work_shift_weekly_schedule
+  work_shift_weekly_schedule_id INT PK
+  work_shift_id                 INT FK -> work_shift(work_shift_id)
+  day_of_week                   TINYINT      0=Sunday .. 6=Saturday
+  is_working_day                TINYINT(1)
+  in_time, out_time             TIME NULL    NULL on a rest day
+  attendance_day_cutoff         TIME NULL
+  break_minutes                 INT
+  normal_work_minutes           INT          computed by the backend
+  ot_rate                       DECIMAL(3,1) one of 0, 1, 1.5, 2, 3
+  created_at, updated_at
+  UNIQUE (work_shift_id, day_of_week)
 ```
 
-Rename `shift_in_time`/`shift_out_time` → `start_time`/`end_time` and
-`status` → `active` in the same migration; only `repository/shift.js` and
-`repository/employee.js` reference them.
+**The weekly schedule is the source of truth for time.** There is no second
+authoritative In/Out on `work_shift` — no `start_time`, no `end_time`, no
+master-level break. A shift's hours on a Tuesday are the Tuesday row, and a
+saved schedule is always the complete week: exactly seven rows, Sunday
+through Saturday, each explicitly Working or Rest. A partial save is
+rejected rather than completed by guesswork.
 
-`crosses_midnight` is what makes night-shift attendance correct: a punch-out
-at 02:10 belongs to the previous day's shift. The attendance processor
-(§6.3) reads this flag to decide which work date a punch is attributed to —
-without it, every night-shift worker looks absent one day and doubly present
-the next.
+`normal_work_minutes` is computed by the backend from `in_time`, `out_time`
+and `break_minutes` (utils/workShift.js), never taken from the caller. An
+out time earlier than the in time is the next day: 22:00 → 06:00 with a 30
+minute break is 450 minutes.
 
-**Existing rows are suspect.** `shift_master` has never been maintained
-against Digisme and `new_employee.shift_id` is largely stale. Treat the
-existing rows as untrusted: define the real shift set from scratch with
-operations, backfill `shift_code` from the Digisme values, then map every
-active employee to a `default_shift_id`, listing the unmatched for manual
-assignment. This is a data exercise, not a code one, and it should happen in
-Stage 1 while Digisme is still available to answer questions.
+`attendance_day_cutoff` is the attendance-day boundary — which work date a
+punch is attributed to — and is a separate concern from whether the shift
+crosses midnight. Overnight is derived from the times themselves, not stored
+as a flag.
 
-**Default shift, roster overrides.** `new_employee.default_shift_id` is the
-fallback. The roster (§5) overrides it for a given date. Attendance
-processing resolves the shift for a day as: roster row → employee default →
-unresolved (flagged, not guessed).
+**Employee mapping is later and manual.** `work_shift` starts empty and the
+real shift set is entered by hand. There is no automatic mapping from
+`shift_master` to `work_shift` and no backfill of employees, because there is
+nothing trustworthy to join on: `shift_master` has never been maintained
+against Digisme and `new_employee.shift_id` is largely stale. HR assigns
+employees to work shifts in a separate phase, deliberately by hand.
+
+**Default shift, roster overrides.** Once that mapping exists,
+`new_employee.default_work_shift_id` is the fallback. The roster (§5)
+overrides it for a given date. Attendance processing resolves the shift for
+a day as: roster row → employee default → unresolved (flagged, not guessed).
+
+**API.** The new model is served under `/work-shift`
+(routes/usecase/repository `work_shift.js`), separate from the legacy
+`/shift` routes, and reuses the existing `view_shift` / `add_shifts`
+permissions.
 
 ---
 
@@ -413,7 +453,7 @@ payroll_shift_roster
   roster_id        BIGINT PK
   employee_id      INT NOT NULL   FK new_employee(employee_id)
   work_date        DATE NOT NULL
-  shift_id         INT NULL       FK shift_master(shift_id)   -- NULL when weekly off
+  work_shift_id    INT NULL       FK work_shift(work_shift_id) -- NULL when weekly off
   outlet_id        INT NULL       FK outlets(outlet_id)       -- assigned location that day
   is_weekly_off    TINYINT(1) NOT NULL DEFAULT 0
   is_holiday       TINYINT(1) NOT NULL DEFAULT 0
@@ -577,7 +617,7 @@ payroll_attendance_day
   employee_id       INT NOT NULL FK new_employee(employee_id)
   work_date         DATE NOT NULL
   roster_id         BIGINT NULL FK payroll_shift_roster(roster_id)
-  shift_id          INT NULL FK shift_master(shift_id)     -- shift as applied
+  work_shift_id     INT NULL FK work_shift(work_shift_id)  -- shift as applied
   outlet_id         INT NULL FK outlets(outlet_id)         -- location as worked
 
   first_in          DATETIME NULL
@@ -1150,7 +1190,8 @@ never deleted.
 | Table | Change |
 | --- | --- |
 | `new_employee` | `origin`, `employment_type`, `probation_status`, `probation_end_date`, `confirmation_date`, `reporting_manager_id` (self-FK), `default_shift_id` (FK), `weekly_off_rule_id`, `last_working_date`, `exit_type`, `exit_reason`, `rehire_eligible`, `pf_applicable`, `esi_applicable`, `pf_joining_date`. Type changes: `date_of_joining` → `DATE`, `gender` → ENUM, `employee_name` → `VARCHAR(100)`. Add the missing FKs to `designation`, `department`, `outlets`. **`employee_id` unchanged** — server-side allocation continues the existing sequence. Drop `shift_code` and `salary` after Stage 2. |
-| `shift_master` | `shift_code` UNIQUE, `crosses_midnight`, `break_minutes`, `paid_hours`, `late_grace_minutes`, `early_exit_grace_minutes`, `minimum_full_day_minutes`, `minimum_half_day_minutes`, `overtime_allowed`, `overtime_start_after_minutes`, `maximum_ot_minutes_per_day`, timestamps; rename `shift_in_time`/`shift_out_time`/`status` → `start_time`/`end_time`/`active` |
+| `shift_master` | **nothing — left exactly as it is** (§4). The legacy shift system keeps it. |
+| `work_shift`, `work_shift_weekly_schedule` | new tables (§4): shift configuration, plus the 7-day weekly schedule that is the source of truth for daily In/Out times |
 | `all_permissions` | the ~30 new keys in §11.2 |
 
 **New tables** (all money `DECIMAL(12,2)`; all employee references FK to
@@ -1249,8 +1290,9 @@ groups in `constants/permissions.js` and `constants/menus.js`.
    to `DATE`; add the missing FKs; add `origin` and backfill it to
    `'digisme'`; move `employee_id` allocation from the client to the server
    in `POST /employee`.
-8. Extend `shift_master` (§4); rebuild the shift set with operations;
-   backfill `default_shift_id`; report unmatched.
+8. Create `work_shift` + `work_shift_weekly_schedule` (§4), leaving
+   `shift_master` untouched; enter the real shift set with operations; HR
+   maps employees to work shifts by hand.
 9. Build the HR lifecycle screens — joiner, transfer, promotion, probation,
    confirmation, exit — and move HR's daily work into dnds.co.in.
 10. **Sync Stage A**: narrow the Digisme field map. Release `designation`,

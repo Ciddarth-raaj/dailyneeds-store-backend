@@ -1,5 +1,5 @@
 /**
- * Shift Master validation - Phase 1 (payroll foundation).
+ * Work Shift validation - Phase 1 (payroll foundation).
  *
  * Pure functions only: no database, no Express. The backend is the
  * authoritative validator for a weekly schedule, so `normal_work_minutes` is
@@ -7,6 +7,10 @@
  * whatever the caller sent. A caller that sends a value which disagrees with
  * the computed one gets an error naming both numbers, which is how a frontend
  * arithmetic bug surfaces immediately instead of quietly reaching payroll.
+ *
+ * This is the NEW shift master (`work_shift` + `work_shift_weekly_schedule`).
+ * The legacy `shift_master` table and its /shift routes are a separate,
+ * untouched system; nothing here reads or writes them.
  *
  * Nothing in this file calculates pay. The lateness, early-out and OT settings
  * validated here are configuration for engines that are a later phase.
@@ -33,21 +37,9 @@ const OT_RATES = [0, 1, 1.5, 2, 3];
 
 const ROUNDING_METHODS = ["NONE", "UP", "DOWN", "NEAREST"];
 const MISSED_CLOCK_IN_TREATMENTS = ["FULL_DAY", "HALF_DAY", "LEAVE"];
-const REGULARIZATION_CONTROLS = ["NONE", "LIMITED", "UNLIMITED"];
-
-/**
- * Old column name -> new one. Both spellings are accepted on the way in for as
- * long as `shift_in_time` / `shift_out_time` / `status` remain on the table.
- */
-const LEGACY_FIELD_ALIASES = {
-  shift_in_time: "start_time",
-  shift_out_time: "end_time",
-  status: "active",
-};
 
 const BOOLEAN_FIELDS = [
   "active",
-  "crosses_midnight",
   "late_exclude_grace_from_deduction",
   "late_offset_against_overtime",
   "early_exit_offset_against_overtime",
@@ -57,12 +49,12 @@ const BOOLEAN_FIELDS = [
   "missed_clock_in_rule_enabled",
   "minimum_hours_rule_enabled",
   "regularization_allowed",
+  "regularization_control_enabled",
   "regularization_require_existing_punch",
   "regularization_requires_approval",
 ];
 
 const NON_NEGATIVE_INT_FIELDS = [
-  "break_minutes",
   "late_grace_minutes",
   "late_deduction_interval_minutes",
   "late_deduct_minutes",
@@ -87,22 +79,26 @@ const ENUM_FIELDS = {
   overtime_rounding_method: ROUNDING_METHODS,
   pre_shift_overtime_rounding_method: ROUNDING_METHODS,
   missed_clock_in_treatment: MISSED_CLOCK_IN_TREATMENTS,
-  regularization_control: REGULARIZATION_CONTROLS,
 };
 
-const TIME_FIELDS = ["start_time", "end_time"];
-
-/** Every shift_master field a caller may set, for whitelisting a payload. */
-const SHIFT_CONFIG_FIELDS = [
+/**
+ * Every `work_shift` field a caller may set, for whitelisting a payload.
+ *
+ * Note what is absent: no start_time/end_time, no crosses_midnight, no
+ * master-level break. Daily timing lives only in the weekly schedule, so
+ * there is one authoritative answer to when a shift runs on a given day.
+ */
+const WORK_SHIFT_CONFIG_FIELDS = [
   "shift_code",
   "shift_name",
-  "paid_hours",
-  ...TIME_FIELDS,
   ...BOOLEAN_FIELDS,
   ...NON_NEGATIVE_INT_FIELDS,
   ...NULLABLE_NON_NEGATIVE_INT_FIELDS,
   ...Object.keys(ENUM_FIELDS),
 ];
+
+const SHIFT_CODE_MAX_LENGTH = 20;
+const SHIFT_NAME_MAX_LENGTH = 150;
 
 const isBlank = (value) =>
   value === undefined || value === null || value === "";
@@ -136,7 +132,12 @@ function formatMinutesToTime(minutes) {
   return `${hh}:${mm}:00`;
 }
 
-/** True when the shift ends on the calendar day after it starts. */
+/**
+ * True when the shift ends on the calendar day after it starts.
+ *
+ * Derived, never stored: `attendance_day_cutoff` is a separate concept (which
+ * work date a punch is attributed to) and is not the overnight indicator.
+ */
 function crossesMidnight(inMinutes, outMinutes) {
   if (inMinutes === null || outMinutes === null) return false;
   return outMinutes < inMinutes;
@@ -335,10 +336,14 @@ function validateWeeklyScheduleRow(row) {
 }
 
 /**
- * Validate a whole weekly schedule: every row valid, and at most one row per
- * weekday for the shift.
+ * Validate a whole weekly schedule.
  *
- * @returns {{errors: string[], value: object[]|null}}
+ * A saved schedule is always the complete week: exactly seven rows, one for
+ * each day 0-6, each explicitly Working or Rest. Six days are not accepted and
+ * a missing day is never invented as a rest day - a shift that is only
+ * partly defined is exactly the state payroll must never read.
+ *
+ * @returns {{errors: string[], value: object[]|null}} rows sorted Sunday first
  */
 function validateWeeklySchedule(rows) {
   if (!Array.isArray(rows)) {
@@ -346,8 +351,7 @@ function validateWeeklySchedule(rows) {
   }
 
   const errors = [];
-  const value = [];
-  const seenDays = new Map();
+  const byDay = new Map();
 
   rows.forEach((row) => {
     const result = validateWeeklyScheduleRow(row);
@@ -357,82 +361,111 @@ function validateWeeklySchedule(rows) {
     }
 
     const day = result.value.day_of_week;
-    if (seenDays.has(day)) {
+    if (byDay.has(day)) {
       errors.push(
         `${DAY_OF_WEEK_LABELS[day]}: appears more than once - a shift may have only one row per weekday`
       );
       return;
     }
-    seenDays.set(day, true);
-    value.push(result.value);
+    byDay.set(day, result.value);
   });
 
+  // Reported even when rows also failed individually: a caller that sent five
+  // broken days should hear about the two it never sent at all.
+  const missing = DAY_OF_WEEK_LABELS.map((label, day) => (byDay.has(day) ? null : label))
+    .filter(Boolean);
+  if (missing.length > 0) {
+    errors.push(
+      `weekly_schedule must contain all 7 days, one row each for Sunday..Saturday - missing ${missing.join(", ")}`
+    );
+  }
+
   if (errors.length > 0) return { errors, value: null };
-  return { errors, value };
+
+  return {
+    errors,
+    value: DAY_OF_WEEK_LABELS.map((_, day) => byDay.get(day)),
+  };
 }
 
 /**
- * Validate and normalize a shift_master configuration payload.
+ * Cross-field rules that need the shift's whole configuration, not just the
+ * keys this request happened to send.
+ *
+ * `effective` is the row as it will be after the update: the stored row with
+ * the validated changes laid over it. That is what makes "enable control in
+ * one request, set the limit in another" behave the same as sending both.
+ */
+function validateConfigCombination(effective) {
+  const errors = [];
+
+  if (toTinyInt(effective.regularization_control_enabled) === 1) {
+    const limit = effective.regularization_limit_per_month;
+    const parsed = isBlank(limit) ? null : parseNonNegativeInt(limit);
+    if (parsed === null || parsed < 1) {
+      errors.push(
+        "regularization_limit_per_month must be at least 1 when regularization_control_enabled is true - it is the number of times per month an employee may regularize"
+      );
+    }
+  }
+
+  return errors;
+}
+
+/**
+ * Validate and normalize a `work_shift` configuration payload.
  *
  * Only keys the caller actually sent come back, so this is safe for a partial
- * update. Legacy `shift_in_time` / `shift_out_time` / `status` are accepted and
- * folded onto their new names; unknown keys are ignored rather than written.
+ * update; unknown keys are ignored rather than written.
  *
+ * @param {object} payload the request body
+ * @param {{isCreate?: boolean, existing?: object}} options `existing` is the
+ *   stored row, used so cross-field rules see the post-update state.
  * @returns {{errors: string[], value: object|null}}
  */
-function validateShiftConfig(payload) {
+function validateWorkShiftConfig(payload, options = {}) {
+  const { isCreate = false, existing = null } = options;
+
   if (!payload || typeof payload !== "object") {
-    return { errors: ["Shift details must be an object"], value: null };
+    return { errors: ["Work shift details must be an object"], value: null };
   }
 
   const errors = [];
   const input = {};
 
   Object.keys(payload).forEach((key) => {
-    const canonical = LEGACY_FIELD_ALIASES[key] || key;
-    if (!SHIFT_CONFIG_FIELDS.includes(canonical)) return;
-    // An explicit new-name value beats the legacy alias for the same column.
-    if (canonical !== key && payload[canonical] !== undefined) return;
-    input[canonical] = payload[key];
+    if (!WORK_SHIFT_CONFIG_FIELDS.includes(key)) return;
+    input[key] = payload[key];
   });
 
   const value = {};
 
-  if (input.shift_name !== undefined) {
-    const name = String(input.shift_name).trim();
-    if (name === "" || name.length > 150) {
-      errors.push("shift_name must be between 1 and 150 characters");
-    } else {
-      value.shift_name = name;
-    }
-  }
-
-  if (input.shift_code !== undefined) {
+  // shift_code is mandatory on create and may never be blanked afterwards:
+  // every work shift is entered by hand, so there is no legacy row without
+  // one. Uniqueness itself is the DB's job (uq_work_shift_shift_code).
+  if (input.shift_code !== undefined || isCreate) {
     if (isBlank(input.shift_code)) {
-      value.shift_code = null;
+      errors.push("shift_code is required and cannot be blank");
     } else {
       const code = String(input.shift_code).trim();
-      if (code.length > 20) {
-        errors.push("shift_code must be 20 characters or fewer");
+      if (code === "") {
+        errors.push("shift_code is required and cannot be blank");
+      } else if (code.length > SHIFT_CODE_MAX_LENGTH) {
+        errors.push(`shift_code must be ${SHIFT_CODE_MAX_LENGTH} characters or fewer`);
       } else {
         value.shift_code = code;
       }
     }
   }
 
-  TIME_FIELDS.forEach((field) => {
-    if (input[field] === undefined) return;
-    if (isBlank(input[field])) {
-      value[field] = null;
-      return;
-    }
-    const minutes = parseTimeToMinutes(input[field]);
-    if (minutes === null) {
-      errors.push(`${field} must be a time of day as HH:MM or HH:MM:SS`);
+  if (input.shift_name !== undefined || isCreate) {
+    const name = isBlank(input.shift_name) ? "" : String(input.shift_name).trim();
+    if (name === "" || name.length > SHIFT_NAME_MAX_LENGTH) {
+      errors.push(`shift_name is required and must be ${SHIFT_NAME_MAX_LENGTH} characters or fewer`);
     } else {
-      value[field] = formatMinutesToTime(minutes);
+      value.shift_name = name;
     }
-  });
+  }
 
   BOOLEAN_FIELDS.forEach((field) => {
     if (input[field] === undefined) return;
@@ -479,55 +512,12 @@ function validateShiftConfig(payload) {
     }
   });
 
-  if (input.paid_hours !== undefined) {
-    if (isBlank(input.paid_hours)) {
-      value.paid_hours = null;
-    } else {
-      const hours = toNumber(input.paid_hours);
-      if (hours === null || hours < 0 || hours > 24) {
-        errors.push("paid_hours must be a number between 0 and 24, or empty");
-      } else {
-        value.paid_hours = hours;
-      }
-    }
-  }
+  if (errors.length > 0) return { errors, value: null };
 
-  // Derived rather than asked for, unless the caller was explicit about it.
-  if (
-    value.crosses_midnight === undefined &&
-    value.start_time !== undefined &&
-    value.end_time !== undefined &&
-    value.start_time !== null &&
-    value.end_time !== null
-  ) {
-    value.crosses_midnight = crossesMidnight(
-      parseTimeToMinutes(value.start_time),
-      parseTimeToMinutes(value.end_time)
-    )
-      ? 1
-      : 0;
-  }
+  errors.push(...validateConfigCombination({ ...(existing || {}), ...value }));
 
   if (errors.length > 0) return { errors, value: null };
   return { errors, value };
-}
-
-/**
- * Mirror the three renamed columns back onto their originals.
- *
- * Phase 1 renamed `shift_in_time` / `shift_out_time` / `status` but did not
- * drop them, because the live web app still reads all three. Every write
- * therefore sets both spellings so the two can never drift apart.
- * repository/shift.js is the only writer of shift_master, so doing it here is
- * enough - no trigger, no generated column. Delete this, and the legacy
- * columns, once the frontend reads the new names.
- */
-function withLegacyColumns(config) {
-  const row = { ...config };
-  if (row.start_time !== undefined) row.shift_in_time = row.start_time;
-  if (row.end_time !== undefined) row.shift_out_time = row.end_time;
-  if (row.active !== undefined) row.status = row.active;
-  return row;
 }
 
 module.exports = {
@@ -536,9 +526,7 @@ module.exports = {
   OT_RATES,
   ROUNDING_METHODS,
   MISSED_CLOCK_IN_TREATMENTS,
-  REGULARIZATION_CONTROLS,
-  LEGACY_FIELD_ALIASES,
-  SHIFT_CONFIG_FIELDS,
+  WORK_SHIFT_CONFIG_FIELDS,
   parseTimeToMinutes,
   formatMinutesToTime,
   crossesMidnight,
@@ -546,6 +534,5 @@ module.exports = {
   computeNormalWorkMinutes,
   validateWeeklyScheduleRow,
   validateWeeklySchedule,
-  validateShiftConfig,
-  withLegacyColumns,
+  validateWorkShiftConfig,
 };

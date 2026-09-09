@@ -187,6 +187,9 @@ class Server {
       this.mysql.connection
     );
     this.shiftRepo = require("./repository/shift")(this.mysql.connection);
+    // The new payroll/attendance shift master. Separate from shiftRepo above,
+    // which still owns the legacy `shift_master` table.
+    this.workShiftRepo = require("./repository/work_shift")(this.mysql.connection);
     this.storeRepo = require("./repository/store")(this.mysql.connection);
     this.outletRepo = require("./repository/outlet")(this.mysql.connection);
     this.familyRepo = require("./repository/family")(this.mysql.connection);
@@ -466,6 +469,7 @@ class Server {
       this.employeeBankRepo
     );
     this.shiftUsecase = require("./usecase/shift")(this.shiftRepo);
+    this.workShiftUsecase = require("./usecase/work_shift")(this.workShiftRepo);
     this.storeUsecase = require("./usecase/store")(this.storeRepo);
     this.outletUsecase = require("./usecase/outlet")(
       this.outletRepo,
@@ -791,6 +795,10 @@ class Server {
       this.permissions
     );
     const shiftRouter = require("./routes/shift")(this.shiftUsecase, this.permissions);
+    const workShiftRouter = require("./routes/work_shift")(
+      this.workShiftUsecase,
+      this.permissions
+    );
     const storeRouter = require("./routes/store")(this.storeUsecase);
     const outletRouter = require("./routes/outlet")(
       this.outletUsecase,
@@ -1007,6 +1015,9 @@ class Server {
     // and Attendance and Payroll will mount beside this one, not inside HR.
     app.use("/reports/employee-master", employeeReportRouter.getRouter());
     app.use("/shift", shiftRouter.getRouter());
+    // The new payroll/attendance shift master. /shift above is unchanged and
+    // still serves the legacy `shift_master` system.
+    app.use("/work-shift", workShiftRouter.getRouter());
     app.use("/store", storeRouter.getRouter());
     app.use("/outlet", outletRouter.getRouter());
     app.use("/company", companyRouter.getRouter());
