@@ -12,6 +12,35 @@ class DepartmentRoutes {
   }
 
   init() {
+    /**
+     * The department picker list — an id, a label and the status.
+     *
+     * Authenticated, and deliberately NOT gated on `view_department`. Holding that
+     * permission means ADMINISTERING the department master; it was never a
+     * prerequisite for being ASSIGNED one. Gating the picker on it left an HR
+     * user holding `employee_edit` looking at an empty dropdown on the employee
+     * profile, so the field could not be changed at all — the same failure
+     * `GET /outlet/directory` was added to fix, and this follows that
+     * precedent: return less rather than hand back the permission.
+     *
+     * It grants nothing administrative — no write of any kind, and none of the
+     * master's other columns.
+     *
+     * INACTIVE ROWS ARE INCLUDED, with their status. An employee assigned to a
+     * department that has since been switched off must still see it and must still
+     * have it preselected when editing; excluding it would silently blank a
+     * real assignment.
+     */
+    router.get("/directory", async (req, res) => {
+      try {
+        res.json(await this.departmentUsecase.getDirectory());
+      } catch (err) {
+        console.log(err);
+        res.json({ code: 500, msg: "An error occurred !" });
+      }
+      res.end();
+    });
+
     router.get("/", this.permissions.require(P.VIEW_DEPARTMENT), async (req, res) => {
         try {
           const department = await this.departmentUsecase.get();

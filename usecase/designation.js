@@ -3,6 +3,17 @@ class DesignationUsecase {
     this.designationRepo = designationRepo;
   }
 
+  /** The picker list - id, label and status. See the repository for why. */
+  getDirectory() {
+    return new Promise(async (resolve, reject) => {
+      try {
+        resolve(await this.designationRepo.getDirectory());
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
   get() {
     return new Promise(async (resolve, reject) => {
       try {

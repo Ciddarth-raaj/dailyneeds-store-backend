@@ -12,6 +12,28 @@ class ShiftRoutes {
   }
 
   init() {
+    /**
+     * The shift picker list — an id, a label and the status.
+     *
+     * Authenticated, and deliberately NOT gated on `view_shift`, for the same
+     * reason as `/department/directory` and `/designation/directory`: holding
+     * that permission means administering the shift master, and it was never a
+     * prerequisite for being assigned a shift. `useShifts` already documented
+     * that HR "does not necessarily hold" it.
+     *
+     * Inactive rows are included, with their status, so an employee on a shift
+     * that was later switched off still shows it and still preselects it.
+     */
+    router.get("/directory", async (req, res) => {
+      try {
+        res.json(await this.shiftUsecase.getDirectory());
+      } catch (err) {
+        console.log(err);
+        res.json({ code: 500, msg: "An error occurred !" });
+      }
+      res.end();
+    });
+
     router.get("/", this.permissions.require(P.VIEW_SHIFT), async (req, res) => {
         try {
           const shift = await this.shiftUsecase.get();

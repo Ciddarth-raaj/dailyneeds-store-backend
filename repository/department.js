@@ -5,6 +5,30 @@ class DepartmentRepository {
     this.db = db;
   }
 
+  getDirectory() {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "SELECT department_id, department_name, `status` FROM department ORDER BY department_name ASC",
+        [],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.DEPARTMENT",
+              code: "REPOSITORY.DEPARTMENT.GET-DIRECTORY",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        }
+      );
+    });
+  }
+
   get() {
     return new Promise((resolve, reject) => {
       this.db.query("SELECT * FROM department", [], (err, docs) => {
