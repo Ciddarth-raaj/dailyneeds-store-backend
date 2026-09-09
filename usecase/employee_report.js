@@ -1,6 +1,6 @@
 const catalogue = require("../constants/employee_report_catalogue");
 const reportConfig = require("../config/reports");
-const { buildEmployeeScope } = require("../repository/employee_scope");
+const { buildReportAccessScope } = require("../repository/employee_scope");
 const P = require("../constants/hr_permissions");
 
 /**
@@ -19,9 +19,16 @@ const P = require("../constants/hr_permissions");
  * SELECT list, the JOINs, the WHERE structure and the ORDER BY are all
  * assembled from catalogue text.
  *
- * THE POPULATION IS NOT REINTERPRETED. Who appears at all comes from
- * `buildEmployeeScope`, the same unit the HR directory uses. Reports adds
- * status and search on top of it; it does not restate who is visible.
+ * AUTHORIZATION IS SHARED; POPULATION IS NOT. Which rows a caller may reach
+ * comes from `buildReportAccessScope` - the same access unit the HR directory
+ * composes - so a future outlet restriction lands on both at once and cannot
+ * be applied to one and forgotten on the other.
+ *
+ * What Reports does NOT inherit is the directory's own population rule, which
+ * hides anyone whose name appears in `resignation`. That is a legacy quirk of
+ * one screen, not authorization: inheriting it would make a "Resigned" report
+ * return nothing and an "All" report quietly mean "all except the ones who
+ * left". A report's population is decided by its explicit status filter.
  */
 
 class ReportValidationError extends Error {
@@ -183,20 +190,29 @@ function resolveFilters(raw = {}) {
  * Every fragment below is either a literal in this file or a value bound to a
  * placeholder. Nothing is concatenated from the request.
  */
-function buildQuery(fields, filters, { count = false, limit = null, offset = 0 } = {}) {
-  // The population, from the shared unit. Store and designation are handled
-  // here rather than passed into the scope so that Reports' multi-select and
-  // the directory's own filter cannot drift apart in meaning.
-  const scope = buildEmployeeScope([], {
-    store_ids: filters.outlet_ids,
-    designation_ids: filters.designation_ids,
-  });
+function buildQuery(fields, filters, { count = false, limit = null, offset = 0, actor = null } = {}) {
+  // AUTHORIZATION ONLY, plus the caller's own outlet/designation narrowing.
+  //
+  // Deliberately NOT the directory's population rule. The directory hides
+  // anyone whose name appears in `resignation`; inheriting that here would
+  // make "Resigned" return nothing and "All" quietly mean "all except the
+  // ones who left" - wrong in a way a reader of the spreadsheet cannot see.
+  // A report's population is decided by its status filter, below.
+  const scope = buildReportAccessScope(
+    { store_ids: filters.outlet_ids, designation_ids: filters.designation_ids },
+    actor
+  );
 
-  const where = [scope.where.replace(/^WHERE\s*/i, "")];
+  const where = [...scope.conditions];
   const params = [...scope.params];
 
+  // The status filter IS the population. `new_employee.status` is the current
+  // employment state - 1 is employed, anything else is not - which is what
+  // §5's "current values only" means here; the C1 employment periods carry
+  // the lifecycle detail and are not consulted for a current-state report.
   if (filters.status === "active") where.push("new_employee.status = 1");
   else if (filters.status === "inactive") where.push("(new_employee.status <> 1 OR new_employee.status IS NULL)");
+  // "all" adds no condition at all, and now genuinely means all.
 
   if (filters.department_ids.length) {
     where.push("new_employee.department_id IN (?)");
@@ -216,7 +232,9 @@ function buildQuery(fields, filters, { count = false, limit = null, offset = 0 }
   const needed = [...new Set(fields.map((f) => f.join).filter(Boolean))];
   const joins = needed.map((name) => catalogue.JOINS[name]).filter(Boolean).join("\n     ");
 
-  const whereSql = `WHERE ${where.join(" AND ")}`;
+  // "All" with no filters legitimately constrains nothing, and `WHERE` with
+  // an empty predicate is a syntax error rather than a wide query.
+  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
   if (count) {
     return {

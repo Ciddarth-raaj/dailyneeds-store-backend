@@ -316,3 +316,30 @@ test("every field declares a group and a join footprint", () => {
     if (f.join) assert.ok(catalogue.JOINS[f.join], `${f.key} names an undefined join`);
   }
 });
+
+/* ========== the report population is the status filter, not the directory's */
+test("THE REPORT NEVER INHERITS THE DIRECTORY'S RESIGNATION EXCLUSION", () => {
+  // If it did, "Resigned" would return nobody and "All" would quietly mean
+  // "all except the ones who left" - wrong in a way a reader of the
+  // spreadsheet cannot see.
+  const { fields } = resolveFields(["employee_id"], adminActor);
+  for (const status of ["active", "inactive", "all"]) {
+    const { sql } = buildQuery(fields, resolveFilters({ status }));
+    assert.ok(!/employee_name NOT IN/.test(sql), `${status}: no name exclusion`);
+    assert.ok(!/resignation/i.test(sql), `${status}: the resignation table is not consulted`);
+  }
+});
+
+test("'all' with no filters constrains nothing, and is still valid SQL", () => {
+  const { fields } = resolveFields(["employee_id"], adminActor);
+  const { sql, params } = buildQuery(fields, resolveFilters({ status: "all" }));
+  assert.ok(!/WHERE/.test(sql), "an unfiltered All has no predicate at all");
+  assert.deepStrictEqual(params, []);
+  assert.match(sql, /ORDER BY new_employee\.employee_id ASC/);
+});
+
+test("'inactive' selects on the employment status column, including NULL", () => {
+  const { fields } = resolveFields(["employee_id"], adminActor);
+  const { sql } = buildQuery(fields, resolveFilters({ status: "inactive" }));
+  assert.match(sql, /new_employee\.status <> 1 OR new_employee\.status IS NULL/);
+});

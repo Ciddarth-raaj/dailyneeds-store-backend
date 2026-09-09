@@ -15,7 +15,13 @@ const assert = require("node:assert");
 const fs = require("fs");
 const path = require("path");
 
-const { buildEmployeeScope } = require("./employee_scope");
+const {
+  buildEmployeeScope,
+  buildReportAccessScope,
+  accessScope,
+  directoryPopulation,
+  lookupFilters,
+} = require("./employee_scope");
 
 /** Whitespace differs between a template literal and a joined string. */
 const norm = (s) => s.replace(/\s+/g, " ").trim();
@@ -115,4 +121,66 @@ test("no caller-supplied string can reach the clause", () => {
   assert.ok(!where.includes("DROP"), "no value is interpolated into SQL");
   assert.ok(!where.includes("1=1"));
   assert.strictEqual((where.match(/\?/g) || []).length, 3, "values travel as placeholders");
+});
+
+/* ============== access scope and directory population are separate ====== */
+test("ACCESS SCOPE AND DIRECTORY POPULATION ARE DIFFERENT CONCEPTS", () => {
+  // Authorization: which rows the caller may reach. Empty today, and that is
+  // a finding rather than an omission - there is no per-actor row restriction
+  // on the HR directory.
+  assert.deepStrictEqual(accessScope({ userId: 21, isAdmin: false }), {
+    conditions: [],
+    params: [],
+  });
+  assert.deepStrictEqual(accessScope(null), { conditions: [], params: [] });
+
+  // Population: a legacy rule belonging to one screen.
+  const pop = directoryPopulation(["Gone"]);
+  assert.deepStrictEqual(pop.conditions, [
+    "(new_employee.employee_name NOT IN (?) OR ? IS NULL)",
+  ]);
+  assert.deepStrictEqual(pop.params, [["Gone"], ["Gone"]]);
+});
+
+test("lookup filters are narrowing, and belong to neither concept", () => {
+  assert.deepStrictEqual(lookupFilters({}), { conditions: [], params: [] });
+  const both = lookupFilters({ store_ids: [2], designation_ids: [15] });
+  assert.deepStrictEqual(both.conditions, [
+    "new_employee.store_id IN (?)",
+    "new_employee.designation_id IN (?)",
+  ]);
+  assert.deepStrictEqual(both.params, [[2], [15]]);
+});
+
+test("A REPORT GETS AUTHORIZATION BUT NOT THE RESIGNATION EXCLUSION", () => {
+  // The whole point of the separation. If the report inherited the
+  // directory's population rule, a "Resigned" report would return nothing
+  // and "All" would quietly mean "all except the ones who left".
+  const scope = buildReportAccessScope({ store_ids: [2] }, { userId: 21 });
+  assert.deepStrictEqual(scope.conditions, ["new_employee.store_id IN (?)"]);
+  assert.deepStrictEqual(scope.params, [[2]]);
+
+  const joined = scope.conditions.join(" ");
+  assert.ok(!/employee_name NOT IN/.test(joined), "no resignation exclusion");
+  assert.ok(!/resignation/i.test(joined));
+});
+
+test("an unfiltered report constrains nothing at all", () => {
+  const scope = buildReportAccessScope({}, null);
+  assert.deepStrictEqual(scope, { conditions: [], params: [] });
+});
+
+test("THE DIRECTORY STILL COMPOSES BOTH, UNCHANGED", () => {
+  // Composed from the units now, but the clause and parameter order are
+  // identical to the inline original.
+  const { where, params } = buildEmployeeScope(["Gone"], {
+    store_ids: [2],
+    designation_ids: [15],
+  });
+  assert.strictEqual(
+    norm(where),
+    "WHERE (new_employee.employee_name NOT IN (?) OR ? IS NULL) " +
+      "AND new_employee.store_id IN (?) AND new_employee.designation_id IN (?)"
+  );
+  assert.deepStrictEqual(params, [["Gone"], ["Gone"], [2], [15]]);
 });
