@@ -1,4 +1,5 @@
 const logger = require("../utils/logger");
+const { buildEmployeeScope } = require("./employee_scope");
 
 class EmployeeRepository {
   constructor(db) {
@@ -228,35 +229,14 @@ class EmployeeRepository {
   }
   get(resignation, filters) {
     return new Promise((resolve, reject) => {
-      let filterConditions = [];
-      let filterValues = [
-        resignation.length ? resignation : null,
-        resignation.length ? resignation : null,
-      ];
-
-      // Add store filter condition if store_ids are provided
-      if (filters && filters.store_ids && filters.store_ids.length > 0) {
-        filterConditions.push("new_employee.store_id IN (?)");
-        filterValues.push(filters.store_ids);
-      }
-
-      // Add designation filter condition if designation_ids are provided
-      if (
-        filters &&
-        filters.designation_ids &&
-        filters.designation_ids.length > 0
-      ) {
-        filterConditions.push("new_employee.designation_id IN (?)");
-        filterValues.push(filters.designation_ids);
-      }
-
-      // Combine all filter conditions
-      const whereClause = `WHERE (new_employee.employee_name NOT IN (?) OR ? IS NULL) 
-        ${
-          filterConditions.length > 0
-            ? "AND " + filterConditions.join(" AND ")
-            : ""
-        }`;
+      // The population - who is in this list at all - now lives in
+      // `employee_scope.js`, so that the C3 status summary and Reports can
+      // ask the same question rather than each restating the rule. The SQL
+      // and the parameter order are unchanged; only their home moved.
+      const { where: whereClause, params: filterValues } = buildEmployeeScope(
+        resignation,
+        filters
+      );
 
       const query = `
         SELECT new_employee.employee_id, new_employee.employee_name, new_employee.father_name, new_employee.dob, new_employee.gender, new_employee.marital_status, 
