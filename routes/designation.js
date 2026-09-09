@@ -120,10 +120,20 @@ class DesignationRoutes {
           // screen editing a name should not be able to do that.
           permissions: Joi.array().items(Joi.string()).optional(),
           designation_details: Joi.object({
-            online_portal: Joi.number().required(),
             designation_name: Joi.string().required(),
-            login_access: Joi.number().required(),
             status: Joi.number().required(),
+            // LEGACY, and optional. Neither flag is read anywhere: the login
+            // path selects only `d.designation_name` from this table and gates
+            // on `user.status`, `new_employee.status`, the IP policy and the
+            // password. No middleware, route guard or menu consults either.
+            // They are written and never asked about.
+            //
+            // Optional rather than removed, so an older caller that still
+            // sends them keeps working. Omitted, they are simply absent from
+            // `UPDATE designation SET ?`, which leaves the stored values
+            // exactly as they were - it does not write a zero.
+            online_portal: Joi.number().optional(),
+            login_access: Joi.number().optional(),
           }).optional(),
         };
 
@@ -183,9 +193,14 @@ class DesignationRoutes {
         const schema = {
           // status: Joi.number().required(),
           designation_name: Joi.string().required(),
-          login_access: Joi.number().required(),
           status: Joi.number().required(),
-          online_portal: Joi.number().required(),
+          // Legacy, as above. Optional here too - but unlike the update path
+          // these cannot simply be left out of the INSERT: both columns are
+          // `INT NOT NULL` with no default, so omitting them raises
+          // ER_NO_DEFAULT_FOR_FIELD under STRICT_TRANS_TABLES. The repository
+          // therefore supplies a value when the caller does not.
+          login_access: Joi.number().optional(),
+          online_portal: Joi.number().optional(),
           permissions: Joi.array().items(Joi.string().optional()).required(),
         };
 
