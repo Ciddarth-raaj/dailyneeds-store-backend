@@ -168,6 +168,12 @@ class SandboxBankService {
       res = await this.client.request({
         method: kycConfig.bank.ifscMethod,
         path,
+        // Sandbox returns the IFSC record as a bare object - `{ "BANK": ...,
+        // "BRANCH": ... }` - rather than inside the `{ code, data }` envelope
+        // its other products use. Without this a valid branch code would be
+        // classified as an unexpected response and reported as if the
+        // provider had misbehaved.
+        rawResponse: true,
         // An IFSC is a public branch code and identifies no person, so unlike
         // the account number it is safe to record against a failure.
         logRef: { product: "bank_ifsc", ifsc: code },
