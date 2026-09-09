@@ -166,11 +166,20 @@ test("the guards are the declared permission constants, not typed strings", () =
 /* ================================================== nothing logs a row == */
 
 test("NO EXPORTED VALUE IS EVER LOGGED", () => {
-  // Only one console call, and it takes the error rather than the payload.
-  const logs = CODE.match(/console\.\w+\([^)]*\)/g) || [];
-  assert.deepStrictEqual(logs, ["console.log(err)"]);
+  // Two console calls, and neither takes a payload: the catch-all takes the
+  // error itself, and the stream guard takes only an error CODE - a string
+  // like ERR_STREAM_WRITE_AFTER_END, which describes the socket and not the
+  // people in the report.
+  const logs = CODE.match(/console\.\w+\(/g) || [];
+  assert.strictEqual(logs.length, 2, "only the two known log statements");
+  assert.match(CODE, /console\.log\(err\)/);
+  assert.match(CODE, /REPORT\.EXPORT\.STREAM_ABORTED \$\{err && err\.code \? err\.code : "unknown"\}/);
 
   for (const forbidden of [/console\.\w+\([^)]*\brow\b/, /console\.\w+\([^)]*prepared/, /console\.\w+\([^)]*body/]) {
+    assert.ok(!forbidden.test(CODE), `a log statement carries report data: ${forbidden}`);
+  }
+  // And nothing logs a field VALUE or the response itself.
+  for (const forbidden of [/console\.\w+\([^)]*\bres\b\s*\)/, /console\.\w+\([^)]*filters/]) {
     assert.ok(!forbidden.test(CODE), `a log statement carries report data: ${forbidden}`);
   }
 });
