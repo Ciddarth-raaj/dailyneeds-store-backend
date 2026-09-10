@@ -61,10 +61,14 @@ const find = (method, path) =>
   guards.find((g) => g.method === method && g.path === path);
 
 describe("the endpoints", () => {
-  it("defines exactly the read and the bulk write", () => {
+  it("defines exactly the two reads and the bulk write", () => {
     assert.deepEqual(
       guards.map((g) => `${g.method} ${g.path}`).sort(),
-      ["GET /work-shift-assignments", "POST /work-shift-assignments/bulk"]
+      [
+        "GET /work-shift-assignments",
+        "GET /work-shift-assignments/employee/:employee_id",
+        "POST /work-shift-assignments/bulk",
+      ]
     );
   });
 });
@@ -72,6 +76,14 @@ describe("the endpoints", () => {
 describe("permissions", () => {
   it("the read requires view_employees AND view_shift", () => {
     const { guard } = find("GET", "/work-shift-assignments");
+    assert.equal(guard.mode, "all");
+    assert.deepEqual(guard.keys, [P.VIEW_EMPLOYEES, P.VIEW_SHIFT]);
+  });
+
+  it("the profile's single-employee read requires the same pair", () => {
+    // Reading one employee's shift is the same join as reading the list of
+    // them, so it cannot be a weaker decision.
+    const { guard } = find("GET", "/work-shift-assignments/employee/:employee_id");
     assert.equal(guard.mode, "all");
     assert.deepEqual(guard.keys, [P.VIEW_EMPLOYEES, P.VIEW_SHIFT]);
   });

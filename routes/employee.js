@@ -508,6 +508,13 @@ class EmployeeRoutes {
             esi_number: Joi.string().allow("").allow(null).optional(),
             pf: Joi.string().allow("").allow(null).optional(),
             pf_number: Joi.string().allow("").allow(null).optional(),
+            // Stage 0C / C3 follow-up. Tri-state on purpose: 1 in the scheme,
+            // 0 not applicable, null nobody has said yet. `null` has to be
+            // accepted so a flag set by mistake can be put back to "not
+            // recorded" rather than being forced to 0, which would be an
+            // assertion nobody made.
+            pf_applicable: Joi.number().integer().min(0).max(1).allow(null).optional(),
+            esi_applicable: Joi.number().integer().min(0).max(1).allow(null).optional(),
             UAN: Joi.string().allow("").allow(null).optional(),
             additional_course: Joi.string().allow("").allow(null).optional(),
             spouse_name: Joi.string().allow("").allow(null).optional(),

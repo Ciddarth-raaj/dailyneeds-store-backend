@@ -43,6 +43,14 @@ const SENSITIVE_EMPLOYEE_FIELDS = [
   "pf_number",
   "esi",
   "esi_number",
+  // Stage 0C / C3 follow-up. Whether an employee is in the PF and ESI schemes
+  // at all, which is what lets the profile say "not applicable" where it used
+  // to say "not recorded". They sit with the numbers they qualify rather than
+  // apart from them: they are read and written by the same Statutory section,
+  // under the same permission, and a caller who may not see somebody's PF
+  // number has no business learning whether they have one.
+  "pf_applicable",
+  "esi_applicable",
 ];
 
 /** The same list as a lower-cased Set, for lookups. */

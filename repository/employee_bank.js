@@ -28,7 +28,8 @@ const PUBLIC_COLUMNS = `
   failure_category, verified_at, last_attempted_at,
   confirmed_by_employee_id, confirmed_at, confirmation_note,
   duplicate_of_employee_id,
-  override_by_employee_id, override_at, override_reason,
+  override_by_employee_id, override_at, override_reason, override_kind,
+  rejected_by_employee_id, rejected_at, rejection_reason,
   created_at, updated_at`;
 
 class EmployeeBankRepository {
@@ -249,15 +250,71 @@ class EmployeeBankRepository {
    * a row that has since stopped being a duplicate.
    *
    * The reason is stored, not optional: an override nobody can be named for,
-   * with no stated reason, is not an audit trail.
+   * with no stated reason, is not an audit trail. `override_kind` says WHICH
+   * check was waived, so this can never be read back as a name-mismatch
+   * override.
    */
   async overrideDuplicate(employeeId, fingerprint, { actorEmployeeId, reason }) {
     const rows = await this._query(
       "OVERRIDE-DUPLICATE",
       `UPDATE employee_bank_verification
           SET status = 'VERIFIED', verified_at = NOW(),
-              override_by_employee_id = ?, override_at = NOW(), override_reason = ?
+              override_by_employee_id = ?, override_at = NOW(), override_reason = ?,
+              override_kind = 'DUPLICATE_ACCOUNT'
         WHERE employee_id = ? AND status = 'DUPLICATE_ACCOUNT' AND account_fingerprint = ?`,
+      [actorEmployeeId, reason, employeeId, fingerprint]
+    );
+    return rows.affectedRows;
+  }
+
+  /**
+   * A reviewer accepting that the name at the bank IS this employee.
+   *
+   * Distinct from `confirmNameMismatch` above in two ways that matter. It
+   * records the decision in the OVERRIDE columns rather than the confirmation
+   * ones, stamped `override_kind = 'NAME_MISMATCH'`, because that is what it
+   * is: a check the bank did not pass, waived by a named human. And the
+   * reason is required rather than an optional note - the usecase refuses an
+   * empty one before this is reached.
+   *
+   * Guarded on the status and the fingerprint like every other write here, so
+   * an approval cannot land on an account that has since been changed or on a
+   * row that has stopped being a mismatch.
+   *
+   * The verdict is deliberately NOT part of the guard: a REVIEW and a
+   * MISMATCH are both reviewable, and which of them this was is already
+   * recorded in `name_match_verdict` on the same row.
+   */
+  async approveNameMismatch(employeeId, fingerprint, { actorEmployeeId, reason }) {
+    const rows = await this._query(
+      "APPROVE-NAME-MISMATCH",
+      `UPDATE employee_bank_verification
+          SET status = 'VERIFIED', verified_at = NOW(),
+              override_by_employee_id = ?, override_at = NOW(), override_reason = ?,
+              override_kind = 'NAME_MISMATCH'
+        WHERE employee_id = ? AND status = 'NAME_MISMATCH' AND account_fingerprint = ?`,
+      [actorEmployeeId, reason, employeeId, fingerprint]
+    );
+    return rows.affectedRows;
+  }
+
+  /**
+   * A reviewer turning the account down. The third outcome of a review, and
+   * the one that had nowhere to go before: the details are not obviously
+   * wrong to re-type, and the account is not this employee's.
+   *
+   * REJECTED is not payroll-ready, so this keeps the payout blocked rather
+   * than releasing it. `verified_at` is deliberately untouched - the bank's
+   * own answer, and when it was given, are not altered by a human disagreeing
+   * with what it means.
+   */
+  async rejectBankAccount(employeeId, fingerprint, { actorEmployeeId, reason }) {
+    const rows = await this._query(
+      "REJECT-BANK-ACCOUNT",
+      `UPDATE employee_bank_verification
+          SET status = 'REJECTED',
+              rejected_by_employee_id = ?, rejected_at = NOW(), rejection_reason = ?
+        WHERE employee_id = ? AND status = 'NAME_MISMATCH' AND account_fingerprint = ?`,
       [actorEmployeeId, reason, employeeId, fingerprint]
     );
     return rows.affectedRows;

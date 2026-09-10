@@ -167,6 +167,15 @@ const bankUsecase = {
     bankCalls.push(["override", id, opts]);
     return { employee_id: id, status: "VERIFIED", bank_payroll_ready: true, account_last4: "6789" };
   },
+  reviewNameMismatch: async (id, opts) => {
+    bankCalls.push(["review", id, opts]);
+    return {
+      employee_id: id,
+      status: opts.decision === "REJECT_ACCOUNT" ? "REJECTED" : "VERIFIED",
+      bank_payroll_ready: opts.decision !== "REJECT_ACCOUNT",
+      account_last4: "6789",
+    };
+  },
 };
 
 const summaryCalls = [];
@@ -902,6 +911,70 @@ describe("attaching an Aadhaar later", () => {
       assert.ok(!/"sql"/.test(r.text));
     } finally {
       usecase.attachAadhaar = saved;
+    }
+  });
+});
+
+describe("the bank name-mismatch review", () => {
+  it("is refused to an anonymous caller", async () => {
+    const r = await call("POST", "/hr/employee/9/bank/name-review", null, {
+      decision: "APPROVE_SAME_PERSON",
+      reason: "passbook checked",
+    });
+    assert.equal(r.body.code, 403);
+    assert.equal(r.body.msg, "Access Denied");
+  });
+
+  it("needs the same pair as the older confirmation, not a new key", async () => {
+    // Same decision, same permission. A second key for "a human accepting a
+    // name the bank did not agree with" would only split the audit trail.
+    bankCalls.length = 0;
+    const r = await call("POST", "/hr/employee/9/bank/name-review", tokenFor({ designationId: HR_DESIGNATION }), {
+      decision: "APPROVE_SAME_PERSON",
+      reason: "passbook checked",
+    });
+    assert.equal(r.status, 403);
+    assert.equal(bankCalls.length, 0, "nothing was reached");
+  });
+
+  it("passes the decision, the reason and the actor through for the audit", async () => {
+    bankCalls.length = 0;
+    const r = await call("POST", "/hr/employee/9/bank/name-review", tokenFor({ designationId: FINANCE_DESIGNATION }), {
+      decision: "APPROVE_SAME_PERSON",
+      reason: "Maiden name; passbook and Aadhaar seen",
+    });
+    assert.equal(r.status, 200);
+    const review = bankCalls.find((c) => c[0] === "review");
+    assert.equal(review[1], 9);
+    assert.equal(review[2].decision, "APPROVE_SAME_PERSON");
+    assert.equal(review[2].reason, "Maiden name; passbook and Aadhaar seen");
+    assert.equal(review[2].actorEmployeeId, EMPLOYEE_ID);
+  });
+
+  it("rejecting the account is the same endpoint and the same permission", async () => {
+    bankCalls.length = 0;
+    const r = await call("POST", "/hr/employee/9/bank/name-review", tokenFor({ designationId: FINANCE_DESIGNATION }), {
+      decision: "REJECT_ACCOUNT",
+      reason: "Belongs to a different person entirely",
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.status, "REJECTED");
+    assert.equal(r.body.bank_payroll_ready, false, "a rejected account is never payroll-ready");
+  });
+
+  it("A REASON IS REQUIRED, AND SO IS A KNOWN DECISION", async () => {
+    const token = tokenFor({ designationId: FINANCE_DESIGNATION });
+    const bad = [
+      {},
+      { decision: "APPROVE_SAME_PERSON" },
+      { decision: "APPROVE_SAME_PERSON", reason: "" },
+      { decision: "APPROVE_SAME_PERSON", reason: "no" },
+      { decision: "MAYBE", reason: "a stated reason" },
+      { reason: "a stated reason" },
+    ];
+    for (const body of bad) {
+      const r = await call("POST", "/hr/employee/9/bank/name-review", token, body);
+      assert.equal(r.body.code, 422, `${JSON.stringify(body)} must be refused`);
     }
   });
 });

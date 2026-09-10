@@ -83,6 +83,35 @@ class EmployeeWorkShiftRoutes {
     );
 
     /**
+     * ONE employee's current work shift, for the employee profile.
+     *
+     * A READ, and only a read. The profile shows which shift somebody is on;
+     * changing it is the assignment screen's job, and the route that does it
+     * is the POST below with its own, stricter permission.
+     *
+     * The same permission pair as the list, for the same reason: this is the
+     * employee master joined to the shift master, and seeing it means being
+     * allowed to see both.
+     *
+     * Declared BEFORE `/work-shift-assignments/bulk` would matter if either
+     * were a wildcard - neither is, and `employee` is a literal segment, so
+     * this cannot swallow another path.
+     */
+    router.get(
+      "/work-shift-assignments/employee/:employee_id",
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.VIEW_SHIFT),
+      async (req, res) => {
+        try {
+          res.json(await this.usecase.currentForEmployee(req.params.employee_id));
+        } catch (err) {
+          respondError(res, err);
+        }
+
+        res.end();
+      }
+    );
+
+    /**
      * Bulk assign. All or nothing: an unknown employee id or an inactive
      * work shift refuses the whole request rather than applying part of it.
      */

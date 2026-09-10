@@ -114,10 +114,17 @@ describe("the legacy shift mapping", () => {
   });
 
   it("reads shift_code only from the work_shift master", () => {
-    // Two places, both on `work_shift`: the joined display column on the list
-    // and the shift the assignment names back to the user.
+    // Every occurrence is on `work_shift`: the joined display column on the
+    // list and on the single-employee profile read, and the shift the
+    // assignment names back to the user.
     const occurrences = code.match(/[A-Za-z_.]*shift_code/g) || [];
-    assert.deepEqual(occurrences.sort(), ["shift_code", "work_shift_code", "ws.shift_code"]);
+    assert.deepEqual(occurrences.sort(), [
+      "shift_code",
+      "work_shift_code",
+      "work_shift_code",
+      "ws.shift_code",
+      "ws.shift_code",
+    ]);
   });
 
   it("writes exactly one column on new_employee, and it is the new one", () => {

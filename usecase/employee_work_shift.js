@@ -96,6 +96,41 @@ function normalizeIdList(value, label) {
   return ids;
 }
 
+/**
+ * A TIME column as "09:00".
+ *
+ * MySQL hands a TIME back as "09:00:00" through this driver, but a duration
+ * of more than a day comes back differently and a null comes back null, so
+ * this is defensive rather than decorative: anything it does not recognise is
+ * returned untouched instead of being sliced into nonsense.
+ */
+function formatTime(value) {
+  if (value === null || value === undefined) return null;
+  const text = String(value);
+  const match = /^(\d{1,2}):(\d{2})/.exec(text);
+  if (!match) return text;
+  return `${match[1].padStart(2, "0")}:${match[2]}`;
+}
+
+/**
+ * The one-line timing a profile can print.
+ *
+ * A work shift's hours are configured per weekday, so there is not always one
+ * answer. Where every working day runs the same hours - which is the common
+ * case - that is the answer. Where they differ, saying so is honest and
+ * naming one day's hours as "the" timing would not be. A shift with no
+ * working days configured has no timing to state at all.
+ */
+function describeTiming(timings) {
+  if (!Array.isArray(timings) || timings.length === 0) return null;
+  if (timings.length === 1) {
+    const only = timings[0];
+    if (!only.in_time || !only.out_time) return null;
+    return `${only.in_time} - ${only.out_time}`;
+  }
+  return "Varies by day";
+}
+
 class EmployeeWorkShiftUsecase {
   constructor(employeeWorkShiftRepo) {
     this.repo = employeeWorkShiftRepo;
@@ -160,6 +195,80 @@ class EmployeeWorkShiftUsecase {
   }
 
   /**
+   * ONE employee's current work shift, as the employee profile shows it.
+   *
+   * READ-ONLY, and that is the point of it existing separately from the
+   * assignment screen. The profile has to be able to answer "which shift is
+   * this person on" without offering to change it - a shift change is a
+   * roster decision with attendance and payroll behind it, and it belongs on
+   * the screen built for it.
+   *
+   * IT READS THE NEW MAPPING ONLY - `default_work_shift_id` - and never the
+   * legacy columns behind `shift_master`. An employee nobody has assigned yet
+   * comes back with `assigned: false` rather than a fabricated shift, because
+   * "unassigned" is exactly what HR needs to see in order to fix it.
+   *
+   * `timing` is a plain string because it is display, not data: a shift whose
+   * weekdays all run the same hours gets those hours, and one that varies by
+   * day says so instead of picking a day to speak for the rest.
+   */
+  async currentForEmployee(employeeId) {
+    const id = Number(employeeId);
+    if (!Number.isInteger(id) || id <= 0) {
+      throw validationError("employee_id must be an employee id");
+    }
+
+    const row = await this.repo.getEmployeeWorkShift(id);
+    if (!row) return { code: 404, msg: "Employee not found" };
+
+    const workShiftId =
+      row.default_work_shift_id === null || row.default_work_shift_id === undefined
+        ? null
+        : Number(row.default_work_shift_id);
+
+    if (workShiftId === null) {
+      return {
+        code: 200,
+        data: {
+          employee_id: id,
+          assigned: false,
+          work_shift_id: null,
+          shift_code: null,
+          shift_name: null,
+          shift_active: null,
+          timing: null,
+          timings: [],
+        },
+      };
+    }
+
+    const times = await this.repo.getWorkShiftWorkingTimes(workShiftId);
+    const timings = (times || []).map((t) => ({
+      in_time: formatTime(t.in_time),
+      out_time: formatTime(t.out_time),
+    }));
+
+    return {
+      code: 200,
+      data: {
+        employee_id: id,
+        assigned: true,
+        work_shift_id: workShiftId,
+        shift_code: row.work_shift_code || null,
+        shift_name: row.work_shift_name || null,
+        // A shift can be deactivated after it was assigned. The profile shows
+        // the assignment as it is rather than pretending it is unassigned.
+        shift_active:
+          row.work_shift_active === null || row.work_shift_active === undefined
+            ? null
+            : Boolean(Number(row.work_shift_active)),
+        timing: describeTiming(timings),
+        timings,
+      },
+    };
+  }
+
+  /**
    * Assign one ACTIVE work shift to the selected employees.
    *
    * Writes `default_work_shift_id` and nothing else. There is no unassign
@@ -211,3 +320,5 @@ module.exports.normalizeEmployeeIds = normalizeEmployeeIds;
 module.exports.normalizeIdList = normalizeIdList;
 module.exports.normalizeChoice = normalizeChoice;
 module.exports.MAX_EMPLOYEES_PER_ASSIGNMENT = MAX_EMPLOYEES_PER_ASSIGNMENT;
+module.exports.formatTime = formatTime;
+module.exports.describeTiming = describeTiming;

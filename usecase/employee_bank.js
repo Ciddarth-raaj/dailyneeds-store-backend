@@ -20,6 +20,8 @@ const { SandboxError, FAILURE } = require("../services/sandbox_client");
  *                  this bank, including one whose details just changed
  *   VERIFIED       the account exists and the name is acceptable
  *   NAME_MISMATCH  the account exists, but the name needs a human
+ *   REJECTED       a human looked at that mismatch and turned the account
+ *                  down, with a stated reason
  *   FAILED         the bank says no such account, or the check could not be
  *                  completed
  *
@@ -39,7 +41,35 @@ const STATUS = {
   VERIFIED: "VERIFIED",
   NAME_MISMATCH: "NAME_MISMATCH",
   DUPLICATE_ACCOUNT: "DUPLICATE_ACCOUNT",
+  // A reviewer looked at a name mismatch and turned the account down. Not
+  // FAILED - the check completed and the bank answered; what was rejected is
+  // the account, by a named human, with a stated reason.
+  REJECTED: "REJECTED",
   FAILED: "FAILED",
+};
+
+/**
+ * Every human decision recorded against a verification, as a block of nulls.
+ *
+ * A fresh provider check clears ALL of them, and they are listed in one place
+ * so that adding a decision - as the name-mismatch review did - cannot leave
+ * one of them standing against a result nobody has looked at yet. A name
+ * accepted for last month's answer has not been accepted for this one, an
+ * administrator who allowed a shared account has not allowed whatever this
+ * check just found, and a reviewer who rejected the old account has not
+ * rejected the new one.
+ */
+const CLEARED_DECISIONS = {
+  confirmed_by_employee_id: null,
+  confirmed_at: null,
+  confirmation_note: null,
+  override_by_employee_id: null,
+  override_at: null,
+  override_reason: null,
+  override_kind: null,
+  rejected_by_employee_id: null,
+  rejected_at: null,
+  rejection_reason: null,
 };
 
 class ValidationError extends Error {
@@ -320,13 +350,8 @@ class EmployeeBankUsecase {
         provider_status: null,
         failure_category: category,
         verified_at: null,
-        confirmed_by_employee_id: null,
-        confirmed_at: null,
-        confirmation_note: null,
         duplicate_of_employee_id: null,
-        override_by_employee_id: null,
-        override_at: null,
-        override_reason: null,
+        ...CLEARED_DECISIONS,
       });
       await this.repo.recordAttempt({
         employee_id: employeeId,
@@ -360,13 +385,8 @@ class EmployeeBankUsecase {
         provider_status: result.provider_status || null,
         failure_category: "account_not_found",
         verified_at: null,
-        confirmed_by_employee_id: null,
-        confirmed_at: null,
-        confirmation_note: null,
         duplicate_of_employee_id: null,
-        override_by_employee_id: null,
-        override_at: null,
-        override_reason: null,
+        ...CLEARED_DECISIONS,
       };
       await this.repo.upsertVerification(row);
       await this.repo.recordAttempt({
@@ -423,16 +443,9 @@ class EmployeeBankUsecase {
       provider_status: result.provider_status || null,
       failure_category: null,
       verified_at: status === STATUS.VERIFIED ? new Date() : null,
-      // A fresh check clears any previous confirmation AND any previous
-      // override: a name accepted for the old result has not been accepted
-      // for this one, and an administrator who allowed a shared account last
-      // month has not allowed whatever this check just found.
-      confirmed_by_employee_id: null,
-      confirmed_at: null,
-      confirmation_note: null,
-      override_by_employee_id: null,
-      override_at: null,
-      override_reason: null,
+      // A fresh check clears every human decision recorded against the
+      // previous one; see CLEARED_DECISIONS.
+      ...CLEARED_DECISIONS,
     });
     await this.repo.recordAttempt({
       employee_id: employeeId,
@@ -576,6 +589,111 @@ class EmployeeBankUsecase {
     return this.getStatus(employeeId);
   }
 
+  /**
+   * THE NAME-MISMATCH REVIEW. One authorised human, looking at what the bank
+   * actually returned, deciding what happens to this account.
+   *
+   * It exists because the previous behaviour was a dead end. A REVIEW verdict
+   * could be confirmed; a MISMATCH verdict could not be confirmed by anybody,
+   * and the screen said so - beside no action at all. That is a correct
+   * statement of a rule and a useless thing to tell somebody whose employee
+   * still cannot be paid. The bank returning a different spelling, a maiden
+   * name, or a joint-account holder's name are all real and all end up as
+   * MISMATCH, and a business has to be able to resolve them.
+   *
+   * So both verdicts are reviewable, and the review has the two outcomes the
+   * old flow was missing a name for:
+   *
+   *   APPROVE_SAME_PERSON  the reviewer is satisfied the account is this
+   *                        employee's. Recorded as a bank-name-mismatch
+   *                        OVERRIDE - who, when, why - and not as a quiet
+   *                        pass. It is a waived check, and it reads like one.
+   *
+   *   REJECT_ACCOUNT       the account is not usable. REJECTED, with the same
+   *                        who/when/why, and still not payroll-ready - so a
+   *                        bank transfer against it stays blocked rather than
+   *                        being released.
+   *
+   * The third option HR has is not here because it already exists and is not
+   * this decision: correcting the details re-fingerprints the account, which
+   * drops it back to PENDING through `resolveEffectiveStatus` on its own.
+   *
+   * A REASON IS REQUIRED FOR BOTH, unlike the older confirmation's optional
+   * note. This is the record payroll and an auditor read later, and "somebody
+   * approved it" without a stated reason is not a record.
+   *
+   * NOTHING HERE DECIDES WHO MAY DO IT. The route holds the permission, as
+   * everywhere else in this file.
+   */
+  async reviewNameMismatch(employeeId, { decision = null, reason = null, actorEmployeeId = null } = {}) {
+    const choice = String(decision === null || decision === undefined ? "" : decision)
+      .trim()
+      .toUpperCase();
+    if (choice !== "APPROVE_SAME_PERSON" && choice !== "REJECT_ACCOUNT") {
+      throw new ValidationError(
+        "a bank name review must be APPROVE_SAME_PERSON or REJECT_ACCOUNT"
+      );
+    }
+
+    const stated = String(reason === null || reason === undefined ? "" : reason).trim();
+    if (stated === "") {
+      throw new ValidationError("a reason is required to review a bank name mismatch");
+    }
+
+    const current = await this.getStatus(employeeId);
+    if (current.status !== STATUS.NAME_MISMATCH) {
+      throw new ConflictError(
+        `employee ${employeeId}'s bank verification is ${current.status}, not NAME_MISMATCH; ` +
+          "there is nothing to review"
+      );
+    }
+
+    const employee = await this.repo.getBankDetails(employeeId);
+    const account = String(employee.account_no).replace(/[\s-]/g, "");
+    const ifsc = String(employee.ifsc).replace(/\s/g, "").toUpperCase();
+    const fingerprint = EmployeeBankUsecase.fingerprint(account, ifsc);
+    const verdict = (current.verification && current.verification.name_match_verdict) || null;
+
+    const approving = choice === "APPROVE_SAME_PERSON";
+    const affected = approving
+      ? await this.repo.approveNameMismatch(employeeId, fingerprint, {
+          actorEmployeeId,
+          reason: stated,
+        })
+      : await this.repo.rejectBankAccount(employeeId, fingerprint, {
+          actorEmployeeId,
+          reason: stated,
+        });
+    if (affected === 0) {
+      throw new ConflictError("the bank details or the verification changed; re-run the verification");
+    }
+
+    // Append-only, and it outlives the row above: a later re-verification
+    // clears the decision columns, and this is where the decision stays.
+    await this.repo.recordAttempt({
+      employee_id: employeeId,
+      account_fingerprint: fingerprint,
+      account_last4: last4(account),
+      ifsc,
+      outcome: approving ? "NAME_MISMATCH_OVERRIDE" : "BANK_ACCOUNT_REJECTED",
+      name_at_bank: (current.verification && current.verification.name_at_bank) || null,
+      name_match_verdict: verdict,
+      failure_category: null,
+      provider: null,
+      requested_by_employee_id: actorEmployeeId,
+      override_reason: stated,
+    });
+
+    this._log(
+      logger.LEVEL.INFO,
+      approving ? "NAME-MISMATCH-OVERRIDDEN" : "BANK-ACCOUNT-REJECTED",
+      `employee ${employeeId}: name mismatch ${approving ? "approved" : "rejected"} by employee ${actorEmployeeId}`,
+      { employeeId, actorEmployeeId, verdict }
+    );
+
+    return this.getStatus(employeeId);
+  }
+
   async listAttempts(employeeId, limit) {
     return this.repo.listAttempts(employeeId, limit);
   }
@@ -599,9 +717,11 @@ class EmployeeBankUsecase {
           : status.status === STATUS.PENDING
           ? "the bank account has not been verified since it was last changed"
           : status.status === STATUS.NAME_MISMATCH
-          ? "the name at the bank needs confirmation"
+          ? "the name at the bank needs review"
           : status.status === STATUS.DUPLICATE_ACCOUNT
           ? "another active employee is already verified against this bank account"
+          : status.status === STATUS.REJECTED
+          ? "a reviewer rejected this bank account"
           : "the last verification failed",
       duplicate_of: status.duplicate_of || null,
     };

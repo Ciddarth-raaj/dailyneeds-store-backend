@@ -498,6 +498,57 @@ class EmployeeMasterRoutes {
     );
 
     /**
+     * REVIEW a bank name mismatch, and record what was decided.
+     *
+     * The action the profile offers where it used to say "this cannot be
+     * confirmed by anybody" and then offer nothing. Both verdicts reach here -
+     * a near-miss spelling and a flatly different name - because both are
+     * things a business has to be able to resolve, and neither resolves
+     * itself.
+     *
+     * The same permission pair as the older confirmation, deliberately.
+     * `confirm_bank_name_mismatch` is already the key for "a human accepting
+     * a name the bank did not agree with", it is granted to NOBODY by the C2
+     * migration, and it therefore already means an administrator or whoever
+     * an administrator has since granted it to. Minting a second key for the
+     * same decision would only split an audit trail.
+     *
+     * `reason` is required for BOTH outcomes - see the usecase. Approving is
+     * recorded as a bank-name-mismatch override; rejecting leaves the account
+     * not payroll-ready, so a payout stays blocked either way until the
+     * details are corrected and re-verified.
+     */
+    router.post(
+      "/employee/:employee_id/bank/name-review",
+      this.permissions.requireAll(P.CONFIRM_BANK_NAME_MISMATCH, P.VIEW_EMPLOYEE_SENSITIVE),
+      async (req, res) => {
+        try {
+          if (!this.bank) {
+            res.json({ code: 503, msg: "Bank verification is not configured on this server" });
+            res.end();
+            return;
+          }
+          const isValid = Joi.validate(req.body || {}, {
+            decision: Joi.string().valid("APPROVE_SAME_PERSON", "REJECT_ACCOUNT").required(),
+            reason: Joi.string().min(3).required(),
+          });
+          if (isValid.error !== null) throw isValid.error;
+
+          res.json(
+            await this.bank.reviewNameMismatch(Number(req.params.employee_id), {
+              actorEmployeeId: this._actor(req),
+              decision: (req.body || {}).decision,
+              reason: (req.body || {}).reason,
+            })
+          );
+        } catch (err) {
+          this._fail(res, err);
+        }
+        res.end();
+      }
+    );
+
+    /**
      * Allow two active employees to share one bank account.
      *
      * Its own key, held by nobody by default, so in practice this is an
