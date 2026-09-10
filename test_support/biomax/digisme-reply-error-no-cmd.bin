@@ -1,0 +1,18 @@
+HTTP/1.1 200 OK
+Cache-Control: private
+Content-Length: 0
+Content-Type: application/octet-stream
+Server: Microsoft-IIS/10.0
+response_code: ERROR_NO_CMD
+cmd_id: 
+cmd_code: 
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Headers: Content-Type, Authorization, Accept, X-Requested-With
+Access-Control-Allow-Methods: OPTIONS, TRACE, GET, HEAD, POST, PUT
+Referrer-Policy: strict-origin
+X-Frame-Options: SAMEORIGIN
+X-Content-Type-Options: nosniff
+Content-Security-Policy: script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'
+Date: Thu, 10 Sep 2026 11:25:31 GMT
+Connection: close
+

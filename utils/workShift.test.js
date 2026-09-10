@@ -11,6 +11,7 @@ const {
   computeNormalWorkMinutes,
   validateWeeklyScheduleRow,
   validateWeeklySchedule,
+  validateCutoffsAgainstNextIn,
   validateWorkShiftConfig,
 } = require("../utils/workShift");
 
@@ -21,6 +22,9 @@ function workingDay(overrides = {}) {
     is_working_day: true,
     in_time: "14:00",
     out_time: "22:00",
+    // Mandatory since A1: a time on the following morning, before the next
+    // working day's In time.
+    attendance_day_cutoff: "04:00",
     break_minutes: 30,
     ot_rate: 1,
     ...overrides,
@@ -193,17 +197,98 @@ describe("weekly schedule row", () => {
 
   it("validates attendance_day_cutoff as a time, separately from overnight", () => {
     const ok = validateWeeklyScheduleRow(
-      workingDay({ in_time: "22:00", out_time: "06:00", attendance_day_cutoff: "04:00" })
+      workingDay({ in_time: "22:00", out_time: "06:00", attendance_day_cutoff: "08:00" })
     );
     assert.deepEqual(ok.errors, []);
-    assert.equal(ok.value.attendance_day_cutoff, "04:00:00");
-    // and it is not required for an overnight shift to be valid
+    assert.equal(ok.value.attendance_day_cutoff, "08:00:00");
     assert.equal(ok.value.normal_work_minutes, 450);
 
     const bad = validateWeeklyScheduleRow(
       workingDay({ attendance_day_cutoff: "25:00" })
     );
     assert.match(bad.errors.join(" "), /attendance_day_cutoff must be a time of day/);
+  });
+
+  // A1: mandatory on a working day. The Biomax receiver dates a punch from
+  // this value and nothing else, so a working day without one is a
+  // configuration error, not a default.
+  it("requires attendance_day_cutoff on a working day", () => {
+    for (const blank of [undefined, null, ""]) {
+      const { errors, value } = validateWeeklyScheduleRow(
+        workingDay({ attendance_day_cutoff: blank })
+      );
+      assert.equal(value, null);
+      assert.match(errors.join(" "), /Monday: Attendance Day Cutoff is required on a working day/);
+    }
+  });
+
+  it("clears a cutoff typed on a rest day rather than storing it", () => {
+    const { errors, value } = validateWeeklyScheduleRow({
+      day_of_week: 0,
+      is_working_day: false,
+      attendance_day_cutoff: "04:00",
+    });
+    assert.deepEqual(errors, []);
+    assert.equal(value.attendance_day_cutoff, null);
+  });
+
+  it("does not require a cutoff on a rest day", () => {
+    const { errors } = validateWeeklyScheduleRow({ day_of_week: 0, is_working_day: false });
+    assert.deepEqual(errors, []);
+  });
+});
+
+// A2: the cutoff is a time on the following morning, so it must be earlier
+// than the next WORKING day's In time - otherwise the boundary would reach
+// into that shift. This is the rule that lets the receiver read only the
+// previous calendar day's row.
+describe("attendance day cutoff against the next working day's In time", () => {
+  it("accepts a cutoff before the next working day's In", () => {
+    const { errors } = validateWeeklySchedule(fullWeek());
+    assert.deepEqual(errors, []);
+  });
+
+  it("rejects a cutoff at or after the next working day's In, naming both days", () => {
+    const equal = validateWeeklySchedule(fullWeek({ 1: { attendance_day_cutoff: "14:00" } }));
+    assert.match(
+      equal.errors.join(" "),
+      /Monday: Attendance Day Cutoff 14:00 must be before Tuesday's In time 14:00/
+    );
+    assert.equal(equal.value, null);
+
+    const later = validateWeeklySchedule(fullWeek({ 1: { attendance_day_cutoff: "15:00" } }));
+    assert.match(later.errors.join(" "), /Monday: Attendance Day Cutoff 15:00 must be before Tuesday's In time 14:00/);
+  });
+
+  it("skips rest days to find the next working day, and wraps Saturday to Sunday", () => {
+    // Sunday rest, so Saturday's next working day is Monday.
+    const ok = validateWeeklySchedule(fullWeek({ 6: { attendance_day_cutoff: "13:59" } }));
+    assert.deepEqual(ok.errors, []);
+
+    const bad = validateWeeklySchedule(fullWeek({ 6: { attendance_day_cutoff: "14:00" } }));
+    assert.match(bad.errors.join(" "), /Saturday: Attendance Day Cutoff 14:00 must be before Monday's In time 14:00/);
+
+    // A working Sunday becomes Saturday's next day.
+    const sundayWorking = validateWeeklySchedule(
+      fullWeek({
+        0: { day_of_week: 0, is_working_day: true, in_time: "09:00", out_time: "17:00", attendance_day_cutoff: "04:00", break_minutes: 0, ot_rate: 1 },
+        6: { attendance_day_cutoff: "09:00" },
+      })
+    );
+    assert.match(sundayWorking.errors.join(" "), /Saturday: Attendance Day Cutoff 09:00 must be before Sunday's In time 09:00/);
+  });
+
+  it("is a whole-week decision: one bad cutoff rejects the save", () => {
+    const { errors, value } = validateWeeklySchedule(fullWeek({ 3: { attendance_day_cutoff: "" } }));
+    assert.equal(value, null);
+    assert.match(errors.join(" "), /Wednesday: Attendance Day Cutoff is required on a working day/);
+  });
+
+  it("exposes the rule on its own for callers that already hold a normalized week", () => {
+    const week = validateWeeklySchedule(fullWeek()).value;
+    assert.deepEqual(validateCutoffsAgainstNextIn(week), []);
+    week[2].attendance_day_cutoff = "23:00:00";
+    assert.equal(validateCutoffsAgainstNextIn(week).length, 1);
   });
 });
 

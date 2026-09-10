@@ -245,6 +245,11 @@ function validateWeeklyScheduleRow(row) {
     );
   }
 
+  // Attendance Day Cutoff (A1). MANDATORY on a working day: it is the time
+  // on the FOLLOWING morning until which punches still belong to this day,
+  // and the Biomax receiver reads nothing else to date a punch. A rest day
+  // never claims the following morning's punches, so a cutoff typed on one
+  // is cleared rather than stored - nothing would ever read it.
   let cutoff = null;
   if (!isBlank(row.attendance_day_cutoff)) {
     const cutoffMinutes = parseTimeToMinutes(row.attendance_day_cutoff);
@@ -255,7 +260,10 @@ function validateWeeklyScheduleRow(row) {
     } else {
       cutoff = formatMinutesToTime(cutoffMinutes);
     }
+  } else if (isWorkingDay === 1) {
+    errors.push(`${dayLabel}: Attendance Day Cutoff is required on a working day`);
   }
+  if (isWorkingDay === 0) cutoff = null;
 
   const inMinutes = parseTimeToMinutes(row.in_time);
   const outMinutes = parseTimeToMinutes(row.out_time);
@@ -382,10 +390,55 @@ function validateWeeklySchedule(rows) {
 
   if (errors.length > 0) return { errors, value: null };
 
-  return {
-    errors,
-    value: DAY_OF_WEEK_LABELS.map((_, day) => byDay.get(day)),
-  };
+  const week = DAY_OF_WEEK_LABELS.map((_, day) => byDay.get(day));
+  errors.push(...validateCutoffsAgainstNextIn(week));
+  if (errors.length > 0) return { errors, value: null };
+
+  return { errors, value: week };
+}
+
+/**
+ * The one cross-row rule for Attendance Day Cutoff (A2).
+ *
+ * A working day's cutoff is a time on the FOLLOWING morning. It must
+ * therefore be EARLIER than the In time of the next working day (the next
+ * working row in weekday order, wrapping Saturday -> Sunday, skipping rest
+ * days), otherwise the boundary would reach into that shift and its first
+ * punches would be dated to the day before. This is what makes it safe for
+ * the receiver to consult only the PREVIOUS calendar day's row.
+ *
+ * Takes the normalized, complete week (Sunday first). Returns error strings.
+ */
+function validateCutoffsAgainstNextIn(week) {
+  const errors = [];
+  for (let day = 0; day < week.length; day += 1) {
+    const row = week[day];
+    if (!row || row.is_working_day !== 1 || row.attendance_day_cutoff === null) continue;
+
+    let next = null;
+    let nextDay = null;
+    for (let step = 1; step <= week.length; step += 1) {
+      const candidateDay = (day + step) % week.length;
+      const candidate = week[candidateDay];
+      if (candidate && candidate.is_working_day === 1 && candidate.in_time !== null) {
+        next = candidate;
+        nextDay = candidateDay;
+        break;
+      }
+    }
+    if (!next) continue;
+
+    const cutoffMinutes = parseTimeToMinutes(row.attendance_day_cutoff);
+    const nextInMinutes = parseTimeToMinutes(next.in_time);
+    if (cutoffMinutes === null || nextInMinutes === null) continue;
+
+    if (cutoffMinutes >= nextInMinutes) {
+      errors.push(
+        `${DAY_OF_WEEK_LABELS[day]}: Attendance Day Cutoff ${row.attendance_day_cutoff.slice(0, 5)} must be before ${DAY_OF_WEEK_LABELS[nextDay]}'s In time ${next.in_time.slice(0, 5)}, because it is a time on the following morning`
+      );
+    }
+  }
+  return errors;
 }
 
 /**
@@ -534,5 +587,6 @@ module.exports = {
   computeNormalWorkMinutes,
   validateWeeklyScheduleRow,
   validateWeeklySchedule,
+  validateCutoffsAgainstNextIn,
   validateWorkShiftConfig,
 };

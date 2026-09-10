@@ -131,4 +131,29 @@ module.exports = {
   VIEW_REPORTS: "view_reports",
   EXPORT_REPORTS: "export_reports",
   MANAGE_SHARED_REPORT_TEMPLATES: "manage_shared_report_templates",
+
+  // Attendance - Part 1, the raw Biomax punch flow. Declared by the
+  // biomax-raw-attendance migration. The three READ keys are granted to HR
+  // EXECUTIVE by it; device management is administrators only (no grant, the
+  // user_type 2 bypass); re-derivation is granted to nobody and gates no
+  // route yet.
+  //
+  //   VIEW_RAW_ATTENDANCE          the Attendance List (employee x date rows)
+  //   EXPORT_RAW_ATTENDANCE        its CSV
+  //   VIEW_ATTENDANCE_PUNCH_AUDIT  the Punch Audit tab (one row per physical
+  //                                punch, device/location filters) and its CSV.
+  //                                Its own key on purpose (D7): reading
+  //                                attendance is not the same decision as
+  //                                seeing which terminal and IP every punch
+  //                                came from.
+  //   VIEW_BIOMAX_DEVICES          read the device registry and its history
+  //   MANAGE_BIOMAX_DEVICES        add, move, replace, deactivate a device
+  //   REDERIVE_ATTENDANCE          reserved: the audited historical
+  //                                re-derivation, not built in Part 1
+  VIEW_RAW_ATTENDANCE: "view_raw_attendance",
+  EXPORT_RAW_ATTENDANCE: "export_raw_attendance",
+  VIEW_ATTENDANCE_PUNCH_AUDIT: "view_attendance_punch_audit",
+  VIEW_BIOMAX_DEVICES: "view_biomax_devices",
+  MANAGE_BIOMAX_DEVICES: "manage_biomax_devices",
+  REDERIVE_ATTENDANCE: "rederive_attendance",
 };
