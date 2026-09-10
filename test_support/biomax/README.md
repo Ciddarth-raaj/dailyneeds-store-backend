@@ -26,6 +26,10 @@ and `biomax/receiver.test.js` read it directly.
 
 ## Replaying against a running receiver
 
+The receiver is started only by the approved activation step
+(`pm2 start ecosystem.biomax.config.js`); a normal backend deploy never
+starts it. For a local run: `BIOMAX_PORT=7005 node biomax/receiver.js`.
+
 ```
 HOST=127.0.0.1 PORT=7005 node test_support/biomax/fake-device-http.js            # punch, fresh io_time
 HOST=127.0.0.1 PORT=7005 RAW=1 node test_support/biomax/fake-device-http.js      # the captured bytes exactly

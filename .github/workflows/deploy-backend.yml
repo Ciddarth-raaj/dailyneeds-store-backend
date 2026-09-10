@@ -103,11 +103,13 @@ jobs:
              db-migrate up
              cd ../..
              pm2 reload 0
-             # The Biomax receiver is a separate pm2 app (ecosystem.config.js).
-             # Reloading it here is safe: a punch cut mid-flight gets no ACK
-             # and the device retransmits it. If it has never been started on
-             # this box, startOrReload starts it - it then idles until port
-             # 7005 is opened in the Lightsail firewall, which is a separate,
-             # approved step.
-             pm2 startOrReload ecosystem.config.js --only biomax-receiver --update-env
-             pm2 save'
+             # The Biomax receiver is NOT started or reloaded here. It lives in
+             # its own file, ecosystem.biomax.config.js, and its activation is
+             # a separate, explicitly approved production action (see
+             # docs/biomax-attendance-part1.md). Once started by hand, pm2
+             # supervises it; a normal backend deploy neither starts nor
+             # restarts it. New receiver code reaches it only when an operator
+             # runs `pm2 reload biomax-receiver` deliberately.
+             if pm2 describe biomax-receiver >/dev/null 2>&1; then
+               echo "biomax-receiver is running under pm2 and was left untouched by this deploy; reload it deliberately to pick up new code."
+             fi'

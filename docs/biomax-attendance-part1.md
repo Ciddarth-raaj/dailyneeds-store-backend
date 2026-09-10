@@ -165,9 +165,17 @@ Env: `BIOMAX_PORT` (7005), `BIOMAX_HOST`, `BIOMAX_MAX_BODY`,
 `config.json` `db.mysql[env]` section as `drivers/mysql.js` (the primary
 application database; never the GoFrugal pool).
 
-Deploy: `ecosystem.config.js` lists the app; `deploy-backend.yml` runs `pm2
-startOrReload ecosystem.config.js --only biomax-receiver --update-env` after
-the API reload. A restart is lossless under R1.
+**Activation is separate from the backend deploy.** The receiver is declared
+only in `ecosystem.biomax.config.js`; `ecosystem.config.js` deliberately
+does not list it and `deploy-backend.yml` neither starts nor reloads it (it
+only prints a notice if it happens to be running). A normal dnds.co.in
+deploy therefore ships the API, migrations and any backend change without
+touching the receiver. Activation is one explicit, approved operator action
+as `ec2-user`: `pm2 start ecosystem.biomax.config.js && pm2 save`. From then
+on pm2 supervises it (crash restart, resurrect on reboot via the existing
+pm2 startup unit). New receiver code reaches a running receiver only when an
+operator runs `pm2 reload biomax-receiver` deliberately; a reload is lossless
+under R1.
 
 ---
 
@@ -256,35 +264,48 @@ export path.
 
 ---
 
-## 9. Deployment-only actions (not done from this session; require host access)
+## 9. Deployment-only actions (each requires its own approval; none done)
 
-1. `SELECT VERSION();` on the primary database (connection from
-   `config.json` / `migrations/mysql/database.json`). Confirm ≥ 5.7.8; note
-   whether ≥ 8.0.16 (CHECK enforced).
-2. Confirm the warehouse row: `SELECT outlet_id, outlet_code, outlet_name
-   FROM outlets WHERE outlet_id = 2;` and that `DN1`..`DN5` exist as
-   `outlet_code`s. After `db-migrate up`, read the two report SELECTs it
-   prints (unassigned seeded devices; working rows without a cutoff).
-3. `pm2 describe 0` confirmed Node 14.21.3; nothing to change. First start of
-   the receiver: `pm2 start ecosystem.config.js --only biomax-receiver && pm2
-   save`; confirm `systemctl status pm2-ec2-user` exists.
-4. `sudo ss -ltnp | grep -E ':82 |:7005 '` should show **no** listener on
-   82 (the temporary proxy is gone) and, after the receiver starts, one on
-   7005 bound to `0.0.0.0`.
-5. Lightsail console -> instance -> Networking -> IPv4 Firewall: remove the
-   leftover rules for 82 and 7005 now (no dependent listener); when parallel
-   testing is approved, add TCP 7005 restricted to the outlets' public IPs
-   (`103.213.194.119` known). No EC2 Security Group is involved.
-6. Do **not** change DigiSME (`4.247.27.112:82`) or any terminal's Server
-   IP. Devices keep sending to DigiSME until cutover is decided.
+Resolved and no longer open: warehouse = `outlet_id 2` (WH and G2 both map
+to it, seeded); all seven terminals point directly at DigiSME
+(`4.247.27.112:82`) and stay there; the runtime is the host's Node 14.21.3
+under `ec2-user` (`pm2 describe 0` verified), nothing to install or change.
+
+1. **Pre-migration check (required):** `SELECT VERSION();` on the primary
+   application database (the `db.mysql` section of `config.json`, i.e. the
+   `drivers/mysql.js` connection; never the GoFrugal pool). The migration
+   requires **MySQL 5.7.8 or later**; on 8.0.16 or later the `CHECK` on
+   assignment periods is also enforced by the server. Do not assume.
+2. Ordinary backend deploy (push to `main-autodeploy`): API + migration.
+   After `db-migrate up`, read the two report SELECTs it prints (seeded
+   devices whose outlet code was not found; working schedule rows without a
+   cutoff). This deploy does **not** start the receiver.
+3. **Receiver activation (separate approval):** as `ec2-user`, `pm2 start
+   ecosystem.biomax.config.js && pm2 save`; confirm `systemctl status
+   pm2-ec2-user`; `sudo ss -ltnp | grep -E ':82 |:7005 '` should then show
+   no listener on 82 and the receiver on 7005; local smoke test
+   `HOST=127.0.0.1 PORT=7005 RAW=1 node test_support/biomax/fake-device-http.js`
+   -> `PASS: response_code: OK`, `MODE=poll` -> `PASS: response_code:
+   ERROR_NO_CMD`; then delete the test rows (`biomax_punch_derived` first,
+   then `biomax_punch`) - the only time those tables are ever deleted from.
+4. **Lightsail IPv4 Firewall (separate approval, not touched by this
+   project's code):** leftover rules for 82 and 7005 are left as they are
+   until that operation is approved. When parallel testing is approved,
+   allow TCP 7005 from the outlets' static IPs only.
+5. **Static IP source of truth for that allowlist:** the repositories hold
+   no outlet IP values. They live in the production table
+   `outlets.allowed_ips` (with `outlets.ip_restriction_enabled`), maintained
+   through the IP Restrictions screen (`docs/ip-restrictions.md`,
+   `repository/outlet.js#updateIpRestriction`). Read them at operation time
+   with `SELECT outlet_id, outlet_code, allowed_ips, ip_restriction_enabled
+   FROM outlets;` and use exactly those values; do not copy IPs from
+   captures, screenshots or notes. Both feature branches are based on the
+   current `main-autodeploy` head with nothing to reconcile.
+6. Do **not** change DigiSME or any terminal's Server IP until cutover is
+   decided.
 7. HR: create the real work shifts with cutoffs and assign employees before
    parallel-run acceptance (A3); until then every punch is `NO_SHIFT` and sits
    in the review queue.
-8. Smoke test on the box (no device involved): `HOST=127.0.0.1 PORT=7005
-   RAW=1 node test_support/biomax/fake-device-http.js` -> `PASS:
-   response_code: OK`; `MODE=poll` -> `PASS: response_code: ERROR_NO_CMD`;
-   then delete the test punch rows (`biomax_punch_derived` first, then
-   `biomax_punch`) - the only time those tables are ever deleted from.
 
 ---
 
