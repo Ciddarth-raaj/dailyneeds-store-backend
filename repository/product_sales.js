@@ -1,5 +1,4 @@
 const TABLE = "product_sales";
-const PRODUCT_OFFERS = "product_offers";
 
 function normalizeTranDate(tran_date) {
   if (tran_date == null) {
@@ -42,6 +41,35 @@ function normalizeRow(r) {
 class ProductSalesRepository {
   constructor(db) {
     this.db = db;
+  }
+
+  /**
+   * Total quantity sold per product over the trailing 3 calendar months,
+   * divided by 3. Only products with at least one sale in the window are
+   * returned.
+   */
+  listAvgSalesLast3Months() {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT product_id, SUM(tran_qty) AS total_qty
+         FROM \`${TABLE}\`
+         WHERE tran_date >= DATE_SUB(CURDATE(), INTERVAL 3 MONTH)
+         GROUP BY product_id`,
+        [],
+        (err, rows) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+          resolve(
+            (rows || []).map((row) => ({
+              product_id: row.product_id,
+              avg_sales: Number(row.total_qty || 0) / 3,
+            }))
+          );
+        }
+      );
+    });
   }
 
   updateAmounts(conn, row) {
@@ -95,31 +123,6 @@ class ProductSalesRepository {
           else resolve(result);
         }
       );
-    });
-  }
-
-  applyStockOutputDeltas(conn, deltas) {
-    const entries = [...deltas.entries()];
-    return new Promise((resolve, reject) => {
-      const runUpdate = (idx) => {
-        if (idx >= entries.length) {
-          resolve();
-          return;
-        }
-        const [pid, delta] = entries[idx];
-        conn.query(
-          `UPDATE \`${PRODUCT_OFFERS}\` SET stock_output = stock_output + ? WHERE product_id = ?`,
-          [delta, pid],
-          (errUp) => {
-            if (errUp) {
-              reject(errUp);
-              return;
-            }
-            runUpdate(idx + 1);
-          }
-        );
-      };
-      runUpdate(0);
     });
   }
 
@@ -197,8 +200,6 @@ class ProductSalesRepository {
               });
             }
 
-            const stockDeltas = new Map();
-            const insertedProductIds = new Set();
             let inserted = 0;
             let updated = 0;
 
@@ -212,25 +213,12 @@ class ProductSalesRepository {
 
               await this.insertRow(conn, row);
               inserted += 1;
-              insertedProductIds.add(row.product_id);
-
-              if (Number.isFinite(row.tran_qty)) {
-                stockDeltas.set(
-                  row.product_id,
-                  (stockDeltas.get(row.product_id) || 0) + row.tran_qty
-                );
-              }
-            }
-
-            if (stockDeltas.size > 0) {
-              await this.applyStockOutputDeltas(conn, stockDeltas);
             }
 
             finishOk({
               code: 200,
               inserted,
               updated,
-              product_ids: [...insertedProductIds],
             });
           } catch (err) {
             finishErr(err);

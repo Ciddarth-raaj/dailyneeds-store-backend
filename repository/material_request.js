@@ -140,9 +140,10 @@ class MaterialRequestRepository {
           if (!requests.length) return resolve(undefined);
           const request = requests[0];
           this.db.query(
-            `SELECT mrl.*, ml.*
+            `SELECT mrl.*, ml.*, mc.category_name
              FROM material_request_list mrl
              LEFT JOIN materials_latest ml ON mrl.material_id = ml.material_id
+             LEFT JOIN materials_category mc ON ml.material_category_id = mc.material_category_id
              WHERE mrl.material_request_id = ?`,
             [id],
             (err2, items) => {
@@ -212,9 +213,10 @@ class MaterialRequestRepository {
           if (!requests.length) return resolve([]);
           requests.forEach((request) => {
             this.db.query(
-              `SELECT mrl.*, ml.*
+              `SELECT mrl.*, ml.*, mc.category_name
                FROM material_request_list mrl
                LEFT JOIN materials_latest ml ON mrl.material_id = ml.material_id
+               LEFT JOIN materials_category mc ON ml.material_category_id = mc.material_category_id
                WHERE mrl.material_request_id = ?`,
               [request.material_request_id],
               (err2, items) => {

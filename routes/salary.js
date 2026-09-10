@@ -1,16 +1,18 @@
 const router = require("express").Router();
+const P = require("../constants/hr_permissions");
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http")
 
 class SalaryRoutes {
-  constructor(salaryUsecase) {
+  constructor(salaryUsecase, permissions) {
+    this.permissions = permissions;
     this.salaryUsecase = salaryUsecase;
 
     this.init();
   }
 
   init() {
-    router.get("/", async (req, res) => {
+    router.get("/", this.permissions.require(P.VIEW_SALARY_ADVANCE), async (req, res) => {
         try {
           const salary = await this.salaryUsecase.get();
           res.json(salary);
@@ -25,7 +27,7 @@ class SalaryRoutes {
   
         res.end();
       });
-      router.get("/store_id", async (req, res) => {
+      router.get("/store_id", this.permissions.require(P.VIEW_SALARY_ADVANCE), async (req, res) => {
         try {
           const schema = {
             store_id: Joi.number().required(),
@@ -48,7 +50,7 @@ class SalaryRoutes {
   
         res.end();
       });
-      router.post("/update-status", async (req, res) => {
+      router.post("/update-status", this.permissions.require(P.ADD_SALARY_ADVANCE), async (req, res) => {
         try {
           const schema = {
             payment_id: Joi.number().required(),
@@ -73,7 +75,7 @@ class SalaryRoutes {
         }
         res.end();
       });
-      router.post("/update-paidstatus", async (req, res) => {
+      router.post("/update-paidstatus", this.permissions.require(P.ADD_SALARY_ADVANCE), async (req, res) => {
         try {
           const schema = {
             payment_id: Joi.number().required(),
@@ -99,7 +101,7 @@ class SalaryRoutes {
         }
         res.end();
       });
-      router.post("/update-payment", async (req, res) => {
+      router.post("/update-payment", this.permissions.require(P.ADD_SALARY_ADVANCE), async (req, res) => {
         try {
           const schema = {
             payment_id: Joi.number().required(),
@@ -129,7 +131,7 @@ class SalaryRoutes {
         }
         res.end();
       });
-      router.get("/payment_id", async (req, res) => {
+      router.get("/payment_id", this.permissions.require(P.VIEW_SALARY_ADVANCE), async (req, res) => {
         try {
           const schema = {
             payment_id: Joi.string().required(),
@@ -152,7 +154,7 @@ class SalaryRoutes {
   
         res.end();
       });
-    router.post("/create", async (req, res) => {
+    router.post("/create", this.permissions.require(P.ADD_SALARY_ADVANCE), async (req, res) => {
         try {
           const schema = {
             employee: Joi.string().required(),
@@ -188,6 +190,6 @@ class SalaryRoutes {
   }
 }   
 
-module.exports = (salaryUsecase) => {
-  return new SalaryRoutes(salaryUsecase);
+module.exports = (salaryUsecase, permissions) => {
+  return new SalaryRoutes(salaryUsecase, permissions);
 };

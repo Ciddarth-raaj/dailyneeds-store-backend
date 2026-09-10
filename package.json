@@ -10,6 +10,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.122.0",
     "@hapi/joi": "^15.1.0",
     "archiver": "^7.0.1",
     "aws-sdk": "^2.974.0",
@@ -20,6 +21,7 @@
     "crypto": "^1.0.1",
     "db-migrate-mysql": "^1.1.10",
     "dotenv": "^16.4.7",
+    "exceljs": "^4.4.0",
     "express": "^4.17.1",
     "file-type": "^16.5.3",
     "formidable": "^1.2.2",

@@ -1,5 +1,6 @@
 // routes/material_request.js
 const router = require("express").Router();
+const { requireEmployee, employeeIdOrNull } = require("../utils/actor");
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
 
@@ -30,7 +31,7 @@ class MaterialRequestRoutes {
         const isValid = Joi.validate(body, schema);
         if (isValid.error !== null) throw isValid.error;
 
-        const created_by = req.decoded.employee_id;
+        const created_by = requireEmployee(req, "Creating a material request");
         const outlet_id = body.outlet_id || req.decoded.store_id;
         const is_approved =
           body.is_approved !== undefined ? body.is_approved : 0;
@@ -94,7 +95,7 @@ class MaterialRequestRoutes {
         const body = req.body;
         const isValid = Joi.validate(body, schema);
         if (isValid.error !== null) throw isValid.error;
-        const created_by = req.decoded.employee_id;
+        const created_by = requireEmployee(req, "Creating a material request");
         const outlet_id = req.decoded.store_id;
         const is_approved =
           body.is_approved !== undefined ? body.is_approved : 0;

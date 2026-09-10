@@ -1,16 +1,35 @@
 const router = require("express").Router();
+const P = require("../constants/hr_permissions");
+const lifecycleConfig = require("../config/lifecycle");
+const { requireEmployee, employeeIdOrNull } = require("../utils/actor");
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
 
 class EmployeeRoutes {
-  constructor(employeeUsecase) {
+  constructor(employeeUsecase, permissions, sensitive) {
+    this.permissions = permissions;
+    this.sensitive = sensitive;
     this.employeeUsecase = employeeUsecase;
 
     this.init();
   }
 
   init() {
-    router.post("/", async (req, res) => {
+    // Stage 0B / B3. Every route below returns employee rows, and several of
+    // them do it with SELECT *, so the field-level guard is mounted once for
+    // the whole router rather than repeated per route - a route added later
+    // is covered by construction instead of by remembering.
+    //
+    //   filterResponse  strips salary, bank, PAN, Aadhaar, UAN, PF and ESI
+    //                   from the response unless the caller holds
+    //                   view_employee_sensitive
+    //   guardWrite      403s a body that mentions any of them unless the
+    //                   caller holds edit_employee_sensitive (a no-op on
+    //                   requests with no body, so GETs are unaffected)
+    router.use(this.sensitive.filterResponse);
+    router.use(this.sensitive.guardWrite);
+
+    router.post("/", this.permissions.require(P.ADD_EMPLOYEES), async (req, res) => {
       try {
         const schema = {
           employee_id: Joi.number().required(),
@@ -100,7 +119,7 @@ class EmployeeRoutes {
       res.end();
     });
 
-    router.get("/employees", async (req, res) => {
+    router.get("/employees", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
       try {
         const schema = {
           store_ids: Joi.array().items(Joi.number().required()).optional(),
@@ -129,7 +148,7 @@ class EmployeeRoutes {
       res.end();
     });
 
-    router.get("/headcount", async (req, res) => {
+    router.get("/headcount", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
       try {
         const employee = await this.employeeUsecase.getHeadCount();
         res.json(employee);
@@ -144,7 +163,7 @@ class EmployeeRoutes {
 
       res.end();
     });
-    router.get("/familydet", async (req, res) => {
+    router.get("/familydet", this.permissions.require(P.VIEW_FAMILY), async (req, res) => {
       try {
         const employee = await this.employeeUsecase.getFamilyDet();
         res.json(employee);
@@ -159,7 +178,7 @@ class EmployeeRoutes {
 
       res.end();
     });
-    router.get("/bank", async (req, res) => {
+    router.get("/bank", this.permissions.require(P.VIEW_BANKS), async (req, res) => {
       try {
         const employee = await this.employeeUsecase.getBankDetails();
         res.json(employee);
@@ -174,7 +193,7 @@ class EmployeeRoutes {
 
       res.end();
     });
-    router.get("/resignedemp", async (req, res) => {
+    router.get("/resignedemp", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
       try {
         const employee = await this.employeeUsecase.getResignedEmployee();
         res.json(employee);
@@ -189,7 +208,7 @@ class EmployeeRoutes {
 
       res.end();
     });
-    router.get("/newjoinee", async (req, res) => {
+    router.get("/newjoinee", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
       try {
         const schema = {
           limit: Joi.number().required(),
@@ -218,7 +237,7 @@ class EmployeeRoutes {
 
       res.end();
     });
-    router.get("/newjoiner", async (req, res) => {
+    router.get("/newjoiner", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
       try {
         const employee = await this.employeeUsecase.getNewJoiner();
         res.json(employee);
@@ -234,7 +253,7 @@ class EmployeeRoutes {
       res.end();
     });
 
-    router.get("/birthday", async (req, res) => {
+    router.get("/birthday", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
       try {
         const employee = await this.employeeUsecase.getEmployeeBirthday();
         res.json(employee);
@@ -249,7 +268,7 @@ class EmployeeRoutes {
 
       res.end();
     });
-    router.get("/filter", async (req, res) => {
+    router.get("/filter", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
       try {
         const schema = {
           filter: Joi.string().required(),
@@ -274,7 +293,7 @@ class EmployeeRoutes {
 
       res.end();
     });
-    router.get("/anniversary", async (req, res) => {
+    router.get("/anniversary", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
       try {
         const employee = await this.employeeUsecase.getJoiningAnniversary();
         res.json(employee);
@@ -290,7 +309,7 @@ class EmployeeRoutes {
       res.end();
     });
 
-    router.get("/store_id", async (req, res) => {
+    router.get("/store_id", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
       try {
         const schema = {
           store_id: Joi.number().required(),
@@ -315,7 +334,7 @@ class EmployeeRoutes {
       res.end();
     });
 
-    router.get("/employee_id", async (req, res) => {
+    router.get("/employee_id", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
       try {
         const schema = {
           employee_id: Joi.number().required(),
@@ -341,12 +360,54 @@ class EmployeeRoutes {
       res.end();
     });
 
+    // Stage 0B follow-up: the operational employee directory.
+    //
+    // B2 put `view_employees` in front of /employee/employees, which is right
+    // - that route returns the whole employee record. But the accounts sheet
+    // only ever needed a name to put in a dropdown, and taking the HR
+    // permission away emptied it. Granting `view_employees` back to every
+    // outlet user to fix a dropdown would undo B2; this returns the two
+    // columns the dropdown actually uses instead.
+    //
+    // Authenticated (B1 covers it - the path is not in unProtectedRoutes) and
+    // deliberately NOT gated on `view_employees`. What keeps it safe is what
+    // it can return, not who may call it:
+    //
+    //   * two columns, employee_id and employee_name, named in the SQL
+    //   * active employees only
+    //   * the caller's OWN outlet, taken from the token, never from the query
+    //
+    // A non-admin's `store_id` parameter is ignored rather than rejected, so
+    // a stale frontend cannot read another branch's staff list by asking. An
+    // admin (user_type 2) may name a store, because the accounts screens let
+    // an admin work on a branch that is not their own; without one they get
+    // their own, and an account with no store gets an empty list rather than
+    // everybody.
+    router.get("/directory", async (req, res) => {
+      try {
+        const isAdmin = Number(req.auth && req.auth.userType) === this.permissions.ADMIN_USER_TYPE;
+        const requested = Number(req.query.store_id);
+        const ownStore = req.auth ? req.auth.storeId : null;
+        const storeId = isAdmin && Number.isInteger(requested) && requested > 0 ? requested : ownStore;
+
+        if (storeId === null || storeId === undefined || storeId === "") {
+          return res.json([]);
+        }
+
+        const data = await this.employeeUsecase.getDirectory(storeId);
+        res.json(data);
+      } catch (err) {
+        console.log(err);
+        res.json({ code: 500, msg: "An error occurred !" });
+      }
+    });
+
     router.get("/get-details", async (req, res) => {
       try {
         const schema = {
           employee_id: Joi.number().required(),
         };
-        const employee_id = req.decoded.employee_id;
+        const employee_id = requireEmployee(req, "Fetching the signed-in employee");
         const isValid = Joi.validate({ employee_id }, schema);
         if (isValid.error !== null) {
           throw isValid.error;
@@ -355,18 +416,23 @@ class EmployeeRoutes {
         const data = await this.employeeUsecase.getEmployeeById(employee_id);
         res.json(data);
       } catch (err) {
-        console.log(err);
-        if (err.name === "ValidationError") {
-          res.json({ code: 422, msg: err.toString() });
+        if (err.name === "SystemAccountError") {
+          // A break-glass session has no employee record to fetch (A3).
+          res.status(403).json({ code: 403, error: err.code, msg: err.message });
         } else {
-          res.json({ code: 500, msg: "An error occurred !" });
+          console.log(err);
+          if (err.name === "ValidationError") {
+            res.json({ code: 422, msg: err.toString() });
+          } else {
+            res.json({ code: 500, msg: "An error occurred !" });
+          }
         }
       }
 
       res.end();
     });
 
-    router.post("/update-status", async (req, res) => {
+    router.post("/update-status", this.permissions.require(P.ADD_EMPLOYEES), async (req, res) => {
       try {
         const schema = {
           employee_id: Joi.number().required(),
@@ -391,7 +457,7 @@ class EmployeeRoutes {
       }
       res.end();
     });
-    router.post("/updatedata", async (req, res) => {
+    router.post("/updatedata", this.permissions.require(P.ADD_EMPLOYEES), async (req, res) => {
       try {
         const schema = {
           employee_id: Joi.number().required(),
@@ -503,8 +569,19 @@ class EmployeeRoutes {
     });
 
     // Sync all data
-    router.post("/sync", async (req, res) => {
+    router.post("/sync", this.permissions.require(P.ADD_EMPLOYEES), async (req, res) => {
       try {
+        // Stage 0C: answer the caller plainly rather than reporting a
+        // successful sync that the service layer then declines to perform.
+        // 423 Locked - the resource is fine, it is deliberately unavailable.
+        // syncDigismeEmployees() carries the same guard; this one exists so
+        // the person who pressed the button learns why nothing happened.
+        if (!lifecycleConfig.digisme.employeeSync) {
+          return res
+            .status(423)
+            .json({ code: 423, msg: lifecycleConfig.PAUSED_MESSAGE, paused: true });
+        }
+
         await this.employeeUsecase.sync();
         res.json({ code: 200, msg: "Data successfully synced!" });
       } catch (err) {
@@ -518,6 +595,6 @@ class EmployeeRoutes {
   }
 }
 
-module.exports = (employeeUsecase) => {
-  return new EmployeeRoutes(employeeUsecase);
+module.exports = (employeeUsecase, permissions, sensitive) => {
+  return new EmployeeRoutes(employeeUsecase, permissions, sensitive);
 };

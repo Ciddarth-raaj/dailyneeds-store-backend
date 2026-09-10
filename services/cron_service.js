@@ -16,6 +16,14 @@ class CronService {
   }
 
   start() {
+    // Stage 0A staging: a rehearsal instance must never run the production
+    // jobs (Digisme sync, Telegram poller, GST refresh, purchase acks). With
+    // CRON_DISABLED=true every job is registered and listed but none is
+    // scheduled. Production never sets this.
+    if (process.env.CRON_DISABLED === "true") {
+      console.log(`[CRON] CRON_DISABLED=true — ${this.jobs.length} job(s) registered, none scheduled: ${this.jobs.map((j) => j.name).join(", ")}`);
+      return;
+    }
     this.jobs.forEach(({ name, schedule, task }) => {
       if (!cron.validate(schedule)) {
         console.error(`[CRON] invalid schedule for "${name}": ${schedule}`);

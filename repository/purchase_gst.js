@@ -1,7 +1,10 @@
 const logger = require("../utils/logger");
+const { WAREHOUSE_OUTLET_ID } = require("../constants/outlets");
 
 const TABLE = "gst_tally_purchase";
 const INTERNAL_TABLE = "gst_tally_purchase_internal";
+const SOURCE_SYSTEM = "system";
+const SOURCE_TALLY = "tally";
 
 function parseTaxJson(val) {
   if (val == null) return [];
@@ -64,6 +67,14 @@ class PurchaseGstRepository {
       const conditions = [];
       const values = [];
 
+      // An invoice reaches this table twice: once as `system` when the purchase is
+      // pushed to Tally (master_id `<purchase_id>-purchase-entry`) and again as
+      // `tally` when Tally syncs it back under its own MasterID, so master_id never
+      // dedupes the pair. Outside the warehouse the Tally row is the record of
+      // truth, so drop the `system` copy for every other outlet.
+      conditions.push(`(p.source != ? OR p.retail_outlet_id = ?)`);
+      values.push(SOURCE_SYSTEM, WAREHOUSE_OUTLET_ID);
+
       if (filters.retail_outlet_id) {
         conditions.push("p.retail_outlet_id = ?");
         values.push(filters.retail_outlet_id);
@@ -112,6 +123,188 @@ class PurchaseGstRepository {
             return reject(err);
           }
           resolve({ code: 200, data: (rows || []).map(mapRow) });
+        }
+      );
+    });
+  }
+
+  /**
+   * Remove a purchase that no longer exists in Tally.
+   *
+   * Only a row Tally owns can go: a `system` row is the snapshot of a purchase
+   * in our own system, and deleting it here would leave that purchase pushed to
+   * Tally with nothing recording it.
+   *
+   * Its GSTR-2A match goes with it. The foreign key is ON DELETE SET NULL, so
+   * leaving the match behind would strand a 2A document reading as matched
+   * against a purchase that is gone.
+   */
+  deleteTallyRow(gst_tally_purchase_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT source FROM ${TABLE} WHERE gst_tally_purchase_id = ?`,
+        [gst_tally_purchase_id],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PURCHASE_GST",
+              code: "REPOSITORY.PURCHASE_GST.DELETE_LOOKUP",
+              description: err.toString(),
+              category: "",
+              ref: { gst_tally_purchase_id },
+            });
+            return reject(err);
+          }
+          if (!rows || !rows.length) {
+            return resolve({ code: 404, msg: "Purchase not found" });
+          }
+          if (rows[0].source !== SOURCE_TALLY) {
+            return resolve({
+              code: 409,
+              msg: "Only purchases synced from Tally can be deleted here",
+            });
+          }
+
+          this.db.query(
+            `DELETE FROM gst_purchase_match WHERE gst_tally_purchase_id = ?`,
+            [gst_tally_purchase_id],
+            (matchErr, matchRes) => {
+              if (matchErr) {
+                logger.Log({
+                  level: logger.LEVEL.ERROR,
+                  component: "REPOSITORY.PURCHASE_GST",
+                  code: "REPOSITORY.PURCHASE_GST.DELETE_MATCH",
+                  description: matchErr.toString(),
+                  category: "",
+                  ref: { gst_tally_purchase_id },
+                });
+                return reject(matchErr);
+              }
+
+              this.db.query(
+                `DELETE FROM ${TABLE} WHERE gst_tally_purchase_id = ?`,
+                [gst_tally_purchase_id],
+                (delErr, delRes) => {
+                  if (delErr) {
+                    logger.Log({
+                      level: logger.LEVEL.ERROR,
+                      component: "REPOSITORY.PURCHASE_GST",
+                      code: "REPOSITORY.PURCHASE_GST.DELETE",
+                      description: delErr.toString(),
+                      category: "",
+                      ref: { gst_tally_purchase_id },
+                    });
+                    return reject(delErr);
+                  }
+                  if (!delRes.affectedRows) {
+                    return resolve({ code: 404, msg: "Purchase not found" });
+                  }
+                  resolve({
+                    code: 200,
+                    msg: "Deleted",
+                    matches_removed: matchRes ? matchRes.affectedRows : 0,
+                  });
+                }
+              );
+            }
+          );
+        }
+      );
+    });
+  }
+
+  /**
+   * Delete several at once. Same rule as one: only rows Tally owns go, and
+   * their matches go with them. Ids that are not deletable are reported back
+   * rather than failing the batch - one system row in a selection should not
+   * stop the rest.
+   */
+  deleteTallyRows(ids) {
+    const list = [
+      ...new Set(
+        (ids || []).map((id) => Number(id)).filter((id) => Number.isFinite(id))
+      ),
+    ];
+    if (!list.length) {
+      return Promise.resolve({ code: 422, msg: "No purchases given" });
+    }
+
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT gst_tally_purchase_id, source
+         FROM ${TABLE}
+         WHERE gst_tally_purchase_id IN (?)`,
+        [list],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PURCHASE_GST",
+              code: "REPOSITORY.PURCHASE_GST.BULK_DELETE_LOOKUP",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            return reject(err);
+          }
+
+          const found = new Map(
+            (rows || []).map((r) => [Number(r.gst_tally_purchase_id), r.source])
+          );
+          const deletable = list.filter((id) => found.get(id) === SOURCE_TALLY);
+          const skipped = list.filter((id) => found.get(id) !== SOURCE_TALLY);
+
+          if (!deletable.length) {
+            return resolve({
+              code: 200,
+              deleted: 0,
+              matches_removed: 0,
+              skipped,
+            });
+          }
+
+          this.db.query(
+            `DELETE FROM gst_purchase_match WHERE gst_tally_purchase_id IN (?)`,
+            [deletable],
+            (matchErr, matchRes) => {
+              if (matchErr) {
+                logger.Log({
+                  level: logger.LEVEL.ERROR,
+                  component: "REPOSITORY.PURCHASE_GST",
+                  code: "REPOSITORY.PURCHASE_GST.BULK_DELETE_MATCH",
+                  description: matchErr.toString(),
+                  category: "",
+                  ref: {},
+                });
+                return reject(matchErr);
+              }
+
+              this.db.query(
+                `DELETE FROM ${TABLE} WHERE gst_tally_purchase_id IN (?)`,
+                [deletable],
+                (delErr, delRes) => {
+                  if (delErr) {
+                    logger.Log({
+                      level: logger.LEVEL.ERROR,
+                      component: "REPOSITORY.PURCHASE_GST",
+                      code: "REPOSITORY.PURCHASE_GST.BULK_DELETE",
+                      description: delErr.toString(),
+                      category: "",
+                      ref: {},
+                    });
+                    return reject(delErr);
+                  }
+                  resolve({
+                    code: 200,
+                    deleted: delRes ? delRes.affectedRows : 0,
+                    matches_removed: matchRes ? matchRes.affectedRows : 0,
+                    skipped,
+                  });
+                }
+              );
+            }
+          );
         }
       );
     });

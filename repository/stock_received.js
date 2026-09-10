@@ -1,10 +1,29 @@
 const logger = require("../utils/logger");
+const { mapWithConcurrency } = require("../utils/concurrency");
+const {
+  LATEST_GRN_LINE_EXPR,
+  parseLatestGrnLine,
+} = require("../utils/grnLatestLine");
 
 const TABLE = "stock_received";
 const GOFRUGAL_DTL = "medishopdb_MED_MRC_DTL";
 const GOFRUGAL_HDR = "medishopdb_MED_MRC_HDR";
 const GOFRUGAL_DIST = "medishopdb_MED_DISTRIBUTOR_MAST";
 const PRODUCT_OFFERS = "product_offers";
+
+/**
+ * Products per `IN (...)` chunk in listLatestGrnPricingByProduct. Kept at or
+ * below MySQL's eq_range_index_dive_limit (200 by default): past that the
+ * optimizer costs the range from index statistics instead of dives and can
+ * abandon idx_med_mrc_dtl_item_code_mrc_no for a full table scan.
+ */
+const GRN_PRICING_CHUNK_SIZE = 200;
+/**
+ * Chunks in flight at once. The GoFrugal pool holds 10 connections
+ * (drivers/mysql_gofrugal.js); leaving most of them free keeps a Purchase Ref
+ * rebuild from blocking every other GoFrugal-backed request.
+ */
+const GOFRUGAL_QUERY_CONCURRENCY = 4;
 
 function normalizeItemCode(value) {
   if (value === null || value === undefined || value === "") {
@@ -130,6 +149,9 @@ function shapeStockReceivedProduct(row) {
     de_name: row.de_name != null ? row.de_name : null,
     de_display_name: row.de_display_name != null ? row.de_display_name : null,
     image_link: link,
+    pareto: row.de_bill_count_level != null ? row.de_bill_count_level : null,
+    purchase_uom: row.purchase_uom != null ? row.purchase_uom : null,
+    store_uom: row.store_uom != null ? row.store_uom : null,
   };
 }
 
@@ -194,6 +216,15 @@ function grnDetailItemRow(row, productMap) {
     mmd_sale_rate: parseOptionalNumber(saleRateRaw),
     mmd_pur_amount: parseOptionalNumber(
       row.MMD_PUR_AMOUNT ?? row.mmd_pur_amount
+    ),
+    mmd_disc_per: parseOptionalNumber(row.MMD_DISC_PER ?? row.mmd_disc_per),
+    mmd_disc_amt: parseOptionalNumber(row.MMD_DISC_AMT ?? row.mmd_disc_amt),
+    mmd_ppur_rate: parseOptionalNumber(
+      row.MMD_PPUR_RATE ?? row.mmd_ppur_rate
+    ),
+    mmd_pmrp: parseOptionalNumber(row.MMD_PMRP ?? row.mmd_pmrp),
+    mmd_prev_pur_price: parseOptionalNumber(
+      row.MMD_PREV_PUR_PRICE ?? row.mmd_prev_pur_price
     ),
     discount_amount,
     discount_pct,
@@ -334,7 +365,12 @@ class StockReceivedRepository {
                 d.MMD_PUR_TAX_AMT,
                 d.MMD_PUR_PRICE,
                 d.MMD_SALE_RATE,
-                d.MMD_PUR_AMOUNT
+                d.MMD_PUR_AMOUNT,
+                d.MMD_DISC_PER,
+                d.MMD_DISC_AMT,
+                d.MMD_PPUR_RATE,
+                d.MMD_PMRP,
+                d.MMD_PREV_PUR_PRICE
              FROM \`${GOFRUGAL_DTL}\` d
              WHERE d.MMD_MRC_NO = ?
              ORDER BY d.MMD_MRC_SL_NO ASC`,
@@ -380,6 +416,95 @@ class StockReceivedRepository {
     });
   }
 
+  /**
+   * All GRN detail item rows (with header fields attached) for GRNs whose
+   * MRC date falls in [fromDate, toDate], in one query -- used by the Issue
+   * GRN page so it doesn't fire one /grn/detail request per GRN in the
+   * range.
+   */
+  listGrnDetailItemsByDateRange(fromDate, toDate) {
+    return new Promise((resolve, reject) => {
+      if (!this.gofrugalDb) {
+        return reject(new Error("Gofrugal DB connection is not configured"));
+      }
+
+      const conditions = [];
+      const params = [];
+      if (fromDate) {
+        conditions.push("DATE(h.MMH_MRC_DT) >= DATE(?)");
+        params.push(fromDate);
+      }
+      if (toDate) {
+        conditions.push("DATE(h.MMH_MRC_DT) <= DATE(?)");
+        params.push(toDate);
+      }
+      const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+
+      this.gofrugalDb.query(
+        `SELECT
+            h.MMH_MRC_REFNO AS mmh_mrc_refno,
+            DATE_FORMAT(h.MMH_MRC_DT, '%Y-%m-%d') AS mmh_mrc_dt,
+            dist.MDM_DIST_NAME AS supplier_name,
+            d.MMD_MRC_SL_NO,
+            d.MMD_ITEM_CODE,
+            d.MMD_RECD_QTY,
+            d.MMD_FREE_QTY,
+            d.MMD_MAX_RATE,
+            d.MMD_PUR_RATE,
+            d.MMD_PUR_TAX_PER,
+            d.MMD_PUR_TAX_AMT,
+            d.MMD_PUR_PRICE,
+            d.MMD_SALE_RATE,
+            d.MMD_PUR_AMOUNT
+         FROM \`${GOFRUGAL_HDR}\` h
+         JOIN \`${GOFRUGAL_DTL}\` d ON d.MMD_MRC_NO = h.MMH_MRC_NO
+         LEFT JOIN \`${GOFRUGAL_DIST}\` dist
+           ON TRIM(CAST(dist.MDM_DIST_CODE AS CHAR)) = TRIM(CAST(h.MMH_DIST_CODE AS CHAR))
+         ${where}
+         ORDER BY h.MMH_MRC_DT DESC, h.MMH_MRC_NO DESC, d.MMD_MRC_SL_NO ASC`,
+        params,
+        async (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.STOCK_RECEIVED",
+              code: "REPOSITORY.STOCK_RECEIVED.GRN_ISSUES_RANGE",
+              description: err.toString(),
+              category: "",
+              ref: { from_date: fromDate, to_date: toDate },
+            });
+            return reject(err);
+          }
+
+          try {
+            const rawItems = rows || [];
+            const productIds = rawItems
+              .map((row) => normalizeItemCode(row.MMD_ITEM_CODE))
+              .filter((id) => id != null);
+            const productMap = await this._fetchProductsMap(productIds);
+            const items = rawItems.map((row) => ({
+              mmh_mrc_refno: row.mmh_mrc_refno,
+              mmh_mrc_dt: row.mmh_mrc_dt,
+              supplier_name: row.supplier_name,
+              ...grnDetailItemRow(row, productMap),
+            }));
+            resolve(items);
+          } catch (lookupErr) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.STOCK_RECEIVED",
+              code: "REPOSITORY.STOCK_RECEIVED.GRN_ISSUES_RANGE_ENRICH",
+              description: lookupErr.toString(),
+              category: "",
+              ref: { from_date: fromDate, to_date: toDate },
+            });
+            reject(lookupErr);
+          }
+        }
+      );
+    });
+  }
+
   _queryGofrugalDtlWithHdr() {
     return new Promise((resolve, reject) => {
       if (!this.gofrugalDb) {
@@ -414,6 +539,98 @@ class StockReceivedRepository {
           resolve(rows || []);
         }
       );
+    });
+  }
+
+  /**
+   * Latest MRP (MMD_MAX_RATE) and net cost (MMD_PUR_PRICE) for the given
+   * product ids, taken from each product's most recent GRN line by actual
+   * GRN date (MMH_MRC_DT) — not MMD_MRC_NO insertion order, since GRNs can
+   * be entered out of chronological order (e.g. backdated). MMD_MRC_NO is
+   * used only as a tiebreak.
+   *
+   * The "pick the newest line" step runs in SQL (see utils/grnLatestLine),
+   * so each chunk returns one row per product instead of that product's
+   * entire GRN history. On the Purchase Ref page that is ~14k rows total
+   * rather than the hundreds of thousands of history rows the old version
+   * sorted in Node — the bulk of the page's load time.
+   *
+   * Returns a Map keyed by product_id.
+   */
+  async listLatestGrnPricingByProduct(productIds) {
+    if (!this.gofrugalDb) {
+      throw new Error("Gofrugal DB connection is not configured");
+    }
+    const unique = [...new Set((productIds || []).filter((id) => id != null))];
+    if (!unique.length) return new Map();
+
+    const chunks = chunkArray(unique, GRN_PRICING_CHUNK_SIZE);
+    const map = new Map();
+
+    try {
+      const chunkRows = await mapWithConcurrency(
+        chunks,
+        GOFRUGAL_QUERY_CONCURRENCY,
+        (ids) =>
+          this._queryGofrugal(
+            `SELECT d.MMD_ITEM_CODE AS item_code,
+                    MAX(${LATEST_GRN_LINE_EXPR}) AS latest_line
+             FROM \`${GOFRUGAL_DTL}\` d
+             LEFT JOIN \`${GOFRUGAL_HDR}\` h ON h.MMH_MRC_NO = d.MMD_MRC_NO
+             WHERE d.MMD_ITEM_CODE IN (${ids.map(() => "?").join(", ")})
+             GROUP BY d.MMD_ITEM_CODE`,
+            ids
+          )
+      );
+
+      // Two MMD_ITEM_CODE spellings can normalize to the same product id, so
+      // keep the highest encoded line per product rather than the first seen —
+      // the encoding sorts newest-last, same as the comparison MAX() did.
+      const bestLine = new Map();
+      chunkRows.forEach((rows) => {
+        (rows || []).forEach((row) => {
+          const productId = normalizeItemCode(
+            row.item_code ?? row.MMD_ITEM_CODE
+          );
+          if (productId == null) return;
+          const encoded = row.latest_line ?? row.LATEST_LINE;
+          if (encoded == null) return;
+          const current = bestLine.get(productId);
+          if (current == null || String(encoded) > current) {
+            bestLine.set(productId, String(encoded));
+          }
+        });
+      });
+
+      bestLine.forEach((encoded, productId) => {
+        const line = parseLatestGrnLine(encoded);
+        if (!line) return;
+        map.set(productId, {
+          mrp: parseOptionalNumber(line.mrp),
+          net_cost: parseOptionalNumber(line.net_cost),
+        });
+      });
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "REPOSITORY.STOCK_RECEIVED",
+        code: "REPOSITORY.STOCK_RECEIVED.LATEST_GRN_PRICING",
+        description: err.toString(),
+        category: "",
+        ref: {},
+      });
+      throw err;
+    }
+
+    return map;
+  }
+
+  _queryGofrugal(sql, params) {
+    return new Promise((resolve, reject) => {
+      this.gofrugalDb.query(sql, params, (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows || []);
+      });
     });
   }
 
@@ -576,6 +793,9 @@ class StockReceivedRepository {
         const sql = `SELECT pt.product_id,
             pt.de_name,
             pt.de_display_name,
+            pt.de_bill_count_level,
+            pt.purchase_uom,
+            pt.store_uom,
             (
               SELECT pi.image_url
               FROM product_images pi
@@ -874,6 +1094,127 @@ class StockReceivedRepository {
           );
         });
       });
+    });
+  }
+
+  listIgnoredGrnIssueKeys() {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT mmh_mrc_refno, mmd_mrc_sl_no FROM grn_issue_ignores`,
+        [],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.STOCK_RECEIVED",
+              code: "REPOSITORY.STOCK_RECEIVED.LIST_IGNORED_GRN_ISSUES",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            return reject(err);
+          }
+          resolve(rows || []);
+        }
+      );
+    });
+  }
+
+  listIgnoredGrnIssueKeysByRefno(refno) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT mmh_mrc_refno, mmd_mrc_sl_no FROM grn_issue_ignores WHERE mmh_mrc_refno = ?`,
+        [String(refno)],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.STOCK_RECEIVED",
+              code: "REPOSITORY.STOCK_RECEIVED.LIST_IGNORED_GRN_ISSUES_BY_REFNO",
+              description: err.toString(),
+              category: "",
+              ref: { refno },
+            });
+            return reject(err);
+          }
+          resolve(rows || []);
+        }
+      );
+    });
+  }
+
+  ignoreGrnIssueItems(items, ignoredBy) {
+    return new Promise((resolve, reject) => {
+      if (!Array.isArray(items) || items.length === 0) {
+        return resolve({ ignored: 0 });
+      }
+
+      const values = items.map((item) => [
+        String(item.refno),
+        String(item.sl_no),
+        item.product_id != null ? item.product_id : null,
+        ignoredBy != null ? ignoredBy : null,
+      ]);
+
+      this.db.query(
+        `INSERT INTO grn_issue_ignores
+            (mmh_mrc_refno, mmd_mrc_sl_no, product_id, ignored_by)
+         VALUES ?
+         ON DUPLICATE KEY UPDATE
+            product_id = VALUES(product_id),
+            ignored_by = VALUES(ignored_by)`,
+        [values],
+        (err, result) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.STOCK_RECEIVED",
+              code: "REPOSITORY.STOCK_RECEIVED.IGNORE_GRN_ISSUES",
+              description: err.toString(),
+              category: "",
+              ref: { items },
+            });
+            return reject(err);
+          }
+          resolve({ ignored: items.length });
+        }
+      );
+    });
+  }
+
+  // Refno and sl_no are stored as strings, so the delete coerces them the
+  // same way the insert above does -- a numeric refno would otherwise never
+  // match its own row.
+  unignoreGrnIssueItems(items) {
+    return new Promise((resolve, reject) => {
+      if (!Array.isArray(items) || items.length === 0) {
+        return resolve({ unignored: 0 });
+      }
+
+      const pairs = items.map((item) => [
+        String(item.refno),
+        String(item.sl_no),
+      ]);
+
+      this.db.query(
+        `DELETE FROM grn_issue_ignores
+         WHERE (mmh_mrc_refno, mmd_mrc_sl_no) IN (?)`,
+        [pairs],
+        (err, result) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.STOCK_RECEIVED",
+              code: "REPOSITORY.STOCK_RECEIVED.UNIGNORE_GRN_ISSUES",
+              description: err.toString(),
+              category: "",
+              ref: { items },
+            });
+            return reject(err);
+          }
+          resolve({ unignored: result?.affectedRows ?? 0 });
+        }
+      );
     });
   }
 }
