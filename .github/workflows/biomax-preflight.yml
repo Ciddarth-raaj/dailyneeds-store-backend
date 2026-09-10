@@ -119,6 +119,35 @@ jobs:
           if echo "$LISTEN" | grep -Eq '(:|\.)7005$'; then fail "something is listening on TCP 7005"; else pass "nothing listens on 7005"; fi
           if echo "$LISTEN" | grep -Eq '(:|\.)82$'; then report "a listener exists on TCP 82 (reported only, not changed)"; else report "no listener on TCP 82"; fi
 
+          if [ "$MODE" = "post" ]; then
+            echo "=== receiver runtime config (read-only; the receiver is NOT started)"
+            # The receiver must read the SAME config.json db.mysql block the live
+            # API reads. Check the deployed files only: never start anything.
+            if [ -f ecosystem.biomax.config.js ]; then
+              ECO_NODE_ENV="$(node -e 'const a=require("./ecosystem.biomax.config.js").apps[0]; process.stdout.write(String((a.env&&a.env.NODE_ENV)||(a.env_production&&a.env_production.NODE_ENV)||""))' 2>/dev/null)"
+              if [ -n "$ECO_NODE_ENV" ]; then fail "ecosystem.biomax.config.js forces NODE_ENV=$ECO_NODE_ENV; the receiver must inherit the API's convention"; else pass "ecosystem.biomax.config.js does not set NODE_ENV"; fi
+            else
+              fail "ecosystem.biomax.config.js is not deployed"
+            fi
+            if grep -q 'BIOMAX_DB_ENV' biomax/receiver.js 2>/dev/null && grep -q 'process.exit(78)' biomax/receiver.js 2>/dev/null; then
+              pass "deployed biomax/receiver.js resolves BIOMAX_DB_ENV || NODE_ENV || development and exits 78 on a missing block"
+            else
+              fail "deployed biomax/receiver.js does not carry the database-block resolution fix"
+            fi
+            # Dry-run of that resolution with the environment a hand-run
+            # `pm2 start ecosystem.biomax.config.js` would have (nothing set),
+            # compared with the block the API actually uses. Host and database
+            # only; credentials are never printed.
+            DBOF() { node -e 'const b=require("./config.json").db.mysql[process.argv[1]]; process.stdout.write(b?`${b.host}:${b.port||3306}/${b.database}`:"MISSING")' "$1" 2>/dev/null || echo ERROR; }
+            RCV_ENV="${BIOMAX_DB_ENV:-${NODE_ENV:-development}}"
+            RCV_DB="$(DBOF "$RCV_ENV")"
+            API_ENV_NOW="$(pm2 env 0 2>/dev/null | sed -n 's/^NODE_ENV: //p' | head -1 | tr -d '[:space:]')"; API_ENV_NOW="${API_ENV_NOW:-development}"
+            API_DB_NOW="$(DBOF "$API_ENV_NOW")"
+            report "receiver would resolve db.mysql.${RCV_ENV} -> ${RCV_DB}; live API uses db.mysql.${API_ENV_NOW} -> ${API_DB_NOW}"
+            case "$RCV_DB" in MISSING|ERROR) fail "receiver's resolved db.mysql.${RCV_ENV} block is missing or unreadable";; esac
+            if [ "$RCV_DB" = "$API_DB_NOW" ] && [ "$RCV_DB" != "MISSING" ] && [ "$RCV_DB" != "ERROR" ]; then pass "receiver and API resolve to the same database"; else fail "receiver would use ${RCV_DB} but the API uses ${API_DB_NOW}"; fi
+          fi
+
           echo "=== local HTTP smoke (read-only GETs against the box's own services)"
           # The API answers on 8080 and the Next.js frontend on 3000, behind
           # nginx. Unauthenticated GETs only. A guarded route proves it exists
