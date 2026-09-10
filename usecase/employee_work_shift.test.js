@@ -18,8 +18,14 @@ const buildUsecase = require("./employee_work_shift");
 const ACTIVE_SHIFT = { work_shift_id: 4, shift_code: "GS1", shift_name: "9 TO 9", active: 1 };
 const INACTIVE_SHIFT = { work_shift_id: 9, shift_code: "OLD", shift_name: "Retired", active: 0 };
 
-const makeRepo = ({ shift = ACTIVE_SHIFT, existing = [11, 12, 13], rows = [] } = {}) => {
-  const calls = { list: [], assign: [] };
+const makeRepo = ({
+  shift = ACTIVE_SHIFT,
+  existing = [11, 12, 13],
+  rows = [],
+  employeeShifts = {},
+  workingTimes = {},
+} = {}) => {
+  const calls = { list: [], assign: [], current: [] };
   return {
     calls,
     async listForAssignment(filters) {
@@ -31,6 +37,15 @@ const makeRepo = ({ shift = ACTIVE_SHIFT, existing = [11, 12, 13], rows = [] } =
     },
     async findExistingEmployeeIds(ids) {
       return ids.filter((id) => existing.includes(id));
+    },
+    async getEmployeeWorkShift(employeeId) {
+      calls.current.push(Number(employeeId));
+      return Object.prototype.hasOwnProperty.call(employeeShifts, employeeId)
+        ? employeeShifts[employeeId]
+        : null;
+    },
+    async getWorkShiftWorkingTimes(workShiftId) {
+      return workingTimes[workShiftId] || [];
     },
     async assignWorkShift(employeeIds, workShiftId) {
       calls.assign.push({ employeeIds, workShiftId });
@@ -254,5 +269,113 @@ describe("list", () => {
       (err) => err.name === "ValidationError"
     );
     assert.equal(repo.calls.list.length, 0);
+  });
+});
+
+/* ============================ one employee's shift, for the profile ====== */
+
+/**
+ * The profile's read. What matters here is that it can only ever describe the
+ * NEW mapping, that "unassigned" survives as its own answer rather than being
+ * dressed up as a shift, and that a timing which genuinely varies by weekday
+ * says so instead of one day speaking for the rest.
+ */
+describe("currentForEmployee", () => {
+  const ASSIGNED = {
+    employee_id: 11,
+    default_work_shift_id: 4,
+    work_shift_code: "GS1",
+    work_shift_name: "9 TO 9",
+    work_shift_active: 1,
+  };
+
+  it("names the assigned shift and its timing", async () => {
+    const repo = makeRepo({
+      employeeShifts: { 11: ASSIGNED },
+      workingTimes: { 4: [{ in_time: "09:00:00", out_time: "21:00:00" }] },
+    });
+    const res = await buildUsecase(repo).currentForEmployee(11);
+    assert.equal(res.code, 200);
+    assert.deepEqual(res.data, {
+      employee_id: 11,
+      assigned: true,
+      work_shift_id: 4,
+      shift_code: "GS1",
+      shift_name: "9 TO 9",
+      shift_active: true,
+      timing: "09:00 - 21:00",
+      timings: [{ in_time: "09:00", out_time: "21:00" }],
+    });
+  });
+
+  it("UNASSIGNED IS ITS OWN ANSWER, not a blank shift", async () => {
+    // The profile has to be able to tell "nobody has assigned this person"
+    // from "the shift could not be loaded"; only the first is somebody's job.
+    const repo = makeRepo({
+      employeeShifts: { 12: { employee_id: 12, default_work_shift_id: null } },
+    });
+    const res = await buildUsecase(repo).currentForEmployee(12);
+    assert.equal(res.code, 200);
+    assert.equal(res.data.assigned, false);
+    assert.equal(res.data.work_shift_id, null);
+    assert.equal(res.data.shift_name, null);
+    assert.equal(res.data.timing, null);
+  });
+
+  it("says so when the hours differ by weekday rather than picking one", async () => {
+    const repo = makeRepo({
+      employeeShifts: { 11: ASSIGNED },
+      workingTimes: {
+        4: [
+          { in_time: "09:00:00", out_time: "21:00:00" },
+          { in_time: "10:00:00", out_time: "18:00:00" },
+        ],
+      },
+    });
+    const res = await buildUsecase(repo).currentForEmployee(11);
+    assert.equal(res.data.timing, "Varies by day");
+    assert.equal(res.data.timings.length, 2);
+  });
+
+  it("shows a deactivated shift as it is, rather than as unassigned", async () => {
+    const repo = makeRepo({
+      employeeShifts: { 11: { ...ASSIGNED, work_shift_active: 0 } },
+      workingTimes: { 4: [] },
+    });
+    const res = await buildUsecase(repo).currentForEmployee(11);
+    assert.equal(res.data.assigned, true);
+    assert.equal(res.data.shift_active, false);
+    assert.equal(res.data.timing, null, "a shift with no working days has no timing to state");
+  });
+
+  it("answers 404 for an employee that does not exist", async () => {
+    const repo = makeRepo();
+    assert.equal((await buildUsecase(repo).currentForEmployee(99)).code, 404);
+  });
+
+  it("refuses an id that is not an employee id", async () => {
+    const repo = makeRepo();
+    for (const bad of ["", "abc", 0, -3]) {
+      await assert.rejects(
+        () => buildUsecase(repo).currentForEmployee(bad),
+        (err) => err.name === "ValidationError"
+      );
+    }
+    assert.equal(repo.calls.current.length, 0, "nothing is read until the id is an id");
+  });
+
+  it("NEVER READS THE LEGACY SHIFT COLUMNS", () => {
+    const fs = require("fs");
+    const path = require("path");
+    // Comments are stripped first: the rule is about what the code touches,
+    // and the file explains the legacy columns by name precisely so that
+    // nobody reaches for them later.
+    const code = fs
+      .readFileSync(path.join(__dirname, "employee_work_shift.js"), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/[^\n]*/g, "");
+    // `\b` does not match inside `work_shift_id` or `default_work_shift_id`.
+    assert.ok(!/\bshift_id\b/.test(code), "the legacy shift_id must not appear");
+    assert.ok(!/shift_master/.test(code), "the legacy shift master must not appear");
   });
 });

@@ -156,6 +156,57 @@ class EmployeeWorkShiftRepository {
     );
   }
 
+  /**
+   * ONE employee's current work shift, for the employee profile.
+   *
+   * The single-row form of `listForAssignment`'s `ws` join, and it reads the
+   * SAME column - `new_employee.default_work_shift_id`. The legacy
+   * `shift_id` / `shift_code` pair is not joined, selected or mentioned here,
+   * so the profile cannot accidentally display the old shift master under a
+   * new label.
+   *
+   * A null row means no such employee; a row with a null
+   * `default_work_shift_id` means unassigned, which is a different fact and
+   * has to stay distinguishable.
+   */
+  async getEmployeeWorkShift(employeeId) {
+    const rows = await this._read(
+      "GET-EMPLOYEE-WORK-SHIFT",
+      `SELECT ne.employee_id,
+              ne.default_work_shift_id,
+              ws.shift_code   AS work_shift_code,
+              ws.shift_name   AS work_shift_name,
+              ws.active       AS work_shift_active
+         FROM new_employee ne
+         LEFT JOIN work_shift ws ON ws.work_shift_id = ne.default_work_shift_id
+        WHERE ne.employee_id = ?`,
+      [employeeId]
+    );
+    return rows && rows[0] ? rows[0] : null;
+  }
+
+  /**
+   * The distinct working-day in/out times of a work shift.
+   *
+   * The schedule is per weekday, so "the timing" is not one pair in general -
+   * a shift may well start later on a Saturday. This returns what is actually
+   * configured and lets the caller decide how to say it; rest days are
+   * excluded because a rest day has no times to show.
+   */
+  async getWorkShiftWorkingTimes(workShiftId) {
+    return this._read(
+      "GET-WORK-SHIFT-WORKING-TIMES",
+      `SELECT DISTINCT in_time, out_time
+         FROM work_shift_weekly_schedule
+        WHERE work_shift_id = ?
+          AND is_working_day = 1
+          AND in_time IS NOT NULL
+          AND out_time IS NOT NULL
+        ORDER BY in_time, out_time`,
+      [workShiftId]
+    );
+  }
+
   /** The active work shift the caller is assigning to, or null. */
   async getActiveWorkShift(workShiftId) {
     const rows = await this._read(

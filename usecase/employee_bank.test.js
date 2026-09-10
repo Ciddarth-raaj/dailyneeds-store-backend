@@ -119,6 +119,32 @@ const makeRepo = (store) => ({
     });
     return 1;
   },
+  async approveNameMismatch(id, fingerprint, { actorEmployeeId, reason }) {
+    const v = store.verification;
+    // Mirrors the real UPDATE's guard exactly: the status and the fingerprint,
+    // and deliberately NOT the verdict - both verdicts are reviewable.
+    if (!v || v.status !== STATUS.NAME_MISMATCH || v.account_fingerprint !== fingerprint) return 0;
+    Object.assign(v, {
+      status: STATUS.VERIFIED,
+      verified_at: new Date(),
+      override_by_employee_id: actorEmployeeId,
+      override_at: new Date(),
+      override_reason: reason,
+      override_kind: "NAME_MISMATCH",
+    });
+    return 1;
+  },
+  async rejectBankAccount(id, fingerprint, { actorEmployeeId, reason }) {
+    const v = store.verification;
+    if (!v || v.status !== STATUS.NAME_MISMATCH || v.account_fingerprint !== fingerprint) return 0;
+    Object.assign(v, {
+      status: STATUS.REJECTED,
+      rejected_by_employee_id: actorEmployeeId,
+      rejected_at: new Date(),
+      rejection_reason: reason,
+    });
+    return 1;
+  },
   async confirmNameMismatch(id, fingerprint, { actorEmployeeId, note }) {
     const v = store.verification;
     if (!v || v.status !== STATUS.NAME_MISMATCH || v.account_fingerprint !== fingerprint) return 0;
@@ -558,6 +584,148 @@ describe("52. a legitimate mismatch can be confirmed; an illegitimate one cannot
     await uc.verify(EMP);
     assert.equal(store.verification.confirmed_by_employee_id, null, "the old acceptance does not carry over");
     assert.equal(store.verification.status, STATUS.NAME_MISMATCH);
+  });
+});
+
+/* =========================================== the name-mismatch review === */
+/**
+ * The dead end this replaced: a MISMATCH verdict could not be confirmed by
+ * anybody, and the profile said exactly that beside no action at all. These
+ * assert the way OUT of a mismatch, in all three directions, and - the part
+ * worth being careful about - that none of them quietly releases a bank
+ * transfer that should still be blocked.
+ */
+describe("a name mismatch has a review, and the review is recorded", () => {
+  const mismatched = async (nameAtBank) => {
+    const built = build();
+    built.provider.nextResult = { account_exists: true, name_at_bank: nameAtBank, transaction_id: "T" };
+    assert.equal((await built.uc.verify(EMP)).status, STATUS.NAME_MISMATCH);
+    return built;
+  };
+
+  it("A HARD MISMATCH IS REVIEWABLE - which the old confirmation refused", async () => {
+    // The whole point. `confirmNameMismatch` rejects this verdict outright;
+    // the review accepts it, from somebody who holds the permission and
+    // states a reason.
+    const { store, uc } = await mismatched("PRIYA SHARMA");
+    const after = await uc.reviewNameMismatch(EMP, {
+      decision: "APPROVE_SAME_PERSON",
+      reason: "Maiden name; passbook and Aadhaar seen",
+      actorEmployeeId: 7,
+    });
+    assert.equal(after.status, STATUS.VERIFIED);
+    assert.equal(store.verification.name_match_verdict, "MISMATCH");
+  });
+
+  it("an approval is recorded as a bank-name-mismatch OVERRIDE, with who, when and why", async () => {
+    const { store, uc } = await mismatched("R K");
+    await uc.reviewNameMismatch(EMP, {
+      decision: "APPROVE_SAME_PERSON",
+      reason: "Passbook checked at the branch",
+      actorEmployeeId: 7,
+    });
+    assert.equal(store.verification.override_by_employee_id, 7);
+    assert.equal(store.verification.override_reason, "Passbook checked at the branch");
+    assert.equal(store.verification.override_kind, "NAME_MISMATCH", "never readable as a duplicate override");
+    assert.ok(store.verification.override_at);
+
+    // And in the append-only log, which survives a later re-verification.
+    const attempt = store.attempts[store.attempts.length - 1];
+    assert.equal(attempt.outcome, "NAME_MISMATCH_OVERRIDE");
+    assert.equal(attempt.requested_by_employee_id, 7);
+    assert.equal(attempt.override_reason, "Passbook checked at the branch");
+    assert.equal(attempt.name_match_verdict, "REVIEW");
+  });
+
+  it("REJECTING LEAVES THE EMPLOYEE UNPAYABLE BY BANK TRANSFER", async () => {
+    const { store, uc } = await mismatched("PRIYA SHARMA");
+    const after = await uc.reviewNameMismatch(EMP, {
+      decision: "REJECT_ACCOUNT",
+      reason: "Belongs to a different person entirely",
+      actorEmployeeId: 7,
+    });
+    assert.equal(after.status, STATUS.REJECTED);
+    assert.equal(after.bank_payroll_ready, false, "a rejected account is never payroll-ready");
+
+    const ready = await uc.isBankPayrollReady(EMP);
+    assert.equal(ready.bank_payroll_ready, false);
+    assert.match(ready.reason, /rejected/);
+
+    assert.equal(store.verification.rejected_by_employee_id, 7);
+    assert.equal(store.verification.rejection_reason, "Belongs to a different person entirely");
+    assert.ok(store.verification.rejected_at);
+    assert.equal(store.attempts[store.attempts.length - 1].outcome, "BANK_ACCOUNT_REJECTED");
+  });
+
+  it("A REASON IS REQUIRED FOR BOTH OUTCOMES, and nothing is written without one", async () => {
+    for (const decision of ["APPROVE_SAME_PERSON", "REJECT_ACCOUNT"]) {
+      const { store, uc } = await mismatched("R K");
+      const attempts = store.attempts.length;
+      await assert.rejects(
+        () => uc.reviewNameMismatch(EMP, { decision, reason: "   ", actorEmployeeId: 7 }),
+        /a reason is required/
+      );
+      assert.equal(store.verification.status, STATUS.NAME_MISMATCH, "the row is untouched");
+      assert.equal(store.attempts.length, attempts, "and nothing is logged");
+    }
+  });
+
+  it("an unknown decision is refused rather than guessed at", async () => {
+    const { uc } = await mismatched("R K");
+    await assert.rejects(
+      () => uc.reviewNameMismatch(EMP, { decision: "MAYBE", reason: "a reason", actorEmployeeId: 7 }),
+      /APPROVE_SAME_PERSON or REJECT_ACCOUNT/
+    );
+  });
+
+  it("there is nothing to review on a row that is not a mismatch", async () => {
+    const { uc } = build();
+    await uc.verify(EMP);
+    await assert.rejects(
+      () => uc.reviewNameMismatch(EMP, { decision: "REJECT_ACCOUNT", reason: "no", actorEmployeeId: 7 }),
+      /is VERIFIED, not NAME_MISMATCH/
+    );
+  });
+
+  it("a review cannot land on an account that has since changed", async () => {
+    const { store, uc } = await mismatched("R K");
+    store.employee.account_no = OTHER_ACCOUNT;
+    await assert.rejects(
+      () =>
+        uc.reviewNameMismatch(EMP, {
+          decision: "APPROVE_SAME_PERSON",
+          reason: "checked",
+          actorEmployeeId: 7,
+        }),
+      /is PENDING, not NAME_MISMATCH/
+    );
+  });
+
+  it("a fresh verification clears the review, approval and rejection alike", async () => {
+    for (const decision of ["APPROVE_SAME_PERSON", "REJECT_ACCOUNT"]) {
+      const { store, provider, uc } = await mismatched("R K");
+      await uc.reviewNameMismatch(EMP, { decision, reason: "checked", actorEmployeeId: 7 });
+
+      provider.nextResult = { account_exists: true, name_at_bank: "R K", transaction_id: "T2" };
+      await uc.verify(EMP);
+      assert.equal(store.verification.status, STATUS.NAME_MISMATCH);
+      assert.equal(store.verification.override_by_employee_id, null);
+      assert.equal(store.verification.override_kind, null);
+      assert.equal(store.verification.rejected_by_employee_id, null);
+      assert.equal(store.verification.rejection_reason, null);
+    }
+  });
+
+  it("the review never returns or logs an account number", async () => {
+    const { store, uc } = await mismatched("R K");
+    const after = await uc.reviewNameMismatch(EMP, {
+      decision: "APPROVE_SAME_PERSON",
+      reason: "checked",
+      actorEmployeeId: 7,
+    });
+    assert.ok(!JSON.stringify(after).includes(ACCOUNT));
+    assert.ok(!JSON.stringify(store.attempts).includes(ACCOUNT));
+    assert.equal(store.attempts[store.attempts.length - 1].account_last4, ACCOUNT.slice(-4));
   });
 });
 

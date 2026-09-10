@@ -105,8 +105,10 @@ const EMPLOYEE_ROW = {
   uan: "100200300400",
   pf: "1",
   pf_number: "PF-9",
+  pf_applicable: 1,
   esi: "1",
   esi_number: "ESI-9",
+  esi_applicable: 0,
 };
 
 /** An Aadhaar document row and an ordinary one, as the document repo returns. */
@@ -571,5 +573,43 @@ describe("B3 filtering rules in isolation", () => {
     assert.equal(containsSensitive({ a: [{ b: { note: "x" } }] }), false);
     assert.equal(containsSensitive(undefined), false);
     assert.equal(containsSensitive({}), false);
+  });
+});
+
+/* ============================ C3: the PF and ESI applicability flags ===== */
+
+/**
+ * The flags travel with the numbers they qualify.
+ *
+ * They are what lets the Statutory section say "not applicable" where it used
+ * to say "not recorded", and they are read and written by that same section
+ * under that same permission. Somebody who may not see an employee's PF
+ * number has no business learning whether they have one - so if these ever
+ * fell out of the sensitive list, the Statutory card would start leaking a
+ * fact about every employee to callers B3 exists to keep out.
+ */
+describe("B3 covers the PF and ESI applicability flags", () => {
+  const { isSensitiveField } = require("../constants/sensitive_fields");
+  const { sanitize, containsSensitive } = buildSensitive;
+
+  it("both flags are sensitive fields", () => {
+    assert.equal(isSensitiveField("pf_applicable"), true);
+    assert.equal(isSensitiveField("esi_applicable"), true);
+    // Case-insensitively, like every other field on the list - the same
+    // column comes back spelled differently depending on the query.
+    assert.equal(isSensitiveField("PF_Applicable"), true);
+  });
+
+  it("a read strips them rather than blanking them", () => {
+    const out = sanitize({ employee_name: "A", pf_applicable: 1, esi_applicable: 0 });
+    assert.deepEqual(out, { employee_name: "A" });
+  });
+
+  it("A WRITE THAT MENTIONS EITHER IS A SENSITIVE WRITE", () => {
+    // Including one that sets a flag back to null: "this employee is not in
+    // the PF scheme after all" is exactly the kind of change that needs the
+    // edit permission.
+    assert.equal(containsSensitive({ employee_details: { pf_applicable: 0 } }), true);
+    assert.equal(containsSensitive({ employee_details: { esi_applicable: null } }), true);
   });
 });
