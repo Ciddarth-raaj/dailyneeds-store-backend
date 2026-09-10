@@ -119,6 +119,29 @@ jobs:
           if echo "$LISTEN" | grep -Eq '(:|\.)7005$'; then fail "something is listening on TCP 7005"; else pass "nothing listens on 7005"; fi
           if echo "$LISTEN" | grep -Eq '(:|\.)82$'; then report "a listener exists on TCP 82 (reported only, not changed)"; else report "no listener on TCP 82"; fi
 
+          echo "=== local HTTP smoke (read-only GETs against the box's own services)"
+          # The API answers on 8080 and the Next.js frontend on 3000, behind
+          # nginx. Unauthenticated GETs only: a 401/403 from a guarded route
+          # proves the route exists and is guarded; a 404 or connection
+          # failure would mean the deploy did not land. The receiver's 7005 is
+          # checked above and must NOT answer.
+          probe() { # label url expected-status-regex
+            CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$2" || echo 000)"
+            if echo "$CODE" | grep -Eq "$3"; then pass "$1 -> HTTP $CODE"; else fail "$1 -> HTTP $CODE (expected $3)"; fi
+          }
+          probe "API root (8080)"                       "http://127.0.0.1:8080/"                       '^(200|301|302|404)$'
+          probe "API /designation (existing, guarded)"   "http://127.0.0.1:8080/designation"            '^(401|403)$'
+          probe "API /work-shift (existing, guarded)"    "http://127.0.0.1:8080/work-shift"             '^(401|403)$'
+          if [ "$MODE" = "post" ]; then
+            probe "API /attendance/raw (new, guarded)"     "http://127.0.0.1:8080/attendance/raw"       '^(401|403)$'
+            probe "API /attendance/devices (new, guarded)" "http://127.0.0.1:8080/attendance/devices"   '^(401|403)$'
+            probe "FE /attendance/list (new page)"         "http://127.0.0.1:3000/attendance/list"      '^(200|301|302|307|308)$'
+            probe "FE /attendance/devices (new page)"      "http://127.0.0.1:3000/attendance/devices"   '^(200|301|302|307|308)$'
+          fi
+          probe "FE /work-shift (existing page)"         "http://127.0.0.1:3000/work-shift"             '^(200|301|302|307|308)$'
+          probe "FE /hr/employees (existing page)"       "http://127.0.0.1:3000/hr/employees"           '^(200|301|302|307|308)$'
+          probe "FE / (login)"                            "http://127.0.0.1:3000/"                       '^(200|301|302|307|308)$'
+
           echo "=== database (read-only) - $MODE"
           # The API's REAL environment: server.js sets global.env from NODE_ENV
           # and falls back to "development" when it is unset. Read it off the
