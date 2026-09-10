@@ -201,6 +201,9 @@ class Server {
     // the PRIMARY application pool, never the GoFrugal one.
     this.biomaxPunchRepo = require("./repository/biomax_punch")(this.mysql.connection);
     this.biomaxDeviceRepo = require("./repository/biomax_device")(this.mysql.connection);
+    // Historical pull scaffolding: the API queues GET_LOG_DATA requests and
+    // reads their state; only the receiver process ever hands one to a device.
+    this.biomaxHistoricalPullRepo = require("./repository/biomax_historical_pull")(this.mysql.connection);
     this.storeRepo = require("./repository/store")(this.mysql.connection);
     this.outletRepo = require("./repository/outlet")(this.mysql.connection);
     this.familyRepo = require("./repository/family")(this.mysql.connection);
@@ -488,6 +491,7 @@ class Server {
       this.reportTemplateRepo
     );
     this.biomaxDeviceUsecase = require("./usecase/biomax_device")(this.biomaxDeviceRepo);
+    this.biomaxHistoricalPullUsecase = require("./usecase/biomax_historical_pull")(this.biomaxHistoricalPullRepo);
     this.employeeWorkShiftUsecase = require("./usecase/employee_work_shift")(
       this.employeeWorkShiftRepo
     );
@@ -830,6 +834,10 @@ class Server {
       this.biomaxDeviceUsecase,
       this.permissions
     );
+    const biomaxHistoricalPullRouter = require("./routes/biomax_historical_pull")(
+      this.biomaxHistoricalPullUsecase,
+      this.permissions
+    );
     // Employee Shift Assignment. Mounted at /hr with the other employee
     // writes, because what it changes is an employee record.
     const employeeWorkShiftRouter = require("./routes/employee_work_shift")(
@@ -1063,6 +1071,7 @@ class Server {
     // navigation already anticipates. Devices first: Express tries routers
     // in order and /attendance/devices must not be swallowed by /attendance.
     app.use("/attendance/devices", biomaxDeviceRouter.getRouter());
+    app.use("/attendance/historical-pulls", biomaxHistoricalPullRouter.getRouter());
     app.use("/attendance", attendanceRawRouter.getRouter());
     app.use("/store", storeRouter.getRouter());
     app.use("/outlet", outletRouter.getRouter());

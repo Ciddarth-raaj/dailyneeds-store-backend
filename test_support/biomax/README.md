@@ -46,6 +46,24 @@ unless you read the reply headers yourself.
 Variables: `DEV_ID`, `USER_ID` (**not** `USER`, which is your login name),
 `IO_TIME` (14 digits), `VERIFY`, `IOMODE`, `TIMEOUT_MS`.
 
+### Historical pull scaffolding (fake device only)
+
+```
+MODE=poll EXPECT_CMD=1 node test_support/biomax/fake-device-http.js        # expects a GET_LOG_DATA back
+MODE=cmd_result TRANS_ID=HP... BLK_NO=1 node test_support/biomax/fake-device-http.js   # a raw result block
+MODE=cmd_result TRANS_ID=HP... RETURN_CODE=ERROR_NO_DATA node test_support/biomax/fake-device-http.js
+```
+
+`EXPECT_CMD=1` only passes against a receiver started with
+`BIOMAX_COMMANDS_ENABLED=1` **and** a pull queued for that `DEV_ID`; with the
+flag off (the default, and the only state the production receiver has ever
+had) the poll is answered `ERROR_NO_CMD` exactly as before. The `cmd_result`
+body is deliberately opaque bytes: the FKDataHS102 historical record layout
+has not been captured and the receiver decodes nothing. No `send_cmd_result`
+and no command reply has been captured from real hardware either; see
+`docs/biomax-historical-pull.md`, section 9. Never point this script at a
+real terminal's server address; it only ever talks to the receiver.
+
 ## No `receive_cmd` request was captured
 
 Its reply was. The synthesised poll frame in the script uses the same

@@ -58,6 +58,10 @@ describe("the captured frame", () => {
       blk_no: 0,
       blk_len: 144,
       content_length: 144,
+      // The command channel is absent on a live punch.
+      trans_id: null,
+      cmd_code: null,
+      cmd_return_code: null,
     });
   });
 

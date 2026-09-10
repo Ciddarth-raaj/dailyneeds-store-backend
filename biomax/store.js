@@ -18,6 +18,21 @@
  *   biomax_raw_request    diagnostics
  *   biomax_device         first/last_seen_at, last_punch_at
  *
+ * Historical pull scaffolding (docs/biomax-historical-pull.md):
+ *
+ *   biomax_device_command       claim the oldest PENDING GET_LOG_DATA for a
+ *                               device on its poll - at most once per command
+ *   biomax_historical_pull      status transitions the receiver owns:
+ *                               REQUESTED -> WAITING_DEVICE -> RECEIVING,
+ *                               and -> FAILED on a failing cmd_return_code.
+ *                               COMPLETED is set by nothing yet (its
+ *                               protocol semantics are unproven).
+ *   biomax_command_result_block one row per (dev_id, trans_id, blk_no), raw
+ *                               body kept byte for byte; a repeat with the
+ *                               same bytes counts, a repeat with different
+ *                               bytes is counted as a conflict and the
+ *                               stored bytes are left alone.
+ *
  * `io_time` is converted from the 14-digit string by MySQL's STR_TO_DATE in
  * the INSERT itself; no JS Date is ever bound (R3). `attendance_date` arrives
  * as a 'YYYY-MM-DD' string from attendanceDate.js (UTC integer math) and is
@@ -25,6 +40,7 @@
  */
 
 const mysql = require("mysql");
+const crypto = require("crypto");
 const {
   queryAsync,
   getConnectionAsync,
@@ -34,6 +50,11 @@ const {
 } = require("../utils/batchInsert");
 
 const SCHEDULE_CACHE_MS = 60 * 1000;
+
+/** How a punch row got here (biomax_punch.ingest_source). */
+const INGEST_SOURCE = { LIVE: "LIVE", HISTORICAL_PULL: "HISTORICAL_PULL" };
+
+const sha256 = (buf) => crypto.createHash("sha256").update(buf).digest("hex");
 
 function createPool(dbConfig) {
   return mysql.createPool({
@@ -112,10 +133,31 @@ function createStore(pool, options = {}) {
    *
    * @returns {{outcome: 'stored'|'duplicate', biomax_punch_id: number|null}}
    */
-  async function insertPunch(punch, derived) {
+  async function insertPunch(punch, derived, options = {}) {
+    const source = options.source === INGEST_SOURCE.HISTORICAL_PULL ? INGEST_SOURCE.HISTORICAL_PULL : INGEST_SOURCE.LIVE;
+    const pullId = source === INGEST_SOURCE.HISTORICAL_PULL ? options.historicalPullId || null : null;
+    if (source === INGEST_SOURCE.HISTORICAL_PULL && !pullId) {
+      throw new Error("a HISTORICAL_PULL punch must name its biomax_historical_pull_id");
+    }
     const connection = await getConnectionAsync(pool);
     try {
       await beginTransactionAsync(connection);
+
+      // A historical punch never touches an existing row: not the
+      // retransmission counter (that means "the device re-sent a live
+      // punch"), not the source, nothing. Same unique key, looked up first.
+      if (source === INGEST_SOURCE.HISTORICAL_PULL) {
+        const existing = await queryAsync(
+          connection,
+          `SELECT biomax_punch_id FROM biomax_punch
+            WHERE dev_id = ? AND user_id = ? AND io_time_raw = ?`,
+          [punch.dev_id, punch.user_id, punch.io_time_raw]
+        );
+        if (existing && existing[0]) {
+          await commitAsync(connection);
+          return { outcome: "duplicate", biomax_punch_id: Number(existing[0].biomax_punch_id) };
+        }
+      }
 
       const result = await queryAsync(
         connection,
@@ -123,11 +165,11 @@ function createStore(pool, options = {}) {
            (dev_id, user_id, io_time_raw, io_time,
             verify_mode, io_mode, fk_bin_data_lib, log_image_present,
             cmd_id, blk_no, blk_len, content_length, body_len_prefix, raw_json,
-            source_ip, source_port)
+            source_ip, source_port, ingest_source, biomax_historical_pull_id)
          VALUES (?, ?, ?, STR_TO_DATE(?, '%Y%m%d%H%i%s'),
                  ?, ?, ?, ?,
                  ?, ?, ?, ?, ?, ?,
-                 ?, ?)
+                 ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE
            retransmit_count = retransmit_count + 1,
            last_retransmit_at = NOW(3)`,
@@ -148,6 +190,8 @@ function createStore(pool, options = {}) {
           punch.raw_json,
           punch.source_ip,
           punch.source_port,
+          source,
+          pullId,
         ]
       );
 
@@ -223,6 +267,163 @@ function createStore(pool, options = {}) {
     );
   }
 
+  /* ------------------------------------------- historical pull (commands) */
+
+  /**
+   * Hand the polling device its oldest PENDING command, exactly once.
+   *
+   * The claim is the UPDATE ... WHERE status = 'PENDING': only the poll
+   * whose UPDATE changed a row gets the command back, so two polls racing
+   * (or the same device polling every 20 s) cannot both execute it. The
+   * pull moves REQUESTED -> WAITING_DEVICE in the same transaction.
+   *
+   * @returns {object|null} the command row, or null when nothing is queued
+   */
+  async function claimPendingCommand(devId, sourceIp) {
+    const connection = await getConnectionAsync(pool);
+    try {
+      await beginTransactionAsync(connection);
+      const rows = await queryAsync(
+        connection,
+        `SELECT biomax_device_command_id, biomax_historical_pull_id, trans_id, dev_id, cmd_code, begin_time, end_time
+           FROM biomax_device_command
+          WHERE dev_id = ? AND status = 'PENDING'
+          ORDER BY created_at ASC, biomax_device_command_id ASC
+          LIMIT 1
+          FOR UPDATE`,
+        [devId]
+      );
+      const command = rows && rows[0] ? rows[0] : null;
+      if (!command) {
+        await commitAsync(connection);
+        return null;
+      }
+      const claimed = await queryAsync(
+        connection,
+        `UPDATE biomax_device_command
+            SET status = 'SENT', sent_at = NOW(3), sent_to_ip = ?
+          WHERE biomax_device_command_id = ? AND dev_id = ? AND status = 'PENDING'`,
+        [sourceIp || null, command.biomax_device_command_id, devId]
+      );
+      if (!claimed || claimed.affectedRows !== 1) {
+        await rollbackAsync(connection);
+        return null;
+      }
+      await queryAsync(
+        connection,
+        `UPDATE biomax_historical_pull
+            SET status = 'WAITING_DEVICE', sent_at = COALESCE(sent_at, NOW(3))
+          WHERE biomax_historical_pull_id = ? AND status = 'REQUESTED'`,
+        [command.biomax_historical_pull_id]
+      );
+      await commitAsync(connection);
+      return {
+        biomax_device_command_id: Number(command.biomax_device_command_id),
+        biomax_historical_pull_id: Number(command.biomax_historical_pull_id),
+        trans_id: command.trans_id,
+        dev_id: command.dev_id,
+        cmd_code: command.cmd_code,
+        begin_time: command.begin_time,
+        end_time: command.end_time,
+      };
+    } catch (err) {
+      await rollbackAsync(connection).catch(() => {});
+      throw err;
+    } finally {
+      connection.release();
+    }
+  }
+
+  /** The command a trans_id was issued for - whoever is answering it. */
+  async function findCommandByTransId(transId) {
+    if (!transId) return null;
+    const rows = await q(
+      `SELECT biomax_device_command_id, biomax_historical_pull_id, trans_id, dev_id, cmd_code, status
+         FROM biomax_device_command
+        WHERE trans_id = ?`,
+      [transId]
+    );
+    return rows && rows[0] ? rows[0] : null;
+  }
+
+  /**
+   * Keep one send_cmd_result block, raw. Idempotent on
+   * (dev_id, trans_id, blk_no): same bytes again -> duplicate_count;
+   * different bytes again -> conflict_count, stored bytes untouched.
+   *
+   * @returns {{outcome: 'stored'|'duplicate'|'conflict', body_sha256: string}}
+   */
+  async function insertResultBlock(block) {
+    const body = Buffer.isBuffer(block.raw_body) ? block.raw_body : Buffer.alloc(0);
+    const hash = sha256(body);
+    const transId = block.trans_id === null || block.trans_id === undefined ? "" : String(block.trans_id);
+    const blkNo = Number.isInteger(block.blk_no) ? block.blk_no : 0;
+
+    const existing = await q(
+      `SELECT body_sha256 FROM biomax_command_result_block
+        WHERE dev_id = ? AND trans_id = ? AND blk_no = ?`,
+      [block.dev_id, transId, blkNo]
+    );
+    const prior = existing && existing[0] ? existing[0].body_sha256 : null;
+
+    await q(
+      `INSERT INTO biomax_command_result_block
+         (biomax_historical_pull_id, dev_id, trans_id, cmd_id, cmd_code, cmd_return_code,
+          blk_no, blk_len, content_length, headers_json, body_len, body_sha256, raw_body,
+          match_status, source_ip)
+       VALUES (?, ?, ?, ?, ?, ?,
+               ?, ?, ?, ?, ?, ?, ?,
+               ?, ?)
+       ON DUPLICATE KEY UPDATE
+         duplicate_count = duplicate_count + IF(body_sha256 = VALUES(body_sha256), 1, 0),
+         conflict_count  = conflict_count  + IF(body_sha256 = VALUES(body_sha256), 0, 1),
+         last_received_at = NOW(3)`,
+      [
+        block.biomax_historical_pull_id || null,
+        block.dev_id,
+        transId,
+        block.cmd_id || null,
+        block.cmd_code || null,
+        block.cmd_return_code || null,
+        blkNo,
+        block.blk_len === undefined ? null : block.blk_len,
+        block.content_length === undefined ? null : block.content_length,
+        block.headers_json ? String(block.headers_json) : null,
+        body.length,
+        hash,
+        body,
+        block.match_status,
+        block.source_ip || null,
+      ]
+    );
+    const outcome = prior === null ? "stored" : prior === hash ? "duplicate" : "conflict";
+    return { outcome, body_sha256: hash };
+  }
+
+  /** First block in: REQUESTED / WAITING_DEVICE -> RECEIVING, once. */
+  async function markPullReceiving(pullId) {
+    await q(
+      `UPDATE biomax_historical_pull
+          SET status = 'RECEIVING', first_result_at = COALESCE(first_result_at, NOW(3))
+        WHERE biomax_historical_pull_id = ? AND status IN ('REQUESTED', 'WAITING_DEVICE')`,
+      [pullId]
+    );
+  }
+
+  /** The device said no: pull FAILED with the code verbatim, command FAILED. */
+  async function markPullFailed(pullId, reason) {
+    await q(
+      `UPDATE biomax_historical_pull
+          SET status = 'FAILED', failed_at = NOW(3), failure_reason = ?
+        WHERE biomax_historical_pull_id = ? AND status IN ('REQUESTED', 'WAITING_DEVICE', 'RECEIVING')`,
+      [String(reason || "").slice(0, 255), pullId]
+    );
+    await q(
+      `UPDATE biomax_device_command SET status = 'FAILED' WHERE biomax_historical_pull_id = ? AND status <> 'FAILED'`,
+      [pullId]
+    );
+  }
+
   async function ping() {
     await q("SELECT 1", []);
     return true;
@@ -250,10 +451,15 @@ function createStore(pool, options = {}) {
     insertPunch,
     insertRawRequest,
     touchDevice,
+    claimPendingCommand,
+    findCommandByTransId,
+    insertResultBlock,
+    markPullReceiving,
+    markPullFailed,
     ping,
     lastPunchAt,
     close,
   };
 }
 
-module.exports = { createPool, createStore, SCHEDULE_CACHE_MS };
+module.exports = { createPool, createStore, SCHEDULE_CACHE_MS, INGEST_SOURCE, sha256 };

@@ -156,4 +156,10 @@ module.exports = {
   VIEW_BIOMAX_DEVICES: "view_biomax_devices",
   MANAGE_BIOMAX_DEVICES: "manage_biomax_devices",
   REDERIVE_ATTENDANCE: "rederive_attendance",
+
+  // Historical pull scaffolding. Asking a terminal for backdated punches
+  // (GET_LOG_DATA) is its own decision: declared by the historical-pull
+  // migration, granted to nobody, so administrators only through the
+  // user_type 2 bypass until it is granted deliberately.
+  MANAGE_BIOMAX_HISTORICAL_PULL: "manage_biomax_historical_pull",
 };

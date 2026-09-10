@@ -10,6 +10,11 @@
  *   MODE=punch (default)   requires  response_code: OK
  *   MODE=poll              requires  response_code: ERROR_NO_CMD
  *                          AND the headers cmd_id and cmd_code present (empty)
+ *                          (EXPECT_CMD=1: requires cmd_code: GET_LOG_DATA and a
+ *                          trans_id instead - only meaningful against a receiver
+ *                          started with BIOMAX_COMMANDS_ENABLED=1 and a queued pull)
+ *   MODE=cmd_result        sends a send_cmd_result with TRANS_ID / BLK_NO /
+ *                          RETURN_CODE and an opaque body; requires response_code: OK
  *
  * Exit codes: 0 pass; 1 wrong or missing response_code; 2 no reply within
  * the timeout (the device would retry this in ~3 minutes); 3 socket error.
@@ -19,6 +24,7 @@
  *   IO_TIME=20260915023000 node fake-device-http.js   # fixed timestamp
  *   DEV_ID=UNKNOWNTEST01 node fake-device-http.js     # unregistered device
  *   MODE=poll node fake-device-http.js                # receive_cmd
+ *   MODE=cmd_result TRANS_ID=HP... BLK_NO=1 node fake-device-http.js   # a result block
  *   RAW=1 node fake-device-http.js                    # the captured 645 bytes, byte for byte
  *
  * Do NOT "fix" USER_ID to USER: `process.env.USER` is the shell login name on
@@ -43,6 +49,10 @@ const USER_ID = process.env.USER_ID || "1952";
 const VERIFY = process.env.VERIFY ? Number(process.env.VERIFY) : 1073741824;
 const IOMODE = process.env.IOMODE ? Number(process.env.IOMODE) : 16777216;
 const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS || "8000", 10);
+const EXPECT_CMD = process.env.EXPECT_CMD === "1";
+const TRANS_ID = process.env.TRANS_ID || "HP00000000000000FAKE000000";
+const BLK_NO = process.env.BLK_NO || "0";
+const RETURN_CODE = process.env.RETURN_CODE || "OK";
 
 function stamp() {
   if (process.env.IO_TIME) return process.env.IO_TIME;
@@ -100,6 +110,21 @@ function pollFrame() {
   return { frame: Buffer.from(commonHeaders("receive_cmd", 0), "latin1"), json: "(no body)" };
 }
 
+/**
+ * A send_cmd_result with an OPAQUE body. The real FKDataHS102 historical
+ * record layout is unknown, so these bytes claim to be nothing; the receiver
+ * must keep them byte for byte and decode nothing.
+ */
+function cmdResultFrame() {
+  const body = Buffer.from([0x00, 0xff, 0x10, 0x00, 0x00, 0x00, 0x7b, 0x22, 0x80, 0x81, 0xfe, 0x0d, 0x0a, 0x00, 0xc0]);
+  const head =
+    commonHeaders("send_cmd_result", body.length).replace(/\r\n\r\n$/, "\r\n") +
+    `cmd_id: ${TRANS_ID}\r\n` +
+    `trans_id: ${TRANS_ID}\r\n` +
+    `cmd_return_code: ${RETURN_CODE}\r\n\r\n`;
+  return { frame: Buffer.concat([Buffer.from(head.replace(/blk_no: 0/, `blk_no: ${BLK_NO}`), "latin1"), body]), json: `(opaque ${body.length}-byte body, trans_id=${TRANS_ID}, blk_no=${BLK_NO}, cmd_return_code=${RETURN_CODE})` };
+}
+
 function parseReply(buf) {
   const text = buf.toString("latin1");
   const end = text.indexOf("\r\n\r\n");
@@ -115,8 +140,8 @@ function parseReply(buf) {
   return { statusLine, headers, headerBlock: lines };
 }
 
-const expected = MODE === "poll" ? "ERROR_NO_CMD" : "OK";
-const { frame, json } = MODE === "poll" ? pollFrame() : punchFrame();
+const expected = MODE === "poll" && !EXPECT_CMD ? "ERROR_NO_CMD" : "OK";
+const { frame, json } = MODE === "poll" ? pollFrame() : MODE === "cmd_result" ? cmdResultFrame() : punchFrame();
 
 console.log(`fake BM70W (${MODE}) -> ${HOST}:${PORT}  ${frame.length} bytes  dev_id=${DEV_ID}`);
 console.log(`  ${json}`);
@@ -146,6 +171,12 @@ sock.on("close", () => {
   const code = headers.response_code;
   if (code !== expected) {
     return finish(1, `FAIL: expected response_code: ${expected}, got ${code === undefined ? "NO response_code HEADER" : JSON.stringify(code)} (status line alone proves nothing)`);
+  }
+  if (MODE === "poll" && EXPECT_CMD) {
+    if (headers.cmd_code !== "GET_LOG_DATA" || !headers.trans_id) {
+      return finish(1, `FAIL: expected a GET_LOG_DATA command with a trans_id, got cmd_code=${JSON.stringify(headers.cmd_code)} trans_id=${JSON.stringify(headers.trans_id)}`);
+    }
+    return finish(0, `PASS: command ${headers.cmd_code} trans_id ${headers.trans_id} (send its result with MODE=cmd_result TRANS_ID=${headers.trans_id})`);
   }
   if (MODE === "poll" && (!("cmd_id" in headers) || !("cmd_code" in headers))) {
     return finish(1, "FAIL: ERROR_NO_CMD reply must carry empty cmd_id and cmd_code headers");

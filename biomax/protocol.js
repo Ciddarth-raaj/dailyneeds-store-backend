@@ -29,6 +29,13 @@
 
 const REQUEST_PUNCH = "realtime_glog";
 const REQUEST_POLL = "receive_cmd";
+/**
+ * The device's answer to a command it was handed on a poll. NOT captured
+ * off hardware yet (no command has ever been issued by this system); the
+ * name follows the vendor's documented request_code vocabulary and the
+ * receiver keeps whatever arrives under it byte for byte.
+ */
+const REQUEST_CMD_RESULT = "send_cmd_result";
 
 const ACK_OK = "OK";
 const ACK_NO_CMD = "ERROR_NO_CMD";
@@ -69,6 +76,7 @@ function classifyRequest(headers) {
   const code = raw === undefined || raw === null ? "" : String(raw).trim();
   if (code === REQUEST_PUNCH) return { kind: "punch", code, unknown: false };
   if (code === REQUEST_POLL) return { kind: "poll", code, unknown: false };
+  if (code === REQUEST_CMD_RESULT) return { kind: "cmd_result", code, unknown: false };
   return { kind: "poll", code, unknown: true };
 }
 
@@ -89,7 +97,30 @@ function readEnvelope(headers) {
     blk_no: int("blk_no"),
     blk_len: int("blk_len"),
     content_length: int("content-length"),
+    // Command-channel headers. Their NAMES on a real send_cmd_result are an
+    // assumption until captured; every header is also kept verbatim in
+    // headers_json, so nothing is lost if the device spells them otherwise.
+    trans_id: str("trans_id"),
+    cmd_code: str("cmd_code"),
+    cmd_return_code: str("cmd_return_code"),
   };
+}
+
+/**
+ * Every header exactly as the device sent it, in order, as [name, value]
+ * pairs - for biomax_command_result_block.headers_json. Takes Node's
+ * `req.rawHeaders` (flat name/value array); a plain object is accepted too.
+ */
+function listHeaders(rawHeaders) {
+  if (Array.isArray(rawHeaders)) {
+    const out = [];
+    for (let i = 0; i + 1 < rawHeaders.length; i += 2) out.push([String(rawHeaders[i]), String(rawHeaders[i + 1])]);
+    return out;
+  }
+  if (rawHeaders && typeof rawHeaders === "object") {
+    return Object.keys(rawHeaders).map((k) => [k, Array.isArray(rawHeaders[k]) ? rawHeaders[k].join(", ") : String(rawHeaders[k])]);
+  }
+  return [];
 }
 
 /**
@@ -223,6 +254,46 @@ function buildAckHeaders(kind) {
 }
 
 /**
+ * The reply that hands a device a queued GET_LOG_DATA command.
+ *
+ * ASSUMED SHAPE - no capture exists of DigiSME (or anything) issuing a
+ * command to a BM70W, so this mirrors the only two facts the hardware has
+ * shown: the device reads custom reply headers, and it frames its own
+ * bodies as `<uint32 LE length><JSON><0x0A><0x00>`. Until a capture proves
+ * otherwise this reply is only ever sent to the fake device
+ * (BIOMAX_COMMANDS_ENABLED defaults to off in the receiver).
+ *
+ *   response_code: OK
+ *   cmd_id:        <trans_id>       the id the device echoes back
+ *   cmd_code:      GET_LOG_DATA
+ *   trans_id:      <trans_id>
+ *   body           {"begin_time":"YYYYMMDDHHMMSS","end_time":"YYYYMMDDHHMMSS"}
+ *
+ * @returns {{headers: Array<[string,string]>, body: Buffer}}
+ */
+function buildCommandReply(command) {
+  if (!command || command.cmd_code !== "GET_LOG_DATA") {
+    throw new Error(`refusing to build a reply for command ${command && command.cmd_code}`);
+  }
+  const json = Buffer.from(JSON.stringify({ begin_time: command.begin_time, end_time: command.end_time }), "utf8");
+  const tail = Buffer.from([0x0a, 0x00]);
+  const prefix = Buffer.alloc(4);
+  prefix.writeUInt32LE(json.length + tail.length, 0);
+  const body = Buffer.concat([prefix, json, tail]);
+  const headers = [
+    ["Cache-Control", "private"],
+    ["Content-Length", String(body.length)],
+    ["Content-Type", "application/octet-stream"],
+    ["response_code", ACK_OK],
+    ["cmd_id", command.trans_id],
+    ["cmd_code", command.cmd_code],
+    ["trans_id", command.trans_id],
+    ["Connection", "close"],
+  ];
+  return { headers, body };
+}
+
+/**
  * Parse a raw HTTP reply (as the fixture files hold it, or as a test reads
  * it off a socket) into {statusLine, headers} with lower-cased names. Used
  * by the tests and the fake-device script so they assert on the protocol
@@ -248,6 +319,7 @@ function parseReplyHeaders(buffer) {
 module.exports = {
   REQUEST_PUNCH,
   REQUEST_POLL,
+  REQUEST_CMD_RESULT,
   ACK_OK,
   ACK_NO_CMD,
   DEFAULT_MAX_BODY_BYTES,
@@ -257,5 +329,7 @@ module.exports = {
   parsePunchBody,
   isRealTimestamp,
   buildAckHeaders,
+  buildCommandReply,
+  listHeaders,
   parseReplyHeaders,
 };

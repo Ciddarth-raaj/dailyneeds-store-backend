@@ -25,8 +25,25 @@
  *        status; nothing falls back to the calendar date silently.
  *   D3   an unregistered Cloud ID is stored and ACKed, subject to R13 caps.
  *
+ * HISTORICAL PULL SCAFFOLDING (docs/biomax-historical-pull.md):
+ *
+ *   receive_cmd       when BIOMAX_COMMANDS_ENABLED=1 AND a GET_LOG_DATA is
+ *                     queued for THIS dev_id, the poll is answered with that
+ *                     command (claimed exactly once). Otherwise, and always
+ *                     when the flag is off (the default), ERROR_NO_CMD as
+ *                     before. A store error while claiming also falls back
+ *                     to ERROR_NO_CMD: the command stays PENDING.
+ *   send_cmd_result   preserved RAW - every header, the body bytes, a hash -
+ *                     matched by trans_id to the command that was issued and
+ *                     by dev_id to the device it was issued to; ACKed OK
+ *                     only once the block row is committed (R1). Nothing
+ *                     decodes the body: the FKDataHS102 historical layout is
+ *                     not captured, so no punch is created from it yet.
+ *
  * WHAT IT NEVER DOES: pair IN/OUT, compute hours, apply grace, breaks, OT,
- * or status. It stores and dates. Part 2 is elsewhere.
+ * or status. It stores and dates. Part 2 is elsewhere. It never queues a
+ * command itself and never issues anything but GET_LOG_DATA
+ * (biomax/commands.js refuses the rest by name).
  *
  * Usage:  BIOMAX_PORT=7005 node biomax/receiver.js
  * Health: GET /healthz  -> {"ok":true,"db":true,"last_punch_received":...}
@@ -41,6 +58,7 @@ const { deriveAttendanceDate, STATUS } = require("./attendanceDate");
 const { createFloodGuard } = require("./flood");
 const { createLog } = require("./log");
 const { createSpool } = require("./spool");
+const commands = require("./commands");
 
 /**
  * Production runs this under ec2-user on Node 14.21.3, the same interpreter
@@ -64,6 +82,9 @@ function readConfig(env = process.env) {
     maxBodyBytes: int("BIOMAX_MAX_BODY", protocol.DEFAULT_MAX_BODY_BYTES),
     socketTimeoutMs: int("BIOMAX_SOCKET_TIMEOUT_MS", 15000),
     spoolDir: env.BIOMAX_SPOOL_DIR || null,
+    // OFF unless explicitly "1"/"true": with it off, a queued command is never
+    // handed to any device, however it got queued.
+    commandsEnabled: /^(1|true|yes)$/i.test(String(env.BIOMAX_COMMANDS_ENABLED === undefined ? "" : env.BIOMAX_COMMANDS_ENABLED).trim()),
     flood: {
       perMinute: int("BIOMAX_UNREG_PER_MINUTE", 30),
       perDay: int("BIOMAX_UNREG_PER_DAY", 2000),
@@ -122,6 +143,14 @@ function createReceiver({ store, log, spool, flood, config } = {}) {
     for (const [k, v] of protocol.buildAckHeaders(kind)) res.setHeader(k, v);
     res.writeHead(200);
     res.end();
+  }
+
+  /** Hand a claimed GET_LOG_DATA to the polling device (assumed reply shape - see protocol.js). */
+  function replyCommand(res, command) {
+    const { headers, body } = protocol.buildCommandReply(command);
+    for (const [k, v] of headers) res.setHeader(k, v);
+    res.writeHead(200);
+    res.end(body);
   }
 
   /** No ACK: the device must keep the punch and retry (R1). */
@@ -310,12 +339,120 @@ function createReceiver({ store, log, spool, flood, config } = {}) {
       source_ip: sourceIp,
       bytes: frame.length,
     };
+
+    // A genuine receive_cmd from an identified device may carry a queued
+    // command back - only with the flag on, only its own device's command,
+    // only once (the store's claim is the UPDATE that flips PENDING->SENT).
+    if (!classified.unknown && envelope.dev_id && cfg.commandsEnabled && typeof store.claimPendingCommand === "function") {
+      let command = null;
+      try {
+        command = await store.claimPendingCommand(envelope.dev_id, sourceIp);
+      } catch (err) {
+        logger.error("COMMAND_CLAIM_FAILED", err && err.message ? err.message : String(err), { dev_id: envelope.dev_id });
+        command = null; // stays PENDING; the device is told there is nothing
+      }
+      if (command) {
+        try {
+          commands.assertAllowedCommand(command.cmd_code);
+        } catch (err) {
+          // Cannot happen (the column is a one-value ENUM), but never send
+          // anything this module has not vetted.
+          logger.error("COMMAND_REFUSED", err.message, { dev_id: envelope.dev_id, trans_id: command.trans_id });
+          reply(res, protocol.ACK_NO_CMD);
+          return;
+        }
+        replyCommand(res, command);
+        logger.request({ ...base, outcome: "command_sent", trans_id: command.trans_id, cmd_code: command.cmd_code, begin_time: command.begin_time, end_time: command.end_time, biomax_historical_pull_id: command.biomax_historical_pull_id, duration_ms: Date.now() - started });
+        await safe(() => store.touchDevice(envelope.dev_id, { punch: false }));
+        return;
+      }
+    }
+
     reply(res, protocol.ACK_NO_CMD);
     if (classified.unknown) {
       await safeRaw({ ...base, outcome: "unknown_request_code", reason: `request_code ${JSON.stringify(classified.code)}`, byte_length: frame.length, raw_frame: frame });
     }
     logger.request({ ...base, outcome: classified.unknown ? "unknown_request_code" : "poll", duration_ms: Date.now() - started, error: classified.unknown });
     if (envelope.dev_id) await safe(() => store.touchDevice(envelope.dev_id, { punch: false }));
+  }
+
+  /**
+   * send_cmd_result: keep it, match it, ACK it - in that order. Nothing is
+   * decoded. The block row is the durable record; if it cannot be written
+   * the socket is closed with no reply, exactly as for a punch (R1).
+   */
+  async function handleCmdResult(ctx, classified) {
+    const { req, res, envelope, body, frame, sourceIp, started, oversized } = ctx;
+    const base = {
+      dev_id: envelope.dev_id,
+      request_code: classified.code,
+      source_ip: sourceIp,
+      bytes: frame.length,
+    };
+    if (!envelope.dev_id) {
+      return preserveAndAck(ctx, "unparsed", "send_cmd_result without dev_id header", base);
+    }
+
+    let command = null;
+    try {
+      command = envelope.trans_id ? await store.findCommandByTransId(envelope.trans_id) : null;
+    } catch (err) {
+      return storeFailure(ctx, err, base, "send_cmd_result: command lookup");
+    }
+    const match = commands.matchResult(envelope, command);
+    const pullId = match === commands.MATCH.MATCHED ? Number(command.biomax_historical_pull_id) : null;
+
+    let stored;
+    try {
+      stored = await store.insertResultBlock({
+        biomax_historical_pull_id: pullId,
+        dev_id: envelope.dev_id,
+        trans_id: envelope.trans_id,
+        cmd_id: envelope.cmd_id,
+        cmd_code: envelope.cmd_code,
+        cmd_return_code: envelope.cmd_return_code,
+        blk_no: envelope.blk_no === null ? 0 : envelope.blk_no,
+        blk_len: envelope.blk_len,
+        content_length: envelope.content_length,
+        headers_json: JSON.stringify(protocol.listHeaders(req.rawHeaders)),
+        raw_body: body,
+        match_status: match,
+        source_ip: sourceIp,
+      });
+    } catch (err) {
+      return storeFailure(ctx, err, base, "send_cmd_result: block");
+    }
+
+    // Durable. ACK first, then the pull's bookkeeping.
+    reply(res, protocol.ACK_OK);
+
+    const failed = commands.isFailureReturnCode(envelope.cmd_return_code);
+    logger.request({
+      ...base,
+      outcome: `cmd_result_${match.toLowerCase()}`,
+      block_outcome: stored.outcome,
+      trans_id: envelope.trans_id,
+      blk_no: envelope.blk_no,
+      body_len: body.length,
+      body_sha256: stored.body_sha256,
+      cmd_return_code: envelope.cmd_return_code,
+      biomax_historical_pull_id: pullId,
+      oversized: oversized || undefined,
+      duration_ms: Date.now() - started,
+      error: match !== commands.MATCH.MATCHED || failed || stored.outcome === "conflict" || oversized,
+    });
+
+    if (match === commands.MATCH.MATCHED && stored.outcome === "stored") {
+      if (failed) {
+        await safe(() => store.markPullFailed(pullId, `device returned cmd_return_code ${envelope.cmd_return_code}`));
+      } else {
+        await safe(() => store.markPullReceiving(pullId));
+      }
+    }
+    if (match !== commands.MATCH.MATCHED && stored.outcome === "stored") {
+      await safeRaw({ ...base, outcome: "unknown_request_code", reason: `send_cmd_result ${match}: trans_id ${JSON.stringify(envelope.trans_id)}`, byte_length: frame.length, raw_frame: frame });
+    }
+    await safe(() => store.touchDevice(envelope.dev_id, { punch: false }));
   }
 
   async function handleHealth(res) {
@@ -352,6 +489,7 @@ function createReceiver({ store, log, spool, flood, config } = {}) {
     const ctx = { req, res, envelope, body: read.body, frame, sourceIp, sourcePort, started, oversized: read.oversized };
 
     if (classified.kind === "punch") return handlePunch(ctx);
+    if (classified.kind === "cmd_result") return handleCmdResult(ctx, classified);
     return handlePoll(ctx, classified);
   }
 
@@ -445,6 +583,7 @@ async function main() {
     db_env: dbEnv,
     db: `${dbConfig.host}/${dbConfig.database}`,
     max_body: receiver.config.maxBodyBytes,
+    commands_enabled: receiver.config.commandsEnabled,
     flood: receiver.config.flood,
   });
 
