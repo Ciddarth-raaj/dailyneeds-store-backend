@@ -37,9 +37,13 @@ class WorkShiftRoutes {
     // unchanged, so every existing caller keeps the list it already gets.
     router.get("/", this.permissions.require(P.VIEW_SHIFT), async (req, res) => {
       try {
-        const schema = {
-          active: Joi.number().valid(0, 1).optional(),
-        };
+        // `.unknown(true)` on purpose: this endpoint accepted any query
+        // string before and ignored it, and tightening that here would be a
+        // behaviour change for existing callers that has nothing to do with
+        // the filter. A malformed `active` IS refused.
+        const schema = Joi.object()
+          .keys({ active: Joi.number().valid(0, 1).optional() })
+          .unknown(true);
         const isValid = Joi.validate(req.query, schema);
         if (isValid.error !== null) {
           throw isValid.error;
