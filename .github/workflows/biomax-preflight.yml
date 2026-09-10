@@ -120,14 +120,21 @@ jobs:
           if echo "$LISTEN" | grep -Eq '(:|\.)82$'; then report "a listener exists on TCP 82 (reported only, not changed)"; else report "no listener on TCP 82"; fi
 
           echo "=== database (read-only) - $MODE"
-          node - "$MODE" <<'NODE'
+          # The API's REAL environment: server.js sets global.env from NODE_ENV
+          # and falls back to "development" when it is unset. Read it off the
+          # running pm2 process rather than assuming "production".
+          API_ENV="$(pm2 env 0 2>/dev/null | sed -n 's/^NODE_ENV: //p' | head -1 | tr -d '[:space:]')"
+          [ -n "$API_ENV" ] || API_ENV="development"
+          echo "API process 0 NODE_ENV resolves to: $API_ENV"
+          node - "$MODE" "$API_ENV" <<'NODE'
           const fs = require("fs");
           const mysql = require("mysql");
           const mode = process.argv[2];
           // THE connection dnds.co.in uses: config.json -> db.mysql[env], exactly
-          // as drivers/mysql.js builds the API's pool (env = NODE_ENV, and the
-          // pm2 app runs with NODE_ENV=production). Never the GoFrugal pool.
-          const env = process.env.NODE_ENV || "production";
+          // as drivers/mysql.js builds the API's pool, with env being what the
+          // RUNNING API process resolves (argv[3], read from pm2). Never the
+          // GoFrugal pool.
+          const env = process.argv[3] || "development";
           const appCfg = JSON.parse(fs.readFileSync("config.json", "utf8"));
           const cfg = appCfg.db.mysql[env];
           if (!cfg) { console.log(`::error::FAIL: config.json has no db.mysql.${env} block`); process.exit(3); }
@@ -135,17 +142,26 @@ jobs:
             host: cfg.host, port: cfg.port, user: cfg.username, password: cfg.password,
             database: cfg.database, dateStrings: true, multipleStatements: false,
           });
-          // What db-migrate will resolve when the deploy runs `db-migrate up`
-          // from migrations/mysql (report only; names, never values).
+          // Where `db-migrate up` (run from migrations/mysql with no -e, so
+          // env "dev", which db-migrate aliases to "development") will write.
+          // It MUST be the same host and database the API reads, otherwise the
+          // migration would land somewhere the application never looks.
+          let migrateFails = 0;
           try {
             const dbm = JSON.parse(fs.readFileSync("migrations/mysql/database.json", "utf8"));
             const envs = Object.keys(dbm).filter((k) => k !== "defaultEnv");
-            const target = dbm.defaultEnv || (dbm.dev ? "dev" : envs[0]);
+            const target = dbm.defaultEnv || (dbm.dev ? "dev" : (dbm.development ? "development" : envs[0]));
             const t = dbm[target] || {};
-            console.log(`REPORT: migrations/mysql/database.json envs=[${envs.join(",")}] defaultEnv=${dbm.defaultEnv || "(none)"} -> db-migrate will use '${target}' = ${t.host}:${t.port}/${t.database} (api pool is ${cfg.host}:${cfg.port}/${cfg.database})`);
-            if (t.database && t.database !== cfg.database) console.log(`::warning::db-migrate target database '${t.database}' differs from the API database '${cfg.database}'`);
-          } catch (e) { console.log(`REPORT: could not read migrations/mysql/database.json: ${e.message}`); }
-          let fails = 0;
+            console.log(`REPORT: migrations/mysql/database.json envs=[${envs.join(",")}] defaultEnv=${dbm.defaultEnv || "(none)"} -> db-migrate target '${target}' = ${t.host}:${t.port}/${t.database}`);
+            console.log(`REPORT: API pool (config.json db.mysql.${env}) = ${cfg.host}:${cfg.port}/${cfg.database}`);
+            if (String(t.host) !== String(cfg.host) || String(t.database) !== String(cfg.database)) {
+              console.log(`::error::FAIL: db-migrate target ${t.host}/${t.database} is not the API database ${cfg.host}/${cfg.database}; the migration would not reach the application's database`);
+              migrateFails += 1;
+            } else {
+              console.log(`PASS: db-migrate target and API pool are the same database (${cfg.database} on ${cfg.host})`);
+            }
+          } catch (e) { console.log(`::error::FAIL: could not read migrations/mysql/database.json: ${e.message}`); migrateFails += 1; }
+          let fails = migrateFails;
           const fail = (m) => { console.log(`::error::FAIL: ${m}`); fails += 1; };
           const pass = (m) => console.log(`PASS: ${m}`);
           const report = (m) => console.log(`REPORT: ${m}`);
