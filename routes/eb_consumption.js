@@ -1,4 +1,5 @@
 const router = require("express").Router();
+const { requireEmployee, employeeIdOrNull } = require("../utils/actor");
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
 
@@ -36,7 +37,7 @@ class EbConsumptionRoutes {
 
         const data = {
           ...value,
-          created_by: req.decoded.employee_id,
+          created_by: requireEmployee(req, "Recording EB consumption"),
         };
 
         // If eb_machines is not provided but old format is used, keep backward compatibility
@@ -131,7 +132,7 @@ class EbConsumptionRoutes {
 
         // If eb_machines is provided, include created_by for bulk operations
         if (updateData.eb_machines) {
-          updateData.created_by = req.decoded.employee_id;
+          updateData.created_by = requireEmployee(req, "Updating EB consumption");
         }
 
         const result = await this.usecase.update(
@@ -172,7 +173,7 @@ class EbConsumptionRoutes {
 
         const data = {
           ...value,
-          created_by: req.decoded.employee_id,
+          created_by: requireEmployee(req, "Recording EB consumption"),
         };
 
         const result = await this.usecase.create(data);

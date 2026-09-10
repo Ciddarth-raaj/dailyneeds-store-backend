@@ -1,0 +1,986 @@
+const logger = require("../utils/logger");
+const { checkTalkerPhoto } = require("../services/talker_check");
+const {
+  DEFAULT_PRINT_SETTINGS,
+  LEGACY_LOGO_POSITIONS,
+  PRINT_SETTING_LIMITS,
+  sheetLayout,
+} = require("../constants/talker_print");
+
+/** Where a card can sit on the shelf. Mirrors the location_type enum. */
+const LOCATION_TYPES = ["aisle", "floor_display", "end_cap", "other"];
+
+/** Standing talkers are re-shot on roughly this cycle. */
+const ROTATION_DAYS = 10;
+
+/**
+ * How many not-yet-mapped groups an outlet is asked to find in one day.
+ *
+ * Without this, day one of a full rollout shows every store a list of all
+ * 300-400 published groups at once, every one of them pinned as mandatory.
+ * Nobody works that list. Capping it lets the location map build a bit at a
+ * time on its own, instead of depending on someone remembering to phase the
+ * rollout by hand.
+ */
+const DISCOVERY_PER_DAY = 15;
+/** Outlets whose photos keep failing get sampled harder. */
+const POOR_HIT_RATE = 0.8;
+const POOR_HIT_RATE_ROTATION_DAYS = 5;
+
+const TIER_FLAGGED = 1;
+const TIER_ROTATION = 2;
+const TIER_ON_DEMAND = 3;
+
+function logError(code, description, ref = {}) {
+  logger.Log({
+    level: logger.LEVEL.ERROR,
+    component: "USECASE.OFFERS_V3_TALKER",
+    code,
+    description,
+    category: "",
+    ref,
+  });
+}
+
+/**
+ * Outlet names are stored with a chain prefix (and occasional stray
+ * whitespace); staff and HQ only ever see the short name.
+ */
+function displayOutletName(outlet_name) {
+  return String(outlet_name ?? "")
+    .replace(/^\s*daily\s*needs\s*[-–]\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function todayIso() {
+  const d = new Date();
+  const pad = (n) => (n < 10 ? "0" : "") + n;
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function daysBetween(fromIso, toIso) {
+  const a = new Date(`${fromIso}T00:00:00Z`).getTime();
+  const b = new Date(`${toIso}T00:00:00Z`).getTime();
+  if (Number.isNaN(a) || Number.isNaN(b)) return null;
+  return Math.floor((b - a) / 86400000);
+}
+
+class OffersV3TalkerUsecase {
+  constructor(talkerRepo, outletRepo) {
+    this.talkerRepo = talkerRepo;
+    this.outletRepo = outletRepo;
+  }
+
+  // ---------------------------------------------------------------------
+  // Groups
+  // ---------------------------------------------------------------------
+
+  async listGroups(filters) {
+    return this.talkerRepo.listGroups(filters);
+  }
+
+  async getGroup(id) {
+    const group = await this.talkerRepo.getGroupById(id);
+    if (!group) {
+      return null;
+    }
+    const [items, locations, editLog] = await Promise.all([
+      this.talkerRepo.listGroupItems(id),
+      this.talkerRepo.listLocations({ group_id: id }),
+      this.talkerRepo.listGroupEditLog(id),
+    ]);
+    return {
+      ...group,
+      items,
+      locations: locations.map((l) => ({
+        ...l,
+        outlet_name: displayOutletName(l.outlet_name),
+      })),
+      edit_log: editLog,
+    };
+  }
+
+  async createGroup(data, created_by) {
+    const id = await this.talkerRepo.createGroup({
+      ...data,
+      origin: "manual",
+      status: "published",
+      created_by,
+    });
+    if (data.item_codes && data.item_codes.length) {
+      await this.talkerRepo.addItemsToGroup(id, data.item_codes);
+    }
+    await this.talkerRepo.logGroupEdit({
+      group_id: id,
+      changed_by: created_by,
+      change_type: "create",
+      detail: { label: data.label, item_count: data.item_codes?.length ?? 0 },
+    });
+    return { code: 200, id };
+  }
+
+  /**
+   * Editing a published group:
+   *  - membership change  -> re-flag its locations to tier 1 for one re-shoot
+   *  - label / talker text -> deliberately NO re-flag; a typo fix must not cost
+   *    five re-shoots
+   */
+  async updateGroup(id, fields, changed_by) {
+    const group = await this.talkerRepo.getGroupById(id);
+    if (!group) {
+      return { code: 404, msg: "Group not found" };
+    }
+    if (group.status === "ended") {
+      return { code: 400, msg: "Ended groups are frozen and cannot be edited" };
+    }
+
+    await this.talkerRepo.updateGroup(id, fields);
+
+    const changedKeys = Object.keys(fields);
+    if (changedKeys.length) {
+      await this.talkerRepo.logGroupEdit({
+        group_id: id,
+        changed_by,
+        change_type: changedKeys.includes("talker_text")
+          ? "talker_text"
+          : "label",
+        detail: { fields: changedKeys },
+      });
+    }
+    return { code: 200 };
+  }
+
+  async setGroupItems(id, { add = [], remove = [] }, changed_by) {
+    const group = await this.talkerRepo.getGroupById(id);
+    if (!group) {
+      return { code: 404, msg: "Group not found" };
+    }
+    if (group.status === "ended") {
+      return {
+        code: 400,
+        msg: "Ended groups are frozen - membership cannot change",
+      };
+    }
+
+    if (add.length) {
+      await this.talkerRepo.addItemsToGroup(id, add);
+    }
+    if (remove.length) {
+      await this.talkerRepo.removeItemsFromGroup(id, remove);
+    }
+
+    if (add.length || remove.length) {
+      await this.talkerRepo.logGroupEdit({
+        group_id: id,
+        changed_by,
+        change_type: add.length ? "items_added" : "items_removed",
+        detail: { added: add, removed: remove },
+      });
+      // Membership changed: this sign now says something different, so it gets
+      // re-shot once.
+      if (group.status === "published") {
+        await this.talkerRepo.flagGroupLocationsTier1(id);
+      }
+    }
+    return { code: 200 };
+  }
+
+  async endGroup(id, changed_by) {
+    const group = await this.talkerRepo.getGroupById(id);
+    if (!group) {
+      return { code: 404, msg: "Group not found" };
+    }
+    await this.talkerRepo.updateGroup(id, { status: "ended" });
+    // An ended offer's sign must come down - stop asking for photos of it.
+    const locations = await this.talkerRepo.listLocations({ group_id: id });
+    for (const loc of locations) {
+      await this.talkerRepo.setLocationQueueState(loc.id, {
+        pending_tier: null,
+      });
+    }
+    await this.talkerRepo.logGroupEdit({
+      group_id: id,
+      changed_by,
+      change_type: "end",
+      detail: {},
+    });
+    return { code: 200 };
+  }
+
+  async deleteGroup(id) {
+    const res = await this.talkerRepo.deleteGroup(id);
+    if (!res.affectedRows) {
+      return { code: 400, msg: "Only draft groups can be deleted" };
+    }
+    return { code: 200 };
+  }
+
+  /**
+   * Deletes the chosen groups outright, whatever their status.
+   *
+   * `dry_run` answers "what would this take?" without touching anything, so the
+   * confirmation can name the shelf maps and photo rounds that go with the
+   * groups rather than surprising someone after the fact. None of it is
+   * recoverable: an outlet's location map only exists because staff walked the
+   * aisles and recorded it.
+   */
+  async deleteGroups(group_ids, { dry_run = false } = {}) {
+    const ids = [...new Set((Array.isArray(group_ids) ? group_ids : [])
+      .map((n) => Number(n))
+      .filter(Number.isInteger))];
+    if (!ids.length) return { code: 422, msg: "No groups selected" };
+
+    const counts = await this.talkerRepo.countGroupCascade(ids);
+    if (dry_run) return { code: 200, dry_run: true, counts };
+
+    const res = await this.talkerRepo.deleteGroups(ids);
+    return { code: 200, deleted: res.affectedRows, counts };
+  }
+
+  async mergeGroups(from_group_id, to_group_id, changed_by) {
+    const [from, to] = await Promise.all([
+      this.talkerRepo.getGroupById(from_group_id),
+      this.talkerRepo.getGroupById(to_group_id),
+    ]);
+    if (!from || !to) {
+      return { code: 404, msg: "Group not found" };
+    }
+    if (from.status === "ended" || to.status === "ended") {
+      return { code: 400, msg: "Ended groups are frozen" };
+    }
+    await this.talkerRepo.mergeGroups(from_group_id, to_group_id);
+    await this.talkerRepo.logGroupEdit({
+      group_id: to_group_id,
+      changed_by,
+      change_type: "merge",
+      detail: { merged_from: from.label },
+    });
+    if (to.status === "published") {
+      await this.talkerRepo.flagGroupLocationsTier1(to_group_id);
+    }
+    return { code: 200 };
+  }
+
+  /** Split: move a subset of articles out into a new group. */
+  async splitGroup(id, { item_codes, label }, changed_by) {
+    const group = await this.talkerRepo.getGroupById(id);
+    if (!group) {
+      return { code: 404, msg: "Group not found" };
+    }
+    if (group.status === "ended") {
+      return { code: 400, msg: "Ended groups are frozen" };
+    }
+    if (!item_codes || !item_codes.length) {
+      return { code: 400, msg: "Pick at least one article to split out" };
+    }
+
+    const newId = await this.talkerRepo.createGroup({
+      label: label || `${group.label} (split)`,
+      group_type: group.group_type,
+      origin: "manual",
+      status: group.status === "published" ? "draft" : group.status,
+      supplier: group.supplier,
+      markdown_pct: group.markdown_pct,
+      talker_text: group.talker_text,
+      expected_price: group.expected_price,
+      expected_pct_off: group.expected_pct_off,
+      created_by: changed_by,
+    });
+    // The unique key on item_code moves them; no explicit remove needed.
+    await this.talkerRepo.addItemsToGroup(newId, item_codes);
+
+    await this.talkerRepo.logGroupEdit({
+      group_id: id,
+      changed_by,
+      change_type: "split",
+      detail: { split_to: newId, item_codes },
+    });
+    if (group.status === "published") {
+      await this.talkerRepo.flagGroupLocationsTier1(id);
+    }
+    return { code: 200, id: newId };
+  }
+
+  /**
+   * The two ways a talker gets made, both deliberate:
+   *
+   *   individual - one talker per article, named after the product
+   *   group      - one talker over the whole selection, named after the supplier
+   *
+   * Same selection, two intents, so the caller states which rather than the
+   * count deciding for them. A talker is live the moment it exists - nothing
+   * proposes talkers any more, so there is nothing to review.
+   */
+  async bulkCreateTalkers({ item_codes, mode, label }, created_by) {
+    const codes = [...new Set((Array.isArray(item_codes) ? item_codes : [])
+      .map((n) => Number(n))
+      .filter(Number.isInteger))];
+    if (!codes.length) return { code: 422, msg: "No articles selected" };
+    if (mode !== "individual" && mode !== "group") {
+      return { code: 422, msg: "mode must be 'individual' or 'group'" };
+    }
+
+    const pool = await this.talkerRepo.listOfferArticles();
+    const byCode = new Map(pool.map((r) => [r.item_code, r]));
+    const unknown = codes.filter((c) => !byCode.has(c));
+    if (unknown.length) {
+      return {
+        code: 400,
+        msg: `${unknown.length} article(s) are not on offer, so they cannot have a talker`,
+      };
+    }
+
+    if (mode === "individual") {
+      const ids = [];
+      for (const code of codes) {
+        const row = byCode.get(code);
+        const res = await this.createGroup(
+          {
+            label: row.item_name || `Item ${code}`,
+            group_type: "individual",
+            item_codes: [code],
+          },
+          created_by
+        );
+        ids.push(res.id);
+      }
+      return { code: 200, created: ids.length, ids };
+    }
+
+    // One card cannot honestly advertise two different discounts, so a mixed
+    // selection is refused rather than silently printing one of them.
+    const offers = new Set(
+      codes.map((c) => {
+        const row = byCode.get(c);
+        return `${row.offer_type}|${row.value}`;
+      })
+    );
+    if (offers.size > 1) {
+      return {
+        code: 400,
+        msg: `These articles carry ${offers.size} different offers. A group talker shows one offer, so make separate talkers or narrow the selection.`,
+      };
+    }
+
+    const first = byCode.get(codes[0]);
+    const res = await this.createGroup(
+      {
+        label: label || first.supplier || first.item_name || "New talker",
+        group_type: "group",
+        supplier: first.supplier ?? null,
+        item_codes: codes,
+      },
+      created_by
+    );
+    return { code: 200, created: 1, ids: [res.id] };
+  }
+
+  listUngrouped() {
+    return this.talkerRepo.listUngroupedArticles();
+  }
+
+  /** The pool a group's articles can be picked from: things actually on offer. */
+  listOfferArticles() {
+    return this.talkerRepo.listOfferArticles();
+  }
+
+  // ---------------------------------------------------------------------
+  // Queue
+  // ---------------------------------------------------------------------
+
+  /**
+   * The outlet's queue for today, tier-sorted.
+   *
+   *  tier 1 - pinned, mandatory: a talker whose state changed
+   *  tier 2 - rotation: standing talkers on a ~10-day cycle
+   *  tier 3 - on demand: HQ pushed this one after a complaint
+   *
+   * Rollover is inherent: an unphotographed flagged location keeps its
+   * pending_tier and its pending_since, so it stays on tomorrow's list and ages
+   * rather than vanishing.
+   */
+  async getQueueForOutlet(outlet_id, round_date) {
+    const day = round_date || todayIso();
+    const [rows, undiscovered, acceptRate] = await Promise.all([
+      this.talkerRepo.listQueueForOutlet(outlet_id, day),
+      this.talkerRepo.listUndiscoveredGroupsForOutlet(outlet_id),
+      this.talkerRepo.getOutletAcceptRate(outlet_id, 30),
+    ]);
+
+    const rotationDays =
+      acceptRate !== null && acceptRate < POOR_HIT_RATE
+        ? POOR_HIT_RATE_ROTATION_DAYS
+        : ROTATION_DAYS;
+
+    const queue = [];
+    for (const row of rows) {
+      // Already shot and accepted this round - nothing owed.
+      if (row.proof_id && row.ai_verdict === "accept") {
+        continue;
+      }
+
+      let tier = row.pending_tier;
+      if (!tier) {
+        // Not flagged: due only if its rotation slot has come round.
+        const lastAccepted = row.last_accepted_at
+          ? String(row.last_accepted_at).slice(0, 10)
+          : null;
+        const age = lastAccepted ? daysBetween(lastAccepted, day) : null;
+        if (age !== null && age < rotationDays) {
+          continue;
+        }
+        tier = TIER_ROTATION;
+      }
+
+      queue.push({
+        location_id: row.location_id,
+        location_label: row.location_label,
+        group_id: row.group_id,
+        group_label: row.group_label,
+        talker_text: row.talker_text,
+        expected_price: row.expected_price,
+        expected_pct_off: row.expected_pct_off,
+        item_count: row.item_count,
+        group_location_count: row.group_location_count,
+        tier,
+        pending_age_days: row.pending_age_days ?? 0,
+        already_shot: Boolean(row.proof_id),
+        last_verdict: row.ai_verdict ?? null,
+        discovery: false,
+      });
+    }
+
+    // Discovery rows: the first time a group reaches this outlet, staff
+    // photograph each place the brand sits, creating locations as they go.
+    // Only a day's worth is offered - the rest wait their turn, so a full
+    // rollout doesn't open with an unworkable list.
+    for (const g of undiscovered.slice(0, DISCOVERY_PER_DAY)) {
+      queue.push({
+        location_id: null,
+        location_label: null,
+        group_id: g.group_id,
+        group_label: g.group_label,
+        talker_text: g.talker_text,
+        expected_price: g.expected_price,
+        expected_pct_off: g.expected_pct_off,
+        item_count: g.item_count,
+        group_location_count: 0,
+        tier: TIER_FLAGGED,
+        pending_age_days: 0,
+        already_shot: false,
+        last_verdict: null,
+        discovery: true,
+      });
+    }
+
+    queue.sort((a, b) => {
+      if (a.tier !== b.tier) return a.tier - b.tier;
+      return (b.pending_age_days ?? 0) - (a.pending_age_days ?? 0);
+    });
+
+    return {
+      code: 200,
+      round_date: day,
+      rotation_days: rotationDays,
+      accept_rate: acceptRate,
+      // What's left to map, so staff can see the job is finite and HQ can see
+      // how far the rollout has got.
+      discovery_remaining: Math.max(0, undiscovered.length - DISCOVERY_PER_DAY),
+      discovery_total: undiscovered.length,
+      data: queue,
+    };
+  }
+
+  async addLocation({ group_id, outlet_id, label, location_type }, created_by) {
+    const group = await this.talkerRepo.getGroupById(group_id);
+    if (!group) {
+      return { code: 404, msg: "Talker not found" };
+    }
+    const type = LOCATION_TYPES.includes(location_type) ? location_type : "other";
+    const id = await this.talkerRepo.createLocation({
+      group_id,
+      outlet_id,
+      label,
+      location_type: type,
+    });
+    await this.talkerRepo.logGroupEdit({
+      group_id,
+      changed_by: created_by,
+      change_type: "location_added",
+      detail: { outlet_id, label, location_type: type },
+    });
+    return { code: 200, id };
+  }
+
+  async setLocationActive(id, active, changed_by) {
+    const location = await this.talkerRepo.getLocationById(id);
+    if (!location) {
+      return { code: 404, msg: "Location not found" };
+    }
+    await this.talkerRepo.setLocationActive(id, active);
+    await this.talkerRepo.logGroupEdit({
+      group_id: location.group_id,
+      changed_by,
+      change_type: active ? "location_added" : "location_removed",
+      detail: { location_id: id, label: location.label },
+    });
+    return { code: 200 };
+  }
+
+  /** Tier 3: HQ pushes a group to the top of an outlet's queue. */
+  async pushToQueue(group_id, outlet_id) {
+    const res = await this.talkerRepo.pushGroupToOutletQueue(
+      group_id,
+      outlet_id
+    );
+    return { code: 200, affectedRows: res.affectedRows };
+  }
+
+  // ---------------------------------------------------------------------
+  // Proofs
+  // ---------------------------------------------------------------------
+
+  /**
+   * Staff submit one photo for one location. The AI check runs inline so the
+   * verdict comes back while they are still in the aisle.
+   */
+  async submitProof({ location_id, s3_url, note, tier }, uploaded_by) {
+    const location = await this.talkerRepo.getLocationById(location_id);
+    if (!location) {
+      return { code: 404, msg: "Location not found" };
+    }
+
+    const round_date = todayIso();
+    const proof = await this.talkerRepo.upsertProof({
+      location_id,
+      round_date,
+      tier: tier ?? location.pending_tier ?? TIER_ROTATION,
+      uploaded_by,
+      note,
+    });
+    await this.talkerRepo.addProofImage(proof.id, s3_url);
+
+    const items = await this.talkerRepo.listGroupItems(location.group_id);
+    const check = await checkTalkerPhoto({
+      imageUrl: s3_url,
+      group_label: location.group_label,
+      talker_text: location.talker_text,
+      expected_price: location.expected_price,
+      expected_pct_off: location.expected_pct_off,
+      item_names: items.map((i) => i.item_name).filter(Boolean),
+    });
+
+    await this.talkerRepo.setProofAiResult(proof.id, {
+      ai_verdict: check.verdict,
+      ai_response_json: JSON.stringify(check.observation ?? {}),
+      ai_model: check.model,
+      // `submitted` is terminal - review is exception-based, so only a reject
+      // needs a human to look at it.
+      status: check.verdict === "reject" ? "rejected" : "submitted",
+    });
+
+    // Feedback into the queue: a clean accept goes back of rotation, anything
+    // else jumps to tomorrow.
+    if (check.verdict === "accept") {
+      await this.talkerRepo.setLocationQueueState(location_id, {
+        pending_tier: null,
+        pending_since: null,
+        last_accepted_at: new Date(),
+      });
+    } else {
+      await this.talkerRepo.setLocationQueueState(location_id, {
+        pending_tier: TIER_FLAGGED,
+        pending_since: new Date(),
+      });
+    }
+
+    return {
+      code: 200,
+      proof_id: proof.id,
+      verdict: check.verdict,
+      reason: check.reason,
+      ai_model: check.model,
+    };
+  }
+
+  /**
+   * Discovery: staff found a new spot for this group and photographed it in one
+   * step - create the location, then treat it as a normal submission.
+   */
+  async submitDiscoveryProof(
+    { group_id, outlet_id, label, s3_url, note },
+    uploaded_by
+  ) {
+    const created = await this.addLocation(
+      { group_id, outlet_id, label },
+      uploaded_by
+    );
+    if (created.code !== 200) {
+      return created;
+    }
+    return this.submitProof(
+      { location_id: created.id, s3_url, note, tier: TIER_FLAGGED },
+      uploaded_by
+    );
+  }
+
+  async listProofs(filters) {
+    const proofs = await this.talkerRepo.listProofs(filters);
+    if (!proofs.length) {
+      return [];
+    }
+    const images = await this.talkerRepo.listProofImages(
+      proofs.map((p) => p.id)
+    );
+    const byProof = new Map();
+    for (const img of images) {
+      if (!byProof.has(img.proof_id)) {
+        byProof.set(img.proof_id, []);
+      }
+      byProof.get(img.proof_id).push(img);
+    }
+    return proofs.map((p) => ({
+      ...p,
+      outlet_name: displayOutletName(p.outlet_name),
+      ai_response: p.ai_response_json ? safeParse(p.ai_response_json) : null,
+      images: byProof.get(p.id) ?? [],
+    }));
+  }
+
+  /**
+   * The HQ board: per-outlet counts plus the open exception list. Review is
+   * exception-based - `submitted` is terminal, HQ only ever touches rejects.
+   */
+  async getBoard(round_date) {
+    const day = round_date || todayIso();
+    const [counts, exceptions] = await Promise.all([
+      this.talkerRepo.listBoardCounts(day),
+      this.listProofs({ exceptions_only: true }),
+    ]);
+    return {
+      code: 200,
+      round_date: day,
+      outlets: counts
+        .filter((c) => c.outlet_id)
+        .map((c) => ({
+          ...c,
+          outlet_name: displayOutletName(c.outlet_name),
+        })),
+      exceptions,
+    };
+  }
+
+  /**
+   * One-click human override of an AI reject. Without this the board fills with
+   * permanent red nobody can close - handwritten talkers, promos the data
+   * doesn't reflect yet, glare.
+   */
+  async overrideProof(id, review_note, reviewed_by) {
+    const proof = await this.talkerRepo.getProofById(id);
+    if (!proof) {
+      return { code: 404, msg: "Proof not found" };
+    }
+    await this.talkerRepo.reviewProof(id, {
+      status: "overridden",
+      reviewed_by,
+      review_note,
+    });
+    // An overridden reject is settled: stop asking for it.
+    await this.talkerRepo.setLocationQueueState(proof.location_id, {
+      pending_tier: null,
+      pending_since: null,
+      last_accepted_at: new Date(),
+    });
+    return { code: 200 };
+  }
+
+  async confirmReject(id, review_note, reviewed_by) {
+    const proof = await this.talkerRepo.getProofById(id);
+    if (!proof) {
+      return { code: 404, msg: "Proof not found" };
+    }
+    await this.talkerRepo.reviewProof(id, {
+      status: "rejected",
+      reviewed_by,
+      review_note,
+    });
+    // Confirmed bad: it stays at the top of that outlet's queue until re-shot.
+    await this.talkerRepo.setLocationQueueState(proof.location_id, {
+      pending_tier: TIER_FLAGGED,
+      pending_since: new Date(),
+    });
+    return { code: 200 };
+  }
+
+  // ---------------------------------------------------------------------
+  // Printing the physical talkers
+  // ---------------------------------------------------------------------
+
+  /**
+   * One card per sign to print. A group normally yields exactly one card; a
+   * group whose articles carry different offers yields one card per distinct
+   * offer and is flagged mixed, because a single sign cannot honestly
+   * advertise two different discounts.
+   *
+   * Articles whose offer has since ended are dropped rather than printed - a
+   * talker for a dead offer is worse than no talker at all.
+   */
+  async getPrintCards({ status, group_type, outlet_id } = {}) {
+    const rows = await this.talkerRepo.listPrintData({ status, group_type });
+
+    // The card carries MRP and price, and both are per outlet - which is why
+    // the outlet prints its own. Without an outlet there is no honest price to
+    // put on a card, so the price lines are simply left off.
+    let priceByCode = new Map();
+    if (outlet_id) {
+      const prices = await this.talkerRepo.listPrintPrices(
+        outlet_id,
+        [...new Set(rows.map((r) => r.item_code))]
+      );
+      priceByCode = new Map(prices.map((p) => [p.item_code, p]));
+    }
+
+    const groups = new Map();
+    for (const row of rows) {
+      if (!groups.has(row.group_id)) {
+        groups.set(row.group_id, { meta: row, offers: new Map(), dropped: [] });
+      }
+      const g = groups.get(row.group_id);
+      const wording = talkerWording(row.offer_type, row.value);
+      if (!wording) {
+        g.dropped.push(row.item_name || `Item ${row.item_code}`);
+        continue;
+      }
+      const key = `${row.offer_type}|${row.value}`;
+      if (!g.offers.has(key)) {
+        g.offers.set(key, {
+          offer_type: row.offer_type,
+          value: row.value,
+          wording,
+          items: [],
+        });
+      }
+      g.offers.get(key).items.push({
+        item_code: row.item_code,
+        item_name: row.item_name,
+        ...(priceByCode.get(row.item_code) ?? {}),
+      });
+    }
+
+    const cards = [];
+    for (const { meta, offers, dropped } of groups.values()) {
+      const mixed = offers.size > 1;
+      for (const offer of offers.values()) {
+        const text = printedText(offer.wording);
+        // Falls back to the supplier or the product only when a group somehow
+        // has no label at all.
+        const title = titleFromLabel(
+          meta.label,
+          meta.group_type === "individual"
+            ? offer.items[0]?.item_name
+            : meta.supplier
+        );
+        cards.push({
+          group_id: meta.group_id,
+          group_type: meta.group_type,
+          status: meta.status,
+          label: meta.label,
+          title,
+          // The sign is set in three parts: a small lead word, the number
+          // itself as large as the card allows, and a small line under it.
+          // One long string at that size runs off a 105mm card.
+          lead: offer.wording.lead,
+          big: offer.wording.big,
+          trail: offer.wording.trail,
+          subline: offer.wording.subline,
+          offer_type: offer.offer_type,
+          value: offer.value,
+          active_to: meta.active_to,
+          item_count: offer.items.length,
+          items: offer.items,
+          // An individual card quotes its own article. A group card covers many
+          // articles at different prices, so it quotes none - the offer line is
+          // the whole message there.
+          mrp: offer.items.length === 1 ? offer.items[0].mrp ?? null : null,
+          price: offer.items.length === 1 ? offer.items[0].price ?? null : null,
+          price_out_of_stock:
+            offer.items.length === 1 ? offer.items[0].in_stock === false : false,
+          printed_text: text,
+          // The photo check compares what is on the shelf against talker_text.
+          // If those two disagree, every photo of a correctly-placed sign
+          // fails, so the mismatch has to be visible before anything prints.
+          expected_text: meta.talker_text || null,
+          expected_text_matches:
+            !meta.talker_text || String(meta.talker_text).trim() === text,
+          mixed,
+          dropped_items: dropped,
+        });
+      }
+    }
+    return { code: 200, cards };
+  }
+
+  /**
+   * Records what the printed sign actually says, so the photo check has
+   * something true to compare against. Skips mixed groups: there is no single
+   * expected text for a group printing two different signs.
+   */
+  async syncExpectedText(group_ids) {
+    const ids = Array.isArray(group_ids) ? group_ids : [];
+    if (!ids.length) return { code: 422, msg: "No groups selected" };
+
+    const { cards } = await this.getPrintCards({});
+    const chosen = cards.filter((c) => ids.includes(c.group_id));
+
+    let updated = 0;
+    // A mixed group yields several cards, so it would otherwise be reported
+    // skipped once per card.
+    const skipped = new Set();
+    for (const card of chosen) {
+      if (card.mixed) {
+        skipped.add(card.label);
+        continue;
+      }
+      if (card.expected_text === card.printed_text) continue;
+      await this.talkerRepo.setTalkerText(card.group_id, card.printed_text);
+      updated += 1;
+    }
+    return { code: 200, updated, skipped: [...skipped] };
+  }
+
+  /**
+   * The shared look of the printed card. Always answers with a complete,
+   * printable set - an unsaved chain gets the defaults.
+   */
+  async getPrintSettings() {
+    const row = await this.talkerRepo.getPrintSettings();
+    const stored = row ? safeParse(row.settings, "PARSE_PRINT_SETTINGS") : null;
+    const settings = normalisePrintSettings(stored);
+    return {
+      code: 200,
+      settings,
+      layout: sheetLayout(settings),
+      updated_at: row ? row.updated_at : null,
+      is_default: !row,
+    };
+  }
+
+  async savePrintSettings(input, updated_by) {
+    const settings = normalisePrintSettings(input);
+    await this.talkerRepo.savePrintSettings(settings, updated_by);
+    return { code: 200, settings, layout: sheetLayout(settings) };
+  }
+}
+
+/**
+ * Offer values are DECIMAL(12,2), so a 22% offer arrives as "22.00". A shelf
+ * talker reading "22.00% OFF" looks like a mistake, so trailing zeros go.
+ */
+function printNumber(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return n % 1 === 0 ? String(n) : n.toFixed(2);
+}
+
+/**
+ * The wording for each kind of offer, fixed by the people who read the sign:
+ * a percentage is "% off on MRP", a flat discount is what you save off MRP,
+ * and a fixed price is a special price - it carries no MRP reference because
+ * the offer replaces the price rather than discounting it.
+ *
+ * None of the three needs the outlet's selling price, which is what makes one
+ * print run valid across every outlet.
+ */
+function talkerWording(offer_type, value) {
+  const num = printNumber(value);
+  if (num === null) return null;
+  if (offer_type === "percentage") {
+    return { lead: null, big: `${num}%`, trail: "OFF", subline: "ON MRP" };
+  }
+  if (offer_type === "flat") {
+    return { lead: "SAVE", big: `\u20b9${num}`, trail: null, subline: "ON MRP" };
+  }
+  if (offer_type === "fixed_price") {
+    return { lead: "SPL PRICE", big: `\u20b9${num}`, trail: null, subline: null };
+  }
+  return null;
+}
+
+/** The whole sign as one line - what the photo check compares against. */
+/**
+ * What the sign is headed with. The label is the only name anyone can edit, so
+ * it wins - reading the supplier or the product master instead meant renaming a
+ * group changed nothing on the printed card.
+ *
+ * Auto-derive names a brand group "Cadbury - 22% off". The offer is already the
+ * largest thing on the card, so that tail is dropped rather than printed twice;
+ * a label typed by hand is printed exactly as written.
+ */
+function titleFromLabel(label, fallback) {
+  const text = String(label ?? "").trim();
+  if (!text) return String(fallback ?? "").trim();
+  const trimmed = text
+    .replace(/\s*[\u2014\u2013-]\s*\d+(\.\d+)?\s*%\s*off\s*$/i, "")
+    .trim();
+  return trimmed || text;
+}
+
+function printedText({ lead, big, trail, subline }) {
+  return [lead, big, trail, subline].filter(Boolean).join(" ");
+}
+
+
+const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+
+/**
+ * Folds a stored or submitted settings object onto the defaults, dropping
+ * anything that would print a broken card: an out-of-range size is clamped
+ * rather than rejected, and an unrecognised colour or logo position falls back.
+ *
+ * Coercing rather than erroring matters on read - a bad row saved by an older
+ * version of the page must still yield a printable sign.
+ */
+function normalisePrintSettings(input) {
+  const raw = input && typeof input === "object" ? input : {};
+  const out = { ...DEFAULT_PRINT_SETTINGS };
+
+  // A setting saved when the logo had a dropdown rather than a position still
+  // has to put the logo where its author left it.
+  if (raw.logo_x === undefined && LEGACY_LOGO_POSITIONS[raw.logo_position]) {
+    Object.assign(out, LEGACY_LOGO_POSITIONS[raw.logo_position]);
+  }
+
+  for (const [key, { min, max }] of Object.entries(PRINT_SETTING_LIMITS)) {
+    const n = Number(raw[key]);
+    if (Number.isFinite(n)) {
+      out[key] = Math.min(max, Math.max(min, n));
+    }
+  }
+  for (const key of ["brand_color", "offer_color"]) {
+    if (HEX_COLOR.test(String(raw[key] ?? ""))) out[key] = raw[key];
+  }
+  for (const key of ["show_border", "show_logo", "show_price"]) {
+    if (raw[key] !== undefined) out[key] = Boolean(raw[key]);
+  }
+
+  return out;
+}
+
+function safeParse(json, code = "PARSE_AI_JSON") {
+  try {
+    return JSON.parse(json);
+  } catch (err) {
+    logError(code, err.toString(), {});
+    return null;
+  }
+}
+
+module.exports = (talkerRepo, outletRepo) => {
+  return new OffersV3TalkerUsecase(talkerRepo, outletRepo);
+};
+
+module.exports.displayOutletName = displayOutletName;
+module.exports.talkerWording = talkerWording;
+module.exports.normalisePrintSettings = normalisePrintSettings;
+module.exports.titleFromLabel = titleFromLabel;

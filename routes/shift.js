@@ -1,16 +1,18 @@
 const router = require("express").Router();
+const P = require("../constants/hr_permissions");
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http")
 
 class ShiftRoutes {
-  constructor(shiftUsecase) {
+  constructor(shiftUsecase, permissions) {
+    this.permissions = permissions;
     this.shiftUsecase = shiftUsecase;
 
     this.init();
   }
 
   init() {
-    router.get("/", async (req, res) => {
+    router.get("/", this.permissions.require(P.VIEW_SHIFT), async (req, res) => {
         try {
           const shift = await this.shiftUsecase.get();
           res.json(shift);
@@ -25,7 +27,7 @@ class ShiftRoutes {
   
         res.end();
       }); 
-      router.post("/update-status", async (req, res) => {
+      router.post("/update-status", this.permissions.require(P.ADD_SHIFTS), async (req, res) => {
         try {
           const schema = {
             shift_id: Joi.number().required(),
@@ -50,7 +52,7 @@ class ShiftRoutes {
         }
         res.end();
       });
-      router.post("/update-shift", async (req, res) => {
+      router.post("/update-shift", this.permissions.require(P.ADD_SHIFTS), async (req, res) => {
         try {
           const schema = {
             shift_id: Joi.number().required(),
@@ -80,7 +82,7 @@ class ShiftRoutes {
         }
         res.end();
       });
-      router.get("/shift_id", async (req, res) => {
+      router.get("/shift_id", this.permissions.require(P.VIEW_SHIFT), async (req, res) => {
         try {
           const schema = {
             shift_id: Joi.string().required(),
@@ -103,7 +105,7 @@ class ShiftRoutes {
   
         res.end();
       }); 
-      router.post("/create", async (req, res) => {
+      router.post("/create", this.permissions.require(P.ADD_SHIFTS), async (req, res) => {
         try {
           const schema = {
             shift_name: Joi.string().required(),
@@ -139,6 +141,6 @@ class ShiftRoutes {
   }
 }   
 
-module.exports = (shiftUsecase) => {
-  return new ShiftRoutes(shiftUsecase);
+module.exports = (shiftUsecase, permissions) => {
+  return new ShiftRoutes(shiftUsecase, permissions);
 };

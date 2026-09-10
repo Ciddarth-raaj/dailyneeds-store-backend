@@ -15,6 +15,22 @@ const HttpServer = require("http").createServer(app);
 const logger = require("./utils/logger");
 const { ALERTS_TELEGRAM_CHAT_ID } = require("./constants/telegram");
 
+/**
+ * Express `trust proxy` from TRUST_PROXY. Default: loopback (nginx on the
+ * same host). Never `true`.
+ */
+function resolveTrustProxy(raw) {
+  if (raw === undefined || raw === "") return "loopback";
+  const v = String(raw).trim();
+  if (v === "false" || v === "0") return false;
+  if (v === "true") {
+    console.warn("TRUST_PROXY=true is not accepted (it lets clients forge X-Forwarded-*); using loopback");
+    return "loopback";
+  }
+  if (/^\d+$/.test(v)) return Number(v);
+  return v; // "loopback", "linklocal", "uniquelocal", or an address/CIDR list
+}
+
 class Server {
   constructor() {
     this.drivers = [];
@@ -42,6 +58,18 @@ class Server {
   }
 
   initExpress() {
+    // In production the app sits behind a reverse proxy, so the socket
+    // address is the proxy's. `trust proxy` makes Express read the real
+    // client from X-Forwarded-For, which is what the IP restriction checks.
+    // Set TRUST_PROXY=false if the app is ever exposed directly, otherwise
+    // a client could spoof the header.
+    // Stage 0A correction: blanket `true` let a client's own X-Forwarded-For
+    // win whenever the proxy appended rather than overwrote the header. The
+    // real topology is nginx on this same host, so only loopback is trusted
+    // by default. TRUST_PROXY accepts Express's forms - "loopback", an
+    // address or CIDR list, a hop count, or "false" - and is read once here.
+    app.set("trust proxy", resolveTrustProxy(process.env.TRUST_PROXY));
+
     app.use(require("cors")());
 
     const colours = {
@@ -90,6 +118,9 @@ class Server {
         this.drivers.push(this.mysqlGofrugal);
         //this.models.push(this.mongo);
 
+        const { ensureGofrugalIndexes } = require("./utils/ensureGofrugalIndexes");
+        await ensureGofrugalIndexes(this.mysqlGofrugal.connection);
+
         resolve();
       } catch (err) {
         reject(err);
@@ -130,7 +161,41 @@ class Server {
       this.mysql.connection
     );
     this.employeeRepo = require("./repository/employee")(this.mysql.connection);
+    // Stage 0C / C1c: employment periods and lifecycle events.
+    this.employeeLifecycleRepo = require("./repository/employee_lifecycle")(
+      this.mysql.connection
+    );
+    // Stage 0C / C2: the local employee master.
+    this.employeeMasterRepo = require("./repository/employee_master")(
+      this.mysql.connection
+    );
+    this.employeeAadhaarRepo = require("./repository/employee_aadhaar")(
+      this.mysql.connection
+    );
+    this.employeeBankRepo = require("./repository/employee_bank")(
+      this.mysql.connection
+    );
+    // A cache of public reference data - which bank and branch an IFSC
+    // belongs to - so the same branch code is bought from the provider once
+    // rather than once per employee. It holds no employee data.
+    this.ifscMasterRepo = require("./repository/ifsc_master")(
+      this.mysql.connection
+    );
+    // Reports: saved templates, the export audit trail, and the lookups
+    // reconciliation needs. It builds no report SQL - that is the resolver's.
+    this.reportTemplateRepo = require("./repository/report_template")(
+      this.mysql.connection
+    );
     this.shiftRepo = require("./repository/shift")(this.mysql.connection);
+    // The new payroll/attendance shift master. Separate from shiftRepo above,
+    // which still owns the legacy `shift_master` table.
+    this.workShiftRepo = require("./repository/work_shift")(this.mysql.connection);
+    // The manual employee -> work shift mapping. It owns exactly one column,
+    // `new_employee.default_work_shift_id`, and never touches the legacy
+    // `shift_id` / `shift_code` pair that employeeRepo still reads.
+    this.employeeWorkShiftRepo = require("./repository/employee_work_shift")(
+      this.mysql.connection
+    );
     this.storeRepo = require("./repository/store")(this.mysql.connection);
     this.outletRepo = require("./repository/outlet")(this.mysql.connection);
     this.familyRepo = require("./repository/family")(this.mysql.connection);
@@ -156,6 +221,10 @@ class Server {
     this.despatchRepo = require("./repository/despatch")(this.mysql.connection);
     this.vehicleRepo = require("./repository/vehicle")(this.mysql.connection);
     this.userRepo = require("./repository/user")(this.mysql.connection);
+    this.authLogRepo = require("./repository/auth_log")(this.mysql.connection);
+    this.passwordResetRepo = require("./repository/passwordReset")(
+      this.mysql.connection
+    );
     this.peopleRepo = require("./repository/people")(this.mysql.connection);
     this.accountsRepo = require("./repository/accounts")(this.mysql.connection);
     this.accountsEbookRepo = require("./repository/accountsEbook")(
@@ -182,6 +251,9 @@ class Server {
       this.mysql.connection
     );
     this.gstPurchaseMatchRepo = require("./repository/gst_purchase_match")(
+      this.mysql.connection
+    );
+    this.gstPurchaseNo2aRepo = require("./repository/gst_purchase_no_2a")(
       this.mysql.connection
     );
     this.debitNoteRepo = require("./repository/debit_note")(
@@ -211,6 +283,9 @@ class Server {
       this.mysql.connection
     );
     this.ticketRepo = require("./repository/ticket")(this.mysql.connection);
+    this.advanceRequestRepo = require("./repository/advance_request")(
+      this.mysql.connection
+    );
     this.telegramDepartmentsRepo = require("./repository/telegram_departments")(
       this.mysql.connection
     );
@@ -227,9 +302,6 @@ class Server {
       require("./repository/product_image_download_job")(this.mysql.connection);
     this.gofrugalSynkerRepo = require("./repository/gofrugal_synker")(
       this.mysqlGofrugal.connection
-    );
-    this.productsChangesRepo = require("./repository/products_changes")(
-      this.mysql.connection
     );
     this.purchaseReturnRepo = require("./repository/purchase_return")(
       this.mysql.connection,
@@ -270,7 +342,10 @@ class Server {
     this.stoCheckRepo = require("./repository/sto_check")(
       this.mysql.connection
     );
-    this.productOffersRepo = require("./repository/product_offers")(
+    this.offersV3Repo = require("./repository/offers_v3")(
+      this.mysql.connection
+    );
+    this.offersV3TalkerRepo = require("./repository/offers_v3_talker")(
       this.mysql.connection
     );
     this.salesDashboardRepo = require("./repository/sales_dashboard")(
@@ -285,6 +360,9 @@ class Server {
     this.stockReceivedRepo = require("./repository/stock_received")(
       this.mysql.connection,
       this.mysqlGofrugal.connection
+    );
+    this.purchaseRefRepo = require("./repository/purchase_ref")(
+      this.mysql.connection
     );
     this.stockHoldingReportRepo = require("./repository/stock_holding_report")(
       this.mysql.connection
@@ -342,7 +420,65 @@ class Server {
       this.userRepo,
       this.resignationRepo
     );
+    // Stage 0C / C1c. userRepo is here only so a rejoin can revoke old
+    // sessions through the existing Stage 0A token_valid_from mechanism.
+    this.employeeLifecycleUsecase = require("./usecase/employee_lifecycle")(
+      this.employeeLifecycleRepo,
+      this.userRepo
+    );
+    // Stage 0C / C2. The lifecycle usecase and its repository are both here
+    // so the four HR actions can run C1c on their OWN transaction - the
+    // master change and the period it implies commit or roll back together.
+    // Stage 0C / C2. Aadhaar and Bank share the GST integration's Sandbox
+    // authentication - one token cache, one set of credentials - while their
+    // business logic stays in separate modules. GST is untouched.
+    this.sandboxClient = require("./services/sandbox_client")(this.sandboxService);
+    this.sandboxAadhaarService = require("./services/sandbox_aadhaar")(this.sandboxClient);
+    this.sandboxBankService = require("./services/sandbox_bank")(this.sandboxClient);
+
+    this.employeeAadhaarUsecase = require("./usecase/employee_aadhaar")(
+      this.employeeAadhaarRepo,
+      this.sandboxAadhaarService
+    );
+    this.employeeBankUsecase = require("./usecase/employee_bank")(
+      this.employeeBankRepo,
+      this.sandboxBankService,
+      this.employeeAadhaarRepo
+    );
+    // Resolving an IFSC while bank details are being entered. It shares the
+    // Sandbox bank service, and therefore the one token cache, but spends no
+    // Penny-Less verification and never touches the employee master.
+    this.ifscLookupUsecase = require("./usecase/ifsc_lookup")(
+      this.ifscMasterRepo,
+      this.sandboxBankService
+    );
+    this.employeeMasterUsecase = require("./usecase/employee_master")(
+      this.employeeMasterRepo,
+      this.employeeLifecycleUsecase,
+      this.employeeLifecycleRepo,
+      this.employeeAadhaarUsecase
+    );
+    // Stage 0C / C3: Aadhaar and bank status for a whole employee list at
+    // once. It takes the employee usecase itself rather than a repository, so
+    // the population it summarises is literally the one `GET
+    // /employee/employees` returns and cannot drift from it.
+    // Reports: the Employee Master service. It takes the shared connection
+    // for the one report query and the template repository for everything
+    // saved, so preview and export resolve a request the same way.
+    this.employeeReportService = require("./usecase/employee_report_service")(
+      this.mysql.connection,
+      this.reportTemplateRepo
+    );
+    this.employeeStatusSummaryUsecase = require("./usecase/employee_status_summary")(
+      this.employeeUsecase,
+      this.employeeAadhaarRepo,
+      this.employeeBankRepo
+    );
     this.shiftUsecase = require("./usecase/shift")(this.shiftRepo);
+    this.workShiftUsecase = require("./usecase/work_shift")(this.workShiftRepo);
+    this.employeeWorkShiftUsecase = require("./usecase/employee_work_shift")(
+      this.employeeWorkShiftRepo
+    );
     this.storeUsecase = require("./usecase/store")(this.storeRepo);
     this.outletUsecase = require("./usecase/outlet")(
       this.outletRepo,
@@ -385,7 +521,19 @@ class Server {
     this.userUsecase = require("./usecase/user")(
       this.userRepo,
       this.designationRepo,
-      this.employeeRepo
+      this.employeeRepo,
+      {
+        authLogRepo: this.authLogRepo,
+        telegram: require("./services/telegram")(),
+      }
+    );
+    // Stage 0A integration: the Telegram reset writes through the modern
+    // password service and audits to user_auth_log; it never touches SHA-1.
+    this.passwordResetUsecase = require("./usecase/passwordReset")(
+      this.userRepo,
+      this.passwordResetRepo,
+      require("./services/telegram")(),
+      { authLogRepo: this.authLogRepo }
     );
     this.peopleUsecase = require("./usecase/people")(this.peopleRepo);
     this.accountsEbookUsecase = require("./usecase/accountsEbook")(
@@ -431,6 +579,9 @@ class Server {
     this.gstPurchaseMatchUsecase = require("./usecase/gst_purchase_match")(
       this.gstPurchaseMatchRepo
     );
+    this.gstPurchaseNo2aUsecase = require("./usecase/gst_purchase_no_2a")(
+      this.gstPurchaseNo2aRepo
+    );
     // Add materials usecase
     this.materialsUsecase = require("./usecase/materials")(this.materialsRepo);
     this.materialRequestUsecase = require("./usecase/material_request")(
@@ -456,6 +607,9 @@ class Server {
     this.telegramDepartmentsUsecase = require("./usecase/telegram_departments")(
       this.telegramDepartmentsRepo
     );
+    this.advanceRequestUsecase = require("./usecase/advance_request")(
+      this.advanceRequestRepo
+    );
     this.ticketUsecase = require("./usecase/ticket")(
       this.ticketRepo,
       this.employeeUsecase,
@@ -470,9 +624,6 @@ class Server {
     );
     this.gofrugalSynkerUsecase = require("./usecase/gofrugal_synker")(
       this.gofrugalSynkerRepo
-    );
-    this.productsChangesUsecase = require("./usecase/products_changes")(
-      this.productsChangesRepo
     );
     this.purchaseReturnUsecase = require("./usecase/purchase_return")(
       this.purchaseReturnRepo
@@ -513,12 +664,17 @@ class Server {
       this.outletUsecase,
       this.stoCheckUsecase
     );
-    this.productOffersUsecase = require("./usecase/product_offers")(
-      this.productOffersRepo
+    this.offersV3Usecase = require("./usecase/offers_v3")(
+      this.offersV3Repo,
+      this.outletRepo,
+      this.priceCheckerRepo
+    );
+    this.offersV3TalkerUsecase = require("./usecase/offers_v3_talker")(
+      this.offersV3TalkerRepo,
+      this.outletRepo
     );
     this.productSalesUsecase = require("./usecase/product_sales")(
-      this.productSalesRepo,
-      this.productOffersRepo
+      this.productSalesRepo
     );
     this.salesDashboardUsecase = require("./usecase/sales_dashboard")(
       this.salesDashboardRepo
@@ -526,8 +682,17 @@ class Server {
     this.deadStockItemsUsecase = require("./usecase/dead_stock_items")(
       this.deadStockItemsRepo
     );
-    this.stockReceivedUsecase = require("./usecase/stock_received")(
-      this.stockReceivedRepo
+    this.grnUsecase = require("./usecase/grn")(
+      this.stockReceivedRepo,
+      this.priceCheckerRepo,
+      this.hqOffersRepo,
+      this.offersV3Repo
+    );
+    this.purchaseRefUsecase = require("./usecase/purchase_ref")(
+      this.purchaseRefRepo,
+      this.productSalesRepo,
+      this.stockReceivedRepo,
+      this.stockHoldingReportRepo
     );
     this.stockHoldingReportUsecase = require("./usecase/stock_holding_report")(
       this.stockHoldingReportRepo,
@@ -536,8 +701,8 @@ class Server {
     this.priceCheckerUsecase = require("./usecase/price_checker")(
       this.priceCheckerRepo,
       this.itemMarkupdownRepo,
-      this.productOffersRepo,
-      this.hqOffersRepo
+      this.hqOffersRepo,
+      this.offersV3Repo
     );
     this.itemMarkupdownUsecase = require("./usecase/item_markupdown")(
       this.itemMarkupdownRepo
@@ -561,7 +726,6 @@ class Server {
       this.outletUsecase,
       this.employeeUsecase,
       this.productRepo,
-      this.productsChangesRepo,
       this.stockHoldingReportUsecase
     );
   }
@@ -571,28 +735,92 @@ class Server {
       app.use(this.apiSyncLogger.middleware());
     }
 
-    const authMiddleWare = require("./middlewares/auth");
+    // Stage 0A: built with the user usecase so a revoked or disabled
+    // session stops within the cache window rather than at token expiry.
+    const authMiddleWare = require("./middlewares/auth").create({
+      userUsecase: this.userUsecase,
+    });
+    this.authMiddleware = authMiddleWare;
     app.use(authMiddleWare);
 
-    const documentRouter = require("./routes/document")(this.documentUsecase);
+    this.permissions = require("./middlewares/permissions")(
+      this.designationUsecase
+    );
+
+    // Stage 0B / B3: field-level protection for sensitive employee data,
+    // built on the same permission lookup so the admin bypass is shared.
+    this.sensitive = require("./middlewares/sensitive")(this.permissions);
+
+    // Runs after auth so it can see the decoded user: an account with an IP
+    // allow-list is cut off the moment it is used outside that network, not
+    // just at login.
+    this.ipRestriction = require("./middlewares/ip_restriction")(
+      this.userUsecase
+    );
+    app.use(this.ipRestriction);
+
+    const documentRouter = require("./routes/document")(
+      this.documentUsecase,
+      this.permissions,
+      this.sensitive
+    );
     const whatsappRouter = require("./routes/whatsapp")(this.whatsappUsecase);
     const budgetRouter = require("./routes/budget")(this.budgetUsecase);
     const issueRouter = require("./routes/issue")(this.issueUsecase);
     const vehicleRouter = require("./routes/vehicle")(this.vehicleUsecase);
-    const familyRouter = require("./routes/family")(this.familyUsecase);
+    const familyRouter = require("./routes/family")(
+      this.familyUsecase,
+      this.permissions
+    );
     const assetRouter = require("./routes/asset")(this.assetUsecase);
     const exampleRouter = require("./routes/example")(this.exampleUsecase);
     const gstRouter = require("./routes/gst")(this.gstUsecase);
     const departmentRouter = require("./routes/department")(
-      this.departmentUsecase
+      this.departmentUsecase,
+      this.permissions
     );
     const designationRouter = require("./routes/designation")(
-      this.designationUsecase
+      this.designationUsecase,
+      this.permissions
     );
-    const employeeRouter = require("./routes/employee")(this.employeeUsecase);
-    const shiftRouter = require("./routes/shift")(this.shiftUsecase);
+    const employeeRouter = require("./routes/employee")(
+      this.employeeUsecase,
+      this.permissions,
+      this.sensitive
+    );
+    // Stage 0C / C2: the local employee-master lifecycle actions.
+    const employeeMasterRouter = require("./routes/employee_master")(
+      this.employeeMasterUsecase,
+      this.permissions,
+      this.sensitive,
+      this.employeeAadhaarUsecase,
+      this.employeeBankUsecase,
+      this.employeeStatusSummaryUsecase,
+      this.ifscLookupUsecase
+    );
+    // Reports: discovery, saved templates, preview and the two exports.
+    const employeeReportRouter = require("./routes/employee_report")(
+      this.employeeReportService,
+      this.permissions
+    );
+    const shiftRouter = require("./routes/shift")(this.shiftUsecase, this.permissions);
+    const workShiftRouter = require("./routes/work_shift")(
+      this.workShiftUsecase,
+      this.permissions
+    );
+    // Employee Shift Assignment. Mounted at /hr with the other employee
+    // writes, because what it changes is an employee record.
+    const employeeWorkShiftRouter = require("./routes/employee_work_shift")(
+      this.employeeWorkShiftUsecase,
+      this.permissions,
+      this.sensitive
+    );
     const storeRouter = require("./routes/store")(this.storeUsecase);
-    const outletRouter = require("./routes/outlet")(this.outletUsecase);
+    const outletRouter = require("./routes/outlet")(
+      this.outletUsecase,
+      this.permissions,
+      this.ipRestriction
+    );
     const companyRouter = require("./routes/company")(this.companyUsecase);
     const materialtypeRouter = require("./routes/materialtype")(
       this.materialtypeUsecase
@@ -600,9 +828,13 @@ class Server {
     const materialsizeRouter = require("./routes/materialsize")(
       this.materialsizeUsecase
     );
-    const salaryRouter = require("./routes/salary")(this.salaryUsecase);
+    const salaryRouter = require("./routes/salary")(
+      this.salaryUsecase,
+      this.permissions
+    );
     const resignationRouter = require("./routes/resignation")(
-      this.resignationUsecase
+      this.resignationUsecase,
+      this.permissions
     );
     const imageRouter = require("./routes/image")(this.imageUsecase);
     const productRouter = require("./routes/product")(
@@ -616,7 +848,16 @@ class Server {
     const brandRouter = require("./routes/brand")(this.brandUsecase);
     const indentRouter = require("./routes/indent")(this.indentUsecase);
     const despatchRouter = require("./routes/despatch")(this.despatchUsecase);
-    const userRouter = require("./routes/user")(this.userUsecase);
+    const userRouter = require("./routes/user")(
+      this.userUsecase,
+      this.permissions,
+      this.ipRestriction,
+      {
+        authLogRepo: this.authLogRepo,
+        authMiddleware: this.authMiddleware,
+        passwordResetUsecase: this.passwordResetUsecase,
+      }
+    );
     const peopleRouter = require("./routes/people")(this.peopleUsecase);
     const accountsRouter = require("./routes/accounts")(
       this.accountsUsecase,
@@ -637,6 +878,9 @@ class Server {
     );
     const purchaseGstMatchRouter = require("./routes/purchase_gst_match")(
       this.gstPurchaseMatchUsecase
+    );
+    const purchaseGstNo2aRouter = require("./routes/purchase_gst_no_2a")(
+      this.gstPurchaseNo2aUsecase
     );
     const purchaseTallyRouter = require("./routes/purchase_tally")(
       this.purchaseTallyUsecase
@@ -674,7 +918,14 @@ class Server {
     const ebMasterListRouter = require("./routes/eb_master_list")(
       this.ebMasterListUsecase
     );
-    const ticketRouter = require("./routes/ticket")(this.ticketUsecase);
+    const advanceRequestRouter = require("./routes/advance_request")(
+      this.advanceRequestUsecase,
+      this.permissions
+    );
+    const ticketRouter = require("./routes/ticket")(
+      this.ticketUsecase,
+      this.permissions
+    );
     const telegramDepartmentsRouter = require("./routes/telegram_departments")(
       this.telegramDepartmentsUsecase
     );
@@ -689,9 +940,6 @@ class Server {
     );
     const gofrugalSynkerRouter = require("./routes/gofrugal_synker")(
       this.gofrugalSynkerUsecase
-    );
-    const productsChangesRouter = require("./routes/products_changes")(
-      this.productsChangesUsecase
     );
     const purchaseReturnRouter = require("./routes/purchase_return")(
       this.purchaseReturnUsecase
@@ -729,8 +977,11 @@ class Server {
       this.stockTransferOutUsecase
     );
     const stoCheckRouter = require("./routes/sto_check")(this.stoCheckUsecase);
-    const productOffersRouter = require("./routes/product_offers")(
-      this.productOffersUsecase
+    const offersV3Router = require("./routes/offers_v3")(
+      this.offersV3Usecase
+    );
+    const offersV3TalkerRouter = require("./routes/offers_v3_talker")(
+      this.offersV3TalkerUsecase
     );
     const productSalesRouter = require("./routes/product_sales")(
       this.productSalesUsecase
@@ -741,8 +992,9 @@ class Server {
     const deadStockItemsRouter = require("./routes/dead_stock_items")(
       this.deadStockItemsUsecase
     );
-    const stockReceivedRouter = require("./routes/stock_received")(
-      this.stockReceivedUsecase
+    const grnRouter = require("./routes/grn")(this.grnUsecase);
+    const purchaseRefRouter = require("./routes/purchase_ref")(
+      this.purchaseRefUsecase
     );
     const stockHoldingReportRouter = require("./routes/stock_holding_report")(
       this.stockHoldingReportUsecase
@@ -772,7 +1024,19 @@ class Server {
     app.use("/department", departmentRouter.getRouter());
     app.use("/designation", designationRouter.getRouter());
     app.use("/employee", employeeRouter.getRouter());
+    // Stage 0C / C2. Mounted at /hr so the lifecycle actions do not collide
+    // with the existing employee routes and C3 can find them in one place.
+    app.use("/hr", employeeMasterRouter.getRouter());
+    // Also /hr: Express tries the routers in order and this one only claims
+    // /hr/work-shift-assignments, which the master router does not define.
+    app.use("/hr", employeeWorkShiftRouter.getRouter());
+    // Mounted under /reports rather than /hr: the machinery is per-dataset
+    // and Attendance and Payroll will mount beside this one, not inside HR.
+    app.use("/reports/employee-master", employeeReportRouter.getRouter());
     app.use("/shift", shiftRouter.getRouter());
+    // The new payroll/attendance shift master. /shift above is unchanged and
+    // still serves the legacy `shift_master` system.
+    app.use("/work-shift", workShiftRouter.getRouter());
     app.use("/store", storeRouter.getRouter());
     app.use("/outlet", outletRouter.getRouter());
     app.use("/company", companyRouter.getRouter());
@@ -796,6 +1060,7 @@ class Server {
     app.use("/purchase", purchaseRouter.getRouter());
     app.use("/purchase-gst", purchaseGstRouter.getRouter());
     app.use("/purchase-gst-match", purchaseGstMatchRouter.getRouter());
+    app.use("/purchase-gst-no-2a", purchaseGstNo2aRouter.getRouter());
     app.use("/purchase-tally", purchaseTallyRouter.getRouter());
     app.use("/debit-note-tally", debitNoteTallyRouter.getRouter());
     app.use("/tally", tallyRouter.getRouter());
@@ -810,12 +1075,12 @@ class Server {
     app.use("/eb-consumption", ebConsumptionRouter.getRouter());
     app.use("/eb-master-list", ebMasterListRouter.getRouter());
     app.use("/ticket", ticketRouter.getRouter());
+    app.use("/advance-request", advanceRequestRouter.getRouter());
     app.use("/telegram-departments", telegramDepartmentsRouter.getRouter());
     app.use("/job-worksheet", jobWorksheetRouter.getRouter());
     app.use("/sticker-types", stickerTypesRouter.getRouter());
     app.use("/product-image-log", productImageLogRouter.getRouter());
     app.use("/gofrugal-synker", gofrugalSynkerRouter.getRouter());
-    app.use("/products-changes", productsChangesRouter.getRouter());
     app.use("/purchase-return", purchaseReturnRouter.getRouter());
     app.use("/product-distributors", productDistributorsRouter.getRouter());
     app.use(
@@ -834,12 +1099,14 @@ class Server {
     );
     app.use("/stock-transfer-out", stockTransferOutRouter.getRouter());
     app.use("/sto-check", stoCheckRouter.getRouter());
-    app.use("/product-offers", productOffersRouter.getRouter());
+    app.use("/offers-v3", offersV3Router.getRouter());
+    app.use("/offers-v3-talker", offersV3TalkerRouter.getRouter());
     app.use("/product-sales", productSalesRouter.getRouter());
     app.use("/sales-report", salesDashboardRouter.getRouter());
     app.use("/dead-stock-items", deadStockItemsRouter.getRouter());
     app.use("/item-markupdown", itemMarkupdownRouter.getRouter());
-    app.use("/stock-received", stockReceivedRouter.getRouter());
+    app.use("/grn", grnRouter.getRouter());
+    app.use("/purchase-ref", purchaseRefRouter.getRouter());
     app.use("/stock-holding-report", stockHoldingReportRouter.getRouter());
     app.use("/price-checker", priceCheckerRouter.getRouter());
     app.use("/api-sync-log", apiSyncLogRouter.getRouter());
@@ -886,6 +1153,26 @@ class Server {
       }
     );
 
+    // 6AM everyday - materialise recurring tasks that fall due today.
+    const RECURRING_TASKS_CRON = "0 6 * * *";
+    this.cronService.register(
+      "recurring_task_generation",
+      RECURRING_TASKS_CRON,
+      async () => {
+        await this.ticketUsecase.runRecurringTaskGeneration();
+      }
+    );
+
+    // 9AM everyday - nudge each chat about work that is past its due date.
+    const OVERDUE_REMINDER_CRON = "0 9 * * *";
+    this.cronService.register(
+      "ticket_overdue_reminders",
+      OVERDUE_REMINDER_CRON,
+      async () => {
+        await this.ticketUsecase.runOverdueReminders();
+      }
+    );
+
     // 12AM everyday - cleanup stale download tmp folders/files.
     const PRODUCT_IMAGE_TMP_CLEANUP_CRON = "0 0 * * *";
     this.cronService.register(
@@ -893,6 +1180,30 @@ class Server {
       PRODUCT_IMAGE_TMP_CLEANUP_CRON,
       async () => {
         await this.productUsecase.cleanupDownloadTmpDirectoryKeepingActiveJobs();
+      }
+    );
+
+    // 8:15AM everyday - just after the stock holding sync (7:30AM), so the
+    // first person to open Purchase Ref gets a warm cache instead of paying
+    // for the full rebuild.
+    const PURCHASE_REF_WARM_CRON = "15 8 * * *";
+    this.cronService.register(
+      "purchase_ref_cache_warm",
+      PURCHASE_REF_WARM_CRON,
+      async () => {
+        await this.purchaseRefUsecase.refresh();
+      }
+    );
+
+    // Every minute - pick up `/start <token>` messages sent to the Telegram
+    // bot and finish linking. Polling rather than a webhook, so the API does
+    // not have to be reachable from the internet over HTTPS.
+    const TELEGRAM_LINK_POLL_CRON = "* * * * *";
+    this.cronService.register(
+      "telegram_link_poll",
+      TELEGRAM_LINK_POLL_CRON,
+      async () => {
+        await this.passwordResetUsecase.pollTelegramUpdates();
       }
     );
 
@@ -947,6 +1258,36 @@ class Server {
       }
     );
 
+    // Stage 0A / A5: a break-glass credential is due rotation after any use
+    // and on a fixed interval even if unused. Nothing is rotated here — the
+    // job only raises the alert; rotation is the documented manual procedure.
+    this.cronService.register("break_glass_rotation_check", "0 8 * * *", async () => {
+      const authConfig = require("./config/auth");
+      const due = await this.authLogRepo.findSystemAccountsDueRotation(
+        authConfig.breakGlass.rotationDays
+      );
+      if (!due || due.length === 0) return;
+      const telegram = require("./services/telegram")();
+      for (const row of due) {
+        await this.authLogRepo.record({
+          event: "break_glass_rotation_due",
+          userId: row.user_id,
+          username: row.username,
+          detail: row.last_login_at && row.credential_rotated_at && row.last_login_at > row.credential_rotated_at
+            ? "used_since_last_rotation"
+            : "interval_elapsed",
+        });
+        // Plain text, no parse mode: the username is database text and must
+        // never be able to break the message (gate 19A).
+        const field = (v) => String(v ?? "unknown").replace(/[\u0000-\u001f\u007f]+/g, " ").slice(0, 120);
+        await telegram.sendMessage(
+          authConfig.breakGlass.alertChatId || ALERTS_TELEGRAM_CHAT_ID,
+          `🔐 BREAK-GLASS CREDENTIAL ROTATION DUE\nAccount: ${field(row.username)}\nLast rotated: ${field(row.credential_rotated_at || "never")}\nLast used: ${field(row.last_login_at || "never")}\n\nRotate with scripts/auth/break-glass.js rotate.`,
+          { disableNotification: false, parseMode: null }
+        );
+      }
+    });
+
     this.synker.initCronJobs(this.cronService, this.apiSyncLogger);
     this.cronService.start();
 
@@ -958,6 +1299,13 @@ class Server {
     // Wire synker back into employeesUsecase after service creation
     if (this.employeeUsecase && this.employeeUsecase.setSynker) {
       this.employeeUsecase.setSynker(this.synker);
+    }
+
+    // Stage 0C / C1c: the lifecycle reconciler runs after every Digisme
+    // employee sync - the 07:00 cron and POST /employee/sync alike, since
+    // both reach syncDigismeEmployees.
+    if (this.synker && this.synker.setEmployeeLifecycleUsecase) {
+      this.synker.setEmployeeLifecycleUsecase(this.employeeLifecycleUsecase);
     }
   }
 

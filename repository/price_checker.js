@@ -104,6 +104,7 @@ function mapGroupedItemRow(row) {
   );
 
   return {
+    product_id: parseOptionalNumber(row.product_id),
     purchase_price: allSameNonNull
       ? parseOptionalNumber(row.purchase_price)
       : null,
@@ -116,6 +117,7 @@ function mapGroupedItemRow(row) {
 }
 
 const LIST_GROUPED_BY_PRODUCT_SQL = `SELECT
+  product_id,
   old_mrp,
   old_selling_price,
   COUNT(*) AS batch_count,
@@ -124,7 +126,7 @@ const LIST_GROUPED_BY_PRODUCT_SQL = `SELECT
   MIN(purchase_price) AS purchase_price
 FROM \`${ITEMS_TABLE}\`
 WHERE product_id = ?
-GROUP BY old_mrp, old_selling_price
+GROUP BY product_id, old_mrp, old_selling_price
 ORDER BY old_mrp ASC, old_selling_price ASC`;
 
 function getConnectionAsync(db) {
@@ -233,8 +235,52 @@ class PriceCheckerRepository {
     );
   }
 
+  // Bulk version of listGroupedItemsByProductId, one query for many products
+  // (used by pages that need batches for a whole set of products at once,
+  // e.g. GRN Issue listing, instead of one request per product).
+  listGroupedItemsByProductIds(productIds) {
+    const ids = (Array.isArray(productIds) ? productIds : [])
+      .map((id) => parseProductId(id))
+      .filter((id) => id != null);
+    if (ids.length === 0) {
+      return Promise.resolve([]);
+    }
+
+    const placeholders = ids.map(() => "?").join(",");
+    const sql = `SELECT
+        product_id,
+        old_mrp,
+        old_selling_price,
+        COUNT(*) AS batch_count,
+        COUNT(DISTINCT purchase_price) AS distinct_purchase_prices,
+        SUM(CASE WHEN purchase_price IS NULL THEN 1 ELSE 0 END) AS null_purchase_count,
+        MIN(purchase_price) AS purchase_price
+      FROM \`${ITEMS_TABLE}\`
+      WHERE product_id IN (${placeholders})
+      GROUP BY product_id, old_mrp, old_selling_price
+      ORDER BY product_id ASC, old_mrp ASC, old_selling_price ASC`;
+    return queryAsync(this.db, sql, ids).then((rows) =>
+      (rows || []).map(mapGroupedItemRow)
+    );
+  }
+
   getMeta() {
     return queryAsync(this.db, GET_META_SQL).then((rows) => rows?.[0] ?? null);
+  }
+
+  // Landing cost per product/outlet/batch, for the given product_ids only
+  // (used by other features, e.g. Offers V3 mismatch checks, that need cost
+  // context without pulling the whole uploaded snapshot).
+  listLandingCostsByProductIds(productIds) {
+    if (!Array.isArray(productIds) || productIds.length === 0) {
+      return Promise.resolve([]);
+    }
+    const placeholders = productIds.map(() => "?").join(",");
+    return queryAsync(
+      this.db,
+      `SELECT product_id, outlet_id, batch_no, landing_cost FROM \`${ITEMS_TABLE}\` WHERE product_id IN (${placeholders})`,
+      productIds
+    );
   }
 
   async replaceAll(rows, meta, onProgress) {

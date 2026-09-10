@@ -1,5 +1,9 @@
 module.exports = function respondError (res, err) {
-    if (err.name && err.name === "ValidationError") {
+    if (err && (err.name === "SystemAccountError" || err.name === "UnauthenticatedError")) {
+      // Stage 0A: a system (break-glass) account tried an employee-only action.
+      res.status(err.status)
+      res.json({ code: err.status, error: err.code, msg: err.message })
+    } else if (err.name && err.name === "ValidationError") {
       res.status(400)
       res.json({ code: 422, msg: err.toString() })
     } else if (err.name === "MissingProductIdsError") {

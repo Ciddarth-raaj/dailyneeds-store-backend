@@ -1,4 +1,5 @@
 const logger = require("../utils/logger");
+const { buildEmployeeScope } = require("./employee_scope");
 
 class EmployeeRepository {
   constructor(db) {
@@ -228,35 +229,18 @@ class EmployeeRepository {
   }
   get(resignation, filters) {
     return new Promise((resolve, reject) => {
-      let filterConditions = [];
-      let filterValues = [
-        resignation.length ? resignation : null,
-        resignation.length ? resignation : null,
-      ];
-
-      // Add store filter condition if store_ids are provided
-      if (filters && filters.store_ids && filters.store_ids.length > 0) {
-        filterConditions.push("new_employee.store_id IN (?)");
-        filterValues.push(filters.store_ids);
-      }
-
-      // Add designation filter condition if designation_ids are provided
-      if (
-        filters &&
-        filters.designation_ids &&
-        filters.designation_ids.length > 0
-      ) {
-        filterConditions.push("new_employee.designation_id IN (?)");
-        filterValues.push(filters.designation_ids);
-      }
-
-      // Combine all filter conditions
-      const whereClause = `WHERE (new_employee.employee_name NOT IN (?) OR ? IS NULL) 
-        ${
-          filterConditions.length > 0
-            ? "AND " + filterConditions.join(" AND ")
-            : ""
-        }`;
+      // The population - who is in this list at all - lives in
+      // `employee_scope.js`, so the C3 status summary and Reports can ask the
+      // same question rather than each restating the rule.
+      //
+      // The hotfix deployed as 1f7c11a moved INTO that module: the resigned
+      // -name exclusion is omitted entirely when there is nothing to exclude,
+      // rather than written as `(... NOT IN (?) OR ? IS NULL)` with the same
+      // array bound twice - a shape MySQL rejects at two or more names.
+      const { where: whereClause, params: filterValues } = buildEmployeeScope(
+        resignation,
+        filters
+      );
 
       const query = `
         SELECT new_employee.employee_id, new_employee.employee_name, new_employee.father_name, new_employee.dob, new_employee.gender, new_employee.marital_status, 
@@ -349,6 +333,38 @@ class EmployeeRepository {
               level: logger.LEVEL.ERROR,
               component: "REPOSITORY.EMPLOYEE",
               code: "REPOSITORY.EMPLOYEE.GET-FAMILY-DET",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        }
+      );
+    });
+  }
+  /**
+   * The names of the active employees at ONE outlet, and nothing else.
+   *
+   * This exists so an operational screen - the accounts sheet's cashier
+   * dropdown - can label a person without holding `view_employees`. Two
+   * columns, chosen explicitly: adding one here would widen what every
+   * signed-in user can read, so the list is the whole security boundary and
+   * `SELECT *` is not an option.
+   */
+  getDirectoryByStore(store_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "SELECT employee_id, employee_name FROM new_employee WHERE status = 1 AND store_id = ? ORDER BY employee_name",
+        [store_id],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.EMPLOYEE",
+              code: "REPOSITORY.EMPLOYEE.GET-DIRECTORY",
               description: err.toString(),
               category: "",
               ref: {},

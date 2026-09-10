@@ -47,6 +47,37 @@ class DocumentRepository {
         });
     });
   }
+  /**
+   * Stage 0B / B3 — the TYPE of one document, and nothing else.
+   *
+   * The write guard has to know whether a document_id names an Aadhaar or a
+   * PAN record before it lets the request through, and it must learn that
+   * without loading the row: `getDocumentById` returns the card number and
+   * the S3 path, which is exactly what the caller may not have. One column,
+   * no join, no contents.
+   */
+  getCardTypeById(document_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "SELECT card_type FROM new_employee_documents WHERE document_id = ?",
+        [document_id],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.DOCUMENT",
+              code: "REPOSITORY.DOCUMENT.GET-CARD-TYPE",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs && docs.length ? docs[0].card_type : null);
+        });
+    });
+  }
   getDocumentsWithoutAdhaar() {
     return new Promise((resolve, reject) => {
       this.db.query(

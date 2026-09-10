@@ -9,6 +9,7 @@ const { capitalizeWords } = require("../utils/string");
 
 const logger = require("../utils/logger");
 const deliumConfig = require("../config/delium");
+const lifecycleConfig = require("../config/lifecycle");
 // const GOFRUGAL_API_KEY =
 //   "92389031420AEF2B22174FA933F178040AFD9395A5E9C3F013A74C4CA152CE786116998975B7AF31";
 
@@ -22,50 +23,6 @@ const CRON_SYNTAX_EMPLOYEE = "0 7 * * *";
 const CRON_SYNTAX_STOCK_HOLDING = "30 7 * * *";
 const CRON_SYNTAX_CLEANING_PACKING = "0 9 * * *";
 
-// Columns on product_table that are updated by sync (for change detection). Excludes product_id.
-// gf_* columns are deprecated for application use; still synced from GoFrugal for legacy data.
-const SYNCED_PRODUCT_COLUMNS = [
-  "variant",
-  "variant_of",
-  "gf_item_name", // @deprecated use de_name
-  "gf_description", // @deprecated
-  "gf_detailed_description", // @deprecated
-  "gf_weight_grams", // @deprecated
-  "gf_applies_online", // @deprecated
-  "gf_item_product_type", // @deprecated
-  "gf_manufacturer", // @deprecated use de_distributor
-  "gf_food_type", // @deprecated
-  "gf_tax_id", // @deprecated
-  "gf_status", // @deprecated
-  "de_distributor",
-  "brand_id",
-  "category_id",
-  "subcategory_id",
-  "measure",
-  "measure_in",
-  "packaging_type",
-  "cleaning",
-  "sticker",
-  "grinding",
-  "cover_type",
-  "cover_sizes",
-  "return_prod",
-  "de_display_name",
-  "department_id",
-  "de_name",
-  "de_packaging_type",
-  "de_preparation_type",
-  "de_combo_name",
-  "purchase_uom",
-  "store_uom",
-  "repln_mode",
-  "de_is_online_allowed",
-  "buyer_name",
-  "distributor_id",
-  "de_manufacturer_name",
-  "de_bill_count_level",
-];
-
 class Synker {
   constructor(
     productUsecase,
@@ -78,7 +35,6 @@ class Synker {
     outletUsecase,
     employeeUsecase,
     productRepo,
-    productsChangesRepo,
     stockHoldingReportUsecase
   ) {
     this.productUsecase = productUsecase;
@@ -91,58 +47,9 @@ class Synker {
     this.outletUsecase = outletUsecase;
     this.employeeUsecase = employeeUsecase;
     this.productRepo = productRepo;
-    this.productsChangesRepo = productsChangesRepo;
     this.stockHoldingReportUsecase = stockHoldingReportUsecase;
-  }
-
-  /** Build incoming row for comparison (same keys as DB). product has .return for return_prod. */
-  _incomingRowForSync(product) {
-    const row = {};
-    for (const col of SYNCED_PRODUCT_COLUMNS) {
-      if (col === "return_prod") {
-        row[col] =
-          product.return !== undefined ? product.return : product.return_prod;
-      } else {
-        row[col] = product[col];
-      }
-    }
-    return row;
-  }
-
-  /**
-   * Normalise value for comparison so type mismatches (e.g. 3598 vs "3598") are treated as equal.
-   * Returns undefined for null/undefined/empty. Numbers and numeric strings compare by value.
-   */
-  _normalizeForCompare(val) {
-    if (val === null || val === undefined) return undefined;
-    if (Buffer.isBuffer(val)) val = val.toString("utf8");
-    if (typeof val === "string") {
-      const s = val.trim();
-      if (s === "") return undefined;
-      const n = Number(s);
-      return Number.isNaN(n) ? s : n;
-    }
-    if (typeof val === "number" && !Number.isFinite(val)) return undefined;
-    return val;
-  }
-
-  /**
-   * Build changes object with only columns that actually changed.
-   * Uses loose equality so 3598 and "3598" are not stored as changed.
-   * Skips when old is null and there is no new value. Only stores real changes.
-   */
-  _buildProductChanges(existing, incoming) {
-    const changes = {};
-    for (const col of SYNCED_PRODUCT_COLUMNS) {
-      const oldVal = existing && col in existing ? existing[col] : undefined;
-      const newVal = incoming && col in incoming ? incoming[col] : undefined;
-      const oldNorm = this._normalizeForCompare(oldVal);
-      const newNorm = this._normalizeForCompare(newVal);
-      if (oldVal == null && (newVal == null || newVal === "")) continue;
-      if (oldNorm == newNorm) continue;
-      changes[col] = { old: oldVal, new: newVal };
-    }
-    return Object.keys(changes).length ? changes : null;
+    // Stage 0C / C1c. Set by setEmployeeLifecycleUsecase after construction.
+    this.employeeLifecycleUsecase = null;
   }
 
   initCronJobs(cronService, apiSyncLogger) {
@@ -157,13 +64,23 @@ class Synker {
       })
     );
 
-    cronService.register(
-      "employee_sync",
-      CRON_SYNTAX_EMPLOYEE,
-      wrap("employee_sync", "/employee/sync", async () => {
-        await this.syncDigismeEmployees();
-      })
-    );
+    // Stage 0C: while the pause is on, the employee job is not registered at
+    // all, so it is neither scheduled nor listed as skipped by CRON_DISABLED.
+    // The startup line below is the operator's proof. Every other job here is
+    // unaffected.
+    if (lifecycleConfig.digisme.employeeSync) {
+      cronService.register(
+        "employee_sync",
+        CRON_SYNTAX_EMPLOYEE,
+        wrap("employee_sync", "/employee/sync", async () => {
+          await this.syncDigismeEmployees();
+        })
+      );
+    } else {
+      console.log(
+        `[CRON] "employee_sync" NOT REGISTERED - ${lifecycleConfig.PAUSED_MESSAGE}. Set DIGISME_EMPLOYEE_SYNC=on to resume.`
+      );
+    }
 
     cronService.register(
       "stock_holding_report_sync",
@@ -235,6 +152,47 @@ class Synker {
   }
 
   async syncDigismeEmployees() {
+    // Stage 0C: paused. This returns BEFORE the Digisme token request, the
+    // employee fetch, and every write the routine performs - designation,
+    // department, outlet, employee and login provisioning alike - so a
+    // paused sync cannot touch the network or the database at all.
+    //
+    // It is checked here as well as at the cron registration because this
+    // function is also reachable from POST /employee/sync. One guard at the
+    // choke point is what makes both callers safe.
+    if (!lifecycleConfig.digisme.employeeSync) {
+      logger.Log({
+        level: logger.LEVEL.INFO,
+        component: "SERVICE.SYNKER",
+        code: "SERVICE.SYNKER.DIGISME-EMPLOYEES-PAUSED",
+        description: lifecycleConfig.PAUSED_MESSAGE,
+        category: "",
+        ref: {},
+      });
+      return { code: 423, msg: lifecycleConfig.PAUSED_MESSAGE, paused: true };
+    }
+
+    // Stage 0C / C2. Even if the pause above were lifted, the employee
+    // master is no longer Digisme's to write. This guard sits at the same
+    // choke point, so the cron and POST /employee/sync are both covered, and
+    // it is checked independently of DIGISME_EMPLOYEE_SYNC so that turning
+    // that flag back on cannot overwrite a local Create/Edit/Resign/Rejoin.
+    if (lifecycleConfig.localEmployeeMaster) {
+      logger.Log({
+        level: logger.LEVEL.INFO,
+        component: "SERVICE.SYNKER",
+        code: "SERVICE.SYNKER.DIGISME-EMPLOYEES-LOCAL-MASTER",
+        description: lifecycleConfig.LOCAL_MASTER_MESSAGE,
+        category: "",
+        ref: {},
+      });
+      return {
+        code: 423,
+        msg: lifecycleConfig.LOCAL_MASTER_MESSAGE,
+        localEmployeeMaster: true,
+      };
+    }
+
     try {
       const GENDER_MAP = {
         FEMALE: "F",
@@ -343,7 +301,61 @@ class Synker {
       console.log("Employee sync completed");
     } catch (err) {
       console.error(err);
+      // The employee master did not finish syncing, so reconciling periods
+      // against a half-written master would draw conclusions from data
+      // Digisme never confirmed. Stop here; the next run repairs both.
+      return { code: 500, msg: "Employee sync failed", error: err.message };
     }
+
+    // Stage 0C / C1c. The employee master is now as Digisme left it, so the
+    // employment periods can be brought into agreement with it.
+    //
+    // Deliberately AFTER the sync and outside its try/catch: the sync's own
+    // success is not conditional on this, and a lifecycle failure must not
+    // make a successful master sync look failed. It is reconciliation, not
+    // event handling, so a failure here is repaired by the next run rather
+    // than lost - which is why it is logged loudly and then returned rather
+    // than thrown.
+    return await this.reconcileEmployeeLifecycle();
+  }
+
+  /**
+   * Runs the lifecycle reconciler if it has been wired in. Split out so that
+   * the scheduled cron and POST /employee/sync - which both reach
+   * syncDigismeEmployees above - take exactly the same path, and so a
+   * deployment where the reconciler is not wired still syncs.
+   */
+  async reconcileEmployeeLifecycle() {
+    if (!this.employeeLifecycleUsecase) {
+      console.log("Employee lifecycle reconciler not wired; skipping");
+      return { code: 200, lifecycle: { skipped: "not_wired" } };
+    }
+
+    try {
+      const summary = await this.employeeLifecycleUsecase.reconcileAll();
+      console.log(
+        `Employee lifecycle reconciled: ${summary.candidates} candidate(s), ` +
+          `${summary.open_initial} opened, ${summary.open_rejoin} rejoined, ` +
+          `${summary.close} closed, ${summary.fill} filled, ${summary.failed} failed`
+      );
+      return { code: summary.failed > 0 ? 207 : 200, lifecycle: summary };
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "SERVICE.SYNKER",
+        code: "SERVICE.SYNKER.LIFECYCLE-RECONCILE-FAILED",
+        description: err.toString(),
+        category: "",
+        ref: {},
+      });
+      console.error("Employee lifecycle reconciliation failed:", err.message);
+      return { code: 207, msg: "Employee sync completed; lifecycle reconciliation failed", error: err.message };
+    }
+  }
+
+  /** Wired after construction, like setSynker elsewhere, to avoid a 12th positional argument. */
+  setEmployeeLifecycleUsecase(employeeLifecycleUsecase) {
+    this.employeeLifecycleUsecase = employeeLifecycleUsecase;
   }
 
   async syncProductsWithLogging() {
@@ -494,43 +506,11 @@ class Synker {
       let brandsProcessed = 0;
       let departmentsProcessed = 0;
 
-      const productIds = formattedProduct.map((p) => p.product_id);
-      const existingByProductId =
-        this.productRepo && productIds.length > 0
-          ? await this.productRepo.getProductRowForSync(productIds)
-          : {};
-
       for (const i in formattedProduct) {
         formattedProduct[i] = {
           ...formattedProduct[i],
           ...products[formattedProduct[i].product_id],
         };
-        const productId = formattedProduct[i].product_id;
-        if (this.productsChangesRepo && this.productRepo) {
-          const existing = existingByProductId[String(productId)];
-          if (existing) {
-            const incoming = this._incomingRowForSync(formattedProduct[i]);
-            const changes = this._buildProductChanges(existing, incoming);
-            if (changes) {
-              try {
-                await this.productsChangesRepo.insert({
-                  product_id: productId,
-                  changes,
-                  is_approved: false,
-                });
-              } catch (err) {
-                logger.Log({
-                  level: logger.LEVEL.ERROR,
-                  component: "SERVICE.SYNKER",
-                  code: "SERVICE.SYNKER.PRODUCTS_CHANGES_INSERT",
-                  description: err.toString(),
-                  category: "",
-                  ref: { product_id: productId },
-                });
-              }
-            }
-          }
-        }
         await this.productUsecase.create(formattedProduct[i]);
         productsProcessed++;
       }
@@ -982,7 +962,6 @@ module.exports = (
   outletUsecase,
   employeeUsecase,
   productRepo,
-  productsChangesRepo,
   stockHoldingReportUsecase
 ) => {
   return new Synker(
@@ -996,7 +975,6 @@ module.exports = (
     outletUsecase,
     employeeUsecase,
     productRepo,
-    productsChangesRepo,
     stockHoldingReportUsecase
   );
 };

@@ -6,3 +6,14 @@ migrations/*/database.json
 .env
 logs/
 tmp/
+__pycache__/
+*.pyc
+
+# Stage 0A: signing keys and secrets never belong in the repository.
+# keys/jwt/*.key is still TRACKED from before this change - see
+# docs/auth-stage0a-implementation.md for the untracking step, which must
+# follow (not precede) moving the key material out on the server.
+keys/
+*.key
+*.pem
+!keys/.gitkeep

@@ -136,7 +136,11 @@ class DesignationRepository {
       return `SELECT * FROM all_permissions`;
     }
     if (user_type === 1) {
-      return `SELECT permission_key FROM permissions WHERE designation_id = ?`;
+      // Stage 0B / B2: `is_active` exists on this table but was never read,
+      // so a permission switched off still granted access. It is a filter
+      // now — for the authorisation check AND for the bootstrap the frontend
+      // uses to decide which screens to show, which must agree.
+      return `SELECT permission_key FROM permissions WHERE designation_id = ? AND is_active = 1`;
     }
   }
   getPermissionById(designation_id, user_type) {
@@ -183,13 +187,29 @@ class DesignationRepository {
   }
   create(designation) {
     return new Promise((resolve, reject) => {
+      const onlinePortal =
+        designation.online_portal === undefined || designation.online_portal === null
+          ? 1
+          : designation.online_portal;
+      const loginAccess =
+        designation.login_access === undefined || designation.login_access === null
+          ? 1
+          : designation.login_access;
       this.db.query(
+        // `online_portal` and `login_access` are LEGACY and inert - nothing
+        // reads either one - but both columns are `INT NOT NULL` with no
+        // default, so the INSERT cannot leave them out: MySQL raises
+        // ER_NO_DEFAULT_FOR_FIELD under STRICT_TRANS_TABLES. A caller that
+        // still sends a value keeps it; one that does not gets 1, which is
+        // what `services/synker.js` has always written for every designation
+        // it creates. Dropping the columns would need a migration, and they
+        // are deliberately kept for compatibility.
         "INSERT INTO designation (status, designation_name, online_portal, login_access) VALUES (?, ?, ?, ?)",
         [
           designation.status,
           designation.designation_name,
-          designation.online_portal,
-          designation.login_access,
+          onlinePortal,
+          loginAccess,
         ],
         (err, res) => {
           if (err) {

@@ -134,6 +134,55 @@ class GstRoutes {
       res.end();
     });
 
+    /**
+     * Stored GSTR-2A B2B invoices across an inclusive range of return periods.
+     * GET /gst/b2b/invoices?from_period=YYYY-MM&to_period=YYYY-MM
+     * The per-month /b2b/invoices/:year/:month form below is unchanged.
+     */
+    router.get("/b2b/invoices", async (req, res) => {
+      try {
+        const periodSchema = Joi.string()
+          .trim()
+          .regex(/^[0-9]{4}-(0[1-9]|1[0-2])$/)
+          .required();
+        const isValid = Joi.validate(req.query, {
+          from_period: periodSchema,
+          to_period: periodSchema,
+        });
+        if (isValid.error !== null) {
+          res.status(400).json({
+            code: 400,
+            msg:
+              isValid.error.message ||
+              "from_period and to_period must be YYYY-MM",
+          });
+          res.end();
+          return;
+        }
+        const [fromYear, fromMonth] = isValid.value.from_period.split("-");
+        const [toYear, toMonth] = isValid.value.to_period.split("-");
+        const payload =
+          await this.gstUsecase.getStoredB2bInvoicesForReturnPeriodRange(
+            parseInt(fromYear, 10),
+            parseInt(fromMonth, 10),
+            parseInt(toYear, 10),
+            parseInt(toMonth, 10)
+          );
+        const http =
+          payload.code === 200
+            ? 200
+            : payload.code === 400
+              ? 400
+              : payload.code === 503
+                ? 503
+                : 500;
+        res.status(http).json(payload);
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
     router.get("/b2b/invoices/:year/:month", async (req, res) => {
       try {
         const paramsSchema = {
