@@ -190,6 +190,12 @@ class Server {
     // The new payroll/attendance shift master. Separate from shiftRepo above,
     // which still owns the legacy `shift_master` table.
     this.workShiftRepo = require("./repository/work_shift")(this.mysql.connection);
+    // The manual employee -> work shift mapping. It owns exactly one column,
+    // `new_employee.default_work_shift_id`, and never touches the legacy
+    // `shift_id` / `shift_code` pair that employeeRepo still reads.
+    this.employeeWorkShiftRepo = require("./repository/employee_work_shift")(
+      this.mysql.connection
+    );
     this.storeRepo = require("./repository/store")(this.mysql.connection);
     this.outletRepo = require("./repository/outlet")(this.mysql.connection);
     this.familyRepo = require("./repository/family")(this.mysql.connection);
@@ -470,6 +476,9 @@ class Server {
     );
     this.shiftUsecase = require("./usecase/shift")(this.shiftRepo);
     this.workShiftUsecase = require("./usecase/work_shift")(this.workShiftRepo);
+    this.employeeWorkShiftUsecase = require("./usecase/employee_work_shift")(
+      this.employeeWorkShiftRepo
+    );
     this.storeUsecase = require("./usecase/store")(this.storeRepo);
     this.outletUsecase = require("./usecase/outlet")(
       this.outletRepo,
@@ -799,6 +808,13 @@ class Server {
       this.workShiftUsecase,
       this.permissions
     );
+    // Employee Shift Assignment. Mounted at /hr with the other employee
+    // writes, because what it changes is an employee record.
+    const employeeWorkShiftRouter = require("./routes/employee_work_shift")(
+      this.employeeWorkShiftUsecase,
+      this.permissions,
+      this.sensitive
+    );
     const storeRouter = require("./routes/store")(this.storeUsecase);
     const outletRouter = require("./routes/outlet")(
       this.outletUsecase,
@@ -1011,6 +1027,9 @@ class Server {
     // Stage 0C / C2. Mounted at /hr so the lifecycle actions do not collide
     // with the existing employee routes and C3 can find them in one place.
     app.use("/hr", employeeMasterRouter.getRouter());
+    // Also /hr: Express tries the routers in order and this one only claims
+    // /hr/work-shift-assignments, which the master router does not define.
+    app.use("/hr", employeeWorkShiftRouter.getRouter());
     // Mounted under /reports rather than /hr: the machinery is per-dataset
     // and Attendance and Payroll will mount beside this one, not inside HR.
     app.use("/reports/employee-master", employeeReportRouter.getRouter());
