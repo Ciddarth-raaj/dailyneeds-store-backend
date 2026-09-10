@@ -196,6 +196,11 @@ class Server {
     this.employeeWorkShiftRepo = require("./repository/employee_work_shift")(
       this.mysql.connection
     );
+    // Attendance - Part 1. Read-only over the Biomax punch tables (the
+    // receiver process is their only writer) plus the device registry. On
+    // the PRIMARY application pool, never the GoFrugal one.
+    this.biomaxPunchRepo = require("./repository/biomax_punch")(this.mysql.connection);
+    this.biomaxDeviceRepo = require("./repository/biomax_device")(this.mysql.connection);
     this.storeRepo = require("./repository/store")(this.mysql.connection);
     this.outletRepo = require("./repository/outlet")(this.mysql.connection);
     this.familyRepo = require("./repository/family")(this.mysql.connection);
@@ -476,6 +481,13 @@ class Server {
     );
     this.shiftUsecase = require("./usecase/shift")(this.shiftRepo);
     this.workShiftUsecase = require("./usecase/work_shift")(this.workShiftRepo);
+    // Attendance - Part 1. Exports are audited through the same
+    // report_export_log the Reports module writes.
+    this.attendanceRawUsecase = require("./usecase/attendance_raw")(
+      this.biomaxPunchRepo,
+      this.reportTemplateRepo
+    );
+    this.biomaxDeviceUsecase = require("./usecase/biomax_device")(this.biomaxDeviceRepo);
     this.employeeWorkShiftUsecase = require("./usecase/employee_work_shift")(
       this.employeeWorkShiftRepo
     );
@@ -808,6 +820,16 @@ class Server {
       this.workShiftUsecase,
       this.permissions
     );
+    // Attendance - Part 1: the Attendance List, the Punch Audit and the
+    // Biomax device registry.
+    const attendanceRawRouter = require("./routes/attendance_raw")(
+      this.attendanceRawUsecase,
+      this.permissions
+    );
+    const biomaxDeviceRouter = require("./routes/biomax_device")(
+      this.biomaxDeviceUsecase,
+      this.permissions
+    );
     // Employee Shift Assignment. Mounted at /hr with the other employee
     // writes, because what it changes is an employee record.
     const employeeWorkShiftRouter = require("./routes/employee_work_shift")(
@@ -1037,6 +1059,11 @@ class Server {
     // The new payroll/attendance shift master. /shift above is unchanged and
     // still serves the legacy `shift_master` system.
     app.use("/work-shift", workShiftRouter.getRouter());
+    // Attendance is its own top-level module beside HR, as the frontend's
+    // navigation already anticipates. Devices first: Express tries routers
+    // in order and /attendance/devices must not be swallowed by /attendance.
+    app.use("/attendance/devices", biomaxDeviceRouter.getRouter());
+    app.use("/attendance", attendanceRawRouter.getRouter());
     app.use("/store", storeRouter.getRouter());
     app.use("/outlet", outletRouter.getRouter());
     app.use("/company", companyRouter.getRouter());

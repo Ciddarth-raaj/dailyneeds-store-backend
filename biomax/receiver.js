@@ -42,7 +42,16 @@ const { createFloodGuard } = require("./flood");
 const { createLog } = require("./log");
 const { createSpool } = require("./spool");
 
-const MIN_NODE_MAJOR = 16;
+/**
+ * Production runs this under ec2-user on Node 14.21.3, the same interpreter
+ * as the API (D1, amended). Everything in biomax/ is written for Node 14:
+ * no fetch(), no node: import prefixes, no ??= / ||=, no replaceAll, no
+ * Array.prototype.at. Node 14 reached end-of-life in April 2023; that is a
+ * pre-existing condition of the host and upgrading the API runtime is out
+ * of scope for Part 1 (recorded as technical debt in the spec).
+ */
+const MIN_NODE_MAJOR = 14;
+const TESTED_NODE_MAJORS = [14, 16, 18, 20, 22];
 
 function readConfig(env = process.env) {
   const int = (name, fallback) => {
@@ -107,9 +116,11 @@ function createReceiver({ store, log, spool, flood, config } = {}) {
   const announcedUnregistered = new Set();
 
   function reply(res, kind) {
-    const flat = [];
-    for (const [k, v] of protocol.buildAckHeaders(kind)) flat.push(k, v);
-    res.writeHead(200, flat);
+    // setHeader keeps insertion order, and unlike the array form of
+    // writeHead it behaves identically on Node 14 (the production runtime)
+    // and on the Node 22 the tests run under.
+    for (const [k, v] of protocol.buildAckHeaders(kind)) res.setHeader(k, v);
+    res.writeHead(200);
     res.end();
   }
 
@@ -389,13 +400,16 @@ function createReceiver({ store, log, spool, flood, config } = {}) {
 function assertRuntime() {
   const major = Number(process.versions.node.split(".")[0]);
   if (major < MIN_NODE_MAJOR) {
-    // Loud and immediate, so a mis-pinned pm2 interpreter is a visible crash
-    // loop in `pm2 ls`, not a syntax error buried in a log.
+    // Loud and immediate, so a wrong interpreter is a visible crash loop in
+    // `pm2 ls`, not a syntax error buried in a log.
     console.error(
-      `biomax-receiver: Node ${process.versions.node} is too old; Node ${MIN_NODE_MAJOR}+ is required. ` +
-        "Pin `interpreter` in ecosystem.config.js to a Node 18 binary usable by the non-root pm2 user."
+      `biomax-receiver: Node ${process.versions.node} is unsupported; Node ${MIN_NODE_MAJOR}+ is required ` +
+        "(production target: Node 14.21.3 under ec2-user, the API's own interpreter)."
     );
     process.exit(78); // EX_CONFIG
+  }
+  if (!TESTED_NODE_MAJORS.includes(major)) {
+    console.warn(`biomax-receiver: Node ${process.versions.node} has not been exercised by the test suite; continuing.`);
   }
 }
 
@@ -447,4 +461,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createReceiver, readConfig, rebuildFrame, MIN_NODE_MAJOR };
+module.exports = { createReceiver, readConfig, rebuildFrame, assertRuntime, MIN_NODE_MAJOR, TESTED_NODE_MAJORS };

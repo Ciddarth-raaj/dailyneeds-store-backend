@@ -102,4 +102,12 @@ jobs:
              cd migrations/mysql
              db-migrate up
              cd ../..
-             pm2 reload 0'
+             pm2 reload 0
+             # The Biomax receiver is a separate pm2 app (ecosystem.config.js).
+             # Reloading it here is safe: a punch cut mid-flight gets no ACK
+             # and the device retransmits it. If it has never been started on
+             # this box, startOrReload starts it - it then idles until port
+             # 7005 is opened in the Lightsail firewall, which is a separate,
+             # approved step.
+             pm2 startOrReload ecosystem.config.js --only biomax-receiver --update-env
+             pm2 save'
