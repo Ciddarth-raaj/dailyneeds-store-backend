@@ -415,12 +415,21 @@ function assertRuntime() {
 
 async function main() {
   assertRuntime();
+  // Same resolution as server.js: NODE_ENV, else "development". On dnds-be
+  // the API runs with NODE_ENV unset, so its live pool is
+  // config.json db.mysql.development; the receiver must use the very same
+  // block. BIOMAX_DB_ENV overrides only when set explicitly.
   global.env = process.env.NODE_ENV === undefined ? "development" : process.env.NODE_ENV;
   global.isDev = () => global.env === "development";
+  const dbEnv = process.env.BIOMAX_DB_ENV || global.env;
 
   // Same config.json section the API uses (drivers/mysql.js).
   const configPath = path.join(__dirname, "..", "config.json");
-  const dbConfig = require(configPath).db.mysql[global.env];
+  const dbConfig = require(configPath).db.mysql[dbEnv];
+  if (!dbConfig) {
+    console.error(`biomax-receiver: config.json has no db.mysql.${dbEnv} block`);
+    process.exit(78);
+  }
   const { createPool, createStore } = require("./store");
   const pool = createPool(dbConfig);
   const store = createStore(pool);
@@ -433,6 +442,8 @@ async function main() {
   log.info("STARTED", `listening on ${address.address}:${address.port}`, {
     node: process.versions.node,
     env: global.env,
+    db_env: dbEnv,
+    db: `${dbConfig.host}/${dbConfig.database}`,
     max_body: receiver.config.maxBodyBytes,
     flood: receiver.config.flood,
   });

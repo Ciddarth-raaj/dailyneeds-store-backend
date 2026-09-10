@@ -42,7 +42,14 @@ module.exports = {
       max_restarts: 50,
       kill_timeout: 6000,
       env: {
-        NODE_ENV: "production",
+        // DELIBERATELY NOT "production". server.js resolves global.env from
+        // NODE_ENV and the API on dnds-be runs with it UNSET, i.e. as
+        // "development", so the live database is config.json's
+        // db.mysql.development block (verified by the preflight gate:
+        // dnds_prod on the Lightsail database host). The production block in
+        // that file still holds sample values. The receiver must read the
+        // SAME block the API reads, so it inherits the API's convention and
+        // sets nothing here. BIOMAX_DB_ENV can override it explicitly.
         BIOMAX_PORT: "7005",
       },
     },
