@@ -1,0 +1,250 @@
+# Biomax Part 1 - the production DEPLOYMENT GATE. Read-only, dispatch only.
+#
+# Never runs on push. Dispatched by hand with a mode:
+#
+#   pre    before the Biomax migration - prerequisites that must already hold
+#   post   after the migration - schema, seed, permissions, receiver state
+#
+# Every check below either FAILS the workflow (the deployment must not
+# proceed) or is REPORT-ONLY (printed for HR / operations, never fatal):
+#
+#   FAIL  a required database query errors
+#   FAIL  MySQL < 5.7.8
+#   FAIL  outlet_id 2 is not the Warehouse, or DN1..DN5 are not all present
+#   FAIL  biomax-receiver is present in pm2 in a running/launching state
+#   FAIL  something is listening on TCP 7005
+#   FAIL  (post) any biomax_* table missing, migration not recorded, seeded
+#         devices != 7, any of the seven Cloud IDs missing or altered, WH/G2
+#         not on outlet_id 2, a seeded device without an assignment, any of
+#         the six permission keys missing
+#   REPORT port 82, the API's pm2 runtime, static-IP source column state,
+#          working schedule rows without an Attendance Day Cutoff, employees
+#          without an assigned shift, punch count
+#
+# STRICTLY READ-ONLY. No INSERT/UPDATE/DELETE, no migration, no pm2
+# start/stop/reload, no firewall change, no device change. Database
+# credentials never leave the host: the queries run there through the repo's
+# own `mysql` module on the host's Node, reading migrations/mysql/
+# database.json (production block), and only result rows are printed.
+#
+# Uses the same secrets as the backend deploy: SSH_PRIVATE_KEY, SSH_HOST,
+# SSH_USER. "on" is quoted so YAML 1.1 does not treat it as a boolean.
+
+name: Biomax Preflight Gate (read-only)
+
+"on":
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "pre = before the Biomax migration; post = after it"
+        required: true
+        default: pre
+        type: choice
+        options:
+          - pre
+          - post
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Validate input
+        env:
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          case "$MODE" in pre|post) echo "mode: $MODE";; *) echo "::error::mode must be pre or post"; exit 1;; esac
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/dnds_gha_deploy
+          chmod 600 ~/.ssh/dnds_gha_deploy
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      # The gate script is a quoted heredoc piped over stdin, so nothing is
+      # left on the box and nothing in it is expanded by the runner. The mode
+      # arrives as a positional argument, already validated.
+      - name: Run the gate on the production host (read-only)
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/dnds_gha_deploy \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "${SSH_USER}@${SSH_HOST}" 'bash -s' -- "$MODE" <<'REMOTE'
+          set -uo pipefail
+          MODE="$1"
+          FAILS=0
+          fail() { echo "::error::FAIL: $*"; FAILS=$((FAILS+1)); }
+          pass() { echo "PASS: $*"; }
+          report() { echo "REPORT: $*"; }
+
+          cd ~/dailyneeds-store-backend || { echo "::error::no checkout at ~/dailyneeds-store-backend"; exit 1; }
+          echo "=== host ($MODE)"
+          echo "user=$(id -un) node=$(node -v) pm2=$(pm2 -v 2>/dev/null || echo n/a)"
+          echo "repo HEAD: $(git rev-parse --short HEAD) on $(git rev-parse --abbrev-ref HEAD)"
+
+          echo "=== pm2"
+          pm2 ls --no-color 2>/dev/null || true
+          echo "--- API (pm2 process 0) runtime - report only"
+          pm2 describe 0 --no-color 2>/dev/null | grep -E "status|script path|node.js version|interpreter" || report "pm2 process 0 not described"
+          echo "--- biomax-receiver must NOT be running"
+          if pm2 describe biomax-receiver >/dev/null 2>&1; then
+            STATUS="$(pm2 describe biomax-receiver --no-color 2>/dev/null | grep -E '^\s*│?\s*status' | head -1 | sed -E 's/.*status[^a-z]*([a-z-]+).*/\1/')"
+            echo "biomax-receiver present in pm2 with status: ${STATUS:-unknown}"
+            case "${STATUS:-unknown}" in
+              online|launching|waiting*|restart*) fail "biomax-receiver is RUNNING (status ${STATUS}); the receiver must stay off in this stage";;
+              *) report "biomax-receiver is present in pm2 but not running (status ${STATUS:-unknown}); it must not be started";;
+            esac
+          else
+            pass "biomax-receiver is not in pm2"
+          fi
+
+          echo "=== listeners"
+          LISTEN="$( (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | awk '{print $4}' )"
+          if echo "$LISTEN" | grep -Eq '(:|\.)7005$'; then fail "something is listening on TCP 7005"; else pass "nothing listens on 7005"; fi
+          if echo "$LISTEN" | grep -Eq '(:|\.)82$'; then report "a listener exists on TCP 82 (reported only, not changed)"; else report "no listener on TCP 82"; fi
+
+          echo "=== database (read-only) - $MODE"
+          node - "$MODE" <<'NODE'
+          const fs = require("fs");
+          const mysql = require("mysql");
+          const mode = process.argv[2];
+          const cfg = JSON.parse(fs.readFileSync("migrations/mysql/database.json", "utf8")).production;
+          const conn = mysql.createConnection({
+            host: cfg.host, port: cfg.port, user: cfg.user, password: cfg.password,
+            database: cfg.database, dateStrings: true, multipleStatements: false,
+          });
+          let fails = 0;
+          const fail = (m) => { console.log(`::error::FAIL: ${m}`); fails += 1; };
+          const pass = (m) => console.log(`PASS: ${m}`);
+          const report = (m) => console.log(`REPORT: ${m}`);
+          const q = (label, sql) => new Promise((resolve) => {
+            conn.query(sql, (err, rows) => {
+              console.log(`--- ${label}`);
+              if (err) { console.log(`ERROR ${err.code || ""} ${err.message}`); resolve({ err, rows: null }); return; }
+              console.log(JSON.stringify(rows));
+              resolve({ err: null, rows });
+            });
+          });
+          const required = async (label, sql) => {
+            const r = await q(label, sql);
+            if (r.err) fail(`required query ${label} errored: ${r.err.code || r.err.message}`);
+            return r.rows || [];
+          };
+          const optional = async (label, sql) => (await q(label, sql)).rows || [];
+
+          const CLOUD_IDS = {
+            C26924B2E7351O35: "DN1", C2695C935328OB31: "DN2", C2695C9353290F31: "DN3",
+            C26044C84F1A1D31: "DN4", AMDB24121401205: "DN5", C2695C56D30E1430: "WH", AMDB24121401307: "G2",
+          };
+          const PERMS = ["view_raw_attendance", "export_raw_attendance", "view_attendance_punch_audit",
+            "view_biomax_devices", "manage_biomax_devices", "rederive_attendance"];
+          const TABLES = ["biomax_device", "biomax_device_assignment", "biomax_device_event", "biomax_punch",
+            "biomax_punch_derived", "biomax_raw_request", "biomax_derivation_run", "biomax_derivation_change"];
+
+          function versionAtLeast(v, min) {
+            const a = String(v).split("-")[0].split(".").map((n) => parseInt(n, 10) || 0);
+            const b = min.split(".").map(Number);
+            for (let i = 0; i < 3; i += 1) { if ((a[i] || 0) > b[i]) return true; if ((a[i] || 0) < b[i]) return false; }
+            return true;
+          }
+
+          (async () => {
+            console.log(`db host=${cfg.host} database=${cfg.database} (credentials not printed)`);
+
+            // ---------------------------------------------------- PRE + POST
+            const v = await required("VERSION", "SELECT VERSION() AS version");
+            const version = v[0] ? v[0].version : null;
+            if (!version) fail("could not read MySQL version");
+            else if (!versionAtLeast(version, "5.7.8")) fail(`MySQL ${version} is below the required 5.7.8`);
+            else pass(`MySQL ${version} >= 5.7.8${versionAtLeast(version, "8.0.16") ? " (CHECK constraints enforced)" : " (CHECK constraints parsed, not enforced)"}`);
+
+            const o2 = await required("OUTLET_2", "SELECT outlet_id, outlet_code, outlet_name, is_active FROM outlets WHERE outlet_id = 2");
+            if (o2.length !== 1) fail("outlet_id 2 not found");
+            else if (!/warehouse|godown|wh\b/i.test(`${o2[0].outlet_name} ${o2[0].outlet_code}`)) fail(`outlet_id 2 is '${o2[0].outlet_name}' (${o2[0].outlet_code}), not recognisably the Warehouse`);
+            else pass(`outlet_id 2 = ${o2[0].outlet_name} (${o2[0].outlet_code})`);
+
+            const dn = await required("OUTLETS_DN1_DN5", "SELECT outlet_id, outlet_code, outlet_name, is_active FROM outlets WHERE UPPER(TRIM(outlet_code)) IN ('DN1','DN2','DN3','DN4','DN5') ORDER BY outlet_code");
+            const codes = dn.map((r) => String(r.outlet_code).trim().toUpperCase());
+            const missing = ["DN1", "DN2", "DN3", "DN4", "DN5"].filter((c) => !codes.includes(c));
+            if (missing.length) fail(`outlet codes missing: ${missing.join(", ")}`); else pass("DN1..DN5 outlet codes present");
+            await optional("ALL_OUTLET_CODES", "SELECT outlet_id, outlet_code, outlet_name FROM outlets ORDER BY outlet_id");
+
+            const ip = await required("STATIC_IP_SOURCE", "SELECT outlet_id, outlet_code, ip_restriction_enabled, CASE WHEN allowed_ips IS NULL OR allowed_ips = '' THEN 'empty' ELSE CONCAT(LENGTH(allowed_ips), ' chars set') END AS allowed_ips_state FROM outlets ORDER BY outlet_id");
+            if (ip.length) pass("static-IP source columns outlets.allowed_ips / ip_restriction_enabled are readable");
+
+            const wsc = await optional("WORK_SHIFT_COUNTS", "SELECT (SELECT COUNT(*) FROM work_shift) AS work_shifts, (SELECT COUNT(*) FROM new_employee WHERE default_work_shift_id IS NOT NULL AND status = 1) AS active_employees_with_shift, (SELECT COUNT(*) FROM new_employee WHERE status = 1) AS active_employees");
+            if (wsc[0]) report(`work shifts: ${wsc[0].work_shifts}; active employees with a shift: ${wsc[0].active_employees_with_shift} of ${wsc[0].active_employees} (HR setup, not a deployment failure)`);
+            const noCut = await optional("REPORT_WORKING_ROWS_WITHOUT_CUTOFF", "SELECT ws.shift_code, ws.shift_name, s.day_of_week FROM work_shift_weekly_schedule s JOIN work_shift ws ON ws.work_shift_id = s.work_shift_id WHERE s.is_working_day = 1 AND s.attendance_day_cutoff IS NULL ORDER BY ws.shift_code, s.day_of_week");
+            report(`${noCut.length} working schedule row(s) without an Attendance Day Cutoff (set in Shift Management; not a deployment failure)`);
+
+            if (mode === "pre") {
+              const t = await optional("BIOMAX_TABLES_BEFORE", "SHOW TABLES LIKE 'biomax%'");
+              report(`${t.length} biomax_* table(s) exist before the migration`);
+            }
+
+            // ---------------------------------------------------------- POST
+            if (mode === "post") {
+              const t = await required("BIOMAX_TABLES", "SHOW TABLES LIKE 'biomax%'");
+              const names = t.map((r) => Object.values(r)[0]);
+              const missingT = TABLES.filter((n) => !names.includes(n));
+              if (missingT.length) fail(`biomax tables missing: ${missingT.join(", ")}`); else pass("all eight biomax_* tables exist");
+
+              const mig = await required("MIGRATION_RECORDED", "SELECT name FROM migrations WHERE name LIKE '%biomax-raw-attendance%'");
+              if (mig.length !== 1) fail("migration 20260911120000-biomax-raw-attendance is not recorded in `migrations`"); else pass(`migration recorded: ${mig[0].name}`);
+
+              const dev = await required("SEEDED_DEVICES", "SELECT d.biomax_device_id, d.dev_id, d.label, a.outlet_id, o.outlet_code, o.outlet_name, a.effective_from, a.effective_to FROM biomax_device d LEFT JOIN biomax_device_assignment a ON a.biomax_device_id = d.biomax_device_id LEFT JOIN outlets o ON o.outlet_id = a.outlet_id ORDER BY d.biomax_device_id");
+              const distinct = new Set(dev.map((r) => r.dev_id));
+              if (distinct.size !== 7) fail(`expected exactly 7 seeded devices, found ${distinct.size}`); else pass("exactly 7 devices seeded");
+              for (const [id, label] of Object.entries(CLOUD_IDS)) {
+                const row = dev.find((r) => r.dev_id === id);
+                if (!row) fail(`Cloud ID ${id} (${label}) missing or altered (byte-exact match required)`);
+              }
+              if (Object.keys(CLOUD_IDS).every((id) => distinct.has(id))) pass("all seven Cloud IDs present verbatim");
+              for (const id of ["C2695C56D30E1430", "AMDB24121401307"]) {
+                const row = dev.find((r) => r.dev_id === id);
+                if (!row || Number(row.outlet_id) !== 2) fail(`${id} (${CLOUD_IDS[id]}) is not assigned to outlet_id 2`);
+              }
+              if (["C2695C56D30E1430", "AMDB24121401307"].every((id) => { const r = dev.find((x) => x.dev_id === id); return r && Number(r.outlet_id) === 2; })) pass("WH and G2 both map to outlet_id 2 (Warehouse)");
+              const unassigned = dev.filter((r) => r.outlet_id === null || r.outlet_id === undefined);
+              if (unassigned.length) fail(`seeded device(s) without an assignment: ${unassigned.map((r) => `${r.dev_id} (${r.label})`).join(", ")}`); else pass("every seeded device has an assignment");
+              for (const [id, label] of Object.entries(CLOUD_IDS)) {
+                const row = dev.find((r) => r.dev_id === id);
+                if (row && label.startsWith("DN") && String(row.outlet_code || "").toUpperCase() !== label) fail(`${id} (${label}) is assigned to ${row.outlet_code}, expected ${label}`);
+              }
+
+              const perms = await required("PERMISSION_KEYS", `SELECT permission_key FROM all_permissions WHERE permission_key IN (${PERMS.map((p) => `'${p}'`).join(",")}) ORDER BY permission_key`);
+              const have = perms.map((r) => r.permission_key);
+              const missingP = PERMS.filter((p) => !have.includes(p));
+              if (missingP.length) fail(`permission keys missing: ${missingP.join(", ")}`); else pass("all six permission keys declared");
+              await optional("GRANTS_HR_EXECUTIVE", "SELECT p.permission_key, d.designation_name FROM permissions p JOIN designation d ON d.designation_id = p.designation_id WHERE p.permission_key IN ('view_raw_attendance','export_raw_attendance','view_attendance_punch_audit') AND p.is_active = 1 ORDER BY p.permission_key");
+
+              const pc = await required("PUNCH_COUNT", "SELECT COUNT(*) AS punches FROM biomax_punch");
+              report(`punch count: ${pc[0] ? pc[0].punches : "?"} (expected 0 before the receiver is ever started)`);
+            }
+
+            conn.end();
+            console.log(`=== database checks: ${fails} failure(s)`);
+            process.exit(fails > 0 ? 2 : 0);
+          })().catch((e) => { console.log(`::error::FAIL: gate script crashed: ${e && e.stack ? e.stack : e}`); process.exit(3); });
+          NODE
+          DB_RC=$?
+          [ "$DB_RC" -eq 0 ] || FAILS=$((FAILS+1))
+
+          echo "=== GATE RESULT ($MODE): $FAILS failing check group(s)"
+          if [ "$FAILS" -gt 0 ]; then echo "::error::Biomax $MODE gate FAILED - do not proceed"; exit 1; fi
+          echo "Biomax $MODE gate PASSED"
+          REMOTE
