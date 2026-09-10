@@ -13,18 +13,30 @@ const router = express.Router();
  * and nothing else. The work shift master itself stays at /work-shift, where
  * the shifts are created and edited.
  *
- * PERMISSIONS ARE EXISTING KEYS, AND BOTH ARE REQUIRED (`requireAll`, so AND
+ * PERMISSIONS ARE PAIRS, AND BOTH HALVES ARE REQUIRED (`requireAll`, so AND
  * rather than OR - see `constants/hr_permissions.js`):
  *
- *   read   `view_employees` AND `view_shift`. The screen joins the employee
- *          master to the shift master, so it asks for permission on both.
- *   write  `employee_edit` AND `view_shift`. `employee_edit` is already the
- *          authority to change an employee's posting - it is what gates
- *          `shift_id` on POST /hr/employee/:id - and `view_shift` is what
- *          says the caller may see the shift they are assigning.
+ *   read        `view_employees` AND `view_shift_assignments`
+ *   assign one  `employee_edit`  AND `assign_employee_shift`
+ *   assign many `employee_edit`  AND `bulk_assign_employee_shift`
  *
- * No new permission key is declared and no existing one is widened: a caller
- * who could not do this before still cannot.
+ * The employee-master half of each pair is exactly what this router required
+ * before, and is kept: this screen is the employee master joined to the shift
+ * master, and no work-shift key should become a way to reach employee data
+ * that `view_employees` / `employee_edit` did not already open.
+ *
+ * What changed is the other half. It used to be `view_shift`, borrowed from
+ * the legacy `shift_master` and held today by designations with no payroll
+ * role. The Work Shift keys replace it, and they are granted to HR and to
+ * administrators only. EVERY CHECK HERE IS THEREFORE NARROWER THAN IT WAS:
+ * a caller who could not do this before still cannot, and some who could no
+ * longer can - which is the point.
+ *
+ * ONE IS NOT MANY. `assign_employee_shift` and `bulk_assign_employee_shift`
+ * gate the same endpoint but not the same act: correcting one person's
+ * roster is an everyday fix, re-rostering four hundred in a click is not.
+ * Neither key implies the other; the request's own `employee_ids` decides
+ * which one is demanded.
  *
  * B3 APPLIES HERE TOO. `filterResponse` and `guardWrite` are mounted exactly
  * as they are on /hr, so this router cannot become a way around
@@ -59,7 +71,7 @@ class EmployeeWorkShiftRoutes {
      */
     router.get(
       "/work-shift-assignments",
-      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.VIEW_SHIFT),
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.VIEW_SHIFT_ASSIGNMENTS),
       async (req, res) => {
         try {
           const schema = {
@@ -99,7 +111,7 @@ class EmployeeWorkShiftRoutes {
      */
     router.get(
       "/work-shift-assignments/employee/:employee_id",
-      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.VIEW_SHIFT),
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.VIEW_SHIFT_ASSIGNMENTS),
       async (req, res) => {
         try {
           res.json(await this.usecase.currentForEmployee(req.params.employee_id));
@@ -112,12 +124,14 @@ class EmployeeWorkShiftRoutes {
     );
 
     /**
-     * Bulk assign. All or nothing: an unknown employee id or an inactive
+     * Assign. All or nothing: an unknown employee id or an inactive
      * work shift refuses the whole request rather than applying part of it.
+     *
+     * One endpoint, two permissions - see `assignGuard` below.
      */
     router.post(
       "/work-shift-assignments/bulk",
-      this.permissions.requireAll(P.EMPLOYEE_EDIT, P.VIEW_SHIFT),
+      this.assignGuard(),
       async (req, res) => {
         try {
           const schema = {
@@ -135,6 +149,47 @@ class EmployeeWorkShiftRoutes {
         res.end();
       }
     );
+  }
+
+  /**
+   * The guard on the assign endpoint, chosen from the request itself.
+   *
+   * One employee in `employee_ids` is a single assignment and needs
+   * `assign_employee_shift`; more than one is a bulk assignment and needs
+   * `bulk_assign_employee_shift`. `employee_edit` is required either way.
+   *
+   * WHY THE BODY AND NOT THE PATH: there is one endpoint, and the frontend
+   * posts through it whether a person ticked one row or four hundred. A
+   * second route would be a second thing to keep guarded, and the count is
+   * the fact that actually distinguishes the two acts.
+   *
+   * ANYTHING THAT IS NOT A SINGLE-ELEMENT ARRAY DEMANDS THE BULK KEY. A
+   * missing, malformed or over-long `employee_ids` therefore asks for the
+   * STRICTER permission and is refused by Joi a moment later; the failure
+   * mode of an unparseable body is "too strict", never "waved through".
+   * Joi still validates the body in the handler - this reads the count, it
+   * does not vouch for the shape.
+   */
+  assignGuard() {
+    const guard = (req, res, next) => {
+      const ids = req && req.body ? req.body.employee_ids : undefined;
+      const isSingle = Array.isArray(ids) && ids.length === 1;
+      const key = isSingle ? P.ASSIGN_EMPLOYEE_SHIFT : P.BULK_ASSIGN_EMPLOYEE_SHIFT;
+      return this.permissions.requireAll(P.EMPLOYEE_EDIT, key)(req, res, next);
+    };
+
+    // So the route tests can read the wiring rather than the source text,
+    // exactly as they do for a plain `requireAll` guard.
+    guard.__guard = {
+      mode: "all",
+      keys: [P.EMPLOYEE_EDIT, P.ASSIGN_EMPLOYEE_SHIFT, P.BULK_ASSIGN_EMPLOYEE_SHIFT],
+      dynamic: {
+        single: [P.EMPLOYEE_EDIT, P.ASSIGN_EMPLOYEE_SHIFT],
+        bulk: [P.EMPLOYEE_EDIT, P.BULK_ASSIGN_EMPLOYEE_SHIFT],
+      },
+    };
+
+    return guard;
   }
 
   getRouter() {

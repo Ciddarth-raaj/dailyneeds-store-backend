@@ -74,10 +74,10 @@ describe("the endpoints", () => {
 });
 
 describe("permissions", () => {
-  it("the read requires view_employees AND view_shift", () => {
+  it("the read requires view_employees AND view_shift_assignments", () => {
     const { guard } = find("GET", "/work-shift-assignments");
     assert.equal(guard.mode, "all");
-    assert.deepEqual(guard.keys, [P.VIEW_EMPLOYEES, P.VIEW_SHIFT]);
+    assert.deepEqual(guard.keys, [P.VIEW_EMPLOYEES, P.VIEW_SHIFT_ASSIGNMENTS]);
   });
 
   it("the profile's single-employee read requires the same pair", () => {
@@ -85,13 +85,23 @@ describe("permissions", () => {
     // them, so it cannot be a weaker decision.
     const { guard } = find("GET", "/work-shift-assignments/employee/:employee_id");
     assert.equal(guard.mode, "all");
-    assert.deepEqual(guard.keys, [P.VIEW_EMPLOYEES, P.VIEW_SHIFT]);
+    assert.deepEqual(guard.keys, [P.VIEW_EMPLOYEES, P.VIEW_SHIFT_ASSIGNMENTS]);
   });
 
-  it("the write requires employee_edit AND view_shift", () => {
+  it("the write always requires employee_edit and a Work Shift assign key", () => {
     const { guard } = find("POST", "/work-shift-assignments/bulk");
     assert.equal(guard.mode, "all");
-    assert.deepEqual(guard.keys, [P.EMPLOYEE_EDIT, P.VIEW_SHIFT]);
+    assert.deepEqual(guard.dynamic.single, [P.EMPLOYEE_EDIT, P.ASSIGN_EMPLOYEE_SHIFT]);
+    assert.deepEqual(guard.dynamic.bulk, [P.EMPLOYEE_EDIT, P.BULK_ASSIGN_EMPLOYEE_SHIFT]);
+  });
+
+  it("no work shift endpoint is gated on the LEGACY shift master's keys", () => {
+    // The whole point of the change: `view_shift` is held by designations
+    // with no payroll role, so it must not be what opens the roster.
+    for (const { guard } of guards) {
+      assert.ok(!guard.keys.includes(P.VIEW_SHIFT), "view_shift no longer guards this router");
+      assert.ok(!guard.keys.includes(P.ADD_SHIFTS), "add_shifts no longer guards this router");
+    }
   });
 
   it("uses only permission keys that already exist", () => {
@@ -105,6 +115,76 @@ describe("permissions", () => {
 
   it("no endpoint is left unguarded", () => {
     for (const g of guards) assert.ok(g.guard, `${g.method} ${g.path} has no permission guard`);
+  });
+});
+
+describe("one is not many", () => {
+  /**
+   * Runs the real assign guard against a body and reports which keys it
+   * actually demanded. `requireAll` is the genuine AND form, so what this
+   * records is the check the route would run, not a description of it.
+   */
+  //
+  // Built ONCE: `routes/employee_work_shift.js` keeps its Express router at
+  // module scope, so building the routes again would register every endpoint
+  // on it a second time.
+  let demanded = null;
+  const recorder = buildRoutes(
+    {},
+    {
+      require: () => (req, res, next) => next(),
+      requireAll: (...keys) => (req, res, next) => {
+        demanded = keys;
+        next();
+      },
+    },
+    null
+  );
+
+  function keysDemandedFor(body) {
+    demanded = null;
+    recorder.assignGuard()({ body }, {}, () => {});
+    return demanded;
+  }
+
+  it("one employee id demands assign_employee_shift", () => {
+    assert.deepEqual(keysDemandedFor({ employee_ids: [7], work_shift_id: 1 }), [
+      P.EMPLOYEE_EDIT,
+      P.ASSIGN_EMPLOYEE_SHIFT,
+    ]);
+  });
+
+  it("two or more demand bulk_assign_employee_shift", () => {
+    assert.deepEqual(keysDemandedFor({ employee_ids: [7, 8], work_shift_id: 1 }), [
+      P.EMPLOYEE_EDIT,
+      P.BULK_ASSIGN_EMPLOYEE_SHIFT,
+    ]);
+    assert.deepEqual(
+      keysDemandedFor({ employee_ids: [1, 2, 3, 4, 5], work_shift_id: 1 }),
+      [P.EMPLOYEE_EDIT, P.BULK_ASSIGN_EMPLOYEE_SHIFT]
+    );
+  });
+
+  it("holding one key does not confer the other", () => {
+    // The two are separate decisions, so neither branch may name both: a
+    // caller who may fix one roster is not thereby allowed to re-roster the
+    // whole company, and vice versa.
+    const single = keysDemandedFor({ employee_ids: [7] });
+    const bulk = keysDemandedFor({ employee_ids: [7, 8] });
+    assert.ok(!single.includes(P.BULK_ASSIGN_EMPLOYEE_SHIFT));
+    assert.ok(!bulk.includes(P.ASSIGN_EMPLOYEE_SHIFT));
+  });
+
+  it("a malformed body asks for the STRICTER key, never the weaker one", () => {
+    // Joi refuses all of these a moment later. What matters here is that an
+    // unparseable `employee_ids` cannot be read as "just one, let it through".
+    for (const body of [{}, { employee_ids: [] }, { employee_ids: "7" }, { employee_ids: null }]) {
+      assert.deepEqual(
+        keysDemandedFor(body),
+        [P.EMPLOYEE_EDIT, P.BULK_ASSIGN_EMPLOYEE_SHIFT],
+        `${JSON.stringify(body)} demands the bulk key`
+      );
+    }
   });
 });
 

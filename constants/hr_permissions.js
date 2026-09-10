@@ -84,6 +84,41 @@ module.exports = {
   VIEW_STORES: "view_stores",
   ADD_STORES: "add_stores",
 
+  // The Work Shift system - the new payroll/attendance shift master on
+  // `work_shift`, and the employee -> work shift mapping on
+  // `new_employee.default_work_shift_id`.
+  //
+  // Its first phase borrowed `view_shift` / `add_shifts` from the LEGACY
+  // `shift_master`, which was right while nothing depended on the new master
+  // and wrong now: `view_shift` is held today by designations that have
+  // nothing to do with payroll (Operations among them), so borrowing it put
+  // the roster in front of people who were never meant to see it. These five
+  // keys say what they gate and are granted to HR - and, through the
+  // middleware's user_type 2 bypass, to administrators - and to nobody else.
+  //
+  // Five rather than two because the four actions are four decisions:
+  //
+  //   VIEW_WORK_SHIFTS            read the shift master and its schedules
+  //   MANAGE_WORK_SHIFTS          create, edit and activate/deactivate them
+  //   VIEW_SHIFT_ASSIGNMENTS      read who is on which shift
+  //   ASSIGN_EMPLOYEE_SHIFT       move ONE employee onto a shift
+  //   BULK_ASSIGN_EMPLOYEE_SHIFT  move MANY in one action
+  //
+  // The last two are separate because the blast radius is: correcting one
+  // person's roster is an everyday fix, and re-rostering four hundred people
+  // in a single click is not. Neither implies the other, and each gates
+  // exactly the action it names.
+  //
+  // These narrow the existing checks and never widen them: every endpoint
+  // keeps the employee-master key (`view_employees` / `employee_edit`) it
+  // already required, so nobody can reach employee data through a work-shift
+  // key they could not reach before.
+  VIEW_WORK_SHIFTS: "view_work_shifts",
+  MANAGE_WORK_SHIFTS: "manage_work_shifts",
+  VIEW_SHIFT_ASSIGNMENTS: "view_shift_assignments",
+  ASSIGN_EMPLOYEE_SHIFT: "assign_employee_shift",
+  BULK_ASSIGN_EMPLOYEE_SHIFT: "bulk_assign_employee_shift",
+
   // Reports. Declared by the reports-foundation migration and granted to
   // NOBODY by it.
   //
