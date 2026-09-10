@@ -19,9 +19,14 @@ class WorkShiftUsecase {
     this.workShiftRepo = workShiftRepo;
   }
 
-  /** Every work shift, configuration only. */
-  async get() {
-    return this.workShiftRepo.get();
+  /**
+   * Every work shift, configuration only.
+   *
+   * `active` is optional and narrows the list. Absent, the answer is what it
+   * has always been: every work shift, active and inactive alike.
+   */
+  async get({ active } = {}) {
+    return this.workShiftRepo.get({ active });
   }
 
   /** A work shift's full configuration plus its 7-day schedule, or null. */

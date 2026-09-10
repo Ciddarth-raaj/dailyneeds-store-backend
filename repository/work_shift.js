@@ -40,12 +40,24 @@ class WorkShiftRepository {
     this.db = db;
   }
 
-  /** Every work shift, without the weekly schedule. */
-  get() {
+  /**
+   * Every work shift, without the weekly schedule.
+   *
+   * `active` narrows to active (true) or inactive (false) shifts. Omitting it
+   * returns everything, exactly as this method always has - the Work Shift
+   * Master list needs both kinds, and the switch in its Status column is the
+   * only way to bring an inactive one back. The filter exists for the
+   * dropdowns that must offer ACTIVE shifts only, so they do not have to
+   * fetch the inactive ones and remember to hide them.
+   */
+  get({ active } = {}) {
+    const where = active === undefined || active === null ? "" : "WHERE active = ?";
+    const params = where === "" ? [] : [active ? 1 : 0];
+
     return new Promise((resolve, reject) => {
       this.db.query(
-        "SELECT * FROM work_shift ORDER BY shift_code ASC",
-        [],
+        `SELECT * FROM work_shift ${where} ORDER BY shift_code ASC`,
+        params,
         (err, docs) => {
           if (err) {
             logger.Log({
