@@ -180,7 +180,15 @@ sales, loyalty). It is not a general ledger and payroll should not post to it.
 
 ## 3. Attendance
 
-**There is none.**
+**Part 1 of the Biomax integration is built** (branch
+`claude/biomax-attendance-spec-uh6y3m`): raw punch storage, device registry,
+attendance-date attribution, Attendance List and Punch Audit. See
+[biomax-attendance-part1.md](biomax-attendance-part1.md). Nothing below this
+line has changed: the Digisme sync still reads `GetEmployeeDetails` only,
+and no attendance is *calculated* anywhere. The rest of this section is the
+pre-Part-1 state, kept for the record.
+
+**There was none.**
 
 `grep -ril "attendance|biometric|punch|check_in|clock_in|muster|leave_|lop"`
 across both repositories returns nothing. No table, no migration, no

@@ -48,6 +48,16 @@ Its reply was. The synthesised poll frame in the script uses the same
 header set with `request_code: receive_cmd` and an empty body. The receiver
 keys on `request_code` alone and does not depend on anything else in a poll.
 
+## Runtime
+
+The receiver (`biomax/receiver.js`) targets **Node 14.21.3**, the interpreter
+the API already runs on under `ec2-user` on the production host. Do not use
+APIs newer than Node 14 in `biomax/` (no `fetch`, no `node:` import prefix,
+no `??=`, no `replaceAll`, no `Array.prototype.at`). The test suite itself
+uses `node:test` and runs on a developer machine with Node 18+. Node 14 is
+end-of-life (April 2023); upgrading the host runtime is recorded as
+technical debt outside Part 1.
+
 ## The capture proxy
 
 `biomax-proxy-minimal.js` from the original handoff is deliberately **not**
