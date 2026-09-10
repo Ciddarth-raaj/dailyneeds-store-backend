@@ -121,20 +121,32 @@ jobs:
 
           echo "=== local HTTP smoke (read-only GETs against the box's own services)"
           # The API answers on 8080 and the Next.js frontend on 3000, behind
-          # nginx. Unauthenticated GETs only: a 401/403 from a guarded route
-          # proves the route exists and is guarded; a 404 or connection
-          # failure would mean the deploy did not land. The receiver's 7005 is
-          # checked above and must NOT answer.
+          # nginx. Unauthenticated GETs only. A guarded route proves it exists
+          # and is guarded by refusing: this API's auth middleware
+          # (middlewares/auth.js) answers HTTP 200 with a JSON body
+          # {"code":403,"msg":"Access Denied"}, so `guarded` accepts either a
+          # real 401/403 status or a 200 whose body carries code 401/403. A
+          # 404 or connection failure would mean the deploy did not land. The
+          # receiver's 7005 is checked above and must NOT answer.
           probe() { # label url expected-status-regex
-            CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$2" || echo 000)"
+            CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$2")"; CODE="${CODE:-000}"
             if echo "$CODE" | grep -Eq "$3"; then pass "$1 -> HTTP $CODE"; else fail "$1 -> HTTP $CODE (expected $3)"; fi
           }
+          guarded() { # label url
+            BODY_FILE="$(mktemp)"
+            CODE="$(curl -s -o "$BODY_FILE" -w '%{http_code}' --max-time 10 "$2")"; CODE="${CODE:-000}"
+            BODY_CODE="$(tr -d ' \n' < "$BODY_FILE" | grep -Eo '"code":[0-9]+' | head -1 | grep -Eo '[0-9]+')"
+            rm -f "$BODY_FILE"
+            if echo "$CODE" | grep -Eq '^(401|403)$'; then pass "$1 -> HTTP $CODE (refused)"
+            elif [ "$CODE" = "200" ] && echo "$BODY_CODE" | grep -Eq '^(401|403)$'; then pass "$1 -> HTTP 200 with body code $BODY_CODE (refused, app convention)"
+            else fail "$1 -> HTTP $CODE body code ${BODY_CODE:-none} (expected the route to refuse an unauthenticated request)"; fi
+          }
           probe "API root (8080)"                       "http://127.0.0.1:8080/"                       '^(200|301|302|404)$'
-          probe "API /designation (existing, guarded)"   "http://127.0.0.1:8080/designation"            '^(401|403)$'
-          probe "API /work-shift (existing, guarded)"    "http://127.0.0.1:8080/work-shift"             '^(401|403)$'
+          guarded "API /designation (existing, guarded)" "http://127.0.0.1:8080/designation"
+          guarded "API /work-shift (existing, guarded)" "http://127.0.0.1:8080/work-shift"
           if [ "$MODE" = "post" ]; then
-            probe "API /attendance/raw (new, guarded)"     "http://127.0.0.1:8080/attendance/raw"       '^(401|403)$'
-            probe "API /attendance/devices (new, guarded)" "http://127.0.0.1:8080/attendance/devices"   '^(401|403)$'
+            guarded "API /attendance/raw (new, guarded)" "http://127.0.0.1:8080/attendance/raw"
+            guarded "API /attendance/devices (new, guarded)" "http://127.0.0.1:8080/attendance/devices"
             probe "FE /attendance/list (new page)"         "http://127.0.0.1:3000/attendance/list"      '^(200|301|302|307|308)$'
             probe "FE /attendance/devices (new page)"      "http://127.0.0.1:3000/attendance/devices"   '^(200|301|302|307|308)$'
           fi
