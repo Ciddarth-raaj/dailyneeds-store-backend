@@ -12,9 +12,18 @@ const respondError = require("../utils/http");
  * `shift_master`, and no employee is mapped onto a work shift - that is a
  * later, manual phase.
  *
- * Permissions reuse the existing VIEW_SHIFT / ADD_SHIFTS keys: whoever
- * maintains shifts today maintains work shifts, and a permission redesign is
- * not part of this phase.
+ * PERMISSIONS ARE THE WORK SHIFT SYSTEM'S OWN, NOT THE LEGACY MASTER'S:
+ *
+ *   read   `view_work_shifts`
+ *   write  `manage_work_shifts`
+ *
+ * Phase 1 borrowed `view_shift` / `add_shifts` from `shift_master` on the
+ * reasoning that whoever maintains shifts maintains work shifts. That is no
+ * longer true: `view_shift` is granted to designations with no payroll role
+ * at all, so it cannot be the key that opens the roster. These two keys are
+ * granted to HR, and to administrators through the middleware's user_type 2
+ * bypass, and to nobody else. /shift keeps `view_shift` / `add_shifts` and is
+ * unchanged.
  *
  * Joi checks the shape only. The field-by-field rules - allowed enums, OT
  * rates, non-negative minutes, the complete-week requirement and the
@@ -35,7 +44,7 @@ class WorkShiftRoutes {
     // `?active=1` narrows to active shifts, for the dropdowns that must offer
     // only those. The parameter is optional and the unfiltered answer is
     // unchanged, so every existing caller keeps the list it already gets.
-    router.get("/", this.permissions.require(P.VIEW_SHIFT), async (req, res) => {
+    router.get("/", this.permissions.require(P.VIEW_WORK_SHIFTS), async (req, res) => {
       try {
         // `.unknown(true)` on purpose: this endpoint accepted any query
         // string before and ignored it, and tightening that here would be a
@@ -61,7 +70,7 @@ class WorkShiftRoutes {
     });
 
     // Full configuration plus the 7-day weekly schedule, in one read.
-    router.get("/details", this.permissions.require(P.VIEW_SHIFT), async (req, res) => {
+    router.get("/details", this.permissions.require(P.VIEW_WORK_SHIFTS), async (req, res) => {
       try {
         const schema = {
           work_shift_id: Joi.number().required(),
@@ -87,7 +96,7 @@ class WorkShiftRoutes {
       res.end();
     });
 
-    router.get("/weekly-schedule", this.permissions.require(P.VIEW_SHIFT), async (req, res) => {
+    router.get("/weekly-schedule", this.permissions.require(P.VIEW_WORK_SHIFTS), async (req, res) => {
       try {
         const schema = {
           work_shift_id: Joi.number().required(),
@@ -108,7 +117,7 @@ class WorkShiftRoutes {
 
     // Create. The complete 7-day schedule is required and is written in the
     // same transaction as the shift itself.
-    router.post("/create", this.permissions.require(P.ADD_SHIFTS), async (req, res) => {
+    router.post("/create", this.permissions.require(P.MANAGE_WORK_SHIFTS), async (req, res) => {
       try {
         const result = await this.workShiftUsecase.create(req.body);
         res.json(result);
@@ -122,7 +131,7 @@ class WorkShiftRoutes {
     // Configuration and weekly schedule save atomically: send either half, or
     // both, and a failure in one leaves neither written. Omitting
     // weekly_schedule leaves the existing schedule exactly as it was.
-    router.post("/update", this.permissions.require(P.ADD_SHIFTS), async (req, res) => {
+    router.post("/update", this.permissions.require(P.MANAGE_WORK_SHIFTS), async (req, res) => {
       try {
         const schema = {
           work_shift_id: Joi.number().required(),
@@ -144,7 +153,7 @@ class WorkShiftRoutes {
     });
 
     // The whole week, always: all seven days or the save is rejected.
-    router.post("/weekly-schedule", this.permissions.require(P.ADD_SHIFTS), async (req, res) => {
+    router.post("/weekly-schedule", this.permissions.require(P.MANAGE_WORK_SHIFTS), async (req, res) => {
       try {
         const schema = {
           work_shift_id: Joi.number().required(),
@@ -167,7 +176,7 @@ class WorkShiftRoutes {
       res.end();
     });
 
-    router.post("/update-status", this.permissions.require(P.ADD_SHIFTS), async (req, res) => {
+    router.post("/update-status", this.permissions.require(P.MANAGE_WORK_SHIFTS), async (req, res) => {
       try {
         const schema = {
           work_shift_id: Joi.number().required(),
