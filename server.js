@@ -190,6 +190,11 @@ class Server {
     // The new payroll/attendance shift master. Separate from shiftRepo above,
     // which still owns the legacy `shift_master` table.
     this.workShiftRepo = require("./repository/work_shift")(this.mysql.connection);
+    // The manual employee -> work shift mapping. Owns `default_work_shift_id`
+    // and nothing else; the legacy `shift_id` stays with employeeRepo.
+    this.employeeWorkShiftRepo = require("./repository/employee_work_shift")(
+      this.mysql.connection
+    );
     this.storeRepo = require("./repository/store")(this.mysql.connection);
     this.outletRepo = require("./repository/outlet")(this.mysql.connection);
     this.familyRepo = require("./repository/family")(this.mysql.connection);
@@ -470,6 +475,9 @@ class Server {
     );
     this.shiftUsecase = require("./usecase/shift")(this.shiftRepo);
     this.workShiftUsecase = require("./usecase/work_shift")(this.workShiftRepo);
+    this.employeeWorkShiftUsecase = require("./usecase/employee_work_shift")(
+      this.employeeWorkShiftRepo
+    );
     this.storeUsecase = require("./usecase/store")(this.storeRepo);
     this.outletUsecase = require("./usecase/outlet")(
       this.outletRepo,
@@ -799,6 +807,10 @@ class Server {
       this.workShiftUsecase,
       this.permissions
     );
+    const employeeWorkShiftRouter = require("./routes/employee_work_shift")(
+      this.employeeWorkShiftUsecase,
+      this.permissions
+    );
     const storeRouter = require("./routes/store")(this.storeUsecase);
     const outletRouter = require("./routes/outlet")(
       this.outletUsecase,
@@ -1018,6 +1030,9 @@ class Server {
     // The new payroll/attendance shift master. /shift above is unchanged and
     // still serves the legacy `shift_master` system.
     app.use("/work-shift", workShiftRouter.getRouter());
+    // The manual employee -> work shift mapping. Separate from /work-shift
+    // above, which maintains the shift definitions themselves.
+    app.use("/employee-work-shift", employeeWorkShiftRouter.getRouter());
     app.use("/store", storeRouter.getRouter());
     app.use("/outlet", outletRouter.getRouter());
     app.use("/company", companyRouter.getRouter());
