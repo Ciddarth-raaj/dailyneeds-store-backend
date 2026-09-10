@@ -31,9 +31,23 @@ class WorkShiftRoutes {
 
   init() {
     // List, configuration only. The weekly schedule comes from /details.
+    //
+    // `?active=1` narrows to active shifts, for the dropdowns that must offer
+    // only those. The parameter is optional and the unfiltered answer is
+    // unchanged, so every existing caller keeps the list it already gets.
     router.get("/", this.permissions.require(P.VIEW_SHIFT), async (req, res) => {
       try {
-        const data = await this.workShiftUsecase.get();
+        const schema = {
+          active: Joi.number().valid(0, 1).optional(),
+        };
+        const isValid = Joi.validate(req.query, schema);
+        if (isValid.error !== null) {
+          throw isValid.error;
+        }
+
+        const data = await this.workShiftUsecase.get(
+          req.query.active === undefined ? {} : { active: Number(req.query.active) === 1 }
+        );
         res.json({ code: 200, data });
       } catch (err) {
         respondError(res, err);
