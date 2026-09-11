@@ -294,6 +294,13 @@ jobs:
             else
               echo "  (no passwordless sudo for tcpdump; skipped)"
             fi
+            echo "--- host facts for the port-82 decision (read-only):"
+            echo "  os: $(. /etc/os-release 2>/dev/null; echo "$PRETTY_NAME")"
+            echo "  node binary: $(readlink -f "$(command -v node)") caps: $(getcap "$(readlink -f "$(command -v node)")" 2>/dev/null || echo none)"
+            echo "  packet filter tools: iptables=$(command -v iptables || echo no) nft=$(command -v nft || echo no) firewalld=$(systemctl is-active firewalld 2>/dev/null || echo inactive)"
+            echo "  nat rules mentioning 82/7005: $(sudo -n iptables -t nat -S 2>/dev/null | grep -E '82|7005' | tr '\n' ';' || true) $(sudo -n nft list ruleset 2>/dev/null | grep -E 'dport (82|7005)' | tr '\n' ';' || true)"
+            echo "  listeners on 82 and 7005 (process):"; (ss -ltnp 2>/dev/null | grep -E ':(82|7005) ' || echo "  none") | sed 's/^/    /'
+            echo "  relay-like processes:"; (pgrep -af 'ncat|socat|nc -l|nc -k' 2>/dev/null || echo "  none") | sed 's/^/    /'
             echo "--- receiver log lines since start: $(cat "$HOME"/.pm2/logs/biomax-receiver*out*.log 2>/dev/null | grep -c '"request_code"') request line(s)"
             echo "--- any request from the outlet IP in the receiver log: $(cat "$HOME"/.pm2/logs/biomax-receiver*out*.log 2>/dev/null | grep -c "${OUTLET_IP:-NONE}")"
             echo "--- last 8 log lines:"; cat "$HOME"/.pm2/logs/biomax-receiver*out*.log 2>/dev/null | tail -8 | cut -c1-300 | sed 's/^/  /'
