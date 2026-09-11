@@ -204,6 +204,11 @@ class Server {
     // Historical pull scaffolding: the API queues GET_LOG_DATA requests and
     // reads their state; only the receiver process ever hands one to a device.
     this.biomaxHistoricalPullRepo = require("./repository/biomax_historical_pull")(this.mysql.connection);
+    // DigiSME Excel attendance import: staging tables here; the punches
+    // themselves are written through biomax/store.js on the API pool - the
+    // same insert path and tables as a live punch.
+    this.attendanceImportRepo = require("./repository/attendance_import")(this.mysql.connection);
+    this.biomaxImportStore = require("./biomax/store").createStore(this.mysql.connection);
     this.storeRepo = require("./repository/store")(this.mysql.connection);
     this.outletRepo = require("./repository/outlet")(this.mysql.connection);
     this.familyRepo = require("./repository/family")(this.mysql.connection);
@@ -496,6 +501,7 @@ class Server {
     );
     this.biomaxDeviceUsecase = require("./usecase/biomax_device")(this.biomaxDeviceRepo);
     this.biomaxHistoricalPullUsecase = require("./usecase/biomax_historical_pull")(this.biomaxHistoricalPullRepo);
+    this.attendanceImportUsecase = require("./usecase/attendance_import")(this.attendanceImportRepo, this.biomaxImportStore);
     this.employeeWorkShiftUsecase = require("./usecase/employee_work_shift")(
       this.employeeWorkShiftRepo
     );
@@ -842,6 +848,10 @@ class Server {
       this.biomaxHistoricalPullUsecase,
       this.permissions
     );
+    const attendanceImportRouter = require("./routes/attendance_import")(
+      this.attendanceImportUsecase,
+      this.permissions
+    );
     // Employee Shift Assignment. Mounted at /hr with the other employee
     // writes, because what it changes is an employee record.
     const employeeWorkShiftRouter = require("./routes/employee_work_shift")(
@@ -1076,6 +1086,7 @@ class Server {
     // in order and /attendance/devices must not be swallowed by /attendance.
     app.use("/attendance/devices", biomaxDeviceRouter.getRouter());
     app.use("/attendance/historical-pulls", biomaxHistoricalPullRouter.getRouter());
+    app.use("/attendance/imports", attendanceImportRouter.getRouter());
     app.use("/attendance", attendanceRawRouter.getRouter());
     app.use("/store", storeRouter.getRouter());
     app.use("/outlet", outletRouter.getRouter());

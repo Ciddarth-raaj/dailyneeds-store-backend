@@ -162,4 +162,9 @@ module.exports = {
   // migration, granted to nobody, so administrators only through the
   // user_type 2 bypass until it is granted deliberately.
   MANAGE_BIOMAX_HISTORICAL_PULL: "manage_biomax_historical_pull",
+
+  // DigiSME Excel attendance import (the permanent fallback path). Its own
+  // decision, declared by the import migration and granted to nobody:
+  // administrators only, through the user_type 2 bypass, until granted.
+  MANAGE_ATTENDANCE_IMPORT: "manage_attendance_import",
 };

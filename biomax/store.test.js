@@ -341,3 +341,59 @@ describe("historical pull: result blocks", () => {
     assert.ok(!pool.log.some((l) => /'COMPLETED'/.test(l.sql)), "nothing in the store sets COMPLETED");
   });
 });
+
+/* -------------------------------------------- DigiSME import (SQL shape) */
+
+describe("DigiSME import: insertPunch with source DIGISME_IMPORT", () => {
+  let pool;
+  let store;
+  beforeEach(() => {
+    pool = fakePool();
+    store = createStore(pool);
+  });
+  const imported = { user_id: "1952", io_time_raw: "20260910091500" };
+
+  it("inserts with NULL dev_id, NULL raw_json, no BM70W fields, source DIGISME_IMPORT and the batch id; derived row in the same transaction", async () => {
+    pool.responses.push({ affectedRows: 1, insertId: 501 }, {});
+    const r = await store.insertPunch(imported, derived, { source: "DIGISME_IMPORT", importBatchId: 7 });
+    assert.deepEqual(r, { outcome: "stored", biomax_punch_id: 501 });
+    const ins = pool.log.find((l) => /INSERT INTO biomax_punch /.test(l.sql));
+    assert.match(ins.sql, /VALUES \(NULL, \?, \?, STR_TO_DATE\(\?, '%Y%m%d%H%i%s'\), NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, \?, NULL, \?\)/);
+    assert.ok(!/ON DUPLICATE KEY UPDATE/.test(ins.sql), "no retransmit bump for an import");
+    assert.deepEqual(ins.params, ["1952", "20260910091500", "20260910091500", "DIGISME_IMPORT", 7]);
+    assert.ok(pool.log.some((l) => /INSERT INTO biomax_punch_derived/.test(l.sql)));
+    assert.deepEqual(pool.log.map((l) => l.sql).filter((s) => /^(BEGIN|COMMIT|ROLLBACK|RELEASE)$/.test(s)), ["BEGIN", "COMMIT", "RELEASE"]);
+  });
+
+  it("ER_DUP_ENTRY from the import dedup key -> duplicate with the existing id, transaction rolled back, no derived row", async () => {
+    const dup = Object.assign(new Error("Duplicate entry"), { code: "ER_DUP_ENTRY" });
+    pool.responses.push(dup, [{ biomax_punch_id: 321 }]);
+    const r = await store.insertPunch(imported, derived, { source: "DIGISME_IMPORT", importBatchId: 7 });
+    assert.deepEqual(r, { outcome: "duplicate", biomax_punch_id: 321 });
+    assert.ok(pool.log.some((l) => l.sql === "ROLLBACK"));
+    assert.ok(!pool.log.some((l) => /biomax_punch_derived/.test(l.sql)));
+    const look = pool.log.find((l) => /SELECT biomax_punch_id FROM biomax_punch WHERE dev_id IS NULL AND ingest_source = \?/.test(l.sql));
+    assert.deepEqual(look.params, ["DIGISME_IMPORT", "1952", "20260910091500"]);
+  });
+
+  it("any other error propagates and rolls back", async () => {
+    pool.responses.push(Object.assign(new Error("boom"), { code: "ER_DATA_TOO_LONG" }));
+    await assert.rejects(store.insertPunch(imported, derived, { source: "DIGISME_IMPORT", importBatchId: 7 }), /boom/);
+    assert.ok(pool.log.some((l) => l.sql === "ROLLBACK"));
+  });
+
+  it("refuses an import without a batch id before any SQL", async () => {
+    await assert.rejects(store.insertPunch(imported, derived, { source: "DIGISME_IMPORT" }), /import_batch_id/);
+    assert.equal(pool.log.length, 0);
+  });
+
+  it("the LIVE path is untouched: same statement, same ON DUPLICATE KEY UPDATE retransmit bump, LIVE and NULL pull id", async () => {
+    pool.responses.push({ affectedRows: 1, insertId: 10 }, {});
+    await store.insertPunch(punch, derived);
+    const ins = pool.log.find((l) => /INSERT INTO biomax_punch /.test(l.sql));
+    assert.match(ins.sql, /source_ip, source_port, ingest_source, biomax_historical_pull_id\) VALUES/);
+    assert.match(ins.sql, /ON DUPLICATE KEY UPDATE retransmit_count = retransmit_count \+ 1, last_retransmit_at = NOW\(3\)/);
+    assert.equal(ins.params[0], punch.dev_id);
+    assert.deepEqual(ins.params.slice(-2), ["LIVE", null]);
+  });
+});

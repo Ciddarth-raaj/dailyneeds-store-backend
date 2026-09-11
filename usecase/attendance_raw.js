@@ -129,8 +129,8 @@ class AttendanceRawUsecase {
       throw validationError(`limit must be between 1 and ${MAX_AUDIT_LIMIT}`);
     }
     const deviceStatus = optionalText(query.device_status, 30);
-    if (deviceStatus && !["REGISTERED", "INACTIVE_DEVICE", "UNREGISTERED_DEVICE"].includes(deviceStatus)) {
-      throw validationError("device_status must be REGISTERED, INACTIVE_DEVICE or UNREGISTERED_DEVICE");
+    if (deviceStatus && !["REGISTERED", "INACTIVE_DEVICE", "UNREGISTERED_DEVICE", "IMPORTED"].includes(deviceStatus)) {
+      throw validationError("device_status must be REGISTERED, INACTIVE_DEVICE, UNREGISTERED_DEVICE or IMPORTED");
     }
     const review = optionalText(query.review, 20);
     if (review && !["needs_review", "ok"].includes(review)) {
@@ -255,6 +255,8 @@ function presentPunch(row) {
     punch_outlet: row.punch_outlet || null,
     punch_outlet_code: row.punch_outlet_code || null,
     device_status: row.device_status,
+    ingest_source: row.ingest_source,
+    import_batch_id: row.import_batch_id,
     source_ip: row.source_ip || null,
     cutoff_applied: row.cutoff_applied || null,
     work_shift_id: row.work_shift_id === null || row.work_shift_id === undefined ? null : Number(row.work_shift_id),
@@ -301,7 +303,9 @@ function pivot(rows) {
       };
       data.push(current);
     }
-    if (p.device_status !== "REGISTERED") {
+    // Quarantine is a DEVICE decision: an unregistered or inactive terminal.
+    // An IMPORTED punch has no terminal and is never quarantined for one.
+    if (p.device_status !== "REGISTERED" && p.device_status !== "IMPORTED") {
       current.quarantined_punch_count += 1;
       quarantined += 1;
       continue;
@@ -317,6 +321,7 @@ function pivot(rows) {
       punch_outlet: p.punch_outlet,
       punch_outlet_code: p.punch_outlet_code,
       source_ip: p.source_ip,
+      ingest_source: p.ingest_source,
       cutoff_applied: p.cutoff_applied,
     });
     current.punch_count = current.punches.length;

@@ -23,10 +23,13 @@ const { queryAsync } = require("../utils/batchInsert");
  *                     device / punch location / source IP / review status.
  *
  * Punch location is resolved BY TIME (R17): the assignment period whose
- * [effective_from, effective_to) contains the punch's io_time.
+ * [effective_from, effective_to) contains the punch's io_time. An IMPORTED
+ * punch (DigiSME Excel, dev_id NULL) has no terminal and therefore no
+ * location; it is a normal, non-quarantined punch with a blank location.
  */
 
 const DEVICE_STATUS_SQL = `CASE
+    WHEN p.dev_id IS NULL THEN 'IMPORTED'
     WHEN bd.biomax_device_id IS NULL THEN 'UNREGISTERED_DEVICE'
     WHEN bda.biomax_device_assignment_id IS NULL THEN 'INACTIVE_DEVICE'
     ELSE 'REGISTERED' END`;
@@ -41,6 +44,8 @@ const PUNCH_COLUMNS = `
   DATE_FORMAT(p.io_time, '%H:%i:%s')               AS clock_time,
   DATE_FORMAT(p.punch_date, '%Y-%m-%d')            AS calendar_date,
   p.source_ip,
+  p.ingest_source,
+  p.import_batch_id,
   p.retransmit_count,
   DATE_FORMAT(p.received_at, '%Y-%m-%d %H:%i:%s')  AS received_at,
   DATE_FORMAT(d.attendance_date, '%Y-%m-%d')       AS attendance_date,
@@ -157,10 +162,12 @@ class BiomaxPunchRepository {
       where.push(`(${DEVICE_STATUS_SQL}) = ?`);
       params.push(f.device_status);
     }
+    // An imported punch (no terminal) has no location to be missing; only
+    // its derivation can put it in the review queue.
     if (f.review === "needs_review") {
-      where.push("(d.derivation_status IS NULL OR d.derivation_status <> 'OK' OR bda.biomax_device_assignment_id IS NULL)");
+      where.push("(d.derivation_status IS NULL OR d.derivation_status <> 'OK' OR (p.dev_id IS NOT NULL AND bda.biomax_device_assignment_id IS NULL))");
     } else if (f.review === "ok") {
-      where.push("d.derivation_status = 'OK' AND bda.biomax_device_assignment_id IS NOT NULL");
+      where.push("d.derivation_status = 'OK' AND (p.dev_id IS NULL OR bda.biomax_device_assignment_id IS NOT NULL)");
     }
     if (f.search) {
       where.push("(p.user_id = ? OR e.employee_name LIKE ?)");
@@ -221,7 +228,7 @@ class BiomaxPunchRepository {
               DATE_FORMAT(MAX(p.io_time), '%Y-%m-%d %H:%i:%s') AS last_punch
          FROM biomax_punch p
          LEFT JOIN biomax_device bd ON bd.dev_id = p.dev_id
-        WHERE p.punch_date BETWEEN ? AND ? AND bd.biomax_device_id IS NULL
+        WHERE p.punch_date BETWEEN ? AND ? AND p.dev_id IS NOT NULL AND bd.biomax_device_id IS NULL
         GROUP BY p.dev_id ORDER BY last_punch DESC`,
       [f.from, f.to]
     );

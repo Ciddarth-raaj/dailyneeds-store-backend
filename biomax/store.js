@@ -52,7 +52,7 @@ const {
 const SCHEDULE_CACHE_MS = 60 * 1000;
 
 /** How a punch row got here (biomax_punch.ingest_source). */
-const INGEST_SOURCE = { LIVE: "LIVE", HISTORICAL_PULL: "HISTORICAL_PULL" };
+const INGEST_SOURCE = { LIVE: "LIVE", HISTORICAL_PULL: "HISTORICAL_PULL", DIGISME_IMPORT: "DIGISME_IMPORT" };
 
 const sha256 = (buf) => crypto.createHash("sha256").update(buf).digest("hex");
 
@@ -134,6 +134,7 @@ function createStore(pool, options = {}) {
    * @returns {{outcome: 'stored'|'duplicate', biomax_punch_id: number|null}}
    */
   async function insertPunch(punch, derived, options = {}) {
+    if (options.source === INGEST_SOURCE.DIGISME_IMPORT) return insertImportedPunch(punch, derived, options);
     const source = options.source === INGEST_SOURCE.HISTORICAL_PULL ? INGEST_SOURCE.HISTORICAL_PULL : INGEST_SOURCE.LIVE;
     const pullId = source === INGEST_SOURCE.HISTORICAL_PULL ? options.historicalPullId || null : null;
     if (source === INGEST_SOURCE.HISTORICAL_PULL && !pullId) {
@@ -223,6 +224,80 @@ function createStore(pool, options = {}) {
         ]
       );
 
+      await commitAsync(connection);
+      return { outcome: "stored", biomax_punch_id: Number(punchId) };
+    } catch (err) {
+      await rollbackAsync(connection).catch(() => {});
+      throw err;
+    } finally {
+      connection.release();
+    }
+  }
+
+  /**
+   * A punch from a DigiSME Excel import: no terminal, no BM70W JSON, nothing
+   * invented. Dedup is the database's: the STORED generated column
+   * import_dedup_key (source|code|time, NULL for device rows) is UNIQUE, so
+   * a second import of the same punch - concurrent or later - is an
+   * ER_DUP_ENTRY, reported here as `duplicate` with the existing row's id.
+   * A LIVE punch at the same employee and time has a different key and is
+   * never touched; the caller records that as a cross-source collision.
+   *
+   * @returns {{outcome: 'stored'|'duplicate', biomax_punch_id: number|null}}
+   */
+  async function insertImportedPunch(punch, derived, options) {
+    if (!options.importBatchId) throw new Error("a DIGISME_IMPORT punch must name its import_batch_id");
+    const connection = await getConnectionAsync(pool);
+    try {
+      await beginTransactionAsync(connection);
+      let result;
+      try {
+        result = await queryAsync(
+          connection,
+          `INSERT INTO biomax_punch
+             (dev_id, user_id, io_time_raw, io_time,
+              verify_mode, io_mode, fk_bin_data_lib, log_image_present,
+              cmd_id, blk_no, blk_len, content_length, body_len_prefix, raw_json,
+              source_ip, source_port, ingest_source, biomax_historical_pull_id, import_batch_id)
+           VALUES (NULL, ?, ?, STR_TO_DATE(?, '%Y%m%d%H%i%s'),
+                   NULL, NULL, NULL, 0,
+                   NULL, NULL, NULL, NULL, NULL, NULL,
+                   NULL, NULL, ?, NULL, ?)`,
+          [punch.user_id, punch.io_time_raw, punch.io_time_raw, INGEST_SOURCE.DIGISME_IMPORT, options.importBatchId]
+        );
+      } catch (err) {
+        if (err && err.code === "ER_DUP_ENTRY") {
+          await rollbackAsync(connection).catch(() => {});
+          const existing = await q(
+            `SELECT biomax_punch_id FROM biomax_punch
+              WHERE dev_id IS NULL AND ingest_source = ? AND user_id = ? AND io_time_raw = ?`,
+            [INGEST_SOURCE.DIGISME_IMPORT, punch.user_id, punch.io_time_raw]
+          );
+          return { outcome: "duplicate", biomax_punch_id: existing && existing[0] ? Number(existing[0].biomax_punch_id) : null };
+        }
+        throw err;
+      }
+      const punchId = result.insertId;
+      await queryAsync(
+        connection,
+        `INSERT INTO biomax_punch_derived
+           (biomax_punch_id, attendance_date, derivation_status,
+            employee_id, home_outlet_id, department_id,
+            work_shift_id, work_shift_weekly_schedule_id, cutoff_applied,
+            derived_at, derivation_run_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(3), NULL)`,
+        [
+          punchId,
+          derived.attendance_date,
+          derived.status,
+          derived.employee_id,
+          derived.home_outlet_id,
+          derived.department_id,
+          derived.work_shift_id,
+          derived.work_shift_weekly_schedule_id,
+          derived.cutoff_applied,
+        ]
+      );
       await commitAsync(connection);
       return { outcome: "stored", biomax_punch_id: Number(punchId) };
     } catch (err) {
