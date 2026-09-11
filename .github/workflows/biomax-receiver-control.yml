@@ -288,9 +288,14 @@ jobs:
             echo "--- conntrack entries for 7005 (if available):"; (sudo -n conntrack -L 2>/dev/null || cat /proc/net/nf_conntrack 2>/dev/null) | grep -E 'dport=7005' | head -20 | sed 's/^/  /' || echo "  (conntrack not available)"
             echo "--- 45-second packet capture: ANY packet from/to the outlet IP ${OUTLET_IP:-?} on ANY port, plus anything on 7005 (needs passwordless sudo; report only):"
             if sudo -n true 2>/dev/null; then
-              if [ -n "$OUTLET_IP" ]; then FILTER="host $OUTLET_IP or tcp port 7005"; else FILTER="tcp port 7005"; fi
-              sudo -n timeout 45 tcpdump -nn -i any -c 60 "$FILTER" 2>&1 | grep -v ' > 172\.26\.1\.5\.22\b\|\.22 > ' | sed 's/^/  /' || true
-              echo "  (SSH traffic on port 22 filtered out of the display)"
+              # Only SYNs to the device-facing ports: one line per new connection, so the
+              # PUBLIC SOURCE IP of every terminal reaching us is visible even though the
+              # relay hands the receiver 127.0.0.1.
+              CAP="$(sudo -n timeout 45 tcpdump -nn -i any -c 200 'tcp[tcpflags] & (tcp-syn|tcp-ack) == tcp-syn and (dst port 82 or dst port 7005)' 2>/dev/null)"
+              echo "$CAP" | grep -E '^[0-9]' | sed 's/^/  /' | head -40
+              echo "  --- distinct source IPs opening connections to 82/7005 in the window:"
+              echo "$CAP" | grep -oE 'IP [0-9.]+\.[0-9]+ > [0-9.]+\.(82|7005):' | sed -E 's/IP ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+ > [0-9.]+\.([0-9]+):/\1 -> port \2/' | sort | uniq -c | sed 's/^/    /'
+              echo "  outlet IP on record for $DEV_ID in production outlets.allowed_ips: ${OUTLET_IP:-none}"
             else
               echo "  (no passwordless sudo for tcpdump; skipped)"
             fi
