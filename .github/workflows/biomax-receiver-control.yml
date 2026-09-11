@@ -1,0 +1,268 @@
+# Biomax receiver CONTROL - the approved activation path, dispatch only.
+#
+# Never runs on push. Each dispatch does ONE thing on dnds-be as the deploy
+# user, over the same SSH secrets the backend deploy uses:
+#
+#   preflight  read-only: the ten checks that must hold before the receiver
+#              is started (Stage 1 live-punch test, step 1). Fails loudly.
+#   start      `pm2 start ecosystem.biomax.config.js && pm2 save`, exactly as
+#              docs/biomax-attendance-part1.md prescribes, then verifies
+#              online / user / node / db / healthz / port 7005. Refuses to
+#              run unless confirm = START-RECEIVER, unless the receiver is
+#              absent, unless 7005 is free, and unless BIOMAX_COMMANDS_ENABLED
+#              is set nowhere. If the post-start health check fails the
+#              receiver is removed again (pm2 delete + save) and the job fails.
+#   status     read-only: pm2 state, healthz, listeners, the last N receiver
+#              log lines summarised by dev_id / request_code / outcome, and
+#              the database view of the selected device (recent punches, raw
+#              requests, command queue). This is how polling and the test
+#              punch are observed.
+#   stop       `pm2 delete biomax-receiver && pm2 save`. Refuses unless
+#              confirm = STOP-RECEIVER. The rollback for this stage.
+#
+# NEVER: sets BIOMAX_COMMANDS_ENABLED, queues a command, touches pm2 process
+# 0 (the API), changes a firewall rule, or contacts a device. Database
+# credentials never leave the host and are never printed.
+
+name: Biomax Receiver Control
+
+"on":
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "preflight | start | status | stop"
+        required: true
+        default: preflight
+        type: choice
+        options:
+          - preflight
+          - start
+          - status
+          - stop
+      dev_id:
+        description: "Cloud ID of the ONE terminal under test (verbatim)"
+        required: true
+        default: "C2695C56D30E1430"
+        type: string
+      lines:
+        description: "status: how many recent receiver log lines to summarise"
+        required: false
+        default: "300"
+        type: string
+      confirm:
+        description: "start needs START-RECEIVER; stop needs STOP-RECEIVER"
+        required: false
+        default: ""
+        type: string
+
+jobs:
+  control:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Validate input
+        env:
+          ACTION: ${{ inputs.action }}
+          DEV_ID: ${{ inputs.dev_id }}
+          CONFIRM: ${{ inputs.confirm }}
+          LINES: ${{ inputs.lines }}
+        run: |
+          set -euo pipefail
+          case "$ACTION" in preflight|start|status|stop) ;; *) echo "::error::bad action"; exit 1;; esac
+          [[ "$DEV_ID" =~ ^[A-Za-z0-9]{6,32}$ ]] || { echo "::error::dev_id must be 6-32 alphanumerics"; exit 1; }
+          [[ "$LINES" =~ ^[0-9]{1,5}$ ]] || { echo "::error::lines must be a number"; exit 1; }
+          if [ "$ACTION" = "start" ] && [ "$CONFIRM" != "START-RECEIVER" ]; then echo "::error::start requires confirm=START-RECEIVER"; exit 1; fi
+          if [ "$ACTION" = "stop" ] && [ "$CONFIRM" != "STOP-RECEIVER" ]; then echo "::error::stop requires confirm=STOP-RECEIVER"; exit 1; fi
+          echo "action=$ACTION dev_id=$DEV_ID"
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/dnds_gha_deploy
+          chmod 600 ~/.ssh/dnds_gha_deploy
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      # Is TCP 7005 reachable from an arbitrary public address (this runner)?
+      # Report only. "open to the internet" is a finding, not a goal: the
+      # terminal's outlet IP is what should be allowed.
+      - name: Reachability of 7005 from the public internet (report only)
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          if timeout 5 bash -c "exec 3<>/dev/tcp/${SSH_HOST}/7005" 2>/dev/null; then
+            echo "REPORT: TCP 7005 on the host IS reachable from this GitHub runner (open to the public internet)"
+          else
+            echo "REPORT: TCP 7005 on the host is NOT reachable from this GitHub runner (filtered, or nothing listening)"
+          fi
+
+      - name: Run on the production host
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          ACTION: ${{ inputs.action }}
+          DEV_ID: ${{ inputs.dev_id }}
+          LINES: ${{ inputs.lines }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/dnds_gha_deploy \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "${SSH_USER}@${SSH_HOST}" 'bash -s' -- "$ACTION" "$DEV_ID" "$LINES" <<'REMOTE'
+          set -uo pipefail
+          ACTION="$1"; DEV_ID="$2"; LINES="$3"
+          FAILS=0
+          fail() { echo "::error::FAIL: $*"; FAILS=$((FAILS+1)); }
+          pass() { echo "PASS: $*"; }
+          report() { echo "REPORT: $*"; }
+          cd ~/dailyneeds-store-backend || { echo "::error::no checkout"; exit 1; }
+          export PATH="$HOME/.nvm/versions/node/$(ls "$HOME/.nvm/versions/node" 2>/dev/null | tail -1)/bin:$PATH" 2>/dev/null || true
+
+          receiver_state() {
+            if pm2 describe biomax-receiver >/dev/null 2>&1; then
+              pm2 describe biomax-receiver --no-color 2>/dev/null | grep -E '^\s*│?\s*status' | head -1 | sed -E 's/.*status[^a-z]*([a-z-]+).*/\1/'
+            else
+              echo "absent"
+            fi
+          }
+          listeners() { (ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null) | awk 'NR>1{print $4" "$NF}'; }
+          commands_flag_set() {
+            [ -n "${BIOMAX_COMMANDS_ENABLED:-}" ] && return 0
+            grep -q 'BIOMAX_COMMANDS_ENABLED' ecosystem.biomax.config.js 2>/dev/null && return 0
+            pm2 env biomax-receiver 2>/dev/null | grep -q 'BIOMAX_COMMANDS_ENABLED' && return 0
+            return 1
+          }
+          api_env() { local e; e="$(pm2 env 0 2>/dev/null | sed -n 's/^NODE_ENV: //p' | head -1 | tr -d '[:space:]')"; echo "${e:-development}"; }
+
+          echo "=== host: user=$(id -un) node=$(node -v) pm2=$(pm2 -v 2>/dev/null) HEAD=$(git rev-parse --short HEAD) branch=$(git rev-parse --abbrev-ref HEAD)"
+          echo "=== pm2"; pm2 ls --no-color 2>/dev/null || true
+
+          # ---------------------------------------------------------------- DB
+          dbquery() { # label sql   (read-only; API's own connection block)
+            node - "$(api_env)" "$1" "$2" <<'NODE'
+          const fs = require("fs"); const mysql = require("mysql");
+          const [env, label, sql] = process.argv.slice(2);
+          const cfg = JSON.parse(fs.readFileSync("config.json", "utf8")).db.mysql[env];
+          if (!cfg) { console.log(`::error::FAIL: no db.mysql.${env}`); process.exit(3); }
+          const c = mysql.createConnection({ host: cfg.host, port: cfg.port, user: cfg.username, password: cfg.password, database: cfg.database, dateStrings: true });
+          c.query(sql, (err, rows) => { console.log(`--- ${label}`); if (err) { console.log(`ERROR ${err.code || ""} ${err.message}`); process.exitCode = 2; } else console.log(JSON.stringify(rows)); c.end(); });
+          NODE
+          }
+          D="$(printf '%s' "$DEV_ID" | sed "s/'/''/g")"
+
+          db_view() {
+            echo "=== database view for $DEV_ID (read-only)"
+            dbquery DEVICE "SELECT d.biomax_device_id, d.dev_id, d.label, d.first_seen_at, d.last_seen_at, d.last_punch_at, a.outlet_id, o.outlet_code, o.outlet_name, a.effective_from, a.effective_to FROM biomax_device d LEFT JOIN biomax_device_assignment a ON a.biomax_device_id = d.biomax_device_id AND a.effective_to IS NULL LEFT JOIN outlets o ON o.outlet_id = a.outlet_id WHERE d.dev_id = '$D'"
+            dbquery PUNCH_COUNTS "SELECT (SELECT COUNT(*) FROM biomax_punch) AS total, (SELECT COUNT(*) FROM biomax_punch WHERE dev_id = '$D') AS this_device, (SELECT COUNT(*) FROM biomax_punch WHERE ingest_source <> 'LIVE') AS non_live"
+            dbquery RECENT_PUNCHES "SELECT p.biomax_punch_id, p.user_id, p.io_time_raw, p.io_time, p.verify_mode, p.io_mode, p.cmd_id, p.source_ip, p.received_at, p.retransmit_count, p.last_retransmit_at, p.ingest_source, dv.attendance_date, dv.derivation_status, dv.employee_id FROM biomax_punch p LEFT JOIN biomax_punch_derived dv ON dv.biomax_punch_id = p.biomax_punch_id WHERE p.dev_id = '$D' ORDER BY p.biomax_punch_id DESC LIMIT 5"
+            dbquery RECENT_RAW_REQUESTS "SELECT biomax_raw_request_id, received_at, source_ip, request_code, outcome, reason, byte_length FROM biomax_raw_request WHERE dev_id = '$D' OR dev_id IS NULL ORDER BY biomax_raw_request_id DESC LIMIT 10"
+            dbquery COMMAND_QUEUE "SELECT (SELECT COUNT(*) FROM biomax_historical_pull) AS pulls, (SELECT COUNT(*) FROM biomax_device_command) AS commands, (SELECT COUNT(*) FROM biomax_device_command WHERE status <> 'PENDING' OR sent_at IS NOT NULL OR attempt_count > 0) AS handed_out, (SELECT COUNT(*) FROM biomax_command_result_block) AS blocks"
+          }
+
+          log_summary() {
+            LOG="$HOME/.pm2/logs/biomax-receiver-out.log"; ERR="$HOME/.pm2/logs/biomax-receiver-error.log"
+            echo "=== receiver log summary (last $LINES lines of $LOG)"
+            [ -f "$LOG" ] || { report "no receiver out log yet"; return; }
+            tail -n "$LINES" "$LOG" | node - "$DEV_ID" <<'NODE'
+          const dev = process.argv[2];
+          const lines = require("fs").readFileSync(0, "utf8").split("\n").filter(Boolean);
+          const tally = {}; let first = null, last = null, n = 0; const others = [];
+          const polls = [];
+          for (const l of lines) {
+            let j; try { j = JSON.parse(l); } catch (e) { continue; }
+            const r = j.ref || {}; if (!r.outcome && !j.code) continue;
+            n += 1; const ts = j.timestamp || j.time || null;
+            if (ts) { first = first || ts; last = ts; }
+            const key = `${r.dev_id || "-"} ${r.request_code || "-"} -> ${r.outcome || j.code}`;
+            tally[key] = (tally[key] || 0) + 1;
+            if (r.request_code === "receive_cmd" && r.dev_id === dev && ts) polls.push(new Date(ts).getTime());
+            if (r.dev_id && r.dev_id !== dev) others.push(r.dev_id);
+            if (r.outcome === "command_sent" || r.trans_id) console.log(`::error::a command-channel line is present: ${l.slice(0, 300)}`);
+          }
+          console.log(`lines parsed: ${n}; window: ${first} .. ${last}`);
+          for (const k of Object.keys(tally).sort()) console.log(`  ${String(tally[k]).padStart(5)}  ${k}`);
+          if (polls.length > 1) {
+            const gaps = polls.slice(1).map((t, i) => (t - polls[i]) / 1000).filter((g) => g >= 0);
+            const avg = gaps.reduce((a, b) => a + b, 0) / gaps.length;
+            console.log(`polls from ${dev}: ${polls.length}; interval avg ${avg.toFixed(1)}s min ${Math.min(...gaps).toFixed(1)}s max ${Math.max(...gaps).toFixed(1)}s`);
+            if (avg < 5) console.log("::warning::poll interval under 5 s - check for a retry storm");
+          } else console.log(`polls from ${dev}: ${polls.length}`);
+          const od = [...new Set(others)]; if (od.length) console.log(`::warning::other dev_ids seen: ${od.join(", ")}`);
+          NODE
+            echo "--- last 15 out lines"; tail -n 15 "$LOG" | cut -c1-400
+            echo "--- last 10 error-log lines"; [ -f "$ERR" ] && tail -n 10 "$ERR" | cut -c1-400 || echo "(none)"
+          }
+
+          health() {
+            H="$(curl -s -m 5 http://127.0.0.1:7005/healthz || echo '')"; HC="$(curl -s -o /dev/null -w '%{http_code}' -m 5 http://127.0.0.1:7005/healthz || echo 000)"
+            echo "healthz: HTTP $HC $H"
+            [ "$HC" = "200" ] && echo "$H" | grep -q '"db":true'
+          }
+
+          case "$ACTION" in
+          # ------------------------------------------------------------ preflight
+          preflight)
+            echo "=== 1. production commit: $(git rev-parse HEAD) ($(git log -1 --format=%s | cut -c1-80))"
+            echo "=== 2. API"
+            A="$(curl -s -o /dev/null -w '%{http_code}' -m 5 http://127.0.0.1:8080/ || echo 000)"; [ "$A" = "200" ] && pass "API answers on 8080" || fail "API root -> HTTP $A"
+            pm2 describe 0 --no-color 2>/dev/null | grep -E 'status|node.js version' | tr -s ' ' || fail "pm2 process 0 not described"
+            echo "=== 3. receiver"; S="$(receiver_state)"; [ "$S" = "absent" ] && pass "biomax-receiver absent from pm2" || fail "biomax-receiver present in pm2 (status $S)"
+            echo "=== 4/5. listeners"; L="$(listeners)"; echo "$L" | grep -Eq '(:|\.)7005 ' && fail "something listens on 7005: $(echo "$L" | grep -E '(:|\.)7005 ')" || pass "nothing listens on 7005"
+            echo "$L" | grep -Eq '(:|\.)82 ' && report "listener on 82: $(echo "$L" | grep -E '(:|\.)82 ')" || pass "nothing listens on 82"
+            echo "=== 6. database block"; E="$(api_env)"; RCV="${BIOMAX_DB_ENV:-${NODE_ENV:-development}}"
+            node -e 'const c=require("./config.json").db.mysql; const a=c[process.argv[1]], r=c[process.argv[2]]; const s=(b)=>b?`${b.host}:${b.port||3306}/${b.database}`:"MISSING"; console.log(`API db.mysql.${process.argv[1]} -> ${s(a)}`); console.log(`receiver db.mysql.${process.argv[2]} -> ${s(r)}`); process.exit(a&&r&&s(a)===s(r)?0:1)' "$E" "$RCV" && pass "receiver resolves the same database as the API" || fail "receiver and API database blocks differ"
+            grep -q 'NODE_ENV' <(node -e 'console.log(JSON.stringify(require("./ecosystem.biomax.config.js").apps[0].env))') && fail "ecosystem sets NODE_ENV" || pass "ecosystem.biomax.config.js sets only $(node -e 'console.log(Object.keys(require("./ecosystem.biomax.config.js").apps[0].env).join(","))')"
+            echo "=== 7. commands flag"; commands_flag_set && fail "BIOMAX_COMMANDS_ENABLED is set" || pass "BIOMAX_COMMANDS_ENABLED not set anywhere"
+            echo "=== 8-10. database"; db_view
+            dbquery OUTLET_SOURCE_IPS "SELECT o.outlet_id, o.outlet_code, o.ip_restriction_enabled, o.allowed_ips FROM biomax_device d JOIN biomax_device_assignment a ON a.biomax_device_id = d.biomax_device_id AND a.effective_to IS NULL JOIN outlets o ON o.outlet_id = a.outlet_id WHERE d.dev_id = '$D'"
+            echo "=== pm2 startup unit"; systemctl is-enabled pm2-$(id -un) 2>/dev/null || systemctl list-unit-files 2>/dev/null | grep -i pm2 || report "no pm2 startup unit found"
+            ;;
+          # ---------------------------------------------------------------- start
+          start)
+            S="$(receiver_state)"; [ "$S" = "absent" ] || { fail "receiver already present (status $S); refusing to start twice"; }
+            listeners | grep -Eq '(:|\.)7005 ' && fail "7005 already in use"
+            commands_flag_set && fail "BIOMAX_COMMANDS_ENABLED is set; refusing to start with the command channel enabled"
+            [ "$FAILS" -eq 0 ] || { echo "::error::preconditions failed; receiver NOT started"; exit 1; }
+            echo "=== starting (as $(id -un)): pm2 start ecosystem.biomax.config.js && pm2 save"
+            pm2 start ecosystem.biomax.config.js --no-color && pm2 save --no-color || fail "pm2 start/save returned non-zero"
+            sleep 4
+            echo "=== verify"; pm2 describe biomax-receiver --no-color 2>/dev/null | grep -E 'status|node.js version|script path|exec mode|restarts|uptime|username|interpreter' | tr -s ' '
+            S="$(receiver_state)"; [ "$S" = "online" ] && pass "biomax-receiver online" || fail "biomax-receiver status $S"
+            pm2 env biomax-receiver 2>/dev/null | grep -E '^(BIOMAX_|NODE_ENV)' | sed 's/^/  env: /'
+            pm2 env biomax-receiver 2>/dev/null | grep -q 'BIOMAX_COMMANDS_ENABLED' && fail "receiver env carries BIOMAX_COMMANDS_ENABLED" || pass "receiver env has no BIOMAX_COMMANDS_ENABLED"
+            health && pass "healthz ok with db:true" || fail "healthz not healthy"
+            listeners | grep -Eq '(:|\.)7005 ' && pass "7005 listening: $(listeners | grep -E '(:|\.)7005 ' | head -1)" || fail "7005 not listening"
+            echo "--- STARTED line"; grep -h 'STARTED' "$HOME/.pm2/logs/biomax-receiver-out.log" 2>/dev/null | tail -1 | cut -c1-600
+            grep -h 'STARTED' "$HOME/.pm2/logs/biomax-receiver-out.log" 2>/dev/null | tail -1 | grep -q '"commands_enabled":false' && pass "receiver reports commands_enabled:false" || fail "STARTED line does not report commands_enabled:false"
+            if [ "$FAILS" -gt 0 ]; then
+              echo "::error::post-start verification failed; removing the receiver again"
+              pm2 delete biomax-receiver --no-color; pm2 save --no-color; echo "receiver state now: $(receiver_state)"
+            fi
+            ;;
+          # --------------------------------------------------------------- status
+          status)
+            S="$(receiver_state)"; echo "receiver: $S"; pm2 describe biomax-receiver --no-color 2>/dev/null | grep -E 'status|restarts|uptime|node.js version|username' | tr -s ' '
+            pm2 env biomax-receiver 2>/dev/null | grep -q 'BIOMAX_COMMANDS_ENABLED' && fail "receiver env carries BIOMAX_COMMANDS_ENABLED" || pass "BIOMAX_COMMANDS_ENABLED not set on the receiver"
+            health && pass "healthz ok" || report "healthz not ok (receiver may be stopped)"
+            listeners | grep -E '(:|\.)(7005|82) ' | sed 's/^/  listener: /' || true
+            log_summary
+            db_view
+            ;;
+          # ----------------------------------------------------------------- stop
+          stop)
+            echo "=== stopping: pm2 delete biomax-receiver && pm2 save"
+            pm2 delete biomax-receiver --no-color; pm2 save --no-color
+            sleep 2; S="$(receiver_state)"; [ "$S" = "absent" ] && pass "receiver removed" || fail "receiver still present ($S)"
+            listeners | grep -Eq '(:|\.)7005 ' && fail "7005 still listening" || pass "7005 closed"
+            ;;
+          esac
+
+          echo "=== RESULT ($ACTION): $FAILS failing check(s)"
+          [ "$FAILS" -eq 0 ] || exit 1
+          REMOTE
