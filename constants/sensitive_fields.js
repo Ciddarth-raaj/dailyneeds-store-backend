@@ -57,6 +57,12 @@ const SENSITIVE_EMPLOYEE_FIELDS = [
   // same permission, and it is a fact about somebody's employment history that
   // a caller who may not see their PF number has no business learning.
   "previous_pf_member",
+  // M2 review fix. Whether the employee was already a member of the PENSION
+  // scheme before they joined - the separate Form 11 question, and the one the
+  // EPS split actually turns on. Sensitive for the same reason as the line
+  // above it, and for one more: it is the fact that decides where a third of
+  // somebody's employer contribution is filed.
+  "previous_eps_member",
 ];
 
 /** The same list as a lower-cased Set, for lookups. */

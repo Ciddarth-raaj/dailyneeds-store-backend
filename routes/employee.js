@@ -542,6 +542,13 @@ class EmployeeRoutes {
             // unresolved rather than picking a side, so collapsing null into
             // 0 would turn "we do not know" into a filed statutory position.
             previous_pf_member: Joi.number().integer().min(0).max(1).allow(null).optional(),
+            // M2 review fix. Existing / Previous EPS Member - the FOURTH
+            // statutory fact, and the one the pension split actually reads.
+            // Official Form 11 asks about prior EPF membership and prior EPS
+            // membership separately because the answers differ, so the two are
+            // two columns here and the engine never derives one from the
+            // other. Tri-state for the same reason as every flag above it.
+            previous_eps_member: Joi.number().integer().min(0).max(1).allow(null).optional(),
             UAN: Joi.string().allow("").allow(null).optional(),
             additional_course: Joi.string().allow("").allow(null).optional(),
             spouse_name: Joi.string().allow("").allow(null).optional(),

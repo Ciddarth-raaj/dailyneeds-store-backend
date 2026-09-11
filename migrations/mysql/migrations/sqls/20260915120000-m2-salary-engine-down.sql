@@ -17,7 +17,17 @@ DELETE FROM `all_permissions` WHERE `permission_key` IN (
   'view_salary', 'add_salary', 'edit_salary', 'manual_salary_component_override',
   'approve_salary_revision', 'view_payroll', 'process_payroll', 'hr_reports');
 
--- The tri-state statutory field. Guarded so the file can be re-run.
+-- The two tri-state statutory fields. Guarded so the file can be re-run.
+SET @drop_previous_eps_member = IF(
+  (SELECT COUNT(*) FROM `information_schema`.`COLUMNS`
+    WHERE `TABLE_SCHEMA` = DATABASE() AND `TABLE_NAME` = 'new_employee'
+      AND `COLUMN_NAME` = 'previous_eps_member') = 1,
+  'ALTER TABLE `new_employee` DROP COLUMN `previous_eps_member`',
+  'DO 0');
+PREPARE drop_eps_stmt FROM @drop_previous_eps_member;
+EXECUTE drop_eps_stmt;
+DEALLOCATE PREPARE drop_eps_stmt;
+
 SET @drop_previous_pf_member = IF(
   (SELECT COUNT(*) FROM `information_schema`.`COLUMNS`
     WHERE `TABLE_SCHEMA` = DATABASE() AND `TABLE_NAME` = 'new_employee'

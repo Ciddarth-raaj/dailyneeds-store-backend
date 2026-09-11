@@ -9,7 +9,8 @@
  * That suits what matters most about this one, which is what it must NOT do:
  *
  *   it must not copy the legacy `new_employee.salary` into the new table
- *   it must not backfill a previous-PF-membership nobody has stated
+ *   it must not backfill a previous-PF- or previous-EPS-membership nobody
+ *     has stated, and must not derive either one from the other
  *   it must not grant the salary rights to any designation
  *   it must not leave two current salaries possible for one employee
  */
@@ -59,7 +60,7 @@ describe("up", () => {
     assert.ok(!/\bsalary\b\s*=/i.test(body), "the legacy column is not read or written");
   });
 
-  it("never backfills the previous-PF-member flag", () => {
+  it("never backfills either membership flag", () => {
     // An UPDATE *statement* - not the `ON UPDATE CURRENT_TIMESTAMP` clause on
     // the new table's `updated_at`, which is a column definition and writes
     // nothing that exists today.
@@ -67,23 +68,51 @@ describe("up", () => {
       !stmts.some((s) => /^UPDATE\s/i.test(s)),
       "no employee row is written on the way up"
     );
-    assert.ok(
-      !/previous_pf_member`?\s+TINYINT\(1\)\s+NOT NULL/i.test(body),
-      "the column is nullable - NULL means nobody has said"
-    );
-    assert.match(body, /previous_pf_member` TINYINT\(1\) NULL DEFAULT NULL/);
+    for (const column of ["previous_pf_member", "previous_eps_member"]) {
+      assert.ok(
+        !new RegExp(`${column}\`?\\s+TINYINT\\(1\\)\\s+NOT NULL`, "i").test(body),
+        `${column} is nullable - NULL means nobody has said`
+      );
+      assert.ok(
+        new RegExp(`${column}\` TINYINT\\(1\\) NULL DEFAULT NULL`).test(body),
+        `${column} is declared tri-state with no default`
+      );
+    }
   });
 
-  it("adds the tri-state column guarded, so the file can be re-run", () => {
+  it("NEVER DERIVES THE EPS FLAG FROM THE PF ONE", () => {
+    // The whole reason `previous_eps_member` is a second column. Form 11 asks
+    // about prior EPF membership and prior EPS membership separately because
+    // the answers differ; a migration that seeded one from the other would
+    // file people into the pension scheme on an inference nobody made, and
+    // would do it once, silently, for everybody.
+    assert.ok(
+      !/previous_eps_member`?\s*=\s*`?previous_pf_member/i.test(body),
+      "the EPS flag is never set from the PF flag"
+    );
+    assert.ok(
+      !/previous_pf_member`?\s*=\s*`?previous_eps_member/i.test(body),
+      "nor the other way round"
+    );
+  });
+
+  it("adds both tri-state columns guarded, so the file can be re-run", () => {
     assert.match(body, /COLUMN_NAME. = 'previous_pf_member'/, "the column is checked for first");
     assert.match(body, /PREPARE add_stmt FROM @add_previous_pf_member/);
+    assert.match(body, /COLUMN_NAME. = 'previous_eps_member'/, "and so is the EPS column");
+    assert.match(body, /PREPARE add_eps_stmt FROM @add_previous_eps_member/);
   });
 
-  it("keeps the new field separate from PF applicable, UAN and PF number", () => {
-    const alter = stmts.find((s) => /ADD COLUMN `previous_pf_member`/.test(s));
-    assert.ok(alter, "the column is added");
-    for (const other of ["pf_applicable", "`uan`", "pf_number", "`pf`"]) {
-      assert.ok(!alter.includes(other), `${other} is not touched by the same statement`);
+  it("keeps the new fields separate from PF applicable, UAN, PF number and each other", () => {
+    for (const column of ["previous_pf_member", "previous_eps_member"]) {
+      const alter = stmts.find((s) => s.includes(`ADD COLUMN \`${column}\``));
+      assert.ok(alter, `${column} is added`);
+      const others = ["pf_applicable", "`uan`", "pf_number", "`pf`"].concat(
+        column === "previous_pf_member" ? ["previous_eps_member"] : ["previous_pf_member"]
+      );
+      for (const other of others) {
+        assert.ok(!alter.includes(other), `${other} is not touched by the same statement`);
+      }
     }
   });
 
@@ -192,8 +221,11 @@ describe("down", () => {
     assert.match(body, /DELETE FROM `all_permissions` WHERE `permission_key` IN/);
   });
 
-  it("drops the column guarded, and the table last", () => {
+  it("drops both columns guarded, and the table last", () => {
     assert.match(body, /COLUMN_NAME. = 'previous_pf_member'/);
+    assert.match(body, /COLUMN_NAME. = 'previous_eps_member'/);
+    assert.match(body, /DROP COLUMN `previous_pf_member`/);
+    assert.match(body, /DROP COLUMN `previous_eps_member`/);
     const dropColumn = body.indexOf("DROP COLUMN");
     const dropTable = body.indexOf("DROP TABLE");
     assert.ok(dropTable > dropColumn, "the table goes last, so an earlier failure leaves data intact");

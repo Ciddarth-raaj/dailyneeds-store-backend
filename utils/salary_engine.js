@@ -299,10 +299,23 @@ function validateManualBreakup(grossRupees, components = {}, options = {}, confi
  *   2. Have they reached the EPS exit age? Pension membership ceases at 58 and
  *      the employer's whole share goes to EPF from then on. Needs a DOB.
  *   3. Are they a post-cutoff joiner above the pension wage ceiling? Somebody
- *      who FIRST joined the fund on or after the cutoff, earning above the
- *      ceiling, cannot join EPS. This is the question `previous_pf_member`
+ *      who was NOT ALREADY AN EPS MEMBER on or after the cutoff, earning above
+ *      the ceiling, cannot join EPS. This is the question `previous_eps_member`
  *      exists to answer, and when it has not been recorded the answer is
  *      genuinely unknown.
+ *
+ * THE MEMBERSHIP FACT IS `previous_eps_member`, NOT `previous_pf_member`.
+ * Official EPFO Form 11 asks the two questions separately — "Whether earlier a
+ * member of the Employees' Provident Fund Scheme, 1952" and "Whether earlier a
+ * member of the Employees' Pension Scheme, 1995" — because they genuinely have
+ * different answers. Somebody can have been an EPF member without ever having
+ * been an EPS member: an international worker, an excluded employee, or
+ * anybody who joined the fund above the pension wage ceiling after the cutoff
+ * and was therefore kept out of EPS at that employer too. Reading a prior EPF
+ * membership as a prior EPS membership would file those people into the
+ * pension scheme on an inference nobody made, so this function reads the EPS
+ * fact and only the EPS fact. `previous_pf_member` remains the separate EPF
+ * history fact and no rule here consults it.
  *
  * WHEN THE SPLIT IS UNRESOLVED THE EMPLOYER TOTAL STILL IS NOT. The employer
  * pays 12% either way; only its division between EPF and EPS is in question.
@@ -332,7 +345,7 @@ function resolveEpsEligibility(context = {}, config = CONFIG) {
   /*
    * The ceiling test comes BEFORE the membership test on purpose. At or below
    * the pension wage ceiling the membership history does not matter — the
-   * employee is eligible either way — so an unrecorded `previous_pf_member`
+   * employee is eligible either way — so an unrecorded `previous_eps_member`
    * is only an unresolved answer for the people it can actually change, which
    * in this structure means a Basic above the ceiling.
    */
@@ -350,16 +363,23 @@ function resolveEpsEligibility(context = {}, config = CONFIG) {
     return { eligible: true, reason: "Joined before the new-member cutoff" };
   }
 
-  const previousMember = triState(context.previous_pf_member);
-  if (previousMember === null) {
+  /*
+   * ONLY the EPS fact decides this. `previous_pf_member` is deliberately not
+   * consulted, in either direction: a recorded prior EPF membership does not
+   * establish a prior EPS membership, and this engine does not turn one into
+   * the other. An unrecorded EPS history is reported as unresolved, which is a
+   * question on a screen rather than a pension position nobody took.
+   */
+  const previousEpsMember = triState(context.previous_eps_member);
+  if (previousEpsMember === null) {
     return { eligible: null, unresolved: UNRESOLVED.EPS_MEMBERSHIP_NOT_RECORDED };
   }
-  if (previousMember === true) {
-    return { eligible: true, reason: "Existing PF member before the cutoff" };
+  if (previousEpsMember === true) {
+    return { eligible: true, reason: "Existing EPS member before the cutoff" };
   }
   return {
     eligible: false,
-    reason: "First joined the fund on or after the cutoff, above the EPS wage ceiling",
+    reason: "Not an EPS member before the cutoff, above the EPS wage ceiling",
   };
 }
 
@@ -708,7 +728,15 @@ function calculateSalary(input = {}, config = CONFIG) {
     gross,
     pf_applicable: input.pf_applicable,
     esi_applicable: input.esi_applicable,
+    /*
+     * BOTH history facts travel, and they are not interchangeable. The EPS
+     * split reads `previous_eps_member` and nothing else; `previous_pf_member`
+     * is carried because it is part of the statutory context a later phase
+     * (EPF transfer, Form 11 generation) will need, not because any rule here
+     * consults it.
+     */
     previous_pf_member: input.previous_pf_member,
+    previous_eps_member: input.previous_eps_member,
     dob: input.dob,
     date_of_joining: input.date_of_joining,
     as_of: input.as_of || input.effective_from,

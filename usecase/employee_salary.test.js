@@ -19,8 +19,20 @@
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
 
-const build = require("./employee_salary");
+const buildUsecase = require("./employee_salary");
 const { SOURCE } = require("./employee_salary");
+
+/**
+ * A FIXED TODAY.
+ *
+ * The future-dated rules are rules about the relationship between an effective
+ * date and today, so a suite that read the real clock would be asserting a
+ * different rule every day it ran and would start failing on a date nobody
+ * chose. The usecase takes its clock as a constructor option for exactly this;
+ * nothing in a request can reach it.
+ */
+const NOW = "2026-09-11";
+const build = (repo) => buildUsecase(repo, { now: () => NOW });
 
 const EMPLOYEE = {
   employee_id: 42,
@@ -28,7 +40,9 @@ const EMPLOYEE = {
   status: 1,
   pf_applicable: 1,
   esi_applicable: 0,
+  // Two separate statutory facts; the pension split reads only the second.
   previous_pf_member: 1,
+  previous_eps_member: 1,
   dob: "1990-05-10",
   date_of_joining: "2019-06-01",
 };
@@ -227,7 +241,9 @@ describe("creating an opening salary", () => {
     );
   });
 
-  it("reports a FUTURE conflict rather than hiding it", async () => {
+  it("reports a FUTURE conflict on a BACK-DATED record rather than hiding it", async () => {
+    // Back-dating under an agreed future increment is legitimate - it queues
+    // no undecided future pay - so it is still allowed, and still reported.
     const repo = makeRepo();
     const uc = build(repo);
     await uc.createInitialSalary(42, { monthly_gross: 20000 }, ACTOR);
@@ -239,6 +255,121 @@ describe("creating an opening salary", () => {
     );
     assert.equal(backdated.future_conflicts.length, 1);
     assert.equal(backdated.future_conflicts[0].effective_from, "2026-12-01");
+  });
+});
+
+/* ------------------------------------- a second future revision is REFUSED */
+
+/*
+ * The review fix. An employee with one pay change already queued ahead of
+ * today must not be given a second one: "what will this person be paid next
+ * month" stops having a single answer, and the earlier proposal is silently
+ * reinterpreted by the later one. It is a refusal, not a warning.
+ */
+describe("the future-dated revision conflict", () => {
+  /** An employee with an APPROVED opening record already in the past. */
+  const withOpening = () =>
+    makeRepo(EMPLOYEE, [row({ salary_id: 1, status: "APPROVED", effective_from: "2026-04-01" })]);
+
+  it("REFUSES a second future-dated revision while one is outstanding", async () => {
+    const repo = withOpening();
+    const uc = build(repo);
+    await uc.createInitialSalary(42, { monthly_gross: 30000, effective_from: "2026-12-01" }, ACTOR);
+    await assert.rejects(
+      () => uc.createInitialSalary(42, { monthly_gross: 35000, effective_from: "2027-01-01" }, ACTOR),
+      /already has a future-dated salary revision/
+    );
+    assert.equal(repo.rows.length, 2, "nothing was written");
+  });
+
+  it("names the existing revision in the error so the caller can act on it", async () => {
+    const repo = withOpening();
+    const uc = build(repo);
+    await uc.createInitialSalary(42, { monthly_gross: 30000, effective_from: "2026-12-01" }, ACTOR);
+    const err = await uc
+      .createInitialSalary(42, { monthly_gross: 35000, effective_from: "2027-01-01" }, ACTOR)
+      .then(() => null, (e) => e);
+    assert.ok(err, "it refused");
+    assert.equal(err.name, "ValidationError");
+    assert.equal(err.conflict.kind, "FUTURE_REVISION_EXISTS");
+    assert.equal(err.conflict.requested_effective_from, "2027-01-01");
+    assert.deepEqual(err.conflict.existing, [
+      { salary_id: 2, effective_from: "2026-12-01", status: "PENDING" },
+    ]);
+  });
+
+  it("refuses when the outstanding future revision is APPROVED too", async () => {
+    const repo = makeRepo(EMPLOYEE, [
+      row({ salary_id: 1, status: "APPROVED", effective_from: "2026-04-01" }),
+      row({ salary_id: 2, status: "APPROVED", effective_from: "2026-12-01" }),
+    ]);
+    await assert.rejects(
+      () =>
+        build(repo).createInitialSalary(
+          42,
+          { monthly_gross: 35000, effective_from: "2027-01-01" },
+          ACTOR
+        ),
+      /already has a future-dated salary revision/
+    );
+  });
+
+  it("a REJECTED future revision does not block a new one", async () => {
+    const repo = makeRepo(EMPLOYEE, [
+      row({ salary_id: 1, status: "APPROVED", effective_from: "2026-04-01" }),
+      row({ salary_id: 2, status: "REJECTED", effective_from: "2026-12-01" }),
+    ]);
+    const r = await build(repo).createInitialSalary(
+      42,
+      { monthly_gross: 35000, effective_from: "2027-01-01" },
+      ACTOR
+    );
+    assert.equal(r.effective_from, "2027-01-01", "rejected history is not a live revision");
+  });
+
+  it("a PAST live revision does not block a future one", async () => {
+    const repo = withOpening();
+    const r = await build(repo).createInitialSalary(
+      42,
+      { monthly_gross: 30000, effective_from: "2026-12-01" },
+      ACTOR
+    );
+    assert.equal(r.effective_from, "2026-12-01", "the first queued change is allowed");
+  });
+
+  it("a revision effective TODAY is not future-dated and is not blocked", async () => {
+    const repo = makeRepo(EMPLOYEE, [
+      row({ salary_id: 1, status: "APPROVED", effective_from: "2026-04-01" }),
+      row({ salary_id: 2, status: "PENDING", effective_from: "2026-12-01" }),
+    ]);
+    const r = await build(repo).createInitialSalary(
+      42,
+      { monthly_gross: 26000, effective_from: NOW },
+      ACTOR
+    );
+    assert.equal(r.effective_from, NOW);
+    assert.equal(r.future_conflicts.length, 1, "the queued change is still reported");
+  });
+
+  it("REPLACES NOTHING - the existing future revision is left exactly as it was", async () => {
+    const repo = withOpening();
+    const uc = build(repo);
+    await uc.createInitialSalary(42, { monthly_gross: 30000, effective_from: "2026-12-01" }, ACTOR);
+    const before = { ...repo.rows[1] };
+    await uc
+      .createInitialSalary(42, { monthly_gross: 99000, effective_from: "2027-01-01" }, ACTOR)
+      .catch(() => {});
+    assert.deepEqual(repo.rows[1], before, "no silent replace, no silent update");
+  });
+
+  it("the same-effective-date rule still answers first", async () => {
+    const repo = withOpening();
+    const uc = build(repo);
+    await uc.createInitialSalary(42, { monthly_gross: 30000, effective_from: "2026-12-01" }, ACTOR);
+    await assert.rejects(
+      () => uc.createInitialSalary(42, { monthly_gross: 31000, effective_from: "2026-12-01" }, ACTOR),
+      /already exists/
+    );
   });
 });
 
@@ -533,6 +664,106 @@ describe("the salary period lock", () => {
     assert.equal(r.period_lock.locked, false);
     assert.equal(r.period_lock.reason, "PAYROLL_NOT_IMPLEMENTED");
     assert.equal(r.period_lock.period, "2026-04");
+  });
+});
+
+/* -------------------------------------------- nobody approves their own */
+
+/*
+ * The review fix. `approve_salary_revision` says a person may approve salary
+ * revisions; it does not say they may approve their own. Without this, anybody
+ * holding both `add_salary` and `approve_salary_revision` could raise a pay
+ * change and agree to it in the same minute, with the audit trail naming them
+ * twice and flagging nothing.
+ *
+ * The exception is the EXISTING admin bypass (`user_type = 2`) and nothing
+ * else: there is no per-user override here and no list of exempted people.
+ */
+describe("self-approval", () => {
+  const CREATOR = { employeeId: 7, userId: 70, userType: 1, isAdmin: false };
+  const OTHER = { employeeId: 8, userId: 80, userType: 1, isAdmin: false };
+  const ADMIN = { employeeId: 7, userId: 70, userType: 2, isAdmin: true };
+
+  const pendingBy = (createdBy) =>
+    makeRepo(EMPLOYEE, [row({ salary_id: 1, status: "PENDING", created_by: createdBy })]);
+
+  it("BLOCKS the creator from approving their own revision", async () => {
+    const repo = pendingBy(7);
+    await assert.rejects(
+      () => build(repo).approveSalary(1, CREATOR),
+      /cannot approve a salary revision you created yourself/
+    );
+    assert.equal(repo.rows[0].status, "PENDING", "it stays pending");
+    assert.equal(repo.rows[0].approved_by, undefined, "and nobody is recorded as approving it");
+  });
+
+  it("allows a DIFFERENT approver", async () => {
+    const repo = pendingBy(7);
+    const r = await build(repo).approveSalary(1, OTHER);
+    assert.equal(r.status, "APPROVED");
+    assert.equal(repo.rows[0].approved_by, 8);
+  });
+
+  it("allows an ADMIN to approve their own revision", async () => {
+    const repo = pendingBy(7);
+    const r = await build(repo).approveSalary(1, ADMIN);
+    assert.equal(r.status, "APPROVED");
+    assert.equal(repo.rows[0].approved_by, 7);
+  });
+
+  it("reads the admin bypass from user_type as well as from isAdmin", async () => {
+    // `actorFor` reports both; an actor assembled either way must be honoured.
+    const repo = pendingBy(7);
+    const r = await build(repo).approveSalary(1, { employeeId: 7, userType: 2 });
+    assert.equal(r.status, "APPROVED");
+  });
+
+  it("blocks it end to end through the real create path", async () => {
+    // Not a hand-built row: the creator is whoever `createInitialSalary` wrote.
+    const repo = makeRepo();
+    const uc = build(repo);
+    const created = await uc.createInitialSalary(42, { monthly_gross: 20000 }, CREATOR);
+    await assert.rejects(
+      () => uc.approveSalary(created.salary_id, CREATOR),
+      /cannot approve a salary revision you created yourself/
+    );
+    await uc.approveSalary(created.salary_id, OTHER);
+    assert.equal(repo.rows[0].status, "APPROVED");
+  });
+
+  it("compares employee identity, not the user account id", async () => {
+    // Two user accounts, one employee. The rule is about the person.
+    const repo = pendingBy(7);
+    await assert.rejects(
+      () => build(repo).approveSalary(1, { employeeId: 7, userId: 999, userType: 1 }),
+      /cannot approve a salary revision you created yourself/
+    );
+  });
+
+  it("does not trip on a row nobody is recorded as having created", async () => {
+    const repo = pendingBy(null);
+    const r = await build(repo).approveSalary(1, CREATOR);
+    assert.equal(r.status, "APPROVED");
+  });
+
+  it("does not trip on an actor with no employee identity", async () => {
+    const repo = pendingBy(7);
+    const r = await build(repo).approveSalary(1, { userId: 70, userType: 1 });
+    assert.equal(r.status, "APPROVED");
+  });
+
+  it("reports the LIFECYCLE state first when the revision is not pending", async () => {
+    const repo = makeRepo(EMPLOYEE, [
+      row({ salary_id: 1, status: "APPROVED", created_by: 7 }),
+    ]);
+    await assert.rejects(() => build(repo).approveSalary(1, CREATOR), /already approved/);
+  });
+
+  it("REJECTION is unchanged - withdrawing your own proposal is not approving it", async () => {
+    const repo = pendingBy(7);
+    const r = await build(repo).rejectSalary(1, "Raised in error", CREATOR);
+    assert.equal(r.status, "REJECTED");
+    assert.equal(repo.rows[0].rejected_by, 7);
   });
 });
 

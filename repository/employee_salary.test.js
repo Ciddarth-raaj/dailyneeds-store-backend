@@ -93,7 +93,7 @@ describe("no SELECT *", () => {
 });
 
 describe("the statutory context read", () => {
-  it("reads five statutory columns and a name — not the employee's documents", async () => {
+  it("reads six statutory columns and a name — not the employee's documents", async () => {
     const db = makeDb([{ employee_id: 1 }]);
     await buildRepo(db).getStatutoryContext(1);
     const sql = db.calls[0].sql;
@@ -102,6 +102,9 @@ describe("the statutory context read", () => {
       "pf_applicable",
       "esi_applicable",
       "previous_pf_member",
+      // The EPS half of the Form 11 question, read as its own column: the
+      // pension split turns on this one and never on the EPF one above it.
+      "previous_eps_member",
       "dob",
       "date_of_joining",
     ]) {

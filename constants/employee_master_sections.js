@@ -31,6 +31,11 @@ const STATUTORY_DETAIL_FIELDS = [
   // of its own. It is a separate FACT from PF Applicable, the UAN and the PF
   // Number, but it is not a separate DECISION about who may record it.
   "previous_pf_member",
+  // M2 review fix. The EPS half of the Form 11 membership question, kept apart
+  // from the EPF half above because the two have two answers. Same section,
+  // same `edit_statutory_details` right, no new permission key: it is another
+  // statutory fact, not another decision about who may record one.
+  "previous_eps_member",
   "esi",
   "esi_number",
   "esi_applicable",

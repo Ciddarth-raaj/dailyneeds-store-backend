@@ -98,6 +98,49 @@ describe("Previous PF Member", () => {
   });
 });
 
+/*
+ * The review fix. EPFO Form 11 asks about prior EPF membership and prior EPS
+ * membership as two questions, so they are two fields here - governed by the
+ * same existing Statutory right, because they are two FACTS and not two
+ * decisions about who may record one.
+ */
+describe("Previous EPS Member", () => {
+  it("is sensitive under B3", () => {
+    assert.ok(SENSITIVE_EMPLOYEE_FIELDS.includes("previous_eps_member"));
+  });
+
+  it("belongs to Statutory Details, and demands the EXISTING statutory key", () => {
+    assert.ok(STATUTORY_DETAIL_FIELDS.includes("previous_eps_member"));
+    assert.ok(!PAYMENT_DETAIL_FIELDS.includes("previous_eps_member"));
+    assert.deepEqual(sectionKeysRequired({ previous_eps_member: 1 }), [P.EDIT_STATUTORY_DETAILS]);
+  });
+
+  it("has no permission key of its own", () => {
+    const keys = Object.values(P);
+    assert.ok(!keys.some((k) => /previous_eps/.test(k)));
+  });
+
+  it("IS A SEPARATE FIELD FROM Previous PF Member", () => {
+    // The point of the whole fix: two columns, not one reused. Both are in the
+    // section, and neither is the other.
+    assert.notEqual("previous_eps_member", "previous_pf_member");
+    assert.ok(STATUTORY_DETAIL_FIELDS.includes("previous_pf_member"));
+    assert.ok(STATUTORY_DETAIL_FIELDS.includes("previous_eps_member"));
+  });
+
+  it("does not reuse the legacy free-text `pf` column", () => {
+    assert.notEqual("previous_eps_member", "pf");
+    assert.ok(STATUTORY_DETAIL_FIELDS.includes("pf"), "the legacy column is left exactly as it was");
+  });
+
+  it("needs the same statutory key when it travels with the PF fact", () => {
+    assert.deepEqual(
+      sectionKeysRequired({ previous_pf_member: 1, previous_eps_member: 0 }),
+      [P.EDIT_STATUTORY_DETAILS]
+    );
+  });
+});
+
 describe("the statutory configuration", () => {
   /**
    * Loaded fresh with an environment applied, because `config/statutory.js`

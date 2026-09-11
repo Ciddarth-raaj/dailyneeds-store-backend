@@ -395,3 +395,70 @@ describe("M2 — Previous PF Member is a Statutory Details field", () => {
     assert.equal(r.wrote, undefined, "salary must never reach updateEmployeeDetails");
   });
 });
+
+/* ----------------------------- M2. Existing / Previous EPS Member ---------- */
+
+/*
+ * The review fix. The pension question is asked and stored separately from the
+ * provident-fund one, because Form 11 asks it separately and the two answers
+ * differ. Same section, same existing right, its own column.
+ */
+describe("M2 — Previous EPS Member is its own Statutory Details field", () => {
+  it("is accepted by the schema in all three states", async () => {
+    for (const value of [1, 0, null]) {
+      const r = await save(ADMIN(), { previous_eps_member: value });
+      assert.equal(r.body && r.body.code, 200, `previous_eps_member=${value}: ${r.text}`);
+      assert.equal(r.wrote.employee_details.previous_eps_member, value);
+    }
+  });
+
+  it("is governed by the EXISTING statutory right, not a new key", async () => {
+    const r = await save(AS(STATUTORY_ONLY), { previous_eps_member: 1 });
+    assert.equal(r.body && r.body.code, 200, r.text);
+    assert.ok(r.wrote);
+  });
+
+  it("Payment Details rights do not open it", async () => {
+    const r = await save(AS(PAYMENT_ONLY), { previous_eps_member: 1 });
+    assert.ok(isSectionRefusal(r), `expected a section refusal, got ${r.text}`);
+    assert.deepEqual(r.body.required_permissions, [P.EDIT_STATUTORY_DETAILS]);
+    assert.equal(r.wrote, undefined);
+  });
+
+  it("is SENSITIVE under B3 — a caller without the sensitive pair is refused", async () => {
+    const r = await save(AS(NO_KEYS), { previous_eps_member: 1 });
+    assert.equal(r.status, 403);
+    assert.equal(r.wrote, undefined);
+  });
+
+  it("out-of-range values are refused", async () => {
+    for (const value of [2, -1, "yes"]) {
+      const r = await save(ADMIN(), { previous_eps_member: value });
+      assert.ok(isValidationRefusal(r), `previous_eps_member=${value} must be refused: ${r.text}`);
+      assert.equal(r.wrote, undefined);
+    }
+  });
+
+  it("TRAVELS SEPARATELY FROM THE PF FACT — one can be Yes while the other is No", async () => {
+    // The whole point. Somebody may have been in a previous employer's EPF
+    // without ever having been in EPS, and the route must be able to record
+    // exactly that rather than collapsing it to one answer.
+    const r = await save(ADMIN(), { previous_pf_member: 1, previous_eps_member: 0 });
+    assert.equal(r.body && r.body.code, 200, r.text);
+    assert.equal(r.wrote.employee_details.previous_pf_member, 1);
+    assert.equal(r.wrote.employee_details.previous_eps_member, 0);
+  });
+
+  it("is NOT the legacy `pf` column either", async () => {
+    const r = await save(ADMIN(), { pf: "legacy text", previous_eps_member: 1 });
+    assert.equal(r.body && r.body.code, 200, r.text);
+    assert.equal(r.wrote.employee_details.pf, "legacy text");
+    assert.equal(r.wrote.employee_details.previous_eps_member, 1);
+  });
+
+  it("SALARY IS STILL NOT WRITABLE ALONGSIDE IT", async () => {
+    const r = await save(ADMIN(), { previous_eps_member: 1, salary: 45000 });
+    assert.ok(isValidationRefusal(r), `expected 422, got ${r.text}`);
+    assert.equal(r.wrote, undefined, "salary must never reach updateEmployeeDetails");
+  });
+});

@@ -1,6 +1,6 @@
 -- M2 — the Salary Engine and the salary schema.
 --
--- ADDITIVE ONLY. One new column on `new_employee`, one new table, and eight
+-- ADDITIVE ONLY. Two new columns on `new_employee`, one new table, and eight
 -- permission declarations. No employee row is written, no existing value
 -- changes meaning, and `new_employee.salary` is neither read, copied nor
 -- dropped by this migration.
@@ -17,11 +17,10 @@
 -- their identifiers). It is: had this person already been a provident fund
 -- member before they joined?
 --
--- WHY PAYROLL NEEDS IT. Somebody who FIRST joins the fund on or after the
--- 2014 cutoff, earning above the pension wage ceiling, cannot join EPS - the
--- employer's whole 12% goes to EPF instead of splitting into EPF and EPS. The
--- answer changes which statutory head the money is filed under, so it is an
--- input to the engine rather than a note on a profile.
+-- WHY PAYROLL NEEDS IT. It is the EPF half of the Form 11 declaration and the
+-- fact an EPF transfer claim is raised from. It is NOT the fact the pension
+-- split is decided by - that is `previous_eps_member` in section 2 below, and
+-- the engine reads that one and only that one.
 --
 -- WHY IT IS NOT `pf`. The legacy `pf VARCHAR(45)` column is free text of
 -- unknown provenance that the target architecture already marks for
@@ -33,10 +32,7 @@
 -- `esi_applicable`: 1 yes, 0 no, NULL nobody has said yet. There is no
 -- backfill and no default, because defaulting six hundred real people to
 -- either answer would be a migration asserting a statutory fact about their
--- employment history that it did not witness. Where the unknown can change a
--- contribution, the engine reports it as unresolved rather than guessing; and
--- where it cannot - which is most employees, whose Basic is under the ceiling -
--- it costs nothing.
+-- employment history that it did not witness.
 --
 -- SAFE FOR THE NIGHTLY SYNC. `services/synker.js` builds its
 -- `INSERT ... ON DUPLICATE KEY UPDATE` from the keys present in the Digisme
@@ -46,13 +42,55 @@ SET @add_previous_pf_member = IF(
   (SELECT COUNT(*) FROM `information_schema`.`COLUMNS`
     WHERE `TABLE_SCHEMA` = DATABASE() AND `TABLE_NAME` = 'new_employee'
       AND `COLUMN_NAME` = 'previous_pf_member') = 0,
-  'ALTER TABLE `new_employee` ADD COLUMN `previous_pf_member` TINYINT(1) NULL DEFAULT NULL COMMENT ''1=was already a PF member before joining, 0=first-time member, NULL=not recorded''',
+  'ALTER TABLE `new_employee` ADD COLUMN `previous_pf_member` TINYINT(1) NULL DEFAULT NULL COMMENT ''1=was already an EPF member before joining, 0=first-time member, NULL=not recorded''',
   'DO 0');
 PREPARE add_stmt FROM @add_previous_pf_member;
 EXECUTE add_stmt;
 DEALLOCATE PREPARE add_stmt;
 
--- ============================================= 2. The salary history table
+-- =================================== 2. Existing / Previous EPS Member
+--
+-- A FOURTH STATUTORY FACT, AND A SEPARATE ONE. Official EPFO Form 11 puts the
+-- question twice - "whether earlier a member of the Employees' Provident Fund
+-- Scheme, 1952" and "whether earlier a member of the Employees' Pension
+-- Scheme, 1995" - because the two have two answers.
+--
+-- WHY THE EPF ANSWER CANNOT STAND IN FOR THIS ONE. Somebody may have been an
+-- EPF member without ever having been an EPS member: an international worker,
+-- an excluded employee, or anybody who joined the fund above the pension wage
+-- ceiling after the 2014 cutoff and was therefore kept out of EPS at that
+-- employer too. Reading `previous_pf_member = 1` as prior EPS membership would
+-- file those people into the pension scheme on an inference nobody made, so
+-- the engine reads THIS column for the split and never the one above.
+--
+-- WHY PAYROLL NEEDS IT. Somebody who was not already an EPS member on or after
+-- the 2014 cutoff, earning above the pension wage ceiling, cannot join EPS -
+-- the employer's whole 12% goes to EPF instead of splitting into EPF and EPS.
+-- The answer changes which statutory head the money is filed under, so it is
+-- an input to the engine rather than a note on a profile.
+--
+-- TRI-STATE, NO BACKFILL, AND NOT DERIVED FROM ANYTHING. 1 yes, 0 no, NULL
+-- nobody has said yet. There is deliberately no `UPDATE ... SET
+-- previous_eps_member = previous_pf_member` here, and there never should be:
+-- that statement is exactly the inference this column exists to stop. Where
+-- the unknown can change a contribution, the engine reports it as unresolved
+-- rather than guessing; and where it cannot - which is most employees, whose
+-- Basic is under the ceiling - it costs nothing.
+--
+-- SAFE FOR THE NIGHTLY SYNC, for the same reason as the column above: it is
+-- not a key the Digisme payload carries, so the 07:00 sync cannot set or clear
+-- it.
+SET @add_previous_eps_member = IF(
+  (SELECT COUNT(*) FROM `information_schema`.`COLUMNS`
+    WHERE `TABLE_SCHEMA` = DATABASE() AND `TABLE_NAME` = 'new_employee'
+      AND `COLUMN_NAME` = 'previous_eps_member') = 0,
+  'ALTER TABLE `new_employee` ADD COLUMN `previous_eps_member` TINYINT(1) NULL DEFAULT NULL COMMENT ''1=was already an EPS member before joining, 0=never an EPS member, NULL=not recorded''',
+  'DO 0');
+PREPARE add_eps_stmt FROM @add_previous_eps_member;
+EXECUTE add_eps_stmt;
+DEALLOCATE PREPARE add_eps_stmt;
+
+-- ============================================= 3. The salary history table
 --
 -- SALARY STOPS BEING A COLUMN. `new_employee.salary` is a free-text
 -- VARCHAR(45) holding one number with no history, no effective date, no
@@ -192,7 +230,7 @@ CREATE TABLE IF NOT EXISTS `employee_salary` (
     FOREIGN KEY (`employee_id`) REFERENCES `new_employee` (`employee_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- =================================== 3. The designation permission catalogue
+-- =================================== 4. The designation permission catalogue
 --
 -- DECLARED HERE, GRANTED TO NOBODY.
 --

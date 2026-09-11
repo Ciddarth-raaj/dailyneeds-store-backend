@@ -21,6 +21,15 @@ const { STATUS } = require("../repository/employee_salary");
  * APPROVED HISTORY IS IMMUTABLE. There is no path here that edits an approved
  * record and no path that deletes any record. A correction to an approved
  * salary is a NEW revision, which is a thing somebody has to approve.
+ *
+ * TWO RULES THAT ARE REFUSALS AND NOT WARNINGS, and are enforced HERE rather
+ * than in a route or a screen, because this is the layer every path shares:
+ *
+ *   a person may not approve a salary revision they created themselves,
+ *   administrators (`user_type = 2`) excepted — see `_refuseSelfApproval`
+ *
+ *   an employee may not be given a second future-dated live revision while one
+ *   is already outstanding — see `createInitialSalary`
  */
 
 /** Shaped so `utils/http.js#respondError` answers 400 with the detail. */
@@ -35,6 +44,22 @@ function notFound(message) {
   const err = new Error(message);
   err.name = "NotFoundError";
   return err;
+}
+
+/**
+ * `user_type = 2` is an administrator and holds every permission.
+ *
+ * The same constant `middlewares/permissions.js` uses, restated here rather
+ * than imported because that module is a factory that has to be built with the
+ * designation usecase, and this layer deliberately has no Express or database
+ * dependency at all. `actorFor` already reports the same fact as `isAdmin`;
+ * both are honoured so that an actor assembled either way is read correctly.
+ */
+const ADMIN_USER_TYPE = 2;
+
+/** True only for an administrator, by either of the two things an actor carries. */
+function isAdminActor(actor = {}) {
+  return actor.isAdmin === true || Number(actor.userType) === ADMIN_USER_TYPE;
 }
 
 /** `YYYY-MM-DD`, or null. Salary dates are date-only; a time would be noise. */
@@ -57,8 +82,20 @@ const SOURCE = {
 };
 
 class EmployeeSalaryUsecase {
-  constructor(salaryRepo) {
+  /**
+   * `options.now` is the clock, and it exists so the future-dating rules can
+   * be tested as rules rather than as "whatever date the suite happens to run
+   * on". It is NOT a caller input: nothing reaches it from a request body, and
+   * the server builds this usecase without it.
+   */
+  constructor(salaryRepo, options = {}) {
     this.salaryRepo = salaryRepo;
+    this._now = typeof options.now === "function" ? options.now : today;
+  }
+
+  /** Today, as a date-only string. The one place the clock is read. */
+  _today() {
+    return normalizeDate(this._now(), "today");
   }
 
   /* ------------------------------------------------------------ calculate */
@@ -86,7 +123,10 @@ class EmployeeSalaryUsecase {
       // The statutory facts come from the employee master, never the caller.
       pf_applicable: employee.pf_applicable,
       esi_applicable: employee.esi_applicable,
+      // Two separate history facts. The EPS split reads the EPS one; the PF
+      // one travels beside it and is never read as a substitute for it.
       previous_pf_member: employee.previous_pf_member,
+      previous_eps_member: employee.previous_eps_member,
       dob: employee.dob,
       date_of_joining: employee.date_of_joining,
       effective_from: effectiveFrom,
@@ -156,11 +196,61 @@ class EmployeeSalaryUsecase {
     });
 
     /*
-     * FUTURE-CONFLICT DETECTION. Inserting behind an existing future revision
-     * is legitimate, but it changes which record is current on which day, so
-     * it is reported back rather than discovered later on a payslip. It is a
-     * warning, not a refusal: back-dating a correction under an agreed future
-     * increment is a normal thing to need to do.
+     * TWO FUTURE-DATED REVISIONS AT ONCE ARE REFUSED.
+     *
+     * An employee who already has a live revision dated ahead of today has a
+     * pay change that is agreed (APPROVED) or awaiting a decision (PENDING)
+     * and has not happened yet. Queueing a SECOND future change behind it
+     * means nobody can answer the only question that matters — what will this
+     * person be paid next month — without replaying a queue, and the second
+     * one silently changes what the first one meant. In M2 the answer is to
+     * refuse, and to say what is already there: the existing revision is
+     * decided (approved, rejected, or superseded by amending it in place)
+     * before another future one is proposed.
+     *
+     * REJECTED HISTORY NEVER BLOCKS. `getFutureRevisions` excludes REJECTED
+     * rows, so a refused proposal at a future date leaves that date open, in
+     * the same way it leaves the opening-salary path open.
+     *
+     * THIS DOES NOT REPLACE ANYTHING. M2 has no path that edits or supersedes
+     * another future revision on the caller's behalf — an existing future row
+     * is left exactly as it is and the new request is refused, rather than one
+     * quietly winning.
+     */
+    const todayDate = this._today();
+    if (effectiveFrom > todayDate) {
+      const liveFutures = await this.salaryRepo.getFutureRevisions(employeeId, todayDate);
+      const blocking = (liveFutures || []).filter(
+        (f) => engine.toDateOnly(f.effective_from) !== effectiveFrom
+      );
+      if (blocking.length > 0) {
+        const detail = blocking
+          .map((f) => `${f.status.toLowerCase()} revision effective ${engine.toDateOnly(f.effective_from)}`)
+          .join(", ");
+        throw validationError(
+          `This employee already has a future-dated salary revision (${detail}); ` +
+            "decide that one before proposing another future revision",
+          {
+            conflict: {
+              kind: "FUTURE_REVISION_EXISTS",
+              requested_effective_from: effectiveFrom,
+              existing: blocking.map((f) => ({
+                salary_id: f.salary_id,
+                effective_from: engine.toDateOnly(f.effective_from),
+                status: f.status,
+              })),
+            },
+          }
+        );
+      }
+    }
+
+    /*
+     * BACK-DATING UNDER A FUTURE REVISION STAYS LEGITIMATE, AND STAYS
+     * REPORTED. A correction dated on or before today does not create a queue
+     * of undecided future pay, so it is not refused — but it does change which
+     * record is current on which day, so the future revisions it lands behind
+     * are still handed back rather than discovered later on a payslip.
      */
     const futures = await this.salaryRepo.getFutureRevisions(employeeId, effectiveFrom);
 
@@ -246,7 +336,7 @@ class EmployeeSalaryUsecase {
    * hardest kind of bug to see from a screen.
    */
   async getCurrentSalary(employeeId, asOf) {
-    const asOfDate = asOf ? normalizeDate(asOf, "as_of") : today();
+    const asOfDate = asOf ? normalizeDate(asOf, "as_of") : this._today();
     const row = await this.salaryRepo.getCurrentSalary(employeeId, asOfDate);
     if (!row) return { employee_id: Number(employeeId), as_of: asOfDate, current_salary: null };
     return { employee_id: Number(employeeId), as_of: asOfDate, current_salary: this._present(row) };
@@ -321,6 +411,46 @@ class EmployeeSalaryUsecase {
     return { salary_id: salaryId, status: STATUS.PENDING, calculated };
   }
 
+  /**
+   * NOBODY APPROVES THEIR OWN SALARY PROPOSAL — administrators excepted.
+   *
+   * `approve_salary_revision` says a person MAY approve salary revisions. It
+   * does not say they may approve their own, and a four-eyes rule that exists
+   * only as a convention is not a control: whoever holds both `add_salary` and
+   * `approve_salary_revision` would otherwise be able to raise a pay change and
+   * agree to it in the same minute, with the audit trail naming them twice and
+   * flagging nothing.
+   *
+   * ENFORCED HERE, NOT IN THE ROUTE OR THE SCREEN. This is the only layer every
+   * approval path goes through, and a rule that lives in route wiring is one
+   * new endpoint away from not existing.
+   *
+   * THE EXCEPTION IS ADMIN, AND IT IS THE EXISTING ONE. `user_type = 2` already
+   * bypasses every permission check in `middlewares/permissions.js`; this
+   * honours that same bypass rather than inventing a second notion of
+   * privilege. It is emphatically NOT a per-user override — there is no list of
+   * people exempted from this rule, and M2 adds no mechanism for one.
+   *
+   * WHO "THEMSELVES" IS. `created_by` holds the actor's EMPLOYEE id, which is
+   * what `_toRow` writes, so the comparison is employee identity against
+   * employee identity. An actor with no employee id (a system account) cannot
+   * have created the row, and a row with no `created_by` was not created by
+   * anybody, so neither case collides.
+   */
+  _refuseSelfApproval(existing, actor) {
+    if (isAdminActor(actor)) return;
+
+    const creator = existing.created_by;
+    const approver = actor.employeeId;
+    if (creator === null || creator === undefined) return;
+    if (approver === null || approver === undefined) return;
+    if (Number(creator) !== Number(approver)) return;
+
+    throw validationError(
+      "You cannot approve a salary revision you created yourself; it needs a different approver"
+    );
+  }
+
   /** Approve a pending revision. */
   async approveSalary(salaryId, actor = {}) {
     const existing = await this.salaryRepo.getById(salaryId);
@@ -328,6 +458,16 @@ class EmployeeSalaryUsecase {
     if (existing.status !== STATUS.PENDING) {
       throw validationError(`This revision is already ${existing.status.toLowerCase()}`);
     }
+    /*
+     * Checked AFTER the record is known to be pending, so a second approval of
+     * an already-approved row still reports the lifecycle state rather than
+     * the authorship rule — the more specific answer for the caller.
+     *
+     * REJECTION IS DELIBERATELY NOT GUARDED. Refusing your own proposal
+     * withdraws it; the rule this enforces is about agreeing to your own pay
+     * change, and `rejectSalary` keeps the existing workflow exactly.
+     */
+    this._refuseSelfApproval(existing, actor);
     const affected = await this.salaryRepo.approve(salaryId, actor.employeeId ?? null);
     if (affected === 0) {
       throw validationError("The salary revision was changed by somebody else; reload and try again");
@@ -353,8 +493,9 @@ class EmployeeSalaryUsecase {
   }
 }
 
-module.exports = (salaryRepo) => new EmployeeSalaryUsecase(salaryRepo);
+module.exports = (salaryRepo, options) => new EmployeeSalaryUsecase(salaryRepo, options);
 module.exports.EmployeeSalaryUsecase = EmployeeSalaryUsecase;
 module.exports.SOURCE = SOURCE;
+module.exports.ADMIN_USER_TYPE = ADMIN_USER_TYPE;
 module.exports.validationError = validationError;
 module.exports.normalizeDate = normalizeDate;

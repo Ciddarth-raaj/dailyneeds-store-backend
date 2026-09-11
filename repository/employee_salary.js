@@ -101,10 +101,15 @@ class EmployeeSalaryRepository {
   /**
    * The statutory context the engine needs about ONE employee.
    *
-   * FIVE COLUMNS AND A NAME. Not `SELECT *`, and deliberately not the bank
+   * SIX COLUMNS AND A NAME. Not `SELECT *`, and deliberately not the bank
    * account, the Aadhaar, the PAN or the legacy `salary` - calculating
    * somebody's provident fund is not a reason to read their identity
    * documents. This is the whole of what the engine is entitled to see.
+   *
+   * BOTH MEMBERSHIP HISTORIES ARE READ, because they are two different facts.
+   * `previous_eps_member` is the one the pension split turns on;
+   * `previous_pf_member` is the EPF history beside it and no rule in the
+   * engine infers one from the other.
    *
    * `date_of_joining` GOES THROUGH THE SHARED PARSER. That column is a VARCHAR
    * holding three different shapes, and `utils/joining_date.js` is the one
@@ -122,6 +127,7 @@ class EmployeeSalaryRepository {
              ne.\`pf_applicable\`,
              ne.\`esi_applicable\`,
              ne.\`previous_pf_member\`,
+             ne.\`previous_eps_member\`,
              DATE_FORMAT(ne.\`dob\`, '%Y-%m-%d') AS \`dob\`,
              DATE_FORMAT(${JOINED_ON("ne")}, '%Y-%m-%d') AS \`date_of_joining\`
         FROM \`new_employee\` ne

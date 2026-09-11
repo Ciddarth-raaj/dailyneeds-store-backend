@@ -119,13 +119,17 @@ const pf = {
   epsExitAgeYears: num("PF_EPS_EXIT_AGE_YEARS", 58),
 
   /**
-   * The "new member" cut-off. Somebody who FIRST joined the provident fund on
-   * or after this date, whose pension wage exceeds the EPS ceiling, is not
+   * The "new member" cut-off. Somebody who was NOT ALREADY AN EPS MEMBER on or
+   * after this date, whose pension wage exceeds the EPS ceiling, is not
    * eligible to join EPS — the employer's whole share goes to EPF instead.
-   * This is the rule that makes `previous_pf_member` a payroll input rather
+   * This is the rule that makes `previous_eps_member` a payroll input rather
    * than a note, and it is why the field is tri-state: for an employee whose
-   * membership history nobody has recorded, the answer is genuinely unknown
-   * and the engine reports it as unresolved rather than picking a side.
+   * pension history nobody has recorded, the answer is genuinely unknown and
+   * the engine reports it as unresolved rather than picking a side.
+   *
+   * IT IS THE EPS FACT AND NOT THE EPF ONE. Form 11 asks about prior EPF
+   * membership and prior EPS membership as two questions because they have two
+   * answers; `previous_pf_member` records the first and is not consulted here.
    */
   newMemberCutoffDate: date("PF_NEW_MEMBER_CUTOFF_DATE", "2014-09-01"),
 
