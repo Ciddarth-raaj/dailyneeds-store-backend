@@ -32,7 +32,16 @@ const fp = (account_no, ifsc) =>
  * calls it rather than querying employees itself, which is what makes its
  * visibility identical by construction rather than by review.
  */
-function build({ employees = [], identities = [], verifications = [], activeVerified = [] } = {}) {
+function build({
+  employees = [],
+  identities = [],
+  verifications = [],
+  activeVerified = [],
+  // `undefined` means this server has no employee-master repository wired, so
+  // the HR-onboarding keys are omitted entirely - which is what every test
+  // written before they existed asserts.
+  statutory = undefined,
+} = {}) {
   const queries = [];
   const employeeUsecase = {
     get: async (filters) => {
@@ -62,7 +71,22 @@ function build({ employees = [], identities = [], verifications = [], activeVeri
       return activeVerified.filter((r) => fingerprints.includes(r.account_fingerprint));
     },
   };
-  return { usecase: buildSummary(employeeUsecase, aadhaarRepo, bankRepo), queries };
+  const masterRepo = statutory
+    ? {
+        getStatutoryDecisionsMany: async (ids) => {
+          queries.push(["statutory", ids]);
+          // The real query answers in SQL and returns 1/0, never the flag.
+          return ids
+            .filter((id) => statutory[id])
+            .map((id) => ({
+              employee_id: id,
+              pf_decided: statutory[id].pf ? 1 : 0,
+              esi_decided: statutory[id].esi ? 1 : 0,
+            }));
+        },
+      }
+    : undefined;
+  return { usecase: buildSummary(employeeUsecase, aadhaarRepo, bankRepo, masterRepo), queries };
 }
 
 const byId = (rows) => Object.fromEntries(rows.map((r) => [r.employee_id, r]));
@@ -366,4 +390,126 @@ test("the account number is read to fingerprint it, and never returned", async (
   for (const forbidden of ["account_no", "ifsc", "last4", "fingerprint"]) {
     assert.ok(!returned.includes(forbidden), `the response must not build in ${forbidden}`);
   }
+});
+
+/* ================================================ HR onboarding pending == */
+/**
+ * The manager-created employee is real and operational the moment Stage 3
+ * commits; what is still outstanding is HR's half of the record. These check
+ * that "waiting on HR" is DERIVED from the sections themselves, so it cannot
+ * disagree with them, and that deriving it discloses no value.
+ */
+const account = { account_no: "123456789012", ifsc: "HDFC0001234" };
+const verified = (employee_id) => ({
+  employee_id,
+  status: "VERIFIED",
+  account_fingerprint: fp(account.account_no, account.ifsc),
+  name_match_verdict: "MATCH",
+});
+
+test("an employee a manager has just created is HR-onboarding pending", async () => {
+  // Nothing statutory decided, no bank account: both HR sections outstanding.
+  const { usecase } = build({
+    employees: [{ employee_id: 700 }],
+    statutory: { 700: { pf: false, esi: false } },
+  });
+  const rows = await usecase.list({});
+  assert.equal(rows[0].hr_onboarding_pending, true);
+  assert.deepEqual(rows[0].hr_onboarding_missing, ["statutory", "bank"]);
+});
+
+test("both HR sections done means nothing is pending - and NO is an answer", async () => {
+  // `pf_applicable = 0` is a recorded decision, not a blank. An employee in
+  // neither scheme is finished, not permanently outstanding.
+  const { usecase } = build({
+    employees: [{ employee_id: 701, ...account }],
+    verifications: [verified(701)],
+    statutory: { 701: { pf: true, esi: true } },
+  });
+  const rows = await usecase.list({});
+  assert.equal(rows[0].hr_onboarding_pending, false);
+  assert.deepEqual(rows[0].hr_onboarding_missing, []);
+});
+
+test("half a statutory decision is still a pending one", async () => {
+  const { usecase } = build({
+    employees: [{ employee_id: 702, ...account }],
+    verifications: [verified(702)],
+    statutory: { 702: { pf: true, esi: false } },
+  });
+  const rows = await usecase.list({});
+  assert.equal(rows[0].hr_onboarding_pending, true);
+  assert.deepEqual(rows[0].hr_onboarding_missing, ["statutory"]);
+});
+
+test("an account on file that has not passed its check is the BANK badge's job, not this one", async () => {
+  // It is already shown, accurately, by the bank column beside it. Counting
+  // it here as well would send HR chasing an employee whose details they
+  // have, which is a different task from chasing the ones they do not.
+  const { usecase } = build({
+    employees: [{ employee_id: 703, ...account }],
+    verifications: [{ ...verified(703), status: "PENDING", name_match_verdict: null }],
+    statutory: { 703: { pf: true, esi: true } },
+  });
+  const rows = await usecase.list({});
+  assert.equal(rows[0].bank_status, "PENDING");
+  assert.equal(rows[0].hr_onboarding_pending, false);
+});
+
+test("Aadhaar Pending never makes an employee HR-onboarding pending", async () => {
+  // "Skip for now" is a first-class choice at Stage 1 and holds up nothing.
+  const { usecase } = build({
+    employees: [{ employee_id: 704, ...account }],
+    verifications: [verified(704)],
+    identities: [],
+    statutory: { 704: { pf: true, esi: true } },
+  });
+  const rows = await usecase.list({});
+  assert.equal(rows[0].aadhaar_status, "PENDING");
+  assert.equal(rows[0].hr_onboarding_pending, false);
+});
+
+test("a server that cannot tell says nothing, rather than saying 'complete'", async () => {
+  const { usecase, queries } = build({ employees: [{ employee_id: 705 }] });
+  const rows = await usecase.list({});
+  assert.ok(!("hr_onboarding_pending" in rows[0]), "an unknown state is not a false one");
+  assert.ok(!("hr_onboarding_missing" in rows[0]));
+  assert.ok(!queries.some(([kind]) => kind === "statutory"), "and it does not ask");
+});
+
+test("the derivation discloses whether a decision exists, never what it was", async () => {
+  const { usecase, queries } = build({
+    employees: [{ employee_id: 706 }],
+    statutory: { 706: { pf: true, esi: true } },
+  });
+  const rows = await usecase.list({});
+  const serialised = JSON.stringify(rows);
+  for (const forbidden of ["pf_applicable", "esi_applicable", "uan", "pf_number", "esi_number"]) {
+    assert.ok(!serialised.includes(forbidden), `${forbidden} must not appear in the summary`);
+  }
+  assert.deepEqual(Object.keys(rows[0]).sort(), [
+    "aadhaar_status",
+    "bank_payroll_ready",
+    "bank_status",
+    "employee_id",
+    "hr_onboarding_missing",
+    "hr_onboarding_pending",
+  ]);
+  // One bulk read for the whole list, like every other read here.
+  assert.equal(queries.filter(([kind]) => kind === "statutory").length, 1);
+});
+
+test("it stays one query per read at 600 employees, statutory included", async () => {
+  const employees = [];
+  const statutory = {};
+  for (let id = 1; id <= 600; id += 1) {
+    employees.push({ employee_id: id });
+    statutory[id] = { pf: id % 2 === 0, esi: true };
+  }
+  const { usecase, queries } = build({ employees, statutory });
+  const rows = await usecase.list({});
+  assert.equal(rows.length, 600);
+  // employees, aadhaar, bank-details, verifications, statutory. No duplicates
+  // query: nobody is sitting on DUPLICATE_ACCOUNT.
+  assert.equal(queries.length, 5);
 });

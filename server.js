@@ -477,10 +477,14 @@ class Server {
       this.mysql.connection,
       this.reportTemplateRepo
     );
+    // The employee-master repository is passed for one read - whether the PF
+    // and ESI decision has been recorded - which is what lets the list say an
+    // employee is still waiting on HR onboarding. No column value leaves it.
     this.employeeStatusSummaryUsecase = require("./usecase/employee_status_summary")(
       this.employeeUsecase,
       this.employeeAadhaarRepo,
-      this.employeeBankRepo
+      this.employeeBankRepo,
+      this.employeeMasterRepo
     );
     this.shiftUsecase = require("./usecase/shift")(this.shiftRepo);
     this.workShiftUsecase = require("./usecase/work_shift")(this.workShiftRepo);

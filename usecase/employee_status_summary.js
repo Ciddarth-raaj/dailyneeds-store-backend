@@ -31,26 +31,77 @@ const { EmployeeBankUsecase } = require("./employee_bank");
  * somebody the existing list would not show. It is a status column on an
  * existing list, not a new way to enumerate employees.
  *
- * QUERY COUNT IS BOUNDED at five, whatever the headcount:
+ * QUERY COUNT IS BOUNDED at six, whatever the headcount:
  *
  *   1  the resigned-name exclusion list  } inside employeeUsecase.get()
  *   2  the employees themselves          }
  *   3  which of them have an Aadhaar identity
  *   4  their bank details
  *   5  their stored bank verifications
- *   6  the active-duplicate lookup - only when at least one employee is
+ *   6  whether the statutory decision has been recorded - see the
+ *      HR-onboarding note below
+ *   7  the active-duplicate lookup - only when at least one employee is
  *      actually sitting on DUPLICATE_ACCOUNT, so usually not run at all
  *
- * WHAT IT RETURNS is four scalars per employee and nothing else. No Aadhaar
- * number or last four digits, no account number or last four, no IFSC, no
- * fingerprint, no ciphertext, no verification or session id, no provider
- * payload, no override reason. A list needs a badge.
+ * WHAT IT RETURNS is four scalars per employee, plus the two HR-onboarding
+ * keys below, and nothing else. No Aadhaar number or last four digits, no
+ * account number or last four, no IFSC, no fingerprint, no ciphertext, no
+ * verification or session id, no provider payload, no override reason. A list
+ * needs a badge.
+ *
+ * HR ONBOARDING PENDING - a DERIVED state, not a new one. A store manager
+ * creates the employee record and their responsibility ends there; the
+ * statutory and bank sections are HR's, and are completed afterwards on the
+ * employee profile. "Still waiting on HR" is therefore not a status somebody
+ * sets - it is the absence of those two sections, which this endpoint can
+ * already see:
+ *
+ *   statutory   the PF and ESI applicability flags, which exist precisely to
+ *               distinguish "decided" from "nobody has been asked yet"
+ *   bank        NOT_PROVIDED, by the same rule as the bank badge beside it
+ *
+ * So no column, no enum value and no migration is added for it, nothing has
+ * to be backfilled for the 630 employees already on file, and the flag cannot
+ * drift out of step with the sections it describes. Aadhaar is deliberately
+ * NOT part of it: Aadhaar Pending is a first-class outcome that holds up
+ * nothing, and it has its own badge already.
+ *
+ * The two keys carry no value of any sensitive field - only whether a section
+ * is outstanding, which is the same kind of fact `bank_status:
+ * "NOT_PROVIDED"` has always carried on this endpoint, under the same
+ * `view_employees` permission. They are omitted entirely, rather than guessed
+ * at, on a server where the employee-master repository is not wired.
  */
+
 class EmployeeStatusSummaryUsecase {
-  constructor(employeeUsecase, aadhaarRepo, bankRepo) {
+  /**
+   * `employeeMasterRepo` is optional and read-only here: it answers whether
+   * the statutory decision has been recorded, never what it was.
+   */
+  constructor(employeeUsecase, aadhaarRepo, bankRepo, employeeMasterRepo) {
     this.employees = employeeUsecase;
     this.aadhaarRepo = aadhaarRepo || null;
     this.bankRepo = bankRepo || null;
+    this.masterRepo = employeeMasterRepo || null;
+  }
+
+  /**
+   * Which HR-owned sections are still outstanding for one employee.
+   *
+   * `statutory` is `{ pfDecided, esiDecided }`, or null when this server
+   * cannot tell - in which case the caller omits the keys rather than
+   * reporting a completeness it did not establish.
+   */
+  static hrOnboardingState({ statutory, bankStatus }) {
+    if (!statutory) return null;
+    const missing = [];
+    if (!statutory.pfDecided || !statutory.esiDecided) missing.push("statutory");
+    // The same rule the bank badge uses: an account nobody has entered is
+    // HR's to chase. An account that IS on file and has not passed its check
+    // is a different job, already shown by the bank badge, and is not counted
+    // here twice.
+    if (!bankStatus || bankStatus === "NOT_PROVIDED") missing.push("bank");
+    return { pending: missing.length > 0, missing };
   }
 
   /**
@@ -67,20 +118,49 @@ class EmployeeStatusSummaryUsecase {
     }
     if (ids.length === 0) return [];
 
-    const [aadhaarIds, bank] = await Promise.all([
+    const [aadhaarIds, bank, statutory] = await Promise.all([
       this._aadhaarIds(ids),
       this._bankStatuses(ids),
+      this._statutoryDecisions(ids),
     ]);
 
     return ids.map((employee_id) => {
       const b = bank.get(employee_id) || { status: "NOT_PROVIDED", bank_payroll_ready: false };
+      const onboarding = EmployeeStatusSummaryUsecase.hrOnboardingState({
+        statutory: statutory ? statutory.get(employee_id) || { pfDecided: false, esiDecided: false } : null,
+        bankStatus: b.status,
+      });
       return {
         employee_id,
         aadhaar_status: aadhaarIds.has(employee_id) ? "VERIFIED" : "PENDING",
         bank_status: b.status,
         bank_payroll_ready: b.bank_payroll_ready,
+        ...(onboarding
+          ? {
+              hr_onboarding_pending: onboarding.pending,
+              hr_onboarding_missing: onboarding.missing,
+            }
+          : {}),
       };
     });
+  }
+
+  /**
+   * Whether the statutory decision has been recorded, per employee. One bulk
+   * read, and null - not an empty map - where this server cannot answer, so
+   * "not wired" never reads as "nothing is outstanding".
+   */
+  async _statutoryDecisions(ids) {
+    if (!this.masterRepo || typeof this.masterRepo.getStatutoryDecisionsMany !== "function") return null;
+    const rows = await this.masterRepo.getStatutoryDecisionsMany(ids);
+    const out = new Map();
+    for (const row of rows || []) {
+      out.set(Number(row.employee_id), {
+        pfDecided: Boolean(Number(row.pf_decided)),
+        esiDecided: Boolean(Number(row.esi_decided)),
+      });
+    }
+    return out;
   }
 
   /**
@@ -195,6 +275,6 @@ class EmployeeStatusSummaryUsecase {
   }
 }
 
-module.exports = (employeeUsecase, aadhaarRepo, bankRepo) =>
-  new EmployeeStatusSummaryUsecase(employeeUsecase, aadhaarRepo, bankRepo);
+module.exports = (employeeUsecase, aadhaarRepo, bankRepo, employeeMasterRepo) =>
+  new EmployeeStatusSummaryUsecase(employeeUsecase, aadhaarRepo, bankRepo, employeeMasterRepo);
 module.exports.EmployeeStatusSummaryUsecase = EmployeeStatusSummaryUsecase;

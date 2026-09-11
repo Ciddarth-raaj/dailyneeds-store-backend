@@ -359,6 +359,35 @@ class EmployeeMasterRepository {
   }
 
   /**
+   * Whether the statutory DECISION has been recorded for each employee -
+   * never what it was.
+   *
+   * Employee onboarding is finished by HR, not by the manager who creates the
+   * record, so a screen needs to know which employees are still waiting on
+   * HR. The PF and ESI applicability flags are the existing, C3 answer to
+   * "has anybody been asked about this yet": NULL means nobody has, and a
+   * value - either value - means somebody has. That is a completeness fact,
+   * so this returns two booleans per employee and no column value at all.
+   *
+   * `pf_applicable` and `esi_applicable` ARE SENSITIVE UNDER B3 and stay
+   * inside the database: the comparison happens in SQL and only the 1/0 of
+   * "recorded" comes back. A number is deliberately NOT part of the test -
+   * a UAN is routinely pending for weeks after joining, and the profile
+   * already treats a missing one as ordinary rather than outstanding.
+   */
+  async getStatutoryDecisionsMany(employeeIds) {
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
+    return this._read(
+      "GET-STATUTORY-DECISIONS-MANY",
+      `SELECT employee_id,
+              (pf_applicable IS NOT NULL)  AS pf_decided,
+              (esi_applicable IS NOT NULL) AS esi_decided
+         FROM new_employee WHERE employee_id IN (?)`,
+      [employeeIds]
+    );
+  }
+
+  /**
    * The review queue: periods C1b or C1c could not date. Read-only, and
    * nothing here repairs anything - the 518 historical rows stay exactly as
    * they are until the archived Digisme export is imported.
