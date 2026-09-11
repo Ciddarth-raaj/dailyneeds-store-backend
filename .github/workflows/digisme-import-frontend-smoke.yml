@@ -151,22 +151,31 @@ jobs:
             if grep -qE 'readAsArrayBuffer|FileReader' "$CHUNK"; then fail "the deployed screen reads the workbook in the browser"; else pass "the deployed screen does not read the workbook in the browser"; fi
           fi
 
-          echo "=== navigation gate (menus.js is compiled into the shared bundle)"
-          NAVHIT="$(grep -rlF "Import Attendance" .next/static/chunks .next/server 2>/dev/null | head -1)"
-          if [ -n "$NAVHIT" ]; then
-            report "navigation bundle: $NAVHIT"
-            navwant() { if grep -qF "$2" "$NAVHIT"; then pass "the deployed navigation carries: $1"; else fail "the deployed navigation is MISSING: $1"; fi; }
-            navwant "the Import Attendance entry"          "Import Attendance"
-            navwant "its route"                            "/attendance/imports"
-            navwant "its permission gate"                  "manage_attendance_import"
-            navwant "Attendance List (unchanged)"          "/attendance/list"
-            navwant "Punch Audit (unchanged)"              "/attendance/list?tab=audit"
-            navwant "Biomax Devices (unchanged)"           "/attendance/devices"
-            navwant "the existing view_raw_attendance key" "view_raw_attendance"
-            navwant "the existing punch audit key"         "view_attendance_punch_audit"
-            navwant "the existing devices key"             "view_biomax_devices"
+          echo "=== navigation (menus.js is compiled into the page bundles)"
+          # Search every deployed bundle: webpack splits the navigation into
+          # whichever chunks import it, so pinning one file proves nothing.
+          navwant() {
+            if grep -rqF "$2" .next/static/chunks .next/server 2>/dev/null; then
+              pass "the deployed navigation carries: $1"
+            else
+              fail "the deployed navigation is MISSING: $1"
+            fi
+          }
+          navwant "the Import Attendance entry"          "Import Attendance"
+          navwant "its route"                            "/attendance/imports"
+          navwant "its permission gate"                  "manage_attendance_import"
+          navwant "Attendance List (unchanged)"          "/attendance/list"
+          navwant "Punch Audit (unchanged)"              "/attendance/list?tab=audit"
+          navwant "Biomax Devices (unchanged)"           "/attendance/devices"
+          navwant "the existing view_raw_attendance key" "view_raw_attendance"
+          navwant "the existing punch audit key"         "view_attendance_punch_audit"
+          navwant "the existing devices key"             "view_biomax_devices"
+          # The entry and its gate must travel together in the SAME bundle,
+          # otherwise "both are present somewhere" would not mean it is gated.
+          if grep -rlF "Import Attendance" .next/static/chunks .next/server 2>/dev/null | xargs -r grep -lF "/attendance/imports" 2>/dev/null | xargs -r grep -qlF "manage_attendance_import" 2>/dev/null; then
+            pass "the entry, its route and manage_attendance_import are in the same bundle - it is gated, not merely present"
           else
-            fail "no deployed bundle carries the Import Attendance navigation entry"
+            fail "no single bundle carries the Import Attendance entry with its route AND its permission gate"
           fi
 
           echo "=== nothing was imported (read-only database check)"
