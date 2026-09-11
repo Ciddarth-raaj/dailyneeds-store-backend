@@ -207,6 +207,28 @@ class EmployeeWorkShiftRepository {
     );
   }
 
+  /**
+   * M1. The active work shifts as a dropdown: id, code, name, plus the
+   * distinct working in/out times so the option can say "9:00 - 18:00".
+   * Configuration (grace, OT, cut-offs) is deliberately not selected: this
+   * is offered to `employee_create` holders who may not see the master.
+   */
+  async listActiveWorkShiftOptions() {
+    return this._read(
+      "LIST-ACTIVE-WORK-SHIFT-OPTIONS",
+      `SELECT ws.work_shift_id, ws.shift_code, ws.shift_name,
+              s.in_time, s.out_time
+         FROM work_shift ws
+         LEFT JOIN work_shift_weekly_schedule s
+           ON s.work_shift_id = ws.work_shift_id
+          AND s.is_working_day = 1
+          AND s.in_time IS NOT NULL
+          AND s.out_time IS NOT NULL
+        WHERE ws.active = 1
+        ORDER BY ws.shift_code, ws.shift_name, s.in_time, s.out_time`
+    );
+  }
+
   /** The active work shift the caller is assigning to, or null. */
   async getActiveWorkShift(workShiftId) {
     const rows = await this._read(

@@ -4,6 +4,7 @@ const lifecycleConfig = require("../config/lifecycle");
 const { requireEmployee, employeeIdOrNull } = require("../utils/actor");
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
+const { sectionKeysRequired } = require("../constants/employee_master_sections");
 
 class EmployeeRoutes {
   constructor(employeeUsecase, permissions, sensitive) {
@@ -561,6 +562,21 @@ class EmployeeRoutes {
         if (isValid.error !== null) {
           console.log(isValid.error);
           throw isValid.error;
+        }
+        // M1. Payment Details and Statutory Details are separate sections
+        // with separate keys, on top of `add_employees` (this route) and
+        // `edit_employee_sensitive` (B3's guardWrite, mounted on the router).
+        // Refused as a whole, like B3: a body that names a column the caller
+        // may not write is not partially applied.
+        const sectionKeys = sectionKeysRequired(employee.employee_details);
+        if (sectionKeys.length > 0 && !(await this.permissions.hasAll(req, ...sectionKeys))) {
+          res.status(403).json({
+            code: 403,
+            msg: "You do not have permission to change these employee details",
+            required_permissions: sectionKeys,
+          });
+          res.end();
+          return;
         }
         const code = await this.employeeUsecase.updateEmployeeDetails(employee);
         res.json({ code: code });

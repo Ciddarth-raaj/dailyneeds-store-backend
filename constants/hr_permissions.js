@@ -60,6 +60,17 @@ module.exports = {
   VIEW_FAMILY: "view_family",
   ADD_FAMILY: "add_family",
 
+  // M1 - Employee Master restructure. The two post-onboarding sections a
+  // store manager never completes, each behind its own key so that Payment
+  // Details (Cash/Bank and the account) and Statutory Details (PAN, PF, ESI)
+  // can be granted separately. Both still sit UNDER B3: the columns stay in
+  // `constants/sensitive_fields.js`, so `edit_employee_sensitive` is required
+  // as well, and the M1 migration grants these only to designations that
+  // already hold `add_employees` together with `edit_employee_sensitive` -
+  // nobody's effective access changes on deploy.
+  EDIT_PAYMENT_DETAILS: "edit_payment_details",
+  EDIT_STATUTORY_DETAILS: "edit_statutory_details",
+
   // documents
   VIEW_DOCUMENTS: "view_documents",
   ADD_DOCUMENTS: "add_documents",

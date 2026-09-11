@@ -61,15 +61,69 @@ const find = (method, path) =>
   guards.find((g) => g.method === method && g.path === path);
 
 describe("the endpoints", () => {
-  it("defines exactly the two reads and the bulk write", () => {
+  it("defines exactly the three reads and the bulk write", () => {
     assert.deepEqual(
       guards.map((g) => `${g.method} ${g.path}`).sort(),
       [
         "GET /work-shift-assignments",
         "GET /work-shift-assignments/employee/:employee_id",
+        "GET /work-shift-assignments/options",
         "POST /work-shift-assignments/bulk",
       ]
     );
+  });
+
+  it("M1: the options read is declared BEFORE the :employee_id read, so 'options' is never an id", () => {
+    const order = guards.map((g) => `${g.method} ${g.path}`);
+    assert.ok(
+      order.indexOf("GET /work-shift-assignments/options") <
+        order.indexOf("GET /work-shift-assignments/employee/:employee_id")
+    );
+  });
+});
+
+describe("M1: the shift options dropdown", () => {
+  it("is open to employee_create (a store manager's initial shift) OR a shift key", () => {
+    const { guard } = find("GET", "/work-shift-assignments/options");
+    assert.equal(guard.mode, "any");
+    assert.deepEqual(guard.keys, [
+      P.EMPLOYEE_CREATE,
+      P.ASSIGN_EMPLOYEE_SHIFT,
+      P.VIEW_SHIFT_ASSIGNMENTS,
+      P.VIEW_WORK_SHIFTS,
+    ]);
+  });
+
+  it("returns identity and timing only, one row per ACTIVE shift, never configuration", async () => {
+    const { EmployeeWorkShiftUsecase } = require("../usecase/employee_work_shift");
+    const usecase = new EmployeeWorkShiftUsecase({
+      listActiveWorkShiftOptions: async () => [
+        { work_shift_id: 2, shift_code: "GS1", shift_name: "General", in_time: "09:00:00", out_time: "18:00:00" },
+        { work_shift_id: 2, shift_code: "GS1", shift_name: "General", in_time: "09:00:00", out_time: "18:00:00" },
+        { work_shift_id: 5, shift_code: "N1", shift_name: "Night", in_time: null, out_time: null },
+      ],
+    });
+    const res = await usecase.activeOptions();
+    assert.equal(res.code, 200);
+    assert.deepEqual(
+      res.data.map((r) => Object.keys(r).sort()),
+      [["shift_code", "shift_name", "timing", "work_shift_id"], ["shift_code", "shift_name", "timing", "work_shift_id"]]
+    );
+    assert.equal(res.data[0].work_shift_id, 2);
+    assert.match(String(res.data[0].timing), /9:00/);
+    assert.equal(res.data[1].timing, null);
+  });
+
+  it("the repository selects only active shifts and no configuration column", () => {
+    const fs = require("fs");
+    const src = fs.readFileSync(require.resolve("../repository/employee_work_shift"), "utf8");
+    const fn = src.slice(src.indexOf("async listActiveWorkShiftOptions"), src.indexOf("async getActiveWorkShift"));
+    assert.match(fn, /WHERE ws\.active = 1/);
+    for (const forbidden of ["grace", "overtime", "ot_", "deduction", "cutoff", "shift_master"]) {
+      assert.ok(!fn.toLowerCase().includes(forbidden), `${forbidden} must not be selected for a dropdown`);
+    }
+    // The legacy column, as opposed to `work_shift_id`.
+    assert.ok(!/(?<!work_)shift_id/.test(fn), "the legacy shift_id is never read here");
   });
 });
 

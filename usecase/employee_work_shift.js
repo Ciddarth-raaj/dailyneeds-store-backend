@@ -269,6 +269,39 @@ class EmployeeWorkShiftUsecase {
   }
 
   /**
+   * M1. Active shifts for the Employment stage / section dropdown:
+   * `[{ work_shift_id, shift_code, shift_name, timing }]`, one row per shift,
+   * timing described exactly as the profile describes it.
+   */
+  async activeOptions() {
+    const rows = (await this.repo.listActiveWorkShiftOptions()) || [];
+    const byId = new Map();
+    for (const row of rows) {
+      const id = Number(row.work_shift_id);
+      if (!byId.has(id)) {
+        byId.set(id, {
+          work_shift_id: id,
+          shift_code: row.shift_code || null,
+          shift_name: row.shift_name || null,
+          timings: [],
+        });
+      }
+      if (row.in_time && row.out_time) {
+        const t = { in_time: formatTime(row.in_time), out_time: formatTime(row.out_time) };
+        const seen = byId.get(id).timings;
+        if (!seen.some((x) => x.in_time === t.in_time && x.out_time === t.out_time)) seen.push(t);
+      }
+    }
+    return {
+      code: 200,
+      data: [...byId.values()].map(({ timings, ...shift }) => ({
+        ...shift,
+        timing: describeTiming(timings),
+      })),
+    };
+  }
+
+  /**
    * Assign one ACTIVE work shift to the selected employees.
    *
    * Writes `default_work_shift_id` and nothing else. There is no unassign

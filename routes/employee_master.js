@@ -83,6 +83,12 @@ class EmployeeMasterRoutes {
             designation_id: Joi.number().integer().positive().required(),
             department_id: Joi.number().integer().positive().required(),
             shift_id: Joi.number().integer().positive().optional(),
+            // M1. The initial work shift, from the NEW work shift master
+            // (`work_shift`), chosen on the Employment stage. Optional: an
+            // employee can still be created and assigned from Employee Shift
+            // Assignment afterwards. The usecase refuses an unknown or
+            // inactive shift, exactly as the assignment endpoint does.
+            default_work_shift_id: Joi.number().integer().positive().allow(null).optional(),
             primary_contact_number: Joi.string().trim().optional(),
             father_name: Joi.string().allow("", null).optional(),
             dob: Joi.string().allow("", null).optional(),
@@ -121,6 +127,48 @@ class EmployeeMasterRoutes {
       }
       res.end();
     });
+
+    /* ----------------------------------------------- onboarding: education */
+    /**
+     * M1. Stage 4 of Add Employee. The Employee ID exists after stage 3, and
+     * the same `employee_create` holder finishes Education on it here -
+     * WITHOUT needing `employee_edit`, which is the profile's key and would
+     * open every ordinary column. This route accepts the three education
+     * columns and nothing else; the body is refused if it names anything
+     * more, and the usecase's ordinary edit path does the write.
+     */
+    router.post(
+      "/employee/:employee_id/onboarding-education",
+      this.permissions.require(P.EMPLOYEE_CREATE),
+      async (req, res) => {
+        try {
+          const employeeId = Number(req.params.employee_id);
+          if (!Number.isInteger(employeeId) || employeeId <= 0) {
+            res.json({ code: 422, msg: "employee_id must be a positive integer" });
+            res.end();
+            return;
+          }
+          const schema = Joi.object()
+            .keys({
+              qualification: Joi.string().allow("", null).optional(),
+              additional_course: Joi.string().allow("", null).optional(),
+              previous_experience: Joi.string().allow("", null).optional(),
+            })
+            .unknown(false);
+          const isValid = Joi.validate(req.body, schema);
+          if (isValid.error !== null) throw isValid.error;
+
+          res.json(
+            await this.usecase.saveOnboardingEducation(employeeId, req.body, {
+              actorEmployeeId: this._actor(req),
+            })
+          );
+        } catch (err) {
+          this._fail(res, err);
+        }
+        res.end();
+      }
+    );
 
     /* -------------------------------------------------------------- edit */
     router.post("/employee/:employee_id/edit", this.permissions.require(P.EMPLOYEE_EDIT), async (req, res) => {

@@ -109,6 +109,27 @@ class EmployeeWorkShiftRoutes {
      * were a wildcard - neither is, and `employee` is a literal segment, so
      * this cannot swallow another path.
      */
+    /**
+     * M1. The dropdown for choosing a shift on the Employment stage of Add
+     * Employee and the Employment section of the profile. Active shifts,
+     * identity and timing ONLY - no configuration - which is why it is open
+     * to `employee_create` (a store manager choosing a new hire's initial
+     * shift) as well as to the shift keys. Declared before the `:employee_id`
+     * route so "options" is never read as an id.
+     */
+    router.get(
+      "/work-shift-assignments/options",
+      this.permissions.require(P.EMPLOYEE_CREATE, P.ASSIGN_EMPLOYEE_SHIFT, P.VIEW_SHIFT_ASSIGNMENTS, P.VIEW_WORK_SHIFTS),
+      async (req, res) => {
+        try {
+          res.json(await this.usecase.activeOptions());
+        } catch (err) {
+          respondError(res, err);
+        }
+        res.end();
+      }
+    );
+
     router.get(
       "/work-shift-assignments/employee/:employee_id",
       this.permissions.requireAll(P.VIEW_EMPLOYEES, P.VIEW_SHIFT_ASSIGNMENTS),

@@ -115,8 +115,13 @@ class EmployeeMasterUsecase {
    * the newest period to validate a date against, and filling a previously
    * unknown end date through C1c's own NULL-only path.
    */
-  constructor(employeeMasterRepo, lifecycleUsecase, lifecycleRepo, aadhaarUsecase) {
+  constructor(employeeMasterRepo, lifecycleUsecase, lifecycleRepo, aadhaarUsecase, workShiftLookup) {
     this.repo = employeeMasterRepo;
+    // M1. Answers `getActiveWorkShift(id)` - the employee work shift
+    // repository - so a create can refuse an unknown or inactive initial
+    // shift the same way Employee Shift Assignment does. Optional: without
+    // it, a create that names a shift is refused rather than trusted.
+    this.workShifts = workShiftLookup || null;
     this.lifecycle = lifecycleUsecase;
     this.lifecycleRepo = lifecycleRepo;
     // Optional: a deployment with no Aadhaar keys configured still creates
@@ -189,6 +194,13 @@ class EmployeeMasterUsecase {
     fields.date_of_joining = joinedOn;
     fields.status = STATUS.ACTIVE;
     fields.resignation_date = null;
+
+    // M1. The initial shift is the NEW master's id, checked before anything
+    // is written. `null` means "not chosen" and is not stored as a value.
+    if (fields.default_work_shift_id === null) delete fields.default_work_shift_id;
+    if (fields.default_work_shift_id !== undefined) {
+      await this._requireActiveWorkShift(fields.default_work_shift_id);
+    }
 
     const verificationId = input.aadhaar_verification_id;
     if (verificationId !== undefined && verificationId !== null && !this.aadhaar) {
@@ -281,6 +293,38 @@ class EmployeeMasterUsecase {
    * keyed on designation - so those edits revoke the employee's sessions
    * through the Stage 0A cutoff.
    */
+  /** Refuses a `default_work_shift_id` that is not an active work shift. */
+  async _requireActiveWorkShift(workShiftId) {
+    const id = Number(workShiftId);
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new ValidationError("default_work_shift_id must be a work shift id");
+    }
+    if (!this.workShifts || typeof this.workShifts.getActiveWorkShift !== "function") {
+      throw new ValidationError("Work shift assignment is not configured on this server");
+    }
+    const shift = await this.workShifts.getActiveWorkShift(id);
+    if (!shift) throw new ValidationError(`work shift ${id} does not exist`, 404);
+    if (!Number(shift.active)) {
+      throw new ValidationError("That work shift is inactive and cannot be assigned");
+    }
+    return shift;
+  }
+
+  /**
+   * M1. Stage 4 of onboarding: the education columns, written by the same
+   * `employee_create` holder who just created the employee. Restricted to
+   * the three education fields here as well as at the route, so a direct
+   * caller cannot reach the ordinary editor through the onboarding key.
+   */
+  async saveOnboardingEducation(employeeId, input, { actorEmployeeId = null } = {}) {
+    const patch = {};
+    for (const f of ["qualification", "additional_course", "previous_experience"]) {
+      if (input && input[f] !== undefined) patch[f] = input[f] === null ? "" : String(input[f]);
+    }
+    if (Object.keys(patch).length === 0) throw new ValidationError("nothing to change");
+    return this.editEmployee(employeeId, patch, { actorEmployeeId });
+  }
+
   async editEmployee(employeeId, patch, { actorEmployeeId = null } = {}) {
     const offered = Object.keys(patch || {});
     const forbidden = offered.filter((k) => LIFECYCLE_CONTROLLED_FIELDS.includes(k));
@@ -703,8 +747,8 @@ class EmployeeMasterUsecase {
   }
 }
 
-module.exports = (employeeMasterRepo, lifecycleUsecase, lifecycleRepo, aadhaarUsecase) =>
-  new EmployeeMasterUsecase(employeeMasterRepo, lifecycleUsecase, lifecycleRepo, aadhaarUsecase);
+module.exports = (employeeMasterRepo, lifecycleUsecase, lifecycleRepo, aadhaarUsecase, workShiftLookup) =>
+  new EmployeeMasterUsecase(employeeMasterRepo, lifecycleUsecase, lifecycleRepo, aadhaarUsecase, workShiftLookup);
 module.exports.EmployeeMasterUsecase = EmployeeMasterUsecase;
 module.exports.effectiveDate = effectiveDate;
 module.exports.rejectFutureDate = rejectFutureDate;

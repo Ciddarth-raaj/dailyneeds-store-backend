@@ -117,11 +117,15 @@ describe("the legacy shift mapping", () => {
     // Every occurrence is on `work_shift`: the joined display column on the
     // list and on the single-employee profile read, and the shift the
     // assignment names back to the user.
+    // M1 added the options read (`listActiveWorkShiftOptions`): one more
+    // SELECT of `ws.shift_code` and its ORDER BY, both on the work_shift master.
     const occurrences = code.match(/[A-Za-z_.]*shift_code/g) || [];
     assert.deepEqual(occurrences.sort(), [
       "shift_code",
       "work_shift_code",
       "work_shift_code",
+      "ws.shift_code",
+      "ws.shift_code",
       "ws.shift_code",
       "ws.shift_code",
     ]);

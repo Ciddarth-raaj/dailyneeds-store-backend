@@ -469,7 +469,10 @@ class Server {
       this.employeeMasterRepo,
       this.employeeLifecycleUsecase,
       this.employeeLifecycleRepo,
-      this.employeeAadhaarUsecase
+      this.employeeAadhaarUsecase,
+      // M1: the initial work shift on a create is checked against the NEW
+      // work shift master through the same lookup the assignment uses.
+      this.employeeWorkShiftRepo
     );
     // Stage 0C / C3: Aadhaar and bank status for a whole employee list at
     // once. It takes the employee usecase itself rather than a repository, so
