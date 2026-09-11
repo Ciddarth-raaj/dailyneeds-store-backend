@@ -330,3 +330,68 @@ describe("M1 review fix 2 — Payment / Statutory Details do not require Add Emp
     assert.ok(r.wrote);
   });
 });
+
+/* ------------------------------ M2. Existing / Previous PF Member ---------- */
+
+describe("M2 — Previous PF Member is a Statutory Details field", () => {
+  it("is accepted by the schema in all three states", async () => {
+    // Tri-state, and the third state is not cosmetic: `null` means "nobody has
+    // said", and the engine reports an unrecorded membership as UNRESOLVED
+    // rather than picking a side. A schema that refused null would force HR to
+    // record 0 - a filed statutory position nobody took.
+    for (const value of [1, 0, null]) {
+      const r = await save(ADMIN(), { previous_pf_member: value });
+      assert.equal(r.body && r.body.code, 200, `previous_pf_member=${value}: ${r.text}`);
+      assert.equal(r.wrote.employee_details.previous_pf_member, value);
+    }
+  });
+
+  it("is governed by the EXISTING statutory right, not a new key", async () => {
+    const r = await save(AS(STATUTORY_ONLY), { previous_pf_member: 1 });
+    assert.equal(r.body && r.body.code, 200, r.text);
+    assert.ok(r.wrote);
+  });
+
+  it("Payment Details rights do not open it", async () => {
+    const r = await save(AS(PAYMENT_ONLY), { previous_pf_member: 1 });
+    assert.ok(isSectionRefusal(r), `expected a section refusal, got ${r.text}`);
+    assert.deepEqual(r.body.required_permissions, [P.EDIT_STATUTORY_DETAILS]);
+    assert.equal(r.wrote, undefined);
+  });
+
+  it("is SENSITIVE under B3 — a caller without the sensitive pair is refused", async () => {
+    const r = await save(AS(NO_KEYS), { previous_pf_member: 1 });
+    assert.equal(r.status, 403);
+    assert.equal(r.wrote, undefined);
+  });
+
+  it("a legacy add_employees designation cannot write it", async () => {
+    const r = await save(AS(LEGACY_ADD), { previous_pf_member: 1 });
+    assert.ok(isSectionRefusal(r), `expected a section refusal, got ${r.text}`);
+    assert.equal(r.wrote, undefined);
+  });
+
+  it("out-of-range values are refused", async () => {
+    for (const value of [2, -1, "yes"]) {
+      const r = await save(ADMIN(), { previous_pf_member: value });
+      assert.ok(isValidationRefusal(r), `previous_pf_member=${value} must be refused: ${r.text}`);
+      assert.equal(r.wrote, undefined);
+    }
+  });
+
+  it("is NOT the legacy `pf` column — both can be sent and stay distinct", async () => {
+    // The approved rule is explicit that `pf` must not be reused for this.
+    const r = await save(ADMIN(), { pf: "legacy text", previous_pf_member: 0 });
+    assert.equal(r.body && r.body.code, 200, r.text);
+    assert.equal(r.wrote.employee_details.pf, "legacy text");
+    assert.equal(r.wrote.employee_details.previous_pf_member, 0);
+  });
+
+  it("SALARY IS STILL NOT WRITABLE ALONGSIDE IT", async () => {
+    // M2 added a statutory field to this route; it must not have reopened the
+    // salary column while doing so.
+    const r = await save(ADMIN(), { previous_pf_member: 1, salary: 45000 });
+    assert.ok(isValidationRefusal(r), `expected 422, got ${r.text}`);
+    assert.equal(r.wrote, undefined, "salary must never reach updateEmployeeDetails");
+  });
+});

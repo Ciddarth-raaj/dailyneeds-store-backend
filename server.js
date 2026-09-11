@@ -196,6 +196,12 @@ class Server {
     this.employeeWorkShiftRepo = require("./repository/employee_work_shift")(
       this.mysql.connection
     );
+    // M2: the salary history. It owns `employee_salary` and reads exactly five
+    // statutory columns off `new_employee`; it never reads or writes the
+    // legacy `new_employee.salary`, which stays where it is for reference.
+    this.employeeSalaryRepo = require("./repository/employee_salary")(
+      this.mysql.connection
+    );
     // Attendance - Part 1. Read-only over the Biomax punch tables (the
     // receiver process is their only writer) plus the device registry. On
     // the PRIMARY application pool, never the GoFrugal one.
@@ -507,6 +513,12 @@ class Server {
     this.attendanceImportUsecase = require("./usecase/attendance_import")(this.attendanceImportRepo, this.biomaxImportStore);
     this.employeeWorkShiftUsecase = require("./usecase/employee_work_shift")(
       this.employeeWorkShiftRepo
+    );
+    // M2: the salary engine's lifecycle. The arithmetic itself is in
+    // `utils/salary_engine.js` and is pure, so this holds only the rules about
+    // when a salary may be created, amended, approved or rejected.
+    this.employeeSalaryUsecase = require("./usecase/employee_salary")(
+      this.employeeSalaryRepo
     );
     this.storeUsecase = require("./usecase/store")(this.storeRepo);
     this.outletUsecase = require("./usecase/outlet")(
@@ -862,6 +874,13 @@ class Server {
       this.permissions,
       this.sensitive
     );
+    // M2: the salary API. Mounted at /hr with the other employee routes,
+    // because a salary is a fact about an employee record.
+    const employeeSalaryRouter = require("./routes/employee_salary")(
+      this.employeeSalaryUsecase,
+      this.permissions,
+      this.sensitive
+    );
     const storeRouter = require("./routes/store")(this.storeUsecase);
     const outletRouter = require("./routes/outlet")(
       this.outletUsecase,
@@ -1077,6 +1096,9 @@ class Server {
     // Also /hr: Express tries the routers in order and this one only claims
     // /hr/work-shift-assignments, which the master router does not define.
     app.use("/hr", employeeWorkShiftRouter.getRouter());
+    // Also /hr: this one only claims /hr/salary, which neither router above
+    // defines, so the ordering is unambiguous.
+    app.use("/hr", employeeSalaryRouter.getRouter());
     // Mounted under /reports rather than /hr: the machinery is per-dataset
     // and Attendance and Payroll will mount beside this one, not inside HR.
     app.use("/reports/employee-master", employeeReportRouter.getRouter());

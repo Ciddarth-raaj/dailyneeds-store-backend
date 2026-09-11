@@ -71,6 +71,43 @@ module.exports = {
   EDIT_PAYMENT_DETAILS: "edit_payment_details",
   EDIT_STATUTORY_DETAILS: "edit_statutory_details",
 
+  // M2 - Salary and payroll. Declared by the M2 migration and granted to
+  // NOBODY by it, so administrators only (through the user_type 2 bypass)
+  // until a designation is granted one deliberately on the Designation screen.
+  //
+  // These are the most powerful rights in the HR system - what everyone is
+  // paid, and the authority to change it - so there is deliberately no
+  // inheritance rule handing them to whoever already holds `add_employees` or
+  // `edit_employee_sensitive`. Recording somebody's PAN and deciding their pay
+  // are not the same authority, and an inheritance rule is how the second
+  // quietly follows the first onto thirty designations nobody re-examined.
+  //
+  //   VIEW_SALARY                       read a structure and its history
+  //   ADD_SALARY                        propose an initial salary
+  //   EDIT_SALARY                       amend a PENDING proposal
+  //   MANUAL_SALARY_COMPONENT_OVERRIDE  depart from the automatic Basic
+  //   APPROVE_SALARY_REVISION           approve or reject - the money decision
+  //   VIEW_PAYROLL                      the Payroll section (M1 placeholder)
+  //   PROCESS_PAYROLL                   run a period (not built in M2)
+  //   HR_REPORTS                        HR / payroll reporting
+  //
+  // ADD and APPROVE are separate on purpose. Nothing is ever created APPROVED,
+  // including by an administrator: if proposing a salary also agreed it, the
+  // approval key would be decorative.
+  //
+  // MANUAL_SALARY_COMPONENT_OVERRIDE is separate from ADD/EDIT for the same
+  // reason. Entering a salary is an everyday HR act; moving Basic away from
+  // the automatic breakup changes the PF wage and therefore what is filed, so
+  // it is a second decision and is granted to far fewer people.
+  VIEW_SALARY: "view_salary",
+  ADD_SALARY: "add_salary",
+  EDIT_SALARY: "edit_salary",
+  MANUAL_SALARY_COMPONENT_OVERRIDE: "manual_salary_component_override",
+  APPROVE_SALARY_REVISION: "approve_salary_revision",
+  VIEW_PAYROLL: "view_payroll",
+  PROCESS_PAYROLL: "process_payroll",
+  HR_REPORTS: "hr_reports",
+
   // documents
   VIEW_DOCUMENTS: "view_documents",
   ADD_DOCUMENTS: "add_documents",

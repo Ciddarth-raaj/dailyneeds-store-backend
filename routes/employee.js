@@ -531,6 +531,17 @@ class EmployeeRoutes {
             // assertion nobody made.
             pf_applicable: Joi.number().integer().min(0).max(1).allow(null).optional(),
             esi_applicable: Joi.number().integer().min(0).max(1).allow(null).optional(),
+            // M2. Existing / Previous PF Member - a THIRD statutory fact,
+            // separate from PF Applicable, the UAN and the PF Number, and
+            // deliberately not the legacy free-text `pf` column.
+            //
+            // Tri-state for the same reason as the two flags above: 1 was
+            // already a member, 0 first-time member, null nobody has said yet.
+            // The third state is not cosmetic here - it is an input to the
+            // EPS split, and the engine reports an unrecorded membership as
+            // unresolved rather than picking a side, so collapsing null into
+            // 0 would turn "we do not know" into a filed statutory position.
+            previous_pf_member: Joi.number().integer().min(0).max(1).allow(null).optional(),
             UAN: Joi.string().allow("").allow(null).optional(),
             additional_course: Joi.string().allow("").allow(null).optional(),
             spouse_name: Joi.string().allow("").allow(null).optional(),

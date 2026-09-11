@@ -51,6 +51,12 @@ const SENSITIVE_EMPLOYEE_FIELDS = [
   // number has no business learning whether they have one.
   "pf_applicable",
   "esi_applicable",
+  // M2. Whether the employee was already a provident fund member before they
+  // joined. It sits with the PF fields it qualifies for the same reason those
+  // two do: it is read and written by the same Statutory section, under the
+  // same permission, and it is a fact about somebody's employment history that
+  // a caller who may not see their PF number has no business learning.
+  "previous_pf_member",
 ];
 
 /** The same list as a lower-cased Set, for lookups. */

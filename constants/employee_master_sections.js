@@ -26,6 +26,11 @@ const STATUTORY_DETAIL_FIELDS = [
   "pf",
   "pf_number",
   "pf_applicable",
+  // M2. Controlled by the EXISTING Statutory designation right - the approved
+  // rule is that it is governed by `edit_statutory_details`, not by a new key
+  // of its own. It is a separate FACT from PF Applicable, the UAN and the PF
+  // Number, but it is not a separate DECISION about who may record it.
+  "previous_pf_member",
   "esi",
   "esi_number",
   "esi_applicable",
