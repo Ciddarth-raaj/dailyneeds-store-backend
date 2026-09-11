@@ -77,11 +77,25 @@ jobs:
           pass() { echo "PASS: $*"; }
           report() { echo "REPORT: $*"; }
 
+          # Ask pm2 where the frontend actually runs rather than guessing a
+          # path: `fe`'s cwd (or the directory above its script) is the
+          # checkout, whatever it is called on this host.
           FE_DIR=""
-          for d in ~/dailyneeds-store ~/dnds-frontend ~/frontend; do
-            [ -d "$d/.next" ] && FE_DIR="$d" && break
+          PM2_CWD="$(pm2 describe fe --no-color 2>/dev/null | grep -Ei 'exec cwd|cwd' | head -1 | sed -E 's/.*[│|][[:space:]]*(\/[^ │|]+).*/\1/')"
+          PM2_SCRIPT="$(pm2 describe fe --no-color 2>/dev/null | grep -Ei 'script path' | head -1 | sed -E 's/.*[│|][[:space:]]*(\/[^ │|]+).*/\1/')"
+          for d in "$PM2_CWD" "$(dirname "${PM2_SCRIPT:-/nonexistent}")" "$(dirname "$(dirname "${PM2_SCRIPT:-/nonexistent}")")" ~/dailyneeds-store ~/dnds-frontend ~/frontend ~/dnds ~/store; do
+            [ -n "$d" ] && [ -d "$d/.next" ] && [ -f "$d/package.json" ] && FE_DIR="$d" && break
           done
-          [ -n "$FE_DIR" ] || { echo "::error::no frontend checkout with a .next build found"; exit 1; }
+          if [ -z "$FE_DIR" ]; then
+            FE_DIR="$(find "$HOME" -maxdepth 3 -type d -name ".next" 2>/dev/null | head -1 | xargs -r dirname)"
+          fi
+          if [ -z "$FE_DIR" ]; then
+            echo "::error::no frontend checkout with a .next build found"
+            echo "pm2 cwd guess: ${PM2_CWD:-none}; script guess: ${PM2_SCRIPT:-none}"
+            ls -la "$HOME" || true
+            pm2 describe fe --no-color 2>/dev/null | head -30 || true
+            exit 1
+          fi
           cd "$FE_DIR"
 
           echo "=== deployed frontend code"
