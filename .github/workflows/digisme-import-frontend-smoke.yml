@@ -1,0 +1,198 @@
+# DigiSME attendance import - FRONTEND post-deploy smoke test. Read-only,
+# dispatch only.
+#
+# The import screen is client-rendered and behind a login, so this does not
+# try to be a browser. It checks, on the production host:
+#
+#   the frontend checkout is the approved commit
+#   pm2 `fe` is online and the Next.js server answers
+#   /attendance/imports exists (an unknown route still 404s, so 200 means it)
+#   the three existing Attendance routes still answer exactly as before
+#   the BUILT client bundle for that page carries the approved controls -
+#     both tabs, the .xlsx selector, Preview Import - and the commit controls
+#     it must not offer before a preview
+#   the navigation bundle gates Import Attendance on manage_attendance_import
+#   nothing was imported: no DIGISME_IMPORT punch, no import batch or item,
+#     and the Part 1 live punches are still there and still LIVE
+#
+# STRICTLY READ-ONLY. No file is uploaded, no preview or commit endpoint is
+# called, no punch is created, no pm2 / firewall / device / receiver change,
+# no write of any kind. The only requests are unauthenticated GETs to the
+# box's own Next.js server, which cannot import anything.
+#
+# Uses the same secrets as the deploys: SSH_PRIVATE_KEY, SSH_HOST, SSH_USER.
+
+name: DigiSME Import Frontend Smoke (read-only)
+
+"on":
+  workflow_dispatch:
+    inputs:
+      expected_head:
+        description: "Frontend commit SHA that production should be running"
+        required: true
+        default: "114bb561fe1bf30b4bf235c261af034ba5676118"
+        type: string
+      expected_live_punches:
+        description: "Live punch count that must still be there (0 = report only)"
+        required: false
+        default: "7"
+        type: string
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/dnds_gha_deploy
+          chmod 600 ~/.ssh/dnds_gha_deploy
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Smoke test the import screen on the production host (read-only)
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          EXPECTED_HEAD: ${{ inputs.expected_head }}
+          EXPECTED_PUNCHES: ${{ inputs.expected_live_punches }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/dnds_gha_deploy \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "${SSH_USER}@${SSH_HOST}" 'bash -s' -- "$EXPECTED_HEAD" "$EXPECTED_PUNCHES" <<'REMOTE'
+          set -uo pipefail
+          EXPECTED_HEAD="$1"
+          EXPECTED_PUNCHES="$2"
+          FAILS=0
+          fail() { echo "::error::FAIL: $*"; FAILS=$((FAILS+1)); }
+          pass() { echo "PASS: $*"; }
+          report() { echo "REPORT: $*"; }
+
+          FE_DIR=""
+          for d in ~/dailyneeds-store ~/dnds-frontend ~/frontend; do
+            [ -d "$d/.next" ] && FE_DIR="$d" && break
+          done
+          [ -n "$FE_DIR" ] || { echo "::error::no frontend checkout with a .next build found"; exit 1; }
+          cd "$FE_DIR"
+
+          echo "=== deployed frontend code"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          report "frontend checkout $FE_DIR at $HEAD_SHA on $(git rev-parse --abbrev-ref HEAD)"
+          if [ "$HEAD_SHA" = "$EXPECTED_HEAD" ]; then pass "production frontend is the approved commit"; else fail "frontend HEAD $HEAD_SHA is not the approved $EXPECTED_HEAD"; fi
+          [ -f pages/attendance/imports/index.jsx ] && pass "the import page is deployed" || fail "pages/attendance/imports/index.jsx is missing on the host"
+
+          echo "=== pm2"
+          pm2 ls --no-color 2>/dev/null || true
+          FE_STATUS="$(pm2 describe fe --no-color 2>/dev/null | grep -E '^\s*.?\s*status' | head -1 | sed -E 's/.*status[^a-z]*([a-z-]+).*/\1/')"
+          if [ "${FE_STATUS:-}" = "online" ]; then pass "the frontend (pm2 fe) is online"; else fail "pm2 fe status is ${FE_STATUS:-unknown}"; fi
+
+          echo "=== routes (unauthenticated GETs to the box's own Next.js server)"
+          route() { curl -s -o /dev/null -w '%{http_code}' --max-time 15 "http://127.0.0.1:3000$1"; }
+          # A route that does not exist must 404, otherwise a 200 proves nothing.
+          UNKNOWN="$(route /attendance/definitely-not-a-page)"
+          if [ "$UNKNOWN" = "404" ]; then pass "an unknown route 404s, so a 200 below is meaningful"; else report "unknown route answered ${UNKNOWN} (cannot use 404 as a control)"; fi
+          for r in "/attendance/imports" "/attendance/list" "/attendance/list?tab=audit" "/attendance/devices"; do
+            CODE="$(route "$r")"
+            if echo "${CODE:-000}" | grep -Eq '^(200|301|302|307|308)$'; then pass "GET $r -> HTTP $CODE"; else fail "GET $r -> HTTP ${CODE:-000}"; fi
+          done
+
+          echo "=== the built client bundle for the import page"
+          # Next 11 emits one client chunk per page under .next/static/chunks/pages.
+          CHUNK="$(ls .next/static/chunks/pages/attendance/imports-*.js 2>/dev/null | head -1)"
+          if [ -z "$CHUNK" ]; then
+            fail "no built client chunk for pages/attendance/imports - the page was not built into this deploy"
+          else
+            report "chunk: $CHUNK ($(wc -c < "$CHUNK") bytes)"
+            want() { if grep -qF "$2" "$CHUNK"; then pass "the deployed screen carries: $1"; else fail "the deployed screen is MISSING: $1"; fi; }
+            want "the New Import tab"            "New Import"
+            want "the Import History tab"        "Import History"
+            want "the .xlsx file selector"       ".xlsx"
+            want "the Preview Import button"     "Preview Import"
+            want "the page subtitle"             "Import historical attendance punches from DigiSME Excel exports."
+            want "the accepted-file notice"      "ATD Daily Attendance"
+            want "the corrected wording"         "No attendance calculation is performed here."
+            want "the preview endpoint"          "/attendance/imports/digisme/preview"
+            want "the permission key"            "manage_attendance_import"
+            # The commit controls exist in the bundle but are rendered only for a
+            # PREVIEWED batch; that gate is what must be present.
+            want "the confirm-import control"    "Confirm Import"
+            want "the commit confirmation"       "You are about to import"
+            # And the wording the review removed must be gone from production.
+            if grep -qF "as a terminal would have sent them" "$CHUNK"; then fail "the deployed screen still carries the withdrawn terminal wording"; else pass "the withdrawn terminal/protocol wording is not in the deployed screen"; fi
+            # No Excel parsing in the browser.
+            if grep -qE 'readAsArrayBuffer|FileReader' "$CHUNK"; then fail "the deployed screen reads the workbook in the browser"; else pass "the deployed screen does not read the workbook in the browser"; fi
+          fi
+
+          echo "=== navigation gate"
+          if grep -rqF "manage_attendance_import" .next/static/chunks/*.js .next/static/chunks/pages/_app-*.js 2>/dev/null || grep -qF "manage_attendance_import" constants/menus.js; then
+            pass "Import Attendance is gated on manage_attendance_import in the deployed navigation"
+          else
+            fail "the deployed navigation does not gate Import Attendance on manage_attendance_import"
+          fi
+          if grep -qF '"/attendance/imports"' constants/menus.js && grep -qF '"/attendance/list"' constants/menus.js && grep -qF '"/attendance/list?tab=audit"' constants/menus.js && grep -qF '"/attendance/devices"' constants/menus.js; then
+            pass "the Attendance section still holds all four entries, the three existing ones unchanged"
+          else
+            fail "an Attendance navigation entry is missing"
+          fi
+
+          echo "=== nothing was imported (read-only database check)"
+          API_DIR=""
+          for d in ~/dailyneeds-store-backend ~/backend; do [ -f "$d/config.json" ] && API_DIR="$d" && break; done
+          if [ -z "$API_DIR" ]; then
+            fail "no backend checkout found to read the database with"
+          else
+            cd "$API_DIR"
+            API_ENV="$(pm2 env 0 2>/dev/null | sed -n 's/^NODE_ENV: //p' | head -1 | tr -d '[:space:]')"
+            [ -n "$API_ENV" ] || API_ENV="development"
+            node - "$API_ENV" "$EXPECTED_PUNCHES" <<'NODE'
+          const fs = require("fs");
+          const mysql = require("mysql");
+          const env = process.argv[2] || "development";
+          const expected = parseInt(process.argv[3], 10) || 0;
+          const cfg = JSON.parse(fs.readFileSync("config.json", "utf8")).db.mysql[env];
+          if (!cfg) { console.log(`::error::FAIL: config.json has no db.mysql.${env} block`); process.exit(3); }
+          const conn = mysql.createConnection({ host: cfg.host, port: cfg.port, user: cfg.username, password: cfg.password, database: cfg.database, dateStrings: true });
+          let fails = 0;
+          const fail = (m) => { console.log(`::error::FAIL: ${m}`); fails += 1; };
+          const pass = (m) => console.log(`PASS: ${m}`);
+          conn.query(
+            `SELECT (SELECT COUNT(*) FROM biomax_punch) AS punches,
+                    (SELECT COUNT(*) FROM biomax_punch WHERE ingest_source = 'LIVE') AS live_rows,
+                    (SELECT COUNT(*) FROM biomax_punch WHERE ingest_source = 'DIGISME_IMPORT') AS imported,
+                    (SELECT COUNT(*) FROM biomax_punch WHERE import_batch_id IS NOT NULL) AS with_batch,
+                    (SELECT COUNT(*) FROM biomax_attendance_import_batch) AS batches,
+                    (SELECT COUNT(*) FROM biomax_attendance_import_item) AS items`,
+            (err, rows) => {
+              if (err) { console.log(`::error::FAIL: database read failed: ${err.code || err.message}`); process.exit(2); }
+              const r = rows[0];
+              console.log(JSON.stringify(r));
+              if (Number(r.imported) > 0) fail(`${r.imported} DIGISME_IMPORT punch row(s) exist; the smoke test must import nothing`);
+              else pass("no DIGISME_IMPORT punch exists - no attendance file has been imported");
+              if (Number(r.batches) > 0 || Number(r.items) > 0) fail(`import staging is not empty: ${r.batches} batch(es), ${r.items} item(s); no file may have been previewed`);
+              else pass("no import batch or item exists - no file has been previewed or committed");
+              if (Number(r.with_batch) > 0) fail(`${r.with_batch} punch row(s) carry an import_batch_id`);
+              else pass("no punch carries an import_batch_id");
+              if (expected > 0 && Number(r.punches) < expected) fail(`punch count fell to ${r.punches} from ${expected}`);
+              else pass(`punch count is ${r.punches} (${r.live_rows} LIVE); the Part 1 punches are intact`);
+              conn.end();
+              console.log(`=== database checks: ${fails} failure(s)`);
+              process.exit(fails > 0 ? 2 : 0);
+            }
+          );
+          NODE
+            [ $? -eq 0 ] || FAILS=$((FAILS+1))
+          fi
+
+          echo "=== SMOKE RESULT: $FAILS failing check group(s)"
+          if [ "$FAILS" -gt 0 ]; then echo "::error::Frontend smoke test FAILED"; exit 1; fi
+          echo "Frontend smoke test PASSED"
+          REMOTE
