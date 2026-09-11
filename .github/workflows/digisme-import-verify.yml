@@ -1,0 +1,251 @@
+# DigiSME attendance import - POST-DEPLOY VERIFICATION. Read-only, dispatch only.
+#
+# Verifies migration 20260913120000-digisme-attendance-import on production
+# and, above all, that the Part 1 live punch data survived it untouched.
+#
+#   FAIL  a required query errors; the migration is not recorded; a schema
+#         object is missing (nullable dev_id/raw_json, DIGISME_IMPORT in the
+#         ENUM, import_dedup_key + its UNIQUE index, import_batch_id, the two
+#         import tables); manage_attendance_import missing or granted to
+#         anyone; any existing LIVE punch lost its dev_id, raw_json or LIVE
+#         ingest_source; the punch count fell; any DIGISME_IMPORT row exists
+#         (no import has been approved yet); an /attendance/imports route
+#         answers an unauthenticated request instead of refusing it
+#   REPORT deployed HEAD, pm2 state, receiver state, punch inventory
+#
+# STRICTLY READ-ONLY. No INSERT/UPDATE/DELETE, no migration, no pm2
+# start/stop/reload, no firewall, device or receiver change, no file upload.
+# Credentials never leave the host: queries run there through the repo's own
+# `mysql` module against config.json db.mysql, exactly as the API connects,
+# and only result rows are printed.
+#
+# Uses the same secrets as the backend deploy: SSH_PRIVATE_KEY, SSH_HOST,
+# SSH_USER. "on" is quoted so YAML 1.1 does not treat it as a boolean.
+
+name: DigiSME Import Verify (read-only)
+
+"on":
+  workflow_dispatch:
+    inputs:
+      expected_head:
+        description: "Commit SHA that production should be running"
+        required: true
+        default: "3ad0c77b95a09c08d749143908f8facadefa0ef3"
+        type: string
+      expected_live_punches:
+        description: "Live punch count expected to be preserved (0 = report only)"
+        required: false
+        default: "7"
+        type: string
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/dnds_gha_deploy
+          chmod 600 ~/.ssh/dnds_gha_deploy
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Verify on the production host (read-only)
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          EXPECTED_HEAD: ${{ inputs.expected_head }}
+          EXPECTED_PUNCHES: ${{ inputs.expected_live_punches }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/dnds_gha_deploy \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "${SSH_USER}@${SSH_HOST}" 'bash -s' -- "$EXPECTED_HEAD" "$EXPECTED_PUNCHES" <<'REMOTE'
+          set -uo pipefail
+          EXPECTED_HEAD="$1"
+          EXPECTED_PUNCHES="$2"
+          FAILS=0
+          fail() { echo "::error::FAIL: $*"; FAILS=$((FAILS+1)); }
+          pass() { echo "PASS: $*"; }
+          report() { echo "REPORT: $*"; }
+
+          cd ~/dailyneeds-store-backend || { echo "::error::no checkout at ~/dailyneeds-store-backend"; exit 1; }
+
+          echo "=== deployed code"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          report "host HEAD $HEAD_SHA on $(git rev-parse --abbrev-ref HEAD) (node $(node -v))"
+          if [ "$HEAD_SHA" = "$EXPECTED_HEAD" ]; then pass "production is running the approved commit"; else fail "production HEAD $HEAD_SHA is not the approved $EXPECTED_HEAD"; fi
+          for f in usecase/attendance_import.js routes/attendance_import.js repository/attendance_import.js biomax/digismeImport.js; do
+            [ -f "$f" ] && pass "deployed: $f" || fail "missing on the host: $f"
+          done
+
+          echo "=== pm2"
+          pm2 ls --no-color 2>/dev/null || true
+          API_STATUS="$(pm2 describe 0 --no-color 2>/dev/null | grep -E '^\s*.?\s*status' | head -1 | sed -E 's/.*status[^a-z]*([a-z-]+).*/\1/')"
+          if [ "${API_STATUS:-}" = "online" ]; then pass "API (pm2 process 0) is online"; else fail "API (pm2 process 0) status is ${API_STATUS:-unknown}"; fi
+          if pm2 describe biomax-receiver >/dev/null 2>&1; then
+            R_STATUS="$(pm2 describe biomax-receiver --no-color 2>/dev/null | grep -E '^\s*.?\s*status' | head -1 | sed -E 's/.*status[^a-z]*([a-z-]+).*/\1/')"
+            R_RESTARTS="$(pm2 describe biomax-receiver --no-color 2>/dev/null | grep -E 'restarts' | head -1 | sed -E 's/[^0-9]*([0-9]+).*/\1/')"
+            report "biomax-receiver status ${R_STATUS:-unknown}, restarts ${R_RESTARTS:-?} (not changed by this workflow)"
+          else
+            report "biomax-receiver is not in pm2 (not changed by this workflow)"
+          fi
+          if [ -n "${BIOMAX_COMMANDS_ENABLED:-}" ] || grep -q 'BIOMAX_COMMANDS_ENABLED' ecosystem.biomax.config.js 2>/dev/null || (pm2 env biomax-receiver 2>/dev/null | grep -q 'BIOMAX_COMMANDS_ENABLED'); then
+            fail "BIOMAX_COMMANDS_ENABLED is set somewhere on the host; it must stay off"
+          else
+            pass "BIOMAX_COMMANDS_ENABLED is not set (shell, ecosystem file, pm2)"
+          fi
+
+          echo "=== HTTP (unauthenticated read-only GETs against the box's own API)"
+          guarded() {
+            BODY_FILE="$(mktemp)"
+            CODE="$(curl -s -o "$BODY_FILE" -w '%{http_code}' --max-time 10 "$2")"; CODE="${CODE:-000}"
+            BODY_CODE="$(tr -d ' \n' < "$BODY_FILE" | grep -Eo '"code":[0-9]+' | head -1 | grep -Eo '[0-9]+')"
+            rm -f "$BODY_FILE"
+            if echo "$CODE" | grep -Eq '^(401|403)$'; then pass "$1 -> HTTP $CODE (refused)"
+            elif [ "$CODE" = "200" ] && echo "$BODY_CODE" | grep -Eq '^(401|403)$'; then pass "$1 -> HTTP 200 with body code $BODY_CODE (refused, app convention)"
+            else fail "$1 -> HTTP $CODE body code ${BODY_CODE:-none} (the route must exist and refuse an unauthenticated request)"; fi
+          }
+          ROOT_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 'http://127.0.0.1:8080/')"
+          if echo "${ROOT_CODE:-000}" | grep -Eq '^(200|301|302|404)$'; then pass "API root answers (HTTP $ROOT_CODE)"; else fail "API root -> HTTP ${ROOT_CODE:-000}"; fi
+          guarded "GET /attendance/imports"          "http://127.0.0.1:8080/attendance/imports"
+          guarded "GET /attendance/imports/details"  "http://127.0.0.1:8080/attendance/imports/details"
+          guarded "GET /attendance/imports/items"    "http://127.0.0.1:8080/attendance/imports/items"
+          guarded "GET /attendance/raw (existing)"   "http://127.0.0.1:8080/attendance/raw"
+
+          echo "=== database (read-only)"
+          API_ENV="$(pm2 env 0 2>/dev/null | sed -n 's/^NODE_ENV: //p' | head -1 | tr -d '[:space:]')"
+          [ -n "$API_ENV" ] || API_ENV="development"
+          echo "API process 0 NODE_ENV resolves to: $API_ENV"
+          node - "$API_ENV" "$EXPECTED_PUNCHES" <<'NODE'
+          const fs = require("fs");
+          const mysql = require("mysql");
+          const env = process.argv[2] || "development";
+          const expectedPunches = parseInt(process.argv[3], 10) || 0;
+          const cfg = JSON.parse(fs.readFileSync("config.json", "utf8")).db.mysql[env];
+          if (!cfg) { console.log(`::error::FAIL: config.json has no db.mysql.${env} block`); process.exit(3); }
+          const conn = mysql.createConnection({
+            host: cfg.host, port: cfg.port, user: cfg.username, password: cfg.password,
+            database: cfg.database, dateStrings: true, multipleStatements: false,
+          });
+          let fails = 0;
+          const fail = (m) => { console.log(`::error::FAIL: ${m}`); fails += 1; };
+          const pass = (m) => console.log(`PASS: ${m}`);
+          const report = (m) => console.log(`REPORT: ${m}`);
+          const q = (label, sql) => new Promise((resolve) => {
+            conn.query(sql, (err, rows) => {
+              console.log(`--- ${label}`);
+              if (err) { console.log(`ERROR ${err.code || ""} ${err.message}`); resolve({ err, rows: null }); return; }
+              console.log(JSON.stringify(rows));
+              resolve({ err: null, rows });
+            });
+          });
+          const required = async (label, sql) => {
+            const r = await q(label, sql);
+            if (r.err) fail(`required query ${label} errored: ${r.err.code || r.err.message}`);
+            return r.rows || [];
+          };
+
+          (async () => {
+            console.log(`api db (config.json db.mysql.${env}): host=${cfg.host} database=${cfg.database} (credentials not printed)`);
+
+            // 1. migration recorded
+            const mig = await required("MIGRATION_RECORDED", "SELECT name, run_on FROM migrations WHERE name LIKE '%digisme-attendance-import%'");
+            if (mig.length !== 1) fail(`migration 20260913120000-digisme-attendance-import is recorded ${mig.length} time(s), expected 1`);
+            else pass(`migration recorded: ${mig[0].name} (${mig[0].run_on})`);
+
+            // 2. biomax_punch columns
+            const cols = await required("PUNCH_COLUMNS", "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, EXTRA, GENERATION_EXPRESSION FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biomax_punch' AND COLUMN_NAME IN ('dev_id','raw_json','ingest_source','import_dedup_key','import_batch_id') ORDER BY COLUMN_NAME");
+            const byName = {};
+            for (const c of cols) byName[c.COLUMN_NAME] = c;
+            for (const n of ["dev_id", "raw_json"]) {
+              const c = byName[n];
+              if (!c) fail(`biomax_punch.${n} is missing`);
+              else if (String(c.IS_NULLABLE).toUpperCase() !== "YES") fail(`biomax_punch.${n} is still NOT NULL`);
+              else pass(`biomax_punch.${n} allows NULL`);
+            }
+            const ing = byName.ingest_source;
+            if (!ing) fail("biomax_punch.ingest_source is missing");
+            else {
+              const t = String(ing.COLUMN_TYPE);
+              const wanted = ["LIVE", "HISTORICAL_PULL", "DIGISME_IMPORT"];
+              const missingE = wanted.filter((v) => !t.includes(`'${v}'`));
+              if (missingE.length) fail(`ingest_source ENUM is missing ${missingE.join(", ")} (${t})`);
+              else pass(`ingest_source ENUM carries LIVE, HISTORICAL_PULL and DIGISME_IMPORT (${t})`);
+            }
+            const key = byName.import_dedup_key;
+            if (!key) fail("biomax_punch.import_dedup_key is missing");
+            else if (!/STORED GENERATED/i.test(String(key.EXTRA))) fail(`import_dedup_key exists but is not STORED GENERATED (EXTRA=${key.EXTRA})`);
+            else pass(`import_dedup_key is a STORED generated column: ${key.GENERATION_EXPRESSION}`);
+            if (!byName.import_batch_id) fail("biomax_punch.import_batch_id is missing"); else pass("biomax_punch.import_batch_id exists");
+
+            // 3. unique index on the dedup key, device key intact
+            const idx = await required("PUNCH_INDEXES", "SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biomax_punch' ORDER BY INDEX_NAME, SEQ_IN_INDEX");
+            const uq = idx.filter((r) => r.INDEX_NAME === "uq_biomax_punch_import_dedup");
+            if (!uq.length) fail("UNIQUE index uq_biomax_punch_import_dedup is missing");
+            else if (Number(uq[0].NON_UNIQUE) !== 0) fail("uq_biomax_punch_import_dedup exists but is not UNIQUE");
+            else pass(`uq_biomax_punch_import_dedup is UNIQUE on (${uq.map((r) => r.COLUMN_NAME).join(", ")})`);
+            const deviceKey = idx.filter((r) => Number(r.NON_UNIQUE) === 0 && r.INDEX_NAME !== "PRIMARY" && r.INDEX_NAME !== "uq_biomax_punch_import_dedup" && ["dev_id", "user_id", "io_time_raw"].includes(r.COLUMN_NAME));
+            if (deviceKey.length >= 3) pass(`the device dedup key is intact (${[...new Set(deviceKey.map((r) => r.INDEX_NAME))].join(", ")})`);
+            else fail("the device dedup UNIQUE key on (dev_id, user_id, io_time_raw) is no longer present");
+
+            // 4. import tables
+            const t = await required("IMPORT_TABLES", "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('biomax_attendance_import_batch','biomax_attendance_import_item')");
+            const names = t.map((r) => r.TABLE_NAME);
+            for (const n of ["biomax_attendance_import_batch", "biomax_attendance_import_item"]) {
+              if (names.includes(n)) pass(`table ${n} exists`); else fail(`table ${n} is missing`);
+            }
+
+            // 5. permission declared, granted to nobody
+            const perm = await required("IMPORT_PERMISSION", "SELECT (SELECT COUNT(*) FROM all_permissions WHERE permission_key = 'manage_attendance_import') AS declared, (SELECT COUNT(*) FROM permissions WHERE permission_key = 'manage_attendance_import' AND is_active = 1) AS granted");
+            if (!perm[0] || Number(perm[0].declared) < 1) fail("manage_attendance_import is not declared");
+            else if (Number(perm[0].granted) > 0) fail(`manage_attendance_import is granted to ${perm[0].granted} designation(s); expected none`);
+            else pass("manage_attendance_import declared and granted to nobody (administrators only)");
+
+            // 6. the existing punch data, unchanged
+            const inv = await required("PUNCH_INVENTORY", "SELECT COUNT(*) AS punches, SUM(ingest_source = 'LIVE') AS live_rows, SUM(ingest_source = 'HISTORICAL_PULL') AS historical_rows, SUM(ingest_source = 'DIGISME_IMPORT') AS imported_rows, SUM(dev_id IS NULL) AS null_dev_id, SUM(raw_json IS NULL) AS null_raw_json, SUM(import_batch_id IS NOT NULL) AS with_batch, MIN(io_time_raw) AS first_punch, MAX(io_time_raw) AS last_punch FROM biomax_punch");
+            const r = inv[0] || {};
+            report(`punches: ${r.punches} total, ${r.live_rows || 0} LIVE, ${r.historical_rows || 0} HISTORICAL_PULL, ${r.imported_rows || 0} DIGISME_IMPORT; io_time_raw ${r.first_punch} .. ${r.last_punch}`);
+            if (expectedPunches > 0) {
+              if (Number(r.punches) === expectedPunches) pass(`punch count is ${r.punches}, exactly the ${expectedPunches} expected - no row lost or added`);
+              else if (Number(r.punches) < expectedPunches) fail(`punch count fell to ${r.punches} from the expected ${expectedPunches}; rows were lost`);
+              else report(`punch count is ${r.punches}, above the ${expectedPunches} expected - the receiver has taken new live punches since (no row lost)`);
+            }
+            if (Number(r.imported_rows || 0) > 0) fail(`${r.imported_rows} DIGISME_IMPORT punch row(s) exist; no import has been approved yet`);
+            else pass("no DIGISME_IMPORT punch exists - nothing has been imported");
+            if (Number(r.null_dev_id || 0) > 0) fail(`${r.null_dev_id} punch row(s) have a NULL dev_id although no import exists; a LIVE row lost its device`);
+            else pass("every existing punch still carries its dev_id");
+            if (Number(r.null_raw_json || 0) > 0) fail(`${r.null_raw_json} punch row(s) have a NULL raw_json; a LIVE row lost its raw body`);
+            else pass("every existing punch still carries its raw_json");
+            if (Number(r.with_batch || 0) > 0) fail(`${r.with_batch} punch row(s) carry an import_batch_id; existing rows must not`);
+            else pass("no existing punch was given an import_batch_id");
+
+            const live = await required("LIVE_PUNCHES", "SELECT p.biomax_punch_id, p.dev_id, p.user_id, p.io_time_raw, p.ingest_source, LENGTH(p.raw_json) AS raw_json_bytes, p.source_ip, d.derivation_status FROM biomax_punch p LEFT JOIN biomax_punch_derived d ON d.biomax_punch_id = p.biomax_punch_id ORDER BY p.biomax_punch_id");
+            const bad = live.filter((x) => x.ingest_source !== "LIVE" || !x.dev_id || !x.raw_json_bytes);
+            if (bad.length) fail(`${bad.length} punch row(s) are not an intact LIVE row: ${bad.map((x) => x.biomax_punch_id).join(", ")}`);
+            else pass(`all ${live.length} Stage-1 punch row(s) are intact LIVE rows with a dev_id and a non-empty raw_json`);
+
+            const batches = await required("IMPORT_BATCHES", "SELECT (SELECT COUNT(*) FROM biomax_attendance_import_batch) AS batches, (SELECT COUNT(*) FROM biomax_attendance_import_item) AS items");
+            if (batches[0] && (Number(batches[0].batches) > 0 || Number(batches[0].items) > 0)) fail(`import staging is not empty: ${batches[0].batches} batch(es), ${batches[0].items} item(s)`);
+            else pass("import staging tables are empty - no file has been previewed or committed");
+
+            conn.end();
+            console.log(`=== database checks: ${fails} failure(s)`);
+            process.exit(fails > 0 ? 2 : 0);
+          })().catch((e) => { console.log(`::error::FAIL: verify script crashed: ${e && e.stack ? e.stack : e}`); process.exit(3); });
+          NODE
+          DB_RC=$?
+          [ "$DB_RC" -eq 0 ] || FAILS=$((FAILS+1))
+
+          echo "=== VERIFY RESULT: $FAILS failing check group(s)"
+          if [ "$FAILS" -gt 0 ]; then echo "::error::DigiSME import verification FAILED"; exit 1; fi
+          echo "DigiSME import verification PASSED"
+          REMOTE
