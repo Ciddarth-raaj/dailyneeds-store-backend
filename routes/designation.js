@@ -26,6 +26,30 @@ class DesignationRoutes {
       }
       res.end();
     });
+    /**
+     * The designation PICKER: `{ designation_id, designation_name }` only.
+     *
+     * `GET /` above stays behind `view_designation`, which is the permission
+     * for administering designations and their permission sets. This route
+     * exists because a dropdown is not administration: an Employee Master
+     * editor holding `employee_edit` could change an employee's designation in
+     * principle and had nothing to choose from in practice.
+     *
+     * Authenticated-only, exactly like `GET /outlet/directory` and
+     * `GET /employee/directory`, and for the same stated reason - return less
+     * rather than hand back the permission. It carries no status, no
+     * `login_access`, no `online_portal` and no permission set, and it writes
+     * nothing.
+     */
+    router.get("/directory", async (req, res) => {
+      try {
+        res.json(await this.designationUsecase.getDirectory());
+      } catch (err) {
+        console.log(err);
+        res.json({ code: 500, msg: "An error occurred !" });
+      }
+      res.end();
+    });
     router.get("/budget", this.permissions.require(P.VIEW_DESIGNATION), async (req, res) => {
       try {
         const designation =

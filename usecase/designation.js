@@ -13,6 +13,16 @@ class DesignationUsecase {
       }
     });
   }
+  /** Id and name only — see the repository for why this exists. */
+  getDirectory() {
+    return new Promise(async (resolve, reject) => {
+      try {
+        resolve(await this.designationRepo.getDirectory());
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
   getDesignationByBudget() {
     return new Promise(async (resolve, reject) => {
       try {

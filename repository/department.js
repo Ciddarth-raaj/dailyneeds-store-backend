@@ -25,6 +25,39 @@ class DepartmentRepository {
     });
   }
 
+  /**
+   * Id and name only, for a picker.
+   *
+   * The counterpart of `getDirectory` on designations and outlets, and there
+   * for the same reason: `GET /department` is behind `view_department`, which
+   * is the permission for administering departments, while the Employee
+   * Master's Employment editor only needs two columns to fill a dropdown. A
+   * department NAME already appears on every row `view_employees` returns.
+   */
+  getDirectory() {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "SELECT department_id, department_name FROM department ORDER BY department_name ASC",
+        [],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.DEPARTMENT",
+              code: "REPOSITORY.DEPARTMENT.GET-DIRECTORY",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        }
+      );
+    });
+  }
+
   getProductDepartment() {
     return new Promise((resolve, reject) => {
       this.db.query("SELECT * FROM product_department", [], (err, docs) => {

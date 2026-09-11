@@ -13,6 +13,16 @@ class DepartmentUsecase {
       }
     });
   }
+  /** Id and name only — see the repository for why this exists. */
+  getDirectory() {
+    return new Promise(async (resolve, reject) => {
+      try {
+        resolve(await this.departmentRepo.getDirectory());
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
   getProductDepartment() {
     return new Promise(async (resolve, reject) => {
       try {

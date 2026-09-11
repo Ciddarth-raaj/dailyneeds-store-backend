@@ -47,6 +47,45 @@ class DesignationRepository {
       );
     });
   }
+  /**
+   * Id and name only, for a picker.
+   *
+   * `GET /designation` is `SELECT * FROM designation` behind `view_designation`
+   * - a permission for ADMINISTERING designations - and that is right for the
+   * master screen. But the Employee Master's Employment editor needs the same
+   * two columns to populate its Designation dropdown, and a designation given
+   * `employee_edit` without `view_designation` got an empty one: the field was
+   * editable and unusable at the same time.
+   *
+   * Same answer as `getDirectory` on outlets and employees: return less rather
+   * than hand back the permission. No status, no `login_access`, no
+   * `online_portal`, no permission set, and no write of any kind. A designation
+   * NAME is already on every row of the employee list that `view_employees`
+   * returns, so this discloses nothing that screen does not.
+   */
+  getDirectory() {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "SELECT designation_id, designation_name FROM designation ORDER BY designation_name ASC",
+        [],
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.DESIGNATION",
+              code: "REPOSITORY.DESIGNATION.GET-DIRECTORY",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(docs);
+        }
+      );
+    });
+  }
   getPermissions() {
     return new Promise((resolve, reject) => {
       this.db.query("SELECT * FROM all_permissions", [], (err, docs) => {

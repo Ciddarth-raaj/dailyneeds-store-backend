@@ -27,6 +27,25 @@ class DepartmentRoutes {
   
         res.end();
       });
+      /**
+       * The department PICKER: `{ department_id, department_name }` only.
+       *
+       * `GET /` above stays behind `view_department`. This is the same
+       * return-less-rather-than-hand-back-the-permission answer as
+       * `GET /outlet/directory`, so that an Employee Master editor holding
+       * `employee_edit` has something to choose from. No image, no status, no
+       * write.
+       */
+      router.get("/directory", async (req, res) => {
+        try {
+          res.json(await this.departmentUsecase.getDirectory());
+        } catch (err) {
+          console.log(err);
+          res.json({ code: 500, msg: "An error occurred !" });
+        }
+
+        res.end();
+      });
       router.get("/product-department", this.permissions.require(P.VIEW_DEPARTMENT), async (req, res) => {
         try {
           const department = await this.departmentUsecase.getProductDepartment();
