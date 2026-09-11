@@ -36,9 +36,20 @@
  *   send_cmd_result   preserved RAW - every header, the body bytes, a hash -
  *                     matched by trans_id to the command that was issued and
  *                     by dev_id to the device it was issued to; ACKed OK
- *                     only once the block row is committed (R1). Nothing
- *                     decodes the body: the FKDataHS102 historical layout is
- *                     not captured, so no punch is created from it yet.
+ *                     only once the COMPLETE block row is committed (R1). A
+ *                     body over BIOMAX_COMMAND_RESULT_MAX_BODY, or shorter
+ *                     than its Content-Length, is never stored truncated and
+ *                     never ACKed: the socket is closed so the device retries.
+ *                     cmd_return_code is kept verbatim and nothing is inferred
+ *                     from it. Nothing decodes the body: the FKDataHS102
+ *                     historical layout is not captured, so no punch is
+ *                     created from it yet.
+ *   delivery lease    a command handed out is SENT for
+ *                     BIOMAX_COMMAND_LEASE_SECONDS; if no result block has
+ *                     arrived by then it is handed out again on the next poll
+ *                     with the SAME trans_id, up to BIOMAX_COMMAND_MAX_ATTEMPTS
+ *                     times (GET_LOG_DATA is read-only and result blocks are
+ *                     deduplicated, so a repeat is harmless).
  *
  * WHAT IT NEVER DOES: pair IN/OUT, compute hours, apply grace, breaks, OT,
  * or status. It stores and dates. Part 2 is elsewhere. It never queues a
@@ -71,6 +82,10 @@ const commands = require("./commands");
 const MIN_NODE_MAJOR = 14;
 const TESTED_NODE_MAJORS = [14, 16, 18, 20, 22];
 
+/** 4 MB by default, never above the 16 MB a MEDIUMBLOB column can hold. */
+const DEFAULT_COMMAND_RESULT_MAX_BODY = 4 * 1024 * 1024;
+const HARD_COMMAND_RESULT_MAX_BODY = 16 * 1024 * 1024 - 1;
+
 function readConfig(env = process.env) {
   const int = (name, fallback) => {
     const n = Number(String(env[name] === undefined ? "" : env[name]).trim());
@@ -80,6 +95,15 @@ function readConfig(env = process.env) {
     port: int("BIOMAX_PORT", 7005),
     host: env.BIOMAX_HOST || "0.0.0.0",
     maxBodyBytes: int("BIOMAX_MAX_BODY", protocol.DEFAULT_MAX_BODY_BYTES),
+    // send_cmd_result bodies carry historical blocks, not 144-byte punches.
+    // Separate, larger, and hard-capped at what biomax_command_result_block
+    // .raw_body (MEDIUMBLOB) can hold: a block we could not keep whole is
+    // refused, never truncated (see handleCmdResult).
+    commandResultMaxBodyBytes: Math.min(int("BIOMAX_COMMAND_RESULT_MAX_BODY", DEFAULT_COMMAND_RESULT_MAX_BODY), HARD_COMMAND_RESULT_MAX_BODY),
+    // Delivery lease: how long a SENT command waits for a result before it
+    // may be handed out again, and how many hand-outs in total.
+    commandLeaseSeconds: int("BIOMAX_COMMAND_LEASE_SECONDS", 600),
+    commandMaxAttempts: int("BIOMAX_COMMAND_MAX_ATTEMPTS", 3),
     socketTimeoutMs: int("BIOMAX_SOCKET_TIMEOUT_MS", 15000),
     spoolDir: env.BIOMAX_SPOOL_DIR || null,
     // OFF unless explicitly "1"/"true": with it off, a queued command is never
@@ -346,7 +370,7 @@ function createReceiver({ store, log, spool, flood, config } = {}) {
     if (!classified.unknown && envelope.dev_id && cfg.commandsEnabled && typeof store.claimPendingCommand === "function") {
       let command = null;
       try {
-        command = await store.claimPendingCommand(envelope.dev_id, sourceIp);
+        command = await store.claimPendingCommand(envelope.dev_id, sourceIp, { leaseSeconds: cfg.commandLeaseSeconds, maxAttempts: cfg.commandMaxAttempts });
       } catch (err) {
         logger.error("COMMAND_CLAIM_FAILED", err && err.message ? err.message : String(err), { dev_id: envelope.dev_id });
         command = null; // stays PENDING; the device is told there is nothing
@@ -362,7 +386,7 @@ function createReceiver({ store, log, spool, flood, config } = {}) {
           return;
         }
         replyCommand(res, command);
-        logger.request({ ...base, outcome: "command_sent", trans_id: command.trans_id, cmd_code: command.cmd_code, begin_time: command.begin_time, end_time: command.end_time, biomax_historical_pull_id: command.biomax_historical_pull_id, duration_ms: Date.now() - started });
+        logger.request({ ...base, outcome: "command_sent", trans_id: command.trans_id, cmd_code: command.cmd_code, begin_time: command.begin_time, end_time: command.end_time, attempt: command.attempt_count, biomax_historical_pull_id: command.biomax_historical_pull_id, duration_ms: Date.now() - started });
         await safe(() => store.touchDevice(envelope.dev_id, { punch: false }));
         return;
       }
@@ -391,6 +415,19 @@ function createReceiver({ store, log, spool, flood, config } = {}) {
     };
     if (!envelope.dev_id) {
       return preserveAndAck(ctx, "unparsed", "send_cmd_result without dev_id header", base);
+    }
+
+    // Complete or nothing. A body cut by the size limit, or shorter than the
+    // device said it would be, is not the block the device sent; storing it
+    // and saying OK would make the device forget data we never got. Refuse:
+    // no reply, socket closed, device retries.
+    if (oversized) {
+      logger.request({ ...base, outcome: "oversized_refused", trans_id: envelope.trans_id, blk_no: envelope.blk_no, bytes_received: ctx.bytesReceived, limit: cfg.commandResultMaxBodyBytes, duration_ms: Date.now() - started, error: true });
+      return refuse(req);
+    }
+    if (envelope.content_length !== null && body.length !== envelope.content_length) {
+      logger.request({ ...base, outcome: "incomplete_refused", trans_id: envelope.trans_id, blk_no: envelope.blk_no, content_length: envelope.content_length, body_len: body.length, duration_ms: Date.now() - started, error: true });
+      return refuse(req);
     }
 
     let command = null;
@@ -423,10 +460,12 @@ function createReceiver({ store, log, spool, flood, config } = {}) {
       return storeFailure(ctx, err, base, "send_cmd_result: block");
     }
 
-    // Durable. ACK first, then the pull's bookkeeping.
+    // Durable and complete. ACK first, then the pull's bookkeeping.
     reply(res, protocol.ACK_OK);
 
-    const failed = commands.isFailureReturnCode(envelope.cmd_return_code);
+    // cmd_return_code is recorded verbatim on the block and in the log and
+    // NOTHING is inferred from it: the device's vocabulary has not been
+    // captured, so neither success nor failure is read into any value.
     logger.request({
       ...base,
       outcome: `cmd_result_${match.toLowerCase()}`,
@@ -437,17 +476,14 @@ function createReceiver({ store, log, spool, flood, config } = {}) {
       body_sha256: stored.body_sha256,
       cmd_return_code: envelope.cmd_return_code,
       biomax_historical_pull_id: pullId,
-      oversized: oversized || undefined,
       duration_ms: Date.now() - started,
-      error: match !== commands.MATCH.MATCHED || failed || stored.outcome === "conflict" || oversized,
+      error: match !== commands.MATCH.MATCHED || stored.outcome === "conflict",
     });
 
-    if (match === commands.MATCH.MATCHED && stored.outcome === "stored") {
-      if (failed) {
-        await safe(() => store.markPullFailed(pullId, `device returned cmd_return_code ${envelope.cmd_return_code}`));
-      } else {
-        await safe(() => store.markPullReceiving(pullId));
-      }
+    if (match === commands.MATCH.MATCHED) {
+      // Any matched block, first or repeated, proves delivery: the command
+      // is answered (no more re-sends) and the pull is receiving.
+      await safe(() => store.markPullReceiving(pullId, envelope.trans_id));
     }
     if (match !== commands.MATCH.MATCHED && stored.outcome === "stored") {
       await safeRaw({ ...base, outcome: "unknown_request_code", reason: `send_cmd_result ${match}: trans_id ${JSON.stringify(envelope.trans_id)}`, byte_length: frame.length, raw_frame: frame });
@@ -475,18 +511,29 @@ function createReceiver({ store, log, spool, flood, config } = {}) {
 
     if (req.method === "GET" && req.url === "/healthz") return handleHealth(res);
 
-    let read;
-    try {
-      read = await readBody(req, cfg.maxBodyBytes);
-    } catch (err) {
-      logger.request({ request_code: null, dev_id: protocol.headerValue(req.headers, "dev_id") || null, source_ip: sourceIp, outcome: "read_error", error: err.message, duration_ms: Date.now() - started });
+    const envelope = protocol.readEnvelope(req.headers);
+    const classified = protocol.classifyRequest(req.headers);
+    const limit = classified.kind === "cmd_result" ? cfg.commandResultMaxBodyBytes : cfg.maxBodyBytes;
+
+    // A result the device announces as larger than we can keep whole is
+    // refused before a byte of it is buffered: no ACK, so it is retried
+    // later (and the limit can be raised deliberately). Punches keep their
+    // preserve-truncated-and-ACK behaviour, which is what R1 wants for them.
+    if (classified.kind === "cmd_result" && envelope.content_length !== null && envelope.content_length > limit) {
+      logger.request({ request_code: classified.code, dev_id: envelope.dev_id, source_ip: sourceIp, outcome: "oversized_refused", content_length: envelope.content_length, limit, duration_ms: Date.now() - started, error: true });
       return refuse(req);
     }
 
-    const envelope = protocol.readEnvelope(req.headers);
-    const classified = protocol.classifyRequest(req.headers);
+    let read;
+    try {
+      read = await readBody(req, limit);
+    } catch (err) {
+      logger.request({ request_code: classified.code || null, dev_id: envelope.dev_id, source_ip: sourceIp, outcome: "read_error", error: err.message, duration_ms: Date.now() - started });
+      return refuse(req);
+    }
+
     const frame = rebuildFrame(req, read.body);
-    const ctx = { req, res, envelope, body: read.body, frame, sourceIp, sourcePort, started, oversized: read.oversized };
+    const ctx = { req, res, envelope, body: read.body, frame, sourceIp, sourcePort, started, oversized: read.oversized, bytesReceived: read.size };
 
     if (classified.kind === "punch") return handlePunch(ctx);
     if (classified.kind === "cmd_result") return handleCmdResult(ctx, classified);
@@ -584,6 +631,9 @@ async function main() {
     db: `${dbConfig.host}/${dbConfig.database}`,
     max_body: receiver.config.maxBodyBytes,
     commands_enabled: receiver.config.commandsEnabled,
+    command_result_max_body: receiver.config.commandResultMaxBodyBytes,
+    command_lease_seconds: receiver.config.commandLeaseSeconds,
+    command_max_attempts: receiver.config.commandMaxAttempts,
     flood: receiver.config.flood,
   });
 
@@ -611,4 +661,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createReceiver, readConfig, rebuildFrame, assertRuntime, MIN_NODE_MAJOR, TESTED_NODE_MAJORS };
+module.exports = { createReceiver, readConfig, rebuildFrame, assertRuntime, MIN_NODE_MAJOR, TESTED_NODE_MAJORS, DEFAULT_COMMAND_RESULT_MAX_BODY, HARD_COMMAND_RESULT_MAX_BODY };

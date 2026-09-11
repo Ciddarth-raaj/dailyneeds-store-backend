@@ -43,13 +43,15 @@ function makeStore() {
     touched: [],
     failBlockInsert: null,
     failClaim: null,
+    clock: 1_000_000_000_000, // ms; tests advance it to expire a lease
+    lastClaimOptions: null,
   };
   let nextCommandId = 1;
   const store = {
     state,
     queue({ pull_id, trans_id, dev_id, begin_time, end_time }) {
       const cmd = commands.buildGetLogDataCommand({ trans_id, dev_id, begin_time, end_time });
-      state.commands.push({ id: nextCommandId++, pull_id, ...cmd, sent_to_ip: null });
+      state.commands.push({ id: nextCommandId++, pull_id, ...cmd, sent_to_ip: null, attempt_count: 0, sent_at_ms: null });
       state.pulls.set(pull_id, { status: "REQUESTED", sent_at: null, first_result_at: null, failed_at: null, failure_reason: null });
       return cmd;
     },
@@ -71,18 +73,24 @@ function makeStore() {
     async touchDevice(devId, opts) {
       state.touched.push([devId, opts]);
     },
-    async claimPendingCommand(devId, sourceIp) {
+    async claimPendingCommand(devId, sourceIp, { leaseSeconds, maxAttempts } = {}) {
       if (state.failClaim) throw state.failClaim;
-      const cmd = state.commands.find((c) => c.dev_id === devId && c.status === "PENDING");
+      state.lastClaimOptions = { leaseSeconds, maxAttempts };
+      const now = state.clock;
+      const cmd = state.commands.find(
+        (c) => c.dev_id === devId && (c.status === "PENDING" || (c.status === "SENT" && now - c.sent_at_ms >= leaseSeconds * 1000 && c.attempt_count < maxAttempts))
+      );
       if (!cmd) return null;
       cmd.status = "SENT";
       cmd.sent_to_ip = sourceIp;
+      cmd.sent_at_ms = now;
+      cmd.attempt_count += 1;
       const pull = state.pulls.get(cmd.pull_id);
       if (pull.status === "REQUESTED") {
         pull.status = "WAITING_DEVICE";
         pull.sent_at = "now";
       }
-      return { biomax_device_command_id: cmd.id, biomax_historical_pull_id: cmd.pull_id, trans_id: cmd.trans_id, dev_id: cmd.dev_id, cmd_code: cmd.cmd_code, begin_time: cmd.begin_time, end_time: cmd.end_time };
+      return { biomax_device_command_id: cmd.id, biomax_historical_pull_id: cmd.pull_id, trans_id: cmd.trans_id, dev_id: cmd.dev_id, cmd_code: cmd.cmd_code, begin_time: cmd.begin_time, end_time: cmd.end_time, attempt_count: cmd.attempt_count };
     },
     async findCommandByTransId(transId) {
       const cmd = state.commands.find((c) => c.trans_id === transId);
@@ -101,7 +109,8 @@ function makeStore() {
       state.blocks.set(key, { row: { ...block, raw_body: Buffer.from(block.raw_body), body_sha256: hash }, duplicate_count: 0, conflict_count: 0 });
       return { outcome: "stored", body_sha256: hash };
     },
-    async markPullReceiving(pullId) {
+    async markPullReceiving(pullId, transId) {
+      for (const c of state.commands) if (c.pull_id === pullId && (!transId || c.trans_id === transId) && c.status !== "ANSWERED") c.status = "ANSWERED";
       const p = state.pulls.get(pullId);
       if (p && (p.status === "REQUESTED" || p.status === "WAITING_DEVICE")) {
         p.status = "RECEIVING";
@@ -205,7 +214,7 @@ describe("historical pull scaffolding (fake device)", () => {
     if (receiver) await receiver.close();
     store = makeStore();
     log = makeLog();
-    receiver = createReceiver({ store, log, config: { commandsEnabled: true, ...(config || {}) } });
+    receiver = createReceiver({ store, log, config: { commandsEnabled: true, commandLeaseSeconds: 60, commandMaxAttempts: 3, commandResultMaxBodyBytes: 256 * 1024, maxBodyBytes: 2048, ...(config || {}) } });
     port = (await receiver.listen(0, "127.0.0.1")).port;
   }
   beforeEach(() => start());
@@ -251,7 +260,7 @@ describe("historical pull scaffolding (fake device)", () => {
       assert.equal(wh.headers.cmd_code, "GET_LOG_DATA");
     });
 
-    it("repeated polls do not hand the same command out twice", async () => {
+    it("repeated polls within the lease do not hand the same command out twice", async () => {
       store.queue({ pull_id: 1, trans_id: TRANS, dev_id: WH, begin_time: "2026-09-01 00:00:00", end_time: "2026-09-02 23:59:59" });
       const first = splitReply((await send(port, poll())).raw);
       const second = splitReply((await send(port, poll())).raw);
@@ -403,15 +412,21 @@ describe("historical pull scaffolding (fake device)", () => {
       assert.ok(log.lines.some((l) => l.outcome === "cmd_result_wrong_device"));
     });
 
-    it("a failing cmd_return_code fails the pull with the code verbatim, block still kept", async () => {
+    it("cmd_return_code is kept verbatim and NOTHING is inferred from it: any matched block -> RECEIVING, never FAILED", async () => {
       await issue();
-      const { headers } = splitReply((await send(port, result({ trans_id: TRANS, blk_no: 0, body: Buffer.alloc(0), cmd_return_code: "ERROR_NO_DATA" }))).raw);
-      assert.equal(headers.response_code, "OK");
+      const codes = ["ERROR_NO_DATA", "-1", "0", "OK", ""];
+      for (let i = 0; i < codes.length; i += 1) {
+        const code = codes[i];
+        const { headers } = splitReply((await send(port, result({ trans_id: TRANS, blk_no: i + 1, body: Buffer.from(code || "empty"), cmd_return_code: code }))).raw);
+        assert.equal(headers.response_code, "OK", code);
+        assert.equal(store.state.blocks.get(`${WH}|${TRANS}|${i + 1}`).row.cmd_return_code, code, "verbatim");
+      }
       const pull = store.state.pulls.get(1);
-      assert.equal(pull.status, "FAILED");
-      assert.equal(pull.failure_reason, "device returned cmd_return_code ERROR_NO_DATA");
-      assert.equal(store.state.commands[0].status, "FAILED");
-      assert.equal(store.state.blocks.get(`${WH}|${TRANS}|0`).row.cmd_return_code, "ERROR_NO_DATA");
+      assert.equal(pull.status, "RECEIVING");
+      assert.equal(pull.failed_at, null);
+      assert.equal(pull.failure_reason, null);
+      assert.equal(store.state.commands[0].status, "ANSWERED");
+      assert.ok(!log.lines.some((l) => /fail/i.test(String(l.outcome))));
     });
 
     it("no trans_id header at all: kept under an empty trans_id as UNKNOWN_TRANS_ID", async () => {
@@ -449,6 +464,130 @@ describe("historical pull scaffolding (fake device)", () => {
       const { headers } = splitReply((await send(port, captured)).raw);
       assert.equal(headers.response_code, "OK");
       assert.equal("cmd_code" in headers, false);
+    });
+  });
+
+  describe("send_cmd_result body size - complete or nothing", () => {
+    const issue = async () => {
+      store.queue({ pull_id: 1, trans_id: TRANS, dev_id: WH, begin_time: "2026-09-01 00:00:00", end_time: "2026-09-02 23:59:59" });
+      await send(port, poll());
+    };
+
+    it("a block far larger than a punch (and than BIOMAX_MAX_BODY) is preserved completely", async () => {
+      await issue();
+      const big = crypto.randomBytes(200 * 1024); // > the 2048-byte punch limit in this suite, < the 256 KB result limit
+      const { headers } = splitReply((await send(port, result({ trans_id: TRANS, blk_no: 1, body: big }), 10000)).raw);
+      assert.equal(headers.response_code, "OK");
+      const stored = store.state.blocks.get(`${WH}|${TRANS}|1`);
+      assert.equal(stored.row.raw_body.length, big.length);
+      assert.equal(Buffer.compare(stored.row.raw_body, big), 0, "every byte, in order");
+      assert.equal(stored.row.body_sha256, crypto.createHash("sha256").update(big).digest("hex"));
+    });
+
+    it("a block over the result limit gets NO OK ack, nothing stored, pull untouched (announced size)", async () => {
+      await issue();
+      const tooBig = crypto.randomBytes(256 * 1024 + 1);
+      const { raw, timedOut } = await send(port, result({ trans_id: TRANS, blk_no: 1, body: tooBig }), 10000);
+      assert.equal(timedOut, false);
+      assert.equal(raw.length, 0, "socket closed with no reply at all");
+      assert.equal(store.state.blocks.size, 0, "no truncated block was accepted as durable");
+      assert.equal(store.state.pulls.get(1).status, "WAITING_DEVICE");
+      assert.ok(log.lines.some((l) => l.outcome === "oversized_refused" && l.error === true));
+    });
+
+    // A body with no Content-Length is read as EMPTY by Node's HTTP/1.0 parser
+    // (the trailing bytes are a parse error), so the announced-size check
+    // above is the enforcement point; the post-read `oversized` refusal in
+    // handleCmdResult is belt-and-braces and has no reachable input here.
+
+    it("a body shorter than its Content-Length (connection cut mid-block) is refused, not stored", async () => {
+      await issue();
+      const full = crypto.randomBytes(4096);
+      const head = `POST /hdata.aspx HTTP/1.0\r\nrequest_code: send_cmd_result\r\ndev_id: ${WH}\r\ntrans_id: ${TRANS}\r\ncmd_return_code: OK\r\nblk_no: 1\r\nblk_len: ${full.length}\r\nContent-Length: ${full.length}\r\n\r\n`;
+      const { raw } = await new Promise((resolve) => {
+        const sock = net.connect(port, "127.0.0.1", () => {
+          sock.write(Buffer.concat([Buffer.from(head, "latin1"), full.subarray(0, 1000)]));
+          setTimeout(() => sock.destroy(), 200); // the device's link drops
+        });
+        const chunks = [];
+        sock.on("data", (d) => chunks.push(d));
+        sock.on("close", () => resolve({ raw: Buffer.concat(chunks) }));
+        sock.on("error", () => resolve({ raw: Buffer.concat(chunks) }));
+      });
+      assert.equal(raw.length, 0);
+      await new Promise((r) => setTimeout(r, 100));
+      assert.equal(store.state.blocks.size, 0, "a partial body is never a block");
+      assert.equal(store.state.pulls.get(1).status, "WAITING_DEVICE");
+    });
+
+    it("the default result limit is 4 MB, configurable, and hard-capped below a MEDIUMBLOB", () => {
+      const { readConfig, DEFAULT_COMMAND_RESULT_MAX_BODY, HARD_COMMAND_RESULT_MAX_BODY } = require("./receiver");
+      assert.equal(readConfig({}).commandResultMaxBodyBytes, 4 * 1024 * 1024);
+      assert.equal(DEFAULT_COMMAND_RESULT_MAX_BODY, 4 * 1024 * 1024);
+      assert.equal(readConfig({ BIOMAX_COMMAND_RESULT_MAX_BODY: "1048576" }).commandResultMaxBodyBytes, 1048576);
+      assert.equal(readConfig({ BIOMAX_COMMAND_RESULT_MAX_BODY: String(64 * 1024 * 1024) }).commandResultMaxBodyBytes, HARD_COMMAND_RESULT_MAX_BODY);
+      assert.ok(HARD_COMMAND_RESULT_MAX_BODY < 16 * 1024 * 1024);
+      assert.notEqual(readConfig({}).commandResultMaxBodyBytes, readConfig({}).maxBodyBytes, "separate from the punch limit");
+    });
+  });
+
+  describe("command delivery lease", () => {
+    const queue = () => store.queue({ pull_id: 1, trans_id: TRANS, dev_id: WH, begin_time: "2026-09-01 00:00:00", end_time: "2026-09-02 23:59:59" });
+
+    it("the receiver passes its lease and attempt settings to the claim", async () => {
+      queue();
+      await send(port, poll());
+      assert.deepEqual(store.state.lastClaimOptions, { leaseSeconds: 60, maxAttempts: 3 });
+      assert.equal(require("./receiver").readConfig({}).commandLeaseSeconds, 600);
+      assert.equal(require("./receiver").readConfig({}).commandMaxAttempts, 3);
+    });
+
+    it("delivery interrupted, no result: after the lease the SAME trans_id is handed out again", async () => {
+      queue();
+      const first = splitReply((await send(port, poll())).raw);
+      assert.equal(first.headers.trans_id, TRANS);
+      // Within the lease: nothing (no rapid resend loop).
+      assert.equal(splitReply((await send(port, poll())).raw).headers.response_code, "ERROR_NO_CMD");
+      store.state.clock += 61 * 1000;
+      const again = splitReply((await send(port, poll())).raw);
+      assert.equal(again.headers.cmd_code, "GET_LOG_DATA");
+      assert.equal(again.headers.trans_id, TRANS, "same transaction, so its blocks land on the same rows");
+      assert.equal(store.state.commands[0].attempt_count, 2);
+      assert.equal(log.lines.filter((l) => l.outcome === "command_sent").length, 2);
+    });
+
+    it("a result that arrives ends the lease: the command is ANSWERED and never re-sent", async () => {
+      queue();
+      await send(port, poll());
+      await send(port, result({ trans_id: TRANS, blk_no: 1, body: Buffer.from("data") }));
+      assert.equal(store.state.commands[0].status, "ANSWERED");
+      store.state.clock += 10 * 60 * 1000;
+      assert.equal(splitReply((await send(port, poll())).raw).headers.response_code, "ERROR_NO_CMD");
+      assert.equal(store.state.commands[0].attempt_count, 1);
+    });
+
+    it("attempts are capped: after the maximum hand-outs with no result it is not offered again", async () => {
+      queue();
+      for (let i = 1; i <= 3; i += 1) {
+        const r = splitReply((await send(port, poll())).raw);
+        assert.equal(r.headers.trans_id, TRANS, `attempt ${i}`);
+        store.state.clock += 61 * 1000;
+      }
+      assert.equal(splitReply((await send(port, poll())).raw).headers.response_code, "ERROR_NO_CMD");
+      assert.equal(store.state.commands[0].attempt_count, 3);
+      assert.equal(store.state.commands[0].status, "SENT", "left visible for an operator, not silently failed");
+    });
+
+    it("a late result after a re-send is still MATCHED and deduplicated by (dev_id, trans_id, blk_no)", async () => {
+      queue();
+      await send(port, poll());
+      store.state.clock += 61 * 1000;
+      await send(port, poll());
+      await send(port, result({ trans_id: TRANS, blk_no: 1, body: Buffer.from("same") }));
+      await send(port, result({ trans_id: TRANS, blk_no: 1, body: Buffer.from("same") }));
+      assert.equal(store.state.blocks.size, 1);
+      assert.equal(store.state.blocks.get(`${WH}|${TRANS}|1`).duplicate_count, 1);
+      assert.equal(store.state.pulls.get(1).status, "RECEIVING");
     });
   });
 });

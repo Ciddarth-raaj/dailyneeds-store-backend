@@ -152,7 +152,7 @@ describe("reads", () => {
     await uc.create({ biomax_device_id: 6, from: "2026-09-01", to: "2026-09-01" }, {});
     const d = await uc.details(1);
     assert.equal(d.trans_id, "HP202609101200000000000001");
-    assert.deepEqual(d.command, { cmd_code: "GET_LOG_DATA", begin_time: "20260901000000", end_time: "20260901235959", status: "PENDING", created_at: undefined, sent_at: undefined });
+    assert.deepEqual(d.command, { cmd_code: "GET_LOG_DATA", begin_time: "20260901000000", end_time: "20260901235959", status: "PENDING", attempt_count: undefined, created_at: undefined, first_sent_at: undefined, sent_at: undefined, answered_at: undefined });
     assert.equal(d.blocks_received, 1);
     assert.ok(!("raw_body" in d.blocks[0]));
     await assert.rejects(uc.details(42), (e) => e.httpCode === 404);

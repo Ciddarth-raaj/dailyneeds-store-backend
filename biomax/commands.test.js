@@ -83,13 +83,14 @@ describe("matchResult", () => {
 });
 
 describe("cmd_return_code", () => {
-  it("OK (any case) and an absent code are not failures; anything else is", () => {
-    assert.equal(c.isFailureReturnCode("OK"), false);
-    assert.equal(c.isFailureReturnCode(" ok "), false);
-    assert.equal(c.isFailureReturnCode(null), false);
-    assert.equal(c.isFailureReturnCode(""), false);
-    assert.equal(c.isFailureReturnCode("ERROR"), true);
-    assert.equal(c.isFailureReturnCode("ERROR_NO_DATA"), true);
-    assert.equal(c.isFailureReturnCode("-1"), true);
+  it("the module has NO notion of success or failure codes - the vocabulary is uncaptured", () => {
+    assert.equal("isFailureReturnCode" in c, false);
+    assert.equal("SUCCESS_RETURN_CODES" in c, false);
+  });
+});
+
+describe("command statuses", () => {
+  it("PENDING, SENT, ANSWERED, FAILED - and FAILED is reserved", () => {
+    assert.deepEqual(c.COMMAND_STATUS, { PENDING: "PENDING", SENT: "SENT", ANSWERED: "ANSWERED", FAILED: "FAILED" });
   });
 });

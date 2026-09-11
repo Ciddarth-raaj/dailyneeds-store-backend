@@ -36,7 +36,13 @@ const FORBIDDEN_COMMANDS = [
   "SET_WEB_SERVER_INFO", // repoints the terminal away from DigiSME
 ];
 
-const COMMAND_STATUS = { PENDING: "PENDING", SENT: "SENT", FAILED: "FAILED" };
+/**
+ * PENDING  queued, never handed out
+ * SENT     handed out; a delivery lease is running (see store.claimPendingCommand)
+ * ANSWERED at least one MATCHED result block arrived - never re-sent
+ * FAILED   reserved; nothing sets it until the return-code vocabulary is known
+ */
+const COMMAND_STATUS = { PENDING: "PENDING", SENT: "SENT", ANSWERED: "ANSWERED", FAILED: "FAILED" };
 
 const PULL_STATUS = {
   REQUESTED: "REQUESTED",
@@ -50,12 +56,11 @@ const ACTIVE_PULL_STATUSES = [PULL_STATUS.REQUESTED, PULL_STATUS.WAITING_DEVICE,
 const MATCH = { MATCHED: "MATCHED", UNKNOWN_TRANS_ID: "UNKNOWN_TRANS_ID", WRONG_DEVICE: "WRONG_DEVICE" };
 
 /**
- * cmd_return_code values taken as success. ASSUMPTION: the device's real
- * vocabulary is not captured; "OK" mirrors the response_code it accepts
- * from us. Anything else that is non-empty is treated as a failure and the
- * pull is marked FAILED with the code recorded verbatim.
+ * cmd_return_code: the device's vocabulary has NOT been captured, so this
+ * module deliberately has no notion of which values mean success or
+ * failure. The receiver records the value verbatim on every block and
+ * infers nothing from it; FAILED semantics arrive with a real capture.
  */
-const SUCCESS_RETURN_CODES = ["OK"];
 
 const DEVID_RE = /^[A-Za-z0-9]{6,32}$/;
 const TIME14_RE = /^\d{14}$/;
@@ -136,14 +141,6 @@ function matchResult(envelope, command) {
   return MATCH.MATCHED;
 }
 
-/** True when cmd_return_code says the device could not serve the command. */
-function isFailureReturnCode(code) {
-  if (code === undefined || code === null) return false;
-  const c = String(code).trim();
-  if (c === "") return false;
-  return SUCCESS_RETURN_CODES.indexOf(c.toUpperCase()) === -1;
-}
-
 module.exports = {
   CMD_GET_LOG_DATA,
   ALLOWED_COMMANDS,
@@ -152,12 +149,10 @@ module.exports = {
   PULL_STATUS,
   ACTIVE_PULL_STATUSES,
   MATCH,
-  SUCCESS_RETURN_CODES,
   CommandRefused,
   assertAllowedCommand,
   newTransId,
   toDeviceTime,
   buildGetLogDataCommand,
   matchResult,
-  isFailureReturnCode,
 };

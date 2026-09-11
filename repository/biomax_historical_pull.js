@@ -114,9 +114,11 @@ class BiomaxHistoricalPullRepository {
   async commandFor(biomax_historical_pull_id) {
     const rows = await this._q(
       "COMMAND",
-      `SELECT biomax_device_command_id, trans_id, dev_id, cmd_code, begin_time, end_time, status,
-              DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
-              DATE_FORMAT(sent_at,    '%Y-%m-%d %H:%i:%s') AS sent_at,
+      `SELECT biomax_device_command_id, trans_id, dev_id, cmd_code, begin_time, end_time, status, attempt_count,
+              DATE_FORMAT(created_at,    '%Y-%m-%d %H:%i:%s') AS created_at,
+              DATE_FORMAT(first_sent_at, '%Y-%m-%d %H:%i:%s') AS first_sent_at,
+              DATE_FORMAT(sent_at,       '%Y-%m-%d %H:%i:%s') AS sent_at,
+              DATE_FORMAT(answered_at,   '%Y-%m-%d %H:%i:%s') AS answered_at,
               sent_to_ip
          FROM biomax_device_command
         WHERE biomax_historical_pull_id = ?

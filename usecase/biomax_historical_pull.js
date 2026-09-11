@@ -87,7 +87,7 @@ class BiomaxHistoricalPullUsecase {
     return {
       ...pull,
       command: command
-        ? { cmd_code: command.cmd_code, begin_time: command.begin_time, end_time: command.end_time, status: command.status, created_at: command.created_at, sent_at: command.sent_at }
+        ? { cmd_code: command.cmd_code, begin_time: command.begin_time, end_time: command.end_time, status: command.status, attempt_count: command.attempt_count, created_at: command.created_at, first_sent_at: command.first_sent_at, sent_at: command.sent_at, answered_at: command.answered_at }
         : null,
       blocks: blocks || [],
       blocks_received: (blocks || []).length,

@@ -270,28 +270,40 @@ function createStore(pool, options = {}) {
   /* ------------------------------------------- historical pull (commands) */
 
   /**
-   * Hand the polling device its oldest PENDING command, exactly once.
+   * Hand the polling device its next deliverable command, under a lease.
    *
-   * The claim is the UPDATE ... WHERE status = 'PENDING': only the poll
-   * whose UPDATE changed a row gets the command back, so two polls racing
-   * (or the same device polling every 20 s) cannot both execute it. The
-   * pull moves REQUESTED -> WAITING_DEVICE in the same transaction.
+   * Deliverable = PENDING, or SENT whose lease has expired (no result block
+   * arrived within leaseSeconds) and which has been handed out fewer than
+   * maxAttempts times. The claim is one transaction: SELECT ... FOR UPDATE
+   * the oldest such row for THIS dev_id, then an UPDATE guarded on the
+   * status and attempt_count just read. Only the poll whose UPDATE changed
+   * a row gets the command, so racing polls cannot both receive it, and a
+   * re-send carries the SAME trans_id, so its result blocks land on the
+   * same rows (deduplicated). A command with maxAttempts hand-outs and
+   * still no answer stays SENT and is simply never offered again.
    *
-   * @returns {object|null} the command row, or null when nothing is queued
+   * @returns {object|null} the command row (with attempt_count after this
+   *   hand-out), or null when nothing is deliverable
    */
-  async function claimPendingCommand(devId, sourceIp) {
+  async function claimPendingCommand(devId, sourceIp, options = {}) {
+    const leaseSeconds = Number.isSafeInteger(options.leaseSeconds) && options.leaseSeconds > 0 ? options.leaseSeconds : 600;
+    const maxAttempts = Number.isSafeInteger(options.maxAttempts) && options.maxAttempts > 0 ? options.maxAttempts : 3;
     const connection = await getConnectionAsync(pool);
     try {
       await beginTransactionAsync(connection);
       const rows = await queryAsync(
         connection,
-        `SELECT biomax_device_command_id, biomax_historical_pull_id, trans_id, dev_id, cmd_code, begin_time, end_time
+        `SELECT biomax_device_command_id, biomax_historical_pull_id, trans_id, dev_id, cmd_code, begin_time, end_time, status, attempt_count
            FROM biomax_device_command
-          WHERE dev_id = ? AND status = 'PENDING'
+          WHERE dev_id = ?
+            AND ( status = 'PENDING'
+                  OR ( status = 'SENT'
+                       AND sent_at < NOW(3) - INTERVAL ? SECOND
+                       AND attempt_count < ? ) )
           ORDER BY created_at ASC, biomax_device_command_id ASC
           LIMIT 1
           FOR UPDATE`,
-        [devId]
+        [devId, leaseSeconds, maxAttempts]
       );
       const command = rows && rows[0] ? rows[0] : null;
       if (!command) {
@@ -301,9 +313,14 @@ function createStore(pool, options = {}) {
       const claimed = await queryAsync(
         connection,
         `UPDATE biomax_device_command
-            SET status = 'SENT', sent_at = NOW(3), sent_to_ip = ?
-          WHERE biomax_device_command_id = ? AND dev_id = ? AND status = 'PENDING'`,
-        [sourceIp || null, command.biomax_device_command_id, devId]
+            SET status = 'SENT',
+                sent_at = NOW(3),
+                first_sent_at = COALESCE(first_sent_at, NOW(3)),
+                sent_to_ip = ?,
+                attempt_count = attempt_count + 1
+          WHERE biomax_device_command_id = ? AND dev_id = ?
+            AND status IN ('PENDING', 'SENT') AND attempt_count = ?`,
+        [sourceIp || null, command.biomax_device_command_id, devId, Number(command.attempt_count) || 0]
       );
       if (!claimed || claimed.affectedRows !== 1) {
         await rollbackAsync(connection);
@@ -325,6 +342,7 @@ function createStore(pool, options = {}) {
         cmd_code: command.cmd_code,
         begin_time: command.begin_time,
         end_time: command.end_time,
+        attempt_count: (Number(command.attempt_count) || 0) + 1,
       };
     } catch (err) {
       await rollbackAsync(connection).catch(() => {});
@@ -400,8 +418,18 @@ function createStore(pool, options = {}) {
     return { outcome, body_sha256: hash };
   }
 
-  /** First block in: REQUESTED / WAITING_DEVICE -> RECEIVING, once. */
-  async function markPullReceiving(pullId) {
+  /**
+   * A MATCHED block arrived: the command is ANSWERED (its lease ends, it is
+   * never re-sent) and the pull is RECEIVING (REQUESTED / WAITING_DEVICE ->
+   * RECEIVING once; first_result_at set once).
+   */
+  async function markPullReceiving(pullId, transId) {
+    await q(
+      `UPDATE biomax_device_command
+          SET status = 'ANSWERED', answered_at = COALESCE(answered_at, NOW(3))
+        WHERE biomax_historical_pull_id = ? ${transId ? "AND trans_id = ?" : ""} AND status IN ('PENDING', 'SENT')`,
+      transId ? [pullId, transId] : [pullId]
+    );
     await q(
       `UPDATE biomax_historical_pull
           SET status = 'RECEIVING', first_result_at = COALESCE(first_result_at, NOW(3))
@@ -410,7 +438,10 @@ function createStore(pool, options = {}) {
     );
   }
 
-  /** The device said no: pull FAILED with the code verbatim, command FAILED. */
+  /**
+   * Reserved for an operator action or for return-code semantics once the
+   * vocabulary is captured. The receiver does NOT call this today.
+   */
   async function markPullFailed(pullId, reason) {
     await q(
       `UPDATE biomax_historical_pull

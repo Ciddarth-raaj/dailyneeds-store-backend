@@ -251,26 +251,26 @@ describe("historical pull: command claim", () => {
     store = createStore(pool);
   });
 
-  it("nothing pending: SELECT ... FOR UPDATE, commit, null", async () => {
+  it("nothing deliverable: SELECT ... FOR UPDATE over PENDING or lease-expired SENT under the attempt cap, commit, null", async () => {
     pool.responses.push([]);
-    assert.equal(await store.claimPendingCommand("C2695C56D30E1430", "1.2.3.4"), null);
+    assert.equal(await store.claimPendingCommand("C2695C56D30E1430", "1.2.3.4", { leaseSeconds: 600, maxAttempts: 3 }), null);
     const sel = pool.log.find((l) => /SELECT .* FROM biomax_device_command/.test(l.sql));
-    assert.match(sel.sql, /WHERE dev_id = \? AND status = 'PENDING' ORDER BY created_at ASC, biomax_device_command_id ASC LIMIT 1 FOR UPDATE/);
-    assert.deepEqual(sel.params, ["C2695C56D30E1430"]);
+    assert.match(sel.sql, /WHERE dev_id = \? AND \( status = 'PENDING' OR \( status = 'SENT' AND sent_at < NOW\(3\) - INTERVAL \? SECOND AND attempt_count < \? \) \) ORDER BY created_at ASC, biomax_device_command_id ASC LIMIT 1 FOR UPDATE/);
+    assert.deepEqual(sel.params, ["C2695C56D30E1430", 600, 3]);
     assert.deepEqual(pool.log.map((l) => l.sql).filter((s) => /^(BEGIN|COMMIT|ROLLBACK|RELEASE)$/.test(s)), ["BEGIN", "COMMIT", "RELEASE"]);
   });
 
-  it("pending: the claim is an UPDATE guarded on dev_id AND status PENDING; the pull moves to WAITING_DEVICE", async () => {
+  it("deliverable: the claim is an UPDATE guarded on dev_id, status and the attempt_count just read; attempt +1; the pull moves to WAITING_DEVICE", async () => {
     pool.responses.push(
-      [{ biomax_device_command_id: 5, biomax_historical_pull_id: 2, trans_id: "T", dev_id: "C2695C56D30E1430", cmd_code: "GET_LOG_DATA", begin_time: "20260901000000", end_time: "20260901235959" }],
+      [{ biomax_device_command_id: 5, biomax_historical_pull_id: 2, trans_id: "T", dev_id: "C2695C56D30E1430", cmd_code: "GET_LOG_DATA", begin_time: "20260901000000", end_time: "20260901235959", status: "SENT", attempt_count: 1 }],
       { affectedRows: 1 },
       { affectedRows: 1 }
     );
-    const cmd = await store.claimPendingCommand("C2695C56D30E1430", "1.2.3.4");
-    assert.deepEqual(cmd, { biomax_device_command_id: 5, biomax_historical_pull_id: 2, trans_id: "T", dev_id: "C2695C56D30E1430", cmd_code: "GET_LOG_DATA", begin_time: "20260901000000", end_time: "20260901235959" });
+    const cmd = await store.claimPendingCommand("C2695C56D30E1430", "1.2.3.4", { leaseSeconds: 600, maxAttempts: 3 });
+    assert.deepEqual(cmd, { biomax_device_command_id: 5, biomax_historical_pull_id: 2, trans_id: "T", dev_id: "C2695C56D30E1430", cmd_code: "GET_LOG_DATA", begin_time: "20260901000000", end_time: "20260901235959", attempt_count: 2 });
     const upd = pool.log.find((l) => /UPDATE biomax_device_command SET status = 'SENT'/.test(l.sql));
-    assert.match(upd.sql, /WHERE biomax_device_command_id = \? AND dev_id = \? AND status = 'PENDING'/);
-    assert.deepEqual(upd.params, ["1.2.3.4", 5, "C2695C56D30E1430"]);
+    assert.match(upd.sql, /sent_at = NOW\(3\), first_sent_at = COALESCE\(first_sent_at, NOW\(3\)\), sent_to_ip = \?, attempt_count = attempt_count \+ 1 WHERE biomax_device_command_id = \? AND dev_id = \? AND status IN \('PENDING', 'SENT'\) AND attempt_count = \?/);
+    assert.deepEqual(upd.params, ["1.2.3.4", 5, "C2695C56D30E1430", 1]);
     const pull = pool.log.find((l) => /UPDATE biomax_historical_pull SET status = 'WAITING_DEVICE'/.test(l.sql));
     assert.match(pull.sql, /WHERE biomax_historical_pull_id = \? AND status = 'REQUESTED'/);
     assert.deepEqual(pull.params, [2]);
@@ -278,8 +278,8 @@ describe("historical pull: command claim", () => {
   });
 
   it("lost the race (UPDATE hit nothing): rollback and null, nothing handed out", async () => {
-    pool.responses.push([{ biomax_device_command_id: 5, biomax_historical_pull_id: 2, trans_id: "T", dev_id: "C2695C56D30E1430", cmd_code: "GET_LOG_DATA", begin_time: "a", end_time: "b" }], { affectedRows: 0 });
-    assert.equal(await store.claimPendingCommand("C2695C56D30E1430", null), null);
+    pool.responses.push([{ biomax_device_command_id: 5, biomax_historical_pull_id: 2, trans_id: "T", dev_id: "C2695C56D30E1430", cmd_code: "GET_LOG_DATA", begin_time: "a", end_time: "b", status: "PENDING", attempt_count: 0 }], { affectedRows: 0 });
+    assert.equal(await store.claimPendingCommand("C2695C56D30E1430", null, {}), null);
     assert.ok(pool.log.some((l) => l.sql === "ROLLBACK"));
     assert.ok(!pool.log.some((l) => /WAITING_DEVICE/.test(l.sql)));
   });
@@ -325,10 +325,13 @@ describe("historical pull: result blocks", () => {
     assert.equal(ins.params[6], 0);
   });
 
-  it("markPullReceiving / markPullFailed only move ACTIVE pulls and never touch COMPLETED", async () => {
-    pool.responses.push({}, {}, {});
-    await store.markPullReceiving(2);
+  it("markPullReceiving marks the command ANSWERED (lease over) and the pull RECEIVING; markPullFailed is reserved and only moves ACTIVE pulls", async () => {
+    pool.responses.push({}, {}, {}, {});
+    await store.markPullReceiving(2, "T");
     await store.markPullFailed(2, "device returned cmd_return_code ERR");
+    const ans = pool.log.find((l) => /SET status = 'ANSWERED'/.test(l.sql));
+    assert.match(ans.sql, /answered_at = COALESCE\(answered_at, NOW\(3\)\) WHERE biomax_historical_pull_id = \? AND trans_id = \? AND status IN \('PENDING', 'SENT'\)/);
+    assert.deepEqual(ans.params, [2, "T"]);
     const rec = pool.log.find((l) => /SET status = 'RECEIVING'/.test(l.sql));
     assert.match(rec.sql, /first_result_at = COALESCE\(first_result_at, NOW\(3\)\)/);
     assert.match(rec.sql, /status IN \('REQUESTED', 'WAITING_DEVICE'\)/);

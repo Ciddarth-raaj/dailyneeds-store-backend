@@ -25,8 +25,8 @@
 --   RECEIVING       the first send_cmd_result block arrived (first_result_at)
 --   COMPLETED       every block is in - set ONLY once the real protocol's
 --                   completion semantics are proven; nothing sets it today
---   FAILED          the device returned a failing cmd_return_code, or an
---                   operator failed it (failed_at, failure_reason)
+--   FAILED          reserved (failed_at, failure_reason) - nothing sets it
+--                   until the device's cmd_return_code vocabulary is captured
 CREATE TABLE IF NOT EXISTS `biomax_historical_pull` (
   `biomax_historical_pull_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `biomax_device_id`  INT NOT NULL,
@@ -61,9 +61,13 @@ CREATE TABLE IF NOT EXISTS `biomax_historical_pull` (
 -- dangerous commands (CLEAR_LOG_DATA, CLEAR_ENROLL_DATA, DELETE_USER,
 -- RESET_FK, SET_WEB_SERVER_INFO) are refused in code AND cannot be stored.
 --
--- A command is handed out at most once: the receiver claims it with an
--- UPDATE ... WHERE status = 'PENDING' and only the poll whose UPDATE hit a
--- row gets the command (repeated polls do not re-execute it).
+-- Delivery is leased, not fire-and-forget: the receiver claims a command
+-- (PENDING, or SENT whose lease expired without any result block, while
+-- attempt_count is below the cap) inside one transaction with SELECT ...
+-- FOR UPDATE and an UPDATE guarded on status and attempt_count, so racing
+-- polls never both receive it. A re-send carries the SAME trans_id
+-- (GET_LOG_DATA is read-only and result blocks are deduplicated). The first
+-- MATCHED result block marks it ANSWERED and it is never sent again.
 CREATE TABLE IF NOT EXISTS `biomax_device_command` (
   `biomax_device_command_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `biomax_historical_pull_id` BIGINT UNSIGNED NOT NULL,
@@ -72,10 +76,13 @@ CREATE TABLE IF NOT EXISTS `biomax_device_command` (
   `cmd_code`          ENUM('GET_LOG_DATA') NOT NULL,
   `begin_time`        CHAR(14) NOT NULL COMMENT 'YYYYMMDDHHMMSS, device-local IST, as the device expects',
   `end_time`          CHAR(14) NOT NULL,
-  `status`            ENUM('PENDING','SENT','FAILED') NOT NULL DEFAULT 'PENDING',
+  `status`            ENUM('PENDING','SENT','ANSWERED','FAILED') NOT NULL DEFAULT 'PENDING' COMMENT 'FAILED is reserved - nothing sets it yet',
+  `attempt_count`     INT NOT NULL DEFAULT 0 COMMENT 'how many polls were handed this command',
   `created_at`        DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-  `sent_at`           DATETIME(3) NULL,
-  `sent_to_ip`        VARCHAR(45) NULL COMMENT 'source IP of the poll that took the command',
+  `first_sent_at`     DATETIME(3) NULL,
+  `sent_at`           DATETIME(3) NULL COMMENT 'latest hand-out - the lease runs from here',
+  `answered_at`       DATETIME(3) NULL COMMENT 'first MATCHED result block',
+  `sent_to_ip`        VARCHAR(45) NULL COMMENT 'source IP of the latest poll that took the command',
   PRIMARY KEY (`biomax_device_command_id`),
   UNIQUE KEY `uq_bdc_trans_id` (`trans_id`),
   KEY `idx_bdc_dev_status` (`dev_id`, `status`, `created_at`),

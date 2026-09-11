@@ -18,7 +18,7 @@ rules (R1-R18) still hold.
 | command rules | `biomax/commands.js` | only GET_LOG_DATA; forbidden list; trans_id; result matching; return-code policy |
 | wire | `biomax/protocol.js` | `send_cmd_result` classification, command headers in the envelope, the (assumed) command reply, header listing |
 | receiver store | `biomax/store.js` | claim a command once; keep a result block raw; pull status; punch `ingest_source` |
-| receiver | `biomax/receiver.js` | poll may carry a claimed command (flag-gated); `send_cmd_result` kept then ACKed |
+| receiver | `biomax/receiver.js` | poll may carry a claimed command (flag-gated, leased); `send_cmd_result` kept whole then ACKed, refused if it cannot be kept whole |
 | API | `repository/`, `usecase/`, `routes/biomax_historical_pull.js`, `server.js` | create / list / view pull requests, admin only |
 | fake device | `test_support/biomax/fake-device-http.js` | `MODE=poll EXPECT_CMD=1`, `MODE=cmd_result` |
 | tests | `biomax/commands.test.js`, `biomax/historical.test.js`, additions to `biomax/store.test.js` and `biomax/protocol.test.js`, `migrations/biomax_historical_pull.test.js`, `usecase/biomax_historical_pull.test.js`, `routes/biomax_historical_pull.test.js` | |
@@ -37,8 +37,10 @@ Timestamps `requested_at`, `sent_at`, `first_result_at`, `completed_at`,
 `biomax_device_command` - the queue. `trans_id` UNIQUE, `dev_id` (the only
 device it may be handed to), `cmd_code ENUM('GET_LOG_DATA')` - a one-value
 enum, so a forbidden command cannot even be stored - `begin_time` /
-`end_time` as 14-digit device time, `status ENUM('PENDING','SENT','FAILED')`,
-`created_at`, `sent_at`, `sent_to_ip`. FK to the pull.
+`end_time` as 14-digit device time, `status
+ENUM('PENDING','SENT','ANSWERED','FAILED')` (FAILED reserved),
+`attempt_count`, `created_at`, `first_sent_at`, `sent_at` (the lease runs
+from here), `answered_at`, `sent_to_ip`. FK to the pull.
 
 `biomax_command_result_block` - every `send_cmd_result`, raw. UNIQUE
 `(dev_id, trans_id, blk_no)`. Keeps `cmd_id`, `cmd_code`, `cmd_return_code`,
@@ -61,18 +63,22 @@ nothing from Part 1.
 ## 3. Pull state flow
 
 ```
-REQUESTED ──(device polls, command claimed)──► WAITING_DEVICE ──(first block)──► RECEIVING ──► COMPLETED
-    │                                                │                              │
-    └──────────────(failing cmd_return_code)─────────┴──────────────────────────────┘──► FAILED
+REQUESTED ──(device polls, command claimed)──► WAITING_DEVICE ──(first MATCHED block)──► RECEIVING ──► COMPLETED
+                                                                                                          FAILED (reserved)
 ```
 
 - `REQUESTED`: the API wrote the pull and its PENDING command in one transaction.
-- `WAITING_DEVICE`: the receiver handed the command over (`sent_at`).
-- `RECEIVING`: the first MATCHED block was stored (`first_result_at`).
-- `FAILED`: a MATCHED block carried a failing `cmd_return_code` (`failed_at`,
-  `failure_reason` = the code verbatim); the command is marked FAILED too.
+- `WAITING_DEVICE`: the receiver handed the command over (`sent_at`). Under
+  the delivery lease (section 5) it may be handed over again with the same
+  trans_id; the pull stays WAITING_DEVICE.
+- `RECEIVING`: the first MATCHED block was stored (`first_result_at`),
+  whatever its `cmd_return_code` says.
 - `COMPLETED`: **set by nothing yet.** Block arrival alone never completes a
   pull, because the protocol's end-of-data signal has not been observed.
+- `FAILED`: **reserved, set by nothing yet.** The device's `cmd_return_code`
+  vocabulary has not been captured, so no value is read as a failure (or as
+  a success). `store.markPullFailed` exists for an operator action or for
+  the semantics a real capture will justify.
 
 ## 4. Command queue
 
@@ -98,15 +104,32 @@ Unchanged by default: `response_code: ERROR_NO_CMD` with the two empty
 `cmd_id:` / `cmd_code:` headers, as captured from DigiSME.
 
 With `BIOMAX_COMMANDS_ENABLED=1` in the receiver process, a genuine
-`receive_cmd` from an identified `dev_id` first calls
-`store.claimPendingCommand(dev_id)`. That is one transaction: `SELECT ...
-FOR UPDATE` the oldest PENDING command **for that dev_id**, `UPDATE ... SET
-status='SENT' WHERE ... AND status='PENDING'`, and only if that UPDATE hit a
-row is the command returned (the pull moves to WAITING_DEVICE in the same
-transaction). So a repeated poll, or two polls racing, cannot hand the same
-command out twice, and a device never receives another device's command.
+`receive_cmd` from an identified `dev_id` calls
+`store.claimPendingCommand(dev_id, ip, { leaseSeconds, maxAttempts })`. That
+is one transaction: `SELECT ... FOR UPDATE` the oldest *deliverable* command
+**for that dev_id**, then `UPDATE ... SET status='SENT', sent_at=NOW(3),
+attempt_count=attempt_count+1 WHERE ... AND status IN ('PENDING','SENT') AND
+attempt_count = <the value just read>`. Only the poll whose UPDATE hit a row
+gets the command (the pull moves to WAITING_DEVICE in the same transaction).
+
+Deliverable means `PENDING`, or `SENT` with `sent_at` older than
+`BIOMAX_COMMAND_LEASE_SECONDS` (default 600) and `attempt_count` below
+`BIOMAX_COMMAND_MAX_ATTEMPTS` (default 3). So:
+
+- racing polls cannot both receive a command (row lock + guarded UPDATE);
+- a hand-out whose HTTP reply never reached the device is not lost: once the
+  lease expires and no result has arrived, the next poll gets it again with
+  the **same trans_id** (GET_LOG_DATA is read-only; its result blocks
+  deduplicate on `(dev_id, trans_id, blk_no)`);
+- there is no rapid resend loop: at most one hand-out per lease period, at
+  most `maxAttempts` in total; after that the command stays `SENT` with its
+  `attempt_count` visible in the pull's details for an operator, and is not
+  offered again;
+- the first MATCHED result block marks the command `ANSWERED`
+  (`answered_at`), which ends the lease for good.
+
 A store error during the claim logs and answers ERROR_NO_CMD; the command
-stays PENDING. An unknown `request_code` is still answered as a plain poll
+is untouched. An unknown `request_code` is still answered as a plain poll
 and never carries a command.
 
 The reply that carries a command (`protocol.buildCommandReply`) is an
@@ -114,20 +137,32 @@ The reply that carries a command (`protocol.buildCommandReply`) is an
 
 ## 6. `send_cmd_result`
 
-Classified by `request_code: send_cmd_result`. Order of operations, per R1:
+Classified by `request_code: send_cmd_result` **before** the body is read,
+because its body limit is its own: `BIOMAX_COMMAND_RESULT_MAX_BODY`, default
+4 MB, hard-capped just under the 16 MB a `MEDIUMBLOB` holds, separate from
+the 64 KB punch limit (`BIOMAX_MAX_BODY`). Order of operations, per R1:
 
-1. no `dev_id` header -> preserved as an `unparsed` raw request, ACKed.
-2. look up the command by `trans_id`; compute `match_status`.
-3. `store.insertResultBlock(...)` with `dev_id`, `trans_id`, `cmd_id`,
-   `cmd_code`, `cmd_return_code`, `blk_no`, `blk_len`, `content_length`,
-   every header as JSON, the body bytes, their sha256, `match_status`,
-   `source_ip`. **If this fails there is no ACK and the socket is closed**,
-   exactly as for a punch.
-4. `response_code: OK`.
-5. bookkeeping: MATCHED + newly stored -> `markPullReceiving`, or
-   `markPullFailed` when `cmd_return_code` is a failure; UNKNOWN / WRONG
-   device -> also a `biomax_raw_request` row with the whole frame, so it is
-   visible where operators already look.
+1. `Content-Length` above the result limit -> refused before a byte is
+   buffered: no reply, socket closed, the device retries later (and the
+   limit can be raised deliberately). Logged `oversized_refused`.
+2. body read; if it overran the limit anyway (no or false Content-Length)
+   -> refused the same way. Never stored truncated, never ACKed.
+3. body shorter than its `Content-Length` (link dropped mid-block) ->
+   refused (`incomplete_refused`). A partial block is never a block.
+4. no `dev_id` header -> preserved as an `unparsed` raw request, ACKed.
+5. look up the command by `trans_id`; compute `match_status`.
+6. `store.insertResultBlock(...)` with `dev_id`, `trans_id`, `cmd_id`,
+   `cmd_code`, `cmd_return_code` **verbatim**, `blk_no`, `blk_len`,
+   `content_length`, every header as JSON, the complete body bytes, their
+   sha256, `match_status`, `source_ip`. **If this fails there is no ACK and
+   the socket is closed**, exactly as for a punch.
+7. `response_code: OK`.
+8. bookkeeping: MATCHED -> command `ANSWERED`, pull `RECEIVING`. Nothing is
+   inferred from `cmd_return_code`: not success, not failure. UNKNOWN /
+   WRONG device -> also a `biomax_raw_request` row with the whole frame.
+
+Punches keep their Part 1 behaviour (a truncated punch frame is preserved
+as `oversized` and ACKed, so a malformed frame cannot block a device).
 
 Nothing decodes the body. There is no historical punch decoder, no
 `punches_returned` increment, and no row is written to `biomax_punch` from a
@@ -169,18 +204,21 @@ yet; the decoder that would call it does not exist.
 2. **The `send_cmd_result` header names.** `trans_id`, `cmd_return_code`,
    `cmd_code` are read by those names. If the device spells them otherwise,
    `headers_json` still has them; matching would need the mapping fixed.
-3. **`cmd_return_code` vocabulary.** `OK` is taken as success; any other
-   non-empty value fails the pull. The real success/failure codes are
-   unobserved.
+3. **`cmd_return_code` vocabulary.** Unobserved. The value is stored
+   verbatim on every block and nothing is inferred from it; FAILED semantics
+   are added only after a real capture shows the codes.
 4. **Completion semantics.** How the device signals "no more blocks" (a
    final empty block, a header, a count, or nothing) is unknown, so
    `COMPLETED` is never set automatically.
 5. **The FKDataHS102 historical record layout.** Deliberately not guessed.
    Blocks are stored raw for a decoder to be written against real captures.
 6. **`trans_id` length.** Whether a 26-character id is echoed intact.
-7. **Block size.** `MEDIUMBLOB` and the receiver's `BIOMAX_MAX_BODY` (64 KB
-   default) bound what is kept; a real block larger than the cap would be
-   stored truncated and flagged `oversized` in the log.
+7. **Block size.** Unknown. `BIOMAX_COMMAND_RESULT_MAX_BODY` (4 MB default,
+   under 16 MB hard cap) bounds what is accepted; a larger block is refused
+   whole (no ACK) and logged `oversized_refused`, never stored truncated.
+   Raise the limit deliberately if a capture shows bigger blocks.
+8. **Lease and attempt defaults.** 600 s and 3 are a conservative guess at
+   how long a terminal takes to answer GET_LOG_DATA; tune from a capture.
 
 ## 10. Safe activation later (not now)
 

@@ -70,8 +70,9 @@ describe("up", () => {
   it("the command queue can hold only GET_LOG_DATA and is unique per trans_id", () => {
     const s = tableOf("biomax_device_command");
     assert.match(s, /`cmd_code` ENUM\('GET_LOG_DATA'\) NOT NULL/);
-    assert.match(s, /`status` ENUM\('PENDING','SENT','FAILED'\)/);
-    for (const c of ["trans_id", "dev_id", "cmd_code", "begin_time", "end_time", "status", "created_at", "sent_at"]) assert.ok(s.includes(`\`${c}\``), c);
+    assert.match(s, /`status` ENUM\('PENDING','SENT','ANSWERED','FAILED'\)/);
+    for (const c of ["trans_id", "dev_id", "cmd_code", "begin_time", "end_time", "status", "created_at", "sent_at", "attempt_count", "first_sent_at", "answered_at", "sent_to_ip"]) assert.ok(s.includes(`\`${c}\``), c);
+    assert.match(s, /`attempt_count` INT NOT NULL DEFAULT 0/);
     assert.match(s, /UNIQUE KEY `uq_bdc_trans_id` \(`trans_id`\)/);
   });
 
