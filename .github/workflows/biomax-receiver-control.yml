@@ -30,7 +30,7 @@ name: Biomax Receiver Control
   workflow_dispatch:
     inputs:
       action:
-        description: "preflight | start | status | stop"
+        description: "preflight | start | status | netcheck | stop"
         required: true
         default: preflight
         type: choice
@@ -38,6 +38,7 @@ name: Biomax Receiver Control
           - preflight
           - start
           - status
+          - netcheck
           - stop
       dev_id:
         description: "Cloud ID of the ONE terminal under test (verbatim)"
@@ -69,7 +70,7 @@ jobs:
           LINES: ${{ inputs.lines }}
         run: |
           set -euo pipefail
-          case "$ACTION" in preflight|start|status|stop) ;; *) echo "::error::bad action"; exit 1;; esac
+          case "$ACTION" in preflight|start|status|netcheck|stop) ;; *) echo "::error::bad action"; exit 1;; esac
           [[ "$DEV_ID" =~ ^[A-Za-z0-9]{6,32}$ ]] || { echo "::error::dev_id must be 6-32 alphanumerics"; exit 1; }
           [[ "$LINES" =~ ^[0-9]{1,5}$ ]] || { echo "::error::lines must be a number"; exit 1; }
           if [ "$ACTION" = "start" ] && [ "$CONFIRM" != "START-RECEIVER" ]; then echo "::error::start requires confirm=START-RECEIVER"; exit 1; fi
@@ -101,6 +102,21 @@ jobs:
           else
             echo "REPORT: TCP 7005 on the host is NOT reachable from this GitHub runner (filtered, or nothing listening)"
           fi
+
+      # netcheck only: a synthetic receive_cmd from this runner, exactly what
+      # the fake device sends, to prove the HTTP path end to end from the
+      # public internet. Harmless: a poll writes nothing (dev_id GHARUNNERTEST
+      # is unregistered, so it is a log line only) and, with commands off,
+      # can only be answered ERROR_NO_CMD.
+      - name: HTTP poll from the public internet (netcheck only, report only)
+        if: ${{ inputs.action == 'netcheck' }}
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          set +e
+          OUT="$(curl -s -m 10 -D - -o /dev/null -X POST "http://${SSH_HOST}:7005/hdata.aspx" -H 'request_code: receive_cmd' -H 'dev_id: GHARUNNERTEST' -H 'Content-Length: 0' 2>&1)"
+          echo "$OUT" | sed 's/^/  /'
+          if echo "$OUT" | grep -qi '^response_code: ERROR_NO_CMD'; then echo "REPORT: synthetic poll from the internet was answered ERROR_NO_CMD - HTTP path to the receiver works end to end"; else echo "REPORT: synthetic poll from the internet got NO protocol reply"; fi
 
       - name: Run on the production host
         env:
@@ -256,6 +272,29 @@ jobs:
             listeners | grep -E '(:|\.)(7005|82) ' | sed 's/^/  listener: /' || true
             log_summary
             db_view
+            ;;
+          # ------------------------------------------------------------- netcheck
+          netcheck)
+            OUTLET_IP="$(node - "$(api_env)" "$D" <<'NODE' 2>/dev/null
+          const fs=require("fs"), mysql=require("mysql"); const [env, d]=process.argv.slice(2);
+          const cfg=JSON.parse(fs.readFileSync("config.json","utf8")).db.mysql[env];
+          const c=mysql.createConnection({host:cfg.host,port:cfg.port,user:cfg.username,password:cfg.password,database:cfg.database});
+          c.query("SELECT o.allowed_ips FROM biomax_device dv JOIN biomax_device_assignment a ON a.biomax_device_id=dv.biomax_device_id AND a.effective_to IS NULL JOIN outlets o ON o.outlet_id=a.outlet_id WHERE dv.dev_id=?",[d],(e,r)=>{ if(!e&&r[0]) process.stdout.write(String(r[0].allowed_ips||"")); c.end(); });
+          NODE
+          )"
+            echo "=== netcheck for $DEV_ID (outlet static IP from production outlets.allowed_ips: ${OUTLET_IP:-unknown})"
+            echo "--- receiver: $(receiver_state); healthz: $(curl -s -m 5 http://127.0.0.1:7005/healthz)"
+            echo "--- TCP sockets on 7005 right now (any state):"; ss -tan '( sport = :7005 )' 2>/dev/null | sed 's/^/  /'
+            echo "--- conntrack entries for 7005 (if available):"; (sudo -n conntrack -L 2>/dev/null || cat /proc/net/nf_conntrack 2>/dev/null) | grep -E 'dport=7005' | head -20 | sed 's/^/  /' || echo "  (conntrack not available)"
+            echo "--- 45-second packet capture on port 7005 (needs passwordless sudo; report only):"
+            if sudo -n true 2>/dev/null; then
+              sudo -n timeout 45 tcpdump -nn -i any -c 40 'tcp port 7005' 2>&1 | sed 's/^/  /' || true
+            else
+              echo "  (no passwordless sudo for tcpdump; skipped)"
+            fi
+            echo "--- receiver log lines since start: $(cat "$HOME"/.pm2/logs/biomax-receiver*out*.log 2>/dev/null | grep -c '"request_code"') request line(s)"
+            echo "--- any request from the outlet IP in the receiver log: $(cat "$HOME"/.pm2/logs/biomax-receiver*out*.log 2>/dev/null | grep -c "${OUTLET_IP:-NONE}")"
+            echo "--- last 8 log lines:"; cat "$HOME"/.pm2/logs/biomax-receiver*out*.log 2>/dev/null | tail -8 | cut -c1-300 | sed 's/^/  /'
             ;;
           # ----------------------------------------------------------------- stop
           stop)
