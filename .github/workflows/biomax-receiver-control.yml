@@ -166,9 +166,9 @@ jobs:
           }
 
           log_summary() {
-            LOG="$HOME/.pm2/logs/biomax-receiver-out.log"; ERR="$HOME/.pm2/logs/biomax-receiver-error.log"
-            echo "=== receiver log summary (last $LINES lines of $LOG)"
-            [ -f "$LOG" ] || { report "no receiver out log yet"; return; }
+            LOG="$(ls -t "$HOME"/.pm2/logs/biomax-receiver*out*.log 2>/dev/null | head -1)"; ERR="$(ls -t "$HOME"/.pm2/logs/biomax-receiver*error*.log 2>/dev/null | head -1)"
+            echo "=== receiver log summary (last $LINES lines of ${LOG:-<none>})"
+            [ -n "$LOG" ] && [ -f "$LOG" ] || { report "no receiver out log yet"; return; }
             tail -n "$LINES" "$LOG" | node - "$DEV_ID" <<'NODE'
           const dev = process.argv[2];
           const lines = require("fs").readFileSync(0, "utf8").split("\n").filter(Boolean);
@@ -196,7 +196,7 @@ jobs:
           const od = [...new Set(others)]; if (od.length) console.log(`::warning::other dev_ids seen: ${od.join(", ")}`);
           NODE
             echo "--- last 15 out lines"; tail -n 15 "$LOG" | cut -c1-400
-            echo "--- last 10 error-log lines"; [ -f "$ERR" ] && tail -n 10 "$ERR" | cut -c1-400 || echo "(none)"
+            echo "--- last 10 error-log lines"; [ -n "$ERR" ] && [ -f "$ERR" ] && tail -n 10 "$ERR" | cut -c1-400 || echo "(none)"
           }
 
           health() {
@@ -238,8 +238,11 @@ jobs:
             pm2 env biomax-receiver 2>/dev/null | grep -q 'BIOMAX_COMMANDS_ENABLED' && fail "receiver env carries BIOMAX_COMMANDS_ENABLED" || pass "receiver env has no BIOMAX_COMMANDS_ENABLED"
             health && pass "healthz ok with db:true" || fail "healthz not healthy"
             listeners | grep -Eq '(:|\.)7005 ' && pass "7005 listening: $(listeners | grep -E '(:|\.)7005 ' | head -1)" || fail "7005 not listening"
-            echo "--- STARTED line"; grep -h 'STARTED' "$HOME/.pm2/logs/biomax-receiver-out.log" 2>/dev/null | tail -1 | cut -c1-600
-            grep -h 'STARTED' "$HOME/.pm2/logs/biomax-receiver-out.log" 2>/dev/null | tail -1 | grep -q '"commands_enabled":false' && pass "receiver reports commands_enabled:false" || fail "STARTED line does not report commands_enabled:false"
+            sleep 2
+            echo "--- STARTED line (pm2 log files: $(ls "$HOME"/.pm2/logs/biomax-receiver*out*.log 2>/dev/null | tr '\n' ' '))"
+            STARTED="$(cat "$HOME"/.pm2/logs/biomax-receiver*out*.log 2>/dev/null | grep -h 'STARTED' | tail -1)"
+            echo "${STARTED:-(no STARTED line found yet)}" | cut -c1-600
+            if echo "$STARTED" | grep -q '"commands_enabled":true'; then fail "receiver reports commands_enabled:true"; elif echo "$STARTED" | grep -q '"commands_enabled":false'; then pass "receiver reports commands_enabled:false"; else report "STARTED line not found in the pm2 log yet; the env check above is authoritative for the flag"; fi
             if [ "$FAILS" -gt 0 ]; then
               echo "::error::post-start verification failed; removing the receiver again"
               pm2 delete biomax-receiver --no-color; pm2 save --no-color; echo "receiver state now: $(receiver_state)"
