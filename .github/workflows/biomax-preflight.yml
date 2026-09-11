@@ -129,6 +129,11 @@ jobs:
             else
               fail "ecosystem.biomax.config.js is not deployed"
             fi
+            if [ -n "${BIOMAX_COMMANDS_ENABLED:-}" ] || grep -q 'BIOMAX_COMMANDS_ENABLED' ecosystem.biomax.config.js 2>/dev/null || (pm2 env biomax-receiver 2>/dev/null | grep -q 'BIOMAX_COMMANDS_ENABLED'); then
+              fail "BIOMAX_COMMANDS_ENABLED is set somewhere on the host; it must stay off until a real capture is approved"
+            else
+              pass "BIOMAX_COMMANDS_ENABLED is not set (shell, ecosystem file, pm2)"
+            fi
             if grep -q 'BIOMAX_DB_ENV' biomax/receiver.js 2>/dev/null && grep -q 'process.exit(78)' biomax/receiver.js 2>/dev/null; then
               pass "deployed biomax/receiver.js resolves BIOMAX_DB_ENV || NODE_ENV || development and exits 78 on a missing block"
             else
@@ -176,6 +181,7 @@ jobs:
           if [ "$MODE" = "post" ]; then
             guarded "API /attendance/raw (new, guarded)" "http://127.0.0.1:8080/attendance/raw"
             guarded "API /attendance/devices (new, guarded)" "http://127.0.0.1:8080/attendance/devices"
+            guarded "API /attendance/historical-pulls (new, guarded)" "http://127.0.0.1:8080/attendance/historical-pulls"
             probe "FE /attendance/list (new page)"         "http://127.0.0.1:3000/attendance/list"      '^(200|301|302|307|308)$'
             probe "FE /attendance/devices (new page)"      "http://127.0.0.1:3000/attendance/devices"   '^(200|301|302|307|308)$'
           fi
@@ -330,8 +336,27 @@ jobs:
               if (missingP.length) fail(`permission keys missing: ${missingP.join(", ")}`); else pass("all six permission keys declared");
               await optional("GRANTS_HR_EXECUTIVE", "SELECT p.permission_key, d.designation_name FROM permissions p JOIN designation d ON d.designation_id = p.designation_id WHERE p.permission_key IN ('view_raw_attendance','export_raw_attendance','view_attendance_punch_audit') AND p.is_active = 1 ORDER BY p.permission_key");
 
-              const pc = await required("PUNCH_COUNT", "SELECT COUNT(*) AS punches FROM biomax_punch");
-              report(`punch count: ${pc[0] ? pc[0].punches : "?"} (expected 0 before the receiver is ever started)`);
+              const pc = await required("PUNCH_COUNT", "SELECT COUNT(*) AS punches, SUM(ingest_source = 'HISTORICAL_PULL') AS historical FROM biomax_punch");
+              report(`punch count: ${pc[0] ? pc[0].punches : "?"} (expected 0 before the receiver is ever started); historical: ${pc[0] ? pc[0].historical || 0 : "?"}`);
+
+              // Historical pull scaffolding (migration 20260912120000): tables, columns,
+              // the migration row, the one key granted to nobody, and the one thing that
+              // must hold until activation is approved - no command was ever handed out.
+              const ht = await required("HISTORICAL_TABLES", "SHOW TABLES LIKE 'biomax_%'");
+              const hnames = ht.map((r) => Object.values(r)[0]);
+              const hmissing = ["biomax_historical_pull", "biomax_device_command", "biomax_command_result_block"].filter((n) => !hnames.includes(n));
+              if (hmissing.length) fail(`historical-pull tables missing: ${hmissing.join(", ")}`); else pass("historical-pull tables exist (pull, command, result block)");
+              const hcols = await required("HISTORICAL_PUNCH_COLUMNS", "SELECT COLUMN_NAME, COLUMN_TYPE, COLUMN_DEFAULT FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biomax_punch' AND COLUMN_NAME IN ('ingest_source','biomax_historical_pull_id')");
+              if (hcols.length !== 2) fail(`biomax_punch is missing ingest_source / biomax_historical_pull_id (found ${hcols.length})`); else pass("biomax_punch has ingest_source (default LIVE) and biomax_historical_pull_id");
+              const hmig = await required("HISTORICAL_MIGRATION_RECORDED", "SELECT name FROM migrations WHERE name LIKE '%biomax-historical-pull%'");
+              if (hmig.length !== 1) fail("migration 20260912120000-biomax-historical-pull is not recorded"); else pass(`migration recorded: ${hmig[0].name}`);
+              const hperm = await required("HISTORICAL_PERMISSION", "SELECT (SELECT COUNT(*) FROM all_permissions WHERE permission_key = 'manage_biomax_historical_pull') AS declared, (SELECT COUNT(*) FROM permissions WHERE permission_key = 'manage_biomax_historical_pull' AND is_active = 1) AS granted");
+              if (!hperm[0] || Number(hperm[0].declared) < 1) fail("manage_biomax_historical_pull is not declared"); else if (Number(hperm[0].granted) > 0) fail(`manage_biomax_historical_pull is granted to ${hperm[0].granted} designation(s); expected none`); else pass("manage_biomax_historical_pull declared and granted to nobody (admin only)");
+              const hcmd = await required("NO_COMMAND_SENT", "SELECT (SELECT COUNT(*) FROM biomax_historical_pull) AS pulls, (SELECT COUNT(*) FROM biomax_device_command) AS commands, (SELECT COUNT(*) FROM biomax_device_command WHERE status <> 'PENDING' OR sent_at IS NOT NULL OR attempt_count > 0) AS handed_out, (SELECT COUNT(*) FROM biomax_command_result_block) AS blocks");
+              report(`historical pulls: ${hcmd[0].pulls}; commands queued: ${hcmd[0].commands}; result blocks: ${hcmd[0].blocks}`);
+              if (Number(hcmd[0].handed_out) > 0) fail(`${hcmd[0].handed_out} command(s) have been handed to a device; none may be before activation is approved`); else pass("no command has ever been handed to a device");
+              const hlive = await required("PUNCHES_UNCHANGED", "SELECT COUNT(*) AS non_live FROM biomax_punch WHERE ingest_source <> 'LIVE' OR biomax_historical_pull_id IS NOT NULL");
+              if (Number(hlive[0].non_live) > 0) fail(`${hlive[0].non_live} punch row(s) are not LIVE`); else pass("every existing punch row is LIVE with no pull id (Part 1 data unchanged)");
             }
 
             conn.end();
