@@ -15,6 +15,8 @@
  *   VALID                            IMPORTED
  *   UNMATCHED_EMPLOYEE               IMPORTED_UNMATCHED   (kept, like a live unmatched punch)
  *   CROSS_SOURCE_COLLISION           IMPORTED_WITH_COLLISION (kept; the live punch is kept too)
+ *   VALID, live punch arrived since    IMPORTED_WITH_COLLISION (rechecked at commit; the
+ *     the preview                      preview classification is left as it was)
  *   REIMPORT_DUPLICATE               SKIPPED_REIMPORT_DUPLICATE
  *   BAD_ROW                          SKIPPED_BAD_ROW
  *   (any)                            FAILED  (database error on that item)
@@ -258,19 +260,43 @@ class AttendanceImportUsecase {
     let fatal = null;
     try {
       const items = await this.repo.itemsForCommit(batchId);
+
+      // Re-resolve every importable item against the employee master AS IT
+      // STANDS NOW (commit is the ingest), then recheck cross-source
+      // collisions in one query: a live punch may have arrived for the same
+      // employee and instant since the preview, and the final audit must say
+      // so. Preview's classification is never rewritten - only the outcome
+      // and, when preview did not see it, the collided punch id are added.
+      const resolvedById = new Map();
+      const employeeIds = new Set();
+      let minRaw = null;
+      let maxRaw = null;
+      for (const it of items) {
+        if (!IMPORTABLE.includes(it.classification)) continue;
+        const r = await resolver.derive(it.user_id, it.io_time_raw);
+        resolvedById.set(it.import_item_id, r);
+        if (r.employee) employeeIds.add(r.employee.employee_id);
+        if (minRaw === null || it.io_time_raw < minRaw) minRaw = it.io_time_raw;
+        if (maxRaw === null || it.io_time_raw > maxRaw) maxRaw = it.io_time_raw;
+      }
+      const collisionsNow = employeeIds.size ? await this.repo.existingCrossSource([...employeeIds], minRaw, maxRaw) : new Map();
+
       for (const it of items) {
         let outcome;
         let punchId = null;
         let message = null;
+        let collidedNow = null;
         try {
           if (it.classification === CLASS.BAD_ROW) {
             outcome = OUTCOME.SKIPPED_BAD_ROW;
           } else if (it.classification === CLASS.REIMPORT_DUPLICATE) {
             outcome = OUTCOME.SKIPPED_REIMPORT_DUPLICATE;
           } else if (IMPORTABLE.includes(it.classification)) {
-            // Re-derive at commit: this is the ingest, and the snapshot rule
-            // (R16) says the derived row reflects the master as it stands now.
-            const r = await resolver.derive(it.user_id, it.io_time_raw);
+            const r = resolvedById.get(it.import_item_id);
+            if (r.employee) {
+              const hit = collisionsNow.get(`${r.employee.employee_id}|${it.io_time_raw}`);
+              if (hit && !it.collided_punch_id) collidedNow = hit;
+            }
             const res = await this.store.insertPunch(
               { user_id: it.user_id, io_time_raw: it.io_time_raw },
               r.derived,
@@ -278,10 +304,13 @@ class AttendanceImportUsecase {
             );
             punchId = res.biomax_punch_id;
             if (res.outcome === "duplicate") {
+              // Dedup wins: a duplicate is a duplicate whatever else exists.
               outcome = OUTCOME.SKIPPED_REIMPORT_DUPLICATE;
               message = "already imported (database dedup)";
-            } else if (it.classification === CLASS.CROSS_SOURCE_COLLISION) {
+              collidedNow = null;
+            } else if (it.classification === CLASS.CROSS_SOURCE_COLLISION || it.collided_punch_id || collidedNow) {
               outcome = OUTCOME.IMPORTED_WITH_COLLISION;
+              if (collidedNow) message = `a device punch (#${collidedNow}) existed for this employee at the same time when committed`;
             } else if (r.derived.status === STATUS.UNMATCHED) {
               outcome = OUTCOME.IMPORTED_UNMATCHED;
             } else {
@@ -298,11 +327,12 @@ class AttendanceImportUsecase {
           }
           outcome = OUTCOME.FAILED;
           message = String(err && err.message ? err.message : err).slice(0, 255);
+          collidedNow = null;
         }
         if (outcome === OUTCOME.IMPORTED || outcome === OUTCOME.IMPORTED_UNMATCHED || outcome === OUTCOME.IMPORTED_WITH_COLLISION) tally.imported += 1;
         else if (outcome === OUTCOME.FAILED) tally.failed += 1;
         else tally.skipped += 1;
-        await this.repo.updateItemOutcome(it.import_item_id, { outcome, biomax_punch_id: punchId, message });
+        await this.repo.updateItemOutcome(it.import_item_id, { outcome, biomax_punch_id: punchId, message, collided_punch_id: collidedNow });
       }
     } catch (err) {
       fatal = err;

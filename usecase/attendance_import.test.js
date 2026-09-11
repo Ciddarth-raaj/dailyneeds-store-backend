@@ -113,7 +113,8 @@ function fakeRepo(store) {
       return true;
     },
     async updateItemOutcome(itemId, o) {
-      Object.assign(items.find((i) => i.import_item_id === itemId), { outcome: o.outcome, biomax_punch_id: o.biomax_punch_id, message: o.message || items.find((i) => i.import_item_id === itemId).message });
+      const it = items.find((i) => i.import_item_id === itemId);
+      Object.assign(it, { outcome: o.outcome, biomax_punch_id: o.biomax_punch_id, message: o.message || it.message, collided_punch_id: it.collided_punch_id || o.collided_punch_id || null });
     },
     async finishBatch(batchId, f) {
       Object.assign(batches.find((x) => x.import_batch_id === batchId), f);
@@ -350,6 +351,57 @@ describe("commit", () => {
     assert.equal(store.punches[1].dev_id, null);
     assert.equal(repo.staged[0].outcome, OUTCOME.IMPORTED_WITH_COLLISION);
     assert.equal(repo.staged[0].collided_punch_id, 1);
+  });
+
+  it("no collision at preview, a live punch arrives before commit -> IMPORTED_WITH_COLLISION, collided id recorded, live punch untouched", async () => {
+    const pv = await uc.preview(await xlsx([["1952", "", "", "10-09-2026", "10:15:00", undefined, undefined]]), {});
+    assert.equal(pv.batch.cross_source_collision_count, 0);
+    assert.equal(repo.staged[0].classification, CLASS.VALID);
+    // The terminal delivers the same employee's punch at the same instant while HR looks at the preview.
+    await store.insertPunch({ dev_id: "C2695C56D30E1430", user_id: "1952", io_time_raw: "20260910101500" }, { employee_id: 1952, status: "OK" }, { source: "LIVE" });
+    const liveBefore = JSON.stringify(store.punches[0]);
+    const out = await uc.commit(pv.batch.import_batch_id, {});
+    assert.equal(out.batch.imported_count, 1);
+    assert.deepEqual(out.outcome_counts, { IMPORTED_WITH_COLLISION: 1 });
+    assert.equal(repo.staged[0].classification, CLASS.VALID, "preview classification is history and stays");
+    assert.equal(repo.staged[0].outcome, OUTCOME.IMPORTED_WITH_COLLISION);
+    assert.equal(repo.staged[0].collided_punch_id, 1);
+    assert.match(repo.staged[0].message, /when committed/);
+    assert.equal(store.punches.length, 2, "the DigiSME punch was imported, not rejected");
+    assert.equal(store.punches[1].dev_id, null);
+    assert.equal(JSON.stringify(store.punches[0]), liveBefore, "the live punch is byte-for-byte untouched");
+  });
+
+  it("collision already seen at preview -> IMPORTED_WITH_COLLISION with the preview's collided id kept, even if that row is gone", async () => {
+    await store.insertPunch({ dev_id: "C2695C56D30E1430", user_id: "1952", io_time_raw: "20260910101500" }, { employee_id: 1952, status: "OK" }, { source: "LIVE" });
+    const pv = await uc.preview(await xlsx([["1952", "", "", "10-09-2026", "10:15:00", undefined, undefined]]), {});
+    assert.equal(repo.staged[0].classification, CLASS.CROSS_SOURCE_COLLISION);
+    assert.equal(repo.staged[0].collided_punch_id, 1);
+    // Append-only means this never happens in production; if it did, the preview record is not rewritten.
+    store.punches.splice(0, 1);
+    const out = await uc.commit(pv.batch.import_batch_id, {});
+    assert.deepEqual(out.outcome_counts, { IMPORTED_WITH_COLLISION: 1 });
+    assert.equal(repo.staged[0].classification, CLASS.CROSS_SOURCE_COLLISION);
+    assert.equal(repo.staged[0].collided_punch_id, 1);
+  });
+
+  it("a DigiSME duplicate stays SKIPPED_REIMPORT_DUPLICATE even when a live punch also exists - collision is not dedup", async () => {
+    const first = await uc.preview(await xlsx([["1952", "", "", "10-09-2026", "10:15:00", undefined, undefined]]), {});
+    await uc.commit(first.batch.import_batch_id, {});
+    await store.insertPunch({ dev_id: "C2695C56D30E1430", user_id: "1952", io_time_raw: "20260910101500" }, { employee_id: 1952, status: "OK" }, { source: "LIVE" });
+    const second = await uc.preview(await xlsx([["1952", "", "", "10-09-2026", "10:15:00", undefined, undefined]]), {});
+    assert.equal(second.batch.reimport_duplicate_count, 1);
+    assert.equal(second.batch.cross_source_collision_count, 0);
+    const out = await uc.commit(second.batch.import_batch_id, {});
+    assert.deepEqual(out.outcome_counts, { SKIPPED_REIMPORT_DUPLICATE: 1 });
+    assert.equal(store.punches.length, 2, "one import, one live - no second import row");
+    // And a race duplicate (not seen at preview) with a live punch present is still a skip, with no collision id.
+    const third = await uc.preview(await xlsx([["1641", "", "", "10-09-2026", "09:30:00", undefined, undefined]]), {});
+    await store.insertPunch({ user_id: "1641", io_time_raw: "20260910093000" }, { status: "NO_SHIFT", employee_id: 1641 }, { source: "DIGISME_IMPORT", importBatchId: 77 });
+    await store.insertPunch({ dev_id: "D", user_id: "1641", io_time_raw: "20260910093000" }, { employee_id: 1641, status: "NO_SHIFT" }, { source: "LIVE" });
+    const out3 = await uc.commit(third.batch.import_batch_id, {});
+    assert.deepEqual(out3.outcome_counts, { SKIPPED_REIMPORT_DUPLICATE: 1 });
+    assert.equal(repo.staged.find((i) => i.user_id === "1641").collided_punch_id, null);
   });
 
   it("one failing item does not stop the batch: FAILED for that item, COMMITTED_WITH_ERRORS overall", async () => {

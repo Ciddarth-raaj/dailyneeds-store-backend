@@ -113,6 +113,19 @@ or device) and classifies the candidate `CROSS_SOURCE_COLLISION` with
 the live punch is never touched. A live punch is never a re-import
 duplicate, and an import is never a collision with another import.
 
+The check is repeated **at commit**, because a preview can go stale: a
+terminal may deliver the same employee's punch at the same instant while
+the preview is on screen. Commit re-resolves every importable item against
+the current employee master, looks up non-import punches for those
+employees over the batch's time range in one query, and if one exists the
+DigiSME punch is imported with outcome `IMPORTED_WITH_COLLISION` and the
+collided punch id is filled in on the item. Preview's classification is
+history and is never rewritten (a `VALID` item can end
+`IMPORTED_WITH_COLLISION`; a `CROSS_SOURCE_COLLISION` item keeps its
+preview collided id even in the theoretical case that the row is gone).
+Dedup wins over collision: a punch already imported is
+`SKIPPED_REIMPORT_DUPLICATE` whatever live rows exist.
+
 ## 8. Employee matching and attendance date
 
 Identity is the Employee Code alone, through `parseEmployeeCode` (1 to 9

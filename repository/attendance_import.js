@@ -187,13 +187,18 @@ class AttendanceImportRepository {
     return r.affectedRows === 1;
   }
 
-  updateItemOutcome(itemId, { outcome, biomax_punch_id, message }) {
+  /**
+   * Outcome per item. collided_punch_id is only ever FILLED IN, never
+   * overwritten: what preview recorded stays (COALESCE keeps the existing).
+   */
+  updateItemOutcome(itemId, { outcome, biomax_punch_id, message, collided_punch_id }) {
     return this._q(
       "ITEM-OUTCOME",
       `UPDATE biomax_attendance_import_item
-          SET outcome = ?, biomax_punch_id = ?, message = COALESCE(?, message), committed_at = NOW(3)
+          SET outcome = ?, biomax_punch_id = ?, message = COALESCE(?, message),
+              collided_punch_id = COALESCE(collided_punch_id, ?), committed_at = NOW(3)
         WHERE import_item_id = ?`,
-      [outcome, biomax_punch_id === undefined ? null : biomax_punch_id, message === undefined ? null : message, itemId]
+      [outcome, biomax_punch_id === undefined ? null : biomax_punch_id, message === undefined ? null : message, collided_punch_id === undefined ? null : collided_punch_id, itemId]
     );
   }
 
