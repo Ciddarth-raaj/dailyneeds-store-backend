@@ -34,6 +34,9 @@ const STATUTORY_DETAIL_FIELDS = [
 const PAYMENT_SET = new Set(PAYMENT_DETAIL_FIELDS);
 const STATUTORY_SET = new Set(STATUTORY_DETAIL_FIELDS);
 
+/** Everything the two post-onboarding sections own, as one lookup. */
+const SECTION_FIELD_SET = new Set([...PAYMENT_DETAIL_FIELDS, ...STATUTORY_DETAIL_FIELDS]);
+
 /** Bank / cash: 1 Bank, 2 Cash - the values the legacy screens always stored. */
 const PAYMENT_TYPE = { BANK: 1, CASH: 2 };
 
@@ -54,9 +57,40 @@ function sectionKeysRequired(details) {
   return [...keys];
 }
 
+/**
+ * True when a body writes NOTHING BUT Payment Details and / or Statutory
+ * Details columns.
+ *
+ * M1 review fix. `add_employees` used to gate the whole of
+ * /employee/updatedata, so a designation holding the sensitive pair and
+ * `edit_payment_details` still could not save Payment Details on an existing
+ * employee without also being able to CREATE one. The final rule is that Add
+ * Employee covers onboarding screens 1-4 and nothing after Education; the
+ * sections past it are controlled by their own designation rights. This is
+ * the pure decision `routes/employee.js` uses to tell the two cases apart.
+ *
+ * IT NEVER ALLOWS A WRITE. `sectionKeysRequired` still demands
+ * `edit_payment_details` / `edit_statutory_details` (AND, not OR), and B3's
+ * `guardWrite` still demands `edit_employee_sensitive`, because every column
+ * named here is in `constants/sensitive_fields.js`. All this decides is
+ * whether `add_employees` is demanded ON TOP of those.
+ *
+ * FALSE IS THE SAFE ANSWER, and is what anything unrecognised gets: a
+ * missing body, an empty one, a non-object, an array, or one that names a
+ * single ordinary column beside the section fields. The failure mode of an
+ * odd body is "still needs add_employees", never "waved through".
+ */
+function isSectionOnlyWrite(details) {
+  if (!details || typeof details !== "object" || Array.isArray(details)) return false;
+  const keys = Object.keys(details);
+  if (keys.length === 0) return false;
+  return keys.every((raw) => SECTION_FIELD_SET.has(String(raw).toLowerCase()));
+}
+
 module.exports = {
   PAYMENT_DETAIL_FIELDS,
   STATUTORY_DETAIL_FIELDS,
   PAYMENT_TYPE,
   sectionKeysRequired,
+  isSectionOnlyWrite,
 };

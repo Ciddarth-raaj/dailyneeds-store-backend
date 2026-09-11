@@ -134,12 +134,47 @@ describe("permissions", () => {
     assert.deepEqual(guard.keys, [P.VIEW_EMPLOYEES, P.VIEW_SHIFT_ASSIGNMENTS]);
   });
 
-  it("the profile's single-employee read requires the same pair", () => {
-    // Reading one employee's shift is the same join as reading the list of
-    // them, so it cannot be a weaker decision.
+  it("M1 review fix: the profile's single-employee read needs view_employees ONLY", () => {
+    // Shift is part of Employment Details now, so whoever may view the
+    // employee may see the shift that employee is on. Requiring
+    // `view_shift_assignments` as well - an HR/administrator key - left the
+    // field unreadable for most of the people the section was built for.
     const { guard } = find("GET", "/work-shift-assignments/employee/:employee_id");
+    assert.deepEqual(guard.keys, [P.VIEW_EMPLOYEES]);
+    assert.ok(
+      !guard.keys.includes(P.VIEW_SHIFT_ASSIGNMENTS),
+      "the roster key is no longer demanded to read one employee's own shift"
+    );
+  });
+
+  it("M1 review fix: view-only access does NOT thereby open the roster", () => {
+    // The single read was relaxed; the list was not. Seeing one person's
+    // shift and reading the whole company's roster are different facts.
+    const { guard } = find("GET", "/work-shift-assignments");
     assert.equal(guard.mode, "all");
     assert.deepEqual(guard.keys, [P.VIEW_EMPLOYEES, P.VIEW_SHIFT_ASSIGNMENTS]);
+  });
+
+  it("M1 review fix: assignment is UNCHANGED - still employee_edit AND assign_employee_shift", () => {
+    // The read was the only thing the review asked to relax. If this ever
+    // starts passing with `view_employees` in it, the write has been
+    // weakened by accident.
+    const { guard } = find("POST", "/work-shift-assignments/bulk");
+    assert.equal(guard.mode, "all");
+    assert.deepEqual(guard.dynamic.single, [P.EMPLOYEE_EDIT, P.ASSIGN_EMPLOYEE_SHIFT]);
+    assert.ok(!guard.keys.includes(P.VIEW_EMPLOYEES), "a read key never opens a write");
+  });
+
+  it("M1 review fix: the single read still uses the NEW work shift master only", () => {
+    // `default_work_shift_id` / `work_shift`, never the legacy `shift_id`.
+    const fs = require("fs");
+    const src = fs.readFileSync(require.resolve("../repository/employee_work_shift"), "utf8");
+    const fn = src.slice(
+      src.indexOf("async getEmployeeWorkShift"),
+      src.indexOf("async getWorkShiftWorkingTimes")
+    );
+    assert.ok(fn.includes("default_work_shift_id"), "the NEW column is what is read");
+    assert.ok(!/(?<!work_)(?<!default_work_)shift_id\b/.test(fn), "the legacy shift_id is never revived here");
   });
 
   it("the write always requires employee_edit and a Work Shift assign key", () => {

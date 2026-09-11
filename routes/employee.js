@@ -4,7 +4,10 @@ const lifecycleConfig = require("../config/lifecycle");
 const { requireEmployee, employeeIdOrNull } = require("../utils/actor");
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
-const { sectionKeysRequired } = require("../constants/employee_master_sections");
+const {
+  sectionKeysRequired,
+  isSectionOnlyWrite,
+} = require("../constants/employee_master_sections");
 
 class EmployeeRoutes {
   constructor(employeeUsecase, permissions, sensitive) {
@@ -458,7 +461,7 @@ class EmployeeRoutes {
       }
       res.end();
     });
-    router.post("/updatedata", this.permissions.require(P.ADD_EMPLOYEES), async (req, res) => {
+    router.post("/updatedata", this.updateDataGuard(), async (req, res) => {
       try {
         const schema = {
           employee_id: Joi.number().required(),
@@ -488,7 +491,19 @@ class EmployeeRoutes {
             qualification: Joi.string().allow("").allow(null).optional(),
             introducer_name: Joi.string().allow("").allow(null).optional(),
             introducer_details: Joi.string().allow("").allow(null).optional(),
-            salary: Joi.number().allow("").allow(null).optional(),
+            // M1 review fix - `salary` IS NOT LISTED HERE ON PURPOSE.
+            //
+            // Final business rule: salary is not writable through the
+            // Employee Master legacy edit APIs. It belongs to the dedicated
+            // Payroll / Salary Revision system, and until that exists the
+            // Payroll section of the profile is read-only.
+            //
+            // Removing the key is the whole mechanism: Joi runs without
+            // `allowUnknown`, so a body that names `salary` fails validation
+            // and is answered 422 before `updateEmployeeDetails` is reached.
+            // The repository builds its UPDATE from whatever object it is
+            // handed (`SET ?`), so refusing the field at the edge is what
+            // stops the column being written, not a filter further in.
             uniform_qty: Joi.number().allow("").allow(null).optional(),
             previous_experience: Joi.string().allow("").allow(null).optional(),
             date_of_joining: Joi.string().allow("").allow(null).optional(),
@@ -564,10 +579,14 @@ class EmployeeRoutes {
           throw isValid.error;
         }
         // M1. Payment Details and Statutory Details are separate sections
-        // with separate keys, on top of `add_employees` (this route) and
-        // `edit_employee_sensitive` (B3's guardWrite, mounted on the router).
+        // with separate keys, on top of `edit_employee_sensitive` (B3's
+        // guardWrite, mounted on the router) and - for anything that is not a
+        // section-only write - `add_employees` (see `updateDataGuard`).
         // Refused as a whole, like B3: a body that names a column the caller
         // may not write is not partially applied.
+        //
+        // This runs AFTER Joi rather than in the guard so the shape is known
+        // to be valid before a permission decision is made from it.
         const sectionKeys = sectionKeysRequired(employee.employee_details);
         if (sectionKeys.length > 0 && !(await this.permissions.hasAll(req, ...sectionKeys))) {
           res.status(403).json({
@@ -613,6 +632,56 @@ class EmployeeRoutes {
       }
     });
   }
+
+  /**
+   * The guard on the legacy employee-master write, chosen from the body.
+   *
+   * M1 review fix. `add_employees` used to gate the whole route, which made
+   * the two post-onboarding section keys ungrantable in practice: a
+   * designation holding `edit_employee_sensitive` and `edit_payment_details`
+   * still could not save Payment Details on an existing employee unless it
+   * could also CREATE employees. Add Employee covers onboarding screens 1-4
+   * and stops at Education; the sections after it are controlled by their own
+   * designation rights.
+   *
+   * So the key is demanded for everything this legacy route has always
+   * carried - ordinary columns, `files`, `docupdate`, the lot - and NOT for a
+   * body that writes only Payment Details and / or Statutory Details columns.
+   *
+   * NOTHING IS WEAKENED BY THIS. A section-only body is still refused twice
+   * over: by B3's `guardWrite` unless the caller holds
+   * `edit_employee_sensitive` (every column concerned is sensitive), and by
+   * the handler's own `hasAll` on `edit_payment_details` /
+   * `edit_statutory_details`. The set of callers who can write these columns
+   * is therefore the same as before MINUS the `add_employees` requirement,
+   * which is exactly the change that was approved - and admins still reach it
+   * through the middleware's user_type 2 bypass, unchanged.
+   *
+   * ANYTHING UNRECOGNISED KEEPS THE OLD REQUIREMENT. An absent, empty or
+   * malformed `employee_details` is not a section-only write, so it demands
+   * `add_employees` exactly as it did before.
+   */
+  updateDataGuard() {
+    const guard = (req, res, next) => {
+      const details = req && req.body ? req.body.employee_details : undefined;
+      if (isSectionOnlyWrite(details)) return next();
+      return this.permissions.require(P.ADD_EMPLOYEES)(req, res, next);
+    };
+
+    // So the route tests can read the wiring rather than the source text,
+    // exactly as `employee_work_shift.js#assignGuard` does.
+    guard.__guard = {
+      mode: "any",
+      keys: [P.ADD_EMPLOYEES],
+      dynamic: {
+        sectionOnly: [],
+        otherwise: [P.ADD_EMPLOYEES],
+      },
+    };
+
+    return guard;
+  }
+
   getRouter() {
     return router;
   }

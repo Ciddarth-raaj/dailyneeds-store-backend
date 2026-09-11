@@ -12,6 +12,7 @@ const {
   STATUTORY_DETAIL_FIELDS,
   PAYMENT_TYPE,
   sectionKeysRequired,
+  isSectionOnlyWrite,
 } = require("./employee_master_sections");
 
 test("the two keys are declared in the catalogue", () => {
@@ -64,4 +65,61 @@ test("the updatedata route applies the guard after validation and refuses as a w
   assert.ok(validateAt < guardAt && guardAt < writeAt, "validate, then guard, then write");
   assert.match(route, /permissions\.hasAll\(req, \.\.\.sectionKeys\)/, "AND, not OR");
   assert.match(route, /status\(403\)/);
+});
+
+/* ------------------------------------------------------ M1 review fix (2) */
+
+test("a body of ONLY section columns is a section-only write", () => {
+  assert.equal(isSectionOnlyWrite({ payment_type: 1, account_no: "1" }), true);
+  assert.equal(isSectionOnlyWrite({ pan_no: "A", pf_applicable: 0 }), true);
+  // Both sections at once is still only sections.
+  assert.equal(isSectionOnlyWrite({ account_no: "1", esi_number: "E" }), true);
+  // The route spells UAN in capitals; the decision is case-insensitive.
+  assert.equal(isSectionOnlyWrite({ UAN: "100" }), true);
+});
+
+test("ONE ordinary column is enough to make it an ordinary write", () => {
+  // This is what keeps the legacy route compatible, and what stops a name
+  // change being smuggled through a Payment Details save.
+  assert.equal(isSectionOnlyWrite({ payment_type: 1, employee_name: "x" }), false);
+  assert.equal(isSectionOnlyWrite({ pan_no: "A", qualification: "y" }), false);
+  assert.equal(isSectionOnlyWrite({ account_no: "1", docupdate: [] }), false);
+  assert.equal(isSectionOnlyWrite({ account_no: "1", files: [] }), false);
+});
+
+test("anything unrecognised is NOT a section-only write, so add_employees stays required", () => {
+  // The failure mode of an odd body must be "still gated", never "waved
+  // through": these all fall back to the requirement the route always had.
+  for (const value of [undefined, null, {}, [], "", 0, "payment_type", [{ payment_type: 1 }]]) {
+    assert.equal(isSectionOnlyWrite(value), false, `${JSON.stringify(value)} is not section-only`);
+  }
+});
+
+test("section-only never decides that a write is ALLOWED, only whether add_employees is also needed", () => {
+  // Every field it accepts still demands its own section key, and every one
+  // of them is sensitive under B3 - so nothing it returns true for is
+  // reachable without `edit_employee_sensitive` plus the section key.
+  for (const field of [...PAYMENT_DETAIL_FIELDS, ...STATUTORY_DETAIL_FIELDS]) {
+    const body = { [field]: "x" };
+    assert.equal(isSectionOnlyWrite(body), true, `${field} is a section column`);
+    assert.equal(sectionKeysRequired(body).length, 1, `${field} still demands its section key`);
+    assert.ok(SENSITIVE_EMPLOYEE_FIELDS.includes(field), `${field} is still sensitive`);
+  }
+});
+
+test("the route demands add_employees for everything that is not a section-only write", () => {
+  const fs = require("fs");
+  const src = fs.readFileSync(require.resolve("../routes/employee"), "utf8");
+  const guard = src.slice(src.indexOf("updateDataGuard()"), src.indexOf("getRouter()"));
+  assert.match(guard, /isSectionOnlyWrite\(details\)/, "the body decides");
+  assert.match(guard, /permissions\.require\(P\.ADD_EMPLOYEES\)/, "otherwise the old gate applies");
+  // The route mounts the dynamic guard, not the flat one it used to.
+  const route = src.slice(src.indexOf('router.post("/updatedata"'), src.indexOf('router.post("/sync"'));
+  assert.match(route, /this\.updateDataGuard\(\)/);
+});
+
+test("salary is not a section column, so it cannot reach the route through one", () => {
+  assert.ok(!PAYMENT_DETAIL_FIELDS.includes("salary"));
+  assert.ok(!STATUTORY_DETAIL_FIELDS.includes("salary"));
+  assert.equal(isSectionOnlyWrite({ salary: 1 }), false);
 });

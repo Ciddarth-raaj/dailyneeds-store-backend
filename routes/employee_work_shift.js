@@ -14,16 +14,28 @@ const router = express.Router();
  * the shifts are created and edited.
  *
  * PERMISSIONS ARE PAIRS, AND BOTH HALVES ARE REQUIRED (`requireAll`, so AND
- * rather than OR - see `constants/hr_permissions.js`):
+ * rather than OR - see `constants/hr_permissions.js`). The one exception is
+ * the single-employee read, which M1 reduced to the employee-master key
+ * alone because the shift is a field of the profile now:
  *
- *   read        `view_employees` AND `view_shift_assignments`
- *   assign one  `employee_edit`  AND `assign_employee_shift`
- *   assign many `employee_edit`  AND `bulk_assign_employee_shift`
+ *   read the LIST      `view_employees` AND `view_shift_assignments`
+ *   read ONE employee  `view_employees`  (M1 review fix - see below)
+ *   assign one         `employee_edit`  AND `assign_employee_shift`
+ *   assign many        `employee_edit`  AND `bulk_assign_employee_shift`
  *
  * The employee-master half of each pair is exactly what this router required
  * before, and is kept: this screen is the employee master joined to the shift
  * master, and no work-shift key should become a way to reach employee data
  * that `view_employees` / `employee_edit` did not already open.
+ *
+ * THE ONE-EMPLOYEE READ IS NOT THE ROSTER. Shift is part of Employment
+ * Details now, so anyone who may open an employee's profile must be able to
+ * see which shift that employee is on - demanding `view_shift_assignments`
+ * for it left the field blank for most of the people who read the profile.
+ * The list endpoint, which is the roster (everybody, filterable, exportable
+ * by eye), keeps the pair: seeing one person's shift and reading the whole
+ * company's roster are different facts. CHANGING a shift is untouched and
+ * still takes `employee_edit` AND `assign_employee_shift`.
  *
  * What changed is the other half. It used to be `view_shift`, borrowed from
  * the legacy `shift_master` and held today by designations with no payroll
@@ -101,9 +113,18 @@ class EmployeeWorkShiftRoutes {
      * changing it is the assignment screen's job, and the route that does it
      * is the POST below with its own, stricter permission.
      *
-     * The same permission pair as the list, for the same reason: this is the
-     * employee master joined to the shift master, and seeing it means being
-     * allowed to see both.
+     * M1 REVIEW FIX - `view_employees` ALONE. Shift moved onto Employment
+     * Details, so this is now a field of the employee profile rather than a
+     * corner of the roster screen, and whoever may view the employee may see
+     * the shift they are on. It used to require `view_shift_assignments` as
+     * well, which is held by HR and administrators only, so the field read
+     * "not permitted" for exactly the people the section was built for.
+     *
+     * WHAT THIS DOES NOT OPEN. The response is identity and timing for ONE
+     * named employee - `work_shift_id`, code, name, active flag and in/out
+     * times - and carries no configuration, no other employee and nothing
+     * sensitive under B3. Reading the roster still needs the pair, and
+     * changing a shift still needs `employee_edit` + `assign_employee_shift`.
      *
      * Declared BEFORE `/work-shift-assignments/bulk` would matter if either
      * were a wildcard - neither is, and `employee` is a literal segment, so
@@ -132,7 +153,7 @@ class EmployeeWorkShiftRoutes {
 
     router.get(
       "/work-shift-assignments/employee/:employee_id",
-      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.VIEW_SHIFT_ASSIGNMENTS),
+      this.permissions.require(P.VIEW_EMPLOYEES),
       async (req, res) => {
         try {
           res.json(await this.usecase.currentForEmployee(req.params.employee_id));

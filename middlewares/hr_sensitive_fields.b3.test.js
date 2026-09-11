@@ -369,9 +369,16 @@ describe("B3 reads: sensitive documents", () => {
 });
 
 describe("B3 writes: changing sensitive data", () => {
+  // The example sensitive field used to be `salary`. The M1 review removed
+  // salary from this route's schema entirely - it belongs to Payroll, not to
+  // the Employee Master - so a salary body is now refused by Joi before B3 is
+  // the reason for anything, which would make these assertions pass or fail
+  // for the wrong cause. `aadhaar_card_no` is sensitive under B3, still
+  // writable here, and deliberately NOT one of M1's two section columns, so
+  // what this block tests is B3 and only B3.
   const sensitiveBody = {
     employee_id: EMPLOYEE_ID,
-    employee_details: { employee_name: "Test Person", salary: 99999 },
+    employee_details: { employee_name: "Test Person", aadhaar_card_no: "111122223333" },
   };
   const ordinaryBody = {
     employee_id: EMPLOYEE_ID,
@@ -391,13 +398,27 @@ describe("B3 writes: changing sensitive data", () => {
   it("HR Executive with edit_employee_sensitive succeeds", async () => {
     const r = await call("POST", "/employee/updatedata", HR(), sensitiveBody);
     assert.equal(r.status, 200);
-    assert.equal(lastWrite.employee_details.salary, 99999);
+    assert.equal(lastWrite.employee_details.aadhaar_card_no, "111122223333");
   });
 
   it("admin succeeds through the same bypass", async () => {
     const r = await call("POST", "/employee/updatedata", ADMIN(), sensitiveBody);
     assert.equal(r.status, 200);
-    assert.equal(lastWrite.employee_details.salary, 99999);
+    assert.equal(lastWrite.employee_details.aadhaar_card_no, "111122223333");
+  });
+
+  it("M1 review fix: salary is refused here whoever sends it, and never written", async () => {
+    // Not a permission decision: the column is not part of this route's
+    // schema any more, so holding every key in the catalogue does not help.
+    // Sequential on purpose - `lastWrite` is one shared recorder.
+    for (const who of [HR, ADMIN]) {
+      const r = await call("POST", "/employee/updatedata", who(), {
+        employee_id: EMPLOYEE_ID,
+        employee_details: { employee_name: "Test Person", salary: 99999 },
+      });
+      assert.equal(r.body && r.body.code, 422, r.text);
+      assert.equal(lastWrite, undefined, "salary must never reach the usecase");
+    }
   });
 
   it("an ordinary update still follows the existing B2 permission alone", async () => {
