@@ -92,6 +92,14 @@ describe("validateApproverSetup", () => {
     const kept = validateApproverSetup({ employee_id: 1, final_approver_employee_id: 99 }, { ...inactive99, previous: { final_approver_employee_id: 99 } });
     assert.deepEqual(kept.errors, []);
   });
+  it("the three non-blank approvers must be different people", () => {
+    const all = validateApproverSetup({ employee_id: 1, first_level_approver_employee_id: 11, second_level_approver_employee_id: 11, final_approver_employee_id: 11 }, facts());
+    assert.equal(all.errors.filter((e) => /must be different people/.test(e)).length, 2);
+    const two = validateApproverSetup({ employee_id: 1, first_level_approver_employee_id: 11, final_approver_employee_id: 11 }, facts());
+    assert.match(two.errors.join(";"), /Final Approver: employee 11 is already the First Level Approver/);
+    const okBlank = validateApproverSetup({ employee_id: 1, first_level_approver_employee_id: null, second_level_approver_employee_id: null, final_approver_employee_id: 33 }, facts());
+    assert.deepEqual(okBlank.errors, [], "blanks are not duplicates of each other");
+  });
   it("unknown ids are refused", () => {
     const v = validateApproverSetup({ employee_id: 1, final_approver_employee_id: 555 }, facts());
     assert.ok(v.errors.some((e) => /no such employee 555/.test(e)));

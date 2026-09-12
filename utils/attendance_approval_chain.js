@@ -23,9 +23,10 @@
  * approval corrects attendance only; overtime the corrected day earns is then
  * requested by the employee as a separate OT request, which walks the same
  * chain: v2 approves overtime after the work, never before it, and never by a
- * different route. REGULARIZATION_WITH_OT is a legacy type kept so historical
- * rows still read; `requestTypeFor` still names it for them, and new code
- * never creates it.
+ * different route. REGULARIZATION_WITH_OT is a legacy ENUM value kept ONLY so
+ * historical rows still read. Nothing in this module can produce it: the
+ * old `requestTypeFor` helper that combined the two flows has been removed so
+ * the combined path cannot be reused by accident.
  *
  * THE EMPLOYEE-LEVEL CHAIN (Attendance Approver Setup). A per-employee
  * mapping now exists beside the role chain, exactly where the earlier note
@@ -203,6 +204,18 @@ function validateApproverSetup(setup, facts) {
     }
   });
 
+  // One person, one stage: the same id at two levels would let one approver
+  // decide the same request twice.
+  const named = levels
+    .map(([key, label]) => [normalized[key], label])
+    .filter(([id]) => id !== null && !Number.isNaN(id));
+  const seen = new Map();
+  named.forEach(([id, label]) => {
+    if (seen.has(id)) {
+      errors.push(`${label}: employee ${id} is already the ${seen.get(id)} - the three approvers must be different people`);
+    } else seen.set(id, label);
+  });
+
   return { ok: errors.length === 0, errors, normalized: errors.length === 0 ? normalized : null };
 }
 
@@ -243,18 +256,6 @@ const isEmployeeStep = (step) =>
   !!step &&
   (step.approver_role === EMPLOYEE_STAGE_ROLE ||
     (step.approver_employee_id !== null && step.approver_employee_id !== undefined));
-
-/**
- * The request type for a date, from what the date actually needs.
- *
- * One date, one request, one pass - so a missing punch that also produces
- * overtime is never two queues and two decisions.
- */
-function requestTypeFor({ has_missing_punch = false, has_candidate_ot = false }) {
-  if (has_missing_punch && has_candidate_ot) return REQUEST_TYPE.REGULARIZATION_WITH_OT;
-  if (has_missing_punch) return REQUEST_TYPE.REGULARIZATION;
-  return REQUEST_TYPE.OT;
-}
 
 /**
  * May `actor` decide `step`?
@@ -380,7 +381,6 @@ module.exports = {
   STEP_DECISION,
   ADMIN_USER_TYPE,
   buildApprovalChain,
-  requestTypeFor,
   canApprove,
   advance,
   isFinallyApproved,

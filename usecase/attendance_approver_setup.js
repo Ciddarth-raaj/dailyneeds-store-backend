@@ -258,13 +258,19 @@ module.exports = (approverSetupRepo) => {
       approverSetupRepo.findPendingStepsWithApprover(approval_level, oldId),
     ]);
 
-    // Nobody becomes their own approver, on a master row or on a live step.
+    // Nobody becomes their own approver, and nobody holds two levels of one
+    // chain - on a master row or on a live request.
     const setupIds = [];
     const skippedSetups = [];
     setups.forEach((s) => {
       const employeeId = Number(s.employee_id);
+      const otherLevels = Object.values(APPROVAL_LEVEL)
+        .filter((level) => level !== approval_level)
+        .filter((level) => idOrNull(s[LEVEL_KEY[level]]) === newId);
       if (employeeId === newId) {
         skippedSetups.push({ employee_id: employeeId, message: `${LEVEL_LABEL[approval_level]}: an employee cannot be their own approver` });
+      } else if (otherLevels.length > 0) {
+        skippedSetups.push({ employee_id: employeeId, message: `${LEVEL_LABEL[approval_level]}: employee ${newId} is already the ${LEVEL_LABEL[otherLevels[0]]} - the three approvers must be different people` });
       } else setupIds.push(employeeId);
     });
     const stepIds = [];
@@ -272,12 +278,13 @@ module.exports = (approverSetupRepo) => {
     steps.forEach((st) => {
       const forId = Number(st.requested_for_employee_id);
       const byId = Number(st.requested_by_employee_id);
+      const others = String(st.other_approver_ids || "").split(",").map((v) => Number(v)).filter((n) => Number.isInteger(n) && n > 0);
+      const skip = (message) =>
+        skippedSteps.push({ attendance_approval_request_id: Number(st.attendance_approval_request_id), request_type: st.request_type, message });
       if (forId === newId || byId === newId) {
-        skippedSteps.push({
-          attendance_approval_request_id: Number(st.attendance_approval_request_id),
-          request_type: st.request_type,
-          message: "The new approver is the subject or raiser of this request and cannot approve it",
-        });
+        skip("The new approver is the subject or raiser of this request and cannot approve it");
+      } else if (others.includes(newId)) {
+        skip("The new approver already holds another stage of this request and cannot hold two");
       } else stepIds.push(Number(st.attendance_approval_step_id));
     });
 

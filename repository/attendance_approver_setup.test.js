@@ -70,6 +70,7 @@ describe("approver setup repository", () => {
     assert.match(sql, /s\.approver_employee_id = \?/);
     assert.match(sql, /s\.approval_level = \?/);
     assert.match(sql, /r\.request_type IN \('REGULARIZATION','OT'\)/);
+    assert.match(sql, /GROUP_CONCAT\(o\.approver_employee_id\).*AS other_approver_ids/, "who the request's other stages name, for the distinct-approver rule");
     assert.deepEqual(params, [22, "SECOND"]);
   });
 

@@ -15,7 +15,6 @@ const {
   REQUEST_STATUS,
   STEP_DECISION,
   buildApprovalChain,
-  requestTypeFor,
   canApprove,
   advance,
   isFinallyApproved,
@@ -73,26 +72,15 @@ describe("a Store Manager never approves their own request", () => {
   });
 });
 
-describe("one date, one request, one pass", () => {
-  it("a missing punch that also earns OT is a single combined request", () => {
-    assert.equal(
-      requestTypeFor({ has_missing_punch: true, has_candidate_ot: true }),
-      REQUEST_TYPE.REGULARIZATION_WITH_OT
-    );
-  });
-
-  it("a missing punch alone is a regularization", () => {
-    assert.equal(
-      requestTypeFor({ has_missing_punch: true, has_candidate_ot: false }),
-      REQUEST_TYPE.REGULARIZATION
-    );
+describe("two requests for two things - the combined flow is gone", () => {
+  it("nothing in the chain module can produce REGULARIZATION_WITH_OT any more", () => {
+    const chain = require("./attendance_approval_chain");
+    assert.equal(chain.requestTypeFor, undefined, "the combined-flow helper has been removed");
+    // The ENUM value stays only so historical rows still read.
+    assert.equal(REQUEST_TYPE.REGULARIZATION_WITH_OT, "REGULARIZATION_WITH_OT");
   });
 
   it("OT with no missing punch is an OT request, on the same chain", () => {
-    assert.equal(
-      requestTypeFor({ has_missing_punch: false, has_candidate_ot: true }),
-      REQUEST_TYPE.OT
-    );
     assert.deepEqual(
       roles(buildApprovalChain({ requester_class: REQUESTER_CLASS.STORE_EMPLOYEE, outlet_id: 1 })),
       roles(buildApprovalChain({ requester_class: REQUESTER_CLASS.STORE_EMPLOYEE, outlet_id: 1 }))

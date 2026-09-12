@@ -320,8 +320,9 @@ class AttendanceApproverSetupRepository {
 
   /**
    * The UNDECIDED steps of PENDING requests assigned to `approverId` at
-   * `level`, with whose request each is, so the usecase can refuse the
-   * self-approval cases before anything is written.
+   * `level`, with whose request each is and who the request's OTHER stages
+   * name, so the usecase can refuse the self-approval and duplicate-approver
+   * cases before anything is written.
    */
   async findPendingStepsWithApprover(level, approverId) {
     return this._read(
@@ -329,7 +330,11 @@ class AttendanceApproverSetupRepository {
       `SELECT s.attendance_approval_step_id, s.attendance_approval_request_id, s.stage_no,
               s.approval_level, s.approver_employee_id,
               r.request_type, r.requested_for_employee_id, r.requested_by_employee_id,
-              r.current_stage_no
+              r.current_stage_no,
+              (SELECT GROUP_CONCAT(o.approver_employee_id)
+                 FROM attendance_approval_step o
+                WHERE o.attendance_approval_request_id = s.attendance_approval_request_id
+                  AND o.attendance_approval_step_id <> s.attendance_approval_step_id) AS other_approver_ids
          FROM attendance_approval_step s
          JOIN attendance_approval_request r
            ON r.attendance_approval_request_id = s.attendance_approval_request_id

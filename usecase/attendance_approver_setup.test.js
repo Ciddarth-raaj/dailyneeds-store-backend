@@ -89,6 +89,15 @@ describe("save - one employee (SET)", () => {
     await assert.rejects(usecase.save({ actor, employee_id: 1, first_level_approver_employee_id: 1, final_approver_employee_id: 33 }), /own approver/);
     await assert.rejects(usecase.save({ actor, employee_id: 1, final_approver_employee_id: 1 }), /own approver/);
   });
+  it("6b. the same person cannot hold two levels of one employee's chain", async () => {
+    const { repo, usecase } = fakes();
+    await assert.rejects(usecase.save({ actor, employee_id: 1, first_level_approver_employee_id: 33, final_approver_employee_id: 33 }), /must be different people/);
+    await assert.rejects(usecase.save({ actor, employee_id: 1, first_level_approver_employee_id: 11, second_level_approver_employee_id: 33, final_approver_employee_id: 33 }), /must be different people/);
+    assert.equal(repo.calls.saved.length, 0);
+    const res = await usecase.bulkSet({ actor, employee_ids: [1, 2], second_level_approver_employee_id: 22, final_approver_employee_id: 22 });
+    assert.equal(res.status, "FAILED");
+    res.failed.forEach((f) => assert.match(f.message, /must be different people/));
+  });
   it("7. an inactive employee cannot be newly assigned as an approver", async () => {
     const { usecase } = fakes();
     await assert.rejects(usecase.save({ actor, employee_id: 1, first_level_approver_employee_id: 99, final_approver_employee_id: 33 }), /not active/);
@@ -215,6 +224,24 @@ describe("replace (REPLACE)", () => {
     assert.deepEqual(repo.calls.replaced[0].step_ids, [2]);
     assert.equal(res.skipped_setups.length, 1);
     assert.equal(res.skipped_steps.length, 1);
+  });
+  it("skips a master row or a live step where the new approver would then hold two levels of one chain", async () => {
+    const { repo, usecase } = fakes({
+      // employee 1: 44 is already First Level; employee 2: fine.
+      setupsWith: () => [
+        { employee_id: 1, first_level_approver_employee_id: 44, second_level_approver_employee_id: 22, final_approver_employee_id: 33 },
+        { employee_id: 2, first_level_approver_employee_id: 11, second_level_approver_employee_id: 22, final_approver_employee_id: 33 },
+      ],
+      stepsWith: () => [
+        { attendance_approval_step_id: 1, attendance_approval_request_id: 10, request_type: "OT", requested_for_employee_id: 1, requested_by_employee_id: 1, other_approver_ids: "44,33" },
+        { attendance_approval_step_id: 2, attendance_approval_request_id: 11, request_type: "REGULARIZATION", requested_for_employee_id: 2, requested_by_employee_id: 2, other_approver_ids: "11,33" },
+      ],
+    });
+    const res = await usecase.replace({ actor, current_approver_employee_id: 22, approval_level: "SECOND", new_approver_employee_id: 44 });
+    assert.deepEqual(repo.calls.replaced[0].setup_employee_ids, [2]);
+    assert.deepEqual(repo.calls.replaced[0].step_ids, [2]);
+    assert.match(res.skipped_setups[0].message, /already the First Level/);
+    assert.match(res.skipped_steps[0].message, /another stage of this request/);
   });
   it("preview computes the plan and writes nothing", async () => {
     const { repo, usecase } = withData();
