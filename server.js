@@ -520,6 +520,13 @@ class Server {
     this.employeeSalaryUsecase = require("./usecase/employee_salary")(
       this.employeeSalaryRepo
     );
+    // M5: Bulk Salary Upload. A BATCH over the lifecycle above rather than a
+    // second one - it is handed the same repository and the same usecase, and
+    // every amount it stores is calculated by the engine through them.
+    this.salaryBulkUploadUsecase = require("./usecase/salary_bulk_upload")(
+      this.employeeSalaryRepo,
+      this.employeeSalaryUsecase
+    );
     this.storeUsecase = require("./usecase/store")(this.storeRepo);
     this.outletUsecase = require("./usecase/outlet")(
       this.outletRepo,
@@ -879,7 +886,10 @@ class Server {
     const employeeSalaryRouter = require("./routes/employee_salary")(
       this.employeeSalaryUsecase,
       this.permissions,
-      this.sensitive
+      this.sensitive,
+      // M5: the two /hr/salary/bulk endpoints mount on this same router, so
+      // they inherit the B3 response filter and write guard mounted on /salary.
+      this.salaryBulkUploadUsecase
     );
     const storeRouter = require("./routes/store")(this.storeUsecase);
     const outletRouter = require("./routes/outlet")(

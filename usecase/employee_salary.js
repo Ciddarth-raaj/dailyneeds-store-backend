@@ -317,8 +317,25 @@ class EmployeeSalaryUsecase {
    * a salary and agreeing to it are two decisions with two permissions, and
    * collapsing them would make `approve_salary_revision` decorative — the
    * person who can add would already have approved by adding.
+   *
+   * M5 — `options.source` FORCES THE STORED SOURCE, AND IT IS INTERNAL ONLY.
+   *
+   * `routes/employee_salary.js` calls this with THREE arguments, so nothing a
+   * caller can put in a request body reaches it - the route cannot pass an
+   * `options` it does not construct, and Joi runs without `allowUnknown` so a
+   * body naming `source` is refused before this layer is reached at all. The
+   * one caller that supplies it is `usecase/salary_bulk_upload.js`, which
+   * stamps IMPORT so a bulk-loaded row says in its own audit trail where it
+   * came from.
+   *
+   * IT CHANGES THE STAMP, NOT THE RULES. The CLASSIFICATION - is this the
+   * employee's first live salary or a change to one - is still worked out here
+   * from `hasLiveSalary`, and it is still the classification that decides the
+   * effective date and whether a reason is required. So a bulk REVISION stored
+   * as IMPORT must still say why it is changing, and a bulk OPENING salary
+   * still takes the server's opening date rather than the file's.
    */
-  async createInitialSalary(employeeId, input = {}, actor = {}) {
+  async createInitialSalary(employeeId, input = {}, actor = {}, options = {}) {
     const employee = await this.salaryRepo.getStatutoryContext(employeeId);
     if (!employee) throw notFound(`Employee ${employeeId} was not found`);
 
@@ -346,15 +363,29 @@ class EmployeeSalaryUsecase {
       ? normalizeDate(input.effective_from, "effective_from")
       : engine.resolveOpeningEffectiveFrom(employee.date_of_joining);
 
-    const source = existing ? SOURCE.REVISION : SOURCE.OPENING_SALARY;
+    /*
+     * TWO NAMES FOR TWO DIFFERENT THINGS.
+     *
+     * `classification` is what this proposal IS - the employee's first live
+     * salary, or a change to one - and it is derived from the record, never
+     * from the caller. `source` is what gets STAMPED on the row, which is the
+     * same thing unless an internal caller (M5's bulk upload) says the origin
+     * was an import.
+     *
+     * Every rule below reads the CLASSIFICATION. Letting the stamp decide them
+     * would mean a bulk revision quietly escaping the reason requirement,
+     * because IMPORT is not in `SOURCES_REQUIRING_REASON`.
+     */
+    const classification = existing ? SOURCE.REVISION : SOURCE.OPENING_SALARY;
+    const source = options.source === undefined ? classification : options.source;
 
     /*
-     * M4 — WHY, and it is decided by the SOURCE rather than by the caller.
-     * Refused before anything is calculated or written, so a proposal that
-     * cannot say why it exists never reaches the table.
+     * M4 — WHY, and it is decided by the CLASSIFICATION rather than by the
+     * caller. Refused before anything is calculated or written, so a proposal
+     * that cannot say why it exists never reaches the table.
      */
     const revisionReason = checkReasonLength(
-      resolveRevisionReason(source, input.revision_reason)
+      resolveRevisionReason(classification, input.revision_reason)
     );
 
     const lock = periodLock.checkLock(effectiveFrom);
@@ -440,6 +471,10 @@ class EmployeeSalaryUsecase {
       employee_id: employeeId,
       status: STATUS.PENDING,
       source,
+      // What this proposal IS, beside what it is stamped as. They differ only
+      // for a bulk import, and a caller that needs to tell an opening salary
+      // from a revision must read this one rather than the stamp.
+      classification,
       effective_from: effectiveFrom,
       revision_reason: revisionReason,
       calculated,

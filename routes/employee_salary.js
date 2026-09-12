@@ -22,6 +22,8 @@ const router = express.Router();
  *   POST /hr/salary/revision/:id/approve   the money decision
  *   POST /hr/salary/revision/:id/reject    with a required reason
  *   GET  /hr/salary/pending                M4: the cross-employee approval queue
+ *   POST /hr/salary/bulk/validate          M5: price and check a whole file
+ *   POST /hr/salary/bulk/submit            M5: create the valid rows, PENDING
  *
  * M4 BUILDS TWO SCREENS ON THIS AND ADDS ONE ENDPOINT. Salary Revision &
  * History and Salary Approval are driven by the seven primitives M2 already
@@ -29,8 +31,11 @@ const router = express.Router();
  * pending proposals, which no per-employee endpoint can answer without the
  * browser reading six hundred histories. That is the whole of the addition.
  *
- * There is STILL no bulk upload, no payroll run, no payslip and no attendance
- * calculation. Those are M5 and later, and nothing here anticipates them.
+ * M5 ADDS THE BULK PAIR AND NOTHING ELSE. Validate and submit are a BATCH over
+ * the seven primitives above - same engine, same lifecycle, same one-pending
+ * rule, same PENDING outcome - and they exist because a file of six hundred
+ * rows must not become six hundred requests. There is STILL no payroll run, no
+ * payslip and no attendance calculation.
  *
  * THE SERVER CALCULATES EVERYTHING. The Joi schemas below accept a gross, an
  * effective date, and — for an override — four component amounts. They accept
@@ -49,6 +54,7 @@ const router = express.Router();
  *   approve   `view_employees` AND `approve_salary_revision`
  *   reject    `view_employees` AND `approve_salary_revision`
  *   queue     `view_employees` AND `view_salary` AND `approve_salary_revision`
+ *   bulk      `view_employees` AND `view_salary` AND `add_salary`
  *
  * The queue is the one triple, and the third key is the point of it: every
  * other read here answers a question about ONE employee somebody navigated to,
@@ -69,10 +75,17 @@ const router = express.Router();
  * `view_employee_sensitive`.
  */
 class EmployeeSalaryRoutes {
-  constructor(employeeSalaryUsecase, permissions, sensitive) {
+  constructor(employeeSalaryUsecase, permissions, sensitive, bulkUploadUsecase) {
     this.usecase = employeeSalaryUsecase;
     this.permissions = permissions;
     this.sensitive = sensitive;
+    /*
+     * M5 — the bulk upload's own usecase, which is a BATCH over the lifecycle
+     * above rather than a second lifecycle. It is optional: a server built
+     * without it simply does not mount the two bulk endpoints, and every M2/M4
+     * route on this router is unchanged either way.
+     */
+    this.bulkUsecase = bulkUploadUsecase || null;
 
     this.init();
   }
@@ -84,6 +97,13 @@ class EmployeeSalaryRoutes {
    * in the codebase relies on that helper's current behaviour, and M2 has no
    * business changing what they answer.
    */
+  /** A server built without the bulk usecase says so rather than throwing a TypeError. */
+  _unavailable() {
+    const err = new Error("Bulk salary upload is not available on this server");
+    err.name = "ValidationError";
+    return err;
+  }
+
   _fail(res, err) {
     if (err && err.name === "NotFoundError") {
       res.status(404).json({ code: 404, msg: err.message });
@@ -288,6 +308,113 @@ class EmployeeSalaryRoutes {
       }
     );
 
+    /**
+     * M5 — BULK SALARY UPLOAD: validate, then submit. Two endpoints, no more.
+     *
+     * WHY THEY TAKE A WHOLE FILE. The alternative a screen reaches for is a
+     * preview request per row and a create request per row, which for a six
+     * hundred person upload is twelve hundred round trips, twelve hundred
+     * authorisations and no way to tell somebody how many rows are wrong before
+     * the first one is written. These take the rows as a list and answer about
+     * all of them.
+     *
+     * THE BODY IS THE THREE TEMPLATE COLUMNS AND NOTHING ELSE. Joi runs without
+     * `allowUnknown`, so a row object that so much as names `basic`,
+     * `monthly_ctc`, `source` or `status` is answered 422 before the usecase is
+     * reached - the same mechanism that keeps a client-calculated figure off a
+     * single-employee proposal, applied per row.
+     *
+     * EACH CELL IS ACCEPTED AS A STRING OR A NUMBER AND MAY BE EMPTY. A file is
+     * a file: cells arrive as text, and a blank one is a row to REPORT rather
+     * than a request to refuse. Answering 422 for the whole upload because row
+     * 417 has no gross would make correcting a file an exercise in uploading it
+     * once per mistake, which is exactly what validate-all exists to avoid.
+     *
+     * THREE KEYS, ALL OF THEM. `view_employees` and `view_salary` because the
+     * validation answers with employee names and a full priced breakup per row,
+     * and `add_salary` because that is what this is for. `add_salary` is the
+     * same key a single proposal takes - there is deliberately no
+     * `bulk_salary_upload` permission, because uploading a hundred proposals and
+     * typing a hundred proposals are the same authority exercised at different
+     * speeds.
+     *
+     * NEITHER ENDPOINT APPROVES ANYTHING. `approve_salary_revision` is not
+     * asked for here and would not help: every row created lands PENDING and is
+     * decided on Salary Approval, whoever uploaded it.
+     */
+    const bulkRowsBody = {
+      rows: Joi.array()
+        .items(
+          Joi.object({
+            employee_id: Joi.alternatives()
+              .try(Joi.string().allow("", null), Joi.number())
+              .optional(),
+            monthly_gross: Joi.alternatives()
+              .try(Joi.string().allow("", null), Joi.number())
+              .optional(),
+            effective_from: Joi.string().allow("", null).optional(),
+          })
+        )
+        .min(1)
+        .required(),
+    };
+
+    /**
+     * VALIDATE — the whole file, priced and checked, and NOTHING IS WRITTEN.
+     *
+     * Every row comes back with a verdict: the valid ones with the type the
+     * system decided (opening salary or revision), the server-resolved
+     * effective date and the full breakup they would create, and the invalid
+     * ones with the one sentence saying why. This is what the preview table
+     * renders and what the rejected-row export is built from.
+     */
+    router.post(
+      "/salary/bulk/validate",
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.VIEW_SALARY, P.ADD_SALARY),
+      async (req, res) => {
+        try {
+          if (!this.bulkUsecase) throw this._unavailable();
+
+          const isValid = Joi.validate(req.body, bulkRowsBody);
+          if (isValid.error !== null) throw isValid.error;
+
+          res.json(await this.bulkUsecase.validate(req.body.rows));
+        } catch (err) {
+          this._fail(res, err);
+        }
+        res.end();
+      }
+    );
+
+    /**
+     * SUBMIT — create the valid rows, as PENDING proposals.
+     *
+     * IT TAKES THE ROWS AGAIN AND CHECKS THEM AGAIN. There is no validation
+     * token and no server-side basket: a proposal can be raised for one of
+     * these employees between the preview and the click, so the file is
+     * revalidated against the database as it is at this moment and a row that
+     * has since become invalid comes back as a per-row failure. Nothing is
+     * created on the strength of a check that has expired.
+     */
+    router.post(
+      "/salary/bulk/submit",
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.VIEW_SALARY, P.ADD_SALARY),
+      async (req, res) => {
+        try {
+          if (!this.bulkUsecase) throw this._unavailable();
+
+          const isValid = Joi.validate(req.body, bulkRowsBody);
+          if (isValid.error !== null) throw isValid.error;
+
+          const actor = await this.permissions.actorFor(req);
+          res.json(await this.bulkUsecase.submit(req.body.rows, actor));
+        } catch (err) {
+          this._fail(res, err);
+        }
+        res.end();
+      }
+    );
+
     /** Amend a PENDING proposal. Approved history is immutable. */
     router.post(
       "/salary/revision/:salary_id",
@@ -387,6 +514,6 @@ class EmployeeSalaryRoutes {
   }
 }
 
-module.exports = (employeeSalaryUsecase, permissions, sensitive) =>
-  new EmployeeSalaryRoutes(employeeSalaryUsecase, permissions, sensitive);
+module.exports = (employeeSalaryUsecase, permissions, sensitive, bulkUploadUsecase) =>
+  new EmployeeSalaryRoutes(employeeSalaryUsecase, permissions, sensitive, bulkUploadUsecase);
 module.exports.EmployeeSalaryRoutes = EmployeeSalaryRoutes;

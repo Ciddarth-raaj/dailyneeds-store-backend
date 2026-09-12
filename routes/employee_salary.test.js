@@ -63,22 +63,31 @@ const { guards, middleware, routes } = makeHarness();
 const find = (method, path) => guards.find((g) => g.method === method && g.path === path);
 
 describe("the endpoints", () => {
-  it("defines exactly the M2 surface plus the ONE read M4 adds, and nothing more", () => {
-    // No bulk upload, no payroll run, no payslip, no attendance calculation.
-    // This API is small on purpose, and a route that appears here without
-    // appearing in the approved scope is scope creep the test should catch.
+  it("defines exactly the M2 surface, the ONE read M4 adds and the M5 bulk pair", () => {
+    // No payroll run, no payslip, no attendance calculation. This API is small
+    // on purpose, and a route that appears here without appearing in the
+    // approved scope is scope creep the test should catch.
     //
-    // M4 builds two screens - Salary Revision & History, and Salary Approval -
+    // M4 built two screens - Salary Revision & History, and Salary Approval -
     // on the seven primitives M2 already defined. The only thing it could not
     // build from them is a list of EVERYBODY's pending proposals, because no
     // per-employee endpoint can answer that without the browser reading six
-    // hundred histories. So M4 adds exactly one endpoint, and it is a read.
+    // hundred histories. So M4 added exactly one endpoint, and it is a read.
+    //
+    // M5 adds exactly two, and they are a BATCH of what is already here rather
+    // than anything new: validate prices and checks a whole file and writes
+    // nothing, submit creates the rows that passed. Both go through the same
+    // engine and the same lifecycle as `POST /salary/employee/:id`, and neither
+    // can produce anything but a PENDING proposal. They exist because six
+    // hundred rows must not become twelve hundred requests.
     assert.deepEqual(
       guards.map((g) => `${g.method} ${g.path}`).sort(),
       [
         "GET /salary/employee/:employee_id/current",
         "GET /salary/employee/:employee_id/history",
         "GET /salary/pending",
+        "POST /salary/bulk/submit",
+        "POST /salary/bulk/validate",
         "POST /salary/employee/:employee_id",
         "POST /salary/preview/:employee_id",
         "POST /salary/revision/:salary_id",
@@ -88,23 +97,36 @@ describe("the endpoints", () => {
     );
   });
 
-  it("M4 ADDS NO WRITE AT ALL — the approval screen cannot edit a proposal", () => {
-    // Rule 14 of the approved task: if a submitted salary is wrong, the
-    // approver REJECTS it with a reason and the salary-entry user corrects it
-    // on Salary Revision & History. An approval screen that could also amend
-    // would let one person rewrite a figure and agree to it in the same visit,
-    // which is the four-eyes rule defeated from the other end.
+  it("NEITHER M4 NOR M5 ADDS AN APPROVAL PATH — and the queue is still a read", () => {
+    // Rule 14 of the M4 task: if a submitted salary is wrong, the approver
+    // REJECTS it with a reason and the salary-entry user corrects it on Salary
+    // Revision & History. An approval screen that could also amend would let
+    // one person rewrite a figure and agree to it in the same visit, which is
+    // the four-eyes rule defeated from the other end.
     //
-    // So the only endpoint M4 adds is a GET, and the writes are still exactly
-    // the M2 ones: create, amend-pending, approve, reject.
+    // M4's one endpoint is therefore a GET, and M5's two writes are a create
+    // path: bulk upload PROPOSES faster, it does not decide. Nothing here
+    // approves, and nothing here amends an existing record.
     const writes = guards.filter((g) => g.method !== "GET").map((g) => `${g.method} ${g.path}`);
     assert.deepEqual(writes.sort(), [
+      "POST /salary/bulk/submit",
+      "POST /salary/bulk/validate",
       "POST /salary/employee/:employee_id",
       "POST /salary/preview/:employee_id",
       "POST /salary/revision/:salary_id",
       "POST /salary/revision/:salary_id/approve",
       "POST /salary/revision/:salary_id/reject",
     ]);
+
+    // The bulk pair is emphatically not an approval route: neither asks for the
+    // approver's key, so holding it is no part of reaching either of them.
+    for (const path of ["/salary/bulk/validate", "/salary/bulk/submit"]) {
+      const g = find("POST", path);
+      assert.ok(
+        !g.guard.keys.includes(P.APPROVE_SALARY_REVISION),
+        `${path} must not be reachable by the approver key`
+      );
+    }
   });
 
   it("has no delete route — salary records are never removed", () => {
@@ -123,19 +145,40 @@ describe("permissions", () => {
     }
   });
 
-  it("every per-employee endpoint is exactly a pair; the M4 queue is the one triple", () => {
-    // The pairs are unchanged by M4. The queue takes a third key because it is
-    // a different disclosure: every other read here answers a question about
-    // ONE employee somebody navigated to, while the queue lists every
-    // outstanding pay proposal in the company.
+  it("every per-employee endpoint is exactly a pair; the cross-employee ones are triples", () => {
+    // The pairs are unchanged by M4 and M5. The three triples are the endpoints
+    // that are NOT about one employee somebody navigated to: the approval queue
+    // lists every outstanding pay proposal in the company, and the two bulk
+    // endpoints read and write across a whole file of people at once.
+    const TRIPLES = new Set(["/salary/pending", "/salary/bulk/validate", "/salary/bulk/submit"]);
     for (const g of guards) {
-      const expected = g.path === "/salary/pending" ? 3 : 2;
+      const expected = TRIPLES.has(g.path) ? 3 : 2;
       assert.equal(
         g.guard.keys.length,
         expected,
         `${g.method} ${g.path} must demand ${expected} keys`
       );
     }
+  });
+
+  it("M5: BULK TAKES add_salary, NOT A NEW PERMISSION OF ITS OWN", () => {
+    // Uploading a hundred proposals and typing a hundred proposals are the same
+    // authority exercised at different speeds, so there is deliberately no
+    // `bulk_salary_upload` key: the permission catalogue already says who may
+    // create a salary, and inventing a second answer would mean two places to
+    // grant and one of them forgotten.
+    for (const path of ["/salary/bulk/validate", "/salary/bulk/submit"]) {
+      const g = find("POST", path);
+      assert.deepEqual(g.guard.keys, [P.VIEW_EMPLOYEES, P.VIEW_SALARY, P.ADD_SALARY]);
+      assert.equal(g.guard.mode, "all", "all three, not any of three");
+    }
+    // `bulk_assign_employee_shift` is a different system's key and predates
+    // this; what must not exist is a bulk key for SALARY.
+    const declared = Object.values(P).map(String);
+    assert.ok(
+      !declared.some((k) => /bulk/i.test(k) && /salary/i.test(k)),
+      "no bulk-salary permission key was invented"
+    );
   });
 
   it("THE PENDING QUEUE TAKES THE APPROVER KEY ON TOP OF SALARY VISIBILITY", () => {
