@@ -46,10 +46,13 @@ const { resolveEffectiveRawPunches } = require("../utils/attendance_effective_pu
  * v2 engine reproduces the attendance-day assignment independently, which is
  * what makes a recalculation a genuine recalculation.
  *
- * The window is widened by ONE DAY at the end, and by nothing at the start,
- * because the cutoff rule can only ever move a punch BACKWARDS onto the
- * previous attendance date: a 00:30 finish on the 15th belongs to the 14th,
- * and no rule anywhere moves a punch forwards.
+ * The window is widened by ONE DAY at the end for DATING, because the cutoff
+ * rule can only ever move a punch BACKWARDS onto the previous attendance
+ * date: a 00:30 finish on the 15th belongs to the 14th, and no rule anywhere
+ * moves a punch forwards. It is also widened by ONE DAY at the start, for the
+ * ten-minute duplicate rule only: the first punch of a range is compared with
+ * the last KEPT punch before it, which may sit on the previous calendar day.
+ * Nothing from that day is calculated or stored - see `buildContext`.
  *
  * Everything else is still derived from the immutable raw punches plus the
  * dated shift history plus the fully approved regularizations, so running it
