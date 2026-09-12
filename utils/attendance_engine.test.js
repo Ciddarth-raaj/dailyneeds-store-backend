@@ -97,7 +97,10 @@ describe("A2 case 2 - under six hours is charged no break at all", () => {
     assert.equal(result.span_minutes, 210);
     assert.equal(result.break_charged_minutes, 0);
     assert.equal(result.worked_minutes, 210);
-    assert.equal(result.shortage_minutes, 450);
+    // Left before 15:00: the no-lunch rule withholds the 60m break credit,
+    // so the whole 510m early out is short (NRM 660 - 210 would be 450).
+    assert.equal(result.break_credit_withheld, true);
+    assert.equal(result.shortage_minutes, 510);
     assert.equal(result.attendance_day_count, 1);
   });
 });
@@ -443,7 +446,8 @@ describe("A2 case 14 - ten minutes present is a whole attendance day", () => {
 
     assert.equal(result.attendance_day_count, 1);
     assert.equal(result.worked_minutes, 10);
-    assert.equal(result.shortage_minutes, 650);
+    // 710m early out under the no-lunch rule, capped at the NRM of 660.
+    assert.equal(result.shortage_minutes, 660);
     // No half day, no quarter day: v2 has no such classification in payroll.
     assert.equal(result.status, CALC_STATUS.FINAL);
   });
@@ -746,11 +750,10 @@ describe("deduction rule - Deduct Minutes per Deduction Interval, settled inside
     assert.equal(result.late_charged_minutes, 0);
   });
 
-  it("the 4 Sep case: late beyond grace AND a long early out - the grace is not refilled by the early out", () => {
-    // 09:57 -> 14:04 on 09:30-18:30 / 30m break: span 247, no break charged
-    // (under six hours), NRM 510, raw shortage 263. Late 27 -> 10 forgiven,
-    // 17 counted. Early 266, of which only 236 are in the shortage. Settled
-    // 17 + 236 = 253, i.e. the raw 263 less the 10 the grace forgave.
+  it("the 4 Sep case: left before 15:00, so no lunch credit - late 17 + early 4h 26m", () => {
+    // 09:57 -> 14:04 on 09:30-18:30 / 30m break: raw shortage 263, but the
+    // last punch is before 15:00 so the 30m break is not credited: 17 late
+    // (27 less 10 grace) + 266 early = 283.
     const result = day({
       shift: ruled({ late_deduction_interval_minutes: 1, late_deduct_minutes: 1, early_exit_deduction_interval_minutes: 1, early_exit_deduct_minutes: 1 }),
       punches: punches("09:57", "14:04"),
@@ -758,10 +761,30 @@ describe("deduction rule - Deduct Minutes per Deduction Interval, settled inside
     assert.equal(result.late_minutes, 27);
     assert.equal(result.early_exit_minutes, 266);
     assert.equal(result.worked_minutes, 247);
+    assert.equal(result.break_credit_withheld, true);
     assert.equal(result.grace_forgiven_minutes, 10);
     assert.equal(result.late_charged_minutes, 17);
-    assert.equal(result.early_exit_charged_minutes, 236);
-    assert.equal(result.shortage_minutes, 253);
+    assert.equal(result.early_exit_charged_minutes, 266);
+    assert.equal(result.shortage_minutes, 283);
+    assert.ok(result.notes.some((n) => /no lunch taken/.test(n)));
+  });
+
+  it("leaving at or after 15:00 keeps the break credit: late 27 -> 17, early 210 of which 180 in the shortage", () => {
+    // 09:57 -> 15:00: span 303, no break charged, raw shortage 207.
+    const result = day({
+      shift: ruled({ late_deduction_interval_minutes: 1, late_deduct_minutes: 1, early_exit_deduction_interval_minutes: 1, early_exit_deduct_minutes: 1 }),
+      punches: punches("09:57", "15:00"),
+    });
+    assert.equal(result.break_credit_withheld, false);
+    assert.equal(result.shortage_minutes, 207 - 10);
+  });
+
+  it("the no-lunch rule never applies to a four-punch day: the gaps are the break", () => {
+    const result = day({
+      shift: ruled({ late_deduction_interval_minutes: 1, late_deduct_minutes: 1 }),
+      punches: punches("09:30", "11:00", "11:20", "14:00"),
+    });
+    assert.equal(result.break_credit_withheld, false);
   });
 
   it("the settled shortage is capped at NRM", () => {

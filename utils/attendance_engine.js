@@ -93,6 +93,18 @@ const MINUTES_PER_DAY = 1440;
 const BREAK_FREE_MINUTES = 360;
 
 /**
+ * THE NO-LUNCH RULE. An employee whose LAST punch of a two-punch day is
+ * before this time (15:00) left before lunch, so no lunch was taken and the
+ * break allowance is not credited against their late arrival or early out:
+ * every minute between the shift's in-time and the first punch, and between
+ * the last punch and the shift's out-time, is short. NRM itself is
+ * unchanged - it is the day's normal - and the phased break charge is
+ * unchanged; only the credit an uncharged break would otherwise give against
+ * lateness and early out is withheld.
+ */
+const BREAK_CREDIT_CUTOFF_MINUTES = 15 * 60;
+
+/**
  * Bumped whenever a stored calculation would come out differently.
  *
  *   1  Attendance v2 as approved.
@@ -108,8 +120,10 @@ const BREAK_FREE_MINUTES = 360;
  *      shortage contains (`applyGrace`).
  *   4  The employee break override applies only on a day with four or more
  *      punches; a two-punch day is charged the shift's break.
+ *   5  The no-lunch rule: a two-punch day ending before 15:00 gets no break
+ *      credit against lateness or early out (`BREAK_CREDIT_CUTOFF_MINUTES`).
  */
-const CALCULATION_VERSION = 4;
+const CALCULATION_VERSION = 5;
 
 /** Every value `status` can take. A calculation is never left without one. */
 const CALC_STATUS = Object.freeze({
@@ -450,7 +464,14 @@ function resolveOvertime({
  * what the rule is for - but the day's total shortage is capped at NRM, so a
  * day can never owe more than the whole day.
  */
-function applyGrace({ shortage_minutes = 0, late_minutes = 0, early_exit_minutes = 0, nrm_minutes = null, shift } = {}) {
+function applyGrace({
+  shortage_minutes = 0,
+  late_minutes = 0,
+  early_exit_minutes = 0,
+  nrm_minutes = null,
+  break_credit_withheld = false,
+  shift,
+} = {}) {
   const int = (v) => Math.max(0, Math.trunc(Number(v) || 0));
   const shortage = int(shortage_minutes);
   const late = int(late_minutes);
@@ -473,9 +494,12 @@ function applyGrace({ shortage_minutes = 0, late_minutes = 0, early_exit_minutes
   // grace comes off each portion. Carving after forgiving would let the
   // early-out portion grow into the minutes the grace had just forgiven,
   // and the forgiveness would silently vanish from the total.
-  const lateRaw = Math.min(late, shortage);
-  const earlyRaw = Math.min(early, shortage - lateRaw);
-  const otherShortage = shortage - lateRaw - earlyRaw;
+  // With the break credit withheld (the no-lunch rule) the late and early
+  // portions are NOT capped at the shortage: an uncharged break is not
+  // allowed to absorb them.
+  const lateRaw = break_credit_withheld ? late : Math.min(late, shortage);
+  const earlyRaw = break_credit_withheld ? early : Math.min(early, shortage - lateRaw);
+  const otherShortage = Math.max(0, shortage - lateRaw - earlyRaw);
   const lateCounted = Math.max(0, lateRaw - lateForgiven);
   const earlyCounted = Math.max(0, earlyRaw - earlyForgiven);
 
@@ -581,6 +605,7 @@ function calculateAttendanceDay(input = {}) {
     worked_minutes: 0,
     shortage_minutes: 0,
     grace_forgiven_minutes: 0,
+    break_credit_withheld: false,
     late_charged_minutes: 0,
     early_exit_charged_minutes: 0,
     late_minutes: null,
@@ -729,8 +754,17 @@ function calculateAttendanceDay(input = {}) {
   const rawShortage = Math.max(0, nrm - worked);
   const surplus = Math.max(0, worked - nrm);
 
+  // The no-lunch rule: a two-punch day whose last punch is before the cutoff.
+  const breakCreditWithheld =
+    effectivePunches.length === 2 && allowedBreak > 0 && last.minute < BREAK_CREDIT_CUTOFF_MINUTES;
+  base.break_credit_withheld = breakCreditWithheld;
+  if (breakCreditWithheld) {
+    base.notes.push("Left before 15:00: no lunch taken, so the break is not credited against lateness or early out");
+  }
+
   const grace = applyGrace({
     shortage_minutes: rawShortage,
+    break_credit_withheld: breakCreditWithheld,
     late_minutes: base.late_minutes || 0,
     early_exit_minutes: base.early_exit_minutes || 0,
     nrm_minutes: nrm,
@@ -745,7 +779,7 @@ function calculateAttendanceDay(input = {}) {
   base.grace_forgiven_minutes = grace.grace_forgiven_minutes;
   base.late_charged_minutes = grace.late_charged_minutes;
   base.early_exit_charged_minutes = grace.early_exit_charged_minutes;
-  if (shortage !== rawShortage - grace.grace_forgiven_minutes) {
+  if (shortage !== rawShortage - grace.grace_forgiven_minutes && !breakCreditWithheld) {
     base.notes.push(
       `Deduction rule: late charged ${grace.late_charged_minutes} minute(s), early out charged ${grace.early_exit_charged_minutes} minute(s) under the shift's interval rule`
     );
@@ -810,6 +844,7 @@ function timeToMinutes(value) {
 module.exports = {
   MINUTES_PER_DAY,
   BREAK_FREE_MINUTES,
+  BREAK_CREDIT_CUTOFF_MINUTES,
   CALCULATION_VERSION,
   CALC_STATUS,
   REVIEW_REASON,
