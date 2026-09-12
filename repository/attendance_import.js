@@ -93,8 +93,16 @@ class AttendanceImportRepository {
   async existingImportKeys(userIds, fromRaw, toRaw) {
     if (!userIds.length) return new Set();
     const out = new Set();
-    for (let i = 0; i < userIds.length; i += 500) {
-      const slice = userIds.slice(i, i + 500);
+    // `biomax_punch.user_id` is VARCHAR(32) holding the employee CODE as the
+    // device or the workbook wrote it, not an employee id. A number reaching
+    // this predicate would make MySQL compare the column to an integer: the
+    // index on (user_id, io_time) goes unused and "0042" stops equalling 42,
+    // so a re-import would silently look new. The parser only ever produces
+    // strings (biomax/digismeImport.js#canonicalEmployeeCode); this keeps the
+    // comparison textual whatever a future caller passes.
+    const codes = userIds.map((id) => String(id));
+    for (let i = 0; i < codes.length; i += 500) {
+      const slice = codes.slice(i, i + 500);
       const rows = await this._q(
         "EXISTING-IMPORT",
         `SELECT user_id, io_time_raw FROM biomax_punch

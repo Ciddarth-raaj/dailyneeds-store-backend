@@ -53,6 +53,11 @@ const EMPLOYEES = [
   { employee_id: 44, employee_name: "Chitra", store_id: 5, designation_id: 11, status: 1, date_of_joining: "2020-01-01", resignation_date: null },
   { employee_id: 45, employee_name: "Left", store_id: 3, designation_id: 11, status: 0, date_of_joining: "2020-01-01", resignation_date: "2026-08-01" },
   { employee_id: 46, employee_name: "Joiner", store_id: 3, designation_id: 11, status: 1, date_of_joining: "2026-10-01", resignation_date: null },
+  // Resigned last year, `status` never changed by hand. The old predicate let
+  // this row through on `status = 1` alone and wrote empty days for it.
+  { employee_id: 47, employee_name: "Stale", store_id: 3, designation_id: 12, status: 1, date_of_joining: "2020-01-01", resignation_date: "2025-11-30" },
+  // Joins in the middle of the RANGE below, so the 14th is before them.
+  { employee_id: 48, employee_name: "MidJoiner", store_id: 5, designation_id: 12, status: 1, date_of_joining: "2026-09-15", resignation_date: null },
 ];
 const IDENTITIES = {
   7: { employee_id: 7, employee_name: "Mgr3", outlet_id: 3, designation_id: 2, designation_name: "STORE MANAGER", approver_role: APPROVER_ROLE.STORE_MANAGER, requester_class: "MANAGER" },
@@ -94,7 +99,7 @@ function build(state = {}) {
     saveCalculations: async (rows) => { saved.calculations.push(rows); return { written: rows.length }; },
     listEmployeesForRecalculation: async ({ employee_id, store_id, designation_id, from_date }) =>
       EMPLOYEES.filter((e) =>
-        (e.status === 1 || e.resignation_date === null || e.resignation_date >= from_date) &&
+        (e.resignation_date === null || e.resignation_date >= from_date) &&
         (!employee_id || e.employee_id === employee_id) &&
         (!store_id || e.store_id === store_id) &&
         (!designation_id || e.designation_id === designation_id)
@@ -420,9 +425,30 @@ describe("bulk recalculation", () => {
   it("23. date range only targets the permitted population: employed inside the range", async () => {
     const w = world();
     const r = await w.calculation.recalculateBulk({ ...RANGE, actor_employee_id: admin });
-    assert.equal(r.employees_targeted, 3);
+    assert.equal(r.employees_targeted, 4);
     assert.ok(!w.saved.calculations.flat().some((x) => x.employee_id === 45), "left before the range");
     assert.ok(!w.saved.calculations.flat().some((x) => x.employee_id === 46), "joins after the range");
+  });
+
+  it("an employee who resigned before the range is excluded even with status still 1", async () => {
+    const w = world();
+    const r = await w.calculation.recalculateBulk({ ...RANGE, actor_employee_id: admin });
+    assert.ok(
+      !w.saved.calculations.flat().some((x) => x.employee_id === 47),
+      "resigned 2025-11-30; the stale status flag must not put them back in"
+    );
+    assert.equal(r.employees_failed, 0);
+  });
+
+  it("an employee who joined inside the range is calculated from their joining date only", async () => {
+    const w = world();
+    await w.calculation.recalculateBulk({ ...RANGE, actor_employee_id: admin });
+    const dates = w.saved.calculations
+      .flat()
+      .filter((x) => x.employee_id === 48)
+      .map((x) => x.attendance_date)
+      .sort();
+    assert.deepEqual(dates, ["2026-09-15", "2026-09-16"], "no row for the 14th - they had not joined");
   });
 
   it("validates the filters and the range", async () => {
