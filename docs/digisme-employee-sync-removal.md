@@ -152,28 +152,47 @@ button and no UI change.
 
 ## Related bug: `row_count: 0` on every run
 
-Real, and independent of the removal. `utils/api_sync_logger.js#wrapCron` asks
-`extractRowCount(req, payload)` (`utils/api_sync_log_helpers.js`) for a count,
-and that helper reads it off the **return value** of the wrapped function —
-`row_count`, `rows_processed`, `rows_imported`, `inserted`, `count`, `total`.
+Real, independent of the removal, and **now fixed** — though not where this
+file first said it was.
 
-`syncDigismeEmployees()` returns none of them. It `await`s
-`employeeUsecase.bulkCreate(formattedEmployees)` and **discards the result**,
-then returns whatever `reconcileEmployeeLifecycle()` returns — `{ code: 200,
-lifecycle: {...} }`. So the helper finds no candidate and yields `null`, which
-the log screen shows as `0`. The rows were written; nothing counted them.
+`utils/api_sync_logger.js#wrapCron` asks `extractRowCount(req, payload)`
+(`utils/api_sync_log_helpers.js`) for a count, and that helper reads it off the
+**return value** of the wrapped function. `syncDigismeEmployees()` returned
+none of the keys it looks for: it `await`ed
+`employeeUsecase.bulkCreate(formattedEmployees)` and discarded the result, then
+returned whatever `reconcileEmployeeLifecycle()` returned.
 
-Two things follow:
+This file originally concluded that the helper therefore "yields `null`, which
+the log screen shows as `0`". That was wrong about the mechanism. The helper's
+candidate list ended with `Array.isArray(p.data) ? p.data.length : null`, and
+`Number(null)` is `0` — a finite number `>= 0`, so it was **returned as a real
+count of zero**. The `return null` after the loop was unreachable for any
+object payload. The screen was reporting faithfully; the helper was producing
+a fabricated zero, and did so for every job whose result carries no recognised
+key, not just this one.
 
-1. the same flaw hits any other cron whose function does not return a count —
-   worth checking `product_sync` and `stock_holding_report_sync` against the
-   candidate key list rather than assuming this was DigiSME-specific;
-2. it is a reporting bug, not evidence that the sync inserted nothing. Do not
-   read historical `employee_sync` log rows as proof of no writes.
+Fixed in `extractRowCount` by skipping absent candidates, so "nobody counted"
+(`null`) and "counted, and it was none" (`0`) are different values again. See
+`utils/api_sync_logger.test.js`.
 
-Not worth fixing for DigiSME, whose sync is now deleted. Fixing `wrapCron`'s
-contract — or having each cron return `{ row_count }` — still is. See
-**Still open**.
+Checking the other crons, as this file proposed, found two more defects in the
+same path — both affecting `stock_holding_report_sync`, a live nightly job:
+
+- its cron body was `async () => { await fn(); }` rather than
+  `return await fn();`, so `wrapCron` saw `undefined` and logged from nothing;
+- `wrapCron` decided status from `result.warnings` alone, so a run returning
+  `{ code: 400, message: "No valid stock holding rows to import" }` was logged
+  as **success / 200**. Only a thrown error was ever a failure.
+
+The second is why the first had to be fixed second: adding the `return` alone
+would have made the job start recording its refusals as clean runs.
+`wrapCron` now applies `isSuccess` — the same rule the HTTP middleware already
+applies to the same table — and `data.item_count`, the stock sync's own word
+for its row count, is a recognised candidate.
+
+One thing that has not changed: these are reporting bugs, not evidence that a
+sync did nothing. Historical `employee_sync` rows showing `row_count: 0` are
+not proof of no writes.
 
 ## Still open
 
@@ -196,6 +215,9 @@ Neither of these is caused by the removal, and neither is fixed by it.
    now a visible gap where it used to be a hidden one. Options: its own cron,
    or have the local Resign / Rejoin actions call it directly — the second is
    probably right, since those are the events it reconciles.
-3. **`wrapCron` counts no rows** for any job whose function returns no count.
-   Worth checking `product_sync` and `stock_holding_report_sync` against the
-   candidate key list rather than assuming this was DigiSME-specific.
+3. **Verify the stock holding sync was actually working.** The logging fixes
+   above mean its runs are recorded truthfully from now on, but they say
+   nothing about the past: every historical row reads `success` with
+   `row_count: 0` whether the run imported 216 items or refused with code 400.
+   Query `api_sync_log` for `log_type = 'stock_holding_report_sync'` and check
+   the outcome against `stock_holding_report` rows for the same dates.

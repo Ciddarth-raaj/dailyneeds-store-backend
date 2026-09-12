@@ -80,9 +80,28 @@ function extractRowCount(req, payload) {
     p.data?.rows_imported,
     p.data?.inserted,
     p.data?.count,
+    // The stock holding sync's own word for it. Its usecase returns
+    // `data.item_count`, which no candidate above matched, so that job
+    // logged a null row count even once it started returning its result.
+    p.item_count,
+    p.data?.item_count,
     Array.isArray(p.data) ? p.data.length : null,
   ];
+  // THE `row_count: 0` BUG. This used to be `const v = Number(n)` over every
+  // candidate, and the last candidate is `null` whenever `p.data` is not an
+  // array - which `Number(null)` turns into 0, a finite number >= 0. So any
+  // payload with nothing countable in it reported a row count of ZERO rather
+  // than "no count", and the `return null` below was unreachable for objects.
+  // That is what made the Digisme employee sync log row_count: 0 on every
+  // run while it was inserting rows, and it did the same for every other job
+  // whose result carries no recognised key.
+  //
+  // "Nobody counted" and "counted, and it was none" are different facts, and
+  // a nightly sync reporting the second when it means the first is how an
+  // integration goes unnoticed. Absent candidates are skipped now; a genuine
+  // 0 still logs as 0.
   for (const n of candidates) {
+    if (n === null || n === undefined || n === "") continue;
     const v = Number(n);
     if (Number.isFinite(v) && v >= 0) return v;
   }

@@ -75,6 +75,7 @@ const MAP = [
   // family
   ["GET", "/family", P.VIEW_FAMILY],
   ["GET", "/family/family_id", P.VIEW_FAMILY],
+  ["GET", "/family/employee_id", P.VIEW_FAMILY],
   ["GET", "/family/employee_name", P.VIEW_FAMILY],
   ["POST", "/family/create", P.ADD_FAMILY],
   ["POST", "/family/update-family", P.ADD_FAMILY],
