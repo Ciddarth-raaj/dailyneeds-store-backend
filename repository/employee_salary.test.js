@@ -86,6 +86,9 @@ describe("no SELECT *", () => {
       "status",
       "source",
       "statutory_snapshot",
+      "changed_by",
+      "changed_at",
+      "updated_at",
     ]) {
       assert.ok(SALARY_COLUMNS.includes(column), `${column} is selectable`);
     }
@@ -171,6 +174,46 @@ describe("immutability is enforced in the SQL, not only in the service", () => {
     assert.equal(params[params.length - 1], "PENDING");
   });
 
+  it("M4 — AN AMENDMENT STAMPS WHO MADE IT, IN THE SAME STATEMENT", async () => {
+    // This is the only path that changes a pending proposal, so the audit is
+    // written by the statement that makes the change rather than by its
+    // caller. There is no code path that amends without recording the amender.
+    const db = makeDb({ affectedRows: 1 });
+    await buildRepo(db).updatePending(7, { basic: 1 }, 41);
+    const { sql, params } = db.calls[0];
+    assert.ok(sql.includes("`changed_by` = ?"));
+    assert.ok(sql.includes("`changed_at` = CURRENT_TIMESTAMP"), "the clock is the database's");
+    assert.deepEqual(params, [{ basic: 1 }, 41, 7, "PENDING"]);
+  });
+
+  it("M4 — THE CALLER CANNOT DICTATE ITS OWN AMENDMENT AUDIT", async () => {
+    // A patch carrying these two columns would let a request name somebody
+    // else as the amender, or backdate the amendment. They are stripped before
+    // the patch is bound, and the statement's own clause is what is written.
+    const db = makeDb({ affectedRows: 1 });
+    await buildRepo(db).updatePending(
+      7,
+      { basic: 1, changed_by: 999, changed_at: "1999-01-01 00:00:00" },
+      41
+    );
+    assert.deepEqual(db.calls[0].params[0], { basic: 1 });
+    assert.equal(db.calls[0].params[1], 41);
+  });
+
+  it("M4 — A DECISION NEVER OVERWRITES THE AMENDMENT AUDIT", async () => {
+    // Approving a proposal is not amending it. Both statements name the
+    // columns they set, and `changed_by`/`changed_at` are not among them, so a
+    // proposal approved without ever being amended keeps its NULLs.
+    const db = makeDb({ affectedRows: 1 });
+    const repo = buildRepo(db);
+    await repo.approve(1, 7);
+    await repo.reject(2, 7, "Budget");
+    for (const call of db.calls) {
+      assert.ok(!call.sql.includes("`changed_by`"), "approval and rejection leave it alone");
+      assert.ok(!call.sql.includes("`changed_at`"));
+    }
+  });
+
   it("an approval is scoped to PENDING", async () => {
     const db = makeDb({ affectedRows: 0 });
     await buildRepo(db).approve(1, 7);
@@ -198,6 +241,7 @@ describe("immutability is enforced in the SQL, not only in the service", () => {
     const flat = code.replace(/\\`/g, "`");
     const chunks = flat.split(/UPDATE\s+`employee_salary`/).slice(1);
     assert.equal(chunks.length, 3, "there are exactly three update paths");
+    assert.ok(chunks[0].includes("`changed_at` = CURRENT_TIMESTAMP"), "and only the first amends");
     for (const chunk of chunks) {
       // Far enough to cover the WHERE clause of any of the three.
       const stmt = chunk.slice(0, 400);
@@ -235,16 +279,33 @@ describe("M4 — the revision reason is a column like any other", () => {
 });
 
 describe("M4 — WHO did it, resolved in the query", () => {
-  it("history joins the three actor names", async () => {
+  it("history joins the FOUR actor names", async () => {
     const db = makeDb([]);
     await buildRepo(db).getHistory(42);
     const sql = db.calls[0].sql;
-    for (const alias of ["created_by_name", "approved_by_name", "rejected_by_name"]) {
+    for (const alias of [
+      "created_by_name",
+      "changed_by_name",
+      "approved_by_name",
+      "rejected_by_name",
+    ]) {
       assert.ok(sql.includes(alias), `${alias} comes back with the row`);
     }
     // LEFT joins: a missing or renamed actor must not drop the revision from
     // somebody's salary history.
-    assert.equal((sql.match(/LEFT JOIN `new_employee`/g) || []).length, 3);
+    assert.equal((sql.match(/LEFT JOIN `new_employee`/g) || []).length, 4);
+  });
+
+  it("RESOLVES THE AMENDER SERVER-SIDE, so no screen reads employees one by one", async () => {
+    // The whole reason the join is here: a history of twenty revisions would
+    // otherwise be twenty-odd employee reads from the browser to render one
+    // table. `changed_by_name` arrives with the row, like the other three.
+    const db = makeDb([]);
+    await buildRepo(db).getHistory(42);
+    const sql = db.calls[0].sql;
+    assert.ok(sql.includes("hb.`employee_name` AS `changed_by_name`"));
+    assert.ok(sql.includes("hb.`employee_id` = s.`changed_by`"));
+    assert.equal(db.calls.length, 1, "one query, not one per actor");
   });
 
   it("KEEPS THE IDS BESIDE THE NAMES", async () => {
@@ -252,7 +313,7 @@ describe("M4 — WHO did it, resolved in the query", () => {
     // employee renamed in 2031 must not change what a 2026 approval says.
     const db = makeDb([]);
     await buildRepo(db).getHistory(42);
-    for (const id of ["created_by", "approved_by", "rejected_by"]) {
+    for (const id of ["created_by", "changed_by", "approved_by", "rejected_by"]) {
       assert.ok(db.calls[0].sql.includes("s.`" + id + "`"), `${id} is still selected`);
     }
   });
@@ -264,6 +325,47 @@ describe("M4 — WHO did it, resolved in the query", () => {
     for (const forbidden of ["cb.`pan_no`", "cb.`account_no`", "cb.`salary`", "cb.`aadhaar"]) {
       assert.ok(!sql.includes(forbidden), "reading who approved is not reading their record");
     }
+  });
+});
+
+describe("M4 review fix — ONE PENDING PROPOSAL PER EMPLOYEE", () => {
+  it("asks for the PENDING row directly, rather than filtering a history", async () => {
+    // An indexed read on (`employee_id`, `status`) answers a yes/no question.
+    // Reading the whole history and filtering in JavaScript would pull every
+    // revision an employee has ever had across the wire on every create.
+    const db = makeDb([]);
+    await buildRepo(db).getPendingForEmployee(42);
+    const { sql, params } = db.calls[0];
+    assert.match(sql, /`status` = \?/);
+    assert.deepEqual(params, [42, "PENDING"]);
+    assert.match(sql, /LIMIT 1/);
+  });
+
+  it("is deterministic even if a database somehow holds two", async () => {
+    const db = makeDb([]);
+    await buildRepo(db).getPendingForEmployee(42);
+    assert.match(db.calls[0].sql, /ORDER BY s\.`effective_from` ASC, s\.`salary_id` ASC/);
+  });
+
+  it("answers null when there is none, and the row when there is", async () => {
+    assert.equal(await buildRepo(makeDb([])).getPendingForEmployee(42), null);
+    const found = await buildRepo(makeDb([{ salary_id: 9 }])).getPendingForEmployee(42);
+    assert.equal(found.salary_id, 9);
+  });
+
+  it("`hasPending` is the same read, as a yes or a no", async () => {
+    assert.equal(await buildRepo(makeDb([])).hasPending(42), false);
+    assert.equal(await buildRepo(makeDb([{ salary_id: 9 }])).hasPending(42), true);
+  });
+
+  it("READS PENDING ONLY — an approved or rejected row is not a block", async () => {
+    // Rejected proposals never block a new one and approved history is
+    // permanent, so neither may be selected here. PENDING is in the SQL rather
+    // than filtered afterwards.
+    const db = makeDb([]);
+    await buildRepo(db).getPendingForEmployee(42);
+    assert.ok(!/<>/.test(db.calls[0].sql), "not `status <> REJECTED` - that is a different rule");
+    assert.equal(db.calls[0].params[1], "PENDING");
   });
 });
 

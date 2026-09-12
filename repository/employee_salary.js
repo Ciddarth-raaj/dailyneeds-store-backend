@@ -62,11 +62,18 @@ const SALARY_COLUMNS = [
   "revision_reason",
   "created_by",
   "created_at",
+  // M4 review fix. WHO amended this proposal while it was PENDING, and WHEN -
+  // a dedicated audit fact, because `updated_at` below also moves when a
+  // proposal is approved or rejected and names nobody at all. NULL on both
+  // means the proposal has never been amended.
+  "changed_by",
+  "changed_at",
   "approved_by",
   "approved_at",
   "rejected_by",
   "rejected_at",
   "rejection_reason",
+  // The generic row-update timestamp, unchanged and NOT an amendment time.
   "updated_at",
 ];
 
@@ -75,8 +82,9 @@ const SELECT_LIST = SALARY_COLUMNS.map((c) => `s.\`${c}\``).join(", ");
 /**
  * M4 — WHO did it, by name, resolved in the query that reads the row.
  *
- * `created_by`, `approved_by` and `rejected_by` hold EMPLOYEE ids. A salary
- * history that names three numbers is not an audit trail anybody can read, and
+ * `created_by`, `changed_by`, `approved_by` and `rejected_by` hold EMPLOYEE
+ * ids. A salary history that names four numbers is not an audit trail anybody
+ * can read, and
  * the alternative - letting a screen look each id up - is one request per
  * distinct actor per history, which is the N+1 the approved task rules out.
  *
@@ -92,12 +100,14 @@ const SELECT_LIST = SALARY_COLUMNS.map((c) => `s.\`${c}\``).join(", ");
  */
 const ACTOR_NAME_SELECT = [
   "cb.`employee_name` AS `created_by_name`",
+  "hb.`employee_name` AS `changed_by_name`",
   "ab.`employee_name` AS `approved_by_name`",
   "rb.`employee_name` AS `rejected_by_name`",
 ].join(", ");
 
 const ACTOR_NAME_JOINS = `
         LEFT JOIN \`new_employee\` cb ON cb.\`employee_id\` = s.\`created_by\`
+        LEFT JOIN \`new_employee\` hb ON hb.\`employee_id\` = s.\`changed_by\`
         LEFT JOIN \`new_employee\` ab ON ab.\`employee_id\` = s.\`approved_by\`
         LEFT JOIN \`new_employee\` rb ON rb.\`employee_id\` = s.\`rejected_by\``;
 
@@ -202,7 +212,8 @@ class EmployeeSalaryRepository {
   /**
    * Every revision for an employee, newest effective date first.
    *
-   * M4 ADDS THE THREE ACTOR NAMES and nothing else. The rows are the same
+   * M4 ADDS THE FOUR ACTOR NAMES and nothing else - created, changed,
+   * approved and rejected. The rows are the same
    * rows; the join is here rather than on the screen because a history of
    * twenty revisions would otherwise be twenty-odd employee reads from the
    * browser to render one table.
@@ -259,6 +270,45 @@ class EmployeeSalaryRepository {
     return this._query("GET-ACTIVE-AT", sql, [employeeId, effectiveFrom, STATUS.REJECTED]).then(
       (rows) => (rows && rows[0]) || null
     );
+  }
+
+  /**
+   * M4 review fix — THE ONE PENDING PROPOSAL FOR AN EMPLOYEE, IF THERE IS ONE.
+   *
+   * The business rule is that a salary proposal is one decision at a time: an
+   * employee may have AT MOST ONE PENDING proposal, whatever its effective
+   * date. `uq_salary_pending_proposal` is what makes that true - a unique key
+   * on (`employee_id`, `pending_proposal_marker`), where the generated marker
+   * is 1 for a PENDING row and NULL for every decided one - and this read is
+   * how the usecase answers with a sentence somebody can act on instead of
+   * handing back a duplicate-key error.
+   *
+   * AN INDEXED READ, NOT A FILTERED HISTORY. `idx_salary_current`
+   * (`employee_id`, `status`, `effective_from`) answers this directly. The
+   * alternative - reading the whole history and filtering in JavaScript -
+   * would pull every revision an employee has ever had across the wire to
+   * answer a yes/no question, on every single create.
+   *
+   * `LIMIT 1` and an explicit ORDER BY, so that a database which somehow holds
+   * two (one from before the unique key existed) still answers
+   * deterministically rather than differently on each call.
+   */
+  getPendingForEmployee(employeeId) {
+    const sql = `
+      SELECT ${SELECT_LIST}
+        FROM \`employee_salary\` s
+       WHERE s.\`employee_id\` = ?
+         AND s.\`status\` = ?
+       ORDER BY s.\`effective_from\` ASC, s.\`salary_id\` ASC
+       LIMIT 1`;
+    return this._query("GET-PENDING-FOR-EMPLOYEE", sql, [employeeId, STATUS.PENDING]).then(
+      (rows) => (rows && rows[0]) || null
+    );
+  }
+
+  /** True when a PENDING proposal is outstanding for this employee. */
+  hasPending(employeeId) {
+    return this.getPendingForEmployee(employeeId).then((row) => row !== null);
   }
 
   /**
@@ -390,12 +440,38 @@ class EmployeeSalaryRepository {
    * service is one bug away from not existing - so the WHERE clause carries it
    * too. A caller that tries to amend an approved row updates nothing and is
    * told so by the affected-row count.
+   *
+   * M4 review fix — THE AMENDMENT AUDIT IS STAMPED HERE, BY THIS METHOD, AND
+   * NOT BY ITS CALLER. This is the only path in the system that changes a
+   * pending proposal, so `changed_by` and `changed_at` are written by the same
+   * statement that makes the change: an amendment cannot be made without
+   * recording who made it, because there is no code path that does one without
+   * the other. They are deliberately absent from `approve` and `reject`, which
+   * name the columns they set, so a decision never overwrites the record of an
+   * amendment - or invents one that never happened.
+   *
+   * `CURRENT_TIMESTAMP`, the DATABASE's clock, exactly as `approved_at` and
+   * `rejected_at` take theirs. Four audit times on one row taken from two
+   * different clocks would not be orderable.
+   *
+   * The patch is the usecase's calculated row and NEVER carries these two
+   * columns; they are stripped before it is bound, so a caller cannot dictate
+   * its own amendment timestamp or name somebody else as the amender.
    */
-  updatePending(salaryId, patch) {
-    const sql = "UPDATE `employee_salary` SET ? WHERE `salary_id` = ? AND `status` = ?";
-    return this._query("UPDATE-PENDING", sql, [patch, salaryId, STATUS.PENDING]).then(
-      (result) => result.affectedRows
-    );
+  updatePending(salaryId, patch, changedBy = null) {
+    const values = { ...patch };
+    delete values.changed_by;
+    delete values.changed_at;
+
+    const sql =
+      "UPDATE `employee_salary` SET ?, `changed_by` = ?, `changed_at` = CURRENT_TIMESTAMP" +
+      " WHERE `salary_id` = ? AND `status` = ?";
+    return this._query("UPDATE-PENDING", sql, [
+      values,
+      changedBy ?? null,
+      salaryId,
+      STATUS.PENDING,
+    ]).then((result) => result.affectedRows);
   }
 
   /**
@@ -403,6 +479,10 @@ class EmployeeSalaryRepository {
    *
    * Also scoped to PENDING in the SQL: approving twice, or approving something
    * already rejected, changes nothing rather than rewriting an audit trail.
+   *
+   * IT NAMES THE COLUMNS IT SETS, and `changed_by`/`changed_at` are not among
+   * them. Approving a proposal is not amending it, so the record of who last
+   * amended it - or the NULL saying nobody ever did - survives the decision.
    */
   approve(salaryId, approvedBy) {
     const sql = `
@@ -414,7 +494,12 @@ class EmployeeSalaryRepository {
     );
   }
 
-  /** Reject a PENDING revision, with a required reason. */
+  /**
+   * Reject a PENDING revision, with a required reason.
+   *
+   * Like `approve`, it names the columns it sets and leaves `changed_by` and
+   * `changed_at` exactly as they are.
+   */
   reject(salaryId, rejectedBy, reason) {
     const sql = `
       UPDATE \`employee_salary\`

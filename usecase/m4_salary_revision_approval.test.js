@@ -44,6 +44,9 @@ const EMPLOYEE = {
 const ACTOR = { employeeId: 7 };
 const REASON = "Annual review increment";
 
+/** The database's clock, as the fake stands in for `CURRENT_TIMESTAMP`. */
+const AMENDED_AT = "2026-09-11T10:00:00Z";
+
 /** A stored row, in the shape the repository hands back. */
 const row = (over) => ({
   salary_id: over.salary_id,
@@ -66,6 +69,7 @@ function makeRepo(employee = EMPLOYEE, rows = []) {
     rows,
     employee,
     queueCalls: [],
+    pendingCalls: [],
     async getStatutoryContext(id) {
       return Number(id) === Number(this.employee.employee_id) ? { ...this.employee } : null;
     },
@@ -87,6 +91,22 @@ function makeRepo(employee = EMPLOYEE, rows = []) {
         (r) =>
           Number(r.employee_id) === Number(id) && r.effective_from > after && r.status !== "REJECTED"
       );
+    },
+    /*
+     * M4 review fix — THE ONE-PENDING-PROPOSAL READ, filtered exactly as the
+     * SQL filters it: PENDING in the read itself, so a test cannot pass on a
+     * condition the real query does not have.
+     */
+    async getPendingForEmployee(id) {
+      this.pendingCalls.push(Number(id));
+      return (
+        this.rows
+          .filter((r) => Number(r.employee_id) === Number(id) && r.status === "PENDING")
+          .sort((a, b) => a.salary_id - b.salary_id)[0] || null
+      );
+    },
+    async hasPending(id) {
+      return (await this.getPendingForEmployee(id)) !== null;
     },
     async getCurrentSalary(id, asOf) {
       const eligible = this.rows
@@ -114,14 +134,36 @@ function makeRepo(employee = EMPLOYEE, rows = []) {
     async create(rowToSave) {
       const clash = await this.getActiveRevisionAt(rowToSave.employee_id, rowToSave.effective_from);
       if (clash) throw new Error("duplicate active revision");
+      /*
+       * `uq_salary_pending_proposal`, as the fake enforces it. The usecase
+       * refuses a second pending proposal with a sentence somebody can act on;
+       * THIS is the database backstop behind it, and it is here so that a test
+       * proving the usecase check cannot accidentally be proving nothing.
+       */
+      if (
+        rowToSave.status === "PENDING" &&
+        this.rows.some(
+          (r) => Number(r.employee_id) === Number(rowToSave.employee_id) && r.status === "PENDING"
+        )
+      ) {
+        throw new Error("duplicate pending proposal");
+      }
       const saved = { ...rowToSave, salary_id: nextId++ };
       this.rows.push(saved);
       return saved.salary_id;
     },
-    async updatePending(salaryId, patch) {
+    /*
+     * The real statement writes `changed_by` and `changed_at` itself, in the
+     * same UPDATE that makes the change, and strips them from the patch so a
+     * caller cannot dictate its own audit. The fake does both.
+     */
+    async updatePending(salaryId, patch, changedBy = null) {
       const found = this.rows.find((r) => Number(r.salary_id) === Number(salaryId));
       if (!found || found.status !== "PENDING") return 0;
-      Object.assign(found, patch);
+      const values = { ...patch };
+      delete values.changed_by;
+      delete values.changed_at;
+      Object.assign(found, values, { changed_by: changedBy, changed_at: AMENDED_AT });
       return 1;
     },
     async approve(salaryId, by) {
@@ -724,13 +766,17 @@ describe("M2 guarantees M4 leaves exactly as they were", () => {
   });
 
   it("a second outstanding future revision still refuses", async () => {
+    // The first future change is APPROVED here, so what is under test is M2's
+    // future-dating rule rather than M4's one-pending rule - both refuse, and
+    // both still hold. The undecided case has its own tests below.
     const repo = withOpening();
     const uc = build(repo);
-    await uc.createInitialSalary(
+    const first = await uc.createInitialSalary(
       42,
       { monthly_gross: 30000, effective_from: "2026-12-01", revision_reason: REASON },
       ACTOR
     );
+    await uc.approveSalary(first.salary_id, { employeeId: 9 });
     await assert.rejects(
       () =>
         uc.createInitialSalary(
@@ -839,5 +885,387 @@ describe("differenceBetween", () => {
 
   it("reports no change as zero rather than as nothing", () => {
     assert.deepEqual(differenceBetween(20000, 20000), { amount: 0, percentage: 0 });
+  });
+});
+
+/* ================== M4 REVIEW FIX A. ONE PENDING PROPOSAL PER EMPLOYEE === */
+
+/*
+ * The business rule, finalized: a salary proposal is ONE DECISION AT A TIME.
+ * An employee may have at most one PENDING proposal, whatever its effective
+ * date. The proposal in hand is amended, approved or rejected before another
+ * is raised.
+ *
+ * TWO LAYERS, AND BOTH ARE TESTED. The usecase refuses with a sentence
+ * somebody can act on, before anything is calculated or written; the database
+ * carries `uq_salary_pending_proposal` as the backstop for two concurrent
+ * requests that both read "no pending proposal" a millisecond apart. The fake
+ * repository enforces the unique key too, so a test proving the first layer
+ * cannot quietly be proving nothing.
+ */
+describe("AT MOST ONE PENDING SALARY PROPOSAL", () => {
+  const APPROVER = { employeeId: 9 };
+
+  it("the FIRST pending proposal succeeds", async () => {
+    const repo = withOpening();
+    const created = await build(repo).createInitialSalary(
+      42,
+      { monthly_gross: 25000, effective_from: "2026-10-01", revision_reason: REASON },
+      ACTOR
+    );
+    assert.equal(created.status, "PENDING");
+    assert.equal(repo.rows.length, 2);
+  });
+
+  it("A SECOND ONE AT A DIFFERENT EFFECTIVE DATE IS REFUSED", async () => {
+    // The gap the same-date rule and the future-dating rule between them left
+    // open: a pending proposal for October and a second for December are two
+    // undecided answers to what somebody will be paid, with nothing on the
+    // record saying which supersedes which.
+    const repo = withOpening();
+    const uc = build(repo);
+    await uc.createInitialSalary(
+      42,
+      { monthly_gross: 25000, effective_from: "2026-10-01", revision_reason: REASON },
+      ACTOR
+    );
+    await assert.rejects(
+      () =>
+        uc.createInitialSalary(
+          42,
+          { monthly_gross: 27000, effective_from: "2026-12-01", revision_reason: REASON },
+          ACTOR
+        ),
+      /A salary proposal is already pending for this employee; amend, approve or reject it before creating another\./
+    );
+    assert.equal(repo.rows.length, 2, "nothing was written");
+  });
+
+  it("names the outstanding proposal, so the caller can go and decide it", async () => {
+    const repo = withOpening();
+    const uc = build(repo);
+    const first = await uc.createInitialSalary(
+      42,
+      { monthly_gross: 25000, effective_from: "2026-10-01", revision_reason: REASON },
+      ACTOR
+    );
+    const err = await uc
+      .createInitialSalary(
+        42,
+        { monthly_gross: 27000, effective_from: "2026-12-01", revision_reason: REASON },
+        ACTOR
+      )
+      .then(() => null, (e) => e);
+    assert.ok(err, "it refused");
+    assert.equal(err.name, "ValidationError");
+    assert.deepEqual(err.conflict, {
+      kind: "PENDING_PROPOSAL_EXISTS",
+      salary_id: first.salary_id,
+      effective_from: "2026-10-01",
+      status: "PENDING",
+    });
+  });
+
+  it("a second one at the SAME effective date is refused too", async () => {
+    const repo = withOpening();
+    const uc = build(repo);
+    await uc.createInitialSalary(
+      42,
+      { monthly_gross: 25000, effective_from: "2026-10-01", revision_reason: REASON },
+      ACTOR
+    );
+    await assert.rejects(
+      () =>
+        uc.createInitialSalary(
+          42,
+          { monthly_gross: 26000, effective_from: "2026-10-01", revision_reason: REASON },
+          ACTOR
+        ),
+      /already pending for this employee/
+    );
+    assert.equal(repo.rows.length, 2);
+  });
+
+  it("REFUSES BEFORE IT CALCULATES OR WRITES", async () => {
+    // The answer is the same whatever gross, date or reason was sent, so
+    // pricing a proposal that cannot be created would only make the refusal
+    // slower and put a preview-shaped object in front of somebody who is not
+    // getting one. The check is also the FIRST repository read after the
+    // employee lookup.
+    const repo = withOpening();
+    const uc = build(repo);
+    await uc.createInitialSalary(
+      42,
+      { monthly_gross: 25000, effective_from: "2026-10-01", revision_reason: REASON },
+      ACTOR
+    );
+    const before = repo.rows.map((r) => ({ ...r }));
+    await uc
+      .createInitialSalary(42, { monthly_gross: 90000, effective_from: "2027-01-01" }, ACTOR)
+      .catch(() => {});
+    assert.deepEqual(repo.rows, before, "not a row written, not a row changed");
+  });
+
+  it("A REJECTED PROPOSAL NEVER BLOCKS A NEW ONE", async () => {
+    const repo = withOpening();
+    const uc = build(repo);
+    const first = await uc.createInitialSalary(
+      42,
+      { monthly_gross: 25000, effective_from: "2026-10-01", revision_reason: REASON },
+      ACTOR
+    );
+    await uc.rejectSalary(first.salary_id, "Budget not approved", APPROVER);
+
+    const second = await uc.createInitialSalary(
+      42,
+      { monthly_gross: 24000, effective_from: "2026-11-01", revision_reason: REASON },
+      ACTOR
+    );
+    assert.equal(second.status, "PENDING");
+    assert.equal(repo.rows.length, 3, "the refused proposal stays on the record");
+    assert.equal(repo.rows[1].status, "REJECTED", "and stays refused");
+  });
+
+  it("AN APPROVED PROPOSAL NO LONGER BLOCKS EITHER — the M2 rules take over", async () => {
+    // Approving it decides it, so the one-pending rule has nothing to say. What
+    // governs the next proposal after that is M2: the same-date rule and the
+    // future-dating rule, exactly as before.
+    const repo = withOpening();
+    const uc = build(repo);
+    const first = await uc.createInitialSalary(
+      42,
+      { monthly_gross: 25000, effective_from: "2026-09-01", revision_reason: REASON },
+      ACTOR
+    );
+    await uc.approveSalary(first.salary_id, APPROVER);
+
+    const second = await uc.createInitialSalary(
+      42,
+      { monthly_gross: 26000, effective_from: "2026-12-01", revision_reason: REASON },
+      ACTOR
+    );
+    assert.equal(second.status, "PENDING");
+    assert.equal(second.effective_from, "2026-12-01");
+  });
+
+  it("and the M2 future-dating rule still bites after an approval", async () => {
+    const repo = withOpening();
+    const uc = build(repo);
+    const first = await uc.createInitialSalary(
+      42,
+      { monthly_gross: 25000, effective_from: "2026-12-01", revision_reason: REASON },
+      ACTOR
+    );
+    await uc.approveSalary(first.salary_id, APPROVER);
+    await assert.rejects(
+      () =>
+        uc.createInitialSalary(
+          42,
+          { monthly_gross: 26000, effective_from: "2027-02-01", revision_reason: REASON },
+          ACTOR
+        ),
+      /already has a future-dated salary revision/
+    );
+  });
+
+  it("THE DATABASE IS THE GUARANTEE, NOT THIS CHECK", async () => {
+    // Two concurrent requests can both read "no pending proposal" and both go
+    // on to insert one; only a unique key stops that. Simulated by reaching
+    // past the usecase check straight into the repository, which is what a
+    // race amounts to - `uq_salary_pending_proposal` refuses the insert.
+    const repo = withOpening();
+    const uc = build(repo);
+    await uc.createInitialSalary(
+      42,
+      { monthly_gross: 25000, effective_from: "2026-10-01", revision_reason: REASON },
+      ACTOR
+    );
+    await assert.rejects(
+      () =>
+        repo.create({
+          employee_id: 42,
+          status: "PENDING",
+          effective_from: "2026-12-01",
+          monthly_gross: 27000,
+        }),
+      /duplicate pending proposal/
+    );
+    assert.equal(repo.rows.length, 2);
+  });
+
+  it("the pending check is an indexed read, not a filtered history", async () => {
+    // A yes/no question answered by `getPendingForEmployee`. Reading the whole
+    // history and filtering in JavaScript would pull every revision an employee
+    // has ever had across the wire on every single create.
+    const repo = withOpening();
+    await build(repo).createInitialSalary(
+      42,
+      { monthly_gross: 25000, effective_from: "2026-10-01", revision_reason: REASON },
+      ACTOR
+    );
+    assert.deepEqual(repo.pendingCalls, [42], "asked once, about one employee");
+  });
+
+  it("AMENDING THE OUTSTANDING PROPOSAL IS THE WAY THROUGH", async () => {
+    // The rule is not "you may not change your mind", it is "there is one
+    // proposal". Amending it stays open the whole time it is pending.
+    const repo = withOpening();
+    const uc = build(repo);
+    const first = await uc.createInitialSalary(
+      42,
+      { monthly_gross: 25000, effective_from: "2026-10-01", revision_reason: REASON },
+      ACTOR
+    );
+    const amended = await uc.updatePendingSalary(
+      first.salary_id,
+      { monthly_gross: 27000, revision_reason: "Promotion to Senior Cashier" },
+      ACTOR
+    );
+    assert.equal(amended.status, "PENDING");
+    assert.equal(repo.rows.length, 2, "one proposal, changed - not two");
+    assert.equal(Number(repo.rows[1].monthly_gross), 27000);
+  });
+});
+
+/* ============== M4 REVIEW FIX B. WHO CHANGED A PENDING PROPOSAL, AND WHEN = */
+
+/*
+ * The finalized audit requirement is Created / Changed / Approved / Rejected,
+ * each with an actor and a time. `updated_at` cannot answer the second of
+ * those: it is `ON UPDATE CURRENT_TIMESTAMP`, so it moves when a proposal is
+ * approved or rejected just as readily as when somebody amends it, and it
+ * names nobody. So the amendment has its own two columns, written by the one
+ * path that makes an amendment and by nothing else.
+ */
+describe("CHANGED BY / CHANGED AT — the amendment audit", () => {
+  const pendingRevision = () =>
+    makeRepo(EMPLOYEE, [
+      row({ salary_id: 1, status: "APPROVED", effective_from: "2026-04-01" }),
+      row({
+        salary_id: 2,
+        status: "PENDING",
+        effective_from: "2026-10-01",
+        source: SOURCE.REVISION,
+        revision_reason: REASON,
+        monthly_gross: 25000,
+        created_by: 7,
+        changed_by: null,
+        changed_at: null,
+      }),
+    ]);
+
+  it("A CREATED PROPOSAL HAS NEITHER, because nothing has been amended", async () => {
+    const repo = withOpening();
+    await build(repo).createInitialSalary(
+      42,
+      { monthly_gross: 25000, effective_from: "2026-10-01", revision_reason: REASON },
+      ACTOR
+    );
+    const saved = repo.rows[1];
+    assert.equal(saved.changed_by, undefined, "the insert does not name the column at all");
+    assert.equal(saved.changed_at, undefined);
+  });
+
+  it("AN AMENDMENT SETS BOTH", async () => {
+    const repo = pendingRevision();
+    await build(repo).updatePendingSalary(2, { monthly_gross: 26000 }, { employeeId: 41 });
+    assert.equal(repo.rows[1].changed_by, 41, "the actor's EMPLOYEE id, as created_by holds");
+    assert.equal(repo.rows[1].changed_at, AMENDED_AT, "and the database's clock");
+  });
+
+  it("and reports the amender back to the caller", async () => {
+    const repo = pendingRevision();
+    const r = await build(repo).updatePendingSalary(2, { monthly_gross: 26000 }, { employeeId: 41 });
+    assert.equal(r.changed_by, 41);
+  });
+
+  it("A SYSTEM ACTOR WITH NO EMPLOYEE ID LEAVES A NULL, not an invented number", async () => {
+    const repo = pendingRevision();
+    await build(repo).updatePendingSalary(2, { monthly_gross: 26000 }, {});
+    assert.equal(repo.rows[1].changed_by, null);
+  });
+
+  it("THE CALLER CANNOT NAME SOMEBODY ELSE AS THE AMENDER", async () => {
+    // Nothing from the request body reaches these columns: the row is built
+    // from the engine's output, and the two audit values are written by the
+    // statement itself.
+    const repo = pendingRevision();
+    await build(repo).updatePendingSalary(
+      2,
+      { monthly_gross: 26000, changed_by: 999, changed_at: "1999-01-01" },
+      { employeeId: 41 }
+    );
+    assert.equal(repo.rows[1].changed_by, 41);
+    assert.equal(repo.rows[1].changed_at, AMENDED_AT);
+  });
+
+  it("A LATER APPROVAL DOES NOT OVERWRITE THEM", async () => {
+    // Approving a proposal is not amending it. The record of who last amended
+    // it has to survive the decision, or the audit trail loses the step.
+    const repo = pendingRevision();
+    const uc = build(repo);
+    await uc.updatePendingSalary(2, { monthly_gross: 26000 }, { employeeId: 41 });
+    await uc.approveSalary(2, { employeeId: 9 });
+    assert.equal(repo.rows[1].status, "APPROVED");
+    assert.equal(repo.rows[1].changed_by, 41, "still the amender, not the approver");
+    assert.equal(repo.rows[1].changed_at, AMENDED_AT);
+    assert.equal(repo.rows[1].approved_by, 9);
+  });
+
+  it("A LATER REJECTION DOES NOT OVERWRITE THEM EITHER", async () => {
+    const repo = pendingRevision();
+    const uc = build(repo);
+    await uc.updatePendingSalary(2, { monthly_gross: 26000 }, { employeeId: 41 });
+    await uc.rejectSalary(2, "Budget not approved", { employeeId: 9 });
+    assert.equal(repo.rows[1].status, "REJECTED");
+    assert.equal(repo.rows[1].changed_by, 41);
+    assert.equal(repo.rows[1].changed_at, AMENDED_AT);
+    assert.equal(repo.rows[1].rejected_by, 9);
+  });
+
+  it("A PROPOSAL APPROVED WITHOUT EVER BEING AMENDED KEEPS ITS NULLS", async () => {
+    // Which is the whole reason `updated_at` could not answer this question:
+    // it would have moved on the approval and reported an amendment that never
+    // happened.
+    const repo = pendingRevision();
+    await build(repo).approveSalary(2, { employeeId: 9 });
+    assert.equal(repo.rows[1].changed_by, null);
+    assert.equal(repo.rows[1].changed_at, null);
+  });
+
+  it("HISTORY RETURNS THE AMENDER'S NAME, AND KEEPS THE ID BESIDE IT", async () => {
+    // Resolved server-side by a LEFT JOIN, exactly like the other three actor
+    // names - no history read from the browser, one employee at a time. The id
+    // stays, because a name is for reading and the id is what the record
+    // asserts.
+    const repo = makeRepo(EMPLOYEE, [
+      row({
+        salary_id: 2,
+        status: "PENDING",
+        effective_from: "2026-10-01",
+        source: SOURCE.REVISION,
+        revision_reason: REASON,
+        created_by: 7,
+        created_by_name: "Proposer",
+        changed_by: 41,
+        changed_by_name: "Amender",
+        changed_at: AMENDED_AT,
+      }),
+    ]);
+    const [record] = await build(repo).getHistory(42);
+    assert.equal(record.changed_by, 41);
+    assert.equal(record.changed_by_name, "Amender");
+    assert.equal(record.changed_at, AMENDED_AT);
+    assert.equal(record.created_by, 7);
+    assert.equal(record.created_by_name, "Proposer");
+  });
+
+  it("and NULL is a real answer for a proposal nobody amended", async () => {
+    const repo = makeRepo(EMPLOYEE, [
+      row({ salary_id: 1, status: "APPROVED", changed_by: null, changed_at: null }),
+    ]);
+    const [record] = await build(repo).getHistory(42);
+    assert.equal(record.changed_by, null);
+    assert.equal(record.changed_at, null);
   });
 });

@@ -30,6 +30,11 @@ const { STATUS } = require("../repository/employee_salary");
  *
  *   an employee may not be given a second future-dated live revision while one
  *   is already outstanding — see `createInitialSalary`
+ *
+ * M4 ADDS A THIRD, AND IT IS THE STRONGEST OF THE THREE:
+ *
+ *   an employee may have AT MOST ONE PENDING salary proposal at any time,
+ *   whatever its effective date — see `_refuseSecondPendingProposal`
  */
 
 /** Shaped so `utils/http.js#respondError` answers 400 with the detail. */
@@ -258,6 +263,54 @@ class EmployeeSalaryUsecase {
   /* --------------------------------------------------------------- create */
 
   /**
+   * ONE PENDING SALARY PROPOSAL PER EMPLOYEE. NOT ONE PER EFFECTIVE DATE.
+   *
+   * A salary proposal is one decision at a time. Where a proposal is already
+   * outstanding, the next thing that happens to that employee's pay is that
+   * SOMEBODY DECIDES IT - it is amended (`edit_salary`), approved, or
+   * rejected. Raising a second one does not queue anything up; it puts two
+   * different answers to "what is this person going to be paid" in front of an
+   * approver with nothing on the record saying which supersedes which, and the
+   * one they approve silently changes what the other one meant.
+   *
+   * WHY THE EFFECTIVE DATE DOES NOT RESCUE IT. M2 already refuses a second
+   * proposal at the SAME date, and refuses a second FUTURE-dated live
+   * revision. Neither of those catches "a pending proposal for October and a
+   * second pending proposal for December" - two undecided pay changes, both
+   * legitimate-looking, neither agreed. That is the gap this closes, and both
+   * M2 rules stay exactly as they are underneath it.
+   *
+   * REJECTED PROPOSALS NEVER BLOCK ANYTHING. Only a PENDING row is read here,
+   * so a refused proposal leaves the employee free to be proposed again - the
+   * same principle `hasLiveSalary` already follows. An APPROVED one does not
+   * block either: it has been decided, and what governs the next one after it
+   * is M2's effective-date and future-revision rules.
+   *
+   * THIS IS THE MESSAGE, NOT THE GUARANTEE. The guarantee is
+   * `uq_salary_pending_proposal` in the database, because a check here and an
+   * insert a moment later is a race two concurrent requests can both win. What
+   * this adds is a sentence somebody can act on, and the refusal happening
+   * BEFORE anything is calculated or written.
+   */
+  async _refuseSecondPendingProposal(employeeId) {
+    const pending = await this.salaryRepo.getPendingForEmployee(employeeId);
+    if (!pending) return;
+
+    throw validationError(
+      "A salary proposal is already pending for this employee; amend, approve or " +
+        "reject it before creating another.",
+      {
+        conflict: {
+          kind: "PENDING_PROPOSAL_EXISTS",
+          salary_id: pending.salary_id,
+          effective_from: engine.toDateOnly(pending.effective_from),
+          status: STATUS.PENDING,
+        },
+      }
+    );
+  }
+
+  /**
    * Create a salary record, always as PENDING.
    *
    * NOTHING IS EVER CREATED APPROVED, including by an administrator. Proposing
@@ -268,6 +321,16 @@ class EmployeeSalaryUsecase {
   async createInitialSalary(employeeId, input = {}, actor = {}) {
     const employee = await this.salaryRepo.getStatutoryContext(employeeId);
     if (!employee) throw notFound(`Employee ${employeeId} was not found`);
+
+    /*
+     * CHECKED FIRST, BEFORE ANYTHING IS CALCULATED OR WRITTEN. Where a
+     * proposal is already outstanding there is nothing to work out: the answer
+     * is the same whatever gross, date or reason was sent, so asking the
+     * engine to price a proposal that cannot be created would only make the
+     * refusal slower and would put a preview-shaped object in front of
+     * somebody who is not getting one.
+     */
+    await this._refuseSecondPendingProposal(employeeId);
 
     // Rejected rows do not count: if every proposal so far was refused, this
     // is still the employee's FIRST salary and takes the opening date.
@@ -661,11 +724,39 @@ class EmployeeSalaryUsecase {
     delete row.status;
     delete row.created_by;
 
-    const affected = await this.salaryRepo.updatePending(salaryId, row);
+    /*
+     * M4 review fix — THE AMENDMENT IS RECORDED AS AN AMENDMENT.
+     *
+     * This is the only path that changes a PENDING proposal, so it is the only
+     * place `changed_by` and `changed_at` are ever written. The repository
+     * stamps them in the same UPDATE that makes the change - the actor's
+     * EMPLOYEE id, the same identity `created_by` holds, and the DATABASE's
+     * clock for the time - so an amendment cannot happen without the record of
+     * who made it.
+     *
+     * NULL ONLY WHEN THERE GENUINELY IS NO ACTOR. An actor with no employee id
+     * is a system account; naming a number that is not an employee would be
+     * worse than the honest blank.
+     *
+     * `updated_at` IS NOT THIS. It moves on approval and on rejection too,
+     * which is precisely why the amendment needed its own two columns rather
+     * than being read off the generic one.
+     */
+    const affected = await this.salaryRepo.updatePending(
+      salaryId,
+      row,
+      actor.employeeId ?? null
+    );
     if (affected === 0) {
       throw validationError("The salary revision was changed by somebody else; reload and try again");
     }
-    return { salary_id: salaryId, status: STATUS.PENDING, revision_reason: revisionReason, calculated };
+    return {
+      salary_id: salaryId,
+      status: STATUS.PENDING,
+      revision_reason: revisionReason,
+      changed_by: actor.employeeId ?? null,
+      calculated,
+    };
   }
 
   /**
