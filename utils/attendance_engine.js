@@ -106,8 +106,10 @@ const BREAK_FREE_MINUTES = 360;
  *   3  Lateness and early-out grace are forgiven from the shortage, and the
  *      shift's deduction interval rule settles the late/early minutes the
  *      shortage contains (`applyGrace`).
+ *   4  The employee break override applies only on a day with four or more
+ *      punches; a two-punch day is charged the shift's break.
  */
-const CALCULATION_VERSION = 3;
+const CALCULATION_VERSION = 4;
 
 /** Every value `status` can take. A calculation is never left without one. */
 const CALC_STATUS = Object.freeze({
