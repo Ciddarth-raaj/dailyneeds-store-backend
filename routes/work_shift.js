@@ -119,7 +119,12 @@ class WorkShiftRoutes {
     // same transaction as the shift itself.
     router.post("/create", this.permissions.require(P.MANAGE_WORK_SHIFTS), async (req, res) => {
       try {
-        const result = await this.workShiftUsecase.create(req.body);
+        const result = await this.workShiftUsecase.create({
+          ...req.body,
+          // Stamped on the configuration version the save appends, and on
+          // nothing else. Taken from the token, never from the body.
+          actor_employee_id: req.decoded ? req.decoded.employee_id : null,
+        });
         res.json(result);
       } catch (err) {
         respondError(res, err);
@@ -143,7 +148,10 @@ class WorkShiftRoutes {
           throw isValid.error;
         }
 
-        const result = await this.workShiftUsecase.update(req.body.work_shift_id, req.body);
+        const result = await this.workShiftUsecase.update(req.body.work_shift_id, {
+          ...req.body,
+          actor_employee_id: req.decoded ? req.decoded.employee_id : null,
+        });
         res.json(result);
       } catch (err) {
         respondError(res, err);
@@ -166,7 +174,8 @@ class WorkShiftRoutes {
 
         const result = await this.workShiftUsecase.saveWeeklySchedule(
           req.body.work_shift_id,
-          req.body.weekly_schedule
+          req.body.weekly_schedule,
+          { actor_employee_id: req.decoded ? req.decoded.employee_id : null }
         );
         res.json(result);
       } catch (err) {

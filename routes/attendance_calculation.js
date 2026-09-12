@@ -151,6 +151,58 @@ class AttendanceCalculationRoutes {
       }
     );
 
+
+    /**
+     * The employee's Special Break Duration Override.
+     *
+     * ONE CURRENT VALUE AND NO EFFECTIVE DATE (review fix #7), because that is
+     * what the approved v2 product contract describes: one field on Employee
+     * Master, nullable. There is deliberately no `effective_from` on this
+     * path, no history endpoint and no dated semantics to introduce later by
+     * accident.
+     *
+     * `manage_employee_break_override` is granted by migration to nobody:
+     * changing somebody's allowed break changes their NRM and therefore their
+     * pay, so an administrator grants it deliberately.
+     */
+    this.router.get(
+      "/attendance/calculated/break-override/:employee_id",
+      this.permissions.require(P.VIEW_CALCULATED_ATTENDANCE),
+      async (req, res) => {
+        try {
+          res.json({ code: 200, ...(await this.usecase.getBreakOverride(req.params.employee_id)) });
+        } catch (err) {
+          respondError(res, err);
+        }
+      }
+    );
+
+    this.router.post(
+      "/attendance/calculated/break-override",
+      this.permissions.require(P.MANAGE_EMPLOYEE_BREAK_OVERRIDE),
+      async (req, res) => {
+        try {
+          const schema = {
+            employee_id: Joi.number().integer().positive().required(),
+            // null CLEARS the override. It is not the same as 0, which is the
+            // real setting "charge this employee no break at all".
+            minutes: Joi.number().integer().min(0).max(1439).allow(null).required(),
+          };
+          const isValid = Joi.validate(req.body, schema);
+          if (isValid.error !== null) throw isValid.error;
+
+          res.json({
+            code: 200,
+            ...(await this.usecase.setBreakOverride({
+              employee_id: Number(req.body.employee_id),
+              minutes: req.body.minutes,
+            })),
+          });
+        } catch (err) {
+          respondError(res, err);
+        }
+      }
+    );
   }
 
   getRouter() {

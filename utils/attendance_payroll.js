@@ -24,9 +24,10 @@
  *     downgraded to a half day, and there is no second monetary penalty for
  *     lateness - that would deduct the same minute twice.
  *
- * THE SALARY-DAY / EXTRA-DAY SPLIT exists for statutory filing, not for pay.
- * Total attendance pay is `attended_days x Daily Rate` either way; the split
- * only decides how much of it is the PF/ESI salary-day base:
+ * THE SALARY-DAY / EXTRA-DAY SPLIT is a split of ATTENDED DAYS, and nothing
+ * more. Total attendance pay is `attended_days x Daily Rate` either way; the
+ * split says how many of those days fell inside the month's own base and how
+ * many fell beyond it:
  *
  *     available_dates = the dates in the month the employee could have worked,
  *                       bounded by joining date and last working date
@@ -35,12 +36,28 @@
  *     salary_days     = min(attended_days, base_days)
  *     extra_days      = max(attended_days - base_days, 0)
  *
- * THE STATUTORY HANDOFF. `statutory_base_earnings` below is the Salary Days
- * line and nothing else; Extra Days are excluded from it by construction.
- * This file does NOT recompute PF or ESI - `utils/salary_engine.js` owns that
- * law and is not touched. What is produced here is the wage base that engine
- * should be given for a period, and the field is named so that the handoff is
- * explicit rather than inferred.
+ * THE STATUTORY HANDOFF - WHAT THIS FILE DOES NOT DECIDE (review fix #8).
+ *
+ * Attendance produces NEUTRAL WAGE COMPONENTS. It does not decide which of
+ * them legally enter the PF or ESI base, and it does not assert that Extra
+ * Days are excluded from it: that is a question of law, the existing
+ * `utils/salary_engine.js` is the authority on it, and this file neither
+ * changes nor pre-empts it. The earlier implementation named the Salary Days
+ * line `statutory_base_earnings` and excluded Extra Days by construction,
+ * which made a legal determination inside an attendance calculator; that field
+ * has been removed rather than renamed, because a provisional legal-sounding
+ * number is worse than no number at all.
+ *
+ * What is exposed instead, each priced and named for what it IS:
+ *
+ *     salary_day_earnings      attended days inside the month's base
+ *     extra_day_earnings       attended days beyond it
+ *     approved_ot_earnings     fully approved overtime only
+ *     missing_minute_deduction the minute-based shortfall
+ *
+ * Feeding those components into the statutory engine is a SEPARATE, separately
+ * reviewed step. Until it is designed, nothing here should be read as saying
+ * which components are PF- or ESI-bearing.
  */
 
 const SALARY_DAYS_PER_MONTH = require("../config/statutory").salary.salaryDaysPerMonth;
@@ -258,7 +275,10 @@ function computeMonthlyAttendancePayroll(input = {}) {
     monthly_gross: toRupees(grossPaise),
     daily_rate: dailyRatePaise === null ? null : toRupees(Math.round(dailyRatePaise)),
 
-    salary_earnings: toRupees(salaryEarningsPaise),
+    // Neutral wage components. See the statutory-handoff note in the header:
+    // naming them for what they are is the point, and no field here claims to
+    // be a legal PF/ESI base.
+    salary_day_earnings: toRupees(salaryEarningsPaise),
     extra_day_earnings: toRupees(extraEarningsPaise),
 
     shortage_minutes: shortageMinutes,
@@ -267,14 +287,14 @@ function computeMonthlyAttendancePayroll(input = {}) {
     approved_ot_minutes: approvedOtMinutes,
     approved_ot_earnings: toRupees(otEarnings),
 
-    // THE STATUTORY HANDOFF (v2). This, and not the total, is the PF/ESI
-    // salary-day base: Extra Days are excluded by construction. It is exposed
-    // for the existing statutory engine to consume; no PF or ESI formula is
-    // recomputed in this file.
-    statutory_base_days: split.salary_days,
-    statutory_base_earnings: toRupees(salaryEarningsPaise),
-
     total_attendance_payable: toRupees(totalPayable),
+
+    // Said out loud rather than left to be inferred from an absent field:
+    // attendance does not decide the statutory base. `utils/salary_engine.js`
+    // remains the legal authority for PF and ESI, and wiring these components
+    // into it is a separate, separately reviewed step.
+    statutory_handoff:
+      "Attendance exposes neutral wage components only. It does not assert which of them legally enter the PF or ESI base; salary_engine.js remains the statutory authority and its integration is a separate reviewed step.",
 
     // Dates payroll must NOT treat as settled, named rather than counted, so
     // the eventual screen can link straight to them.

@@ -103,17 +103,38 @@ describe("the money", () => {
     assert.equal(result.attendance_days, 30);
     assert.equal(result.salary_days, 26);
     assert.equal(result.extra_days, 4);
-    assert.equal(result.salary_earnings, 26000);
+    assert.equal(result.salary_day_earnings, 26000);
     assert.equal(result.extra_day_earnings, 4000);
-    assert.equal(result.salary_earnings + result.extra_day_earnings, 30 * 1000);
+    assert.equal(result.salary_day_earnings + result.extra_day_earnings, 30 * 1000);
     assert.equal(result.total_attendance_payable, 30000);
   });
 
-  it("the statutory base is the Salary Days line and excludes extra days", () => {
+  /**
+   * Review fix #8. Attendance exposes NEUTRAL wage components and makes no
+   * legal determination: which of them enter the PF or ESI base is
+   * `utils/salary_engine.js`'s question, and a provisional legal-sounding
+   * number here would be worse than none.
+   */
+  it("names neutral wage components and asserts no statutory base", () => {
     const result = computeMonthlyAttendancePayroll({ ...base, days: daysOf(30) });
-    assert.equal(result.statutory_base_days, 26);
-    assert.equal(result.statutory_base_earnings, 26000);
-    assert.notEqual(result.statutory_base_earnings, result.total_attendance_payable);
+
+    ["salary_day_earnings", "extra_day_earnings", "approved_ot_earnings",
+     "missing_minute_deduction"].forEach((field) =>
+      assert.ok(field in result, `${field} is part of the neutral component contract`)
+    );
+
+    assert.ok(!("statutory_base_days" in result));
+    assert.ok(!("statutory_base_earnings" in result));
+    assert.match(result.statutory_handoff, /salary_engine\.js remains the statutory authority/);
+    assert.match(result.statutory_handoff, /separate reviewed step/);
+  });
+
+  it("excludes nothing from the total: every attended day is paid either way", () => {
+    const result = computeMonthlyAttendancePayroll({ ...base, days: daysOf(30) });
+    assert.equal(
+      result.salary_day_earnings + result.extra_day_earnings,
+      result.total_attendance_payable
+    );
   });
 
   it("the shortage is deducted by the minute, at that date's own rate", () => {
@@ -208,7 +229,7 @@ describe("dates that are not settled are held, not guessed", () => {
       days: daysOf(26),
     });
     assert.equal(result.daily_rate, null);
-    assert.equal(result.salary_earnings, null);
+    assert.equal(result.salary_day_earnings, null);
     assert.equal(result.total_attendance_payable, null);
     assert.equal(result.attendance_days, 26, "the days are still counted");
   });

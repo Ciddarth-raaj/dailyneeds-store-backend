@@ -10,4 +10,8 @@ DELETE FROM `all_permissions`
 
 DROP TABLE IF EXISTS `attendance_monthly_payroll`;
 DROP TABLE IF EXISTS `attendance_day_calculation`;
-DROP TABLE IF EXISTS `employee_break_override`;
+
+-- The Special Break Duration Override column. Dropping it loses the overrides
+-- that were entered, which is exactly what reversing the migration that
+-- introduced the field means; nothing else on `new_employee` is touched.
+ALTER TABLE `new_employee` DROP COLUMN `special_break_override_minutes`;

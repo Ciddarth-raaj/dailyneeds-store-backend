@@ -32,7 +32,8 @@ const day = (overrides = {}) => ({
 });
 
 function fakes(state = {}) {
-  const calls = { created: [], decided: [], recalculated: [] };
+  const calls = { created: [], decided: [], proposed: [], cancelled: [] };
+  let nextRequestId = state.first_request_id || 500;
 
   const repo = {
     calls,
@@ -49,12 +50,30 @@ function fakes(state = {}) {
     findOpenRequest: async () => state.openRequest || null,
     createRequest: async ({ request, chain, punch }) => {
       calls.created.push({ request, chain, punch });
-      return { attendance_approval_request_id: 500, total_stages: chain.length };
+      const id = nextRequestId;
+      nextRequestId += 1;
+      return { attendance_approval_request_id: id, total_stages: chain.length };
     },
     getRequest: async () => state.request || null,
     decideStage: async (args) => {
       calls.decided.push(args);
-      return { code: 200, status: args.next.status, current_stage_no: args.next.current_stage_no };
+      if (state.decideStageThrows) throw new Error(state.decideStageThrows);
+      return {
+        code: 200,
+        status: args.next.status,
+        current_stage_no: args.next.current_stage_no,
+        finalization_state:
+          args.next.status === "APPROVED" || args.next.status === "REJECTED"
+            ? "SETTLED"
+            : "NOT_REQUIRED",
+        calculations_written: (args.calculations || []).length,
+      };
+    },
+    // Review fix #6: what the OT auto-queue reads and writes.
+    findRequestsForDates: async () => state.existingRequests || [],
+    cancelAutoOtRequest: async (args) => {
+      calls.cancelled.push(args);
+      return { code: 200, attendance_approval_request_id: args.requestId };
     },
     listPendingFor: async (args) => {
       calls.listed = args;
@@ -64,11 +83,22 @@ function fakes(state = {}) {
   };
 
   const calculation = {
-    calculateRange: async () => [state.day || day()],
-    recalculateRange: async (args) => {
-      calls.recalculated.push(args);
-      return { days: [day()] };
+    calculateRange: async (args) => {
+      calls.calculated = args;
+      if (args && args.assume) return [state.assumedDay || state.day || day()];
+      return [state.day || day()];
     },
+    // The PROPOSED corrected day: raw punches plus the punch being proposed,
+    // run through the same engine, stored nowhere.
+    calculateProposedDay: async (args) => {
+      calls.proposed.push(args);
+      return state.proposedDay || day({ punch_count: 4 });
+    },
+    attendanceDateForPunchTime: async (args) =>
+      state.punchResolvesTo === undefined
+        ? String(args.punch_time).slice(0, 10)
+        : state.punchResolvesTo,
+    toStorageRow: (d) => ({ employee_id: d.employee_id, attendance_date: d.attendance_date }),
   };
 
   return { repo, calculation, usecase: buildUsecase(repo, calculation) };
@@ -182,20 +212,94 @@ describe("only a missing punch may be regularized", () => {
 });
 
 describe("one date, one request, one pass", () => {
-  it("a missing punch that also earns OT raises one combined request", async () => {
-    const { usecase, repo } = fakes({ day: day({ punch_count: 3, candidate_ot_minutes: 45 }) });
-    await usecase.raiseRequest({
+  /**
+   * Review fix #3. The incomplete day reports ZERO overtime - an odd punch
+   * count leaves the engine before OT is calculated at all - so the request
+   * has to carry what the PROPOSED punch would produce, which is what the
+   * proposed-day calculation answers.
+   */
+  it("a missing punch that also earns OT raises one combined request, carrying the OT the proposed punch creates", async () => {
+    const { usecase, repo } = fakes({
+      day: day({ punch_count: 3, candidate_ot_minutes: 0 }),
+      proposedDay: day({ punch_count: 4, candidate_ot_minutes: 150, is_final: true }),
+      // A 00:30 finish after a 10:00-22:00 shift belongs to the SHIFT date,
+      // which is what the historical cutoff says and what the raise path
+      // insists on before it will accept the punch.
+      punchResolvesTo: "2026-09-14",
+    });
+    const result = await usecase.raiseRequest({
       actor,
       requested_for_employee_id: 100,
       attendance_date: "2026-09-14",
       reason: "Forgot to punch out after covering the late shift",
-      punch_time: "2026-09-14 22:00:00",
+      punch_time: "2026-09-15 00:30:00",
     });
 
     const [created] = repo.calls.created;
     assert.equal(created.request.request_type, REQUEST_TYPE.REGULARIZATION_WITH_OT);
-    assert.equal(created.request.candidate_ot_minutes, 45);
+    assert.equal(
+      created.request.candidate_ot_minutes,
+      150,
+      "the OT the proposed punch produces, not the incomplete day's zero"
+    );
     assert.equal(created.chain.length, 3, "one chain, not two");
+    assert.equal(result.candidate_ot_minutes, 150);
+    assert.equal(result.proposed_day.punch_count, 4);
+
+    // The proposed punch was run through the engine, not assumed.
+    assert.equal(repo.calls.proposed.length, 1);
+    assert.equal(repo.calls.proposed[0].punch_time, "2026-09-15 00:30:00");
+  });
+
+  it("refuses a proposed punch that belongs to a different attendance date", async () => {
+    const { usecase } = fakes({
+      day: day({ punch_count: 3 }),
+      punchResolvesTo: "2026-09-15",
+    });
+    await assert.rejects(
+      usecase.raiseRequest({
+        actor,
+        requested_for_employee_id: 100,
+        attendance_date: "2026-09-14",
+        reason: "Forgot to punch out at the end of the shift",
+        punch_time: "2026-09-15 09:00:00",
+      }),
+      /belongs to attendance date 2026-09-15/
+    );
+  });
+
+  it("refuses a proposed punch that still leaves the punch set odd", async () => {
+    const { usecase } = fakes({
+      day: day({ punch_count: 3 }),
+      proposedDay: day({ punch_count: 5 }),
+    });
+    await assert.rejects(
+      usecase.raiseRequest({
+        actor,
+        requested_for_employee_id: 100,
+        attendance_date: "2026-09-14",
+        reason: "Forgot to punch out at the end of the shift",
+        punch_time: "2026-09-14 21:00:00",
+      }),
+      /odd number of punches/
+    );
+  });
+
+  it("a missing punch that creates NO overtime stays a plain regularization", async () => {
+    const { usecase, repo } = fakes({
+      day: day({ punch_count: 3, candidate_ot_minutes: 0 }),
+      proposedDay: day({ punch_count: 4, candidate_ot_minutes: 0 }),
+    });
+    await usecase.raiseRequest({
+      actor,
+      requested_for_employee_id: 100,
+      attendance_date: "2026-09-14",
+      reason: "Forgot to punch out at the end of the shift",
+      punch_time: "2026-09-14 21:00:00",
+    });
+    const [created] = repo.calls.created;
+    assert.equal(created.request.request_type, REQUEST_TYPE.REGULARIZATION);
+    assert.equal(created.request.candidate_ot_minutes, 0);
   });
 
   it("OT with no missing punch walks the same chain", async () => {
@@ -337,8 +441,44 @@ describe("deciding a stage", () => {
 
     assert.equal(result.status, REQUEST_STATUS.APPROVED);
     assert.equal(result.approved_ot_minutes, 45);
-    assert.equal(repo.calls.recalculated.length, 1, "the date is recalculated immediately");
-    assert.equal(repo.calls.recalculated[0].from_date, "2026-09-14");
+
+    // Review fix #4: the recalculated day travels INTO the decision
+    // transaction, rather than being written after it commits.
+    const [decided] = repo.calls.decided;
+    assert.equal(decided.calculations.length, 1);
+    assert.equal(decided.calculations[0].attendance_date, "2026-09-14");
+    assert.equal(result.finalization_state, "SETTLED");
+  });
+
+  /**
+   * Review fix #4, the failure that used to be possible. If storing the
+   * recalculated day fails, the whole decision fails with it: the caller sees
+   * the error and the request is never reported as approved, so no payable OT
+   * can exist against a day that was not recalculated.
+   */
+  it("a storage failure fails the decision rather than leaving an approved request with a stale day", async () => {
+    const { usecase, repo } = fakes({
+      request: pendingRequest({ current_stage_no: 3 }),
+      identities: {
+        7: { employee_id: 7, outlet_id: 3, approver_role: APPROVER_ROLE.HR, requester_class: "MANAGER" },
+      },
+      decideStageThrows: "the recalculated day could not be stored",
+    });
+
+    await assert.rejects(
+      usecase.decide({
+        actor: { employee_id: 7, user_type: 1 },
+        request_id: 500,
+        decision: STEP_DECISION.APPROVED,
+      }),
+      /could not be stored/
+    );
+
+    // The decision and the day were offered to the repository together, so
+    // there is no half-applied state for anybody to read.
+    assert.equal(repo.calls.decided.length, 1);
+    assert.equal(repo.calls.decided[0].calculations.length, 1);
+    assert.equal(repo.calls.decided[0].next.status, REQUEST_STATUS.APPROVED);
   });
 
   it("refuses somebody who is not the current approver", async () => {
@@ -412,7 +552,10 @@ describe("deciding a stage", () => {
 
     assert.equal(result.status, REQUEST_STATUS.REJECTED);
     assert.equal(result.approved_ot_minutes, null);
-    assert.equal(repo.calls.recalculated.length, 1);
+    // The date is recalculated in the same transaction on a rejection too: the
+    // pending state that was holding it out of payroll has ended.
+    assert.equal(repo.calls.decided[0].calculations.length, 1);
+    assert.equal(result.finalization_state, "SETTLED");
   });
 
   it("refuses a decision that is neither approve nor reject", async () => {

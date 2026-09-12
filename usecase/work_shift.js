@@ -69,7 +69,13 @@ class WorkShiftUsecase {
 
     if (errors.length > 0) throw validationError(errors);
 
-    return this.workShiftRepo.createWorkShiftWithSchedule(config, weeklySchedule);
+    // `actor_employee_id` is stamped on the configuration VERSION the write
+    // appends, so "who changed this shift, and when did it start applying" has
+    // an answer. It reaches nothing else - the `work_shift` row itself is
+    // written exactly as it always was.
+    return this.workShiftRepo.createWorkShiftWithSchedule(config, weeklySchedule, {
+      created_by: payload.actor_employee_id === undefined ? null : payload.actor_employee_id,
+    });
   }
 
   /**
@@ -112,21 +118,21 @@ class WorkShiftUsecase {
       ]);
     }
 
-    return this.workShiftRepo.updateWorkShiftWithSchedule(
-      work_shift_id,
-      config,
-      weeklySchedule
-    );
+    return this.workShiftRepo.updateWorkShiftWithSchedule(work_shift_id, config, weeklySchedule, {
+      created_by: payload.actor_employee_id === undefined ? null : payload.actor_employee_id,
+    });
   }
 
   /**
    * Save a work shift's weekly schedule. All seven days or nothing.
    */
-  async saveWeeklySchedule(work_shift_id, rows) {
+  async saveWeeklySchedule(work_shift_id, rows, options = {}) {
     const { errors, value } = validateWeeklySchedule(rows);
     if (errors.length > 0) throw validationError(errors);
 
-    return this.workShiftRepo.updateWorkShiftWithSchedule(work_shift_id, {}, value);
+    return this.workShiftRepo.updateWorkShiftWithSchedule(work_shift_id, {}, value, {
+      created_by: options.actor_employee_id === undefined ? null : options.actor_employee_id,
+    });
   }
 
   /** Active/inactive toggle. */

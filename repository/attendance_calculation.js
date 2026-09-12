@@ -18,6 +18,17 @@ const {
  * `attendance_monthly_payroll`, hold derived numbers only and can be dropped
  * and recomputed without losing anything.
  *
+ * PUNCHES ARE READ BY CALENDAR DATE, NOT BY DERIVED ATTENDANCE DATE (review
+ * fix #1). `biomax_punch_derived.attendance_date` was decided at ingest,
+ * against whatever shift the employee was on at that moment, and it is exactly
+ * what a recalculation must NOT trust. `getRawPunchesByCalendarWindow` below
+ * therefore filters on `biomax_punch.punch_date` - the raw calendar date the
+ * device stamped - and the usecase re-derives the attendance day from the
+ * dated shift history and that shift version's own cutoff. The derived row is
+ * still joined, for two things only: the employee it was matched to at ingest,
+ * and the ingest-time attendance date, carried through so a disagreement
+ * between ingest and recalculation can be SEEN rather than silently resolved.
+ *
  * EVERY TIME LEAVES THE DATABASE AS A STRING, via DATE_FORMAT. The API pool
  * has no `dateStrings` option, so a bare DATETIME would come back as a JS Date
  * built in the process timezone and would shift every punch by the server's
@@ -27,6 +38,56 @@ const {
  * engine consumes: calculating somebody's worked minutes is not a reason to
  * read their bank details or their Aadhaar.
  */
+
+/**
+ * The stored calculation's columns, in one place.
+ *
+ * Named here rather than inline because TWO writers use exactly this list: the
+ * ordinary `saveCalculations` below, and `writeCalculationsOnConnection`, which
+ * the A3 approval path calls INSIDE its own decision transaction so that a
+ * final approval and the recalculated day it produces commit together or not
+ * at all (review fix #4).
+ */
+const CALCULATION_COLUMNS = [
+  "employee_id", "attendance_date", "work_shift_id", "work_shift_weekly_schedule_id",
+  "work_shift_config_version_id",
+  "shift_snapshot", "shift_snapshot_hash", "raw_punch_ids", "effective_punches",
+  "punch_count", "attendance_day_count", "nrm_minutes", "span_minutes",
+  "break_allowance_minutes", "break_allowance_source", "actual_gap_minutes",
+  "break_charged_minutes", "worked_minutes", "shortage_minutes", "late_minutes",
+  "early_exit_minutes", "pre_shift_minutes", "post_shift_minutes",
+  "raw_ot_minutes", "ot_offset_minutes", "pre_shift_ot_minutes", "post_shift_ot_minutes",
+  "candidate_ot_minutes", "approved_ot_minutes",
+  "ot_rate", "status", "is_final", "review_reasons", "approval_request_id",
+  "calculation_version",
+];
+
+/**
+ * INSERT ... ON DUPLICATE KEY UPDATE for calculated days, on a connection the
+ * caller already owns and inside whatever transaction it has open.
+ *
+ * Exported as a free function so `repository/attendance_regularization.js` can
+ * write the recalculated day in the SAME transaction that records the final
+ * approval, without either repository having to import the other's class.
+ */
+async function writeCalculationsOnConnection(connection, rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return { written: 0 };
+
+  const values = rows.map((row) => CALCULATION_COLUMNS.map((column) => row[column]));
+  const updates = CALCULATION_COLUMNS
+    .filter((column) => column !== "employee_id" && column !== "attendance_date")
+    .map((column) => `\`${column}\` = VALUES(\`${column}\`)`)
+    .join(", ");
+
+  const result = await queryAsync(
+    connection,
+    `INSERT INTO attendance_day_calculation (${CALCULATION_COLUMNS.map((c) => `\`${c}\``).join(", ")})
+     VALUES ?
+     ON DUPLICATE KEY UPDATE ${updates}`,
+    [values]
+  );
+  return { written: rows.length, affected: result ? Number(result.affectedRows) : 0 };
+}
 
 class AttendanceCalculationRepository {
   constructor(db) {
@@ -105,7 +166,11 @@ class AttendanceCalculationRepository {
       `SELECT work_shift_id, shift_code, shift_name, active,
               overtime_allowed, overtime_minimum_minutes,
               overtime_rounding_method, overtime_rounding_interval_minutes,
-              overtime_minimum_threshold_only, maximum_ot_minutes_per_day
+              overtime_minimum_threshold_only, maximum_ot_minutes_per_day,
+              pre_shift_overtime_allowed, pre_shift_overtime_minimum_minutes,
+              pre_shift_overtime_rounding_method,
+              pre_shift_overtime_rounding_interval_minutes,
+              late_offset_against_overtime, early_exit_offset_against_overtime
          FROM work_shift
         WHERE work_shift_id = ?`,
       [workShiftId]
@@ -128,46 +193,92 @@ class AttendanceCalculationRepository {
     return { config, schedule };
   }
 
+  /**
+   * A shift's effective-dated CONFIGURATION VERSIONS, oldest first (review
+   * fix #2).
+   *
+   * The whole history rather than "the version for this date", for the same
+   * reason the assignment history is read whole: a month resolves thirty dates
+   * and would otherwise issue thirty queries. `utils/shift_config_version.js`
+   * picks the one in force per date.
+   *
+   * Append-only. There is no UPDATE or DELETE of this table anywhere in this
+   * backend - a Work Shift edit APPENDS a version, which is what stops an edit
+   * today from moving a settled figure from September.
+   */
+  async getWorkShiftConfigVersions(workShiftId) {
+    return this._read(
+      "GET-WORK-SHIFT-CONFIG-VERSIONS",
+      `SELECT work_shift_config_version_id, work_shift_id,
+              DATE_FORMAT(effective_from, '%Y-%m-%d') AS effective_from,
+              config_hash, config_document, source
+         FROM work_shift_config_version
+        WHERE work_shift_id = ?
+        ORDER BY effective_from ASC, work_shift_config_version_id ASC`,
+      [workShiftId]
+    );
+  }
+
   /* ------------------------------------------------------ A1: the punches */
 
   /**
-   * RAW punches for an employee over a date range, by ATTENDANCE date.
+   * RAW punches for an employee over a CALENDAR window (review fix #1).
    *
-   * `biomax_punch_derived.attendance_date` is what dated them at ingest;
-   * punches whose date could not be derived have NULL there and are
-   * deliberately excluded - they sit in the existing review queue, and an
-   * undated punch has no day to be calculated into.
+   * The filter is `biomax_punch.punch_date`, the generated calendar date of
+   * the instant the device stamped, and NOT
+   * `biomax_punch_derived.attendance_date`. The attendance day each punch
+   * belongs to is re-derived by the engine from the dated shift history and
+   * that shift version's cutoff; reading the ingest-time date instead would
+   * mean a "recalculation" that could never actually correct a mis-dated
+   * punch, which is precisely the defect this fixes.
+   *
+   * The derived row is still joined, for exactly two things: `employee_id`,
+   * the identity the receiver matched at ingest, which is the only place that
+   * mapping exists; and the ingest-time attendance date, carried through as
+   * `ingest_attendance_date` so the engine's answer can be compared with what
+   * ingest believed rather than quietly replacing it.
+   *
+   * A punch ingest could NOT date (`attendance_date IS NULL` - the employee
+   * had no shift assigned that night) is deliberately included now: the engine
+   * can date it from history even when the receiver could not.
    *
    * Device identity is carried through for the audit trail only. Nothing
    * groups or orders by it: the punch belongs to the employee, not the
    * terminal, so somebody covering a shift at another outlet aggregates with
    * the rest of their day.
    */
-  async getRawPunches(employeeId, fromDate, toDate) {
+  async getRawPunchesByCalendarWindow(employeeId, fromCalendarDate, toCalendarDate) {
     return this._read(
-      "GET-RAW-PUNCHES",
+      "GET-RAW-PUNCHES-BY-CALENDAR-WINDOW",
       `SELECT p.biomax_punch_id                            AS punch_id,
               d.employee_id,
-              DATE_FORMAT(d.attendance_date, '%Y-%m-%d')   AS attendance_date,
+              DATE_FORMAT(p.punch_date, '%Y-%m-%d')        AS punch_date,
+              DATE_FORMAT(d.attendance_date, '%Y-%m-%d')   AS ingest_attendance_date,
               DATE_FORMAT(p.io_time, '%Y-%m-%d %H:%i:%s')  AS io_time,
               p.dev_id,
               p.ingest_source
          FROM biomax_punch_derived d
          JOIN biomax_punch p ON p.biomax_punch_id = d.biomax_punch_id
         WHERE d.employee_id = ?
-          AND d.attendance_date IS NOT NULL
-          AND d.attendance_date BETWEEN ? AND ?
+          AND p.punch_date BETWEEN ? AND ?
         ORDER BY p.io_time ASC, p.biomax_punch_id ASC`,
-      [employeeId, fromDate, toDate]
+      [employeeId, fromCalendarDate, toCalendarDate]
     );
   }
 
   /**
-   * FULLY APPROVED regularized punches only.
+   * FULLY APPROVED AND SETTLED regularized punches only.
    *
-   * The join to the request with `status = 'APPROVED'` is the enforcement,
-   * not a convention: a punch attached to a request still sitting at stage 2
-   * of 3 is simply not returned, so it cannot reach a calculation.
+   * The join to the request is the enforcement, not a convention: a punch
+   * attached to a request still sitting at stage 2 of 3 is simply not
+   * returned, so it cannot reach a calculation.
+   *
+   * `finalization_state = 'SETTLED'` is belt and braces (review fix #4). The
+   * approval and the recalculated day now commit in one transaction, so an
+   * APPROVED request that is not SETTLED cannot exist; requiring it here means
+   * that even if one somehow did - a hand-edited row, a restore from a
+   * half-finished dump - its punch would stay out of the calculation rather
+   * than becoming effective against a day nobody recalculated.
    */
   async getApprovedRegularizedPunches(employeeId, fromDate, toDate) {
     return this._read(
@@ -184,24 +295,44 @@ class AttendanceCalculationRepository {
         WHERE rp.employee_id = ?
           AND rp.attendance_date BETWEEN ? AND ?
           AND r.status = 'APPROVED'
+          AND r.finalization_state = 'SETTLED'
         ORDER BY rp.punch_time ASC, rp.attendance_regularized_punch_id ASC`,
       [employeeId, fromDate, toDate]
     );
   }
 
-  /** The employee's special break overrides that touch the range. */
-  async getBreakOverrides(employeeId, fromDate, toDate) {
+  /**
+   * The employee's Special Break Duration Override - ONE CURRENT VALUE
+   * (review fix #7).
+   *
+   * A column on the employee row, exactly as the approved v2 product contract
+   * describes it: one field on Employee Master, nullable, with NO Effective
+   * From. The first implementation built an effective-dated
+   * `employee_break_override` table; that invented a second temporal business
+   * rule the product does not have, and it has been removed rather than kept
+   * alongside this.
+   */
+  async getBreakOverride(employeeId) {
+    const rows = await this._read(
+      "GET-BREAK-OVERRIDE",
+      `SELECT employee_id, special_break_override_minutes
+         FROM new_employee
+        WHERE employee_id = ?`,
+      [employeeId]
+    );
+    return rows && rows[0] ? rows[0] : null;
+  }
+
+  /**
+   * Set or clear that override. NULL clears it - "no override" is the absence
+   * of a value, and there is no history to append because the product contract
+   * has no effective date to append it against.
+   */
+  async setBreakOverride(employeeId, minutes) {
     return this._read(
-      "GET-BREAK-OVERRIDES",
-      `SELECT employee_break_override_id, employee_id, break_minutes,
-              DATE_FORMAT(effective_from, '%Y-%m-%d') AS effective_from,
-              DATE_FORMAT(effective_to, '%Y-%m-%d')   AS effective_to
-         FROM employee_break_override
-        WHERE employee_id = ?
-          AND effective_from <= ?
-          AND (effective_to IS NULL OR effective_to >= ?)
-        ORDER BY effective_from ASC, employee_break_override_id ASC`,
-      [employeeId, toDate, fromDate]
+      "SET-BREAK-OVERRIDE",
+      `UPDATE new_employee SET special_break_override_minutes = ? WHERE employee_id = ?`,
+      [minutes === null || minutes === undefined ? null : Math.max(0, Math.trunc(Number(minutes))), employeeId]
     );
   }
 
@@ -215,7 +346,8 @@ class AttendanceCalculationRepository {
       `SELECT attendance_approval_request_id,
               DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date,
               request_type, status, current_stage_no, total_stages,
-              candidate_ot_minutes, approved_ot_minutes
+              candidate_ot_minutes, approved_ot_minutes, finalization_state,
+              auto_created
          FROM attendance_approval_request
         WHERE requested_for_employee_id = ?
           AND attendance_date BETWEEN ? AND ?
@@ -280,34 +412,11 @@ class AttendanceCalculationRepository {
     try {
       await beginTransactionAsync(connection);
 
-      const columns = [
-        "employee_id", "attendance_date", "work_shift_id", "work_shift_weekly_schedule_id",
-        "shift_snapshot", "shift_snapshot_hash", "raw_punch_ids", "effective_punches",
-        "punch_count", "attendance_day_count", "nrm_minutes", "span_minutes",
-        "break_allowance_minutes", "break_allowance_source", "actual_gap_minutes",
-        "break_charged_minutes", "worked_minutes", "shortage_minutes", "late_minutes",
-        "early_exit_minutes", "raw_ot_minutes", "candidate_ot_minutes", "approved_ot_minutes",
-        "ot_rate", "status", "is_final", "review_reasons", "approval_request_id",
-        "calculation_version",
-      ];
-
-      const values = rows.map((row) => columns.map((column) => row[column]));
-
-      const updates = columns
-        .filter((column) => column !== "employee_id" && column !== "attendance_date")
-        .map((column) => `\`${column}\` = VALUES(\`${column}\`)`)
-        .join(", ");
-
-      const result = await queryAsync(
-        connection,
-        `INSERT INTO attendance_day_calculation (${columns.map((c) => `\`${c}\``).join(", ")})
-         VALUES ?
-         ON DUPLICATE KEY UPDATE ${updates}`,
-        [values]
-      );
+      // One writer, shared with the approval path's own transaction.
+      const result = await writeCalculationsOnConnection(connection, rows);
 
       await commitAsync(connection);
-      return { written: rows.length, affected: result ? Number(result.affectedRows) : 0 };
+      return result;
     } catch (err) {
       await rollbackAsync(connection);
       this._log("SAVE-CALCULATIONS", err);
@@ -319,12 +428,15 @@ class AttendanceCalculationRepository {
 
   /** The same idempotency, for one employee's month. */
   async saveMonthlyPayroll(row) {
+    // Neutral wage components only (review fix #8). There is no
+    // `statutory_base_*` column: attendance does not decide the PF/ESI base,
+    // and `utils/salary_engine.js` remains the statutory authority.
     const columns = [
       "employee_id", "period_year", "period_month", "available_from", "available_to",
       "available_dates", "notional_offs", "base_days", "attendance_days", "salary_days",
-      "extra_days", "monthly_gross", "daily_rate", "salary_earnings", "extra_day_earnings",
+      "extra_days", "monthly_gross", "daily_rate", "salary_day_earnings", "extra_day_earnings",
       "shortage_minutes", "missing_minute_deduction", "approved_ot_minutes",
-      "approved_ot_earnings", "statutory_base_days", "statutory_base_earnings",
+      "approved_ot_earnings",
       "total_attendance_payable", "held_dates", "is_final", "payroll_version",
     ];
     const updates = columns
@@ -368,3 +480,5 @@ class AttendanceCalculationRepository {
 
 module.exports = (db) => new AttendanceCalculationRepository(db);
 module.exports.AttendanceCalculationRepository = AttendanceCalculationRepository;
+module.exports.CALCULATION_COLUMNS = CALCULATION_COLUMNS;
+module.exports.writeCalculationsOnConnection = writeCalculationsOnConnection;

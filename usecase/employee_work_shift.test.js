@@ -47,14 +47,26 @@ const makeRepo = ({
     async getWorkShiftWorkingTimes(workShiftId) {
       return workingTimes[workShiftId] || [];
     },
-    async assignWorkShift(employeeIds, workShiftId) {
-      calls.assign.push({ employeeIds, workShiftId });
+    async assignWorkShift(employeeIds, workShiftId, options = {}) {
+      calls.assign.push({ employeeIds, workShiftId, options });
       return {
         code: 200,
         work_shift_id: workShiftId,
         requested: employeeIds.length,
         matched: employeeIds.length,
         updated: employeeIds.length,
+      };
+    },
+    async correctAssignment(args) {
+      calls.corrected = calls.corrected || [];
+      calls.corrected.push(args);
+      return {
+        code: 200,
+        employee_work_shift_assignment_id: 991,
+        employee_id: args.employeeId,
+        work_shift_id: args.workShiftId,
+        effective_from: args.effectiveFrom,
+        source: "CORRECTION",
       };
     },
   };
@@ -77,7 +89,12 @@ describe("assign", () => {
     // The screen's confirmation and toast name the shift, so it comes back.
     assert.equal(result.shift_code, "GS1");
     assert.equal(result.shift_name, "9 TO 9");
-    assert.deepEqual(repo.calls.assign, [{ employeeIds: [11, 12], workShiftId: 4 }]);
+    assert.equal(repo.calls.assign.length, 1);
+    assert.deepEqual(repo.calls.assign[0].employeeIds, [11, 12]);
+    assert.equal(repo.calls.assign[0].workShiftId, 4);
+    // A0: the history row is dated by the server, and the actor is stamped on it.
+    assert.match(repo.calls.assign[0].options.effective_from, /^\d{4}-\d{2}-\d{2}$/);
+    assert.equal(repo.calls.assign[0].options.created_by, null);
   });
 
   it("deduplicates employee ids, including string and number forms of one id", async () => {
@@ -377,5 +394,126 @@ describe("currentForEmployee", () => {
     // `\b` does not match inside `work_shift_id` or `default_work_shift_id`.
     assert.ok(!/\bshift_id\b/.test(code), "the legacy shift_id must not appear");
     assert.ok(!/shift_master/.test(code), "the legacy shift master must not appear");
+  });
+});
+
+/* ========================================== correcting a historical date == */
+
+/**
+ * The AUTHORIZED CORRECTION path (Attendance v2 review, the shift-assignment
+ * point). The ordinary assign route dates every change today and has no field
+ * for any other date; a genuine historical mistake needs a separate, audited
+ * way to be fixed, and the append-only resolver has always implied one.
+ *
+ * What is proven here is mostly refusal again, and for the same reason: the
+ * dangerous outcome is a silent backdate, so every path to one has to be shut.
+ */
+describe("correctAssignment", () => {
+  const valid = {
+    employee_id: 11,
+    work_shift_id: 4,
+    effective_from: "2026-09-01",
+    note: "Recorded on the wrong shift for the first fortnight of September",
+    actor_employee_id: 3,
+    today: "2026-10-05",
+  };
+
+  it("appends one CORRECTION row with the explicit date, the note and the actor", async () => {
+    const repo = makeRepo();
+    const result = await buildUsecase(repo).correctAssignment(valid);
+
+    assert.equal(result.code, 200);
+    assert.equal(result.source, "CORRECTION");
+    assert.deepEqual(repo.calls.corrected, [
+      {
+        employeeId: 11,
+        workShiftId: 4,
+        effectiveFrom: "2026-09-01",
+        note: valid.note,
+        createdBy: 3,
+      },
+    ]);
+    // It is a correction to history and nothing else: today's roster is not
+    // touched, so the ordinary assignment write is never reached.
+    assert.equal(repo.calls.assign.length, 0);
+  });
+
+  it("says out loud that attendance is not recalculated for you", async () => {
+    const result = await buildUsecase(makeRepo()).correctAssignment(valid);
+    assert.equal(result.recalculation_required, true);
+    assert.match(result.msg, /NOT recalculated automatically/);
+  });
+
+  it("refuses a correction that does not say which date it corrects", async () => {
+    const usecase = buildUsecase(makeRepo());
+    await assert.rejects(
+      usecase.correctAssignment({ ...valid, effective_from: undefined }),
+      /effective_from is required/
+    );
+    await assert.rejects(
+      usecase.correctAssignment({ ...valid, effective_from: "01-09-2026" }),
+      /YYYY-MM-DD/
+    );
+  });
+
+  it("refuses a correction that does not say why", async () => {
+    const usecase = buildUsecase(makeRepo());
+    await assert.rejects(usecase.correctAssignment({ ...valid, note: "typo" }), /at least 10/);
+    await assert.rejects(usecase.correctAssignment({ ...valid, note: undefined }), /at least 10/);
+  });
+
+  it("refuses a FUTURE effective date - this path corrects the past", async () => {
+    const usecase = buildUsecase(makeRepo());
+    await assert.rejects(
+      usecase.correctAssignment({ ...valid, effective_from: "2026-10-06" }),
+      /cannot be in the future/
+    );
+  });
+
+  it("takes one employee, never a list", async () => {
+    const usecase = buildUsecase(makeRepo());
+    await assert.rejects(
+      usecase.correctAssignment({ ...valid, employee_id: undefined }),
+      /employee_id is required/
+    );
+  });
+
+  it("refuses an employee or a work shift that does not exist", async () => {
+    const unknownEmployee = await buildUsecase(makeRepo()).correctAssignment({
+      ...valid,
+      employee_id: 99,
+    });
+    assert.equal(unknownEmployee.code, 422);
+
+    const unknownShift = await buildUsecase(makeRepo({ shift: null })).correctAssignment(valid);
+    assert.equal(unknownShift.code, 404);
+  });
+
+  it("ACCEPTS an inactive shift, which an ordinary assignment refuses", async () => {
+    // A correction records what was true then, and a shift that has since been
+    // retired is exactly the sort of thing a correction is for.
+    const repo = makeRepo({ shift: INACTIVE_SHIFT });
+    const result = await buildUsecase(repo).correctAssignment({ ...valid, work_shift_id: 9 });
+    assert.equal(result.code, 200);
+    assert.equal(result.shift_code, "OLD");
+
+    const assigned = await buildUsecase(makeRepo({ shift: INACTIVE_SHIFT })).assign({
+      employee_ids: [11],
+      work_shift_id: 9,
+    });
+    assert.equal(assigned.code, 422, "the ordinary route still refuses one");
+  });
+
+  it("the ordinary assign route still has no way to backdate anything", async () => {
+    const repo = makeRepo();
+    await buildUsecase(repo).assign({
+      employee_ids: [11],
+      work_shift_id: 4,
+      // A caller inventing this field changes nothing: `assign` reads its
+      // effective date from the server's own clock and from nowhere else.
+      effective_from: "2020-01-01",
+      today: "2026-10-05",
+    });
+    assert.equal(repo.calls.assign[0].options.effective_from, "2026-10-05");
   });
 });

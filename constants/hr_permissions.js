@@ -248,4 +248,16 @@ module.exports = {
   APPROVE_ATTENDANCE_REGULARIZATION: "approve_attendance_regularization",
   VIEW_ATTENDANCE_APPROVALS: "view_attendance_approvals",
   MANAGE_ATTENDANCE_APPROVAL_ROLES: "manage_attendance_approval_roles",
+
+  // Attendance v2 / A0 - the AUTHORIZED CORRECTION of a historical shift
+  // assignment.
+  //
+  // The ordinary assignment route dates every change today and has no field
+  // for any other date. This is the separate, audited path for a genuine
+  // historical mistake: an explicit effective_from, a mandatory note and
+  // `source = 'CORRECTION'` on the appended row. It changes what payroll will
+  // recalculate for past dates, so the migration grants it to NOBODY -
+  // administrators reach it through the user_type 2 bypass, and anybody else
+  // is given it deliberately on the designation screen.
+  CORRECT_EMPLOYEE_SHIFT_ASSIGNMENT: "correct_employee_shift_assignment",
 };

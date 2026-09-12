@@ -57,8 +57,27 @@ describe("every Attendance v2 migration", () => {
           .forEach((s) => assert.match(s, /^CREATE TABLE IF NOT EXISTS/i));
       });
 
-      it("ALTERs nothing - no existing table is modified", () => {
-        up.forEach((s) => assert.ok(!/^ALTER TABLE/i.test(s), `unexpected ALTER: ${s}`));
+      /**
+       * The only ALTER any of these may carry is an ADD COLUMN of a new,
+       * nullable field - the shape 20260910120000 already uses to put
+       * `default_work_shift_id` on `new_employee`, and the shape the v2
+       * product contract requires for the Special Break Duration Override.
+       *
+       * What must stay impossible is anything that changes or removes what is
+       * already there: no MODIFY, no CHANGE, no DROP COLUMN, no RENAME, and no
+       * NOT NULL on a column being added to a populated table.
+       */
+      it("modifies nothing that already exists - an ALTER may only ADD a nullable column", () => {
+        up
+          .filter((s) => /^ALTER TABLE/i.test(s))
+          .forEach((s) => {
+            assert.ok(!/\bMODIFY\b/i.test(s), `an existing column is modified: ${s}`);
+            assert.ok(!/\bCHANGE\b/i.test(s), `an existing column is changed: ${s}`);
+            assert.ok(!/\bDROP\b/i.test(s), `something is dropped: ${s}`);
+            assert.ok(!/\bRENAME\b/i.test(s), `something is renamed: ${s}`);
+            assert.match(s, /ADD COLUMN/i, `an ALTER that adds no column: ${s}`);
+            assert.match(s, /NULL DEFAULT NULL/i, `a column added here must be nullable: ${s}`);
+          });
       });
 
       it("never writes to a Biomax punch table", () => {
@@ -121,9 +140,32 @@ describe("A0 - the shift history migration", () => {
   const up = statements(read(`${name}-up.sql`));
   const inserts = up.filter((s) => /^INSERT/i.test(s));
 
-  it("creates exactly one table", () => {
-    assert.equal(up.filter((s) => /^CREATE TABLE/i.test(s)).length, 1);
-    assert.match(up[0], /CREATE TABLE IF NOT EXISTS `employee_work_shift_assignment`/);
+  it("creates the assignment history and the shift configuration history", () => {
+    const created = up
+      .filter((s) => /^CREATE TABLE/i.test(s))
+      .map((s) => /CREATE TABLE IF NOT EXISTS `([^`]+)`/i.exec(s)[1]);
+    assert.deepEqual(created.sort(), [
+      "employee_work_shift_assignment",
+      "work_shift_config_version",
+    ]);
+  });
+
+  /**
+   * Review fix #2. Without a version dated at the cutover, a September date
+   * that resolved to "no version yet" would fall back to the LIVE tables and
+   * therefore read whatever a later edit put there - which is the whole bug.
+   */
+  it("seeds one configuration version per existing shift, dated at the cutover", () => {
+    const seed = inserts.find((s) => /^INSERT INTO `work_shift_config_version`/.test(s));
+    assert.ok(seed, "no configuration version is seeded");
+    assert.match(seed, /'2026-09-01'/);
+    assert.match(seed, /'MIGRATION_SEED'/);
+    assert.match(seed, /FROM `work_shift` ws/);
+  });
+
+  it("has NO unique key on the configuration history either, so a same-day correction fits", () => {
+    const create = up.find((s) => /CREATE TABLE IF NOT EXISTS `work_shift_config_version`/.test(s));
+    assert.ok(!/UNIQUE KEY[^,]*`work_shift_id`[^,]*`effective_from`/i.test(create));
   });
 
   it("has NO unique key on (employee_id, effective_from), so a correction is insertable", () => {
@@ -133,28 +175,50 @@ describe("A0 - the shift history migration", () => {
     );
   });
 
+  const assignmentBackfill = () =>
+    inserts.find((s) => /^INSERT INTO `employee_work_shift_assignment`/.test(s));
+
   it("backfills only employees who ALREADY have a default work shift", () => {
-    assert.equal(inserts.length, 1);
-    assert.match(inserts[0], /WHERE ne\.`default_work_shift_id` IS NOT NULL/);
+    assert.match(assignmentBackfill(), /WHERE ne\.`default_work_shift_id` IS NOT NULL/);
   });
 
   it("dates the backfill at the cutover and invents nothing earlier", () => {
-    assert.match(inserts[0], /'2026-09-01'/);
-    assert.match(inserts[0], /'MIGRATION_BACKFILL'/);
+    const backfill = assignmentBackfill();
+    assert.match(backfill, /'2026-09-01'/);
+    assert.match(backfill, /'MIGRATION_BACKFILL'/);
     // Exactly one date literal: no second, earlier row is written anywhere.
-    assert.equal((inserts[0].match(/'\d{4}-\d{2}-\d{2}'/g) || []).length, 1);
+    assert.equal((backfill.match(/'\d{4}-\d{2}-\d{2}'/g) || []).length, 1);
+  });
+
+  it("dates every seeded configuration version at the cutover too, and no earlier", () => {
+    const seed = inserts.find((s) => /^INSERT INTO `work_shift_config_version`/.test(s));
+    assert.equal((seed.match(/'\d{4}-\d{2}-\d{2}'/g) || []).length, 1);
   });
 
   it("reads nothing from the legacy shift master", () => {
     up.map(withoutLiterals).forEach((s) => {
       assert.ok(!/shift_master/i.test(s), `the legacy shift master is read: ${s}`);
-      assert.ok(!/`shift_code`/i.test(s), `the Digisme shift_code is read: ${s}`);
+      // `new_employee.shift_code` is the Digisme text column and must never be
+      // read. `work_shift.shift_code` is the NEW master's own code and is part
+      // of the configuration a version snapshots; it is qualified `ws.`, which
+      // is what tells the two apart.
+      assert.ok(
+        !/(?<!ws\.)`shift_code`/i.test(s) || /`work_shift`/i.test(s),
+        `the Digisme shift_code is read: ${s}`
+      );
     });
   });
 
-  it("writes to no table but its own", () => {
+  it("writes to no table but the two it creates, and no permission grant", () => {
     inserts.forEach((s) =>
-      assert.match(s, /^INSERT INTO `employee_work_shift_assignment`/)
+      assert.match(
+        s,
+        /^INSERT INTO `(employee_work_shift_assignment|work_shift_config_version|all_permissions)`/
+      )
+    );
+    assert.ok(
+      !up.some((s) => /^INSERT INTO `permissions`/i.test(s)),
+      "the correction key is declared but granted to nobody"
     );
   });
 });
@@ -163,15 +227,32 @@ describe("A1/A4 - the calculation migration", () => {
   const up = statements(read(`${NAMES[1]}-up.sql`));
   const text = stripComments(read(`${NAMES[1]}-up.sql`));
 
-  it("creates the three derived tables", () => {
+  it("creates the two derived tables and no dated break-override table", () => {
     const created = up
       .filter((s) => /^CREATE TABLE/i.test(s))
       .map((s) => /CREATE TABLE IF NOT EXISTS `([^`]+)`/i.exec(s)[1]);
     assert.deepEqual(created.sort(), [
       "attendance_day_calculation",
       "attendance_monthly_payroll",
-      "employee_break_override",
     ]);
+  });
+
+  /**
+   * Review fix #7. The product contract gives Employee Master ONE current
+   * Special Break Duration Override with no Effective From, so there must be
+   * no effective-dated override table and no effective_from/effective_to
+   * anywhere near it.
+   */
+  it("puts the break override on Employee Master as one undated, nullable field", () => {
+    assert.ok(!/employee_break_override`/.test(text), "the dated override table is gone");
+    assert.match(
+      text,
+      /ALTER TABLE `new_employee`\s+ADD COLUMN `special_break_override_minutes` INT NULL DEFAULT NULL/
+    );
+    assert.ok(
+      !/special_break_override[\s\S]{0,400}effective_(from|to)/i.test(text),
+      "the override must carry no effective date"
+    );
   });
 
   it("makes a recalculation idempotent by unique key", () => {
@@ -199,6 +280,58 @@ describe("A1/A4 - the calculation migration", () => {
         "the break override key must not be granted by a migration"
       )
     );
+  });
+
+  /**
+   * Review fix #9. Somebody entitled to see how long a colleague worked is not
+   * thereby entitled to see what those minutes are worth, and re-running the
+   * engine rewrites what payroll reads - so neither key is handed to HR by a
+   * migration. Both are DECLARED, so an administrator can assign them on the
+   * existing designation rights screen.
+   */
+  it("declares the payroll and recalculation keys but grants them to nobody", () => {
+    const declared = up.filter((s) => /^INSERT INTO `all_permissions`/i.test(s)).join(" ");
+    assert.match(declared, /'view_attendance_payroll'/);
+    assert.match(declared, /'recalculate_attendance'/);
+
+    const grants = up.filter((s) => /^INSERT INTO `permissions`/i.test(s));
+    grants.forEach((s) => {
+      assert.ok(!/view_attendance_payroll/.test(s), "HR must not get payroll report access");
+      assert.ok(!/recalculate_attendance/.test(s), "recalculation rewrites payroll-consumed data");
+    });
+  });
+
+  it("still grants HR the attendance read, which is its operational role", () => {
+    const grants = up.filter((s) => /^INSERT INTO `permissions`/i.test(s));
+    assert.equal(grants.length, 1);
+    assert.match(grants[0], /'view_calculated_attendance'/);
+    assert.match(grants[0], /'HR EXECUTIVE'/);
+  });
+
+  /**
+   * Review fix #8. Attendance exposes neutral wage components; it does not
+   * name a legal PF/ESI base, because that determination is salary_engine.js's
+   * and not an attendance calculator's to make.
+   */
+  it("stores neutral wage components and asserts no statutory base", () => {
+    assert.match(text, /`salary_day_earnings` DECIMAL\(12,2\) NULL/);
+    assert.match(text, /`extra_day_earnings`\s+DECIMAL\(12,2\) NULL/);
+    assert.match(text, /`approved_ot_earnings` DECIMAL\(12,2\) NULL/);
+    assert.ok(!/`statutory_base_days`/.test(text));
+    assert.ok(!/`statutory_base_earnings`/.test(text));
+  });
+
+  /** Review fix #5: every OT figure the engine produced is stored. */
+  it("stores every intermediate overtime figure the shift rules produced", () => {
+    ["pre_shift_minutes", "post_shift_minutes", "ot_offset_minutes",
+     "pre_shift_ot_minutes", "post_shift_ot_minutes"].forEach((column) =>
+      assert.match(text, new RegExp("`" + column + "`\\s+INT"))
+    );
+  });
+
+  /** Review fix #2: a stored calculation names the configuration version it read. */
+  it("records which dated configuration version a calculation consumed", () => {
+    assert.match(text, /`work_shift_config_version_id` BIGINT UNSIGNED NULL/);
   });
 });
 
@@ -254,6 +387,23 @@ describe("A3 - the approvals migration", () => {
 
   it("records an administrator short-cut rather than hiding it", () => {
     assert.match(text, /`acted_as_admin_override` TINYINT\(1\) NOT NULL DEFAULT 0/);
+  });
+
+  /** Review fix #6: the queue can tell its own requests from a person's. */
+  it("marks a request the OT auto-queue raised", () => {
+    assert.match(text, /`auto_created` TINYINT\(1\) NOT NULL DEFAULT 0/);
+  });
+
+  /**
+   * Review fix #4: a final decision and the recalculated day commit together,
+   * so SETTLED is reached in the same commit as APPROVED and payroll treats
+   * anything else as not final.
+   */
+  it("carries the finalization state payroll reads", () => {
+    assert.match(
+      text,
+      /`finalization_state` ENUM\('NOT_REQUIRED','PENDING','SETTLED'\) NOT NULL DEFAULT 'NOT_REQUIRED'/
+    );
   });
 });
 

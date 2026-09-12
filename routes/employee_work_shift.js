@@ -202,6 +202,51 @@ class EmployeeWorkShiftRoutes {
         res.end();
       }
     );
+
+    /**
+     * CORRECT a historical assignment. A different endpoint, a different
+     * permission and a different shape from `assign` above, deliberately:
+     *
+     *   - `effective_from` is REQUIRED here and impossible there, so the
+     *     ordinary route can never be used to backdate anything.
+     *   - `note` is required, and is stored on the appended history row.
+     *   - one employee, never a list: a bulk backdate is not a correction.
+     *   - `correct_employee_shift_assignment` is granted by migration to
+     *     nobody, because this changes what payroll will recalculate.
+     *
+     * No frontend field is added for this. It is the safe backend path the
+     * append-only resolver has always implied, made explicit and audited.
+     */
+    router.post(
+      "/work-shift-assignments/correction",
+      this.permissions.requireAll(P.EMPLOYEE_EDIT, P.CORRECT_EMPLOYEE_SHIFT_ASSIGNMENT),
+      async (req, res) => {
+        try {
+          const schema = {
+            employee_id: Joi.number().integer().positive().required(),
+            work_shift_id: Joi.number().integer().positive().required(),
+            effective_from: Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).required(),
+            note: Joi.string().min(10).max(255).required(),
+          };
+          const isValid = Joi.validate(req.body, schema);
+          if (isValid.error !== null) throw isValid.error;
+
+          res.json(
+            await this.usecase.correctAssignment({
+              employee_id: req.body.employee_id,
+              work_shift_id: req.body.work_shift_id,
+              effective_from: req.body.effective_from,
+              note: req.body.note,
+              actor_employee_id: req.decoded ? req.decoded.employee_id : null,
+            })
+          );
+        } catch (err) {
+          respondError(res, err);
+        }
+
+        res.end();
+      }
+    );
   }
 
   /**

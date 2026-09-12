@@ -26,6 +26,27 @@
  *   - It does not decide whether OT is payable. It produces a CANDIDATE, which
  *     is worth zero rupees until the A3 approval chain finishes.
  *
+ * THE OT RULES IT DOES READ, all of them, from Shift Management and nowhere
+ * else. Post-shift OT (`overtime_allowed`, `overtime_minimum_minutes`,
+ * `overtime_minimum_threshold_only`, `overtime_rounding_method`,
+ * `overtime_rounding_interval_minutes`), PRE-shift OT (the four
+ * `pre_shift_overtime_*` columns), the per-day cap
+ * (`maximum_ot_minutes_per_day`), the weekday `ot_rate`, and the two OFFSET
+ * switches `late_offset_against_overtime` and
+ * `early_exit_offset_against_overtime`.
+ *
+ * THE OFFSETS ARE NOT A DEDUCTION. When Shift Management says lateness offsets
+ * overtime, late minutes are subtracted FROM THE OVERTIME and from nothing
+ * else; OT can never be driven below zero and no rupee is ever taken for the
+ * same minute twice. v2 has no monetary late or early-exit penalty, and these
+ * two switches do not create one.
+ *
+ * PRE-SHIFT TIME IS NOT OVERTIME BY DEFAULT. Turning up an hour early is not
+ * an instruction to work, so minutes before the shift's own in-time become OT
+ * only when `pre_shift_overtime_allowed` is set AND they qualify under the
+ * pre-shift minimum. With the flag off they are excluded from the candidate
+ * entirely rather than falling through into the post-shift figure.
+ *
  * THE PAIRING RULE (A1). Punches are paired chronologically by POSITION: 1st
  * IN, 2nd OUT, 3rd IN, 4th OUT. The device's own IN/OUT flag is deliberately
  * not read - `biomax_punch.io_mode` is documented in the Part 1 schema as "NOT
@@ -245,18 +266,125 @@ function applyOvertimeRules(rawMinutes, snapshot) {
 
   let minutes = snapshot.overtime_minimum_threshold_only ? raw : Math.max(raw, minimum);
 
-  const interval = Math.max(0, Math.trunc(snapshot.overtime_rounding_interval_minutes || 0));
-  const method = String(snapshot.overtime_rounding_method || "NONE").toUpperCase();
-  if (interval > 0 && method !== "NONE") {
-    if (method === "UP") minutes = Math.ceil(minutes / interval) * interval;
-    else if (method === "DOWN") minutes = Math.floor(minutes / interval) * interval;
-    else if (method === "NEAREST") minutes = Math.round(minutes / interval) * interval;
-  }
+  minutes = roundOvertime(
+    minutes,
+    snapshot.overtime_rounding_method,
+    snapshot.overtime_rounding_interval_minutes
+  );
 
   const cap = snapshot.maximum_ot_minutes_per_day;
   if (cap !== null && cap !== undefined) minutes = Math.min(minutes, Math.max(0, Math.trunc(cap)));
 
   return Math.max(0, minutes);
+}
+
+/** The shift's rounding, applied to one OT figure. `NONE` or interval 0 = exact. */
+function roundOvertime(minutes, method, intervalMinutes) {
+  const interval = Math.max(0, Math.trunc(intervalMinutes || 0));
+  const how = String(method || "NONE").toUpperCase();
+  if (interval <= 0 || how === "NONE") return minutes;
+  if (how === "UP") return Math.ceil(minutes / interval) * interval;
+  if (how === "DOWN") return Math.floor(minutes / interval) * interval;
+  if (how === "NEAREST") return Math.round(minutes / interval) * interval;
+  return minutes;
+}
+
+/**
+ * PRE-SHIFT OT, under its own four columns.
+ *
+ * qualify -> round. There is deliberately no floor step and no
+ * `..._threshold_only` flag, because Shift Management has no such column for
+ * pre-shift OT: `pre_shift_overtime_minimum_minutes` is read as a QUALIFYING
+ * threshold only. Reading it as a floor would pay somebody for minutes they
+ * did not work before their shift started, which is the one direction an
+ * unstated rule must not err in.
+ */
+function applyPreShiftOvertimeRules(rawMinutes, snapshot) {
+  const raw = Math.max(0, Math.trunc(rawMinutes || 0));
+  if (!snapshot || !snapshot.pre_shift_overtime_allowed) return 0;
+  if (raw === 0) return 0;
+
+  const minimum = Math.max(0, Math.trunc(snapshot.pre_shift_overtime_minimum_minutes || 0));
+  if (raw < minimum) return 0;
+
+  const minutes = roundOvertime(
+    raw,
+    snapshot.pre_shift_overtime_rounding_method,
+    snapshot.pre_shift_overtime_rounding_interval_minutes
+  );
+  return Math.max(0, minutes);
+}
+
+/**
+ * The whole OT decision for one day, from the earned surplus and the shift.
+ *
+ * The order is: SPLIT the surplus into its pre-shift and post-shift parts,
+ * apply the configured OFFSETS to it, put each part through its own rules, add
+ * them, then apply the per-day CAP to the total.
+ *
+ * The cap is applied to the TOTAL rather than to each half, because
+ * `maximum_ot_minutes_per_day` says per DAY; capping the halves separately
+ * would let a shift with both kinds of OT pay twice its own maximum.
+ *
+ * "POST-SHIFT" HERE MEANS "THE REST OF IT". The pre-shift part is exactly the
+ * surplus that sits before the shift's in-time; everything else earned - time
+ * after the out-time, and on a four-or-more-punch day the minutes of an unused
+ * break - falls under the ordinary `overtime_*` rules. That is deliberate:
+ * `overtime_allowed`, its minimum and its rounding are the rules for ordinary
+ * overtime, and an unused break is ordinary overtime rather than a third kind
+ * with no configuration of its own.
+ *
+ * Offsets come off the post-shift part first. A late arrival and an early
+ * finish are both failures against the shift's own hours, and the minutes the
+ * employee chose to stay after it are the ones that answer for them; only when
+ * those run out does the offset reach pre-shift time.
+ *
+ * @returns {object} every intermediate figure, so a payslip query can be
+ *   answered from the stored row instead of by re-running this function.
+ */
+function resolveOvertime({
+  raw_ot_minutes = 0,
+  pre_shift_minutes = 0,
+  late_minutes = 0,
+  early_exit_minutes = 0,
+  shift = null,
+}) {
+  const earned = Math.max(0, Math.trunc(raw_ot_minutes || 0));
+
+  // Only surplus that actually sits before the shift can be pre-shift OT.
+  let preRaw = Math.min(Math.max(0, Math.trunc(pre_shift_minutes || 0)), earned);
+  let postRaw = Math.max(0, earned - preRaw);
+
+  let offset = 0;
+  if (shift && shift.late_offset_against_overtime) {
+    offset += Math.max(0, Math.trunc(late_minutes || 0));
+  }
+  if (shift && shift.early_exit_offset_against_overtime) {
+    offset += Math.max(0, Math.trunc(early_exit_minutes || 0));
+  }
+  if (offset > 0) {
+    const fromPost = Math.min(postRaw, offset);
+    postRaw -= fromPost;
+    preRaw = Math.max(0, preRaw - (offset - fromPost));
+  }
+
+  // Pre-shift time the shift does not pay for is excluded here, rather than
+  // being folded into the post-shift figure where it would be paid anyway.
+  const preOt = applyPreShiftOvertimeRules(preRaw, shift);
+  const postOt = applyOvertimeRules(postRaw, shift);
+
+  let total = preOt + postOt;
+  const cap = shift ? shift.maximum_ot_minutes_per_day : null;
+  if (cap !== null && cap !== undefined) total = Math.min(total, Math.max(0, Math.trunc(cap)));
+
+  return {
+    pre_shift_eligible_minutes: preRaw,
+    post_shift_eligible_minutes: postRaw,
+    ot_offset_minutes: offset,
+    pre_shift_ot_minutes: preOt,
+    post_shift_ot_minutes: postOt,
+    candidate_ot_minutes: Math.max(0, total),
+  };
 }
 
 /* --------------------------------------------------------- the day itself */
@@ -320,8 +448,13 @@ function calculateAttendanceDay(input = {}) {
     shortage_minutes: 0,
     late_minutes: null,
     early_exit_minutes: null,
+    pre_shift_minutes: 0,
+    post_shift_minutes: 0,
     candidate_ot_minutes: 0,
     raw_ot_minutes: 0,
+    pre_shift_ot_minutes: 0,
+    post_shift_ot_minutes: 0,
+    ot_offset_minutes: 0,
     approved_ot_minutes: 0,
     ot_rate: shift ? shift.ot_rate : null,
     is_final: false,
@@ -390,10 +523,16 @@ function calculateAttendanceDay(input = {}) {
 
   // Reported, never charged. See the file header: the shortage already is the
   // deduction, and a separate late penalty would take the same minute twice.
+  // The two OFFSET switches below can subtract them from OVERTIME, which is a
+  // different thing from charging for them and is the only use v2 makes of
+  // either figure.
   const shiftIn = timeToMinutes(shift.in_time);
   if (shiftIn !== null) {
     base.late_minutes = Math.max(0, first.minute - shiftIn);
     base.early_exit_minutes = Math.max(0, shiftIn + shiftSpan - last.minute);
+    // Time genuinely outside the shift's own hours, before it and after it.
+    base.pre_shift_minutes = Math.max(0, shiftIn - first.minute);
+    base.post_shift_minutes = Math.max(0, last.minute - (shiftIn + shiftSpan));
   }
 
   // An odd number of punches means one is missing. Provisional numbers are
@@ -447,7 +586,20 @@ function calculateAttendanceDay(input = {}) {
 
   const rawOt = otBasis === null ? surplus : Math.min(surplus, otBasis);
   base.raw_ot_minutes = rawOt;
-  base.candidate_ot_minutes = applyOvertimeRules(rawOt, shift);
+
+  // Every Shift Management OT rule, in one place: the pre/post split, the two
+  // offsets, each side's own minimum and rounding, then the per-day cap.
+  const overtime = resolveOvertime({
+    raw_ot_minutes: rawOt,
+    pre_shift_minutes: base.pre_shift_minutes,
+    late_minutes: base.late_minutes || 0,
+    early_exit_minutes: base.early_exit_minutes || 0,
+    shift,
+  });
+  base.pre_shift_ot_minutes = overtime.pre_shift_ot_minutes;
+  base.post_shift_ot_minutes = overtime.post_shift_ot_minutes;
+  base.ot_offset_minutes = overtime.ot_offset_minutes;
+  base.candidate_ot_minutes = overtime.candidate_ot_minutes;
 
   const approved = Math.max(0, Math.trunc(Number(approved_ot_minutes) || 0));
   // Approved OT can never exceed what was actually earned: an approval is a
@@ -494,5 +646,8 @@ module.exports = {
   orderPunches,
   attendanceDateForPunch,
   applyOvertimeRules,
+  applyPreShiftOvertimeRules,
+  roundOvertime,
+  resolveOvertime,
   calculateAttendanceDay,
 };

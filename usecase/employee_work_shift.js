@@ -1,3 +1,5 @@
+const { istToday } = require("../utils/istDate");
+
 const {
   ASSIGNMENT_STATUS,
   EMPLOYMENT_STATUS,
@@ -46,12 +48,7 @@ const MAX_EMPLOYEES_PER_ASSIGNMENT = 1000;
  * field on any route.
  */
 function effectiveFromToday(override = null) {
-  if (typeof override === "string" && /^\d{4}-\d{2}-\d{2}$/.test(override)) return override;
-  const IST_OFFSET_MINUTES = 5 * 60 + 30;
-  const ist = new Date(Date.now() + IST_OFFSET_MINUTES * 60 * 1000);
-  return `${ist.getUTCFullYear()}-${String(ist.getUTCMonth() + 1).padStart(2, "0")}-${String(
-    ist.getUTCDate()
-  ).padStart(2, "0")}`;
+  return istToday(override);
 }
 
 /**
@@ -374,6 +371,100 @@ class EmployeeWorkShiftUsecase {
       ...result,
       shift_code: shift.shift_code,
       shift_name: shift.shift_name,
+    };
+  }
+
+  /**
+   * Correct which work shift an employee was on for a HISTORICAL date.
+   *
+   * WHY THIS EXISTS, AND WHY IT IS NOT THE ASSIGN ROUTE. `assign` above dates
+   * every change TODAY and has no field for any other date, which is right:
+   * moving somebody to a new shift must never rewrite yesterday's worked
+   * minutes. But the append-only resolver explicitly supports a correction
+   * dated to the same day as the row it corrects, and a genuine historical
+   * mistake - somebody was recorded on the wrong shift for a fortnight - has
+   * to be fixable by an authorized person rather than by a DBA.
+   *
+   * WHAT MAKES IT SAFE:
+   *
+   *   - Its own permission, `correct_employee_shift_assignment`, granted by a
+   *     migration to NOBODY. Correcting the past changes payroll-consumed
+   *     history.
+   *   - An EXPLICIT `effective_from`. There is no default and no "today"
+   *     fallback: a correction that does not say which date it corrects is
+   *     refused, so nothing can be backdated by accident.
+   *   - A mandatory note, recorded on the row, saying why.
+   *   - `source = 'CORRECTION'`, so a correction is distinguishable from an
+   *     ordinary assignment forever after.
+   *   - ONE employee at a time. A bulk backdate is not a correction, it is an
+   *     accident waiting to happen.
+   *   - `default_work_shift_id` is NOT touched. Correcting September says
+   *     nothing about what somebody is rostered on today.
+   *
+   * The affected dates are NOT recalculated here. What a correction changes is
+   * potentially a month of settled attendance, and re-running it is a separate,
+   * deliberate act through the recalculation endpoint by somebody who holds
+   * that key - not a side effect of filing the correction.
+   */
+  async correctAssignment(payload = {}) {
+    const employeeId = Number(payload.employee_id);
+    if (!Number.isInteger(employeeId) || employeeId <= 0) {
+      throw validationError("employee_id is required and must be an employee id");
+    }
+
+    const workShiftId = Number(payload.work_shift_id);
+    if (!Number.isInteger(workShiftId) || workShiftId <= 0) {
+      throw validationError("work_shift_id is required and must be a work shift id");
+    }
+
+    const effectiveFrom =
+      typeof payload.effective_from === "string" ? payload.effective_from.trim() : "";
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom)) {
+      throw validationError(
+        "effective_from is required and must be a date as YYYY-MM-DD - a correction must say which date it corrects"
+      );
+    }
+
+    const note = typeof payload.note === "string" ? payload.note.trim() : "";
+    if (note.length < 10) {
+      throw validationError(
+        "A note of at least 10 characters is required: a correction to historical attendance has to say why"
+      );
+    }
+
+    // A correction may be dated into the past. It may NOT be dated into the
+    // future: an assignment that has not happened yet is an assignment, and it
+    // goes through the ordinary route on the day it takes effect.
+    if (effectiveFrom > istToday(payload.today)) {
+      throw validationError("effective_from cannot be in the future - this path corrects the past");
+    }
+
+    const existing = await this.repo.findExistingEmployeeIds([employeeId]);
+    if (!existing || existing.length === 0) {
+      return { code: 422, msg: `No employee exists for id ${employeeId}` };
+    }
+
+    const shift = await this.repo.getActiveWorkShift(workShiftId);
+    if (!shift) return { code: 404, msg: "Work shift not found" };
+    // An INACTIVE shift is allowed here, unlike on the assign route: the
+    // correction records what was true then, and a shift that has since been
+    // retired is exactly the kind of thing a correction is for.
+
+    const result = await this.repo.correctAssignment({
+      employeeId,
+      workShiftId,
+      effectiveFrom,
+      note,
+      createdBy: payload.actor_employee_id === undefined ? null : payload.actor_employee_id,
+    });
+
+    return {
+      ...result,
+      shift_code: shift.shift_code,
+      shift_name: shift.shift_name,
+      note,
+      recalculation_required: true,
+      msg: "Correction recorded. Attendance for the affected dates is NOT recalculated automatically - run a recalculation for the range when you are ready.",
     };
   }
 }

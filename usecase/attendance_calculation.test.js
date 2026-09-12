@@ -60,9 +60,20 @@ function fakeRepo(state = {}) {
       },
       schedule: (state.schedules && state.schedules[id]) || scheduleRows(id),
     }),
-    getRawPunches: async () => state.rawPunches || [],
+    getWorkShiftConfigVersions: async (id) =>
+      (state.configVersions && state.configVersions[id]) || [],
+    // Raw punches by CALENDAR window, which is what the real repository now
+    // does: the engine re-derives the attendance date itself.
+    getRawPunchesByCalendarWindow: async (_employeeId, from, to) =>
+      (state.rawPunches || []).filter((p) => {
+        const day = String(p.io_time).slice(0, 10);
+        return day >= from && day <= to;
+      }),
     getApprovedRegularizedPunches: async () => state.regularized || [],
-    getBreakOverrides: async () => state.overrides || [],
+    getBreakOverride: async () =>
+      state.employeeRow === undefined
+        ? { employee_id: 42, special_break_override_minutes: null }
+        : state.employeeRow,
     getApprovalStateByDate: async () => state.approvals || [],
     getEmploymentWindow: async () =>
       state.employment === undefined
@@ -162,36 +173,60 @@ describe("calculating a range", () => {
     assert.equal(day.is_final, false);
   });
 
-  it("applies an employee break override that covers the date, and not one that does not", async () => {
+  /**
+   * Review fix #7. ONE current value on Employee Master, no effective date:
+   * it applies to every date the engine calculates, and an employee with no
+   * override falls back to the shift's own break.
+   */
+  it("applies the employee's one current break override to every date", async () => {
     const usecase = buildUsecase(
       fakeRepo({
         rawPunches: [punch(1, "2026-09-14 09:00:00"), punch(2, "2026-09-14 21:00:00")],
-        overrides: [
-          {
-            employee_break_override_id: 1,
-            break_minutes: 90,
-            effective_from: "2026-09-10",
-            effective_to: "2026-09-14",
-          },
-        ],
+        employeeRow: { employee_id: 42, special_break_override_minutes: 90 },
       })
     );
 
-    const [covered] = await usecase.calculateRange({
+    const days = await usecase.calculateRange({
+      employee_id: 42,
+      from_date: "2026-09-14",
+      to_date: "2026-09-15",
+    });
+    days.forEach((day) => {
+      assert.equal(day.nrm_minutes, 630);
+      assert.equal(day.break_allowance_source, "EMPLOYEE_OVERRIDE");
+    });
+  });
+
+  it("falls back to the shift break when the employee has no override", async () => {
+    const usecase = buildUsecase(
+      fakeRepo({
+        rawPunches: [punch(1, "2026-09-14 09:00:00"), punch(2, "2026-09-14 21:00:00")],
+        employeeRow: { employee_id: 42, special_break_override_minutes: null },
+      })
+    );
+    const [day] = await usecase.calculateRange({
       employee_id: 42,
       from_date: "2026-09-14",
       to_date: "2026-09-14",
     });
-    assert.equal(covered.nrm_minutes, 630);
-    assert.equal(covered.break_allowance_source, "EMPLOYEE_OVERRIDE");
+    assert.equal(day.nrm_minutes, 660);
+    assert.equal(day.break_allowance_source, "SHIFT");
+  });
 
-    const [after] = await usecase.calculateRange({
+  it("treats a zero override as a real setting, not as no override", async () => {
+    const usecase = buildUsecase(
+      fakeRepo({
+        rawPunches: [punch(1, "2026-09-14 09:00:00"), punch(2, "2026-09-14 21:00:00")],
+        employeeRow: { employee_id: 42, special_break_override_minutes: 0 },
+      })
+    );
+    const [day] = await usecase.calculateRange({
       employee_id: 42,
-      from_date: "2026-09-15",
-      to_date: "2026-09-15",
+      from_date: "2026-09-14",
+      to_date: "2026-09-14",
     });
-    assert.equal(after.nrm_minutes, 660);
-    assert.equal(after.break_allowance_source, "SHIFT");
+    assert.equal(day.nrm_minutes, 720);
+    assert.equal(day.break_allowance_source, "EMPLOYEE_OVERRIDE");
   });
 
   it("consumes only FULLY APPROVED OT, never a pending figure", async () => {
@@ -346,10 +381,14 @@ describe("the monthly roll-up", () => {
     assert.equal(result.salary_days, 26);
     assert.equal(result.extra_days, 4);
     assert.equal(result.daily_rate, 1000);
-    assert.equal(result.salary_earnings, 26000);
+    assert.equal(result.salary_day_earnings, 26000);
     assert.equal(result.extra_day_earnings, 4000);
-    assert.equal(result.statutory_base_earnings, 26000);
     assert.equal(result.total_attendance_payable, 30000);
+    // Review fix #8: attendance names neutral components and asserts no
+    // statutory base.
+    assert.equal(result.statutory_base_earnings, undefined);
+    assert.equal(result.statutory_base_days, undefined);
+    assert.match(result.statutory_handoff, /separate reviewed step/);
     assert.equal(result.salary_record_id, 9);
   });
 
@@ -378,6 +417,8 @@ describe("the monthly roll-up", () => {
     assert.equal(repo.saved.monthly.length, 1);
     assert.equal(repo.saved.calculations.length, 1);
     assert.equal(repo.saved.monthly[0].salary_days, 26);
+    assert.equal(repo.saved.monthly[0].salary_day_earnings, 26000);
+    assert.ok(!("statutory_base_earnings" in repo.saved.monthly[0]));
     assert.equal(typeof repo.saved.monthly[0].held_dates, "string");
   });
 

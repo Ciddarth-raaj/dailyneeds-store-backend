@@ -6,6 +6,7 @@ const {
   commitAsync,
   rollbackAsync,
 } = require("../utils/batchInsert");
+const { writeCalculationsOnConnection } = require("./attendance_calculation");
 
 /**
  * Attendance v2 / A3 - the regularization and OT approval store.
@@ -21,6 +22,17 @@ const {
  * writes the request, its whole chain of steps and its punch together or not
  * at all; deciding a stage stamps the step and moves the request together or
  * not at all. A half-created request would be a chain nobody could finish.
+ *
+ * THE DECISION AND THE RECALCULATED DAY MOVE TOGETHER (review fix #4). A final
+ * approval is what makes a regularized punch effective and turns candidate
+ * overtime into payable overtime, so the recalculated
+ * `attendance_day_calculation` row is written INSIDE the same transaction that
+ * records the decision - `decideStage` takes the already-computed rows and
+ * hands them to `writeCalculationsOnConnection` on its own connection. The
+ * first implementation committed the approval and then recalculated
+ * afterwards, which left a window in which a request was APPROVED - and its OT
+ * therefore payable - while the stored day still said otherwise. There is now
+ * no such window: if the day cannot be stored, the approval does not happen.
  */
 
 class AttendanceRegularizationRepository {
@@ -89,7 +101,8 @@ class AttendanceRegularizationRepository {
               DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date,
               outlet_id, requester_class, reason,
               candidate_ot_minutes, approved_ot_minutes,
-              status, current_stage_no, total_stages
+              status, current_stage_no, total_stages,
+              finalization_state, auto_created
          FROM attendance_approval_request
         WHERE attendance_approval_request_id = ?`,
       [requestId]
@@ -126,7 +139,8 @@ class AttendanceRegularizationRepository {
   async findOpenRequest(employeeId, attendanceDate) {
     const rows = await this._read(
       "FIND-OPEN-REQUEST",
-      `SELECT attendance_approval_request_id, request_type, status, current_stage_no
+      `SELECT attendance_approval_request_id, request_type, status, current_stage_no,
+              candidate_ot_minutes, auto_created
          FROM attendance_approval_request
         WHERE requested_for_employee_id = ?
           AND attendance_date = ?
@@ -134,6 +148,85 @@ class AttendanceRegularizationRepository {
       [employeeId, attendanceDate]
     );
     return rows && rows[0] ? rows[0] : null;
+  }
+
+  /**
+   * Every request for these dates that the OT auto-queue must not duplicate
+   * (review fix #6).
+   *
+   * PENDING, APPROVED and REJECTED all count: a date somebody has already
+   * decided must not have a fresh request raised on it by a recalculation,
+   * and a rejection in particular must not be re-asked every time the engine
+   * runs. CANCELLED does not count, because that is the state the queue itself
+   * uses when it supersedes its own request, and a date whose OT later comes
+   * back is a date that genuinely needs asking about again.
+   */
+  async findRequestsForDates(employeeId, dates) {
+    if (!Array.isArray(dates) || dates.length === 0) return [];
+    return this._read(
+      "FIND-REQUESTS-FOR-DATES",
+      `SELECT attendance_approval_request_id, request_type, status,
+              DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date,
+              candidate_ot_minutes, auto_created
+         FROM attendance_approval_request
+        WHERE requested_for_employee_id = ?
+          AND attendance_date IN (?)
+          AND status <> 'CANCELLED'
+        ORDER BY attendance_date ASC, attendance_approval_request_id ASC`,
+      [employeeId, dates]
+    );
+  }
+
+  /**
+   * Supersede an OT request the queue raised itself, because a recalculation
+   * has since found there is no overtime on that date after all.
+   *
+   * CANCELLED rather than deleted, and every outstanding step is stamped
+   * SKIPPED with the reason, so the audit trail still shows that the system
+   * asked and then withdrew the question. The guards mean a request a human
+   * has already started deciding - `auto_created = 0`, or a status that is no
+   * longer PENDING - is never touched by this.
+   */
+  async cancelAutoOtRequest({ requestId, reason }) {
+    const connection = await getConnectionAsync(this.db);
+    try {
+      await beginTransactionAsync(connection);
+
+      const result = await queryAsync(
+        connection,
+        `UPDATE attendance_approval_request
+            SET status = 'CANCELLED',
+                approved_ot_minutes = NULL,
+                finalization_state = 'NOT_REQUIRED',
+                decided_at = CURRENT_TIMESTAMP(3)
+          WHERE attendance_approval_request_id = ?
+            AND status = 'PENDING'
+            AND auto_created = 1`,
+        [requestId]
+      );
+      if (!result || Number(result.affectedRows) !== 1) {
+        await rollbackAsync(connection);
+        return { code: 409, msg: "That request is no longer an open automatic OT request" };
+      }
+
+      await queryAsync(
+        connection,
+        `UPDATE attendance_approval_step
+            SET decision = 'SKIPPED', remarks = ?, decided_at = CURRENT_TIMESTAMP(3)
+          WHERE attendance_approval_request_id = ?
+            AND decision = 'PENDING'`,
+        [reason || "Superseded: recalculation found no overtime on this date", requestId]
+      );
+
+      await commitAsync(connection);
+      return { code: 200, attendance_approval_request_id: Number(requestId) };
+    } catch (err) {
+      await rollbackAsync(connection);
+      this._log("CANCEL-AUTO-OT-REQUEST", err);
+      throw err;
+    } finally {
+      connection.release();
+    }
   }
 
   /**
@@ -153,8 +246,8 @@ class AttendanceRegularizationRepository {
         `INSERT INTO attendance_approval_request
            (request_type, requested_for_employee_id, requested_by_employee_id,
             attendance_date, outlet_id, requester_class, reason,
-            candidate_ot_minutes, status, current_stage_no, total_stages)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 1, ?)`,
+            candidate_ot_minutes, auto_created, status, current_stage_no, total_stages)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 1, ?)`,
         [
           request.request_type,
           request.requested_for_employee_id,
@@ -164,6 +257,7 @@ class AttendanceRegularizationRepository {
           request.requester_class,
           request.reason,
           request.candidate_ot_minutes,
+          request.auto_created ? 1 : 0,
           chain.length,
         ]
       );
@@ -206,14 +300,37 @@ class AttendanceRegularizationRepository {
   }
 
   /**
-   * Record one stage's decision and move the request, atomically.
+   * Record one stage's decision, move the request, AND store the recalculated
+   * day - all in one transaction (review fix #4).
    *
-   * Both statements are guarded on the state they expect - the step on being
+   * Three statements are guarded on the state they expect - the step on being
    * still PENDING, the request on still being at this stage - so two approvers
    * clicking at the same instant cannot both succeed. A guard that matched
    * nothing rolls the whole thing back and the caller is told to re-read.
+   *
+   * `calculations` is the already-computed `attendance_day_calculation` row
+   * (or rows) for the date, produced by the calculation usecase with this very
+   * decision assumed. Writing it HERE, on this connection, is what makes the
+   * approval and the attendance it causes a single atomic move: a failure to
+   * store the day rolls the approval back, so there is no state in which a
+   * request is APPROVED - and its overtime therefore payable - while the
+   * stored day still reflects the punches as they were before it.
+   *
+   * `finalization_state` records which of those two cases a row is in, so the
+   * invariant is legible in the data and not only in this comment. It reaches
+   * SETTLED in the same commit as APPROVED; a request that is APPROVED but not
+   * SETTLED cannot exist, and payroll treats anything else as not yet final.
    */
-  async decideStage({ requestId, stageNo, decision, actorId, remarks, adminOverride, next }) {
+  async decideStage({
+    requestId,
+    stageNo,
+    decision,
+    actorId,
+    remarks,
+    adminOverride,
+    next,
+    calculations = null,
+  }) {
     const connection = await getConnectionAsync(this.db);
     try {
       await beginTransactionAsync(connection);
@@ -233,11 +350,18 @@ class AttendanceRegularizationRepository {
         return { code: 409, msg: "That stage has already been decided - reload and try again" };
       }
 
+      // SETTLED only where the recalculated day is committed in this very
+      // transaction. An intermediate stage is an ordinary audit write and
+      // settles nothing, so it stays NOT_REQUIRED.
+      const finalizationState =
+        next.status === "APPROVED" || next.status === "REJECTED" ? "SETTLED" : "NOT_REQUIRED";
+
       const requestResult = await queryAsync(
         connection,
         `UPDATE attendance_approval_request
             SET status = ?, current_stage_no = ?,
                 approved_ot_minutes = ?,
+                finalization_state = ?,
                 decided_at = CASE WHEN ? IN ('APPROVED','REJECTED') THEN CURRENT_TIMESTAMP(3) ELSE decided_at END
           WHERE attendance_approval_request_id = ?
             AND status = 'PENDING'
@@ -246,6 +370,7 @@ class AttendanceRegularizationRepository {
           next.status,
           next.current_stage_no,
           next.approved_ot_minutes,
+          finalizationState,
           next.status,
           requestId,
           stageNo,
@@ -256,8 +381,18 @@ class AttendanceRegularizationRepository {
         return { code: 409, msg: "This request moved while you were deciding it - reload and try again" };
       }
 
+      // The day the decision produced, stored before the commit. If this
+      // throws, the catch below rolls the decision back with it.
+      const stored = await writeCalculationsOnConnection(connection, calculations || []);
+
       await commitAsync(connection);
-      return { code: 200, status: next.status, current_stage_no: next.current_stage_no };
+      return {
+        code: 200,
+        status: next.status,
+        current_stage_no: next.current_stage_no,
+        finalization_state: finalizationState,
+        calculations_written: stored.written,
+      };
     } catch (err) {
       await rollbackAsync(connection);
       this._log("DECIDE-STAGE", err);

@@ -61,7 +61,7 @@ const find = (method, path) =>
   guards.find((g) => g.method === method && g.path === path);
 
 describe("the endpoints", () => {
-  it("defines exactly the three reads and the bulk write", () => {
+  it("defines exactly the three reads, the bulk write and the correction", () => {
     assert.deepEqual(
       guards.map((g) => `${g.method} ${g.path}`).sort(),
       [
@@ -69,8 +69,25 @@ describe("the endpoints", () => {
         "GET /work-shift-assignments/employee/:employee_id",
         "GET /work-shift-assignments/options",
         "POST /work-shift-assignments/bulk",
+        "POST /work-shift-assignments/correction",
       ]
     );
+  });
+
+  /**
+   * Attendance v2 review, the shift-assignment point. The correction is a
+   * SEPARATE endpoint behind a separate key, so the ordinary assignment route
+   * keeps having no way to backdate anything and a correction to payroll-
+   * consumed history is always a deliberate, separately granted act.
+   */
+  it("the correction is its own endpoint behind its own permission", () => {
+    const { guard } = find("POST", "/work-shift-assignments/correction");
+    assert.equal(guard.mode, "all");
+    assert.deepEqual(guard.keys, [P.EMPLOYEE_EDIT, P.CORRECT_EMPLOYEE_SHIFT_ASSIGNMENT]);
+
+    // And the ordinary write does NOT accept that key as an alternative.
+    const bulk = find("POST", "/work-shift-assignments/bulk");
+    assert.ok(!JSON.stringify(bulk.guard).includes("correct_employee_shift_assignment"));
   });
 
   it("M1: the options read is declared BEFORE the :employee_id read, so 'options' is never an id", () => {

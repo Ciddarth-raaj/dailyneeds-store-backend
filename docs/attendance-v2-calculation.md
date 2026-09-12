@@ -11,9 +11,10 @@ import) behaves exactly as it did.
 | Concern | File | Pure? |
 |---|---|---|
 | Which shift applied on a date | `utils/shiftResolution.js` | yes |
+| Which **version** of that shift applied | `utils/shift_config_version.js` | yes |
 | Worked minutes, breaks, shortage, candidate OT | `utils/attendance_engine.js` | yes |
 | Who approves, in what order | `utils/attendance_approval_chain.js` | yes |
-| The month, and the statutory base | `utils/attendance_payroll.js` | yes |
+| The month's neutral wage components | `utils/attendance_payroll.js` | yes |
 | Fetching and shaping | `usecase/attendance_calculation.js`, `usecase/attendance_regularization.js` | no |
 | SQL | `repository/attendance_calculation.js`, `repository/attendance_regularization.js` | no |
 
@@ -144,7 +145,8 @@ per-minute rate = daily_rate / THAT DATE'S NRM minutes
 ```
 
 * Total attendance pay is `attended_days × daily_rate` either way; the split
-  only decides how much of it is the statutory base.
+  only says how many attended days fell inside the month's base and how many
+  fell beyond it. It is not a statutory determination — see below.
 * The missing-hour deduction is separate and minute-based. A day is never
   downgraded to a half.
 * OT base hourly rate is `(Gross/26) / NRM hours`, calculated in minutes, times
@@ -152,20 +154,30 @@ per-minute rate = daily_rate / THAT DATE'S NRM minutes
 * Extra-day pay and approved OT can both apply on the same date and stay
   separate line items.
 
-### The statutory handoff
+### The statutory handoff — what Attendance does NOT decide
 
-`statutory_base_earnings` (= `salary_earnings`, the Salary Days line) is the
-PF/ESI salary-day base. Extra-day earnings are excluded from it by
-construction.
+**Attendance exposes neutral wage components. It does not decide which of them
+legally enter the PF or ESI base.**
 
-**No PF or ESI formula is recomputed here.** `utils/salary_engine.js` owns that
-law and is untouched by this work. What A4 exposes is the wage base that engine
-should be given for a period, named explicitly so the handoff is a field rather
-than an inference. Wiring it into a filing run is a later task, and doing it
-needs a decision this work deliberately did not take on its own: the existing
-engine calculates PF/ESI from a *monthly* gross, whereas a salary-day base for a
-part-attended month is a different number. That is flagged rather than silently
-resolved.
+| Field | What it is |
+|---|---|
+| `salary_day_earnings` | attended days inside the month's base × daily rate |
+| `extra_day_earnings` | attended days beyond that base × daily rate |
+| `approved_ot_earnings` | fully approved overtime only |
+| `missing_minute_deduction` | the minute-based shortfall |
+
+There is deliberately **no** `statutory_base_earnings` and no
+`statutory_base_days`, on the response or in the database. An earlier draft
+named the Salary Days line as the PF/ESI base and excluded Extra Days from it by
+construction — which is a determination of law made inside an attendance
+calculator. `utils/salary_engine.js` is the statutory authority, it is untouched
+by this work, and **integrating these components into it is a separate,
+separately reviewed step.**
+
+Nothing here should be read as saying which components are PF- or ESI-bearing.
+When that integration is designed it will also have to settle a question this
+work does not: the existing engine calculates PF/ESI from a *monthly* gross,
+whereas a salary-day base for a part-attended month is a different number.
 
 ### The Monthly Gross a month is priced on
 
@@ -194,3 +206,199 @@ priced on one rate and the choice is stated here rather than buried.
 ```
 cd dailyneeds-store-backend && IS_TEST=true node --test
 ```
+
+---
+
+# The review fixes
+
+What follows is the second pass over the above, correcting the implementation
+mismatches ChatGPT's review found. The A0–A4 structure and every behaviour that
+still matched the approved v2 handoff are preserved.
+
+## 1. Recalculation genuinely re-dates raw punches
+
+The first implementation had `attendanceDateForPunch()` and tested it, but the
+production path read `biomax_punch_derived.attendance_date` and grouped by that
+stored value — so a "recalculation" could never actually correct a mis-dated
+punch.
+
+`repository/attendance_calculation.js#getRawPunchesByCalendarWindow` now filters
+on `biomax_punch.punch_date`, the raw calendar date the device stamped, over a
+window widened by **one day at the end and none at the start** (the cutoff rule
+can only move a punch backwards). `usecase/attendance_calculation.js` then
+derives each punch's attendance date itself, from the dated shift assignment and
+that shift **version**'s own cutoff.
+
+`biomax_punch_derived` is preserved untouched and the receiver keeps writing it;
+its `attendance_date` is carried through the query as `ingest_attendance_date`
+so ingest and recalculation can be compared rather than one silently overwriting
+the other. A punch ingest could not date at all is now datable by the engine.
+
+## 2. Work Shift configuration is effective-dated
+
+A0 dated the employee → shift *assignment*. It did not date the *shift*, so
+editing a break, a cutoff or an OT rule changed the live tables in place and the
+next recalculation of a settled September date read October's configuration.
+
+`work_shift_config_version` is an append-only, effective-dated JSON snapshot of
+the whole definition of a shift — the master row's attendance/OT columns plus
+all seven weekly rows. Resolution for a date now answers **both** halves:
+which shift (the dated assignment) and which version of it.
+
+* Saving a Work Shift writes the live tables **exactly as before** — screen,
+  endpoint, response and every existing reader are unchanged — and additionally
+  appends a version *when the content actually changed*, effective today. A typo
+  fix in a shift name appends nothing.
+* No prior version is ever updated or deleted.
+* The migration **seeds** one version per existing shift at the v2 cutover
+  (2026-09-01). Without that seed the fix would not hold: a September date with
+  no version yet would fall back to the live tables and read the new edit.
+* A stored `attendance_day_calculation` row records
+  `work_shift_config_version_id`, so a historical recalculation reproduces the
+  same row rather than silently replacing the audit artifact with today's
+  settings.
+
+## 3. A missing-punch request carries the OT its proposed punch creates
+
+An odd punch count leaves the engine *before* overtime is calculated, so asking
+the incomplete day for its overtime always answered zero. A missing 00:30 OUT
+that plainly earns two hours could therefore enter approval showing none.
+
+`calculateProposedDay()` builds a **proposed effective punch list in memory**
+(raw punches plus the proposed manual punch), runs the same engine over it, and
+the request carries that day's candidate OT. Nothing is stored: the punch row
+stays invisible to the calculation until the chain finishes, and the final
+approval makes the punch and its OT effective in one pass.
+
+Refused: a proposed punch that does not resolve to the requested attendance date
+under the historical cutoff, and one that leaves the punch set still odd.
+
+## 4. A final decision and its recalculated day commit together
+
+The approval used to commit and *then* recalculate. If the recalculation failed,
+a request could be APPROVED — its OT payable — against a stored day still
+showing the punches as they were.
+
+`decide()` now computes the corrected day **before** opening the transaction
+and hands the rows to `decideStage`, which writes them on its own connection
+inside the same transaction via `writeCalculationsOnConnection`. A storage
+failure rolls the decision back with it. `finalization_state` records the
+invariant in the data: it reaches `SETTLED` in the same commit as `APPROVED` or
+`REJECTED`, so a row that is APPROVED but not SETTLED cannot exist.
+
+Intermediate stages remain ordinary audit writes and settle nothing.
+
+## 5. Every Shift Management OT rule is consumed
+
+The snapshot and the engine now read the whole finalized rule set:
+`overtime_allowed`, `overtime_minimum_minutes`,
+`overtime_minimum_threshold_only`, `overtime_rounding_method`,
+`overtime_rounding_interval_minutes`, `maximum_ot_minutes_per_day`, the four
+`pre_shift_overtime_*` columns, `late_offset_against_overtime`,
+`early_exit_offset_against_overtime`, and the weekday `ot_rate`.
+
+```
+split the earned surplus into its pre-shift and post-shift parts
+  -> apply the offsets (post-shift first, then pre-shift)
+  -> apply each side's own minimum and rounding
+  -> add them
+  -> apply the per-day cap to the TOTAL
+```
+
+* **Pre-shift time is not overtime by default.** With
+  `pre_shift_overtime_allowed` off it is excluded from the candidate entirely,
+  rather than falling through into the post-shift figure.
+* The pre-shift minimum is a **qualifying threshold only** — Shift Management has
+  no `..._threshold_only` column for it, and reading it as a floor would pay for
+  minutes nobody worked.
+* "Post-shift" means *the rest of it*: time after the out-time plus, on a
+  four-or-more-punch day, the minutes of an unused break. Those are ordinary
+  overtime and take the ordinary rules.
+* The offsets subtract from **overtime only**, never below zero, and create no
+  second wage deduction. The old Full/Half/Quarter Day payroll rules and the
+  monetary late/early deductions are **not** revived.
+
+## 6. Routine OT queues itself
+
+A recalculation that finds candidate OT on a complete, valid day with no request
+against it now raises the OT request automatically, on the same role/outlet
+chain. Nobody has to know to ask for overtime they have already worked.
+
+* **Idempotent.** A date is checked against every existing PENDING, APPROVED or
+  REJECTED request for it, so a retried recalculation creates nothing.
+* **Safe when the overtime goes away.** If a later recalculation finds no
+  candidate OT, an open request *the queue itself raised* is CANCELLED with its
+  steps stamped SKIPPED — superseded auditably, never left as stale payable OT.
+  A request a person raised, or one already decided, is never touched.
+* A date with a **missing punch** is left to its single combined
+  `REGULARIZATION_WITH_OT` request, which carries the OT the proposed punch
+  creates.
+* The queue runs **after** the calculation is stored and outside the approval
+  transaction: creating an approval request makes nothing payable.
+
+## 7. The break override is one current field
+
+The product contract gives Employee Master one `Special Break Duration
+Override`, nullable, with **no Effective From**. The first implementation built
+an effective-dated `employee_break_override` table, inventing a second temporal
+business rule the product does not have.
+
+That table is gone. The field is
+`new_employee.special_break_override_minutes` — the same shape
+`default_work_shift_id` already uses — read as one current value for every date
+the engine calculates. `NULL` means no override; `0` is the real setting "charge
+this employee no break at all", and the two stay distinguishable. No
+effective-date semantics exist on any path.
+
+## 8. Neutral wage components — see *The statutory handoff* above.
+
+## 9. Permission grants
+
+| Key | Granted by migration to |
+|---|---|
+| `view_calculated_attendance` | HR EXECUTIVE |
+| `view_attendance_payroll` | **nobody** |
+| `recalculate_attendance` | **nobody** |
+| `manage_employee_break_override` | **nobody** |
+| `correct_employee_shift_assignment` | **nobody** |
+
+Seeing how long a colleague worked is an attendance question and stays with HR.
+What those minutes are *worth* is a payroll report, assigned deliberately per
+designation on the existing rights screen. `recalculate_attendance` is withheld
+for a different reason: re-running the engine rewrites the rows payroll reads,
+so it is a write dressed as a refresh.
+
+## The shift-assignment correction path
+
+The ordinary assignment route dates every change **today** and has no field for
+any other date — moving somebody to a new shift must not rewrite yesterday. But
+the append-only resolver explicitly supports a same-date correction, and a
+genuine historical mistake has to be fixable by an authorized person.
+
+`POST /work-shift-assignments/correction` is that path, and nothing else is:
+
+* its own key, `correct_employee_shift_assignment`, granted to nobody;
+* an **explicit** `effective_from` with no default and no "today" fallback, so
+  nothing can be backdated by accident, and no future date;
+* a mandatory note, stored on the appended row;
+* `source = 'CORRECTION'`, distinguishable forever after;
+* one employee at a time — a bulk backdate is not a correction;
+* `default_work_shift_id` is **not** touched;
+* affected dates are **not** recalculated as a side effect; that is a separate
+  deliberate act by somebody holding `recalculate_attendance`.
+
+An inactive shift is accepted here and refused on the ordinary route: a
+correction records what was true then.
+
+**No frontend field is added.** This is the safe backend path the append-only
+resolver has always implied, made explicit and audited.
+
+## Tests added for the review fixes
+
+| File | Covers |
+|---|---|
+| `usecase/attendance_v2_review_fixes.test.js` | fixes 1, 2, 3, 4, 6, 7 through the **real** usecases wired as `server.js` wires them |
+| `utils/attendance_overtime_rules.test.js` | fix 5 — every OT rule, in its on and off positions |
+| `utils/shift_config_version.test.js` | fix 2 — version documents, fingerprints and date resolution |
+| `migrations/attendance_v2_migrations.test.js` | fixes 2, 5, 7, 8, 9 — schema and grants |
+| `usecase/employee_work_shift.test.js` | the correction path |

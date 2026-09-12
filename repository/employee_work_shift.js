@@ -285,6 +285,55 @@ class EmployeeWorkShiftRepository {
    * which is what keeps this method's old two-argument form working for any
    * caller that has not been updated.
    */
+  /**
+   * The AUTHORIZED CORRECTION path for a historical shift assignment.
+   *
+   * Separate from `assignWorkShift` on purpose, and doing a genuinely
+   * different thing: it appends ONE history row with an explicit, caller-
+   * supplied `effective_from`, `source = 'CORRECTION'` and a mandatory note,
+   * and it does NOT touch `new_employee.default_work_shift_id`. Correcting
+   * what somebody was rostered on in September must not change what they are
+   * rostered on today, and the ordinary assignment route must stay unable to
+   * backdate anything.
+   *
+   * Append-only, like every other row in this table. The row it corrects is
+   * left exactly as it was, so what payroll believed before the correction
+   * survives it; the resolver picks the correction because, for an equal
+   * `effective_from`, the greater assignment id wins.
+   */
+  async correctAssignment({ employeeId, workShiftId, effectiveFrom, note, createdBy }) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `INSERT INTO employee_work_shift_assignment
+           (employee_id, work_shift_id, effective_from, source, note, created_by)
+         VALUES (?, ?, ?, 'CORRECTION', ?, ?)`,
+        [employeeId, workShiftId, effectiveFrom, note, createdBy === undefined ? null : createdBy],
+        (err, result) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.EMPLOYEE_WORK_SHIFT",
+              code: "REPOSITORY.EMPLOYEE_WORK_SHIFT.CORRECT-ASSIGNMENT",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve({
+            code: 200,
+            employee_work_shift_assignment_id: result ? result.insertId : null,
+            employee_id: employeeId,
+            work_shift_id: workShiftId,
+            effective_from: effectiveFrom,
+            source: "CORRECTION",
+          });
+        }
+      );
+    });
+  }
+
   async assignWorkShift(employeeIds, workShiftId, options = {}) {
     const connection = await getConnectionAsync(this.db);
     try {

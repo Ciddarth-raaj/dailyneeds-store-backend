@@ -90,9 +90,26 @@ CREATE TABLE IF NOT EXISTS `attendance_approval_request` (
   `candidate_ot_minutes` INT NOT NULL DEFAULT 0 COMMENT 'as calculated at the time of raising',
   `approved_ot_minutes`  INT NULL COMMENT 'set on FINAL approval only',
 
+  -- Raised by the OT AUTO-QUEUE rather than by a person (review fix #6). It is
+  -- what makes the queue's withdrawal safe: only a request the system raised
+  -- and nobody has yet decided may be superseded when a later recalculation
+  -- finds the overtime gone. A request a person raised is never touched by
+  -- that path.
+  `auto_created` TINYINT(1) NOT NULL DEFAULT 0
+    COMMENT '1 = raised by the OT auto-queue, not by a person',
+
   `status` ENUM('PENDING','APPROVED','REJECTED','CANCELLED') NOT NULL DEFAULT 'PENDING',
   `current_stage_no` INT NOT NULL DEFAULT 1,
   `total_stages`     INT NOT NULL,
+
+  -- A final decision and the attendance recalculation it causes are committed
+  -- in ONE transaction (review fix #4), so SETTLED is reached in the same
+  -- commit as APPROVED or REJECTED and a row that is APPROVED but not SETTLED
+  -- cannot exist. Payroll is written to treat anything other than SETTLED as
+  -- not yet final, so even if one somehow did exist it could not be consumed
+  -- as though its day had been recalculated.
+  `finalization_state` ENUM('NOT_REQUIRED','PENDING','SETTLED') NOT NULL DEFAULT 'NOT_REQUIRED'
+    COMMENT 'SETTLED = the recalculated day was committed with this decision',
 
   `created_at`  TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   `decided_at`  TIMESTAMP(3) NULL COMMENT 'when the chain finished, either way',
@@ -107,7 +124,8 @@ CREATE TABLE IF NOT EXISTS `attendance_approval_request` (
     (`requested_for_employee_id`, `open_attendance_date`),
   KEY `idx_aareq_status_stage` (`status`, `current_stage_no`),
   KEY `idx_aareq_employee_date` (`requested_for_employee_id`, `attendance_date`),
-  KEY `idx_aareq_outlet` (`outlet_id`, `status`)
+  KEY `idx_aareq_outlet` (`outlet_id`, `status`),
+  KEY `idx_aareq_auto_open` (`auto_created`, `status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ============================================== 3. the audit trail, full ===
@@ -210,3 +228,4 @@ SELECT d.`designation_name` AS `DESIGNATION_WITHOUT_APPROVAL_ROLE_map_on_designa
   LEFT JOIN `attendance_approval_role` a ON a.`designation_id` = d.`designation_id`
  WHERE a.`attendance_approval_role_id` IS NULL
  ORDER BY d.`designation_name`;
+

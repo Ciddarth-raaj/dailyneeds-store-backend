@@ -30,6 +30,14 @@
  * hash is what makes a recomputation auditable: if the stored hash for a date
  * no longer matches the one the current configuration produces, the shift
  * definition has been edited since, and that is visible rather than silent.
+ *
+ * THE SHIFT DEFINITION IS DATED TOO (review fix #2). `readSchedule` and
+ * `readShiftConfig` are now handed the ATTENDANCE DATE as well as the shift
+ * id, so the caller can hand back the configuration VERSION that applied on
+ * that date (see `utils/shift_config_version.js`) rather than whatever the
+ * live `work_shift` row says today. Resolving a date therefore answers both
+ * halves of the question - which shift, and which version of it - and editing
+ * a Work Shift tomorrow cannot move a settled September figure.
  */
 
 const crypto = require("crypto");
@@ -43,8 +51,14 @@ const RESOLUTION_STATUS = Object.freeze({
   REST_DAY: "REST_DAY",
 });
 
-/** The version stamped on every snapshot, so an old row says which rule built it. */
-const SHIFT_SNAPSHOT_VERSION = 1;
+/**
+ * The version stamped on every snapshot, so an old row says which rule built it.
+ *
+ * 2 = the review-fix snapshot: it carries the whole Shift Management OT rule
+ * set (pre-shift OT and the two offset switches as well as post-shift OT) and
+ * the provenance of the configuration VERSION it was built from.
+ */
+const SHIFT_SNAPSHOT_VERSION = 2;
 
 /** `YYYY-MM-DD` from a string or a Date, else null. Text compare is date compare. */
 function toDateOnly(value) {
@@ -133,6 +147,12 @@ function snapshotHash(snapshot) {
     `ot_interval=${snapshot.overtime_rounding_interval_minutes}`,
     `ot_threshold_only=${snapshot.overtime_minimum_threshold_only ? 1 : 0}`,
     `ot_cap=${snapshot.maximum_ot_minutes_per_day === null ? "" : snapshot.maximum_ot_minutes_per_day}`,
+    `pre_ot_allowed=${snapshot.pre_shift_overtime_allowed ? 1 : 0}`,
+    `pre_ot_min=${snapshot.pre_shift_overtime_minimum_minutes}`,
+    `pre_ot_round=${snapshot.pre_shift_overtime_rounding_method}`,
+    `pre_ot_interval=${snapshot.pre_shift_overtime_rounding_interval_minutes}`,
+    `late_offset=${snapshot.late_offset_against_overtime ? 1 : 0}`,
+    `early_offset=${snapshot.early_exit_offset_against_overtime ? 1 : 0}`,
   ].join("|");
   return crypto.createHash("sha256").update(canonical).digest("hex").slice(0, 32);
 }
@@ -190,7 +210,37 @@ function buildShiftSnapshot(scheduleRow, shiftConfig, dow) {
       cfg.maximum_ot_minutes_per_day === null || cfg.maximum_ot_minutes_per_day === undefined
         ? null
         : nonNegativeInt(cfg.maximum_ot_minutes_per_day, 0),
+
+    // PRE-shift OT, its own four columns. Defaulting `allowed` to false is the
+    // safe direction: a shift that has never been configured for pre-shift OT
+    // pays none, rather than paying for every early arrival.
+    pre_shift_overtime_allowed: tinyBool(cfg.pre_shift_overtime_allowed),
+    pre_shift_overtime_minimum_minutes: nonNegativeInt(cfg.pre_shift_overtime_minimum_minutes, 0),
+    pre_shift_overtime_rounding_method: String(
+      cfg.pre_shift_overtime_rounding_method || "NONE"
+    ).toUpperCase(),
+    pre_shift_overtime_rounding_interval_minutes: nonNegativeInt(
+      cfg.pre_shift_overtime_rounding_interval_minutes,
+      0
+    ),
+
+    // The two OFFSET switches. They subtract from OVERTIME and from nothing
+    // else - v2 has no monetary late or early-exit penalty and these do not
+    // create one. See the header of `utils/attendance_engine.js`.
+    late_offset_against_overtime: tinyBool(cfg.late_offset_against_overtime),
+    early_exit_offset_against_overtime: tinyBool(cfg.early_exit_offset_against_overtime),
   };
+
+  // Which effective-dated CONFIGURATION VERSION this snapshot was built from,
+  // carried so a stored calculation can name it. `null` means it came from the
+  // live tables - either a date before the first version row, or a caller that
+  // does not use versions at all.
+  snapshot.config_version_id =
+    cfg.config_version_id === undefined ? null : cfg.config_version_id;
+  snapshot.config_version_hash =
+    cfg.config_version_hash === undefined ? null : cfg.config_version_hash;
+  snapshot.config_effective_from =
+    cfg.config_effective_from === undefined ? null : cfg.config_effective_from;
 
   snapshot.snapshot_hash = snapshotHash(snapshot);
   return snapshot;
@@ -202,8 +252,10 @@ function buildShiftSnapshot(scheduleRow, shiftConfig, dow) {
  * @param {object} input
  * @param {Array}  input.assignments   the employee's assignment history rows
  * @param {string} input.attendanceDate `YYYY-MM-DD`
- * @param {function} input.readSchedule (workShiftId, dayOfWeek) => schedule row|null
- * @param {function} input.readShiftConfig (workShiftId) => work_shift row|null
+ * @param {function} input.readSchedule (workShiftId, dayOfWeek, attendanceDate)
+ *        => schedule row|null, for the configuration version in force on that date
+ * @param {function} input.readShiftConfig (workShiftId, attendanceDate)
+ *        => work_shift row|null, likewise
  * @returns {{status: string, work_shift_id: number|null, assignment: object|null,
  *            snapshot: object|null}}
  */
@@ -222,7 +274,10 @@ function resolveShiftForDate({ assignments, attendanceDate, readSchedule, readSh
 
   const workShiftId = Number(assignment.work_shift_id);
   const dow = dayOfWeek(date);
-  const scheduleRow = readSchedule(workShiftId, dow);
+  // The DATE is passed as well as the shift: a shift's configuration is itself
+  // effective-dated, so "the Tuesday row of shift 7" is not a complete
+  // question without saying which Tuesday.
+  const scheduleRow = readSchedule(workShiftId, dow, date);
   if (!scheduleRow) {
     return {
       status: RESOLUTION_STATUS.NO_SCHEDULE_ROW,
@@ -234,7 +289,7 @@ function resolveShiftForDate({ assignments, attendanceDate, readSchedule, readSh
 
   const snapshot = buildShiftSnapshot(
     { ...scheduleRow, work_shift_id: workShiftId },
-    readShiftConfig ? readShiftConfig(workShiftId) : null,
+    readShiftConfig ? readShiftConfig(workShiftId, date) : null,
     dow
   );
 

@@ -1,10 +1,15 @@
 -- Attendance v2 / A1 + A4 - the calculated attendance store, the employee
 -- break override, and the monthly payroll roll-up.
 --
--- ADDITIVE ONLY. Three new tables and four permission keys. `biomax_punch`
--- and `biomax_punch_derived` are not read, written or altered by this
--- migration, and nothing here touches `new_employee`, `work_shift`,
--- `employee_salary` or any existing permission grant.
+-- ADDITIVE ONLY. Two new tables, ONE new nullable column on `new_employee`,
+-- and four permission keys. `biomax_punch` and `biomax_punch_derived` are not
+-- read, written or altered by this migration, and nothing here touches
+-- `work_shift`, `employee_salary` or any existing permission grant.
+--
+-- The single ALTER is an ADD COLUMN of a nullable field with no backfill and
+-- no data movement - the same shape as 20260910120000's
+-- `default_work_shift_id`. No existing column is modified or dropped, and no
+-- existing row changes value.
 --
 -- RAW PUNCHES STAY RAW. Nothing in this file stores a punch. The calculated
 -- rows below reference punches by id and hold the numbers derived from them;
@@ -19,30 +24,36 @@
 -- never a second source of truth: delete every row here and a recalculation
 -- reproduces them exactly.
 
--- ======================================== 1. the employee break override ===
+-- ================ 1. the Special Break Duration Override (review fix #7) ===
 -- The employee's own allowed break, which REPLACES the shift's break and
--- therefore changes their NRM for the day. Effective-dated and append-only for
--- the same reason the shift assignment history is: changing somebody's break
--- in October must not move September's worked minutes.
+-- therefore changes their NRM for the day.
 --
--- A NULL `break_minutes` is not permitted - "no override" is the absence of a
--- row, not a row saying nothing. Reverting to the shift's own break is done by
--- appending a row with `ends_on` set, which keeps the record of when the
--- override applied.
-CREATE TABLE IF NOT EXISTS `employee_break_override` (
-  `employee_break_override_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  `employee_id`    INT NOT NULL,
-  `break_minutes`  INT NOT NULL COMMENT 'replaces the work shift break for these dates',
-  `effective_from` DATE NOT NULL COMMENT 'inclusive attendance date',
-  `effective_to`   DATE NULL COMMENT 'inclusive - NULL = open ended',
-  `reason`         VARCHAR(255) NULL,
-  `created_by`     INT NULL,
-  `created_at`     TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-  PRIMARY KEY (`employee_break_override_id`),
-  KEY `idx_ebo_employee_effective` (`employee_id`, `effective_from`),
-  CONSTRAINT `chk_ebo_break_minutes` CHECK (`break_minutes` >= 0),
-  CONSTRAINT `chk_ebo_range` CHECK (`effective_to` IS NULL OR `effective_to` >= `effective_from`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+-- ONE CURRENT VALUE ON EMPLOYEE MASTER, WITH NO EFFECTIVE DATE. That is what
+-- the approved v2 product contract says: Employee Master carries one `Special
+-- Break Duration Override` field, nullable, and nothing about it is dated. The
+-- first implementation built an effective-dated `employee_break_override`
+-- history table instead, which invented a second temporal business rule the
+-- product does not have and which no screen or API would ever have driven.
+-- That table is not created here, and because this migration has never been
+-- merged or deployed there is nothing of it to migrate away from.
+--
+-- A column on `new_employee` rather than a side table, because that is the
+-- established pattern for a per-employee attendance setting in this database -
+-- `default_work_shift_id` is added exactly this way by 20260910120000 - and
+-- because Employee Master is where the product puts the field.
+--
+-- SAFE FOR THE NIGHTLY SYNC, for the same reason `default_work_shift_id` is:
+-- `services/synker.js` builds its upsert from the keys present in the Digisme
+-- payload, and this is not one of them, so the sync can neither set nor clear
+-- a locally entered override.
+--
+-- NULL = no override, which is the absence of a value and not a zero. A zero
+-- is a real setting meaning "this employee is charged no break at all".
+--
+-- One ALTER statement, so it either lands whole or not at all.
+ALTER TABLE `new_employee`
+  ADD COLUMN `special_break_override_minutes` INT NULL DEFAULT NULL
+    COMMENT 'Special Break Duration Override. Replaces the work shift break. NULL = no override. Not dated, by product contract.';
 
 -- ================================== 2. one calculated employee x date row ===
 -- THE STABLE OUTPUT CONTRACT the future frontend reads. Every field the v2
@@ -67,6 +78,8 @@ CREATE TABLE IF NOT EXISTS `attendance_day_calculation` (
   -- which shift applied on this date, resolved through the A0 dated history
   `work_shift_id`    INT NULL,
   `work_shift_weekly_schedule_id` INT NULL COMMENT 'snapshot reference, deliberately not an FK',
+  `work_shift_config_version_id` BIGINT UNSIGNED NULL
+    COMMENT 'the dated work_shift_config_version this calculation read. NULL = read from the live tables',
   `shift_snapshot`      JSON NOT NULL COMMENT 'the configuration this calculation consumed',
   `shift_snapshot_hash` CHAR(32) NOT NULL COMMENT 'fingerprint of the above, for drift detection',
 
@@ -86,13 +99,24 @@ CREATE TABLE IF NOT EXISTS `attendance_day_calculation` (
   `worked_minutes`          INT NOT NULL DEFAULT 0 COMMENT 'credited minutes',
   `shortage_minutes`        INT NOT NULL DEFAULT 0,
 
-  -- reported, never charged: v2 has no separate monetary late/early penalty
+  -- reported, never charged: v2 has no separate monetary late/early penalty.
+  -- The Work Shift's two OFFSET switches can subtract them from OVERTIME,
+  -- which is a different thing and is the only use v2 makes of either.
   `late_minutes`       INT NULL,
   `early_exit_minutes` INT NULL,
 
+  -- time genuinely outside the shift's own hours, before it and after it
+  `pre_shift_minutes`  INT NOT NULL DEFAULT 0,
+  `post_shift_minutes` INT NOT NULL DEFAULT 0,
+
   -- overtime. `approved_ot_minutes` is the ONLY column payroll may read.
-  `raw_ot_minutes`       INT NOT NULL DEFAULT 0 COMMENT 'before the shift OT minimum/rounding/cap',
-  `candidate_ot_minutes` INT NOT NULL DEFAULT 0 COMMENT 'after them. Worth zero until approved',
+  -- Every intermediate figure is stored so a payslip query can be answered
+  -- from the row instead of by re-running the engine (review fix #5).
+  `raw_ot_minutes`       INT NOT NULL DEFAULT 0 COMMENT 'earned surplus, before any shift OT rule',
+  `ot_offset_minutes`    INT NOT NULL DEFAULT 0 COMMENT 'late/early minutes subtracted from OT by the shift offset switches',
+  `pre_shift_ot_minutes` INT NOT NULL DEFAULT 0 COMMENT 'after the pre_shift_overtime_* rules. 0 unless pre-shift OT is allowed',
+  `post_shift_ot_minutes` INT NOT NULL DEFAULT 0 COMMENT 'after the overtime_* rules',
+  `candidate_ot_minutes` INT NOT NULL DEFAULT 0 COMMENT 'pre + post, capped per day. Worth zero until approved',
   `approved_ot_minutes`  INT NOT NULL DEFAULT 0 COMMENT 'FINAL APPROVED only',
   `ot_rate`              DECIMAL(3,1) NULL COMMENT 'the weekday multiplier from the snapshot',
 
@@ -124,10 +148,10 @@ CREATE TABLE IF NOT EXISTS `attendance_day_calculation` (
 -- effective on or before the period). This table is not a second salary
 -- source and never computes one; it records which figure it was handed.
 --
--- `statutory_base_earnings` is the Salary Days line and the PF/ESI salary-day
--- base. Extra-day earnings are excluded from it by construction. No PF or ESI
--- amount is computed or stored here - `utils/salary_engine.js` owns that law
--- and is untouched.
+-- The wage components are NEUTRAL: they are named for what they are and no
+-- column here claims to be a legal PF/ESI base. No PF or ESI amount is
+-- computed or stored here - `utils/salary_engine.js` owns that law and is
+-- untouched.
 CREATE TABLE IF NOT EXISTS `attendance_monthly_payroll` (
   `attendance_monthly_payroll_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `employee_id`   INT NOT NULL,
@@ -147,8 +171,11 @@ CREATE TABLE IF NOT EXISTS `attendance_monthly_payroll` (
   `monthly_gross` DECIMAL(12,2) NULL COMMENT 'snapshotted from the M2/M4 salary resolver',
   `daily_rate`    DECIMAL(12,2) NULL COMMENT 'monthly_gross / 26',
 
-  `salary_earnings`    DECIMAL(12,2) NULL,
-  `extra_day_earnings` DECIMAL(12,2) NULL,
+  -- NEUTRAL WAGE COMPONENTS (review fix #8). Each is named for what it IS.
+  -- None of them asserts what legally enters the PF or ESI base - see the
+  -- statutory-handoff note at the end of this table.
+  `salary_day_earnings` DECIMAL(12,2) NULL COMMENT 'attended days inside the month base x daily rate',
+  `extra_day_earnings`  DECIMAL(12,2) NULL COMMENT 'attended days beyond it x daily rate',
 
   `shortage_minutes`         INT NOT NULL DEFAULT 0,
   `missing_minute_deduction` DECIMAL(12,2) NULL COMMENT 'shortage x (daily_rate / that date NRM)',
@@ -156,11 +183,15 @@ CREATE TABLE IF NOT EXISTS `attendance_monthly_payroll` (
   `approved_ot_minutes`  INT NOT NULL DEFAULT 0,
   `approved_ot_earnings` DECIMAL(12,2) NULL,
 
-  `statutory_base_days`     INT NOT NULL DEFAULT 0 COMMENT '= salary_days. The PF/ESI base',
-  `statutory_base_earnings` DECIMAL(12,2) NULL COMMENT '= salary_earnings. Extra days excluded',
-
+  -- THE STATUTORY HANDOFF, and what this table deliberately does NOT hold
+  -- (review fix #8). There is no `statutory_base_days` or
+  -- `statutory_base_earnings` column. Naming one would have attendance make
+  -- the legal determination of which components enter the PF/ESI base, which
+  -- is not attendance's to make: `utils/salary_engine.js` remains the
+  -- statutory authority, it is not changed by v2, and feeding these neutral
+  -- components into it is a separate, separately reviewed step.
   `total_attendance_payable` DECIMAL(12,2) NULL
-    COMMENT 'salary + extra + approved OT - shortage. BEFORE other existing deductions/components',
+    COMMENT 'salary day + extra day + approved OT - shortage. BEFORE other existing deductions/components',
 
   `held_dates` JSON NULL COMMENT 'dates not settled - payroll must not treat the month as final',
   `is_final`   TINYINT(1) NOT NULL DEFAULT 0,
@@ -181,9 +212,18 @@ CREATE TABLE IF NOT EXISTS `attendance_monthly_payroll` (
 -- guards itself and a re-run adds nothing.
 --
 --   view_calculated_attendance     read the calculated day rows        HR EXECUTIVE
---   recalculate_attendance         re-run the engine for a range       HR EXECUTIVE
---   view_attendance_payroll        read the monthly roll-up            HR EXECUTIVE
+--   recalculate_attendance         re-run the engine for a range       NOBODY (admin only)
+--   view_attendance_payroll        read the monthly roll-up            NOBODY (admin only)
 --   manage_employee_break_override set somebody's special break        NOBODY (admin only)
+--
+-- WHY HR IS NOT GIVEN THE LAST THREE (review fix #9). Seeing how long a
+-- colleague worked is an attendance question and stays with HR. What those
+-- minutes are WORTH is a payroll report, and payroll report access is not
+-- something a migration should hand anybody by default - it is assigned
+-- deliberately, per designation, on the existing rights screen.
+-- `recalculate_attendance` is withheld for a different reason again: re-running
+-- the engine rewrites the rows payroll will read, so it is a write dressed as a
+-- refresh and the safe default is to grant it to nobody.
 INSERT INTO `all_permissions` (`permission_key`)
   SELECT 'view_calculated_attendance' FROM DUAL
    WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'view_calculated_attendance');
@@ -197,14 +237,18 @@ INSERT INTO `all_permissions` (`permission_key`)
   SELECT 'manage_employee_break_override' FROM DUAL
    WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'manage_employee_break_override');
 
--- The three READ/RECALC keys to HR EXECUTIVE and nobody else. The break
--- override key receives NO grant: changing somebody's NRM changes their pay,
--- and an administrator grants it deliberately on the designation screen.
+-- ONE grant, and only one: reading calculated attendance, to HR EXECUTIVE.
+-- That is consistent with HR's current attendance operational role and with
+-- the three earlier migrations that grant to that designation by name.
+--
+-- `view_attendance_payroll`, `recalculate_attendance` and
+-- `manage_employee_break_override` are DECLARED ABOVE AND GRANTED TO NOBODY.
+-- Administrators (user_type 2) reach them through the permission middleware's
+-- bypass, and anybody else is given them explicitly, by a person, on the
+-- designation rights screen.
 INSERT INTO `permissions` (`permission_key`, `designation_id`, `is_active`)
   SELECT k.`permission_key`, d.`designation_id`, TRUE
-    FROM ( SELECT 'view_calculated_attendance' AS `permission_key`
-           UNION ALL SELECT 'recalculate_attendance'
-           UNION ALL SELECT 'view_attendance_payroll' ) k
+    FROM ( SELECT 'view_calculated_attendance' AS `permission_key` ) k
     JOIN ( SELECT `designation_id` FROM `designation`
             WHERE UPPER(TRIM(`designation_name`)) = 'HR EXECUTIVE' ) d
    WHERE NOT EXISTS (

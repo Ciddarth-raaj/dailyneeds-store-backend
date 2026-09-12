@@ -6,6 +6,8 @@ const {
   commitAsync,
   rollbackAsync,
 } = require("../utils/batchInsert");
+const { buildConfigVersion, configVersionHash } = require("../utils/shift_config_version");
+const { istToday } = require("../utils/istDate");
 
 const WEEKLY_SCHEDULE_COLUMNS = [
   "work_shift_id",
@@ -35,6 +37,116 @@ function presentScheduleRow(row) {
  * `shift_master` table is owned by repository/shift.js and is never read or
  * written from here.
  */
+/**
+ * Append the shift's CONFIGURATION VERSION, if it actually changed (review
+ * fix #2).
+ *
+ * Runs on the caller's connection, inside the caller's transaction, right
+ * after the live tables have been written - so the version that is stored is
+ * exactly what was saved, and a save that rolls back leaves no version behind.
+ *
+ * NOTHING IS OVERWRITTEN. A change appends a row; an unchanged save appends
+ * nothing, which is what keeps a typo fix in a shift name from filling the
+ * table. Two saves on the SAME day that both change something append two rows
+ * with the same `effective_from`, and the resolver breaks that tie on id -
+ * newest wins - exactly as the A0 assignment history does.
+ *
+ * WHY TODAY AND NOT BACKDATED. A Work Shift edit made today describes the
+ * shift from today. Applying it to yesterday is what this whole fix exists to
+ * prevent: a settled September date must keep reading September's version.
+ */
+function hashOfStoredDocument(row) {
+  if (!row || row.config_document === null || row.config_document === undefined) return null;
+  try {
+    const doc =
+      typeof row.config_document === "string"
+        ? JSON.parse(row.config_document)
+        : row.config_document;
+    if (!doc) return null;
+    return configVersionHash(buildConfigVersion(doc.config, doc.schedule));
+  } catch (err) {
+    // An unreadable stored document is not a reason to refuse a save: it just
+    // means this save cannot prove nothing changed, so it appends a version.
+    return null;
+  }
+}
+
+async function appendConfigVersionOnConnection(connection, work_shift_id, options = {}) {
+  const [config] = await queryAsync(
+    connection,
+    `SELECT work_shift_id, shift_code,
+            overtime_allowed, overtime_minimum_minutes,
+            overtime_rounding_method, overtime_rounding_interval_minutes,
+            overtime_minimum_threshold_only, maximum_ot_minutes_per_day,
+            pre_shift_overtime_allowed, pre_shift_overtime_minimum_minutes,
+            pre_shift_overtime_rounding_method,
+            pre_shift_overtime_rounding_interval_minutes,
+            late_offset_against_overtime, early_exit_offset_against_overtime
+       FROM work_shift
+      WHERE work_shift_id = ?`,
+    [work_shift_id]
+  );
+  if (!config) return { appended: false, reason: "NO_SHIFT" };
+
+  const schedule = await queryAsync(
+    connection,
+    `SELECT day_of_week, is_working_day,
+            TIME_FORMAT(in_time, '%H:%i:%s')               AS in_time,
+            TIME_FORMAT(out_time, '%H:%i:%s')              AS out_time,
+            TIME_FORMAT(attendance_day_cutoff, '%H:%i:%s') AS attendance_day_cutoff,
+            break_minutes, ot_rate
+       FROM work_shift_weekly_schedule
+      WHERE work_shift_id = ?
+      ORDER BY day_of_week ASC`,
+    [work_shift_id]
+  );
+
+  const document = buildConfigVersion(config, schedule || []);
+  const hash = configVersionHash(document);
+
+  const [latest] = await queryAsync(
+    connection,
+    `SELECT work_shift_config_version_id, config_hash, config_document
+       FROM work_shift_config_version
+      WHERE work_shift_id = ?
+      ORDER BY effective_from DESC, work_shift_config_version_id DESC
+      LIMIT 1`,
+    [work_shift_id]
+  );
+
+  // Compared by RECOMPUTING the stored document's hash rather than by trusting
+  // the stored `config_hash` column. The migration seeds the first version
+  // straight from the live tables in SQL and leaves that column NULL, and a
+  // JSON document written by MySQL does not have to serialize in the same byte
+  // order as one written by Node; recomputing walks a fixed field list and is
+  // therefore immune to both. It is also what stops a seeded shift nobody has
+  // edited from growing a spurious second version on its next save.
+  if (latest && hashOfStoredDocument(latest) === hash) {
+    return { appended: false, reason: "UNCHANGED", hash };
+  }
+
+  const inserted = await queryAsync(
+    connection,
+    `INSERT INTO work_shift_config_version
+       (work_shift_id, effective_from, config_hash, config_document, source, created_by)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [
+      work_shift_id,
+      istToday(options.effective_from),
+      hash,
+      JSON.stringify(document),
+      options.source || "WORK_SHIFT_SAVE",
+      options.created_by === undefined ? null : options.created_by,
+    ]
+  );
+
+  return {
+    appended: true,
+    hash,
+    work_shift_config_version_id: inserted ? inserted.insertId : null,
+  };
+}
+
 class WorkShiftRepository {
   constructor(db) {
     this.db = db;
@@ -185,7 +297,7 @@ class WorkShiftRepository {
    * @param {object} config normalized work_shift fields
    * @param {object[]} weeklySchedule normalized rows, all seven days
    */
-  async createWorkShiftWithSchedule(config, weeklySchedule) {
+  async createWorkShiftWithSchedule(config, weeklySchedule, options = {}) {
     const connection = await getConnectionAsync(this.db);
     try {
       await beginTransactionAsync(connection);
@@ -195,8 +307,12 @@ class WorkShiftRepository {
 
       await this.replaceWeeklySchedule(connection, work_shift_id, weeklySchedule);
 
+      // The first configuration version, in the same transaction as the shift
+      // it describes, so a shift can never exist without one.
+      const version = await appendConfigVersionOnConnection(connection, work_shift_id, options);
+
       await commitAsync(connection);
-      return { code: 200, work_shift_id };
+      return { code: 200, work_shift_id, config_version: version };
     } catch (err) {
       await rollbackAsync(connection);
       if (err.code === "ER_DUP_ENTRY") {
@@ -222,7 +338,7 @@ class WorkShiftRepository {
    * `config` may be empty (schedule-only save) and `weeklySchedule` may be
    * null (configuration-only save, schedule left exactly as it was).
    */
-  async updateWorkShiftWithSchedule(work_shift_id, config, weeklySchedule) {
+  async updateWorkShiftWithSchedule(work_shift_id, config, weeklySchedule, options = {}) {
     const connection = await getConnectionAsync(this.db);
     try {
       await beginTransactionAsync(connection);
@@ -248,8 +364,12 @@ class WorkShiftRepository {
         await this.replaceWeeklySchedule(connection, work_shift_id, weeklySchedule);
       }
 
+      // Behind the scenes, and ONLY if the content actually changed: the
+      // screen, the endpoint and the response are exactly as they were.
+      const version = await appendConfigVersionOnConnection(connection, work_shift_id, options);
+
       await commitAsync(connection);
-      return { code: 200, work_shift_id };
+      return { code: 200, work_shift_id, config_version: version };
     } catch (err) {
       await rollbackAsync(connection);
       if (err.code === "ER_DUP_ENTRY") {
