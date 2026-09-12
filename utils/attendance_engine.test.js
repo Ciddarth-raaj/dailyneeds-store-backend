@@ -746,6 +746,24 @@ describe("deduction rule - Deduct Minutes per Deduction Interval, settled inside
     assert.equal(result.late_charged_minutes, 0);
   });
 
+  it("the 4 Sep case: late beyond grace AND a long early out - the grace is not refilled by the early out", () => {
+    // 09:57 -> 14:04 on 09:30-18:30 / 30m break: span 247, no break charged
+    // (under six hours), NRM 510, raw shortage 263. Late 27 -> 10 forgiven,
+    // 17 counted. Early 266, of which only 236 are in the shortage. Settled
+    // 17 + 236 = 253, i.e. the raw 263 less the 10 the grace forgave.
+    const result = day({
+      shift: ruled({ late_deduction_interval_minutes: 1, late_deduct_minutes: 1, early_exit_deduction_interval_minutes: 1, early_exit_deduct_minutes: 1 }),
+      punches: punches("09:57", "14:04"),
+    });
+    assert.equal(result.late_minutes, 27);
+    assert.equal(result.early_exit_minutes, 266);
+    assert.equal(result.worked_minutes, 247);
+    assert.equal(result.grace_forgiven_minutes, 10);
+    assert.equal(result.late_charged_minutes, 17);
+    assert.equal(result.early_exit_charged_minutes, 236);
+    assert.equal(result.shortage_minutes, 253);
+  });
+
   it("the settled shortage is capped at NRM", () => {
     const result = day({
       shift: ruled({ late_deduct_minutes: 600 }),

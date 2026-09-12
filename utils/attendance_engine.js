@@ -468,14 +468,16 @@ function applyGrace({ shortage_minutes = 0, late_minutes = 0, early_exit_minutes
   }
   const earlyForgiven = early > 0 && earlyGrace > 0 && early <= earlyGrace ? early : 0;
 
-  // 2. attribution, against the shortage the day actually has
-  const lateCounted = Math.min(late - lateForgiven, shortage);
-  const earlyCounted = Math.min(early - earlyForgiven, shortage - lateCounted);
-  // What the shortage would have charged for those same minutes had there
-  // been no grace: the raw late/early portion, forgiven or not.
+  // 2. attribution, against the shortage the day actually has. The raw late
+  // and early-out portions are carved out of the shortage FIRST, then the
+  // grace comes off each portion. Carving after forgiving would let the
+  // early-out portion grow into the minutes the grace had just forgiven,
+  // and the forgiveness would silently vanish from the total.
   const lateRaw = Math.min(late, shortage);
   const earlyRaw = Math.min(early, shortage - lateRaw);
   const otherShortage = shortage - lateRaw - earlyRaw;
+  const lateCounted = Math.max(0, lateRaw - lateForgiven);
+  const earlyCounted = Math.max(0, earlyRaw - earlyForgiven);
 
   // 3. the interval rule
   const charge = (counted, interval, deduct) =>
@@ -492,7 +494,7 @@ function applyGrace({ shortage_minutes = 0, late_minutes = 0, early_exit_minutes
 
   return {
     shortage_minutes: settled,
-    grace_forgiven_minutes: Math.min(shortage, lateForgiven + earlyForgiven),
+    grace_forgiven_minutes: Math.min(lateRaw, lateForgiven) + Math.min(earlyRaw, earlyForgiven),
     late_forgiven_minutes: lateForgiven,
     early_forgiven_minutes: earlyForgiven,
     late_charged_minutes: lateCharged,
