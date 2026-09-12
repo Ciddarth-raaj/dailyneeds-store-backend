@@ -46,12 +46,23 @@ const CONFIG_VERSION_FORMAT = 1;
  * The `work_shift` master columns that can change a calculated number.
  *
  * Everything else on that table - the shift's name, the legacy Full/Half-Day
- * settings, the regularization counters - is deliberately NOT versioned,
+ * settings, the regularization policy - is deliberately NOT versioned,
  * because none of it reaches the engine and versioning it would append a row
  * every time somebody fixed a typo in a shift name.
  */
 const VERSIONED_CONFIG_COLUMNS = Object.freeze([
   "shift_code",
+  // Lateness and early-out: the grace, and the interval-based deduction the
+  // engine settles the shortage with. A document written before these were
+  // versioned simply lacks the keys; the calculation usecase fills such a
+  // gap from the LIVE row, so an old version never silently means "no grace".
+  "late_grace_minutes",
+  "late_deduction_interval_minutes",
+  "late_deduct_minutes",
+  "late_exclude_grace_from_deduction",
+  "early_exit_grace_minutes",
+  "early_exit_deduction_interval_minutes",
+  "early_exit_deduct_minutes",
   "overtime_allowed",
   "overtime_minimum_minutes",
   "overtime_rounding_method",
@@ -113,7 +124,8 @@ function buildConfigVersion(config, schedule) {
       column === "overtime_minimum_threshold_only" ||
       column === "pre_shift_overtime_allowed" ||
       column === "late_offset_against_overtime" ||
-      column === "early_exit_offset_against_overtime"
+      column === "early_exit_offset_against_overtime" ||
+      column === "late_exclude_grace_from_deduction"
     ) {
       normalizedConfig[column] = tinyBool(value) ? 1 : 0;
     } else if (column === "maximum_ot_minutes_per_day") {

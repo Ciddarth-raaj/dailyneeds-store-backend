@@ -23,6 +23,22 @@
  *     Late and early minutes are REPORTED as metadata because a manager wants
  *     to see them, and they are deducted nowhere: the shortage is already the
  *     deduction, and charging both would deduct the same minute twice.
+ *
+ * GRACE IS FORGIVEN FROM THE SHORTAGE. The Work Shift's `late_grace_minutes`
+ * and `early_exit_grace_minutes` name how much of a late arrival or an early
+ * finish is tolerated. Because the shortage is the only deduction, a grace
+ * that was never subtracted from it would be a grace in name only: arriving
+ * two minutes late on a ten-minute grace would still cost two minutes. So
+ * `applyGrace` takes the forgiven minutes off the shortage, and off nothing
+ * else - worked minutes, surplus and OT are untouched, so a forgiven minute
+ * can never turn into paid overtime.
+ *
+ * THE INTERVAL DEDUCTION RULE, when the shift configures one. "Deduct D
+ * minutes for every started I minutes of lateness" replaces the one-for-one
+ * charge for the late minutes the shortage contains (and likewise for early
+ * out). It is still settled INSIDE the shortage - the same field payroll
+ * already prices - never as a second deduction beside it, and the day's
+ * shortage is capped at NRM.
  *   - It does not decide whether OT is payable. It produces a CANDIDATE, which
  *     is worth zero rupees until the A3 approval chain finishes.
  *
@@ -87,8 +103,11 @@ const BREAK_FREE_MINUTES = 360;
  *      version 1 is distinguishable from one the new rule produced; nothing
  *      is recalculated automatically - Recalculate Attendance applies it to a
  *      chosen range.
+ *   3  Lateness and early-out grace are forgiven from the shortage, and the
+ *      shift's deduction interval rule settles the late/early minutes the
+ *      shortage contains (`applyGrace`).
  */
-const CALCULATION_VERSION = 2;
+const CALCULATION_VERSION = 3;
 
 /** Every value `status` can take. A calculation is never left without one. */
 const CALC_STATUS = Object.freeze({
@@ -401,6 +420,85 @@ function resolveOvertime({
 /* --------------------------------------------------------- the day itself */
 
 /**
+ * Settle the part of the shortage that lateness and early out account for,
+ * under the Work Shift's own rules.
+ *
+ * Step 1 - GRACE. With `late_grace_minutes` G and "Do Not Deduct Grace
+ * Minutes" (`late_exclude_grace_from_deduction`) X:
+ *   - late <= G          -> the whole late is forgiven, whatever X says.
+ *   - late  > G and X on -> the first G minutes are forgiven, the rest count.
+ *   - late  > G and X off-> nothing is forgiven: the grace was used up and the
+ *                           whole late arrival counts, from minute one.
+ * Early out has a grace and no switch, so it is forgiven only when it fits
+ * inside the grace entirely.
+ *
+ * Step 2 - ATTRIBUTION. Only minutes the shortage actually contains can be
+ * settled here. A break gap that ran long is not a late arrival, and a late
+ * arrival that was worked off at the end of the day (the shortage is 0) is
+ * charged nothing: v2 never deducts a minute that was also worked. So the
+ * late minutes that count are capped at the shortage, and the early-out
+ * minutes at what is left of it after the late.
+ *
+ * Step 3 - THE DEDUCTION RULE. With `late_deduction_interval_minutes` I and
+ * `late_deduct_minutes` D both set, every started interval of the counted
+ * late minutes is charged D minutes: charged = ceil(counted / I) * D. With
+ * either at 0 the rule is not configured and the counted minutes are charged
+ * one for one, which is exactly what the shortage already did. Early out has
+ * its own I and D. The charge can exceed the minutes it stands for - that is
+ * what the rule is for - but the day's total shortage is capped at NRM, so a
+ * day can never owe more than the whole day.
+ */
+function applyGrace({ shortage_minutes = 0, late_minutes = 0, early_exit_minutes = 0, nrm_minutes = null, shift } = {}) {
+  const int = (v) => Math.max(0, Math.trunc(Number(v) || 0));
+  const shortage = int(shortage_minutes);
+  const late = int(late_minutes);
+  const early = int(early_exit_minutes);
+  const cfg = shift || {};
+  const lateGrace = int(cfg.late_grace_minutes);
+  const earlyGrace = int(cfg.early_exit_grace_minutes);
+  const excludeGrace = Boolean(cfg.late_exclude_grace_from_deduction);
+
+  // 1. grace
+  let lateForgiven = 0;
+  if (late > 0 && lateGrace > 0) {
+    if (late <= lateGrace) lateForgiven = late;
+    else if (excludeGrace) lateForgiven = lateGrace;
+  }
+  const earlyForgiven = early > 0 && earlyGrace > 0 && early <= earlyGrace ? early : 0;
+
+  // 2. attribution, against the shortage the day actually has
+  const lateCounted = Math.min(late - lateForgiven, shortage);
+  const earlyCounted = Math.min(early - earlyForgiven, shortage - lateCounted);
+  // What the shortage would have charged for those same minutes had there
+  // been no grace: the raw late/early portion, forgiven or not.
+  const lateRaw = Math.min(late, shortage);
+  const earlyRaw = Math.min(early, shortage - lateRaw);
+  const otherShortage = shortage - lateRaw - earlyRaw;
+
+  // 3. the interval rule
+  const charge = (counted, interval, deduct) =>
+    counted > 0 && interval > 0 && deduct > 0 ? Math.ceil(counted / interval) * deduct : counted;
+  const lateCharged = charge(lateCounted, int(cfg.late_deduction_interval_minutes), int(cfg.late_deduct_minutes));
+  const earlyCharged = charge(
+    earlyCounted,
+    int(cfg.early_exit_deduction_interval_minutes),
+    int(cfg.early_exit_deduct_minutes)
+  );
+
+  let settled = otherShortage + lateCharged + earlyCharged;
+  if (nrm_minutes !== null && nrm_minutes !== undefined) settled = Math.min(settled, int(nrm_minutes));
+
+  return {
+    shortage_minutes: settled,
+    grace_forgiven_minutes: Math.min(shortage, lateForgiven + earlyForgiven),
+    late_forgiven_minutes: lateForgiven,
+    early_forgiven_minutes: earlyForgiven,
+    late_charged_minutes: lateCharged,
+    early_exit_charged_minutes: earlyCharged,
+  };
+}
+
+/**
  * Calculate one employee's one attendance date.
  *
  * @param {object} input
@@ -478,6 +576,9 @@ function calculateAttendanceDay(input = {}) {
     break_charged_minutes: 0,
     worked_minutes: 0,
     shortage_minutes: 0,
+    grace_forgiven_minutes: 0,
+    late_charged_minutes: 0,
+    early_exit_charged_minutes: 0,
     late_minutes: null,
     early_exit_minutes: null,
     pre_shift_minutes: 0,
@@ -608,13 +709,35 @@ function calculateAttendanceDay(input = {}) {
   }
 
   const worked = Math.max(0, span - breakCharged);
-  const shortage = Math.max(0, nrm - worked);
+  const rawShortage = Math.max(0, nrm - worked);
   const surplus = Math.max(0, worked - nrm);
+
+  const grace = applyGrace({
+    shortage_minutes: rawShortage,
+    late_minutes: base.late_minutes || 0,
+    early_exit_minutes: base.early_exit_minutes || 0,
+    nrm_minutes: nrm,
+    shift,
+  });
+  const shortage = grace.shortage_minutes;
 
   base.actual_gap_minutes = actualGaps;
   base.break_charged_minutes = breakCharged;
   base.worked_minutes = worked;
   base.shortage_minutes = shortage;
+  base.grace_forgiven_minutes = grace.grace_forgiven_minutes;
+  base.late_charged_minutes = grace.late_charged_minutes;
+  base.early_exit_charged_minutes = grace.early_exit_charged_minutes;
+  if (shortage !== rawShortage - grace.grace_forgiven_minutes) {
+    base.notes.push(
+      `Deduction rule: late charged ${grace.late_charged_minutes} minute(s), early out charged ${grace.early_exit_charged_minutes} minute(s) under the shift's interval rule`
+    );
+  }
+  if (grace.grace_forgiven_minutes > 0) {
+    base.notes.push(
+      `Grace: ${grace.grace_forgiven_minutes} minute(s) forgiven from the shortage (late ${grace.late_forgiven_minutes}, early out ${grace.early_forgiven_minutes})`
+    );
+  }
 
   const rawOt = otBasis === null ? surplus : Math.min(surplus, otBasis);
   base.raw_ot_minutes = rawOt;
@@ -687,4 +810,5 @@ module.exports = {
   roundOvertime,
   resolveOvertime,
   calculateAttendanceDay,
+  applyGrace,
 };

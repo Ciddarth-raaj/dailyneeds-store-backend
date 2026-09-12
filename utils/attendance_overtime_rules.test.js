@@ -366,7 +366,11 @@ describe("the rules v2 does NOT revive", () => {
     assert.ok(!("half_day" in result));
   });
 
-  it("creates no monetary late or early deduction from the legacy columns", () => {
+  it("settles late and early-out minutes under the shift's grace and interval rule, inside the shortage", () => {
+    // 10:00 -> 21:00 with a 30-minute gap: 630 worked against NRM 660, so 30
+    // short - all of it a 60-minute late arrival (only 30 of which the
+    // shortage contains). Grace 5 used up, no exclusion: all 30 count, and
+    // every started 15 minutes charges 30 -> 60. Early out is 0.
     const plain = day({}, ["10:00", "13:00", "13:30", "21:00"]);
     const configured = day(
       {
@@ -379,8 +383,10 @@ describe("the rules v2 does NOT revive", () => {
       },
       ["10:00", "13:00", "13:30", "21:00"]
     );
-    assert.equal(configured.shortage_minutes, plain.shortage_minutes);
-    assert.equal(configured.worked_minutes, plain.worked_minutes);
-    assert.ok(!("late_deduction_minutes" in configured));
+    assert.equal(plain.shortage_minutes, 30);
+    assert.equal(configured.worked_minutes, plain.worked_minutes, "worked minutes never move");
+    assert.equal(configured.late_charged_minutes, 60);
+    assert.equal(configured.shortage_minutes, 60);
+    assert.equal(configured.candidate_ot_minutes, plain.candidate_ot_minutes, "OT is untouched");
   });
 });

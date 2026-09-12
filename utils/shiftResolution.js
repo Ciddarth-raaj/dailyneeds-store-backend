@@ -58,7 +58,7 @@ const RESOLUTION_STATUS = Object.freeze({
  * set (pre-shift OT and the two offset switches as well as post-shift OT) and
  * the provenance of the configuration VERSION it was built from.
  */
-const SHIFT_SNAPSHOT_VERSION = 2;
+const SHIFT_SNAPSHOT_VERSION = 3;
 
 /** `YYYY-MM-DD` from a string or a Date, else null. Text compare is date compare. */
 function toDateOnly(value) {
@@ -179,6 +179,13 @@ function snapshotHash(snapshot) {
     `pre_ot_interval=${snapshot.pre_shift_overtime_rounding_interval_minutes}`,
     `late_offset=${snapshot.late_offset_against_overtime ? 1 : 0}`,
     `early_offset=${snapshot.early_exit_offset_against_overtime ? 1 : 0}`,
+    `late_grace=${snapshot.late_grace_minutes}`,
+    `late_grace_excluded=${snapshot.late_exclude_grace_from_deduction ? 1 : 0}`,
+    `early_grace=${snapshot.early_exit_grace_minutes}`,
+    `late_interval=${snapshot.late_deduction_interval_minutes}`,
+    `late_deduct=${snapshot.late_deduct_minutes}`,
+    `early_interval=${snapshot.early_exit_deduction_interval_minutes}`,
+    `early_deduct=${snapshot.early_exit_deduct_minutes}`,
   ].join("|");
   return crypto.createHash("sha256").update(canonical).digest("hex").slice(0, 32);
 }
@@ -255,6 +262,17 @@ function buildShiftSnapshot(scheduleRow, shiftConfig, dow) {
     // create one. See the header of `utils/attendance_engine.js`.
     late_offset_against_overtime: tinyBool(cfg.late_offset_against_overtime),
     early_exit_offset_against_overtime: tinyBool(cfg.early_exit_offset_against_overtime),
+
+    // Lateness and early-out GRACE. Minutes inside the grace are forgiven
+    // from the day's shortage; see `applyGrace` in `utils/attendance_engine.js`
+    // for exactly how the "Do Not Deduct Grace Minutes" switch is read.
+    late_grace_minutes: nonNegativeInt(cfg.late_grace_minutes, 0),
+    late_exclude_grace_from_deduction: tinyBool(cfg.late_exclude_grace_from_deduction),
+    late_deduction_interval_minutes: nonNegativeInt(cfg.late_deduction_interval_minutes, 0),
+    late_deduct_minutes: nonNegativeInt(cfg.late_deduct_minutes, 0),
+    early_exit_grace_minutes: nonNegativeInt(cfg.early_exit_grace_minutes, 0),
+    early_exit_deduction_interval_minutes: nonNegativeInt(cfg.early_exit_deduction_interval_minutes, 0),
+    early_exit_deduct_minutes: nonNegativeInt(cfg.early_exit_deduct_minutes, 0),
   };
 
   // Which effective-dated CONFIGURATION VERSION this snapshot was built from,

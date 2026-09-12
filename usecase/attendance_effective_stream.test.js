@@ -240,7 +240,7 @@ describe("recalculation and storage", () => {
     assert.deepEqual(JSON.parse(batch[0].raw_punch_ids), [1, 2, 3], "every raw punch is still named on the stored row");
     assert.deepEqual(JSON.parse(batch[0].effective_punches).map((p) => p.punch_id), [1, 3]);
     assert.equal(batch[0].calculation_version, CALCULATION_VERSION);
-    assert.equal(CALCULATION_VERSION, 2, "historical results can differ, so the version is bumped");
+    assert.ok(CALCULATION_VERSION >= 2, "historical results can differ, so the version is bumped");
     assert.equal(batch[0].status, CALC_STATUS.FINAL);
   });
 

@@ -48,8 +48,8 @@ function fakes(state = {}) {
         requester_class: null,
       },
     findOpenRequest: async () => state.openRequest || null,
-    createRequest: async ({ request, chain, punch }) => {
-      calls.created.push({ request, chain, punch });
+    createRequest: async ({ request, chain, punch, auto_approve = null }) => {
+      calls.created.push({ request, chain, punch, auto_approve });
       const id = nextRequestId;
       nextRequestId += 1;
       return { attendance_approval_request_id: id, total_stages: chain.length };
@@ -81,6 +81,13 @@ function fakes(state = {}) {
     },
     listForEmployee: async () => [],
   };
+  if (state.policy !== undefined) {
+    repo.getRegularizationPolicy = async () => state.policy;
+    repo.countRegularizationsInMonth = async (...args) => {
+      calls.counted = args;
+      return state.usedThisMonth || 0;
+    };
+  }
 
   const calculation = {
     calculateRange: async (args) => {
@@ -591,5 +598,102 @@ describe("the pending queue", () => {
     const { usecase } = fakes();
     const result = await usecase.listPending({ actor: { employee_id: 100, user_type: 1 } });
     assert.deepEqual(result.rows, []);
+  });
+});
+
+describe("the work shift's regularization policy", () => {
+  const raise = (usecase) =>
+    usecase.raiseRequest({
+      actor,
+      requested_for_employee_id: 100,
+      attendance_date: "2026-09-14",
+      reason: "Forgot to punch out at the end of the shift",
+      punch_time: "2026-09-14 21:00:00",
+    });
+  const allowed = (extra = {}) => ({
+    work_shift_id: 7,
+    regularization_allowed: 1,
+    regularization_control_enabled: 0,
+    regularization_limit_per_month: null,
+    regularization_require_existing_punch: 1,
+    regularization_requires_approval: 1,
+    ...extra,
+  });
+
+  it("a repository without a policy reader enforces nothing (as before)", async () => {
+    const { usecase } = fakes({ day: day({ punch_count: 3 }) });
+    const result = await raise(usecase);
+    assert.equal(result.auto_approved, false);
+  });
+
+  it("refuses a shift with Regularization Allowed off", async () => {
+    const { usecase } = fakes({
+      day: day({ punch_count: 3 }),
+      policy: allowed({ regularization_allowed: 0 }),
+    });
+    await assert.rejects(raise(usecase), /Regularization is not allowed on work shift/);
+  });
+
+  it("enforces the monthly limit against open and approved requests in that calendar month", async () => {
+    const { usecase, repo } = fakes({
+      day: day({ punch_count: 3 }),
+      policy: allowed({ regularization_control_enabled: 1, regularization_limit_per_month: 2 }),
+      usedThisMonth: 2,
+    });
+    await assert.rejects(raise(usecase), /limit of 2 per month is already used for 2026-09/);
+    assert.deepEqual(repo.calls.counted, [100, "2026-09-01", "2026-09-30"]);
+  });
+
+  it("under the limit the request is raised as usual", async () => {
+    const { usecase } = fakes({
+      day: day({ punch_count: 3 }),
+      policy: allowed({ regularization_control_enabled: 1, regularization_limit_per_month: 2 }),
+      usedThisMonth: 1,
+    });
+    const result = await raise(usecase);
+    assert.equal(result.status, REQUEST_STATUS.PENDING);
+  });
+
+  it("with the control off the limit is not read at all", async () => {
+    const { usecase, repo } = fakes({
+      day: day({ punch_count: 3 }),
+      policy: allowed({ regularization_control_enabled: 0, regularization_limit_per_month: 1 }),
+      usedThisMonth: 5,
+    });
+    await raise(usecase);
+    assert.equal(repo.calls.counted, undefined);
+  });
+
+  it("no approval required: the request is created APPROVED with the corrected day, in one write", async () => {
+    const { usecase, repo, calculation } = fakes({
+      day: day({ punch_count: 3 }),
+      policy: allowed({ regularization_requires_approval: 0 }),
+    });
+    calculation.calculateRange = async (args) => {
+      if (args.assume) {
+        assert.equal(args.assume.status, REQUEST_STATUS.APPROVED);
+        assert.equal(args.assume.regularized_punch.io_time, "2026-09-14 21:00:00");
+        return [day({ punch_count: 4, attendance_date: "2026-09-14" })];
+      }
+      return [day({ punch_count: 3 })];
+    };
+    const result = await raise(usecase);
+    assert.equal(result.auto_approved, true);
+    const [created] = repo.calls.created;
+    assert.ok(created.auto_approve, "the repository is told to settle it");
+    assert.equal(created.auto_approve.calculations.length, 1);
+    assert.equal(created.chain.length, 1);
+    assert.equal(created.chain[0].approver_role, APPROVER_ROLE.ADMIN);
+    assert.equal(created.request.chain_source, "SHIFT_POLICY_NO_APPROVAL");
+    assert.equal(created.punch.punch_time, "2026-09-14 21:00:00");
+  });
+
+  it("approval required: nothing is auto-approved and the normal chain is used", async () => {
+    const { usecase, repo } = fakes({ day: day({ punch_count: 3 }), policy: allowed() });
+    const result = await raise(usecase);
+    assert.equal(result.auto_approved, false);
+    const [created] = repo.calls.created;
+    assert.equal(created.auto_approve, null);
+    assert.ok(created.chain.length >= 1);
   });
 });
