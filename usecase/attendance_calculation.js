@@ -20,6 +20,7 @@ const {
   computeMonthlyAttendancePayroll,
   daysInMonth,
 } = require("../utils/attendance_payroll");
+const { resolveEffectiveRawPunches } = require("../utils/attendance_effective_punches");
 
 /**
  * Attendance v2 - the orchestration between the repository and the pure
@@ -45,10 +46,13 @@ const {
  * v2 engine reproduces the attendance-day assignment independently, which is
  * what makes a recalculation a genuine recalculation.
  *
- * The window is widened by ONE DAY at the end, and by nothing at the start,
- * because the cutoff rule can only ever move a punch BACKWARDS onto the
- * previous attendance date: a 00:30 finish on the 15th belongs to the 14th,
- * and no rule anywhere moves a punch forwards.
+ * The window is widened by ONE DAY at the end for DATING, because the cutoff
+ * rule can only ever move a punch BACKWARDS onto the previous attendance
+ * date: a 00:30 finish on the 15th belongs to the 14th, and no rule anywhere
+ * moves a punch forwards. It is also widened by ONE DAY at the start, for the
+ * ten-minute duplicate rule only: the first punch of a range is compared with
+ * the last KEPT punch before it, which may sit on the previous calendar day.
+ * Nothing from that day is calculated or stored - see `buildContext`.
  *
  * Everything else is still derived from the immutable raw punches plus the
  * dated shift history plus the fully approved regularizations, so running it
@@ -201,15 +205,25 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    * applied on this date".
    */
   const buildContext = async ({ employee_id, from, to, assume_override = null }) => {
-    // ONE day of slack at the END only - see the file header. A punch on the
-    // morning after `to` can belong to `to`; a punch before `from` can never
-    // belong to `from`.
+    // ONE day of slack at the END for DATING - see the file header. A punch on
+    // the morning after `to` can belong to `to`; a punch before `from` can
+    // never belong to `from`.
+    //
+    // ONE day of slack at the START for the DUPLICATE RULE only. Whether the
+    // first punch of `from` is a duplicate depends on the last KEPT punch
+    // before it - 23:58 on the previous calendar day and 00:04 are six
+    // minutes apart - so the effective stream is resolved over the day
+    // before as well. Nothing from that day is calculated or stored here:
+    // a punch that dates to before `from` is dropped by the grouping below
+    // exactly as it always was. The duplicate chain resets at any gap longer
+    // than ten minutes, so one day is far more neighbourhood than it needs.
+    const punchWindowFrom = addDays(from, -1);
     const punchWindowTo = addDays(to, 1);
 
     const [assignments, rawPunches, regularized, employee, approvals, storedOverrides] =
       await Promise.all([
         attendanceCalculationRepo.getShiftAssignmentHistory(employee_id),
-        attendanceCalculationRepo.getRawPunchesByCalendarWindow(employee_id, from, punchWindowTo),
+        attendanceCalculationRepo.getRawPunchesByCalendarWindow(employee_id, punchWindowFrom, punchWindowTo),
         attendanceCalculationRepo.getApprovedRegularizedPunches(employee_id, from, to),
         attendanceCalculationRepo.getBreakOverride(employee_id),
         attendanceCalculationRepo.getApprovalStateByDate(employee_id, from, to),
@@ -330,28 +344,67 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     };
   };
 
+  /** `biomax_punch.ingest_source` -> the engine's source. Only the import is not a device. */
+  const rawSource = (ingestSource) =>
+    ingestSource === "DIGISME_IMPORT" || ingestSource === "IMPORT"
+      ? PUNCH_SOURCE.IMPORT
+      : PUNCH_SOURCE.BIOMAX;
+
   /**
-   * Raw punches, re-dated to the attendance day they belong to and grouped by
-   * it. Anything that lands outside the requested range is dropped.
+   * THE EFFECTIVE RAW STREAM, then the grouping by attendance date.
+   *
+   * This is the one implementation point of the two raw-punch exclusions.
+   * Every path that calculates - the preview, a single-date recalculation,
+   * the bulk run, the approval's assumed day, the proposed-punch pricing -
+   * comes through `buildContext` and then here, so the rule holds the same
+   * way for a historical date, a freshly imported punch and tonight's
+   * device punch. In this order:
+   *
+   *   1. raw BIOMAX + IMPORT punches, one chronological stream by the
+   *      absolute punch instant (the calendar date takes no part, so a
+   *      midnight crossing does not reset anything);
+   *   2. manually VOIDED punches are removed;
+   *   3. a punch ten minutes or less after the LAST KEPT punch is IGNORED
+   *      as a duplicate (`utils/attendance_effective_punches.js`);
+   *   4. the kept punches are re-dated to their attendance day and grouped;
+   *   5. the APPROVED regularized punches join per date in `calculateRange`,
+   *      untouched by steps 2 and 3, and the engine pairs positionally.
+   *
+   * The excluded punches are grouped by the same derived date and handed to
+   * the engine as `excluded_punches`, so the day can show them; they count
+   * for nothing. Anything that lands outside the requested range is dropped
+   * either way - including the extra day read for step 3.
    */
   const groupRawPunchesByAttendanceDate = ({ rawPunches, readCutoff, from, to }) => {
+    const shaped = (rawPunches || []).map((punch) => ({
+      punch_id: punch.punch_id,
+      source: rawSource(punch.ingest_source),
+      dev_id: punch.dev_id,
+      io_time: punch.io_time,
+      // What ingest thought, kept beside what the engine derived, so a
+      // disagreement is visible instead of silent.
+      ingest_attendance_date: punch.ingest_attendance_date || null,
+      attendance_punch_void_id: punch.attendance_punch_void_id || null,
+      void_reason: punch.void_reason === undefined ? null : punch.void_reason,
+      voided_by_employee_id:
+        punch.voided_by_employee_id === undefined ? null : punch.voided_by_employee_id,
+      voided_at: punch.voided_at === undefined ? null : punch.voided_at,
+    }));
+
+    const { all } = resolveEffectiveRawPunches(shaped);
+
     const byDate = new Map();
-    (rawPunches || []).forEach((punch) => {
+    const excludedByDate = new Map();
+    all.forEach((punch) => {
       const derived = attendanceDateForPunch({ ioTime: punch.io_time, readCutoff });
       if (derived === null || derived < from || derived > to) return;
-      if (!byDate.has(derived)) byDate.set(derived, []);
-      byDate.get(derived).push({
-        punch_id: punch.punch_id,
-        source: punch.ingest_source === "IMPORT" ? PUNCH_SOURCE.IMPORT : PUNCH_SOURCE.BIOMAX,
-        dev_id: punch.dev_id,
-        io_time: punch.io_time,
-        // What ingest thought, kept beside what the engine derived, so a
-        // disagreement is visible instead of silent.
-        ingest_attendance_date: punch.ingest_attendance_date || null,
-        attendance_date: derived,
-      });
+      const { attendance_punch_void_id, void_reason, voided_by_employee_id, voided_at, ...rest } = punch;
+      const row = { ...rest, attendance_date: derived };
+      const target = punch.effective_status === "USED" ? byDate : excludedByDate;
+      if (!target.has(derived)) target.set(derived, []);
+      target.get(derived).push(row);
     });
-    return byDate;
+    return { byDate, excludedByDate };
   };
 
   /**
@@ -388,7 +441,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     }
 
     const context = await buildContext({ employee_id, from, to, assume_override });
-    const rawByDate = groupRawPunchesByAttendanceDate({
+    const { byDate: rawByDate, excludedByDate } = groupRawPunchesByAttendanceDate({
       rawPunches: context.rawPunches,
       readCutoff: context.readCutoff,
       from,
@@ -493,6 +546,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
         shift: resolution.snapshot,
         shift_status: resolution.status,
         punches: rawByDate.get(date) || [],
+        excluded_punches: excludedByDate.get(date) || [],
         regularized_punches: regularizedPunches.map((p) => ({
           punch_id: p.punch_id === undefined ? null : p.punch_id,
           source: PUNCH_SOURCE.REGULARIZED,
