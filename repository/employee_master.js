@@ -197,6 +197,20 @@ class EmployeeMasterRepository {
   }
 
   /**
+   * Corrects the joining date of the CURRENT spell. The only write to
+   * `date_of_joining` outside create / rejoin, and it goes through the
+   * usecase's joining-date correction, which also moves the period's
+   * `joined_on` in the same transaction so the two never disagree.
+   */
+  async setJoiningDate(tx, employeeId, joinedOn) {
+    const res = await tx.query(`UPDATE new_employee SET date_of_joining = ? WHERE employee_id = ?`, [
+      joinedOn,
+      employeeId,
+    ]);
+    return res.affectedRows;
+  }
+
+  /**
    * Marks the employee as having left. Guarded by `status = ?` in the WHERE
    * so a second concurrent resignation affects zero rows rather than
    * overwriting the first one's date; the caller checks affectedRows.

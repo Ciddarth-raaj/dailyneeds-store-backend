@@ -330,8 +330,9 @@ class EmployeeMasterUsecase {
     const forbidden = offered.filter((k) => LIFECYCLE_CONTROLLED_FIELDS.includes(k));
     if (forbidden.length) {
       throw new ValidationError(
-        `${forbidden.join(", ")} cannot be changed here. employee_id is permanent; status, ` +
-          `date_of_joining and resignation_date are set by the create, resign and rejoin actions.`
+        `${forbidden.join(", ")} cannot be changed here. employee_id is permanent; status and ` +
+          `resignation_date are set by the create, resign and rejoin actions; a wrongly recorded ` +
+          `date_of_joining is corrected through the joining-date action.`
       );
     }
     const unknown = offered.filter((k) => !EDITABLE_FIELDS.includes(k));
@@ -370,6 +371,64 @@ class EmployeeMasterUsecase {
         rows_changed: changed,
         security_relevant: securityRelevant,
         sessions_revoked: sessionsRevoked,
+      };
+    });
+  }
+
+  /* ==================================================================== */
+  /*  correct joining date                                                */
+  /* ==================================================================== */
+  /**
+   * HR corrects a joining date that was typed wrongly. Behind `employee_edit`
+   * at the route - the same user-based right as the rest of the employee
+   * record - but deliberately NOT part of `editEmployee`: the date describes
+   * the CURRENT employment period as well as the master row, so C1c moves
+   * the period's date in the same transaction and records the change as a
+   * `period_corrected` event with the old and new value. Nothing here opens
+   * or closes a period; the reconciler is not called.
+   *
+   * This layer checks the date's shape, that it is not in the future, and
+   * that it is not after a recorded resignation. The period-ordering rules
+   * (not after the spell's own end, after the previous spell ended) belong
+   * to C1c and are applied there.
+   */
+  async correctJoiningDate(employeeId, input, { actorEmployeeId = null } = {}) {
+    const joinedOn = effectiveDate(input && input.date_of_joining, "date_of_joining");
+    rejectFutureDate(joinedOn, "date_of_joining");
+
+    return this.repo.withTransaction(async (tx) => {
+      const employee = await this.repo.lockEmployee(tx, employeeId);
+      if (!employee) throw new NotFoundError(`employee ${employeeId} does not exist`);
+
+      const resignedOn = dateOnly(employee.resignation_date);
+      if (Number(employee.status) !== STATUS.ACTIVE && resignedOn !== null && joinedOn > resignedOn) {
+        throw new ValidationError(`date_of_joining '${joinedOn}' is after the resignation date '${resignedOn}'`);
+      }
+
+      const current = await this.lifecycleRepo.getLatestPeriod(tx, employeeId);
+      if (current && dateOnly(current.joined_on) === joinedOn && dateOnly(employee.date_of_joining) === joinedOn) {
+        throw new ValidationError("nothing to change");
+      }
+
+      // The row is locked above, so a 0 here only means the master already
+      // held this date and the period did not - which is exactly a mismatch
+      // this action exists to repair.
+      await this.repo.setJoiningDate(tx, employeeId, joinedOn);
+
+      const period = await this.lifecycle.correctJoinedOn(employeeId, joinedOn, { tx, actorEmployeeId });
+
+      this._log(logger.LEVEL.INFO, "JOINING-DATE", `employee ${employeeId} joining date corrected to ${joinedOn}`, {
+        employeeId,
+        actorEmployeeId,
+        previousJoinedOn: period.previous_joined_on,
+      });
+      return {
+        code: 200,
+        employee_id: employeeId,
+        period_no: period.period_no,
+        previous_joined_on: period.previous_joined_on,
+        joined_on: joinedOn,
+        needs_review: period.needs_review,
       };
     });
   }

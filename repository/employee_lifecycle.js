@@ -229,6 +229,22 @@ class EmployeeLifecycleRepository {
     return res.affectedRows;
   }
 
+  /**
+   * Overwrites a period's `joined_on`, known or not. Unlike `fillNullDate`
+   * this IS allowed to replace a recorded date: it exists for HR's audited
+   * joining-date correction, which records the old and new value on the
+   * event it writes in the same transaction. Nothing automatic calls it.
+   */
+  async setJoinedOn(tx, periodId, value, { needs_review, actor_employee_id }) {
+    const res = await tx.query(
+      `UPDATE employee_employment_period
+          SET joined_on = ?, needs_review = ?, updated_by = ?
+        WHERE period_id = ?`,
+      [value, needs_review ? 1 : 0, actor_employee_id === undefined ? null : actor_employee_id, periodId]
+    );
+    return res.affectedRows;
+  }
+
   async insertEvent(tx, event) {
     const res = await tx.query(
       `INSERT INTO employee_lifecycle_event

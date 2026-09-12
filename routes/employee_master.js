@@ -196,6 +196,37 @@ class EmployeeMasterRoutes {
       res.end();
     });
 
+    /* ----------------------------------------------------- joining date */
+    /**
+     * Correcting a wrongly recorded joining date. `employee_edit`, the same
+     * user-based right as the rest of the record - it is a correction to the
+     * employee's own data, not a lifecycle transition. Kept off the generic
+     * edit body because the usecase moves the current period's date with it.
+     */
+    router.post(
+      "/employee/:employee_id/joining-date",
+      this.permissions.require(P.EMPLOYEE_EDIT),
+      async (req, res) => {
+        try {
+          const employeeId = Number(req.params.employee_id);
+          if (!Number.isInteger(employeeId) || employeeId <= 0) {
+            res.json({ code: 422, msg: "employee_id must be a positive integer" });
+            res.end();
+            return;
+          }
+          const isValid = Joi.validate(req.body, { date_of_joining: Joi.string().required() });
+          if (isValid.error !== null) throw isValid.error;
+
+          res.json(
+            await this.usecase.correctJoiningDate(employeeId, req.body, { actorEmployeeId: this._actor(req) })
+          );
+        } catch (err) {
+          this._fail(res, err);
+        }
+        res.end();
+      }
+    );
+
     /* ------------------------------------------------------------ resign */
     router.post("/employee/:employee_id/resign", this.permissions.require(P.EMPLOYEE_RESIGN), async (req, res) => {
       try {

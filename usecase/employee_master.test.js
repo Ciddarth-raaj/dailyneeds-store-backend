@@ -119,6 +119,14 @@ function makeMasterRepo(world) {
       record(tx, () => world.employees.set(Number(id), before));
       return 1;
     },
+    async setJoiningDate(tx, id, joinedOn) {
+      const e = world.employees.get(Number(id));
+      if (!e) return 0;
+      const before = { ...e };
+      e.date_of_joining = joinedOn;
+      record(tx, () => world.employees.set(Number(id), before));
+      return 1;
+    },
     async markResigned(tx, id, endedOn) {
       const e = world.employees.get(Number(id));
       if (!e || Number(e.status) !== 1) return 0;
@@ -261,6 +269,16 @@ function makeLifecycleRepo(world) {
       const row = world.periods.find((p) => p.period_id === periodId);
       if (!row || row[column] !== null) return 0;
       const next = { ...row, [column]: value, needs_review: patch.needs_review ? 1 : 0 };
+      world.check(next);
+      const before = { ...row };
+      Object.assign(row, next);
+      record(tx, () => Object.assign(row, before));
+      return 1;
+    },
+    async setJoinedOn(tx, periodId, value, patch) {
+      const row = world.periods.find((p) => p.period_id === periodId);
+      if (!row) return 0;
+      const next = { ...row, joined_on: value, needs_review: patch.needs_review ? 1 : 0 };
       world.check(next);
       const before = { ...row };
       Object.assign(row, next);
@@ -435,6 +453,91 @@ describe("Edit Employee", () => {
 
   it("the security-relevant list is exactly what the auth layer reads", () => {
     assert.deepEqual(SECURITY_RELEVANT_FIELDS.sort(), ["designation_id", "store_id"]);
+  });
+});
+
+/* ============================================== correct joining date ==== */
+describe("Correct joining date", () => {
+  it("moves the master date and the current period's joined_on together, and records why", async () => {
+    const { world, uc } = build();
+    const { employee_id: id } = await uc.createEmployee(VALID, { actorEmployeeId: 7 });
+    assert.deepEqual(shapeOf(world, id), [[1, "open", "2022-03-01", null]]);
+
+    const out = await uc.correctJoiningDate(id, { date_of_joining: "2022-02-14" }, { actorEmployeeId: 7 });
+    assert.equal(out.code, 200);
+    assert.equal(out.previous_joined_on, "2022-03-01");
+    assert.equal(out.joined_on, "2022-02-14");
+    assert.equal(world.employees.get(id).date_of_joining, "2022-02-14");
+    assert.deepEqual(shapeOf(world, id), [[1, "open", "2022-02-14", null]]);
+
+    const corrected = world.events.filter((e) => e.employee_id === id && e.event_type === "period_corrected");
+    assert.equal(corrected.length, 1);
+    assert.equal(corrected[0].actor_employee_id, 7);
+    assert.equal(corrected[0].detail.reason, "date_corrected");
+    assert.equal(corrected[0].detail.previous_joined_on, "2022-03-01");
+    assert.equal(corrected[0].detail.joined_on, "2022-02-14");
+    // No transition happened: still one period, still open, no new opened event.
+    assert.equal(openedEvents(world, id).length, 1);
+  });
+
+  it("is the only way in: the generic edit still refuses date_of_joining", async () => {
+    const { uc } = build();
+    const { employee_id: id } = await uc.createEmployee(VALID);
+    await assert.rejects(() => uc.editEmployee(id, { date_of_joining: "2022-02-14" }), /cannot be changed here/);
+  });
+
+  it("refuses a future date, a malformed date, an unchanged date and an unknown employee", async () => {
+    const { uc } = build();
+    const { employee_id: id } = await uc.createEmployee(VALID);
+    await assert.rejects(() => uc.correctJoiningDate(id, { date_of_joining: "2999-01-01" }), /in the future/);
+    await assert.rejects(() => uc.correctJoiningDate(id, { date_of_joining: "01/02/2022" }), /YYYY-MM-DD/);
+    await assert.rejects(() => uc.correctJoiningDate(id, {}), /date_of_joining is required/);
+    await assert.rejects(() => uc.correctJoiningDate(id, { date_of_joining: "2022-03-01" }), /nothing to change/);
+    await assert.rejects(() => uc.correctJoiningDate(999999, { date_of_joining: "2022-03-01" }), /does not exist/);
+  });
+
+  it("keeps the corrected date inside the spell: not after its end, and after the previous spell", async () => {
+    const { world, uc } = build();
+    const { employee_id: id } = await uc.createEmployee(VALID);
+    await uc.resignEmployee(id, { resignation_date: "2023-06-30" });
+    // Closed period 1: the joining date may move but never past the end. The
+    // master refuses it against the resignation date first; C1c's own rule
+    // refuses the same date against the period's end.
+    await assert.rejects(() => uc.correctJoiningDate(id, { date_of_joining: "2023-07-01" }), /after the resignation date/);
+    await assert.rejects(
+      () => uc.lifecycle.correctJoinedOn(id, "2023-07-01", { actorEmployeeId: 1 }),
+      /after this period ended/
+    );
+    await uc.correctJoiningDate(id, { date_of_joining: "2022-04-01" });
+    assert.deepEqual(shapeOf(world, id), [[1, "closed", "2022-04-01", "2023-06-30"]]);
+
+    await uc.rejoinEmployee(id, { date_of_joining: "2024-01-15" });
+    // Period 2: must postdate period 1's end; period 1 is untouched.
+    await assert.rejects(() => uc.correctJoiningDate(id, { date_of_joining: "2023-06-30" }), /after the previous period ended/);
+    await uc.correctJoiningDate(id, { date_of_joining: "2024-01-08" });
+    assert.deepEqual(shapeOf(world, id), [
+      [1, "closed", "2022-04-01", "2023-06-30"],
+      [2, "open", "2024-01-08", null],
+    ]);
+    assert.equal(world.employees.get(id).date_of_joining, "2024-01-08");
+  });
+
+  it("refuses when the previous spell's end is unknown, rather than guess", async () => {
+    const { world, uc } = build();
+    const { employee_id: id } = await uc.createEmployee(VALID);
+    await uc.resignEmployee(id, { resignation_date: "2023-06-30" });
+    await uc.rejoinEmployee(id, { date_of_joining: "2024-01-15" });
+    world.periods.find((p) => p.employee_id === id && p.period_no === 1).ended_on = null;
+    await assert.rejects(() => uc.correctJoiningDate(id, { date_of_joining: "2024-01-08" }), /no recorded end date/);
+  });
+
+  it("is atomic: a failed event write leaves the master and the period as they were", async () => {
+    const { world, uc } = build();
+    const { employee_id: id } = await uc.createEmployee(VALID);
+    const before = world.snapshot();
+    world.failNextEvent = true;
+    await assert.rejects(() => uc.correctJoiningDate(id, { date_of_joining: "2022-02-14" }), /simulated event failure/);
+    assert.equal(world.snapshot(), before);
   });
 });
 

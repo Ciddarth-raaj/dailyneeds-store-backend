@@ -37,6 +37,8 @@ const REASON = {
   REJOIN: "rejoin",
   RESIGNATION: "resignation",
   DATE_LEARNED: "date_learned",
+  /** HR corrected a joining date that was recorded wrongly (C2 joining-date correction). */
+  DATE_CORRECTED: "date_corrected",
 };
 
 /** A DATE column, as YYYY-MM-DD, so two dates can be compared as text. */
@@ -421,6 +423,91 @@ class EmployeeLifecycleUsecase {
     }
 
     return outcome;
+  }
+
+  /**
+   * C2's joining-date correction, on the period side. The caller (the
+   * employee master usecase) has already moved `new_employee.date_of_joining`
+   * inside `options.tx`; this moves the CURRENT period's `joined_on` to match,
+   * on that same transaction, and records a `period_corrected` event carrying
+   * the old and new value so the rewrite is never silent.
+   *
+   * The ordering rules are the ones this engine already applies elsewhere: a
+   * closed period cannot start after its own end, and a rejoin period must
+   * start after the previous spell ended - and where that end is unknown the
+   * date cannot be judged, so it is refused rather than guessed. The caller
+   * checks the date's shape and that it is not in the future.
+   *
+   * Returns `{ period_id, period_no, previous_joined_on, needs_review }`, or
+   * throws an Error with `httpCode` (409 no period / unknown previous end,
+   * 422 ordering) that C2 passes straight through.
+   */
+  async correctJoinedOn(employeeId, joinedOn, options = {}) {
+    const actor = options.actorEmployeeId === undefined ? null : options.actorEmployeeId;
+    const run = (fn) => (options.tx ? fn(options.tx) : this.lifecycleRepo.withTransaction(fn));
+    const refuse = (message, httpCode) => Object.assign(new Error(message), { httpCode });
+
+    return run(async (tx) => {
+      const latest = await this.lifecycleRepo.getLatestPeriod(tx, employeeId);
+      if (!latest) {
+        throw refuse(
+          `employee ${employeeId} has no employment period yet; run the lifecycle reconciliation ` +
+            `before correcting the joining date.`,
+          409
+        );
+      }
+      const previousJoined = toDateOnly(latest.joined_on);
+      const endedOn = toDateOnly(latest.ended_on);
+      if (endedOn !== null && joinedOn > endedOn) {
+        throw refuse(`date_of_joining '${joinedOn}' is after this period ended on '${endedOn}'`, 422);
+      }
+      if (Number(latest.period_no) > 1) {
+        const prevEnded = toDateOnly(latest.prev_ended_on);
+        if (prevEnded === null) {
+          throw refuse(
+            `employee ${employeeId}'s previous period has no recorded end date, so a corrected ` +
+              `joining date cannot be checked against it. Resolve the period from the review queue first.`,
+            409
+          );
+        }
+        if (joinedOn <= prevEnded) {
+          throw refuse(`date_of_joining '${joinedOn}' must be after the previous period ended on '${prevEnded}'`, 422);
+        }
+      }
+
+      const needsReview = reviewNeeded(latest.period_state, joinedOn, endedOn);
+      const affected = await this.lifecycleRepo.setJoinedOn(tx, latest.period_id, joinedOn, {
+        needs_review: needsReview,
+        actor_employee_id: actor,
+      });
+      // affectedRows is 0 both when the row vanished and when MySQL found the
+      // value already equal; the master row is locked FOR UPDATE by the
+      // caller, so the second is the only one possible here and is fine.
+      if (affected === 0 && !(await this.lifecycleRepo.getLatestPeriod(tx, employeeId))) {
+        throw refuse(`employee ${employeeId}'s period was changed concurrently`, 409);
+      }
+
+      await this.lifecycleRepo.insertEvent(tx, {
+        employee_id: employeeId,
+        period_id: latest.period_id,
+        event_type: EVENT.CORRECTED,
+        actor_employee_id: actor,
+        detail: {
+          reason: REASON.DATE_CORRECTED,
+          period_no: latest.period_no,
+          corrected: ["joined_on"],
+          previous_joined_on: previousJoined,
+          joined_on: joinedOn,
+          ended_on: endedOn,
+        },
+      });
+
+      this._log(logger.LEVEL.INFO, "JOINED-ON-CORRECTED", `employee ${employeeId} period ${latest.period_no} joined_on ${previousJoined} -> ${joinedOn}`, {
+        employeeId,
+        actorEmployeeId: actor,
+      });
+      return { period_id: latest.period_id, period_no: latest.period_no, previous_joined_on: previousJoined, needs_review: needsReview };
+    });
   }
 
   /**
