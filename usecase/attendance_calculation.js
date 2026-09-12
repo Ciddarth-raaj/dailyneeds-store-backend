@@ -854,7 +854,10 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    *
    * A date range (required) and any subset of employee / store /
    * designation. The repository resolves the target employees, bounded by
-   * employment: nobody who left before the range or joined after it. Each
+   * employment: nobody who left before the range or joined after it, decided
+   * by `resignation_date` and `date_of_joining` rather than by the hand-kept
+   * `status` flag. An employee who joined DURING the range is recalculated
+   * from their joining date, not from the start of the range. Each
    * employee is then recalculated through `recalculateRange` - the SAME
    * path as the single-employee endpoint, so every date resolves its own
    * dated shift assignment, the single-date override, the shift
@@ -941,9 +944,17 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     for (const target of targets) {
       /* eslint-disable no-await-in-loop */
       try {
+        // A date before somebody joined is not a day they were absent from;
+        // it is a day they did not work here. Calculating it stored a
+        // NO_SHIFT_FOR_DATE row that looks like attendance and is not, so
+        // each employee's range starts at their joining date when that falls
+        // inside it. An unparseable or absent `date_of_joining` clamps
+        // nothing - the range is used as asked, exactly as before.
+        const joined = toDateOnly(target.date_of_joining);
+        const employeeFrom = joined !== null && joined > from ? joined : from;
         const result = await recalculateRange({
           employee_id: Number(target.employee_id),
-          from_date: from,
+          from_date: employeeFrom,
           to_date: to,
         });
         completed += 1;

@@ -534,9 +534,22 @@ class AttendanceCalculationRepository {
    * ended, is not in it. `date_of_joining` is a VARCHAR on `new_employee`,
    * so it is returned and the usecase applies the joining bound in JS with
    * the same parser payroll uses.
+   *
+   * EMPLOYMENT IS THE RESIGNATION DATE, NOT `status`. The predicate used to
+   * read `ne.status = 1 OR resignation_date IS NULL OR resignation_date >= ?`,
+   * and that first disjunct let every employee whose `status` had been left at
+   * 1 through however long ago they resigned - which is most of the leavers,
+   * because `status` is maintained by hand. An unfiltered "All employees" run
+   * therefore targeted all 305 rows of the master and wrote a NO_SHIFT_FOR_DATE
+   * day for every date of the range for people who had left. Only the dated
+   * facts decide now: no resignation date, or one on/after the range began.
+   *
+   * `employee_employment_period` is NOT consulted. It is the right source
+   * eventually, but its backfill still carries rows flagged needs_review, so
+   * this reads the column payroll reads.
    */
   async listEmployeesForRecalculation({ employee_id, store_id, designation_id, from_date }) {
-    const where = ["(ne.status = 1 OR ne.resignation_date IS NULL OR ne.resignation_date >= ?)"];
+    const where = ["(ne.resignation_date IS NULL OR ne.resignation_date >= ?)"];
     const params = [from_date];
     if (employee_id) {
       where.push("ne.employee_id = ?");
