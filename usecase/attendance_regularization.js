@@ -13,6 +13,17 @@ const {
 } = require("../utils/attendance_approval_chain");
 const { CALC_STATUS, addDays } = require("../utils/attendance_engine");
 const { toDateOnly } = require("../utils/shiftResolution");
+
+/** MySQL's TINYINT(1), a JS boolean and a string "1" all mean the same thing. */
+const tinyBool = (value) => value === true || Number(value) === 1;
+
+/** The first and last day of the calendar month a `YYYY-MM-DD` date is in. */
+function monthBounds(date) {
+  const y = Number(date.slice(0, 4));
+  const m = Number(date.slice(5, 7));
+  const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  return [`${date.slice(0, 7)}-01`, `${date.slice(0, 7)}-${String(last).padStart(2, "0")}`];
+}
 const { istToday } = require("../utils/istDate");
 
 /**
@@ -201,6 +212,39 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
       );
     }
 
+    // THE SHIFT'S REGULARIZATION POLICY, read live. A repository without the
+    // reader (older fakes) has no policy to enforce.
+    const policy = attendanceRegularizationRepo.getRegularizationPolicy
+      ? await attendanceRegularizationRepo.getRegularizationPolicy(day.shift_snapshot.work_shift_id)
+      : null;
+    if (policy && !tinyBool(policy.regularization_allowed)) {
+      throw validationError(
+        `Regularization is not allowed on work shift ${day.shift_snapshot.shift_code || day.shift_snapshot.work_shift_id}`
+      );
+    }
+    if (policy && tinyBool(policy.regularization_require_existing_punch) && day.punch_count === 0) {
+      throw validationError(
+        `${date} has no punch at all, and this work shift allows a regularization only where a clock-in or clock-out already exists`
+      );
+    }
+    if (policy && tinyBool(policy.regularization_control_enabled)) {
+      const limit = Number(policy.regularization_limit_per_month);
+      if (Number.isFinite(limit) && limit > 0 && attendanceRegularizationRepo.countRegularizationsInMonth) {
+        const [monthStart, monthEnd] = monthBounds(date);
+        const used = await attendanceRegularizationRepo.countRegularizationsInMonth(
+          forEmployeeId,
+          monthStart,
+          monthEnd
+        );
+        if (used >= limit) {
+          throw validationError(
+            `The regularization limit of ${limit} per month is already used for ${date.slice(0, 7)} (${used} raised)`
+          );
+        }
+      }
+    }
+    const requiresApproval = !policy || tinyBool(policy.regularization_requires_approval);
+
     if (day.punch_count % 2 !== 1) {
       // Nothing is missing, so a manual punch here would be an edit to a
       // complete day rather than a regularization. Refused, not ignored. (OT
@@ -252,7 +296,36 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
     }
 
     const identity = await resolveIdentity(forEmployeeId);
-    const { chain, source: chain_source } = await resolveChain(identity);
+    let { chain, source: chain_source } = await resolveChain(identity);
+
+    // NO APPROVAL REQUIRED: the punch takes effect as it is raised. The chain
+    // collapses to one already-decided ADMIN stage (the audit row that says
+    // who, when and why), and the corrected day - the same engine run over
+    // raw punches plus this one, with the approval assumed - is stored in the
+    // same transaction, exactly as a final approval would store it.
+    let auto_approve = null;
+    if (!requiresApproval) {
+      chain = [{ stage_no: 1, approver_role: APPROVER_ROLE.ADMIN, outlet_id: null }];
+      chain_source = "SHIFT_POLICY_NO_APPROVAL";
+      const [correctedDay] = await attendanceCalculationUsecase.calculateRange({
+        employee_id: forEmployeeId,
+        from_date: date,
+        to_date: date,
+        assume: {
+          attendance_date: date,
+          request_type: REQUEST_TYPE.REGULARIZATION,
+          status: REQUEST_STATUS.APPROVED,
+          candidate_ot_minutes: 0,
+          reason: reason.trim(),
+          approved_ot_minutes: 0,
+          regularized_punch: { punch_id: null, io_time: punchTime },
+        },
+      });
+      auto_approve = {
+        remarks: "Auto-approved: the work shift does not require approval",
+        calculations: correctedDay ? [attendanceCalculationUsecase.toStorageRow(correctedDay)] : [],
+      };
+    }
 
     const created = await attendanceRegularizationRepo.createRequest({
       request: {
@@ -269,10 +342,13 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
       },
       chain,
       punch: { punch_time: punchTime },
+      auto_approve,
     });
 
     return {
       ...created,
+      status: created.status || REQUEST_STATUS.PENDING,
+      auto_approved: Boolean(auto_approve),
       request_type: REQUEST_TYPE.REGULARIZATION,
       attendance_date: date,
       chain,

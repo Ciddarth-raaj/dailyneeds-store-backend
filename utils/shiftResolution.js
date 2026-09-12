@@ -182,6 +182,10 @@ function snapshotHash(snapshot) {
     `late_grace=${snapshot.late_grace_minutes}`,
     `late_grace_excluded=${snapshot.late_exclude_grace_from_deduction ? 1 : 0}`,
     `early_grace=${snapshot.early_exit_grace_minutes}`,
+    `late_interval=${snapshot.late_deduction_interval_minutes}`,
+    `late_deduct=${snapshot.late_deduct_minutes}`,
+    `early_interval=${snapshot.early_exit_deduction_interval_minutes}`,
+    `early_deduct=${snapshot.early_exit_deduct_minutes}`,
   ].join("|");
   return crypto.createHash("sha256").update(canonical).digest("hex").slice(0, 32);
 }
@@ -264,7 +268,11 @@ function buildShiftSnapshot(scheduleRow, shiftConfig, dow) {
     // for exactly how the "Do Not Deduct Grace Minutes" switch is read.
     late_grace_minutes: nonNegativeInt(cfg.late_grace_minutes, 0),
     late_exclude_grace_from_deduction: tinyBool(cfg.late_exclude_grace_from_deduction),
+    late_deduction_interval_minutes: nonNegativeInt(cfg.late_deduction_interval_minutes, 0),
+    late_deduct_minutes: nonNegativeInt(cfg.late_deduct_minutes, 0),
     early_exit_grace_minutes: nonNegativeInt(cfg.early_exit_grace_minutes, 0),
+    early_exit_deduction_interval_minutes: nonNegativeInt(cfg.early_exit_deduction_interval_minutes, 0),
+    early_exit_deduct_minutes: nonNegativeInt(cfg.early_exit_deduct_minutes, 0),
   };
 
   // Which effective-dated CONFIGURATION VERSION this snapshot was built from,

@@ -206,7 +206,11 @@ class AttendanceCalculationRepository {
               pre_shift_overtime_allowed, pre_shift_overtime_minimum_minutes,
               pre_shift_overtime_rounding_method,
               pre_shift_overtime_rounding_interval_minutes,
-              late_offset_against_overtime, early_exit_offset_against_overtime
+              late_offset_against_overtime, early_exit_offset_against_overtime,
+            late_grace_minutes, late_deduction_interval_minutes, late_deduct_minutes,
+            late_exclude_grace_from_deduction,
+            early_exit_grace_minutes, early_exit_deduction_interval_minutes,
+            early_exit_deduct_minutes
          FROM work_shift
         WHERE work_shift_id = ?`,
       [workShiftId]

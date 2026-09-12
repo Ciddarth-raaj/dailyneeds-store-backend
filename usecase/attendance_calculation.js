@@ -14,6 +14,7 @@ const {
 const {
   resolveConfigVersionForDate,
   toShiftDefinition,
+  VERSIONED_CONFIG_COLUMNS,
 } = require("../utils/shift_config_version");
 const {
   PAYROLL_VERSION,
@@ -177,6 +178,21 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    * touches two. Either way each one is fetched once and the resolver reads
    * from memory, rather than a query per date.
    */
+  /**
+   * A version document written before a column was versioned lacks the key
+   * altogether. Such a column was not "0 then" - it was never recorded - so
+   * the live row supplies it. Only ABSENT keys are filled; a value the
+   * version does carry, including 0, is what that date calculates under.
+   */
+  const withLiveDefaults = (definition, live) => {
+    if (!definition || !live) return definition;
+    const config = { ...definition.config };
+    VERSIONED_CONFIG_COLUMNS.forEach((column) => {
+      if (config[column] === undefined && live[column] !== undefined) config[column] = live[column];
+    });
+    return { ...definition, config };
+  };
+
   const loadShiftCache = async (assignments) => {
     const ids = [...new Set((assignments || []).map((a) => Number(a.work_shift_id)))];
     const cache = new Map();
@@ -248,7 +264,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       if (loaded) {
         const versionRow = resolveConfigVersionForDate(loaded.versions, date);
         definition = versionRow
-          ? toShiftDefinition(versionRow, workShiftId)
+          ? withLiveDefaults(toShiftDefinition(versionRow, workShiftId), loaded.live)
           : // Before the first version row there is nothing dated to read, so
             // the live tables answer and say so. The migration seeds a version
             // at the v2 cutover, so this is only reachable for dates earlier

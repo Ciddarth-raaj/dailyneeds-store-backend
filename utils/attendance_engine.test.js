@@ -636,3 +636,93 @@ describe("grace - late minutes inside the shift's grace are forgiven from the sh
     assert.notEqual(shift().snapshot_hash, shift({ config: { late_grace_minutes: 10 } }).snapshot_hash);
   });
 });
+
+describe("deduction rule - Deduct Minutes per Deduction Interval, settled inside the shortage", () => {
+  const ruled = (extra = {}) =>
+    shift({
+      in_time: "09:30",
+      out_time: "18:30",
+      break_minutes: 30,
+      config: {
+        late_grace_minutes: 10,
+        late_exclude_grace_from_deduction: 1,
+        late_deduction_interval_minutes: 15,
+        late_deduct_minutes: 30,
+        early_exit_grace_minutes: 10,
+        early_exit_deduction_interval_minutes: 15,
+        early_exit_deduct_minutes: 30,
+        ...extra,
+      },
+    });
+
+  it("interval 1 / deduct 1 (or 0 / 0) is the plain one-for-one shortage", () => {
+    const a = day({
+      shift: ruled({ late_deduction_interval_minutes: 1, late_deduct_minutes: 1 }),
+      punches: punches("09:45", "18:30"),
+    });
+    const b = day({
+      shift: ruled({ late_deduction_interval_minutes: 0, late_deduct_minutes: 0 }),
+      punches: punches("09:45", "18:30"),
+    });
+    assert.equal(a.shortage_minutes, 5);
+    assert.equal(b.shortage_minutes, 5);
+  });
+
+  it("late 25 on grace 10 (excluded): 15 counted -> one started interval -> 30 charged", () => {
+    const result = day({ shift: ruled(), punches: punches("09:55", "18:30") });
+    assert.equal(result.late_minutes, 25);
+    assert.equal(result.grace_forgiven_minutes, 10);
+    assert.equal(result.late_charged_minutes, 30);
+    assert.equal(result.shortage_minutes, 30);
+    assert.equal(result.worked_minutes, 485, "worked minutes are never changed by the rule");
+  });
+
+  it("late 26: 16 counted -> two started intervals -> 60 charged", () => {
+    const result = day({ shift: ruled(), punches: punches("09:56", "18:30") });
+    assert.equal(result.shortage_minutes, 60);
+  });
+
+  it("with the exclusion off the whole 25 counts -> two intervals -> 60", () => {
+    const result = day({
+      shift: ruled({ late_exclude_grace_from_deduction: 0 }),
+      punches: punches("09:55", "18:30"),
+    });
+    assert.equal(result.grace_forgiven_minutes, 0);
+    assert.equal(result.shortage_minutes, 60);
+  });
+
+  it("early out has its own rule: out 20 early -> 20 counted -> 60 charged", () => {
+    const result = day({ shift: ruled(), punches: punches("09:30", "18:10") });
+    assert.equal(result.early_exit_minutes, 20);
+    assert.equal(result.early_exit_charged_minutes, 60);
+    assert.equal(result.shortage_minutes, 60);
+  });
+
+  it("a late arrival worked off at the end of the day is charged nothing", () => {
+    // 25 late, 25 stayed on: no shortage, so nothing to settle, and no
+    // penalty is invented from a day the employee fully worked.
+    const result = day({ shift: ruled(), punches: punches("09:55", "18:55") });
+    assert.equal(result.shortage_minutes, 0);
+    assert.equal(result.late_charged_minutes, 0);
+  });
+
+  it("a shortage from a long break is not scaled by the late rule", () => {
+    // 5 late (forgiven) and a 90-minute lunch: 60 short from the break only.
+    const result = day({ shift: ruled(), punches: punches("09:35", "13:00", "14:30", "18:35") });
+    assert.equal(result.shortage_minutes, 55);
+    assert.equal(result.late_charged_minutes, 0);
+  });
+
+  it("the settled shortage is capped at NRM", () => {
+    const result = day({
+      shift: ruled({ late_deduct_minutes: 600 }),
+      punches: punches("11:00", "18:30"),
+    });
+    assert.equal(result.nrm_minutes, 510);
+    assert.equal(result.shortage_minutes, 510);
+  });
+
+  it("the rule's settings are part of the snapshot hash", () => {
+    assert.notEqual(ruled().snapshot_hash, ruled({ late_deduct_minutes: 45 }).snapshot_hash);
+  });
+});

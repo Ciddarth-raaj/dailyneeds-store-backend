@@ -153,6 +153,44 @@ class AttendanceRegularizationRepository {
   }
 
   /**
+   * The Work Shift's regularization POLICY, from the LIVE row. Policy is not
+   * effective-dated on purpose (see `utils/shift_config_version.js`): whether
+   * a request may be raised is a question about now, not about the date.
+   */
+  async getRegularizationPolicy(workShiftId) {
+    const rows = await this._read(
+      "GET-REGULARIZATION-POLICY",
+      `SELECT work_shift_id, regularization_allowed, regularization_control_enabled,
+              regularization_limit_per_month, regularization_require_existing_punch,
+              regularization_requires_approval
+         FROM work_shift
+        WHERE work_shift_id = ?`,
+      [workShiftId]
+    );
+    return rows && rows[0] ? rows[0] : null;
+  }
+
+  /**
+   * How many regularizations the employee has already used in a calendar
+   * month: every attendance-correction request that is open or approved. A
+   * rejected or cancelled one did not correct anything and is not counted
+   * against the limit.
+   */
+  async countRegularizationsInMonth(employeeId, monthStart, monthEnd) {
+    const rows = await this._read(
+      "COUNT-REGULARIZATIONS-IN-MONTH",
+      `SELECT COUNT(*) AS used
+         FROM attendance_approval_request
+        WHERE requested_for_employee_id = ?
+          AND request_type IN ('REGULARIZATION', 'REGULARIZATION_WITH_OT')
+          AND status IN ('PENDING', 'APPROVED')
+          AND attendance_date BETWEEN ? AND ?`,
+      [employeeId, monthStart, monthEnd]
+    );
+    return rows && rows[0] ? Number(rows[0].used) || 0 : 0;
+  }
+
+  /**
    * Every request on these dates, in any state but CANCELLED: what
    * `raiseOtRequest` checks so that one date carries one OT claim, open or
    * decided.
@@ -312,52 +350,81 @@ class AttendanceRegularizationRepository {
    * has already been raised (Replace Approver does that explicitly, and only
    * for undecided steps).
    */
-  async createRequest({ request, chain, punch }) {
+  async createRequest({ request, chain, punch, auto_approve = null }) {
     const connection = await getConnectionAsync(this.db);
     try {
       await beginTransactionAsync(connection);
 
-      const inserted = await queryAsync(
-        connection,
-        `INSERT INTO attendance_approval_request
-           (request_type, requested_for_employee_id, requested_by_employee_id,
-            attendance_date, outlet_id, requester_class, reason,
-            candidate_ot_minutes, auto_created, status, current_stage_no, total_stages,
-            chain_source)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 1, ?, ?)`,
-        [
-          request.request_type,
-          request.requested_for_employee_id,
-          request.requested_by_employee_id,
-          request.attendance_date,
-          request.outlet_id,
-          request.requester_class,
-          request.reason,
-          request.candidate_ot_minutes,
-          request.auto_created ? 1 : 0,
-          chain.length,
-          request.chain_source === undefined ? null : request.chain_source,
-        ]
-      );
+      // A shift whose policy needs no approval settles the request in the
+      // same transaction it is raised in: APPROVED, SETTLED, its one step
+      // decided, and the corrected day stored - the same invariant a decided
+      // request has (see `decideStage`), reached in one commit. The pending
+      // path is left exactly as it was.
+      const autoApproved = Boolean(auto_approve);
+      const requestParams = [
+        request.request_type,
+        request.requested_for_employee_id,
+        request.requested_by_employee_id,
+        request.attendance_date,
+        request.outlet_id,
+        request.requester_class,
+        request.reason,
+        request.candidate_ot_minutes,
+        request.auto_created ? 1 : 0,
+        chain.length,
+        request.chain_source === undefined ? null : request.chain_source,
+      ];
+      const inserted = autoApproved
+        ? await queryAsync(
+            connection,
+            `INSERT INTO attendance_approval_request
+               (request_type, requested_for_employee_id, requested_by_employee_id,
+                attendance_date, outlet_id, requester_class, reason,
+                candidate_ot_minutes, auto_created, status, current_stage_no, total_stages,
+                chain_source, approved_ot_minutes, finalization_state, decided_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'APPROVED', 1, ?, ?, 0, 'SETTLED', CURRENT_TIMESTAMP(3))`,
+            requestParams
+          )
+        : await queryAsync(
+            connection,
+            `INSERT INTO attendance_approval_request
+               (request_type, requested_for_employee_id, requested_by_employee_id,
+                attendance_date, outlet_id, requester_class, reason,
+                candidate_ot_minutes, auto_created, status, current_stage_no, total_stages,
+                chain_source)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 1, ?, ?)`,
+            requestParams
+          );
       const requestId = inserted.insertId;
 
-      await queryAsync(
-        connection,
-        `INSERT INTO attendance_approval_step
-           (attendance_approval_request_id, stage_no, approver_role, outlet_id,
-            approver_employee_id, approval_level)
-         VALUES ?`,
-        [
-          chain.map((s) => [
-            requestId,
-            s.stage_no,
-            s.approver_role,
-            s.outlet_id,
-            s.approver_employee_id === undefined ? null : s.approver_employee_id,
-            s.approval_level === undefined ? null : s.approval_level,
-          ]),
-        ]
-      );
+      const stepRows = chain.map((s) => [
+        requestId,
+        s.stage_no,
+        s.approver_role,
+        s.outlet_id,
+        s.approver_employee_id === undefined ? null : s.approver_employee_id,
+        s.approval_level === undefined ? null : s.approval_level,
+      ]);
+      if (autoApproved) {
+        const remarks = auto_approve.remarks || "Auto-approved: the work shift does not require approval";
+        await queryAsync(
+          connection,
+          `INSERT INTO attendance_approval_step
+             (attendance_approval_request_id, stage_no, approver_role, outlet_id,
+              approver_employee_id, approval_level, decision, decided_at, remarks)
+           VALUES ?`,
+          [stepRows.map((row) => [...row, "APPROVED", new Date(), remarks])]
+        );
+      } else {
+        await queryAsync(
+          connection,
+          `INSERT INTO attendance_approval_step
+             (attendance_approval_request_id, stage_no, approver_role, outlet_id,
+              approver_employee_id, approval_level)
+           VALUES ?`,
+          [stepRows]
+        );
+      }
 
       if (punch) {
         await queryAsync(
@@ -376,8 +443,23 @@ class AttendanceRegularizationRepository {
         );
       }
 
+      // The corrected day, committed with the auto-approval - a request that
+      // is APPROVED while the stored day still shows the missing punch must
+      // not exist, exactly as for a decided one.
+      let calculationsWritten = 0;
+      if (autoApproved && Array.isArray(auto_approve.calculations) && auto_approve.calculations.length) {
+        const stored = await writeCalculationsOnConnection(connection, auto_approve.calculations);
+        calculationsWritten = stored.written;
+      }
+
       await commitAsync(connection);
-      return { attendance_approval_request_id: requestId, total_stages: chain.length };
+      return {
+        attendance_approval_request_id: requestId,
+        total_stages: chain.length,
+        status: autoApproved ? "APPROVED" : "PENDING",
+        finalization_state: autoApproved ? "SETTLED" : "NOT_REQUIRED",
+        calculations_written: calculationsWritten,
+      };
     } catch (err) {
       await rollbackAsync(connection);
       this._log("CREATE-REQUEST", err);

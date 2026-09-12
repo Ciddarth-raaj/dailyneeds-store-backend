@@ -193,3 +193,25 @@ describe("resolving the version in force on a date", () => {
     assert.equal(october.schedule[0].break_minutes, 45);
   });
 });
+
+describe("the lateness and early-out settings are versioned", () => {
+  const { VERSIONED_CONFIG_COLUMNS } = require("../utils/shift_config_version");
+  it("names every column the engine settles the shortage with", () => {
+    [
+      "late_grace_minutes",
+      "late_deduction_interval_minutes",
+      "late_deduct_minutes",
+      "late_exclude_grace_from_deduction",
+      "early_exit_grace_minutes",
+      "early_exit_deduction_interval_minutes",
+      "early_exit_deduct_minutes",
+    ].forEach((c) => assert.ok(VERSIONED_CONFIG_COLUMNS.includes(c), c));
+  });
+  it("a changed grace is a changed version", () => {
+    const a = buildConfigVersion(config({ late_grace_minutes: 0 }), schedule());
+    const b = buildConfigVersion(config({ late_grace_minutes: 10 }), schedule());
+    assert.notEqual(configVersionHash(a), configVersionHash(b));
+    assert.equal(b.config.late_grace_minutes, 10);
+    assert.equal(b.config.late_exclude_grace_from_deduction, 0);
+  });
+});
