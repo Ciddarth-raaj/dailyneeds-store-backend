@@ -310,3 +310,87 @@ describe("CSV (D5)", () => {
     assert.equal(toDisplayDate(null), "");
   });
 });
+
+
+/* ------------------------------------------------ effective status on the audit */
+
+describe("Punch Audit - effective status, voids and ignored duplicates", () => {
+  // The void columns the LEFT JOIN adds to the row.
+  const voidedRow = (time, extra = {}) =>
+    Object.assign(wh(time, extra), { attendance_punch_void_id: 31, void_reason: "Wrong employee punch", voided_by_employee_id: 7, voided_by_name: "HR Person", voided_at: "2026-09-16 10:00:00" });
+
+  function repoWithStream(rows, stream) {
+    const repo = fakeRepo(rows);
+    repo.listPunchStreamForEmployees = async (f) => {
+      repo.calls.push(["listPunchStreamForEmployees", f]);
+      return stream;
+    };
+    return repo;
+  }
+
+  it("37/38. a voided punch is still returned, as VOIDED, with the reason, who and when", async () => {
+    const rows = [wh("09:00:00", { id: 1 }), voidedRow("12:30:00", { id: 2 }), wh("21:00:00", { id: 3 })];
+    const stream = rows.map((r) => ({ biomax_punch_id: r.biomax_punch_id, employee_id: r.employee_id, io_time: r.io_time, ingest_source: "LIVE", attendance_punch_void_id: r.attendance_punch_void_id || null }));
+    const { data } = await build(repoWithStream(rows, stream)).audit({ from: "2026-09-15", to: "2026-09-15" });
+    assert.equal(data.length, 3, "nothing is hidden");
+    const v = data.find((p) => p.biomax_punch_id === 2);
+    assert.equal(v.effective_status, "VOIDED");
+    assert.equal(v.effective_reason, "Wrong employee punch");
+    assert.equal(v.void_reason, "Wrong employee punch");
+    assert.equal(v.voided_by_employee_id, 7);
+    assert.equal(v.voided_by_name, "HR Person");
+    assert.equal(v.voided_at, "2026-09-16 10:00:00");
+    assert.equal(v.attendance_punch_void_id, 31);
+    assert.deepEqual(data.filter((p) => p.biomax_punch_id !== 2).map((p) => p.effective_status), ["USED", "USED"]);
+  });
+
+  it("39. an automatically ignored duplicate is visible, marked IGNORED_DUPLICATE with the reason and the punch it duplicated", async () => {
+    const rows = [wh("09:00:00", { id: 1 }), wh("09:04:00", { id: 2 }), wh("21:00:00", { id: 3 })];
+    const stream = rows.map((r) => ({ biomax_punch_id: r.biomax_punch_id, employee_id: r.employee_id, io_time: r.io_time, ingest_source: "LIVE", attendance_punch_void_id: null }));
+    const { data } = await build(repoWithStream(rows, stream)).audit({ from: "2026-09-15", to: "2026-09-15" });
+    const dup = data.find((p) => p.biomax_punch_id === 2);
+    assert.equal(dup.effective_status, "IGNORED_DUPLICATE");
+    assert.equal(dup.effective_reason, "Duplicate punch within 10 minutes");
+    assert.equal(dup.duplicate_of_punch_id, 1);
+    assert.equal(dup.duplicate_of_io_time, "2026-09-15 09:00:00");
+    assert.equal(dup.punch_source, "BIOMAX");
+    assert.equal(dup.attendance_punch_void_id, null, "no fake manual audit record for an automatic suppression");
+  });
+
+  it("the stream is read from the day BEFORE the range, so a duplicate of yesterday's last kept punch is marked", async () => {
+    const rows = [wh("00:04:00", { id: 2, calendar_date: "2026-09-16" })];
+    const stream = [
+      { biomax_punch_id: 1, employee_id: 1952, io_time: "2026-09-15 23:58:00", ingest_source: "LIVE", attendance_punch_void_id: null },
+      { biomax_punch_id: 2, employee_id: 1952, io_time: "2026-09-16 00:04:00", ingest_source: "LIVE", attendance_punch_void_id: null },
+    ];
+    const repo = repoWithStream(rows, stream);
+    const { data } = await build(repo).audit({ from: "2026-09-16", to: "2026-09-16" });
+    assert.equal(data[0].effective_status, "IGNORED_DUPLICATE");
+    const call = repo.calls.find((c) => c[0] === "listPunchStreamForEmployees")[1];
+    assert.deepEqual(call, { employee_ids: [1952], from: "2026-09-15", to: "2026-09-16" });
+  });
+
+  it("an unmatched punch has no effective status, and no stream is read when nobody on the page is matched", async () => {
+    const rows = [wh("09:00:00", { id: 1, employee_id: null })];
+    const repo = repoWithStream(rows, []);
+    const { data } = await build(repo).audit({ from: "2026-09-15", to: "2026-09-15" });
+    assert.equal(data[0].effective_status, null);
+    assert.ok(!repo.calls.some((c) => c[0] === "listPunchStreamForEmployees"));
+  });
+
+  it("the CSV carries the effective status and the void audit fields", async () => {
+    const rows = [wh("09:00:00", { id: 1 }), voidedRow("12:30:00", { id: 2 })];
+    const stream = rows.map((r) => ({ biomax_punch_id: r.biomax_punch_id, employee_id: r.employee_id, io_time: r.io_time, ingest_source: "LIVE", attendance_punch_void_id: r.attendance_punch_void_id || null }));
+    const csv = await build(repoWithStream(rows, stream)).auditCsv({ from: "2026-09-15", to: "2026-09-15" });
+    for (const h of ["Punch ID", "Source", "Effective Status", "Effective Reason", "Void Reason", "Voided By", "Voided At"]) assert.ok(csv.header.includes(h), h);
+    const idx = (h) => csv.header.indexOf(h);
+    assert.equal(csv.rows[0][idx("Effective Status")], "Used");
+    assert.equal(csv.rows[1][idx("Effective Status")], "Voided");
+    assert.equal(csv.rows[1][idx("Void Reason")], "Wrong employee punch");
+    assert.equal(csv.rows[1][idx("Voided By")], "HR Person");
+    assert.equal(csv.rows[1][idx("Voided At")], "2026-09-16 10:00:00");
+    assert.equal(csv.rows[1][idx("Source")], "BIOMAX");
+    // no unrelated personal data joined the export
+    assert.ok(!csv.header.some((h) => /bank|aadhaar|pan|salary|phone/i.test(h)));
+  });
+});

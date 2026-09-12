@@ -233,6 +233,11 @@ class Server {
     // themselves are written through biomax/store.js on the API pool - the
     // same insert path and tables as a live punch.
     this.attendanceImportRepo = require("./repository/attendance_import")(this.mysql.connection);
+    // Void Punch: the additive `attendance_punch_void` record beside a raw
+    // punch. The only writer of that table; it never writes `biomax_punch`.
+    this.attendancePunchVoidRepo = require("./repository/attendance_punch_void")(
+      this.mysql.connection
+    );
     this.biomaxImportStore = require("./biomax/store").createStore(this.mysql.connection);
     this.storeRepo = require("./repository/store")(this.mysql.connection);
     this.outletRepo = require("./repository/outlet")(this.mysql.connection);
@@ -569,6 +574,15 @@ class Server {
     // argument would be a cycle.
     this.attendanceCalculationUsecase.setOtRequestService(
       this.attendanceRegularizationUsecase
+    );
+    // Void Punch. Handed the calculation usecase for the date the punch
+    // belongs to and for the recalculation afterwards, and the
+    // regularization repository to refuse a void while a request on that
+    // date is still pending.
+    this.attendancePunchVoidUsecase = require("./usecase/attendance_punch_void")(
+      this.attendancePunchVoidRepo,
+      this.attendanceCalculationUsecase,
+      this.attendanceRegularizationRepo
     );
     // M5: Bulk Salary Upload. A BATCH over the lifecycle above rather than a
     // second one - it is handed the same repository and the same usecase, and
@@ -910,7 +924,8 @@ class Server {
     // Biomax device registry.
     const attendanceRawRouter = require("./routes/attendance_raw")(
       this.attendanceRawUsecase,
-      this.permissions
+      this.permissions,
+      this.attendancePunchVoidUsecase
     );
     const biomaxDeviceRouter = require("./routes/biomax_device")(
       this.biomaxDeviceUsecase,

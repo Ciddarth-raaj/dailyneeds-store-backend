@@ -288,6 +288,10 @@ class AttendanceCalculationRepository {
    * the rest of their day.
    */
   async getRawPunchesByCalendarWindow(employeeId, fromCalendarDate, toCalendarDate) {
+    // The manual void, if any, rides on the same row: `attendance_punch_void`
+    // is unique per raw punch and is never deleted, so a LEFT JOIN answers
+    // "is this punch voided" without a second query. The raw row itself is
+    // still read exactly as stored.
     return this._read(
       "GET-RAW-PUNCHES-BY-CALENDAR-WINDOW",
       `SELECT p.biomax_punch_id                            AS punch_id,
@@ -296,9 +300,14 @@ class AttendanceCalculationRepository {
               DATE_FORMAT(d.attendance_date, '%Y-%m-%d')   AS ingest_attendance_date,
               DATE_FORMAT(p.io_time, '%Y-%m-%d %H:%i:%s')  AS io_time,
               p.dev_id,
-              p.ingest_source
+              p.ingest_source,
+              v.attendance_punch_void_id,
+              v.reason                                     AS void_reason,
+              v.voided_by_employee_id,
+              DATE_FORMAT(v.voided_at, '%Y-%m-%d %H:%i:%s') AS voided_at
          FROM biomax_punch_derived d
          JOIN biomax_punch p ON p.biomax_punch_id = d.biomax_punch_id
+         LEFT JOIN attendance_punch_void v ON v.biomax_punch_id = p.biomax_punch_id
         WHERE d.employee_id = ?
           AND p.punch_date BETWEEN ? AND ?
         ORDER BY p.io_time ASC, p.biomax_punch_id ASC`,
