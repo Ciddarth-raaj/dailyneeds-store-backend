@@ -34,6 +34,27 @@ function validationError(message) {
 const MAX_EMPLOYEES_PER_ASSIGNMENT = 1000;
 
 /**
+ * Today's date in IST, as `YYYY-MM-DD`, for the A0 assignment history.
+ *
+ * IST and not the process zone: the business day this assignment belongs to is
+ * the Indian one, and a server running in UTC would otherwise date every
+ * evening assignment to the day before. The offset is applied to the epoch and
+ * the date read back in UTC, so no local `Date` is constructed and the answer
+ * does not depend on where the process runs.
+ *
+ * `override` exists so tests can pin the day; it is not a caller-supplied
+ * field on any route.
+ */
+function effectiveFromToday(override = null) {
+  if (typeof override === "string" && /^\d{4}-\d{2}-\d{2}$/.test(override)) return override;
+  const IST_OFFSET_MINUTES = 5 * 60 + 30;
+  const ist = new Date(Date.now() + IST_OFFSET_MINUTES * 60 * 1000);
+  return `${ist.getUTCFullYear()}-${String(ist.getUTCMonth() + 1).padStart(2, "0")}-${String(
+    ist.getUTCDate()
+  ).padStart(2, "0")}`;
+}
+
+/**
  * Employee ids as a clean, deduplicated list of positive integers.
  *
  * Order is preserved so an error message reads in the order the caller sent
@@ -304,9 +325,16 @@ class EmployeeWorkShiftUsecase {
   /**
    * Assign one ACTIVE work shift to the selected employees.
    *
-   * Writes `default_work_shift_id` and nothing else. There is no unassign
-   * here, deliberately: changing somebody's shift means choosing another
-   * active one, and clearing the mapping outright is not part of this phase.
+   * Writes `default_work_shift_id` and nothing else on the employee row. There
+   * is no unassign here, deliberately: changing somebody's shift means
+   * choosing another active one, and clearing the mapping outright is not part
+   * of this phase.
+   *
+   * ATTENDANCE v2 / A0. It now also appends a dated row to
+   * `employee_work_shift_assignment`, effective from the date the assignment
+   * is made. NOT backdated, ever: moving somebody to a new shift today must
+   * not rewrite yesterday's worked minutes. The screen, the permissions and
+   * the response are otherwise exactly as they were.
    */
   async assign(payload = {}) {
     const employeeIds = normalizeEmployeeIds(payload.employee_ids);
@@ -336,7 +364,10 @@ class EmployeeWorkShiftUsecase {
       };
     }
 
-    const result = await this.repo.assignWorkShift(employeeIds, workShiftId);
+    const result = await this.repo.assignWorkShift(employeeIds, workShiftId, {
+      effective_from: effectiveFromToday(payload.today),
+      created_by: payload.actor_employee_id === undefined ? null : payload.actor_employee_id,
+    });
     if (!result || result.code !== 200) return result;
 
     return {
@@ -353,5 +384,6 @@ module.exports.normalizeEmployeeIds = normalizeEmployeeIds;
 module.exports.normalizeIdList = normalizeIdList;
 module.exports.normalizeChoice = normalizeChoice;
 module.exports.MAX_EMPLOYEES_PER_ASSIGNMENT = MAX_EMPLOYEES_PER_ASSIGNMENT;
+module.exports.effectiveFromToday = effectiveFromToday;
 module.exports.formatTime = formatTime;
 module.exports.describeTiming = describeTiming;

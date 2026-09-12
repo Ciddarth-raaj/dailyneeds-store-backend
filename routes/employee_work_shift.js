@@ -183,7 +183,18 @@ class EmployeeWorkShiftRoutes {
           const isValid = Joi.validate(req.body, schema);
           if (isValid.error !== null) throw isValid.error;
 
-          res.json(await this.usecase.assign(req.body));
+          // The payload is built field by field rather than spread from the
+          // body, so nothing a caller invents can reach the usecase. The actor
+          // comes from the token and is stamped on the A0 assignment-history
+          // row as who made the change; the effective date is the server's,
+          // and there is deliberately no way to ask for a backdated one here.
+          res.json(
+            await this.usecase.assign({
+              employee_ids: req.body.employee_ids,
+              work_shift_id: req.body.work_shift_id,
+              actor_employee_id: req.decoded ? req.decoded.employee_id : null,
+            })
+          );
         } catch (err) {
           respondError(res, err);
         }

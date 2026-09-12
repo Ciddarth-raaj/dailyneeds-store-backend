@@ -1,0 +1,262 @@
+/**
+ * Attendance v2 / A0 - which work shift applied on a given attendance date.
+ *
+ * PURE FUNCTIONS ONLY. No database, no Express, no clock. The caller fetches
+ * the employee's assignment history and the shift's weekly schedule and hands
+ * them over; everything here is arithmetic on those rows, which is what lets
+ * the whole rule be tested without a MySQL instance.
+ *
+ * WHY THIS EXISTS. `new_employee.default_work_shift_id` is current state. It
+ * answers "which shift is this person on today" and it is the right column for
+ * the assignment screen and for dating a punch as it arrives. It is the WRONG
+ * column for recalculating 3rd August in October: moving somebody to a new
+ * shift would silently rewrite August's worked minutes, its shortage and its
+ * overtime, and therefore a payslip that has already been paid. Historical
+ * attendance has to stop moving, so it reads dated history instead.
+ *
+ * THE RULE, in full:
+ *
+ *     resolve(employee, date) = the assignment row with the greatest
+ *     effective_from <= date, and among equal dates the greatest id.
+ *
+ * A date earlier than the employee's first row is NOT assigned. It does not
+ * fall back to `default_work_shift_id` and it does not guess - the engine
+ * reports NO_SHIFT_FOR_DATE and the date stays out of payroll until a human
+ * fixes the cause. The migration that creates the history states the cutover
+ * explicitly (2026-09-01) and invents nothing before it.
+ *
+ * THE SNAPSHOT. Resolution returns not only an id but a normalized snapshot of
+ * the schedule row the calculation will consume, plus a stable hash of it. The
+ * hash is what makes a recomputation auditable: if the stored hash for a date
+ * no longer matches the one the current configuration produces, the shift
+ * definition has been edited since, and that is visible rather than silent.
+ */
+
+const crypto = require("crypto");
+const { parseTimeToMinutes, formatMinutesToTime, shiftSpanMinutes } = require("./workShift");
+
+/** Why a date has no usable shift. Never a silent null. */
+const RESOLUTION_STATUS = Object.freeze({
+  OK: "OK",
+  NO_SHIFT_FOR_DATE: "NO_SHIFT_FOR_DATE",
+  NO_SCHEDULE_ROW: "NO_SCHEDULE_ROW",
+  REST_DAY: "REST_DAY",
+});
+
+/** The version stamped on every snapshot, so an old row says which rule built it. */
+const SHIFT_SNAPSHOT_VERSION = 1;
+
+/** `YYYY-MM-DD` from a string or a Date, else null. Text compare is date compare. */
+function toDateOnly(value) {
+  if (value === null || value === undefined || value === "") return null;
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null;
+    const y = value.getUTCFullYear();
+    const m = String(value.getUTCMonth() + 1).padStart(2, "0");
+    const d = String(value.getUTCDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value).trim());
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
+}
+
+/**
+ * 0=Sunday..6=Saturday for a `YYYY-MM-DD`, computed with Date.UTC.
+ *
+ * Deliberately not `new Date(text).getDay()`: that builds a local date, so the
+ * process timezone could move a Sunday shift onto Saturday's schedule row.
+ */
+function dayOfWeek(dateOnly) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateOnly));
+  if (!m) return null;
+  return new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))).getUTCDay();
+}
+
+/**
+ * The assignment in force on `attendanceDate`.
+ *
+ * `assignments` is the employee's history, in any order. Rows are read, never
+ * written: this function has no opinion about how history is appended.
+ *
+ * @returns {object|null} the winning row, or null when the date precedes the
+ *   employee's first assignment.
+ */
+function resolveAssignmentForDate(assignments, attendanceDate) {
+  const date = toDateOnly(attendanceDate);
+  if (date === null || !Array.isArray(assignments)) return null;
+
+  let best = null;
+  let bestFrom = null;
+  let bestId = -1;
+
+  assignments.forEach((row) => {
+    if (!row) return;
+    const from = toDateOnly(row.effective_from);
+    if (from === null || from > date) return;
+    const id = Number(row.employee_work_shift_assignment_id) || 0;
+
+    // Newest effective_from wins; a correction appended for the SAME date
+    // wins on id, which is why history can be corrected without editing.
+    if (bestFrom === null || from > bestFrom || (from === bestFrom && id > bestId)) {
+      best = row;
+      bestFrom = from;
+      bestId = id;
+    }
+  });
+
+  return best;
+}
+
+/**
+ * A deterministic fingerprint of the schedule values a calculation consumed.
+ *
+ * Only the fields that can change a number are hashed, and they are hashed in
+ * a fixed order from a canonical string - not from `JSON.stringify` of an
+ * object, whose key order is an accident of how the row was built. Two runs
+ * that saw the same configuration produce the same hash on any machine.
+ */
+function snapshotHash(snapshot) {
+  const canonical = [
+    `v=${SHIFT_SNAPSHOT_VERSION}`,
+    `shift=${snapshot.work_shift_id}`,
+    `dow=${snapshot.day_of_week}`,
+    `working=${snapshot.is_working_day ? 1 : 0}`,
+    `in=${snapshot.in_time || ""}`,
+    `out=${snapshot.out_time || ""}`,
+    `cutoff=${snapshot.attendance_day_cutoff || ""}`,
+    `break=${snapshot.break_minutes}`,
+    `span=${snapshot.shift_span_minutes}`,
+    `otrate=${snapshot.ot_rate}`,
+    `ot_allowed=${snapshot.overtime_allowed ? 1 : 0}`,
+    `ot_min=${snapshot.overtime_minimum_minutes}`,
+    `ot_round=${snapshot.overtime_rounding_method}`,
+    `ot_interval=${snapshot.overtime_rounding_interval_minutes}`,
+    `ot_threshold_only=${snapshot.overtime_minimum_threshold_only ? 1 : 0}`,
+    `ot_cap=${snapshot.maximum_ot_minutes_per_day === null ? "" : snapshot.maximum_ot_minutes_per_day}`,
+  ].join("|");
+  return crypto.createHash("sha256").update(canonical).digest("hex").slice(0, 32);
+}
+
+const tinyBool = (value) => value === true || Number(value) === 1;
+
+const nonNegativeInt = (value, fallback = 0) => {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? Math.trunc(n) : fallback;
+};
+
+/**
+ * Build the audit-safe snapshot the engine calculates from.
+ *
+ * `scheduleRow` is one `work_shift_weekly_schedule` row; `shiftConfig` is the
+ * `work_shift` master row. Both are normalized here so the engine never sees a
+ * MySQL `"1"` where it expected a boolean or a `"09:00:00"` where it expected
+ * minutes.
+ */
+function buildShiftSnapshot(scheduleRow, shiftConfig, dow) {
+  const inMinutes = parseTimeToMinutes(scheduleRow.in_time);
+  const outMinutes = parseTimeToMinutes(scheduleRow.out_time);
+  const span = shiftSpanMinutes(inMinutes, outMinutes);
+  const cfg = shiftConfig || {};
+
+  const snapshot = {
+    snapshot_version: SHIFT_SNAPSHOT_VERSION,
+    work_shift_id: Number(scheduleRow.work_shift_id ?? cfg.work_shift_id) || null,
+    work_shift_weekly_schedule_id:
+      scheduleRow.work_shift_weekly_schedule_id === undefined
+        ? null
+        : Number(scheduleRow.work_shift_weekly_schedule_id),
+    shift_code: cfg.shift_code === undefined ? null : cfg.shift_code,
+    day_of_week: dow,
+    is_working_day: tinyBool(scheduleRow.is_working_day),
+    in_time: inMinutes === null ? null : formatMinutesToTime(inMinutes),
+    out_time: outMinutes === null ? null : formatMinutesToTime(outMinutes),
+    attendance_day_cutoff:
+      parseTimeToMinutes(scheduleRow.attendance_day_cutoff) === null
+        ? null
+        : formatMinutesToTime(parseTimeToMinutes(scheduleRow.attendance_day_cutoff)),
+    break_minutes: nonNegativeInt(scheduleRow.break_minutes, 0),
+    shift_span_minutes: span === null ? 0 : span,
+    ot_rate: Number(scheduleRow.ot_rate ?? 1),
+
+    // Shift Management OT configuration, carried on the snapshot so a
+    // recalculation of an old date uses the rules that date was calculated
+    // under rather than whatever the shift says today.
+    overtime_allowed: tinyBool(cfg.overtime_allowed),
+    overtime_minimum_minutes: nonNegativeInt(cfg.overtime_minimum_minutes, 0),
+    overtime_rounding_method: String(cfg.overtime_rounding_method || "NONE").toUpperCase(),
+    overtime_rounding_interval_minutes: nonNegativeInt(cfg.overtime_rounding_interval_minutes, 0),
+    overtime_minimum_threshold_only: tinyBool(cfg.overtime_minimum_threshold_only),
+    maximum_ot_minutes_per_day:
+      cfg.maximum_ot_minutes_per_day === null || cfg.maximum_ot_minutes_per_day === undefined
+        ? null
+        : nonNegativeInt(cfg.maximum_ot_minutes_per_day, 0),
+  };
+
+  snapshot.snapshot_hash = snapshotHash(snapshot);
+  return snapshot;
+}
+
+/**
+ * The whole of A0 in one call: employee + date -> the shift that applied.
+ *
+ * @param {object} input
+ * @param {Array}  input.assignments   the employee's assignment history rows
+ * @param {string} input.attendanceDate `YYYY-MM-DD`
+ * @param {function} input.readSchedule (workShiftId, dayOfWeek) => schedule row|null
+ * @param {function} input.readShiftConfig (workShiftId) => work_shift row|null
+ * @returns {{status: string, work_shift_id: number|null, assignment: object|null,
+ *            snapshot: object|null}}
+ */
+function resolveShiftForDate({ assignments, attendanceDate, readSchedule, readShiftConfig }) {
+  const date = toDateOnly(attendanceDate);
+  const assignment = resolveAssignmentForDate(assignments, date);
+
+  if (!assignment) {
+    return {
+      status: RESOLUTION_STATUS.NO_SHIFT_FOR_DATE,
+      work_shift_id: null,
+      assignment: null,
+      snapshot: null,
+    };
+  }
+
+  const workShiftId = Number(assignment.work_shift_id);
+  const dow = dayOfWeek(date);
+  const scheduleRow = readSchedule(workShiftId, dow);
+  if (!scheduleRow) {
+    return {
+      status: RESOLUTION_STATUS.NO_SCHEDULE_ROW,
+      work_shift_id: workShiftId,
+      assignment,
+      snapshot: null,
+    };
+  }
+
+  const snapshot = buildShiftSnapshot(
+    { ...scheduleRow, work_shift_id: workShiftId },
+    readShiftConfig ? readShiftConfig(workShiftId) : null,
+    dow
+  );
+
+  return {
+    // A rest day is a successful resolution with a real snapshot: somebody who
+    // punches in on their day off has genuinely worked, and v2 pays by the day
+    // attended rather than by the roster. The status says which it was so the
+    // caller can tell the two apart.
+    status: snapshot.is_working_day ? RESOLUTION_STATUS.OK : RESOLUTION_STATUS.REST_DAY,
+    work_shift_id: workShiftId,
+    assignment,
+    snapshot,
+  };
+}
+
+module.exports = {
+  RESOLUTION_STATUS,
+  SHIFT_SNAPSHOT_VERSION,
+  toDateOnly,
+  dayOfWeek,
+  resolveAssignmentForDate,
+  buildShiftSnapshot,
+  snapshotHash,
+  resolveShiftForDate,
+};

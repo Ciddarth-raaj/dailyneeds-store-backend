@@ -202,6 +202,19 @@ class Server {
     this.employeeSalaryRepo = require("./repository/employee_salary")(
       this.mysql.connection
     );
+    // Attendance v2. The reads the calculation engine needs and the writes of
+    // what it produced. It SELECTs the Biomax punch tables and never writes
+    // them - the receiver process remains their only writer - and the two
+    // tables it does write hold derived numbers that can be recomputed.
+    this.attendanceCalculationRepo = require("./repository/attendance_calculation")(
+      this.mysql.connection
+    );
+    // Attendance v2 / A3. The regularization and OT approval store. It cannot
+    // reach `biomax_punch` at all: an approved manual punch is a row in its
+    // own table, and the raw punch stays exactly as the device sent it.
+    this.attendanceRegularizationRepo = require("./repository/attendance_regularization")(
+      this.mysql.connection
+    );
     // Attendance - Part 1. Read-only over the Biomax punch tables (the
     // receiver process is their only writer) plus the device registry. On
     // the PRIMARY application pool, never the GoFrugal one.
@@ -519,6 +532,20 @@ class Server {
     // when a salary may be created, amended, approved or rejected.
     this.employeeSalaryUsecase = require("./usecase/employee_salary")(
       this.employeeSalaryRepo
+    );
+    // Attendance v2. Orchestration only: the arithmetic is in the pure
+    // `utils/attendance_engine.js`, `utils/shiftResolution.js` and
+    // `utils/attendance_payroll.js`, and this fetches what they need and
+    // shapes what they returned.
+    this.attendanceCalculationUsecase = require("./usecase/attendance_calculation")(
+      this.attendanceCalculationRepo
+    );
+    // Attendance v2 / A3. Handed the calculation usecase as well, because a
+    // request is validated against what the engine actually says is wrong with
+    // the date, and a final approval recalculates that date immediately.
+    this.attendanceRegularizationUsecase = require("./usecase/attendance_regularization")(
+      this.attendanceRegularizationRepo,
+      this.attendanceCalculationUsecase
     );
     // M5: Bulk Salary Upload. A BATCH over the lifecycle above rather than a
     // second one - it is handed the same repository and the same usecase, and
@@ -891,6 +918,19 @@ class Server {
       // they inherit the B3 response filter and write guard mounted on /salary.
       this.salaryBulkUploadUsecase
     );
+    // Attendance v2: calculated attendance, the monthly payroll roll-up, and
+    // the regularization / OT approval API. Read and recalculate only; no
+    // punch is created, edited or deleted from either router.
+    const attendanceCalculationRouter = require("./routes/attendance_calculation")(
+      this.attendanceCalculationUsecase,
+      this.permissions,
+      this.sensitive
+    );
+    const attendanceRegularizationRouter = require("./routes/attendance_regularization")(
+      this.attendanceRegularizationUsecase,
+      this.permissions,
+      this.sensitive
+    );
     const storeRouter = require("./routes/store")(this.storeUsecase);
     const outletRouter = require("./routes/outlet")(
       this.outletUsecase,
@@ -1122,6 +1162,11 @@ class Server {
     app.use("/attendance/devices", biomaxDeviceRouter.getRouter());
     app.use("/attendance/historical-pulls", biomaxHistoricalPullRouter.getRouter());
     app.use("/attendance/imports", attendanceImportRouter.getRouter());
+    // Attendance v2. Both declare their full `/attendance/...` paths, so they
+    // mount at the root and are tried BEFORE the Part 1 router, which claims
+    // the bare `/attendance` prefix.
+    app.use("/", attendanceCalculationRouter.getRouter());
+    app.use("/", attendanceRegularizationRouter.getRouter());
     app.use("/attendance", attendanceRawRouter.getRouter());
     app.use("/store", storeRouter.getRouter());
     app.use("/outlet", outletRouter.getRouter());

@@ -215,4 +215,37 @@ module.exports = {
   // decision, declared by the import migration and granted to nobody:
   // administrators only, through the user_type 2 bypass, until granted.
   MANAGE_ATTENDANCE_IMPORT: "manage_attendance_import",
+
+  // Attendance v2 - the calculation engine and its monthly payroll roll-up.
+  //
+  // Reading calculated minutes and RE-RUNNING the engine are separate keys
+  // because a recalculation rewrites what payroll will read; and the monthly
+  // roll-up is a third, because somebody entitled to see how long a colleague
+  // worked is not thereby entitled to see what those minutes are worth.
+  //
+  // `manage_employee_break_override` changes somebody's NRM, and therefore
+  // their pay, so the migration grants it to NOBODY - an administrator grants
+  // it deliberately on the designation screen.
+  VIEW_CALCULATED_ATTENDANCE: "view_calculated_attendance",
+  RECALCULATE_ATTENDANCE: "recalculate_attendance",
+  VIEW_ATTENDANCE_PAYROLL: "view_attendance_payroll",
+  MANAGE_EMPLOYEE_BREAK_OVERRIDE: "manage_employee_break_override",
+
+  // Attendance v2 / A3 - missing-punch regularization and OT approval.
+  //
+  // Raising a request for YOURSELF and raising one for SOMEBODY ELSE are two
+  // keys, because a manager filing on a team member's behalf is a different
+  // act from an employee filing their own.
+  //
+  // `approve_attendance_regularization` is permission to reach the decision
+  // endpoint; it is NOT authority over a particular stage. That is decided by
+  // `utils/attendance_approval_chain.js#canApprove` from the caller's mapped
+  // approval role and outlet, so holding this key without the right role
+  // decides nothing. The migration grants it to nobody.
+  RAISE_ATTENDANCE_REGULARIZATION: "raise_attendance_regularization",
+  RAISE_ATTENDANCE_REGULARIZATION_FOR_OTHERS:
+    "raise_attendance_regularization_for_others",
+  APPROVE_ATTENDANCE_REGULARIZATION: "approve_attendance_regularization",
+  VIEW_ATTENDANCE_APPROVALS: "view_attendance_approvals",
+  MANAGE_ATTENDANCE_APPROVAL_ROLES: "manage_attendance_approval_roles",
 };

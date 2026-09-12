@@ -263,8 +263,29 @@ class EmployeeWorkShiftRepository {
    * changed - re-assigning somebody to the shift they already have is a
    * legitimate no-op, and the caller is told the difference rather than being
    * left to guess from one number.
+   *
+   * ATTENDANCE v2 / A0. The same transaction now also APPENDS one row per
+   * employee to `employee_work_shift_assignment`, the dated history the
+   * attendance engine resolves a past date against. Two things about that are
+   * deliberate:
+   *
+   *   - It is an INSERT, never an UPDATE. History is appended, so what payroll
+   *     believed on the day it ran survives a later correction.
+   *   - `effective_from` is the date the assignment is MADE, supplied by the
+   *     caller, and is never backdated here. Moving somebody to a new shift
+   *     today must not rewrite yesterday's worked minutes; a genuine
+   *     correction to the past is a separate, audited act.
+   *
+   * `default_work_shift_id` keeps being written exactly as before, so every
+   * existing screen, the Biomax receiver's ingest-time derivation and the HR
+   * assignment flow behave identically. The history is additional, not a
+   * replacement.
+   *
+   * `options.effective_from` omitted means no history row is written at all -
+   * which is what keeps this method's old two-argument form working for any
+   * caller that has not been updated.
    */
-  async assignWorkShift(employeeIds, workShiftId) {
+  async assignWorkShift(employeeIds, workShiftId, options = {}) {
     const connection = await getConnectionAsync(this.db);
     try {
       await beginTransactionAsync(connection);
@@ -290,6 +311,25 @@ class EmployeeWorkShiftRepository {
         [workShiftId, employeeIds]
       );
 
+      if (options.effective_from) {
+        await queryAsync(
+          connection,
+          `INSERT INTO employee_work_shift_assignment
+             (employee_id, work_shift_id, effective_from, source, note, created_by)
+           VALUES ?`,
+          [
+            employeeIds.map((employeeId) => [
+              employeeId,
+              workShiftId,
+              options.effective_from,
+              employeeIds.length > 1 ? "BULK_ASSIGNMENT" : "ASSIGNMENT",
+              options.note || null,
+              options.created_by === undefined ? null : options.created_by,
+            ]),
+          ]
+        );
+      }
+
       await commitAsync(connection);
       return {
         code: 200,
@@ -297,6 +337,7 @@ class EmployeeWorkShiftRepository {
         requested: employeeIds.length,
         matched: result ? Number(result.affectedRows) : 0,
         updated: result ? Number(result.changedRows) : 0,
+        effective_from: options.effective_from || null,
       };
     } catch (err) {
       await rollbackAsync(connection);
