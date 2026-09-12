@@ -181,12 +181,14 @@ Neither of these is caused by the removal, and neither is fixed by it.
 
 1. **DigiSME must revoke the two credentials** (§4). The only item here that
    code cannot close. Start it now if it has not been started.
-   While removing them, a **commented-out `GOFRUGAL_API_KEY` literal** was
-   found sitting immediately above them in `services/synker.js` and was
-   deleted too — commenting a key out does not stop it being published. It is
-   equally in git history, so **GoFrugal needs to revoke it as well**. That
-   one is unrelated to this removal and was not part of the reported scope;
-   it is recorded here because this is where it was found.
+   Noticed while removing them, and **left in place**: a commented-out
+   `GOFRUGAL_API_KEY` literal sits immediately above them in
+   `services/synker.js`, with two commented-out REST calls further down that
+   reference it. Nothing reads it — the live GoFrugal path is a direct MySQL
+   connection — but it was committed in plaintext, so **GoFrugal should revoke
+   it too**. Deleting the line would not change that; only revocation does.
+   Flagged here rather than acted on: it is unrelated to this removal and
+   outside its scope.
 2. **`reconcileEmployeeLifecycle()` has no caller.** Nothing reconciles
    employment periods on a schedule. This is *not* a regression from the
    removal: its only caller was a sync disabled at two switches for the whole

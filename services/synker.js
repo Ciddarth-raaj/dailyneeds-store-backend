@@ -6,11 +6,8 @@ const moment = require("moment");
 
 const logger = require("../utils/logger");
 const deliumConfig = require("../config/delium");
-// A commented-out GOFRUGAL_API_KEY literal used to sit here. Removed while
-// removing the Digisme credentials beside it: commenting a key out does not
-// stop it being a published credential. It is still in git history, so it
-// needs revoking at GoFrugal like the Digisme pair - see
-// docs/digisme-employee-sync-removal.md.
+// const GOFRUGAL_API_KEY =
+//   "92389031420AEF2B22174FA933F178040AFD9395A5E9C3F013A74C4CA152CE786116998975B7AF31";
 
 const CRON_SYNTAX_PRODUCT = "0 4 * * *";
 const CRON_SYNTAX_STOCK_HOLDING = "30 7 * * *";
