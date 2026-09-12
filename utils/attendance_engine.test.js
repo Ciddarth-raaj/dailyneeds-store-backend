@@ -800,3 +800,70 @@ describe("deduction rule - Deduct Minutes per Deduction Interval, settled inside
     assert.notEqual(ruled().snapshot_hash, ruled({ late_deduct_minutes: 45 }).snapshot_hash);
   });
 });
+
+describe("Exclude Minimum OT - only the minutes beyond the minimum are paid", () => {
+  const excl = (extra = {}) =>
+    shift({
+      in_time: "09:30",
+      out_time: "18:30",
+      break_minutes: 30,
+      config: {
+        overtime_allowed: 1,
+        overtime_minimum_minutes: 20,
+        overtime_minimum_excluded: 1,
+        overtime_rounding_method: "UP",
+        overtime_rounding_interval_minutes: 1,
+        ...extra,
+      },
+    });
+
+  it("2 Sep: 39 minutes after out-time on a 20-minute minimum pays 19", () => {
+    const result = day({ shift: excl(), punches: punches("09:30", "19:09") });
+    assert.equal(result.raw_ot_minutes, 39);
+    assert.equal(result.candidate_ot_minutes, 19);
+  });
+
+  it("under the minimum pays nothing; exactly the minimum pays nothing", () => {
+    assert.equal(day({ shift: excl(), punches: punches("09:30", "18:49") }).candidate_ot_minutes, 0);
+    assert.equal(day({ shift: excl(), punches: punches("09:30", "18:50") }).candidate_ot_minutes, 0);
+  });
+
+  it("with the flag off the existing readings apply (threshold-only pays 39, floor pays 39)", () => {
+    assert.equal(
+      day({ shift: excl({ overtime_minimum_excluded: 0, overtime_minimum_threshold_only: 1 }), punches: punches("09:30", "19:09") }).candidate_ot_minutes,
+      39
+    );
+    assert.equal(
+      day({ shift: excl({ overtime_minimum_excluded: 0, overtime_minimum_threshold_only: 0 }), punches: punches("09:30", "19:09") }).candidate_ot_minutes,
+      39
+    );
+  });
+
+  it("rounding and the cap apply to the excess", () => {
+    const rounded = day({
+      shift: excl({ overtime_rounding_method: "UP", overtime_rounding_interval_minutes: 15 }),
+      punches: punches("09:30", "19:09"),
+    });
+    assert.equal(rounded.candidate_ot_minutes, 30, "19 rounded up to 15s");
+    const capped = day({ shift: excl({ maximum_ot_minutes_per_day: 10 }), punches: punches("09:30", "19:09") });
+    assert.equal(capped.candidate_ot_minutes, 10);
+  });
+
+  it("pre-shift OT has its own exclusion: 25 minutes early on a 10-minute minimum pays 15", () => {
+    const pre = excl({
+      pre_shift_overtime_allowed: 1,
+      pre_shift_overtime_minimum_minutes: 10,
+      pre_shift_overtime_minimum_excluded: 1,
+    });
+    const result = day({ shift: pre, punches: punches("09:05", "18:30") });
+    assert.equal(result.pre_shift_minutes, 25);
+    assert.equal(result.pre_shift_ot_minutes, 15);
+    assert.equal(result.candidate_ot_minutes, 15);
+    const off = day({ shift: excl({ pre_shift_overtime_allowed: 1, pre_shift_overtime_minimum_minutes: 10 }), punches: punches("09:05", "18:30") });
+    assert.equal(off.pre_shift_ot_minutes, 25);
+  });
+
+  it("the flags are part of the snapshot hash", () => {
+    assert.notEqual(excl().snapshot_hash, excl({ overtime_minimum_excluded: 0 }).snapshot_hash);
+  });
+});

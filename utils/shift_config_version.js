@@ -68,11 +68,13 @@ const VERSIONED_CONFIG_COLUMNS = Object.freeze([
   "overtime_rounding_method",
   "overtime_rounding_interval_minutes",
   "overtime_minimum_threshold_only",
+  "overtime_minimum_excluded",
   "maximum_ot_minutes_per_day",
   "pre_shift_overtime_allowed",
   "pre_shift_overtime_minimum_minutes",
   "pre_shift_overtime_rounding_method",
   "pre_shift_overtime_rounding_interval_minutes",
+  "pre_shift_overtime_minimum_excluded",
   "late_offset_against_overtime",
   "early_exit_offset_against_overtime",
 ]);
@@ -122,6 +124,8 @@ function buildConfigVersion(config, schedule) {
     if (
       column === "overtime_allowed" ||
       column === "overtime_minimum_threshold_only" ||
+      column === "overtime_minimum_excluded" ||
+      column === "pre_shift_overtime_minimum_excluded" ||
       column === "pre_shift_overtime_allowed" ||
       column === "late_offset_against_overtime" ||
       column === "early_exit_offset_against_overtime" ||

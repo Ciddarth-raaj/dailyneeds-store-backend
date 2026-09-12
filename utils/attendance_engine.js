@@ -122,8 +122,10 @@ const BREAK_CREDIT_CUTOFF_MINUTES = 15 * 60;
  *      punches; a two-punch day is charged the shift's break.
  *   5  The no-lunch rule: a two-punch day ending before 15:00 gets no break
  *      credit against lateness or early out (`BREAK_CREDIT_CUTOFF_MINUTES`).
+ *   6  "Exclude Minimum OT": with the shift flag on, only minutes beyond the
+ *      OT minimum are paid (post-shift and pre-shift each have their own).
  */
-const CALCULATION_VERSION = 5;
+const CALCULATION_VERSION = 6;
 
 /** Every value `status` can take. A calculation is never left without one. */
 const CALC_STATUS = Object.freeze({
@@ -310,7 +312,15 @@ function applyOvertimeRules(rawMinutes, snapshot) {
   const minimum = Math.max(0, Math.trunc(snapshot.overtime_minimum_minutes || 0));
   if (raw < minimum) return 0;
 
-  let minutes = snapshot.overtime_minimum_threshold_only ? raw : Math.max(raw, minimum);
+  // EXCLUDE MINIMUM (DigiSME's "Exclude Minimum Over Time"): the minimum
+  // qualifies the day and is then not paid - only the minutes beyond it are.
+  // 39 on a 20-minute minimum pays 19. Takes precedence over the
+  // threshold-only / floor reading, which only applies with it off.
+  let minutes = snapshot.overtime_minimum_excluded
+    ? raw - minimum
+    : snapshot.overtime_minimum_threshold_only
+      ? raw
+      : Math.max(raw, minimum);
 
   minutes = roundOvertime(
     minutes,
@@ -353,8 +363,10 @@ function applyPreShiftOvertimeRules(rawMinutes, snapshot) {
   const minimum = Math.max(0, Math.trunc(snapshot.pre_shift_overtime_minimum_minutes || 0));
   if (raw < minimum) return 0;
 
+  // Exclude minimum, the same reading as post-shift: only minutes beyond
+  // the minimum are paid.
   const minutes = roundOvertime(
-    raw,
+    snapshot.pre_shift_overtime_minimum_excluded ? raw - minimum : raw,
     snapshot.pre_shift_overtime_rounding_method,
     snapshot.pre_shift_overtime_rounding_interval_minutes
   );

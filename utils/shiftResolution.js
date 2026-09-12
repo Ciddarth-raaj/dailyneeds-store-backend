@@ -172,11 +172,13 @@ function snapshotHash(snapshot) {
     `ot_round=${snapshot.overtime_rounding_method}`,
     `ot_interval=${snapshot.overtime_rounding_interval_minutes}`,
     `ot_threshold_only=${snapshot.overtime_minimum_threshold_only ? 1 : 0}`,
+    `ot_min_excluded=${snapshot.overtime_minimum_excluded ? 1 : 0}`,
     `ot_cap=${snapshot.maximum_ot_minutes_per_day === null ? "" : snapshot.maximum_ot_minutes_per_day}`,
     `pre_ot_allowed=${snapshot.pre_shift_overtime_allowed ? 1 : 0}`,
     `pre_ot_min=${snapshot.pre_shift_overtime_minimum_minutes}`,
     `pre_ot_round=${snapshot.pre_shift_overtime_rounding_method}`,
     `pre_ot_interval=${snapshot.pre_shift_overtime_rounding_interval_minutes}`,
+    `pre_ot_min_excluded=${snapshot.pre_shift_overtime_minimum_excluded ? 1 : 0}`,
     `late_offset=${snapshot.late_offset_against_overtime ? 1 : 0}`,
     `early_offset=${snapshot.early_exit_offset_against_overtime ? 1 : 0}`,
     `late_grace=${snapshot.late_grace_minutes}`,
@@ -239,6 +241,7 @@ function buildShiftSnapshot(scheduleRow, shiftConfig, dow) {
     overtime_rounding_method: String(cfg.overtime_rounding_method || "NONE").toUpperCase(),
     overtime_rounding_interval_minutes: nonNegativeInt(cfg.overtime_rounding_interval_minutes, 0),
     overtime_minimum_threshold_only: tinyBool(cfg.overtime_minimum_threshold_only),
+    overtime_minimum_excluded: tinyBool(cfg.overtime_minimum_excluded),
     maximum_ot_minutes_per_day:
       cfg.maximum_ot_minutes_per_day === null || cfg.maximum_ot_minutes_per_day === undefined
         ? null
@@ -256,6 +259,7 @@ function buildShiftSnapshot(scheduleRow, shiftConfig, dow) {
       cfg.pre_shift_overtime_rounding_interval_minutes,
       0
     ),
+    pre_shift_overtime_minimum_excluded: tinyBool(cfg.pre_shift_overtime_minimum_excluded),
 
     // The two OFFSET switches. They subtract from OVERTIME and from nothing
     // else - v2 has no monetary late or early-exit penalty and these do not
