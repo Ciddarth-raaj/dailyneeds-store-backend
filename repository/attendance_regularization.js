@@ -102,7 +102,7 @@ class AttendanceRegularizationRepository {
               outlet_id, requester_class, reason,
               candidate_ot_minutes, approved_ot_minutes,
               status, current_stage_no, total_stages,
-              finalization_state, auto_created
+              finalization_state, auto_created, chain_source
          FROM attendance_approval_request
         WHERE attendance_approval_request_id = ?`,
       [requestId]
@@ -112,13 +112,15 @@ class AttendanceRegularizationRepository {
 
     const steps = await this._read(
       "GET-REQUEST-STEPS",
-      `SELECT attendance_approval_step_id, stage_no, approver_role, outlet_id,
-              decision, decided_by_employee_id,
-              DATE_FORMAT(decided_at, '%Y-%m-%d %H:%i:%s') AS decided_at,
-              remarks, acted_as_admin_override
-         FROM attendance_approval_step
-        WHERE attendance_approval_request_id = ?
-        ORDER BY stage_no ASC`,
+      `SELECT s.attendance_approval_step_id, s.stage_no, s.approver_role, s.outlet_id,
+              s.approver_employee_id, s.approval_level, a.employee_name AS approver_name,
+              s.decision, s.decided_by_employee_id,
+              DATE_FORMAT(s.decided_at, '%Y-%m-%d %H:%i:%s') AS decided_at,
+              s.remarks, s.acted_as_admin_override
+         FROM attendance_approval_step s
+         LEFT JOIN new_employee a ON a.employee_id = s.approver_employee_id
+        WHERE s.attendance_approval_request_id = ?
+        ORDER BY s.stage_no ASC`,
       [requestId]
     );
 
@@ -301,6 +303,14 @@ class AttendanceRegularizationRepository {
    * The punch is written now rather than on approval so that what everybody in
    * the chain reviews is the exact time that will be used - an approver should
    * be agreeing to a specific punch, not to the idea of one.
+   *
+   * THE CHAIN IS SNAPSHOTTED. Each step stores the role it was addressed to
+   * and, for an EMPLOYEE-LEVEL chain, the actual approver employee id and the
+   * level it came from; `chain_source` on the request says which of the two
+   * chains was resolved. Nothing about a request re-reads the approver
+   * mapping afterwards, so later mapping changes do not move a request that
+   * has already been raised (Replace Approver does that explicitly, and only
+   * for undecided steps).
    */
   async createRequest({ request, chain, punch }) {
     const connection = await getConnectionAsync(this.db);
@@ -312,8 +322,9 @@ class AttendanceRegularizationRepository {
         `INSERT INTO attendance_approval_request
            (request_type, requested_for_employee_id, requested_by_employee_id,
             attendance_date, outlet_id, requester_class, reason,
-            candidate_ot_minutes, auto_created, status, current_stage_no, total_stages)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 1, ?)`,
+            candidate_ot_minutes, auto_created, status, current_stage_no, total_stages,
+            chain_source)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 1, ?, ?)`,
         [
           request.request_type,
           request.requested_for_employee_id,
@@ -325,6 +336,7 @@ class AttendanceRegularizationRepository {
           request.candidate_ot_minutes,
           request.auto_created ? 1 : 0,
           chain.length,
+          request.chain_source === undefined ? null : request.chain_source,
         ]
       );
       const requestId = inserted.insertId;
@@ -332,9 +344,19 @@ class AttendanceRegularizationRepository {
       await queryAsync(
         connection,
         `INSERT INTO attendance_approval_step
-           (attendance_approval_request_id, stage_no, approver_role, outlet_id)
+           (attendance_approval_request_id, stage_no, approver_role, outlet_id,
+            approver_employee_id, approval_level)
          VALUES ?`,
-        [chain.map((s) => [requestId, s.stage_no, s.approver_role, s.outlet_id])]
+        [
+          chain.map((s) => [
+            requestId,
+            s.stage_no,
+            s.approver_role,
+            s.outlet_id,
+            s.approver_employee_id === undefined ? null : s.approver_employee_id,
+            s.approval_level === undefined ? null : s.approval_level,
+          ]),
+        ]
       );
 
       if (punch) {
@@ -477,8 +499,10 @@ class AttendanceRegularizationRepository {
    * the action would correctly be refused.
    */
   async listPendingFor({ approver_roles, outlet_id, actor_employee_id, limit = 200 }) {
-    const roles = Array.isArray(approver_roles) ? approver_roles : [];
-    if (roles.length === 0) return [];
+    // An actor with no role still has a queue: the employee-level steps that
+    // name them. The IN (?) below needs a non-empty list, so an impossible
+    // role stands in for "none".
+    const roles = Array.isArray(approver_roles) && approver_roles.length > 0 ? approver_roles : ["__NONE__"];
 
     return this._read(
       "LIST-PENDING-FOR",
@@ -489,6 +513,7 @@ class AttendanceRegularizationRepository {
               r.outlet_id, o.outlet_name, r.reason,
               r.candidate_ot_minutes, r.current_stage_no, r.total_stages,
               s.attendance_approval_step_id, s.approver_role,
+              s.approver_employee_id, s.approval_level, r.chain_source,
               DATE_FORMAT(r.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
          FROM attendance_approval_request r
          JOIN attendance_approval_step s
@@ -498,13 +523,17 @@ class AttendanceRegularizationRepository {
          LEFT JOIN outlets o ON o.outlet_id = r.outlet_id
         WHERE r.status = 'PENDING'
           AND s.decision = 'PENDING'
-          AND s.approver_role IN (?)
-          AND (s.approver_role <> 'STORE_MANAGER' OR s.outlet_id = ?)
+          AND (
+                (s.approver_employee_id IS NULL
+                 AND s.approver_role IN (?)
+                 AND (s.approver_role <> 'STORE_MANAGER' OR s.outlet_id = ?))
+             OR s.approver_employee_id = ?
+              )
           AND r.requested_for_employee_id <> ?
           AND r.requested_by_employee_id <> ?
         ORDER BY r.attendance_date ASC, r.attendance_approval_request_id ASC
         LIMIT ?`,
-      [roles, outlet_id === undefined ? null : outlet_id, actor_employee_id, actor_employee_id, Number(limit)]
+      [roles, outlet_id === undefined ? null : outlet_id, actor_employee_id, actor_employee_id, actor_employee_id, Number(limit)]
     );
   }
 
@@ -521,6 +550,14 @@ class AttendanceRegularizationRepository {
    * with the same outlet rule - and, again, never their own. An
    * administrator sees everything. Nothing here widens visibility for a
    * history tab beyond what the approver's role already gave them.
+   *
+   * EMPLOYEE-LEVEL STEPS are addressed to a person, so they are in scope for
+   * exactly that person: a step whose `approver_employee_id` is the actor is
+   * theirs, whatever their role; a step with a snapshotted approver who is
+   * somebody else is nobody else's, whatever their role. Role-based steps
+   * (historical, and the unmapped fallback) keep the role rule unchanged.
+   * The same clause serves the list and the count, so "pending with me"
+   * moves the moment Replace Approver moves a step.
    */
   _approvalScope({ request_type, status, approver_roles, outlet_id, actor_employee_id, is_admin }) {
     const roles = Array.isArray(approver_roles) ? approver_roles : [];
@@ -532,13 +569,16 @@ class AttendanceRegularizationRepository {
       where.push("r.status = 'PENDING'");
       where.push("s.decision = 'PENDING'");
       if (!is_admin) {
-        if (roles.length === 0) where.push("1 = 0");
+        if (roles.length === 0) where.push("s.approver_employee_id = ?");
         else {
-          where.push("s.approver_role IN (?)");
-          params.push(roles);
-          where.push("(s.approver_role <> 'STORE_MANAGER' OR s.outlet_id = ?)");
-          params.push(outlet);
+          where.push(
+            `((s.approver_employee_id IS NULL AND s.approver_role IN (?)
+               AND (s.approver_role <> 'STORE_MANAGER' OR s.outlet_id = ?))
+              OR s.approver_employee_id = ?)`
+          );
+          params.push(roles, outlet);
         }
+        params.push(actor_employee_id);
       }
     } else {
       if (status === "APPROVED" || status === "REJECTED") {
@@ -548,15 +588,22 @@ class AttendanceRegularizationRepository {
         where.push("r.status <> 'CANCELLED'");
       }
       if (!is_admin) {
-        if (roles.length === 0) where.push("1 = 0");
-        else {
+        if (roles.length === 0) {
           where.push(
             `EXISTS (SELECT 1 FROM attendance_approval_step x
                       WHERE x.attendance_approval_request_id = r.attendance_approval_request_id
-                        AND x.approver_role IN (?)
-                        AND (x.approver_role <> 'STORE_MANAGER' OR x.outlet_id = ?))`
+                        AND x.approver_employee_id = ?)`
           );
-          params.push(roles, outlet);
+          params.push(actor_employee_id);
+        } else {
+          where.push(
+            `EXISTS (SELECT 1 FROM attendance_approval_step x
+                      WHERE x.attendance_approval_request_id = r.attendance_approval_request_id
+                        AND ((x.approver_employee_id IS NULL AND x.approver_role IN (?)
+                              AND (x.approver_role <> 'STORE_MANAGER' OR x.outlet_id = ?))
+                             OR x.approver_employee_id = ?))`
+          );
+          params.push(roles, outlet, actor_employee_id);
         }
       }
     }
@@ -587,7 +634,8 @@ class AttendanceRegularizationRepository {
               r.outlet_id, o.outlet_name, r.reason,
               r.candidate_ot_minutes, r.approved_ot_minutes,
               r.current_stage_no, r.total_stages, r.finalization_state,
-              r.closure_reason, r.auto_created,
+              r.closure_reason, r.auto_created, r.chain_source,
+              s.approver_employee_id AS current_stage_approver_employee_id,
               DATE_FORMAT(r.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
               DATE_FORMAT(r.decided_at, '%Y-%m-%d %H:%i:%s') AS decided_at,
               DATE_FORMAT(p.punch_time, '%Y-%m-%d %H:%i:%s') AS proposed_punch_time,
@@ -636,11 +684,13 @@ class AttendanceRegularizationRepository {
       "LIST-STEPS-FOR-REQUESTS",
       `SELECT s.attendance_approval_request_id, s.attendance_approval_step_id,
               s.stage_no, s.approver_role, s.outlet_id, s.decision,
+              s.approver_employee_id, s.approval_level, a.employee_name AS approver_name,
               s.decided_by_employee_id, d.employee_name AS decided_by_name,
               DATE_FORMAT(s.decided_at, '%Y-%m-%d %H:%i:%s') AS decided_at,
               s.remarks, s.acted_as_admin_override
          FROM attendance_approval_step s
          LEFT JOIN new_employee d ON d.employee_id = s.decided_by_employee_id
+         LEFT JOIN new_employee a ON a.employee_id = s.approver_employee_id
         WHERE s.attendance_approval_request_id IN (?)
         ORDER BY s.attendance_approval_request_id ASC, s.stage_no ASC`,
       [requestIds]

@@ -215,6 +215,12 @@ class Server {
     this.attendanceRegularizationRepo = require("./repository/attendance_regularization")(
       this.mysql.connection
     );
+    // Attendance Approver Setup: the EMPLOYEE-LEVEL approver master and its
+    // append-only audit. Read by the regularization usecase to resolve a new
+    // request's chain; an unmapped employee falls back to the role chain.
+    this.attendanceApproverSetupRepo = require("./repository/attendance_approver_setup")(
+      this.mysql.connection
+    );
     // Attendance - Part 1. Read-only over the Biomax punch tables (the
     // receiver process is their only writer) plus the device registry. On
     // the PRIMARY application pool, never the GoFrugal one.
@@ -545,7 +551,11 @@ class Server {
     // the date, and a final approval recalculates that date immediately.
     this.attendanceRegularizationUsecase = require("./usecase/attendance_regularization")(
       this.attendanceRegularizationRepo,
-      this.attendanceCalculationUsecase
+      this.attendanceCalculationUsecase,
+      this.attendanceApproverSetupRepo
+    );
+    this.attendanceApproverSetupUsecase = require("./usecase/attendance_approver_setup")(
+      this.attendanceApproverSetupRepo
     );
     // Finalized OT flow. The calculation usecase raises NO OT request of its
     // own; it needs the regularization usecase for one thing - closing
@@ -939,6 +949,10 @@ class Server {
       this.permissions,
       this.sensitive
     );
+    const attendanceApproverSetupRouter = require("./routes/attendance_approver_setup")(
+      this.attendanceApproverSetupUsecase,
+      this.permissions
+    );
     const storeRouter = require("./routes/store")(this.storeUsecase);
     const outletRouter = require("./routes/outlet")(
       this.outletUsecase,
@@ -1175,6 +1189,7 @@ class Server {
     // the bare `/attendance` prefix.
     app.use("/", attendanceCalculationRouter.getRouter());
     app.use("/", attendanceRegularizationRouter.getRouter());
+    app.use("/", attendanceApproverSetupRouter.getRouter());
     app.use("/attendance", attendanceRawRouter.getRouter());
     app.use("/store", storeRouter.getRouter());
     app.use("/outlet", outletRouter.getRouter());

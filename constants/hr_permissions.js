@@ -249,6 +249,14 @@ module.exports = {
   VIEW_ATTENDANCE_APPROVALS: "view_attendance_approvals",
   MANAGE_ATTENDANCE_APPROVAL_ROLES: "manage_attendance_approval_roles",
 
+  // Attendance Approver Setup - the EMPLOYEE-LEVEL chain (First Level, Second
+  // Level, Final Approver per employee), Bulk Set and Replace Approver. One
+  // key for the screen and every mutation behind it; declared by the
+  // approver-setup migration and granted to NOBODY, so administrators only
+  // through the user_type 2 bypass until a designation is granted it
+  // deliberately. It is NOT handed to HR or managers by any rule here.
+  MANAGE_ATTENDANCE_APPROVERS: "manage_attendance_approvers",
+
   // Attendance v2 / A0 - the AUTHORIZED CORRECTION of a historical shift
   // assignment.
   //

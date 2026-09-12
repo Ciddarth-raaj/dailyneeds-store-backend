@@ -5,7 +5,9 @@ const {
   REQUEST_STATUS,
   STEP_DECISION,
   ADMIN_USER_TYPE,
+  CHAIN_SOURCE,
   buildApprovalChain,
+  buildEmployeeApprovalChain,
   canApprove,
   advance,
 } = require("../utils/attendance_approval_chain");
@@ -71,7 +73,14 @@ function validationError(message) {
 /** How far back a date may be regularized. A month of slack, not a decade. */
 const MAX_BACKDATE_DAYS = 45;
 
-module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase) => {
+/**
+ * `approverSetupRepo` is the EMPLOYEE-LEVEL approver store (Attendance
+ * Approver Setup). It is optional: without it every request follows the role
+ * chain exactly as before, which is also what happens for an employee who has
+ * no active mapping yet. With it, `resolveChain` snapshots the mapped approver
+ * ids onto the request at creation. ONE chain per request, never a mix.
+ */
+module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, approverSetupRepo = null) => {
   /**
    * The two facts about a person the chain needs: which chain their own
    * request follows, and which stages they may decide.
@@ -107,7 +116,28 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase) =>
     },
   });
 
-  /** The chain for somebody's own request, with the outlet check every raise needs. */
+  /**
+   * Which chain a NEW request walks, resolved once and snapshotted.
+   *
+   *   mapped employee    the employee-level chain from Attendance Approver
+   *                      Setup: First -> Second -> Final with blank levels
+   *                      skipped, each step carrying the approver's id
+   *   unmapped employee  the existing designation/outlet role chain,
+   *                      unchanged - the backward-compatible fallback
+   *
+   * The two are never combined inside one request.
+   */
+  const resolveChain = async (identity) => {
+    if (approverSetupRepo && typeof approverSetupRepo.getActiveSetup === "function") {
+      const setup = await approverSetupRepo.getActiveSetup(identity.employee_id);
+      if (setup && setup.final_approver_employee_id) {
+        return { chain: buildEmployeeApprovalChain(setup), source: CHAIN_SOURCE.EMPLOYEE };
+      }
+    }
+    return { chain: chainFor(identity), source: CHAIN_SOURCE.ROLE };
+  };
+
+  /** The ROLE chain for somebody's own request, with the outlet check every raise needs. */
   const chainFor = (identity) => {
     const chain = buildApprovalChain({
       requester_class: identity.requester_class,
@@ -222,7 +252,7 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase) =>
     }
 
     const identity = await resolveIdentity(forEmployeeId);
-    const chain = chainFor(identity);
+    const { chain, source: chain_source } = await resolveChain(identity);
 
     const created = await attendanceRegularizationRepo.createRequest({
       request: {
@@ -235,6 +265,7 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase) =>
         reason: reason.trim(),
         candidate_ot_minutes: 0,
         auto_created: false,
+        chain_source,
       },
       chain,
       punch: { punch_time: punchTime },
@@ -245,6 +276,7 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase) =>
       request_type: REQUEST_TYPE.REGULARIZATION,
       attendance_date: date,
       chain,
+      chain_source,
       // What the day would look like if this were approved, so an approver can
       // be shown the corrected day rather than the broken one. Its candidate
       // OT is informational: it becomes claimable only after approval.
@@ -331,7 +363,7 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase) =>
       throw validationError(`${date} has no overtime calculated, so there is nothing to request`);
     }
 
-    const chain = chainFor(identity);
+    const { chain, source: chain_source } = await resolveChain(identity);
     const created = await attendanceRegularizationRepo.createRequest({
       request: {
         request_type: REQUEST_TYPE.OT,
@@ -343,6 +375,7 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase) =>
         reason: reason.trim(),
         candidate_ot_minutes: candidate,
         auto_created: false,
+        chain_source,
       },
       chain,
       punch: null,
@@ -355,6 +388,7 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase) =>
       candidate_ot_minutes: candidate,
       approved_ot_minutes: 0,
       chain,
+      chain_source,
       requester_class: identity.requester_class,
       requester_class_is_default: identity.requester_class_is_default,
     };
@@ -412,6 +446,8 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase) =>
       stage_no: Number(s.stage_no),
       approver_role: s.approver_role,
       outlet_id: s.outlet_id,
+      approver_employee_id: s.approver_employee_id === undefined ? null : s.approver_employee_id,
+      approval_level: s.approval_level === undefined ? null : s.approval_level,
     }));
     const next = advance(request, chain, decision);
 
@@ -717,6 +753,14 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase) =>
         current_stage_no: Number(row.current_stage_no),
         total_stages: Number(row.total_stages),
         current_stage_role: currentStep ? currentStep.approver_role : null,
+        // Employee-level chains name a person for the stage; role chains do not.
+        chain_source: row.chain_source || null,
+        current_stage_approval_level: currentStep ? currentStep.approval_level || null : null,
+        current_stage_approver_employee_id:
+          currentStep && currentStep.approver_employee_id !== null && currentStep.approver_employee_id !== undefined
+            ? Number(currentStep.approver_employee_id)
+            : null,
+        current_stage_approver_name: currentStep ? currentStep.approver_name || null : null,
         actionable: !!verdict.allowed,
         not_actionable_reason: verdict.allowed ? null : verdict.reason,
         // The proposed missing punch (regularization only).
@@ -743,6 +787,12 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase) =>
           stage_no: Number(st.stage_no),
           approver_role: st.approver_role,
           outlet_id: st.outlet_id === null ? null : Number(st.outlet_id),
+          approval_level: st.approval_level || null,
+          approver_employee_id:
+            st.approver_employee_id === null || st.approver_employee_id === undefined
+              ? null
+              : Number(st.approver_employee_id),
+          approver_name: st.approver_name || null,
           decision: st.decision,
           decided_by_employee_id: st.decided_by_employee_id,
           decided_by_name: st.decided_by_name || null,
@@ -783,8 +833,7 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase) =>
         if (!roles.includes(role)) roles.push(role);
       });
     }
-    if (roles.length === 0) return { rows: [], approver_roles: [] };
-
+    // No role does not mean no queue: an employee-level step may name them.
     const rows = await attendanceRegularizationRepo.listPendingFor({
       approver_roles: roles,
       outlet_id: identity.outlet_id,
@@ -808,6 +857,7 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase) =>
     CALC_STATUS,
     OT_CLOSURE,
     resolveIdentity,
+    resolveChain,
     raiseRequest,
     raiseOtRequest,
     closeOtForPayrollLock,
