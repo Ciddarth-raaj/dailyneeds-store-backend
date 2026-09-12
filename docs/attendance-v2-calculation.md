@@ -402,3 +402,68 @@ resolver has always implied, made explicit and audited.
 | `utils/shift_config_version.test.js` | fix 2 — version documents, fingerprints and date resolution |
 | `migrations/attendance_v2_migrations.test.js` | fixes 2, 5, 7, 8, 9 — schema and grants |
 | `usecase/employee_work_shift.test.js` | the correction path |
+
+---
+
+# The first frontend screens, and what they needed from the backend
+
+Three screens now consume the above - My Attendance, the Attendance Day
+Detail and the Missing Punch Regularization form - plus the single-date Edit
+Shift action for authorized users. The backend additions are deliberately
+small.
+
+## Self-only attendance read: `GET /attendance/me`
+
+Query `from_date`, `to_date`. The employee is `req.decoded.employee_id` and
+nothing else: the schema has no employee field and Joi refuses unknown keys, so
+`?employee_id=` is a 400, never a way to read a colleague. No permission key is
+needed - reading your own month is not `view_calculated_attendance` - but an
+employee identity is, so a system account is refused. It is the same preview
+path as `GET /attendance/calculated`: it stores nothing and queues nothing.
+The HR read of another employee stays behind `view_calculated_attendance`.
+
+## Self-only regularization: `POST /attendance/me/regularization`
+
+Body `attendance_date`, `punch_time`, `reason`. Raised for and by the caller;
+`requested_for_employee_id` is refused, and there is still no field anywhere
+that names an existing punch. Every rule of `raiseRequest` applies unchanged:
+odd punch count only, the proposed time must land on the date under the
+historical cutoff, one open request per date, and any OT the corrected day
+creates rides the same request.
+
+## Single-date Edit Shift: `POST /attendance/calculated/date-shift`
+
+Body `employee_id`, `attendance_date`, `work_shift_id`; key
+`edit_attendance_date_shift`, granted to nobody by migration. The dropdown's
+options come from `GET /attendance/calculated/date-shift/options`, same key.
+
+`attendance_date_shift_override` is an append-only table of (employee, date,
+shift, previous shift, changed by, created at). The resolver reads it for
+exactly the attendance date being calculated and lets the newest row for that
+date win over the dated assignment history - for that date only. The day
+before and the day after resolve as they did, `default_work_shift_id` is not
+read or written, and nothing is appended to `employee_work_shift_assignment`,
+whose effective-from rows would have moved every later date as well. That is
+why this is not the `/hr/work-shift-assignments/correction` path.
+
+The day is calculated under the new shift first, and then the override row and
+the recalculated day are written in one transaction, so the shift can never be
+changed with stored attendance still showing the old one. A retry for a shift
+the date already resolves to appends no second row and simply re-stores the
+same calculation. Routine OT on the recalculated day queues itself afterwards,
+as after any recalculation.
+
+## Status mapping the screens use
+
+| Backend | Screen |
+|---|---|
+| `REVIEW_REQUIRED` with `MISSING_PUNCH` | Missing Punch (with Regularize) |
+| `REGULARIZATION_PENDING` | Regularization Pending |
+| `OT_PENDING` | OT Approval Pending |
+| `NO_SHIFT_FOR_DATE` | No Shift Assigned |
+| `NO_SCHEDULE_ROW` | Shift Setup Issue |
+| `ABSENT` | Absent |
+| `FINAL` | no badge |
+
+"Review Required" is never shown to staff. A punch whose `source` is
+`REGULARIZED` is shown as *Missed Punch – Regularized*.

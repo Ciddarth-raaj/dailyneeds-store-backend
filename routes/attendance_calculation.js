@@ -27,6 +27,36 @@ const respondError = require("../utils/http");
  * `view_employee_sensitive`. Nothing here selects a sensitive column in the
  * first place; the middleware is the guarantee rather than the mechanism.
  */
+/**
+ * The self-only guard for `/attendance/me`.
+ *
+ * NO PERMISSION KEY, and deliberately so: reading your own attendance is not
+ * "view everybody's calculated attendance", and a designation that holds
+ * neither key must still be able to see its own month. What it needs instead
+ * is an EMPLOYEE identity - `req.decoded.employee_id`, set by the auth
+ * middleware from the token and never from the request. A system account has
+ * no employee and is refused; an unauthenticated call is refused by the auth
+ * middleware before this runs, and refused again here in case it is mounted
+ * without it.
+ *
+ * The handlers behind it never read an employee id from the query, body or
+ * path, and their schemas REJECT one (Joi refuses unknown keys), so there is
+ * no parameter an employee could manipulate to see somebody else.
+ */
+function requireSelf(req, res, next) {
+  if (!req.decoded) {
+    res.status(401).json({ code: 401, msg: "Unauthorized" });
+    return;
+  }
+  const employeeId = Number(req.decoded.employee_id);
+  if (!Number.isInteger(employeeId) || employeeId <= 0) {
+    res.status(403).json({ code: 403, msg: "This account is not linked to an employee" });
+    return;
+  }
+  next();
+}
+requireSelf.__guard = { mode: "self", keys: [] };
+
 class AttendanceCalculationRoutes {
   constructor(attendanceCalculationUsecase, permissions, sensitive) {
     this.usecase = attendanceCalculationUsecase;
@@ -43,7 +73,40 @@ class AttendanceCalculationRoutes {
       this.router.use("/attendance/calculated", this.sensitive.guardWrite);
       this.router.use("/attendance/payroll", this.sensitive.filterResponse);
       this.router.use("/attendance/payroll", this.sensitive.guardWrite);
+      this.router.use("/attendance/me", this.sensitive.filterResponse);
+      this.router.use("/attendance/me", this.sensitive.guardWrite);
     }
+
+    /**
+     * MY ATTENDANCE: the caller's own calculated attendance, read-only.
+     *
+     * `employee_id` comes from `req.decoded` and from nowhere else. The query
+     * schema has no such field, and Joi refuses unknown keys, so a request
+     * that tries to pass one is rejected rather than ignored. This is the same
+     * preview path as `/attendance/calculated`: it calculates and returns, it
+     * stores nothing, and it queues nothing - the OT auto-queue runs only
+     * after a STORED recalculation, which this is not.
+     */
+    this.router.get("/attendance/me", requireSelf, async (req, res) => {
+      try {
+        const schema = {
+          from_date: Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).required(),
+          to_date: Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).required(),
+        };
+        const isValid = Joi.validate(req.query, schema);
+        if (isValid.error !== null) throw isValid.error;
+
+        const employee_id = Number(req.decoded.employee_id);
+        const days = await this.usecase.calculateRange({
+          employee_id,
+          from_date: req.query.from_date,
+          to_date: req.query.to_date,
+        });
+        res.json({ code: 200, employee_id, days });
+      } catch (err) {
+        respondError(res, err);
+      }
+    });
 
     /**
      * Calculate a date range WITHOUT storing anything.
@@ -153,6 +216,64 @@ class AttendanceCalculationRoutes {
 
 
     /**
+     * The SINGLE-DATE shift edit.
+     *
+     * `edit_attendance_date_shift`, granted by migration to nobody. Body is
+     * exactly the finalized UX: which employee, which date, which shift. There
+     * is no effective-from, no effective-to, no range and no reason field -
+     * the audit line is the override row itself (employee, date, shift before,
+     * shift after, who, when). The usecase changes that one date, recalculates
+     * it in the same transaction, and leaves the employee's current shift and
+     * the neighbouring dates alone.
+     *
+     * This is NOT the `/hr/work-shift-assignments/correction` path, whose
+     * effective-from semantics would move every later date as well.
+     */
+    this.router.post(
+      "/attendance/calculated/date-shift",
+      this.permissions.require(P.EDIT_ATTENDANCE_DATE_SHIFT),
+      async (req, res) => {
+        try {
+          const schema = {
+            employee_id: Joi.number().integer().positive().required(),
+            attendance_date: Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).required(),
+            work_shift_id: Joi.number().integer().positive().required(),
+          };
+          const isValid = Joi.validate(req.body, schema);
+          if (isValid.error !== null) throw isValid.error;
+
+          const result = await this.usecase.setDateShift({
+            employee_id: Number(req.body.employee_id),
+            attendance_date: req.body.attendance_date,
+            work_shift_id: Number(req.body.work_shift_id),
+            actor_employee_id:
+              req.decoded && req.decoded.employee_id !== undefined ? req.decoded.employee_id : null,
+          });
+          res.json({ code: 200, ...result });
+        } catch (err) {
+          if (err && err.name === "NotFoundError") {
+            res.status(404).json({ code: 404, msg: err.message });
+            return;
+          }
+          respondError(res, err);
+        }
+      }
+    );
+
+    /** The active shifts the Edit Shift dropdown offers. Same key as the edit. */
+    this.router.get(
+      "/attendance/calculated/date-shift/options",
+      this.permissions.require(P.EDIT_ATTENDANCE_DATE_SHIFT),
+      async (req, res) => {
+        try {
+          res.json({ code: 200, options: await this.usecase.listDateShiftOptions() });
+        } catch (err) {
+          respondError(res, err);
+        }
+      }
+    );
+
+    /**
      * The employee's Special Break Duration Override.
      *
      * ONE CURRENT VALUE AND NO EFFECTIVE DATE (review fix #7), because that is
@@ -213,3 +334,4 @@ class AttendanceCalculationRoutes {
 module.exports = (attendanceCalculationUsecase, permissions, sensitive) =>
   new AttendanceCalculationRoutes(attendanceCalculationUsecase, permissions, sensitive);
 module.exports.AttendanceCalculationRoutes = AttendanceCalculationRoutes;
+module.exports.requireSelf = requireSelf;

@@ -143,21 +143,41 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    * proposed-punch calculation, so all three see one definition of "what
    * applied on this date".
    */
-  const buildContext = async ({ employee_id, from, to }) => {
+  const buildContext = async ({ employee_id, from, to, assume_override = null }) => {
     // ONE day of slack at the END only - see the file header. A punch on the
     // morning after `to` can belong to `to`; a punch before `from` can never
     // belong to `from`.
     const punchWindowTo = addDays(to, 1);
 
-    const [assignments, rawPunches, regularized, employee, approvals] = await Promise.all([
-      attendanceCalculationRepo.getShiftAssignmentHistory(employee_id),
-      attendanceCalculationRepo.getRawPunchesByCalendarWindow(employee_id, from, punchWindowTo),
-      attendanceCalculationRepo.getApprovedRegularizedPunches(employee_id, from, to),
-      attendanceCalculationRepo.getBreakOverride(employee_id),
-      attendanceCalculationRepo.getApprovalStateByDate(employee_id, from, to),
-    ]);
+    const [assignments, rawPunches, regularized, employee, approvals, storedOverrides] =
+      await Promise.all([
+        attendanceCalculationRepo.getShiftAssignmentHistory(employee_id),
+        attendanceCalculationRepo.getRawPunchesByCalendarWindow(employee_id, from, punchWindowTo),
+        attendanceCalculationRepo.getApprovedRegularizedPunches(employee_id, from, to),
+        attendanceCalculationRepo.getBreakOverride(employee_id),
+        attendanceCalculationRepo.getApprovalStateByDate(employee_id, from, to),
+        // Single-date overrides. The cutoff rule can date a punch one day back,
+        // so the day AFTER `to` is read as well: dating that punch needs the
+        // shift that applied on its own date.
+        attendanceCalculationRepo.getDateShiftOverrides
+          ? attendanceCalculationRepo.getDateShiftOverrides(employee_id, from, punchWindowTo)
+          : [],
+      ]);
 
-    const shiftCache = await loadShiftCache(assignments);
+    // An override that is being SAVED joins the stored ones in memory only, so
+    // the day can be calculated under it inside the transaction that records
+    // it. It carries the greatest id by construction, so it wins the date.
+    const overrides = [...(storedOverrides || [])];
+    if (assume_override) {
+      overrides.push({
+        attendance_date_shift_override_id: Number.MAX_SAFE_INTEGER,
+        employee_id,
+        attendance_date: toDateOnly(assume_override.attendance_date),
+        work_shift_id: Number(assume_override.work_shift_id),
+      });
+    }
+
+    const shiftCache = await loadShiftCache([...(assignments || []), ...overrides]);
 
     // (shift, date) -> the configuration VERSION in force then. Memoized
     // because a month resolves the same pair thirty times.
@@ -208,12 +228,20 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       if (resolutions.has(date)) return resolutions.get(date);
       const resolution = resolveShiftForDate({
         assignments,
+        overrides,
         attendanceDate: date,
         readSchedule,
         readShiftConfig,
       });
       resolutions.set(date, resolution);
       return resolution;
+    };
+
+    /** The shift's display name, from the live master row. Null if unknown. */
+    const shiftNameFor = (workShiftId) => {
+      const loaded = shiftCache.get(Number(workShiftId));
+      const config = loaded && loaded.live ? loaded.live.config : null;
+      return config && config.shift_name ? config.shift_name : null;
     };
 
     /**
@@ -241,6 +269,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       break_override_minutes: breakOverrideMinutes(employee),
       resolutionFor,
       readCutoff,
+      shiftNameFor,
     };
   };
 
@@ -282,7 +311,13 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    * regularized punch is priced before anyone has agreed to it (review fix #3).
    * It changes nothing in the database by itself.
    */
-  const calculateRange = async ({ employee_id, from_date, to_date, assume = null }) => {
+  const calculateRange = async ({
+    employee_id,
+    from_date,
+    to_date,
+    assume = null,
+    assume_override = null,
+  }) => {
     const from = toDateOnly(from_date);
     const to = toDateOnly(to_date);
     if (from === null || to === null) {
@@ -295,7 +330,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       throw validationError(`A range may cover at most ${MAX_RANGE_DAYS} days`);
     }
 
-    const context = await buildContext({ employee_id, from, to });
+    const context = await buildContext({ employee_id, from, to, assume_override });
     const rawByDate = groupRawPunchesByAttendanceDate({
       rawPunches: context.rawPunches,
       readCutoff: context.readCutoff,
@@ -382,6 +417,10 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       return {
         ...calculated,
         shift_resolution_status: resolution.status,
+        // Display only: the live shift name, and whether the date's shift came
+        // from the dated history or from a single-date edit.
+        shift_name: resolution.work_shift_id ? context.shiftNameFor(resolution.work_shift_id) : null,
+        shift_source: resolution.assignment ? resolution.assignment.source || null : null,
         approval_request_id: approval ? approval.attendance_approval_request_id : null,
       };
     });
@@ -550,6 +589,123 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
   };
 
   /**
+   * The SINGLE-DATE shift edit.
+   *
+   * Changes the shift ONE attendance date is calculated under, and nothing
+   * else. It does not touch `new_employee.default_work_shift_id`, it appends
+   * nothing to `employee_work_shift_assignment` (whose effective-from rows
+   * would move every later date as well), and the dates either side resolve
+   * exactly as they did. The override table is read by the resolver for
+   * exactly this date - see `utils/shiftResolution.js#resolveOverrideForDate`.
+   *
+   * The day is calculated under the new shift BEFORE anything is written, and
+   * the override row and the recalculated day are then stored in ONE
+   * transaction, so the shift can never be changed with the stored attendance
+   * left showing the old one.
+   *
+   * IDEMPOTENT. If the date already resolves to the requested shift - a retry
+   * of a save that committed, or a no-op edit - no second override row is
+   * appended; the date is simply recalculated and stored, which is the same
+   * upsert a recalculation performs. Every appended row is the audit line:
+   * employee, date, the shift before, the shift after, who, when.
+   */
+  const setDateShift = async ({ employee_id, attendance_date, work_shift_id, actor_employee_id }) => {
+    const employeeId = Number(employee_id);
+    if (!Number.isInteger(employeeId) || employeeId <= 0) {
+      throw validationError("employee_id is required and must be an employee id");
+    }
+    const date = toDateOnly(attendance_date);
+    if (date === null) throw validationError("attendance_date must be a date as YYYY-MM-DD");
+    const workShiftId = Number(work_shift_id);
+    if (!Number.isInteger(workShiftId) || workShiftId <= 0) {
+      throw validationError("work_shift_id is required and must be a work shift id");
+    }
+
+    const loaded = await attendanceCalculationRepo.getWorkShiftWithSchedule(workShiftId);
+    const shift = loaded && loaded.config ? loaded.config : null;
+    if (!shift) {
+      const err = new Error(`No work shift exists for id ${workShiftId}`);
+      err.name = "NotFoundError";
+      throw err;
+    }
+    if (shift.active !== undefined && shift.active !== null && Number(shift.active) !== 1) {
+      throw validationError(`Work shift ${shift.shift_code || workShiftId} is inactive`);
+    }
+
+    // What the date resolves to NOW, through the same resolver the
+    // calculation uses (stored overrides included).
+    const [before] = await calculateRange({ employee_id: employeeId, from_date: date, to_date: date });
+    const previousShiftId = before && before.work_shift_id ? Number(before.work_shift_id) : null;
+
+    // What the date looks like under the new shift. In memory only, so far.
+    const [after] = await calculateRange({
+      employee_id: employeeId,
+      from_date: date,
+      to_date: date,
+      assume_override: { attendance_date: date, work_shift_id: workShiftId },
+    });
+    if (!after || !after.shift_snapshot) {
+      throw validationError(
+        `${date} cannot be calculated under work shift ${shift.shift_code || workShiftId}: it has no schedule row for that weekday`
+      );
+    }
+
+    const changed = previousShiftId !== workShiftId;
+    let stored;
+    if (changed) {
+      stored = await attendanceCalculationRepo.saveDateShiftOverrideWithCalculation({
+        override: {
+          employee_id: employeeId,
+          attendance_date: date,
+          work_shift_id: workShiftId,
+          previous_work_shift_id: previousShiftId,
+          changed_by: actor_employee_id === undefined ? null : actor_employee_id,
+        },
+        rows: [toStorageRow(after)],
+      });
+    } else {
+      stored = await attendanceCalculationRepo.saveCalculations([toStorageRow(after)]);
+    }
+
+    // Routine OT on the recalculated day queues itself exactly as it does
+    // after any other recalculation - after the write, never inside it.
+    let ot_queue = null;
+    if (otApprovalQueue && typeof otApprovalQueue.syncOtQueueSafely === "function") {
+      ot_queue = await otApprovalQueue.syncOtQueueSafely({ employee_id: employeeId, days: [after] });
+    } else if (otApprovalQueue && typeof otApprovalQueue.syncDays === "function") {
+      ot_queue = await otApprovalQueue.syncDays({ employee_id: employeeId, days: [after] });
+    }
+
+    return {
+      employee_id: employeeId,
+      attendance_date: date,
+      changed,
+      previous_work_shift_id: previousShiftId,
+      work_shift_id: workShiftId,
+      shift_code: shift.shift_code || null,
+      shift_name: shift.shift_name || null,
+      attendance_date_shift_override_id:
+        stored && stored.attendance_date_shift_override_id !== undefined
+          ? stored.attendance_date_shift_override_id
+          : null,
+      day: after,
+      ot_queue,
+    };
+  };
+
+  /** The active shifts the Edit Shift dropdown offers. */
+  const listDateShiftOptions = async () => {
+    const rows = attendanceCalculationRepo.listActiveWorkShiftOptions
+      ? await attendanceCalculationRepo.listActiveWorkShiftOptions()
+      : [];
+    return (rows || []).map((r) => ({
+      work_shift_id: Number(r.work_shift_id),
+      shift_code: r.shift_code,
+      shift_name: r.shift_name,
+    }));
+  };
+
+  /**
    * A whole month, calculated and rolled up into the A4 payroll line items.
    *
    * The Monthly Gross comes from the EXISTING effective-dated salary resolver,
@@ -637,6 +793,8 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     calculateProposedDay,
     attendanceDateForPunchTime,
     recalculateRange,
+    setDateShift,
+    listDateShiftOptions,
     calculateMonth,
   };
 };

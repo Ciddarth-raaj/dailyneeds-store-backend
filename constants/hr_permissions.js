@@ -260,4 +260,14 @@ module.exports = {
   // administrators reach it through the user_type 2 bypass, and anybody else
   // is given it deliberately on the designation screen.
   CORRECT_EMPLOYEE_SHIFT_ASSIGNMENT: "correct_employee_shift_assignment",
+
+  // Attendance v2 - the SINGLE-DATE shift edit on the attendance screens.
+  //
+  // Changes the shift ONE attendance date is calculated under, and nothing
+  // else: not the employee's current shift, not the previous date, not the
+  // following date. It is deliberately not the correction key above, whose
+  // effective-from semantics would move every later date as well. The
+  // migration grants it to NOBODY; employees never hold it, and the self-only
+  // `/attendance/me` surface has no shift-editing endpoint at all.
+  EDIT_ATTENDANCE_DATE_SHIFT: "edit_attendance_date_shift",
 };

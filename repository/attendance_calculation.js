@@ -142,6 +142,42 @@ class AttendanceCalculationRepository {
     );
   }
 
+  /**
+   * The employee's SINGLE-DATE shift overrides inside a window.
+   *
+   * Every row for a date is returned, newest last; the resolver picks the
+   * greatest id per date. The table is append-only, so this is a plain read
+   * of what every edit recorded.
+   */
+  async getDateShiftOverrides(employeeId, fromDate, toDate) {
+    return this._read(
+      "GET-DATE-SHIFT-OVERRIDES",
+      `SELECT attendance_date_shift_override_id,
+              employee_id,
+              work_shift_id,
+              previous_work_shift_id,
+              changed_by,
+              DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date,
+              DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at
+         FROM attendance_date_shift_override
+        WHERE employee_id = ?
+          AND attendance_date BETWEEN ? AND ?
+        ORDER BY attendance_date ASC, attendance_date_shift_override_id ASC`,
+      [employeeId, fromDate, toDate]
+    );
+  }
+
+  /** The active shifts an authorized user may put a date on. */
+  async listActiveWorkShiftOptions() {
+    return this._read(
+      "LIST-ACTIVE-WORK-SHIFT-OPTIONS",
+      `SELECT work_shift_id, shift_code, shift_name
+         FROM work_shift
+        WHERE active = 1
+        ORDER BY shift_code, shift_name`
+    );
+  }
+
   /** The same, for many employees at once. Keyed by the caller. */
   async getShiftAssignmentHistoryForEmployees(employeeIds) {
     if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
@@ -420,6 +456,52 @@ class AttendanceCalculationRepository {
     } catch (err) {
       await rollbackAsync(connection);
       this._log("SAVE-CALCULATIONS", err);
+      throw err;
+    } finally {
+      connection.release();
+    }
+  }
+
+  /**
+   * Record a single-date shift override AND the recalculated day it produces,
+   * in ONE transaction.
+   *
+   * Either both land or neither does: an override row without its recalculated
+   * day would leave the stored attendance - the rows payroll reads - showing
+   * the old shift while the resolver already says the new one. The override is
+   * appended (never updated), and the calculation is the same idempotent
+   * upsert every other writer uses, so a retried save that got as far as the
+   * usecase's "already on that shift" check writes no second override row and
+   * a retry that did not simply repeats the same two writes.
+   */
+  async saveDateShiftOverrideWithCalculation({ override, rows }) {
+    const connection = await getConnectionAsync(this.db);
+    try {
+      await beginTransactionAsync(connection);
+
+      const inserted = await queryAsync(
+        connection,
+        `INSERT INTO attendance_date_shift_override
+           (employee_id, attendance_date, work_shift_id, previous_work_shift_id, changed_by)
+         VALUES (?, ?, ?, ?, ?)`,
+        [
+          override.employee_id,
+          override.attendance_date,
+          override.work_shift_id,
+          override.previous_work_shift_id === undefined ? null : override.previous_work_shift_id,
+          override.changed_by === undefined ? null : override.changed_by,
+        ]
+      );
+      const calculation = await writeCalculationsOnConnection(connection, rows);
+
+      await commitAsync(connection);
+      return {
+        attendance_date_shift_override_id: inserted ? inserted.insertId : null,
+        ...calculation,
+      };
+    } catch (err) {
+      await rollbackAsync(connection);
+      this._log("SAVE-DATE-SHIFT-OVERRIDE", err);
       throw err;
     } finally {
       connection.release();

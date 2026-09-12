@@ -2,6 +2,7 @@ const express = require("express");
 const Joi = require("@hapi/joi");
 const P = require("../constants/hr_permissions");
 const respondError = require("../utils/http");
+const { requireSelf } = require("./attendance_calculation");
 
 /**
  * Attendance v2 / A3 - the regularization and OT approval API.
@@ -46,7 +47,52 @@ class AttendanceRegularizationRoutes {
     if (this.sensitive) {
       this.router.use("/attendance/regularization", this.sensitive.filterResponse);
       this.router.use("/attendance/regularization", this.sensitive.guardWrite);
+      this.router.use("/attendance/me", this.sensitive.filterResponse);
+      this.router.use("/attendance/me", this.sensitive.guardWrite);
     }
+
+    /**
+     * MY ATTENDANCE: regularize a missing punch on your OWN attendance.
+     *
+     * The employee it is for is the caller - `req.decoded.employee_id`, from
+     * the token - and the body has no field to name anybody else; Joi refuses
+     * unknown keys, so `requested_for_employee_id` here is a 400, not an
+     * override. No permission key: filing for yourself is self-service, and
+     * `raise_attendance_regularization_for_others` remains the only way to
+     * file for somebody else, on the HR route above.
+     *
+     * Everything else is the usecase's business, unchanged: the date must
+     * actually have an odd punch count, the proposed time must land on that
+     * date under the historical cutoff, the reason is required, an open
+     * request already on the date is refused, and any OT the corrected day
+     * creates rides the SAME request. Existing Biomax punches cannot be named
+     * on this path at all, so they cannot be edited or deleted.
+     */
+    this.router.post("/attendance/me/regularization", requireSelf, async (req, res) => {
+      try {
+        const schema = {
+          attendance_date: Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).required(),
+          reason: Joi.string().min(5).max(500).required(),
+          punch_time: Joi.string()
+            .regex(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})?$/)
+            .required(),
+        };
+        const isValid = Joi.validate(req.body, schema);
+        if (isValid.error !== null) throw isValid.error;
+
+        const employeeId = Number(req.decoded.employee_id);
+        const result = await this.usecase.raiseRequest({
+          actor: { employee_id: employeeId, user_type: req.decoded.user_type },
+          requested_for_employee_id: employeeId,
+          attendance_date: req.body.attendance_date,
+          reason: req.body.reason,
+          punch_time: req.body.punch_time,
+        });
+        res.json({ code: 200, ...result });
+      } catch (err) {
+        AttendanceRegularizationRoutes._respond(res, err);
+      }
+    });
 
     /**
      * Raise a request for one date.

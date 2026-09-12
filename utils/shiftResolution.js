@@ -122,6 +122,32 @@ function resolveAssignmentForDate(assignments, attendanceDate) {
 }
 
 /**
+ * The SINGLE-DATE override in force on `attendanceDate`, or null.
+ *
+ * `overrides` are `attendance_date_shift_override` rows, in any order. Only a
+ * row whose date is EXACTLY the attendance date counts - an override is one
+ * date, not a range, and it never leaks onto the day before or after. Among
+ * several rows for the same date the greatest id wins, which is how a second
+ * edit supersedes the first without either row being updated.
+ */
+function resolveOverrideForDate(overrides, attendanceDate) {
+  const date = toDateOnly(attendanceDate);
+  if (date === null || !Array.isArray(overrides)) return null;
+
+  let best = null;
+  let bestId = -1;
+  overrides.forEach((row) => {
+    if (!row || toDateOnly(row.attendance_date) !== date) return;
+    const id = Number(row.attendance_date_shift_override_id) || 0;
+    if (best === null || id > bestId) {
+      best = row;
+      bestId = id;
+    }
+  });
+  return best;
+}
+
+/**
  * A deterministic fingerprint of the schedule values a calculation consumed.
  *
  * Only the fields that can change a number are hashed, and they are hashed in
@@ -251,6 +277,9 @@ function buildShiftSnapshot(scheduleRow, shiftConfig, dow) {
  *
  * @param {object} input
  * @param {Array}  input.assignments   the employee's assignment history rows
+ * @param {Array}  [input.overrides]   the employee's single-date shift override
+ *        rows; one dated EXACTLY `attendanceDate` wins over the history for
+ *        that date only
  * @param {string} input.attendanceDate `YYYY-MM-DD`
  * @param {function} input.readSchedule (workShiftId, dayOfWeek, attendanceDate)
  *        => schedule row|null, for the configuration version in force on that date
@@ -259,9 +288,30 @@ function buildShiftSnapshot(scheduleRow, shiftConfig, dow) {
  * @returns {{status: string, work_shift_id: number|null, assignment: object|null,
  *            snapshot: object|null}}
  */
-function resolveShiftForDate({ assignments, attendanceDate, readSchedule, readShiftConfig }) {
+function resolveShiftForDate({
+  assignments,
+  overrides,
+  attendanceDate,
+  readSchedule,
+  readShiftConfig,
+}) {
   const date = toDateOnly(attendanceDate);
-  const assignment = resolveAssignmentForDate(assignments, date);
+
+  // Precedence: a single-date override for EXACTLY this date, then the dated
+  // assignment history. The override is shaped like an assignment row so the
+  // rest of the resolution - and the snapshot the engine consumes - is the
+  // same code either way; `source` says which it was.
+  const override = resolveOverrideForDate(overrides, date);
+  const assignment = override
+    ? {
+        employee_work_shift_assignment_id: null,
+        attendance_date_shift_override_id: override.attendance_date_shift_override_id,
+        employee_id: override.employee_id,
+        work_shift_id: override.work_shift_id,
+        effective_from: date,
+        source: "DATE_OVERRIDE",
+      }
+    : resolveAssignmentForDate(assignments, date);
 
   if (!assignment) {
     return {
@@ -311,6 +361,7 @@ module.exports = {
   toDateOnly,
   dayOfWeek,
   resolveAssignmentForDate,
+  resolveOverrideForDate,
   buildShiftSnapshot,
   snapshotHash,
   resolveShiftForDate,
