@@ -55,6 +55,11 @@ const SALARY_COLUMNS = [
   "effective_from",
   "status",
   "source",
+  // M4. The proposer's business reason for a REVISION or a CORRECTION. NOT
+  // `override_reason` (why the breakup departs from the automatic one) and NOT
+  // `rejection_reason` (why an approver refused) - three different questions,
+  // asked of three different people, kept in three columns.
+  "revision_reason",
   "created_by",
   "created_at",
   "approved_by",
@@ -66,6 +71,35 @@ const SALARY_COLUMNS = [
 ];
 
 const SELECT_LIST = SALARY_COLUMNS.map((c) => `s.\`${c}\``).join(", ");
+
+/**
+ * M4 — WHO did it, by name, resolved in the query that reads the row.
+ *
+ * `created_by`, `approved_by` and `rejected_by` hold EMPLOYEE ids. A salary
+ * history that names three numbers is not an audit trail anybody can read, and
+ * the alternative - letting a screen look each id up - is one request per
+ * distinct actor per history, which is the N+1 the approved task rules out.
+ *
+ * The ids are kept ALONGSIDE the names rather than replaced by them: a name is
+ * for reading and an id is what the record actually asserts, and an employee
+ * row that has since been renamed must not silently change what an old
+ * approval says. A LEFT JOIN, so a deleted or missing actor leaves a null name
+ * beside a surviving id rather than dropping the whole revision from history.
+ *
+ * NOTHING BUT THE NAME COMES OVER. Not the outlet, not the designation and
+ * certainly none of the B3 columns - reading who approved a revision is not a
+ * reason to read their record.
+ */
+const ACTOR_NAME_SELECT = [
+  "cb.`employee_name` AS `created_by_name`",
+  "ab.`employee_name` AS `approved_by_name`",
+  "rb.`employee_name` AS `rejected_by_name`",
+].join(", ");
+
+const ACTOR_NAME_JOINS = `
+        LEFT JOIN \`new_employee\` cb ON cb.\`employee_id\` = s.\`created_by\`
+        LEFT JOIN \`new_employee\` ab ON ab.\`employee_id\` = s.\`approved_by\`
+        LEFT JOIN \`new_employee\` rb ON rb.\`employee_id\` = s.\`rejected_by\``;
 
 const STATUS = { PENDING: "PENDING", APPROVED: "APPROVED", REJECTED: "REJECTED" };
 
@@ -165,11 +199,18 @@ class EmployeeSalaryRepository {
     );
   }
 
-  /** Every revision for an employee, newest effective date first. */
+  /**
+   * Every revision for an employee, newest effective date first.
+   *
+   * M4 ADDS THE THREE ACTOR NAMES and nothing else. The rows are the same
+   * rows; the join is here rather than on the screen because a history of
+   * twenty revisions would otherwise be twenty-odd employee reads from the
+   * browser to render one table.
+   */
   getHistory(employeeId) {
     const sql = `
-      SELECT ${SELECT_LIST}
-        FROM \`employee_salary\` s
+      SELECT ${SELECT_LIST}, ${ACTOR_NAME_SELECT}
+        FROM \`employee_salary\` s${ACTOR_NAME_JOINS}
        WHERE s.\`employee_id\` = ?
        ORDER BY s.\`effective_from\` DESC, s.\`salary_id\` DESC`;
     return this._query("GET-HISTORY", sql, [employeeId]);
@@ -237,6 +278,102 @@ class EmployeeSalaryRepository {
          AND s.\`status\` <> ?
        ORDER BY s.\`effective_from\` ASC`;
     return this._query("GET-FUTURE", sql, [employeeId, afterDate, STATUS.REJECTED]);
+  }
+
+  /**
+   * M4 — EVERY PENDING PROPOSAL, ACROSS ALL EMPLOYEES: the approval queue.
+   *
+   * WHY THIS IS A QUERY AND NOT A LOOP. The alternative an approval screen
+   * reaches for is "list the employees, then read each one's history and keep
+   * the pending rows", which is six hundred requests to draw a list that is
+   * usually four rows long, and which hands the browser five hundred and
+   * ninety-six salary histories it had no business seeing. One indexed read on
+   * `idx_salary_status` answers the same question.
+   *
+   * PENDING ONLY, IN THE SQL. Approved and rejected rows are not "filtered out"
+   * of the result - they are never selected. An approval queue that could be
+   * made to show an approved revision is one query-string away from offering a
+   * second approval of something already decided.
+   *
+   * THE CURRENT APPROVED SALARY COMES BACK WITH THE PROPOSAL, because "is this
+   * a rise, and by how much" is the question the queue exists to answer, and a
+   * screen that had to fetch the current salary per row would be back to the
+   * N+1 this method avoids. It is resolved by exactly the rule
+   * `getCurrentSalary` uses - the latest APPROVED row effective on or before
+   * the as-of date - through a single correlated lookup of its id, so the queue
+   * and the resolver cannot drift apart.
+   *
+   * IT IS NAMED `current_monthly_gross`, NOT `salary` OR `current_salary`.
+   * `middlewares/sensitive.js#filterResponse` strips keys called `salary` at
+   * any depth, so that name would make the figure vanish for callers without
+   * `view_employee_sensitive` - silently, with no error and no 403.
+   *
+   * THE EMPLOYEE COLUMNS ARE THE FOUR THE QUEUE SHOWS: id, name, outlet and
+   * designation. Not the bank account, not the PAN, not the Aadhaar and not the
+   * legacy `salary` column - deciding a pay revision is not a reason to read
+   * somebody's identity documents, the same principle `getStatutoryContext`
+   * already follows.
+   *
+   * FILTERS ARE ALL OPTIONAL AND ALL PARAMETERISED. An absent filter adds no
+   * clause; nothing here is interpolated into the SQL.
+   */
+  getPendingQueue(filters = {}) {
+    const where = ["s.`status` = ?"];
+    const params = [STATUS.PENDING];
+
+    if (filters.employee_id !== undefined && filters.employee_id !== null) {
+      where.push("s.`employee_id` = ?");
+      params.push(filters.employee_id);
+    }
+    if (filters.store_id !== undefined && filters.store_id !== null) {
+      where.push("ne.`store_id` = ?");
+      params.push(filters.store_id);
+    }
+    if (filters.effective_from) {
+      where.push("s.`effective_from` >= ?");
+      params.push(filters.effective_from);
+    }
+    if (filters.effective_to) {
+      where.push("s.`effective_from` <= ?");
+      params.push(filters.effective_to);
+    }
+
+    /*
+     * The as-of date for "what is this person on TODAY" is the caller's, so the
+     * queue reads the same current salary the Employee Master would show on the
+     * same day, rather than one derived from the database server's clock.
+     */
+    const sql = `
+      SELECT ${SELECT_LIST}, ${ACTOR_NAME_SELECT},
+             ne.\`employee_name\`,
+             ne.\`store_id\`,
+             ne.\`designation_id\`,
+             o.\`outlet_name\`,
+             o.\`outlet_nickname\`,
+             d.\`designation_name\`,
+             cur.\`salary_id\`      AS \`current_salary_id\`,
+             cur.\`monthly_gross\`  AS \`current_monthly_gross\`,
+             cur.\`effective_from\` AS \`current_effective_from\`
+        FROM \`employee_salary\` s${ACTOR_NAME_JOINS}
+        JOIN \`new_employee\` ne ON ne.\`employee_id\` = s.\`employee_id\`
+        LEFT JOIN \`outlets\` o     ON o.\`outlet_id\` = ne.\`store_id\`
+        LEFT JOIN \`designation\` d ON d.\`designation_id\` = ne.\`designation_id\`
+        LEFT JOIN \`employee_salary\` cur ON cur.\`salary_id\` = (
+               SELECT c.\`salary_id\`
+                 FROM \`employee_salary\` c
+                WHERE c.\`employee_id\` = s.\`employee_id\`
+                  AND c.\`status\` = ?
+                  AND c.\`effective_from\` <= ?
+                ORDER BY c.\`effective_from\` DESC, c.\`salary_id\` DESC
+                LIMIT 1)
+       WHERE ${where.join(" AND ")}
+       ORDER BY s.\`effective_from\` ASC, s.\`salary_id\` ASC
+       LIMIT ?`;
+
+    // The two resolver parameters sit in the JOIN, which the parser reaches
+    // before the WHERE clause - so they go in front of the filter values.
+    const ordered = [STATUS.APPROVED, filters.as_of, ...params, filters.limit];
+    return this._query("GET-PENDING-QUEUE", sql, ordered);
   }
 
   /** Insert one revision. Returns its new id. */

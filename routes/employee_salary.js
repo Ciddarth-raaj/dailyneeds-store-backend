@@ -6,23 +6,31 @@ const respondError = require("../utils/http");
 const router = express.Router();
 
 /**
- * M2 — the salary API.
+ * M2 — the salary API. M4 adds ONE read to it.
  *
  * Mounted at /hr beside `routes/employee_master.js` and
  * `routes/employee_work_shift.js`, because what these endpoints describe is an
  * employee record.
  *
- * M2 IS DELIBERATELY A SMALL API. Four things and no more:
+ * THE SURFACE, AND IT IS STILL SMALL:
  *
- *   POST /hr/salary/preview                the pure calculation, saving nothing
- *   POST /hr/salary/employee/:id           create an initial salary as PENDING
+ *   POST /hr/salary/preview/:id            the pure calculation, saving nothing
+ *   POST /hr/salary/employee/:id           create a salary proposal as PENDING
  *   GET  /hr/salary/employee/:id/current   the current effective approved salary
  *   GET  /hr/salary/employee/:id/history   every revision
+ *   POST /hr/salary/revision/:id           amend a PENDING proposal
+ *   POST /hr/salary/revision/:id/approve   the money decision
+ *   POST /hr/salary/revision/:id/reject    with a required reason
+ *   GET  /hr/salary/pending                M4: the cross-employee approval queue
  *
- * There is NO bulk upload, no revision workflow screen and no payroll run.
- * Approve and reject exist because a record created PENDING that nothing can
- * ever approve is a dead end, and because the resolver cannot be tested
- * without them — but they are the lifecycle primitives, not a workflow.
+ * M4 BUILDS TWO SCREENS ON THIS AND ADDS ONE ENDPOINT. Salary Revision &
+ * History and Salary Approval are driven by the seven primitives M2 already
+ * defined; the only thing they could not be built from is a list of everybody's
+ * pending proposals, which no per-employee endpoint can answer without the
+ * browser reading six hundred histories. That is the whole of the addition.
+ *
+ * There is STILL no bulk upload, no payroll run, no payslip and no attendance
+ * calculation. Those are M5 and later, and nothing here anticipates them.
  *
  * THE SERVER CALCULATES EVERYTHING. The Joi schemas below accept a gross, an
  * effective date, and — for an override — four component amounts. They accept
@@ -31,8 +39,8 @@ const router = express.Router();
  * `monthly_ctc` is answered 422 before the usecase is reached. That is the
  * mechanism, not a filter further in.
  *
- * PERMISSIONS ARE PAIRS, AND BOTH HALVES ARE REQUIRED (`requireAll`, so AND
- * rather than OR):
+ * PERMISSIONS ARE CONJUNCTIONS, AND EVERY HALF IS REQUIRED (`requireAll`, so
+ * AND rather than OR):
  *
  *   preview   `view_employees` AND `view_salary`
  *   create    `view_employees` AND `add_salary`
@@ -40,6 +48,12 @@ const router = express.Router();
  *   read      `view_employees` AND `view_salary`
  *   approve   `view_employees` AND `approve_salary_revision`
  *   reject    `view_employees` AND `approve_salary_revision`
+ *   queue     `view_employees` AND `view_salary` AND `approve_salary_revision`
+ *
+ * The queue is the one triple, and the third key is the point of it: every
+ * other read here answers a question about ONE employee somebody navigated to,
+ * while this one lists every outstanding pay proposal in the company. That is
+ * an approver's worklist, so it takes the approver's key.
  *
  * The employee-master half is what every other /hr router already demands, and
  * it is kept so that no salary key becomes a way to reach employee data that
@@ -116,6 +130,18 @@ class EmployeeSalaryRoutes {
       manual_components: manualComponents.optional(),
       manual_override: Joi.boolean().optional(),
       override_reason: Joi.string().allow("").allow(null).optional(),
+      /*
+       * M4 — the proposer's business reason. A STRING, and the only other
+       * thing besides the four override components that a caller may put on a
+       * salary record; it is not an amount and nothing is computed from it.
+       *
+       * Accepted as optional HERE and required in the usecase, because whether
+       * it is required depends on the SOURCE, which the server decides: an
+       * opening salary legitimately has none, a revision must have one. Joi
+       * cannot see that decision, and a schema that demanded it unconditionally
+       * would make the first salary for every employee unenterable.
+       */
+      revision_reason: Joi.string().allow("").allow(null).optional(),
       ...payrollContext,
     };
 
@@ -204,6 +230,57 @@ class EmployeeSalaryRoutes {
       async (req, res) => {
         try {
           res.json(await this.usecase.getHistory(req.params.employee_id));
+        } catch (err) {
+          this._fail(res, err);
+        }
+        res.end();
+      }
+    );
+
+    /**
+     * M4 — THE PENDING APPROVAL QUEUE, ACROSS ALL EMPLOYEES.
+     *
+     * The one read the Salary Approval screen makes. It exists because the
+     * alternative is a browser walking the employee master and reading every
+     * history to find four pending rows - which is hundreds of requests, and
+     * hundreds of salary histories handed to a client that wanted none of them.
+     *
+     * THREE KEYS, NOT TWO, AND ALL OF THEM (`requireAll`):
+     *
+     *   `view_employees`           this returns employee names and outlets
+     *   `view_salary`              it returns salary figures
+     *   `approve_salary_revision`  it is the approver's worklist
+     *
+     * The third is what makes this different from every other read on this
+     * router. A queue of everybody's outstanding pay proposals is not the same
+     * disclosure as one employee's structure that somebody opened deliberately,
+     * so it is gated on the key that says you are the person who decides them.
+     * Holding it still does not let you approve your own - that rule is in the
+     * usecase and applies to the action, not to the list.
+     *
+     * FILTERS ARE OPTIONAL AND ARE FILTERS ONLY. Employee, outlet and an
+     * effective-date window; none of them can widen what comes back beyond
+     * PENDING, which is fixed in the SQL rather than defaulted here.
+     *
+     * NO PAGINATION. A worklist people empty is a handful of rows - see
+     * `QUEUE_MAX_ROWS` in the usecase, which is a safety cap and not a page.
+     */
+    router.get(
+      "/salary/pending",
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.VIEW_SALARY, P.APPROVE_SALARY_REVISION),
+      async (req, res) => {
+        try {
+          const isValid = Joi.validate(req.query, {
+            employee_id: Joi.number().integer().optional(),
+            store_id: Joi.number().integer().optional(),
+            effective_from: Joi.string().allow("").optional(),
+            effective_to: Joi.string().allow("").optional(),
+            as_of: Joi.string().allow("").optional(),
+          });
+          if (isValid.error !== null) throw isValid.error;
+
+          const actor = await this.permissions.actorFor(req);
+          res.json(await this.usecase.getPendingQueue(req.query, actor));
         } catch (err) {
           this._fail(res, err);
         }

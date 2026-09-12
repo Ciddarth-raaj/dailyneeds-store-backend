@@ -152,6 +152,16 @@ const row = (over) => ({
   ...over,
 });
 
+/**
+ * M4 — every REVISION has to say why, so the fixtures do.
+ *
+ * `usecase/m4_salary_revision_approval.test.js` is where that rule itself is
+ * proved. Here it is only the reason a revision is now well-formed, and the
+ * opening-salary cases deliberately go on carrying none: an opening salary
+ * changes nothing, so there is nothing for a reason to be about.
+ */
+const REASON = "Annual review increment";
+
 /* --------------------------------------------------------------- creation */
 
 describe("creating an opening salary", () => {
@@ -224,7 +234,7 @@ describe("creating an opening salary", () => {
     await uc.createInitialSalary(42, { monthly_gross: 20000 }, ACTOR);
     const second = await uc.createInitialSalary(
       42,
-      { monthly_gross: 25000, effective_from: "2026-10-01" },
+      { monthly_gross: 25000, effective_from: "2026-10-01", revision_reason: REASON },
       ACTOR
     );
     assert.equal(second.source, SOURCE.REVISION);
@@ -236,7 +246,7 @@ describe("creating an opening salary", () => {
     const uc = build(repo);
     await uc.createInitialSalary(42, { monthly_gross: 20000 }, ACTOR);
     await assert.rejects(
-      () => uc.createInitialSalary(42, { monthly_gross: 30000, effective_from: "2026-04-01" }, ACTOR),
+      () => uc.createInitialSalary(42, { monthly_gross: 30000, effective_from: "2026-04-01", revision_reason: REASON }, ACTOR),
       /already exists/
     );
   });
@@ -247,10 +257,10 @@ describe("creating an opening salary", () => {
     const repo = makeRepo();
     const uc = build(repo);
     await uc.createInitialSalary(42, { monthly_gross: 20000 }, ACTOR);
-    await uc.createInitialSalary(42, { monthly_gross: 30000, effective_from: "2026-12-01" }, ACTOR);
+    await uc.createInitialSalary(42, { monthly_gross: 30000, effective_from: "2026-12-01", revision_reason: REASON }, ACTOR);
     const backdated = await uc.createInitialSalary(
       42,
-      { monthly_gross: 22000, effective_from: "2026-07-01" },
+      { monthly_gross: 22000, effective_from: "2026-07-01", revision_reason: REASON },
       ACTOR
     );
     assert.equal(backdated.future_conflicts.length, 1);
@@ -274,9 +284,9 @@ describe("the future-dated revision conflict", () => {
   it("REFUSES a second future-dated revision while one is outstanding", async () => {
     const repo = withOpening();
     const uc = build(repo);
-    await uc.createInitialSalary(42, { monthly_gross: 30000, effective_from: "2026-12-01" }, ACTOR);
+    await uc.createInitialSalary(42, { monthly_gross: 30000, effective_from: "2026-12-01", revision_reason: REASON }, ACTOR);
     await assert.rejects(
-      () => uc.createInitialSalary(42, { monthly_gross: 35000, effective_from: "2027-01-01" }, ACTOR),
+      () => uc.createInitialSalary(42, { monthly_gross: 35000, effective_from: "2027-01-01", revision_reason: REASON }, ACTOR),
       /already has a future-dated salary revision/
     );
     assert.equal(repo.rows.length, 2, "nothing was written");
@@ -285,9 +295,9 @@ describe("the future-dated revision conflict", () => {
   it("names the existing revision in the error so the caller can act on it", async () => {
     const repo = withOpening();
     const uc = build(repo);
-    await uc.createInitialSalary(42, { monthly_gross: 30000, effective_from: "2026-12-01" }, ACTOR);
+    await uc.createInitialSalary(42, { monthly_gross: 30000, effective_from: "2026-12-01", revision_reason: REASON }, ACTOR);
     const err = await uc
-      .createInitialSalary(42, { monthly_gross: 35000, effective_from: "2027-01-01" }, ACTOR)
+      .createInitialSalary(42, { monthly_gross: 35000, effective_from: "2027-01-01", revision_reason: REASON }, ACTOR)
       .then(() => null, (e) => e);
     assert.ok(err, "it refused");
     assert.equal(err.name, "ValidationError");
@@ -307,7 +317,7 @@ describe("the future-dated revision conflict", () => {
       () =>
         build(repo).createInitialSalary(
           42,
-          { monthly_gross: 35000, effective_from: "2027-01-01" },
+          { monthly_gross: 35000, effective_from: "2027-01-01", revision_reason: REASON },
           ACTOR
         ),
       /already has a future-dated salary revision/
@@ -321,7 +331,7 @@ describe("the future-dated revision conflict", () => {
     ]);
     const r = await build(repo).createInitialSalary(
       42,
-      { monthly_gross: 35000, effective_from: "2027-01-01" },
+      { monthly_gross: 35000, effective_from: "2027-01-01", revision_reason: REASON },
       ACTOR
     );
     assert.equal(r.effective_from, "2027-01-01", "rejected history is not a live revision");
@@ -331,7 +341,7 @@ describe("the future-dated revision conflict", () => {
     const repo = withOpening();
     const r = await build(repo).createInitialSalary(
       42,
-      { monthly_gross: 30000, effective_from: "2026-12-01" },
+      { monthly_gross: 30000, effective_from: "2026-12-01", revision_reason: REASON },
       ACTOR
     );
     assert.equal(r.effective_from, "2026-12-01", "the first queued change is allowed");
@@ -344,7 +354,7 @@ describe("the future-dated revision conflict", () => {
     ]);
     const r = await build(repo).createInitialSalary(
       42,
-      { monthly_gross: 26000, effective_from: NOW },
+      { monthly_gross: 26000, effective_from: NOW, revision_reason: REASON },
       ACTOR
     );
     assert.equal(r.effective_from, NOW);
@@ -354,10 +364,10 @@ describe("the future-dated revision conflict", () => {
   it("REPLACES NOTHING - the existing future revision is left exactly as it was", async () => {
     const repo = withOpening();
     const uc = build(repo);
-    await uc.createInitialSalary(42, { monthly_gross: 30000, effective_from: "2026-12-01" }, ACTOR);
+    await uc.createInitialSalary(42, { monthly_gross: 30000, effective_from: "2026-12-01", revision_reason: REASON }, ACTOR);
     const before = { ...repo.rows[1] };
     await uc
-      .createInitialSalary(42, { monthly_gross: 99000, effective_from: "2027-01-01" }, ACTOR)
+      .createInitialSalary(42, { monthly_gross: 99000, effective_from: "2027-01-01", revision_reason: REASON }, ACTOR)
       .catch(() => {});
     assert.deepEqual(repo.rows[1], before, "no silent replace, no silent update");
   });
@@ -365,9 +375,9 @@ describe("the future-dated revision conflict", () => {
   it("the same-effective-date rule still answers first", async () => {
     const repo = withOpening();
     const uc = build(repo);
-    await uc.createInitialSalary(42, { monthly_gross: 30000, effective_from: "2026-12-01" }, ACTOR);
+    await uc.createInitialSalary(42, { monthly_gross: 30000, effective_from: "2026-12-01", revision_reason: REASON }, ACTOR);
     await assert.rejects(
-      () => uc.createInitialSalary(42, { monthly_gross: 31000, effective_from: "2026-12-01" }, ACTOR),
+      () => uc.createInitialSalary(42, { monthly_gross: 31000, effective_from: "2026-12-01", revision_reason: REASON }, ACTOR),
       /already exists/
     );
   });
@@ -603,7 +613,7 @@ describe("approval and immutability", () => {
     ]);
     await build(repo).updatePendingSalary(
       1,
-      { monthly_gross: 30000, effective_from: "2027-01-01" },
+      { monthly_gross: 30000, effective_from: "2027-01-01", revision_reason: REASON },
       ACTOR
     );
     assert.equal(repo.rows[0].effective_from, "2026-04-01", "the date is not amendable");

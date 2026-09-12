@@ -215,3 +215,172 @@ describe("the live-salary test excludes rejected rows", () => {
     assert.deepEqual(params, [42, "REJECTED"]);
   });
 });
+
+/* ============================================================= M4 ======== */
+
+describe("M4 — the revision reason is a column like any other", () => {
+  it("is selectable, so history can show WHY", () => {
+    assert.ok(SALARY_COLUMNS.includes("revision_reason"));
+  });
+
+  it("is kept apart from the two other reason columns", () => {
+    // Three questions asked of three people at three moments: why the pay is
+    // changing, why the breakup departs from the automatic one, and why an
+    // approver refused. A row that collapsed any two of them could answer
+    // neither later.
+    for (const column of ["revision_reason", "override_reason", "rejection_reason"]) {
+      assert.ok(SALARY_COLUMNS.includes(column), `${column} is its own column`);
+    }
+  });
+});
+
+describe("M4 — WHO did it, resolved in the query", () => {
+  it("history joins the three actor names", async () => {
+    const db = makeDb([]);
+    await buildRepo(db).getHistory(42);
+    const sql = db.calls[0].sql;
+    for (const alias of ["created_by_name", "approved_by_name", "rejected_by_name"]) {
+      assert.ok(sql.includes(alias), `${alias} comes back with the row`);
+    }
+    // LEFT joins: a missing or renamed actor must not drop the revision from
+    // somebody's salary history.
+    assert.equal((sql.match(/LEFT JOIN `new_employee`/g) || []).length, 3);
+  });
+
+  it("KEEPS THE IDS BESIDE THE NAMES", async () => {
+    // A name is for reading; the id is what the record actually asserts. An
+    // employee renamed in 2031 must not change what a 2026 approval says.
+    const db = makeDb([]);
+    await buildRepo(db).getHistory(42);
+    for (const id of ["created_by", "approved_by", "rejected_by"]) {
+      assert.ok(db.calls[0].sql.includes("s.`" + id + "`"), `${id} is still selected`);
+    }
+  });
+
+  it("reads the actor's NAME and nothing else about them", async () => {
+    const db = makeDb([]);
+    await buildRepo(db).getHistory(42);
+    const sql = db.calls[0].sql;
+    for (const forbidden of ["cb.`pan_no`", "cb.`account_no`", "cb.`salary`", "cb.`aadhaar"]) {
+      assert.ok(!sql.includes(forbidden), "reading who approved is not reading their record");
+    }
+  });
+});
+
+describe("M4 — the pending approval queue", () => {
+  const FILTERS = {
+    employee_id: null,
+    store_id: null,
+    effective_from: null,
+    effective_to: null,
+    as_of: "2026-09-11",
+    limit: 500,
+  };
+
+  it("SELECTS PENDING IN THE SQL — not filtered afterwards", async () => {
+    // An approval queue that could be made to show an approved revision is one
+    // query-string away from offering a second decision on something already
+    // decided.
+    const db = makeDb([]);
+    await buildRepo(db).getPendingQueue(FILTERS);
+    const { sql, params } = db.calls[0];
+    assert.ok(sql.includes("s.`status` = ?"));
+    assert.ok(params.includes("PENDING"), "and PENDING is bound, never interpolated");
+  });
+
+  it("resolves the current approved salary by EXACTLY the resolver's rule", async () => {
+    // Latest APPROVED row effective on or before the as-of date, newest first
+    // - the same three clauses `getCurrentSalary` uses, so the queue and the
+    // Employee Master cannot disagree about what somebody is on today.
+    const db = makeDb([]);
+    await buildRepo(db).getPendingQueue(FILTERS);
+    const sql = db.calls[0].sql;
+    const sub = sql.slice(sql.indexOf("LEFT JOIN `employee_salary` cur"));
+    assert.ok(sub.includes("c.`status` = ?"));
+    assert.ok(sub.includes("c.`effective_from` <= ?"));
+    assert.ok(sub.includes("ORDER BY c.`effective_from` DESC, c.`salary_id` DESC LIMIT 1"));
+    assert.equal(db.calls[0].params[0], "APPROVED", "the join's parameters come first");
+    assert.equal(db.calls[0].params[1], FILTERS.as_of);
+  });
+
+  it("names the current figure `current_monthly_gross`, never `salary`", async () => {
+    // `middlewares/sensitive.js#filterResponse` strips keys called `salary` at
+    // any depth: that alias would make the figure vanish for anybody without
+    // the B3 key, with no error and no 403 to see.
+    const db = makeDb([]);
+    await buildRepo(db).getPendingQueue(FILTERS);
+    const sql = db.calls[0].sql;
+    assert.ok(sql.includes("AS `current_monthly_gross`"));
+    assert.ok(!/AS `salary`/.test(sql));
+  });
+
+  it("reads FOUR employee facts — not the identity documents", async () => {
+    const db = makeDb([]);
+    await buildRepo(db).getPendingQueue(FILTERS);
+    const sql = db.calls[0].sql;
+    for (const wanted of ["ne.`employee_name`", "ne.`store_id`", "ne.`designation_id`"]) {
+      assert.ok(sql.includes(wanted), `${wanted} is read`);
+    }
+    for (const forbidden of [
+      "ne.`pan_no`",
+      "ne.`aadhaar",
+      "ne.`account_no`",
+      "ne.`ifsc`",
+      "ne.`bank_name`",
+      "ne.`uan`",
+      "ne.`salary`",
+    ]) {
+      assert.ok(!sql.includes(forbidden), `deciding a revision is no reason to read ${forbidden}`);
+    }
+  });
+
+  it("EVERY FILTER IS PARAMETERISED, and an absent one adds no clause", async () => {
+    const bare = makeDb([]);
+    await buildRepo(bare).getPendingQueue(FILTERS);
+    assert.ok(!bare.calls[0].sql.includes("s.`employee_id` = ?"));
+    assert.ok(!bare.calls[0].sql.includes("ne.`store_id` = ?"));
+
+    const filtered = makeDb([]);
+    await buildRepo(filtered).getPendingQueue({
+      ...FILTERS,
+      employee_id: 42,
+      store_id: 9,
+      effective_from: "2026-10-01",
+      effective_to: "2026-12-31",
+    });
+    const { sql, params } = filtered.calls[0];
+    assert.ok(sql.includes("s.`employee_id` = ?"));
+    assert.ok(sql.includes("ne.`store_id` = ?"));
+    assert.ok(sql.includes("s.`effective_from` >= ?"));
+    assert.ok(sql.includes("s.`effective_from` <= ?"));
+    for (const value of [42, 9, "2026-10-01", "2026-12-31"]) {
+      assert.ok(params.includes(value), `${value} is bound, not interpolated`);
+    }
+  });
+
+  it("is bounded, and the bound is bound too", async () => {
+    const db = makeDb([]);
+    await buildRepo(db).getPendingQueue({ ...FILTERS, limit: 500 });
+    assert.ok(db.calls[0].sql.trim().endsWith("LIMIT ?"));
+    assert.equal(db.calls[0].params[db.calls[0].params.length - 1], 500);
+  });
+
+  it("ORDERS BY EFFECTIVE DATE, OLDEST FIRST — a worklist, not a feed", async () => {
+    // The proposal that takes effect soonest is the one that needs deciding
+    // first; a newest-first queue buries it.
+    const db = makeDb([]);
+    await buildRepo(db).getPendingQueue(FILTERS);
+    assert.ok(
+      db.calls[0].sql.includes("ORDER BY s.`effective_from` ASC, s.`salary_id` ASC"),
+      "oldest effective date first, deterministically"
+    );
+  });
+
+  it("is ONE query, not one per row", async () => {
+    // The whole reason this method exists: the alternative is listing the
+    // employees and reading each one's history.
+    const db = makeDb([]);
+    await buildRepo(db).getPendingQueue(FILTERS);
+    assert.equal(db.calls.length, 1);
+  });
+});

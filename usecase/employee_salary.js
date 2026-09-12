@@ -81,6 +81,112 @@ const SOURCE = {
   IMPORT: "IMPORT",
 };
 
+/**
+ * M4 — the sources that must say WHY.
+ *
+ * A REVISION and a CORRECTION both CHANGE something an employee is already on,
+ * and an approver's first question about a change is what it is for. An
+ * OPENING_SALARY changes nothing: it is the first structure the person is put
+ * on at all, so there is no prior figure for a reason to be a reason about,
+ * and demanding one would only produce six hundred rows reading "opening
+ * salary".
+ *
+ * IMPORT is not listed. Nothing creates one today; when a bulk load does, what
+ * it carries per row is that module's decision and not a rule inherited here.
+ */
+const SOURCES_REQUIRING_REASON = [SOURCE.REVISION, SOURCE.CORRECTION];
+
+/** A reason as it is stored: trimmed, or null when nobody wrote one. */
+function normalizeReason(value) {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  return text === "" ? null : text;
+}
+
+/**
+ * The revision reason for a proposal of this source, or a refusal.
+ *
+ * ENFORCED HERE, in the layer every write path shares, for the same reason the
+ * self-approval rule is: a required-field rule that lives in a Joi schema is
+ * one new endpoint away from not existing, and the database column is
+ * deliberately nullable because opening salaries legitimately have no reason.
+ *
+ * `revision_reason` IS ITS OWN FIELD AND IS NEVER SATISFIED BY ANOTHER ONE.
+ * `override_reason` is why the BREAKUP departs from the automatic one, and
+ * `rejection_reason` is why an approver REFUSED. Three questions, three people,
+ * three columns - a proposal carrying a manual override still has to say why
+ * the pay is changing.
+ */
+function resolveRevisionReason(source, value) {
+  const reason = normalizeReason(value);
+  if (!SOURCES_REQUIRING_REASON.includes(source)) return reason;
+  if (reason === null) {
+    throw validationError(
+      "A revision reason is required: say why this salary is changing"
+    );
+  }
+  return reason;
+}
+
+/**
+ * The most pending proposals one queue read will return.
+ *
+ * NOT PAGINATION, AND DELIBERATELY NOT. A pending approval queue is a worklist
+ * that people empty; it is a handful of rows in practice and a few dozen at
+ * the very worst. Paging it would be machinery on a screen that never needs to
+ * turn a page, and the approved task says not to overengineer this. The cap is
+ * here so that a bug elsewhere - a thousand proposals raised by a loop - cannot
+ * turn one screen into an unbounded read, not as a page size.
+ */
+const QUEUE_MAX_ROWS = 500;
+
+/** A filter id as a number, or null when it was not supplied. */
+function toId(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** A DECIMAL column, which the driver hands back as a string, as a number. */
+function toAmount(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * What is changing, in rupees and as a percentage of what came before.
+ *
+ * `null` WHEN THERE IS NOTHING TO COMPARE WITH. An opening salary has no
+ * previous figure; reporting "+100%" for it would be arithmetic on a number
+ * that does not exist. A current gross of zero gets an amount but no
+ * percentage, for the same reason - the division has no meaning, and "infinite
+ * increase" is not a thing to put in front of an approver.
+ *
+ * ROUNDED TO TWO PLACES, and it is a DISPLAY figure. Nothing downstream
+ * computes anything from it: the amounts on the record are what a payslip and a
+ * filing are built from.
+ */
+function differenceBetween(currentGross, proposedGross) {
+  if (currentGross === null || proposedGross === null) return null;
+  const amount = Math.round((proposedGross - currentGross) * 100) / 100;
+  const percentage =
+    currentGross > 0 ? Math.round((amount / currentGross) * 10000) / 100 : null;
+  return { amount, percentage };
+}
+
+/** The upper bound the `revision_reason` column can actually hold. */
+const REASON_MAX_LENGTH = 500;
+
+function checkReasonLength(reason) {
+  if (reason !== null && reason.length > REASON_MAX_LENGTH) {
+    throw validationError(
+      `A revision reason may be at most ${REASON_MAX_LENGTH} characters`
+    );
+  }
+  return reason;
+}
+
 class EmployeeSalaryUsecase {
   /**
    * `options.now` is the clock, and it exists so the future-dating rules can
@@ -179,6 +285,15 @@ class EmployeeSalaryUsecase {
 
     const source = existing ? SOURCE.REVISION : SOURCE.OPENING_SALARY;
 
+    /*
+     * M4 — WHY, and it is decided by the SOURCE rather than by the caller.
+     * Refused before anything is calculated or written, so a proposal that
+     * cannot say why it exists never reaches the table.
+     */
+    const revisionReason = checkReasonLength(
+      resolveRevisionReason(source, input.revision_reason)
+    );
+
     const lock = periodLock.checkLock(effectiveFrom);
     if (lock.locked) throw validationError(periodLock.blockedReason(effectiveFrom));
 
@@ -254,7 +369,7 @@ class EmployeeSalaryUsecase {
      */
     const futures = await this.salaryRepo.getFutureRevisions(employeeId, effectiveFrom);
 
-    const row = this._toRow(employeeId, effectiveFrom, source, calculated, actor);
+    const row = this._toRow(employeeId, effectiveFrom, source, calculated, actor, revisionReason);
     const salaryId = await this.salaryRepo.create(row);
 
     return {
@@ -263,6 +378,7 @@ class EmployeeSalaryUsecase {
       status: STATUS.PENDING,
       source,
       effective_from: effectiveFrom,
+      revision_reason: revisionReason,
       calculated,
       future_conflicts: (futures || []).map((f) => ({
         salary_id: f.salary_id,
@@ -280,7 +396,7 @@ class EmployeeSalaryUsecase {
    * filter applied to the caller's object, it is a row assembled from a
    * different object entirely.
    */
-  _toRow(employeeId, effectiveFrom, source, c, actor) {
+  _toRow(employeeId, effectiveFrom, source, c, actor, revisionReason = null) {
     return {
       employee_id: employeeId,
       monthly_gross: c.monthly_gross,
@@ -311,6 +427,9 @@ class EmployeeSalaryUsecase {
       effective_from: effectiveFrom,
       status: STATUS.PENDING,
       source,
+      // The one value on this row that is the CALLER'S words rather than the
+      // engine's arithmetic - and it is a reason, never an amount.
+      revision_reason: revisionReason,
       created_by: actor.employeeId ?? null,
     };
   }
@@ -375,6 +494,117 @@ class EmployeeSalaryUsecase {
     };
   }
 
+  /* ----------------------------------------------------- the approval queue */
+
+  /**
+   * M4 — EVERY PENDING PROPOSAL, FOR THE SALARY APPROVAL SCREEN.
+   *
+   * PENDING ONLY. Approved and rejected rows are never selected, so there is
+   * no filter for an approver to relax and no way for this screen to offer a
+   * second decision on something already decided.
+   *
+   * EACH ROW CARRIES WHAT THE DECISION NEEDS: who the employee is, where they
+   * work, what they are on today, what is being proposed, from when, why, and
+   * who asked. That is one query - see `getPendingQueue` in the repository -
+   * rather than a history read per employee from the browser.
+   *
+   * THE DIFFERENCE IS WORKED OUT HERE, NOT IN THE BROWSER. It is a subtraction
+   * of two grosses rather than a statutory calculation, but the rule this
+   * module exists to hold is that salary figures are the server's answer, and
+   * a screen that does its own arithmetic on pay is a screen that can disagree
+   * with the record. `null` where there is nothing to compare against - a
+   * first salary has no previous figure, and calling that a rise of 100% would
+   * be an invention.
+   *
+   * SELF-APPROVAL IS FLAGGED, NOT FILTERED. A proposal the caller created
+   * themselves stays in their queue with `own_proposal: true`, because they may
+   * still reject it - withdrawing your own proposal is allowed, agreeing to it
+   * is not. The refusal itself lives in `_refuseSelfApproval` and is the
+   * server's; this flag only lets the screen say so before the click.
+   */
+  async getPendingQueue(filters = {}, actor = {}) {
+    const asOf = filters.as_of ? normalizeDate(filters.as_of, "as_of") : this._today();
+
+    const effectiveFrom = filters.effective_from
+      ? normalizeDate(filters.effective_from, "effective_from")
+      : null;
+    const effectiveTo = filters.effective_to
+      ? normalizeDate(filters.effective_to, "effective_to")
+      : null;
+    if (effectiveFrom && effectiveTo && effectiveFrom > effectiveTo) {
+      throw validationError("effective_from must be on or before effective_to");
+    }
+
+    const rows = await this.salaryRepo.getPendingQueue({
+      employee_id: toId(filters.employee_id),
+      store_id: toId(filters.store_id),
+      effective_from: effectiveFrom,
+      effective_to: effectiveTo,
+      as_of: asOf,
+      limit: QUEUE_MAX_ROWS,
+    });
+
+    const approverId = actor.employeeId;
+    const isAdmin = isAdminActor(actor);
+
+    return (rows || []).map((row) => {
+      const record = this._present(row);
+      const currentGross = toAmount(row.current_monthly_gross);
+      const proposedGross = toAmount(row.monthly_gross);
+
+      /*
+       * `own_proposal` compares EMPLOYEE identity against employee identity,
+       * exactly as `_refuseSelfApproval` does, and an actor with no employee id
+       * cannot have created anything. Administrators are the standing exception
+       * to the rule, so their own proposals are not flagged as un-approvable.
+       */
+      const ownProposal =
+        !isAdmin &&
+        approverId !== null &&
+        approverId !== undefined &&
+        record.created_by !== null &&
+        record.created_by !== undefined &&
+        Number(record.created_by) === Number(approverId);
+
+      /*
+       * The raw join columns are dropped rather than sent alongside the shaped
+       * ones. `current_monthly_gross` and `current_salary.monthly_gross` would
+       * otherwise be two names for one figure on the same object, and two
+       * names for one figure is how a screen ends up reading the one nobody
+       * maintained.
+       */
+      delete record.current_salary_id;
+      delete record.current_monthly_gross;
+      delete record.current_effective_from;
+      delete record.outlet_nickname;
+
+      return {
+        ...record,
+        employee_name: row.employee_name || null,
+        store_id: row.store_id ?? null,
+        outlet_name: row.outlet_nickname || row.outlet_name || null,
+        designation_id: row.designation_id ?? null,
+        designation_name: row.designation_name || null,
+        /*
+         * NAMED `current_salary`, NOT `salary`. `middlewares/sensitive.js`
+         * strips keys called `salary` at any depth, so that name would delete
+         * this object from the response for anybody without the B3 key -
+         * silently, with no error to see. The same trap `getCurrentSalary`
+         * documents.
+         */
+        current_salary: currentGross === null
+          ? null
+          : {
+              salary_id: row.current_salary_id ?? null,
+              monthly_gross: row.current_monthly_gross,
+              effective_from: engine.toDateOnly(row.current_effective_from),
+            },
+        difference: differenceBetween(currentGross, proposedGross),
+        own_proposal: ownProposal,
+      };
+    });
+  }
+
   /* ------------------------------------------------------------ lifecycle */
 
   /** Amend a PENDING proposal. Approved and rejected records are never edited. */
@@ -391,12 +621,39 @@ class EmployeeSalaryUsecase {
     const lock = periodLock.checkLock(effectiveFrom);
     if (lock.locked) throw validationError(periodLock.blockedReason(effectiveFrom));
 
+    /*
+     * M4 — AN AMENDED REVISION STILL HAS TO SAY WHY.
+     *
+     * The source is the STORED one: amending cannot turn a revision into an
+     * opening salary, so it cannot be a way around the rule either.
+     *
+     * An omitted `revision_reason` keeps whatever is on the record rather than
+     * clearing it, so an amendment that only corrects a figure need not retype
+     * the sentence. What it may NOT do is leave a revision with no reason at
+     * all - including a pending row created before this column existed, which
+     * is the one case where the stored value is null and the amendment is
+     * asked to supply one.
+     */
+    const revisionReason = checkReasonLength(
+      resolveRevisionReason(
+        existing.source,
+        input.revision_reason === undefined ? existing.revision_reason : input.revision_reason
+      )
+    );
+
     const calculated = await this.calculateForEmployee(existing.employee_id, {
       ...input,
       effective_from: effectiveFrom,
     });
 
-    const row = this._toRow(existing.employee_id, effectiveFrom, existing.source, calculated, actor);
+    const row = this._toRow(
+      existing.employee_id,
+      effectiveFrom,
+      existing.source,
+      calculated,
+      actor,
+      revisionReason
+    );
     // The identity of the row is not up for amendment: only its numbers are.
     delete row.employee_id;
     delete row.effective_from;
@@ -408,7 +665,7 @@ class EmployeeSalaryUsecase {
     if (affected === 0) {
       throw validationError("The salary revision was changed by somebody else; reload and try again");
     }
-    return { salary_id: salaryId, status: STATUS.PENDING, calculated };
+    return { salary_id: salaryId, status: STATUS.PENDING, revision_reason: revisionReason, calculated };
   }
 
   /**
@@ -499,3 +756,7 @@ module.exports.SOURCE = SOURCE;
 module.exports.ADMIN_USER_TYPE = ADMIN_USER_TYPE;
 module.exports.validationError = validationError;
 module.exports.normalizeDate = normalizeDate;
+module.exports.SOURCES_REQUIRING_REASON = SOURCES_REQUIRING_REASON;
+module.exports.REASON_MAX_LENGTH = REASON_MAX_LENGTH;
+module.exports.QUEUE_MAX_ROWS = QUEUE_MAX_ROWS;
+module.exports.differenceBetween = differenceBetween;

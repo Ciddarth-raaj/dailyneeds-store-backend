@@ -63,15 +63,22 @@ const { guards, middleware, routes } = makeHarness();
 const find = (method, path) => guards.find((g) => g.method === method && g.path === path);
 
 describe("the endpoints", () => {
-  it("defines exactly the M2 surface and nothing more", () => {
-    // No bulk upload, no payroll run, no revision workflow screen. M2 is a
-    // small API on purpose, and a route that appears here without appearing
-    // in the approved scope is scope creep the test should catch.
+  it("defines exactly the M2 surface plus the ONE read M4 adds, and nothing more", () => {
+    // No bulk upload, no payroll run, no payslip, no attendance calculation.
+    // This API is small on purpose, and a route that appears here without
+    // appearing in the approved scope is scope creep the test should catch.
+    //
+    // M4 builds two screens - Salary Revision & History, and Salary Approval -
+    // on the seven primitives M2 already defined. The only thing it could not
+    // build from them is a list of EVERYBODY's pending proposals, because no
+    // per-employee endpoint can answer that without the browser reading six
+    // hundred histories. So M4 adds exactly one endpoint, and it is a read.
     assert.deepEqual(
       guards.map((g) => `${g.method} ${g.path}`).sort(),
       [
         "GET /salary/employee/:employee_id/current",
         "GET /salary/employee/:employee_id/history",
+        "GET /salary/pending",
         "POST /salary/employee/:employee_id",
         "POST /salary/preview/:employee_id",
         "POST /salary/revision/:salary_id",
@@ -79,6 +86,25 @@ describe("the endpoints", () => {
         "POST /salary/revision/:salary_id/reject",
       ]
     );
+  });
+
+  it("M4 ADDS NO WRITE AT ALL — the approval screen cannot edit a proposal", () => {
+    // Rule 14 of the approved task: if a submitted salary is wrong, the
+    // approver REJECTS it with a reason and the salary-entry user corrects it
+    // on Salary Revision & History. An approval screen that could also amend
+    // would let one person rewrite a figure and agree to it in the same visit,
+    // which is the four-eyes rule defeated from the other end.
+    //
+    // So the only endpoint M4 adds is a GET, and the writes are still exactly
+    // the M2 ones: create, amend-pending, approve, reject.
+    const writes = guards.filter((g) => g.method !== "GET").map((g) => `${g.method} ${g.path}`);
+    assert.deepEqual(writes.sort(), [
+      "POST /salary/employee/:employee_id",
+      "POST /salary/preview/:employee_id",
+      "POST /salary/revision/:salary_id",
+      "POST /salary/revision/:salary_id/approve",
+      "POST /salary/revision/:salary_id/reject",
+    ]);
   });
 
   it("has no delete route — salary records are never removed", () => {
@@ -94,8 +120,33 @@ describe("permissions", () => {
         g.guard.keys.includes(P.VIEW_EMPLOYEES),
         `${g.method} ${g.path} keeps the employee-master key`
       );
-      assert.equal(g.guard.keys.length, 2, `${g.method} ${g.path} is exactly a pair`);
     }
+  });
+
+  it("every per-employee endpoint is exactly a pair; the M4 queue is the one triple", () => {
+    // The pairs are unchanged by M4. The queue takes a third key because it is
+    // a different disclosure: every other read here answers a question about
+    // ONE employee somebody navigated to, while the queue lists every
+    // outstanding pay proposal in the company.
+    for (const g of guards) {
+      const expected = g.path === "/salary/pending" ? 3 : 2;
+      assert.equal(
+        g.guard.keys.length,
+        expected,
+        `${g.method} ${g.path} must demand ${expected} keys`
+      );
+    }
+  });
+
+  it("THE PENDING QUEUE TAKES THE APPROVER KEY ON TOP OF SALARY VISIBILITY", () => {
+    const g = find("GET", "/salary/pending");
+    assert.deepEqual(g.guard.keys, [P.VIEW_EMPLOYEES, P.VIEW_SALARY, P.APPROVE_SALARY_REVISION]);
+    assert.equal(g.guard.mode, "all", "all three, not any of three");
+
+    // And holding `add_salary` is not a way in: proposing pay and reviewing
+    // everybody's proposals are different authorities.
+    assert.ok(!g.guard.keys.includes(P.ADD_SALARY));
+    assert.ok(!g.guard.keys.includes(P.EDIT_SALARY));
   });
 
   it("reads take view_salary", () => {
