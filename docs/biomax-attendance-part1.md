@@ -288,6 +288,11 @@ under `ec2-user` (`pm2 describe 0` verified), nothing to install or change.
    -> `PASS: response_code: OK`, `MODE=poll` -> `PASS: response_code:
    ERROR_NO_CMD`; then delete the test rows (`biomax_punch_derived` first,
    then `biomax_punch`) - the only time those tables are ever deleted from.
+   `scripts/delete-test-biomax-punches.js` does exactly that: run it with
+   `--from`/`--to` (calendar dates, optionally `--dev-id`/`--user-id`) to
+   list the matching punches, then again with `--apply` to delete them. It
+   refuses punches that already carry an attendance_date unless
+   `--include-dated` is passed.
 4. **Lightsail IPv4 Firewall (separate approval, not touched by this
    project's code):** leftover rules for 82 and 7005 are left as they are
    until that operation is approved. When parallel testing is approved,
