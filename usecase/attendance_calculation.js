@@ -96,20 +96,77 @@ function breakOverrideMinutes(row) {
   return Number.isFinite(n) && n >= 0 ? Math.trunc(n) : null;
 }
 
+/** The OT claim states a day can be in. Separate from the attendance status. */
+const OT_CLAIM_STATE = Object.freeze({
+  NONE: "NONE",
+  AVAILABLE: "AVAILABLE",
+  REQUEST_PENDING: "REQUEST_PENDING",
+  APPROVED: "APPROVED",
+  REJECTED: "REJECTED",
+  CLOSED_AT_PAYROLL_LOCK: "CLOSED_AT_PAYROLL_LOCK",
+});
+
+/**
+ * The OT claim on a calculated day, from the OT request against it (if any).
+ *
+ *   NONE                    no candidate OT and nothing requested
+ *   AVAILABLE               the engine found candidate OT and nobody asked yet
+ *   REQUEST_PENDING         the employee asked and the chain is not finished
+ *   APPROVED                finally approved; `approved_ot_minutes` is paid
+ *   REJECTED                an approver rejected it
+ *   CLOSED_AT_PAYROLL_LOCK  closed by the payroll lock, never requested or
+ *                           never approved in time (`ot_closure_reason` says
+ *                           which)
+ *
+ * Only a complete FINAL day can offer OT: an incomplete day's overtime is
+ * a guess until the missing punch is supplied, and that is a regularization.
+ */
+function otClaimFor({ day, otRequest, otSettled }) {
+  const candidate = Math.max(0, Math.trunc(Number(day.candidate_ot_minutes) || 0));
+  const claim = {
+    ot_claim_state: OT_CLAIM_STATE.NONE,
+    ot_request_id: otRequest ? otRequest.attendance_approval_request_id : null,
+    ot_requested_minutes: otRequest ? Number(otRequest.candidate_ot_minutes || 0) : null,
+    ot_reason: otRequest ? otRequest.reason || null : null,
+    ot_closure_reason: otRequest ? otRequest.closure_reason || null : null,
+    ot_requested_at: otRequest ? otRequest.created_at || null : null,
+    ot_decided_at: otRequest ? otRequest.decided_at || null : null,
+  };
+
+  if (otRequest) {
+    if (otRequest.status === "PENDING" || (otRequest.status === "APPROVED" && !otSettled)) {
+      claim.ot_claim_state = OT_CLAIM_STATE.REQUEST_PENDING;
+    } else if (otRequest.status === "APPROVED") {
+      claim.ot_claim_state = OT_CLAIM_STATE.APPROVED;
+    } else if (otRequest.closure_reason) {
+      claim.ot_claim_state = OT_CLAIM_STATE.CLOSED_AT_PAYROLL_LOCK;
+    } else {
+      claim.ot_claim_state = OT_CLAIM_STATE.REJECTED;
+    }
+    return claim;
+  }
+
+  if (candidate > 0 && day.is_final === true && day.status === CALC_STATUS.FINAL) {
+    claim.ot_claim_state = OT_CLAIM_STATE.AVAILABLE;
+  }
+  return claim;
+}
+
 module.exports = (attendanceCalculationRepo, options = {}) => {
   /**
-   * The OT auto-queue collaborator (review fix #6), injected rather than
-   * required.
+   * The OT request collaborator, injected rather than required.
    *
    * It lives in `usecase/attendance_regularization.js`, which already depends
    * on THIS usecase, so wiring it the other way round as a constructor
    * argument would be a cycle. `server.js` builds both and then hands this one
-   * the hook; a caller that does not (every unit test that is not about the
-   * queue) simply gets no auto-queueing, which is the old behaviour.
+   * the service. It is consulted for exactly one thing: closing unresolved OT
+   * when a payroll month is locked (`closeOtForPayrollLock` below). NOTHING
+   * here raises an OT request: candidate overtime is a figure the engine
+   * reports, and it becomes a request only when the employee asks for it.
    */
-  let otApprovalQueue = options.ot_approval_queue || null;
-  const setOtApprovalQueue = (queue) => {
-    otApprovalQueue = queue || null;
+  let otRequestService = options.ot_request_service || null;
+  const setOtRequestService = (service) => {
+    otRequestService = service || null;
   };
 
   /**
@@ -346,40 +403,60 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       regularizedByDate.get(date).push(row);
     });
 
+    // TWO SLOTS PER DATE, because Missing Punch and OT are two separate
+    // requests now. `regularization` is the attendance correction (a
+    // REGULARIZATION request, or a legacy REGULARIZATION_WITH_OT one); `ot`
+    // is the employee's OT claim (an OT request). Among several rows of one
+    // kind the newest wins, which is the one that is not CANCELLED.
     const approvalByDate = new Map();
-    (context.approvals || []).forEach((row) =>
-      approvalByDate.set(toDateOnly(row.attendance_date), row)
-    );
+    (context.approvals || []).forEach((row) => {
+      const date = toDateOnly(row.attendance_date);
+      if (!approvalByDate.has(date)) approvalByDate.set(date, { regularization: null, ot: null });
+      const slot = approvalByDate.get(date);
+      if (row.request_type === "OT") slot.ot = row;
+      else slot.regularization = row;
+    });
 
     const assumedDate = assume ? toDateOnly(assume.attendance_date) : null;
 
     return dates.map((date) => {
       const resolution = context.resolutionFor(date);
 
-      let approval = approvalByDate.get(date) || null;
+      const slots = approvalByDate.get(date) || { regularization: null, ot: null };
+      let approval = slots.regularization;
+      let otRequest = slots.ot;
       let regularizedPunches = regularizedByDate.get(date) || [];
 
       if (assumedDate !== null && assumedDate === date) {
-        // The assumption REPLACES whatever is stored for this date's request:
-        // a decision that has not been committed yet is not in the tables the
-        // context read, and a stale stored row must not leak past it.
-        approval =
-          assume.status === "PENDING" || assume.status === "APPROVED"
-            ? {
-                attendance_approval_request_id: assume.attendance_approval_request_id || null,
-                attendance_date: date,
-                status: assume.status,
-                approved_ot_minutes: assume.approved_ot_minutes || 0,
-                // An assumed APPROVED decision is being SETTLED in the very
-                // transaction that is asking for this day: the row it produces
-                // is the settled one, committed with the approval.
-                finalization_state: assume.status === "APPROVED" ? "SETTLED" : "NOT_REQUIRED",
-              }
-            : null;
-        regularizedPunches =
-          assume.status === "APPROVED" && assume.regularized_punch
-            ? [assume.regularized_punch]
-            : [];
+        // The assumption REPLACES whatever is stored for this date's request
+        // OF THAT KIND: a decision that has not been committed yet is not in
+        // the tables the context read, and a stale stored row must not leak
+        // past it. `assume.request_type` says which slot; anything but OT is
+        // the attendance correction.
+        const assumed = {
+          attendance_approval_request_id: assume.attendance_approval_request_id || null,
+          attendance_date: date,
+          request_type: assume.request_type || "REGULARIZATION",
+          status: assume.status,
+          candidate_ot_minutes:
+            assume.candidate_ot_minutes === undefined ? null : assume.candidate_ot_minutes,
+          approved_ot_minutes: assume.approved_ot_minutes || 0,
+          reason: assume.reason === undefined ? null : assume.reason,
+          closure_reason: null,
+          // An assumed APPROVED decision is being SETTLED in the very
+          // transaction that is asking for this day: the row it produces is
+          // the settled one, committed with the approval.
+          finalization_state: assume.status === "APPROVED" ? "SETTLED" : "NOT_REQUIRED",
+        };
+        if (assumed.request_type === "OT") {
+          otRequest = assumed;
+        } else {
+          approval = assumed;
+          regularizedPunches =
+            assume.status === "APPROVED" && assume.regularized_punch
+              ? [assume.regularized_punch]
+              : [];
+        }
       }
 
       // Only a SETTLED approval is payroll-effective (review fix #4). The
@@ -387,16 +464,28 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       // SETTLED; requiring it here as well means that an APPROVED request whose
       // day was somehow never recalculated holds the date out of payroll
       // instead of paying overtime against stale attendance.
-      const settled =
-        !!approval &&
-        approval.status === "APPROVED" &&
-        (approval.finalization_state === undefined ||
-          approval.finalization_state === null ||
-          approval.finalization_state === "SETTLED");
+      const isSettled = (row) =>
+        !!row &&
+        row.status === "APPROVED" &&
+        (row.finalization_state === undefined ||
+          row.finalization_state === null ||
+          row.finalization_state === "SETTLED");
 
-      const approvedOt = settled ? Number(approval.approved_ot_minutes || 0) : 0;
+      const regularizationSettled = isSettled(approval);
+      const otSettled = isSettled(otRequest);
+
+      // Finally approved OT comes from the settled OT request. A legacy
+      // REGULARIZATION_WITH_OT request that was approved before the flows
+      // were separated still pays what it approved, so history is not
+      // silently re-priced.
+      const approvedOt = otSettled
+        ? Number(otRequest.approved_ot_minutes || 0)
+        : regularizationSettled && approval.request_type === "REGULARIZATION_WITH_OT"
+        ? Number(approval.approved_ot_minutes || 0)
+        : 0;
       const stillOpen =
-        !!approval && (approval.status === "PENDING" || (approval.status === "APPROVED" && !settled));
+        !!approval &&
+        (approval.status === "PENDING" || (approval.status === "APPROVED" && !regularizationSettled));
 
       const calculated = calculateAttendanceDay({
         employee_id,
@@ -416,12 +505,17 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
 
       return {
         ...calculated,
+        ...otClaimFor({ day: calculated, otRequest, otSettled }),
         shift_resolution_status: resolution.status,
         // Display only: the live shift name, and whether the date's shift came
         // from the dated history or from a single-date edit.
         shift_name: resolution.work_shift_id ? context.shiftNameFor(resolution.work_shift_id) : null,
         shift_source: resolution.assignment ? resolution.assignment.source || null : null,
-        approval_request_id: approval ? approval.attendance_approval_request_id : null,
+        approval_request_id: approval
+          ? approval.attendance_approval_request_id
+          : otRequest
+          ? otRequest.attendance_approval_request_id
+          : null,
       };
     });
   };
@@ -562,30 +656,16 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    * Calculate a range and store it. Idempotent by the unique key on
    * (employee_id, attendance_date) - see the repository.
    *
-   * Once the rows are safely stored, routine OT is QUEUED FOR APPROVAL
-   * automatically (review fix #6): a complete, valid day that earned candidate
-   * OT raises its own request, so nobody has to know to ask for the overtime
-   * they have already worked. The queue sync runs AFTER the write and never
-   * inside it - creating an approval request makes nothing payable, so it is
-   * not part of what has to move atomically, and a failure there must not lose
-   * a calculation that is already correct.
+   * NOTHING IS QUEUED FOR APPROVAL. A recalculation that finds candidate OT
+   * simply reports it; the day shows "OT Available" and the employee raises
+   * the OT request themselves, with a reason (`raiseOtRequest` in the
+   * regularization usecase). The old automatic OT queue is gone.
    */
   const recalculateRange = async ({ employee_id, from_date, to_date }) => {
     const days = await calculateRange({ employee_id, from_date, to_date });
     const written = await attendanceCalculationRepo.saveCalculations(days.map(toStorageRow));
 
-    // Never allowed to fail the recalculation, which is already stored: see
-    // `syncOtQueueSafely` in the regularization usecase. A queue that is wired
-    // without that wrapper is still called directly, so a test fake does not
-    // have to implement two methods.
-    let ot_queue = null;
-    if (otApprovalQueue && typeof otApprovalQueue.syncOtQueueSafely === "function") {
-      ot_queue = await otApprovalQueue.syncOtQueueSafely({ employee_id, days });
-    } else if (otApprovalQueue && typeof otApprovalQueue.syncDays === "function") {
-      ot_queue = await otApprovalQueue.syncDays({ employee_id, days });
-    }
-
-    return { employee_id, from_date, to_date, days, ot_queue, ...written };
+    return { employee_id, from_date, to_date, days, ...written };
   };
 
   /**
@@ -667,15 +747,6 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       stored = await attendanceCalculationRepo.saveCalculations([toStorageRow(after)]);
     }
 
-    // Routine OT on the recalculated day queues itself exactly as it does
-    // after any other recalculation - after the write, never inside it.
-    let ot_queue = null;
-    if (otApprovalQueue && typeof otApprovalQueue.syncOtQueueSafely === "function") {
-      ot_queue = await otApprovalQueue.syncOtQueueSafely({ employee_id: employeeId, days: [after] });
-    } else if (otApprovalQueue && typeof otApprovalQueue.syncDays === "function") {
-      ot_queue = await otApprovalQueue.syncDays({ employee_id: employeeId, days: [after] });
-    }
-
     return {
       employee_id: employeeId,
       attendance_date: date,
@@ -689,7 +760,6 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
           ? stored.attendance_date_shift_override_id
           : null,
       day: after,
-      ot_queue,
     };
   };
 
@@ -703,6 +773,48 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       shift_code: r.shift_code,
       shift_name: r.shift_name,
     }));
+  };
+
+  /**
+   * PAYROLL LOCK, the OT half: close every OT claim in a month that is not
+   * finally approved.
+   *
+   * There is no payroll lock action in this codebase yet. This is the
+   * domain entry point the future lock action calls, inside whatever
+   * workflow it runs, and it is exposed HERE - on the payroll usecase - so
+   * the wiring is one call. The rule it applies (finalized):
+   *
+   *   OT available but never requested   -> Rejected – Not Requested Before Payroll Lock
+   *   OT requested, still pending        -> Rejected – Not Approved Before Payroll Lock
+   *   OT already rejected                -> stays rejected
+   *   OT finally approved                -> stays approved, paid
+   *
+   * Afterwards no open OT request exists for the period, and nothing here
+   * marks candidate OT payable: only `approved_ot_minutes` from a finally
+   * approved request ever reaches payroll. Idempotent - a second run finds
+   * nothing to close.
+   */
+  const closeOtForPayrollLock = async ({ employee_id, year, month, actor_employee_id = null }) => {
+    if (!otRequestService || typeof otRequestService.closeOtForPayrollLock !== "function") {
+      throw new Error("No OT request service is wired: closeOtForPayrollLock cannot run");
+    }
+    const y = Number(year);
+    const m = Number(month);
+    if (!Number.isInteger(y) || !Number.isInteger(m) || m < 1 || m > 12) {
+      throw validationError("year and month must be integers, month 1-12");
+    }
+    const pad = (n) => String(n).padStart(2, "0");
+    const from = `${y}-${pad(m)}-01`;
+    const to = `${y}-${pad(m)}-${pad(daysInMonth(y, m))}`;
+
+    const days = await calculateRange({ employee_id, from_date: from, to_date: to });
+    return otRequestService.closeOtForPayrollLock({
+      employee_id: Number(employee_id),
+      from_date: from,
+      to_date: to,
+      days,
+      actor_employee_id,
+    });
   };
 
   /**
@@ -786,7 +898,9 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     dateRange,
     breakOverrideMinutes,
     toStorageRow,
-    setOtApprovalQueue,
+    OT_CLAIM_STATE,
+    setOtRequestService,
+    closeOtForPayrollLock,
     getBreakOverride,
     setBreakOverride,
     calculateRange,

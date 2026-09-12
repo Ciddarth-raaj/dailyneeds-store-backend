@@ -259,8 +259,11 @@ describe("calculating a range", () => {
     });
     assert.equal(held.candidate_ot_minutes, 15);
     assert.equal(held.approved_ot_minutes, 0);
-    assert.equal(held.status, CALC_STATUS.REGULARIZATION_PENDING);
-    assert.equal(held.is_final, false);
+    // A pending OT CLAIM does not hold the attendance: the day is FINAL and
+    // the claim state says the OT is still being decided.
+    assert.equal(held.status, CALC_STATUS.FINAL);
+    assert.equal(held.ot_claim_state, "REQUEST_PENDING");
+    assert.equal(held.is_final, true);
 
     const approved = buildUsecase(
       fakeRepo({

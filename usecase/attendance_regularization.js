@@ -6,13 +6,12 @@ const {
   STEP_DECISION,
   ADMIN_USER_TYPE,
   buildApprovalChain,
-  requestTypeFor,
   canApprove,
   advance,
 } = require("../utils/attendance_approval_chain");
-const { CALC_STATUS } = require("../utils/attendance_engine");
+const { CALC_STATUS, addDays } = require("../utils/attendance_engine");
 const { toDateOnly } = require("../utils/shiftResolution");
-const logger = require("../utils/logger");
+const { istToday } = require("../utils/istDate");
 
 /**
  * Attendance v2 / A3 - raising and deciding a regularization or OT request.
@@ -34,27 +33,27 @@ const logger = require("../utils/logger");
  * than a mapped one. It is given NO approver role at all: authority is never
  * defaulted, only granted.
  *
- * OT IS APPROVED AFTER THE WORK. A candidate OT figure is calculated
- * automatically by the engine, and it is worth zero rupees until this chain
- * finishes. There is no pre-approval and no way to approve OT that has not
- * been earned: the approved figure is clamped to the candidate.
+ * MISSING PUNCH AND OT ARE TWO REQUESTS (finalized OT flow). A regularization
+ * request carries the proposed punch and the employee's reason, and its
+ * approval corrects ATTENDANCE only. Once the corrected day is recalculated,
+ * any candidate OT the engine now finds is merely AVAILABLE; the employee
+ * raises a separate OT request for it, with a reason, and OT approval runs on
+ * its own. New code never creates REGULARIZATION_WITH_OT; the enum value is
+ * kept so historical rows still read.
  *
- * THE CANDIDATE OT ON A MISSING-PUNCH REQUEST IS THE OT THE PROPOSED PUNCH
- * WOULD CREATE (review fix #3). An odd punch count leaves the engine before
- * overtime is calculated at all, so asking the INCOMPLETE day what its
- * overtime is always answers zero - which is how a missing 00:30 OUT that
- * plainly earns two hours of OT could reach an approver showing none. The
- * proposed punch is therefore put into a PROPOSED effective punch list in
- * memory, the same engine is run over it, and the candidate comes from that
- * corrected day. Nothing is made effective in stored attendance by this: the
- * punch row stays invisible to the calculation until the chain finishes.
+ * OT IS REQUESTED BY THE EMPLOYEE, NEVER QUEUED BY THE SYSTEM. The engine
+ * calculates `candidate_ot_minutes`; that figure is system-controlled and the
+ * request body has no field for it. `raiseOtRequest` recalculates the date on
+ * the server at submission and stores THAT candidate. Approval is after the
+ * work, and the approved figure is clamped to the eligible OT as calculated at
+ * the moment of final approval, so it can never exceed what the engine says.
  *
- * ROUTINE OT QUEUES ITSELF (review fix #6). Nobody should have to know to ask
- * for overtime they have already worked. When a recalculation finds candidate
- * OT on a complete, valid day with no request against it, `otAutoQueue` raises
- * the OT request on the same role/outlet chain, and when a later recalculation
- * finds the overtime gone it supersedes its own request rather than leaving
- * stale payable OT in the queue.
+ * PAYROLL LOCK closes every OT claim in the month that is not finally
+ * approved - never requested, or requested and not approved in time - as
+ * REJECTED with a closure reason, so no open OT request survives a locked
+ * period. `closeOtForPayrollLock` is that rule; there is no lock action yet
+ * that calls it, and it is exposed on the payroll usecase for the one that
+ * will.
  *
  * A FINAL DECISION AND THE ATTENDANCE IT CAUSES COMMIT TOGETHER (review fix
  * #4). `decide` computes the corrected day BEFORE it opens the decision
@@ -96,13 +95,41 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase) =>
     };
   };
 
+  /** The exact closure wording the payroll lock records. */
+  const OT_CLOSURE = Object.freeze({
+    NOT_REQUESTED_BEFORE_PAYROLL_LOCK: {
+      code: "NOT_REQUESTED_BEFORE_PAYROLL_LOCK",
+      label: "Rejected – Not Requested Before Payroll Lock",
+    },
+    NOT_APPROVED_BEFORE_PAYROLL_LOCK: {
+      code: "NOT_APPROVED_BEFORE_PAYROLL_LOCK",
+      label: "Rejected – Not Approved Before Payroll Lock",
+    },
+  });
+
+  /** The chain for somebody's own request, with the outlet check every raise needs. */
+  const chainFor = (identity) => {
+    const chain = buildApprovalChain({
+      requester_class: identity.requester_class,
+      outlet_id: identity.outlet_id,
+      requester_is_store_manager: identity.is_store_manager,
+    });
+    if (chain.some((s) => s.approver_role === APPROVER_ROLE.STORE_MANAGER && s.outlet_id === null)) {
+      throw validationError(
+        "This employee has no outlet, so their Store Manager stage cannot be addressed"
+      );
+    }
+    return chain;
+  };
+
   /**
-   * Raise ONE request for ONE date.
+   * Raise a MISSING PUNCH regularization for ONE date.
    *
-   * A date that has both a missing punch and resulting overtime raises a
-   * single REGULARIZATION_WITH_OT request on a single chain, so there is one
-   * decision to make and one audit trail to read. The final approval on it
-   * approves both.
+   * Attendance correction only. The request carries the proposed punch, the
+   * employee's reason and the attendance approval chain - and NO overtime:
+   * whatever OT the corrected day turns out to earn becomes available for a
+   * separate OT request once this one is finally approved and the date is
+   * recalculated.
    */
   const raiseRequest = async ({
     actor,
@@ -110,7 +137,6 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase) =>
     attendance_date,
     reason,
     punch_time = null,
-    auto_created = false,
   }) => {
     const date = toDateOnly(attendance_date);
     if (date === null) throw validationError("attendance_date must be a date as YYYY-MM-DD");
@@ -145,121 +171,190 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase) =>
       );
     }
 
-    const hasMissingPunch = day.punch_count % 2 === 1;
-    const hasCandidateOt = day.candidate_ot_minutes > 0;
-
-    if (!hasMissingPunch && !hasCandidateOt) {
-      throw validationError(
-        `${date} has ${day.punch_count} punches and no overtime, so there is nothing to approve`
-      );
-    }
-
-    // The OT the request actually carries. On a complete day it is the day's
-    // own candidate; on a missing-punch day it is the OT the PROPOSED punch
-    // would create, and deriving it any other way gives zero (review fix #3).
-    let candidateOtMinutes = day.candidate_ot_minutes;
-    let proposedDay = null;
-
-    if (hasMissingPunch) {
-      if (!punch_time) {
-        throw validationError("punch_time is required when a punch is missing");
-      }
-      if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})?$/.test(String(punch_time).trim())) {
-        throw validationError("punch_time must be YYYY-MM-DD HH:MM:SS");
-      }
-
-      const punchTime = String(punch_time).trim();
-
-      // The proposed punch has to belong to the date being regularized, under
-      // the cutoff that applied on that date. A 00:30 OUT after a 10:00-22:00
-      // shift does; a 09:00 punch on the following morning does not, and
-      // approving it would silently credit a different day.
-      const resolvedDate = await attendanceCalculationUsecase.attendanceDateForPunchTime({
-        employee_id: forEmployeeId,
-        punch_time: punchTime,
-        near_date: date,
-      });
-      if (resolvedDate !== date) {
-        throw validationError(
-          `A punch at ${punchTime} belongs to attendance date ${
-            resolvedDate === null ? "none" : resolvedDate
-          } under this employee's shift and cutoff for ${date}, not to ${date}`
-        );
-      }
-
-      // Run the SAME engine over raw punches plus the proposed one. Nothing is
-      // stored; this is what the day would look like if it were approved.
-      proposedDay = await attendanceCalculationUsecase.calculateProposedDay({
-        employee_id: forEmployeeId,
-        attendance_date: date,
-        punch_time: punchTime,
-      });
-
-      if (!proposedDay || proposedDay.punch_count % 2 === 1) {
-        throw validationError(
-          `A punch at ${punchTime} still leaves ${date} with an odd number of punches, so it cannot be what was missing`
-        );
-      }
-      if (proposedDay.status === CALC_STATUS.REVIEW_REQUIRED) {
-        throw validationError(
-          `A punch at ${punchTime} does not produce a calculable day for ${date}`
-        );
-      }
-
-      candidateOtMinutes = proposedDay.candidate_ot_minutes;
-    } else if (punch_time) {
+    if (day.punch_count % 2 !== 1) {
       // Nothing is missing, so a manual punch here would be an edit to a
-      // complete day rather than a regularization. Refused, not ignored.
+      // complete day rather than a regularization. Refused, not ignored. (OT
+      // on a complete day is an OT request, not this.)
       throw validationError(
-        `${date} already has an even number of punches - a punch cannot be added to a complete day`
+        `${date} has ${day.punch_count} punches - a punch cannot be added to a complete day`
+      );
+    }
+    if (!punch_time) {
+      throw validationError("punch_time is required when a punch is missing");
+    }
+    if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})?$/.test(String(punch_time).trim())) {
+      throw validationError("punch_time must be YYYY-MM-DD HH:MM:SS");
+    }
+    const punchTime = String(punch_time).trim();
+
+    // The proposed punch has to belong to the date being regularized, under
+    // the cutoff that applied on that date. A 00:30 OUT after a 10:00-22:00
+    // shift does; a 09:00 punch on the following morning does not, and
+    // approving it would silently credit a different day.
+    const resolvedDate = await attendanceCalculationUsecase.attendanceDateForPunchTime({
+      employee_id: forEmployeeId,
+      punch_time: punchTime,
+      near_date: date,
+    });
+    if (resolvedDate !== date) {
+      throw validationError(
+        `A punch at ${punchTime} belongs to attendance date ${
+          resolvedDate === null ? "none" : resolvedDate
+        } under this employee's shift and cutoff for ${date}, not to ${date}`
       );
     }
 
-    // The TYPE follows the corrected day, not the broken one: a missing punch
-    // that creates overtime is one REGULARIZATION_WITH_OT request on one
-    // chain, and the final approval on it makes both effective in one pass.
-    const carriesOt = candidateOtMinutes > 0;
+    // Run the SAME engine over raw punches plus the proposed one, to prove the
+    // corrected day is calculable. Nothing is stored, and NOTHING about its
+    // overtime is carried onto this request.
+    const proposedDay = await attendanceCalculationUsecase.calculateProposedDay({
+      employee_id: forEmployeeId,
+      attendance_date: date,
+      punch_time: punchTime,
+    });
+    if (!proposedDay || proposedDay.punch_count % 2 === 1) {
+      throw validationError(
+        `A punch at ${punchTime} still leaves ${date} with an odd number of punches, so it cannot be what was missing`
+      );
+    }
+    if (proposedDay.status === CALC_STATUS.REVIEW_REQUIRED) {
+      throw validationError(`A punch at ${punchTime} does not produce a calculable day for ${date}`);
+    }
 
     const identity = await resolveIdentity(forEmployeeId);
-    const chain = buildApprovalChain({
-      requester_class: identity.requester_class,
-      outlet_id: identity.outlet_id,
-      requester_is_store_manager: identity.is_store_manager,
-    });
-
-    if (chain.some((s) => s.approver_role === APPROVER_ROLE.STORE_MANAGER && s.outlet_id === null)) {
-      throw validationError(
-        "This employee has no outlet, so their Store Manager stage cannot be addressed"
-      );
-    }
+    const chain = chainFor(identity);
 
     const created = await attendanceRegularizationRepo.createRequest({
       request: {
-        request_type: requestTypeFor({
-          has_missing_punch: hasMissingPunch,
-          has_candidate_ot: carriesOt,
-        }),
+        request_type: REQUEST_TYPE.REGULARIZATION,
         requested_for_employee_id: forEmployeeId,
         requested_by_employee_id: Number(actor.employee_id),
         attendance_date: date,
         outlet_id: identity.outlet_id,
         requester_class: identity.requester_class,
         reason: reason.trim(),
-        candidate_ot_minutes: candidateOtMinutes,
-        auto_created: !!auto_created,
+        candidate_ot_minutes: 0,
+        auto_created: false,
       },
       chain,
-      punch: hasMissingPunch ? { punch_time: String(punch_time).trim() } : null,
+      punch: { punch_time: punchTime },
     });
 
     return {
       ...created,
+      request_type: REQUEST_TYPE.REGULARIZATION,
       attendance_date: date,
       chain,
-      candidate_ot_minutes: candidateOtMinutes,
       // What the day would look like if this were approved, so an approver can
-      // be shown the corrected day rather than the broken one.
+      // be shown the corrected day rather than the broken one. Its candidate
+      // OT is informational: it becomes claimable only after approval.
       proposed_day: proposedDay,
+      requester_class: identity.requester_class,
+      requester_class_is_default: identity.requester_class_is_default,
+    };
+  };
+
+  /**
+   * Raise an OT REQUEST for ONE date, by the employee, for themselves.
+   *
+   * The caller supplies a date and a reason and nothing else. The candidate
+   * OT is whatever the engine calculates for that date RIGHT NOW on the
+   * server - `candidate_ot_minutes` from a request body is not a field this
+   * function has - and it is stored on the request so the approver sees the
+   * figure that was claimed, then clamped again at final approval.
+   *
+   * Refused when: the day has no candidate OT; the day is not a complete,
+   * FINAL day (a missing punch is a regularization, not an OT claim); an OT
+   * request for the date already exists in any decided or open state (one
+   * claim per date - a fresh claim after rejection is not a policy this
+   * invents); the date is in the future or older than the backdate window.
+   */
+  const raiseOtRequest = async ({ actor, attendance_date, reason, today = null }) => {
+    const employeeId = Number(actor && actor.employee_id);
+    if (!Number.isInteger(employeeId) || employeeId <= 0) {
+      throw validationError("An employee identity is required to request OT");
+    }
+    const date = toDateOnly(attendance_date);
+    if (date === null) throw validationError("attendance_date must be a date as YYYY-MM-DD");
+    if (typeof reason !== "string" || reason.trim().length < 5) {
+      throw validationError("A reason of at least 5 characters is required");
+    }
+
+    const businessToday = istToday(today);
+    if (date > businessToday) throw validationError("OT cannot be requested for a future date");
+    if (date < addDays(businessToday, -MAX_BACKDATE_DAYS)) {
+      throw validationError(`OT can be requested for the last ${MAX_BACKDATE_DAYS} days only`);
+    }
+
+    // The employee must exist; the chain needs their identity anyway.
+    const identity = await resolveIdentity(employeeId);
+
+    // One claim per date, whatever its state. PENDING is also enforced by the
+    // database's unique open-request key, so a concurrent retry cannot slip a
+    // second one in between this check and the insert.
+    const existing = await attendanceRegularizationRepo.findRequestsForDates(employeeId, [date]);
+    const priorOt = (existing || []).find((r) => r.request_type === REQUEST_TYPE.OT);
+    if (priorOt) {
+      const state =
+        priorOt.status === REQUEST_STATUS.PENDING
+          ? "is already pending"
+          : priorOt.status === REQUEST_STATUS.APPROVED
+          ? "has already been approved"
+          : "has already been decided";
+      throw validationError(
+        `An OT request for ${date} ${state} (#${priorOt.attendance_approval_request_id})`
+      );
+    }
+    const openOther = (existing || []).find((r) => r.status === REQUEST_STATUS.PENDING);
+    if (openOther) {
+      throw validationError(
+        `${date} has an open attendance request (#${openOther.attendance_approval_request_id}); OT can be requested once it is decided`
+      );
+    }
+
+    // The server's own calculation, now. Never the caller's figure.
+    const [day] = await attendanceCalculationUsecase.calculateRange({
+      employee_id: employeeId,
+      from_date: date,
+      to_date: date,
+    });
+    if (!day || !day.shift_snapshot) {
+      throw validationError(`${date} has no work shift resolved, so there is no overtime to request`);
+    }
+    if (day.is_final !== true || day.status !== CALC_STATUS.FINAL || day.punch_count % 2 === 1) {
+      throw validationError(
+        `${date} is not a complete attendance day yet, so its overtime cannot be requested`
+      );
+    }
+    const candidate = Math.max(0, Math.trunc(Number(day.candidate_ot_minutes) || 0));
+    if (candidate <= 0) {
+      throw validationError(`${date} has no overtime calculated, so there is nothing to request`);
+    }
+
+    const chain = chainFor(identity);
+    const created = await attendanceRegularizationRepo.createRequest({
+      request: {
+        request_type: REQUEST_TYPE.OT,
+        requested_for_employee_id: employeeId,
+        requested_by_employee_id: employeeId,
+        attendance_date: date,
+        outlet_id: identity.outlet_id,
+        requester_class: identity.requester_class,
+        reason: reason.trim(),
+        candidate_ot_minutes: candidate,
+        auto_created: false,
+      },
+      chain,
+      punch: null,
+    });
+
+    return {
+      ...created,
+      request_type: REQUEST_TYPE.OT,
+      attendance_date: date,
+      candidate_ot_minutes: candidate,
+      approved_ot_minutes: 0,
+      chain,
       requester_class: identity.requester_class,
       requester_class_is_default: identity.requester_class_is_default,
     };
@@ -320,13 +415,35 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase) =>
     }));
     const next = advance(request, chain, decision);
 
-    // The approved figure is set on FINAL approval only, and is clamped to the
-    // candidate that was calculated when the request was raised: approving is
-    // a decision about earned overtime, not a way to create it.
-    const approvedOt =
-      next.status === REQUEST_STATUS.APPROVED
-        ? Math.max(0, Math.trunc(Number(request.candidate_ot_minutes) || 0))
-        : null;
+    const isOtRequest = request.request_type === REQUEST_TYPE.OT;
+    const carriesOt = isOtRequest || request.request_type === REQUEST_TYPE.REGULARIZATION_WITH_OT;
+
+    // The approved figure is set on FINAL approval only, and it can NEVER
+    // exceed the eligible OT. For an OT request that is the LOWER of what was
+    // claimed when it was raised and what the engine calculates for the date
+    // right now - if the candidate has since moved down (a shift edit, a
+    // recalculation), the approval follows it down rather than paying minutes
+    // the engine no longer finds. A plain regularization approves no OT at
+    // all; whatever the corrected day earns becomes available to claim.
+    let approvedOt = null;
+    if (next.status === REQUEST_STATUS.APPROVED && carriesOt) {
+      const claimed = Math.max(0, Math.trunc(Number(request.candidate_ot_minutes) || 0));
+      if (isOtRequest) {
+        const [currentDay] = await attendanceCalculationUsecase.calculateRange({
+          employee_id: request.requested_for_employee_id,
+          from_date: request.attendance_date,
+          to_date: request.attendance_date,
+        });
+        const eligible = currentDay
+          ? Math.max(0, Math.trunc(Number(currentDay.candidate_ot_minutes) || 0))
+          : 0;
+        approvedOt = Math.min(claimed, eligible);
+      } else {
+        approvedOt = claimed;
+      }
+    } else if (next.status === REQUEST_STATUS.APPROVED) {
+      approvedOt = 0;
+    }
 
     // Whatever the outcome, the date's stored calculation is about to be stale:
     // an approval adds a punch and unlocks OT, a rejection ends the pending
@@ -339,7 +456,10 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase) =>
       assume: {
         attendance_approval_request_id: Number(request_id),
         attendance_date: request.attendance_date,
+        request_type: request.request_type,
         status: next.status,
+        candidate_ot_minutes: request.candidate_ot_minutes,
+        reason: request.reason,
         approved_ot_minutes: approvedOt || 0,
         regularized_punch:
           next.status === REQUEST_STATUS.APPROVED && request.regularized_punch
@@ -363,21 +483,6 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase) =>
     });
     if (saved.code !== 200) return saved;
 
-    // AFTER the commit, and deliberately outside it: a rejection can leave a
-    // date whose overtime is real and unasked-for, and queueing it makes
-    // nothing payable, so it is not part of what has to move atomically.
-    // It is NOT allowed to fail the call: the decision is already committed,
-    // and reporting an error for work that succeeded would have an approver
-    // click again on a request that no longer needs it. The failure is
-    // returned rather than swallowed, so it is visible to whoever is looking.
-    let ot_queue = null;
-    if (correctedDay) {
-      ot_queue = await syncOtQueueSafely({
-        employee_id: Number(request.requested_for_employee_id),
-        days: [correctedDay],
-      });
-    }
-
     return {
       code: 200,
       attendance_approval_request_id: Number(request_id),
@@ -390,191 +495,86 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase) =>
       approved_ot_minutes: approvedOt,
       attendance_date: request.attendance_date,
       recalculated: correctedDay || null,
-      ot_queue,
+      // Attendance approval corrects attendance only. If the corrected day now
+      // earns overtime, it is merely AVAILABLE - the employee claims it.
+      ot_now_available:
+        !isOtRequest && correctedDay && correctedDay.ot_claim_state === "AVAILABLE"
+          ? Number(correctedDay.candidate_ot_minutes) || 0
+          : 0,
     };
   };
 
   /**
-   * Run the OT auto-queue without letting it fail the work that already
-   * succeeded.
+   * PAYROLL LOCK: close every OT claim in a period that is not finally
+   * approved.
    *
-   * Both callers - a committed approval and a stored recalculation - have
-   * already done the thing that mattered by the time this runs. Queueing an
-   * approval request makes nothing payable, so a failure here is a missing
-   * convenience rather than a corrupt state, and it must not be reported as a
-   * failure of the decision or the recalculation.
+   *   never requested   -> a REJECTED OT record is written for the date with
+   *                        closure NOT_REQUESTED_BEFORE_PAYROLL_LOCK, carrying
+   *                        the candidate the engine reported, so the date
+   *                        reads "Rejected – Not Requested Before Payroll
+   *                        Lock" afterwards and can no longer be claimed
+   *   pending           -> REJECTED with closure NOT_APPROVED_BEFORE_PAYROLL_LOCK,
+   *                        every outstanding step stamped SKIPPED
+   *   rejected          -> untouched
+   *   finally approved  -> untouched, and paid
    *
-   * The error is RETURNED, not swallowed: it appears on the response as
-   * `ot_queue.error` and is logged, so a date that should have been queued and
-   * was not is visible rather than quietly absent.
+   * `days` is the period as the payroll usecase has just calculated it, so
+   * the "available" dates are the engine's answer at the moment of lock and
+   * nothing is re-derived from a stale stored row. Idempotent: a date that
+   * already has any OT record - open, decided or closed - is left alone, so a
+   * second run writes nothing. NOTHING here marks candidate OT payable.
    */
-  const syncOtQueueSafely = async ({ employee_id, days }) => {
-    try {
-      return await otAutoQueue.syncDays({ employee_id, days });
-    } catch (err) {
-      logger.Log({
-        level: logger.LEVEL.ERROR,
-        component: "USECASE.ATTENDANCE_REGULARIZATION",
-        code: "USECASE.ATTENDANCE_REGULARIZATION.OT-AUTO-QUEUE",
-        description: err.toString(),
-        category: "",
-        ref: { employee_id, dates: (days || []).map((d) => d && d.attendance_date) },
-      });
-      return { created: [], superseded: [], skipped: [], error: err.message };
+  const closeOtForPayrollLock = async ({ employee_id, from_date, to_date, days, actor_employee_id = null }) => {
+    const employeeId = Number(employee_id);
+    if (!Number.isInteger(employeeId) || employeeId <= 0) {
+      throw validationError("employee_id is required");
     }
-  };
-
-  /* ------------------------------------------------ the OT auto-queue (#6) */
-
-  /**
-   * Whether a calculated day is one whose overtime may be queued at all.
-   *
-   * COMPLETE AND VALID, both. A day with an odd punch count is not complete -
-   * its overtime is a guess until the missing punch is supplied, and that is a
-   * regularization request, not an OT one. A day with no resolvable shift has
-   * no numbers to queue. Everything else with candidate overtime on it is a
-   * day somebody worked late on and has not been asked about.
-   */
-  const isQueueableOtDay = (day) =>
-    !!day &&
-    !!day.shift_snapshot &&
-    day.punch_count > 0 &&
-    day.punch_count % 2 === 0 &&
-    (day.status === CALC_STATUS.FINAL || day.status === CALC_STATUS.OT_PENDING);
-
-  /**
-   * Keep the approval queue in step with what the engine last calculated
-   * (review fix #6).
-   *
-   * IDEMPOTENT, which is the whole point. A recalculation that runs twice must
-   * not raise two requests for the same date, so every date is checked against
-   * the requests that already exist for it - PENDING, APPROVED or REJECTED
-   * alike - and only a date with none of them gets one. A retry therefore
-   * changes nothing.
-   *
-   * SAFE WHEN THE OVERTIME GOES AWAY. If a later recalculation finds no
-   * candidate OT on a date whose only request is one this queue raised itself
-   * and nobody has decided yet, that request is CANCELLED with its steps
-   * stamped SKIPPED - superseded, auditably, rather than left sitting in
-   * somebody's queue as payable overtime that no longer exists.
-   *
-   * A DATE WITH A MISSING PUNCH IS NOT THIS QUEUE'S BUSINESS. Its overtime
-   * rides on the single combined REGULARIZATION_WITH_OT request that the
-   * missing punch raises, which carries the OT the proposed punch creates.
-   */
-  /**
-   * Raise the OT request for a day the caller has ALREADY calculated.
-   *
-   * It takes the day rather than re-deriving it, deliberately. `raiseRequest`
-   * recalculates the date from the database on purpose - a person raising a
-   * request must be held to what the engine says right now, not to what a
-   * screen believed a while ago - but the auto-queue's caller has just
-   * calculated that very day and is the reason it is being asked about. Going
-   * back to the database would do the same work twice and, worse, would read a
-   * state that the caller's own in-flight decision has not finished producing.
-   *
-   * The employee is both the subject and the nominal requester of their own
-   * routine overtime: the chain is theirs, and `listPendingFor` already
-   * excludes a requester from their own queue, so nobody is ever shown their
-   * own automatic request to decide.
-   */
-  const createOtRequestForDay = async ({ employee_id, day }) => {
-    const identity = await resolveIdentity(Number(employee_id));
-    const chain = buildApprovalChain({
-      requester_class: identity.requester_class,
-      outlet_id: identity.outlet_id,
-      requester_is_store_manager: identity.is_store_manager,
-    });
-
-    if (chain.some((s) => s.approver_role === APPROVER_ROLE.STORE_MANAGER && s.outlet_id === null)) {
-      throw validationError(
-        "This employee has no outlet, so their Store Manager stage cannot be addressed"
-      );
+    const from = toDateOnly(from_date);
+    const to = toDateOnly(to_date);
+    if (from === null || to === null || from > to) {
+      throw validationError("from_date and to_date must be dates as YYYY-MM-DD");
     }
 
-    const candidate = Math.max(0, Math.trunc(Number(day.candidate_ot_minutes) || 0));
-    const created = await attendanceRegularizationRepo.createRequest({
-      request: {
-        request_type: REQUEST_TYPE.OT,
-        requested_for_employee_id: Number(employee_id),
-        requested_by_employee_id: Number(employee_id),
+    const unrequested = (days || [])
+      .filter(
+        (day) =>
+          day &&
+          day.attendance_date >= from &&
+          day.attendance_date <= to &&
+          day.ot_claim_state === "AVAILABLE" &&
+          Number(day.candidate_ot_minutes) > 0
+      )
+      .map((day) => ({
         attendance_date: day.attendance_date,
-        outlet_id: identity.outlet_id,
-        requester_class: identity.requester_class,
-        reason: `Automatic: ${candidate} minutes of overtime calculated for ${day.attendance_date}`,
-        candidate_ot_minutes: candidate,
-        auto_created: true,
-      },
-      chain,
-      punch: null,
+        candidate_ot_minutes: Math.max(0, Math.trunc(Number(day.candidate_ot_minutes) || 0)),
+      }));
+
+    let identity = null;
+    if (unrequested.length > 0) identity = await resolveIdentity(employeeId);
+
+    const closed = await attendanceRegularizationRepo.closeOtAtPayrollLock({
+      employee_id: employeeId,
+      from_date: from,
+      to_date: to,
+      pending_closure: OT_CLOSURE.NOT_APPROVED_BEFORE_PAYROLL_LOCK,
+      unrequested_closure: OT_CLOSURE.NOT_REQUESTED_BEFORE_PAYROLL_LOCK,
+      unrequested: unrequested.map((u) => ({
+        ...u,
+        outlet_id: identity ? identity.outlet_id : null,
+        requester_class: identity ? identity.requester_class : REQUESTER_CLASS.STORE_EMPLOYEE,
+        closed_by: actor_employee_id === undefined ? null : actor_employee_id,
+      })),
     });
 
-    return { ...created, attendance_date: day.attendance_date, candidate_ot_minutes: candidate, chain };
-  };
-
-  const otAutoQueue = {
-    syncDays: async ({ employee_id, days }) => {
-      const candidates = (days || []).filter((day) => day && day.attendance_date);
-      if (candidates.length === 0) return { created: [], superseded: [], skipped: [] };
-
-      const dates = candidates.map((day) => day.attendance_date);
-      const existing = await attendanceRegularizationRepo.findRequestsForDates(
-        Number(employee_id),
-        dates
-      );
-      const byDate = new Map();
-      (existing || []).forEach((row) => byDate.set(toDateOnly(row.attendance_date), row));
-
-      const created = [];
-      const superseded = [];
-      const skipped = [];
-
-      for (const day of candidates) {
-        const date = day.attendance_date;
-        const request = byDate.get(date) || null;
-        const wantsOt = isQueueableOtDay(day) && Number(day.candidate_ot_minutes || 0) > 0;
-
-        if (request && !wantsOt) {
-          // The overtime has gone. Only THIS queue's own undecided request may
-          // be withdrawn; anything a human raised or decided is left alone.
-          if (
-            Number(request.auto_created) === 1 &&
-            request.status === REQUEST_STATUS.PENDING &&
-            request.request_type === REQUEST_TYPE.OT
-          ) {
-            /* eslint-disable no-await-in-loop */
-            const cancelled = await attendanceRegularizationRepo.cancelAutoOtRequest({
-              requestId: Number(request.attendance_approval_request_id),
-              reason: `Superseded: a recalculation on ${date} found no overtime`,
-            });
-            /* eslint-enable no-await-in-loop */
-            if (cancelled.code === 200) {
-              superseded.push({ attendance_date: date, ...cancelled });
-              continue;
-            }
-          }
-          skipped.push({ attendance_date: date, why: "EXISTING_REQUEST" });
-          continue;
-        }
-
-        if (!wantsOt) continue;
-        if (request) {
-          skipped.push({ attendance_date: date, why: "EXISTING_REQUEST" });
-          continue;
-        }
-
-        /* eslint-disable no-await-in-loop */
-        const raised = await createOtRequestForDay({ employee_id: Number(employee_id), day });
-        /* eslint-enable no-await-in-loop */
-        created.push({
-          attendance_date: date,
-          attendance_approval_request_id: raised.attendance_approval_request_id,
-          candidate_ot_minutes: raised.candidate_ot_minutes,
-        });
-      }
-
-      return { created, superseded, skipped };
-    },
+    return {
+      employee_id: employeeId,
+      from_date: from,
+      to_date: to,
+      closed_unrequested: closed.closed_unrequested || 0,
+      rejected_pending: closed.rejected_pending || 0,
+      approved_preserved: (days || []).filter((d) => d && d.ot_claim_state === "APPROVED").length,
+      unrequested_dates: unrequested.map((u) => u.attendance_date),
+    };
   };
 
   /** The queue: requests whose current stage this actor could decide. */
@@ -610,12 +610,11 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase) =>
     REQUEST_STATUS,
     STEP_DECISION,
     CALC_STATUS,
+    OT_CLOSURE,
     resolveIdentity,
     raiseRequest,
-    createOtRequestForDay,
-    otAutoQueue,
-    syncOtQueueSafely,
-    isQueueableOtDay,
+    raiseOtRequest,
+    closeOtForPayrollLock,
     decide,
     listPending,
     listForEmployee,

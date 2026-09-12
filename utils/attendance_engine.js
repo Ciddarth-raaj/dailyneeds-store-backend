@@ -609,12 +609,17 @@ function calculateAttendanceDay(input = {}) {
   if (regularization_pending) {
     base.status = CALC_STATUS.REGULARIZATION_PENDING;
     base.is_final = false;
-  } else if (base.candidate_ot_minutes > 0 && base.approved_ot_minutes < base.candidate_ot_minutes) {
-    // The date's attendance is settled; only its OT is still waiting. Payroll
-    // takes the day and the shortage and pays zero OT.
-    base.status = CALC_STATUS.OT_PENDING;
-    base.is_final = true;
   } else {
+    // ATTENDANCE STATE AND OT CLAIM STATE ARE SEPARATE. A complete, valid day
+    // is FINAL whether or not its candidate overtime has been requested,
+    // approved or rejected: the day and its shortage go to payroll either
+    // way, and only finally approved OT (`approved_ot_minutes`, supplied by
+    // the caller from the settled OT request) is paid. The OT claim itself -
+    // available / requested / approved / rejected / closed at payroll lock -
+    // is derived beside the day by the calculation usecase, not encoded in
+    // this status. `CALC_STATUS.OT_PENDING` remains declared because stored
+    // rows and the database enum carry it, but the engine no longer produces
+    // it.
     base.status = CALC_STATUS.FINAL;
     base.is_final = true;
   }

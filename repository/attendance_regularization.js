@@ -151,15 +151,9 @@ class AttendanceRegularizationRepository {
   }
 
   /**
-   * Every request for these dates that the OT auto-queue must not duplicate
-   * (review fix #6).
-   *
-   * PENDING, APPROVED and REJECTED all count: a date somebody has already
-   * decided must not have a fresh request raised on it by a recalculation,
-   * and a rejection in particular must not be re-asked every time the engine
-   * runs. CANCELLED does not count, because that is the state the queue itself
-   * uses when it supersedes its own request, and a date whose OT later comes
-   * back is a date that genuinely needs asking about again.
+   * Every request on these dates, in any state but CANCELLED: what
+   * `raiseOtRequest` checks so that one date carries one OT claim, open or
+   * decided.
    */
   async findRequestsForDates(employeeId, dates) {
     if (!Array.isArray(dates) || dates.length === 0) return [];
@@ -178,51 +172,123 @@ class AttendanceRegularizationRepository {
   }
 
   /**
-   * Supersede an OT request the queue raised itself, because a recalculation
-   * has since found there is no overtime on that date after all.
+   * PAYROLL LOCK, the OT writes, in ONE transaction.
    *
-   * CANCELLED rather than deleted, and every outstanding step is stamped
-   * SKIPPED with the reason, so the audit trail still shows that the system
-   * asked and then withdrew the question. The guards mean a request a human
-   * has already started deciding - `auto_created = 0`, or a status that is no
-   * longer PENDING - is never touched by this.
+   *   1. Every PENDING OT request for the employee in the period becomes
+   *      REJECTED with the pending closure reason, approved_ot_minutes 0 and
+   *      finalization SETTLED (nothing is recalculated: a rejection pays
+   *      nothing and the stored day already pays nothing), and each of its
+   *      outstanding steps is stamped SKIPPED with the closure label.
+   *   2. For every date in `unrequested` that has NO OT record at all (any
+   *      status but CANCELLED), a REJECTED OT record is INSERTed with the
+   *      unrequested closure reason, the candidate the engine reported, and
+   *      one SKIPPED step, so the date reads as closed and a later request
+   *      for it is refused by the one-claim-per-date rule.
+   *
+   * Nothing APPROVED or already REJECTED is touched. Idempotent by the guard
+   * in 2 and the status filter in 1.
    */
-  async cancelAutoOtRequest({ requestId, reason }) {
+  async closeOtAtPayrollLock({
+    employee_id,
+    from_date,
+    to_date,
+    pending_closure,
+    unrequested_closure,
+    unrequested,
+  }) {
     const connection = await getConnectionAsync(this.db);
     try {
       await beginTransactionAsync(connection);
 
-      const result = await queryAsync(
+      const pendingRows = await queryAsync(
         connection,
-        `UPDATE attendance_approval_request
-            SET status = 'CANCELLED',
-                approved_ot_minutes = NULL,
-                finalization_state = 'NOT_REQUIRED',
-                decided_at = CURRENT_TIMESTAMP(3)
-          WHERE attendance_approval_request_id = ?
+        `SELECT attendance_approval_request_id
+           FROM attendance_approval_request
+          WHERE requested_for_employee_id = ?
+            AND attendance_date BETWEEN ? AND ?
+            AND request_type = 'OT'
             AND status = 'PENDING'
-            AND auto_created = 1`,
-        [requestId]
+          FOR UPDATE`,
+        [employee_id, from_date, to_date]
       );
-      if (!result || Number(result.affectedRows) !== 1) {
-        await rollbackAsync(connection);
-        return { code: 409, msg: "That request is no longer an open automatic OT request" };
+      const pendingIds = (pendingRows || []).map((r) => Number(r.attendance_approval_request_id));
+
+      if (pendingIds.length > 0) {
+        await queryAsync(
+          connection,
+          `UPDATE attendance_approval_request
+              SET status = 'REJECTED',
+                  approved_ot_minutes = 0,
+                  finalization_state = 'SETTLED',
+                  closure_reason = ?,
+                  decided_at = CURRENT_TIMESTAMP(3)
+            WHERE attendance_approval_request_id IN (?)
+              AND status = 'PENDING'`,
+          [pending_closure.code, pendingIds]
+        );
+        await queryAsync(
+          connection,
+          `UPDATE attendance_approval_step
+              SET decision = 'SKIPPED', remarks = ?, decided_at = CURRENT_TIMESTAMP(3)
+            WHERE attendance_approval_request_id IN (?)
+              AND decision = 'PENDING'`,
+          [pending_closure.label, pendingIds]
+        );
       }
 
-      await queryAsync(
-        connection,
-        `UPDATE attendance_approval_step
-            SET decision = 'SKIPPED', remarks = ?, decided_at = CURRENT_TIMESTAMP(3)
-          WHERE attendance_approval_request_id = ?
-            AND decision = 'PENDING'`,
-        [reason || "Superseded: recalculation found no overtime on this date", requestId]
-      );
+      let closedUnrequested = 0;
+      for (const u of unrequested || []) {
+        /* eslint-disable no-await-in-loop */
+        const existing = await queryAsync(
+          connection,
+          `SELECT attendance_approval_request_id
+             FROM attendance_approval_request
+            WHERE requested_for_employee_id = ?
+              AND attendance_date = ?
+              AND request_type = 'OT'
+              AND status <> 'CANCELLED'
+            LIMIT 1`,
+          [employee_id, u.attendance_date]
+        );
+        if (existing && existing.length > 0) continue;
+
+        const inserted = await queryAsync(
+          connection,
+          `INSERT INTO attendance_approval_request
+             (request_type, requested_for_employee_id, requested_by_employee_id,
+              attendance_date, outlet_id, requester_class, reason,
+              candidate_ot_minutes, approved_ot_minutes, auto_created,
+              status, current_stage_no, total_stages, finalization_state,
+              closure_reason, decided_at)
+           VALUES ('OT', ?, ?, ?, ?, ?, ?, ?, 0, 1, 'REJECTED', 1, 1, 'SETTLED', ?, CURRENT_TIMESTAMP(3))`,
+          [
+            employee_id,
+            u.closed_by === undefined ? null : u.closed_by,
+            u.attendance_date,
+            u.outlet_id === undefined ? null : u.outlet_id,
+            u.requester_class,
+            unrequested_closure.label,
+            u.candidate_ot_minutes,
+            unrequested_closure.code,
+          ]
+        );
+        await queryAsync(
+          connection,
+          `INSERT INTO attendance_approval_step
+             (attendance_approval_request_id, stage_no, approver_role, outlet_id,
+              decision, remarks, decided_at)
+           VALUES (?, 1, 'HR', NULL, 'SKIPPED', ?, CURRENT_TIMESTAMP(3))`,
+          [inserted.insertId, unrequested_closure.label]
+        );
+        /* eslint-enable no-await-in-loop */
+        closedUnrequested += 1;
+      }
 
       await commitAsync(connection);
-      return { code: 200, attendance_approval_request_id: Number(requestId) };
+      return { rejected_pending: pendingIds.length, closed_unrequested: closedUnrequested };
     } catch (err) {
       await rollbackAsync(connection);
-      this._log("CANCEL-AUTO-OT-REQUEST", err);
+      this._log("CLOSE-OT-AT-PAYROLL-LOCK", err);
       throw err;
     } finally {
       connection.release();

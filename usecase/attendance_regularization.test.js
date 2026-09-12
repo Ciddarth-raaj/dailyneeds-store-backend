@@ -116,7 +116,7 @@ describe("only a missing punch may be regularized", () => {
         attendance_date: "2026-09-14",
         reason: "Forgot to punch out",
       }),
-      /nothing to approve/
+      /cannot be added to a complete day/
     );
   });
 
@@ -218,7 +218,7 @@ describe("one date, one request, one pass", () => {
    * has to carry what the PROPOSED punch would produce, which is what the
    * proposed-day calculation answers.
    */
-  it("a missing punch that also earns OT raises one combined request, carrying the OT the proposed punch creates", async () => {
+  it("a missing punch that would also earn OT raises a plain REGULARIZATION carrying NO OT", async () => {
     const { usecase, repo } = fakes({
       day: day({ punch_count: 3, candidate_ot_minutes: 0 }),
       proposedDay: day({ punch_count: 4, candidate_ot_minutes: 150, is_final: true }),
@@ -236,15 +236,15 @@ describe("one date, one request, one pass", () => {
     });
 
     const [created] = repo.calls.created;
-    assert.equal(created.request.request_type, REQUEST_TYPE.REGULARIZATION_WITH_OT);
-    assert.equal(
-      created.request.candidate_ot_minutes,
-      150,
-      "the OT the proposed punch produces, not the incomplete day's zero"
-    );
-    assert.equal(created.chain.length, 3, "one chain, not two");
-    assert.equal(result.candidate_ot_minutes, 150);
+    // Attendance correction only. The OT the corrected day earns is claimed
+    // separately, by the employee, once the day is approved and recalculated.
+    assert.equal(created.request.request_type, REQUEST_TYPE.REGULARIZATION);
+    assert.notEqual(created.request.request_type, REQUEST_TYPE.REGULARIZATION_WITH_OT);
+    assert.equal(created.request.candidate_ot_minutes, 0);
+    assert.equal(created.chain.length, 3, "the attendance approval chain");
+    assert.equal(result.request_type, REQUEST_TYPE.REGULARIZATION);
     assert.equal(result.proposed_day.punch_count, 4);
+    assert.equal(result.proposed_day.candidate_ot_minutes, 150, "informational only");
 
     // The proposed punch was run through the engine, not assumed.
     assert.equal(repo.calls.proposed.length, 1);
@@ -302,23 +302,18 @@ describe("one date, one request, one pass", () => {
     assert.equal(created.request.candidate_ot_minutes, 0);
   });
 
-  it("OT with no missing punch walks the same chain", async () => {
+  it("OT with no missing punch is NOT a regularization: the path refuses it", async () => {
     const { usecase, repo } = fakes({ day: day({ punch_count: 4, candidate_ot_minutes: 30 }) });
-    await usecase.raiseRequest({
-      actor,
-      requested_for_employee_id: 100,
-      attendance_date: "2026-09-14",
-      reason: "Stayed late for the stock count",
-    });
-
-    const [created] = repo.calls.created;
-    assert.equal(created.request.request_type, REQUEST_TYPE.OT);
-    assert.deepEqual(created.chain.map((s) => s.approver_role), [
-      APPROVER_ROLE.STORE_MANAGER,
-      APPROVER_ROLE.OPERATIONS_MANAGER,
-      APPROVER_ROLE.HR,
-    ]);
-    assert.equal(created.punch, null);
+    await assert.rejects(
+      usecase.raiseRequest({
+        actor,
+        requested_for_employee_id: 100,
+        attendance_date: "2026-09-14",
+        reason: "Stayed late for the stock count",
+      }),
+      /cannot be added to a complete day/
+    );
+    assert.equal(repo.calls.created.length, 0);
   });
 });
 

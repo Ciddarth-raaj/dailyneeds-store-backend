@@ -48,6 +48,7 @@ describe("the endpoints and their guards", () => {
       [
         "GET /attendance/regularization/:request_id",
         "GET /attendance/regularization/pending",
+        "POST /attendance/me/ot-request",
         "POST /attendance/me/regularization",
         "POST /attendance/regularization",
         "POST /attendance/regularization/:request_id/decision",
@@ -55,8 +56,9 @@ describe("the endpoints and their guards", () => {
     );
   });
 
-  it("the self raise needs an employee identity and no permission key; the HR raise is unchanged", () => {
+  it("the self raises need an employee identity and no permission key; the HR raise is unchanged", () => {
     assert.deepEqual(find("POST", "/attendance/me/regularization").guard, { mode: "self", keys: [] });
+    assert.deepEqual(find("POST", "/attendance/me/ot-request").guard, { mode: "self", keys: [] });
     assert.deepEqual(find("POST", "/attendance/regularization").guard, {
       mode: "any",
       keys: [P.RAISE_ATTENDANCE_REGULARIZATION],

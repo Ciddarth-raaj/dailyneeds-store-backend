@@ -141,7 +141,7 @@ function fakeCalculationRepo(state = {}) {
 }
 
 function fakeRegularizationRepo(state = {}) {
-  const store = { requests: [], decided: [], cancelled: [] };
+  const store = { requests: [], decided: [], closed: [] };
   let nextId = 900;
   return {
     store,
@@ -178,14 +178,53 @@ function fakeRegularizationRepo(state = {}) {
       });
       return { attendance_approval_request_id: id, total_stages: chain.length };
     },
-    cancelAutoOtRequest: async ({ requestId, reason }) => {
-      const row = store.requests.find((r) => r.attendance_approval_request_id === requestId);
-      if (!row || row.status !== REQUEST_STATUS.PENDING || row.auto_created !== 1) {
-        return { code: 409, msg: "not an open automatic OT request" };
-      }
-      row.status = REQUEST_STATUS.CANCELLED;
-      store.cancelled.push({ requestId, reason });
-      return { code: 200, attendance_approval_request_id: requestId };
+    // The payroll lock's writes, mirrored on the store exactly as the real
+    // transaction performs them.
+    closeOtAtPayrollLock: async ({ employee_id, from_date, to_date, pending_closure, unrequested_closure, unrequested }) => {
+      let rejected_pending = 0;
+      store.requests.forEach((r) => {
+        if (
+          r.request_type === REQUEST_TYPE.OT &&
+          r.status === REQUEST_STATUS.PENDING &&
+          r.attendance_date >= from_date &&
+          r.attendance_date <= to_date
+        ) {
+          r.status = REQUEST_STATUS.REJECTED;
+          r.approved_ot_minutes = 0;
+          r.finalization_state = "SETTLED";
+          r.closure_reason = pending_closure.code;
+          rejected_pending += 1;
+        }
+      });
+      let closed_unrequested = 0;
+      (unrequested || []).forEach((u) => {
+        const exists = store.requests.some(
+          (r) =>
+            r.request_type === REQUEST_TYPE.OT &&
+            r.status !== REQUEST_STATUS.CANCELLED &&
+            r.attendance_date === u.attendance_date
+        );
+        if (exists) return;
+        const id = nextId;
+        nextId += 1;
+        store.requests.push({
+          attendance_approval_request_id: id,
+          attendance_date: u.attendance_date,
+          request_type: REQUEST_TYPE.OT,
+          candidate_ot_minutes: u.candidate_ot_minutes,
+          approved_ot_minutes: 0,
+          auto_created: 1,
+          reason: unrequested_closure.label,
+          status: REQUEST_STATUS.REJECTED,
+          finalization_state: "SETTLED",
+          closure_reason: unrequested_closure.code,
+          punch: null,
+          chain: [],
+        });
+        closed_unrequested += 1;
+      });
+      store.closed.push({ employee_id, from_date, to_date, rejected_pending, closed_unrequested });
+      return { rejected_pending, closed_unrequested };
     },
     getRequest: async () => state.request || null,
     decideStage: async (args) => {
@@ -196,7 +235,12 @@ function fakeRegularizationRepo(state = {}) {
       const row = store.requests.find(
         (r) => r.attendance_approval_request_id === args.requestId
       );
-      if (row) row.status = args.next.status;
+      if (row) {
+        row.status = args.next.status;
+        row.approved_ot_minutes = args.next.approved_ot_minutes;
+        row.finalization_state =
+          args.next.status === REQUEST_STATUS.PENDING ? "NOT_REQUIRED" : "SETTLED";
+      }
       // The REAL repository writes the calculated day inside this very
       // transaction, so the fake fails the same way the real one would: the
       // decision does not happen if its day cannot be stored.
@@ -232,11 +276,36 @@ function wire(calcState = {}, regState = {}) {
       chain: regState.request.steps,
     });
   }
+  // The calculation reads approval state from the SAME store the
+  // regularization usecase writes, so a request raised or decided in one
+  // step is what the next calculation sees - as the two tables are in MySQL.
+  calculationRepo.getApprovalStateByDate = async (_employeeId, from, to) => [
+    ...(calcState.approvals || []),
+    ...regularizationRepo.store.requests
+      .filter(
+        (r) =>
+          r.status !== REQUEST_STATUS.CANCELLED &&
+          r.attendance_date >= from &&
+          r.attendance_date <= to
+      )
+      .map((r) => ({
+        attendance_approval_request_id: r.attendance_approval_request_id,
+        attendance_date: r.attendance_date,
+        request_type: r.request_type,
+        status: r.status,
+        candidate_ot_minutes: r.candidate_ot_minutes,
+        approved_ot_minutes: r.approved_ot_minutes === undefined ? null : r.approved_ot_minutes,
+        finalization_state: r.finalization_state || "NOT_REQUIRED",
+        auto_created: r.auto_created,
+        reason: r.reason,
+        closure_reason: r.closure_reason || null,
+      })),
+  ];
   const calculation = buildCalculation(calculationRepo);
   const regularization = buildRegularization(regularizationRepo, calculation);
-  // Exactly as `server.js` wires it: the whole usecase, so the calculation
-  // reaches the queue through `syncOtQueueSafely` rather than around it.
-  calculation.setOtApprovalQueue(regularization);
+  // Exactly as `server.js` wires it: the payroll lock reaches the OT closer
+  // through the calculation usecase.
+  calculation.setOtRequestService(regularization);
   return { calculationRepo, regularizationRepo, calculation, regularization };
 }
 
@@ -267,7 +336,8 @@ describe("review fix #1 - recalculation re-dates raw punches through the histori
     assert.equal(shiftDate.span_minutes, 870, "10:00 to 00:30 is 14h30");
     assert.equal(shiftDate.worked_minutes, 810);
     assert.equal(shiftDate.candidate_ot_minutes, 150);
-    assert.equal(shiftDate.status, CALC_STATUS.OT_PENDING);
+    assert.equal(shiftDate.status, CALC_STATUS.FINAL);
+    assert.equal(shiftDate.ot_claim_state, "AVAILABLE");
 
     assert.equal(nextDate.attendance_date, "2026-09-15");
     assert.equal(nextDate.punch_count, 0, "the 00:30 punch is not also counted here");
@@ -500,16 +570,18 @@ describe("review fix #2 - a Work Shift edit cannot move a settled historical dat
 
 /* ================================================================== #3 === */
 
-describe("review fix #3 - a missing-punch request carries the OT its proposed punch creates", () => {
+describe("finalized OT flow - a missing-punch request carries NO overtime", () => {
   /**
    * A REAL odd punch set: one IN at 10:00 and nothing else. The proposed OUT
    * is 00:30 the next morning, which under the historical cutoff belongs to
-   * the shift date and produces 150 minutes of OT. No candidate OT is mocked
-   * anywhere - the incomplete day genuinely reports zero.
+   * the shift date and would produce 150 minutes of OT. That OT is NOT put on
+   * the regularization request: attendance approval corrects attendance, and
+   * the overtime becomes claimable - separately - once the corrected day is
+   * recalculated.
    */
   const oddDay = () => ({ rawPunches: [punch(1, "2026-09-14 10:00:00")] });
 
-  it("the incomplete day really does report zero overtime", async () => {
+  it("the incomplete day really does report zero overtime, and offers none", async () => {
     const { calculation } = wire(oddDay());
     const [day] = await calculation.calculateRange({
       employee_id: EMPLOYEE,
@@ -519,9 +591,10 @@ describe("review fix #3 - a missing-punch request carries the OT its proposed pu
     assert.equal(day.punch_count, 1);
     assert.equal(day.candidate_ot_minutes, 0, "an odd punch count leaves the engine before OT");
     assert.equal(day.status, CALC_STATUS.REVIEW_REQUIRED);
+    assert.equal(day.ot_claim_state, "NONE");
   });
 
-  it("the proposed corrected day is what the OT is taken from", async () => {
+  it("the proposed corrected day is still calculated, to prove the punch is valid", async () => {
     const { calculation } = wire(oddDay());
     const proposed = await calculation.calculateProposedDay({
       employee_id: EMPLOYEE,
@@ -533,7 +606,7 @@ describe("review fix #3 - a missing-punch request carries the OT its proposed pu
     assert.equal(proposed.candidate_ot_minutes, 150);
   });
 
-  it("and the request that is raised carries exactly that figure", async () => {
+  it("the request that is raised is a plain REGULARIZATION with the punch, the reason and NO OT", async () => {
     const { regularization, regularizationRepo } = wire(oddDay());
     const raised = await regularization.raiseRequest({
       actor: { employee_id: EMPLOYEE, user_type: 1 },
@@ -543,11 +616,14 @@ describe("review fix #3 - a missing-punch request carries the OT its proposed pu
       punch_time: "2026-09-15 00:30:00",
     });
 
-    assert.equal(raised.candidate_ot_minutes, 150);
+    assert.equal(raised.request_type, REQUEST_TYPE.REGULARIZATION);
+    assert.equal(raised.candidate_ot_minutes, undefined);
     const [stored] = regularizationRepo.store.requests;
-    assert.equal(stored.request_type, REQUEST_TYPE.REGULARIZATION_WITH_OT);
-    assert.equal(stored.candidate_ot_minutes, 150);
-    assert.equal(stored.chain.length, 3, "one combined request on one chain");
+    assert.equal(stored.request_type, REQUEST_TYPE.REGULARIZATION);
+    assert.notEqual(stored.request_type, REQUEST_TYPE.REGULARIZATION_WITH_OT);
+    assert.equal(stored.candidate_ot_minutes, 0, "no OT rides on an attendance correction");
+    assert.equal(stored.reason, "Terminal was offline when I finished the late shift");
+    assert.equal(stored.chain.length, 3, "the attendance approval chain");
     assert.equal(stored.punch.punch_time, "2026-09-15 00:30:00");
   });
 
@@ -569,7 +645,9 @@ describe("review fix #3 - a missing-punch request carries the OT its proposed pu
       to_date: "2026-09-14",
     });
     assert.equal(day.punch_count, 1, "the day is still the incomplete one");
+    assert.equal(day.status, CALC_STATUS.REGULARIZATION_PENDING);
     assert.equal(day.candidate_ot_minutes, 0);
+    assert.equal(day.ot_claim_state, "NONE");
   });
 
   it("refuses a proposed punch that resolves to a different attendance date", async () => {
@@ -587,26 +665,94 @@ describe("review fix #3 - a missing-punch request carries the OT its proposed pu
     );
   });
 
-  it("refuses a proposed punch that leaves the punch set still impossible", async () => {
-    const { regularization } = wire({
-      rawPunches: [
-        punch(1, "2026-09-14 10:00:00"),
-        punch(2, "2026-09-14 13:00:00"),
-        punch(3, "2026-09-14 14:00:00"),
-      ],
+  it("refuses OT-only use of the regularization path: a complete day cannot be regularized", async () => {
+    const { regularization, regularizationRepo } = wire({
+      rawPunches: [punch(1, "2026-09-14 10:00:00"), punch(2, "2026-09-15 00:30:00")],
     });
-    // A fourth punch makes it even, so this one IS accepted - and a fifth
-    // would not be. Prove the accepted case rather than asserting a rejection
-    // the engine would never reach.
+    await assert.rejects(
+      regularization.raiseRequest({
+        actor: { employee_id: EMPLOYEE, user_type: 1 },
+        requested_for_employee_id: EMPLOYEE,
+        attendance_date: "2026-09-14",
+        reason: "Stayed late to finish the stock count",
+      }),
+      /cannot be added to a complete day/
+    );
+    assert.equal(regularizationRepo.store.requests.length, 0);
+  });
+
+  it("after final attendance approval and recalculation, the OT is merely AVAILABLE", async () => {
+    const { regularization, calculation, regularizationRepo } = wire(oddDay(), {
+      roles: { 7: APPROVER_ROLE.HR },
+    });
     const raised = await regularization.raiseRequest({
       actor: { employee_id: EMPLOYEE, user_type: 1 },
       requested_for_employee_id: EMPLOYEE,
       attendance_date: "2026-09-14",
-      reason: "Missed the final punch out of the day",
-      punch_time: "2026-09-14 22:00:00",
+      reason: "Terminal was offline when I finished the late shift",
+      punch_time: "2026-09-15 00:30:00",
     });
-    assert.equal(raised.proposed_day.punch_count, 4);
-    assert.equal(raised.candidate_ot_minutes, 0, "the whole break was taken: no OT");
+    // Put the request at its last stage with the punch attached, as the
+    // repository's getRequest would return it.
+    const row = regularizationRepo.store.requests[0];
+    regularizationRepo.getRequest = async () => ({
+      ...row,
+      requested_for_employee_id: EMPLOYEE,
+      requested_by_employee_id: EMPLOYEE,
+      outlet_id: 3,
+      requester_class: "STORE_EMPLOYEE",
+      current_stage_no: 3,
+      total_stages: 3,
+      regularized_punch: { attendance_regularized_punch_id: 77, punch_time: "2026-09-15 00:30:00" },
+      steps: [
+        { stage_no: 1, approver_role: APPROVER_ROLE.STORE_MANAGER, outlet_id: 3, decision: "APPROVED" },
+        { stage_no: 2, approver_role: APPROVER_ROLE.OPERATIONS_MANAGER, outlet_id: null, decision: "APPROVED" },
+        { stage_no: 3, approver_role: APPROVER_ROLE.HR, outlet_id: null, decision: "PENDING" },
+      ],
+    });
+
+    const result = await regularization.decide({
+      actor: { employee_id: 7, user_type: 1 },
+      request_id: raised.attendance_approval_request_id,
+      decision: STEP_DECISION.APPROVED,
+    });
+
+    assert.equal(result.status, REQUEST_STATUS.APPROVED);
+    assert.equal(result.approved_ot_minutes, 0, "attendance approval approves no OT");
+    assert.equal(result.ot_now_available, 150, "and says the corrected day now offers it");
+    const [decided] = regularizationRepo.store.decided;
+    assert.equal(decided.calculations[0].punch_count, 2);
+    assert.equal(decided.calculations[0].approved_ot_minutes, 0);
+    assert.equal(decided.calculations[0].status, CALC_STATUS.FINAL);
+
+    // No OT request was created by the approval; it is the employee's to raise.
+    assert.equal(regularizationRepo.store.requests.length, 1);
+    assert.equal(regularizationRepo.store.requests[0].request_type, REQUEST_TYPE.REGULARIZATION);
+
+    // The regularized punch is now effective for the calculation.
+    regularizationRepo.store.requests[0].regularized_punch = null;
+    const { calculation: fresh } = wire(
+      {
+        ...oddDay(),
+        regularized: [{ punch_id: 77, attendance_date: "2026-09-14", io_time: "2026-09-15 00:30:00" }],
+        approvals: [{
+          attendance_approval_request_id: raised.attendance_approval_request_id,
+          attendance_date: "2026-09-14",
+          request_type: REQUEST_TYPE.REGULARIZATION,
+          status: REQUEST_STATUS.APPROVED,
+          candidate_ot_minutes: 0,
+          approved_ot_minutes: 0,
+          finalization_state: "SETTLED",
+        }],
+      }
+    );
+    void calculation;
+    const [day] = await fresh.calculateRange({ employee_id: EMPLOYEE, from_date: "2026-09-14", to_date: "2026-09-14" });
+    assert.equal(day.punch_count, 2);
+    assert.equal(day.status, CALC_STATUS.FINAL);
+    assert.equal(day.candidate_ot_minutes, 150);
+    assert.equal(day.approved_ot_minutes, 0);
+    assert.equal(day.ot_claim_state, "AVAILABLE");
   });
 });
 
@@ -751,125 +897,355 @@ describe("review fix #4 - a final approval and its recalculated day move togethe
 
 /* ================================================================== #6 === */
 
-describe("review fix #6 - routine overtime queues itself", () => {
-  /** A complete, valid day that earned 150 minutes of OT and nobody asked. */
+describe("finalized OT flow - the system calculates OT, the employee requests it", () => {
+  /** A complete, valid day that earned 150 minutes of OT. */
   const overtimeDay = () => ({
     rawPunches: [punch(1, "2026-09-14 10:00:00"), punch(2, "2026-09-15 00:30:00")],
   });
+  const TODAY = "2026-09-20";
+  const me = { employee_id: EMPLOYEE, user_type: 1 };
 
-  it("raises an OT request when a recalculation finds unasked-for overtime", async () => {
+  it("1. candidate OT does NOT auto-create an approval request", async () => {
     const { calculation, regularizationRepo } = wire(overtimeDay());
     const result = await calculation.recalculateRange({
       employee_id: EMPLOYEE,
       from_date: "2026-09-14",
       to_date: "2026-09-14",
     });
-
-    assert.equal(result.ot_queue.created.length, 1);
-    const [request] = regularizationRepo.store.requests;
-    assert.equal(request.request_type, REQUEST_TYPE.OT);
-    assert.equal(request.candidate_ot_minutes, 150);
-    assert.equal(request.auto_created, 1);
-    assert.equal(request.status, REQUEST_STATUS.PENDING);
-    assert.match(request.reason, /^Automatic: 150 minutes of overtime/);
-    assert.equal(request.chain.length, 3, "the same role and outlet chain as any other request");
+    assert.equal(regularizationRepo.store.requests.length, 0, "nothing was queued");
+    assert.equal(result.ot_queue, undefined);
+    assert.equal(result.days[0].candidate_ot_minutes, 150);
+    assert.equal(result.days[0].status, CALC_STATUS.FINAL, "the day is FINAL, not OT_PENDING");
+    assert.equal(result.days[0].is_final, true);
+    assert.equal(result.days[0].approved_ot_minutes, 0);
+    assert.equal(result.days[0].ot_claim_state, "AVAILABLE");
   });
 
-  it("is idempotent: a retried recalculation creates no second request", async () => {
-    const { calculation, regularizationRepo } = wire(overtimeDay());
-    const args = { employee_id: EMPLOYEE, from_date: "2026-09-14", to_date: "2026-09-14" };
-
-    await calculation.recalculateRange(args);
-    const second = await calculation.recalculateRange(args);
-    const third = await calculation.recalculateRange(args);
-
-    assert.equal(regularizationRepo.store.requests.length, 1);
-    assert.equal(second.ot_queue.created.length, 0);
-    assert.equal(third.ot_queue.created.length, 0);
-    assert.deepEqual(second.ot_queue.skipped, [
-      { attendance_date: "2026-09-14", why: "EXISTING_REQUEST" },
-    ]);
-  });
-
-  it("supersedes its own open request when a recalculation finds the overtime gone", async () => {
-    const state = overtimeDay();
-    const { calculation, regularizationRepo } = wire(state);
-    const args = { employee_id: EMPLOYEE, from_date: "2026-09-14", to_date: "2026-09-14" };
-
-    await calculation.recalculateRange(args);
-    assert.equal(regularizationRepo.store.requests[0].status, REQUEST_STATUS.PENDING);
-
-    // The 00:30 punch turns out to have been a mis-read and is gone; the day
-    // now finishes at 22:00 with no overtime at all.
-    state.rawPunches = [punch(1, "2026-09-14 10:00:00"), punch(3, "2026-09-14 22:00:00")];
-    const after = await calculation.recalculateRange(args);
-
-    assert.equal(after.ot_queue.superseded.length, 1);
-    assert.equal(regularizationRepo.store.requests[0].status, REQUEST_STATUS.CANCELLED);
-    assert.match(regularizationRepo.store.cancelled[0].reason, /found no overtime/);
-  });
-
-  it("never withdraws a request a person raised, nor one already decided", async () => {
-    const state = overtimeDay();
-    const { calculation, regularization, regularizationRepo } = wire(state);
-
-    await regularization.raiseRequest({
-      actor: { employee_id: EMPLOYEE, user_type: 1 },
-      requested_for_employee_id: EMPLOYEE,
+  it("2. the employee can request their own eligible OT; 7. the reason is stored", async () => {
+    const { regularization, calculation, regularizationRepo } = wire(overtimeDay());
+    const raised = await regularization.raiseOtRequest({
+      actor: me,
       attendance_date: "2026-09-14",
       reason: "Stayed late to finish the stock count",
+      today: TODAY,
     });
-    assert.equal(regularizationRepo.store.requests[0].auto_created, 0);
+    assert.equal(raised.request_type, REQUEST_TYPE.OT);
+    assert.equal(raised.candidate_ot_minutes, 150, "the server's own figure");
+    assert.equal(raised.approved_ot_minutes, 0);
+    assert.equal(raised.chain.length, 3, "Store Manager -> Operations Manager -> HR");
 
-    state.rawPunches = [punch(1, "2026-09-14 10:00:00"), punch(3, "2026-09-14 22:00:00")];
-    const after = await calculation.recalculateRange({
-      employee_id: EMPLOYEE,
-      from_date: "2026-09-14",
-      to_date: "2026-09-14",
-    });
+    const [stored] = regularizationRepo.store.requests;
+    assert.equal(stored.request_type, REQUEST_TYPE.OT);
+    assert.equal(stored.reason, "Stayed late to finish the stock count");
+    assert.equal(stored.auto_created, 0, "employee-submitted, never automatic");
+    assert.equal(stored.candidate_ot_minutes, 150);
+    assert.equal(stored.punch, null);
 
-    assert.equal(after.ot_queue.superseded.length, 0);
-    assert.equal(regularizationRepo.store.requests[0].status, REQUEST_STATUS.PENDING);
-    assert.deepEqual(after.ot_queue.skipped, [
-      { attendance_date: "2026-09-14", why: "EXISTING_REQUEST" },
-    ]);
+    const [day] = await calculation.calculateRange({ employee_id: EMPLOYEE, from_date: "2026-09-14", to_date: "2026-09-14" });
+    assert.equal(day.ot_claim_state, "REQUEST_PENDING");
+    assert.equal(day.ot_requested_minutes, 150);
+    assert.equal(day.ot_reason, "Stayed late to finish the stock count");
+    assert.equal(day.status, CALC_STATUS.FINAL, "a pending OT claim does not make the day non-final");
+    assert.equal(day.approved_ot_minutes, 0);
   });
 
-  it("leaves a date with a MISSING punch to its combined request, and queues nothing", async () => {
-    const { calculation, regularizationRepo } = wire({
-      rawPunches: [punch(1, "2026-09-14 10:00:00")],
+  it("3. the request is for the ACTOR: there is no field to name anybody else", async () => {
+    const { regularization, regularizationRepo } = wire(overtimeDay());
+    await regularization.raiseOtRequest({
+      actor: me,
+      attendance_date: "2026-09-14",
+      reason: "Stayed late to finish the stock count",
+      today: TODAY,
+      // Ignored: not a parameter. The request is the actor's.
+      requested_for_employee_id: 999,
+      employee_id: 999,
     });
-    const result = await calculation.recalculateRange({
-      employee_id: EMPLOYEE,
-      from_date: "2026-09-14",
-      to_date: "2026-09-14",
-    });
-    assert.equal(result.ot_queue.created.length, 0);
-    assert.equal(regularizationRepo.store.requests.length, 0);
+    const [stored] = regularizationRepo.store.requests;
+    assert.equal(stored.request_type, REQUEST_TYPE.OT);
+    // The fake stores what createRequest received.
+    assert.equal(regularizationRepo.store.requests.length, 1);
   });
 
-  it("queues nothing on a day with no overtime, and nothing on an absent day", async () => {
-    const { calculation, regularizationRepo } = wire({
+  it("4. client-supplied OT minutes are ignored: the stored candidate is the server's", async () => {
+    const { regularization, regularizationRepo } = wire(overtimeDay());
+    await regularization.raiseOtRequest({
+      actor: me,
+      attendance_date: "2026-09-14",
+      reason: "Stayed late to finish the stock count",
+      today: TODAY,
+      candidate_ot_minutes: 9999,
+      approved_ot_minutes: 9999,
+    });
+    assert.equal(regularizationRepo.store.requests[0].candidate_ot_minutes, 150);
+    assert.notEqual(regularizationRepo.store.requests[0].approved_ot_minutes, 9999);
+  });
+
+  it("5. no OT request when the candidate is zero", async () => {
+    const { regularization, regularizationRepo } = wire({
       rawPunches: [punch(1, "2026-09-14 10:00:00"), punch(2, "2026-09-14 22:00:00")],
     });
-    const result = await calculation.recalculateRange({
-      employee_id: EMPLOYEE,
-      from_date: "2026-09-13",
-      to_date: "2026-09-15",
-    });
-    assert.equal(result.ot_queue.created.length, 0);
+    await assert.rejects(
+      regularization.raiseOtRequest({ actor: me, attendance_date: "2026-09-14", reason: "Worked extra hours", today: TODAY }),
+      /no overtime calculated/
+    );
     assert.equal(regularizationRepo.store.requests.length, 0);
   });
 
-  it("does nothing at all when no queue is wired, which is the old behaviour", async () => {
-    const repo = fakeCalculationRepo(overtimeDay());
-    const result = await buildCalculation(repo).recalculateRange({
-      employee_id: EMPLOYEE,
-      from_date: "2026-09-14",
-      to_date: "2026-09-14",
+  it("nor on an incomplete day: a missing punch is a regularization, not an OT claim", async () => {
+    const { regularization } = wire({ rawPunches: [punch(1, "2026-09-14 10:00:00")] });
+    await assert.rejects(
+      regularization.raiseOtRequest({ actor: me, attendance_date: "2026-09-14", reason: "Worked extra hours", today: TODAY }),
+      /not a complete attendance day/
+    );
+  });
+
+  it("6. a duplicate open OT request is prevented, and a retry is safe", async () => {
+    const { regularization, regularizationRepo } = wire(overtimeDay());
+    const args = { actor: me, attendance_date: "2026-09-14", reason: "Stayed late to finish the stock count", today: TODAY };
+    await regularization.raiseOtRequest(args);
+    await assert.rejects(regularization.raiseOtRequest(args), /is already pending \(#900\)/);
+    await assert.rejects(regularization.raiseOtRequest(args), /is already pending/);
+    assert.equal(regularizationRepo.store.requests.length, 1);
+  });
+
+  it("a decided claim is not re-raised: one claim per date", async () => {
+    const { regularization, regularizationRepo } = wire(overtimeDay());
+    const args = { actor: me, attendance_date: "2026-09-14", reason: "Stayed late to finish the stock count", today: TODAY };
+    await regularization.raiseOtRequest(args);
+    regularizationRepo.store.requests[0].status = REQUEST_STATUS.REJECTED;
+    await assert.rejects(regularization.raiseOtRequest(args), /has already been decided/);
+    regularizationRepo.store.requests[0].status = REQUEST_STATUS.APPROVED;
+    await assert.rejects(regularization.raiseOtRequest(args), /has already been approved/);
+  });
+
+  it("refuses a future date and a date beyond the backdate window", async () => {
+    const { regularization } = wire(overtimeDay());
+    await assert.rejects(
+      regularization.raiseOtRequest({ actor: me, attendance_date: "2026-09-14", reason: "Worked extra hours", today: "2026-09-13" }),
+      /future date/
+    );
+    await assert.rejects(
+      regularization.raiseOtRequest({ actor: me, attendance_date: "2026-09-14", reason: "Worked extra hours", today: "2026-12-01" }),
+      /last 45 days/
+    );
+  });
+
+  it("requires a reason", async () => {
+    const { regularization } = wire(overtimeDay());
+    await assert.rejects(
+      regularization.raiseOtRequest({ actor: me, attendance_date: "2026-09-14", reason: "", today: TODAY }),
+      /reason of at least 5 characters/
+    );
+  });
+
+  /** An OT request at its last stage, as getRequest returns it. */
+  const otRequestAtLastStage = (overrides = {}) => ({
+    attendance_approval_request_id: 900,
+    request_type: REQUEST_TYPE.OT,
+    requested_for_employee_id: EMPLOYEE,
+    requested_by_employee_id: EMPLOYEE,
+    attendance_date: "2026-09-14",
+    outlet_id: 3,
+    requester_class: "STORE_EMPLOYEE",
+    reason: "Stayed late to finish the stock count",
+    candidate_ot_minutes: 150,
+    status: REQUEST_STATUS.PENDING,
+    current_stage_no: 3,
+    total_stages: 3,
+    finalization_state: "NOT_REQUIRED",
+    regularized_punch: null,
+    steps: [
+      { stage_no: 1, approver_role: APPROVER_ROLE.STORE_MANAGER, outlet_id: 3, decision: "APPROVED" },
+      { stage_no: 2, approver_role: APPROVER_ROLE.OPERATIONS_MANAGER, outlet_id: null, decision: "APPROVED" },
+      { stage_no: 3, approver_role: APPROVER_ROLE.HR, outlet_id: null, decision: "PENDING" },
+    ],
+    ...overrides,
+  });
+  const hr = { employee_id: 7, user_type: 1 };
+
+  it("10. approved_ot_minutes stays 0 until FINAL OT approval", async () => {
+    const { regularization, regularizationRepo } = wire(overtimeDay(), {
+      request: otRequestAtLastStage({
+        current_stage_no: 1,
+        steps: [
+          { stage_no: 1, approver_role: APPROVER_ROLE.STORE_MANAGER, outlet_id: 3, decision: "PENDING" },
+          { stage_no: 2, approver_role: APPROVER_ROLE.OPERATIONS_MANAGER, outlet_id: null, decision: "PENDING" },
+          { stage_no: 3, approver_role: APPROVER_ROLE.HR, outlet_id: null, decision: "PENDING" },
+        ],
+      }),
+      roles: { 7: APPROVER_ROLE.STORE_MANAGER },
     });
-    assert.equal(result.ot_queue, null);
-    assert.equal(repo.saved.calculations.length, 1, "the calculation still landed");
+    const result = await regularization.decide({ actor: hr, request_id: 900, decision: STEP_DECISION.APPROVED });
+    assert.equal(result.status, REQUEST_STATUS.PENDING);
+    assert.equal(result.approved_ot_minutes, null);
+    const [decided] = regularizationRepo.store.decided;
+    assert.equal(decided.calculations[0].approved_ot_minutes, 0);
+    assert.equal(decided.calculations[0].status, CALC_STATUS.FINAL);
+  });
+
+  it("11. final OT approval sets the approved OT, and the day pays it", async () => {
+    const { regularization, calculation, regularizationRepo } = wire(overtimeDay(), {
+      request: otRequestAtLastStage(),
+      roles: { 7: APPROVER_ROLE.HR },
+    });
+    const result = await regularization.decide({ actor: hr, request_id: 900, decision: STEP_DECISION.APPROVED });
+    assert.equal(result.status, REQUEST_STATUS.APPROVED);
+    assert.equal(result.approved_ot_minutes, 150);
+    assert.equal(result.finalization_state, "SETTLED");
+    const [decided] = regularizationRepo.store.decided;
+    assert.equal(decided.calculations[0].approved_ot_minutes, 150);
+    assert.equal(decided.calculations[0].status, CALC_STATUS.FINAL);
+
+    const [day] = await calculation.calculateRange({ employee_id: EMPLOYEE, from_date: "2026-09-14", to_date: "2026-09-14" });
+    assert.equal(day.ot_claim_state, "APPROVED");
+    assert.equal(day.approved_ot_minutes, 150);
+    const month = await calculation.calculateMonth({ employee_id: EMPLOYEE, year: 2026, month: 9 });
+    assert.equal(month.approved_ot_minutes, 150, "only finally approved OT reaches payroll");
+  });
+
+  it("12. approval cannot exceed the eligible OT: a candidate that moved down clamps the approval", async () => {
+    const state = overtimeDay();
+    const { regularization, regularizationRepo } = wire(state, {
+      request: otRequestAtLastStage({ candidate_ot_minutes: 150 }),
+      roles: { 7: APPROVER_ROLE.HR },
+    });
+    // The day was recalculated since the claim: it now finishes at 23:00,
+    // and the engine finds 60 minutes, not 150.
+    state.rawPunches = [punch(1, "2026-09-14 10:00:00"), punch(2, "2026-09-14 23:00:00")];
+    const result = await regularization.decide({ actor: hr, request_id: 900, decision: STEP_DECISION.APPROVED });
+    assert.equal(result.approved_ot_minutes, 60);
+    assert.equal(regularizationRepo.store.decided[0].calculations[0].approved_ot_minutes, 60);
+  });
+
+  it("a rejected OT claim pays nothing, and the day stays FINAL", async () => {
+    const { regularization, calculation, regularizationRepo } = wire(overtimeDay(), {
+      request: otRequestAtLastStage(),
+      roles: { 7: APPROVER_ROLE.HR },
+    });
+    const result = await regularization.decide({ actor: hr, request_id: 900, decision: STEP_DECISION.REJECTED, remarks: "Not authorised" });
+    assert.equal(result.status, REQUEST_STATUS.REJECTED);
+    assert.equal(regularizationRepo.store.decided[0].calculations[0].approved_ot_minutes, 0);
+    const [day] = await calculation.calculateRange({ employee_id: EMPLOYEE, from_date: "2026-09-14", to_date: "2026-09-14" });
+    assert.equal(day.ot_claim_state, "REJECTED");
+    assert.equal(day.status, CALC_STATUS.FINAL);
+    assert.equal(day.is_final, true);
+  });
+
+  it("8. a missing-punch approval does not approve or combine OT (see the suite above); the two requests never share a row", async () => {
+    const { regularization, regularizationRepo } = wire(overtimeDay());
+    await regularization.raiseOtRequest({ actor: me, attendance_date: "2026-09-14", reason: "Stayed late to finish the stock count", today: TODAY });
+    assert.ok(regularizationRepo.store.requests.every((r) => r.request_type !== REQUEST_TYPE.REGULARIZATION_WITH_OT));
+  });
+});
+
+/* ===================================================== payroll lock ===== */
+
+describe("payroll lock closes every OT claim that is not finally approved", () => {
+  const TODAY = "2026-09-20";
+  const me = { employee_id: EMPLOYEE, user_type: 1 };
+  /** 14th: 150 OT, never requested. 15th: 150 OT, requested. 16th: no OT. */
+  const month = () => ({
+    rawPunches: [
+      punch(1, "2026-09-14 10:00:00"), punch(2, "2026-09-15 00:30:00"),
+      punch(3, "2026-09-15 10:00:00"), punch(4, "2026-09-16 00:30:00"),
+      punch(5, "2026-09-16 10:00:00"), punch(6, "2026-09-16 22:00:00"),
+    ],
+  });
+
+  it("13. closes unrequested candidate OT as Rejected – Not Requested Before Payroll Lock", async () => {
+    const { calculation, regularizationRepo } = wire(month());
+    const result = await calculation.closeOtForPayrollLock({ employee_id: EMPLOYEE, year: 2026, month: 9 });
+    assert.equal(result.closed_unrequested, 2);
+    assert.deepEqual(result.unrequested_dates, ["2026-09-14", "2026-09-15"]);
+    const rows = regularizationRepo.store.requests;
+    assert.equal(rows.length, 2);
+    rows.forEach((r) => {
+      assert.equal(r.request_type, REQUEST_TYPE.OT);
+      assert.equal(r.status, REQUEST_STATUS.REJECTED);
+      assert.equal(r.closure_reason, "NOT_REQUESTED_BEFORE_PAYROLL_LOCK");
+      assert.equal(r.reason, "Rejected – Not Requested Before Payroll Lock");
+      assert.equal(r.approved_ot_minutes, 0);
+      assert.equal(r.candidate_ot_minutes, 150, "the figure the engine reported, for the record");
+    });
+    const [day] = await calculation.calculateRange({ employee_id: EMPLOYEE, from_date: "2026-09-14", to_date: "2026-09-14" });
+    assert.equal(day.ot_claim_state, "CLOSED_AT_PAYROLL_LOCK");
+    assert.equal(day.ot_closure_reason, "NOT_REQUESTED_BEFORE_PAYROLL_LOCK");
+    assert.equal(day.approved_ot_minutes, 0);
+    assert.equal(day.status, CALC_STATUS.FINAL);
+  });
+
+  it("14. rejects a pending OT request as Rejected – Not Approved Before Payroll Lock", async () => {
+    const { calculation, regularization, regularizationRepo } = wire(month());
+    await regularization.raiseOtRequest({ actor: me, attendance_date: "2026-09-15", reason: "Stayed late to finish the stock count", today: TODAY });
+    const result = await calculation.closeOtForPayrollLock({ employee_id: EMPLOYEE, year: 2026, month: 9 });
+    assert.equal(result.rejected_pending, 1);
+    assert.equal(result.closed_unrequested, 1, "the 14th only; the 15th had a request");
+    const pendingOne = regularizationRepo.store.requests.find((r) => r.attendance_date === "2026-09-15");
+    assert.equal(pendingOne.status, REQUEST_STATUS.REJECTED);
+    assert.equal(pendingOne.closure_reason, "NOT_APPROVED_BEFORE_PAYROLL_LOCK");
+    assert.equal(pendingOne.approved_ot_minutes, 0);
+    assert.equal(pendingOne.reason, "Stayed late to finish the stock count", "the employee's reason survives");
+  });
+
+  it("15. preserves finally approved OT, and 16. leaves no pending OT behind", async () => {
+    const { calculation, regularizationRepo } = wire(month(), {
+      request: {
+        attendance_approval_request_id: 950,
+        request_type: REQUEST_TYPE.OT,
+        attendance_date: "2026-09-15",
+        candidate_ot_minutes: 150,
+        status: REQUEST_STATUS.APPROVED,
+        steps: [],
+      },
+    });
+    regularizationRepo.store.requests[0].approved_ot_minutes = 150;
+    regularizationRepo.store.requests[0].finalization_state = "SETTLED";
+    regularizationRepo.store.requests[0].reason = "Stayed late";
+
+    const result = await calculation.closeOtForPayrollLock({ employee_id: EMPLOYEE, year: 2026, month: 9 });
+    assert.equal(result.approved_preserved, 1);
+    assert.equal(result.rejected_pending, 0);
+    assert.equal(result.closed_unrequested, 1);
+
+    const approved = regularizationRepo.store.requests.find((r) => r.attendance_date === "2026-09-15");
+    assert.equal(approved.status, REQUEST_STATUS.APPROVED);
+    assert.equal(approved.approved_ot_minutes, 150);
+    assert.ok(regularizationRepo.store.requests.every((r) => r.status !== REQUEST_STATUS.PENDING), "no pending OT after lock");
+
+    const days = await calculation.calculateRange({ employee_id: EMPLOYEE, from_date: "2026-09-14", to_date: "2026-09-16" });
+    assert.deepEqual(days.map((d) => d.ot_claim_state), ["CLOSED_AT_PAYROLL_LOCK", "APPROVED", "NONE"]);
+    const rolled = await calculation.calculateMonth({ employee_id: EMPLOYEE, year: 2026, month: 9 });
+    assert.equal(rolled.approved_ot_minutes, 150, "approved OT is in payroll; closed OT is not");
+  });
+
+  it("is idempotent and a closed date can no longer be claimed", async () => {
+    const { calculation, regularization, regularizationRepo } = wire(month());
+    await calculation.closeOtForPayrollLock({ employee_id: EMPLOYEE, year: 2026, month: 9 });
+    const again = await calculation.closeOtForPayrollLock({ employee_id: EMPLOYEE, year: 2026, month: 9 });
+    assert.equal(again.closed_unrequested, 0);
+    assert.equal(again.rejected_pending, 0);
+    assert.equal(regularizationRepo.store.requests.length, 2);
+    await assert.rejects(
+      regularization.raiseOtRequest({ actor: me, attendance_date: "2026-09-14", reason: "Stayed late to finish the stock count", today: TODAY }),
+      /has already been decided/
+    );
+  });
+
+  it("17. touches no Biomax punch: the raw punches read after the lock are the ones read before it", async () => {
+    const state = month();
+    const before = JSON.stringify(state.rawPunches);
+    const { calculation, calculationRepo } = wire(state);
+    await calculation.closeOtForPayrollLock({ employee_id: EMPLOYEE, year: 2026, month: 9 });
+    assert.equal(JSON.stringify(state.rawPunches), before);
+    assert.equal(calculationRepo.saved.calculations.length, 0, "the lock stores no attendance rows either");
+  });
+
+  it("is refused when no OT service is wired, rather than silently doing nothing", async () => {
+    const repo = fakeCalculationRepo(month());
+    await assert.rejects(
+      buildCalculation(repo).closeOtForPayrollLock({ employee_id: EMPLOYEE, year: 2026, month: 9 }),
+      /No OT request service is wired/
+    );
   });
 });
 
@@ -956,7 +1332,7 @@ describe("review fix #4 - payroll never reads an APPROVED request that is not SE
     assert.equal(day.is_final, true);
   });
 
-  it("pays nothing, and holds the date, when it is not", async () => {
+  it("pays nothing when it is not, and keeps the claim pending", async () => {
     for (const state of ["PENDING", "NOT_REQUIRED"]) {
       const { calculation } = wire(approvedButUnsettled(state));
       const [day] = await calculation.calculateRange({
@@ -965,52 +1341,21 @@ describe("review fix #4 - payroll never reads an APPROVED request that is not SE
         to_date: "2026-09-14",
       });
       assert.equal(day.approved_ot_minutes, 0, `paid OT while ${state}`);
-      assert.equal(day.is_final, false, `settled the date while ${state}`);
-      assert.equal(day.status, CALC_STATUS.REGULARIZATION_PENDING);
+      // An OT claim is separate from the attendance: the day itself is
+      // complete and stays FINAL; only the OT is withheld.
+      assert.equal(day.is_final, true);
+      assert.equal(day.status, CALC_STATUS.FINAL);
+      assert.equal(day.ot_claim_state, "REQUEST_PENDING");
     }
   });
 
-  it("and the month holds that date rather than treating it as final", async () => {
+  it("and the month pays no OT for it", async () => {
     const { calculation } = wire(approvedButUnsettled("PENDING"));
     const month = await calculation.calculateMonth({
       employee_id: EMPLOYEE,
       year: 2026,
       month: 9,
     });
-    assert.ok(month.held_dates.includes("2026-09-14"));
-    assert.equal(month.is_final, false);
     assert.equal(month.approved_ot_minutes, 0);
-  });
-});
-
-/* ================================ the queue must never break its caller == */
-
-describe("the OT auto-queue can fail without failing the work that succeeded", () => {
-  /**
-   * Queueing an approval request makes nothing payable, so a failure there is
-   * a missing convenience and not a corrupt state. Reporting it as a failure
-   * of the recalculation - or of an approval that has already committed -
-   * would have somebody redo work that was done correctly.
-   */
-  it("a recalculation still succeeds and is still stored", async () => {
-    const { calculation, calculationRepo, regularizationRepo } = wire({
-      rawPunches: [punch(1, "2026-09-14 10:00:00"), punch(2, "2026-09-15 00:30:00")],
-    });
-    regularizationRepo.createRequest = async () => {
-      throw new Error("ER_LOCK_WAIT_TIMEOUT");
-    };
-
-    const result = await calculation.recalculateRange({
-      employee_id: EMPLOYEE,
-      from_date: "2026-09-14",
-      to_date: "2026-09-14",
-    });
-
-    assert.equal(calculationRepo.saved.calculations.length, 1, "the calculation landed");
-    assert.equal(result.days[0].candidate_ot_minutes, 150);
-    // Returned, not swallowed: a date that should have been queued and was not
-    // is visible on the response.
-    assert.match(result.ot_queue.error, /ER_LOCK_WAIT_TIMEOUT/);
-    assert.deepEqual(result.ot_queue.created, []);
   });
 });

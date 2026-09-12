@@ -547,13 +547,12 @@ class Server {
       this.attendanceRegularizationRepo,
       this.attendanceCalculationUsecase
     );
-    // Attendance v2 review fix #6. The OT auto-queue lives in the
-    // regularization usecase - it needs the approval chain - but it is the
-    // CALCULATION that discovers unasked-for overtime, so the hook is handed
-    // back the other way once both exist. Wiring it as a constructor argument
-    // would be a cycle; this is the same two-step the rest of this method uses
-    // where two collaborators genuinely need each other.
-    this.attendanceCalculationUsecase.setOtApprovalQueue(
+    // Finalized OT flow. The calculation usecase raises NO OT request of its
+    // own; it needs the regularization usecase for one thing - closing
+    // unresolved OT when a payroll month is locked - and the hook is handed
+    // back the other way once both exist, because wiring it as a constructor
+    // argument would be a cycle.
+    this.attendanceCalculationUsecase.setOtRequestService(
       this.attendanceRegularizationUsecase
     );
     // M5: Bulk Salary Upload. A BATCH over the lifecycle above rather than a

@@ -383,11 +383,13 @@ class AttendanceCalculationRepository {
               DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date,
               request_type, status, current_stage_no, total_stages,
               candidate_ot_minutes, approved_ot_minutes, finalization_state,
-              auto_created
+              auto_created, reason, closure_reason,
+              DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+              DATE_FORMAT(decided_at, '%Y-%m-%d %H:%i:%s') AS decided_at
          FROM attendance_approval_request
         WHERE requested_for_employee_id = ?
           AND attendance_date BETWEEN ? AND ?
-          AND status IN ('PENDING', 'APPROVED')
+          AND status <> 'CANCELLED'
         ORDER BY attendance_date ASC, attendance_approval_request_id ASC`,
       [employeeId, fromDate, toDate]
     );

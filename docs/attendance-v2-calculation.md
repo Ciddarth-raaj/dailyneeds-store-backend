@@ -98,10 +98,11 @@ the A0 resolver alongside the engine.
   `REGULARIZED` so a future display can say *Missed Punch – Regularized*. It
   becomes part of the effective punch list only when its request is `APPROVED`;
   the calculation's own query joins on that status.
-* **One date, one request, one pass.** A date with both a missing punch and
-  resulting OT raises one `REGULARIZATION_WITH_OT` request; the final approval
-  approves both. OT with no missing punch walks the same chain — approval is
-  after the work, never before it.
+* **Missing Punch and OT are two requests** (finalized OT flow, see the last
+  section). A regularization carries the proposed punch and the reason and
+  corrects attendance only; the OT the corrected day earns is claimed by the
+  employee separately, afterwards. `REGULARIZATION_WITH_OT` is no longer
+  created; the enum value stays so historical rows read.
 * **Chains**: store employee → own Store Manager → Operations Manager → HR;
   manager → Operations Manager → HR; head → Admin. A Store Manager's own request
   follows the Manager chain by construction, so the first approver is somebody
@@ -318,23 +319,13 @@ split the earned surplus into its pre-shift and post-shift parts
   second wage deduction. The old Full/Half/Quarter Day payroll rules and the
   monetary late/early deductions are **not** revived.
 
-## 6. Routine OT queues itself
+## 6. Routine OT does NOT queue itself (superseded)
 
-A recalculation that finds candidate OT on a complete, valid day with no request
-against it now raises the OT request automatically, on the same role/outlet
-chain. Nobody has to know to ask for overtime they have already worked.
-
-* **Idempotent.** A date is checked against every existing PENDING, APPROVED or
-  REJECTED request for it, so a retried recalculation creates nothing.
-* **Safe when the overtime goes away.** If a later recalculation finds no
-  candidate OT, an open request *the queue itself raised* is CANCELLED with its
-  steps stamped SKIPPED — superseded auditably, never left as stale payable OT.
-  A request a person raised, or one already decided, is never touched.
-* A date with a **missing punch** is left to its single combined
-  `REGULARIZATION_WITH_OT` request, which carries the OT the proposed punch
-  creates.
-* The queue runs **after** the calculation is stored and outside the approval
-  transaction: creating an approval request makes nothing payable.
+The first review pass had a recalculation raise an OT approval request
+automatically whenever it found candidate OT. **That behaviour is removed.**
+Candidate OT is reported on the day as *OT Available* and the employee raises
+the OT request with a reason — see *The finalized OT flow* at the end of this
+document. `auto_created` is no longer used to create routine OT requests.
 
 ## 7. The break override is one current field
 
@@ -450,8 +441,8 @@ The day is calculated under the new shift first, and then the override row and
 the recalculated day are written in one transaction, so the shift can never be
 changed with stored attendance still showing the old one. A retry for a shift
 the date already resolves to appends no second row and simply re-stores the
-same calculation. Routine OT on the recalculated day queues itself afterwards,
-as after any recalculation.
+same calculation. Nothing is queued for approval: if the recalculated day now
+earns overtime, it shows as *OT Available* for the employee to request.
 
 ## Status mapping the screens use
 
@@ -459,11 +450,79 @@ as after any recalculation.
 |---|---|
 | `REVIEW_REQUIRED` with `MISSING_PUNCH` | Missing Punch (with Regularize) |
 | `REGULARIZATION_PENDING` | Regularization Pending |
-| `OT_PENDING` | OT Approval Pending |
 | `NO_SHIFT_FOR_DATE` | No Shift Assigned |
 | `NO_SCHEDULE_ROW` | Shift Setup Issue |
 | `ABSENT` | Absent |
 | `FINAL` | no badge |
 
 "Review Required" is never shown to staff. A punch whose `source` is
-`REGULARIZED` is shown as *Missed Punch – Regularized*.
+`REGULARIZED` is shown as *Missed Punch – Regularized*. `OT_PENDING` is no
+longer produced by the engine (see below); the OT claim has its own state.
+
+---
+
+# The finalized OT flow
+
+```
+system calculates OT -> employee requests OT with reason -> OT approval
+  -> approved / rejected -> payroll lock closes all OT not requested or not
+     finally approved
+```
+
+## Attendance state and OT claim state are separate
+
+`attendance_day_calculation.status` describes the attendance: a complete valid
+day is `FINAL` whether or not its overtime has been claimed. The engine no
+longer produces `OT_PENDING` (the enum value remains for stored rows). Beside
+every calculated day the usecase derives an **OT claim state** from the OT
+request against that date:
+
+| `ot_claim_state` | Meaning | Screen |
+|---|---|---|
+| `NONE` | no candidate OT, nothing requested | nothing |
+| `AVAILABLE` | candidate OT > 0 on a FINAL day, not yet requested | OT Available: hh:mm + Request OT |
+| `REQUEST_PENDING` | the employee requested it; chain not finished | OT Request Pending: hh:mm |
+| `APPROVED` | finally approved; `approved_ot_minutes` is paid | OT Approved: hh:mm |
+| `REJECTED` | an approver rejected it | OT Rejected |
+| `CLOSED_AT_PAYROLL_LOCK` | closed by the payroll lock; `ot_closure_reason` says why | OT Rejected + the closure wording |
+
+`approved_ot_minutes` is 0 until final OT approval and is never more than the
+eligible OT: at final approval it is the lower of the figure claimed and the
+engine's current candidate for the date.
+
+## The employee requests OT: `POST /attendance/me/ot-request`
+
+Body `attendance_date`, `reason`. Nothing else is accepted — `employee_id`,
+`requested_for_employee_id`, `candidate_ot_minutes` and `approved_ot_minutes`
+are refused by the schema. The employee is `req.decoded.employee_id`. The
+usecase (`raiseOtRequest`) recalculates the date on the server and stores that
+candidate; refuses a day with no candidate OT, an incomplete day, a future
+date, a date older than 45 days, and a date that already carries an OT claim
+in any state (one claim per date — a fresh claim after rejection is not a
+policy this invents). The request is `request_type = OT`, `auto_created = 0`,
+with the employee's reason and the ordinary approval chain. Approvers decide
+it through the existing decision endpoint; nobody approves their own.
+
+## Missing punch is attendance only
+
+`raiseRequest` creates `REGULARIZATION` only, with `candidate_ot_minutes = 0`.
+Final approval recalculates the date and reports `ot_now_available`; the
+employee then sees *OT Available* and requests it.
+
+## Payroll lock
+
+There is no payroll lock action in this codebase yet. The domain rule is
+implemented and exposed as `closeOtForPayrollLock({ employee_id, year, month })`
+on the calculation (payroll) usecase, for the future lock action to call
+inside its workflow:
+
+| At lock | Result |
+|---|---|
+| OT available, never requested | a REJECTED OT record for the date, `closure_reason = NOT_REQUESTED_BEFORE_PAYROLL_LOCK` ("Rejected – Not Requested Before Payroll Lock") |
+| OT request pending | REJECTED, `closure_reason = NOT_APPROVED_BEFORE_PAYROLL_LOCK`, steps SKIPPED |
+| already rejected | unchanged |
+| finally approved | unchanged, paid |
+
+Afterwards no open OT request exists for the period and a closed date cannot
+be claimed. Idempotent. Nothing marks candidate OT payable. Migration
+`20260921120000` adds the nullable `closure_reason` column.

@@ -110,9 +110,12 @@ class AttendanceRegularizationRoutes {
             requested_for_employee_id: Joi.number().integer().positive().optional(),
             attendance_date: Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).required(),
             reason: Joi.string().min(5).max(500).required(),
+            // Attendance correction only: the missing punch is required, and
+            // there is no OT on this request (the finalized OT flow raises OT
+            // separately, by the employee, after the corrected day exists).
             punch_time: Joi.string()
               .regex(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})?$/)
-              .optional(),
+              .required(),
           };
           const isValid = Joi.validate(req.body, schema);
           if (isValid.error !== null) throw isValid.error;
@@ -138,7 +141,7 @@ class AttendanceRegularizationRoutes {
             requested_for_employee_id: forId,
             attendance_date: req.body.attendance_date,
             reason: req.body.reason,
-            punch_time: req.body.punch_time || null,
+            punch_time: req.body.punch_time,
           });
           res.json({ code: 200, ...result });
         } catch (err) {
@@ -146,6 +149,38 @@ class AttendanceRegularizationRoutes {
         }
       }
     );
+
+    /**
+     * MY ATTENDANCE: request the overtime the engine calculated on your OWN
+     * date.
+     *
+     * The body is a date and a reason. There is no field for an employee id
+     * and none for OT minutes - `candidate_ot_minutes`, `approved_ot_minutes`,
+     * `employee_id` and `requested_for_employee_id` are all refused by the
+     * schema (Joi rejects unknown keys) - and the usecase recalculates the
+     * date on the server and stores THAT candidate. The chain, the one-claim-
+     * per-date rule and the "complete FINAL day with OT" rule are the
+     * usecase's, unchanged by anything the client sends.
+     */
+    this.router.post("/attendance/me/ot-request", requireSelf, async (req, res) => {
+      try {
+        const schema = {
+          attendance_date: Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).required(),
+          reason: Joi.string().min(5).max(500).required(),
+        };
+        const isValid = Joi.validate(req.body, schema);
+        if (isValid.error !== null) throw isValid.error;
+
+        const result = await this.usecase.raiseOtRequest({
+          actor: { employee_id: Number(req.decoded.employee_id), user_type: req.decoded.user_type },
+          attendance_date: req.body.attendance_date,
+          reason: req.body.reason,
+        });
+        res.json({ code: 200, ...result });
+      } catch (err) {
+        AttendanceRegularizationRoutes._respond(res, err);
+      }
+    });
 
     /** The queue: requests whose current stage this caller could decide. */
     this.router.get(

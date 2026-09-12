@@ -181,9 +181,12 @@ describe("A2 case 7 - gaps below the allowance can feed OT", () => {
     assert.equal(result.shortage_minutes, 0);
     assert.equal(result.raw_ot_minutes, 15);
     assert.equal(result.candidate_ot_minutes, 15);
-    // Earned is not payable. Nothing is owed until A3 approves it.
+    // Earned is not payable. Nothing is owed until the OT request is finally
+    // approved - and the day itself is FINAL regardless: the OT claim is a
+    // separate state, not an attendance status.
     assert.equal(result.approved_ot_minutes, 0);
-    assert.equal(result.status, CALC_STATUS.OT_PENDING);
+    assert.equal(result.status, CALC_STATUS.FINAL);
+    assert.equal(result.is_final, true);
   });
 
   it("no gap is singled out as the lunch one - three gaps sum the same way", () => {
