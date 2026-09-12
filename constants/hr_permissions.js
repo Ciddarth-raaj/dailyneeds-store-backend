@@ -231,6 +231,25 @@ module.exports = {
   VIEW_ATTENDANCE_PAYROLL: "view_attendance_payroll",
   MANAGE_EMPLOYEE_BREAK_OVERRIDE: "manage_employee_break_override",
 
+  // The Attendance Dashboard - the management overview of ONE attendance date
+  // across the company: headcount, checked in, absence, the four attendance
+  // issues and pending OT.
+  //
+  // ITS OWN KEY, AND A READ-ONLY ONE. It is not `view_calculated_attendance`
+  // because that key answers "may this person open one employee's month",
+  // and a screen that aggregates everybody is a wider read even though every
+  // individual figure behind it is one that key already permits. Giving it a
+  // name means a designation can be granted the overview without the
+  // per-employee screen, or the other way round.
+  //
+  // IT GRANTS NO WRITE OF ANY KIND. Holding it does not let anybody approve a
+  // request, regularize a punch, edit a time or recalculate a date: every
+  // action the dashboard links out to keeps its own existing key and is
+  // re-checked by the route that performs it. The C4 migration grants this to
+  // the designations that ALREADY hold `view_calculated_attendance`, so
+  // nobody's effective visibility changes on deploy.
+  VIEW_ATTENDANCE_DASHBOARD: "view_attendance_dashboard",
+
   // Attendance v2 / A3 - missing-punch regularization and OT approval.
   //
   // Raising a request for YOURSELF and raising one for SOMEBODY ELSE are two

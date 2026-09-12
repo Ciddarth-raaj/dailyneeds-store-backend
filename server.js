@@ -209,6 +209,14 @@ class Server {
     this.attendanceCalculationRepo = require("./repository/attendance_calculation")(
       this.mysql.connection
     );
+    // The Attendance Dashboard's reads. A SEPARATE repository from the one
+    // above because every statement in it is batched across a whole
+    // population: the calculation repository is built for one employee over a
+    // range and issues six queries per employee, which a company-wide
+    // overview cannot afford. It contains no INSERT, UPDATE or DELETE at all.
+    this.attendanceDashboardRepo = require("./repository/attendance_dashboard")(
+      this.mysql.connection
+    );
     // Attendance v2 / A3. The regularization and OT approval store. It cannot
     // reach `biomax_punch` at all: an approved manual punch is a row in its
     // own table, and the raw punch stays exactly as the device sent it.
@@ -555,6 +563,14 @@ class Server {
     // shapes what they returned.
     this.attendanceCalculationUsecase = require("./usecase/attendance_calculation")(
       this.attendanceCalculationRepo
+    );
+    // The Attendance Dashboard. Orchestration only, and it calculates nothing
+    // of its own: it calls the SAME pure `calculateAttendanceDay` over the
+    // same effective punch stream and the same dated shift resolution, so the
+    // dashboard and the employee's own screen can never disagree about a
+    // date. It writes nothing and recalculates nothing.
+    this.attendanceDashboardUsecase = require("./usecase/attendance_dashboard")(
+      this.attendanceDashboardRepo
     );
     // Attendance v2 / A3. Handed the calculation usecase as well, because a
     // request is validated against what the engine actually says is wrong with
@@ -961,6 +977,13 @@ class Server {
       this.permissions,
       this.sensitive
     );
+    // The Attendance Dashboard: read-only aggregates over one attendance date.
+    // Every route on it requires `view_attendance_dashboard` individually.
+    const attendanceDashboardRouter = require("./routes/attendance_dashboard")(
+      this.attendanceDashboardUsecase,
+      this.permissions,
+      this.sensitive
+    );
     const attendanceRegularizationRouter = require("./routes/attendance_regularization")(
       this.attendanceRegularizationUsecase,
       this.permissions,
@@ -1205,6 +1228,7 @@ class Server {
     // mount at the root and are tried BEFORE the Part 1 router, which claims
     // the bare `/attendance` prefix.
     app.use("/", attendanceCalculationRouter.getRouter());
+    app.use("/", attendanceDashboardRouter.getRouter());
     app.use("/", attendanceRegularizationRouter.getRouter());
     app.use("/", attendanceApproverSetupRouter.getRouter());
     app.use("/attendance", attendanceRawRouter.getRouter());
