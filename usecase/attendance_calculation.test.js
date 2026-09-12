@@ -441,3 +441,64 @@ describe("the monthly roll-up", () => {
     );
   });
 });
+
+describe("a version document written before grace was versioned", () => {
+  it("takes the grace from the LIVE shift row, so a 2-minute late arrival owes nothing", async () => {
+    const usecase = buildUsecase(
+      fakeRepo({
+        // The live row carries the grace the shift screen shows.
+        shiftConfig: {
+          late_grace_minutes: 10,
+          late_exclude_grace_from_deduction: 1,
+          early_exit_grace_minutes: 10,
+        },
+        // The version in force for the date predates the grace columns and
+        // has no key for them at all.
+        configVersions: {
+          7: [
+            {
+              work_shift_config_version_id: 1,
+              work_shift_id: 7,
+              effective_from: "2026-09-01",
+              config_hash: null,
+              config_document: JSON.stringify({
+                format: 1,
+                config: {
+                  shift_code: "S7",
+                  overtime_allowed: 1,
+                  overtime_minimum_minutes: 0,
+                  overtime_rounding_method: "NONE",
+                  overtime_rounding_interval_minutes: 0,
+                  overtime_minimum_threshold_only: 0,
+                  maximum_ot_minutes_per_day: null,
+                  late_offset_against_overtime: 0,
+                  early_exit_offset_against_overtime: 0,
+                },
+                schedule: scheduleRows(7).map((r) => ({
+                  day_of_week: r.day_of_week,
+                  is_working_day: 1,
+                  in_time: "09:30:00",
+                  out_time: "18:30:00",
+                  attendance_day_cutoff: "04:00:00",
+                  break_minutes: 30,
+                  ot_rate: 1,
+                })),
+              }),
+            },
+          ],
+        },
+        rawPunches: [punch(1, "2026-09-05 09:32:00"), punch(2, "2026-09-05 18:30:00")],
+      })
+    );
+    const [day] = await usecase.calculateRange({
+      employee_id: 42,
+      from_date: "2026-09-05",
+      to_date: "2026-09-05",
+    });
+    assert.equal(day.late_minutes, 2);
+    assert.equal(day.worked_minutes, 508);
+    assert.equal(day.shift_snapshot.late_grace_minutes, 10, "grace came from the live row");
+    assert.equal(day.grace_forgiven_minutes, 2);
+    assert.equal(day.shortage_minutes, 0);
+  });
+});

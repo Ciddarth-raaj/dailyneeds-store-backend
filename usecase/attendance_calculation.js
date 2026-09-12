@@ -189,10 +189,14 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    * version does carry, including 0, is what that date calculates under.
    */
   const withLiveDefaults = (definition, live) => {
-    if (!definition || !live) return definition;
+    // `live` is the repository's `{ config, schedule }` pair.
+    const liveConfig = live && live.config ? live.config : null;
+    if (!definition || !liveConfig) return definition;
     const config = { ...definition.config };
     VERSIONED_CONFIG_COLUMNS.forEach((column) => {
-      if (config[column] === undefined && live[column] !== undefined) config[column] = live[column];
+      if (config[column] === undefined && liveConfig[column] !== undefined) {
+        config[column] = liveConfig[column];
+      }
     });
     return { ...definition, config };
   };
