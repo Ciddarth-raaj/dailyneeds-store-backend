@@ -237,6 +237,11 @@ class EmployeeRepository {
       // -name exclusion is omitted entirely when there is nothing to exclude,
       // rather than written as `(... NOT IN (?) OR ? IS NULL)` with the same
       // array bound twice - a shape MySQL rejects at two or more names.
+      // `resignation` is keyed by name and may hold several rows for one
+      // person (re-hires, voided and re-recorded resignations). Joining it
+      // directly fanned each employee out once per row, which showed up as
+      // the same name repeated in every employee dropdown. Collapse it to one
+      // row per name first so the result stays one row per employee.
       const { where: whereClause, params: filterValues } = buildEmployeeScope(
         resignation,
         filters
@@ -256,7 +261,11 @@ class EmployeeRepository {
         LEFT JOIN department ON department.department_id = new_employee.department_id 
         LEFT JOIN outlets ON outlets.outlet_id = new_employee.store_id 
         LEFT JOIN shift_master ON shift_master.shift_id = new_employee.shift_id 
-        LEFT JOIN resignation ON resignation.employee_name = new_employee.employee_name 
+        LEFT JOIN (
+          SELECT employee_name, MAX(resignation_date) AS resignation_date
+          FROM resignation
+          GROUP BY employee_name
+        ) resignation ON resignation.employee_name = new_employee.employee_name
         ${whereClause}`;
 
       this.db.query(query, filterValues, (err, docs) => {
