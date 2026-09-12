@@ -1,4 +1,5 @@
 const express = require("express");
+const Joi = require("@hapi/joi");
 const P = require("../constants/hr_permissions");
 const respondError = require("../utils/http");
 const { csvCell } = require("./employee_report");
@@ -13,6 +14,13 @@ const { csvCell } = require("./employee_report");
  *   GET  /raw/summary            banner counts        view_raw_attendance
  *   GET  /raw/punches            Punch Audit          view_attendance_punch_audit
  *   GET  /raw/punches/export.csv its CSV              view_attendance_punch_audit
+ *   POST /raw/punches/:id/void   Void Punch           void_attendance_punch
+ *
+ * Void Punch is the ONE write here, and it writes an additive record beside
+ * the raw punch (`attendance_punch_void`), never the raw punch itself. The
+ * body carries a reason and, optionally, the source the caller believes the
+ * punch has; the employee, the time and the actor are all decided on the
+ * server. See usecase/attendance_punch_void.js.
  *
  * The Attendance List has NO device or punch-location parameter and answers
  * 400 if one is sent, so a client cannot believe it filtered by them: a row
@@ -28,9 +36,10 @@ const { csvCell } = require("./employee_report");
  * report_export_log by shape only - exactly as routes/employee_report.js.
  */
 class AttendanceRawRoutes {
-  constructor(attendanceRawUsecase, permissions) {
+  constructor(attendanceRawUsecase, permissions, punchVoidUsecase = null) {
     this.usecase = attendanceRawUsecase;
     this.permissions = permissions;
+    this.punchVoidUsecase = punchVoidUsecase;
     this.router = express.Router();
     this.init();
   }
@@ -73,6 +82,43 @@ class AttendanceRawRoutes {
     r.get("/raw/punches/export.csv", P_.require(P.VIEW_ATTENDANCE_PUNCH_AUDIT), (req, res) =>
       this.streamCsv(req, res, () => this.usecase.auditCsv(req.query))
     );
+
+    /**
+     * VOID PUNCH. Behind `void_attendance_punch`, which the migration grants
+     * to nobody. The id is the raw `biomax_punch_id`; the body is the reason
+     * and, optionally, `source` (BIOMAX or IMPORT - REGULARIZED is refused).
+     * Joi refuses every other key, so `employee_id`, `voided_by`, `io_time`
+     * and the like are a 400 rather than an override. The actor is the
+     * session's employee and user.
+     *
+     * The answer is honest about the two steps: `recalculated` says whether
+     * the existing single-date recalculation succeeded after the void was
+     * stored; if it did not, `msg` says so and names the date to repair.
+     */
+    r.post("/raw/punches/:id/void", P_.require(P.VOID_ATTENDANCE_PUNCH), async (req, res) => {
+      try {
+        if (!this.punchVoidUsecase) {
+          throw Object.assign(new Error("Void Punch is not configured on this server"), { httpCode: 501 });
+        }
+        const schema = {
+          reason: Joi.string().trim().min(5).max(500).required(),
+          source: Joi.string().valid("BIOMAX", "IMPORT", "REGULARIZED").optional(),
+        };
+        const isValid = Joi.validate(req.body || {}, schema);
+        if (isValid.error !== null) throw isValid.error;
+
+        const actor = await this.permissions.actorFor(req);
+        const result = await this.punchVoidUsecase.voidPunch({
+          biomax_punch_id: req.params.id,
+          reason: req.body.reason,
+          source: req.body.source || null,
+          actor: { employee_id: actor.employeeId, user_id: actor.userId },
+        });
+        res.json(result);
+      } catch (err) {
+        this.fail(res, err);
+      }
+    });
   }
 
   /**
@@ -135,6 +181,15 @@ class AttendanceRawRoutes {
       res.status(err.httpCode).json({ code: err.httpCode, msg: err.message });
       return;
     }
+    if (err && err.name === "NotFoundError") {
+      res.status(404).json({ code: 404, msg: err.message });
+      return;
+    }
+    if (err && err.name === "ValidationError" && err.pending_request) {
+      // The pending-request block, with the request so a screen can link it.
+      res.status(400).json({ code: 422, msg: err.message, pending_request: err.pending_request });
+      return;
+    }
     respondError(res, err);
   }
 
@@ -143,6 +198,6 @@ class AttendanceRawRoutes {
   }
 }
 
-module.exports = (attendanceRawUsecase, permissions) =>
-  new AttendanceRawRoutes(attendanceRawUsecase, permissions);
+module.exports = (attendanceRawUsecase, permissions, punchVoidUsecase = null) =>
+  new AttendanceRawRoutes(attendanceRawUsecase, permissions, punchVoidUsecase);
 module.exports.AttendanceRawRoutes = AttendanceRawRoutes;

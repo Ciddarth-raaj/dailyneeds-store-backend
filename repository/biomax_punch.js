@@ -65,7 +65,12 @@ const PUNCH_COLUMNS = `
   bda.outlet_id                                    AS punch_outlet_id,
   o_dev.outlet_name                                AS punch_outlet,
   o_dev.outlet_code                                AS punch_outlet_code,
-  ${DEVICE_STATUS_SQL}                             AS device_status`;
+  ${DEVICE_STATUS_SQL}                             AS device_status,
+  v.attendance_punch_void_id,
+  v.reason                                         AS void_reason,
+  v.voided_by_employee_id,
+  ve.employee_name                                 AS voided_by_name,
+  DATE_FORMAT(v.voided_at, '%Y-%m-%d %H:%i:%s')    AS voided_at`;
 
 /** The FROM/JOIN block both views share. */
 const PUNCH_JOINS = `
@@ -79,7 +84,9 @@ const PUNCH_JOINS = `
          ON bda.biomax_device_id = bd.biomax_device_id
         AND bda.effective_from <= p.io_time
         AND (bda.effective_to IS NULL OR p.io_time < bda.effective_to)
-  LEFT JOIN outlets o_dev           ON o_dev.outlet_id = bda.outlet_id`;
+  LEFT JOIN outlets o_dev           ON o_dev.outlet_id = bda.outlet_id
+  LEFT JOIN attendance_punch_void v ON v.biomax_punch_id = p.biomax_punch_id
+  LEFT JOIN new_employee ve         ON ve.employee_id = v.voided_by_employee_id`;
 
 class BiomaxPunchRepository {
   constructor(db) {
@@ -194,6 +201,36 @@ class BiomaxPunchRepository {
         ORDER BY p.io_time, p.biomax_punch_id
         LIMIT ${limit} OFFSET ${offset}`,
       params
+    );
+  }
+
+  /**
+   * The chronological raw stream of some employees over a CALENDAR range, as
+   * light as it can be: id, employee, instant, source, void. This is what the
+   * Punch Audit needs to say whether a listed punch was IGNORED as a
+   * duplicate - the rule compares against the last KEPT punch, so the whole
+   * neighbourhood is needed, not only the rows on the page. The caller widens
+   * the range by a day at the start for the same reason the calculation does.
+   *
+   * @param {object} f  {employee_ids: number[], from, to}
+   */
+  listPunchStreamForEmployees(f) {
+    const ids = (f.employee_ids || []).map(Number).filter((n) => Number.isSafeInteger(n) && n > 0);
+    if (ids.length === 0) return Promise.resolve([]);
+    return this._read(
+      "LIST-PUNCH-STREAM",
+      `SELECT p.biomax_punch_id,
+              d.employee_id,
+              DATE_FORMAT(p.io_time, '%Y-%m-%d %H:%i:%s') AS io_time,
+              p.ingest_source,
+              v.attendance_punch_void_id
+         FROM biomax_punch_derived d
+         JOIN biomax_punch p ON p.biomax_punch_id = d.biomax_punch_id
+         LEFT JOIN attendance_punch_void v ON v.biomax_punch_id = p.biomax_punch_id
+        WHERE d.employee_id IN (?)
+          AND p.punch_date BETWEEN ? AND ?
+        ORDER BY d.employee_id, p.io_time, p.biomax_punch_id`,
+      [ids, f.from, f.to]
     );
   }
 

@@ -20,6 +20,12 @@
  *                     punches live.
  */
 
+const {
+  EFFECTIVE_PUNCH_STATUS,
+  IGNORED_DUPLICATE_REASON,
+  resolveEffectiveRawPunchesByEmployee,
+} = require("../utils/attendance_effective_punches");
+
 const RANGE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_LIST_DAYS = 92;
 const MAX_AUDIT_DAYS = 31;
@@ -156,13 +162,62 @@ class AttendanceRawUsecase {
     };
   }
 
+  /**
+   * Punch Audit rows, each with its EFFECTIVE status: USED, IGNORED_DUPLICATE
+   * or VOIDED (null for a punch matched to nobody).
+   *
+   * The void is on the row already (LEFT JOIN). The duplicate status is
+   * DERIVED here, deterministically, by the same rule the calculation
+   * applies (`utils/attendance_effective_punches.js`), over the same
+   * neighbourhood: every matched employee on the page has their raw stream
+   * read from the day before the range, because whether a punch is a
+   * duplicate depends on the last KEPT punch before it. Nothing is stored;
+   * the audit shows what the engine would decide today.
+   */
   async audit(query) {
     const filters = this.auditFilters(query);
     const rows = await this.punchRepo.listPunches(filters);
+    const data = rows.map(presentPunch);
+    await this.attachEffectiveStatus(data, filters);
     return {
       meta: { ...filters, row_count: rows.length },
-      data: rows.map(presentPunch),
+      data,
     };
+  }
+
+  async attachEffectiveStatus(data, filters) {
+    const employeeIds = [...new Set(data.filter((p) => p.employee_id !== null).map((p) => p.employee_id))];
+    if (employeeIds.length === 0 || !this.punchRepo.listPunchStreamForEmployees) return;
+
+    const stream = await this.punchRepo.listPunchStreamForEmployees({
+      employee_ids: employeeIds,
+      from: addDaysIso(filters.from, -1),
+      to: filters.to,
+    });
+    const resolved = resolveEffectiveRawPunchesByEmployee(
+      (stream || []).map((r) => ({
+        punch_id: Number(r.biomax_punch_id),
+        employee_id: Number(r.employee_id),
+        io_time: r.io_time,
+        attendance_punch_void_id: r.attendance_punch_void_id || null,
+      }))
+    );
+
+    for (const p of data) {
+      const hit = resolved.get(String(p.biomax_punch_id));
+      if (p.attendance_punch_void_id) {
+        p.effective_status = EFFECTIVE_PUNCH_STATUS.VOIDED;
+        p.effective_reason = p.void_reason || null;
+      } else if (hit && hit.effective_status === EFFECTIVE_PUNCH_STATUS.IGNORED_DUPLICATE) {
+        p.effective_status = EFFECTIVE_PUNCH_STATUS.IGNORED_DUPLICATE;
+        p.effective_reason = IGNORED_DUPLICATE_REASON;
+        p.duplicate_of_punch_id = hit.duplicate_of_punch_id === undefined ? null : hit.duplicate_of_punch_id;
+        p.duplicate_of_io_time = hit.duplicate_of_io_time || null;
+      } else if (hit && hit.effective_status === EFFECTIVE_PUNCH_STATUS.USED) {
+        p.effective_status = EFFECTIVE_PUNCH_STATUS.USED;
+        p.effective_reason = null;
+      }
+    }
   }
 
   async summary(query) {
@@ -200,10 +255,12 @@ class AttendanceRawUsecase {
 
   async auditCsv(query) {
     const { meta, data } = await this.audit(query);
-    const header = ["Calendar Date", "Time", "Attendance Date", "Employee Code", "Employee Name", "Home Outlet", "Punch Location", "Device", "Cloud ID", "Source IP", "Device Status", "Derivation Status", "Cutoff Applied", "Retransmits"];
+    const header = ["Calendar Date", "Time", "Attendance Date", "Employee Code", "Employee Name", "Home Outlet", "Punch Location", "Device", "Cloud ID", "Source IP", "Device Status", "Derivation Status", "Cutoff Applied", "Retransmits", "Punch ID", "Source", "Effective Status", "Effective Reason", "Void Reason", "Voided By", "Voided At"];
     const rows = data.map((p) => [
       toDisplayDate(p.calendar_date), p.clock_time, toDisplayDate(p.attendance_date), p.user_id, p.employee_name || "", p.home_outlet || "",
       p.punch_outlet || "", p.device_label || "", p.dev_id, p.source_ip || "", p.device_status, p.derivation_status || "NO_DERIVED_ROW", p.cutoff_applied || "", String(p.retransmit_count || 0),
+      String(p.biomax_punch_id), p.punch_source || "", EFFECTIVE_STATUS_LABEL[p.effective_status] || "", p.effective_reason || "",
+      p.void_reason || "", p.voided_by_name || "", p.voided_at || "",
     ]);
     return { header, rows, meta, dataset_key: "RAW_ATTENDANCE_PUNCHES", filename: `punch-audit-${meta.from}-to-${meta.to}.csv` };
   }
@@ -231,7 +288,28 @@ class AttendanceRawUsecase {
 
 /* ------------------------------------------------------------ helpers -- */
 
+/** The wording of the effective status, for the CSV. */
+const EFFECTIVE_STATUS_LABEL = Object.freeze({
+  USED: "Used",
+  IGNORED_DUPLICATE: "Ignored - Duplicate within 10 min",
+  VOIDED: "Voided",
+});
+
+/** `YYYY-MM-DD` plus n days, UTC arithmetic. */
+function addDaysIso(dateOnly, n) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateOnly));
+  if (!m) return dateOnly;
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) + n * 86400000);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+}
+
+/** `biomax_punch.ingest_source` -> the engine's BIOMAX / IMPORT. */
+function punchSourceOf(ingestSource) {
+  return ingestSource === "DIGISME_IMPORT" || ingestSource === "IMPORT" ? "IMPORT" : "BIOMAX";
+}
+
 function presentPunch(row) {
+  const voidId = row.attendance_punch_void_id === null || row.attendance_punch_void_id === undefined ? null : Number(row.attendance_punch_void_id);
   return {
     biomax_punch_id: Number(row.biomax_punch_id),
     dev_id: row.dev_id,
@@ -263,6 +341,17 @@ function presentPunch(row) {
     retransmit_count: Number(row.retransmit_count || 0),
     received_at: row.received_at,
     match_status: row.employee_id === null || row.employee_id === undefined ? "UNMATCHED" : "MATCHED",
+    // The raw source as the engine names it, and the manual void if any.
+    // `effective_status` is filled in by `audit()` once the employee's
+    // stream has been resolved; a voided punch is VOIDED regardless.
+    punch_source: punchSourceOf(row.ingest_source),
+    attendance_punch_void_id: voidId,
+    void_reason: voidId ? row.void_reason || null : null,
+    voided_by_employee_id: voidId && row.voided_by_employee_id !== null && row.voided_by_employee_id !== undefined ? Number(row.voided_by_employee_id) : null,
+    voided_by_name: voidId ? row.voided_by_name || null : null,
+    voided_at: voidId ? row.voided_at || null : null,
+    effective_status: voidId ? EFFECTIVE_PUNCH_STATUS.VOIDED : null,
+    effective_reason: voidId ? row.void_reason || null : null,
   };
 }
 
@@ -374,5 +463,6 @@ module.exports.pivot = pivot;
 module.exports.presentPunch = presentPunch;
 module.exports.summariseCounts = summariseCounts;
 module.exports.toDisplayDate = toDisplayDate;
+module.exports.EFFECTIVE_STATUS_LABEL = EFFECTIVE_STATUS_LABEL;
 module.exports.MAX_LIST_DAYS = MAX_LIST_DAYS;
 module.exports.MAX_AUDIT_DAYS = MAX_AUDIT_DAYS;

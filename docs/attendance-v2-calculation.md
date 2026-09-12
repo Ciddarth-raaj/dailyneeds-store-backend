@@ -526,3 +526,117 @@ inside its workflow:
 Afterwards no open OT request exists for the period and a closed date cannot
 be claimed. Idempotent. Nothing marks candidate OT payable. Migration
 `20260921120000` adds the nullable `closure_reason` column.
+
+---
+
+# Raw punch controls: the ten-minute duplicate rule and Void Punch
+
+Two controls sit between the immutable raw punch tables and the engine. Both
+are decided in one place - `utils/attendance_effective_punches.js` (pure) -
+and applied in one place - `usecase/attendance_calculation.js`
+`groupRawPunchesByAttendanceDate`, which every calculating path goes
+through: the preview, a single-date recalculation, the bulk run, the
+approval's assumed day and the proposed-punch pricing. Raw rows are never
+written by either.
+
+## Where the raw punches are
+
+Every raw punch, whichever way it arrived, is a row of `biomax_punch` with a
+globally unique `biomax_punch_id`; `ingest_source` says how it got there
+(`LIVE`, `HISTORICAL_PULL` = a Biomax device, `DIGISME_IMPORT` = the Excel
+import) and `biomax_punch_derived.employee_id` says whom ingest matched it
+to. The engine's `source` is `BIOMAX` for the two device values and `IMPORT`
+for the import. A REGULARIZED punch is a row of a different table
+(`attendance_regularized_punch`) and joins the effective list only through
+its APPROVED + SETTLED request, exactly as before.
+
+## The order of exclusion
+
+```
+raw BIOMAX + IMPORT punches of the employee, ONE stream by absolute instant
+  -> manually VOIDED punches are removed (attendance_punch_void)
+  -> a punch <= 10 minutes after the LAST KEPT punch is IGNORED as a duplicate
+  -> the kept punches are re-dated by the historical cutoff and grouped
+  -> the APPROVED regularized punches join per date, untouched by the above
+  -> chronological positional pairing (1st IN, 2nd OUT, ...) and calculation
+```
+
+* The comparison is against the last **kept** punch: 09:00 / 09:04 / 09:09 /
+  09:11 keeps 09:00 and 09:11. Exactly ten minutes is a duplicate.
+* The stream is ordered by the absolute instant, so 23:58 and 00:04 are six
+  minutes apart whatever attendance date each lands on. To see the last kept
+  punch before a range, the raw fetch now starts **one day before `from`**
+  (and still one day after `to` for dating); nothing from that extra day is
+  calculated or stored - the grouping drops it as it always did.
+* Two punches at the same instant are ordered by id; the lower id is kept.
+* A voided punch is out before the rule looks, so it can neither be kept nor
+  hide a genuine punch: voiding 09:00 promotes the 09:04 it was hiding.
+* A REGULARIZED punch never enters the rule.
+
+An excluded punch counts for nothing - not the punch count, the pairing, NRM,
+Worked, Shortage, candidate OT, Missing Punch or the status - and is carried
+on the calculated day as `excluded_punches`, each with `effective_status`
+(`IGNORED_DUPLICATE` with `duplicate_of_punch_id`, or `VOIDED` with the
+void), so the Day Detail and the Punch Audit can show it. Every effective
+punch carries `effective_status: USED`. `raw_punch_ids` on the stored row
+lists every raw punch the engine looked at, counted or not.
+
+Nothing is stored for an automatic suppression: it is derived on every read
+and every calculation from the raw rows and the void rows, so it is
+deterministic and needs no audit row of its own.
+
+`CALCULATION_VERSION` is **2**. Historical dates can come out differently,
+and nothing recalculates them on deploy: Recalculate Attendance applies the
+rule to a chosen range.
+
+## Void Punch
+
+`POST /attendance/raw/punches/:id/void`, key `void_attendance_punch`,
+granted by migration `20260924120000` to **nobody**. Body: `reason`
+(mandatory, five characters or more, trimmed) and optionally `source`
+(`BIOMAX` / `IMPORT`; `REGULARIZED` is refused). Everything else is refused
+by the schema: the employee, the original time and the source come from the
+punch the server reads, the actor from the session.
+
+`attendance_punch_void` is one additive row per raw punch - `biomax_punch_id`
+(UNIQUE, FK to `biomax_punch`), a snapshot of `punch_source`, `employee_id`,
+`punch_io_time` and the engine-derived `attendance_date`, the `reason`,
+`voided_by_employee_id` / `voided_by_user_id`, `voided_at`. There is no
+un-void. Refused: a nonexistent punch (404), an unmatched punch, an already
+voided punch, a source that does not match the punch, and - so that an
+approver never finds the day changed under a request they are deciding - a
+punch whose attendance date carries a **PENDING** regularization or OT
+request:
+
+> This attendance date has a pending Attendance/OT request. Decide or cancel
+> it before voiding a raw punch.
+
+Approved and rejected history is not rewritten (`findOpenRequest` sees
+PENDING rows only, and the void repository never touches the approval
+tables).
+
+After the void is stored the date is recalculated through the existing
+`recalculateRange`. The two are deliberately not one transaction: the void
+is the audit record and survives a calculation failure, and the answer says
+what happened - `recalculated: true`, or `recalculated: false` with the
+error and a `msg` naming the date, which Recalculate Attendance repairs.
+
+## What the screens show
+
+* **Employee Attendance day detail** lists every punch of the day: used ones
+  with their position and IN/OUT, excluded ones unpositioned, dimmed, with
+  *Ignored – Duplicate within 10 min* or *Voided* (struck through, with the
+  reason). *Void Punch* appears beside a raw BIOMAX/IMPORT punch for a caller
+  holding the key, never on a REGULARIZED or already VOIDED punch.
+* **Punch Audit** carries `effective_status` (`USED` / `IGNORED_DUPLICATE` /
+  `VOIDED`, null for an unmatched punch), `punch_source`, and for a void its
+  reason, who and when; the CSV gains *Punch ID, Source, Effective Status,
+  Effective Reason, Void Reason, Voided By, Voided At*. The duplicate status
+  is derived for the page by reading the matched employees' raw stream from
+  the day before the range (`listPunchStreamForEmployees`). A holder of the
+  key gets the Void action; `view_attendance_punch_audit` alone sees the
+  status.
+
+The DigiSME import and the Biomax receiver are unchanged: a raw punch within
+ten minutes of another is still committed and still received, and the
+calculation layer ignores it.

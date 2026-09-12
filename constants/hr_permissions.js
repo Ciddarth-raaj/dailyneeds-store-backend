@@ -278,4 +278,15 @@ module.exports = {
   // migration grants it to NOBODY; employees never hold it, and the self-only
   // `/attendance/me` surface has no shift-editing endpoint at all.
   EDIT_ATTENDANCE_DATE_SHIFT: "edit_attendance_date_shift",
+
+  // Attendance - VOID a raw BIOMAX / IMPORT punch.
+  //
+  // Excludes ONE raw punch from attendance calculation, with a mandatory
+  // reason, by an additive `attendance_punch_void` record; the raw punch row
+  // is never deleted or altered. A REGULARIZED punch cannot be voided here -
+  // it belongs to the approval workflow. Declared by the punch-void migration
+  // and granted to NOBODY: administrators reach it through the user_type 2
+  // bypass, anybody else is given it deliberately on the designation screen.
+  // Seeing a void in the Punch Audit needs only `view_attendance_punch_audit`.
+  VOID_ATTENDANCE_PUNCH: "void_attendance_punch",
 };

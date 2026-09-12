@@ -344,7 +344,7 @@ describe("review fix #1 - recalculation re-dates raw punches through the histori
     assert.equal(nextDate.status, CALC_STATUS.ABSENT);
   });
 
-  it("reads the punch window by calendar date, one day wider at the end and no wider at the start", async () => {
+  it("reads the punch window by calendar date, one day wider at each end: the end for dating, the start for the duplicate rule only", async () => {
     const asked = [];
     const repo = fakeCalculationRepo({ rawPunches: [] });
     const original = repo.getRawPunchesByCalendarWindow;
@@ -357,7 +357,30 @@ describe("review fix #1 - recalculation re-dates raw punches through the histori
       from_date: "2026-09-14",
       to_date: "2026-09-16",
     });
-    assert.deepEqual(asked, [{ from: "2026-09-14", to: "2026-09-17" }]);
+    // The day before `from` is read so that the ten-minute duplicate rule can
+    // see the last KEPT punch before the range (23:58 / 00:04). It is never
+    // calculated: see the next case.
+    assert.deepEqual(asked, [{ from: "2026-09-13", to: "2026-09-17" }]);
+  });
+
+  it("a punch on the day before the range is read for the duplicate rule but never calculated or stored", async () => {
+    const { calculation } = wire({
+      rawPunches: [
+        punch(1, "2026-09-13 10:00:00"),
+        punch(2, "2026-09-13 22:00:00"),
+        punch(3, "2026-09-14 10:00:00"),
+        punch(4, "2026-09-14 22:00:00"),
+      ],
+    });
+    const days = await calculation.calculateRange({
+      employee_id: EMPLOYEE,
+      from_date: "2026-09-14",
+      to_date: "2026-09-14",
+    });
+    assert.equal(days.length, 1);
+    assert.equal(days[0].attendance_date, "2026-09-14");
+    assert.deepEqual(days[0].raw_punch_ids, [3, 4], "the 13th's punches belong to the 13th and are not here");
+    assert.equal(days[0].punch_count, 2);
   });
 
   it("leaves a morning punch after a REST day on its own calendar date", async () => {

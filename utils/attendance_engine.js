@@ -76,8 +76,19 @@ const MINUTES_PER_DAY = 1440;
 /** The phase-in point of the break rule: six hours, in minutes. */
 const BREAK_FREE_MINUTES = 360;
 
-/** Bumped whenever a stored calculation would come out differently. */
-const CALCULATION_VERSION = 1;
+/**
+ * Bumped whenever a stored calculation would come out differently.
+ *
+ *   1  Attendance v2 as approved.
+ *   2  The effective raw punch stream: manually VOIDED punches are excluded
+ *      and a raw punch ten minutes or less after the last kept one is
+ *      IGNORED as a duplicate (`utils/attendance_effective_punches.js`).
+ *      Historical dates can now come out differently, so a row stored under
+ *      version 1 is distinguishable from one the new rule produced; nothing
+ *      is recalculated automatically - Recalculate Attendance applies it to a
+ *      chosen range.
+ */
+const CALCULATION_VERSION = 2;
 
 /** Every value `status` can take. A calculation is never left without one. */
 const CALC_STATUS = Object.freeze({
@@ -395,7 +406,13 @@ function resolveOvertime({
  * @param {object} input
  * @param {number} input.employee_id
  * @param {string} input.attendance_date          `YYYY-MM-DD`
- * @param {Array}  input.punches                  RAW punches, as stored
+ * @param {Array}  input.punches                  RAW punches that COUNT: the
+ *        effective raw stream after manual voids and the ten-minute duplicate
+ *        rule (`utils/attendance_effective_punches.js`) have been applied
+ * @param {Array}  [input.excluded_punches]       the raw punches of the date
+ *        that do NOT count - VOIDED or IGNORED_DUPLICATE, each with its
+ *        `effective_status` and reason. Carried through for the audit views;
+ *        they take no part in any number here
  * @param {Array}  [input.regularized_punches]    APPROVED manual punches only
  * @param {object|null} input.shift                a `buildShiftSnapshot` result
  * @param {string} [input.shift_status]            RESOLUTION_STATUS from A0
@@ -411,6 +428,7 @@ function calculateAttendanceDay(input = {}) {
     employee_id = null,
     attendance_date = null,
     punches = [],
+    excluded_punches = [],
     regularized_punches = [],
     shift = null,
     shift_status = null,
@@ -420,10 +438,21 @@ function calculateAttendanceDay(input = {}) {
   } = input;
 
   const rawPunches = orderPunches(punches, attendance_date);
+  // Every effective punch is marked USED so a reader of the stored JSON can
+  // tell it apart from the excluded ones without consulting a second list.
   const effectivePunches = orderPunches(
     [...(punches || []), ...(regularized_punches || [])],
     attendance_date
-  );
+  ).map((p) => ({ ...p, effective_status: "USED" }));
+  // The raw punches of the date that were voided or ignored: chronological,
+  // never counted, never paired. `raw_punch_ids` lists ALL raw evidence for
+  // the date, counted or not, so the stored row still names every raw punch
+  // the engine looked at.
+  const excludedById = new Map((excluded_punches || []).map((e) => [String(e.punch_id), e]));
+  const excludedPunches = orderPunches(excluded_punches || [], attendance_date).map((p) => ({
+    ...(excludedById.get(String(p.punch_id)) || {}),
+    ...p,
+  }));
 
   const base = {
     calculation_version: CALCULATION_VERSION,
@@ -433,8 +462,11 @@ function calculateAttendanceDay(input = {}) {
     work_shift_weekly_schedule_id: shift ? shift.work_shift_weekly_schedule_id : null,
     shift_snapshot: shift,
     shift_snapshot_hash: shift ? shift.snapshot_hash : null,
-    raw_punch_ids: rawPunches.map((p) => p.punch_id),
+    raw_punch_ids: [...rawPunches, ...excludedPunches]
+      .sort((a, b) => a.minute - b.minute || Number(a.punch_id) - Number(b.punch_id))
+      .map((p) => p.punch_id),
     raw_punches: rawPunches,
+    excluded_punches: excludedPunches,
     effective_punches: effectivePunches,
     punch_count: effectivePunches.length,
     attendance_day_count: 0,
