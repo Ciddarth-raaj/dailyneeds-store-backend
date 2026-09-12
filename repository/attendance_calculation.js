@@ -510,6 +510,130 @@ class AttendanceCalculationRepository {
     }
   }
 
+  /* ------------------------------------------- bulk recalculation */
+
+  /**
+   * The employees a bulk recalculation targets.
+   *
+   * Filters combine: an employee id, an outlet (store), a designation, any
+   * subset. Employment is respected the way the payroll window already does
+   * it: somebody who had left before the range began, or joined after it
+   * ended, is not in it. `date_of_joining` is a VARCHAR on `new_employee`,
+   * so it is returned and the usecase applies the joining bound in JS with
+   * the same parser payroll uses.
+   */
+  async listEmployeesForRecalculation({ employee_id, store_id, designation_id, from_date }) {
+    const where = ["(ne.status = 1 OR ne.resignation_date IS NULL OR ne.resignation_date >= ?)"];
+    const params = [from_date];
+    if (employee_id) {
+      where.push("ne.employee_id = ?");
+      params.push(employee_id);
+    }
+    if (store_id) {
+      where.push("ne.store_id = ?");
+      params.push(store_id);
+    }
+    if (designation_id) {
+      where.push("ne.designation_id = ?");
+      params.push(designation_id);
+    }
+    return this._read(
+      "LIST-EMPLOYEES-FOR-RECALCULATION",
+      `SELECT ne.employee_id, ne.employee_name, ne.store_id, ne.designation_id, ne.status,
+              ne.date_of_joining,
+              DATE_FORMAT(ne.resignation_date, '%Y-%m-%d') AS resignation_date
+         FROM new_employee ne
+        WHERE ${where.join(" AND ")}
+        ORDER BY ne.employee_id ASC`,
+      params
+    );
+  }
+
+  async outletExists(outletId) {
+    const rows = await this._read(
+      "OUTLET-EXISTS",
+      "SELECT outlet_id FROM outlets WHERE outlet_id = ?",
+      [outletId]
+    );
+    return rows.length > 0;
+  }
+
+  async designationExists(designationId) {
+    const rows = await this._read(
+      "DESIGNATION-EXISTS",
+      "SELECT designation_id FROM designation WHERE designation_id = ?",
+      [designationId]
+    );
+    return rows.length > 0;
+  }
+
+  /** Open a run record: RUNNING, with what was asked and by whom. */
+  async insertRecalculationRun(run) {
+    const result = await this._read(
+      "INSERT-RECALCULATION-RUN",
+      `INSERT INTO attendance_recalculation_run
+         (requested_by_employee_id, from_date, to_date, employee_id, store_id, designation_id,
+          employees_targeted, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'RUNNING')`,
+      [
+        run.requested_by_employee_id === undefined ? null : run.requested_by_employee_id,
+        run.from_date,
+        run.to_date,
+        run.employee_id || null,
+        run.store_id || null,
+        run.designation_id || null,
+        run.employees_targeted,
+      ]
+    );
+    return result && result.insertId ? Number(result.insertId) : null;
+  }
+
+  /** Close it with the real counts and the outcome. */
+  async finishRecalculationRun(runId, outcome) {
+    if (!runId) return;
+    await this._read(
+      "FINISH-RECALCULATION-RUN",
+      `UPDATE attendance_recalculation_run
+          SET status = ?, employees_completed = ?, employees_failed = ?,
+              days_processed = ?, errors = ?, completed_at = CURRENT_TIMESTAMP(3)
+        WHERE attendance_recalculation_run_id = ?`,
+      [
+        outcome.status,
+        outcome.employees_completed,
+        outcome.employees_failed,
+        outcome.days_processed,
+        JSON.stringify(outcome.errors || []),
+        runId,
+      ]
+    );
+  }
+
+  /** Recent runs, newest first, for the Recalculate Attendance screen. */
+  async listRecalculationRuns(limit = 20) {
+    return this._read(
+      "LIST-RECALCULATION-RUNS",
+      `SELECT r.attendance_recalculation_run_id, r.requested_by_employee_id,
+              rb.employee_name AS requested_by_name,
+              DATE_FORMAT(r.started_at, '%Y-%m-%d %H:%i:%s') AS started_at,
+              DATE_FORMAT(r.completed_at, '%Y-%m-%d %H:%i:%s') AS completed_at,
+              DATE_FORMAT(r.from_date, '%Y-%m-%d') AS from_date,
+              DATE_FORMAT(r.to_date, '%Y-%m-%d') AS to_date,
+              r.employee_id, e.employee_name,
+              r.store_id, o.outlet_name,
+              r.designation_id, d.designation_name,
+              r.employees_targeted, r.employees_completed, r.employees_failed,
+              r.days_processed, r.status, r.errors
+         FROM attendance_recalculation_run r
+         LEFT JOIN new_employee rb ON rb.employee_id = r.requested_by_employee_id
+         LEFT JOIN new_employee e ON e.employee_id = r.employee_id
+         LEFT JOIN outlets o ON o.outlet_id = r.store_id
+         LEFT JOIN designation d ON d.designation_id = r.designation_id
+        ORDER BY r.attendance_recalculation_run_id DESC
+        LIMIT ?`,
+      [Number(limit) > 0 ? Number(limit) : 20]
+    );
+  }
+
   /** The same idempotency, for one employee's month. */
   async saveMonthlyPayroll(row) {
     // Neutral wage components only (review fix #8). There is no

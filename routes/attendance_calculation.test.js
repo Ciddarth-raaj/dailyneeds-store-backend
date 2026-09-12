@@ -57,13 +57,26 @@ describe("the endpoints and their guards", () => {
         "GET /attendance/calculated",
         "GET /attendance/calculated/break-override/:employee_id",
         "GET /attendance/calculated/date-shift/options",
+        "GET /attendance/calculated/recalculate-runs",
         "GET /attendance/me",
         "GET /attendance/payroll/monthly",
         "POST /attendance/calculated/break-override",
         "POST /attendance/calculated/date-shift",
         "POST /attendance/calculated/recalculate",
+        "POST /attendance/calculated/recalculate-bulk",
       ]
     );
+  });
+
+  it("bulk recalculation and its run history are behind recalculate_attendance", () => {
+    assert.deepEqual(find("POST", "/attendance/calculated/recalculate-bulk").guard, {
+      mode: "any",
+      keys: [P.RECALCULATE_ATTENDANCE],
+    });
+    assert.deepEqual(find("GET", "/attendance/calculated/recalculate-runs").guard, {
+      mode: "any",
+      keys: [P.RECALCULATE_ATTENDANCE],
+    });
   });
 
   it("/attendance/me needs an employee identity and NO permission key", () => {

@@ -776,6 +776,154 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
   };
 
   /**
+   * BULK RECALCULATION: the Recalculate Attendance screen.
+   *
+   * A date range (required) and any subset of employee / store /
+   * designation. The repository resolves the target employees, bounded by
+   * employment: nobody who left before the range or joined after it. Each
+   * employee is then recalculated through `recalculateRange` - the SAME
+   * path as the single-employee endpoint, so every date resolves its own
+   * dated shift assignment, the single-date override, the shift
+   * configuration version in force, the break override and the approved
+   * regularized punches - and stored in its own transaction. One employee's
+   * failure is recorded and the run continues; the summary and the audit
+   * row say exactly how many completed and how many did not.
+   *
+   * NO OT REQUEST IS CREATED. Candidate OT a recalculation finds is
+   * AVAILABLE for the employee to request. No punch is written.
+   */
+  const MAX_BULK_EMPLOYEES = 2000;
+
+  const recalculateBulk = async ({
+    from_date,
+    to_date,
+    employee_id = null,
+    store_id = null,
+    designation_id = null,
+    actor_employee_id = null,
+  }) => {
+    const from = toDateOnly(from_date);
+    const to = toDateOnly(to_date);
+    if (from === null || to === null) {
+      throw validationError("from_date and to_date must be dates as YYYY-MM-DD");
+    }
+    if (from > to) throw validationError("from_date must not be after to_date");
+    if (dateRange(from, to).length > MAX_RANGE_DAYS) {
+      throw validationError(`A range may cover at most ${MAX_RANGE_DAYS} days`);
+    }
+
+    const asId = (value, name) => {
+      if (value === null || value === undefined || value === "") return null;
+      const n = Number(value);
+      if (!Number.isInteger(n) || n <= 0) throw validationError(`${name} must be a positive id`);
+      return n;
+    };
+    const employeeId = asId(employee_id, "employee_id");
+    const storeId = asId(store_id, "store_id");
+    const designationId = asId(designation_id, "designation_id");
+
+    if (storeId !== null && !(await attendanceCalculationRepo.outletExists(storeId))) {
+      throw validationError(`No outlet exists for store_id ${storeId}`);
+    }
+    if (designationId !== null && !(await attendanceCalculationRepo.designationExists(designationId))) {
+      throw validationError(`No designation exists for designation_id ${designationId}`);
+    }
+    if (employeeId !== null && !(await attendanceCalculationRepo.getEmploymentWindow(employeeId))) {
+      throw validationError(`No employee exists for employee_id ${employeeId}`);
+    }
+
+    const candidates = await attendanceCalculationRepo.listEmployeesForRecalculation({
+      employee_id: employeeId,
+      store_id: storeId,
+      designation_id: designationId,
+      from_date: from,
+    });
+    // The joining bound, applied here because date_of_joining is text.
+    const targets = (candidates || []).filter((e) => {
+      const joined = toDateOnly(e.date_of_joining);
+      return joined === null || joined <= to;
+    });
+    if (targets.length > MAX_BULK_EMPLOYEES) {
+      throw validationError(
+        `${targets.length} employees match; narrow the filters to at most ${MAX_BULK_EMPLOYEES}`
+      );
+    }
+
+    const runId = attendanceCalculationRepo.insertRecalculationRun
+      ? await attendanceCalculationRepo.insertRecalculationRun({
+          requested_by_employee_id: actor_employee_id,
+          from_date: from,
+          to_date: to,
+          employee_id: employeeId,
+          store_id: storeId,
+          designation_id: designationId,
+          employees_targeted: targets.length,
+        })
+      : null;
+
+    const errors = [];
+    let completed = 0;
+    let daysProcessed = 0;
+    for (const target of targets) {
+      /* eslint-disable no-await-in-loop */
+      try {
+        const result = await recalculateRange({
+          employee_id: Number(target.employee_id),
+          from_date: from,
+          to_date: to,
+        });
+        completed += 1;
+        daysProcessed += Number(result.written) || 0;
+      } catch (err) {
+        errors.push({
+          employee_id: Number(target.employee_id),
+          employee_name: target.employee_name || null,
+          message: err && err.message ? err.message : String(err),
+        });
+      }
+      /* eslint-enable no-await-in-loop */
+    }
+
+    const status =
+      errors.length === 0
+        ? "COMPLETED"
+        : completed === 0 && targets.length > 0
+        ? "FAILED"
+        : "COMPLETED_WITH_ERRORS";
+
+    if (runId && attendanceCalculationRepo.finishRecalculationRun) {
+      await attendanceCalculationRepo.finishRecalculationRun(runId, {
+        status,
+        employees_completed: completed,
+        employees_failed: errors.length,
+        days_processed: daysProcessed,
+        errors,
+      });
+    }
+
+    return {
+      run_id: runId,
+      status,
+      from_date: from,
+      to_date: to,
+      filters: { employee_id: employeeId, store_id: storeId, designation_id: designationId },
+      employees_targeted: targets.length,
+      employees_completed: completed,
+      employees_failed: errors.length,
+      attendance_days_processed: daysProcessed,
+      errors,
+    };
+  };
+
+  const listRecalculationRuns = async (limit = 20) =>
+    attendanceCalculationRepo.listRecalculationRuns
+      ? (await attendanceCalculationRepo.listRecalculationRuns(limit)).map((r) => ({
+          ...r,
+          errors: typeof r.errors === "string" ? (() => { try { return JSON.parse(r.errors); } catch (e) { return []; } })() : r.errors || [],
+        }))
+      : [];
+
+  /**
    * PAYROLL LOCK, the OT half: close every OT claim in a month that is not
    * finally approved.
    *
@@ -907,6 +1055,8 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     calculateProposedDay,
     attendanceDateForPunchTime,
     recalculateRange,
+    recalculateBulk,
+    listRecalculationRuns,
     setDateShift,
     listDateShiftOptions,
     calculateMonth,

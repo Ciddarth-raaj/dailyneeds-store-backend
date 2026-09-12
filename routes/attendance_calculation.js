@@ -172,6 +172,63 @@ class AttendanceCalculationRoutes {
     );
 
     /**
+     * BULK recalculation, for the Recalculate Attendance screen: a date
+     * range and any subset of employee / store / designation. Same key as
+     * the single-employee recalculation, same engine path per employee, one
+     * transaction per employee, and a run summary that says how many
+     * completed and how many failed. No OT request is created.
+     */
+    this.router.post(
+      "/attendance/calculated/recalculate-bulk",
+      this.permissions.require(P.RECALCULATE_ATTENDANCE),
+      async (req, res) => {
+        try {
+          const schema = {
+            from_date: Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).required(),
+            to_date: Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).required(),
+            employee_id: Joi.number().integer().positive().allow(null, "").optional(),
+            store_id: Joi.number().integer().positive().allow(null, "").optional(),
+            designation_id: Joi.number().integer().positive().allow(null, "").optional(),
+          };
+          const isValid = Joi.validate(req.body, schema);
+          if (isValid.error !== null) throw isValid.error;
+
+          const result = await this.usecase.recalculateBulk({
+            from_date: req.body.from_date,
+            to_date: req.body.to_date,
+            employee_id: req.body.employee_id || null,
+            store_id: req.body.store_id || null,
+            designation_id: req.body.designation_id || null,
+            actor_employee_id:
+              req.decoded && req.decoded.employee_id !== undefined ? req.decoded.employee_id : null,
+          });
+          res.json({ code: 200, ...result });
+        } catch (err) {
+          respondError(res, err);
+        }
+      }
+    );
+
+    /** Recent bulk runs, for the same screen. */
+    this.router.get(
+      "/attendance/calculated/recalculate-runs",
+      this.permissions.require(P.RECALCULATE_ATTENDANCE),
+      async (req, res) => {
+        try {
+          const schema = { limit: Joi.number().integer().min(1).max(100).optional() };
+          const isValid = Joi.validate(req.query, schema);
+          if (isValid.error !== null) throw isValid.error;
+          res.json({
+            code: 200,
+            runs: await this.usecase.listRecalculationRuns(req.query.limit ? Number(req.query.limit) : 20),
+          });
+        } catch (err) {
+          respondError(res, err);
+        }
+      }
+    );
+
+    /**
      * The A4 monthly roll-up for one employee.
      *
      * `persist=true` stores the month as well as returning it, and needs the

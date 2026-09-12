@@ -182,6 +182,60 @@ class AttendanceRegularizationRoutes {
       }
     });
 
+    /**
+     * The approval screens. ONE request type per call, so Attendance Approval
+     * (REGULARIZATION) and OT Approval (OT) never mix; PENDING is "pending
+     * with me" and history is scoped to what the caller's role entitled them
+     * to see. Same key as the existing pending queue.
+     */
+    this.router.get(
+      "/attendance/approvals",
+      this.permissions.require(P.VIEW_ATTENDANCE_APPROVALS),
+      async (req, res) => {
+        try {
+          const schema = {
+            request_type: Joi.string().valid("REGULARIZATION", "OT").required(),
+            status: Joi.string().valid("PENDING", "APPROVED", "REJECTED", "ALL").optional(),
+            limit: Joi.number().integer().min(1).max(500).optional(),
+            offset: Joi.number().integer().min(0).optional(),
+          };
+          const isValid = Joi.validate(req.query, schema);
+          if (isValid.error !== null) throw isValid.error;
+
+          const result = await this.usecase.listApprovals({
+            actor: { employee_id: Number(req.decoded.employee_id), user_type: req.decoded.user_type },
+            request_type: req.query.request_type,
+            status: req.query.status || "PENDING",
+            limit: req.query.limit ? Number(req.query.limit) : 200,
+            offset: req.query.offset ? Number(req.query.offset) : 0,
+          });
+          res.json({ code: 200, ...result });
+        } catch (err) {
+          AttendanceRegularizationRoutes._respond(res, err);
+        }
+      }
+    );
+
+    /** "Pending with me", counted in SQL, per request type. */
+    this.router.get(
+      "/attendance/approvals/count",
+      this.permissions.require(P.VIEW_ATTENDANCE_APPROVALS),
+      async (req, res) => {
+        try {
+          const schema = { request_type: Joi.string().valid("REGULARIZATION", "OT").required() };
+          const isValid = Joi.validate(req.query, schema);
+          if (isValid.error !== null) throw isValid.error;
+          const result = await this.usecase.countPending({
+            actor: { employee_id: Number(req.decoded.employee_id), user_type: req.decoded.user_type },
+            request_type: req.query.request_type,
+          });
+          res.json({ code: 200, ...result });
+        } catch (err) {
+          AttendanceRegularizationRoutes._respond(res, err);
+        }
+      }
+    );
+
     /** The queue: requests whose current stage this caller could decide. */
     this.router.get(
       "/attendance/regularization/pending",
@@ -227,9 +281,12 @@ class AttendanceRegularizationRoutes {
     /**
      * Decide the current stage.
      *
-     * A final approval recalculates the date in the same request, which is
-     * what turns the regularized punch into worked minutes and the candidate
-     * OT into payable OT. Both writes are idempotent, so a retry is safe.
+     * A final approval recalculates the date in the same transaction. For a
+     * regularization that makes the proposed punch effective and nothing
+     * more - any OT the corrected day earns becomes Available to request; for
+     * an OT request it sets the approved OT, clamped to what the engine finds
+     * eligible now. The endpoint takes no minutes: an approver cannot change
+     * the figure. Both writes are idempotent, so a retry is safe.
      */
     this.router.post(
       "/attendance/regularization/:request_id/decision",

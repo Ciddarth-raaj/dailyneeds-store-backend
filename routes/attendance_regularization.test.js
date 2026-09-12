@@ -46,6 +46,8 @@ describe("the endpoints and their guards", () => {
     assert.deepEqual(
       guards.map((g) => `${g.method} ${g.path}`).sort(),
       [
+        "GET /attendance/approvals",
+        "GET /attendance/approvals/count",
         "GET /attendance/regularization/:request_id",
         "GET /attendance/regularization/pending",
         "POST /attendance/me/ot-request",
@@ -54,6 +56,11 @@ describe("the endpoints and their guards", () => {
         "POST /attendance/regularization/:request_id/decision",
       ]
     );
+  });
+
+  it("the approval screens' list and count are behind view_attendance_approvals", () => {
+    assert.deepEqual(find("GET", "/attendance/approvals").guard, { mode: "any", keys: [P.VIEW_ATTENDANCE_APPROVALS] });
+    assert.deepEqual(find("GET", "/attendance/approvals/count").guard, { mode: "any", keys: [P.VIEW_ATTENDANCE_APPROVALS] });
   });
 
   it("the self raises need an employee identity and no permission key; the HR raise is unchanged", () => {

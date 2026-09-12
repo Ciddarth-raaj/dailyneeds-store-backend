@@ -508,6 +508,145 @@ class AttendanceRegularizationRepository {
     );
   }
 
+  /**
+   * The WHERE clause of an approver's visibility, shared by the list and the
+   * count so the two can never disagree.
+   *
+   * PENDING: requests whose CURRENT stage this actor could decide now - the
+   * stage's role is one of theirs (a Store Manager's only for their own
+   * outlet) and the request is not their own. That is "pending with me".
+   *
+   * History (APPROVED / REJECTED / ALL): requests this actor was authorized
+   * to see or act on - any stage of the chain carries one of their roles,
+   * with the same outlet rule - and, again, never their own. An
+   * administrator sees everything. Nothing here widens visibility for a
+   * history tab beyond what the approver's role already gave them.
+   */
+  _approvalScope({ request_type, status, approver_roles, outlet_id, actor_employee_id, is_admin }) {
+    const roles = Array.isArray(approver_roles) ? approver_roles : [];
+    const where = ["r.request_type = ?"];
+    const params = [request_type];
+    const outlet = outlet_id === undefined ? null : outlet_id;
+
+    if (status === "PENDING") {
+      where.push("r.status = 'PENDING'");
+      where.push("s.decision = 'PENDING'");
+      if (!is_admin) {
+        if (roles.length === 0) where.push("1 = 0");
+        else {
+          where.push("s.approver_role IN (?)");
+          params.push(roles);
+          where.push("(s.approver_role <> 'STORE_MANAGER' OR s.outlet_id = ?)");
+          params.push(outlet);
+        }
+      }
+    } else {
+      if (status === "APPROVED" || status === "REJECTED") {
+        where.push("r.status = ?");
+        params.push(status);
+      } else {
+        where.push("r.status <> 'CANCELLED'");
+      }
+      if (!is_admin) {
+        if (roles.length === 0) where.push("1 = 0");
+        else {
+          where.push(
+            `EXISTS (SELECT 1 FROM attendance_approval_step x
+                      WHERE x.attendance_approval_request_id = r.attendance_approval_request_id
+                        AND x.approver_role IN (?)
+                        AND (x.approver_role <> 'STORE_MANAGER' OR x.outlet_id = ?))`
+          );
+          params.push(roles, outlet);
+        }
+      }
+    }
+    if (!is_admin) {
+      where.push("r.requested_for_employee_id <> ?");
+      where.push("r.requested_by_employee_id <> ?");
+      params.push(actor_employee_id, actor_employee_id);
+    }
+    return { where: where.join(" AND "), params };
+  }
+
+  /**
+   * The approval screens' rows: one request type, one status filter, the
+   * actor's scope, with the employee, the outlet, the proposed punch and the
+   * STORED calculation for the date joined in - so a screen can render the
+   * inline detail from one query rather than one request per row.
+   */
+  async listApprovals(filters) {
+    const { where, params } = this._approvalScope(filters);
+    const limit = Number(filters.limit) > 0 ? Number(filters.limit) : 200;
+    const offset = Number(filters.offset) > 0 ? Number(filters.offset) : 0;
+    return this._read(
+      "LIST-APPROVALS",
+      `SELECT r.attendance_approval_request_id, r.request_type, r.status,
+              r.requested_for_employee_id, ne.employee_name,
+              r.requested_by_employee_id,
+              DATE_FORMAT(r.attendance_date, '%Y-%m-%d') AS attendance_date,
+              r.outlet_id, o.outlet_name, r.reason,
+              r.candidate_ot_minutes, r.approved_ot_minutes,
+              r.current_stage_no, r.total_stages, r.finalization_state,
+              r.closure_reason, r.auto_created,
+              DATE_FORMAT(r.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+              DATE_FORMAT(r.decided_at, '%Y-%m-%d %H:%i:%s') AS decided_at,
+              DATE_FORMAT(p.punch_time, '%Y-%m-%d %H:%i:%s') AS proposed_punch_time,
+              c.shift_snapshot, c.effective_punches, c.nrm_minutes, c.worked_minutes,
+              c.shortage_minutes, c.candidate_ot_minutes AS stored_candidate_ot_minutes,
+              c.status AS stored_status, ws.shift_name
+         FROM attendance_approval_request r
+         JOIN attendance_approval_step s
+           ON s.attendance_approval_request_id = r.attendance_approval_request_id
+          AND s.stage_no = r.current_stage_no
+         LEFT JOIN new_employee ne ON ne.employee_id = r.requested_for_employee_id
+         LEFT JOIN outlets o ON o.outlet_id = r.outlet_id
+         LEFT JOIN attendance_regularized_punch p
+           ON p.attendance_approval_request_id = r.attendance_approval_request_id
+         LEFT JOIN attendance_day_calculation c
+           ON c.employee_id = r.requested_for_employee_id
+          AND c.attendance_date = r.attendance_date
+         LEFT JOIN work_shift ws ON ws.work_shift_id = c.work_shift_id
+        WHERE ${where}
+        ORDER BY r.status = 'PENDING' DESC, r.attendance_date DESC, r.attendance_approval_request_id DESC
+        LIMIT ? OFFSET ?`,
+      [...params, limit, offset]
+    );
+  }
+
+  /** The same scope, counted - never derived from a page of rows. */
+  async countApprovals(filters) {
+    const { where, params } = this._approvalScope(filters);
+    const rows = await this._read(
+      "COUNT-APPROVALS",
+      `SELECT COUNT(*) AS n
+         FROM attendance_approval_request r
+         JOIN attendance_approval_step s
+           ON s.attendance_approval_request_id = r.attendance_approval_request_id
+          AND s.stage_no = r.current_stage_no
+        WHERE ${where}`,
+      params
+    );
+    return rows && rows[0] ? Number(rows[0].n) : 0;
+  }
+
+  /** Every step of these requests, with the decider's name, one query. */
+  async listStepsForRequests(requestIds) {
+    if (!Array.isArray(requestIds) || requestIds.length === 0) return [];
+    return this._read(
+      "LIST-STEPS-FOR-REQUESTS",
+      `SELECT s.attendance_approval_request_id, s.attendance_approval_step_id,
+              s.stage_no, s.approver_role, s.outlet_id, s.decision,
+              s.decided_by_employee_id, d.employee_name AS decided_by_name,
+              DATE_FORMAT(s.decided_at, '%Y-%m-%d %H:%i:%s') AS decided_at,
+              s.remarks, s.acted_as_admin_override
+         FROM attendance_approval_step s
+         LEFT JOIN new_employee d ON d.employee_id = s.decided_by_employee_id
+        WHERE s.attendance_approval_request_id IN (?)
+        ORDER BY s.attendance_approval_request_id ASC, s.stage_no ASC`,
+      [requestIds]
+    );
+  }
+
   /** One employee's own requests, for the "what did I raise" view. */
   async listForEmployee({ employee_id, from_date, to_date, limit = 200 }) {
     return this._read(

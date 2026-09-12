@@ -19,11 +19,13 @@
  * enforced separately in `canApprove`, because a Store Manager is not the only
  * person who could otherwise appear in their own chain.
  *
- * ONE PASS FOR ONE DATE. A date that has both a missing punch and resulting
- * overtime raises ONE request, of type REGULARIZATION_WITH_OT, and the final
- * approval on that single chain approves both. OT with no missing punch raises
- * an OT request and still walks the same chain: v2 approves overtime after the
- * work, never before it, and never by a different route.
+ * TWO REQUESTS FOR TWO THINGS. A missing punch raises a REGULARIZATION, whose
+ * approval corrects attendance only; overtime the corrected day earns is then
+ * requested by the employee as a separate OT request, which walks the same
+ * chain: v2 approves overtime after the work, never before it, and never by a
+ * different route. REGULARIZATION_WITH_OT is a legacy type kept so historical
+ * rows still read; `requestTypeFor` still names it for them, and new code
+ * never creates it.
  *
  * WHY THERE IS NO PER-EMPLOYEE APPROVER TABLE. The chain is a function of role
  * and outlet, and the current architecture has no genuine per-employee
@@ -191,8 +193,10 @@ function canApprove(step, actor, request) {
  *
  * A rejection ends the whole request immediately: there is no "reject and pass
  * it on". An approval at the last stage is what makes the request APPROVED,
- * and only then does its regularized punch become effective and its OT become
- * payable - which is the entire point of the chain.
+ * and only then does a regularization's punch become effective, or an OT
+ * request's approved minutes become payable - which is the entire point of
+ * the chain. The two are separate requests; an attendance approval never
+ * approves OT.
  *
  * Pure: it returns the new state and writes nothing.
  */

@@ -446,7 +446,8 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase) =>
     }
 
     // Whatever the outcome, the date's stored calculation is about to be stale:
-    // an approval adds a punch and unlocks OT, a rejection ends the pending
+    // an approval makes the punch effective (attendance only - any OT the
+    // corrected day earns becomes AVAILABLE to request), a rejection ends the pending
     // state that was holding the date out of payroll. Compute the corrected
     // day NOW, with this decision assumed, so it can be committed with it.
     const [correctedDay] = await attendanceCalculationUsecase.calculateRange({
@@ -577,6 +578,201 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase) =>
     };
   };
 
+  /** The roles an actor decides with: their mapped role, or every role for an administrator. */
+  const rolesFor = (identity, actor) => {
+    const roles = [...identity.approver_roles];
+    if (Number(actor.user_type) === ADMIN_USER_TYPE) {
+      Object.values(APPROVER_ROLE).forEach((role) => {
+        if (!roles.includes(role)) roles.push(role);
+      });
+    }
+    return roles;
+  };
+
+  const APPROVAL_TYPES = [REQUEST_TYPE.REGULARIZATION, REQUEST_TYPE.OT];
+  const APPROVAL_STATUSES = ["PENDING", "APPROVED", "REJECTED", "ALL"];
+
+  const parseJson = (value, fallback) => {
+    if (value === null || value === undefined) return fallback;
+    if (typeof value !== "string") return value;
+    try {
+      return JSON.parse(value);
+    } catch (err) {
+      return fallback;
+    }
+  };
+
+  /**
+   * The approval screens: ONE request type, ONE status filter, the actor's
+   * own scope.
+   *
+   * Attendance Approval asks for REGULARIZATION and OT Approval asks for OT;
+   * the two never mix, by the filter. PENDING is "pending with me": the
+   * requests whose CURRENT stage this actor could decide now, each also
+   * checked through `canApprove` so a row is never shown as actionable when
+   * it is not. History is what the actor's role and outlet entitled them to
+   * see; the repository's scope is the same for the list and the count.
+   *
+   * Every PENDING row's day is calculated LIVE, so the punches, NRM, worked,
+   * shortage and eligible OT an approver decides on are the engine's answer
+   * now rather than a stored row from an earlier run. History rows read the
+   * stored calculation, which is what the decision was made against.
+   */
+  const listApprovals = async ({ actor, request_type, status = "PENDING", limit = 200, offset = 0 }) => {
+    if (!APPROVAL_TYPES.includes(request_type)) {
+      throw validationError("request_type must be REGULARIZATION or OT");
+    }
+    if (!APPROVAL_STATUSES.includes(status)) {
+      throw validationError("status must be PENDING, APPROVED, REJECTED or ALL");
+    }
+    const identity = await resolveIdentity(actor.employee_id);
+    const isAdmin = Number(actor.user_type) === ADMIN_USER_TYPE;
+    const roles = rolesFor(identity, actor);
+    const scope = {
+      request_type,
+      status,
+      approver_roles: roles,
+      outlet_id: identity.outlet_id,
+      actor_employee_id: identity.employee_id,
+      is_admin: isAdmin,
+    };
+
+    const [rows, total] = await Promise.all([
+      attendanceRegularizationRepo.listApprovals({ ...scope, limit, offset }),
+      attendanceRegularizationRepo.countApprovals(scope),
+    ]);
+    const steps = await attendanceRegularizationRepo.listStepsForRequests(
+      rows.map((r) => Number(r.attendance_approval_request_id))
+    );
+    const stepsByRequest = new Map();
+    steps.forEach((st) => {
+      const id = Number(st.attendance_approval_request_id);
+      if (!stepsByRequest.has(id)) stepsByRequest.set(id, []);
+      stepsByRequest.get(id).push(st);
+    });
+
+    const shaped = [];
+    for (const row of rows) {
+      const id = Number(row.attendance_approval_request_id);
+      const chain = stepsByRequest.get(id) || [];
+      const currentStep = chain.find((st) => Number(st.stage_no) === Number(row.current_stage_no)) || null;
+
+      let day = null;
+      if (row.status === REQUEST_STATUS.PENDING) {
+        /* eslint-disable no-await-in-loop */
+        const [live] = await attendanceCalculationUsecase.calculateRange({
+          employee_id: Number(row.requested_for_employee_id),
+          from_date: row.attendance_date,
+          to_date: row.attendance_date,
+        });
+        /* eslint-enable no-await-in-loop */
+        day = live || null;
+      }
+      const snapshot = day ? day.shift_snapshot : parseJson(row.shift_snapshot, null);
+      const punches = day ? day.effective_punches : parseJson(row.effective_punches, []);
+
+      const verdict =
+        row.status === REQUEST_STATUS.PENDING && currentStep
+          ? canApprove(
+              currentStep,
+              {
+                employee_id: identity.employee_id,
+                user_type: actor.user_type,
+                outlet_id: identity.outlet_id,
+                approver_roles: identity.approver_roles,
+              },
+              row
+            )
+          : { allowed: false, reason: null };
+
+      const decidedStep = [...chain]
+        .reverse()
+        .find((st) => st.decision === STEP_DECISION.APPROVED || st.decision === STEP_DECISION.REJECTED);
+      const claimed = Math.max(0, Math.trunc(Number(row.candidate_ot_minutes) || 0));
+      const eligible = day
+        ? Math.max(0, Math.trunc(Number(day.candidate_ot_minutes) || 0))
+        : row.stored_candidate_ot_minutes === null || row.stored_candidate_ot_minutes === undefined
+        ? claimed
+        : Math.max(0, Math.trunc(Number(row.stored_candidate_ot_minutes) || 0));
+
+      shaped.push({
+        attendance_approval_request_id: id,
+        request_type: row.request_type,
+        status: row.status,
+        employee_id: Number(row.requested_for_employee_id),
+        employee_name: row.employee_name || null,
+        requested_by_employee_id: Number(row.requested_by_employee_id),
+        outlet_id: row.outlet_id === null ? null : Number(row.outlet_id),
+        outlet_name: row.outlet_name || null,
+        attendance_date: row.attendance_date,
+        reason: row.reason,
+        submitted_at: row.created_at,
+        decided_at: row.decided_at || null,
+        decided_by_employee_id: decidedStep ? decidedStep.decided_by_employee_id : null,
+        decided_by_name: decidedStep ? decidedStep.decided_by_name || null : null,
+        closure_reason: row.closure_reason || null,
+        closure_label: row.closure_reason && OT_CLOSURE[row.closure_reason]
+          ? OT_CLOSURE[row.closure_reason].label
+          : null,
+        current_stage_no: Number(row.current_stage_no),
+        total_stages: Number(row.total_stages),
+        current_stage_role: currentStep ? currentStep.approver_role : null,
+        actionable: !!verdict.allowed,
+        not_actionable_reason: verdict.allowed ? null : verdict.reason,
+        // The proposed missing punch (regularization only).
+        proposed_punch_time: row.proposed_punch_time || null,
+        // The day, live for pending rows and stored for history.
+        shift_name: row.shift_name || (day ? day.shift_name : null) || null,
+        shift_code: snapshot ? snapshot.shift_code || null : null,
+        shift_in_time: snapshot ? snapshot.in_time || null : null,
+        shift_out_time: snapshot ? snapshot.out_time || null : null,
+        effective_punches: Array.isArray(punches) ? punches : [],
+        nrm_minutes: day ? day.nrm_minutes : row.nrm_minutes,
+        worked_minutes: day ? day.worked_minutes : row.worked_minutes,
+        shortage_minutes: day ? day.shortage_minutes : row.shortage_minutes,
+        // OT: what was claimed when raised, what the engine finds eligible,
+        // and what was finally approved. Never editable by an approver - the
+        // decision endpoint takes no minutes at all.
+        claimed_ot_minutes: request_type === REQUEST_TYPE.OT ? claimed : 0,
+        eligible_ot_minutes: request_type === REQUEST_TYPE.OT ? Math.min(claimed, eligible) : 0,
+        approved_ot_minutes:
+          row.approved_ot_minutes === null || row.approved_ot_minutes === undefined
+            ? 0
+            : Math.max(0, Math.trunc(Number(row.approved_ot_minutes) || 0)),
+        chain: chain.map((st) => ({
+          stage_no: Number(st.stage_no),
+          approver_role: st.approver_role,
+          outlet_id: st.outlet_id === null ? null : Number(st.outlet_id),
+          decision: st.decision,
+          decided_by_employee_id: st.decided_by_employee_id,
+          decided_by_name: st.decided_by_name || null,
+          decided_at: st.decided_at || null,
+          remarks: st.remarks || null,
+          acted_as_admin_override: Number(st.acted_as_admin_override) === 1,
+        })),
+      });
+    }
+
+    return { rows: shaped, total, request_type, status, limit, offset, approver_roles: roles };
+  };
+
+  /** "Pending with me", counted in SQL for one request type. */
+  const countPending = async ({ actor, request_type }) => {
+    if (!APPROVAL_TYPES.includes(request_type)) {
+      throw validationError("request_type must be REGULARIZATION or OT");
+    }
+    const identity = await resolveIdentity(actor.employee_id);
+    const count = await attendanceRegularizationRepo.countApprovals({
+      request_type,
+      status: "PENDING",
+      approver_roles: rolesFor(identity, actor),
+      outlet_id: identity.outlet_id,
+      actor_employee_id: identity.employee_id,
+      is_admin: Number(actor.user_type) === ADMIN_USER_TYPE,
+    });
+    return { request_type, pending_with_me: count };
+  };
+
   /** The queue: requests whose current stage this actor could decide. */
   const listPending = async ({ actor, limit }) => {
     const identity = await resolveIdentity(actor.employee_id);
@@ -616,6 +812,8 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase) =>
     raiseOtRequest,
     closeOtForPayrollLock,
     decide,
+    listApprovals,
+    countPending,
     listPending,
     listForEmployee,
     getRequest,
