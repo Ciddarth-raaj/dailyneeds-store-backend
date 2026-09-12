@@ -567,3 +567,72 @@ describe("recalculation is deterministic", () => {
     assert.notEqual(shift().snapshot_hash, shift({ break_minutes: 30 }).snapshot_hash);
   });
 });
+
+/* ======================================================== grace forgiveness == */
+
+describe("grace - late minutes inside the shift's grace are forgiven from the shortage", () => {
+  const graced = (extra = {}) =>
+    shift({
+      in_time: "09:30",
+      out_time: "18:30",
+      break_minutes: 30,
+      config: { late_grace_minutes: 10, early_exit_grace_minutes: 10, late_exclude_grace_from_deduction: 1, ...extra },
+    });
+
+  it("09:32 -> 18:30 on a 10-minute grace owes nothing (the reported 5 Sep bug)", () => {
+    const result = day({ shift: graced(), punches: punches("09:32", "18:30") });
+    assert.equal(result.late_minutes, 2);
+    assert.equal(result.worked_minutes, 508);
+    assert.equal(result.grace_forgiven_minutes, 2);
+    assert.equal(result.shortage_minutes, 0);
+    assert.equal(result.candidate_ot_minutes, 0, "a forgiven minute never becomes OT");
+  });
+
+  it("late beyond the grace with 'Do Not Deduct Grace Minutes' on charges only the excess", () => {
+    const result = day({ shift: graced(), punches: punches("09:45", "18:30") });
+    assert.equal(result.late_minutes, 15);
+    assert.equal(result.grace_forgiven_minutes, 10);
+    assert.equal(result.shortage_minutes, 5);
+  });
+
+  it("late beyond the grace with the switch off charges the whole late arrival", () => {
+    const result = day({
+      shift: graced({ late_exclude_grace_from_deduction: 0 }),
+      punches: punches("09:45", "18:30"),
+    });
+    assert.equal(result.grace_forgiven_minutes, 0);
+    assert.equal(result.shortage_minutes, 15);
+  });
+
+  it("an early out inside its grace is forgiven too; beyond it, nothing is", () => {
+    const inside = day({ shift: graced(), punches: punches("09:30", "18:22") });
+    assert.equal(inside.early_exit_minutes, 8);
+    assert.equal(inside.shortage_minutes, 0);
+    const beyond = day({ shift: graced(), punches: punches("09:30", "18:15") });
+    assert.equal(beyond.shortage_minutes, 15);
+  });
+
+  it("a shift with no grace behaves exactly as before", () => {
+    const result = day({
+      shift: shift({ in_time: "09:30", out_time: "18:30", break_minutes: 30 }),
+      punches: punches("09:32", "18:30"),
+    });
+    assert.equal(result.grace_forgiven_minutes, 0);
+    assert.equal(result.shortage_minutes, 2);
+  });
+
+  it("forgiveness never exceeds the shortage, and a long break gap is not a late arrival", () => {
+    // Late 5 (inside grace) but the shortage comes from a 90-minute lunch.
+    const result = day({
+      shift: graced(),
+      punches: punches("09:35", "13:00", "14:30", "18:35"),
+    });
+    assert.equal(result.late_minutes, 5);
+    assert.equal(result.worked_minutes, 450);
+    assert.equal(result.shortage_minutes, 55, "60 short, 5 forgiven for the late");
+  });
+
+  it("the grace settings are part of the snapshot hash", () => {
+    assert.notEqual(shift().snapshot_hash, shift({ config: { late_grace_minutes: 10 } }).snapshot_hash);
+  });
+});
