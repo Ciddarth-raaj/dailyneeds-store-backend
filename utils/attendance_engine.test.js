@@ -201,9 +201,9 @@ describe("A2 case 7 - gaps below the allowance can feed OT", () => {
 /* ================================================================== 8 ==== */
 
 describe("A2 case 8 - the employee's special break override replaces the shift break", () => {
-  it("a 90 minute override on a 12 hour shift makes NRM 630", () => {
+  it("a 90 minute override on a 12 hour shift makes NRM 630, when the break was punched", () => {
     const result = day({
-      punches: punches("09:00", "21:00"),
+      punches: punches("09:00", "13:00", "14:30", "21:00"),
       break_override_minutes: 90,
     });
 
@@ -214,6 +214,39 @@ describe("A2 case 8 - the employee's special break override replaces the shift b
     assert.equal(result.break_charged_minutes, 90);
     assert.equal(result.worked_minutes, 630);
     assert.equal(result.shortage_minutes, 0);
+  });
+
+  it("is NOT applied on a two-punch day: the shift's break is charged and NRM is the shift's", () => {
+    const result = day({
+      punches: punches("09:00", "21:00"),
+      break_override_minutes: 90,
+    });
+    assert.equal(result.break_allowance_source, "SHIFT");
+    assert.equal(result.break_allowance_minutes, 60);
+    assert.equal(result.nrm_minutes, 660);
+    assert.equal(result.break_charged_minutes, 60);
+    assert.equal(result.worked_minutes, 660);
+    assert.equal(result.shortage_minutes, 0);
+    assert.ok(result.notes.some((n) => /four or more punches/.test(n)));
+  });
+
+  it("a zero override on a four-punch day charges the actual gaps against an NRM of the whole span", () => {
+    const result = day({
+      punches: punches("09:00", "13:00", "13:30", "21:00"),
+      break_override_minutes: 0,
+    });
+    assert.equal(result.nrm_minutes, 720);
+    assert.equal(result.break_charged_minutes, 30);
+    assert.equal(result.worked_minutes, 690);
+    assert.equal(result.shortage_minutes, 30);
+  });
+
+  it("an absent or odd-punch day never carries the override", () => {
+    assert.equal(day({ punches: [], break_override_minutes: 90 }).break_allowance_source, "SHIFT");
+    assert.equal(
+      day({ punches: punches("09:00", "13:00", "14:00"), break_override_minutes: 90 }).break_allowance_source,
+      "SHIFT"
+    );
   });
 });
 

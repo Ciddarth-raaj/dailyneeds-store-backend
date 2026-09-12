@@ -582,10 +582,18 @@ function calculateAttendanceDay(input = {}) {
   // The employee's special break override REPLACES the shift break (it does
   // not add to it), and because NRM is span - break, changing it changes the
   // number of minutes the employee owes for the day.
-  const overrideGiven =
+  //
+  // IT APPLIES ONLY WHEN THE BREAK WAS PUNCHED: four or more punches, so the
+  // OUT -> IN gaps are on record. A two-punch day has no evidence of any
+  // break at all and is charged the SHIFT's allowance under the phased rule;
+  // a longer personal allowance is not credited against a break nobody can
+  // see was taken. An absent or odd-punch day is likewise calculated on the
+  // shift's own figure.
+  const overrideConfigured =
     break_override_minutes !== null &&
     break_override_minutes !== undefined &&
     Number.isFinite(Number(break_override_minutes));
+  const overrideGiven = overrideConfigured && effectivePunches.length >= 4;
   const allowedBreak = Math.max(
     0,
     Math.trunc(overrideGiven ? Number(break_override_minutes) : shift.break_minutes || 0)
@@ -596,6 +604,11 @@ function calculateAttendanceDay(input = {}) {
   base.break_allowance_minutes = allowedBreak;
   base.break_allowance_source = overrideGiven ? "EMPLOYEE_OVERRIDE" : "SHIFT";
   base.nrm_minutes = nrm;
+  if (overrideConfigured && !overrideGiven && effectivePunches.length > 0) {
+    base.notes.push(
+      "Employee break override not applied: it needs four or more punches, so the shift's break is used"
+    );
+  }
 
   // Nobody punched. Absent is a real, final answer: no day counted, and NO
   // shortage either - an absent day is simply not paid, and also charging the

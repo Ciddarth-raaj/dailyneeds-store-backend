@@ -178,23 +178,31 @@ describe("calculating a range", () => {
    * it applies to every date the engine calculates, and an employee with no
    * override falls back to the shift's own break.
    */
-  it("applies the employee's one current break override to every date", async () => {
+  it("applies the employee's one current break override to every date whose break was punched", async () => {
     const usecase = buildUsecase(
       fakeRepo({
-        rawPunches: [punch(1, "2026-09-14 09:00:00"), punch(2, "2026-09-14 21:00:00")],
+        rawPunches: [
+          punch(1, "2026-09-14 09:00:00"),
+          punch(2, "2026-09-14 13:00:00"),
+          punch(3, "2026-09-14 14:30:00"),
+          punch(4, "2026-09-14 21:00:00"),
+          punch(5, "2026-09-15 09:00:00"),
+          punch(6, "2026-09-15 21:00:00"),
+        ],
         employeeRow: { employee_id: 42, special_break_override_minutes: 90 },
       })
     );
 
-    const days = await usecase.calculateRange({
+    const [four, two] = await usecase.calculateRange({
       employee_id: 42,
       from_date: "2026-09-14",
       to_date: "2026-09-15",
     });
-    days.forEach((day) => {
-      assert.equal(day.nrm_minutes, 630);
-      assert.equal(day.break_allowance_source, "EMPLOYEE_OVERRIDE");
-    });
+    assert.equal(four.nrm_minutes, 630);
+    assert.equal(four.break_allowance_source, "EMPLOYEE_OVERRIDE");
+    // Two punches: no break on record, so the shift's own break applies.
+    assert.equal(two.nrm_minutes, 660);
+    assert.equal(two.break_allowance_source, "SHIFT");
   });
 
   it("falls back to the shift break when the employee has no override", async () => {
@@ -216,7 +224,12 @@ describe("calculating a range", () => {
   it("treats a zero override as a real setting, not as no override", async () => {
     const usecase = buildUsecase(
       fakeRepo({
-        rawPunches: [punch(1, "2026-09-14 09:00:00"), punch(2, "2026-09-14 21:00:00")],
+        rawPunches: [
+          punch(1, "2026-09-14 09:00:00"),
+          punch(2, "2026-09-14 13:00:00"),
+          punch(3, "2026-09-14 13:30:00"),
+          punch(4, "2026-09-14 21:00:00"),
+        ],
         employeeRow: { employee_id: 42, special_break_override_minutes: 0 },
       })
     );
