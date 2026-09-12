@@ -834,9 +834,6 @@ class Server {
       this.departmentUsecase,
       this.brandUsecase,
       this.cleaningPackingUsecase,
-      this.designationUsecase,
-      this.outletUsecase,
-      this.employeeUsecase,
       this.productRepo,
       this.stockHoldingReportUsecase
     );
@@ -1470,14 +1467,10 @@ class Server {
       this.cleaningPackingUsecase.setSynker(this.synker);
     }
 
-    // Wire synker back into employeesUsecase after service creation
-    if (this.employeeUsecase && this.employeeUsecase.setSynker) {
-      this.employeeUsecase.setSynker(this.synker);
-    }
-
-    // Stage 0C / C1c: the lifecycle reconciler runs after every Digisme
-    // employee sync - the 07:00 cron and POST /employee/sync alike, since
-    // both reach syncDigismeEmployees.
+    // Stage 0C / C1c: wired so the reconciler is callable. It has no caller
+    // since the Digisme employee sync was removed - see
+    // Synker#reconcileEmployeeLifecycle and
+    // docs/digisme-employee-sync-removal.md.
     if (this.synker && this.synker.setEmployeeLifecycleUsecase) {
       this.synker.setEmployeeLifecycleUsecase(this.employeeLifecycleUsecase);
     }

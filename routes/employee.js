@@ -1,6 +1,5 @@
 const router = require("express").Router();
 const P = require("../constants/hr_permissions");
-const lifecycleConfig = require("../config/lifecycle");
 const { requireEmployee, employeeIdOrNull } = require("../utils/actor");
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
@@ -628,27 +627,10 @@ class EmployeeRoutes {
       res.end();
     });
 
-    // Sync all data
-    router.post("/sync", this.permissions.require(P.ADD_EMPLOYEES), async (req, res) => {
-      try {
-        // Stage 0C: answer the caller plainly rather than reporting a
-        // successful sync that the service layer then declines to perform.
-        // 423 Locked - the resource is fine, it is deliberately unavailable.
-        // syncDigismeEmployees() carries the same guard; this one exists so
-        // the person who pressed the button learns why nothing happened.
-        if (!lifecycleConfig.digisme.employeeSync) {
-          return res
-            .status(423)
-            .json({ code: 423, msg: lifecycleConfig.PAUSED_MESSAGE, paused: true });
-        }
-
-        await this.employeeUsecase.sync();
-        res.json({ code: 200, msg: "Data successfully synced!" });
-      } catch (err) {
-        console.log(err);
-        res.json({ code: 500, msg: "An error occurred!" });
-      }
-    });
+    // POST /employee/sync is GONE. It triggered the Digisme employee sync,
+    // which has been removed - see docs/digisme-employee-sync-removal.md.
+    // dnds.co.in is the employee master; employees are created, edited,
+    // resigned and rejoined through the local actions on this router.
   }
 
   /**

@@ -367,7 +367,20 @@ describe("the API refuses what it cannot honour", () => {
 });
 
 /* ================================================= the Digisme guard ==== */
-describe("31/32. the legacy Digisme employee sync cannot overwrite local data", () => {
+/**
+ * 31/32 used to assert that the legacy Digisme employee sync was paused by
+ * default and, if un-paused, still refused by the C2 local-master guard at
+ * the one choke point both its callers reached.
+ *
+ * That sync has since been REMOVED - route, cron, credentials and service
+ * code (docs/digisme-employee-sync-removal.md). There is no longer a caller
+ * to guard, so what remains to assert is that the guard itself survived the
+ * removal, because the rule it enforces was never about Digisme: no legacy or
+ * future importer may write the employee master. The removal's own
+ * assertions - that no sync code, credential or endpoint is left, and that
+ * the route and cron are gone - live in services/digisme_removal.test.js.
+ */
+describe("31/32. dnds.co.in remains the employee master", () => {
   const reload = (env) => {
     const saved = { ...process.env };
     Object.assign(process.env, env);
@@ -383,68 +396,16 @@ describe("31/32. the legacy Digisme employee sync cannot overwrite local data", 
     assert.equal(cfg.localEmployeeMaster, true);
   });
 
-  it("32. the Digisme employee sync remains paused by default", () => {
-    const cfg = reload({ DIGISME_EMPLOYEE_SYNC: "" });
-    assert.equal(cfg.digisme.employeeSync, false);
+  it("and it is the only way back, so turning it off has to be deliberate", () => {
+    assert.equal(reload({ LOCAL_EMPLOYEE_MASTER: "off" }).localEmployeeMaster, false);
+    assert.equal(reload({ LOCAL_EMPLOYEE_MASTER: "nonsense" }).localEmployeeMaster, true);
   });
 
-  it("31. and turning the sync back on still cannot write the employee master", async () => {
-    // The guard is checked independently of DIGISME_EMPLOYEE_SYNC, at the
-    // same choke point both callers reach, so the cron and POST /employee/sync
-    // are covered by one check.
-    const saved = { ...process.env };
-    process.env.DIGISME_EMPLOYEE_SYNC = "on";
-    process.env.LOCAL_EMPLOYEE_MASTER = "on";
-    for (const m of ["../config/lifecycle", "../services/synker"]) delete require.cache[require.resolve(m)];
-    const buildSynker = require("../services/synker");
-
-    let bulkCreateCalls = 0;
-    const noop = async () => ({});
-    const synker = buildSynker(
-      {}, {}, {}, { bulkCreate: noop }, {}, {}, { bulkCreate: noop }, { bulkCreate: noop },
-      { bulkCreate: async () => { bulkCreateCalls += 1; return {}; } },
-      {}, {}
-    );
-    let fetched = false;
-    synker._fetchDigismeEmployees = async () => {
-      fetched = true;
-      return [];
-    };
-
-    const res = await synker.syncDigismeEmployees();
-    assert.equal(res.code, 423);
-    assert.equal(res.localEmployeeMaster, true);
-    assert.equal(bulkCreateCalls, 0, "no employee row was written");
-    assert.equal(fetched, false, "Digisme was not even contacted");
-
-    process.env = saved;
-    for (const m of ["../config/lifecycle", "../services/synker"]) delete require.cache[require.resolve(m)];
-  });
-
-  it("the guard sits at the choke point both entry points reach", () => {
-    const src = fs.readFileSync(path.join(__dirname, "..", "services/synker.js"), "utf8");
-    const fn = src.slice(src.indexOf("async syncDigismeEmployees()"), src.indexOf("async reconcileEmployeeLifecycle()"));
-    assert.ok(
-      fn.indexOf("localEmployeeMaster") < fn.indexOf("_fetchDigismeEmployees"),
-      "the local-master guard must precede the fetch and every write"
-    );
-    assert.equal((src.match(/lifecycleConfig\.localEmployeeMaster/g) || []).length, 1, "one guard, one place");
-  });
-
-  it("no unrelated sync was disabled", () => {
+  it("no unrelated sync was disabled by the removal", () => {
     const src = fs.readFileSync(path.join(__dirname, "..", "services/synker.js"), "utf8");
     for (const job of ["product_sync", "stock_holding_report_sync"]) {
       assert.match(src, new RegExp(`cronService\\.register\\(\\s*"${job}"`), `${job} must still be registered`);
     }
-    // The guard's single occurrence is inside syncDigismeEmployees and
-    // nowhere else, so no other sync can be affected by it.
-    const employeeFn = src.slice(
-      src.indexOf("async syncDigismeEmployees()"),
-      src.indexOf("async reconcileEmployeeLifecycle()")
-    );
-    assert.ok(employeeFn.includes("lifecycleConfig.localEmployeeMaster"));
-    const everythingElse = src.replace(employeeFn, "");
-    assert.ok(!/localEmployeeMaster/.test(everythingElse), "no other sync is gated by the employee guard");
   });
 });
 

@@ -10,6 +10,12 @@ const API_SYNC_TYPES = [
     label: "Product Sync",
     match: "/product/sync",
   },
+  // KEPT ON PURPOSE after the Digisme employee sync was removed
+  // (docs/digisme-employee-sync-removal.md). No route and no cron produce
+  // this type any more, so `match` can never fire again - but the historical
+  // `api_sync_log` rows are the record of what that sync did, and the log
+  // screen resolves their label through this list. Removing the entry would
+  // leave those rows unlabelled.
   {
     type: "employee_sync",
     category: "sync",

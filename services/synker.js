@@ -3,23 +3,16 @@ const cron = require("node-cron");
 const fs = require("fs");
 const path = require("path");
 const moment = require("moment");
-const encryptAES = require("../utils/encryptAES");
-const { exec } = require("child_process");
-const { capitalizeWords } = require("../utils/string");
 
 const logger = require("../utils/logger");
 const deliumConfig = require("../config/delium");
-const lifecycleConfig = require("../config/lifecycle");
-// const GOFRUGAL_API_KEY =
-//   "92389031420AEF2B22174FA933F178040AFD9395A5E9C3F013A74C4CA152CE786116998975B7AF31";
-
-const DIGISME_API_KEY =
-  "87961db9-7af8-472f-bf20-41c4f8ba117d:6eGalmciCUs09JToTitdJeOJzO4VZr";
-const DIGISME_CUSTOM_KEY =
-  "RO9XC34ub5YjttUlD08VuP3Q6JIldpNCRAwLm+YovhbOWC/BNGJ45VNGegryFBvCy30m+r1ocix8CwhULO7SWQ==";
+// A commented-out GOFRUGAL_API_KEY literal used to sit here. Removed while
+// removing the Digisme credentials beside it: commenting a key out does not
+// stop it being a published credential. It is still in git history, so it
+// needs revoking at GoFrugal like the Digisme pair - see
+// docs/digisme-employee-sync-removal.md.
 
 const CRON_SYNTAX_PRODUCT = "0 4 * * *";
-const CRON_SYNTAX_EMPLOYEE = "0 7 * * *";
 const CRON_SYNTAX_STOCK_HOLDING = "30 7 * * *";
 const CRON_SYNTAX_CLEANING_PACKING = "0 9 * * *";
 
@@ -31,9 +24,6 @@ class Synker {
     departmentUsecase,
     brandUsecase,
     cleaningPackingUsecase,
-    designationUsecase,
-    outletUsecase,
-    employeeUsecase,
     productRepo,
     stockHoldingReportUsecase
   ) {
@@ -43,9 +33,6 @@ class Synker {
     this.subcategoryUsecase = subcategoryUsecase;
     this.brandUsecase = brandUsecase;
     this.cleaningPackingUsecase = cleaningPackingUsecase;
-    this.designationUsecase = designationUsecase;
-    this.outletUsecase = outletUsecase;
-    this.employeeUsecase = employeeUsecase;
     this.productRepo = productRepo;
     this.stockHoldingReportUsecase = stockHoldingReportUsecase;
     // Stage 0C / C1c. Set by setEmployeeLifecycleUsecase after construction.
@@ -63,24 +50,6 @@ class Synker {
         return await this.syncProductsWithLogging();
       })
     );
-
-    // Stage 0C: while the pause is on, the employee job is not registered at
-    // all, so it is neither scheduled nor listed as skipped by CRON_DISABLED.
-    // The startup line below is the operator's proof. Every other job here is
-    // unaffected.
-    if (lifecycleConfig.digisme.employeeSync) {
-      cronService.register(
-        "employee_sync",
-        CRON_SYNTAX_EMPLOYEE,
-        wrap("employee_sync", "/employee/sync", async () => {
-          await this.syncDigismeEmployees();
-        })
-      );
-    } else {
-      console.log(
-        `[CRON] "employee_sync" NOT REGISTERED - ${lifecycleConfig.PAUSED_MESSAGE}. Set DIGISME_EMPLOYEE_SYNC=on to resume.`
-      );
-    }
 
     cronService.register(
       "stock_holding_report_sync",
@@ -141,189 +110,20 @@ class Synker {
     }
   }
 
-  async getDigismeToken() {
-    try {
-      const response = await this._authenticateDigisme();
-      return response.access_token;
-    } catch (error) {
-      console.error(error);
-      throw err;
-    }
-  }
-
-  async syncDigismeEmployees() {
-    // Stage 0C: paused. This returns BEFORE the Digisme token request, the
-    // employee fetch, and every write the routine performs - designation,
-    // department, outlet, employee and login provisioning alike - so a
-    // paused sync cannot touch the network or the database at all.
-    //
-    // It is checked here as well as at the cron registration because this
-    // function is also reachable from POST /employee/sync. One guard at the
-    // choke point is what makes both callers safe.
-    if (!lifecycleConfig.digisme.employeeSync) {
-      logger.Log({
-        level: logger.LEVEL.INFO,
-        component: "SERVICE.SYNKER",
-        code: "SERVICE.SYNKER.DIGISME-EMPLOYEES-PAUSED",
-        description: lifecycleConfig.PAUSED_MESSAGE,
-        category: "",
-        ref: {},
-      });
-      return { code: 423, msg: lifecycleConfig.PAUSED_MESSAGE, paused: true };
-    }
-
-    // Stage 0C / C2. Even if the pause above were lifted, the employee
-    // master is no longer Digisme's to write. This guard sits at the same
-    // choke point, so the cron and POST /employee/sync are both covered, and
-    // it is checked independently of DIGISME_EMPLOYEE_SYNC so that turning
-    // that flag back on cannot overwrite a local Create/Edit/Resign/Rejoin.
-    if (lifecycleConfig.localEmployeeMaster) {
-      logger.Log({
-        level: logger.LEVEL.INFO,
-        component: "SERVICE.SYNKER",
-        code: "SERVICE.SYNKER.DIGISME-EMPLOYEES-LOCAL-MASTER",
-        description: lifecycleConfig.LOCAL_MASTER_MESSAGE,
-        category: "",
-        ref: {},
-      });
-      return {
-        code: 423,
-        msg: lifecycleConfig.LOCAL_MASTER_MESSAGE,
-        localEmployeeMaster: true,
-      };
-    }
-
-    try {
-      const GENDER_MAP = {
-        FEMALE: "F",
-        MALE: "M",
-      };
-
-      const MARITAL_STATUS_MAP = {
-        MARRIED: "M",
-        SINGLE: "S",
-      };
-
-      const employees = await this._fetchDigismeEmployees();
-      const parsedDesignations = {};
-      const parsedDepartments = {};
-      const parsedBranches = {};
-
-      let formattedEmployees = employees.map((employee) => {
-        if (!parsedDesignations[employee.DesignationCode]) {
-          parsedDesignations[employee.DesignationCode] = {
-            designation_code: employee.DesignationCode,
-            designation_name: capitalizeWords(employee.DesignationName),
-            online_portal: 1,
-            login_access: 1,
-          };
-        }
-
-        if (!parsedBranches[employee.CategoryCode]) {
-          parsedBranches[employee.CategoryCode] = {
-            outlet_nickname: capitalizeWords(employee.CategoryName),
-            outlet_code: employee.CategoryCode,
-          };
-        }
-
-        if (
-          employee.DepartmentCode !== "NONE" &&
-          !parsedDepartments[employee.DepartmentCode]
-        ) {
-          parsedDepartments[employee.DepartmentCode] = {
-            department_code: employee.DepartmentCode,
-            department_name: capitalizeWords(employee.DepartmentName),
-          };
-        }
-
-        return {
-          employee_id: employee.EmployeeCode,
-          employee_name: capitalizeWords(employee.EmployeeName),
-          gender: GENDER_MAP[employee.Gender] ?? null,
-          marital_status: MARITAL_STATUS_MAP[employee.MartialStatus] ?? null,
-          department_code: employee.DepartmentCode,
-          designation_code: employee.DesignationCode,
-          outlet_code: employee.CategoryCode,
-          shift_code: employee.ShiftCode,
-          primary_contact_number: employee.MobileNo
-            ? employee.MobileNo.replace("91-", "")
-            : null,
-          status:
-            employee.IsTerminated &&
-            employee.IsTerminated.toLowerCase() === "yes"
-              ? 0
-              : 1,
-          resignation_date:
-            employee.IsTerminated &&
-            employee.IsTerminated.toLowerCase() === "yes"
-              ? new Date(employee.TerminateDate)
-              : null,
-        };
-      });
-
-      const designationsRes = await this.designationUsecase.bulkCreate(
-        Object.values(parsedDesignations)
-      );
-      const departmentsRes = await this.departmentUsecase.bulkCreate(
-        Object.values(parsedDepartments)
-      );
-      const branchesRes = await this.outletUsecase.bulkCreate(
-        Object.values(parsedBranches)
-      );
-
-      const designations = Object.fromEntries(
-        (designationsRes.designations || []).map((d) => [d.designation_code, d])
-      );
-      const departments = Object.fromEntries(
-        (departmentsRes.departments || []).map((d) => [d.department_code, d])
-      );
-      const branches = Object.fromEntries(
-        (branchesRes.branches || []).map((d) => [d.outlet_code, d])
-      );
-
-      formattedEmployees = formattedEmployees.map((employee) => {
-        const data = {
-          ...employee,
-          designation_id:
-            designations[employee.designation_code]?.designation_id,
-          department_id: departments[employee.department_code]?.department_id,
-          store_id: branches[employee.outlet_code]?.outlet_id,
-        };
-
-        delete data.designation_code;
-        delete data.department_code;
-        delete data.outlet_code;
-
-        return data;
-      });
-
-      await this.employeeUsecase.bulkCreate(formattedEmployees);
-      console.log("Employee sync completed");
-    } catch (err) {
-      console.error(err);
-      // The employee master did not finish syncing, so reconciling periods
-      // against a half-written master would draw conclusions from data
-      // Digisme never confirmed. Stop here; the next run repairs both.
-      return { code: 500, msg: "Employee sync failed", error: err.message };
-    }
-
-    // Stage 0C / C1c. The employee master is now as Digisme left it, so the
-    // employment periods can be brought into agreement with it.
-    //
-    // Deliberately AFTER the sync and outside its try/catch: the sync's own
-    // success is not conditional on this, and a lifecycle failure must not
-    // make a successful master sync look failed. It is reconciliation, not
-    // event handling, so a failure here is repaired by the next run rather
-    // than lost - which is why it is logged loudly and then returned rather
-    // than thrown.
-    return await this.reconcileEmployeeLifecycle();
-  }
-
   /**
-   * Runs the lifecycle reconciler if it has been wired in. Split out so that
-   * the scheduled cron and POST /employee/sync - which both reach
-   * syncDigismeEmployees above - take exactly the same path, and so a
-   * deployment where the reconciler is not wired still syncs.
+   * Stage 0C / C1c employment-period reconciliation.
+   *
+   * HAS NO CALLER. Its only caller was syncDigismeEmployees(), removed with
+   * the rest of the Digisme employee sync. It is kept, wired and callable
+   * because removing it would discard working reconciliation logic, and
+   * because that sync had been disabled at two switches for the whole of
+   * Stage 0C - so this had not run in production either way, and keeping it
+   * callerless changes nothing that was happening.
+   *
+   * GIVING IT A CALLER IS A SEPARATE, DELIBERATE DECISION: its own cron, or
+   * the local Resign / Rejoin actions calling it directly. Until then no
+   * process reconciles employment periods, which is the state Stage 0C has
+   * been in since the pause, not a regression introduced here.
    */
   async reconcileEmployeeLifecycle() {
     if (!this.employeeLifecycleUsecase) {
@@ -853,102 +653,6 @@ class Synker {
 
     return product;
   }
-
-  _authenticateDigisme() {
-    return new Promise(async (resolve, reject) => {
-      try {
-        const curlCommand = `curl -s --location --request GET 'https://indhrmsgateway.azurewebsites.net/Authenticate' \
---header 'Authorization: ${DIGISME_API_KEY}' \
---header 'customKey: ${DIGISME_CUSTOM_KEY}' \
---header 'Content-Type: application/x-www-form-urlencoded' \
---header 'Cookie: ARRAffinity=9a42df7877699a1820bb3aff0e46053675d3b7c9cb3150938bf21e214337c56e; ARRAffinitySameSite=9a42df7877699a1820bb3aff0e46053675d3b7c9cb3150938bf21e214337c56e' \
---data-urlencode 'Grant_type=password'`;
-
-        exec(curlCommand, (error, stdout, stderr) => {
-          if (error) {
-            console.error(`Error executing curl: ${error.message}`);
-            reject(error);
-            return;
-          }
-          if (stderr) {
-            console.error(`Curl stderr: ${stderr}`);
-            reject(stderr);
-            return;
-          }
-
-          console.log(`Curl stdout: ${stdout}`);
-          // Process the 'stdout' which contains the response from the curl command
-          resolve(JSON.parse(stdout));
-        });
-      } catch (err) {
-        logger.Log({
-          level: logger.LEVEL.ERROR,
-          component: "SERVICE.SYNKER",
-          code: "SERVICE.SYNKER.DIGISME-AUTHENTICATE",
-          description: err.toString(),
-          category: "",
-          ref: {},
-        });
-        reject(err);
-      }
-    });
-  }
-
-  async getDigismeToken() {
-    try {
-      const response = await this._authenticateDigisme();
-      return response.access_token;
-    } catch (error) {
-      console.error(error);
-      throw err;
-    }
-  }
-
-  _fetchDigismeEmployees() {
-    return new Promise(async (resolve, reject) => {
-      try {
-        const str = encryptAES({
-          CompanyId: "1",
-          IsActive: "2",
-        });
-        const token = await this.getDigismeToken();
-
-        const response = await axios({
-          method: "GET",
-          url: "https://indhrmsgateway.azurewebsites.net/api/GetEmployeeDetails",
-          headers: {
-            Authorization: `bearer ${token}`,
-          },
-          data: {
-            str,
-          },
-        });
-        if (response.status !== 200) {
-          logger.Log({
-            level: logger.LEVEL.ERROR,
-            component: "SERVICE.SYNKER",
-            code: "SERVICE.SYNKER.DIGISME-EMPLOYEES-FETCH",
-            description: err.toString(),
-            category: "",
-            ref: {},
-          });
-          reject();
-          return;
-        }
-        resolve(response.data);
-      } catch (err) {
-        logger.Log({
-          level: logger.LEVEL.ERROR,
-          component: "SERVICE.SYNKER",
-          code: "SERVICE.SYNKER.DIGISME-EMPLOYEES-FETCH",
-          description: err.toString(),
-          category: "",
-          ref: {},
-        });
-        reject(err);
-      }
-    });
-  }
 }
 
 module.exports = (
@@ -958,9 +662,6 @@ module.exports = (
   departmentUsecase,
   brandUsecase,
   cleaningPackingUsecase,
-  designationUsecase,
-  outletUsecase,
-  employeeUsecase,
   productRepo,
   stockHoldingReportUsecase
 ) => {
@@ -971,9 +672,6 @@ module.exports = (
     departmentUsecase,
     brandUsecase,
     cleaningPackingUsecase,
-    designationUsecase,
-    outletUsecase,
-    employeeUsecase,
     productRepo,
     stockHoldingReportUsecase
   );

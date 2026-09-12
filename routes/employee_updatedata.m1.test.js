@@ -223,7 +223,13 @@ describe("M1 review fix 1 — salary cannot be written through the legacy Employ
 
   it("the schema does not mention salary at all", () => {
     const src = fs.readFileSync(require.resolve("./employee"), "utf8");
-    const route = src.slice(src.indexOf('router.post("/updatedata"'), src.indexOf('router.post("/sync"'));
+    // From the updatedata handler to whatever route is registered next. This
+    // used to end at router.post("/sync"), which was removed with the Digisme
+    // employee sync (docs/digisme-employee-sync-removal.md), so the end of
+    // the handler is now found rather than named.
+    const from = src.indexOf('router.post("/updatedata"');
+    const next = src.indexOf("router.", from + 1);
+    const route = src.slice(from, next === -1 ? undefined : next);
     assert.ok(
       !/^\s*salary:\s*Joi\./m.test(route),
       "salary must not be a writable key in the updatedata schema"
