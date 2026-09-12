@@ -85,8 +85,24 @@ function post(port, path, { body, type }) {
 describe("/attendance/imports", () => {
   const guards = guardsOf(buildRoutes({}, permissions).getRouter());
 
-  it("defines preview, list, details, items and commit, and nothing else", () => {
-    assert.deepEqual(guards.map((g) => `${g.method} ${g.path}`).sort(), ["GET /", "GET /details", "GET /items", "POST /commit", "POST /digisme/preview"]);
+  it("defines preview, list, details, items, commit and rematch, and nothing else", () => {
+    assert.deepEqual(guards.map((g) => `${g.method} ${g.path}`).sort(), ["GET /", "GET /details", "GET /items", "POST /commit", "POST /digisme/preview", "POST /rematch"]);
+  });
+
+  it("rematch passes an optional employee_id through as a one-element filter, and rejects a non-positive one", async () => {
+    const seen = [];
+    const routes = buildRoutes({ async rematchUnmatched(f) { seen.push(f); return { code: 200, scanned: 3, rematched: 2, still_unmatched: 1, employees: [] }; } }, permissions);
+    const h = guardsOf(routes.getRouter()).find((g) => g.path === "/rematch").handler;
+    let res = fakeRes();
+    await h({ body: { employee_id: 42 } }, res);
+    assert.equal(res.body.rematched, 2);
+    res = fakeRes();
+    await h({ body: {} }, res);
+    assert.equal(res.body.rematched, 2);
+    assert.deepEqual(seen, [{ employeeIds: [42] }, { employeeIds: undefined }]);
+    res = fakeRes();
+    await h({ body: { employee_id: 0 } }, res);
+    assert.equal(res.statusCode, 400);
   });
 
   it("every endpoint requires manage_attendance_import - a key granted to nobody, so admin only", () => {

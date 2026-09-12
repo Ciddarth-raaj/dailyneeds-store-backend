@@ -352,6 +352,65 @@ class AttendanceImportUsecase {
 
   /* ---------------------------------------------------------------- reads */
 
+  /* -------------------------------------------------------------- re-match */
+
+  /**
+   * Give a stored UNMATCHED punch its identity once the employee exists.
+   *
+   * An unknown Employee Code is kept at ingest (device or import alike) with
+   * no employee_id, and the attendance engine reads punches by employee_id,
+   * so those punches count for nobody until something re-matches them. This
+   * is that something: every punch still UNMATCHED is resolved again through
+   * the SAME employee lookup and the SAME date rule as ingest, and the ones
+   * that now match get their derived row filled in. Punches that still match
+   * nobody are left exactly as they are. The raw punch is never modified, and
+   * a punch that already has an identity is never re-decided here.
+   *
+   * Called from the import screen on demand, and after an employee is
+   * created so the fix is automatic in the common case (HR adds the missing
+   * employee, the earlier punches attach themselves).
+   *
+   * @param {{employeeIds?: number[]}} filter  only these employees' codes
+   * @returns {{scanned, rematched, still_unmatched, employees: Array<{employee_id, user_id, punches}>}}
+   */
+  async rematchUnmatched(filter = {}) {
+    const only = Array.isArray(filter.employeeIds) && filter.employeeIds.length ? new Set(filter.employeeIds.map(Number)) : null;
+    const rows = await this.repo.unmatchedPunches();
+    const resolver = this._resolver();
+    const byEmployee = new Map();
+    let rematched = 0;
+    let considered = 0;
+    for (const p of rows) {
+      const code = parseEmployeeCode(String(p.user_id));
+      if (code === null) continue; // not a number at all - can never match
+      if (only && !only.has(code)) continue;
+      considered += 1;
+      const r = await resolver.derive(String(p.user_id), String(p.io_time_raw));
+      if (!r.employee) continue;
+      const ok = await this.repo.rematchPunch(p.biomax_punch_id, r.derived);
+      if (!ok) continue;
+      rematched += 1;
+      if (p.ingest_source === INGEST_SOURCE.DIGISME_IMPORT) {
+        await this.repo.rematchImportItems(p.biomax_punch_id, {
+          employee_id: r.derived.employee_id,
+          derivation_status: r.derived.status,
+          attendance_date: r.derived.attendance_date,
+          message: `re-matched to employee ${r.derived.employee_id} after the employee was added to the master`,
+        });
+      }
+      const k = r.derived.employee_id;
+      if (!byEmployee.has(k)) byEmployee.set(k, { employee_id: k, user_id: String(p.user_id), punches: 0 });
+      byEmployee.get(k).punches += 1;
+    }
+    return {
+      code: 200,
+      scanned: rows.length,
+      rematched,
+      still_unmatched: rows.length - rematched,
+      employees: [...byEmployee.values()].sort((a, b) => a.employee_id - b.employee_id),
+    };
+  }
+
   list(filters = {}) {
     return this.repo.list({ limit: filters.limit });
   }

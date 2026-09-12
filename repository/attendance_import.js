@@ -252,15 +252,81 @@ class AttendanceImportRepository {
     return rows;
   }
 
-  /** Distinct unmatched employee codes, with how many punches each carries. */
+  /**
+   * Distinct employee codes STILL unmatched, with how many punches each
+   * carries. An item re-matched later (see rematchImportItems) drops out:
+   * its outcome is no longer IMPORTED_UNMATCHED.
+   */
   unmatchedCodes(batchId, limit = 500) {
     return this._q(
       "UNMATCHED-CODES",
       `SELECT user_id, COUNT(*) AS punches, MIN(excel_row) AS first_excel_row
          FROM biomax_attendance_import_item
         WHERE import_batch_id = ? AND classification = 'UNMATCHED_EMPLOYEE'
+          AND (outcome IS NULL OR outcome = 'IMPORTED_UNMATCHED')
         GROUP BY user_id ORDER BY punches DESC, user_id LIMIT ${Math.min(Math.max(Number(limit) || 500, 1), 5000)}`,
       [batchId]
+    );
+  }
+
+  /* ------------------------------------------------------------ re-match */
+
+  /**
+   * Every stored punch whose code matched nobody at ingest - from ANY source
+   * (device, historical pull, DigiSME import): the gap is the same whoever
+   * delivered the punch. Oldest first, bounded.
+   */
+  unmatchedPunches(limit = 50000) {
+    return this._q(
+      "UNMATCHED-PUNCHES",
+      `SELECT p.biomax_punch_id, p.user_id, p.io_time_raw, p.ingest_source, p.import_batch_id
+         FROM biomax_punch_derived d
+         JOIN biomax_punch p ON p.biomax_punch_id = d.biomax_punch_id
+        WHERE d.derivation_status = 'UNMATCHED'
+        ORDER BY p.biomax_punch_id
+        LIMIT ${Math.min(Math.max(Number(limit) || 50000, 1), 200000)}`,
+      []
+    );
+  }
+
+  /**
+   * Attach the identity (and the attendance date that follows from it) to a
+   * punch that was UNMATCHED at ingest. The raw punch row is never touched;
+   * only the derived row moves, and only while it is still UNMATCHED, so a
+   * concurrent re-match cannot overwrite a result with a stale one.
+   * @returns {boolean} whether the row was still unmatched and got updated
+   */
+  async rematchPunch(punchId, derived) {
+    const r = await this._q(
+      "REMATCH-PUNCH",
+      `UPDATE biomax_punch_derived
+          SET employee_id = ?, home_outlet_id = ?, department_id = ?,
+              work_shift_id = ?, work_shift_weekly_schedule_id = ?, cutoff_applied = ?,
+              attendance_date = ?, derivation_status = ?, derived_at = NOW(3)
+        WHERE biomax_punch_id = ? AND derivation_status = 'UNMATCHED'`,
+      [
+        derived.employee_id,
+        derived.home_outlet_id,
+        derived.department_id,
+        derived.work_shift_id,
+        derived.work_shift_weekly_schedule_id,
+        derived.cutoff_applied,
+        derived.attendance_date,
+        derived.status,
+        punchId,
+      ]
+    );
+    return Boolean(r && r.affectedRows);
+  }
+
+  /** The import audit follows: an IMPORTED_UNMATCHED item becomes IMPORTED, with a note saying when. */
+  rematchImportItems(punchId, { employee_id, derivation_status, attendance_date, message }) {
+    return this._q(
+      "REMATCH-ITEMS",
+      `UPDATE biomax_attendance_import_item
+          SET employee_id = ?, derivation_status = ?, attendance_date = ?, outcome = 'IMPORTED', message = ?
+        WHERE biomax_punch_id = ? AND outcome = 'IMPORTED_UNMATCHED'`,
+      [employee_id, derivation_status, attendance_date, message, punchId]
     );
   }
 

@@ -116,6 +116,14 @@ class EmployeeMasterUsecase {
    * unknown end date through C1c's own NULL-only path.
    */
   constructor(employeeMasterRepo, lifecycleUsecase, lifecycleRepo, aadhaarUsecase, workShiftLookup) {
+    /**
+     * Optional: called with the new employee_id AFTER a create has committed.
+     * Best-effort and never awaited by the caller's response - a failure is
+     * logged and the create still succeeded. server.js wires the attendance
+     * re-match here so punches stored under a code nobody knew yet attach
+     * themselves the moment the employee exists.
+     */
+    this.onEmployeeCreated = null;
     this.repo = employeeMasterRepo;
     // M1. Answers `getActiveWorkShift(id)` - the employee work shift
     // repository - so a create can refuse an unknown or inactive initial
@@ -208,7 +216,7 @@ class EmployeeMasterUsecase {
     }
     delete fields.aadhaar_verification_id;
 
-    return this.repo.withTransaction(async (tx) => {
+    const created = await this.repo.withTransaction(async (tx) => {
       // The verified demographics are read BEFORE the insert and fill only the
       // fields HR left blank. `employee_name` is NOT NULL, so filling it after
       // the insert would be too late; and the allowlist is the Aadhaar layer's
@@ -278,6 +286,12 @@ class EmployeeMasterUsecase {
         aadhaar_status: aadhaar ? "VERIFIED" : "PENDING",
       };
     });
+    if (typeof this.onEmployeeCreated === "function") {
+      Promise.resolve()
+        .then(() => this.onEmployeeCreated(created.employee_id))
+        .catch((err) => this._log(logger.LEVEL.ERROR, "AFTER-CREATE", `after-create hook failed for employee ${created.employee_id}: ${err && err.message}`, { employeeId: created.employee_id }));
+    }
+    return created;
   }
 
   /* ==================================================================== */

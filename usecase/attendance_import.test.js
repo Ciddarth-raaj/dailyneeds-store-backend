@@ -38,6 +38,7 @@ function fakeStore() {
   let next = 1;
   const store = {
     punches,
+    employees,
     calls: { findEmployee: 0, findScheduleRow: 0, insertPunch: 0 },
     failOn: null, // io_time_raw that throws a generic error on insert
     async findEmployee(id) {
@@ -137,8 +138,20 @@ function fakeRepo(store) {
     },
     async unmatchedCodes(batchId) {
       const m = {};
-      for (const i of items.filter((x) => x.import_batch_id === batchId && x.classification === CLASS.UNMATCHED_EMPLOYEE)) m[i.user_id] = (m[i.user_id] || 0) + 1;
+      for (const i of items.filter((x) => x.import_batch_id === batchId && x.classification === CLASS.UNMATCHED_EMPLOYEE && (x.outcome === null || x.outcome === OUTCOME.IMPORTED_UNMATCHED))) m[i.user_id] = (m[i.user_id] || 0) + 1;
       return Object.entries(m).map(([user_id, punches]) => ({ user_id, punches }));
+    },
+    async unmatchedPunches() {
+      return store.punches.filter((p) => p.derived && p.derived.status === "UNMATCHED").map((p) => ({ biomax_punch_id: p.id, user_id: p.user_id, io_time_raw: p.io_time_raw, ingest_source: p.ingest_source, import_batch_id: p.import_batch_id }));
+    },
+    async rematchPunch(punchId, derived) {
+      const p = store.punches.find((x) => x.id === punchId);
+      if (!p || p.derived.status !== "UNMATCHED") return false;
+      p.derived = { ...derived };
+      return true;
+    },
+    async rematchImportItems(punchId, o) {
+      for (const it of items) if (it.biomax_punch_id === punchId && it.outcome === OUTCOME.IMPORTED_UNMATCHED) Object.assign(it, { outcome: OUTCOME.IMPORTED, employee_id: o.employee_id, derivation_status: o.derivation_status, attendance_date: o.attendance_date, message: o.message });
     },
     async items(batchId, f = {}) {
       const rows = items.filter((x) => x.import_batch_id === batchId && (!f.classification || x.classification === f.classification) && (!f.outcome || x.outcome === f.outcome));
@@ -450,5 +463,77 @@ describe("reads", () => {
     const d = await uc.details(pv.batch.import_batch_id);
     assert.equal(d.classification_counts.BAD_ROW, 2);
     await assert.rejects(uc.details("x"), /positive integer/);
+  });
+});
+
+describe("re-match", () => {
+  let store;
+  let repo;
+  let uc;
+  beforeEach(() => {
+    store = fakeStore();
+    repo = fakeRepo(store);
+    uc = build(repo, store);
+  });
+
+  it("an UNMATCHED punch attaches to the employee once the master knows the code; nothing else moves", async () => {
+    const out = await uc.preview(await xlsx(ROWS), { employeeId: 1 });
+    await uc.commit(out.batch.import_batch_id, { employeeId: 1 });
+    // a live device punch from the same unknown code, like the receiver stores it
+    await store.insertPunch({ dev_id: "DEV1", user_id: "9999", io_time_raw: "20260911180000" }, { attendance_date: null, status: "UNMATCHED", employee_id: null }, { source: "LIVE" });
+    const before = store.punches.map((p) => ({ ...p, derived: { ...p.derived } }));
+    assert.equal(store.punches.filter((p) => p.derived.status === "UNMATCHED").length, 3);
+
+    // nobody yet -> nothing changes
+    let r = await uc.rematchUnmatched();
+    assert.equal(r.rematched, 0);
+    assert.equal(r.still_unmatched, 3);
+    assert.deepEqual(store.punches, before);
+
+    // HR creates employee 9999 on shift 7 (04:00 cutoff)
+    store.employees.set(9999, { employee_id: 9999, store_id: 1, department_id: 2, default_work_shift_id: 7 });
+    r = await uc.rematchUnmatched({ employeeIds: [9999] });
+    assert.equal(r.scanned, 3);
+    assert.equal(r.rematched, 3, "both import punches and the live punch");
+    assert.equal(r.still_unmatched, 0);
+    assert.deepEqual(r.employees, [{ employee_id: 9999, user_id: "9999", punches: 3 }]);
+    for (const p of store.punches) {
+      if (p.user_id !== "9999") {
+        assert.deepEqual(p, before.find((b) => b.id === p.id), "matched punches are never re-decided");
+        continue;
+      }
+      assert.equal(p.derived.status, "OK");
+      assert.equal(p.derived.employee_id, 9999);
+      assert.equal(p.derived.home_outlet_id, 1);
+      assert.equal(p.derived.work_shift_id, 7);
+      assert.equal(p.derived.attendance_date, p.io_time_raw.startsWith("20260911") ? "2026-09-11" : "2026-09-10");
+    }
+    // the import audit follows and the batch no longer lists the code as unmatched
+    const items = repo.staged.filter((i) => i.user_id === "9999");
+    assert.deepEqual(items.map((i) => [i.outcome, i.employee_id, i.attendance_date]), [[OUTCOME.IMPORTED, 9999, "2026-09-10"], [OUTCOME.IMPORTED, 9999, "2026-09-10"]]);
+    assert.match(items[0].message, /re-matched to employee 9999/);
+    const d = await uc.details(out.batch.import_batch_id);
+    assert.deepEqual(d.unmatched_employee_codes, []);
+
+    // idempotent
+    r = await uc.rematchUnmatched();
+    assert.equal(r.scanned, 0);
+    assert.equal(r.rematched, 0);
+  });
+
+  it("the employee filter leaves other codes alone, and a code that is not a number is never considered", async () => {
+    await store.insertPunch({ dev_id: "DEV1", user_id: "9999", io_time_raw: "20260911180000" }, { attendance_date: null, status: "UNMATCHED", employee_id: null }, { source: "LIVE" });
+    await store.insertPunch({ dev_id: "DEV1", user_id: "8888", io_time_raw: "20260911180500" }, { attendance_date: null, status: "UNMATCHED", employee_id: null }, { source: "LIVE" });
+    await store.insertPunch({ dev_id: "DEV1", user_id: "A12", io_time_raw: "20260911181000" }, { attendance_date: null, status: "UNMATCHED", employee_id: null }, { source: "LIVE" });
+    store.employees.set(9999, { employee_id: 9999, store_id: 1, department_id: 2, default_work_shift_id: 7 });
+    store.employees.set(8888, { employee_id: 8888, store_id: 1, department_id: 2, default_work_shift_id: null });
+    let r = await uc.rematchUnmatched({ employeeIds: [9999] });
+    assert.equal(r.rematched, 1);
+    assert.equal(store.punches.find((p) => p.user_id === "8888").derived.status, "UNMATCHED");
+    r = await uc.rematchUnmatched();
+    assert.equal(r.rematched, 1);
+    assert.equal(store.punches.find((p) => p.user_id === "8888").derived.status, "NO_SHIFT", "matched, but dated by the same rule as ingest");
+    assert.equal(store.punches.find((p) => p.user_id === "A12").derived.status, "UNMATCHED");
+    assert.equal(r.still_unmatched, 1);
   });
 });
