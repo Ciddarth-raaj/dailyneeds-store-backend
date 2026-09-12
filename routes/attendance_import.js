@@ -15,6 +15,8 @@ const { MAX_UPLOAD_BYTES } = require("../usecase/attendance_import");
  *   GET  /details           one batch: counts, unmatched codes               manage_attendance_import
  *   GET  /items             paginated items of one batch (by classification) manage_attendance_import
  *   POST /commit            commit a PREVIEWED batch                         manage_attendance_import
+ *   POST /rematch           attach identity to punches UNMATCHED at ingest   manage_attendance_import
+ *                           (all of them, or one employee_id's code)
  *
  * ADMIN ONLY at this stage: the key is granted to no designation. The upload
  * is parsed with formidable (the project's existing upload library) into a
@@ -77,6 +79,16 @@ class AttendanceImportRoutes {
         });
         const { import_batch_id, ...filters } = req.query;
         res.json({ code: 200, data: await this.usecase.items(import_batch_id, filters) });
+      } catch (err) {
+        this.fail(res, err);
+      }
+    });
+
+    r.post("/rematch", P_.require(P.MANAGE_ATTENDANCE_IMPORT), async (req, res) => {
+      try {
+        this.validate(req.body, { employee_id: Joi.number().integer().positive().optional() });
+        const employeeIds = req.body && req.body.employee_id ? [Number(req.body.employee_id)] : undefined;
+        res.json(await this.usecase.rematchUnmatched({ employeeIds }));
       } catch (err) {
         this.fail(res, err);
       }

@@ -530,6 +530,11 @@ class Server {
     this.biomaxDeviceUsecase = require("./usecase/biomax_device")(this.biomaxDeviceRepo);
     this.biomaxHistoricalPullUsecase = require("./usecase/biomax_historical_pull")(this.biomaxHistoricalPullRepo);
     this.attendanceImportUsecase = require("./usecase/attendance_import")(this.attendanceImportRepo, this.biomaxImportStore);
+    // A punch stored under an Employee Code nobody knew yet (device or
+    // DigiSME import) is UNMATCHED and counts for nobody. Once HR creates
+    // that employee, re-match their punches automatically.
+    this.employeeMasterUsecase.onEmployeeCreated = (employeeId) =>
+      this.attendanceImportUsecase.rematchUnmatched({ employeeIds: [employeeId] });
     this.employeeWorkShiftUsecase = require("./usecase/employee_work_shift")(
       this.employeeWorkShiftRepo
     );
