@@ -728,9 +728,9 @@ module.exports = (attendanceDashboardRepo) => {
       const name = r.shift_code || r.shift_name || (r.work_shift_id ? `Shift ${r.work_shift_id}` : null);
       if (!isGap(r)) return name || "Shift (unnamed)";
       if (r.shift_resolution_status === RESOLUTION_STATUS.NO_SHIFT_FOR_DATE) {
-        return "No shift assigned for this date";
+        return "No shift assigned";
       }
-      return name ? `${name} — no schedule row for this weekday` : "Shift setup issue";
+      return name ? `${name} — no schedule row` : "Shift setup issue";
     };
     const labels = new Map(rows.map((r) => [String(keyOf(r)), labelOf(r)]));
     const shiftIds = new Map(
