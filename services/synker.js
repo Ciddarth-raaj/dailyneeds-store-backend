@@ -55,7 +55,12 @@ class Synker {
         "stock_holding_report_sync",
         "/stock-holding-report/sync",
         async () => {
-          await this.syncStockHoldingReportWithLogging();
+          // RETURN, not just await: wrapCron logs from what this resolves
+          // to, so swallowing the result logged every run with a null row
+          // count and - before the isSuccess fix in utils/api_sync_logger.js
+          // - as a success whatever the sync actually reported. Same shape as
+          // product_sync above.
+          return await this.syncStockHoldingReportWithLogging();
         }
       )
     );

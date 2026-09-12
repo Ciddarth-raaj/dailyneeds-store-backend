@@ -119,16 +119,37 @@ class ApiSyncLogger {
         const result = await fn();
         const warnings = collectSyncWarnings(result);
         const row_count = extractRowCount({ body: {} }, result);
+
+        // A RESOLVED PROMISE IS NOT A SUCCESSFUL SYNC. This used to decide
+        // status from `result.warnings` alone, so a job that returned
+        // `{ code: 400, message: "No valid rows to import" }` - a refusal,
+        // reported properly by the usecase - was logged as success / 200.
+        // Only a thrown error was ever a failure.
+        //
+        // `isSuccess` is the rule the HTTP middleware above already applies
+        // to the same log table: a payload whose `code` is present and not
+        // 200 is a failure. Sharing it is the point - one table, one
+        // definition of "did this sync work", whether the run came from the
+        // cron or from someone pressing the button.
+        //
+        // A job that returns nothing at all (no `code`) is still treated as
+        // success: plenty return undefined on a clean run, and calling those
+        // failures would be a different lie.
+        const failed = !isSuccess(200, result);
+        const code = Number(result && result.code);
+        const message = result && (result.message || result.msg);
         const error_message = warnings.length
           ? warnings.join("; ").slice(0, 512)
+          : failed
+          ? String(message || `sync reported code ${result.code}`).slice(0, 512)
           : null;
 
         await this.write({
           log_type: logType,
           method: "POST",
           path,
-          status: error_message ? "failed" : "success",
-          status_code: error_message ? 500 : 200,
+          status: failed || error_message ? "failed" : "success",
+          status_code: Number.isFinite(code) && code > 0 ? code : failed || error_message ? 500 : 200,
           duration_ms: Date.now() - startedAt,
           row_count,
           source: "cron",
