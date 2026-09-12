@@ -7,11 +7,6 @@ class EmployeeUsecase {
     this.documentUsecase = documentUsecase;
     this.userRepo = userRepo;
     this.resignationRepo = resignationRepo;
-    this.synker = null;
-  }
-
-  setSynker(synker) {
-    this.synker = synker;
   }
 
   get(filters) {
@@ -313,20 +308,6 @@ class EmployeeUsecase {
     }
   }
 
-  sync() {
-    return new Promise(async (resolve, reject) => {
-      try {
-        if (!this.synker || !this.synker.syncDigismeEmployees) {
-          throw new Error("Synker service not initialised");
-        }
-
-        await this.synker.syncDigismeEmployees();
-        resolve({ code: 200 });
-      } catch (err) {
-        reject(err);
-      }
-    });
-  }
 }
 
 module.exports = (employeeRepo, documentUsecase, userRepo, resignationRepo) => {

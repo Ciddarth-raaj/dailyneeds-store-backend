@@ -6,12 +6,16 @@ const { JOINED_ON } = require("../utils/joining_date");
  *
  * Every statement here is about `employee_employment_period` and
  * `employee_lifecycle_event`. Nothing in this file writes to `new_employee`:
- * Digisme is still the source of truth for the employee master, and C1c only
- * records what that master already says about who is employed and when.
+ * C1c only records what the employee master already says about who is
+ * employed and when. That master is dnds.co.in itself since Stage 0C / C2 -
+ * the Digisme sync that used to own it has been removed
+ * (docs/digisme-employee-sync-removal.md) - so the reconciler reads local
+ * HR's Create / Edit / Resign / Rejoin rather than a vendor payload.
  *
- * Locking. Two syncs running at once (the 07:00 cron and a manual
- * POST /employee/sync, say) would otherwise both read "latest period is
- * closed, employee is active" and both insert a rejoin period. Reconciling
+ * Locking. Two reconciliations running at once would otherwise both read
+ * "latest period is closed, employee is active" and both insert a rejoin
+ * period. There is one caller today and it is manual, but the lock is not
+ * conditional on that and must not be removed on those grounds. Reconciling
  * one employee therefore begins by taking a row lock on that employee's
  * `new_employee` row. The row always exists - the periods table has an FK to
  * it - so it can be locked even when the employee has no period yet, which a

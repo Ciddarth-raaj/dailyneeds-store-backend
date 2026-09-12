@@ -62,7 +62,6 @@ const MAP = [
   ["POST", "/employee", P.ADD_EMPLOYEES],
   ["POST", "/employee/updatedata", P.ADD_EMPLOYEES],
   ["POST", "/employee/update-status", P.ADD_EMPLOYEES],
-  ["POST", "/employee/sync", P.ADD_EMPLOYEES],
   ["GET", "/employee/bank", P.VIEW_BANKS],
   ["GET", "/employee/familydet", P.VIEW_FAMILY],
   // documents
@@ -287,7 +286,6 @@ describe("B2 — one module's permission does not grant another", () => {
     [P.VIEW_EMPLOYEES, "GET", "/employee/bank", "the staff directory does not open bank details"],
     [P.VIEW_EMPLOYEES, "GET", "/document/adhaar", "the staff directory does not open Aadhaar"],
     [P.VIEW_EMPLOYEES, "POST", "/employee/updatedata", "read does not grant write"],
-    [P.VIEW_EMPLOYEES, "POST", "/employee/sync", "read does not grant the Digisme sync"],
     [P.VIEW_DOCUMENTS, "GET", "/document/adhaar", "ordinary documents do not open Aadhaar"],
     [P.VIEW_DOCUMENTS, "POST", "/document/update-document", "viewing documents does not grant editing them"],
     [P.VIEW_SALARY_ADVANCE, "GET", "/employee/employees", "payroll does not open the staff directory"],

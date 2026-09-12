@@ -17,8 +17,10 @@
  *                                 `purchase_acknowledgement_gofrugal_sync`,
  *                                 registered in server.js.
  *
- * These tests pin that the pause cannot reach either, so nobody has to
- * re-derive it the next time purchase data goes quiet.
+ * These tests pinned that the pause could reach neither. The Digisme
+ * employee sync has since been removed outright, so they now pin the same
+ * thing about the removal - nobody should have to re-derive it the next time
+ * purchase data goes quiet.
  */
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
@@ -57,42 +59,41 @@ describe("the GoFrugal purchase-acknowledgement cron", () => {
   });
 });
 
-describe("the Digisme pause is scoped to the employee sync alone", () => {
+describe("the Digisme employee sync is gone, and took nothing else with it", () => {
   const synker = read("services/synker.js");
   const code = codeOf(synker);
 
-  it("the cron conditional names only employee_sync", () => {
+  it("registers no employee_sync job, and no conditional registration at all", () => {
     const init = code.slice(code.indexOf("initCronJobs("), code.indexOf("async syncStockHoldingReportWithLogging"));
-    const guarded = init.slice(init.indexOf("if (lifecycleConfig.digisme.employeeSync)"));
-    // The guarded block ends at its else; everything registered inside it must
-    // be the employee sync and nothing else.
-    const block = guarded.slice(0, guarded.indexOf("} else {"));
-    const registered = [...block.matchAll(/register\(\s*"([a-z_]+)"/g)].map((m) => m[1]);
-    assert.deepEqual(registered, ["employee_sync"]);
+    const registered = [...init.matchAll(/register\(\s*"([a-z_]+)"/g)].map((m) => m[1]);
+    assert.ok(!registered.includes("employee_sync"), "the job is removed, not merely skipped");
+    assert.ok(!/if\s*\(/.test(init), "no job is registered behind a flag any more");
   });
 
-  it("the other synker jobs are registered outside it", () => {
+  it("the other synker jobs survive the removal", () => {
     const init = code.slice(code.indexOf("initCronJobs("), code.indexOf("async syncStockHoldingReportWithLogging"));
-    const guardStart = init.indexOf("if (lifecycleConfig.digisme.employeeSync)");
-    const guardEnd = init.indexOf("}", init.indexOf("} else {") + 8);
-    const outside = init.slice(0, guardStart) + init.slice(guardEnd);
-    const registered = [...outside.matchAll(/register\(\s*"([a-z_]+)"/g)].map((m) => m[1]);
+    const registered = [...init.matchAll(/register\(\s*"([a-z_]+)"/g)].map((m) => m[1]);
     assert.ok(registered.includes("product_sync"));
     assert.ok(registered.includes("stock_holding_report_sync"));
-    assert.ok(!registered.includes("employee_sync"));
   });
 
-  it("and the C2 local-master guard touches only the employee sync function", () => {
-    const employeeFn = code.slice(
-      code.indexOf("async syncDigismeEmployees()"),
-      code.indexOf("async reconcileEmployeeLifecycle()")
-    );
-    assert.ok(employeeFn.includes("lifecycleConfig.localEmployeeMaster"));
-    const everythingElse = code.replace(employeeFn, "");
-    assert.ok(!/localEmployeeMaster/.test(everythingElse), "no other job is gated by it");
+  it("no Digisme code, credential or flag is left in the synker", () => {
+    for (const gone of [
+      "syncDigismeEmployees",
+      "_fetchDigismeEmployees",
+      "_authenticateDigisme",
+      "getDigismeToken",
+      "DIGISME_API_KEY",
+      "DIGISME_CUSTOM_KEY",
+      "indhrmsgateway",
+      "lifecycleConfig",
+      "encryptAES",
+    ]) {
+      assert.ok(!code.includes(gone), `services/synker.js still references ${gone}`);
+    }
   });
 
-  it("nothing in the synker mentions purchases, so the pause cannot reach them", () => {
+  it("nothing in the synker mentions purchases", () => {
     const init = code.slice(code.indexOf("initCronJobs("), code.indexOf("async syncStockHoldingReportWithLogging"));
     assert.ok(!/purchase/i.test(init), "the purchase jobs do not live here");
   });
