@@ -1191,18 +1191,72 @@ describe("Own Store and employee status", () => {
     active();
   });
 
-  it("AN ALL STORES USER IS UNAFFECTED - the check is Own Store's alone", async () => {
-    // Deliberately narrow: this task stops an inactive employee resolving Own
-    // Store through Employee Master. All Stores never reads the employee row, so
-    // nothing changed for it, and broadening it here would be an account-status
-    // redesign nobody approved. `middlewares/auth.js` remains the layer that
-    // refuses an inactive account outright.
+  it("AN INACTIVE ALL STORES USER IS REFUSED TOO", async () => {
+    // This was the residual the previous pass left and reported: the employee
+    // lookup sat inside the Own Store branch, so All Stores returned before it
+    // ever ran and an employee who had left kept COMPANY-WIDE access on a token
+    // still within its lifetime. The narrower scope was guarded and the wider
+    // one was not, which is precisely backwards.
+    active();
     employeeStore.status = 0;
     seen.scopeLookup = null;
     const res = await call("/attendance/dashboard/filters", tokenFor({ designationId: HR_ALL_STORES }));
+    assertRefused(res, "inactive employee holding All Stores");
+    assert.equal(res.body.reason, "EMPLOYEE_INACTIVE");
+    assert.equal(seen.scopeLookup, EMPLOYEE_ID, "the row IS read for All Stores now");
+    active();
+  });
+
+  it("AN ACTIVE ALL STORES USER IS STILL COMPANY-WIDE", async () => {
+    active();
+    const res = await call("/attendance/dashboard/filters", tokenFor({ designationId: HR_ALL_STORES }));
     assert.equal(res.body.code, 200);
     assert.equal(res.body.dashboard_scope.kind, "ALL_STORES");
-    assert.equal(seen.scopeLookup, null);
+    assert.equal(res.body.dashboard_scope.can_choose_outlet, true);
+  });
+
+  it("AN ACTIVE ALL STORES USER NEEDS NO ASSIGNED BRANCH", async () => {
+    // The scope is "every branch", so which one they are assigned to decides
+    // nothing. A missing outlet is fatal for Own Store and irrelevant here.
+    active();
+    employeeStore.value = null;
+    const res = await call("/attendance/dashboard/filters", tokenFor({ designationId: HR_ALL_STORES }));
+    assert.equal(res.body.code, 200);
+    assert.equal(res.body.dashboard_scope.kind, "ALL_STORES");
+    active();
+  });
+
+  it("an All Stores user with NO EMPLOYEE ROW is refused", async () => {
+    active();
+    employeeStore.missingRow = true;
+    const res = await call("/attendance/dashboard/filters", tokenFor({ designationId: HR_ALL_STORES }));
+    assertRefused(res, "All Stores with no employee record");
+    assert.equal(res.body.reason, "NO_EMPLOYEE_RECORD");
+    active();
+  });
+
+  it("THE LOOKUP FAILING IS A REFUSAL FOR ALL STORES TOO", async () => {
+    active();
+    employeeStore.throws = true;
+    const res = await call("/attendance/dashboard/filters", tokenFor({ designationId: HR_ALL_STORES }));
+    assertRefused(res, "the employee read threw for an All Stores caller");
+    active();
+  });
+
+  it("an inactive All Stores user cannot reach any endpoint", async () => {
+    active();
+    employeeStore.status = 0;
+    const token = tokenFor({ designationId: HR_ALL_STORES });
+    for (const endpoint of [
+      `/attendance/dashboard/overview?attendance_date=${DATE}`,
+      "/attendance/dashboard/staffing",
+      "/attendance/dashboard/staffing/drilldown?bucket=GAP",
+      "/attendance/dashboard/recurring-gaps",
+    ]) {
+      const res = await call(endpoint, token);
+      assertRefused(res, endpoint);
+      assert.equal(res.body.reason, "EMPLOYEE_INACTIVE", endpoint);
+    }
     active();
   });
 
@@ -1220,5 +1274,109 @@ describe("Own Store and employee status", () => {
     assert.equal(res.body.reason, "NO_DASHBOARD_PERMISSION");
     assert.equal(seen.scopeLookup, null, "a refusal must not differ by employee status");
     active();
+  });
+});
+
+/* ==================================================================== */
+/* THE RESOLVER ORDER ITSELF.                                           */
+/*                                                                      */
+/* Active employment is a PREREQUISITE for every non-administrator,      */
+/* answered above the Own Store / All Stores split - not a detail of one */
+/* branch. These pin the order, because the order IS the security.      */
+/* ==================================================================== */
+
+describe("the resolver order", () => {
+  const active = () => {
+    employeeStore.value = MOOLAKULAM;
+    employeeStore.status = 1;
+    employeeStore.missingRow = false;
+    employeeStore.throws = false;
+  };
+
+  it("THE ADMINISTRATOR IS DECIDED BEFORE ANY EMPLOYEE QUESTION IS ASKED", async () => {
+    // No employee row, inactive, and the lookup would throw if reached. An
+    // administrator is authorized by user type and asks none of it.
+    employeeStore.missingRow = true;
+    employeeStore.status = 0;
+    employeeStore.throws = true;
+    seen.scopeLookup = null;
+    const res = await call("/attendance/dashboard/filters", tokenFor({ designationId: OUTLET_STAFF, userType: 2 }));
+    assert.equal(res.body.code, 200);
+    assert.equal(res.body.dashboard_scope.kind, "ALL_STORES");
+    assert.equal(seen.scopeLookup, null, "it never asked");
+    active();
+  });
+
+  it("the feature key is checked BEFORE the employee row", async () => {
+    // A refusal must not differ in shape or timing by whether the caller
+    // happens to be an active employee.
+    active();
+    employeeStore.status = 0;
+    seen.scopeLookup = null;
+    const res = await call("/attendance/dashboard/filters", tokenFor({ designationId: OUTLET_STAFF }));
+    assert.equal(res.body.reason, "NO_DASHBOARD_PERMISSION");
+    assert.equal(seen.scopeLookup, null);
+    active();
+  });
+
+  it("the SCOPE KEYS are resolved before the employee row", async () => {
+    // Both keys, or neither, is a rights-configuration fault and is answered as
+    // one - reading Employee Master first would report the wrong problem.
+    active();
+    employeeStore.status = 0;
+    seen.scopeLookup = null;
+    const both = await call("/attendance/dashboard/filters", tokenFor({ designationId: CONFLICTED }));
+    assert.equal(both.body.reason, "CONFLICTING_SCOPE");
+    assert.equal(seen.scopeLookup, null, "a conflict needs no employee row");
+
+    seen.scopeLookup = null;
+    const none = await call("/attendance/dashboard/filters", tokenFor({ designationId: HR_EXECUTIVE }));
+    assert.equal(none.body.reason, "NO_SCOPE_GRANTED");
+    assert.equal(seen.scopeLookup, null, "nor does an absent scope");
+    active();
+  });
+
+  it("BOTH NON-ADMIN SCOPES GO THROUGH THE SAME EMPLOYEE CHECK", async () => {
+    // One lookup, above the split. The same inactive employee is refused with
+    // the same reason whichever scope their designation holds.
+    active();
+    employeeStore.status = 0;
+    for (const designationId of [STORE_MANAGER, HR_ALL_STORES]) {
+      seen.scopeLookup = null;
+      const res = await call("/attendance/dashboard/filters", tokenFor({ designationId }));
+      assert.equal(res.body.reason, "EMPLOYEE_INACTIVE", String(designationId));
+      assert.equal(seen.scopeLookup, EMPLOYEE_ID, String(designationId));
+    }
+    active();
+  });
+
+  it("A MISSING BRANCH SEPARATES THE TWO SCOPES, and only there", async () => {
+    // The one place they legitimately differ: Own Store needs the branch, All
+    // Stores does not. Both start from the same active employee.
+    active();
+    employeeStore.value = null;
+    const own = await call("/attendance/dashboard/filters", tokenFor({ designationId: STORE_MANAGER }));
+    assert.equal(own.body.reason, "NO_STORE_ASSIGNED");
+    const all = await call("/attendance/dashboard/filters", tokenFor({ designationId: HR_ALL_STORES }));
+    assert.equal(all.body.code, 200);
+    assert.equal(all.body.dashboard_scope.kind, "ALL_STORES");
+    active();
+  });
+
+  it("a transferred ACTIVE employee still follows Employee Master", async () => {
+    // The reordering must not disturb the transfer behaviour.
+    active();
+    employeeStore.value = ECR;
+    await call(`/attendance/dashboard/overview?attendance_date=${DATE}`, tokenFor({ designationId: STORE_MANAGER }));
+    assert.deepEqual(seen.overview.store_ids, [ECR]);
+    active();
+  });
+
+  it("the stale token store_id still decides nothing", async () => {
+    // Every token here carries store_id 2; the assigned branch is 1.
+    active();
+    await call(`/attendance/dashboard/overview?attendance_date=${DATE}`, tokenFor({ designationId: STORE_MANAGER }));
+    assert.deepEqual(seen.overview.store_ids, [MOOLAKULAM]);
+    assert.notDeepEqual(seen.overview.store_ids, [2]);
   });
 });

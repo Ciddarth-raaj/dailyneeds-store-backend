@@ -32,10 +32,11 @@ const {
  *       ...
  *     });
  *
- * `requireDashboardAccess` refuses before the handler runs - no feature key,
- * no scope, an unresolvable branch or an attempt to widen the scope all end
- * there - so a handler that runs has a caller who may be there, and a
- * `store_ids` that is already narrowed. A module that needs the scope without
+ * `requireDashboardAccess` refuses before the handler runs - no feature key, no
+ * scope, an employee who is not active, an unresolvable branch or an attempt to
+ * widen the scope all end there - so a handler that runs has a caller who may be
+ * there, and a `store_ids` that is already narrowed. ACTIVE EMPLOYMENT IS A
+ * PREREQUISITE FOR EVERY NON-ADMINISTRATOR, whichever scope they hold. A module that needs the scope without
  * the middleware (a filters endpoint building its own options, say) calls
  * `resolveDashboardScope(req, key)` directly and reads `.kind` itself.
  *
@@ -102,7 +103,15 @@ module.exports = (permissions, dashboardScopeRepo) => {
     });
 
     if (decided.kind === DASHBOARD_SCOPE.NONE) return refuse(decided.reason);
-    if (decided.kind === DASHBOARD_SCOPE.ALL_STORES) {
+
+    // 3. THE ADMINISTRATOR FAST PATH, and the only way past the employee check.
+    //
+    //    `user_type` 2 is the system's existing administrator and is authorized
+    //    company-wide BY USER TYPE. It was never an employee question, so it
+    //    asks no employee question: an administrator with no employee row, or
+    //    an inactive one, still gets All Stores. Returning here is what keeps
+    //    that true, and is why the check below can be unconditional.
+    if (isAdmin) {
       return {
         kind: DASHBOARD_SCOPE.ALL_STORES,
         store_ids: null,
@@ -112,33 +121,53 @@ module.exports = (permissions, dashboardScopeRepo) => {
       };
     }
 
-    // 3. OWN STORE: the branch Employee Master says they are assigned to, read
-    //    now. A login with no employee record, an employee row that is gone, an
-    //    employee who is no longer active, and an employee with no branch on
-    //    record are four different faults and all four fail closed - none of
-    //    them becomes "everywhere", and none of them becomes "their old branch".
+    // 4. EVERY NON-ADMINISTRATOR MUST BE AN ACTIVE EMPLOYEE, whichever scope
+    //    they hold.
+    //
+    //    THE GAP THIS CLOSES. The employee lookup used to sit inside the Own
+    //    Store branch, so All Stores returned before it ever ran - and an
+    //    employee who had left, holding `dashboard_scope_all_stores` on a
+    //    designation nobody had revoked, kept resolving to COMPANY-WIDE access
+    //    on a token that was still within its lifetime. The narrower scope was
+    //    guarded and the wider one was not, which is precisely backwards.
+    //
+    //    IT IS A PREREQUISITE, NOT A DETAIL OF OWN STORE. "May this person see
+    //    dashboards at all" is answered before "which branches", so the lookup
+    //    happens once, above the split, and both scopes pass through it.
+    //
+    //    AND IT IS READ LIVE. Not `req.decoded.store_id`, not an employee status
+    //    carried in the token, not anything the browser sent - the current
+    //    Employee Master row, every request.
+    //
+    //    WHY NOT LEAVE IT TO AUTH. `middlewares/auth.js` does refuse an inactive
+    //    employee, but only when `AUTH_EMPLOYEE_STATUS_CHECK` is on, only for
+    //    non-legacy tokens on one of its two call sites, and only as often as
+    //    its session-state cache refreshes. An authorization boundary must not
+    //    depend on a feature flag it does not own.
     const employeeId = req.decoded.employee_id;
     if (!employeeId) return refuse(SCOPE_REASON.NO_EMPLOYEE_RECORD);
 
     const row = await dashboardScopeRepo.getEmployeeStore(employeeId);
     if (!row) return refuse(SCOPE_REASON.NO_EMPLOYEE_RECORD);
-
-    // AN INACTIVE EMPLOYEE RESOLVES TO NOTHING, and this check has to be here
-    // rather than left to the authentication layer.
-    //
-    // `middlewares/auth.js` does refuse an inactive employee - but only when
-    // `AUTH_EMPLOYEE_STATUS_CHECK` is on, only for non-legacy tokens, and only
-    // as often as the session-state cache is refreshed. An authorization
-    // boundary must not depend on a feature flag it does not own, and this one
-    // is reading Employee Master anyway: the row that says which branch is the
-    // same row that says whether they still work here, and it would be strange
-    // to trust half of it.
-    //
-    // CHECKED BEFORE THE BRANCH, so somebody who left AND had no branch is
-    // reported as inactive - the fault that actually matters - rather than as a
-    // setup problem somebody might try to fix by assigning them an outlet.
     if (!isActiveEmployeeRow(row)) return refuse(SCOPE_REASON.EMPLOYEE_INACTIVE);
 
+    // 5. ALL STORES for an active employee. NO BRANCH IS REQUIRED: the scope is
+    //    "every branch", so which one they are assigned to decides nothing. An
+    //    active All Stores holder with no outlet on their record is authorized
+    //    company-wide, exactly as one with an outlet is.
+    if (decided.kind === DASHBOARD_SCOPE.ALL_STORES) {
+      return {
+        kind: DASHBOARD_SCOPE.ALL_STORES,
+        store_ids: null,
+        reason: decided.reason,
+        outlet_name: null,
+        employee_id: Number(row.employee_id),
+      };
+    }
+
+    // 6. OWN STORE needs the branch itself, so a missing one is fatal here in a
+    //    way it is not above. Reported as its own fault, which an administrator
+    //    fixes by assigning an outlet in Employee Master.
     if (row.store_id === null || row.store_id === undefined) {
       return refuse(SCOPE_REASON.NO_STORE_ASSIGNED);
     }
