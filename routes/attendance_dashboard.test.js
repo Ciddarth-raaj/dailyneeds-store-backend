@@ -117,6 +117,18 @@ const staffingUsecase = {
     seen.staffing = args;
     return { as_of: `${DATE} 10:00`, expected_now: 0, recorded_in: 0, gap: 0 };
   },
+  getStaffingDrilldown: async (args) => {
+    seen.staffingDrilldown = args;
+    return {
+      as_of: `${DATE} 10:00`,
+      bucket: args.bucket,
+      total: 0,
+      rows: [],
+      limit: args.limit || 50,
+      offset: args.offset || 0,
+      applied_filters: { store_ids: args.store_ids, store_id: args.store_id },
+    };
+  },
   getRecurringGaps: async (args) => {
     seen.recurring = args;
     return { patterns: [], available: false };
@@ -216,6 +228,7 @@ const ENDPOINTS = [
   `/attendance/dashboard/trend?attendance_date=${DATE}`,
   `/attendance/dashboard/recent-punches?attendance_date=${DATE}`,
   `/attendance/dashboard/staffing`,
+  `/attendance/dashboard/staffing/drilldown?bucket=GAP`,
   `/attendance/dashboard/recurring-gaps`,
 ];
 
@@ -535,5 +548,101 @@ describe("the browser's outlet filter is a FILTER, never authorization", () => {
       tokenFor()
     );
     assert.equal(seen.drilldown.store_unassigned, true);
+  });
+});
+
+/* ==================================================================== */
+/* THE STAFFING DRILLDOWN at the route level.                            */
+/* ==================================================================== */
+
+describe("the staffing drilldown endpoint", () => {
+  it("takes no attendance_date either - it answers about now", async () => {
+    const res = await call(
+      `/attendance/dashboard/staffing/drilldown?bucket=GAP&attendance_date=${DATE}`,
+      tokenFor()
+    );
+    assert.equal(res.body.code, 422);
+  });
+
+  it("requires a bucket rather than defaulting to one", async () => {
+    const res = await call("/attendance/dashboard/staffing/drilldown", tokenFor());
+    assert.equal(res.body.code, 422, "answering 'everybody' to a missing bucket would be a guess");
+  });
+
+  it("refuses a page larger than the cap", async () => {
+    const res = await call(
+      "/attendance/dashboard/staffing/drilldown?bucket=GAP&limit=5000",
+      tokenFor()
+    );
+    assert.equal(res.body.code, 422);
+  });
+
+  it("refuses a negative offset", async () => {
+    const res = await call(
+      "/attendance/dashboard/staffing/drilldown?bucket=GAP&offset=-1",
+      tokenFor()
+    );
+    assert.equal(res.body.code, 422);
+  });
+
+  it("refuses an unknown query parameter rather than ignoring it", async () => {
+    const res = await call(
+      "/attendance/dashboard/staffing/drilldown?bucket=GAP&include_salary=true",
+      tokenFor()
+    );
+    assert.equal(res.body.code, 422);
+  });
+
+  it("passes the bucket, the paging and every filter through", async () => {
+    await call(
+      "/attendance/dashboard/staffing/drilldown?bucket=NO_CHECK_IN&store_ids=2&store_id=2" +
+        "&designation_id=5&work_shift_id=7&search=%20Priya%20&gap_class=NO_CHECK_IN&limit=25&offset=50",
+      tokenFor()
+    );
+    assert.equal(seen.staffingDrilldown.bucket, "NO_CHECK_IN");
+    assert.deepEqual(seen.staffingDrilldown.store_ids, [2]);
+    assert.equal(seen.staffingDrilldown.store_id, 2);
+    assert.equal(seen.staffingDrilldown.designation_id, 5);
+    assert.equal(seen.staffingDrilldown.work_shift_id, 7);
+    assert.equal(seen.staffingDrilldown.search, "Priya", "trimmed, like every other filter");
+    assert.equal(seen.staffingDrilldown.gap_class, "NO_CHECK_IN");
+    assert.equal(seen.staffingDrilldown.limit, 25);
+    assert.equal(seen.staffingDrilldown.offset, 50);
+  });
+
+  it("A REQUESTED LOCATION REACHES THE USECASE AS A FILTER, never as authorization", async () => {
+    // The route hands both down; the intersection happens in the usecase, where
+    // an id outside the caller's scope yields nothing rather than widening it.
+    // Here the scope is ALL, so the requested id is simply passed on.
+    await call("/attendance/dashboard/staffing/drilldown?bucket=EXPECTED&store_id=2", tokenFor());
+    assert.equal(seen.staffingDrilldown.store_id, 2);
+    assert.equal(seen.staffingDrilldown.store_ids, null, "an unfiltered ALL scope narrows nothing");
+  });
+
+  it("an out-of-scope store_ids filter intersects to nothing, not to everything", async () => {
+    // A LIST scope of [2] asked for outlet 1: the intersection is empty and the
+    // usecase is told so explicitly.
+    assert.deepEqual(effectiveStoreIds("1", { kind: SCOPE.LIST, store_ids: [2] }), []);
+    assert.deepEqual(effectiveStoreIds("1,2", { kind: SCOPE.LIST, store_ids: [2] }), [2]);
+    assert.deepEqual(effectiveStoreIds(null, { kind: SCOPE.NONE, store_ids: [] }), []);
+  });
+
+  it("sets no-store, so a shared cache cannot serve one person's list to another", async () => {
+    const res = await fetch(
+      `http://127.0.0.1:${port}/attendance/dashboard/staffing/drilldown?bucket=GAP`,
+      { headers: { "x-access-token": await tokenFor() } }
+    );
+    assert.equal(res.headers.get("cache-control"), "no-store");
+  });
+
+  it("the recurring-gaps panel takes the effective shift filter too", async () => {
+    await call(
+      "/attendance/dashboard/recurring-gaps?store_ids=2&designation_id=5&work_shift_id=7&search=Priya",
+      tokenFor()
+    );
+    assert.deepEqual(seen.recurring.store_ids, [2]);
+    assert.equal(seen.recurring.work_shift_id, 7, "narrowed the same way as the cards above it");
+    assert.equal(seen.recurring.designation_id, 5);
+    assert.equal(seen.recurring.search, "Priya");
   });
 });

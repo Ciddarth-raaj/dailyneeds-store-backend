@@ -516,6 +516,44 @@ class AttendanceDashboardRepository {
     );
   }
 
+  /**
+   * WHO THE SYSTEM ITSELF NAMES as the approver of each waiting request.
+   *
+   * The UNDECIDED step of a PENDING request, which is the one somebody actually
+   * has to act on - not the employee's configured chain, which is only the
+   * template a request was built from and may name somebody who has already
+   * decided. `created_at` comes from the request so the age shown beside an item
+   * is the age of the request, not of the step.
+   *
+   * A request with no `approver_employee_id` on its pending step - a ROLE-based
+   * step - yields no name, and the caller shows none rather than guessing one.
+   */
+  async listPendingApproversForRequests(requestIds) {
+    if (!Array.isArray(requestIds) || requestIds.length === 0) return [];
+    return this._read(
+      "LIST-PENDING-APPROVERS",
+      `SELECT r.attendance_approval_request_id,
+              r.request_type,
+              r.current_stage_no,
+              r.total_stages,
+              DATE_FORMAT(r.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+              s.stage_no,
+              s.approver_role,
+              s.approver_employee_id,
+              a.employee_name AS approver_name
+         FROM attendance_approval_request r
+         LEFT JOIN attendance_approval_step s
+                ON s.attendance_approval_request_id = r.attendance_approval_request_id
+               AND s.decision = 'PENDING'
+               AND s.stage_no = r.current_stage_no
+         LEFT JOIN new_employee a ON a.employee_id = s.approver_employee_id
+        WHERE r.attendance_approval_request_id IN (?)
+          AND r.status = 'PENDING'
+        ORDER BY r.attendance_approval_request_id ASC`,
+      [requestIds]
+    );
+  }
+
   async listRecentPunches({ limit = 25, store_ids = null }) {
     const where = [];
     const params = [];

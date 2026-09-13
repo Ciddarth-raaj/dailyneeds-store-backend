@@ -194,6 +194,13 @@ const asId = (value) => {
   return Number.isInteger(n) && n > 0 ? n : null;
 };
 
+/** A paging number, where ZERO is a legitimate value and `asId` would drop it. */
+const asCount = (value, fallback) => {
+  if (value === null || value === undefined || value === "") return fallback;
+  const n = Number(value);
+  return Number.isInteger(n) && n >= 0 ? n : fallback;
+};
+
 class AttendanceDashboardRoutes {
   constructor(attendanceDashboardUsecase, permissions, sensitive, attendanceStaffingUsecase) {
     this.usecase = attendanceDashboardUsecase;
@@ -415,11 +422,75 @@ class AttendanceDashboardRoutes {
     );
 
     /**
+     * THE STAFFING DRILLDOWN - one named bucket of the CURRENT snapshot, paged.
+     *
+     * WHY THIS EXISTS. The snapshot used to carry a 200-row array that the
+     * screen opened as though it were the whole population, so a clickable list
+     * could silently disagree with the headline count above it. The snapshot now
+     * sends previews and this endpoint serves the real lists: the bucket names
+     * the subset, `limit`/`offset` page it, and `total` is the same number the
+     * card shows because both come from one classification.
+     *
+     * NO `attendance_date` HERE EITHER. Like the snapshot it answers "now", and
+     * it recomputes with its OWN server-issued `as_of`, which it returns: a
+     * drilldown opened a minute after the card is a new observation and says so
+     * rather than pretending to be a replay.
+     *
+     * A REQUESTED LOCATION CANNOT WIDEN THE READ. `store_id` is intersected
+     * with the caller's resolved scope in the usecase; an id outside it yields
+     * nothing, exactly as an empty scope does.
+     */
+    this.router.get(
+      "/attendance/dashboard/staffing/drilldown",
+      this.permissions.require(P.VIEW_ATTENDANCE_DASHBOARD),
+      async (req, res) => {
+        try {
+          const isValid = Joi.validate(req.query, {
+            bucket: Joi.string().max(60).required(),
+            store_ids: Joi.string().regex(/^\d+(,\d+)*$/).allow(null, "").optional(),
+            store_id: Joi.number().integer().positive().allow(null, "").optional(),
+            designation_id: Joi.number().integer().positive().allow(null, "").optional(),
+            work_shift_id: Joi.number().integer().positive().allow(null, "").optional(),
+            search: Joi.string().max(100).allow(null, "").optional(),
+            gap_class: Joi.string().max(40).allow(null, "").optional(),
+            limit: Joi.number().integer().min(1).max(200).optional(),
+            offset: Joi.number().integer().min(0).optional(),
+          });
+          if (isValid.error !== null) throw isValid.error;
+
+          const scope = await this._scopeOrDeny(req, res);
+          if (!scope) return;
+
+          const result = await this.staffing.getStaffingDrilldown({
+            bucket: req.query.bucket,
+            store_ids: effectiveStoreIds(req.query.store_ids, scope),
+            store_id: asId(req.query.store_id),
+            designation_id: asId(req.query.designation_id),
+            work_shift_id: asId(req.query.work_shift_id),
+            search: req.query.search ? String(req.query.search).trim() : null,
+            gap_class: req.query.gap_class ? String(req.query.gap_class).trim() : null,
+            limit: asCount(req.query.limit, undefined),
+            offset: asCount(req.query.offset, 0),
+          });
+          res.setHeader("Cache-Control", "no-store");
+          res.json({ code: 200, ...result });
+        } catch (err) {
+          respondError(res, err);
+        }
+      }
+    );
+
+    /**
      * E. Recurring coverage gaps - repeated shortfalls against the SCHEDULE.
      *
      * A secondary, evidence-showing panel: every row carries the dates and
-     * counts behind it, and days whose punch retrieval was unfinished or
-     * failed are excluded rather than averaged in.
+     * counts behind it, days whose punch retrieval was unfinished or failed are
+     * excluded rather than averaged in, and retrieval status that cannot be read
+     * at all makes the panel unavailable rather than optimistic.
+     *
+     * IT TAKES THE SAME FILTERS AS THE SNAPSHOT, the effective shift included:
+     * a pattern panel narrowed differently from the cards above it is a
+     * different question wearing the same heading.
      */
     this.router.get(
       "/attendance/dashboard/recurring-gaps",
@@ -429,6 +500,7 @@ class AttendanceDashboardRoutes {
           const isValid = Joi.validate(req.query, {
             store_ids: Joi.string().regex(/^\d+(,\d+)*$/).allow(null, "").optional(),
             designation_id: Joi.number().integer().positive().allow(null, "").optional(),
+            work_shift_id: Joi.number().integer().positive().allow(null, "").optional(),
             search: Joi.string().max(100).allow(null, "").optional(),
             comparable_days: Joi.number().integer().min(2).max(8).optional(),
           });
@@ -440,6 +512,7 @@ class AttendanceDashboardRoutes {
           const result = await this.staffing.getRecurringGaps({
             store_ids: effectiveStoreIds(req.query.store_ids, scope),
             designation_id: asId(req.query.designation_id),
+            work_shift_id: asId(req.query.work_shift_id),
             search: req.query.search ? String(req.query.search).trim() : null,
             comparable_days: req.query.comparable_days,
           });

@@ -11,16 +11,20 @@
  * - an operational snapshot that is never payable, never stored, and never
  * fed back into payroll.
  *
- * TWO BOUNDARIES THAT ARE ROUTINELY CONFUSED:
+ * THREE BOUNDARIES THAT ARE ROUTINELY CONFUSED:
  *
  *   THE DUTY INTERVAL   in_time -> out_time. It decides who is EXPECTED NOW.
  *   THE ATTENDANCE DAY  the shift's cutoff. It decides which punches belong
- *                       to which date.
+ *                       to which date, and therefore WHICH SESSION describes
+ *                       an employee right now.
+ *   THE CALENDAR DAY    midnight. It decides nothing here at all.
  *
  * They are not the same and must not be substituted for each other. A 9-9
  * employee stops being expected at 21:00 even though their attendance day
  * stays open until a later cutoff; using the cutoff for expectation would keep
- * them "expected" for hours after they went home.
+ * them "expected" for hours after they went home. Equally, using the duty
+ * interval to decide punch ownership would drop the 00:30 finish of a shift
+ * that started yesterday.
  *
  * NORMAL HOURS AND BREAKS ARE NOT THE INTERVAL EITHER. A 9-9 shift with a
  * one-hour break is scheduled across twelve hours; the break changes what is
@@ -32,6 +36,10 @@
  * counter, working, or not on a break - several Daily Needs employees eat on
  * the premises and punch twice a day. The vocabulary here says "recorded",
  * never "present", for that reason.
+ *
+ * AND RECORDED STATE IS NOT RECORDED PLACE. Knowing that somebody's latest
+ * punch opened a session is a different fact from knowing WHERE it happened,
+ * and this file never lets the first stand in for the second - see GAP below.
  */
 
 const MINUTES_PER_DAY = 1440;
@@ -77,6 +85,13 @@ function onDutyAt(interval, nowMinute) {
   return nowMinute >= interval.start && nowMinute < interval.end;
 }
 
+/** The same interval, shifted onto a shared axis by `offsetMinutes`. */
+function shiftInterval(interval, offsetMinutes) {
+  if (!interval) return null;
+  const offset = Math.trunc(Number(offsetMinutes) || 0);
+  return { start: interval.start + offset, end: interval.end + offset };
+}
+
 /**
  * Which of an employee's candidate attendance dates is on duty right now.
  *
@@ -96,6 +111,114 @@ function activeDuty(candidates) {
   return null;
 }
 
+/* ------------------------------------------ which session describes "now" */
+
+/**
+ * How long an attendance date keeps claiming punches, on its own minute axis.
+ *
+ * THIS IS THE ENGINE'S RULE, NOT A NEW ONE. `attendanceDateForPunch` gives a
+ * punch to the PREVIOUS date when its clock time is before that date's
+ * `attendance_day_cutoff`, so date D owns punches up to - and not including -
+ * minute 1440 + cutoff. A rest day never claims the following morning, and
+ * neither does a date with no cutoff on record, so both stop at midnight.
+ *
+ * DELIBERATELY DIFFERENT FROM `dayCloseMinute` IN ONE CASE, and the difference
+ * is the safe direction for each question. With no snapshot at all, that helper
+ * returns midnight - because for absence it is safer to call an unresolvable
+ * day CLOSED and report it as a setup fault than to leave it open for ever.
+ * Here the safe direction is the opposite: calling it closed would silently
+ * discard real punches, so it returns null and the caller reports
+ * Indeterminate. Same rule, two different failure directions, on purpose.
+ *
+ * @returns {number|null} null when the snapshot is missing, i.e. when the
+ *   window cannot be established at all
+ */
+function sessionOwnershipEnd(snapshot) {
+  if (!snapshot) return null;
+  if (!snapshot.is_working_day) return MINUTES_PER_DAY;
+  const cutoff = timeToMinutes(snapshot.attendance_day_cutoff);
+  if (cutoff === null) return MINUTES_PER_DAY;
+  return MINUTES_PER_DAY + cutoff;
+}
+
+const SESSION = Object.freeze({
+  OPEN: "OPEN",
+  CLOSED: "CLOSED",
+  UNKNOWN: "UNKNOWN",
+});
+
+/** Is this candidate's attendance session still able to own punches now? */
+function sessionWindow(candidate) {
+  if (!candidate) return SESSION.UNKNOWN;
+  const end = sessionOwnershipEnd(candidate.snapshot);
+  if (end === null) return SESSION.UNKNOWN;
+  return candidate.now_minute < end ? SESSION.OPEN : SESSION.CLOSED;
+}
+
+/** The candidate's punches at or before its own `now_minute`. */
+function punchesSoFar(candidate) {
+  if (!candidate) return [];
+  return (candidate.punches || []).filter(
+    (p) => p && p.minute !== null && p.minute !== undefined && p.minute <= candidate.now_minute
+  );
+}
+
+/**
+ * WHICH attendance session describes this employee's recorded state right now.
+ *
+ * THE DEFECT THIS REPLACES took whichever candidate happened to be processed
+ * last and had punches. With candidates offered as [today, yesterday] that
+ * meant YESTERDAY WON: a completed yesterday could override today's newer OUT,
+ * and an unmatched IN from a session that closed hours ago could still be
+ * reported as "recorded IN" today.
+ *
+ * THE RULE, in order:
+ *
+ *   1. ON DUTY -> that duty's session, and only that one. The question "is the
+ *      person covering the shift they are on" is a question about that shift's
+ *      own session; no other session can answer it.
+ *   2. OTHERWISE, the NEWEST session that both still owns punches (its
+ *      attendance day has not closed) and has at least one punch so far. Newest
+ *      wins on purpose: at 14:00 today, today's OUT is the current state and
+ *      yesterday's punches are history.
+ *   3. A session whose ownership window CANNOT be established - the shift for
+ *      that date did not resolve - but which has punches, is AMBIGUOUS. We
+ *      cannot say whether it still owns them, so the caller reports
+ *      Indeterminate rather than guessing IN.
+ *   4. Nothing else: no session. That is "nothing recorded", which is not the
+ *      same claim as "absent".
+ *
+ * NO GRACE PERIOD IS INVENTED anywhere in here. The only boundary used is the
+ * shift's own cutoff, which the engine already applies at ingest.
+ *
+ * @param {Array<{attendance_date:string, snapshot:object, now_minute:number, punches:Array}>} candidates
+ * @param {object} [options]
+ * @param {object} [options.active] the active-duty candidate, when one exists
+ * @returns {{candidate:object|null, ambiguous:boolean, reason:string}}
+ */
+function selectSession(candidates, { active = null } = {}) {
+  if (active) return { candidate: active, ambiguous: false, reason: "ACTIVE_DUTY" };
+
+  const newestFirst = (candidates || [])
+    .filter(Boolean)
+    .slice()
+    .sort((a, b) => (String(a.attendance_date) < String(b.attendance_date) ? 1 : -1));
+
+  const open = newestFirst.find(
+    (c) => sessionWindow(c) === SESSION.OPEN && punchesSoFar(c).length > 0
+  );
+  if (open) return { candidate: open, ambiguous: false, reason: "OPEN_SESSION" };
+
+  const unresolved = newestFirst.find(
+    (c) => sessionWindow(c) === SESSION.UNKNOWN && punchesSoFar(c).length > 0
+  );
+  if (unresolved) {
+    return { candidate: unresolved, ambiguous: true, reason: "SESSION_OWNERSHIP_UNKNOWN" };
+  }
+
+  return { candidate: null, ambiguous: false, reason: "NO_OPEN_SESSION" };
+}
+
 /* ------------------------------------------------- recorded state as of */
 
 /**
@@ -111,6 +234,7 @@ const RECORDED = Object.freeze({
   NONE: "NONE",
   IN: "IN",
   OUT: "OUT",
+  INDETERMINATE: "INDETERMINATE",
 });
 
 /**
@@ -155,12 +279,21 @@ function recordedStateAsOf(punches, nowMinute) {
  *   expected = recorded IN at the expected location + every gap class
  *
  * holds by construction. `reconcileGap` asserts it rather than trusting it.
+ *
+ * "RECORDED IN" AND "RECORDED IN HERE" ARE TWO FACTS, and the defect these
+ * classes replace collapsed them. An employee expected at Moolakulam whose
+ * latest punch opened a session at an UNMAPPED terminal used to count as
+ * COVERED - so an unknown place silently reduced a known outlet's gap. It
+ * cannot: the state is evidence, the place is not, and the scheduled location
+ * stays unverified until something says where the punch happened.
  */
 const GAP = Object.freeze({
   COVERED: "COVERED",
   NO_CHECK_IN: "NO_CHECK_IN",
   RECORDED_OUT: "RECORDED_OUT",
   IN_ELSEWHERE: "IN_ELSEWHERE",
+  IN_LOCATION_UNKNOWN: "IN_LOCATION_UNKNOWN",
+  EXPECTED_LOCATION_UNKNOWN: "EXPECTED_LOCATION_UNKNOWN",
   INDETERMINATE: "INDETERMINATE",
 });
 
@@ -169,7 +302,9 @@ const GAP_LABEL = Object.freeze({
   NO_CHECK_IN: "No check-in received",
   RECORDED_OUT: "Recorded OUT during the shift",
   IN_ELSEWHERE: "Recorded IN at another location",
-  INDETERMINATE: "Punch state or location cannot be determined",
+  IN_LOCATION_UNKNOWN: "Recorded IN, punch location not established",
+  EXPECTED_LOCATION_UNKNOWN: "Expected location not on record",
+  INDETERMINATE: "Punch state cannot be determined",
 });
 
 /** The classes that make up the gap. COVERED is not one of them. */
@@ -177,6 +312,45 @@ const GAP_CLASSES = Object.freeze([
   GAP.NO_CHECK_IN,
   GAP.RECORDED_OUT,
   GAP.IN_ELSEWHERE,
+  GAP.IN_LOCATION_UNKNOWN,
+  GAP.EXPECTED_LOCATION_UNKNOWN,
+  GAP.INDETERMINATE,
+]);
+
+/**
+ * HOW a recorded punch's location is known at all.
+ *
+ *   DEVICE                   a terminal reported it, and the terminal's outlet
+ *                            mapping either resolves or it does not.
+ *   APPROVED_REGULARIZATION  there was no terminal: an approver accepted this
+ *                            employee's attendance for this date.
+ *   UNKNOWN                  nothing establishes it.
+ */
+const LOCATION_BASIS = Object.freeze({
+  DEVICE: "DEVICE",
+  APPROVED_REGULARIZATION: "APPROVED_REGULARIZATION",
+  UNKNOWN: "UNKNOWN",
+});
+
+/**
+ * The classes where the employee IS recorded IN somewhere, but the punch
+ * cannot be credited to the location they were scheduled at.
+ *
+ * A company-wide screen may total these as "Recorded IN, location unverified".
+ * It must NOT add them to any outlet's recorded cover - that is the whole
+ * point of separating them.
+ */
+const IN_WITHOUT_LOCATION_CREDIT = Object.freeze([
+  GAP.IN_ELSEWHERE,
+  GAP.IN_LOCATION_UNKNOWN,
+  GAP.EXPECTED_LOCATION_UNKNOWN,
+]);
+
+/** The classes that ask somebody to check the DATA rather than the cover. */
+const VERIFICATION_CLASSES = Object.freeze([
+  GAP.IN_ELSEWHERE,
+  GAP.IN_LOCATION_UNKNOWN,
+  GAP.EXPECTED_LOCATION_UNKNOWN,
   GAP.INDETERMINATE,
 ]);
 
@@ -185,42 +359,79 @@ const GAP_CLASSES = Object.freeze([
  *
  * The order is the rule:
  *
- *   1. An UNRESOLVED punch or an unknown punch location is INDETERMINATE. We
- *      do not know, and guessing either way would put a real person in a
- *      category that reads like a finding about them.
+ *   1. An AMBIGUOUS session, or any state that is not one of the three
+ *      interpretable ones, is INDETERMINATE. We do not know, and guessing
+ *      either way would put a real person in a category that reads like a
+ *      finding about them.
  *   2. No punch at all is NO_CHECK_IN. This is "nothing recorded", not
  *      "absent": the delivery of punches is not verifiable in this system.
  *   3. Recorded OUT is RECORDED_OUT, and nothing more is claimed. It is not
  *      lunch, not an early departure, and not unauthorised - all three are
  *      interpretations this data cannot support.
- *   4. Recorded IN, at a punch location that is not the expected one, is
- *      IN_ELSEWHERE. The person is working somewhere; their schedule is still
- *      uncovered, and the receiving location counts them separately as an
- *      additional arrival rather than as cover.
- *   5. Recorded IN at the expected location - or with no location to compare,
- *      which is the common case when the terminal is unmapped - is COVERED.
+ *   4. Recorded IN, but the employee's OWN expected outlet is not on record,
+ *      is EXPECTED_LOCATION_UNKNOWN. There is nothing to compare against, so
+ *      no location is called matched; it is a setup fault to fix.
+ *   5. Recorded IN, but where the punch happened cannot be established - an
+ *      unmapped terminal, or a location lookup that failed - is
+ *      IN_LOCATION_UNKNOWN. The person is recorded IN somewhere; this outlet's
+ *      cover is unverified.
+ *   6. Recorded IN at a KNOWN and DIFFERENT location is IN_ELSEWHERE. The
+ *      person is working somewhere; their schedule is still uncovered, and the
+ *      receiving location counts them separately as an additional arrival
+ *      rather than as cover.
+ *   7. Recorded IN at the known, matching location is COVERED. Nothing else is.
+ *
+ * WHY EXPECTED-OUTLET IS CHECKED BEFORE PUNCH-OUTLET. Both are "verification
+ * needed", so the precedence only decides which fault gets named first. An
+ * employee with no outlet on record cannot be allocated to any location at
+ * all, which is the more fundamental fault and the one a manager can actually
+ * fix from the employee master - so it wins.
  *
  * @param {object} input
  * @param {string} input.recorded_state       one of RECORDED
  * @param {number|null} [input.punch_outlet_id] where the latest punch happened
  * @param {number|null} [input.expected_outlet_id]
+ * ONE CASE IS NOT A DEVICE AT ALL. An APPROVED REGULARIZATION has no terminal
+ * and therefore no terminal location, but it is not the uncertainty this guards
+ * against either: the risk being prevented is an unmapped terminal SOMEWHERE
+ * ELSE silently counting as cover, and a regularization has no somewhere else -
+ * it is an approved statement about this employee's own attendance record on
+ * this date. So it is credited to their scheduled location, and the row carries
+ * `location_basis: APPROVED_REGULARIZATION` rather than pretending a device
+ * reported it. A DEVICE punch whose place cannot be established is still not
+ * credited; the two are deliberately kept apart rather than merged.
+ *
  * @param {boolean} [input.location_known]    false when the punch's terminal
- *        has no outlet mapping; the state is trusted, the location is not
+ *        has no outlet mapping, or the lookup did not succeed; the state is
+ *        trusted, the location is not
+ * @param {string} [input.location_basis]     how the place is known at all -
+ *        one of LOCATION_BASIS
+ * @param {boolean} [input.ambiguous_session] the session that produced the
+ *        state could not be established as the relevant one
  */
 function classifyExpected({
   recorded_state,
   punch_outlet_id = null,
   expected_outlet_id = null,
   location_known = true,
+  location_basis = LOCATION_BASIS.DEVICE,
+  ambiguous_session = false,
 }) {
+  if (ambiguous_session) return GAP.INDETERMINATE;
   if (recorded_state === RECORDED.NONE) return GAP.NO_CHECK_IN;
   if (recorded_state === RECORDED.OUT) return GAP.RECORDED_OUT;
   if (recorded_state !== RECORDED.IN) return GAP.INDETERMINATE;
 
-  // Recorded IN. Only a KNOWN and DIFFERENT location makes it elsewhere.
-  if (!location_known) return GAP.COVERED;
-  if (expected_outlet_id === null || expected_outlet_id === undefined) return GAP.COVERED;
-  if (punch_outlet_id === null || punch_outlet_id === undefined) return GAP.COVERED;
+  // Recorded IN. Location certainty is now a separate question from state.
+  if (expected_outlet_id === null || expected_outlet_id === undefined) {
+    return GAP.EXPECTED_LOCATION_UNKNOWN;
+  }
+  // An approved regularization is an approval about THIS employee-date, so the
+  // scheduled location is the one it speaks for. See the note above.
+  if (location_basis === LOCATION_BASIS.APPROVED_REGULARIZATION) return GAP.COVERED;
+  if (!location_known || punch_outlet_id === null || punch_outlet_id === undefined) {
+    return GAP.IN_LOCATION_UNKNOWN;
+  }
   return Number(punch_outlet_id) === Number(expected_outlet_id) ? GAP.COVERED : GAP.IN_ELSEWHERE;
 }
 
@@ -230,6 +441,10 @@ function classifyExpected({
  * `reconciles` is returned rather than assumed: a breakdown that does not sum
  * to the headcount it claims to explain is worse than no breakdown, because it
  * looks authoritative.
+ *
+ * `recorded_in_somewhere` is reported beside it as a SEPARATE total - recorded
+ * cover here, plus everyone recorded IN whose place cannot be credited to this
+ * location. It is never added into `recorded_in_at_expected`.
  */
 function reconcileGap(rows) {
   const counts = { [GAP.COVERED]: 0 };
@@ -243,9 +458,12 @@ function reconcileGap(rows) {
   const expected = (rows || []).length;
   const covered = counts[GAP.COVERED];
   const gap = GAP_CLASSES.reduce((a, c) => a + counts[c], 0);
+  const inWithoutCredit = IN_WITHOUT_LOCATION_CREDIT.reduce((a, c) => a + counts[c], 0);
   return {
     expected,
     recorded_in_at_expected: covered,
+    recorded_in_location_unverified: inWithoutCredit,
+    recorded_in_somewhere: covered + inWithoutCredit,
     gap,
     by_class: GAP_CLASSES.map((c) => ({ key: c, label: GAP_LABEL[c], count: counts[c] })),
     reconciles: covered + gap === expected,
@@ -263,21 +481,31 @@ function reconcileGap(rows) {
  * sufficient - that is a staffing requirement, which belongs to the budgeting
  * phase and does not exist yet.
  *
- * @param {Array<{employee_id, interval, ...}>} rostered every employee with a
- *   duty interval on the axis `nowMinute` is measured on
+ * EVERY ROW MUST ALREADY BE ON ONE SHARED AXIS. The defect this replaces fed
+ * it only the currently-expected population, measured on whichever date the
+ * first of them happened to sit on - so an employee whose shift STARTS in
+ * twenty minutes was invisible (not yet expected), and a shift that began
+ * yesterday was compared on the wrong axis. The caller now converts every
+ * candidate interval onto a single as-of timeline and passes the whole
+ * relevant schedule, including rows that are not active yet.
+ *
+ * @param {Array<{employee_id, interval:{start,end}, ...}>} scheduled every
+ *   relevant employee-shift, its interval already on the shared axis
  * @returns {{next_change_minute:number|null, transitions:Array}}
  */
-function upcomingTransitions(rostered, nowMinute, windowMinutes = 60) {
+function upcomingTransitions(scheduled, nowMinute, windowMinutes = 60) {
   const limit = nowMinute + windowMinutes;
   const events = new Map();
 
   const add = (minute, kind, row) => {
+    // Strictly after now, and up to and including the window edge: a change
+    // exactly 60 minutes away is the last thing this view is for.
     if (minute <= nowMinute || minute > limit) return;
     if (!events.has(minute)) events.set(minute, { minute, starting: [], finishing: [] });
     events.get(minute)[kind].push(row);
   };
 
-  (rostered || []).forEach((row) => {
+  (scheduled || []).forEach((row) => {
     if (!row || !row.interval) return;
     add(row.interval.start, "starting", row);
     add(row.interval.end, "finishing", row);
@@ -289,8 +517,10 @@ function upcomingTransitions(rostered, nowMinute, windowMinutes = 60) {
       minute: event.minute,
       starting: event.starting,
       finishing: event.finishing,
-      // Who is still rostered immediately after this moment.
-      remaining: (rostered || []).filter(
+      // Who is still rostered immediately after this moment: everyone whose
+      // interval has begun and has not ended. Somebody finishing AT this
+      // minute is out; somebody starting AT it is in.
+      remaining: (scheduled || []).filter(
         (r) => r.interval && r.interval.start <= event.minute && r.interval.end > event.minute
       ),
     }));
@@ -321,12 +551,20 @@ module.exports = {
   timeToMinutes,
   dutyInterval,
   onDutyAt,
+  shiftInterval,
   activeDuty,
+  SESSION,
+  sessionOwnershipEnd,
+  sessionWindow,
+  selectSession,
   RECORDED,
   recordedStateAsOf,
   GAP,
   GAP_LABEL,
   GAP_CLASSES,
+  LOCATION_BASIS,
+  IN_WITHOUT_LOCATION_CREDIT,
+  VERIFICATION_CLASSES,
   classifyExpected,
   reconcileGap,
   upcomingTransitions,

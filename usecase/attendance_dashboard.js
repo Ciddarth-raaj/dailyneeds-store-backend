@@ -467,6 +467,12 @@ module.exports = (attendanceDashboardRepo) => {
             (otRequest.status === "APPROVED" && !otSettled)),
         ot_requested_minutes: otRequest ? Number(otRequest.candidate_ot_minutes || 0) : null,
         regularization_request_id: approval ? approval.attendance_approval_request_id : null,
+        // WHETHER THAT REQUEST IS STILL WAITING, which is not the same question
+        // as the day's own status: a request can be pending on a day whose punch
+        // count is even, and `status` only becomes REGULARIZATION_PENDING on an
+        // odd count. `stillOpen` already knows; it was simply not reported. Named
+        // to match `ot_request_pending` so the two read alike.
+        regularization_request_pending: stillOpen,
       };
     });
   };
