@@ -257,6 +257,30 @@ module.exports = {
   // `resolveLocationScope` in `routes/attendance_dashboard.js`.
   VIEW_ATTENDANCE_DASHBOARD: "view_attendance_dashboard",
 
+  // ================================================ GLOBAL DASHBOARD ACCESS =
+  //
+  // ONE FEATURE KEY PER DASHBOARD, and ONE STORE SCOPE shared by all of them.
+  // Keeping the two apart is the point: a feature key says which SCREEN may be
+  // opened and never which BRANCHES may be seen. `utils/dashboard_scope.js`
+  // holds the rule and `middlewares/dashboard_scope.js` applies it.
+  //
+  // Only Attendance is wired to a route today. The other three are declared so
+  // the resolver has a complete vocabulary and a future module can be gated
+  // without inventing an authorization scheme of its own - they build no
+  // screen, add no route and put nothing in the navigation.
+  VIEW_HR_DASHBOARD: "view_hr_dashboard",
+  VIEW_SALES_DASHBOARD: "view_sales_dashboard",
+  VIEW_MY_DASHBOARD: "view_my_dashboard",
+
+  // THE STORE SCOPE. Exactly one of these applies, enforced on the server:
+  // holding both is a configuration fault and is refused rather than resolved
+  // to either. An administrator (`user_type` 2) is All Stores by user type and
+  // needs neither key. These are deliberately NOT the application-wide
+  // `all_stores` permission, which has its own established meaning outside
+  // dashboards and is left untouched.
+  DASHBOARD_SCOPE_OWN_STORE: "dashboard_scope_own_store",
+  DASHBOARD_SCOPE_ALL_STORES: "dashboard_scope_all_stores",
+
   // Attendance v2 / A3 - missing-punch regularization and OT approval.
   //
   // Raising a request for YOURSELF and raising one for SOMEBODY ELSE are two

@@ -373,6 +373,7 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
     designation_id = null,
     work_shift_id = null,
     search = null,
+    disclose_other_locations = true,
     now = Date.now(),
   } = {}) => {
     const nowParts = istNowParts(now);
@@ -411,6 +412,33 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
      * "now" is simply `nowParts.minutes` and every interval from any of the
      * three dates is converted onto the same axis before comparison.
      */
+    /**
+     * WHERE SOMEBODY PUNCHED, WITHHELD when the where is outside this viewer's
+     * scope.
+     *
+     * An Own Store viewer is entitled to know that one of THEIR employees is
+     * recorded IN somewhere other than the branch they were scheduled at - the
+     * schedule they are responsible for is uncovered and it needs checking. They
+     * are not entitled to the other branch's identity, which their scope
+     * excludes. So "Recorded IN at another location - verification needed"
+     * travels and the destination's name and id do not.
+     *
+     * IT REDACTS AFTER CLASSIFICATION, NEVER BEFORE. The classifier compares the
+     * punch outlet with the expected one; blanking the id first would turn a
+     * genuine IN_ELSEWHERE into IN_LOCATION_UNKNOWN and quietly change what the
+     * gap means. The verdict is computed from the real values, then the values
+     * the response carries are reduced to what the viewer may have.
+     */
+    const outletInScope = (outletId) => {
+      if (disclose_other_locations) return true;
+      if (outletId === null || outletId === undefined) return true;
+      return (store_ids || []).map(Number).includes(Number(outletId));
+    };
+    const redactPunchOutlet = (row) => {
+      if (outletInScope(row.punch_outlet_id)) return { ...row, punch_outlet_in_scope: true };
+      return { ...row, punch_outlet_id: null, punch_outlet_name: null, punch_outlet_in_scope: false };
+    };
+
     const offsetOf = (date) => -dayDelta(date, businessDate) * MINUTES_PER_DAY;
     const nowOn = (date) => nowParts.minutes - offsetOf(date);
     const nowAbsolute = nowParts.minutes;
@@ -532,7 +560,7 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
             session_date: observed.attendance_date,
             scheduled_start: todaysInterval ? minuteToClock(todaysInterval.start) : null,
           };
-          (startsLater ? early : noActiveShift).push(row);
+          (startsLater ? early : noActiveShift).push(redactPunchOutlet(row));
         }
         return;
       }
@@ -562,7 +590,7 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
         ambiguous_session: observed.ambiguous,
       });
 
-      rostered.push({
+      rostered.push(redactPunchOutlet({
         ...employeeRow(employee),
         attendance_date: duty.attendance_date,
         work_shift_id: duty.day.work_shift_id === null ? null : Number(duty.day.work_shift_id),
@@ -581,7 +609,7 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
         session_date: observed.attendance_date,
         gap_class: gapClass,
         gap_label: GAP_LABEL[gapClass],
-      });
+      }));
     });
 
     /* ------------------------------- delivery, per outlet in the view ---- */
@@ -643,6 +671,9 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
     const gapRows = orderForDisplay(snap.rostered.filter((r) => r.gap_class !== GAP.COVERED));
     const expectedRows = orderForDisplay(snap.rostered);
 
+    // The destination fields are whatever survived redaction on the row: for a
+    // viewer whose scope excludes that branch they are already null, and the
+    // panel shows "another location" instead of naming it.
     const crossLocation = snap.rostered
       .filter((r) => r.gap_class === GAP.IN_ELSEWHERE)
       .map((r) => ({
@@ -653,6 +684,7 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
         expected_outlet_name: r.outlet_name,
         recorded_outlet_id: r.punch_outlet_id,
         recorded_outlet_name: r.punch_outlet_name,
+        recorded_outlet_in_scope: r.punch_outlet_in_scope !== false,
         recorded_at: r.recorded_since,
         verification_needed: true,
       }));
@@ -747,6 +779,7 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
     work_shift_id = null,
     search = null,
     gap_class = null,
+    disclose_other_locations = true,
     limit = DRILLDOWN_DEFAULT_LIMIT,
     offset = 0,
     now = Date.now(),
@@ -770,6 +803,7 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
       designation_id,
       work_shift_id,
       search,
+      disclose_other_locations,
       now,
     });
 

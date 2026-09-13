@@ -45,7 +45,15 @@ const auth = require("../middlewares/auth");
 const buildPermissions = require("../middlewares/permissions");
 const jwtService = require("../services/jwt");
 const P = require("../constants/hr_permissions");
-const { effectiveStoreIds, resolveLocationScope, SCOPE } = require("./attendance_dashboard");
+const buildDashboardScope = require("../middlewares/dashboard_scope");
+const {
+  DASHBOARD_SCOPE,
+  DASHBOARD_SCOPE_KEY,
+  decideScope,
+  effectiveStoreIds,
+  isWideningAttempt,
+  parseRequestedStores,
+} = require("../utils/dashboard_scope");
 
 const USER_ID = 7;
 const EMPLOYEE_ID = 1003;
@@ -68,23 +76,76 @@ const HR_ALL_STORES = 8;
 const HR_EXECUTIVE = 9;
 const HR_ASSISTANT = 10;
 const OUTLET_STAFF = 4;
+/** A branch manager: the dashboard key plus OWN STORE scope. */
+const STORE_MANAGER = 11;
+/** Both scope keys ticked - a configuration fault that must fail closed. */
+const CONFLICTED = 12;
+/** Own Store, but the employee record has no branch on it. */
+const NO_BRANCH = 13;
 
+/**
+ * THE APPLICATION-WIDE PERMISSION THAT IS NO LONGER A DASHBOARD SCOPE.
+ *
+ * `all_stores` still exists and still means what it always meant elsewhere in
+ * the application. It is deliberately granted to nobody here, and one test
+ * below asserts that holding it alone now buys NO dashboard access at all -
+ * dashboard scope is its own explicit grant.
+ */
 const ACCESS_ALL_STORES = "all_stores";
 
 const GRANTS = {
-  [HR_ALL_STORES]: [P.VIEW_ATTENDANCE_DASHBOARD, P.VIEW_CALCULATED_ATTENDANCE, ACCESS_ALL_STORES],
+  [HR_ALL_STORES]: [
+    P.VIEW_ATTENDANCE_DASHBOARD,
+    P.VIEW_CALCULATED_ATTENDANCE,
+    P.DASHBOARD_SCOPE_ALL_STORES,
+  ],
   [HR_EXECUTIVE]: [P.VIEW_ATTENDANCE_DASHBOARD, P.VIEW_CALCULATED_ATTENDANCE],
   [HR_ASSISTANT]: [P.VIEW_CALCULATED_ATTENDANCE],
   [OUTLET_STAFF]: [],
+  [STORE_MANAGER]: [P.VIEW_ATTENDANCE_DASHBOARD, P.DASHBOARD_SCOPE_OWN_STORE],
+  [CONFLICTED]: [
+    P.VIEW_ATTENDANCE_DASHBOARD,
+    P.DASHBOARD_SCOPE_OWN_STORE,
+    P.DASHBOARD_SCOPE_ALL_STORES,
+  ],
+  [NO_BRANCH]: [P.VIEW_ATTENDANCE_DASHBOARD, P.DASHBOARD_SCOPE_OWN_STORE],
+};
+
+/**
+ * EMPLOYEE MASTER, as the scope repository reads it.
+ *
+ * `employeeStore` is what `new_employee.store_id` says RIGHT NOW - the fact the
+ * resolver goes to the database for on every request, rather than trusting the
+ * `store_id` baked into the token at login. Tests move an employee between
+ * branches by changing this, which is what a transfer looks like to the
+ * resolver.
+ */
+const MOOLAKULAM = 1;
+const ECR = 2;
+const employeeStore = { value: MOOLAKULAM, missingRow: false };
+
+const dashboardScopeRepo = {
+  getEmployeeStore: async (employeeId) => {
+    seen.scopeLookup = employeeId;
+    if (employeeStore.missingRow) return null;
+    if (employeeStore.throws) throw new Error("employee read failed");
+    return {
+      employee_id: employeeId,
+      store_id: employeeStore.value,
+      employee_status: 1,
+      outlet_name: employeeStore.value === MOOLAKULAM ? "Moolakulam" : "ECR",
+      outlet_nickname: null,
+    };
+  },
 };
 
 const DATE = "2026-09-12";
 
 /** What the usecase was asked, so a scope test can inspect it. */
-const seen = { overview: null, drilldown: null, trend: null, recent: null };
+const seen = { overview: null, drilldown: null, trend: null, recent: null, scopeLookup: null };
 
 const usecase = {
-  getFilters: async () => ({
+  getFilters: async (args) => ({
     outlets: [
       { store_id: 1, outlet_name: "Main Store" },
       { store_id: 2, outlet_name: "Warehouse" },
@@ -92,6 +153,7 @@ const usecase = {
     designations: [{ designation_id: 5, designation_name: "Cashier" }],
     shifts: [{ work_shift_id: 7, shift_code: "10-10", shift_name: "Shift 7" }],
     today: DATE,
+    _asked: (seen.filters = args),
   }),
   getOverview: async (args) => {
     seen.overview = args;
@@ -159,7 +221,14 @@ before(async () => {
   app.use(bodyParser.json());
   app.use(auth.create({ userUsecase: { getSessionState: async () => sessionState } }));
   delete require.cache[require.resolve("./attendance_dashboard")];
-  const routes = require("./attendance_dashboard")(usecase, permissions, null, staffingUsecase);
+  const dashboardScope = buildDashboardScope(permissions, dashboardScopeRepo);
+  const routes = require("./attendance_dashboard")(
+    usecase,
+    permissions,
+    null,
+    staffingUsecase,
+    dashboardScope
+  );
   router = routes.getRouter();
   app.use("/", router);
 
@@ -399,82 +468,129 @@ describe("the browser's outlet filter is a FILTER, never authorization", () => {
     );
   });
 
-  it("INTERSECTS the request with the scope and can never widen it", () => {
-    const ALL = { kind: SCOPE.ALL, store_ids: null };
-    const LIST = { kind: SCOPE.LIST, store_ids: [2, 3] };
-    const NONE = { kind: SCOPE.NONE, store_ids: [] };
+  it("NARROWS the request against the scope and can never widen it", () => {
+    const ALL = { kind: DASHBOARD_SCOPE.ALL_STORES, store_ids: null };
+    const OWN = { kind: DASHBOARD_SCOPE.OWN_STORE, store_ids: [2] };
+    const NONE = { kind: DASHBOARD_SCOPE.NONE, store_ids: [] };
+    const asked = (q) => parseRequestedStores(q);
 
     // Company-wide: the filter is an ordinary filter.
-    assert.equal(effectiveStoreIds(null, ALL), null);
-    assert.deepEqual(effectiveStoreIds("2", ALL), [2]);
+    assert.equal(effectiveStoreIds(ALL, asked(null)), null);
+    assert.deepEqual(effectiveStoreIds(ALL, asked("2")), [2]);
 
-    // A specific set: no filter means the whole set, never "everything".
-    assert.deepEqual(effectiveStoreIds(null, LIST), [2, 3]);
-    assert.deepEqual(effectiveStoreIds("", LIST), [2, 3]);
-    assert.deepEqual(effectiveStoreIds("1,2,3", LIST), [2, 3], "the out-of-scope branch is dropped");
-
-    // THE CASE THAT USED TO FAIL OPEN: asking for a branch you may not see
-    // yields the EMPTY set, which every layer must read as "no data".
-    assert.deepEqual(effectiveStoreIds("9", LIST), []);
+    // Own Store: ALWAYS the assigned branch, whatever was asked for. There is
+    // no arithmetic to get wrong here - the answer does not depend on the
+    // request at all, which is the point.
+    assert.deepEqual(effectiveStoreIds(OWN, asked(null)), [2]);
+    assert.deepEqual(effectiveStoreIds(OWN, asked("")), [2]);
+    assert.deepEqual(effectiveStoreIds(OWN, asked("2")), [2]);
+    assert.deepEqual(effectiveStoreIds(OWN, asked("1,2,3")), [2]);
+    assert.deepEqual(effectiveStoreIds(OWN, asked("9")), [2]);
 
     // No scope at all: nothing, whatever was asked for.
-    assert.deepEqual(effectiveStoreIds(null, NONE), []);
-    assert.deepEqual(effectiveStoreIds("1,2,3", NONE), []);
-    assert.deepEqual(effectiveStoreIds(null, null), [], "an absent scope is not an open one");
+    assert.deepEqual(effectiveStoreIds(NONE, asked(null)), []);
+    assert.deepEqual(effectiveStoreIds(NONE, asked("1,2,3")), []);
+    assert.deepEqual(effectiveStoreIds(null, asked(null)), [], "an absent scope is not an open one");
   });
 
-  it("an empty intersection is never mistaken for an absent filter", () => {
-    const LIST = { kind: SCOPE.LIST, store_ids: [2] };
-    const out = effectiveStoreIds("9", LIST);
+  it("AN OWN STORE REQUEST NAMING ANOTHER BRANCH IS A WIDENING ATTEMPT", () => {
+    // Refused rather than silently narrowed: quietly returning the caller's own
+    // figures under another branch's heading is worse than saying no.
+    const OWN = { kind: DASHBOARD_SCOPE.OWN_STORE, store_ids: [2] };
+    assert.equal(isWideningAttempt(OWN, parseRequestedStores("9")), true);
+    assert.equal(isWideningAttempt(OWN, parseRequestedStores("2,9")), true, "even alongside its own");
+    assert.equal(isWideningAttempt(OWN, parseRequestedStores("2")), false);
+    assert.equal(isWideningAttempt(OWN, parseRequestedStores(null)), false, "omitting it is not asking");
+    // All Stores has nothing outside it, and NONE never reaches a handler.
+    assert.equal(
+      isWideningAttempt({ kind: DASHBOARD_SCOPE.ALL_STORES, store_ids: null }, [9]),
+      false
+    );
+  });
+
+  it("an empty scope is never mistaken for an absent filter", () => {
+    const out = effectiveStoreIds({ kind: DASHBOARD_SCOPE.NONE, store_ids: [] }, [9]);
     assert.ok(Array.isArray(out) && out.length === 0);
-    assert.notEqual(out, null, "null would mean 'no restriction' - the exact fail-open being fixed");
+    assert.notEqual(out, null, "null would mean 'no restriction' - the exact fail-open being prevented");
   });
 
-  it("resolves ALL only for an administrator or the all_stores grant", async () => {
-    const has = (keys) => async (_req, key) => keys.includes(key);
-
-    const admin = await resolveLocationScope(
-      { decoded: { user_type: 2, designation_id: OUTLET_STAFF } },
-      { ADMIN_USER_TYPE: 2, has: has([]) }
-    );
-    assert.equal(admin.kind, SCOPE.ALL);
+  it("AN ADMINISTRATOR IS ALL STORES, decided before the conflict rule", () => {
+    // It has to be checked first: the permission middleware gives user_type 2
+    // every row of `all_permissions`, so an administrator necessarily holds BOTH
+    // scope keys. Applying the both-keys rule to them would lock every
+    // administrator out of every dashboard.
+    const admin = decideScope({ is_admin: true, has_all_stores: true, has_own_store: true });
+    assert.equal(admin.kind, DASHBOARD_SCOPE.ALL_STORES);
     assert.equal(admin.reason, "ADMINISTRATOR");
-
-    const allStores = await resolveLocationScope(
-      { decoded: { user_type: 1, designation_id: HR_ALL_STORES } },
-      { ADMIN_USER_TYPE: 2, has: has([ACCESS_ALL_STORES]) }
-    );
-    assert.equal(allStores.kind, SCOPE.ALL);
-    assert.equal(allStores.reason, "ALL_STORES_PERMISSION");
   });
 
-  it("neither attendance key establishes company-wide access", async () => {
-    const scope = await resolveLocationScope(
-      { decoded: { user_type: 1, designation_id: HR_EXECUTIVE } },
-      {
-        ADMIN_USER_TYPE: 2,
-        has: async (_req, key) =>
-          [P.VIEW_ATTENDANCE_DASHBOARD, P.VIEW_CALCULATED_ATTENDANCE].includes(key),
-      }
-    );
-    assert.equal(scope.kind, SCOPE.NONE);
-    assert.equal(scope.reason, "NO_LOCATION_SCOPE");
+  it("BOTH SCOPE KEYS ON A NON-ADMINISTRATOR FAILS CLOSED", () => {
+    // The two keys are meant to be exclusive and the rights table cannot enforce
+    // it. Guessing would turn a mis-click into company-wide attendance access.
+    const both = decideScope({ has_all_stores: true, has_own_store: true });
+    assert.equal(both.kind, DASHBOARD_SCOPE.NONE);
+    assert.equal(both.reason, "CONFLICTING_SCOPE");
   });
 
-  it("never derives a scope from the caller's own store_id", async () => {
-    // The token carries store_id 2 throughout these tests. Promoting it to an
-    // authorization boundary would be a per-store policy nobody approved.
-    const scope = await resolveLocationScope(
-      { decoded: { user_type: 1, designation_id: HR_EXECUTIVE, store_id: 2 } },
-      { ADMIN_USER_TYPE: 2, has: async () => false }
+  it("each scope key resolves to its own scope, and neither key means NONE", () => {
+    assert.equal(decideScope({ has_all_stores: true }).kind, DASHBOARD_SCOPE.ALL_STORES);
+    assert.equal(decideScope({ has_own_store: true }).kind, DASHBOARD_SCOPE.OWN_STORE);
+    const none = decideScope({});
+    assert.equal(none.kind, DASHBOARD_SCOPE.NONE);
+    assert.equal(none.reason, "NO_SCOPE_GRANTED");
+  });
+
+  it("THE DASHBOARD FEATURE KEY ESTABLISHES NO LOCATION AT ALL", async () => {
+    // Holding `view_attendance_dashboard` says which SCREEN may be opened. It
+    // has never said which branches, and conflating the two is what the first
+    // implementation did.
+    const res = await call(
+      `/attendance/dashboard/overview?attendance_date=${DATE}`,
+      tokenFor({ designationId: HR_EXECUTIVE })
     );
-    assert.equal(scope.kind, SCOPE.NONE);
+    assertRefused(res, "dashboard key with no scope key");
+    assert.match(res.body.msg, /not authorized for any branch/i);
+  });
+
+  it("THE APPLICATION-WIDE all_stores PERMISSION IS NO LONGER A DASHBOARD SCOPE", async () => {
+    // It still exists and still means what it means elsewhere; it simply does
+    // not grant dashboard reach any more. Dashboard scope is its own explicit
+    // grant, so an `all_stores` holder with no dashboard scope is refused.
+    const permissions = buildPermissions({
+      getPermissionById: async () =>
+        [P.VIEW_ATTENDANCE_DASHBOARD, ACCESS_ALL_STORES].map((permission_key) => ({
+          permission_key,
+          is_active: 1,
+        })),
+    });
+    const dashboards = buildDashboardScope(permissions, dashboardScopeRepo);
+    const scope = await dashboards.resolveDashboardScope(
+      { decoded: { user_type: 1, designation_id: 99, employee_id: EMPLOYEE_ID } },
+      P.VIEW_ATTENDANCE_DASHBOARD
+    );
+    assert.equal(scope.kind, DASHBOARD_SCOPE.NONE);
+    assert.equal(scope.reason, "NO_SCOPE_GRANTED");
+  });
+
+  it("never derives a scope from the caller's own token store_id", async () => {
+    // The token carries store_id 2 throughout these tests. It is a copy taken at
+    // login and never refreshed, so it is not an authorization boundary - the
+    // resolver goes to Employee Master for the branch, every request.
+    const permissions = buildPermissions({ getPermissionById: async () => [] });
+    const dashboards = buildDashboardScope(permissions, dashboardScopeRepo);
+    const scope = await dashboards.resolveDashboardScope(
+      { decoded: { user_type: 1, designation_id: OUTLET_STAFF, store_id: 2, employee_id: EMPLOYEE_ID } },
+      P.VIEW_ATTENDANCE_DASHBOARD
+    );
+    assert.equal(scope.kind, DASHBOARD_SCOPE.NONE);
     assert.deepEqual(scope.store_ids, []);
   });
 
   it("an unauthenticated request resolves to NONE, not to ALL", async () => {
-    const scope = await resolveLocationScope({}, { ADMIN_USER_TYPE: 2, has: async () => true });
-    assert.equal(scope.kind, SCOPE.NONE);
+    const permissions = buildPermissions({ getPermissionById: async () => [] });
+    const dashboards = buildDashboardScope(permissions, dashboardScopeRepo);
+    const scope = await dashboards.resolveDashboardScope({}, P.VIEW_ATTENDANCE_DASHBOARD);
+    assert.equal(scope.kind, DASHBOARD_SCOPE.NONE);
     assert.equal(scope.reason, "UNAUTHENTICATED");
   });
 
@@ -619,12 +735,28 @@ describe("the staffing drilldown endpoint", () => {
     assert.equal(seen.staffingDrilldown.store_ids, null, "an unfiltered ALL scope narrows nothing");
   });
 
-  it("an out-of-scope store_ids filter intersects to nothing, not to everything", async () => {
-    // A LIST scope of [2] asked for outlet 1: the intersection is empty and the
-    // usecase is told so explicitly.
-    assert.deepEqual(effectiveStoreIds("1", { kind: SCOPE.LIST, store_ids: [2] }), []);
-    assert.deepEqual(effectiveStoreIds("1,2", { kind: SCOPE.LIST, store_ids: [2] }), [2]);
-    assert.deepEqual(effectiveStoreIds(null, { kind: SCOPE.NONE, store_ids: [] }), []);
+  it("AN OWN STORE CALLER CANNOT PAGE INTO ANOTHER BRANCH", async () => {
+    // The drilldown is the most tempting way in: a bucket, a store_id and an
+    // offset. An Own Store caller naming another branch is refused outright
+    // rather than handed their own branch's rows under that heading.
+    const res = await call(
+      "/attendance/dashboard/staffing/drilldown?bucket=EXPECTED&store_ids=9",
+      tokenFor({ designationId: STORE_MANAGER })
+    );
+    assertRefused(res, "own-store caller paging into another branch");
+    assert.match(res.body.msg, /only authorized for your own branch/i);
+  });
+
+  it("an out-of-scope store filter never becomes an absent one", () => {
+    // The failure mode this guards is the classic one: an empty authorized set
+    // collapsing into null, which every layer reads as "no restriction".
+    const OWN = { kind: DASHBOARD_SCOPE.OWN_STORE, store_ids: [2] };
+    assert.deepEqual(effectiveStoreIds(OWN, parseRequestedStores("1")), [2]);
+    assert.deepEqual(effectiveStoreIds({ kind: DASHBOARD_SCOPE.NONE, store_ids: [] }, null), []);
+    assert.notEqual(
+      effectiveStoreIds({ kind: DASHBOARD_SCOPE.NONE, store_ids: [] }, null),
+      null
+    );
   });
 
   it("sets no-store, so a shared cache cannot serve one person's list to another", async () => {
@@ -644,5 +776,246 @@ describe("the staffing drilldown endpoint", () => {
     assert.equal(seen.recurring.work_shift_id, 7, "narrowed the same way as the cards above it");
     assert.equal(seen.recurring.designation_id, 5);
     assert.equal(seen.recurring.search, "Priya");
+  });
+});
+
+/* ==================================================================== */
+/* GLOBAL DASHBOARD ACCESS - the scope, end to end over a real server.   */
+/*                                                                      */
+/* Every case here is decided by the SERVER. The browser is not involved */
+/* in any of them, and none of them can be changed by anything a caller  */
+/* sends.                                                               */
+/* ==================================================================== */
+
+describe("Own Store scope", () => {
+  const reset = () => {
+    employeeStore.value = MOOLAKULAM;
+    employeeStore.missingRow = false;
+    employeeStore.throws = false;
+  };
+
+  it("PINS EVERY ENDPOINT to the employee's assigned branch", async () => {
+    reset();
+    const token = tokenFor({ designationId: STORE_MANAGER });
+
+    await call(`/attendance/dashboard/overview?attendance_date=${DATE}`, token);
+    assert.deepEqual(seen.overview.store_ids, [MOOLAKULAM]);
+
+    await call(`/attendance/dashboard/trend?attendance_date=${DATE}`, token);
+    assert.deepEqual(seen.trend.store_ids, [MOOLAKULAM]);
+
+    await call(`/attendance/dashboard/recent-punches?attendance_date=${DATE}`, token);
+    assert.deepEqual(seen.recent.store_ids, [MOOLAKULAM]);
+
+    await call("/attendance/dashboard/staffing", token);
+    assert.deepEqual(seen.staffing.store_ids, [MOOLAKULAM]);
+
+    await call("/attendance/dashboard/staffing/drilldown?bucket=GAP", token);
+    assert.deepEqual(seen.staffingDrilldown.store_ids, [MOOLAKULAM]);
+
+    await call("/attendance/dashboard/recurring-gaps", token);
+    assert.deepEqual(seen.recurring.store_ids, [MOOLAKULAM]);
+
+    await call(`/attendance/dashboard/drilldown?attendance_date=${DATE}&bucket=TOTAL`, token);
+    assert.deepEqual(seen.drilldown.store_ids, [MOOLAKULAM]);
+  });
+
+  it("CANNOT BE WIDENED by a query parameter, however it is spelled", async () => {
+    reset();
+    const token = tokenFor({ designationId: STORE_MANAGER });
+    for (const q of ["store_ids=2", "store_ids=1,2", "store_ids=2,3,4"]) {
+      const res = await call(`/attendance/dashboard/overview?attendance_date=${DATE}&${q}`, token);
+      assertRefused(res, q);
+      assert.match(res.body.msg, /only authorized for your own branch/i);
+    }
+    // And asking for exactly its own branch is simply allowed, unchanged.
+    await call(
+      `/attendance/dashboard/overview?attendance_date=${DATE}&store_ids=${MOOLAKULAM}`,
+      token
+    );
+    assert.deepEqual(seen.overview.store_ids, [MOOLAKULAM]);
+  });
+
+  it("the filters endpoint exposes ONLY the authorized branch", async () => {
+    reset();
+    const res = await call("/attendance/dashboard/filters", tokenFor({ designationId: STORE_MANAGER }));
+    assert.equal(res.body.code, 200);
+    // THE USECASE WAS ASKED FOR ONE BRANCH. That is what stops the selector
+    // enumerating the company - `getFilters` returns no outlet outside the
+    // `store_ids` it is given, and it is given exactly the authorized one.
+    assert.deepEqual(seen.filters.store_ids, [MOOLAKULAM]);
+    assert.deepEqual(res.body.dashboard_scope.store_ids, [MOOLAKULAM]);
+    assert.equal(res.body.dashboard_scope.can_choose_outlet, false);
+    assert.equal(res.body.dashboard_scope.kind, "OWN_STORE");
+    assert.equal(res.body.dashboard_scope.outlet_name, "Moolakulam");
+  });
+
+  it("tells the browser the scope WITHOUT leaking keys or other branches", async () => {
+    reset();
+    const res = await call("/attendance/dashboard/filters", tokenFor({ designationId: STORE_MANAGER }));
+    const payload = JSON.stringify(res.body.dashboard_scope);
+    assert.doesNotMatch(payload, /dashboard_scope_own_store|dashboard_scope_all_stores|all_stores/);
+    assert.doesNotMatch(payload, /ECR/, "no branch the caller cannot see is named");
+    assert.doesNotMatch(payload, /reason/i, "a successful resolve needs no reason code");
+  });
+
+  it("DOES NOT DISCLOSE another branch's identity on a cross-location row", async () => {
+    reset();
+    await call("/attendance/dashboard/staffing", tokenFor({ designationId: STORE_MANAGER }));
+    assert.equal(
+      seen.staffing.disclose_other_locations,
+      false,
+      "the fact travels, the destination's name does not"
+    );
+    await call("/attendance/dashboard/staffing/drilldown?bucket=IN_ELSEWHERE", tokenFor({ designationId: STORE_MANAGER }));
+    assert.equal(seen.staffingDrilldown.disclose_other_locations, false);
+    await call(`/attendance/dashboard/recent-punches?attendance_date=${DATE}`, tokenFor({ designationId: STORE_MANAGER }));
+    assert.equal(seen.recent.disclose_other_locations, false);
+  });
+
+  it("search and the other filters still narrow, and still only inside scope", async () => {
+    reset();
+    await call(
+      `/attendance/dashboard/overview?attendance_date=${DATE}&search=Priya&designation_id=5`,
+      tokenFor({ designationId: STORE_MANAGER })
+    );
+    assert.equal(seen.overview.search, "Priya");
+    assert.equal(seen.overview.designation_id, 5);
+    assert.deepEqual(seen.overview.store_ids, [MOOLAKULAM], "a search cannot reach outside the branch");
+  });
+});
+
+describe("All Stores scope", () => {
+  it("reads company-wide and may use the outlet filter normally", async () => {
+    const token = tokenFor({ designationId: HR_ALL_STORES });
+    await call(`/attendance/dashboard/overview?attendance_date=${DATE}`, token);
+    assert.equal(seen.overview.store_ids, null, "no restriction");
+
+    await call(`/attendance/dashboard/overview?attendance_date=${DATE}&store_ids=2`, token);
+    assert.deepEqual(seen.overview.store_ids, [2], "and a filter is an ordinary filter");
+  });
+
+  it("is offered the outlet picker, and is told so", async () => {
+    const res = await call("/attendance/dashboard/filters", tokenFor({ designationId: HR_ALL_STORES }));
+    assert.equal(seen.filters.store_ids, null, "no restriction on the option list either");
+    assert.equal(res.body.dashboard_scope.kind, "ALL_STORES");
+    assert.equal(res.body.dashboard_scope.can_choose_outlet, true);
+    assert.deepEqual(res.body.dashboard_scope.store_ids, []);
+  });
+
+  it("may be told where a cross-location punch happened", async () => {
+    await call("/attendance/dashboard/staffing", tokenFor({ designationId: HR_ALL_STORES }));
+    assert.equal(seen.staffing.disclose_other_locations, true);
+  });
+});
+
+describe("the administrator", () => {
+  it("is All Stores by user type, with no dashboard scope granted", async () => {
+    // OUTLET_STAFF holds nothing at all; user_type 2 is the whole reason this
+    // works, and it is the system's existing single administrator concept.
+    const token = tokenFor({ designationId: OUTLET_STAFF, userType: 2 });
+    const res = await call("/attendance/dashboard/filters", token);
+    assert.equal(res.body.code, 200);
+    assert.equal(res.body.dashboard_scope.kind, "ALL_STORES");
+    await call(`/attendance/dashboard/overview?attendance_date=${DATE}`, token);
+    assert.equal(seen.overview.store_ids, null);
+  });
+
+  it("needs no employee lookup at all", async () => {
+    seen.scopeLookup = null;
+    await call("/attendance/dashboard/filters", tokenFor({ designationId: OUTLET_STAFF, userType: 2 }));
+    assert.equal(seen.scopeLookup, null, "All Stores never asks which branch somebody works at");
+  });
+});
+
+describe("scopes that cannot be resolved fail closed", () => {
+  it("BOTH SCOPE KEYS is refused, and says what is wrong", async () => {
+    const res = await call("/attendance/dashboard/filters", tokenFor({ designationId: CONFLICTED }));
+    assertRefused(res, "both scope keys");
+    assert.equal(res.body.reason, "CONFLICTING_SCOPE");
+    assert.match(res.body.msg, /exactly one must be granted/i);
+  });
+
+  it("OWN STORE WITH NO BRANCH ASSIGNED is refused, never widened", async () => {
+    employeeStore.value = null;
+    const res = await call("/attendance/dashboard/filters", tokenFor({ designationId: STORE_MANAGER }));
+    assertRefused(res, "no branch on the employee record");
+    assert.equal(res.body.reason, "NO_STORE_ASSIGNED");
+    employeeStore.value = MOOLAKULAM;
+  });
+
+  it("A LOGIN WITH NO EMPLOYEE ROW is refused", async () => {
+    employeeStore.missingRow = true;
+    const res = await call("/attendance/dashboard/filters", tokenFor({ designationId: STORE_MANAGER }));
+    assertRefused(res, "no employee record");
+    assert.equal(res.body.reason, "NO_EMPLOYEE_RECORD");
+    employeeStore.missingRow = false;
+  });
+
+  it("A FAILED EMPLOYEE LOOKUP IS A REFUSAL, not an open door", async () => {
+    employeeStore.throws = true;
+    const res = await call("/attendance/dashboard/filters", tokenFor({ designationId: STORE_MANAGER }));
+    assertRefused(res, "employee lookup threw");
+    employeeStore.throws = false;
+  });
+
+  it("no dashboard feature key is refused before any branch is looked up", async () => {
+    seen.scopeLookup = null;
+    const res = await call("/attendance/dashboard/filters", tokenFor({ designationId: OUTLET_STAFF }));
+    assertRefused(res, "no feature key");
+    assert.equal(res.body.reason, "NO_DASHBOARD_PERMISSION");
+    assert.equal(seen.scopeLookup, null, "a refusal must not differ by whether they have a branch");
+  });
+});
+
+describe("the login-user to employee to branch mapping", () => {
+  it("A TRANSFER IN EMPLOYEE MASTER TAKES EFFECT ON THE NEXT REQUEST", async () => {
+    // The same token throughout - nobody logs out. The branch is read live, so
+    // moving the employee moves the scope.
+    const token = tokenFor({ designationId: STORE_MANAGER });
+    employeeStore.value = MOOLAKULAM;
+    await call(`/attendance/dashboard/overview?attendance_date=${DATE}`, token);
+    assert.deepEqual(seen.overview.store_ids, [MOOLAKULAM]);
+
+    employeeStore.value = ECR;
+    await call(`/attendance/dashboard/overview?attendance_date=${DATE}`, token);
+    assert.deepEqual(seen.overview.store_ids, [ECR], "the new branch, without re-logging in");
+
+    // And the branch they LEFT is now out of scope for them.
+    const refused = await call(
+      `/attendance/dashboard/overview?attendance_date=${DATE}&store_ids=${MOOLAKULAM}`,
+      token
+    );
+    assertRefused(refused, "the branch they were transferred out of");
+    employeeStore.value = MOOLAKULAM;
+  });
+
+  it("THE STALE store_id IN THE TOKEN IS IGNORED", async () => {
+    // Every token in this file carries store_id 2. The assigned branch is 1.
+    // If the token's copy were ever used, this would read branch 2.
+    employeeStore.value = MOOLAKULAM;
+    await call(
+      `/attendance/dashboard/overview?attendance_date=${DATE}`,
+      tokenFor({ designationId: STORE_MANAGER })
+    );
+    assert.deepEqual(seen.overview.store_ids, [MOOLAKULAM]);
+    assert.notDeepEqual(seen.overview.store_ids, [2], "the token's store_id decided nothing");
+  });
+
+  it("the branch is resolved from the employee id, on every request", async () => {
+    employeeStore.value = MOOLAKULAM;
+    seen.scopeLookup = null;
+    await call("/attendance/dashboard/filters", tokenFor({ designationId: STORE_MANAGER }));
+    assert.equal(seen.scopeLookup, EMPLOYEE_ID, "by employee id, not user id or store id");
+  });
+
+  it("a permission change takes effect without a new token", async () => {
+    // Same user, same token, different designation grants: the middleware reads
+    // permissions per request (behind its own short cache), so scope follows.
+    employeeStore.value = MOOLAKULAM;
+    const own = await call("/attendance/dashboard/filters", tokenFor({ designationId: STORE_MANAGER }));
+    assert.equal(own.body.dashboard_scope.kind, "OWN_STORE");
+    const all = await call("/attendance/dashboard/filters", tokenFor({ designationId: HR_ALL_STORES }));
+    assert.equal(all.body.dashboard_scope.kind, "ALL_STORES");
   });
 });

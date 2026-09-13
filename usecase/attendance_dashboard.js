@@ -1384,6 +1384,20 @@ module.exports = (attendanceDashboardRepo) => {
    * about the selected day - and which is never "confirmed", because nothing
    * in this system can confirm it.
    */
+  /**
+   * `disclose_other_locations` - MAY THIS VIEWER BE TOLD WHERE, when the where
+   * is outside their scope?
+   *
+   * An Own Store viewer is authorized for their own branch. One of their own
+   * employees punching at another branch is legitimately their business - the
+   * schedule they are responsible for is uncovered and somebody must check it -
+   * but the OTHER branch's identity is not: naming it would hand a viewer
+   * details of a location their scope excludes, through a row they are
+   * otherwise entitled to see. So the fact travels and the name does not.
+   *
+   * It defaults to true so nothing changes for an All Stores viewer or for any
+   * caller that does not pass it; the route sets it from the resolved scope.
+   */
   const getRecentPunches = async ({
     attendance_date,
     store_ids = null,
@@ -1391,6 +1405,7 @@ module.exports = (attendanceDashboardRepo) => {
     work_shift_id = null,
     search = null,
     limit = 25,
+    disclose_other_locations = true,
     now = Date.now(),
   }) => {
     const nowParts = istNowParts(now);
@@ -1459,6 +1474,14 @@ module.exports = (attendanceDashboardRepo) => {
       return Math.max(0, Math.round(nowAbs - then));
     };
 
+    /** Is this punch's own outlet inside the viewer's authorized scope? */
+    const inScope = (outletId) => {
+      if (disclose_other_locations) return true;
+      if (outletId === null || outletId === undefined) return true; // nothing to withhold
+      return (store_ids || []).map(Number).includes(Number(outletId));
+    };
+    const punchOutletVisible = (p) => inScope(p.punch_outlet_id);
+
     return {
       attendance_date: date,
       punches: (punches || [])
@@ -1472,7 +1495,11 @@ module.exports = (attendanceDashboardRepo) => {
           direction: "PUNCH",
           device_label: p.device_label || p.dev_id || null,
           dev_id: p.dev_id,
-          outlet_name: p.punch_outlet_name || null,
+          // The punch's own outlet, withheld from a viewer whose scope does not
+          // include it. `outlet_in_scope` says which case this is, so a screen
+          // can show "another location" rather than an unexplained blank.
+          outlet_name: punchOutletVisible(p) ? p.punch_outlet_name || null : null,
+          outlet_in_scope: punchOutletVisible(p),
           source: p.ingest_source,
           ingest_attendance_date: p.ingest_attendance_date,
           derivation_status: p.derivation_status,
@@ -1488,7 +1515,8 @@ module.exports = (attendanceDashboardRepo) => {
         biomax_device_id: d.biomax_device_id,
         dev_id: d.dev_id,
         label: d.label || d.dev_id,
-        outlet_name: d.outlet_name || null,
+        outlet_name: inScope(d.outlet_id) ? d.outlet_name || null : null,
+        outlet_in_scope: inScope(d.outlet_id),
         last_seen_at: d.last_seen_at || null,
         last_seen_age_minutes: ageMinutes(d.last_seen_at),
         last_punch_at: d.last_punch_at || null,

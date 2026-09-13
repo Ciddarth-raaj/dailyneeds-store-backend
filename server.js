@@ -883,6 +883,19 @@ class Server {
     // built on the same permission lookup so the admin bypass is shared.
     this.sensitive = require("./middlewares/sensitive")(this.permissions);
 
+    // GLOBAL DASHBOARD ACCESS - the one location-authorization layer every
+    // dashboard uses. Built on the same permission middleware so the
+    // administrator bypass is the system's single existing one, and on its own
+    // small repository so a future HR or Sales dashboard can be gated without
+    // depending on Attendance for its authorization.
+    this.dashboardScopeRepo = new (require("./repository/dashboard_scope"))(
+      this.mysql.connection
+    );
+    this.dashboardScope = require("./middlewares/dashboard_scope")(
+      this.permissions,
+      this.dashboardScopeRepo
+    );
+
     // Runs after auth so it can see the decoded user: an account with an IP
     // allow-list is cut off the moment it is used outside that network, not
     // just at login.
@@ -985,12 +998,15 @@ class Server {
       this.sensitive
     );
     // The Attendance Dashboard: read-only aggregates over one attendance date.
-    // Every route on it requires `view_attendance_dashboard` individually.
+    // Every route on it goes through the SHARED Global Dashboard resolver,
+    // which requires `view_attendance_dashboard` AND a resolved store scope
+    // (Own Store or All Stores) individually per endpoint.
     const attendanceDashboardRouter = require("./routes/attendance_dashboard")(
       this.attendanceDashboardUsecase,
       this.permissions,
       this.sensitive,
-      this.attendanceStaffingUsecase
+      this.attendanceStaffingUsecase,
+      this.dashboardScope
     );
     const attendanceRegularizationRouter = require("./routes/attendance_regularization")(
       this.attendanceRegularizationUsecase,
