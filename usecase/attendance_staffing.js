@@ -205,6 +205,7 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
       reconciles: true,
       gap_by_class: GAP_CLASSES.map((c) => ({ key: c, label: GAP_LABEL[c], count: 0 })),
       coverage: [],
+      expected_detail: [],
       additional: { early: [], no_active_shift: [], cross_location_arrivals: [] },
       unknown_expectation: [],
       next_hour: { next_change_at: null, transitions: [] },
@@ -347,14 +348,19 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
 
     /* ------------------------------------------- gap detail (C) --------- */
 
-    const gapDetail = rostered
-      .filter((r) => r.gap_class !== GAP.COVERED)
-      .map((r) => ({
-        ...r,
-        explanation: gapExplanation(r),
-      }))
-      .sort((a, b) => (b.minutes_since_start || 0) - (a.minutes_since_start || 0))
+    // THE WHOLE EXPECTED ROSTER, each row carrying its own classification, so
+    // the screen can list "expected", "recorded IN" and "gap" from one payload
+    // without asking a dated endpoint a question about "now".
+    const expectedDetail = rostered
+      .map((r) => ({ ...r, explanation: r.gap_class === GAP.COVERED ? null : gapExplanation(r) }))
+      .sort(
+        (a, b) =>
+          (b.gap_class !== GAP.COVERED) - (a.gap_class !== GAP.COVERED) ||
+          (b.minutes_since_start || 0) - (a.minutes_since_start || 0)
+      )
       .slice(0, MAX_LIST);
+
+    const gapDetail = expectedDetail.filter((r) => r.gap_class !== GAP.COVERED);
 
     /* --------------------------------- cross-location arrivals (D) ------ */
 
@@ -383,6 +389,7 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
       gap_by_class: totals.by_class,
 
       coverage,
+      expected_detail: expectedDetail,
       gap_detail: gapDetail,
       next_hour: {
         next_change_at: minuteToClock(next.next_change_minute),
