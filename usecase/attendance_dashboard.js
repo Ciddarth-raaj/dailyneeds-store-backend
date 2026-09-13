@@ -477,6 +477,34 @@ module.exports = (attendanceDashboardRepo) => {
     });
   };
 
+  /**
+   * APPLICABILITY FOR ONE EMPLOYEE ON ONE DATE - the one rule, shared.
+   *
+   * The same two dated facts, in the same direction, as
+   * `listApplicableEmployees` applies in SQL: joined on or before the date, and
+   * not resigned before it. An absent or unreadable joining date leaves the
+   * start unbounded, exactly as the SQL `IS NULL` branch does, because most
+   * production rows have no readable one.
+   *
+   * IT IS EXPORTED RATHER THAN RESTATED. The trend, and now the live staffing
+   * snapshot, both need applicability per DATE across a range that one
+   * single-date query cannot express. Writing the rule twice is how the two
+   * views begin to disagree about who was employed when, so there is one copy
+   * and both call it.
+   *
+   * THE KNOWN LIMITATION TRAVELS WITH IT: `new_employee` carries one joining
+   * date and one resignation date, so a resign-then-rejoin GAP is not modelled.
+   * That is reported rather than papered over with `employee_employment_period`,
+   * whose backfill is flagged needs_review.
+   */
+  const applicableOn = (employee, date) => {
+    const joined = toDateOnly(employee.joined_on);
+    if (joined !== null && joined > date) return false;
+    const resigned = toDateOnly(employee.resignation_date);
+    if (resigned !== null && resigned < date) return false;
+    return true;
+  };
+
   /* ---------------------------------------------- delivery assurance */
 
   /** One key for "this employee's outlet", including the no-outlet case. */
@@ -1225,21 +1253,6 @@ module.exports = (attendanceDashboardRepo) => {
     const batch = await loadBatch({ employees: candidates, from: probeFrom, to: selected });
     const dates = dateRange(probeFrom, selected);
 
-    /**
-     * Applicability for ONE employee on ONE date - the same two dated facts,
-     * in the same direction, as `listApplicableEmployees` applies in SQL:
-     * joined on or before the date, and not resigned before it. An absent or
-     * unreadable joining date leaves the start unbounded, exactly as the SQL
-     * `IS NULL` branch does, because most production rows have no readable one.
-     */
-    const applicableOn = (employee, date) => {
-      const joined = toDateOnly(employee.joined_on);
-      if (joined !== null && joined > date) return false;
-      const resigned = toDateOnly(employee.resignation_date);
-      if (resigned !== null && resigned < date) return false;
-      return true;
-    };
-
     // Coverage inputs for the whole window, read once.
     const loadedPulls = await loadPulls({ from: probeFrom, to: selected, store_ids });
 
@@ -1522,6 +1535,7 @@ module.exports = (attendanceDashboardRepo) => {
     buildLocationPanel,
     buildShiftPanel,
     buildAttentionPanel,
+    applicableOn,
     computeDaysForEmployee,
     loadBatch,
     getFilters,

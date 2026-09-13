@@ -197,18 +197,41 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
    * Everything the snapshot needs for the business date, the one before it and
    * the one after it.
    *
-   * The population is the applicable employees for the BUSINESS DATE - the
-   * question is about now, so today's applicability is the right rule. The
-   * engine days are computed for all three dates so a shift that began
-   * yesterday can be found and read, and so tomorrow's first shift can appear
-   * in a next-hour window that crosses midnight.
+   * THE CANDIDATE POPULATION IS THE RANGE, NOT THE BUSINESS DATE, and the
+   * defect this replaces was exactly that confusion. Employees were loaded with
+   * `listApplicableEmployees({ attendance_date: businessDate })` and only then
+   * asked about yesterday's and tomorrow's shifts - so an employee whose
+   * relevant shift belongs to a DIFFERENT attendance date could never appear at
+   * all, however valid that shift was:
+   *
+   *   AT 01:00 ON THE 13th, somebody whose employment ended on the 12th and who
+   *   is two hours into a 22:00-06:00 shift DATED the 12th vanished from
+   *   Expected Now - their duty interval was live, and they were not in the
+   *   population to be asked about.
+   *
+   *   AT 23:40 ON THE 13th, somebody joining on the 14th whose first shift
+   *   begins at 00:15 was never considered for the next-hour outlook, though
+   *   that start is thirty-five minutes away.
+   *
+   * So the candidates are everyone whose employment OVERLAPS previousDate ->
+   * nextDate, and applicability is then decided PER DATE with
+   * `dashboardUsecase.applicableOn` - the same rule the corrected trend uses,
+   * shared rather than restated. Being in the range does not put anybody in a
+   * date's shift; only being applicable on that date does.
+   *
+   * THE SCOPE IS UNCHANGED AND STILL SERVER-SIDE. The range query applies the
+   * same `locationPredicate` on the same column as the single-date one, so a
+   * yesterday or tomorrow shift cannot surface an employee from an outlet the
+   * caller is not authorized for - the widening that would matter here is a
+   * location one, and neither query can do it.
    */
   const loadSnapshotContext = async ({ businessDate, filters }) => {
     const previousDate = addDays(businessDate, -1);
     const nextDate = addDays(businessDate, 1);
 
-    const employees = await attendanceDashboardRepo.listApplicableEmployees({
-      attendance_date: businessDate,
+    const employees = await attendanceDashboardRepo.listApplicableEmployeesForRange({
+      from_date: previousDate,
+      to_date: nextDate,
       store_ids: filters.store_ids,
       designation_id: filters.designation_id,
       search: filters.search,
@@ -418,16 +441,30 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
         };
       };
 
-      // Only today and yesterday can be ON DUTY now; tomorrow cannot.
-      const dutyCandidates = [businessDate, previousDate].map(candidateFor);
-      const tomorrow = candidateFor(nextDate);
+      /**
+       * APPLICABILITY IS DECIDED PER DATE, not once for the business date.
+       *
+       * Being inside the candidate range puts nobody in a date's shift. A
+       * yesterday-only employee is applicable to yesterday and not to today; a
+       * tomorrow joiner is applicable to tomorrow and not to today. Each date
+       * asks separately, through the shared rule.
+       */
+      const applicable = (date) => dashboardUsecase.applicableOn(employee, date);
+
+      // Only today and yesterday can be ON DUTY now; tomorrow cannot. Each is
+      // offered only if the employee was actually employed on that date.
+      const dutyCandidates = [businessDate, previousDate]
+        .filter(applicable)
+        .map(candidateFor);
+      const tomorrow = applicable(nextDate) ? candidateFor(nextDate) : null;
 
       /* ---- B. the schedule outlook: EVERY relevant shift, one axis ---- */
       //
       // Not just the currently-expected population. A shift that starts in
       // twenty minutes is exactly what this view exists to show, and it is not
-      // in Expected Now by definition.
-      [...dutyCandidates, tomorrow].forEach((candidate) => {
+      // in Expected Now by definition - and neither is a shift that begins just
+      // after midnight for somebody who joins tomorrow.
+      [...dutyCandidates, tomorrow].filter(Boolean).forEach((candidate) => {
         const interval = dutyInterval(candidate.snapshot);
         if (!interval) return;
         if (
@@ -445,7 +482,10 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
         });
       });
 
-      const todaysDay = days[businessDate];
+      // A SETUP FAULT IS ONLY A FAULT ON A DATE THE PERSON IS EMPLOYED. Somebody
+      // who left yesterday has no shift today and is not missing one.
+      const applicableToday = applicable(businessDate);
+      const todaysDay = applicableToday ? days[businessDate] : null;
       const unresolved =
         todaysDay &&
         (todaysDay.shift_resolution_status === "NO_SHIFT_FOR_DATE" ||

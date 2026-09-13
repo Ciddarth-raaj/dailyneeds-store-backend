@@ -14,6 +14,8 @@ const {
   GAP,
   GAP_CLASSES,
   IN_WITHOUT_LOCATION_CREDIT,
+  LOCATION_BASIS,
+  LOCATION_ESTABLISHING_BASES,
   RECORDED,
   SESSION,
   activeDuty,
@@ -695,5 +697,117 @@ describe("reconciliation with location certainty separated out", () => {
     const t = reconcileGap(rows);
     assert.deepEqual(t.by_class.map((c) => c.key), [...GAP_CLASSES]);
     assert.equal(t.by_class.reduce((a, c) => a + c.count, 0), t.gap);
+  });
+});
+
+/* ==================================================================== */
+/* AN APPROVED REGULARIZATION IS NOT PROOF OF A PLACE.                   */
+/*                                                                      */
+/* The rule this replaces credited one to the scheduled outlet. What an  */
+/* approver accepted is a TIME and a STATE for an employee-date; nothing */
+/* in that decision names the outlet the person physically stood in, and */
+/* nothing in the data records one.                                      */
+/* ==================================================================== */
+
+describe("what establishes a location, and what does not", () => {
+  const inAt = (over) =>
+    classifyExpected({ recorded_state: RECORDED.IN, expected_outlet_id: 1, ...over });
+
+  it("a regularization with no location is IN_LOCATION_UNKNOWN, NOT covered", () => {
+    const verdict = inAt({
+      punch_outlet_id: null,
+      location_known: false,
+      location_basis: LOCATION_BASIS.APPROVED_REGULARIZATION,
+    });
+    assert.equal(verdict, GAP.IN_LOCATION_UNKNOWN);
+    assert.notEqual(verdict, GAP.COVERED, "an approval of a time is not proof of a place");
+  });
+
+  it("the basis alone never grants credit, whatever it says", () => {
+    // Even spelled out as the regularization basis, with an outlet id present,
+    // an unestablished location stays unestablished: the FLAG decides, and the
+    // basis is carried for display only.
+    assert.equal(
+      inAt({
+        punch_outlet_id: 1,
+        location_known: false,
+        location_basis: LOCATION_BASIS.APPROVED_REGULARIZATION,
+      }),
+      GAP.IN_LOCATION_UNKNOWN
+    );
+  });
+
+  it("ONLY A DEVICE is an establishing basis", () => {
+    assert.deepEqual([...LOCATION_ESTABLISHING_BASES], [LOCATION_BASIS.DEVICE]);
+    assert.ok(!LOCATION_ESTABLISHING_BASES.includes(LOCATION_BASIS.APPROVED_REGULARIZATION));
+    assert.ok(!LOCATION_ESTABLISHING_BASES.includes(LOCATION_BASIS.UNKNOWN));
+  });
+
+  it("the device rules are untouched", () => {
+    assert.equal(
+      inAt({ punch_outlet_id: 1, location_known: true, location_basis: LOCATION_BASIS.DEVICE }),
+      GAP.COVERED
+    );
+    assert.equal(
+      inAt({ punch_outlet_id: 2, location_known: true, location_basis: LOCATION_BASIS.DEVICE }),
+      GAP.IN_ELSEWHERE
+    );
+    assert.equal(
+      inAt({ punch_outlet_id: null, location_known: false, location_basis: LOCATION_BASIS.DEVICE }),
+      GAP.IN_LOCATION_UNKNOWN
+    );
+  });
+
+  it("a missing expected location is still its own answer, on any basis", () => {
+    [LOCATION_BASIS.DEVICE, LOCATION_BASIS.APPROVED_REGULARIZATION, LOCATION_BASIS.UNKNOWN].forEach(
+      (basis) => {
+        assert.equal(
+          classifyExpected({
+            recorded_state: RECORDED.IN,
+            expected_outlet_id: null,
+            punch_outlet_id: 7,
+            location_known: true,
+            location_basis: basis,
+          }),
+          GAP.EXPECTED_LOCATION_UNKNOWN,
+          basis
+        );
+      }
+    );
+  });
+
+  it("NO BASIS CAN MAKE A NON-IN STATE INTO COVERAGE", () => {
+    [RECORDED.NONE, RECORDED.OUT].forEach((state) => {
+      assert.notEqual(
+        classifyExpected({
+          recorded_state: state,
+          expected_outlet_id: 1,
+          punch_outlet_id: 1,
+          location_known: true,
+          location_basis: LOCATION_BASIS.APPROVED_REGULARIZATION,
+        }),
+        GAP.COVERED
+      );
+    });
+  });
+
+  it("every uncredited IN still reconciles into the gap", () => {
+    const rows = [
+      { gap_class: inAt({ punch_outlet_id: 1, location_known: true }) },
+      { gap_class: inAt({ punch_outlet_id: 2, location_known: true }) },
+      {
+        gap_class: inAt({
+          punch_outlet_id: null,
+          location_known: false,
+          location_basis: LOCATION_BASIS.APPROVED_REGULARIZATION,
+        }),
+      },
+    ];
+    const t = reconcileGap(rows);
+    assert.equal(t.expected, 3);
+    assert.equal(t.recorded_in_at_expected, 1);
+    assert.equal(t.recorded_in_location_unverified, 2);
+    assert.equal(t.recorded_in_somewhere, 3, "all three ARE recorded IN somewhere");
+    assert.equal(t.reconciles, true);
   });
 });

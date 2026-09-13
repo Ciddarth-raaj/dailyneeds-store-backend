@@ -125,6 +125,36 @@ function fakeRepo(state = {}) {
   const calls = {};
   return {
     calls,
+    /**
+     * THE RANGE CANDIDATE QUERY the live snapshot uses.
+     *
+     * It answers "whose employment OVERLAPS this window", exactly as the real
+     * SQL does - not resigned before it began, not joined after it ended - so a
+     * yesterday-only employee and a tomorrow joiner both come back and the
+     * usecase decides per date which of them belongs in which date's shift.
+     */
+    listApplicableEmployeesForRange: async (args) => {
+      calls.populationRange = args;
+      let rows = state.employees || [employee(1)];
+      rows = rows.filter((r) => {
+        if (r.resignation_date && r.resignation_date < args.from_date) return false;
+        if (r.joined_on && r.joined_on > args.to_date) return false;
+        return true;
+      });
+      if (Array.isArray(args.store_ids)) {
+        rows = args.store_ids.length
+          ? rows.filter((r) => args.store_ids.map(Number).includes(Number(r.store_id)))
+          : [];
+      }
+      if (args.designation_id) {
+        rows = rows.filter((r) => Number(r.designation_id) === Number(args.designation_id));
+      }
+      if (args.search) {
+        const q = String(args.search).toLowerCase();
+        rows = rows.filter((r) => String(r.employee_name).toLowerCase().includes(q));
+      }
+      return rows;
+    },
     listApplicableEmployees: async (args) => {
       calls.population = args;
       calls.populationDates = [...(calls.populationDates || []), args.attendance_date];
@@ -135,6 +165,15 @@ function fakeRepo(state = {}) {
         (state.employeesByDate && state.employeesByDate[args.attendance_date]) ||
         state.employees ||
         [employee(1)];
+      // THE SAME TWO DATED FACTS THE REAL SQL APPLIES: not resigned before the
+      // date, not joined after it. Without this the fake answers "everybody" to
+      // every date, and a cross-date applicability test would pass whatever the
+      // usecase did - which is no test at all.
+      rows = rows.filter((r) => {
+        if (r.resignation_date && r.resignation_date < args.attendance_date) return false;
+        if (r.joined_on && r.joined_on > args.attendance_date) return false;
+        return true;
+      });
       if (Array.isArray(args.store_ids)) {
         rows = args.store_ids.length
           ? rows.filter((r) => args.store_ids.map(Number).includes(Number(r.store_id)))
@@ -390,7 +429,10 @@ describe("Recorded IN is the state as of now, not 'punched at some point'", () =
     assert.equal(res.gap_by_class.find((c) => c.key === "NO_CHECK_IN").count, 1);
   });
 
-  it("an approved regularized punch counts, keeping its source", async () => {
+  it("an approved regularized punch sets the STATE to IN, whatever it says about place", async () => {
+    // The state half of the rule, on its own: an approved regularization is a
+    // real recorded IN. What it is NOT is proof of a location - asserted in the
+    // location suite below.
     const { uc } = build({
       employees: [employee(1)],
       assignments: [assign(1, 1)],
@@ -406,7 +448,9 @@ describe("Recorded IN is the state as of now, not 'punched at some point'", () =
       ],
     });
     const res = await uc.getSnapshot({ now: ist(DATE, 12, 0) });
-    assert.equal(res.recorded_in, 1);
+    assert.equal(res.expected_preview[0].recorded_state, "IN");
+    assert.equal(res.expected_preview[0].recorded_since, "09:00");
+    assert.equal(res.recorded_in_location_unverified, 1, "counted company-wide as recorded IN");
   });
 });
 
@@ -527,11 +571,11 @@ describe("the gap is named honestly and reconciles", () => {
     assert.equal(res.gap_by_class.find((c) => c.key === "EXPECTED_LOCATION_UNKNOWN").count, 1);
   });
 
-  it("AN APPROVED REGULARIZATION IS CREDITED, and says why", async () => {
-    // It had no terminal, so there is no device location - but it is not the
-    // uncertainty the rule guards against either: an approver accepted this
-    // employee's own attendance for this date, and there is no "somewhere else"
-    // for it to have happened. Kept distinct from an unmapped terminal.
+  it("AN APPROVED REGULARIZATION DOES NOT PROVE A PLACE", async () => {
+    // The corrected rule, replacing the shortcut that credited one to the
+    // scheduled outlet. An approver accepted a TIME and a STATE for this
+    // employee-date; nothing in that decision says which outlet the person
+    // physically stood in, and no field in the data records one.
     const { uc } = build({
       employees: [employee(1)],
       assignments: [assign(1, 1)],
@@ -547,8 +591,120 @@ describe("the gap is named honestly and reconciles", () => {
       ],
     });
     const res = await uc.getSnapshot({ now: ist(DATE, 12, 0) });
-    assert.equal(res.recorded_in, 1);
+    assert.equal(res.recorded_in, 0, "not recorded IN AT THE EXPECTED LOCATION");
+    assert.equal(res.gap, 1);
+    assert.equal(res.gap_by_class.find((c) => c.key === "IN_LOCATION_UNKNOWN").count, 1);
+    // The basis is still reported, because HOW the state arose is worth showing
+    // even though it settles nothing about where.
     assert.equal(res.expected_preview[0].location_basis, "APPROVED_REGULARIZATION");
+    assert.equal(res.expected_preview[0].location_known, false);
+  });
+
+  it("a regularization does NOT reduce the scheduled outlet's gap", async () => {
+    const { uc } = build({
+      employees: [employee(1), employee(2)],
+      assignments: [assign(1, 1), assign(2, 1)],
+      rawPunches: [punch(2, `${DATE} 09:00:00`, 1)],
+      regularized: [
+        {
+          punch_id: 900,
+          employee_id: 1,
+          attendance_date: DATE,
+          io_time: `${DATE} 09:00:00`,
+          punch_source: "REGULARIZED",
+        },
+      ],
+    });
+    const res = await uc.getSnapshot({ now: ist(DATE, 12, 0) });
+    const row = res.coverage[0];
+    assert.equal(row.expected_now, 2);
+    assert.equal(row.recorded_in, 1, "only the device-mapped punch is cover of this outlet");
+    assert.equal(row.gap, 1);
+    assert.equal(row.recorded_in_location_unverified, 1);
+    assert.equal(row.reconciles, true);
+    assert.equal(res.reconciles, true, "and the headline still reconciles");
+  });
+
+  it("the regularized employee appears in the verification bucket of the drilldown", async () => {
+    const { uc } = build({
+      employees: [employee(1)],
+      assignments: [assign(1, 1)],
+      rawPunches: [],
+      regularized: [
+        {
+          punch_id: 900,
+          employee_id: 1,
+          attendance_date: DATE,
+          io_time: `${DATE} 09:00:00`,
+          punch_source: "REGULARIZED",
+        },
+      ],
+    });
+    const now = ist(DATE, 12, 0);
+    const bucket = await uc.getStaffingDrilldown({ bucket: "IN_LOCATION_UNKNOWN", now });
+    assert.equal(bucket.total, 1);
+    assert.equal(bucket.rows[0].employee_id, 1);
+    const unverified = await uc.getStaffingDrilldown({
+      bucket: "RECORDED_IN_LOCATION_UNVERIFIED",
+      now,
+    });
+    assert.equal(unverified.total, 1);
+    const covered = await uc.getStaffingDrilldown({
+      bucket: "RECORDED_IN_EXPECTED_LOCATION",
+      now,
+    });
+    assert.equal(covered.total, 0);
+  });
+
+  it("Needs Attention Now surfaces it as a verification item, not a fault", async () => {
+    const { uc } = build({
+      employees: [employee(1)],
+      assignments: [assign(1, 1)],
+      rawPunches: [],
+      regularized: [
+        {
+          punch_id: 900,
+          employee_id: 1,
+          attendance_date: DATE,
+          io_time: `${DATE} 09:00:00`,
+          punch_source: "REGULARIZED",
+        },
+      ],
+    });
+    const res = await uc.getSnapshot({ now: ist(DATE, 12, 0) });
+    const item = res.attention_preview.find((a) => a.reason_key === "IN_LOCATION_UNKNOWN");
+    assert.ok(item, "it is something to verify");
+    assert.match(item.detail, /verification needed/i);
+    assert.doesNotMatch(JSON.stringify(item), /absent|penalt|misconduct/i);
+  });
+
+  it("ONLY A DEVICE ESTABLISHES A PLACE - the whole matrix in one assertion", async () => {
+    const { uc } = build({
+      employees: [employee(1), employee(2), employee(3), employee(4)],
+      assignments: [assign(1, 1), assign(2, 1), assign(3, 1), assign(4, 1)],
+      rawPunches: [
+        punch(1, `${DATE} 09:00:00`, 1), // device, mapped to outlet 1 = expected
+        punch(2, `${DATE} 09:00:00`, 2, { outlet_id: 99, outlet_name: "Elsewhere" }),
+        punch(3, `${DATE} 09:00:00`, 3, { outlet_id: null, outlet_name: null }),
+      ],
+      regularized: [
+        {
+          punch_id: 900,
+          employee_id: 4,
+          attendance_date: DATE,
+          io_time: `${DATE} 09:00:00`,
+          punch_source: "REGULARIZED",
+        },
+      ],
+    });
+    const res = await uc.getSnapshot({ now: ist(DATE, 12, 0) });
+    const by = (id) => res.expected_preview.find((r) => r.employee_id === id).gap_class;
+    assert.equal(by(1), "COVERED", "device, matching outlet");
+    assert.equal(by(2), "IN_ELSEWHERE", "device, different outlet");
+    assert.equal(by(3), "IN_LOCATION_UNKNOWN", "device, unmapped terminal");
+    assert.equal(by(4), "IN_LOCATION_UNKNOWN", "regularization, no location at all");
+    assert.equal(res.recorded_in, 1, "exactly one is cover of the expected location");
+    assert.equal(res.reconciles, true);
   });
 });
 
@@ -1782,5 +1938,216 @@ describe("recurring coverage gaps: the evidence fails closed", () => {
     assert.match(res.limitation, /Rejoin history is not reconstructed/i);
     assert.doesNotMatch(res.limitation, /performance score/i);
     assert.match(res.limitation, /not any employee's performance/i);
+  });
+});
+
+/* ==================================================================== */
+/* CROSS-DATE APPLICABILITY.                                            */
+/*                                                                      */
+/* The candidate population is the RANGE previousDate -> nextDate, and   */
+/* applicability is then decided PER DATE. The defect this replaces      */
+/* loaded only employees applicable on the business date, so a valid     */
+/* shift belonging to another attendance date could never be found.      */
+/* ==================================================================== */
+
+describe("employees are resolved per date, not once for the business date", () => {
+  const SEP12 = "2026-09-12";
+  const SEP13 = "2026-09-13";
+  const SEP14 = "2026-09-14";
+
+  it("asks for the whole window, previous through next", async () => {
+    const { uc, repo } = build({
+      employees: [employee(1)],
+      assignments: [assign(1, 1)],
+      rawPunches: [],
+    });
+    await uc.getSnapshot({ now: ist(SEP13, 14, 0) });
+    assert.deepEqual(
+      { from: repo.calls.populationRange.from_date, to: repo.calls.populationRange.to_date },
+      { from: SEP12, to: SEP14 }
+    );
+  });
+
+  it("AN OVERNIGHT EMPLOYEE WHOSE EMPLOYMENT ENDED YESTERDAY IS STILL EXPECTED NOW", async () => {
+    // Employment ends 12 Sep. Their 22:00-06:00 shift is DATED 12 Sep and at
+    // 01:00 on the 13th it is two hours in. The duty interval is live, and the
+    // date it belongs to is one they were employed on - so they are on duty.
+    // The old population query, asking only about the 13th, lost them entirely.
+    const { uc } = build({
+      employees: [employee(1, { resignation_date: SEP12 })],
+      assignments: [assign(1, 4)], // 22:00 -> 06:00
+      rawPunches: [punch(1, `${SEP12} 22:00:00`, 1)],
+    });
+    const res = await uc.getSnapshot({ now: ist(SEP13, 1, 0) });
+    assert.equal(res.expected_now, 1);
+    assert.equal(res.expected_preview[0].attendance_date, SEP12, "yesterday's shift");
+    assert.equal(res.recorded_in, 1);
+  });
+
+  it("and stops being expected the moment that duty interval ends", async () => {
+    const { uc } = build({
+      employees: [employee(1, { resignation_date: SEP12 })],
+      assignments: [assign(1, 4)],
+      rawPunches: [],
+    });
+    // 06:30 on the 13th: the 06:00 finish has passed.
+    const res = await uc.getSnapshot({ now: ist(SEP13, 6, 30) });
+    assert.equal(res.expected_now, 0);
+    // And they are NOT reported as a shift-setup fault for a day they were not
+    // employed on - having no shift today is not a missing shift.
+    assert.equal(res.unknown_expectation_total, 0);
+    assert.equal(res.attention_total, 0);
+  });
+
+  it("A TOMORROW JOINER APPEARS IN THE NEXT 60 MINUTES, after midnight", async () => {
+    // 23:40 on the 13th. The employee joins on the 14th; their first shift
+    // starts at 00:15 that day - thirty-five minutes away. The old population,
+    // scoped to the 13th, never considered them.
+    const { uc } = build({
+      employees: [employee(1, { joined_on: SEP14 })],
+      assignments: [assign(1, 5)], // 00:15 -> 08:15
+      configs: [...CONFIGS, shiftConfig(5, "00:15-08:15")],
+      schedules: [...SCHEDULES, ...scheduleRows(5, "00:15:00", 8)],
+      rawPunches: [],
+    });
+    const res = await uc.getSnapshot({ now: ist(SEP13, 23, 40) });
+    assert.equal(res.expected_now, 0, "they have not joined yet and are not on duty");
+    assert.equal(res.next_hour.next_change_at, "00:15");
+    assert.equal(res.next_hour.transitions[0].starting, 1);
+    assert.equal(res.next_hour.transitions[0].remaining, 1);
+  });
+
+  it("but a tomorrow joiner is NOT counted today, before their joining date", async () => {
+    const { uc } = build({
+      employees: [employee(1, { joined_on: SEP14 })],
+      assignments: [assign(1, 1)], // an ordinary 9-9
+      rawPunches: [],
+    });
+    const res = await uc.getSnapshot({ now: ist(SEP13, 14, 0) });
+    assert.equal(res.expected_now, 0, "not employed on the 13th");
+    assert.equal(res.unknown_expectation_total, 0, "and not a setup fault either");
+  });
+
+  it("an employee joining TODAY is counted from today", async () => {
+    const { uc } = build({
+      employees: [employee(1, { joined_on: SEP13 })],
+      assignments: [assign(1, 1)],
+      rawPunches: [],
+    });
+    assert.equal((await uc.getSnapshot({ now: ist(SEP13, 14, 0) })).expected_now, 1);
+    assert.equal((await uc.getSnapshot({ now: ist(SEP12, 14, 0) })).expected_now, 0);
+  });
+
+  it("an employee resigned BEFORE the relevant attendance date is excluded", async () => {
+    const { uc } = build({
+      employees: [employee(1, { resignation_date: "2026-09-11" })],
+      assignments: [assign(1, 1)],
+      rawPunches: [],
+    });
+    const res = await uc.getSnapshot({ now: ist(SEP13, 14, 0) });
+    assert.equal(res.expected_now, 0);
+  });
+
+  it("an employee resigning ON the date follows the existing single-date boundary", async () => {
+    // `resignation_date >= date` is applicable, the same direction the SQL and
+    // the trend use. The last day is worked, not lost.
+    const { uc } = build({
+      employees: [employee(1, { resignation_date: SEP13 })],
+      assignments: [assign(1, 1)],
+      rawPunches: [],
+    });
+    assert.equal((await uc.getSnapshot({ now: ist(SEP13, 14, 0) })).expected_now, 1);
+  });
+
+  it("being inside the range puts nobody in a date they were not employed on", async () => {
+    // Two employees returned by one range query; each belongs to one date only.
+    const { uc } = build({
+      employees: [
+        employee(1, { resignation_date: SEP12 }),
+        employee(2, { joined_on: SEP14 }),
+      ],
+      assignments: [assign(1, 1), assign(2, 1)],
+      rawPunches: [],
+    });
+    const res = await uc.getSnapshot({ now: ist(SEP13, 14, 0) });
+    assert.equal(res.expected_now, 0, "neither is employed on the 13th");
+    assert.equal(res.unknown_expectation_total, 0);
+  });
+
+  it("THE LOCATION SCOPE STILL APPLIES to the range query", async () => {
+    const { uc, repo } = build({
+      employees: [
+        employee(1),
+        employee(2, { store_id: 2, outlet_name: "Warehouse", resignation_date: SEP12 }),
+      ],
+      assignments: [assign(1, 1), assign(2, 4)],
+      rawPunches: [],
+    });
+    const res = await uc.getSnapshot({ store_ids: [1], now: ist(SEP13, 1, 0) });
+    assert.deepEqual(repo.calls.populationRange.store_ids, [1]);
+    // The warehouse employee's overnight shift is live at 01:00, and a caller
+    // scoped to outlet 1 must not see them or their outlet's name anywhere.
+    assert.doesNotMatch(JSON.stringify(res), /Warehouse/);
+    assert.ok(res.coverage.every((c) => c.store_id === 1));
+  });
+
+  it("an empty authorized scope still reads nothing across the range", async () => {
+    const { uc } = build({
+      employees: [employee(1)],
+      assignments: [assign(1, 1)],
+      rawPunches: [],
+    });
+    const res = await uc.getSnapshot({ store_ids: [], now: ist(SEP13, 14, 0) });
+    assert.equal(res.reason, "NO_SCOPE");
+    assert.equal(res.expected_now, 0);
+  });
+
+  it("the shift, designation and search filters still apply", async () => {
+    const state = {
+      employees: [employee(1), employee(2, { designation_id: 6, designation_name: "Packer" })],
+      assignments: [assign(1, 1), assign(2, 2)],
+      rawPunches: [],
+    };
+    const { uc } = build(state);
+    const now = ist(SEP13, 14, 0);
+    assert.equal((await uc.getSnapshot({ now, work_shift_id: 1 })).expected_now, 1);
+    assert.equal((await uc.getSnapshot({ now, designation_id: 6 })).expected_now, 1);
+    assert.equal((await uc.getSnapshot({ now, search: "Employee 2" })).expected_now, 1);
+    assert.equal((await uc.getSnapshot({ now })).expected_now, 2);
+  });
+
+  it("the drilldown totals agree with the cards across the date boundary", async () => {
+    const { uc } = build({
+      employees: [employee(1, { resignation_date: SEP12 }), employee(2)],
+      assignments: [assign(1, 4), assign(2, 4)],
+      rawPunches: [punch(1, `${SEP12} 22:00:00`, 1)],
+    });
+    const now = ist(SEP13, 1, 0);
+    const snap = await uc.getSnapshot({ now });
+    assert.equal(snap.expected_now, 2, "both are inside yesterday's overnight interval");
+    const expected = await uc.getStaffingDrilldown({ bucket: "EXPECTED", now });
+    const gap = await uc.getStaffingDrilldown({ bucket: "GAP", now });
+    const covered = await uc.getStaffingDrilldown({
+      bucket: "RECORDED_IN_EXPECTED_LOCATION",
+      now,
+    });
+    assert.equal(expected.total, snap.expected_now);
+    assert.equal(gap.total, snap.gap);
+    assert.equal(covered.total, snap.recorded_in);
+    assert.equal(covered.total + gap.total, expected.total);
+  });
+
+  it("uses the SHARED applicability rule rather than one of its own", async () => {
+    // Not a behaviour assertion but an architecture one: a second copy of the
+    // joining/resignation rule is how the live view and the trend begin to
+    // disagree about who was employed when.
+    const repo = fakeRepo({ employees: [employee(1)], assignments: [assign(1, 1)] });
+    const dashboard = buildDashboard(repo);
+    assert.equal(typeof dashboard.applicableOn, "function");
+    assert.equal(dashboard.applicableOn({ joined_on: SEP14 }, SEP13), false);
+    assert.equal(dashboard.applicableOn({ joined_on: SEP13 }, SEP13), true);
+    assert.equal(dashboard.applicableOn({ resignation_date: SEP12 }, SEP13), false);
+    assert.equal(dashboard.applicableOn({ resignation_date: SEP13 }, SEP13), true);
+    assert.equal(dashboard.applicableOn({}, SEP13), true, "unreadable dates leave it unbounded");
   });
 });

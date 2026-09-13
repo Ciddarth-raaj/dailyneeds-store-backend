@@ -318,12 +318,15 @@ const GAP_CLASSES = Object.freeze([
 ]);
 
 /**
- * HOW a recorded punch's location is known at all.
+ * HOW a recorded punch's location is known at all - which is not the same
+ * question as WHETHER it is known.
  *
  *   DEVICE                   a terminal reported it, and the terminal's outlet
  *                            mapping either resolves or it does not.
  *   APPROVED_REGULARIZATION  there was no terminal: an approver accepted this
- *                            employee's attendance for this date.
+ *                            employee's attendance time and state for this
+ *                            date. It says nothing about the place, and it is
+ *                            never treated as if it did.
  *   UNKNOWN                  nothing establishes it.
  */
 const LOCATION_BASIS = Object.freeze({
@@ -331,6 +334,13 @@ const LOCATION_BASIS = Object.freeze({
   APPROVED_REGULARIZATION: "APPROVED_REGULARIZATION",
   UNKNOWN: "UNKNOWN",
 });
+
+/**
+ * The bases that ESTABLISH a place. Only a device whose terminal resolves to an
+ * outlet does; APPROVED_REGULARIZATION is recorded for display and establishes
+ * nothing, because no approved duty location exists in the data to read.
+ */
+const LOCATION_ESTABLISHING_BASES = Object.freeze([LOCATION_BASIS.DEVICE]);
 
 /**
  * The classes where the employee IS recorded IN somewhere, but the punch
@@ -391,15 +401,24 @@ const VERIFICATION_CLASSES = Object.freeze([
  * @param {string} input.recorded_state       one of RECORDED
  * @param {number|null} [input.punch_outlet_id] where the latest punch happened
  * @param {number|null} [input.expected_outlet_id]
- * ONE CASE IS NOT A DEVICE AT ALL. An APPROVED REGULARIZATION has no terminal
- * and therefore no terminal location, but it is not the uncertainty this guards
- * against either: the risk being prevented is an unmapped terminal SOMEWHERE
- * ELSE silently counting as cover, and a regularization has no somewhere else -
- * it is an approved statement about this employee's own attendance record on
- * this date. So it is credited to their scheduled location, and the row carries
- * `location_basis: APPROVED_REGULARIZATION` rather than pretending a device
- * reported it. A DEVICE punch whose place cannot be established is still not
- * credited; the two are deliberately kept apart rather than merged.
+ * AN APPROVED REGULARIZATION DOES NOT PROVE A PLACE, and the previous version's
+ * shortcut - crediting one to the scheduled outlet - claimed more than the
+ * approval does. What an approver accepted is an attendance TIME and STATE for
+ * an employee-date. Nothing in that decision is a statement about which outlet
+ * the person physically stood in, and the data bears this out: reading the
+ * schema, `attendance_regularized_punch` has no location column of any kind,
+ * and the only outlet on `attendance_approval_request` is documented in its own
+ * DDL as "the employee home outlet, for the Store Manager stage" - approval
+ * ROUTING derived from the default store, not an approved duty location.
+ *
+ * So a regularization with no authoritative location is IN_LOCATION_UNKNOWN,
+ * exactly like an unmapped terminal: the state is evidence, the place is not.
+ * The row still carries `location_basis: APPROVED_REGULARIZATION`, because HOW
+ * a state arose is worth showing even when it settles nothing about where. If a
+ * field that genuinely records an APPROVED duty location is ever added, this is
+ * where it would be read - from that field, and never inferred from the
+ * employee's default store, the scheduled store, the approver, the designation
+ * or anything the browser sent.
  *
  * @param {boolean} [input.location_known]    false when the punch's terminal
  *        has no outlet mapping, or the lookup did not succeed; the state is
@@ -422,13 +441,12 @@ function classifyExpected({
   if (recorded_state === RECORDED.OUT) return GAP.RECORDED_OUT;
   if (recorded_state !== RECORDED.IN) return GAP.INDETERMINATE;
 
-  // Recorded IN. Location certainty is now a separate question from state.
+  // Recorded IN. Location certainty is a separate question from state, and
+  // NOTHING short of an established location answers it - a regularization
+  // included. `location_basis` is carried for display; it grants no credit.
   if (expected_outlet_id === null || expected_outlet_id === undefined) {
     return GAP.EXPECTED_LOCATION_UNKNOWN;
   }
-  // An approved regularization is an approval about THIS employee-date, so the
-  // scheduled location is the one it speaks for. See the note above.
-  if (location_basis === LOCATION_BASIS.APPROVED_REGULARIZATION) return GAP.COVERED;
   if (!location_known || punch_outlet_id === null || punch_outlet_id === undefined) {
     return GAP.IN_LOCATION_UNKNOWN;
   }
@@ -563,6 +581,7 @@ module.exports = {
   GAP_LABEL,
   GAP_CLASSES,
   LOCATION_BASIS,
+  LOCATION_ESTABLISHING_BASES,
   IN_WITHOUT_LOCATION_CREDIT,
   VERIFICATION_CLASSES,
   classifyExpected,
