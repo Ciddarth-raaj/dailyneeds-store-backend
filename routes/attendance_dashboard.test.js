@@ -111,6 +111,18 @@ const usecase = {
   },
 };
 
+/** The operational snapshot usecase, stubbed: the gate is what is under test. */
+const staffingUsecase = {
+  getSnapshot: async (args) => {
+    seen.staffing = args;
+    return { as_of: `${DATE} 10:00`, expected_now: 0, recorded_in: 0, gap: 0 };
+  },
+  getRecurringGaps: async (args) => {
+    seen.recurring = args;
+    return { patterns: [], available: false };
+  },
+};
+
 const sessionState = {
   user_id: USER_ID,
   employee_id: EMPLOYEE_ID,
@@ -135,7 +147,7 @@ before(async () => {
   app.use(bodyParser.json());
   app.use(auth.create({ userUsecase: { getSessionState: async () => sessionState } }));
   delete require.cache[require.resolve("./attendance_dashboard")];
-  const routes = require("./attendance_dashboard")(usecase, permissions, null);
+  const routes = require("./attendance_dashboard")(usecase, permissions, null, staffingUsecase);
   router = routes.getRouter();
   app.use("/", router);
 
@@ -203,6 +215,8 @@ const ENDPOINTS = [
   `/attendance/dashboard/drilldown?attendance_date=${DATE}&bucket=CHECKED_IN`,
   `/attendance/dashboard/trend?attendance_date=${DATE}`,
   `/attendance/dashboard/recent-punches?attendance_date=${DATE}`,
+  `/attendance/dashboard/staffing`,
+  `/attendance/dashboard/recurring-gaps`,
 ];
 
 describe("every endpoint fails closed", () => {
@@ -493,6 +507,26 @@ describe("the browser's outlet filter is a FILTER, never authorization", () => {
   it("the punch feed refuses a request with no attendance date", async () => {
     const res = await call("/attendance/dashboard/recent-punches", tokenFor());
     assert.equal(res.body.code, 422, "a feed with no date cannot be evidence about a date");
+  });
+
+  it("the staffing snapshot takes no date: the server decides what 'now' is", async () => {
+    const res = await call(`/attendance/dashboard/staffing?attendance_date=${DATE}`, tokenFor());
+    assert.equal(
+      res.body.code,
+      422,
+      "a caller-supplied date would put a past day's figures under a 'Now' heading"
+    );
+  });
+
+  it("the staffing snapshot receives the scope and the filters", async () => {
+    await call(
+      "/attendance/dashboard/staffing?store_ids=2&designation_id=5&work_shift_id=7&search=Priya",
+      tokenFor()
+    );
+    assert.deepEqual(seen.staffing.store_ids, [2]);
+    assert.equal(seen.staffing.designation_id, 5);
+    assert.equal(seen.staffing.work_shift_id, 7);
+    assert.equal(seen.staffing.search, "Priya");
   });
 
   it("the drilldown carries the unassigned-location selection", async () => {

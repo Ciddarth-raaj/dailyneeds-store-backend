@@ -14,8 +14,9 @@ const {
 } = require("../utils/shift_config_version");
 const { resolveEffectiveRawPunches } = require("../utils/attendance_effective_punches");
 const {
-  COVERAGE,
-  COVERAGE_LABEL,
+  DELIVERY,
+  DELIVERY_DETAIL,
+  DELIVERY_LABEL,
   ISSUE_KEY,
   ISSUE_LABEL,
   NEED_ACTION_ISSUE_KEYS,
@@ -24,11 +25,10 @@ const {
   PRESENCE_SLICE_ORDER,
   CHECK_IN_RATE_DEFINITION,
   dashboardIssueKey,
-  dayCloseMinute,
   hasShiftStarted,
   isDayClosed,
   istNowParts,
-  locationCoverage,
+  locationDelivery,
   nowOnDateAxis,
   presenceSlice,
   rate,
@@ -471,233 +471,80 @@ module.exports = (attendanceDashboardRepo) => {
     });
   };
 
-  /* ------------------------------------------------ delivery coverage */
+  /* ---------------------------------------------- delivery assurance */
 
   /** One key for "this employee's outlet", including the no-outlet case. */
   const outletKeyOf = (storeId) =>
     storeId === null || storeId === undefined ? "none" : String(storeId);
 
   /**
-   * Coverage inputs for a whole date RANGE, read once.
+   * DELIVERY ASSURANCE per outlet, for one date or a range.
    *
-   * `last_seen_at` is a single CURRENT value per device, so one read answers
-   * every date in the window: a device that has been in contact since a past
-   * day closed has had the chance to hand over anything it buffered for that
-   * day. The assignments come back with their own effective windows so the
-   * per-date question - which terminals served this outlet THEN - is answered
-   * from memory rather than with a query per day.
+   * Device contact is no longer an input. `biomax/store.js` writes
+   * `last_seen_at` on every request including idle polls, so it cannot
+   * distinguish a terminal that delivered everything from one that delivered
+   * nothing, and using it produced a "confirmed" that was not earned. The only
+   * facts that bear on delivery are the historical pulls: one still running
+   * means punches are still coming, and one that FAILED means some may be
+   * missing. Neither can make the answer "complete" - nothing in this system
+   * can (see `DELIVERY` in utils/attendance_dashboard.js).
    *
-   * A failure is UNKNOWN, not COMPLETE: `available: false` makes every date
-   * withhold absence.
+   * A read failure leaves every outlet UNVERIFIED, which is where they start.
    */
-  const loadRangeCoverageInputs = async ({ from, to, store_ids }) => {
+  const loadPulls = async ({ from, to, store_ids }) => {
     try {
-      const [assignments, pulls] = await Promise.all([
-        attendanceDashboardRepo.listDeviceCoverageForRange
-          ? attendanceDashboardRepo.listDeviceCoverageForRange({
-              from_date: from,
-              to_date: to,
-              store_ids,
-            })
-          : [],
-        attendanceDashboardRepo.listOpenHistoricalPullsForRange
-          ? attendanceDashboardRepo.listOpenHistoricalPullsForRange({
-              from_date: from,
-              to_date: to,
-              store_ids,
-            })
-          : [],
-      ]);
-      return { assignments: assignments || [], pulls: pulls || [], available: true };
+      const rows = attendanceDashboardRepo.listHistoricalPullsForRange
+        ? await attendanceDashboardRepo.listHistoricalPullsForRange({
+            from_date: from,
+            to_date: to,
+            store_ids,
+          })
+        : [];
+      return { pulls: rows || [], available: true };
     } catch (err) {
-      return { assignments: [], pulls: [], available: false };
+      return { pulls: [], available: false };
     }
   };
 
-  /** `YYYY-MM-DD HH:MM:SS` -> is it at or before the END of `date`? */
-  const startsOnOrBefore = (value, date) => {
-    const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(value || ""));
-    return m ? m[1] <= date : false;
-  };
-  /** An assignment's exclusive end: still in force on `date`? */
-  const endsAfter = (value, date) => {
-    if (value === null || value === undefined || value === "") return true;
-    const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(value));
-    return m ? m[1] > date : true;
+  /** Does a pull's requested range cover `date`? */
+  const pullCoversDate = (pull, date) => {
+    const from = /^(\d{4}-\d{2}-\d{2})/.exec(String(pull.requested_from || ""));
+    const to = /^(\d{4}-\d{2}-\d{2})/.exec(String(pull.requested_to || ""));
+    if (from && from[1] > date) return false;
+    if (to && to[1] < date) return false;
+    return true;
   };
 
-  /**
-   * The per-outlet coverage verdict for ONE date of a range, from inputs
-   * already in memory.
-   *
-   * Only the outlets the day's own population actually sits in are judged: a
-   * silent terminal at a branch nobody on this filtered list works at says
-   * nothing about this day's figures.
-   */
-  const coverageForDate = ({ date, rows, inputs }) => {
-    const outletKeys = [...new Set((rows || []).map((r) => outletKeyOf(r.store_id)))];
+  /** Per-outlet delivery verdicts for one date, from pulls already in memory. */
+  const deliveryForDate = ({ date, outletKeys, pulls }) => {
+    const open = new Set();
+    const failed = new Set();
+    let openAny = false;
+    let failedAny = false;
+
+    (pulls || []).forEach((p) => {
+      if (!pullCoversDate(p, date)) return;
+      const attributed = p.outlet_id !== null && p.outlet_id !== undefined;
+      if (String(p.status) === "FAILED") {
+        if (attributed) failed.add(outletKeyOf(p.outlet_id));
+        else failedAny = true;
+      } else {
+        if (attributed) open.add(outletKeyOf(p.outlet_id));
+        else openAny = true;
+      }
+    });
+
     const byOutlet = new Map();
-
-    if (!inputs.available) {
-      outletKeys.forEach((k) => byOutlet.set(k, COVERAGE.UNKNOWN));
-      return { byOutlet, allComplete: outletKeys.length === 0 };
-    }
-
-    // The close instant for each outlet on this date: the LATEST among the
-    // shifts its people were rostered on, because the location's window is not
-    // over until its last shift's cutoff has passed.
-    const closeByOutlet = new Map();
-    (rows || []).forEach((r) => {
-      const key = outletKeyOf(r.store_id);
-      const close = dayCloseMinute(r.snapshot);
-      const current = closeByOutlet.get(key);
-      if (current === undefined || close > current) closeByOutlet.set(key, close);
-    });
-
-    const devicesByOutlet = new Map();
-    inputs.assignments.forEach((a) => {
-      if (!startsOnOrBefore(a.effective_from, date)) return;
-      if (!endsAfter(a.effective_to, date)) return;
-      const key = outletKeyOf(a.outlet_id);
-      if (!devicesByOutlet.has(key)) devicesByOutlet.set(key, []);
-      devicesByOutlet.get(key).push({
-        ...a,
-        last_seen_minute:
-          a.last_seen_at === null || a.last_seen_at === undefined
-            ? null
-            : minuteOnDateAxis(date, a.last_seen_at),
-      });
-    });
-
-    const openForOutlet = new Set();
-    let unattributedPull = false;
-    inputs.pulls.forEach((p) => {
-      // Does this pull actually cover THIS date?
-      if (!startsOnOrBefore(p.requested_from, date)) return;
-      const toM = /^(\d{4}-\d{2}-\d{2})/.exec(String(p.requested_to || ""));
-      if (toM && toM[1] < date) return;
-      if (p.outlet_id === null || p.outlet_id === undefined) unattributedPull = true;
-      else openForOutlet.add(outletKeyOf(p.outlet_id));
-    });
-
     outletKeys.forEach((key) => {
       byOutlet.set(
         key,
-        locationCoverage({
-          devices: devicesByOutlet.get(key) || [],
-          close_minute: closeByOutlet.get(key),
-          open_pull: unattributedPull || openForOutlet.has(key),
+        locationDelivery({
+          open_pull: openAny || open.has(key),
+          failed_pull: failedAny || failed.has(key),
         })
       );
     });
-
-    return {
-      byOutlet,
-      allComplete:
-        outletKeys.length > 0 && outletKeys.every((k) => byOutlet.get(k) === COVERAGE.COMPLETE),
-    };
-  };
-
-
-  /**
-   * DELIVERY COVERAGE per outlet for one attendance date.
-   *
-   * Answers "have the punches for this window actually reached us", which the
-   * cutoff passing does NOT answer. Built from two existing facts and nothing
-   * invented:
-   *
-   *   - every terminal mapped to that outlet ON THAT DATE, and the last moment
-   *     the receiver heard from it (`biomax_device.last_seen_at`, written on
-   *     any contact including polls);
-   *   - any historical pull still running that covers the date, which is a
-   *     positive statement that punches are still being retrieved.
-   *
-   * The comparison is against the attendance day's OWN close instant - the one
-   * the shift's cutoff already defines - so there is no "stale after N
-   * minutes" threshold anywhere in it.
-   *
-   * A READ FAILURE IS UNKNOWN, NOT COMPLETE. If either query throws, every
-   * outlet comes back UNKNOWN and every no-punch day stays provisional. The
-   * safe direction is to under-claim absence.
-   *
-   * @returns {{byOutlet: Map<string,string>, available: boolean, devices: Array}}
-   */
-  const resolveCoverage = async ({ date, store_ids, closeMinuteByOutlet, now }) => {
-    let devices = [];
-    let pulls = [];
-    let available = true;
-    try {
-      [devices, pulls] = await Promise.all([
-        attendanceDashboardRepo.listDeviceCoverageForDate
-          ? attendanceDashboardRepo.listDeviceCoverageForDate({ attendance_date: date, store_ids })
-          : [],
-        attendanceDashboardRepo.listOpenHistoricalPullsForDate
-          ? attendanceDashboardRepo.listOpenHistoricalPullsForDate({ attendance_date: date, store_ids })
-          : [],
-      ]);
-    } catch (err) {
-      // Deliberately swallowed into UNKNOWN rather than failing the page: the
-      // headcounts are still worth showing, and the honest consequence of not
-      // knowing is that absence is withheld, which is what UNKNOWN does.
-      available = false;
-      devices = [];
-      pulls = [];
-    }
-
-    const devicesByOutlet = new Map();
-    (devices || []).forEach((d) => {
-      const key = outletKeyOf(d.outlet_id);
-      if (!devicesByOutlet.has(key)) devicesByOutlet.set(key, []);
-      devicesByOutlet.get(key).push({
-        ...d,
-        // The device's last contact, on the attendance date's own minute axis,
-        // so it is directly comparable with the day's close minute.
-        last_seen_minute: d.last_seen_at === null || d.last_seen_at === undefined
-          ? null
-          : minuteOnDateAxis(date, d.last_seen_at),
-      });
-    });
-
-    const openPullOutlets = new Set(
-      (pulls || []).filter((p) => p.outlet_id !== null && p.outlet_id !== undefined)
-        .map((p) => outletKeyOf(p.outlet_id))
-    );
-    // A running pull whose device has no current outlet assignment cannot be
-    // attributed to a branch, so it clouds every outlet rather than none: we
-    // do not know which location's punches are still coming.
-    const unattributedPull = (pulls || []).some(
-      (p) => p.outlet_id === null || p.outlet_id === undefined
-    );
-
-    const byOutlet = new Map();
-    closeMinuteByOutlet.forEach((closeMinute, key) => {
-      if (!available) {
-        byOutlet.set(key, COVERAGE.UNKNOWN);
-        return;
-      }
-      byOutlet.set(
-        key,
-        locationCoverage({
-          devices: devicesByOutlet.get(key) || [],
-          close_minute: closeMinute,
-          open_pull: unattributedPull || openPullOutlets.has(key),
-        })
-      );
-    });
-
-    return { byOutlet, available, devices: devices || [], pulls: pulls || [] };
-  };
-
-  /**
-   * A `YYYY-MM-DD HH:MM:SS` instant expressed on an attendance date's minute
-   * axis, the same axis `nowOnDateAxis` puts "now" on. Null when unreadable.
-   */
-  const minuteOnDateAxis = (attendanceDate, value) => {
-    const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}):(\d{2})/.exec(String(value || ""));
-    if (!m) return null;
-    const delta = dayDelta(attendanceDate, m[1]);
-    if (delta === null) return null;
-    return delta * 1440 + Number(m[2]) * 60 + Number(m[3]);
+    return byOutlet;
   };
 
   /* ------------------------------------------------------- the population */
@@ -728,7 +575,7 @@ module.exports = (attendanceDashboardRepo) => {
     // the request never reaches the database at all, and the repository's own
     // `1 = 0` backstop is never even needed.
     if (Array.isArray(store_ids) && store_ids.length === 0) {
-      return { date, rows: [], employees: [], coverage: new Map(), coverage_available: true };
+      return { date, rows: [], employees: [], delivery: new Map(), delivery_available: true };
     }
 
     const employees = await attendanceDashboardRepo.listApplicableEmployees({
@@ -744,7 +591,7 @@ module.exports = (attendanceDashboardRepo) => {
       );
     }
     if (!employees || employees.length === 0) {
-      return { date, rows: [], employees: [], coverage: new Map(), coverage_available: true };
+      return { date, rows: [], employees: [], delivery: new Map(), delivery_available: true };
     }
 
     const batch = await loadBatch({ employees, from: date, to: date });
@@ -759,24 +606,13 @@ module.exports = (attendanceDashboardRepo) => {
       partial.push({ employee, day });
     });
 
-    // THE CLOSE INSTANT PER OUTLET is the LATEST close among the employees
-    // rostered there: the location's window is not over until its last shift's
-    // cutoff has passed, so a 9-9 terminal is not asked to vouch for a 2-10
-    // night that is still running.
-    const closeMinuteByOutlet = new Map();
-    partial.forEach(({ employee, day }) => {
-      const key = outletKeyOf(employee.store_id);
-      const close = dayCloseMinute(day.shift_snapshot || null);
-      const current = closeMinuteByOutlet.get(key);
-      if (current === undefined || close > current) closeMinuteByOutlet.set(key, close);
-    });
-
-    const coverage = await resolveCoverage({ date, store_ids, closeMinuteByOutlet, now });
+    const outletKeys = [...new Set(partial.map(({ employee }) => outletKeyOf(employee.store_id)))];
+    const loaded = await loadPulls({ from: date, to: date, store_ids });
+    const deliveryByOutlet = deliveryForDate({ date, outletKeys, pulls: loaded.pulls });
 
     // PASS TWO: the slice, now that each employee's location has a verdict.
     const rows = partial.map(({ employee, day }) => {
-      const outletKey = outletKeyOf(employee.store_id);
-      const outletCoverage = coverage.byOutlet.get(outletKey) || COVERAGE.UNKNOWN;
+      const outletDelivery = deliveryByOutlet.get(outletKeyOf(employee.store_id)) || DELIVERY.UNVERIFIED;
 
       const dayClosed = isDayClosed({
         attendance_date: date,
@@ -788,16 +624,12 @@ module.exports = (attendanceDashboardRepo) => {
         snapshot: day.shift_snapshot || null,
         now,
       });
-      const issueKey = dashboardIssueKey(day, {
-        day_closed: dayClosed,
-        coverage: outletCoverage,
-      });
+      const issueKey = dashboardIssueKey(day, { day_closed: dayClosed });
       const slice = presenceSlice({
         day,
         resolution_status: day.shift_resolution_status,
         day_closed: dayClosed,
         shift_started: shiftStarted,
-        coverage: outletCoverage,
       });
 
       return {
@@ -834,15 +666,15 @@ module.exports = (attendanceDashboardRepo) => {
         shift_resolution_status: day.shift_resolution_status,
         day_closed: dayClosed,
         shift_started: shiftStarted,
-        // Delivery evidence for this employee's location, carried on the row so
-        // the drilldown can say WHY a day is still unresolved.
-        coverage: outletCoverage,
-        coverage_label: COVERAGE_LABEL[outletCoverage],
+        // Delivery state for this employee's location, carried on the row so
+        // a reader can see what qualifies the figure.
+        delivery: outletDelivery,
+        delivery_label: DELIVERY_LABEL[outletDelivery],
         unresolved_reason: unresolvedReason({
           day,
           resolution_status: day.shift_resolution_status,
           day_closed: dayClosed,
-          coverage: outletCoverage,
+          delivery: outletDelivery,
         }),
         issue_key: issueKey,
         issue_label: issueKey ? ISSUE_LABEL[issueKey] : null,
@@ -860,8 +692,8 @@ module.exports = (attendanceDashboardRepo) => {
       date,
       rows,
       employees,
-      coverage: coverage.byOutlet,
-      coverage_available: coverage.available,
+      delivery: deliveryByOutlet,
+      delivery_available: loaded.available,
     };
   };
 
@@ -886,8 +718,10 @@ module.exports = (attendanceDashboardRepo) => {
    *                         regularized punches count.
    *   3 NOT YET CHECKED IN  shift started, day still open, nothing punched.
    *                         Somebody whose shift has not begun is NOT here.
-   *   4 ABSENT              the engine's ABSENT, and only after the day closed.
-   *                         Never inferred from a missing row or a quiet feed.
+   *   4 NO RECORD           a finished day with no punches. Deliberately NOT
+   *                         called absence: punch delivery cannot be verified
+   *                         in this system, so "nothing arrived" and "nobody
+   *                         came" are indistinguishable from here.
    *   5 NEED ACTION         the four canonical issues. OT pending alone never
    *                         puts a day here.
    *   6 OT REQUESTS PENDING pending OT requests and the engine's own minutes
@@ -923,7 +757,9 @@ module.exports = (attendanceDashboardRepo) => {
       not_yet_checked_in: {
         count: distinct((r) => r.slice === PRESENCE_SLICE.NOT_YET_CHECKED_IN),
       },
-      absent: { count: distinct((r) => r.slice === PRESENCE_SLICE.ABSENT) },
+      // NOT "absent": a finished day with no punches, which this system
+      // cannot distinguish from punches that never arrived.
+      no_record: { count: distinct((r) => r.slice === PRESENCE_SLICE.NO_RECORD) },
       need_action: {
         count: distinct((r) => r.need_action),
         by_issue: NEED_ACTION_ISSUE_KEYS.map((key) => ({
@@ -957,10 +793,10 @@ module.exports = (attendanceDashboardRepo) => {
    * trying to be careful about. The engine's answer is used, subject to the
    * open-day and delivery safeguards that apply to every other date.
    *
-   * `unconfirmed_absence` is a different thing entirely, and IS reported: the
-   * number of no-punch days on a closed day whose LOCATION has no delivery
-   * evidence. Those sit in Unresolved rather than Absent, and naming the count
-   * is what stops that looking like an unexplained gap.
+   * AND NO "ABSENT" SLICE. A finished day with no punches is `NO_RECORD` -
+   * "No punches recorded" - because this system has no delivery
+   * acknowledgement that could turn that into a confirmed absence.
+   * `no_record_unverified` names how many such days there are.
    */
   const buildOverviewPanel = (rows) => {
     const counts = new Map(PRESENCE_SLICE_ORDER.map((s) => [s, 0]));
@@ -975,12 +811,11 @@ module.exports = (attendanceDashboardRepo) => {
       slices,
       total: rows.length,
       reconciles: sum === rows.length,
-      unconfirmed_absence: rows.filter(
-        (r) =>
-          r.punch_count === 0 &&
-          r.day_closed &&
-          r.coverage !== COVERAGE.COMPLETE &&
-          r.slice === PRESENCE_SLICE.UNRESOLVED
+      // Every no-punch finished day is unverified, because nothing in this
+      // system can verify delivery. Naming the count is what stops
+      // "No punches recorded" reading as a confirmed absence.
+      no_record_unverified: rows.filter(
+        (r) => r.punch_count === 0 && r.day_closed && r.slice === PRESENCE_SLICE.NO_RECORD
       ).length,
       note:
         "Slices are mutually exclusive: every applicable employee appears in exactly one. " +
@@ -1134,7 +969,7 @@ module.exports = (attendanceDashboardRepo) => {
     search = null,
     now = Date.now(),
   }) => {
-    const { date, rows, coverage, coverage_available } = await buildPopulation({
+    const { date, rows, delivery, delivery_available } = await buildPopulation({
       attendance_date,
       store_ids,
       designation_id,
@@ -1160,17 +995,16 @@ module.exports = (attendanceDashboardRepo) => {
       fetched_at: `${nowParts.date} ${String(Math.floor(nowParts.minutes / 60)).padStart(2, "0")}:${String(
         nowParts.minutes % 60
       ).padStart(2, "0")}`,
-      // DELIVERY COVERAGE for this date, per outlet in scope. Reported beside
-      // the counts because it is what decides whether a no-punch day is an
-      // absence or a gap in the feed, and a reader is entitled to see which.
-      coverage: [...coverage.entries()].map(([key, verdict]) => ({
+      // DELIVERY ASSURANCE for this date, per outlet in scope. Never
+      // "confirmed": see DELIVERY in utils/attendance_dashboard.js.
+      delivery: [...delivery.entries()].map(([key, verdict]) => ({
         store_id: key === "none" ? null : Number(key),
-        coverage: verdict,
-        label: COVERAGE_LABEL[verdict],
+        delivery: verdict,
+        label: DELIVERY_LABEL[verdict],
+        detail: DELIVERY_DETAIL[verdict],
       })),
-      coverage_available,
-      delivery_confirmed:
-        rows.length > 0 && [...coverage.values()].every((v) => v === COVERAGE.COMPLETE),
+      delivery_available,
+      delivery_confirmed: false,
       cards: buildCards(rows),
       overview: buildOverviewPanel(rows),
       by_location: buildLocationPanel(rows),
@@ -1185,20 +1019,20 @@ module.exports = (attendanceDashboardRepo) => {
           "At least one valid effective punch dated to the attendance day, after voided and " +
           "within-10-minute duplicate punches are excluded and approved regularized punches are " +
           "included. Not 'currently inside', and not a finalized payable Present Day.",
-        absent:
-          "The engine's ABSENT status, reported only once the attendance day has closed under that " +
-          "employee's own shift cutoff.",
+        no_record:
+          "A finished attendance day with no punches recorded, reported once the day has closed " +
+          "under that employee's own shift cutoff. It is NOT a confirmed absence: the terminals " +
+          "give no end-of-transfer acknowledgement, so undelivered punches look identical.",
         need_action:
           "Missing Punch, Regularization Pending, No Shift Assigned or Shift Setup Issue. " +
           "A missing punch is only reported once the day has closed. A pending OT request alone " +
           "never puts a day here.",
-        delivery_coverage:
-          "Whether the punches for this attendance day have actually reached us, decided per " +
-          "location: COMPLETE when every terminal mapped to that outlet has been in contact with " +
-          "the receiver at or after the day's own close instant; INCOMPLETE when a historical " +
-          "pull covering the date is still running; UNKNOWN otherwise. A closed day is not a " +
-          "complete one, so confirmed absence requires COMPLETE - without it a no-punch day is " +
-          "reported as Unresolved / Data Pending. There is no freshness threshold in this rule.",
+        delivery:
+          "Whether the punches for this attendance day are known to have all arrived. The " +
+          "terminals give no end-of-transfer acknowledgement and nothing ever marks a historical " +
+          "pull COMPLETED, so the answer is never 'confirmed': UNVERIFIED normally, IN_PROGRESS " +
+          "while a pull covering the date is running, PULL_FAILED where one failed. A finished " +
+          "day with no punches is therefore reported as 'No punches recorded', never as absence.",
       },
     };
   };
@@ -1246,14 +1080,14 @@ module.exports = (attendanceDashboardRepo) => {
         case "SHIFT_NOT_STARTED":
           return (r) => r.slice === PRESENCE_SLICE.SHIFT_NOT_STARTED;
         case "ABSENT":
-          return (r) => r.slice === PRESENCE_SLICE.ABSENT;
+          // Kept as an alias so existing links resolve; it selects NO_RECORD,
+          // which is what the data actually supports.
+          return (r) => r.slice === PRESENCE_SLICE.NO_RECORD;
         case "UNRESOLVED":
           return (r) => r.slice === PRESENCE_SLICE.UNRESOLVED;
-        case "UNCONFIRMED_ABSENCE":
-          // The people a completeness gap is holding: no punch, day over, and
-          // their location's delivery unconfirmed.
-          return (r) =>
-            r.punch_count === 0 && r.day_closed && r.coverage !== COVERAGE.COMPLETE;
+        case "NO_RECORD":
+          // A finished day with no punches. Not a confirmed absence.
+          return (r) => r.slice === PRESENCE_SLICE.NO_RECORD;
         case "NEED_ACTION":
           return (r) => r.need_action;
         case "OT_PENDING":
@@ -1401,11 +1235,7 @@ module.exports = (attendanceDashboardRepo) => {
     };
 
     // Coverage inputs for the whole window, read once.
-    const coverageInputs = await loadRangeCoverageInputs({
-      from: probeFrom,
-      to: selected,
-      store_ids,
-    });
+    const loadedPulls = await loadPulls({ from: probeFrom, to: selected, store_ids });
 
     const perDate = new Map(dates.map((d) => [d, []]));
     candidates.forEach((employee) => {
@@ -1437,36 +1267,41 @@ module.exports = (attendanceDashboardRepo) => {
 
     const series = completed.map((date) => {
       const rows = perDate.get(date) || [];
-      const coverage = coverageForDate({ date, rows, inputs: coverageInputs });
+      const outletKeys = [...new Set(rows.map((r) => outletKeyOf(r.store_id)))];
+      const dayDelivery = deliveryForDate({ date, outletKeys, pulls: loadedPulls.pulls });
 
       const applicable = new Set(rows.map((r) => r.employee_id)).size;
       const checkedIn = new Set(rows.filter((r) => r.punch_count > 0).map((r) => r.employee_id)).size;
 
-      // Absence is only counted where delivery for that employee's location is
-      // confirmed - the same rule the overview applies, so a date shared with
-      // it reconciles.
-      const absent = rows.filter(
-        (r) =>
-          r.punch_count === 0 &&
-          r.status === CALC_STATUS.ABSENT &&
-          coverage.byOutlet.get(outletKeyOf(r.store_id)) === COVERAGE.COMPLETE
+      // Days with NO PUNCHES RECORDED - not "absent", which this system
+      // cannot establish. The same rule the overview applies, so a shared date
+      // reconciles.
+      const noRecord = rows.filter(
+        (r) => r.punch_count === 0 && r.status === CALC_STATUS.ABSENT
       ).length;
 
-      const fullyCovered = coverage.allComplete;
+      // A day is plotted when nothing positively says punches are missing for
+      // it. UNVERIFIED is the normal state and does not suppress the rate -
+      // otherwise nothing would ever plot - but it IS declared on every point.
+      const disturbed = [...dayDelivery.values()].some((v) => v !== DELIVERY.UNVERIFIED);
       return {
         attendance_date: date,
         applicable,
         checked_in: checkedIn,
-        absent,
-        delivery_confirmed: fullyCovered,
-        // A rate with unconfirmed delivery is a LOWER BOUND, not a
-        // measurement, so it is marked unavailable rather than plotted.
-        check_in_rate: fullyCovered
-          ? rate(checkedIn, applicable)
-          : { numerator: checkedIn, denominator: applicable, percent: null, available: false },
-        unavailable_reason: fullyCovered
-          ? null
-          : "Punch delivery for this day is not confirmed for every location, so the rate would be a lower bound",
+        no_record: noRecord,
+        // NEVER "confirmed" - nothing in this system can confirm delivery.
+        delivery_confirmed: false,
+        delivery_disturbed: disturbed,
+        // The rate is a LOWER BOUND on attendance in every case, because more
+        // punches may always arrive. It is plotted, and labelled as such; a
+        // day with a running or failed pull is withheld, because there the
+        // shortfall is not a doubt but a known gap.
+        check_in_rate: disturbed
+          ? { numerator: checkedIn, denominator: applicable, percent: null, available: false }
+          : rate(checkedIn, applicable),
+        unavailable_reason: disturbed
+          ? "A punch retrieval covering this day is unfinished or failed, so the rate would understate attendance"
+          : null,
       };
     });
 
@@ -1481,15 +1316,16 @@ module.exports = (attendanceDashboardRepo) => {
         series.length === 0
           ? "NO_COMPLETED_DAYS"
           : plotted === 0
-          ? "NO_CONFIRMED_DELIVERY"
+          ? "NO_PLOTTABLE_DAYS"
           : series.length < window
           ? "PARTIAL_HISTORY"
           : null,
       definition: CHECK_IN_RATE_DEFINITION,
       note:
         "Completed attendance days only, each with its own applicable population. The selected " +
-        "day is excluded while it is still open. A day whose punch delivery is not confirmed is " +
-        "reported without a rate rather than as a lower bound.",
+        "day is excluded while it is still open. Every rate is a LOWER BOUND on attendance: " +
+        "punch delivery cannot be verified in this system, so late arrivals of data can only " +
+        "raise it. A day with an unfinished or failed punch retrieval is withheld entirely.",
       limitations:
         "Employment is read from the joining and resignation dates, which is the same source the " +
         "rest of attendance uses. A resign-then-rejoin GAP is not modelled by that source, so a " +
@@ -1525,8 +1361,9 @@ module.exports = (attendanceDashboardRepo) => {
    * terminal's current state, not a historical fact about the selected date,
    * so it is returned under `observed_at` with that stated plainly - today's
    * contact is not evidence that a punch from three weeks ago was delivered.
-   * The per-date delivery verdict is the separate `coverage` field, which IS
-   * about the selected day.
+   * The per-date delivery verdict is the separate `delivery` field, which IS
+   * about the selected day - and which is never "confirmed", because nothing
+   * in this system can confirm it.
    */
   const getRecentPunches = async ({
     attendance_date,
@@ -1542,7 +1379,7 @@ module.exports = (attendanceDashboardRepo) => {
       nowParts.minutes % 60
     ).padStart(2, "0")}`;
 
-    const { date, rows, coverage, coverage_available } = await buildPopulation({
+    const { date, rows, delivery, delivery_available } = await buildPopulation({
       attendance_date,
       store_ids,
       designation_id,
@@ -1638,28 +1475,31 @@ module.exports = (attendanceDashboardRepo) => {
         last_punch_at: d.last_punch_at || null,
         last_punch_age_minutes: ageMinutes(d.last_punch_at),
         sync_known: !!d.last_seen_at,
-        // The per-date verdict for this terminal's outlet, which is the thing
-        // that actually bears on the selected day's absences.
-        coverage:
+        // The per-date delivery verdict for this terminal's outlet. Device
+        // contact does not feed it: an idle poll updates last_seen_at and
+        // proves nothing about buffered punches.
+        delivery:
           d.outlet_id === null || d.outlet_id === undefined
-            ? COVERAGE.UNKNOWN
-            : coverage.get(outletKeyOf(d.outlet_id)) || COVERAGE.UNKNOWN,
+            ? DELIVERY.UNVERIFIED
+            : delivery.get(outletKeyOf(d.outlet_id)) || DELIVERY.UNVERIFIED,
       })),
       devices_available: devicesAvailable,
-      // Delivery coverage for the SELECTED DATE, per outlet in scope.
-      coverage: [...coverage.entries()].map(([key, verdict]) => ({
+      // Delivery assurance for the SELECTED DATE, per outlet in scope.
+      delivery: [...delivery.entries()].map(([key, verdict]) => ({
         store_id: key === "none" ? null : Number(key),
-        coverage: verdict,
-        label: COVERAGE_LABEL[verdict],
+        delivery: verdict,
+        label: DELIVERY_LABEL[verdict],
+        detail: DELIVERY_DETAIL[verdict],
       })),
-      coverage_available,
+      delivery_available,
       observed_at: fetchedAt,
       fetched_at: fetchedAt,
       note:
         "Punches are the ones the attendance engine dated to this attendance day, so membership " +
         "follows the shift's cutoff rather than a midnight boundary. Terminal freshness is " +
         "OBSERVED NOW (observed_at) and is not evidence about the selected date; the per-date " +
-        "delivery verdict is `coverage`. A quiet terminal is not necessarily offline, and no " +
+        "delivery verdict is `delivery`, which is never 'confirmed'. A quiet terminal is not " +
+        "necessarily offline, and no " +
         "online/offline status is derived from an absence of employee punches.",
     };
   };

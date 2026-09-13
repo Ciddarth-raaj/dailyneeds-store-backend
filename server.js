@@ -572,6 +572,13 @@ class Server {
     this.attendanceDashboardUsecase = require("./usecase/attendance_dashboard")(
       this.attendanceDashboardRepo
     );
+    // Attendance & Staffing: the operational "right now" snapshot. Built on
+    // the dashboard usecase - same batched reads, same engine - and adding
+    // only the as-of classification. Stores nothing.
+    this.attendanceStaffingUsecase = require("./usecase/attendance_staffing")(
+      this.attendanceDashboardRepo,
+      this.attendanceDashboardUsecase
+    );
     // Attendance v2 / A3. Handed the calculation usecase as well, because a
     // request is validated against what the engine actually says is wrong with
     // the date, and a final approval recalculates that date immediately.
@@ -982,7 +989,8 @@ class Server {
     const attendanceDashboardRouter = require("./routes/attendance_dashboard")(
       this.attendanceDashboardUsecase,
       this.permissions,
-      this.sensitive
+      this.sensitive,
+      this.attendanceStaffingUsecase
     );
     const attendanceRegularizationRouter = require("./routes/attendance_regularization")(
       this.attendanceRegularizationUsecase,

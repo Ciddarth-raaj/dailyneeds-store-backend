@@ -242,36 +242,9 @@ class AttendanceDashboardRepository {
     );
   }
 
-  /**
-   * Device-to-outlet coverage over a RANGE, with each assignment's own
-   * effective window, so the usecase can ask "which terminals served this
-   * outlet on THAT date" for every date of a trend from one read.
-   */
-  async listDeviceCoverageForRange({ from_date, to_date, store_ids = null }) {
-    const scope = locationPredicate("asg.outlet_id", store_ids);
-    const params = [to_date, from_date];
-    if (scope.params.length) params.push(...scope.params);
-    return this._read(
-      "LIST-DEVICE-COVERAGE-FOR-RANGE",
-      `SELECT asg.outlet_id,
-              dev.biomax_device_id,
-              dev.dev_id,
-              dev.label,
-              DATE_FORMAT(asg.effective_from, '%Y-%m-%d %H:%i:%s') AS effective_from,
-              DATE_FORMAT(asg.effective_to,   '%Y-%m-%d %H:%i:%s') AS effective_to,
-              DATE_FORMAT(dev.last_seen_at,   '%Y-%m-%d %H:%i:%s') AS last_seen_at
-         FROM biomax_device_assignment asg
-         JOIN biomax_device dev ON dev.biomax_device_id = asg.biomax_device_id
-        WHERE asg.effective_from <= TIMESTAMP(?, '23:59:59')
-          AND (asg.effective_to IS NULL OR asg.effective_to > TIMESTAMP(?, '00:00:00'))
-          ${scope.clause ? `AND ${scope.clause}` : ""}
-        ORDER BY asg.outlet_id ASC, dev.biomax_device_id ASC`,
-      params
-    );
-  }
 
-  /** Open historical pulls overlapping a RANGE. Same rule as the single date. */
-  async listOpenHistoricalPullsForRange({ from_date, to_date, store_ids = null }) {
+  /** Pulls bearing on delivery over a RANGE. Same rule as the single date. */
+  async listHistoricalPullsForRange({ from_date, to_date, store_ids = null }) {
     const scope = locationPredicate("asg.outlet_id", store_ids);
     const params = [to_date, from_date, to_date, from_date];
     if (scope.params.length) params.push(...scope.params);
@@ -286,7 +259,7 @@ class AttendanceDashboardRepository {
                 ON asg.biomax_device_id = hp.biomax_device_id
                AND asg.effective_from <= TIMESTAMP(?, '23:59:59')
                AND (asg.effective_to IS NULL OR asg.effective_to > TIMESTAMP(?, '00:00:00'))
-        WHERE hp.status NOT IN ('COMPLETED', 'FAILED')
+        WHERE hp.status <> 'COMPLETED'
           AND hp.requested_from <= TIMESTAMP(?, '23:59:59')
           AND hp.requested_to   >= TIMESTAMP(?, '00:00:00')
           ${scope.clause ? `AND ${scope.clause}` : ""}
@@ -627,59 +600,25 @@ class AttendanceDashboardRepository {
 
   /* ------------------------------------------- delivery completeness */
 
-  /**
-   * Which terminals served which outlet ON A GIVEN DATE, with the last moment
-   * each was in contact with the receiver.
-   *
-   * This is the evidence behind "have the punches for this window actually
-   * arrived". `biomax_device.last_seen_at` is written by the receiver on EVERY
-   * request from a terminal, including its `receive_cmd` polls, so a contact
-   * at or after the attendance day's close means the device had the chance to
-   * hand over anything it had buffered. It is the strongest statement this
-   * system holds; the usecase turns it into a per-location verdict.
-   *
-   * THE ASSIGNMENT IS READ AT THE DATE, not as it stands today. A terminal
-   * moved between branches last week must not be credited with covering this
-   * branch last month - `effective_from <= t < effective_to` is the same
-   * half-open rule the schema documents and the punch query already uses.
-   * Evaluated at the END of the attendance date, which is the moment whose
-   * coverage is in question.
-   */
-  async listDeviceCoverageForDate({ attendance_date, store_ids = null }) {
-    const scope = locationPredicate("asg.outlet_id", store_ids);
-    const params = [attendance_date, attendance_date];
-    if (scope.params.length) params.push(...scope.params);
-    return this._read(
-      "LIST-DEVICE-COVERAGE-FOR-DATE",
-      `SELECT asg.outlet_id,
-              dev.biomax_device_id,
-              dev.dev_id,
-              dev.label,
-              DATE_FORMAT(dev.last_seen_at,  '%Y-%m-%d %H:%i:%s') AS last_seen_at,
-              DATE_FORMAT(dev.last_punch_at, '%Y-%m-%d %H:%i:%s') AS last_punch_at
-         FROM biomax_device_assignment asg
-         JOIN biomax_device dev ON dev.biomax_device_id = asg.biomax_device_id
-        WHERE asg.effective_from <= TIMESTAMP(?, '23:59:59')
-          AND (asg.effective_to IS NULL OR asg.effective_to > TIMESTAMP(?, '23:59:59'))
-          ${scope.clause ? `AND ${scope.clause}` : ""}
-        ORDER BY asg.outlet_id ASC, dev.biomax_device_id ASC`,
-      params
-    );
-  }
 
   /**
-   * Historical pulls that are STILL RUNNING and cover this attendance date.
+   * Historical pulls covering this attendance date that bear on delivery -
+   * the ones still running AND the ones that FAILED.
    *
-   * A row here is not a doubt - it is a positive statement that punches for
-   * the date are being retrieved from that terminal right now, so anybody with
-   * no punch at that location cannot yet be called absent. COMPLETED and
-   * FAILED are excluded: a finished pull (either way) is no longer a reason to
-   * expect more punches to arrive from it.
+   * FAILED IS INCLUDED, and that is the correction. The previous version
+   * excluded it alongside COMPLETED, so a pull that died halfway looked
+   * exactly like one that had never been needed. A pull that stopped is not a
+   * pull that succeeded.
+   *
+   * COMPLETED is excluded because nothing ever sets it: `biomax/store.js`
+   * states in its own header that its protocol semantics are unproven, and
+   * only FAILED is ever written. A row can therefore sit in RECEIVING
+   * indefinitely, which is exactly the uncertainty the caller must report.
    *
    * `requested_from`/`requested_to` are IST wall clock and inclusive, so the
    * overlap test is against the whole calendar day.
    */
-  async listOpenHistoricalPullsForDate({ attendance_date, store_ids = null }) {
+  async listHistoricalPullsForDate({ attendance_date, store_ids = null }) {
     const scope = locationPredicate("asg.outlet_id", store_ids);
     const params = [attendance_date, attendance_date, attendance_date, attendance_date];
     if (scope.params.length) params.push(...scope.params);
@@ -694,7 +633,7 @@ class AttendanceDashboardRepository {
                 ON asg.biomax_device_id = hp.biomax_device_id
                AND asg.effective_from <= TIMESTAMP(?, '23:59:59')
                AND (asg.effective_to IS NULL OR asg.effective_to > TIMESTAMP(?, '23:59:59'))
-        WHERE hp.status NOT IN ('COMPLETED', 'FAILED')
+        WHERE hp.status <> 'COMPLETED'
           AND hp.requested_from <= TIMESTAMP(?, '23:59:59')
           AND hp.requested_to   >= TIMESTAMP(?, '00:00:00')
           ${scope.clause ? `AND ${scope.clause}` : ""}

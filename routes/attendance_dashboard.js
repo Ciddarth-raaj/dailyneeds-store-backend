@@ -195,8 +195,9 @@ const asId = (value) => {
 };
 
 class AttendanceDashboardRoutes {
-  constructor(attendanceDashboardUsecase, permissions, sensitive) {
+  constructor(attendanceDashboardUsecase, permissions, sensitive, attendanceStaffingUsecase) {
     this.usecase = attendanceDashboardUsecase;
+    this.staffing = attendanceStaffingUsecase;
     this.permissions = permissions;
     this.sensitive = sensitive;
     this.router = express.Router();
@@ -371,6 +372,86 @@ class AttendanceDashboardRoutes {
     );
 
     /**
+     * THE OPERATIONAL SNAPSHOT: Expected Now / Recorded IN / Gap.
+     *
+     * NO `attendance_date`, DELIBERATELY. This endpoint answers "right now",
+     * and the server decides what "now" is - one `as_of` in the business
+     * timezone, returned with the response. A caller-supplied date would
+     * invite a past day's figures under a "Now" heading, which is the one
+     * thing this view must never show.
+     *
+     * Same key, same scope resolution, same fail-closed behaviour as every
+     * other endpoint on this router. Read-only: it computes in memory and
+     * stores nothing.
+     */
+    this.router.get(
+      "/attendance/dashboard/staffing",
+      this.permissions.require(P.VIEW_ATTENDANCE_DASHBOARD),
+      async (req, res) => {
+        try {
+          const isValid = Joi.validate(req.query, {
+            store_ids: Joi.string().regex(/^\d+(,\d+)*$/).allow(null, "").optional(),
+            designation_id: Joi.number().integer().positive().allow(null, "").optional(),
+            work_shift_id: Joi.number().integer().positive().allow(null, "").optional(),
+            search: Joi.string().max(100).allow(null, "").optional(),
+          });
+          if (isValid.error !== null) throw isValid.error;
+
+          const scope = await this._scopeOrDeny(req, res);
+          if (!scope) return;
+
+          const result = await this.staffing.getSnapshot({
+            store_ids: effectiveStoreIds(req.query.store_ids, scope),
+            designation_id: asId(req.query.designation_id),
+            work_shift_id: asId(req.query.work_shift_id),
+            search: req.query.search ? String(req.query.search).trim() : null,
+          });
+          res.setHeader("Cache-Control", "no-store");
+          res.json({ code: 200, ...result });
+        } catch (err) {
+          respondError(res, err);
+        }
+      }
+    );
+
+    /**
+     * E. Recurring coverage gaps - repeated shortfalls against the SCHEDULE.
+     *
+     * A secondary, evidence-showing panel: every row carries the dates and
+     * counts behind it, and days whose punch retrieval was unfinished or
+     * failed are excluded rather than averaged in.
+     */
+    this.router.get(
+      "/attendance/dashboard/recurring-gaps",
+      this.permissions.require(P.VIEW_ATTENDANCE_DASHBOARD),
+      async (req, res) => {
+        try {
+          const isValid = Joi.validate(req.query, {
+            store_ids: Joi.string().regex(/^\d+(,\d+)*$/).allow(null, "").optional(),
+            designation_id: Joi.number().integer().positive().allow(null, "").optional(),
+            search: Joi.string().max(100).allow(null, "").optional(),
+            comparable_days: Joi.number().integer().min(2).max(8).optional(),
+          });
+          if (isValid.error !== null) throw isValid.error;
+
+          const scope = await this._scopeOrDeny(req, res);
+          if (!scope) return;
+
+          const result = await this.staffing.getRecurringGaps({
+            store_ids: effectiveStoreIds(req.query.store_ids, scope),
+            designation_id: asId(req.query.designation_id),
+            search: req.query.search ? String(req.query.search).trim() : null,
+            comparable_days: req.query.comparable_days,
+          });
+          res.setHeader("Cache-Control", "no-store");
+          res.json({ code: 200, ...result });
+        } catch (err) {
+          respondError(res, err);
+        }
+      }
+    );
+
+    /**
      * The punches the engine dated to the SELECTED attendance day, for the
      * selected filters, and the terminals' own freshness.
      *
@@ -410,8 +491,13 @@ class AttendanceDashboardRoutes {
   }
 }
 
-module.exports = (attendanceDashboardUsecase, permissions, sensitive) =>
-  new AttendanceDashboardRoutes(attendanceDashboardUsecase, permissions, sensitive);
+module.exports = (attendanceDashboardUsecase, permissions, sensitive, attendanceStaffingUsecase) =>
+  new AttendanceDashboardRoutes(
+    attendanceDashboardUsecase,
+    permissions,
+    sensitive,
+    attendanceStaffingUsecase
+  );
 module.exports.AttendanceDashboardRoutes = AttendanceDashboardRoutes;
 module.exports.resolveLocationScope = resolveLocationScope;
 module.exports.effectiveStoreIds = effectiveStoreIds;
