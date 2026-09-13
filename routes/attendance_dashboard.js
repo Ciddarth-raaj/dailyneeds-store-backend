@@ -44,60 +44,121 @@ const respondError = require("../utils/http");
  */
 
 /**
- * THE SERVER-SIDE LOCATION SCOPE - and the honest state of it today.
+ * THE PERMISSION THAT MEANS "EVERY BRANCH".
  *
- * The approved task requires that the caller's PERMITTED LOCATION SCOPE be
- * enforced on the server for every count, chart label, employee search and
- * piece of device metadata, and that a branch filter arriving from the browser
- * never be treated as authorization. The second half is implemented and
- * enforced here. The first half has a DEPENDENCY that this task cannot settle
- * on its own, and pretending otherwise would be worse than saying so:
- *
- *   THIS BACKEND HAS NO MULTI-LOCATION AUTHORIZATION MODEL. Authorization is
- *   permission keys by designation (`middlewares/permissions.js`) plus the
- *   administrator bypass, and separately an IP rule per branch
- *   (`middlewares/ip_restriction.js`). `req.decoded.store_id` is the user's
- *   OWN store and is used in a handful of routes as a DEFAULT VALUE for a
- *   submitted outlet - never as a boundary. There is no "stores this user may
- *   read" list anywhere in the schema or the token, and every existing
- *   attendance read - `/attendance/calculated`, `/attendance/list`, the
- *   approval queues - is company-wide once the key is held.
- *
- * So this function returns the caller's permitted scope, and TODAY that is
- * `null`, meaning "every outlet", which is exactly the scope the existing
- * attendance screens already grant to the same designations. That is a
- * deliberate choice between two wrong alternatives:
- *
- *   - Inventing a rule here - say, confining every caller to
- *     `decoded.store_id` - would be a business-rule invention with real
- *     consequences. Roles that are MEANT to work across branches would
- *     silently lose data (the outlet-directory work records exactly this
- *     breakage for Accounts Executive), and this overview would show LESS
- *     than the per-employee screen beside it, which is incoherent.
- *   - Widening anything is not on the table either: this returns a scope, and
- *     the caller below INTERSECTS the browser's filter with it. When a real
- *     scope model arrives, it is implemented in this one function and every
- *     count, label, search and device row on the dashboard narrows with it,
- *     because they all pass through here.
- *
- * The dependency is reported with this task rather than resolved inside it:
- * building a location-authorization model is an authorization change affecting
- * every HR screen, not a dashboard feature, and it is not in the approved
- * scope.
- *
- * @returns {number[]|null} the outlet ids the caller may read, or null for all
+ * `all_stores` ("Access All Stores") is this system's own, already-declared
+ * statement of company-wide access - seeded by
+ * `20251128052422-all-stores-up.sql` and listed on the designation rights
+ * screen. It is used here rather than invented: the dashboard needs a
+ * company-wide authorization and the system already has exactly one.
  */
-function resolveLocationScope(/* req */) {
-  return null;
+const ACCESS_ALL_STORES = "all_stores";
+
+/** Every state a caller's location authorization can be in. Never a null. */
+const SCOPE = Object.freeze({
+  ALL: "ALL",
+  LIST: "LIST",
+  NONE: "NONE",
+});
+
+/**
+ * THE SERVER-SIDE LOCATION SCOPE.
+ *
+ * WHAT WAS WRONG BEFORE. This function returned `null`, meaning "every
+ * outlet", for every caller who held the dashboard permission. Intersecting a
+ * browser filter with an unrestricted scope is not location authorization at
+ * all - it is a filter with extra steps - and it made the permission key the
+ * only thing standing between any holder and the whole company's attendance.
+ *
+ * THE THREE STATES ARE THREE DIFFERENT ANSWERS, and keeping them distinct all
+ * the way down is the point:
+ *
+ *   ALL   the caller is explicitly authorized company-wide. Two things
+ *         establish it and nothing else does: `user_type` 2, the
+ *         administrator the permission middleware already bypasses the whole
+ *         table for; and the existing `all_stores` grant, verified on the
+ *         SERVER through that same middleware.
+ *   LIST  a specific set of authorized outlets.
+ *   NONE  no authorized locations, or an authorization that cannot be
+ *         resolved. This FAILS CLOSED - the endpoint refuses - rather than
+ *         degrading to company-wide, which is how the previous version's
+ *         "unresolved" case behaved.
+ *
+ * NEITHER ATTENDANCE KEY ESTABLISHES ALL. Holding
+ * `view_attendance_dashboard`, or `view_calculated_attendance`, says the
+ * caller may READ CALCULATED ATTENDANCE; it does not say for whom. Treating
+ * either as company-wide is exactly the conflation this replaces.
+ *
+ * `decoded.store_id` IS DELIBERATELY NOT USED AS A BOUNDARY. It identifies the
+ * user's own store, which is not the same statement as "these are the stores
+ * this person may read" - it is a default value that a handful of routes use
+ * to prefill a submitted outlet. Promoting it to an authorization rule would
+ * invent a per-store attendance policy that nobody has approved, and it would
+ * silently confine roles that are meant to work across branches (the outlet
+ * directory work records that exact breakage for Accounts Executive).
+ *
+ * SO: WHAT THIS MEANS TODAY, stated plainly rather than papered over. The
+ * system has no per-user list of permitted locations - there is no column,
+ * table or claim that carries one. Until one exists, only an administrator or
+ * an `all_stores` holder can resolve to a scope at all, and every other caller
+ * gets NONE and is refused. That is the fail-closed direction the review asked
+ * for, and it means THE DASHBOARD IS NOT YET USABLE BY A BRANCH MANAGER. That
+ * remaining dependency is reported with the task rather than closed here,
+ * because defining who may see which branch is an authorization decision for
+ * the owner and a change that would reach every HR screen - not a dashboard
+ * feature.
+ *
+ * `LIST` is implemented and enforced throughout even though nothing produces
+ * one yet: it is the shape a real model will return, and the intersection,
+ * the empty-set handling and the tests around it all exercise it.
+ *
+ * @returns {Promise<{kind: string, store_ids: number[]|null, reason: string}>}
+ */
+async function resolveLocationScope(req, permissions) {
+  if (!req || !req.decoded) {
+    return { kind: SCOPE.NONE, store_ids: [], reason: "UNAUTHENTICATED" };
+  }
+  // The admin user type comes from the permission middleware instance rather
+  // than a second copy of the number here: it is exported on what
+  // `middlewares/permissions.js` RETURNS, not on the module, so requiring it
+  // at the top of this file would silently be `undefined` and every
+  // administrator would fall through to NONE.
+  const adminUserType = permissions && permissions.ADMIN_USER_TYPE;
+  if (adminUserType !== undefined && Number(req.decoded.user_type) === Number(adminUserType)) {
+    return { kind: SCOPE.ALL, store_ids: null, reason: "ADMINISTRATOR" };
+  }
+  if (permissions && (await permissions.has(req, ACCESS_ALL_STORES))) {
+    return { kind: SCOPE.ALL, store_ids: null, reason: "ALL_STORES_PERMISSION" };
+  }
+  return { kind: SCOPE.NONE, store_ids: [], reason: "NO_LOCATION_SCOPE" };
 }
+
+/** The refusal a NONE scope produces. Same shape as any other 403. */
+const SCOPE_DENIED = {
+  code: 403,
+  msg:
+    "You are not authorized for any branch on the Attendance Dashboard. " +
+    "Company-wide access requires the Access All Stores permission or an administrator account.",
+};
 
 /**
  * The browser's outlet filter, INTERSECTED with the caller's scope.
  *
  * The intersection is the whole point: a request naming an outlet outside the
- * caller's scope gets the intersection (nothing from that outlet), never the
- * outlet. When the scope is null the filter stands alone as an ordinary
- * filter, which is what it is.
+ * caller's scope gets the intersection - nothing from that outlet - never the
+ * outlet. The three scope states map to three different return values, and
+ * the EMPTY ARRAY is a real answer meaning "no locations", which callers must
+ * honour rather than treat as "no filter":
+ *
+ *   ALL  + no filter  -> null   (no restriction)
+ *   ALL  + [2]        -> [2]
+ *   LIST + no filter  -> the scope
+ *   LIST + [9]        -> []     when 9 is outside it: NO data, not all data
+ *   NONE + anything   -> []
+ *
+ * The `[]`-means-nothing contract is enforced again in the repository
+ * (`locationPredicate`) and short-circuited in the usecase, so a caller that
+ * forgets to check still cannot leak.
  */
 function effectiveStoreIds(requested, scope) {
   const asked =
@@ -108,9 +169,11 @@ function effectiveStoreIds(requested, scope) {
           .map((v) => Number(String(v).trim()))
           .filter((n) => Number.isInteger(n) && n > 0);
 
-  if (scope === null) return asked && asked.length ? asked : null;
-  if (!asked || asked.length === 0) return scope;
-  const allowed = new Set(scope.map(Number));
+  if (!scope || scope.kind === SCOPE.NONE) return [];
+  if (scope.kind === SCOPE.ALL) return asked && asked.length ? asked : null;
+
+  const allowed = new Set((scope.store_ids || []).map(Number));
+  if (!asked || asked.length === 0) return [...allowed];
   return asked.filter((id) => allowed.has(id));
 }
 
@@ -140,11 +203,28 @@ class AttendanceDashboardRoutes {
     this.init();
   }
 
+  /**
+   * Resolve the caller's scope and refuse the request when it is NONE.
+   *
+   * Every handler goes through this before touching the usecase, so there is
+   * one place that decides and one place that refuses. Returns null when the
+   * request has already been answered.
+   */
+  async _scopeOrDeny(req, res) {
+    const scope = await resolveLocationScope(req, this.permissions);
+    if (scope.kind === SCOPE.NONE) {
+      res.status(403).json(SCOPE_DENIED);
+      return null;
+    }
+    return scope;
+  }
+
   /** The filters as the usecase takes them, scope already applied. */
-  _filters(req, query) {
+  _filters(req, query, scope) {
     return {
       attendance_date: query.attendance_date,
-      store_ids: effectiveStoreIds(query.store_ids, resolveLocationScope(req)),
+      store_ids: effectiveStoreIds(query.store_ids, scope),
+      store_unassigned: query.store_unassigned === "true" || query.store_unassigned === true,
       designation_id: asId(query.designation_id),
       work_shift_id: asId(query.work_shift_id),
       search: query.search ? String(query.search).trim() : null,
@@ -161,25 +241,21 @@ class AttendanceDashboardRoutes {
      * The filter selectors' options: the REAL outlets, designations and
      * Shift Management shifts, plus today's date in IST.
      *
-     * BEHIND THE SAME KEY as the aggregates. A selector is a read of master
-     * data, and an endpoint that listed every outlet and every designation to
-     * anybody signed in would be a way of enumerating the company through the
-     * dashboard's own door.
+     * BEHIND THE SAME KEY as the aggregates AND scoped the same way. A
+     * selector is a read of master data, and an unscoped one would enumerate
+     * every branch in the company to somebody authorized for two of them.
      */
     this.router.get(
       "/attendance/dashboard/filters",
       this.permissions.require(P.VIEW_ATTENDANCE_DASHBOARD),
       async (req, res) => {
         try {
-          const filters = await this.usecase.getFilters();
-          const scope = resolveLocationScope(req);
-          // The selector offers only outlets inside the caller's scope, so
-          // the control cannot suggest a branch the counts would refuse.
-          const outlets =
-            scope === null
-              ? filters.outlets
-              : filters.outlets.filter((o) => scope.map(Number).includes(Number(o.store_id)));
-          res.json({ code: 200, ...filters, outlets });
+          const scope = await this._scopeOrDeny(req, res);
+          if (!scope) return;
+          const filters = await this.usecase.getFilters({
+            store_ids: effectiveStoreIds(null, scope),
+          });
+          res.json({ code: 200, ...filters, scope: scope.kind });
         } catch (err) {
           respondError(res, err);
         }
@@ -194,7 +270,10 @@ class AttendanceDashboardRoutes {
         try {
           const isValid = Joi.validate(req.query, FILTER_SCHEMA);
           if (isValid.error !== null) throw isValid.error;
-          const result = await this.usecase.getOverview(this._filters(req, req.query));
+          const scope = await this._scopeOrDeny(req, res);
+          if (!scope) return;
+          const { store_unassigned, ...filters } = this._filters(req, req.query, scope);
+          const result = await this.usecase.getOverview(filters);
           res.setHeader("Cache-Control", "no-store");
           res.json({ code: 200, ...result });
         } catch (err) {
@@ -204,10 +283,11 @@ class AttendanceDashboardRoutes {
     );
 
     /**
-     * The employee list behind one card, slice or issue. Paginated.
+     * The employee list behind one card, slice, issue or panel row.
      *
-     * Re-derived from the same population on the server, so a drilldown can
-     * never list somebody the card did not count.
+     * `store_unassigned` selects the "no outlet on record" group explicitly -
+     * an employee with no `store_id` cannot be named by a store filter, and
+     * omitting the filter would return everybody.
      */
     this.router.get(
       "/attendance/dashboard/drilldown",
@@ -224,6 +304,7 @@ class AttendanceDashboardRoutes {
                 "SHIFT_NOT_STARTED",
                 "ABSENT",
                 "UNRESOLVED",
+                "UNCONFIRMED_ABSENCE",
                 "NEED_ACTION",
                 "OT_PENDING",
                 "MISSING_PUNCH",
@@ -232,13 +313,16 @@ class AttendanceDashboardRoutes {
                 "SHIFT_SETUP"
               )
               .required(),
+            store_unassigned: Joi.boolean().optional(),
             limit: Joi.number().integer().min(1).max(200).optional(),
             offset: Joi.number().integer().min(0).optional(),
           });
           if (isValid.error !== null) throw isValid.error;
 
+          const scope = await this._scopeOrDeny(req, res);
+          if (!scope) return;
           const result = await this.usecase.getDrilldown({
-            ...this._filters(req, req.query),
+            ...this._filters(req, req.query, scope),
             bucket: req.query.bucket,
             limit: req.query.limit,
             offset: req.query.offset,
@@ -251,7 +335,15 @@ class AttendanceDashboardRoutes {
       }
     );
 
-    /** The trend over COMPLETED attendance days. Never the open one. */
+    /**
+     * The trend over COMPLETED attendance days. Never the open one.
+     *
+     * IT TAKES THE SAME FILTERS AS EVERYTHING ELSE, EMPLOYEE SEARCH INCLUDED.
+     * The first version forbade `search` here and deleted it in the frontend
+     * helper, so the chart quietly described a different population from the
+     * cards above it. It is applied server-side, per date, against each date's
+     * own applicable population.
+     */
     this.router.get(
       "/attendance/dashboard/trend",
       this.permissions.require(P.VIEW_ATTENDANCE_DASHBOARD),
@@ -259,17 +351,15 @@ class AttendanceDashboardRoutes {
         try {
           const isValid = Joi.validate(req.query, {
             ...FILTER_SCHEMA,
-            search: Joi.any().forbidden(),
             days: Joi.number().integer().min(1).max(35).optional(),
           });
           if (isValid.error !== null) throw isValid.error;
 
-          const filters = this._filters(req, req.query);
+          const scope = await this._scopeOrDeny(req, res);
+          if (!scope) return;
+          const { store_unassigned, ...filters } = this._filters(req, req.query, scope);
           const result = await this.usecase.getTrend({
-            attendance_date: filters.attendance_date,
-            store_ids: filters.store_ids,
-            designation_id: filters.designation_id,
-            work_shift_id: filters.work_shift_id,
+            ...filters,
             days: req.query.days,
           });
           res.setHeader("Cache-Control", "no-store");
@@ -281,12 +371,12 @@ class AttendanceDashboardRoutes {
     );
 
     /**
-     * The bounded tail of received punches, and the terminals' own freshness.
+     * The punches the engine dated to the SELECTED attendance day, for the
+     * selected filters, and the terminals' own freshness.
      *
-     * BEHIND THE SAME KEY, which matters here specifically: device labels,
-     * dev ids and sync times are infrastructure metadata, and this endpoint
-     * must not become a way to read the terminal registry without the
-     * dashboard permission.
+     * The date and the filters are required here for the same reason they are
+     * everywhere else: a feed showing this morning under cards describing last
+     * Tuesday is not evidence about anything.
      */
     this.router.get(
       "/attendance/dashboard/recent-punches",
@@ -294,14 +384,17 @@ class AttendanceDashboardRoutes {
       async (req, res) => {
         try {
           const isValid = Joi.validate(req.query, {
-            store_ids: Joi.string().regex(/^\d+(,\d+)*$/).allow(null, "").optional(),
+            ...FILTER_SCHEMA,
             limit: Joi.number().integer().min(1).max(100).optional(),
           });
           if (isValid.error !== null) throw isValid.error;
 
+          const scope = await this._scopeOrDeny(req, res);
+          if (!scope) return;
+          const { store_unassigned, ...filters } = this._filters(req, req.query, scope);
           const result = await this.usecase.getRecentPunches({
+            ...filters,
             limit: req.query.limit || 25,
-            store_ids: effectiveStoreIds(req.query.store_ids, resolveLocationScope(req)),
           });
           res.setHeader("Cache-Control", "no-store");
           res.json({ code: 200, ...result });
@@ -322,3 +415,5 @@ module.exports = (attendanceDashboardUsecase, permissions, sensitive) =>
 module.exports.AttendanceDashboardRoutes = AttendanceDashboardRoutes;
 module.exports.resolveLocationScope = resolveLocationScope;
 module.exports.effectiveStoreIds = effectiveStoreIds;
+module.exports.SCOPE = SCOPE;
+module.exports.ACCESS_ALL_STORES = ACCESS_ALL_STORES;

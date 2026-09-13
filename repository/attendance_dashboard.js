@@ -32,6 +32,36 @@ const { JOINED_ON } = require("../utils/joining_date");
  * Aadhaar, so none of those columns is selected in this file at all - the
  * response cannot leak a field it never loaded.
  */
+/**
+ * THE LOCATION PREDICATE, and the fail-open this exists to prevent.
+ *
+ * `store_ids` arrives in three states and they are three different questions:
+ *
+ *   null   no location restriction - the caller is authorized company-wide
+ *   [1,2]  exactly these locations
+ *   []     NO locations at all
+ *
+ * The bug this replaces was `if (Array.isArray(store_ids) && store_ids.length > 0)`,
+ * which is correct for the first two and catastrophically wrong for the third:
+ * an EMPTY authorized set fell through the `if` and produced a query with no
+ * location clause, so a caller authorized for nothing was served everything.
+ * An empty intersection is the normal result of asking for a branch you may
+ * not see, so this was reachable by ordinary use rather than by attack.
+ *
+ * Hence: `[]` yields `1 = 0`. It returns no rows, in SQL, rather than relying
+ * on every caller to remember to check first. The usecase short-circuits as
+ * well; this is the backstop that makes a forgotten check harmless.
+ *
+ * @returns {{clause: string, params: Array}} always a usable WHERE fragment
+ */
+function locationPredicate(column, store_ids) {
+  if (store_ids === null || store_ids === undefined) return { clause: null, params: [] };
+  if (!Array.isArray(store_ids) || store_ids.length === 0) {
+    return { clause: "1 = 0", params: [] };
+  }
+  return { clause: `${column} IN (?)`, params: [store_ids] };
+}
+
 class AttendanceDashboardRepository {
   constructor(db) {
     this.db = db;
@@ -100,9 +130,10 @@ class AttendanceDashboardRepository {
     ];
     const params = [attendance_date, attendance_date];
 
-    if (Array.isArray(store_ids) && store_ids.length > 0) {
-      where.push("ne.store_id IN (?)");
-      params.push(store_ids);
+    const scope = locationPredicate("ne.store_id", store_ids);
+    if (scope.clause) {
+      where.push(scope.clause);
+      params.push(...scope.params);
     }
     if (designation_id) {
       where.push("ne.designation_id = ?");
@@ -128,6 +159,138 @@ class AttendanceDashboardRepository {
          LEFT JOIN designation d ON d.designation_id = ne.designation_id
         WHERE ${where.join(" AND ")}
         ORDER BY ne.employee_id ASC`,
+      params
+    );
+  }
+
+  /**
+   * The employees who could be applicable ANYWHERE in a date RANGE, each
+   * carrying the two dated facts so applicability can be decided PER DATE in
+   * memory.
+   *
+   * WHY THIS EXISTS SEPARATELY FROM THE SINGLE-DATE READ. The trend used to
+   * take the population applicable on the SELECTED date and reuse it for the
+   * thirteen days before it. That is wrong in both directions: somebody who
+   * joined mid-window was counted as applicable on days before they worked
+   * here (inflating the denominator and inventing absences), and somebody who
+   * worked the first half of the window and resigned before the selected date
+   * was missing from the days they actually worked.
+   *
+   * So the candidate set is everybody whose employment OVERLAPS the window at
+   * all, and `joined_on` / `resignation_date` come back with them. The usecase
+   * applies the SAME rule per date that the single-date query applies in SQL,
+   * which is what makes the trend and the overview agree for a shared date.
+   *
+   * `joined_on` is the parsed DATE, through `JOINED_ON` - the one parser the
+   * lifecycle backfill and payroll already share - rather than the raw VARCHAR,
+   * so the usecase never re-implements that parsing. NULL where the column is
+   * absent or unreadable, which is most production rows; such an employee is
+   * included and the usecase treats their start as unbounded, exactly as the
+   * single-date query does.
+   *
+   * `employee_employment_period` is still NOT consulted, for the reason the
+   * calculation repository gives: its backfill carries rows flagged
+   * needs_review. That means a resign-then-rejoin GAP is not modelled here -
+   * reported as a known limitation rather than papered over with a second,
+   * less trustworthy source that would also make the trend disagree with the
+   * overview.
+   */
+  async listApplicableEmployeesForRange({
+    from_date,
+    to_date,
+    store_ids = null,
+    designation_id = null,
+    search = null,
+  }) {
+    const where = [
+      // Employment overlaps the window: not resigned before it began, and not
+      // joined after it ended.
+      "(ne.resignation_date IS NULL OR ne.resignation_date >= ?)",
+      `((${JOINED_ON("ne")}) IS NULL OR (${JOINED_ON("ne")}) <= ?)`,
+    ];
+    const params = [from_date, to_date];
+
+    const scope = locationPredicate("ne.store_id", store_ids);
+    if (scope.clause) {
+      where.push(scope.clause);
+      params.push(...scope.params);
+    }
+    if (designation_id) {
+      where.push("ne.designation_id = ?");
+      params.push(designation_id);
+    }
+    if (search) {
+      const like = `%${String(search).replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+      where.push("(ne.employee_name LIKE ? OR CAST(ne.employee_id AS CHAR) LIKE ?)");
+      params.push(like, like);
+    }
+
+    return this._read(
+      "LIST-APPLICABLE-EMPLOYEES-FOR-RANGE",
+      `SELECT ne.employee_id, ne.employee_name, ne.store_id, ne.designation_id,
+              ne.special_break_override_minutes,
+              o.outlet_name, o.outlet_nickname,
+              d.designation_name,
+              DATE_FORMAT((${JOINED_ON("ne")}), '%Y-%m-%d')      AS joined_on,
+              DATE_FORMAT(ne.resignation_date, '%Y-%m-%d')       AS resignation_date
+         FROM new_employee ne
+         LEFT JOIN outlets o     ON o.outlet_id = ne.store_id
+         LEFT JOIN designation d ON d.designation_id = ne.designation_id
+        WHERE ${where.join(" AND ")}
+        ORDER BY ne.employee_id ASC`,
+      params
+    );
+  }
+
+  /**
+   * Device-to-outlet coverage over a RANGE, with each assignment's own
+   * effective window, so the usecase can ask "which terminals served this
+   * outlet on THAT date" for every date of a trend from one read.
+   */
+  async listDeviceCoverageForRange({ from_date, to_date, store_ids = null }) {
+    const scope = locationPredicate("asg.outlet_id", store_ids);
+    const params = [to_date, from_date];
+    if (scope.params.length) params.push(...scope.params);
+    return this._read(
+      "LIST-DEVICE-COVERAGE-FOR-RANGE",
+      `SELECT asg.outlet_id,
+              dev.biomax_device_id,
+              dev.dev_id,
+              dev.label,
+              DATE_FORMAT(asg.effective_from, '%Y-%m-%d %H:%i:%s') AS effective_from,
+              DATE_FORMAT(asg.effective_to,   '%Y-%m-%d %H:%i:%s') AS effective_to,
+              DATE_FORMAT(dev.last_seen_at,   '%Y-%m-%d %H:%i:%s') AS last_seen_at
+         FROM biomax_device_assignment asg
+         JOIN biomax_device dev ON dev.biomax_device_id = asg.biomax_device_id
+        WHERE asg.effective_from <= TIMESTAMP(?, '23:59:59')
+          AND (asg.effective_to IS NULL OR asg.effective_to > TIMESTAMP(?, '00:00:00'))
+          ${scope.clause ? `AND ${scope.clause}` : ""}
+        ORDER BY asg.outlet_id ASC, dev.biomax_device_id ASC`,
+      params
+    );
+  }
+
+  /** Open historical pulls overlapping a RANGE. Same rule as the single date. */
+  async listOpenHistoricalPullsForRange({ from_date, to_date, store_ids = null }) {
+    const scope = locationPredicate("asg.outlet_id", store_ids);
+    const params = [to_date, from_date, to_date, from_date];
+    if (scope.params.length) params.push(...scope.params);
+    return this._read(
+      "LIST-OPEN-HISTORICAL-PULLS-FOR-RANGE",
+      `SELECT hp.biomax_historical_pull_id, hp.biomax_device_id, hp.dev_id, hp.status,
+              DATE_FORMAT(hp.requested_from, '%Y-%m-%d %H:%i:%s') AS requested_from,
+              DATE_FORMAT(hp.requested_to,   '%Y-%m-%d %H:%i:%s') AS requested_to,
+              asg.outlet_id
+         FROM biomax_historical_pull hp
+         LEFT JOIN biomax_device_assignment asg
+                ON asg.biomax_device_id = hp.biomax_device_id
+               AND asg.effective_from <= TIMESTAMP(?, '23:59:59')
+               AND (asg.effective_to IS NULL OR asg.effective_to > TIMESTAMP(?, '00:00:00'))
+        WHERE hp.status NOT IN ('COMPLETED', 'FAILED')
+          AND hp.requested_from <= TIMESTAMP(?, '23:59:59')
+          AND hp.requested_to   >= TIMESTAMP(?, '00:00:00')
+          ${scope.clause ? `AND ${scope.clause}` : ""}
+        ORDER BY hp.biomax_historical_pull_id ASC`,
       params
     );
   }
@@ -338,10 +501,59 @@ class AttendanceDashboardRepository {
    * to where it actually was. `effective_to` is exclusive and NULL means open,
    * exactly as the schema documents.
    */
+  /**
+   * Specific punches BY ID, with the terminal and its punch location.
+   *
+   * The ids come from the attendance engine's own dating of an attendance
+   * date, so membership of the day is already decided by the shift's cutoff
+   * rule before this runs. That is the whole reason this reads by id rather
+   * than by a timestamp range: a `BETWEEN midnight AND midnight` filter would
+   * quietly disagree with the engine for every overnight shift.
+   */
+  async listPunchesByIds(punchIds) {
+    if (!Array.isArray(punchIds) || punchIds.length === 0) return [];
+    return this._read(
+      "LIST-PUNCHES-BY-IDS",
+      `SELECT p.biomax_punch_id AS punch_id,
+              d.employee_id,
+              ne.employee_name,
+              DATE_FORMAT(p.io_time, '%Y-%m-%d %H:%i:%s')     AS io_time,
+              DATE_FORMAT(p.received_at, '%Y-%m-%d %H:%i:%s') AS received_at,
+              DATE_FORMAT(d.attendance_date, '%Y-%m-%d')      AS ingest_attendance_date,
+              d.derivation_status,
+              p.dev_id,
+              p.ingest_source,
+              dev.label      AS device_label,
+              asg.outlet_id  AS punch_outlet_id,
+              po.outlet_name AS punch_outlet_name,
+              v.attendance_punch_void_id
+         FROM biomax_punch p
+         JOIN biomax_punch_derived d ON d.biomax_punch_id = p.biomax_punch_id
+         LEFT JOIN new_employee ne  ON ne.employee_id = d.employee_id
+         LEFT JOIN biomax_device dev ON dev.dev_id = p.dev_id
+         LEFT JOIN biomax_device_assignment asg
+                ON asg.biomax_device_id = dev.biomax_device_id
+               AND asg.effective_from <= p.io_time
+               AND (asg.effective_to IS NULL OR asg.effective_to > p.io_time)
+         LEFT JOIN outlets po ON po.outlet_id = asg.outlet_id
+         LEFT JOIN attendance_punch_void v ON v.biomax_punch_id = p.biomax_punch_id
+        WHERE p.biomax_punch_id IN (?)
+        ORDER BY p.received_at DESC, p.biomax_punch_id DESC`,
+      [punchIds]
+    );
+  }
+
   async listRecentPunches({ limit = 25, store_ids = null }) {
     const where = [];
     const params = [];
-    if (Array.isArray(store_ids) && store_ids.length > 0) {
+    // Both the PUNCH location (where the terminal was) and the employee's home
+    // outlet are scoped: a punch is in scope only if one of the two is, and
+    // with an empty authorized set neither can be.
+    if (store_ids === null || store_ids === undefined) {
+      // company-wide: no location clause
+    } else if (!Array.isArray(store_ids) || store_ids.length === 0) {
+      where.push("1 = 0");
+    } else {
       where.push("(asg.outlet_id IN (?) OR ne.store_id IN (?))");
       params.push(store_ids, store_ids);
     }
@@ -391,9 +603,10 @@ class AttendanceDashboardRepository {
   async listDeviceSyncHealth({ store_ids = null }) {
     const where = [];
     const params = [];
-    if (Array.isArray(store_ids) && store_ids.length > 0) {
-      where.push("asg.outlet_id IN (?)");
-      params.push(store_ids);
+    const scope = locationPredicate("asg.outlet_id", store_ids);
+    if (scope.clause) {
+      where.push(scope.clause);
+      params.push(...scope.params);
     }
     return this._read(
       "LIST-DEVICE-SYNC-HEALTH",
@@ -412,12 +625,103 @@ class AttendanceDashboardRepository {
     );
   }
 
+  /* ------------------------------------------- delivery completeness */
+
+  /**
+   * Which terminals served which outlet ON A GIVEN DATE, with the last moment
+   * each was in contact with the receiver.
+   *
+   * This is the evidence behind "have the punches for this window actually
+   * arrived". `biomax_device.last_seen_at` is written by the receiver on EVERY
+   * request from a terminal, including its `receive_cmd` polls, so a contact
+   * at or after the attendance day's close means the device had the chance to
+   * hand over anything it had buffered. It is the strongest statement this
+   * system holds; the usecase turns it into a per-location verdict.
+   *
+   * THE ASSIGNMENT IS READ AT THE DATE, not as it stands today. A terminal
+   * moved between branches last week must not be credited with covering this
+   * branch last month - `effective_from <= t < effective_to` is the same
+   * half-open rule the schema documents and the punch query already uses.
+   * Evaluated at the END of the attendance date, which is the moment whose
+   * coverage is in question.
+   */
+  async listDeviceCoverageForDate({ attendance_date, store_ids = null }) {
+    const scope = locationPredicate("asg.outlet_id", store_ids);
+    const params = [attendance_date, attendance_date];
+    if (scope.params.length) params.push(...scope.params);
+    return this._read(
+      "LIST-DEVICE-COVERAGE-FOR-DATE",
+      `SELECT asg.outlet_id,
+              dev.biomax_device_id,
+              dev.dev_id,
+              dev.label,
+              DATE_FORMAT(dev.last_seen_at,  '%Y-%m-%d %H:%i:%s') AS last_seen_at,
+              DATE_FORMAT(dev.last_punch_at, '%Y-%m-%d %H:%i:%s') AS last_punch_at
+         FROM biomax_device_assignment asg
+         JOIN biomax_device dev ON dev.biomax_device_id = asg.biomax_device_id
+        WHERE asg.effective_from <= TIMESTAMP(?, '23:59:59')
+          AND (asg.effective_to IS NULL OR asg.effective_to > TIMESTAMP(?, '23:59:59'))
+          ${scope.clause ? `AND ${scope.clause}` : ""}
+        ORDER BY asg.outlet_id ASC, dev.biomax_device_id ASC`,
+      params
+    );
+  }
+
+  /**
+   * Historical pulls that are STILL RUNNING and cover this attendance date.
+   *
+   * A row here is not a doubt - it is a positive statement that punches for
+   * the date are being retrieved from that terminal right now, so anybody with
+   * no punch at that location cannot yet be called absent. COMPLETED and
+   * FAILED are excluded: a finished pull (either way) is no longer a reason to
+   * expect more punches to arrive from it.
+   *
+   * `requested_from`/`requested_to` are IST wall clock and inclusive, so the
+   * overlap test is against the whole calendar day.
+   */
+  async listOpenHistoricalPullsForDate({ attendance_date, store_ids = null }) {
+    const scope = locationPredicate("asg.outlet_id", store_ids);
+    const params = [attendance_date, attendance_date, attendance_date, attendance_date];
+    if (scope.params.length) params.push(...scope.params);
+    return this._read(
+      "LIST-OPEN-HISTORICAL-PULLS-FOR-DATE",
+      `SELECT hp.biomax_historical_pull_id, hp.biomax_device_id, hp.dev_id, hp.status,
+              DATE_FORMAT(hp.requested_from, '%Y-%m-%d %H:%i:%s') AS requested_from,
+              DATE_FORMAT(hp.requested_to,   '%Y-%m-%d %H:%i:%s') AS requested_to,
+              asg.outlet_id
+         FROM biomax_historical_pull hp
+         LEFT JOIN biomax_device_assignment asg
+                ON asg.biomax_device_id = hp.biomax_device_id
+               AND asg.effective_from <= TIMESTAMP(?, '23:59:59')
+               AND (asg.effective_to IS NULL OR asg.effective_to > TIMESTAMP(?, '23:59:59'))
+        WHERE hp.status NOT IN ('COMPLETED', 'FAILED')
+          AND hp.requested_from <= TIMESTAMP(?, '23:59:59')
+          AND hp.requested_to   >= TIMESTAMP(?, '00:00:00')
+          ${scope.clause ? `AND ${scope.clause}` : ""}
+        ORDER BY hp.biomax_historical_pull_id ASC`,
+      params
+    );
+  }
+
   /* ------------------------------------------------------- master data */
 
-  async listOutlets() {
+  /**
+   * The outlets the caller may read.
+   *
+   * SCOPED LIKE EVERYTHING ELSE. A selector is a read of master data, and an
+   * unscoped one would let the filter bar enumerate every branch in the
+   * company to somebody authorized for two of them - and offer them branches
+   * whose counts the other endpoints would then refuse.
+   */
+  async listOutlets({ store_ids = null } = {}) {
+    const scope = locationPredicate("outlet_id", store_ids);
     return this._read(
       "LIST-OUTLETS",
-      "SELECT outlet_id, outlet_name, outlet_nickname FROM outlets ORDER BY outlet_name ASC"
+      `SELECT outlet_id, outlet_name, outlet_nickname
+         FROM outlets
+        ${scope.clause ? `WHERE ${scope.clause}` : ""}
+        ORDER BY outlet_name ASC`,
+      scope.params
     );
   }
 
@@ -449,3 +753,4 @@ class AttendanceDashboardRepository {
 
 module.exports = (db) => new AttendanceDashboardRepository(db);
 module.exports.AttendanceDashboardRepository = AttendanceDashboardRepository;
+module.exports.locationPredicate = locationPredicate;

@@ -14,6 +14,7 @@ const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  COVERAGE,
   ISSUE_KEY,
   PRESENCE_SLICE,
   PRESENCE_SLICE_ORDER,
@@ -23,11 +24,16 @@ const {
   hasShiftStarted,
   isDayClosed,
   istNowParts,
+  locationCoverage,
   nowOnDateAxis,
   presenceSlice,
   rate,
   timeMinutes,
+  unresolvedReason,
 } = require("./attendance_dashboard");
+
+/** Shorthand: the common case in these tests is a fully delivered day. */
+const covered = COVERAGE.COMPLETE;
 
 /** An IST instant as epoch millis: IST is UTC+5:30, so subtract the offset. */
 const ist = (date, hh, mm) =>
@@ -247,7 +253,35 @@ describe("the open-day gate in front of the settled verdicts", () => {
   });
 
   it("withholds Absent while the day is open", () => {
-    assert.equal(dashboardIssueKey({ status: "ABSENT" }, { day_closed: false }), null);
+    assert.equal(
+      dashboardIssueKey({ status: "ABSENT" }, { day_closed: false, coverage: COVERAGE.COMPLETE }),
+      null
+    );
+  });
+
+  it("withholds Absent on a closed day without delivery evidence", () => {
+    assert.equal(
+      dashboardIssueKey({ status: "ABSENT" }, { day_closed: true, coverage: COVERAGE.UNKNOWN }),
+      null,
+      "issue_key must never claim an absence the presence slice does not"
+    );
+    assert.equal(
+      dashboardIssueKey({ status: "ABSENT" }, { day_closed: true, coverage: COVERAGE.COMPLETE }),
+      ISSUE_KEY.ABSENT
+    );
+  });
+
+  it("still reports a Missing Punch when delivery is unconfirmed", () => {
+    // Deliberately asymmetric with Absent: a missing punch is a prompt to
+    // look, and the day genuinely is not settled either way. Suppressing it
+    // would hide real work from the people whose job is to clear it.
+    assert.equal(
+      dashboardIssueKey(
+        { status: "REVIEW_REQUIRED", review_reasons: ["MISSING_PUNCH"], punch_count: 1 },
+        { day_closed: true, coverage: COVERAGE.UNKNOWN }
+      ),
+      ISSUE_KEY.MISSING_PUNCH
+    );
   });
 
   it("reports a configuration fault immediately, open day or not", () => {
@@ -277,8 +311,23 @@ describe("the presence slices", () => {
         resolution_status: "OK",
         day_closed: true,
         shift_started: true,
+        coverage: covered,
       }),
       PRESENCE_SLICE.CHECKED_IN
+    );
+  });
+
+  it("a punch stays a check-in even when delivery for the location is unconfirmed", () => {
+    assert.equal(
+      presenceSlice({
+        day: { punch_count: 2, status: "FINAL" },
+        resolution_status: "OK",
+        day_closed: true,
+        shift_started: true,
+        coverage: COVERAGE.UNKNOWN,
+      }),
+      PRESENCE_SLICE.CHECKED_IN,
+      "doubt about what is MISSING says nothing about what ARRIVED"
     );
   });
 
@@ -289,6 +338,7 @@ describe("the presence slices", () => {
         resolution_status: "OK",
         day_closed: false,
         shift_started: false,
+        coverage: covered,
       }),
       PRESENCE_SLICE.SHIFT_NOT_STARTED
     );
@@ -301,21 +351,39 @@ describe("the presence slices", () => {
         resolution_status: "OK",
         day_closed: false,
         shift_started: true,
+        coverage: covered,
       }),
       PRESENCE_SLICE.NOT_YET_CHECKED_IN
     );
   });
 
-  it("only a CLOSED day can be Absent", () => {
+  it("a CLOSED day with CONFIRMED delivery can be Absent", () => {
     assert.equal(
       presenceSlice({
         day: { punch_count: 0, status: "ABSENT" },
         resolution_status: "OK",
         day_closed: true,
         shift_started: true,
+        coverage: COVERAGE.COMPLETE,
       }),
       PRESENCE_SLICE.ABSENT
     );
+  });
+
+  it("a CLOSED day WITHOUT delivery evidence is NOT Absent", () => {
+    [COVERAGE.UNKNOWN, COVERAGE.INCOMPLETE, null].forEach((coverage) => {
+      assert.equal(
+        presenceSlice({
+          day: { punch_count: 0, status: "ABSENT" },
+          resolution_status: "OK",
+          day_closed: true,
+          shift_started: true,
+          coverage,
+        }),
+        PRESENCE_SLICE.UNRESOLVED,
+        `coverage ${coverage}: the cutoff passing does not prove the punches arrived`
+      );
+    });
   });
 
   it("an unresolvable shift is Unresolved, never Absent", () => {
@@ -326,6 +394,7 @@ describe("the presence slices", () => {
           resolution_status: status,
           day_closed: true,
           shift_started: false,
+          coverage: covered,
         }),
         PRESENCE_SLICE.UNRESOLVED,
         `${status} is a setup fault, not evidence that somebody failed to turn up`
@@ -333,15 +402,45 @@ describe("the presence slices", () => {
     });
   });
 
-  it("a rest day with no punch is Unresolved, not Absent: v2 has no weekly-off rule", () => {
+  it("a REST DAY is NOT special-cased: the engine's answer stands", () => {
+    // The removed dashboard-only rule diverted this to UNRESOLVED, which made
+    // the screen disagree with the employee's own attendance for the date.
     assert.equal(
       presenceSlice({
         day: { punch_count: 0, status: "ABSENT" },
         resolution_status: "REST_DAY",
         day_closed: true,
         shift_started: false,
+        coverage: COVERAGE.COMPLETE,
       }),
-      PRESENCE_SLICE.UNRESOLVED
+      PRESENCE_SLICE.ABSENT
+    );
+  });
+
+  it("a rest day worked is a check-in, as it always was", () => {
+    assert.equal(
+      presenceSlice({
+        day: { punch_count: 2, status: "FINAL" },
+        resolution_status: "REST_DAY",
+        day_closed: true,
+        shift_started: false,
+        coverage: COVERAGE.COMPLETE,
+      }),
+      PRESENCE_SLICE.CHECKED_IN
+    );
+  });
+
+  it("a rest day gets the SAME completeness safeguard as any other day", () => {
+    assert.equal(
+      presenceSlice({
+        day: { punch_count: 0, status: "ABSENT" },
+        resolution_status: "REST_DAY",
+        day_closed: true,
+        shift_started: false,
+        coverage: COVERAGE.UNKNOWN,
+      }),
+      PRESENCE_SLICE.UNRESOLVED,
+      "no special rule for rest days - just the rule everything else gets"
     );
   });
 
@@ -352,6 +451,7 @@ describe("the presence slices", () => {
         resolution_status: "OK",
         day_closed: true,
         shift_started: true,
+        coverage: covered,
       }),
       PRESENCE_SLICE.UNRESOLVED
     );
@@ -363,13 +463,16 @@ describe("the presence slices", () => {
       ["OK", "REST_DAY", "NO_SHIFT_FOR_DATE", "NO_SCHEDULE_ROW"].forEach((resolution_status) =>
         [true, false].forEach((day_closed) =>
           [true, false].forEach((shift_started) =>
-            ["FINAL", "ABSENT", "REVIEW_REQUIRED", "REGULARIZATION_PENDING"].forEach((status) =>
-              combos.push({
-                day: { punch_count, status },
-                resolution_status,
-                day_closed,
-                shift_started,
-              })
+            [COVERAGE.COMPLETE, COVERAGE.INCOMPLETE, COVERAGE.UNKNOWN, null].forEach((coverage) =>
+              ["FINAL", "ABSENT", "REVIEW_REQUIRED", "REGULARIZATION_PENDING"].forEach((status) =>
+                combos.push({
+                  day: { punch_count, status },
+                  resolution_status,
+                  day_closed,
+                  shift_started,
+                  coverage,
+                })
+              )
             )
           )
         )
@@ -382,7 +485,132 @@ describe("the presence slices", () => {
         `${JSON.stringify(input)} produced an undeclared slice ${slice}`
       );
     });
-    assert.equal(combos.length, 3 * 4 * 2 * 2 * 4);
+    assert.equal(combos.length, 3 * 4 * 2 * 2 * 4 * 4);
+  });
+
+  it("never reports Absent without both a closed day and confirmed delivery", () => {
+    const combos = [];
+    [true, false].forEach((day_closed) =>
+      [COVERAGE.COMPLETE, COVERAGE.INCOMPLETE, COVERAGE.UNKNOWN, null].forEach((coverage) =>
+        combos.push({ day_closed, coverage })
+      )
+    );
+    combos.forEach(({ day_closed, coverage }) => {
+      const slice = presenceSlice({
+        day: { punch_count: 0, status: "ABSENT" },
+        resolution_status: "OK",
+        day_closed,
+        shift_started: true,
+        coverage,
+      });
+      if (slice === PRESENCE_SLICE.ABSENT) {
+        assert.ok(day_closed, "absent on an open day");
+        assert.equal(coverage, COVERAGE.COMPLETE, "absent without delivery evidence");
+      }
+    });
+  });
+});
+
+describe("why a day is still unresolved is always answerable", () => {
+  it("names the setup fault", () => {
+    assert.match(
+      unresolvedReason({ day: { punch_count: 0 }, resolution_status: "NO_SHIFT_FOR_DATE", day_closed: true }),
+      /No shift assigned/
+    );
+    assert.match(
+      unresolvedReason({ day: { punch_count: 0 }, resolution_status: "NO_SCHEDULE_ROW", day_closed: true }),
+      /no schedule row/
+    );
+  });
+
+  it("names a pull that is still retrieving", () => {
+    assert.match(
+      unresolvedReason({
+        day: { punch_count: 0, status: "ABSENT" },
+        resolution_status: "OK",
+        day_closed: true,
+        coverage: COVERAGE.INCOMPLETE,
+      }),
+      /still being retrieved/
+    );
+  });
+
+  it("names an unconfirmed terminal, without calling it offline", () => {
+    const reason = unresolvedReason({
+      day: { punch_count: 0, status: "ABSENT" },
+      resolution_status: "OK",
+      day_closed: true,
+      coverage: COVERAGE.UNKNOWN,
+    });
+    assert.match(reason, /has not been in contact/);
+    assert.doesNotMatch(reason, /offline|down/i);
+  });
+
+  it("says nothing for an employee who punched", () => {
+    assert.equal(
+      unresolvedReason({ day: { punch_count: 2 }, resolution_status: "OK", day_closed: true, coverage: COVERAGE.UNKNOWN }),
+      null
+    );
+  });
+});
+
+describe("delivery coverage for a location", () => {
+  const close = 1440 + 240; // a 04:00 cutoff
+
+  it("is COMPLETE when every terminal was in contact at or after the close", () => {
+    assert.equal(
+      locationCoverage({
+        devices: [{ last_seen_minute: close }, { last_seen_minute: close + 600 }],
+        close_minute: close,
+      }),
+      COVERAGE.COMPLETE
+    );
+  });
+
+  it("is UNKNOWN when any terminal's last contact predates the close", () => {
+    assert.equal(
+      locationCoverage({
+        devices: [{ last_seen_minute: close + 600 }, { last_seen_minute: close - 1 }],
+        close_minute: close,
+      }),
+      COVERAGE.UNKNOWN,
+      "a terminal last heard from before the window ended may still hold buffered punches"
+    );
+  });
+
+  it("is UNKNOWN when a terminal has no recorded contact at all", () => {
+    assert.equal(
+      locationCoverage({ devices: [{ last_seen_minute: null }], close_minute: close }),
+      COVERAGE.UNKNOWN
+    );
+  });
+
+  it("is UNKNOWN when no terminal is mapped to the location", () => {
+    assert.equal(locationCoverage({ devices: [], close_minute: close }), COVERAGE.UNKNOWN);
+  });
+
+  it("is INCOMPLETE when a historical pull covering the date is still running", () => {
+    assert.equal(
+      locationCoverage({
+        devices: [{ last_seen_minute: close + 600 }],
+        close_minute: close,
+        open_pull: true,
+      }),
+      COVERAGE.INCOMPLETE,
+      "an open pull is a positive statement that punches are still arriving"
+    );
+  });
+
+  it("uses no time threshold: only the day's own close decides", () => {
+    // One minute before the close is not complete; the close itself is.
+    assert.equal(
+      locationCoverage({ devices: [{ last_seen_minute: close - 1 }], close_minute: close }),
+      COVERAGE.UNKNOWN
+    );
+    assert.equal(
+      locationCoverage({ devices: [{ last_seen_minute: close }], close_minute: close }),
+      COVERAGE.COMPLETE
+    );
   });
 });
 

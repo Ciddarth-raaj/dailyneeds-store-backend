@@ -33,6 +33,22 @@
  * relevant attendance day has CLOSED. Before that they are reported as the
  * open-day states they actually are.
  *
+ * AND CLOSED IS NOT THE SAME AS COMPLETE. The cutoff passing proves the
+ * window is OVER; it proves nothing about whether every punch inside it has
+ * REACHED US. A terminal that was offline buffers and delivers on its next
+ * contact, and a historical pull may still be retrieving. So a CONFIRMED
+ * ABSENCE needs a second thing as well - delivery evidence for that
+ * employee's location (`COVERAGE` below) - and without it a no-punch day is
+ * reported as Unresolved / Data Pending rather than as absence.
+ *
+ * A MISSING PUNCH IS DELIBERATELY NOT GATED ON COVERAGE, and the asymmetry is
+ * the point. "Absent" is a VERDICT ABOUT A PERSON, and getting it wrong when
+ * the real cause is an undelivered punch is unfair to them, so it waits for
+ * evidence. "Missing punch" is a PROMPT TO LOOK: the day genuinely is not
+ * settled, and it needs a human whether it resolves by a late punch arriving
+ * or by a regularization. Suppressing it would hide real work from the people
+ * whose job is to clear it.
+ *
  * THE ATTENDANCE DAY BOUNDARY IS THE SHIFT'S, NOT MIDNIGHT. A 14:00-22:00
  * shift with a 04:00 cutoff owns punches up to 04:00 the following calendar
  * morning (`attendanceDateForPunch` in the engine), so its attendance date is
@@ -237,8 +253,10 @@ function dayIssueKey(day) {
  *                  count during an ongoing shift is somebody still at work,
  *                  not a confirmed missing OUT, and reporting it as one would
  *                  send a manager chasing a correction that does not exist.
- *   ABSENT         is withheld while the day is open, and is not a Need
- *                  Action item in any case.
+ *   ABSENT         is withheld while the day is open, AND until delivery for
+ *                  that location is confirmed - see `COVERAGE`. It is not a
+ *                  Need Action item in any case: absence is a fact to know,
+ *                  not a task to clear.
  *
  * A REGULARIZATION_PENDING day is reported whether the day is open or closed:
  * a request genuinely is waiting for somebody either way. NO_SHIFT and
@@ -246,10 +264,13 @@ function dayIssueKey(day) {
  * looked at, so they are reported immediately - that is the whole point of
  * surfacing them.
  */
-function dashboardIssueKey(day, { day_closed = false } = {}) {
+function dashboardIssueKey(day, { day_closed = false, coverage = null } = {}) {
   const key = dayIssueKey(day);
   if (key === null) return null;
   if (!day_closed && (key === ISSUE_KEY.MISSING_PUNCH || key === ISSUE_KEY.ABSENT)) return null;
+  // ABSENT additionally needs delivery evidence, so that `issue_key` and the
+  // presence slice can never disagree about whether somebody was absent.
+  if (key === ISSUE_KEY.ABSENT && coverage !== COVERAGE.COMPLETE) return null;
   return key;
 }
 
@@ -260,6 +281,78 @@ function isNeedAction(day, context = {}) {
 }
 
 /* --------------------------------------------- the headcount breakdown */
+
+/**
+ * DELIVERY COVERAGE for one location on one attendance date - the answer to
+ * "have the punches for this window actually reached us", which is a DIFFERENT
+ * question from "is the window over".
+ *
+ *   COMPLETE    every terminal mapped to that location has been in contact
+ *               with the receiver AT OR AFTER the moment the attendance day
+ *               closed. A terminal that buffered punches while offline
+ *               delivers them on its next contact, so contact after the close
+ *               is the best evidence this system holds that nothing for that
+ *               window is still sitting on a device.
+ *   INCOMPLETE  a historical pull covering this date is still open
+ *               (`biomax_historical_pull` in any state but COMPLETED/FAILED).
+ *               That is not a doubt, it is a positive statement that punches
+ *               for the date are still being retrieved.
+ *   UNKNOWN     no terminal is mapped to that location; or a terminal has no
+ *               recorded contact at all; or its last contact predates the
+ *               close. We cannot tell an absence from an undelivered punch.
+ *
+ * NO INVENTED THRESHOLD. There is no "stale after N minutes" anywhere in this
+ * rule - the comparison is against the attendance day's OWN close instant,
+ * which the shift's cutoff already defines. A threshold in minutes would have
+ * been a policy nobody approved, and it would have made the answer depend on
+ * when somebody happened to open the page.
+ *
+ * PER LOCATION, NEVER GLOBAL. Coverage is decided from the devices mapped to
+ * that outlet by `biomax_device_assignment`, so a healthy terminal at one
+ * branch cannot vouch for a silent one at another.
+ *
+ * FAILURE IS UNKNOWN, NOT COMPLETE. If the device-health read fails, the
+ * caller passes UNKNOWN and every no-punch day stays provisional. The safe
+ * direction is to under-claim absence, never to over-claim it.
+ */
+const COVERAGE = Object.freeze({
+  COMPLETE: "COMPLETE",
+  INCOMPLETE: "INCOMPLETE",
+  UNKNOWN: "UNKNOWN",
+});
+
+const COVERAGE_LABEL = Object.freeze({
+  COMPLETE: "Punch delivery confirmed",
+  INCOMPLETE: "Punches still being retrieved",
+  UNKNOWN: "Punch delivery not confirmed",
+});
+
+/**
+ * Coverage for ONE location on ONE date, from that location's devices.
+ *
+ * @param {object} input
+ * @param {Array}  input.devices  the devices mapped to this location, each
+ *        `{last_seen_minute}` on the attendance date's own minute axis (null
+ *        when the receiver has never recorded a contact)
+ * @param {number} input.close_minute the minute the attendance day closed, on
+ *        that same axis
+ * @param {boolean} [input.open_pull] a historical pull covering this date is
+ *        still running
+ * @returns {string} one of COVERAGE
+ */
+function locationCoverage({ devices, close_minute, open_pull = false }) {
+  if (open_pull) return COVERAGE.INCOMPLETE;
+  const rows = Array.isArray(devices) ? devices : [];
+  if (rows.length === 0) return COVERAGE.UNKNOWN;
+  const everySeenAfterClose = rows.every(
+    (d) =>
+      d &&
+      d.last_seen_minute !== null &&
+      d.last_seen_minute !== undefined &&
+      Number(d.last_seen_minute) >= Number(close_minute)
+  );
+  return everySeenAfterClose ? COVERAGE.COMPLETE : COVERAGE.UNKNOWN;
+}
 
 /**
  * The Attendance Overview slices. MUTUALLY EXCLUSIVE AND EXHAUSTIVE: every
@@ -304,38 +397,90 @@ const PRESENCE_SLICE_ORDER = Object.freeze([
  *
  *   1. A VALID PUNCH beats everything. Somebody who punched is Checked In
  *      whatever else is true of their day - including a day that still needs
- *      a correction, which is counted on the Need Action card instead.
+ *      a correction, which is counted on the Need Action card instead. A
+ *      received punch is positive evidence and stays positive even when the
+ *      feed's completeness is in doubt: doubt about what is MISSING says
+ *      nothing about what ARRIVED.
  *   2. NO RESOLVABLE SHIFT is Unresolved, never Absent. "We do not know what
  *      this person was rostered for" is not evidence that they failed to turn
  *      up, and calling it absence would invent a fact.
- *   3. A REST DAY with no punch is Unresolved rather than Absent. The engine
- *      reports ABSENT for it because v2 has no weekly-off concept at all, and
- *      this dashboard is explicitly not the place to introduce one - so a
- *      rostered rest day is shown as coverage this screen cannot settle, and
- *      `rest_day_no_punch` beside the slices says how much of Unresolved it
- *      is. This is a PRESENTATION choice and changes no stored calculation.
- *   4. AN OPEN DAY splits on whether the shift has started yet. Before its
+ *   3. AN OPEN DAY splits on whether the shift has started yet. Before its
  *      in-time nobody is late; after it, and still with no punch, the honest
  *      answer is Not Yet Checked In - not Absent, because the day can still
  *      be worked.
- *   5. ONLY A CLOSED DAY can be Absent, and only when the engine says so.
- *      Anything else on a closed day - a missing punch, a pending
- *      regularization - is Unresolved here and is counted on Need Action.
+ *   4. A CLOSED DAY IS NOT THE SAME AS A COMPLETE ONE. The cutoff passing
+ *      proves the window is over; it proves nothing about whether every punch
+ *      inside it has reached us. A terminal that buffered while offline
+ *      delivers on its next contact, and a historical pull may still be
+ *      retrieving. So confirmed absence additionally requires DELIVERY
+ *      EVIDENCE for that employee's location (`coverage`): without it a
+ *      no-punch day is Unresolved / Data Pending, not Absent. See
+ *      `COVERAGE` below.
+ *   5. ONLY THEN can the engine's ABSENT be reported as Absent. Anything else
+ *      on a closed, covered day - a missing punch, a pending regularization -
+ *      is Unresolved here and is counted on Need Action.
+ *
+ * A ROSTERED REST DAY IS NOT SPECIAL-CASED. An earlier version of this file
+ * diverted `REST_DAY` with no punch into Unresolved on the grounds that v2 has
+ * no weekly-off concept. That was itself a weekly-off policy - a
+ * dashboard-only one, invisible to the engine and to every other screen, which
+ * made this screen disagree with the employee's own attendance for the same
+ * date. The engine's answer is used, subject to exactly the same open-day and
+ * completeness safeguards as any other date.
  */
-function presenceSlice({ day, resolution_status = null, day_closed = false, shift_started = false }) {
+function presenceSlice({
+  day,
+  resolution_status = null,
+  day_closed = false,
+  shift_started = false,
+  coverage = null,
+}) {
   const punchCount = Number(day && day.punch_count) || 0;
   if (punchCount > 0) return PRESENCE_SLICE.CHECKED_IN;
 
   if (resolution_status === "NO_SHIFT_FOR_DATE" || resolution_status === "NO_SCHEDULE_ROW") {
     return PRESENCE_SLICE.UNRESOLVED;
   }
-  if (resolution_status === "REST_DAY") return PRESENCE_SLICE.UNRESOLVED;
 
   if (!day_closed) {
     return shift_started ? PRESENCE_SLICE.NOT_YET_CHECKED_IN : PRESENCE_SLICE.SHIFT_NOT_STARTED;
   }
+
+  // The day is over. Absence is only a FACT if the punches for it have
+  // actually arrived; otherwise this is a gap in the feed wearing absence's
+  // clothes, and it is reported as the gap it is.
+  if (coverage !== COVERAGE.COMPLETE) return PRESENCE_SLICE.UNRESOLVED;
+
   return day && day.status === "ABSENT" ? PRESENCE_SLICE.ABSENT : PRESENCE_SLICE.UNRESOLVED;
 }
+
+/**
+ * Why a no-punch day on a closed day is still unresolved, for the drilldown
+ * and the tooltip. Null when the slice is not Unresolved for a coverage
+ * reason. Never a silent blank.
+ */
+function unresolvedReason({
+  day,
+  resolution_status = null,
+  day_closed = false,
+  coverage = null,
+}) {
+  const punchCount = Number(day && day.punch_count) || 0;
+  if (punchCount > 0) return null;
+  if (resolution_status === "NO_SHIFT_FOR_DATE") return "No shift assigned for this date";
+  if (resolution_status === "NO_SCHEDULE_ROW") return "The shift has no schedule row for this weekday";
+  if (!day_closed) return null;
+  if (coverage === COVERAGE.INCOMPLETE) {
+    return "Punches for this date are still being retrieved from the terminal, so absence is not confirmed";
+  }
+  if (coverage !== COVERAGE.COMPLETE) {
+    return "The terminal for this location has not been in contact since this attendance day closed, so we cannot tell an absence from an undelivered punch";
+  }
+  if (day && day.status !== "ABSENT") return "The day needs a correction before it is settled";
+  return null;
+}
+
+/* ------------------------------------------------------- the coverage */
 
 /* ----------------------------------------------------- the percentages */
 
@@ -427,10 +572,14 @@ module.exports = {
   dayIssueKey,
   dashboardIssueKey,
   isNeedAction,
+  COVERAGE,
+  COVERAGE_LABEL,
+  locationCoverage,
   PRESENCE_SLICE,
   PRESENCE_SLICE_LABEL,
   PRESENCE_SLICE_ORDER,
   presenceSlice,
+  unresolvedReason,
   rate,
   CHECK_IN_RATE_DEFINITION,
   tallyBy,

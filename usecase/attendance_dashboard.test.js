@@ -79,9 +79,31 @@ const employee = (id, over = {}) => ({
   outlet_name: "Main Store",
   outlet_nickname: "MAIN",
   designation_name: "Cashier",
+  // The two dated facts the range query returns, so per-date applicability can
+  // be decided. Null = unbounded, which is what most production rows look like.
+  joined_on: null,
   resignation_date: null,
   ...over,
 });
+
+/**
+ * Terminals whose last contact is long after any close, at every outlet these
+ * tests use - so coverage is COMPLETE unless a test says otherwise.
+ */
+const DEFAULT_DEVICE_COVERAGE = [1, 2, 9].map((outlet_id) => ({
+  outlet_id,
+  biomax_device_id: outlet_id,
+  dev_id: `DEV${outlet_id}`,
+  label: `Fixture G${outlet_id}`,
+  last_seen_at: "2026-09-20 10:00:00",
+  last_punch_at: "2026-09-12 22:00:00",
+}));
+
+const DEFAULT_DEVICE_COVERAGE_RANGE = DEFAULT_DEVICE_COVERAGE.map((d) => ({
+  ...d,
+  effective_from: "2020-01-01 00:00:00",
+  effective_to: null,
+}));
 
 function fakeRepo(state = {}) {
   const calls = { listApplicableEmployees: 0, rawPunches: 0 };
@@ -134,7 +156,76 @@ function fakeRepo(state = {}) {
     getApprovalStateForEmployees: async () => state.approvals || [],
     listRecentPunches: async () => state.recentPunches || [],
     listDeviceSyncHealth: async () => state.devices || [],
-    listOutlets: async () => state.outlets || [{ outlet_id: 1, outlet_name: "Main Store", outlet_nickname: "MAIN" }],
+    listPunchesByIds: async (ids) => {
+      calls.punchesByIds = ids;
+      if (state.punchesByIdsThrows) throw new Error("punch read failed");
+      return (state.rawPunches || [])
+        .filter((p) => ids.includes(p.punch_id))
+        .map((p) => ({
+          punch_id: p.punch_id,
+          employee_id: p.employee_id,
+          employee_name: `Employee ${p.employee_id}`,
+          io_time: p.io_time,
+          received_at: p.io_time,
+          ingest_attendance_date: p.punch_date,
+          derivation_status: "OK",
+          dev_id: p.dev_id,
+          ingest_source: p.ingest_source,
+          device_label: "Fixture G1",
+          punch_outlet_id: 1,
+          punch_outlet_name: "Main Store",
+          attendance_punch_void_id: p.attendance_punch_void_id,
+        }));
+    },
+    /**
+     * DELIVERY EVIDENCE. The default is a terminal at outlet 1 (and 2, and 9)
+     * last seen well after any close, i.e. COMPLETE - because most tests are
+     * about something else and a feed nobody has vouched for would withhold
+     * every absence and drown the assertion under test.
+     */
+    listDeviceCoverageForDate: async (args) => {
+      calls.coverageForDate = args;
+      if (state.coverageThrows) throw new Error("device read failed");
+      return state.deviceCoverage === undefined ? DEFAULT_DEVICE_COVERAGE : state.deviceCoverage;
+    },
+    listOpenHistoricalPullsForDate: async () => state.openPulls || [],
+    listDeviceCoverageForRange: async (args) => {
+      calls.coverageForRange = args;
+      if (state.coverageThrows) throw new Error("device read failed");
+      return state.deviceCoverageRange === undefined
+        ? DEFAULT_DEVICE_COVERAGE_RANGE
+        : state.deviceCoverageRange;
+    },
+    listOpenHistoricalPullsForRange: async () => state.openPulls || [],
+    listApplicableEmployeesForRange: async (args) => {
+      calls.rangePopulation = args;
+      let rows = state.rangeEmployees === undefined
+        ? (state.employees === undefined ? [employee(42)] : state.employees)
+        : state.rangeEmployees;
+      if (args.store_ids && args.store_ids.length) {
+        rows = rows.filter((r) => args.store_ids.map(Number).includes(Number(r.store_id)));
+      } else if (Array.isArray(args.store_ids)) {
+        rows = [];
+      }
+      if (args.designation_id) {
+        rows = rows.filter((r) => Number(r.designation_id) === Number(args.designation_id));
+      }
+      if (args.search) {
+        const q = String(args.search).toLowerCase();
+        rows = rows.filter(
+          (r) =>
+            String(r.employee_name).toLowerCase().includes(q) || String(r.employee_id).includes(q)
+        );
+      }
+      return rows;
+    },
+    listOutlets: async (args) => {
+      calls.outletArgs = args;
+      const all = state.outlets || [{ outlet_id: 1, outlet_name: "Main Store", outlet_nickname: "MAIN" }];
+      const ids = args && args.store_ids;
+      if (ids === null || ids === undefined) return all;
+      return all.filter((o) => ids.map(Number).includes(Number(o.outlet_id)));
+    },
     listDesignations: async () => state.designations || [{ designation_id: 5, designation_name: "Cashier" }],
     listActiveWorkShifts: async () =>
       state.activeShifts || [{ work_shift_id: 7, shift_code: "10-10", shift_name: "Shift 7" }],
@@ -579,7 +670,7 @@ describe("device sync is evidence, not a verdict", () => {
         ],
       })
     );
-    const res = await uc.getRecentPunches({ now: ist(DATE, 12, 0) });
+    const res = await uc.getRecentPunches({ attendance_date: DATE, now: ist(DATE, 12, 0) });
     const dev = res.devices[0];
     assert.equal(dev.sync_known, true);
     assert.equal(dev.last_seen_age_minutes, 60);
@@ -599,7 +690,7 @@ describe("device sync is evidence, not a verdict", () => {
         ],
       })
     );
-    const res = await uc.getRecentPunches({ now: ist(DATE, 12, 0) });
+    const res = await uc.getRecentPunches({ attendance_date: DATE, now: ist(DATE, 12, 0) });
     assert.equal(res.devices[0].sync_known, false);
     assert.equal(res.devices[0].last_seen_age_minutes, null);
     assert.ok(!("online" in res.devices[0]), "no online/offline verdict is invented");
@@ -608,36 +699,106 @@ describe("device sync is evidence, not a verdict", () => {
   it("does not claim a direction it cannot establish, and labels an excluded punch", async () => {
     const uc = buildUsecase(
       fakeRepo({
-        recentPunches: [
-          {
-            punch_id: 1,
-            employee_id: 42,
-            employee_name: "Employee 42",
-            io_time: `${DATE} 10:00:00`,
-            received_at: `${DATE} 10:00:02`,
-            ingest_attendance_date: DATE,
-            derivation_status: "OK",
-            dev_id: "DEV1",
-            ingest_source: "BIOMAX",
-            device_label: "Main - G1",
-            punch_outlet_id: 1,
-            punch_outlet_name: "Main Store",
+        rawPunches: [
+          punch(42, `${DATE} 10:00:00`, { punch_id: 1 }),
+          punch(42, `${DATE} 22:00:00`, {
+            punch_id: 2,
             attendance_punch_void_id: 5,
-          },
+            void_reason: "Wrong person",
+          }),
         ],
       })
     );
-    const res = await uc.getRecentPunches({ now: ist(DATE, 12, 0) });
-    assert.equal(res.punches[0].direction, "PUNCH", "the device flag is not a direction flag");
-    assert.equal(res.punches[0].excluded, true);
-    assert.match(res.punches[0].excluded_reason, /Voided/);
+    const res = await uc.getRecentPunches({ attendance_date: DATE, now: ist("2026-09-13", 6, 0) });
+    assert.ok(res.punches.length >= 1);
+    assert.ok(
+      res.punches.every((p) => p.direction === "PUNCH"),
+      "the device flag is not a direction flag"
+    );
+    const voided = res.punches.find((p) => p.punch_id === 2);
+    assert.ok(voided, "a voided punch is still shown, for diagnosis");
+    assert.equal(voided.excluded, true);
+    assert.match(voided.excluded_reason, /Voided/);
   });
 
-  it("fetched_at is labelled as the response time, not a sync time", async () => {
+  it("observed_at is the terminal reading's time, distinct from the attendance date", async () => {
     const uc = buildUsecase(fakeRepo({}));
-    const res = await uc.getRecentPunches({ now: ist(DATE, 12, 34) });
-    assert.equal(res.fetched_at, `${DATE} 12:34`);
-    assert.match(res.note, /fetched_at is when this response was built/);
+    const res = await uc.getRecentPunches({ attendance_date: DATE, now: ist("2026-09-20", 12, 34) });
+    assert.equal(res.attendance_date, DATE);
+    assert.equal(res.observed_at, "2026-09-20 12:34");
+    assert.match(res.note, /OBSERVED NOW \(observed_at\) and is not evidence about the selected date/);
+  });
+
+  it("the punch feed is the SELECTED attendance day, not the latest punches anywhere", async () => {
+    const uc = buildUsecase(
+      fakeRepo({
+        rawPunches: [
+          punch(42, "2026-09-10 10:00:00", { punch_id: 1 }),
+          punch(42, "2026-09-10 22:00:00", { punch_id: 2 }),
+          punch(42, `${DATE} 10:00:00`, { punch_id: 3 }),
+          punch(42, `${DATE} 22:00:00`, { punch_id: 4 }),
+        ],
+      })
+    );
+    const res = await uc.getRecentPunches({ attendance_date: DATE, now: ist("2026-09-13", 6, 0) });
+    assert.deepEqual(
+      res.punches.map((p) => p.punch_id).sort((a, b) => a - b),
+      [3, 4],
+      "punches from another day must not appear under this one"
+    );
+  });
+
+  it("an overnight punch belongs to the shift date, not the calendar date it landed on", async () => {
+    const uc = buildUsecase(
+      fakeRepo({
+        rawPunches: [
+          punch(42, `${DATE} 10:00:00`, { punch_id: 1 }),
+          // 00:30 the next morning, inside the 04:00 cutoff.
+          punch(42, "2026-09-13 00:30:00", { punch_id: 2 }),
+        ],
+      })
+    );
+    const res = await uc.getRecentPunches({ attendance_date: DATE, now: ist("2026-09-13", 6, 0) });
+    assert.deepEqual(
+      res.punches.map((p) => p.punch_id).sort((a, b) => a - b),
+      [1, 2],
+      "a midnight-to-midnight filter would have dropped the OUT"
+    );
+  });
+
+  it("the feed honours the employee search, like every other panel", async () => {
+    const uc = buildUsecase(
+      fakeRepo({
+        employees: [employee(1), employee(2)],
+        rawPunches: [
+          punch(1, `${DATE} 10:00:00`, { punch_id: 1 }),
+          punch(1, `${DATE} 22:00:00`, { punch_id: 2 }),
+          punch(2, `${DATE} 10:00:00`, { punch_id: 3 }),
+          punch(2, `${DATE} 22:00:00`, { punch_id: 4 }),
+        ],
+      })
+    );
+    const res = await uc.getRecentPunches({
+      attendance_date: DATE,
+      search: "Employee 2",
+      now: ist("2026-09-13", 6, 0),
+    });
+    assert.deepEqual(res.punches.map((p) => p.punch_id).sort((a, b) => a - b), [3, 4]);
+  });
+
+  it("a punch-read failure is reported, not rendered as an empty feed", async () => {
+    const uc = buildUsecase(
+      fakeRepo({
+        punchesByIdsThrows: true,
+        rawPunches: [
+          punch(42, `${DATE} 10:00:00`, { punch_id: 1 }),
+          punch(42, `${DATE} 22:00:00`, { punch_id: 2 }),
+        ],
+      })
+    );
+    const res = await uc.getRecentPunches({ attendance_date: DATE, now: ist("2026-09-13", 6, 0) });
+    assert.equal(res.punches_available, false);
+    assert.deepEqual(res.punches, []);
   });
 });
 
@@ -695,5 +856,447 @@ describe("the reads are batched", () => {
     const uc = buildUsecase(repo);
     await uc.getOverview({ attendance_date: DATE, now: ist(DATE, 12, 0) });
     assert.equal(repo.calls.rawPunches, 1, "fifty employees must not mean fifty queries");
+  });
+});
+
+/* ================================ delivery completeness (finding 4) ==== */
+
+describe("a closed day is not a complete one", () => {
+  const closedNow = ist("2026-09-13", 6, 0);
+
+  it("confirms absence when every terminal was in contact after the close", async () => {
+    const uc = buildUsecase(fakeRepo({ rawPunches: [] }));
+    const res = await uc.getOverview({ attendance_date: DATE, now: closedNow });
+    assert.equal(res.cards.absent.count, 1);
+    assert.equal(res.delivery_confirmed, true);
+  });
+
+  it("withholds absence when the terminal has not been heard from since the close", async () => {
+    const uc = buildUsecase(
+      fakeRepo({
+        rawPunches: [],
+        deviceCoverage: [
+          {
+            outlet_id: 1,
+            biomax_device_id: 1,
+            dev_id: "DEV1",
+            label: "Main - G1",
+            // Before the 04:00 cutoff on the 13th: it may still hold punches.
+            last_seen_at: `${DATE} 20:00:00`,
+            last_punch_at: `${DATE} 20:00:00`,
+          },
+        ],
+      })
+    );
+    const res = await uc.getOverview({ attendance_date: DATE, now: closedNow });
+    assert.equal(res.cards.absent.count, 0, "this is a gap in the feed, not an absence");
+    assert.equal(res.overview.slices.find((s) => s.slice === "UNRESOLVED").count, 1);
+    assert.equal(res.overview.unconfirmed_absence, 1);
+    assert.equal(res.delivery_confirmed, false);
+  });
+
+  it("withholds absence while a historical pull covering the date is still running", async () => {
+    const uc = buildUsecase(
+      fakeRepo({
+        rawPunches: [],
+        openPulls: [
+          {
+            biomax_historical_pull_id: 1,
+            biomax_device_id: 1,
+            dev_id: "DEV1",
+            status: "RECEIVING",
+            requested_from: `${DATE} 00:00:00`,
+            requested_to: `${DATE} 23:59:59`,
+            outlet_id: 1,
+          },
+        ],
+      })
+    );
+    const res = await uc.getOverview({ attendance_date: DATE, now: closedNow });
+    assert.equal(res.cards.absent.count, 0);
+    assert.equal(res.coverage.find((c) => c.store_id === 1).coverage, "INCOMPLETE");
+  });
+
+  it("a device-health FAILURE withholds absence rather than confirming it", async () => {
+    const uc = buildUsecase(fakeRepo({ rawPunches: [], coverageThrows: true }));
+    const res = await uc.getOverview({ attendance_date: DATE, now: closedNow });
+    assert.equal(res.cards.absent.count, 0, "unknown must fail towards under-claiming absence");
+    assert.equal(res.coverage_available, false);
+  });
+
+  it("punches still count as check-ins when delivery is unconfirmed", async () => {
+    const uc = buildUsecase(
+      fakeRepo({
+        rawPunches: [
+          punch(42, `${DATE} 10:00:00`, { punch_id: 1 }),
+          punch(42, `${DATE} 22:00:00`, { punch_id: 2 }),
+        ],
+        coverageThrows: true,
+      })
+    );
+    const res = await uc.getOverview({ attendance_date: DATE, now: closedNow });
+    assert.equal(res.cards.checked_in.count, 1, "what arrived is not in doubt");
+  });
+
+  it("one healthy location does not vouch for another", async () => {
+    const uc = buildUsecase(
+      fakeRepo({
+        employees: [employee(1, { store_id: 1 }), employee(2, { store_id: 2, outlet_name: "Warehouse" })],
+        rawPunches: [],
+        deviceCoverage: [
+          // Outlet 1 healthy; outlet 2 silent since before the close.
+          { outlet_id: 1, biomax_device_id: 1, dev_id: "D1", label: "G1", last_seen_at: "2026-09-20 10:00:00", last_punch_at: null },
+          { outlet_id: 2, biomax_device_id: 2, dev_id: "D2", label: "G2", last_seen_at: `${DATE} 18:00:00`, last_punch_at: null },
+        ],
+      })
+    );
+    const res = await uc.getOverview({ attendance_date: DATE, now: closedNow });
+    assert.equal(res.cards.absent.count, 1, "only the covered location's absence is confirmed");
+    const drill = await uc.getDrilldown({ attendance_date: DATE, bucket: "ABSENT", now: closedNow });
+    assert.deepEqual(drill.employees.map((e) => e.employee_id), [1]);
+    assert.equal(res.coverage.find((c) => c.store_id === 2).coverage, "UNKNOWN");
+  });
+
+  it("a late punch arriving turns an unconfirmed day into a check-in", async () => {
+    // Same date, same silent terminal - but the punch has now been delivered.
+    const silent = [
+      { outlet_id: 1, biomax_device_id: 1, dev_id: "D1", label: "G1", last_seen_at: `${DATE} 18:00:00`, last_punch_at: null },
+    ];
+    const before = await buildUsecase(
+      fakeRepo({ rawPunches: [], deviceCoverage: silent })
+    ).getOverview({ attendance_date: DATE, now: closedNow });
+    assert.equal(before.cards.checked_in.count, 0);
+    assert.equal(before.cards.absent.count, 0);
+
+    const after = await buildUsecase(
+      fakeRepo({
+        deviceCoverage: silent,
+        rawPunches: [
+          punch(42, `${DATE} 10:00:00`, { punch_id: 1 }),
+          punch(42, `${DATE} 22:00:00`, { punch_id: 2 }),
+        ],
+      })
+    ).getOverview({ attendance_date: DATE, now: closedNow });
+    assert.equal(after.cards.checked_in.count, 1);
+    assert.equal(after.cards.absent.count, 0);
+  });
+
+  it("the UNCONFIRMED_ABSENCE drilldown lists exactly who is being held", async () => {
+    const uc = buildUsecase(
+      fakeRepo({
+        rawPunches: [],
+        deviceCoverage: [
+          { outlet_id: 1, biomax_device_id: 1, dev_id: "D1", label: "G1", last_seen_at: `${DATE} 18:00:00`, last_punch_at: null },
+        ],
+      })
+    );
+    const drill = await uc.getDrilldown({
+      attendance_date: DATE,
+      bucket: "UNCONFIRMED_ABSENCE",
+      now: closedNow,
+    });
+    assert.equal(drill.total, 1);
+    assert.match(drill.employees[0].unresolved_reason, /has not been in contact/);
+  });
+});
+
+/* ================================ per-date populations (finding 2) ==== */
+
+describe("the trend resolves its population PER DATE", () => {
+  const closedNow = ist("2026-09-13", 6, 0);
+
+  it("does not count a mid-window joiner before they joined", async () => {
+    const uc = buildUsecase(
+      fakeRepo({
+        rangeEmployees: [employee(1, { joined_on: "2026-09-10" })],
+        employees: [employee(1, { joined_on: "2026-09-10" })],
+        rawPunches: [],
+      })
+    );
+    const res = await uc.getTrend({ attendance_date: DATE, days: 10, now: closedNow });
+    const before = res.days.filter((d) => d.attendance_date < "2026-09-10");
+    assert.equal(before.length, 0, "days before somebody joined have no population at all");
+    assert.ok(res.days.every((d) => d.attendance_date >= "2026-09-10"));
+    assert.ok(res.days.every((d) => d.applicable === 1));
+  });
+
+  it("still counts a mid-window leaver on the days they actually worked", async () => {
+    const uc = buildUsecase(
+      fakeRepo({
+        // Resigned before the selected date: the OLD code dropped them from
+        // every day of the window, including the ones they worked.
+        rangeEmployees: [employee(1, { resignation_date: "2026-09-08" })],
+        employees: [],
+        rawPunches: [
+          punch(1, "2026-09-07 10:00:00", { punch_id: 1 }),
+          punch(1, "2026-09-07 22:00:00", { punch_id: 2 }),
+        ],
+      })
+    );
+    const res = await uc.getTrend({ attendance_date: DATE, days: 12, now: closedNow });
+    const worked = res.days.find((d) => d.attendance_date === "2026-09-07");
+    assert.ok(worked, "the day they worked is in the trend");
+    assert.equal(worked.applicable, 1);
+    assert.equal(worked.checked_in, 1);
+    assert.ok(
+      res.days.every((d) => d.attendance_date <= "2026-09-08"),
+      "and they are gone from every day after they left"
+    );
+  });
+
+  it("the resignation date itself is still an applicable day", async () => {
+    const uc = buildUsecase(
+      fakeRepo({ rangeEmployees: [employee(1, { resignation_date: "2026-09-08" })], employees: [], rawPunches: [] })
+    );
+    const res = await uc.getTrend({ attendance_date: DATE, days: 12, now: closedNow });
+    assert.ok(
+      res.days.some((d) => d.attendance_date === "2026-09-08"),
+      "resigned ON the 8th means the 8th counts, matching the single-date rule"
+    );
+  });
+
+  it("an unreadable joining date leaves the start unbounded, as the SQL does", async () => {
+    const uc = buildUsecase(
+      fakeRepo({ rangeEmployees: [employee(1, { joined_on: null })], employees: [employee(1)], rawPunches: [] })
+    );
+    const res = await uc.getTrend({ attendance_date: DATE, days: 5, now: closedNow });
+    assert.ok(res.days.length > 0);
+    assert.ok(res.days.every((d) => d.applicable === 1));
+  });
+
+  it("agrees with the single-date overview for a date they both cover", async () => {
+    const state = {
+      employees: [employee(1), employee(2)],
+      rangeEmployees: [employee(1), employee(2)],
+      rawPunches: [
+        punch(1, "2026-09-11 10:00:00", { punch_id: 1 }),
+        punch(1, "2026-09-11 22:00:00", { punch_id: 2 }),
+      ],
+    };
+    const overview = await buildUsecase(fakeRepo(state)).getOverview({
+      attendance_date: "2026-09-11",
+      now: closedNow,
+    });
+    const trend = await buildUsecase(fakeRepo(state)).getTrend({
+      attendance_date: DATE,
+      days: 5,
+      now: closedNow,
+    });
+    const day = trend.days.find((d) => d.attendance_date === "2026-09-11");
+    assert.ok(day, "the date is in the trend");
+    assert.equal(day.applicable, overview.cards.total_employees.count);
+    assert.equal(day.checked_in, overview.cards.checked_in.count);
+    assert.equal(day.absent, overview.cards.absent.count);
+  });
+
+  it("honours the employee search, which the first version dropped", async () => {
+    const uc = buildUsecase(
+      fakeRepo({
+        employees: [employee(1), employee(2)],
+        rangeEmployees: [employee(1), employee(2)],
+        rawPunches: [],
+      })
+    );
+    const all = await uc.getTrend({ attendance_date: DATE, days: 5, now: closedNow });
+    const one = await uc.getTrend({ attendance_date: DATE, days: 5, search: "Employee 2", now: closedNow });
+    assert.equal(all.days[0].applicable, 2);
+    assert.equal(one.days[0].applicable, 1, "the chart must describe the same people as the cards");
+  });
+
+  it("withholds the rate for a day whose delivery is unconfirmed", async () => {
+    const uc = buildUsecase(
+      fakeRepo({
+        rawPunches: [],
+        deviceCoverageRange: [
+          {
+            outlet_id: 1,
+            biomax_device_id: 1,
+            dev_id: "D1",
+            label: "G1",
+            effective_from: "2020-01-01 00:00:00",
+            effective_to: null,
+            last_seen_at: "2026-09-05 10:00:00",
+          },
+        ],
+      })
+    );
+    const res = await uc.getTrend({ attendance_date: DATE, days: 5, now: closedNow });
+    assert.ok(res.days.length > 0);
+    assert.ok(
+      res.days.every((d) => d.check_in_rate.available === false),
+      "a rate built on an unconfirmed feed is a lower bound, not a measurement"
+    );
+    assert.equal(res.available, false);
+    assert.equal(res.reason, "NO_CONFIRMED_DELIVERY");
+    assert.ok(res.days.every((d) => d.unavailable_reason));
+  });
+
+  it("still batches: one range population read and one punch read", async () => {
+    const repo = fakeRepo({
+      employees: Array.from({ length: 40 }, (_, i) => employee(i + 1)),
+      rangeEmployees: Array.from({ length: 40 }, (_, i) => employee(i + 1)),
+    });
+    const uc = buildUsecase(repo);
+    await uc.getTrend({ attendance_date: DATE, days: 14, now: closedNow });
+    assert.equal(repo.calls.rawPunches, 1, "forty employees over fourteen days is still one read");
+  });
+});
+
+/* ================================= exact drilldowns (finding 3) ==== */
+
+describe("a drilldown lists the exact group that was clicked", () => {
+  const closedNow = ist("2026-09-13", 6, 0);
+
+  it("finds a CHECKED-IN employee whose shift has no schedule row", async () => {
+    // The employee this panel most needs to show: they turned up, and their
+    // roster is broken. Their slice is CHECKED_IN, so a slice-based drilldown
+    // could never find them.
+    const uc = buildUsecase(
+      fakeRepo({
+        schedules: [],
+        rawPunches: [
+          punch(42, `${DATE} 10:00:00`, { punch_id: 1 }),
+          punch(42, `${DATE} 22:00:00`, { punch_id: 2 }),
+        ],
+      })
+    );
+    const overview = await uc.getOverview({ attendance_date: DATE, now: closedNow });
+    assert.equal(overview.cards.checked_in.count, 1, "they are checked in");
+    assert.equal(
+      overview.cards.need_action.by_issue.find((i) => i.key === "SHIFT_SETUP").count,
+      1,
+      "and they need action"
+    );
+
+    const bySlice = await uc.getDrilldown({ attendance_date: DATE, bucket: "UNRESOLVED", now: closedNow });
+    assert.equal(bySlice.total, 0, "the old slice-based drilldown would have missed them");
+
+    const byIssue = await uc.getDrilldown({ attendance_date: DATE, bucket: "SHIFT_SETUP", now: closedNow });
+    assert.equal(byIssue.total, 1);
+    assert.equal(byIssue.employees[0].employee_id, 42);
+  });
+
+  it("separates No Shift Assigned from Shift Setup Issue", async () => {
+    const uc = buildUsecase(
+      fakeRepo({
+        employees: [employee(1), employee(2)],
+        // employee 1 has an assignment, employee 2 does not
+        assignments: [
+          { employee_work_shift_assignment_id: 1, employee_id: 1, work_shift_id: 7, effective_from: "2026-09-01" },
+        ],
+        schedules: [],
+        rawPunches: [],
+      })
+    );
+    const setup = await uc.getDrilldown({ attendance_date: DATE, bucket: "SHIFT_SETUP", now: closedNow });
+    const noShift = await uc.getDrilldown({ attendance_date: DATE, bucket: "NO_SHIFT", now: closedNow });
+    assert.deepEqual(setup.employees.map((e) => e.employee_id), [1]);
+    assert.deepEqual(noShift.employees.map((e) => e.employee_id), [2]);
+  });
+
+  it("combines an issue bucket with the shift filter to name one panel row", async () => {
+    const uc = buildUsecase(
+      fakeRepo({
+        employees: [employee(1), employee(2)],
+        assignments: [
+          { employee_work_shift_assignment_id: 1, employee_id: 1, work_shift_id: 7, effective_from: "2026-09-01" },
+          { employee_work_shift_assignment_id: 2, employee_id: 2, work_shift_id: 8, effective_from: "2026-09-01" },
+        ],
+        configs: [shiftConfig(7), shiftConfig(8)],
+        schedules: scheduleRows(7),
+        rawPunches: [],
+      })
+    );
+    // Only shift 8 lacks a schedule row.
+    const all = await uc.getDrilldown({ attendance_date: DATE, bucket: "SHIFT_SETUP", now: closedNow });
+    assert.equal(all.total, 1);
+    const scoped = await uc.getDrilldown({
+      attendance_date: DATE,
+      bucket: "SHIFT_SETUP",
+      work_shift_id: 8,
+      now: closedNow,
+    });
+    assert.equal(scoped.total, 1);
+    assert.equal(scoped.applied_filters.work_shift_id, 8);
+    const other = await uc.getDrilldown({
+      attendance_date: DATE,
+      bucket: "SHIFT_SETUP",
+      work_shift_id: 7,
+      now: closedNow,
+    });
+    assert.equal(other.total, 0, "the other shift's row is a different group");
+  });
+
+  it("selects the no-outlet group explicitly rather than returning everybody", async () => {
+    const uc = buildUsecase(
+      fakeRepo({
+        employees: [
+          employee(1, { store_id: 1 }),
+          employee(2, { store_id: null, outlet_name: null }),
+        ],
+        rawPunches: [],
+      })
+    );
+    const everyone = await uc.getDrilldown({ attendance_date: DATE, bucket: "TOTAL", now: closedNow });
+    assert.equal(everyone.total, 2);
+    const unassigned = await uc.getDrilldown({
+      attendance_date: DATE,
+      bucket: "TOTAL",
+      store_unassigned: true,
+      now: closedNow,
+    });
+    assert.deepEqual(unassigned.employees.map((e) => e.employee_id), [2]);
+    assert.equal(unassigned.applied_filters.store_unassigned, true);
+  });
+
+  it("echoes the filters back, so pagination carries the same group", async () => {
+    const uc = buildUsecase(fakeRepo({ employees: [employee(1)], rawPunches: [] }));
+    const res = await uc.getDrilldown({
+      attendance_date: DATE,
+      bucket: "TOTAL",
+      designation_id: 5,
+      search: "Employee",
+      now: closedNow,
+    });
+    assert.equal(res.applied_filters.designation_id, 5);
+    assert.equal(res.applied_filters.search, "Employee");
+  });
+});
+
+/* ============================== authorized scope (finding 1) ==== */
+
+describe("an empty authorized scope reads nothing", () => {
+  it("returns no population and never queries", async () => {
+    const repo = fakeRepo({ employees: [employee(1), employee(2)] });
+    const uc = buildUsecase(repo);
+    const res = await uc.getOverview({
+      attendance_date: DATE,
+      store_ids: [],
+      now: ist(DATE, 12, 0),
+    });
+    assert.equal(res.cards.total_employees.count, 0);
+    assert.equal(repo.calls.listApplicableEmployees, 0, "an empty scope never reaches the database");
+  });
+
+  it("the trend and the filter options are empty too", async () => {
+    const uc = buildUsecase(fakeRepo({ employees: [employee(1)] }));
+    const trend = await uc.getTrend({ attendance_date: DATE, store_ids: [], now: ist(DATE, 12, 0) });
+    assert.equal(trend.available, false);
+    assert.deepEqual(trend.days, []);
+    const filters = await uc.getFilters({ store_ids: [] });
+    assert.deepEqual(filters.outlets, []);
+  });
+
+  it("a specific scope narrows the filter options to it", async () => {
+    const uc = buildUsecase(
+      fakeRepo({
+        outlets: [
+          { outlet_id: 1, outlet_name: "Main Store" },
+          { outlet_id: 2, outlet_name: "Warehouse" },
+        ],
+      })
+    );
+    const filters = await uc.getFilters({ store_ids: [2] });
+    assert.deepEqual(filters.outlets.map((o) => o.store_id), [2]);
   });
 });

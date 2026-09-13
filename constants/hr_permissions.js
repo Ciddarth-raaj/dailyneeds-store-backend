@@ -245,9 +245,16 @@ module.exports = {
   // IT GRANTS NO WRITE OF ANY KIND. Holding it does not let anybody approve a
   // request, regularize a punch, edit a time or recalculate a date: every
   // action the dashboard links out to keeps its own existing key and is
-  // re-checked by the route that performs it. The C4 migration grants this to
-  // the designations that ALREADY hold `view_calculated_attendance`, so
-  // nobody's effective visibility changes on deploy.
+  // re-checked by the route that performs it.
+  //
+  // GRANTED TO NOBODY BY MIGRATION. An aggregate over every employee is a
+  // capability rather than a convenience, so it is assigned deliberately, per
+  // designation, on the rights screen - not handed out at deploy time to
+  // whoever already holds the per-employee read.
+  //
+  // AND IT DOES NOT SETTLE WHICH BRANCHES. Holding it permits the dashboard;
+  // the caller's LOCATION scope is resolved separately and fails closed. See
+  // `resolveLocationScope` in `routes/attendance_dashboard.js`.
   VIEW_ATTENDANCE_DASHBOARD: "view_attendance_dashboard",
 
   // Attendance v2 / A3 - missing-punch regularization and OT approval.

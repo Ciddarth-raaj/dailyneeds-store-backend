@@ -1,4 +1,4 @@
--- The Attendance Dashboard - ONE permission key, and one grant rule.
+-- The Attendance Dashboard - ONE permission key, declared and granted to nobody.
 --
 -- ADDITIVE AND PERMISSION-ONLY. This migration creates no table, alters no
 -- table, adds no column, adds no index and touches no attendance, shift,
@@ -21,17 +21,38 @@
 -- links out to keeps its own existing key and is re-checked by the route that
 -- performs it; the dashboard router is GET-only and has no write path at all.
 --
--- THE GRANT RULE: whoever already holds `view_calculated_attendance`.
--- Those designations can already read every one of these employees' days one
--- at a time, so granting them the overview changes what is CONVENIENT and not
--- what is VISIBLE - nobody's effective access widens on deploy. This is the
--- same reasoning the M1 migration used when it granted its two new keys only
--- to designations that already held the underlying ones.
+-- GRANTED TO NOBODY, and that is a correction to this migration's first form.
 --
--- NOBODY ELSE IS GRANTED ANYTHING. There is no grant to "all designations",
--- no grant by user type and no grant to a designation that does not already
--- hold the read above. Administrators (user_type 2) need no row: the
--- permission middleware bypasses this table for them.
+-- It originally granted the key to every designation already holding
+-- `view_calculated_attendance`, on the reasoning that those designations can
+-- already read the same employees one at a time, so the overview changes only
+-- what is CONVENIENT. Review rejected that, and rightly:
+--
+--   * `view_calculated_attendance` answers "may this person open ONE
+--     employee's calculated month". It says nothing about how many employees,
+--     or at which branches, and it is not a statement of company-wide reach.
+--     Treating it as one is how a narrow read silently becomes a broad one.
+--   * An aggregate IS materially different from the same figures fetched one
+--     by one. "Who is absent across every branch today" is a capability, not
+--     a convenience, and it should be given deliberately to named designations
+--     by a person on the rights screen.
+--   * A migration is the worst place to make that decision, because it makes
+--     it for every designation at once, silently, at deploy time.
+--
+-- So this declares the key and grants it to nobody. Administrators (user_type
+-- 2) reach it through the permission middleware's bypass, exactly as they do
+-- for `recalculate_attendance`, `view_attendance_payroll` and
+-- `manage_employee_break_override` - the three keys the A1 migration withheld
+-- for the same reason. Anybody else is granted it explicitly, by a person, on
+-- the Designation rights screen.
+--
+-- NOTE ON LOCATION SCOPE, which this key does NOT settle. Holding it permits
+-- the dashboard; it does not say which branches the holder may see. The route
+-- resolves that separately and fails closed, and today only an administrator
+-- or a holder of the existing `all_stores` permission resolves to any scope at
+-- all. Granting this key alone to a branch designation will therefore refuse
+-- them until a per-user location model exists. See the comment on
+-- `resolveLocationScope` in `routes/attendance_dashboard.js`.
 --
 -- `all_permissions` has no unique key on `permission_key`, so the insert
 -- guards itself and a re-run adds nothing.
@@ -39,16 +60,3 @@ INSERT INTO `all_permissions` (`permission_key`)
   SELECT 'view_attendance_dashboard' FROM DUAL
    WHERE NOT EXISTS (
      SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'view_attendance_dashboard' );
-
--- One row per designation that ALREADY holds `view_calculated_attendance`
--- and is active on it. `NOT EXISTS` makes the statement idempotent.
-INSERT INTO `permissions` (`permission_key`, `designation_id`, `is_active`)
-  SELECT 'view_attendance_dashboard', p.`designation_id`, TRUE
-    FROM `permissions` p
-   WHERE p.`permission_key` = 'view_calculated_attendance'
-     AND p.`is_active` = TRUE
-     AND NOT EXISTS (
-       SELECT 1 FROM `permissions` q
-        WHERE q.`permission_key` = 'view_attendance_dashboard'
-          AND q.`designation_id` = p.`designation_id` )
-   GROUP BY p.`designation_id`;

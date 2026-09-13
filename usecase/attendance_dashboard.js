@@ -4,6 +4,7 @@ const {
   calculateAttendanceDay,
   attendanceDateForPunch,
   addDays,
+  dayDelta,
 } = require("../utils/attendance_engine");
 const { RESOLUTION_STATUS, resolveShiftForDate, toDateOnly } = require("../utils/shiftResolution");
 const {
@@ -13,6 +14,8 @@ const {
 } = require("../utils/shift_config_version");
 const { resolveEffectiveRawPunches } = require("../utils/attendance_effective_punches");
 const {
+  COVERAGE,
+  COVERAGE_LABEL,
   ISSUE_KEY,
   ISSUE_LABEL,
   NEED_ACTION_ISSUE_KEYS,
@@ -21,12 +24,17 @@ const {
   PRESENCE_SLICE_ORDER,
   CHECK_IN_RATE_DEFINITION,
   dashboardIssueKey,
+  dayCloseMinute,
   hasShiftStarted,
   isDayClosed,
   istNowParts,
+  locationCoverage,
+  nowOnDateAxis,
   presenceSlice,
   rate,
   tallyBy,
+  timeMinutes,
+  unresolvedReason,
 } = require("../utils/attendance_dashboard");
 
 /**
@@ -463,6 +471,235 @@ module.exports = (attendanceDashboardRepo) => {
     });
   };
 
+  /* ------------------------------------------------ delivery coverage */
+
+  /** One key for "this employee's outlet", including the no-outlet case. */
+  const outletKeyOf = (storeId) =>
+    storeId === null || storeId === undefined ? "none" : String(storeId);
+
+  /**
+   * Coverage inputs for a whole date RANGE, read once.
+   *
+   * `last_seen_at` is a single CURRENT value per device, so one read answers
+   * every date in the window: a device that has been in contact since a past
+   * day closed has had the chance to hand over anything it buffered for that
+   * day. The assignments come back with their own effective windows so the
+   * per-date question - which terminals served this outlet THEN - is answered
+   * from memory rather than with a query per day.
+   *
+   * A failure is UNKNOWN, not COMPLETE: `available: false` makes every date
+   * withhold absence.
+   */
+  const loadRangeCoverageInputs = async ({ from, to, store_ids }) => {
+    try {
+      const [assignments, pulls] = await Promise.all([
+        attendanceDashboardRepo.listDeviceCoverageForRange
+          ? attendanceDashboardRepo.listDeviceCoverageForRange({
+              from_date: from,
+              to_date: to,
+              store_ids,
+            })
+          : [],
+        attendanceDashboardRepo.listOpenHistoricalPullsForRange
+          ? attendanceDashboardRepo.listOpenHistoricalPullsForRange({
+              from_date: from,
+              to_date: to,
+              store_ids,
+            })
+          : [],
+      ]);
+      return { assignments: assignments || [], pulls: pulls || [], available: true };
+    } catch (err) {
+      return { assignments: [], pulls: [], available: false };
+    }
+  };
+
+  /** `YYYY-MM-DD HH:MM:SS` -> is it at or before the END of `date`? */
+  const startsOnOrBefore = (value, date) => {
+    const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(value || ""));
+    return m ? m[1] <= date : false;
+  };
+  /** An assignment's exclusive end: still in force on `date`? */
+  const endsAfter = (value, date) => {
+    if (value === null || value === undefined || value === "") return true;
+    const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(value));
+    return m ? m[1] > date : true;
+  };
+
+  /**
+   * The per-outlet coverage verdict for ONE date of a range, from inputs
+   * already in memory.
+   *
+   * Only the outlets the day's own population actually sits in are judged: a
+   * silent terminal at a branch nobody on this filtered list works at says
+   * nothing about this day's figures.
+   */
+  const coverageForDate = ({ date, rows, inputs }) => {
+    const outletKeys = [...new Set((rows || []).map((r) => outletKeyOf(r.store_id)))];
+    const byOutlet = new Map();
+
+    if (!inputs.available) {
+      outletKeys.forEach((k) => byOutlet.set(k, COVERAGE.UNKNOWN));
+      return { byOutlet, allComplete: outletKeys.length === 0 };
+    }
+
+    // The close instant for each outlet on this date: the LATEST among the
+    // shifts its people were rostered on, because the location's window is not
+    // over until its last shift's cutoff has passed.
+    const closeByOutlet = new Map();
+    (rows || []).forEach((r) => {
+      const key = outletKeyOf(r.store_id);
+      const close = dayCloseMinute(r.snapshot);
+      const current = closeByOutlet.get(key);
+      if (current === undefined || close > current) closeByOutlet.set(key, close);
+    });
+
+    const devicesByOutlet = new Map();
+    inputs.assignments.forEach((a) => {
+      if (!startsOnOrBefore(a.effective_from, date)) return;
+      if (!endsAfter(a.effective_to, date)) return;
+      const key = outletKeyOf(a.outlet_id);
+      if (!devicesByOutlet.has(key)) devicesByOutlet.set(key, []);
+      devicesByOutlet.get(key).push({
+        ...a,
+        last_seen_minute:
+          a.last_seen_at === null || a.last_seen_at === undefined
+            ? null
+            : minuteOnDateAxis(date, a.last_seen_at),
+      });
+    });
+
+    const openForOutlet = new Set();
+    let unattributedPull = false;
+    inputs.pulls.forEach((p) => {
+      // Does this pull actually cover THIS date?
+      if (!startsOnOrBefore(p.requested_from, date)) return;
+      const toM = /^(\d{4}-\d{2}-\d{2})/.exec(String(p.requested_to || ""));
+      if (toM && toM[1] < date) return;
+      if (p.outlet_id === null || p.outlet_id === undefined) unattributedPull = true;
+      else openForOutlet.add(outletKeyOf(p.outlet_id));
+    });
+
+    outletKeys.forEach((key) => {
+      byOutlet.set(
+        key,
+        locationCoverage({
+          devices: devicesByOutlet.get(key) || [],
+          close_minute: closeByOutlet.get(key),
+          open_pull: unattributedPull || openForOutlet.has(key),
+        })
+      );
+    });
+
+    return {
+      byOutlet,
+      allComplete:
+        outletKeys.length > 0 && outletKeys.every((k) => byOutlet.get(k) === COVERAGE.COMPLETE),
+    };
+  };
+
+
+  /**
+   * DELIVERY COVERAGE per outlet for one attendance date.
+   *
+   * Answers "have the punches for this window actually reached us", which the
+   * cutoff passing does NOT answer. Built from two existing facts and nothing
+   * invented:
+   *
+   *   - every terminal mapped to that outlet ON THAT DATE, and the last moment
+   *     the receiver heard from it (`biomax_device.last_seen_at`, written on
+   *     any contact including polls);
+   *   - any historical pull still running that covers the date, which is a
+   *     positive statement that punches are still being retrieved.
+   *
+   * The comparison is against the attendance day's OWN close instant - the one
+   * the shift's cutoff already defines - so there is no "stale after N
+   * minutes" threshold anywhere in it.
+   *
+   * A READ FAILURE IS UNKNOWN, NOT COMPLETE. If either query throws, every
+   * outlet comes back UNKNOWN and every no-punch day stays provisional. The
+   * safe direction is to under-claim absence.
+   *
+   * @returns {{byOutlet: Map<string,string>, available: boolean, devices: Array}}
+   */
+  const resolveCoverage = async ({ date, store_ids, closeMinuteByOutlet, now }) => {
+    let devices = [];
+    let pulls = [];
+    let available = true;
+    try {
+      [devices, pulls] = await Promise.all([
+        attendanceDashboardRepo.listDeviceCoverageForDate
+          ? attendanceDashboardRepo.listDeviceCoverageForDate({ attendance_date: date, store_ids })
+          : [],
+        attendanceDashboardRepo.listOpenHistoricalPullsForDate
+          ? attendanceDashboardRepo.listOpenHistoricalPullsForDate({ attendance_date: date, store_ids })
+          : [],
+      ]);
+    } catch (err) {
+      // Deliberately swallowed into UNKNOWN rather than failing the page: the
+      // headcounts are still worth showing, and the honest consequence of not
+      // knowing is that absence is withheld, which is what UNKNOWN does.
+      available = false;
+      devices = [];
+      pulls = [];
+    }
+
+    const devicesByOutlet = new Map();
+    (devices || []).forEach((d) => {
+      const key = outletKeyOf(d.outlet_id);
+      if (!devicesByOutlet.has(key)) devicesByOutlet.set(key, []);
+      devicesByOutlet.get(key).push({
+        ...d,
+        // The device's last contact, on the attendance date's own minute axis,
+        // so it is directly comparable with the day's close minute.
+        last_seen_minute: d.last_seen_at === null || d.last_seen_at === undefined
+          ? null
+          : minuteOnDateAxis(date, d.last_seen_at),
+      });
+    });
+
+    const openPullOutlets = new Set(
+      (pulls || []).filter((p) => p.outlet_id !== null && p.outlet_id !== undefined)
+        .map((p) => outletKeyOf(p.outlet_id))
+    );
+    // A running pull whose device has no current outlet assignment cannot be
+    // attributed to a branch, so it clouds every outlet rather than none: we
+    // do not know which location's punches are still coming.
+    const unattributedPull = (pulls || []).some(
+      (p) => p.outlet_id === null || p.outlet_id === undefined
+    );
+
+    const byOutlet = new Map();
+    closeMinuteByOutlet.forEach((closeMinute, key) => {
+      if (!available) {
+        byOutlet.set(key, COVERAGE.UNKNOWN);
+        return;
+      }
+      byOutlet.set(
+        key,
+        locationCoverage({
+          devices: devicesByOutlet.get(key) || [],
+          close_minute: closeMinute,
+          open_pull: unattributedPull || openPullOutlets.has(key),
+        })
+      );
+    });
+
+    return { byOutlet, available, devices: devices || [], pulls: pulls || [] };
+  };
+
+  /**
+   * A `YYYY-MM-DD HH:MM:SS` instant expressed on an attendance date's minute
+   * axis, the same axis `nowOnDateAxis` puts "now" on. Null when unreadable.
+   */
+  const minuteOnDateAxis = (attendanceDate, value) => {
+    const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}):(\d{2})/.exec(String(value || ""));
+    if (!m) return null;
+    const delta = dayDelta(attendanceDate, m[1]);
+    if (delta === null) return null;
+    return delta * 1440 + Number(m[2]) * 60 + Number(m[3]);
+  };
+
   /* ------------------------------------------------------- the population */
 
   /**
@@ -486,6 +723,14 @@ module.exports = (attendanceDashboardRepo) => {
     const date = toDateOnly(attendance_date);
     if (date === null) throw validationError("attendance_date must be a date as YYYY-MM-DD");
 
+    // AN EMPTY AUTHORIZED SCOPE IS NOT AN EMPTY FILTER. The caller may read
+    // no location, so there is nothing to query - short-circuiting here means
+    // the request never reaches the database at all, and the repository's own
+    // `1 = 0` backstop is never even needed.
+    if (Array.isArray(store_ids) && store_ids.length === 0) {
+      return { date, rows: [], employees: [], coverage: new Map(), coverage_available: true };
+    }
+
     const employees = await attendanceDashboardRepo.listApplicableEmployees({
       attendance_date: date,
       store_ids,
@@ -499,15 +744,39 @@ module.exports = (attendanceDashboardRepo) => {
       );
     }
     if (!employees || employees.length === 0) {
-      return { date, rows: [], employees: [] };
+      return { date, rows: [], employees: [], coverage: new Map(), coverage_available: true };
     }
 
     const batch = await loadBatch({ employees, from: date, to: date });
 
-    const rows = [];
+    // PASS ONE: the engine day per employee, plus the clock facts that depend
+    // only on their own shift. Coverage needs the close instants first, so the
+    // slice is decided in pass two.
+    const partial = [];
     employees.forEach((employee) => {
       const [day] = computeDaysForEmployee({ employee, dates: [date], batch });
       if (work_shift_id !== null && Number(day.work_shift_id) !== Number(work_shift_id)) return;
+      partial.push({ employee, day });
+    });
+
+    // THE CLOSE INSTANT PER OUTLET is the LATEST close among the employees
+    // rostered there: the location's window is not over until its last shift's
+    // cutoff has passed, so a 9-9 terminal is not asked to vouch for a 2-10
+    // night that is still running.
+    const closeMinuteByOutlet = new Map();
+    partial.forEach(({ employee, day }) => {
+      const key = outletKeyOf(employee.store_id);
+      const close = dayCloseMinute(day.shift_snapshot || null);
+      const current = closeMinuteByOutlet.get(key);
+      if (current === undefined || close > current) closeMinuteByOutlet.set(key, close);
+    });
+
+    const coverage = await resolveCoverage({ date, store_ids, closeMinuteByOutlet, now });
+
+    // PASS TWO: the slice, now that each employee's location has a verdict.
+    const rows = partial.map(({ employee, day }) => {
+      const outletKey = outletKeyOf(employee.store_id);
+      const outletCoverage = coverage.byOutlet.get(outletKey) || COVERAGE.UNKNOWN;
 
       const dayClosed = isDayClosed({
         attendance_date: date,
@@ -519,9 +788,19 @@ module.exports = (attendanceDashboardRepo) => {
         snapshot: day.shift_snapshot || null,
         now,
       });
-      const issueKey = dashboardIssueKey(day, { day_closed: dayClosed });
+      const issueKey = dashboardIssueKey(day, {
+        day_closed: dayClosed,
+        coverage: outletCoverage,
+      });
+      const slice = presenceSlice({
+        day,
+        resolution_status: day.shift_resolution_status,
+        day_closed: dayClosed,
+        shift_started: shiftStarted,
+        coverage: outletCoverage,
+      });
 
-      rows.push({
+      return {
         employee_id: Number(employee.employee_id),
         employee_name: employee.employee_name,
         store_id: employee.store_id === null ? null : Number(employee.store_id),
@@ -539,29 +818,51 @@ module.exports = (attendanceDashboardRepo) => {
         last_punch: day.effective_punches && day.effective_punches.length
           ? day.effective_punches[day.effective_punches.length - 1].io_time
           : null,
+        // THE PUNCHES THE ENGINE DATED TO THIS ATTENDANCE DAY, by id. The
+        // punch feed is built from these rather than from a timestamp range,
+        // so its membership is the shift's own cutoff rule and not an assumed
+        // midnight boundary. Excluded ones are carried separately so they can
+        // be shown for diagnosis and counted nowhere.
+        punch_ids: (day.effective_punches || [])
+          .filter((pn) => pn.source !== PUNCH_SOURCE.REGULARIZED)
+          .map((pn) => pn.punch_id)
+          .filter((id) => id !== null && id !== undefined),
+        excluded_punch_ids: (day.excluded_punches || [])
+          .map((pn) => pn.punch_id)
+          .filter((id) => id !== null && id !== undefined),
         status: day.status,
         shift_resolution_status: day.shift_resolution_status,
         day_closed: dayClosed,
         shift_started: shiftStarted,
-        rest_day: day.shift_resolution_status === RESOLUTION_STATUS.REST_DAY,
-        issue_key: issueKey,
-        issue_label: issueKey ? ISSUE_LABEL[issueKey] : null,
-        need_action: issueKey !== null && NEED_ACTION_ISSUE_KEYS.includes(issueKey),
-        slice: presenceSlice({
+        // Delivery evidence for this employee's location, carried on the row so
+        // the drilldown can say WHY a day is still unresolved.
+        coverage: outletCoverage,
+        coverage_label: COVERAGE_LABEL[outletCoverage],
+        unresolved_reason: unresolvedReason({
           day,
           resolution_status: day.shift_resolution_status,
           day_closed: dayClosed,
-          shift_started: shiftStarted,
+          coverage: outletCoverage,
         }),
+        issue_key: issueKey,
+        issue_label: issueKey ? ISSUE_LABEL[issueKey] : null,
+        need_action: issueKey !== null && NEED_ACTION_ISSUE_KEYS.includes(issueKey),
+        slice,
         ot_request_id: day.ot_request_id,
         ot_request_pending: day.ot_request_pending,
         ot_requested_minutes: day.ot_requested_minutes,
         candidate_ot_minutes: Number(day.candidate_ot_minutes) || 0,
         regularization_request_id: day.regularization_request_id,
-      });
+      };
     });
 
-    return { date, rows, employees };
+    return {
+      date,
+      rows,
+      employees,
+      coverage: coverage.byOutlet,
+      coverage_available: coverage.available,
+    };
   };
 
   /* ------------------------------------------------------------ the cards */
@@ -646,11 +947,20 @@ module.exports = (attendanceDashboardRepo) => {
    *
    * The slices partition the population, so they always sum to the total;
    * `reconciles` says so explicitly rather than leaving a reader to add up the
-   * chart. `rest_day_no_punch` is reported BESIDE the slices, as a labelled
-   * part of Unresolved and not as a slice of its own: v2 has no weekly-off
-   * concept, this screen is explicitly not the place to introduce one, and a
-   * rostered rest day with no punch is therefore shown as coverage this screen
-   * cannot settle rather than as either absence or attendance.
+   * chart.
+   *
+   * NO REST-DAY SLICE AND NO REST-DAY COUNT. An earlier version reported
+   * `rest_day_no_punch` beside the slices and diverted such days out of
+   * Absent. Both are gone: v2 has no weekly-off concept, and a dashboard-only
+   * rest-day rule WAS one - it made this screen disagree with the employee's
+   * own attendance for the same date, which is worse than the ambiguity it was
+   * trying to be careful about. The engine's answer is used, subject to the
+   * open-day and delivery safeguards that apply to every other date.
+   *
+   * `unconfirmed_absence` is a different thing entirely, and IS reported: the
+   * number of no-punch days on a closed day whose LOCATION has no delivery
+   * evidence. Those sit in Unresolved rather than Absent, and naming the count
+   * is what stops that looking like an unexplained gap.
    */
   const buildOverviewPanel = (rows) => {
     const counts = new Map(PRESENCE_SLICE_ORDER.map((s) => [s, 0]));
@@ -665,7 +975,13 @@ module.exports = (attendanceDashboardRepo) => {
       slices,
       total: rows.length,
       reconciles: sum === rows.length,
-      rest_day_no_punch: rows.filter((r) => r.rest_day && r.punch_count === 0).length,
+      unconfirmed_absence: rows.filter(
+        (r) =>
+          r.punch_count === 0 &&
+          r.day_closed &&
+          r.coverage !== COVERAGE.COMPLETE &&
+          r.slice === PRESENCE_SLICE.UNRESOLVED
+      ).length,
       note:
         "Slices are mutually exclusive: every applicable employee appears in exactly one. " +
         "Need Action, late/early and OT are counted separately because they can also be true " +
@@ -774,9 +1090,13 @@ module.exports = (attendanceDashboardRepo) => {
    * configured there (9-9, 10-10, 2-10, anything added later) is what the
    * selector offers and this screen cannot introduce a shift of its own.
    */
-  const getFilters = async () => {
+  const getFilters = async ({ store_ids = null } = {}) => {
+    // An empty authorized scope offers no outlets, rather than every outlet.
+    if (Array.isArray(store_ids) && store_ids.length === 0) {
+      return { outlets: [], designations: [], shifts: [], today: istNowParts().date };
+    }
     const [outlets, designations, shifts] = await Promise.all([
-      attendanceDashboardRepo.listOutlets(),
+      attendanceDashboardRepo.listOutlets({ store_ids }),
       attendanceDashboardRepo.listDesignations(),
       attendanceDashboardRepo.listActiveWorkShifts(),
     ]);
@@ -814,7 +1134,7 @@ module.exports = (attendanceDashboardRepo) => {
     search = null,
     now = Date.now(),
   }) => {
-    const { date, rows } = await buildPopulation({
+    const { date, rows, coverage, coverage_available } = await buildPopulation({
       attendance_date,
       store_ids,
       designation_id,
@@ -840,6 +1160,17 @@ module.exports = (attendanceDashboardRepo) => {
       fetched_at: `${nowParts.date} ${String(Math.floor(nowParts.minutes / 60)).padStart(2, "0")}:${String(
         nowParts.minutes % 60
       ).padStart(2, "0")}`,
+      // DELIVERY COVERAGE for this date, per outlet in scope. Reported beside
+      // the counts because it is what decides whether a no-punch day is an
+      // absence or a gap in the feed, and a reader is entitled to see which.
+      coverage: [...coverage.entries()].map(([key, verdict]) => ({
+        store_id: key === "none" ? null : Number(key),
+        coverage: verdict,
+        label: COVERAGE_LABEL[verdict],
+      })),
+      coverage_available,
+      delivery_confirmed:
+        rows.length > 0 && [...coverage.values()].every((v) => v === COVERAGE.COMPLETE),
       cards: buildCards(rows),
       overview: buildOverviewPanel(rows),
       by_location: buildLocationPanel(rows),
@@ -861,22 +1192,42 @@ module.exports = (attendanceDashboardRepo) => {
           "Missing Punch, Regularization Pending, No Shift Assigned or Shift Setup Issue. " +
           "A missing punch is only reported once the day has closed. A pending OT request alone " +
           "never puts a day here.",
+        delivery_coverage:
+          "Whether the punches for this attendance day have actually reached us, decided per " +
+          "location: COMPLETE when every terminal mapped to that outlet has been in contact with " +
+          "the receiver at or after the day's own close instant; INCOMPLETE when a historical " +
+          "pull covering the date is still running; UNKNOWN otherwise. A closed day is not a " +
+          "complete one, so confirmed absence requires COMPLETE - without it a no-punch day is " +
+          "reported as Unresolved / Data Pending. There is no freshness threshold in this rule.",
       },
     };
   };
 
   /**
-   * THE DRILLDOWN behind every card, slice and issue - the same population,
-   * the same filters, narrowed to one bucket and PAGINATED.
+   * THE DRILLDOWN behind every card, slice, issue and panel row - the same
+   * population, the same filters, narrowed to one bucket and PAGINATED.
    *
-   * The filters are re-applied on the server from the same code path, so a
-   * drilldown can never show a row the card did not count, and the totals
-   * agree by construction rather than by coincidence.
+   * THE BUCKET IS THE EXACT GROUP THAT WAS CLICKED. An earlier version sent a
+   * shift-setup row to the whole `UNRESOLVED` population, which was wrong in
+   * both directions: it listed people whose day was unresolved for entirely
+   * different reasons, and it MISSED the employee this panel most needs to
+   * show - somebody who punched normally but whose shift has no schedule row.
+   * That person is Checked In (they turned up) and Need Action (their roster
+   * is broken) at the same time, so their presence slice is CHECKED_IN and a
+   * slice-based drilldown could never find them. Issue buckets therefore
+   * select on `issue_key`, which is true of them, and combine with the
+   * ordinary `work_shift_id` filter to name the exact row.
+   *
+   * `store_unassigned` is the same idea for the location panel's
+   * "no outlet on record" row: an employee with no `store_id` cannot be
+   * selected by a store filter, and omitting the filter returns everybody. It
+   * is an explicit predicate rather than an absence of one.
    */
   const getDrilldown = async ({
     attendance_date,
     bucket,
     store_ids = null,
+    store_unassigned = false,
     designation_id = null,
     work_shift_id = null,
     search = null,
@@ -884,15 +1235,6 @@ module.exports = (attendanceDashboardRepo) => {
     offset = 0,
     now = Date.now(),
   }) => {
-    const { date, rows } = await buildPopulation({
-      attendance_date,
-      store_ids,
-      designation_id,
-      work_shift_id,
-      search,
-      now,
-    });
-
     const pick = (() => {
       switch (bucket) {
         case "TOTAL":
@@ -907,6 +1249,11 @@ module.exports = (attendanceDashboardRepo) => {
           return (r) => r.slice === PRESENCE_SLICE.ABSENT;
         case "UNRESOLVED":
           return (r) => r.slice === PRESENCE_SLICE.UNRESOLVED;
+        case "UNCONFIRMED_ABSENCE":
+          // The people a completeness gap is holding: no punch, day over, and
+          // their location's delivery unconfirmed.
+          return (r) =>
+            r.punch_count === 0 && r.day_closed && r.coverage !== COVERAGE.COMPLETE;
         case "NEED_ACTION":
           return (r) => r.need_action;
         case "OT_PENDING":
@@ -915,15 +1262,25 @@ module.exports = (attendanceDashboardRepo) => {
         case ISSUE_KEY.REGULARIZATION_PENDING:
         case ISSUE_KEY.NO_SHIFT:
         case ISSUE_KEY.SHIFT_SETUP:
-        case ISSUE_KEY.ABSENT:
           return (r) => r.issue_key === bucket;
         default:
           throw validationError(`Unknown drilldown bucket ${bucket}`);
       }
     })();
 
+    const { date, rows } = await buildPopulation({
+      attendance_date,
+      store_ids,
+      designation_id,
+      work_shift_id,
+      search,
+      now,
+    });
+
     const matched = rows
       .filter(pick)
+      // The location panel's unassigned row, as an explicit selection.
+      .filter((r) => (store_unassigned ? r.store_id === null : true))
       .sort((a, b) =>
         String(a.outlet_name || "").localeCompare(String(b.outlet_name || "")) ||
         String(a.employee_name || "").localeCompare(String(b.employee_name || ""))
@@ -938,21 +1295,46 @@ module.exports = (attendanceDashboardRepo) => {
       total: matched.length,
       limit: size,
       offset: start,
+      // Echoed back so the screen can prove the list it is showing is the one
+      // it asked for, and so pagination carries the same group.
+      applied_filters: {
+        store_ids: store_ids === null ? null : [...store_ids],
+        store_unassigned: !!store_unassigned,
+        designation_id: designation_id === null ? null : Number(designation_id),
+        work_shift_id: work_shift_id === null ? null : Number(work_shift_id),
+        search: search || null,
+      },
       employees: matched.slice(start, start + size),
     };
   };
 
   /**
-   * D. THE TREND: completed attendance days only.
+   * D. THE TREND: completed attendance days only, each with ITS OWN
+   * applicable population.
    *
-   * The window ENDS at the last day that has actually closed, not at the
-   * selected date. An in-progress day's check-in rate is not comparable with
-   * a finished day's - half a night shift has not punched yet - so plotting it
+   * THE POPULATION IS RESOLVED PER DATE, which is the defect this replaces.
+   * The first version took the employees applicable on the SELECTED date and
+   * reused that list for every earlier day, which was wrong twice over: a
+   * mid-window joiner was counted as applicable on days before they worked
+   * here - inflating the denominator and manufacturing absences against
+   * somebody who had not started - and a mid-window leaver vanished from the
+   * days they actually worked. Now the candidate set is everybody whose
+   * employment overlaps the window, and applicability is decided for each date
+   * with the SAME rule the single-date query applies in SQL. That is what
+   * makes a date shared with the overview come out identically.
+   *
+   * STILL ONE BATCH. The per-date decision is arithmetic over rows already in
+   * memory; there is no query per employee and none per date.
+   *
+   * THE WINDOW ENDS AT THE LAST DAY THAT HAS ACTUALLY CLOSED, not at the
+   * selected date. An in-progress day's check-in rate is not comparable with a
+   * finished day's - half a night shift has not punched yet - so plotting it
    * beside them would read as a collapse in attendance that never happened.
-   * The open day is reported separately, by `getOverview`, labelled as open.
    *
-   * A day with no applicable population comes back `available: false` rather
-   * than 0%: nobody was employed, which is not an attendance failure.
+   * A DAY WITH NO POPULATION, OR WITH NO DELIVERY EVIDENCE, IS UNAVAILABLE -
+   * never 0%. Nobody employed is not an attendance failure, and a day whose
+   * punches may still be in transit yields a rate that is only a LOWER BOUND;
+   * presenting either as a settled percentage would overstate absence.
    */
   const getTrend = async ({
     attendance_date,
@@ -960,55 +1342,92 @@ module.exports = (attendanceDashboardRepo) => {
     store_ids = null,
     designation_id = null,
     work_shift_id = null,
+    search = null,
     now = Date.now(),
   }) => {
     const selected = toDateOnly(attendance_date);
     if (selected === null) throw validationError("attendance_date must be a date as YYYY-MM-DD");
     const window = Math.max(1, Math.min(MAX_TREND_DAYS, Math.trunc(Number(days) || DEFAULT_TREND_DAYS)));
 
-    // Walk back from the selected date to the most recent CLOSED day. The
-    // employees' own cutoffs decide, so this is checked against the real
-    // population rather than assumed to be "yesterday".
-    const employees = await attendanceDashboardRepo.listApplicableEmployees({
-      attendance_date: selected,
+    const emptyResult = (reason) => ({
+      from_date: null,
+      to_date: null,
+      requested_days: window,
+      days: [],
+      available: false,
+      reason,
+      definition: CHECK_IN_RATE_DEFINITION,
+    });
+
+    // An empty authorized scope reads nothing, exactly as the overview does.
+    if (Array.isArray(store_ids) && store_ids.length === 0) return emptyResult("NO_POPULATION");
+
+    const probeFrom = addDays(selected, -(window + 1));
+
+    // The candidate set for the WHOLE window, with the dated facts needed to
+    // decide each day. `search` is honoured here as an ordinary filter - the
+    // first version dropped it, so the chart quietly described a different
+    // population from the cards above it.
+    const candidates = await attendanceDashboardRepo.listApplicableEmployeesForRange({
+      from_date: probeFrom,
+      to_date: selected,
       store_ids,
       designation_id,
-      search: null,
+      search,
     });
-    if (!employees || employees.length === 0) {
-      return { from_date: null, to_date: null, days: [], available: false, reason: "NO_POPULATION" };
-    }
-    if (employees.length > MAX_POPULATION) {
+    if (!candidates || candidates.length === 0) return emptyResult("NO_POPULATION");
+    if (candidates.length > MAX_POPULATION) {
       throw validationError(
-        `${employees.length} employees match; narrow the filters to at most ${MAX_POPULATION}`
+        `${candidates.length} employees match; narrow the filters to at most ${MAX_POPULATION}`
       );
     }
 
-    // One batch over the whole window, then the engine per employee per date.
-    const probeFrom = addDays(selected, -(window + 1));
-    const batch = await loadBatch({ employees, from: probeFrom, to: selected });
+    const batch = await loadBatch({ employees: candidates, from: probeFrom, to: selected });
     const dates = dateRange(probeFrom, selected);
 
+    /**
+     * Applicability for ONE employee on ONE date - the same two dated facts,
+     * in the same direction, as `listApplicableEmployees` applies in SQL:
+     * joined on or before the date, and not resigned before it. An absent or
+     * unreadable joining date leaves the start unbounded, exactly as the SQL
+     * `IS NULL` branch does, because most production rows have no readable one.
+     */
+    const applicableOn = (employee, date) => {
+      const joined = toDateOnly(employee.joined_on);
+      if (joined !== null && joined > date) return false;
+      const resigned = toDateOnly(employee.resignation_date);
+      if (resigned !== null && resigned < date) return false;
+      return true;
+    };
+
+    // Coverage inputs for the whole window, read once.
+    const coverageInputs = await loadRangeCoverageInputs({
+      from: probeFrom,
+      to: selected,
+      store_ids,
+    });
+
     const perDate = new Map(dates.map((d) => [d, []]));
-    employees.forEach((employee) => {
-      computeDaysForEmployee({ employee, dates, batch }).forEach((day, i) => {
+    candidates.forEach((employee) => {
+      const days_ = computeDaysForEmployee({ employee, dates, batch });
+      days_.forEach((day, i) => {
         const date = dates[i];
+        if (!applicableOn(employee, date)) return;
         if (work_shift_id !== null && Number(day.work_shift_id) !== Number(work_shift_id)) return;
         perDate.get(date).push({
           employee_id: Number(employee.employee_id),
+          store_id: employee.store_id === null || employee.store_id === undefined
+            ? null
+            : Number(employee.store_id),
           punch_count: Number(day.punch_count) || 0,
           status: day.status,
-          closed: isDayClosed({
-            attendance_date: date,
-            snapshot: day.shift_snapshot || null,
-            now,
-          }),
+          snapshot: day.shift_snapshot || null,
+          closed: isDayClosed({ attendance_date: date, snapshot: day.shift_snapshot || null, now }),
         });
       });
     });
 
-    // Completed days only, newest first, then trimmed to the window and
-    // returned oldest first so the chart reads left to right.
+    // Completed days only, then the most recent `window` of them, oldest first.
     const completed = dates
       .filter((date) => {
         const rows = perDate.get(date) || [];
@@ -1018,66 +1437,161 @@ module.exports = (attendanceDashboardRepo) => {
 
     const series = completed.map((date) => {
       const rows = perDate.get(date) || [];
-      const checkedIn = new Set(rows.filter((r) => r.punch_count > 0).map((r) => r.employee_id)).size;
+      const coverage = coverageForDate({ date, rows, inputs: coverageInputs });
+
       const applicable = new Set(rows.map((r) => r.employee_id)).size;
+      const checkedIn = new Set(rows.filter((r) => r.punch_count > 0).map((r) => r.employee_id)).size;
+
+      // Absence is only counted where delivery for that employee's location is
+      // confirmed - the same rule the overview applies, so a date shared with
+      // it reconciles.
+      const absent = rows.filter(
+        (r) =>
+          r.punch_count === 0 &&
+          r.status === CALC_STATUS.ABSENT &&
+          coverage.byOutlet.get(outletKeyOf(r.store_id)) === COVERAGE.COMPLETE
+      ).length;
+
+      const fullyCovered = coverage.allComplete;
       return {
         attendance_date: date,
         applicable,
         checked_in: checkedIn,
-        absent: rows.filter((r) => r.punch_count === 0 && r.status === CALC_STATUS.ABSENT).length,
-        check_in_rate: rate(checkedIn, applicable),
+        absent,
+        delivery_confirmed: fullyCovered,
+        // A rate with unconfirmed delivery is a LOWER BOUND, not a
+        // measurement, so it is marked unavailable rather than plotted.
+        check_in_rate: fullyCovered
+          ? rate(checkedIn, applicable)
+          : { numerator: checkedIn, denominator: applicable, percent: null, available: false },
+        unavailable_reason: fullyCovered
+          ? null
+          : "Punch delivery for this day is not confirmed for every location, so the rate would be a lower bound",
       };
     });
 
+    const plotted = series.filter((d) => d.check_in_rate.available).length;
     return {
       from_date: series.length ? series[0].attendance_date : null,
       to_date: series.length ? series[series.length - 1].attendance_date : null,
       requested_days: window,
       days: series,
-      available: series.length > 0,
-      // Honest about a short history rather than padding it with zeroes.
-      reason: series.length === 0 ? "NO_COMPLETED_DAYS" : series.length < window ? "PARTIAL_HISTORY" : null,
+      available: plotted > 0,
+      reason:
+        series.length === 0
+          ? "NO_COMPLETED_DAYS"
+          : plotted === 0
+          ? "NO_CONFIRMED_DELIVERY"
+          : series.length < window
+          ? "PARTIAL_HISTORY"
+          : null,
       definition: CHECK_IN_RATE_DEFINITION,
-      note: "Completed attendance days only. The selected day is excluded while it is still open.",
+      note:
+        "Completed attendance days only, each with its own applicable population. The selected " +
+        "day is excluded while it is still open. A day whose punch delivery is not confirmed is " +
+        "reported without a rate rather than as a lower bound.",
+      limitations:
+        "Employment is read from the joining and resignation dates, which is the same source the " +
+        "rest of attendance uses. A resign-then-rejoin GAP is not modelled by that source, so a " +
+        "rejoined employee counts as applicable across the gap.",
     };
   };
 
   /**
-   * F. Recent punches and device sync - EVIDENCE, never a verdict.
+   * F. Recent punches and device sync, FOR THE SELECTED ATTENDANCE DATE and
+   * the selected filters - EVIDENCE, never a verdict.
    *
-   * DIRECTION. The engine pairs punches POSITIONALLY over the whole attendance
-   * day (1st IN, 2nd OUT, ...) and deliberately does not read the device's
-   * `io_mode`, which the Part 1 schema documents as "NOT a direction flag".
-   * This panel is a bounded tail of the latest frames across employees, so it
-   * does not hold a whole day per employee and cannot establish a reliable
-   * position - therefore it reports `direction: "PUNCH"` and never guesses IN
-   * or OUT. The employee's own day screen, which does hold the whole day, is
-   * where direction is shown.
+   * IT IS THE SAME DAY THE REST OF THE SCREEN IS SHOWING. The first version
+   * took the latest punches received company-wide, ignoring the chosen date,
+   * shift, designation and employee search - so the panel could be describing
+   * this morning while every card above it described last Tuesday. Now the
+   * punches are the ones the ENGINE dated to the selected attendance day for
+   * the employees in scope, which means membership follows the shift's own
+   * cutoff and an overnight 00:30 punch appears under the shift date it
+   * belongs to rather than the calendar date it landed on.
    *
-   * AN EXCLUDED PUNCH IS LABELLED AND NEVER COUNTED. A voided punch may be
-   * shown here for diagnosis, flagged `excluded: true`; it takes no part in
-   * any check-in count anywhere on this dashboard.
+   * DIRECTION IS NOT GUESSED. The engine pairs punches POSITIONALLY over a
+   * whole attendance day and deliberately ignores the terminal's own flag,
+   * which the Biomax schema documents as "NOT a direction flag". This panel
+   * shows the tail of a day rather than a whole day per employee, so it
+   * reports `direction: "PUNCH"` and links to the employee's own day, which
+   * does hold the whole day and does show IN and OUT.
    *
-   * DEVICE HEALTH IS `last_seen_at`, NOT SILENCE. A terminal is quiet when
-   * nobody punches, which is not the same as offline, so nothing here derives
-   * an online/offline status from an absence of employee punches: the raw
-   * `last_seen_at` and `last_punch_at` are reported, separately, with the age
-   * of each, and `sync_known` is false when the receiver has never recorded a
-   * contact - in which case the screen shows a freshness warning rather than
-   * asserting anything about the device.
+   * AN EXCLUDED PUNCH IS LABELLED AND COUNTED NOWHERE. Voided and
+   * duplicate-suppressed punches are shown for diagnosis, flagged `excluded`;
+   * they take no part in any check-in count on this dashboard.
+   *
+   * DEVICE HEALTH IS OBSERVED NOW, AND SAYS SO. `last_seen_at` is the
+   * terminal's current state, not a historical fact about the selected date,
+   * so it is returned under `observed_at` with that stated plainly - today's
+   * contact is not evidence that a punch from three weeks ago was delivered.
+   * The per-date delivery verdict is the separate `coverage` field, which IS
+   * about the selected day.
    */
-  const getRecentPunches = async ({ limit = 25, store_ids = null, now = Date.now() }) => {
-    const [punches, devices] = await Promise.all([
-      attendanceDashboardRepo.listRecentPunches({ limit, store_ids }),
-      attendanceDashboardRepo.listDeviceSyncHealth({ store_ids }),
-    ]);
-
+  const getRecentPunches = async ({
+    attendance_date,
+    store_ids = null,
+    designation_id = null,
+    work_shift_id = null,
+    search = null,
+    limit = 25,
+    now = Date.now(),
+  }) => {
     const nowParts = istNowParts(now);
+    const fetchedAt = `${nowParts.date} ${String(Math.floor(nowParts.minutes / 60)).padStart(2, "0")}:${String(
+      nowParts.minutes % 60
+    ).padStart(2, "0")}`;
+
+    const { date, rows, coverage, coverage_available } = await buildPopulation({
+      attendance_date,
+      store_ids,
+      designation_id,
+      work_shift_id,
+      search,
+      now,
+    });
+
+    const size = Math.max(1, Math.min(100, Math.trunc(Number(limit) || 25)));
+
+    // Every punch the engine attributed to this attendance day for the
+    // in-scope employees, effective and excluded alike.
+    const effectiveIds = new Set();
+    const excludedIds = new Set();
+    rows.forEach((r) => {
+      (r.punch_ids || []).forEach((id) => effectiveIds.add(id));
+      (r.excluded_punch_ids || []).forEach((id) => excludedIds.add(id));
+    });
+    const allIds = [...new Set([...effectiveIds, ...excludedIds])];
+
+    let punches = [];
+    let punchesAvailable = true;
+    if (allIds.length > 0) {
+      try {
+        punches = await attendanceDashboardRepo.listPunchesByIds(allIds);
+      } catch (err) {
+        punchesAvailable = false;
+        punches = [];
+      }
+    }
+
+    // Device health for the locations actually in scope for this view.
+    let devices = [];
+    let devicesAvailable = true;
+    try {
+      devices = await attendanceDashboardRepo.listDeviceSyncHealth({ store_ids });
+    } catch (err) {
+      devicesAvailable = false;
+      devices = [];
+    }
+
     const ageMinutes = (value) => {
       if (!value) return null;
       const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(String(value));
       if (!m) return null;
-      const then = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) / 60000 + Number(m[4]) * 60 + Number(m[5]);
+      const then =
+        Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) / 60000 +
+        Number(m[4]) * 60 +
+        Number(m[5]);
       const nowAbs =
         Date.UTC(
           Number(nowParts.date.slice(0, 4)),
@@ -1090,24 +1604,30 @@ module.exports = (attendanceDashboardRepo) => {
     };
 
     return {
-      punches: (punches || []).map((p) => ({
-        punch_id: p.punch_id,
-        employee_id: p.employee_id === null ? null : Number(p.employee_id),
-        employee_name: p.employee_name || (p.employee_id ? `Employee ${p.employee_id}` : "Unmatched"),
-        io_time: p.io_time,
-        received_at: p.received_at,
-        // Positional direction cannot be established from a cross-employee
-        // tail, and the device flag is not a direction. So: a punch.
-        direction: "PUNCH",
-        device_label: p.device_label || p.dev_id || null,
-        dev_id: p.dev_id,
-        outlet_name: p.punch_outlet_name || null,
-        source: p.ingest_source,
-        ingest_attendance_date: p.ingest_attendance_date,
-        derivation_status: p.derivation_status,
-        excluded: !!p.attendance_punch_void_id,
-        excluded_reason: p.attendance_punch_void_id ? "Voided - excluded from attendance" : null,
-      })),
+      attendance_date: date,
+      punches: (punches || [])
+        .slice(0, size)
+        .map((p) => ({
+          punch_id: p.punch_id,
+          employee_id: p.employee_id === null ? null : Number(p.employee_id),
+          employee_name: p.employee_name || (p.employee_id ? `Employee ${p.employee_id}` : "Unmatched"),
+          io_time: p.io_time,
+          received_at: p.received_at,
+          direction: "PUNCH",
+          device_label: p.device_label || p.dev_id || null,
+          dev_id: p.dev_id,
+          outlet_name: p.punch_outlet_name || null,
+          source: p.ingest_source,
+          ingest_attendance_date: p.ingest_attendance_date,
+          derivation_status: p.derivation_status,
+          excluded: excludedIds.has(p.punch_id) || !!p.attendance_punch_void_id,
+          excluded_reason: p.attendance_punch_void_id
+            ? "Voided - excluded from attendance"
+            : excludedIds.has(p.punch_id)
+            ? "Excluded - duplicate within ten minutes"
+            : null,
+        })),
+      punches_available: punchesAvailable,
       devices: (devices || []).map((d) => ({
         biomax_device_id: d.biomax_device_id,
         dev_id: d.dev_id,
@@ -1117,19 +1637,30 @@ module.exports = (attendanceDashboardRepo) => {
         last_seen_age_minutes: ageMinutes(d.last_seen_at),
         last_punch_at: d.last_punch_at || null,
         last_punch_age_minutes: ageMinutes(d.last_punch_at),
-        // The receiver has never recorded a contact with this terminal, so
-        // its freshness is UNKNOWN. Not "offline" - that would be a claim the
-        // data does not support.
         sync_known: !!d.last_seen_at,
+        // The per-date verdict for this terminal's outlet, which is the thing
+        // that actually bears on the selected day's absences.
+        coverage:
+          d.outlet_id === null || d.outlet_id === undefined
+            ? COVERAGE.UNKNOWN
+            : coverage.get(outletKeyOf(d.outlet_id)) || COVERAGE.UNKNOWN,
       })),
-      fetched_at: `${nowParts.date} ${String(Math.floor(nowParts.minutes / 60)).padStart(2, "0")}:${String(
-        nowParts.minutes % 60
-      ).padStart(2, "0")}`,
+      devices_available: devicesAvailable,
+      // Delivery coverage for the SELECTED DATE, per outlet in scope.
+      coverage: [...coverage.entries()].map(([key, verdict]) => ({
+        store_id: key === "none" ? null : Number(key),
+        coverage: verdict,
+        label: COVERAGE_LABEL[verdict],
+      })),
+      coverage_available,
+      observed_at: fetchedAt,
+      fetched_at: fetchedAt,
       note:
-        "last_seen_at is any contact from the terminal, including its polls; last_punch_at is a real " +
-        "punch. A quiet device is not necessarily offline, and no online/offline status is derived " +
-        "from an absence of employee punches. fetched_at is when this response was built - it is not " +
-        "a device sync time.",
+        "Punches are the ones the attendance engine dated to this attendance day, so membership " +
+        "follows the shift's cutoff rather than a midnight boundary. Terminal freshness is " +
+        "OBSERVED NOW (observed_at) and is not evidence about the selected date; the per-date " +
+        "delivery verdict is `coverage`. A quiet terminal is not necessarily offline, and no " +
+        "online/offline status is derived from an absence of employee punches.",
     };
   };
 
