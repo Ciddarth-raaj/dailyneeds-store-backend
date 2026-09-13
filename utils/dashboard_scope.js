@@ -94,6 +94,7 @@ const SCOPE_REASON = Object.freeze({
   NO_SCOPE_GRANTED: "NO_SCOPE_GRANTED",
   CONFLICTING_SCOPE: "CONFLICTING_SCOPE",
   NO_EMPLOYEE_RECORD: "NO_EMPLOYEE_RECORD",
+  EMPLOYEE_INACTIVE: "EMPLOYEE_INACTIVE",
   NO_STORE_ASSIGNED: "NO_STORE_ASSIGNED",
 });
 
@@ -106,6 +107,8 @@ const SCOPE_MESSAGE = Object.freeze({
     "Your designation has both Own Store and All Stores dashboard scope. Exactly one must be granted; an administrator can correct this on the Designation rights screen.",
   NO_EMPLOYEE_RECORD:
     "Your login is not linked to an employee record, so your own store cannot be determined.",
+  EMPLOYEE_INACTIVE:
+    "Your employee record is not active, so Own Store dashboard access cannot be resolved.",
   NO_STORE_ASSIGNED:
     "You have no branch assigned in Employee Master, so Own Store scope cannot be resolved.",
   UNAUTHENTICATED: "Unauthorized",
@@ -148,6 +151,34 @@ function decideScope({ is_admin = false, has_all_stores = false, has_own_store =
   }
   if (has_own_store) return { kind: DASHBOARD_SCOPE.OWN_STORE, reason: SCOPE_REASON.OWN_STORE_SCOPE };
   return { kind: DASHBOARD_SCOPE.NONE, reason: SCOPE_REASON.NO_SCOPE_GRANTED };
+}
+
+/**
+ * IS THIS EMPLOYEE ROW ACTIVE?
+ *
+ * THE RULE IS NOT INVENTED HERE. `new_employee.status = 1` means active and
+ * anything else means inactive, and that is the convention the whole
+ * application already runs on: `middlewares/auth.js#employeeActive` reads
+ * `Number(state.employee_status) === 1`, the login query in
+ * `repository/user.js#getByUsername` refuses anybody without `ne.status = 1`,
+ * and the employee, bank and shift repositories all write the same predicate.
+ * This restates it for an EMPLOYEE ROW rather than a session state, and
+ * `dashboard_scope.test.js` asserts the two agree on every value so they cannot
+ * drift apart.
+ *
+ * `resignation_date` IS DELIBERATELY NOT CONSULTED. It is a DATED fact - "were
+ * they employed on this date" - which the attendance views use to decide
+ * applicability, and it is a different question from "may this person use the
+ * application right now". Nothing in the authentication layer reads it, so
+ * reading it here would invent a live-access rule this system does not have.
+ *
+ * AN UNREADABLE OR ABSENT STATUS IS NOT ACTIVE. A row whose status is null,
+ * missing or unparseable cannot be shown to be an active employee, and the safe
+ * direction for an authorization boundary is to refuse.
+ */
+function isActiveEmployeeRow(row) {
+  if (!row) return false;
+  return Number(row.employee_status) === 1;
 }
 
 /** A `store_ids` query value (`"1,2"`, a list, or nothing) as numbers. */
@@ -223,6 +254,7 @@ module.exports = {
   SCOPE_REASON,
   SCOPE_MESSAGE,
   decideScope,
+  isActiveEmployeeRow,
   parseRequestedStores,
   isWideningAttempt,
   effectiveStoreIds,

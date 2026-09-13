@@ -6,6 +6,7 @@ const {
   SCOPE_REASON,
   decideScope,
   effectiveStoreIds,
+  isActiveEmployeeRow,
   isWideningAttempt,
   parseRequestedStores,
   scopeForClient,
@@ -112,14 +113,32 @@ module.exports = (permissions, dashboardScopeRepo) => {
     }
 
     // 3. OWN STORE: the branch Employee Master says they are assigned to, read
-    //    now. A login with no employee record, an employee row that is gone,
-    //    or an employee with no branch on record are three different faults and
-    //    all three fail closed - none of them becomes "everywhere".
+    //    now. A login with no employee record, an employee row that is gone, an
+    //    employee who is no longer active, and an employee with no branch on
+    //    record are four different faults and all four fail closed - none of
+    //    them becomes "everywhere", and none of them becomes "their old branch".
     const employeeId = req.decoded.employee_id;
     if (!employeeId) return refuse(SCOPE_REASON.NO_EMPLOYEE_RECORD);
 
     const row = await dashboardScopeRepo.getEmployeeStore(employeeId);
     if (!row) return refuse(SCOPE_REASON.NO_EMPLOYEE_RECORD);
+
+    // AN INACTIVE EMPLOYEE RESOLVES TO NOTHING, and this check has to be here
+    // rather than left to the authentication layer.
+    //
+    // `middlewares/auth.js` does refuse an inactive employee - but only when
+    // `AUTH_EMPLOYEE_STATUS_CHECK` is on, only for non-legacy tokens, and only
+    // as often as the session-state cache is refreshed. An authorization
+    // boundary must not depend on a feature flag it does not own, and this one
+    // is reading Employee Master anyway: the row that says which branch is the
+    // same row that says whether they still work here, and it would be strange
+    // to trust half of it.
+    //
+    // CHECKED BEFORE THE BRANCH, so somebody who left AND had no branch is
+    // reported as inactive - the fault that actually matters - rather than as a
+    // setup problem somebody might try to fix by assigning them an outlet.
+    if (!isActiveEmployeeRow(row)) return refuse(SCOPE_REASON.EMPLOYEE_INACTIVE);
+
     if (row.store_id === null || row.store_id === undefined) {
       return refuse(SCOPE_REASON.NO_STORE_ASSIGNED);
     }

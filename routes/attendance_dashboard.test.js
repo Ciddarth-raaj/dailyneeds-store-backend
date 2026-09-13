@@ -122,7 +122,7 @@ const GRANTS = {
  */
 const MOOLAKULAM = 1;
 const ECR = 2;
-const employeeStore = { value: MOOLAKULAM, missingRow: false };
+const employeeStore = { value: MOOLAKULAM, missingRow: false, status: 1 };
 
 const dashboardScopeRepo = {
   getEmployeeStore: async (employeeId) => {
@@ -132,7 +132,8 @@ const dashboardScopeRepo = {
     return {
       employee_id: employeeId,
       store_id: employeeStore.value,
-      employee_status: 1,
+      // The same row carries the branch AND whether they still work here.
+      employee_status: employeeStore.status,
       outlet_name: employeeStore.value === MOOLAKULAM ? "Moolakulam" : "ECR",
       outlet_nickname: null,
     };
@@ -792,6 +793,7 @@ describe("Own Store scope", () => {
     employeeStore.value = MOOLAKULAM;
     employeeStore.missingRow = false;
     employeeStore.throws = false;
+    employeeStore.status = 1;
   };
 
   it("PINS EVERY ENDPOINT to the employee's assigned branch", async () => {
@@ -1017,5 +1019,206 @@ describe("the login-user to employee to branch mapping", () => {
     assert.equal(own.body.dashboard_scope.kind, "OWN_STORE");
     const all = await call("/attendance/dashboard/filters", tokenFor({ designationId: HR_ALL_STORES }));
     assert.equal(all.body.dashboard_scope.kind, "ALL_STORES");
+  });
+});
+
+/* ==================================================================== */
+/* AN INACTIVE EMPLOYEE HAS NO OWN STORE - over the real server.         */
+/*                                                                      */
+/* The premise: a token stays valid for its lifetime, the designation    */
+/* keeps its grants, and `new_employee.status` is the only thing that    */
+/* changed. The dashboard must refuse anyway.                            */
+/* ==================================================================== */
+
+describe("Own Store and employee status", () => {
+  const active = () => {
+    employeeStore.value = MOOLAKULAM;
+    employeeStore.status = 1;
+    employeeStore.missingRow = false;
+    employeeStore.throws = false;
+  };
+
+  it("AN ACTIVE EMPLOYEE WITH A BRANCH IS ALLOWED, exactly as before", async () => {
+    active();
+    const res = await call("/attendance/dashboard/filters", tokenFor({ designationId: STORE_MANAGER }));
+    assert.equal(res.body.code, 200);
+    assert.deepEqual(res.body.dashboard_scope.store_ids, [MOOLAKULAM]);
+  });
+
+  it("AN INACTIVE EMPLOYEE IS REFUSED, and is NOT given their former branch", async () => {
+    active();
+    employeeStore.status = 0;
+    const res = await call("/attendance/dashboard/filters", tokenFor({ designationId: STORE_MANAGER }));
+    assertRefused(res, "inactive employee");
+    assert.equal(res.body.reason, "EMPLOYEE_INACTIVE");
+    assert.match(res.body.msg, /employee record is not active/i);
+    // The branch must appear nowhere in the refusal.
+    assert.doesNotMatch(JSON.stringify(res.body), /Moolakulam|store_ids/);
+    active();
+  });
+
+  it("is refused on EVERY endpoint, not just the one the screen opens with", async () => {
+    active();
+    employeeStore.status = 0;
+    const token = tokenFor({ designationId: STORE_MANAGER });
+    const endpoints = [
+      `/attendance/dashboard/overview?attendance_date=${DATE}`,
+      `/attendance/dashboard/trend?attendance_date=${DATE}`,
+      `/attendance/dashboard/recent-punches?attendance_date=${DATE}`,
+      `/attendance/dashboard/drilldown?attendance_date=${DATE}&bucket=TOTAL`,
+      "/attendance/dashboard/staffing",
+      "/attendance/dashboard/staffing/drilldown?bucket=GAP",
+      "/attendance/dashboard/recurring-gaps",
+      "/attendance/dashboard/filters",
+    ];
+    for (const endpoint of endpoints) {
+      const res = await call(endpoint, token);
+      assertRefused(res, endpoint);
+      assert.equal(res.body.reason, "EMPLOYEE_INACTIVE", endpoint);
+    }
+    active();
+  });
+
+  it("A STALE TOKEN NAMING THE OLD BRANCH BUYS NOTHING", async () => {
+    // Every token here carries store_id 2. An inactive employee presenting it
+    // must not get branch 2, branch 1, or anything else.
+    active();
+    employeeStore.status = 0;
+    seen.overview = null;
+    const res = await call(
+      `/attendance/dashboard/overview?attendance_date=${DATE}&store_ids=2`,
+      tokenFor({ designationId: STORE_MANAGER })
+    );
+    assertRefused(res, "inactive employee with a stale token branch");
+    assert.equal(seen.overview, null, "the usecase was never reached");
+    active();
+  });
+
+  it("cannot be rescued by asking for a branch explicitly", async () => {
+    active();
+    employeeStore.status = 0;
+    const res = await call(
+      `/attendance/dashboard/overview?attendance_date=${DATE}&store_ids=${MOOLAKULAM}`,
+      tokenFor({ designationId: STORE_MANAGER })
+    );
+    assertRefused(res, "inactive employee asking for their own former branch");
+    active();
+  });
+
+  it("an inactive employee with NO branch is reported as inactive, not as a setup fault", async () => {
+    // The fault that matters is the one somebody would act on. "No branch
+    // assigned" invites an administrator to assign one; "not active" does not.
+    active();
+    employeeStore.status = 0;
+    employeeStore.value = null;
+    const res = await call("/attendance/dashboard/filters", tokenFor({ designationId: STORE_MANAGER }));
+    assert.equal(res.body.reason, "EMPLOYEE_INACTIVE");
+    active();
+  });
+
+  it("ANY STATUS THAT IS NOT 1 IS INACTIVE", async () => {
+    active();
+    for (const status of [0, 2, null, undefined, "0"]) {
+      employeeStore.status = status;
+      const res = await call("/attendance/dashboard/filters", tokenFor({ designationId: STORE_MANAGER }));
+      assertRefused(res, `status ${JSON.stringify(status)}`);
+      assert.equal(res.body.reason, "EMPLOYEE_INACTIVE", String(status));
+    }
+    active();
+  });
+
+  it("REACTIVATION RESTORES ACCESS with no change to the token", async () => {
+    active();
+    employeeStore.status = 0;
+    assertRefused(
+      await call("/attendance/dashboard/filters", tokenFor({ designationId: STORE_MANAGER })),
+      "inactive"
+    );
+    employeeStore.status = 1;
+    const back = await call("/attendance/dashboard/filters", tokenFor({ designationId: STORE_MANAGER }));
+    assert.equal(back.body.code, 200);
+    assert.deepEqual(back.body.dashboard_scope.store_ids, [MOOLAKULAM]);
+  });
+
+  it("A TRANSFERRED ACTIVE EMPLOYEE still gets the CURRENT branch", async () => {
+    // The status check must not disturb the transfer behaviour.
+    active();
+    employeeStore.value = ECR;
+    await call(
+      `/attendance/dashboard/overview?attendance_date=${DATE}`,
+      tokenFor({ designationId: STORE_MANAGER })
+    );
+    assert.deepEqual(seen.overview.store_ids, [ECR]);
+    active();
+  });
+
+  it("THE STATUS LOOKUP FAILING IS A REFUSAL, not a pass", async () => {
+    active();
+    employeeStore.throws = true;
+    const res = await call("/attendance/dashboard/filters", tokenFor({ designationId: STORE_MANAGER }));
+    assertRefused(res, "the employee read threw");
+    assert.notEqual(res.body.code, 200);
+    active();
+  });
+
+  it("no employee row is still NO_EMPLOYEE_RECORD, unchanged", async () => {
+    active();
+    employeeStore.missingRow = true;
+    const res = await call("/attendance/dashboard/filters", tokenFor({ designationId: STORE_MANAGER }));
+    assert.equal(res.body.reason, "NO_EMPLOYEE_RECORD");
+    active();
+  });
+
+  it("an ACTIVE employee with no branch is still NO_STORE_ASSIGNED, unchanged", async () => {
+    active();
+    employeeStore.value = null;
+    const res = await call("/attendance/dashboard/filters", tokenFor({ designationId: STORE_MANAGER }));
+    assert.equal(res.body.reason, "NO_STORE_ASSIGNED");
+    active();
+  });
+
+  it("THE ADMINISTRATOR IS UNAFFECTED - no employee lookup, no status check", async () => {
+    // The admin path resolves before any of this. An administrator whose
+    // employee row is inactive, missing, or unreadable still gets All Stores,
+    // because `user_type` 2 is the grant and it was never an employee question.
+    employeeStore.status = 0;
+    employeeStore.missingRow = true;
+    seen.scopeLookup = null;
+    const res = await call("/attendance/dashboard/filters", tokenFor({ designationId: OUTLET_STAFF, userType: 2 }));
+    assert.equal(res.body.code, 200);
+    assert.equal(res.body.dashboard_scope.kind, "ALL_STORES");
+    assert.equal(seen.scopeLookup, null, "it never asked");
+    active();
+  });
+
+  it("AN ALL STORES USER IS UNAFFECTED - the check is Own Store's alone", async () => {
+    // Deliberately narrow: this task stops an inactive employee resolving Own
+    // Store through Employee Master. All Stores never reads the employee row, so
+    // nothing changed for it, and broadening it here would be an account-status
+    // redesign nobody approved. `middlewares/auth.js` remains the layer that
+    // refuses an inactive account outright.
+    employeeStore.status = 0;
+    seen.scopeLookup = null;
+    const res = await call("/attendance/dashboard/filters", tokenFor({ designationId: HR_ALL_STORES }));
+    assert.equal(res.body.code, 200);
+    assert.equal(res.body.dashboard_scope.kind, "ALL_STORES");
+    assert.equal(seen.scopeLookup, null);
+    active();
+  });
+
+  it("the both-scope conflict is still refused, and still says so", async () => {
+    active();
+    const res = await call("/attendance/dashboard/filters", tokenFor({ designationId: CONFLICTED }));
+    assert.equal(res.body.reason, "CONFLICTING_SCOPE");
+  });
+
+  it("the dashboard feature key is still required, and still checked first", async () => {
+    active();
+    employeeStore.status = 0;
+    seen.scopeLookup = null;
+    const res = await call("/attendance/dashboard/filters", tokenFor({ designationId: OUTLET_STAFF }));
+    assert.equal(res.body.reason, "NO_DASHBOARD_PERMISSION");
+    assert.equal(seen.scopeLookup, null, "a refusal must not differ by employee status");
+    active();
   });
 });

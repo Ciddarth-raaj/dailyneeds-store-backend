@@ -19,6 +19,7 @@ const {
   SCOPE_REASON,
   decideScope,
   effectiveStoreIds,
+  isActiveEmployeeRow,
   isWideningAttempt,
   parseRequestedStores,
   scopeForClient,
@@ -209,5 +210,78 @@ describe("what the browser is told", () => {
       store_ids: [],
       can_choose_outlet: false,
     });
+  });
+});
+
+/* ==================================================================== */
+/* AN INACTIVE EMPLOYEE HAS NO OWN STORE.                                */
+/*                                                                      */
+/* The row that says which branch somebody works at is the same row that */
+/* says whether they still work here. Reading one half and ignoring the  */
+/* other is the defect these pin.                                       */
+/* ==================================================================== */
+
+describe("the active-employee rule", () => {
+  it("IS status = 1, and nothing else is active", () => {
+    assert.equal(isActiveEmployeeRow({ employee_status: 1 }), true);
+    assert.equal(isActiveEmployeeRow({ employee_status: "1" }), true, "the driver may hand back a string");
+    [0, 2, -1, 99, "0", "resigned"].forEach((status) =>
+      assert.equal(isActiveEmployeeRow({ employee_status: status }), false, String(status))
+    );
+  });
+
+  it("AN ABSENT OR UNREADABLE STATUS IS NOT ACTIVE", () => {
+    // A row that cannot be shown to be active must not be treated as one: the
+    // safe direction for an authorization boundary is to refuse.
+    [null, undefined, NaN, ""].forEach((status) =>
+      assert.equal(isActiveEmployeeRow({ employee_status: status }), false, String(status))
+    );
+    assert.equal(isActiveEmployeeRow({}), false, "no status field at all");
+    assert.equal(isActiveEmployeeRow(null), false, "no row at all");
+  });
+
+  it("AGREES WITH middlewares/auth.js#employeeActive ON EVERY VALUE", () => {
+    // The drift guard. The rule is the application's, not this file's - auth
+    // reads `Number(state.employee_status) === 1` and the login query refuses
+    // anybody without `ne.status = 1`. If either side is ever changed alone,
+    // this fails.
+    const { employeeActive } = require("../middlewares/auth");
+    [1, "1", 0, "0", 2, -1, null, undefined, "", "x"].forEach((status) => {
+      assert.equal(
+        isActiveEmployeeRow({ employee_status: status }),
+        employeeActive({ employee_id: 1, is_system_account: 0, employee_status: status }),
+        `disagreed on ${JSON.stringify(status)}`
+      );
+    });
+  });
+
+  it("does NOT consult resignation_date", () => {
+    // A dated fact - "were they employed on this date" - is a different question
+    // from "may this person use the application right now", and nothing in the
+    // authentication layer reads it. Reading it here would invent a live-access
+    // rule this system does not have.
+    assert.equal(
+      isActiveEmployeeRow({ employee_status: 1, resignation_date: "2020-01-01" }),
+      true,
+      "a past resignation date on an ACTIVE row does not make it inactive here"
+    );
+    assert.equal(
+      isActiveEmployeeRow({ employee_status: 0, resignation_date: null }),
+      false,
+      "and no resignation date does not make an INACTIVE row active"
+    );
+  });
+
+  it("has its own refusal reason and a message with no database detail in it", () => {
+    assert.equal(SCOPE_REASON.EMPLOYEE_INACTIVE, "EMPLOYEE_INACTIVE");
+    const msg = SCOPE_MESSAGE.EMPLOYEE_INACTIVE;
+    assert.match(msg, /employee record is not active/i);
+    assert.doesNotMatch(msg, /new_employee|status|column|table|sql|=\s*1/i);
+  });
+
+  it("leaves every other refusal reason untouched", () => {
+    ["NO_EMPLOYEE_RECORD", "NO_STORE_ASSIGNED", "CONFLICTING_SCOPE", "NO_SCOPE_GRANTED"].forEach(
+      (reason) => assert.equal(SCOPE_REASON[reason], reason)
+    );
   });
 });

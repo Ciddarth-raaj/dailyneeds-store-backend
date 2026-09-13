@@ -504,3 +504,7 @@ module.exports = defaultMiddleware;
 module.exports.create = create;
 module.exports.unProtectedRoutes = unProtectedRoutes;
 module.exports.resolveIdentity = resolveIdentity;
+// Exported so the Global Dashboard scope's own active-employee predicate can be
+// asserted against THIS one rather than drifting from it. Nothing else changes:
+// the middleware still applies it exactly where it always did.
+module.exports.employeeActive = employeeActive;
