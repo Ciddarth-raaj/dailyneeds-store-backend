@@ -1,4 +1,6 @@
 const logger = require("../utils/logger");
+const { JOINED_ON } = require("../utils/joining_date");
+const { effectiveFromNotBeforeCutover } = require("../constants/attendance_v2");
 const { accessScope } = require("./employee_scope");
 const {
   queryAsync,
@@ -361,6 +363,46 @@ class EmployeeWorkShiftRepository {
       );
 
       if (options.effective_from) {
+        // A FIRST-EVER ASSIGNMENT IS DATED FROM THE START, NOT FROM TODAY.
+        //
+        // Dating every assignment TODAY is right when the employee already
+        // has a shift: moving somebody to a new one must not rewrite
+        // yesterday's worked minutes. It is WRONG for their first one,
+        // because there is no earlier assignment to protect - every date
+        // before today resolves to NO_SHIFT and stays out of payroll
+        // forever, including days they demonstrably worked.
+        //
+        // That is the defect behind "shift is assigned but Punch Audit
+        // still says No Shift": HR assigned the shift on the 12th, the
+        // punches were from the 2nd to the 10th, and the history began
+        // after the evidence.
+        //
+        // So an employee with NO history is dated from the LATER of the v2
+        // cutover and their joining date - the same rule the A0 backfill
+        // and the repair migrations use, and never earlier than either.
+        // An employee who already has history keeps today's date exactly as
+        // before: this widens nothing for them.
+        const existing = await queryAsync(
+          connection,
+          `SELECT employee_id, MIN(effective_from) AS earliest
+             FROM employee_work_shift_assignment
+            WHERE employee_id IN (?)
+            GROUP BY employee_id`,
+          [employeeIds]
+        );
+        const hasHistory = new Set((existing || []).map((r) => Number(r.employee_id)));
+
+        const joiningRows = await queryAsync(
+          connection,
+          `SELECT employee_id, DATE_FORMAT((${JOINED_ON("ne")}), '%Y-%m-%d') AS joined_on
+             FROM new_employee ne
+            WHERE employee_id IN (?)`,
+          [employeeIds]
+        );
+        const joinedOn = new Map(
+          (joiningRows || []).map((r) => [Number(r.employee_id), r.joined_on || null])
+        );
+
         await queryAsync(
           connection,
           `INSERT INTO employee_work_shift_assignment
@@ -370,7 +412,9 @@ class EmployeeWorkShiftRepository {
             employeeIds.map((employeeId) => [
               employeeId,
               workShiftId,
-              options.effective_from,
+              hasHistory.has(Number(employeeId))
+                ? options.effective_from
+                : effectiveFromNotBeforeCutover(joinedOn.get(Number(employeeId))),
               employeeIds.length > 1 ? "BULK_ASSIGNMENT" : "ASSIGNMENT",
               options.note || null,
               options.created_by === undefined ? null : options.created_by,
