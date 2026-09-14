@@ -42,6 +42,31 @@ module.exports = {
   // narrows, which is the point of the change.
   EMPLOYEE_SCOPE_ALL_BRANCHES: "employee_scope_all_branches",
 
+  // MAY THIS USER OPEN THE ONBOARDING / PENDING HR WORK QUEUE?
+  //
+  // A SEPARATE DECISION FROM THE KEY ABOVE, AND THAT SEPARATION IS THE WHOLE
+  // REASON IT EXISTS. `employee_scope_all_branches` answers "which employees
+  // may this caller be shown"; this answers "may this caller open HR's
+  // follow-up screen". They travel together for HR today, but they are not
+  // the same question, and reusing the scope key for the screen would mean
+  // that granting company-wide employee access to any future designation -
+  // an Operations lead, a second HR role, an auditor - silently handed them
+  // HR's work queue as well. Nobody would have decided that.
+  //
+  // SO A DESIGNATION CAN HOLD EITHER WITHOUT THE OTHER, deliberately:
+  //   this key alone         opens the screen; the employees it shows are
+  //                          still whatever the caller's branch scope allows
+  //   the scope key alone    company-wide employee reads, no work queue
+  //
+  // AN ADMINISTRATOR NEEDS NEITHER. `user_type = 2` bypasses the permission
+  // table entirely, exactly as it does for every other key here.
+  //
+  // IT IS NOT `view_employee_sensitive` EITHER. Opening the queue and being
+  // told how somebody is paid stay separate keys, so HR without the sensitive
+  // key gets the dashboard with the Cash -> Bank card and the Paid by column
+  // withheld.
+  VIEW_HR_ONBOARDING_DASHBOARD: "view_hr_onboarding_dashboard",
+
   // employee master
   VIEW_EMPLOYEES: "view_employees",
 
