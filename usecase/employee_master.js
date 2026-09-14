@@ -813,6 +813,7 @@ class EmployeeMasterUsecase {
         aadhaar_status: "PENDING",
         aadhaar_last4: null,
         verified_at: null,
+        name_as_per_aadhaar: null,
         can_verify_now: false,
         message: "Aadhaar verification is not configured on this server.",
       };
@@ -826,6 +827,7 @@ class EmployeeMasterUsecase {
         aadhaar_status: "PENDING",
         aadhaar_last4: null,
         verified_at: null,
+        name_as_per_aadhaar: null,
         can_verify_now: true,
         message: "No Aadhaar on record. It can be verified at any time and attached to this employee.",
       };
@@ -836,6 +838,12 @@ class EmployeeMasterUsecase {
       aadhaar_status: "VERIFIED",
       aadhaar_last4: identity.aadhaar_last4,
       verified_at: identity.verified_at || null,
+      // THE VERIFIED LEGAL NAME, kept apart from the operational
+      // `new_employee.employee_name`. It is a name, not an identifier, and
+      // showing it beside the operational one is the point of storing it -
+      // so that editing the display name can no longer lose what the
+      // Aadhaar actually said. Never editable through Employee Master.
+      name_as_per_aadhaar: identity.name_as_per_aadhaar || null,
       can_verify_now: false,
       message: `Aadhaar ending ${identity.aadhaar_last4} is verified against this employee.`,
     };

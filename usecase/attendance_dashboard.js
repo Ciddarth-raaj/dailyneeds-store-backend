@@ -642,7 +642,14 @@ module.exports = (attendanceDashboardRepo) => {
     // the request never reaches the database at all, and the repository's own
     // `1 = 0` backstop is never even needed.
     if (Array.isArray(store_ids) && store_ids.length === 0) {
-      return { date, rows: [], employees: [], delivery: new Map(), delivery_available: true };
+      return {
+        date,
+        rows: [],
+        employees: [],
+        attendance_exempt_employees: 0,
+        delivery: new Map(),
+        delivery_available: true,
+      };
     }
 
     const { employees, attendance_exempt_employees } = applicablePopulation(
