@@ -49,22 +49,42 @@ const { EmployeeBankUsecase } = require("./employee_bank");
  * verification or session id, no provider payload, no override reason. A list
  * needs a badge.
  *
- * HR ONBOARDING PENDING - a DERIVED state, not a new one. A store manager
- * creates the employee record and their responsibility ends there; the
- * statutory and bank sections are HR's, and are completed afterwards on the
- * employee profile. "Still waiting on HR" is therefore not a status somebody
- * sets - it is the absence of those two sections, which this endpoint can
- * already see:
+ * HR ONBOARDING PENDING - a DERIVED state, not a new one. "Still waiting on
+ * HR" is not a status somebody sets: it is the absence of the sections HR
+ * follows up, which this endpoint can already see. It is true when ANY of
+ * three things is outstanding:
  *
+ *   aadhaar     no verified Aadhaar identity is attached
  *   statutory   the PF and ESI applicability flags, which exist precisely to
  *               distinguish "decided" from "nobody has been asked yet"
- *   bank        NOT_PROVIDED, by the same rule as the bank badge beside it
+ *   bank        not payroll ready - see below
  *
  * So no column, no enum value and no migration is added for it, nothing has
  * to be backfilled for the 630 employees already on file, and the flag cannot
- * drift out of step with the sections it describes. Aadhaar is deliberately
- * NOT part of it: Aadhaar Pending is a first-class outcome that holds up
- * nothing, and it has its own badge already.
+ * drift out of step with the sections it describes.
+ *
+ * AADHAAR IS PART OF IT, and this is the business rule rather than a
+ * technical choice. THE STORE MANAGER OWNS THE FIRST ATTEMPT: stage 1 of the
+ * Add Employee wizard is where an Aadhaar is verified, or explicitly skipped.
+ * HR OWNS EVERY UNRESOLVED CASE AFTER THAT. It does not matter why it is
+ * unresolved - a failed check, a mismatch, a technical problem, a manager who
+ * skipped it or never finished it - once onboarding has moved on, getting the
+ * Aadhaar verified is HR's follow-up like the other two. It used to be
+ * excluded here on the grounds that Aadhaar Pending "holds up nothing", which
+ * described the payroll consequence correctly and the OWNERSHIP wrongly: it
+ * left the employee list showing HR Complete for a record with no verified
+ * identity, and nobody chasing it.
+ *
+ * BANK MEANS PAYROLL READY, not merely entered. `bank_payroll_ready` is true
+ * for VERIFIED and nothing else, so an account awaiting its check, or one
+ * that came back NAME_MISMATCH, FAILED or DUPLICATE_ACCOUNT, is an employee
+ * who cannot be paid - which is outstanding work, not a finished section.
+ * This used to count only NOT_PROVIDED.
+ *
+ * THE FLAG IS THE ONE DEFINITION OF HR COMPLETION. Both changes were made
+ * here, at the source both screens read, rather than in a screen: the
+ * employee list's HR column and the Onboarding / Pending HR queue now agree
+ * by construction, and there is no second opinion to drift.
  *
  * The two keys carry no value of any sensitive field - only whether a section
  * is outstanding, which is the same kind of fact `bank_status:
@@ -76,9 +96,9 @@ const { EmployeeBankUsecase } = require("./employee_bank");
  *
  * `hr_onboarding_pending` answers "is anything outstanding", which is the
  * right question for a badge on a list and the wrong one for a work queue:
- * somebody chasing PF has no use for a flag that also goes up for a missing
- * bank account. So the same statutory read now also reports each scheme on
- * its own, as `pf_status` / `esi_status`, in three values:
+ * somebody chasing PF has no use for a flag that also goes up for an
+ * unverified Aadhaar. So the same statutory read now also reports each scheme
+ * on its own, as `pf_status` / `esi_status`, in three values:
  *
  *   COMPLETE        the decision has been recorded and the employee is in the
  *                   scheme
@@ -115,21 +135,34 @@ class EmployeeStatusSummaryUsecase {
   }
 
   /**
-   * Which HR-owned sections are still outstanding for one employee.
+   * Which HR follow-up items are still outstanding for one employee.
    *
    * `statutory` is `{ pfDecided, esiDecided }`, or null when this server
    * cannot tell - in which case the caller omits the keys rather than
    * reporting a completeness it did not establish.
+   *
+   * THE REASONS, in this order, and each one appearing at most once:
+   *
+   *   "aadhaar"     no verified Aadhaar identity is attached. HR's to chase
+   *                 whatever left it unverified - see the note above.
+   *   "statutory"   the PF or the ESI decision has not been recorded. ONE
+   *                 reason for both schemes, which is the existing naming and
+   *                 is kept: they are one section of the profile, completed
+   *                 in one edit.
+   *   "bank"        the account is not payroll ready.
+   *
+   * `pending` is exactly `missing.length > 0`, so the flag and the reasons
+   * can never contradict each other.
    */
-  static hrOnboardingState({ statutory, bankStatus }) {
+  static hrOnboardingState({ aadhaarVerified, statutory, bankPayrollReady }) {
     if (!statutory) return null;
     const missing = [];
+    if (!aadhaarVerified) missing.push("aadhaar");
     if (!statutory.pfDecided || !statutory.esiDecided) missing.push("statutory");
-    // The same rule the bank badge uses: an account nobody has entered is
-    // HR's to chase. An account that IS on file and has not passed its check
-    // is a different job, already shown by the bank badge, and is not counted
-    // here twice.
-    if (!bankStatus || bankStatus === "NOT_PROVIDED") missing.push("bank");
+    // Payroll ready, not merely on file: an account that has not passed its
+    // check is an employee who cannot be paid, which is work rather than a
+    // finished section.
+    if (!bankPayrollReady) missing.push("bank");
     return { pending: missing.length > 0, missing };
   }
 
@@ -176,9 +209,11 @@ class EmployeeStatusSummaryUsecase {
       const decisions = statutory
         ? statutory.get(employee_id) || { pfDecided: false, esiDecided: false }
         : null;
+      const aadhaarVerified = aadhaarIds.has(employee_id);
       const onboarding = EmployeeStatusSummaryUsecase.hrOnboardingState({
+        aadhaarVerified,
         statutory: decisions,
-        bankStatus: b.status,
+        bankPayrollReady: b.bank_payroll_ready,
       });
       const scheme = (decided, notApplicable) =>
         EmployeeStatusSummaryUsecase.schemeStatus(decided, notApplicable, {
@@ -186,7 +221,7 @@ class EmployeeStatusSummaryUsecase {
         });
       return {
         employee_id,
-        aadhaar_status: aadhaarIds.has(employee_id) ? "VERIFIED" : "PENDING",
+        aadhaar_status: aadhaarVerified ? "VERIFIED" : "PENDING",
         bank_status: b.status,
         bank_payroll_ready: b.bank_payroll_ready,
         ...(onboarding

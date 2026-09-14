@@ -411,34 +411,111 @@ const verified = (employee_id) => ({
   name_match_verdict: "MATCH",
 });
 
-test("an employee a manager has just created is HR-onboarding pending", async () => {
-  // Nothing statutory decided, no bank account: both HR sections outstanding.
+test("AADHAAR PENDING ALONE MAKES AN EMPLOYEE HR PENDING", async () => {
+  // THE BUSINESS RULE. The store manager owns the FIRST ATTEMPT at Aadhaar;
+  // HR owns every unresolved case afterwards, whatever left it unresolved -
+  // a failed check, a mismatch, a technical problem, a skip, or a manager who
+  // never finished it. Everything else about this employee is done.
+  const { usecase } = build({
+    employees: [{ employee_id: 704, ...account }],
+    verifications: [verified(704)],
+    identities: [], // no Aadhaar identity attached
+    statutory: { 704: { pf: true, esi: true } },
+  });
+  const rows = await usecase.list({});
+  assert.equal(rows[0].aadhaar_status, "PENDING");
+  assert.equal(rows[0].bank_payroll_ready, true);
+  assert.equal(rows[0].hr_onboarding_pending, true);
+  assert.deepEqual(rows[0].hr_onboarding_missing, ["aadhaar"]);
+});
+
+test("AADHAAR VERIFIED WITH EVERYTHING ELSE DONE IS HR COMPLETE", async () => {
+  const { usecase } = build({
+    employees: [{ employee_id: 701, ...account }],
+    verifications: [verified(701)],
+    identities: [701],
+    statutory: { 701: { pf: true, esi: true } },
+  });
+  const rows = await usecase.list({});
+  assert.equal(rows[0].aadhaar_status, "VERIFIED");
+  assert.equal(rows[0].hr_onboarding_pending, false);
+  assert.deepEqual(rows[0].hr_onboarding_missing, []);
+});
+
+test("VERIFYING THE AADHAAR LATER TAKES THE EMPLOYEE OUT OF THE QUEUE", async () => {
+  // The flag is DERIVED from the sections, so nothing has to be marked done:
+  // attaching the identity is the whole of it. Same employee, same fixtures,
+  // one identity row different.
+  const fixtures = {
+    employees: [{ employee_id: 709, ...account }],
+    verifications: [verified(709)],
+    statutory: { 709: { pf: true, esi: true } },
+  };
+  const before = await build({ ...fixtures, identities: [] }).usecase.list({});
+  assert.equal(before[0].hr_onboarding_pending, true);
+  assert.deepEqual(before[0].hr_onboarding_missing, ["aadhaar"]);
+
+  const after = await build({ ...fixtures, identities: [709] }).usecase.list({});
+  assert.equal(after[0].hr_onboarding_pending, false);
+  assert.deepEqual(after[0].hr_onboarding_missing, []);
+});
+
+test("an employee a manager has just created is HR-onboarding pending, for all three reasons", async () => {
+  // No Aadhaar, nothing statutory decided, no bank account.
   const { usecase } = build({
     employees: [{ employee_id: 700 }],
     statutory: { 700: { pf: false, esi: false } },
   });
   const rows = await usecase.list({});
   assert.equal(rows[0].hr_onboarding_pending, true);
-  assert.deepEqual(rows[0].hr_onboarding_missing, ["statutory", "bank"]);
+  assert.deepEqual(rows[0].hr_onboarding_missing, ["aadhaar", "statutory", "bank"]);
 });
 
-test("both HR sections done means nothing is pending - and NO is an answer", async () => {
-  // `pf_applicable = 0` is a recorded decision, not a blank. An employee in
-  // neither scheme is finished, not permanently outstanding.
+test("AADHAAR AND BANK PENDING NAMES BOTH REASONS, AND NEITHER TWICE", async () => {
   const { usecase } = build({
-    employees: [{ employee_id: 701, ...account }],
-    verifications: [verified(701)],
-    statutory: { 701: { pf: true, esi: true } },
+    employees: [{ employee_id: 720 }], // no account on file
+    identities: [],
+    statutory: { 720: { pf: true, esi: true } },
   });
   const rows = await usecase.list({});
-  assert.equal(rows[0].hr_onboarding_pending, false);
-  assert.deepEqual(rows[0].hr_onboarding_missing, []);
+  assert.equal(rows[0].hr_onboarding_pending, true);
+  assert.deepEqual(rows[0].hr_onboarding_missing, ["aadhaar", "bank"]);
+});
+
+test("AADHAAR AND STATUTORY PENDING NAMES BOTH REASONS", async () => {
+  const { usecase } = build({
+    employees: [{ employee_id: 721, ...account }],
+    verifications: [verified(721)],
+    identities: [],
+    statutory: { 721: { pf: true, esi: false } },
+  });
+  const rows = await usecase.list({});
+  assert.equal(rows[0].hr_onboarding_pending, true);
+  assert.deepEqual(rows[0].hr_onboarding_missing, ["aadhaar", "statutory"]);
+});
+
+test("every reason appears at most once, whatever the combination", async () => {
+  // PF and ESI are ONE section of the profile and keep ONE reason - the
+  // existing naming - so two undecided schemes cannot produce "statutory"
+  // twice and contradict nothing.
+  const { usecase } = build({
+    employees: [{ employee_id: 722 }],
+    identities: [],
+    statutory: { 722: { pf: false, esi: false } },
+  });
+  const rows = await usecase.list({});
+  const missing = rows[0].hr_onboarding_missing;
+  assert.deepEqual(missing, ["aadhaar", "statutory", "bank"]);
+  assert.equal(new Set(missing).size, missing.length, "no reason is repeated");
+  // And the flag is exactly "is anything outstanding".
+  assert.equal(rows[0].hr_onboarding_pending, missing.length > 0);
 });
 
 test("half a statutory decision is still a pending one", async () => {
   const { usecase } = build({
     employees: [{ employee_id: 702, ...account }],
     verifications: [verified(702)],
+    identities: [702],
     statutory: { 702: { pf: true, esi: false } },
   });
   const rows = await usecase.list({});
@@ -446,31 +523,89 @@ test("half a statutory decision is still a pending one", async () => {
   assert.deepEqual(rows[0].hr_onboarding_missing, ["statutory"]);
 });
 
-test("an account on file that has not passed its check is the BANK badge's job, not this one", async () => {
-  // It is already shown, accurately, by the bank column beside it. Counting
-  // it here as well would send HR chasing an employee whose details they
-  // have, which is a different task from chasing the ones they do not.
+test("PF or ESI recorded as NOT APPLICABLE is a finished decision, not a permanent chase", async () => {
+  // `pf_applicable = 0` is a recorded decision, not a blank. An employee in
+  // neither scheme is finished.
   const { usecase } = build({
-    employees: [{ employee_id: 703, ...account }],
-    verifications: [{ ...verified(703), status: "PENDING", name_match_verdict: null }],
-    statutory: { 703: { pf: true, esi: true } },
+    employees: [{ employee_id: 723, ...account }],
+    verifications: [verified(723)],
+    identities: [723],
+    statutory: { 723: { pf: true, esi: true, pfNo: true, esiNo: true } },
   });
   const rows = await usecase.list({});
-  assert.equal(rows[0].bank_status, "PENDING");
   assert.equal(rows[0].hr_onboarding_pending, false);
+  assert.deepEqual(rows[0].hr_onboarding_missing, []);
 });
 
-test("Aadhaar Pending never makes an employee HR-onboarding pending", async () => {
-  // "Skip for now" is a first-class choice at Stage 1 and holds up nothing.
+test("AN ACCOUNT THAT HAS NOT PASSED ITS CHECK IS STILL HR WORK", async () => {
+  // Entering an account number is not finishing the section: until it is
+  // payroll ready the employee cannot be paid. Every non-ready state counts,
+  // and the Aadhaar and statutory sections here are complete so `bank` is
+  // the only reason.
+  const cases = [
+    ["PENDING", null],
+    ["NAME_MISMATCH", "MISMATCH"],
+    ["FAILED", null],
+  ];
+  for (const [status, verdict] of cases) {
+    const { usecase } = build({
+      employees: [{ employee_id: 703, ...account }],
+      verifications: [{ ...verified(703), status, name_match_verdict: verdict }],
+      identities: [703],
+      statutory: { 703: { pf: true, esi: true } },
+    });
+    const rows = await usecase.list({});
+    assert.equal(rows[0].bank_payroll_ready, false, status);
+    assert.equal(rows[0].hr_onboarding_pending, true, status);
+    assert.deepEqual(rows[0].hr_onboarding_missing, ["bank"], status);
+  }
+});
+
+test("a LIVE duplicate account is HR work too", async () => {
+  const shared = fp(account.account_no, account.ifsc);
   const { usecase } = build({
-    employees: [{ employee_id: 704, ...account }],
-    verifications: [verified(704)],
-    identities: [],
-    statutory: { 704: { pf: true, esi: true } },
+    employees: [{ employee_id: 724, ...account }],
+    verifications: [
+      { employee_id: 724, status: "DUPLICATE_ACCOUNT", account_fingerprint: shared, name_match_verdict: "MATCH" },
+    ],
+    activeVerified: [{ account_fingerprint: shared, employee_id: 999 }],
+    identities: [724],
+    statutory: { 724: { pf: true, esi: true } },
   });
   const rows = await usecase.list({});
-  assert.equal(rows[0].aadhaar_status, "PENDING");
-  assert.equal(rows[0].hr_onboarding_pending, false);
+  assert.equal(rows[0].bank_status, "DUPLICATE_ACCOUNT");
+  assert.equal(rows[0].bank_payroll_ready, false);
+  assert.equal(rows[0].hr_onboarding_pending, true);
+  assert.deepEqual(rows[0].hr_onboarding_missing, ["bank"]);
+});
+
+test("THE FLAG AGREES WITH THE COLUMNS BESIDE IT, BY CONSTRUCTION", async () => {
+  // There is ONE definition of HR completion and it lives here, so a screen
+  // never has to compose a second one. Across every combination, the flag is
+  // true exactly when Aadhaar, bank, PF or ESI is outstanding.
+  for (const aadhaar of [true, false]) {
+    for (const ready of [true, false]) {
+      for (const pf of [true, false]) {
+        for (const esi of [true, false]) {
+          const id = 730;
+          const { usecase } = build({
+            employees: [{ employee_id: id, ...(ready ? account : {}) }],
+            verifications: ready ? [verified(id)] : [],
+            identities: aadhaar ? [id] : [],
+            statutory: { [id]: { pf, esi } },
+          });
+          const row = (await usecase.list({}))[0];
+          const expected = !aadhaar || !ready || !pf || !esi;
+          const label = `aadhaar=${aadhaar} bank=${ready} pf=${pf} esi=${esi}`;
+          assert.equal(row.hr_onboarding_pending, expected, label);
+          assert.equal(row.aadhaar_status === "PENDING", !aadhaar, label);
+          assert.equal(row.bank_payroll_ready, ready, label);
+          assert.equal(row.pf_status === "PENDING", !pf, label);
+          assert.equal(row.esi_status === "PENDING", !esi, label);
+        }
+      }
+    }
+  }
 });
 
 test("a server that cannot tell says nothing, rather than saying 'complete'", async () => {
@@ -511,6 +646,7 @@ test("PF and ESI are reported separately, from the SAME decision the flag uses",
   const { usecase } = build({
     employees: [{ employee_id: 710, ...account }],
     verifications: [verified(710)],
+    identities: [710],
     statutory: { 710: { pf: true, esi: false } },
   });
   const rows = await usecase.list({});
@@ -525,11 +661,12 @@ test("PF and ESI are reported separately, from the SAME decision the flag uses",
 test("NOT APPLICABLE IS A COMPLETED DECISION, and is named only to a caller who may see it", async () => {
   const employees = [{ employee_id: 711, ...account }];
   const verifications = [verified(711)];
+  const identities = [711];
   const statutory = { 711: { pf: true, esi: true, pfNo: true, esiNo: true } };
 
   // With `view_employee_sensitive`: the recorded answer is named, which is
   // what lets the queue show "Not applicable" instead of "Complete".
-  const disclosed = await build({ employees, verifications, statutory }).usecase.list(
+  const disclosed = await build({ employees, verifications, identities, statutory }).usecase.list(
     {},
     { disclosePfEsiApplicability: true }
   );
@@ -538,7 +675,7 @@ test("NOT APPLICABLE IS A COMPLETED DECISION, and is named only to a caller who 
 
   // Without it: still not outstanding, but WHICH answer was recorded is not
   // disclosed - `pf_applicable` and `esi_applicable` are sensitive under B3.
-  const plain = await build({ employees, verifications, statutory }).usecase.list({});
+  const plain = await build({ employees, verifications, identities, statutory }).usecase.list({});
   assert.equal(plain[0].pf_status, "COMPLETE");
   assert.equal(plain[0].esi_status, "COMPLETE");
 
