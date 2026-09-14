@@ -101,6 +101,42 @@ describe("up", () => {
     assert.match(up, /END\) IS NULL\) = 0,/);
   });
 
+  it("ABORTS if any value is still not YYYY-MM-DD when the ALTER is reached", () => {
+    // The ALTER is the dangerous statement: under a non-strict sql_mode MySQL
+    // coerces what it cannot read to 0000-00-00 or NULL, silently. This
+    // assertion sits between the normalisation and the conversion.
+    assert.match(up, /__ABORT_a_date_of_joining_value_is_still_not_YYYY_MM_DD_after_normalising/);
+    const guardAt = up.indexOf("__ABORT_a_date_of_joining_value_is_still_not");
+    const alterAt = up.indexOf("MODIFY COLUMN `date_of_joining` DATE");
+    const updateAt = up.lastIndexOf("UPDATE `new_employee`");
+    assert.ok(updateAt < guardAt && guardAt < alterAt, "after normalising, before converting");
+  });
+
+  it("NEVER coerces - there is no fallback value anywhere in the file", () => {
+    assert.ok(!/0000-00-00/.test(up), "no zero date is written or accepted");
+    assert.ok(!/IFNULL|COALESCE/i.test(up), "no value is substituted for one that could not be read");
+    assert.ok(!/SET `date_of_joining` = '/.test(up), "no literal date is ever written");
+  });
+
+  it("performs NO timezone conversion of any kind", () => {
+    // A calendar day read through an instant is how a joining date moves by
+    // one. Nothing here constructs one.
+    for (const forbidden of ["CONVERT_TZ", "UTC_DATE", "UTC_TIMESTAMP", "NOW(", "CURRENT_TIMESTAMP", "UNIX_TIMESTAMP", "@@time_zone"]) {
+      assert.ok(!up.includes(forbidden), `${forbidden} must not appear in a date-only migration`);
+    }
+  });
+
+  it("PRESERVES NULL - a row with no joining date is never written to", () => {
+    // Both UPDATEs carry `date_of_joining IS NOT NULL`, so a NULL row is not
+    // matched by either and arrives at the ALTER untouched.
+    const updates = up.match(/UPDATE `new_employee`[\s\S]*?(?='\)?,\s*$|', *\n)/gm) || [];
+    const writes = up.split("UPDATE `new_employee`").slice(1);
+    assert.equal(writes.length, 2, "exactly two UPDATEs: blanks to NULL, and the normalisation");
+    for (const w of writes) {
+      assert.match(w.slice(0, 700), /`date_of_joining` IS NOT NULL/, "every write excludes the NULL rows");
+    }
+  });
+
   it("ABORTS when lc_time_names would make a good date look unreadable", () => {
     assert.match(up, /__ABORT_lc_time_names_must_be_en_US/);
     assert.match(up, /@@lc_time_names = 'en_US'/);

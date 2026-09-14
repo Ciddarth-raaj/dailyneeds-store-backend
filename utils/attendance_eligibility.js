@@ -131,6 +131,51 @@ function eligibleWindow(employee, fromDate, toDate) {
   return { from: start, to: end };
 }
 
+/**
+ * EVERY DATE OF `[from, to]` THIS EMPLOYEE IS NOT ELIGIBLE FOR, as a list.
+ *
+ * This is the POSITIVE statement of ineligibility, and it exists because the
+ * reconciliation that deletes stored attendance must be driven by the rule
+ * itself rather than by the absence of a calculated row. "The engine returned
+ * nothing for this date" and "this employee/date is ineligible" are two
+ * different sentences, and the first is true for a missing shift assignment,
+ * a missing schedule row, an unreadable configuration, a partial run and a
+ * thrown exception - none of which is a reason to delete somebody's
+ * attendance history. Only the three exclusions in this file are.
+ *
+ * The caller bounds the range (a recalculation may cover at most 62 days), so
+ * the list is short by construction. An invalid or backwards range yields an
+ * empty list: nothing can be PROVEN ineligible from a range that cannot be
+ * read, and proving it is the entire point.
+ */
+function ineligibleDatesIn(employee, fromDate, toDate) {
+  const from = toDateOnly(fromDate);
+  const to = toDateOnly(toDate);
+  if (from === null || to === null || from > to) return [];
+
+  const dates = [];
+  let cursor = from;
+  // Bounded independently of the caller, so a mistake upstream cannot turn
+  // this into an unbounded scan. 366 is a year; a recalculation range is 62.
+  let guard = 0;
+  while (cursor <= to && guard <= 366) {
+    if (!eligibleOn(employee, cursor)) dates.push(cursor);
+    cursor = addOneDay(cursor);
+    guard += 1;
+  }
+  return dates;
+}
+
+/** `YYYY-MM-DD` -> the next day. UTC arithmetic only; no local midnight. */
+function addOneDay(dateOnly) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateOnly));
+  if (!m) return null;
+  const next = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]) + 1));
+  return `${next.getUTCFullYear()}-${String(next.getUTCMonth() + 1).padStart(2, "0")}-${String(
+    next.getUTCDate()
+  ).padStart(2, "0")}`;
+}
+
 /** Why an employee/date was excluded, for the audit line. Null when eligible. */
 function exclusionReason(employee, date) {
   if (!attendanceRequired(employee)) return "ATTENDANCE_NOT_REQUIRED";
@@ -151,5 +196,6 @@ module.exports = {
   eligibleOn,
   eligibleInRange,
   eligibleWindow,
+  ineligibleDatesIn,
   exclusionReason,
 };

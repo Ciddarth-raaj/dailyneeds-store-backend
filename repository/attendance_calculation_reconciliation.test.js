@@ -80,52 +80,105 @@ const row = (attendance_date) => ({
   calculation_version: 1,
 });
 
-const run = async (rows, pool = fakePool()) => {
+const run = async (rows, ineligible_dates = [], pool = fakePool()) => {
   const repo = buildRepo(pool);
   const result = await repo.saveCalculationsWithReconciliation({
     employee_id: 42,
     from_date: "2026-09-01",
     to_date: "2026-09-30",
     rows,
+    ineligible_dates,
   });
   return { result, log: pool.log };
 };
 
 const deletes = (log) => log.filter((e) => /^DELETE/i.test(e.sql));
 
-describe("the DELETE", () => {
+describe("the DELETE deletes ONLY what the eligibility rule condemns", () => {
   it("targets attendance_day_calculation and nothing else", async () => {
-    const { log } = await run([row("2026-09-01")]);
+    const { log } = await run([row("2026-09-01")], ["2026-09-02"]);
     assert.equal(deletes(log).length, 1, "exactly one DELETE per reconciliation");
     assert.match(deletes(log)[0].sql, /^DELETE FROM attendance_day_calculation\b/);
   });
 
-  it("is bounded by the employee AND the requested window", async () => {
-    const { log } = await run([row("2026-09-01")]);
+  it("names the ineligible dates POSITIVELY - IN, never NOT IN", async () => {
+    // The whole review finding in one assertion. `NOT IN (what was
+    // calculated)` deletes a date the engine merely failed to produce; `IN
+    // (what the rule excludes)` cannot.
+    const { log } = await run([row("2026-09-03")], ["2026-09-01", "2026-09-02"]);
     const [del] = deletes(log);
-    assert.match(del.sql, /WHERE employee_id = \?/);
-    assert.match(del.sql, /AND attendance_date BETWEEN \? AND \?/);
-    assert.deepEqual(del.params.slice(0, 3), [42, "2026-09-01", "2026-09-30"]);
+    assert.match(del.sql, /AND attendance_date IN \(\?\)/);
+    assert.ok(!/NOT IN/.test(del.sql), "'not calculated' is not 'ineligible'");
+    assert.deepEqual(del.params, [42, ["2026-09-01", "2026-09-02"]]);
   });
 
-  it("spares every date the same run just wrote - valid history is never a candidate", async () => {
-    const { log } = await run([row("2026-09-01"), row("2026-09-02")]);
-    const [del] = deletes(log);
-    assert.match(del.sql, /AND attendance_date NOT IN \(\?\)/);
-    assert.deepEqual(del.params[3], ["2026-09-01", "2026-09-02"]);
+  it("is bounded by the employee", async () => {
+    const { log } = await run([], ["2026-09-02"]);
+    assert.match(deletes(log)[0].sql, /WHERE employee_id = \?/);
+    assert.equal(deletes(log)[0].params[0], 42);
   });
 
-  it("with NO eligible date, deletes the whole window and adds no NOT IN", async () => {
-    const { result, log } = await run([]);
-    const [del] = deletes(log);
-    assert.ok(!/NOT IN/.test(del.sql), "nothing to keep means nothing to exclude");
-    assert.equal(del.params.length, 3);
-    assert.equal(result.written, 0);
+  it("ISSUES NO DELETE AT ALL when the rule excludes nothing", async () => {
+    // A recalculation of a fully eligible window - however few rows the
+    // engine produced - must not reach the DELETE statement at all.
+    const { result, log } = await run([row("2026-09-01")], []);
+    assert.equal(deletes(log).length, 0);
+    assert.equal(result.stale_removed, 0);
+    assert.equal(result.written, 1);
+  });
+
+  it("AN ENGINE THAT PRODUCED NOTHING STILL DELETES NOTHING", async () => {
+    // The failure the review asked about: a temporary calculation failure, a
+    // missing shift, an incomplete batch. No row written, no date condemned,
+    // therefore no deletion.
+    const { result, log } = await run([], []);
+    assert.equal(deletes(log).length, 0, "an empty calculation is not an eligibility verdict");
+    assert.equal(result.stale_removed, 0);
+  });
+
+  it("deletes the whole window when every date of it is ineligible", async () => {
+    const whole = ["2026-09-01", "2026-09-02", "2026-09-03"];
+    const { result, log } = await run([], whole);
+    assert.deepEqual(deletes(log)[0].params[1], whole);
     assert.equal(result.stale_removed, 3);
   });
 
+  it("REFUSES a date outside the requested window, and writes nothing", async () => {
+    const pool = fakePool();
+    await assert.rejects(
+      run([row("2026-09-01")], ["2026-08-31"], pool),
+      /outside the requested window/
+    );
+    assert.equal(pool.log.length, 0, "it never even opened a transaction");
+  });
+
+  it("REFUSES a date that the same run also calculated", async () => {
+    // The rule and the calculation disagreeing is a contradiction, and the
+    // honest response is to abort rather than to pick a winner.
+    const pool = fakePool();
+    await assert.rejects(
+      run([row("2026-09-01")], ["2026-09-01"], pool),
+      /the eligibility rule and the calculation disagree/
+    );
+    assert.equal(pool.log.length, 0);
+  });
+
+  it("REFUSES a caller that did not compute the ineligible dates", async () => {
+    const repo = buildRepo(fakePool());
+    await assert.rejects(
+      repo.saveCalculationsWithReconciliation({
+        employee_id: 42,
+        from_date: "2026-09-01",
+        to_date: "2026-09-30",
+        rows: [],
+      }),
+      /needs ineligible_dates/,
+      "not defaulted to [] - a caller that forgot must fail loudly"
+    );
+  });
+
   it("runs INSIDE the transaction, after the write, and commits once", async () => {
-    const { log } = await run([row("2026-09-01")]);
+    const { log } = await run([row("2026-09-01")], ["2026-09-02"]);
     const order = log.map((e) => (/^(BEGIN|COMMIT|ROLLBACK|RELEASE)$/.test(e.sql) ? e.sql : e.sql.split(" ")[0]));
     assert.deepEqual(order, ["BEGIN", "INSERT", "DELETE", "COMMIT", "RELEASE"]);
   });
@@ -139,6 +192,7 @@ describe("the DELETE", () => {
         from_date: "2026-09-01",
         to_date: "2026-09-30",
         rows: [row("2026-09-01")],
+        ineligible_dates: ["2026-09-02"],
       }),
       /forced failure/
     );
@@ -146,21 +200,44 @@ describe("the DELETE", () => {
     assert.ok(!pool.log.some((e) => e.sql === "COMMIT"));
   });
 
+  it("a failing INSERT rolls back before the DELETE is ever issued", async () => {
+    const pool = fakePool({ failOn: "INSERT" });
+    const repo = buildRepo(pool);
+    await assert.rejects(
+      repo.saveCalculationsWithReconciliation({
+        employee_id: 42,
+        from_date: "2026-09-01",
+        to_date: "2026-09-30",
+        rows: [row("2026-09-01")],
+        ineligible_dates: ["2026-09-02"],
+      }),
+      /forced failure/
+    );
+    assert.equal(deletes(pool.log).length, 0, "the write failed, so nothing was removed");
+    assert.ok(pool.log.some((e) => e.sql === "ROLLBACK"));
+  });
+
   it("refuses a call that does not name an employee and a window", async () => {
     const repo = buildRepo(fakePool());
     await assert.rejects(
-      repo.saveCalculationsWithReconciliation({ from_date: "2026-09-01", to_date: "2026-09-30", rows: [] }),
+      repo.saveCalculationsWithReconciliation({ from_date: "2026-09-01", to_date: "2026-09-30", rows: [], ineligible_dates: [] }),
       /employee_id/
     );
     await assert.rejects(
-      repo.saveCalculationsWithReconciliation({ employee_id: 42, rows: [] }),
+      repo.saveCalculationsWithReconciliation({ employee_id: 42, rows: [], ineligible_dates: [] }),
       /window/
     );
   });
 });
 
 describe("what the repository can reach at all", () => {
-  const source = fs.readFileSync(path.join(__dirname, "attendance_calculation.js"), "utf8");
+  // COMMENTS STRIPPED FIRST. The documentation above the method quotes the
+  // statement it issues, and a scan that counts prose would count that quote
+  // as a second DELETE - measuring the comment instead of the code.
+  const source = fs
+    .readFileSync(path.join(__dirname, "attendance_calculation.js"), "utf8")
+    .replace(/^\s*\*.*$/gm, "")
+    .replace(/\/\/.*$/gm, "");
   const statements = source.match(/\bDELETE\s+FROM\s+[`a-z_]+/gi) || [];
 
   it("issues exactly one DELETE in the whole file", () => {

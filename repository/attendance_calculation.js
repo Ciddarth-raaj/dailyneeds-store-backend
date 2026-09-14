@@ -499,22 +499,46 @@ class AttendanceCalculationRepository {
   }
 
   /**
-   * Persist a recalculated window AND remove what the window still holds for
-   * dates the employee is no longer eligible for - in ONE transaction.
+   * Persist a recalculated window AND remove the stored rows for dates the
+   * employee is PROVEN ineligible for - in ONE transaction.
    *
-   * WHAT THIS DELETES, AND WHY IT IS SAFE TO DELETE IT.
+   * ================== THE RULE, AND THE RULE IT REPLACES ==================
    *
-   * `attendance_day_calculation` is the OUTPUT of the calculation flow and
-   * nothing else. Every row in it was written by this repository's
-   * `writeCalculationsOnConnection` - the recalculation path, the
-   * date-shift-override path and the approval path all funnel through that one
-   * writer - and every column in it is derived from raw punches, dated shift
-   * history and approved regularizations. The whole table can be dropped and
-   * recomputed without losing a fact anybody entered. That is the ownership
-   * test this deletion turns on, and it is why the delete is confined to this
-   * table.
+   * The first implementation deleted every row of the window that the
+   * calculation had not just written: `... AND attendance_date NOT IN (the
+   * dates produced)`. That treats "the engine returned no row for this date"
+   * as identical to "this employee/date is ineligible", and those are two
+   * different sentences. The engine can return nothing for a date because of
+   * a missing shift assignment, a missing schedule row, an unreadable shift
+   * configuration, a punch read that came back short, an incomplete batch or
+   * a thrown exception - and NONE of those is a reason to delete somebody's
+   * attendance history. Under that rule, a future change that made the engine
+   * skip a date would silently destroy stored attendance for it, and no test
+   * anywhere would have to fail first.
    *
-   * WHAT IT MUST NEVER TOUCH, and does not:
+   * So the caller now computes the ineligible dates POSITIVELY, from the
+   * shared rule alone (`utils/attendance_eligibility.js#ineligibleDatesIn`),
+   * and passes them in. This statement deletes those dates and nothing else:
+   *
+   *   DELETE FROM attendance_day_calculation
+   *    WHERE employee_id = ? AND attendance_date IN (<the ineligible dates>)
+   *
+   * A date can therefore only be deleted by being one of `attendance_required
+   * = 0`, before the joining date, or after the resignation date. A date that
+   * failed to calculate keeps whatever was stored for it, which is the safe
+   * direction: stale-but-recalculable beats deleted-and-gone.
+   *
+   * ============================ THE GUARDS ================================
+   *
+   * `ineligible_dates` is REQUIRED. Omitting it is an error rather than a
+   * default, so no caller can reach this and get a deletion policy it did not
+   * ask for. Every date is then checked to be inside the requested window,
+   * and checked NOT to be among the dates being written - a date that is
+   * simultaneously calculated and ineligible means the eligibility rule and
+   * the calculation disagree, and the honest response to that is to abort the
+   * transaction, not to pick one.
+   *
+   * =================== WHAT IT MUST NEVER TOUCH, AND DOES NOT =============
    *
    *   biomax_punch, biomax_punch_derived   raw, append-only, someone else's
    *   attendance_punch_void                a human said this punch is void
@@ -525,23 +549,32 @@ class AttendanceCalculationRepository {
    *                                        month, reconciled by its own path
    *   employee_lifecycle_event / period    service history
    *
-   * None of those is named in any statement here. This file issues exactly one
-   * DELETE, against one table, and it is below.
+   * None of those is named in any statement here. This file issues exactly
+   * one DELETE, against one table, and it is below.
    *
-   * WHAT IT MUST NOT DELETE WITHIN ITS OWN TABLE: valid historical attendance.
-   * The delete is bounded THREE ways - one employee, the requested window, and
-   * NOT IN the dates just written - so a date inside the employee's employment
-   * is recalculated and re-upserted by the same statement batch and is
-   * therefore never a delete candidate. A resigned employee keeps every
-   * calculated day up to and including their resignation date, and loses only
-   * the days after it.
+   * `attendance_day_calculation` is the OUTPUT of the calculation flow and
+   * nothing else: every row in it was written by `writeCalculationsOnConnection`
+   * and every column is derived from raw punches, dated shift history and
+   * approved regularizations. The whole table can be dropped and recomputed
+   * without losing a fact anybody entered. That is the ownership test this
+   * deletion turns on, and it is why the delete is confined to this table.
    *
-   * A window with NO eligible dates (an employee made exempt, a window wholly
-   * outside their employment) deletes everything the window holds, which is
-   * the entire point of item 2: filtering future calculations does not remove
-   * what a past calculation already stored.
+   * ========================= TRANSACTION BOUNDARY =========================
+   *
+   * The upsert and the delete share one transaction on one connection. Either
+   * both land or neither does: a window that was emptied but not rewritten is
+   * worse than one that was never touched. Any failure rolls back - and a
+   * failure BEFORE this method is called (the engine throwing, the punch
+   * re-derive failing) means it is never called at all, so nothing was
+   * deleted either.
    */
-  async saveCalculationsWithReconciliation({ employee_id, from_date, to_date, rows }) {
+  async saveCalculationsWithReconciliation({
+    employee_id,
+    from_date,
+    to_date,
+    rows,
+    ineligible_dates,
+  }) {
     const employeeId = Number(employee_id);
     if (!Number.isInteger(employeeId) || employeeId <= 0) {
       throw new Error("saveCalculationsWithReconciliation needs an employee_id");
@@ -549,37 +582,51 @@ class AttendanceCalculationRepository {
     if (!from_date || !to_date) {
       throw new Error("saveCalculationsWithReconciliation needs the requested window");
     }
+    if (!Array.isArray(ineligible_dates)) {
+      // Deliberately not defaulted to []. A caller that forgot to compute the
+      // ineligible dates must fail loudly, not quietly stop reconciling.
+      throw new Error(
+        "saveCalculationsWithReconciliation needs ineligible_dates - the dates the shared eligibility rule excludes"
+      );
+    }
+
     const batch = Array.isArray(rows) ? rows : [];
-    // A row written for a date outside the requested window would make the
-    // "keep" list disagree with the delete bounds. It cannot happen - the
-    // usecase clamps INSIDE the window - and is asserted rather than assumed.
-    const keep = batch
-      .map((r) => r.attendance_date)
-      .filter((d) => d >= from_date && d <= to_date);
+    const written = new Set(batch.map((r) => r.attendance_date));
+
+    const doomed = [...new Set(ineligible_dates)];
+    for (const date of doomed) {
+      if (date < from_date || date > to_date) {
+        throw new Error(
+          `refusing to delete ${date}: outside the requested window ${from_date}..${to_date}`
+        );
+      }
+      if (written.has(date)) {
+        throw new Error(
+          `refusing to delete ${date}: the same run calculated it, so the eligibility rule and the calculation disagree`
+        );
+      }
+    }
 
     const connection = await getConnectionAsync(this.db);
     try {
       await beginTransactionAsync(connection);
 
-      const written = await writeCalculationsOnConnection(connection, batch);
+      const result = await writeCalculationsOnConnection(connection, batch);
 
-      const params = [employeeId, from_date, to_date];
-      let notIn = "";
-      if (keep.length > 0) {
-        notIn = " AND attendance_date NOT IN (?)";
-        params.push(keep);
+      let removed = null;
+      if (doomed.length > 0) {
+        removed = await queryAsync(
+          connection,
+          `DELETE FROM attendance_day_calculation
+            WHERE employee_id = ?
+              AND attendance_date IN (?)`,
+          [employeeId, doomed]
+        );
       }
-      const removed = await queryAsync(
-        connection,
-        `DELETE FROM attendance_day_calculation
-          WHERE employee_id = ?
-            AND attendance_date BETWEEN ? AND ?${notIn}`,
-        params
-      );
 
       await commitAsync(connection);
       return {
-        ...written,
+        ...result,
         stale_removed: removed ? Number(removed.affectedRows) : 0,
       };
     } catch (err) {

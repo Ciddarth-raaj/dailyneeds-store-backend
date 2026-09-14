@@ -119,20 +119,31 @@ function fakeRepo(state = {}) {
 
     /**
      * What the real repository's ONE transaction does, in memory: upsert the
-     * batch, then delete every row of this employee inside the requested
-     * window that the batch did not write.
+     * batch, then delete the rows this employee has on the dates the caller
+     * PROVED ineligible - and no others. The same two guards, so a test that
+     * would violate them fails here as it would in MySQL.
      */
-    saveCalculationsWithReconciliation: async ({ employee_id, from_date, to_date, rows }) => {
-      calls.reconciliations.push({ employee_id, from_date, to_date, kept: rows.map((r) => r.attendance_date) });
-      const keep = new Set(rows.map((r) => r.attendance_date));
+    saveCalculationsWithReconciliation: async ({ employee_id, from_date, to_date, rows, ineligible_dates }) => {
+      if (!Array.isArray(ineligible_dates)) {
+        throw new Error("saveCalculationsWithReconciliation needs ineligible_dates");
+      }
+      calls.reconciliations.push({
+        employee_id,
+        from_date,
+        to_date,
+        kept: rows.map((r) => r.attendance_date),
+        ineligible: [...ineligible_dates],
+      });
+      const written = new Set(rows.map((r) => r.attendance_date));
+      for (const date of ineligible_dates) {
+        if (date < from_date || date > to_date) throw new Error(`refusing to delete ${date}: outside the requested window`);
+        if (written.has(date)) throw new Error(`refusing to delete ${date}: the same run calculated it`);
+      }
+      if (state.saveThrows) throw new Error(state.saveThrows);
       for (const row of rows) store.set(`${row.employee_id}|${row.attendance_date}`, { ...row });
       let removed = 0;
-      for (const [key, row] of [...store.entries()]) {
-        if (row.employee_id !== employee_id) continue;
-        if (row.attendance_date < from_date || row.attendance_date > to_date) continue;
-        if (keep.has(row.attendance_date)) continue;
-        store.delete(key);
-        removed += 1;
+      for (const date of new Set(ineligible_dates)) {
+        if (store.delete(`${employee_id}|${date}`)) removed += 1;
       }
       return { written: rows.length, stale_removed: removed };
     },
@@ -160,7 +171,7 @@ const build = (state) => {
   // Punch re-derivation is a collaborator; recording it proves the exempt
   // employee's punches are not re-derived for a calculation nobody runs.
   usecase.setPunchRedriveService({
-    redriveUndatedPunches: async (args) => {
+    redriveUndated: async (args) => {
       repo.calls.redrive.push(args);
       return { scanned: 0, rematched: 0, still_unmatched: 0, employees: [] };
     },
@@ -364,7 +375,14 @@ describe("what reconciliation must never touch", () => {
     });
     await usecase.recalculateRange({ employee_id: 42, from_date: "2026-09-10", to_date: "2026-09-16" });
     assert.deepEqual(repo.calls.reconciliations, [
-      { employee_id: 42, from_date: "2026-09-10", to_date: "2026-09-16", kept: ["2026-09-15", "2026-09-16"] },
+      {
+        employee_id: 42,
+        from_date: "2026-09-10",
+        to_date: "2026-09-16",
+        kept: ["2026-09-15", "2026-09-16"],
+        // The dates BEFORE the joining date, named positively.
+        ineligible: ["2026-09-10", "2026-09-11", "2026-09-12", "2026-09-13", "2026-09-14"],
+      },
     ]);
   });
 });
@@ -421,6 +439,244 @@ describe("the bulk run applies the same rule through the same path", () => {
   it("an active employee is never accidentally excluded", async () => {
     const { repo, usecase } = world();
     await usecase.recalculateBulk({ from_date: "2026-09-14", to_date: "2026-09-15" });
+    assert.deepEqual(repo.rowsFor(42), ["2026-09-14", "2026-09-15"]);
+  });
+});
+
+/* ======== 5. "not calculated" is NOT "ineligible" - the review finding ==== */
+
+describe("an ELIGIBLE date the engine returns nothing for is NEVER deleted", () => {
+  /**
+   * The failure mode this whole suite exists for. A stored row must be
+   * deleted only when the shared rule PROVES the employee/date ineligible -
+   * never because the calculation happened not to produce a row for it.
+   *
+   * Each case below makes the engine return an incomplete set for a fully
+   * eligible employee, and asserts the stored history survives untouched.
+   */
+  const eligibleEmployee = {
+    42: { employee_id: 42, status: 1, attendance_required: 1, date_of_joining: "2020-01-01", resignation_date: null },
+  };
+
+  /** A usecase whose calculation returns only SOME of the eligible dates. */
+  const buildWithPartialEngine = (produce) => {
+    const repo = fakeRepo({
+      rawPunches: [],
+      employment: eligibleEmployee,
+      stored: [
+        storedDay(42, "2026-09-14"),
+        storedDay(42, "2026-09-15"),
+        storedDay(42, "2026-09-16"),
+      ],
+    });
+    const usecase = buildUsecase(repo);
+    usecase.setPunchRedriveService({ redriveUndated: async () => ({ scanned: 0 }) });
+    // The engine is replaced wholesale, which is the only honest way to model
+    // "it returned an incomplete set": every real cause - a missing shift
+    // assignment, an unreadable configuration, a short punch read, a partial
+    // batch - shows up here as exactly that.
+    const real = usecase.calculateRange;
+    usecase.calculateRange = async (args) => (await real(args)).filter((d) => produce.includes(d.attendance_date));
+    return { repo, usecase };
+  };
+
+  it("the engine returning NOTHING deletes nothing", async () => {
+    const { repo, usecase } = buildWithPartialEngine([]);
+    const r = await usecase.recalculateRange({ employee_id: 42, from_date: "2026-09-14", to_date: "2026-09-16" });
+    assert.deepEqual(r.ineligible_dates, [], "the rule condemns no date, so nothing may be deleted");
+    assert.equal(r.stale_removed, 0);
+    assert.deepEqual(
+      repo.rowsFor(42),
+      ["2026-09-14", "2026-09-15", "2026-09-16"],
+      "a total calculation failure must not destroy attendance history"
+    );
+  });
+
+  it("the engine returning ONE of three dates deletes neither of the other two", async () => {
+    const { repo, usecase } = buildWithPartialEngine(["2026-09-15"]);
+    const r = await usecase.recalculateRange({ employee_id: 42, from_date: "2026-09-14", to_date: "2026-09-16" });
+    assert.equal(r.stale_removed, 0);
+    assert.deepEqual(repo.rowsFor(42), ["2026-09-14", "2026-09-15", "2026-09-16"]);
+  });
+
+  it("and the reconciliation is told to delete nothing, not merely told to keep one", async () => {
+    const { repo, usecase } = buildWithPartialEngine(["2026-09-15"]);
+    await usecase.recalculateRange({ employee_id: 42, from_date: "2026-09-14", to_date: "2026-09-16" });
+    assert.deepEqual(repo.calls.reconciliations[0].ineligible, []);
+  });
+});
+
+describe("a calculation that THROWS deletes nothing", () => {
+  const world = () => {
+    const repo = fakeRepo({
+      rawPunches: [],
+      employment: {
+        // Exempt, so under a correct rule the window WOULD be reconciled away
+        // - which is what makes this a real test: the failure has to prevent
+        // even a deletion that was going to be right.
+        42: { employee_id: 42, status: 1, attendance_required: 0, date_of_joining: "2020-01-01", resignation_date: null },
+      },
+      stored: [storedDay(42, "2026-09-14"), storedDay(42, "2026-09-15")],
+    });
+    return { repo, usecase: buildUsecase(repo) };
+  };
+
+  it("an employment read that fails aborts before anything is written or removed", async () => {
+    const { repo, usecase } = world();
+    repo.getEmploymentWindow = async () => {
+      throw new Error("database went away");
+    };
+    await assert.rejects(
+      usecase.recalculateRange({ employee_id: 42, from_date: "2026-09-14", to_date: "2026-09-15" }),
+      /database went away/
+    );
+    assert.deepEqual(repo.calls.reconciliations, [], "the reconciliation was never reached");
+    assert.deepEqual(repo.rowsFor(42), ["2026-09-14", "2026-09-15"]);
+  });
+
+  it("a punch re-derive that fails is REPORTED, and still condemns only the proven dates", async () => {
+    // `redrivePunches` catches and reports rather than throwing - that is its
+    // existing contract, and this pins what it means for the deletion: a
+    // failed re-derive changes what is CALCULATED, and must change nothing
+    // about what is DELETED, because deletion comes from the rule alone.
+    const repo = fakeRepo({
+      rawPunches: [],
+      employment: {
+        42: { employee_id: 42, status: 1, attendance_required: 1, date_of_joining: "2026-09-15", resignation_date: null },
+      },
+      stored: [storedDay(42, "2026-09-13"), storedDay(42, "2026-09-15")],
+    });
+    const usecase = buildUsecase(repo);
+    usecase.setPunchRedriveService({
+      redriveUndated: async () => {
+        throw new Error("punch re-derive failed");
+      },
+    });
+    const r = await usecase.recalculateRange({ employee_id: 42, from_date: "2026-09-13", to_date: "2026-09-16" });
+    assert.match(r.punch_redrive.error, /punch re-derive failed/, "reported, not swallowed");
+    assert.deepEqual(r.ineligible_dates, ["2026-09-13", "2026-09-14"], "the dates before joining, and only those");
+    assert.deepEqual(repo.rowsFor(42), ["2026-09-15", "2026-09-16"]);
+  });
+
+  it("a write that fails leaves the stored rows exactly as they were", async () => {
+    const repo = fakeRepo({
+      rawPunches: [],
+      employment: {
+        42: { employee_id: 42, status: 1, attendance_required: 0, date_of_joining: "2020-01-01", resignation_date: null },
+      },
+      stored: [storedDay(42, "2026-09-14"), storedDay(42, "2026-09-15")],
+      saveThrows: "the transaction rolled back",
+    });
+    const usecase = buildUsecase(repo);
+    await assert.rejects(
+      usecase.recalculateRange({ employee_id: 42, from_date: "2026-09-14", to_date: "2026-09-15" }),
+      /rolled back/
+    );
+    assert.deepEqual(
+      repo.rowsFor(42),
+      ["2026-09-14", "2026-09-15"],
+      "upsert and delete are one transaction: neither half may survive alone"
+    );
+  });
+
+  it("a per-employee failure in a bulk run does not delete that employee's rows", async () => {
+    const CANDIDATES = [
+      { employee_id: 42, employee_name: "Breaks", attendance_required: 1, date_of_joining: "2020-01-01", resignation_date: null },
+      { employee_id: 43, employee_name: "Fine", attendance_required: 0, date_of_joining: "2020-01-01", resignation_date: null },
+    ];
+    const repo = fakeRepo({
+      rawPunches: [...workedDay("2026-09-14", 1)],
+      candidates: CANDIDATES,
+      employment: Object.fromEntries(CANDIDATES.map((c) => [c.employee_id, { ...c, status: 1 }])),
+      stored: [storedDay(42, "2026-09-14"), storedDay(43, "2026-09-14")],
+    });
+    const usecase = buildUsecase(repo);
+    const realHistory = repo.getShiftAssignmentHistory;
+    repo.getShiftAssignmentHistory = async (id) => {
+      if (Number(id) === 42) throw new Error("shift history unreadable");
+      return realHistory(id);
+    };
+    const r = await usecase.recalculateBulk({ from_date: "2026-09-14", to_date: "2026-09-14" });
+    assert.equal(r.employees_failed, 1);
+    assert.deepEqual(repo.rowsFor(42), ["2026-09-14"], "the failed employee keeps everything");
+    assert.deepEqual(repo.rowsFor(43), [], "and the run still reconciles the one it could");
+  });
+});
+
+/* ============ 6. the exact dates condemned, for each exclusion =========== */
+
+describe("the dates handed to the DELETE are the rule's own verdict", () => {
+  const condemn = async (employment, from, to) => {
+    const repo = fakeRepo({ rawPunches: [], employment: { 42: employment } });
+    const usecase = buildUsecase(repo);
+    usecase.setPunchRedriveService({ redriveUndated: async () => ({ scanned: 0 }) });
+    const r = await usecase.recalculateRange({ employee_id: 42, from_date: from, to_date: to });
+    return r.ineligible_dates;
+  };
+
+  it("attendance_required = 0: every date of the requested window", async () => {
+    assert.deepEqual(
+      await condemn(
+        { employee_id: 42, attendance_required: 0, date_of_joining: "2020-01-01", resignation_date: null },
+        "2026-09-14",
+        "2026-09-16"
+      ),
+      ["2026-09-14", "2026-09-15", "2026-09-16"]
+    );
+  });
+
+  it("before joining: the dates before it, and not the joining date itself", async () => {
+    assert.deepEqual(
+      await condemn(
+        { employee_id: 42, attendance_required: 1, date_of_joining: "2026-09-16", resignation_date: null },
+        "2026-09-14",
+        "2026-09-17"
+      ),
+      ["2026-09-14", "2026-09-15"]
+    );
+  });
+
+  it("after resignation: the dates after it, and not the resignation date itself", async () => {
+    assert.deepEqual(
+      await condemn(
+        { employee_id: 42, attendance_required: 1, date_of_joining: "2020-01-01", resignation_date: "2026-09-15" },
+        "2026-09-14",
+        "2026-09-17"
+      ),
+      ["2026-09-16", "2026-09-17"]
+    );
+  });
+
+  it("a fully eligible employee condemns NOTHING", async () => {
+    assert.deepEqual(
+      await condemn(
+        { employee_id: 42, attendance_required: 1, date_of_joining: "2020-01-01", resignation_date: null },
+        "2026-09-14",
+        "2026-09-17"
+      ),
+      []
+    );
+  });
+
+  it("an employee with no readable joining date condemns NOTHING", async () => {
+    // 425 production rows. An unreadable bound must never become a deletion.
+    assert.deepEqual(
+      await condemn(
+        { employee_id: 42, attendance_required: 1, date_of_joining: "not a date", resignation_date: null },
+        "2026-09-14",
+        "2026-09-17"
+      ),
+      []
+    );
+  });
+
+  it("an employee the master has no row for condemns NOTHING", async () => {
+    const repo = fakeRepo({ rawPunches: [], stored: [storedDay(42, "2026-09-14")] });
+    repo.getEmploymentWindow = async () => null;
+    const usecase = buildUsecase(repo);
+    usecase.setPunchRedriveService({ redriveUndated: async () => ({ scanned: 0 }) });
+    const r = await usecase.recalculateRange({ employee_id: 42, from_date: "2026-09-14", to_date: "2026-09-15" });
+    assert.deepEqual(r.ineligible_dates, []);
     assert.deepEqual(repo.rowsFor(42), ["2026-09-14", "2026-09-15"]);
   });
 });

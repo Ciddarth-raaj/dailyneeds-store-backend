@@ -158,3 +158,62 @@ describe("`status` takes no part", () => {
     assert.equal(eligibleOn(mislabelled, "2026-09-15"), true);
   });
 });
+
+describe("ineligibleDatesIn - the list the reconciliation deletes by", () => {
+  const { ineligibleDatesIn } = require("./attendance_eligibility");
+
+  it("names the dates the rule excludes, positively, in order", () => {
+    assert.deepEqual(
+      ineligibleDatesIn(employee({ date_of_joining: "2026-09-12", resignation_date: "2026-09-14" }), "2026-09-10", "2026-09-16"),
+      ["2026-09-10", "2026-09-11", "2026-09-15", "2026-09-16"]
+    );
+  });
+
+  it("is EMPTY for a fully eligible employee - the common case must delete nothing", () => {
+    assert.deepEqual(ineligibleDatesIn(employee({ date_of_joining: "2020-01-01" }), "2026-09-10", "2026-09-16"), []);
+  });
+
+  it("is the whole window for an exempt employee", () => {
+    assert.deepEqual(
+      ineligibleDatesIn(employee({ attendance_required: 0 }), "2026-09-14", "2026-09-16"),
+      ["2026-09-14", "2026-09-15", "2026-09-16"]
+    );
+  });
+
+  it("is EMPTY when the bounds are absent or unreadable", () => {
+    assert.deepEqual(ineligibleDatesIn(employee({ date_of_joining: null }), "2026-09-14", "2026-09-16"), []);
+    assert.deepEqual(ineligibleDatesIn(employee({ date_of_joining: "not a date" }), "2026-09-14", "2026-09-16"), []);
+    assert.deepEqual(ineligibleDatesIn(null, "2026-09-14", "2026-09-16"), []);
+  });
+
+  it("is EMPTY for a range it cannot read - nothing is PROVEN from a bad range", () => {
+    assert.deepEqual(ineligibleDatesIn(employee({ attendance_required: 0 }), "2026-09-16", "2026-09-14"), []);
+    assert.deepEqual(ineligibleDatesIn(employee({ attendance_required: 0 }), "nonsense", "2026-09-14"), []);
+  });
+
+  it("crosses a month and a year boundary without losing or repeating a day", () => {
+    const across = ineligibleDatesIn(employee({ attendance_required: 0 }), "2025-12-30", "2026-01-02");
+    assert.deepEqual(across, ["2025-12-30", "2025-12-31", "2026-01-01", "2026-01-02"]);
+  });
+
+  it("includes a leap day rather than skipping it", () => {
+    assert.deepEqual(
+      ineligibleDatesIn(employee({ attendance_required: 0 }), "2024-02-28", "2024-03-01"),
+      ["2024-02-28", "2024-02-29", "2024-03-01"]
+    );
+  });
+
+  it("agrees with eligibleOn for every date of a window", () => {
+    const e = employee({ date_of_joining: "2026-09-12", resignation_date: "2026-09-14" });
+    const condemned = new Set(ineligibleDatesIn(e, "2026-09-10", "2026-09-16"));
+    for (const day of ["10", "11", "12", "13", "14", "15", "16"]) {
+      const date = `2026-09-${day}`;
+      assert.equal(condemned.has(date), !eligibleOn(e, date), date);
+    }
+  });
+
+  it("is bounded even if a caller passes an absurd range", () => {
+    const huge = ineligibleDatesIn(employee({ attendance_required: 0 }), "2020-01-01", "2030-01-01");
+    assert.ok(huge.length <= 367, "a guard the caller cannot disable");
+  });
+});

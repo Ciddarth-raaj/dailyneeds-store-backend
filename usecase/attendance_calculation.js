@@ -798,11 +798,21 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    * the calculation leaves whatever was stored for it last time exactly where
    * it was, which is how an exempted, resigned or corrected employee kept a
    * screenful of calculated days they are not entitled to. So the rows the
-   * requested window still holds for now-ineligible dates are DELETED in the
-   * same transaction that writes the eligible ones - see
-   * `saveCalculationsWithReconciliation` in the repository for what may and
-   * may not be deleted. Nothing outside the requested employee and window is
-   * touched, and no raw punch is touched by anything here.
+   * requested window holds for now-ineligible dates are DELETED in the same
+   * transaction that writes the eligible ones.
+   *
+   * THE DATES TO DELETE ARE COMPUTED FROM THE RULE, NOT FROM THE CALCULATION.
+   * `ineligibleDatesIn` walks the requested window and returns the dates the
+   * shared rule excludes - and that list, and only that list, is what the
+   * repository deletes. Deriving it instead from "the dates the engine did
+   * not return" would make a missing shift assignment, an unreadable shift
+   * configuration, a short punch read, an incomplete batch or a thrown
+   * exception delete somebody's attendance history, because all of those also
+   * produce no row. A date that failed to calculate keeps what it had:
+   * stale-but-recalculable is recoverable, deleted is not.
+   *
+   * Nothing outside the requested employee and window is touched, and no raw
+   * punch is touched by anything here.
    *
    * NOTHING IS QUEUED FOR APPROVAL. A recalculation that finds candidate OT
    * simply reports it; the day shows "OT Available" and the employee raises
@@ -853,11 +863,16 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
         })
       : [];
 
+    // The dates the shared rule excludes, over the REQUESTED window - stated
+    // positively, independently of whatever the engine did or did not return.
+    const ineligibleDates = eligibility.ineligibleDatesIn(employment, from, to);
+
     const stored = await attendanceCalculationRepo.saveCalculationsWithReconciliation({
       employee_id: employeeId,
       from_date: from,
       to_date: to,
       rows: days.map(toStorageRow),
+      ineligible_dates: ineligibleDates,
     });
 
     return {
@@ -870,6 +885,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       // from a run that found nothing.
       eligible_from: window ? window.from : null,
       eligible_to: window ? window.to : null,
+      ineligible_dates: ineligibleDates,
       excluded_reason: window ? null : eligibility.exclusionReason(employment, from),
       punch_redrive: redrive,
       ...stored,

@@ -128,6 +128,34 @@ PREPARE stmt FROM @normalise;
 EXECUTE stmt;
 DEALLOCATE PREPARE stmt;
 
+-- =============================== 3b. the LAST LINE OF DEFENCE ==============
+-- Assert, AFTER normalising and IMMEDIATELY BEFORE the ALTER, that every
+-- remaining non-NULL value is exactly `YYYY-MM-DD`.
+--
+-- Defence in depth rather than a known defect: the guard in section 2 already
+-- refuses to proceed on an unreadable value, and section 3 rewrites the rest.
+-- But the two are separated by two UPDATEs, and it is the ALTER that is
+-- dangerous - under a non-strict `sql_mode` MySQL would coerce anything it
+-- could not read to `0000-00-00` or NULL SILENTLY, turning a row nobody
+-- looked at into a wrong date nobody can recover. A row inserted between the
+-- guard and the ALTER by a concurrent writer is the realistic way that
+-- happens. Checking the shape one statement before the conversion costs a
+-- scan of 584 rows and removes the possibility entirely.
+--
+-- The shape test is deliberately TEXTUAL (`LIKE '____-__-__'`) rather than a
+-- second date parse: at this point every value has already been produced by
+-- DATE_FORMAT, so what is being confirmed is that section 3 actually ran and
+-- covered every row.
+SET @normalised_ok = IF(
+  (SELECT COUNT(*) FROM `new_employee`
+    WHERE `date_of_joining` IS NOT NULL
+      AND `date_of_joining` NOT LIKE '____-__-__') = 0,
+  'DO 0',
+  'SELECT 1 FROM `new_employee` WHERE `__ABORT_a_date_of_joining_value_is_still_not_YYYY_MM_DD_after_normalising__` = 1');
+PREPARE stmt FROM @normalised_ok;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
 -- ======================================================= 4. the ALTER ======
 -- NULL stays permitted: 425 of the production rows have no joining date at
 -- all, and a NOT NULL column would have to invent one for each of them.
