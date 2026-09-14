@@ -114,22 +114,32 @@ const { EmployeeBankUsecase } = require("./employee_bank");
  * `view_employees` permission. They are omitted entirely, rather than guessed
  * at, on a server where the employee-master repository is not wired.
  *
- * WHAT `cash_to_bank_pending` DISCLOSES, STATED PLAINLY. `payment_type` is a
- * B3-sensitive column, and this key lets a `view_employees` caller infer one
- * bit of it: whether this employee is paid in cash. That is deliberate and
- * it is the narrowest form of the fact the card needs - "how many people are
- * still on cash, and who" is the entire question HR asked for. No amount, no
- * account, no IFSC and not the column itself goes with it, and the repository
- * makes the comparison in SQL so the value never leaves the database.
+ * THE PAYMENT ROUTE IS SENSITIVE, AND IS GATED LIKE ONE. `payment_type` is a
+ * B3-sensitive column, and "this employee is paid in cash" is a value of it.
+ * So `cash_to_bank_pending` is sent ONLY to a caller holding
+ * `view_employee_sensitive` - the same key that unlocks NOT_APPLICABLE above,
+ * and no new permission for it.
  *
- * It is NOT gated like PF/ESI's NOT_APPLICABLE, and the difference is worth
- * naming: that gate exists because "not in the scheme" and "in the scheme"
- * are both answers a caller has no operational need for, so withholding
- * which one costs nothing. Withholding the cash answer would leave the
- * migration count reading zero for the very people running the migration -
- * a silently wrong number, which is worse than the disclosure. If that trade
- * is ever judged the wrong way round, the gate goes here, beside the read.
+ * IT IS OMITTED, NOT SENT AS FALSE. That distinction is the point rather than
+ * a detail: a `false` would let a screen count zero employees on cash and
+ * state, as a fact, that the migration is finished. A withheld key makes the
+ * card impossible to draw, which is the honest outcome - no number beats a
+ * wrong one.
  *
+ * `bank_pending` IS NOT GATED, AND MUST NOT BE. It is the Bank card's count
+ * and every caller has to see the same number; only the REASON behind it is
+ * withheld, because NOT_APPLICABLE names the route in as many words. Without
+ * the permission it reads UNKNOWN - "nothing outstanding here, no further
+ * detail".
+ *
+ * WHAT STILL LEAKS, STATED PLAINLY RATHER THAN GLOSSED. A caller without the
+ * permission can still narrow the route by inference: an employee whose
+ * `bank_status` is NOT_PROVIDED and whose `bank_pending` is nonetheless false
+ * is either paid in cash or has no recorded route, because a bank-paid
+ * employee with no account would be pending. That residue is the price of
+ * `bank_pending` being the same number for everybody, which is a requirement;
+ * closing it entirely would mean giving the two callers different Bank counts.
+ * It is one bit, narrowed to two possibilities, and nothing names cash.
  * PF AND ESI, SEPARATELY - for the Onboarding / Pending HR queue.
  *
  * `hr_onboarding_pending` answers "is anything outstanding", which is the
@@ -359,10 +369,11 @@ class EmployeeStatusSummaryUsecase {
   /**
    * @param filters the same `{ store_ids, designation_ids }` the employee
    *   list accepts, passed through unchanged.
-   * @param options `{ disclosePfEsiApplicability }` - true only for a caller
-   *   holding `view_employee_sensitive`; see the NOT_APPLICABLE note above.
+   * @param options `{ disclosePfEsiApplicability, disclosePaymentRoute }` -
+   *   both true only for a caller holding `view_employee_sensitive`; see the
+   *   NOT_APPLICABLE note and the payment-route note above.
    */
-  async list(filters, { disclosePfEsiApplicability = false } = {}) {
+  async list(filters, { disclosePfEsiApplicability = false, disclosePaymentRoute = false } = {}) {
     const employees = await this.employees.get(filters || {});
 
     const ids = [];
@@ -448,18 +459,39 @@ class EmployeeStatusSummaryUsecase {
         // The bank SECTION as the dashboard asks it - route-aware, and not to
         // be confused with `bank_status` above, which is the raw C2 answer
         // about the account itself and is unchanged.
+        //
+        // `bank_pending` IS TOLD TO EVERYONE - it is the Bank card's count and
+        // it must be the same number for every caller, which is the whole
+        // point of the route-aware rule. Only the REASON is withheld:
+        // NOT_APPLICABLE names the payment route in as many words, so without
+        // `view_employee_sensitive` it collapses to UNKNOWN - "nothing
+        // outstanding, no further detail" - rather than "they are paid in
+        // cash". COMPLETE and PENDING are unchanged for everybody.
         ...(bankSection
-          ? { bank_pending: bankSection.pending, bank_section_status: bankSection.status }
+          ? {
+              bank_pending: bankSection.pending,
+              bank_section_status:
+                !disclosePaymentRoute && bankSection.status === "NOT_APPLICABLE"
+                  ? "UNKNOWN"
+                  : bankSection.status,
+            }
           : {}),
         // The cash migration. NOT part of `hr_onboarding_pending` - see
         // `cashToBankState` - and reported so the dashboard can count it
         // without inferring it from the absence of an account.
         //
-        // OMITTED WHERE THE ROUTE WAS NEVER RECORDED, rather than sent as
-        // false. `false` is not "we do not know": a screen reading it would
-        // say this employee is paid by bank, which is a route nobody has
-        // chosen for them. The same rule every other key here follows.
-        ...(cashToBank && cashToBank.status !== "UNKNOWN"
+        // SENSITIVE, AND SENT TO NOBODY ELSE. It is a value of `payment_type`,
+        // so it goes only to a caller holding `view_employee_sensitive`. It is
+        // OMITTED rather than sent as false for everybody else, which matters
+        // more here than anywhere on this endpoint: a `false` would let a
+        // screen count zero cash employees and state as a fact that nobody is
+        // on cash, which is worse than showing no card at all.
+        //
+        // OMITTED TOO WHERE THE ROUTE WAS NEVER RECORDED, for the same reason
+        // in a different direction: `false` is not "we do not know", and a
+        // screen reading it would say this employee is paid by bank - a route
+        // nobody has chosen for them.
+        ...(disclosePaymentRoute && cashToBank && cashToBank.status !== "UNKNOWN"
           ? { cash_to_bank_pending: cashToBank.pending }
           : {}),
       };

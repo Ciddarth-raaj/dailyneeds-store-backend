@@ -143,6 +143,17 @@ function build({
 
 const byId = (rows) => Object.fromEntries(rows.map((r) => [r.employee_id, r]));
 
+/**
+ * List AS A CALLER HOLDING `view_employee_sensitive`.
+ *
+ * The payment route is gated on that key, so a test about cash has to say
+ * which caller it is asking as - and a plain `usecase.list({})` is
+ * deliberately the OTHER caller, the one who may not see it. Both states are
+ * asserted directly further down.
+ */
+const asSensitive = (usecase, filters = {}) =>
+  usecase.list(filters, { disclosePfEsiApplicability: true, disclosePaymentRoute: true });
+
 /* ================================================================ Aadhaar */
 test("an attached Aadhaar identity reads VERIFIED, and its absence reads PENDING", async () => {
   const { usecase } = build({
@@ -685,9 +696,10 @@ test("the derivation discloses whether a decision exists, never what it was", as
     "bank_pending",
     "bank_section_status",
     "bank_status",
-    // Whether they are still paid in cash. A derived operational fact; the
-    // `payment_type` column itself never leaves the database.
-    "cash_to_bank_pending",
+    // NO `cash_to_bank_pending` HERE, and that is the assertion: this is a
+    // plain caller, without `view_employee_sensitive`, so the payment route
+    // is absent entirely rather than present and false. The permission tests
+    // below check both states directly.
     "employee_id",
     "esi_status",
     "hr_onboarding_missing",
@@ -946,7 +958,7 @@ test("HR PENDING IS EXACTLY THE UNION OF THE FOUR, over every combination", asyn
               salaries: payrollDone ? { [id]: "APPLIED" } : {},
               payroll: { [id]: route },
             });
-            const row = (await usecase.list({}))[0];
+            const row = (await asSensitive(usecase))[0];
 
             const label = JSON.stringify({ aadhaarDone, bankDone, statutoryDone, payrollDone, route });
             const four = [
@@ -999,7 +1011,7 @@ test("CASE 1 - paid by bank, account not verified", async () => {
     salaries: { 910: "APPLIED" },
     payroll: { 910: 1 },
   });
-  const row = (await usecase.list({}))[0];
+  const row = (await asSensitive(usecase))[0];
   assert.equal(row.bank_pending, true, "Bank Pending = YES");
   assert.equal(row.cash_to_bank_pending, false, "Cash to Bank = NO");
   assert.equal(row.payroll_pending, true, "Payroll Pending = YES");
@@ -1015,7 +1027,7 @@ test("CASE 2 - paid in cash, everything else ready", async () => {
     salaries: { 911: "APPLIED" },
     payroll: { 911: 2 },
   });
-  const row = (await usecase.list({}))[0];
+  const row = (await asSensitive(usecase))[0];
   assert.equal(row.bank_pending, false, "Bank Pending = NO");
   assert.equal(row.bank_section_status, "NOT_APPLICABLE", "and it is N/A, not Complete");
   assert.equal(row.cash_to_bank_pending, true, "Cash to Bank = YES");
@@ -1032,7 +1044,7 @@ test("CASE 3 - paid in cash, no salary", async () => {
     salaries: {},
     payroll: { 912: 2 },
   });
-  const row = (await usecase.list({}))[0];
+  const row = (await asSensitive(usecase))[0];
   assert.equal(row.cash_to_bank_pending, true, "Cash to Bank = YES");
   assert.equal(row.payroll_pending, true, "Payroll Pending = YES");
   assert.equal(row.hr_onboarding_pending, true, "HR Pending = YES");
@@ -1049,7 +1061,7 @@ test("CASE 4 - payment type not recorded", async () => {
     salaries: { 913: "APPLIED" },
     payroll: { 913: null },
   });
-  const row = (await usecase.list({}))[0];
+  const row = (await asSensitive(usecase))[0];
   assert.equal(row.bank_pending, false, "Bank Pending = NO");
   assert.equal(row.bank_section_status, "UNKNOWN", "there is no way to say yet");
   assert.ok(!("cash_to_bank_pending" in row), "not false - nobody has said how they are paid");
@@ -1067,7 +1079,7 @@ test("CASE 5 - paid by bank, verified account, everything complete", async () =>
     salaries: { 914: "APPLIED" },
     payroll: { 914: 1 },
   });
-  const row = (await usecase.list({}))[0];
+  const row = (await asSensitive(usecase))[0];
   assert.equal(row.bank_pending, false);
   assert.equal(row.bank_section_status, "COMPLETE");
   assert.equal(row.cash_to_bank_pending, false);
@@ -1088,7 +1100,7 @@ test("THE RAW BANK ANSWER IS UNCHANGED AND STILL REPORTED", async () => {
     statutory: { 915: { pf: true, esi: true } },
     payroll: { 915: 2 }, // cash, but an account exists and is verified
   });
-  const row = (await usecase.list({}))[0];
+  const row = (await asSensitive(usecase))[0];
   assert.equal(row.bank_status, "VERIFIED");
   assert.equal(row.bank_payroll_ready, true);
   assert.equal(row.bank_section_status, "NOT_APPLICABLE", "they are not paid that way");
@@ -1147,4 +1159,91 @@ test("the payroll reads carry no money, no breakup and no effective date out", a
   ]) {
     assert.ok(!serialised.includes(forbidden), `${forbidden} must not appear in the summary`);
   }
+});
+
+/* ============== the payment route is sensitive, and is gated like one === */
+/**
+ * `payment_type` is B3-sensitive, so "paid in cash" goes only to a caller
+ * holding `view_employee_sensitive`. What matters as much as withholding it
+ * is HOW it is withheld: absent, never false - a false would let a screen
+ * count zero and announce that nobody is on cash.
+ */
+const cashEmployee = (id) => ({
+  employees: [{ employee_id: id }],
+  identities: [id],
+  statutory: { [id]: { pf: true, esi: true } },
+  salaries: { [id]: "APPLIED" },
+  payroll: { [id]: 2 },
+});
+
+test("WITHOUT view_employee_sensitive THE CASH FLAG IS ABSENT, NOT FALSE", async () => {
+  const { usecase } = build(cashEmployee(920));
+  const row = (await usecase.list({}))[0];
+  assert.ok(
+    !("cash_to_bank_pending" in row),
+    "a false here would be counted as 'nobody is on cash', which is worse than no card"
+  );
+  // The route is not named anywhere else either: NOT_APPLICABLE says "paid in
+  // cash" in as many words, so it collapses to UNKNOWN for this caller.
+  assert.equal(row.bank_section_status, "UNKNOWN");
+  assert.ok(!JSON.stringify(row).includes("NOT_APPLICABLE"));
+  assert.ok(!JSON.stringify(row).includes("payment_type"));
+});
+
+test("WITH view_employee_sensitive IT IS DISCLOSED IN FULL", async () => {
+  const { usecase } = build(cashEmployee(921));
+  const row = (await asSensitive(usecase))[0];
+  assert.equal(row.cash_to_bank_pending, true);
+  assert.equal(row.bank_section_status, "NOT_APPLICABLE");
+});
+
+test("THE PERMISSION CHANGES NOTHING ELSE ON THE ROW", async () => {
+  // The gate withholds a reason, never a count: Bank, Statutory, Payroll and
+  // HR must be identical for both callers, or two people looking at the same
+  // dashboard would see different numbers.
+  const fixtures = [
+    ["cash, finished", cashEmployee(922)],
+    ["bank, unverified", {
+      employees: [{ employee_id: 923, ...account }],
+      verifications: [{ ...verified(923), status: "FAILED", name_match_verdict: null }],
+      identities: [923],
+      statutory: { 923: { pf: true, esi: true } },
+      salaries: { 923: "APPLIED" },
+      payroll: { 923: 1 },
+    }],
+    ["route unrecorded", {
+      employees: [{ employee_id: 924, ...account }],
+      verifications: [verified(924)],
+      identities: [924],
+      statutory: { 924: { pf: true, esi: true } },
+      salaries: { 924: "APPLIED" },
+      payroll: { 924: null },
+    }],
+  ];
+
+  for (const [label, fixture] of fixtures) {
+    const plain = (await build(fixture).usecase.list({}))[0];
+    const sensitive = (await asSensitive(build(fixture).usecase))[0];
+    for (const key of [
+      "bank_pending", "statutory_pending", "payroll_pending",
+      "hr_onboarding_pending", "bank_status", "bank_payroll_ready", "aadhaar_status",
+    ]) {
+      assert.deepEqual(plain[key], sensitive[key], `${label}: ${key} must not depend on the permission`);
+    }
+    assert.deepEqual(
+      plain.hr_onboarding_missing,
+      sensitive.hr_onboarding_missing,
+      `${label}: HR reasons must not depend on the permission`
+    );
+  }
+});
+
+test("A CASH EMPLOYEE IS STILL NOT BANK PENDING FOR AN UNPRIVILEGED CALLER", async () => {
+  // The functional rule survives the gate: the Bank card shows the same
+  // number to everyone, only the reason behind it is withheld.
+  const { usecase } = build(cashEmployee(925));
+  const row = (await usecase.list({}))[0];
+  assert.equal(row.bank_pending, false);
+  assert.equal(row.hr_onboarding_pending, false, "HR is still the union of the four");
+  assert.deepEqual(row.hr_onboarding_missing, []);
 });
