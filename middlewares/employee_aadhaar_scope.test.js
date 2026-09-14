@@ -88,10 +88,14 @@ const GRANTS = {
     P.VIEW_EMPLOYEE_LIFECYCLE, P.VIEW_EMPLOYEE_AADHAAR,
     P.EMPLOYEE_SCOPE_ALL_BRANCHES,
   ],
-  // THE STORE MANAGER. Note what is ABSENT: view_employee_lifecycle,
+  // THE STORE MANAGER, as an administrator configures them: the Aadhaar key
+  // ticked deliberately on the rights screen. The migration does NOT grant it
+  // to Store Managers - it neither infers from employee_create/employee_edit
+  // nor guesses a designation name - so this fixture models the state after
+  // that administrator action, which is the state the business rule describes.
+  //
+  // Note what is ABSENT and stays absent: view_employee_lifecycle,
   // employee_scope_all_branches, view_employee_sensitive, view_aadhaar_full.
-  // The Aadhaar key arrives from the migration because they hold
-  // employee_create / employee_edit.
   [D.MANAGER]: [
     P.VIEW_EMPLOYEES, P.EMPLOYEE_CREATE, P.EMPLOYEE_EDIT, P.VIEW_EMPLOYEE_AADHAAR,
   ],

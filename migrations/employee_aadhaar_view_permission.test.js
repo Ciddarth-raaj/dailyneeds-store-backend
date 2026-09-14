@@ -38,18 +38,39 @@ describe("up", () => {
     assert.deepEqual([...new Set(declared)], [KEY]);
   });
 
-  it("GRANTS TO DESIGNATIONS THAT ALREADY HOLD LIFECYCLE, CREATE OR EDIT", () => {
-    // The grant follows the database rather than naming a designation: every
-    // designation that can read this status today keeps it, and the onboarding
-    // and edit population - who already create the Aadhaar identity - gain it.
-    const sources = [...stmts[1].matchAll(/'(view_employee_lifecycle|employee_create|employee_edit)'/g)]
-      .map((m) => m[1]);
-    assert.deepEqual(
-      [...new Set(sources)].sort(),
-      ["employee_create", "employee_edit", "view_employee_lifecycle"]
-    );
+  it("GRANTS FOR CONTINUITY ONLY - today's lifecycle holders, plus HR by name", () => {
+    // Set 1: exactly the designations that can read this status TODAY through
+    // the lifecycle gate this migration replaces. Net effect on who can see
+    // what is zero, so re-keying the route takes nothing away.
+    assert.match(stmts[1], /'view_employee_lifecycle'/);
     assert.match(stmts[1], /`is_active` = TRUE/, "an inactive grant is not a grant");
-    assert.match(stmts[1], /SELECT DISTINCT/, "a designation holding two sources is inserted once");
+    // Set 2: HR, by the one designation name this codebase relies on.
+    assert.match(stmts[1], /UPPER\(TRIM\(`designation_name`\)\) = 'HR EXECUTIVE'/);
+    assert.match(stmts[1], /\bUNION\b/, "a designation in both sets is inserted once");
+  });
+
+  it("DOES NOT INFER THE GRANT FROM employee_create OR employee_edit", () => {
+    // The correction this version makes. Those keys are held well beyond
+    // Store Manager, so inferring from them would hand Aadhaar visibility to
+    // designations nobody decided to give it to.
+    for (const inferred of ["employee_create", "employee_edit", "add_employees", "view_employees"]) {
+      assert.ok(
+        !sql.includes(`'${inferred}'`),
+        `Aadhaar access must not be inferred from ${inferred}`
+      );
+    }
+  });
+
+  it("DOES NOT GUESS A STORE MANAGER DESIGNATION BY NAME", () => {
+    // `20260919120000-attendance-v2-approvals` already records why: which
+    // designations are the Store Managers is a business fact nobody has
+    // written down, and a migration that guessed would assign access in the
+    // one place it could never be reviewed. An administrator grants it.
+    const names = [...sql.matchAll(/designation_name`\)\) = '([^']+)'/g)].map((m) => m[1]);
+    assert.deepEqual(names, ["HR EXECUTIVE"], "only the name this codebase already relies on");
+    for (const guess of ["STORE MANAGER", "STORE_MANAGER", "MANAGER", "SUPERVISOR", "OPERATIONS"]) {
+      assert.ok(!sql.toUpperCase().includes(`'${guess}'`), `${guess} must not be guessed`);
+    }
   });
 
   it("GRANTS NO OTHER KEY - especially not lifecycle or the full number", () => {

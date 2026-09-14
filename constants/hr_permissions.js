@@ -116,6 +116,15 @@ module.exports = {
   // IT GRANTS NO BRANCH. Like every other key here it says WHAT may be done,
   // never WHERE - `employee_scope_all_branches` and the branch resolver decide
   // that, and the route applies both.
+  //
+  // THE MIGRATION GRANTS IT ONLY FOR CONTINUITY - to designations that already
+  // hold `view_employee_lifecycle`, which is exactly who can read this status
+  // today - and to HR EXECUTIVE by name. STORE MANAGERS ARE NOT GRANTED IT BY
+  // MIGRATION: an administrator ticks it for their designation on the rights
+  // screen. Inferring it from `employee_create` / `employee_edit` was tried
+  // and rejected - those keys reach well beyond Store Manager - and guessing
+  // a designation by name is what `20260919120000-attendance-v2-approvals`
+  // already records this codebase as refusing to do.
   VIEW_EMPLOYEE_AADHAAR: "view_employee_aadhaar",
 
   // Stage 0C / C2. Running a paid external bank check, and accepting a name

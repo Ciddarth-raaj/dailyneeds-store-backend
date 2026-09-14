@@ -23,21 +23,38 @@
 --
 -- ================================================== WHO IT IS GRANTED TO ===
 --
--- Chosen from what designations ALREADY hold, rather than by naming a
--- designation, so the grant follows this database rather than a guess:
+-- TWO SETS, AND NEITHER IS INFERRED FROM WHAT SOMEBODY CAN DO TO AN EMPLOYEE.
 --
---   view_employee_lifecycle   everyone who can read this status TODAY. They
---                             keep it, so the change takes nothing away.
---   employee_create           the onboarding population - they already run
---                             the Aadhaar verification itself.
---   employee_edit             they can already ATTACH a verified Aadhaar to
---                             an employee.
+--   1. Designations that ALREADY hold `view_employee_lifecycle`. This is
+--      CONTINUITY, not a grant: they are exactly the designations that can
+--      read this Aadhaar status today, through the lifecycle gate this
+--      migration replaces. Without it, re-keying the route would silently
+--      TAKE the capability away from whoever holds lifecycle and is not HR.
+--      The net effect on who can see what is zero.
 --
--- THE SECOND AND THIRD ARE A DELIBERATE WIDENING, and it is the one the
--- approved rule asks for: these designations can already create the Aadhaar
--- identity, and this lets them see the status of the thing they created.
--- Nothing else moves - no salary, bank, PAN, employment history or
--- cross-branch access comes with it.
+--   2. 'HR EXECUTIVE', named explicitly, as seven earlier migrations in this
+--      directory already do. Almost certainly a no-op beside (1), and stated
+--      anyway so HR's access does not depend on a key they happen to hold.
+--
+-- STORE MANAGER IS DELIBERATELY NOT GRANTED HERE, and that is the correction
+-- this version makes. An earlier draft inferred the grant from
+-- `employee_create` / `employee_edit` - "they can already attach an Aadhaar,
+-- so let them see it" - which reads reasonably and is wrong: those keys are
+-- held by designations well beyond Store Manager, so the inference would have
+-- handed Aadhaar visibility to roles nobody decided to give it to.
+--
+-- Nor is it granted by designation NAME. This codebase has already recorded
+-- the reason, in `20260919120000-attendance-v2-approvals`: only 'HR EXECUTIVE'
+-- is a designation name it relies on, and which designations are the Store
+-- Managers "is a business fact nobody has recorded". A migration that guessed
+-- would be assigning access in the one place it could never be reviewed.
+--
+-- SO THIS MIGRATION ALONE DOES NOT RESTORE AADHAAR FOR STORE MANAGERS. An
+-- administrator ticks `view_employee_aadhaar` for their designation on the
+-- Designation rights screen - one deliberate, visible, reversible decision,
+-- which is precisely the approved rule: other designations get it only if we
+-- give it to them. The route is ready for them the moment they do, and the
+-- branch scope confines them to their own branches when they arrive.
 --
 -- Administrators need no grant: the permission middleware bypasses this table
 -- for `user_type = 2`.
@@ -50,18 +67,26 @@ INSERT INTO `all_permissions` (`permission_key`)
    WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'view_employee_aadhaar');
 
 -- ------------------------------------------------------------------ grant
--- One row per designation that already holds any of the three source keys.
--- `DISTINCT` because a designation holding two of them must not be inserted
--- twice; `permissions` has no unique key to catch it.
+-- One row per designation in either set. `UNION` de-duplicates, so a
+-- designation in both is inserted once; `permissions` has no unique key to
+-- catch a double insert.
 --
--- A row that exists but is INACTIVE is left alone: re-enabling a permission
--- an administrator switched off is their decision, not a migration's.
+-- A row that exists but is INACTIVE is left alone: re-enabling a permission an
+-- administrator switched off is their decision, not a migration's.
 INSERT INTO `permissions` (`permission_key`, `designation_id`, `is_active`)
   SELECT 'view_employee_aadhaar', d.`designation_id`, TRUE
-    FROM ( SELECT DISTINCT `designation_id`
+    FROM (
+           -- 1. continuity: everyone who can read Aadhaar status today
+           SELECT `designation_id`
              FROM `permissions`
-            WHERE `permission_key` IN ('view_employee_lifecycle', 'employee_create', 'employee_edit')
-              AND `is_active` = TRUE ) d
+            WHERE `permission_key` = 'view_employee_lifecycle'
+              AND `is_active` = TRUE
+           UNION
+           -- 2. HR, by the name this codebase already relies on
+           SELECT `designation_id`
+             FROM `designation`
+            WHERE UPPER(TRIM(`designation_name`)) = 'HR EXECUTIVE'
+         ) d
    WHERE NOT EXISTS (
      SELECT 1 FROM `permissions` p
       WHERE p.`permission_key` = 'view_employee_aadhaar'

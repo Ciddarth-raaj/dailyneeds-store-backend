@@ -52,8 +52,9 @@ const GRANTS = {
     P.EMPLOYEE_CREATE, P.EMPLOYEE_EDIT, P.EMPLOYEE_RESIGN, P.EMPLOYEE_REJOIN,
     P.VIEW_EMPLOYEE_LIFECYCLE,
     // The Aadhaar STATUS read is its own key now, and no longer employment
-    // history's. The migration grants it to every designation already holding
-    // any of lifecycle / create / edit, which is why HR has it here.
+    // history's. HR holds it because the migration grants it to today's
+    // `view_employee_lifecycle` holders - continuity, so nothing HR could read
+    // before becomes unreadable - and to HR EXECUTIVE by name.
     P.VIEW_EMPLOYEE_AADHAAR,
   ],
   [OUTLET_DESIGNATION]: ["view_stores"],
@@ -1031,9 +1032,9 @@ describe("permission layering after the C2 bank grant", () => {
     P.VIEW_EMPLOYEE_LIFECYCLE,
     P.VERIFY_EMPLOYEE_BANK, P.CONFIRM_BANK_NAME_MISMATCH,
     P.VIEW_EMPLOYEE_SENSITIVE, P.EDIT_EMPLOYEE_SENSITIVE,
-    // From the Aadhaar-status migration, which grants this to every
-    // designation already holding lifecycle, create or edit. HR Executive
-    // holds all three, so it arrives here and HR's reach is unchanged.
+    // From the Aadhaar-status migration, which grants this for continuity to
+    // today's `view_employee_lifecycle` holders and to HR EXECUTIVE by name.
+    // HR Executive is both, so it arrives here and HR's reach is unchanged.
     P.VIEW_EMPLOYEE_AADHAAR,
   ];
 
