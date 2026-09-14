@@ -254,31 +254,72 @@ function computeMonthlyAttendancePayroll(input = {}) {
   const heldDates = [];
   const unratedDates = [];
 
-  // EXEMPT FROM BIOMETRIC ATTENDANCE - paid for the month's base days, and
-  // no day is read at all.
+  // EXEMPT FROM BIOMETRIC ATTENDANCE - paid their ordinary salary for the
+  // period they were employed, and no day is read at all.
   //
   // WHY IT IS NOT SIMPLY "SKIP THE DEDUCTION". Attendance pay in v2 is
   // `attended days x Daily Rate`, so an employee with no punches has no
   // attended days and would be paid nothing. For somebody who is exempt,
   // that IS the deduction - the largest one possible - and the requirement
-  // is that the absence of a biometric punch never costs them money. So
-  // they are deemed present for every day of the month's own base: the
-  // window, the notional offs and the base-day arithmetic are exactly the
-  // same as for everybody else, and the pay comes out at the month's base
-  // rather than at zero.
+  // is that the absence of a biometric punch never costs them money.
   //
-  // WHAT IS NOT PAID. No extra days, because an extra day is evidence of
-  // attendance beyond the base and there is none; no overtime, for the same
-  // reason; and no shortage, which is what "no deduction" means. Nothing
-  // here touches their status, their salary record or their eligibility -
-  // exempt is not resigned, not inactive and not unpaid.
+  // THE BASIS IS THE ESTABLISHED 26-DAY ONE, AND IT IS A CEILING.
+  //
+  //   employed the whole month  -> exactly SALARY_DAYS_PER_MONTH (26)
+  //   employed part of it       -> the period's own base days, capped at 26
+  //
+  // Both halves matter, and an earlier version of this got both wrong by
+  // paying `base_days` outright:
+  //
+  //   a 31-day month gives base_days 27, so the exemption INVENTED 27/26 of
+  //   a month's gross - extra salary created by the flag, which it must
+  //   never do;
+  //   a 28-day February gives base_days 24, so a full month of employment
+  //   paid 24/26 - an underpayment caused by exactly the missing punches
+  //   the exemption exists to stop being read as evidence.
+  //
+  // Capping at the salary-day basis fixes the first and paying the full
+  // basis for a full month fixes the second, so an exempt employee is paid
+  // one month's gross for one month of employment and never a rupee more.
+  //
+  // WHAT IS STILL BOUNDED, AND DELIBERATELY. `window` is the SAME
+  // `availableDates` every other employee's month is measured with, so the
+  // joining date and the resignation / last working date bound an exempt
+  // employee exactly as they bound anybody else: a mid-month joiner is
+  // pro-rated, a leaver is pro-rated, and somebody not employed in the
+  // month at all is paid nothing. The exemption ignores biometric
+  // attendance; it does not ignore the employment period.
+  //
+  // WHAT IS NOT PAID: no extra days, because an extra day is evidence of
+  // attendance beyond the base and there is none; and no overtime, for the
+  // same reason - the engine reports no candidate OT for an exempt day, so
+  // no OT request can arise from one. Nothing here touches their status,
+  // their salary record or their eligibility: exempt is not resigned, not
+  // inactive and not unpaid.
   if (attendance_required === false) {
-    // Deemed present for the month's BASE days - the available dates less
-    // their notional offs - so `salary_days` is the whole base and
-    // `extra_days` is zero. Passing the raw available count instead would
-    // credit them with extra days they have no evidence of working.
-    const baseDays = splitSalaryAndExtraDays(window.count, window.count).base_days;
-    const exemptSplit = splitSalaryAndExtraDays(baseDays, window.count);
+    const windowSplit = splitSalaryAndExtraDays(0, window.count);
+    const wholeMonth = window.count === daysInMonth(year, month) && window.count > 0;
+    const deemedDays = Math.min(
+      wholeMonth ? salaryDaysPerMonth : windowSplit.base_days,
+      salaryDaysPerMonth
+    );
+
+    // The split is built here rather than through `splitSalaryAndExtraDays`,
+    // because that helper exists to divide ATTENDED days against the base
+    // and would spill anything above the base into EXTRA days. A deemed day
+    // is not an attended one: a full February has 24 base days by the
+    // notional-offs arithmetic, and paying a full month there is 26 salary
+    // days and ZERO extra days, not 24 and 2. `available_dates`,
+    // `notional_offs` and `base_days` are still reported exactly as the
+    // window computes them, so the row can be audited against any other.
+    const exemptSplit = {
+      available_dates: windowSplit.available_dates,
+      notional_offs: windowSplit.notional_offs,
+      base_days: windowSplit.base_days,
+      attendance_days: deemedDays,
+      salary_days: deemedDays,
+      extra_days: 0,
+    };
     const exemptEarnings =
       dailyRatePaise === null ? null : Math.round(exemptSplit.salary_days * dailyRatePaise);
     return {
@@ -288,7 +329,7 @@ function computeMonthlyAttendancePayroll(input = {}) {
       extra_day_earnings: toRupees(dailyRatePaise === null ? null : 0),
       total_attendance_payable: toRupees(exemptEarnings),
       attendance_exemption:
-        "Biometric attendance is not required for this employee. The month is paid at its base days; no shortage, deduction or overtime is derived from the absence of punches.",
+        "Biometric attendance is not required for this employee. They are paid the ordinary 26-day basis for the period they were employed in this month - bounded by joining and last working date exactly as everybody else is - and no shortage, deduction, extra day or overtime is derived from the absence of punches.",
     };
   }
 

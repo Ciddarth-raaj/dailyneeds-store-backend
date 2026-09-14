@@ -42,16 +42,47 @@ ALTER TABLE `new_employee`
 -- `usecase/employee_master.js#createEmployee`; this closes the rows it has
 -- already left behind.
 --
--- THE EFFECTIVE DATE IS NOT A BLANKET CUTOVER. A0 could only date its rows
--- at the v2 cutover because nothing recorded when those assignments were
--- made. These employees do have such a date - the day they joined - so the
--- row is dated to the LATER of their joining date and the cutover. Later,
--- because no history is invented before v2 began; the joining date, because
--- an employee who joined in October was on no shift in September and a
--- cutover-dated row would assert that they were.
+-- THE EFFECTIVE DATE IS NOT A BLANKET CUTOVER, AND IT IS NEVER EARLIER THAN
+-- ONE. A0 could only date its rows at the v2 cutover because nothing
+-- recorded when those assignments were made. These employees do have such a
+-- date - the day they joined - so the row is dated to:
 --
--- Re-runnable: the guard is per employee, so a second run inserts nothing,
--- and an employee who has ANY history row is left entirely alone.
+--     GREATEST(2026-09-01, their joining date)
+--
+-- LATER of the two, both ways round, and each half is load-bearing:
+--
+--   * never before 2026-09-01, because that is the established v2 rule: no
+--     dated history is invented before the cutover, the earliest date any
+--     punch in this system can belong to and the date every work shift's
+--     first configuration version is effective from. An employee who joined
+--     in 2019 gets the cutover, exactly as A0 gave them.
+--   * never before they joined, because a cutover-dated row for an October
+--     joiner would assert they were rostered on a shift in September, a
+--     month they were not employed.
+--
+-- So the date is always the more conservative of the two, and this can only
+-- ever claim LESS history than A0's blanket cutover did - never more.
+--
+-- THE JOINING DATE IS READ THROUGH THE ONE SHARED PARSER. `date_of_joining`
+-- is a VARCHAR holding three shapes - an ISO prefix sometimes followed by a
+-- time, the Indian long form "05 September 2021", and (for most production
+-- rows) nothing at all - and the CASE below is character-identical to
+-- `JOINED_ON` in `utils/joining_date.js`, which the lifecycle backfill, the
+-- dashboard and payroll already share. A bare STR_TO_DATE(..., '%Y-%m-%d')
+-- would silently return NULL for two of those three shapes and quietly date
+-- a genuine October joiner at the cutover.
+--
+-- An absent or unreadable joining date falls back to the cutover, which is
+-- the A0 answer and the safe one: it claims no more than A0 already did.
+--
+-- WHY THIS CANNOT DAMAGE LEGITIMATE HISTORY. The guard is per EMPLOYEE and
+-- not per row: an employee with ANY assignment row is skipped entirely, so
+-- somebody who joined on Shift A in April and moved to Shift B in August
+-- keeps both rows untouched and gains nothing. Only an employee with ZERO
+-- rows is written to, and they receive exactly ONE - so no row is
+-- overwritten, none is deleted, no duplicate is created, and one row cannot
+-- overlap anything. A second run finds the row it wrote and inserts
+-- nothing.
 INSERT INTO `employee_work_shift_assignment`
        (`employee_id`, `work_shift_id`, `effective_from`, `source`, `note`, `created_by`)
   SELECT ne.`employee_id`,
@@ -59,7 +90,13 @@ INSERT INTO `employee_work_shift_assignment`
          GREATEST(
            '2026-09-01',
            COALESCE(
-             STR_TO_DATE(NULLIF(ne.`date_of_joining`, ''), '%Y-%m-%d'),
+             CASE
+               WHEN ne.date_of_joining IS NULL OR TRIM(ne.date_of_joining) = '' THEN NULL
+               WHEN ne.date_of_joining LIKE '____-__-__%'
+                    AND STR_TO_DATE(LEFT(ne.date_of_joining, 10), '%Y-%m-%d') IS NOT NULL
+                 THEN STR_TO_DATE(LEFT(ne.date_of_joining, 10), '%Y-%m-%d')
+               ELSE STR_TO_DATE(TRIM(ne.date_of_joining), '%d %M %Y')
+             END,
              '2026-09-01'
            )
          ),

@@ -98,42 +98,124 @@ describe("the payroll month", () => {
       ...over,
     });
 
-  it("pays an exempt employee the month's base days, not nothing", () => {
-    const exempt = month({ attendance_required: false });
-    assert.equal(exempt.base_days > 0, true);
-    assert.equal(exempt.attendance_days, exempt.base_days);
-    assert.equal(exempt.salary_days, exempt.base_days);
-    assert.equal(Number(exempt.total_attendance_payable) > 0, true);
+  const exempt = (over = {}) => month({ attendance_required: false, ...over });
+
+  /* ------------------------------------------- the 26-day basis holds */
+
+  it("pays EXACTLY one month's gross for a full month, whatever the month's length", () => {
+    // THE REGRESSION. Paying `base_days` outright gave 27 days in a 31-day
+    // month (extra salary the exemption invented) and 24 in February (an
+    // underpayment caused by the very missing punches the flag exists to
+    // stop being read as evidence). Both are the same bug seen from two
+    // sides, and both are fixed by paying the established 26-day basis.
+    for (const [m, days] of [[9, 30], [10, 31], [2, 28], [1, 31], [4, 30]]) {
+      const r = exempt({ month: m });
+      assert.equal(r.available_dates, days, `month ${m} window`);
+      assert.equal(Number(r.total_attendance_payable), 26000, `month ${m} must pay one gross`);
+      assert.equal(r.salary_days, 26, `month ${m} salary days`);
+    }
   });
 
-  it("takes NO deduction from them for the absence of punches", () => {
-    const exempt = month({ attendance_required: false });
-    assert.equal(exempt.shortage_minutes, 0);
-    assert.equal(Number(exempt.missing_minute_deduction), 0);
-    assert.deepEqual(exempt.held_dates, []);
-    assert.equal(exempt.is_final, true);
+  it("never pays MORE than a month's gross - the exemption creates no extra salary", () => {
+    for (let m = 1; m <= 12; m += 1) {
+      const r = exempt({ month: m });
+      assert.ok(
+        Number(r.total_attendance_payable) <= 26000,
+        `month ${m} paid ${r.total_attendance_payable}`
+      );
+      assert.equal(r.extra_days, 0, `month ${m} must create no extra days`);
+      assert.equal(Number(r.extra_day_earnings), 0, `month ${m} must pay no extra days`);
+    }
   });
 
-  it("pays them no extra days and no overtime - neither has any evidence", () => {
-    const exempt = month({ attendance_required: false });
-    assert.equal(exempt.extra_days, 0);
-    assert.equal(exempt.approved_ot_minutes, 0);
-    assert.equal(Number(exempt.extra_day_earnings), 0);
-    assert.equal(Number(exempt.approved_ot_earnings), 0);
+  it("uses the shared salary-day basis rather than a literal", () => {
+    const basis = require("../config/statutory").salary.salaryDaysPerMonth;
+    assert.equal(exempt({ month: 10 }).salary_days, basis);
+    assert.equal(Number(exempt({ month: 10 }).daily_rate), 26000 / basis);
+  });
+
+  /* ---------------------------------- the employment period still binds */
+
+  it("respects the JOINING date - a mid-month joiner is pro-rated, not given a full month", () => {
+    const r = exempt({ month: 10, joined_on: "2026-10-20" });
+    assert.equal(r.available_from, "2026-10-20");
+    assert.equal(r.available_dates, 12);
+    assert.equal(r.salary_days, 11);
+    assert.equal(Number(r.total_attendance_payable), 11000);
+  });
+
+  it("respects the RESIGNATION / last working date", () => {
+    const r = exempt({ month: 10, ended_on: "2026-10-10" });
+    assert.equal(r.available_to, "2026-10-10");
+    assert.equal(r.available_dates, 10);
+    assert.equal(r.salary_days, 9);
+    assert.equal(Number(r.total_attendance_payable), 9000);
+  });
+
+  it("pays NOTHING for a month the employee was not employed in at all", () => {
+    for (const bounds of [{ joined_on: "2026-11-01" }, { ended_on: "2026-08-31" }]) {
+      const r = exempt({ month: 10, ...bounds });
+      assert.equal(r.available_dates, 0);
+      assert.equal(r.salary_days, 0);
+      assert.equal(Number(r.total_attendance_payable), 0);
+    }
+  });
+
+  it("bounds an exempt employee with the SAME window as everybody else", () => {
+    // Not a second, laxer rule: the identical `availableDates` output.
+    const bounds = { month: 10, joined_on: "2026-10-05", ended_on: "2026-10-25" };
+    const e = exempt(bounds);
+    const ordinary = month(bounds);
+    assert.equal(e.available_from, ordinary.available_from);
+    assert.equal(e.available_to, ordinary.available_to);
+    assert.equal(e.available_dates, ordinary.available_dates);
+    assert.equal(e.notional_offs, ordinary.notional_offs);
+    assert.equal(e.base_days, ordinary.base_days);
+  });
+
+  /* --------------------------------------------- no attendance effects */
+
+  it("takes NO deduction for the absence of punches", () => {
+    const r = exempt();
+    assert.equal(r.shortage_minutes, 0);
+    assert.equal(Number(r.missing_minute_deduction), 0);
+    assert.deepEqual(r.held_dates, []);
+    assert.equal(r.is_final, true);
+  });
+
+  it("pays no overtime - an exempt day reports no candidate OT for one to be raised from", () => {
+    const r = exempt();
+    assert.equal(r.approved_ot_minutes, 0);
+    assert.equal(Number(r.approved_ot_earnings), 0);
   });
 
   it("says out loud why the month carries no derived attendance", () => {
-    assert.match(month({ attendance_required: false }).attendance_exemption, /not required/i);
+    assert.match(exempt().attendance_exemption, /not required/i);
+    assert.match(exempt().attendance_exemption, /joining and last working date/i);
+  });
+
+  /* ---------------------------------------- nothing else is bypassed */
+
+  it("still pays nothing when there is no approved salary record", () => {
+    // An exempt employee with no salary is not paid a guessed one.
+    const r = exempt({ monthly_gross: null });
+    assert.equal(r.total_attendance_payable, null);
+    assert.equal(r.monthly_gross, null);
   });
 
   it("carries the same keys as an ordinary month, so no caller special-cases it", () => {
-    const exempt = Object.keys(month({ attendance_required: false })).sort();
+    const exemptKeys = Object.keys(exempt()).sort();
     const ordinary = Object.keys(month()).sort();
     assert.deepEqual(
-      ordinary.filter((k) => !exempt.includes(k)),
+      ordinary.filter((k) => !exemptKeys.includes(k)),
       [],
       "an exempt month is missing keys an ordinary one has"
     );
+  });
+
+  it("asserts nothing about PF or ESI - the statutory handoff is unchanged", () => {
+    assert.equal(exempt().statutory_handoff, month().statutory_handoff);
+    assert.match(exempt().statutory_handoff, /salary_engine\.js remains the statutory authority/);
   });
 
   it("without the flag, an employee with no days is still paid nothing", () => {
@@ -143,5 +225,24 @@ describe("the payroll month", () => {
     assert.equal(ordinary.attendance_days, 0);
     assert.equal(Number(ordinary.total_attendance_payable), 0);
     assert.equal(ordinary.attendance_required, true);
+  });
+
+  it("leaves an ATTENDING employee's month arithmetic exactly as it was", () => {
+    // The 31-day / 27-base-day behaviour is the established v2 model for
+    // somebody who actually attended 27 days, and the exemption fix must
+    // not have touched it.
+    const days = Array.from({ length: 27 }, (_, i) => ({
+      attendance_date: `2026-10-${String(i + 1).padStart(2, "0")}`,
+      attendance_day_count: 1,
+      is_final: true,
+      nrm_minutes: 480,
+      shortage_minutes: 0,
+      approved_ot_minutes: 0,
+      ot_rate: 1,
+    }));
+    const r = month({ month: 10, days });
+    assert.equal(r.base_days, 27);
+    assert.equal(r.salary_days, 27);
+    assert.equal(Number(r.total_attendance_payable), 27000);
   });
 });
