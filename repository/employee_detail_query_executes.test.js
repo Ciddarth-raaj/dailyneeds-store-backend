@@ -144,6 +144,32 @@ test("6. AN EMPLOYEE THAT DOES NOT EXIST RETURNS NO ROWS, NOT AN ERROR", () => {
   assert.deepEqual(runDetail(db, 999999), []);
 });
 
+test("6. THE JOINED QUERY PRESERVES THE EMPLOYEE'S OWN PLACEMENT IDS", () => {
+  // `department_id`, `designation_id` and `shift_id` exist on BOTH sides of
+  // three of these joins, and `store_id` is what the branch scope is decided
+  // from. A join that overwrote any of them would move an employee to another
+  // branch, department or designation in the response alone.
+  const db = build();
+  db.exec("INSERT INTO department (department_id, department_name, status) VALUES (9,'Warehouse',1)");
+  db.exec("INSERT INTO designation (designation_id, designation_name, status, online_portal) VALUES (9,'Packer',1,0)");
+  db.exec("INSERT INTO outlets (outlet_id, outlet_name, outlet_nickname, is_active, created_at, updated_at) VALUES (9,'Moolakulam','MLK',1,'x','y')");
+  db.prepare(
+    `INSERT INTO new_employee (employee_id, employee_name, status, store_id, shift_id, department_id, designation_id)
+     VALUES (411, 'Placement Person', 1, 9, 7, 9, 9)`
+  ).run();
+
+  const [row] = runDetail(db, 411);
+  assert.equal(row.store_id, 9, "the branch the scope is decided from");
+  assert.equal(row.department_id, 9);
+  assert.equal(row.designation_id, 9);
+  assert.equal(row.shift_id, 7);
+  // And the display names resolve from those ids rather than replacing them.
+  assert.equal(row.outlet_name, "Moolakulam");
+  assert.equal(row.outlet_nickname, "MLK");
+  assert.equal(row.department_name, "Warehouse");
+  assert.equal(row.designation_name, "Packer");
+});
+
 test("the joined display columns arrive under the keys consumers use", () => {
   const db = build();
   insertEmployee(db, { employee_id: 408, status: 1 });
