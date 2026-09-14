@@ -22,11 +22,49 @@
 -- =====================================================================
 
 -- ------------------------------------------------------------ 0. the input
--- The id list the endpoint actually passes: every employee the directory
--- returns. Use these ids for :IDS below.
-SELECT GROUP_CONCAT(ne.employee_id ORDER BY ne.employee_id) AS ids
+-- The population the endpoint actually passes: every employee the directory
+-- returns, which is `repository/employee_scope.js#buildEmployeeScope` with no
+-- store or designation filter. The predicate below is that clause verbatim.
+--
+-- NO GROUP_CONCAT HERE, DELIBERATELY. Building the id list inside MySQL means
+-- `group_concat_max_len` (1024 bytes by default) can truncate it silently -
+-- no error, no warning in a batch client - and the whole validation would
+-- then run against a prefix of the population while reporting a clean pass.
+-- A validation that can quietly check half the company is worse than none.
+-- So section 0 emits ONE ROW PER EMPLOYEE and a SEPARATE count, and the run
+-- instructions join them into a list in the shell, where a truncation would
+-- show up as a count mismatch before anything else runs.
+
+-- 0a. THE INDEPENDENT COUNT. Derived on its own, not from the list below, so
+--     the two can be compared against each other. Record this number.
+SELECT COUNT(*) AS directory_population
   FROM `new_employee` ne
  WHERE ne.employee_name NOT IN (SELECT employee_name FROM `resignation`);
+
+-- 0b. THE IDS, one per row. Export with `-N -B`, count the lines, and confirm
+--     the count equals 0a BEFORE substituting them for :IDS.
+--     STOP THE VALIDATION IF THEY DIFFER - sections 1-6 would then be
+--     checking part of the population and passing.
+SELECT ne.employee_id
+  FROM `new_employee` ne
+ WHERE ne.employee_name NOT IN (SELECT employee_name FROM `resignation`)
+ ORDER BY ne.employee_id;
+
+-- 0c. ONE WAY 0a AND 0b CAN BOTH BE ZERO, and it is not an empty company.
+--     `x NOT IN (subquery)` returns NO ROWS AT ALL if the subquery yields a
+--     single NULL - a standard SQL three-valued-logic trap. If `resignation`
+--     holds a NULL or empty name, the predicate above excludes everybody.
+--
+--     THIS IS NOT A BUG IN THE SCRIPT. The application builds the same
+--     exclusion from the same unfiltered `SELECT employee_name FROM
+--     resignation`, so the same trap would empty the real dashboard. It is
+--     reported here so a zero population is recognised for what it is.
+--     Informational; a non-zero count is a finding to raise, not a failure of
+--     this validation.
+SELECT SUM(employee_name IS NULL)                       AS null_names,
+       SUM(employee_name IS NOT NULL AND TRIM(employee_name) = '') AS empty_names,
+       COUNT(*)                                         AS resignation_rows
+  FROM `resignation`;
 
 -- =============== 1. getCurrentSalaryStatusMany: one row per employee ====
 -- THE FAN-OUT CHECK, and the one that matters most: a JOIN that duplicated a
@@ -97,21 +135,86 @@ SELECT b.employee_id, NULL, b.salary_id, NULL, b.ctc_status
   FROM bulk b
  WHERE NOT EXISTS (SELECT 1 FROM ranked r WHERE r.rn = 1 AND r.employee_id = b.employee_id);
 
--- 2b. MySQL 5.7 fallback: the tie-break case, checked directly. Two APPROVED
---     rows sharing an effective date must resolve to the LATER salary_id.
---     PASS: `chosen_salary_id` equals `max_salary_id` on every row.
-SELECT s.`employee_id`, s.`effective_from`, COUNT(*) AS rows_at_this_date,
-       MAX(s.`salary_id`) AS max_salary_id,
-       (SELECT s2.`salary_id` FROM `employee_salary` s2
-         WHERE s2.`employee_id` = s.`employee_id`
-           AND s2.`status` = 'APPROVED'
-           AND s2.`effective_from` <= CURDATE()
-         ORDER BY s2.`effective_from` DESC, s2.`salary_id` DESC
-         LIMIT 1) AS chosen_salary_id
-  FROM `employee_salary` s
- WHERE s.`status` = 'APPROVED'
- GROUP BY s.`employee_id`, s.`effective_from`
-HAVING COUNT(*) > 1;
+-- 2b. MySQL 5.7 FALLBACK for section 2 - no window functions, no CTE.
+--
+--     WHAT IT CHECKS. For each employee, the production rule is `ORDER BY
+--     effective_from DESC, salary_id DESC LIMIT 1` over their APPROVED rows
+--     effective on or before today. This derives the same answer a second
+--     way - the highest `salary_id` on the employee's LATEST ELIGIBLE
+--     `effective_from` - and compares the two.
+--
+--     ONLY THE LATEST ELIGIBLE DATE IS EXAMINED, and that is the correction
+--     this section needed. An earlier version grouped every duplicated
+--     `effective_from` and compared each group's MAX against the one row the
+--     production rule picks. An employee with two approved rows on an OLD
+--     date and a newer approved row would then be reported as a mismatch -
+--     production correctly returns the newer row, which is not the maximum of
+--     the older group. That is a false failure on entirely correct data, and
+--     on real payroll history it would be the common case rather than an edge
+--     one. Historical duplicate dates are irrelevant to the answer and are
+--     now ignored.
+--
+--     EVERY EMPLOYEE IS CHECKED, not only those with a tie: where the latest
+--     eligible date holds one row, the expected id is that row, so the
+--     comparison still validates the whole per-employee pick and makes this a
+--     real substitute for section 2. `rows_at_latest_date` says which ones
+--     were actual ties - the case the tie-break exists for.
+--
+--     PASS: zero rows.
+SELECT t.*
+  FROM (
+    SELECT s.`employee_id`,
+           s.`effective_from`      AS latest_eligible_date,
+           COUNT(*)                AS rows_at_latest_date,
+           MAX(s.`salary_id`)      AS expected_salary_id,
+           (SELECT s2.`salary_id`
+              FROM `employee_salary` s2
+             WHERE s2.`employee_id` = s.`employee_id`
+               AND s2.`status` = 'APPROVED'
+               AND s2.`effective_from` <= CURDATE()
+             ORDER BY s2.`effective_from` DESC, s2.`salary_id` DESC
+             LIMIT 1) AS chosen_salary_id
+      FROM `employee_salary` s
+      JOIN (
+        -- each employee's latest eligible effective date, and nothing else
+        SELECT `employee_id`, MAX(`effective_from`) AS max_effective_from
+          FROM `employee_salary`
+         WHERE `status` = 'APPROVED'
+           AND `effective_from` <= CURDATE()
+         GROUP BY `employee_id`
+      ) latest
+        ON latest.`employee_id` = s.`employee_id`
+       AND latest.max_effective_from = s.`effective_from`
+     WHERE s.`status` = 'APPROVED'
+       AND s.`effective_from` <= CURDATE()
+     GROUP BY s.`employee_id`, s.`effective_from`
+  ) t
+ -- NULL-safe: a chosen_salary_id that came back NULL must not slip past a
+ -- plain <>, which would yield NULL and filter the row out.
+ WHERE NOT (t.chosen_salary_id <=> t.expected_salary_id)
+ ORDER BY t.`employee_id`;
+
+-- 2c. DID THE TIE-BREAK GET EXERCISED AT ALL? Informational. If this is zero,
+--     2b passed without any employee actually having two approved rows on
+--     their latest eligible date - the check is sound but proved nothing
+--     about ties on this dataset. Say so in the results rather than claiming
+--     the tie-break is verified.
+SELECT COUNT(*) AS employees_with_a_tie_on_their_latest_eligible_date
+  FROM (
+    SELECT s.`employee_id`
+      FROM `employee_salary` s
+      JOIN (
+        SELECT `employee_id`, MAX(`effective_from`) AS max_effective_from
+          FROM `employee_salary`
+         WHERE `status` = 'APPROVED' AND `effective_from` <= CURDATE()
+         GROUP BY `employee_id`
+      ) latest
+        ON latest.`employee_id` = s.`employee_id`
+       AND latest.max_effective_from = s.`effective_from`
+     WHERE s.`status` = 'APPROVED' AND s.`effective_from` <= CURDATE()
+     GROUP BY s.`employee_id`, s.`effective_from`
+    HAVING COUNT(*) > 1
+  ) ties;
 
 -- --------------- 3. the three exclusions the rule depends on -------------
 -- PENDING is never current, REJECTED is never current, and a future-dated
