@@ -102,14 +102,19 @@ jobs:
              cd migrations/mysql
              db-migrate up
              cd ../..
-             pm2 reload 0
-             # The Biomax receiver is NOT started or reloaded here. It lives in
-             # its own file, ecosystem.biomax.config.js, and its activation is
-             # a separate, explicitly approved production action (see
-             # docs/biomax-attendance-part1.md). Once started by hand, pm2
-             # supervises it; a normal backend deploy neither starts nor
-             # restarts it. New receiver code reaches it only when an operator
-             # runs `pm2 reload biomax-receiver` deliberately.
-             if pm2 describe biomax-receiver >/dev/null 2>&1; then
-               echo "biomax-receiver is running under pm2 and was left untouched by this deploy; reload it deliberately to pick up new code."
-             fi'
+             # EVERY long-running process that runs this code is reloaded
+             # here, and each is checked to be back online - see
+             # scripts/deploy/pm2-reload.js. It reloads the API and, when it
+             # is running, the Biomax receiver.
+             #
+             # IT NEVER STARTS ANYTHING. The receiver stays out of
+             # ecosystem.config.js precisely so that no deploy can bring it
+             # up as a side effect: it opens a TCP listener and activating
+             # it is a separate approved production action. A receiver that
+             # has never been activated is reported and skipped; one that IS
+             # running is reloaded, so a fix to punch dating takes effect
+             # without anybody SSHing in to remember it.
+             #
+             # The script exits non-zero if a process that had to reload did
+             # not come back, and `set -e` fails the deploy with it.
+             node scripts/deploy/pm2-reload.js'
