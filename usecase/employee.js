@@ -9,7 +9,15 @@ class EmployeeUsecase {
     this.resignationRepo = resignationRepo;
   }
 
-  get(filters) {
+  /**
+   * The HR directory list.
+   *
+   * `actor` carries the caller's resolved BRANCH SCOPE and is rendered into the
+   * WHERE clause by `repository/employee_scope.js#accessScope`. An actor
+   * without one is refused there (`1 = 0`), so a caller who reaches this
+   * without going through the resolver gets nothing rather than everybody.
+   */
+  get(filters, actor = null) {
     return new Promise(async (resolve, reject) => {
       try {
         const resignation = await this.resignationRepo.getResignedEmployee();
@@ -17,7 +25,7 @@ class EmployeeUsecase {
         for (let i = 0; i <= resignation.length - 1; i++) {
           new_data.push(resignation[i].employee_name);
         }
-        const data = await this.employeeRepo.get(new_data, filters);
+        const data = await this.employeeRepo.get(new_data, filters, actor);
         resolve(data);
       } catch (err) {
         reject(err);
@@ -25,60 +33,60 @@ class EmployeeUsecase {
     });
   }
 
-  getHeadCount() {
+  getHeadCount(storeIds = null) {
     return new Promise(async (resolve, reject) => {
       try {
-        const data = await this.employeeRepo.getHeadCount();
+        const data = await this.employeeRepo.getHeadCount(storeIds);
         resolve(data);
       } catch (err) {
         reject(err);
       }
     });
   }
-  getResignedEmployee() {
+  getResignedEmployee(storeIds = null) {
     return new Promise(async (resolve, reject) => {
       try {
-        const data = await this.employeeRepo.getResignedEmployee();
+        const data = await this.employeeRepo.getResignedEmployee(storeIds);
         resolve(data);
       } catch (err) {
         reject(err);
       }
     });
   }
-  getEmployeeBirthday() {
+  getEmployeeBirthday(storeIds = null) {
     return new Promise(async (resolve, reject) => {
       try {
-        const data = await this.employeeRepo.getEmployeeBirthday();
+        const data = await this.employeeRepo.getEmployeeBirthday(storeIds);
         resolve(data);
       } catch (err) {
         reject(err);
       }
     });
   }
-  getEmployeeByFilter(filter) {
+  getEmployeeByFilter(filter, storeIds = null) {
     return new Promise(async (resolve, reject) => {
       try {
-        const data = await this.employeeRepo.getEmployeeByFilter(filter);
+        const data = await this.employeeRepo.getEmployeeByFilter(filter, storeIds);
         resolve(data);
       } catch (err) {
         reject(err);
       }
     });
   }
-  getnewJoinee(limit, offset) {
+  getnewJoinee(limit, offset, storeIds = null) {
     return new Promise(async (resolve, reject) => {
       try {
-        const data = await this.employeeRepo.getnewJoinee(limit, offset);
+        const data = await this.employeeRepo.getnewJoinee(limit, offset, storeIds);
         resolve(data);
       } catch (err) {
         reject(err);
       }
     });
   }
-  getFamilyDet() {
+  getFamilyDet(storeIds = null) {
     return new Promise(async (resolve, reject) => {
       try {
-        const data = await this.employeeRepo.getFamilyDet();
+        const data = await this.employeeRepo.getFamilyDet(storeIds);
         resolve(data);
       } catch (err) {
         reject(err);
@@ -95,30 +103,30 @@ class EmployeeUsecase {
       }
     });
   }
-  getBankDetails() {
+  getBankDetails(storeIds = null) {
     return new Promise(async (resolve, reject) => {
       try {
-        const data = await this.employeeRepo.getBankDetails();
+        const data = await this.employeeRepo.getBankDetails(storeIds);
         resolve(data);
       } catch (err) {
         reject(err);
       }
     });
   }
-  getJoiningAnniversary() {
+  getJoiningAnniversary(storeIds = null) {
     return new Promise(async (resolve, reject) => {
       try {
-        const data = await this.employeeRepo.getJoiningAnniversary();
+        const data = await this.employeeRepo.getJoiningAnniversary(storeIds);
         resolve(data);
       } catch (err) {
         reject(err);
       }
     });
   }
-  getNewJoiner() {
+  getNewJoiner(storeIds = null) {
     return new Promise(async (resolve, reject) => {
       try {
-        const data = await this.employeeRepo.getNewJoiner();
+        const data = await this.employeeRepo.getNewJoiner(storeIds);
         resolve(data);
       } catch (err) {
         reject(err);

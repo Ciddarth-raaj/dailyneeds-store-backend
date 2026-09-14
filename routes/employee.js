@@ -9,12 +9,36 @@ const {
 } = require("../constants/employee_master_sections");
 
 class EmployeeRoutes {
-  constructor(employeeUsecase, permissions, sensitive) {
+  constructor(employeeUsecase, permissions, sensitive, branchScope) {
     this.permissions = permissions;
     this.sensitive = sensitive;
     this.employeeUsecase = employeeUsecase;
+    // EMPLOYEE BRANCH SCOPE. Required, not optional: constructing this router
+    // without it would silently restore company-wide employee access to every
+    // holder of `view_employees`, which is the defect this exists to close.
+    if (!branchScope) {
+      throw new Error("routes/employee: the employee branch scope is required");
+    }
+    this.branchScope = branchScope;
 
     this.init();
+  }
+
+  /**
+   * The branches this request may look at, or a refusal already sent.
+   *
+   * Returns `{ done: true }` when it has answered the request itself, and
+   * `{ done: false, store_ids }` otherwise. `store_ids` is `null` for an
+   * unrestricted caller and a LIST otherwise - including `[]`, which means no
+   * branch is authorized and must never be read as "no restriction".
+   */
+  async _branches(req, res, requested = null) {
+    const scoped = await this.branchScope.listFilters(req, requested);
+    if (!scoped.ok) {
+      this.branchScope.refuse(res, scoped);
+      return { done: true };
+    }
+    return { done: false, store_ids: scoped.store_ids };
   }
 
   init() {
@@ -107,6 +131,16 @@ class EmployeeRoutes {
           console.log(isValid.error);
           throw isValid.error;
         }
+
+        // BRANCH-SCOPED CALLERS CREATE INTO THEIR OWN BRANCH ONLY. `store_id`
+        // is required by the schema above, so this always has something to
+        // check; HR and administrators are unrestricted and unaffected.
+        const target = await this.branchScope.checkTargetBranch(req, employee.store_id);
+        if (!target.ok) {
+          this.branchScope.refuse(res, target);
+          return;
+        }
+
         const response = await this.employeeUsecase.create(employee);
 
         res.json(response);
@@ -137,7 +171,16 @@ class EmployeeRoutes {
           throw isValid.error;
         }
 
-        const employee = await this.employeeUsecase.get(req.query);
+        // AUTHORIZATION AND THE CALLER'S OWN FILTER ARE BOTH APPLIED, and they
+        // are different things. `listFilters` refuses a request that NAMES a
+        // branch outside the caller's scope rather than quietly narrowing it;
+        // the actor then carries the scope into the WHERE clause, so the
+        // population is restricted in SQL and not after the fact.
+        const scoped = await this.branchScope.listFilters(req, req.query.store_ids);
+        if (!scoped.ok) return this.branchScope.refuse(res, scoped);
+
+        const actor = await this.branchScope.actorFor(req);
+        const employee = await this.employeeUsecase.get(req.query, actor);
         res.json(employee);
       } catch (err) {
         console.log(err);
@@ -153,7 +196,9 @@ class EmployeeRoutes {
 
     router.get("/headcount", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
       try {
-        const employee = await this.employeeUsecase.getHeadCount();
+        const branches = await this._branches(req, res);
+        if (branches.done) return;
+        const employee = await this.employeeUsecase.getHeadCount(branches.store_ids);
         res.json(employee);
       } catch (err) {
         console.log(err);
@@ -168,7 +213,9 @@ class EmployeeRoutes {
     });
     router.get("/familydet", this.permissions.require(P.VIEW_FAMILY), async (req, res) => {
       try {
-        const employee = await this.employeeUsecase.getFamilyDet();
+        const branches = await this._branches(req, res);
+        if (branches.done) return;
+        const employee = await this.employeeUsecase.getFamilyDet(branches.store_ids);
         res.json(employee);
       } catch (err) {
         console.log(err);
@@ -183,7 +230,9 @@ class EmployeeRoutes {
     });
     router.get("/bank", this.permissions.require(P.VIEW_BANKS), async (req, res) => {
       try {
-        const employee = await this.employeeUsecase.getBankDetails();
+        const branches = await this._branches(req, res);
+        if (branches.done) return;
+        const employee = await this.employeeUsecase.getBankDetails(branches.store_ids);
         res.json(employee);
       } catch (err) {
         console.log(err);
@@ -198,7 +247,9 @@ class EmployeeRoutes {
     });
     router.get("/resignedemp", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
       try {
-        const employee = await this.employeeUsecase.getResignedEmployee();
+        const branches = await this._branches(req, res);
+        if (branches.done) return;
+        const employee = await this.employeeUsecase.getResignedEmployee(branches.store_ids);
         res.json(employee);
       } catch (err) {
         console.log(err);
@@ -224,9 +275,12 @@ class EmployeeRoutes {
           console.log({ err: isValid.error });
           throw isValid.error;
         }
+        const branches = await this._branches(req, res);
+        if (branches.done) return;
         const employee = await this.employeeUsecase.getnewJoinee(
           data.limit,
-          data.offset
+          data.offset,
+          branches.store_ids
         );
         res.json(employee);
       } catch (err) {
@@ -242,7 +296,9 @@ class EmployeeRoutes {
     });
     router.get("/newjoiner", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
       try {
-        const employee = await this.employeeUsecase.getNewJoiner();
+        const branches = await this._branches(req, res);
+        if (branches.done) return;
+        const employee = await this.employeeUsecase.getNewJoiner(branches.store_ids);
         res.json(employee);
       } catch (err) {
         console.log(err);
@@ -258,7 +314,9 @@ class EmployeeRoutes {
 
     router.get("/birthday", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
       try {
-        const employee = await this.employeeUsecase.getEmployeeBirthday();
+        const branches = await this._branches(req, res);
+        if (branches.done) return;
+        const employee = await this.employeeUsecase.getEmployeeBirthday(branches.store_ids);
         res.json(employee);
       } catch (err) {
         console.log(err);
@@ -281,8 +339,15 @@ class EmployeeRoutes {
         if (isValid.error !== null) {
           throw isValid.error;
         }
+        // THE SEARCH IS SCOPED IN SQL, not trimmed afterwards. An
+        // autocomplete that queried every branch and then dropped rows would
+        // still have disclosed them to anybody reading the response before the
+        // trim - and to anybody calling the API directly.
+        const branches = await this._branches(req, res);
+        if (branches.done) return;
         const data = await this.employeeUsecase.getEmployeeByFilter(
-          employee.filter
+          employee.filter,
+          branches.store_ids
         );
         res.json(data);
       } catch (err) {
@@ -298,7 +363,9 @@ class EmployeeRoutes {
     });
     router.get("/anniversary", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
       try {
-        const employee = await this.employeeUsecase.getJoiningAnniversary();
+        const branches = await this._branches(req, res);
+        if (branches.done) return;
+        const employee = await this.employeeUsecase.getJoiningAnniversary(branches.store_ids);
         res.json(employee);
       } catch (err) {
         console.log(err);
@@ -322,6 +389,11 @@ class EmployeeRoutes {
         if (isValid.error !== null) {
           throw isValid.error;
         }
+        // The branch is NAMED by the caller, so naming one outside their
+        // scope is refused rather than narrowed - otherwise the count for
+        // their own branch would come back under another branch's heading.
+        const branches = await this._branches(req, res, employee.store_id);
+        if (branches.done) return;
         const data = await this.employeeUsecase.getEmployeeByStore(
           employee.store_id
         );
@@ -337,7 +409,16 @@ class EmployeeRoutes {
       res.end();
     });
 
-    router.get("/employee_id", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
+    // THE EMPLOYEE DETAIL READ - the one a manager reaches by typing an id
+    // into the URL. `requireEmployeeInScope` reads `employee_id` from the
+    // query and refuses an employee outside the caller's branches, so
+    // changing the id in /employee/<id> reaches a 403 rather than a record.
+    // A NON-EXISTENT id gets the SAME refusal, so ids cannot be enumerated.
+    router.get(
+      "/employee_id",
+      this.permissions.require(P.VIEW_EMPLOYEES),
+      this.branchScope.requireEmployeeInScope(),
+      async (req, res) => {
       try {
         const schema = {
           employee_id: Joi.number().required(),
@@ -360,8 +441,9 @@ class EmployeeRoutes {
         }
       }
 
-      res.end();
-    });
+        res.end();
+      }
+    );
 
     // Stage 0B follow-up: the operational employee directory.
     //
@@ -435,7 +517,11 @@ class EmployeeRoutes {
       res.end();
     });
 
-    router.post("/update-status", this.permissions.require(P.ADD_EMPLOYEES), async (req, res) => {
+    router.post(
+      "/update-status",
+      this.permissions.require(P.ADD_EMPLOYEES),
+      this.branchScope.requireEmployeeInScope(),
+      async (req, res) => {
       try {
         const schema = {
           employee_id: Joi.number().required(),
@@ -458,9 +544,14 @@ class EmployeeRoutes {
           res.json({ code: 500, msg: "An error occurred !" });
         }
       }
-      res.end();
-    });
-    router.post("/updatedata", this.updateDataGuard(), async (req, res) => {
+        res.end();
+      }
+    );
+    router.post(
+      "/updatedata",
+      this.updateDataGuard(),
+      this.branchScope.requireEmployeeInScope(),
+      async (req, res) => {
       try {
         const schema = {
           employee_id: Joi.number().required(),
@@ -604,6 +695,22 @@ class EmployeeRoutes {
         //
         // This runs AFTER Joi rather than in the guard so the shape is known
         // to be valid before a permission decision is made from it.
+        // BRANCH-TRANSFER PROTECTION. The employee is already known to be
+        // inside the caller's branches (the guard above); this stops the same
+        // caller moving them OUT of it. `store_id` is an ordinary optional
+        // column in the schema, so a body that does not name it is not a
+        // transfer and is left alone. HR and administrators are ALL_BRANCHES
+        // and keep the transfer capability they have today.
+        const transfer = await this.branchScope.checkTargetBranch(
+          req,
+          (employee.employee_details || {}).store_id
+        );
+        if (!transfer.ok) {
+          this.branchScope.refuse(res, transfer);
+          res.end();
+          return;
+        }
+
         const sectionKeys = sectionKeysRequired(employee.employee_details);
         if (sectionKeys.length > 0 && !(await this.permissions.hasAll(req, ...sectionKeys))) {
           res.status(403).json({
@@ -624,8 +731,9 @@ class EmployeeRoutes {
           res.json({ code: 500, msg: "An error occurred !" });
         }
       }
-      res.end();
-    });
+        res.end();
+      }
+    );
 
     // POST /employee/sync is GONE. It triggered the Digisme employee sync,
     // which has been removed - see docs/digisme-employee-sync-removal.md.
@@ -687,6 +795,6 @@ class EmployeeRoutes {
   }
 }
 
-module.exports = (employeeUsecase, permissions, sensitive) => {
-  return new EmployeeRoutes(employeeUsecase, permissions, sensitive);
+module.exports = (employeeUsecase, permissions, sensitive, branchScope) => {
+  return new EmployeeRoutes(employeeUsecase, permissions, sensitive, branchScope);
 };

@@ -6,6 +6,31 @@ class EmployeeRepository {
     this.db = db;
   }
 
+  /**
+   * THE BRANCH PREDICATE for a query that takes no other WHERE parameters.
+   *
+   * `store_ids` says which branches the caller is authorized for, and the
+   * three states are three DIFFERENT statements that must not be collapsed:
+   *
+   *   null / undefined   no restriction. HR, an administrator, or an internal
+   *                      caller with no actor at all.
+   *   a non-empty list   those branches only.
+   *   `[]`               NO branch is authorized. Renders `AND 1 = 0`, so the
+   *                      query returns nothing. An empty authorized set is
+   *                      never the same as no restriction, and treating it as
+   *                      one is exactly the bug this shape prevents.
+   *
+   * Returns a fragment to append after an existing WHERE, plus its parameters.
+   * The ids are BOUND, never interpolated.
+   */
+  _branchClause(storeIds, column = "store_id") {
+    if (storeIds === null || storeIds === undefined) return { sql: "", params: [] };
+    if (!Array.isArray(storeIds) || storeIds.length === 0) {
+      return { sql: " AND 1 = 0", params: [] };
+    }
+    return { sql: ` AND ${column} IN (?)`, params: [storeIds] };
+  }
+
   create(employee) {
     return new Promise((resolve, reject) => {
       this.db.query(
@@ -100,11 +125,12 @@ class EmployeeRepository {
       );
     });
   }
-  getnewJoinee(limit, offset) {
+  getnewJoinee(limit, offset, storeIds = null) {
     return new Promise((resolve, reject) => {
+      const branch = this._branchClause(storeIds);
       this.db.query(
-        `SELECT employee_id, employee_name, date_of_joining FROM new_employee WHERE MONTH(date_of_joining)=MONTH(now()) LIMIT ${offset},${limit}`,
-        [],
+        `SELECT employee_id, employee_name, date_of_joining FROM new_employee WHERE MONTH(date_of_joining)=MONTH(now())${branch.sql} LIMIT ${offset},${limit}`,
+        branch.params,
         (err, docs) => {
           if (err) {
             logger.Log({
@@ -192,8 +218,34 @@ class EmployeeRepository {
       );
     });
   }
-  getEmployeeByFilter(filter) {
+  /**
+   * THE EMPLOYEE SEARCH / AUTOCOMPLETE.
+   *
+   * TWO THINGS ARE FIXED HERE BEYOND ADDING THE BRANCH SCOPE, and both had to
+   * be:
+   *
+   *   PRECEDENCE. The clause used to read `status = 1 AND name LIKE x OR id
+   *   LIKE x OR outlet LIKE x`. AND binds tighter than OR, so the second and
+   *   third arms stood alone - a search matching an outlet name returned
+   *   employees regardless of anything ANDed before it. Appending a branch
+   *   predicate to that shape would have been bypassable by exactly those two
+   *   arms, so the search group is parenthesised and the branch restriction
+   *   ANDed outside it.
+   *
+   *   INTERPOLATION. `filter` came straight from the query string into the SQL
+   *   text. It is a bound parameter now, and the caller's `%` and `_` are
+   *   escaped so a search for a literal `%` searches for that character
+   *   instead of matching every employee in the company.
+   *
+   * @param storeIds null for no restriction, or the authorized branches.
+   */
+  getEmployeeByFilter(filter, storeIds = null) {
     return new Promise((resolve, reject) => {
+      const branch = this._branchClause(storeIds, "new_employee.store_id");
+      const like = `%${String(filter === undefined || filter === null ? "" : filter)
+        .replace(/\\/g, "\\\\")
+        .replace(/%/g, "\\%")
+        .replace(/_/g, "\\_")}%`;
       this.db.query(
         `SELECT new_employee.employee_id, new_employee.employee_name, new_employee.father_name, new_employee.dob, new_employee.gender, new_employee.marital_status, 
         new_employee.employee_image, new_employee.marriage_date, new_employee.spouse_name, new_employee.permanent_address, new_employee.residential_address, 
@@ -206,9 +258,12 @@ class EmployeeRepository {
         LEFT JOIN department ON department.department_id = new_employee.department_id
         LEFT JOIN outlets ON outlets.outlet_id = new_employee.store_id
         LEFT JOIN designation ON designation.designation_id  = new_employee.designation_id
-        LEFT JOIN shift_master ON shift_master.shift_id = new_employee.shift_id WHERE new_employee.status = 1 AND new_employee.employee_name LIKE "%${filter}%" OR new_employee.employee_id 
-        LIKE "%${filter}%" OR outlets.outlet_name LIKE "%${filter}%"`,
-        [filter],
+        LEFT JOIN shift_master ON shift_master.shift_id = new_employee.shift_id
+        WHERE new_employee.status = 1
+          AND (new_employee.employee_name LIKE ?
+               OR new_employee.employee_id LIKE ?
+               OR outlets.outlet_name LIKE ?)${branch.sql}`,
+        [like, like, like, ...branch.params],
         (err, docs) => {
           if (err) {
             logger.Log({
@@ -227,7 +282,7 @@ class EmployeeRepository {
       );
     });
   }
-  get(resignation, filters) {
+  get(resignation, filters, actor = null) {
     return new Promise((resolve, reject) => {
       // The population - who is in this list at all - lives in
       // `employee_scope.js`, so the C3 status summary and Reports can ask the
@@ -244,7 +299,8 @@ class EmployeeRepository {
       // row per name first so the result stays one row per employee.
       const { where: whereClause, params: filterValues } = buildEmployeeScope(
         resignation,
-        filters
+        filters,
+        actor
       );
 
       const query = `
@@ -285,11 +341,12 @@ class EmployeeRepository {
       });
     });
   }
-  getHeadCount() {
+  getHeadCount(storeIds = null) {
     return new Promise((resolve, reject) => {
+      const branch = this._branchClause(storeIds);
       this.db.query(
-        "SELECT count(employee_id) as head_count, created_at FROM new_employee WHERE status = 1 GROUP BY MONTH(DATE(created_at))",
-        [],
+        `SELECT count(employee_id) as head_count, created_at FROM new_employee WHERE status = 1${branch.sql} GROUP BY MONTH(DATE(created_at))`,
+        branch.params,
         (err, docs) => {
           if (err) {
             logger.Log({
@@ -308,11 +365,12 @@ class EmployeeRepository {
       );
     });
   }
-  getResignedEmployee() {
+  getResignedEmployee(storeIds = null) {
     return new Promise((resolve, reject) => {
+      const branch = this._branchClause(storeIds);
       this.db.query(
-        "SELECT count(employee_id) as Resigned_employee FROM new_employee where resignation_date IS NOT NULL",
-        [],
+        `SELECT count(employee_id) as Resigned_employee FROM new_employee where resignation_date IS NOT NULL${branch.sql}`,
+        branch.params,
         (err, docs) => {
           if (err) {
             logger.Log({
@@ -331,11 +389,12 @@ class EmployeeRepository {
       );
     });
   }
-  getFamilyDet() {
+  getFamilyDet(storeIds = null) {
     return new Promise((resolve, reject) => {
+      const branch = this._branchClause(storeIds);
       this.db.query(
-        "SELECT employee_id, employee_name, employee_image FROM new_employee WHERE status = 1",
-        [],
+        `SELECT employee_id, employee_name, employee_image FROM new_employee WHERE status = 1${branch.sql}`,
+        branch.params,
         (err, docs) => {
           if (err) {
             logger.Log({
@@ -432,11 +491,12 @@ class EmployeeRepository {
       );
     });
   }
-  getNewJoiner() {
+  getNewJoiner(storeIds = null) {
     return new Promise((resolve, reject) => {
+      const branch = this._branchClause(storeIds);
       this.db.query(
-        "select count(employee_id) as new_joiners from new_employee WHERE status = 1 AND MONTH(date_of_joining)=MONTH(now())",
-        [],
+        `select count(employee_id) as new_joiners from new_employee WHERE status = 1 AND MONTH(date_of_joining)=MONTH(now())${branch.sql}`,
+        branch.params,
         (err, docs) => {
           if (err) {
             logger.Log({
@@ -455,11 +515,12 @@ class EmployeeRepository {
       );
     });
   }
-  getBankDetails() {
+  getBankDetails(storeIds = null) {
     return new Promise((resolve, reject) => {
+      const branch = this._branchClause(storeIds);
       this.db.query(
-        "SELECT * FROM new_employee WHERE payment_type = 2 AND status = 1",
-        [],
+        `SELECT * FROM new_employee WHERE payment_type = 2 AND status = 1${branch.sql}`,
+        branch.params,
         (err, docs) => {
           if (err) {
             logger.Log({
@@ -479,11 +540,12 @@ class EmployeeRepository {
     });
   }
 
-  getEmployeeBirthday() {
+  getEmployeeBirthday(storeIds = null) {
     return new Promise((resolve, reject) => {
+      const branch = this._branchClause(storeIds);
       this.db.query(
-        "SELECT dob, employee_name AS birthday FROM new_employee WHERE status = 1 AND WEEK(dob) = WEEK(now())",
-        [],
+        `SELECT dob, employee_name AS birthday FROM new_employee WHERE status = 1 AND WEEK(dob) = WEEK(now())${branch.sql}`,
+        branch.params,
         (err, docs) => {
           if (err) {
             logger.Log({
@@ -503,11 +565,12 @@ class EmployeeRepository {
     });
   }
 
-  getJoiningAnniversary() {
+  getJoiningAnniversary(storeIds = null) {
     return new Promise((resolve, reject) => {
+      const branch = this._branchClause(storeIds);
       this.db.query(
-        "SELECT date_of_joining, employee_name AS anniversary FROM new_employee WHERE status = 1 AND WEEK(date_of_joining)=WEEK(now())",
-        [],
+        `SELECT date_of_joining, employee_name AS anniversary FROM new_employee WHERE status = 1 AND WEEK(date_of_joining)=WEEK(now())${branch.sql}`,
+        branch.params,
         (err, docs) => {
           if (err) {
             logger.Log({

@@ -908,6 +908,19 @@ class Server {
       this.dashboardScopeRepo
     );
 
+    // EMPLOYEE BRANCH SCOPE - the one branch-authorization layer every employee
+    // read and every employee write goes through. Built on the same permission
+    // middleware so the administrator bypass is the system's single existing
+    // one, and on its own small repository so resolving a branch never reaches
+    // into the employee repository's `SELECT *` queries.
+    this.employeeBranchRepo = new (require("./repository/employee_branch"))(
+      this.mysql.connection
+    );
+    this.employeeBranchScope = require("./middlewares/employee_branch_scope")(
+      this.permissions,
+      this.employeeBranchRepo
+    );
+
     // Runs after auth so it can see the decoded user: an account with an IP
     // allow-list is cut off the moment it is used outside that network, not
     // just at login.
@@ -943,7 +956,8 @@ class Server {
     const employeeRouter = require("./routes/employee")(
       this.employeeUsecase,
       this.permissions,
-      this.sensitive
+      this.sensitive,
+      this.employeeBranchScope
     );
     // Stage 0C / C2: the local employee-master lifecycle actions.
     const employeeMasterRouter = require("./routes/employee_master")(
@@ -953,12 +967,14 @@ class Server {
       this.employeeAadhaarUsecase,
       this.employeeBankUsecase,
       this.employeeStatusSummaryUsecase,
-      this.ifscLookupUsecase
+      this.ifscLookupUsecase,
+      this.employeeBranchScope
     );
     // Reports: discovery, saved templates, preview and the two exports.
     const employeeReportRouter = require("./routes/employee_report")(
       this.employeeReportService,
-      this.permissions
+      this.permissions,
+      this.employeeBranchScope
     );
     const shiftRouter = require("./routes/shift")(this.shiftUsecase, this.permissions);
     const workShiftRouter = require("./routes/work_shift")(
@@ -989,7 +1005,8 @@ class Server {
     const employeeWorkShiftRouter = require("./routes/employee_work_shift")(
       this.employeeWorkShiftUsecase,
       this.permissions,
-      this.sensitive
+      this.sensitive,
+      this.employeeBranchScope
     );
     // M2: the salary API. Mounted at /hr with the other employee routes,
     // because a salary is a fact about an employee record.

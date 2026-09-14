@@ -20,6 +20,28 @@
  * the app, and which are authenticated-only by design.
  */
 module.exports = {
+  // ============================================ EMPLOYEE BRANCH SCOPE ======
+  //
+  // WHICH BRANCHES' EMPLOYEES A CALLER MAY SEE AND EDIT - and nothing about
+  // WHAT they may do to them, which is what every other key below says.
+  //
+  // Holding it means company-wide employee access: this is how HR is expressed
+  // in a rights system whose only shape of right is a boolean key per
+  // designation. There is no `is_hr` column on `designation` to read, and
+  // inventing one would be a second authorization scheme for one question.
+  // An administrator (`user_type` 2) is company-wide by user type and needs no
+  // key, exactly as everywhere else.
+  //
+  // WITHOUT IT, A CALLER IS SCOPED TO THEIR OWN ASSIGNED BRANCH. That is the
+  // default and it FAILS CLOSED: a caller whose branch cannot be resolved gets
+  // no employees rather than all of them. `view_employees` and `employee_edit`
+  // still say WHETHER they may read or write; this says WHERE.
+  //
+  // The migration grants it to HR EXECUTIVE and to nobody else, so no other
+  // designation's effective reach widens on deploy - every one of them
+  // narrows, which is the point of the change.
+  EMPLOYEE_SCOPE_ALL_BRANCHES: "employee_scope_all_branches",
+
   // employee master
   VIEW_EMPLOYEES: "view_employees",
 

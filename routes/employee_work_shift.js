@@ -59,7 +59,15 @@ const router = express.Router();
  * `shift_id`, `shift_code` or `shift_master`, and /shift is unchanged.
  */
 class EmployeeWorkShiftRoutes {
-  constructor(employeeWorkShiftUsecase, permissions, sensitive) {
+  constructor(employeeWorkShiftUsecase, permissions, sensitive, branchScope) {
+    // EMPLOYEE BRANCH SCOPE. Required, not optional: this router lists
+    // employees and changes employee records, so without it the assignment
+    // screen would be a way around the branch scope every other employee
+    // surface now enforces.
+    if (!branchScope) {
+      throw new Error("routes/employee_work_shift: the employee branch scope is required");
+    }
+    this.branchScope = branchScope;
     this.usecase = employeeWorkShiftUsecase;
     this.permissions = permissions;
     this.sensitive = sensitive;
@@ -97,7 +105,18 @@ class EmployeeWorkShiftRoutes {
           const isValid = Joi.validate(req.query, schema);
           if (isValid.error !== null) throw isValid.error;
 
-          res.json(await this.usecase.list(req.query));
+          // THE ASSIGNMENT POPULATION IS BRANCH-SCOPED. The actor carries the
+          // resolved scope into `accessScope`, which renders it into the
+          // WHERE clause; a request that NAMES a branch outside the caller's
+          // is refused rather than silently narrowed.
+          const scoped = await this.branchScope.listFilters(req, req.query.store_ids);
+          if (!scoped.ok) {
+            this.branchScope.refuse(res, scoped);
+            res.end();
+            return;
+          }
+          const actor = await this.branchScope.actorFor(req);
+          res.json(await this.usecase.list({ ...req.query, actor }));
         } catch (err) {
           respondError(res, err);
         }
@@ -154,6 +173,7 @@ class EmployeeWorkShiftRoutes {
     router.get(
       "/work-shift-assignments/employee/:employee_id",
       this.permissions.require(P.VIEW_EMPLOYEES),
+      this.branchScope.requireEmployeeInScope(),
       async (req, res) => {
         try {
           res.json(await this.usecase.currentForEmployee(req.params.employee_id));
@@ -182,6 +202,20 @@ class EmployeeWorkShiftRoutes {
           };
           const isValid = Joi.validate(req.body, schema);
           if (isValid.error !== null) throw isValid.error;
+
+          // EVERY EMPLOYEE IN THE LIST, not the first one. A bulk write is
+          // refused as a WHOLE if any employee in it is outside the caller's
+          // branches - the assignment itself is all-or-nothing, so a partial
+          // authorization decision would be the one shape that could apply
+          // half of it.
+          for (const employeeId of req.body.employee_ids) {
+            const allowed = await this.branchScope.checkEmployee(req, employeeId);
+            if (!allowed.ok) {
+              this.branchScope.refuse(res, allowed);
+              res.end();
+              return;
+            }
+          }
 
           // The payload is built field by field rather than spread from the
           // body, so nothing a caller invents can reach the usecase. The actor
@@ -220,6 +254,7 @@ class EmployeeWorkShiftRoutes {
     router.post(
       "/work-shift-assignments/correction",
       this.permissions.requireAll(P.EMPLOYEE_EDIT, P.CORRECT_EMPLOYEE_SHIFT_ASSIGNMENT),
+      this.branchScope.requireEmployeeInScope(),
       async (req, res) => {
         try {
           const schema = {
@@ -295,5 +330,5 @@ class EmployeeWorkShiftRoutes {
   }
 }
 
-module.exports = (employeeWorkShiftUsecase, permissions, sensitive) =>
-  new EmployeeWorkShiftRoutes(employeeWorkShiftUsecase, permissions, sensitive);
+module.exports = (employeeWorkShiftUsecase, permissions, sensitive, branchScope) =>
+  new EmployeeWorkShiftRoutes(employeeWorkShiftUsecase, permissions, sensitive, branchScope);

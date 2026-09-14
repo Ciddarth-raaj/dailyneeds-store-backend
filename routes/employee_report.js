@@ -129,9 +129,14 @@ const copySchema = {
 };
 
 class EmployeeReportRoutes {
-  constructor(reportService, permissions) {
+  constructor(reportService, permissions, branchScope) {
     this.service = reportService;
     this.permissions = permissions;
+    // EMPLOYEE BRANCH SCOPE. Required, not optional - see routes/employee.js.
+    if (!branchScope) {
+      throw new Error("routes/employee_report: the employee branch scope is required");
+    }
+    this.branchScope = branchScope;
     // A router per instance rather than a module-level one, so that
     // constructing the routes twice - which the tests do - does not stack two
     // sets of handlers on one shared router.
@@ -188,7 +193,14 @@ class EmployeeReportRoutes {
     const canView = needsAll(P.VIEW_REPORTS, P.VIEW_EMPLOYEES);
     const canExport = needsAll(P.VIEW_REPORTS, P.VIEW_EMPLOYEES, P.EXPORT_REPORTS);
 
-    const actor = (req) => this.permissions.actorFor(req);
+    // THE BRANCH-SCOPED ACTOR, not the plain permission actor.
+    //
+    // A report is an employee query like any other, and it composes the same
+    // `accessScope` unit the HR directory does - which is exactly why that
+    // unit was kept shared. Passing `permissions.actorFor` here would hand the
+    // resolver an actor with no `branch_scope`, and `accessScope` answers that
+    // with `1 = 0`: an empty report rather than a company-wide one.
+    const actor = (req) => this.branchScope.actorFor(req);
     const router = this.router;
 
     /* ------------------------------------------------------- discovery */
@@ -290,7 +302,7 @@ class EmployeeReportRoutes {
    */
   async _prepare(req, res, format) {
     const body = this.validate(req.body, exportSchema);
-    const actor = await this.permissions.actorFor(req);
+    const actor = await this.branchScope.actorFor(req);
     const prepared = await this.service.prepareExport(body, actor, format);
     return { prepared, actor };
   }
@@ -469,7 +481,7 @@ function csvCell(value) {
   return text;
 }
 
-module.exports = (reportService, permissions) =>
-  new EmployeeReportRoutes(reportService, permissions);
+module.exports = (reportService, permissions, branchScope) =>
+  new EmployeeReportRoutes(reportService, permissions, branchScope);
 module.exports.EmployeeReportRoutes = EmployeeReportRoutes;
 module.exports.csvCell = csvCell;

@@ -229,8 +229,11 @@ test("the module exposes a router per instance", () => {
     requireAll: () => (req, res, next) => next(),
     actorFor: async () => ({ userId: 1, isAdmin: true, permissions: [] }),
   };
-  const a = routes({}, permissions);
-  const b = routes({}, permissions);
+  const branchScope = require("../test_support/employee_branch_scope").allBranchesScope(
+    permissions
+  );
+  const a = routes({}, permissions, branchScope);
+  const b = routes({}, permissions, branchScope);
 
   assert.ok(a instanceof EmployeeReportRoutes);
   assert.notStrictEqual(a.getRouter(), b.getRouter(), "two instances must not share one router");

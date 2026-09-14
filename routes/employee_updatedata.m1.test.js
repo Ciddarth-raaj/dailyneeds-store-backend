@@ -129,7 +129,14 @@ before(async () => {
   app.use(auth.create({ userUsecase: { getSessionState: async () => sessionState } }));
 
   delete require.cache[require.resolve("./employee")];
-  const routes = require("./employee")(employeeUsecase, permissions, sensitive);
+  const routes = require("./employee")(
+    employeeUsecase,
+    permissions,
+    sensitive,
+    // ALL BRANCHES: this file's subject is which permission keys the legacy
+    // updatedata body demands, not which branches the caller may reach.
+    require("../test_support/employee_branch_scope").allBranchesScope(permissions)
+  );
   app.use("/employee", routes.getRouter());
 
   server = await new Promise((r) => {

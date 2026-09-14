@@ -40,7 +40,15 @@ function makeHarness() {
     guardWrite: (req, res, next) => next(),
   };
 
-  const routes = buildRoutes({}, permissions, sensitive);
+  const routes = buildRoutes(
+    {},
+    permissions,
+    sensitive,
+    // The branch scope is required by the router. All branches here: this file
+    // asserts which PERMISSION KEYS each endpoint demands, and the branch rule
+    // has its own file.
+    require("../test_support/employee_branch_scope").allBranchesScope(permissions)
+  );
   const router = routes.getRouter();
 
   for (const layer of router.stack) {
@@ -244,7 +252,8 @@ describe("one is not many", () => {
         next();
       },
     },
-    null
+    null,
+    require("../test_support/employee_branch_scope").allBranchesScope()
   );
 
   function keysDemandedFor(body) {

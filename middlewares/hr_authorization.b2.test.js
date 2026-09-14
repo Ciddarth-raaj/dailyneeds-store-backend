@@ -170,7 +170,16 @@ before(async () => {
   // It is passed here so this file keeps testing the wiring that ships; what
   // it asserts is unchanged, and B3 has its own tests.
   const sensitive = require("./sensitive")(permissions);
-  mount("/employee", "employee", [sensitive]);
+  // The employee router takes a fourth argument now - the EMPLOYEE BRANCH
+  // SCOPE. It is passed here so this file keeps testing the wiring that ships.
+  // ALL BRANCHES, because what B2 asserts is which PERMISSION KEY each
+  // endpoint demands, and a branch refusal arriving first would answer 403 for
+  // a second reason and make the "allowed with <key>" cases untestable. The
+  // branch rule has its own file.
+  const branchScope = require("../test_support/employee_branch_scope").allBranchesScope(
+    permissions
+  );
+  mount("/employee", "employee", [sensitive, branchScope]);
   mount("/document", "document", [sensitive]);
   mount("/family", "family");
   mount("/salary", "salary");

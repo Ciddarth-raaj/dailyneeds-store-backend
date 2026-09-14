@@ -55,10 +55,29 @@ test("payment type values are the ones the legacy screens always stored", () => 
   assert.deepEqual(PAYMENT_TYPE, { BANK: 1, CASH: 2 });
 });
 
+/**
+ * The source text of the /updatedata route.
+ *
+ * Anchored on the path literal rather than on `router.post("/updatedata"`,
+ * which stopped matching when the route grew a third middleware and Prettier
+ * put the arguments on their own lines. The end anchor is the comment that
+ * follows the last route on the router - `POST /employee/sync` was removed,
+ * and an `indexOf` that returns -1 silently slices to the second-to-last
+ * character rather than failing, which is how an empty slice passed for a
+ * while as a matching one.
+ */
+function updateDataRoute(src) {
+  const start = src.indexOf('"/updatedata"');
+  const end = src.indexOf("// POST /employee/sync is GONE");
+  assert.ok(start > 0, "the /updatedata route must be findable");
+  assert.ok(end > start, "the end-of-routes marker must follow it");
+  return src.slice(start, end);
+}
+
 test("the updatedata route applies the guard after validation and refuses as a whole", () => {
   const fs = require("fs");
   const src = fs.readFileSync(require.resolve("../routes/employee"), "utf8");
-  const route = src.slice(src.indexOf('router.post("/updatedata"'), src.indexOf('router.post("/sync"'));
+  const route = updateDataRoute(src);
   const guardAt = route.indexOf("sectionKeysRequired(employee.employee_details)");
   const validateAt = route.indexOf("Joi.validate(employee, schema)");
   const writeAt = route.indexOf("updateEmployeeDetails(employee)");
@@ -114,7 +133,7 @@ test("the route demands add_employees for everything that is not a section-only 
   assert.match(guard, /isSectionOnlyWrite\(details\)/, "the body decides");
   assert.match(guard, /permissions\.require\(P\.ADD_EMPLOYEES\)/, "otherwise the old gate applies");
   // The route mounts the dynamic guard, not the flat one it used to.
-  const route = src.slice(src.indexOf('router.post("/updatedata"'), src.indexOf('router.post("/sync"'));
+  const route = updateDataRoute(src);
   assert.match(route, /this\.updateDataGuard\(\)/);
 });
 

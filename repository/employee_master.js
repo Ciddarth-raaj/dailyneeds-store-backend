@@ -409,7 +409,16 @@ class EmployeeMasterRepository {
    * warning about a possible duplicate is not an excuse to read somebody's
    * record.
    */
-  async findPossibleDuplicates({ name_tokens = [], contact = null, dob = null }, limit = 25) {
+  /**
+   * @param storeIds null for no restriction (HR, an administrator, or an
+   *   internal caller); otherwise the branches the caller is authorized for,
+   *   with `[]` meaning none and returning nothing.
+   */
+  async findPossibleDuplicates(
+    { name_tokens = [], contact = null, dob = null },
+    limit = 25,
+    storeIds = null
+  ) {
     const clauses = [];
     const params = [];
 
@@ -426,6 +435,19 @@ class EmployeeMasterRepository {
       params.push(`%${token}%`);
     }
     if (clauses.length === 0) return [];
+
+    // THE BRANCH SCOPE, applied OUTSIDE the OR of the match clauses below.
+    // The candidate clauses are ORed together, so a branch predicate placed
+    // among them would be satisfied by any single match and restrict nothing.
+    let branchSql = "";
+    const branchParams = [];
+    if (storeIds !== null && storeIds !== undefined) {
+      if (!Array.isArray(storeIds) || storeIds.length === 0) {
+        return [];
+      }
+      branchSql = " AND ne.store_id IN (?)";
+      branchParams.push(storeIds);
+    }
 
     return this._read(
       "FIND-POSSIBLE-DUPLICATES",
@@ -444,10 +466,10 @@ class EmployeeMasterRepository {
                 ON p.employee_id = ne.employee_id
                AND p.period_no = ( SELECT MAX(period_no) FROM employee_employment_period
                                     WHERE employee_id = ne.employee_id )
-        WHERE ${clauses.join(" OR ")}
+        WHERE (${clauses.join(" OR ")})${branchSql}
         ORDER BY ne.employee_id
         LIMIT ?`,
-      [...params, Number(limit)]
+      [...params, ...branchParams, Number(limit)]
     );
   }
 
@@ -496,7 +518,17 @@ class EmployeeMasterRepository {
    * nothing here repairs anything - the 518 historical rows stay exactly as
    * they are until the archived Digisme export is imported.
    */
-  async getReviewList({ limit = 200, offset = 0 } = {}) {
+  /**
+   * @param storeIds null for no restriction; otherwise the caller's authorized
+   *   branches, with `[]` meaning none. The join to `new_employee` exists only
+   *   to reach `store_id` - no employee column is selected through it, so the
+   *   response shape is unchanged.
+   */
+  async getReviewList({ limit = 200, offset = 0, storeIds = null } = {}) {
+    if (storeIds !== null && storeIds !== undefined && (!Array.isArray(storeIds) || storeIds.length === 0)) {
+      return [];
+    }
+    const scoped = Array.isArray(storeIds) && storeIds.length > 0;
     return this._read(
       "GET-REVIEW-LIST",
       `SELECT p.employee_id, p.period_id, p.period_no, p.period_state, p.source,
@@ -510,18 +542,36 @@ class EmployeeMasterRepository {
                 ELSE 'other'
               END AS warning_type
          FROM employee_employment_period p
-        WHERE p.needs_review = 1
+         ${scoped ? "JOIN new_employee ne ON ne.employee_id = p.employee_id" : ""}
+        WHERE p.needs_review = 1${scoped ? " AND ne.store_id IN (?)" : ""}
         ORDER BY p.employee_id, p.period_no
         LIMIT ? OFFSET ?`,
-      [Number(limit), Number(offset)]
+      scoped
+        ? [storeIds, Number(limit), Number(offset)]
+        : [Number(limit), Number(offset)]
     );
   }
 
-  async countReviewList() {
+  /**
+   * The total behind the review list, scoped the SAME way as the list itself.
+   *
+   * A count is a disclosure. Leaving this company-wide while the rows beside
+   * it were narrowed would tell a branch manager exactly how many employees
+   * with employment-period problems exist outside their branch - a smaller
+   * leak than the rows, and still one.
+   */
+  async countReviewList(storeIds = null) {
+    if (storeIds !== null && storeIds !== undefined && (!Array.isArray(storeIds) || storeIds.length === 0)) {
+      return 0;
+    }
+    const scoped = Array.isArray(storeIds) && storeIds.length > 0;
     const rows = await this._read(
       "COUNT-REVIEW-LIST",
-      "SELECT COUNT(*) AS total FROM employee_employment_period WHERE needs_review = 1",
-      []
+      `SELECT COUNT(*) AS total
+         FROM employee_employment_period p
+         ${scoped ? "JOIN new_employee ne ON ne.employee_id = p.employee_id" : ""}
+        WHERE p.needs_review = 1${scoped ? " AND ne.store_id IN (?)" : ""}`,
+      scoped ? [storeIds] : []
     );
     return rows && rows[0] ? Number(rows[0].total) : 0;
   }

@@ -94,7 +94,17 @@ before(async () => {
   app.use(bodyParser.json());
   app.use(auth.create({ userUsecase: { getSessionState: async () => sessionState } }));
   delete require.cache[require.resolve("../routes/employee")];
-  const routes = require("../routes/employee")(employeeUsecase, permissions, sensitive);
+  const routes = require("../routes/employee")(
+    employeeUsecase,
+    permissions,
+    sensitive,
+    // This file's subject is the directory route, which is scoped to the
+    // caller's own outlet by its own rule and does not consult the branch
+    // scope. An all-branches scope keeps the other routes on this router
+    // behaving exactly as they did, so nothing here is testing the branch
+    // rule by accident. That rule has its own file.
+    require("../test_support/employee_branch_scope").allBranchesScope(permissions)
+  );
   app.use("/employee", routes.getRouter());
 
   server = await new Promise((r) => {

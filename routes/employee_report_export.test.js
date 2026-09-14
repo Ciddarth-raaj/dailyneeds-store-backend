@@ -100,7 +100,11 @@ function serve({ actor = actorWith(EXPORTER), db = fakeDb(), repo = templateRepo
     hasAll: async () => true,
   };
   const service = require("../usecase/employee_report_service")(db, repo);
-  const routes = require("./employee_report")(service, permissions);
+  const routes = require("./employee_report")(
+    service,
+    permissions,
+    require("../test_support/employee_branch_scope").allBranchesScope(permissions)
+  );
 
   const app = express();
   app.use(express.json());

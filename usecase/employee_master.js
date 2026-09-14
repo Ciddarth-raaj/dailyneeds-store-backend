@@ -860,7 +860,7 @@ class EmployeeMasterUsecase {
    * decides, which is why the response is shaped for a screen rather than for
    * a branch.
    */
-  async findPossibleDuplicates(input, { limit = 25 } = {}) {
+  async findPossibleDuplicates(input, { limit = 25, storeIds = null } = {}) {
     const name = input && input.employee_name ? String(input.employee_name) : "";
     const contact = normaliseContact(input && input.primary_contact_number);
     const dob = normaliseDob(input && input.dob);
@@ -874,7 +874,8 @@ class EmployeeMasterUsecase {
 
     const candidates = await this.repo.findPossibleDuplicates(
       { name_tokens: tokens, contact, dob },
-      limit
+      limit,
+      storeIds
     );
     const matches = rankCandidates({ employee_name: name, primary_contact_number: contact, dob }, candidates);
     const inactive = matches.filter((m) => !m.is_active);
@@ -931,9 +932,10 @@ class EmployeeMasterUsecase {
   }
 
   async getReviewList(options) {
+    const storeIds = options && options.storeIds !== undefined ? options.storeIds : null;
     const [items, total] = await Promise.all([
       this.repo.getReviewList(options),
-      this.repo.countReviewList(),
+      this.repo.countReviewList(storeIds),
     ]);
     return { total, count: items.length, items };
   }

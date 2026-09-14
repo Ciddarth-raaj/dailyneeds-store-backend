@@ -204,7 +204,11 @@ before(async () => {
   app.use(authMiddleware.create({ userUsecase: { getSessionState: async () => ({ ...sessionState }) } }));
   delete require.cache[require.resolve("./employee_master")];
   const routes = require("./employee_master")(
-    usecase, permissions, sensitive, aadhaarUsecase, bankUsecase, statusSummaryUsecase
+    usecase, permissions, sensitive, aadhaarUsecase, bankUsecase, statusSummaryUsecase,
+    null,
+    // All branches: this file's subject is the lifecycle API, not the branch
+    // rule, which has its own file.
+    require("../test_support/employee_branch_scope").allBranchesScope(permissions)
   );
   app.use("/hr", routes.getRouter());
 
@@ -611,7 +615,10 @@ describe("the Aadhaar surface", () => {
       ],
     });
     delete require.cache[require.resolve("./employee_master")];
-    const routes = require("./employee_master")(usecase, permissionsAll, buildSensitive(permissionsAll), null);
+    const routes = require("./employee_master")(
+      usecase, permissionsAll, buildSensitive(permissionsAll), null, null, null, null,
+      require("../test_support/employee_branch_scope").allBranchesScope(permissionsAll)
+    );
     const app = express();
     app.use(bodyParser.json());
     app.use(require("../middlewares/auth").create({ userUsecase: { getSessionState: async () => ({ ...sessionState }) } }));
@@ -743,7 +750,10 @@ describe("the bank verification surface", () => {
       ],
     });
     delete require.cache[require.resolve("./employee_master")];
-    const routes = require("./employee_master")(usecase, permissionsAll, buildSensitive(permissionsAll), null, null);
+    const routes = require("./employee_master")(
+      usecase, permissionsAll, buildSensitive(permissionsAll), null, null, null, null,
+      require("../test_support/employee_branch_scope").allBranchesScope(permissionsAll)
+    );
     const app = express();
     app.use(bodyParser.json());
     app.use(require("../middlewares/auth").create({ userUsecase: { getSessionState: async () => ({ ...sessionState }) } }));
@@ -1307,7 +1317,11 @@ describe("GET /hr/employees/status-summary", () => {
       tokenFor({ designationId: LIST_DESIGNATION })
     );
     assert.equal(r.status, 200);
-    assert.deepEqual(summaryCalls[0], { store_ids: ["2", "3"], designation_ids: ["15"] });
+    // `store_ids` arrives NUMERIC now: the branch scope parses the requested
+    // branches so it can compare them with the caller's authorized ones, and
+    // the parsed list is what reaches the usecase. `designation_ids` is not an
+    // authorization input and is passed through as the query string gave it.
+    assert.deepEqual(summaryCalls[0], { store_ids: [2, 3], designation_ids: ["15"] });
   });
 
   it("refuses a filter that is not a list of numbers", async () => {

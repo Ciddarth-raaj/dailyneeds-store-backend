@@ -117,7 +117,7 @@ test("THE DIRECTORY QUERY USES THE SHARED SCOPE RATHER THAN ITS OWN CLAUSE", () 
   const src = fs.readFileSync(path.join(__dirname, "employee.js"), "utf8");
   const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 
-  assert.match(code, /buildEmployeeScope\(\s*resignation,\s*filters\s*\)/);
+  assert.match(code, /buildEmployeeScope\(\s*resignation,\s*filters,\s*actor\s*\)/);
   // And it no longer builds the predicate itself: exactly one occurrence of
   // the resignation clause remains in the repository layer, in employee_scope.
   const inline = code.match(/employee_name NOT IN \(\?\)/g) || [];
@@ -137,13 +137,28 @@ test("no caller-supplied string can reach the clause", () => {
 
 /* ============== access scope and directory population are separate ====== */
 test("ACCESS SCOPE AND DIRECTORY POPULATION ARE DIFFERENT CONCEPTS", () => {
-  // Authorization: which rows the caller may reach. Empty today, and that is
-  // a finding rather than an omission - there is no per-actor row restriction
-  // on the HR directory.
+  // Authorization: which rows the caller may reach. This is the BRANCH SCOPE
+  // now - the emptiness this test used to pin was recorded as a finding, and
+  // it is the finding that has been fixed.
+  assert.deepStrictEqual(
+    accessScope({ userId: 21, branch_scope: { kind: "ALL_BRANCHES", store_ids: null } }),
+    { conditions: [], params: [] }
+  );
+  assert.deepStrictEqual(
+    accessScope({ userId: 21, branch_scope: { kind: "OWN_BRANCHES", store_ids: [4] } }),
+    { conditions: ["new_employee.store_id IN (?)"], params: [[4]] }
+  );
+
+  // AN ACTOR THAT SKIPPED THE RESOLVER RETURNS NOTHING, not everything: the
+  // failure mode of a forgotten scope must be an empty screen, never a
+  // company-wide one.
   assert.deepStrictEqual(accessScope({ userId: 21, isAdmin: false }), {
-    conditions: [],
+    conditions: ["1 = 0"],
     params: [],
   });
+
+  // No actor at all is an INTERNAL caller - a cron job, a sync - and is
+  // unrestricted, exactly as it always was.
   assert.deepStrictEqual(accessScope(null), { conditions: [], params: [] });
 
   // Population: a legacy rule belonging to one screen.
@@ -177,9 +192,23 @@ test("A REPORT GETS AUTHORIZATION BUT NOT THE RESIGNATION EXCLUSION", () => {
   // The whole point of the separation. If the report inherited the
   // directory's population rule, a "Resigned" report would return nothing
   // and "All" would quietly mean "all except the ones who left".
-  const scope = buildReportAccessScope({ store_ids: [2] }, { userId: 21 });
+  const scope = buildReportAccessScope(
+    { store_ids: [2] },
+    { userId: 21, branch_scope: { kind: "ALL_BRANCHES", store_ids: null } }
+  );
   assert.deepStrictEqual(scope.conditions, ["new_employee.store_id IN (?)"]);
   assert.deepStrictEqual(scope.params, [[2]]);
+
+  // And a BRANCH-SCOPED report carries the restriction as well as the filter.
+  const scoped = buildReportAccessScope(
+    { store_ids: [2] },
+    { userId: 21, branch_scope: { kind: "OWN_BRANCHES", store_ids: [2] } }
+  );
+  assert.deepStrictEqual(scoped.conditions, [
+    "new_employee.store_id IN (?)",
+    "new_employee.store_id IN (?)",
+  ]);
+  assert.deepStrictEqual(scoped.params, [[2], [2]]);
 
   const joined = scope.conditions.join(" ");
   assert.ok(!/employee_name NOT IN/.test(joined), "no resignation exclusion");

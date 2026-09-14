@@ -203,9 +203,17 @@ before(async () => {
   app.use(bodyParser.json());
   app.use(auth.create({ userUsecase: { getSessionState: async () => sessionState } }));
 
+  // The employee router takes the EMPLOYEE BRANCH SCOPE as a fourth argument.
+  // ALL BRANCHES here: B3's subject is field-level filtering, and a branch
+  // refusal arriving first would hide the very responses this file inspects.
+  // The branch rule has its own file. The document router ignores the extra
+  // argument.
+  const branchScope = require("../test_support/employee_branch_scope").allBranchesScope(
+    permissions
+  );
   const mount = (prefix, mod, usecase) => {
     delete require.cache[require.resolve(`../routes/${mod}`)];
-    const r = require(`../routes/${mod}`)(usecase, permissions, sensitive);
+    const r = require(`../routes/${mod}`)(usecase, permissions, sensitive, branchScope);
     app.use(prefix, r.getRouter());
   };
   mount("/employee", "employee", employeeUsecase);

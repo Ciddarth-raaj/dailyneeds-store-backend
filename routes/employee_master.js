@@ -29,8 +29,14 @@ class EmployeeMasterRoutes {
     aadhaarUsecase,
     bankUsecase,
     statusSummaryUsecase,
-    ifscLookupUsecase
+    ifscLookupUsecase,
+    branchScope
   ) {
+    // EMPLOYEE BRANCH SCOPE. Required, not optional - see routes/employee.js.
+    if (!branchScope) {
+      throw new Error("routes/employee_master: the employee branch scope is required");
+    }
+    this.branchScope = branchScope;
     this.usecase = employeeMasterUsecase;
     this.permissions = permissions;
     this.sensitive = sensitive;
@@ -72,6 +78,20 @@ class EmployeeMasterRoutes {
   setupRoutes() {
     router.use(this.sensitive.filterResponse);
     router.use(this.sensitive.guardWrite);
+
+    /**
+     * EMPLOYEE BRANCH SCOPE. Every route below that names an employee carries
+     * `this.branchScope.requireEmployeeInScope()` immediately after its
+     * permission check, so an employee outside the caller's branches is
+     * refused whatever that caller's keys say they may do to employees they
+     * CAN reach - and a non-existent id gets the same refusal, so ids cannot
+     * be enumerated by watching the answer change.
+     *
+     * Attached PER ROUTE rather than mounted once on `/employee/:employee_id`,
+     * because `router.use` matches by prefix and would also have caught
+     * `POST /employee/check-duplicate`, which names no employee. That route
+     * and `POST /employee` are scoped in their own handlers instead.
+     */
 
     /* ------------------------------------------------------------ create */
     router.post("/employee", this.permissions.require(P.EMPLOYEE_CREATE), async (req, res) => {
@@ -122,6 +142,15 @@ class EmployeeMasterRoutes {
         const isValid = Joi.validate(req.body, schema);
         if (isValid.error !== null) throw isValid.error;
 
+        // BRANCH-SCOPED CALLERS CREATE INTO THEIR OWN BRANCH ONLY. `store_id`
+        // is required by the schema, so there is always a branch to check.
+        const target = await this.branchScope.checkTargetBranch(req, req.body.store_id);
+        if (!target.ok) {
+          this.branchScope.refuse(res, target);
+          res.end();
+          return;
+        }
+
         res.json(await this.usecase.createEmployee(req.body, { actorEmployeeId: this._actor(req) }));
       } catch (err) {
         this._fail(res, err);
@@ -141,6 +170,7 @@ class EmployeeMasterRoutes {
     router.post(
       "/employee/:employee_id/onboarding-education",
       this.permissions.require(P.EMPLOYEE_CREATE),
+      this.branchScope.requireEmployeeInScope(),
       async (req, res) => {
         try {
           const employeeId = Number(req.params.employee_id);
@@ -172,7 +202,7 @@ class EmployeeMasterRoutes {
     );
 
     /* -------------------------------------------------------------- edit */
-    router.post("/employee/:employee_id/edit", this.permissions.require(P.EMPLOYEE_EDIT), async (req, res) => {
+    router.post("/employee/:employee_id/edit", this.permissions.require(P.EMPLOYEE_EDIT), this.branchScope.requireEmployeeInScope(), async (req, res) => {
       try {
         const employeeId = Number(req.params.employee_id);
         if (!Number.isInteger(employeeId) || employeeId <= 0) {
@@ -187,6 +217,18 @@ class EmployeeMasterRoutes {
         for (const f of EDITABLE_FIELDS) keys[f] = Joi.any().optional();
         const isValid = Joi.validate(req.body, Joi.object().keys(keys).unknown(true));
         if (isValid.error !== null) throw isValid.error;
+
+        // BRANCH-TRANSFER PROTECTION. The employee is already known to be in
+        // the caller's branches (the router-level guard); this stops the same
+        // caller moving them out. A body that does not name `store_id` is not
+        // a transfer and is unaffected, and HR and administrators keep the
+        // transfer capability they have today.
+        const transfer = await this.branchScope.checkTargetBranch(req, req.body.store_id);
+        if (!transfer.ok) {
+          this.branchScope.refuse(res, transfer);
+          res.end();
+          return;
+        }
 
         res.json(
           await this.usecase.editEmployee(employeeId, req.body, { actorEmployeeId: this._actor(req) })
@@ -205,6 +247,7 @@ class EmployeeMasterRoutes {
     router.get(
       "/employee/:employee_id/attendance-required",
       this.permissions.require(P.VIEW_EMPLOYEES),
+      this.branchScope.requireEmployeeInScope(),
       async (req, res) => {
         try {
           res.json(await this.usecase.getAttendanceRequired(req.params.employee_id));
@@ -229,6 +272,7 @@ class EmployeeMasterRoutes {
     router.post(
       "/employee/:employee_id/attendance-required",
       requireAdmin,
+      this.branchScope.requireEmployeeInScope(),
       async (req, res) => {
         try {
           const isValid = Joi.validate(
@@ -261,6 +305,7 @@ class EmployeeMasterRoutes {
     router.post(
       "/employee/:employee_id/joining-date",
       this.permissions.require(P.EMPLOYEE_EDIT),
+      this.branchScope.requireEmployeeInScope(),
       async (req, res) => {
         try {
           const employeeId = Number(req.params.employee_id);
@@ -283,7 +328,7 @@ class EmployeeMasterRoutes {
     );
 
     /* ------------------------------------------------------------ resign */
-    router.post("/employee/:employee_id/resign", this.permissions.require(P.EMPLOYEE_RESIGN), async (req, res) => {
+    router.post("/employee/:employee_id/resign", this.permissions.require(P.EMPLOYEE_RESIGN), this.branchScope.requireEmployeeInScope(), async (req, res) => {
       try {
         const employeeId = Number(req.params.employee_id);
         const schema = {
@@ -304,7 +349,7 @@ class EmployeeMasterRoutes {
     });
 
     /* ------------------------------------------------------------ rejoin */
-    router.post("/employee/:employee_id/rejoin", this.permissions.require(P.EMPLOYEE_REJOIN), async (req, res) => {
+    router.post("/employee/:employee_id/rejoin", this.permissions.require(P.EMPLOYEE_REJOIN), this.branchScope.requireEmployeeInScope(), async (req, res) => {
       try {
         const employeeId = Number(req.params.employee_id);
         const schema = {
@@ -327,6 +372,7 @@ class EmployeeMasterRoutes {
     router.get(
       "/employee/:employee_id/lifecycle",
       this.permissions.require(P.VIEW_EMPLOYEE_LIFECYCLE),
+      this.branchScope.requireEmployeeInScope(),
       async (req, res) => {
         try {
           res.json(await this.usecase.getLifecycleHistory(Number(req.params.employee_id)));
@@ -371,6 +417,22 @@ class EmployeeMasterRoutes {
         const isValid = Joi.validate(req.query, schema);
         if (isValid.error !== null) throw isValid.error;
 
+        // THE SAME BRANCH SCOPE AS THE LIST IT ANNOTATES. This shows badges for
+        // exactly the employees `GET /employee/employees` shows the same
+        // caller, so it has to be narrowed the same way - otherwise the badge
+        // endpoint would disclose the existence, and the onboarding state, of
+        // employees the list itself refuses to return.
+        const scoped = await this.branchScope.listFilters(req, req.query.store_ids);
+        if (!scoped.ok) {
+          this.branchScope.refuse(res, scoped);
+          res.end();
+          return;
+        }
+        const filters =
+          scoped.store_ids === null
+            ? req.query
+            : { ...req.query, store_ids: scoped.store_ids };
+
         // `pf_status` / `esi_status` may name NOT_APPLICABLE only for a caller
         // who is allowed to see the applicability columns themselves. Everyone
         // else is told COMPLETE for a recorded decision, which is the same
@@ -381,7 +443,7 @@ class EmployeeMasterRoutes {
           req,
           P.VIEW_EMPLOYEE_SENSITIVE
         );
-        res.json(await this.statusSummary.list(req.query, { disclosePfEsiApplicability }));
+        res.json(await this.statusSummary.list(filters, { disclosePfEsiApplicability }));
       } catch (err) {
         this._fail(res, err);
       }
@@ -405,7 +467,30 @@ class EmployeeMasterRoutes {
         });
         if (isValid.error !== null) throw isValid.error;
 
-        res.json(await this.usecase.findPossibleDuplicates(req.body || {}));
+        // SCOPED, because this IS a search: it takes a name, a mobile or a
+        // date of birth and returns matching employees' names, contact
+        // numbers, dates of birth and branches. Left global it would be the
+        // widest employee-search endpoint on the server and the easiest way
+        // around every other restriction in this change.
+        //
+        // THE COST IS STATED RATHER THAN HIDDEN: a branch-scoped creator no
+        // longer sees a duplicate who works at another branch. That is a
+        // narrowing of an ADVISORY check which blocks nothing, and the
+        // employee-id and Aadhaar uniqueness guarantees that actually prevent
+        // a duplicate record are enforced elsewhere and are unchanged. HR,
+        // who complete onboarding, still see company-wide matches.
+        const scoped = await this.branchScope.listFilters(req, null);
+        if (!scoped.ok) {
+          this.branchScope.refuse(res, scoped);
+          res.end();
+          return;
+        }
+
+        res.json(
+          await this.usecase.findPossibleDuplicates(req.body || {}, {
+            storeIds: scoped.store_ids,
+          })
+        );
       } catch (err) {
         this._fail(res, err);
       }
@@ -483,6 +568,7 @@ class EmployeeMasterRoutes {
     router.get(
       "/employee/:employee_id/aadhaar",
       this.permissions.require(P.VIEW_EMPLOYEE_LIFECYCLE),
+      this.branchScope.requireEmployeeInScope(),
       async (req, res) => {
         try {
           res.json(await this.usecase.getAadhaarStatus(Number(req.params.employee_id)));
@@ -502,6 +588,7 @@ class EmployeeMasterRoutes {
     router.post(
       "/employee/:employee_id/aadhaar/attach",
       this.permissions.require(P.EMPLOYEE_EDIT),
+      this.branchScope.requireEmployeeInScope(),
       async (req, res) => {
         try {
           if (!this.aadhaar) {
@@ -542,6 +629,7 @@ class EmployeeMasterRoutes {
     router.get(
       "/employee/:employee_id/aadhaar/full",
       this.permissions.requireAll(P.VIEW_EMPLOYEE_SENSITIVE, P.VIEW_AADHAAR_FULL),
+      this.branchScope.requireEmployeeInScope(),
       async (req, res) => {
         try {
           if (!this.aadhaar) {
@@ -576,6 +664,7 @@ class EmployeeMasterRoutes {
     router.post(
       "/employee/:employee_id/bank/verify",
       this.permissions.requireAll(P.VERIFY_EMPLOYEE_BANK, P.VIEW_EMPLOYEE_SENSITIVE),
+      this.branchScope.requireEmployeeInScope(),
       async (req, res) => {
         try {
           if (!this.bank) {
@@ -597,6 +686,7 @@ class EmployeeMasterRoutes {
     router.get(
       "/employee/:employee_id/bank/verification",
       this.permissions.require(P.VIEW_EMPLOYEE_LIFECYCLE),
+      this.branchScope.requireEmployeeInScope(),
       async (req, res) => {
         try {
           if (!this.bank) {
@@ -619,6 +709,7 @@ class EmployeeMasterRoutes {
     router.post(
       "/employee/:employee_id/bank/confirm-name",
       this.permissions.requireAll(P.CONFIRM_BANK_NAME_MISMATCH, P.VIEW_EMPLOYEE_SENSITIVE),
+      this.branchScope.requireEmployeeInScope(),
       async (req, res) => {
         try {
           if (!this.bank) {
@@ -665,6 +756,7 @@ class EmployeeMasterRoutes {
     router.post(
       "/employee/:employee_id/bank/name-review",
       this.permissions.requireAll(P.CONFIRM_BANK_NAME_MISMATCH, P.VIEW_EMPLOYEE_SENSITIVE),
+      this.branchScope.requireEmployeeInScope(),
       async (req, res) => {
         try {
           if (!this.bank) {
@@ -704,6 +796,7 @@ class EmployeeMasterRoutes {
     router.post(
       "/employee/:employee_id/bank/override-duplicate",
       this.permissions.requireAll(P.OVERRIDE_DUPLICATE_BANK_ACCOUNT, P.VIEW_EMPLOYEE_SENSITIVE),
+      this.branchScope.requireEmployeeInScope(),
       async (req, res) => {
         try {
           if (!this.bank) {
@@ -774,7 +867,15 @@ class EmployeeMasterRoutes {
       try {
         const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 500);
         const offset = Math.max(Number(req.query.offset) || 0, 0);
-        res.json(await this.usecase.getReviewList({ limit, offset }));
+        const scoped = await this.branchScope.listFilters(req, null);
+        if (!scoped.ok) {
+          this.branchScope.refuse(res, scoped);
+          res.end();
+          return;
+        }
+        res.json(
+          await this.usecase.getReviewList({ limit, offset, storeIds: scoped.store_ids })
+        );
       } catch (err) {
         this._fail(res, err);
       }
@@ -794,7 +895,8 @@ module.exports = (
   aadhaarUsecase,
   bankUsecase,
   statusSummaryUsecase,
-  ifscLookupUsecase
+  ifscLookupUsecase,
+  branchScope
 ) =>
   new EmployeeMasterRoutes(
     employeeMasterUsecase,
@@ -803,5 +905,6 @@ module.exports = (
     aadhaarUsecase,
     bankUsecase,
     statusSummaryUsecase,
-    ifscLookupUsecase
+    ifscLookupUsecase,
+    branchScope
   );

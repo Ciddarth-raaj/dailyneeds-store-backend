@@ -82,7 +82,10 @@ class EmployeeWorkShiftRepository {
    */
   buildFilters(filters = {}) {
     const f = filters || {};
-    const { conditions, params } = accessScope(f.actor || null);
+    // The employee table is aliased `ne` here, so the branch predicate must be
+    // too. An actor without a resolved `branch_scope` renders `1 = 0` rather
+    // than nothing - see `employee_scope.js#accessScope`.
+    const { conditions, params } = accessScope(f.actor || null, { alias: "ne" });
 
     const employment = String(f.employment_status || EMPLOYMENT_STATUS.ACTIVE).toUpperCase();
     if (employment === EMPLOYMENT_STATUS.ACTIVE) {
