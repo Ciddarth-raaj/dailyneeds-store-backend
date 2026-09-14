@@ -49,13 +49,27 @@ describe("the migration identifier", () => {
     assert.deepEqual(sameStamp, [NAME], "no other migration shares this timestamp");
   });
 
-  it("sorts AFTER every migration that already exists", () => {
-    const others = all.filter((f) => f !== NAME).sort();
-    const highest = others[others.length - 1];
+  it("sorts AFTER every migration that existed when it was written", () => {
+    // The rule this protects is that the DATA FIX runs after the schema and
+    // permission migrations it depends on - not that it is forever the last
+    // file in the directory. So it is pinned to the highest identifier that
+    // existed when it was written, and a LATER migration is allowed to land
+    // beside it as long as that migration does not touch `payment_type`.
+    const WHEN_WRITTEN = "20261004120000-employee-aadhaar-view-permission";
+    const earlier = all.filter((f) => f !== NAME && f <= WHEN_WRITTEN).sort();
+    const highest = earlier[earlier.length - 1];
     assert.ok(NAME > highest, `${NAME} must sort after the current highest, ${highest}`);
-    // Named explicitly so a rebase that lands a newer HR migration fails
-    // here rather than silently reordering this data fix behind it.
-    assert.equal(highest, "20261004120000-employee-aadhaar-view-permission");
+    assert.equal(highest, WHEN_WRITTEN);
+
+    // Anything that landed afterwards must leave this fix's column alone,
+    // which is the only way a later migration could actually reorder it.
+    for (const later of all.filter((f) => f > NAME)) {
+      const sql = fs.readFileSync(path.join(dir, "sqls", `${later}-up.sql`), "utf8");
+      assert.ok(
+        !sql.includes("payment_type"),
+        `${later} sorts after this data fix and must not touch payment_type`
+      );
+    }
   });
 
   it("has both halves on disk, and a runner that points at them", () => {

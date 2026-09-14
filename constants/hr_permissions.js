@@ -127,6 +127,51 @@ module.exports = {
   // already records this codebase as refusing to do.
   VIEW_EMPLOYEE_AADHAAR: "view_employee_aadhaar",
 
+  // ====================== THE EXISTING-EMPLOYEE AADHAAR VERIFICATION =======
+  //
+  // START AND COMPLETE AADHAAR OTP VERIFICATION FOR AN EMPLOYEE WHO ALREADY
+  // EXISTS AND WHOSE AADHAAR IS STILL PENDING. Nothing else.
+  //
+  // WHY IT EXISTS. Roughly six hundred employees predate the Aadhaar flow and
+  // carry no identity at all. Completing that backlog is branch work - the
+  // store manager knows the person standing in front of them - but the only
+  // way to run the OTP flow was `POST /hr/aadhaar/initiate`, which is the
+  // ONBOARDING path: gated on `employee_create` and, because its body carries
+  // `aadhaar_number`, on `edit_employee_sensitive` through B3's write guard.
+  // A store manager holds neither, so the modal on the employee profile
+  // ended in "You do not have permission to perform this action". The
+  // alternative - granting `edit_employee_sensitive` - would have handed them
+  // salary, bank, PAN, PF and ESI writes to fix an Aadhaar badge, which is
+  // the opposite of what B3 is for.
+  //
+  // SO IT IS ITS OWN KEY, AND A DELIBERATELY TEMPORARY ONE. It is the whole
+  // reason the key exists as a separate decision: when the old-employee
+  // backlog is finished, an administrator unticks ONE box and the ability is
+  // gone, with no other capability moving.
+  //
+  // WHAT IT IS NOT.
+  //   not `view_employee_aadhaar`  reading the badge is not running the check
+  //   not `employee_edit`          which is still what ATTACHING requires,
+  //                                unchanged - the pair is the whole rule
+  //   not `edit_employee_sensitive` it grants no bank, PAN, PF or ESI write
+  //   not `view_aadhaar_full`      it reads no digit beyond the last four
+  //   not `employee_create`        it hires nobody, and creating an employee
+  //                                does not require it
+  //
+  // IT ONLY EVER APPLIES TO A PENDING AADHAAR. The existing-employee routes
+  // refuse an employee who is already VERIFIED, so this key can never be used
+  // to swap or overwrite a verified identity; that stays an HR/Admin matter.
+  //
+  // AND IT GRANTS NO BRANCH. Like every key here it says WHAT, never WHERE:
+  // the routes apply this key AND the employee branch scope.
+  //
+  // The migration declares it and grants it to HR EXECUTIVE only, by the one
+  // designation name this codebase already relies on. It is NOT inferred from
+  // `employee_create`, `employee_edit`, `view_employees` or
+  // `view_employee_aadhaar`, and no Store Manager designation is guessed at:
+  // an administrator ticks it.
+  VERIFY_EMPLOYEE_AADHAAR: "verify_employee_aadhaar",
+
   // Stage 0C / C2. Running a paid external bank check, and accepting a name
   // that did not quite match, are separate decisions from editing an
   // employee. Declared by the C2 Sandbox migration, granted to nobody.

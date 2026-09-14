@@ -68,7 +68,7 @@ class EmployeeAadhaarRepository {
               aadhaar_ciphertext, aadhaar_iv, aadhaar_auth_tag, key_version,
               status, provider, provider_reference_id, provider_transaction_id,
               verified_at, consent_given, demographics_json, employee_id,
-              otp_attempts, initiated_by_employee_id, expires_at
+              otp_attempts, initiated_by_employee_id, target_employee_id, expires_at
          FROM employee_aadhaar_verification WHERE session_token = ?`,
       [sessionToken]
     );
@@ -119,7 +119,12 @@ class EmployeeAadhaarRepository {
       `SELECT verification_id, aadhaar_fingerprint, aadhaar_last4,
               aadhaar_ciphertext, aadhaar_iv, aadhaar_auth_tag, key_version,
               status, provider, provider_reference, verified_at,
-              consent_given, demographics_json, employee_id, expires_at
+              consent_given, demographics_json, employee_id,
+              -- THE EMPLOYEE THIS SESSION WAS RAISED FOR. Selected under the
+              -- same FOR UPDATE lock as everything else the consume decision
+              -- rests on: the binding check must read the row the write will
+              -- actually update, not a copy read a moment earlier.
+              target_employee_id, expires_at
          FROM employee_aadhaar_verification
         WHERE verification_id = ?
         FOR UPDATE`,
@@ -168,7 +173,8 @@ class EmployeeAadhaarRepository {
       "GET-VERIFICATION",
       `SELECT verification_id, aadhaar_last4, status, provider, provider_reference,
               failure_reason, verified_at, consent_given, consent_version,
-              consent_actor_employee_id, consent_at, employee_id, consumed_at,
+              consent_actor_employee_id, consent_at, employee_id,
+              target_employee_id, consumed_at,
               expires_at, created_at
          FROM employee_aadhaar_verification WHERE verification_id = ?`,
       [verificationId]

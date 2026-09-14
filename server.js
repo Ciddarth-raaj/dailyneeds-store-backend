@@ -974,6 +974,18 @@ class Server {
       this.ifscLookupUsecase,
       this.employeeBranchScope
     );
+    // THE EXISTING-EMPLOYEE AADHAAR VERIFICATION PATH. A router of its own so
+    // that the one endpoint which legitimately accepts an `aadhaar_number` for
+    // an employee who already exists is not under the master router's blanket
+    // `guardWrite` - see routes/employee_aadhaar_verification.js, which states
+    // in full why that is safe and what runs in its place.
+    const employeeAadhaarVerificationRouter = require("./routes/employee_aadhaar_verification")(
+      this.employeeMasterUsecase,
+      this.employeeAadhaarUsecase,
+      this.permissions,
+      this.sensitive,
+      this.employeeBranchScope
+    );
     // Reports: discovery, saved templates, preview and the two exports.
     const employeeReportRouter = require("./routes/employee_report")(
       this.employeeReportService,
@@ -1259,6 +1271,15 @@ class Server {
     app.use("/department", departmentRouter.getRouter());
     app.use("/designation", designationRouter.getRouter());
     app.use("/employee", employeeRouter.getRouter());
+    // BEFORE the employee-master router, and the order is load-bearing: the
+    // master router mounts B3's `guardWrite` with `router.use`, which runs for
+    // every request that enters it whether or not one of its routes matches.
+    // Mounted after it, these two endpoints would be refused by that guard -
+    // for carrying the very Aadhaar number they exist to verify - before ever
+    // being reached. It claims only
+    // /hr/employee/:id/aadhaar/initiate and /hr/employee/:id/aadhaar/verify-otp,
+    // neither of which any other /hr router defines, so nothing else changes.
+    app.use("/hr", employeeAadhaarVerificationRouter.getRouter());
     // Stage 0C / C2. Mounted at /hr so the lifecycle actions do not collide
     // with the existing employee routes and C3 can find them in one place.
     app.use("/hr", employeeMasterRouter.getRouter());
