@@ -149,23 +149,121 @@ SELECT 'live_but_uncosted', COUNT(DISTINCT employee_id)
 
 -- ================= 4. getPayrollConfigMany: the derived pair ============
 -- The query returns only `payment_type_recorded` and `pays_in_cash`; the
--- column itself never leaves the database. This proves the two booleans are
--- exactly the column.
+-- column itself never leaves the database. These checks prove the two
+-- booleans ARE the column, by reproducing the repository's query verbatim in
+-- a derived table and comparing its output against the same rule written a
+-- second, different way. Comparing an expression to itself would pass no
+-- matter what the query did.
 --
--- PASS: `mismatches` is 0 on both rows.
-SELECT 'payment_type_recorded' AS derived_column,
-       SUM((payment_type IS NOT NULL) <> (payment_type IS NOT NULL)) AS mismatches,
-       SUM(payment_type IS NULL)     AS not_recorded,
-       SUM(payment_type = 1)         AS bank,
-       SUM(payment_type = 2)         AS cash,
-       SUM(payment_type NOT IN (1, 2)) AS unexpected_value
-  FROM `new_employee` WHERE employee_id IN (:IDS)
-UNION ALL
-SELECT 'pays_in_cash',
-       SUM((payment_type = 2) <> (payment_type = 2)), NULL, NULL, NULL, NULL
+-- A derived table rather than a CTE, so this section runs on MySQL 5.7 as
+-- well as 8 (sections 2 and 6 need 8).
+--
+-- ONE NULL SUBTLETY, AND IT IS EXPECTED BEHAVIOUR RATHER THAN A DEFECT.
+-- `payment_type = 2` is NULL - not 0 - when `payment_type` is NULL, so
+-- `pays_in_cash` comes back NULL for an employee whose route was never
+-- recorded. The repository coerces it with `Boolean(Number(row.pays_in_cash))`
+-- and `Number(null)` is 0, so it reads false, which is correct. The checks
+-- below therefore treat NULL as 0 for the comparison AND report it separately,
+-- so the reviewer sees it rather than having it silently normalised away.
+-- `payment_type IS NOT NULL` is never NULL, so `payment_type_recorded` is
+-- always a clean 0 or 1.
+
+-- 4a. The totals, and the two mismatch counts.
+--     PASS: `mismatch_recorded` = 0 AND `mismatch_cash` = 0.
+SELECT
+  COUNT(*)                                                      AS employees_checked,
+  SUM(bulk.payment_type_recorded)                               AS derived_recorded,
+  SUM(COALESCE(bulk.pays_in_cash, 0))                           AS derived_cash,
+  SUM(CASE WHEN ne.payment_type IS NULL THEN 0 ELSE 1 END)      AS expected_recorded,
+  SUM(CASE WHEN ne.payment_type = 2    THEN 1 ELSE 0 END)       AS expected_cash,
+  -- NOT (a <=> b) is the NULL-SAFE inequality: a plain <> yields NULL when
+  -- either side is NULL, and a NULL is not counted by SUM - which is exactly
+  -- how a mismatch would hide.
+  SUM(NOT (bulk.payment_type_recorded
+           <=> CASE WHEN ne.payment_type IS NULL THEN 0 ELSE 1 END))  AS mismatch_recorded,
+  SUM(NOT (COALESCE(bulk.pays_in_cash, 0)
+           <=> CASE WHEN ne.payment_type = 2 THEN 1 ELSE 0 END))      AS mismatch_cash
+FROM (
+  -- repository/employee_master.js#getPayrollConfigMany, verbatim.
+  SELECT employee_id,
+         (payment_type IS NOT NULL) AS payment_type_recorded,
+         (payment_type = 2)         AS pays_in_cash
+    FROM `new_employee` WHERE employee_id IN (:IDS)
+) bulk
+JOIN `new_employee` ne ON ne.employee_id = bulk.employee_id;
+
+-- 4b. EVERY MISMATCHING EMPLOYEE, with what the query returned beside what it
+--     should have returned. This is the row-level form of 4a - run it
+--     whenever 4a is non-zero, and keep its output.
+--     PASS: zero rows.
+SELECT
+  bulk.employee_id,
+  bulk.payment_type_recorded                                   AS actual_payment_type_recorded,
+  CASE WHEN ne.payment_type IS NULL THEN 0 ELSE 1 END          AS expected_payment_type_recorded,
+  bulk.pays_in_cash                                            AS actual_pays_in_cash,
+  CASE WHEN ne.payment_type = 2 THEN 1 ELSE 0 END              AS expected_pays_in_cash,
+  CASE
+    WHEN NOT (bulk.payment_type_recorded
+              <=> CASE WHEN ne.payment_type IS NULL THEN 0 ELSE 1 END)
+     AND NOT (COALESCE(bulk.pays_in_cash, 0)
+              <=> CASE WHEN ne.payment_type = 2 THEN 1 ELSE 0 END)
+      THEN 'both'
+    WHEN NOT (bulk.payment_type_recorded
+              <=> CASE WHEN ne.payment_type IS NULL THEN 0 ELSE 1 END)
+      THEN 'payment_type_recorded'
+    ELSE 'pays_in_cash'
+  END                                                          AS mismatched_column
+FROM (
+  SELECT employee_id,
+         (payment_type IS NOT NULL) AS payment_type_recorded,
+         (payment_type = 2)         AS pays_in_cash
+    FROM `new_employee` WHERE employee_id IN (:IDS)
+) bulk
+JOIN `new_employee` ne ON ne.employee_id = bulk.employee_id
+WHERE NOT (bulk.payment_type_recorded
+           <=> CASE WHEN ne.payment_type IS NULL THEN 0 ELSE 1 END)
+   OR NOT (COALESCE(bulk.pays_in_cash, 0)
+           <=> CASE WHEN ne.payment_type = 2 THEN 1 ELSE 0 END)
+ORDER BY bulk.employee_id;
+
+-- 4c. THE QUERY MUST ANSWER FOR EVERY EMPLOYEE IT WAS ASKED ABOUT. A row
+--     missing from the bulk result is read as `{recorded: false, cash: false}`
+--     by the usecase, which would put a bank employee on the payroll-pending
+--     list for a reason that is not true of them. That happens only if an id
+--     in the list has no `new_employee` row.
+--
+--     THIS ONE CANNOT BE CHECKED IN SQL ALONE - the id list is substituted in
+--     as a literal, so a query over `new_employee` can only ever compare the
+--     table with itself. Compare BY HAND: `rows_out` below must equal the
+--     number of ids you substituted for :IDS.
+--     PASS: rows_out = the count of ids passed (section 0's list length).
+SELECT COUNT(*) AS rows_out
   FROM `new_employee` WHERE employee_id IN (:IDS);
 
--- 4b. THE VALUE THAT WOULD BREAK THE RULE. `pays_in_cash` is `payment_type =
+-- 4d. WHERE `pays_in_cash` COMES BACK NULL. Informational, and expected to be
+--     exactly the employees with no recorded route - see the NULL note above.
+--     PASS: `null_but_route_recorded` = 0. `null_and_not_recorded` is a count
+--     to note, not a failure; it should match `not_recorded` in 4e.
+SELECT
+  SUM(CASE WHEN bulk.pays_in_cash IS NULL AND ne.payment_type IS NULL
+           THEN 1 ELSE 0 END) AS null_and_not_recorded,
+  SUM(CASE WHEN bulk.pays_in_cash IS NULL AND ne.payment_type IS NOT NULL
+           THEN 1 ELSE 0 END) AS null_but_route_recorded
+FROM (
+  SELECT employee_id, (payment_type = 2) AS pays_in_cash
+    FROM `new_employee` WHERE employee_id IN (:IDS)
+) bulk
+JOIN `new_employee` ne ON ne.employee_id = bulk.employee_id;
+
+-- 4e. The distribution, for the record - and the number the Cash -> Bank card
+--     should show. Informational.
+SELECT SUM(payment_type IS NULL)        AS not_recorded,
+       SUM(payment_type = 1)            AS bank,
+       SUM(payment_type = 2)            AS cash,
+       SUM(payment_type NOT IN (1, 2))  AS unexpected_value
+  FROM `new_employee` WHERE employee_id IN (:IDS);
+
+-- 4f. THE VALUE THAT WOULD BREAK THE RULE. `pays_in_cash` is `payment_type =
 --     2`; anything that is neither 1 nor 2 would be treated as "bank" and
 --     asked for an account. Legacy free-text or a third code would show here.
 --     PASS: zero rows.
