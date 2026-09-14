@@ -358,11 +358,37 @@ describe("DigiSME import: insertPunch with source DIGISME_IMPORT", () => {
     const r = await store.insertPunch(imported, derived, { source: "DIGISME_IMPORT", importBatchId: 7 });
     assert.deepEqual(r, { outcome: "stored", biomax_punch_id: 501 });
     const ins = pool.log.find((l) => /INSERT INTO biomax_punch /.test(l.sql));
-    assert.match(ins.sql, /VALUES \(NULL, \?, \?, STR_TO_DATE\(\?, '%Y%m%d%H%i%s'\), NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, \?, NULL, \?\)/);
+    // raw_json is a PLACEHOLDER now, not a literal NULL: the DigiSME API
+    // pull has a vendor row worth preserving (PunchAction, Source,
+    // ClockLocation) and passes it. An Excel import passes nothing and the
+    // bound value is still null, which is what this case asserts - a
+    // spreadsheet cell has no payload. Every other BM70W field stays a
+    // literal NULL: none of them is ever invented for an imported punch.
+    assert.match(ins.sql, /VALUES \(NULL, \?, \?, STR_TO_DATE\(\?, '%Y%m%d%H%i%s'\), NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, \?, NULL, NULL, \?, NULL, \?\)/);
     assert.ok(!/ON DUPLICATE KEY UPDATE/.test(ins.sql), "no retransmit bump for an import");
-    assert.deepEqual(ins.params, ["1952", "20260910091500", "20260910091500", "DIGISME_IMPORT", 7]);
+    assert.deepEqual(ins.params, ["1952", "20260910091500", "20260910091500", null, "DIGISME_IMPORT", 7]);
     assert.ok(pool.log.some((l) => /INSERT INTO biomax_punch_derived/.test(l.sql)));
     assert.deepEqual(pool.log.map((l) => l.sql).filter((s) => /^(BEGIN|COMMIT|ROLLBACK|RELEASE)$/.test(s)), ["BEGIN", "COMMIT", "RELEASE"]);
+  });
+
+  it("a DigiSME API punch stores the vendor row in raw_json, and io_mode stays NULL", async () => {
+    // PunchAction and Source are preserved here rather than mapped onto
+    // `io_mode`: that column is a BIGINT the Part 1 schema documents as "NOT
+    // a direction flag", and the engine pairs punches by position on
+    // purpose. Keeping the payload costs no schema change and decides
+    // nothing downstream.
+    pool.responses.push({ affectedRows: 1, insertId: 502 }, {});
+    const vendor = JSON.stringify({ Code: "1952", PunchAction: "IN", Source: "Device" });
+    const r = await store.insertPunch(
+      { ...imported, raw_json: vendor },
+      derived,
+      { source: "DIGISME_IMPORT", importBatchId: 8 }
+    );
+    assert.deepEqual(r, { outcome: "stored", biomax_punch_id: 502 });
+    const ins = pool.log.find((l) => /INSERT INTO biomax_punch /.test(l.sql));
+    assert.deepEqual(ins.params, ["1952", "20260910091500", "20260910091500", vendor, "DIGISME_IMPORT", 8]);
+    // io_mode is the 6th column in the VALUES list and is a literal NULL.
+    assert.match(ins.sql, /STR_TO_DATE\(\?, '%Y%m%d%H%i%s'\), NULL, NULL, NULL, 0,/);
   });
 
   it("ER_DUP_ENTRY from the import dedup key -> duplicate with the existing id, transaction rolled back, no derived row", async () => {

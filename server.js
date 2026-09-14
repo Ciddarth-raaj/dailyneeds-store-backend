@@ -1561,6 +1561,77 @@ class Server {
       }
     });
 
+    /* ------------------------------------------- DigiSME attendance sync
+     *
+     * Constructed HERE, not beside the other usecases, because it needs
+     * `this.apiSyncLogger` and that is not built until initRoutes(). One
+     * instance is deliberate: both jobs must share the same pair of
+     * re-entrancy guards, and two instances would each think they were the
+     * only run in flight.
+     *
+     * It inserts nothing of its own - it reuses the import repository, the
+     * import usecase's resolver and the same biomax/store insertPunch path
+     * the Excel upload and a live device punch use.
+     *
+     * Target: employee punch -> DigiSME -> this sync -> the existing
+     * insertPunch path -> dnds.co.in, in about one to two minutes.
+     *
+     * BOTH JOBS SHARE ONE VENDOR BUDGET, and neither reasons about it. Every
+     * DigiSME call - authentication, live fetch, recovery fetch, the 401
+     * refresh and its retry - queues behind the single serialized throttle
+     * in services/digisme_attendance.js at MIN_CALL_INTERVAL_MS (15s), which
+     * caps any 60-second window at four calls against the vendor's limit of
+     * five. Adding a third DigiSME caller needs no new coordination; adding
+     * a SECOND PROCESS does - see the topology note below.
+     *
+     * TOPOLOGY. The re-entrancy guards inside the usecase are in-process,
+     * and that is sound only while the API runs as ONE process:
+     * ecosystem.config.js declares the API with no `instances` and no
+     * `exec_mode`, so pm2 runs it in fork mode, single instance, and
+     * `pm2 reload 0` is a restart rather than an overlap
+     * (docs/auth-stage0a-preproduction-readiness.md, verified snapshot:
+     * pm_id=0, exec_mode=fork_mode, instances=1).
+     *
+     * IF THE API IS EVER CLUSTERED OR SCALED TO MULTIPLE INSTANCES, every
+     * instance runs its own copy of these crons AND its own throttle queue.
+     * Vendor traffic multiplies by the instance count and silently breaches
+     * the 5/minute limit with no error anywhere in our logs. Moving to
+     * cluster mode therefore requires revisiting this block first - a lock
+     * these jobs can share across processes, or a single designated worker.
+     * `services/digisme_cron_topology.test.js` fails if ecosystem.config.js
+     * starts declaring instances, so this cannot happen quietly.
+     */
+
+    this.digismeAttendanceSyncUsecase = require("./usecase/digisme_attendance_sync")({
+      client: require("./services/digisme_attendance"),
+      repo: this.attendanceImportRepo,
+      store: this.biomaxImportStore,
+      importUsecase: this.attendanceImportUsecase,
+      apiSyncLogger: this.apiSyncLogger,
+      alerter: {
+        sendMessage: (text) =>
+          require("./services/telegram")().sendMessage(ALERTS_TELEGRAM_CHAT_ID, text, {
+            disableNotification: false,
+            parseMode: null,
+          }),
+      },
+    });
+
+    // Every minute: TODAY only. Fetches the whole current day rather than a
+    // delta, so a minute lost to a deploy or a vendor blip is recovered by
+    // the next poll and today never needs the recovery job. A tick arriving
+    // while the previous run is still in flight is skipped, not queued.
+    this.cronService.register("digisme_attendance_live", "* * * * *", async () => {
+      return await this.digismeAttendanceSyncUsecase.runLive();
+    });
+
+    // Four times a day: today-3, today-2, yesterday - for vendor-delayed
+    // records only. :45 is chosen because every other in-process cron sits
+    // at :00, :15 or :30, so a recovery run never contends with one.
+    this.cronService.register("digisme_attendance_recovery", "45 6,12,18,23 * * *", async () => {
+      return await this.digismeAttendanceSyncUsecase.runHistorical();
+    });
+
     this.synker.initCronJobs(this.cronService, this.apiSyncLogger);
     this.cronService.start();
 

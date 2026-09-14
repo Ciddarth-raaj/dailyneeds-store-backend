@@ -142,8 +142,40 @@ class AttendanceImportRepository {
     return out;
   }
 
+  /**
+   * What is actually STORED for one calendar date, for the sync's own
+   * monitoring: how many punches and the latest instant among them.
+   *
+   * Read back from biomax_punch rather than counted in the job, because the
+   * number that matters when someone asks "is attendance still arriving?" is
+   * the one in the table, not the one the last run happened to compute.
+   * Bounded to the date's own 14-digit range, so it uses the
+   * (user_id, io_time) index territory and never scans the table.
+   */
+  async storedForDate(dateIso) {
+    const ymd = String(dateIso).replace(/-/g, "");
+    const rows = await this._q(
+      "STORED-FOR-DATE",
+      `SELECT COUNT(*) AS n, MAX(io_time_raw) AS latest
+         FROM biomax_punch
+        WHERE io_time_raw BETWEEN ? AND ?`,
+      [`${ymd}000000`, `${ymd}235959`]
+    );
+    const r = rows && rows[0] ? rows[0] : {};
+    return { count: Number(r.n) || 0, latest_io_time_raw: r.latest || null };
+  }
+
   /* -------------------------------------------------------------- writes */
 
+  /**
+   * `source_type` defaults to DIGISME_ATD_DAILY so every existing Excel
+   * caller is untouched. The API pull passes DIGISME_API_PULL: the batch is
+   * where the two DigiSME routes are told apart, deliberately, because
+   * nothing reads `source_type` except this audit - no dedup key, no
+   * calculation, no punch label. The punch row itself stays DIGISME_IMPORT
+   * for both, which is what keeps Excel and API sharing one
+   * `import_dedup_key` and therefore one identity per real punch.
+   */
   async insertBatch(connection, b) {
     const r = await this._q(
       "INSERT-BATCH",
@@ -151,8 +183,9 @@ class AttendanceImportRepository {
          (source_type, original_filename, file_sha256, file_size_bytes, sheet_name, time_columns, status, uploaded_by,
           previewed_at, excel_row_count, employee_code_count, candidate_count, valid_count, bad_count, unmatched_count,
           reimport_duplicate_count, cross_source_collision_count, date_from, date_to)
-       VALUES ('DIGISME_ATD_DAILY', ?, ?, ?, ?, ?, 'PREVIEWED', ?, NOW(3), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, 'PREVIEWED', ?, NOW(3), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
+        b.source_type || "DIGISME_ATD_DAILY",
         b.original_filename, b.file_sha256, b.file_size_bytes, b.sheet_name, b.time_columns, b.uploaded_by,
         b.excel_row_count, b.employee_code_count, b.candidate_count, b.valid_count, b.bad_count, b.unmatched_count,
         b.reimport_duplicate_count, b.cross_source_collision_count, b.date_from, b.date_to,

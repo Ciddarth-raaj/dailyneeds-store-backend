@@ -28,6 +28,25 @@ const API_SYNC_TYPES = [
     label: "Stock Holding Report Sync",
     match: "/stock-holding-report/sync",
   },
+  // The DigiSME attendance API sync. `match` is a PATH THAT DOES NOT EXIST
+  // and is not meant to: no route is exposed for either job (phase 1 is
+  // cron-only, deliberately - no new externally callable surface until
+  // something needs one). The entries are here because the API Sync Log
+  // screen resolves a row's label through this list, and both jobs write
+  // rows. A manual endpoint added later can mount on these same paths and
+  // the logging will already be correct.
+  {
+    type: "digisme_attendance_live",
+    category: "sync",
+    label: "DigiSME Attendance (live)",
+    match: "/attendance/digisme/live",
+  },
+  {
+    type: "digisme_attendance_recovery",
+    category: "sync",
+    label: "DigiSME Attendance Recovery",
+    match: "/attendance/digisme/recovery",
+  },
   // Bulk import APIs
   {
     type: "purchase_bulk",

@@ -267,8 +267,11 @@ function createStore(pool, options = {}) {
   }
 
   /**
-   * A punch from a DigiSME Excel import: no terminal, no BM70W JSON, nothing
-   * invented. Dedup is the database's: the STORED generated column
+   * A punch from DigiSME - the Excel import or the API pull, which are the
+   * SAME ingest source and the same row shape on purpose (see the
+   * `import_dedup_key` note below). No terminal, no BM70W JSON, nothing
+   * invented; `raw_json` carries the vendor's own row when the caller has
+   * one and stays NULL when it does not. Dedup is the database's: the STORED generated column
    * import_dedup_key (source|code|time, NULL for device rows) is UNIQUE, so
    * a second import of the same punch - concurrent or later - is an
    * ER_DUP_ENTRY, reported here as `duplicate` with the existing row's id.
@@ -293,9 +296,22 @@ function createStore(pool, options = {}) {
               source_ip, source_port, ingest_source, biomax_historical_pull_id, import_batch_id)
            VALUES (NULL, ?, ?, STR_TO_DATE(?, '%Y%m%d%H%i%s'),
                    NULL, NULL, NULL, 0,
-                   NULL, NULL, NULL, NULL, NULL, NULL,
+                   NULL, NULL, NULL, NULL, NULL, ?,
                    NULL, NULL, ?, NULL, ?)`,
-          [punch.user_id, punch.io_time_raw, punch.io_time_raw, INGEST_SOURCE.DIGISME_IMPORT, options.importBatchId]
+          [
+            punch.user_id,
+            punch.io_time_raw,
+            punch.io_time_raw,
+            // The vendor row, when one exists. An Excel import passes
+            // nothing and keeps writing NULL, exactly as before: a
+            // spreadsheet cell has no payload to preserve. The DigiSME API
+            // does, and `raw_json` is where PunchAction, Source,
+            // ClockLocation and JobLocation are kept - see
+            // services/digisme_attendance.js. `io_mode` stays NULL for both.
+            punch.raw_json === undefined ? null : punch.raw_json,
+            INGEST_SOURCE.DIGISME_IMPORT,
+            options.importBatchId,
+          ]
         );
       } catch (err) {
         if (err && err.code === "ER_DUP_ENTRY") {
