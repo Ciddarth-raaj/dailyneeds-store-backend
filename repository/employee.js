@@ -1,5 +1,6 @@
 const logger = require("../utils/logger");
 const { buildEmployeeScope } = require("./employee_scope");
+const { applyDefaultPaymentType } = require("../utils/payment_type");
 
 /**
  * THE EMPLOYEE-DETAIL RESULT CONTRACT — every column `getById` returns.
@@ -131,7 +132,15 @@ class EmployeeRepository {
     return { sql: ` AND ${column} IN (?)`, params: [storeIds] };
   }
 
-  create(employee) {
+  create(rawEmployee) {
+    // THE SAME PAYMENT ROUTE DEFAULT AS THE C2 MASTER REPOSITORY, FROM THE
+    // SAME DEFINITION. This is the legacy HR create, and it has its own
+    // INSERT rather than sharing the master one, so the default is applied
+    // here too - from `utils/payment_type.js`, never re-decided locally.
+    // Its route marks `payment_type` required, but a blank or unrecognised
+    // value still reached the column as NULL, which is the state the HR
+    // Onboarding dashboard cannot classify.
+    const employee = applyDefaultPaymentType(rawEmployee);
     return new Promise((resolve, reject) => {
       this.db.query(
         "INSERT INTO new_employee (employee_id, employee_name, father_name, dob, permanent_address, residential_address, primary_contact_number, alternate_contact_number, email_id, qualification, introducer_name, introducer_details, salary, uniform_qty, previous_experience, date_of_joining, gender, blood_group, designation_id, store_id, shift_id, department_id, marital_status, marriage_date, employee_image, bank_name, ifsc, account_no, esi, esi_number, pf, pan_no, payment_type, pf_number, UAN, additional_course, spouse_name, online_portal, telegram_username, aadhaar_card_no, aadhaar_card_name, aadhaar_card_image) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
