@@ -1,6 +1,103 @@
 const logger = require("../utils/logger");
 const { buildEmployeeScope } = require("./employee_scope");
 
+/**
+ * THE EMPLOYEE-DETAIL RESULT CONTRACT — every column `getById` returns.
+ *
+ * EVERY `new_employee` COLUMN IS QUALIFIED. That qualification is the fix, not
+ * decoration: four of these tables carry a `status` column and the driver keys
+ * rows by the bare column name, so an unqualified or starred select lets the
+ * last join win. Naming `new_employee.status` means the employee's status is
+ * the one that arrives.
+ *
+ * Exported so `employee_detail_columns.test.js` can hold it against the
+ * migrations and fail when a column is added to `new_employee` and forgotten
+ * here.
+ */
+const EMPLOYEE_MASTER_COLUMNS = [
+  "new_employee.employee_id",
+  "new_employee.employee_name",
+  "new_employee.father_name",
+  "new_employee.dob",
+  "new_employee.gender",
+  "new_employee.marital_status",
+  "new_employee.employee_image",
+  "new_employee.marriage_date",
+  "new_employee.spouse_name",
+  "new_employee.permanent_address",
+  "new_employee.residential_address",
+  "new_employee.primary_contact_number",
+  "new_employee.alternate_contact_number",
+  "new_employee.email_id",
+  "new_employee.blood_group",
+  "new_employee.qualification",
+  "new_employee.introducer_name",
+  "new_employee.introducer_details",
+  "new_employee.salary",
+  "new_employee.bank_name",
+  "new_employee.ifsc",
+  "new_employee.account_no",
+  "new_employee.esi",
+  "new_employee.esi_number",
+  "new_employee.pf",
+  "new_employee.pf_number",
+  "new_employee.uan",
+  "new_employee.uniform_qty",
+  "new_employee.store_id",
+  "new_employee.department_id",
+  "new_employee.designation_id",
+  "new_employee.shift_id",
+  "new_employee.previous_experience",
+  "new_employee.additional_course",
+  "new_employee.date_of_joining",
+  "new_employee.pan_no",
+  "new_employee.payment_type",
+  "new_employee.online_portal",
+  "new_employee.created_at",
+  // THE COLUMN THE WHOLE FIX IS ABOUT. 1 is employed; anything else is not.
+  "new_employee.status",
+  "new_employee.resignation_date",
+  "new_employee.is_verified",
+  "new_employee.telegram_username",
+  "new_employee.aadhaar_card_no",
+  "new_employee.aadhaar_card_name",
+  "new_employee.aadhaar_card_image",
+  "new_employee.updated_at",
+  "new_employee.shift_code",
+  "new_employee.default_work_shift_id",
+  "new_employee.pf_applicable",
+  "new_employee.esi_applicable",
+  "new_employee.previous_pf_member",
+  "new_employee.previous_eps_member",
+  "new_employee.special_break_override_minutes",
+  "new_employee.source_system",
+  "new_employee.source_employee_code",
+  "new_employee.attendance_required",
+];
+
+/**
+ * The joined DISPLAY columns, under the exact key names this endpoint already
+ * returned for them, so nothing downstream changes.
+ *
+ * `designation.online_portal` is aliased because `new_employee` has a column
+ * of that name too and it was being overwritten. Nothing else here collides.
+ */
+const EMPLOYEE_DETAIL_JOINED_COLUMNS = [
+  "department.department_name",
+  "designation.designation_name",
+  "designation.online_portal AS designation_online_portal",
+  "outlets.outlet_name",
+  "outlets.outlet_nickname",
+  "shift_master.shift_name",
+  "shift_master.shift_in_time",
+  "shift_master.shift_out_time",
+];
+
+const EMPLOYEE_DETAIL_COLUMNS = [
+  ...EMPLOYEE_MASTER_COLUMNS,
+  ...EMPLOYEE_DETAIL_JOINED_COLUMNS,
+];
+
 class EmployeeRepository {
   constructor(db) {
     this.db = db;
@@ -589,10 +686,65 @@ class EmployeeRepository {
       );
     });
   }
+  /**
+   * ONE EMPLOYEE, FOR THE PROFILE. Every column named; no `SELECT *`.
+   *
+   * ============================ THE BUG THIS FIXES ========================
+   *
+   * This query used to read `SELECT *` across FIVE joined tables, and the
+   * mysql driver builds each row as a flat object keyed by the BARE column
+   * name - `RowDataPacket` does `this[fieldPacket.name] = value`, with no
+   * table qualifier unless `nestTables` is set, and this pool does not set
+   * it. So where two joined tables share a column name, THE LAST ONE WINS
+   * and silently overwrites the first.
+   *
+   * `new_employee`, `department`, `designation` and `shift_master` all have a
+   * `status` column. The join order ends at `shift_master`, so the `status`
+   * this endpoint returned was THE SHIFT'S status, not the employee's - and
+   * `shift_master.status` defaults to 0. An active employee therefore came
+   * back as `status: 0`, or `null` when they had no shift row at all, and the
+   * profile drew "Resigned" over somebody who works here. The employee LIST
+   * was always right because `#get` names its columns explicitly.
+   *
+   * Two more columns were being overwritten the same way, and are fixed by
+   * the same change:
+   *
+   *   online_portal          came from `designation`, not the employee
+   *   created_at, updated_at came from `outlets`, not the employee
+   *
+   * ============================ WHY EVERY COLUMN IS TYPED OUT =============
+   *
+   * `new_employee.*` would also have fixed it, and would survive a schema
+   * change without edits. It is not used, because an explicit list is the
+   * result contract: it says what this endpoint returns, a reader can see
+   * that `status` is the employee's, and nothing can be added to a joined
+   * table later and quietly appear in - or overwrite part of - the profile
+   * payload. `employee_detail_columns.test.js` reads the migrations and
+   * fails if a column is added to `new_employee` and not listed here, so the
+   * one cost of being explicit is covered by a test rather than by memory.
+   *
+   * THE JOINED COLUMNS ARE THE DISPLAY NAMES ONLY, each named individually.
+   * The key names are exactly the ones this endpoint already returned for
+   * them, so no consumer changes: `department_name`, `designation_name`,
+   * `outlet_name`, `outlet_nickname`, `shift_name`, `shift_in_time`,
+   * `shift_out_time`. `designation.online_portal` is still available, but
+   * under an alias that cannot collide with the employee's own column.
+   *
+   * B3 IS UNAFFECTED. `middlewares/sensitive.js` filters the RESPONSE by key
+   * name, and every sensitive key it looks for (salary, bank, PAN, Aadhaar,
+   * UAN, PF, ESI) is still selected under exactly the same name, so it strips
+   * exactly what it stripped before.
+   */
   getById(employee_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "SELECT *, new_employee.telegram_username FROM new_employee LEFT JOIN department ON new_employee.department_id = department.department_id LEFT JOIN designation ON new_employee.designation_id = designation.designation_id LEFT JOIN outlets ON new_employee.store_id = outlets.outlet_id LEFT JOIN shift_master ON new_employee.shift_id = shift_master.shift_id WHERE employee_id = ?",
+        `SELECT ${EMPLOYEE_DETAIL_COLUMNS.join(", ")}
+           FROM new_employee
+           LEFT JOIN department   ON new_employee.department_id  = department.department_id
+           LEFT JOIN designation  ON new_employee.designation_id = designation.designation_id
+           LEFT JOIN outlets      ON new_employee.store_id       = outlets.outlet_id
+           LEFT JOIN shift_master ON new_employee.shift_id       = shift_master.shift_id
+          WHERE new_employee.employee_id = ?`,
         [employee_id],
         (err, docs) => {
           if (err) {
@@ -691,3 +843,6 @@ class EmployeeRepository {
 module.exports = (db) => {
   return new EmployeeRepository(db);
 };
+module.exports.EMPLOYEE_MASTER_COLUMNS = EMPLOYEE_MASTER_COLUMNS;
+module.exports.EMPLOYEE_DETAIL_JOINED_COLUMNS = EMPLOYEE_DETAIL_JOINED_COLUMNS;
+module.exports.EMPLOYEE_DETAIL_COLUMNS = EMPLOYEE_DETAIL_COLUMNS;

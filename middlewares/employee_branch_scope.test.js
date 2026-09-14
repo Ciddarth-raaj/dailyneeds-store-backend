@@ -364,6 +364,12 @@ describe("View Employee is confined to the caller's branches", () => {
     const res = await get(`/employee/employee_id?employee_id=${KAT_EMPLOYEE}`, CALLERS.managerView());
     assert.equal(res.status, 200);
     assert.equal(res.body[0].employee_id, KAT_EMPLOYEE);
+    // AND THE EMPLOYEE'S OWN STATUS COMES BACK. This endpoint used to answer
+    // with `status` taken from the joined `shift_master` table because of a
+    // `SELECT *` collision, so an active employee read as 0 and the profile
+    // drew "Resigned" over somebody who works here - visible only to a caller
+    // without `view_employee_lifecycle`, which is exactly this caller.
+    assert.equal(res.body[0].status, 1, "the employee master's status, not a joined table's");
   });
 
   it("4. Store Manager + View Employee + different branch is denied", async () => {
