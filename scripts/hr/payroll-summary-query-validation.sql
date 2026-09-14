@@ -14,9 +14,23 @@
 -- employee, that it returns the SAME row the single-employee query would, and
 -- that the derived booleans match the column they are derived from.
 --
--- HOW TO RUN. Substitute a real id list for :IDS - the application passes the
--- whole active population, so use a few hundred real employee_ids, e.g. the
--- output of section 0. Run top to bottom and keep the output.
+-- HOW TO RUN. Section 0 first, on its own. It yields the dashboard population
+-- as one id per row plus an independent count of it; substitute that list for
+-- :IDS everywhere and run sections 1-6 top to bottom, keeping the output.
+--
+-- THE GATE BEFORE SECTIONS 1-6, and it has three parts, not one:
+--
+--     population > 0           a zero population is never "no employees"
+--     exported ids > 0         an empty :IDS makes `IN ()` a syntax error
+--     exported ids = population   nothing was lost on the way out
+--
+-- If any of the three fails, STOP: read section 0c, and do not build the list
+-- or run anything below. A validation that reports on nobody, or on part of
+-- the company, looks exactly like one that passed.
+--
+-- EVERY SECTION THAT TAKES :IDS IS SCOPED TO IT, on every path - the
+-- endpoint is only ever asked about the dashboard population, so an employee
+-- outside it must never be able to fail, or pad, a check about it.
 --
 -- PASS CRITERIA are stated with each section. Any FAIL row is a blocker.
 -- =====================================================================
@@ -41,26 +55,44 @@ SELECT COUNT(*) AS directory_population
   FROM `new_employee` ne
  WHERE ne.employee_name NOT IN (SELECT employee_name FROM `resignation`);
 
--- 0b. THE IDS, one per row. Export with `-N -B`, count the lines, and confirm
---     the count equals 0a BEFORE substituting them for :IDS.
---     STOP THE VALIDATION IF THEY DIFFER - sections 1-6 would then be
---     checking part of the population and passing.
+-- 0b. THE IDS, one per row. Export with `-N -B`, count the lines, and check
+--     BOTH of the following BEFORE substituting them for :IDS:
+--
+--         0a > 0           the population is not empty
+--         line count = 0a  nothing was lost on the way out
+--
+--     STOP THE VALIDATION IF EITHER FAILS. Unequal counts mean sections 1-6
+--     would check part of the population and pass. BOTH being zero passes the
+--     equality test and is the more dangerous case: `:IDS` would be empty,
+--     `IN ()` is a syntax error in MySQL, and a run that got that far would be
+--     reporting on nobody at all. See 0c for how that happens.
 SELECT ne.employee_id
   FROM `new_employee` ne
  WHERE ne.employee_name NOT IN (SELECT employee_name FROM `resignation`)
  ORDER BY ne.employee_id;
 
--- 0c. ONE WAY 0a AND 0b CAN BOTH BE ZERO, and it is not an empty company.
---     `x NOT IN (subquery)` returns NO ROWS AT ALL if the subquery yields a
---     single NULL - a standard SQL three-valued-logic trap. If `resignation`
---     holds a NULL or empty name, the predicate above excludes everybody.
+-- 0c. HOW 0a AND 0b CAN BOTH BE ZERO WITHOUT THE COMPANY BEING EMPTY.
+--     Run this FIRST whenever the population is zero; it is the explanation.
 --
---     THIS IS NOT A BUG IN THE SCRIPT. The application builds the same
+--     `null_names` IS THE DANGEROUS ONE, and only that one. `x NOT IN
+--     (subquery)` is evaluated as `NOT (x = a OR x = b OR ...)`, and `x =
+--     NULL` is UNKNOWN rather than false - so a single NULL in the subquery
+--     makes the whole predicate UNKNOWN for EVERY row, and the query returns
+--     nothing. One NULL name in `resignation` therefore excludes the entire
+--     company. That is standard three-valued logic, not a quirk of this data.
+--
+--     `empty_names` IS NOT THE SAME TRAP. An empty string is an ordinary
+--     value: `'' = 'Ada'` is simply false, so it excludes only employees
+--     whose name is also empty, and the rest of the population is unaffected.
+--     It is reported as DIRTY DATA worth cleaning, not as a cause of a zero
+--     population - do not read a non-zero `empty_names` as the explanation
+--     for one.
+--
+--     NEITHER IS A BUG IN THIS SCRIPT. The application builds the same
 --     exclusion from the same unfiltered `SELECT employee_name FROM
---     resignation`, so the same trap would empty the real dashboard. It is
---     reported here so a zero population is recognised for what it is.
---     Informational; a non-zero count is a finding to raise, not a failure of
---     this validation.
+--     resignation`, so a NULL there would empty the real dashboard exactly as
+--     it empties this. Informational: a non-zero count on either column is a
+--     finding to raise against the data, not a failure of this validation.
 SELECT SUM(employee_name IS NULL)                       AS null_names,
        SUM(employee_name IS NOT NULL AND TRIM(employee_name) = '') AS empty_names,
        COUNT(*)                                         AS resignation_rows
@@ -137,6 +169,13 @@ SELECT b.employee_id, NULL, b.salary_id, NULL, b.ctc_status
 
 -- 2b. MySQL 5.7 FALLBACK for section 2 - no window functions, no CTE.
 --
+--     SCOPED TO :IDS, EVERY PATH OF IT. The endpoint only ever asks about the
+--     dashboard population, so this must only ever check it: the latest
+--     eligible date, the expected row and the chosen row are each derived
+--     from `employee_id IN (:IDS)`. Without that, a resigned employee outside
+--     the population - exactly the sort carrying odd historical salary rows -
+--     could fail a validation of a query that is never asked about them.
+--
 --     WHAT IT CHECKS. For each employee, the production rule is `ORDER BY
 --     effective_from DESC, salary_id DESC LIMIT 1` over their APPROVED rows
 --     effective on or before today. This derives the same answer a second
@@ -154,11 +193,11 @@ SELECT b.employee_id, NULL, b.salary_id, NULL, b.ctc_status
 --     one. Historical duplicate dates are irrelevant to the answer and are
 --     now ignored.
 --
---     EVERY EMPLOYEE IS CHECKED, not only those with a tie: where the latest
---     eligible date holds one row, the expected id is that row, so the
---     comparison still validates the whole per-employee pick and makes this a
---     real substitute for section 2. `rows_at_latest_date` says which ones
---     were actual ties - the case the tie-break exists for.
+--     EVERY EMPLOYEE IN THE POPULATION IS CHECKED, not only those with a tie:
+--     where the latest eligible date holds one row, the expected id is that
+--     row, so the comparison still validates the whole per-employee pick and
+--     makes this a real substitute for section 2. `rows_at_latest_date` says
+--     which ones were actual ties - the case the tie-break exists for.
 --
 --     PASS: zero rows.
 SELECT t.*
@@ -170,6 +209,7 @@ SELECT t.*
            (SELECT s2.`salary_id`
               FROM `employee_salary` s2
              WHERE s2.`employee_id` = s.`employee_id`
+               AND s2.`employee_id` IN (:IDS)
                AND s2.`status` = 'APPROVED'
                AND s2.`effective_from` <= CURDATE()
              ORDER BY s2.`effective_from` DESC, s2.`salary_id` DESC
@@ -179,13 +219,15 @@ SELECT t.*
         -- each employee's latest eligible effective date, and nothing else
         SELECT `employee_id`, MAX(`effective_from`) AS max_effective_from
           FROM `employee_salary`
-         WHERE `status` = 'APPROVED'
+         WHERE `employee_id` IN (:IDS)
+           AND `status` = 'APPROVED'
            AND `effective_from` <= CURDATE()
          GROUP BY `employee_id`
       ) latest
         ON latest.`employee_id` = s.`employee_id`
        AND latest.max_effective_from = s.`effective_from`
-     WHERE s.`status` = 'APPROVED'
+     WHERE s.`employee_id` IN (:IDS)
+       AND s.`status` = 'APPROVED'
        AND s.`effective_from` <= CURDATE()
      GROUP BY s.`employee_id`, s.`effective_from`
   ) t
@@ -194,11 +236,14 @@ SELECT t.*
  WHERE NOT (t.chosen_salary_id <=> t.expected_salary_id)
  ORDER BY t.`employee_id`;
 
--- 2c. DID THE TIE-BREAK GET EXERCISED AT ALL? Informational. If this is zero,
---     2b passed without any employee actually having two approved rows on
---     their latest eligible date - the check is sound but proved nothing
---     about ties on this dataset. Say so in the results rather than claiming
---     the tie-break is verified.
+-- 2c. DID THE TIE-BREAK GET EXERCISED AT ALL? Informational, and scoped to
+--     :IDS like 2b - a tie belonging to somebody outside the dashboard
+--     population is not evidence about this query.
+--
+--     If this is zero, 2b passed without any employee in the population
+--     actually having two approved rows on their latest eligible date - the
+--     check is sound but proved nothing about ties on this dataset. Say so in
+--     the results rather than claiming the tie-break is verified.
 SELECT COUNT(*) AS employees_with_a_tie_on_their_latest_eligible_date
   FROM (
     SELECT s.`employee_id`
@@ -206,12 +251,14 @@ SELECT COUNT(*) AS employees_with_a_tie_on_their_latest_eligible_date
       JOIN (
         SELECT `employee_id`, MAX(`effective_from`) AS max_effective_from
           FROM `employee_salary`
-         WHERE `status` = 'APPROVED' AND `effective_from` <= CURDATE()
+         WHERE `employee_id` IN (:IDS)
+           AND `status` = 'APPROVED' AND `effective_from` <= CURDATE()
          GROUP BY `employee_id`
       ) latest
         ON latest.`employee_id` = s.`employee_id`
        AND latest.max_effective_from = s.`effective_from`
-     WHERE s.`status` = 'APPROVED' AND s.`effective_from` <= CURDATE()
+     WHERE s.`employee_id` IN (:IDS)
+       AND s.`status` = 'APPROVED' AND s.`effective_from` <= CURDATE()
      GROUP BY s.`employee_id`, s.`effective_from`
     HAVING COUNT(*) > 1
   ) ties;
@@ -220,35 +267,52 @@ SELECT COUNT(*) AS employees_with_a_tie_on_their_latest_eligible_date
 -- PENDING is never current, REJECTED is never current, and a future-dated
 -- approval is not current yet. These count the employees each rule actually
 -- changes the answer for - they are the rows a mistake would show up in.
+--
+-- SCOPED TO :IDS, because of what the comment below them claims. "Each of
+-- these must read Payroll Pending on the dashboard" is only true of employees
+-- the dashboard actually has: counting a resigned employee's abandoned
+-- PENDING proposal here would produce a number that can never be reconciled
+-- with the screen, and a reviewer comparing the two would be chasing a
+-- discrepancy that is not one. The employee being evaluated comes from :IDS;
+-- the NOT EXISTS beside it stays per-employee, since it asks about that same
+-- employee's own rows.
+--
+-- Informational: these are real business states and are expected to be
+-- non-zero. Their value is as a cross-check against section 6 and the screen.
 SELECT 'pending_only'  AS population,
        COUNT(DISTINCT employee_id) AS employees
   FROM `employee_salary` s
- WHERE s.`status` = 'PENDING'
+ WHERE s.`employee_id` IN (:IDS)
+   AND s.`status` = 'PENDING'
    AND NOT EXISTS (SELECT 1 FROM `employee_salary` x
                     WHERE x.employee_id = s.employee_id AND x.status = 'APPROVED'
                       AND x.effective_from <= CURDATE())
 UNION ALL
 SELECT 'rejected_only', COUNT(DISTINCT employee_id)
   FROM `employee_salary` s
- WHERE s.`status` = 'REJECTED'
+ WHERE s.`employee_id` IN (:IDS)
+   AND s.`status` = 'REJECTED'
    AND NOT EXISTS (SELECT 1 FROM `employee_salary` x
                     WHERE x.employee_id = s.employee_id AND x.status = 'APPROVED'
                       AND x.effective_from <= CURDATE())
 UNION ALL
 SELECT 'future_approved_only', COUNT(DISTINCT employee_id)
   FROM `employee_salary` s
- WHERE s.`status` = 'APPROVED' AND s.`effective_from` > CURDATE()
+ WHERE s.`employee_id` IN (:IDS)
+   AND s.`status` = 'APPROVED' AND s.`effective_from` > CURDATE()
    AND NOT EXISTS (SELECT 1 FROM `employee_salary` x
                     WHERE x.employee_id = s.employee_id AND x.status = 'APPROVED'
                       AND x.effective_from <= CURDATE())
 UNION ALL
 SELECT 'live_but_uncosted', COUNT(DISTINCT employee_id)
   FROM `employee_salary` s
- WHERE s.`status` = 'APPROVED' AND s.`effective_from` <= CURDATE()
+ WHERE s.`employee_id` IN (:IDS)
+   AND s.`status` = 'APPROVED' AND s.`effective_from` <= CURDATE()
    AND s.`ctc_status` <> 'APPLIED';
 
--- Each of those must read Payroll Pending on the dashboard. Section 6 is
--- where that is checked end to end.
+-- Each of those must read Payroll Pending on the dashboard - they are in the
+-- population now, so that comparison is meaningful. Section 6 is where it is
+-- checked end to end.
 
 -- ================= 4. getPayrollConfigMany: the derived pair ============
 -- The query returns only `payment_type_recorded` and `pays_in_cash`; the
