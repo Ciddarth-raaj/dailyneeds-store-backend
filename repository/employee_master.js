@@ -1,4 +1,5 @@
 const logger = require("../utils/logger");
+const { applyDefaultPaymentType } = require("../utils/payment_type");
 
 /**
  * Stage 0C / C2 — the local employee master.
@@ -152,7 +153,15 @@ class EmployeeMasterRepository {
    * `employee_id` is deliberately absent from the column list: supplying it
    * is what would create a race, and AUTO_INCREMENT is what removes one.
    */
-  async createEmployee(tx, fields) {
+  async createEmployee(tx, rawFields) {
+    // THE PAYMENT ROUTE DEFAULT, APPLIED AT THE WRITE. A create that says
+    // nothing about how this person is paid means Cash, not "unknown" - see
+    // `utils/payment_type.js`. It is done here, in the repository, because
+    // this is the last thing every Add Employee path crosses: the onboarding
+    // wizard, a rehearsal script and any future caller of the usecase all
+    // arrive at this INSERT, so none of them can diverge. An explicitly
+    // supplied Bank is preserved untouched.
+    const fields = applyDefaultPaymentType(rawFields);
     const columns = Object.keys(fields);
     if (columns.includes("employee_id")) {
       throw new Error("createEmployee must not be given an employee_id; the database allocates it");

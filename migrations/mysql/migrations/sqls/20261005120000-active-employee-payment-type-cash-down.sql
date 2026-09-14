@@ -1,0 +1,26 @@
+-- DELIBERATELY A NO-OP. THIS IS NOT AN OVERSIGHT.
+--
+-- The up migration sets `payment_type = 2` on active employees who had none.
+-- After it runs, those rows are indistinguishable from the active employees
+-- who were ALREADY Cash - the column records the route, not how it came to be
+-- recorded, and no row anywhere remembers which employees were NULL first.
+--
+-- So a down migration has exactly two options, and both are worse than doing
+-- nothing:
+--
+--   * `SET payment_type = NULL WHERE payment_type = 2` would strip the
+--     payment route from every genuinely cash-paid employee in the company,
+--     inventing a data loss the rollback was supposed to prevent.
+--   * Any narrower guess - by date, by whether bank details exist - would be
+--     this file deciding, with no evidence, which real people's records to
+--     blank. A migration must never guess about a person.
+--
+-- Reverting the CODE is safe and is what a rollback of this change actually
+-- means: the dashboard rules are unchanged by this work, and they classify a
+-- Cash employee correctly whichever version is deployed. The data fix simply
+-- stays applied, which is the intended outcome - those employees really are
+-- paid in cash.
+--
+-- `SELECT 1` so that `db-migrate down` succeeds and records the reversal
+-- rather than erroring on an empty file.
+SELECT 1;
