@@ -52,12 +52,23 @@ const { EmployeeBankUsecase } = require("./employee_bank");
  * HR ONBOARDING PENDING - a DERIVED state, not a new one. "Still waiting on
  * HR" is not a status somebody sets: it is the absence of the sections HR
  * follows up, which this endpoint can already see. It is true when ANY of
- * three things is outstanding:
+ * FOUR things is outstanding:
  *
  *   aadhaar     no verified Aadhaar identity is attached
  *   statutory   the PF and ESI applicability flags, which exist precisely to
  *               distinguish "decided" from "nobody has been asked yet"
  *   bank        not payroll ready - see below
+ *   payroll     no live salary, an uncosted one, or no recorded way to pay
+ *               them - see `payrollState`
+ *
+ * PAYROLL IS THE FOURTH ITEM, AND IT IS NOT THE BANK COLUMN AGAIN. The bank
+ * column asks whether an account can receive a transfer; payroll asks whether
+ * there is anything to transfer - an agreed, costed salary in effect today.
+ * An employee can have a verified account and no salary, or a salary and no
+ * account, and both are unfinished records. The rule is read from the payroll
+ * module's own definitions (`repository/employee_salary.js#getCurrentSalary`
+ * and `utils/salary_engine.js`) rather than restated here, so this endpoint
+ * cannot drift from what payroll itself believes.
  *
  * So no column, no enum value and no migration is added for it, nothing has
  * to be backfilled for the 630 employees already on file, and the flag cannot
@@ -127,11 +138,12 @@ class EmployeeStatusSummaryUsecase {
    * `employeeMasterRepo` is optional and read-only here: it answers whether
    * the statutory decision has been recorded, never what it was.
    */
-  constructor(employeeUsecase, aadhaarRepo, bankRepo, employeeMasterRepo) {
+  constructor(employeeUsecase, aadhaarRepo, bankRepo, employeeMasterRepo, salaryRepo) {
     this.employees = employeeUsecase;
     this.aadhaarRepo = aadhaarRepo || null;
     this.bankRepo = bankRepo || null;
     this.masterRepo = employeeMasterRepo || null;
+    this.salaryRepo = salaryRepo || null;
   }
 
   /**
@@ -154,8 +166,8 @@ class EmployeeStatusSummaryUsecase {
    * `pending` is exactly `missing.length > 0`, so the flag and the reasons
    * can never contradict each other.
    */
-  static hrOnboardingState({ aadhaarVerified, statutory, bankPayrollReady }) {
-    if (!statutory) return null;
+  static hrOnboardingState({ aadhaarVerified, statutory, bankPayrollReady, payroll }) {
+    if (!statutory || !payroll) return null;
     const missing = [];
     if (!aadhaarVerified) missing.push("aadhaar");
     if (!statutory.pfDecided || !statutory.esiDecided) missing.push("statutory");
@@ -163,6 +175,62 @@ class EmployeeStatusSummaryUsecase {
     // check is an employee who cannot be paid, which is work rather than a
     // finished section.
     if (!bankPayrollReady) missing.push("bank");
+    // THE FOURTH ITEM. A record with a verified identity, a recorded statutory
+    // decision and a payable account is still not a finished record if nobody
+    // has put the employee on payroll - they will not be paid this month
+    // either way, which is the whole thing this queue exists to prevent.
+    // `payroll.missing` names which part; one reason is added here, exactly as
+    // "statutory" covers PF and ESI together.
+    if (payroll.pending) missing.push("payroll");
+    return { pending: missing.length > 0, missing };
+  }
+
+  /**
+   * IS THIS EMPLOYEE SET UP TO BE PAID? - derived from the payroll module's
+   * own rules, not from a second opinion about them.
+   *
+   * THREE THINGS HAVE TO BE TRUE, and each one is somebody's outstanding work
+   * when it is not:
+   *
+   *   "salary"        a LIVE salary exists. `repository/employee_salary.js`
+   *                   defines that and this reads its answer: the latest
+   *                   APPROVED revision effective on or before today. A
+   *                   PENDING proposal is not a salary - it has not been
+   *                   agreed - and a REJECTED one never was, so an employee
+   *                   whose only revision is awaiting approval is payroll
+   *                   pending, which is precisely the state somebody needs to
+   *                   see.
+   *
+   *   "salary_ctc"    that salary's `ctc_status` is APPLIED. The engine writes
+   *                   PENDING when an employer cost could not be resolved -
+   *                   an unrecorded PF applicability, an unanswered EPS
+   *                   membership - and `utils/salary_engine.js` is explicit
+   *                   that a CTC with an unresolved component in it is not a
+   *                   CTC. A salary that cannot be costed is not a finished
+   *                   payroll setup.
+   *
+   *   "payment_type"  somebody has said HOW the employee is paid, and if that
+   *                   is Bank, the account has passed its check. Cash needs no
+   *                   account, so a cash-paid employee is not held up by one -
+   *                   requiring it would be work nobody will ever do.
+   *
+   * RESIGNED AND INACTIVE EMPLOYEES NEVER REACH THIS. The queue filters to
+   * active employees before any of it is counted, and this usecase is only
+   * ever asked about the population `GET /employee/employees` returns.
+   *
+   * `null` - not "complete" - where this server cannot answer, following the
+   * rule the statutory read above already follows: a payroll module that is
+   * not wired must never read as "nothing outstanding".
+   */
+  static payrollState({ salary, config, bankPayrollReady }) {
+    if (!config) return null;
+    const missing = [];
+    if (!salary || !salary.hasLiveSalary) missing.push("salary");
+    else if (!salary.ctcApplied) missing.push("salary_ctc");
+
+    if (!config.paymentTypeRecorded) missing.push("payment_type");
+    else if (!config.paysInCash && !bankPayrollReady) missing.push("payment_account");
+
     return { pending: missing.length > 0, missing };
   }
 
@@ -198,10 +266,12 @@ class EmployeeStatusSummaryUsecase {
     }
     if (ids.length === 0) return [];
 
-    const [aadhaarIds, bank, statutory] = await Promise.all([
+    const [aadhaarIds, bank, statutory, salaries, payrollConfig] = await Promise.all([
       this._aadhaarIds(ids),
       this._bankStatuses(ids),
       this._statutoryDecisions(ids),
+      this._liveSalaries(ids),
+      this._payrollConfig(ids),
     ]);
 
     return ids.map((employee_id) => {
@@ -210,10 +280,19 @@ class EmployeeStatusSummaryUsecase {
         ? statutory.get(employee_id) || { pfDecided: false, esiDecided: false }
         : null;
       const aadhaarVerified = aadhaarIds.has(employee_id);
+      // An employee with no salary row at all is not missing from the answer -
+      // they are the commonest case of "payroll not set up yet", so the
+      // absence IS the answer rather than a gap in it.
+      const payroll = EmployeeStatusSummaryUsecase.payrollState({
+        salary: (salaries && salaries.get(employee_id)) || { hasLiveSalary: false, ctcApplied: false },
+        config: payrollConfig ? payrollConfig.get(employee_id) || { paymentTypeRecorded: false, paysInCash: false } : null,
+        bankPayrollReady: b.bank_payroll_ready,
+      });
       const onboarding = EmployeeStatusSummaryUsecase.hrOnboardingState({
         aadhaarVerified,
         statutory: decisions,
         bankPayrollReady: b.bank_payroll_ready,
+        payroll,
       });
       const scheme = (decided, notApplicable) =>
         EmployeeStatusSummaryUsecase.schemeStatus(decided, notApplicable, {
@@ -236,7 +315,18 @@ class EmployeeStatusSummaryUsecase {
           ? {
               pf_status: scheme(decisions.pfDecided, decisions.pfNotApplicable),
               esi_status: scheme(decisions.esiDecided, decisions.esiNotApplicable),
+              // THE TWO SCHEMES AS ONE SECTION, which is how they are asked
+              // and how they are now counted. Derived here, from the same two
+              // decisions, so the Statutory card and the PF / ESI values it
+              // replaces cannot drift apart - and NOT_APPLICABLE is not
+              // pending, because the decision has been recorded.
+              statutory_pending: !decisions.pfDecided || !decisions.esiDecided,
             }
+          : {}),
+        // Payroll, on the same terms as every key above: derived, carrying no
+        // amount, and omitted rather than guessed where it cannot be answered.
+        ...(payroll
+          ? { payroll_pending: payroll.pending, payroll_missing: payroll.missing }
           : {}),
       };
     });
@@ -260,6 +350,54 @@ class EmployeeStatusSummaryUsecase {
       });
     }
     return out;
+  }
+
+  /**
+   * The live salary per employee, as two booleans. One bulk read, and null -
+   * not an empty map - where this server has no salary module, so "not wired"
+   * never reads as "payroll is set up".
+   *
+   * TODAY is the as-of date, the same one `getCurrentSalary` is asked for
+   * elsewhere: a revision approved for next month is genuinely not this
+   * employee's salary yet.
+   */
+  async _liveSalaries(ids) {
+    if (!this.salaryRepo || typeof this.salaryRepo.getCurrentSalaryStatusMany !== "function") {
+      return null;
+    }
+    const rows = await this.salaryRepo.getCurrentSalaryStatusMany(ids, EmployeeStatusSummaryUsecase.today());
+    const out = new Map();
+    for (const row of rows || []) {
+      out.set(Number(row.employee_id), {
+        hasLiveSalary: true,
+        ctcApplied: String(row.ctc_status) === "APPLIED",
+      });
+    }
+    return out;
+  }
+
+  /**
+   * How each employee is paid, per employee. Same rule as every other bulk
+   * read here: null where the repository cannot answer.
+   */
+  async _payrollConfig(ids) {
+    if (!this.masterRepo || typeof this.masterRepo.getPayrollConfigMany !== "function") return null;
+    const rows = await this.masterRepo.getPayrollConfigMany(ids);
+    const out = new Map();
+    for (const row of rows || []) {
+      out.set(Number(row.employee_id), {
+        paymentTypeRecorded: Boolean(Number(row.payment_type_recorded)),
+        paysInCash: Boolean(Number(row.pays_in_cash)),
+      });
+    }
+    return out;
+  }
+
+  /** YYYY-MM-DD, as the salary repository's as-of date. */
+  static today() {
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
   }
 
   /**
@@ -374,6 +512,6 @@ class EmployeeStatusSummaryUsecase {
   }
 }
 
-module.exports = (employeeUsecase, aadhaarRepo, bankRepo, employeeMasterRepo) =>
-  new EmployeeStatusSummaryUsecase(employeeUsecase, aadhaarRepo, bankRepo, employeeMasterRepo);
+module.exports = (employeeUsecase, aadhaarRepo, bankRepo, employeeMasterRepo, salaryRepo) =>
+  new EmployeeStatusSummaryUsecase(employeeUsecase, aadhaarRepo, bankRepo, employeeMasterRepo, salaryRepo);
 module.exports.EmployeeStatusSummaryUsecase = EmployeeStatusSummaryUsecase;
