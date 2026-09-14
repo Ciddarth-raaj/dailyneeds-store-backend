@@ -422,7 +422,13 @@ function buildQuery(fields, filters, { count = false, limit = null, offset = 0, 
   // expression - the very text the column is read with, so a filter can never
   // address a column the report cannot show - with the value bound.
   for (const applied of filters.field_filters || []) {
-    const expr = applied.field.select;
+    // `filter_select` where the catalogue gives one, `select` otherwise. The
+    // two differ only where a column is PROJECTED through a formatting
+    // expression but should be FILTERED on its own type - `date_of_joining`,
+    // which is read as ISO text and compared as a DATE. Both texts come from
+    // the catalogue, so a filter still cannot address a column the report
+    // cannot show.
+    const expr = applied.field.filter_select || applied.field.select;
     const type = applied.field.filter.type;
 
     if (type === catalogue.FILTER.MASTER) {

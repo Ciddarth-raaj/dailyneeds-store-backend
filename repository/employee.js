@@ -1,6 +1,7 @@
 const logger = require("../utils/logger");
 const { buildEmployeeScope } = require("./employee_scope");
 const { applyDefaultPaymentType } = require("../utils/payment_type");
+const { JOINED_ON } = require("../utils/joining_date");
 
 /**
  * THE EMPLOYEE-DETAIL RESULT CONTRACT — every column `getById` returns.
@@ -101,6 +102,30 @@ const EMPLOYEE_DETAIL_COLUMNS = [
   ...EMPLOYEE_MASTER_COLUMNS,
   ...EMPLOYEE_DETAIL_JOINED_COLUMNS,
 ];
+
+/**
+ * Columns that are SELECTED as an expression rather than bare, keyed by the
+ * declared column so the contract list above stays a list of columns.
+ *
+ * `date_of_joining` is a real DATE since
+ * `20261012120000-employee-joining-date-to-date`, and this pool sets no
+ * `dateStrings`, so selecting it bare would hand the API a JS Date built at
+ * LOCAL midnight. Serialised to JSON in IST that is `...T18:30:00.000Z` - the
+ * PREVIOUS day once anything takes the first ten characters, which is exactly
+ * what the Employee Master's edit form does. So it leaves as `YYYY-MM-DD`
+ * TEXT, through the one shared parser, which also means this query returns the
+ * same shape before and after the migration.
+ *
+ * THE API BOUNDARY IS ISO. Turning that into `16 Sep 2022` is the screen's
+ * job and happens in `util/displayDate.js`, at the point of render.
+ */
+const SELECT_EXPRESSIONS = {
+  "new_employee.date_of_joining": `DATE_FORMAT((${JOINED_ON("new_employee")}), '%Y-%m-%d') AS date_of_joining`,
+};
+
+/** The declared list, rendered for SQL: an override where one exists. */
+const renderColumns = (columns) =>
+  columns.map((c) => SELECT_EXPRESSIONS[c] || c).join(", ");
 
 class EmployeeRepository {
   constructor(db) {
@@ -760,7 +785,7 @@ class EmployeeRepository {
   getById(employee_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT ${EMPLOYEE_DETAIL_COLUMNS.join(", ")}
+        `SELECT ${renderColumns(EMPLOYEE_DETAIL_COLUMNS)}
            FROM new_employee
            LEFT JOIN department   ON new_employee.department_id  = department.department_id
            LEFT JOIN designation  ON new_employee.designation_id = designation.designation_id

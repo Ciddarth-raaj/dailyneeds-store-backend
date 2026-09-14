@@ -115,6 +115,10 @@ function fakeRepo(state = {}) {
       saved.calculations.push(rows);
       return { written: rows.length };
     },
+    saveCalculationsWithReconciliation: async ({ rows }) => {
+      saved.calculations.push(rows);
+      return { written: rows.length, stale_removed: 0 };
+    },
     saveDateShiftOverrideWithCalculation: async ({ override, rows }) => {
       const id = nextOverrideId;
       nextOverrideId += 1;

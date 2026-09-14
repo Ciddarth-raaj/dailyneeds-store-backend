@@ -129,6 +129,11 @@ function fakeCalculationRepo(state = {}) {
       saved.calculations.push(rows);
       return { written: rows.length };
     },
+    saveCalculationsWithReconciliation: async ({ rows }) => {
+      if (state.saveCalculationsThrows) throw new Error(state.saveCalculationsThrows);
+      saved.calculations.push(rows);
+      return { written: rows.length, stale_removed: 0 };
+    },
     saveMonthlyPayroll: async (row) => {
       saved.monthly.push(row);
       return [];

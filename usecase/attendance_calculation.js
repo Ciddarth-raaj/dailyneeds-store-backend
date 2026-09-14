@@ -22,6 +22,7 @@ const {
   daysInMonth,
 } = require("../utils/attendance_payroll");
 const { resolveEffectiveRawPunches } = require("../utils/attendance_effective_punches");
+const eligibility = require("../utils/attendance_eligibility");
 
 /**
  * Attendance v2 - the orchestration between the repository and the pure
@@ -96,16 +97,12 @@ function dateRange(from, to) {
 /**
  * Whether biometric attendance is expected of this employee.
  *
- * Absent or NULL is TRUE. The column is NOT NULL with DEFAULT 1, so the only
- * way to get here without a value is a caller that did not select it, and
- * "not asked" must not silently exempt somebody from attendance.
+ * RE-EXPORTED, NOT RE-IMPLEMENTED. The rule - and the two employment bounds
+ * that go with it - now live once in `utils/attendance_eligibility.js`, which
+ * the bulk run, the single-employee recalculation and the dashboard all read.
+ * The copy that used to sit here is what let the three disagree.
  */
-function attendanceRequired(row) {
-  if (!row) return true;
-  const v = row.attendance_required;
-  if (v === undefined || v === null) return true;
-  return Number(v) === 1 || v === true;
-}
+const attendanceRequired = eligibility.attendanceRequired;
 
 function breakOverrideMinutes(row) {
   if (!row) return null;
@@ -789,23 +786,94 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    * Calculate a range and store it. Idempotent by the unique key on
    * (employee_id, attendance_date) - see the repository.
    *
+   * THE ELIGIBILITY RULE IS APPLIED HERE, ONCE, FOR EVERY PATH. This is the
+   * only function that stores attendance for a range, and both recalculation
+   * entry points - the single-employee endpoint and every employee of a bulk
+   * run - go through it, so `utils/attendance_eligibility.js` is consulted
+   * exactly once per employee and cannot be applied differently by one caller
+   * than another. Dates outside the employee's employment are not calculated,
+   * and an employee with `attendance_required = 0` is not calculated at all.
+   *
+   * AND THE RANGE IS RECONCILED, not merely filtered. Excluding a date from
+   * the calculation leaves whatever was stored for it last time exactly where
+   * it was, which is how an exempted, resigned or corrected employee kept a
+   * screenful of calculated days they are not entitled to. So the rows the
+   * requested window still holds for now-ineligible dates are DELETED in the
+   * same transaction that writes the eligible ones - see
+   * `saveCalculationsWithReconciliation` in the repository for what may and
+   * may not be deleted. Nothing outside the requested employee and window is
+   * touched, and no raw punch is touched by anything here.
+   *
    * NOTHING IS QUEUED FOR APPROVAL. A recalculation that finds candidate OT
    * simply reports it; the day shows "OT Available" and the employee raises
    * the OT request themselves, with a reason (`raiseOtRequest` in the
    * regularization usecase). The old automatic OT queue is gone.
    */
   const recalculateRange = async ({ employee_id, from_date, to_date }) => {
-    // FIRST, so the calculation below sees any punch that becomes datable.
-    // See `setPunchRedriveService` for why Recalculate owns this.
-    const redrive = await redrivePunches({
-      employee_ids: [Number(employee_id)],
-      from: toDateOnly(from_date),
-      to: toDateOnly(to_date),
-    });
-    const days = await calculateRange({ employee_id, from_date, to_date });
-    const written = await attendanceCalculationRepo.saveCalculations(days.map(toStorageRow));
+    const employeeId = Number(employee_id);
+    const from = toDateOnly(from_date);
+    const to = toDateOnly(to_date);
+    if (from === null || to === null) {
+      throw validationError("from_date and to_date must be dates as YYYY-MM-DD");
+    }
+    if (from > to) throw validationError("from_date must not be after to_date");
+    if (dateRange(from, to).length > MAX_RANGE_DAYS) {
+      throw validationError(`A range may cover at most ${MAX_RANGE_DAYS} days`);
+    }
 
-    return { employee_id, from_date, to_date, days, punch_redrive: redrive, ...written };
+    // The employment facts and the exemption switch, read FIRST and once. A
+    // caller that named an employee who does not exist is a validation error
+    // at the bulk entry point; here an absent row simply carries no bounds,
+    // which is the same unbounded treatment an absent joining date has
+    // always had.
+    const employment = attendanceCalculationRepo.getEmploymentWindow
+      ? await attendanceCalculationRepo.getEmploymentWindow(employeeId)
+      : null;
+    const window = eligibility.eligibleWindow(employment, from, to);
+
+    // Re-deriving punches is work done FOR a calculation, so it happens only
+    // when there is one to do. An employee exempt from attendance, or a
+    // window entirely outside their employment, gets the reconciliation below
+    // and nothing else - and re-deriving would in any case not change the
+    // outcome for a date nobody is going to calculate.
+    // See `setPunchRedriveService` for why Recalculate owns this.
+    const redrive = window
+      ? await redrivePunches({
+          employee_ids: [employeeId],
+          from: window.from,
+          to: window.to,
+        })
+      : null;
+
+    const days = window
+      ? await calculateRange({
+          employee_id: employeeId,
+          from_date: window.from,
+          to_date: window.to,
+        })
+      : [];
+
+    const stored = await attendanceCalculationRepo.saveCalculationsWithReconciliation({
+      employee_id: employeeId,
+      from_date: from,
+      to_date: to,
+      rows: days.map(toStorageRow),
+    });
+
+    return {
+      employee_id: employeeId,
+      from_date: from,
+      to_date: to,
+      days,
+      // What the eligibility rule did to the requested window, stated rather
+      // than silently applied: an empty result is otherwise indistinguishable
+      // from a run that found nothing.
+      eligible_from: window ? window.from : null,
+      eligible_to: window ? window.to : null,
+      excluded_reason: window ? null : eligibility.exclusionReason(employment, from),
+      punch_redrive: redrive,
+      ...stored,
+    };
   };
 
   /**
@@ -980,15 +1048,38 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       store_id: storeId,
       designation_id: designationId,
       from_date: from,
+      to_date: to,
     });
-    // The joining bound, applied here because date_of_joining is text.
-    const targets = (candidates || []).filter((e) => {
-      const joined = toDateOnly(e.date_of_joining);
-      return joined === null || joined <= to;
-    });
-    if (targets.length > MAX_BULK_EMPLOYEES) {
+    // THE SHARED ELIGIBILITY RULE, not a fourth copy of a bound.
+    // `utils/attendance_eligibility.js` decides, from the same three facts
+    // `recalculateRange` applies per employee below: `attendance_required`,
+    // the joining date and the resignation date.
+    //
+    // AN INELIGIBLE CANDIDATE IS STILL PROCESSED, and that is the point. The
+    // run is a reconciliation, not only a calculation: somebody who has just
+    // been made exempt, or who has just resigned, is precisely the employee
+    // whose stored days have to be removed, and filtering them out here is
+    // what left those rows behind. `recalculateRange` calculates nothing for
+    // them and deletes what the window still holds. The repository widens its
+    // own candidate query by the same reasoning - see
+    // `listEmployeesForRecalculation`.
+    const processed = candidates || [];
+    const isEligible = (e) => eligibility.eligibleInRange(e, from, to);
+    // TARGETED still means "will have attendance calculated", which is what
+    // the run record and every existing caller understand by it. The wider
+    // set is reported beside it as RECONCILED, so a run that only removed
+    // rows is visible rather than looking like a run that did nothing.
+    const targets = processed.filter(isEligible);
+    const excluded = processed
+      .filter((e) => !isEligible(e))
+      .map((e) => ({
+        employee_id: Number(e.employee_id),
+        employee_name: e.employee_name || null,
+        reason: eligibility.exclusionReason(e, from),
+      }));
+    if (processed.length > MAX_BULK_EMPLOYEES) {
       throw validationError(
-        `${targets.length} employees match; narrow the filters to at most ${MAX_BULK_EMPLOYEES}`
+        `${processed.length} employees match; narrow the filters to at most ${MAX_BULK_EMPLOYEES}`
       );
     }
 
@@ -1007,24 +1098,23 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     const errors = [];
     let completed = 0;
     let daysProcessed = 0;
-    for (const target of targets) {
+    let staleRemoved = 0;
+    for (const target of processed) {
       /* eslint-disable no-await-in-loop */
       try {
-        // A date before somebody joined is not a day they were absent from;
-        // it is a day they did not work here. Calculating it stored a
-        // NO_SHIFT_FOR_DATE row that looks like attendance and is not, so
-        // each employee's range starts at their joining date when that falls
-        // inside it. An unparseable or absent `date_of_joining` clamps
-        // nothing - the range is used as asked, exactly as before.
-        const joined = toDateOnly(target.date_of_joining);
-        const employeeFrom = joined !== null && joined > from ? joined : from;
+        // The whole requested range is handed over. `recalculateRange` clamps
+        // it to the employee's eligible window through the shared rule and
+        // reconciles the REST of the window - which is exactly why the clamp
+        // is no longer applied here: clamping twice would hide the ineligible
+        // dates from the reconciliation that has to delete their stale rows.
         const result = await recalculateRange({
           employee_id: Number(target.employee_id),
-          from_date: employeeFrom,
+          from_date: from,
           to_date: to,
         });
-        completed += 1;
+        if (isEligible(target)) completed += 1;
         daysProcessed += Number(result.written) || 0;
+        staleRemoved += Number(result.stale_removed) || 0;
       } catch (err) {
         errors.push({
           employee_id: Number(target.employee_id),
@@ -1062,6 +1152,12 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       employees_completed: completed,
       employees_failed: errors.length,
       attendance_days_processed: daysProcessed,
+      // Reported, never silent: a run that removed rows has to say so, and
+      // the employees it removed them for have to be nameable afterwards.
+      stale_rows_removed: staleRemoved,
+      employees_reconciled: processed.length,
+      employees_excluded: excluded.length,
+      excluded,
       errors,
     };
   };

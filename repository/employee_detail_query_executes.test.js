@@ -34,7 +34,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { DatabaseSync } = require("node:sqlite");
 
-const { EMPLOYEE_MASTER_COLUMNS } = require("./employee");
+const { EMPLOYEE_MASTER_COLUMNS, EMPLOYEE_DETAIL_COLUMNS } = require("./employee");
 
 /** The rendered SQL, taken from the repository rather than transcribed. */
 function detailSql() {
@@ -71,8 +71,52 @@ const JOINED = {
  * migrations. Together they close the loop - one checks the list against the
  * schema, the other checks the SQL against the list.
  */
+/**
+ * THE THREE MySQL FUNCTIONS THE SELECT LIST USES, taught to SQLite.
+ *
+ * `date_of_joining` is selected through `utils/joining_date.js#JOINED_ON` so
+ * that a real DATE column leaves the database as `YYYY-MM-DD` TEXT instead of
+ * a JS Date built at local midnight. That expression uses LEFT, TRIM and the
+ * two STR_TO_DATE formats, none of which SQLite has, so they are defined here
+ * to mean what MySQL means by them - narrowly, for the two format strings the
+ * expression actually passes. This is a harness detail, not a second parser:
+ * the SQL under test is still the repository's own text.
+ */
+const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+const isoOrNull = (y, m, d) => {
+  const date = new Date(Date.UTC(y, m - 1, d));
+  if (Number.isNaN(date.getTime()) || date.getUTCMonth() !== m - 1 || date.getUTCDate() !== d) return null;
+  return `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+};
+const strToDate = (value, format) => {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  if (format === "%Y-%m-%d") {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+    return m ? isoOrNull(Number(m[1]), Number(m[2]), Number(m[3])) : null;
+  }
+  if (format === "%d %M %Y") {
+    const m = /^(\d{1,2}) ([A-Za-z]+) (\d{4})$/.exec(text);
+    if (!m) return null;
+    const month = MONTHS.findIndex((name) => name.toLowerCase() === m[2].toLowerCase());
+    return month === -1 ? null : isoOrNull(Number(m[3]), month + 1, Number(m[1]));
+  }
+  return null;
+};
+const installMysqlFunctions = (db) => {
+  db.function("LEFT", (value, n) => (value === null ? null : String(value).slice(0, n)));
+  db.function("TRIM", (value) => (value === null ? null : String(value).trim()));
+  db.function("STR_TO_DATE", strToDate);
+  // The only format the select list asks DATE_FORMAT for is '%Y-%m-%d', and
+  // its argument is already an ISO date by then.
+  db.function("DATE_FORMAT", (value, format) =>
+    value === null || format !== "%Y-%m-%d" ? null : String(value).slice(0, 10)
+  );
+};
+
 function build() {
   const db = new DatabaseSync(":memory:");
+  installMysqlFunctions(db);
   const master = EMPLOYEE_MASTER_COLUMNS.map((c) => c.replace("new_employee.", ""));
   db.exec(`CREATE TABLE new_employee (${master.map((c) => `\`${c}\``).join(", ")})`);
   for (const [table, columns] of Object.entries(JOINED)) {
@@ -164,12 +208,14 @@ test("EVERY SELECTED KEY IS DISTINCT IN THE RESULT", () => {
   const db = build();
   insertEmployee(db, { employee_id: 408, status: 1 });
   const [row] = runDetail(db, 408);
-  // One key per selected column: nothing collapsed, nothing overwrote
+  // One key per DECLARED column: nothing collapsed, nothing overwrote
   // anything. The count is what a duplicate name would silently reduce.
-  const selected = detailSql()
-    .slice(detailSql().indexOf("SELECT") + 6, detailSql().indexOf("FROM"))
-    .split(",").length;
-  assert.equal(Object.keys(row).length, selected);
+  //
+  // Counted from the declared list rather than by splitting the SQL on
+  // commas: a column selected as an EXPRESSION - `date_of_joining` goes
+  // through the shared joining-date parser - contains commas of its own, and
+  // counting those would measure the expression instead of the contract.
+  assert.equal(Object.keys(row).length, EMPLOYEE_DETAIL_COLUMNS.length);
 });
 
 test("A PHANTOM COLUMN WOULD FAIL HERE - the guard is real, not decorative", () => {

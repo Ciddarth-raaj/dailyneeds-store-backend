@@ -215,7 +215,8 @@ class EmployeeMasterRepository {
       // now with the patch applied - so that saving one field does not
       // require the other nine to be resent. They are read under the same
       // lock as everything else; no new query and no second round trip.
-      `SELECT employee_id, employee_name, status, resignation_date, date_of_joining,
+      `SELECT employee_id, employee_name, status, resignation_date,
+              DATE_FORMAT(date_of_joining, '%Y-%m-%d') AS date_of_joining,
               store_id, designation_id, department_id, shift_id,
               father_name, dob, gender, blood_group, marital_status, marriage_date,
               spouse_name, primary_contact_number, alternate_contact_number, email_id,
@@ -350,7 +351,8 @@ class EmployeeMasterRepository {
     const rows = await this._read(
       "GET-HEADER",
       `SELECT ne.employee_id, ne.employee_name, ne.status,
-              ne.date_of_joining, DATE_FORMAT(ne.resignation_date, '%Y-%m-%d') AS resignation_date,
+              DATE_FORMAT(ne.date_of_joining, '%Y-%m-%d') AS date_of_joining,
+              DATE_FORMAT(ne.resignation_date, '%Y-%m-%d') AS resignation_date,
               ne.store_id, ne.designation_id, ne.department_id, ne.shift_id,
               o.outlet_nickname, d.designation_name, dep.department_name
          FROM new_employee ne

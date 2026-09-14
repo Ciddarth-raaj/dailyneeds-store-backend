@@ -67,7 +67,7 @@ const IDENTITIES = {
 };
 
 function build(state = {}) {
-  const saved = { calculations: [], runs: [] };
+  const saved = { calculations: [], runs: [], reconciliations: [] };
   const overrides = [...(state.overrides || [])];
   const store = { requests: [], steps: [], decided: [] };
   let nextId = 900;
@@ -97,6 +97,11 @@ function build(state = {}) {
     getEmploymentWindow: async (id) => EMPLOYEES.find((e) => e.employee_id === Number(id)) || null,
     getMonthlyGrossAsOf: async () => null,
     saveCalculations: async (rows) => { saved.calculations.push(rows); return { written: rows.length }; },
+    saveCalculationsWithReconciliation: async ({ employee_id, from_date, to_date, rows }) => {
+      saved.reconciliations.push({ employee_id, from_date, to_date, kept: rows.map((r) => r.attendance_date) });
+      saved.calculations.push(rows);
+      return { written: rows.length, stale_removed: 0 };
+    },
     listEmployeesForRecalculation: async ({ employee_id, store_id, designation_id, from_date }) =>
       EMPLOYEES.filter((e) =>
         (e.resignation_date === null || e.resignation_date >= from_date) &&

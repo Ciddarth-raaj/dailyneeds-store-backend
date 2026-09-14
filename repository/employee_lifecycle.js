@@ -125,8 +125,8 @@ class EmployeeLifecycleRepository {
       `SELECT ne.employee_id,
               ne.status,
               ne.resignation_date,
-              ne.date_of_joining AS raw_date_of_joining,
-              (${JOINED_ON("ne")}) AS parsed_joined_on
+              DATE_FORMAT(ne.date_of_joining, '%Y-%m-%d') AS raw_date_of_joining,
+              DATE_FORMAT((${JOINED_ON("ne")}), '%Y-%m-%d') AS parsed_joined_on
          FROM new_employee ne
         WHERE ne.employee_id = ?
         FOR UPDATE`,

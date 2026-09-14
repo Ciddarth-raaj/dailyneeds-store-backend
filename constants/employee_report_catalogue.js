@@ -88,9 +88,27 @@ const maskAccount = (value) => {
   return "*".repeat(raw.length - 4) + raw.slice(-4);
 };
 
-/** `date_of_joining` is a VARCHAR of mixed formats; export what parses. */
+/**
+ * A date column, exported as `YYYY-MM-DD`.
+ *
+ * `date_of_joining` is a real DATE since
+ * `20261012120000-employee-joining-date-to-date` and is SELECTed through
+ * DATE_FORMAT, so what arrives here is already ISO text. The tolerant branches
+ * remain because this transform is shared with values that may still carry a
+ * time, and because a report is not the place to start throwing on old data -
+ * an unrecognised value is exported verbatim rather than guessed at.
+ */
 const asDate = (value) => {
   if (value === null || value === undefined || String(value).trim() === "") return null;
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null;
+    // LOCAL getters: the driver builds a DATE at local midnight, so the UTC
+    // ones would report the previous day everywhere east of Greenwich.
+    const y = value.getFullYear();
+    const m = String(value.getMonth() + 1).padStart(2, "0");
+    const d = String(value.getDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
   const head = String(value).trim().split("T")[0].split(" ")[0];
   return /^\d{4}-\d{2}-\d{2}$/.test(head) ? head : String(value).trim();
 };
@@ -222,10 +240,17 @@ const FIELDS = [
 
   /* ---------------------------------------------------------- Employment */
   { key: "date_of_joining", label: "Joining Date", group: "Employment",
-    select: "new_employee.date_of_joining", join_footprint: "base", transform: asDate,
-    // Stored as VARCHAR, so a range compares lexically. ISO dates sort
-    // correctly that way; anything else in the column will not, which is why
-    // this is a range and never an arithmetic comparison.
+    select: "DATE_FORMAT(new_employee.date_of_joining, '%Y-%m-%d')",
+    // FILTERED AS A DATE, READ AS TEXT. The predicate addresses the bare
+    // column so the range is a DATE comparison MySQL can use the column's own
+    // type for; the projection formats it so the value does not leave as a JS
+    // Date built at local midnight. Same column, two jobs.
+    filter_select: "new_employee.date_of_joining",
+    join_footprint: "base", transform: asDate,
+    // A real DATE column now, so a range filter is a DATE comparison rather
+    // than the lexical one a VARCHAR forced. The column leaves as ISO text
+    // because the API pool sets no `dateStrings` and a bare DATE would arrive
+    // as a JS Date built at local midnight.
     filter: { type: FILTER.DATE },
     history_backed: false, enabled: true },
 

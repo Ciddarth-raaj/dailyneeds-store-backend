@@ -1,4 +1,5 @@
 const logger = require("../utils/logger");
+const { JOINED_ON } = require("../utils/joining_date");
 const {
   queryAsync,
   getConnectionAsync,
@@ -408,14 +409,34 @@ class AttendanceCalculationRepository {
     );
   }
 
-  /** Joining and last-working dates, for the A4 available-dates window. */
+  /**
+   * Joining and last-working dates, for the A4 available-dates window AND for
+   * the shared eligibility rule every recalculation now applies
+   * (`utils/attendance_eligibility.js`).
+   *
+   * `attendance_required` is selected because the rule needs all three facts
+   * from one read, and because a caller that did NOT select it is treated as
+   * "attendance is required" - which is right for safety and wrong as a way
+   * of deciding an exemption. Asking for it here is how the exemption is
+   * actually honoured.
+   *
+   * `date_of_joining` goes through `JOINED_ON` - the one shared parser - and
+   * then DATE_FORMAT, so it leaves the database as `YYYY-MM-DD` TEXT. It is a
+   * real DATE column since
+   * `20261012120000-employee-joining-date-to-date`, and the API pool sets no
+   * `dateStrings`, so a bare DATE would arrive as a JS Date built at local
+   * midnight - in IST that is 18:30 the PREVIOUS day in UTC, and every
+   * joining bound would silently move a day. No bare date is selected
+   * anywhere in this file, and this is no exception.
+   */
   async getEmploymentWindow(employeeId) {
     const rows = await this._read(
       "GET-EMPLOYMENT-WINDOW",
       `SELECT ne.employee_id,
               ne.status,
+              ne.attendance_required,
               DATE_FORMAT(ne.resignation_date, '%Y-%m-%d') AS resignation_date,
-              ne.date_of_joining
+              DATE_FORMAT((${JOINED_ON("ne")}), '%Y-%m-%d') AS date_of_joining
          FROM new_employee ne
         WHERE ne.employee_id = ?`,
       [employeeId]
@@ -471,6 +492,99 @@ class AttendanceCalculationRepository {
     } catch (err) {
       await rollbackAsync(connection);
       this._log("SAVE-CALCULATIONS", err);
+      throw err;
+    } finally {
+      connection.release();
+    }
+  }
+
+  /**
+   * Persist a recalculated window AND remove what the window still holds for
+   * dates the employee is no longer eligible for - in ONE transaction.
+   *
+   * WHAT THIS DELETES, AND WHY IT IS SAFE TO DELETE IT.
+   *
+   * `attendance_day_calculation` is the OUTPUT of the calculation flow and
+   * nothing else. Every row in it was written by this repository's
+   * `writeCalculationsOnConnection` - the recalculation path, the
+   * date-shift-override path and the approval path all funnel through that one
+   * writer - and every column in it is derived from raw punches, dated shift
+   * history and approved regularizations. The whole table can be dropped and
+   * recomputed without losing a fact anybody entered. That is the ownership
+   * test this deletion turns on, and it is why the delete is confined to this
+   * table.
+   *
+   * WHAT IT MUST NEVER TOUCH, and does not:
+   *
+   *   biomax_punch, biomax_punch_derived   raw, append-only, someone else's
+   *   attendance_punch_void                a human said this punch is void
+   *   attendance_approval_request          a human decided this
+   *   attendance_regularized_punch         a human supplied this
+   *   attendance_date_shift_override       the audit line of a shift edit
+   *   attendance_monthly_payroll           a different derived table, keyed by
+   *                                        month, reconciled by its own path
+   *   employee_lifecycle_event / period    service history
+   *
+   * None of those is named in any statement here. This file issues exactly one
+   * DELETE, against one table, and it is below.
+   *
+   * WHAT IT MUST NOT DELETE WITHIN ITS OWN TABLE: valid historical attendance.
+   * The delete is bounded THREE ways - one employee, the requested window, and
+   * NOT IN the dates just written - so a date inside the employee's employment
+   * is recalculated and re-upserted by the same statement batch and is
+   * therefore never a delete candidate. A resigned employee keeps every
+   * calculated day up to and including their resignation date, and loses only
+   * the days after it.
+   *
+   * A window with NO eligible dates (an employee made exempt, a window wholly
+   * outside their employment) deletes everything the window holds, which is
+   * the entire point of item 2: filtering future calculations does not remove
+   * what a past calculation already stored.
+   */
+  async saveCalculationsWithReconciliation({ employee_id, from_date, to_date, rows }) {
+    const employeeId = Number(employee_id);
+    if (!Number.isInteger(employeeId) || employeeId <= 0) {
+      throw new Error("saveCalculationsWithReconciliation needs an employee_id");
+    }
+    if (!from_date || !to_date) {
+      throw new Error("saveCalculationsWithReconciliation needs the requested window");
+    }
+    const batch = Array.isArray(rows) ? rows : [];
+    // A row written for a date outside the requested window would make the
+    // "keep" list disagree with the delete bounds. It cannot happen - the
+    // usecase clamps INSIDE the window - and is asserted rather than assumed.
+    const keep = batch
+      .map((r) => r.attendance_date)
+      .filter((d) => d >= from_date && d <= to_date);
+
+    const connection = await getConnectionAsync(this.db);
+    try {
+      await beginTransactionAsync(connection);
+
+      const written = await writeCalculationsOnConnection(connection, batch);
+
+      const params = [employeeId, from_date, to_date];
+      let notIn = "";
+      if (keep.length > 0) {
+        notIn = " AND attendance_date NOT IN (?)";
+        params.push(keep);
+      }
+      const removed = await queryAsync(
+        connection,
+        `DELETE FROM attendance_day_calculation
+          WHERE employee_id = ?
+            AND attendance_date BETWEEN ? AND ?${notIn}`,
+        params
+      );
+
+      await commitAsync(connection);
+      return {
+        ...written,
+        stale_removed: removed ? Number(removed.affectedRows) : 0,
+      };
+    } catch (err) {
+      await rollbackAsync(connection);
+      this._log("SAVE-CALCULATIONS-WITH-RECONCILIATION", err);
       throw err;
     } finally {
       connection.release();
@@ -548,9 +662,24 @@ class AttendanceCalculationRepository {
    * eventually, but its backfill still carries rows flagged needs_review, so
    * this reads the column payroll reads.
    */
-  async listEmployeesForRecalculation({ employee_id, store_id, designation_id, from_date }) {
-    const where = ["(ne.resignation_date IS NULL OR ne.resignation_date >= ?)"];
-    const params = [from_date];
+  async listEmployeesForRecalculation({ employee_id, store_id, designation_id, from_date, to_date }) {
+    // A run is a RECONCILIATION, so the candidate set is "who might have a
+    // calculated day in this window", not only "who can earn one". Somebody
+    // who resigned before the window began earns nothing - but if a previous
+    // run stored days for them, those days are exactly what has to be removed,
+    // and a query that hides them is what let them survive. So the employment
+    // predicate is widened by an EXISTS over the calculated days the window
+    // actually holds. It stays a targeted query: it adds only employees who
+    // already have a row in that window, and the usecase's shared eligibility
+    // rule then decides that they get a reconciliation and no calculation.
+    const windowTo = to_date || from_date;
+    const where = [
+      `((ne.resignation_date IS NULL OR ne.resignation_date >= ?)
+        OR EXISTS (SELECT 1 FROM attendance_day_calculation adc
+                    WHERE adc.employee_id = ne.employee_id
+                      AND adc.attendance_date BETWEEN ? AND ?))`,
+    ];
+    const params = [from_date, from_date, windowTo];
     if (employee_id) {
       where.push("ne.employee_id = ?");
       params.push(employee_id);
@@ -566,7 +695,8 @@ class AttendanceCalculationRepository {
     return this._read(
       "LIST-EMPLOYEES-FOR-RECALCULATION",
       `SELECT ne.employee_id, ne.employee_name, ne.store_id, ne.designation_id, ne.status,
-              ne.date_of_joining,
+              ne.attendance_required,
+              DATE_FORMAT((${JOINED_ON("ne")}), '%Y-%m-%d') AS date_of_joining,
               DATE_FORMAT(ne.resignation_date, '%Y-%m-%d') AS resignation_date
          FROM new_employee ne
         WHERE ${where.join(" AND ")}

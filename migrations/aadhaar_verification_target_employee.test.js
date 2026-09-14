@@ -107,8 +107,16 @@ describe("wiring and ordering", () => {
       .filter((f) => f.endsWith(".js"))
       .map((f) => f.replace(/\.js$/, ""));
     assert.equal(all.filter((f) => f === NAME).length, 1, "the identifier is unique");
-    const others = all.filter((f) => f !== NAME).sort();
-    assert.ok(NAME > others[others.length - 1], "must be the newest migration");
+    // Pinned to the highest identifier that existed when this was written,
+    // not to "is the newest file in the directory". The rule being protected
+    // is that this migration runs AFTER the tables it alters - a later,
+    // unrelated migration landing beside it does not break that, and an
+    // assertion that fails on every subsequent migration is a tripwire, not
+    // a test. (`active_employee_payment_type_cash.test.js` states the same
+    // reasoning for the same reason.)
+    const WHEN_WRITTEN = "20261011120000-aadhaar-verification-target-employee";
+    const earlier = all.filter((f) => f !== NAME && f <= WHEN_WRITTEN).sort();
+    assert.ok(NAME >= earlier[earlier.length - 1], "must sort after every migration it depends on");
     // And after the table it alters.
     assert.ok("20260908140000" < NAME.slice(0, 14), "after the C2 Aadhaar tables");
   });

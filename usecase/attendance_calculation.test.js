@@ -87,6 +87,10 @@ function fakeRepo(state = {}) {
       saved.calculations.push(rows);
       return { written: rows.length };
     },
+    saveCalculationsWithReconciliation: async ({ rows }) => {
+      saved.calculations.push(rows);
+      return { written: rows.length, stale_removed: 0 };
+    },
     saveMonthlyPayroll: async (row) => {
       saved.monthly.push(row);
       return [];

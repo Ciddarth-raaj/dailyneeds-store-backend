@@ -13,6 +13,7 @@ const {
   VERSIONED_CONFIG_COLUMNS,
 } = require("../utils/shift_config_version");
 const { resolveEffectiveRawPunches } = require("../utils/attendance_effective_punches");
+const eligibility = require("../utils/attendance_eligibility");
 const {
   DELIVERY,
   DELIVERY_DETAIL,
@@ -123,16 +124,14 @@ function breakOverrideMinutes(row) {
 }
 
 /**
- * Whether biometric attendance is expected of this employee. Same rule as A1
- * (`usecase/attendance_calculation.js#attendanceRequired`): absent or NULL is
- * TRUE, because "not selected" must never silently exempt anybody.
+ * Whether biometric attendance is expected of this employee.
+ *
+ * THE SHARED RULE, not a second copy of it. It lives in
+ * `utils/attendance_eligibility.js` along with the two employment bounds, and
+ * the calculation usecase reads the same one - which is what makes "excluded
+ * from the dashboard" and "excluded from a recalculation" the same sentence.
  */
-function attendanceRequired(row) {
-  if (!row) return true;
-  const v = row.attendance_required;
-  if (v === undefined || v === null) return true;
-  return Number(v) === 1 || v === true;
-}
+const attendanceRequired = eligibility.attendanceRequired;
 
 /**
  * The employees this dashboard is ABOUT, and the count it left out.
@@ -530,13 +529,7 @@ module.exports = (attendanceDashboardRepo) => {
    * That is reported rather than papered over with `employee_employment_period`,
    * whose backfill is flagged needs_review.
    */
-  const applicableOn = (employee, date) => {
-    const joined = toDateOnly(employee.joined_on);
-    if (joined !== null && joined > date) return false;
-    const resigned = toDateOnly(employee.resignation_date);
-    if (resigned !== null && resigned < date) return false;
-    return true;
-  };
+  const applicableOn = (employee, date) => eligibility.employedOn(employee, date);
 
   /* ---------------------------------------------- delivery assurance */
 
