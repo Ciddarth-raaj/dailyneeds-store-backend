@@ -136,17 +136,34 @@ describe("down", () => {
 });
 
 describe("ordering", () => {
-  it("sorts after every migration that exists today, with no collision", () => {
+  /**
+   * WHAT ACTUALLY MATTERS, which is not "I am last".
+   *
+   * This asserted that EVERY other migration sorted before this one. That was
+   * true the day it was written and false the moment another migration was
+   * added - exactly the way `hr_permission_keys_b2.test.js` had already been
+   * corrected once, for the same reason and with the same comment.
+   *
+   * The real properties are that the identifier is UNIQUE - a collision is
+   * two migrations db-migrate cannot order - and that this one sorts AFTER
+   * the migrations it depends on, which is what decides whether the keys it
+   * reads from `permissions` exist when it runs.
+   */
+  it("has a unique identifier, and sorts after what it depends on", () => {
     const all = fs
       .readdirSync(path.join(__dirname, "mysql/migrations"))
       .filter((f) => f.endsWith(".js"))
       .map((f) => f.slice(0, 14))
       .filter((id) => /^\d{14}$/.test(id));
     const mine = NAME.slice(0, 14);
-    const others = all.filter((id) => id !== mine);
+
     assert.equal(all.filter((id) => id === mine).length, 1, "the identifier is unique");
-    for (const id of others) {
-      assert.ok(id < mine, `${id} must sort before ${mine}`);
+
+    for (const dependency of [
+      "20260907120000", // B2 declared the HR permission keys
+      "20261002120000", // employee branch scope
+    ]) {
+      assert.ok(dependency < mine, `${mine} must sort after ${dependency}`);
     }
   });
 });

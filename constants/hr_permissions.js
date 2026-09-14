@@ -88,6 +88,36 @@ module.exports = {
   // twelve digits. Declared by the C2 Aadhaar migration, granted to nobody.
   VIEW_AADHAAR_FULL: "view_aadhaar_full",
 
+  // ============================ THE AADHAAR STATUS READ =====================
+  //
+  // WHETHER THIS EMPLOYEE HAS A VERIFIED AADHAAR - and, for a caller entitled
+  // to the profile, the last four digits and the verified name. Never the
+  // number: that is `VIEW_AADHAAR_FULL` above, and it is granted to nobody.
+  //
+  // WHY THIS KEY HAD TO EXIST. The status endpoint was gated on
+  // `view_employee_lifecycle`, which is the EMPLOYMENT HISTORY key - periods,
+  // resignations, rejoins. A store manager does not hold it, so the profile
+  // told them Aadhaar status was unavailable for employees they had onboarded
+  // themselves. Aadhaar identity and employment history are different
+  // questions and one must not gate the other.
+  //
+  // AND WHY NOT AN EXISTING KEY. `view_employees` is the staff list, and
+  // putting a verified legal name and last four digits behind it would widen
+  // that list for everyone who holds it. `view_employee_sensitive` is the
+  // right SHAPE but far too broad - it also opens salary, bank and PAN, which
+  // is precisely what a store manager must not gain in order to see an
+  // Aadhaar badge. Neither is a fit, so this is its own narrow decision.
+  //
+  // THERE IS DELIBERATELY NO MATCHING EDIT KEY. Attaching a verified Aadhaar
+  // is already `employee_edit` + branch scope, which is correct and already
+  // works; a second key for the same act would duplicate a working rule and
+  // lock HR out until it was granted.
+  //
+  // IT GRANTS NO BRANCH. Like every other key here it says WHAT may be done,
+  // never WHERE - `employee_scope_all_branches` and the branch resolver decide
+  // that, and the route applies both.
+  VIEW_EMPLOYEE_AADHAAR: "view_employee_aadhaar",
+
   // Stage 0C / C2. Running a paid external bank check, and accepting a name
   // that did not quite match, are separate decisions from editing an
   // employee. Declared by the C2 Sandbox migration, granted to nobody.

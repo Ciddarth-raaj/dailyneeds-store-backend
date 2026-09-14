@@ -581,7 +581,12 @@ class EmployeeMasterRoutes {
      */
     router.get(
       "/employee/:employee_id/aadhaar",
-      this.permissions.require(P.VIEW_EMPLOYEE_LIFECYCLE),
+      // AADHAAR STATUS IS ITS OWN DECISION, not employment history's. This was
+      // `view_employee_lifecycle`, which a store manager does not hold, so the
+      // profile reported Aadhaar unavailable for employees they had onboarded
+      // themselves. The branch scope beside it is unchanged and still decides
+      // WHICH employees: the pair is the whole rule.
+      this.permissions.require(P.VIEW_EMPLOYEE_AADHAAR),
       this.branchScope.requireEmployeeInScope(),
       async (req, res) => {
         try {
