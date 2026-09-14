@@ -510,6 +510,39 @@ class EmployeeMasterRepository {
   }
 
   /**
+   * HOW EACH EMPLOYEE IS PAID - recorded or not, and by which route. Never
+   * an account, a name or a number.
+   *
+   * The Payroll column on the Pending HR queue asks "can this employee
+   * actually be paid this month", and the first thing that has to be true is
+   * that somebody has said HOW. `payment_type` is the M1 decision the Payment
+   * Details section records - 1 Bank, 2 Cash, NULL nobody has said - and it is
+   * the reason the bank account is asked for at all.
+   *
+   * WHY THE ROUTE AND NOT JUST "RECORDED". A cash-paid employee has no
+   * account to verify, so requiring a payroll-ready bank account of them would
+   * be work nobody will ever do; a bank-paid employee without a verified
+   * account cannot be paid at all. Those are different answers, so the caller
+   * needs to know which route was chosen, not merely that a choice exists.
+   *
+   * IT IS THE SAME SHAPE AS THE STATUTORY READ ABOVE, AND FOR THE SAME
+   * REASON: `payment_type` is sensitive under B3, so the comparison is made
+   * in SQL and only the 1/0 of "recorded" and "is cash" comes back. The
+   * column value itself never leaves the database.
+   */
+  async getPayrollConfigMany(employeeIds) {
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
+    return this._read(
+      "GET-PAYROLL-CONFIG-MANY",
+      `SELECT employee_id,
+              (payment_type IS NOT NULL) AS payment_type_recorded,
+              (payment_type = 2)         AS pays_in_cash
+         FROM new_employee WHERE employee_id IN (?)`,
+      [employeeIds]
+    );
+  }
+
+  /**
    * The review queue: periods C1b or C1c could not date. Read-only, and
    * nothing here repairs anything - the 518 historical rows stay exactly as
    * they are until the archived Digisme export is imported.

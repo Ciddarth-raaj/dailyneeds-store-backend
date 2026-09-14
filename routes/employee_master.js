@@ -439,11 +439,26 @@ class EmployeeMasterRoutes {
         // "outstanding or not" this endpoint has always disclosed. See the
         // usecase for why the choice is made here rather than by B3's
         // `filterResponse`, which has no sensitive key to strip.
-        const disclosePfEsiApplicability = await this.permissions.has(
-          req,
-          P.VIEW_EMPLOYEE_SENSITIVE
+        //
+        // THE PAYMENT ROUTE IS THE SAME KIND OF DISCLOSURE, ON THE SAME KEY.
+        // "This employee is paid in cash" is a value of `payment_type`, which
+        // is sensitive under B3, so it is told to the same callers that may
+        // see the applicability columns and to nobody else. One permission
+        // read answers both questions - there is no new permission here, and
+        // the two are deliberately not split: a caller who may see one of
+        // these columns may see the other.
+        const discloseSensitive = await this.permissions.has(req, P.VIEW_EMPLOYEE_SENSITIVE);
+        // `filters`, NOT `req.query` - the branch-scoped filters computed
+        // above. The disclosure flags decide WHICH COLUMNS a caller is told
+        // about; the branch scope decides WHICH EMPLOYEES they may be told
+        // about at all, and passing the raw query here would hand back badges
+        // for employees the list itself refuses to return.
+        res.json(
+          await this.statusSummary.list(filters, {
+            disclosePfEsiApplicability: discloseSensitive,
+            disclosePaymentRoute: discloseSensitive,
+          })
         );
-        res.json(await this.statusSummary.list(filters, { disclosePfEsiApplicability }));
       } catch (err) {
         this._fail(res, err);
       }

@@ -526,11 +526,15 @@ class Server {
     // The employee-master repository is passed for one read - whether the PF
     // and ESI decision has been recorded - which is what lets the list say an
     // employee is still waiting on HR onboarding. No column value leaves it.
+    // The salary repository is passed for one read too - whether a live,
+    // costed salary exists today - which is what lets the queue say an
+    // employee is not yet on payroll. No amount leaves it.
     this.employeeStatusSummaryUsecase = require("./usecase/employee_status_summary")(
       this.employeeUsecase,
       this.employeeAadhaarRepo,
       this.employeeBankRepo,
-      this.employeeMasterRepo
+      this.employeeMasterRepo,
+      this.employeeSalaryRepo
     );
     this.shiftUsecase = require("./usecase/shift")(this.shiftRepo);
     this.workShiftUsecase = require("./usecase/work_shift")(this.workShiftRepo);
