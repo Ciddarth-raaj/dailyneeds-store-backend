@@ -14,9 +14,20 @@ const logger = require("../utils/logger");
  */
 
 /** The safe projection: enough to display and to match, never to reconstruct. */
+/**
+ * The display record for one employee. Never the number, never the
+ * ciphertext, never the fingerprint.
+ *
+ * `name_as_per_aadhaar` IS here, and belongs here: it is the verified LEGAL
+ * name, and showing it beside the operational `new_employee.employee_name`
+ * is the whole point of keeping the two apart. It is not sensitive in the
+ * B3 sense - it is a name, not an identifier - and nothing can edit it
+ * through Employee Master: it is written once, when the Aadhaar is
+ * attached, from the payload the verification returned.
+ */
 const IDENTITY_PUBLIC_COLUMNS = `
   aadhaar_identity_id, employee_id, aadhaar_last4, key_version,
-  verification_id, verified_at, created_at, updated_at`;
+  verification_id, verified_at, name_as_per_aadhaar, created_at, updated_at`;
 
 class EmployeeAadhaarRepository {
   constructor(db) {

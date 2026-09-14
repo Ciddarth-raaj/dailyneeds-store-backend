@@ -85,8 +85,8 @@ function post(port, path, { body, type }) {
 describe("/attendance/imports", () => {
   const guards = guardsOf(buildRoutes({}, permissions).getRouter());
 
-  it("defines preview, list, details, items, commit and rematch, and nothing else", () => {
-    assert.deepEqual(guards.map((g) => `${g.method} ${g.path}`).sort(), ["GET /", "GET /details", "GET /items", "POST /commit", "POST /digisme/preview", "POST /rematch"]);
+  it("defines preview, list, details, items, commit, rematch and redrive, and nothing else", () => {
+    assert.deepEqual(guards.map((g) => `${g.method} ${g.path}`).sort(), ["GET /", "GET /details", "GET /items", "POST /commit", "POST /digisme/preview", "POST /redrive", "POST /rematch"]);
   });
 
   it("rematch passes an optional employee_id through as a one-element filter, and rejects a non-positive one", async () => {

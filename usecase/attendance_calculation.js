@@ -93,6 +93,20 @@ function dateRange(from, to) {
  * and no dated override table - the earlier implementation invented one, and
  * it has been removed rather than carried forward.
  */
+/**
+ * Whether biometric attendance is expected of this employee.
+ *
+ * Absent or NULL is TRUE. The column is NOT NULL with DEFAULT 1, so the only
+ * way to get here without a value is a caller that did not select it, and
+ * "not asked" must not silently exempt somebody from attendance.
+ */
+function attendanceRequired(row) {
+  if (!row) return true;
+  const v = row.attendance_required;
+  if (v === undefined || v === null) return true;
+  return Number(v) === 1 || v === true;
+}
+
 function breakOverrideMinutes(row) {
   if (!row) return null;
   const value = row.special_break_override_minutes;
@@ -172,6 +186,49 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
   let otRequestService = options.ot_request_service || null;
   const setOtRequestService = (service) => {
     otRequestService = service || null;
+  };
+
+  /**
+   * The punch RE-DERIVATION collaborator, injected for the same reason.
+   *
+   * It lives in `usecase/attendance_import.js`. Recalculate has to reach it
+   * because the two halves of "this date's shift" live in two tables and
+   * only one of them was ever recomputed: `attendance_calculation` resolves
+   * the shift from dated history on every run, while
+   * `biomax_punch_derived.derivation_status` is stamped once at ingest and
+   * was never revisited. An employee given a shift after their punches
+   * arrived therefore calculated correctly and still read "No Shift" in the
+   * Punch Audit, with no action anywhere that could clear it.
+   *
+   * Recalculate now re-derives the range's undatable punches FIRST and then
+   * calculates, so both halves agree afterwards. Optional: a caller that
+   * wires no service simply recalculates as before.
+   */
+  let punchRedriveService = options.punch_redrive_service || null;
+  const setPunchRedriveService = (service) => {
+    punchRedriveService = service || null;
+  };
+
+  /**
+   * Re-derive the undatable punches of these employees over this range, and
+   * never let that fail a recalculation: a punch that cannot be re-derived
+   * is a cause that has not been fixed yet, not a reason to refuse to
+   * recalculate the dates that can be.
+   */
+  const redrivePunches = async ({ employee_ids, from, to }) => {
+    if (!punchRedriveService || typeof punchRedriveService.redriveUndated !== "function") return null;
+    try {
+      return await punchRedriveService.redriveUndated({
+        employeeIds: employee_ids,
+        // A punch on the morning after `to` can belong to `to`, and one on
+        // the evening before `from` can belong to `from` - the same slack
+        // the calculation reads punches over.
+        from: addDays(from, -1),
+        to: addDays(to, 1),
+      });
+    } catch (err) {
+      return { error: err && err.message ? err.message : String(err) };
+    }
   };
 
   /**
@@ -358,6 +415,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       regularized,
       approvals,
       break_override_minutes: breakOverrideMinutes(employee),
+      attendance_required: attendanceRequired(employee),
       resolutionFor,
       readCutoff,
       shiftNameFor,
@@ -575,6 +633,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
         break_override_minutes: context.break_override_minutes,
         approved_ot_minutes: approvedOt,
         regularization_pending: stillOpen,
+        attendance_required: context.attendance_required,
       });
 
       return {
@@ -736,10 +795,17 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    * regularization usecase). The old automatic OT queue is gone.
    */
   const recalculateRange = async ({ employee_id, from_date, to_date }) => {
+    // FIRST, so the calculation below sees any punch that becomes datable.
+    // See `setPunchRedriveService` for why Recalculate owns this.
+    const redrive = await redrivePunches({
+      employee_ids: [Number(employee_id)],
+      from: toDateOnly(from_date),
+      to: toDateOnly(to_date),
+    });
     const days = await calculateRange({ employee_id, from_date, to_date });
     const written = await attendanceCalculationRepo.saveCalculations(days.map(toStorageRow));
 
-    return { employee_id, from_date, to_date, days, ...written };
+    return { employee_id, from_date, to_date, days, punch_redrive: redrive, ...written };
   };
 
   /**
@@ -1069,10 +1135,11 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     const from = `${y}-${pad(m)}-01`;
     const to = `${y}-${pad(m)}-${pad(daysInMonth(y, m))}`;
 
-    const [days, employment, salary] = await Promise.all([
+    const [days, employment, salary, employee] = await Promise.all([
       calculateRange({ employee_id, from_date: from, to_date: to }),
       attendanceCalculationRepo.getEmploymentWindow(employee_id),
       attendanceCalculationRepo.getMonthlyGrossAsOf(employee_id, to),
+      attendanceCalculationRepo.getBreakOverride(employee_id),
     ]);
 
     const payroll = computeMonthlyAttendancePayroll({
@@ -1083,6 +1150,12 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       days,
       joined_on: employment ? employment.date_of_joining : null,
       ended_on: employment ? employment.resignation_date : null,
+      // An employee exempt from biometric attendance is paid the month's
+      // base days and no punch of theirs is priced - see the exemption note
+      // in `utils/attendance_payroll.js`. They remain active, salaried and
+      // payroll-eligible; the flag changes how attendance is READ, not
+      // whether they are paid.
+      attendance_required: attendanceRequired(employee),
     });
 
     const result = {
@@ -1130,9 +1203,11 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     RESOLUTION_STATUS,
     dateRange,
     breakOverrideMinutes,
+    attendanceRequired,
     toStorageRow,
     OT_CLAIM_STATE,
     setOtRequestService,
+    setPunchRedriveService,
     closeOtForPayrollLock,
     getBreakOverride,
     setBreakOverride,

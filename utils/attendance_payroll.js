@@ -177,6 +177,57 @@ function perMinutePaise(dailyRatePaise, nrmMinutes) {
  * @param {string|null} [input.ended_on]
  * @returns {object} the stable monthly contract
  */
+/**
+ * The fields every monthly result carries, with the derived money left at
+ * zero. The exempt branch fills in the three it does pay and returns; the
+ * ordinary path builds its own object below, field for field the same.
+ *
+ * Written as one shape rather than two half-shapes so that a reader (and a
+ * consumer, and the storage row in
+ * `usecase/attendance_calculation.js#calculateMonth`) sees exactly the same
+ * keys either way, and an exempt month is never a differently shaped object
+ * that some caller has to special-case.
+ */
+function emptyPayrollShape({ employee_id, year, month, window, split, grossPaise, dailyRatePaise }) {
+  return {
+    payroll_version: PAYROLL_VERSION,
+    employee_id,
+    period_year: year,
+    period_month: month,
+
+    available_from: window.from,
+    available_to: window.to,
+    available_dates: split.available_dates,
+    notional_offs: split.notional_offs,
+    base_days: split.base_days,
+
+    attendance_days: split.attendance_days,
+    salary_days: split.salary_days,
+    extra_days: split.extra_days,
+
+    monthly_gross: toRupees(grossPaise),
+    daily_rate: dailyRatePaise === null ? null : toRupees(Math.round(dailyRatePaise)),
+
+    salary_day_earnings: toRupees(dailyRatePaise === null ? null : 0),
+    extra_day_earnings: toRupees(dailyRatePaise === null ? null : 0),
+
+    shortage_minutes: 0,
+    missing_minute_deduction: toRupees(dailyRatePaise === null ? null : 0),
+
+    approved_ot_minutes: 0,
+    approved_ot_earnings: toRupees(dailyRatePaise === null ? null : 0),
+
+    total_attendance_payable: toRupees(dailyRatePaise === null ? null : 0),
+
+    statutory_handoff:
+      "Attendance exposes neutral wage components only. It does not assert which of them legally enter the PF or ESI base; salary_engine.js remains the statutory authority and its integration is a separate reviewed step.",
+
+    held_dates: [],
+    unrated_dates: [],
+    is_final: true,
+  };
+}
+
 function computeMonthlyAttendancePayroll(input = {}) {
   const {
     employee_id = null,
@@ -186,6 +237,7 @@ function computeMonthlyAttendancePayroll(input = {}) {
     days = [],
     joined_on = null,
     ended_on = null,
+    attendance_required = true,
   } = input;
 
   const grossPaise = toPaise(monthly_gross);
@@ -201,6 +253,44 @@ function computeMonthlyAttendancePayroll(input = {}) {
   let otEarningsPaise = 0;
   const heldDates = [];
   const unratedDates = [];
+
+  // EXEMPT FROM BIOMETRIC ATTENDANCE - paid for the month's base days, and
+  // no day is read at all.
+  //
+  // WHY IT IS NOT SIMPLY "SKIP THE DEDUCTION". Attendance pay in v2 is
+  // `attended days x Daily Rate`, so an employee with no punches has no
+  // attended days and would be paid nothing. For somebody who is exempt,
+  // that IS the deduction - the largest one possible - and the requirement
+  // is that the absence of a biometric punch never costs them money. So
+  // they are deemed present for every day of the month's own base: the
+  // window, the notional offs and the base-day arithmetic are exactly the
+  // same as for everybody else, and the pay comes out at the month's base
+  // rather than at zero.
+  //
+  // WHAT IS NOT PAID. No extra days, because an extra day is evidence of
+  // attendance beyond the base and there is none; no overtime, for the same
+  // reason; and no shortage, which is what "no deduction" means. Nothing
+  // here touches their status, their salary record or their eligibility -
+  // exempt is not resigned, not inactive and not unpaid.
+  if (attendance_required === false) {
+    // Deemed present for the month's BASE days - the available dates less
+    // their notional offs - so `salary_days` is the whole base and
+    // `extra_days` is zero. Passing the raw available count instead would
+    // credit them with extra days they have no evidence of working.
+    const baseDays = splitSalaryAndExtraDays(window.count, window.count).base_days;
+    const exemptSplit = splitSalaryAndExtraDays(baseDays, window.count);
+    const exemptEarnings =
+      dailyRatePaise === null ? null : Math.round(exemptSplit.salary_days * dailyRatePaise);
+    return {
+      ...emptyPayrollShape({ employee_id, year, month, window, split: exemptSplit, grossPaise, dailyRatePaise }),
+      attendance_required: false,
+      salary_day_earnings: toRupees(exemptEarnings),
+      extra_day_earnings: toRupees(dailyRatePaise === null ? null : 0),
+      total_attendance_payable: toRupees(exemptEarnings),
+      attendance_exemption:
+        "Biometric attendance is not required for this employee. The month is paid at its base days; no shortage, deduction or overtime is derived from the absence of punches.",
+    };
+  }
 
   (days || []).forEach((day) => {
     if (!day) return;
@@ -260,6 +350,7 @@ function computeMonthlyAttendancePayroll(input = {}) {
     employee_id,
     period_year: year,
     period_month: month,
+    attendance_required: true,
 
     // The window, so the day counts can be audited without re-deriving them.
     available_from: window.from,

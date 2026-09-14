@@ -80,6 +80,7 @@ function createPool(dbConfig) {
 function createStore(pool, options = {}) {
   const now = options.now || (() => Date.now());
   const scheduleCache = new Map(); // `${shift}:${dow}` -> {at, row}
+  const assignmentCache = new Map(); // `assignments:${employee}` -> {at, rows}
 
   const q = (sql, params) => queryAsync(pool, sql, params);
 
@@ -103,6 +104,37 @@ function createStore(pool, options = {}) {
       [employeeId]
     );
     return rows && rows[0] ? rows[0] : null;
+  }
+
+  /**
+   * The employee's DATED shift-assignment history (A0), cached for a minute
+   * exactly as the schedule rows are.
+   *
+   * This is what makes a punch's shift the SAME answer the attendance
+   * engine, the dashboard and payroll give for that date. Dating used to
+   * read `new_employee.default_work_shift_id` instead, and because a
+   * punch's derivation status is written once at ingest, any disagreement
+   * between the two became permanent - an employee assigned a shift after
+   * their punches arrived stayed "No Shift" in the Punch Audit for ever.
+   *
+   * Two columns and nothing else: the resolver in `utils/shiftResolution.js`
+   * needs the effective date, the shift and the id it breaks ties on.
+   */
+  async function findShiftAssignments(employeeId) {
+    if (employeeId === null || employeeId === undefined || employeeId <= 0) return [];
+    const key = `assignments:${employeeId}`;
+    const hit = assignmentCache.get(key);
+    if (hit && now() - hit.at < SCHEDULE_CACHE_MS) return hit.rows;
+    const rows = await q(
+      `SELECT employee_work_shift_assignment_id, work_shift_id,
+              DATE_FORMAT(effective_from, '%Y-%m-%d') AS effective_from
+         FROM employee_work_shift_assignment
+        WHERE employee_id = ?`,
+      [employeeId]
+    );
+    const list = rows || [];
+    assignmentCache.set(key, { at: now(), rows: list });
+    return list;
   }
 
   /**
@@ -554,6 +586,7 @@ function createStore(pool, options = {}) {
     findDevice,
     findEmployee,
     findScheduleRow,
+    findShiftAssignments,
     insertPunch,
     insertRawRequest,
     touchDevice,

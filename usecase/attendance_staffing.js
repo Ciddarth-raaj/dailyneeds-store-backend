@@ -229,13 +229,20 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
     const previousDate = addDays(businessDate, -1);
     const nextDate = addDays(businessDate, 1);
 
-    const employees = await attendanceDashboardRepo.listApplicableEmployeesForRange({
-      from_date: previousDate,
-      to_date: nextDate,
-      store_ids: filters.store_ids,
-      designation_id: filters.designation_id,
-      search: filters.search,
-    });
+    // EXEMPT EMPLOYEES ARE NOT STAFFING. Somebody who is not required to
+    // record biometric attendance has no assigned shift to be on duty
+    // within, so counting them would report a permanent "expected coverage
+    // unknown" against a setup fault that is not one. They remain active
+    // and paid; they are simply not what this screen measures.
+    const employees = (
+      await attendanceDashboardRepo.listApplicableEmployeesForRange({
+        from_date: previousDate,
+        to_date: nextDate,
+        store_ids: filters.store_ids,
+        designation_id: filters.designation_id,
+        search: filters.search,
+      })
+    ).filter((e) => !e || e.attendance_required === undefined || e.attendance_required === null || Number(e.attendance_required) === 1);
     if (!employees || employees.length === 0) {
       return {
         employees: [],

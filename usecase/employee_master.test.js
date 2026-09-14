@@ -311,12 +311,26 @@ function build() {
   return { world, uc };
 }
 
+/**
+ * A create that satisfies the Personal Details rules, because creating an
+ * employee IS creating their Personal Details section (Add Employee's
+ * Personal stage). Blood Group and Email are deliberately absent - they are
+ * optional, and a fixture that supplied them would stop proving it.
+ */
 const VALID = {
   employee_name: "Rehearsal Person",
   date_of_joining: "2022-03-01",
   store_id: 2,
   designation_id: 3,
   department_id: 4,
+  father_name: "Rehearsal Senior",
+  dob: "1990-04-12",
+  gender: "M",
+  marital_status: "Single",
+  primary_contact_number: "9876543210",
+  alternate_contact_number: "9876500000",
+  permanent_address: "1 Rehearsal Street",
+  residential_address: "1 Rehearsal Street",
 };
 
 const shapeOf = (world, id) =>
@@ -1043,7 +1057,18 @@ describe("Create with a verified Aadhaar", () => {
     assert.equal(v.duplicate, false);
 
     const res = await uc.createEmployee(
-      { ...VALID, employee_name: undefined, date_of_joining: "2026-01-05", aadhaar_verification_id: v.verification_id },
+      // The four mapped fields are left blank on purpose: this test is
+      // about the verified payload filling them. Personal Details is still
+      // satisfied, because the pre-fill runs BEFORE the mandatory check.
+      {
+        ...VALID,
+        employee_name: undefined,
+        dob: undefined,
+        gender: undefined,
+        permanent_address: undefined,
+        date_of_joining: "2026-01-05",
+        aadhaar_verification_id: v.verification_id,
+      },
       { actorEmployeeId: 7 }
     );
     assert.equal(res.code, 200);
@@ -1205,6 +1230,11 @@ describe("Create with a verified Aadhaar", () => {
   it("a later attach fills only the fields still blank", async () => {
     const { world, uc, aadhaar } = buildWithAadhaar();
     const created = await uc.createEmployee({ ...VALID, employee_name: "Name HR Typed" });
+    // A field that is blank on the stored row - as it is on a great many
+    // historical employees, which the mandatory rules deliberately do not
+    // retrospectively repair. Blanked directly rather than through create,
+    // because create is a Personal Details save and would refuse it.
+    world.employees.get(created.employee_id).dob = null;
     const v = await verified(aadhaar);
     const attached = await uc.attachAadhaar(created.employee_id, { aadhaar_verification_id: v.verification_id });
 
@@ -1286,11 +1316,8 @@ describe("checking for a possible duplicate before creating without Aadhaar", ()
   /** An existing employee, created through the real create path. */
   const existing = async (uc, fields) =>
     uc.createEmployee({
+      ...VALID,
       employee_name: "Ramesh Kumar",
-      date_of_joining: "2022-03-01",
-      store_id: 2,
-      designation_id: 3,
-      department_id: 4,
       primary_contact_number: "9876543210",
       dob: "1990-02-01",
       ...fields,
@@ -1311,8 +1338,12 @@ describe("checking for a possible duplicate before creating without Aadhaar", ()
   });
 
   it("finds a name + date of birth match", async () => {
-    const { uc } = build();
-    const them = await existing(uc, { primary_contact_number: null });
+    const { world, uc } = build();
+    // A historical row with no mobile on file. Created complete and then
+    // blanked, because create is a Personal Details save: the mandatory
+    // rules apply to saving the section, never to the rows that predate them.
+    const them = await existing(uc);
+    world.employees.get(them.employee_id).primary_contact_number = null;
     const res = await uc.findPossibleDuplicates({ employee_name: "Ramesh Kumar", dob: "01-02-1990" });
     assert.equal(res.matches[0].employee_id, them.employee_id);
     assert.equal(res.matches[0].confidence, "high");
@@ -1340,8 +1371,13 @@ describe("checking for a possible duplicate before creating without Aadhaar", ()
   });
 
   it("a weak name-only match is reported, ranked low, and blocks nothing", async () => {
-    const { uc } = build();
-    await existing(uc, { primary_contact_number: null, dob: null, employee_name: "Ramesh Sharma" });
+    const { world, uc } = build();
+    // Likewise historical: neither mobile nor date of birth on file.
+    const them = await existing(uc, { employee_name: "Ramesh Sharma" });
+    Object.assign(world.employees.get(them.employee_id), {
+      primary_contact_number: null,
+      dob: null,
+    });
     const res = await uc.findPossibleDuplicates({ employee_name: "Ramesh Kumar" });
     assert.equal(res.matches[0].confidence, "low");
     assert.equal(res.blocking, false);

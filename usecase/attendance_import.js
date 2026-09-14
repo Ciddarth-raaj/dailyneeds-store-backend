@@ -31,6 +31,7 @@ const fs = require("fs");
 const { parseWorkbook, WorkbookError } = require("../biomax/digismeImport");
 const { parseEmployeeCode } = require("../biomax/employeeMatch");
 const { deriveAttendanceDate, calendarDates, STATUS } = require("../biomax/attendanceDate");
+const { resolveWorkShiftIdForPunch } = require("../utils/shiftResolution");
 const { INGEST_SOURCE } = require("../biomax/store");
 
 const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
@@ -95,17 +96,32 @@ class AttendanceImportUsecase {
       if (!employees.has(code)) employees.set(code, await this.store.findEmployee(code));
       return employees.get(code);
     };
+    const assignments = new Map();
+    const findAssignments = async (employeeId) => {
+      if (!assignments.has(employeeId)) {
+        assignments.set(
+          employeeId,
+          this.store.findShiftAssignments ? await this.store.findShiftAssignments(employeeId) : []
+        );
+      }
+      return assignments.get(employeeId);
+    };
     const derive = async (userId, ioTimeRaw) => {
       const employee = await findEmployee(userId);
       let row = null;
-      if (employee && employee.default_work_shift_id !== null && employee.default_work_shift_id !== undefined) {
-        const shift = Number(employee.default_work_shift_id);
-        const { previousDayOfWeek } = calendarDates(ioTimeRaw);
-        const key = `${shift}:${previousDayOfWeek}`;
-        if (!schedules.has(key)) schedules.set(key, await this.store.findScheduleRow(shift, previousDayOfWeek));
+      const { calendarDate, previousDate, previousDayOfWeek } = calendarDates(ioTimeRaw);
+      // The DATED assignment history, exactly as the receiver and the engine
+      // read it - never `default_work_shift_id`. See the header of
+      // `utils/shiftResolution.js`.
+      const workShiftId = employee
+        ? resolveWorkShiftIdForPunch(await findAssignments(employee.employee_id), calendarDate, previousDate)
+        : null;
+      if (workShiftId !== null) {
+        const key = `${workShiftId}:${previousDayOfWeek}`;
+        if (!schedules.has(key)) schedules.set(key, await this.store.findScheduleRow(workShiftId, previousDayOfWeek));
         row = schedules.get(key);
       }
-      const decision = deriveAttendanceDate({ ioTimeRaw, employee, readSchedule: () => row });
+      const decision = deriveAttendanceDate({ ioTimeRaw, employee, workShiftId, readSchedule: () => row });
       return {
         employee,
         derived: {
@@ -407,6 +423,80 @@ class AttendanceImportUsecase {
       scanned: rows.length,
       rematched,
       still_unmatched: rows.length - rematched,
+      employees: [...byEmployee.values()].sort((a, b) => a.employee_id - b.employee_id),
+    };
+  }
+
+  /**
+   * RE-DERIVE the punches that could not be dated when they arrived.
+   *
+   * WHY THIS EXISTS, and why `rematchUnmatched` was not enough. A punch's
+   * `derivation_status` is written once, at ingest, from the configuration
+   * as it stood then. `rematchUnmatched` revisited exactly one of the four
+   * reasons a punch can be undatable - an unknown employee code - and left
+   * the other three alone:
+   *
+   *   NO_SHIFT          the employee had no shift when the punch arrived
+   *   NO_SCHEDULE_ROW   the shift had no row for that weekday
+   *   MISSING_CUTOFF    that row had no Attendance Day Cutoff
+   *
+   * All three are fixed by an ordinary configuration change - assign the
+   * shift, add the weekday, set the cutoff - and none of those changes went
+   * anywhere near the stored punch. Recalculate did not help either: it
+   * rewrites `attendance_calculation` and re-dates punches in memory, and
+   * never touches `biomax_punch_derived`. So the Punch Audit went on saying
+   * "No Shift" about an employee who had plainly been given one, and there
+   * was no action anywhere in the product that could clear it.
+   *
+   * Every punch is resolved again through the SAME employee lookup, the
+   * SAME dated shift history and the SAME date rule as ingest. A punch that
+   * is still undatable is left exactly as it is - re-derivation reports the
+   * cause, it does not paper over it. The raw punch is never modified.
+   *
+   * @param {{employeeIds?: number[], from?: string, to?: string}} filter
+   * @returns {{scanned, redrived, still_undated, by_status, employees}}
+   */
+  async redriveUndated(filter = {}) {
+    const rows = await this.repo.undatedPunches({
+      employee_ids: filter.employeeIds || [],
+      from: filter.from,
+      to: filter.to,
+    });
+    const resolver = this._resolver();
+    const byEmployee = new Map();
+    const byStatus = {};
+    let redrived = 0;
+
+    for (const p of rows) {
+      const r = await resolver.derive(String(p.user_id), String(p.io_time_raw));
+      // Still not datable: the cause has not been fixed yet. Reported, never
+      // guessed around.
+      if (!r.employee || r.derived.status !== STATUS.OK) {
+        byStatus[r.derived.status] = (byStatus[r.derived.status] || 0) + 1;
+        continue;
+      }
+      const ok = await this.repo.redrivePunch(p.biomax_punch_id, r.derived);
+      if (!ok) continue;
+      redrived += 1;
+      if (p.ingest_source === INGEST_SOURCE.DIGISME_IMPORT) {
+        await this.repo.rematchImportItems(p.biomax_punch_id, {
+          employee_id: r.derived.employee_id,
+          derivation_status: r.derived.status,
+          attendance_date: r.derived.attendance_date,
+          message: `re-derived to ${r.derived.attendance_date} after the cause of '${p.derivation_status}' was corrected`,
+        });
+      }
+      const k = r.derived.employee_id;
+      if (!byEmployee.has(k)) byEmployee.set(k, { employee_id: k, user_id: String(p.user_id), punches: 0 });
+      byEmployee.get(k).punches += 1;
+    }
+
+    return {
+      code: 200,
+      scanned: rows.length,
+      redrived,
+      still_undated: rows.length - redrived,
+      by_status: byStatus,
       employees: [...byEmployee.values()].sort((a, b) => a.employee_id - b.employee_id),
     };
   }

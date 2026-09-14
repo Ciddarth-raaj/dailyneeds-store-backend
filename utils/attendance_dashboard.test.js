@@ -190,6 +190,10 @@ const SHARED_ISSUE_TABLE = [
   { status: "REVIEW_REQUIRED", reasons: [], punch_count: 2, issue: null },
   // OT is a claim on a day, never a defect in it.
   { status: "OT_PENDING", reasons: [], punch_count: 2, issue: null },
+  // Exempt from biometric attendance: a settled day, and never an issue.
+  // Reporting one would be reporting the absence of a punch nobody asked
+  // this employee for.
+  { status: "ATTENDANCE_NOT_REQUIRED", reasons: [], punch_count: 0, issue: null },
 ];
 
 describe("the shared status -> issue table", () => {

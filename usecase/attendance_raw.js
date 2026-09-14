@@ -31,6 +31,23 @@ const MAX_LIST_DAYS = 92;
 const MAX_AUDIT_DAYS = 31;
 const MAX_AUDIT_LIMIT = 1000;
 
+/**
+ * The issue types the Punch Audit can be filtered to.
+ *
+ * One per warning the Attendance List raises, named for what the warning
+ * says rather than for the stored `derivation_status`, because that is what
+ * the link means to the person following it. `UNDATED` is every undatable
+ * reason at once, for a caller that wants the whole dating queue.
+ */
+const AUDIT_ISSUES = Object.freeze([
+  "NO_SHIFT",
+  "UNKNOWN_EMPLOYEE",
+  "SHIFT_SETUP",
+  "UNDATED",
+  "UNREGISTERED_DEVICE",
+  "INACTIVE_DEVICE",
+]);
+
 function validationError(message, extra) {
   const err = new Error(message);
   err.name = "ValidationError";
@@ -142,6 +159,14 @@ class AttendanceRawUsecase {
     if (review && !["needs_review", "ok"].includes(review)) {
       throw validationError("review must be needs_review or ok");
     }
+    // WHICH KIND of review record, so a warning on the Attendance List can
+    // deep-link to the punches it counted instead of to the whole queue.
+    // Rejected by name rather than ignored: a filter that silently does
+    // nothing is how a screen ends up claiming it filtered and did not.
+    const issue = optionalText(query.issue, 30);
+    if (issue && !AUDIT_ISSUES.includes(issue)) {
+      throw validationError(`issue must be one of ${AUDIT_ISSUES.join(", ")}`);
+    }
     const attendanceDate = optionalText(query.attendance_date, 10);
     if (attendanceDate && !RANGE_RE.test(attendanceDate)) {
       throw validationError("attendance_date must be YYYY-MM-DD");
@@ -153,6 +178,7 @@ class AttendanceRawUsecase {
       punch_outlet_id: optionalInt(query.punch_outlet_id, "punch_outlet_id"),
       device_status: deviceStatus,
       review,
+      issue,
       search: optionalText(query.search),
       source_ip: optionalText(query.source_ip, 45),
       employee_id: optionalInt(query.employee_id, "employee_id"),
@@ -466,3 +492,4 @@ module.exports.toDisplayDate = toDisplayDate;
 module.exports.EFFECTIVE_STATUS_LABEL = EFFECTIVE_STATUS_LABEL;
 module.exports.MAX_LIST_DAYS = MAX_LIST_DAYS;
 module.exports.MAX_AUDIT_DAYS = MAX_AUDIT_DAYS;
+module.exports.AUDIT_ISSUES = AUDIT_ISSUES;

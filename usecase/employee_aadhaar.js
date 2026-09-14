@@ -515,8 +515,25 @@ class EmployeeAadhaarUsecase {
       );
     }
 
+    // THE VERIFIED LEGAL NAME, PRESERVED SEPARATELY.
+    //
+    // It was previously only ever mapped onto `new_employee.employee_name`
+    // and then lost: editing the employee's name - which HR legitimately
+    // does, for a preferred or an operational spelling - overwrote the only
+    // record of what the Aadhaar actually said. The two are different
+    // questions, so they are now two fields:
+    //
+    //   name_as_per_aadhaar   verified legal identity, written once here
+    //   employee_name         operational / display name, freely editable
+    //
+    // Trimmed and bounded to the column, and left NULL rather than blank
+    // when the payload carried no name: NULL means "the verification did not
+    // return one", and an empty string would claim it returned nothing.
+    const verifiedName = EmployeeAadhaarUsecase.verifiedNameOf(v.demographics_json);
+
     await this.repo.createIdentity(tx, {
       employee_id: employeeId,
+      name_as_per_aadhaar: verifiedName,
       aadhaar_fingerprint: v.aadhaar_fingerprint,
       aadhaar_last4: v.aadhaar_last4,
       aadhaar_ciphertext: v.aadhaar_ciphertext,
@@ -550,8 +567,33 @@ class EmployeeAadhaarUsecase {
     return {
       aadhaar_last4: v.aadhaar_last4,
       verified_at: v.verified_at,
+      name_as_per_aadhaar: verifiedName,
       demographic_fields: EmployeeAadhaarUsecase.mapDemographics(demographics),
     };
+  }
+
+  /**
+   * The verified name a demographics payload carries, or null.
+   *
+   * Static and pure, so the rule is one line in one place and testable
+   * without a database: the JSON may arrive already parsed (the driver's
+   * JSON column) or as text (a locked row read back), and neither form may
+   * throw.
+   */
+  static verifiedNameOf(demographicsJson) {
+    let demographics = demographicsJson;
+    if (typeof demographics === "string") {
+      try {
+        demographics = JSON.parse(demographics);
+      } catch (err) {
+        return null;
+      }
+    }
+    if (!demographics || typeof demographics !== "object") return null;
+    const name = demographics.name;
+    if (name === null || name === undefined) return null;
+    const trimmed = String(name).trim();
+    return trimmed === "" ? null : trimmed.slice(0, 191);
   }
 
   /**

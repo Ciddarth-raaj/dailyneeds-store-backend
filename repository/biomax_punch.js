@@ -171,10 +171,40 @@ class BiomaxPunchRepository {
     }
     // An imported punch (no terminal) has no location to be missing; only
     // its derivation can put it in the review queue.
+    //
+    // AN EXEMPT EMPLOYEE IS NEVER IN THE REVIEW QUEUE FOR A MISSING
+    // ATTENDANCE ARTEFACT. Somebody who is not required to record biometric
+    // attendance usually has no shift, so every punch they do make derives
+    // as NO_SHIFT and would sit in this queue for ever, describing a
+    // configuration fault that is not one. `COALESCE(..., 1)` keeps an
+    // UNMATCHED punch - which has no employee at all - firmly IN the queue:
+    // an unknown Employee Code is a real gap whoever it turns out to be.
     if (f.review === "needs_review") {
-      where.push("(d.derivation_status IS NULL OR d.derivation_status <> 'OK' OR (p.dev_id IS NOT NULL AND bda.biomax_device_assignment_id IS NULL))");
+      where.push(
+        "(d.derivation_status IS NULL OR d.derivation_status <> 'OK' OR (p.dev_id IS NOT NULL AND bda.biomax_device_assignment_id IS NULL))"
+      );
+      where.push("COALESCE(e.attendance_required, 1) = 1");
     } else if (f.review === "ok") {
       where.push("d.derivation_status = 'OK' AND (p.dev_id IS NULL OR bda.biomax_device_assignment_id IS NOT NULL)");
+    }
+
+    // THE ISSUE FILTER - which KIND of review record, so a warning on the
+    // Attendance List can link straight to the punches it counted rather
+    // than to the whole queue. Each value maps to exactly the condition the
+    // corresponding banner counts, and nothing here changes how a punch's
+    // review state is decided.
+    if (f.issue) {
+      const ISSUE_SQL = {
+        NO_SHIFT: "d.derivation_status = 'NO_SHIFT'",
+        UNKNOWN_EMPLOYEE: "d.derivation_status = 'UNMATCHED'",
+        SHIFT_SETUP: "d.derivation_status IN ('NO_SCHEDULE_ROW', 'MISSING_CUTOFF')",
+        UNDATED: "(d.derivation_status IS NULL OR d.derivation_status <> 'OK')",
+        UNREGISTERED_DEVICE: "(p.dev_id IS NOT NULL AND bd.biomax_device_id IS NULL)",
+        INACTIVE_DEVICE:
+          "(p.dev_id IS NOT NULL AND bd.biomax_device_id IS NOT NULL AND bda.biomax_device_assignment_id IS NULL)",
+      };
+      const clause = ISSUE_SQL[f.issue];
+      if (clause) where.push(clause);
     }
     if (f.search) {
       where.push("(p.user_id = ? OR e.employee_name LIKE ?)");
@@ -249,12 +279,18 @@ class BiomaxPunchRepository {
           COUNT(DISTINCT p.user_id) AS subjects
         FROM biomax_punch p
         LEFT JOIN biomax_punch_derived d ON d.biomax_punch_id = p.biomax_punch_id
+        LEFT JOIN new_employee e ON e.employee_id = d.employee_id AND e.employee_id > 0
         LEFT JOIN biomax_device bd ON bd.dev_id = p.dev_id
         LEFT JOIN biomax_device_assignment bda
                ON bda.biomax_device_id = bd.biomax_device_id
               AND bda.effective_from <= p.io_time
               AND (bda.effective_to IS NULL OR p.io_time < bda.effective_to)
         WHERE p.punch_date BETWEEN ? AND ?
+          -- The banners this feeds are a to-do list, and an employee exempt
+          -- from biometric attendance has nothing on it: their punches would
+          -- otherwise be counted as "employees without an assigned shift"
+          -- for ever. An UNMATCHED punch has no employee and still counts.
+          AND COALESCE(e.attendance_required, 1) = 1
         GROUP BY derivation_status, device_status`,
       [f.from, f.to]
     );

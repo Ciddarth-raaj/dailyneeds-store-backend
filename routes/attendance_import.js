@@ -16,6 +16,7 @@ const { MAX_UPLOAD_BYTES } = require("../usecase/attendance_import");
  *   GET  /items             paginated items of one batch (by classification) manage_attendance_import
  *   POST /commit            commit a PREVIEWED batch                         manage_attendance_import
  *   POST /rematch           attach identity to punches UNMATCHED at ingest   manage_attendance_import
+ *   POST /redrive           re-derive every punch that could not be DATED    manage_attendance_import
  *                           (all of them, or one employee_id's code)
  *
  * ADMIN ONLY at this stage: the key is granted to no designation. The upload
@@ -89,6 +90,31 @@ class AttendanceImportRoutes {
         this.validate(req.body, { employee_id: Joi.number().integer().positive().optional() });
         const employeeIds = req.body && req.body.employee_id ? [Number(req.body.employee_id)] : undefined;
         res.json(await this.usecase.rematchUnmatched({ employeeIds }));
+      } catch (err) {
+        this.fail(res, err);
+      }
+    });
+
+    /**
+     * Re-derive punches that could not be DATED at ingest - the four
+     * undatable statuses, not just an unknown Employee Code. `/rematch`
+     * above stays exactly as it was for callers that want only UNMATCHED.
+     */
+    r.post("/redrive", P_.require(P.MANAGE_ATTENDANCE_IMPORT), async (req, res) => {
+      try {
+        this.validate(req.body, {
+          employee_id: Joi.number().integer().positive().optional(),
+          from: Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+          to: Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+        });
+        const body = req.body || {};
+        res.json(
+          await this.usecase.redriveUndated({
+            employeeIds: body.employee_id ? [Number(body.employee_id)] : undefined,
+            from: body.from,
+            to: body.to,
+          })
+        );
       } catch (err) {
         this.fail(res, err);
       }

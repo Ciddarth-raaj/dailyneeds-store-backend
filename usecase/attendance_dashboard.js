@@ -122,6 +122,35 @@ function breakOverrideMinutes(row) {
   return Number.isFinite(n) && n >= 0 ? Math.trunc(n) : null;
 }
 
+/**
+ * Whether biometric attendance is expected of this employee. Same rule as A1
+ * (`usecase/attendance_calculation.js#attendanceRequired`): absent or NULL is
+ * TRUE, because "not selected" must never silently exempt anybody.
+ */
+function attendanceRequired(row) {
+  if (!row) return true;
+  const v = row.attendance_required;
+  if (v === undefined || v === null) return true;
+  return Number(v) === 1 || v === true;
+}
+
+/**
+ * The employees this dashboard is ABOUT, and the count it left out.
+ *
+ * An employee exempt from biometric attendance is not part of the attendance
+ * population at all. They are active and paid; they are simply not expected
+ * to punch, so counting them would make the denominator of every presence
+ * percentage wrong and would put them permanently in Unresolved and in the
+ * Need Action counts for the absence of a punch nobody asked them for. The
+ * count is returned rather than discarded, so "12 of 340 employees are exempt"
+ * is visible on the screen instead of 12 people quietly disappearing.
+ */
+function applicablePopulation(employees) {
+  const rows = employees || [];
+  const included = rows.filter((e) => attendanceRequired(e));
+  return { employees: included, attendance_exempt_employees: rows.length - included.length };
+}
+
 /** `biomax_punch.ingest_source` -> the engine's source. Same map as A1. */
 const rawSource = (ingestSource) =>
   ingestSource === "DIGISME_IMPORT" || ingestSource === "IMPORT"
@@ -445,6 +474,10 @@ module.exports = (attendanceDashboardRepo) => {
         break_override_minutes: breakOverrideMinutes(employee),
         approved_ot_minutes: approvedOt,
         regularization_pending: stillOpen,
+        // An exempt employee's day is ATTENDANCE_NOT_REQUIRED: no issue, no
+        // review reason, and in particular no "No Shift Assigned" for want
+        // of a roster they were never meant to have.
+        attendance_required: attendanceRequired(employee),
       });
 
       return {
@@ -612,12 +645,14 @@ module.exports = (attendanceDashboardRepo) => {
       return { date, rows: [], employees: [], delivery: new Map(), delivery_available: true };
     }
 
-    const employees = await attendanceDashboardRepo.listApplicableEmployees({
-      attendance_date: date,
-      store_ids,
-      designation_id,
-      search,
-    });
+    const { employees, attendance_exempt_employees } = applicablePopulation(
+      await attendanceDashboardRepo.listApplicableEmployees({
+        attendance_date: date,
+        store_ids,
+        designation_id,
+        search,
+      })
+    );
 
     if ((employees || []).length > MAX_POPULATION) {
       throw validationError(
@@ -625,7 +660,14 @@ module.exports = (attendanceDashboardRepo) => {
       );
     }
     if (!employees || employees.length === 0) {
-      return { date, rows: [], employees: [], delivery: new Map(), delivery_available: true };
+      return {
+        date,
+        rows: [],
+        employees: [],
+        attendance_exempt_employees,
+        delivery: new Map(),
+        delivery_available: true,
+      };
     }
 
     const batch = await loadBatch({ employees, from: date, to: date });
@@ -726,6 +768,7 @@ module.exports = (attendanceDashboardRepo) => {
       date,
       rows,
       employees,
+      attendance_exempt_employees,
       delivery: deliveryByOutlet,
       delivery_available: loaded.available,
     };
@@ -1003,14 +1046,15 @@ module.exports = (attendanceDashboardRepo) => {
     search = null,
     now = Date.now(),
   }) => {
-    const { date, rows, delivery, delivery_available } = await buildPopulation({
-      attendance_date,
-      store_ids,
-      designation_id,
-      work_shift_id,
-      search,
-      now,
-    });
+    const { date, rows, delivery, delivery_available, attendance_exempt_employees } =
+      await buildPopulation({
+        attendance_date,
+        store_ids,
+        designation_id,
+        work_shift_id,
+        search,
+        now,
+      });
 
     const nowParts = istNowParts(now);
     // The date is a completed day only when EVERY applicable employee's own
@@ -1039,6 +1083,13 @@ module.exports = (attendanceDashboardRepo) => {
       })),
       delivery_available,
       delivery_confirmed: false,
+      // Employees in scope who are EXEMPT from biometric attendance and are
+      // therefore not part of any count above. Named rather than silently
+      // dropped: a headcount that shrank for an invisible reason is worse
+      // than one that says why.
+      attendance_exempt_employees,
+      attendance_exempt_note:
+        "Employees marked Attendance Required = No are active and payroll-eligible but are not expected to punch, so they are excluded from these counts rather than reported as unresolved.",
       cards: buildCards(rows),
       overview: buildOverviewPanel(rows),
       by_location: buildLocationPanel(rows),
@@ -1047,7 +1098,8 @@ module.exports = (attendanceDashboardRepo) => {
       metric_definitions: {
         check_in_rate: CHECK_IN_RATE_DEFINITION,
         applicable:
-          "Employed on the attendance date: joined on or before it and not resigned before it. " +
+          "Employed on the attendance date: joined on or before it and not resigned before it, " +
+          "and required to record biometric attendance. " +
           "new_employee.status is deliberately not read - it is hand-maintained and stale for most leavers.",
         checked_in:
           "At least one valid effective punch dated to the attendance day, after voided and " +
@@ -1236,13 +1288,15 @@ module.exports = (attendanceDashboardRepo) => {
     // decide each day. `search` is honoured here as an ordinary filter - the
     // first version dropped it, so the chart quietly described a different
     // population from the cards above it.
-    const candidates = await attendanceDashboardRepo.listApplicableEmployeesForRange({
-      from_date: probeFrom,
-      to_date: selected,
-      store_ids,
-      designation_id,
-      search,
-    });
+    const { employees: candidates } = applicablePopulation(
+      await attendanceDashboardRepo.listApplicableEmployeesForRange({
+        from_date: probeFrom,
+        to_date: selected,
+        store_ids,
+        designation_id,
+        search,
+      })
+    );
     if (!candidates || candidates.length === 0) return emptyResult("NO_POPULATION");
     if (candidates.length > MAX_POPULATION) {
       throw validationError(

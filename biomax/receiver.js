@@ -65,7 +65,14 @@ const path = require("path");
 
 const protocol = require("./protocol");
 const { parseEmployeeCode } = require("./employeeMatch");
-const { deriveAttendanceDate, STATUS } = require("./attendanceDate");
+const { deriveAttendanceDate, calendarDates, STATUS } = require("./attendanceDate");
+const { resolveWorkShiftIdForPunch } = require("../utils/shiftResolution");
+
+/** `[calendarDate, previousDate]` for a raw io_time, for the shift resolver. */
+const punchDates = (ioTimeRaw) => {
+  const { calendarDate, previousDate } = calendarDates(ioTimeRaw);
+  return [calendarDate, previousDate];
+};
 const { createFloodGuard } = require("./flood");
 const { createLog } = require("./log");
 const { createSpool } = require("./spool");
@@ -231,14 +238,26 @@ function createReceiver({ store, log, spool, flood, config } = {}) {
       const code = parseEmployeeCode(parsed.punch.user_id);
       employee = code === null ? null : await store.findEmployee(code);
 
+      // WHICH SHIFT, from the DATED assignment history - the same rows the
+      // attendance engine, the dashboard and payroll resolve a date
+      // against. Reading `default_work_shift_id` here is what let the Punch
+      // Audit and the Attendance Dashboard disagree about the same
+      // employee, permanently: a punch's derivation status is written once,
+      // here, and nothing revisited it.
+      const workShiftId = employee
+        ? resolveWorkShiftIdForPunch(
+            await store.findShiftAssignments(employee.employee_id),
+            ...punchDates(parsed.punch.io_time_raw)
+          )
+        : null;
+
       const scheduleRow =
-        employee && employee.default_work_shift_id !== null && employee.default_work_shift_id !== undefined
-          ? await prefetchSchedule(employee.default_work_shift_id, parsed.punch.io_time_raw)
-          : null;
+        workShiftId === null ? null : await prefetchSchedule(workShiftId, parsed.punch.io_time_raw);
 
       const decision = deriveAttendanceDate({
         ioTimeRaw: parsed.punch.io_time_raw,
         employee,
+        workShiftId,
         readSchedule: () => scheduleRow,
       });
       derived = {
@@ -319,7 +338,6 @@ function createReceiver({ store, log, spool, flood, config } = {}) {
    * cache and handed to the pure rule as a synchronous reader.
    */
   async function prefetchSchedule(workShiftId, ioTimeRaw) {
-    const { calendarDates } = require("./attendanceDate");
     const { previousDayOfWeek } = calendarDates(ioTimeRaw);
     return store.findScheduleRow(Number(workShiftId), previousDayOfWeek);
   }

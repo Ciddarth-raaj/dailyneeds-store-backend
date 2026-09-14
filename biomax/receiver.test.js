@@ -29,6 +29,11 @@ function makeStore() {
   const state = {
     devices: new Map([["C2695C56D30E1430", { biomax_device_id: 6, first_seen_at: null }]]),
     employees: new Map([[1952, { employee_id: 1952, store_id: 2, department_id: 4, default_work_shift_id: 7 }]]),
+    // The DATED assignment history is what dating reads now, not
+    // `default_work_shift_id`; 1952 has been on shift 7 since the v2 cutover.
+    assignments: new Map([
+      [1952, [{ employee_work_shift_assignment_id: 1, work_shift_id: 7, effective_from: "2026-09-01" }]],
+    ]),
     // shift 7: every day working, cutoff 04:00
     schedule: new Map([0, 1, 2, 3, 4, 5, 6].map((d) => [`7:${d}`, { work_shift_weekly_schedule_id: 700 + d, is_working_day: 1, attendance_day_cutoff: "04:00:00" }])),
     punches: new Map(), // key -> {punch, derived, retransmits}
@@ -50,6 +55,10 @@ function makeStore() {
     async findEmployee(id) {
       calls.push(["findEmployee", id]);
       return state.employees.get(id) || null;
+    },
+    async findShiftAssignments(employeeId) {
+      calls.push(["findShiftAssignments", employeeId]);
+      return state.assignments.get(employeeId) || [];
     },
     async findScheduleRow(shift, dow) {
       calls.push(["findScheduleRow", shift, dow]);
@@ -376,6 +385,8 @@ describe("receiver", () => {
     });
 
     it("no assigned shift: NO_SHIFT, dated null", async () => {
+      // No history row at all. A `default_work_shift_id` would NOT rescue
+      // this - dating reads the dated history and nothing else.
       store.state.employees.set(77, { employee_id: 77, store_id: 3, department_id: 1, default_work_shift_id: null });
       await send(port, punchFrame({ user_id: "77" }));
       const [p] = [...store.state.punches.values()];

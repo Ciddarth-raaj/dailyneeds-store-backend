@@ -545,12 +545,17 @@ class Server {
     this.attendanceImportUsecase = require("./usecase/attendance_import")(this.attendanceImportRepo, this.biomaxImportStore);
     // A punch stored under an Employee Code nobody knew yet (device or
     // DigiSME import) is UNMATCHED and counts for nobody. Once HR creates
-    // that employee, re-match their punches automatically.
+    // that employee, re-derive their punches automatically.
+    // A punch that could not be DATED - unknown code, no shift, no schedule
+    // row, no cutoff - is revisited whenever the cause may have been fixed.
     this.employeeMasterUsecase.onEmployeeCreated = (employeeId) =>
-      this.attendanceImportUsecase.rematchUnmatched({ employeeIds: [employeeId] });
+      this.attendanceImportUsecase.redriveUndated({ employeeIds: [employeeId] });
     this.employeeWorkShiftUsecase = require("./usecase/employee_work_shift")(
       this.employeeWorkShiftRepo
     );
+    // Assigning a shift is the moment a NO_SHIFT punch becomes datable, so
+    // the assignment re-derives that employee's undatable punches.
+    this.employeeWorkShiftUsecase.setPunchRedriveService(this.attendanceImportUsecase);
     // M2: the salary engine's lifecycle. The arithmetic itself is in
     // `utils/salary_engine.js` and is pure, so this holds only the rules about
     // when a salary may be created, amended, approved or rejected.
@@ -597,6 +602,13 @@ class Server {
     // argument would be a cycle.
     this.attendanceCalculationUsecase.setOtRequestService(
       this.attendanceRegularizationUsecase
+    );
+    // Recalculate also re-derives the range's undatable punches, so the
+    // Punch Audit stops reporting "No Shift" for an employee whose shift was
+    // assigned after their punches arrived. Injected rather than required for
+    // the same cycle reason as the OT service above.
+    this.attendanceCalculationUsecase.setPunchRedriveService(
+      this.attendanceImportUsecase
     );
     // Void Punch. Handed the calculation usecase for the date the punch
     // belongs to and for the recalculation afterwards, and the

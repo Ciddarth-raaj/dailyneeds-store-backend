@@ -165,11 +165,52 @@ class EmployeeMasterRepository {
     return res.insertId;
   }
 
+  /**
+   * Append one dated row to the A0 shift-assignment history.
+   *
+   * WHY ADD EMPLOYEE NEEDS THIS. `new_employee.default_work_shift_id` is
+   * current state and is what the Shift Assignment screen reads; the
+   * attendance engine, the dashboard and payroll resolve a DATE against
+   * `employee_work_shift_assignment` instead, and refuse to fall back to the
+   * live column (see `utils/shiftResolution.js`). Writing one without the
+   * other is therefore an employee who looks assigned on one screen and
+   * resolves to NO_SHIFT_FOR_DATE on every other - which is exactly what
+   * Add Employee did until now, for every employee created after A0 ran.
+   *
+   * INSERT, never UPDATE, like every other row in that table: history is
+   * appended so that what payroll believed on the day it ran survives a
+   * later correction.
+   */
+  async appendShiftAssignment(tx, { employee_id, work_shift_id, effective_from, source, note, created_by }) {
+    const res = await tx.query(
+      `INSERT INTO employee_work_shift_assignment
+         (employee_id, work_shift_id, effective_from, source, note, created_by)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        employee_id,
+        work_shift_id,
+        effective_from,
+        source,
+        note === undefined ? null : note,
+        created_by === undefined ? null : created_by,
+      ]
+    );
+    return res.insertId;
+  }
+
   /** Locks the master row, so two HR actions on one employee serialise. */
   async lockEmployee(tx, employeeId) {
     const rows = await tx.query(
+      // The Personal Details columns are selected too, because the mandatory
+      // rules are judged on the row the save will PRODUCE - what is stored
+      // now with the patch applied - so that saving one field does not
+      // require the other nine to be resent. They are read under the same
+      // lock as everything else; no new query and no second round trip.
       `SELECT employee_id, employee_name, status, resignation_date, date_of_joining,
-              store_id, designation_id, department_id, shift_id
+              store_id, designation_id, department_id, shift_id,
+              father_name, dob, gender, blood_group, marital_status, marriage_date,
+              spouse_name, primary_contact_number, alternate_contact_number, email_id,
+              permanent_address, residential_address
          FROM new_employee WHERE employee_id = ? FOR UPDATE`,
       [employeeId]
     );
@@ -311,6 +352,44 @@ class EmployeeMasterRepository {
       [employeeId]
     );
     return rows && rows[0] ? rows[0] : null;
+  }
+
+  /* ------------------------------------------------ attendance required -- */
+
+  /**
+   * Whether biometric attendance is expected of this employee.
+   *
+   * DELIBERATELY NOT ON `EDITABLE_FIELDS`. That allowlist is what the
+   * `employee_edit` route may write, and `employee_edit` is HR's key; this
+   * switch is administrators only. Keeping it off the list means the generic
+   * edit path refuses it by name ("not an editable employee field") without
+   * any extra check, and the only way in is the dedicated action below.
+   */
+  async getAttendanceRequired(employeeId) {
+    const rows = await this._read(
+      "GET-ATTENDANCE-REQUIRED",
+      `SELECT employee_id, employee_name, attendance_required
+         FROM new_employee WHERE employee_id = ?`,
+      [employeeId]
+    );
+    if (!rows || !rows[0]) return null;
+    return {
+      employee_id: Number(rows[0].employee_id),
+      employee_name: rows[0].employee_name,
+      attendance_required: Number(rows[0].attendance_required) === 1,
+    };
+  }
+
+  /**
+   * Set it. `changedRows` distinguishes a real change from setting it to
+   * what it already was, which is a legitimate no-op and not an error.
+   */
+  async setAttendanceRequired(tx, employeeId, required) {
+    const res = await tx.query(
+      "UPDATE new_employee SET attendance_required = ? WHERE employee_id = ?",
+      [required ? 1 : 0, employeeId]
+    );
+    return { matched: Number(res.affectedRows || 0), changed: Number(res.changedRows || 0) };
   }
 
   /**

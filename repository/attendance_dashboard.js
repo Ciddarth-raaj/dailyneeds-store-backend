@@ -151,6 +151,7 @@ class AttendanceDashboardRepository {
       "LIST-APPLICABLE-EMPLOYEES",
       `SELECT ne.employee_id, ne.employee_name, ne.store_id, ne.designation_id,
               ne.special_break_override_minutes,
+              ne.attendance_required,
               o.outlet_name, o.outlet_nickname,
               d.designation_name,
               DATE_FORMAT(ne.resignation_date, '%Y-%m-%d') AS resignation_date
@@ -229,6 +230,7 @@ class AttendanceDashboardRepository {
       "LIST-APPLICABLE-EMPLOYEES-FOR-RANGE",
       `SELECT ne.employee_id, ne.employee_name, ne.store_id, ne.designation_id,
               ne.special_break_override_minutes,
+              ne.attendance_required,
               o.outlet_name, o.outlet_nickname,
               d.designation_name,
               DATE_FORMAT((${JOINED_ON("ne")}), '%Y-%m-%d')      AS joined_on,

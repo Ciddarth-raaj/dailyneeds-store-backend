@@ -152,6 +152,33 @@ function describeTiming(timings) {
 class EmployeeWorkShiftUsecase {
   constructor(employeeWorkShiftRepo) {
     this.repo = employeeWorkShiftRepo;
+    /**
+     * Punch RE-DERIVATION, set by `server.js` after both exist.
+     *
+     * Assigning a shift is the moment a NO_SHIFT punch becomes datable.
+     * Without this, the punch keeps its ingest-time status for ever: the
+     * Punch Audit goes on reporting "No Shift" for somebody who plainly has
+     * one, and Recalculate - which only rewrites `attendance_calculation` -
+     * cannot clear it either. Optional; a caller that wires nothing simply
+     * assigns, exactly as before.
+     */
+    this.punchRedriveService = null;
+  }
+
+  setPunchRedriveService(service) {
+    this.punchRedriveService = service || null;
+  }
+
+  /** Never let re-derivation fail an assignment that has already committed. */
+  async _redrive(employeeIds) {
+    if (!this.punchRedriveService || typeof this.punchRedriveService.redriveUndated !== "function") {
+      return null;
+    }
+    try {
+      return await this.punchRedriveService.redriveUndated({ employeeIds });
+    } catch (err) {
+      return { error: err && err.message ? err.message : String(err) };
+    }
   }
 
   /**
@@ -367,10 +394,15 @@ class EmployeeWorkShiftUsecase {
     });
     if (!result || result.code !== 200) return result;
 
+    // The punches these employees already have that could not be dated for
+    // want of a shift are datable now.
+    const punchRedrive = await this._redrive(employeeIds);
+
     return {
       ...result,
       shift_code: shift.shift_code,
       shift_name: shift.shift_name,
+      punch_redrive: punchRedrive,
     };
   }
 
@@ -458,11 +490,14 @@ class EmployeeWorkShiftUsecase {
       createdBy: payload.actor_employee_id === undefined ? null : payload.actor_employee_id,
     });
 
+    const punchRedrive = await this._redrive([employeeId]);
+
     return {
       ...result,
       shift_code: shift.shift_code,
       shift_name: shift.shift_name,
       note,
+      punch_redrive: punchRedrive,
       recalculation_required: true,
       msg: "Correction recorded. Attendance for the affected dates is NOT recalculated automatically - run a recalculation for the range when you are ready.",
     };

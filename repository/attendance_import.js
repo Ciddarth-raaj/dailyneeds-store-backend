@@ -298,6 +298,86 @@ class AttendanceImportRepository {
   }
 
   /**
+   * Every stored punch that could not be DATED at ingest, for re-derivation.
+   *
+   * The four undatable statuses, not just UNMATCHED. `derivation_status` is
+   * stamped once, when the punch arrives, from the configuration as it was
+   * then - so a punch that arrived before the employee had a shift, or
+   * before the shift had a schedule row or an Attendance Day Cutoff, keeps
+   * saying so for ever even after HR fixes the cause. Recalculate rewrote
+   * `attendance_calculation` and never these rows, which is why the Punch
+   * Audit went on reporting "No Shift" for an employee who plainly had one.
+   *
+   * Bounded by employee and by calendar date so a recalculation re-derives
+   * its own range rather than the whole table.
+   *
+   * @param {object} f {employee_ids?: number[], from?, to?, limit?}
+   */
+  undatedPunches(f = {}) {
+    const where = ["d.derivation_status IN ('UNMATCHED', 'NO_SHIFT', 'NO_SCHEDULE_ROW', 'MISSING_CUTOFF')"];
+    const params = [];
+    const ids = (f.employee_ids || []).map(Number).filter((n) => Number.isSafeInteger(n) && n > 0);
+    if (ids.length) {
+      // d.employee_id is NULL on an UNMATCHED punch, so the code on the raw
+      // row is matched too - that is the only handle an unmatched punch has.
+      where.push("(d.employee_id IN (?) OR p.user_id IN (?))");
+      params.push(ids, ids.map(String));
+    }
+    if (f.from) {
+      where.push("p.punch_date >= ?");
+      params.push(f.from);
+    }
+    if (f.to) {
+      where.push("p.punch_date <= ?");
+      params.push(f.to);
+    }
+    const limit = Math.min(Math.max(Number(f.limit) || 50000, 1), 200000);
+    return this._q(
+      "UNDATED-PUNCHES",
+      `SELECT p.biomax_punch_id, p.user_id, p.io_time_raw, p.ingest_source, p.import_batch_id,
+              d.derivation_status
+         FROM biomax_punch_derived d
+         JOIN biomax_punch p ON p.biomax_punch_id = d.biomax_punch_id
+        WHERE ${where.join(" AND ")}
+        ORDER BY p.biomax_punch_id
+        LIMIT ${limit}`,
+      params
+    );
+  }
+
+  /**
+   * Re-derive one punch that could not be dated at ingest.
+   *
+   * Guarded on the row still being undatable, so a punch that has since been
+   * dated by another path is never re-decided - the same protection
+   * `rematchPunch` gives, widened to the same four statuses.
+   * @returns {boolean} whether the row was still undatable and got updated
+   */
+  async redrivePunch(punchId, derived) {
+    const r = await this._q(
+      "REDRIVE-PUNCH",
+      `UPDATE biomax_punch_derived
+          SET employee_id = ?, home_outlet_id = ?, department_id = ?,
+              work_shift_id = ?, work_shift_weekly_schedule_id = ?, cutoff_applied = ?,
+              attendance_date = ?, derivation_status = ?, derived_at = NOW(3)
+        WHERE biomax_punch_id = ?
+          AND derivation_status IN ('UNMATCHED', 'NO_SHIFT', 'NO_SCHEDULE_ROW', 'MISSING_CUTOFF')`,
+      [
+        derived.employee_id,
+        derived.home_outlet_id,
+        derived.department_id,
+        derived.work_shift_id,
+        derived.work_shift_weekly_schedule_id,
+        derived.cutoff_applied,
+        derived.attendance_date,
+        derived.status,
+        punchId,
+      ]
+    );
+    return Boolean(r && r.affectedRows);
+  }
+
+  /**
    * Attach the identity (and the attendance date that follows from it) to a
    * punch that was UNMATCHED at ingest. The raw punch row is never touched;
    * only the derived row moves, and only while it is still UNMATCHED, so a

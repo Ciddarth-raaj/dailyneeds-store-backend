@@ -30,6 +30,13 @@ function fakeStore() {
     [1641, { employee_id: 1641, store_id: 3, department_id: 4, default_work_shift_id: null }], // NO_SHIFT
     [1420, { employee_id: 1420, store_id: 3, department_id: 5, default_work_shift_id: 9 }], // shift 9: working, no cutoff
   ]);
+  // The DATED assignment history is what dating reads now. Each employee's
+  // history mirrors the `default_work_shift_id` above, effective from the v2
+  // cutover; 1641 has no row at all, which is what NO_SHIFT means.
+  const assignments = new Map([
+    [1952, [{ employee_work_shift_assignment_id: 1, work_shift_id: 7, effective_from: "2026-09-01" }]],
+    [1420, [{ employee_work_shift_assignment_id: 2, work_shift_id: 9, effective_from: "2026-09-01" }]],
+  ]);
   const schedule = (shift, dow) => {
     if (shift === 7) return { work_shift_weekly_schedule_id: 700 + dow, is_working_day: 1, attendance_day_cutoff: "04:00:00" };
     if (shift === 9) return { work_shift_weekly_schedule_id: 900 + dow, is_working_day: 1, attendance_day_cutoff: null };
@@ -39,11 +46,15 @@ function fakeStore() {
   const store = {
     punches,
     employees,
+    assignments,
     calls: { findEmployee: 0, findScheduleRow: 0, insertPunch: 0 },
     failOn: null, // io_time_raw that throws a generic error on insert
     async findEmployee(id) {
       store.calls.findEmployee += 1;
       return employees.get(id) || null;
+    },
+    async findShiftAssignments(employeeId) {
+      return assignments.get(employeeId) || [];
     },
     async findScheduleRow(shift, dow) {
       store.calls.findScheduleRow += 1;
@@ -490,8 +501,10 @@ describe("re-match", () => {
     assert.equal(r.still_unmatched, 3);
     assert.deepEqual(store.punches, before);
 
-    // HR creates employee 9999 on shift 7 (04:00 cutoff)
+    // HR creates employee 9999 on shift 7 (04:00 cutoff), which appends the
+    // dated history row Add Employee now writes alongside the live column.
     store.employees.set(9999, { employee_id: 9999, store_id: 1, department_id: 2, default_work_shift_id: 7 });
+    store.assignments.set(9999, [{ employee_work_shift_assignment_id: 9, work_shift_id: 7, effective_from: "2026-09-01" }]);
     r = await uc.rematchUnmatched({ employeeIds: [9999] });
     assert.equal(r.scanned, 3);
     assert.equal(r.rematched, 3, "both import punches and the live punch");
@@ -526,6 +539,7 @@ describe("re-match", () => {
     await store.insertPunch({ dev_id: "DEV1", user_id: "8888", io_time_raw: "20260911180500" }, { attendance_date: null, status: "UNMATCHED", employee_id: null }, { source: "LIVE" });
     await store.insertPunch({ dev_id: "DEV1", user_id: "A12", io_time_raw: "20260911181000" }, { attendance_date: null, status: "UNMATCHED", employee_id: null }, { source: "LIVE" });
     store.employees.set(9999, { employee_id: 9999, store_id: 1, department_id: 2, default_work_shift_id: 7 });
+    store.assignments.set(9999, [{ employee_work_shift_assignment_id: 9, work_shift_id: 7, effective_from: "2026-09-01" }]);
     store.employees.set(8888, { employee_id: 8888, store_id: 1, department_id: 2, default_work_shift_id: null });
     let r = await uc.rematchUnmatched({ employeeIds: [9999] });
     assert.equal(r.rematched, 1);

@@ -7,6 +7,8 @@ const {
   rankCandidates,
 } = require("../utils/duplicate_person");
 
+const { effectiveFromNotBeforeCutover } = require("../constants/attendance_v2");
+const personalDetails = require("../utils/personal_details");
 const { EDITABLE_FIELDS, SECURITY_RELEVANT_FIELDS, LIFECYCLE_CONTROLLED_FIELDS, STATUS } = masterRepo;
 
 /**
@@ -234,7 +236,40 @@ class EmployeeMasterUsecase {
         }
       }
 
+      // PERSONAL DETAILS ARE MANDATORY WHEN THE SECTION IS CREATED, and
+      // this is that moment - Add Employee's Personal stage is collected
+      // here. Checked AFTER the Aadhaar pre-fill above, because a name, a
+      // date of birth or an address the verification supplied is filled in
+      // as far as this rule is concerned; checking first would demand that
+      // HR retype what the Aadhaar already said.
+      const missing = personalDetails.missingPersonalDetails(fields);
+      if (missing.length) {
+        throw new ValidationError(personalDetails.missingMessage(missing));
+      }
+
       const employeeId = await this.repo.createEmployee(tx, fields);
+
+      // A0 HISTORY, IN THE SAME TRANSACTION. Writing `default_work_shift_id`
+      // without appending the dated row leaves an employee who reads as
+      // ASSIGNED on the Shift Assignment screen and resolves to
+      // NO_SHIFT_FOR_DATE on every date in the Attendance Dashboard, in the
+      // punch audit and in payroll - because those resolve a date against
+      // the history and deliberately do not fall back to the live column.
+      //
+      // The row is dated to the joining date, or to the v2 cutover when the
+      // employee joined before v2 existed: no history is invented earlier
+      // than the cutover, and a cutover-dated row for an October joiner
+      // would assert they were on this shift in September.
+      if (fields.default_work_shift_id !== undefined && fields.default_work_shift_id !== null) {
+        await this.repo.appendShiftAssignment(tx, {
+          employee_id: employeeId,
+          work_shift_id: Number(fields.default_work_shift_id),
+          effective_from: effectiveFromNotBeforeCutover(joinedOn),
+          source: "ASSIGNMENT",
+          note: "Initial work shift chosen on Add Employee",
+          created_by: actorEmployeeId,
+        });
+      }
 
       // The Aadhaar identity is written INSIDE this transaction, so an
       // employee cannot exist with a half-attached identity, and a duplicate
@@ -292,6 +327,65 @@ class EmployeeMasterUsecase {
         .catch((err) => this._log(logger.LEVEL.ERROR, "AFTER-CREATE", `after-create hook failed for employee ${created.employee_id}: ${err && err.message}`, { employeeId: created.employee_id }));
     }
     return created;
+  }
+
+  /* ==================================================================== */
+  /*  attendance required                                                 */
+  /* ==================================================================== */
+  /**
+   * Whether biometric attendance is expected of this employee.
+   *
+   * WHAT `false` MEANS, AND WHAT IT DOES NOT. An exempt employee is ACTIVE,
+   * payroll-eligible and paid. The only thing that changes is that the
+   * absence of a biometric punch stops being evidence of anything: no shift
+   * is required for attendance purposes, no missing-punch exception is
+   * raised, no missing-minute deduction is taken, and they do not appear in
+   * the review queue or the attention counts for want of a punch. It is not
+   * a resignation, not an inactive status and not a salary stop, and nothing
+   * in this method touches `status`, `resignation_date` or any salary row.
+   *
+   * ADMINISTRATORS ONLY, and the check is on the route
+   * (`middlewares/admin_only.js`) rather than in a permission key, because a
+   * key is grantable and the requirement is that HR and Store Managers
+   * cannot hold it. This usecase is not reachable from any other path: the
+   * field is off `EDITABLE_FIELDS`, so the generic edit refuses it by name,
+   * and the legacy `/employee/updatedata` schema does not list it either.
+   */
+  async getAttendanceRequired(employeeId) {
+    const id = Number(employeeId);
+    if (!Number.isInteger(id) || id <= 0) throw new ValidationError("employee_id must be a positive integer");
+    const row = await this.repo.getAttendanceRequired(id);
+    if (!row) throw new NotFoundError(`employee ${id} does not exist`);
+    return { code: 200, ...row };
+  }
+
+  async setAttendanceRequired(employeeId, required, { actorEmployeeId = null } = {}) {
+    const id = Number(employeeId);
+    if (!Number.isInteger(id) || id <= 0) throw new ValidationError("employee_id must be a positive integer");
+    if (typeof required !== "boolean") {
+      throw new ValidationError("attendance_required must be true or false");
+    }
+
+    return this.repo.withTransaction(async (tx) => {
+      const before = await this.repo.lockEmployee(tx, id);
+      if (!before) throw new NotFoundError(`employee ${id} does not exist`);
+
+      const result = await this.repo.setAttendanceRequired(tx, id, required);
+
+      this._log(
+        logger.LEVEL.INFO,
+        "ATTENDANCE-REQUIRED",
+        `employee ${id}: attendance_required set to ${required ? 1 : 0}`,
+        { employeeId: id, actorEmployeeId, attendance_required: required }
+      );
+
+      return {
+        code: 200,
+        employee_id: id,
+        attendance_required: required,
+        changed: result.changed > 0,
+      };
+    });
   }
 
   /* ==================================================================== */
@@ -356,6 +450,23 @@ class EmployeeMasterUsecase {
     return this.repo.withTransaction(async (tx) => {
       const before = await this.repo.lockEmployee(tx, employeeId);
       if (!before) throw new NotFoundError(`employee ${employeeId} does not exist`);
+
+      // PERSONAL DETAILS ARE MANDATORY WHEN THE SECTION IS SAVED - and only
+      // then. A patch that names none of those fields (an Employment edit,
+      // the onboarding Education step) is not a Personal Details save and is
+      // not judged as one, which is what keeps a 2013 employee with no date
+      // of birth on file editable everywhere else. The check is on the
+      // MERGED row rather than on the patch, so saving one field does not
+      // require the other nine to be resent - and so clearing a mandatory
+      // field is refused rather than silently ignored.
+      if (personalDetails.isPersonalDetailsWrite(patch)) {
+        const missing = personalDetails.missingPersonalDetails(
+          personalDetails.mergeForValidation(before, patch)
+        );
+        if (missing.length) {
+          throw new ValidationError(personalDetails.missingMessage(missing));
+        }
+      }
 
       const securityRelevant = offered.filter(
         (k) => SECURITY_RELEVANT_FIELDS.includes(k) && String(patch[k]) !== String(before[k])

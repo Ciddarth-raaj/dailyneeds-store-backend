@@ -3,6 +3,7 @@ const Joi = require("@hapi/joi");
 const P = require("../constants/hr_permissions");
 const { EDITABLE_FIELDS } = require("../repository/employee_master");
 const { getClientIp } = require("../utils/ip");
+const { requireAdmin } = require("../middlewares/admin_only");
 
 const router = express.Router();
 
@@ -195,6 +196,60 @@ class EmployeeMasterRoutes {
       }
       res.end();
     });
+
+    /* ---------------------------------------------- attendance required */
+    /**
+     * Read is an ordinary employee-master read: anybody who may see the
+     * profile may see whether the employee is exempt.
+     */
+    router.get(
+      "/employee/:employee_id/attendance-required",
+      this.permissions.require(P.VIEW_EMPLOYEES),
+      async (req, res) => {
+        try {
+          res.json(await this.usecase.getAttendanceRequired(req.params.employee_id));
+        } catch (err) {
+          this._fail(res, err);
+        }
+        res.end();
+      }
+    );
+
+    /**
+     * WRITE IS ADMINISTRATORS ONLY, enforced here and not merely hidden in
+     * the web app. `requireAdmin` checks `user_type = 2` directly rather
+     * than a permission key, because a key can be granted to a designation
+     * and the requirement is that HR and Store Managers cannot change this.
+     *
+     * There is no other way in. The column is absent from `EDITABLE_FIELDS`,
+     * so `POST /employee/:id/edit` answers "not an editable employee field";
+     * and the legacy `/employee/updatedata` schema does not list it, so that
+     * route 422s a body that names it.
+     */
+    router.post(
+      "/employee/:employee_id/attendance-required",
+      requireAdmin,
+      async (req, res) => {
+        try {
+          const isValid = Joi.validate(
+            req.body,
+            Joi.object().keys({ attendance_required: Joi.boolean().required() }).unknown(false)
+          );
+          if (isValid.error !== null) throw isValid.error;
+
+          res.json(
+            await this.usecase.setAttendanceRequired(
+              req.params.employee_id,
+              req.body.attendance_required === true || req.body.attendance_required === "true",
+              { actorEmployeeId: this._actor(req) }
+            )
+          );
+        } catch (err) {
+          this._fail(res, err);
+        }
+        res.end();
+      }
+    );
 
     /* ----------------------------------------------------- joining date */
     /**

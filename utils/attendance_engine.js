@@ -136,6 +136,19 @@ const CALC_STATUS = Object.freeze({
   OT_PENDING: "OT_PENDING",
   NO_SHIFT_FOR_DATE: "NO_SHIFT_FOR_DATE",
   NO_SCHEDULE_ROW: "NO_SCHEDULE_ROW",
+  /**
+   * The employee is exempt from biometric attendance
+   * (`new_employee.attendance_required = 0`).
+   *
+   * A SETTLED, FINAL verdict, not a review state and not an absence. Some
+   * active, paid employees are simply not expected to punch, and for them
+   * the absence of a punch is evidence of nothing. The day therefore
+   * produces no shortage, no missing-punch reason, no NO_SHIFT and no
+   * deduction, and it is reported under its own name rather than being
+   * disguised as a normal FINAL day - a reader of the stored row can always
+   * see why it carries no minutes.
+   */
+  ATTENDANCE_NOT_REQUIRED: "ATTENDANCE_NOT_REQUIRED",
 });
 
 /** Why a date needs a human. Empty on a clean day. */
@@ -573,6 +586,7 @@ function calculateAttendanceDay(input = {}) {
     break_override_minutes = null,
     approved_ot_minutes = null,
     regularization_pending = false,
+    attendance_required = true,
   } = input;
 
   const rawPunches = orderPunches(punches, attendance_date);
@@ -636,6 +650,26 @@ function calculateAttendanceDay(input = {}) {
     review_reasons: [],
     notes: [],
   };
+
+  // EXEMPT FROM BIOMETRIC ATTENDANCE, and therefore settled before any
+  // other verdict - including the no-shift one below.
+  //
+  // The order matters. An exempt employee frequently has no shift assigned,
+  // because a shift is an attendance artefact and they have no attendance to
+  // roster; reporting NO_SHIFT_FOR_DATE for them would be reporting a
+  // configuration fault that is not one, and it is exactly what put such
+  // employees in the review queue and the attention counts. So the exemption
+  // answers first. Whatever punches exist are still carried on the row - an
+  // exempt employee is not forbidden to punch - they simply decide nothing.
+  if (attendance_required === false) {
+    return {
+      ...base,
+      status: CALC_STATUS.ATTENDANCE_NOT_REQUIRED,
+      is_final: true,
+      review_reasons: [],
+      notes: ["Biometric attendance is not required for this employee"],
+    };
+  }
 
   // A date with no resolvable shift produces no numbers at all. It is never
   // silently calculated against "the shift they are on today" - that is the

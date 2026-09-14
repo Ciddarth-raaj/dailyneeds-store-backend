@@ -21,6 +21,10 @@ function fakeRepo(store = {}) {
       return Object.keys(patch);
     },
     lockEmployee: async () => ({ employee_id: 901, designation_id: 1, store_id: 1 }),
+    appendShiftAssignment: async (tx, row) => {
+      store.shiftAssignments = [...(store.shiftAssignments || []), row];
+      return 1;
+    },
     bumpTokenValidFrom: async () => {},
   };
 }
@@ -34,7 +38,26 @@ const lifecycleRepo = {
 const usecaseWith = (store, workShifts) =>
   build(fakeRepo(store), lifecycleUsecase, lifecycleRepo, null, workShifts);
 
-const base = { employee_name: "A", date_of_joining: "2026-01-05", store_id: 1, designation_id: 1, department_id: 1 };
+/**
+ * A create that satisfies the Personal Details rules - creating an employee
+ * IS creating their Personal Details section. Blood Group and Email stay
+ * absent: they are optional.
+ */
+const base = {
+  employee_name: "A",
+  date_of_joining: "2026-01-05",
+  store_id: 1,
+  designation_id: 1,
+  department_id: 1,
+  father_name: "B",
+  dob: "1992-07-19",
+  gender: "M",
+  marital_status: "Single",
+  primary_contact_number: "9876543210",
+  alternate_contact_number: "9876500000",
+  permanent_address: "1 Street",
+  residential_address: "1 Street",
+};
 
 test("a create with no shift stores no shift column", async () => {
   const store = {};

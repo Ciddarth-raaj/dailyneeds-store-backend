@@ -95,6 +95,15 @@ function calendarDates(ioTimeRaw) {
  * @param {string} input.ioTimeRaw   14 digits, already validated by protocol.js
  * @param {object|null} input.employee  {employee_id, default_work_shift_id} or
  *        null when the code matched nobody
+ * @param {number|null} [input.workShiftId]  the shift that applied on the
+ *        punch's own date, resolved by the caller from the DATED assignment
+ *        history (`utils/shiftResolution.js#resolveAssignmentForDate`). When
+ *        the key is supplied at all it is authoritative, `null` included -
+ *        `null` means the history says the employee was on no shift then, and
+ *        that must produce NO_SHIFT rather than quietly reading the live
+ *        column. Omit the key entirely to fall back to
+ *        `employee.default_work_shift_id`, which is only for callers that
+ *        have no history to hand.
  * @param {function} input.readSchedule  (workShiftId, dayOfWeek) => row|null,
  *        where row has ONLY the SCHEDULE_COLUMNS. Synchronous - the caller
  *        has already fetched (and may cache) the row.
@@ -104,7 +113,7 @@ function calendarDates(ioTimeRaw) {
  *   cutoff_applied: string|null, previous_day_of_week: number
  * }}
  */
-function deriveAttendanceDate({ ioTimeRaw, employee, readSchedule }) {
+function deriveAttendanceDate({ ioTimeRaw, employee, readSchedule, ...rest }) {
   const { calendarDate, previousDate, previousDayOfWeek, secondsOfDay } = calendarDates(ioTimeRaw);
 
   const base = {
@@ -119,7 +128,23 @@ function deriveAttendanceDate({ ioTimeRaw, employee, readSchedule }) {
     return { ...base, status: STATUS.UNMATCHED, attendance_date: null };
   }
 
-  const shiftId = employee.default_work_shift_id;
+  // ONE SOURCE OF TRUTH FOR WHICH SHIFT APPLIED (DN-ATTENDANCE fix #1).
+  //
+  // This used to read `employee.default_work_shift_id` - current state -
+  // while the attendance engine, the dashboard and payroll resolved the
+  // same question against the DATED assignment history. The two disagreed
+  // in both directions, and because a punch's `derivation_status` is
+  // written once at ingest and never revisited, a disagreement was
+  // permanent: assigning a shift afterwards left the punch stamped
+  // NO_SHIFT in the Punch Audit for ever, and Recalculate - which only
+  // rewrites `attendance_calculation` - could not clear it.
+  //
+  // The caller now resolves the shift from the same history the engine
+  // reads and passes it as `workShiftId`. The live column remains only as
+  // the fallback for a caller that supplies no history at all.
+  const shiftId = Object.prototype.hasOwnProperty.call(rest, "workShiftId")
+    ? rest.workShiftId
+    : employee.default_work_shift_id;
   if (shiftId === null || shiftId === undefined) {
     return { ...base, status: STATUS.NO_SHIFT, attendance_date: null };
   }

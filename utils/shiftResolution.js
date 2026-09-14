@@ -8,8 +8,8 @@
  *
  * WHY THIS EXISTS. `new_employee.default_work_shift_id` is current state. It
  * answers "which shift is this person on today" and it is the right column for
- * the assignment screen and for dating a punch as it arrives. It is the WRONG
- * column for recalculating 3rd August in October: moving somebody to a new
+ * the assignment screen. It is the WRONG column for recalculating 3rd August
+ * in October: moving somebody to a new
  * shift would silently rewrite August's worked minutes, its shortage and its
  * overtime, and therefore a payslip that has already been paid. Historical
  * attendance has to stop moving, so it reads dated history instead.
@@ -24,6 +24,13 @@
  * reports NO_SHIFT_FOR_DATE and the date stays out of payroll until a human
  * fixes the cause. The migration that creates the history states the cutover
  * explicitly (2026-09-01) and invents nothing before it.
+ *
+ * DATING A PUNCH READS THIS TOO. It used to read `default_work_shift_id`,
+ * which is how the Punch Audit and the Attendance Dashboard came to disagree
+ * about whether the same employee had a shift: a punch's derivation status is
+ * stamped once at ingest and never revisited, so assigning a shift afterwards
+ * left it reading "No Shift" for ever. `resolveWorkShiftIdForPunch` below is
+ * the entry point ingest and re-derivation both use.
  *
  * THE SNAPSHOT. Resolution returns not only an id but a normalized snapshot of
  * the schedule row the calculation will consume, plus a stable hash of it. The
@@ -145,6 +152,36 @@ function resolveOverrideForDate(overrides, attendanceDate) {
     }
   });
   return best;
+}
+
+/**
+ * The work shift id to DATE a punch with, from the same dated history the
+ * engine resolves an attendance date against.
+ *
+ * WHY A SEPARATE ENTRY POINT. `resolveShiftForDate` answers "what applied on
+ * attendance date D", and it needs D - which is the very thing punch dating
+ * is trying to work out. Dating reads the PREVIOUS calendar day's schedule
+ * row (see `biomax/attendanceDate.js`), so the assignment that governs the
+ * decision is the one in force on that previous day; an employee whose first
+ * assignment starts on the punch's own calendar date has no row there, and
+ * their own date answers instead rather than the punch being left undated.
+ *
+ * Returns `null` when the history has nothing on or before either date. That
+ * is a real answer - NO_SHIFT - and deliberately NOT a fallback to
+ * `new_employee.default_work_shift_id`: falling back is what made the Punch
+ * Audit and the Attendance Dashboard disagree about the same employee.
+ *
+ * @param {Array} assignments      the employee's assignment history rows
+ * @param {string} calendarDate    the punch's own calendar date, `YYYY-MM-DD`
+ * @param {string} previousDate    the calendar day before it
+ * @returns {number|null}
+ */
+function resolveWorkShiftIdForPunch(assignments, calendarDate, previousDate) {
+  const previous = resolveAssignmentForDate(assignments, previousDate);
+  const own = previous || resolveAssignmentForDate(assignments, calendarDate);
+  if (!own) return null;
+  const id = Number(own.work_shift_id);
+  return Number.isFinite(id) && id > 0 ? id : null;
 }
 
 /**
@@ -384,6 +421,7 @@ module.exports = {
   dayOfWeek,
   resolveAssignmentForDate,
   resolveOverrideForDate,
+  resolveWorkShiftIdForPunch,
   buildShiftSnapshot,
   snapshotHash,
   resolveShiftForDate,
