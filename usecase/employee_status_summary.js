@@ -57,9 +57,20 @@ const { EmployeeBankUsecase } = require("./employee_bank");
  *   aadhaar     no verified Aadhaar identity is attached
  *   statutory   the PF and ESI applicability flags, which exist precisely to
  *               distinguish "decided" from "nobody has been asked yet"
- *   bank        not payroll ready - see below
+ *   bank        the employee is paid BY BANK and the account is not payroll
+ *               ready - see `bankState`
  *   payroll     no live salary, an uncosted one, or no recorded way to pay
  *               them - see `payrollState`
+ *
+ * CASH IS A ROUTE, NOT A FAILURE, AND IT IS NOT ONE OF THE FOUR. Cash is a
+ * payment route payroll accepts today, so a cash-paid employee with a costed
+ * salary is a FINISHED record: their bank section is Not Applicable rather
+ * than pending, and nothing about being on cash makes them HR pending. The
+ * migration onto bank accounts is real work somebody is running, so it is
+ * counted - as `cash_to_bank_pending` - but as its own operational question.
+ * An employee can be HR complete, payroll complete, and still on that list.
+ * That is intended: the alternative parks every cash employee permanently in
+ * the HR queue for work that is not the employee's record's fault.
  *
  * PAYROLL IS THE FOURTH ITEM, AND IT IS NOT THE BANK COLUMN AGAIN. The bank
  * column asks whether an account can receive a transfer; payroll asks whether
@@ -102,6 +113,22 @@ const { EmployeeBankUsecase } = require("./employee_bank");
  * "NOT_PROVIDED"` has always carried on this endpoint, under the same
  * `view_employees` permission. They are omitted entirely, rather than guessed
  * at, on a server where the employee-master repository is not wired.
+ *
+ * WHAT `cash_to_bank_pending` DISCLOSES, STATED PLAINLY. `payment_type` is a
+ * B3-sensitive column, and this key lets a `view_employees` caller infer one
+ * bit of it: whether this employee is paid in cash. That is deliberate and
+ * it is the narrowest form of the fact the card needs - "how many people are
+ * still on cash, and who" is the entire question HR asked for. No amount, no
+ * account, no IFSC and not the column itself goes with it, and the repository
+ * makes the comparison in SQL so the value never leaves the database.
+ *
+ * It is NOT gated like PF/ESI's NOT_APPLICABLE, and the difference is worth
+ * naming: that gate exists because "not in the scheme" and "in the scheme"
+ * are both answers a caller has no operational need for, so withholding
+ * which one costs nothing. Withholding the cash answer would leave the
+ * migration count reading zero for the very people running the migration -
+ * a silently wrong number, which is worse than the disclosure. If that trade
+ * is ever judged the wrong way round, the gate goes here, beside the read.
  *
  * PF AND ESI, SEPARATELY - for the Onboarding / Pending HR queue.
  *
@@ -161,20 +188,30 @@ class EmployeeStatusSummaryUsecase {
    *                 reason for both schemes, which is the existing naming and
    *                 is kept: they are one section of the profile, completed
    *                 in one edit.
-   *   "bank"        the account is not payroll ready.
+   *   "bank"        the employee is paid BY BANK and the account is not
+   *                 payroll ready - see `bankState`.
+   *
+   * BEING PAID IN CASH IS NOT ONE OF THE REASONS, and that is the whole of
+   * the distinction this class now draws. Cash is a route payroll accepts
+   * today, so a cash-paid employee with a costed salary is a FINISHED record;
+   * moving them onto a bank account is an operational migration somebody is
+   * running, reported separately as `cash_to_bank_pending`, and it must never
+   * hold up an employee's HR completion. Counting it here would put every
+   * cash employee permanently in the HR queue for work that is not theirs.
    *
    * `pending` is exactly `missing.length > 0`, so the flag and the reasons
    * can never contradict each other.
    */
-  static hrOnboardingState({ aadhaarVerified, statutory, bankPayrollReady, payroll }) {
-    if (!statutory || !payroll) return null;
+  static hrOnboardingState({ aadhaarVerified, statutory, bank, payroll }) {
+    if (!statutory || !payroll || !bank) return null;
     const missing = [];
     if (!aadhaarVerified) missing.push("aadhaar");
     if (!statutory.pfDecided || !statutory.esiDecided) missing.push("statutory");
-    // Payroll ready, not merely on file: an account that has not passed its
+    // Payroll ready, not merely on file, and only for somebody who is
+    // actually paid by bank transfer: an account that has not passed its
     // check is an employee who cannot be paid, which is work rather than a
-    // finished section.
-    if (!bankPayrollReady) missing.push("bank");
+    // finished section. A cash employee has no account to finish.
+    if (bank.pending) missing.push("bank");
     // THE FOURTH ITEM. A record with a verified identity, a recorded statutory
     // decision and a payable account is still not a finished record if nobody
     // has put the employee on payroll - they will not be paid this month
@@ -183,6 +220,75 @@ class EmployeeStatusSummaryUsecase {
     // "statutory" covers PF and ESI together.
     if (payroll.pending) missing.push("payroll");
     return { pending: missing.length > 0, missing };
+  }
+
+  /**
+   * THE BANK SECTION, AS THE DASHBOARD ASKS IT: is there an account that
+   * still has to be finished for THIS employee?
+   *
+   * IT DEPENDS ON HOW THEY ARE PAID, which is the correction this makes. The
+   * question "is the bank section outstanding" has no answer until somebody
+   * has said the employee is paid by bank transfer at all:
+   *
+   *   BANK        `applicable` - pending until the account is payroll ready,
+   *               exactly as before. This is the employee somebody has to
+   *               chase.
+   *   CASH        NOT APPLICABLE. There is no account to verify and nobody is
+   *               ever going to verify one, so reporting them as Bank Pending
+   *               is a chase that can never be closed. They appear on the
+   *               separate cash-migration count instead.
+   *   not recorded  UNKNOWN, and deliberately NOT pending. Until the payment
+   *               type is recorded there is no way to say whether this
+   *               employee needs an account - and the thing that IS
+   *               outstanding for them, the unrecorded payment type itself,
+   *               is already reported by `payrollState`. Reporting it twice
+   *               under a second name would double-count one piece of work.
+   *
+   * `bank_status` and `bank_payroll_ready` are UNCHANGED and still reported:
+   * they are the raw C2 answer about the account itself, which the employee's
+   * profile and the employee list both render, and neither of them is asking
+   * this question.
+   */
+  static bankState({ config, bankPayrollReady }) {
+    if (!config) return null;
+    if (!config.paymentTypeRecorded) {
+      return { applicable: null, pending: false, status: "UNKNOWN" };
+    }
+    if (config.paysInCash) {
+      return { applicable: false, pending: false, status: "NOT_APPLICABLE" };
+    }
+    return {
+      applicable: true,
+      pending: !bankPayrollReady,
+      status: bankPayrollReady ? "COMPLETE" : "PENDING",
+    };
+  }
+
+  /**
+   * CASH -> BANK: is this employee still being paid in cash?
+   *
+   * AN OPERATIONAL MIGRATION, NOT A COMPLIANCE FAILURE. Cash is a payment
+   * route the business accepts today, so an employee on it is not incomplete
+   * and nothing about their record is wrong. What HR needs is a running count
+   * of how many people are still to be moved onto a bank account, and a list
+   * of who they are - which is a different question from every other status
+   * on this endpoint, and is why it is a separate key rather than a flavour
+   * of the bank one.
+   *
+   * IT IS DELIBERATELY ABSENT FROM `hr_onboarding_pending`. See the note
+   * there: an employee can be HR complete, payroll complete, and still be on
+   * this list. That is the intended outcome, not an inconsistency.
+   *
+   * An unrecorded payment type is NOT cash - nobody has said what it is - so
+   * it is UNKNOWN and counts towards neither side.
+   */
+  static cashToBankState({ config }) {
+    if (!config) return null;
+    if (!config.paymentTypeRecorded) return { pending: false, status: "UNKNOWN" };
+    return {
+      pending: Boolean(config.paysInCash),
+      status: config.paysInCash ? "PENDING" : "COMPLETE",
+    };
   }
 
   /**
@@ -283,15 +389,26 @@ class EmployeeStatusSummaryUsecase {
       // An employee with no salary row at all is not missing from the answer -
       // they are the commonest case of "payroll not set up yet", so the
       // absence IS the answer rather than a gap in it.
+      const config = payrollConfig
+        ? payrollConfig.get(employee_id) || { paymentTypeRecorded: false, paysInCash: false }
+        : null;
       const payroll = EmployeeStatusSummaryUsecase.payrollState({
         salary: (salaries && salaries.get(employee_id)) || { hasLiveSalary: false, ctcApplied: false },
-        config: payrollConfig ? payrollConfig.get(employee_id) || { paymentTypeRecorded: false, paysInCash: false } : null,
+        config,
         bankPayrollReady: b.bank_payroll_ready,
       });
+      // The bank SECTION (does this employee still need an account finished)
+      // and the cash MIGRATION (are they still paid in cash) - two questions
+      // off the one payment route, and only the first is HR completion.
+      const bankSection = EmployeeStatusSummaryUsecase.bankState({
+        config,
+        bankPayrollReady: b.bank_payroll_ready,
+      });
+      const cashToBank = EmployeeStatusSummaryUsecase.cashToBankState({ config });
       const onboarding = EmployeeStatusSummaryUsecase.hrOnboardingState({
         aadhaarVerified,
         statutory: decisions,
-        bankPayrollReady: b.bank_payroll_ready,
+        bank: bankSection,
         payroll,
       });
       const scheme = (decided, notApplicable) =>
@@ -327,6 +444,23 @@ class EmployeeStatusSummaryUsecase {
         // amount, and omitted rather than guessed where it cannot be answered.
         ...(payroll
           ? { payroll_pending: payroll.pending, payroll_missing: payroll.missing }
+          : {}),
+        // The bank SECTION as the dashboard asks it - route-aware, and not to
+        // be confused with `bank_status` above, which is the raw C2 answer
+        // about the account itself and is unchanged.
+        ...(bankSection
+          ? { bank_pending: bankSection.pending, bank_section_status: bankSection.status }
+          : {}),
+        // The cash migration. NOT part of `hr_onboarding_pending` - see
+        // `cashToBankState` - and reported so the dashboard can count it
+        // without inferring it from the absence of an account.
+        //
+        // OMITTED WHERE THE ROUTE WAS NEVER RECORDED, rather than sent as
+        // false. `false` is not "we do not know": a screen reading it would
+        // say this employee is paid by bank, which is a route nobody has
+        // chosen for them. The same rule every other key here follows.
+        ...(cashToBank && cashToBank.status !== "UNKNOWN"
+          ? { cash_to_bank_pending: cashToBank.pending }
           : {}),
       };
     });
