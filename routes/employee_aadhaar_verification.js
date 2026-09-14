@@ -71,6 +71,17 @@ const { getClientIp } = require("../utils/ip");
  * `filterResponse` IS STILL APPLIED, so nothing sensitive can leave here
  * either, however the usecase changes later.
  *
+ * ================================ THE TARGET BINDING ======================
+ *
+ * A session raised here is stamped with `target_employee_id` = the route's
+ * `:employee_id`, server-derived and never read from the body. The OTP step
+ * refuses a session raised for anybody else - before the provider call and
+ * before an OTP attempt is spent - and `attachToEmployee` refuses to consume
+ * one for anybody else, under the row lock, whatever route asked. Without that
+ * a caller could initiate for employee A and complete and attach against
+ * employee B in the same branch: same caller, same branch, both PENDING, every
+ * other check passing.
+ *
  * ================================ THE PENDING-ONLY RULE ===================
  *
  * Both endpoints refuse an employee whose Aadhaar is already VERIFIED, with
@@ -203,7 +214,15 @@ class EmployeeAadhaarVerificationRoutes {
                 aadhaar_number: req.body.aadhaar_number,
                 consent_given: req.body.consent_given,
               },
-              { actorEmployeeId: this._actor(req), ip: getClientIp(req) }
+              {
+                actorEmployeeId: this._actor(req),
+                ip: getClientIp(req),
+                // BOUND TO THE ROUTE'S EMPLOYEE, and only ever to that. Taken
+                // from `:employee_id`, which the branch scope has already
+                // authorized this caller for - never from the body, which a
+                // caller controls.
+                targetEmployeeId: Number(req.params.employee_id),
+              }
             )
           );
         } catch (err) {
@@ -240,7 +259,13 @@ class EmployeeAadhaarVerificationRoutes {
           res.json(
             await this.aadhaar.verifyOtp(
               { verification_token: req.body.verification_token, otp: req.body.otp },
-              { actorEmployeeId: this._actor(req) }
+              {
+                actorEmployeeId: this._actor(req),
+                // The session must have been raised for THIS employee. The
+                // usecase refuses before the provider is called and before an
+                // OTP attempt is spent.
+                targetEmployeeId: Number(req.params.employee_id),
+              }
             )
           );
         } catch (err) {

@@ -473,6 +473,68 @@ describe("the existing paths are untouched", () => {
 });
 
 /* ===================================================================== */
+/*  THE TARGET BINDING IS SERVER-DERIVED                                 */
+/* ===================================================================== */
+
+describe("the session is bound to the route's employee", () => {
+  it("initiate binds to :employee_id, and the body cannot say otherwise", async () => {
+    const res = await post(initiateUrl(OWN_PENDING), CALLERS.verifier(), INITIATE_BODY);
+    ok(res, "initiate");
+    assert.equal(calls.initiate.length, 1);
+    assert.equal(
+      calls.initiate[0].opts.targetEmployeeId,
+      OWN_PENDING,
+      "the target comes from the route, never from the body"
+    );
+    // The usecase receives only the two fields the schema names.
+    assert.deepEqual(Object.keys(calls.initiate[0].body).sort(), [
+      "aadhaar_number",
+      "consent_given",
+    ]);
+  });
+
+  it("a body that TRIES to name a target is refused outright, not quietly ignored", async () => {
+    // The exact Joi schema is the second half of the binding: there is no
+    // field here a caller could smuggle a different employee through, and the
+    // attempt is a 422 rather than a silently dropped key.
+    for (const smuggled of [
+      { ...INITIATE_BODY, target_employee_id: OTHER_PENDING },
+      { ...INITIATE_BODY, employee_id: OTHER_PENDING },
+    ]) {
+      const res = await post(initiateUrl(OWN_PENDING), CALLERS.verifier(), smuggled);
+      assert.equal(res.body && res.body.code, 422, "an unknown field is refused");
+    }
+    const otp = await post(otpUrl(OWN_PENDING), CALLERS.verifier(), {
+      ...OTP_BODY,
+      target_employee_id: OTHER_PENDING,
+    });
+    assert.equal(otp.body && otp.body.code, 422);
+    assert.equal(calls.initiate.length, 0, "nothing reached the provider");
+    assert.equal(calls.verifyOtp.length, 0);
+  });
+
+  it("verify-otp passes the same route-derived target", async () => {
+    const res = await post(otpUrl(OWN_PENDING), CALLERS.verifier(), OTP_BODY);
+    ok(res, "verify-otp");
+    assert.equal(calls.verifyOtp.length, 1);
+    assert.equal(calls.verifyOtp[0].opts.targetEmployeeId, OWN_PENDING);
+    assert.deepEqual(Object.keys(calls.verifyOtp[0].body).sort(), ["otp", "verification_token"]);
+  });
+
+  it("the ONBOARDING routes pass no target at all", async () => {
+    ok(await post("/hr/aadhaar/initiate", CALLERS.onboarder(), INITIATE_BODY), "onboarding initiate");
+    assert.equal(calls.initiate.length, 1);
+    assert.equal(
+      calls.initiate[0].opts.targetEmployeeId,
+      undefined,
+      "there is no employee yet, so the session stays unbound"
+    );
+    ok(await post("/hr/aadhaar/verify-otp", CALLERS.onboarder(), OTP_BODY), "onboarding verify-otp");
+    assert.equal(calls.verifyOtp[0].opts.targetEmployeeId, undefined);
+  });
+});
+
+/* ===================================================================== */
 /*  14. NOTHING SECRET IS LOGGED                                          */
 /* ===================================================================== */
 

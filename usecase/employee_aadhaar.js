@@ -111,7 +111,7 @@ class EmployeeAadhaarUsecase {
    * a typo costs nothing, and is reduced to fingerprint + ciphertext + last
    * four immediately afterwards. Nothing downstream holds it.
    */
-  async initiate(input, { actorEmployeeId = null, ip = null } = {}) {
+  async initiate(input, { actorEmployeeId = null, ip = null, targetEmployeeId = null } = {}) {
     this.assertEnabled();
     this._assertProvider();
 
@@ -148,6 +148,11 @@ class EmployeeAadhaarUsecase {
       consent_ip: ip,
       consent_at: new Date(),
       initiated_by_employee_id: actorEmployeeId,
+      // THE EMPLOYEE THIS SESSION IS RAISED FOR, and the only thing that may
+      // ever consume it. NULL for onboarding, where there is no employee yet.
+      // Server-derived from the route's `:employee_id` - never from the body,
+      // which is why this is an option and not an input field.
+      target_employee_id: targetEmployeeId === null ? null : Number(targetEmployeeId),
       initiated_at: new Date(),
       session_token: sessionToken,
       expires_at: expiresAt,
@@ -179,7 +184,7 @@ class EmployeeAadhaarUsecase {
    * argument to one provider call and nowhere else - not on the session row,
    * not in an error message, not in a log line.
    */
-  async verifyOtp(input, { actorEmployeeId = null } = {}) {
+  async verifyOtp(input, { actorEmployeeId = null, targetEmployeeId = null } = {}) {
     this.assertEnabled();
     this._assertProvider();
 
@@ -191,6 +196,16 @@ class EmployeeAadhaarUsecase {
 
     const session = await this.repo.findVerificationByToken(token);
     if (!session) throw new ValidationError("that verification session does not exist", 404);
+
+    // THE TARGET BINDING, AND IT IS CHECKED FIRST.
+    //
+    // Before the status, before the expiry, before the attempt counter and a
+    // long way before the provider: a token presented against the wrong
+    // employee must cost nothing and disclose nothing. In particular it must
+    // NOT burn an OTP attempt, or one employee's verification could be
+    // exhausted by aiming it at another.
+    EmployeeAadhaarUsecase.assertTargetMatches(session.target_employee_id, targetEmployeeId);
+
     if (session.status !== "initiated") {
       throw new ConflictError(`that verification session has already been ${session.status}`);
     }
@@ -276,6 +291,41 @@ class EmployeeAadhaarUsecase {
       demographics,
       existing,
     });
+  }
+
+  /**
+   * DOES THIS SESSION BELONG TO THIS EMPLOYEE?
+   *
+   * ONE rule, stated once, and both halves of it matter:
+   *
+   *   session NULL, caller NULL   an ONBOARDING session used by the onboarding
+   *                               path. There is no employee yet; Create
+   *                               Employee consumes it. Unchanged, and this is
+   *                               also every historical row.
+   *   session id,   caller same   an EXISTING-EMPLOYEE session used for the
+   *                               employee it was raised for. Allowed.
+   *   session id,   caller other  the attack: A's session aimed at B. Refused.
+   *   session id,   caller NULL   a bound session presented to the onboarding
+   *                               path, which would launder the binding away.
+   *                               Refused.
+   *   session NULL, caller id     an unbound session presented to the
+   *                               existing-employee path, which is how a bound
+   *                               flow would be entered without ever binding.
+   *                               Refused.
+   *
+   * The last two are not required to close the reported hole and are refused
+   * anyway: "belongs to exactly one target from initiation through attach" is
+   * only true if a session cannot change which path it is travelling on.
+   *
+   * THE MESSAGE NAMES NOBODY. Not the other employee, not their branch, not
+   * their name, not whether the session exists in some other state - a caller
+   * probing with a stolen token learns only that this pairing is refused.
+   */
+  static assertTargetMatches(sessionTarget, callerTarget) {
+    const bound = sessionTarget === null || sessionTarget === undefined ? null : Number(sessionTarget);
+    const asked = callerTarget === null || callerTarget === undefined ? null : Number(callerTarget);
+    if (bound === asked) return;
+    throw new ConflictError("that verification session cannot be used for this employee");
   }
 
   /** Drops anything that looks like it carries the number itself. */
@@ -487,6 +537,26 @@ class EmployeeAadhaarUsecase {
 
     const v = await this.repo.lockVerificationForUse(tx, verificationId);
     if (!v) throw new ValidationError(`verification ${verificationId} does not exist`);
+
+    // THE FINAL AND MOST IMPORTANT ENFORCEMENT OF THE TARGET BINDING.
+    //
+    // Here rather than only on the route, because this is the one funnel every
+    // consume goes through - Create Employee and the existing-employee attach
+    // alike - and a check that lives on a route is a check that a new route
+    // can forget. Under the same lock as the row it is about.
+    //
+    // ASYMMETRIC ON PURPOSE, and this is the one place it is: a session with
+    // NO target is still attachable to any employee the CALLER was authorized
+    // for, because that is exactly what "Skip for now, attach later" and every
+    // historical row are - unbound onboarding sessions, consumed by an attach
+    // that carries its own `employee_edit` + branch-scope authorization. A
+    // session WITH a target may only ever be consumed by that employee.
+    if (v.target_employee_id !== null && v.target_employee_id !== undefined) {
+      if (Number(v.target_employee_id) !== Number(employeeId)) {
+        throw new ConflictError("that verification session cannot be used for this employee");
+      }
+    }
+
     if (v.status !== "verified") {
       throw new ConflictError(`verification ${verificationId} has already been ${v.status}`);
     }
