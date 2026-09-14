@@ -6,6 +6,7 @@ const respondError = require("../utils/http");
 const {
   sectionKeysRequired,
   isSectionOnlyWrite,
+  PAYMENT_TYPE,
 } = require("../constants/employee_master_sections");
 
 class EmployeeRoutes {
@@ -89,7 +90,19 @@ class EmployeeRoutes {
           previous_experience: Joi.string().allow("").allow(null).optional(),
           date_of_joining: Joi.string().allow("").allow(null).optional(),
           gender: Joi.string().required(),
-          payment_type: Joi.number().required(),
+          // THE PAYMENT ROUTE, REFUSED AT THE EDGE WHEN IT IS WRONG AND
+          // LEFT TO THE DEFAULT WHEN IT IS ABSENT. `valid(1, 2)` is the
+          // whole meaning of the column (`constants/employee_master_sections`
+          // PAYMENT_TYPE), so a 3, a 0 or a "bank" is a 422 here rather than
+          // a row nobody can classify. It stopped being `required()` because
+          // a create that says nothing now MEANS something - Cash, applied by
+          // the repository - and demanding the field would refuse the very
+          // case the default exists for.
+          payment_type: Joi.number()
+            .valid(PAYMENT_TYPE.BANK, PAYMENT_TYPE.CASH)
+            .allow("")
+            .allow(null)
+            .optional(),
           blood_group: Joi.string().allow("").allow(null).optional(),
           designation_id: Joi.number().required(),
           store_id: Joi.number().required(),

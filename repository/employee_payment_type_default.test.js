@@ -17,10 +17,13 @@
  */
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("fs");
+const path = require("path");
 
 const {
   PAYMENT_TYPE,
   DEFAULT_PAYMENT_TYPE_ON_CREATE,
+  isPaymentTypeSupplied,
   isValidPaymentType,
   paymentTypeForCreate,
   applyDefaultPaymentType,
@@ -88,30 +91,52 @@ const PERSON = {
 
 /* ------------------------------------------------------------ the rule -- */
 
+/** Everything an explicitly wrong answer can look like. */
+const INVALID = [0, 3, -1, 1.5, "bank", "cash", "0", {}, [], true];
+/** Everything "nobody said" can look like. */
+const UNSAID = [undefined, null, "", "   "];
+
 describe("the default itself", () => {
   it("is Cash, which is 2", () => {
     assert.equal(DEFAULT_PAYMENT_TYPE_ON_CREATE, PAYMENT_TYPE.CASH);
     assert.equal(DEFAULT_PAYMENT_TYPE_ON_CREATE, 2);
   });
 
-  it("recognises only Bank and Cash as explicitly supplied", () => {
-    assert.equal(isValidPaymentType(1), true);
-    assert.equal(isValidPaymentType(2), true);
-    assert.equal(isValidPaymentType("1"), true, "the legacy screens post strings");
-    for (const nothing of [null, undefined, "", "   ", 0, 3, -1, 1.5, "bank", {}, []]) {
-      assert.equal(isValidPaymentType(nothing), false, `${JSON.stringify(nothing)} is not a payment route`);
-    }
-  });
-
-  it("falls back to Cash for anything that is not a payment route", () => {
-    for (const nothing of [null, undefined, "", 0, 3, "bank"]) {
+  it("treats absent, null and blank as 'nobody said'", () => {
+    for (const nothing of UNSAID) {
+      assert.equal(isPaymentTypeSupplied(nothing), false, `${JSON.stringify(nothing)} says nothing`);
       assert.equal(paymentTypeForCreate(nothing), PAYMENT_TYPE.CASH);
     }
   });
 
-  it("preserves an explicit Bank, as a number", () => {
-    assert.equal(paymentTypeForCreate(PAYMENT_TYPE.BANK), PAYMENT_TYPE.BANK);
-    assert.equal(paymentTypeForCreate("1"), PAYMENT_TYPE.BANK);
+  it("recognises Bank and Cash, including as posted form strings", () => {
+    for (const good of [1, 2, "1", "2"]) {
+      assert.equal(isValidPaymentType(good), true);
+      assert.equal(paymentTypeForCreate(good), Number(good));
+    }
+  });
+
+  /**
+   * THE LINE THIS WHOLE MODULE DRAWS. Missing means "use our default".
+   * Invalid means somebody's code or input is wrong, and answering a bug
+   * with a silent Cash would both hide it and record a payment route
+   * nobody chose.
+   */
+  it("REFUSES an explicitly supplied value that is not a payment route", () => {
+    for (const bad of INVALID) {
+      assert.equal(isPaymentTypeSupplied(bad), true, `${JSON.stringify(bad)} is an answer`);
+      assert.equal(isValidPaymentType(bad), false, `${JSON.stringify(bad)} is a wrong one`);
+      assert.throws(
+        () => paymentTypeForCreate(bad),
+        (err) => {
+          assert.equal(err.name, "ValidationError");
+          assert.equal(err.httpCode, 422, "the response style both employee routes already use");
+          assert.match(err.message, /payment_type must be 1 \(Bank\) or 2 \(Cash\)/);
+          return true;
+        },
+        `${JSON.stringify(bad)} must be refused, not converted`
+      );
+    }
   });
 
   it("never rewrites the caller's own object", () => {
@@ -147,6 +172,24 @@ describe("repository/employee_master.createEmployee", () => {
     assert.equal(boundValue(tx.calls[0], "payment_type"), PAYMENT_TYPE.BANK);
   });
 
+  it("REFUSES an explicitly invalid payment route rather than storing Cash", async () => {
+    for (const bad of [0, 3, "bank"]) {
+      const tx = fakeTx();
+      await assert.rejects(
+        () => makeMasterRepo({}).createEmployee(tx, { ...PERSON, payment_type: bad }),
+        (err) => err.name === "ValidationError" && err.httpCode === 422
+      );
+      assert.equal(tx.calls.length, 0, "nothing is inserted for a refused create");
+    }
+  });
+
+  it("stores an explicit Cash unchanged", async () => {
+    const repo = makeMasterRepo({});
+    const tx = fakeTx();
+    await repo.createEmployee(tx, { ...PERSON, payment_type: PAYMENT_TYPE.CASH });
+    assert.equal(boundValue(tx.calls[0], "payment_type"), PAYMENT_TYPE.CASH);
+  });
+
   it("still refuses a client-supplied employee_id", async () => {
     const repo = makeMasterRepo({});
     await assert.rejects(
@@ -162,6 +205,31 @@ describe("repository/employee_master.createEmployee", () => {
     assert.equal(boundValue(tx.calls[0], "employee_name"), "New Joiner");
     assert.equal(boundValue(tx.calls[0], "store_id"), 3);
     assert.equal(boundValue(tx.calls[0], "salary"), 18000);
+  });
+});
+
+/* -------------------------------------------------- the route's edge --- */
+
+describe("the legacy create route's schema", () => {
+  // The refusal is enforced in the repository, where every creation path
+  // converges, so this is the SECOND line rather than the only one: Joi
+  // refuses a wrong payment route at the edge, in the same 422 shape the
+  // route already returns for every other schema failure.
+  const src = fs.readFileSync(path.join(__dirname, "../routes/employee.js"), "utf8");
+  const createSchema = src.slice(
+    src.indexOf("employee_id: Joi.number().required()"),
+    src.indexOf("files: Joi.array()")
+  );
+
+  it("accepts only Bank and Cash", () => {
+    assert.match(createSchema, /payment_type: Joi\.number\(\)\s*\.valid\(PAYMENT_TYPE\.BANK, PAYMENT_TYPE\.CASH\)/);
+  });
+
+  it("no longer DEMANDS a payment route, because an absent one now means Cash", () => {
+    const decl = createSchema.slice(createSchema.indexOf("payment_type:"));
+    const upToNextField = decl.slice(0, decl.indexOf("blood_group"));
+    assert.equal(/required\(\)/.test(upToNextField), false);
+    assert.match(upToNextField, /optional\(\)/);
   });
 });
 
@@ -181,6 +249,17 @@ describe("repository/employee.create (legacy)", () => {
     const repo = makeLegacyRepo(db);
     await repo.create({ ...PERSON, employee_id: 2284, payment_type: PAYMENT_TYPE.BANK });
     assert.equal(legacyBoundValue(db.calls[0], "payment_type"), PAYMENT_TYPE.BANK);
+  });
+
+  it("REFUSES an explicitly invalid payment route, and inserts nothing", async () => {
+    for (const bad of [0, 3, "bank"]) {
+      const db = fakeDb();
+      await assert.rejects(
+        () => makeLegacyRepo(db).create({ ...PERSON, employee_id: 2284, payment_type: bad }),
+        (err) => err.name === "ValidationError" && err.httpCode === 422
+      );
+      assert.equal(db.calls.length, 0);
+    }
   });
 });
 
