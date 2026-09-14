@@ -41,6 +41,26 @@ function build({
   // the HR-onboarding keys are omitted entirely - which is what every test
   // written before they existed asserts.
   statutory = undefined,
+  /**
+   * THE DEFAULT EMPLOYEE IS PAID BY BANK, WITH A LIVE COSTED SALARY.
+   *
+   * Bank is the default route because it is the one under which the bank
+   * section means anything at all: a cash employee's bank section is Not
+   * Applicable, so defaulting to cash would quietly turn every bank test
+   * below into a test of nothing. The salary defaults to live and costed so
+   * that a test about Aadhaar or PF is not also a test about payroll.
+   *
+   * NOTE WHAT THAT IMPLIES, because it is the specified behaviour and not a
+   * fixture artefact: for a BANK employee whose account has not passed its
+   * check, `bank` AND `payroll` are both outstanding - the section is
+   * unfinished and they cannot be paid. The tests below assert both.
+   *
+   * A test that is about payroll or the payment route passes these:
+   *   salaries  { [id]: "APPLIED" | "PENDING" }, absent = no live salary
+   *   payroll   { [id]: 1 (Bank) | 2 (Cash) | null (nobody has said) }
+   */
+  salaries = undefined,
+  payroll = undefined,
 } = {}) {
   const queries = [];
   const employeeUsecase = {
@@ -88,12 +108,51 @@ function build({
               esi_not_applicable: statutory[id].esiNo ? 1 : 0,
             }));
         },
+        getPayrollConfigMany: async (ids) => {
+          queries.push(["payroll-config", ids]);
+          return ids.map((id) => {
+            const type = payroll && id in payroll ? payroll[id] : 1; // Bank by default
+            return {
+              employee_id: id,
+              payment_type_recorded: type === null || type === undefined ? 0 : 1,
+              pays_in_cash: Number(type) === 2 ? 1 : 0,
+            };
+          });
+        },
       }
     : undefined;
-  return { usecase: buildSummary(employeeUsecase, aadhaarRepo, bankRepo, masterRepo), queries };
+  // Wired whenever the master repository is: a server that can answer the
+  // statutory question can answer the payroll one.
+  const salaryRepo = statutory
+    ? {
+        getCurrentSalaryStatusMany: async (ids, asOf) => {
+          queries.push(["salary", ids, asOf]);
+          return ids
+            .filter((id) => (salaries ? id in salaries : true))
+            // Exactly the two columns the real query selects - no amount,
+            // and not even the effective date.
+            .map((id) => ({ employee_id: id, ctc_status: salaries ? salaries[id] : "APPLIED" }));
+        },
+      }
+    : undefined;
+  return {
+    usecase: buildSummary(employeeUsecase, aadhaarRepo, bankRepo, masterRepo, salaryRepo),
+    queries,
+  };
 }
 
 const byId = (rows) => Object.fromEntries(rows.map((r) => [r.employee_id, r]));
+
+/**
+ * List AS A CALLER HOLDING `view_employee_sensitive`.
+ *
+ * The payment route is gated on that key, so a test about cash has to say
+ * which caller it is asking as - and a plain `usecase.list({})` is
+ * deliberately the OTHER caller, the one who may not see it. Both states are
+ * asserted directly further down.
+ */
+const asSensitive = (usecase, filters = {}) =>
+  usecase.list(filters, { disclosePfEsiApplicability: true, disclosePaymentRoute: true });
 
 /* ================================================================ Aadhaar */
 test("an attached Aadhaar identity reads VERIFIED, and its absence reads PENDING", async () => {
@@ -460,15 +519,16 @@ test("VERIFYING THE AADHAAR LATER TAKES THE EMPLOYEE OUT OF THE QUEUE", async ()
   assert.deepEqual(after[0].hr_onboarding_missing, []);
 });
 
-test("an employee a manager has just created is HR-onboarding pending, for all three reasons", async () => {
-  // No Aadhaar, nothing statutory decided, no bank account.
+test("an employee a manager has just created is HR-onboarding pending, for all four reasons", async () => {
+  // No Aadhaar, nothing statutory decided, no bank account - and so, since
+  // they are paid by bank, no way to actually pay them either.
   const { usecase } = build({
     employees: [{ employee_id: 700 }],
     statutory: { 700: { pf: false, esi: false } },
   });
   const rows = await usecase.list({});
   assert.equal(rows[0].hr_onboarding_pending, true);
-  assert.deepEqual(rows[0].hr_onboarding_missing, ["aadhaar", "statutory", "bank"]);
+  assert.deepEqual(rows[0].hr_onboarding_missing, ["aadhaar", "statutory", "bank", "payroll"]);
 });
 
 test("AADHAAR AND BANK PENDING NAMES BOTH REASONS, AND NEITHER TWICE", async () => {
@@ -479,7 +539,9 @@ test("AADHAAR AND BANK PENDING NAMES BOTH REASONS, AND NEITHER TWICE", async () 
   });
   const rows = await usecase.list({});
   assert.equal(rows[0].hr_onboarding_pending, true);
-  assert.deepEqual(rows[0].hr_onboarding_missing, ["aadhaar", "bank"]);
+  // Paid by bank with no account: the section is unfinished AND they cannot
+  // be paid, which is two facts about one employee, not one counted twice.
+  assert.deepEqual(rows[0].hr_onboarding_missing, ["aadhaar", "bank", "payroll"]);
 });
 
 test("AADHAAR AND STATUTORY PENDING NAMES BOTH REASONS", async () => {
@@ -505,7 +567,7 @@ test("every reason appears at most once, whatever the combination", async () => 
   });
   const rows = await usecase.list({});
   const missing = rows[0].hr_onboarding_missing;
-  assert.deepEqual(missing, ["aadhaar", "statutory", "bank"]);
+  assert.deepEqual(missing, ["aadhaar", "statutory", "bank", "payroll"]);
   assert.equal(new Set(missing).size, missing.length, "no reason is repeated");
   // And the flag is exactly "is anything outstanding".
   assert.equal(rows[0].hr_onboarding_pending, missing.length > 0);
@@ -557,7 +619,7 @@ test("AN ACCOUNT THAT HAS NOT PASSED ITS CHECK IS STILL HR WORK", async () => {
     const rows = await usecase.list({});
     assert.equal(rows[0].bank_payroll_ready, false, status);
     assert.equal(rows[0].hr_onboarding_pending, true, status);
-    assert.deepEqual(rows[0].hr_onboarding_missing, ["bank"], status);
+    assert.deepEqual(rows[0].hr_onboarding_missing, ["bank", "payroll"], status);
   }
 });
 
@@ -576,7 +638,7 @@ test("a LIVE duplicate account is HR work too", async () => {
   assert.equal(rows[0].bank_status, "DUPLICATE_ACCOUNT");
   assert.equal(rows[0].bank_payroll_ready, false);
   assert.equal(rows[0].hr_onboarding_pending, true);
-  assert.deepEqual(rows[0].hr_onboarding_missing, ["bank"]);
+  assert.deepEqual(rows[0].hr_onboarding_missing, ["bank", "payroll"]);
 });
 
 test("THE FLAG AGREES WITH THE COLUMNS BESIDE IT, BY CONSTRUCTION", async () => {
@@ -628,13 +690,26 @@ test("the derivation discloses whether a decision exists, never what it was", as
   }
   assert.deepEqual(Object.keys(rows[0]).sort(), [
     "aadhaar_status",
+    // The dashboard's route-aware bank section, beside the raw C2 answer
+    // about the account itself. Two questions, two keys, neither renamed.
     "bank_payroll_ready",
+    "bank_pending",
+    "bank_section_status",
     "bank_status",
+    // NO `cash_to_bank_pending` HERE, and that is the assertion: this is a
+    // plain caller, without `view_employee_sensitive`, so the payment route
+    // is absent entirely rather than present and false. The permission tests
+    // below check both states directly.
     "employee_id",
     "esi_status",
     "hr_onboarding_missing",
     "hr_onboarding_pending",
+    "payroll_missing",
+    "payroll_pending",
     "pf_status",
+    // The two schemes as one section, for the Statutory card. A derived
+    // boolean, not a third copy of either flag.
+    "statutory_pending",
   ]);
   // One bulk read for the whole list, like every other read here.
   assert.equal(queries.filter(([kind]) => kind === "statutory").length, 1);
@@ -717,7 +792,458 @@ test("it stays one query per read at 600 employees, statutory included", async (
   const { usecase, queries } = build({ employees, statutory });
   const rows = await usecase.list({});
   assert.equal(rows.length, 600);
-  // employees, aadhaar, bank-details, verifications, statutory. No duplicates
-  // query: nobody is sitting on DUPLICATE_ACCOUNT.
-  assert.equal(queries.length, 5);
+  // employees, aadhaar, bank-details, verifications, statutory, salary,
+  // payroll-config. No duplicates query: nobody is on DUPLICATE_ACCOUNT.
+  //
+  // THE TWO PAYROLL READS ARE BULK READS LIKE THE REST. Payroll added two
+  // concerns to this endpoint and therefore two queries - not two per
+  // employee, which is the property this test exists to hold.
+  assert.equal(queries.length, 7);
+  assert.deepEqual(queries.map((q) => q[0]).sort(), [
+    "aadhaar",
+    "bank-details",
+    "employees",
+    "payroll-config",
+    "salary",
+    "statutory",
+    "verifications",
+  ]);
+});
+
+/* ================================================= payroll pending (dashboard) */
+/**
+ * THE FOURTH HR ITEM, and the one that is NOT the bank column again.
+ *
+ * The bank column asks whether an account can receive a transfer. Payroll
+ * asks whether there is anything to transfer: an agreed, costed salary in
+ * effect today, and a recorded way to pay it. An employee can have a verified
+ * account and no salary, or a salary and no account, and both are unfinished
+ * records - so these pin the two apart rather than trusting they differ.
+ *
+ * Every rule below is read from the payroll module's own definitions
+ * (`getCurrentSalary` and `utils/salary_engine.js`), never restated here.
+ */
+
+test("NO LIVE SALARY IS PAYROLL PENDING, whatever else is finished", async () => {
+  const { usecase } = build({
+    employees: [{ employee_id: 800, ...account }],
+    verifications: [verified(800)],
+    identities: [800],
+    statutory: { 800: { pf: true, esi: true } },
+    salaries: {}, // nobody has a salary row
+  });
+  const rows = await usecase.list({});
+  assert.equal(rows[0].payroll_pending, true);
+  assert.deepEqual(rows[0].payroll_missing, ["salary"]);
+  // And it reaches the overall flag, which is the whole point of the change.
+  assert.equal(rows[0].hr_onboarding_pending, true);
+  assert.deepEqual(rows[0].hr_onboarding_missing, ["payroll"]);
+});
+
+test("A SALARY THAT COULD NOT BE COSTED IS NOT A FINISHED PAYROLL SETUP", async () => {
+  // `ctc_status = PENDING` is what the engine writes when an employer cost
+  // could not be resolved. A CTC with an unresolved component in it is not a
+  // CTC, so it is not a finished setup either.
+  const { usecase } = build({
+    employees: [{ employee_id: 801, ...account }],
+    verifications: [verified(801)],
+    identities: [801],
+    statutory: { 801: { pf: true, esi: true } },
+    salaries: { 801: "PENDING" },
+  });
+  const rows = await usecase.list({});
+  assert.equal(rows[0].payroll_pending, true);
+  assert.deepEqual(rows[0].payroll_missing, ["salary_ctc"]);
+});
+
+test("a live, costed salary with a recorded payment route is payroll COMPLETE", async () => {
+  const { usecase } = build({
+    employees: [{ employee_id: 802, ...account }],
+    verifications: [verified(802)],
+    identities: [802],
+    statutory: { 802: { pf: true, esi: true } },
+    salaries: { 802: "APPLIED" },
+    payroll: { 802: 1 }, // Bank, and the account above is verified
+  });
+  const rows = await usecase.list({});
+  assert.equal(rows[0].payroll_pending, false);
+  assert.deepEqual(rows[0].payroll_missing, []);
+  assert.equal(rows[0].hr_onboarding_pending, false, "all four complete");
+  assert.deepEqual(rows[0].hr_onboarding_missing, []);
+});
+
+test("NOBODY HAS SAID HOW TO PAY THEM, so payroll is pending", async () => {
+  const { usecase } = build({
+    employees: [{ employee_id: 803, ...account }],
+    verifications: [verified(803)],
+    identities: [803],
+    statutory: { 803: { pf: true, esi: true } },
+    salaries: { 803: "APPLIED" },
+    payroll: { 803: null }, // payment_type not recorded
+  });
+  const rows = await usecase.list({});
+  assert.equal(rows[0].payroll_pending, true);
+  assert.deepEqual(rows[0].payroll_missing, ["payment_type"]);
+});
+
+test("BANK-PAID WITHOUT A PAYROLL-READY ACCOUNT IS PAYROLL PENDING TOO", async () => {
+  // Chosen Bank, account on file, verification never passed. They cannot be
+  // paid, so both the bank column AND payroll say so - two different facts
+  // about the same employee, not one counted twice.
+  const { usecase } = build({
+    employees: [{ employee_id: 804, ...account }],
+    verifications: [{ ...verified(804), status: "FAILED", name_match_verdict: null }],
+    identities: [804],
+    statutory: { 804: { pf: true, esi: true } },
+    salaries: { 804: "APPLIED" },
+    payroll: { 804: 1 }, // Bank
+  });
+  const rows = await usecase.list({});
+  assert.equal(rows[0].bank_payroll_ready, false);
+  assert.deepEqual(rows[0].payroll_missing, ["payment_account"]);
+  assert.deepEqual(rows[0].hr_onboarding_missing, ["bank", "payroll"]);
+});
+
+test("A CASH-PAID EMPLOYEE IS NOT HELD UP BY A BANK ACCOUNT THEY DO NOT NEED", async () => {
+  // The payroll half of it: Cash needs no account, so payroll is complete.
+  // The BANK column still reports what it has always reported - that is the
+  // definition the dashboard was given, and it is not changed here.
+  const { usecase } = build({
+    employees: [{ employee_id: 805 }], // no account at all
+    identities: [805],
+    statutory: { 805: { pf: true, esi: true } },
+    salaries: { 805: "APPLIED" },
+    payroll: { 805: 2 }, // Cash
+  });
+  const rows = await usecase.list({});
+  assert.equal(rows[0].payroll_pending, false, "cash needs no account");
+  assert.equal(rows[0].bank_status, "NOT_PROVIDED");
+});
+
+test("EVERY REASON APPEARS AT MOST ONCE ACROSS ALL FOUR ITEMS", async () => {
+  const { usecase } = build({
+    employees: [{ employee_id: 806 }],
+    identities: [],
+    statutory: { 806: { pf: false, esi: false } },
+    salaries: {},
+    payroll: { 806: null },
+  });
+  const rows = await usecase.list({});
+  const missing = rows[0].hr_onboarding_missing;
+  // NO "bank" HERE, and that is the point: nobody has recorded how this
+  // employee is paid, so there is no way to say whether they need an account.
+  // The thing that IS outstanding - the unrecorded payment type - is reported
+  // once, by payroll, rather than twice under two names.
+  assert.deepEqual(missing, ["aadhaar", "statutory", "payroll"]);
+  assert.equal(new Set(missing).size, missing.length, "no reason is repeated");
+  assert.equal(rows[0].hr_onboarding_pending, missing.length > 0);
+});
+
+test("HR PENDING IS EXACTLY THE UNION OF THE FOUR, over every combination", async () => {
+  // The property the dashboard is specified on, checked exhaustively across
+  // the payment route as well: HR is pending if and only if at least one of
+  // Aadhaar, Bank, Statutory and Payroll is - and being paid in cash is not
+  // one of them.
+  for (const aadhaarDone of [false, true]) {
+    for (const bankDone of [false, true]) {
+      for (const statutoryDone of [false, true]) {
+        for (const payrollDone of [false, true]) {
+          for (const route of [1, 2, null]) {
+            const id = 900;
+            const { usecase } = build({
+              employees: [{ employee_id: id, ...(bankDone ? account : {}) }],
+              verifications: bankDone ? [verified(id)] : [],
+              identities: aadhaarDone ? [id] : [],
+              statutory: { [id]: { pf: statutoryDone, esi: statutoryDone } },
+              salaries: payrollDone ? { [id]: "APPLIED" } : {},
+              payroll: { [id]: route },
+            });
+            const row = (await asSensitive(usecase))[0];
+
+            const label = JSON.stringify({ aadhaarDone, bankDone, statutoryDone, payrollDone, route });
+            const four = [
+              row.aadhaar_status !== "VERIFIED",
+              row.bank_pending,
+              row.statutory_pending,
+              row.payroll_pending,
+            ];
+
+            assert.equal(
+              row.hr_onboarding_pending,
+              four.some(Boolean),
+              `HR pending must be the union ${label}`
+            );
+            assert.equal(
+              row.hr_onboarding_pending === false,
+              four.every((p) => !p),
+              `HR complete means all four complete ${label}`
+            );
+            // THE CASH MIGRATION IS NEVER ONE OF THE FOUR. Whatever else is
+            // true, being on cash cannot by itself make HR pending.
+            assert.equal(
+              row.cash_to_bank_pending,
+              route === null ? undefined : route === 2,
+              `cash flag follows the route alone, and is absent without one ${label}`
+            );
+            assert.ok(
+              !row.hr_onboarding_missing.includes("cash_to_bank"),
+              `the cash migration is not an HR reason ${label}`
+            );
+          }
+        }
+      }
+    }
+  }
+});
+
+/* ========================== the five specified semantic cases ========== */
+/**
+ * The exact table the dashboard was specified on, asserted case by case
+ * rather than inferred from the properties above - these are the answers
+ * somebody will check by hand against the screen.
+ */
+test("CASE 1 - paid by bank, account not verified", async () => {
+  const { usecase } = build({
+    employees: [{ employee_id: 910, ...account }],
+    verifications: [{ ...verified(910), status: "FAILED", name_match_verdict: null }],
+    identities: [910],
+    statutory: { 910: { pf: true, esi: true } },
+    salaries: { 910: "APPLIED" },
+    payroll: { 910: 1 },
+  });
+  const row = (await asSensitive(usecase))[0];
+  assert.equal(row.bank_pending, true, "Bank Pending = YES");
+  assert.equal(row.cash_to_bank_pending, false, "Cash to Bank = NO");
+  assert.equal(row.payroll_pending, true, "Payroll Pending = YES");
+  assert.equal(row.hr_onboarding_pending, true, "HR Pending = YES");
+  assert.deepEqual(row.payroll_missing, ["payment_account"]);
+});
+
+test("CASE 2 - paid in cash, everything else ready", async () => {
+  const { usecase } = build({
+    employees: [{ employee_id: 911 }], // no account, and none needed
+    identities: [911],
+    statutory: { 911: { pf: true, esi: true } },
+    salaries: { 911: "APPLIED" },
+    payroll: { 911: 2 },
+  });
+  const row = (await asSensitive(usecase))[0];
+  assert.equal(row.bank_pending, false, "Bank Pending = NO");
+  assert.equal(row.bank_section_status, "NOT_APPLICABLE", "and it is N/A, not Complete");
+  assert.equal(row.cash_to_bank_pending, true, "Cash to Bank = YES");
+  assert.equal(row.payroll_pending, false, "Payroll Pending = NO");
+  assert.equal(row.hr_onboarding_pending, false, "HR must NOT be pending merely for being cash");
+  assert.deepEqual(row.hr_onboarding_missing, []);
+});
+
+test("CASE 3 - paid in cash, no salary", async () => {
+  const { usecase } = build({
+    employees: [{ employee_id: 912 }],
+    identities: [912],
+    statutory: { 912: { pf: true, esi: true } },
+    salaries: {},
+    payroll: { 912: 2 },
+  });
+  const row = (await asSensitive(usecase))[0];
+  assert.equal(row.cash_to_bank_pending, true, "Cash to Bank = YES");
+  assert.equal(row.payroll_pending, true, "Payroll Pending = YES");
+  assert.equal(row.hr_onboarding_pending, true, "HR Pending = YES");
+  assert.deepEqual(row.payroll_missing, ["salary"]);
+  assert.deepEqual(row.hr_onboarding_missing, ["payroll"], "for payroll, not for cash");
+});
+
+test("CASE 4 - payment type not recorded", async () => {
+  const { usecase } = build({
+    employees: [{ employee_id: 913, ...account }],
+    verifications: [verified(913)],
+    identities: [913],
+    statutory: { 913: { pf: true, esi: true } },
+    salaries: { 913: "APPLIED" },
+    payroll: { 913: null },
+  });
+  const row = (await asSensitive(usecase))[0];
+  assert.equal(row.bank_pending, false, "Bank Pending = NO");
+  assert.equal(row.bank_section_status, "UNKNOWN", "there is no way to say yet");
+  assert.ok(!("cash_to_bank_pending" in row), "not false - nobody has said how they are paid");
+  assert.equal(row.payroll_pending, true, "Payroll Pending = YES");
+  assert.deepEqual(row.payroll_missing, ["payment_type"]);
+  assert.equal(row.hr_onboarding_pending, true, "HR Pending = YES");
+});
+
+test("CASE 5 - paid by bank, verified account, everything complete", async () => {
+  const { usecase } = build({
+    employees: [{ employee_id: 914, ...account }],
+    verifications: [verified(914)],
+    identities: [914],
+    statutory: { 914: { pf: true, esi: true } },
+    salaries: { 914: "APPLIED" },
+    payroll: { 914: 1 },
+  });
+  const row = (await asSensitive(usecase))[0];
+  assert.equal(row.bank_pending, false);
+  assert.equal(row.bank_section_status, "COMPLETE");
+  assert.equal(row.cash_to_bank_pending, false);
+  assert.equal(row.payroll_pending, false);
+  assert.equal(row.hr_onboarding_pending, false, "HR Complete");
+  assert.deepEqual(row.hr_onboarding_missing, []);
+});
+
+test("THE RAW BANK ANSWER IS UNCHANGED AND STILL REPORTED", async () => {
+  // `bank_status` / `bank_payroll_ready` are the C2 answer about the ACCOUNT,
+  // which the profile and the employee list render. The dashboard's
+  // route-aware question is a separate key, so neither had to change meaning
+  // for the other - and a cash employee's account, if they have one, is still
+  // described accurately.
+  const { usecase } = build({
+    employees: [{ employee_id: 915, ...account }],
+    verifications: [verified(915)],
+    statutory: { 915: { pf: true, esi: true } },
+    payroll: { 915: 2 }, // cash, but an account exists and is verified
+  });
+  const row = (await asSensitive(usecase))[0];
+  assert.equal(row.bank_status, "VERIFIED");
+  assert.equal(row.bank_payroll_ready, true);
+  assert.equal(row.bank_section_status, "NOT_APPLICABLE", "they are not paid that way");
+  assert.equal(row.bank_pending, false);
+});
+
+test("statutory_pending is pf OR esi, and NOT_APPLICABLE is not pending", async () => {
+  const cases = [
+    [{ pf: true, esi: true }, false],
+    [{ pf: true, esi: false }, true],
+    [{ pf: false, esi: true }, true],
+    [{ pf: false, esi: false }, true],
+    // Recorded as "not in the scheme" is a decision, so it is finished.
+    [{ pf: true, esi: true, pfNo: true, esiNo: true }, false],
+  ];
+  for (const [decision, expected] of cases) {
+    const { usecase } = build({
+      employees: [{ employee_id: 807 }],
+      statutory: { 807: decision },
+    });
+    const rows = await usecase.list({});
+    assert.equal(rows[0].statutory_pending, expected, JSON.stringify(decision));
+    // It cannot disagree with the two columns it is derived from.
+    assert.equal(
+      rows[0].statutory_pending,
+      rows[0].pf_status === "PENDING" || rows[0].esi_status === "PENDING",
+      JSON.stringify(decision)
+    );
+  }
+});
+
+test("A SERVER WITH NO SALARY MODULE SAYS SO, rather than reporting payroll finished", async () => {
+  // The same rule every other key here follows: not wired is omitted, never
+  // guessed - and an unanswerable payroll item leaves the overall flag
+  // unanswered too, because a union missing a term is not the union.
+  const { usecase } = build({ employees: [{ employee_id: 808 }] }); // no statutory => no repos
+  const rows = await usecase.list({});
+  assert.ok(!("payroll_pending" in rows[0]), "an unknown state is not a false one");
+  assert.ok(!("payroll_missing" in rows[0]));
+  assert.ok(!("hr_onboarding_pending" in rows[0]));
+});
+
+test("the payroll reads carry no money, no breakup and no effective date out", async () => {
+  const { usecase } = build({
+    employees: [{ employee_id: 809, ...account }],
+    verifications: [verified(809)],
+    identities: [809],
+    statutory: { 809: { pf: true, esi: true } },
+    salaries: { 809: "APPLIED" },
+  });
+  const serialised = JSON.stringify(await usecase.list({}));
+  for (const forbidden of [
+    "monthly_gross", "monthly_ctc", "basic", "hra", "salary_id", "effective_from",
+    "employee_pf", "employer_pf_total", "statutory_snapshot", "unresolved_notes",
+    "payment_type",
+  ]) {
+    assert.ok(!serialised.includes(forbidden), `${forbidden} must not appear in the summary`);
+  }
+});
+
+/* ============== the payment route is sensitive, and is gated like one === */
+/**
+ * `payment_type` is B3-sensitive, so "paid in cash" goes only to a caller
+ * holding `view_employee_sensitive`. What matters as much as withholding it
+ * is HOW it is withheld: absent, never false - a false would let a screen
+ * count zero and announce that nobody is on cash.
+ */
+const cashEmployee = (id) => ({
+  employees: [{ employee_id: id }],
+  identities: [id],
+  statutory: { [id]: { pf: true, esi: true } },
+  salaries: { [id]: "APPLIED" },
+  payroll: { [id]: 2 },
+});
+
+test("WITHOUT view_employee_sensitive THE CASH FLAG IS ABSENT, NOT FALSE", async () => {
+  const { usecase } = build(cashEmployee(920));
+  const row = (await usecase.list({}))[0];
+  assert.ok(
+    !("cash_to_bank_pending" in row),
+    "a false here would be counted as 'nobody is on cash', which is worse than no card"
+  );
+  // The route is not named anywhere else either: NOT_APPLICABLE says "paid in
+  // cash" in as many words, so it collapses to UNKNOWN for this caller.
+  assert.equal(row.bank_section_status, "UNKNOWN");
+  assert.ok(!JSON.stringify(row).includes("NOT_APPLICABLE"));
+  assert.ok(!JSON.stringify(row).includes("payment_type"));
+});
+
+test("WITH view_employee_sensitive IT IS DISCLOSED IN FULL", async () => {
+  const { usecase } = build(cashEmployee(921));
+  const row = (await asSensitive(usecase))[0];
+  assert.equal(row.cash_to_bank_pending, true);
+  assert.equal(row.bank_section_status, "NOT_APPLICABLE");
+});
+
+test("THE PERMISSION CHANGES NOTHING ELSE ON THE ROW", async () => {
+  // The gate withholds a reason, never a count: Bank, Statutory, Payroll and
+  // HR must be identical for both callers, or two people looking at the same
+  // dashboard would see different numbers.
+  const fixtures = [
+    ["cash, finished", cashEmployee(922)],
+    ["bank, unverified", {
+      employees: [{ employee_id: 923, ...account }],
+      verifications: [{ ...verified(923), status: "FAILED", name_match_verdict: null }],
+      identities: [923],
+      statutory: { 923: { pf: true, esi: true } },
+      salaries: { 923: "APPLIED" },
+      payroll: { 923: 1 },
+    }],
+    ["route unrecorded", {
+      employees: [{ employee_id: 924, ...account }],
+      verifications: [verified(924)],
+      identities: [924],
+      statutory: { 924: { pf: true, esi: true } },
+      salaries: { 924: "APPLIED" },
+      payroll: { 924: null },
+    }],
+  ];
+
+  for (const [label, fixture] of fixtures) {
+    const plain = (await build(fixture).usecase.list({}))[0];
+    const sensitive = (await asSensitive(build(fixture).usecase))[0];
+    for (const key of [
+      "bank_pending", "statutory_pending", "payroll_pending",
+      "hr_onboarding_pending", "bank_status", "bank_payroll_ready", "aadhaar_status",
+    ]) {
+      assert.deepEqual(plain[key], sensitive[key], `${label}: ${key} must not depend on the permission`);
+    }
+    assert.deepEqual(
+      plain.hr_onboarding_missing,
+      sensitive.hr_onboarding_missing,
+      `${label}: HR reasons must not depend on the permission`
+    );
+  }
+});
+
+test("A CASH EMPLOYEE IS STILL NOT BANK PENDING FOR AN UNPRIVILEGED CALLER", async () => {
+  // The functional rule survives the gate: the Bank card shows the same
+  // number to everyone, only the reason behind it is withheld.
+  const { usecase } = build(cashEmployee(925));
+  const row = (await usecase.list({}))[0];
+  assert.equal(row.bank_pending, false);
+  assert.equal(row.hr_onboarding_pending, false, "HR is still the union of the four");
+  assert.deepEqual(row.hr_onboarding_missing, []);
 });

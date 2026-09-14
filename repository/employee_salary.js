@@ -253,6 +253,58 @@ class EmployeeSalaryRepository {
   }
 
   /**
+   * THE LIVE SALARY FOR MANY EMPLOYEES AT ONCE - the bulk form of
+   * `getCurrentSalary`, for the Onboarding / Pending HR queue's Payroll
+   * column.
+   *
+   * SAME RULE, ONE QUERY. "Current" is decided exactly as `getCurrentSalary`
+   * decides it, and the comment there is the definition: PENDING is never
+   * current because it has not been agreed, REJECTED is never current because
+   * it was refused, and an APPROVED row dated in the future is not current
+   * yet. Re-stating the rule in a second place is how a queue and a profile
+   * start disagreeing about whether somebody is on payroll, so the WHERE
+   * clause here is the same three conditions.
+   *
+   * THE PER-EMPLOYEE PICK IS THE SAME TIE-BREAK TOO, and it is the same
+   * clause: each employee's row is the one whose `salary_id` equals the
+   * `ORDER BY effective_from DESC, salary_id DESC LIMIT 1` that
+   * `getCurrentSalary` runs for that employee. Two approved rows sharing an
+   * effective date therefore resolve to the later `salary_id` here exactly as
+   * they do there, and the subquery is a copy of that ordering rather than a
+   * re-derivation of it.
+   *
+   * IT RETURNS TWO SCALARS AND NO MONEY. `ctc_status` says whether the
+   * calculation finished; no amount, no breakup, no statutory snapshot and no
+   * unresolved note leaves this method. The caller turns it into "payroll is
+   * set up: yes or no", and a queue needs a badge rather than a payslip.
+   */
+  getCurrentSalaryStatusMany(employeeIds, asOfDate) {
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0) return Promise.resolve([]);
+    const sql = `
+      SELECT s.\`employee_id\`, s.\`ctc_status\`
+        FROM \`employee_salary\` s
+       WHERE s.\`employee_id\` IN (?)
+         AND s.\`status\` = ?
+         AND s.\`effective_from\` <= ?
+         AND s.\`salary_id\` = (
+           SELECT s2.\`salary_id\`
+             FROM \`employee_salary\` s2
+            WHERE s2.\`employee_id\` = s.\`employee_id\`
+              AND s2.\`status\` = ?
+              AND s2.\`effective_from\` <= ?
+            ORDER BY s2.\`effective_from\` DESC, s2.\`salary_id\` DESC
+            LIMIT 1
+         )`;
+    return this._query("GET-CURRENT-STATUS-MANY", sql, [
+      employeeIds,
+      STATUS.APPROVED,
+      asOfDate,
+      STATUS.APPROVED,
+      asOfDate,
+    ]);
+  }
+
+  /**
    * The non-rejected revision already sitting at an effective date, if any.
    *
    * The unique index is what actually guarantees there is at most one; this
