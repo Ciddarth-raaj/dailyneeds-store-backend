@@ -1467,8 +1467,31 @@ describe("checking for a possible duplicate before creating without Aadhaar", ()
       await existing(uc);
       const res = await search(uc, OTHER_BRANCH);
       assert.equal(res.possible_duplicates, true, "the caller is told there IS one");
-      assert.equal(res.count, 1);
-      assert.equal(res.restricted_count, 1);
+    });
+
+    it("BUT NOT HOW MANY - `count` describes `matches` and nothing else", async () => {
+      const { world, uc } = build();
+      await existing(uc);
+      // A second and a third match in that same other branch. If the count
+      // moved, a manager could learn by arithmetic exactly what leaving them
+      // out of `matches` withholds.
+      await existing(uc, { employee_name: "Ramesh Kumaar" });
+      await existing(uc, { employee_name: "Ramesh Kumarr" });
+      assert.equal(world.employees.size, 3);
+
+      const res = await search(uc, OTHER_BRANCH);
+      assert.equal(res.count, 0, "no arithmetic reveals the restricted matches");
+      assert.deepEqual(res.matches, []);
+      assert.equal(res.possible_duplicates, true, "and yet the caller is still told");
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(res, "restricted_count"),
+        false,
+        "the field does not exist at all"
+      );
+      // One match or three, the answer a scoped caller sees is identical.
+      const { uc: solo } = build();
+      await existing(solo);
+      assert.deepEqual(res, await search(solo, OTHER_BRANCH));
     });
 
     it("is reported as 'contact HR', with the plain message", async () => {
@@ -1506,7 +1529,7 @@ describe("checking for a possible duplicate before creating without Aadhaar", ()
       const { uc } = build();
       const them = await existing(uc);
       const res = await search(uc, THEIR_BRANCH);
-      assert.equal(res.restricted_count, 0);
+      assert.equal(res.count, 1);
       assert.equal(res.matches[0].employee_id, them.employee_id);
       assert.equal(res.suggested_action, "review");
       assert.match(res.message, /Review before creating a new employee ID/);
@@ -1516,7 +1539,7 @@ describe("checking for a possible duplicate before creating without Aadhaar", ()
       const { uc } = build();
       const them = await existing(uc);
       const res = await search(uc, null);
-      assert.equal(res.restricted_count, 0);
+      assert.equal(res.count, 1);
       assert.equal(res.matches[0].employee_id, them.employee_id);
     });
 
@@ -1531,7 +1554,6 @@ describe("checking for a possible duplicate before creating without Aadhaar", ()
         { visibleStoreIds: OTHER_BRANCH }
       );
       assert.equal(world.employees.size, 1, "the coincidence is a real row in the table");
-      assert.equal(res.restricted_count, 0);
       assert.equal(res.possible_duplicates, false);
       assert.equal(res.suggested_action, "create");
       assert.equal(res.message, "No possible duplicate found.");
@@ -1542,7 +1564,8 @@ describe("checking for a possible duplicate before creating without Aadhaar", ()
       await existing(uc);
       const res = await search(uc, []);
       assert.equal(res.matches.length, 0);
-      assert.equal(res.restricted_count, 1);
+      assert.equal(res.count, 0);
+      assert.equal(res.possible_duplicates, true);
       assert.equal(res.suggested_action, "contact_hr");
     });
   });

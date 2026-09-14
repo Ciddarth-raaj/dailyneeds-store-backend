@@ -876,13 +876,17 @@ class EmployeeMasterUsecase {
    *   outside them                   the FACT that one exists, and nothing
    *                                  else. No employee id, no name, no
    *                                  branch, no designation, no employment
-   *                                  state, no matched-on reason. The screen
-   *                                  is told to send the manager to HR, who
-   *                                  are company-wide and can see the record.
+   *                                  state, no matched-on reason, AND NO
+   *                                  COUNT. The screen is told to send the
+   *                                  manager to HR, who are company-wide and
+   *                                  can see the record.
    *
-   * A COUNT IS THE MOST THAT CROSSES THE BOUNDARY, and it is here because the
-   * message would otherwise be unactionable - "something exists" with no sense
-   * of whether it is one strong match or several weak ones. It names nobody.
+   * NOT EVEN HOW MANY. A store manager needs to know that somebody already
+   * exists and that HR own it; whether one, two or three people outside their
+   * branch matched is a fact about other branches. `count` therefore describes
+   * `matches` alone - a restricted-only answer is `possible_duplicates: true`
+   * with `count: 0` - because a count that included them would disclose by
+   * arithmetic precisely what leaving them out of `matches` withholds.
    *
    * @param visibleStoreIds null for a company-wide caller (HR, an
    *   administrator, an internal caller); otherwise the branches whose matches
@@ -927,9 +931,17 @@ class EmployeeMasterUsecase {
     // a shared birthday and nothing else is dropped - so counting raw rows
     // would report duplicates the caller's own branch would not have been
     // shown either.
-    const restricted = rankCandidates(ranked, restrictedRows).length;
+    // Reduced to a BOOLEAN, not a count. A store manager needs to know that
+    // somebody already exists and that HR own it; how MANY people outside
+    // their branch matched is a fact about other branches and is not theirs.
+    //
+    // It is still RANKED before being reduced: `rankCandidates` is what
+    // decides whether a candidate is a real match or a coincidence - a shared
+    // birthday and nothing else is dropped - so testing the raw rows would
+    // send a manager to HR over somebody their own branch would never have
+    // been shown either.
+    const restricted = rankCandidates(ranked, restrictedRows).length > 0;
     const inactive = matches.filter((m) => !m.is_active);
-    const total = matches.length + restricted;
 
     return {
       code: 200,
@@ -939,14 +951,16 @@ class EmployeeMasterUsecase {
         primary_contact_number: contact ? true : false,
         dob: dob ? true : false,
       },
-      possible_duplicates: total > 0,
+      possible_duplicates: matches.length > 0 || restricted,
       // Always false. Said explicitly so C3 cannot mistake this for a gate.
       blocking: false,
-      count: total,
-      // How many of `count` are in branches this caller may not see. The
-      // screen shows the HR message when this is non-zero; `matches` never
-      // contains them.
-      restricted_count: restricted,
+      // `count` DESCRIBES `matches` AND NOTHING ELSE. Counting the restricted
+      // ones into it would disclose by arithmetic exactly what leaving them
+      // out of `matches` withholds - a caller seeing `count: 3, matches: []`
+      // has been told how many people outside their branch matched. So a
+      // restricted-only answer is `possible_duplicates: true` with `count: 0`,
+      // and the message is what carries the finding.
+      count: matches.length,
       suggested_action: inactive.length
         ? "rejoin"
         : matches.length

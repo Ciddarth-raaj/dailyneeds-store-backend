@@ -141,23 +141,39 @@ So the search stays company-wide and the ANSWER is scoped:
 | outside them | that it exists, and nothing else: `suggested_action: "contact_hr"` and `"Employee already exists. Please contact HR."` |
 
 A restricted match carries no employee id, no name, no branch, no designation,
-no employment state and no matched-on reason. The partition happens on the raw
-rows BEFORE scoring, so a restricted candidate never becomes a match object at
-all - stripping fields off one afterwards would be a forgotten key away from a
-leak. The only thing that crosses the boundary is `restricted_count`, which
-names nobody and is there so the message is actionable rather than vague.
+no employment state, no matched-on reason **and no count**. The partition
+happens on the raw rows BEFORE scoring, so a restricted candidate never becomes
+a match object at all - stripping fields off one afterwards would be a
+forgotten key away from a leak.
+
+`count` describes `matches` alone, so a restricted-only answer is
+`possible_duplicates: true` with `count: 0` and the message carrying the
+finding. A count that included the restricted matches would disclose by
+arithmetic exactly what leaving them out of `matches` withholds: a manager
+seeing `count: 3, matches: []` has been told how many people outside their
+branch matched, which is a fact about other branches and not theirs. What they
+need is that somebody exists and that HR own it.
+
+A restricted candidate is still RANKED before being reduced to that boolean, so
+a coincidence - a shared birthday and nothing else - is dropped rather than
+sending a manager to HR over somebody their own branch would never have been
+shown.
 
 ## Rollback
 
-`migrations/.../20260914120000-employee-branch-scope-down.sql` removes the key.
+`migrations/.../20261002120000-employee-branch-scope-down.sql` removes the key.
 
-The timestamp is the date this was written (14-09-2026). Several migrations
-already in the directory carry LATER dates - `20260929`, `20260930`,
-`20261001` - so this one does not sort last. That is safe here and worth
-saying out loud: `db-migrate` runs whatever is not recorded in its own
-`migrations` table, so an environment that has already applied those still
-applies this one; and this migration declares one permission key and writes
-one grant row, depending on nothing any other migration does.
+THE PREFIX IS AN ORDERING IDENTIFIER, NOT A CALENDAR DATE. It is the next
+number after the current highest (`20261001120000`), so this migration sorts
+LAST and `db-migrate up` applies it after everything already in the directory.
+Dating it to the day it was written (14-09-2026) would have placed it before
+three migrations that are already applied in production - relying on
+`db-migrate` backfilling an earlier-numbered file it has not recorded, which is
+CLI behaviour this repository does not pin: `package.json` carries
+`db-migrate-mysql`, the driver, and not the `db-migrate` CLI itself. An
+authorization fix should not depend on an assumed behaviour of an unpinned
+tool. (It would also have collided with the existing
+`20260914120000-m1-employee-master-sections`.)
 
 Rolling back the SQL alone fails CLOSED, not open: with the key gone and the
 code still deployed, only administrators are company-wide and HR is confined to
