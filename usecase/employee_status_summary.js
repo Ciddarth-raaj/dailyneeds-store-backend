@@ -71,6 +71,35 @@ const { EmployeeBankUsecase } = require("./employee_bank");
  * "NOT_PROVIDED"` has always carried on this endpoint, under the same
  * `view_employees` permission. They are omitted entirely, rather than guessed
  * at, on a server where the employee-master repository is not wired.
+ *
+ * PF AND ESI, SEPARATELY - for the Onboarding / Pending HR queue.
+ *
+ * `hr_onboarding_pending` answers "is anything outstanding", which is the
+ * right question for a badge on a list and the wrong one for a work queue:
+ * somebody chasing PF has no use for a flag that also goes up for a missing
+ * bank account. So the same statutory read now also reports each scheme on
+ * its own, as `pf_status` / `esi_status`, in three values:
+ *
+ *   COMPLETE        the decision has been recorded and the employee is in the
+ *                   scheme
+ *   PENDING         nobody has been asked yet (the flag is NULL)
+ *   NOT_APPLICABLE  asked, and the employee is not in the scheme
+ *
+ * THE RULE IS THE EXISTING ONE, NOT A NEW DEFINITION OF COMPLIANCE. It is the
+ * very `pf_applicable IS NOT NULL` test `hr_onboarding_pending` is already
+ * built on, split per scheme; the UAN / PF number / ESI number are still NOT
+ * part of it, exactly as the repository comment explains. So a queue built on
+ * these can never disagree with the badge beside it, and `NOT_APPLICABLE` is
+ * simply the "decided" half named.
+ *
+ * NOT_APPLICABLE IS ONLY TOLD TO A CALLER WHO MAY SEE THE COLUMN. Naming it
+ * discloses WHICH answer was recorded, and `pf_applicable` / `esi_applicable`
+ * are sensitive under B3. So it is sent only with `view_employee_sensitive`;
+ * without that key the caller sees COMPLETE for any recorded decision - the
+ * same "outstanding or not" they have always been told, and enough to run the
+ * queue. `filterResponse` is not being routed around: these keys carry no
+ * sensitive column name and no sensitive value, and the one inference that
+ * would be sensitive is withheld here rather than stripped there.
  */
 
 class EmployeeStatusSummaryUsecase {
@@ -105,10 +134,28 @@ class EmployeeStatusSummaryUsecase {
   }
 
   /**
+   * One scheme's status, from the SAME decision the flag above is built on.
+   *
+   * `decided` false is PENDING - nobody has been asked. `decided` true is
+   * COMPLETE, or NOT_APPLICABLE where the recorded answer was "no" AND the
+   * caller may be told which answer it was. Collapsing NOT_APPLICABLE into
+   * COMPLETE for everyone else is not a lie about completeness: both mean
+   * "there is nothing outstanding here", which is the whole question the
+   * queue asks.
+   */
+  static schemeStatus(decided, notApplicable, { disclose = false } = {}) {
+    if (!decided) return "PENDING";
+    if (disclose && notApplicable) return "NOT_APPLICABLE";
+    return "COMPLETE";
+  }
+
+  /**
    * @param filters the same `{ store_ids, designation_ids }` the employee
    *   list accepts, passed through unchanged.
+   * @param options `{ disclosePfEsiApplicability }` - true only for a caller
+   *   holding `view_employee_sensitive`; see the NOT_APPLICABLE note above.
    */
-  async list(filters) {
+  async list(filters, { disclosePfEsiApplicability = false } = {}) {
     const employees = await this.employees.get(filters || {});
 
     const ids = [];
@@ -126,10 +173,17 @@ class EmployeeStatusSummaryUsecase {
 
     return ids.map((employee_id) => {
       const b = bank.get(employee_id) || { status: "NOT_PROVIDED", bank_payroll_ready: false };
+      const decisions = statutory
+        ? statutory.get(employee_id) || { pfDecided: false, esiDecided: false }
+        : null;
       const onboarding = EmployeeStatusSummaryUsecase.hrOnboardingState({
-        statutory: statutory ? statutory.get(employee_id) || { pfDecided: false, esiDecided: false } : null,
+        statutory: decisions,
         bankStatus: b.status,
       });
+      const scheme = (decided, notApplicable) =>
+        EmployeeStatusSummaryUsecase.schemeStatus(decided, notApplicable, {
+          disclose: disclosePfEsiApplicability,
+        });
       return {
         employee_id,
         aadhaar_status: aadhaarIds.has(employee_id) ? "VERIFIED" : "PENDING",
@@ -139,6 +193,14 @@ class EmployeeStatusSummaryUsecase {
           ? {
               hr_onboarding_pending: onboarding.pending,
               hr_onboarding_missing: onboarding.missing,
+            }
+          : {}),
+        // Omitted, never guessed, where the statutory read is not wired - the
+        // same rule the two keys above follow.
+        ...(decisions
+          ? {
+              pf_status: scheme(decisions.pfDecided, decisions.pfNotApplicable),
+              esi_status: scheme(decisions.esiDecided, decisions.esiNotApplicable),
             }
           : {}),
       };
@@ -158,6 +220,8 @@ class EmployeeStatusSummaryUsecase {
       out.set(Number(row.employee_id), {
         pfDecided: Boolean(Number(row.pf_decided)),
         esiDecided: Boolean(Number(row.esi_decided)),
+        pfNotApplicable: Boolean(Number(row.pf_not_applicable)),
+        esiNotApplicable: Boolean(Number(row.esi_not_applicable)),
       });
     }
     return out;

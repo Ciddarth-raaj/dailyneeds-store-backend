@@ -316,7 +316,17 @@ class EmployeeMasterRoutes {
         const isValid = Joi.validate(req.query, schema);
         if (isValid.error !== null) throw isValid.error;
 
-        res.json(await this.statusSummary.list(req.query));
+        // `pf_status` / `esi_status` may name NOT_APPLICABLE only for a caller
+        // who is allowed to see the applicability columns themselves. Everyone
+        // else is told COMPLETE for a recorded decision, which is the same
+        // "outstanding or not" this endpoint has always disclosed. See the
+        // usecase for why the choice is made here rather than by B3's
+        // `filterResponse`, which has no sensitive key to strip.
+        const disclosePfEsiApplicability = await this.permissions.has(
+          req,
+          P.VIEW_EMPLOYEE_SENSITIVE
+        );
+        res.json(await this.statusSummary.list(req.query, { disclosePfEsiApplicability }));
       } catch (err) {
         this._fail(res, err);
       }

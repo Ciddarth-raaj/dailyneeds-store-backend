@@ -82,6 +82,10 @@ function build({
               employee_id: id,
               pf_decided: statutory[id].pf ? 1 : 0,
               esi_decided: statutory[id].esi ? 1 : 0,
+              // `pf_applicable = 0` / `esi_applicable = 0`, answered in SQL.
+              // Only meaningful where the decision was made at all.
+              pf_not_applicable: statutory[id].pfNo ? 1 : 0,
+              esi_not_applicable: statutory[id].esiNo ? 1 : 0,
             }));
         },
       }
@@ -492,11 +496,78 @@ test("the derivation discloses whether a decision exists, never what it was", as
     "bank_payroll_ready",
     "bank_status",
     "employee_id",
+    "esi_status",
     "hr_onboarding_missing",
     "hr_onboarding_pending",
+    "pf_status",
   ]);
   // One bulk read for the whole list, like every other read here.
   assert.equal(queries.filter(([kind]) => kind === "statutory").length, 1);
+});
+
+/* ================= the per-scheme statuses the Pending HR queue runs on = */
+
+test("PF and ESI are reported separately, from the SAME decision the flag uses", async () => {
+  const { usecase } = build({
+    employees: [{ employee_id: 710, ...account }],
+    verifications: [verified(710)],
+    statutory: { 710: { pf: true, esi: false } },
+  });
+  const rows = await usecase.list({});
+  assert.equal(rows[0].pf_status, "COMPLETE");
+  assert.equal(rows[0].esi_status, "PENDING");
+  // And they cannot disagree with the flag beside them: one scheme
+  // undecided is exactly what makes the statutory section outstanding.
+  assert.equal(rows[0].hr_onboarding_pending, true);
+  assert.deepEqual(rows[0].hr_onboarding_missing, ["statutory"]);
+});
+
+test("NOT APPLICABLE IS A COMPLETED DECISION, and is named only to a caller who may see it", async () => {
+  const employees = [{ employee_id: 711, ...account }];
+  const verifications = [verified(711)];
+  const statutory = { 711: { pf: true, esi: true, pfNo: true, esiNo: true } };
+
+  // With `view_employee_sensitive`: the recorded answer is named, which is
+  // what lets the queue show "Not applicable" instead of "Complete".
+  const disclosed = await build({ employees, verifications, statutory }).usecase.list(
+    {},
+    { disclosePfEsiApplicability: true }
+  );
+  assert.equal(disclosed[0].pf_status, "NOT_APPLICABLE");
+  assert.equal(disclosed[0].esi_status, "NOT_APPLICABLE");
+
+  // Without it: still not outstanding, but WHICH answer was recorded is not
+  // disclosed - `pf_applicable` and `esi_applicable` are sensitive under B3.
+  const plain = await build({ employees, verifications, statutory }).usecase.list({});
+  assert.equal(plain[0].pf_status, "COMPLETE");
+  assert.equal(plain[0].esi_status, "COMPLETE");
+
+  // Either way, an employee in neither scheme is FINISHED, not permanently
+  // outstanding - which is the whole reason the flags exist.
+  assert.equal(disclosed[0].hr_onboarding_pending, false);
+  assert.equal(plain[0].hr_onboarding_pending, false);
+});
+
+test("a server that cannot derive the statutory decision omits PF and ESI too", async () => {
+  // `statutory: undefined` means no employee-master repository is wired. A
+  // missing key must never read as "nothing outstanding".
+  const { usecase } = build({ employees: [{ employee_id: 712 }] });
+  const rows = await usecase.list({}, { disclosePfEsiApplicability: true });
+  assert.ok(!("pf_status" in rows[0]));
+  assert.ok(!("esi_status" in rows[0]));
+  assert.ok(!("hr_onboarding_pending" in rows[0]));
+});
+
+test("nothing undecided is ever NOT_APPLICABLE, however it is asked", async () => {
+  // A NULL flag is "nobody has been asked", and the disclosure option cannot
+  // turn that into an answer.
+  const { usecase } = build({
+    employees: [{ employee_id: 713 }],
+    statutory: { 713: { pf: false, esi: false, pfNo: true, esiNo: true } },
+  });
+  const rows = await usecase.list({}, { disclosePfEsiApplicability: true });
+  assert.equal(rows[0].pf_status, "PENDING");
+  assert.equal(rows[0].esi_status, "PENDING");
 });
 
 test("it stays one query per read at 600 employees, statutory included", async () => {

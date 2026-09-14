@@ -388,6 +388,15 @@ class EmployeeMasterRepository {
    * "recorded" comes back. A number is deliberately NOT part of the test -
    * a UAN is routinely pending for weeks after joining, and the profile
    * already treats a missing one as ordinary rather than outstanding.
+   *
+   * THE `*_not_applicable` PAIR IS THE SAME KIND OF FACT, ONE STEP FINER.
+   * The Pending HR queue has to distinguish "nobody has been asked" from
+   * "asked, and this employee is not in the scheme", because only the first
+   * is work for somebody. It is still a comparison made in SQL - the column
+   * value itself never leaves the database - but it DOES disclose which of
+   * the two answers was given, so the usecase above only passes it on to a
+   * caller holding `view_employee_sensitive`. Everyone else sees the same
+   * "decided / not decided" the flag pair has always carried.
    */
   async getStatutoryDecisionsMany(employeeIds) {
     if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
@@ -395,7 +404,9 @@ class EmployeeMasterRepository {
       "GET-STATUTORY-DECISIONS-MANY",
       `SELECT employee_id,
               (pf_applicable IS NOT NULL)  AS pf_decided,
-              (esi_applicable IS NOT NULL) AS esi_decided
+              (esi_applicable IS NOT NULL) AS esi_decided,
+              (pf_applicable = 0)          AS pf_not_applicable,
+              (esi_applicable = 0)         AS esi_not_applicable
          FROM new_employee WHERE employee_id IN (?)`,
       [employeeIds]
     );
