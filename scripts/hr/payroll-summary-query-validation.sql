@@ -263,56 +263,112 @@ SELECT COUNT(*) AS employees_with_a_tie_on_their_latest_eligible_date
     HAVING COUNT(*) > 1
   ) ties;
 
--- --------------- 3. the three exclusions the rule depends on -------------
--- PENDING is never current, REJECTED is never current, and a future-dated
--- approval is not current yet. These count the employees each rule actually
--- changes the answer for - they are the rows a mistake would show up in.
+-- ------------- 3. the payroll states, as the dashboard sees them ---------
+-- PENDING is never current, REJECTED is never current, a future-dated
+-- approval is not current yet, and a live salary that could not be costed is
+-- not a finished payroll setup. These count the employees each rule actually
+-- changes the answer for - the rows a mistake would show up in.
 --
--- SCOPED TO :IDS, because of what the comment below them claims. "Each of
--- these must read Payroll Pending on the dashboard" is only true of employees
--- the dashboard actually has: counting a resigned employee's abandoned
--- PENDING proposal here would produce a number that can never be reconciled
--- with the screen, and a reviewer comparing the two would be chasing a
--- discrepancy that is not one. The employee being evaluated comes from :IDS;
--- the NOT EXISTS beside it stays per-employee, since it asks about that same
--- employee's own rows.
+-- SCOPED TWICE: TO :IDS AND TO ACTIVE EMPLOYEES. The closing line below
+-- claims these must read Payroll Pending on the dashboard, and that is only
+-- true of employees the dashboard actually counts - which is `status = 1`,
+-- not merely "in the directory". A resigned employee's abandoned proposal
+-- would otherwise produce a number that can never be reconciled with the
+-- screen, and a reviewer comparing the two would chase a discrepancy that is
+-- not one. Every count below is driven FROM `new_employee`, so the two
+-- scopes are applied once, uniformly, and one row is counted per employee.
+--
+-- The salary history itself is untouched: these look at whichever rows an
+-- employee has, and only the POPULATION is narrowed.
+--
+-- WHAT EACH ONE MEANS, and the cases they were checked against:
+--
+--   pending_only          active dashboard employee with PENDING proposals
+--                         and no live APPROVED salary effective today
+--   rejected_only         the same, with REJECTED revisions
+--   future_approved_only  the same, with APPROVED rows dated in the future
+--                         (case D: they are Payroll Pending, because nothing
+--                         is live today)
+--   live_but_uncosted     their CURRENT live salary could not be costed
+--                         (case B). An employee whose OLD revision was
+--                         uncosted but whose current one is APPLIED is NOT
+--                         counted (case A) - see the note on that query.
+--
+--   case C: an employee with `status <> 1` contributes to none of them,
+--           whatever their salary rows say.
 --
 -- Informational: these are real business states and are expected to be
 -- non-zero. Their value is as a cross-check against section 6 and the screen.
-SELECT 'pending_only'  AS population,
-       COUNT(DISTINCT employee_id) AS employees
-  FROM `employee_salary` s
- WHERE s.`employee_id` IN (:IDS)
-   AND s.`status` = 'PENDING'
+SELECT 'pending_only' AS population, COUNT(*) AS employees
+  FROM `new_employee` ne
+ WHERE ne.`employee_id` IN (:IDS)
+   AND ne.`status` = 1
+   AND EXISTS (SELECT 1 FROM `employee_salary` s
+                WHERE s.`employee_id` = ne.`employee_id`
+                  AND s.`status` = 'PENDING')
    AND NOT EXISTS (SELECT 1 FROM `employee_salary` x
-                    WHERE x.employee_id = s.employee_id AND x.status = 'APPROVED'
-                      AND x.effective_from <= CURDATE())
+                    WHERE x.`employee_id` = ne.`employee_id`
+                      AND x.`status` = 'APPROVED'
+                      AND x.`effective_from` <= CURDATE())
 UNION ALL
-SELECT 'rejected_only', COUNT(DISTINCT employee_id)
-  FROM `employee_salary` s
- WHERE s.`employee_id` IN (:IDS)
-   AND s.`status` = 'REJECTED'
+SELECT 'rejected_only', COUNT(*)
+  FROM `new_employee` ne
+ WHERE ne.`employee_id` IN (:IDS)
+   AND ne.`status` = 1
+   AND EXISTS (SELECT 1 FROM `employee_salary` s
+                WHERE s.`employee_id` = ne.`employee_id`
+                  AND s.`status` = 'REJECTED')
    AND NOT EXISTS (SELECT 1 FROM `employee_salary` x
-                    WHERE x.employee_id = s.employee_id AND x.status = 'APPROVED'
-                      AND x.effective_from <= CURDATE())
+                    WHERE x.`employee_id` = ne.`employee_id`
+                      AND x.`status` = 'APPROVED'
+                      AND x.`effective_from` <= CURDATE())
 UNION ALL
-SELECT 'future_approved_only', COUNT(DISTINCT employee_id)
-  FROM `employee_salary` s
- WHERE s.`employee_id` IN (:IDS)
-   AND s.`status` = 'APPROVED' AND s.`effective_from` > CURDATE()
+SELECT 'future_approved_only', COUNT(*)
+  FROM `new_employee` ne
+ WHERE ne.`employee_id` IN (:IDS)
+   AND ne.`status` = 1
+   AND EXISTS (SELECT 1 FROM `employee_salary` s
+                WHERE s.`employee_id` = ne.`employee_id`
+                  AND s.`status` = 'APPROVED'
+                  AND s.`effective_from` > CURDATE())
    AND NOT EXISTS (SELECT 1 FROM `employee_salary` x
-                    WHERE x.employee_id = s.employee_id AND x.status = 'APPROVED'
-                      AND x.effective_from <= CURDATE())
+                    WHERE x.`employee_id` = ne.`employee_id`
+                      AND x.`status` = 'APPROVED'
+                      AND x.`effective_from` <= CURDATE())
 UNION ALL
-SELECT 'live_but_uncosted', COUNT(DISTINCT employee_id)
-  FROM `employee_salary` s
- WHERE s.`employee_id` IN (:IDS)
-   AND s.`status` = 'APPROVED' AND s.`effective_from` <= CURDATE()
-   AND s.`ctc_status` <> 'APPLIED';
+-- THE CURRENT LIVE SALARY, AND ONLY IT.
+--
+-- This used to read `status = 'APPROVED' AND effective_from <= CURDATE() AND
+-- ctc_status <> 'APPLIED'` over the salary table, which counts an employee
+-- whose OLD revision could not be costed even when their CURRENT one is
+-- APPLIED. Payroll does not look at superseded revisions, so that was a false
+-- Payroll Pending finding - and on real history, where revisions accumulate,
+-- it would have been the common case rather than a rare one.
+--
+-- It now resolves the employee's live salary exactly as production does -
+-- `ORDER BY effective_from DESC, salary_id DESC LIMIT 1` over their APPROVED
+-- rows effective on or before today - and asks about that single row.
+--
+-- AN EMPLOYEE WITH NO LIVE SALARY IS NOT COUNTED HERE. The scalar subquery
+-- returns NULL for them, and `NULL <> 'APPLIED'` is UNKNOWN rather than true,
+-- so they fall out - correctly, because "no salary at all" is a different
+-- state and is already counted by the three categories above. (`ctc_status`
+-- is NOT NULL on the row itself, so a live row cannot go missing this way.)
+SELECT 'live_but_uncosted', COUNT(*)
+  FROM `new_employee` ne
+ WHERE ne.`employee_id` IN (:IDS)
+   AND ne.`status` = 1
+   AND (SELECT s2.`ctc_status`
+          FROM `employee_salary` s2
+         WHERE s2.`employee_id` = ne.`employee_id`
+           AND s2.`status` = 'APPROVED'
+           AND s2.`effective_from` <= CURDATE()
+         ORDER BY s2.`effective_from` DESC, s2.`salary_id` DESC
+         LIMIT 1) <> 'APPLIED';
 
 -- Each of those must read Payroll Pending on the dashboard - they are in the
--- population now, so that comparison is meaningful. Section 6 is where it is
--- checked end to end.
+-- population AND active now, so that comparison is meaningful. Section 6 is
+-- where it is checked end to end.
 
 -- ================= 4. getPayrollConfigMany: the derived pair ============
 -- The query returns only `payment_type_recorded` and `pays_in_cash`; the
@@ -422,8 +478,17 @@ FROM (
 ) bulk
 JOIN `new_employee` ne ON ne.employee_id = bulk.employee_id;
 
--- 4e. The distribution, for the record - and the number the Cash -> Bank card
---     should show. Informational.
+-- 4e. THE PAYMENT-ROUTE DISTRIBUTION OF THE BULK QUERY'S INPUT. Informational.
+--
+--     NOT THE DASHBOARD'S CASH -> BANK COUNT, and the difference matters.
+--     This is every employee in :IDS - the directory population the endpoint
+--     is asked about - whereas the card counts only employees with `status =
+--     1`. `cash` here is therefore "cash employees in the bulk input
+--     population" and will read HIGHER than the card wherever a resigned or
+--     inactive employee is still on cash.
+--
+--     SECTION 6 IS THE DASHBOARD COMPARISON, because it applies `status = 1`.
+--     Compare the card against 6, never against this.
 SELECT SUM(payment_type IS NULL)        AS not_recorded,
        SUM(payment_type = 1)            AS bank,
        SUM(payment_type = 2)            AS cash,
