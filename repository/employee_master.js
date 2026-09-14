@@ -410,14 +410,23 @@ class EmployeeMasterRepository {
    * record.
    */
   /**
-   * @param storeIds null for no restriction (HR, an administrator, or an
-   *   internal caller); otherwise the branches the caller is authorized for,
-   *   with `[]` meaning none and returning nothing.
+   * THE DUPLICATE SEARCH IS COMPANY-WIDE, AND DELIBERATELY SO.
+   *
+   * A duplicate that matters most is precisely the one at ANOTHER branch: the
+   * person who left Moolakulam and is being onboarded again at Kathirkamam.
+   * Restricting this query to the caller's branches would have hidden exactly
+   * the case it exists to catch and made the onboarding screen say "no
+   * duplicate found" when there is one.
+   *
+   * BRANCH SCOPE IS APPLIED TO THE ANSWER, NOT THE QUESTION. The usecase
+   * partitions what comes back: a match inside the caller's branches is
+   * returned in full, and one outside is reduced to the fact that it exists -
+   * no id, no name, no branch, no designation. `store_id` is selected below so
+   * that partition can be made; it is not returned to a scoped caller.
    */
   async findPossibleDuplicates(
     { name_tokens = [], contact = null, dob = null },
-    limit = 25,
-    storeIds = null
+    limit = 25
   ) {
     const clauses = [];
     const params = [];
@@ -436,19 +445,6 @@ class EmployeeMasterRepository {
     }
     if (clauses.length === 0) return [];
 
-    // THE BRANCH SCOPE, applied OUTSIDE the OR of the match clauses below.
-    // The candidate clauses are ORed together, so a branch predicate placed
-    // among them would be satisfied by any single match and restrict nothing.
-    let branchSql = "";
-    const branchParams = [];
-    if (storeIds !== null && storeIds !== undefined) {
-      if (!Array.isArray(storeIds) || storeIds.length === 0) {
-        return [];
-      }
-      branchSql = " AND ne.store_id IN (?)";
-      branchParams.push(storeIds);
-    }
-
     return this._read(
       "FIND-POSSIBLE-DUPLICATES",
       `SELECT ne.employee_id, ne.employee_name, ne.status,
@@ -466,10 +462,10 @@ class EmployeeMasterRepository {
                 ON p.employee_id = ne.employee_id
                AND p.period_no = ( SELECT MAX(period_no) FROM employee_employment_period
                                     WHERE employee_id = ne.employee_id )
-        WHERE (${clauses.join(" OR ")})${branchSql}
+        WHERE ${clauses.join(" OR ")}
         ORDER BY ne.employee_id
         LIMIT ?`,
-      [...params, ...branchParams, Number(limit)]
+      [...params, Number(limit)]
     );
   }
 

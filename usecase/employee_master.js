@@ -859,8 +859,36 @@ class EmployeeMasterUsecase {
    * merges, never rejoins, and never prevents a create. HR reviews and
    * decides, which is why the response is shaped for a screen rather than for
    * a branch.
+   *
+   * ============================== BRANCH SCOPE IS APPLIED TO THE ANSWER ====
+   *
+   * The SEARCH is company-wide and must stay that way. The duplicate that
+   * matters most is the one at ANOTHER branch - the person who left
+   * Moolakulam being onboarded again at Kathirkamam - so a query narrowed to
+   * the caller's branches would hide exactly the case this exists to catch,
+   * and would tell a manager "No possible duplicate found" when there is one.
+   *
+   * What is scoped is what comes BACK:
+   *
+   *   inside the caller's branches   the full match - id, name, branch,
+   *                                  designation, confidence, and whether to
+   *                                  Rejoin - exactly as before.
+   *   outside them                   the FACT that one exists, and nothing
+   *                                  else. No employee id, no name, no
+   *                                  branch, no designation, no employment
+   *                                  state, no matched-on reason. The screen
+   *                                  is told to send the manager to HR, who
+   *                                  are company-wide and can see the record.
+   *
+   * A COUNT IS THE MOST THAT CROSSES THE BOUNDARY, and it is here because the
+   * message would otherwise be unactionable - "something exists" with no sense
+   * of whether it is one strong match or several weak ones. It names nobody.
+   *
+   * @param visibleStoreIds null for a company-wide caller (HR, an
+   *   administrator, an internal caller); otherwise the branches whose matches
+   *   may be returned in full, with `[]` meaning none of them may.
    */
-  async findPossibleDuplicates(input, { limit = 25, storeIds = null } = {}) {
+  async findPossibleDuplicates(input, { limit = 25, visibleStoreIds = null } = {}) {
     const name = input && input.employee_name ? String(input.employee_name) : "";
     const contact = normaliseContact(input && input.primary_contact_number);
     const dob = normaliseDob(input && input.dob);
@@ -874,11 +902,34 @@ class EmployeeMasterUsecase {
 
     const candidates = await this.repo.findPossibleDuplicates(
       { name_tokens: tokens, contact, dob },
-      limit,
-      storeIds
+      limit
     );
-    const matches = rankCandidates({ employee_name: name, primary_contact_number: contact, dob }, candidates);
+
+    // PARTITIONED BEFORE RANKING, on the raw rows, so a restricted candidate
+    // never becomes a match object at all. Scoring it and then trying to strip
+    // the identifying fields afterwards would be one forgotten key away from a
+    // leak; not building the object is not.
+    const scoped = Array.isArray(visibleStoreIds);
+    const visibleRows = [];
+    const restrictedRows = [];
+    for (const row of candidates || []) {
+      if (!scoped || visibleStoreIds.map(Number).includes(Number(row.store_id))) {
+        visibleRows.push(row);
+      } else {
+        restrictedRows.push(row);
+      }
+    }
+
+    const ranked = { employee_name: name, primary_contact_number: contact, dob };
+    const matches = rankCandidates(ranked, visibleRows);
+    // Ranked too, and then thrown away except for its length: `rankCandidates`
+    // is what decides whether a candidate is a real match or a coincidence -
+    // a shared birthday and nothing else is dropped - so counting raw rows
+    // would report duplicates the caller's own branch would not have been
+    // shown either.
+    const restricted = rankCandidates(ranked, restrictedRows).length;
     const inactive = matches.filter((m) => !m.is_active);
+    const total = matches.length + restricted;
 
     return {
       code: 200,
@@ -888,13 +939,25 @@ class EmployeeMasterUsecase {
         primary_contact_number: contact ? true : false,
         dob: dob ? true : false,
       },
-      possible_duplicates: matches.length > 0,
+      possible_duplicates: total > 0,
       // Always false. Said explicitly so C3 cannot mistake this for a gate.
       blocking: false,
-      count: matches.length,
-      suggested_action: inactive.length ? "rejoin" : matches.length ? "review" : "create",
+      count: total,
+      // How many of `count` are in branches this caller may not see. The
+      // screen shows the HR message when this is non-zero; `matches` never
+      // contains them.
+      restricted_count: restricted,
+      suggested_action: inactive.length
+        ? "rejoin"
+        : matches.length
+        ? "review"
+        : restricted
+        ? "contact_hr"
+        : "create",
       message: matches.length
         ? "Possible existing employee found. Review before creating a new employee ID."
+        : restricted
+        ? "Employee already exists. Please contact HR."
         : "No possible duplicate found.",
       matches,
     };

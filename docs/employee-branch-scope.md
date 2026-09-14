@@ -125,9 +125,40 @@ fixed for the branch scope to hold there at all:
 * **Interpolation.** The search term went from the query string straight into
   the SQL text. It is a bound parameter now, with `%` and `_` escaped.
 
+## The duplicate check searches wide and answers narrow
+
+`POST /hr/employee/check-duplicate` is the one endpoint where scoping the
+QUERY would have been wrong. The duplicate that matters most is the one at
+another branch - the person who left Moolakulam being onboarded again at
+Kathirkamam - so a narrowed search would have hidden the case the check exists
+to catch and answered "No possible duplicate found" when there was one.
+
+So the search stays company-wide and the ANSWER is scoped:
+
+| match | what the caller gets |
+|---|---|
+| in the caller's branches | the full match - id, name, branch, designation, confidence, and whether to Rejoin - unchanged |
+| outside them | that it exists, and nothing else: `suggested_action: "contact_hr"` and `"Employee already exists. Please contact HR."` |
+
+A restricted match carries no employee id, no name, no branch, no designation,
+no employment state and no matched-on reason. The partition happens on the raw
+rows BEFORE scoring, so a restricted candidate never becomes a match object at
+all - stripping fields off one afterwards would be a forgotten key away from a
+leak. The only thing that crosses the boundary is `restricted_count`, which
+names nobody and is there so the message is actionable rather than vague.
+
 ## Rollback
 
-`migrations/.../20261002120000-employee-branch-scope-down.sql` removes the key.
+`migrations/.../20260914120000-employee-branch-scope-down.sql` removes the key.
+
+The timestamp is the date this was written (14-09-2026). Several migrations
+already in the directory carry LATER dates - `20260929`, `20260930`,
+`20261001` - so this one does not sort last. That is safe here and worth
+saying out loud: `db-migrate` runs whatever is not recorded in its own
+`migrations` table, so an environment that has already applied those still
+applies this one; and this migration declares one permission key and writes
+one grant row, depending on nothing any other migration does.
+
 Rolling back the SQL alone fails CLOSED, not open: with the key gone and the
 code still deployed, only administrators are company-wide and HR is confined to
 its own branch. Restoring the previous behaviour means deploying the previous
@@ -137,11 +168,9 @@ code too.
 
 * One branch per user, because `new_employee.store_id` holds one. The rule,
   the resolver and every predicate already handle a list.
-* `/hr/employee/check-duplicate` is scoped, so a branch-scoped creator no
-  longer sees a duplicate at another branch. It is an ADVISORY check that
-  blocks nothing; the uniqueness guarantees that actually prevent a duplicate
-  record are elsewhere and are unchanged, and HR - who complete onboarding -
-  still see company-wide matches.
+* `/hr/employee/check-duplicate` searches company-wide for everybody, and a
+  match outside the caller's branches is reported as its existence only - see
+  below.
 * The web app is unchanged. It sends an outlet filter only when a user picks
   one, so a scoped caller's screens narrow silently; picking another branch's
   outlet returns a clear 403 rather than that branch's data.

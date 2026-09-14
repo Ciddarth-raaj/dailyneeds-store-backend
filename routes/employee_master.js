@@ -467,18 +467,17 @@ class EmployeeMasterRoutes {
         });
         if (isValid.error !== null) throw isValid.error;
 
-        // SCOPED, because this IS a search: it takes a name, a mobile or a
-        // date of birth and returns matching employees' names, contact
-        // numbers, dates of birth and branches. Left global it would be the
-        // widest employee-search endpoint on the server and the easiest way
-        // around every other restriction in this change.
+        // THE SEARCH STAYS COMPANY-WIDE; THE ANSWER IS SCOPED.
         //
-        // THE COST IS STATED RATHER THAN HIDDEN: a branch-scoped creator no
-        // longer sees a duplicate who works at another branch. That is a
-        // narrowing of an ADVISORY check which blocks nothing, and the
-        // employee-id and Aadhaar uniqueness guarantees that actually prevent
-        // a duplicate record are enforced elsewhere and are unchanged. HR,
-        // who complete onboarding, still see company-wide matches.
+        // A duplicate at another branch is the case this check exists to
+        // catch - the person who left Moolakulam being onboarded again at
+        // Kathirkamam - so narrowing the QUERY would make the screen say "no
+        // duplicate found" when there is one.
+        //
+        // `visibleStoreIds` decides what may be described rather than what may
+        // be searched: a match in the caller's branches comes back in full, and
+        // one outside them is reduced to "Employee already exists. Please
+        // contact HR." with no id, name, branch or designation attached.
         const scoped = await this.branchScope.listFilters(req, null);
         if (!scoped.ok) {
           this.branchScope.refuse(res, scoped);
@@ -488,7 +487,7 @@ class EmployeeMasterRoutes {
 
         res.json(
           await this.usecase.findPossibleDuplicates(req.body || {}, {
-            storeIds: scoped.store_ids,
+            visibleStoreIds: scoped.store_ids,
           })
         );
       } catch (err) {

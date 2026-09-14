@@ -1436,4 +1436,114 @@ describe("checking for a possible duplicate before creating without Aadhaar", ()
       "but does not repeat the number back"
     );
   });
+
+  /* ================================================== the branch boundary */
+  /**
+   * The SEARCH is company-wide for everybody; the ANSWER is scoped.
+   *
+   * Narrowing the query would have hidden exactly the duplicate this exists to
+   * catch - the person who left one branch and is being onboarded at another -
+   * and answered "No possible duplicate found" while there was one. So the
+   * boundary sits on what may be DESCRIBED, not on what may be searched.
+   */
+  describe("a match in a branch the caller cannot see", () => {
+    // The existing employee is at store 2 (VALID.store_id). A caller scoped to
+    // store 7 is therefore looking at somebody they may not be shown.
+    const OTHER_BRANCH = [7];
+    const THEIR_BRANCH = [2];
+
+    // Searched under a DIFFERENT spelling of the name, matching on the mobile.
+    // Deliberate: `searched_on` echoes the name the caller typed, so searching
+    // for the exact stored name would put it in the response as the caller's
+    // own input and make the disclosure assertion below meaningless.
+    const search = (uc, visibleStoreIds) =>
+      uc.findPossibleDuplicates(
+        { employee_name: "R K Sharma", primary_contact_number: "9876543210" },
+        { visibleStoreIds }
+      );
+
+    it("IS STILL FOUND - the search is not narrowed", async () => {
+      const { uc } = build();
+      await existing(uc);
+      const res = await search(uc, OTHER_BRANCH);
+      assert.equal(res.possible_duplicates, true, "the caller is told there IS one");
+      assert.equal(res.count, 1);
+      assert.equal(res.restricted_count, 1);
+    });
+
+    it("is reported as 'contact HR', with the plain message", async () => {
+      const { uc } = build();
+      await existing(uc);
+      const res = await search(uc, OTHER_BRANCH);
+      assert.equal(res.suggested_action, "contact_hr");
+      assert.equal(res.message, "Employee already exists. Please contact HR.");
+    });
+
+    it("DISCLOSES NOTHING ABOUT THAT EMPLOYEE, checked against the whole response", async () => {
+      const { uc } = build();
+      const them = await existing(uc);
+      const res = await search(uc, OTHER_BRANCH);
+
+      assert.deepEqual(res.matches, [], "no match object is built at all");
+
+      // Asserted against the serialized response rather than key by key: a
+      // field added to the match shape later would slip past a spot check.
+      const text = JSON.stringify(res);
+      for (const secret of [
+        String(them.employee_id),
+        "Ramesh Kumar",
+        "Branch",
+        "Cashier",
+        "active",
+        "rejoin",
+        "9876543210",
+      ]) {
+        assert.ok(!text.includes(secret), `the response must not contain ${secret}`);
+      }
+    });
+
+    it("a match in the caller's OWN branch still comes back in full", async () => {
+      const { uc } = build();
+      const them = await existing(uc);
+      const res = await search(uc, THEIR_BRANCH);
+      assert.equal(res.restricted_count, 0);
+      assert.equal(res.matches[0].employee_id, them.employee_id);
+      assert.equal(res.suggested_action, "review");
+      assert.match(res.message, /Review before creating a new employee ID/);
+    });
+
+    it("HR and administrators are unrestricted - null means no boundary", async () => {
+      const { uc } = build();
+      const them = await existing(uc);
+      const res = await search(uc, null);
+      assert.equal(res.restricted_count, 0);
+      assert.equal(res.matches[0].employee_id, them.employee_id);
+    });
+
+    it("A COINCIDENCE ELSEWHERE IS NOT A DUPLICATE, and is not counted", async () => {
+      const { world, uc } = build();
+      await existing(uc);
+      // A shared birthday and nothing else: `rankCandidates` drops it, and the
+      // restricted count must drop it too - otherwise a scoped caller would be
+      // sent to HR over somebody their own branch would never have been shown.
+      const res = await uc.findPossibleDuplicates(
+        { employee_name: "Completely Different", dob: "1990-02-01" },
+        { visibleStoreIds: OTHER_BRANCH }
+      );
+      assert.equal(world.employees.size, 1, "the coincidence is a real row in the table");
+      assert.equal(res.restricted_count, 0);
+      assert.equal(res.possible_duplicates, false);
+      assert.equal(res.suggested_action, "create");
+      assert.equal(res.message, "No possible duplicate found.");
+    });
+
+    it("an empty visible set restricts everything, and still reports the fact", async () => {
+      const { uc } = build();
+      await existing(uc);
+      const res = await search(uc, []);
+      assert.equal(res.matches.length, 0);
+      assert.equal(res.restricted_count, 1);
+      assert.equal(res.suggested_action, "contact_hr");
+    });
+  });
 });

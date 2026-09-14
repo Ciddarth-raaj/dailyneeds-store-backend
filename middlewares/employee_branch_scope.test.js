@@ -91,11 +91,15 @@ const GRANTS = {
   [D.HR]: [
     P.VIEW_EMPLOYEES,
     P.EMPLOYEE_EDIT,
+    P.EMPLOYEE_CREATE,
     P.ADD_EMPLOYEES,
     P.EMPLOYEE_SCOPE_ALL_BRANCHES,
   ],
   [D.MANAGER_VIEW]: [P.VIEW_EMPLOYEES],
-  [D.MANAGER_EDIT]: [P.VIEW_EMPLOYEES, P.EMPLOYEE_EDIT, P.ADD_EMPLOYEES],
+  // A store manager who onboards: `employee_create` is here so the create and
+  // duplicate-check cases below are refused by the BRANCH rule rather than by
+  // a missing key, which would have made them pass for the wrong reason.
+  [D.MANAGER_EDIT]: [P.VIEW_EMPLOYEES, P.EMPLOYEE_EDIT, P.EMPLOYEE_CREATE, P.ADD_EMPLOYEES],
   [D.NO_KEYS]: [],
   [D.MULTI_VIEW]: [P.VIEW_EMPLOYEES],
   [D.ADMIN]: [],
@@ -115,6 +119,7 @@ const inBranches = (row, storeIds) => {
 let lastEdit = null;
 let lastCreate = null;
 let lastUpdateData = null;
+let lastDuplicateCheck = null;
 
 const employeeUsecase = {
   // `get` receives the ACTOR, and the branch predicate is rendered from it by
@@ -179,7 +184,8 @@ const employeeMasterUsecase = {
   async resignEmployee() {
     return { code: 200 };
   },
-  async findPossibleDuplicates() {
+  async findPossibleDuplicates(body, options) {
+    lastDuplicateCheck = { body, options };
     return { code: 200, matches: [] };
   },
   async getReviewList() {
@@ -619,16 +625,63 @@ describe("branch transfer", () => {
   });
 
   it("17. and a scoped caller cannot CREATE into another branch either", async () => {
-    lastCreate = null;
-    const res = await post("/hr/employee", CALLERS.managerEdit(), {
+    const body = (storeId) => ({
       employee_name: "New Person",
       date_of_joining: "2026-01-01",
-      store_id: MOOLAKULAM,
+      store_id: storeId,
       designation_id: 3,
       department_id: 1,
     });
-    assertRefused(res, "creating into another branch");
+
+    lastCreate = null;
+    const refused = await post("/hr/employee", CALLERS.managerEdit(), body(MOOLAKULAM));
+    assertRefused(refused, "creating into another branch");
     assert.equal(lastCreate, null);
+
+    // And the SAME caller creating into their OWN branch succeeds - so the
+    // refusal above is the branch rule and not a missing `employee_create`.
+    lastCreate = null;
+    const allowed = await post("/hr/employee", CALLERS.managerEdit(), body(KATHIRKAMAM));
+    assert.equal(allowed.status, 200);
+    assert.equal(lastCreate.store_id, KATHIRKAMAM);
+  });
+});
+
+/* ======================================================================= */
+/*  THE DUPLICATE CHECK SEARCHES WIDE AND ANSWERS NARROW                    */
+/* ======================================================================= */
+
+describe("the duplicate check", () => {
+  const check = (token) =>
+    post("/hr/employee/check-duplicate", token, { employee_name: "Someone" });
+
+  it("is NOT narrowed for a scoped caller - it is answered narrowly instead", async () => {
+    lastDuplicateCheck = null;
+    const res = await check(CALLERS.managerEdit());
+    assert.equal(res.status, 200, "a scoped caller may still run the check");
+    // The route hands over which branches may be DESCRIBED. It passes no
+    // filter to the query: `visibleStoreIds`, not `storeIds`.
+    assert.deepEqual(lastDuplicateCheck.options, { visibleStoreIds: [KATHIRKAMAM] });
+  });
+
+  it("HR and administrators are unrestricted", async () => {
+    for (const caller of [CALLERS.hr, CALLERS.admin]) {
+      lastDuplicateCheck = null;
+      const res = await check(caller());
+      assert.equal(res.status, 200);
+      assert.equal(
+        lastDuplicateCheck.options.visibleStoreIds,
+        null,
+        "null is no boundary, not an empty one"
+      );
+    }
+  });
+
+  it("a caller whose branch cannot be resolved is still refused", async () => {
+    lastDuplicateCheck = null;
+    const res = await check(CALLERS.noBranch());
+    assertRefused(res, "a branchless caller running the duplicate check");
+    assert.equal(lastDuplicateCheck, null);
   });
 });
 
