@@ -137,6 +137,35 @@ test("no two selected columns land on the same response key", () => {
  * fails when the list falls behind. So the list can be explicit without
  * depending on anybody remembering it.
  */
+/**
+ * THE TABLE NAME MUST END WHERE IT ENDS.
+ *
+ * ================== THE INCIDENT THIS ANCHOR EXISTS TO PREVENT ============
+ *
+ * This scan first shipped as ``/ALTER TABLE\s+`?new_employee`?/`` - with the
+ * closing backtick OPTIONAL and no boundary after the name. That happily
+ * matched the first fourteen characters of
+ *
+ *     ALTER TABLE `new_employee_documents` ADD COLUMN `is_verified` ...
+ *
+ * leaving `_documents` to be swallowed by the following `([\s\S]*?)`. So
+ * `is_verified` - a column on the DOCUMENTS table, because a document is
+ * verified and an employee is not - was read as a `new_employee` column,
+ * added to the select list, and shipped.
+ *
+ * `SELECT new_employee.is_verified` is ER_BAD_FIELD_ERROR (1054), so EVERY
+ * employee profile answered HTTP 500 in production.
+ *
+ * THE TEST AGREED WITH THE BUG. It was written to catch the list falling
+ * BEHIND the schema and it did that correctly, but it derived "the schema"
+ * with the same broken pattern the list came from, so it confirmed the very
+ * column that was wrong. A check that shares its input with the thing it
+ * checks is not a check. Hence the anchor below, and hence
+ * `columnsFromMigrations` is now asserted to EXCLUDE a known
+ * `new_employee_documents` column as well as to include real ones.
+ */
+const NEW_EMPLOYEE_TABLE = "(?:`new_employee`|\\bnew_employee\\b(?!_))";
+
 function columnsFromMigrations() {
   const dir = path.join(__dirname, "../migrations/mysql/migrations/sqls");
   const files = fs.readdirSync(dir).filter((f) => f.endsWith("-up.sql"));
@@ -145,13 +174,28 @@ function columnsFromMigrations() {
   for (const file of files.sort()) {
     const sql = fs.readFileSync(path.join(dir, file), "utf8").replace(/--[^\n]*/g, "");
 
-    const created = /CREATE TABLE `new_employee`\s*\(([\s\S]*?)\);/.exec(sql);
+    const created = new RegExp(`CREATE TABLE\\s+${NEW_EMPLOYEE_TABLE}\\s*\\(([\\s\\S]*?)\\);`).exec(sql);
     if (created) {
       for (const m of created[1].matchAll(/`([a-zA-Z_0-9]+)`\s+[a-zA-Z]/g)) columns.push(m[1]);
     }
-    for (const alter of sql.matchAll(/ALTER TABLE\s+`?new_employee`?([\s\S]*?);/g)) {
-      for (const m of alter[1].matchAll(/ADD\s+(?:COLUMN\s+)?`([a-zA-Z_0-9]+)`/gi)) {
-        columns.push(m[1]);
+    for (const alter of sql.matchAll(
+      new RegExp(`ALTER TABLE\\s+${NEW_EMPLOYEE_TABLE}([\\s\\S]*?);`, "g")
+    )) {
+      // ADD and DROP, in order: a column added by one migration and dropped
+      // by a later one is not on the table either.
+      //
+      // Backticks are optional because `DROP COLUMN foo` is written bare, so
+      // the structural forms - ADD INDEX, ADD CONSTRAINT, ADD UNIQUE KEY -
+      // have to be excluded by name rather than by quoting.
+      const NOT_A_COLUMN = /^(INDEX|KEY|CONSTRAINT|UNIQUE|PRIMARY|FOREIGN|FULLTEXT|SPATIAL|CHECK)$/i;
+      for (const m of alter[1].matchAll(/\b(ADD|DROP)\s+(?:COLUMN\s+)?`?([a-zA-Z_0-9]+)`?/gi)) {
+        const [, verb, name] = m;
+        if (NOT_A_COLUMN.test(name)) continue;
+        if (/^add$/i.test(verb)) columns.push(name);
+        else {
+          const at = columns.lastIndexOf(name);
+          if (at !== -1) columns.splice(at, 1);
+        }
       }
     }
   }
@@ -173,6 +217,47 @@ test("THE LIST DOES NOT FALL BEHIND THE SCHEMA", () => {
     [],
     `these new_employee columns are in the schema but not in EMPLOYEE_MASTER_COLUMNS: ${missing.join(", ")}`
   );
+});
+
+/**
+ * THE INCIDENT ITSELF, pinned by name.
+ *
+ * `is_verified` is a `new_employee_documents` column. It reached the select
+ * list because the migration scan matched `new_employee` as a PREFIX of
+ * `new_employee_documents`, and every employee profile then answered HTTP 500
+ * with ER_BAD_FIELD_ERROR (1054).
+ */
+test("7. THE PRODUCTION-INCOMPATIBLE FIELD IS NOT SELECTED", () => {
+  const sql = detailSql();
+  assert.ok(
+    !/is_verified/.test(sql),
+    "is_verified belongs to new_employee_documents; selecting it is a 1054 and a 500"
+  );
+  assert.ok(!EMPLOYEE_MASTER_COLUMNS.some((c) => c.includes("is_verified")));
+});
+
+test("THE SCAN CANNOT BE FOOLED BY A PREFIX TABLE AGAIN", () => {
+  // The scan is what let the column in: it agreed with the bug because it
+  // derived "the schema" the same broken way the list was derived. So it is
+  // asserted here to EXCLUDE a column it would previously have swallowed.
+  const found = columnsFromMigrations();
+
+  assert.ok(
+    !found.includes("is_verified"),
+    "is_verified is added to new_employee_documents, never to new_employee"
+  );
+  // A real `new_employee_documents` column set, none of which is on the
+  // employee master. If any appears, the table name is matching a prefix.
+  for (const documentsColumn of ["card_type", "card_no", "card_name", "expiry_date"]) {
+    assert.ok(
+      !found.includes(documentsColumn),
+      `${documentsColumn} is a new_employee_documents column, not an employee one`
+    );
+  }
+  // And it still finds the real ones - the anchor must not have over-tightened.
+  for (const real of ["employee_id", "status", "store_id", "attendance_required", "shift_code"]) {
+    assert.ok(found.includes(real), `${real} is a real new_employee column and must be found`);
+  }
 });
 
 test("and names nothing that is not a new_employee column", () => {

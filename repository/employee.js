@@ -57,7 +57,10 @@ const EMPLOYEE_MASTER_COLUMNS = [
   // THE COLUMN THE WHOLE FIX IS ABOUT. 1 is employed; anything else is not.
   "new_employee.status",
   "new_employee.resignation_date",
-  "new_employee.is_verified",
+  // `is_verified` IS NOT HERE, and must not be added back. It belongs to
+  // `new_employee_documents` (a document is verified; an employee is not),
+  // and selecting it from `new_employee` is ER_BAD_FIELD_ERROR 1054 - the
+  // production 500 this list caused. See the test for how it got in.
   "new_employee.telegram_username",
   "new_employee.aadhaar_card_no",
   "new_employee.aadhaar_card_name",
@@ -748,13 +751,38 @@ class EmployeeRepository {
         [employee_id],
         (err, docs) => {
           if (err) {
+            // ENOUGH DETAIL TO DIAGNOSE THIS WITHOUT A DEPLOY, AND NO MORE.
+            //
+            // When this query failed in production the log said only
+            // `err.toString()` and `ref: {}`. That happened to name the bad
+            // column, but nothing said WHICH employee was being read or what
+            // the driver's own error code was, so the first step of the
+            // investigation was guessing.
+            //
+            // The four driver fields below are the diagnosis: `code` /
+            // `errno` identify the class (ER_BAD_FIELD_ERROR 1054 was this
+            // incident) and `sqlMessage` names the offending identifier.
+            //
+            // `err.sql` IS DELIBERATELY NOT LOGGED. The driver interpolates
+            // bound parameters into it, so for other queries it can carry an
+            // employee's own data; `sqlMessage` carries the column name and
+            // no values. The employee id is logged because it is the
+            // identifier the investigation needs and is not personal data -
+            // no name, contact, bank, PAN or Aadhaar value is recorded here,
+            // and none is available to this handler in any case.
             logger.Log({
               level: logger.LEVEL.ERROR,
               component: "REPOSITORY.EMPLOYEE",
               code: "REPOSITORY.EMPLOYEE.GET-ID",
               description: err.toString(),
               category: "",
-              ref: {},
+              ref: {
+                employee_id,
+                db_code: err.code || null,
+                db_errno: err.errno || null,
+                db_sql_state: err.sqlState || null,
+                db_message: err.sqlMessage || null,
+              },
             });
             reject(err);
             return;
