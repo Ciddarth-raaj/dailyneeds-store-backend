@@ -196,3 +196,81 @@ describe("the test-only interval hook is test-only", () => {
     assert.deepEqual(offenders, [], "the vendor rate limit must never be loosened by shipped code");
   });
 });
+
+describe("the environment contract", () => {
+  it("the client loads dotenv itself, before it captures its credentials", () => {
+    // It reads its credentials into module-level `const`s at require time.
+    // Before this line existed the integration worked only because a
+    // config/*.js - each of which calls dotenv.config() - happened to be
+    // required first by server.js. Requiring this module any earlier, or
+    // from a script that loads no config, left API_KEY permanently
+    // undefined with a perfectly good .env on disk.
+    const src = require("fs").readFileSync(CLIENT, "utf8");
+    const dotenvAt = src.indexOf('require("dotenv").config()');
+    const firstCredAt = src.indexOf("process.env.DIGISME_API_KEY");
+    assert.ok(dotenvAt !== -1, "the client must load dotenv itself");
+    assert.ok(firstCredAt !== -1);
+    assert.ok(dotenvAt < firstCredAt, "dotenv must run BEFORE the credentials are captured");
+  });
+
+  it("names exactly the three documented variables, and defaults only the safe two", () => {
+    const src = require("fs").readFileSync(CLIENT, "utf8");
+    const vars = [...src.matchAll(/process\.env\.(DIGISME_[A-Z_]+)/g)].map((m) => m[1]);
+    assert.deepEqual(
+      [...new Set(vars)].sort(),
+      ["DIGISME_API_KEY", "DIGISME_BASE_URL", "DIGISME_COMPANY_ID", "DIGISME_CUSTOM_KEY"]
+    );
+    // The two SECRETS have no fallback: a missing credential must fail
+    // loudly, never silently authenticate as something else.
+    assert.match(src, /const API_KEY = process\.env\.DIGISME_API_KEY;/);
+    assert.match(src, /const CUSTOM_KEY = process\.env\.DIGISME_CUSTOM_KEY;/);
+  });
+
+  it("refuses to run, by name, when a credential is missing", () => {
+    // The operator needs to be told WHICH variable is absent - and told it
+    // without the value of the one that is present appearing anywhere.
+    const src = require("fs").readFileSync(CLIENT, "utf8");
+    assert.match(src, /if \(!API_KEY\) missing\.push\("DIGISME_API_KEY"\)/);
+    assert.match(src, /if \(!CUSTOM_KEY\) missing\.push\("DIGISME_CUSTOM_KEY"\)/);
+    assert.match(src, /is not configured: \$\{missing\.join\(", "\)\}/);
+  });
+});
+
+describe("the queue covers every vendor call", () => {
+  it("every axios call site is immediately preceded by a throttle", () => {
+    // The rate limit is structural only if NOTHING can bypass the queue.
+    // Asserted against the source because the risk is a future edit adding
+    // a "quick" extra call - a health check, a second endpoint - that skips
+    // the ticket and quietly pushes the process over the vendor's limit.
+    const src = require("fs").readFileSync(CLIENT, "utf8");
+    const lines = src.split("\n");
+    const callSites = [];
+    lines.forEach((line, i) => {
+      if (/\baxios\(/.test(line)) callSites.push(i);
+    });
+    assert.ok(callSites.length >= 2, "expected the authenticate and fetch call sites");
+    for (const i of callSites) {
+      // Look back a few lines for the throttle that reserved this slot.
+      const preceding = lines.slice(Math.max(0, i - 4), i).join("\n");
+      assert.match(
+        preceding,
+        /await throttle\(\)/,
+        `axios call at line ${i + 1} is not preceded by await throttle() - it would bypass the vendor rate limit`
+      );
+    }
+  });
+
+  it("the 401 refresh and its retry reuse the throttled path, not a bare axios", () => {
+    // The retry goes back through `call()` and `getToken({force:true})`,
+    // both of which take tickets. A hand-rolled retry would not.
+    const src = require("fs").readFileSync(CLIENT, "utf8");
+    assert.match(src, /response = await call\(await getToken\(\{ force: true \}\)\)/);
+  });
+
+  it("nothing else in the client reaches the network", () => {
+    const src = require("fs").readFileSync(CLIENT, "utf8");
+    for (const other of ["fetch(", "http.request", "https.request", "got(", "node-fetch", "request("]) {
+      assert.ok(!src.includes(other), `the client must reach the vendor only through the throttled axios calls (${other})`);
+    }
+  });
+});

@@ -363,6 +363,50 @@ describe("commit", () => {
     assert.match(repo.staged[0].message, /database dedup/);
   });
 
+  it("API FIRST, then Excel: the punch the API stored is a REIMPORT_DUPLICATE, not a second row", async () => {
+    // The other direction of cross-source dedup. The API sync stores punches
+    // with dev_id NULL and ingest_source DIGISME_IMPORT - identical to an
+    // Excel punch by design, because import_dedup_key is
+    // CONCAT(ingest_source,'|',user_id,'|',io_time_raw) and sharing the
+    // source value is the whole reason one real punch has one identity
+    // whichever route delivered it. It carries raw_json, which the key does
+    // not read, so it makes no difference here - and that is the point.
+    await store.insertPunch(
+      { user_id: "1952", io_time_raw: "20260910090000", raw_json: JSON.stringify({ Code: "1952", PunchAction: "IN" }) },
+      { status: "OK", employee_id: 1952 },
+      { source: "DIGISME_IMPORT", importBatchId: 4242 }
+    );
+    assert.equal(store.punches.length, 1);
+
+    const pv = await uc.preview(await xlsx([["1952", "", "", "10-09-2026", "09:00:00", undefined, undefined]]), {});
+    // The Excel PREVIEW already sees it: existingImportKeys matches on
+    // dev_id IS NULL AND ingest_source = 'DIGISME_IMPORT', which is what an
+    // API punch is.
+    assert.equal(repo.staged[0].classification, CLASS.REIMPORT_DUPLICATE);
+    assert.match(repo.staged[0].message, /already imported from DigiSME/);
+
+    const out = await uc.commit(pv.batch.import_batch_id, {});
+    assert.equal(out.batch.imported_count, 0);
+    assert.equal(store.punches.length, 1, "still exactly one punch for this employee and instant");
+    assert.equal(store.punches[0].import_batch_id, 4242, "and it is still the API's row, untouched");
+  });
+
+  it("an Excel punch and an API punch of the same instant produce ONE dedup key", async () => {
+    // Stated as an identity rather than a scenario, because this is the
+    // property every cross-source case above reduces to.
+    const key = (p) => `${p.ingest_source}|${p.user_id}|${p.io_time_raw}`;
+    await store.insertPunch({ user_id: "1952", io_time_raw: "20260910090000" }, { status: "OK", employee_id: 1952 }, { source: "DIGISME_IMPORT", importBatchId: 1 });
+    const fromExcel = key(store.punches[0]);
+    const second = await store.insertPunch(
+      { user_id: "1952", io_time_raw: "20260910090000", raw_json: "{}" },
+      { status: "OK", employee_id: 1952 },
+      { source: "DIGISME_IMPORT", importBatchId: 2 }
+    );
+    assert.equal(second.outcome, "duplicate");
+    assert.equal(store.punches.length, 1);
+    assert.equal(fromExcel, "DIGISME_IMPORT|1952|20260910090000");
+  });
+
   it("a cross-source collision is IMPORTED_WITH_COLLISION and the LIVE punch is untouched", async () => {
     await store.insertPunch({ dev_id: "C2695C56D30E1430", user_id: "1952", io_time_raw: "20260910101500" }, { employee_id: 1952, status: "OK" }, { source: "LIVE" });
     const pv = await uc.preview(await xlsx([["1952", "", "", "10-09-2026", "10:15:00", undefined, undefined]]), {});

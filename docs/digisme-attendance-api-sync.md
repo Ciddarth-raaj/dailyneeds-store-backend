@@ -201,12 +201,75 @@ node --test services/digisme_throttle.test.js         # the queue, spacing, toke
 node --test services/digisme_cron_topology.test.js    # single-process assumption, schedules, no route
 ```
 
-## Known issue, not addressed here
+## Environment
 
-`services/digisme_removal.test.js` has been failing since commit `1b73b4f`
-(the attendance client): it asserts that **no shipped file** references
-`DIGISME_API_KEY`, `indhrmsgateway` or `utils/encryptAES.js`, which the
-removal of the *employee* sync required. The *attendance* integration
-legitimately uses all three, and the guard cannot tell the two apart.
-`utils/encryptAES.js` also carries a hard-coded key and a fixed IV.
-Narrowing that guard is a separate, deliberate decision.
+Required on the API host **before the sync can run**:
+
+| variable | notes |
+|---|---|
+| `DIGISME_API_KEY` | no default - missing means refuse, loudly |
+| `DIGISME_CUSTOM_KEY` | no default |
+| `DIGISME_COMPANY_ID` | optional, defaults to `1` |
+| `DIGISME_BASE_URL` | optional, defaults to the live gateway |
+
+Documented in `.env-sample`. These are **not** the removed employee sync's
+credentials - those were hard-coded literals now being revoked
+(`docs/digisme-employee-sync-removal.md` §4).
+
+`services/digisme_attendance.js` calls `require("dotenv").config()` itself,
+before capturing them. It previously relied on a `config/*.js` having been
+required first by `server.js` - an implicit load-order coupling that would
+have left the credentials `undefined` if the module were ever required
+earlier, or from a script or test harness that loads no config.
+
+Without them the live cron reports *"not configured"* every minute and pulls
+nothing. That is loud in the log but only if someone is reading it - **set
+them before enabling the crons.**
+
+## The removal guardrail, and why this integration is allowed past it
+
+`services/digisme_removal.test.js` pins the removal of the *employee* sync.
+It originally banned the vendor's host, both credential names and
+`utils/encryptAES.js` outright - correct the day the sync was deleted, and a
+direct collision once the approved attendance integration landed.
+
+It is now split in two:
+
+- **`GONE_EVERYWHERE`** - the employee sync's own function names, its feature
+  flag, and `GetEmployeeDetails`. Banned in every shipped file **with no
+  exception, including this integration's own client.**
+- **`GONE_UNLESS_SANCTIONED`** - the gateway host, the two credential names
+  and the cipher. These are the *vendor's*, not the employee sync's. Allowed
+  in exactly one file: `services/digisme_attendance.js`.
+
+The allowance is worth only as much as its narrowness, so the test also
+asserts the sanctioned list stays one integration file, that the file still
+exists, that it calls `GetRawAttendance`, and that it never touches the
+employee master (`bulkCreate`, `new_employee`, the employee usecases).
+
+**Adding a file to `SANCTIONED` is not a formality.** Ask whether it
+genuinely needs to speak the vendor's protocol, or is reaching for
+credentials it should not have.
+
+## `utils/encryptAES.js` - vendor protocol, not a security primitive
+
+Every DigiSME `/api/<Endpoint>` call carries its parameters as
+`{ str: encryptAES(payload) }`. The key and IV are fixed **by the gateway** -
+the IV is the gateway vendor's own name in ASCII - so they are protocol
+constants, not a key we chose. Changing them gets requests rejected.
+
+It offers **no confidentiality**: the values are in the file, so anyone who
+can read the repo can decrypt, and the fixed IV means identical payloads
+give identical ciphertext.
+
+Therefore the rule, enforced by tests: encode **non-secret request
+parameters** (`CompanyId`, `fromDate`, `toDate`) and nothing else. Never a
+credential, token or personal data. DigiSME credentials travel in request
+headers over TLS and never pass through it. `config/aadhaar.js` documents in
+its own header why it uses a real cipher instead - follow that example.
+
+> **Provenance.** That these exact values are gateway-mandated is established
+> by the integration working against the live gateway, **not** by a vendor
+> specification held in this repository. The vendor's manual is not in the
+> tree. Treat them as protocol constants to change only on the vendor's
+> instruction.

@@ -488,6 +488,166 @@ describe("PunchAction and Source are preserved, not mapped", () => {
   });
 });
 
+describe("IST date boundaries", () => {
+  // The server's clock and the database session are UTC; attendance is
+  // Indian wall-clock. Between 18:30 and 24:00 UTC the two disagree about
+  // what day it is, and a sync that derived "today" from UTC would spend
+  // those five and a half hours re-fetching YESTERDAY - so the first hours
+  // of every Indian day would never be pulled until the day was over.
+  // IST is UTC+5:30 with no DST, so the offset is a constant, not a lookup.
+
+  it("a 00:15 IST run fetches the NEW Indian date, not the UTC one", async () => {
+    const asked = [];
+    // 00:15 IST on 15 Sep == 18:45 UTC on 14 Sep.
+    const { usecase } = build({
+      fetch: async (from) => { asked.push(from); return []; },
+      now: () => new Date("2026-09-14T18:45:00Z"),
+    });
+    await usecase.runLive();
+    assert.deepEqual(asked, ["2026-09-15"], "the UTC date 2026-09-14 would miss the whole new Indian day");
+  });
+
+  it("a 23:59 IST run is still on the old Indian date", async () => {
+    const asked = [];
+    const { usecase } = build({
+      fetch: async (from) => { asked.push(from); return []; },
+      now: () => new Date("2026-09-14T18:29:00Z"), // 23:59 IST
+    });
+    await usecase.runLive();
+    assert.deepEqual(asked, ["2026-09-14"]);
+  });
+
+  it("the boundary is exactly 18:30 UTC, to the minute", () => {
+    assert.equal(sync.istDateString(new Date("2026-09-14T18:29:59Z")), "2026-09-14");
+    assert.equal(sync.istDateString(new Date("2026-09-14T18:30:00Z")), "2026-09-15");
+  });
+
+  it("recovery walks back from the IST date, across a month end", async () => {
+    const asked = [];
+    // 00:30 IST on 1 Oct 2026 == 19:00 UTC on 30 Sep.
+    const { usecase } = build({
+      fetch: async (from) => { asked.push(from); return []; },
+      now: () => new Date("2026-09-30T19:00:00Z"),
+    });
+    await usecase.runHistorical();
+    assert.deepEqual(asked, ["2026-09-28", "2026-09-29", "2026-09-30"]);
+    assert.ok(!asked.includes("2026-10-01"), "today is never in the recovery window");
+  });
+
+  it("the alert window is read in IST too", () => {
+    // 10:00 IST == 04:30 UTC. A UTC reading would open the window at
+    // 15:30 IST and alert through the night.
+    const inWindow = (iso) => {
+      const { usecase } = build({ now: () => new Date(iso) });
+      return usecase._inAlertWindow(new Date(iso));
+    };
+    assert.equal(inWindow("2026-09-14T04:29:00Z"), false, "09:59 IST - still shut");
+    assert.equal(inWindow("2026-09-14T04:30:00Z"), true, "10:00 IST - window opens");
+    assert.equal(inWindow("2026-09-14T16:29:00Z"), true, "21:59 IST - still open");
+    assert.equal(inWindow("2026-09-14T16:30:00Z"), false, "22:00 IST - window closes");
+    assert.equal(inWindow("2026-09-14T20:00:00Z"), false, "01:30 IST - shut");
+  });
+
+  it("the attendance date on a stored punch comes from the punch, not the clock", async () => {
+    // A punch at 00:30 IST is a punch on the new calendar date. Whether it
+    // belongs to the PREVIOUS attendance date is the cutoff rule's business
+    // (biomax/attendanceDate.js), reached through the shared resolver - the
+    // sync never decides it.
+    const { usecase, repo } = build({
+      fetch: async () => [punch(101, "20260915003000")],
+      now: () => new Date("2026-09-14T19:00:00Z"), // 00:30 IST on the 15th
+    });
+    await usecase.syncDate("2026-09-15");
+    assert.equal(repo.items[0].io_time_raw, "20260915003000");
+    assert.equal(repo.items[0].attendance_date, "2026-09-15", "from the resolver, given the punch instant");
+  });
+});
+
+describe("monitoring state survives a restart without crying wolf", () => {
+  it("a fresh process does not alert stale on its very first poll", async () => {
+    // State is in memory and resets on restart. The first poll must
+    // re-establish the baseline from the vendor's own dataset rather than
+    // treating "I have no history" as "the feed has stopped".
+    const alerter = new FakeAlerter();
+    const { usecase } = build({
+      // A dataset whose newest punch is hours old - which is normal first
+      // thing, and normal for the first poll after any restart.
+      fetch: async () => [punch(101, "20260914093000")],
+      alerter,
+      now: () => new Date("2026-09-14T04:35:00Z"), // 10:05 IST
+    });
+    assert.equal(usecase.state.latest_vendor_punch_ts, null, "no history yet");
+    await usecase.runLive();
+    assert.equal(alerter.messages.length, 0, "the first poll establishes a baseline, it does not alert");
+  });
+
+  it("a fresh process does not inherit a zero-poll streak", async () => {
+    const alerter = new FakeAlerter();
+    const { usecase } = build({ fetch: async () => [], alerter });
+    assert.equal(usecase.state.consecutive_zero_polls, 0);
+    await usecase.runLive();
+    assert.equal(alerter.messages.length, 0, "one empty poll after a restart is not an incident");
+  });
+
+  it("a non-empty poll clears the streak, so a blip cannot accumulate into an alert", async () => {
+    const alerter = new FakeAlerter();
+    let empty = true;
+    const { usecase } = build({
+      fetch: async () => (empty ? [] : [punch(101, "20260914134500")]),
+      alerter,
+    });
+    for (let i = 0; i < 14; i++) await usecase.runLive();
+    empty = false;
+    await usecase.runLive();
+    assert.equal(usecase.state.consecutive_zero_polls, 0, "the streak resets on real data");
+    empty = true;
+    for (let i = 0; i < 14; i++) await usecase.runLive();
+    assert.equal(alerter.messages.length, 0, "two sub-threshold runs are not one alert");
+  });
+});
+
+describe("raw_json cannot carry anything of ours", () => {
+  it("is built from the vendor's response row alone - never from the request", () => {
+    // The only assignment to raw_json in the client is JSON.stringify(row),
+    // where `row` is one element of the DECODED RESPONSE. Our credentials
+    // live in the request headers and in module constants; neither is in
+    // scope of that expression. Asserted against the source because the risk
+    // is a future edit that helpfully attaches "context" to the payload.
+    const src = require("fs").readFileSync(
+      require("path").join(__dirname, "..", "services", "digisme_attendance.js"),
+      "utf8"
+    );
+    const assignments = [...src.matchAll(/raw_json:\s*([^,\n]+)/g)].map((m) => m[1].trim());
+    assert.deepEqual(assignments, ["JSON.stringify(row)"], "raw_json must be the vendor row and nothing else");
+  });
+
+  it("the stored payload contains no credential, header or config value", async () => {
+    const API_KEY = "11111111-2222-3333-4444-555555555555:SuperSecretVendorBearerValue";
+    const CUSTOM_KEY = "Y3VzdG9tS2V5VmFsdWVUaGF0SXNTZWNyZXQ=";
+    const { usecase, store } = build({
+      fetch: async () => [punch(101, "20260914134500", { PunchAction: "IN", Source: "Device" })],
+    });
+    await usecase.syncDate("2026-09-14");
+    const stored = [...store.rows.values()][0];
+    for (const secret of [API_KEY, CUSTOM_KEY, "Authorization", "customKey", "bearer", "Grant_type"]) {
+      assert.ok(!String(stored.raw_json).includes(secret), `raw_json must not contain ${secret}`);
+    }
+    // What it DOES contain: the vendor's own fields.
+    const payload = JSON.parse(stored.raw_json);
+    assert.deepEqual(Object.keys(payload).sort(), ["Code", "PunchAction", "Source"]);
+  });
+
+  it("the punch handed to insertPunch carries nothing but identity and payload", async () => {
+    const { usecase, store } = build({ fetch: async () => [punch(101, "20260914134500")] });
+    await usecase.syncDate("2026-09-14");
+    assert.deepEqual(
+      Object.keys(store.insertCalls[0].punch).sort(),
+      ["io_time_raw", "raw_json", "user_id"],
+      "no employee_name, clock_location or other vendor extras leak into biomax_punch"
+    );
+  });
+});
+
 describe("re-entrancy", () => {
   it("a tick arriving mid-run is skipped, not queued", async () => {
     let release;

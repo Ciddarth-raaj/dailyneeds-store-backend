@@ -25,6 +25,22 @@
  * repeat that.
  */
 
+// Load .env before the constants below are captured.
+//
+// This module reads its credentials into `const`s AT REQUIRE TIME, and
+// nothing else in it loads dotenv. Under server.js it happened to work only
+// because a file under config/ - every one of which calls dotenv.config() - was
+// required first: an implicit, order-dependent coupling that would leave
+// API_KEY permanently `undefined` if this file were ever required earlier,
+// or from a script or a test harness that loads no config. The failure mode
+// is the whole integration reporting "not configured" every minute with a
+// perfectly good .env sitting on disk.
+//
+// dotenv.config() is idempotent and never overrides a variable that is
+// already set, so calling it here is safe alongside the config modules and
+// alongside real environment variables set by pm2 or the shell.
+require("dotenv").config();
+
 const axios = require("axios");
 const encryptAES = require("../utils/encryptAES");
 const logger = require("../utils/logger");
