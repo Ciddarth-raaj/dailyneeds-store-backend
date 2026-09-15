@@ -9,6 +9,8 @@ const {
 /**
  * Telegram Group Registry. Mounted at /telegram-groups.
  *
+ *   GET    /detected  groups that sent /setup and are not yet registered
+ *                                                        manage_telegram_groups
  *   GET    /          list, with `?search=` and `?category=`   view_telegram_groups
  *   GET    /:id       one group, with its derived type          view_telegram_groups
  *   POST   /          add                                      manage_telegram_groups
@@ -29,9 +31,10 @@ const {
  * usecase owns that list and returns the message naming the four values.
  */
 class TelegramGroupRegistryRoutes {
-  constructor(telegramGroupRegistryUsecase, permissions) {
+  constructor(telegramGroupRegistryUsecase, permissions, detectionUsecase) {
     this.usecase = telegramGroupRegistryUsecase;
     this.permissions = permissions;
+    this.detection = detectionUsecase || null;
     this.router = express.Router();
     this.init();
   }
@@ -52,6 +55,34 @@ class TelegramGroupRegistryRoutes {
         });
         const data = await this.usecase.getAll(req.query);
         res.json({ code: 200, data, categories: TELEGRAM_GROUP_CATEGORIES });
+      } catch (err) {
+        this.fail(res, err);
+      }
+      res.end();
+    });
+
+    /**
+     * Pending `/setup` detections.
+     *
+     * DECLARED BEFORE THE `:telegram_group_id` ROUTE. That parameter is
+     * digits-only so "detected" could not match it today, but a later
+     * loosening of the pattern would silently swallow this path, and the
+     * order costs nothing.
+     *
+     * Behind the MANAGE key, not the view key: a detection is the first step
+     * of registering a group, so whoever may not register one has no reason
+     * to see which groups are waiting. It returns the chat id, the title and
+     * the time - never a message body, a sender, or anything about the bot's
+     * credentials.
+     */
+    r.get("/detected", gate.require(P.MANAGE_TELEGRAM_GROUPS), async (req, res) => {
+      try {
+        if (!this.detection) {
+          res.json({ code: 200, data: [] });
+          res.end();
+          return;
+        }
+        res.json({ code: 200, data: await this.detection.list() });
       } catch (err) {
         this.fail(res, err);
       }
@@ -154,6 +185,6 @@ class TelegramGroupRegistryRoutes {
   }
 }
 
-module.exports = (telegramGroupRegistryUsecase, permissions) =>
-  new TelegramGroupRegistryRoutes(telegramGroupRegistryUsecase, permissions);
+module.exports = (telegramGroupRegistryUsecase, permissions, detectionUsecase) =>
+  new TelegramGroupRegistryRoutes(telegramGroupRegistryUsecase, permissions, detectionUsecase);
 module.exports.TelegramGroupRegistryRoutes = TelegramGroupRegistryRoutes;

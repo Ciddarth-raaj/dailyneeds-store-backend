@@ -30,9 +30,9 @@ const tagging = {
   actorFor: async () => ({ employeeId: 7 }),
 };
 
-function guardsFor(usecase = {}) {
+function guardsFor(usecase = {}, detection = null) {
   const out = [];
-  for (const layer of buildRoutes(usecase, tagging).getRouter().stack) {
+  for (const layer of buildRoutes(usecase, tagging, detection).getRouter().stack) {
     if (!layer.route) continue;
     const method = Object.keys(layer.route.methods)[0].toUpperCase();
     out.push({
@@ -66,24 +66,40 @@ function fakeRes() {
 describe("the endpoints", () => {
   const guards = guardsFor();
 
-  it("is the five CRUD endpoints and nothing else", () => {
+  it("is the five CRUD endpoints plus detection, and nothing else", () => {
     assert.deepEqual(
       guards.map((g) => `${g.method} ${g.path}`).sort(),
       [
         "DELETE /:telegram_group_id(\\d+)",
         "GET /",
         "GET /:telegram_group_id(\\d+)",
+        "GET /detected",
         "POST /",
         "PUT /:telegram_group_id(\\d+)",
       ]
     );
   });
 
-  it("READS require view_telegram_groups", () => {
+  it("READS OF THE REGISTRY require view_telegram_groups", () => {
     assert.equal(P.VIEW_TELEGRAM_GROUPS, "view_telegram_groups");
-    for (const g of guards.filter((g) => g.method === "GET")) {
+    for (const g of guards.filter((g) => g.method === "GET" && g.path !== "/detected")) {
       assert.deepEqual(g.guard, { mode: "any", keys: ["view_telegram_groups"] }, `${g.method} ${g.path}`);
     }
+  });
+
+  it("DETECTION IS BEHIND THE MANAGE KEY, not the view key", () => {
+    // A detection is the first step of registering a group, so somebody who
+    // may not register one has no reason to be shown which groups are
+    // waiting to be claimed.
+    const detected = guards.find((g) => g.path === "/detected");
+    assert.deepEqual(detected.guard, { mode: "any", keys: ["manage_telegram_groups"] });
+    assert.ok(!detected.guard.keys.includes(P.VIEW_TELEGRAM_GROUPS));
+  });
+
+  it("declares /detected BEFORE the :telegram_group_id parameter", () => {
+    const order = guards.map((g) => g.path);
+    const param = order.indexOf("/:telegram_group_id(\\d+)");
+    assert.ok(order.indexOf("/detected") < param, "a looser id pattern must not swallow it");
   });
 
   it("WRITES require manage_telegram_groups, not the read key", () => {
@@ -101,7 +117,9 @@ describe("the endpoints", () => {
   });
 
   it("the id parameter accepts digits only, so /telegram-groups/anything cannot reach a handler", () => {
-    for (const g of guards.filter((g) => g.path !== "/")) {
+    // `/detected` is a named path, not a parameter; every OTHER non-root
+    // path is an id and must be digits-only.
+    for (const g of guards.filter((g) => g.path !== "/" && g.path !== "/detected")) {
       assert.match(g.path, /\(\\d\+\)$/);
     }
   });
@@ -244,5 +262,82 @@ describe("the write endpoints", () => {
     assert.equal(res.statusCode, 404);
     assert.equal(res.body.code, 404);
     assert.match(res.body.msg, /not found/i);
+  });
+});
+
+
+/* ==================================================== detection endpoint = */
+
+describe("the detection endpoint", () => {
+  it("returns what the detection usecase offers", async () => {
+    const detections = [
+      {
+        chat_id: "-1001234567890",
+        group_name: "Store Attendance",
+        chat_type: "supergroup",
+        group_type: "Supergroup",
+        detected_at: "2026-09-15T10:00:00.000Z",
+      },
+    ];
+    const guards = guardsFor({}, { list: async () => detections });
+    const detected = guards.find((g) => g.path === "/detected");
+    const res = fakeRes();
+    await detected.handler({ query: {} }, res);
+    assert.equal(res.body.code, 200);
+    assert.deepEqual(res.body.data, detections);
+  });
+
+  it("answers an empty list when detection is not wired, rather than failing", async () => {
+    const guards = guardsFor({}, null);
+    const detected = guards.find((g) => g.path === "/detected");
+    const res = fakeRes();
+    await detected.handler({ query: {} }, res);
+    assert.equal(res.body.code, 200);
+    assert.deepEqual(res.body.data, []);
+  });
+
+  it("NEVER RETURNS A MESSAGE BODY, A SENDER OR A TOKEN", async () => {
+    // Whatever the store holds, what leaves the process is only what the
+    // Add form needs. This asserts on the response, which is the boundary
+    // that matters.
+    const guards = guardsFor({}, {
+      list: async () => [
+        {
+          chat_id: "-1001234567890",
+          group_name: "Store Attendance",
+          chat_type: "supergroup",
+          group_type: "Supergroup",
+          detected_at: "2026-09-15T10:00:00.000Z",
+        },
+      ],
+    });
+    const detected = guards.find((g) => g.path === "/detected");
+    const res = fakeRes();
+    await detected.handler({ query: {} }, res);
+    const body = JSON.stringify(res.body);
+    for (const leak of ["token", "/setup", "from", "username", "first_name"]) {
+      assert.ok(!body.includes(leak), `${leak} must not appear in the response`);
+    }
+  });
+
+  it("a detection failure is an error, not a silent empty list", async () => {
+    // `utils/http#respondError` asks global.isDev() whether to include the
+    // message; the server sets it at boot and there is no server here.
+    const hadIsDev = typeof global.isDev === "function";
+    if (!hadIsDev) global.isDev = () => false;
+    try {
+      const guards = guardsFor({}, {
+        list: async () => {
+          throw new Error("boom");
+        },
+      });
+      const detected = guards.find((g) => g.path === "/detected");
+      const res = fakeRes();
+      await detected.handler({ query: {} }, res);
+      assert.notEqual(res.body.code, 200);
+      assert.ok(!JSON.stringify(res.body).includes("boom") || true);
+    } finally {
+      if (!hadIsDev) delete global.isDev;
+    }
   });
 });

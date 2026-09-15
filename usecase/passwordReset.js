@@ -93,6 +93,7 @@ class PasswordResetUsecase {
    * @param {object} [deps.authLogRepo]
    * @param {object} [deps.passwords]   services/password override (tests)
    * @param {function} [deps.now]
+   * @param {function} [deps.onTelegramMessage]  see pollTelegramUpdates
    */
   constructor(userRepo, passwordResetRepo, telegram, deps = {}) {
     this.userRepo = userRepo;
@@ -101,6 +102,19 @@ class PasswordResetUsecase {
     this.authLog = deps.authLogRepo || null;
     this.passwords = deps.passwords || passwordService;
     this.now = deps.now || (() => new Date());
+    /**
+     * An observer for every message this poller reads.
+     *
+     * THIS EXISTS BECAUSE THE OFFSET HAS ONE OWNER. Passing the offset back
+     * to Telegram acknowledges those updates, so anything this loop reads is
+     * gone for every other reader: a second poller elsewhere would not "also
+     * see" a message, it would race this one and each would swallow updates
+     * the other needed, breaking linking intermittently and invisibly. So
+     * other features are handed the message here instead of fetching their
+     * own. The observer is told about messages; it never affects linking,
+     * and it cannot stop this loop.
+     */
+    this.onTelegramMessage = deps.onTelegramMessage || null;
     // Where the update poller has read up to. Held in memory only: passing it
     // back to Telegram acknowledges those updates, so a restart resumes from
     // the first one still unacknowledged rather than replaying history.
@@ -202,6 +216,26 @@ class PasswordResetUsecase {
         }
 
         const message = update.message;
+
+        // Every message, before the linking branch: this loop is the only
+        // reader of the update stream, so a message it does not pass on is a
+        // message nobody else will ever see. Failures here are swallowed -
+        // an observer must never stop somebody linking their account.
+        if (this.onTelegramMessage && message) {
+          try {
+            await this.onTelegramMessage(message);
+          } catch (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "USECASE.PASSWORD-RESET",
+              code: "USECASE.PASSWORD-RESET.OBSERVER",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+          }
+        }
+
         const payload = parseStartPayload(message?.text);
         if (!payload || !message?.chat?.id) continue;
 

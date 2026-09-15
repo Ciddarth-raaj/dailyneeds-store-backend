@@ -686,11 +686,26 @@ class Server {
     );
     // Stage 0A integration: the Telegram reset writes through the modern
     // password service and audits to user_auth_log; it never touches SHA-1.
+    // Telegram group DETECTION. It owns no Telegram cursor and fetches
+    // nothing: `passwordResetUsecase.pollTelegramUpdates` is the single
+    // reader of `getUpdates`, and it hands every message it reads to this as
+    // an observer. A second poller here would race that one for the shared
+    // update offset and each would swallow the other's messages.
+    this.telegramGroupDetectionUsecase = require("./usecase/telegram_group_detection")({
+      telegram: require("./services/telegram")(),
+      registryRepo: this.telegramGroupRegistryRepo,
+    });
+    // Stage 0A integration: the Telegram reset writes through the modern
+    // password service and audits to user_auth_log; it never touches SHA-1.
     this.passwordResetUsecase = require("./usecase/passwordReset")(
       this.userRepo,
       this.passwordResetRepo,
       require("./services/telegram")(),
-      { authLogRepo: this.authLogRepo }
+      {
+        authLogRepo: this.authLogRepo,
+        onTelegramMessage: (message) =>
+          this.telegramGroupDetectionUsecase.handleMessage(message),
+      }
     );
     this.peopleUsecase = require("./usecase/people")(this.peopleRepo);
     this.accountsEbookUsecase = require("./usecase/accountsEbook")(
@@ -1212,7 +1227,8 @@ class Server {
     );
     const telegramGroupRegistryRouter = require("./routes/telegram_group_registry")(
       this.telegramGroupRegistryUsecase,
-      this.permissions
+      this.permissions,
+      this.telegramGroupDetectionUsecase
     );
     const pickPackRemarksRouter = require("./routes/pick_pack_remarks")(
       this.pickPackRemarksUsecase
