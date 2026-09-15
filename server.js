@@ -13,7 +13,7 @@ const bodyParser = require("body-parser");
 const HttpServer = require("http").createServer(app);
 
 const logger = require("./utils/logger");
-const { ALERTS_TELEGRAM_CHAT_ID } = require("./constants/telegram");
+const { ALERTS_TELEGRAM_CHAT_ID, DIGISME_ATTENDANCE_ALERT_CHAT_ID } = require("./constants/telegram");
 
 /**
  * Express `trust proxy` from TRUST_PROXY. Default: loopback (nginx on the
@@ -1608,9 +1608,21 @@ class Server {
       store: this.biomaxImportStore,
       importUsecase: this.attendanceImportUsecase,
       apiSyncLogger: this.apiSyncLogger,
+      // TEMPORARY, DIGISME-ONLY DESTINATION. Not the shared alerts group.
+      //
+      // These alerts go to one personal chat because this bridge lasts about
+      // ten days and its failures are one person's to chase. Everything else
+      // that alerts - accounts, purchase orders, break-glass - keeps using
+      // ALERTS_TELEGRAM_CHAT_ID, untouched. Remove this alerter with the rest
+      // of the bridge when Biomax reaches dnds.co.in directly.
+      //
+      // ONLY EXCEPTIONAL CONDITIONS REACH HERE. The usecase decides what is
+      // exceptional and a routine poll never is: a quiet minute, and a poll
+      // whose punches are all already stored, are ordinary successes that
+      // send nothing. See `_alert` and its 60-minute per-condition cooldown.
       alerter: {
         sendMessage: (text) =>
-          require("./services/telegram")().sendMessage(ALERTS_TELEGRAM_CHAT_ID, text, {
+          require("./services/telegram")().sendMessage(DIGISME_ATTENDANCE_ALERT_CHAT_ID, text, {
             disableNotification: false,
             parseMode: null,
           }),

@@ -146,6 +146,35 @@ real `latest_vendor_punch_ts` data.**
 All alerts share a **60-minute cooldown** per condition - a per-minute poll
 must not spam Telegram.
 
+### Where the alerts go
+
+**A single personal Telegram chat, not the shared alerts group.**
+`DIGISME_ATTENDANCE_ALERT_CHAT_ID` in `constants/telegram.js`, injected into
+the sync from `server.js`.
+
+This is deliberate and **temporary**. The shared `ALERTS_TELEGRAM_CHAT_ID` -
+accounts, purchase orders, break-glass - is for things the whole team acts
+on; ten days of vendor-feed noise there would teach everyone to ignore the
+channel, which is how a silent failure happens in the first place. Those
+destinations are untouched.
+
+Unlike every other id in that file, it does **not** fall back to the test
+chat under `IS_TEST`: the destination was given explicitly for this bridge,
+and an alert quietly delivered somewhere nobody watches is the exact failure
+this sync exists to prevent. A non-production instance is silenced by
+`CRON_DISABLED`, which stops the jobs rather than rerouting their alerts.
+
+**Only exceptional conditions send anything.** A quiet minute, and a poll
+whose punches are all already stored, are ordinary successes and send
+nothing. `usecase/digisme_alert_destination.test.js` pins all of this -
+including that 60 minutes of healthy polling is completely silent, and that
+no other file may use this chat.
+
+**Remove the constant with the bridge**, along with
+`usecase/digisme_attendance_sync.js`, `services/digisme_attendance.js`, the
+two crons in `server.js` and the `SANCTIONED` entry in the removal
+guardrail.
+
 ### Log volume
 
 One `api_sync_log` row per run would be ~525,000 rows a year and would bury
