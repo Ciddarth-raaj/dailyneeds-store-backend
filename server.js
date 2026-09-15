@@ -340,6 +340,12 @@ class Server {
     this.telegramDepartmentsRepo = require("./repository/telegram_departments")(
       this.mysql.connection
     );
+    // The Telegram Group Registry: a record of which Telegram groups the bot
+    // posts to. Nothing reads it to choose a destination yet - the hardcoded
+    // ids in constants/telegram.js are unchanged.
+    this.telegramGroupRegistryRepo = require("./repository/telegram_group_registry")(
+      this.mysql.connection
+    );
     this.jobWorksheetRepo = require("./repository/job_worksheet")(
       this.mysql.connection
     );
@@ -757,6 +763,9 @@ class Server {
     );
     this.telegramDepartmentsUsecase = require("./usecase/telegram_departments")(
       this.telegramDepartmentsRepo
+    );
+    this.telegramGroupRegistryUsecase = require("./usecase/telegram_group_registry")(
+      this.telegramGroupRegistryRepo
     );
     this.advanceRequestUsecase = require("./usecase/advance_request")(
       this.advanceRequestRepo
@@ -1201,6 +1210,10 @@ class Server {
     const remarksMasterRouter = require("./routes/remarks_master")(
       this.remarksMasterUsecase
     );
+    const telegramGroupRegistryRouter = require("./routes/telegram_group_registry")(
+      this.telegramGroupRegistryUsecase,
+      this.permissions
+    );
     const pickPackRemarksRouter = require("./routes/pick_pack_remarks")(
       this.pickPackRemarksUsecase
     );
@@ -1361,6 +1374,7 @@ class Server {
       purchaseAcknowledgementRouter.getRouter()
     );
     app.use("/remarks-master", remarksMasterRouter.getRouter());
+    app.use("/telegram-groups", telegramGroupRegistryRouter.getRouter());
     app.use("/pick-pack-remarks", pickPackRemarksRouter.getRouter());
     app.use("/pick-pack-write-off", pickPackWriteOffRouter.getRouter());
     app.use("/pick-pack-verification-remarks", pickPackVerificationRemarksRouter.getRouter());

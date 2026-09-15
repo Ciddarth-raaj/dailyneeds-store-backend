@@ -1,0 +1,202 @@
+const logger = require("../utils/logger");
+
+const TABLE = "telegram_group_registry";
+
+/**
+ * The Telegram Group Registry table.
+ *
+ * SQL only: every rule - the Chat ID format, the category vocabulary, the
+ * uniqueness message, the derived group type - is in the usecase and in
+ * `constants/telegram_group_registry.js`. Nothing here decides anything.
+ *
+ * THE OUTLET IS JOINED, NEVER COPIED. `outlet_name` and `outlet_code` come
+ * out of `outlets` on every read, so renaming an outlet renames it here too
+ * and the registry holds no second copy of outlet data.
+ *
+ * GROUP TYPE IS NOT SELECTED because it is not stored; the usecase derives it
+ * from `chat_id`.
+ */
+const COLUMNS = `
+  g.telegram_group_id, g.group_name, g.chat_id, g.category, g.used_for,
+  g.outlet_id, o.outlet_name, o.outlet_code, g.bot_is_admin,
+  g.created_by, g.created_at, g.updated_by, g.updated_at`;
+
+class TelegramGroupRegistryRepository {
+  constructor(db) {
+    this.db = db;
+  }
+
+  _log(code, err) {
+    logger.Log({
+      level: logger.LEVEL.ERROR,
+      component: "REPOSITORY.TELEGRAM_GROUP_REGISTRY",
+      code: `REPOSITORY.TELEGRAM_GROUP_REGISTRY.${code}`,
+      description: err.toString(),
+      category: "",
+      ref: {},
+    });
+  }
+
+  _query(code, sql, params) {
+    return new Promise((resolve, reject) => {
+      this.db.query(sql, params, (err, rows) => {
+        if (err) {
+          this._log(code, err);
+          return reject(err);
+        }
+        resolve(rows);
+      });
+    });
+  }
+
+  static _row(row) {
+    if (!row) return null;
+    return {
+      telegram_group_id: row.telegram_group_id,
+      group_name: row.group_name,
+      chat_id: String(row.chat_id),
+      category: row.category,
+      used_for: row.used_for,
+      outlet_id: row.outlet_id === null || row.outlet_id === undefined ? null : row.outlet_id,
+      outlet_name: row.outlet_name || null,
+      outlet_code: row.outlet_code || null,
+      bot_is_admin: Boolean(row.bot_is_admin),
+      created_by: row.created_by === undefined ? null : row.created_by,
+      created_at: row.created_at,
+      updated_by: row.updated_by === undefined ? null : row.updated_by,
+      updated_at: row.updated_at,
+    };
+  }
+
+  /* --------------------------------------------------------------- reads */
+
+  /**
+   * The registry, newest first.
+   *
+   * `search` matches the group name, the Chat ID and Used For; `category`
+   * narrows to one of the fixed values. Both are optional and the usecase has
+   * already validated the category, so an unknown one never reaches here.
+   */
+  async getAll({ search, category } = {}) {
+    const where = [];
+    const params = [];
+    if (category) {
+      where.push("g.category = ?");
+      params.push(category);
+    }
+    if (search) {
+      where.push("(g.group_name LIKE ? OR g.chat_id LIKE ? OR g.used_for LIKE ?)");
+      const like = `%${search}%`;
+      params.push(like, like, like);
+    }
+    const rows = await this._query(
+      "GET_ALL",
+      `SELECT ${COLUMNS}
+         FROM ${TABLE} g
+         LEFT JOIN outlets o ON o.outlet_id = g.outlet_id
+        ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+        ORDER BY g.telegram_group_id DESC`,
+      params
+    );
+    return (rows || []).map(TelegramGroupRegistryRepository._row);
+  }
+
+  async getById(telegram_group_id) {
+    const rows = await this._query(
+      "GET_BY_ID",
+      `SELECT ${COLUMNS}
+         FROM ${TABLE} g
+         LEFT JOIN outlets o ON o.outlet_id = g.outlet_id
+        WHERE g.telegram_group_id = ?`,
+      [telegram_group_id]
+    );
+    return TelegramGroupRegistryRepository._row(rows && rows[0]);
+  }
+
+  /**
+   * The row holding this Chat ID, or null.
+   *
+   * `excludeId` is what makes EDITING WORK: a record being updated always
+   * matches its own Chat ID, and without excluding itself every save of an
+   * unchanged group would be refused as a duplicate.
+   */
+  async getByChatId(chat_id, excludeId = null) {
+    const params = [String(chat_id)];
+    let sql = `SELECT g.telegram_group_id, g.group_name, g.chat_id FROM ${TABLE} g WHERE g.chat_id = ?`;
+    if (excludeId !== null && excludeId !== undefined) {
+      sql += " AND g.telegram_group_id <> ?";
+      params.push(excludeId);
+    }
+    const rows = await this._query("GET_BY_CHAT_ID", sql, params);
+    return (rows && rows[0]) || null;
+  }
+
+  async outletExists(outlet_id) {
+    const rows = await this._query(
+      "OUTLET_EXISTS",
+      "SELECT outlet_id FROM outlets WHERE outlet_id = ?",
+      [outlet_id]
+    );
+    return Boolean(rows && rows.length);
+  }
+
+  /* -------------------------------------------------------------- writes */
+
+  async create(row) {
+    const res = await this._query(
+      "CREATE",
+      `INSERT INTO ${TABLE}
+         (group_name, chat_id, category, used_for, outlet_id, bot_is_admin, created_by, updated_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        row.group_name,
+        row.chat_id,
+        row.category,
+        row.used_for,
+        row.outlet_id === undefined ? null : row.outlet_id,
+        row.bot_is_admin ? 1 : 0,
+        row.created_by === undefined ? null : row.created_by,
+        row.created_by === undefined ? null : row.created_by,
+      ]
+    );
+    return { code: 200, telegram_group_id: res.insertId };
+  }
+
+  /** Only the fields present in `fields` are written. */
+  async update(telegram_group_id, fields, updated_by = null) {
+    const sets = [];
+    const values = [];
+    for (const column of ["group_name", "chat_id", "category", "used_for", "outlet_id"]) {
+      if (fields[column] !== undefined) {
+        sets.push(`${column} = ?`);
+        values.push(fields[column]);
+      }
+    }
+    if (fields.bot_is_admin !== undefined) {
+      sets.push("bot_is_admin = ?");
+      values.push(fields.bot_is_admin ? 1 : 0);
+    }
+    if (sets.length === 0) return { code: 200, affectedRows: 0 };
+    sets.push("updated_by = ?");
+    values.push(updated_by);
+    values.push(telegram_group_id);
+    const res = await this._query(
+      "UPDATE",
+      `UPDATE ${TABLE} SET ${sets.join(", ")} WHERE telegram_group_id = ?`,
+      values
+    );
+    return { code: 200, affectedRows: res.affectedRows };
+  }
+
+  async delete(telegram_group_id) {
+    const res = await this._query(
+      "DELETE",
+      `DELETE FROM ${TABLE} WHERE telegram_group_id = ?`,
+      [telegram_group_id]
+    );
+    return { code: 200, affectedRows: res.affectedRows };
+  }
+}
+
+module.exports = (db) => new TelegramGroupRegistryRepository(db);
+module.exports.TelegramGroupRegistryRepository = TelegramGroupRegistryRepository;
