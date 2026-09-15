@@ -60,13 +60,23 @@ function requiredText(value, label, max) {
 /**
  * The Chat ID, as it will be stored.
  *
+ * THE SUBMITTED STRING IS WHAT IS CHECKED - IT IS NEVER TRIMMED FIRST. A
+ * value like `" -1001234567890 "` does not satisfy the approved rule, and
+ * trimming before validating would quietly turn a string the rule refuses
+ * into one it accepts: the check would be passing judgement on a value
+ * nobody sent, and the row would be stored under an id the user never typed.
+ * Whitespace is refused as the malformed Chat ID it is, and what is stored
+ * is exactly the string that was validated.
+ *
  * The two refusals are deliberately different sentences: "you typed a user id"
  * is a different mistake from "that is not a number at all", and telling
  * somebody their `-100…` group id is invalid when they pasted a personal one
- * would send them looking in the wrong place.
+ * would send them looking in the wrong place. That test runs on the
+ * submitted string too, so a padded `" 123 "` is a format error rather than
+ * a positive-id one - it is not a usable id of any kind.
  */
 function normaliseChatId(value) {
-  const text = String(value === undefined || value === null ? "" : value).trim();
+  const text = String(value === undefined || value === null ? "" : value);
   if (!text) throw validationError(MESSAGES.CHAT_ID_REQUIRED);
   if (/^\+?\d+$/.test(text)) throw validationError(MESSAGES.CHAT_ID_POSITIVE);
   if (!isValidGroupChatId(text)) throw validationError(MESSAGES.CHAT_ID_FORMAT);

@@ -23,12 +23,19 @@
 const TELEGRAM_GROUP_CATEGORIES = ["Attendance", "Maintenance", "HR", "Other"];
 
 /**
- * A Telegram GROUP chat id: a leading minus and digits, nothing else.
+ * A Telegram GROUP chat id: a leading minus and digits, NOTHING ELSE.
  *
  * A POSITIVE ID IS A PERSON, NOT A GROUP - that is the whole reason this is
  * not `^-?\d+$`. Telegram gives users positive ids and chats negative ones,
  * so a positive value in this registry would be somebody's private chat and
  * the bot would be posting group announcements to one individual.
+ *
+ * IT IS APPLIED TO THE SUBMITTED STRING AS IT ARRIVED, NEVER TO A TRIMMED
+ * COPY. `" -1001234567890 "` does not satisfy this rule, and trimming it
+ * first would turn a value the rule refuses into one it accepts - the
+ * validation would then be describing a string nobody sent. Whitespace
+ * anywhere in the value, leading, trailing or internal, is a malformed Chat
+ * ID and is refused as one.
  */
 const TELEGRAM_GROUP_CHAT_ID_RE = /^-\d+$/;
 
@@ -78,7 +85,9 @@ const MESSAGES = {
 
 /** True for the exact strings this registry accepts as a group Chat ID. */
 function isValidGroupChatId(value) {
-  const text = String(value === undefined || value === null ? "" : value).trim();
+  // NO `.trim()`. The rule is about the value that was submitted; see the
+  // comment on TELEGRAM_GROUP_CHAT_ID_RE above.
+  const text = String(value === undefined || value === null ? "" : value);
   return TELEGRAM_GROUP_CHAT_ID_RE.test(text) && !ALL_ZEROS_RE.test(text);
 }
 
@@ -89,7 +98,7 @@ function isValidGroupChatId(value) {
  * forgot to validate cannot be handed a confident answer about rubbish.
  */
 function deriveGroupType(chatId) {
-  const value = String(chatId === undefined || chatId === null ? "" : chatId).trim();
+  const value = String(chatId === undefined || chatId === null ? "" : chatId);
   if (!isValidGroupChatId(value)) return null;
   return value.startsWith(SUPERGROUP_PREFIX) ? GROUP_TYPE.SUPERGROUP : GROUP_TYPE.BASIC_GROUP;
 }

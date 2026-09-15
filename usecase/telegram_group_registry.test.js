@@ -174,10 +174,46 @@ describe("Chat ID", () => {
     }
   });
 
-  it("trims surrounding whitespace rather than refusing a pasted id", async () => {
+  it("REFUSES LEADING AND TRAILING WHITESPACE - it never trims a bad id into a good one", async () => {
+    // The approved rule is `^-\d+$` and it applies to the value that was
+    // submitted. Trimming first would turn a string the rule refuses into
+    // one it accepts, so the check would be judging a value nobody sent and
+    // the row would be stored under an id the user never typed.
+    for (const padded of [` ${SUPERGROUP}`, `${SUPERGROUP} `, ` ${SUPERGROUP} `, `\t${SUPERGROUP}`, `${SUPERGROUP}\n`]) {
+      const repo = fakeRepo();
+      const err = await refusal(build(repo).create(valid({ chat_id: padded })));
+      assert.equal(err && err.name, "ValidationError", `${JSON.stringify(padded)} must be refused`);
+      assert.equal(err.message, MESSAGES.CHAT_ID_FORMAT);
+      assert.deepEqual(repo.store.rows, [], "nothing was written");
+    }
+  });
+
+  it("refuses a padded id on EDIT as well, not only on create", async () => {
+    const repo = fakeRepo([row()]);
+    const err = await refusal(build(repo).update(1, { chat_id: ` ${BASIC} ` }));
+    assert.equal(err.name, "ValidationError");
+    assert.equal(err.message, MESSAGES.CHAT_ID_FORMAT);
+    assert.equal(repo.store.rows[0].chat_id, SUPERGROUP, "the row is unchanged");
+  });
+
+  it("refuses whitespace INSIDE the id", async () => {
+    const err = await refusal(build(fakeRepo()).create(valid({ chat_id: "-100 1234567890" })));
+    assert.equal(err.name, "ValidationError");
+    assert.equal(err.message, MESSAGES.CHAT_ID_FORMAT);
+  });
+
+  it("refuses a whitespace-only id as malformed, and an absent one as missing", async () => {
+    const blank = await refusal(build(fakeRepo()).create(valid({ chat_id: "   " })));
+    assert.equal(blank.message, MESSAGES.CHAT_ID_FORMAT);
+    const absent = await refusal(build(fakeRepo()).create(valid({ chat_id: "" })));
+    assert.equal(absent.message, MESSAGES.CHAT_ID_REQUIRED);
+  });
+
+  it("STORES THE EXACT VALIDATED STRING", async () => {
     const repo = fakeRepo();
-    await build(repo).create(valid({ chat_id: `  ${SUPERGROUP}  ` }));
+    await build(repo).create(valid({ chat_id: SUPERGROUP }));
     assert.equal(repo.store.rows[0].chat_id, SUPERGROUP);
+    assert.equal(repo.store.writes[0].chat_id, SUPERGROUP);
   });
 });
 
