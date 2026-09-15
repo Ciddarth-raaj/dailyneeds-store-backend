@@ -42,6 +42,7 @@ const row = (overrides = {}) => ({
   outlet_name: null,
   outlet_code: null,
   bot_is_admin: true,
+  is_active: true,
   created_by: null,
   created_at: "2026-09-15 10:00:00",
   updated_by: null,
@@ -54,9 +55,13 @@ function fakeRepo(rows = [], { outletIds = [1, 2] } = {}) {
   let nextId = 100;
   return {
     store,
-    getAll: async ({ search, category } = {}) =>
+    getAll: async ({ search, category, outlet_id, bot_is_admin, is_active } = {}) =>
       store.rows.filter((r) => {
         if (category && r.category !== category) return false;
+        if (outlet_id === "none" && r.outlet_id !== null) return false;
+        if (outlet_id !== undefined && outlet_id !== "none" && Number(r.outlet_id) !== Number(outlet_id)) return false;
+        if (bot_is_admin !== undefined && Boolean(r.bot_is_admin) !== bot_is_admin) return false;
+        if (is_active !== undefined && Boolean(r.is_active) !== is_active) return false;
         if (search) {
           const hay = `${r.group_name} ${r.chat_id} ${r.used_for}`.toLowerCase();
           if (!hay.includes(String(search).toLowerCase())) return false;
@@ -72,7 +77,13 @@ function fakeRepo(rows = [], { outletIds = [1, 2] } = {}) {
     create: async (r) => {
       const id = nextId;
       nextId += 1;
-      store.rows.push({ ...row(), ...r, telegram_group_id: id, bot_is_admin: Boolean(r.bot_is_admin) });
+      store.rows.push({
+        ...row(),
+        ...r,
+        telegram_group_id: id,
+        bot_is_admin: Boolean(r.bot_is_admin),
+        is_active: r.is_active === undefined ? true : Boolean(r.is_active),
+      });
       store.writes.push({ op: "create", ...r });
       return { code: 200, telegram_group_id: id };
     },
@@ -269,8 +280,17 @@ describe("Category", () => {
     });
   }
 
-  it("lists exactly the four approved values and no more", async () => {
-    assert.deepEqual(TELEGRAM_GROUP_CATEGORIES, ["Attendance", "Maintenance", "HR", "Other"]);
+  it("lists exactly the approved values and no more", async () => {
+    // Display order, which is deliberately not the schema's order - the ENUM
+    // appends Marketing last because appending rewrites no row, while
+    // reordering existing members renumbers and rewrites every row.
+    assert.deepEqual(TELEGRAM_GROUP_CATEGORIES, [
+      "Attendance",
+      "Maintenance",
+      "HR",
+      "Marketing",
+      "Other",
+    ]);
   });
 
   it("REFUSES an unsupported category even though the UI only offers four", async () => {
@@ -485,5 +505,118 @@ describe("required text", () => {
     await build(repo).create(valid({ group_name: "  Attendance Alerts  ", used_for: "  alerts  " }));
     assert.equal(repo.store.rows[0].group_name, "Attendance Alerts");
     assert.equal(repo.store.rows[0].used_for, "alerts");
+  });
+});
+
+/* ========================================== status and the new filters === */
+
+describe("Status", () => {
+  it("defaults to Active when the caller does not say", async () => {
+    // A group somebody is registering is one they are about to use; a
+    // required field with one sensible answer is just an extra click.
+    const repo = fakeRepo();
+    await build(repo).create(valid());
+    assert.equal(repo.store.rows[0].is_active, true);
+  });
+
+  it("accepts Active and Inactive on create", async () => {
+    const repo = fakeRepo();
+    await build(repo).create(valid({ chat_id: "-100111", is_active: "Active" }));
+    await build(repo).create(valid({ chat_id: "-100222", is_active: "Inactive" }));
+    assert.equal(repo.store.rows[0].is_active, true);
+    assert.equal(repo.store.rows[1].is_active, false);
+  });
+
+  it("accepts the shapes a form sends", async () => {
+    const repo = fakeRepo();
+    for (const [i, yes] of [true, 1, "1", "true", "Yes", "Active"].entries()) {
+      await build(repo).create(valid({ chat_id: `-10055${i}`, is_active: yes }));
+    }
+    assert.equal(repo.store.rows.filter((r) => r.is_active === true).length, 6);
+  });
+
+  it("refuses a value that is neither", async () => {
+    const err = await refusal(build(fakeRepo()).create(valid({ is_active: "retired" })));
+    assert.equal(err.name, "ValidationError");
+    assert.equal(err.message, MESSAGES.STATUS_INVALID);
+  });
+
+  it("can be changed on edit, and an untouched edit leaves it alone", async () => {
+    const repo = fakeRepo([row()]);
+    await build(repo).update(1, { is_active: false });
+    assert.equal(repo.store.rows[0].is_active, false);
+    await build(repo).update(1, { group_name: "Renamed" });
+    assert.equal(repo.store.rows[0].is_active, false, "a rename does not reactivate");
+  });
+
+  it("IS NOT THE BOT-ADMIN FLAG - a group is Active with a non-admin bot", async () => {
+    const repo = fakeRepo();
+    const result = await build(repo).create(valid({ bot_is_admin: false }));
+    assert.equal(repo.store.rows[0].is_active, true);
+    assert.ok(result.warnings.includes(MESSAGES.BOT_NOT_ADMIN_WARNING));
+  });
+});
+
+describe("Marketing", () => {
+  it("is an accepted category", async () => {
+    const repo = fakeRepo();
+    const result = await build(repo).create(valid({ category: "Marketing" }));
+    assert.equal(result.code, 200);
+    assert.equal(repo.store.rows[0].category, "Marketing");
+  });
+
+  it("is still refused when misspelt, like every other category", async () => {
+    const err = await refusal(build(fakeRepo()).create(valid({ category: "Markting" })));
+    assert.equal(err.name, "ValidationError");
+  });
+});
+
+describe("the outlet and bot-admin filters", () => {
+  const seeded = () =>
+    fakeRepo([
+      row({ telegram_group_id: 1, chat_id: "-100111", outlet_id: 1, bot_is_admin: true, is_active: true }),
+      row({ telegram_group_id: 2, chat_id: "-100222", outlet_id: 2, bot_is_admin: false, is_active: true }),
+      row({ telegram_group_id: 3, chat_id: "-100333", outlet_id: null, bot_is_admin: true, is_active: false }),
+    ]);
+
+  it("filters by outlet", async () => {
+    const list = await build(seeded()).getAll({ outlet_id: 2 });
+    assert.equal(list.length, 1);
+    assert.equal(list[0].telegram_group_id, 2);
+  });
+
+  it("'none' finds the company-wide groups, which an outlet id cannot express", async () => {
+    const list = await build(seeded()).getAll({ outlet_id: "none" });
+    assert.equal(list.length, 1);
+    assert.equal(list[0].outlet_id, null);
+  });
+
+  it("filters by bot admin, in both directions", async () => {
+    assert.equal((await build(seeded()).getAll({ bot_is_admin: "No" })).length, 1);
+    assert.equal((await build(seeded()).getAll({ bot_is_admin: "Yes" })).length, 2);
+  });
+
+  it("filters by status", async () => {
+    assert.equal((await build(seeded()).getAll({ is_active: "Inactive" })).length, 1);
+    assert.equal((await build(seeded()).getAll({ is_active: "Active" })).length, 2);
+  });
+
+  it("an empty filter still lists everything", async () => {
+    assert.equal((await build(seeded()).getAll({ outlet_id: "", bot_is_admin: "", is_active: "" })).length, 3);
+  });
+
+  it("REFUSES a malformed filter rather than silently listing everything", async () => {
+    // Quietly ignoring a filter nobody supports is how a user concludes the
+    // filter works and trusts a list that was never narrowed.
+    assert.equal((await refusal(build(seeded()).getAll({ bot_is_admin: "maybe" }))).name, "ValidationError");
+    assert.equal((await refusal(build(seeded()).getAll({ outlet_id: "abc" }))).name, "ValidationError");
+    assert.equal((await refusal(build(seeded()).getAll({ is_active: "sometimes" }))).name, "ValidationError");
+  });
+
+  it("combines with the category filter", async () => {
+    const repo = seeded();
+    const list = await build(repo).getAll({ bot_is_admin: "Yes", is_active: "Active" });
+    assert.equal(list.length, 1);
+    assert.equal(list[0].telegram_group_id, 1);
   });
 });

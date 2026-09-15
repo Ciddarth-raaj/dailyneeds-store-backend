@@ -18,7 +18,7 @@ const TABLE = "telegram_group_registry";
  */
 const COLUMNS = `
   g.telegram_group_id, g.group_name, g.chat_id, g.category, g.used_for,
-  g.outlet_id, o.outlet_name, o.outlet_code, g.bot_is_admin,
+  g.outlet_id, o.outlet_name, o.outlet_code, g.bot_is_admin, g.is_active,
   g.created_by, g.created_at, g.updated_by, g.updated_at`;
 
 class TelegramGroupRegistryRepository {
@@ -61,6 +61,7 @@ class TelegramGroupRegistryRepository {
       outlet_name: row.outlet_name || null,
       outlet_code: row.outlet_code || null,
       bot_is_admin: Boolean(row.bot_is_admin),
+      is_active: Boolean(row.is_active),
       created_by: row.created_by === undefined ? null : row.created_by,
       created_at: row.created_at,
       updated_by: row.updated_by === undefined ? null : row.updated_by,
@@ -73,16 +74,34 @@ class TelegramGroupRegistryRepository {
   /**
    * The registry, newest first.
    *
-   * `search` matches the group name, the Chat ID and Used For; `category`
-   * narrows to one of the fixed values. Both are optional and the usecase has
-   * already validated the category, so an unknown one never reaches here.
+   * `search` matches the group name, the Chat ID and Used For. `category`,
+   * `outlet_id`, `bot_is_admin` and `is_active` each narrow the list and are
+   * all optional; the usecase has already validated every one of them, so an
+   * unknown category or a non-boolean flag never reaches here.
+   *
+   * `outlet_id` of the string "none" means the company-wide groups - the rows
+   * with NO outlet - which is a filter a plain `outlet_id = ?` cannot express.
    */
-  async getAll({ search, category } = {}) {
+  async getAll({ search, category, outlet_id, bot_is_admin, is_active } = {}) {
     const where = [];
     const params = [];
     if (category) {
       where.push("g.category = ?");
       params.push(category);
+    }
+    if (outlet_id === "none") {
+      where.push("g.outlet_id IS NULL");
+    } else if (outlet_id !== undefined && outlet_id !== null) {
+      where.push("g.outlet_id = ?");
+      params.push(outlet_id);
+    }
+    if (bot_is_admin !== undefined && bot_is_admin !== null) {
+      where.push("g.bot_is_admin = ?");
+      params.push(bot_is_admin ? 1 : 0);
+    }
+    if (is_active !== undefined && is_active !== null) {
+      where.push("g.is_active = ?");
+      params.push(is_active ? 1 : 0);
     }
     if (search) {
       where.push("(g.group_name LIKE ? OR g.chat_id LIKE ? OR g.used_for LIKE ?)");
@@ -146,8 +165,8 @@ class TelegramGroupRegistryRepository {
     const res = await this._query(
       "CREATE",
       `INSERT INTO ${TABLE}
-         (group_name, chat_id, category, used_for, outlet_id, bot_is_admin, created_by, updated_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         (group_name, chat_id, category, used_for, outlet_id, bot_is_admin, is_active, created_by, updated_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         row.group_name,
         row.chat_id,
@@ -155,6 +174,7 @@ class TelegramGroupRegistryRepository {
         row.used_for,
         row.outlet_id === undefined ? null : row.outlet_id,
         row.bot_is_admin ? 1 : 0,
+        row.is_active === false ? 0 : 1,
         row.created_by === undefined ? null : row.created_by,
         row.created_by === undefined ? null : row.created_by,
       ]
@@ -172,9 +192,11 @@ class TelegramGroupRegistryRepository {
         values.push(fields[column]);
       }
     }
-    if (fields.bot_is_admin !== undefined) {
-      sets.push("bot_is_admin = ?");
-      values.push(fields.bot_is_admin ? 1 : 0);
+    for (const flag of ["bot_is_admin", "is_active"]) {
+      if (fields[flag] !== undefined) {
+        sets.push(`${flag} = ?`);
+        values.push(fields[flag] ? 1 : 0);
+      }
     }
     if (sets.length === 0) return { code: 200, affectedRows: 0 };
     sets.push("updated_by = ?");

@@ -45,6 +45,10 @@ class TelegramGroupRegistryRoutes {
         this.validate(req.query, {
           search: Joi.string().allow("").max(150).optional(),
           category: Joi.string().allow("").max(50).optional(),
+          // "none" for the company-wide groups; the usecase owns that word.
+          outlet_id: Joi.any().optional(),
+          bot_is_admin: Joi.any().optional(),
+          is_active: Joi.any().optional(),
         });
         const data = await this.usecase.getAll(req.query);
         res.json({ code: 200, data, categories: TELEGRAM_GROUP_CATEGORIES });
@@ -82,6 +86,8 @@ class TelegramGroupRegistryRoutes {
           used_for: Joi.string().max(255).required(),
           outlet_id: Joi.any().optional(),
           bot_is_admin: Joi.any().required(),
+          // Optional: a new group defaults to Active.
+          is_active: Joi.any().optional(),
         });
         const result = await this.usecase.create(req.body, await this.permissions.actorFor(req));
         res.json(result);
@@ -100,6 +106,7 @@ class TelegramGroupRegistryRoutes {
           used_for: Joi.string().max(255).optional(),
           outlet_id: Joi.any().optional(),
           bot_is_admin: Joi.any().optional(),
+          is_active: Joi.any().optional(),
         });
         const id = parseInt(req.params.telegram_group_id, 10);
         const result = await this.usecase.update(id, req.body, await this.permissions.actorFor(req));

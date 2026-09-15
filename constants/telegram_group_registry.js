@@ -19,8 +19,17 @@
  * asks the user to pick it.
  */
 
-/** The only categories a registry row may carry. Order is display order. */
-const TELEGRAM_GROUP_CATEGORIES = ["Attendance", "Maintenance", "HR", "Other"];
+/**
+ * The only categories a registry row may carry. ORDER HERE IS DISPLAY ORDER
+ * and is deliberately not the schema's order: the ENUM appends 'Marketing'
+ * last, because appending is metadata-only while reordering existing members
+ * renumbers them and rewrites every row. "Other" reads last in a dropdown, so
+ * it sits last here and the two orders are allowed to differ.
+ */
+const TELEGRAM_GROUP_CATEGORIES = ["Attendance", "Maintenance", "HR", "Marketing", "Other"];
+
+/** The four this registry shipped with, before 'Marketing' was added. */
+const ORIGINAL_TELEGRAM_GROUP_CATEGORIES = ["Attendance", "Maintenance", "HR", "Other"];
 
 /**
  * A Telegram GROUP chat id: a leading minus and digits, NOTHING ELSE.
@@ -77,6 +86,7 @@ const MESSAGES = {
   CHAT_ID_FORMAT:
     "Group Chat ID must be a negative whole number such as -1001234567890 - digits only, with a leading minus and no spaces or decimals.",
   CHAT_ID_DUPLICATE: "This Telegram Chat ID is already registered",
+  STATUS_INVALID: "Status must be Active or Inactive",
   BASIC_GROUP_WARNING:
     "This is a Basic Telegram Group. Invite-link and member-removal functionality will require the group to be converted to a Supergroup.",
   BOT_NOT_ADMIN_WARNING:
@@ -128,6 +138,7 @@ function warningsFor({ chat_id, bot_is_admin }) {
 module.exports = {
   PERMISSIONS,
   TELEGRAM_GROUP_CATEGORIES,
+  ORIGINAL_TELEGRAM_GROUP_CATEGORIES,
   TELEGRAM_GROUP_CHAT_ID_RE,
   ALL_ZEROS_RE,
   SUPERGROUP_PREFIX,

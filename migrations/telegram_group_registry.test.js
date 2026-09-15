@@ -22,7 +22,7 @@ const assert = require("node:assert/strict");
 const fs = require("fs");
 const path = require("path");
 
-const { PERMISSIONS, TELEGRAM_GROUP_CATEGORIES } = require("../constants/telegram_group_registry");
+const { PERMISSIONS, ORIGINAL_TELEGRAM_GROUP_CATEGORIES } = require("../constants/telegram_group_registry");
 
 const dir = path.join(__dirname, "mysql/migrations/sqls");
 const NAME = "20261014120000-telegram-group-registry";
@@ -54,7 +54,13 @@ describe("the migration runner file", () => {
       .filter((id) => /^\d{14}$/.test(id));
     const mine = NAME.slice(0, 14);
     assert.equal(all.filter((id) => id === mine).length, 1, "the identifier is unique");
-    assert.ok(all.every((id) => id <= mine), "it is the newest migration on this branch");
+    // NOT "it is the newest": that was true the day it was written and false
+    // the moment another migration was added - the same correction
+    // hr_onboarding_dashboard_permission.test.js already records making.
+    // What matters is that it sorts after what it depends on.
+    for (const dependency of ["20261013120000"]) {
+      assert.ok(dependency < mine, `${mine} must sort after ${dependency}`);
+    }
   });
 });
 
@@ -118,11 +124,16 @@ describe("the table", () => {
     assert.ok(!/outlet_name|outlet_code/.test(upBody), "no outlet data is duplicated into this table");
   });
 
-  it("constrains the category to the four values the code allows, and only those", () => {
+  it("constrains the category to the four values THIS migration shipped with", () => {
+    // A migration is a historical fact: this one created the original four.
+    // 'Marketing' was appended later by 20261015120000, so this assertion
+    // pins the original list rather than today's constant - otherwise every
+    // future category would retroactively "fail" a migration that ran long
+    // before it existed.
     const enumMatch = /`category` ENUM\(([^)]*)\)/.exec(createTable);
     assert.ok(enumMatch, "category is an ENUM");
     const values = enumMatch[1].split(",").map((v) => v.trim().replace(/^'|'$/g, ""));
-    assert.deepEqual(values, TELEGRAM_GROUP_CATEGORIES, "the schema and constants agree");
+    assert.deepEqual(values, ORIGINAL_TELEGRAM_GROUP_CATEGORIES);
   });
 
   it("indexes what the list screen filters on", () => {

@@ -104,14 +104,43 @@ function normaliseOutletId(value) {
   return id;
 }
 
-function normaliseBotIsAdmin(value, { required = true } = {}) {
+/**
+ * A yes/no field as the form, the API and a script each spell it.
+ *
+ * One helper for both booleans so Bot Is Admin and Status cannot drift into
+ * accepting different shapes of the same answer; `label` and `invalid` keep
+ * each field's own message.
+ */
+function normaliseFlag(value, { label, invalid, required = true } = {}) {
   if (value === undefined || value === null || value === "") {
-    if (required) throw validationError("Bot Is Admin is required");
+    if (required) throw validationError(`${label} is required`);
     return undefined;
   }
-  if (value === true || value === 1 || value === "1" || value === "true" || value === "Yes") return true;
-  if (value === false || value === 0 || value === "0" || value === "false" || value === "No") return false;
-  throw validationError("Bot Is Admin must be Yes or No");
+  if (value === true || value === 1 || value === "1" || value === "true" || value === "Yes" || value === "Active") return true;
+  if (value === false || value === 0 || value === "0" || value === "false" || value === "No" || value === "Inactive") return false;
+  throw validationError(invalid);
+}
+
+function normaliseBotIsAdmin(value, options = {}) {
+  return normaliseFlag(value, {
+    label: "Bot Is Admin",
+    invalid: "Bot Is Admin must be Yes or No",
+    ...options,
+  });
+}
+
+/**
+ * Status. OPTIONAL ON CREATE and defaults to Active: a group somebody is
+ * registering is one they are about to use, and making them say so would be
+ * a required field with one sensible answer.
+ */
+function normaliseIsActive(value, options = {}) {
+  return normaliseFlag(value, {
+    label: "Status",
+    invalid: MESSAGES.STATUS_INVALID,
+    required: false,
+    ...options,
+  });
 }
 
 class TelegramGroupRegistryUsecase {
@@ -143,7 +172,14 @@ class TelegramGroupRegistryUsecase {
     };
   }
 
-  /** `{ search?, category? }`. An unsupported category is refused, not ignored. */
+  /**
+   * `{ search?, category?, outlet_id?, bot_is_admin?, is_active? }`.
+   *
+   * Every filter is validated rather than passed through: an unsupported
+   * category is REFUSED, not quietly ignored, because silently listing
+   * everything in answer to a filter nobody supports is how a user concludes
+   * the filter works. `outlet_id=none` is the company-wide groups.
+   */
   async getAll(filters = {}) {
     try {
       const search = filters.search === undefined || filters.search === null
@@ -153,7 +189,15 @@ class TelegramGroupRegistryUsecase {
       if (filters.category !== undefined && filters.category !== null && String(filters.category).trim() !== "") {
         category = normaliseCategoryOrThrow(filters.category);
       }
-      const rows = await this.repo.getAll({ search, category });
+      let outlet_id;
+      const rawOutlet = filters.outlet_id;
+      if (rawOutlet !== undefined && rawOutlet !== null && String(rawOutlet).trim() !== "") {
+        outlet_id = String(rawOutlet).trim() === "none" ? "none" : normaliseOutletId(rawOutlet);
+      }
+      const bot_is_admin = normaliseBotIsAdmin(filters.bot_is_admin, { required: false });
+      const is_active = normaliseIsActive(filters.is_active);
+
+      const rows = await this.repo.getAll({ search, category, outlet_id, bot_is_admin, is_active });
       return rows.map(TelegramGroupRegistryUsecase.decorate);
     } catch (err) {
       if (err.name !== "ValidationError") this._log("GET_ALL", err);
@@ -180,6 +224,8 @@ class TelegramGroupRegistryUsecase {
         used_for: requiredText(body.used_for, "Used For", 255),
         outlet_id: normaliseOutletId(body.outlet_id),
         bot_is_admin: normaliseBotIsAdmin(body.bot_is_admin),
+        // Absent means Active - see normaliseIsActive.
+        is_active: body.is_active === undefined ? true : normaliseIsActive(body.is_active),
         created_by: actor.employeeId === undefined ? null : actor.employeeId,
       };
 
@@ -215,6 +261,7 @@ class TelegramGroupRegistryUsecase {
       if (body.used_for !== undefined) fields.used_for = requiredText(body.used_for, "Used For", 255);
       if (body.outlet_id !== undefined) fields.outlet_id = normaliseOutletId(body.outlet_id);
       if (body.bot_is_admin !== undefined) fields.bot_is_admin = normaliseBotIsAdmin(body.bot_is_admin);
+      if (body.is_active !== undefined) fields.is_active = normaliseIsActive(body.is_active, { required: true });
 
       if (fields.outlet_id !== undefined) await this._assertOutletExists(fields.outlet_id);
       if (fields.chat_id !== undefined) {
