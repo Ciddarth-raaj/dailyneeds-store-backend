@@ -447,6 +447,113 @@ describe("duplicate delivery and retries", () => {
     assert.equal(state.attempt.status, ATTEMPT_STATUS.JOINED);
   });
 
+  /* ------------------------------------------- HIDE_REQUESTER_MISSING ----- */
+
+  const hideRequesterError = () => {
+    const err = new Error("Bad Request: HIDE_REQUESTER_MISSING");
+    err.telegramDescription = "Bad Request: HIDE_REQUESTER_MISSING";
+    return err;
+  };
+
+  it("hide requester missing: a CONFIRMED member is JOINED and cached", async () => {
+    // The request is gone from Telegram's side because they are already in.
+    // That is the one reading of this error we may act on, and only because
+    // getChatMember said so.
+    const { usecase, calls, state } = build({ approveThrows: hideRequesterError() });
+    state.memberAfter = { status: "member" };
+
+    const result = await usecase.handle(update());
+
+    assert.equal(result.approved, true);
+    assert.equal(result.alreadyMember, true);
+    assert.equal(state.attempt.status, ATTEMPT_STATUS.JOINED);
+    assert.equal(calls.verified.length, 1);
+    assert.equal(calls.verified[0].membership, "JOINED");
+    assert.equal(calls.verified[0].employeeTelegramId, 900);
+    assert.equal(calls.verified[0].telegramGroupId, 10);
+  });
+
+  it("hide requester missing: a CONFIRMED non-member is NOT joined", async () => {
+    // The request vanished for one of its other reasons - cancelled,
+    // declined, aged out - and nobody joined anything. Calling this JOINED
+    // would put a membership in the record that Telegram just denied.
+    for (const memberAfter of [{ status: "left" }, { status: "kicked" }, null]) {
+      const { usecase, calls, state } = build({ approveThrows: hideRequesterError() });
+      state.memberAfter = memberAfter;
+
+      const result = await usecase.handle(update());
+
+      const where = JSON.stringify(memberAfter);
+      assert.equal(result.approved, false, where);
+      assert.equal(result.reason, JOIN_REFUSAL.APPROVAL_FAILED, where);
+      assert.equal(state.attempt.status, ATTEMPT_STATUS.FAILED, where);
+      assert.notEqual(state.attempt.status, ATTEMPT_STATUS.JOINED, where);
+      assert.deepEqual(calls.verified, [], where);
+    }
+  });
+
+  it("hide requester missing: an UNANSWERABLE lookup claims no membership", async () => {
+    // We could not ask, so we know nothing. The attempt stays exactly where
+    // it is - received, not concluded - for somebody to review.
+    const { usecase, calls, state } = build({ approveThrows: hideRequesterError() });
+    usecase.telegram.getChatMember = async () => {
+      throw new Error("ETIMEDOUT");
+    };
+
+    const result = await usecase.handle(update());
+
+    assert.equal(result.approved, false);
+    assert.equal(result.reason, JOIN_REFUSAL.APPROVAL_FAILED);
+    assert.equal(state.attempt.status, ATTEMPT_STATUS.JOIN_REQUEST_RECEIVED);
+    assert.notEqual(state.attempt.status, ATTEMPT_STATUS.JOINED);
+    assert.notEqual(state.attempt.status, ATTEMPT_STATUS.FAILED);
+    assert.deepEqual(calls.verified, []);
+  });
+
+  it("hide requester missing: the error ALONE never proves membership", async () => {
+    // The distinction under test: USER_ALREADY_PARTICIPANT concludes the
+    // attempt as JOINED on its own, HIDE_REQUESTER_MISSING never does. Same
+    // world, same non-member, two different outcomes.
+    const alreadyErr = new Error("Bad Request: USER_ALREADY_PARTICIPANT");
+    alreadyErr.telegramDescription = "Bad Request: USER_ALREADY_PARTICIPANT";
+
+    const already = build({ approveThrows: alreadyErr });
+    already.state.memberAfter = { status: "left" };
+    const hidden = build({ approveThrows: hideRequesterError() });
+    hidden.state.memberAfter = { status: "left" };
+
+    await already.usecase.handle(update());
+    await hidden.usecase.handle(update());
+
+    assert.equal(already.state.attempt.status, ATTEMPT_STATUS.JOINED);
+    assert.equal(hidden.state.attempt.status, ATTEMPT_STATUS.FAILED);
+  });
+
+  it("hide requester missing: a CACHE failure does not change the outcome", async () => {
+    const { usecase, state } = build({ approveThrows: hideRequesterError() });
+    state.memberAfter = { status: "member" };
+    usecase.verificationRepo.record = async () => {
+      throw new Error("cache table is gone");
+    };
+
+    const result = await usecase.handle(update());
+
+    assert.equal(result.approved, true);
+    assert.equal(result.alreadyMember, true);
+    assert.equal(state.attempt.status, ATTEMPT_STATUS.JOINED);
+  });
+
+  it("hide requester missing: a confirmed member joins with no verification repository", async () => {
+    const { usecase, state } = build({ approveThrows: hideRequesterError() });
+    usecase.verificationRepo = null;
+    state.memberAfter = { status: "member" };
+
+    const result = await usecase.handle(update());
+
+    assert.equal(result.approved, true);
+    assert.equal(state.attempt.status, ATTEMPT_STATUS.JOINED);
+  });
+
   it("marks the attempt FAILED on a genuine approval error, and approves nobody", async () => {
     const err = new Error("Bad Request: CHAT_ADMIN_REQUIRED");
     err.telegramDescription = "Bad Request: CHAT_ADMIN_REQUIRED";

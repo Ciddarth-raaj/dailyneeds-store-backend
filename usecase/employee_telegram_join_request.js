@@ -150,12 +150,16 @@ class EmployeeTelegramJoinRequestUsecase {
    * sooner.
    */
   async _verifyAndCache({ identity, group, userId, readiness }) {
-    if (!this.verificationRepo) return { verified: false };
     try {
       const member = await this.telegram.getChatMember(group.chat_id, userId);
-      if (!isTelegramMember(member)) return { verified: false };
+      // THREE ANSWERS, NOT TWO. `member` is what Telegram said - true, false,
+      // or null for "we could not ask" - and callers that must tell a
+      // confirmed non-member from an unanswered question read it. `verified`
+      // stays the narrow question the cache cares about: did we write one.
+      if (!isTelegramMember(member)) return { verified: false, member: false };
+      if (!this.verificationRepo) return { verified: false, member: true };
       await this._recordVerification({ identity, group, joined: true, readiness });
-      return { verified: true };
+      return { verified: true, member: true };
     } catch (err) {
       logger.Log({
         level: logger.LEVEL.WARN,
@@ -165,7 +169,7 @@ class EmployeeTelegramJoinRequestUsecase {
         category: "",
         ref: { telegram_group_id: group.telegram_group_id },
       });
-      return { verified: false };
+      return { verified: false, member: null };
     }
   }
 
@@ -291,7 +295,69 @@ class EmployeeTelegramJoinRequestUsecase {
       // approve somebody already in the chat, which happens when a request
       // is delivered twice or an admin let them in by hand while this ran.
       const description = String((err && err.telegramDescription) || err.message || "");
-      if (/USER_ALREADY_PARTICIPANT|already a participant|HIDE_REQUESTER_MISSING/i.test(description)) {
+
+      // HIDE_REQUESTER_MISSING IS NOT "ALREADY A MEMBER", and the two were
+      // read as one error for too long. Telegram sends it when the join
+      // request it was asked to approve is no longer on its side - which
+      // happens when the person is already in, AND EQUALLY when they
+      // cancelled the request, an admin declined it, or it aged out. It says
+      // the REQUEST is gone; it says nothing at all about the PERSON. Only
+      // `getChatMember` can tell those apart, so this branch asks, and
+      // believes nothing it did not hear back.
+      if (/HIDE_REQUESTER_MISSING/i.test(description)) {
+        const { member } = await this._verifyAndCache({
+          identity,
+          group: full,
+          userId: Number(fromId),
+          readiness,
+        });
+
+        if (member === true) {
+          await this.joinRepo.advanceStatus(
+            attempt.employee_telegram_group_join_attempt_id,
+            ATTEMPT_STATUS.JOIN_REQUEST_RECEIVED,
+            ATTEMPT_STATUS.JOINED,
+            { completed: true }
+          );
+          return { approved: true, alreadyMember: true };
+        }
+
+        if (member === false) {
+          // TELEGRAM ANSWERED, AND THE ANSWER WAS NO. The request is gone and
+          // they are not in the group, so nothing was achieved: this attempt
+          // failed and the employee needs a fresh link.
+          await this.joinRepo.advanceStatus(
+            attempt.employee_telegram_group_join_attempt_id,
+            ATTEMPT_STATUS.JOIN_REQUEST_RECEIVED,
+            ATTEMPT_STATUS.FAILED
+          );
+          return this._refuse(JOIN_REFUSAL.APPROVAL_FAILED, {
+            telegram_group_id: full.telegram_group_id,
+            employee_id: employeeId,
+          });
+        }
+
+        // WE COULD NOT ASK. The attempt stays where it genuinely is -
+        // JOIN_REQUEST_RECEIVED, received and not concluded - which is the
+        // honest row for somebody to review. It is deliberately neither
+        // JOINED (a membership nothing confirmed) nor FAILED (a failure
+        // nothing established).
+        logger.Log({
+          level: logger.LEVEL.WARN,
+          component: "USECASE.EMPLOYEE_TELEGRAM_JOIN_REQUEST",
+          code: "USECASE.EMPLOYEE_TELEGRAM_JOIN_REQUEST.APPROVE",
+          description: "join request vanished and membership could not be confirmed",
+          category: "",
+          ref: { telegram_group_id: full.telegram_group_id, employee_id: employeeId },
+        });
+        return this._refuse(JOIN_REFUSAL.APPROVAL_FAILED, {
+          telegram_group_id: full.telegram_group_id,
+          employee_id: employeeId,
+        });
+      }
+
+      // ALREADY A MEMBER IS A SUCCESS, NOT A FAILURE.
+      if (/USER_ALREADY_PARTICIPANT|already a participant/i.test(description)) {
         await this.joinRepo.advanceStatus(
           attempt.employee_telegram_group_join_attempt_id,
           ATTEMPT_STATUS.JOIN_REQUEST_RECEIVED,
