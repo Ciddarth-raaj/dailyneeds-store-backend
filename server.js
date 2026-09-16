@@ -346,7 +346,13 @@ class Server {
     this.telegramGroupRegistryRepo = require("./repository/telegram_group_registry")(
       this.mysql.connection
     );
-    // EMPLOYEE Telegram identity. Keyed by employee_id, never by a login:
+
+    // Phase 3A: WHICH EMPLOYEES SHOULD BELONG TO WHICH GROUP. Configuration
+    // only - this repository writes mapping rows and reads the employee
+    // master; it touches nothing on Telegram.
+    this.telegramGroupMappingRepo = require("./repository/telegram_group_mapping")(
+      this.mysql.connection
+    );    // EMPLOYEE Telegram identity. Keyed by employee_id, never by a login:
     // most employees have no dnds.co.in account, so `telegram_links` (which is
     // keyed by user_id, for password reset) could not serve them.
     this.employeeTelegramRepo = require("./repository/employee_telegram")(
@@ -822,6 +828,13 @@ class Server {
     this.telegramGroupRegistryUsecase = require("./usecase/telegram_group_registry")(
       this.telegramGroupRegistryRepo
     );
+    // NO TELEGRAM SERVICE IS PASSED, and that is deliberate rather than an
+    // omission: Phase 3A decides who SHOULD be in a group and performs no
+    // membership action, so it is given nothing it could send with.
+    this.telegramGroupMappingUsecase = require("./usecase/telegram_group_mapping")(
+      this.telegramGroupMappingRepo,
+      this.telegramGroupRegistryRepo
+    );
     this.advanceRequestUsecase = require("./usecase/advance_request")(
       this.advanceRequestRepo
     );
@@ -1276,7 +1289,12 @@ class Server {
     const telegramGroupRegistryRouter = require("./routes/telegram_group_registry")(
       this.telegramGroupRegistryUsecase,
       this.permissions,
-      this.telegramGroupDetectionUsecase
+      this.telegramGroupDetectionUsecase,
+      this.telegramGroupMappingUsecase,
+      // The SAME live branch resolver every other employee read uses. Passed
+      // in rather than resolved inside the usecase so there is one
+      // authorization layer for employee names on dnds.co.in, not two.
+      this.employeeBranchScope
     );
     const pickPackRemarksRouter = require("./routes/pick_pack_remarks")(
       this.pickPackRemarksUsecase

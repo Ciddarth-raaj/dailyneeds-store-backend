@@ -5,6 +5,7 @@ const {
   PERMISSIONS: P,
   TELEGRAM_GROUP_CATEGORIES,
 } = require("../constants/telegram_group_registry");
+const { MAPPING_TYPES } = require("../constants/telegram_group_mapping");
 
 /**
  * Telegram Group Registry. Mounted at /telegram-groups.
@@ -16,6 +17,23 @@ const {
  *   POST   /          add                                      manage_telegram_groups
  *   PUT    /:id       edit                                     manage_telegram_groups
  *   DELETE /:id       remove                                   manage_telegram_groups
+ *
+ * Phase 3A - WHO SHOULD BELONG TO A GROUP. Configuration only; none of these
+ * adds, removes, invites or bans anybody on Telegram.
+ *
+ *   GET    /:id/mappings            the rules, with live counts   view_telegram_groups
+ *   POST   /:id/mappings            add a rule                  manage_telegram_groups
+ *   DELETE /:id/mappings/:mapping   remove a rule               manage_telegram_groups
+ *   GET    /:id/matched-employees   who they resolve to           view_telegram_groups
+ *
+ * NO NEW PERMISSION KEY. A mapping belongs to the group it maps into, so it
+ * is governed by the same two keys as the group - a third key would be one
+ * more thing to grant before a screen that is already behind a gate works.
+ *
+ * `matched-employees` IS THE ONE ENDPOINT THAT NAMES PEOPLE, so it is also
+ * the one that resolves the caller's live employee branch scope. The counts
+ * elsewhere are company-wide on purpose: a number discloses nobody, and a
+ * manager checking a rule needs the real total.
  *
  * The REST shape is `routes/remarks_master.js`, the master CRUD this screen
  * is modelled on. The PERMISSION MIDDLEWARE is `routes/biomax_device.js`:
@@ -31,10 +49,12 @@ const {
  * usecase owns that list and returns the message naming the four values.
  */
 class TelegramGroupRegistryRoutes {
-  constructor(telegramGroupRegistryUsecase, permissions, detectionUsecase) {
+  constructor(telegramGroupRegistryUsecase, permissions, detectionUsecase, mappingUsecase, branchScope) {
     this.usecase = telegramGroupRegistryUsecase;
     this.permissions = permissions;
     this.detection = detectionUsecase || null;
+    this.mapping = mappingUsecase || null;
+    this.branch = branchScope || null;
     this.router = express.Router();
     this.init();
   }
@@ -158,6 +178,100 @@ class TelegramGroupRegistryRoutes {
       }
       res.end();
     });
+
+    /* ------------------------------------------- Phase 3A: group mapping */
+
+    if (!this.mapping) return;
+
+    r.get(
+      "/:telegram_group_id(\\d+)/mappings",
+      gate.require(P.VIEW_TELEGRAM_GROUPS),
+      async (req, res) => {
+        try {
+          const id = parseInt(req.params.telegram_group_id, 10);
+          res.json({ code: 200, data: await this.mapping.getMappings(id), mapping_types: MAPPING_TYPES });
+        } catch (err) {
+          this.fail(res, err);
+        }
+        res.end();
+      }
+    );
+
+    r.post(
+      "/:telegram_group_id(\\d+)/mappings",
+      gate.require(P.MANAGE_TELEGRAM_GROUPS),
+      async (req, res) => {
+        try {
+          this.validate(req.body, {
+            // `any` for both, because the usecase owns the vocabulary AND the
+            // separate refusals - "not a supported type", "takes no target",
+            // "select what this applies to", "no longer exists". A Joi
+            // `valid()` list here would flatten all of those into one.
+            mapping_type: Joi.any().required(),
+            target_id: Joi.any().optional(),
+          });
+          const id = parseInt(req.params.telegram_group_id, 10);
+          res.json(
+            await this.mapping.addMapping(id, req.body, await this.permissions.actorFor(req))
+          );
+        } catch (err) {
+          this.fail(res, err);
+        }
+        res.end();
+      }
+    );
+
+    r.delete(
+      "/:telegram_group_id(\\d+)/mappings/:telegram_group_mapping_id(\\d+)",
+      gate.require(P.MANAGE_TELEGRAM_GROUPS),
+      async (req, res) => {
+        try {
+          const id = parseInt(req.params.telegram_group_id, 10);
+          const mappingId = parseInt(req.params.telegram_group_mapping_id, 10);
+          res.json(await this.mapping.deleteMapping(id, mappingId));
+        } catch (err) {
+          this.fail(res, err);
+        }
+        res.end();
+      }
+    );
+
+    /**
+     * The people a group's rules resolve to.
+     *
+     * THE SCOPE IS RESOLVED HERE AND HANDED DOWN. `branch.resolve(req)` reads
+     * the caller's CURRENT branch assignment from the database - never
+     * `store_id` from the JWT, which is a copy taken at login that nothing
+     * refreshes - and the usecase is given the answer rather than the
+     * request. Nothing a client sends can widen it: there is no branch
+     * parameter on this route to send.
+     *
+     * WITHOUT THE RESOLVER WIRED, THIS RETURNS NO NAMES. Failing closed, so a
+     * future wiring mistake cannot quietly publish the staff list.
+     */
+    r.get(
+      "/:telegram_group_id(\\d+)/matched-employees",
+      gate.require(P.VIEW_TELEGRAM_GROUPS),
+      async (req, res) => {
+        try {
+          this.validate(req.query, { mapping_id: Joi.any().optional() });
+          const id = parseInt(req.params.telegram_group_id, 10);
+          const scope = this.branch
+            ? await this.branch.resolve(req)
+            : { kind: "NONE", store_ids: [] };
+          res.json({
+            code: 200,
+            data: await this.mapping.getMatchedEmployees(id, {
+              mapping_id: req.query.mapping_id,
+              scope,
+            }),
+          });
+        } catch (err) {
+          this.fail(res, err);
+        }
+        res.end();
+      }
+    );
   }
 
   /**
@@ -185,6 +299,18 @@ class TelegramGroupRegistryRoutes {
   }
 }
 
-module.exports = (telegramGroupRegistryUsecase, permissions, detectionUsecase) =>
-  new TelegramGroupRegistryRoutes(telegramGroupRegistryUsecase, permissions, detectionUsecase);
+module.exports = (
+  telegramGroupRegistryUsecase,
+  permissions,
+  detectionUsecase,
+  mappingUsecase,
+  branchScope
+) =>
+  new TelegramGroupRegistryRoutes(
+    telegramGroupRegistryUsecase,
+    permissions,
+    detectionUsecase,
+    mappingUsecase,
+    branchScope
+  );
 module.exports.TelegramGroupRegistryRoutes = TelegramGroupRegistryRoutes;
