@@ -230,14 +230,48 @@ describe("the employee's Telegram picture", () => {
     assert.equal(result.groups[0].membership_status, MEMBERSHIP_STATUS.ACTION_REQUIRED);
   });
 
-  it("falls back to the stored JOINED when Telegram cannot be asked", async () => {
+  it("FAILS CLOSED when membership cannot be verified - never a stale JOINED", async () => {
+    // The case this replaced an earlier behaviour for: employee joined last
+    // week, left the group by hand since, and today's getChatMember times
+    // out. Reporting Joined from the old record would report Telegram
+    // Complete for somebody who is not in the group.
     const { usecase } = build({
       mappings,
       joinedGroupIds: new Set([1]),
       memberThrows: new Error("network"),
     });
     const result = await usecase.getGroups(42, emp());
+
+    assert.notEqual(result.groups[0].membership_status, MEMBERSHIP_STATUS.JOINED);
+    assert.equal(result.groups[0].membership_status, MEMBERSHIP_STATUS.GROUP_NOT_READY);
+    assert.equal(result.groups[0].readiness_status, GROUP_READINESS.TELEGRAM_UNAVAILABLE);
+    assert.match(result.groups[0].readiness_reason, /temporarily unavailable/);
+    assert.equal(result.telegram_complete, false, "unverified is never complete");
+  });
+
+  it("does not offer a Join link while membership is unverifiable", async () => {
+    // We do not know whether they are already in; offering a link would be
+    // guessing, and the honest row says Telegram could not be reached.
+    const { usecase } = build({ mappings, memberThrows: new Error("network") });
+    const result = await usecase.getGroups(42, emp());
+    assert.equal(result.groups[0].can_generate_join_link, false);
+  });
+
+  it("NEVER reads the stored JOINED as truth, even with no Telegram failure", async () => {
+    // A record saying joined, and a live answer saying left. The live answer
+    // wins; the record is history, not evidence.
+    const { usecase } = build({ mappings, isMember: false, joinedGroupIds: new Set([1]) });
+    const result = await usecase.getGroups(42, emp());
+    assert.equal(result.groups[0].membership_status, MEMBERSHIP_STATUS.ACTION_REQUIRED);
+    assert.equal(result.telegram_complete, false);
+  });
+
+  it("an employee with a verified membership is still Complete", async () => {
+    // Failing closed must not make completion unreachable.
+    const { usecase } = build({ mappings, isMember: true });
+    const result = await usecase.getGroups(42, emp());
     assert.equal(result.groups[0].membership_status, MEMBERSHIP_STATUS.JOINED);
+    assert.equal(result.telegram_complete, true);
   });
 
   it("a disconnected employee costs NO Telegram calls", async () => {

@@ -209,6 +209,28 @@ class Telegram {
     return data.result;
   }
 
+  /**
+   * THE BOT'S OWN ACCOUNT. Needed to ask Telegram about the bot's standing in
+   * a group, which is what group readiness turns on.
+   *
+   * THIS WAS MISSING, AND ITS ABSENCE WAS INVISIBLE. `getBotUsername` called
+   * the underlying client's `getMe` from inside the service and never
+   * exposed one, so `readiness.getMe()` was `undefined` on the real object -
+   * a TypeError, swallowed by the readiness catch, reported as
+   * TELEGRAM_UNAVAILABLE. Every group would have read "Telegram is
+   * temporarily unavailable" forever: no link could be issued and nobody
+   * could become Telegram Complete, and it would have looked like an outage
+   * rather than a bug. The unit tests missed it because their double defined
+   * `getMe` itself - which is exactly what
+   * `services/telegram_contract.test.js` now exists to stop.
+   *
+   * It returns Telegram's own record rather than a cached username, because
+   * the caller wants the id.
+   */
+  async getMe() {
+    return requireClient().getMe();
+  }
+
   /** The chat itself - `type` is what says Supergroup rather than Basic Group. */
   async getChat(chatId) {
     return requireClient().getChat(String(chatId));

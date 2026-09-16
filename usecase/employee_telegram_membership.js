@@ -14,6 +14,8 @@ const {
   JOIN_LINK_TTL_MS,
   MEMBERSHIP_MESSAGES,
   ATTEMPT_STATUS,
+  GROUP_READINESS,
+  READINESS_REASON,
 } = require("../constants/telegram_membership");
 
 /**
@@ -131,10 +133,13 @@ class EmployeeTelegramMembershipUsecase {
     // Sweep anything that timed out before reading what is live, so a stale
     // PENDING is never shown as Join Pending.
     await this.joinRepo.expireOverdue(employeeId);
-    const [liveAttempts, joinedGroupIds] = await Promise.all([
-      this.joinRepo.getLiveAttemptsForEmployee(employeeId),
-      this.joinRepo.getJoinedGroupIds(employeeId),
-    ]);
+    // THE STORED `JOINED` IS NOT READ HERE. It used to be the fallback when
+    // Telegram could not be reached, and that is precisely what made a
+    // week-old record able to report Telegram Complete. This screen asks
+    // Telegram or reports that it could not; the stored status remains the
+    // history of what we did, and `getJoinedGroupIds` remains for a bounded
+    // dashboard signal where a live check per employee is not affordable.
+    const liveAttempts = await this.joinRepo.getLiveAttemptsForEmployee(employeeId);
 
     const readinessByGroup = connected
       ? await this.readiness.checkMany(groups)
@@ -145,13 +150,35 @@ class EmployeeTelegramMembershipUsecase {
       const readiness = readinessByGroup.get(group.telegram_group_id) || null;
       const liveAttempt = liveAttempts.get(group.telegram_group_id) || null;
 
-      // TELEGRAM IS THE AUTHORITY ON MEMBERSHIP, not our own record of an
-      // approval: somebody may have been added by hand, or have left. The
-      // stored JOINED is only the fallback when we cannot ask.
-      let joined = joinedGroupIds.has(group.telegram_group_id);
+      // TELEGRAM IS THE AUTHORITY ON MEMBERSHIP, and it is the ONLY
+      // authority. Somebody may have been added by hand, or have left.
+      //
+      // AN UNVERIFIABLE MEMBERSHIP FAILS CLOSED. An earlier revision kept
+      // the stored JOINED when the live check failed, which meant: employee
+      // joins, later leaves the group by hand, today's `getChatMember`
+      // happens to time out - and the screen reports Joined and Telegram
+      // Complete from a record that is a week out of date. Completion is
+      // defined as CURRENTLY VERIFIED membership, so a check we could not
+      // make is not a membership, and the row says why rather than pretending
+      // to know.
+      //
+      // The stored JOINED is therefore never read as truth. It stays in the
+      // table as the history of what we did, which is what it is for.
+      let joined = false;
+      let rowReadiness = readiness;
       if (connected && isReady(readiness)) {
         const live = await this._isMember(group, identity);
-        if (live !== null) joined = live;
+        if (live === null) {
+          // Not a verdict about the group - we simply could not ask. The
+          // approved readiness vocabulary already has the word for that, and
+          // using it keeps the row honest AND out of Telegram Complete.
+          rowReadiness = {
+            status: GROUP_READINESS.TELEGRAM_UNAVAILABLE,
+            reason: READINESS_REASON.TELEGRAM_UNAVAILABLE,
+          };
+        } else {
+          joined = live;
+        }
       }
 
       rows.push({
@@ -159,14 +186,14 @@ class EmployeeTelegramMembershipUsecase {
         group_name: group.group_name,
         category: group.category,
         used_for: group.used_for,
-        readiness_status: readiness ? readiness.status : null,
-        readiness_reason: readiness ? readiness.reason : null,
+        readiness_status: rowReadiness ? rowReadiness.status : null,
+        readiness_reason: rowReadiness ? rowReadiness.reason : null,
         membership_status: connected
-          ? membershipStatus({ readiness, joined, liveAttempt })
+          ? membershipStatus({ readiness: rowReadiness, joined, liveAttempt })
           : MEMBERSHIP_STATUS.ACTION_REQUIRED,
         // The UI shows Join only when there is something a person can do.
         can_generate_join_link:
-          connected && isReady(readiness) && !joined && !liveAttempt,
+          connected && isReady(rowReadiness) && !joined && !liveAttempt,
         join_attempt_expires_at: liveAttempt ? liveAttempt.expires_at : null,
       });
     }
