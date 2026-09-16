@@ -316,6 +316,12 @@ class EmployeeTelegramMembershipUsecase {
 
     const alreadyMember = await this._isMember(group, identity);
     if (alreadyMember === true) {
+      // A LIVE, DEFINITIVE ANSWER - so the cache learns it here too. Readiness
+      // was confirmed a few lines above and Telegram has just said they are
+      // in the group; leaving the dashboard to find that out only when
+      // somebody next opens the detail screen would keep an employee sitting
+      // in the queue after the very check that cleared them.
+      await this._recordVerification({ identity, group, readiness, joined: true });
       return {
         code: 200,
         already_joined: true,
@@ -323,6 +329,10 @@ class EmployeeTelegramMembershipUsecase {
         msg: MEMBERSHIP_MESSAGES.ALREADY_JOINED,
       };
     }
+    // `alreadyMember === false` is ALSO definitive, and deliberately NOT
+    // cached: we are about to issue a link precisely because they are not in
+    // the group, and `getGroups` already records that state. `null` - the
+    // check failed - is never cached by anything.
 
     const expiresAt = new Date(this.now().getTime() + JOIN_LINK_TTL_MS);
     let link;

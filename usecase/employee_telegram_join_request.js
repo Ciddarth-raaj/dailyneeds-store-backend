@@ -1,7 +1,12 @@
 const crypto = require("crypto");
 const logger = require("../utils/logger");
 const { isReady, isTelegramMember, attemptIsLive } = require("../utils/telegram_membership");
-const { ATTEMPT_STATUS, JOIN_REFUSAL } = require("../constants/telegram_membership");
+const {
+  ATTEMPT_STATUS,
+  JOIN_REFUSAL,
+  GROUP_READINESS,
+  VERIFIED_MEMBERSHIP,
+} = require("../constants/telegram_membership");
 
 const sha256 = (value) => crypto.createHash("sha256").update(String(value)).digest("hex");
 
@@ -50,7 +55,7 @@ const sha256 = (value) => crypto.createHash("sha256").update(String(value)).dige
  * somebody and that this company runs this flow.
  */
 class EmployeeTelegramJoinRequestUsecase {
-  constructor({ registryRepo, identityRepo, joinRepo, membership, readiness, telegram, mappingRepo, now } = {}) {
+  constructor({ registryRepo, identityRepo, joinRepo, membership, readiness, telegram, mappingRepo, verificationRepo, now } = {}) {
     this.registryRepo = registryRepo;
     this.identityRepo = identityRepo;
     this.joinRepo = joinRepo;
@@ -58,6 +63,8 @@ class EmployeeTelegramJoinRequestUsecase {
     this.readiness = readiness;
     this.telegram = telegram;
     this.mappingRepo = mappingRepo;
+    // Optional: the dashboard's cache. Written on a confirmed join, never read.
+    this.verificationRepo = verificationRepo || null;
     this.now = now || (() => new Date());
   }
 
@@ -96,6 +103,42 @@ class EmployeeTelegramJoinRequestUsecase {
       ref,
     });
     return { approved: false, reason };
+  }
+
+  /**
+   * Teach the dashboard's cache what Telegram just confirmed.
+   *
+   * SAME RULES AS THE DETAIL SCREEN'S RECORDER: only a definitive answer is
+   * written, TELEGRAM_UNAVAILABLE never is, and a failure to cache never
+   * changes the outcome of a join that has already happened. The repository
+   * refuses a non-answer as well, so this is the second of three layers
+   * rather than the only one.
+   *
+   * OPTIONAL. Without a verification repository wired the approval works
+   * exactly as before; the dashboard simply learns later.
+   */
+  async _recordVerification({ identity, group, joined, readiness }) {
+    if (!this.verificationRepo || !identity || !group) return;
+    if (!readiness || readiness.status === GROUP_READINESS.TELEGRAM_UNAVAILABLE) return;
+    try {
+      await this.verificationRepo.record({
+        employeeTelegramId: identity.employee_telegram_id,
+        employeeId: Number(identity.employee_id),
+        telegramGroupId: group.telegram_group_id,
+        membership: joined ? VERIFIED_MEMBERSHIP.JOINED : VERIFIED_MEMBERSHIP.NOT_JOINED,
+        readinessStatus: readiness.status,
+        verifiedAt: this.now(),
+      });
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "USECASE.EMPLOYEE_TELEGRAM_JOIN_REQUEST",
+        code: "USECASE.EMPLOYEE_TELEGRAM_JOIN_REQUEST.RECORD-VERIFICATION",
+        description: `could not cache a verification: ${err.toString()}`,
+        category: "",
+        ref: { telegram_group_id: group.telegram_group_id },
+      });
+    }
   }
 
   async handle(update) {
@@ -266,6 +309,17 @@ class EmployeeTelegramJoinRequestUsecase {
           ATTEMPT_STATUS.JOINED,
           { completed: true }
         );
+        // THE DASHBOARD LEARNS IT NOW, not whenever somebody next opens the
+        // employee. This is the moment a join actually completes, and it
+        // completes asynchronously - nobody is looking at a screen. Without
+        // this the employee would sit in the queue as VERIFICATION_PENDING
+        // after the join that finished them, which is the queue reporting
+        // work that is already done.
+        //
+        // Readiness was re-confirmed as READY earlier in this same handler,
+        // and Telegram has just confirmed the membership, so this is a
+        // definitive answer by both halves.
+        await this._recordVerification({ identity, group: full, joined: true, readiness });
         return { approved: true, joined: true };
       }
     } catch (err) {

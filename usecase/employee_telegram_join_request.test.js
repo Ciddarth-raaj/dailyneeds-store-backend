@@ -41,11 +41,13 @@ const liveAttempt = (over = {}) => ({
 
 /** A whole world, with every knob the tests need to turn. */
 const build = (over = {}) => {
-  const calls = { approved: [], declined: [], advanced: [] };
+  const calls = { approved: [], declined: [], advanced: [], verified: [] };
   const state = {
     group: GROUP,
     readiness: { status: GROUP_READINESS.READY, reason: null },
-    identityByTelegramUser: { [EMPLOYEE_TELEGRAM_USER]: { employee_id: 42 } },
+    identityByTelegramUser: {
+      [EMPLOYEE_TELEGRAM_USER]: { employee_id: 42, employee_telegram_id: 900 },
+    },
     attempt: liveAttempt(),
     required: true,
     approveThrows: null,
@@ -77,6 +79,12 @@ const build = (over = {}) => {
       },
     },
     membership: { isGroupRequired: async () => state.required },
+    verificationRepo: {
+      record: async (row) => {
+        calls.verified.push(row);
+        return { recorded: true };
+      },
+    },
     readiness: { check: async () => state.readiness },
     mappingRepo: { getEmployeeForMatching: async () => ({ employee_id: 42, store_id: 5 }) },
     telegram: {
@@ -192,7 +200,9 @@ describe("A FORWARDED LINK LETS NOBODY IN", () => {
   it("refuses another EMPLOYEE holding somebody else's link", async () => {
     // A connected Telegram account, just not the one this attempt was for.
     const { usecase, calls } = build({
-      identityByTelegramUser: { [STRANGER_TELEGRAM_USER]: { employee_id: 77 } },
+      identityByTelegramUser: {
+        [STRANGER_TELEGRAM_USER]: { employee_id: 77, employee_telegram_id: 901 },
+      },
     });
     const result = await usecase.handle(update({ from: { id: STRANGER_TELEGRAM_USER } }));
 
@@ -384,6 +394,92 @@ describe("duplicate delivery and retries", () => {
     await usecase.handle(update());
     assert.equal(order[0], `advance:${ATTEMPT_STATUS.JOIN_REQUEST_RECEIVED}`);
     assert.equal(order[1], "approve", "a crash between the two must not leave a re-approvable row");
+  });
+});
+
+/* ================================================== the dashboard's cache */
+
+describe("a confirmed join teaches the dashboard immediately", () => {
+  it("records a JOINED verification against the identity row", async () => {
+    // The join completes asynchronously, with nobody looking at a screen.
+    // Without this the employee sits in the queue as VERIFICATION_PENDING
+    // after the join that finished them.
+    const { usecase, calls } = build();
+    const result = await usecase.handle(update());
+
+    assert.equal(result.joined, true);
+    assert.equal(calls.verified.length, 1);
+    assert.equal(calls.verified[0].employeeTelegramId, 900);
+    assert.equal(calls.verified[0].employeeId, 42);
+    assert.equal(calls.verified[0].telegramGroupId, 10);
+    assert.equal(calls.verified[0].membership, "JOINED");
+    assert.equal(calls.verified[0].readinessStatus, GROUP_READINESS.READY);
+  });
+
+  it("writes NOTHING when post-approval verification could not be made", async () => {
+    // Approved, but Telegram would not confirm. The attempt stays APPROVED
+    // and the cache learns nothing - a membership we have not seen is not a
+    // membership, here as everywhere else.
+    const { usecase, calls, state } = build();
+    state.memberAfter = null;
+    const result = await usecase.handle(update());
+
+    assert.equal(result.approved, true);
+    assert.equal(result.joined, false);
+    assert.deepEqual(calls.verified, []);
+    assert.equal(state.attempt.status, ATTEMPT_STATUS.APPROVED);
+  });
+
+  it("writes NOTHING when the verification call throws", async () => {
+    const { usecase, calls } = build();
+    usecase.telegram.getChatMember = async () => {
+      throw new Error("ETIMEDOUT");
+    };
+    const result = await usecase.handle(update());
+    assert.equal(result.approved, true);
+    assert.deepEqual(calls.verified, []);
+  });
+
+  it("writes NOTHING on any refused request", async () => {
+    for (const over of [
+      { required: false },
+      { attempt: null },
+      { identityByTelegramUser: {} },
+      { readiness: { status: GROUP_READINESS.BOT_NOT_ADMIN, reason: "x" } },
+    ]) {
+      const { usecase, calls } = build(over);
+      await usecase.handle(update());
+      assert.deepEqual(calls.verified, [], JSON.stringify(over));
+    }
+  });
+
+  it("a cache failure never undoes an approval that already happened", async () => {
+    const { usecase, calls, state } = build();
+    usecase.verificationRepo.record = async () => {
+      throw new Error("cache table is gone");
+    };
+    const result = await usecase.handle(update());
+    assert.equal(result.approved, true);
+    assert.equal(result.joined, true);
+    assert.equal(state.attempt.status, ATTEMPT_STATUS.JOINED);
+    assert.equal(calls.approved.length, 1);
+  });
+
+  it("works unchanged with no verification repository wired", async () => {
+    const { usecase } = build();
+    usecase.verificationRepo = null;
+    const result = await usecase.handle(update());
+    assert.equal(result.approved, true);
+    assert.equal(result.joined, true);
+  });
+
+  it("caches no Telegram identifier", async () => {
+    const { usecase, calls } = build();
+    await usecase.handle(update());
+    const body = JSON.stringify(calls.verified[0]);
+    assert.ok(!body.includes(String(EMPLOYEE_TELEGRAM_USER)));
+    assert.ok(!body.includes(CHAT_ID));
+    assert.ok(!body.includes(INVITE));
   });
 });
 

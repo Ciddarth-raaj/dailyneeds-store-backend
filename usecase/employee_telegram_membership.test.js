@@ -487,6 +487,37 @@ describe("issuing a join link", () => {
     assert.deepEqual(calls.invites, []);
   });
 
+  it("an ALREADY-JOINED result records the verification immediately", async () => {
+    // Telegram has just said they are in the group, off the back of a
+    // confirmed readiness check. Leaving the dashboard to discover that only
+    // when somebody next opens the detail screen would keep the employee in
+    // the queue after the very check that cleared them.
+    const { usecase, calls } = build({ mappings, isMember: true });
+    const result = await usecase.createJoinLink(42, 1, emp());
+
+    assert.equal(result.already_joined, true);
+    assert.equal(calls.verified.length, 1);
+    assert.equal(calls.verified[0].employeeTelegramId, 900);
+    assert.equal(calls.verified[0].telegramGroupId, 1);
+    assert.equal(calls.verified[0].membership, "JOINED");
+    assert.equal(calls.verified[0].readinessStatus, GROUP_READINESS.READY);
+  });
+
+  it("records NOTHING when the already-member check could not be made", async () => {
+    const { usecase, calls } = build({ mappings, memberThrows: new Error("ETIMEDOUT") });
+    await usecase.createJoinLink(42, 1, emp()).catch(() => {});
+    assert.deepEqual(calls.verified, []);
+  });
+
+  it("records nothing when the group is not ready - no link, no cache write", async () => {
+    const { usecase, calls } = build({
+      mappings,
+      readiness: { status: GROUP_READINESS.BOT_NOT_ADMIN, reason: "Diya is not an admin" },
+    });
+    await usecase.createJoinLink(42, 1, emp()).catch(() => {});
+    assert.deepEqual(calls.verified, []);
+  });
+
   it("issues NO link when the employee is already in the group", async () => {
     const { usecase, calls } = build({ mappings, isMember: true });
     const result = await usecase.createJoinLink(42, 1, emp());

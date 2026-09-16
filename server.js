@@ -794,6 +794,9 @@ class Server {
       readiness: this.telegramGroupReadinessUsecase,
       telegram: require("./services/telegram")(),
       mappingRepo: this.telegramGroupMappingRepo,
+      // A confirmed join teaches the dashboard immediately - the join
+      // completes asynchronously, with nobody looking at a screen.
+      verificationRepo: this.employeeTelegramGroupVerificationRepo,
     });
     this.telegramUpdateDispatcher.register({
       name: "employee_telegram_join_request",
