@@ -74,7 +74,14 @@ describe("the table", () => {
     assert.match(createTable, /CASE WHEN `status` = 'PENDING'/);
     assert.match(createTable, /UNIQUE KEY `uq_etgja_live` \(`live_marker`\)/);
     // NULL when concluded, so history piles up without colliding.
-    assert.match(createTable, /ELSE NULL END\) STORED/);
+    //
+    // VIRTUAL IS LOAD-BEARING, NOT A DETAIL. MySQL refuses ON DELETE CASCADE
+    // on a base column of a STORED generated column, and this migration
+    // failed in production with ER_CANNOT_ADD_FOREIGN for exactly that
+    // reason. Both halves are asserted together because they are one
+    // decision: the cascade below stays, so this column cannot be STORED.
+    assert.match(createTable, /ELSE NULL END\) VIRTUAL/);
+    assert.doesNotMatch(createTable, /ELSE NULL END\) STORED/);
   });
 
   it("makes the invite hash unique, so one link maps to one attempt", () => {

@@ -62,9 +62,18 @@ CREATE TABLE IF NOT EXISTS `employee_telegram_group_join_attempt` (
   `completed_at` DATETIME NULL DEFAULT NULL,
   `concluded_at` DATETIME NULL DEFAULT NULL
     COMMENT 'when it stopped being outstanding - superseded, expired or failed',
+  -- VIRTUAL, NOT STORED, AND THE DIFFERENCE IS THE FOREIGN KEY BELOW. MySQL
+  -- refuses `ON DELETE CASCADE` on a column that a STORED generated column is
+  -- computed from - `ER_CANNOT_ADD_FOREIGN`, which is exactly how this
+  -- migration failed in production. The cascade is the part worth keeping:
+  -- the registry really does hard-delete groups, and a deleted group must
+  -- take its join attempts with it rather than leave rows pointing at
+  -- nothing. A VIRTUAL column is computed on read, is not a stored base-column
+  -- dependency, and carries the same UNIQUE index - so the invariant is
+  -- unchanged and only the storage is.
   `live_marker` VARCHAR(32) AS
     (CASE WHEN `status` = 'PENDING'
-          THEN CONCAT(`employee_id`, ':', `telegram_group_id`) ELSE NULL END) STORED,
+          THEN CONCAT(`employee_id`, ':', `telegram_group_id`) ELSE NULL END) VIRTUAL,
   PRIMARY KEY (`employee_telegram_group_join_attempt_id`),
   UNIQUE KEY `uq_etgja_live` (`live_marker`),
   UNIQUE KEY `uq_etgja_invite_hash` (`invite_link_hash`),
