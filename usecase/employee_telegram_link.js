@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const logger = require("../utils/logger");
 const { normalizeIndianMobile, mobilesMatch } = require("../utils/mobile_number");
 const { employedOn } = require("../utils/attendance_eligibility");
+const { istDateOf } = require("../utils/istDate");
 const {
   EMPLOYEE_LINK_PREFIX,
   LINK_TOKEN_TTL_MS,
@@ -130,13 +131,19 @@ function isEligibleEmployee(employee, today) {
   return employedOn(employee, today);
 }
 
-/** Today, as the YYYY-MM-DD the dated rule compares. */
-const dateOnly = (now) => {
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, "0");
-  const d = String(now.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
-};
+/**
+ * Today, as the YYYY-MM-DD the dated rule compares - IN IST, ALWAYS.
+ *
+ * NOT the process's local date. The business day an employment fact belongs
+ * to is the Indian one, and this API runs wherever it happens to be deployed:
+ * reading `getFullYear()`/`getMonth()`/`getDate()` off a Date would make "is
+ * this person employed today" depend on the host's zone, so between 18:30 and
+ * midnight UTC a resignation effective yesterday would still look current for
+ * several hours. `utils/istDate.js` already owns this arithmetic for the
+ * work-shift and regularization rules; this is the same helper, given this
+ * class's injected clock rather than `Date.now()`.
+ */
+const dateOnly = (now) => istDateOf(now);
 
 class EmployeeTelegramLinkUsecase {
   /**

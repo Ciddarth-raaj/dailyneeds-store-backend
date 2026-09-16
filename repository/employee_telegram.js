@@ -91,35 +91,88 @@ class EmployeeTelegramRepository {
   /* -------------------------------------------------------------- tokens */
 
   /**
-   * Issue a token, retiring whatever the employee had outstanding.
+   * Issue a token, retiring whatever the employee had outstanding - as ONE
+   * serialized unit per employee.
    *
-   * THE OLD ONE IS CONSUMED, NOT DELETED. Marking it consumed with a
-   * SUPERSEDED outcome means a QR printed a minute ago stops working AND the
-   * reason it stopped is still on the row - which is what makes "I scanned it
-   * and nothing happened" answerable. It also kills any pending verification
-   * that token had started: a fresh link must not be able to finish an older
-   * half-done session.
+   * ================================ WHY THIS IS A TRANSACTION ==============
+   *
+   * The rule is that a fresh QR invalidates the previous one, and as two
+   * independent statements it did not hold. Two managers - or one manager
+   * double-clicking - could interleave:
+   *
+   *     A supersedes the outstanding tokens
+   *     B supersedes the outstanding tokens (there are none left)
+   *     A inserts token A
+   *     B inserts token B
+   *
+   * leaving TWO live QR codes for one employee, either of which would work.
+   *
+   * `SELECT … FOR UPDATE` ON THE EMPLOYEE ROW IS THE SERIALIZATION. Locking
+   * the employee is what makes "supersede, then insert" indivisible for that
+   * employee: the second issuer waits at the SELECT until the first commits,
+   * and then supersedes the token the first just wrote. Locking the token
+   * rows instead would not do it - when an employee has no outstanding token
+   * there are no rows to lock, which is exactly the case that races.
+   *
+   * IT LOCKS ONE ROW, BRIEFLY, AND ONLY FOR ISSUANCE. Nothing else in this
+   * feature locks `new_employee`, and issuing a link is a deliberate human
+   * action a few times per employee, so this cannot become contention on the
+   * employee master.
    */
   async createLinkToken(employeeId, tokenHash, expiresAt, issuedByUserId, supersededOutcome) {
-    await this.run(
-      "SUPERSEDE-TOKENS",
-      `UPDATE employee_telegram_link_tokens
-          SET consumed_at = COALESCE(consumed_at, NOW()),
-              pending_expires_at = NULL,
-              pending_outcome = COALESCE(pending_outcome, ?)
-        WHERE employee_id = ?
-          AND (consumed_at IS NULL OR pending_expires_at IS NOT NULL)`,
-      [supersededOutcome, employeeId],
-      { employeeId }
-    );
-    return this.run(
-      "CREATE-TOKEN",
-      `INSERT INTO employee_telegram_link_tokens
-         (token_hash, employee_id, issued_by_user_id, expires_at)
-       VALUES (?, ?, ?, ?)`,
-      [tokenHash, employeeId, issuedByUserId === undefined ? null : issuedByUserId, expiresAt],
-      { employeeId }
-    );
+    const connection = await getConnectionAsync(this.db);
+    try {
+      await beginTransactionAsync(connection);
+
+      // The lock. The row is read for no other reason - `employedOn` was
+      // already decided by the usecase before we got here.
+      await queryAsync(
+        connection,
+        "SELECT employee_id FROM new_employee WHERE employee_id = ? FOR UPDATE",
+        [employeeId]
+      );
+
+      // Retire what is outstanding. CONSUMED, NOT DELETED: a QR printed a
+      // minute ago stops working and the reason it stopped is still on the
+      // row, which is what makes "I scanned it and nothing happened"
+      // answerable. It also kills any pending verification that token had
+      // started - a fresh link must not be able to finish an older half-done
+      // session.
+      await queryAsync(
+        connection,
+        `UPDATE employee_telegram_link_tokens
+            SET consumed_at = COALESCE(consumed_at, NOW()),
+                pending_expires_at = NULL,
+                pending_outcome = COALESCE(pending_outcome, ?)
+          WHERE employee_id = ?
+            AND (consumed_at IS NULL OR pending_expires_at IS NOT NULL)`,
+        [supersededOutcome, employeeId]
+      );
+
+      await queryAsync(
+        connection,
+        `INSERT INTO employee_telegram_link_tokens
+           (token_hash, employee_id, issued_by_user_id, expires_at)
+         VALUES (?, ?, ?, ?)`,
+        [tokenHash, employeeId, issuedByUserId === undefined ? null : issuedByUserId, expiresAt]
+      );
+
+      await commitAsync(connection);
+      return { issued: true };
+    } catch (err) {
+      await rollbackAsync(connection);
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "REPOSITORY.EMPLOYEE-TELEGRAM",
+        code: "REPOSITORY.EMPLOYEE-TELEGRAM.CREATE-TOKEN",
+        description: err.toString(),
+        category: "",
+        ref: { employeeId },
+      });
+      throw err;
+    } finally {
+      if (connection && typeof connection.release === "function") connection.release();
+    }
   }
 
   /**

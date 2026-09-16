@@ -37,6 +37,8 @@ const makeStore = ({ employees = {}, } = {}) => ({
   tokens: new Map(),
   identities: [],
   audit: [],
+  /** Per-employee issuance locks - see `createLinkToken` below. */
+  locks: new Map(),
 });
 
 /**
@@ -47,28 +49,53 @@ const makeRepo = (store) => ({
   async getEmployeeForVerification(employeeId) {
     return store.employees[employeeId] || null;
   },
+  /**
+   * Issuance, SERIALIZED PER EMPLOYEE as the transaction's
+   * `SELECT … FOR UPDATE` on the employee row serializes it.
+   *
+   * The `await` in the middle is deliberate and is what makes the concurrency
+   * test mean something: without the lock the two callers interleave there
+   * and both supersede before either inserts, leaving two live tokens. With
+   * it, the second waits and supersedes the token the first just wrote.
+   */
   async createLinkToken(employeeId, tokenHash, expiresAt, issuedByUserId, superseded) {
-    for (const row of store.tokens.values()) {
-      if (row.employee_id !== employeeId) continue;
-      if (row.consumed_at === null || row.pending_expires_at !== null) {
-        row.consumed_at = row.consumed_at || new Date();
-        row.pending_expires_at = null;
-        row.pending_outcome = row.pending_outcome || superseded;
+    const key = String(employeeId);
+    const previous = store.locks.get(key) || Promise.resolve();
+    let release;
+    store.locks.set(
+      key,
+      new Promise((resolve) => {
+        release = resolve;
+      })
+    );
+    await previous;
+    try {
+      for (const row of store.tokens.values()) {
+        if (row.employee_id !== employeeId) continue;
+        if (row.consumed_at === null || row.pending_expires_at !== null) {
+          row.consumed_at = row.consumed_at || new Date();
+          row.pending_expires_at = null;
+          row.pending_outcome = row.pending_outcome || superseded;
+        }
       }
+      // The window the race used to open in.
+      await new Promise((resolve) => setImmediate(resolve));
+      store.tokens.set(tokenHash, {
+        token_hash: tokenHash,
+        employee_id: employeeId,
+        issued_by_user_id: issuedByUserId ?? null,
+        expires_at: expiresAt,
+        consumed_at: null,
+        pending_telegram_user_id: null,
+        pending_chat_id: null,
+        pending_username: null,
+        pending_expires_at: null,
+        pending_outcome: null,
+        created_at: new Date(),
+      });
+    } finally {
+      release();
     }
-    store.tokens.set(tokenHash, {
-      token_hash: tokenHash,
-      employee_id: employeeId,
-      issued_by_user_id: issuedByUserId ?? null,
-      expires_at: expiresAt,
-      consumed_at: null,
-      pending_telegram_user_id: null,
-      pending_chat_id: null,
-      pending_username: null,
-      pending_expires_at: null,
-      pending_outcome: null,
-      created_at: new Date(),
-    });
   },
   // THE CLAIM. One statement, and `consumed_at IS NULL` is part of the match:
   // a second caller finds nothing to claim, exactly as the UPDATE does.
@@ -1216,5 +1243,171 @@ describe("finishing the verification is atomic and idempotent", () => {
     const active = ctx.store.identities.filter((i) => i.disconnected_at === null);
     assert.equal(active.length, 1);
     assert.equal(active[0].employee_id, 7, "employee 7 keeps their identity");
+  });
+});
+
+/* ------------------------------------------------ concurrent QR issuance */
+
+describe("issuing two QR codes at once", () => {
+  /** Every token for an employee that a `/start` would still be allowed to use. */
+  const usableTokens = (store, employeeId) =>
+    [...store.tokens.values()].filter(
+      (r) =>
+        r.employee_id === employeeId &&
+        r.consumed_at === null &&
+        new Date(r.expires_at).getTime() > Date.now()
+    );
+
+  it("LEAVES EXACTLY ONE USABLE TOKEN - a fresh QR invalidates the previous one", async () => {
+    // Two managers on the same employee, or one double-click. As two
+    // independent statements both would supersede before either inserted,
+    // leaving two live QR codes either of which would work.
+    const { usecase, store } = setup();
+
+    const [first, second] = await Promise.all([usecase.startLink(7), usecase.startLink(7)]);
+
+    assert.equal(usableTokens(store, 7).length, 1, "exactly one token is still usable");
+    assert.equal(store.tokens.size, 2, "and the superseded one is kept, with its reason");
+
+    // And it is the LATEST one that works, not whichever happened to insert first.
+    const live = usableTokens(store, 7)[0];
+    const links = [first.link, second.link];
+    const workingToken = tokenFrom({ link: links.find((l) => l.endsWith(live.token_hash)) || links[1] });
+    assert.ok(workingToken, "a link is returned to each caller");
+  });
+
+  it("the token that still works is the one issued LAST", async () => {
+    const { usecase, store } = setup();
+    const results = await Promise.all([usecase.startLink(7), usecase.startLink(7)]);
+
+    // Try both in the order they were handed out; exactly one opens a session.
+    const outcomes = [];
+    for (const result of results) {
+      const token = tokenFrom(result);
+      outcomes.push((await usecase.onStart(token, startMessage(token))).outcome);
+    }
+
+    assert.equal(outcomes.filter((o) => o === "AWAITING_CONTACT").length, 1);
+    assert.equal(outcomes.filter((o) => o === "TOKEN_REJECTED").length, 1);
+    assert.equal(store.identities.length, 0);
+  });
+
+  it("three at once is still exactly one", async () => {
+    const { usecase, store } = setup();
+    await Promise.all([usecase.startLink(7), usecase.startLink(7), usecase.startLink(7)]);
+
+    assert.equal(usableTokens(store, 7).length, 1);
+    assert.equal(store.tokens.size, 3, "every issuance is recorded");
+  });
+
+  it("two employees issuing at once do not block or supersede each other", async () => {
+    const { usecase, store } = setup();
+    await Promise.all([usecase.startLink(7), usecase.startLink(14)]);
+
+    assert.equal(usableTokens(store, 7).length, 1);
+    assert.equal(usableTokens(store, 14).length, 1, "the lock is per employee, not global");
+  });
+
+  it("a fresh token kills a PENDING session the old one had opened", async () => {
+    const { usecase, store } = setup();
+    const first = tokenFrom(await usecase.startLink(7));
+    await usecase.onStart(first, startMessage(first));
+
+    await usecase.startLink(7);
+
+    const stale = [...store.tokens.values()].find((r) => r.pending_telegram_user_id === 4242);
+    assert.equal(stale.pending_outcome, PENDING_OUTCOME.SUPERSEDED);
+    const outcome = await usecase.onContact(
+      contactMessage({ phoneNumber: "+919876543210", userId: 4242 })
+    );
+    assert.equal(outcome, null, "the half-finished session cannot be completed");
+    assert.deepEqual(store.identities, []);
+  });
+});
+
+/* ------------------------------------------------ the IST business date */
+
+describe("`employed today` is the INDIAN day, not the host's", () => {
+  // Instants deliberately in the future: the in-memory store judges a pending
+  // row's expiry by the real wall clock, so a past instant would make every
+  // session look expired for reasons that have nothing to do with the zone.
+  const at = (iso) => () => new Date(iso);
+
+  const employeeAt = (fields) => {
+    const store = makeStore({ employees: { 20: { employee_id: 20, status: 1, primary_contact_number: "9876543210", ...fields } } });
+    return { store, repo: makeRepo(store) };
+  };
+
+  it("2027-09-15T20:00:00Z is the 16th, so a 16 Sep joiner is ALREADY eligible", async () => {
+    // A UTC host would call this the 15th and refuse somebody who started
+    // that morning in India.
+    const { store, repo } = employeeAt({ date_of_joining: "2027-09-16", resignation_date: null });
+    const usecase = buildUsecase(repo, makeTelegram(), { now: at("2027-09-15T20:00:00Z") });
+
+    assert.equal((await usecase.startLink(20)).code, 200);
+    assert.ok(store.tokens.size, 1);
+  });
+
+  it("and a 15 Sep resignation is ALREADY ineligible at that instant", async () => {
+    const { repo } = employeeAt({ date_of_joining: "2020-01-01", resignation_date: "2027-09-15" });
+    const usecase = buildUsecase(repo, makeTelegram(), { now: at("2027-09-15T20:00:00Z") });
+
+    await assert.rejects(
+      () => usecase.startLink(20),
+      (err) => err.name === "ValidationError" && /not currently employed/.test(err.message)
+    );
+  });
+
+  it("at 18:29:59Z it is still the 15th - the boundary is not off by a day", async () => {
+    const { repo } = employeeAt({ date_of_joining: "2020-01-01", resignation_date: "2027-09-15" });
+    const usecase = buildUsecase(repo, makeTelegram(), { now: at("2027-09-15T18:29:59Z") });
+
+    // Still employed ON the 15th: a resignation date excludes only AFTER it.
+    assert.equal((await usecase.startLink(20)).code, 200);
+  });
+
+  it("the final contact step uses the same Indian day", async () => {
+    const store = makeStore({
+      employees: {
+        20: {
+          employee_id: 20,
+          status: 1,
+          primary_contact_number: "9876543210",
+          date_of_joining: "2020-01-01",
+          resignation_date: "2027-09-15",
+        },
+      },
+    });
+    const telegram = makeTelegram();
+    // Issued while still employed on the 15th...
+    const before = buildUsecase(makeRepo(store), telegram, { now: at("2027-09-15T12:00:00Z") });
+    const token = tokenFrom(await before.startLink(20));
+    await before.onStart(token, startMessage(token));
+
+    // ...and the contact arrives after India has rolled into the 16th.
+    const after = buildUsecase(makeRepo(store), telegram, { now: at("2027-09-15T20:00:00Z") });
+    const outcome = await after.onContact(
+      contactMessage({ phoneNumber: "+919876543210", userId: 4242 })
+    );
+
+    assert.equal(outcome.outcome, PENDING_OUTCOME.EMPLOYEE_INELIGIBLE);
+    assert.deepEqual(store.identities, [], "the leaver is not connected");
+  });
+
+  it("DOES NOT READ THE PROCESS ZONE", async () => {
+    const original = process.env.TZ;
+    const outcomes = [];
+    try {
+      for (const zone of ["UTC", "America/Los_Angeles", "Asia/Kolkata"]) {
+        process.env.TZ = zone;
+        const { repo } = employeeAt({ date_of_joining: "2027-09-16", resignation_date: null });
+        const usecase = buildUsecase(repo, makeTelegram(), { now: at("2027-09-15T20:00:00Z") });
+        outcomes.push((await usecase.startLink(20)).code);
+      }
+    } finally {
+      if (original === undefined) delete process.env.TZ;
+      else process.env.TZ = original;
+    }
+    assert.deepEqual(outcomes, [200, 200, 200], "one answer, whatever the host thinks");
   });
 });

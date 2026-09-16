@@ -256,3 +256,93 @@ describe("the employee read behind eligibility", () => {
     assert.match(sql, /DATE_FORMAT/, "as YYYY-MM-DD, which the shared rule compares");
   });
 });
+
+describe("createLinkToken", () => {
+  // (employeeId, tokenHash, expiresAt, issuedByUserId, supersededOutcome) -
+  // in that order. Getting it wrong puts the hash where the employee id
+  // belongs, which the log-safety test below notices.
+  const TOKEN_HASH = "h".repeat(64);
+  const ISSUE = [7, TOKEN_HASH, new Date("2027-01-01T00:00:00Z"), 3, "SUPERSEDED"];
+
+  it("LOCKS THE EMPLOYEE, then supersedes, then inserts - all in one transaction", async () => {
+    // Two issuers used to interleave between the supersede and the insert and
+    // leave two live QR codes. The lock is what makes the pair indivisible.
+    const pool = fakePool();
+    await buildRepo(pool).createLinkToken(...ISSUE);
+
+    const sql = sqlOf(pool);
+    const begin = sql.indexOf("BEGIN");
+    const lock = sql.findIndex((s) => /SELECT employee_id FROM new_employee/.test(s));
+    const supersede = sql.findIndex((s) => /UPDATE employee_telegram_link_tokens/.test(s));
+    const insert = sql.findIndex((s) => /INSERT INTO employee_telegram_link_tokens/.test(s));
+    const commit = sql.indexOf("COMMIT");
+
+    assert.ok(lock !== -1, "the employee row is locked");
+    assert.match(sql[lock], /FOR UPDATE/);
+    assert.ok(begin < lock, "the lock is taken inside the transaction");
+    assert.ok(lock < supersede, "and BEFORE anything is superseded");
+    assert.ok(supersede < insert, "the old token dies before the new one is written");
+    assert.ok(insert < commit, "and both commit together");
+  });
+
+  it("LOCKS THE EMPLOYEE, NOT THE TOKEN ROWS", () => {
+    // An employee with no outstanding token has no token rows to lock, and
+    // that is precisely the case that raced.
+    const source = require("fs").readFileSync(__dirname + "/employee_telegram.js", "utf8");
+    const fn = source.slice(source.indexOf("async createLinkToken"), source.indexOf("async consumeLinkToken"));
+    assert.match(fn, /SELECT employee_id FROM new_employee WHERE employee_id = \? FOR UPDATE/);
+    assert.ok(
+      !/FROM employee_telegram_link_tokens[\s\S]*?FOR UPDATE/.test(fn),
+      "locking the token rows would not serialize an employee who has none"
+    );
+  });
+
+  it("supersedes the outstanding token AND any pending session it opened", async () => {
+    const pool = fakePool();
+    await buildRepo(pool).createLinkToken(...ISSUE);
+
+    const supersede = sqlOf(pool).find((s) => /UPDATE employee_telegram_link_tokens/.test(s));
+    assert.match(supersede, /consumed_at = COALESCE\(consumed_at, NOW\(\)\)/, "kept, not deleted");
+    assert.match(supersede, /pending_expires_at = NULL/, "a half-done session cannot be finished");
+    assert.match(supersede, /WHERE employee_id = \?/);
+  });
+
+  it("ROLLS BACK and throws when the insert fails - no half-issued state", async () => {
+    const pool = fakePool({
+      answers: [["INSERT INTO employee_telegram_link_tokens", new Error("ER_LOCK_WAIT_TIMEOUT")]],
+    });
+
+    await assert.rejects(() => buildRepo(pool).createLinkToken(...ISSUE));
+    assert.ok(pool.state.rolledBack, "the supersede goes back with it");
+    assert.ok(!pool.state.committed, "so the employee keeps the QR they already had");
+    assert.ok(pool.state.released);
+  });
+
+  it("releases the connection on success and on failure", async () => {
+    const ok = fakePool();
+    await buildRepo(ok).createLinkToken(...ISSUE);
+    assert.ok(ok.state.released);
+
+    const bad = fakePool({ answers: [["SELECT employee_id FROM new_employee", new Error("boom")]] });
+    await assert.rejects(() => buildRepo(bad).createLinkToken(...ISSUE));
+    assert.ok(bad.state.released);
+  });
+
+  it("never logs the token hash", async () => {
+    const pool = fakePool({
+      answers: [["INSERT INTO employee_telegram_link_tokens", new Error("boom")]],
+    });
+    const logger = require("../utils/logger");
+    const entries = [];
+    const original = logger.Log;
+    logger.Log = (entry) => entries.push(entry);
+    try {
+      await assert.rejects(() => buildRepo(pool).createLinkToken(...ISSUE));
+    } finally {
+      logger.Log = original;
+    }
+    const dumped = JSON.stringify(entries);
+    assert.ok(!dumped.includes(TOKEN_HASH), "the hash must never reach a log");
+    assert.ok(dumped.includes("7"), "the employee id is fine, and is what identifies the failure");
+  });
+});
