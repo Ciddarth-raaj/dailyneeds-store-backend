@@ -469,3 +469,98 @@ describe("gate 13 — a proven-weak password is flagged at login, never reset or
     assert.equal(rows["1003"].must_change_password, 0);
   });
 });
+
+/**
+ * A JWT is an identity document, not a profile.
+ *
+ * `new_employee.employee_image` is a base64 data URI in a LONGTEXT column. It
+ * was a claim, so one employee's photo made their token 38,099 characters;
+ * the frontend sends the token in `x-access-token` on every request, the
+ * header blew past the server's limit, and every authenticated call died with
+ * a 400 before reaching a handler. The UI showed it as a permissions failure,
+ * because `/designation/permissions` was one of the calls that died.
+ *
+ * These tests pin the invariant rather than a number: what must never happen
+ * is that the token grows with something a user can upload.
+ */
+describe("JWT payload — profile data must never enter the token", () => {
+  const rows = async () => ({
+    "1003": F.employeeRow({ password: F.legacyHash("legacy-pass-1"), password_algo: "sha1" }),
+  });
+
+  it("a normal employee's token carries the identity claims and no employee_image", async () => {
+    const { usecase } = build(await rows());
+    const r = await usecase.login("1003", "legacy-pass-1", IP);
+    const claims = jsonwebtoken.decode(r.token);
+
+    assert.equal(claims.employee_id, 1003);
+    assert.equal(claims.designation_id, 4);
+    assert.equal(claims.user_type, 1);
+    assert.equal(claims.store_id, 2);
+
+    assert.equal("employee_image" in claims, false, "the photo must not be a claim");
+  });
+
+  it("a 250KB photo does not reach the token, and the token stays small", async () => {
+    // Far larger than the 28,263-character row that caused the outage.
+    const hugePhoto = "data:image/png;base64," + "A".repeat(250 * 1024);
+    const { usecase } = build({
+      "1003": F.employeeRow({
+        password: F.legacyHash("legacy-pass-1"),
+        password_algo: "sha1",
+        employee_image: hugePhoto,
+      }),
+    });
+
+    // Issuance still succeeds - the photo is ignored, not rejected.
+    const r = await usecase.login("1003", "legacy-pass-1", IP);
+    assert.equal(r.code, 200);
+
+    const claims = jsonwebtoken.decode(r.token);
+    assert.equal("employee_image" in claims, false);
+
+    // No claim carries the blob under any other name.
+    const encoded = JSON.stringify(claims);
+    assert.equal(encoded.includes("AAAA"), false, "no base64 payload anywhere in the claims");
+    assert.equal(encoded.includes("data:image"), false, "no data URI anywhere in the claims");
+
+    // The real invariant: token size is independent of photo size. A token
+    // that embedded this photo would exceed 250,000 characters.
+    assert.ok(
+      r.token.length < 2000,
+      `token should stay small, got ${r.token.length} characters`
+    );
+    assert.ok(
+      r.token.length < hugePhoto.length / 10,
+      "token length must not scale with the image"
+    );
+  });
+
+  it("the login response body still carries the photo, so the web app is unaffected", async () => {
+    const photo = "data:image/png;base64,SGVsbG8=";
+    const { usecase } = build({
+      "1003": F.employeeRow({
+        password: F.legacyHash("legacy-pass-1"),
+        password_algo: "sha1",
+        employee_image: photo,
+      }),
+    });
+    const r = await usecase.login("1003", "legacy-pass-1", IP);
+    assert.equal(r.employee_image, photo);
+  });
+
+  it("a system account still issues a token with no employee_image and no employee_id", async () => {
+    const { usecase } = build({
+      "1003": F.employeeRow({ password: F.legacyHash("legacy-pass-1"), password_algo: "sha1" }),
+      breakglass: F.systemRow({
+        password_hash: await F.hashCheap("a-very-long-break-glass-secret-2026"),
+      }),
+    });
+    const r = await usecase.login("breakglass", "a-very-long-break-glass-secret-2026", IP);
+    const claims = jsonwebtoken.decode(r.token);
+    assert.equal(claims.sys, true);
+    assert.equal("employee_image" in claims, false);
+    assert.equal("employee_id" in claims, false);
+    assert.equal(r.employee_image, null);
+  });
+});
