@@ -1547,10 +1547,39 @@ class Server {
       }
     );
 
-    // Every minute - pick up `/start <token>` messages sent to the Telegram
-    // bot and finish linking. Polling rather than a webhook, so the API does
-    // not have to be reachable from the internet over HTTPS.
-    const TELEGRAM_LINK_POLL_CRON = "* * * * *";
+    // EVERY THREE SECONDS - pick up `/start <token>` messages sent to the
+    // Telegram bot and finish linking. Polling rather than a webhook, so the
+    // API does not have to be reachable from the internet over HTTPS.
+    //
+    // SIX FIELDS, AND THE FIRST ONE IS SECONDS. node-cron's optional seconds
+    // field is what makes this expressible at all; the five-field form cannot
+    // say anything faster than "once a minute". Verified against the pinned
+    // node-cron (3.0.3): `cron.validate` accepts it and the task fires on
+    // every wall-clock second divisible by three. `services/cron_service.js`
+    // now refuses anything that is not five or six fields, because
+    // `cron.validate` does NOT - see the guard there.
+    //
+    // WHY IT CHANGED. A minute was the wait an employee saw while holding
+    // their phone after scanning the QR: they tap Start, Telegram shows the
+    // message delivered, and then nothing happens for up to sixty seconds
+    // while the screen in front of them still says pending. People re-scan,
+    // re-tap, and ask whether it is broken. Three seconds is below the point
+    // where somebody starts doubting it worked.
+    //
+    // THE COST IS TWENTY SHORT REQUESTS A MINUTE to one Telegram endpoint,
+    // against the ~30-per-second the Bot API permits. `getUpdates` is still
+    // SHORT polling (`timeout: 0` in `services/telegram.js`), so each call
+    // returns immediately rather than holding a connection open across ticks.
+    //
+    // OVERLAP IS ALREADY IMPOSSIBLE, and that mattered enough to check before
+    // changing this number: `pollTelegramUpdates` takes an in-process
+    // re-entrancy guard and returns `skipped: "in_progress"` if a previous
+    // tick is still running, so a slow call makes ticks a no-op instead of
+    // stacking twenty concurrent readers onto one shared update offset. That
+    // guard is in-process, which is sound only while the API is a single
+    // fork-mode pm2 instance - asserted in
+    // `services/telegram_poll_topology.test.js`.
+    const TELEGRAM_LINK_POLL_CRON = "*/3 * * * * *";
     this.cronService.register(
       "telegram_link_poll",
       TELEGRAM_LINK_POLL_CRON,

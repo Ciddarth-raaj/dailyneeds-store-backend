@@ -16,6 +16,13 @@ const MAX_RESET_ATTEMPTS = 5;
 const MAX_CODES_PER_HOUR = 5;
 
 /**
+ * How often an unchanged, still-failing getUpdates error is repeated in the
+ * log. One minute: the poller ticks twenty times in that span, so this is the
+ * difference between one line and twenty identical ones.
+ */
+const POLL_ERROR_LOG_INTERVAL_MS = 60 * 1000;
+
+/**
  * What every forgot-password request answers, whatever actually happened.
  *
  * The screen must not become a way to discover which usernames exist or
@@ -143,6 +150,71 @@ class PasswordResetUsecase {
     this.updateOffset = null;
     // Re-entrancy guard: a slow getUpdates must not overlap the next tick.
     this.polling = false;
+    /**
+     * A repeating getUpdates failure is logged at most once a minute.
+     *
+     * THE POLLER TICKS EVERY THREE SECONDS. The conditions that make
+     * getUpdates fail are not momentary - a webhook registered on the bot
+     * (409) stays registered until somebody deletes it, a revoked token stays
+     * revoked, an outbound network block stays blocked - so the honest
+     * logging of one failure per tick is twenty identical ERROR lines a
+     * minute, twenty-eight thousand a day. That does not make the problem
+     * more visible, it buries every other error in the file and fills the
+     * disk while doing it.
+     *
+     * So: the FIRST failure is logged immediately and in full - nothing is
+     * delayed, because the first one is the one that says what broke - and
+     * while the same failure keeps happening it is repeated once a minute
+     * with a count of what was suppressed. A DIFFERENT failure logs at once,
+     * because it is new information. Recovery logs once, so the file says
+     * when it stopped rather than merely going quiet.
+     *
+     * Suppression is COUNTING, NEVER DISCARDING: no failure goes unrecorded,
+     * the repetitions are summarised instead of restated.
+     */
+    this.pollFailure = null;
+  }
+
+  /**
+   * Log a getUpdates failure, collapsing an identical repeat to once a minute.
+   * Returns nothing; it must never change the poll's outcome.
+   */
+  _logPollFailure(description) {
+    const at = this.now().getTime();
+    const previous = this.pollFailure;
+    const isRepeat = previous && previous.description === description;
+    if (isRepeat && at - previous.lastLoggedAt < POLL_ERROR_LOG_INTERVAL_MS) {
+      previous.suppressed += 1;
+      return;
+    }
+    const suppressed = isRepeat ? previous.suppressed : 0;
+    this.pollFailure = { description, lastLoggedAt: at, suppressed: 0 };
+    logger.Log({
+      level: logger.LEVEL.ERROR,
+      component: "USECASE.PASSWORD-RESET",
+      code: "USECASE.PASSWORD-RESET.POLL",
+      description:
+        suppressed > 0
+          ? `${description} (still failing; ${suppressed} identical failure(s) suppressed since the last line)`
+          : description,
+      category: "",
+      ref: {},
+    });
+  }
+
+  /** The stream is working again. Logged once, then forgotten. */
+  _clearPollFailure() {
+    const previous = this.pollFailure;
+    if (!previous) return;
+    this.pollFailure = null;
+    logger.Log({
+      level: logger.LEVEL.INFO,
+      component: "USECASE.PASSWORD-RESET",
+      code: "USECASE.PASSWORD-RESET.POLL-RECOVERED",
+      description: `Telegram getUpdates is working again (${previous.suppressed} identical failure(s) suppressed while it was down)`,
+      category: "",
+      ref: {},
+    });
   }
 
   async audit(event, fields = {}) {
@@ -220,16 +292,13 @@ class PasswordResetUsecase {
         // A webhook registered on the bot makes getUpdates fail with 409. Say
         // so plainly — silently polling nothing would look like linking is
         // merely slow, and nobody would think to look at the bot's setup.
-        logger.Log({
-          level: logger.LEVEL.ERROR,
-          component: "USECASE.PASSWORD-RESET",
-          code: "USECASE.PASSWORD-RESET.POLL",
-          description: `${err.toString()} (a webhook set on the bot blocks getUpdates)`,
-          category: "",
-          ref: {},
-        });
+        //
+        // Throttled, because this runs every three seconds and this kind of
+        // failure persists: see `_logPollFailure`. The first one is immediate.
+        this._logPollFailure(`${err.toString()} (a webhook set on the bot blocks getUpdates)`);
         return { code: 500, linked: 0 };
       }
+      this._clearPollFailure();
 
       let linked = 0;
       for (const update of updates || []) {
