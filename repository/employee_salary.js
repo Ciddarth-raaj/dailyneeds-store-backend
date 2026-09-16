@@ -113,6 +113,26 @@ const ACTOR_NAME_JOINS = `
 
 const STATUS = { PENDING: "PENDING", APPROVED: "APPROVED", REJECTED: "REJECTED" };
 
+/* --------------------------------------------------------- pool plumbing --
+ * Shaped exactly like `repository/employee_master.js`'s, and for the same
+ * reason: a bulk decision that half-happens is worse than one that does not
+ * happen, so the statements that make it run on ONE connection inside ONE
+ * transaction.
+ */
+const getConnectionAsync = (db) =>
+  new Promise((resolve, reject) =>
+    db.getConnection((err, connection) => (err ? reject(err) : resolve(connection)))
+  );
+const queryAsync = (conn, sql, params) =>
+  new Promise((resolve, reject) =>
+    conn.query(sql, params, (err, rows) => (err ? reject(err) : resolve(rows)))
+  );
+const beginAsync = (conn) =>
+  new Promise((resolve, reject) => conn.beginTransaction((err) => (err ? reject(err) : resolve())));
+const commitAsync = (conn) =>
+  new Promise((resolve, reject) => conn.commit((err) => (err ? reject(err) : resolve())));
+const rollbackAsync = (conn) => new Promise((resolve) => conn.rollback(() => resolve()));
+
 class EmployeeSalaryRepository {
   constructor(db) {
     this.db = db;
@@ -129,7 +149,21 @@ class EmployeeSalaryRepository {
     });
   }
 
-  _query(code, sql, params) {
+  /**
+   * `tx` IS THE ONLY THING A TRANSACTIONAL CALLER CHANGES.
+   *
+   * Given one, the statement runs on that transaction's connection; given
+   * nothing, on the pool exactly as before. That is what lets `approve` be one
+   * statement serving both the single decision and the bulk one - the bulk
+   * path cannot drift from the single path, because there is only one of it.
+   */
+  _query(code, sql, params, tx = null) {
+    if (tx) {
+      return tx.query(sql, params).catch((err) => {
+        this._log(code, err);
+        throw err;
+      });
+    }
     return new Promise((resolve, reject) => {
       this.db.query(sql, params, (err, result) => {
         if (err) {
@@ -140,6 +174,35 @@ class EmployeeSalaryRepository {
         resolve(result);
       });
     });
+  }
+
+  /** One transaction on one pooled connection; rolls back on any throw. */
+  async withTransaction(fn) {
+    let conn;
+    try {
+      conn = await getConnectionAsync(this.db);
+    } catch (err) {
+      this._log("GET-CONNECTION", err);
+      throw err;
+    }
+    const tx = { query: (sql, params) => queryAsync(conn, sql, params) };
+    try {
+      await beginAsync(conn);
+    } catch (err) {
+      conn.release();
+      this._log("BEGIN", err);
+      throw err;
+    }
+    try {
+      const result = await fn(tx);
+      await commitAsync(conn);
+      return result;
+    } catch (err) {
+      await rollbackAsync(conn);
+      throw err;
+    } finally {
+      conn.release();
+    }
   }
 
   /**
@@ -231,6 +294,28 @@ class EmployeeSalaryRepository {
   getById(salaryId) {
     const sql = `SELECT ${SELECT_LIST} FROM \`employee_salary\` s WHERE s.\`salary_id\` = ?`;
     return this._query("GET-BY-ID", sql, [salaryId]).then((rows) => (rows && rows[0]) || null);
+  }
+
+  /**
+   * The same rows `getById` returns, for a LIST of ids, locked for the rest of
+   * the transaction.
+   *
+   * `FOR UPDATE` is the whole point. A bulk approval reads each record, judges
+   * it against the lifecycle rules and then writes it; without the lock,
+   * somebody could approve, reject or amend one of them in between, and the
+   * batch would act on a record that no longer says what it said. The lock is
+   * the same protection the `AND status = 'PENDING'` clause gives the single
+   * decision, extended over a read-then-write that spans several rows.
+   *
+   * Requires a transaction: a row lock outside one would be released
+   * immediately and would protect nothing.
+   */
+  getByIdsForUpdate(salaryIds, tx) {
+    if (!tx) throw new Error("getByIdsForUpdate requires a transaction");
+    if (!Array.isArray(salaryIds) || salaryIds.length === 0) return Promise.resolve([]);
+    const sql =
+      `SELECT ${SELECT_LIST} FROM \`employee_salary\` s WHERE s.\`salary_id\` IN (?) FOR UPDATE`;
+    return this._query("GET-BY-IDS-FOR-UPDATE", sql, [salaryIds], tx).then((rows) => rows || []);
   }
 
   /**
@@ -535,15 +620,24 @@ class EmployeeSalaryRepository {
    * IT NAMES THE COLUMNS IT SETS, and `changed_by`/`changed_at` are not among
    * them. Approving a proposal is not amending it, so the record of who last
    * amended it - or the NULL saying nobody ever did - survives the decision.
+   *
+   * ONE STATEMENT, BOTH PATHS. Bulk approval passes a transaction and this
+   * runs on its connection; the single decision passes nothing and it runs on
+   * the pool. The SQL - the status, `approved_by`, `approved_at` from the
+   * DATABASE's clock, and the PENDING scope - is the same either way, so the
+   * two paths cannot write a different audit trail.
    */
-  approve(salaryId, approvedBy) {
+  approve(salaryId, approvedBy, tx = null) {
     const sql = `
       UPDATE \`employee_salary\`
          SET \`status\` = ?, \`approved_by\` = ?, \`approved_at\` = CURRENT_TIMESTAMP
        WHERE \`salary_id\` = ? AND \`status\` = ?`;
-    return this._query("APPROVE", sql, [STATUS.APPROVED, approvedBy, salaryId, STATUS.PENDING]).then(
-      (result) => result.affectedRows
-    );
+    return this._query(
+      "APPROVE",
+      sql,
+      [STATUS.APPROVED, approvedBy, salaryId, STATUS.PENDING],
+      tx
+    ).then((result) => result.affectedRows);
   }
 
   /**

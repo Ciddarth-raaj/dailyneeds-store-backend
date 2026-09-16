@@ -20,6 +20,7 @@ const router = express.Router();
  *   GET  /hr/salary/employee/:id/history   every revision
  *   POST /hr/salary/revision/:id           amend a PENDING proposal
  *   POST /hr/salary/revision/:id/approve   the money decision
+ *   POST /hr/salary/revision/bulk-approve  the same decision, over a selection
  *   POST /hr/salary/revision/:id/reject    with a required reason
  *   GET  /hr/salary/pending                M4: the cross-employee approval queue
  *   POST /hr/salary/bulk/validate          M5: price and check a whole file
@@ -52,6 +53,7 @@ const router = express.Router();
  *   amend     `view_employees` AND `edit_salary`
  *   read      `view_employees` AND `view_salary`
  *   approve   `view_employees` AND `approve_salary_revision`
+ *   bulk approve  `view_employees` AND `approve_salary_revision` — the same pair
  *   reject    `view_employees` AND `approve_salary_revision`
  *   queue     `view_employees` AND `view_salary` AND `approve_salary_revision`
  *   bulk      `view_employees` AND `view_salary` AND `add_salary`
@@ -408,6 +410,47 @@ class EmployeeSalaryRoutes {
 
           const actor = await this.permissions.actorFor(req);
           res.json(await this.bulkUsecase.submit(req.body.rows, actor));
+        } catch (err) {
+          this._fail(res, err);
+        }
+        res.end();
+      }
+    );
+
+    /**
+     * BULK APPROVE — the same money decision, over a selection.
+     *
+     * THE SAME PERMISSIONS AS THE SINGLE DECISION, deliberately identical:
+     * `view_employees` AND `approve_salary_revision`. Approving twenty
+     * proposals is twenty approvals, not a different kind of act, so it does
+     * not get a different key - and it does not get a weaker one.
+     *
+     * NO SALARY RULE LIVES HERE. This route validates that it was handed a
+     * list of ids and hands it to the usecase, which applies the existing
+     * per-record rules - exists, still PENDING, not your own (administrators
+     * excepted) - and does the whole batch in one transaction. A rule restated
+     * in a route is a rule that only that route has.
+     *
+     * NOT `/salary/revision/:id/...`. The selection is the body, because a URL
+     * of a hundred ids is a URL that gets truncated somewhere.
+     *
+     * REGISTERED BEFORE `/salary/revision/:salary_id`, AND THAT IS LOAD-BEARING.
+     * Express matches in declaration order, so after the amend route this path
+     * would be read as a revision called "bulk-approve" and would answer under
+     * `edit_salary` instead of the approver's key.
+     */
+    router.post(
+      "/salary/revision/bulk-approve",
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.APPROVE_SALARY_REVISION),
+      async (req, res) => {
+        try {
+          const isValid = Joi.validate(req.body, {
+            salary_ids: Joi.array().items(Joi.number().integer().positive()).min(1).required(),
+          });
+          if (isValid.error !== null) throw isValid.error;
+
+          const actor = await this.permissions.actorFor(req);
+          res.json(await this.usecase.approveSalaries(req.body.salary_ids, actor));
         } catch (err) {
           this._fail(res, err);
         }

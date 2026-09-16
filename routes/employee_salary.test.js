@@ -93,6 +93,7 @@ describe("the endpoints", () => {
         "POST /salary/revision/:salary_id",
         "POST /salary/revision/:salary_id/approve",
         "POST /salary/revision/:salary_id/reject",
+        "POST /salary/revision/bulk-approve",
       ]
     );
   });
@@ -106,7 +107,11 @@ describe("the endpoints", () => {
     //
     // M4's one endpoint is therefore a GET, and M5's two writes are a create
     // path: bulk upload PROPOSES faster, it does not decide. Nothing here
-    // approves, and nothing here amends an existing record.
+    // amends an existing record from the approval side.
+    //
+    // BULK APPROVE IS THE ONE APPROVAL PATH ADDED SINCE, and it is the SAME
+    // decision over a selection rather than a new one: same approver key, same
+    // per-record rules in the usecase, and still no way to change a figure.
     const writes = guards.filter((g) => g.method !== "GET").map((g) => `${g.method} ${g.path}`);
     assert.deepEqual(writes.sort(), [
       "POST /salary/bulk/submit",
@@ -116,6 +121,7 @@ describe("the endpoints", () => {
       "POST /salary/revision/:salary_id",
       "POST /salary/revision/:salary_id/approve",
       "POST /salary/revision/:salary_id/reject",
+      "POST /salary/revision/bulk-approve",
     ]);
 
     // The bulk pair is emphatically not an approval route: neither asks for the
@@ -127,6 +133,30 @@ describe("the endpoints", () => {
         `${path} must not be reachable by the approver key`
       );
     }
+  });
+
+  it("BULK APPROVE IS REGISTERED BEFORE THE AMEND ROUTE", () => {
+    // Express matches in declaration order. Behind `/salary/revision/:salary_id`
+    // this path would be read as a revision literally called "bulk-approve" and
+    // would be guarded by `edit_salary` rather than the approver's key — an
+    // approval endpoint answering under the wrong permission, with nothing in
+    // the source saying so. The order is the control, so the order is tested.
+    const order = guards.map((g) => `${g.method} ${g.path}`);
+    assert.ok(
+      order.indexOf("POST /salary/revision/bulk-approve") <
+        order.indexOf("POST /salary/revision/:salary_id"),
+      "bulk-approve must be declared before the :salary_id amend route"
+    );
+  });
+
+  it("BULK APPROVE TAKES EXACTLY THE SINGLE APPROVAL'S KEYS", () => {
+    // Approving twenty proposals is twenty approvals, not a different kind of
+    // act — so it is neither a new permission nor a weaker one.
+    const single = find("POST", "/salary/revision/:salary_id/approve");
+    const bulk = find("POST", "/salary/revision/bulk-approve");
+    assert.equal(bulk.guard.mode, "all");
+    assert.deepEqual([...bulk.guard.keys].sort(), [...single.guard.keys].sort());
+    assert.ok(bulk.guard.keys.includes(P.APPROVE_SALARY_REVISION));
   });
 
   it("has no delete route — salary records are never removed", () => {

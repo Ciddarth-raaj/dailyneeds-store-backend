@@ -192,6 +192,40 @@ function checkReasonLength(reason) {
   return reason;
 }
 
+/**
+ * The ids a bulk approval may act on: whole positive numbers, de-duplicated,
+ * and at least one. The order the approver sent is kept so the first refusal
+ * names the record they would look at first.
+ *
+ * SELECTING THE SAME ROW TWICE IS NOT AN ERROR AND IS NOT TWO APPROVALS - a
+ * screen can send a duplicate, and collapsing it here means the count the
+ * approver is told matches the rows that moved.
+ *
+ * CAPPED AT `QUEUE_MAX_ROWS`, the cap the queue itself is read under: nothing
+ * can be selected that the queue would not have shown.
+ */
+function normalizeSalaryIds(salaryIds) {
+  if (!Array.isArray(salaryIds) || salaryIds.length === 0) {
+    throw validationError("Select at least one salary revision to approve");
+  }
+
+  const ids = [];
+  for (const raw of salaryIds) {
+    const id = Number(raw);
+    if (!Number.isInteger(id) || id <= 0) {
+      throw validationError(`${raw} is not a salary revision id`);
+    }
+    if (!ids.includes(id)) ids.push(id);
+  }
+
+  if (ids.length > QUEUE_MAX_ROWS) {
+    throw validationError(
+      `At most ${QUEUE_MAX_ROWS} salary revisions can be approved at once`
+    );
+  }
+  return ids;
+}
+
 class EmployeeSalaryUsecase {
   /**
    * `options.now` is the clock, and it exists so the future-dating rules can
@@ -834,28 +868,98 @@ class EmployeeSalaryUsecase {
     );
   }
 
-  /** Approve a pending revision. */
-  async approveSalary(salaryId, actor = {}) {
-    const existing = await this.salaryRepo.getById(salaryId);
+  /**
+   * EVERY RULE THAT DECIDES WHETHER ONE RECORD MAY BE APPROVED, IN ONE PLACE.
+   *
+   * There are two approval paths - one revision, or a selection of them - and
+   * this is the only statement of what makes a record approvable, so the two
+   * cannot answer differently. A rule that bulk approval restated for itself
+   * would be a rule with two versions, and the version that matters is
+   * whichever one the caller happened to use.
+   *
+   * THE ORDER IS PART OF THE RULE. Existence, then PENDING, then authorship -
+   * so a second approval of an already-approved row reports the lifecycle
+   * state rather than the authorship rule, which is the more specific answer.
+   */
+  _assertApprovable(existing, salaryId, actor) {
     if (!existing) throw notFound(`Salary revision ${salaryId} was not found`);
     if (existing.status !== STATUS.PENDING) {
       throw validationError(`This revision is already ${existing.status.toLowerCase()}`);
     }
     /*
-     * Checked AFTER the record is known to be pending, so a second approval of
-     * an already-approved row still reports the lifecycle state rather than
-     * the authorship rule — the more specific answer for the caller.
-     *
      * REJECTION IS DELIBERATELY NOT GUARDED. Refusing your own proposal
      * withdraws it; the rule this enforces is about agreeing to your own pay
      * change, and `rejectSalary` keeps the existing workflow exactly.
      */
     this._refuseSelfApproval(existing, actor);
+  }
+
+  /** Approve a pending revision. */
+  async approveSalary(salaryId, actor = {}) {
+    const existing = await this.salaryRepo.getById(salaryId);
+    this._assertApprovable(existing, salaryId, actor);
     const affected = await this.salaryRepo.approve(salaryId, actor.employeeId ?? null);
     if (affected === 0) {
       throw validationError("The salary revision was changed by somebody else; reload and try again");
     }
     return { salary_id: salaryId, status: STATUS.APPROVED };
+  }
+
+  /**
+   * APPROVE A SELECTION OF PENDING REVISIONS — ALL OF THEM, OR NONE.
+   *
+   * IT IS THE SINGLE DECISION, REPEATED INSIDE ONE TRANSACTION. Every record
+   * goes through `_assertApprovable` - the same existence, PENDING and
+   * self-approval rules, with the same administrator exception - and is
+   * written by the same `salaryRepo.approve` statement, which stamps
+   * `approved_by` and `approved_at` from the database's clock. There is no
+   * second set of rules here to fall out of step with the first, and a
+   * rule added to the single path is added to this one by having been written
+   * once.
+   *
+   * ANY REFUSAL REFUSES THE WHOLE BATCH. The first record that does not exist,
+   * is no longer pending, or belongs to the approver ends the transaction, and
+   * nothing is approved - not the records before it in the list, not the ones
+   * after. An approver who selected twenty rows and is told one of them is
+   * stale has twenty rows still waiting, which is a state they can reason
+   * about; twelve approved and eight not, with one message, is not.
+   *
+   * THE ROWS ARE LOCKED BEFORE THEY ARE JUDGED. `getByIdsForUpdate` holds them
+   * for the life of the transaction, so a record cannot be approved, rejected
+   * or amended between the check and the write. The existing stale-record
+   * guard - an UPDATE that touches no row because the status moved - is kept
+   * as well, and is what aborts the batch if it ever fires.
+   *
+   * THE PERMISSION IS THE ROUTE'S, AND IT IS THE SAME ONE. `view_employees`
+   * AND `approve_salary_revision`, checked by the same `requireAll` the single
+   * approval endpoint carries.
+   */
+  async approveSalaries(salaryIds, actor = {}) {
+    const ids = normalizeSalaryIds(salaryIds);
+
+    return this.salaryRepo.withTransaction(async (tx) => {
+      const rows = await this.salaryRepo.getByIdsForUpdate(ids, tx);
+      const byId = new Map((rows || []).map((r) => [Number(r.salary_id), r]));
+
+      for (const salaryId of ids) {
+        this._assertApprovable(byId.get(salaryId), salaryId, actor);
+      }
+
+      for (const salaryId of ids) {
+        const affected = await this.salaryRepo.approve(salaryId, actor.employeeId ?? null, tx);
+        if (affected === 0) {
+          throw validationError(
+            "The salary revision was changed by somebody else; reload and try again"
+          );
+        }
+      }
+
+      return {
+        approved_count: ids.length,
+        salary_ids: ids,
+        status: STATUS.APPROVED,
+      };
+    });
   }
 
   /** Reject a pending revision, with a required reason. */
@@ -886,3 +990,4 @@ module.exports.SOURCES_REQUIRING_REASON = SOURCES_REQUIRING_REASON;
 module.exports.REASON_MAX_LENGTH = REASON_MAX_LENGTH;
 module.exports.QUEUE_MAX_ROWS = QUEUE_MAX_ROWS;
 module.exports.differenceBetween = differenceBetween;
+module.exports.normalizeSalaryIds = normalizeSalaryIds;
