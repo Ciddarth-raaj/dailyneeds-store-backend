@@ -95,6 +95,57 @@ class TelegramGroupMappingRepository {
   }
 
   /**
+   * EVERY mapping, with the registry group it belongs to. One query.
+   *
+   * Phase 3B needs the reverse of the Map screen's question: not "who does
+   * this group require" but "which groups require this employee". That is
+   * the same mapping rows read the other way round, so it is the same rows -
+   * and the SAME matcher in `utils/telegram_group_mapping.js` is applied to
+   * them, rather than a second rule written in SQL that could drift from the
+   * one the Map screen shows.
+   *
+   * WHOLE TABLE, NO `WHERE` ON THE EMPLOYEE. A group has a handful of rules
+   * and a company has a handful of groups; this is a small join read once
+   * per employee screen. Filtering by dimension in SQL would mean encoding
+   * the matching rule twice, and the copy that drifted would be the one
+   * deciding who is required to join a real group.
+   *
+   * INACTIVE GROUPS ARE INCLUDED. They are not managed - readiness reports
+   * INACTIVE_GROUP - but they must still be visible, because a requirement
+   * that silently disappeared when somebody retired a group is a requirement
+   * nobody can see is unmet.
+   */
+  async getAllMappingsWithGroups() {
+    const rows = await this._query(
+      "ALL_WITH_GROUPS",
+      `SELECT m.telegram_group_mapping_id, m.telegram_group_id, m.mapping_type, m.target_id,
+              g.group_name, g.chat_id, g.category, g.used_for, g.outlet_id,
+              g.bot_is_admin, g.is_active
+         FROM ${TABLE} m
+         JOIN telegram_group_registry g ON g.telegram_group_id = m.telegram_group_id
+        ORDER BY g.group_name ASC, m.telegram_group_mapping_id ASC`,
+      []
+    );
+    return (rows || []).map((row) => ({
+      telegram_group_mapping_id: Number(row.telegram_group_mapping_id),
+      telegram_group_id: Number(row.telegram_group_id),
+      mapping_type: row.mapping_type,
+      target_id: Number(row.target_id),
+      group: {
+        telegram_group_id: Number(row.telegram_group_id),
+        group_name: row.group_name,
+        chat_id: String(row.chat_id),
+        category: row.category,
+        used_for: row.used_for,
+        outlet_id:
+          row.outlet_id === null || row.outlet_id === undefined ? null : Number(row.outlet_id),
+        bot_is_admin: Boolean(row.bot_is_admin),
+        is_active: Boolean(row.is_active),
+      },
+    }));
+  }
+
+  /**
    * One mapping, but ONLY if it belongs to this group.
    *
    * The group id is part of the WHERE rather than something checked
@@ -235,6 +286,43 @@ class TelegramGroupMappingRepository {
       designation_name: row.designation_name || null,
       department_name: row.department_name || null,
     }));
+  }
+
+  /**
+   * ONE employee's matching columns. The same safe set as the snapshot.
+   *
+   * Phase 3B asks about a single employee - on their profile, or when a join
+   * request arrives - and reading the whole company to answer that would be
+   * a table scan per Telegram update. Same columns, same shape, one row, so
+   * the shared matcher does not care which of the two it was handed.
+   */
+  async getEmployeeForMatching(employeeId) {
+    const rows = await this._query(
+      "EMPLOYEE_FOR_MATCHING",
+      `SELECT ne.employee_id, ne.employee_name, ne.store_id, ne.designation_id,
+              ne.department_id, ne.status, ne.date_of_joining, ne.resignation_date
+         FROM new_employee ne
+        WHERE ne.employee_id = ?`,
+      [employeeId]
+    );
+    const row = rows && rows[0];
+    if (!row) return null;
+    return {
+      employee_id: Number(row.employee_id),
+      employee_name: row.employee_name,
+      store_id: row.store_id === null || row.store_id === undefined ? null : Number(row.store_id),
+      designation_id:
+        row.designation_id === null || row.designation_id === undefined
+          ? null
+          : Number(row.designation_id),
+      department_id:
+        row.department_id === null || row.department_id === undefined
+          ? null
+          : Number(row.department_id),
+      status: row.status,
+      date_of_joining: row.date_of_joining,
+      resignation_date: row.resignation_date,
+    };
   }
 
   /**
