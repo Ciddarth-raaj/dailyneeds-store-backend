@@ -168,6 +168,109 @@ class Telegram {
     return requireClient().getUpdates(options);
   }
 
+  /* ------------------------------------ Phase 3B: group membership ------ */
+
+  /**
+   * The Bot API methods this package does not implement.
+   *
+   * `messaging-api-telegram@1.1.0` predates Bot API 5.4, so it has no
+   * `createChatInviteLink`, `approveChatJoinRequest` or
+   * `declineChatJoinRequest` - it does have `getChat` and `getChatMember`,
+   * which are used through the client above as normal.
+   *
+   * THE RAW CALL LIVES HERE AND NOWHERE ELSE. The client already holds an
+   * axios instance bound to `https://api.telegram.org/bot<token>/`, so this
+   * reuses the same credential, the same base URL and the same timeout
+   * rather than assembling a second HTTP path around a token read from the
+   * environment. A usecase that built its own request would be a second
+   * place the bot token is handled, and the first place somebody logs it.
+   *
+   * UPGRADING THE PACKAGE IS THE REAL FIX. When a version that implements
+   * these ships, delete this and call the client - the four methods below
+   * are the only callers and their signatures are already the package's.
+   *
+   * IT SNAKE_CASES ITS OWN PARAMETERS and camelCases nothing on the way
+   * back: the caller reads Telegram's own field names, so a reader checking
+   * this against the Bot API documentation is comparing like with like.
+   */
+  async _callBotApi(method, params = {}) {
+    const client = requireClient();
+    const { data } = await client.axios.post(`/${method}`, params);
+    if (!data || data.ok !== true) {
+      // `description` is Telegram's own sentence ("CHAT_ADMIN_REQUIRED",
+      // "USER_ALREADY_PARTICIPANT"). It names no token and no user.
+      const err = new Error(
+        `Telegram ${method} failed: ${(data && data.description) || "unknown error"}`
+      );
+      err.telegramMethod = method;
+      err.telegramDescription = (data && data.description) || null;
+      throw err;
+    }
+    return data.result;
+  }
+
+  /** The chat itself - `type` is what says Supergroup rather than Basic Group. */
+  async getChat(chatId) {
+    return requireClient().getChat(String(chatId));
+  }
+
+  /**
+   * One member's standing in a chat.
+   *
+   * Used for two different questions: is the BOT an admin here with the
+   * right to manage join requests, and is the EMPLOYEE already in the group.
+   * Both are answered by the same call, so both are answered by Telegram
+   * rather than by anything we stored earlier and hoped was still true.
+   */
+  async getChatMember(chatId, userId) {
+    return requireClient().getChatMember(String(chatId), Number(userId));
+  }
+
+  /**
+   * A single-use-shaped invite link that CREATES A JOIN REQUEST rather than
+   * admitting anybody.
+   *
+   * `creates_join_request` is the whole security model: the link does not
+   * let its holder in, it lets them ASK, and the bot then decides. A link
+   * that admitted people directly would make forwarding it equivalent to
+   * handing out group membership - which is exactly what the approval checks
+   * in `usecase/employee_telegram_join_request.js` exist to prevent.
+   *
+   * `member_limit` IS DELIBERATELY NOT SET, because Telegram rejects it
+   * together with `creates_join_request`. The limit of one is enforced by us
+   * at approval time - against the employee's verified Telegram identity,
+   * which is a stronger rule than "the first person through the door".
+   */
+  async createChatInviteLink(chatId, { expireDate, name } = {}) {
+    const params = { chat_id: String(chatId), creates_join_request: true };
+    if (expireDate) params.expire_date = Math.floor(expireDate / 1000);
+    if (name) params.name = String(name).slice(0, 32);
+    return this._callBotApi("createChatInviteLink", params);
+  }
+
+  /** Let this user in. IRREVERSIBLE in the sense that matters: they are now in. */
+  async approveChatJoinRequest(chatId, userId) {
+    return this._callBotApi("approveChatJoinRequest", {
+      chat_id: String(chatId),
+      user_id: Number(userId),
+    });
+  }
+
+  /**
+   * Refuse a join request.
+   *
+   * NOT called on a failed check. A request we cannot match is left pending
+   * so a human can look at it: declining would be an action taken against a
+   * real person on the strength of a rule that might simply be
+   * misconfigured, and Phase 3B does not act against anybody.
+   */
+  async declineChatJoinRequest(chatId, userId) {
+    return this._callBotApi("declineChatJoinRequest", {
+      chat_id: String(chatId),
+      user_id: Number(userId),
+    });
+  }
+
   async sendDocument(chat_id, fileUrl, caption = "") {
     return new Promise(async (resolve, reject) => {
       try {

@@ -169,11 +169,40 @@ describe("the dispatcher", () => {
     const block = /name: "employee_telegram_link"[\s\S]*?\}\);/.exec(server);
     assert.ok(block, "the employee handler is registered on the dispatcher");
     assert.match(block[0], /claims\s*:/, "it declares a claim predicate");
+    assert.match(block[0], /updateTypes: \["message"\]/);
+  });
 
-    // Exactly one claimer in the whole wiring. A second one would be a
-    // CLAIM-CONFLICT at runtime and an ambiguity here.
-    const claimers = (server.match(/claims\s*:/g) || []).length;
-    assert.equal(claimers, 1, "only the employee deep link is owned by anybody");
+  it("AT MOST ONE CLAIMER PER UPDATE TYPE - the invariant the dispatcher enforces", () => {
+    // This was a count of every `claims:` in the wiring, back when only the
+    // employee deep link claimed anything. Phase 3B legitimately claims
+    // `chat_join_request`, and `_resolveClaim` resolves ownership only among
+    // the handlers registered FOR THAT TYPE - so two claimers on different
+    // types can never conflict, while two on the SAME type still would.
+    //
+    // The count is therefore replaced by the invariant it was standing in
+    // for, which is strictly stronger: a second `message` claimer fails this
+    // exactly as it failed the old assertion.
+    const server = strip(read("server.js"));
+    const registrations = server.match(/\.register\(\{[\s\S]*?\n    \}\);/g) || [];
+    assert.ok(registrations.length >= 3, `expected the dispatcher registrations, saw ${registrations.length}`);
+
+    const claimersByType = new Map();
+    for (const block of registrations) {
+      if (!/claims\s*:/.test(block)) continue;
+      const types = /updateTypes:\s*\[([^\]]*)\]/.exec(block);
+      assert.ok(types, `a claiming handler must declare its update types: ${block.slice(0, 60)}`);
+      for (const raw of types[1].split(",")) {
+        const type = raw.trim().replace(/^["']|["']$/g, "");
+        if (!type) continue;
+        claimersByType.set(type, (claimersByType.get(type) || 0) + 1);
+      }
+    }
+
+    for (const [type, count] of claimersByType) {
+      assert.equal(count, 1, `${type} has ${count} claimers - that is a CLAIM-CONFLICT at runtime`);
+    }
+    // And the two we expect are exactly the two that exist.
+    assert.deepEqual([...claimersByType.keys()].sort(), ["chat_join_request", "message"]);
   });
 
   it("THE CLAIM PREDICATE IS SYNCHRONOUS AND TOUCHES NO REPOSITORY", () => {

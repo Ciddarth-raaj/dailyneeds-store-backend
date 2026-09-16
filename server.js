@@ -352,6 +352,12 @@ class Server {
     // master; it touches nothing on Telegram.
     this.telegramGroupMappingRepo = require("./repository/telegram_group_mapping")(
       this.mysql.connection
+    );
+    // Phase 3B: durable join attempts. A join is asynchronous and crosses a
+    // process boundary - an in-memory attempt would die with the next pm2
+    // reload and refuse an employee who did nothing wrong.
+    this.employeeTelegramGroupJoinRepo = require("./repository/employee_telegram_group_join")(
+      this.mysql.connection
     );    // EMPLOYEE Telegram identity. Keyed by employee_id, never by a login:
     // most employees have no dnds.co.in account, so `telegram_links` (which is
     // keyed by user_id, for password reset) could not serve them.
@@ -742,6 +748,43 @@ class Server {
       claims: (update) => this.employeeTelegramLinkUsecase.claims(update),
       handle: (update) => this.employeeTelegramLinkUsecase.handle(update),
     });
+    // PHASE 3B: GROUP READINESS AND MANAGED JOINS.
+    //
+    // Readiness asks TELEGRAM whether a group can be managed - it never
+    // trusts the registry's `bot_is_admin` checkbox, which is what somebody
+    // declared when registering the group rather than what is true now.
+    this.telegramGroupReadinessUsecase = require("./usecase/telegram_group_readiness")(
+      require("./services/telegram")()
+    );
+    this.employeeTelegramMembershipUsecase = require("./usecase/employee_telegram_membership")({
+      mappingRepo: this.telegramGroupMappingRepo,
+      identityRepo: this.employeeTelegramRepo,
+      joinRepo: this.employeeTelegramGroupJoinRepo,
+      readiness: this.telegramGroupReadinessUsecase,
+      telegram: require("./services/telegram")(),
+    });
+    // THE JOIN-REQUEST HANDLER, ON THE SAME DISPATCHER. `chat_join_request`
+    // is already in `allowed_updates` and already aliased by the dispatcher,
+    // so this adds a handler and NOT a second poller, offset owner or
+    // webhook. `chat_member` is deliberately NOT subscribed: membership is
+    // verified on demand with `getChatMember` after an approval or on a
+    // screen read, rather than by asking Telegram to stream every member
+    // change in every group at us forever.
+    this.employeeTelegramJoinRequestUsecase = require("./usecase/employee_telegram_join_request")({
+      registryRepo: this.telegramGroupRegistryRepo,
+      identityRepo: this.employeeTelegramRepo,
+      joinRepo: this.employeeTelegramGroupJoinRepo,
+      membership: this.employeeTelegramMembershipUsecase,
+      readiness: this.telegramGroupReadinessUsecase,
+      telegram: require("./services/telegram")(),
+      mappingRepo: this.telegramGroupMappingRepo,
+    });
+    this.telegramUpdateDispatcher.register({
+      name: "employee_telegram_join_request",
+      updateTypes: ["chat_join_request"],
+      claims: (update) => this.employeeTelegramJoinRequestUsecase.claims(update),
+      handle: (update) => this.employeeTelegramJoinRequestUsecase.handle(update),
+    });
     // Stage 0A integration: the Telegram reset writes through the modern
     // password service and audits to user_auth_log; it never touches SHA-1.
     this.passwordResetUsecase = require("./usecase/passwordReset")(
@@ -1057,7 +1100,9 @@ class Server {
     const employeeTelegramRouter = require("./routes/employee_telegram")(
       this.employeeTelegramLinkUsecase,
       this.permissions,
-      this.employeeBranchScope
+      this.employeeBranchScope,
+      this.employeeTelegramMembershipUsecase,
+      this.telegramGroupMappingRepo
     );
     // THE EXISTING-EMPLOYEE AADHAAR VERIFICATION PATH. A router of its own so
     // that the one endpoint which legitimately accepts an `aadhaar_number` for

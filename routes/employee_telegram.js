@@ -35,13 +35,17 @@ const P = require("../constants/hr_permissions");
  * caller who asked for it, and is stored only as a hash.
  */
 class EmployeeTelegramRoutes {
-  constructor(usecase, permissions, branchScope) {
+  constructor(usecase, permissions, branchScope, membershipUsecase, mappingRepo) {
     if (!branchScope) {
       throw new Error("routes/employee_telegram: the employee branch scope is required");
     }
     this.usecase = usecase;
     this.permissions = permissions;
     this.branchScope = branchScope;
+    // Phase 3B. Optional so the routes still mount without it - the
+    // existing identity endpoints are unaffected by group membership.
+    this.membership = membershipUsecase || null;
+    this.mappingRepo = mappingRepo || null;
     this.router = express.Router();
     this.init();
   }
@@ -155,6 +159,78 @@ class EmployeeTelegramRoutes {
         res.end();
       }
     );
+
+    /* -------------------------------- Phase 3B: required group membership */
+
+    if (!this.membership) return;
+
+    /**
+     * The employee's required groups and where they stand in each.
+     *
+     * `view_employees`, like every other status on these screens, plus the
+     * SAME branch guard: which groups somebody must be in, and whether they
+     * are, is information about that employee, so a manager may read it for
+     * their own branch and nobody else's.
+     *
+     * IT COSTS TELEGRAM CALLS - readiness and membership for each required
+     * group - so it is deliberately a per-employee screen endpoint and is
+     * never called from a list or a dashboard.
+     */
+    r.get(
+      "/employee/:employee_id/telegram/groups",
+      gate.require(P.VIEW_EMPLOYEES),
+      this.branchScope.requireEmployeeInScope(),
+      async (req, res) => {
+        try {
+          const employeeId = this._employeeId(req, res);
+          if (employeeId === null) return;
+          const employee = await this.mappingRepo.getEmployeeForMatching(employeeId);
+          res.json({ code: 200, data: await this.membership.getGroups(employeeId, employee) });
+        } catch (err) {
+          this._fail(res, err);
+        }
+        res.end();
+      }
+    );
+
+    /**
+     * Issue this employee's join link for one group.
+     *
+     * The mutation pair the rest of Telegram onboarding uses -
+     * `employee_create OR employee_edit` - plus the branch guard, so a
+     * manager cannot generate a link for another branch's employee.
+     *
+     * THE BODY MUST BE EMPTY. Nothing about this request may come from the
+     * browser except which employee and which group, and both are checked
+     * against current state by the usecase before anything is created.
+     */
+    r.post(
+      "/employee/:employee_id/telegram/groups/:telegram_group_id(\\d+)/join-link",
+      gate.require(P.EMPLOYEE_CREATE, P.EMPLOYEE_EDIT),
+      this.branchScope.requireEmployeeInScope(),
+      async (req, res) => {
+        try {
+          const employeeId = this._employeeId(req, res);
+          if (employeeId === null) return;
+
+          const isValid = Joi.validate(req.body || {}, Joi.object().keys({}).unknown(false));
+          if (isValid.error !== null) throw isValid.error;
+
+          const employee = await this.mappingRepo.getEmployeeForMatching(employeeId);
+          res.json(
+            await this.membership.createJoinLink(
+              employeeId,
+              parseInt(req.params.telegram_group_id, 10),
+              employee,
+              { actorUserId: this._actorUserId(req) }
+            )
+          );
+        } catch (err) {
+          this._fail(res, err);
+        }
+        res.end();
+      }
+    );
   }
 
   getRouter() {
@@ -162,6 +238,6 @@ class EmployeeTelegramRoutes {
   }
 }
 
-module.exports = (usecase, permissions, branchScope) =>
-  new EmployeeTelegramRoutes(usecase, permissions, branchScope);
+module.exports = (usecase, permissions, branchScope, membershipUsecase, mappingRepo) =>
+  new EmployeeTelegramRoutes(usecase, permissions, branchScope, membershipUsecase, mappingRepo);
 module.exports.EmployeeTelegramRoutes = EmployeeTelegramRoutes;
