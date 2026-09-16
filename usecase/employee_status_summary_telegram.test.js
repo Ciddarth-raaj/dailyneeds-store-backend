@@ -511,3 +511,151 @@ describe("link_attempt - the field the reconnect experience needs", () => {
     );
   });
 });
+
+/* ------------------------------------------------ the link_attempt vocabulary */
+
+describe("every link_attempt state, and what maps to it", () => {
+  const { attemptStateOf, LINK_ATTEMPT } = require("../utils/employee_telegram_status");
+
+  it("no attempt at all is NONE", () => {
+    assert.equal(attemptStateOf(null), LINK_ATTEMPT.NONE);
+    assert.equal(attemptStateOf(undefined), LINK_ATTEMPT.NONE);
+  });
+
+  it("a freshly issued, never-opened link is PENDING", () => {
+    assert.equal(
+      attemptStateOf({ pending_outcome: null, is_unconsumed: 1 }),
+      LINK_ATTEMPT.PENDING
+    );
+  });
+
+  it("a live pending session is AWAITING_CONTACT", () => {
+    assert.equal(attemptStateOf({ pending_outcome: null, is_live: 1 }), LINK_ATTEMPT.AWAITING_CONTACT);
+  });
+
+  it("a mismatch is MOBILE_MISMATCH", () => {
+    assert.equal(
+      attemptStateOf({ pending_outcome: PENDING_OUTCOME.MOBILE_MISMATCH }),
+      LINK_ATTEMPT.MOBILE_MISMATCH
+    );
+  });
+
+  it("a verification is VERIFIED", () => {
+    assert.equal(attemptStateOf({ pending_outcome: PENDING_OUTCOME.VERIFIED }), LINK_ATTEMPT.VERIFIED);
+  });
+
+  it("A DUPLICATE TELEGRAM ACCOUNT IS FAILED, not pending", () => {
+    // It used to collapse to PENDING, which told a watching screen the attempt
+    // was still going when it had ended and needed a fresh QR.
+    assert.equal(
+      attemptStateOf({ pending_outcome: PENDING_OUTCOME.DUPLICATE_IDENTITY }),
+      LINK_ATTEMPT.FAILED
+    );
+  });
+
+  it("an employee who stopped being employed mid-flow is FAILED", () => {
+    assert.equal(
+      attemptStateOf({ pending_outcome: PENDING_OUTCOME.EMPLOYEE_INELIGIBLE }),
+      LINK_ATTEMPT.FAILED
+    );
+  });
+
+  it("A FORWARDED CONTACT STAYS RETRYABLE WHILE THE SESSION IS LIVE", () => {
+    // The usecase deliberately leaves the session open so somebody who
+    // forwarded the wrong card can tap the right button. An honest mistake
+    // must not cost a fresh QR.
+    assert.equal(
+      attemptStateOf({ pending_outcome: PENDING_OUTCOME.CONTACT_NOT_OWNED, is_live: 1 }),
+      LINK_ATTEMPT.AWAITING_CONTACT
+    );
+    // Once the window has closed it is over, like any other expired attempt.
+    assert.equal(
+      attemptStateOf({ pending_outcome: PENDING_OUTCOME.CONTACT_NOT_OWNED, is_live: 0 }),
+      LINK_ATTEMPT.FAILED
+    );
+  });
+
+  it("a superseded attempt is PENDING - replaced, not failed", () => {
+    assert.equal(
+      attemptStateOf({ pending_outcome: PENDING_OUTCOME.SUPERSEDED }),
+      LINK_ATTEMPT.PENDING
+    );
+  });
+
+  it("A LIVE SESSION IS LIVE WHATEVER HAPPENED DURING IT", () => {
+    for (const outcome of [null, PENDING_OUTCOME.CONTACT_NOT_OWNED]) {
+      assert.equal(
+        attemptStateOf({ pending_outcome: outcome, is_live: 1 }),
+        LINK_ATTEMPT.AWAITING_CONTACT
+      );
+    }
+  });
+});
+
+describe("FAILED is a link_attempt and never a status", () => {
+  const { TELEGRAM_STATUS: STATUSES } = require("../constants/employee_telegram");
+
+  it("the employee status vocabulary does not contain FAILED", () => {
+    assert.ok(!Object.values(STATUSES).includes("FAILED"), "a failed attempt is not an employee state");
+  });
+
+  it("a failed attempt leaves an unconnected employee PENDING", async () => {
+    const { usecase } = build({
+      employees: [7],
+      telegram: { 7: { rows: [{ token_hash: "a", pending_outcome: PENDING_OUTCOME.DUPLICATE_IDENTITY }] } },
+    });
+    assert.equal(byId(await usecase.list({}))[7].telegram_status, TELEGRAM_STATUS.PENDING);
+  });
+
+  it("AND LEAVES A CONNECTED EMPLOYEE CONNECTED - a failed reconnect costs them nothing", async () => {
+    const { usecase } = build({
+      employees: [7],
+      telegram: {
+        7: {
+          identity: true,
+          rows: [{ token_hash: "a", pending_outcome: PENDING_OUTCOME.DUPLICATE_IDENTITY }],
+        },
+      },
+    });
+    assert.equal(byId(await usecase.list({}))[7].telegram_status, TELEGRAM_STATUS.CONNECTED);
+  });
+
+  it("the screen reports the failure on the attempt, with the employee still connected", async () => {
+    const linkUsecase = buildLinkUsecase(
+      {
+        getActiveIdentityByEmployee: async () => ({
+          employee_telegram_id: 1,
+          telegram_username: "asha_t",
+          connected_at: new Date(),
+        }),
+        getCurrentAttemptRows: async () => [
+          { token_hash: "a", pending_outcome: PENDING_OUTCOME.DUPLICATE_IDENTITY },
+        ],
+      },
+      { getBotUsername: async () => "dnds_bot" }
+    );
+    const data = (await linkUsecase.getStatus(7)).data;
+    assert.equal(data.status, TELEGRAM_STATUS.CONNECTED);
+    assert.equal(data.link_attempt, "FAILED");
+  });
+
+  it("FAILED DISCLOSES NOTHING about why, or about anybody else", async () => {
+    // Which employee already holds that Telegram account is exactly what the
+    // bot refuses to say; the office screen must not say it either.
+    const linkUsecase = buildLinkUsecase(
+      {
+        getActiveIdentityByEmployee: async () => null,
+        getCurrentAttemptRows: async () => [
+          { token_hash: "secret", pending_outcome: PENDING_OUTCOME.DUPLICATE_IDENTITY },
+        ],
+      },
+      { getBotUsername: async () => "dnds_bot" }
+    );
+    const data = (await linkUsecase.getStatus(7)).data;
+    const dumped = JSON.stringify(data);
+    assert.equal(data.link_attempt, "FAILED", "one word");
+    assert.ok(!dumped.includes("DUPLICATE_IDENTITY"), "never the reason");
+    assert.ok(!dumped.includes("secret"), "never the token");
+    assert.ok(!/\d{6,}/.test(dumped), "no id or number of any kind");
+  });
+});

@@ -79,6 +79,22 @@ const LINK_ATTEMPT = Object.freeze({
   AWAITING_CONTACT: "AWAITING_CONTACT",
   MOBILE_MISMATCH: "MOBILE_MISMATCH",
   VERIFIED: "VERIFIED",
+  /**
+   * IT ENDED, AND NOT ON THE NUMBER. The Telegram account already belongs to
+   * another employee, or the employee stopped being employed mid-flow.
+   *
+   * IT IS ONE WORD AND CARRIES NO REASON, deliberately. Which employee holds
+   * that Telegram account is exactly what the bot refuses to say, and a screen
+   * that named it would disclose from the office what the bot protects in the
+   * chat. A manager needs to know the attempt is over and a fresh QR is the
+   * next move; the reason is in the audit table, where it belongs.
+   *
+   * FAILED IS A LINK_ATTEMPT AND NEVER A TELEGRAM_STATUS. The employee's own
+   * status is about whether they have a working Telegram, which a failed
+   * attempt does not change: they are PENDING if they had none and CONNECTED
+   * if they had one.
+   */
+  FAILED: "FAILED",
 });
 
 /** Outcomes that mean the attempt REACHED a conclusion of its own. */
@@ -86,6 +102,20 @@ const CONCLUDED_OUTCOMES = new Set([
   PENDING_OUTCOME.VERIFIED,
   PENDING_OUTCOME.MOBILE_MISMATCH,
   PENDING_OUTCOME.CONTACT_NOT_OWNED,
+  PENDING_OUTCOME.DUPLICATE_IDENTITY,
+  PENDING_OUTCOME.EMPLOYEE_INELIGIBLE,
+]);
+
+/**
+ * Outcomes the attempt cannot come back from - a fresh QR is the only way on.
+ *
+ * `CONTACT_NOT_OWNED` IS DELIBERATELY NOT HERE. Forwarding somebody else's
+ * contact card does not end the session: the usecase leaves it open precisely
+ * so the employee can tap the right button, and an honest mistake should not
+ * cost a fresh QR. It is treated as terminal only once the session is no
+ * longer live, which is the ordinary expiry every open attempt reaches.
+ */
+const TERMINAL_FAILURES = new Set([
   PENDING_OUTCOME.DUPLICATE_IDENTITY,
   PENDING_OUTCOME.EMPLOYEE_INELIGIBLE,
 ]);
@@ -136,9 +166,15 @@ function attemptStateOf(row) {
   const outcome = row.pending_outcome === undefined ? null : row.pending_outcome;
   if (outcome === PENDING_OUTCOME.VERIFIED) return LINK_ATTEMPT.VERIFIED;
   if (outcome === PENDING_OUTCOME.MOBILE_MISMATCH) return LINK_ATTEMPT.MOBILE_MISMATCH;
-  if (outcome === null && truthy(row.is_live)) return LINK_ATTEMPT.AWAITING_CONTACT;
-  // Superseded, expired, refused, freshly issued: nothing is outstanding on
-  // this attempt and nothing about it needs a human.
+  // A LIVE SESSION IS STILL A LIVE SESSION, whatever happened during it. A
+  // refused contact card leaves the session open on purpose, so somebody who
+  // forwarded the wrong one can tap the right button - and until that window
+  // closes the attempt is still awaiting a contact, not failed.
+  if (truthy(row.is_live)) return LINK_ATTEMPT.AWAITING_CONTACT;
+  if (outcome !== null && TERMINAL_FAILURES.has(outcome)) return LINK_ATTEMPT.FAILED;
+  if (outcome === PENDING_OUTCOME.CONTACT_NOT_OWNED) return LINK_ATTEMPT.FAILED;
+  // Superseded, expired, freshly issued: nothing is outstanding on this
+  // attempt and nothing about it needs a human. A fresh QR carries on.
   return LINK_ATTEMPT.PENDING;
 }
 
