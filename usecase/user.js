@@ -365,7 +365,26 @@ class UserUsecase {
       store_id: isSystem ? null : row.store_id,
       name: isSystem ? row.username : row.employee_name,
       designation: isSystem ? "System account" : row.designation_name,
-      employee_image: isSystem ? null : row.employee_image,
+      // `employee_image` IS DELIBERATELY NOT A CLAIM. It is a base64 data URI
+      // in a LONGTEXT column - one production row was 28,263 characters, which
+      // by itself made the signed token 38,099 characters. The frontend sends
+      // that token on every request in `x-access-token`, so the request header
+      // exceeded the server's limit and authenticated calls were rejected with
+      // 400 before any handler ran. The visible symptom was not an image
+      // problem at all: `/designation/permissions` failed, the sidebar fell
+      // back to an empty permission set, and the only navigation entry without
+      // a permission key (My Attendance) was all that remained on screen.
+      //
+      // Nothing ever read it from the token. `middlewares/auth.js` rebuilds
+      // `req.decoded` from six fields and this was never one of them, and no
+      // frontend code decodes the JWT at all. It is still returned in the
+      // login RESPONSE BODY below, which is a JSON body rather than a header
+      // and is where the web app has always read it from.
+      //
+      // The rule this encodes: a JWT carries identity, not profile data. Any
+      // field that can grow with user input - an image, a document, a list -
+      // belongs behind an authenticated endpoint, never in a header sent on
+      // every single request.
     };
     if (!isSystem) claims.employee_id = row.employee_id;
     if (isSystem) claims.sys = true;
@@ -385,7 +404,9 @@ class UserUsecase {
       user_type: row.user_type,
       name: claims.name,
       designation: claims.designation,
-      employee_image: claims.employee_image,
+      // From the row, not from `claims` - it is no longer a claim. The login
+      // response is a JSON body, not a header, so its size is not what broke.
+      employee_image: isSystem ? null : row.employee_image,
       is_system_account: isSystem,
       must_change_password: mustChange,
     };
