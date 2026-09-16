@@ -32,6 +32,30 @@ const BOT_USERNAME_OVERRIDE = (process.env.TELEGRAM_BOT_USERNAME || "").replace(
 
 const client = BOT_TOKEN ? new TelegramClient({ accessToken: BOT_TOKEN }) : null;
 
+/**
+ * The update types the bot asks Telegram for. NOTHING ELSE IS DELIVERED.
+ *
+ * Telegram DROPS an update type that is not named here rather than queueing
+ * it, so this list is not a filter over a stream we are already paying for -
+ * it is the stream. Adding a type turns traffic on; removing one turns it off
+ * with no backlog left behind.
+ *
+ *   message            `/start <token>` linking, `/setup` group detection, and
+ *                      a shared contact (which arrives as `message.contact`).
+ *   chat_join_request  the approved employee join flow: the bot creates an
+ *                      invite link with `creates_join_request`, the employee
+ *                      taps it, and this is how we hear about it. It produces
+ *                      NO traffic at all until such a link exists, so it costs
+ *                      nothing to have ready.
+ *
+ * `chat_member` IS DELIBERATELY ABSENT. It fires for every member joining or
+ * leaving EVERY group the bot is in, including groups that have nothing to do
+ * with employee management. It belongs to the membership work that consumes
+ * it, not here - `usecase/telegram_update_dispatcher.js` can already route it
+ * the day it is switched on.
+ */
+const ALLOWED_UPDATES = ["message", "chat_join_request"];
+
 const NOT_CONFIGURED = "Telegram is not configured (TELEGRAM_BOT_TOKEN missing)";
 const requireClient = () => {
   if (!client) throw new Error(NOT_CONFIGURED);
@@ -139,7 +163,7 @@ class Telegram {
    * cron tick, so it must return promptly rather than hold the connection.
    */
   async getUpdates(offset) {
-    const options = { timeout: 0, allowedUpdates: ["message"] };
+    const options = { timeout: 0, allowedUpdates: ALLOWED_UPDATES };
     if (offset !== undefined && offset !== null) options.offset = offset;
     return requireClient().getUpdates(options);
   }
@@ -193,3 +217,4 @@ module.exports = () => {
   return new Telegram();
 };
 module.exports.NOT_CONFIGURED = NOT_CONFIGURED;
+module.exports.ALLOWED_UPDATES = ALLOWED_UPDATES;

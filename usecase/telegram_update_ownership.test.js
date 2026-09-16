@@ -76,26 +76,57 @@ describe("the Telegram update stream", () => {
     assert.ok(/handleMessage/.test(detection), "it receives messages instead");
   });
 
-  it("the owner hands every message to the observer, before its own branch", () => {
+  it("the owner hands every update to the dispatcher, before its own branch", () => {
     const poll = strip(read("usecase/passwordReset.js"));
     const loopStart = poll.indexOf("for (const update of updates");
     assert.notEqual(loopStart, -1);
     const body = poll.slice(loopStart, poll.indexOf("return { code: 200, linked }", loopStart));
-    const observerAt = body.indexOf("this.onTelegramMessage");
+    const dispatchAt = body.indexOf("this.onTelegramUpdate");
     const linkAt = body.indexOf("parseStartPayload");
-    assert.ok(observerAt !== -1, "the observer is called");
+    assert.ok(dispatchAt !== -1, "the dispatcher is called");
     assert.ok(
-      observerAt < linkAt,
-      "the observer sees the message before the linking branch can `continue` past it"
+      dispatchAt < linkAt,
+      "handlers see the update before the linking branch can `continue` past it"
     );
   });
 
-  it("an observer failure cannot stop linking", () => {
+  it("IT IS HANDED THE WHOLE UPDATE, not just the message", () => {
     const poll = strip(read("usecase/passwordReset.js"));
-    const call = /if \(this\.onTelegramMessage && message\) \{([\s\S]*?)\n        \}/.exec(poll);
-    assert.ok(call, "the observer call is guarded");
+    assert.match(
+      poll,
+      /this\.onTelegramUpdate\(update\)/,
+      "a join request carries no message, so handlers must receive the update itself"
+    );
+  });
+
+  it("a dispatcher failure cannot stop linking", () => {
+    const poll = strip(read("usecase/passwordReset.js"));
+    const call = /if \(this\.onTelegramUpdate\) \{([\s\S]*?)\n        \}/.exec(poll);
+    assert.ok(call, "the dispatch call is guarded");
     assert.match(call[1], /try \{/, "it is wrapped in try/catch");
     assert.match(call[1], /catch \(err\)/);
+  });
+
+  it("THE CLAIM IS CHECKED AFTER DISPATCH AND BEFORE THE /start BRANCH", () => {
+    // This ordering is the whole contract: a `/start` another feature owns
+    // must not also be answered here with "that link has expired".
+    const poll = strip(read("usecase/passwordReset.js"));
+    const loopStart = poll.indexOf("for (const update of updates");
+    const body = poll.slice(loopStart, poll.indexOf("return { code: 200, linked }", loopStart));
+    const dispatchAt = body.indexOf("this.onTelegramUpdate");
+    const claimAt = body.indexOf("if (claimed) continue;");
+    const linkAt = body.indexOf("parseStartPayload");
+    assert.ok(claimAt !== -1, "the claim is honoured");
+    assert.ok(dispatchAt < claimAt && claimAt < linkAt, "dispatch, then claim, then link");
+  });
+
+  it("the legacy observer name is still accepted, for one release", () => {
+    const poll = strip(read("usecase/passwordReset.js"));
+    assert.match(
+      poll,
+      /deps\.onTelegramMessage/,
+      "a stale wiring must keep working rather than deliver updates to nobody"
+    );
   });
 
   it("the offset is still advanced for every update, acted on or not", () => {
@@ -105,8 +136,43 @@ describe("the Telegram update stream", () => {
     const loopStart = poll.indexOf("for (const update of updates");
     const body = poll.slice(loopStart);
     const offsetAt = body.indexOf("this.updateOffset = Math.max");
-    const observerAt = body.indexOf("this.onTelegramMessage");
-    assert.ok(offsetAt !== -1 && offsetAt < observerAt, "the offset advances first");
+    const dispatchAt = body.indexOf("this.onTelegramUpdate");
+    assert.ok(offsetAt !== -1 && offsetAt < dispatchAt, "the offset advances first");
+  });
+});
+
+describe("the dispatcher", () => {
+  it("FETCHES NOTHING and schedules nothing - it is handed updates by the owner", () => {
+    const src = strip(read("usecase/telegram_update_dispatcher.js"));
+    assert.ok(!/getUpdates/.test(src), "the dispatcher must never call getUpdates");
+    assert.ok(!/setInterval|cron|schedule/i.test(src), "it schedules nothing");
+    assert.ok(!/updateOffset|offset/i.test(src), "and it holds no cursor of its own");
+  });
+
+  it("is registered with handlers in ONE place - server.js, at wiring time", () => {
+    const registrars = files.filter((f) => /telegramUpdateDispatcher\.register\(/.test(strip(read(f))));
+    assert.deepEqual(registrars, ["server.js"], "handlers are wired once, never at runtime");
+  });
+
+  it("group detection is registered as an OBSERVER - it claims no deep link", () => {
+    const server = strip(read("server.js"));
+    const block = /name: "telegram_group_detection"[\s\S]*?\}\);/.exec(server);
+    assert.ok(block, "detection is registered on the dispatcher");
+    assert.ok(
+      !/claims\s*:/.test(block[0]),
+      "a claim here would suppress password-reset linking for every /start"
+    );
+  });
+
+  it("asks Telegram for the approved update types and NOTHING else", () => {
+    const service = strip(read("services/telegram.js"));
+    const list = /const ALLOWED_UPDATES = (\[[^\]]*\])/.exec(service);
+    assert.ok(list, "the allowed updates are one named constant");
+    assert.deepEqual(JSON.parse(list[1].replace(/'/g, '"')), ["message", "chat_join_request"]);
+    assert.ok(
+      !/chat_member/.test(list[1]),
+      "chat_member belongs to the membership phase that consumes it"
+    );
   });
 });
 

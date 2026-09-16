@@ -292,6 +292,111 @@ describe("pollTelegramUpdates", () => {
     assert.equal(usecase.updateOffset, 6);
   });
 
+  /**
+   * THE DISPATCHER CANNOT BREAK LINKING, AND CANNOT QUIETLY TAKE IT OVER.
+   *
+   * These four pin the contract the update dispatcher was added for. The
+   * dangerous direction is the last two: a `/start` that ANOTHER feature owns
+   * must not also be answered here, because `completeLink` would not find the
+   * payload and would tell the employee their link had expired.
+   */
+  it("links normally when the dispatcher claims nothing - the Phase 1 state", async () => {
+    const repo = makeResetRepo();
+    const telegram = makeTelegram();
+    telegram.getUpdates = async () => [
+      { updateId: 10, message: { chat: { id: 4242 }, text: "/start good-token" } },
+    ];
+    const usecase = buildPasswordReset(makeUserRepo(), repo, telegram, {
+      onTelegramUpdate: async () => ({ claimed: false, claimedBy: null }),
+    });
+
+    const result = await usecase.pollTelegramUpdates();
+    assert.equal(result.linked, 1);
+    assert.deepEqual(repo.calls.saved.length, 1);
+  });
+
+  it("A CLAIMED /start IS NOT ANSWERED HERE - no link, and no expired-link reply", async () => {
+    const repo = makeResetRepo();
+    const telegram = makeTelegram();
+    telegram.getUpdates = async () => [
+      { updateId: 11, message: { chat: { id: 4242 }, text: "/start e_employee-token" } },
+    ];
+    const usecase = buildPasswordReset(makeUserRepo(), repo, telegram, {
+      onTelegramUpdate: async () => ({ claimed: true, claimedBy: "employee_link" }),
+    });
+
+    const result = await usecase.pollTelegramUpdates();
+
+    assert.equal(result.linked, 0);
+    assert.deepEqual(repo.calls.saved, [], "the chat is not linked to a login");
+    assert.deepEqual(
+      telegram.sent,
+      [],
+      "and above all: the employee is NOT told their link has expired"
+    );
+    assert.equal(usecase.updateOffset, 12, "the offset still advanced");
+  });
+
+  it("a dispatcher that throws claims nothing, so linking still happens", async () => {
+    const repo = makeResetRepo();
+    const telegram = makeTelegram();
+    telegram.getUpdates = async () => [
+      { updateId: 12, message: { chat: { id: 4242 }, text: "/start good-token" } },
+    ];
+    const usecase = buildPasswordReset(makeUserRepo(), repo, telegram, {
+      onTelegramUpdate: async () => {
+        throw new Error("dispatcher down");
+      },
+    });
+
+    const result = await usecase.pollTelegramUpdates();
+    assert.equal(result.linked, 1);
+    assert.equal(usecase.updateOffset, 13);
+  });
+
+  it("an update carrying no message reaches the dispatcher and is ignored by linking", async () => {
+    const seen = [];
+    const repo = makeResetRepo();
+    const telegram = makeTelegram();
+    telegram.getUpdates = async () => [
+      { updateId: 20, chatJoinRequest: { from: { id: 7 }, chat: { id: -100123 } } },
+    ];
+    const usecase = buildPasswordReset(makeUserRepo(), repo, telegram, {
+      onTelegramUpdate: async (update) => {
+        seen.push(update);
+        return { claimed: false };
+      },
+    });
+
+    const result = await usecase.pollTelegramUpdates();
+
+    assert.equal(seen.length, 1, "the whole update is handed over, message or not");
+    assert.equal(seen[0].chatJoinRequest.from.id, 7);
+    assert.equal(result.linked, 0);
+    assert.equal(usecase.updateOffset, 21);
+  });
+
+  // The old single-observer wiring keeps working for one release, so a stale
+  // `onTelegramMessage` cannot silently deliver updates to nobody.
+  it("still accepts the legacy onTelegramMessage observer, message-only and claiming nothing", async () => {
+    const seen = [];
+    const repo = makeResetRepo();
+    const telegram = makeTelegram();
+    telegram.getUpdates = async () => [
+      { updateId: 30, message: { chat: { id: 4242 }, text: "/start good-token" } },
+      { updateId: 31, chatJoinRequest: { from: { id: 7 } } },
+    ];
+    const usecase = buildPasswordReset(makeUserRepo(), repo, telegram, {
+      onTelegramMessage: async (message) => seen.push(message),
+    });
+
+    const result = await usecase.pollTelegramUpdates();
+
+    assert.equal(seen.length, 1, "the legacy observer only ever saw messages");
+    assert.equal(seen[0].text, "/start good-token");
+    assert.equal(result.linked, 1, "and it claims nothing, so linking is untouched");
+  });
+
   // A webhook registered on the bot makes getUpdates fail with 409; the tick
   // must survive it rather than take the cron down.
   it("survives a getUpdates failure", async () => {
