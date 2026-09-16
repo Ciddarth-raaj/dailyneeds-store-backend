@@ -592,6 +592,95 @@ describe("the rule is global, every employee number is scoped", () => {
     );
   });
 
+  it("reports the THREE scopes distinctly - NONE is not a kind of BRANCH", async () => {
+    // Two of these render as zero and mean different things: "nobody in your
+    // branch matches" is an observation, "we could not look" is not.
+    const cases = [
+      [ALL_BRANCHES, COUNTS_SCOPE.ALL],
+      [ownBranches([8]), COUNTS_SCOPE.BRANCH],
+      [{ kind: EMPLOYEE_BRANCH_SCOPE.NONE, store_ids: [] }, COUNTS_SCOPE.NONE],
+      [ownBranches([]), COUNTS_SCOPE.NONE],
+      [undefined, COUNTS_SCOPE.NONE],
+      [{ kind: "SOMETHING_NEW" }, COUNTS_SCOPE.NONE],
+    ];
+    for (const [scope, expected] of cases) {
+      const result = await build({ mappings: all, employees }).getMappings(10, { scope });
+      assert.equal(result.counts_scope, expected, `scope ${JSON.stringify(scope)}`);
+      const list = await build({ mappings: all, employees }).getMatchedEmployees(10, { scope });
+      assert.equal(list.counts_scope, expected, `matched-employees, scope ${JSON.stringify(scope)}`);
+    }
+  });
+
+  it("an OWN_BRANCHES scope with no usable branch is NONE, not BRANCH", async () => {
+    // It cannot be a branch answer, because there is no branch.
+    for (const ids of [[], null, undefined, ["x"], [NaN]]) {
+      const result = await build({ mappings: all, employees }).getMappings(10, {
+        scope: { kind: EMPLOYEE_BRANCH_SCOPE.OWN_BRANCHES, store_ids: ids },
+      });
+      assert.equal(result.counts_scope, COUNTS_SCOPE.NONE, `store_ids ${JSON.stringify(ids)}`);
+      assert.equal(result.total_matched, 0);
+    }
+  });
+
+  it("the label always describes the rule that produced the numbers", async () => {
+    // countsScope and visibleEmployees must agree: a BRANCH label over an
+    // empty population, or a NONE label over a counted one, is a lie either
+    // way round.
+    for (const scope of [
+      ALL_BRANCHES,
+      ownBranches([8]),
+      ownBranches([]),
+      { kind: EMPLOYEE_BRANCH_SCOPE.NONE, store_ids: [] },
+      undefined,
+    ]) {
+      const result = await build({ mappings: all, employees }).getMappings(10, { scope });
+      if (result.counts_scope === COUNTS_SCOPE.NONE) {
+        assert.equal(result.total_matched, 0, "NONE must have counted nothing");
+      } else {
+        assert.ok(result.total_matched > 0, "ALL and BRANCH counted a real population here");
+      }
+    }
+  });
+
+  it("the mapping RULES are returned unchanged under NONE", async () => {
+    // The configuration is not employee information. Somebody who may open
+    // the screen still sees every rule in full.
+    const mappings = [
+      mapping(1, MAPPING_TYPE.ALL_EMPLOYEES),
+      mapping(2, MAPPING_TYPE.OUTLET, 5),
+    ];
+    const targets = { OUTLET: { 5: { name: "ECR", active: true } } };
+    const strip = (r) =>
+      r.mappings.map((m) => ({
+        id: m.telegram_group_mapping_id,
+        type: m.mapping_type,
+        label: m.mapping_type_label,
+        target_id: m.target_id,
+        target_name: m.target_name,
+        target_state: m.target_state,
+        target_warning: m.target_warning,
+      }));
+
+    const hr = await build({ mappings, employees, targets }).getMappings(10, { scope: ALL_BRANCHES });
+    const none = await build({ mappings, employees, targets }).getMappings(10, {
+      scope: { kind: EMPLOYEE_BRANCH_SCOPE.NONE, store_ids: [] },
+    });
+    assert.deepEqual(strip(none), strip(hr));
+    assert.equal(none.group.group_name, hr.group.group_name);
+    assert.equal(none.total_matched, 0);
+  });
+
+  it("NONE computes no unauthorized total to distinguish itself", async () => {
+    const repo = makeRepo({ mappings: all, employees });
+    const usecase = buildMapping(repo, makeRegistry(), { now: () => NOW });
+    const result = await usecase.getMappings(10, {
+      scope: { kind: EMPLOYEE_BRANCH_SCOPE.NONE, store_ids: [] },
+    });
+    const numbers = JSON.stringify(result).match(/\d+/g).map(Number);
+    assert.ok(!numbers.includes(3), "the company-wide count must not appear anywhere");
+    assert.equal(repo.calls.connected, 1, "still bounded, still no per-employee lookup");
+  });
+
   it("a NONE scope counts NOTHING and lists nobody", async () => {
     const none = { kind: EMPLOYEE_BRANCH_SCOPE.NONE, store_ids: [] };
     const mappingsResult = await build({ mappings: all, employees }).getMappings(10, { scope: none });

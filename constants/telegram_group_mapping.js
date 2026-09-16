@@ -97,18 +97,31 @@ const MAPPING_TARGET_SOURCE = {
  * WHOSE EMPLOYEES THE NUMBERS ON THIS SCREEN COUNT.
  *
  * `ALL` is the company. `BRANCH` means the caller may only see employees in
- * their own branch scope, so every employee-derived number - the per-rule
- * count, the union, the connected count and the list - counts only those.
+ * their own branch, so every employee-derived number counts only those.
  *
- * IT REPLACES `scope_limited`, WHICH ANSWERED A QUESTION NOBODY MAY ASK ANY
- * MORE. That flag meant "your list is smaller than the company-wide total",
- * which required computing a company-wide total for somebody not entitled to
- * one. This says what the numbers ARE rather than what they are not, and it
- * needs no forbidden figure to derive.
+ * `NONE` MEANS THE NUMBERS ARE NOT AVAILABLE AT ALL, and it is a THIRD state
+ * rather than a flavour of `BRANCH`. The distinction is the difference
+ * between two sentences that both render as zero:
+ *
+ *   BRANCH, 0  "nobody in your branch matches this rule"   - an observation
+ *   NONE,   0  "employee information is unavailable to you" - not an
+ *              observation about anybody
+ *
+ * A request resolves to `NONE` when the caller has no employee record, is
+ * inactive, has no branch assigned, is unauthenticated, or when the resolver
+ * did not run at all. In none of those cases has anything been counted, so
+ * presenting a 0 as if it were a finding would be inventing an observation
+ * out of a failure - and the most likely reading, "this rule matches nobody,
+ * it must be broken", is the one that gets a correct rule deleted.
+ *
+ * IT REPLACED `scope_limited`, which meant "your list is smaller than the
+ * company-wide total" and so required computing a total the caller may not
+ * have. This says what the numbers ARE, and needs no forbidden figure.
  */
 const COUNTS_SCOPE = {
   ALL: "ALL",
   BRANCH: "BRANCH",
+  NONE: "NONE",
 };
 
 const TARGET_STATE = {

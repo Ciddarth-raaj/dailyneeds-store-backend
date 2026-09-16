@@ -142,14 +142,28 @@ class TelegramGroupMappingUsecase {
   /**
    * What the numbers in this response count, stated plainly for the screen.
    *
-   * A branch-scoped caller is told `BRANCH` so the UI can say the count is
-   * limited to their scope rather than presenting it as the company figure.
-   * `NONE` reports `BRANCH` too: its numbers are limited as well, just to
-   * nothing.
+   * THREE STATES, BECAUSE TWO OF THEM RENDER AS ZERO AND MEAN DIFFERENT
+   * THINGS. `BRANCH` with a count of 0 is an observation - nobody in your
+   * branch matches this rule. `NONE` with a count of 0 is not an observation
+   * about anybody: nothing was counted, because the caller has no employee
+   * record, no branch, an inactive record, no session, or the resolver never
+   * ran. Telling somebody "0 employees in your branch match" when the truth
+   * is "we could not look" invents a finding out of a failure, and invites
+   * them to delete a rule that is working.
+   *
+   * AN OWN_BRANCHES SCOPE WITH NO USABLE BRANCH IDS IS `NONE`, not `BRANCH`.
+   * It cannot be a branch answer, because there is no branch.
+   *
+   * This mirrors `visibleEmployees` exactly - the same three cases in the
+   * same order - so the label can never describe a different rule from the
+   * one that produced the numbers.
    */
   static countsScope(scope) {
     const kind = (scope && scope.kind) || EMPLOYEE_BRANCH_SCOPE.NONE;
-    return kind === EMPLOYEE_BRANCH_SCOPE.ALL_BRANCHES ? COUNTS_SCOPE.ALL : COUNTS_SCOPE.BRANCH;
+    if (kind === EMPLOYEE_BRANCH_SCOPE.ALL_BRANCHES) return COUNTS_SCOPE.ALL;
+    if (kind !== EMPLOYEE_BRANCH_SCOPE.OWN_BRANCHES) return COUNTS_SCOPE.NONE;
+    const usable = (scope.store_ids || []).map(Number).filter((id) => Number.isInteger(id));
+    return usable.length > 0 ? COUNTS_SCOPE.BRANCH : COUNTS_SCOPE.NONE;
   }
 
   /**
