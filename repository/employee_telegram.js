@@ -1,4 +1,23 @@
 const logger = require("../utils/logger");
+const {
+  queryAsync,
+  getConnectionAsync,
+  beginTransactionAsync,
+  commitAsync,
+  rollbackAsync,
+} = require("../utils/batchInsert");
+
+/**
+ * MySQL's own name for a unique-key violation.
+ *
+ * A DUPLICATE IS A BUSINESS OUTCOME; ANYTHING ELSE IS A FAILURE. Treating
+ * every insert error as "already connected" would tell an employee their
+ * account belongs to somebody else because a network blipped, and would hide
+ * a real database problem behind a plausible sentence.
+ */
+const DUPLICATE_KEY = "ER_DUP_ENTRY";
+const isDuplicateKeyError = (err) =>
+  Boolean(err) && (err.code === DUPLICATE_KEY || err.errno === 1062);
 
 /**
  * Rows behind employee Telegram identity, its one-time links and its audit.
@@ -50,7 +69,17 @@ class EmployeeTelegramRepository {
   async getEmployeeForVerification(employeeId) {
     const rows = await this.run(
       "GET-EMPLOYEE",
-      `SELECT employee_id, status, primary_contact_number
+      // THE DATED FACTS, NOT JUST `status`. `new_employee.status` is
+      // maintained by hand and has been left at 1 for most leavers - the
+      // reason `utils/attendance_eligibility.js` refuses to read it at all -
+      // so "is this person employed today" is decided from the joining and
+      // resignation dates, which is what payroll and attendance already do.
+      // Formatted as YYYY-MM-DD so the shared rule can compare them as text.
+      `SELECT employee_id,
+              status,
+              primary_contact_number,
+              DATE_FORMAT(date_of_joining, '%Y-%m-%d')  AS date_of_joining,
+              DATE_FORMAT(resignation_date, '%Y-%m-%d') AS resignation_date
          FROM new_employee
         WHERE employee_id = ?`,
       [employeeId],
@@ -238,23 +267,150 @@ class EmployeeTelegramRepository {
   }
 
   /**
-   * Create the live identity. Only ever called once a mobile has MATCHED.
+   * FINISH THE VERIFICATION - atomically, or not at all.
    *
-   * The three unique keys in the schema are what actually enforce one active
-   * identity per employee, per Telegram account and per chat; this insert
-   * simply lets them do it, and the usecase turns the resulting driver error
-   * into a sentence.
+   * ============================ WHY THIS IS ONE TRANSACTION =================
+   *
+   * The steps used to be four separate statements: read the pending row, mark
+   * it, disconnect the old identity, insert the new one. Two copies of the
+   * same contact message - Telegram retries, or an employee tapping twice -
+   * could both read the SAME still-open pending row, and then:
+   *
+   *   caller A inserts the identity
+   *   caller B runs the reconnect disconnect and RETIRES WHAT A JUST CREATED
+   *   caller B inserts a second one
+   *
+   * and worse, the reconnect disconnect happened BEFORE the insert, so a
+   * failing insert left the employee with NO active identity at all - having
+   * destroyed the working one they had.
+   *
+   * So the whole finalisation is one transaction, and THE PENDING ROW IS THE
+   * CLAIM. `pending_outcome IS NULL` in the first UPDATE's WHERE clause means
+   * exactly one caller can ever proceed past it; everybody else sees
+   * `affectedRows: 0`, rolls back and is told the work was already done. The
+   * old identity is retired inside the same transaction as the insert that
+   * replaces it, so a failure rolls BOTH back and the employee keeps the
+   * identity they had.
+   *
+   * @returns {Promise<{outcome: string, identityCreated: boolean}>}
+   *   VERIFIED            this caller finalised it
+   *   ALREADY_FINALISED   somebody else did - nothing was changed
+   *   DUPLICATE_IDENTITY  the Telegram account belongs to another employee
+   * Any other database failure ROLLS BACK AND THROWS. It is not an outcome.
    */
-  async createIdentity({ employeeId, telegramUserId, chatId, username, verifiedMobile }) {
-    return this.run(
-      "CREATE-IDENTITY",
-      `INSERT INTO employee_telegram_identity
-         (employee_id, telegram_user_id, private_chat_id, telegram_username,
-          verified_mobile, connected_at)
-       VALUES (?, ?, ?, ?, ?, NOW())`,
-      [employeeId, telegramUserId, chatId, username === undefined ? null : username, verifiedMobile],
-      { employeeId, telegramUserId }
-    );
+  async finalizeVerification({
+    tokenHash,
+    employeeId,
+    telegramUserId,
+    chatId,
+    username,
+    verifiedMobile,
+    verifiedOutcome,
+  }) {
+    const connection = await getConnectionAsync(this.db);
+    try {
+      await beginTransactionAsync(connection);
+
+      // 1 - THE CLAIM. One winner, decided by the database.
+      const claimed = await queryAsync(
+        connection,
+        `UPDATE employee_telegram_link_tokens
+            SET pending_outcome = ?, pending_expires_at = NULL
+          WHERE token_hash = ? AND pending_outcome IS NULL`,
+        [verifiedOutcome, tokenHash]
+      );
+      if (!claimed || claimed.affectedRows !== 1) {
+        await rollbackAsync(connection);
+        return { outcome: "ALREADY_FINALISED", identityCreated: false };
+      }
+
+      // 2 - Is this Telegram account already somebody's? FOR UPDATE, so a
+      // concurrent finalisation for a different employee waits here rather
+      // than racing us to the insert.
+      const existing = await queryAsync(
+        connection,
+        `SELECT employee_telegram_id, employee_id
+           FROM employee_telegram_identity
+          WHERE telegram_user_id = ? AND disconnected_at IS NULL
+          FOR UPDATE`,
+        [telegramUserId]
+      );
+      const owner = existing && existing[0] ? existing[0] : null;
+
+      if (owner && Number(owner.employee_id) !== Number(employeeId)) {
+        // Another employee's account. Roll the claim back so the caller can
+        // close the pending row with the reason that actually applies.
+        await rollbackAsync(connection);
+        return { outcome: "DUPLICATE_IDENTITY", identityCreated: false };
+      }
+
+      if (owner) {
+        // Already this employee's account: the identity the insert would
+        // create is the one already there. Nothing to write.
+        await commitAsync(connection);
+        return { outcome: "VERIFIED", identityCreated: false };
+      }
+
+      // 3 - RECONNECT, INSIDE THE SAME TRANSACTION AS THE INSERT. A different
+      // Telegram account for an employee who already has one: retire the old
+      // row so `uq_eti_active_employee` is satisfied. If step 4 fails, this is
+      // rolled back with it and the employee keeps what they had.
+      await queryAsync(
+        connection,
+        `UPDATE employee_telegram_identity
+            SET disconnected_at = NOW(), disconnect_reason = 'RECONNECT'
+          WHERE employee_id = ? AND disconnected_at IS NULL`,
+        [employeeId]
+      );
+
+      // 4 - the identity itself. The three unique keys are the real authority.
+      try {
+        await queryAsync(
+          connection,
+          `INSERT INTO employee_telegram_identity
+             (employee_id, telegram_user_id, private_chat_id, telegram_username,
+              verified_mobile, connected_at)
+           VALUES (?, ?, ?, ?, ?, NOW())`,
+          [employeeId, telegramUserId, chatId, username === undefined ? null : username, verifiedMobile]
+        );
+      } catch (err) {
+        await rollbackAsync(connection);
+        // A UNIQUE KEY REFUSED IT - somebody claimed the account between our
+        // check and our insert. That is a duplicate and reads as one.
+        if (isDuplicateKeyError(err)) {
+          return { outcome: "DUPLICATE_IDENTITY", identityCreated: false };
+        }
+        // ANYTHING ELSE IS A FAILURE, NOT AN OUTCOME. The rollback has already
+        // restored the previous active identity; the caller must not report
+        // this as "already connected to another employee".
+        logger.Log({
+          level: logger.LEVEL.ERROR,
+          component: "REPOSITORY.EMPLOYEE-TELEGRAM",
+          code: "REPOSITORY.EMPLOYEE-TELEGRAM.FINALIZE-INSERT",
+          description: err.toString(),
+          category: "",
+          ref: { employeeId, telegramUserId },
+        });
+        throw err;
+      }
+
+      await commitAsync(connection);
+      return { outcome: "VERIFIED", identityCreated: true };
+    } catch (err) {
+      await rollbackAsync(connection);
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "REPOSITORY.EMPLOYEE-TELEGRAM",
+        code: "REPOSITORY.EMPLOYEE-TELEGRAM.FINALIZE",
+        description: err.toString(),
+        category: "",
+        ref: { employeeId, telegramUserId },
+      });
+      throw err;
+    } finally {
+      // Always returned to the pool, on every path.
+      if (connection && typeof connection.release === "function") connection.release();
+    }
   }
 
   /* --------------------------------------------------------------- audit */

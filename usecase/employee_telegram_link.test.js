@@ -132,31 +132,83 @@ const makeRepo = (store) => ({
     }
     return n;
   },
-  async createIdentity({ employeeId, telegramUserId, chatId, username, verifiedMobile }) {
-    // The three unique keys, as the schema declares them.
-    const clash = store.identities.some(
-      (i) =>
-        i.disconnected_at === null &&
-        (i.employee_id === employeeId ||
-          i.telegram_user_id === telegramUserId ||
-          i.private_chat_id === chatId)
+  // The atomic finalisation, modelled as MySQL would run it: the pending row
+  // is the claim, the reconnect-disconnect and the insert are one unit, and a
+  // failed insert rolls the disconnect back with it.
+  async finalizeVerification({ tokenHash, employeeId, telegramUserId, chatId, username, verifiedMobile, verifiedOutcome }) {
+    const row = store.tokens.get(tokenHash);
+    if (!row || row.pending_outcome !== null) {
+      return { outcome: "ALREADY_FINALISED", identityCreated: false };
+    }
+    // Claimed. Anything after this that fails must undo it - and a real
+    // ROLLBACK restores BOTH columns the claiming UPDATE wrote, which is what
+    // leaves the session open for the employee to tap the button again.
+    const beforeClaim = {
+      pending_outcome: row.pending_outcome,
+      pending_expires_at: row.pending_expires_at,
+    };
+    row.pending_outcome = verifiedOutcome;
+    row.pending_expires_at = null;
+    const undoClaim = () => {
+      row.pending_outcome = beforeClaim.pending_outcome;
+      row.pending_expires_at = beforeClaim.pending_expires_at;
+    };
+
+    const owner = store.identities.find(
+      (i) => i.telegram_user_id === telegramUserId && i.disconnected_at === null
     );
-    if (clash) {
-      const err = new Error("ER_DUP_ENTRY: Duplicate entry for key 'uq_eti_active_telegram'");
-      err.code = "ER_DUP_ENTRY";
+    if (owner && Number(owner.employee_id) !== Number(employeeId)) {
+      undoClaim();
+      return { outcome: "DUPLICATE_IDENTITY", identityCreated: false };
+    }
+    if (owner) return { outcome: "VERIFIED", identityCreated: false };
+
+    // A snapshot to roll back to, which is what the transaction gives us.
+    const snapshot = store.identities.map((i) => ({ ...i }));
+    for (const i of store.identities) {
+      if (i.employee_id === employeeId && i.disconnected_at === null) {
+        i.disconnected_at = new Date();
+        i.disconnect_reason = "RECONNECT";
+      }
+    }
+
+    try {
+      if (store.failInsert) throw store.failInsert;
+      const clash = store.identities.some(
+        (i) =>
+          i.disconnected_at === null &&
+          (i.employee_id === employeeId ||
+            i.telegram_user_id === telegramUserId ||
+            i.private_chat_id === chatId)
+      );
+      if (clash) {
+        const err = new Error("ER_DUP_ENTRY: Duplicate entry for key 'uq_eti_active_telegram'");
+        err.code = "ER_DUP_ENTRY";
+        throw err;
+      }
+      store.identities.push({
+        employee_telegram_id: store.identities.length + 1,
+        employee_id: employeeId,
+        telegram_user_id: telegramUserId,
+        private_chat_id: chatId,
+        telegram_username: username ?? null,
+        verified_mobile: verifiedMobile,
+        connected_at: new Date(),
+        disconnected_at: null,
+        disconnect_reason: null,
+      });
+    } catch (err) {
+      // ROLLBACK - both the disconnect and the claim.
+      store.identities.length = 0;
+      store.identities.push(...snapshot);
+      undoClaim();
+      if (err.code === "ER_DUP_ENTRY") {
+        return { outcome: "DUPLICATE_IDENTITY", identityCreated: false };
+      }
       throw err;
     }
-    store.identities.push({
-      employee_telegram_id: store.identities.length + 1,
-      employee_id: employeeId,
-      telegram_user_id: telegramUserId,
-      private_chat_id: chatId,
-      telegram_username: username ?? null,
-      verified_mobile: verifiedMobile,
-      connected_at: new Date(),
-      disconnected_at: null,
-      disconnect_reason: null,
-    });
+
+    return { outcome: "VERIFIED", identityCreated: true };
   },
   async audit(entry) {
     store.audit.push(entry);
@@ -173,11 +225,66 @@ const makeTelegram = ({ botUsername = "dnds_bot", failSend = false } = {}) => ({
   },
 });
 
-const ACTIVE = { employee_id: 7, status: 1, primary_contact_number: "+91 98765 43210" };
-const RESIGNED = { employee_id: 9, status: 0, primary_contact_number: "9876500000" };
+/** Yesterday / tomorrow as YYYY-MM-DD, for the dated employment rule. */
+const dayOffset = (days) => {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+
+const ACTIVE = {
+  employee_id: 7,
+  status: 1,
+  primary_contact_number: "+91 98765 43210",
+  date_of_joining: dayOffset(-365),
+  resignation_date: null,
+};
+const RESIGNED = {
+  employee_id: 9,
+  status: 0,
+  primary_contact_number: "9876500000",
+  date_of_joining: dayOffset(-700),
+  resignation_date: dayOffset(-30),
+};
+/**
+ * THE ROW THAT MOTIVATED THIS RULE. Resigned a month ago, and `status` was
+ * never changed - which is the state most leavers in this database are in.
+ */
+const STALE_STATUS_LEAVER = {
+  employee_id: 12,
+  status: 1,
+  primary_contact_number: "+91 98765 43210",
+  date_of_joining: dayOffset(-700),
+  resignation_date: dayOffset(-30),
+};
+/** Hired, but not started yet. */
+const FUTURE_JOINER = {
+  employee_id: 13,
+  status: 1,
+  primary_contact_number: "+91 98765 43210",
+  date_of_joining: dayOffset(30),
+  resignation_date: null,
+};
+/** Resigning at the end of the month - still employed today. */
+const LEAVING_LATER = {
+  employee_id: 14,
+  status: 1,
+  primary_contact_number: "+91 98765 43210",
+  date_of_joining: dayOffset(-700),
+  resignation_date: dayOffset(15),
+};
 
 const setup = (overrides = {}) => {
-  const store = makeStore({ employees: { 7: { ...ACTIVE }, 9: { ...RESIGNED }, ...(overrides.employees || {}) } });
+  const store = makeStore({
+    employees: {
+      7: { ...ACTIVE },
+      9: { ...RESIGNED },
+      12: { ...STALE_STATUS_LEAVER },
+      13: { ...FUTURE_JOINER },
+      14: { ...LEAVING_LATER },
+      ...(overrides.employees || {}),
+    },
+  });
   const repo = makeRepo(store);
   const telegram = makeTelegram(overrides.telegram);
   const usecase = buildUsecase(repo, telegram);
@@ -272,13 +379,23 @@ describe("issuing a link", () => {
     const { usecase, store } = setup();
     await assert.rejects(
       () => usecase.startLink(9),
-      (err) => err.name === "ValidationError" && /not active/.test(err.message)
+      (err) => err.name === "ValidationError" && /not currently employed/.test(err.message)
     );
     assert.ok(store.audit.some((a) => a.event === AUDIT_EVENT.EMPLOYEE_INELIGIBLE));
   });
 
   it("refuses an employee with no usable mobile, naming the fix", async () => {
-    const { usecase } = setup({ employees: { 11: { employee_id: 11, status: 1, primary_contact_number: "123" } } });
+    const { usecase } = setup({
+      employees: {
+        11: {
+          employee_id: 11,
+          status: 1,
+          primary_contact_number: "123",
+          date_of_joining: dayOffset(-365),
+          resignation_date: null,
+        },
+      },
+    });
     await assert.rejects(
       () => usecase.startLink(11),
       (err) => err.name === "ValidationError" && /mobile number/.test(err.message)
@@ -364,7 +481,7 @@ describe("/start", () => {
   it("refuses an employee who resigned after the QR was generated", async () => {
     const { usecase, store, telegram } = setup();
     const token = tokenFrom(await usecase.startLink(7));
-    store.employees[7].status = 0;
+    store.employees[7].resignation_date = dayOffset(-1);
 
     const outcome = await usecase.onStart(token, startMessage(token));
 
@@ -484,7 +601,7 @@ describe("the shared contact", () => {
 
   it("an employee who resigned mid-flow is not connected", async () => {
     const { usecase, store, telegram } = await openSession();
-    store.employees[7].status = 0;
+    store.employees[7].resignation_date = dayOffset(-1);
 
     const outcome = await usecase.onContact(
       contactMessage({ phoneNumber: "+919876543210", userId: 4242 })
@@ -555,7 +672,15 @@ describe("one Telegram account, one employee", () => {
 
   it("REFUSES a Telegram account already linked to another employee, naming nobody", async () => {
     const ctx = setup({
-      employees: { 8: { employee_id: 8, status: 1, primary_contact_number: "9876543210" } },
+      employees: {
+        8: {
+          employee_id: 8,
+          status: 1,
+          primary_contact_number: "9876543210",
+          date_of_joining: dayOffset(-365),
+          resignation_date: null,
+        },
+      },
     });
     await connect(ctx, 7, 4242, 555, "+919876543210");
     ctx.telegram.sent.length = 0;
@@ -574,7 +699,15 @@ describe("one Telegram account, one employee", () => {
 
   it("a unique-key violation is reported as a duplicate, not as a crash", async () => {
     const ctx = setup({
-      employees: { 8: { employee_id: 8, status: 1, primary_contact_number: "9876543210" } },
+      employees: {
+        8: {
+          employee_id: 8,
+          status: 1,
+          primary_contact_number: "9876543210",
+          date_of_joining: dayOffset(-365),
+          resignation_date: null,
+        },
+      },
     });
     // An identity appears between the check and the insert - the database is
     // the authority, and its refusal must read like the check's refusal.
@@ -815,5 +948,273 @@ describe("what is audited, and what is never recorded", () => {
       AUDIT_EVENT.TOKEN_CONSUMED,
       AUDIT_EVENT.CONNECTED,
     ]);
+  });
+});
+
+/* ------------------------------------------------- dated employment rule */
+
+describe("EMPLOYED TODAY, decided from the dates and not from `status`", () => {
+  /**
+   * `new_employee.status` is maintained by hand and has been left at 1 for
+   * most leavers - which `utils/attendance_eligibility.js` documents and
+   * refuses to read for exactly that reason. These are the cases where
+   * trusting it would connect a Telegram account to somebody who left.
+   */
+  it("REFUSES A LEAVER WHOSE status IS STILL 1 - the case that motivated this", async () => {
+    const { usecase, store } = setup();
+    await assert.rejects(
+      () => usecase.startLink(12),
+      (err) => err.name === "ValidationError" && /not currently employed/.test(err.message)
+    );
+    assert.ok(store.audit.some((a) => a.event === AUDIT_EVENT.EMPLOYEE_INELIGIBLE));
+  });
+
+  it("refuses somebody whose joining date is in the future", async () => {
+    const { usecase } = setup();
+    await assert.rejects(
+      () => usecase.startLink(13),
+      (err) => err.name === "ValidationError" && /not currently employed/.test(err.message)
+    );
+  });
+
+  it("ALLOWS an employee who is employed today", async () => {
+    const { usecase } = setup();
+    const result = await usecase.startLink(7);
+    assert.equal(result.code, 200);
+  });
+
+  it("allows somebody whose resignation date is still in the future", async () => {
+    const { usecase } = setup();
+    const result = await usecase.startLink(14);
+    assert.equal(result.code, 200);
+  });
+
+  it("allows an employee with no dates recorded at all - unbounded, not excluded", async () => {
+    // 425 production rows carry no readable joining date; the shared rule
+    // treats an absent bound as unbounded, and this must not start excluding
+    // them.
+    const { usecase } = setup({
+      employees: {
+        15: { employee_id: 15, status: 1, primary_contact_number: "9876543210" },
+      },
+    });
+    assert.equal((await usecase.startLink(15)).code, 200);
+  });
+
+  it("`attendance_required = 0` DOES NOT EXCLUDE - exempt from punching is not gone", async () => {
+    const { usecase } = setup({
+      employees: {
+        16: {
+          employee_id: 16,
+          status: 1,
+          attendance_required: 0,
+          primary_contact_number: "9876543210",
+          date_of_joining: dayOffset(-100),
+          resignation_date: null,
+        },
+      },
+    });
+    assert.equal((await usecase.startLink(16)).code, 200);
+  });
+
+  it("RE-CHECKS AT /start - a resignation recorded after the QR was made", async () => {
+    const { usecase, store, telegram } = setup();
+    const token = tokenFrom(await usecase.startLink(7));
+    store.employees[7].resignation_date = dayOffset(-1);
+
+    const outcome = await usecase.onStart(token, startMessage(token));
+
+    assert.equal(outcome.outcome, "EMPLOYEE_INELIGIBLE");
+    assert.equal(telegram.sent.at(-1).text, BOT_MESSAGE.EMPLOYEE_INELIGIBLE);
+    assert.deepEqual(store.identities, []);
+  });
+
+  it("RE-CHECKS AT THE FINAL CONTACT STEP - a resignation recorded mid-flow", async () => {
+    const { usecase, store, telegram } = setup();
+    const token = tokenFrom(await usecase.startLink(7));
+    await usecase.onStart(token, startMessage(token));
+    // Resigned between scanning the code and tapping the button.
+    store.employees[7].resignation_date = dayOffset(-1);
+
+    const outcome = await usecase.onContact(
+      contactMessage({ phoneNumber: "+919876543210", userId: 4242 })
+    );
+
+    assert.equal(outcome.outcome, PENDING_OUTCOME.EMPLOYEE_INELIGIBLE);
+    assert.deepEqual(store.identities, [], "no identity is written");
+    assert.equal(telegram.sent.at(-1).text, BOT_MESSAGE.EMPLOYEE_INELIGIBLE);
+  });
+
+  it("status = 0 still refuses, even with dates that would allow it", async () => {
+    // Status can only ever REFUSE. It is unreliable in the direction of
+    // leaving leavers active, so it is never allowed to admit anybody.
+    const { usecase } = setup({
+      employees: {
+        17: {
+          employee_id: 17,
+          status: 0,
+          primary_contact_number: "9876543210",
+          date_of_joining: dayOffset(-100),
+          resignation_date: null,
+        },
+      },
+    });
+    await assert.rejects(() => usecase.startLink(17), (err) => err.name === "ValidationError");
+  });
+});
+
+/* ------------------------------------------- the atomic finalisation leg */
+
+describe("finishing the verification is atomic and idempotent", () => {
+  const openSessionFor = async (ctx, employeeId = 7) => {
+    const token = tokenFrom(await ctx.usecase.startLink(employeeId));
+    await ctx.usecase.onStart(token, startMessage(token));
+    ctx.telegram.sent.length = 0;
+    return token;
+  };
+
+  it("CONCURRENT COPIES OF THE SAME CONTACT FINALISE EXACTLY ONCE", async () => {
+    // Telegram retries, or an employee tapping the button twice. Both used to
+    // read the same open pending row - and the second one's reconnect could
+    // retire the identity the first had just created.
+    const ctx = setup();
+    await openSessionFor(ctx);
+
+    const results = await Promise.all([
+      ctx.usecase.onContact(contactMessage({ phoneNumber: "+919876543210", userId: 4242 })),
+      ctx.usecase.onContact(contactMessage({ phoneNumber: "+919876543210", userId: 4242 })),
+      ctx.usecase.onContact(contactMessage({ phoneNumber: "+919876543210", userId: 4242 })),
+    ]);
+
+    const verified = results.filter((r) => r && r.outcome === PENDING_OUTCOME.VERIFIED);
+    assert.equal(verified.length, 1, "exactly one caller finalises");
+
+    const active = ctx.store.identities.filter((i) => i.disconnected_at === null);
+    assert.equal(active.length, 1, "exactly one ACTIVE identity");
+    assert.equal(ctx.store.identities.length, 1, "and no retired stragglers");
+    assert.equal(
+      ctx.store.audit.filter((a) => a.event === AUDIT_EVENT.CONNECTED).length,
+      1,
+      "connected is audited once"
+    );
+    assert.equal(
+      ctx.telegram.sent.filter((m) => m.text === BOT_MESSAGE.CONNECTED).length,
+      1,
+      "and the employee is congratulated once"
+    );
+  });
+
+  it("the losers say NOTHING - a retry is not an error to report", async () => {
+    const ctx = setup();
+    await openSessionFor(ctx);
+    const results = await Promise.all([
+      ctx.usecase.onContact(contactMessage({ phoneNumber: "+919876543210", userId: 4242 })),
+      ctx.usecase.onContact(contactMessage({ phoneNumber: "+919876543210", userId: 4242 })),
+    ]);
+    const losers = results.filter((r) => r && r.outcome === "ALREADY_FINALISED");
+    assert.equal(losers.length, 1);
+    assert.equal(ctx.telegram.sent.length, 1, "one reply in total");
+  });
+
+  it("RECONNECT WHOSE INSERT FAILS LEAVES THE PREVIOUS IDENTITY ACTIVE", async () => {
+    // The dangerous one: the old identity used to be retired BEFORE the
+    // insert, so a failure left the employee with no Telegram at all.
+    const ctx = setup();
+    await openSessionFor(ctx);
+    await ctx.usecase.onContact(contactMessage({ phoneNumber: "+919876543210", userId: 4242 }));
+    const before = ctx.store.identities.map((i) => ({ ...i }));
+    assert.equal(before.filter((i) => i.disconnected_at === null).length, 1);
+
+    // Now the employee reconnects with a DIFFERENT Telegram account, and the
+    // insert fails for a reason that is not a duplicate.
+    ctx.store.failInsert = Object.assign(new Error("ER_LOCK_WAIT_TIMEOUT"), { code: "ER_LOCK_WAIT_TIMEOUT" });
+    const token = tokenFrom(await ctx.usecase.startLink(7));
+    await ctx.usecase.onStart(token, {
+      chat: { id: 556, type: "private" },
+      from: { id: 7777 },
+      text: `/start ${EMPLOYEE_LINK_PREFIX}${token}`,
+    });
+    const outcome = await ctx.usecase.onContact({
+      chat: { id: 556, type: "private" },
+      from: { id: 7777 },
+      contact: { phoneNumber: "+919876543210", userId: 7777 },
+    });
+
+    assert.equal(outcome.outcome, "ERROR");
+    const active = ctx.store.identities.filter((i) => i.disconnected_at === null);
+    assert.equal(active.length, 1, "the employee still has a Telegram identity");
+    assert.equal(active[0].telegram_user_id, 4242, "and it is the one they had");
+  });
+
+  it("A NON-DUPLICATE DATABASE ERROR IS NOT REPORTED AS A DUPLICATE", async () => {
+    const ctx = setup();
+    await openSessionFor(ctx);
+    ctx.store.failInsert = Object.assign(new Error("ECONNRESET"), { code: "ECONNRESET" });
+
+    const outcome = await ctx.usecase.onContact(
+      contactMessage({ phoneNumber: "+919876543210", userId: 4242 })
+    );
+
+    assert.equal(outcome.outcome, "ERROR");
+    assert.notEqual(outcome.outcome, PENDING_OUTCOME.DUPLICATE_IDENTITY);
+    const reply = ctx.telegram.sent.at(-1);
+    assert.equal(reply.text, BOT_MESSAGE.TRY_AGAIN);
+    assert.notEqual(reply.text, BOT_MESSAGE.DUPLICATE_IDENTITY);
+    assert.ok(
+      !ctx.store.audit.some((a) => a.event === AUDIT_EVENT.DUPLICATE_IDENTITY),
+      "and it is not audited as one either"
+    );
+  });
+
+  it("a failed finalisation LEAVES THE SESSION OPEN, so the button still works", async () => {
+    const ctx = setup();
+    await openSessionFor(ctx);
+    ctx.store.failInsert = Object.assign(new Error("ECONNRESET"), { code: "ECONNRESET" });
+    await ctx.usecase.onContact(contactMessage({ phoneNumber: "+919876543210", userId: 4242 }));
+
+    ctx.store.failInsert = null;
+    const retry = await ctx.usecase.onContact(
+      contactMessage({ phoneNumber: "+919876543210", userId: 4242 })
+    );
+
+    assert.equal(retry.outcome, PENDING_OUTCOME.VERIFIED);
+    assert.equal(ctx.store.identities.filter((i) => i.disconnected_at === null).length, 1);
+  });
+
+  it("a duplicate Telegram account racing the check is still a safe duplicate", async () => {
+    const ctx = setup({
+      employees: {
+        8: {
+          employee_id: 8,
+          status: 1,
+          primary_contact_number: "9876543210",
+          date_of_joining: dayOffset(-365),
+          resignation_date: null,
+        },
+      },
+    });
+    // Employee 7 connects first.
+    await openSessionFor(ctx);
+    await ctx.usecase.onContact(contactMessage({ phoneNumber: "+919876543210", userId: 4242 }));
+
+    // Employee 8 tries the same Telegram account, and the pre-check is blind
+    // to it - only the transaction sees it.
+    ctx.repo.getActiveIdentityByTelegramUser = async () => null;
+    const token = tokenFrom(await ctx.usecase.startLink(8));
+    await ctx.usecase.onStart(token, {
+      chat: { id: 557, type: "private" },
+      from: { id: 4242 },
+      text: `/start ${EMPLOYEE_LINK_PREFIX}${token}`,
+    });
+    const outcome = await ctx.usecase.onContact({
+      chat: { id: 557, type: "private" },
+      from: { id: 4242 },
+      contact: { phoneNumber: "+919876543210", userId: 4242 },
+    });
+
+    assert.equal(outcome.outcome, PENDING_OUTCOME.DUPLICATE_IDENTITY);
+    const active = ctx.store.identities.filter((i) => i.disconnected_at === null);
+    assert.equal(active.length, 1);
+    assert.equal(active[0].employee_id, 7, "employee 7 keeps their identity");
   });
 });

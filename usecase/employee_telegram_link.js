@@ -1,6 +1,7 @@
 const crypto = require("crypto");
 const logger = require("../utils/logger");
 const { normalizeIndianMobile, mobilesMatch } = require("../utils/mobile_number");
+const { employedOn } = require("../utils/attendance_eligibility");
 const {
   EMPLOYEE_LINK_PREFIX,
   LINK_TOKEN_TTL_MS,
@@ -94,9 +95,48 @@ function parseEmployeeStartPayload(text) {
   return token.length > 0 ? token : null;
 }
 
-/** An employee who may be connected at all. Checked at issue AND at verification. */
-const isEligibleEmployee = (employee) =>
-  Boolean(employee) && Number(employee.status) === 1;
+/**
+ * IS THIS PERSON EMPLOYED HERE TODAY? Checked at issue AND again at the
+ * moment of verification.
+ *
+ * `new_employee.status` IS NOT THE ANSWER, AND MUST NOT BE THE ONLY ONE.
+ * It is maintained by hand and has been left at 1 for most leavers - the
+ * reason `utils/attendance_eligibility.js` refuses to read it at all and
+ * decides from the dated employment facts instead. An employee who resigned
+ * two years ago and whose `status` was never changed would otherwise be able
+ * to generate a QR and connect a Telegram account to a live employee record.
+ *
+ * So the DATED RULE IS THE AUTHORITY, and it is the shared one - `employedOn`
+ * from that module, the same function the attendance dashboard uses, so there
+ * is no second interpretation of "employed on a date" to drift. It reads
+ * `date_of_joining` and `resignation_date`: a resignation date in the past
+ * excludes, and a joining date in the future excludes.
+ *
+ * `attendance_required` IS DELIBERATELY NOT CONSULTED. That column says
+ * somebody is exempt from punching, not that they have left; an exempt
+ * employee is still an employee and still gets Telegram. `employedOn` is
+ * exactly the half of `eligibleOn` that leaves it out.
+ *
+ * STATUS IS STILL READ, BUT ONLY TO REFUSE. Where it says 0 the record has
+ * been explicitly deactivated, and this feature should not connect anybody on
+ * the strength of dates alone in that case. It can never ADMIT somebody the
+ * dates exclude - which is the direction it is unreliable in.
+ */
+function isEligibleEmployee(employee, today) {
+  if (!employee) return false;
+  if (employee.status !== undefined && employee.status !== null && Number(employee.status) !== 1) {
+    return false;
+  }
+  return employedOn(employee, today);
+}
+
+/** Today, as the YYYY-MM-DD the dated rule compares. */
+const dateOnly = (now) => {
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+};
 
 class EmployeeTelegramLinkUsecase {
   /**
@@ -153,14 +193,16 @@ class EmployeeTelegramLinkUsecase {
   async startLink(employeeId, { actorUserId = null } = {}) {
     const employee = await this.repo.getEmployeeForVerification(employeeId);
     if (!employee) validationError("That employee does not exist.");
-    if (!isEligibleEmployee(employee)) {
+    if (!isEligibleEmployee(employee, dateOnly(this.now()))) {
       await this.repo.audit({
         employeeId,
         event: AUDIT_EVENT.EMPLOYEE_INELIGIBLE,
         actorUserId,
         detail: "token_issue",
       });
-      validationError("This employee is not active, so Telegram cannot be connected.");
+      validationError(
+        "This employee is not currently employed, so Telegram cannot be connected."
+      );
     }
     if (normalizeIndianMobile(employee.primary_contact_number) === null) {
       validationError(
@@ -334,7 +376,7 @@ class EmployeeTelegramLinkUsecase {
     // ELIGIBILITY IS RE-READ HERE, not taken from the moment the QR was made.
     // A resignation can be recorded between generating a link and scanning it.
     const employee = await this.repo.getEmployeeForVerification(employeeId);
-    if (!isEligibleEmployee(employee)) {
+    if (!isEligibleEmployee(employee, dateOnly(this.now()))) {
       await this.repo.closePending(sha256(token), PENDING_OUTCOME.EMPLOYEE_INELIGIBLE);
       await this.repo.audit({
         employeeId,
@@ -403,7 +445,7 @@ class EmployeeTelegramLinkUsecase {
 
     // 3 - eligibility again, at the last possible moment.
     const employee = await this.repo.getEmployeeForVerification(employeeId);
-    if (!isEligibleEmployee(employee)) {
+    if (!isEligibleEmployee(employee, dateOnly(this.now()))) {
       await this.repo.closePending(pending.token_hash, PENDING_OUTCOME.EMPLOYEE_INELIGIBLE);
       await this.repo.audit({
         employeeId,
@@ -415,9 +457,10 @@ class EmployeeTelegramLinkUsecase {
       return { outcome: PENDING_OUTCOME.EMPLOYEE_INELIGIBLE };
     }
 
-    // 4 - ONE TELEGRAM ACCOUNT, ONE EMPLOYEE. Never moved silently: a second
-    // employee record connecting somebody else's Telegram account is either a
-    // mistake or an attempt, and both want a human. The reply names nobody.
+    // 4 - ONE TELEGRAM ACCOUNT, ONE EMPLOYEE. Checked here so the reply is a
+    // sentence rather than a driver error - but NOT decided here: the
+    // transaction below re-reads it under a lock, and that is what actually
+    // settles a race. The reply names nobody.
     const existing = await this.repo.getActiveIdentityByTelegramUser(telegramUserId);
     if (existing && Number(existing.employee_id) !== Number(employeeId)) {
       await this.repo.closePending(pending.token_hash, PENDING_OUTCOME.DUPLICATE_IDENTITY);
@@ -445,40 +488,57 @@ class EmployeeTelegramLinkUsecase {
       return { outcome: PENDING_OUTCOME.MOBILE_MISMATCH };
     }
 
-    // ALREADY CONNECTED, SAME ACCOUNT. Re-scanning a link for an account that
-    // is already this employee's is not an error and writes nothing: the
-    // identity it would create already exists.
-    if (!existing) {
-      // RECONNECT. The same employee linking a DIFFERENT Telegram account
-      // retires the old identity rather than editing it, so the history stays
-      // readable and `uq_eti_active_employee` is satisfied by construction.
-      await this.repo.disconnectActiveIdentity(employeeId, "RECONNECT");
-
-      try {
-        await this.repo.createIdentity({
-          employeeId,
-          telegramUserId,
-          chatId,
-          username: from.username || null,
-          verifiedMobile: normalizeIndianMobile(sharedNumber),
-        });
-      } catch (err) {
-        // A unique key refused it - two verifications raced, or the account
-        // was claimed a moment ago. The database is the authority; we report
-        // the same thing we would have reported had we seen it in time.
-        await this.repo.closePending(pending.token_hash, PENDING_OUTCOME.DUPLICATE_IDENTITY);
-        await this.repo.audit({
-          employeeId,
-          event: AUDIT_EVENT.DUPLICATE_IDENTITY,
-          telegramUserId,
-          detail: "unique_violation",
-        });
-        await this._say(chatId, BOT_MESSAGE.DUPLICATE_IDENTITY);
-        return { outcome: PENDING_OUTCOME.DUPLICATE_IDENTITY };
-      }
+    // 6 - FINALISE, IN ONE TRANSACTION.
+    //
+    // Everything above this line is a read that can be repeated harmlessly.
+    // Everything that WRITES an identity happens inside
+    // `finalizeVerification`: claiming the pending row, retiring a replaced
+    // identity and inserting the new one are one unit, so two copies of the
+    // same contact message cannot both get past the claim, and a failed
+    // insert cannot leave an employee with the old identity already retired
+    // and no new one in its place.
+    let finalised;
+    try {
+      finalised = await this.repo.finalizeVerification({
+        tokenHash: pending.token_hash,
+        employeeId,
+        telegramUserId,
+        chatId,
+        username: from.username || null,
+        verifiedMobile: normalizeIndianMobile(sharedNumber),
+        verifiedOutcome: PENDING_OUTCOME.VERIFIED,
+      });
+    } catch (err) {
+      // A DATABASE FAILURE IS NOT A DUPLICATE. The transaction rolled back, so
+      // the employee still has whatever identity they had and the pending row
+      // is still open - they can tap the button again. Saying "already
+      // connected to another employee" here would be a lie that sends them to
+      // HR about a problem that does not exist.
+      this._log("FINALIZE", err.toString(), { employee_id: employeeId });
+      await this._say(chatId, BOT_MESSAGE.TRY_AGAIN);
+      return { outcome: "ERROR" };
     }
 
-    await this.repo.closePending(pending.token_hash, PENDING_OUTCOME.VERIFIED);
+    if (finalised.outcome === "DUPLICATE_IDENTITY") {
+      await this.repo.closePending(pending.token_hash, PENDING_OUTCOME.DUPLICATE_IDENTITY);
+      await this.repo.audit({
+        employeeId,
+        event: AUDIT_EVENT.DUPLICATE_IDENTITY,
+        telegramUserId,
+        detail: "unique_violation",
+      });
+      await this._say(chatId, BOT_MESSAGE.DUPLICATE_IDENTITY);
+      return { outcome: PENDING_OUTCOME.DUPLICATE_IDENTITY };
+    }
+
+    // SOMEBODY ELSE ALREADY FINISHED THIS ONE - a duplicate contact message,
+    // or a Telegram retry. The work is done and was done correctly; this
+    // caller simply says nothing and writes nothing, which is what makes the
+    // whole leg idempotent rather than merely safe.
+    if (finalised.outcome === "ALREADY_FINALISED") {
+      return { outcome: "ALREADY_FINALISED" };
+    }
+
     await this.repo.audit({
       employeeId,
       event: AUDIT_EVENT.CONNECTED,

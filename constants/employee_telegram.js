@@ -108,6 +108,14 @@ const BOT_MESSAGE = Object.freeze({
   CONNECTED: "Telegram connected successfully ✅",
   ASK_AGAIN:
     "Please tap the Share Phone Number button below to verify your number.",
+  /**
+   * Something on our side failed. It says so without inventing a reason - in
+   * particular it does NOT say the account belongs to somebody else, which is
+   * what a database failure used to be reported as.
+   */
+  TRY_AGAIN:
+    "Something went wrong on our side and your Telegram was not connected. " +
+    "Please tap the Share Phone Number button again in a moment.",
 });
 
 /** The Share Phone Number keyboard, as `messaging-api-telegram` expresses it. */
