@@ -30,10 +30,11 @@ const { MAPPING_TYPES } = require("../constants/telegram_group_mapping");
  * is governed by the same two keys as the group - a third key would be one
  * more thing to grant before a screen that is already behind a gate works.
  *
- * `matched-employees` IS THE ONE ENDPOINT THAT NAMES PEOPLE, so it is also
- * the one that resolves the caller's live employee branch scope. The counts
- * elsewhere are company-wide on purpose: a number discloses nobody, and a
- * manager checking a rule needs the real total.
+ * BOTH READS RESOLVE THE CALLER'S LIVE EMPLOYEE BRANCH SCOPE, because every
+ * employee-derived number is scoped and not merely the names. A count of
+ * other branches' staff is still information about other branches' staff.
+ * The mapping RULES are company-wide and returned in full to anybody who may
+ * open the screen; only the employee arithmetic narrows.
  *
  * The REST shape is `routes/remarks_master.js`, the master CRUD this screen
  * is modelled on. The PERMISSION MIDDLEWARE is `routes/biomax_device.js`:
@@ -189,7 +190,14 @@ class TelegramGroupRegistryRoutes {
       async (req, res) => {
         try {
           const id = parseInt(req.params.telegram_group_id, 10);
-          res.json({ code: 200, data: await this.mapping.getMappings(id), mapping_types: MAPPING_TYPES });
+          // The RULES are company-wide and returned in full; the employee
+          // COUNTS beside them are the caller's own.
+          const scope = await this.scopeFor(req);
+          res.json({
+            code: 200,
+            data: await this.mapping.getMappings(id, { scope }),
+            mapping_types: MAPPING_TYPES,
+          });
         } catch (err) {
           this.fail(res, err);
         }
@@ -256,9 +264,7 @@ class TelegramGroupRegistryRoutes {
         try {
           this.validate(req.query, { mapping_id: Joi.any().optional() });
           const id = parseInt(req.params.telegram_group_id, 10);
-          const scope = this.branch
-            ? await this.branch.resolve(req)
-            : { kind: "NONE", store_ids: [] };
+          const scope = await this.scopeFor(req);
           res.json({
             code: 200,
             data: await this.mapping.getMatchedEmployees(id, {
@@ -281,6 +287,20 @@ class TelegramGroupRegistryRoutes {
    * way: honour `err.httpCode` first, and hand everything else to the shared
    * responder unchanged.
    */
+  /**
+   * THE CALLER'S EMPLOYEE SCOPE, resolved by the server and never by the
+   * request. Both mapping reads need it now - the counts are scoped, not
+   * only the names - so it is resolved in one place rather than twice.
+   *
+   * WITHOUT THE RESOLVER WIRED THIS IS `NONE`, which counts nothing and
+   * lists nobody. Failing closed, so a future wiring mistake cannot quietly
+   * publish other branches' staffing.
+   */
+  async scopeFor(req) {
+    if (!this.branch) return { kind: "NONE", store_ids: [] };
+    return this.branch.resolve(req);
+  }
+
   fail(res, err) {
     if (err && err.httpCode) {
       res.status(err.httpCode).json({ code: err.httpCode, msg: err.message });

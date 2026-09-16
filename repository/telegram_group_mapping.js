@@ -16,13 +16,18 @@ const TABLE = "telegram_group_mapping";
  *
  * ===================================== A BOUNDED NUMBER OF QUERIES =========
  *
- * The mapping screen for one group is FOUR reads, whatever it contains:
+ * The mapping screen for one group is AT MOST SIX reads, whatever it
+ * contains:
  *
- *   1. the group's mapping rows
- *   2. one read per master actually referenced, to resolve target names and
- *      state - at most three, and only for the types present
- *   3. ONE employee snapshot
- *   4. ONE active-Telegram-identity read over that snapshot
+ *   1  the group's mapping rows
+ *  <=3 one read per master actually referenced, to resolve target names and
+ *      state - only for the types present, so a group using outlets alone
+ *      costs one
+ *   1  ONE employee snapshot
+ *   1  ONE active-Telegram-identity read over that snapshot
+ *
+ * `matched-employees` is at most four on the same basis - it resolves no
+ * masters - plus one `getByIdForGroup` when `?mapping_id=` is given.
  *
  * It is deliberately NOT a query per mapping and NOT a query per employee.
  * Matching a few hundred employees against a handful of rules is arithmetic;

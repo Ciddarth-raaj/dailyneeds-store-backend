@@ -93,6 +93,24 @@ const MAPPING_TARGET_SOURCE = {
  * into "0 employees" would hide real misconfiguration behind an ordinary
  * number, so they are separate states and the UI renders them differently.
  */
+/**
+ * WHOSE EMPLOYEES THE NUMBERS ON THIS SCREEN COUNT.
+ *
+ * `ALL` is the company. `BRANCH` means the caller may only see employees in
+ * their own branch scope, so every employee-derived number - the per-rule
+ * count, the union, the connected count and the list - counts only those.
+ *
+ * IT REPLACES `scope_limited`, WHICH ANSWERED A QUESTION NOBODY MAY ASK ANY
+ * MORE. That flag meant "your list is smaller than the company-wide total",
+ * which required computing a company-wide total for somebody not entitled to
+ * one. This says what the numbers ARE rather than what they are not, and it
+ * needs no forbidden figure to derive.
+ */
+const COUNTS_SCOPE = {
+  ALL: "ALL",
+  BRANCH: "BRANCH",
+};
+
 const TARGET_STATE = {
   /** ALL_EMPLOYEES: there is no target to resolve. */
   NOT_APPLICABLE: "NOT_APPLICABLE",
@@ -120,6 +138,7 @@ const MAPPING_MESSAGES = {
 };
 
 module.exports = {
+  COUNTS_SCOPE,
   MAPPING_TYPE,
   MAPPING_TYPES,
   MAPPING_TYPE_LABEL,

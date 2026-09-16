@@ -7,8 +7,8 @@
  *
  *   EMPLOYMENT IS DATED, NOT `status`. A resigned employee carrying
  *   `status = 1` is the production trap this whole file exists to pin.
- *   COUNTS ARE GLOBAL, NAMES ARE SCOPED. The same rule shows 34 to everybody
- *   and lists 12 to a branch manager.
+ *   THE RULE IS GLOBAL, EVERY EMPLOYEE NUMBER IS SCOPED. A branch manager
+ *   sees the same rule as HR and counts only their own branch's staff.
  *   A MISSING TARGET IS NOT A ZERO COUNT. They are different states.
  *   NOTHING IS INFERRED FROM A GROUP'S NAME.
  */
@@ -21,6 +21,7 @@ const {
   TARGET_STATE,
   TARGET_WARNING,
   MAPPING_MESSAGES,
+  COUNTS_SCOPE,
 } = require("../constants/telegram_group_mapping");
 const { EMPLOYEE_BRANCH_SCOPE } = require("../utils/employee_branch_scope");
 
@@ -258,7 +259,7 @@ describe("employment is DATED, never `status`", () => {
 
   const countFor = async (employee) => {
     const usecase = build({ mappings: outletMapping, employees: [employee], targets });
-    const result = await usecase.getMappings(10);
+    const result = await usecase.getMappings(10, { scope: ALL_BRANCHES });
     return result.mappings[0].matched_employees;
   };
 
@@ -298,7 +299,7 @@ describe("employment is DATED, never `status`", () => {
       mappings: [mapping(1, MAPPING_TYPE.ALL_EMPLOYEES)],
       employees: [emp({ employee_id: 1 }), emp({ employee_id: 2, resignation_date: "2020-06-01" })],
     });
-    const result = await usecase.getMappings(10);
+    const result = await usecase.getMappings(10, { scope: ALL_BRANCHES });
     assert.equal(result.mappings[0].matched_employees, 1);
     assert.equal(result.total_matched, 1);
   });
@@ -314,7 +315,7 @@ describe("employment is DATED, never `status`", () => {
       makeRegistry(),
       { now: () => new Date("2026-09-16T19:00:00Z") }
     );
-    const result = await late.getMappings(10);
+    const result = await late.getMappings(10, { scope: ALL_BRANCHES });
     assert.equal(result.as_of_date, "2026-09-17");
     assert.equal(result.mappings[0].matched_employees, 1);
   });
@@ -337,14 +338,14 @@ describe("several mappings", () => {
 
   it("is OR, not AND", async () => {
     const usecase = build({ mappings, employees, targets });
-    const result = await usecase.getMappings(10);
+    const result = await usecase.getMappings(10, { scope: ALL_BRANCHES });
     // 1 and 2 by outlet, 1 and 3 by designation -> {1,2,3}, not just {1}.
     assert.equal(result.total_matched, 3);
   });
 
   it("counts each rule independently, even where they overlap", async () => {
     const usecase = build({ mappings, employees, targets });
-    const result = await usecase.getMappings(10);
+    const result = await usecase.getMappings(10, { scope: ALL_BRANCHES });
     assert.equal(result.mappings[0].matched_employees, 2);
     assert.equal(result.mappings[1].matched_employees, 2);
     assert.equal(result.total_matched, 3, "2 + 2 is 4 rows but 3 people");
@@ -391,7 +392,7 @@ describe("a target's lifecycle", () => {
       employees,
       targets: { OUTLET: { 5: { name: "ECR", active: true } } },
     });
-    const row = (await usecase.getMappings(10)).mappings[0];
+    const row = (await usecase.getMappings(10, { scope: ALL_BRANCHES })).mappings[0];
     assert.equal(row.target_state, TARGET_STATE.ACTIVE);
     assert.equal(row.target_warning, null);
     assert.equal(row.target_name, "ECR");
@@ -405,7 +406,7 @@ describe("a target's lifecycle", () => {
       employees,
       targets: { OUTLET: { 5: { name: "ECR (closed)", active: false } } },
     });
-    const row = (await usecase.getMappings(10)).mappings[0];
+    const row = (await usecase.getMappings(10, { scope: ALL_BRANCHES })).mappings[0];
     assert.equal(row.target_state, TARGET_STATE.INACTIVE);
     assert.equal(row.target_warning, TARGET_WARNING.INACTIVE);
     assert.equal(row.matched_employees, 1, "the stored target id still matches");
@@ -417,7 +418,7 @@ describe("a target's lifecycle", () => {
       employees,
       targets: { OUTLET: {} },
     });
-    const row = (await usecase.getMappings(10)).mappings[0];
+    const row = (await usecase.getMappings(10, { scope: ALL_BRANCHES })).mappings[0];
     assert.equal(row.target_state, TARGET_STATE.MISSING);
     assert.equal(row.target_warning, TARGET_WARNING.MISSING);
     assert.notEqual(TARGET_WARNING.MISSING, TARGET_WARNING.INACTIVE);
@@ -430,7 +431,7 @@ describe("a target's lifecycle", () => {
       employees: [emp({ employee_id: 1, store_id: 99 })],
       targets: { OUTLET: { 5: { name: "ECR", active: true } } },
     });
-    const row = (await usecase.getMappings(10)).mappings[0];
+    const row = (await usecase.getMappings(10, { scope: ALL_BRANCHES })).mappings[0];
     assert.equal(row.matched_employees, 0);
     assert.equal(row.target_warning, null);
     assert.equal(row.target_state, TARGET_STATE.ACTIVE);
@@ -438,7 +439,7 @@ describe("a target's lifecycle", () => {
 
   it("ALL_EMPLOYEES has no target to be broken", async () => {
     const usecase = build({ mappings: [mapping(1, MAPPING_TYPE.ALL_EMPLOYEES)], employees });
-    const row = (await usecase.getMappings(10)).mappings[0];
+    const row = (await usecase.getMappings(10, { scope: ALL_BRANCHES })).mappings[0];
     assert.equal(row.target_state, TARGET_STATE.NOT_APPLICABLE);
     assert.equal(row.target_warning, null);
     assert.equal(row.target_id, null);
@@ -455,7 +456,7 @@ describe("an inactive Telegram group", () => {
       { mappings: [mapping(1, MAPPING_TYPE.ALL_EMPLOYEES)], employees: [emp()] },
       inactive
     );
-    const result = await usecase.getMappings(10);
+    const result = await usecase.getMappings(10, { scope: ALL_BRANCHES });
     assert.equal(result.mappings.length, 1);
     assert.equal(result.group.is_active, false);
     assert.match(result.group.inactive_notice, /No Telegram membership action will be performed/);
@@ -470,72 +471,170 @@ describe("an inactive Telegram group", () => {
 
   it("an ACTIVE group carries no banner", async () => {
     const usecase = build({ mappings: [], employees: [] });
-    assert.equal((await usecase.getMappings(10)).group.inactive_notice, null);
+    assert.equal((await usecase.getMappings(10, { scope: ALL_BRANCHES })).group.inactive_notice, null);
   });
 });
 
 /* ============================================================= scope */
 
-describe("global counts, scoped names", () => {
+describe("the rule is global, every employee number is scoped", () => {
   const employees = [
-    emp({ employee_id: 1, store_id: 5, employee_name: "Anitha" }),
-    emp({ employee_id: 2, store_id: 8, employee_name: "Bala" }),
-    emp({ employee_id: 3, store_id: 8, employee_name: "Chitra" }),
+    emp({ employee_id: 1, store_id: 5, employee_name: "Anitha", designation_id: 7, department_id: 3 }),
+    emp({ employee_id: 2, store_id: 8, employee_name: "Bala", designation_id: 7, department_id: 3 }),
+    emp({ employee_id: 3, store_id: 8, employee_name: "Chitra", designation_id: 9, department_id: 4 }),
   ];
-  const mappings = [mapping(1, MAPPING_TYPE.ALL_EMPLOYEES)];
+  const all = [mapping(1, MAPPING_TYPE.ALL_EMPLOYEES)];
 
-  it("HR/Admin sees every name", async () => {
-    const usecase = build({ mappings, employees });
-    const result = await usecase.getMatchedEmployees(10, { scope: ALL_BRANCHES });
+  it("HR/Admin counts the company", async () => {
+    const result = await build({ mappings: all, employees }).getMappings(10, { scope: ALL_BRANCHES });
+    assert.equal(result.mappings[0].matched_employees, 3);
     assert.equal(result.total_matched, 3);
-    assert.equal(result.visible_count, 3);
-    assert.equal(result.scope_limited, false);
+    assert.equal(result.counts_scope, COUNTS_SCOPE.ALL);
   });
 
-  it("a branch manager sees the SAME total but only their own names", async () => {
-    const usecase = build({ mappings, employees });
-    const result = await usecase.getMatchedEmployees(10, { scope: ownBranches([8]) });
-    assert.equal(result.total_matched, 3, "the company-wide count must not shrink");
-    assert.equal(result.visible_count, 2);
-    assert.equal(result.scope_limited, true);
-    assert.deepEqual(result.employees.map((e) => e.employee_name), ["Bala", "Chitra"]);
-  });
-
-  it("the count is identical for the manager and for HR", async () => {
-    const hr = await build({ mappings, employees }).getMatchedEmployees(10, { scope: ALL_BRANCHES });
-    const mgr = await build({ mappings, employees }).getMatchedEmployees(10, {
-      scope: ownBranches([5]),
+  it("a branch manager counts ONLY their own branch", async () => {
+    const result = await build({ mappings: all, employees }).getMappings(10, {
+      scope: ownBranches([8]),
     });
-    assert.equal(hr.total_matched, mgr.total_matched);
-    assert.notEqual(hr.visible_count, mgr.visible_count);
+    assert.equal(result.mappings[0].matched_employees, 2, "not the company's 3");
+    assert.equal(result.total_matched, 2);
+    assert.equal(result.counts_scope, COUNTS_SCOPE.BRANCH);
   });
 
-  it("a NONE scope returns no names at all - it fails CLOSED", async () => {
-    const usecase = build({ mappings, employees });
-    const result = await usecase.getMatchedEmployees(10, {
-      scope: { kind: EMPLOYEE_BRANCH_SCOPE.NONE, store_ids: [] },
+  it("NO company-wide figure appears ANYWHERE in a manager's response", async () => {
+    // The whole point of the correction: the forbidden number is not hidden,
+    // it is never computed. Serialize the entire body and look for it.
+    const result = await build({ mappings: all, employees }).getMappings(10, {
+      scope: ownBranches([8]),
     });
-    assert.equal(result.employees.length, 0);
-    assert.equal(result.total_matched, 3, "the count is still the truth");
+    const numbers = JSON.stringify(result).match(/\d+/g).map(Number);
+    assert.ok(!numbers.includes(3), "the company-wide count of 3 must not appear");
+    assert.ok(!("scope_limited" in result), "the stale flag is gone");
+    assert.ok(!("visible_count" in result), "there is no total to be a subset of");
   });
 
-  it("a missing scope argument returns no names, rather than all of them", async () => {
-    const usecase = build({ mappings, employees });
-    assert.equal((await usecase.getMatchedEmployees(10, {})).employees.length, 0);
-    assert.equal((await usecase.getMatchedEmployees(10)).employees.length, 0);
+  it("ALL_EMPLOYEES counts only the manager's currently employed staff", async () => {
+    const withLeaver = [
+      ...employees,
+      emp({ employee_id: 4, store_id: 8, resignation_date: "2026-09-15" }),
+      emp({ employee_id: 5, store_id: 5, employee_name: "Elsewhere" }),
+    ];
+    const result = await build({ mappings: all, employees: withLeaver }).getMappings(10, {
+      scope: ownBranches([8]),
+    });
+    // Branch 8 has Bala, Chitra and a leaver. Employment and scope BOTH apply.
+    assert.equal(result.total_matched, 2);
   });
 
-  it("an employee with no branch is not visible to a branch-scoped caller", async () => {
-    const usecase = build({ mappings, employees: [emp({ employee_id: 9, store_id: null })] });
-    const result = await usecase.getMatchedEmployees(10, { scope: ownBranches([5]) });
-    assert.equal(result.employees.length, 0);
-    assert.equal(result.total_matched, 1);
+  it("an OUTLET rule for ANOTHER branch reveals no count from it", async () => {
+    // The manager sees the rule names outlet 5, and that it counts nobody
+    // they may see. They never learn outlet 5 has one employee.
+    const result = await build({
+      mappings: [mapping(1, MAPPING_TYPE.OUTLET, 5)],
+      employees,
+      targets: { OUTLET: { 5: { name: "ECR", active: true } } },
+    }).getMappings(10, { scope: ownBranches([8]) });
+
+    assert.equal(result.mappings[0].matched_employees, 0);
+    assert.equal(result.mappings[0].target_name, "ECR", "the RULE is still shown in full");
+    assert.equal(result.mappings[0].target_state, TARGET_STATE.ACTIVE);
   });
 
-  it("the mapping screen's counts do not vary by actor at all", async () => {
-    // getMappings takes no scope: there are no names in it to scope.
-    const result = await build({ mappings, employees }).getMappings(10);
-    assert.equal(result.total_matched, 3);
+  it("a DESIGNATION rule spanning outlets exposes only the manager's own", async () => {
+    // Designation 7 is held by Anitha (branch 5) and Bala (branch 8).
+    const result = await build({
+      mappings: [mapping(1, MAPPING_TYPE.DESIGNATION, 7)],
+      employees,
+      targets: { DESIGNATION: { 7: { name: "Cashier", active: true } } },
+    }).getMappings(10, { scope: ownBranches([8]) });
+    assert.equal(result.mappings[0].matched_employees, 1, "not the company's 2");
+    assert.equal(result.mappings[0].target_name, "Cashier");
+  });
+
+  it("a DEPARTMENT rule spanning outlets exposes only the manager's own", async () => {
+    // Department 3 is Anitha (branch 5) and Bala (branch 8).
+    const result = await build({
+      mappings: [mapping(1, MAPPING_TYPE.DEPARTMENT, 3)],
+      employees,
+      targets: { DEPARTMENT: { 3: { name: "Operations", active: true } } },
+    }).getMappings(10, { scope: ownBranches([8]) });
+    assert.equal(result.mappings[0].matched_employees, 1);
+  });
+
+  it("the MAPPING RULES are identical for HR and for the manager", async () => {
+    const mappings = [
+      mapping(1, MAPPING_TYPE.ALL_EMPLOYEES),
+      mapping(2, MAPPING_TYPE.OUTLET, 5),
+      mapping(3, MAPPING_TYPE.DESIGNATION, 7),
+    ];
+    const targets = {
+      OUTLET: { 5: { name: "ECR", active: true } },
+      DESIGNATION: { 7: { name: "Cashier", active: true } },
+    };
+    const strip = (r) =>
+      r.mappings.map((m) => ({
+        id: m.telegram_group_mapping_id,
+        type: m.mapping_type,
+        target_id: m.target_id,
+        target_name: m.target_name,
+        target_state: m.target_state,
+        target_warning: m.target_warning,
+      }));
+
+    const hr = await build({ mappings, employees, targets }).getMappings(10, { scope: ALL_BRANCHES });
+    const mgr = await build({ mappings, employees, targets }).getMappings(10, {
+      scope: ownBranches([8]),
+    });
+    assert.deepEqual(strip(mgr), strip(hr), "configuration is not branch-scoped, only its arithmetic");
+    assert.notDeepEqual(
+      mgr.mappings.map((m) => m.matched_employees),
+      hr.mappings.map((m) => m.matched_employees)
+    );
+  });
+
+  it("a NONE scope counts NOTHING and lists nobody", async () => {
+    const none = { kind: EMPLOYEE_BRANCH_SCOPE.NONE, store_ids: [] };
+    const mappingsResult = await build({ mappings: all, employees }).getMappings(10, { scope: none });
+    assert.equal(mappingsResult.total_matched, 0);
+    assert.equal(mappingsResult.total_connected, 0);
+    assert.equal(mappingsResult.mappings[0].matched_employees, 0);
+
+    const list = await build({ mappings: all, employees }).getMatchedEmployees(10, { scope: none });
+    assert.equal(list.employees.length, 0);
+    assert.equal(list.total_matched, 0);
+  });
+
+  it("a missing scope argument counts nothing, rather than everything", async () => {
+    assert.equal((await build({ mappings: all, employees }).getMappings(10, {})).total_matched, 0);
+    assert.equal((await build({ mappings: all, employees }).getMappings(10)).total_matched, 0);
+    assert.equal(
+      (await build({ mappings: all, employees }).getMatchedEmployees(10, {})).employees.length,
+      0
+    );
+  });
+
+  it("an OWN_BRANCHES scope with no branches counts nothing", async () => {
+    const result = await build({ mappings: all, employees }).getMappings(10, {
+      scope: ownBranches([]),
+    });
+    assert.equal(result.total_matched, 0);
+  });
+
+  it("an employee with no branch is invisible to a branch-scoped caller", async () => {
+    const result = await build({
+      mappings: all,
+      employees: [emp({ employee_id: 9, store_id: null })],
+    }).getMappings(10, { scope: ownBranches([5]) });
+    assert.equal(result.total_matched, 0, "there is no branch on which they could be authorized");
+  });
+
+  it("the employee LIST and the COUNT agree for the same caller", async () => {
+    const scope = ownBranches([8]);
+    const counts = await build({ mappings: all, employees }).getMappings(10, { scope });
+    const list = await build({ mappings: all, employees }).getMatchedEmployees(10, { scope });
+    assert.equal(counts.total_matched, list.total_matched);
+    assert.equal(list.total_matched, list.employees.length);
+    assert.deepEqual(list.employees.map((e) => e.employee_name), ["Bala", "Chitra"]);
   });
 });
 
@@ -554,16 +653,46 @@ describe("the Telegram Connected column", () => {
   });
 
   it("does not change who matches the mapping", async () => {
-    const connectedNone = await build({ mappings, employees, connected: [] }).getMappings(10);
-    const connectedAll = await build({ mappings, employees, connected: [1, 2] }).getMappings(10);
+    const connectedNone = await build({ mappings, employees, connected: [] }).getMappings(10, { scope: ALL_BRANCHES });
+    const connectedAll = await build({ mappings, employees, connected: [1, 2] }).getMappings(10, { scope: ALL_BRANCHES });
     assert.equal(connectedNone.total_matched, connectedAll.total_matched);
     assert.equal(connectedNone.mappings[0].matched_employees, connectedAll.mappings[0].matched_employees);
   });
 
   it("reports how many of the population are ready", async () => {
-    const result = await build({ mappings, employees, connected: [2] }).getMappings(10);
+    const result = await build({ mappings, employees, connected: [2] }).getMappings(10, { scope: ALL_BRANCHES });
     assert.equal(result.total_matched, 2);
     assert.equal(result.total_connected, 1);
+  });
+
+  it("the CONNECTED count is branch-scoped too", async () => {
+    // "9 of the 34 Store Managers are on Telegram" is a fact about other
+    // branches' readiness, so it narrows with everything else.
+    const branched = [
+      emp({ employee_id: 1, store_id: 5 }),
+      emp({ employee_id: 2, store_id: 8 }),
+      emp({ employee_id: 3, store_id: 8 }),
+    ];
+    const hr = await build({ mappings, employees: branched, connected: [1, 2, 3] }).getMappings(10, {
+      scope: ALL_BRANCHES,
+    });
+    const mgr = await build({ mappings, employees: branched, connected: [1, 2, 3] }).getMappings(10, {
+      scope: ownBranches([8]),
+    });
+    assert.equal(hr.total_connected, 3);
+    assert.equal(mgr.total_connected, 2, "not the company's 3");
+  });
+
+  it("the connected lookup stays bulk under scoping", async () => {
+    const repo = makeRepo({
+      mappings,
+      employees: Array.from({ length: 50 }, (_, i) => emp({ employee_id: i + 1, store_id: 8 })),
+      connected: [1, 2],
+    });
+    const usecase = buildMapping(repo, makeRegistry(), { now: () => NOW });
+    await usecase.getMappings(10, { scope: ownBranches([8]) });
+    assert.equal(repo.calls.connected, 1, "one identity read, never one per employee");
+    assert.equal(repo.calls.snapshot, 1);
   });
 });
 
@@ -626,13 +755,13 @@ describe("what a matched employee row may contain", () => {
       mappings: [mapping(1, MAPPING_TYPE.ALL_EMPLOYEES)],
       employees: [emp({ employee_name: "Raj Kumar" })],
     });
-    const body = JSON.stringify(await usecase.getMappings(10));
+    const body = JSON.stringify(await usecase.getMappings(10, { scope: ALL_BRANCHES }));
     assert.ok(!body.includes("Raj Kumar"), "the rules screen shows counts, not people");
   });
 
   it("the group summary carries no chat id", async () => {
     const usecase = build({ mappings: [], employees: [] }, { ...GROUP, chat_id: "-1001234567890" });
-    const body = JSON.stringify((await usecase.getMappings(10)).group);
+    const body = JSON.stringify((await usecase.getMappings(10, { scope: ALL_BRANCHES })).group);
     assert.ok(!body.includes("-1001234567890"));
   });
 });
@@ -648,7 +777,7 @@ describe("a group's NAME creates no membership", () => {
         emp({ employee_id: 2, designation_name: "Cashier", designation_id: 7 }),
       ],
     });
-    const result = await usecase.getMappings(10);
+    const result = await usecase.getMappings(10, { scope: ALL_BRANCHES });
     assert.equal(result.group.group_name, "Cashiers");
     assert.equal(result.mappings.length, 0);
     assert.equal(result.total_matched, 0);
@@ -665,7 +794,7 @@ describe("a group's NAME creates no membership", () => {
       mappings: [],
       employees: [emp({ employee_id: 1, store_id: 9 }), emp({ employee_id: 2, store_id: 9 })],
     });
-    assert.equal((await usecase.getMappings(10)).total_matched, 0);
+    assert.equal((await usecase.getMappings(10, { scope: ALL_BRANCHES })).total_matched, 0);
   });
 
   it("the category and Used For text create nothing", async () => {
@@ -673,13 +802,41 @@ describe("a group's NAME creates no membership", () => {
       { mappings: [], employees: [emp()] },
       { ...GROUP, category: "HR", used_for: "All cashiers and store managers" }
     );
-    assert.equal((await usecase.getMappings(10)).total_matched, 0);
+    assert.equal((await usecase.getMappings(10, { scope: ALL_BRANCHES })).total_matched, 0);
   });
 });
 
 /* ======================================================== performance */
 
 describe("no N+1", () => {
+  it("the Map screen is AT MOST SIX reads: 1 mappings + <=3 masters + 1 snapshot + 1 identity", async () => {
+    // The bound the comments now state. `resolveTargets` batches by MASTER,
+    // so three types present is three reads and one type present is one -
+    // never one per mapping.
+    const repo = makeRepo({
+      mappings: [
+        mapping(1, MAPPING_TYPE.ALL_EMPLOYEES),
+        mapping(2, MAPPING_TYPE.OUTLET, 1),
+        mapping(3, MAPPING_TYPE.OUTLET, 2),
+        mapping(4, MAPPING_TYPE.DESIGNATION, 3),
+        mapping(5, MAPPING_TYPE.DEPARTMENT, 3),
+      ],
+      employees: [emp()],
+      targets: {
+        OUTLET: { 1: { name: "A", active: true }, 2: { name: "B", active: true } },
+        DESIGNATION: { 3: { name: "C", active: true } },
+        DEPARTMENT: { 3: { name: "D", active: true } },
+      },
+    });
+    const usecase = buildMapping(repo, makeRegistry(), { now: () => NOW });
+    await usecase.getMappings(10, { scope: ALL_BRANCHES });
+
+    assert.equal(repo.calls.byGroup, 1);
+    assert.equal(repo.calls.resolveTargets, 1, "one batched call covering every master");
+    assert.equal(repo.calls.snapshot, 1);
+    assert.equal(repo.calls.connected, 1);
+  });
+
   it("one employee snapshot and one identity read, whatever the mapping count", async () => {
     const employees = Array.from({ length: 200 }, (_, i) =>
       emp({ employee_id: i + 1, store_id: (i % 5) + 1, designation_id: (i % 7) + 1 })
@@ -702,7 +859,7 @@ describe("no N+1", () => {
       },
     });
     const usecase = buildMapping(repo, makeRegistry(), { now: () => NOW });
-    const result = await usecase.getMappings(10);
+    const result = await usecase.getMappings(10, { scope: ALL_BRANCHES });
 
     assert.equal(repo.calls.snapshot, 1, "one employee read for five mappings");
     assert.equal(repo.calls.connected, 1, "one identity read for 200 employees");
@@ -717,7 +874,7 @@ describe("no N+1", () => {
       targets: { OUTLET: { 5: { name: "ECR", active: true } } },
     });
     const usecase = buildMapping(repo, makeRegistry(), { now: () => NOW });
-    const result = await usecase.getMappings(10);
+    const result = await usecase.getMappings(10, { scope: ALL_BRANCHES });
     assert.equal(repo.calls.snapshot, 1);
     assert.equal(result.as_of_date, TODAY);
   });

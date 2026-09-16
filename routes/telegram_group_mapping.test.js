@@ -40,8 +40,8 @@ const mappingUsecase = () => {
   const calls = [];
   return {
     calls,
-    getMappings: async (id) => {
-      calls.push({ fn: "getMappings", id });
+    getMappings: async (id, opts) => {
+      calls.push({ fn: "getMappings", id, opts });
       return { group: {}, mappings: [], total_matched: 0 };
     },
     addMapping: async (id, body, actor) => {
@@ -54,7 +54,7 @@ const mappingUsecase = () => {
     },
     getMatchedEmployees: async (id, opts) => {
       calls.push({ fn: "getMatchedEmployees", id, opts });
-      return { employees: [], total_matched: 0, visible_count: 0 };
+      return { employees: [], total_matched: 0, counts_scope: "ALL" };
     },
   };
 };
@@ -138,7 +138,8 @@ describe("the mapping list", () => {
     );
     assert.equal(res.body.code, 200);
     assert.deepEqual(res.body.mapping_types, MAPPING_TYPES);
-    assert.deepEqual(mapping.calls[0], { fn: "getMappings", id: 10 });
+    assert.equal(mapping.calls[0].fn, "getMappings");
+    assert.equal(mapping.calls[0].id, 10);
   });
 
   it("answers 404 as a not-found, not a 500", async () => {
@@ -192,6 +193,47 @@ describe("deleting a mapping", () => {
       res
     );
     assert.deepEqual(mapping.calls[0], { fn: "deleteMapping", id: 10, mappingId: 3 });
+  });
+});
+
+describe("the mapping list is scoped too", () => {
+  it("resolves the caller's scope and hands it to the usecase", async () => {
+    // The counts on the mapping rows are employee-derived, so this endpoint
+    // needs the scope exactly as matched-employees does.
+    const mapping = mappingUsecase();
+    const routes = routesFor(mapping, {
+      resolve: async () => ({ kind: "OWN_BRANCHES", store_ids: [8] }),
+    });
+    await find(routes, "GET", "/mappings").handler(
+      { params: { telegram_group_id: "10" }, query: {} },
+      fakeRes()
+    );
+    assert.deepEqual(mapping.calls[0].opts.scope, { kind: "OWN_BRANCHES", store_ids: [8] });
+  });
+
+  it("FAILS CLOSED when no resolver is wired", async () => {
+    const mapping = mappingUsecase();
+    const routes = routesFor(mapping, null);
+    await find(routes, "GET", "/mappings").handler(
+      { params: { telegram_group_id: "10" }, query: {} },
+      fakeRes()
+    );
+    assert.equal(mapping.calls[0].opts.scope.kind, "NONE");
+  });
+
+  it("both reads resolve the scope the same way", async () => {
+    const seen = [];
+    const mapping = mappingUsecase();
+    const routes = routesFor(mapping, {
+      resolve: async () => {
+        seen.push(1);
+        return { kind: "OWN_BRANCHES", store_ids: [8] };
+      },
+    });
+    await find(routes, "GET", "/mappings").handler({ params: { telegram_group_id: "10" }, query: {} }, fakeRes());
+    await find(routes, "GET", "matched-employees").handler({ params: { telegram_group_id: "10" }, query: {} }, fakeRes());
+    assert.equal(seen.length, 2, "one shared resolution path, used by both");
+    assert.deepEqual(mapping.calls[0].opts.scope, mapping.calls[1].opts.scope);
   });
 });
 

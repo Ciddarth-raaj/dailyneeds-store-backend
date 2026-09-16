@@ -9,6 +9,7 @@ const {
   TARGET_STATE,
   TARGET_WARNING,
   MAPPING_MESSAGES,
+  COUNTS_SCOPE,
 } = require("../constants/telegram_group_mapping");
 const { EMPLOYEE_BRANCH_SCOPE } = require("../utils/employee_branch_scope");
 
@@ -32,14 +33,26 @@ const { EMPLOYEE_BRANCH_SCOPE } = require("../utils/employee_branch_scope");
  * typed for humans to read, and inferring staff from prose is how a group
  * ends up containing people nobody chose. Only a mapping row maps.
  *
- * ================================== COUNTS ARE GLOBAL, NAMES ARE NOT =======
+ * ============ THE RULE IS GLOBAL. EVERY EMPLOYEE NUMBER IS SCOPED. =========
  *
- * The matched count is a company-wide fact about the configuration, and it is
- * the same number for everybody: a store manager checking whether an Outlet
- * rule is right needs to know it covers 34 people, and a number discloses
- * nobody. The NAMES behind it obey the existing employee branch scope, live -
- * so the same screen can honestly say "34 match, 12 are visible to you"
- * rather than either lying about the total or listing the company.
+ * A mapping row is configuration and is shown in full to anybody who may open
+ * the screen: a branch manager sees that the rule is "All Employees" or
+ * "Designation: Store Manager", exactly as HR does. What they do NOT see is
+ * anybody else's staff, in any form.
+ *
+ * THAT INCLUDES COUNTS, AND THIS IS A CORRECTION. An earlier revision showed
+ * the company-wide total to everybody on the grounds that a number names
+ * nobody. That was wrong: "34 Store Managers company-wide, 9 of them already
+ * on Telegram" is a fact about other branches' staffing, inferable one rule
+ * at a time by anybody who may open this screen. The existing branch scope
+ * governs which EMPLOYEES an endpoint may look at, not merely which names it
+ * may print, and a count derived from employees is employee information.
+ *
+ * SO THE POPULATION IS NARROWED ONCE, BEFORE ANY ARITHMETIC. Everything -
+ * the per-rule counts, the union, the connected count and the employee list -
+ * is derived from the employees the caller may see. The forbidden total is
+ * not hidden or withheld; it is never computed, so there is no path by which
+ * a later change could surface it.
  */
 
 function validationError(message) {
@@ -96,6 +109,47 @@ class TelegramGroupMappingUsecase {
     const group = await this.registryRepo.getById(telegram_group_id);
     if (!group) throw notFound(MAPPING_MESSAGES.GROUP_NOT_FOUND);
     return group;
+  }
+
+  /**
+   * THE EMPLOYEES THIS CALLER MAY SEE. The single scoping rule.
+   *
+   * Applied ONCE to the snapshot, before any matching, so every number in the
+   * response is arithmetic over the same permitted population. One
+   * derivation rather than a filter at each count is the point: four places
+   * each remembering to scope is four places one can be forgotten, and the
+   * one that is forgotten is a disclosure.
+   *
+   * FAILS CLOSED. Anything that is not ALL_BRANCHES or a usable
+   * OWN_BRANCHES list yields NOTHING - not everything. An employee with no
+   * branch is invisible to a branch-scoped caller, because there is no branch
+   * on which they could be authorized.
+   */
+  static visibleEmployees(employees, scope) {
+    const kind = (scope && scope.kind) || EMPLOYEE_BRANCH_SCOPE.NONE;
+    if (kind === EMPLOYEE_BRANCH_SCOPE.ALL_BRANCHES) return employees || [];
+    if (kind !== EMPLOYEE_BRANCH_SCOPE.OWN_BRANCHES) return [];
+    const allowed = new Set((scope.store_ids || []).map(Number));
+    if (allowed.size === 0) return [];
+    return (employees || []).filter(
+      (employee) =>
+        employee.store_id !== null &&
+        employee.store_id !== undefined &&
+        allowed.has(Number(employee.store_id))
+    );
+  }
+
+  /**
+   * What the numbers in this response count, stated plainly for the screen.
+   *
+   * A branch-scoped caller is told `BRANCH` so the UI can say the count is
+   * limited to their scope rather than presenting it as the company figure.
+   * `NONE` reports `BRANCH` too: its numbers are limited as well, just to
+   * nothing.
+   */
+  static countsScope(scope) {
+    const kind = (scope && scope.kind) || EMPLOYEE_BRANCH_SCOPE.NONE;
+    return kind === EMPLOYEE_BRANCH_SCOPE.ALL_BRANCHES ? COUNTS_SCOPE.ALL : COUNTS_SCOPE.BRANCH;
   }
 
   /**
@@ -167,17 +221,18 @@ class TelegramGroupMappingUsecase {
   }
 
   /**
-   * THE MAP SCREEN'S ONE READ.
+   * THE MAP SCREEN'S READ. At most SIX bounded queries, whatever it contains:
+   * the mapping rows (1), one per master actually referenced (at most 3, and
+   * only for the types present), ONE employee snapshot (1) and ONE
+   * active-identity read (1). Never one per mapping, never one per employee.
    *
-   * Four bounded queries: the mappings, the referenced masters, the employee
-   * snapshot, and - only when employees matched - the Telegram identities.
-   * Never one per mapping, never one per employee.
-   *
-   * Every count in this response comes from ONE snapshot and ONE business
-   * date, both reported as `as_of_date`, so the rows cannot disagree with
-   * each other or with the total.
+   * EVERY COUNT HERE IS SCOPED TO THE CALLER, and comes from one snapshot and
+   * one business date - both reported as `as_of_date` - so the rows cannot
+   * disagree with each other or with the total. The mapping rules themselves
+   * are returned in full to anybody who may open the screen; only the
+   * employee arithmetic narrows.
    */
-  async getMappings(telegram_group_id) {
+  async getMappings(telegram_group_id, { scope } = {}) {
     const group = await this.requireGroup(telegram_group_id);
     const mappings = await this.repo.getByGroup(telegram_group_id);
     const businessDate = this.businessDate();
@@ -187,18 +242,26 @@ class TelegramGroupMappingUsecase {
       this.repo.getEmployeeSnapshot(),
     ]);
 
-    const { perMapping, union } = deriveMatches(employees, mappings, businessDate);
+    // NARROWED BEFORE ANY MATCHING. The company-wide figure is never
+    // computed for a branch-scoped caller, so it cannot leak from here.
+    const visible = TelegramGroupMappingUsecase.visibleEmployees(employees, scope);
+    const { perMapping, union } = deriveMatches(visible, mappings, businessDate);
     const connected = await this.repo.getConnectedEmployeeIds(union);
 
     return {
       group: TelegramGroupMappingUsecase.groupSummary(group),
       as_of_date: businessDate,
+      // What the numbers below count. The UI says so out loud rather than
+      // presenting a branch figure as the company's.
+      counts_scope: TelegramGroupMappingUsecase.countsScope(scope),
       mappings: mappings.map((mapping) => ({
         telegram_group_mapping_id: mapping.telegram_group_mapping_id,
         mapping_type: mapping.mapping_type,
         mapping_type_label: MAPPING_TYPE_LABEL[mapping.mapping_type] || mapping.mapping_type,
         target_id:
           mapping.mapping_type === MAPPING_TYPE.ALL_EMPLOYEES ? null : mapping.target_id,
+        // The RULE, unnarrowed: a manager sees that an Outlet mapping names
+        // Moolakulam even when no Moolakulam employee is theirs to count.
         ...TelegramGroupMappingUsecase.describeTarget(mapping, resolved),
         matched_employees: (perMapping.get(mapping.telegram_group_mapping_id) || []).length,
         created_at: mapping.created_at,
@@ -292,10 +355,10 @@ class TelegramGroupMappingUsecase {
   /**
    * THE MATCHED EMPLOYEES - the union, or one mapping's own population.
    *
-   * `total_matched` IS COMPANY-WIDE AND IDENTICAL FOR EVERY CALLER. Only the
-   * rows are scoped. That split is the whole design: the count answers "is
-   * this rule right", which needs the truth, and the list answers "who are
-   * they", which is where an employee's name actually gets disclosed.
+   * THE COUNT AND THE LIST NOW AGREE, and both are the caller's own. There is
+   * no company-wide total in this response because none is calculated: the
+   * snapshot is narrowed to the employees this caller may see and everything
+   * is derived from that.
    *
    * THE SCOPE COMES FROM THE SERVER'S OWN LOOKUP, never from the request. It
    * is resolved live by `middlewares/employee_branch_scope.js` from the
@@ -303,7 +366,7 @@ class TelegramGroupMappingUsecase {
    * which is a copy taken at login that nothing refreshes, so a transferred
    * manager would keep authority over the branch they left.
    *
-   * A SCOPE OF `NONE` RETURNS NO ROWS - never all of them. Failing closed
+   * A SCOPE OF `NONE` RETURNS NOTHING AND COUNTS NOTHING. Failing closed
    * matters most in the branch a reader is least likely to test.
    */
   async getMatchedEmployees(telegram_group_id, { mapping_id, scope } = {}) {
@@ -322,33 +385,19 @@ class TelegramGroupMappingUsecase {
     }
 
     const employees = await this.repo.getEmployeeSnapshot();
-    const { union } = deriveMatches(employees, selected, businessDate);
+    const visible = TelegramGroupMappingUsecase.visibleEmployees(employees, scope);
+    const { union } = deriveMatches(visible, selected, businessDate);
     const matchedIds = new Set(union);
-
     const connected = await this.repo.getConnectedEmployeeIds(union);
-
-    const kind = (scope && scope.kind) || EMPLOYEE_BRANCH_SCOPE.NONE;
-    const allowedBranches =
-      kind === EMPLOYEE_BRANCH_SCOPE.OWN_BRANCHES
-        ? new Set((scope.store_ids || []).map(Number))
-        : null;
-
-    const visible = employees.filter((employee) => {
-      if (!matchedIds.has(employee.employee_id)) return false;
-      if (kind === EMPLOYEE_BRANCH_SCOPE.ALL_BRANCHES) return true;
-      if (kind !== EMPLOYEE_BRANCH_SCOPE.OWN_BRANCHES) return false;
-      return employee.store_id !== null && allowedBranches.has(Number(employee.store_id));
-    });
 
     return {
       as_of_date: businessDate,
-      // Company-wide. Identical for a store manager and for HR.
+      counts_scope: TelegramGroupMappingUsecase.countsScope(scope),
+      // Scoped, like every other employee number in this phase.
       total_matched: union.length,
-      visible_count: visible.length,
-      scope_limited: visible.length !== union.length,
-      employees: visible.map((employee) =>
-        TelegramGroupMappingUsecase.safeEmployee(employee, connected)
-      ),
+      employees: visible
+        .filter((employee) => matchedIds.has(employee.employee_id))
+        .map((employee) => TelegramGroupMappingUsecase.safeEmployee(employee, connected)),
     };
   }
 
