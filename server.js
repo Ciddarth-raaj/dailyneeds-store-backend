@@ -695,6 +695,20 @@ class Server {
       telegram: require("./services/telegram")(),
       registryRepo: this.telegramGroupRegistryRepo,
     });
+    // THE UPDATE DISPATCHER. The poller below still owns the loop and the
+    // offset; this is only how the one stream reaches more than one feature.
+    // Handlers are registered here, once, and never at runtime.
+    this.telegramUpdateDispatcher = require("./usecase/telegram_update_dispatcher")();
+    this.telegramUpdateDispatcher.register({
+      name: "telegram_group_detection",
+      updateTypes: ["message"],
+      // NO `claims` PREDICATE. Detection OBSERVES `/setup` in a group; it
+      // never owns a private `/start`, so password-reset linking is reached
+      // exactly as it was before the dispatcher existed. Note that
+      // `handleMessage` RETURNS a detection object - a truthy value that means
+      // nothing about ownership, which is why ownership is a predicate.
+      handle: (update) => this.telegramGroupDetectionUsecase.handleMessage(update.message),
+    });
     // Stage 0A integration: the Telegram reset writes through the modern
     // password service and audits to user_auth_log; it never touches SHA-1.
     this.passwordResetUsecase = require("./usecase/passwordReset")(
@@ -703,8 +717,7 @@ class Server {
       require("./services/telegram")(),
       {
         authLogRepo: this.authLogRepo,
-        onTelegramMessage: (message) =>
-          this.telegramGroupDetectionUsecase.handleMessage(message),
+        onTelegramUpdate: (update) => this.telegramUpdateDispatcher.dispatch(update),
       }
     );
     this.peopleUsecase = require("./usecase/people")(this.peopleRepo);

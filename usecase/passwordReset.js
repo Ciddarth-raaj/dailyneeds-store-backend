@@ -103,18 +103,40 @@ class PasswordResetUsecase {
     this.passwords = deps.passwords || passwordService;
     this.now = deps.now || (() => new Date());
     /**
-     * An observer for every message this poller reads.
+     * Where every update this poller reads is fanned out - in practice
+     * `usecase/telegram_update_dispatcher.js#dispatch`.
      *
      * THIS EXISTS BECAUSE THE OFFSET HAS ONE OWNER. Passing the offset back
      * to Telegram acknowledges those updates, so anything this loop reads is
      * gone for every other reader: a second poller elsewhere would not "also
      * see" a message, it would race this one and each would swallow updates
      * the other needed, breaking linking intermittently and invisibly. So
-     * other features are handed the message here instead of fetching their
-     * own. The observer is told about messages; it never affects linking,
-     * and it cannot stop this loop.
+     * other features are handed the update here instead of fetching their
+     * own. It cannot stop this loop.
+     *
+     * IT IS HANDED THE WHOLE UPDATE, not just `message`: a join request or a
+     * membership change carries no message at all, and a handler that only
+     * ever saw messages could never be given one.
+     *
+     * ITS ANSWER DECIDES ONE THING AND ONLY ONE: whether somebody else has
+     * already claimed this `/start`, in which case THIS class must not also
+     * answer it. See the linking branch below and the dispatcher's header.
+     *
+     * `onTelegramMessage` IS STILL ACCEPTED, for one release. A stale wiring
+     * that still passes the old name keeps working - message-only, claiming
+     * nothing - rather than silently delivering updates to nobody, which is a
+     * failure that shows up as "group detection just stopped" weeks later.
      */
-    this.onTelegramMessage = deps.onTelegramMessage || null;
+    const legacyMessageObserver =
+      typeof deps.onTelegramMessage === "function" ? deps.onTelegramMessage : null;
+    this.onTelegramUpdate =
+      typeof deps.onTelegramUpdate === "function"
+        ? deps.onTelegramUpdate
+        : legacyMessageObserver
+        ? async (update) => {
+            if (update && update.message) await legacyMessageObserver(update.message);
+          }
+        : null;
     // Where the update poller has read up to. Held in memory only: passing it
     // back to Telegram acknowledges those updates, so a restart resumes from
     // the first one still unacknowledged rather than replaying history.
@@ -217,24 +239,38 @@ class PasswordResetUsecase {
 
         const message = update.message;
 
-        // Every message, before the linking branch: this loop is the only
-        // reader of the update stream, so a message it does not pass on is a
-        // message nobody else will ever see. Failures here are swallowed -
-        // an observer must never stop somebody linking their account.
-        if (this.onTelegramMessage && message) {
+        // Every update, before the linking branch: this loop is the only
+        // reader of the update stream, so an update it does not pass on is an
+        // update nobody else will ever see. Failures here are swallowed - a
+        // handler must never stop somebody linking their account.
+        //
+        // THE ONE THING THE ANSWER DECIDES. A `/start` payload that belongs to
+        // another feature - an employee Telegram link, say - is CLAIMED by the
+        // handler that owns that namespace, and this class must then keep
+        // quiet: `completeLink` would not find the payload in
+        // `telegram_link_tokens` and would tell the employee their link had
+        // expired, which is both wrong and alarming. The claim is decided by a
+        // pure predicate inside the dispatcher BEFORE any handler runs, so it
+        // still holds when the handler that owns the update fails or times
+        // out - see `usecase/telegram_update_dispatcher.js`.
+        let claimed = false;
+        if (this.onTelegramUpdate) {
           try {
-            await this.onTelegramMessage(message);
+            const outcome = await this.onTelegramUpdate(update);
+            claimed = Boolean(outcome && outcome.claimed);
           } catch (err) {
+            // A dispatcher that throws claims nothing, so linking still runs.
             logger.Log({
               level: logger.LEVEL.ERROR,
               component: "USECASE.PASSWORD-RESET",
-              code: "USECASE.PASSWORD-RESET.OBSERVER",
+              code: "USECASE.PASSWORD-RESET.DISPATCH",
               description: err.toString(),
               category: "",
               ref: {},
             });
           }
         }
+        if (claimed) continue;
 
         const payload = parseStartPayload(message?.text);
         if (!payload || !message?.chat?.id) continue;
