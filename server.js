@@ -546,7 +546,12 @@ class Server {
       this.employeeAadhaarRepo,
       this.employeeBankRepo,
       this.employeeMasterRepo,
-      this.employeeSalaryRepo
+      this.employeeSalaryRepo,
+      // Telegram status for the onboarding dashboard's column, read in TWO
+      // bulk queries for the whole list. The browser must never ask
+      // /hr/employee/:id/telegram per row - that is the N+1 this endpoint
+      // exists to prevent.
+      this.employeeTelegramRepo
     );
     this.shiftUsecase = require("./usecase/shift")(this.shiftRepo);
     this.workShiftUsecase = require("./usecase/work_shift")(this.workShiftRepo);

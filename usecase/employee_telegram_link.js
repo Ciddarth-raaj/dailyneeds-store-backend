@@ -3,6 +3,7 @@ const logger = require("../utils/logger");
 const { normalizeIndianMobile, mobilesMatch } = require("../utils/mobile_number");
 const { employedOn } = require("../utils/attendance_eligibility");
 const { istDateOf } = require("../utils/istDate");
+const { statusFromRows } = require("../utils/employee_telegram_status");
 const {
   EMPLOYEE_LINK_PREFIX,
   LINK_TOKEN_TTL_MS,
@@ -274,18 +275,19 @@ class EmployeeTelegramLinkUsecase {
     }
 
     const latest = await this.repo.getLatestPendingForEmployee(employeeId);
-    let status = TELEGRAM_STATUS.PENDING;
-    if (latest) {
-      if (latest.pending_outcome === PENDING_OUTCOME.MOBILE_MISMATCH) {
-        status = TELEGRAM_STATUS.MOBILE_MISMATCH;
-      } else if (
-        latest.pending_outcome === null &&
-        latest.pending_expires_at &&
-        new Date(latest.pending_expires_at).getTime() > this.now().getTime()
-      ) {
-        status = TELEGRAM_STATUS.AWAITING_CONTACT;
-      }
-    }
+    // THE PRECEDENCE IS NOT WRITTEN HERE ANY MORE. It is shared with the
+    // onboarding dashboard's bulk summary (`utils/employee_telegram_status.js`)
+    // so that a badge on a list and the status on this employee's own screen
+    // cannot drift apart. The behaviour is unchanged - see the parity tests.
+    const status = statusFromRows({
+      hasActiveIdentity: false,
+      latest,
+      latestIsLive: Boolean(
+        latest &&
+          latest.pending_expires_at &&
+          new Date(latest.pending_expires_at).getTime() > this.now().getTime()
+      ),
+    });
 
     return {
       code: 200,

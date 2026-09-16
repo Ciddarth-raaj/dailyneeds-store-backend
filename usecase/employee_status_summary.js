@@ -1,5 +1,6 @@
 const logger = require("../utils/logger");
 const { EmployeeBankUsecase } = require("./employee_bank");
+const { statusFromRows, isConnected } = require("../utils/employee_telegram_status");
 
 /**
  * Stage 0C / C3 — the bulk Aadhaar and bank status summary.
@@ -175,12 +176,19 @@ class EmployeeStatusSummaryUsecase {
    * `employeeMasterRepo` is optional and read-only here: it answers whether
    * the statutory decision has been recorded, never what it was.
    */
-  constructor(employeeUsecase, aadhaarRepo, bankRepo, employeeMasterRepo, salaryRepo) {
+  constructor(employeeUsecase, aadhaarRepo, bankRepo, employeeMasterRepo, salaryRepo, telegramRepo) {
     this.employees = employeeUsecase;
     this.aadhaarRepo = aadhaarRepo || null;
     this.bankRepo = bankRepo || null;
     this.masterRepo = employeeMasterRepo || null;
     this.salaryRepo = salaryRepo || null;
+    /**
+     * OPTIONAL AND READ-ONLY, like `masterRepo` above. Where it is not wired
+     * the Telegram keys are OMITTED rather than guessed at - a `PENDING` this
+     * endpoint did not establish would put every employee on a work queue for
+     * a reason that was really "this server is not configured".
+     */
+    this.telegramRepo = telegramRepo || null;
   }
 
   /**
@@ -383,12 +391,13 @@ class EmployeeStatusSummaryUsecase {
     }
     if (ids.length === 0) return [];
 
-    const [aadhaarIds, bank, statutory, salaries, payrollConfig] = await Promise.all([
+    const [aadhaarIds, bank, statutory, salaries, payrollConfig, telegram] = await Promise.all([
       this._aadhaarIds(ids),
       this._bankStatuses(ids),
       this._statutoryDecisions(ids),
       this._liveSalaries(ids),
       this._payrollConfig(ids),
+      this._telegramFacts(ids),
     ]);
 
     return ids.map((employee_id) => {
@@ -426,9 +435,29 @@ class EmployeeStatusSummaryUsecase {
         EmployeeStatusSummaryUsecase.schemeStatus(decided, notApplicable, {
           disclose: disclosePfEsiApplicability,
         });
+      // TELEGRAM. Two scalars, derived by the SHARED precedence rule so this
+      // badge and the employee's own Telegram screen cannot disagree - see
+      // `utils/employee_telegram_status.js`. It carries no Telegram user id,
+      // no chat id, no mobile and no token: the same kind of fact as
+      // `aadhaar_status`, under the same `view_employees` permission.
+      //
+      // CONNECTED HERE IS NOT "TELEGRAM COMPLETE". Required-group membership
+      // does not exist yet, so a connected employee still has work outstanding
+      // and the screens say so. Nothing in this endpoint claims completion,
+      // and `hr_onboarding_pending` is deliberately NOT changed - adding
+      // Telegram to it today would mark all 630 employees incomplete for a
+      // feature that has not shipped.
+      const telegramFacts = telegram ? telegram.get(employee_id) : null;
+      const telegramStatus = telegramFacts ? statusFromRows(telegramFacts) : null;
       return {
         employee_id,
         aadhaar_status: aadhaarVerified ? "VERIFIED" : "PENDING",
+        ...(telegramStatus
+          ? {
+              telegram_status: telegramStatus,
+              telegram_connected: isConnected(telegramStatus),
+            }
+          : {}),
         bank_status: b.status,
         bank_payroll_ready: b.bank_payroll_ready,
         ...(onboarding
@@ -540,6 +569,38 @@ class EmployeeStatusSummaryUsecase {
       });
     }
     return out;
+  }
+
+  /**
+   * The Telegram facts for the whole list, in the repository's TWO queries.
+   *
+   * Returns null - not an empty map - where the repository is not wired, so
+   * the caller OMITS the keys rather than reporting a Pending it did not
+   * establish. That is the same distinction `_statutoryDecisions` draws, and
+   * for the same reason.
+   *
+   * A REPOSITORY FAILURE IS ALSO null. A dashboard that silently showed every
+   * employee as Telegram Pending because one query failed would send somebody
+   * to chase 630 people; showing no Telegram column at all is the honest
+   * outcome and is what the screen already does for a failed summary.
+   */
+  async _telegramFacts(ids) {
+    if (!this.telegramRepo || typeof this.telegramRepo.getSummaryForEmployees !== "function") {
+      return null;
+    }
+    try {
+      return await this.telegramRepo.getSummaryForEmployees(ids);
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "USECASE.EMPLOYEE-STATUS-SUMMARY",
+        code: "USECASE.EMPLOYEE-STATUS-SUMMARY.TELEGRAM",
+        description: err.toString(),
+        category: "",
+        ref: {},
+      });
+      return null;
+    }
   }
 
   /**
@@ -678,6 +739,13 @@ class EmployeeStatusSummaryUsecase {
   }
 }
 
-module.exports = (employeeUsecase, aadhaarRepo, bankRepo, employeeMasterRepo, salaryRepo) =>
-  new EmployeeStatusSummaryUsecase(employeeUsecase, aadhaarRepo, bankRepo, employeeMasterRepo, salaryRepo);
+module.exports = (employeeUsecase, aadhaarRepo, bankRepo, employeeMasterRepo, salaryRepo, telegramRepo) =>
+  new EmployeeStatusSummaryUsecase(
+    employeeUsecase,
+    aadhaarRepo,
+    bankRepo,
+    employeeMasterRepo,
+    salaryRepo,
+    telegramRepo
+  );
 module.exports.EmployeeStatusSummaryUsecase = EmployeeStatusSummaryUsecase;

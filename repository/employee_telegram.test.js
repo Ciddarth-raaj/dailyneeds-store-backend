@@ -346,3 +346,117 @@ describe("createLinkToken", () => {
     assert.ok(dumped.includes("7"), "the employee id is fine, and is what identifies the failure");
   });
 });
+
+describe("getSummaryForEmployees", () => {
+  const IDS = [7, 8, 9];
+
+  it("READS THE WHOLE LIST IN TWO QUERIES, whatever the headcount", async () => {
+    const pool = fakePool({ answers: [[/SELECT/, []]] });
+    const many = Array.from({ length: 600 }, (_, i) => i + 1);
+
+    await buildRepo(pool).getSummaryForEmployees(many);
+
+    const selects = sqlOf(pool).filter((s) => /^SELECT/.test(s));
+    assert.equal(selects.length, 2, "600 employees cost exactly what 2 cost");
+  });
+
+  it("asks nothing at all for an empty list", async () => {
+    const pool = fakePool();
+    const out = await buildRepo(pool).getSummaryForEmployees([]);
+    assert.equal(out.size, 0);
+    assert.deepEqual(sqlOf(pool), []);
+  });
+
+  it("ignores junk ids rather than sending them to MySQL", async () => {
+    const pool = fakePool({ answers: [[/SELECT/, []]] });
+    const out = await buildRepo(pool).getSummaryForEmployees([7, "8", null, undefined, -1, 0, "x", 9.5]);
+    assert.deepEqual([...out.keys()], [7, 8]);
+  });
+
+  it("SELECTS NO IDENTIFIER - no user id, chat id, mobile, token or hash", async () => {
+    const pool = fakePool({ answers: [[/SELECT/, []]] });
+    await buildRepo(pool).getSummaryForEmployees(IDS);
+
+    for (const sql of sqlOf(pool).filter((s) => /^SELECT/.test(s))) {
+      for (const forbidden of [
+        "telegram_user_id",
+        "private_chat_id",
+        "verified_mobile",
+        "token_hash",
+        "telegram_username",
+        "pending_chat_id",
+      ]) {
+        assert.ok(!sql.includes(forbidden), `${forbidden} must not be selected: ${sql}`);
+      }
+    }
+  });
+
+  it("only counts an ACTIVE identity", async () => {
+    const pool = fakePool({
+      answers: [
+        [/FROM employee_telegram_identity/, [{ employee_id: 7 }]],
+        [/FROM employee_telegram_link_tokens/, []],
+      ],
+    });
+
+    const out = await buildRepo(pool).getSummaryForEmployees(IDS);
+
+    const identitySql = sqlOf(pool).find((s) => /FROM employee_telegram_identity/.test(s));
+    assert.match(identitySql, /disconnected_at IS NULL/, "a retired row is not a connection");
+    assert.equal(out.get(7).hasActiveIdentity, true);
+    assert.equal(out.get(8).hasActiveIdentity, false);
+  });
+
+  it("takes only the LATEST link attempt per employee, and lets MySQL decide live-ness", async () => {
+    const pool = fakePool({
+      answers: [
+        [/FROM employee_telegram_identity/, []],
+        [
+          /FROM employee_telegram_link_tokens/,
+          [{ employee_id: 8, pending_outcome: null, latest_is_live: 1 }],
+        ],
+      ],
+    });
+
+    const out = await buildRepo(pool).getSummaryForEmployees(IDS);
+
+    const tokenSql = sqlOf(pool).find((s) => /JOIN/.test(s));
+    assert.match(tokenSql, /MAX\(created_at\)/, "the latest attempt, decided in SQL");
+    assert.match(tokenSql, /pending_expires_at > NOW\(\)/, "live-ness against MySQL's own clock");
+    assert.deepEqual(out.get(8), {
+      hasActiveIdentity: false,
+      latest: { pending_outcome: null },
+      latestIsLive: true,
+    });
+  });
+
+  it("ON A TIE THE LIVE ROW WINS - two tokens inside one second", async () => {
+    // `created_at` is a TIMESTAMP, so two issuances in the same second tie.
+    // Issuance supersedes the older one, so the live row IS the newer.
+    const pool = fakePool({
+      answers: [
+        [/FROM employee_telegram_identity/, []],
+        [
+          /FROM employee_telegram_link_tokens/,
+          [
+            { employee_id: 9, pending_outcome: "SUPERSEDED", latest_is_live: 0 },
+            { employee_id: 9, pending_outcome: null, latest_is_live: 1 },
+          ],
+        ],
+      ],
+    });
+
+    const out = await buildRepo(pool).getSummaryForEmployees(IDS);
+    assert.equal(out.get(9).latestIsLive, true);
+    assert.equal(out.get(9).latest.pending_outcome, null);
+  });
+
+  it("gives every requested employee an entry, so a missing row is not a missing answer", async () => {
+    const pool = fakePool({ answers: [[/SELECT/, []]] });
+    const out = await buildRepo(pool).getSummaryForEmployees(IDS);
+    assert.deepEqual([...out.keys()], IDS);
+    for (const id of IDS) {
+      assert.deepEqual(out.get(id), { hasActiveIdentity: false, latest: null, latestIsLive: false });
+    }
+  });
+});

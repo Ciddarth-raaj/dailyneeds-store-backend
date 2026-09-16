@@ -466,6 +466,90 @@ class EmployeeTelegramRepository {
     }
   }
 
+  /* ------------------------------------------------------ bulk summary */
+
+  /**
+   * The Telegram facts for a WHOLE employee list, in TWO queries.
+   *
+   * FOR THE ONBOARDING DASHBOARD, and it is two queries whatever the
+   * headcount - which is the entire point. `usecase/employee_status_summary.js`
+   * counts its queries in its header because asking per employee is how that
+   * screen came to have no status columns at all; a Telegram column that
+   * called `getStatus` 630 times would reintroduce exactly that.
+   *
+   * IT RETURNS FACTS, NOT A STATUS. The precedence lives in
+   * `utils/employee_telegram_status.js` and is shared with the single-employee
+   * read, so a dashboard badge cannot disagree with the employee's own screen.
+   *
+   * NOTHING SENSITIVE LEAVES THIS METHOD. No Telegram user id, no chat id, no
+   * mobile, no token and no hash is selected - only whether an identity is
+   * active and what the latest link attempt came to.
+   *
+   * THE LATEST ATTEMPT IS DECIDED IN SQL by `MAX(created_at)`. `created_at` is
+   * a TIMESTAMP, so two tokens issued for one employee inside the same second
+   * tie. That is harmless here: issuance is serialized per employee and
+   * supersedes the previous row, so of two rows sharing a second the older one
+   * carries a `pending_outcome` and reads PENDING while the newer is live -
+   * and the precedence picks the live one, which is the newer. The single
+   * employee read's `ORDER BY created_at DESC LIMIT 1` resolves the same tie
+   * the same way for the same reason.
+   */
+  async getSummaryForEmployees(employeeIds) {
+    const ids = (Array.isArray(employeeIds) ? employeeIds : [])
+      .map((id) => Number(id))
+      .filter((id) => Number.isInteger(id) && id > 0);
+    if (ids.length === 0) return new Map();
+
+    const [identities, latest] = await Promise.all([
+      this.run(
+        "SUMMARY-IDENTITIES",
+        `SELECT employee_id
+           FROM employee_telegram_identity
+          WHERE disconnected_at IS NULL AND employee_id IN (?)`,
+        [ids],
+        {}
+      ),
+      this.run(
+        "SUMMARY-LATEST-TOKEN",
+        // `latest_is_live` is computed by MySQL against its own NOW(), beside
+        // the row it is about, rather than compared to this process's clock
+        // afterwards.
+        `SELECT t.employee_id,
+                t.pending_outcome,
+                (t.pending_outcome IS NULL
+                 AND t.pending_expires_at IS NOT NULL
+                 AND t.pending_expires_at > NOW()) AS latest_is_live
+           FROM employee_telegram_link_tokens t
+           JOIN (SELECT employee_id, MAX(created_at) AS newest
+                   FROM employee_telegram_link_tokens
+                  WHERE employee_id IN (?)
+                  GROUP BY employee_id) newest_token
+             ON newest_token.employee_id = t.employee_id
+            AND t.created_at = newest_token.newest`,
+        [ids],
+        {}
+      ),
+    ]);
+
+    const connected = new Set((identities || []).map((row) => Number(row.employee_id)));
+    const summary = new Map();
+    for (const id of ids) {
+      summary.set(id, { hasActiveIdentity: connected.has(id), latest: null, latestIsLive: false });
+    }
+    for (const row of latest || []) {
+      const id = Number(row.employee_id);
+      const entry = summary.get(id);
+      if (!entry) continue;
+      const isLive = Number(row.latest_is_live) === 1;
+      // On a tie the LIVE row wins - see the note above.
+      if (entry.latest === null || (isLive && !entry.latestIsLive)) {
+        entry.latest = { pending_outcome: row.pending_outcome };
+        entry.latestIsLive = isLive;
+      }
+    }
+    return summary;
+  }
+
   /* --------------------------------------------------------------- audit */
 
   /**
