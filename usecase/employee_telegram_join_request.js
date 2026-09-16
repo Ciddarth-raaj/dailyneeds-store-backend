@@ -141,6 +141,34 @@ class EmployeeTelegramJoinRequestUsecase {
     }
   }
 
+  /**
+   * Ask Telegram whether they really are in the group, and cache only a YES.
+   *
+   * NEVER THROWS AND NEVER CHANGES THE OUTCOME. The join has already
+   * happened by the time this runs; a lookup that fails, or a cache write
+   * that fails, must leave that alone. All it can do is teach the dashboard
+   * sooner.
+   */
+  async _verifyAndCache({ identity, group, userId, readiness }) {
+    if (!this.verificationRepo) return { verified: false };
+    try {
+      const member = await this.telegram.getChatMember(group.chat_id, userId);
+      if (!isTelegramMember(member)) return { verified: false };
+      await this._recordVerification({ identity, group, joined: true, readiness });
+      return { verified: true };
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.WARN,
+        component: "USECASE.EMPLOYEE_TELEGRAM_JOIN_REQUEST",
+        code: "USECASE.EMPLOYEE_TELEGRAM_JOIN_REQUEST.VERIFY-CACHE",
+        description: `could not confirm membership for the cache: ${err.toString()}`,
+        category: "",
+        ref: { telegram_group_id: group.telegram_group_id },
+      });
+      return { verified: false };
+    }
+  }
+
   async handle(update) {
     const request = EmployeeTelegramJoinRequestUsecase._request(update);
     if (!request) return { approved: false, reason: JOIN_REFUSAL.NO_MATCHING_ATTEMPT };
@@ -270,6 +298,22 @@ class EmployeeTelegramJoinRequestUsecase {
           ATTEMPT_STATUS.JOINED,
           { completed: true }
         );
+        // THE CACHE STILL NEEDS A VERIFIED ANSWER, NOT TELEGRAM'S REFUSAL.
+        //
+        // "Already a participant" is a good enough reason to treat the ATTEMPT
+        // as finished - the person is in the group and there is nothing left
+        // to approve. It is NOT a membership check: it is an error string
+        // from a write we did not complete, and the dashboard's cache is
+        // supposed to hold what `getChatMember` said. Recording JOINED
+        // straight from this message would put a claim in the cache that no
+        // verification produced, which is the same shortcut the stale-JOINED
+        // fix removed from the detail screen.
+        //
+        // So it is confirmed properly, and a confirmation we cannot get
+        // writes nothing - the attempt stays JOINED either way, and the
+        // dashboard reports VERIFICATION_PENDING until somebody looks. Fail
+        // closed on the cache, not on the join.
+        await this._verifyAndCache({ identity, group: full, userId: Number(fromId), readiness });
         return { approved: true, alreadyMember: true };
       }
       await this.joinRepo.advanceStatus(

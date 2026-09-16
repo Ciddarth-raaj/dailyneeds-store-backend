@@ -355,6 +355,85 @@ describe("duplicate delivery and retries", () => {
     assert.equal(calls.approved.length, 1);
   });
 
+  it("already a participant: CONFIRMS membership before caching it", async () => {
+    // Telegram's refusal is an error string from a write we did not
+    // complete - not a membership check. The attempt is finished either
+    // way, but the cache only learns what getChatMember actually said.
+    const err = new Error("Bad Request: USER_ALREADY_PARTICIPANT");
+    err.telegramDescription = "Bad Request: USER_ALREADY_PARTICIPANT";
+    const { usecase, calls, state } = build({ approveThrows: err });
+    state.memberAfter = { status: "member" };
+
+    const result = await usecase.handle(update());
+
+    assert.equal(result.approved, true);
+    assert.equal(result.alreadyMember, true);
+    assert.equal(state.attempt.status, ATTEMPT_STATUS.JOINED);
+    assert.equal(calls.verified.length, 1);
+    assert.equal(calls.verified[0].membership, "JOINED");
+    assert.equal(calls.verified[0].employeeTelegramId, 900);
+    assert.equal(calls.verified[0].telegramGroupId, 10);
+  });
+
+  it("already a participant: caches NOTHING when membership cannot be confirmed", async () => {
+    // The attempt still concludes as JOINED - the person is in the group and
+    // there is nothing left to approve - but the dashboard reports
+    // VERIFICATION_PENDING until somebody looks. Fail closed on the cache,
+    // not on the join.
+    const err = new Error("Bad Request: USER_ALREADY_PARTICIPANT");
+    err.telegramDescription = "Bad Request: USER_ALREADY_PARTICIPANT";
+
+    for (const memberAfter of [null, { status: "left" }, { status: "kicked" }]) {
+      const { usecase, calls, state } = build({ approveThrows: err });
+      state.memberAfter = memberAfter;
+      const result = await usecase.handle(update());
+
+      assert.equal(result.approved, true, JSON.stringify(memberAfter));
+      assert.equal(state.attempt.status, ATTEMPT_STATUS.JOINED);
+      assert.deepEqual(calls.verified, [], JSON.stringify(memberAfter));
+    }
+  });
+
+  it("already a participant: a THROWN membership lookup caches nothing and still succeeds", async () => {
+    const err = new Error("Bad Request: USER_ALREADY_PARTICIPANT");
+    err.telegramDescription = "Bad Request: USER_ALREADY_PARTICIPANT";
+    const { usecase, calls, state } = build({ approveThrows: err });
+    usecase.telegram.getChatMember = async () => {
+      throw new Error("ETIMEDOUT");
+    };
+
+    const result = await usecase.handle(update());
+    assert.equal(result.approved, true);
+    assert.equal(result.alreadyMember, true);
+    assert.equal(state.attempt.status, ATTEMPT_STATUS.JOINED);
+    assert.deepEqual(calls.verified, []);
+  });
+
+  it("already a participant: a CACHE failure does not undo the success", async () => {
+    const err = new Error("Bad Request: USER_ALREADY_PARTICIPANT");
+    err.telegramDescription = "Bad Request: USER_ALREADY_PARTICIPANT";
+    const { usecase, state } = build({ approveThrows: err });
+    state.memberAfter = { status: "member" };
+    usecase.verificationRepo.record = async () => {
+      throw new Error("cache table is gone");
+    };
+
+    const result = await usecase.handle(update());
+    assert.equal(result.approved, true);
+    assert.equal(result.alreadyMember, true);
+    assert.equal(state.attempt.status, ATTEMPT_STATUS.JOINED);
+  });
+
+  it("already a participant: works with no verification repository wired", async () => {
+    const err = new Error("Bad Request: USER_ALREADY_PARTICIPANT");
+    err.telegramDescription = "Bad Request: USER_ALREADY_PARTICIPANT";
+    const { usecase, state } = build({ approveThrows: err });
+    usecase.verificationRepo = null;
+    const result = await usecase.handle(update());
+    assert.equal(result.approved, true);
+    assert.equal(state.attempt.status, ATTEMPT_STATUS.JOINED);
+  });
+
   it("treats USER_ALREADY_PARTICIPANT as a success, not a failure", async () => {
     // Somebody let them in by hand, or a retry raced us. They are in the
     // group, which is the outcome we wanted.
