@@ -164,6 +164,29 @@ describe("the dispatcher", () => {
     );
   });
 
+  it("the EMPLOYEE handler is the only claimer, and it claims by namespace", () => {
+    const server = strip(read("server.js"));
+    const block = /name: "employee_telegram_link"[\s\S]*?\}\);/.exec(server);
+    assert.ok(block, "the employee handler is registered on the dispatcher");
+    assert.match(block[0], /claims\s*:/, "it declares a claim predicate");
+
+    // Exactly one claimer in the whole wiring. A second one would be a
+    // CLAIM-CONFLICT at runtime and an ambiguity here.
+    const claimers = (server.match(/claims\s*:/g) || []).length;
+    assert.equal(claimers, 1, "only the employee deep link is owned by anybody");
+  });
+
+  it("THE CLAIM PREDICATE IS SYNCHRONOUS AND TOUCHES NO REPOSITORY", () => {
+    // The dispatcher decides ownership BEFORE any handler runs precisely so a
+    // crash cannot hand an employee deep link back to password reset. A
+    // predicate that awaited a database read could not offer that, and a slow
+    // database would start producing false expired-link replies.
+    const src = strip(read("usecase/employee_telegram_link.js"));
+    const claims = /\n  claims\(update\) \{([\s\S]*?)\n  \}/.exec(src);
+    assert.ok(claims, "claims() is defined");
+    assert.ok(!/await|async|this\.repo|Promise/.test(claims[1]), "it is pure and synchronous");
+  });
+
   it("asks Telegram for the approved update types and NOTHING else", () => {
     const service = strip(read("services/telegram.js"));
     const list = /const ALLOWED_UPDATES = (\[[^\]]*\])/.exec(service);

@@ -346,6 +346,12 @@ class Server {
     this.telegramGroupRegistryRepo = require("./repository/telegram_group_registry")(
       this.mysql.connection
     );
+    // EMPLOYEE Telegram identity. Keyed by employee_id, never by a login:
+    // most employees have no dnds.co.in account, so `telegram_links` (which is
+    // keyed by user_id, for password reset) could not serve them.
+    this.employeeTelegramRepo = require("./repository/employee_telegram")(
+      this.mysql.connection
+    );
     this.jobWorksheetRepo = require("./repository/job_worksheet")(
       this.mysql.connection
     );
@@ -709,6 +715,22 @@ class Server {
       // nothing about ownership, which is why ownership is a predicate.
       handle: (update) => this.telegramGroupDetectionUsecase.handleMessage(update.message),
     });
+    // EMPLOYEE TELEGRAM LINKING. Registered on the same dispatcher, and it is
+    // the first handler that CLAIMS: an employee deep link is `/start e_…`,
+    // and password-reset linking must not also answer it - `completeLink`
+    // would not find that payload in `telegram_link_tokens` and would tell the
+    // employee their link had expired. The predicate is pure and synchronous,
+    // so the claim holds even if this handler throws or times out.
+    this.employeeTelegramLinkUsecase = require("./usecase/employee_telegram_link")(
+      this.employeeTelegramRepo,
+      require("./services/telegram")()
+    );
+    this.telegramUpdateDispatcher.register({
+      name: "employee_telegram_link",
+      updateTypes: ["message"],
+      claims: (update) => this.employeeTelegramLinkUsecase.claims(update),
+      handle: (update) => this.employeeTelegramLinkUsecase.handle(update),
+    });
     // Stage 0A integration: the Telegram reset writes through the modern
     // password service and audits to user_auth_log; it never touches SHA-1.
     this.passwordResetUsecase = require("./usecase/passwordReset")(
@@ -1009,6 +1031,14 @@ class Server {
       this.employeeBankUsecase,
       this.employeeStatusSummaryUsecase,
       this.ifscLookupUsecase,
+      this.employeeBranchScope
+    );
+    // Employee Telegram setup. A router of its own rather than three more
+    // endpoints on the master router: these return no sensitive employee
+    // column at all, so there is nothing for B3's response filter to strip.
+    const employeeTelegramRouter = require("./routes/employee_telegram")(
+      this.employeeTelegramLinkUsecase,
+      this.permissions,
       this.employeeBranchScope
     );
     // THE EXISTING-EMPLOYEE AADHAAR VERIFICATION PATH. A router of its own so
@@ -1325,6 +1355,7 @@ class Server {
     // Stage 0C / C2. Mounted at /hr so the lifecycle actions do not collide
     // with the existing employee routes and C3 can find them in one place.
     app.use("/hr", employeeMasterRouter.getRouter());
+    app.use("/hr", employeeTelegramRouter.getRouter());
     // Also /hr: Express tries the routers in order and this one only claims
     // /hr/work-shift-assignments, which the master router does not define.
     app.use("/hr", employeeWorkShiftRouter.getRouter());
