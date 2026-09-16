@@ -244,19 +244,46 @@ class EmployeeTelegramRepository {
     return rows.length === 0 ? null : rows[0];
   }
 
-  /** The employee's most recent pending row, live or finished - for the status read. */
-  async getLatestPendingForEmployee(employeeId) {
+  /**
+   * The employee's CURRENT link attempt - as every row sharing the newest
+   * second, not as one row the storage engine chose.
+   *
+   * `created_at` IS A TIMESTAMP AND TIES. Two QR operations inside one second
+   * leave two rows with the same value, and `LIMIT 1` over them returns
+   * whichever came back first - so a superseded mismatch could outrank the
+   * fresh link that replaced it. The tie is broken by the LIFECYCLE in
+   * `utils/employee_telegram_status.js`, shared with the dashboard's bulk
+   * read, which is why this returns the candidates rather than a winner.
+   *
+   * The LIMIT is a safety rail, not a rule: issuance supersedes, so one
+   * employee cannot accumulate many attempts inside a single second.
+   *
+   * `is_live` and `is_unconsumed` are computed by MySQL beside the row they
+   * describe - against its own NOW(), not this process's clock.
+   */
+  async getCurrentAttemptRows(employeeId) {
     const rows = await this.run(
-      "GET-PENDING-EMPLOYEE",
-      `SELECT token_hash, employee_id, pending_outcome, pending_expires_at, consumed_at, created_at
+      "GET-CURRENT-ATTEMPT",
+      // `token_hash` is ORDERED BY and never SELECTED: it is the stable
+      // discriminator of last resort for two otherwise identical rows, and it
+      // does not need to be read to be sorted by.
+      `SELECT employee_id,
+              pending_outcome,
+              created_at,
+              (consumed_at IS NULL) AS is_unconsumed,
+              (pending_outcome IS NULL
+               AND pending_expires_at IS NOT NULL
+               AND pending_expires_at > NOW()) AS is_live
          FROM employee_telegram_link_tokens
         WHERE employee_id = ?
-        ORDER BY created_at DESC
-        LIMIT 1`,
+        ORDER BY created_at DESC, token_hash ASC
+        LIMIT 10`,
       [employeeId],
       { employeeId }
     );
-    return rows.length === 0 ? null : rows[0];
+    if (!rows || rows.length === 0) return [];
+    const newest = String(rows[0].created_at);
+    return rows.filter((row) => String(row.created_at) === newest);
   }
 
   /**
@@ -500,7 +527,7 @@ class EmployeeTelegramRepository {
       .filter((id) => Number.isInteger(id) && id > 0);
     if (ids.length === 0) return new Map();
 
-    const [identities, latest] = await Promise.all([
+    const [identities, attempts] = await Promise.all([
       this.run(
         "SUMMARY-IDENTITIES",
         `SELECT employee_id
@@ -510,22 +537,24 @@ class EmployeeTelegramRepository {
         {}
       ),
       this.run(
-        "SUMMARY-LATEST-TOKEN",
-        // `latest_is_live` is computed by MySQL against its own NOW(), beside
-        // the row it is about, rather than compared to this process's clock
-        // afterwards.
+        "SUMMARY-CURRENT-ATTEMPT",
+        // EVERY row of each employee's newest second, not one of them: the
+        // tie is broken by the lifecycle in JavaScript, shared with the
+        // single-employee read, so both paths answer the same thing.
         `SELECT t.employee_id,
                 t.pending_outcome,
+                (t.consumed_at IS NULL) AS is_unconsumed,
                 (t.pending_outcome IS NULL
                  AND t.pending_expires_at IS NOT NULL
-                 AND t.pending_expires_at > NOW()) AS latest_is_live
+                 AND t.pending_expires_at > NOW()) AS is_live
            FROM employee_telegram_link_tokens t
            JOIN (SELECT employee_id, MAX(created_at) AS newest
                    FROM employee_telegram_link_tokens
                   WHERE employee_id IN (?)
                   GROUP BY employee_id) newest_token
              ON newest_token.employee_id = t.employee_id
-            AND t.created_at = newest_token.newest`,
+            AND t.created_at = newest_token.newest
+          ORDER BY t.employee_id, t.token_hash ASC`,
         [ids],
         {}
       ),
@@ -534,18 +563,11 @@ class EmployeeTelegramRepository {
     const connected = new Set((identities || []).map((row) => Number(row.employee_id)));
     const summary = new Map();
     for (const id of ids) {
-      summary.set(id, { hasActiveIdentity: connected.has(id), latest: null, latestIsLive: false });
+      summary.set(id, { hasActiveIdentity: connected.has(id), rows: [] });
     }
-    for (const row of latest || []) {
-      const id = Number(row.employee_id);
-      const entry = summary.get(id);
-      if (!entry) continue;
-      const isLive = Number(row.latest_is_live) === 1;
-      // On a tie the LIVE row wins - see the note above.
-      if (entry.latest === null || (isLive && !entry.latestIsLive)) {
-        entry.latest = { pending_outcome: row.pending_outcome };
-        entry.latestIsLive = isLive;
-      }
+    for (const row of attempts || []) {
+      const entry = summary.get(Number(row.employee_id));
+      if (entry) entry.rows.push(row);
     }
     return summary;
   }

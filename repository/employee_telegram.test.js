@@ -378,6 +378,11 @@ describe("getSummaryForEmployees", () => {
     await buildRepo(pool).getSummaryForEmployees(IDS);
 
     for (const sql of sqlOf(pool).filter((s) => /^SELECT/.test(s))) {
+      // The SELECT list only. `token_hash` legitimately appears in ORDER BY -
+      // it is the stable discriminator of last resort for two otherwise
+      // identical rows, and sorting by it does not read it out.
+      const selectList = /SELECT ([\s\S]*?) FROM /.exec(sql);
+      assert.ok(selectList, `a select list: ${sql}`);
       for (const forbidden of [
         "telegram_user_id",
         "private_chat_id",
@@ -386,7 +391,7 @@ describe("getSummaryForEmployees", () => {
         "telegram_username",
         "pending_chat_id",
       ]) {
-        assert.ok(!sql.includes(forbidden), `${forbidden} must not be selected: ${sql}`);
+        assert.ok(!selectList[1].includes(forbidden), `${forbidden} must not be selected: ${sql}`);
       }
     }
   });
@@ -407,13 +412,13 @@ describe("getSummaryForEmployees", () => {
     assert.equal(out.get(8).hasActiveIdentity, false);
   });
 
-  it("takes only the LATEST link attempt per employee, and lets MySQL decide live-ness", async () => {
+  it("takes the NEWEST SECOND per employee, and lets MySQL decide live-ness", async () => {
     const pool = fakePool({
       answers: [
         [/FROM employee_telegram_identity/, []],
         [
           /FROM employee_telegram_link_tokens/,
-          [{ employee_id: 8, pending_outcome: null, latest_is_live: 1 }],
+          [{ employee_id: 8, pending_outcome: null, is_live: 1, is_unconsumed: 0 }],
         ],
       ],
     });
@@ -421,34 +426,36 @@ describe("getSummaryForEmployees", () => {
     const out = await buildRepo(pool).getSummaryForEmployees(IDS);
 
     const tokenSql = sqlOf(pool).find((s) => /JOIN/.test(s));
-    assert.match(tokenSql, /MAX\(created_at\)/, "the latest attempt, decided in SQL");
+    assert.match(tokenSql, /MAX\(created_at\)/, "the newest second, decided in SQL");
     assert.match(tokenSql, /pending_expires_at > NOW\(\)/, "live-ness against MySQL's own clock");
-    assert.deepEqual(out.get(8), {
-      hasActiveIdentity: false,
-      latest: { pending_outcome: null },
-      latestIsLive: true,
-    });
+    assert.match(tokenSql, /consumed_at IS NULL\) AS is_unconsumed/, "and the lifecycle facts with it");
+    assert.match(tokenSql, /ORDER BY t\.employee_id, t\.token_hash ASC/, "ordered stably, never selected");
+    assert.equal(out.get(8).hasActiveIdentity, false);
+    assert.equal(out.get(8).rows.length, 1);
+    assert.equal(out.get(8).rows[0].pending_outcome, null);
+    assert.equal(Number(out.get(8).rows[0].is_live), 1);
   });
 
-  it("ON A TIE THE LIVE ROW WINS - two tokens inside one second", async () => {
+  it("HANDS OVER EVERY ROW OF THE TIE - the lifecycle decides, not this query", async () => {
     // `created_at` is a TIMESTAMP, so two issuances in the same second tie.
-    // Issuance supersedes the older one, so the live row IS the newer.
+    // The repository deliberately does NOT pick a winner: the rule lives in
+    // `utils/employee_telegram_status.js` and is shared with the
+    // single-employee read, so both paths break the tie identically.
     const pool = fakePool({
       answers: [
         [/FROM employee_telegram_identity/, []],
         [
           /FROM employee_telegram_link_tokens/,
           [
-            { employee_id: 9, pending_outcome: "SUPERSEDED", latest_is_live: 0 },
-            { employee_id: 9, pending_outcome: null, latest_is_live: 1 },
+            { employee_id: 9, pending_outcome: "SUPERSEDED", is_live: 0 },
+            { employee_id: 9, pending_outcome: null, is_live: 1 },
           ],
         ],
       ],
     });
 
     const out = await buildRepo(pool).getSummaryForEmployees(IDS);
-    assert.equal(out.get(9).latestIsLive, true);
-    assert.equal(out.get(9).latest.pending_outcome, null);
+    assert.equal(out.get(9).rows.length, 2, "both candidates are handed over");
   });
 
   it("gives every requested employee an entry, so a missing row is not a missing answer", async () => {
@@ -456,7 +463,7 @@ describe("getSummaryForEmployees", () => {
     const out = await buildRepo(pool).getSummaryForEmployees(IDS);
     assert.deepEqual([...out.keys()], IDS);
     for (const id of IDS) {
-      assert.deepEqual(out.get(id), { hasActiveIdentity: false, latest: null, latestIsLive: false });
+      assert.deepEqual(out.get(id), { hasActiveIdentity: false, rows: [] });
     }
   });
 });

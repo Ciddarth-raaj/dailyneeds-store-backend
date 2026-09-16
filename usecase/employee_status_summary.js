@@ -1,6 +1,6 @@
 const logger = require("../utils/logger");
 const { EmployeeBankUsecase } = require("./employee_bank");
-const { statusFromRows, isConnected } = require("../utils/employee_telegram_status");
+const { resolveTelegramState, isConnected } = require("../utils/employee_telegram_status");
 
 /**
  * Stage 0C / C3 — the bulk Aadhaar and bank status summary.
@@ -32,7 +32,8 @@ const { statusFromRows, isConnected } = require("../utils/employee_telegram_stat
  * somebody the existing list would not show. It is a status column on an
  * existing list, not a new way to enumerate employees.
  *
- * QUERY COUNT IS BOUNDED at six, whatever the headcount:
+ * QUERY COUNT IS BOUNDED, whatever the headcount - the number below, and not
+ * one more for each of the 630 employees:
  *
  *   1  the resigned-name exclusion list  } inside employeeUsecase.get()
  *   2  the employees themselves          }
@@ -41,11 +42,16 @@ const { statusFromRows, isConnected } = require("../utils/employee_telegram_stat
  *   5  their stored bank verifications
  *   6  whether the statutory decision has been recorded - see the
  *      HR-onboarding note below
- *   7  the active-duplicate lookup - only when at least one employee is
+ *   7  their live salaries
+ *   8  how each of them is paid
+ *   9  which of them have a live Telegram identity   } the Telegram column,
+ *  10  their current Telegram link attempt           } added for the dashboard
+ *
+ *   +  the active-duplicate lookup - only when at least one employee is
  *      actually sitting on DUPLICATE_ACCOUNT, so usually not run at all
  *
  * WHAT IT RETURNS is four scalars per employee, plus the two HR-onboarding
- * keys below, and nothing else. No Aadhaar number or last four digits, no
+ * keys below and the two Telegram keys, and nothing else. No Aadhaar number or last four digits, no
  * account number or last four, no IFSC, no fingerprint, no ciphertext, no
  * verification or session id, no provider payload, no override reason. A list
  * needs a badge.
@@ -448,7 +454,7 @@ class EmployeeStatusSummaryUsecase {
       // Telegram to it today would mark all 630 employees incomplete for a
       // feature that has not shipped.
       const telegramFacts = telegram ? telegram.get(employee_id) : null;
-      const telegramStatus = telegramFacts ? statusFromRows(telegramFacts) : null;
+      const telegramStatus = telegramFacts ? resolveTelegramState(telegramFacts).status : null;
       return {
         employee_id,
         aadhaar_status: aadhaarVerified ? "VERIFIED" : "PENDING",

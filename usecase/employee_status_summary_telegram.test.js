@@ -22,8 +22,6 @@ const buildSummary = require("./employee_status_summary");
 const buildLinkUsecase = require("./employee_telegram_link");
 const { TELEGRAM_STATUS, PENDING_OUTCOME } = require("../constants/employee_telegram");
 
-const IN_AN_HOUR = () => new Date(Date.now() + 60 * 60 * 1000);
-const AN_HOUR_AGO = () => new Date(Date.now() - 60 * 60 * 1000);
 
 /**
  * The employee list and the four other reads, stubbed to their emptiest
@@ -53,8 +51,7 @@ function build({ employees = [], telegram = undefined }) {
               const row = telegram[id] || {};
               out.set(Number(id), {
                 hasActiveIdentity: Boolean(row.identity),
-                latest: row.latest === undefined ? null : row.latest,
-                latestIsLive: Boolean(row.latestIsLive),
+                rows: row.rows || [],
               });
             }
             return out;
@@ -89,7 +86,7 @@ describe("the Telegram status of each row", () => {
   it("a live pending session is AWAITING_CONTACT", async () => {
     const { usecase } = build({
       employees: [1],
-      telegram: { 1: { latest: { pending_outcome: null }, latestIsLive: true } },
+      telegram: { 1: { rows: [{ token_hash: "a", pending_outcome: null, is_live: 1 }] } },
     });
     const rows = byId(await usecase.list({}));
     assert.equal(rows[1].telegram_status, TELEGRAM_STATUS.AWAITING_CONTACT);
@@ -99,7 +96,7 @@ describe("the Telegram status of each row", () => {
   it("AN EXPIRED PENDING SESSION IS NOT 'Awaiting' - it is PENDING again", async () => {
     const { usecase } = build({
       employees: [1],
-      telegram: { 1: { latest: { pending_outcome: null }, latestIsLive: false } },
+      telegram: { 1: { rows: [{ token_hash: "a", pending_outcome: null, is_live: 0 }] } },
     });
     const rows = byId(await usecase.list({}));
     assert.equal(rows[1].telegram_status, TELEGRAM_STATUS.PENDING);
@@ -108,7 +105,7 @@ describe("the Telegram status of each row", () => {
   it("a mismatch on the latest attempt is MOBILE_MISMATCH", async () => {
     const { usecase } = build({
       employees: [1],
-      telegram: { 1: { latest: { pending_outcome: PENDING_OUTCOME.MOBILE_MISMATCH } } },
+      telegram: { 1: { rows: [{ token_hash: "a", pending_outcome: PENDING_OUTCOME.MOBILE_MISMATCH }] } },
     });
     const rows = byId(await usecase.list({}));
     assert.equal(rows[1].telegram_status, TELEGRAM_STATUS.MOBILE_MISMATCH);
@@ -118,7 +115,7 @@ describe("the Telegram status of each row", () => {
     const { usecase } = build({
       employees: [1],
       telegram: {
-        1: { identity: true, latest: { pending_outcome: PENDING_OUTCOME.MOBILE_MISMATCH } },
+        1: { identity: true, rows: [{ token_hash: "a", pending_outcome: PENDING_OUTCOME.MOBILE_MISMATCH }] },
       },
     });
     const rows = byId(await usecase.list({}));
@@ -128,7 +125,7 @@ describe("the Telegram status of each row", () => {
   it("a superseded attempt is PENDING, not a mismatch", async () => {
     const { usecase } = build({
       employees: [1],
-      telegram: { 1: { latest: { pending_outcome: PENDING_OUTCOME.SUPERSEDED } } },
+      telegram: { 1: { rows: [{ token_hash: "a", pending_outcome: PENDING_OUTCOME.SUPERSEDED }] } },
     });
     const rows = byId(await usecase.list({}));
     assert.equal(rows[1].telegram_status, TELEGRAM_STATUS.PENDING);
@@ -139,8 +136,8 @@ describe("the Telegram status of each row", () => {
       employees: [1, 2, 3, 4],
       telegram: {
         1: { identity: true },
-        2: { latest: { pending_outcome: null }, latestIsLive: true },
-        3: { latest: { pending_outcome: PENDING_OUTCOME.MOBILE_MISMATCH } },
+        2: { rows: [{ token_hash: "b", pending_outcome: null, is_live: 1 }] },
+        3: { rows: [{ token_hash: "c", pending_outcome: PENDING_OUTCOME.MOBILE_MISMATCH }] },
       },
     });
     const rows = byId(await usecase.list({}));
@@ -255,50 +252,50 @@ describe("PARITY with the employee's own Telegram screen", () => {
     {
       name: "nothing at all",
       identity: null,
-      latestRow: null,
-      facts: { latest: undefined },
+      rows: [],
+      facts: { rows: [] },
       expected: TELEGRAM_STATUS.PENDING,
     },
     {
       name: "connected",
       identity: { employee_telegram_id: 1, telegram_username: "a", connected_at: new Date() },
-      latestRow: null,
-      facts: { identity: true },
+      rows: [],
+      facts: { identity: true, rows: [] },
       expected: TELEGRAM_STATUS.CONNECTED,
     },
     {
       name: "live pending session",
       identity: null,
-      latestRow: { pending_outcome: null, pending_expires_at: IN_AN_HOUR() },
-      facts: { latest: { pending_outcome: null }, latestIsLive: true },
+      rows: [{ token_hash: "a", pending_outcome: null, is_live: 1 }],
+      facts: { rows: [{ token_hash: "a", pending_outcome: null, is_live: 1 }] },
       expected: TELEGRAM_STATUS.AWAITING_CONTACT,
     },
     {
       name: "expired pending session",
       identity: null,
-      latestRow: { pending_outcome: null, pending_expires_at: AN_HOUR_AGO() },
-      facts: { latest: { pending_outcome: null }, latestIsLive: false },
+      rows: [{ token_hash: "a", pending_outcome: null, is_live: 0 }],
+      facts: { rows: [{ token_hash: "a", pending_outcome: null, is_live: 0 }] },
       expected: TELEGRAM_STATUS.PENDING,
     },
     {
       name: "mismatch",
       identity: null,
-      latestRow: { pending_outcome: PENDING_OUTCOME.MOBILE_MISMATCH, pending_expires_at: null },
-      facts: { latest: { pending_outcome: PENDING_OUTCOME.MOBILE_MISMATCH } },
+      rows: [{ token_hash: "a", pending_outcome: PENDING_OUTCOME.MOBILE_MISMATCH }],
+      facts: { rows: [{ token_hash: "a", pending_outcome: PENDING_OUTCOME.MOBILE_MISMATCH }] },
       expected: TELEGRAM_STATUS.MOBILE_MISMATCH,
     },
     {
       name: "superseded",
       identity: null,
-      latestRow: { pending_outcome: PENDING_OUTCOME.SUPERSEDED, pending_expires_at: null },
-      facts: { latest: { pending_outcome: PENDING_OUTCOME.SUPERSEDED } },
+      rows: [{ token_hash: "a", pending_outcome: PENDING_OUTCOME.SUPERSEDED }],
+      facts: { rows: [{ token_hash: "a", pending_outcome: PENDING_OUTCOME.SUPERSEDED }] },
       expected: TELEGRAM_STATUS.PENDING,
     },
     {
       name: "connected after an earlier mismatch",
       identity: { employee_telegram_id: 2, telegram_username: null, connected_at: new Date() },
-      latestRow: { pending_outcome: PENDING_OUTCOME.MOBILE_MISMATCH, pending_expires_at: null },
-      facts: { identity: true, latest: { pending_outcome: PENDING_OUTCOME.MOBILE_MISMATCH } },
+      rows: [{ token_hash: "a", pending_outcome: PENDING_OUTCOME.MOBILE_MISMATCH }],
+      facts: { identity: true, rows: [{ token_hash: "a", pending_outcome: PENDING_OUTCOME.MOBILE_MISMATCH }] },
       expected: TELEGRAM_STATUS.CONNECTED,
     },
   ];
@@ -309,7 +306,7 @@ describe("PARITY with the employee's own Telegram screen", () => {
       const linkUsecase = buildLinkUsecase(
         {
           getActiveIdentityByEmployee: async () => scenario.identity,
-          getLatestPendingForEmployee: async () => scenario.latestRow,
+          getCurrentAttemptRows: async () => scenario.rows,
         },
         { getBotUsername: async () => "dnds_bot" }
       );
@@ -325,4 +322,192 @@ describe("PARITY with the employee's own Telegram screen", () => {
       assert.equal(row.telegram_connected, screen.connected);
     });
   }
+});
+
+/* ------------------------------------------------- same-second tie-breaks */
+
+describe("TWO ATTEMPTS INSIDE ONE SECOND", () => {
+  /**
+   * `created_at` is a TIMESTAMP, so a fresh QR issued while an older attempt
+   * is still on the row ties with it. `ORDER BY created_at DESC LIMIT 1` then
+   * returns whichever the storage engine felt like - a manager would see a
+   * mismatch that had already been superseded, or miss one that had not.
+   *
+   * The tie is broken by the LIFECYCLE, and these are the four cases that
+   * decide it. Each is driven through BOTH paths, and in BOTH row orders, so
+   * neither the answer nor the agreement can depend on SQL result order.
+   */
+  const CASES = [
+    {
+      name: "A: an old mismatch and a fresh, never-opened QR",
+      rows: [
+        { token_hash: "old", pending_outcome: PENDING_OUTCOME.MOBILE_MISMATCH },
+        { token_hash: "new", pending_outcome: null, is_unconsumed: 1 },
+      ],
+      expected: TELEGRAM_STATUS.PENDING,
+      why: "the fresh link replaced the mismatch - it is not still the answer",
+    },
+    {
+      name: "B: a superseded attempt and a fresh live pending one",
+      rows: [
+        { token_hash: "old", pending_outcome: PENDING_OUTCOME.SUPERSEDED },
+        { token_hash: "new", pending_outcome: null, is_live: 1 },
+      ],
+      expected: TELEGRAM_STATUS.AWAITING_CONTACT,
+      why: "somebody is mid-flow right now",
+    },
+    {
+      name: "C: a superseded attempt and a fresh one that ended in a mismatch",
+      rows: [
+        { token_hash: "old", pending_outcome: PENDING_OUTCOME.SUPERSEDED },
+        { token_hash: "new", pending_outcome: PENDING_OUTCOME.MOBILE_MISMATCH },
+      ],
+      expected: TELEGRAM_STATUS.MOBILE_MISMATCH,
+      why: "the conclusion is newer than the supersession, and needs a human",
+    },
+    {
+      name: "D: an active identity and any tied token states at all",
+      identity: true,
+      rows: [
+        { token_hash: "old", pending_outcome: PENDING_OUTCOME.MOBILE_MISMATCH },
+        { token_hash: "new", pending_outcome: null, is_live: 1 },
+      ],
+      expected: TELEGRAM_STATUS.CONNECTED,
+      why: "somebody verified - everything else is history",
+    },
+  ];
+
+  for (const testCase of CASES) {
+    it(`${testCase.name} -> ${testCase.expected} (${testCase.why})`, async () => {
+      for (const rows of [testCase.rows, [...testCase.rows].reverse()]) {
+        const facts = { identity: testCase.identity, rows };
+
+        const { usecase } = build({ employees: [7], telegram: { 7: facts } });
+        const row = byId(await usecase.list({}))[7];
+
+        const linkUsecase = buildLinkUsecase(
+          {
+            getActiveIdentityByEmployee: async () =>
+              testCase.identity ? { employee_telegram_id: 1, telegram_username: null, connected_at: new Date() } : null,
+            getCurrentAttemptRows: async () => rows,
+          },
+          { getBotUsername: async () => "dnds_bot" }
+        );
+        const screen = (await linkUsecase.getStatus(7)).data;
+
+        assert.equal(row.telegram_status, testCase.expected, "the dashboard");
+        assert.equal(screen.status, testCase.expected, "the employee's own screen");
+        assert.equal(row.telegram_status, screen.status, "and they agree, in either row order");
+      }
+    });
+  }
+
+  it("THE ANSWER DOES NOT DEPEND ON RESULT ORDER, for any tie at all", async () => {
+    const outcomes = [
+      null,
+      PENDING_OUTCOME.SUPERSEDED,
+      PENDING_OUTCOME.MOBILE_MISMATCH,
+      PENDING_OUTCOME.VERIFIED,
+    ];
+    for (const a of outcomes) {
+      for (const b of outcomes) {
+        const rows = [
+          { token_hash: "aaa", pending_outcome: a, is_live: a === null ? 1 : 0 },
+          { token_hash: "bbb", pending_outcome: b, is_unconsumed: b === null ? 1 : 0 },
+        ];
+        const forward = build({ employees: [7], telegram: { 7: { rows } } });
+        const reverse = build({ employees: [7], telegram: { 7: { rows: [...rows].reverse() } } });
+        assert.equal(
+          byId(await forward.usecase.list({}))[7].telegram_status,
+          byId(await reverse.usecase.list({}))[7].telegram_status,
+          `${a} vs ${b} must not depend on order`
+        );
+      }
+    }
+  });
+
+  it("two rows that are semantically identical still answer deterministically", async () => {
+    // Every lifecycle fact agrees, so only the stable token_hash tie-break is
+    // left - which is exactly when an arbitrary one is acceptable.
+    const rows = [
+      { token_hash: "bbb", pending_outcome: PENDING_OUTCOME.MOBILE_MISMATCH },
+      { token_hash: "aaa", pending_outcome: PENDING_OUTCOME.MOBILE_MISMATCH },
+    ];
+    const one = build({ employees: [7], telegram: { 7: { rows } } });
+    const two = build({ employees: [7], telegram: { 7: { rows: [...rows].reverse() } } });
+    assert.equal(
+      byId(await one.usecase.list({}))[7].telegram_status,
+      byId(await two.usecase.list({}))[7].telegram_status
+    );
+  });
+});
+
+/* --------------------------------------------------- the reconnect signal */
+
+describe("link_attempt - the field the reconnect experience needs", () => {
+  const statusFor = async (identity, rows) => {
+    const linkUsecase = buildLinkUsecase(
+      {
+        getActiveIdentityByEmployee: async () =>
+          identity ? { employee_telegram_id: 1, telegram_username: "a", connected_at: new Date() } : null,
+        getCurrentAttemptRows: async () => rows,
+      },
+      { getBotUsername: async () => "dnds_bot" }
+    );
+    return (await linkUsecase.getStatus(7)).data;
+  };
+
+  it("A RECONNECT IN FLIGHT: still CONNECTED, but the attempt is AWAITING_CONTACT", async () => {
+    // The old identity is deliberately kept until the new account verifies,
+    // so `status` alone cannot tell a screen whether its QR has been dealt
+    // with. Without this field the UI declares success the moment it generates
+    // the QR.
+    const data = await statusFor(true, [{ token_hash: "a", pending_outcome: null, is_live: 1 }]);
+    assert.equal(data.status, TELEGRAM_STATUS.CONNECTED, "the employee is still reachable");
+    assert.equal(data.link_attempt, "AWAITING_CONTACT", "and the new QR is still outstanding");
+  });
+
+  it("a finished reconnect reads VERIFIED", async () => {
+    const data = await statusFor(true, [{ token_hash: "a", pending_outcome: PENDING_OUTCOME.VERIFIED }]);
+    assert.equal(data.status, TELEGRAM_STATUS.CONNECTED);
+    assert.equal(data.link_attempt, "VERIFIED");
+  });
+
+  it("a failed reconnect reads MOBILE_MISMATCH while the OLD identity stays connected", async () => {
+    const data = await statusFor(true, [
+      { token_hash: "a", pending_outcome: PENDING_OUTCOME.MOBILE_MISMATCH },
+    ]);
+    assert.equal(data.status, TELEGRAM_STATUS.CONNECTED, "the working connection survives");
+    assert.equal(data.link_attempt, "MOBILE_MISMATCH", "and the attempt is reported as failed");
+  });
+
+  it("no attempt at all reads NONE", async () => {
+    assert.equal((await statusFor(false, [])).link_attempt, "NONE");
+    assert.equal((await statusFor(true, [])).link_attempt, "NONE");
+  });
+
+  it("an initial connection moves NONE -> AWAITING_CONTACT -> VERIFIED", async () => {
+    assert.equal((await statusFor(false, [])).link_attempt, "NONE");
+    assert.equal(
+      (await statusFor(false, [{ token_hash: "a", pending_outcome: null, is_live: 1 }])).link_attempt,
+      "AWAITING_CONTACT"
+    );
+    const done = await statusFor(true, [{ token_hash: "a", pending_outcome: PENDING_OUTCOME.VERIFIED }]);
+    assert.equal(done.status, TELEGRAM_STATUS.CONNECTED);
+    assert.equal(done.link_attempt, "VERIFIED");
+  });
+
+  it("IT CARRIES NO SECRET - it is one word about progress", async () => {
+    const data = await statusFor(true, [{ token_hash: "supersecret", pending_outcome: null, is_live: 1 }]);
+    const dumped = JSON.stringify(data);
+    // VALUES, not key names: `mobile_verified` is a legitimate boolean saying
+    // whether verification happened, and carries no number.
+    assert.ok(!dumped.includes("supersecret"), "no token or hash value");
+    assert.ok(!/\d{6,}/.test(dumped), "no run of digits that could be a mobile, user id or chat id");
+    assert.equal(typeof data.link_attempt, "string");
+    assert.ok(
+      ["NONE", "PENDING", "AWAITING_CONTACT", "MOBILE_MISMATCH", "VERIFIED"].includes(data.link_attempt),
+      "and it is one of five fixed words"
+    );
+  });
 });

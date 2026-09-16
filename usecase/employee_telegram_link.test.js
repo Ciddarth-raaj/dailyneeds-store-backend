@@ -122,10 +122,30 @@ const makeRepo = (store) => ({
     live.sort((a, b) => new Date(b.consumed_at) - new Date(a.consumed_at));
     return live[0] || null;
   },
-  async getLatestPendingForEmployee(employeeId) {
+  /**
+   * Every row of the employee's newest second, with the lifecycle facts the
+   * real query computes in SQL - so the tie-break under test is the real one.
+   */
+  async getCurrentAttemptRows(employeeId) {
     const rows = [...store.tokens.values()].filter((r) => r.employee_id === employeeId);
+    if (rows.length === 0) return [];
     rows.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-    return rows[0] || null;
+    const newest = new Date(rows[0].created_at).getTime();
+    return rows
+      .filter((r) => new Date(r.created_at).getTime() === newest)
+      .map((r) => ({
+        token_hash: r.token_hash,
+        employee_id: r.employee_id,
+        pending_outcome: r.pending_outcome,
+        created_at: r.created_at,
+        is_unconsumed: r.consumed_at === null ? 1 : 0,
+        is_live:
+          r.pending_outcome === null &&
+          r.pending_expires_at !== null &&
+          new Date(r.pending_expires_at).getTime() > Date.now()
+            ? 1
+            : 0,
+      }));
   },
   async closePending(tokenHash, outcome) {
     const row = store.tokens.get(tokenHash);
@@ -832,6 +852,10 @@ describe("status", () => {
     assert.deepEqual(Object.keys(data).sort(), [
       "connected",
       "connected_at",
+      // Additive, and it is a single word about the CURRENT link attempt -
+      // which is what lets a screen tell a reconnect in progress from one
+      // that finished, while `status` stays CONNECTED throughout.
+      "link_attempt",
       "mobile_verified",
       "status",
       "telegram_username",

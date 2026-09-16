@@ -3,7 +3,7 @@ const logger = require("../utils/logger");
 const { normalizeIndianMobile, mobilesMatch } = require("../utils/mobile_number");
 const { employedOn } = require("../utils/attendance_eligibility");
 const { istDateOf } = require("../utils/istDate");
-const { statusFromRows } = require("../utils/employee_telegram_status");
+const { resolveTelegramState } = require("../utils/employee_telegram_status");
 const {
   EMPLOYEE_LINK_PREFIX,
   LINK_TOKEN_TTL_MS,
@@ -260,43 +260,46 @@ class EmployeeTelegramLinkUsecase {
    * they linked the right account, and it is not proof of anything.
    */
   async getStatus(employeeId) {
-    const identity = await this.repo.getActiveIdentityByEmployee(employeeId);
-    if (identity) {
-      return {
-        code: 200,
-        data: {
-          status: TELEGRAM_STATUS.CONNECTED,
-          connected: true,
-          mobile_verified: true,
-          telegram_username: identity.telegram_username || null,
-          connected_at: identity.connected_at,
-        },
-      };
-    }
+    const [identity, rows] = await Promise.all([
+      this.repo.getActiveIdentityByEmployee(employeeId),
+      this.repo.getCurrentAttemptRows(employeeId),
+    ]);
 
-    const latest = await this.repo.getLatestPendingForEmployee(employeeId);
-    // THE PRECEDENCE IS NOT WRITTEN HERE ANY MORE. It is shared with the
-    // onboarding dashboard's bulk summary (`utils/employee_telegram_status.js`)
-    // so that a badge on a list and the status on this employee's own screen
-    // cannot drift apart. The behaviour is unchanged - see the parity tests.
-    const status = statusFromRows({
-      hasActiveIdentity: false,
-      latest,
-      latestIsLive: Boolean(
-        latest &&
-          latest.pending_expires_at &&
-          new Date(latest.pending_expires_at).getTime() > this.now().getTime()
-      ),
+    // THE PRECEDENCE IS NOT WRITTEN HERE. It is shared with the onboarding
+    // dashboard's bulk summary (`utils/employee_telegram_status.js`), applied
+    // to the same facts, so a badge on a list and the status on this
+    // employee's own screen cannot drift apart - including how they break a
+    // tie between two attempts issued inside one second.
+    const resolved = resolveTelegramState({
+      hasActiveIdentity: Boolean(identity),
+      rows: rows || [],
     });
 
     return {
       code: 200,
       data: {
-        status,
-        connected: false,
-        mobile_verified: false,
-        telegram_username: null,
-        connected_at: null,
+        status: resolved.status,
+        connected: Boolean(identity),
+        mobile_verified: Boolean(identity),
+        telegram_username: identity ? identity.telegram_username || null : null,
+        connected_at: identity ? identity.connected_at : null,
+        /**
+         * WHAT THE LINK IN FRONT OF THE USER HAS COME TO - additive, and the
+         * reason it exists is RECONNECT.
+         *
+         * When a connected employee links a different Telegram account the old
+         * identity is deliberately kept until the new one verifies, so `status`
+         * reads CONNECTED throughout. A screen watching only `status` would
+         * therefore see "connected" the instant it generated the new QR and
+         * conclude the employee had already finished - declaring success for a
+         * verification that has not happened.
+         *
+         * This says what the CURRENT attempt is doing, independently of the
+         * identity: NONE, PENDING, AWAITING_CONTACT, MOBILE_MISMATCH or
+         * VERIFIED. It carries no token, no hash, no mobile number, no
+         * Telegram user id and no chat id - it is a single word about progress.
+         */
+        link_attempt: resolved.attempt,
       },
     };
   }
