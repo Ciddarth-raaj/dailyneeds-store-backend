@@ -4,6 +4,7 @@ const P = require("../constants/hr_permissions");
 const { EDITABLE_FIELDS } = require("../repository/employee_master");
 const { getClientIp } = require("../utils/ip");
 const { requireAdmin } = require("../middlewares/admin_only");
+const { EMPLOYMENT_TYPES, GRADES } = require("../utils/employment_classification");
 
 const router = express.Router();
 
@@ -131,6 +132,14 @@ class EmployeeMasterRoutes {
             employee_image: Joi.string().allow("", null).optional(),
             telegram_username: Joi.string().allow("", null).optional(),
             online_portal: Joi.number().optional(),
+            // CLASSIFICATION ONLY, and fixed sets. Declared with `valid` so an
+            // unsupported value is refused at the edge as well as in
+            // `utils/employment_classification.js` - which stays the one
+            // definition, imported here rather than retyped. Optional and
+            // blankable: a hire nobody has classified yet is created with
+            // both NULL, exactly like every existing employee.
+            employment_type: Joi.string().valid(EMPLOYMENT_TYPES).allow("", null).optional(),
+            grade: Joi.string().valid(GRADES).allow("", null).optional(),
             // Stage 0C / C2. When present, the employee is created with a
             // verified Aadhaar identity attached in the same transaction.
             aadhaar_verification_id: Joi.number().integer().positive().optional(),

@@ -78,6 +78,12 @@ const EMPLOYEE_MASTER_COLUMNS = [
   "new_employee.source_system",
   "new_employee.source_employee_code",
   "new_employee.attendance_required",
+  // Classification only - how the employee is engaged, and their internal
+  // band. Nothing derives pay, attendance or permissions from either; they
+  // are here because Employment Details displays them. NULL for every
+  // employee nobody has classified, which is a permanent, valid state.
+  "new_employee.employment_type",
+  "new_employee.grade",
 ];
 
 /**

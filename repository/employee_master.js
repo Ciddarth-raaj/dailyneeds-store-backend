@@ -52,6 +52,13 @@ const EDITABLE_FIELDS = [
   "department_id",
   "designation_id",
   "shift_id",
+  // Classification only. On this list because Employment Details is where HR
+  // records them, under the SAME `employee_edit` key and the same branch
+  // scope as branch, department and designation - no new permission and no
+  // second edit path. The usecase checks the value against
+  // `utils/employment_classification.js` before it reaches the column.
+  "employment_type",
+  "grade",
 ];
 
 /**

@@ -9,6 +9,9 @@ const {
 
 const { effectiveFromNotBeforeCutover } = require("../constants/attendance_v2");
 const personalDetails = require("../utils/personal_details");
+const {
+  normaliseClassificationFields,
+} = require("../utils/employment_classification");
 const { EDITABLE_FIELDS, SECURITY_RELEVANT_FIELDS, LIFECYCLE_CONTROLLED_FIELDS, STATUS } = masterRepo;
 
 /**
@@ -200,6 +203,12 @@ class EmployeeMasterUsecase {
     // must not become an INSERT of NULL into a NOT NULL column.
     for (const k of Object.keys(fields)) if (fields[k] === undefined) delete fields[k];
     for (const f of LIFECYCLE_CONTROLLED_FIELDS) delete fields[f];
+    // EMPLOYMENT TYPE AND GRADE ARE CHECKED BEFORE ANYTHING IS WRITTEN, and
+    // by the same module the edit path uses, so the two cannot diverge. An
+    // unsupported value is a 422 here rather than a truncated ENUM in the
+    // column; a blank one is `null`, which is "not recorded" and is exactly
+    // what every existing employee already carries.
+    Object.assign(fields, normaliseClassificationFields(fields));
     // The lifecycle owns these two, and sets them to exactly this.
     fields.date_of_joining = joinedOn;
     fields.status = STATUS.ACTIVE;
@@ -446,6 +455,11 @@ class EmployeeMasterUsecase {
     const unknown = offered.filter((k) => !EDITABLE_FIELDS.includes(k));
     if (unknown.length) throw new ValidationError(`not an editable employee field: ${unknown.join(", ")}`);
     if (offered.length === 0) throw new ValidationError("nothing to change");
+
+    // The same check the create does, from the same module. Clearing either
+    // field is allowed and stores NULL - "not recorded" is a state HR may
+    // return an employee to, not an error.
+    patch = normaliseClassificationFields(patch);
 
     return this.repo.withTransaction(async (tx) => {
       const before = await this.repo.lockEmployee(tx, employeeId);
