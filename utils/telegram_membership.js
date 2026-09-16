@@ -1,4 +1,6 @@
 const {
+  TELEGRAM_COMPLETION,
+  VERIFIED_MEMBERSHIP,
   GROUP_READINESS,
   READINESS_REASON,
   MEMBERSHIP_STATUS,
@@ -179,8 +181,62 @@ function telegramComplete({ connected, groups } = {}) {
   return list.every((group) => group.membership_status === MEMBERSHIP_STATUS.JOINED);
 }
 
+/**
+ * THE DASHBOARD'S COMPLETION, from cached verifications alone.
+ *
+ * Pure, and deliberately separate from `telegramComplete` above: that one
+ * answers "is this person complete, according to Telegram, right now" for
+ * the detail screen, and this one answers "what should the queue show,
+ * according to the last time anybody looked". They must not be the same
+ * function, because they are not the same question and the second one is
+ * allowed to be out of date.
+ *
+ * `verifications` IS KEYED BY GROUP AND IS ALREADY SCOPED TO THE EMPLOYEE'S
+ * CURRENT IDENTITY ROW by the query that produced it. That is what makes a
+ * reconnect invalidate everything automatically: the new identity row has no
+ * verifications, so every required group reads VERIFICATION_PENDING until
+ * somebody opens the record - which is true, because that Telegram account
+ * has never been checked in that group.
+ *
+ * ORDER OF THE CHECKS MATTERS. Unverified is reported ahead of not-joined,
+ * because claiming somebody has not joined a group nobody has looked at is a
+ * statement we have no evidence for.
+ */
+function dashboardCompletion({ connected, requiredGroupIds, verifications } = {}) {
+  if (!connected) return TELEGRAM_COMPLETION.NOT_CONNECTED;
+
+  const required = requiredGroupIds || [];
+  // Nothing required, and an identity connected: there is nothing left to do
+  // and no verification anybody could be waiting for.
+  if (required.length === 0) return TELEGRAM_COMPLETION.COMPLETE;
+
+  const byGroup = verifications || new Map();
+  let anyUnverified = false;
+  let anyNotComplete = false;
+
+  for (const groupId of required) {
+    const row = byGroup.get(Number(groupId));
+    if (!row) {
+      anyUnverified = true;
+      continue;
+    }
+    // A group we last saw as unmanageable is a real, definitive problem -
+    // the requirement is unmet - so it is PENDING rather than unverified.
+    if (row.readiness_status !== GROUP_READINESS.READY) {
+      anyNotComplete = true;
+      continue;
+    }
+    if (row.membership !== VERIFIED_MEMBERSHIP.JOINED) anyNotComplete = true;
+  }
+
+  if (anyUnverified) return TELEGRAM_COMPLETION.VERIFICATION_PENDING;
+  if (anyNotComplete) return TELEGRAM_COMPLETION.PENDING;
+  return TELEGRAM_COMPLETION.COMPLETE;
+}
+
 module.exports = {
   CHAT_TYPE,
+  dashboardCompletion,
   groupReadiness,
   isReady,
   isTelegramMember,

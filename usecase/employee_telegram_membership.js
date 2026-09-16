@@ -16,6 +16,7 @@ const {
   ATTEMPT_STATUS,
   GROUP_READINESS,
   READINESS_REASON,
+  VERIFIED_MEMBERSHIP,
 } = require("../constants/telegram_membership");
 
 /**
@@ -67,13 +68,53 @@ class EmployeeTelegramMembershipUsecase {
    * @param {object} deps.telegram       services/telegram
    * @param {() => Date} [deps.now]
    */
-  constructor({ mappingRepo, identityRepo, joinRepo, readiness, telegram, now } = {}) {
+  constructor({ mappingRepo, identityRepo, joinRepo, readiness, telegram, verificationRepo, now } = {}) {
     this.mappingRepo = mappingRepo;
     this.identityRepo = identityRepo;
     this.joinRepo = joinRepo;
     this.readiness = readiness;
     this.telegram = telegram;
+    // Optional: the dashboard's cache. This screen writes to it and never
+    // reads it - it asks Telegram - so the screen works identically without.
+    this.verificationRepo = verificationRepo || null;
     this.now = now || (() => new Date());
+  }
+
+  /**
+   * Record a DEFINITIVE answer for the dashboard to read later.
+   *
+   * CALLED ONLY WHERE TELEGRAM ACTUALLY ANSWERED. A readiness of
+   * TELEGRAM_UNAVAILABLE, or a membership check that threw, is not an answer
+   * and must never overwrite a real one: a momentary network failure would
+   * otherwise knock an employee off the Complete list for a reason that has
+   * nothing to do with them. The repository refuses it too - belt and braces
+   * on the one rule that makes the cache trustworthy.
+   *
+   * NEVER THROWS. Filling a cache is not worth failing the screen that
+   * fetched the data.
+   */
+  async _recordVerification({ identity, group, readiness, joined }) {
+    if (!this.verificationRepo || !identity) return;
+    if (!readiness || readiness.status === GROUP_READINESS.TELEGRAM_UNAVAILABLE) return;
+    try {
+      await this.verificationRepo.record({
+        employeeTelegramId: identity.employee_telegram_id,
+        employeeId: identity.employee_id,
+        telegramGroupId: group.telegram_group_id,
+        membership: joined ? VERIFIED_MEMBERSHIP.JOINED : VERIFIED_MEMBERSHIP.NOT_JOINED,
+        readinessStatus: readiness.status,
+        verifiedAt: this.now(),
+      });
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "USECASE.EMPLOYEE_TELEGRAM_MEMBERSHIP",
+        code: "USECASE.EMPLOYEE_TELEGRAM_MEMBERSHIP.RECORD-VERIFICATION",
+        description: `could not cache a verification: ${err.toString()}`,
+        category: "",
+        ref: { telegram_group_id: group.telegram_group_id },
+      });
+    }
   }
 
   businessDate() {
@@ -178,7 +219,14 @@ class EmployeeTelegramMembershipUsecase {
           };
         } else {
           joined = live;
+          await this._recordVerification({ identity, group, readiness, joined });
         }
+      } else if (connected && readiness && readiness.status !== GROUP_READINESS.TELEGRAM_UNAVAILABLE) {
+        // A group we definitively could not manage - inactive, a Basic
+        // Group, the bot demoted. That is a real finding and the dashboard
+        // should show the employee as PENDING rather than unverified: we DID
+        // look, and the requirement is genuinely unmet.
+        await this._recordVerification({ identity, group, readiness, joined: false });
       }
 
       rows.push({

@@ -358,6 +358,12 @@ class Server {
     // reload and refuse an employee who did nothing wrong.
     this.employeeTelegramGroupJoinRepo = require("./repository/employee_telegram_group_join")(
       this.mysql.connection
+    );
+    // The dashboard's membership-verification cache. Written by the employee
+    // DETAIL screen when Telegram gives a definitive answer, read only by the
+    // bulk status summary - so the dashboard needs no Telegram call at all.
+    this.employeeTelegramGroupVerificationRepo = require("./repository/employee_telegram_group_verification")(
+      this.mysql.connection
     );    // EMPLOYEE Telegram identity. Keyed by employee_id, never by a login:
     // most employees have no dnds.co.in account, so `telegram_links` (which is
     // keyed by user_id, for password reset) could not serve them.
@@ -563,7 +569,15 @@ class Server {
       // bulk queries for the whole list. The browser must never ask
       // /hr/employee/:id/telegram per row - that is the N+1 this endpoint
       // exists to prevent.
-      this.employeeTelegramRepo
+      this.employeeTelegramRepo,
+      // PHASE 3B COMPLETION, from the same page's data and the cache - and
+      // from NO Telegram call. Asking here would be two calls per required
+      // group per employee, thousands per page load, on the token the
+      // three-second poller shares.
+      {
+        mappingRepo: this.telegramGroupMappingRepo,
+        verificationRepo: this.employeeTelegramGroupVerificationRepo,
+      }
     );
     this.shiftUsecase = require("./usecase/shift")(this.shiftRepo);
     this.workShiftUsecase = require("./usecase/work_shift")(this.workShiftRepo);
@@ -762,6 +776,8 @@ class Server {
       joinRepo: this.employeeTelegramGroupJoinRepo,
       readiness: this.telegramGroupReadinessUsecase,
       telegram: require("./services/telegram")(),
+      // This screen WRITES the cache and never reads it - it asks Telegram.
+      verificationRepo: this.employeeTelegramGroupVerificationRepo,
     });
     // THE JOIN-REQUEST HANDLER, ON THE SAME DISPATCHER. `chat_join_request`
     // is already in `allowed_updates` and already aliased by the dispatcher,

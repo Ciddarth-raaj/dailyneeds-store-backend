@@ -1,6 +1,10 @@
 const logger = require("../utils/logger");
 const { EmployeeBankUsecase } = require("./employee_bank");
 const { resolveTelegramState, isConnected } = require("../utils/employee_telegram_status");
+const { dashboardCompletion } = require("../utils/telegram_membership");
+const { matchesDimension } = require("../utils/telegram_group_mapping");
+const { employedOn } = require("../utils/attendance_eligibility");
+const { istDateOf } = require("../utils/istDate");
 
 /**
  * Stage 0C / C3 — the bulk Aadhaar and bank status summary.
@@ -182,7 +186,15 @@ class EmployeeStatusSummaryUsecase {
    * `employeeMasterRepo` is optional and read-only here: it answers whether
    * the statutory decision has been recorded, never what it was.
    */
-  constructor(employeeUsecase, aadhaarRepo, bankRepo, employeeMasterRepo, salaryRepo, telegramRepo) {
+  constructor(
+    employeeUsecase,
+    aadhaarRepo,
+    bankRepo,
+    employeeMasterRepo,
+    salaryRepo,
+    telegramRepo,
+    telegramCompletionDeps
+  ) {
     this.employees = employeeUsecase;
     this.aadhaarRepo = aadhaarRepo || null;
     this.bankRepo = bankRepo || null;
@@ -195,6 +207,23 @@ class EmployeeStatusSummaryUsecase {
      * a reason that was really "this server is not configured".
      */
     this.telegramRepo = telegramRepo || null;
+    /**
+     * PHASE 3B DASHBOARD COMPLETION - two more bulk reads, and ZERO Telegram
+     * API calls. Asking Telegram here would be two calls per required group
+     * per employee: for a few hundred employees that is thousands of Bot API
+     * calls on every page load, on the token the three-second password-reset
+     * poller shares. So this reads the cache the employee DETAIL screen
+     * fills in, and the field it produces says `last verified` in its own
+     * name rather than claiming to be live.
+     *
+     * Optional, exactly like `telegramRepo`: unwired, the key is OMITTED
+     * rather than guessed, because a PENDING this endpoint did not establish
+     * would put every employee on a queue for a reason that was really
+     * "this server is not configured".
+     */
+    const completion = telegramCompletionDeps || {};
+    this.telegramMappingRepo = completion.mappingRepo || null;
+    this.telegramVerificationRepo = completion.verificationRepo || null;
   }
 
   /**
@@ -406,6 +435,13 @@ class EmployeeStatusSummaryUsecase {
       this._telegramFacts(ids),
     ]);
 
+    // AFTER the others, because it REUSES their Telegram facts rather than
+    // fetching them again. Running it inside the Promise.all above cost a
+    // second identical `getSummaryForEmployees` on every page load - a
+    // duplicate bulk query for a Map already in hand. Two bulk reads of its
+    // own, whatever the page size, and never a Telegram call.
+    const telegramCompletion = await this._telegramCompletion(ids, telegram);
+
     return ids.map((employee_id) => {
       const b = bank.get(employee_id) || { status: "NOT_PROVIDED", bank_payroll_ready: false };
       const decisions = statutory
@@ -455,6 +491,9 @@ class EmployeeStatusSummaryUsecase {
       // feature that has not shipped.
       const telegramFacts = telegram ? telegram.get(employee_id) : null;
       const telegramStatus = telegramFacts ? resolveTelegramState(telegramFacts).status : null;
+      const completionStatus = telegramCompletion
+        ? telegramCompletion.get(employee_id) || null
+        : null;
       return {
         employee_id,
         aadhaar_status: aadhaarVerified ? "VERIFIED" : "PENDING",
@@ -464,6 +503,10 @@ class EmployeeStatusSummaryUsecase {
               telegram_connected: isConnected(telegramStatus),
             }
           : {}),
+        // A SEPARATE FIELD, not a replacement. `telegram_connected` still
+        // means connected and other screens still read it; this says whether
+        // the required groups are done, AS LAST VERIFIED.
+        ...(completionStatus ? { telegram_completion: completionStatus } : {}),
         bank_status: b.status,
         bank_payroll_ready: b.bank_payroll_ready,
         ...(onboarding
@@ -590,6 +633,88 @@ class EmployeeStatusSummaryUsecase {
    * to chase 630 people; showing no Telegram column at all is the honest
    * outcome and is what the screen already does for a failed summary.
    */
+  /**
+   * DASHBOARD TELEGRAM COMPLETION for every employee on the page.
+   *
+   * TWO BULK QUERIES, AND NO TELEGRAM CALL AT ALL:
+   *
+   *   1  every mapping with its group - the same rows the Map screen reads,
+   *      matched with the SAME Phase 3A matcher, so "required" means here
+   *      exactly what it means there
+   *   2  the cached verifications for these employees, joined to their
+   *      ACTIVE identity so a reconnect's old answers are excluded by the
+   *      query rather than by a caller remembering to
+   *
+   * The employee rows are already in hand from the summary's own read, so
+   * matching is arithmetic over data we have. There is no per-employee query
+   * and no per-group query.
+   *
+   * IT NEVER THROWS. A dashboard is not worth failing over a work-queue
+   * column; an error omits the key, which reads as "not wired" rather than
+   * as everybody being incomplete.
+   */
+  async _telegramCompletion(ids, identityFacts) {
+    if (!this.telegramMappingRepo || !this.telegramVerificationRepo || !identityFacts) {
+      return null;
+    }
+    try {
+      const [mappings, verifications, employees] = await Promise.all([
+        this.telegramMappingRepo.getAllMappingsWithGroups(),
+        this.telegramVerificationRepo.getForEmployees(ids),
+        this.telegramMappingRepo.getEmployeeSnapshot(),
+      ]);
+
+      const businessDate = istDateOf(new Date());
+      const byId = new Map(employees.map((employee) => [Number(employee.employee_id), employee]));
+      const out = new Map();
+
+      for (const employeeId of ids) {
+        const employee = byId.get(Number(employeeId));
+        // THE REAL BULK SHAPE is `{ hasActiveIdentity, rows }` - decided by
+        // the SHARED precedence rule, so this column and the employee's own
+        // Telegram screen cannot disagree about what "connected" means. An
+        // invented `facts.connected` read undefined and reported everybody
+        // NOT_CONNECTED.
+        const facts = identityFacts ? identityFacts.get(Number(employeeId)) : null;
+        const connected = facts ? isConnected(resolveTelegramState(facts).status) : false;
+
+        // The SAME matcher as the Map screen and the detail endpoint. A
+        // fourth copy of "who is required" would be a fourth thing to keep
+        // in step.
+        const required = [];
+        if (employee && employedOn(employee, businessDate)) {
+          const seen = new Set();
+          for (const mapping of mappings) {
+            if (!matchesDimension(employee, mapping)) continue;
+            if (seen.has(mapping.telegram_group_id)) continue;
+            seen.add(mapping.telegram_group_id);
+            required.push(mapping.telegram_group_id);
+          }
+        }
+
+        out.set(
+          Number(employeeId),
+          dashboardCompletion({
+            connected,
+            requiredGroupIds: required,
+            verifications: verifications.get(Number(employeeId)) || new Map(),
+          })
+        );
+      }
+      return out;
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "USECASE.EMPLOYEE-STATUS-SUMMARY",
+        code: "USECASE.EMPLOYEE-STATUS-SUMMARY.TELEGRAM-COMPLETION",
+        description: err.toString(),
+        category: "",
+        ref: {},
+      });
+      return null;
+    }
+  }
+
   async _telegramFacts(ids) {
     if (!this.telegramRepo || typeof this.telegramRepo.getSummaryForEmployees !== "function") {
       return null;
@@ -745,13 +870,28 @@ class EmployeeStatusSummaryUsecase {
   }
 }
 
-module.exports = (employeeUsecase, aadhaarRepo, bankRepo, employeeMasterRepo, salaryRepo, telegramRepo) =>
+module.exports = (
+  employeeUsecase,
+  aadhaarRepo,
+  bankRepo,
+  employeeMasterRepo,
+  salaryRepo,
+  telegramRepo,
+  telegramCompletionDeps
+) =>
   new EmployeeStatusSummaryUsecase(
     employeeUsecase,
     aadhaarRepo,
     bankRepo,
     employeeMasterRepo,
     salaryRepo,
-    telegramRepo
+    telegramRepo,
+    // THE SEVENTH ARGUMENT, AND THE REASON THIS LINE IS WORTH A COMMENT.
+    // The sixth was dropped here once before: the constructor took it, the
+    // factory did not pass it, every unit test built the class directly and
+    // passed, and the column would have been silently missing in production.
+    // A parity test now pins that the factory forwards everything the
+    // constructor accepts.
+    telegramCompletionDeps
   );
 module.exports.EmployeeStatusSummaryUsecase = EmployeeStatusSummaryUsecase;

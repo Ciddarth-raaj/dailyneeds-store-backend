@@ -63,6 +63,35 @@ const MEMBERSHIP_STATUS = {
   GROUP_NOT_READY: "GROUP_NOT_READY",
 };
 
+/**
+ * THE DASHBOARD'S ANSWER. Four words, and the third exists to stay honest.
+ *
+ * This is LAST-VERIFIED status, not a live Telegram verdict: the employee
+ * dashboard cannot ask Telegram - thousands of calls per page load on a
+ * token shared with the three-second poller - so it reads the cache the
+ * detail screen fills in.
+ *
+ * `VERIFICATION_PENDING` IS THE HONEST GAP. It means we have never checked
+ * THAT identity in THAT group, which happens the moment a mapping is added
+ * or somebody reconnects a different Telegram account. Folding it into
+ * PENDING would say "they have not joined" about something nobody has
+ * looked at, and folding it into COMPLETE would be worse. It is a
+ * distinguishable state so the queue can be worked: PENDING needs the
+ * employee to act, VERIFICATION_PENDING needs somebody to open their record.
+ */
+const TELEGRAM_COMPLETION = {
+  NOT_CONNECTED: "NOT_CONNECTED",
+  VERIFICATION_PENDING: "VERIFICATION_PENDING",
+  PENDING: "PENDING",
+  COMPLETE: "COMPLETE",
+};
+
+/** What a cached verification recorded. Never "unknown" - see the migration. */
+const VERIFIED_MEMBERSHIP = {
+  JOINED: "JOINED",
+  NOT_JOINED: "NOT_JOINED",
+};
+
 /** One join in flight. Durable, and richer than the screen needs. */
 const ATTEMPT_STATUS = {
   PENDING: "PENDING",
@@ -141,6 +170,8 @@ const MEMBERSHIP_MESSAGES = {
 };
 
 module.exports = {
+  TELEGRAM_COMPLETION,
+  VERIFIED_MEMBERSHIP,
   GROUP_READINESS,
   READINESS_REASON,
   MEMBERSHIP_STATUS,

@@ -55,10 +55,10 @@ const mapping = (id, groupId, type, target, groupRow) => ({
 });
 
 const build = (over = {}) => {
-  const calls = { issued: [], invites: [], memberChecks: [], expired: [] };
+  const calls = { issued: [], invites: [], memberChecks: [], expired: [], verified: [] };
   const state = {
     mappings: [],
-    identity: { employee_id: 42, telegram_user_id: 555001 },
+    identity: { employee_id: 42, employee_telegram_id: 900, telegram_user_id: 555001 },
     readiness: { status: GROUP_READINESS.READY, reason: null },
     liveAttempts: new Map(),
     joinedGroupIds: new Set(),
@@ -74,6 +74,12 @@ const build = (over = {}) => {
       getEmployeeForMatching: async () => emp(),
     },
     identityRepo: { getActiveIdentityByEmployee: async () => state.identity },
+    verificationRepo: {
+      record: async (row) => {
+        calls.verified.push(row);
+        return { recorded: true };
+      },
+    },
     joinRepo: {
       expireOverdue: async (id) => {
         calls.expired.push(id);
@@ -301,6 +307,126 @@ describe("the employee's Telegram picture", () => {
     for (const secret of ["555001", "-1001", "telegram_user_id", "private_chat_id", "invite"]) {
       assert.ok(!body.includes(secret), `must not expose ${secret}`);
     }
+  });
+});
+
+/* ============================================ the dashboard's cache */
+
+describe("what gets written to the verification cache", () => {
+  const ecr = group(1, "ECR Team");
+  const mappings = [mapping(1, 1, "OUTLET", 5, ecr)];
+
+  it("records JOINED against the IDENTITY ROW, not just the employee", async () => {
+    // The identity binding is what makes a reconnect invalidate the cache.
+    const { usecase, calls } = build({ mappings, isMember: true });
+    await usecase.getGroups(42, emp());
+
+    assert.equal(calls.verified.length, 1);
+    assert.equal(calls.verified[0].employeeTelegramId, 900);
+    assert.equal(calls.verified[0].employeeId, 42);
+    assert.equal(calls.verified[0].telegramGroupId, 1);
+    assert.equal(calls.verified[0].membership, "JOINED");
+    assert.equal(calls.verified[0].readinessStatus, GROUP_READINESS.READY);
+    assert.ok(calls.verified[0].verifiedAt instanceof Date);
+  });
+
+  it("records NOT_JOINED when Telegram says they are not in the group", async () => {
+    const { usecase, calls } = build({ mappings, isMember: false });
+    await usecase.getGroups(42, emp());
+    assert.equal(calls.verified[0].membership, "NOT_JOINED");
+  });
+
+  it("records a DEFINITIVE not-ready group, so the dashboard can say PENDING", async () => {
+    // We DID look and the requirement is genuinely unmet - a finding, not
+    // an absence of one.
+    const { usecase, calls } = build({
+      mappings,
+      readiness: { status: GROUP_READINESS.BOT_NOT_ADMIN, reason: "Diya is not an admin" },
+    });
+    await usecase.getGroups(42, emp());
+    assert.equal(calls.verified.length, 1);
+    assert.equal(calls.verified[0].membership, "NOT_JOINED");
+    assert.equal(calls.verified[0].readinessStatus, GROUP_READINESS.BOT_NOT_ADMIN);
+  });
+
+  it("WRITES NOTHING when Telegram could not be reached", async () => {
+    // The rule the cache's trustworthiness rests on. A momentary network
+    // failure must not knock an employee off the Complete list for a reason
+    // that has nothing to do with them.
+    const { usecase, calls } = build({
+      mappings,
+      readiness: { status: GROUP_READINESS.TELEGRAM_UNAVAILABLE, reason: "unavailable" },
+    });
+    await usecase.getGroups(42, emp());
+    assert.deepEqual(calls.verified, []);
+  });
+
+  it("WRITES NOTHING when the membership check itself failed", async () => {
+    // Readiness was fine; the member lookup threw. Still not an answer.
+    const { usecase, calls } = build({ mappings, memberThrows: new Error("ETIMEDOUT") });
+    await usecase.getGroups(42, emp());
+    assert.deepEqual(calls.verified, []);
+  });
+
+  it("writes nothing for a disconnected employee", async () => {
+    const { usecase, calls } = build({ mappings, identity: null });
+    await usecase.getGroups(42, emp());
+    assert.deepEqual(calls.verified, []);
+  });
+
+  it("NEVER READS the cache - this screen asks Telegram", async () => {
+    const reads = [];
+    const { usecase } = build({ mappings, isMember: true });
+    usecase.verificationRepo.getForEmployees = async () => {
+      reads.push(1);
+      return new Map();
+    };
+    await usecase.getGroups(42, emp());
+    assert.deepEqual(reads, [], "the detail screen is the authority, not the cache");
+  });
+
+  it("a cache failure never breaks the screen", async () => {
+    const { usecase } = build({ mappings, isMember: true });
+    usecase.verificationRepo.record = async () => {
+      throw new Error("cache table is gone");
+    };
+    const result = await usecase.getGroups(42, emp());
+    assert.equal(result.groups[0].membership_status, MEMBERSHIP_STATUS.JOINED);
+  });
+
+  it("the recorder REFUSES an unavailable readiness even if called directly", async () => {
+    // Defence in depth, and worth its own test: the caller already avoids
+    // this branch, so without calling it directly nothing would notice the
+    // guard being removed. Three layers protect the one rule the cache's
+    // trustworthiness rests on - the caller, this guard, and the
+    // repository's own refusal.
+    const { usecase, calls } = build({});
+    await usecase._recordVerification({
+      identity: { employee_telegram_id: 900, employee_id: 42 },
+      group: { telegram_group_id: 1 },
+      readiness: { status: GROUP_READINESS.TELEGRAM_UNAVAILABLE },
+      joined: false,
+    });
+    assert.deepEqual(calls.verified, [], "we could not ask is not an answer");
+  });
+
+  it("the recorder refuses a missing readiness", async () => {
+    const { usecase, calls } = build({});
+    await usecase._recordVerification({
+      identity: { employee_telegram_id: 900, employee_id: 42 },
+      group: { telegram_group_id: 1 },
+      readiness: null,
+      joined: true,
+    });
+    assert.deepEqual(calls.verified, []);
+  });
+
+  it("caches no Telegram identifier", async () => {
+    const { usecase, calls } = build({ mappings, isMember: true });
+    await usecase.getGroups(42, emp());
+    const body = JSON.stringify(calls.verified[0]);
+    assert.ok(!body.includes("555001"), "no Telegram user id");
+    assert.ok(!body.includes("-1001"), "no chat id");
   });
 });
 
