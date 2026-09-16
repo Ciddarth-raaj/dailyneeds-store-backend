@@ -169,6 +169,13 @@ class Server {
     this.employeeMasterRepo = require("./repository/employee_master")(
       this.mysql.connection
     );
+    // Employee Master Bulk Export / Import. Reads only: the export
+    // population, the three masters a human-readable cell resolves against,
+    // and the bulk-operation audit row. It contains no employee UPDATE at
+    // all - every change goes through the C2 employee-master usecase.
+    this.employeeBulkUpdateRepo = require("./repository/employee_bulk_update")(
+      this.mysql.connection
+    );
     this.employeeAadhaarRepo = require("./repository/employee_aadhaar")(
       this.mysql.connection
     );
@@ -529,6 +536,17 @@ class Server {
       // M1: the initial work shift on a create is checked against the NEW
       // work shift master through the same lookup the assignment uses.
       this.employeeWorkShiftRepo
+    );
+    // Employee Master Bulk Export / Import. A BATCH over the C2 employee
+    // master and nothing more: it is handed `employeeMasterUsecase` itself
+    // rather than a repository, so every field it writes goes through the
+    // same `editEmployee` / `correctJoiningDate` that a single-employee edit
+    // does - with the same branch checks, the same session revocation on a
+    // store or designation change, and the same lifecycle reconciliation on
+    // a joining date.
+    this.employeeBulkUpdateUsecase = require("./usecase/employee_bulk_update")(
+      this.employeeBulkUpdateRepo,
+      this.employeeMasterUsecase
     );
     // Stage 0C / C3: Aadhaar and bank status for a whole employee list at
     // once. It takes the employee usecase itself rather than a repository, so
@@ -1051,6 +1069,15 @@ class Server {
       this.ifscLookupUsecase,
       this.employeeBranchScope
     );
+    // Employee Master Bulk Export / Import. Mounted at /hr with the other
+    // employee writes; it claims only the /hr/employees/bulk endpoints,
+    // which no other /hr router defines.
+    const employeeBulkUpdateRouter = require("./routes/employee_bulk_update")(
+      this.employeeBulkUpdateUsecase,
+      this.permissions,
+      this.sensitive,
+      this.employeeBranchScope
+    );
     // Employee Telegram setup. A router of its own rather than three more
     // endpoints on the master router: these return no sensitive employee
     // column at all, so there is nothing for B3's response filter to strip.
@@ -1379,6 +1406,7 @@ class Server {
     // with the existing employee routes and C3 can find them in one place.
     app.use("/hr", employeeMasterRouter.getRouter());
     app.use("/hr", employeeTelegramRouter.getRouter());
+    app.use("/hr", employeeBulkUpdateRouter.getRouter());
     // Also /hr: Express tries the routers in order and this one only claims
     // /hr/work-shift-assignments, which the master router does not define.
     app.use("/hr", employeeWorkShiftRouter.getRouter());
