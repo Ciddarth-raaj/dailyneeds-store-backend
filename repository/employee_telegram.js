@@ -6,6 +6,7 @@ const {
   commitAsync,
   rollbackAsync,
 } = require("../utils/batchInsert");
+const { JOB_REASON } = require("../constants/telegram_membership_claim");
 
 /**
  * MySQL's own name for a unique-key violation.
@@ -35,6 +36,24 @@ const isDuplicateKeyError = (err) =>
 class EmployeeTelegramRepository {
   constructor(db) {
     this.db = db;
+    /**
+     * Phase 3C, OPTIONAL. The managed-membership queue. Connecting,
+     * reconnecting and disconnecting a Telegram account all change WHO can
+     * be removed from a group and WHICH account satisfies a claim, so each
+     * enqueues reconciliation - inside the same transaction as the identity
+     * change itself, which for `finalizeVerification` is the transaction
+     * that retires the old identity and inserts the new one.
+     *
+     * Unset, every path behaves exactly as it did before Phase 3C.
+     */
+    this.membershipQueue = null;
+  }
+
+  /** Enqueue on the caller's connection, so identity and job commit together. */
+  async _enqueueMembership(connection, employeeId, reason) {
+    if (!this.membershipQueue) return;
+    const tx = { query: (sql, params) => queryAsync(connection, sql, params) };
+    await this.membershipQueue.enqueueEmployee(employeeId, reason, {}, { tx });
   }
 
   run(code, sql, params, ref = {}) {
@@ -320,6 +339,44 @@ class EmployeeTelegramRepository {
     return rows.length === 0 ? null : rows[0];
   }
 
+  /**
+   * EVERY identity this employee has ever had, active and retired, newest
+   * first. Phase 3C cleanup needs the retired ones: an account somebody
+   * reconnected away from, or left the company holding, is still in the
+   * groups it joined, and the person is still reachable through it.
+   *
+   * Phase 2's model is why this is a plain SELECT and not a reconstruction -
+   * a reconnect inserts a new row and retires the old one, so the history is
+   * already here, row per spell.
+   */
+  async getAllIdentitiesForEmployee(employeeId) {
+    return this.run(
+      "GET-ALL-IDENTITIES",
+      `SELECT employee_telegram_id, employee_id, telegram_user_id, private_chat_id,
+              connected_at, disconnected_at, disconnect_reason
+         FROM employee_telegram_identity
+        WHERE employee_id = ?
+        ORDER BY disconnected_at IS NULL DESC, connected_at DESC`,
+      [employeeId],
+      { employeeId }
+    );
+  }
+
+  /**
+   * Everybody who has ever connected a Telegram account. The hourly sweep's
+   * population, together with anybody holding a live claim: bounded, and it
+   * needs no "changed since" cursor to be correct.
+   */
+  async getEmployeeIdsWithAnyIdentity() {
+    const rows = await this.run(
+      "EMPLOYEES-WITH-IDENTITY",
+      `SELECT DISTINCT employee_id FROM employee_telegram_identity`,
+      [],
+      {}
+    );
+    return (rows || []).map((row) => Number(row.employee_id));
+  }
+
   /** Which employee, if any, this Telegram account is currently attached to. */
   async getActiveIdentityByTelegramUser(telegramUserId) {
     const rows = await this.run(
@@ -335,15 +392,50 @@ class EmployeeTelegramRepository {
 
   /** Retire an employee's live identity, so a new one can take its place. */
   async disconnectActiveIdentity(employeeId, reason) {
-    const done = await this.run(
-      "DISCONNECT-IDENTITY",
-      `UPDATE employee_telegram_identity
-          SET disconnected_at = NOW(), disconnect_reason = ?
-        WHERE employee_id = ? AND disconnected_at IS NULL`,
-      [reason, employeeId],
-      { employeeId }
-    );
-    return done && done.affectedRows ? done.affectedRows : 0;
+    // ONE TRANSACTION ONCE PHASE 3C IS WIRED. Retiring the identity and
+    // queueing the cleanup that follows from it are one fact: the account
+    // that just stopped being theirs is still in the groups it joined, and a
+    // job lost between the two writes is access nobody is tracking.
+    // Without a queue wired this is the single statement it always was.
+    if (!this.membershipQueue) {
+      const done = await this.run(
+        "DISCONNECT-IDENTITY",
+        `UPDATE employee_telegram_identity
+            SET disconnected_at = NOW(), disconnect_reason = ?
+          WHERE employee_id = ? AND disconnected_at IS NULL`,
+        [reason, employeeId],
+        { employeeId }
+      );
+      return done && done.affectedRows ? done.affectedRows : 0;
+    }
+
+    const connection = await getConnectionAsync(this.db);
+    try {
+      await beginTransactionAsync(connection);
+      const done = await queryAsync(
+        connection,
+        `UPDATE employee_telegram_identity
+            SET disconnected_at = NOW(), disconnect_reason = ?
+          WHERE employee_id = ? AND disconnected_at IS NULL`,
+        [reason, employeeId]
+      );
+      await this._enqueueMembership(connection, employeeId, JOB_REASON.TELEGRAM_DISCONNECTED);
+      await commitAsync(connection);
+      return done && done.affectedRows ? done.affectedRows : 0;
+    } catch (err) {
+      await rollbackAsync(connection);
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "REPOSITORY.EMPLOYEE-TELEGRAM",
+        code: "REPOSITORY.EMPLOYEE-TELEGRAM.DISCONNECT-IDENTITY",
+        description: err.toString(),
+        category: "",
+        ref: { employeeId },
+      });
+      throw err;
+    } finally {
+      connection.release();
+    }
   }
 
   /**
@@ -430,6 +522,25 @@ class EmployeeTelegramRepository {
         await commitAsync(connection);
         return { outcome: "VERIFIED", identityCreated: false };
       }
+
+      // Phase 3C: from here the identity IS changing - either a first
+      // connect or a reconnect - so reconciliation is queued in this
+      // transaction, before the writes it describes.
+      const reconnect = Boolean(
+        (
+          await queryAsync(
+            connection,
+            `SELECT employee_telegram_id FROM employee_telegram_identity
+              WHERE employee_id = ? AND disconnected_at IS NULL`,
+            [employeeId]
+          )
+        ).length
+      );
+      await this._enqueueMembership(
+        connection,
+        employeeId,
+        reconnect ? JOB_REASON.TELEGRAM_RECONNECTED : JOB_REASON.TELEGRAM_CONNECTED
+      );
 
       // 3 - RECONNECT, INSIDE THE SAME TRANSACTION AS THE INSERT. A different
       // Telegram account for an employee who already has one: retire the old

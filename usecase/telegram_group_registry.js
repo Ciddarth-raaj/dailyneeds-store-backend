@@ -42,6 +42,18 @@ function validationError(message) {
   return err;
 }
 
+/**
+ * 409, and it exists for exactly one refusal: deleting a group that still has
+ * mappings or unresolved managed claims. Phase 3C.
+ */
+function conflict(message, detail = {}) {
+  const err = new Error(message);
+  err.name = "ConflictError";
+  err.httpCode = 409;
+  err.detail = detail;
+  return err;
+}
+
 function notFound(message) {
   const err = new Error(message);
   err.name = "NotFoundError";
@@ -144,7 +156,14 @@ function normaliseIsActive(value, options = {}) {
 }
 
 class TelegramGroupRegistryUsecase {
-  constructor(telegramGroupRegistryRepo) {
+  /**
+   * `mappingRepo` and `claimRepo` are Phase 3C and OPTIONAL: without them the
+   * delete behaves exactly as it did before, which is what keeps this file
+   * inert until Phase 3C is wired.
+   */
+  constructor(telegramGroupRegistryRepo, { mappingRepo = null, claimRepo = null } = {}) {
+    this.mappingRepo = mappingRepo;
+    this.claimRepo = claimRepo;
     this.repo = telegramGroupRegistryRepo;
   }
 
@@ -287,13 +306,42 @@ class TelegramGroupRegistryUsecase {
     }
   }
 
+  /**
+   * HARD DELETE, GUARDED. Phase 3C.
+   *
+   * `employee_telegram_group_membership` cascades from this row, so deleting
+   * a group with unresolved claims would erase the evidence that people
+   * still need removing FROM THAT GROUP - silently, and precisely when
+   * somebody is winding it down. Mappings block it too: a group that still
+   * has rules is still managing people, and deleting it would strand them
+   * with no record of why.
+   *
+   * The correct order is the one the message names: remove the mappings,
+   * let reconciliation close the claims, then delete. The check and the
+   * delete share a transaction, so a claim opened in between cannot slip
+   * through the gap between them.
+   */
   async delete(telegram_group_id) {
     try {
       const existing = await this.repo.getById(telegram_group_id);
       if (!existing) throw notFound("Telegram group not found");
+      if (this.mappingRepo && this.claimRepo && this.repo.withTransaction) {
+        return await this.repo.withTransaction(async (tx) => {
+          const mappings = await this.mappingRepo.countForGroup(telegram_group_id, { tx });
+          const claims = await this.claimRepo.countLiveForGroup(telegram_group_id, { tx });
+          if (mappings > 0 || claims > 0) {
+            throw conflict(
+              "This group still manages people. Remove its mappings and let managed membership " +
+                "finish its cleanup before deleting the group.",
+              { mappings, unresolved_claims: claims }
+            );
+          }
+          return this.repo.delete(telegram_group_id, { tx });
+        });
+      }
       return await this.repo.delete(telegram_group_id);
     } catch (err) {
-      if (err.name !== "NotFoundError") this._log("DELETE", err);
+      if (err.name !== "NotFoundError" && err.name !== "ConflictError") this._log("DELETE", err);
       throw err;
     }
   }

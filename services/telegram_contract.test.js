@@ -47,6 +47,10 @@ const CONSUMERS = [
   { file: "usecase/employee_telegram_link.js", holder: "this.telegram" },
   { file: "usecase/telegram_group_detection.js", holder: "this.telegram" },
   { file: "usecase/passwordReset.js", holder: "this.telegram" },
+  // Phase 3C. The removal path is the one where a missing method would be
+  // worst: it would look exactly like "Telegram would not let us remove
+  // them" while nobody was ever removed from anything.
+  { file: "usecase/telegram_membership_reconcile.js", holder: "this.telegram" },
 ];
 
 function calledMethods({ file, holder }) {

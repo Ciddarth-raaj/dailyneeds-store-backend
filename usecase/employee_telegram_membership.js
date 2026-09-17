@@ -68,8 +68,23 @@ class EmployeeTelegramMembershipUsecase {
    * @param {object} deps.telegram       services/telegram
    * @param {() => Date} [deps.now]
    */
-  constructor({ mappingRepo, identityRepo, joinRepo, readiness, telegram, verificationRepo, now } = {}) {
+  constructor({
+    mappingRepo,
+    identityRepo,
+    joinRepo,
+    readiness,
+    telegram,
+    verificationRepo,
+    claimRepo,
+    now,
+  } = {}) {
     this.mappingRepo = mappingRepo;
+    /**
+     * Phase 3C, OPTIONAL. Managed claims. A MANUAL grant is a reason to be in
+     * a group that no mapping expresses, so `requiredGroups()` unions them -
+     * see there for why. Unset, this file behaves exactly as Phase 3B left it.
+     */
+    this.claimRepo = claimRepo || null;
     this.identityRepo = identityRepo;
     this.joinRepo = joinRepo;
     this.readiness = readiness;
@@ -141,6 +156,24 @@ class EmployeeTelegramMembershipUsecase {
       if (!matchesDimension(employee, mapping)) continue;
       if (!byGroup.has(mapping.telegram_group_id)) {
         byGroup.set(mapping.telegram_group_id, mapping.group);
+      }
+    }
+
+    // A MANUAL GRANT IS A REQUIREMENT TOO. Phase 3C lets somebody be placed
+    // in a group by hand, for a reason no rule expresses, and a grant that
+    // did not appear here would be a group the employee is claimed for but
+    // is never offered the Join for, never has a membership status shown
+    // for, and which never counts towards Telegram Complete.
+    //
+    // Unioning here rather than in the screen means the join-request
+    // approval reads it too - `isGroupRequired` is the seventh check that
+    // path makes - so a manual grant is honoured by exactly the same
+    // security as a rule, and a REVOKED grant refuses a join the same way.
+    if (this.claimRepo) {
+      for (const group of await this.claimRepo.getManualActiveGroups(employee.employee_id)) {
+        if (!byGroup.has(group.telegram_group_id)) {
+          byGroup.set(group.telegram_group_id, group);
+        }
       }
     }
     return [...byGroup.values()];

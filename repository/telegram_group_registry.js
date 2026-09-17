@@ -1,4 +1,11 @@
 const logger = require("../utils/logger");
+const {
+  queryAsync,
+  getConnectionAsync,
+  beginTransactionAsync,
+  commitAsync,
+  rollbackAsync,
+} = require("../utils/batchInsert");
 
 const TABLE = "telegram_group_registry";
 
@@ -37,7 +44,9 @@ class TelegramGroupRegistryRepository {
     });
   }
 
-  _query(code, sql, params) {
+  /** `tx` is optional: given one, the statement joins that transaction. */
+  _query(code, sql, params, tx) {
+    if (tx) return tx.query(sql, params);
     return new Promise((resolve, reject) => {
       this.db.query(sql, params, (err, rows) => {
         if (err) {
@@ -210,11 +219,33 @@ class TelegramGroupRegistryRepository {
     return { code: 200, affectedRows: res.affectedRows };
   }
 
-  async delete(telegram_group_id) {
+  /**
+   * One transaction, same shape as every other repository's. Phase 3C uses
+   * it so the "may this group be deleted" check and the delete cannot be
+   * separated by a claim opening between them.
+   */
+  async withTransaction(fn) {
+    const connection = await getConnectionAsync(this.db);
+    const tx = { query: (sql, params) => queryAsync(connection, sql, params) };
+    try {
+      await beginTransactionAsync(connection);
+      const result = await fn(tx);
+      await commitAsync(connection);
+      return result;
+    } catch (err) {
+      await rollbackAsync(connection);
+      throw err;
+    } finally {
+      connection.release();
+    }
+  }
+
+  async delete(telegram_group_id, { tx } = {}) {
     const res = await this._query(
       "DELETE",
       `DELETE FROM ${TABLE} WHERE telegram_group_id = ?`,
-      [telegram_group_id]
+      [telegram_group_id],
+      tx
     );
     return { code: 200, affectedRows: res.affectedRows };
   }

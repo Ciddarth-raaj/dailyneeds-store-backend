@@ -50,12 +50,27 @@ const { MAPPING_TYPES } = require("../constants/telegram_group_mapping");
  * usecase owns that list and returns the message naming the four values.
  */
 class TelegramGroupRegistryRoutes {
-  constructor(telegramGroupRegistryUsecase, permissions, detectionUsecase, mappingUsecase, branchScope) {
+  constructor(
+    telegramGroupRegistryUsecase,
+    permissions,
+    detectionUsecase,
+    mappingUsecase,
+    branchScope,
+    membershipAdmin
+  ) {
     this.usecase = telegramGroupRegistryUsecase;
     this.permissions = permissions;
     this.detection = detectionUsecase || null;
     this.mapping = mappingUsecase || null;
     this.branch = branchScope || null;
+    /**
+     * Phase 3C, OPTIONAL. Managed membership lives HERE, in the Group Map,
+     * under `manage_telegram_groups` - the key held by the people who decide
+     * what a group is for. Granting somebody a company group is granting
+     * access, not recording a detail about them, so it is deliberately not
+     * reachable through `employee_edit`.
+     */
+    this.membershipAdmin = membershipAdmin || null;
     this.router = express.Router();
     this.init();
   }
@@ -257,6 +272,8 @@ class TelegramGroupRegistryRoutes {
      * WITHOUT THE RESOLVER WIRED, THIS RETURNS NO NAMES. Failing closed, so a
      * future wiring mistake cannot quietly publish the staff list.
      */
+    this._membershipRoutes(r, gate);
+
     r.get(
       "/:telegram_group_id(\\d+)/matched-employees",
       gate.require(P.VIEW_TELEGRAM_GROUPS),
@@ -287,6 +304,97 @@ class TelegramGroupRegistryRoutes {
    * way: honour `err.httpCode` first, and hand everything else to the shared
    * responder unchanged.
    */
+  /**
+   * MANAGED MEMBERSHIP - Phase 3C. Reading is `view_telegram_groups`;
+   * granting and revoking are `manage_telegram_groups`, the same key that
+   * already decides a group's mappings.
+   */
+  _membershipRoutes(r, gate) {
+    if (!this.membershipAdmin) return;
+
+    r.get(
+      "/:telegram_group_id(\\d+)/membership",
+      gate.require(P.VIEW_TELEGRAM_GROUPS),
+      async (req, res) => {
+        try {
+          const id = parseInt(req.params.telegram_group_id, 10);
+          res.json(await this.membershipAdmin.listForGroup(id));
+        } catch (err) {
+          this.fail(res, err);
+        }
+        res.end();
+      }
+    );
+
+    r.post(
+      "/:telegram_group_id(\\d+)/membership",
+      gate.require(P.MANAGE_TELEGRAM_GROUPS),
+      async (req, res) => {
+        try {
+          this.validate(req.body, { employee_id: Joi.any().required() });
+          const id = parseInt(req.params.telegram_group_id, 10);
+          res.json(
+            await this.membershipAdmin.grantManual(
+              id,
+              req.body.employee_id,
+              await this.permissions.actorFor(req)
+            )
+          );
+        } catch (err) {
+          this.fail(res, err);
+        }
+        res.end();
+      }
+    );
+
+    r.delete(
+      "/:telegram_group_id(\\d+)/membership/:employee_id(\\d+)",
+      gate.require(P.MANAGE_TELEGRAM_GROUPS),
+      async (req, res) => {
+        try {
+          const id = parseInt(req.params.telegram_group_id, 10);
+          const employeeId = parseInt(req.params.employee_id, 10);
+          res.json(
+            await this.membershipAdmin.revokeManual(
+              id,
+              employeeId,
+              await this.permissions.actorFor(req)
+            )
+          );
+        } catch (err) {
+          this.fail(res, err);
+        }
+        res.end();
+      }
+    );
+
+    /** Queue health and the dead-letter list, for the people who own it. */
+    r.get("/membership/queue", gate.require(P.MANAGE_TELEGRAM_GROUPS), async (req, res) => {
+      try {
+        res.json(await this.membershipAdmin.queueHealth());
+      } catch (err) {
+        this.fail(res, err);
+      }
+      res.end();
+    });
+
+    r.post(
+      "/membership/queue/:telegram_membership_job_id(\\d+)/requeue",
+      gate.require(P.MANAGE_TELEGRAM_GROUPS),
+      async (req, res) => {
+        try {
+          const jobId = parseInt(req.params.telegram_membership_job_id, 10);
+          res.json(
+            await this.membershipAdmin.requeue(jobId, await this.permissions.actorFor(req))
+          );
+        } catch (err) {
+          this.fail(res, err);
+        }
+        res.end();
+      }
+    );
+  }
+
   /**
    * THE CALLER'S EMPLOYEE SCOPE, resolved by the server and never by the
    * request. Both mapping reads need it now - the counts are scoped, not
@@ -324,13 +432,15 @@ module.exports = (
   permissions,
   detectionUsecase,
   mappingUsecase,
-  branchScope
+  branchScope,
+  membershipAdmin
 ) =>
   new TelegramGroupRegistryRoutes(
     telegramGroupRegistryUsecase,
     permissions,
     detectionUsecase,
     mappingUsecase,
-    branchScope
+    branchScope,
+    membershipAdmin
   );
 module.exports.TelegramGroupRegistryRoutes = TelegramGroupRegistryRoutes;

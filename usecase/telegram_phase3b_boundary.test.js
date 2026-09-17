@@ -60,13 +60,28 @@ describe("no Phase 3B file can remove anybody", () => {
     });
   }
 
-  it("the service DEFINES no ban or kick of its own beyond what already existed", () => {
-    // `kickChatMember` exists on the vendored client; Phase 3B must not have
-    // added a wrapper that makes it reachable from our code.
+  it("the service's ONLY removal wrappers are Phase 3C's, and no Phase 3B file reaches them", () => {
+    // This assertion moved rather than weakened. Phase 3B's rule was that
+    // nothing could remove anybody, and the service had no wrapper at all.
+    // Phase 3C adds exactly two - `banChatMember` and the `unbanChatMember`
+    // that undoes it - because removal is now a deliberate, gated,
+    // capped action. What must remain true is that PHASE 3B cannot reach
+    // them, which the per-file loop above asserts, and that nothing else was
+    // opened up on the way past: restricting and promoting members are still
+    // not things this system can do.
     const service = strip(read("services/telegram.js"));
-    for (const method of ["banChatMember", "unbanChatMember", "restrictChatMember"]) {
+    for (const method of ["restrictChatMember", "promoteChatMember", "kickChatMember"]) {
       assert.ok(!new RegExp(`async ${method}\\s*\\(`).test(service), `no ${method} wrapper`);
     }
+    for (const method of ["banChatMember", "unbanChatMember"]) {
+      assert.ok(
+        new RegExp(`async ${method}\\s*\\(`).test(service),
+        `${method} is Phase 3C's removal primitive and must exist`
+      );
+    }
+    // The unban must be the harmless one: without `only_if_banned` it would
+    // silently un-restrict somebody an admin had banned on purpose.
+    assert.match(service, /only_if_banned:\s*true/);
   });
 
   it("nothing reconciles, sweeps or syncs membership", () => {

@@ -1,5 +1,12 @@
 const logger = require("../utils/logger");
 const {
+  queryAsync,
+  getConnectionAsync,
+  beginTransactionAsync,
+  commitAsync,
+  rollbackAsync,
+} = require("../utils/batchInsert");
+const {
   MAPPING_TARGET_SOURCE,
   TARGETED_MAPPING_TYPES,
 } = require("../constants/telegram_group_mapping");
@@ -59,7 +66,9 @@ class TelegramGroupMappingRepository {
     });
   }
 
-  _query(code, sql, params) {
+  /** `tx` is optional: given one, the statement joins that transaction. */
+  _query(code, sql, params, tx) {
+    if (tx) return tx.query(sql, params);
     return new Promise((resolve, reject) => {
       this.db.query(sql, params, (err, rows) => {
         if (err) {
@@ -360,12 +369,41 @@ class TelegramGroupMappingRepository {
 
   /* -------------------------------------------------------------- writes */
 
-  async create({ telegram_group_id, mapping_type, target_id, created_by = null }) {
+  /**
+   * One transaction on one pooled connection, shaped exactly like
+   * `repository/employee_master.js#withTransaction` so the same `tx` object
+   * can be handed to any repository that takes one.
+   *
+   * Phase 3C added this. A mapping change is what decides who belongs in a
+   * group, so the reconciliation job that acts on it must commit with it -
+   * "write the mapping, then hope to queue the work" loses the work whenever
+   * the process dies in between, and the mapping then silently manages
+   * nobody.
+   */
+  async withTransaction(fn) {
+    const connection = await getConnectionAsync(this.db);
+    const tx = { query: (sql, params) => queryAsync(connection, sql, params) };
+    try {
+      await beginTransactionAsync(connection);
+      const result = await fn(tx);
+      await commitAsync(connection);
+      return result;
+    } catch (err) {
+      await rollbackAsync(connection);
+      this._log("TRANSACTION", err);
+      throw err;
+    } finally {
+      connection.release();
+    }
+  }
+
+  async create({ telegram_group_id, mapping_type, target_id, created_by = null }, { tx } = {}) {
     const res = await this._query(
       "CREATE",
       `INSERT INTO ${TABLE} (telegram_group_id, mapping_type, target_id, created_by)
        VALUES (?, ?, ?, ?)`,
-      [telegram_group_id, mapping_type, target_id, created_by === undefined ? null : created_by]
+      [telegram_group_id, mapping_type, target_id, created_by === undefined ? null : created_by],
+      tx
     );
     return { telegram_group_mapping_id: res.insertId };
   }
@@ -377,13 +415,25 @@ class TelegramGroupMappingRepository {
    * the id is unknown or belongs to somebody else, which is the answer the
    * caller should give either way.
    */
-  async delete(telegram_group_id, telegram_group_mapping_id) {
+  async delete(telegram_group_id, telegram_group_mapping_id, { tx } = {}) {
     const res = await this._query(
       "DELETE",
       `DELETE FROM ${TABLE} WHERE telegram_group_id = ? AND telegram_group_mapping_id = ?`,
-      [telegram_group_id, telegram_group_mapping_id]
+      [telegram_group_id, telegram_group_mapping_id],
+      tx
     );
     return { affectedRows: res.affectedRows };
+  }
+
+  /** How many mappings a group carries - the registry delete guard reads it. */
+  async countForGroup(telegram_group_id, { tx } = {}) {
+    const rows = await this._query(
+      "COUNT-FOR-GROUP",
+      `SELECT COUNT(*) AS n FROM ${TABLE} WHERE telegram_group_id = ?`,
+      [telegram_group_id],
+      tx
+    );
+    return rows && rows[0] ? Number(rows[0].n) : 0;
   }
 }
 

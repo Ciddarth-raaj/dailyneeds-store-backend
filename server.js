@@ -354,6 +354,16 @@ class Server {
       this.mysql.connection
     );
 
+    // Phase 3C: MANAGED MEMBERSHIP. Claims are what the company has said it
+    // manages; the job table is how that work reaches Telegram afterwards,
+    // never inside the transaction that caused it.
+    this.telegramMembershipClaimRepo = require("./repository/telegram_membership_claim")(
+      this.mysql.connection
+    );
+    this.telegramMembershipJobRepo = require("./repository/telegram_membership_job")(
+      this.mysql.connection
+    );
+
     // Phase 3A: WHICH EMPLOYEES SHOULD BELONG TO WHICH GROUP. Configuration
     // only - this repository writes mapping rows and reads the employee
     // master; it touches nothing on Telegram.
@@ -796,6 +806,10 @@ class Server {
       telegram: require("./services/telegram")(),
       // This screen WRITES the cache and never reads it - it asks Telegram.
       verificationRepo: this.employeeTelegramGroupVerificationRepo,
+      // Phase 3C: a MANUAL grant makes a group required, so the join action,
+      // the membership status and Telegram Complete all cover it - and the
+      // join-request approval honours it through the same `isGroupRequired`.
+      claimRepo: this.telegramMembershipClaimRepo,
     });
     // THE JOIN-REQUEST HANDLER, ON THE SAME DISPATCHER. `chat_join_request`
     // is already in `allowed_updates` and already aliased by the dispatcher,
@@ -816,6 +830,48 @@ class Server {
       // completes asynchronously, with nobody looking at a screen.
       verificationRepo: this.employeeTelegramGroupVerificationRepo,
     });
+    /* ------------------------------------------- Phase 3C: lifecycle ---- */
+    //
+    // EVERYTHING HERE IS OFF UNTIL IT IS SWITCHED ON. `TELEGRAM_MEMBERSHIP_WORKER`
+    // gates the worker entirely, and `TELEGRAM_MEMBERSHIP_REMOVALS` gates
+    // removals separately - so the rollout can run claims-only for as long
+    // as it likes, maintaining and adopting, before anything is removed from
+    // any group.
+    this.telegramMembershipConfig = {
+      workerEnabled: String(process.env.TELEGRAM_MEMBERSHIP_WORKER || "").toLowerCase() === "on",
+      removalsEnabled:
+        String(process.env.TELEGRAM_MEMBERSHIP_REMOVALS || "").toLowerCase() === "on",
+      jobsPerTick: Number(process.env.TELEGRAM_MEMBERSHIP_JOBS_PER_TICK || 5),
+      apiCallsPerTick: Number(process.env.TELEGRAM_MEMBERSHIP_CALLS_PER_TICK || 20),
+      removalCapPerTick: Number(process.env.TELEGRAM_MEMBERSHIP_REMOVALS_PER_TICK || 5),
+      removalCapPerHour: Number(process.env.TELEGRAM_MEMBERSHIP_REMOVALS_PER_HOUR || 50),
+    };
+    this.telegramMembershipReconcileUsecase = require("./usecase/telegram_membership_reconcile")({
+      claimRepo: this.telegramMembershipClaimRepo,
+      jobRepo: this.telegramMembershipJobRepo,
+      mappingRepo: this.telegramGroupMappingRepo,
+      registryRepo: this.telegramGroupRegistryRepo,
+      identityRepo: this.employeeTelegramRepo,
+      telegram: require("./services/telegram")(),
+      config: this.telegramMembershipConfig,
+    });
+    this.telegramMembershipWorkerUsecase = require("./usecase/telegram_membership_worker")({
+      jobRepo: this.telegramMembershipJobRepo,
+      claimRepo: this.telegramMembershipClaimRepo,
+      identityRepo: this.employeeTelegramRepo,
+      reconcile: this.telegramMembershipReconcileUsecase,
+      config: this.telegramMembershipConfig,
+    });
+    this.telegramMembershipAdminUsecase = require("./usecase/telegram_membership_admin")({
+      claimRepo: this.telegramMembershipClaimRepo,
+      jobRepo: this.telegramMembershipJobRepo,
+      registryRepo: this.telegramGroupRegistryRepo,
+    });
+    // The two write paths that are not screens: an employee change and an
+    // identity change both enqueue inside their own transaction.
+    this.employeeMasterUsecase.membershipQueue = this.telegramMembershipJobRepo;
+    this.employeeTelegramRepo.membershipQueue = this.telegramMembershipJobRepo;
+
     this.telegramUpdateDispatcher.register({
       name: "employee_telegram_join_request",
       updateTypes: ["chat_join_request"],
@@ -906,14 +962,27 @@ class Server {
       this.telegramDepartmentsRepo
     );
     this.telegramGroupRegistryUsecase = require("./usecase/telegram_group_registry")(
-      this.telegramGroupRegistryRepo
+      this.telegramGroupRegistryRepo,
+      {
+        // Phase 3C: a hard delete cascades the claim rows, so it is refused
+        // while the group still has mappings or unresolved cleanup.
+        mappingRepo: this.telegramGroupMappingRepo,
+        claimRepo: this.telegramMembershipClaimRepo,
+      }
     );
     // NO TELEGRAM SERVICE IS PASSED, and that is deliberate rather than an
     // omission: Phase 3A decides who SHOULD be in a group and performs no
     // membership action, so it is given nothing it could send with.
     this.telegramGroupMappingUsecase = require("./usecase/telegram_group_mapping")(
       this.telegramGroupMappingRepo,
-      this.telegramGroupRegistryRepo
+      this.telegramGroupRegistryRepo,
+      {
+        // Phase 3C: a mapping change enqueues reconciliation in the same
+        // transaction that writes the mapping. Still no Telegram service
+        // here - Phase 3A performs no membership action and this does not
+        // change that; the worker is the only thing that calls Telegram.
+        membershipQueue: this.telegramMembershipJobRepo,
+      }
     );
     this.advanceRequestUsecase = require("./usecase/advance_request")(
       this.advanceRequestRepo
@@ -1148,7 +1217,10 @@ class Server {
       this.permissions,
       this.employeeBranchScope,
       this.employeeTelegramMembershipUsecase,
-      this.telegramGroupMappingRepo
+      this.telegramGroupMappingRepo,
+      // Phase 3C, READ-ONLY on this router: Employee Master shows managed
+      // membership; granting one is Group Map work under a different key.
+      this.telegramMembershipAdminUsecase
     );
     // THE EXISTING-EMPLOYEE AADHAAR VERIFICATION PATH. A router of its own so
     // that the one endpoint which legitimately accepts an `aadhaar_number` for
@@ -1385,7 +1457,10 @@ class Server {
       // The SAME live branch resolver every other employee read uses. Passed
       // in rather than resolved inside the usecase so there is one
       // authorization layer for employee names on dnds.co.in, not two.
-      this.employeeBranchScope
+      this.employeeBranchScope,
+      // Phase 3C: manual membership and the queue's admin view, both under
+      // `manage_telegram_groups`.
+      this.telegramMembershipAdminUsecase
     );
     const pickPackRemarksRouter = require("./routes/pick_pack_remarks")(
       this.pickPackRemarksUsecase
@@ -1697,6 +1772,30 @@ class Server {
         await this.passwordResetUsecase.pollTelegramUpdates();
       }
     );
+
+    // PHASE 3C: THE MEMBERSHIP WORKER. A SEPARATE job from the poller above,
+    // on a separate schedule, and it must stay that way: the poller owns the
+    // getUpdates offset and nothing else may touch it. This one only reads
+    // its own queue.
+    //
+    // Thirty seconds, not three. Reconciliation is not interactive - nobody
+    // is watching a screen for it - and the two share one rate-limited bot
+    // token, so this one takes the slower lane. Every tick is additionally
+    // bounded (jobs, API calls, removals) and guarded against re-entry, and
+    // the whole thing is inert unless TELEGRAM_MEMBERSHIP_WORKER=on.
+    const TELEGRAM_MEMBERSHIP_WORKER_CRON = "*/30 * * * * *";
+    this.cronService.register("telegram_membership_worker", TELEGRAM_MEMBERSHIP_WORKER_CRON, async () => {
+      await this.telegramMembershipWorkerUsecase.tick();
+    });
+
+    // The safety net, hourly: reclaim jobs whose worker died, and re-enqueue
+    // the bounded population that could have changed without passing a
+    // hooked path - the Digisme sync reconciles employment in bulk. Enqueue
+    // collapses onto one live job per scope, so this is cheap even when it
+    // finds nothing.
+    this.cronService.register("telegram_membership_sweep", "0 * * * *", async () => {
+      await this.telegramMembershipWorkerUsecase.sweep();
+    });
 
     const SANDBOX_GST_TAXPAYER_REFRESH_CRON = "*/2 * * * *";
     this.cronService.register(

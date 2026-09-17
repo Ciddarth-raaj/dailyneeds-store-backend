@@ -293,6 +293,39 @@ class Telegram {
     });
   }
 
+  /**
+   * REMOVE SOMEBODY FROM A GROUP - Phase 3C, and the only removal primitive.
+   *
+   * `banChatMember` is Telegram's ONLY way for a bot to remove a member;
+   * there is no "kick". On its own it also BANS them, which is not what an
+   * employee leaving a branch deserves - they may be back next month, or be
+   * granted the group again by hand. So the ban is undone immediately with
+   * `only_if_banned`, which leaves the person removed and free to rejoin.
+   *
+   * The two calls are separate methods rather than one, because the second
+   * failing is a different fact from the first failing: the person is out
+   * either way, and only the "may they come back" part is in doubt.
+   */
+  async banChatMember(chatId, userId) {
+    return this._callBotApi("banChatMember", {
+      chat_id: String(chatId),
+      user_id: Number(userId),
+    });
+  }
+
+  /**
+   * Lift the ban `banChatMember` left behind, and ONLY if there is one.
+   * `only_if_banned: true` makes this safe to call against somebody who was
+   * never banned - it does nothing rather than quietly un-restricting them.
+   */
+  async unbanChatMember(chatId, userId) {
+    return this._callBotApi("unbanChatMember", {
+      chat_id: String(chatId),
+      user_id: Number(userId),
+      only_if_banned: true,
+    });
+  }
+
   async sendDocument(chat_id, fileUrl, caption = "") {
     return new Promise(async (resolve, reject) => {
       try {

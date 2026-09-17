@@ -102,6 +102,17 @@ const makeRepo = ({
       calls.connected += 1;
       return new Set(connected.filter((id) => ids.includes(id)));
     },
+    /**
+     * Phase 3C wraps the mapping writes in a transaction, so that the
+     * reconciliation job they enqueue commits with them. The double has to
+     * offer one for the same reason the real repository does - and it runs
+     * the callback, so a test that forgets to commit fails here rather than
+     * passing against a stub that swallowed the work.
+     */
+    withTransaction: async (fn) => {
+      calls.transactions += 1;
+      return fn({ query: async () => ({ affectedRows: 1 }) });
+    },
     create: async (row) => {
       if (createThrows) throw createThrows;
       calls.created.push(row);

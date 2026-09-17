@@ -35,7 +35,7 @@ const P = require("../constants/hr_permissions");
  * caller who asked for it, and is stored only as a hash.
  */
 class EmployeeTelegramRoutes {
-  constructor(usecase, permissions, branchScope, membershipUsecase, mappingRepo) {
+  constructor(usecase, permissions, branchScope, membershipUsecase, mappingRepo, membershipAdmin) {
     if (!branchScope) {
       throw new Error("routes/employee_telegram: the employee branch scope is required");
     }
@@ -46,6 +46,13 @@ class EmployeeTelegramRoutes {
     // existing identity endpoints are unaffected by group membership.
     this.membership = membershipUsecase || null;
     this.mappingRepo = mappingRepo || null;
+    /**
+     * Phase 3C, OPTIONAL and READ-ONLY here. Employee Master may SHOW which
+     * groups an employee is managed into and by which source; granting or
+     * revoking a manual one is `manage_telegram_groups` work on the Group
+     * Map, never an employee-edit action - so this router exposes no write.
+     */
+    this.membershipAdmin = membershipAdmin || null;
     this.router = express.Router();
     this.init();
   }
@@ -231,6 +238,32 @@ class EmployeeTelegramRoutes {
         res.end();
       }
     );
+
+    this._managedMembershipRoute(r, gate);
+  }
+
+  _managedMembershipRoute(r, gate) {
+    if (!this.membershipAdmin) return;
+    /**
+     * READ-ONLY managed membership for one employee. `view_employees`, the
+     * same key as the rest of this screen, plus the branch guard. It names
+     * groups and sources - no Telegram identifier of any kind.
+     */
+    r.get(
+      "/employee/:employee_id/telegram/membership",
+      gate.require(P.VIEW_EMPLOYEES),
+      this.branchScope.requireEmployeeInScope(),
+      async (req, res) => {
+        try {
+          const employeeId = this._employeeId(req, res);
+          if (employeeId === null) return;
+          res.json(await this.membershipAdmin.listForEmployee(employeeId));
+        } catch (err) {
+          this._fail(res, err);
+        }
+        res.end();
+      }
+    );
   }
 
   getRouter() {
@@ -238,6 +271,13 @@ class EmployeeTelegramRoutes {
   }
 }
 
-module.exports = (usecase, permissions, branchScope, membershipUsecase, mappingRepo) =>
-  new EmployeeTelegramRoutes(usecase, permissions, branchScope, membershipUsecase, mappingRepo);
+module.exports = (usecase, permissions, branchScope, membershipUsecase, mappingRepo, membershipAdmin) =>
+  new EmployeeTelegramRoutes(
+    usecase,
+    permissions,
+    branchScope,
+    membershipUsecase,
+    mappingRepo,
+    membershipAdmin
+  );
 module.exports.EmployeeTelegramRoutes = EmployeeTelegramRoutes;

@@ -59,9 +59,11 @@ const mappingUsecase = () => {
   };
 };
 
-function routesFor(mapping, branch) {
+function routesFor(mapping, branch, membershipAdmin = null) {
   const out = [];
-  for (const layer of buildRoutes({}, tagging, null, mapping, branch).getRouter().stack) {
+  for (const layer of buildRoutes({}, tagging, null, mapping, branch, membershipAdmin)
+    .getRouter()
+    .stack) {
     if (!layer.route) continue;
     out.push({
       method: Object.keys(layer.route.methods)[0].toUpperCase(),
@@ -318,14 +320,48 @@ describe("matched employees: where the scope comes from", () => {
   });
 });
 
-describe("no membership endpoint exists", () => {
-  it("there is no join, invite, add-member, remove-member or sync route", () => {
+describe("membership endpoints are Phase 3C's, and only Phase 3C's", () => {
+  it("PHASE 3A ALONE exposes no join, invite, member, sync, ban or kick route", () => {
+    // Unchanged in substance: mapping configuration decides who SHOULD
+    // belong and performs no membership action. Without Phase 3C's admin
+    // usecase wired, this router still cannot touch anybody's membership.
     const routes = routesFor(mappingUsecase(), { resolve: async () => ALL_BRANCHES });
     for (const route of routes) {
       assert.ok(
-        !/join|invite|member|sync|reconcile|ban|kick/i.test(route.path),
+        !/join|invite|member|sync|reconcile|ban|kick/i.test(route.path.replace(/employees/g, "")),
         `Phase 3A must expose no membership route, found ${route.method} ${route.path}`
       );
+    }
+  });
+
+  it("with Phase 3C wired, the membership routes are exactly three, all MANAGE-gated", () => {
+    const routes = routesFor(mappingUsecase(), { resolve: async () => ALL_BRANCHES }, {
+      listForGroup: async () => ({ code: 200, data: [] }),
+      grantManual: async () => ({ code: 200 }),
+      revokeManual: async () => ({ code: 200 }),
+      queueHealth: async () => ({ code: 200 }),
+      requeue: async () => ({ code: 200 }),
+    });
+    const membership = routes.filter((route) => /\/membership/.test(route.path));
+    const signatures = membership.map((route) => `${route.method} ${route.path}`).sort();
+    assert.deepEqual(signatures, [
+      "DELETE /:telegram_group_id(\\d+)/membership/:employee_id(\\d+)",
+      "GET /:telegram_group_id(\\d+)/membership",
+      "GET /membership/queue",
+      "POST /:telegram_group_id(\\d+)/membership",
+      "POST /membership/queue/:telegram_membership_job_id(\\d+)/requeue",
+    ].sort());
+
+    // GRANTING A GROUP IS GRANTING ACCESS. Every write here is
+    // `manage_telegram_groups` - the key that already decides what a group
+    // is for - and never an employee-record key.
+    for (const route of membership) {
+      const expected =
+        route.method === "GET" && /\/membership$/.test(route.path)
+          ? P.VIEW_TELEGRAM_GROUPS
+          : P.MANAGE_TELEGRAM_GROUPS;
+      assert.deepEqual(route.guard, { mode: "any", keys: [expected] }, route.path);
+      assert.ok(!route.guard.keys.includes(P.EMPLOYEE_EDIT), route.path);
     }
   });
 });

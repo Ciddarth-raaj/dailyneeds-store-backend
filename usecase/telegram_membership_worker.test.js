@@ -1,0 +1,243 @@
+/**
+ * THE WORKER - budgets, caps, retries and the rerun handshake. Phase 3C.
+ *
+ *   node --test usecase/telegram_membership_worker.test.js
+ *
+ * The properties that keep this out of the password-reset poller's way, and
+ * keep a mis-configured mapping from emptying a group while nobody is awake.
+ */
+const { describe, it } = require("node:test");
+const assert = require("node:assert/strict");
+const buildWorker = require("./telegram_membership_worker");
+const { JOB_SCOPE, JOB_REASON } = require("../constants/telegram_membership_claim");
+
+const NOW = new Date("2026-09-17T06:00:00Z");
+
+const build = (over = {}) => {
+  const state = {
+    jobs: [
+      {
+        telegram_membership_job_id: 1,
+        scope_type: JOB_SCOPE.EMPLOYEE,
+        scope_id: 42,
+        reason: JOB_REASON.EMPLOYEE_EDITED,
+      },
+    ],
+    claimed: new Set(),
+    reconcileResult: { capReached: false },
+    reconcileThrows: null,
+    workerEnabled: true,
+    ...over,
+  };
+  const calls = { completed: [], failed: [], delayed: [], reconciled: [], enqueued: [], reclaimed: 0 };
+
+  const jobRepo = {
+    dueJobs: async (limit) => state.jobs.slice(0, limit),
+    claim: async (id) => {
+      if (state.claimed.has(id)) return { claimed: false };
+      state.claimed.add(id);
+      return { claimed: true };
+    },
+    complete: async (id, options = {}) => {
+      calls.completed.push({ id, ...options });
+      return { changed: true };
+    },
+    fail: async (id, options) => {
+      calls.failed.push({ id, ...options });
+      return { changed: true, dead: state.dead === true };
+    },
+    delay: async (id, seconds) => {
+      calls.delayed.push({ id, seconds });
+      return { changed: true };
+    },
+    reclaimAbandoned: async () => {
+      calls.reclaimed += 1;
+      return { reclaimed: 2 };
+    },
+    enqueueEmployee: async (id, reason) => {
+      calls.enqueued.push({ id, reason });
+      return { created: true };
+    },
+  };
+
+  const reconcile = {
+    reconcileEmployee: async (id, options) => {
+      calls.reconciled.push({ id, ...options });
+      if (state.reconcileThrows) throw state.reconcileThrows;
+      if (typeof state.onReconcile === "function") state.onReconcile(options);
+      return state.reconcileResult;
+    },
+    reconcileGroup: async (id, options) => {
+      calls.reconciled.push({ group: id, ...options });
+      return state.reconcileResult;
+    },
+  };
+
+  const usecase = buildWorker({
+    jobRepo,
+    claimRepo: {
+      getEmployeeIdsWithLiveClaims: async () => [7],
+      getEmployeeIdsAwaitingRemoval: async () => [8],
+    },
+    identityRepo: { getEmployeeIdsWithAnyIdentity: async () => [42, 7] },
+    reconcile,
+    config: {
+      workerEnabled: state.workerEnabled,
+      jobsPerTick: 5,
+      apiCallsPerTick: 20,
+      removalCapPerTick: 2,
+      removalCapPerHour: 3,
+      ...(over.config || {}),
+    },
+    now: () => NOW,
+  });
+
+  return { usecase, state, calls };
+};
+
+describe("nothing happens until it is switched on", () => {
+  it("a tick does nothing at all with the worker off", async () => {
+    const { usecase, calls } = build({ workerEnabled: false });
+    assert.deepEqual(await usecase.tick(), { skipped: "disabled" });
+    assert.deepEqual(calls.reconciled, []);
+  });
+
+  it("and neither does the sweep", async () => {
+    const { usecase, calls } = build({ workerEnabled: false });
+    assert.deepEqual(await usecase.sweep(), { skipped: "disabled" });
+    assert.equal(calls.reclaimed, 0);
+  });
+});
+
+describe("one tick", () => {
+  it("claims a job, reconciles its scope and completes it", async () => {
+    const { usecase, calls } = build();
+    const summary = await usecase.tick();
+    assert.equal(summary.jobs, 1);
+    assert.equal(calls.reconciled[0].id, 42);
+    assert.equal(calls.completed[0].requestRerun, false);
+  });
+
+  it("skips a job somebody else claimed", async () => {
+    const { usecase, state, calls } = build();
+    state.claimed.add(1);
+    const summary = await usecase.tick();
+    assert.equal(summary.jobs, 0);
+    assert.deepEqual(calls.reconciled, []);
+  });
+
+  it("RE-ENTRANCY: a tick while one is running is a no-op, not a second worker", async () => {
+    const { usecase } = build();
+    usecase.running = true;
+    assert.deepEqual(await usecase.tick(), { skipped: "in_progress" });
+  });
+
+  it("A CAPPED JOB IS NOT A FINISHED JOB - it asks for a rerun", async () => {
+    const { usecase, state, calls } = build();
+    state.reconcileResult = { capReached: true };
+    await usecase.tick();
+    assert.equal(calls.completed[0].requestRerun, true);
+  });
+
+  it("an exhausted API budget also asks for a rerun", async () => {
+    const { usecase, state, calls } = build();
+    state.onReconcile = (options) => {
+      while (options.budget.spend(1)) {
+        /* burn the tick's call budget, as a big group would */
+      }
+    };
+    await usecase.tick();
+    assert.equal(calls.completed[0].requestRerun, true);
+  });
+});
+
+describe("the removal caps", () => {
+  it("the per-tick cap is the smaller of the tick and hour limits", async () => {
+    const { usecase, state } = build();
+    let seen = null;
+    state.onReconcile = (options) => {
+      seen = options.budget.removalsLeft;
+    };
+    await usecase.tick();
+    assert.equal(seen, 2, "tick cap 2, hour cap 3 - the tick decides");
+  });
+
+  it("THE HOURLY CEILING SURVIVES ACROSS TICKS", async () => {
+    // A mis-configured mapping must not empty a group over many ticks.
+    const { usecase, state } = build();
+    state.onReconcile = (options) => {
+      while (options.budget.removalsLeft > 0) options.budget.spendRemoval(1);
+    };
+    await usecase.tick();
+    state.claimed.clear();
+    let left = null;
+    state.onReconcile = (options) => {
+      left = options.budget.removalsLeft;
+    };
+    await usecase.tick();
+    assert.equal(left, 1, "only the hour's remaining allowance is offered");
+  });
+});
+
+describe("failure handling", () => {
+  it("a 429 DELAYS without spending a retry", async () => {
+    const { usecase, state, calls } = build();
+    const err = new Error("Too Many Requests: retry after 17");
+    err.parameters = { retry_after: 17 };
+    state.reconcileThrows = err;
+
+    const summary = await usecase.tick();
+    assert.equal(summary.delayed, 1);
+    assert.deepEqual(calls.delayed, [{ id: 1, seconds: 17 }]);
+    assert.deepEqual(calls.failed, [], "a rate limit is not a failed attempt");
+  });
+
+  it("reads retry_after out of the description when that is all there is", async () => {
+    const { usecase, state, calls } = build();
+    state.reconcileThrows = new Error("Too Many Requests: retry after 9");
+    await usecase.tick();
+    assert.deepEqual(calls.delayed, [{ id: 1, seconds: 9 }]);
+  });
+
+  it("an ordinary failure spends a retry", async () => {
+    const { usecase, state, calls } = build();
+    state.reconcileThrows = new Error("ETIMEDOUT");
+    const summary = await usecase.tick();
+    assert.equal(summary.failed, 1);
+    assert.equal(calls.failed.length, 1);
+    assert.deepEqual(calls.delayed, []);
+  });
+
+  it("a tick never throws - the next one would run anyway", async () => {
+    const { usecase } = build();
+    usecase.jobRepo.dueJobs = async () => {
+      throw new Error("database is gone");
+    };
+    await usecase.tick();
+  });
+});
+
+describe("the hourly sweep", () => {
+  it("reclaims abandoned jobs and re-enqueues the bounded population", async () => {
+    const { usecase, calls } = build();
+    const summary = await usecase.sweep();
+    assert.equal(summary.reclaimed, 2);
+    // Everybody with an identity, everybody with a live claim, everybody
+    // stuck awaiting removal - de-duplicated, and no cursor anywhere.
+    assert.deepEqual(
+      calls.enqueued.map((e) => e.id).sort((a, b) => a - b),
+      [7, 8, 42]
+    );
+    for (const call of calls.enqueued) assert.equal(call.reason, JOB_REASON.SWEEP);
+  });
+
+  it("keeps no durable employment-change cursor", () => {
+    // The sweep re-enqueues a bounded population instead. A "changed since"
+    // cursor would be a second source of truth, and a wrong one silently
+    // stops reconciling anybody.
+    const source = require("fs")
+      .readFileSync(require("path").join(__dirname, "telegram_membership_worker.js"), "utf8")
+      .replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
+    assert.ok(!/cursor|last_swept|since_id|changed_since/i.test(source));
+  });
+});

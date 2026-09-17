@@ -1,4 +1,5 @@
 const { istDateOf } = require("../utils/istDate");
+const { JOB_REASON } = require("../constants/telegram_membership_claim");
 const { deriveMatches } = require("../utils/telegram_group_mapping");
 const {
   MAPPING_TYPE,
@@ -89,6 +90,8 @@ class TelegramGroupMappingUsecase {
     this.repo = mappingRepo;
     this.registryRepo = registryRepo;
     this.now = deps.now || (() => new Date());
+    /** Phase 3C queue. Optional - unset, nothing is enqueued. */
+    this.membershipQueue = deps.membershipQueue || null;
   }
 
   /**
@@ -334,11 +337,23 @@ class TelegramGroupMappingUsecase {
     if (duplicate) throw validationError(MAPPING_MESSAGES.DUPLICATE);
 
     try {
-      const created = await this.repo.create({
-        telegram_group_id: group.telegram_group_id,
-        mapping_type: type,
-        target_id,
-        created_by: actor && actor.employee_id !== undefined ? actor.employee_id : null,
+      // ONE TRANSACTION, Phase 3C. The mapping and the reconciliation job it
+      // creates commit together: a mapping that exists always has its work
+      // queued, and a mapping that rolled back queued none. No Telegram call
+      // happens here - the queue row is a local write and the worker does
+      // the rest afterwards.
+      const created = await this.repo.withTransaction(async (tx) => {
+        const row = await this.repo.create(
+          {
+            telegram_group_id: group.telegram_group_id,
+            mapping_type: type,
+            target_id,
+            created_by: actor && actor.employee_id !== undefined ? actor.employee_id : null,
+          },
+          { tx }
+        );
+        await this._enqueueGroup(tx, group.telegram_group_id, JOB_REASON.MAPPING_ADDED, actor);
+        return row;
       });
       return { code: 200, msg: "Mapping added", ...created };
     } catch (err) {
@@ -353,13 +368,35 @@ class TelegramGroupMappingUsecase {
     }
   }
 
+  /**
+   * Phase 3C enqueue, in the caller's transaction. Skipped entirely when no
+   * queue is wired, which is how the mapping screens behave exactly as they
+   * did before Phase 3C until it is switched on.
+   */
+  async _enqueueGroup(tx, telegramGroupId, reason, actor = null) {
+    if (!this.membershipQueue) return;
+    await this.membershipQueue.enqueueGroup(
+      telegramGroupId,
+      reason,
+      { enqueuedBy: actor && actor.employee_id !== undefined ? actor.employee_id : null },
+      { tx }
+    );
+  }
+
   /** Remove a mapping, which can only ever be one belonging to this group. */
   async deleteMapping(telegram_group_id, telegram_group_mapping_id) {
     await this.requireGroup(telegram_group_id);
     const id = positiveId(telegram_group_mapping_id);
     if (id === null) throw notFound(MAPPING_MESSAGES.MAPPING_NOT_FOUND);
 
-    const result = await this.repo.delete(telegram_group_id, id);
+    const result = await this.repo.withTransaction(async (tx) => {
+      const deleted = await this.repo.delete(telegram_group_id, id, { tx });
+      if (!deleted || !deleted.affectedRows) return deleted;
+      // Removing a rule is how people stop being required to be in a group,
+      // so this is the change that can lead to a removal. Queued with it.
+      await this._enqueueGroup(tx, telegram_group_id, JOB_REASON.MAPPING_REMOVED);
+      return deleted;
+    });
     if (!result || !result.affectedRows) {
       throw notFound(MAPPING_MESSAGES.MAPPING_NOT_FOUND);
     }

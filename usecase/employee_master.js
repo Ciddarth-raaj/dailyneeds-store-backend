@@ -1,4 +1,5 @@
 const logger = require("../utils/logger");
+const { JOB_REASON, MAPPING_RELEVANT_FIELDS } = require("../constants/telegram_membership_claim");
 const masterRepo = require("../repository/employee_master");
 const {
   normaliseContact,
@@ -129,6 +130,22 @@ class EmployeeMasterUsecase {
      * themselves the moment the employee exists.
      */
     this.onEmployeeCreated = null;
+    /**
+     * Phase 3C, OPTIONAL. Given a queue repository, every employee change
+     * that can move somebody between Telegram groups enqueues a
+     * reconciliation job INSIDE THE SAME TRANSACTION as the change itself.
+     *
+     * That is the whole design in one sentence: a resignation that committed
+     * always has its Telegram cleanup queued, and a resignation that rolled
+     * back never queued anything. The alternative - commit, then enqueue -
+     * loses the job whenever the process dies in the gap, and the employee
+     * keeps their group access with nothing recording that they should not.
+     *
+     * NO TELEGRAM CALL HAPPENS HERE. The queue row is a local write; the
+     * network work is the worker's, afterwards, on its own schedule. Without
+     * this wired, every path behaves exactly as it did before Phase 3C.
+     */
+    this.membershipQueue = null;
     this.repo = employeeMasterRepo;
     // M1. Answers `getActiveWorkShift(id)` - the employee work shift
     // repository - so a create can refuse an unknown or inactive initial
@@ -172,6 +189,25 @@ class EmployeeMasterUsecase {
   }
 
   /** Stage 0A revocation, inside the transaction, when C1c says one is owed. */
+  /**
+   * ENQUEUE PHASE 3C RECONCILIATION, in the caller's transaction.
+   *
+   * Deliberately NOT best-effort: if the queue write fails the whole
+   * business change fails with it, because a change that silently loses its
+   * cleanup is worse than one that did not happen. It is skipped entirely
+   * when nothing is wired, which is how this stays inert until Phase 3C is
+   * switched on.
+   */
+  async _enqueueMembership(tx, employeeId, reason, actorEmployeeId = null) {
+    if (!this.membershipQueue) return;
+    await this.membershipQueue.enqueueEmployee(
+      employeeId,
+      reason,
+      { enqueuedBy: actorEmployeeId },
+      { tx }
+    );
+  }
+
   async _revokeIfOwed(tx, outcome) {
     if (outcome && outcome.revocationOwedFor) {
       await this.repo.bumpTokenValidFrom(tx, outcome.revocationOwedFor);
@@ -313,6 +349,7 @@ class EmployeeMasterUsecase {
 
       const outcome = await this._reconcile(tx, employeeId, "create", actorEmployeeId);
       const periods = await this.lifecycleRepo.getLatestPeriod(tx, employeeId);
+      await this._enqueueMembership(tx, employeeId, JOB_REASON.EMPLOYEE_CREATED, actorEmployeeId);
 
       this._log(logger.LEVEL.INFO, "CREATE", `employee ${employeeId} created, period 1 opened`, {
         employeeId,
@@ -500,6 +537,18 @@ class EmployeeMasterUsecase {
         );
       }
 
+      // TELEGRAM GROUPS FOLLOW BRANCH, DEPARTMENT AND DESIGNATION, so an edit
+      // that moves one of those can change which groups this person belongs
+      // in - and an edit that changes a phone number cannot. Enqueuing on
+      // the second would queue reconciliation for every routine edit in the
+      // company, so the comparison is against the row we locked, by value.
+      const mappingRelevant = offered.filter(
+        (k) => MAPPING_RELEVANT_FIELDS.includes(k) && String(patch[k]) !== String(before[k])
+      );
+      if (mappingRelevant.length > 0) {
+        await this._enqueueMembership(tx, employeeId, JOB_REASON.EMPLOYEE_EDITED, actorEmployeeId);
+      }
+
       // No lifecycle transition: an edit does not move anybody between
       // periods. The reconciler is not called, and must not be - calling it
       // would be asking it to react to a change it has no opinion about.
@@ -555,6 +604,9 @@ class EmployeeMasterUsecase {
       await this.repo.setJoiningDate(tx, employeeId, joinedOn);
 
       const period = await this.lifecycle.correctJoinedOn(employeeId, joinedOn, { tx, actorEmployeeId });
+      // The joining date is what `employedOn` reads, so moving it can change
+      // whether somebody is required to be in any group at all.
+      await this._enqueueMembership(tx, employeeId, JOB_REASON.JOINING_DATE_CORRECTED, actorEmployeeId);
 
       this._log(logger.LEVEL.INFO, "JOINING-DATE", `employee ${employeeId} joining date corrected to ${joinedOn}`, {
         employeeId,
@@ -605,6 +657,11 @@ class EmployeeMasterUsecase {
 
       const outcome = await this._reconcile(tx, employeeId, "resign", actorEmployeeId);
       const sessionsRevoked = await this._revokeIfOwed(tx, outcome);
+      // THE BROADEST CLEANUP THIS SYSTEM PERFORMS rides on this transaction:
+      // employment ending closes every managed claim, MANUAL included, and
+      // reaches every employee-managed group. Queued here so it cannot be
+      // lost between the commit and the process that would have queued it.
+      await this._enqueueMembership(tx, employeeId, JOB_REASON.RESIGNED, actorEmployeeId);
 
       // The supporting record, linked to both the employee and the period it
       // belongs to, because for a resignation C2 performed itself both are
@@ -713,6 +770,11 @@ class EmployeeMasterUsecase {
       const outcome = await this._reconcile(tx, employeeId, "rejoin", actorEmployeeId);
       const sessionsRevoked = await this._revokeIfOwed(tx, outcome);
       const opened = await this.lifecycleRepo.getLatestPeriod(tx, employeeId);
+      // Rejoining re-derives the RULE claims from the mappings. It does NOT
+      // revive a MANUAL grant that employment ended closed - that was a
+      // person's decision about a person in a job, and giving it back is a
+      // person's decision too.
+      await this._enqueueMembership(tx, employeeId, JOB_REASON.REJOINED, actorEmployeeId);
 
       this._log(logger.LEVEL.INFO, "REJOIN", `employee ${employeeId} rejoined on ${joinedOn}`, {
         employeeId,
