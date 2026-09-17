@@ -324,6 +324,15 @@ class StockReceivedRepository {
          LEFT JOIN \`${GOFRUGAL_DIST}\` dist
            ON TRIM(CAST(dist.MDM_DIST_CODE AS CHAR)) = TRIM(CAST(h.MMH_DIST_CODE AS CHAR))
          WHERE h.MMH_MRC_REFNO = ?
+         -- DETERMINISTIC, not arbitrary. LIMIT 1 with no ORDER BY lets MySQL
+         -- return whichever matching header it reaches first, which is stable
+         -- only while exactly one row matches. If the sync table ever holds
+         -- two headers for one reference number, the page could show either
+         -- of them, and could show a different one on the next refresh.
+         -- Highest memo number wins, so the answer is at least the same
+         -- answer every time. This does NOT repair duplicate rows; see
+         -- scripts/diagnostics/gofrugal-sync-key-audit.js.
+         ORDER BY h.MMH_MRC_NO DESC
          LIMIT 1`,
         [refnoKey],
         async (err, headerRows) => {

@@ -69,6 +69,93 @@ class GofrugalSynkerRepository {
   }
 
   /**
+   * The columns of the table's PRIMARY KEY, in key order.
+   *
+   * This is the key the upsert below ACTUALLY matches on, which is not
+   * necessarily the `unique_keys` of the request: ensureTable is a CREATE
+   * TABLE IF NOT EXISTS, so the key is fixed at creation and a later request
+   * asking for a different one changes nothing. Reading it back is how that
+   * disagreement becomes visible instead of silently mis-keying every row.
+   *
+   * Returns [] for a table with no primary key at all - which is worse than a
+   * wrong one, because then ON DUPLICATE KEY UPDATE never matches anything
+   * and every sync inserts another copy of the same source row.
+   */
+  getPrimaryKeyColumns(tableName) {
+    return new Promise((resolve, reject) => {
+      if (!tableName) return reject(new Error("table_name is required"));
+      const escapedTable = escapeIdentifier(tableName);
+      this.db.query(
+        `SHOW KEYS FROM ${escapedTable} WHERE Key_name = 'PRIMARY'`,
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.GOFRUGAL_SYNKER",
+              code: "REPOSITORY.GOFRUGAL_SYNKER.SHOW_KEYS",
+              description: err.toString(),
+              category: "",
+              ref: { tableName }
+            });
+            return reject(err);
+          }
+          const cols = (rows || [])
+            .slice()
+            .sort(
+              (a, b) =>
+                Number(a.Seq_in_index ?? a.seq_in_index ?? 0) -
+                Number(b.Seq_in_index ?? b.seq_in_index ?? 0)
+            )
+            .map((r) => r.Column_name ?? r.column_name)
+            .filter((c) => c != null);
+          resolve(cols);
+        }
+      );
+    });
+  }
+
+  /**
+   * How many rows the table holds, and how many DISTINCT values of the key
+   * the sender believes identifies a source row.
+   *
+   * When those two numbers differ, the table is holding more than one row per
+   * source row: the upsert has been inserting copies instead of updating,
+   * which is exactly what an edited GRN looks like when it "does not reflect"
+   * - the new values are in the table, in a row nothing reads.
+   */
+  countRowsByKeys(tableName, uniqueKeys) {
+    return new Promise((resolve, reject) => {
+      if (!tableName) return reject(new Error("table_name is required"));
+      if (!uniqueKeys?.length) return reject(new Error("unique_keys is required"));
+      const escapedTable = escapeIdentifier(tableName);
+      const keyCols = uniqueKeys.map((k) => escapeIdentifier(k)).join(", ");
+      this.db.query(
+        `SELECT COUNT(*) AS total_rows,
+                COUNT(DISTINCT ${keyCols}) AS distinct_keys
+         FROM ${escapedTable}`,
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.GOFRUGAL_SYNKER",
+              code: "REPOSITORY.GOFRUGAL_SYNKER.COUNT_BY_KEYS",
+              description: err.toString(),
+              category: "",
+              ref: { tableName }
+            });
+            return reject(err);
+          }
+          const row = (rows || [])[0] || {};
+          resolve({
+            total_rows: Number(row.total_rows ?? 0),
+            distinct_keys: Number(row.distinct_keys ?? 0)
+          });
+        }
+      );
+    });
+  }
+
+  /**
    * Fetch existing rows from the table by unique key values.
    * @param {string} tableName
    * @param {string[]} uniqueKeys
