@@ -495,28 +495,81 @@ function calculatePf(context = {}, config = CONFIG) {
   };
 }
 
-/* ------------------------------------------------------------------- ESI */
+/* ------------------------------------------- the statutory wage definition */
 
 /**
- * ISOLATED NUANCE — what an ESI wage could be, given only a salary structure.
+ * STATUTORY WAGES — the Code on Social Security, 2020 definition, and the ONE
+ * implementation of it.
  *
- * The engine needs this for exactly one decision: can it say "outside the
- * scheme" WITHOUT a payroll wage? It can, but only when even the smallest wage
- * the structure could produce is already above the coverage ceiling.
+ * Every contribution charged on "wages" is charged on this, not on the gross
+ * and not on a convenient subset of the structure:
  *
- * The lower bound is the gross less Conveyance, because travelling allowance
- * is outside the statutory definition of wages and Conveyance is this
- * structure's travelling allowance. If that exclusion is wrong the bound is
- * merely too low, and a bound that is too low can only cost an unresolved
- * answer — never a wrong contribution. That is why the flag defaults the way
- * it does and why this is the safe direction to be uncertain in.
+ *   wages = total remuneration
+ *         − the heads of remuneration the Code excludes
+ *         + the 50% proviso's add-back
+ *
+ * THE EXCLUSIONS ARE A LIST OF WHAT COMES OUT, never a list of what goes in
+ * (`config/statutory.js#wages.excludedComponents`). The Code makes all
+ * remuneration wages except what it specifically excludes, so a component
+ * added to the structure next quarter is wages by default and cannot be left
+ * out of the contribution base by nobody having thought about it. That is also
+ * why nothing below names `hra` or `conveyance`.
+ *
+ * THE 50% PROVISO. If the excluded heads come to more than half of total
+ * remuneration, the EXCESS OVER THAT HALF — not the whole of the excluded
+ * amount — is added back to wages. The arithmetic below computes the excess
+ * explicitly rather than jumping to the equivalent `max(included, half)`,
+ * because the add-back is the number somebody reconciling a contribution asks
+ * for, and it is returned beside the wage for exactly that reason.
+ *
+ * IT IS NOT A BOUND. The figure this returns is the wage a contribution is
+ * charged on. (It replaces an earlier `esiWageBounds`, which was a
+ * deliberately conservative LOWER BOUND for deciding "definitely above the
+ * coverage ceiling" and was never the statutory wage.)
+ *
+ * @param components the four component amounts, in rupees
+ * @param totalRemunerationRupees everything paid for the period — the monthly
+ *        gross in the Salary Master's standard case, the payable remuneration
+ *        in a payrun's
  */
-function esiWageBounds(components = {}, grossRupees, config = CONFIG) {
-  const gross = toPaise(grossRupees);
-  const conveyance = toPaise(components.conveyance) || 0;
-  const minimum = config.esi.conveyanceExcludedFromWage ? gross - conveyance : gross;
-  return { minimum_wage: toRupees(minimum), structural_wage: toRupees(gross) };
+function statutoryWages(components = {}, totalRemunerationRupees, config = CONFIG) {
+  const cfg = config.wages;
+  const total = toPaise(totalRemunerationRupees);
+  if (total === null || total < 0) return null;
+
+  const excludedComponents = {};
+  let excluded = 0;
+  for (const name of cfg.excludedComponents || []) {
+    const amount = toPaise(components[name]) || 0;
+    excludedComponents[name] = toRupees(amount);
+    excluded += amount;
+  }
+
+  /*
+   * Bad data cannot be allowed to produce a negative wage: components that sum
+   * to more than the remuneration they came out of is a broken record, and the
+   * honest floor for it is zero rather than a contribution on a negative wage.
+   */
+  excluded = Math.min(Math.max(excluded, 0), total);
+  const included = total - excluded;
+
+  const floor = Math.round(percentOf(total, cfg.minimumPercentOfRemuneration));
+  const addBack = excluded > floor ? excluded - floor : 0;
+
+  return {
+    total_remuneration: toRupees(total),
+    excluded_remuneration: toRupees(excluded),
+    excluded_components: excludedComponents,
+    included_remuneration: toRupees(included),
+    minimum_percent_of_remuneration: cfg.minimumPercentOfRemuneration,
+    /** The proviso's floor, and the amount added back to reach it. Both, because one alone does not explain the other. */
+    minimum_wages: toRupees(floor),
+    add_back: toRupees(addBack),
+    statutory_wages: toRupees(included + addBack),
+  };
 }
+
+/* ------------------------------------------------------------------- ESI */
 
 /**
  * The ESI block.
@@ -529,9 +582,8 @@ function esiWageBounds(components = {}, grossRupees, config = CONFIG) {
  *             payrun worked out after attendance and deductions. This is the
  *             authoritative figure and the one a payrun must keep using.
  *   STANDARD  no wage is supplied, so the wage is the one this SALARY
- *             STRUCTURE implies for a full month: the gross less the
- *             components outside the statutory definition of wages, which is
- *             exactly `esiWageBounds`' lower bound.
+ *             STRUCTURE implies for a full month: `statutoryWages` above,
+ *             applied to the approved monthly gross.
  *
  * The rates, the ceiling, the low-wage exemption and the rounding are the same
  * in both cases — only the wage differs — so both go through `contributionsFor`
@@ -652,22 +704,31 @@ function calculateEsi(context = {}, config = CONFIG) {
 
   /*
    * No wage supplied, so this is the Salary Master asking what a full standard
-   * month costs. The structural wage is `esiWageBounds`' lower bound — the
-   * gross less Conveyance, because travelling allowance is outside the
-   * statutory definition of wages — and it is also what decides "too well paid
-   * to be covered at all" without a payroll wage.
+   * month costs. The wage is the statutory wage definition applied to the
+   * approved structure for a whole month — the same definition a payrun
+   * applies to what is actually payable — and it decides the coverage ceiling
+   * question too, because the ceiling is a ceiling on wages.
    */
-  const bounds = esiWageBounds(context, context.gross, config);
-  const minimum = toPaise(bounds.minimum_wage);
+  const wageDefinition = statutoryWages(context, context.gross, config);
+  const standard = wageDefinition === null ? null : toPaise(wageDefinition.statutory_wages);
 
-  if (minimum !== null && minimum > ceiling) {
+  if (standard === null) {
+    /*
+     * No usable remuneration to apply the definition to. Nothing about this
+     * employee has been decided, so it is a question and not a zero.
+     */
+    return pending(UNRESOLVED.ESI_WAGE_CONTEXT_UNAVAILABLE);
+  }
+
+  if (standard > ceiling && context.contribution_period_continues !== true) {
     return {
       status: STATUS.NOT_APPLICABLE,
       unresolved: [],
       esi_wage: 0,
       employee_esi: 0,
       employer_esi: 0,
-      reason: "Even the lowest wage this structure can produce is above the coverage ceiling",
+      wage_definition: wageDefinition,
+      reason: "Standard statutory wages are above the ESI coverage ceiling",
     };
   }
 
@@ -680,11 +741,15 @@ function calculateEsi(context = {}, config = CONFIG) {
    * structure fixes the wage, so the standard monthly contribution is a known
    * number and is reported as one. A payrun still computes its own from the
    * wage actually payable, and the two are allowed to differ.
+   *
+   * `contributionsFor` re-checks the ceiling — and must, because a continuing
+   * contribution period keeps somebody covered above it, which is exactly the
+   * case the return above steps around rather than deciding.
    */
-  if (minimum === null) {
-    return pending(UNRESOLVED.ESI_WAGE_CONTEXT_UNAVAILABLE, { wage_bounds: bounds });
-  }
-  return { ...contributionsFor(minimum, ESI_WAGE_BASIS.STANDARD), wage_bounds: bounds };
+  return {
+    ...contributionsFor(standard, ESI_WAGE_BASIS.STANDARD),
+    wage_definition: wageDefinition,
+  };
 }
 
 /* ------------------------------------------------------------------- CTC */
@@ -754,10 +819,23 @@ function configFromSnapshot(snapshot, config = CONFIG) {
         snap.esi_employee_exemption_daily_wage,
         config.esi.employeeExemptionDailyWage
       ),
-      conveyanceExcludedFromWage:
-        typeof snap.esi_conveyance_excluded_from_wage === "boolean"
-          ? snap.esi_conveyance_excluded_from_wage
-          : config.esi.conveyanceExcludedFromWage,
+    },
+    /*
+     * THE WAGE DEFINITION TOO, and it is the one place the fallback does real
+     * work: a row written before the Code definition was implemented has no
+     * wage-definition keys to honour — it never held an ESI wage at all — so
+     * the definition in force now is the right one to apply to it.
+     */
+    wages: {
+      ...config.wages,
+      excludedComponents: Array.isArray(snap.wage_excluded_components)
+        ? snap.wage_excluded_components
+        : config.wages.excludedComponents,
+      minimumPercentOfRemuneration: pick(
+        snap.wage_minimum_percent_of_remuneration,
+        config.wages.minimumPercentOfRemuneration
+      ),
+      effectiveFrom: snap.wage_definition_effective_from || config.wages.effectiveFrom,
     },
     rounding: {
       ...config.rounding,
@@ -801,7 +879,13 @@ function fillStandardEsi(record, config = CONFIG) {
       // written for an employee already recorded as ESI applicable.
       esi_applicable: true,
       gross: record.monthly_gross,
+      // EVERY COMPONENT TRAVELS. The statutory wage definition is a rule about
+      // the whole structure, so handing it a subset would compute a different
+      // wage from the one a record created today gets on the same numbers.
+      basic: record.basic,
       conveyance: record.conveyance,
+      hra: record.hra,
+      special_allowance: record.special_allowance,
     },
     cfg
   );
@@ -956,7 +1040,14 @@ function calculateSalary(input = {}, config = CONFIG) {
       esi_employer_rate_percent: config.esi.employerRatePercent,
       esi_coverage_ceiling: config.esi.coverageCeiling,
       esi_employee_exemption_daily_wage: config.esi.employeeExemptionDailyWage,
-      esi_conveyance_excluded_from_wage: config.esi.conveyanceExcludedFromWage,
+      /*
+       * WHICH DEFINITION OF WAGES produced the contributions on this record.
+       * A rate change is visible in a number; a change to what counts as wages
+       * is not, so it travels with the record explicitly.
+       */
+      wage_definition_effective_from: config.wages.effectiveFrom,
+      wage_excluded_components: [...config.wages.excludedComponents],
+      wage_minimum_percent_of_remuneration: config.wages.minimumPercentOfRemuneration,
       contribution_rounding: config.rounding.contributionRounding,
     },
   };
@@ -971,7 +1062,7 @@ module.exports = {
   validateManualBreakup,
   resolveEpsEligibility,
   calculatePf,
-  esiWageBounds,
+  statutoryWages,
   calculateEsi,
   calculateCtc,
   configFromSnapshot,
