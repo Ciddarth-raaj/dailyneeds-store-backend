@@ -334,21 +334,99 @@ class TelegramGroupRegistryUsecase {
    * copy of "what counts as still managing people".
    */
   async _updateWithChatIdGuard(telegram_group_id, fields, actorEmployeeId) {
-    if (!this.mappingRepo || !this.claimRepo || !this.repo.withTransaction) {
+    if (!this._canGuard()) {
       return this.repo.update(telegram_group_id, fields, actorEmployeeId);
     }
-    return this.repo.withTransaction(async (tx) => {
-      const mappings = await this.mappingRepo.countForGroup(telegram_group_id, { tx });
-      const claims = await this.claimRepo.countLiveForGroup(telegram_group_id, { tx });
-      if (mappings > 0 || claims > 0) {
+    return this._guardedTransaction(async (tx) => {
+      const counts = await this._lockAndCountDependents(telegram_group_id, tx);
+      if (counts.mappings > 0 || counts.claims > 0) {
         throw conflict(
           "This group still manages people, so its Chat ID cannot be changed. Remove its " +
             "mappings, let managed membership finish its cleanup, and then change the Chat ID.",
-          { mappings, unresolved_claims: claims }
+          { mappings: counts.mappings, unresolved_claims: counts.claims }
         );
       }
       return this.repo.update(telegram_group_id, fields, actorEmployeeId, { tx });
     });
+  }
+
+  /**
+   * RUN A GUARDED TRANSACTION, AND RETRY IT IF INNODB BREAKS A DEADLOCK.
+   *
+   * The guard locks the parent row before the children, because that is what
+   * stops new children being inserted. A concurrent writer reaches the same
+   * rows in the opposite order - an upsert takes the claim row it is about
+   * to change, and only then checks its foreign key against the parent - so
+   * the two can deadlock, and InnoDB picks one of them to roll back. There
+   * is no lock order that avoids it without giving up the insert protection,
+   * which is the whole point of the guard.
+   *
+   * A deadlock is not a failure to report to an operator: it means somebody
+   * else was mid-flight. The transaction is simply taken again, with fresh
+   * locks and a fresh look at the data - so if the other writer's claim did
+   * commit, the retry SEES it and refuses with the ordinary 409, which is
+   * the right answer rather than a lucky one. A lock-wait timeout is the
+   * same situation with a slower ending.
+   *
+   * Never retried: the 409 itself, and anything else. Only contention.
+   */
+  async _guardedTransaction(fn, attempts = 3) {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await this.repo.withTransaction(fn);
+      } catch (err) {
+        const contended =
+          err &&
+          (err.code === "ER_LOCK_DEADLOCK" ||
+            err.code === "ER_LOCK_WAIT_TIMEOUT" ||
+            err.errno === 1213 ||
+            err.errno === 1205);
+        if (!contended || attempt >= attempts) throw err;
+      }
+    }
+  }
+
+  _canGuard() {
+    return Boolean(
+      this.mappingRepo &&
+        this.claimRepo &&
+        this.repo.withTransaction &&
+        this.repo.lockForUpdate &&
+        this.mappingRepo.countForGroupForUpdate &&
+        this.claimRepo.lockAllForGroup
+    );
+  }
+
+  /**
+   * TAKE THE LOCKS FIRST, THEN DECIDE. Both registry guards run this, in
+   * this order, and the order is the design:
+   *
+   *   1. THE REGISTRY ROW, `FOR UPDATE`. InnoDB checks a foreign key by
+   *      taking a SHARED lock on the parent row, so while this exclusive
+   *      lock is held no new mapping and no new claim can be INSERTED for
+   *      this group - they wait here rather than appearing between the count
+   *      and the write. That is the whole reason this lock is taken first
+   *      and on the parent rather than anywhere else.
+   *
+   *   2. THE MAPPING ROWS for the group, `FOR UPDATE`.
+   *
+   *   3. EVERY CLAIM ROW for the group, `FOR UPDATE`, INCLUDING CLOSED ONES.
+   *      A claim is re-opened in place by an upsert, so a CLOSED row is one
+   *      statement away from ACTIVE; locking only the live ones would leave
+   *      the exact race this guard exists to close.
+   *
+   * A counted read would answer what was true a moment ago, which is the
+   * wrong thing for a guard to act on. These are locking reads: what they
+   * report stays true until this transaction ends.
+   */
+  async _lockAndCountDependents(telegram_group_id, tx) {
+    await this.repo.lockForUpdate(telegram_group_id, { tx });
+    const mappings = await this.mappingRepo.countForGroupForUpdate(telegram_group_id, { tx });
+    const claimRows = await this.claimRepo.lockAllForGroup(telegram_group_id, { tx });
+    const claims = claimRows.filter(
+      (claim) => claim.state === "ACTIVE" || claim.state === "REMOVAL_PENDING"
+    ).length;
+    return { mappings, claims };
   }
 
   /**
@@ -370,15 +448,14 @@ class TelegramGroupRegistryUsecase {
     try {
       const existing = await this.repo.getById(telegram_group_id);
       if (!existing) throw notFound("Telegram group not found");
-      if (this.mappingRepo && this.claimRepo && this.repo.withTransaction) {
-        return await this.repo.withTransaction(async (tx) => {
-          const mappings = await this.mappingRepo.countForGroup(telegram_group_id, { tx });
-          const claims = await this.claimRepo.countLiveForGroup(telegram_group_id, { tx });
-          if (mappings > 0 || claims > 0) {
+      if (this._canGuard()) {
+        return await this._guardedTransaction(async (tx) => {
+          const counts = await this._lockAndCountDependents(telegram_group_id, tx);
+          if (counts.mappings > 0 || counts.claims > 0) {
             throw conflict(
               "This group still manages people. Remove its mappings and let managed membership " +
                 "finish its cleanup before deleting the group.",
-              { mappings, unresolved_claims: claims }
+              { mappings: counts.mappings, unresolved_claims: counts.claims }
             );
           }
           return this.repo.delete(telegram_group_id, { tx });

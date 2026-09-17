@@ -241,6 +241,31 @@ class TelegramGroupRegistryRepository {
     }
   }
 
+  /**
+   * LOCK THIS REGISTRY ROW FOR THE TRANSACTION, and lock it for WRITING.
+   *
+   * This is the lock that stops new children appearing, and it does it
+   * through InnoDB's own foreign-key rules rather than through anything this
+   * code does: inserting a row that references a parent takes a SHARED lock
+   * on that parent row to check the constraint, and a shared lock cannot be
+   * taken while somebody else holds this exclusive one. So a mapping or a
+   * claim being created for this group waits here, behind the guard, instead
+   * of appearing between the guard's count and the write that follows it.
+   *
+   * It does NOT cover an existing child row being UPDATED - a CLOSED claim
+   * reopened in place never touches the parent - which is why the claim rows
+   * are locked separately.
+   */
+  async lockForUpdate(telegram_group_id, { tx } = {}) {
+    const rows = await this._query(
+      "LOCK-FOR-UPDATE",
+      `SELECT telegram_group_id, chat_id FROM ${TABLE} WHERE telegram_group_id = ? FOR UPDATE`,
+      [telegram_group_id],
+      tx
+    );
+    return rows && rows[0] ? rows[0] : null;
+  }
+
   async delete(telegram_group_id, { tx } = {}) {
     const res = await this._query(
       "DELETE",

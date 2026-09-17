@@ -964,8 +964,10 @@ class Server {
     this.telegramGroupRegistryUsecase = require("./usecase/telegram_group_registry")(
       this.telegramGroupRegistryRepo,
       {
-        // Phase 3C: a hard delete cascades the claim rows, so it is refused
-        // while the group still has mappings or unresolved cleanup.
+        // Phase 3C: a hard delete cascades the claim rows, and a Chat ID
+        // change re-points them, so both are refused while the group still
+        // has mappings or unresolved cleanup - decided under row locks
+        // these two repositories take, never from a stale count.
         mappingRepo: this.telegramGroupMappingRepo,
         claimRepo: this.telegramMembershipClaimRepo,
       }

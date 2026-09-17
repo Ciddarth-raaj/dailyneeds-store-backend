@@ -165,17 +165,39 @@ describe("the registry hard-delete guard", () => {
   const body = methodBody(source, "async delete(");
 
   it("refuses while the group has mappings OR unresolved claims", () => {
-    assert.match(body, /countForGroup/);
-    assert.match(body, /countLiveForGroup/);
-    assert.match(body, /if \(mappings > 0 \|\| claims > 0\)/);
+    // The counting moved into the shared locking helper both guards use;
+    // what this method must still do is act on its answer.
+    assert.match(body, /_lockAndCountDependents/);
+    const guard = methodBody(source, "async _lockAndCountDependents(");
+    assert.match(guard, /countForGroupForUpdate/);
+    assert.match(guard, /lockAllForGroup/);
+    assert.match(body, /if \(counts\.mappings > 0 \|\| counts\.claims > 0\)/);
     assert.match(body, /conflict\(/);
   });
 
-  it("checks and deletes in ONE transaction", () => {
-    assert.match(body, /withTransaction/);
-    const txAt = body.indexOf("withTransaction");
-    assert.ok(body.indexOf("countLiveForGroup") > txAt);
+  it("checks and deletes in ONE transaction, and LOCKS before it checks", () => {
+    // The transaction itself moved into `_guardedTransaction`, which both
+    // registry guards share - it is also what retries when InnoDB breaks a
+    // deadlock between this guard and a concurrent writer.
+    assert.match(body, /_guardedTransaction/);
+    const txAt = body.indexOf("_guardedTransaction");
+    assert.ok(body.indexOf("_lockAndCountDependents") > txAt);
     assert.ok(body.indexOf("this.repo.delete") > txAt);
+    const runner = methodBody(source, "async _guardedTransaction(");
+    assert.match(runner, /this\.repo\.withTransaction/);
+    assert.match(runner, /ER_LOCK_DEADLOCK/);
+
+    // The locks themselves: the parent row first - which is what stops a new
+    // mapping or claim being INSERTED - then the existing children,
+    // including CLOSED claims, which an insert-lock cannot cover.
+    const guard = methodBody(source, "async _lockAndCountDependents(");
+    assert.match(guard, /this\.repo\.lockForUpdate/);
+    assert.match(guard, /countForGroupForUpdate/);
+    assert.match(guard, /lockAllForGroup/);
+    assert.ok(
+      guard.indexOf("lockForUpdate") < guard.indexOf("countForGroupForUpdate"),
+      "the parent row is locked first"
+    );
   });
 
   it("answers 409, not 500 - it is a refusal, not a fault", () => {
@@ -238,13 +260,14 @@ describe("every Phase 3C factory forwards what its class takes", () => {
         // The duplicate-Chat-ID check runs before the Phase 3C guard; the
         // new id belongs to nobody.
         getByChatId: async () => null,
+        lockForUpdate: async () => ({ telegram_group_id: 10 }),
         update: async () => ({ code: 200, affectedRows: 1 }),
         delete: async () => ({ code: 200, affectedRows: 1 }),
         withTransaction: async (fn) => fn({ query: async () => ({}) }),
       },
       {
-        mappingRepo: { countForGroup: async () => 1 },
-        claimRepo: { countLiveForGroup: async () => 0 },
+        mappingRepo: { countForGroupForUpdate: async () => 1 },
+        claimRepo: { lockAllForGroup: async () => [] },
       }
     );
 

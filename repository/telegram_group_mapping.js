@@ -425,6 +425,29 @@ class TelegramGroupMappingRepository {
     return { affectedRows: res.affectedRows };
   }
 
+  /**
+   * THE GROUP'S MAPPING ROWS, LOCKED FOR THE TRANSACTION.
+   *
+   * `countForGroup` is an ordinary read: it answers what was true a moment
+   * ago, which is exactly the wrong thing for a guard. This takes write
+   * locks on the rows it counts, so a mapping being deleted concurrently
+   * cannot vanish out from under the decision either.
+   *
+   * New INSERTs are held by the parent-row lock the registry takes first -
+   * InnoDB checks the foreign key by taking a shared lock on that parent,
+   * and it cannot while the guard holds it exclusively.
+   */
+  async countForGroupForUpdate(telegram_group_id, { tx } = {}) {
+    const rows = await this._query(
+      "COUNT-FOR-GROUP-FOR-UPDATE",
+      `SELECT telegram_group_mapping_id FROM ${TABLE}
+        WHERE telegram_group_id = ? FOR UPDATE`,
+      [telegram_group_id],
+      tx
+    );
+    return rows ? rows.length : 0;
+  }
+
   /** How many mappings a group carries - the registry delete guard reads it. */
   async countForGroup(telegram_group_id, { tx } = {}) {
     const rows = await this._query(

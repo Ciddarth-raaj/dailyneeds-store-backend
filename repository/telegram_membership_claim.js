@@ -175,6 +175,29 @@ class TelegramMembershipClaimRepository {
   }
 
   /**
+   * EVERY CLAIM ROW FOR THIS GROUP, LOCKED - AND THAT MEANS CLOSED ONES TOO.
+   *
+   * The closed rows are the whole point. A claim is re-opened IN PLACE by
+   * `open()`'s upsert, so a CLOSED row is one statement away from ACTIVE and
+   * locking only the live ones would leave exactly the race the guard exists
+   * to close: the guard counts nothing live, somebody reopens a closed
+   * claim, and the group is re-pointed or deleted under a membership that
+   * became real in between.
+   *
+   * Returned rather than counted, so the caller can decide what "live" means
+   * from the rows it has locked rather than from a second query.
+   */
+  async lockAllForGroup(telegramGroupId, { tx } = {}) {
+    const rows = await this._query(
+      "LOCK-ALL-FOR-GROUP",
+      `SELECT * FROM ${TABLE} WHERE telegram_group_id = ? FOR UPDATE`,
+      [Number(telegramGroupId)],
+      tx
+    );
+    return (rows || []).map(TelegramMembershipClaimRepository._row);
+  }
+
+  /**
    * Names for a screen, for ids we already hold. Name only - a membership
    * screen has no business with a mobile number or a Telegram handle.
    */

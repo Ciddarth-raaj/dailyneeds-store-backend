@@ -51,7 +51,7 @@ const row = (overrides = {}) => ({
 });
 
 function fakeRepo(rows = [], { outletIds = [1, 2] } = {}) {
-  const store = { rows: rows.map((r) => ({ ...r })), writes: [], deletes: [], transactions: 0 };
+  const store = { rows: rows.map((r) => ({ ...r })), writes: [], deletes: [], transactions: 0, locks: [] };
   let nextId = 100;
   return {
     store,
@@ -102,6 +102,15 @@ function fakeRepo(rows = [], { outletIds = [1, 2] } = {}) {
     withTransaction: async (fn) => {
       store.transactions += 1;
       return fn({ query: async () => ({ affectedRows: 1 }) });
+    },
+    /**
+     * The guard locks this row before it counts anything - it is what stops
+     * a new mapping or claim being inserted while the decision is being
+     * made. The double records that it was asked for.
+     */
+    lockForUpdate: async (id, options = {}) => {
+      store.locks.push({ id, tx: Boolean(options.tx) });
+      return store.rows.find((r) => r.telegram_group_id === id) || null;
     },
     delete: async (id) => {
       store.deletes.push(id);
@@ -636,11 +645,21 @@ describe("the outlet and bot-admin filters", () => {
 describe("changing a Chat ID while the group still manages people", () => {
   const OTHER = "-1009999999999";
 
-  /** The registry usecase with Phase 3C's two guard repositories wired. */
-  const guarded = (repo, { mappings = 0, claims = 0 } = {}) =>
+  /**
+   * The registry usecase with Phase 3C's two guard repositories wired.
+   *
+   * The doubles offer the LOCKING reads, because those are what the guard
+   * calls: a plain count answers what was true a moment ago, which is the
+   * wrong thing for a guard to act on.
+   */
+  const guarded = (repo, { mappings = 0, claims = 0, claimRows = null } = {}) =>
     build(repo, {
-      mappingRepo: { countForGroup: async () => mappings },
-      claimRepo: { countLiveForGroup: async () => claims },
+      mappingRepo: { countForGroupForUpdate: async () => mappings },
+      claimRepo: {
+        lockAllForGroup: async () =>
+          claimRows ||
+          Array.from({ length: claims }, () => ({ state: "ACTIVE" })),
+      },
     });
 
   const conflictFrom = async (promise) => {
@@ -653,6 +672,13 @@ describe("changing a Chat ID while the group still manages people", () => {
     assert.equal(err.httpCode, 409);
     return err;
   };
+
+  it("LOCKS THE REGISTRY ROW before it decides anything", async () => {
+    const repo = fakeRepo([row({ chat_id: SUPERGROUP })]);
+    await guarded(repo).update(1, { chat_id: OTHER });
+    assert.equal(repo.store.locks.length, 1);
+    assert.equal(repo.store.locks[0].tx, true, "and inside the transaction");
+  });
 
   it("is REFUSED while a mapping still points at it", async () => {
     // Re-pointing the row leaves the employees in the old group with
@@ -709,27 +735,104 @@ describe("changing a Chat ID while the group still manages people", () => {
     // guard exists to close.
     const repo = fakeRepo([row({ chat_id: SUPERGROUP })]);
     const seen = [];
-    await build(repo, {
+    const lockingRepo = fakeRepo([row({ chat_id: SUPERGROUP })]);
+    lockingRepo.lockForUpdate = async (id, options) => {
+      seen.push(["registry-row", Boolean(options && options.tx)]);
+      return { telegram_group_id: id };
+    };
+    await build(lockingRepo, {
       mappingRepo: {
-        countForGroup: async (id, options) => {
+        countForGroupForUpdate: async (id, options) => {
           seen.push(["mappings", Boolean(options && options.tx)]);
           return 0;
         },
       },
       claimRepo: {
-        countLiveForGroup: async (id, options) => {
+        lockAllForGroup: async (id, options) => {
           seen.push(["claims", Boolean(options && options.tx)]);
-          return 0;
+          return [];
         },
       },
     }).update(1, { chat_id: OTHER });
 
+    // THE ORDER IS THE DESIGN. The parent row first, because InnoDB checks a
+    // foreign key by taking a shared lock on it - so nothing new can be
+    // inserted for this group while that exclusive lock is held. Then the
+    // existing children, which an insert-lock cannot cover.
     assert.deepEqual(seen, [
+      ["registry-row", true],
       ["mappings", true],
       ["claims", true],
     ]);
+    Object.assign(repo.store, lockingRepo.store);
     assert.equal(repo.store.transactions, 1);
     assert.equal(repo.store.writes[0].tx, true, "the write itself carries the transaction");
+  });
+
+  it("A DEADLOCK IS RETRIED, and the retry decides on what it then sees", async () => {
+    // The guard locks the parent before the children; a concurrent upsert
+    // reaches them the other way round, so InnoDB can pick either as its
+    // victim. That is contention, not a fault - and the retry is what turns
+    // it into the right answer rather than a lucky one.
+    const repo = fakeRepo([row({ chat_id: SUPERGROUP })]);
+    let attempts = 0;
+    let claims = [];
+    const usecase = build(repo, {
+      mappingRepo: { countForGroupForUpdate: async () => 0 },
+      claimRepo: {
+        lockAllForGroup: async () => {
+          attempts += 1;
+          if (attempts === 1) {
+            // The rival commits its reopen and InnoDB rolls us back.
+            claims = [{ state: "ACTIVE" }];
+            const deadlock = new Error("Deadlock found when trying to get lock");
+            deadlock.code = "ER_LOCK_DEADLOCK";
+            throw deadlock;
+          }
+          return claims;
+        },
+      },
+    });
+
+    const err = await conflictFrom(usecase.update(1, { chat_id: OTHER }));
+    assert.equal(attempts, 2, "it takes the transaction again");
+    assert.equal(err.detail.unresolved_claims, 1, "and the retry sees what the rival committed");
+    assert.equal(repo.store.rows[0].chat_id, SUPERGROUP, "nothing was written");
+  });
+
+  it("a deadlock that never clears eventually surfaces, rather than looping", async () => {
+    const repo = fakeRepo([row({ chat_id: SUPERGROUP })]);
+    let attempts = 0;
+    const usecase = build(repo, {
+      mappingRepo: { countForGroupForUpdate: async () => 0 },
+      claimRepo: {
+        lockAllForGroup: async () => {
+          attempts += 1;
+          const deadlock = new Error("Deadlock found when trying to get lock");
+          deadlock.code = "ER_LOCK_DEADLOCK";
+          throw deadlock;
+        },
+      },
+    });
+
+    await assert.rejects(() => usecase.update(1, { chat_id: OTHER }), /Deadlock/);
+    assert.equal(attempts, 3, "bounded - three attempts, not forever");
+  });
+
+  it("a 409 is NEVER retried - it is an answer, not contention", async () => {
+    const repo = fakeRepo([row({ chat_id: SUPERGROUP })]);
+    let attempts = 0;
+    const usecase = build(repo, {
+      mappingRepo: {
+        countForGroupForUpdate: async () => {
+          attempts += 1;
+          return 1;
+        },
+      },
+      claimRepo: { lockAllForGroup: async () => [] },
+    });
+    await conflictFrom(usecase.update(1, { chat_id: OTHER }));
+    assert.equal(attempts, 1);
   });
 
   it("reuses the guard repositories rather than counting for itself", () => {
@@ -737,9 +840,39 @@ describe("changing a Chat ID while the group still manages people", () => {
       require("path").join(__dirname, "telegram_group_registry.js"),
       "utf8"
     );
-    assert.match(source, /countForGroup/);
-    assert.match(source, /countLiveForGroup/);
+    assert.match(source, /countForGroupForUpdate/);
+    assert.match(source, /lockAllForGroup/);
+    assert.match(source, /lockForUpdate/);
     // No SQL and no second definition of "still managing people" here.
     assert.ok(!/SELECT|FROM telegram_group_mapping/i.test(source));
+  });
+
+  it("EVERY guard read is a LOCKING read - a plain count would be a stale one", () => {
+    const source = require("fs").readFileSync(
+      require("path").join(__dirname, "telegram_group_registry.js"),
+      "utf8"
+    );
+    const code = source.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
+    assert.ok(!/countForGroup\(/.test(code), "the non-locking mapping count must not be used");
+    assert.ok(!/countLiveForGroup\(/.test(code), "the non-locking claim count must not be used");
+  });
+
+  it("CLOSED claims are locked too, and counted as not live", async () => {
+    // A closed claim is one upsert away from ACTIVE, so it must be inside
+    // the lock - and it must not by itself block the change.
+    const repo = fakeRepo([row({ chat_id: SUPERGROUP })]);
+    const result = await guarded(repo, {
+      claimRows: [{ state: "CLOSED" }, { state: "CLOSED" }],
+    }).update(1, { chat_id: OTHER });
+    assert.equal(result.code, 200);
+    assert.equal(repo.store.rows[0].chat_id, OTHER);
+  });
+
+  it("a REMOVAL_PENDING claim blocks it, exactly as an ACTIVE one does", async () => {
+    const repo = fakeRepo([row({ chat_id: SUPERGROUP })]);
+    const err = await conflictFrom(
+      guarded(repo, { claimRows: [{ state: "REMOVAL_PENDING" }] }).update(1, { chat_id: OTHER })
+    );
+    assert.equal(err.detail.unresolved_claims, 1);
   });
 });
