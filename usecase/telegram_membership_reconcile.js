@@ -153,7 +153,11 @@ class TelegramMembershipReconcileUsecase {
    *
    * @returns a summary the worker turns into a job outcome.
    */
-  async reconcileEmployee(employeeId, { jobId = null, budget = null } = {}) {
+  async reconcileEmployee(employeeId, { jobId = null, budget = null, groupCache = null } = {}) {
+    // One job, one view of the registry. A GROUP job hands its own cache
+    // down so the employees it reconciles share it; a standalone employee
+    // job makes one here and drops it when it returns.
+    const cache = groupCache || new Map();
     const employee = await this.mappingRepo.getEmployeeForMatching(employeeId);
     if (!employee) {
       return { employeeId, skipped: "UNKNOWN_EMPLOYEE", claimsChanged: 0, removals: [] };
@@ -173,6 +177,7 @@ class TelegramMembershipReconcileUsecase {
     const telegram = await this._telegramPass(employeeId, after, {
       jobId,
       budget,
+      groupCache: cache,
       includeUnclaimedManagedGroups: !employed,
     });
 
@@ -312,7 +317,7 @@ class TelegramMembershipReconcileUsecase {
    * adopting from it would record "they were already in" on the strength of
    * something nobody checked today.
    */
-  async _telegramPass(employeeId, claims, { jobId, budget, includeUnclaimedManagedGroups }) {
+  async _telegramPass(employeeId, claims, { jobId, budget, groupCache, includeUnclaimedManagedGroups }) {
     const removals = [];
     const adopted = [];
     const skipped = [];
@@ -352,12 +357,27 @@ class TelegramMembershipReconcileUsecase {
     for (const [groupId, target] of targets) {
       if (!target.remove) {
         if (!active) continue;
-        const adoptedHere = await this._tryAdopt(employeeId, groupId, target.pair, active, jobId, budget);
+        const adoptedHere = await this._tryAdopt(
+          employeeId,
+          groupId,
+          target.pair,
+          active,
+          jobId,
+          budget,
+          groupCache
+        );
         if (adoptedHere) adopted.push(groupId);
         continue;
       }
 
-      const result = await this._removeFromGroup(employeeId, groupId, identities, jobId, budget);
+      const result = await this._removeFromGroup(
+        employeeId,
+        groupId,
+        identities,
+        jobId,
+        budget,
+        groupCache
+      );
       switch (result.outcome) {
         case REMOVAL_OUTCOME.REMOVED:
         case REMOVAL_OUTCOME.ALREADY_ABSENT:
@@ -406,10 +426,10 @@ class TelegramMembershipReconcileUsecase {
    * ALREADY IN THE GROUP? Then the claim is satisfied and we say so once.
    * Absent is not a failure and not an action: joining is Phase 3B's flow.
    */
-  async _tryAdopt(employeeId, groupId, pair, identity, jobId, budget) {
+  async _tryAdopt(employeeId, groupId, pair, identity, jobId, budget, groupCache) {
     const claim = pair.RULE && pair.RULE.state === CLAIM_STATE.ACTIVE ? pair.RULE : pair.MANUAL;
     if (!claim || claim.adopted_from_existing_member) return false;
-    const group = await this._group(groupId);
+    const group = await this._group(groupId, groupCache);
     if (!group) return false;
     if (budget && budget.spend && !budget.spend(1)) return false;
     try {
@@ -465,7 +485,7 @@ class TelegramMembershipReconcileUsecase {
    * because a Telegram account can be re-used by a different employee later
    * and removing "their old account" would then remove SOMEBODY ELSE.
    */
-  async _removeFromGroup(employeeId, groupId, identities, jobId, budget) {
+  async _removeFromGroup(employeeId, groupId, identities, jobId, budget, groupCache) {
     if (!this.config.removalsEnabled) {
       // DELIBERATELY OFF, so this is not a failure and must burn no retry -
       // but the work is NOT done, and the job must not report that it is.
@@ -504,7 +524,7 @@ class TelegramMembershipReconcileUsecase {
       return { outcome: REMOVAL_OUTCOME.CAPPED, reason: REMOVAL_REFUSAL.CAP_REACHED };
     }
 
-    const group = await this._group(groupId);
+    const group = await this._group(groupId, groupCache);
     if (!group) {
       return {
         outcome: REMOVAL_OUTCOME.RETRYABLE,
@@ -670,8 +690,17 @@ class TelegramMembershipReconcileUsecase {
       }
 
       if (!isTelegramMember(member)) {
-        // `left`, or no row at all: they are out and not banned, which is
-        // the end state this phase wants.
+        // `left`, or no row at all: they are out and NOT banned, which is
+        // the end state this phase wants - so any outstanding ban of ours
+        // for this identity and group is stale and must go with it.
+        //
+        // The stale marker is the danger: our unban can succeed and the row
+        // that records it fail to clear. Left behind, it is standing
+        // authorisation to unban this identity in this group - so a
+        // completely unrelated ban an administrator issues months later
+        // would be read as ours and quietly undone.
+        const cleared = await this._clearStaleBan(employeeId, group, identity, jobId);
+        if (!cleared.ok) return cleared.result;
         await this.claimRepo.recordEvent({
           employeeId,
           telegramGroupId: groupId,
@@ -723,7 +752,10 @@ class TelegramMembershipReconcileUsecase {
     } catch (err) {
       const description = String((err && err.telegramDescription) || err.message || "");
       if (/USER_NOT_PARTICIPANT|PARTICIPANT_ID_INVALID/i.test(description)) {
-        // THE DESIRED END STATE ALREADY HOLDS. Not a failure.
+        // THE DESIRED END STATE ALREADY HOLDS. Not a failure - and, exactly
+        // as above, not a state any ban of ours may still claim.
+        const cleared = await this._clearStaleBan(employeeId, group, identity, jobId);
+        if (!cleared.ok) return cleared.result;
         await this.claimRepo.recordEvent({
           employeeId,
           telegramGroupId: groupId,
@@ -753,6 +785,46 @@ class TelegramMembershipReconcileUsecase {
           retryAfter: retryAfterOf(err),
           cause: err,
         }),
+      };
+    }
+  }
+
+  /**
+   * CONFIRMED ABSENT AND NOT BANNED, so no ban of ours can still be
+   * outstanding for this identity in this group.
+   *
+   * IF THE CLEAR FAILS, NOTHING IS SETTLED. Closing the claim over a marker
+   * we could not remove would leave standing authorisation to unban this
+   * identity here - and the next ban, whoever issued it and for whatever
+   * reason, would be treated as ours. Better a retry than an authorisation
+   * that outlives what it described.
+   *
+   * Deliberately NOT called for `kicked`: that is the one status where an
+   * outstanding ban of ours is the thing being acted on, not stale.
+   */
+  async _clearStaleBan(employeeId, group, identity, jobId) {
+    if (!this.claimRepo.clearBan) return { ok: true };
+    try {
+      await this.claimRepo.clearBan({
+        employeeTelegramId: identity.employee_telegram_id,
+        telegramGroupId: Number(group.telegram_group_id),
+      });
+      return { ok: true };
+    } catch (err) {
+      this._log(logger.LEVEL.ERROR, "CLEAR-BAN", `could not clear a stale ban marker: ${err.toString()}`, {
+        telegram_group_id: group.telegram_group_id,
+        employee_id: employeeId,
+      });
+      return {
+        ok: false,
+        result: {
+          removed: false,
+          settled: false,
+          error: new TelegramMembershipRetryableError(
+            "a stale ban marker could not be cleared",
+            { code: "BAN_MARKER_NOT_CLEARED", cause: err }
+          ),
+        },
       };
     }
   }
@@ -831,12 +903,24 @@ class TelegramMembershipReconcileUsecase {
     return this.telegram.getChatMember(chatId, Number(this._botId));
   }
 
-  async _group(groupId) {
-    if (!this._groupCache) this._groupCache = new Map();
+  /**
+   * THE REGISTRY ROW, READ FRESH FOR EVERY JOB.
+   *
+   * It used to be cached for the life of the process, which quietly broke
+   * the one promise reconciliation makes: that it acts on what is true NOW.
+   * An operator re-pointing a group's Chat ID would have watched the worker
+   * keep talking to the old chat until somebody restarted pm2 - and pm2 is
+   * not part of anybody's mental model of editing a registry row.
+   *
+   * The cache is now the JOB's, passed down and discarded with it: one job
+   * asking about the same group five times still reads once, and the next
+   * job starts from the database.
+   */
+  async _group(groupId, groupCache) {
     const key = Number(groupId);
-    if (this._groupCache.has(key)) return this._groupCache.get(key);
+    if (groupCache && groupCache.has(key)) return groupCache.get(key);
     const group = await this.registryRepo.getById(key);
-    this._groupCache.set(key, group || null);
+    if (groupCache) groupCache.set(key, group || null);
     return group || null;
   }
 
@@ -850,7 +934,10 @@ class TelegramMembershipReconcileUsecase {
    */
   async reconcileGroup(telegramGroupId, { jobId = null, budget = null } = {}) {
     const groupId = Number(telegramGroupId);
-    const group = await this._group(groupId);
+    // One cache for this job, shared by every employee it reconciles and
+    // discarded when it returns.
+    const cache = new Map();
+    const group = await this._group(groupId, cache);
     if (!group) return { telegramGroupId: groupId, skipped: "UNKNOWN_GROUP", employees: 0 };
 
     // WHO THIS GROUP MATCHES NOW, by Phase 3A's own matcher over the same
@@ -871,7 +958,7 @@ class TelegramMembershipReconcileUsecase {
     for (const employeeId of ids) {
       // Per employee, so the group job cannot invent a different rule from
       // the employee job for the same pair.
-      await this.reconcileEmployee(employeeId, { jobId, budget });
+      await this.reconcileEmployee(employeeId, { jobId, budget, groupCache: cache });
       reconciled += 1;
       if (budget && budget.exhausted && budget.exhausted()) break;
     }

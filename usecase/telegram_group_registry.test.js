@@ -51,7 +51,7 @@ const row = (overrides = {}) => ({
 });
 
 function fakeRepo(rows = [], { outletIds = [1, 2] } = {}) {
-  const store = { rows: rows.map((r) => ({ ...r })), writes: [], deletes: [] };
+  const store = { rows: rows.map((r) => ({ ...r })), writes: [], deletes: [], transactions: 0 };
   let nextId = 100;
   return {
     store,
@@ -87,11 +87,21 @@ function fakeRepo(rows = [], { outletIds = [1, 2] } = {}) {
       store.writes.push({ op: "create", ...r });
       return { code: 200, telegram_group_id: id };
     },
-    update: async (id, fields, updated_by) => {
+    update: async (id, fields, updated_by, options = {}) => {
       const target = store.rows.find((r) => r.telegram_group_id === id);
       if (target) Object.assign(target, fields);
-      store.writes.push({ op: "update", id, fields, updated_by });
+      store.writes.push({ op: "update", id, fields, updated_by, tx: Boolean(options.tx) });
       return { code: 200, affectedRows: target ? 1 : 0 };
+    },
+    /**
+     * Phase 3C wraps the guarded writes - the Chat ID change and the hard
+     * delete - so a mapping or claim created between the check and the write
+     * cannot slip through. The double offers one for the same reason the
+     * real repository does, and records that the write carried it.
+     */
+    withTransaction: async (fn) => {
+      store.transactions += 1;
+      return fn({ query: async () => ({ affectedRows: 1 }) });
     },
     delete: async (id) => {
       store.deletes.push(id);
@@ -618,5 +628,118 @@ describe("the outlet and bot-admin filters", () => {
     const list = await build(repo).getAll({ bot_is_admin: "Yes", is_active: "Active" });
     assert.equal(list.length, 1);
     assert.equal(list[0].telegram_group_id, 1);
+  });
+});
+
+/* ================================ Phase 3C: the Chat ID is the group ===== */
+
+describe("changing a Chat ID while the group still manages people", () => {
+  const OTHER = "-1009999999999";
+
+  /** The registry usecase with Phase 3C's two guard repositories wired. */
+  const guarded = (repo, { mappings = 0, claims = 0 } = {}) =>
+    build(repo, {
+      mappingRepo: { countForGroup: async () => mappings },
+      claimRepo: { countLiveForGroup: async () => claims },
+    });
+
+  const conflictFrom = async (promise) => {
+    const err = await promise.then(
+      () => null,
+      (caught) => caught
+    );
+    assert.ok(err, "the update must be refused");
+    assert.equal(err.name, "ConflictError");
+    assert.equal(err.httpCode, 409);
+    return err;
+  };
+
+  it("is REFUSED while a mapping still points at it", async () => {
+    // Re-pointing the row leaves the employees in the old group with
+    // nothing recording that they are there, and aims the cleanup that
+    // would have removed them somewhere else entirely.
+    const repo = fakeRepo([row({ chat_id: SUPERGROUP })]);
+    const err = await conflictFrom(
+      guarded(repo, { mappings: 2 }).update(1, { chat_id: OTHER })
+    );
+    assert.match(err.message, /mappings/i);
+    assert.match(err.message, /Chat ID/);
+    assert.equal(repo.store.rows[0].chat_id, SUPERGROUP, "nothing was written");
+  });
+
+  it("is REFUSED while a live managed claim exists", async () => {
+    const repo = fakeRepo([row({ chat_id: SUPERGROUP })]);
+    const err = await conflictFrom(guarded(repo, { claims: 1 }).update(1, { chat_id: OTHER }));
+    assert.equal(err.detail.unresolved_claims, 1);
+    assert.equal(repo.store.rows[0].chat_id, SUPERGROUP);
+  });
+
+  it("is ALLOWED once nothing depends on the row", async () => {
+    const repo = fakeRepo([row({ chat_id: SUPERGROUP })]);
+    const result = await guarded(repo).update(1, { chat_id: OTHER });
+    assert.equal(result.code, 200);
+    assert.equal(repo.store.rows[0].chat_id, OTHER);
+  });
+
+  it("AN UNCHANGED Chat ID saves even while the group manages people", async () => {
+    // Renaming a busy group, re-categorising it or switching it off are all
+    // still ordinary edits. Only the identity of the group is guarded.
+    const repo = fakeRepo([row({ chat_id: SUPERGROUP })]);
+    const result = await guarded(repo, { mappings: 3, claims: 4 }).update(1, {
+      chat_id: SUPERGROUP,
+      group_name: "Renamed",
+    });
+    assert.equal(result.code, 200);
+    assert.equal(repo.store.rows[0].group_name, "Renamed");
+  });
+
+  it("every other field is editable on a group that manages people", async () => {
+    const repo = fakeRepo([row({ chat_id: SUPERGROUP })]);
+    const result = await guarded(repo, { mappings: 3, claims: 4 }).update(1, {
+      group_name: "Renamed",
+      category: "Other",
+      is_active: false,
+    });
+    assert.equal(result.code, 200);
+    assert.equal(repo.store.rows[0].is_active, false);
+  });
+
+  it("THE GUARD AND THE WRITE SHARE ONE TRANSACTION", async () => {
+    // Otherwise a mapping created between the two slips through the gap the
+    // guard exists to close.
+    const repo = fakeRepo([row({ chat_id: SUPERGROUP })]);
+    const seen = [];
+    await build(repo, {
+      mappingRepo: {
+        countForGroup: async (id, options) => {
+          seen.push(["mappings", Boolean(options && options.tx)]);
+          return 0;
+        },
+      },
+      claimRepo: {
+        countLiveForGroup: async (id, options) => {
+          seen.push(["claims", Boolean(options && options.tx)]);
+          return 0;
+        },
+      },
+    }).update(1, { chat_id: OTHER });
+
+    assert.deepEqual(seen, [
+      ["mappings", true],
+      ["claims", true],
+    ]);
+    assert.equal(repo.store.transactions, 1);
+    assert.equal(repo.store.writes[0].tx, true, "the write itself carries the transaction");
+  });
+
+  it("reuses the guard repositories rather than counting for itself", () => {
+    const source = require("fs").readFileSync(
+      require("path").join(__dirname, "telegram_group_registry.js"),
+      "utf8"
+    );
+    assert.match(source, /countForGroup/);
+    assert.match(source, /countLiveForGroup/);
+    // No SQL and no second definition of "still managing people" here.
+    assert.ok(!/SELECT|FROM telegram_group_mapping/i.test(source));
   });
 });

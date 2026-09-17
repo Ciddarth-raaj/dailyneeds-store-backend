@@ -192,7 +192,7 @@ class TelegramGroupRegistryRepository {
   }
 
   /** Only the fields present in `fields` are written. */
-  async update(telegram_group_id, fields, updated_by = null) {
+  async update(telegram_group_id, fields, updated_by = null, { tx } = {}) {
     const sets = [];
     const values = [];
     for (const column of ["group_name", "chat_id", "category", "used_for", "outlet_id"]) {
@@ -214,7 +214,8 @@ class TelegramGroupRegistryRepository {
     const res = await this._query(
       "UPDATE",
       `UPDATE ${TABLE} SET ${sets.join(", ")} WHERE telegram_group_id = ?`,
-      values
+      values,
+      tx
     );
     return { code: 200, affectedRows: res.affectedRows };
   }

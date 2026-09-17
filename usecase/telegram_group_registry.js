@@ -288,11 +288,23 @@ class TelegramGroupRegistryUsecase {
         await this._assertChatIdFree(fields.chat_id, telegram_group_id);
       }
 
-      const result = await this.repo.update(
-        telegram_group_id,
-        fields,
-        actor.employeeId === undefined ? null : actor.employeeId
-      );
+      // A CHAT ID IS WHICH TELEGRAM GROUP THIS ROW IS. Changing it while the
+      // row still manages people re-points every mapping and every claim at
+      // a DIFFERENT group, silently: the employees stay in the old one, with
+      // nothing left recording that they are there, and the cleanup that
+      // would have removed them now aims somewhere else entirely.
+      //
+      // Renaming the row, re-categorising it, switching it off - all still
+      // fine. Only the identity of the group is refused, and only while
+      // something still depends on it. The message names the order that
+      // works: remove the mappings, let cleanup finish, then re-point it.
+      const changingChatId =
+        fields.chat_id !== undefined && String(fields.chat_id) !== String(existing.chat_id);
+
+      const actorEmployeeId = actor.employeeId === undefined ? null : actor.employeeId;
+      const result = changingChatId
+        ? await this._updateWithChatIdGuard(telegram_group_id, fields, actorEmployeeId)
+        : await this.repo.update(telegram_group_id, fields, actorEmployeeId);
       const chatId = fields.chat_id === undefined ? existing.chat_id : fields.chat_id;
       const botIsAdmin = fields.bot_is_admin === undefined ? existing.bot_is_admin : fields.bot_is_admin;
       return {
@@ -301,9 +313,42 @@ class TelegramGroupRegistryUsecase {
         warnings: warningsFor({ chat_id: chatId, bot_is_admin: botIsAdmin }),
       };
     } catch (err) {
-      if (err.name !== "ValidationError" && err.name !== "NotFoundError") this._log("UPDATE", err);
+      if (
+        err.name !== "ValidationError" &&
+        err.name !== "NotFoundError" &&
+        err.name !== "ConflictError"
+      ) {
+        this._log("UPDATE", err);
+      }
       throw err;
     }
+  }
+
+  /**
+   * THE GUARD AND THE WRITE SHARE A TRANSACTION, so a mapping or a claim
+   * created between the two cannot slip through the gap - which is the only
+   * gap that matters here, because the whole point of the guard is that
+   * nothing still depends on this row.
+   *
+   * The same repository methods the delete guard uses, rather than a second
+   * copy of "what counts as still managing people".
+   */
+  async _updateWithChatIdGuard(telegram_group_id, fields, actorEmployeeId) {
+    if (!this.mappingRepo || !this.claimRepo || !this.repo.withTransaction) {
+      return this.repo.update(telegram_group_id, fields, actorEmployeeId);
+    }
+    return this.repo.withTransaction(async (tx) => {
+      const mappings = await this.mappingRepo.countForGroup(telegram_group_id, { tx });
+      const claims = await this.claimRepo.countLiveForGroup(telegram_group_id, { tx });
+      if (mappings > 0 || claims > 0) {
+        throw conflict(
+          "This group still manages people, so its Chat ID cannot be changed. Remove its " +
+            "mappings, let managed membership finish its cleanup, and then change the Chat ID.",
+          { mappings, unresolved_claims: claims }
+        );
+      }
+      return this.repo.update(telegram_group_id, fields, actorEmployeeId, { tx });
+    });
   }
 
   /**
@@ -363,6 +408,6 @@ class TelegramGroupRegistryUsecase {
   }
 }
 
-module.exports = (telegramGroupRegistryRepo) =>
-  new TelegramGroupRegistryUsecase(telegramGroupRegistryRepo);
+module.exports = (telegramGroupRegistryRepo, deps) =>
+  new TelegramGroupRegistryUsecase(telegramGroupRegistryRepo, deps);
 module.exports.TelegramGroupRegistryUsecase = TelegramGroupRegistryUsecase;

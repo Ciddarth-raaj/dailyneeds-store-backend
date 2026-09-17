@@ -55,7 +55,7 @@ const build = (over = {}) => {
     botRights: { status: "administrator", canRestrictMembers: true },
     ...over,
   };
-  const calls = { bans: [], unbans: [], events: [], getChatMember: [] };
+  const calls = { bans: [], unbans: [], events: [], getChatMember: [], registryReads: [] };
   /**
    * The durable record of bans WE issued and have not yet lifted. A Set of
    * `identity:group`, which is exactly what the table stores - our identity
@@ -140,9 +140,10 @@ const build = (over = {}) => {
     },
     hasOutstandingBan: async ({ employeeTelegramId, telegramGroupId }) =>
       outstandingBans.has(`${employeeTelegramId}:${telegramGroupId}`),
-    clearBan: async ({ employeeTelegramId, telegramGroupId }) => ({
-      changed: outstandingBans.delete(`${employeeTelegramId}:${telegramGroupId}`),
-    }),
+    clearBan: async ({ employeeTelegramId, telegramGroupId }) => {
+      if (state.clearBanThrows) throw state.clearBanThrows;
+      return { changed: outstandingBans.delete(`${employeeTelegramId}:${telegramGroupId}`) };
+    },
   };
 
   const usecase = buildReconcile({
@@ -157,6 +158,10 @@ const build = (over = {}) => {
     },
     registryRepo: {
       getById: async (id) => {
+        calls.registryReads.push(Number(id));
+        // The registry row as it is RIGHT NOW: tests change `state.groups`
+        // between jobs exactly as an operator would edit the record.
+        if (state.groups && state.groups.has(Number(id))) return state.groups.get(Number(id));
         const mapping = state.mappings.find((m) => m.telegram_group_id === Number(id));
         return mapping ? mapping.group : GROUP(Number(id));
       },
@@ -585,6 +590,149 @@ describe("a ban is only ever undone if we can prove it is ours", () => {
     };
     await world.usecase.reconcileEmployee(42, {});
     assert.equal(sawStateAtUnban, true);
+  });
+});
+
+describe("the registry row is read fresh for every job", () => {
+  it("A CHANGED CHAT ID IS PICKED UP BY THE NEXT JOB, with no restart", async () => {
+    // The cache used to live as long as the process, so an operator
+    // re-pointing a group watched the worker keep talking to the old chat
+    // until somebody restarted pm2 - which is nobody's mental model of
+    // editing a registry row.
+    const world = build();
+    world.state.groups = new Map([[10, { ...GROUP(10), chat_id: "-1001OLD" }]]);
+    world.state.members.add("-1001OLD:555001");
+    await world.usecase.reconcileEmployee(42);
+    assert.ok(world.calls.getChatMember.some((c) => c.chatId === "-1001OLD"));
+
+    // The operator re-points the group.
+    world.state.groups.set(10, { ...GROUP(10), chat_id: "-1001NEW" });
+    world.state.members.add("-1001NEW:555001");
+    world.calls.getChatMember.length = 0;
+    // A fresh claim state, so the second job has work of its own to do.
+    world.state.claims.find((c) => c.source === CLAIM_SOURCE.RULE).adopted_from_existing_member = false;
+
+    await world.usecase.reconcileEmployee(42);
+
+    assert.ok(
+      world.calls.getChatMember.some((c) => c.chatId === "-1001NEW"),
+      "the second job must use the new Chat ID"
+    );
+    assert.ok(
+      !world.calls.getChatMember.some((c) => c.chatId === "-1001OLD"),
+      "and must not still be talking to the old one"
+    );
+  });
+
+  it("but ONE job still reads a group only once", async () => {
+    const world = build();
+    world.state.mappings = [
+      { telegram_group_id: 10, mapping_type: "ALL_EMPLOYEES", target_id: 0, group: GROUP(10) },
+      { telegram_group_id: 11, mapping_type: "ALL_EMPLOYEES", target_id: 0, group: GROUP(11) },
+    ];
+    await world.usecase.reconcileEmployee(42);
+    world.calls.registryReads.length = 0;
+    world.state.claims.forEach((c) => {
+      c.adopted_from_existing_member = false;
+    });
+
+    await world.usecase.reconcileEmployee(42);
+
+    const tens = world.calls.registryReads.filter((id) => id === 10).length;
+    assert.equal(tens, 1, "repeated reads inside one job are deduplicated");
+  });
+
+  it("a GROUP job shares one view of the registry across its employees", async () => {
+    const world = build();
+    await world.usecase.reconcileGroup(10);
+    const tens = world.calls.registryReads.filter((id) => id === 10).length;
+    assert.ok(tens <= 2, `one job, one read of the row (saw ${tens})`);
+  });
+});
+
+describe("a stale ban marker never survives confirmed absence", () => {
+  const pending = async (world) => {
+    await world.usecase.reconcileEmployee(42);
+    world.state.mappings = [];
+  };
+
+  it("`left` with a stale marker: the marker goes, and the claim closes", async () => {
+    // Our unban succeeded and the row recording it did not clear. Left
+    // behind it is standing authorisation to unban this identity here - so
+    // an unrelated ban months later would be read as ours and undone.
+    const world = build({ members: new Set() });
+    await pending(world);
+    world.outstandingBans.add("900:10");
+
+    await world.usecase.reconcileEmployee(42, {});
+
+    assert.ok(!world.outstandingBans.has("900:10"), "the stale marker is cleared");
+    const claim = world.claim(42, 10, CLAIM_SOURCE.RULE);
+    assert.equal(claim.state, CLAIM_STATE.CLOSED);
+    assert.equal(claim.close_outcome, CLOSE_OUTCOME.ALREADY_ABSENT);
+    assert.deepEqual(world.calls.unbans, [], "nothing needed unbanning");
+  });
+
+  it("USER_NOT_PARTICIPANT with a stale marker clears it too", async () => {
+    const world = build();
+    await pending(world);
+    world.outstandingBans.add("900:10");
+    const real = world.usecase.telegram.getChatMember;
+    world.usecase.telegram.getChatMember = async (chatId, userId) => {
+      if (Number(userId) === 777) return real(chatId, userId);
+      const err = new Error("Bad Request: USER_NOT_PARTICIPANT");
+      err.telegramDescription = "Bad Request: USER_NOT_PARTICIPANT";
+      throw err;
+    };
+
+    await world.usecase.reconcileEmployee(42, {});
+
+    assert.ok(!world.outstandingBans.has("900:10"));
+    assert.equal(world.claim(42, 10, CLAIM_SOURCE.RULE).state, CLAIM_STATE.CLOSED);
+  });
+
+  it("A MARKER WE COULD NOT CLEAR SETTLES NOTHING", async () => {
+    const world = build({ members: new Set() });
+    await pending(world);
+    world.outstandingBans.add("900:10");
+    world.state.clearBanThrows = new Error("the database is unavailable");
+
+    await expectRetryable(() => world.usecase.reconcileEmployee(42, {}));
+
+    assert.equal(world.claim(42, 10, CLAIM_SOURCE.RULE).state, CLAIM_STATE.REMOVAL_PENDING);
+    assert.equal(world.claim(42, 10, CLAIM_SOURCE.RULE).close_outcome, null);
+    assert.ok(world.outstandingBans.has("900:10"), "and the marker is still there to retry");
+  });
+
+  it("`kicked` WITH our marker still takes the owned-ban recovery path", async () => {
+    const world = build();
+    await pending(world);
+    world.outstandingBans.add("900:10");
+    world.state.members.delete("-10010:555001");
+    const real = world.usecase.telegram.getChatMember;
+    world.usecase.telegram.getChatMember = async (chatId, userId) =>
+      Number(userId) === 777 ? real(chatId, userId) : { status: "kicked" };
+
+    await world.usecase.reconcileEmployee(42, {});
+
+    assert.equal(world.calls.unbans.length, 1, "the ban is lifted, because it is ours");
+    assert.deepEqual(world.calls.bans, []);
+    assert.ok(!world.outstandingBans.has("900:10"));
+    assert.equal(world.claim(42, 10, CLAIM_SOURCE.RULE).close_outcome, CLOSE_OUTCOME.REMOVED);
+  });
+
+  it("`kicked` WITHOUT a marker is still somebody else's ban", async () => {
+    const world = build();
+    await pending(world);
+    world.state.members.delete("-10010:555001");
+    const real = world.usecase.telegram.getChatMember;
+    world.usecase.telegram.getChatMember = async (chatId, userId) =>
+      Number(userId) === 777 ? real(chatId, userId) : { status: "kicked" };
+
+    await expectRetryable(() => world.usecase.reconcileEmployee(42, {}));
+
+    assert.deepEqual(world.calls.unbans, [], "never undone");
+    assert.equal(world.claim(42, 10, CLAIM_SOURCE.RULE).state, CLAIM_STATE.REMOVAL_PENDING);
   });
 });
 

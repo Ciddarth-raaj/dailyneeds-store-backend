@@ -182,3 +182,73 @@ describe("the registry hard-delete guard", () => {
     assert.match(source, /err\.httpCode = 409/);
   });
 });
+
+/* ================================================ the factory seam ======= */
+
+describe("every Phase 3C factory forwards what its class takes", () => {
+  /**
+   * THE BUG THIS EXISTS FOR, AND IT WAS LIVE UNTIL THIS TASK.
+   *
+   * `usecase/telegram_group_registry.js` grew a second constructor parameter
+   * for Phase 3C's delete guard - the mapping and claim repositories - and
+   * its factory kept the one-argument signature it had always had. Every
+   * unit test built the class directly and passed; `server.js` uses the
+   * factory, so in production the guard was handed nothing, fell into its
+   * "not wired" branch, and a group with unresolved cleanup would have
+   * deleted exactly as before. The same mistake dropped an argument in Phase
+   * 3A and nearly again in 3B.
+   *
+   * So it is asserted structurally, for every factory this phase touched:
+   * whatever the factory accepts, it passes on.
+   */
+  const FACTORIES = [
+    "usecase/telegram_group_registry.js",
+    "usecase/telegram_group_mapping.js",
+    "usecase/telegram_membership_reconcile.js",
+    "usecase/telegram_membership_worker.js",
+    "usecase/telegram_membership_admin.js",
+  ];
+
+  const names = (block) =>
+    block
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/[^\n]*/g, "")
+      .split(",")
+      .map((part) => part.trim())
+      .filter(Boolean);
+
+  for (const file of FACTORIES) {
+    it(`${file} passes every parameter on`, () => {
+      const source = read(file);
+      const factory = /module\.exports = \(([\s\S]*?)\) =>\s*new \w+\(([\s\S]*?)\);/.exec(source);
+      assert.ok(factory, `${file} must export an arrow that returns its class`);
+      const accepted = names(factory[1]);
+      const forwarded = names(factory[2]);
+      assert.deepEqual(forwarded, accepted, `${file}: a dropped argument is a silently inert feature`);
+    });
+  }
+
+  it("the registry factory really does carry the delete and Chat ID guards", async () => {
+    // The end-to-end version: built the way server.js builds it, a group
+    // that still has mappings refuses BOTH guarded operations.
+    const buildRegistry = require("./telegram_group_registry");
+    const usecase = buildRegistry(
+      {
+        getById: async () => ({ telegram_group_id: 10, chat_id: "-1001", group_name: "ECR" }),
+        // The duplicate-Chat-ID check runs before the Phase 3C guard; the
+        // new id belongs to nobody.
+        getByChatId: async () => null,
+        update: async () => ({ code: 200, affectedRows: 1 }),
+        delete: async () => ({ code: 200, affectedRows: 1 }),
+        withTransaction: async (fn) => fn({ query: async () => ({}) }),
+      },
+      {
+        mappingRepo: { countForGroup: async () => 1 },
+        claimRepo: { countLiveForGroup: async () => 0 },
+      }
+    );
+
+    await assert.rejects(() => usecase.delete(10), /still manages people/);
+    await assert.rejects(() => usecase.update(10, { chat_id: "-1009999999999" }), /Chat ID/);
+  });
+});
