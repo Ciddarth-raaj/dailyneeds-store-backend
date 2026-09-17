@@ -128,6 +128,23 @@ const STATUS = {
   PENDING: "PENDING",
 };
 
+/**
+ * Which wage an ESI figure was charged on.
+ *
+ *   PAYROLL   the wage actually payable in a month, supplied by a payrun after
+ *             attendance and deductions. The authoritative monthly liability.
+ *   STANDARD  the wage this salary structure implies for a full month. What the
+ *             Salary Master states as the employee's standard monthly cost.
+ *
+ * They are allowed to differ, and a caller that mixes them up would be
+ * reporting an estimate as a liability — hence a named basis on the result
+ * rather than a bare amount.
+ */
+const ESI_WAGE_BASIS = {
+  PAYROLL: "PAYROLL",
+  STANDARD: "STANDARD",
+};
+
 /** Reason codes. Stable strings, because screens and reports key off them. */
 const UNRESOLVED = {
   PF_APPLICABILITY_NOT_RECORDED: "PF_APPLICABILITY_NOT_RECORDED",
@@ -504,15 +521,32 @@ function esiWageBounds(components = {}, grossRupees, config = CONFIG) {
 /**
  * The ESI block.
  *
- * IT WILL NOT INVENT A WAGE. ESI is charged on what is actually paid in a
- * wage period, which includes overtime and other per-period inputs that a
- * salary structure does not know about. Monthly payroll does not exist yet, so
- * for anybody who might be covered this returns PENDING with a named reason
- * rather than a number computed off the gross.
+ * TWO WAGES, ONE ARITHMETIC. ESI is charged on what is actually paid in a wage
+ * period, which includes overtime and other per-period inputs a salary
+ * structure knows nothing about. So there are two honest answers, not one:
  *
- * The caller may supply `esi_wage` once payroll can, and the same function
- * then computes the contribution — that is the whole point of taking the wage
- * as context rather than deriving it.
+ *   ACTUAL    the caller supplies `esi_wage` — the payable wage a monthly
+ *             payrun worked out after attendance and deductions. This is the
+ *             authoritative figure and the one a payrun must keep using.
+ *   STANDARD  no wage is supplied, so the wage is the one this SALARY
+ *             STRUCTURE implies for a full month: the gross less the
+ *             components outside the statutory definition of wages, which is
+ *             exactly `esiWageBounds`' lower bound.
+ *
+ * The rates, the ceiling, the low-wage exemption and the rounding are the same
+ * in both cases — only the wage differs — so both go through `contributionsFor`
+ * below and there is one implementation of the statutory rule.
+ *
+ * WHY STANDARD IS NOT PENDING. The Salary Master has to be able to state an
+ * employee's standard monthly cost the moment their salary is approved; a
+ * figure that the structure fully determines is not an open question, and
+ * showing it as Pending until a payrun happens to run reports a known number
+ * as unknown. What genuinely cannot be answered from the employee master — has
+ * anybody recorded whether this employee is in the scheme at all — is still
+ * PENDING with its own named reason.
+ *
+ * `esi_wage_basis` says which of the two a caller is looking at, so a standard
+ * amount is never mistaken for a month's actual liability.
  */
 function calculateEsi(context = {}, config = CONFIG) {
   const cfg = config.esi;
@@ -540,10 +574,60 @@ function calculateEsi(context = {}, config = CONFIG) {
 
   const ceiling = toPaise(cfg.coverageCeiling);
 
+  /**
+   * The contribution pair for a wage, in paise. THE ONLY place the ESI rates,
+   * the exemption and the rounding are applied — the actual wage a payrun
+   * supplies and the standard wage this structure implies are the same
+   * arithmetic on a different number, and one implementation is what keeps
+   * them from drifting apart.
+   */
+  const contributionsFor = (wage, basis) => {
+    const covered = context.contribution_period_continues === true || wage <= ceiling;
+    if (!covered) {
+      return {
+        status: STATUS.NOT_APPLICABLE,
+        unresolved: [],
+        esi_wage: toRupees(wage),
+        esi_wage_basis: basis,
+        employee_esi: 0,
+        employer_esi: 0,
+        reason: "Wage is above the ESI coverage ceiling",
+      };
+    }
+
+    const employerEsi = roundContribution(
+      percentOf(wage, cfg.employerRatePercent),
+      config.rounding.contributionRounding
+    );
+
+    /*
+     * The low-wage exemption: the EMPLOYEE pays nothing below the daily-wage
+     * threshold and the EMPLOYER still pays in full. An exemption that zeroed
+     * both would understate the employer cost, so the two are decided apart.
+     */
+    const daily = Number(toRupees(wage)) / config.salary.salaryDaysPerMonth;
+    const exempt =
+      context.employee_contribution_exempt === true || daily <= cfg.employeeExemptionDailyWage;
+
+    const employeeEsi = exempt
+      ? 0
+      : roundContribution(percentOf(wage, cfg.employeeRatePercent), config.rounding.contributionRounding);
+
+    return {
+      status: STATUS.APPLIED,
+      unresolved: [],
+      esi_wage: toRupees(wage),
+      esi_wage_basis: basis,
+      employee_esi: toRupees(employeeEsi),
+      employer_esi: toRupees(employerEsi),
+      employee_contribution_exempt: exempt,
+    };
+  };
+
   /*
    * A wage the caller can prove beats every inference below. This is the path
-   * monthly payroll will take; the bound-based reasoning exists only because
-   * that caller does not exist yet.
+   * a monthly payrun takes, and it stays authoritative: nothing here lets the
+   * standard figure override a wage that was actually worked out.
    */
   const supplied = toPaise(context.esi_wage);
   if (supplied !== null) {
@@ -553,6 +637,7 @@ function calculateEsi(context = {}, config = CONFIG) {
         status: STATUS.NOT_APPLICABLE,
         unresolved: [],
         esi_wage: toRupees(supplied),
+        esi_wage_basis: ESI_WAGE_BASIS.PAYROLL,
         employee_esi: 0,
         employer_esi: 0,
         reason: "Wage is above the ESI coverage ceiling",
@@ -562,49 +647,15 @@ function calculateEsi(context = {}, config = CONFIG) {
       return pending(UNRESOLVED.ESI_APPLICABILITY_NOT_RECORDED);
     }
 
-    const covered = context.contribution_period_continues === true || supplied <= ceiling;
-    if (!covered) {
-      return {
-        status: STATUS.NOT_APPLICABLE,
-        unresolved: [],
-        esi_wage: toRupees(supplied),
-        employee_esi: 0,
-        employer_esi: 0,
-        reason: "Wage is above the ESI coverage ceiling",
-      };
-    }
-
-    const employerEsi = roundContribution(
-      percentOf(supplied, cfg.employerRatePercent),
-      config.rounding.contributionRounding
-    );
-
-    /*
-     * The low-wage exemption: the EMPLOYEE pays nothing below the daily-wage
-     * threshold and the EMPLOYER still pays in full. An exemption that zeroed
-     * both would understate the employer cost, so the two are decided apart.
-     */
-    const daily = Number(toRupees(supplied)) / config.salary.salaryDaysPerMonth;
-    const exempt =
-      context.employee_contribution_exempt === true || daily <= cfg.employeeExemptionDailyWage;
-
-    const employeeEsi = exempt
-      ? 0
-      : roundContribution(percentOf(supplied, cfg.employeeRatePercent), config.rounding.contributionRounding);
-
-    return {
-      status: STATUS.APPLIED,
-      unresolved: [],
-      esi_wage: toRupees(supplied),
-      employee_esi: toRupees(employeeEsi),
-      employer_esi: toRupees(employerEsi),
-      employee_contribution_exempt: exempt,
-    };
+    return contributionsFor(supplied, ESI_WAGE_BASIS.PAYROLL);
   }
 
   /*
-   * No wage supplied. The one thing still provable from the structure alone is
-   * that somebody is too well paid to be covered at all.
+   * No wage supplied, so this is the Salary Master asking what a full standard
+   * month costs. The structural wage is `esiWageBounds`' lower bound — the
+   * gross less Conveyance, because travelling allowance is outside the
+   * statutory definition of wages — and it is also what decides "too well paid
+   * to be covered at all" without a payroll wage.
    */
   const bounds = esiWageBounds(context, context.gross, config);
   const minimum = toPaise(bounds.minimum_wage);
@@ -624,9 +675,16 @@ function calculateEsi(context = {}, config = CONFIG) {
     return pending(UNRESOLVED.ESI_APPLICABILITY_NOT_RECORDED);
   }
 
-  return pending(UNRESOLVED.ESI_WAGE_CONTEXT_UNAVAILABLE, {
-    wage_bounds: bounds,
-  });
+  /*
+   * NOT PENDING. Whether this employee is in the scheme is recorded and the
+   * structure fixes the wage, so the standard monthly contribution is a known
+   * number and is reported as one. A payrun still computes its own from the
+   * wage actually payable, and the two are allowed to differ.
+   */
+  if (minimum === null) {
+    return pending(UNRESOLVED.ESI_WAGE_CONTEXT_UNAVAILABLE, { wage_bounds: bounds });
+  }
+  return { ...contributionsFor(minimum, ESI_WAGE_BASIS.STANDARD), wage_bounds: bounds };
 }
 
 /* ------------------------------------------------------------------- CTC */
@@ -666,6 +724,110 @@ function calculateCtc(grossRupees, pf, esi) {
     return { status: STATUS.PENDING, monthly_ctc: null, pending_components: pending };
   }
   return { status: STATUS.APPLIED, monthly_ctc: toRupees(total), pending_components: [] };
+}
+
+/* ------------------------------------- stored records from before the fix */
+
+/**
+ * A record's OWN rates, as a config object.
+ *
+ * Every salary row carries the snapshot that produced it, precisely so that it
+ * can be re-read years later without the current `config/statutory.js` being
+ * mistaken for the rates in force when it was calculated. Anything the
+ * snapshot does not carry falls back to the live config.
+ */
+function configFromSnapshot(snapshot, config = CONFIG) {
+  const snap = snapshot && typeof snapshot === "object" ? snapshot : {};
+  const pick = (value, fallback) => (Number.isFinite(Number(value)) ? Number(value) : fallback);
+  return {
+    ...config,
+    salary: {
+      ...config.salary,
+      salaryDaysPerMonth: pick(snap.salary_days_per_month, config.salary.salaryDaysPerMonth),
+    },
+    esi: {
+      ...config.esi,
+      employeeRatePercent: pick(snap.esi_employee_rate_percent, config.esi.employeeRatePercent),
+      employerRatePercent: pick(snap.esi_employer_rate_percent, config.esi.employerRatePercent),
+      coverageCeiling: pick(snap.esi_coverage_ceiling, config.esi.coverageCeiling),
+      employeeExemptionDailyWage: pick(
+        snap.esi_employee_exemption_daily_wage,
+        config.esi.employeeExemptionDailyWage
+      ),
+      conveyanceExcludedFromWage:
+        typeof snap.esi_conveyance_excluded_from_wage === "boolean"
+          ? snap.esi_conveyance_excluded_from_wage
+          : config.esi.conveyanceExcludedFromWage,
+    },
+    rounding: {
+      ...config.rounding,
+      contributionRounding: snap.contribution_rounding || config.rounding.contributionRounding,
+    },
+  };
+}
+
+/**
+ * Fill in the standard ESI and CTC on a record stored BEFORE ESI had a
+ * standard basis.
+ *
+ * Rows written by the earlier engine carry `esi_status = PENDING` and a
+ * `ESI_WAGE_CONTEXT_UNAVAILABLE` note — the engine of the day declined to
+ * state a contribution without a payroll wage. That is exactly the figure the
+ * Salary Master now shows, and it is fully determined by the record's own
+ * gross, components and snapshot, so those rows are completed at READ time
+ * rather than being rewritten: a salary record is history, and nothing here
+ * changes what was approved or when.
+ *
+ * ONLY THAT ONE NOTE. Any other unresolved reason — nobody recorded ESI
+ * applicability, nobody recorded the EPS membership — is a real open question
+ * and is left exactly as it is. A row the current engine wrote never reaches
+ * the arithmetic below, because the current engine cannot produce that note
+ * for a record that has a gross.
+ */
+function fillStandardEsi(record, config = CONFIG) {
+  if (!record || record.esi_status !== STATUS.PENDING) return record;
+
+  const notes = Array.isArray(record.unresolved_notes) ? record.unresolved_notes : [];
+  const stale = notes.filter(
+    (n) => n && n.component === "esi" && n.code === UNRESOLVED.ESI_WAGE_CONTEXT_UNAVAILABLE
+  );
+  if (stale.length !== notes.filter((n) => n && n.component === "esi").length) return record;
+  if (stale.length === 0) return record;
+
+  const cfg = configFromSnapshot(record.statutory_snapshot, config);
+  const esi = calculateEsi(
+    {
+      // Applicability is not re-decided: this note could only have been
+      // written for an employee already recorded as ESI applicable.
+      esi_applicable: true,
+      gross: record.monthly_gross,
+      conveyance: record.conveyance,
+    },
+    cfg
+  );
+  if (esi.status === STATUS.PENDING) return record;
+
+  const ctc = calculateCtc(
+    record.monthly_gross,
+    {
+      employer_pf_total: record.employer_pf_total,
+      edli: record.edli,
+      pf_admin_charge: record.pf_admin_charge,
+    },
+    esi
+  );
+
+  return {
+    ...record,
+    esi_status: esi.status,
+    esi_wage: esi.esi_wage,
+    employee_esi: esi.employee_esi,
+    employer_esi: esi.employer_esi,
+    monthly_ctc: ctc.monthly_ctc,
+    ctc_status: ctc.status,
+    // The ESI question is answered, so its note goes. Every other note stays.
+    unresolved_notes: notes.filter((n) => !stale.includes(n)),
+  };
 }
 
 /* ------------------------------------------------------ effective dating */
@@ -802,6 +964,7 @@ function calculateSalary(input = {}, config = CONFIG) {
 
 module.exports = {
   STATUS,
+  ESI_WAGE_BASIS,
   UNRESOLVED,
   calculateBreakup,
   dailySalary,
@@ -811,6 +974,8 @@ module.exports = {
   esiWageBounds,
   calculateEsi,
   calculateCtc,
+  configFromSnapshot,
+  fillStandardEsi,
   resolveOpeningEffectiveFrom,
   calculateSalary,
   // exported for tests and for callers that need the same date handling

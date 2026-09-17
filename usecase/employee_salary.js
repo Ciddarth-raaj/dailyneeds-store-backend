@@ -617,13 +617,21 @@ class EmployeeSalaryUsecase {
         return null;
       }
     };
-    return {
+    /*
+     * THE ONE DERIVATION THIS PRESENTER MAKES, and it completes a record
+     * rather than changing one: rows written before ESI had a standard basis
+     * carry a PENDING ESI and a null CTC that the record's own gross,
+     * components and snapshot fully determine. `fillStandardEsi` supplies
+     * exactly those and leaves every genuinely open question alone. Nothing is
+     * written back — a salary record is history.
+     */
+    return engine.fillStandardEsi({
       ...row,
       effective_from: engine.toDateOnly(row.effective_from),
       unresolved_notes: parse(row.unresolved_notes),
       statutory_snapshot: parse(row.statutory_snapshot),
       manual_override: Number(row.manual_override) === 1,
-    };
+    });
   }
 
   /* ----------------------------------------------------- the approval queue */

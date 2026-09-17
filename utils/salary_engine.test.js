@@ -403,12 +403,39 @@ test("ESI not applicable means zeros, not pending", () => {
   assert.equal(esi.employer_esi, 0);
 });
 
-test("ESI does NOT assume the wage is the gross — it returns PENDING with a reason", () => {
+test("with no payroll wage the STANDARD monthly contribution is computed, not PENDING", () => {
+  // The Salary Master case. 15000 gross less 2500 Conveyance is a 12500
+  // standard wage: 0.75% is 93.75 and 3.25% is 406.25, each to the rupee.
   const esi = E.calculateEsi({ esi_applicable: 1, gross: 15000, conveyance: 2500 });
+  assert.equal(esi.status, E.STATUS.APPLIED);
+  assert.equal(esi.esi_wage, 12500);
+  assert.equal(esi.esi_wage_basis, E.ESI_WAGE_BASIS.STANDARD);
+  assert.equal(esi.employee_esi, 94);
+  assert.equal(esi.employer_esi, 406);
+  assert.deepEqual(esi.unresolved, []);
+});
+
+test("the STANDARD wage never overrides a wage a payrun worked out", () => {
+  // Same structure, but payroll says only 9000 was payable this month. The
+  // actual wage wins and is labelled as the actual one.
+  const actual = E.calculateEsi({
+    esi_applicable: 1,
+    gross: 15000,
+    conveyance: 2500,
+    esi_wage: 9000,
+  });
+  assert.equal(actual.esi_wage, 9000);
+  assert.equal(actual.esi_wage_basis, E.ESI_WAGE_BASIS.PAYROLL);
+  assert.equal(actual.employer_esi, 293);
+});
+
+test("ESI applicability nobody has recorded is still PENDING, and is not guessed", () => {
+  // The one ESI question a salary structure genuinely cannot answer.
+  const esi = E.calculateEsi({ gross: 15000, conveyance: 2500 });
   assert.equal(esi.status, E.STATUS.PENDING);
   assert.equal(esi.employee_esi, null);
   assert.equal(esi.employer_esi, null);
-  assert.equal(esi.unresolved[0].code, E.UNRESOLVED.ESI_WAGE_CONTEXT_UNAVAILABLE);
+  assert.equal(esi.unresolved[0].code, E.UNRESOLVED.ESI_APPLICABILITY_NOT_RECORDED);
 });
 
 test("somebody too well paid to be covered is resolved without a payroll wage", () => {
@@ -418,11 +445,13 @@ test("somebody too well paid to be covered is resolved without a payroll wage", 
   assert.deepEqual(esi.unresolved, []);
 });
 
-test("the coverage bound excludes Conveyance, so a borderline gross stays pending", () => {
+test("the wage excludes Conveyance, so a borderline gross is covered rather than out", () => {
   // 23000 gross less 2500 conveyance is 20500, under the 21000 ceiling: the
-  // employee might be covered, so the answer is pending rather than "no".
+  // employee IS covered on the standard wage, and the gross alone would have
+  // put them wrongly outside the scheme.
   const esi = E.calculateEsi({ esi_applicable: 1, gross: 23000, conveyance: 2500 });
-  assert.equal(esi.status, E.STATUS.PENDING);
+  assert.equal(esi.status, E.STATUS.APPLIED);
+  assert.equal(esi.esi_wage, 20500);
 });
 
 test("a supplied ESI wage is what gets used", () => {
@@ -503,10 +532,12 @@ test("the employee's own PF and ESI are NOT added back into CTC", () => {
 });
 
 test("an unresolved employer cost makes the CTC PENDING rather than a subtotal", () => {
+  // `esi_applicable` is deliberately absent: nobody has recorded whether this
+  // employee is in the scheme, so the employer's ESI is genuinely unknown and
+  // the CTC that would contain it is not a CTC.
   const r = E.calculateSalary({
     monthly_gross: 20000,
     pf_applicable: 1,
-    esi_applicable: 1,
     previous_eps_member: 1,
     dob: "1990-05-10",
     date_of_joining: "2020-01-01",
@@ -515,6 +546,38 @@ test("an unresolved employer cost makes the CTC PENDING rather than a subtotal",
   assert.equal(r.ctc_status, E.STATUS.PENDING);
   assert.equal(r.monthly_ctc, null);
   assert.deepEqual(r.ctc_pending_components, ["employer_esi"]);
+});
+
+test("an approved 16000 salary states its standard ESI and CTC with no payrun", () => {
+  // The Salary Master case end to end: gross 16000 breaks up as 10000 / 2500 /
+  // 3500 / 0, the standard ESI wage is 13500, and the CTC is the gross plus
+  // the employer's costs only — 16000 + 1200 + 50 + 50 + 439.
+  const r = E.calculateSalary({
+    monthly_gross: 16000,
+    pf_applicable: 1,
+    esi_applicable: 1,
+    previous_eps_member: 1,
+    dob: "1990-05-10",
+    date_of_joining: "2020-01-01",
+    effective_from: "2026-04-01",
+  });
+  assert.deepEqual(r.components, {
+    basic: 10000,
+    conveyance: 2500,
+    hra: 3500,
+    special_allowance: 0,
+  });
+  assert.equal(r.esi.status, E.STATUS.APPLIED);
+  assert.equal(r.esi.employee_esi, 101);
+  assert.equal(r.esi.employer_esi, 439);
+  assert.equal(r.ctc_status, E.STATUS.APPLIED);
+  assert.equal(r.monthly_ctc, 17739);
+  assert.deepEqual(r.unresolved, []);
+  // The PF side is untouched by the ESI change.
+  assert.equal(r.pf.employee_pf, 1200);
+  assert.equal(r.pf.employer_pf_total, 1200);
+  assert.equal(r.pf.edli, 50);
+  assert.equal(r.pf.pf_admin_charge, 50);
 });
 
 test("with ESI out of scope the CTC for a 20000 gross resolves", () => {
@@ -646,4 +709,95 @@ test("a tri-state flag distinguishes No from nobody-has-said", () => {
   assert.equal(E.triState(null), null);
   assert.equal(E.triState(undefined), null);
   assert.equal(E.triState(""), null);
+});
+
+/* ------------------------------- records stored before the standard basis */
+
+const LEGACY_ROW = {
+  monthly_gross: 16000,
+  basic: 10000,
+  conveyance: 2500,
+  hra: 3500,
+  special_allowance: 0,
+  pf_status: "APPLIED",
+  employee_pf: 1200,
+  employer_pf_total: 1200,
+  employer_epf: 367,
+  employer_eps: 833,
+  edli: 50,
+  pf_admin_charge: 50,
+  esi_status: "PENDING",
+  esi_wage: null,
+  employee_esi: null,
+  employer_esi: null,
+  monthly_ctc: null,
+  ctc_status: "PENDING",
+  unresolved_notes: [{ code: "ESI_WAGE_CONTEXT_UNAVAILABLE", component: "esi" }],
+  statutory_snapshot: {
+    esi_employee_rate_percent: 0.75,
+    esi_employer_rate_percent: 3.25,
+    esi_coverage_ceiling: 21000,
+    esi_employee_exemption_daily_wage: 176,
+    esi_conveyance_excluded_from_wage: true,
+    salary_days_per_month: 26,
+    contribution_rounding: "NEAREST_RUPEE",
+  },
+};
+
+test("a record stored before the standard basis reads as the standard amount", () => {
+  const filled = E.fillStandardEsi(LEGACY_ROW);
+  assert.equal(filled.esi_status, E.STATUS.APPLIED);
+  assert.equal(filled.esi_wage, 13500);
+  assert.equal(filled.employee_esi, 101);
+  assert.equal(filled.employer_esi, 439);
+  assert.equal(filled.monthly_ctc, 17739);
+  assert.equal(filled.ctc_status, E.STATUS.APPLIED);
+  assert.deepEqual(filled.unresolved_notes, []);
+  // The stored row itself is untouched: this completes a record, it does not
+  // rewrite history.
+  assert.equal(LEGACY_ROW.employer_esi, null);
+  assert.equal(LEGACY_ROW.esi_status, "PENDING");
+});
+
+test("the fill uses the RECORD'S OWN rates, not today's", () => {
+  const filled = E.fillStandardEsi({
+    ...LEGACY_ROW,
+    statutory_snapshot: { ...LEGACY_ROW.statutory_snapshot, esi_employer_rate_percent: 4.75 },
+  });
+  // 4.75% of 13500 is 641.25, to the rupee.
+  assert.equal(filled.employer_esi, 641);
+});
+
+test("a genuinely open ESI question is left open by the fill", () => {
+  const unrecorded = E.fillStandardEsi({
+    ...LEGACY_ROW,
+    unresolved_notes: [{ code: "ESI_APPLICABILITY_NOT_RECORDED", component: "esi" }],
+  });
+  assert.equal(unrecorded.esi_status, E.STATUS.PENDING);
+  assert.equal(unrecorded.employer_esi, null);
+  assert.equal(unrecorded.monthly_ctc, null);
+});
+
+test("the fill touches neither PF nor an unresolved PF note", () => {
+  const withPfNote = E.fillStandardEsi({
+    ...LEGACY_ROW,
+    employer_eps: null,
+    unresolved_notes: [
+      { code: "ESI_WAGE_CONTEXT_UNAVAILABLE", component: "esi" },
+      { code: "EPS_MEMBERSHIP_NOT_RECORDED", component: "employer_eps" },
+    ],
+  });
+  assert.equal(withPfNote.employer_esi, 439);
+  assert.equal(withPfNote.employee_pf, 1200);
+  assert.equal(withPfNote.employer_pf_total, 1200);
+  assert.deepEqual(withPfNote.unresolved_notes, [
+    { code: "EPS_MEMBERSHIP_NOT_RECORDED", component: "employer_eps" },
+  ]);
+});
+
+test("an already-resolved or not-applicable record is returned unchanged", () => {
+  const applied = { ...LEGACY_ROW, esi_status: "APPLIED", employer_esi: 439, unresolved_notes: [] };
+  assert.equal(E.fillStandardEsi(applied), applied);
+  const na = { ...LEGACY_ROW, esi_status: "NOT_APPLICABLE", employer_esi: 0, unresolved_notes: [] };
+  assert.equal(E.fillStandardEsi(na), na);
 });
