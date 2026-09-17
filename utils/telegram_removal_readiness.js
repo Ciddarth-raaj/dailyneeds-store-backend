@@ -35,6 +35,15 @@ const REMOVAL_READINESS = {
   BOT_NOT_ADMIN: "BOT_NOT_ADMIN",
   /** Admin, but without `can_restrict_members` - the right a kick needs. */
   BOT_CANNOT_RESTRICT: "BOT_CANNOT_RESTRICT",
+  /**
+   * We were not ALLOWED to ask this tick - the per-tick Telegram budget is
+   * spent. Deliberately distinct from TELEGRAM_UNAVAILABLE: nothing is
+   * wrong, nothing should be retried with backoff, and the work simply
+   * resumes on the next tick. `removalReadiness()` never returns this - the
+   * caller does, before it asks - and it is listed here so the two cannot be
+   * confused by anybody reading the vocabulary.
+   */
+  CAPPED: "CAPPED",
 };
 
 /** Human sentences, so no screen invents its own. */
@@ -45,6 +54,7 @@ const REMOVAL_READINESS_REASON = {
   BOT_NOT_MEMBER: "Diya is not in this group",
   BOT_NOT_ADMIN: "Diya is not an admin",
   BOT_CANNOT_RESTRICT: "Diya needs permission to remove members",
+  CAPPED: "Paused for this run",
 };
 
 /**

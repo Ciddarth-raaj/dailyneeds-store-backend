@@ -58,6 +58,19 @@ class TelegramMembershipAdminUsecase {
     });
   }
 
+  /**
+   * Runs `fn` inside the claim repository's transaction when it offers one.
+   * Without it - a double in a test, an older wiring - the writes still
+   * happen, in order, exactly as they did before; the transaction is what
+   * makes them all-or-nothing, not what makes them work.
+   */
+  async _inTransaction(fn) {
+    if (this.claimRepo && typeof this.claimRepo.withTransaction === "function") {
+      return this.claimRepo.withTransaction(fn);
+    }
+    return fn(undefined);
+  }
+
   async _requireGroup(telegramGroupId) {
     const group = await this.registryRepo.getById(telegramGroupId);
     if (!group) throw notFound("Telegram group not found");
@@ -98,23 +111,43 @@ class TelegramMembershipAdminUsecase {
     if (!employee.has(id)) throw notFound("Employee not found");
 
     const actorId = actor && actor.employee_id !== undefined ? actor.employee_id : null;
-    await this.claimRepo.open({
-      employeeId: id,
-      telegramGroupId: group.telegram_group_id,
-      source: CLAIM_SOURCE.MANUAL,
-      actorEmployeeId: actorId,
+
+    // ONE TRANSACTION: the claim, its audit row and the job that will act on
+    // it. Three separate writes could leave a granted claim with no job -
+    // the group would be required for somebody and nothing would ever
+    // reconcile it - or an audit row for a grant that was never written. If
+    // the enqueue fails, the grant fails with it and the screen says so.
+    // No Telegram call happens here; the worker does that afterwards.
+    await this._inTransaction(async (tx) => {
+      await this.claimRepo.open(
+        {
+          employeeId: id,
+          telegramGroupId: group.telegram_group_id,
+          source: CLAIM_SOURCE.MANUAL,
+          actorEmployeeId: actorId,
+        },
+        { tx }
+      );
+      await this.claimRepo.recordEvent(
+        {
+          employeeId: id,
+          telegramGroupId: group.telegram_group_id,
+          source: CLAIM_SOURCE.MANUAL,
+          eventType: MEMBERSHIP_EVENT.CLAIM_OPENED,
+          detailCode: DETAIL_CODE.MANUAL_GRANT,
+          actorEmployeeId: actorId,
+        },
+        { tx }
+      );
+      if (this.jobRepo) {
+        await this.jobRepo.enqueueEmployee(
+          id,
+          JOB_REASON.MANUAL_GRANTED,
+          { enqueuedBy: actorId },
+          { tx }
+        );
+      }
     });
-    await this.claimRepo.recordEvent({
-      employeeId: id,
-      telegramGroupId: group.telegram_group_id,
-      source: CLAIM_SOURCE.MANUAL,
-      eventType: MEMBERSHIP_EVENT.CLAIM_OPENED,
-      detailCode: DETAIL_CODE.MANUAL_GRANT,
-      actorEmployeeId: actorId,
-    });
-    if (this.jobRepo) {
-      await this.jobRepo.enqueueEmployee(id, JOB_REASON.MANUAL_GRANTED, { enqueuedBy: actorId });
-    }
     return { code: 200, msg: "Manual membership granted" };
   }
 
@@ -128,25 +161,42 @@ class TelegramMembershipAdminUsecase {
     const group = await this._requireGroup(telegramGroupId);
     const id = Number(employeeId);
     const actorId = actor && actor.employee_id !== undefined ? actor.employee_id : null;
-    const res = await this.claimRepo.requestRemoval({
-      employeeId: id,
-      telegramGroupId: group.telegram_group_id,
-      source: CLAIM_SOURCE.MANUAL,
-      intentReason: INTENT_REASON.MANUAL_REVOKED,
-      actorEmployeeId: actorId,
+    // ONE TRANSACTION, for the same reason as the grant - and here the cost
+    // of losing the job is higher: a revoked claim with nothing queued is
+    // somebody left in a group after their access was taken away, with the
+    // record saying it had been.
+    await this._inTransaction(async (tx) => {
+      const res = await this.claimRepo.requestRemoval(
+        {
+          employeeId: id,
+          telegramGroupId: group.telegram_group_id,
+          source: CLAIM_SOURCE.MANUAL,
+          intentReason: INTENT_REASON.MANUAL_REVOKED,
+          actorEmployeeId: actorId,
+        },
+        { tx }
+      );
+      if (!res.changed) throw notFound("No active manual membership for that employee");
+      await this.claimRepo.recordEvent(
+        {
+          employeeId: id,
+          telegramGroupId: group.telegram_group_id,
+          source: CLAIM_SOURCE.MANUAL,
+          eventType: MEMBERSHIP_EVENT.CLAIM_REMOVAL_REQUESTED,
+          detailCode: DETAIL_CODE.MANUAL_REVOKE,
+          actorEmployeeId: actorId,
+        },
+        { tx }
+      );
+      if (this.jobRepo) {
+        await this.jobRepo.enqueueEmployee(
+          id,
+          JOB_REASON.MANUAL_REVOKED,
+          { enqueuedBy: actorId },
+          { tx }
+        );
+      }
     });
-    if (!res.changed) throw notFound("No active manual membership for that employee");
-    await this.claimRepo.recordEvent({
-      employeeId: id,
-      telegramGroupId: group.telegram_group_id,
-      source: CLAIM_SOURCE.MANUAL,
-      eventType: MEMBERSHIP_EVENT.CLAIM_REMOVAL_REQUESTED,
-      detailCode: DETAIL_CODE.MANUAL_REVOKE,
-      actorEmployeeId: actorId,
-    });
-    if (this.jobRepo) {
-      await this.jobRepo.enqueueEmployee(id, JOB_REASON.MANUAL_REVOKED, { enqueuedBy: actorId });
-    }
     return { code: 200, msg: "Manual membership revoked" };
   }
 

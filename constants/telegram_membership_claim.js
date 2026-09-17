@@ -129,6 +129,25 @@ const ABANDONED_RUNNING_MS = 10 * 60 * 1000;
 /** Fields whose change can alter which groups a rule matches. */
 const MAPPING_RELEVANT_FIELDS = ["store_id", "department_id", "designation_id"];
 
+/**
+ * WHAT ONE GROUP'S CLEANUP ACHIEVED. The worker turns these into a job
+ * outcome, which is why they are a closed list rather than loose booleans:
+ * a cleanup that did not happen must never be able to look like one that did.
+ */
+const REMOVAL_OUTCOME = {
+  /** They were in the group and are not now. */
+  REMOVED: "REMOVED",
+  /** They were already out. The desired end state, so a success. */
+  ALREADY_ABSENT: "ALREADY_ABSENT",
+  /** Removals are switched off. Deliberate, so it burns no retry - but the
+   *  work is NOT done and the job must not report that it is. */
+  DEFERRED: "DEFERRED",
+  /** A per-tick or hourly cap stopped it. Resume next tick. */
+  CAPPED: "CAPPED",
+  /** Telegram would not answer, or refused. Retry, and eventually DEAD. */
+  RETRYABLE: "RETRYABLE",
+};
+
 /** Why a removal could not be performed. Never a reason to close a claim. */
 const REMOVAL_REFUSAL = {
   REMOVAL_DISABLED: "REMOVAL_DISABLED",
@@ -140,6 +159,7 @@ const REMOVAL_REFUSAL = {
 };
 
 module.exports = {
+  REMOVAL_OUTCOME,
   CLAIM_SOURCE,
   CLAIM_STATE,
   INTENT_REASON,

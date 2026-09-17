@@ -143,19 +143,49 @@ describe("one group, both sources", () => {
     assert.deepEqual(decisions, []);
   });
 
-  it("a returning rule cancels a MANUAL removal that had not run yet", () => {
+  it("A REVOKED GRANT IS NEVER GIVEN BACK BY A RULE", () => {
+    // The revocation was a person's decision. A rule that still matches
+    // decides only that nobody LEAVES - so the grant closes as retained, and
+    // the employee stays because the RULE holds them. Restoring the grant
+    // would hide the revocation and hand it back the day the rule stopped
+    // matching.
     const decisions = decideGroup({
-      ruleClaim: claim(CLAIM_SOURCE.RULE, CLAIM_STATE.REMOVAL_PENDING),
+      ruleClaim: claim(CLAIM_SOURCE.RULE, CLAIM_STATE.ACTIVE),
       manualClaim: claim(CLAIM_SOURCE.MANUAL, CLAIM_STATE.REMOVAL_PENDING),
       ruleDesired: true,
     });
-    assert.deepEqual(
-      decisions.map((d) => [d.source, d.action]).sort(),
-      [
-        [CLAIM_SOURCE.MANUAL, ACTION.CANCEL_REMOVAL],
-        [CLAIM_SOURCE.RULE, ACTION.CANCEL_REMOVAL],
-      ].sort()
+    const manual = decisions.find((d) => d.source === CLAIM_SOURCE.MANUAL);
+    assert.equal(manual.action, ACTION.CLOSE_RETAINED);
+    assert.equal(manual.close_outcome, CLOSE_OUTCOME.RETAINED_BY_OTHER_SOURCE);
+    assert.ok(
+      !decisions.some(
+        (d) => d.source === CLAIM_SOURCE.MANUAL && d.action === ACTION.CANCEL_REMOVAL
+      ),
+      "a MANUAL claim is re-opened by a person and by nothing else"
     );
+  });
+
+  it("the RULE's own removal is still cancelled when the rule returns", () => {
+    // The rule is the source that came back, so cancelling its own removal
+    // is correct - that is not somebody's revoked decision being undone.
+    const decisions = decideGroup({
+      ruleClaim: claim(CLAIM_SOURCE.RULE, CLAIM_STATE.REMOVAL_PENDING),
+      manualClaim: null,
+      ruleDesired: true,
+    });
+    assert.deepEqual(
+      decisions.map((d) => [d.source, d.action]),
+      [[CLAIM_SOURCE.RULE, ACTION.CANCEL_REMOVAL]]
+    );
+  });
+
+  it("a revoked grant with NO rule holding them is left to be removed", () => {
+    const decisions = decideGroup({
+      ruleClaim: claim(CLAIM_SOURCE.RULE, CLAIM_STATE.CLOSED),
+      manualClaim: claim(CLAIM_SOURCE.MANUAL, CLAIM_STATE.REMOVAL_PENDING),
+      ruleDesired: false,
+    });
+    assert.deepEqual(decisions, [], "nothing to decide - the cleanup proceeds");
   });
 });
 

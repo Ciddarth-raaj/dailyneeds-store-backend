@@ -1,5 +1,12 @@
 const logger = require("../utils/logger");
 const {
+  queryAsync,
+  getConnectionAsync,
+  beginTransactionAsync,
+  commitAsync,
+  rollbackAsync,
+} = require("../utils/batchInsert");
+const {
   CLAIM_SOURCE,
   CLAIM_STATE,
   CLOSE_OUTCOME,
@@ -67,6 +74,29 @@ class TelegramMembershipClaimRepository {
       created_at: row.created_at || null,
       updated_at: row.updated_at || null,
     };
+  }
+
+  /**
+   * One transaction on one pooled connection, the same `{query}` shape every
+   * other repository here produces - so the queue repository can be handed
+   * the same `tx` and a claim, its audit row and the job that will act on it
+   * commit together or not at all.
+   */
+  async withTransaction(fn) {
+    const connection = await getConnectionAsync(this.db);
+    const tx = { query: (sql, params) => queryAsync(connection, sql, params) };
+    try {
+      await beginTransactionAsync(connection);
+      const result = await fn(tx);
+      await commitAsync(connection);
+      return result;
+    } catch (err) {
+      await rollbackAsync(connection);
+      this._log("TRANSACTION", err);
+      throw err;
+    } finally {
+      connection.release();
+    }
   }
 
   /* ------------------------------------------------------------- reads -- */

@@ -166,7 +166,14 @@ describe("the removal caps", () => {
     // A mis-configured mapping must not empty a group over many ticks.
     const { usecase, state } = build();
     state.onReconcile = (options) => {
-      while (options.budget.removalsLeft > 0) options.budget.spendRemoval(1);
+      // BOUNDED ON PURPOSE. An unbounded `while (takeRemoval())` would hang
+      // rather than fail if the cap ever stopped refusing, and a hanging
+      // test reports nothing useful.
+      let guard = 0;
+      while (options.budget.takeRemoval()) {
+        guard += 1;
+        assert.ok(guard <= 10, "takeRemoval must refuse once the cap is spent");
+      }
     };
     await usecase.tick();
     state.claimed.clear();
@@ -214,6 +221,105 @@ describe("failure handling", () => {
       throw new Error("database is gone");
     };
     await usecase.tick();
+  });
+});
+
+describe("a cleanup that did not happen never reads as SUCCEEDED", () => {
+  const { TelegramMembershipRetryableError } = require("../utils/telegram_membership_errors");
+
+  it("a TEMPORARY removal failure fails the job rather than completing it", async () => {
+    const { usecase, state, calls } = build();
+    state.reconcileThrows = new TelegramMembershipRetryableError("removal failed: ETIMEDOUT", {
+      code: "TELEGRAM_REMOVAL_FAILED",
+    });
+
+    const summary = await usecase.tick();
+
+    assert.equal(summary.failed, 1);
+    assert.deepEqual(calls.completed, [], "the job must NOT be completed");
+    assert.equal(calls.failed[0].errorCode, "TELEGRAM_REMOVAL_FAILED");
+  });
+
+  it("REPEATED failures reach DEAD", async () => {
+    const { usecase, state } = build();
+    state.reconcileThrows = new TelegramMembershipRetryableError("still failing");
+    state.dead = true; // the repository reports the ladder exhausted
+    const summary = await usecase.tick();
+    assert.equal(summary.dead, 1);
+  });
+
+  it("a 429 raised from INSIDE a removal uses the delay path", async () => {
+    // Raised deep in the reconciler, wrapped, and it still has to reach
+    // `delay()` - spending a retry on a rate limit would kill jobs that were
+    // never wrong.
+    const { usecase, state, calls } = build();
+    const cause = new Error("Too Many Requests: retry after 31");
+    cause.parameters = { retry_after: 31 };
+    state.reconcileThrows = new TelegramMembershipRetryableError("rate limited", {
+      retryAfter: 31,
+      cause,
+    });
+
+    const summary = await usecase.tick();
+
+    assert.equal(summary.delayed, 1);
+    assert.deepEqual(calls.delayed, [{ id: 1, seconds: 31 }]);
+    assert.deepEqual(calls.failed, [], "a rate limit spends no retry");
+    assert.deepEqual(calls.completed, []);
+  });
+
+  it("CONFIRMED ABSENT is success, and completes the job", async () => {
+    const { usecase, state, calls } = build();
+    state.reconcileResult = { removals: [10], capReached: false };
+    const summary = await usecase.tick();
+    assert.equal(summary.succeeded, 1);
+    assert.equal(calls.completed[0].requestRerun, false);
+  });
+
+  it("REMOVALS SWITCHED OFF defers the job - not done, and not a failure", async () => {
+    const { usecase, state, calls } = build();
+    state.reconcileResult = { deferred: true };
+
+    const summary = await usecase.tick();
+
+    assert.equal(summary.deferred, 1);
+    assert.deepEqual(calls.completed, [], "deferred work is not completed work");
+    assert.deepEqual(calls.failed, [], "and it burns no retry");
+    assert.equal(calls.delayed[0].seconds, 900);
+  });
+});
+
+describe("the budget cannot be overspent", () => {
+  it("spend refuses what it cannot cover, and never goes negative", async () => {
+    const { usecase, state } = build({ config: { apiCallsPerTick: 3 } });
+    let budget = null;
+    state.onReconcile = (options) => {
+      budget = options.budget;
+    };
+    await usecase.tick();
+
+    assert.equal(budget.spend(2), true);
+    assert.equal(budget.callsLeft, 1);
+    assert.equal(budget.spend(2), false, "a request it cannot cover is refused whole");
+    assert.equal(budget.callsLeft, 1, "and nothing is deducted");
+    assert.equal(budget.spend(1), true);
+    assert.equal(budget.callsLeft, 0);
+    assert.equal(budget.spend(1), false);
+    assert.ok(budget.callsLeft >= 0);
+  });
+
+  it("takeRemoval is a checked withdrawal, not a subtraction", async () => {
+    const { usecase, state } = build({ config: { removalCapPerTick: 2, removalCapPerHour: 99 } });
+    let budget = null;
+    state.onReconcile = (options) => {
+      budget = options.budget;
+    };
+    await usecase.tick();
+
+    assert.equal(budget.takeRemoval(), true);
+    assert.equal(budget.takeRemoval(), true);
+    assert.equal(budget.takeRemoval(), false, "the cap is a limit, not a suggestion");
+    assert.equal(budget.removalsLeft, 0, "never negative");
   });
 });
 

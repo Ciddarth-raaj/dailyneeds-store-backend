@@ -183,6 +183,21 @@ const build = (over = {}) => {
 
 const events = (calls, type) => calls.events.filter((e) => e.eventType === type);
 
+/**
+ * Cleanup that could not be performed RAISES, so the queue retries it. The
+ * claim work has already been committed by then, which is why the tests that
+ * follow still assert on the claims afterwards.
+ */
+const expectRetryable = async (fn) => {
+  const err = await fn().then(
+    () => null,
+    (caught) => caught
+  );
+  assert.ok(err, "a failed cleanup must reach the queue, not be swallowed");
+  assert.equal(err.retryable, true);
+  return err;
+};
+
 describe("an employed employee", () => {
   it("opens a RULE claim for every group the mappings match", async () => {
     const { usecase, claim, calls } = build();
@@ -265,6 +280,170 @@ describe("an employed employee", () => {
   });
 });
 
+describe("a revoked manual grant", () => {
+  const revoked = (world) => {
+    world.state.claims.push({
+      employee_id: 42,
+      telegram_group_id: 10,
+      source: CLAIM_SOURCE.MANUAL,
+      state: CLAIM_STATE.REMOVAL_PENDING,
+      intent_reason: INTENT_REASON.MANUAL_REVOKED,
+      adopted_from_existing_member: false,
+    });
+  };
+
+  it("STAYS REVOKED while the rule keeps them in the group", async () => {
+    // The blocker this replaces: reconciliation saw "the rule still matches,
+    // so nobody is leaving" and cancelled the removal - handing back a grant
+    // a person had deliberately taken away, invisibly.
+    const world = build();
+    await world.usecase.reconcileEmployee(42);
+    revoked(world);
+
+    await world.usecase.reconcileEmployee(42);
+
+    const manual = world.claim(42, 10, CLAIM_SOURCE.MANUAL);
+    assert.equal(manual.state, CLAIM_STATE.CLOSED);
+    assert.equal(manual.close_outcome, CLOSE_OUTCOME.RETAINED_BY_OTHER_SOURCE);
+    assert.notEqual(manual.state, CLAIM_STATE.ACTIVE);
+    // And the person stays in the group, because the RULE holds them.
+    assert.equal(world.claim(42, 10, CLAIM_SOURCE.RULE).state, CLAIM_STATE.ACTIVE);
+    assert.deepEqual(world.calls.bans, []);
+    assert.ok(world.state.members.has("-10010:555001"));
+  });
+
+  it("stays revoked across repeated reconciliation", async () => {
+    const world = build();
+    await world.usecase.reconcileEmployee(42);
+    revoked(world);
+    await world.usecase.reconcileEmployee(42);
+    await world.usecase.reconcileEmployee(42);
+    await world.usecase.reconcileEmployee(42);
+    assert.equal(world.claim(42, 10, CLAIM_SOURCE.MANUAL).state, CLAIM_STATE.CLOSED);
+  });
+
+  it("and IS removed once the rule stops holding them", async () => {
+    const world = build();
+    await world.usecase.reconcileEmployee(42);
+    revoked(world);
+    world.state.claims.find((c) => c.source === CLAIM_SOURCE.MANUAL).state =
+      CLAIM_STATE.REMOVAL_PENDING;
+    world.state.mappings = [];
+
+    await world.usecase.reconcileEmployee(42);
+
+    assert.equal(world.calls.bans.length, 1);
+    assert.equal(world.claim(42, 10, CLAIM_SOURCE.MANUAL).state, CLAIM_STATE.CLOSED);
+    assert.equal(world.claim(42, 10, CLAIM_SOURCE.MANUAL).close_outcome, CLOSE_OUTCOME.REMOVED);
+  });
+});
+
+describe("the tick's budget is a HARD limit", () => {
+  const budgetOf = (calls, removals) => {
+    let left = calls;
+    let removalsLeft = removals;
+    const spent = { calls: 0, removals: 0 };
+    return {
+      spent,
+      get callsLeft() {
+        return left;
+      },
+      get removalsLeft() {
+        return removalsLeft;
+      },
+      spend(n = 1) {
+        if (left < n) return false;
+        left -= n;
+        spent.calls += n;
+        return true;
+      },
+      takeRemoval() {
+        if (removalsLeft <= 0) return false;
+        removalsLeft -= 1;
+        spent.removals += 1;
+        return true;
+      },
+      exhausted() {
+        return left <= 0;
+      },
+    };
+  };
+
+  const pending = async (world) => {
+    await world.usecase.reconcileEmployee(42);
+    world.state.mappings = [];
+  };
+
+  it("EXACTLY at the limit, the removal goes through", async () => {
+    // Two calls for readiness, three for the identity: five is exactly
+    // enough, and the balance lands on zero rather than below it.
+    const world = build();
+    await pending(world);
+    const budget = budgetOf(5, 1);
+    await world.usecase.reconcileEmployee(42, { budget });
+    assert.equal(world.calls.bans.length, 1);
+    assert.equal(budget.callsLeft, 0);
+    assert.equal(budget.removalsLeft, 0);
+  });
+
+  it("ONE BELOW the limit, NOTHING is sent to Telegram", async () => {
+    const world = build();
+    await pending(world);
+    const budget = budgetOf(4, 1);
+    const result = await world.usecase.reconcileEmployee(42, { budget });
+    assert.deepEqual(world.calls.bans, []);
+    assert.deepEqual(world.calls.unbans, []);
+    assert.equal(result.capReached, true);
+    assert.ok(budget.callsLeft >= 0, "a budget must never go negative");
+  });
+
+  it("no removal budget means no removal, and no call spent looking", async () => {
+    const world = build();
+    await pending(world);
+    const budget = budgetOf(20, 0);
+    const result = await world.usecase.reconcileEmployee(42, { budget });
+    assert.deepEqual(world.calls.bans, []);
+    assert.equal(result.capReached, true);
+    assert.equal(budget.spent.calls, 0, "the cap is checked before the group is touched");
+  });
+
+  it("MULTIPLE IDENTITIES each cost their own removal, and the cap holds", async () => {
+    // The second account in the same group cannot ride the first one's
+    // allowance - that is how a cap of one turns into two people removed.
+    const world = build();
+    world.state.identities = [
+      { employee_telegram_id: 901, employee_id: 42, telegram_user_id: 555002, disconnected_at: null },
+      {
+        employee_telegram_id: 900,
+        employee_id: 42,
+        telegram_user_id: 555001,
+        disconnected_at: new Date("2026-05-01"),
+      },
+    ];
+    world.state.members.add("-10010:555002");
+    await pending(world);
+
+    const budget = budgetOf(20, 1);
+    const result = await world.usecase.reconcileEmployee(42, { budget });
+
+    assert.equal(world.calls.bans.length, 1, "only one removal was affordable");
+    assert.equal(budget.removalsLeft, 0);
+    assert.equal(result.capReached, true);
+    // And the claim is NOT closed, because the group is not finished.
+    assert.equal(world.claim(42, 10, CLAIM_SOURCE.RULE).state, CLAIM_STATE.REMOVAL_PENDING);
+  });
+
+  it("no ban or unban is issued once the budget is exhausted", async () => {
+    const world = build();
+    await pending(world);
+    const budget = budgetOf(2, 5); // enough to check readiness, not to act
+    await world.usecase.reconcileEmployee(42, { budget });
+    assert.deepEqual(world.calls.bans, []);
+    assert.deepEqual(world.calls.unbans, []);
+    assert.equal(budget.callsLeft, 0);
+  });
+});
+
 describe("employment ending", () => {
   const ended = () => EMPLOYEE({ status: 0, resignation_date: "2026-09-16" });
 
@@ -344,17 +523,33 @@ describe("employment ending", () => {
 });
 
 describe("when Telegram will not cooperate", () => {
-  it("leaves the claim REMOVAL_PENDING rather than closing it", async () => {
+  it("leaves the claim REMOVAL_PENDING rather than closing it, AND raises", async () => {
     const world = build();
     await world.usecase.reconcileEmployee(42);
     world.state.mappings = [];
     world.state.telegramDown = true;
 
-    await world.usecase.reconcileEmployee(42);
+    await expectRetryable(() => world.usecase.reconcileEmployee(42));
 
     const claim = world.claim(42, 10, CLAIM_SOURCE.RULE);
     assert.equal(claim.state, CLAIM_STATE.REMOVAL_PENDING);
     assert.notEqual(claim.state, CLAIM_STATE.CLOSED);
+  });
+
+  it("A 429 CARRIES ITS retry_after OUT to the queue", async () => {
+    // So the delay path is used and no retry is spent on work Telegram never
+    // let us attempt.
+    const world = build();
+    await world.usecase.reconcileEmployee(42);
+    world.state.mappings = [];
+    world.usecase.telegram.getChat = async () => {
+      const err = new Error("Too Many Requests: retry after 21");
+      err.parameters = { retry_after: 21 };
+      throw err;
+    };
+
+    const err = await expectRetryable(() => world.usecase.reconcileEmployee(42));
+    assert.equal(err.retryAfter, 21);
   });
 
   it("a lookup that FAILS MID-REMOVAL leaves the claim REMOVAL_PENDING", async () => {
@@ -370,7 +565,7 @@ describe("when Telegram will not cooperate", () => {
       throw new Error("ETIMEDOUT");
     };
 
-    await world.usecase.reconcileEmployee(42);
+    await expectRetryable(() => world.usecase.reconcileEmployee(42));
 
     const claim = world.claim(42, 10, CLAIM_SOURCE.RULE);
     assert.equal(claim.state, CLAIM_STATE.REMOVAL_PENDING);
@@ -387,7 +582,7 @@ describe("when Telegram will not cooperate", () => {
       throw new Error("Bad Request: CHAT_ADMIN_REQUIRED");
     };
 
-    await world.usecase.reconcileEmployee(42);
+    await expectRetryable(() => world.usecase.reconcileEmployee(42));
 
     assert.equal(world.claim(42, 10, CLAIM_SOURCE.RULE).state, CLAIM_STATE.REMOVAL_PENDING);
     assert.equal(world.claim(42, 10, CLAIM_SOURCE.RULE).close_outcome, null);
@@ -397,7 +592,9 @@ describe("when Telegram will not cooperate", () => {
     const world = build({ botRights: { status: "administrator" } });
     await world.usecase.reconcileEmployee(42);
     world.state.mappings = [];
-    await world.usecase.reconcileEmployee(42);
+    // A MISSING RIGHT IS SOMEBODY'S TO FIX, so it retries and ends in the
+    // dead-letter list rather than in a claim nobody looks at.
+    await expectRetryable(() => world.usecase.reconcileEmployee(42));
 
     assert.equal(world.claim(42, 10, CLAIM_SOURCE.RULE).state, CLAIM_STATE.REMOVAL_PENDING);
     assert.deepEqual(world.calls.bans, []);
@@ -436,10 +633,15 @@ describe("when Telegram will not cooperate", () => {
     const world = build({ removalsEnabled: false });
     await world.usecase.reconcileEmployee(42);
     world.state.mappings = [];
-    await world.usecase.reconcileEmployee(42);
+    const result = await world.usecase.reconcileEmployee(42);
 
     assert.equal(world.claim(42, 10, CLAIM_SOURCE.RULE).state, CLAIM_STATE.REMOVAL_PENDING);
     assert.deepEqual(world.calls.bans, []);
+    // NOT a failure - it is deliberate - and NOT a success either: the job
+    // is deferred, so the queue keeps it pending rather than reporting
+    // cleanup that was switched off.
+    assert.equal(result.deferred, true);
+    assert.ok(!result.retryable);
   });
 });
 

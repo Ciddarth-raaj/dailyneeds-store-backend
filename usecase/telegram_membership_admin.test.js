@@ -23,8 +23,28 @@ const build = (over = {}) => {
   const find = (employeeId, source) =>
     state.claims.find((c) => c.employee_id === employeeId && c.source === source);
 
+  const tx = { calls: 0, rolledBack: 0 };
   const usecase = buildAdmin({
     claimRepo: {
+      /**
+       * A transaction that really wraps: the writes are staged and only
+       * applied when the callback returns. A double that just ran the
+       * callback would pass an atomicity test while proving nothing.
+       */
+      withTransaction: async (fn) => {
+        tx.calls += 1;
+        const before = JSON.parse(JSON.stringify(state.claims));
+        const eventsBefore = calls.events.length;
+        try {
+          return await fn({ query: async () => ({ affectedRows: 1 }) });
+        } catch (err) {
+          tx.rolledBack += 1;
+          state.claims.length = 0;
+          for (const claim of before) state.claims.push(claim);
+          calls.events.length = eventsBefore;
+          throw err;
+        }
+      },
       getLiveForGroup: async () => state.claims.filter((c) => c.state !== CLAIM_STATE.CLOSED),
       getForEmployee: async (id) => state.claims.filter((c) => c.employee_id === Number(id)),
       describeEmployees: async (ids) =>
@@ -74,7 +94,7 @@ const build = (over = {}) => {
     registryRepo: { getById: async (id) => (Number(id) === 10 ? state.group : null) },
   });
 
-  return { usecase, state, calls, find };
+  return { usecase, state, calls, find, tx };
 };
 
 describe("granting", () => {
@@ -129,6 +149,89 @@ describe("revoking", () => {
     await usecase.grantManual(10, 42);
     await usecase.revokeManual(10, 42);
     assert.equal(find(42, CLAIM_SOURCE.RULE).state, CLAIM_STATE.ACTIVE);
+  });
+});
+
+describe("a grant, its audit row and its job are ONE write", () => {
+  it("the grant runs inside a transaction", async () => {
+    const { usecase, tx } = build();
+    await usecase.grantManual(10, 42);
+    assert.equal(tx.calls, 1);
+  });
+
+  it("A FAILED ENQUEUE ROLLS THE GRANT BACK", async () => {
+    // A granted claim with no job queued would make a group required for
+    // somebody that nothing ever reconciles - so the grant fails with it,
+    // and the screen says so, rather than half-happening in silence.
+    const world = build();
+    world.usecase.jobRepo.enqueueEmployee = async () => {
+      throw new Error("the queue is unavailable");
+    };
+
+    await assert.rejects(() => world.usecase.grantManual(10, 42), /queue is unavailable/);
+
+    assert.equal(world.tx.rolledBack, 1);
+    assert.equal(world.find(42, CLAIM_SOURCE.MANUAL), undefined, "no claim survives");
+    assert.deepEqual(world.calls.events, [], "and no audit row claims one was made");
+  });
+
+  it("A FAILED ENQUEUE ROLLS THE REVOKE BACK, leaving the grant ACTIVE", async () => {
+    // Worse than the grant case: a revoked claim with nothing queued is
+    // somebody left in a group after their access was taken away, with the
+    // record saying it had been.
+    const world = build();
+    await world.usecase.grantManual(10, 42);
+    world.usecase.jobRepo.enqueueEmployee = async () => {
+      throw new Error("the queue is unavailable");
+    };
+
+    await assert.rejects(() => world.usecase.revokeManual(10, 42), /queue is unavailable/);
+
+    assert.equal(world.find(42, CLAIM_SOURCE.MANUAL).state, CLAIM_STATE.ACTIVE);
+    assert.ok(
+      !world.calls.events.some((e) => e.eventType === MEMBERSHIP_EVENT.CLAIM_REMOVAL_REQUESTED),
+      "no audit row for a revocation that did not happen"
+    );
+  });
+
+  it("every write in the pair carries the transaction", async () => {
+    const seen = [];
+    const world = build();
+    const realOpen = world.usecase.claimRepo.open;
+    const realEvent = world.usecase.claimRepo.recordEvent;
+    world.usecase.claimRepo.open = async (args, options) => {
+      seen.push(["open", Boolean(options && options.tx)]);
+      return realOpen(args, options);
+    };
+    world.usecase.claimRepo.recordEvent = async (args, options) => {
+      seen.push(["event", Boolean(options && options.tx)]);
+      return realEvent(args, options);
+    };
+    world.usecase.jobRepo.enqueueEmployee = async (id, reason, opts, txOptions) => {
+      seen.push(["enqueue", Boolean(txOptions && txOptions.tx)]);
+    };
+
+    await world.usecase.grantManual(10, 42);
+
+    assert.deepEqual(seen, [
+      ["open", true],
+      ["event", true],
+      ["enqueue", true],
+    ]);
+  });
+
+  it("no Telegram call happens inside the transaction", () => {
+    const source = require("fs").readFileSync(
+      require("path").join(__dirname, "telegram_membership_admin.js"),
+      "utf8"
+    );
+    // The Telegram SERVICE is what must be absent - the word "telegram"
+    // appears throughout in table and field names, which is not a call.
+    assert.ok(!/this\.telegram\b/.test(source));
+    assert.ok(!/services\/telegram/.test(source));
+    for (const method of ["banChatMember", "unbanChatMember", "getChatMember", "getChat("]) {
+      assert.ok(!source.includes(method), `${method} must not be called here`);
+    }
   });
 });
 

@@ -11,6 +11,11 @@ const {
   removalWanted,
 } = require("../utils/telegram_membership_reconcile");
 const {
+  TelegramMembershipRetryableError,
+  retryAfterOf,
+} = require("../utils/telegram_membership_errors");
+const {
+  REMOVAL_OUTCOME,
   CLAIM_SOURCE,
   CLAIM_STATE,
   CLOSE_OUTCOME,
@@ -170,6 +175,14 @@ class TelegramMembershipReconcileUsecase {
       includeUnclaimedManagedGroups: !employed,
     });
 
+    // THE CLAIMS ARE ALREADY COMMITTED, so raising here loses nothing and
+    // costs nothing to repeat: the next attempt re-reads truth and finds the
+    // claim work done. What it buys is that the QUEUE knows this job did not
+    // finish - it retries, backs off, and ends in the dead-letter list where
+    // somebody can see it, instead of being marked SUCCEEDED over a person
+    // still sitting in a group they were removed from on paper.
+    if (telegram.retryable) throw telegram.retryable;
+
     return { employeeId, employed, claimsChanged, ...telegram };
   }
 
@@ -303,6 +316,8 @@ class TelegramMembershipReconcileUsecase {
     const adopted = [];
     const skipped = [];
     let capReached = false;
+    let deferred = false;
+    let retryable = null;
 
     const identities = await this._identities(employeeId);
     const active = identities.find((i) => !i.disconnected_at) || null;
@@ -341,24 +356,32 @@ class TelegramMembershipReconcileUsecase {
         continue;
       }
 
-      if (budget && budget.removalsLeft !== undefined && budget.removalsLeft <= 0) {
-        capReached = true;
-        await this.claimRepo.recordEvent({
-          employeeId,
-          telegramGroupId: groupId,
-          eventType: MEMBERSHIP_EVENT.SKIPPED_NOT_READY,
-          detailCode: DETAIL_CODE.REMOVAL_CAP_REACHED,
-          jobId,
-        });
-        continue;
+      const result = await this._removeFromGroup(employeeId, groupId, identities, jobId, budget);
+      switch (result.outcome) {
+        case REMOVAL_OUTCOME.REMOVED:
+        case REMOVAL_OUTCOME.ALREADY_ABSENT:
+          removals.push(groupId);
+          break;
+        case REMOVAL_OUTCOME.CAPPED:
+          capReached = true;
+          skipped.push({ telegram_group_id: groupId, reason: REMOVAL_REFUSAL.CAP_REACHED });
+          break;
+        case REMOVAL_OUTCOME.DEFERRED:
+          deferred = true;
+          skipped.push({ telegram_group_id: groupId, reason: result.reason });
+          break;
+        default:
+          // RETRYABLE. The FIRST failure is kept and raised once the whole
+          // pass has finished: every other group still gets its chance, and
+          // the claims already written stay written - the job simply is not
+          // finished, which is exactly what the queue is for.
+          retryable = retryable || result.error || new Error("removal failed");
+          skipped.push({ telegram_group_id: groupId, reason: result.reason });
+          break;
       }
-
-      const outcome = await this._removeFromGroup(employeeId, groupId, identities, jobId, budget);
-      if (outcome.removed || outcome.alreadyAbsent) removals.push(groupId);
-      else skipped.push({ telegram_group_id: groupId, reason: outcome.reason });
     }
 
-    return { removals, adopted, skipped, capReached };
+    return { removals, adopted, skipped, capReached, deferred, retryable };
   }
 
   async _identities(employeeId) {
@@ -416,6 +439,8 @@ class TelegramMembershipReconcileUsecase {
    */
   async _removeFromGroup(employeeId, groupId, identities, jobId, budget) {
     if (!this.config.removalsEnabled) {
+      // DELIBERATELY OFF, so this is not a failure and must burn no retry -
+      // but the work is NOT done, and the job must not report that it is.
       await this.claimRepo.recordEvent({
         employeeId,
         telegramGroupId: groupId,
@@ -423,24 +448,51 @@ class TelegramMembershipReconcileUsecase {
         detailCode: DETAIL_CODE.REMOVAL_DISABLED,
         jobId,
       });
-      return { removed: false, reason: REMOVAL_REFUSAL.REMOVAL_DISABLED };
+      return { outcome: REMOVAL_OUTCOME.DEFERRED, reason: REMOVAL_REFUSAL.REMOVAL_DISABLED };
     }
     if (!identities.length) {
+      // Nobody to remove: there is no Telegram account to act on. Retrying
+      // cannot fix it, so it is deferred rather than failed - and it is not
+      // reported as cleanup either, because none happened.
       await this.claimRepo.recordEvent({
         employeeId,
         telegramGroupId: groupId,
         eventType: MEMBERSHIP_EVENT.SKIPPED_NO_IDENTITY,
         jobId,
       });
-      return { removed: false, reason: REMOVAL_REFUSAL.NO_IDENTITY };
+      return { outcome: REMOVAL_OUTCOME.DEFERRED, reason: REMOVAL_REFUSAL.NO_IDENTITY };
+    }
+
+    // THE CAP IS CHECKED BEFORE THE GROUP IS TOUCHED, not after. Starting a
+    // removal we cannot finish spends Telegram calls to achieve nothing.
+    if (budget && typeof budget.removalsLeft === "number" && budget.removalsLeft <= 0) {
+      await this.claimRepo.recordEvent({
+        employeeId,
+        telegramGroupId: groupId,
+        eventType: MEMBERSHIP_EVENT.SKIPPED_NOT_READY,
+        detailCode: DETAIL_CODE.REMOVAL_CAP_REACHED,
+        jobId,
+      });
+      return { outcome: REMOVAL_OUTCOME.CAPPED, reason: REMOVAL_REFUSAL.CAP_REACHED };
     }
 
     const group = await this._group(groupId);
-    if (!group) return { removed: false, alreadyAbsent: false, reason: REMOVAL_REFUSAL.NOT_READY };
+    if (!group) {
+      return {
+        outcome: REMOVAL_OUTCOME.RETRYABLE,
+        reason: REMOVAL_REFUSAL.NOT_READY,
+        error: new TelegramMembershipRetryableError("the group could not be read", {
+          code: "GROUP_NOT_READABLE",
+        }),
+      };
+    }
 
     // REGISTRY `is_active` IS NOT CONSULTED. Retiring a group must not strand
     // the people inside it - that is exactly when cleanup matters most.
     const readiness = await this._removalReadiness(group, budget);
+    if (readiness.status === REMOVAL_READINESS.CAPPED) {
+      return { outcome: REMOVAL_OUTCOME.CAPPED, reason: REMOVAL_REFUSAL.CAP_REACHED };
+    }
     if (!canRemove(readiness)) {
       await this.claimRepo.recordEvent({
         employeeId,
@@ -452,20 +504,46 @@ class TelegramMembershipReconcileUsecase {
             : DETAIL_CODE.REMOVAL_NOT_READY,
         jobId,
       });
-      return { removed: false, reason: REMOVAL_REFUSAL.NOT_READY, readiness };
+      // A GROUP WE CANNOT CLEAN IS A JOB THAT IS NOT DONE. Unavailable is
+      // temporary and a missing right is a configuration fault somebody has
+      // to fix - both are retried, and both end in the dead-letter list
+      // where they can be seen, rather than in a claim nobody looks at.
+      return {
+        outcome: REMOVAL_OUTCOME.RETRYABLE,
+        reason: REMOVAL_REFUSAL.NOT_READY,
+        readiness,
+        error:
+          readiness.error ||
+          new TelegramMembershipRetryableError(`group not ready for removal: ${readiness.status}`, {
+            code: `REMOVAL_${readiness.status}`,
+          }),
+      };
     }
 
     let anyPresent = false;
-    let allSettled = true;
+    let failure = null;
+    let capped = false;
     for (const identity of identities) {
       const result = await this._removeIdentity(employeeId, group, identity, jobId, budget);
       if (result.removed) anyPresent = true;
-      if (!result.settled) allSettled = false;
+      if (result.capped) {
+        // EVERY IDENTITY COSTS ITS OWN BUDGET. The second account in the
+        // same group cannot be removed on the first one's allowance.
+        capped = true;
+        break;
+      }
+      if (!result.settled) failure = failure || result.error;
     }
-    if (!allSettled) return { removed: false, reason: REMOVAL_REFUSAL.TELEGRAM_UNAVAILABLE };
+
+    if (failure) {
+      return { outcome: REMOVAL_OUTCOME.RETRYABLE, reason: REMOVAL_REFUSAL.TELEGRAM_UNAVAILABLE, error: failure };
+    }
+    if (capped) return { outcome: REMOVAL_OUTCOME.CAPPED, reason: REMOVAL_REFUSAL.CAP_REACHED };
 
     await this._closeClaimsFor(employeeId, groupId, anyPresent, jobId);
-    return { removed: anyPresent, alreadyAbsent: !anyPresent };
+    return {
+      outcome: anyPresent ? REMOVAL_OUTCOME.REMOVED : REMOVAL_OUTCOME.ALREADY_ABSENT,
+    };
   }
 
   async _removeIdentity(employeeId, group, identity, jobId, budget) {
@@ -491,8 +569,15 @@ class TelegramMembershipReconcileUsecase {
       }
     }
 
+    // ONE CALL TO LOOK, TWO TO ACT: the whole cost is taken up front, so a
+    // removal is never started with a budget that cannot finish it and no
+    // ban is ever issued without its unban being affordable.
+    if (budget && !budget.spend(3)) return { removed: false, settled: false, capped: true };
+    if (budget && typeof budget.takeRemoval === "function" && !budget.takeRemoval()) {
+      return { removed: false, settled: false, capped: true };
+    }
+
     try {
-      if (budget && budget.spend && !budget.spend(1)) return { removed: false, settled: false };
       const member = await this.telegram.getChatMember(group.chat_id, userId);
       if (!isTelegramMember(member)) {
         await this.claimRepo.recordEvent({
@@ -513,8 +598,6 @@ class TelegramMembershipReconcileUsecase {
         eventType: MEMBERSHIP_EVENT.REMOVE_ATTEMPTED,
         jobId,
       });
-      if (budget && budget.spendRemoval) budget.spendRemoval(1);
-      if (budget && budget.spend) budget.spend(2);
       await this.telegram.banChatMember(group.chat_id, userId);
       // UNBAN IMMEDIATELY. They are removed, not banished - a rejoin or a new
       // manual grant must not need somebody to remember to undo this.
@@ -552,7 +635,15 @@ class TelegramMembershipReconcileUsecase {
         eventType: MEMBERSHIP_EVENT.REMOVE_FAILED,
         jobId,
       });
-      return { removed: false, settled: false, error: err };
+      return {
+        removed: false,
+        settled: false,
+        error: new TelegramMembershipRetryableError(`removal failed: ${description || "unknown"}`, {
+          code: "TELEGRAM_REMOVAL_FAILED",
+          retryAfter: retryAfterOf(err),
+          cause: err,
+        }),
+      };
     }
   }
 
@@ -580,10 +671,14 @@ class TelegramMembershipReconcileUsecase {
   }
 
   async _removalReadiness(group, budget) {
+    // A BUDGET THAT CANNOT PAY FOR THE CHECK IS NOT A TELEGRAM OUTAGE.
+    // Reporting it as one was the bug: "we could not ask" and "we were not
+    // allowed to ask this tick" are different facts, and only the first is a
+    // reason to retry with backoff. The second simply resumes next tick.
+    if (budget && budget.spend && !budget.spend(2)) {
+      return { status: REMOVAL_READINESS.CAPPED };
+    }
     try {
-      if (budget && budget.spend && !budget.spend(2)) {
-        return { status: REMOVAL_READINESS.TELEGRAM_UNAVAILABLE };
-      }
       const [chat, botMember] = await Promise.all([
         this.telegram.getChat(group.chat_id),
         this._botMember(group.chat_id),
@@ -593,7 +688,16 @@ class TelegramMembershipReconcileUsecase {
       this._log(logger.LEVEL.WARN, "REMOVAL-READINESS", err.toString(), {
         telegram_group_id: group.telegram_group_id,
       });
-      return { status: REMOVAL_READINESS.TELEGRAM_UNAVAILABLE };
+      return {
+        status: REMOVAL_READINESS.TELEGRAM_UNAVAILABLE,
+        // Carried so a 429 here reaches the delay path rather than spending
+        // a retry - the readiness calls hit the same rate limit as the rest.
+        error: new TelegramMembershipRetryableError(`readiness check failed: ${err.message}`, {
+          code: "REMOVAL_READINESS_FAILED",
+          retryAfter: retryAfterOf(err),
+          cause: err,
+        }),
+      };
     }
   }
 

@@ -112,12 +112,37 @@ function decideGroup({ ruleClaim = null, manualClaim = null, ruleDesired, reason
   });
   if (ruleDecision) decisions.push(ruleDecision);
 
-  // MANUAL is never opened or closed by reconciliation - only by a person,
-  // and only through the Group Map. Reconciliation may, however, need to
-  // cancel a removal it asked for earlier, when a rule came back and the
-  // pair is live again.
-  if (manualClaim && manualClaim.state === CLAIM_STATE.REMOVAL_PENDING && ruleDesired) {
-    decisions.push({ action: ACTION.CANCEL_REMOVAL, source: CLAIM_SOURCE.MANUAL });
+  // A REVOKED MANUAL GRANT IS NEVER GIVEN BACK BY A RULE.
+  //
+  // An earlier revision cancelled the MANUAL removal whenever a rule still
+  // matched, which read as "they are staying anyway, so nothing to do" - and
+  // silently RESTORED the grant a person had deliberately revoked. The
+  // revocation would then be invisible, and the day the rule stopped
+  // matching they would stay in the group on the strength of a grant nobody
+  // still wanted.
+  //
+  // What the rule legitimately decides is only whether anybody LEAVES. So
+  // the revoked grant is closed - RETAINED_BY_OTHER_SOURCE, the same outcome
+  // a rule gets when a grant holds it - and the person stays in the group
+  // because the RULE holds them, not because the grant came back. A MANUAL
+  // claim is re-opened by a person, through the Group Map, and by nothing
+  // else.
+  if (manualClaim && manualClaim.state === CLAIM_STATE.REMOVAL_PENDING) {
+    // `ruleDesired`, NOT the rule claim's current state. The rule's own
+    // decision is being taken in this same pass: a claim that reads ACTIVE
+    // right now is on its way to REMOVAL_PENDING when the mapping no longer
+    // matches, and treating it as a retainer would close the revoked grant
+    // as "somebody else is keeping them" at the very moment nobody is - and
+    // the removal that follows would then have no claim left to close.
+    const ruleHolds = Boolean(ruleDesired);
+    if (ruleHolds) {
+      decisions.push({
+        action: ACTION.CLOSE_RETAINED,
+        source: CLAIM_SOURCE.MANUAL,
+        intent_reason: INTENT_REASON.RETAINED_BY_OTHER_SOURCE,
+        close_outcome: CLOSE_OUTCOME.RETAINED_BY_OTHER_SOURCE,
+      });
+    }
   }
   return decisions;
 }

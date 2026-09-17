@@ -1,4 +1,5 @@
 const logger = require("../utils/logger");
+const { retryAfterOf } = require("../utils/telegram_membership_errors");
 const {
   JOB_SCOPE,
   JOB_REASON,
@@ -73,17 +74,36 @@ class TelegramMembershipWorkerUsecase {
     let calls = this.config.apiCallsPerTick || 20;
     let removals = Math.min(this.config.removalCapPerTick || 5, this._hourlyRemovalsLeft());
     return {
+      get callsLeft() {
+        return calls;
+      },
       get removalsLeft() {
         return removals;
       },
+      /**
+       * SPENDING IS A REQUEST, NOT A STATEMENT. It answers whether the whole
+       * amount was available and deducts only then, so a caller that ignores
+       * the answer cannot overspend and the balance can never go negative -
+       * which is what "at most twenty calls a tick" has to mean if the
+       * poller is to keep its share of the token.
+       */
       spend(n = 1) {
+        if (n <= 0) return true;
         if (calls < n) return false;
         calls -= n;
         return true;
       },
-      spendRemoval(n = 1) {
-        removals -= n;
-        self._removalWindow.count += n;
+      /**
+       * A REMOVAL IS TAKEN, NOT SUBTRACTED. The cap is the reason a
+       * mis-configured mapping cannot empty a group overnight, so it is a
+       * checked withdrawal: refused when nothing is left, and counted
+       * against the rolling hour in the same breath.
+       */
+      takeRemoval() {
+        if (removals <= 0) return false;
+        removals -= 1;
+        self._removalWindow.count += 1;
+        return true;
       },
       exhausted() {
         return calls <= 0;
@@ -127,6 +147,19 @@ class TelegramMembershipWorkerUsecase {
           ? await this.reconcile.reconcileEmployee(job.scope_id, { jobId, budget })
           : await this.reconcile.reconcileGroup(job.scope_id, { jobId, budget });
 
+      // DEFERRED IS NOT DONE, AND IS NOT A FAILURE EITHER. Removals switched
+      // off, or nobody with a Telegram account to remove: retrying in a
+      // minute achieves nothing and spending a retry on it would eventually
+      // kill a job that was never wrong. So the job waits - visibly PENDING,
+      // with its claims still REMOVAL_PENDING - rather than being reported as
+      // cleanup that happened.
+      if (result && result.deferred) {
+        await this.jobRepo.delay(jobId, this.config.deferSeconds || 900, {
+          errorCode: "REMOVAL_DEFERRED",
+        });
+        return "deferred";
+      }
+
       // A JOB STOPPED BY A CAP IS NOT A FINISHED JOB. Asking for a rerun is
       // what stops the queue reporting work that was never done.
       const requestRerun = Boolean(result && (result.capReached || budget.exhausted()));
@@ -152,15 +185,13 @@ class TelegramMembershipWorkerUsecase {
     }
   }
 
-  /** Telegram's own `retry_after`, in seconds, or null if this is not a 429. */
+  /**
+   * Telegram's own `retry_after`, in seconds, or null if this is not a 429.
+   * Shared with the reconciler, so a rate limit raised from inside a removal
+   * reaches the delay path exactly as one raised here would.
+   */
   static _retryAfter(err) {
-    if (!err) return null;
-    const parameters = err.parameters || (err.response && err.response.parameters);
-    if (parameters && parameters.retry_after) return Number(parameters.retry_after);
-    if (err.retryAfter) return Number(err.retryAfter);
-    const description = String(err.telegramDescription || err.message || "");
-    const match = description.match(/Too Many Requests[^0-9]*(\d+)/i);
-    return match ? Number(match[1]) : null;
+    return retryAfterOf(err);
   }
 
   /**
