@@ -18,7 +18,7 @@ const EMPLOYEES = {
 };
 
 function fakes(state = {}) {
-  const calls = { saved: [], replaced: [], listed: [], counted: [] };
+  const calls = { saved: [], replaced: [], listed: [], counted: [], summarised: [] };
   const setups = new Map(Object.entries(state.setups || {}).map(([k, v]) => [Number(k), { is_active: 1, ...v }]));
   const repo = {
     calls,
@@ -34,6 +34,12 @@ function fakes(state = {}) {
     },
     listEmployeesWithSetup: async (f) => { calls.listed.push(f); return state.rows || []; },
     countEmployeesWithSetup: async (f) => { calls.counted.push(f); return (state.rows || []).length; },
+    summariseEmployeesWithSetup: async (f) => {
+      calls.summarised.push(f);
+      const rows = state.rows || [];
+      const completed = rows.filter((r) => r.attendance_approver_setup_id != null && r.final_approver_employee_id != null).length;
+      return { attendance_required: rows.length, completed, missing: rows.length - completed };
+    },
     findSetupsWithApprover: async (level, id) => state.setupsWith ? state.setupsWith(level, id) : [],
     findPendingStepsWithApprover: async (level, id) => state.stepsWith ? state.stepsWith(level, id) : [],
     replaceApprover: async (args) => { calls.replaced.push(args); return { code: 200, setups_updated: args.setup_employee_ids.length, pending_steps_updated: args.step_ids.length }; },

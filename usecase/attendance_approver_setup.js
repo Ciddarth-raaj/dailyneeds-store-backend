@@ -51,6 +51,14 @@ const LEVEL_LABEL = Object.freeze({
 
 const idOrNull = (v) => (v === null || v === undefined || v === "" ? null : Number(v));
 
+/**
+ * The two states the dashboard cards filter by. Anything else - including a
+ * typo - is treated as no filter at all rather than as an error: this is a
+ * view preference on a read, and refusing the whole list because a query
+ * string was odd would be worse than showing everybody.
+ */
+const SETUP_STATUS = Object.freeze(["completed", "missing"]);
+
 module.exports = (approverSetupRepo) => {
   /** The employees named anywhere in a setup, looked up once. */
   const factsFor = async (ids) => {
@@ -122,7 +130,21 @@ module.exports = (approverSetupRepo) => {
     return { employee_id: employeeId, changed_levels: audit.map((a) => a.approval_level) };
   };
 
-  /** The setup screen's list: employees with their mapping, filtered. */
+  /**
+   * The setup screen's list: employees with their mapping, filtered, plus
+   * the dashboard's three counts.
+   *
+   * THE LIST IS THE ATTENDANCE-REQUIRED POPULATION. The repository scopes it
+   * on `new_employee.attendance_required` - the existing flag, read the way
+   * `utils/attendance_eligibility.js` reads it - so an exempt employee is
+   * neither listed nor counted as missing a setup. An old mapping belonging
+   * to somebody since exempted is left exactly where it is; it simply stops
+   * being part of what this screen says is outstanding.
+   *
+   * ONE ROUND TRIP. The summary rides on the list response rather than a
+   * second endpoint: the cards and the table must agree about the same
+   * filters at the same moment, and two requests can disagree.
+   */
   const list = async (filters = {}) => {
     const clean = {
       department_id: idOrNull(filters.department_id),
@@ -130,12 +152,14 @@ module.exports = (approverSetupRepo) => {
       designation_id: idOrNull(filters.designation_id),
       employee_id: idOrNull(filters.employee_id),
       search: filters.search || null,
+      setup_status: SETUP_STATUS.includes(filters.setup_status) ? filters.setup_status : null,
       limit: Number(filters.limit) > 0 ? Number(filters.limit) : 200,
       offset: Number(filters.offset) > 0 ? Number(filters.offset) : 0,
     };
-    const [rows, total] = await Promise.all([
+    const [rows, total, summary] = await Promise.all([
       approverSetupRepo.listEmployeesWithSetup(clean),
       approverSetupRepo.countEmployeesWithSetup(clean),
+      approverSetupRepo.summariseEmployeesWithSetup(clean),
     ]);
     return {
       rows: rows.map((r) => ({
@@ -148,6 +172,14 @@ module.exports = (approverSetupRepo) => {
         department_id: idOrNull(r.department_id),
         department_name: r.department_name || null,
         has_setup: r.attendance_approver_setup_id !== null && r.attendance_approver_setup_id !== undefined,
+        // The same rule the counts use, so a row and the card it was counted
+        // into can never disagree: an ACTIVE mapping carrying a final
+        // approver. First and Second Level are optional and not consulted.
+        setup_completed:
+          r.attendance_approver_setup_id !== null &&
+          r.attendance_approver_setup_id !== undefined &&
+          r.final_approver_employee_id !== null &&
+          r.final_approver_employee_id !== undefined,
         first_level_approver_employee_id: idOrNull(r.first_level_approver_employee_id),
         first_level_approver_name: r.first_level_approver_name || null,
         first_level_approver_active: r.first_level_approver_status === null || r.first_level_approver_status === undefined ? null : Number(r.first_level_approver_status) === 1,
@@ -160,6 +192,8 @@ module.exports = (approverSetupRepo) => {
         setup_updated_at: r.setup_updated_at || null,
       })),
       total,
+      summary,
+      setup_status: clean.setup_status,
       limit: clean.limit,
       offset: clean.offset,
     };

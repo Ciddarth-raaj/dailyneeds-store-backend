@@ -42,6 +42,50 @@ const EMPLOYEE_JOINS = `FROM new_employee ne
          LEFT JOIN designation d ON d.designation_id = ne.designation_id
          LEFT JOIN department dp ON dp.department_id = ne.department_id`;
 
+/**
+ * The ACTIVE mapping, joined so a missing one stays a LEFT JOIN miss.
+ *
+ * `s.is_active = 1` belongs in the ON clause, not the WHERE: moved to WHERE
+ * it would turn this into an inner join and quietly drop every employee who
+ * has no mapping at all - which is exactly the population this screen exists
+ * to show. An employee whose only mapping is deactivated reads the same as
+ * one who never had one, which is what "active setup" means here.
+ */
+const SETUP_JOIN = `LEFT JOIN attendance_approver_setup s
+           ON s.employee_id = ne.employee_id AND s.is_active = 1`;
+
+/**
+ * WHO IS REQUIRED TO HAVE AN APPROVER CHAIN.
+ *
+ * `new_employee.attendance_required` is the one existing flag for it - the
+ * column migration 20260930120000 added, that `utils/attendance_eligibility.js`
+ * reads as the single rule, and that `repository/biomax_punch.js` already
+ * scopes its queues with in exactly this shape. No second exemption flag is
+ * introduced here.
+ *
+ * COALESCE(..., 1) matches that helper's own reading: absent or NULL means
+ * REQUIRED, because the column is NOT NULL DEFAULT 1 and the only way to
+ * arrive without a value is a query that did not ask for it. "Not asked"
+ * must never silently exempt somebody.
+ *
+ * An exempt employee raises no Regularization or OT request, so there is
+ * nothing for a chain to approve; listing them as missing a setup would
+ * invent work nobody owes.
+ */
+const ATTENDANCE_REQUIRED = "COALESCE(ne.attendance_required, 1) = 1";
+
+/**
+ * A COMPLETED setup: an active mapping WITH a final approver on it.
+ *
+ * First and Second Level are optional and deliberately not consulted - a
+ * chain of Final alone is complete. The explicit NULL check on the final
+ * approver is not redundant with the column's NOT NULL: it is what makes a
+ * legacy or malformed row that predates that constraint count as missing
+ * rather than as done.
+ */
+const SETUP_COMPLETED = `(s.attendance_approver_setup_id IS NOT NULL
+                          AND s.final_approver_employee_id IS NOT NULL)`;
+
 class AttendanceApproverSetupRepository {
   constructor(db) {
     this.db = db;
@@ -80,9 +124,14 @@ class AttendanceApproverSetupRepository {
    * only invite mappings nobody can use. `search` matches the code or the
    * name.
    */
-  _listWhere({ department_id, store_id, designation_id, employee_id, search }) {
-    const where = ["ne.status = 1"];
+  _listWhere({ department_id, store_id, designation_id, employee_id, search, setup_status }) {
+    // Active AND required to have attendance. Both, always: this screen is a
+    // list of people who need an approver chain, and an exempt employee needs
+    // none.
+    const where = ["ne.status = 1", ATTENDANCE_REQUIRED];
     const params = [];
+    if (setup_status === "completed") where.push(SETUP_COMPLETED);
+    if (setup_status === "missing") where.push(`NOT ${SETUP_COMPLETED}`);
     if (department_id) { where.push("ne.department_id = ?"); params.push(department_id); }
     if (store_id) { where.push("ne.store_id = ?"); params.push(store_id); }
     if (designation_id) { where.push("ne.designation_id = ?"); params.push(designation_id); }
@@ -108,12 +157,16 @@ class AttendanceApproverSetupRepository {
               s.final_approver_employee_id,        a3.employee_name AS final_approver_name,        a3.status AS final_approver_status,
               DATE_FORMAT(s.updated_at, '%Y-%m-%d %H:%i:%s') AS setup_updated_at
          ${EMPLOYEE_JOINS}
-         LEFT JOIN attendance_approver_setup s ON s.employee_id = ne.employee_id AND s.is_active = 1
+         ${SETUP_JOIN}
          LEFT JOIN new_employee a1 ON a1.employee_id = s.first_level_approver_employee_id
          LEFT JOIN new_employee a2 ON a2.employee_id = s.second_level_approver_employee_id
          LEFT JOIN new_employee a3 ON a3.employee_id = s.final_approver_employee_id
         WHERE ${where}
-        ORDER BY ne.employee_name ASC, ne.employee_id ASC
+        -- BY EMPLOYEE CODE, NUMERICALLY. employee_id is INT, so this orders
+        -- 1, 2, 101, 106 rather than the 1, 101, 106, 2 a lexicographic sort
+        -- would give. The approver PICKER is deliberately left sorted by
+        -- name - it is searched by person, not scanned by code.
+        ORDER BY ne.employee_id ASC
         LIMIT ? OFFSET ?`,
       [...params, limit, offset]
     );
@@ -123,10 +176,45 @@ class AttendanceApproverSetupRepository {
     const { where, params } = this._listWhere(filters);
     const rows = await this._read(
       "COUNT-EMPLOYEES-WITH-SETUP",
-      `SELECT COUNT(*) AS n ${EMPLOYEE_JOINS} WHERE ${where}`,
+      `SELECT COUNT(*) AS n ${EMPLOYEE_JOINS} ${SETUP_JOIN} WHERE ${where}`,
       params
     );
     return rows && rows[0] ? Number(rows[0].n) : 0;
+  }
+
+  /**
+   * The dashboard's three numbers, counted IN THE DATABASE over the whole
+   * filtered population - not over the page of rows the browser happens to
+   * be holding. A screen showing 500 of 2,000 employees would otherwise
+   * report a completion figure that is simply wrong.
+   *
+   * `setup_status` is deliberately IGNORED here. It filters which rows the
+   * table shows; the cards must keep showing the completed/missing SPLIT of
+   * the same base population, or clicking "Without Approver Setup" would
+   * redraw the cards as "missing = everything" and destroy the comparison
+   * the user clicked them to see.
+   *
+   * completed + missing = attendance_required, by construction: every row
+   * counted is counted by exactly one of the two CASEs.
+   */
+  async summariseEmployeesWithSetup(filters) {
+    const { where, params } = this._listWhere({ ...filters, setup_status: null });
+    const rows = await this._read(
+      "SUMMARISE-EMPLOYEES-WITH-SETUP",
+      `SELECT COUNT(*) AS attendance_required,
+              SUM(CASE WHEN ${SETUP_COMPLETED} THEN 1 ELSE 0 END) AS completed,
+              SUM(CASE WHEN ${SETUP_COMPLETED} THEN 0 ELSE 1 END) AS missing
+         ${EMPLOYEE_JOINS}
+         ${SETUP_JOIN}
+        WHERE ${where}`,
+      params
+    );
+    const row = (rows && rows[0]) || {};
+    return {
+      attendance_required: Number(row.attendance_required) || 0,
+      completed: Number(row.completed) || 0,
+      missing: Number(row.missing) || 0,
+    };
   }
 
   /** The employees named in `ids`, with the two facts validation needs. */

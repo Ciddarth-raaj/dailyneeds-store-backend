@@ -47,6 +47,11 @@ class AttendanceApproverSetupRoutes {
           designation_id: ID.optional(),
           employee_id: ID.optional(),
           search: Joi.string().allow("").max(100).optional(),
+          // Which dashboard card is selected. It narrows the ROWS only; the
+          // summary the response carries stays the completed/missing split of
+          // the other filters, so the cards keep their meaning while one of
+          // them is active.
+          setup_status: Joi.string().valid("completed", "missing").optional(),
           limit: Joi.number().integer().min(1).max(1000).optional(),
           offset: Joi.number().integer().min(0).optional(),
         };

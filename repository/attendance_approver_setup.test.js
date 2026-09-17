@@ -30,7 +30,9 @@ describe("approver setup repository", () => {
     const repo = buildSetupRepo(db);
     await repo.listEmployeesWithSetup({ department_id: 2, store_id: 3, designation_id: 5, employee_id: 7, search: "raj", limit: 50, offset: 100 });
     const { sql, params } = log[0];
-    assert.match(sql, /WHERE ne\.status = 1 AND ne\.department_id = \? AND ne\.store_id = \? AND ne\.designation_id = \? AND ne\.employee_id = \? AND \(ne\.employee_name LIKE \? OR CAST\(ne\.employee_id AS CHAR\) LIKE \?\)/);
+    // ACTIVE **and** attendance-required: an employee exempt from biometric
+    // attendance raises no request, so no chain is owed for them.
+    assert.match(sql, /WHERE ne\.status = 1 AND COALESCE\(ne\.attendance_required, 1\) = 1 AND ne\.department_id = \? AND ne\.store_id = \? AND ne\.designation_id = \? AND ne\.employee_id = \? AND \(ne\.employee_name LIKE \? OR CAST\(ne\.employee_id AS CHAR\) LIKE \?\)/);
     assert.deepEqual(params, [2, 3, 5, 7, "%raj%", "%raj%", 50, 100]);
     assert.match(sql, /LEFT JOIN attendance_approver_setup s ON s\.employee_id = ne\.employee_id AND s\.is_active = 1/);
     assert.ok(!/salary|bank|aadhaar|pan_no|contact/i.test(sql), "no personal fields");
