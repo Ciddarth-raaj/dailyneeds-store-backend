@@ -67,9 +67,19 @@ const toId = (value) => {
  * row read by code that predates this change still arrive in the old shape,
  * and a decoder is cheaper to trust than a second matcher.
  *
- * COMPOSITE COLUMNS WIN when both are present. After the migration they are
- * the truth; a stale `mapping_type` alongside them is a leftover, and reading
- * the leftover is how a two-dimension rule would silently match one.
+ * COMPOSITE COLUMNS WIN when they are present. On a migrated row they are
+ * the truth; a `mapping_type` alongside them is the backward-compatible
+ * shadow the old process reads, and reading the shadow is how a
+ * two-dimension rule would silently match one.
+ *
+ * NULL IS "NOT PRESENT", NOT ZERO, and the difference is the whole
+ * transition. The expand migration leaves these columns NULLABLE so that a
+ * row written by the OLD process - whose INSERT names only the legacy pair -
+ * says "I have no composite rule, decode me from `mapping_type`". Reading
+ * NULL as 0 would make that row mean every dimension unrestricted, so an
+ * operator who added a single-outlet mapping during the migration-to-reload
+ * window would have created a company-wide one. A row is composite only when
+ * at least one dimension is actually set.
  */
 function ruleOf(mapping) {
   const rule = { OUTLET: ANY_TARGET_ID, DEPARTMENT: ANY_TARGET_ID, DESIGNATION: ANY_TARGET_ID };
@@ -78,7 +88,9 @@ function ruleOf(mapping) {
   let sawComposite = false;
   for (const dimension of RULE_DIMENSIONS) {
     const raw = mapping[RULE_DIMENSION[dimension].column];
-    if (raw === undefined) continue;
+    // `undefined` - the reader did not select it. `null` - the row has no
+    // composite rule. Neither is a value, and neither makes this composite.
+    if (raw === undefined || raw === null) continue;
     sawComposite = true;
     const id = toId(raw);
     rule[dimension] = id === null || id < 0 ? ANY_TARGET_ID : id;
@@ -89,7 +101,16 @@ function ruleOf(mapping) {
   // rule; a targeted type narrows exactly its own dimension.
   const type = mapping.mapping_type;
   if (!type || type === MAPPING_TYPE.ALL_EMPLOYEES) return rule;
-  if (!RULE_DIMENSIONS.includes(type)) return rule;
+  // 'COMPOSITE' lands here. It is the NEUTRAL legacy shadow of a multi-level
+  // rule, written so the old process matches nobody rather than acting on a
+  // rule it cannot express. A row carrying it always has real composite
+  // columns, which were read above; reaching this line means those columns
+  // were not selected, so the honest answer is a rule that matches NOBODY -
+  // never one that matches everybody.
+  if (!RULE_DIMENSIONS.includes(type)) {
+    for (const dimension of RULE_DIMENSIONS) rule[dimension] = -1;
+    return rule;
+  }
   const target = toId(mapping.target_id);
   // A targeted legacy row on the sentinel is a row that should never have
   // been written. It stays unrestricted-on-nothing and matches NOBODY below,

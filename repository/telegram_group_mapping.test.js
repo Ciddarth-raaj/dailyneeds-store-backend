@@ -12,6 +12,7 @@
  */
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
+const { ruleOf } = require("../utils/telegram_group_mapping");
 const fs = require("fs");
 const path = require("path");
 
@@ -163,26 +164,72 @@ describe("mapping reads and writes", () => {
     assert.match(db.queries[0].sql, /ORDER BY telegram_group_mapping_id ASC/);
   });
 
-  it("writes exactly the columns the multi-level table expects", async () => {
+  it("DUAL-WRITES the composite rule and the legacy shadow", async () => {
+    // Until the contract migration drops them, `mapping_type` and
+    // `target_id` are NOT NULL and the OLD process still reads them.
     const db = makeDb(() => ({ insertId: 7 }));
     await buildRepo(db).create({
       telegram_group_id: 10,
-      rule: { rule_outlet_id: 5, rule_department_id: 0, rule_designation_id: 3 },
+      rule: { rule_outlet_id: 5, rule_department_id: 0, rule_designation_id: 0 },
       created_by: 42,
     });
     assert.match(
       db.queries[0].sql,
-      /INSERT INTO telegram_group_mapping \(telegram_group_id, rule_outlet_id, rule_department_id, rule_designation_id, created_by\)/
+      /INSERT INTO telegram_group_mapping \(telegram_group_id, mapping_type, target_id, rule_outlet_id, rule_department_id, rule_designation_id, created_by\)/
     );
-    assert.deepEqual(db.queries[0].params, [10, 5, 0, 3, 42]);
+    // A single-dimension rule has an EXACT legacy shadow, so the old process
+    // agrees with the new one completely.
+    assert.deepEqual(db.queries[0].params, [10, "OUTLET", 5, 5, 0, 0, 42]);
   });
 
-  it("writes 0 - never NULL - for a dimension left unrestricted", async () => {
-    // The sentinel IS the duplicate guard: MySQL treats NULLs as distinct in
-    // a UNIQUE index, so a NULL here would let one rule be added repeatedly.
+  it("writes ALL_EMPLOYEES as the shadow of a rule that narrows nothing", async () => {
     const db = makeDb(() => ({ insertId: 7 }));
     await buildRepo(db).create({ telegram_group_id: 10, rule: {}, created_by: null });
-    assert.deepEqual(db.queries[0].params, [10, 0, 0, 0, null]);
+    assert.deepEqual(db.queries[0].params, [10, "ALL_EMPLOYEES", 0, 0, 0, 0, null]);
+  });
+
+  it("writes 0 - never NULL - for a dimension left unrestricted on a new row", async () => {
+    // The sentinel IS the duplicate guard: MySQL treats NULLs as distinct in
+    // a UNIQUE index, so a NULL here would let one rule be added repeatedly.
+    // NULL is reserved for a row the OLD process wrote, which has no
+    // composite rule at all.
+    const db = makeDb(() => ({ insertId: 7 }));
+    await buildRepo(db).create({ telegram_group_id: 10, rule: {} });
+    assert.deepEqual(db.queries[0].params.slice(3, 6), [0, 0, 0]);
+    for (const value of db.queries[0].params.slice(3, 6)) assert.notEqual(value, null);
+  });
+
+  it("writes a NEUTRAL shadow for a multi-level rule, never a lossy one", async () => {
+    // There is no honest legacy pair for "Cashiers at Moolakulam", and both
+    // lossy ones BROADEN it. COMPOSITE is a value the old matcher does not
+    // recognise, so it matches nobody there.
+    const db = makeDb(() => ({ insertId: 7 }));
+    await buildRepo(db).create({
+      telegram_group_id: 10,
+      rule: { rule_outlet_id: 5, rule_department_id: 0, rule_designation_id: 3 },
+    });
+    assert.deepEqual(db.queries[0].params, [10, "COMPOSITE", 0, 5, 0, 3, null]);
+    assert.notEqual(db.queries[0].params[1], "OUTLET", "must not claim to be an outlet rule");
+    assert.notEqual(db.queries[0].params[1], "DESIGNATION");
+  });
+
+  it("gives the composite shadow the row's own id, so the legacy key holds", async () => {
+    // `uq_tgm_group_type_target` is deliberately KEPT for the old process, so
+    // several multi-level rules on one group need distinct legacy pairs.
+    const db = makeDb(() => ({ insertId: 7, affectedRows: 1 }));
+    await buildRepo(db).create({
+      telegram_group_id: 10,
+      rule: { rule_outlet_id: 5, rule_designation_id: 3 },
+    });
+    assert.equal(db.queries.length, 2);
+    assert.match(db.queries[1].sql, /SET target_id = telegram_group_mapping_id/);
+    assert.deepEqual(db.queries[1].params, [7]);
+  });
+
+  it("does NOT run that second statement for a single-dimension rule", async () => {
+    const db = makeDb(() => ({ insertId: 7 }));
+    await buildRepo(db).create({ telegram_group_id: 10, rule: { rule_outlet_id: 5 } });
+    assert.equal(db.queries.length, 1, "an exact shadow needs no fixing up");
   });
 
   it("coerces a junk dimension to unrestricted rather than storing it", async () => {
@@ -191,7 +238,7 @@ describe("mapping reads and writes", () => {
       telegram_group_id: 10,
       rule: { rule_outlet_id: "abc", rule_department_id: -4, rule_designation_id: 1.5 },
     });
-    assert.deepEqual(db.queries[0].params, [10, 0, 0, 0, null]);
+    assert.deepEqual(db.queries[0].params, [10, "ALL_EMPLOYEES", 0, 0, 0, 0, null]);
   });
 
   it("findDuplicateRule compares ALL THREE dimensions, not one", async () => {
@@ -208,15 +255,41 @@ describe("mapping reads and writes", () => {
     assert.deepEqual(db.queries[0].params, [10, 5, 0, 3]);
   });
 
-  it("no read still names the dropped single-dimension columns", async () => {
+  it("every read selects BOTH shapes, so a transitional row still decodes", async () => {
+    // A row the OLD process wrote during the migration-to-reload window has
+    // NULL composite columns and must be read from its legacy pair. One
+    // decoder, both shapes.
     const db = makeDb(() => []);
     const repo = buildRepo(db);
     await repo.getByGroup(10);
     await repo.getByIdForGroup(10, 1);
     await repo.getAllMappingsWithGroups();
     for (const query of db.queries) {
-      assert.doesNotMatch(query.sql, /\bmapping_type\b/, query.sql);
-      assert.doesNotMatch(query.sql, /\btarget_id\b/, query.sql);
+      assert.match(query.sql, /\bmapping_type\b/, query.sql);
+      assert.match(query.sql, /\btarget_id\b/, query.sql);
+      for (const column of ["rule_outlet_id", "rule_department_id", "rule_designation_id"]) {
+        assert.match(query.sql, new RegExp(column), query.sql);
+      }
     }
+  });
+
+  it("a legacy row keeps its NULLs, so ruleOf falls back instead of widening", async () => {
+    // Coercing NULL to 0 here would turn "this row is legacy" into "every
+    // dimension unrestricted" - the widest rule there is.
+    const db = makeDb(() => [
+      {
+        telegram_group_mapping_id: 1,
+        telegram_group_id: 10,
+        mapping_type: "OUTLET",
+        target_id: 5,
+        rule_outlet_id: null,
+        rule_department_id: null,
+        rule_designation_id: null,
+      },
+    ]);
+    const [row] = await buildRepo(db).getByGroup(10);
+    assert.equal(row.rule_outlet_id, null);
+    assert.equal(row.mapping_type, "OUTLET");
+    assert.deepEqual(ruleOf(row), { OUTLET: 5, DEPARTMENT: 0, DESIGNATION: 0 });
   });
 });

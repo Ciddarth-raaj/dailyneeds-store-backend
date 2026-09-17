@@ -23,15 +23,74 @@ const ruleId = (value) => {
   return Number.isSafeInteger(n) && n > 0 ? n : ANY_TARGET_ID;
 };
 
-/** The stored rule, read off a row. Shape matches `ruleOf`'s input exactly. */
+/**
+ * The stored rule, read off a row. Shape matches `ruleOf`'s input exactly.
+ *
+ * NULL SURVIVES AS NULL. During the expand/contract transition a row written
+ * by the OLD process has no composite rule at all, and `ruleOf` decodes such
+ * a row from its legacy pair instead. Coercing NULL to 0 here would turn
+ * "this row is legacy" into "every dimension unrestricted" - the widest rule
+ * there is - so the sentinel is applied only to rows that actually carry one.
+ */
 const ruleFromRow = (row) => {
   const out = {};
+  const legacy = RULE_DIMENSIONS.every((dimension) => {
+    const raw = row[RULE_DIMENSION[dimension].column];
+    return raw === null || raw === undefined;
+  });
   for (const dimension of RULE_DIMENSIONS) {
     const column = RULE_DIMENSION[dimension].column;
-    out[column] = ruleId(row[column]);
+    out[column] = legacy ? null : ruleId(row[column]);
   }
   return out;
 };
+
+/**
+ * THE BACKWARD-COMPATIBLE SHADOW a new row leaves for the old process.
+ *
+ * Until the contract migration drops them, `mapping_type` and `target_id` are
+ * NOT NULL and the old code still reads them, so every row this code writes
+ * has to carry a pair that the old matcher handles SAFELY.
+ *
+ *   nothing narrowed -> ALL_EMPLOYEES, 0   exact. Old code agrees completely.
+ *   one dimension    -> that type, its id  exact. Old code agrees completely.
+ *   two or three     -> COMPOSITE, 0       NEUTRAL. There is no honest legacy
+ *                                          pair for a multi-level rule, and
+ *                                          both lossy ones BROADEN it -
+ *                                          "Cashiers at Moolakulam" would
+ *                                          become every cashier, or everybody
+ *                                          at that outlet. The old matcher
+ *                                          does not recognise COMPOSITE and
+ *                                          so matches nobody, which
+ *                                          under-reaches for a few minutes
+ *                                          instead of telling real people to
+ *                                          join a group they do not belong in.
+ *
+ * `target_id` for the COMPOSITE case is replaced with the row's own id
+ * immediately after the insert, so `uq_tgm_group_type_target` - which this
+ * migration deliberately keeps - stays satisfiable when one group carries
+ * several multi-level rules. Nothing ever reads it as a target.
+ */
+const legacyShadowOf = (rule) => {
+  const narrowed = RULE_DIMENSIONS.filter(
+    (dimension) => ruleId(rule && rule[RULE_DIMENSION[dimension].column]) > ANY_TARGET_ID
+  );
+  if (narrowed.length === 0) {
+    return { mapping_type: LEGACY_ALL_EMPLOYEES, target_id: ANY_TARGET_ID, composite: false };
+  }
+  if (narrowed.length === 1) {
+    return {
+      mapping_type: narrowed[0],
+      target_id: ruleId(rule[RULE_DIMENSION[narrowed[0]].column]),
+      composite: false,
+    };
+  }
+  return { mapping_type: LEGACY_COMPOSITE, target_id: ANY_TARGET_ID, composite: true };
+};
+
+const LEGACY_ALL_EMPLOYEES = "ALL_EMPLOYEES";
+/** Not a dimension - the neutral marker the old matcher cannot act on. */
+const LEGACY_COMPOSITE = "COMPOSITE";
 
 const TABLE = "telegram_group_mapping";
 
@@ -108,8 +167,8 @@ class TelegramGroupMappingRepository {
   async getByGroup(telegram_group_id) {
     const rows = await this._query(
       "GET_BY_GROUP",
-      `SELECT telegram_group_mapping_id, telegram_group_id, ${RULE_COLUMNS.join(", ")},
-              created_by, created_at
+      `SELECT telegram_group_mapping_id, telegram_group_id, mapping_type, target_id,
+              ${RULE_COLUMNS.join(", ")}, created_by, created_at
          FROM ${TABLE}
         WHERE telegram_group_id = ?
         ORDER BY telegram_group_mapping_id ASC`,
@@ -118,6 +177,11 @@ class TelegramGroupMappingRepository {
     return (rows || []).map((row) => ({
       telegram_group_mapping_id: Number(row.telegram_group_mapping_id),
       telegram_group_id: Number(row.telegram_group_id),
+      // BOTH SHAPES TRAVEL TOGETHER. `ruleOf` prefers the composite columns
+      // and falls back to the legacy pair for a row the old process wrote
+      // during the transition, so one decoder serves both.
+      mapping_type: row.mapping_type,
+      target_id: row.target_id === null || row.target_id === undefined ? null : Number(row.target_id),
       ...ruleFromRow(row),
       created_by: row.created_by === undefined ? null : row.created_by,
       created_at: row.created_at,
@@ -148,7 +212,7 @@ class TelegramGroupMappingRepository {
   async getAllMappingsWithGroups() {
     const rows = await this._query(
       "ALL_WITH_GROUPS",
-      `SELECT m.telegram_group_mapping_id, m.telegram_group_id,
+      `SELECT m.telegram_group_mapping_id, m.telegram_group_id, m.mapping_type, m.target_id,
               ${RULE_COLUMNS.map((c) => `m.${c}`).join(", ")},
               g.group_name, g.chat_id, g.category, g.used_for, g.outlet_id,
               g.bot_is_admin, g.is_active
@@ -160,6 +224,8 @@ class TelegramGroupMappingRepository {
     return (rows || []).map((row) => ({
       telegram_group_mapping_id: Number(row.telegram_group_mapping_id),
       telegram_group_id: Number(row.telegram_group_id),
+      mapping_type: row.mapping_type,
+      target_id: row.target_id === null || row.target_id === undefined ? null : Number(row.target_id),
       ...ruleFromRow(row),
       group: {
         telegram_group_id: Number(row.telegram_group_id),
@@ -186,7 +252,8 @@ class TelegramGroupMappingRepository {
   async getByIdForGroup(telegram_group_id, telegram_group_mapping_id) {
     const rows = await this._query(
       "GET_BY_ID_FOR_GROUP",
-      `SELECT telegram_group_mapping_id, telegram_group_id, ${RULE_COLUMNS.join(", ")}
+      `SELECT telegram_group_mapping_id, telegram_group_id, mapping_type, target_id,
+              ${RULE_COLUMNS.join(", ")}
          FROM ${TABLE}
         WHERE telegram_group_id = ? AND telegram_group_mapping_id = ?`,
       [telegram_group_id, telegram_group_mapping_id]
@@ -196,6 +263,8 @@ class TelegramGroupMappingRepository {
     return {
       telegram_group_mapping_id: Number(row.telegram_group_mapping_id),
       telegram_group_id: Number(row.telegram_group_id),
+      mapping_type: row.mapping_type,
+      target_id: row.target_id === null || row.target_id === undefined ? null : Number(row.target_id),
       ...ruleFromRow(row),
     };
   }
@@ -425,18 +494,44 @@ class TelegramGroupMappingRepository {
     }
   }
 
+  /**
+   * DUAL-WRITE: the composite rule AND the legacy shadow the old process
+   * reads. See `legacyShadowOf` for why the shadow is exact for a
+   * single-dimension rule and deliberately NEUTRAL for a multi-level one.
+   *
+   * The COMPOSITE case needs a second statement because its `target_id` is
+   * the row's own auto-increment id, which does not exist until the insert
+   * has run. It is the only thing keeping `uq_tgm_group_type_target` - which
+   * the expand migration deliberately preserves for the old process -
+   * satisfiable when one group carries several multi-level rules. It runs in
+   * the SAME transaction as the insert, so no row is ever visible to another
+   * connection carrying the placeholder.
+   */
   async create({ telegram_group_id, rule, created_by = null }, { tx } = {}) {
+    const shadow = legacyShadowOf(rule);
     const res = await this._query(
       "CREATE",
-      `INSERT INTO ${TABLE} (telegram_group_id, ${RULE_COLUMNS.join(", ")}, created_by)
-       VALUES (?, ${RULE_COLUMNS.map(() => "?").join(", ")}, ?)`,
+      `INSERT INTO ${TABLE}
+         (telegram_group_id, mapping_type, target_id, ${RULE_COLUMNS.join(", ")}, created_by)
+       VALUES (?, ?, ?, ${RULE_COLUMNS.map(() => "?").join(", ")}, ?)`,
       [
         telegram_group_id,
+        shadow.mapping_type,
+        shadow.target_id,
         ...RULE_COLUMNS.map((c) => ruleId(rule && rule[c])),
         created_by === undefined ? null : created_by,
       ],
       tx
     );
+    if (shadow.composite) {
+      await this._query(
+        "CREATE-COMPOSITE-SHADOW",
+        `UPDATE ${TABLE} SET target_id = telegram_group_mapping_id
+          WHERE telegram_group_mapping_id = ?`,
+        [res.insertId],
+        tx
+      );
+    }
     return { telegram_group_mapping_id: res.insertId };
   }
 
@@ -496,3 +591,4 @@ module.exports = (db) => new TelegramGroupMappingRepository(db);
 module.exports.TelegramGroupMappingRepository = TelegramGroupMappingRepository;
 module.exports.TABLE = TABLE;
 module.exports.RULE_COLUMNS = RULE_COLUMNS;
+module.exports.legacyShadowOf = legacyShadowOf;
