@@ -70,13 +70,21 @@ function fakeRepo({ refnos = ["GRN-1"], verified = null } = {}) {
     },
     insertGrnVerification: async (refno, verifiedBy) => {
       calls.inserts.push({ refno, verifiedBy });
+      // The real repository rejects a missing verifier before it reaches the
+      // NOT NULL column.
+      if (verifiedBy == null || verifiedBy === "") {
+        throw new Error("verified_by is required to verify a GRN");
+      }
+      // The unique key refusing the second approval, reported the way the
+      // repository reports ER_DUP_ENTRY.
       if (rows.has(String(refno))) return { created: false };
       rows.set(String(refno), {
         mmh_mrc_refno: String(refno),
         verified_by: verifiedBy,
         verified_by_name: "Server Resolved Name",
-        // The store's clock, never the caller's.
-        verified_at: "2026-09-17 10:30:00",
+        // The store's clock, as an instant - never the caller's, and never a
+        // wall clock without a zone.
+        verified_at: "2026-09-17T10:30:00Z",
       });
       return { created: true };
     },
@@ -245,7 +253,7 @@ describe("POST /grn/:refno/verify", () => {
 
     // refno + employee id and nothing else: the column default writes the time.
     assert.deepEqual(seen, [["GRN-1", 42]]);
-    assert.equal(res.body.data.verified_at, "2026-09-17 10:30:00");
+    assert.equal(res.body.data.verified_at, "2026-09-17T10:30:00Z");
   });
 
   it("does not overwrite the audit data when an already-verified GRN is clicked again", async () => {
@@ -254,7 +262,7 @@ describe("POST /grn/:refno/verify", () => {
         mmh_mrc_refno: "GRN-1",
         verified_by: 7,
         verified_by_name: "First Verifier",
-        verified_at: "2026-09-01 08:00:00",
+        verified_at: "2026-09-01T08:00:00Z",
       },
     });
     const route = verifyRouteOf(buildUsecase(repo), tagging);
@@ -269,7 +277,7 @@ describe("POST /grn/:refno/verify", () => {
     assert.equal(res.body.meta.already_verified, true);
     assert.equal(res.body.data.verified_by, 7);
     assert.equal(res.body.data.verified_by_name, "First Verifier");
-    assert.equal(res.body.data.verified_at, "2026-09-01 08:00:00");
+    assert.equal(res.body.data.verified_at, "2026-09-01T08:00:00Z");
     assert.deepEqual(repo.rows.get("GRN-1").verified_by, 7);
   });
 
@@ -298,6 +306,73 @@ describe("POST /grn/:refno/verify", () => {
     assert.equal(res.statusCode, 404);
     assert.equal(repo.calls.inserts.length, 0);
   });
+
+  it("propagates a NON-duplicate database error instead of calling it verified", async () => {
+    const repo = fakeRepo();
+    const boom = new Error("ER_NO_SUCH_TABLE: grn_verifications is missing");
+    boom.code = "ER_NO_SUCH_TABLE";
+    repo.insertGrnVerification = async () => {
+      throw boom;
+    };
+    const route = verifyRouteOf(buildUsecase(repo), tagging);
+
+    // `utils/http#respondError` asks global.isDev() whether to include the
+    // message; the server sets it at boot and there is no server here.
+    const hadIsDev = typeof global.isDev === "function";
+    if (!hadIsDev) global.isDev = () => false;
+    try {
+      const res = await call(route, {
+        params: { refno: "GRN-1" },
+        body: {},
+        decoded: { employee_id: 42 },
+      });
+
+      // 500, not a cheerful "already verified" over a broken table.
+      assert.equal(res.statusCode, 500);
+      assert.notEqual(res.body?.data?.status, "VERIFIED");
+      assert.notEqual(res.body?.meta?.already_verified, true);
+    } finally {
+      if (!hadIsDev) delete global.isDev;
+    }
+  });
+
+  it("reports a lost unique-key race as already_verified, with the winner's record", async () => {
+    // Two approvals in flight: the second insert loses the unique key, and
+    // the row it then reads is the FIRST verifier's.
+    const repo = fakeRepo();
+    const route = verifyRouteOf(buildUsecase(repo), tagging);
+
+    const first = await call(route, {
+      params: { refno: "GRN-1" },
+      body: {},
+      decoded: { employee_id: 7 },
+    });
+    const second = await call(route, {
+      params: { refno: "GRN-1" },
+      body: {},
+      decoded: { employee_id: 42 },
+    });
+
+    assert.equal(first.body.meta.already_verified, false);
+    assert.equal(first.body.data.verified_by, 7);
+    assert.equal(second.statusCode, 200);
+    assert.equal(second.body.meta.already_verified, true);
+    assert.equal(second.body.data.verified_by, 7);
+    assert.equal(repo.calls.inserts.length, 2, "the second insert was attempted");
+  });
+
+  it("writes nothing when the usecase is handed no verifier", async () => {
+    // The route refuses this first; this is the usecase's own guard, which is
+    // what stands between a future caller and a NOT NULL audit column.
+    const repo = fakeRepo();
+    const usecase = buildUsecase(repo);
+
+    await assert.rejects(
+      () => usecase.verifyGrn("GRN-1", null),
+      /verified_by is required/
+    );
+    assert.equal(repo.calls.inserts.length, 0);
+  });
 });
 
 describe("verification state on the GRN list and detail", () => {
@@ -323,7 +398,7 @@ describe("verification state on the GRN list and detail", () => {
         mmh_mrc_refno: "GRN-2",
         verified_by: 7,
         verified_by_name: "Asha R",
-        verified_at: "2026-09-01 08:00:00",
+        verified_at: "2026-09-01T08:00:00Z",
       },
     });
     let batchCalls = 0;
@@ -342,7 +417,7 @@ describe("verification state on the GRN list and detail", () => {
       status: "VERIFIED",
       verified_by: 7,
       verified_by_name: "Asha R",
-      verified_at: "2026-09-01 08:00:00",
+      verified_at: "2026-09-01T08:00:00Z",
     });
   });
 
@@ -367,6 +442,6 @@ describe("verification state on the GRN list and detail", () => {
 
     assert.equal(detail.verification.status, "VERIFIED");
     assert.equal(detail.verification.verified_by, 42);
-    assert.equal(detail.verification.verified_at, "2026-09-17 10:30:00");
+    assert.equal(detail.verification.verified_at, "2026-09-17T10:30:00Z");
   });
 });

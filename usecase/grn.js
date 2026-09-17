@@ -245,14 +245,23 @@ class GrnUsecase {
    *
    * `verifiedBy` is the employee id the route read off the JWT - the route
    * never takes it from the request body - and the timestamp is the
-   * database's, written by the column default. The insert is an INSERT
-   * IGNORE, so a GRN that is ALREADY VERIFIED comes back with its original
-   * verifier and time and `already_verified: true`; clicking twice cannot
-   * rewrite who signed it off. Reopening a verification is deliberately not
-   * offered here.
+   * database's, written by the column default. A GRN that is ALREADY
+   * VERIFIED comes back with its original verifier and time and
+   * `already_verified: true`, whether the repository saw the existing row or
+   * lost the unique-key race to a simultaneous approval; clicking twice
+   * cannot rewrite who signed it off. Any other database error propagates
+   * rather than passing for a duplicate. Reopening a verification is
+   * deliberately not offered here.
    */
   async verifyGrn(refno, verifiedBy) {
     try {
+      if (verifiedBy == null || verifiedBy === "") {
+        // The route refuses this first; the usecase refuses it again so no
+        // future caller can write a verification naming nobody into a NOT
+        // NULL audit column.
+        throw new Error("verified_by is required to verify a GRN");
+      }
+
       const detail = await this.stockReceivedRepo.listGrnDetailByRefno(refno);
       if (!detail) return null;
 

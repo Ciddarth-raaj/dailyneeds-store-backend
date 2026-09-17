@@ -233,6 +233,43 @@ function grnDetailItemRow(row, productMap) {
   };
 }
 
+/**
+ * A verification row as the API hands it out.
+ *
+ * `verified_at_epoch` is seconds since the epoch, straight out of
+ * UNIX_TIMESTAMP, and becomes an ISO-8601 instant in UTC ("2026-09-17T
+ * 09:00:00Z"). That trailing Z is the whole point: it says WHICH instant the
+ * approval happened at, so nothing downstream has to assume the database
+ * server, the API host and the viewer share a time zone. The browser then
+ * renders it in Asia/Kolkata explicitly.
+ */
+/**
+ * Is this the unique key on grn_verifications refusing a second approval?
+ *
+ * Matched on the driver's ER_DUP_ENTRY / errno 1062 and nothing looser: the
+ * point of checking at all is to let EVERY other database error through
+ * rather than mistaking it for a duplicate.
+ */
+function isDuplicateKeyError(err) {
+  return err != null && (err.code === "ER_DUP_ENTRY" || err.errno === 1062);
+}
+
+function grnVerificationRow(row) {
+  if (!row) return null;
+  const epochRaw = row.verified_at_epoch ?? row.VERIFIED_AT_EPOCH;
+  const epoch = epochRaw != null && epochRaw !== "" ? Number(epochRaw) : null;
+  const verifiedAt =
+    epoch != null && Number.isFinite(epoch)
+      ? new Date(epoch * 1000).toISOString().replace(/\.\d{3}Z$/, "Z")
+      : null;
+  return {
+    mmh_mrc_refno: row.mmh_mrc_refno ?? row.MMH_MRC_REFNO,
+    verified_by: row.verified_by ?? row.VERIFIED_BY ?? null,
+    verified_by_name: row.verified_by_name ?? row.VERIFIED_BY_NAME ?? null,
+    verified_at: verifiedAt,
+  };
+}
+
 class StockReceivedRepository {
   constructor(mainDb, gofrugalDb) {
     this.db = mainDb;
@@ -1104,9 +1141,15 @@ class StockReceivedRepository {
    *
    * One query for the whole page: the GRN list renders a Status / Verified By
    * / Verified At column per row, and a lookup per row would be a round trip
-   * per GRN. `verified_at` is formatted here rather than handed over as a
-   * driver Date, so every caller sees the same server-local wall clock the
-   * row was written with.
+   * per GRN.
+   *
+   * `verified_at` comes back as UNIX_TIMESTAMP and is turned into an ISO-8601
+   * UTC instant here. A DATE_FORMAT of the column would be a wall-clock
+   * string with NO ZONE on it, read in whatever session time zone the pool
+   * happens to have - drivers/mysql.js sets none - so the same row could mean
+   * two different instants on two servers. UNIX_TIMESTAMP is the one reading
+   * that does not depend on that: a TIMESTAMP column is stored as a UTC
+   * epoch, and this returns that epoch whatever the session zone is.
    */
   listGrnVerificationsByRefnos(refnos) {
     const keys = [
@@ -1125,7 +1168,7 @@ class StockReceivedRepository {
             v.mmh_mrc_refno,
             v.verified_by,
             emp.employee_name AS verified_by_name,
-            DATE_FORMAT(v.verified_at, '%Y-%m-%d %H:%i:%s') AS verified_at
+            UNIX_TIMESTAMP(v.verified_at) AS verified_at_epoch
          FROM \`${GRN_VERIFICATIONS}\` v
          LEFT JOIN \`new_employee\` emp ON emp.employee_id = v.verified_by
          WHERE v.mmh_mrc_refno IN (?)`,
@@ -1142,7 +1185,7 @@ class StockReceivedRepository {
             });
             return reject(err);
           }
-          resolve(rows || []);
+          resolve((rows || []).map(grnVerificationRow));
         }
       );
     });
@@ -1158,13 +1201,23 @@ class StockReceivedRepository {
    * Records that `verifiedBy` checked this GRN, and answers whether THIS call
    * is the one that recorded it.
    *
-   * INSERT IGNORE against the unique key on mmh_mrc_refno, deliberately: a
-   * second approval - a double click, two people at once, a replayed request
-   * - is a no-op that leaves the first verifier and the first timestamp
-   * exactly as they were. An ON DUPLICATE KEY UPDATE here would silently
-   * rewrite the audit trail, which is the one thing this row exists to
-   * prevent. The time is the database's CURRENT_TIMESTAMP default; no caller
-   * supplies it.
+   * A PLAIN INSERT, and the unique key on mmh_mrc_refno is the concurrency
+   * guard: the second approval - a double click, two people at once, a
+   * replayed request - loses the race and comes back ER_DUP_ENTRY, which is
+   * reported as `created: false` so the caller can return the ORIGINAL
+   * verifier and time. Every other database error is rejected and travels up
+   * as an error.
+   *
+   * NOT `INSERT IGNORE`: that downgrades a whole class of failures - a bad
+   * column, truncated data, a NOT NULL violation - into warnings and an
+   * affectedRows of 0, which this method would then have reported as a
+   * successful duplicate approval. An audit record must never be faked by an
+   * error nobody saw. ON DUPLICATE KEY UPDATE is equally wrong here for the
+   * opposite reason: it would rewrite who signed the GRN off.
+   *
+   * `verifiedBy` is required - the column is NOT NULL, and a verification
+   * naming nobody is not an audit record. The time is the database's
+   * CURRENT_TIMESTAMP default; no caller supplies it.
    */
   insertGrnVerification(refno, verifiedBy) {
     const refnoKey =
@@ -1174,13 +1227,21 @@ class StockReceivedRepository {
       if (!refnoKey) {
         return reject(new Error("refno is required to verify a GRN"));
       }
+      if (verifiedBy == null || verifiedBy === "") {
+        return reject(new Error("verified_by is required to verify a GRN"));
+      }
 
       this.db.query(
-        `INSERT IGNORE INTO \`${GRN_VERIFICATIONS}\` (mmh_mrc_refno, verified_by)
+        `INSERT INTO \`${GRN_VERIFICATIONS}\` (mmh_mrc_refno, verified_by)
          VALUES (?, ?)`,
-        [refnoKey, verifiedBy != null ? verifiedBy : null],
+        [refnoKey, verifiedBy],
         (err, result) => {
           if (err) {
+            if (isDuplicateKeyError(err)) {
+              // Someone got there first. Not an error: the caller reads the
+              // row that won and reports it as already verified.
+              return resolve({ created: false });
+            }
             logger.Log({
               level: logger.LEVEL.ERROR,
               component: "REPOSITORY.STOCK_RECEIVED",
