@@ -107,9 +107,31 @@ describe("removal is gated, capped and reachable from ONE place", () => {
     const service = strip(read("services/telegram.js"));
     assert.match(service, /only_if_banned: true/);
     const reconcile = strip(read("usecase/telegram_membership_reconcile.js"));
+
+    // EVERY ban is followed by its unban - checked per call site rather than
+    // by position in the file, because there is now also an unban with NO
+    // ban before it: the recovery path for somebody left banned by a
+    // half-finished removal, which must not issue a second ban.
     const ban = reconcile.indexOf("this.telegram.banChatMember");
-    const unban = reconcile.indexOf("this.telegram.unbanChatMember");
-    assert.ok(ban !== -1 && unban > ban, "removed, not banished");
+    assert.notEqual(ban, -1);
+    const after = reconcile.slice(ban);
+    assert.match(
+      after.slice(0, 400),
+      /this\.telegram\.unbanChatMember/,
+      "removed, not banished - the unban follows immediately"
+    );
+    const bans = (reconcile.match(/this\.telegram\.banChatMember/g) || []).length;
+    const unbans = (reconcile.match(/this\.telegram\.unbanChatMember/g) || []).length;
+    assert.ok(unbans >= bans, "there can never be more bans than unbans");
+  });
+
+  it("the KICKED recovery path lifts a ban without issuing one", () => {
+    const reconcile = strip(read("usecase/telegram_membership_reconcile.js"));
+    const kicked = reconcile.indexOf("TELEGRAM_MEMBER_STATUS.KICKED");
+    assert.notEqual(kicked, -1, "kicked must be told apart from ordinary absence");
+    const block = reconcile.slice(kicked, reconcile.indexOf("if (!isTelegramMember(member))", kicked));
+    assert.match(block, /unbanChatMember/);
+    assert.ok(!/banChatMember\(/.test(block.replace(/unbanChatMember\(/g, "")), "no second ban");
   });
 });
 

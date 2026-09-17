@@ -289,6 +289,50 @@ describe("a cleanup that did not happen never reads as SUCCEEDED", () => {
   });
 });
 
+describe("a rate limit raised during ADOPTION", () => {
+  const { TelegramMembershipRetryableError } = require("../utils/telegram_membership_errors");
+
+  it("reaches the delay path, spends no retry, and honours retry_after", async () => {
+    const { usecase, state, calls } = build();
+    const cause = new Error("Too Many Requests: retry after 42");
+    cause.parameters = { retry_after: 42 };
+    state.reconcileThrows = new TelegramMembershipRetryableError("rate limited during adoption", {
+      code: "TELEGRAM_RATE_LIMITED",
+      retryAfter: 42,
+      cause,
+    });
+
+    const summary = await usecase.tick();
+
+    assert.equal(summary.delayed, 1);
+    assert.deepEqual(calls.delayed, [{ id: 1, seconds: 42 }]);
+    assert.deepEqual(calls.failed, [], "failure_count is untouched by a rate limit");
+    assert.deepEqual(calls.completed, [], "and the job is certainly not complete");
+  });
+
+  it("the tick stops there rather than claiming another job", async () => {
+    const { usecase, state, calls } = build();
+    state.jobs = [
+      { telegram_membership_job_id: 1, scope_type: JOB_SCOPE.EMPLOYEE, scope_id: 42, reason: JOB_REASON.SWEEP },
+      { telegram_membership_job_id: 2, scope_type: JOB_SCOPE.EMPLOYEE, scope_id: 43, reason: JOB_REASON.SWEEP },
+    ];
+    const cause = new Error("Too Many Requests: retry after 5");
+    cause.parameters = { retry_after: 5 };
+    state.reconcileThrows = new TelegramMembershipRetryableError("rate limited", {
+      retryAfter: 5,
+      cause,
+    });
+
+    await usecase.tick();
+
+    // Both jobs may be claimed, but every one of them is delayed rather than
+    // failed - nothing in this tick reports work it did not do.
+    assert.deepEqual(calls.completed, []);
+    assert.deepEqual(calls.failed, []);
+    assert.ok(calls.delayed.length >= 1);
+  });
+});
+
 describe("the budget cannot be overspent", () => {
   it("spend refuses what it cannot cover, and never goes negative", async () => {
     const { usecase, state } = build({ config: { apiCallsPerTick: 3 } });

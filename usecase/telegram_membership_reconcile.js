@@ -3,6 +3,7 @@ const { employedOn } = require("../utils/attendance_eligibility");
 const { istDateOf } = require("../utils/istDate");
 const { matchesDimension } = require("../utils/telegram_group_mapping");
 const { isTelegramMember } = require("../utils/telegram_membership");
+const { TELEGRAM_MEMBER_STATUS } = require("../constants/telegram_membership");
 const { removalReadiness, canRemove, REMOVAL_READINESS } = require("../utils/telegram_removal_readiness");
 const {
   ACTION,
@@ -421,6 +422,24 @@ class TelegramMembershipReconcileUsecase {
       });
       return true;
     } catch (err) {
+      // A RATE LIMIT IS NOT "COULD NOT CONFIRM". Swallowing it here meant a
+      // 429 during adoption looked like an ordinary unconfirmed membership:
+      // the job completed, the queue spent no delay, and the tick carried on
+      // spending calls into a limit Telegram had already refused - against a
+      // token the three-second poller is also using.
+      //
+      // So it is raised, which both hands `retry_after` to the queue's delay
+      // path and STOPS THE PASS: no further Telegram call is made in this
+      // job. Any other failure stays what it was - adoption is a nicety, and
+      // an unconfirmed membership simply stays unconfirmed.
+      const retryAfter = retryAfterOf(err);
+      if (retryAfter) {
+        throw new TelegramMembershipRetryableError(`rate limited during adoption`, {
+          code: "TELEGRAM_RATE_LIMITED",
+          retryAfter,
+          cause: err,
+        });
+      }
       this._log(logger.LEVEL.WARN, "ADOPT", `could not confirm membership: ${err.toString()}`, {
         telegram_group_id: groupId,
         employee_id: employeeId,
@@ -579,7 +598,33 @@ class TelegramMembershipReconcileUsecase {
 
     try {
       const member = await this.telegram.getChatMember(group.chat_id, userId);
+
+      // KICKED IS NOT ABSENT. Telegram's `kicked` means BANNED, and the only
+      // way to reach it here is our own removal having got half done: the
+      // ban succeeded and the unban that undoes it did not. Reading it as
+      // "not a member, so the cleanup worked" would close the claim over a
+      // person who cannot rejoin the group - the exact opposite of the
+      // remove-but-do-not-banish this phase promises, and invisible, because
+      // the record would say they were simply removed.
+      //
+      // So the ban is finished rather than repeated: the unban is retried on
+      // its own, WITHOUT a second ban, and only its success settles this.
+      if (member && member.status === TELEGRAM_MEMBER_STATUS.KICKED) {
+        await this.telegram.unbanChatMember(group.chat_id, userId);
+        await this.claimRepo.recordEvent({
+          employeeId,
+          telegramGroupId: groupId,
+          employeeTelegramId: identity.employee_telegram_id,
+          eventType: MEMBERSHIP_EVENT.REMOVED,
+          detailCode: DETAIL_CODE.BAN_LIFTED,
+          jobId,
+        });
+        return { removed: true, settled: true };
+      }
+
       if (!isTelegramMember(member)) {
+        // `left`, or no row at all: they are out and not banned, which is
+        // the end state this phase wants.
         await this.claimRepo.recordEvent({
           employeeId,
           telegramGroupId: groupId,
@@ -671,11 +716,22 @@ class TelegramMembershipReconcileUsecase {
   }
 
   async _removalReadiness(group, budget) {
+    // THE FIRST READINESS CHECK COSTS THREE CALLS, NOT TWO: `getChat`,
+    // `getMe` for the bot's own id, and `getChatMember` for the bot. Only
+    // once the id is cached does it cost two. Reserving two on the first
+    // check made the cap a lie by one call per worker start - small, and
+    // exactly the kind of small that a shared rate limit turns into the
+    // password-reset poller's problem.
+    //
+    // The whole amount is reserved BEFORE anything is sent, so a budget that
+    // cannot cover the check issues no partial half of it.
+    //
     // A BUDGET THAT CANNOT PAY FOR THE CHECK IS NOT A TELEGRAM OUTAGE.
     // Reporting it as one was the bug: "we could not ask" and "we were not
     // allowed to ask this tick" are different facts, and only the first is a
     // reason to retry with backoff. The second simply resumes next tick.
-    if (budget && budget.spend && !budget.spend(2)) {
+    const needed = this._botId ? 2 : 3;
+    if (budget && budget.spend && !budget.spend(needed)) {
       return { status: REMOVAL_READINESS.CAPPED };
     }
     try {

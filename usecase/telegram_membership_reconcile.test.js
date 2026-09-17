@@ -338,6 +338,164 @@ describe("a revoked manual grant", () => {
   });
 });
 
+describe("a ban that succeeded and an unban that did not", () => {
+  const pending = async (world) => {
+    await world.usecase.reconcileEmployee(42);
+    world.state.mappings = [];
+  };
+
+  it("the job is RETRYABLE and the claim stays REMOVAL_PENDING", async () => {
+    // The person is out of the group and BANNED. Reporting the cleanup as
+    // finished here would leave them unable to rejoin, with a record saying
+    // they were merely removed.
+    const world = build();
+    await pending(world);
+    world.usecase.telegram.unbanChatMember = async () => {
+      throw new Error("ETIMEDOUT");
+    };
+
+    await expectRetryable(() => world.usecase.reconcileEmployee(42, {}));
+
+    assert.equal(world.calls.bans.length, 1);
+    assert.equal(world.claim(42, 10, CLAIM_SOURCE.RULE).state, CLAIM_STATE.REMOVAL_PENDING);
+    assert.equal(world.claim(42, 10, CLAIM_SOURCE.RULE).close_outcome, null);
+  });
+
+  it("THE RETRY LIFTS THE BAN AND CLOSES - without issuing a second ban", async () => {
+    const world = build();
+    await pending(world);
+    let failNextUnban = true;
+    world.usecase.telegram.unbanChatMember = async (chatId, userId) => {
+      if (failNextUnban) {
+        failNextUnban = false;
+        throw new Error("ETIMEDOUT");
+      }
+      world.calls.unbans.push({ chatId, userId });
+      return true;
+    };
+    await expectRetryable(() => world.usecase.reconcileEmployee(42, {}));
+
+    // Telegram now reports them as `kicked`: banned, not merely gone.
+    world.state.members.delete("-10010:555001");
+    const realGetChatMember = world.usecase.telegram.getChatMember;
+    world.usecase.telegram.getChatMember = async (chatId, userId) => {
+      if (Number(userId) === 777) return realGetChatMember(chatId, userId);
+      return { status: "kicked" };
+    };
+    const bansBefore = world.calls.bans.length;
+
+    await world.usecase.reconcileEmployee(42, {});
+
+    assert.equal(world.calls.bans.length, bansBefore, "no second ban on the kicked path");
+    assert.equal(world.calls.unbans.length, 1, "the ban is lifted");
+    const claim = world.claim(42, 10, CLAIM_SOURCE.RULE);
+    assert.equal(claim.state, CLAIM_STATE.CLOSED);
+    assert.equal(claim.close_outcome, CLOSE_OUTCOME.REMOVED);
+  });
+
+  it("a KICKED identity whose unban fails again stays unsettled", async () => {
+    const world = build();
+    await pending(world);
+    world.state.members.delete("-10010:555001");
+    const realGetChatMember = world.usecase.telegram.getChatMember;
+    world.usecase.telegram.getChatMember = async (chatId, userId) =>
+      Number(userId) === 777 ? realGetChatMember(chatId, userId) : { status: "kicked" };
+    world.usecase.telegram.unbanChatMember = async () => {
+      throw new Error("ETIMEDOUT");
+    };
+
+    await expectRetryable(() => world.usecase.reconcileEmployee(42, {}));
+
+    assert.deepEqual(world.calls.bans, [], "still no ban - they are already out");
+    assert.equal(world.claim(42, 10, CLAIM_SOURCE.RULE).state, CLAIM_STATE.REMOVAL_PENDING);
+  });
+
+  it("an ORDINARY `left` still closes as already absent", async () => {
+    const world = build({ members: new Set() });
+    await pending(world);
+    await world.usecase.reconcileEmployee(42, {});
+    const claim = world.claim(42, 10, CLAIM_SOURCE.RULE);
+    assert.equal(claim.state, CLAIM_STATE.CLOSED);
+    assert.equal(claim.close_outcome, CLOSE_OUTCOME.ALREADY_ABSENT);
+    assert.deepEqual(world.calls.bans, []);
+    assert.deepEqual(world.calls.unbans, []);
+  });
+
+  it("the historical-identity reuse guard still runs before any of this", async () => {
+    const world = build();
+    world.state.identities = [
+      {
+        employee_telegram_id: 900,
+        employee_id: 42,
+        telegram_user_id: 555001,
+        disconnected_at: new Date("2026-05-01"),
+      },
+    ];
+    world.state.activeOwner[555001] = { employee_id: 43, employee_telegram_id: 950 };
+    await pending(world);
+    const realGetChatMember = world.usecase.telegram.getChatMember;
+    world.usecase.telegram.getChatMember = async (chatId, userId) =>
+      Number(userId) === 777 ? realGetChatMember(chatId, userId) : { status: "kicked" };
+
+    await world.usecase.reconcileEmployee(42, {});
+
+    assert.deepEqual(world.calls.unbans, [], "somebody else's account is not touched at all");
+    assert.deepEqual(world.calls.bans, []);
+  });
+});
+
+describe("a rate limit during adoption", () => {
+  const rateLimited = () => {
+    const err = new Error("Too Many Requests: retry after 42");
+    err.parameters = { retry_after: 42 };
+    return err;
+  };
+
+  it("REACHES THE QUEUE with its retry_after, instead of being swallowed", async () => {
+    const world = build();
+    world.usecase.telegram.getChatMember = async () => {
+      throw rateLimited();
+    };
+
+    const err = await expectRetryable(() => world.usecase.reconcileEmployee(42));
+    assert.equal(err.retryAfter, 42);
+    assert.equal(err.code, "TELEGRAM_RATE_LIMITED");
+  });
+
+  it("STOPS THE PASS - no further Telegram call is made in that job", async () => {
+    // Carrying on spends calls into a limit Telegram has already refused,
+    // against a token the three-second poller is also using.
+    const world = build();
+    world.state.mappings = [
+      { telegram_group_id: 10, mapping_type: "ALL_EMPLOYEES", target_id: 0, group: GROUP(10) },
+      { telegram_group_id: 11, mapping_type: "ALL_EMPLOYEES", target_id: 0, group: GROUP(11) },
+    ];
+    let calls = 0;
+    world.usecase.telegram.getChatMember = async () => {
+      calls += 1;
+      throw rateLimited();
+    };
+
+    await expectRetryable(() => world.usecase.reconcileEmployee(42));
+    assert.equal(calls, 1, "the first 429 ends the pass");
+  });
+
+  it("an ORDINARY adoption timeout stays non-fatal, as it always was", async () => {
+    // Adoption is a nicety: an unconfirmed membership simply stays
+    // unconfirmed, and the job is not failed over it.
+    const world = build();
+    world.usecase.telegram.getChatMember = async () => {
+      throw new Error("ETIMEDOUT");
+    };
+
+    const result = await world.usecase.reconcileEmployee(42);
+
+    assert.ok(result, "no throw");
+    assert.equal(world.claim(42, 10, CLAIM_SOURCE.RULE).state, CLAIM_STATE.ACTIVE);
+    assert.equal(world.claim(42, 10, CLAIM_SOURCE.RULE).adopted_from_existing_member, false);
+  });
+});
+
 describe("the tick's budget is a HARD limit", () => {
   const budgetOf = (calls, removals) => {
     let left = calls;
@@ -375,11 +533,12 @@ describe("the tick's budget is a HARD limit", () => {
   };
 
   it("EXACTLY at the limit, the removal goes through", async () => {
-    // Two calls for readiness, three for the identity: five is exactly
+    // THREE calls for the first readiness check - getChat, getMe and the
+    // bot's own membership - and three for the identity. Six is exactly
     // enough, and the balance lands on zero rather than below it.
     const world = build();
     await pending(world);
-    const budget = budgetOf(5, 1);
+    const budget = budgetOf(6, 1);
     await world.usecase.reconcileEmployee(42, { budget });
     assert.equal(world.calls.bans.length, 1);
     assert.equal(budget.callsLeft, 0);
@@ -389,12 +548,54 @@ describe("the tick's budget is a HARD limit", () => {
   it("ONE BELOW the limit, NOTHING is sent to Telegram", async () => {
     const world = build();
     await pending(world);
-    const budget = budgetOf(4, 1);
+    const budget = budgetOf(5, 1);
     const result = await world.usecase.reconcileEmployee(42, { budget });
     assert.deepEqual(world.calls.bans, []);
     assert.deepEqual(world.calls.unbans, []);
     assert.equal(result.capReached, true);
     assert.ok(budget.callsLeft >= 0, "a budget must never go negative");
+  });
+
+  it("A FIRST READINESS CHECK COSTS THREE, because it must ask who the bot is", async () => {
+    const world = build();
+    await pending(world);
+    const budget = budgetOf(3, 1);
+    await world.usecase.reconcileEmployee(42, { budget });
+    // Enough for readiness and nothing else: the check happened, the removal
+    // did not, and not a single call was spent beyond the three reserved.
+    assert.equal(budget.spent.calls, 3);
+    assert.equal(world.calls.getChatMember.filter((c) => c.userId === 777).length, 1);
+    assert.deepEqual(world.calls.bans, []);
+  });
+
+  it("with only TWO available, the first readiness check issues NO call at all", async () => {
+    // Half a readiness check is worse than none: it spends the rate limit
+    // the poller shares and answers nothing.
+    const world = build();
+    await pending(world);
+    // The setup pass adopted, which is a call of its own; what is being
+    // asserted is that THIS pass sends nothing.
+    world.calls.getChatMember.length = 0;
+    const budget = budgetOf(2, 1);
+    const result = await world.usecase.reconcileEmployee(42, { budget });
+    assert.equal(budget.spent.calls, 0, "nothing partial is sent");
+    assert.deepEqual(world.calls.getChatMember, []);
+    assert.equal(result.capReached, true);
+  });
+
+  it("ONCE THE BOT ID IS CACHED, a readiness check costs two", async () => {
+    const world = build();
+    await pending(world);
+    // First pass caches the id, paying three for it.
+    await world.usecase.reconcileEmployee(42, { budget: budgetOf(3, 1) });
+    world.calls.getChatMember.length = 0;
+
+    const budget = budgetOf(5, 1);
+    await world.usecase.reconcileEmployee(42, { budget });
+    // Two for readiness, three for the identity: five is now exactly enough.
+    assert.equal(world.calls.bans.length, 1);
+    assert.equal(budget.callsLeft, 0);
+    assert.ok(budget.callsLeft >= 0);
   });
 
   it("no removal budget means no removal, and no call spent looking", async () => {
@@ -436,11 +637,33 @@ describe("the tick's budget is a HARD limit", () => {
   it("no ban or unban is issued once the budget is exhausted", async () => {
     const world = build();
     await pending(world);
-    const budget = budgetOf(2, 5); // enough to check readiness, not to act
+    const budget = budgetOf(3, 5); // enough to check readiness, not to act
     await world.usecase.reconcileEmployee(42, { budget });
     assert.deepEqual(world.calls.bans, []);
     assert.deepEqual(world.calls.unbans, []);
     assert.equal(budget.callsLeft, 0);
+  });
+
+  it("the budget is never exceeded, whatever the shape of the work", async () => {
+    // Two identities, two groups, and a budget that cannot cover all of it.
+    const world = build();
+    world.state.identities = [
+      { employee_telegram_id: 901, employee_id: 42, telegram_user_id: 555002, disconnected_at: null },
+      {
+        employee_telegram_id: 900,
+        employee_id: 42,
+        telegram_user_id: 555001,
+        disconnected_at: new Date("2026-05-01"),
+      },
+    ];
+    world.state.members.add("-10010:555002");
+    await pending(world);
+
+    const budget = budgetOf(7, 5);
+    await world.usecase.reconcileEmployee(42, { budget });
+
+    assert.ok(budget.callsLeft >= 0, "never negative");
+    assert.ok(budget.spent.calls <= 7, "never more than the tick allowed");
   });
 });
 
