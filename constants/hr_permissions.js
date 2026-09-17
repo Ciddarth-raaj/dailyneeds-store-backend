@@ -470,4 +470,34 @@ module.exports = {
   // bypass, anybody else is given it deliberately on the designation screen.
   // Seeing a void in the Punch Audit needs only `view_attendance_punch_audit`.
   VOID_ATTENDANCE_PUNCH: "void_attendance_punch",
+
+  // ======================================== PAYRUN INITIALIZATION ==========
+  //
+  // CHANGING THE PAY TYPE ON ONE PAYRUN ROW - the monthly Bank <-> Cash
+  // decision, for that month and that employee only.
+  //
+  // THE ONLY NEW KEY THE PAYRUN NEEDED, and the other two decisions reuse what
+  // M2 already declared for exactly this purpose:
+  //
+  //   view_payroll     opening the Payrun screen and reading a month
+  //   process_payroll  INITIALIZING a month. M2 declared this key as "run a
+  //                    payroll period (not built in M2)" and this is that act;
+  //                    a new `initialize_payrun` beside it would leave
+  //                    `process_payroll` gating nothing forever.
+  //
+  // SO WHY IS THIS ONE SEPARATE. Initializing a month freezes what somebody is
+  // OWED. Changing a pay type decides HOW the money reaches them, which is the
+  // payment desk's decision rather than the payroll processor's - somebody may
+  // reasonably hold either without the other. One key covering both would mean
+  // whoever runs the month can also redirect where every payment goes, and
+  // nobody would have decided that.
+  //
+  // IT CHANGES NOTHING IN THE EMPLOYEE MASTER. The key permits a write to ONE
+  // payrun row for ONE month; `new_employee.payment_type` is untouched by every
+  // path behind it, and editing THAT stays `edit_payment_details` as before.
+  //
+  // Declared by the payrun migration and granted to NOBODY, so administrators
+  // only through the user_type 2 bypass until a designation is given it
+  // deliberately on the rights screen.
+  CHANGE_PAYRUN_PAY_TYPE: "change_payrun_pay_type",
 };

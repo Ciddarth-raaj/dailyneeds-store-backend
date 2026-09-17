@@ -209,6 +209,13 @@ class Server {
     this.employeeSalaryRepo = require("./repository/employee_salary")(
       this.mysql.connection
     );
+    // Payrun Initialization. It owns THREE tables - `payrun_period`,
+    // `payrun_employee` and the pay type audit - and reads four it does not
+    // own: the employee master, `employee_salary`, `attendance_monthly_payroll`
+    // and `attendance_approval_request`. It writes none of those four, and in
+    // particular never `new_employee.payment_type`: a payrun pay type is a
+    // fact about one month.
+    this.payrunRepo = require("./repository/payrun")(this.mysql.connection);
     // Attendance v2. The reads the calculation engine needs and the writes of
     // what it produced. It SELECTs the Biomax punch tables and never writes
     // them - the receiver process remains their only writer - and the two
@@ -637,6 +644,11 @@ class Server {
     this.employeeSalaryUsecase = require("./usecase/employee_salary")(
       this.employeeSalaryRepo
     );
+    // Payrun Initialization. Orchestration only: the eligibility rules are in
+    // the pure `utils/payrun_eligibility.js`, and this fetches what they need
+    // and performs what they permit. It calculates NO attendance - the payrun
+    // consumes the month the attendance engine already stored.
+    this.payrunUsecase = require("./usecase/payrun")(this.payrunRepo);
     // Attendance v2. Orchestration only: the arithmetic is in the pure
     // `utils/attendance_engine.js`, `utils/shiftResolution.js` and
     // `utils/attendance_payroll.js`, and this fetches what they need and
@@ -1312,6 +1324,15 @@ class Server {
       this.attendanceApproverSetupUsecase,
       this.permissions
     );
+    // Payrun Initialization: the first stage of the Monthly Payrun. Mounted at
+    // the root, like the attendance routers, because /payrun is its own
+    // top-level surface rather than a fact about one employee record.
+    const payrunRouter = require("./routes/payrun")(
+      this.payrunUsecase,
+      this.permissions,
+      this.sensitive,
+      this.employeeBranchScope
+    );
     const storeRouter = require("./routes/store")(this.storeUsecase);
     const outletRouter = require("./routes/outlet")(
       this.outletUsecase,
@@ -1560,6 +1581,9 @@ class Server {
     // Mounted under /reports rather than /hr: the machinery is per-dataset
     // and Attendance and Payroll will mount beside this one, not inside HR.
     app.use("/reports/employee-master", employeeReportRouter.getRouter());
+    // Payrun Initialization. Claims only /payrun, which no other router defines.
+    app.use("/", payrunRouter.getRouter());
+
     app.use("/shift", shiftRouter.getRouter());
     // The new payroll/attendance shift master. /shift above is unchanged and
     // still serves the legacy `shift_master` system.
