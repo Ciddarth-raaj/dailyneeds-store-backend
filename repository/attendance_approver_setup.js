@@ -1,5 +1,10 @@
 const logger = require("../utils/logger");
 const {
+  currentlyAttendanceEligible,
+  currentlyAttendanceEligibleParams,
+} = require("../utils/attendance_eligibility_sql");
+const { JOINED_ON } = require("../utils/joining_date");
+const {
   queryAsync,
   getConnectionAsync,
   beginTransactionAsync,
@@ -51,28 +56,37 @@ const EMPLOYEE_JOINS = `FROM new_employee ne
  * to show. An employee whose only mapping is deactivated reads the same as
  * one who never had one, which is what "active setup" means here.
  */
+/**
+ * The three facts `utils/attendance_eligibility.js` reads, and only those.
+ * Selected for the write-path validation, not for any screen.
+ */
+const ELIGIBILITY_COLUMNS = `ne.attendance_required,
+              DATE_FORMAT((${JOINED_ON("ne")}), '%Y-%m-%d') AS date_of_joining,
+              DATE_FORMAT(ne.resignation_date, '%Y-%m-%d') AS resignation_date`;
+
 const SETUP_JOIN = `LEFT JOIN attendance_approver_setup s
            ON s.employee_id = ne.employee_id AND s.is_active = 1`;
 
 /**
- * WHO IS REQUIRED TO HAVE AN APPROVER CHAIN.
+ * WHO CURRENTLY REQUIRES AN APPROVER CHAIN.
  *
- * `new_employee.attendance_required` is the one existing flag for it - the
- * column migration 20260930120000 added, that `utils/attendance_eligibility.js`
- * reads as the single rule, and that `repository/biomax_punch.js` already
- * scopes its queues with in exactly this shape. No second exemption flag is
- * introduced here.
+ * The canonical attendance rule, `utils/attendance_eligibility.js#eligibleOn`
+ * evaluated on TODAY, expressed as SQL by
+ * `utils/attendance_eligibility_sql.js`: attendance is required of them, they
+ * have joined, and they have not left. No second exemption flag and no second
+ * definition of "currently employed".
  *
- * COALESCE(..., 1) matches that helper's own reading: absent or NULL means
- * REQUIRED, because the column is NOT NULL DEFAULT 1 and the only way to
- * arrive without a value is a query that did not ask for it. "Not asked"
- * must never silently exempt somebody.
+ * `ne.status` IS NOT PART OF IT. It used to be the only employment test here,
+ * and it is the wrong one: the helper it now defers to says plainly that
+ * `status` is maintained by hand and has been left at 1 for most leavers, so
+ * it both admits people who left years ago and can drop somebody still here
+ * whose status was never set. Only the dated facts decide.
  *
- * An exempt employee raises no Regularization or OT request, so there is
- * nothing for a chain to approve; listing them as missing a setup would
- * invent work nobody owes.
+ * An employee outside this population raises no Regularization or OT
+ * request, so there is nothing for a chain to approve; listing them as
+ * missing a setup would invent work nobody owes.
  */
-const ATTENDANCE_REQUIRED = "COALESCE(ne.attendance_required, 1) = 1";
+const ELIGIBLE = currentlyAttendanceEligible("ne");
 
 /**
  * A COMPLETED setup: an active mapping WITH a final approver on it.
@@ -124,12 +138,16 @@ class AttendanceApproverSetupRepository {
    * only invite mappings nobody can use. `search` matches the code or the
    * name.
    */
-  _listWhere({ department_id, store_id, designation_id, employee_id, search, setup_status }) {
-    // Active AND required to have attendance. Both, always: this screen is a
-    // list of people who need an approver chain, and an exempt employee needs
-    // none.
-    const where = ["ne.status = 1", ATTENDANCE_REQUIRED];
-    const params = [];
+  /**
+   * `today` is the IST business date the usecase resolved; every query that
+   * shares this WHERE must bind the SAME one, or the list and the counts
+   * could straddle a midnight and disagree.
+   */
+  _listWhere({ department_id, store_id, designation_id, employee_id, search, setup_status, today }) {
+    // The whole population rule, in one predicate, first so its two bound
+    // dates lead the parameter list.
+    const where = [ELIGIBLE.clause];
+    const params = [...currentlyAttendanceEligibleParams(today)];
     if (setup_status === "completed") where.push(SETUP_COMPLETED);
     if (setup_status === "missing") where.push(`NOT ${SETUP_COMPLETED}`);
     if (department_id) { where.push("ne.department_id = ?"); params.push(department_id); }
@@ -217,13 +235,26 @@ class AttendanceApproverSetupRepository {
     };
   }
 
-  /** The employees named in `ids`, with the two facts validation needs. */
+  /**
+   * The employees named in `ids`, with the facts validation needs.
+   *
+   * THE THREE ELIGIBILITY COLUMNS ARE SELECTED HERE AND NOWHERE ELSE in this
+   * repository: the usecase has to ask `eligibleOn` about the TARGET of a Set
+   * or Bulk Set, and the shared helper reads those columns by name. They are
+   * added to this one query rather than to EMPLOYEE_COLUMNS so the approver
+   * picker and the current-approver list keep the narrower shape they had.
+   *
+   * `date_of_joining` goes out already parsed by `JOINED_ON` and formatted,
+   * so the usecase never re-parses a VARCHAR that holds three shapes; the
+   * helper's own `toDateOnly` then reads a plain `YYYY-MM-DD`. Nothing
+   * sensitive is added - no contact, bank, statutory or salary field.
+   */
   async getEmployeesByIds(ids) {
     const list = [...new Set((ids || []).map(Number).filter((n) => Number.isInteger(n) && n > 0))];
     if (list.length === 0) return [];
     return this._read(
       "GET-EMPLOYEES-BY-IDS",
-      `SELECT ${EMPLOYEE_COLUMNS} ${EMPLOYEE_JOINS} WHERE ne.employee_id IN (?)`,
+      `SELECT ${EMPLOYEE_COLUMNS}, ${ELIGIBILITY_COLUMNS} ${EMPLOYEE_JOINS} WHERE ne.employee_id IN (?)`,
       [list]
     );
   }

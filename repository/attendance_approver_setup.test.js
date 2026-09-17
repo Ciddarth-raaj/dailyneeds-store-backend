@@ -28,12 +28,14 @@ describe("approver setup repository", () => {
   it("lists ACTIVE employees only, filtered by department, store, designation, employee and search", async () => {
     const { db, log } = fakeDb();
     const repo = buildSetupRepo(db);
-    await repo.listEmployeesWithSetup({ department_id: 2, store_id: 3, designation_id: 5, employee_id: 7, search: "raj", limit: 50, offset: 100 });
+    await repo.listEmployeesWithSetup({ today: "2026-09-17", department_id: 2, store_id: 3, designation_id: 5, employee_id: 7, search: "raj", limit: 50, offset: 100 });
     const { sql, params } = log[0];
-    // ACTIVE **and** attendance-required: an employee exempt from biometric
-    // attendance raises no request, so no chain is owed for them.
-    assert.match(sql, /WHERE ne\.status = 1 AND COALESCE\(ne\.attendance_required, 1\) = 1 AND ne\.department_id = \? AND ne\.store_id = \? AND ne\.designation_id = \? AND ne\.employee_id = \? AND \(ne\.employee_name LIKE \? OR CAST\(ne\.employee_id AS CHAR\) LIKE \?\)/);
-    assert.deepEqual(params, [2, 3, 5, 7, "%raj%", "%raj%", 50, 100]);
+    // CURRENTLY ATTENDANCE-ELIGIBLE, not `status = 1`: attendance is required
+    // of them, they have joined, and they have not left. The two bound dates
+    // of that predicate lead the parameter list.
+    assert.match(sql, /WHERE \(COALESCE\(ne\.attendance_required, 1\) = 1/);
+    assert.match(sql, /ne\.department_id = \? AND ne\.store_id = \? AND ne\.designation_id = \? AND ne\.employee_id = \? AND \(ne\.employee_name LIKE \? OR CAST\(ne\.employee_id AS CHAR\) LIKE \?\)/);
+    assert.deepEqual(params, ["2026-09-17", "2026-09-17", 2, 3, 5, 7, "%raj%", "%raj%", 50, 100]);
     assert.match(sql, /LEFT JOIN attendance_approver_setup s ON s\.employee_id = ne\.employee_id AND s\.is_active = 1/);
     assert.ok(!/salary|bank|aadhaar|pan_no|contact/i.test(sql), "no personal fields");
   });

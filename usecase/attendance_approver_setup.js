@@ -2,6 +2,8 @@ const {
   APPROVAL_LEVEL,
   validateApproverSetup,
 } = require("../utils/attendance_approval_chain");
+const { eligibleOn, exclusionReason } = require("../utils/attendance_eligibility");
+const { istToday } = require("../utils/istDate");
 
 /**
  * Attendance Approver Setup - the rules behind the employee-level chain.
@@ -59,7 +61,61 @@ const idOrNull = (v) => (v === null || v === undefined || v === "" ? null : Numb
  */
 const SETUP_STATUS = Object.freeze(["completed", "missing"]);
 
-module.exports = (approverSetupRepo) => {
+/**
+ * `deps.today` pins the business date for tests. It is NEVER a request field:
+ * the route's schema rejects unknown query keys, and "which day is it" is not
+ * a caller's to assert on a screen that decides who currently needs a setup.
+ */
+module.exports = (approverSetupRepo, deps = {}) => {
+  /**
+   * The IST business date every eligibility question in this file is asked
+   * on, resolved ONCE per operation. IST and not the process zone, through
+   * the shared `utils/istDate.js`: a server running in UTC would otherwise
+   * date every evening action to the day before and could refuse a setup for
+   * somebody whose joining date is today.
+   */
+  const businessToday = () => istToday(deps.today || null);
+
+  /**
+   * Is this employee somebody who currently needs an approver chain?
+   *
+   * The canonical rule, unmodified: `eligibleOn` from
+   * `utils/attendance_eligibility.js`, evaluated on today. The repository's
+   * list narrows the same population in SQL through
+   * `utils/attendance_eligibility_sql.js`; this is the same question asked of
+   * one row that has already been loaded.
+   */
+  const REFUSAL = Object.freeze({
+    ATTENDANCE_NOT_REQUIRED: "is not required to have attendance, so no approver setup is needed",
+    BEFORE_JOINING_DATE: "has not joined yet",
+    AFTER_RESIGNATION_DATE: "has already left",
+    INVALID_DATE: "cannot be placed in time",
+  });
+
+  /**
+   * Refuses a Set / Bulk Set whose TARGET no longer requires attendance.
+   *
+   * THE SCREEN HIDING THEM IS NOT THE BOUNDARY - this is. The list shows only
+   * the currently eligible population, but a direct API call, a stale tab or
+   * a bookmarked id could otherwise create or REACTIVATE a mapping for
+   * somebody exempt, unjoined or gone.
+   *
+   * It says nothing about the APPROVERS: an approver's own eligibility is the
+   * existing `isActive` rule in `validateApproverSetup`, unchanged. And it is
+   * not applied to Replace Approver, which exists precisely to clean an old
+   * approver out of mappings that may belong to people who have since left.
+   */
+  const assertTargetEligible = (employee, employeeId, today) => {
+    if (!employee) return; // "no such employee" is the existing error, raised below.
+    if (eligibleOn(employee, today)) return;
+    const reason = exclusionReason(employee, today);
+    const name = employee.employee_name ? `${employee.employee_name} (${employeeId})` : `Employee ${employeeId}`;
+    throw validationError(
+      `${name} ${REFUSAL[reason] || "does not currently require attendance"}; no approver setup can be assigned`,
+      [reason || "NOT_ATTENDANCE_ELIGIBLE"]
+    );
+  };
+
   /** The employees named anywhere in a setup, looked up once. */
   const factsFor = async (ids) => {
     const rows = await approverSetupRepo.getEmployeesByIds(ids);
@@ -103,7 +159,7 @@ module.exports = (approverSetupRepo) => {
    * Validate and save ONE employee's mapping. Shared by the single edit and
    * the bulk set, which differ only in the audit's action type.
    */
-  const saveOne = async ({ actor, setup, action_type }) => {
+  const saveOne = async ({ actor, setup, action_type, today }) => {
     const employeeId = Number(setup.employee_id);
     const previous = Number.isInteger(employeeId) ? await approverSetupRepo.getSetup(employeeId) : null;
     const facts = await factsFor([
@@ -112,6 +168,9 @@ module.exports = (approverSetupRepo) => {
       setup.second_level_approver_employee_id,
       setup.final_approver_employee_id,
     ]);
+    // BEFORE the chain is validated and long before anything is written: a
+    // refused target must leave no setup row and no audit row behind.
+    assertTargetEligible(facts.byId.get(employeeId), employeeId, today || businessToday());
     const verdict = validateApproverSetup(setup, {
       exists: facts.exists,
       isActive: facts.isActive,
@@ -153,6 +212,9 @@ module.exports = (approverSetupRepo) => {
       employee_id: idOrNull(filters.employee_id),
       search: filters.search || null,
       setup_status: SETUP_STATUS.includes(filters.setup_status) ? filters.setup_status : null,
+      // The rows, the total and the summary all bind THIS date, so the three
+      // answers describe one population at one moment.
+      today: businessToday(),
       limit: Number(filters.limit) > 0 ? Number(filters.limit) : 200,
       offset: Number(filters.offset) > 0 ? Number(filters.offset) : 0,
     };
@@ -240,12 +302,17 @@ module.exports = (approverSetupRepo) => {
 
     const updated = [];
     const failed = [];
+    // ONE business date for the whole run: a long bulk save must not straddle
+    // midnight and judge the first employees on one day and the rest on the
+    // next.
+    const today = businessToday();
     for (const employee_id of ids) {
       try {
         /* eslint-disable no-await-in-loop */
         const one = await saveOne({
           actor,
           action_type: "BULK_SET",
+          today,
           setup: { employee_id, first_level_approver_employee_id, second_level_approver_employee_id, final_approver_employee_id },
         });
         /* eslint-enable no-await-in-loop */

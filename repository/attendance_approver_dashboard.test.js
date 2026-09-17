@@ -44,23 +44,56 @@ function fakeDb(answers = () => []) {
   };
 }
 
+const TODAY = "2026-09-17";
 const ATTENDANCE_REQUIRED_SQL = /COALESCE\(ne\.attendance_required, 1\) = 1/;
+const RESIGNATION_SQL = /ne\.resignation_date IS NULL OR ne\.resignation_date >= \?/;
+const JOINING_SQL = /IS NULL OR \(\s*CASE WHEN ne\.date_of_joining/;
 const COMPLETED_SQL =
   /\(s\.attendance_approver_setup_id IS NOT NULL AND s\.final_approver_employee_id IS NOT NULL\)/;
 
 describe("the attendance-required scope", () => {
-  it("scopes the LIST to employees who actually require attendance", async () => {
+  it("scopes the LIST to employees who CURRENTLY require attendance", async () => {
     const { db, log } = fakeDb();
-    await buildSetupRepo(db).listEmployeesWithSetup({});
+    await buildSetupRepo(db).listEmployeesWithSetup({ today: TODAY });
     assert.match(log[0].sql, ATTENDANCE_REQUIRED_SQL);
-    assert.match(log[0].sql, /ne\.status = 1/);
+    assert.match(log[0].sql, RESIGNATION_SQL);
+    assert.match(log[0].sql, JOINING_SQL);
+  });
+
+  it("does NOT use ne.status as the employment test", async () => {
+    // The canonical helper says plainly that `status` is maintained by hand
+    // and left at 1 for most leavers: reading it would admit people who left
+    // years ago and could drop somebody still here whose status was never
+    // set. Only the dated facts decide.
+    const { db, log } = fakeDb(() => [{}]);
+    const repo = buildSetupRepo(db);
+    await repo.listEmployeesWithSetup({ today: TODAY });
+    await repo.countEmployeesWithSetup({ today: TODAY });
+    await repo.summariseEmployeesWithSetup({ today: TODAY });
+    for (const { sql } of log) {
+      const where = (sql.split("WHERE")[1] || "").split("ORDER BY")[0];
+      assert.ok(!/ne\.status/.test(where), `status must not scope the population: ${where}`);
+    }
+  });
+
+  it("binds the SAME business date to the list, the count and the summary", async () => {
+    // A list and a summary that straddled midnight would describe two
+    // different populations and the cards would stop adding up.
+    const { db, log } = fakeDb(() => [{ attendance_required: 1, completed: 1, missing: 0 }]);
+    const repo = buildSetupRepo(db);
+    await repo.listEmployeesWithSetup({ today: TODAY });
+    await repo.countEmployeesWithSetup({ today: TODAY });
+    await repo.summariseEmployeesWithSetup({ today: TODAY });
+    for (const { params } of log) {
+      assert.deepEqual(params.slice(0, 2), [TODAY, TODAY], "one business date, bound twice");
+    }
   });
 
   it("scopes the COUNT and the SUMMARY the same way", async () => {
     const { db, log } = fakeDb(() => [{ attendance_required: 0, completed: 0, missing: 0 }]);
     const repo = buildSetupRepo(db);
-    await repo.countEmployeesWithSetup({});
-    await repo.summariseEmployeesWithSetup({});
+    await repo.countEmployeesWithSetup({ today: TODAY });
+    await repo.summariseEmployeesWithSetup({ today: TODAY });
     assert.match(log[0].sql, ATTENDANCE_REQUIRED_SQL);
     assert.match(log[1].sql, ATTENDANCE_REQUIRED_SQL);
   });
@@ -68,8 +101,8 @@ describe("the attendance-required scope", () => {
   it("uses the EXISTING flag and invents no second one", async () => {
     const { db, log } = fakeDb(() => [{}]);
     const repo = buildSetupRepo(db);
-    await repo.listEmployeesWithSetup({});
-    await repo.summariseEmployeesWithSetup({});
+    await repo.listEmployeesWithSetup({ today: TODAY });
+    await repo.summariseEmployeesWithSetup({ today: TODAY });
     for (const { sql } of log) {
       assert.ok(
         !/attendance_exempt|requires_attendance|is_attendance|exempt_from/i.test(sql),
@@ -82,7 +115,7 @@ describe("the attendance-required scope", () => {
 describe("the summary counts", () => {
   it("counts required, completed and missing in ONE database query", async () => {
     const { db, log } = fakeDb(() => [{ attendance_required: 200, completed: 185, missing: 15 }]);
-    const summary = await buildSetupRepo(db).summariseEmployeesWithSetup({});
+    const summary = await buildSetupRepo(db).summariseEmployeesWithSetup({ today: TODAY });
 
     assert.equal(log.length, 1, "one round trip, not one per card");
     assert.deepEqual(summary, { attendance_required: 200, completed: 185, missing: 15 });
@@ -95,7 +128,7 @@ describe("the summary counts", () => {
     // are read against, and it holds by construction: the two CASEs are each
     // other's complement over the same COUNT(*).
     const { db, log } = fakeDb(() => [{ attendance_required: 7, completed: 3, missing: 4 }]);
-    const summary = await buildSetupRepo(db).summariseEmployeesWithSetup({});
+    const summary = await buildSetupRepo(db).summariseEmployeesWithSetup({ today: TODAY });
 
     assert.equal(summary.completed + summary.missing, summary.attendance_required);
     assert.match(log[0].sql, /SUM\(CASE WHEN .* THEN 1 ELSE 0 END\) AS completed/);
@@ -105,6 +138,7 @@ describe("the summary counts", () => {
   it("applies Department / Store / Designation / Employee / Search to the counts", async () => {
     const { db, log } = fakeDb(() => [{ attendance_required: 1, completed: 1, missing: 0 }]);
     await buildSetupRepo(db).summariseEmployeesWithSetup({
+      today: TODAY,
       department_id: 2,
       store_id: 3,
       designation_id: 5,
@@ -115,15 +149,16 @@ describe("the summary counts", () => {
     // The same predicates the table's own rows are filtered by, so the cards
     // describe the population the table is showing.
     assert.match(log[0].sql, /ne\.department_id = \? AND ne\.store_id = \? AND ne\.designation_id = \? AND ne\.employee_id = \?/);
-    assert.deepEqual(log[0].params, [2, 3, 5, 7, "%raj%", "%raj%"]);
+    // The eligibility predicate leads, so its two dates lead the params.
+    assert.deepEqual(log[0].params, [TODAY, TODAY, 2, 3, 5, 7, "%raj%", "%raj%"]);
   });
 
   it("IGNORES setup_status, so a selected card does not redraw the cards", async () => {
     const { db, log } = fakeDb(() => [{ attendance_required: 200, completed: 185, missing: 15 }]);
     const repo = buildSetupRepo(db);
 
-    await repo.summariseEmployeesWithSetup({ setup_status: "missing" });
-    await repo.summariseEmployeesWithSetup({ setup_status: "completed" });
+    await repo.summariseEmployeesWithSetup({ today: TODAY, setup_status: "missing" });
+    await repo.summariseEmployeesWithSetup({ today: TODAY, setup_status: "completed" });
 
     // Neither summary carries the row filter: both are the full split.
     for (const { sql } of log) {
@@ -139,7 +174,7 @@ describe("the summary counts", () => {
 
   it("reads a missing or non-numeric answer as zero rather than NaN", async () => {
     const { db } = fakeDb(() => []);
-    assert.deepEqual(await buildSetupRepo(db).summariseEmployeesWithSetup({}), {
+    assert.deepEqual(await buildSetupRepo(db).summariseEmployeesWithSetup({ today: TODAY }), {
       attendance_required: 0,
       completed: 0,
       missing: 0,
@@ -152,13 +187,13 @@ describe("the setup_status row filter", () => {
 
   it("completed means an ACTIVE mapping carrying a final approver", async () => {
     const { db, log } = fakeDb();
-    await buildSetupRepo(db).listEmployeesWithSetup({ setup_status: "completed" });
+    await buildSetupRepo(db).listEmployeesWithSetup({ today: TODAY, setup_status: "completed" });
     assert.match(whereOf(log), COMPLETED_SQL);
   });
 
   it("missing is its exact complement", async () => {
     const { db, log } = fakeDb();
-    await buildSetupRepo(db).listEmployeesWithSetup({ setup_status: "missing" });
+    await buildSetupRepo(db).listEmployeesWithSetup({ today: TODAY, setup_status: "missing" });
     assert.match(whereOf(log), /NOT \(s\.attendance_approver_setup_id IS NOT NULL AND s\.final_approver_employee_id IS NOT NULL\)/);
   });
 
@@ -167,8 +202,8 @@ describe("the setup_status row filter", () => {
     // enters this predicate, three of the four valid shapes stop counting.
     const { db, log } = fakeDb();
     const repo = buildSetupRepo(db);
-    await repo.listEmployeesWithSetup({ setup_status: "completed" });
-    await repo.listEmployeesWithSetup({ setup_status: "missing" });
+    await repo.listEmployeesWithSetup({ today: TODAY, setup_status: "completed" });
+    await repo.listEmployeesWithSetup({ today: TODAY, setup_status: "missing" });
 
     for (const entry of log) {
       const where = (entry.sql.split("WHERE")[1] || "").split("ORDER BY")[0];
@@ -179,7 +214,7 @@ describe("the setup_status row filter", () => {
 
   it("keeps the mapping join a LEFT JOIN, so employees with no mapping are still listed", async () => {
     const { db, log } = fakeDb();
-    await buildSetupRepo(db).listEmployeesWithSetup({ setup_status: "missing" });
+    await buildSetupRepo(db).listEmployeesWithSetup({ today: TODAY, setup_status: "missing" });
     assert.match(
       log[0].sql,
       /LEFT JOIN attendance_approver_setup s ON s\.employee_id = ne\.employee_id AND s\.is_active = 1/
@@ -205,8 +240,8 @@ describe("the setup_status row filter", () => {
   it("an absent or unknown status filters nothing", async () => {
     const { db, log } = fakeDb();
     const repo = buildSetupRepo(db);
-    await repo.listEmployeesWithSetup({});
-    await repo.listEmployeesWithSetup({ setup_status: "nonsense" });
+    await repo.listEmployeesWithSetup({ today: TODAY });
+    await repo.listEmployeesWithSetup({ today: TODAY, setup_status: "nonsense" });
     for (const entry of log) {
       const where = (entry.sql.split("WHERE")[1] || "").split("ORDER BY")[0];
       assert.ok(!/attendance_approver_setup_id IS NOT NULL/.test(where));
@@ -217,7 +252,7 @@ describe("the setup_status row filter", () => {
 describe("the main table's order", () => {
   it("orders by employee id NUMERICALLY, not by name", async () => {
     const { db, log } = fakeDb();
-    await buildSetupRepo(db).listEmployeesWithSetup({});
+    await buildSetupRepo(db).listEmployeesWithSetup({ today: TODAY });
     assert.match(log[0].sql, /ORDER BY ne\.employee_id ASC/);
     assert.ok(!/ORDER BY ne\.employee_name/.test(log[0].sql), "name is no longer the primary sort");
     // employee_id is INT (migration 20210901160746), so no CAST is needed and
