@@ -371,14 +371,23 @@ class TelegramMembershipReconcileUsecase {
           deferred = true;
           skipped.push({ telegram_group_id: groupId, reason: result.reason });
           break;
-        default:
+        default: {
           // RETRYABLE. The FIRST failure is kept and raised once the whole
           // pass has finished: every other group still gets its chance, and
           // the claims already written stay written - the job simply is not
           // finished, which is exactly what the queue is for.
-          retryable = retryable || result.error || new Error("removal failed");
+          const error = result.error || new Error("removal failed");
+          // EXCEPT A RATE LIMIT, WHICH ENDS THE PASS THERE AND THEN.
+          // Telegram has already refused; continuing to the next group
+          // spends more of a limit we are over, on a token the
+          // three-second poller is also using. It is raised immediately so
+          // no further call is made in this job and the queue delays it by
+          // exactly the `retry_after` Telegram named.
+          if (retryAfterOf(error)) throw error;
+          retryable = retryable || error;
           skipped.push({ telegram_group_id: groupId, reason: result.reason });
           break;
+        }
       }
     }
 
@@ -599,18 +608,56 @@ class TelegramMembershipReconcileUsecase {
     try {
       const member = await this.telegram.getChatMember(group.chat_id, userId);
 
-      // KICKED IS NOT ABSENT. Telegram's `kicked` means BANNED, and the only
-      // way to reach it here is our own removal having got half done: the
-      // ban succeeded and the unban that undoes it did not. Reading it as
-      // "not a member, so the cleanup worked" would close the claim over a
-      // person who cannot rejoin the group - the exact opposite of the
-      // remove-but-do-not-banish this phase promises, and invisible, because
-      // the record would say they were simply removed.
+      // KICKED IS NOT ABSENT, AND IT IS NOT NECESSARILY OURS.
       //
-      // So the ban is finished rather than repeated: the unban is retried on
-      // its own, WITHOUT a second ban, and only its success settles this.
+      // Telegram's `kicked` means BANNED. It can be our own removal half
+      // done - the ban succeeded, the unban that undoes it did not - and it
+      // can equally be an administrator who banned somebody deliberately,
+      // after an incident or at somebody's request. The word is identical.
+      //
+      // Reading it as "not a member, so the cleanup worked" would close the
+      // claim over a person who cannot rejoin. Unbanning it on sight would
+      // undo a human decision this system knows nothing about. So neither is
+      // done on Telegram's say-so: the question is asked of OUR OWN durable
+      // record of bans we issued and have not yet lifted.
       if (member && member.status === TELEGRAM_MEMBER_STATUS.KICKED) {
+        const ours =
+          this.claimRepo.hasOutstandingBan &&
+          (await this.claimRepo.hasOutstandingBan({
+            employeeTelegramId: identity.employee_telegram_id,
+            telegramGroupId: groupId,
+          }));
+
+        if (!ours) {
+          // SOMEBODY ELSE'S BAN. Not undone, and not reported as cleanup
+          // either - the claim stays REMOVAL_PENDING and the job retries
+          // into the dead-letter list, where a person can see it and decide.
+          await this.claimRepo.recordEvent({
+            employeeId,
+            telegramGroupId: groupId,
+            employeeTelegramId: identity.employee_telegram_id,
+            eventType: MEMBERSHIP_EVENT.SKIPPED_NOT_READY,
+            detailCode: DETAIL_CODE.EXTERNAL_BAN,
+            jobId,
+          });
+          return {
+            removed: false,
+            settled: false,
+            error: new TelegramMembershipRetryableError(
+              "the account is banned by somebody else; this needs a person",
+              { code: "EXTERNAL_BAN" }
+            ),
+          };
+        }
+
+        // OURS, AND STILL OUTSTANDING. Finish it rather than repeat it: the
+        // unban alone, with no second ban - they are already out, a second
+        // ban achieves nothing and costs a call.
         await this.telegram.unbanChatMember(group.chat_id, userId);
+        await this.claimRepo.clearBan({
+          employeeTelegramId: identity.employee_telegram_id,
+          telegramGroupId: groupId,
+        });
         await this.claimRepo.recordEvent({
           employeeId,
           telegramGroupId: groupId,
@@ -644,9 +691,27 @@ class TelegramMembershipReconcileUsecase {
         jobId,
       });
       await this.telegram.banChatMember(group.chat_id, userId);
+      // THE BAN IS NOW OUTSTANDING, AND RECORDED AS OURS BEFORE THE UNBAN IS
+      // ATTEMPTED. If the unban below fails - or this process dies between
+      // the two - this row is the only thing that will later distinguish our
+      // half-finished removal from an administrator's deliberate ban.
+      if (this.claimRepo.recordBan) {
+        await this.claimRepo.recordBan({
+          employeeTelegramId: identity.employee_telegram_id,
+          telegramGroupId: groupId,
+          employeeId,
+          bannedAt: this.now(),
+        });
+      }
       // UNBAN IMMEDIATELY. They are removed, not banished - a rejoin or a new
       // manual grant must not need somebody to remember to undo this.
       await this.telegram.unbanChatMember(group.chat_id, userId);
+      if (this.claimRepo.clearBan) {
+        await this.claimRepo.clearBan({
+          employeeTelegramId: identity.employee_telegram_id,
+          telegramGroupId: groupId,
+        });
+      }
       await this.claimRepo.recordEvent({
         employeeId,
         telegramGroupId: groupId,

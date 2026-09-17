@@ -82,6 +82,12 @@ const DETAIL_CODE = {
   ALREADY_IN_GROUP: "ALREADY_IN_GROUP",
   /** They were left banned by a half-finished removal; the ban is now lifted. */
   BAN_LIFTED: "BAN_LIFTED",
+  /**
+   * Banned, but not by us - no outstanding ban of ours exists for this
+   * identity and group. Somebody made that decision deliberately and this
+   * system does not undo it.
+   */
+  EXTERNAL_BAN: "EXTERNAL_BAN",
   NOT_IN_GROUP: "NOT_IN_GROUP",
   HISTORICAL_IDENTITY: "HISTORICAL_IDENTITY",
   REMOVAL_DISABLED: "REMOVAL_DISABLED",
@@ -158,6 +164,8 @@ const REMOVAL_REFUSAL = {
   TELEGRAM_UNAVAILABLE: "TELEGRAM_UNAVAILABLE",
   CAP_REACHED: "CAP_REACHED",
   IDENTITY_REUSED: "IDENTITY_REUSED",
+  /** Banned by somebody else. Needs a person, and never an automatic unban. */
+  EXTERNAL_BAN: "EXTERNAL_BAN",
 };
 
 module.exports = {

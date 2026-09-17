@@ -56,6 +56,12 @@ const build = (over = {}) => {
     ...over,
   };
   const calls = { bans: [], unbans: [], events: [], getChatMember: [] };
+  /**
+   * The durable record of bans WE issued and have not yet lifted. A Set of
+   * `identity:group`, which is exactly what the table stores - our identity
+   * row id and the group, and no Telegram identifier.
+   */
+  const outstandingBans = state.outstandingBans || new Set();
 
   const find = (employeeId, groupId, source) =>
     state.claims.find(
@@ -129,6 +135,14 @@ const build = (over = {}) => {
     recordEvent: async (event) => {
       calls.events.push(event);
     },
+    recordBan: async ({ employeeTelegramId, telegramGroupId }) => {
+      outstandingBans.add(`${employeeTelegramId}:${telegramGroupId}`);
+    },
+    hasOutstandingBan: async ({ employeeTelegramId, telegramGroupId }) =>
+      outstandingBans.has(`${employeeTelegramId}:${telegramGroupId}`),
+    clearBan: async ({ employeeTelegramId, telegramGroupId }) => ({
+      changed: outstandingBans.delete(`${employeeTelegramId}:${telegramGroupId}`),
+    }),
   };
 
   const usecase = buildReconcile({
@@ -178,7 +192,7 @@ const build = (over = {}) => {
     now: () => NOW,
   });
 
-  return { usecase, state, calls, claim: find };
+  return { usecase, state, calls, claim: find, outstandingBans };
 };
 
 const events = (calls, type) => calls.events.filter((e) => e.eventType === type);
@@ -441,6 +455,197 @@ describe("a ban that succeeded and an unban that did not", () => {
 
     assert.deepEqual(world.calls.unbans, [], "somebody else's account is not touched at all");
     assert.deepEqual(world.calls.bans, []);
+  });
+});
+
+describe("a ban is only ever undone if we can prove it is ours", () => {
+  const pending = async (world) => {
+    await world.usecase.reconcileEmployee(42);
+    world.state.mappings = [];
+  };
+
+  /** Telegram now reports the employee as banned. */
+  const reportsKicked = (world) => {
+    world.state.members.delete("-10010:555001");
+    const real = world.usecase.telegram.getChatMember;
+    world.usecase.telegram.getChatMember = async (chatId, userId) =>
+      Number(userId) === 777 ? real(chatId, userId) : { status: "kicked" };
+  };
+
+  it("OUR ban that could not be lifted leaves durable recovery state", async () => {
+    const world = build();
+    await pending(world);
+    world.usecase.telegram.unbanChatMember = async () => {
+      throw new Error("ETIMEDOUT");
+    };
+
+    await expectRetryable(() => world.usecase.reconcileEmployee(42, {}));
+
+    assert.equal(world.calls.bans.length, 1);
+    assert.ok(world.outstandingBans.has("900:10"), "the ban is recorded as ours, still outstanding");
+    assert.equal(world.claim(42, 10, CLAIM_SOURCE.RULE).state, CLAIM_STATE.REMOVAL_PENDING);
+  });
+
+  it("the retry lifts OUR ban, clears the state, and settles - with no second ban", async () => {
+    const world = build();
+    await pending(world);
+    let failNextUnban = true;
+    world.usecase.telegram.unbanChatMember = async (chatId, userId) => {
+      if (failNextUnban) {
+        failNextUnban = false;
+        throw new Error("ETIMEDOUT");
+      }
+      world.calls.unbans.push({ chatId, userId });
+      return true;
+    };
+    await expectRetryable(() => world.usecase.reconcileEmployee(42, {}));
+    reportsKicked(world);
+    const bansBefore = world.calls.bans.length;
+
+    await world.usecase.reconcileEmployee(42, {});
+
+    assert.equal(world.calls.bans.length, bansBefore, "no second ban");
+    assert.equal(world.calls.unbans.length, 1);
+    assert.ok(!world.outstandingBans.has("900:10"), "the recovery state is cleared");
+    const claim = world.claim(42, 10, CLAIM_SOURCE.RULE);
+    assert.equal(claim.state, CLAIM_STATE.CLOSED);
+    assert.equal(claim.close_outcome, CLOSE_OUTCOME.REMOVED);
+  });
+
+  it("A BAN THAT IS NOT OURS IS NEVER UNDONE", async () => {
+    // An administrator banned somebody deliberately. Telegram says `kicked`
+    // either way; only our own record can tell the two apart, and there is
+    // no record here.
+    const world = build();
+    await pending(world);
+    reportsKicked(world);
+
+    await expectRetryable(() => world.usecase.reconcileEmployee(42, {}));
+
+    assert.deepEqual(world.calls.unbans, [], "somebody's deliberate ban stands");
+    assert.deepEqual(world.calls.bans, []);
+    const claim = world.claim(42, 10, CLAIM_SOURCE.RULE);
+    assert.equal(claim.state, CLAIM_STATE.REMOVAL_PENDING);
+    assert.notEqual(claim.close_outcome, CLOSE_OUTCOME.ALREADY_ABSENT, "and it is not called cleanup");
+    assert.equal(
+      events(world.calls, MEMBERSHIP_EVENT.SKIPPED_NOT_READY).filter(
+        (e) => e.detailCode === "EXTERNAL_BAN"
+      ).length,
+      1
+    );
+  });
+
+  it("THE REUSE GUARD STILL COMES FIRST, even with recovery state present", async () => {
+    // The account is banned, we have a record of banning it, and it now
+    // belongs to somebody else. Nothing is touched.
+    const world = build();
+    world.state.identities = [
+      {
+        employee_telegram_id: 900,
+        employee_id: 42,
+        telegram_user_id: 555001,
+        disconnected_at: new Date("2026-05-01"),
+      },
+    ];
+    world.outstandingBans.add("900:10");
+    world.state.activeOwner[555001] = { employee_id: 43, employee_telegram_id: 950 };
+    await pending(world);
+    reportsKicked(world);
+
+    await world.usecase.reconcileEmployee(42, {});
+
+    assert.deepEqual(world.calls.unbans, [], "another employee's account is not unbanned");
+    assert.deepEqual(world.calls.bans, []);
+    assert.equal(
+      events(world.calls, MEMBERSHIP_EVENT.IDENTITY_REUSED_BY_OTHER_EMPLOYEE).length,
+      1
+    );
+  });
+
+  it("A CLEAN removal leaves NO recovery state behind", async () => {
+    const world = build();
+    await pending(world);
+    await world.usecase.reconcileEmployee(42, {});
+    assert.equal(world.calls.bans.length, 1);
+    assert.equal(world.calls.unbans.length, 1);
+    assert.equal(world.outstandingBans.size, 0, "nothing is left outstanding");
+  });
+
+  it("the recovery state is written BEFORE the unban is attempted", async () => {
+    // If the process dies between the ban and the unban, that row is the
+    // only thing that will later tell our half-finished removal from an
+    // administrator's deliberate ban.
+    const world = build();
+    await pending(world);
+    let sawStateAtUnban = null;
+    world.usecase.telegram.unbanChatMember = async (chatId, userId) => {
+      sawStateAtUnban = world.outstandingBans.has("900:10");
+      world.calls.unbans.push({ chatId, userId });
+      return true;
+    };
+    await world.usecase.reconcileEmployee(42, {});
+    assert.equal(sawStateAtUnban, true);
+  });
+});
+
+describe("a rate limit on the REMOVAL side", () => {
+  const rateLimited = () => {
+    const err = new Error("Too Many Requests: retry after 37");
+    err.parameters = { retry_after: 37 };
+    return err;
+  };
+
+  it("STOPS THE PASS: the second group receives no Telegram call at all", async () => {
+    const world = build();
+    world.state.mappings = [
+      { telegram_group_id: 10, mapping_type: "ALL_EMPLOYEES", target_id: 0, group: GROUP(10) },
+      { telegram_group_id: 11, mapping_type: "ALL_EMPLOYEES", target_id: 0, group: GROUP(11) },
+    ];
+    world.state.members.add("-10011:555001");
+    await world.usecase.reconcileEmployee(42);
+    world.state.mappings = [];
+    world.calls.getChatMember.length = 0;
+
+    // The ban itself is rate limited, in whichever group is reached first.
+    world.usecase.telegram.banChatMember = async () => {
+      throw rateLimited();
+    };
+
+    const err = await expectRetryable(() => world.usecase.reconcileEmployee(42, {}));
+
+    assert.equal(err.retryAfter, 37, "Telegram's own retry_after, exactly");
+    const chats = new Set(world.calls.getChatMember.map((c) => c.chatId));
+    chats.delete(undefined);
+    assert.equal(
+      [...chats].filter((chat) => chat === "-10010" || chat === "-10011").length,
+      1,
+      "only the first group was touched"
+    );
+    // And both claims are still pending: nothing was concluded.
+    assert.equal(world.claim(42, 10, CLAIM_SOURCE.RULE).state, CLAIM_STATE.REMOVAL_PENDING);
+    assert.equal(world.claim(42, 11, CLAIM_SOURCE.RULE).state, CLAIM_STATE.REMOVAL_PENDING);
+  });
+
+  it("an ORDINARY removal failure still lets the other groups have their turn", async () => {
+    const world = build();
+    world.state.mappings = [
+      { telegram_group_id: 10, mapping_type: "ALL_EMPLOYEES", target_id: 0, group: GROUP(10) },
+      { telegram_group_id: 11, mapping_type: "ALL_EMPLOYEES", target_id: 0, group: GROUP(11) },
+    ];
+    world.state.members.add("-10011:555001");
+    await world.usecase.reconcileEmployee(42);
+    world.state.mappings = [];
+    world.usecase.telegram.banChatMember = async (chatId, userId) => {
+      if (chatId === "-10010") throw new Error("ETIMEDOUT");
+      world.calls.bans.push({ chatId, userId });
+      world.state.members.delete(`${chatId}:${userId}`);
+      return true;
+    };
+
+    await expectRetryable(() => world.usecase.reconcileEmployee(42, {}));
+
+    assert.equal(world.calls.bans.length, 1, "the second group was still attempted");
+    assert.equal(world.calls.bans[0].chatId, "-10011");
   });
 });
 

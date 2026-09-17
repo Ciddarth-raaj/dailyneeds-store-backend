@@ -14,6 +14,7 @@ const {
 
 const TABLE = "employee_telegram_group_membership";
 const EVENTS = "employee_telegram_group_membership_event";
+const BAN_RECOVERY = "employee_telegram_group_ban_recovery";
 
 /**
  * MANAGED MEMBERSHIP CLAIMS - SQL only. Phase 3C.
@@ -315,6 +316,54 @@ class TelegramMembershipClaimRepository {
         WHERE employee_id = ? AND telegram_group_id = ? AND source = ?
           AND adopted_from_existing_member = 0`,
       [Number(employeeId), Number(telegramGroupId), source],
+      tx
+    );
+    return { changed: Boolean(res && res.affectedRows) };
+  }
+
+  /* -------------------------------------------------- ban recovery ------ */
+  /**
+   * OUTSTANDING BANS OF OUR OWN. Written after our `banChatMember` succeeds,
+   * deleted after the unban that clears it succeeds - so a row here means
+   * exactly one thing: WE banned this identity out of this group and have
+   * not yet lifted it.
+   *
+   * That is the only evidence the recovery path may act on. Telegram's
+   * `kicked` says an account is banned and nothing about who banned it, so
+   * an administrator's deliberate ban reads identically - and unbanning on
+   * the strength of it would undo a human decision in a real group.
+   */
+  async recordBan({ employeeTelegramId, telegramGroupId, employeeId, bannedAt }, { tx } = {}) {
+    await this._query(
+      "RECORD-BAN",
+      `INSERT INTO ${BAN_RECOVERY}
+         (employee_telegram_id, telegram_group_id, employee_id, banned_at)
+       VALUES (?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE banned_at = VALUES(banned_at)`,
+      [Number(employeeTelegramId), Number(telegramGroupId), Number(employeeId), bannedAt],
+      tx
+    );
+  }
+
+  /** Is there an outstanding ban of ours for this identity in this group? */
+  async hasOutstandingBan({ employeeTelegramId, telegramGroupId }, { tx } = {}) {
+    const rows = await this._query(
+      "HAS-OUTSTANDING-BAN",
+      `SELECT employee_telegram_group_ban_recovery_id FROM ${BAN_RECOVERY}
+        WHERE employee_telegram_id = ? AND telegram_group_id = ?`,
+      [Number(employeeTelegramId), Number(telegramGroupId)],
+      tx
+    );
+    return Boolean(rows && rows.length);
+  }
+
+  /** The ban is lifted; the instruction to lift it is no longer outstanding. */
+  async clearBan({ employeeTelegramId, telegramGroupId }, { tx } = {}) {
+    const res = await this._query(
+      "CLEAR-BAN",
+      `DELETE FROM ${BAN_RECOVERY}
+        WHERE employee_telegram_id = ? AND telegram_group_id = ?`,
+      [Number(employeeTelegramId), Number(telegramGroupId)],
       tx
     );
     return { changed: Boolean(res && res.affectedRows) };

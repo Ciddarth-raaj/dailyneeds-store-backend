@@ -30,10 +30,12 @@ const one = (sql) => strip(sql).replace(/\s+/g, " ");
 const CLAIM = "20260917100000-telegram-membership-claim";
 const JOB = "20260917110000-telegram-membership-job";
 const EVENT = "20260917130000-telegram-membership-event";
+const BAN_RECOVERY = "20260917140000-telegram-ban-recovery";
 
 const claimUp = one(read(`${CLAIM}-up.sql`));
 const jobUp = one(read(`${JOB}-up.sql`));
 const eventUp = one(read(`${EVENT}-up.sql`));
+const banUp = one(read(`${BAN_RECOVERY}-up.sql`));
 
 const enumValues = (sql, column) => {
   const match = new RegExp("`" + column + "` ENUM\\(([^)]*)\\)").exec(sql);
@@ -42,7 +44,7 @@ const enumValues = (sql, column) => {
 };
 
 describe("the migration files", () => {
-  for (const name of [CLAIM, JOB, EVENT]) {
+  for (const name of [CLAIM, JOB, EVENT, BAN_RECOVERY]) {
     it(`${name} reads its own two files and owns its timestamp`, () => {
       const js = fs.readFileSync(path.join(__dirname, "mysql/migrations", `${name}.js`), "utf8");
       assert.match(js, new RegExp(`${name}-up\\.sql`));
@@ -56,7 +58,7 @@ describe("the migration files", () => {
   }
 
   it("all three are additive - they create tables and alter nothing", () => {
-    for (const sql of [claimUp, jobUp, eventUp]) {
+    for (const sql of [claimUp, jobUp, eventUp, banUp]) {
       // `ON UPDATE CURRENT_TIMESTAMP` is a column default, not a statement,
       // so the check is for statements that would touch existing data.
       assert.ok(!/ALTER TABLE|DROP TABLE|DELETE FROM|UPDATE `/i.test(sql));
@@ -69,6 +71,7 @@ describe("the migration files", () => {
       [CLAIM, "employee_telegram_group_membership"],
       [JOB, "telegram_membership_job"],
       [EVENT, "employee_telegram_group_membership_event"],
+      [BAN_RECOVERY, "employee_telegram_group_ban_recovery"],
     ]) {
       const down = one(read(`${name}-down.sql`));
       assert.match(down, new RegExp(`DROP TABLE IF EXISTS \`${table}\``));
@@ -138,5 +141,33 @@ describe("the event table", () => {
   it("names OUR identity row, never a Telegram user id", () => {
     assert.match(eventUp, /`employee_telegram_id` INT NULL/);
     assert.ok(!/telegram_user_id|chat_id|mobile/.test(eventUp));
+  });
+});
+
+describe("the ban-recovery table", () => {
+  it("is keyed by OUR identity row and the group, one row per pair", () => {
+    assert.match(
+      banUp,
+      /UNIQUE KEY `uq_etgbr_identity_group` \(`employee_telegram_id`,`telegram_group_id`\)/
+    );
+    assert.match(banUp, /`banned_at` DATETIME NOT NULL/);
+  });
+
+  it("STORES NO TELEGRAM IDENTIFIER - that is the whole point of it", () => {
+    // It answers one question: did WE ban this identity out of this group,
+    // and is that ban still outstanding. Nothing about the account itself.
+    assert.ok(!/telegram_user_id|chat_id|mobile|token|invite/.test(banUp));
+  });
+
+  it("cascades from both parents, so it cannot outlive what it describes", () => {
+    assert.match(
+      banUp,
+      /CONSTRAINT `fk_etgbr_identity` FOREIGN KEY \(`employee_telegram_id`\) REFERENCES `employee_telegram_identity`/
+    );
+    assert.match(
+      banUp,
+      /CONSTRAINT `fk_etgbr_group` FOREIGN KEY \(`telegram_group_id`\) REFERENCES `telegram_group_registry`/
+    );
+    assert.equal((banUp.match(/ON DELETE CASCADE/g) || []).length, 2);
   });
 });
