@@ -72,7 +72,11 @@ function monthWindow(year, month) {
  * VARCHAR that `utils/joining_date.js` parses and that is genuinely null for
  * some old records; treating null as "never employed" would block six hundred
  * people over a data-entry gap rather than a payroll fact. Null means the
- * window is open at that end, and the employee's `status` still applies.
+ * window is open at that end.
+ *
+ * NEITHER BOUND READS `status`, for the reason `resignedForMonth` gives below:
+ * whether somebody was employed in August is answered by dates, and the
+ * current master row cannot answer it.
  */
 function employedInMonth({ year, month, joined_on = null, ended_on = null }) {
   const { from, to } = monthWindow(year, month);
@@ -142,14 +146,53 @@ function defaultPayType(employee = {}, { resigned = false } = {}) {
   return { pay_type: PAY_TYPE.CASH, pay_type_source: PAY_TYPE_SOURCE.EMPLOYEE_MASTER };
 }
 
-/** Has this employee left on or before the end of the month being run? */
-function resignedForMonth({ year, month, ended_on = null, status = null }) {
+/**
+ * HAD THIS EMPLOYEE LEFT BY THE END OF THE MONTH BEING RUN?
+ *
+ * THE DATE DECIDES, AND ONLY THE DATE. A payrun is an EFFECTIVE-DATED monthly
+ * record, and the question it asks is about the month, not about today.
+ *
+ * WHY THE CURRENT `status` IS NOT CONSULTED, AND MUST NOT BE. It was, and it
+ * was a bug: somebody who worked all of August and resigned on 10 September
+ * carries a resigned `status` from that day on, so reading it made August's
+ * payrun call them resigned and default their August pay type to CASH -
+ * months after August was over, and changing depending on WHEN somebody
+ * opened the screen. `status` is a fact about NOW; it has no date on it and
+ * cannot answer a question about a month in the past. Letting it decide is
+ * the Employee Master rewriting history.
+ *
+ *   exit date on or before the month end   resigned FOR THAT MONTH
+ *   exit date after the month end          NOT resigned for that month - the
+ *                                          Employee Master's pay type applies
+ *                                          normally, exactly as it did then
+ *   no exit date at all                    NOT resigned. An undated exit
+ *                                          cannot be placed in a month, and
+ *                                          guessing "it must have been before
+ *                                          this one" would silently rewrite
+ *                                          every earlier month to CASH.
+ *
+ * THIS IS THE SAME PREDICATE THE POPULATION QUERY ALREADY USES, deliberately:
+ * `repository/payrun.js#listPopulation` decides who is in the month from
+ * `resignation_date` and the joining date and never from `status`, for the
+ * reason `repository/attendance_dashboard.js` records at length - `status` is
+ * maintained by hand and has been left at 1 for most leavers. Two answers
+ * about the same person, one dated and one not, is how a month's population
+ * and a month's pay types end up disagreeing.
+ *
+ * WHICH EXIT DATE. `new_employee.resignation_date` - the same column the
+ * attendance engine, the dashboard and the population query all read.
+ * `employee_employment_period` is the richer lifecycle record and will be the
+ * right source eventually, but it is NOT consulted here for exactly the reason
+ * `repository/attendance_calculation.js#listEmployeesForRecalculation` and
+ * `repository/attendance_dashboard.js#listApplicableEmployees` both state:
+ * its C1b backfill still carries rows flagged `needs_review`, so payroll reads
+ * the column payroll reads. Changing that is a decision for all of payroll and
+ * attendance at once, not something one eligibility rule does on its own.
+ */
+function resignedForMonth({ year, month, ended_on = null }) {
   const { to } = monthWindow(year, month);
   const ended = toDateOnly(ended_on);
-  if (ended && ended <= to) return true;
-  // `status` 1 is employed; anything else is not - the same reading
-  // `repository/employee.js` records for that column.
-  return status !== null && status !== undefined && Number(status) !== 1;
+  return Boolean(ended && ended <= to);
 }
 
 /** A reason code paired with the sentence a person reads. */
@@ -162,8 +205,11 @@ function reasonOf(code) {
  *
  * @param {object} input
  * @param {number} input.year, input.month      the payroll month
- * @param {object} input.employee               the master row (status, dates,
- *                                              statutory flags, payment_type)
+ * @param {object} input.employee               the master row - the dated
+ *                                              employment facts, the statutory
+ *                                              flags and `payment_type`. Its
+ *                                              `status` is deliberately not
+ *                                              read: see `resignedForMonth`.
  * @param {object|null} input.salary            the APPROVED salary effective
  *                                              for the month, or null
  * @param {object|null} input.attendance        the stored
@@ -191,11 +237,15 @@ function evaluateEmployee(input = {}) {
     existing = null,
   } = input;
 
+  /*
+   * DATED, NOT CURRENT. `employee.status` is deliberately NOT passed: it says
+   * what is true today and would make a past month's pay type depend on when
+   * somebody happened to open the screen. See `resignedForMonth`.
+   */
   const resigned = resignedForMonth({
     year,
     month,
     ended_on: employee.resignation_date,
-    status: employee.status,
   });
 
   const reasons = [];
