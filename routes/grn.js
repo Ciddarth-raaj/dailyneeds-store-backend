@@ -2,6 +2,9 @@ const router = require("express").Router();
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
 const P = require("../constants/grn_permissions");
+const {
+  VERIFICATION_START_DATE,
+} = require("../constants/grn_verification");
 
 const ignoreItemSchema = Joi.object({
   refno: Joi.alternatives().try(Joi.string(), Joi.number()).required(),
@@ -232,7 +235,10 @@ class GrnRoutes {
      *
      * A repeat approval answers 200 with the ORIGINAL verifier and time and
      * `already_verified: true`, so a double click is harmless and the audit
-     * record is never overwritten.
+     * record is never overwritten. A GRN dated before
+     * VERIFICATION_START_DATE is refused with a 400: verification is not
+     * retrospective, and the screens hiding the button is presentation, not
+     * the boundary.
      */
     router.post(
       "/:refno/verify",
@@ -257,6 +263,14 @@ class GrnRoutes {
           const result = await this.grnUsecase.verifyGrn(refno, verifiedBy);
           if (!result) {
             res.status(404).json({ code: 404, msg: "GRN not found" });
+            res.end();
+            return;
+          }
+          if (result.out_of_scope) {
+            res.status(400).json({
+              code: 400,
+              msg: `GRN verification applies to GRNs dated ${VERIFICATION_START_DATE} onwards; this GRN is older and cannot be verified`,
+            });
             res.end();
             return;
           }

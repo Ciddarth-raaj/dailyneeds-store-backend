@@ -1,4 +1,5 @@
 const logger = require("../utils/logger");
+const { isGrnVerifiable } = require("../constants/grn_verification");
 
 function tagOfferProducts(items, activeOfferProductIds) {
   items.forEach((item) => {
@@ -76,13 +77,16 @@ const PENDING_VERIFICATION = Object.freeze({
 });
 
 /**
- * The verification block every GRN payload carries.
+ * The verification block for a GRN that IS in scope.
  *
- * Always present, never undefined: a GRN that predates this feature - which
- * is every GRN already in GoFrugal - reads as PENDING rather than as a
- * missing field the frontend has to interpret. The verifier's display NAME
- * is resolved here too, so a list of fifty GRNs does not turn into fifty
- * employee lookups from the browser.
+ * An in-scope GRN always carries one, never undefined: an unverified one
+ * reads as PENDING rather than as a missing field the frontend has to
+ * interpret. The verifier's display NAME is resolved here too, so a list of
+ * fifty GRNs does not turn into fifty employee lookups from the browser.
+ *
+ * A GRN dated before VERIFICATION_START_DATE gets `null` instead - see
+ * verificationFor below. `null` is the one thing that means "verification
+ * does not apply to this bill", and the screens render nothing at all for it.
  */
 function verificationOf(row) {
   if (!row) return { ...PENDING_VERIFICATION };
@@ -92,6 +96,18 @@ function verificationOf(row) {
     verified_by_name: row.verified_by_name ?? null,
     verified_at: row.verified_at ?? null,
   };
+}
+
+/**
+ * The verification a GRN payload should carry, scope included.
+ *
+ * Verification is not retrospective, so a GRN dated before the start date
+ * gets null: no status, no columns, no button. Everything from the start
+ * date on gets the ordinary block, PENDING until somebody signs it off.
+ */
+function verificationFor(header, row) {
+  if (!isGrnVerifiable(header?.mmh_mrc_dt)) return null;
+  return verificationOf(row);
 }
 
 function verificationsByRefno(rows) {
@@ -121,10 +137,11 @@ class GrnUsecase {
       );
       return headers.map((header) => ({
         ...header,
-        verification:
-          byRefno.get(String(header.mmh_mrc_refno)) ?? {
-            ...PENDING_VERIFICATION,
-          },
+        verification: isGrnVerifiable(header.mmh_mrc_dt)
+          ? byRefno.get(String(header.mmh_mrc_refno)) ?? {
+              ...PENDING_VERIFICATION,
+            }
+          : null,
       }));
     } catch (err) {
       logger.Log({
@@ -166,7 +183,7 @@ class GrnUsecase {
         new Set(ignoredRows.map((row) => String(row.mmd_mrc_sl_no)))
       );
 
-      detail.verification = verificationOf(verificationRow);
+      detail.verification = verificationFor(detail.header, verificationRow);
 
       return detail;
     } catch (err) {
@@ -252,6 +269,9 @@ class GrnUsecase {
    * cannot rewrite who signed it off. Any other database error propagates
    * rather than passing for a duplicate. Reopening a verification is
    * deliberately not offered here.
+   *
+   * A GRN dated before VERIFICATION_START_DATE answers `{ out_of_scope: true }`
+   * and writes nothing: verification is not retrospective.
    */
   async verifyGrn(refno, verifiedBy) {
     try {
@@ -264,6 +284,15 @@ class GrnUsecase {
 
       const detail = await this.stockReceivedRepo.listGrnDetailByRefno(refno);
       if (!detail) return null;
+
+      // OUT OF SCOPE BILLS ARE REFUSED, not quietly recorded. The screens
+      // give an old GRN no button, but the endpoint is the boundary that
+      // actually holds: a stale tab, a bookmarked URL or a direct call must
+      // not be able to write an audit row for a bill the programme never
+      // covered.
+      if (!isGrnVerifiable(detail.header?.mmh_mrc_dt)) {
+        return { out_of_scope: true };
+      }
 
       const { created } = await this.stockReceivedRepo.insertGrnVerification(
         refno,

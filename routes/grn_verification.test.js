@@ -38,7 +38,7 @@ const P = require("../constants/grn_permissions");
  * refusing the second insert, and the timestamp set by the store rather than
  * the caller.
  */
-function fakeRepo({ refnos = ["GRN-1"], verified = null } = {}) {
+function fakeRepo({ refnos = ["GRN-1"], verified = null, grnDate = "2026-09-17" } = {}) {
   const rows = new Map();
   const calls = { inserts: [] };
   if (verified) rows.set(String(verified.mmh_mrc_refno), { ...verified });
@@ -49,14 +49,17 @@ function fakeRepo({ refnos = ["GRN-1"], verified = null } = {}) {
     listGrnHeaders: async () =>
       refnos.map((refno, i) => ({
         mmh_mrc_refno: refno,
-        mmh_mrc_dt: "2026-09-17",
+        mmh_mrc_dt: grnDate,
         supplier_name: "ACME",
         mmh_mrc_amt: 100 + i,
         product_count: 1,
       })),
     listGrnDetailByRefno: async (refno) =>
       refnos.includes(String(refno))
-        ? { header: { mmh_mrc_refno: String(refno) }, items: [] }
+        ? {
+            header: { mmh_mrc_refno: String(refno), mmh_mrc_dt: grnDate },
+            items: [],
+          }
         : null,
     listIgnoredGrnIssueKeysByRefno: async () => [],
     listGrnVerificationsByRefnos: async (keys) =>
@@ -443,5 +446,89 @@ describe("verification state on the GRN list and detail", () => {
     assert.equal(detail.verification.status, "VERIFIED");
     assert.equal(detail.verification.verified_by, 42);
     assert.equal(detail.verification.verified_at, "2026-09-17T10:30:00Z");
+  });
+});
+
+describe("verification is not retrospective", () => {
+  const OLD = "2026-09-16";
+
+  it("gives a GRN dated before the start date NO verification block", async () => {
+    const usecase = buildUsecase(fakeRepo({ grnDate: OLD }));
+
+    const [header] = await usecase.listGrnHeaders({});
+    const detail = await usecase.getGrnDetailByRefno("GRN-1");
+
+    // null, not PENDING: the columns show nothing at all for an old bill.
+    assert.equal(header.verification, null);
+    assert.equal(detail.verification, null);
+  });
+
+  it("still gives an in-scope GRN its PENDING block", async () => {
+    const usecase = buildUsecase(fakeRepo({ grnDate: "2026-09-17" }));
+
+    const [header] = await usecase.listGrnHeaders({});
+    assert.equal(header.verification.status, "PENDING");
+  });
+
+  it("REFUSES to verify an old GRN, and writes nothing", async () => {
+    const repo = fakeRepo({ grnDate: OLD });
+    const route = verifyRouteOf(buildUsecase(repo), tagging);
+
+    const res = await call(route, {
+      params: { refno: "GRN-1" },
+      body: {},
+      decoded: { employee_id: 42 },
+    });
+
+    assert.equal(res.statusCode, 400);
+    assert.match(res.body.msg, /2026-09-17 onwards/);
+    assert.equal(repo.calls.inserts.length, 0, "no audit row was written");
+  });
+
+  it("refuses an old GRN even for a caller holding verify_grn", async () => {
+    // The hidden button is presentation. This is the boundary: a stale tab or
+    // a direct call must not be able to verify a bill outside the programme.
+    const repo = fakeRepo({ grnDate: "2024-04-01" });
+    const route = verifyRouteOf(buildUsecase(repo), enforcing([P.VERIFY_GRN]));
+
+    const res = await call(route, {
+      params: { refno: "GRN-1" },
+      body: {},
+      decoded: { employee_id: 42, designation_id: 9 },
+    });
+
+    assert.equal(res.statusCode, 400);
+    assert.equal(repo.calls.inserts.length, 0);
+  });
+
+  it("verifies a GRN dated exactly on the start date", async () => {
+    const repo = fakeRepo({ grnDate: "2026-09-17" });
+    const route = verifyRouteOf(buildUsecase(repo), tagging);
+
+    const res = await call(route, {
+      params: { refno: "GRN-1" },
+      body: {},
+      decoded: { employee_id: 42 },
+    });
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.data.status, "VERIFIED");
+  });
+
+  it("leaves a GRN with an unreadable date out of the programme", async () => {
+    const repo = fakeRepo({ grnDate: null });
+    const usecase = buildUsecase(repo);
+
+    const [header] = await usecase.listGrnHeaders({});
+    assert.equal(header.verification, null);
+
+    const route = verifyRouteOf(usecase, tagging);
+    const res = await call(route, {
+      params: { refno: "GRN-1" },
+      body: {},
+      decoded: { employee_id: 42 },
+    });
+    assert.equal(res.statusCode, 400);
+    assert.equal(repo.calls.inserts.length, 0);
   });
 });
