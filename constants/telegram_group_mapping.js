@@ -184,6 +184,9 @@ const RULE_DIMENSION = {
   OUTLET: {
     column: "rule_outlet_id",
     employeeColumn: "store_id",
+    // The name the employee SNAPSHOT already carries for this dimension, so
+    // the cascade can label an option without a second query per level.
+    nameColumn: "outlet_name",
     field: "outlet_id",
     label: "Outlet",
     source: MAPPING_TARGET_SOURCE.OUTLET,
@@ -191,6 +194,9 @@ const RULE_DIMENSION = {
   DEPARTMENT: {
     column: "rule_department_id",
     employeeColumn: "department_id",
+    // The name the employee SNAPSHOT already carries for this dimension, so
+    // the cascade can label an option without a second query per level.
+    nameColumn: "department_name",
     field: "department_id",
     label: "Department",
     source: MAPPING_TARGET_SOURCE.DEPARTMENT,
@@ -198,6 +204,9 @@ const RULE_DIMENSION = {
   DESIGNATION: {
     column: "rule_designation_id",
     employeeColumn: "designation_id",
+    // The name the employee SNAPSHOT already carries for this dimension, so
+    // the cascade can label an option without a second query per level.
+    nameColumn: "designation_name",
     field: "designation_id",
     label: "Designation",
     source: MAPPING_TARGET_SOURCE.DESIGNATION,

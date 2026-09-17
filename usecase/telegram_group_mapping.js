@@ -542,6 +542,97 @@ class TelegramGroupMappingUsecase {
   }
 
   /**
+   * THE CASCADE'S OPTIONS, derived from the employees themselves.
+   *
+   * Outlet -> Department -> Designation, and each level is answered from the
+   * population the levels ABOVE it have already narrowed:
+   *
+   *   Outlet       every outlet the caller can see staff in
+   *   Department   the departments present among employees AT the chosen
+   *                outlet - so picking ECR stops offering departments that
+   *                exist in the master but have nobody at ECR
+   *   Designation  the designations present among employees at the chosen
+   *                outlet AND in the chosen department
+   *
+   * A LEVEL NEVER NARROWS ITSELF. The department list is computed with the
+   * department dimension IGNORED, otherwise choosing a department would
+   * leave it as the only department on offer and there would be no way back.
+   * Same for designation. Only the levels above a dimension constrain it.
+   *
+   * THE MASTER LISTS ARE NOT THE SOURCE OF TRUTH HERE, and that is the whole
+   * point: a dropdown built from `outlets`/`department`/`designation` offers
+   * combinations that match nobody, and an operator who picks one reads a
+   * count of 0 and cannot tell a mistake from an empty outlet. These options
+   * come from the SAME snapshot and the SAME `employedOn()` rule as the
+   * count below them, so every combination the form can reach matches at
+   * least one person.
+   *
+   * IT IS SCOPED LIKE EVERYTHING ELSE. `employed` is already narrowed to the
+   * employees this caller may see, so a branch manager is not offered - and
+   * cannot infer - another branch's departments.
+   */
+  static ruleOptions(employed, mapping) {
+    // DECODED THROUGH `ruleOf`, like every other reader of a rule. The
+    // stored shape is keyed by COLUMN and the dimensions here are keyed by
+    // NAME; indexing one with the other yields `undefined`, which reads as
+    // "unrestricted" and would silently stop the cascade narrowing at all.
+    const rule = ruleOf(mapping);
+    const options = {};
+    // Levels above each dimension, in cascade order. Index i constrains i+1.
+    const above = [];
+    for (const dimension of RULE_DIMENSIONS) {
+      const meta = RULE_DIMENSION[dimension];
+      // The population this level may choose from: everybody who satisfies
+      // the dimensions ABOVE this one. `above` is empty for Outlet, so it
+      // starts from the whole visible, employed population.
+      const population = employed.filter((employee) =>
+        above.every((up) => {
+          const want = rule[up];
+          if (!want || want === ANY_TARGET_ID) return true;
+          const have = employee[RULE_DIMENSION[up].employeeColumn];
+          return have !== null && have !== undefined && Number(have) === Number(want);
+        })
+      );
+
+      const seen = new Map();
+      for (const employee of population) {
+        const id = employee[meta.employeeColumn];
+        if (id === null || id === undefined) continue;
+        const key = Number(id);
+        if (!Number.isSafeInteger(key) || key <= 0 || seen.has(key)) continue;
+        seen.set(key, {
+          id: key,
+          name: employee[meta.nameColumn] || `#${key}`,
+        });
+      }
+      options[meta.field] = [...seen.values()].sort((a, b) =>
+        String(a.name).localeCompare(String(b.name))
+      );
+      above.push(dimension);
+    }
+    return options;
+  }
+
+  /**
+   * SEARCH MATCHES THE TWO SAFE IDENTIFIERS a person actually knows somebody
+   * by: their name and their employee ID.
+   *
+   * Name alone is not enough - two people share a first name and the operator
+   * has the ID in front of them on a roster. The ID is matched as a PREFIX-
+   * free substring of its digits so "42" finds 42 and 1425 alike, which is
+   * how every other search box in this codebase behaves.
+   *
+   * NOTHING ELSE IS SEARCHABLE, and that is deliberate: matching on mobile
+   * or Aadhaar would confirm a value the searcher already had, which is a
+   * disclosure even though nothing is printed.
+   */
+  static matchesSearch(employee, needle) {
+    if (!needle) return true;
+    if (String(employee.employee_name || "").toLowerCase().includes(needle)) return true;
+    return String(employee.employee_id).includes(needle);
+  }
+
+  /**
    * PREVIEW - who a rule WOULD cover, before anybody saves it.
    *
    * This is the multi-level screen's whole point: you narrow Outlet, then
@@ -577,7 +668,10 @@ class TelegramGroupMappingUsecase {
     const employees = await this.repo.getEmployeeSnapshot();
 
     const visible = TelegramGroupMappingUsecase.visibleEmployees(employees, scope);
-    const { union } = deriveMatches(visible, [rule], businessDate);
+    // `employed` is the visible population filtered by the dated employment
+    // rule ONCE - the same pass the matching used, so the cascade's options
+    // and the count below them are answers about one population.
+    const { union, employed } = deriveMatches(visible, [rule], businessDate);
     const matchedIds = new Set(union);
     const connected = await this.repo.getConnectedEmployeeIds(union);
 
@@ -586,9 +680,7 @@ class TelegramGroupMappingUsecase {
       .toLowerCase();
     const matched = visible.filter((employee) => matchedIds.has(employee.employee_id));
     const shown = needle
-      ? matched.filter((employee) =>
-          String(employee.employee_name || "").toLowerCase().includes(needle)
-        )
+      ? matched.filter((employee) => TelegramGroupMappingUsecase.matchesSearch(employee, needle))
       : matched;
 
     return {
@@ -601,6 +693,9 @@ class TelegramGroupMappingUsecase {
       // Whether an identical rule already exists, so the screen can say so
       // before the operator presses Save rather than after.
       duplicate_rule: Boolean(await this.repo.findDuplicateRule(telegram_group_id, rule)),
+      // The cascade's own options, from this same population - so every
+      // combination the form can reach matches at least one person.
+      rule_options: TelegramGroupMappingUsecase.ruleOptions(employed, rule),
       employees: shown.map((employee) =>
         TelegramGroupMappingUsecase.safeEmployee(employee, connected)
       ),

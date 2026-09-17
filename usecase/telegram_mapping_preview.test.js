@@ -344,6 +344,201 @@ describe("search narrows what is shown, never what is counted", () => {
   });
 });
 
+describe("the cascade's options come from the employees, not the masters", () => {
+  /**
+   * ECR (5) has Operations(3)/Cashier(7), Operations(3)/Packer(8) and
+   * Billing(4)/Cashier(7). Anna Nagar (6) has Accounts(9)/Manager(10).
+   * Nothing at ECR is in Accounts, and nobody at ECR is a Manager.
+   */
+  const CASCADE = [
+    emp({ employee_id: 1, employee_name: "Anitha", store_id: 5, department_id: 3, designation_id: 7, outlet_name: "ECR", department_name: "Operations", designation_name: "Cashier" }),
+    emp({ employee_id: 2, employee_name: "Bala", store_id: 5, department_id: 3, designation_id: 8, outlet_name: "ECR", department_name: "Operations", designation_name: "Packer" }),
+    emp({ employee_id: 3, employee_name: "Chitra", store_id: 5, department_id: 4, designation_id: 7, outlet_name: "ECR", department_name: "Billing", designation_name: "Cashier" }),
+    emp({ employee_id: 4, employee_name: "Deepa", store_id: 6, department_id: 9, designation_id: 10, outlet_name: "Anna Nagar", department_name: "Accounts", designation_name: "Manager" }),
+  ];
+
+  const num = (list) => [...list].sort((a, b) => a - b);
+
+  /** The masters behind the cascade fixture, so every id validates. */
+  const CASCADE_TARGETS = {
+    OUTLET: { 5: { name: "ECR", active: true }, 6: { name: "Anna Nagar", active: true } },
+    DEPARTMENT: {
+      3: { name: "Operations", active: true },
+      4: { name: "Billing", active: true },
+      9: { name: "Accounts", active: true },
+      77: { name: "Retired Dept", active: true },
+    },
+    DESIGNATION: {
+      7: { name: "Cashier", active: true },
+      8: { name: "Packer", active: true },
+      10: { name: "Manager", active: true },
+    },
+  };
+  const cascade = (employees = CASCADE) => build({ employees, targets: CASCADE_TARGETS });
+
+  const optionsFor = async (body, scope = ALL_BRANCHES) => {
+    const result = await cascade().previewEmployees(10, { ...body, scope });
+    const ids = (field) => result.rule_options[field].map((o) => o.id);
+    return { ids, raw: result.rule_options };
+  };
+
+  it("with nothing chosen, every dimension offers everything present", async () => {
+    const { ids } = await optionsFor({});
+    assert.deepEqual(ids("outlet_id"), [6, 5], "sorted by name: Anna Nagar, ECR");
+    assert.deepEqual(num(ids("department_id")), [3, 4, 9]);
+    assert.deepEqual(num(ids("designation_id")), [7, 8, 10]);
+  });
+
+  it("ECR narrows Department and Designation to the people AT ECR", async () => {
+    // THE RULE THIS BLOCK EXISTS FOR. Accounts(9) and Manager(10) exist in
+    // the masters but nobody at ECR is in either, so offering them would let
+    // the operator build a rule that matches nobody and read the 0 as a
+    // mistake they cannot diagnose.
+    const { ids } = await optionsFor({ outlet_id: 5 });
+    assert.deepEqual(num(ids("department_id")), [3, 4], "no Accounts");
+    assert.deepEqual(num(ids("designation_id")), [7, 8], "no Manager");
+  });
+
+  it("ECR + Operations narrows Designation to that population only", async () => {
+    const { ids } = await optionsFor({ outlet_id: 5, department_id: 3 });
+    assert.deepEqual(num(ids("designation_id")), [7, 8]);
+  });
+
+  it("ECR + Billing narrows Designation further still", async () => {
+    // Billing at ECR is Chitra alone, a Cashier. Packer must disappear.
+    const { ids } = await optionsFor({ outlet_id: 5, department_id: 4 });
+    assert.deepEqual(ids("designation_id"), [7], "only Cashier");
+  });
+
+  it("a level never narrows ITSELF, or there would be no way back", async () => {
+    // Choosing Operations must not reduce the Department list to Operations:
+    // the dropdown would then offer only what is already selected.
+    const { ids } = await optionsFor({ outlet_id: 5, department_id: 3 });
+    assert.deepEqual(num(ids("department_id")), [3, 4], "the sibling stays on offer");
+    const outlets = await optionsFor({ outlet_id: 5 });
+    assert.deepEqual(outlets.ids("outlet_id"), [6, 5], "Outlet still offers both");
+  });
+
+  it("a lower level never narrows a higher one", async () => {
+    // Designation is below Outlet, so choosing a designation must leave the
+    // outlet list alone - the cascade runs one way.
+    const { ids } = await optionsFor({ designation_id: 10 });
+    assert.deepEqual(ids("outlet_id"), [6, 5]);
+    assert.deepEqual(num(ids("department_id")), [3, 4, 9]);
+  });
+
+  it("going back to All restores the wider choices", async () => {
+    const narrowed = await optionsFor({ outlet_id: 5 });
+    assert.deepEqual(num(narrowed.ids("department_id")), [3, 4]);
+    // "All" is sent as an omitted/empty dimension, exactly as the form sends
+    // it, and the wider choices must come back.
+    const widened = await optionsFor({ outlet_id: "" });
+    assert.deepEqual(num(widened.ids("department_id")), [3, 4, 9], "Accounts is back");
+    assert.deepEqual(num(widened.ids("designation_id")), [7, 8, 10], "Manager is back");
+  });
+
+  it("every option carries the name the snapshot already knows", async () => {
+    const { raw } = await optionsFor({ outlet_id: 5 });
+    assert.deepEqual(raw.outlet_id, [
+      { id: 6, name: "Anna Nagar" },
+      { id: 5, name: "ECR" },
+    ]);
+    assert.deepEqual(raw.department_id.map((o) => o.name).sort(), ["Billing", "Operations"]);
+  });
+
+  it("offers no combination that matches nobody", async () => {
+    // The promise the whole cascade makes: anything reachable in the form
+    // covers at least one person.
+    const outlets = (await optionsFor({})).ids("outlet_id");
+    for (const outlet_id of outlets) {
+      const level = await optionsFor({ outlet_id });
+      for (const department_id of level.ids("department_id")) {
+        const result = await cascade().previewEmployees(10, {
+          outlet_id,
+          department_id,
+          scope: ALL_BRANCHES,
+        });
+        assert.ok(result.total_matched > 0, `outlet ${outlet_id} + department ${department_id}`);
+      }
+    }
+  });
+
+  it("excludes a leaver from the options, as it excludes them from the count", async () => {
+    // Otherwise a department only a resigned employee was in stays on offer.
+    const leaver = emp({ employee_id: 9, employee_name: "Gone", store_id: 5, department_id: 77, designation_id: 7, outlet_name: "ECR", department_name: "Retired Dept", resignation_date: "2026-01-01" });
+    const result = await cascade([...CASCADE, leaver]).previewEmployees(10, { scope: ALL_BRANCHES });
+    assert.ok(!result.rule_options.department_id.some((o) => o.id === 77));
+  });
+
+  it("is branch-scoped - a manager is not offered another branch's departments", async () => {
+    const { ids } = await optionsFor({}, ownBranches([5]));
+    assert.deepEqual(ids("outlet_id"), [5]);
+    assert.deepEqual(num(ids("department_id")), [3, 4], "Accounts belongs to the other branch");
+  });
+
+  it("a NONE scope is offered nothing at all", async () => {
+    const { ids } = await optionsFor({}, NONE);
+    assert.deepEqual(ids("outlet_id"), []);
+    assert.deepEqual(ids("department_id"), []);
+    assert.deepEqual(ids("designation_id"), []);
+  });
+
+  it("skips an employee with no value on a dimension rather than inventing one", async () => {
+    const floating = emp({ employee_id: 8, store_id: 5, department_id: null, outlet_name: "ECR" });
+    const result = await cascade([...CASCADE, floating]).previewEmployees(10, { scope: ALL_BRANCHES });
+    assert.ok(result.rule_options.department_id.every((o) => o.id !== null && o.id > 0));
+  });
+});
+
+describe("search matches both safe identifiers", () => {
+  const PEOPLE = [
+    emp({ employee_id: 42, employee_name: "Ravi" }),
+    emp({ employee_id: 1425, employee_name: "Kumar" }),
+    emp({ employee_id: 7, employee_name: "Ravi Kumar" }),
+  ];
+
+  const found = async (search) => {
+    const result = await build({ employees: PEOPLE }).previewEmployees(10, { scope: ALL_BRANCHES, search });
+    return result.employees.map((e) => e.employee_id).sort((a, b) => a - b);
+  };
+
+  it("matches the employee NAME", async () => {
+    assert.deepEqual(await found("ravi"), [7, 42]);
+    assert.deepEqual(await found("Kumar"), [7, 1425]);
+  });
+
+  it("matches the employee ID", async () => {
+    assert.deepEqual(await found("1425"), [1425]);
+    assert.deepEqual(await found("7"), [7]);
+  });
+
+  it("matches an ID as a substring, like every other search box here", async () => {
+    assert.deepEqual(await found("42"), [42, 1425]);
+  });
+
+  it("still leaves the rule's population untouched", async () => {
+    const result = await build({ employees: PEOPLE }).previewEmployees(10, { scope: ALL_BRANCHES, search: "1425" });
+    assert.equal(result.employees.length, 1);
+    assert.equal(result.total_matched, 3, "the rule still covers everybody");
+  });
+
+  it("matches NOTHING else - not a mobile, not an Aadhaar", async () => {
+    // Matching those would CONFIRM a value the searcher already had, which
+    // is a disclosure even though nothing is printed.
+    const loaded = [emp({ employee_id: 3, employee_name: "Raj", mobile: "9876543210", aadhaar_number: "123456789012" })];
+    const result = await build({ employees: loaded }).previewEmployees(10, { scope: ALL_BRANCHES, search: "9876543210" });
+    assert.equal(result.employees.length, 0);
+    const byAadhaar = await build({ employees: loaded }).previewEmployees(10, { scope: ALL_BRANCHES, search: "123456789012" });
+    assert.equal(byAadhaar.employees.length, 0);
+  });
+
+  it("cannot reach outside the caller's branch", async () => {
+    const other = [emp({ employee_id: 99, employee_name: "Elsewhere", store_id: 6 })];
+    const result = await build({ employees: other }).previewEmployees(10, { scope: ownBranches([5]), search: "99" });
+    assert.equal(result.employees.length, 0);
+  });
+});
+
 describe("the preview message vocabulary", () => {
   it("names a bound the browser cannot argue with", () => {
     assert.match(PREVIEW_MESSAGES.TOO_MANY_EMPLOYEES, /at most \d+ employees/);
