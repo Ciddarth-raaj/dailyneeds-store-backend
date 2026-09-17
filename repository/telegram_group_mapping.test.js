@@ -163,15 +163,60 @@ describe("mapping reads and writes", () => {
     assert.match(db.queries[0].sql, /ORDER BY telegram_group_mapping_id ASC/);
   });
 
-  it("writes exactly the four columns the table expects", async () => {
+  it("writes exactly the columns the multi-level table expects", async () => {
     const db = makeDb(() => ({ insertId: 7 }));
     await buildRepo(db).create({
       telegram_group_id: 10,
-      mapping_type: "OUTLET",
-      target_id: 5,
+      rule: { rule_outlet_id: 5, rule_department_id: 0, rule_designation_id: 3 },
       created_by: 42,
     });
-    assert.match(db.queries[0].sql, /INSERT INTO telegram_group_mapping \(telegram_group_id, mapping_type, target_id, created_by\)/);
-    assert.deepEqual(db.queries[0].params, [10, "OUTLET", 5, 42]);
+    assert.match(
+      db.queries[0].sql,
+      /INSERT INTO telegram_group_mapping \(telegram_group_id, rule_outlet_id, rule_department_id, rule_designation_id, created_by\)/
+    );
+    assert.deepEqual(db.queries[0].params, [10, 5, 0, 3, 42]);
+  });
+
+  it("writes 0 - never NULL - for a dimension left unrestricted", async () => {
+    // The sentinel IS the duplicate guard: MySQL treats NULLs as distinct in
+    // a UNIQUE index, so a NULL here would let one rule be added repeatedly.
+    const db = makeDb(() => ({ insertId: 7 }));
+    await buildRepo(db).create({ telegram_group_id: 10, rule: {}, created_by: null });
+    assert.deepEqual(db.queries[0].params, [10, 0, 0, 0, null]);
+  });
+
+  it("coerces a junk dimension to unrestricted rather than storing it", async () => {
+    const db = makeDb(() => ({ insertId: 7 }));
+    await buildRepo(db).create({
+      telegram_group_id: 10,
+      rule: { rule_outlet_id: "abc", rule_department_id: -4, rule_designation_id: 1.5 },
+    });
+    assert.deepEqual(db.queries[0].params, [10, 0, 0, 0, null]);
+  });
+
+  it("findDuplicateRule compares ALL THREE dimensions, not one", async () => {
+    const db = makeDb(() => []);
+    await buildRepo(db).findDuplicateRule(10, {
+      rule_outlet_id: 5,
+      rule_department_id: 0,
+      rule_designation_id: 3,
+    });
+    assert.match(
+      db.queries[0].sql,
+      /WHERE telegram_group_id = \? AND rule_outlet_id = \? AND rule_department_id = \? AND rule_designation_id = \?/
+    );
+    assert.deepEqual(db.queries[0].params, [10, 5, 0, 3]);
+  });
+
+  it("no read still names the dropped single-dimension columns", async () => {
+    const db = makeDb(() => []);
+    const repo = buildRepo(db);
+    await repo.getByGroup(10);
+    await repo.getByIdForGroup(10, 1);
+    await repo.getAllMappingsWithGroups();
+    for (const query of db.queries) {
+      assert.doesNotMatch(query.sql, /\bmapping_type\b/, query.sql);
+      assert.doesNotMatch(query.sql, /\btarget_id\b/, query.sql);
+    }
   });
 });

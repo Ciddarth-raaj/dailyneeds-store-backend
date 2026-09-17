@@ -212,6 +212,43 @@ class TelegramMembershipClaimRepository {
     return new Map((rows || []).map((row) => [Number(row.employee_id), row.employee_name]));
   }
 
+  /**
+   * THE SAME EMPLOYEES, PLUS THE ONE COLUMN A BRANCH DECISION NEEDS.
+   *
+   * `describeEmployees` answers "what is this person called" and is used
+   * wherever a name is rendered. Bulk granting has a second question - "is
+   * this person the caller's to grant" - and that is `store_id`, so it is a
+   * separate reader rather than a widened one: nothing that only wanted a
+   * name starts carrying a branch it might print.
+   *
+   * STILL NO SENSITIVE COLUMN. Name and branch, and an employee id. No
+   * mobile, no Aadhaar, no salary, no Telegram identifier of any kind.
+   */
+  async describeEmployeesWithBranch(employeeIds) {
+    const ids = [...new Set((employeeIds || []).map(Number).filter(Number.isInteger))];
+    if (!ids.length) return new Map();
+    const rows = await this._query(
+      "DESCRIBE-EMPLOYEES-WITH-BRANCH",
+      `SELECT employee_id, employee_name, store_id, status, date_of_joining, resignation_date
+         FROM new_employee WHERE employee_id IN (?)`,
+      [ids]
+    );
+    return new Map(
+      (rows || []).map((row) => [
+        Number(row.employee_id),
+        {
+          employee_id: Number(row.employee_id),
+          employee_name: row.employee_name,
+          store_id:
+            row.store_id === null || row.store_id === undefined ? null : Number(row.store_id),
+          status: row.status,
+          date_of_joining: row.date_of_joining,
+          resignation_date: row.resignation_date,
+        },
+      ])
+    );
+  }
+
   /** How many live claims block a registry hard delete. */
   async countLiveForGroup(telegramGroupId, { tx } = {}) {
     const rows = await this._query(

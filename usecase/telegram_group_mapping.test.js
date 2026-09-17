@@ -22,7 +22,9 @@ const {
   TARGET_WARNING,
   MAPPING_MESSAGES,
   COUNTS_SCOPE,
+  PREVIEW_MESSAGES,
 } = require("../constants/telegram_group_mapping");
+const { RULE_COLUMNS } = require("../repository/telegram_group_mapping");
 const { EMPLOYEE_BRANCH_SCOPE } = require("../utils/employee_branch_scope");
 
 const TODAY = "2026-09-16";
@@ -76,9 +78,11 @@ const makeRepo = ({
     getByIdForGroup: async (groupId, id) =>
       mappings.find((m) => m.telegram_group_mapping_id === id && m.telegram_group_id === groupId) ||
       null,
-    findDuplicate: async (groupId, type, target) =>
+    findDuplicateRule: async (groupId, wanted) =>
       mappings.find(
-        (m) => m.telegram_group_id === groupId && m.mapping_type === type && m.target_id === target
+        (m) =>
+          m.telegram_group_id === groupId &&
+          RULE_COLUMNS.every((c) => Number(m[c] || 0) === Number((wanted || {})[c] || 0))
       ) || null,
     resolveTargets: async (idsByType) => {
       calls.resolveTargets += 1;
@@ -133,12 +137,36 @@ const makeRegistry = (group = GROUP) => ({ getById: async (id) => (group && grou
 const build = (repoOpts, group) =>
   buildMapping(makeRepo(repoOpts), makeRegistry(group), { now: () => NOW });
 
-const mapping = (id, type, target = ALL_EMPLOYEES_TARGET_ID) => ({
+/**
+ * A STORED mapping row, in the shape the table now holds: three dimensions,
+ * 0 meaning unrestricted.
+ *
+ * The single-dimension call `mapping(1, MAPPING_TYPE.OUTLET, 5)` still reads
+ * the same way and still means the same rule - it just stores it as
+ * (5, 0, 0). The tests below that predate multi-level rules therefore assert
+ * unchanged behaviour against the new storage, which is the point: a rule
+ * that meant "outlet 5" before must still mean exactly that.
+ */
+const mapping = (id, type, target = ALL_EMPLOYEES_TARGET_ID) =>
+  rule(id, type && type !== MAPPING_TYPE.ALL_EMPLOYEES ? { [FIELD_OF[type]]: target } : {});
+
+/** A stored row for an arbitrary composite rule. `{outlet_id, ...}` in. */
+const rule = (id, dims = {}) => ({
   telegram_group_mapping_id: id,
   telegram_group_id: 10,
-  mapping_type: type,
-  target_id: target,
+  rule_outlet_id: Number(dims.outlet_id || 0),
+  rule_department_id: Number(dims.department_id || 0),
+  rule_designation_id: Number(dims.designation_id || 0),
 });
+
+const FIELD_OF = {
+  [MAPPING_TYPE.OUTLET]: "outlet_id",
+  [MAPPING_TYPE.DEPARTMENT]: "department_id",
+  [MAPPING_TYPE.DESIGNATION]: "designation_id",
+};
+
+/** One dimension off a described mapping row. */
+const dim = (row, dimension) => row.rule_dimensions.find((d) => d.dimension === dimension);
 
 const ALL_BRANCHES = { kind: EMPLOYEE_BRANCH_SCOPE.ALL_BRANCHES, store_ids: null };
 const ownBranches = (ids) => ({ kind: EMPLOYEE_BRANCH_SCOPE.OWN_BRANCHES, store_ids: ids });
@@ -146,61 +174,158 @@ const ownBranches = (ids) => ({ kind: EMPLOYEE_BRANCH_SCOPE.OWN_BRANCHES, store_
 /* ============================================================ persistence */
 
 describe("adding a mapping", () => {
-  it("stores target_id 0 for ALL_EMPLOYEES, never NULL", async () => {
+  it("stores 0 - never NULL - on every dimension left unrestricted", async () => {
     const repo = makeRepo();
     const usecase = buildMapping(repo, makeRegistry(), { now: () => NOW });
-    await usecase.addMapping(10, { mapping_type: MAPPING_TYPE.ALL_EMPLOYEES });
+    // No dimension at all IS "All Employees". There is no type to name.
+    await usecase.addMapping(10, {});
 
     assert.equal(repo.calls.created.length, 1);
-    assert.equal(repo.calls.created[0].target_id, ALL_EMPLOYEES_TARGET_ID);
-    assert.notEqual(repo.calls.created[0].target_id, null);
+    assert.deepEqual(repo.calls.created[0].rule, {
+      rule_outlet_id: ALL_EMPLOYEES_TARGET_ID,
+      rule_department_id: ALL_EMPLOYEES_TARGET_ID,
+      rule_designation_id: ALL_EMPLOYEES_TARGET_ID,
+    });
+    for (const column of RULE_COLUMNS) {
+      assert.notEqual(repo.calls.created[0].rule[column], null, column);
+    }
   });
 
-  it("refuses a target alongside ALL_EMPLOYEES instead of ignoring it", async () => {
-    const usecase = build({});
-    await assert.rejects(
-      () => usecase.addMapping(10, { mapping_type: MAPPING_TYPE.ALL_EMPLOYEES, target_id: 5 }),
-      /takes no target/
-    );
+  it("treats absent, null and empty string on a dimension as All", async () => {
+    // The screen's own dropdown sends "" for All, so all three spellings
+    // must land on the same stored rule rather than on three of them.
+    for (const blank of [undefined, null, ""]) {
+      const repo = makeRepo();
+      const usecase = buildMapping(repo, makeRegistry(), { now: () => NOW });
+      await usecase.addMapping(10, { outlet_id: blank, department_id: blank });
+      assert.deepEqual(repo.calls.created[0].rule, {
+        rule_outlet_id: 0,
+        rule_department_id: 0,
+        rule_designation_id: 0,
+      });
+    }
   });
 
-  for (const type of [MAPPING_TYPE.OUTLET, MAPPING_TYPE.DESIGNATION, MAPPING_TYPE.DEPARTMENT]) {
-    it(`${type} requires a positive target that exists`, async () => {
-      const targets = { [type]: { 5: { name: "Something", active: true } } };
+  it("stores a rule that narrows ALL THREE dimensions", async () => {
+    const repo = makeRepo({
+      targets: {
+        OUTLET: { 5: { name: "ECR", active: true } },
+        DEPARTMENT: { 3: { name: "Operations", active: true } },
+        DESIGNATION: { 7: { name: "Cashier", active: true } },
+      },
+    });
+    const usecase = buildMapping(repo, makeRegistry(), { now: () => NOW });
+    const ok = await usecase.addMapping(10, { outlet_id: 5, department_id: 3, designation_id: 7 });
+    assert.equal(ok.code, 200);
+    assert.deepEqual(repo.calls.created[0].rule, {
+      rule_outlet_id: 5,
+      rule_department_id: 3,
+      rule_designation_id: 7,
+    });
+  });
+
+  it("stores a rule that narrows TWO of the three, leaving the middle open", async () => {
+    const repo = makeRepo({
+      targets: {
+        OUTLET: { 5: { name: "ECR", active: true } },
+        DESIGNATION: { 7: { name: "Cashier", active: true } },
+      },
+    });
+    const usecase = buildMapping(repo, makeRegistry(), { now: () => NOW });
+    await usecase.addMapping(10, { outlet_id: 5, designation_id: 7 });
+    assert.deepEqual(repo.calls.created[0].rule, {
+      rule_outlet_id: 5,
+      rule_department_id: 0,
+      rule_designation_id: 7,
+    });
+  });
+
+  for (const [field, dimension, label] of [
+    ["outlet_id", "OUTLET", "outlet"],
+    ["department_id", "DEPARTMENT", "department"],
+    ["designation_id", "DESIGNATION", "designation"],
+  ]) {
+    it(`${field} must be a positive id that EXISTS`, async () => {
+      const targets = { [dimension]: { 5: { name: "Something", active: true } } };
       const usecase = build({ targets });
 
-      for (const bad of [undefined, null, "", 0, -1, "abc", 2.5, {}]) {
+      for (const bad of [0, -1, "abc", 2.5, {}]) {
         await assert.rejects(
-          () => usecase.addMapping(10, { mapping_type: type, target_id: bad }),
-          /Select what this mapping applies to/,
-          `target_id ${JSON.stringify(bad)} must be refused`
+          () => usecase.addMapping(10, { [field]: bad }),
+          new RegExp(`Select a valid ${label}`),
+          `${field} ${JSON.stringify(bad)} must be refused`
         );
       }
       await assert.rejects(
-        () => usecase.addMapping(10, { mapping_type: type, target_id: 404 }),
-        /no longer exists/
+        () => usecase.addMapping(10, { [field]: 404 }),
+        new RegExp(`That ${label} no longer exists`)
       );
-      const ok = await usecase.addMapping(10, { mapping_type: type, target_id: 5 });
+      const ok = await usecase.addMapping(10, { [field]: 5 });
       assert.equal(ok.code, 200);
     });
   }
 
-  it("refuses an unsupported mapping type", async () => {
-    const usecase = build({});
-    for (const type of ["SELECTED_EMPLOYEES", "MANUAL", "ROLE", "USER", "", null, "outlet"]) {
-      await assert.rejects(
-        () => usecase.addMapping(10, { mapping_type: type, target_id: 1 }),
-        /Mapping Type must be one of/,
-        `${type} must not be accepted`
-      );
-    }
+  it("refuses the WHOLE rule when any one dimension is unknown", async () => {
+    // Partial acceptance would store a BROADER rule than the operator asked
+    // for - dropping the designation leaves "everybody at outlet 5".
+    const repo = makeRepo({ targets: { OUTLET: { 5: { name: "ECR", active: true } } } });
+    const usecase = buildMapping(repo, makeRegistry(), { now: () => NOW });
+    await assert.rejects(
+      () => usecase.addMapping(10, { outlet_id: 5, designation_id: 404 }),
+      /designation no longer exists/
+    );
+    assert.equal(repo.calls.created.length, 0, "nothing may be stored");
   });
 
-  it("rejects a duplicate with a sentence, not a driver error", async () => {
-    const usecase = build({ mappings: [mapping(1, MAPPING_TYPE.ALL_EMPLOYEES)] });
+  it("an INACTIVE target is still mappable", async () => {
+    // Retiring a department does not retire the people assigned to it.
+    const repo = makeRepo({ targets: { DEPARTMENT: { 3: { name: "Old", active: false } } } });
+    const usecase = buildMapping(repo, makeRegistry(), { now: () => NOW });
+    assert.equal((await usecase.addMapping(10, { department_id: 3 })).code, 200);
+  });
+
+  it("rejects an identical rule with a sentence, not a driver error", async () => {
+    const usecase = build({
+      mappings: [rule(1, { outlet_id: 5, designation_id: 7 })],
+      targets: {
+        OUTLET: { 5: { name: "ECR", active: true } },
+        DESIGNATION: { 7: { name: "Cashier", active: true } },
+      },
+    });
     await assert.rejects(
-      () => usecase.addMapping(10, { mapping_type: MAPPING_TYPE.ALL_EMPLOYEES }),
-      (err) => err.message === MAPPING_MESSAGES.DUPLICATE
+      () => usecase.addMapping(10, { outlet_id: 5, designation_id: 7 }),
+      (err) => err.message === PREVIEW_MESSAGES.DUPLICATE_RULE
+    );
+  });
+
+  it("a rule differing on ONE dimension is not a duplicate", async () => {
+    const repo = makeRepo({
+      mappings: [rule(1, { outlet_id: 5, designation_id: 7 })],
+      targets: {
+        OUTLET: { 5: { name: "ECR", active: true } },
+        DESIGNATION: { 7: { name: "Cashier", active: true } },
+      },
+      // Same outlet, same designation, but a department named as well - a
+      // strictly narrower rule, and a different one.
+    });
+    repo.resolveTargets = async () =>
+      new Map([
+        ["OUTLET", new Map([[5, { name: "ECR", active: true }]])],
+        ["DEPARTMENT", new Map([[3, { name: "Ops", active: true }]])],
+        ["DESIGNATION", new Map([[7, { name: "Cashier", active: true }]])],
+      ]);
+    const usecase = buildMapping(repo, makeRegistry(), { now: () => NOW });
+    assert.equal(
+      (await usecase.addMapping(10, { outlet_id: 5, department_id: 3, designation_id: 7 })).code,
+      200
+    );
+  });
+
+  it("the ALL-EMPLOYEES rule can only be added once, by the same guard", async () => {
+    const usecase = build({ mappings: [rule(1, {})] });
+    await assert.rejects(
+      () => usecase.addMapping(10, {}),
+      (err) => err.message === PREVIEW_MESSAGES.DUPLICATE_RULE
     );
   });
 
@@ -211,14 +336,14 @@ describe("adding a mapping", () => {
     err.code = "ER_DUP_ENTRY";
     const usecase = build({ createThrows: err });
     await assert.rejects(
-      () => usecase.addMapping(10, { mapping_type: MAPPING_TYPE.ALL_EMPLOYEES }),
-      (e) => e.message === MAPPING_MESSAGES.DUPLICATE && e.name === "ValidationError"
+      () => usecase.addMapping(10, {}),
+      (e) => e.message === PREVIEW_MESSAGES.DUPLICATE_RULE && e.name === "ValidationError"
     );
   });
 
   it("does not disguise an unrelated database failure as a duplicate", async () => {
     const usecase = build({ createThrows: new Error("ER_LOCK_WAIT_TIMEOUT") });
-    await assert.rejects(() => usecase.addMapping(10, { mapping_type: MAPPING_TYPE.ALL_EMPLOYEES }), /LOCK_WAIT/);
+    await assert.rejects(() => usecase.addMapping(10, {}), /LOCK_WAIT/);
   });
 
   it("allows several DIFFERENT mappings on one group", async () => {
@@ -227,13 +352,13 @@ describe("adding a mapping", () => {
       targets: { DESIGNATION: { 7: { name: "Cashier", active: true } } },
     });
     const usecase = buildMapping(repo, makeRegistry(), { now: () => NOW });
-    await usecase.addMapping(10, { mapping_type: MAPPING_TYPE.DESIGNATION, target_id: 7 });
+    await usecase.addMapping(10, { designation_id: 7 });
     assert.equal(repo.calls.created.length, 1);
   });
 
   it("refuses to map onto a group that does not exist", async () => {
     const usecase = buildMapping(makeRepo(), makeRegistry(null), { now: () => NOW });
-    await assert.rejects(() => usecase.addMapping(10, { mapping_type: MAPPING_TYPE.ALL_EMPLOYEES }), /not found/);
+    await assert.rejects(() => usecase.addMapping(10, {}), /not found/);
   });
 });
 
@@ -404,9 +529,14 @@ describe("a target's lifecycle", () => {
       targets: { OUTLET: { 5: { name: "ECR", active: true } } },
     });
     const row = (await usecase.getMappings(10, { scope: ALL_BRANCHES })).mappings[0];
-    assert.equal(row.target_state, TARGET_STATE.ACTIVE);
+    assert.equal(dim(row, "OUTLET").state, TARGET_STATE.ACTIVE);
     assert.equal(row.target_warning, null);
-    assert.equal(row.target_name, "ECR");
+    assert.equal(dim(row, "OUTLET").name, "ECR");
+    assert.equal(row.rule_label, "Outlet: ECR");
+    // The two dimensions this rule does not narrow are "All", which is a
+    // state of its own and not a missing target.
+    assert.equal(dim(row, "DEPARTMENT").state, TARGET_STATE.NOT_APPLICABLE);
+    assert.equal(dim(row, "DEPARTMENT").name, "All");
   });
 
   it("INACTIVE target: mapping preserved, warned, and STILL MATCHING", async () => {
@@ -418,7 +548,7 @@ describe("a target's lifecycle", () => {
       targets: { OUTLET: { 5: { name: "ECR (closed)", active: false } } },
     });
     const row = (await usecase.getMappings(10, { scope: ALL_BRANCHES })).mappings[0];
-    assert.equal(row.target_state, TARGET_STATE.INACTIVE);
+    assert.equal(dim(row, "OUTLET").state, TARGET_STATE.INACTIVE);
     assert.equal(row.target_warning, TARGET_WARNING.INACTIVE);
     assert.equal(row.matched_employees, 1, "the stored target id still matches");
   });
@@ -430,8 +560,10 @@ describe("a target's lifecycle", () => {
       targets: { OUTLET: {} },
     });
     const row = (await usecase.getMappings(10, { scope: ALL_BRANCHES })).mappings[0];
-    assert.equal(row.target_state, TARGET_STATE.MISSING);
+    assert.equal(dim(row, "OUTLET").state, TARGET_STATE.MISSING);
     assert.equal(row.target_warning, TARGET_WARNING.MISSING);
+    // The rule still reads as a rule, naming the id it can no longer name.
+    assert.equal(row.rule_label, "Outlet: #5");
     assert.notEqual(TARGET_WARNING.MISSING, TARGET_WARNING.INACTIVE);
   });
 
@@ -445,15 +577,21 @@ describe("a target's lifecycle", () => {
     const row = (await usecase.getMappings(10, { scope: ALL_BRANCHES })).mappings[0];
     assert.equal(row.matched_employees, 0);
     assert.equal(row.target_warning, null);
-    assert.equal(row.target_state, TARGET_STATE.ACTIVE);
+    assert.equal(dim(row, "OUTLET").state, TARGET_STATE.ACTIVE);
   });
 
   it("ALL_EMPLOYEES has no target to be broken", async () => {
     const usecase = build({ mappings: [mapping(1, MAPPING_TYPE.ALL_EMPLOYEES)], employees });
     const row = (await usecase.getMappings(10, { scope: ALL_BRANCHES })).mappings[0];
-    assert.equal(row.target_state, TARGET_STATE.NOT_APPLICABLE);
+    // Nothing narrowed, so there is no target to be broken on ANY dimension.
+    for (const dimension of ["OUTLET", "DEPARTMENT", "DESIGNATION"]) {
+      assert.equal(dim(row, dimension).state, TARGET_STATE.NOT_APPLICABLE, dimension);
+      assert.equal(dim(row, dimension).id, null, dimension);
+    }
     assert.equal(row.target_warning, null);
-    assert.equal(row.target_id, null);
+    assert.equal(row.is_all_employees, true);
+    assert.equal(row.rule_label, "All Employees");
+    assert.deepEqual(row.rule, { outlet_id: null, department_id: null, designation_id: null });
   });
 });
 
@@ -547,8 +685,8 @@ describe("the rule is global, every employee number is scoped", () => {
     }).getMappings(10, { scope: ownBranches([8]) });
 
     assert.equal(result.mappings[0].matched_employees, 0);
-    assert.equal(result.mappings[0].target_name, "ECR", "the RULE is still shown in full");
-    assert.equal(result.mappings[0].target_state, TARGET_STATE.ACTIVE);
+    assert.equal(dim(result.mappings[0], "OUTLET").name, "ECR", "the RULE is shown in full");
+    assert.equal(dim(result.mappings[0], "OUTLET").state, TARGET_STATE.ACTIVE);
   });
 
   it("a DESIGNATION rule spanning outlets exposes only the manager's own", async () => {
@@ -559,7 +697,7 @@ describe("the rule is global, every employee number is scoped", () => {
       targets: { DESIGNATION: { 7: { name: "Cashier", active: true } } },
     }).getMappings(10, { scope: ownBranches([8]) });
     assert.equal(result.mappings[0].matched_employees, 1, "not the company's 2");
-    assert.equal(result.mappings[0].target_name, "Cashier");
+    assert.equal(dim(result.mappings[0], "DESIGNATION").name, "Cashier");
   });
 
   it("a DEPARTMENT rule spanning outlets exposes only the manager's own", async () => {

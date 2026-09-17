@@ -137,6 +137,104 @@ const TARGET_WARNING = {
   MISSING: "Mapped target no longer exists",
 };
 
+
+/* ===================================================================== *
+ *            MULTI-LEVEL RULES - Outlet AND Department AND Designation
+ * ===================================================================== *
+ *
+ * A mapping is no longer ONE dimension. It is a composite rule with three
+ * optional dimensions combined with AND:
+ *
+ *   Outlet=Moolakulam, Department=ALL, Designation=Cashier
+ *     -> cashiers at Moolakulam, whatever department they sit in
+ *
+ * WHY AND AND NOT OR. "Outlet OR Designation" is a rule nobody can read off
+ * the row: it silently includes every cashier in the company the moment you
+ * name a designation. Narrowing is the operation this screen exists for, so
+ * every dimension added makes the population smaller, never larger - and a
+ * reader can predict the direction without knowing the operator.
+ *
+ * UNRESTRICTED IS STORED AS 0, NOT NULL, and it is the same sentinel and the
+ * same reason as the one ALL_EMPLOYEES used: MySQL treats NULLs as DISTINCT
+ * in a UNIQUE index, so a rule with three nullable dimensions could be added
+ * to one group any number of times and the index would raise no objection.
+ * With 0 the four-column UNIQUE key is the real duplicate guard, exactly as
+ * the three-column one was before it. `outlets`, `designation` and
+ * `department` are AUTO_INCREMENT from 1, so 0 cannot collide with a target.
+ *
+ * ALL THREE UNRESTRICTED IS "ALL EMPLOYEES". It is not a special type, a
+ * special row or a special code path - it is the rule with nothing narrowed,
+ * which is what "everybody" means. The legacy ALL_EMPLOYEES row migrated to
+ * exactly that, so it kept its meaning without keeping its own concept.
+ */
+
+/** The three dimensions, in the order the screen cascades through them. */
+const RULE_DIMENSIONS = ["OUTLET", "DEPARTMENT", "DESIGNATION"];
+
+/**
+ * Everything each dimension needs, in one place: the mapping column, the
+ * employee-master column it compares against, the request field the API
+ * accepts, and the master table that resolves its name and active state.
+ *
+ * ONE ENTRY PER DIMENSION, so a fourth dimension is a row here plus a column,
+ * rather than an edit in the matcher, the repository, the validator, the
+ * preview, the label builder and the screen.
+ */
+const RULE_DIMENSION = {
+  OUTLET: {
+    column: "rule_outlet_id",
+    employeeColumn: "store_id",
+    field: "outlet_id",
+    label: "Outlet",
+    source: MAPPING_TARGET_SOURCE.OUTLET,
+  },
+  DEPARTMENT: {
+    column: "rule_department_id",
+    employeeColumn: "department_id",
+    field: "department_id",
+    label: "Department",
+    source: MAPPING_TARGET_SOURCE.DEPARTMENT,
+  },
+  DESIGNATION: {
+    column: "rule_designation_id",
+    employeeColumn: "designation_id",
+    field: "designation_id",
+    label: "Designation",
+    source: MAPPING_TARGET_SOURCE.DESIGNATION,
+  },
+};
+
+/** Unrestricted, on any dimension. The sentinel ALL_EMPLOYEES already used. */
+const ANY_TARGET_ID = ALL_EMPLOYEES_TARGET_ID;
+
+/** What a dimension left unrestricted is called on screen and in labels. */
+const ANY_LABEL = "All";
+
+/** The label a rule with nothing narrowed carries. */
+const ALL_EMPLOYEES_LABEL = MAPPING_TYPE_LABEL.ALL_EMPLOYEES;
+
+/**
+ * How many employees ONE bulk MANUAL grant may name.
+ *
+ * A bound rather than "however many the browser sent", because this endpoint
+ * writes a claim, an event and a queue row per employee inside ONE
+ * transaction: an unbounded list is an unbounded transaction holding
+ * unbounded locks, and the operator who pasted the whole company would find
+ * out by taking the mapping screen down for everybody else. Two hundred is
+ * comfortably larger than any real outlet and small enough that the
+ * transaction is measured in milliseconds.
+ */
+const BULK_GRANT_MAX = 200;
+
+const PREVIEW_MESSAGES = {
+  DIMENSION_NOT_POSITIVE: (label) => `Select a valid ${label.toLowerCase()}`,
+  dimensionMissing: (label) => `That ${label.toLowerCase()} no longer exists`,
+  DUPLICATE_RULE: "An identical rule is already on this group",
+  NO_EMPLOYEES: "Select at least one employee",
+  TOO_MANY_EMPLOYEES: `Select at most ${BULK_GRANT_MAX} employees at a time`,
+  NOT_IN_SCOPE: "Some selected employees are not yours to add",
+};
+
 const MAPPING_MESSAGES = {
   UNSUPPORTED_TYPE: `Mapping Type must be one of: ${MAPPING_TYPES.join(", ")}`,
   TARGET_REQUIRED: "Select what this mapping applies to",
@@ -152,6 +250,13 @@ const MAPPING_MESSAGES = {
 
 module.exports = {
   COUNTS_SCOPE,
+  RULE_DIMENSIONS,
+  RULE_DIMENSION,
+  ANY_TARGET_ID,
+  ANY_LABEL,
+  ALL_EMPLOYEES_LABEL,
+  BULK_GRANT_MAX,
+  PREVIEW_MESSAGES,
   MAPPING_TYPE,
   MAPPING_TYPES,
   MAPPING_TYPE_LABEL,

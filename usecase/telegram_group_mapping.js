@@ -1,16 +1,16 @@
 const { istDateOf } = require("../utils/istDate");
 const { JOB_REASON } = require("../constants/telegram_membership_claim");
-const { deriveMatches } = require("../utils/telegram_group_mapping");
+const { deriveMatches, ruleOf, ruleLabel, isAllEmployees } = require("../utils/telegram_group_mapping");
 const {
-  MAPPING_TYPE,
-  MAPPING_TYPES,
-  MAPPING_TYPE_LABEL,
-  TARGETED_MAPPING_TYPES,
-  ALL_EMPLOYEES_TARGET_ID,
   TARGET_STATE,
   TARGET_WARNING,
   MAPPING_MESSAGES,
   COUNTS_SCOPE,
+  RULE_DIMENSIONS,
+  RULE_DIMENSION,
+  ANY_TARGET_ID,
+  ANY_LABEL,
+  PREVIEW_MESSAGES,
 } = require("../constants/telegram_group_mapping");
 const { EMPLOYEE_BRANCH_SCOPE } = require("../utils/employee_branch_scope");
 
@@ -193,48 +193,168 @@ class TelegramGroupMappingUsecase {
     };
   }
 
-  /** The ids each targeted type needs resolved, grouped by type. */
-  static targetIdsByType(mappings) {
+  /**
+   * The ids each DIMENSION needs resolved, grouped by dimension.
+   *
+   * Only narrowed dimensions contribute, so a group whose rules all leave
+   * department unrestricted costs no department query at all - the same
+   * "one read per master actually referenced" bound the single-dimension
+   * screen had, now counted per dimension instead of per type.
+   */
+  static ruleTargetIds(mappings) {
     const out = {};
-    for (const type of TARGETED_MAPPING_TYPES) out[type] = [];
+    for (const dimension of RULE_DIMENSIONS) out[dimension] = [];
     for (const mapping of mappings || []) {
-      if (out[mapping.mapping_type]) out[mapping.mapping_type].push(mapping.target_id);
+      const rule = ruleOf(mapping);
+      for (const dimension of RULE_DIMENSIONS) {
+        if (rule[dimension] > ANY_TARGET_ID) out[dimension].push(rule[dimension]);
+      }
     }
     return out;
   }
 
   /**
-   * Decorate one mapping with what its target IS right now.
+   * Decorate ONE dimension of a rule with what its target IS right now.
    *
-   * THREE OUTCOMES, AND THE THIRD IS THE ONE THAT MATTERS. Active is
-   * ordinary. Inactive keeps the mapping and warns. Missing keeps the mapping
-   * and warns differently - a target that has been deleted is not the same as
-   * a target that is merely quiet, and a mapping is NEVER removed or hidden
-   * because of either. Erasing configuration on somebody's behalf is how a
-   * group silently loses a rule its owner still believes is there.
+   * Unrestricted is a fourth answer and not a missing one: `NOT_APPLICABLE`
+   * with the label "All". The other three are the states the single-dimension
+   * screen already had, and they still mean what they meant - a target that
+   * is merely retired and a target that has been deleted look different, and
+   * NEITHER removes or hides the rule. Erasing configuration on somebody's
+   * behalf is how a group silently loses a rule its owner still believes is
+   * there.
    */
-  static describeTarget(mapping, resolved) {
-    if (mapping.mapping_type === MAPPING_TYPE.ALL_EMPLOYEES) {
+  static describeDimension(dimension, id, resolved) {
+    const meta = RULE_DIMENSION[dimension];
+    if (!id || id === ANY_TARGET_ID) {
       return {
-        target_name: MAPPING_TYPE_LABEL.ALL_EMPLOYEES,
-        target_state: TARGET_STATE.NOT_APPLICABLE,
-        target_warning: null,
+        dimension,
+        label: meta.label,
+        id: null,
+        name: ANY_LABEL,
+        state: TARGET_STATE.NOT_APPLICABLE,
+        warning: null,
       };
     }
-    const found = resolved.get(mapping.mapping_type);
-    const row = found ? found.get(Number(mapping.target_id)) : undefined;
+    const found = resolved.get(dimension);
+    const row = found ? found.get(Number(id)) : undefined;
     if (!row) {
       return {
-        target_name: null,
-        target_state: TARGET_STATE.MISSING,
-        target_warning: TARGET_WARNING.MISSING,
+        dimension,
+        label: meta.label,
+        id,
+        name: null,
+        state: TARGET_STATE.MISSING,
+        warning: TARGET_WARNING.MISSING,
       };
     }
     return {
-      target_name: row.name,
-      target_state: row.active ? TARGET_STATE.ACTIVE : TARGET_STATE.INACTIVE,
-      target_warning: row.active ? null : TARGET_WARNING.INACTIVE,
+      dimension,
+      label: meta.label,
+      id,
+      name: row.name,
+      state: row.active ? TARGET_STATE.ACTIVE : TARGET_STATE.INACTIVE,
+      warning: row.active ? null : TARGET_WARNING.INACTIVE,
     };
+  }
+
+  /**
+   * THE WHOLE RULE, described: one entry per dimension plus a sentence.
+   *
+   * The screen renders the three entries as columns and the sentence as the
+   * row's title, and both come from the same resolution pass so they cannot
+   * disagree about whether an outlet still exists.
+   */
+  static describeRule(mapping, resolved) {
+    const rule = ruleOf(mapping);
+    const dimensions = RULE_DIMENSIONS.map((dimension) =>
+      TelegramGroupMappingUsecase.describeDimension(dimension, rule[dimension], resolved)
+    );
+    const warnings = dimensions.map((d) => d.warning).filter(Boolean);
+    return {
+      rule: RULE_DIMENSIONS.reduce((acc, dimension) => {
+        acc[RULE_DIMENSION[dimension].field] =
+          rule[dimension] === ANY_TARGET_ID ? null : rule[dimension];
+        return acc;
+      }, {}),
+      rule_dimensions: dimensions,
+      rule_label: ruleLabel(mapping, resolved),
+      is_all_employees: isAllEmployees(mapping),
+      // Kept singular so the existing row renderer keeps working: the FIRST
+      // problem is the one shown beside the rule, and every one of them is in
+      // `rule_dimensions` for a screen that wants all three.
+      target_warning: warnings.length ? warnings[0] : null,
+    };
+  }
+
+  /**
+   * VALIDATE A SUBMITTED RULE, dimension by dimension, and return the stored
+   * shape.
+   *
+   * EACH DIMENSION IS INDEPENDENTLY OPTIONAL. Absent, null and empty string
+   * all mean "All" - the screen's own dropdown sends an empty value for it -
+   * and all three absent is the rule that means everybody, which is exactly
+   * what the legacy ALL_EMPLOYEES row migrated to. There is no separate
+   * "select a type" step to get wrong any more.
+   *
+   * A NARROWED DIMENSION MUST NAME SOMETHING THAT EXISTS, and that check is
+   * at CREATE TIME ONLY - the same asymmetry the single-dimension screen had.
+   * Refusing to create a rule against a target that was never there catches a
+   * mistake; deleting a rule whose target vanished afterwards destroys a
+   * decision somebody made.
+   *
+   * AN INACTIVE TARGET IS ALLOWED. Retiring a department does not retire the
+   * people still assigned to it, and refusing here would block the very
+   * configuration somebody needs to reach them.
+   */
+  async validateRule(body = {}) {
+    return (await this.validateRuleResolved(body)).rule;
+  }
+
+  /**
+   * The same validation, but handing back the RESOLUTION it already did.
+   *
+   * The preview needs both the stored rule and the names of its targets, and
+   * resolving twice is a second round trip whose answer could differ from the
+   * first - so the rule the preview describes could name an outlet the rule
+   * it validated did not. One pass, one answer.
+   */
+  async validateRuleResolved(body = {}) {
+    const wanted = {};
+    for (const dimension of RULE_DIMENSIONS) {
+      const meta = RULE_DIMENSION[dimension];
+      const raw = body[meta.field];
+      if (raw === undefined || raw === null || raw === "") {
+        wanted[dimension] = ANY_TARGET_ID;
+        continue;
+      }
+      const id = positiveId(raw);
+      if (id === null) {
+        throw validationError(PREVIEW_MESSAGES.DIMENSION_NOT_POSITIVE(meta.label));
+      }
+      wanted[dimension] = id;
+    }
+
+    const toResolve = {};
+    for (const dimension of RULE_DIMENSIONS) {
+      if (wanted[dimension] > ANY_TARGET_ID) toResolve[dimension] = [wanted[dimension]];
+    }
+    const resolved =
+      Object.keys(toResolve).length > 0 ? await this.repo.resolveTargets(toResolve) : new Map();
+    for (const dimension of Object.keys(toResolve)) {
+      const found = resolved.get(dimension);
+      if (!found || !found.has(wanted[dimension])) {
+        throw validationError(PREVIEW_MESSAGES.dimensionMissing(RULE_DIMENSION[dimension].label));
+      }
+    }
+
+    // The stored shape, keyed by column, which is also the shape `ruleOf`
+    // reads - so what is validated and what is matched are one object.
+    const stored = {};
+    for (const dimension of RULE_DIMENSIONS) {
+      stored[RULE_DIMENSION[dimension].column] = wanted[dimension];
+    }
+    return { rule: stored, resolved };
   }
 
   /**
@@ -255,7 +375,7 @@ class TelegramGroupMappingUsecase {
     const businessDate = this.businessDate();
 
     const [resolved, employees] = await Promise.all([
-      this.repo.resolveTargets(TelegramGroupMappingUsecase.targetIdsByType(mappings)),
+      this.repo.resolveTargets(TelegramGroupMappingUsecase.ruleTargetIds(mappings)),
       this.repo.getEmployeeSnapshot(),
     ]);
 
@@ -273,13 +393,9 @@ class TelegramGroupMappingUsecase {
       counts_scope: TelegramGroupMappingUsecase.countsScope(scope),
       mappings: mappings.map((mapping) => ({
         telegram_group_mapping_id: mapping.telegram_group_mapping_id,
-        mapping_type: mapping.mapping_type,
-        mapping_type_label: MAPPING_TYPE_LABEL[mapping.mapping_type] || mapping.mapping_type,
-        target_id:
-          mapping.mapping_type === MAPPING_TYPE.ALL_EMPLOYEES ? null : mapping.target_id,
-        // The RULE, unnarrowed: a manager sees that an Outlet mapping names
-        // Moolakulam even when no Moolakulam employee is theirs to count.
-        ...TelegramGroupMappingUsecase.describeTarget(mapping, resolved),
+        // The RULE, unnarrowed: a manager sees that a rule names Moolakulam
+        // even when no Moolakulam employee is theirs to count.
+        ...TelegramGroupMappingUsecase.describeRule(mapping, resolved),
         matched_employees: (perMapping.get(mapping.telegram_group_mapping_id) || []).length,
         created_at: mapping.created_at,
       })),
@@ -291,50 +407,24 @@ class TelegramGroupMappingUsecase {
   }
 
   /**
-   * Add a mapping.
+   * Add a mapping - ONE composite rule.
    *
-   * VALIDATION IS THE TYPE FIRST, THEN THE TARGET, and the target rules are
-   * opposite for the two shapes: ALL_EMPLOYEES must NOT carry one (a client
-   * sending `{ALL_EMPLOYEES, target_id: 5}` has misunderstood something, and
-   * silently ignoring the 5 would store a row that does not mean what they
-   * sent), and a targeted type must carry a positive id that EXISTS.
+   * There is no type to choose any more. The body carries up to three
+   * optional dimensions; `validateRule` owns every refusal, so this method is
+   * the transaction and nothing else, and the rule that decides what is valid
+   * is the same one the preview already showed the operator.
    *
-   * THE EXISTENCE CHECK IS AT CREATE TIME ONLY. A target may be deleted later
-   * and the mapping survives it, with a warning - that asymmetry is
-   * deliberate: refusing to CREATE a rule against a target that was never
-   * there is catching a mistake, while deleting a rule whose target vanished
-   * afterwards is destroying a decision somebody made.
+   * THE RULE THAT NARROWS NOTHING IS ALLOWED, because that is "All
+   * Employees" - the thing the old ALL_EMPLOYEES type meant - and it is
+   * guarded against being added twice by the same UNIQUE key as every other
+   * rule rather than by a sentinel of its own.
    */
   async addMapping(telegram_group_id, body = {}, actor = {}) {
     const group = await this.requireGroup(telegram_group_id);
+    const rule = await this.validateRule(body);
 
-    const type = String(body.mapping_type || "").trim();
-    if (!MAPPING_TYPES.includes(type)) {
-      throw validationError(MAPPING_MESSAGES.UNSUPPORTED_TYPE);
-    }
-
-    let target_id;
-    if (type === MAPPING_TYPE.ALL_EMPLOYEES) {
-      if (body.target_id !== undefined && body.target_id !== null && body.target_id !== "") {
-        throw validationError(MAPPING_MESSAGES.TARGET_NOT_ALLOWED);
-      }
-      target_id = ALL_EMPLOYEES_TARGET_ID;
-    } else {
-      target_id = positiveId(body.target_id);
-      if (target_id === null) throw validationError(MAPPING_MESSAGES.TARGET_REQUIRED);
-
-      const resolved = await this.repo.resolveTargets({ [type]: [target_id] });
-      const found = resolved.get(type);
-      if (!found || !found.has(target_id)) {
-        throw validationError(MAPPING_MESSAGES.targetMissing(MAPPING_TYPE_LABEL[type]));
-      }
-      // An INACTIVE target is allowed to be mapped: retiring a department
-      // does not retire the people still assigned to it, and refusing here
-      // would block the very configuration somebody needs to reach them.
-    }
-
-    const duplicate = await this.repo.findDuplicate(telegram_group_id, type, target_id);
-    if (duplicate) throw validationError(MAPPING_MESSAGES.DUPLICATE);
+    const duplicate = await this.repo.findDuplicateRule(telegram_group_id, rule);
+    if (duplicate) throw validationError(PREVIEW_MESSAGES.DUPLICATE_RULE);
 
     try {
       // ONE TRANSACTION, Phase 3C. The mapping and the reconciliation job it
@@ -346,8 +436,7 @@ class TelegramGroupMappingUsecase {
         const row = await this.repo.create(
           {
             telegram_group_id: group.telegram_group_id,
-            mapping_type: type,
-            target_id,
+            rule,
             created_by: actor && actor.employee_id !== undefined ? actor.employee_id : null,
           },
           { tx }
@@ -358,11 +447,11 @@ class TelegramGroupMappingUsecase {
       return { code: 200, msg: "Mapping added", ...created };
     } catch (err) {
       // THE INDEX IS THE REAL GUARANTEE. Two requests can both pass the
-      // duplicate check above in the same instant; only the UNIQUE key
+      // duplicate check above in the same instant; only `uq_tgm_group_rule`
       // decides, and the loser must read the same sentence as anybody else
       // rather than a driver error.
       if (err && (err.code === "ER_DUP_ENTRY" || err.errno === 1062)) {
-        throw validationError(MAPPING_MESSAGES.DUPLICATE);
+        throw validationError(PREVIEW_MESSAGES.DUPLICATE_RULE);
       }
       throw err;
     }
@@ -449,6 +538,72 @@ class TelegramGroupMappingUsecase {
       employees: visible
         .filter((employee) => matchedIds.has(employee.employee_id))
         .map((employee) => TelegramGroupMappingUsecase.safeEmployee(employee, connected)),
+    };
+  }
+
+  /**
+   * PREVIEW - who a rule WOULD cover, before anybody saves it.
+   *
+   * This is the multi-level screen's whole point: you narrow Outlet, then
+   * Department, then Designation, and the list under the form answers "who is
+   * that" at every step. Saving a rule you have not seen the population of is
+   * how a group ends up containing people nobody chose.
+   *
+   * IT MAKES NO TELEGRAM CALL AND WRITES NOTHING. Not one request to
+   * Telegram, not a row, not a claim. It is arithmetic over the same employee
+   * snapshot and the same `employedOn()` rule the saved rules use - so the
+   * number under the form and the number on the row afterwards are produced
+   * by the same code from the same snapshot, and cannot disagree.
+   *
+   * THE SCOPE IS THE CALLER'S, resolved server-side, and it FAILS CLOSED.
+   * There is no branch parameter to send. A `NONE` scope returns no names and
+   * counts nothing, so a wiring mistake cannot publish the staff list.
+   *
+   * `search` NARROWS WHAT IS SHOWN, NEVER WHAT IS COUNTED. `total_matched` is
+   * the rule's population; typing in the search box must not make the
+   * operator believe the rule got smaller.
+   *
+   * THE FIELDS ARE `safeEmployee`'s and nothing else - no salary, no Aadhaar,
+   * no bank, no mobile, no Telegram user id, chat id or username.
+   * `telegram_connected` is a boolean and answers only how much of this
+   * population is ready for the membership phase.
+   */
+  async previewEmployees(telegram_group_id, { scope, search, ...body } = {}) {
+    await this.requireGroup(telegram_group_id);
+    // ONE resolution pass, reused for the description below.
+    const { rule, resolved } = await this.validateRuleResolved(body);
+    const businessDate = this.businessDate();
+
+    const employees = await this.repo.getEmployeeSnapshot();
+
+    const visible = TelegramGroupMappingUsecase.visibleEmployees(employees, scope);
+    const { union } = deriveMatches(visible, [rule], businessDate);
+    const matchedIds = new Set(union);
+    const connected = await this.repo.getConnectedEmployeeIds(union);
+
+    const needle = String(search === undefined || search === null ? "" : search)
+      .trim()
+      .toLowerCase();
+    const matched = visible.filter((employee) => matchedIds.has(employee.employee_id));
+    const shown = needle
+      ? matched.filter((employee) =>
+          String(employee.employee_name || "").toLowerCase().includes(needle)
+        )
+      : matched;
+
+    return {
+      as_of_date: businessDate,
+      counts_scope: TelegramGroupMappingUsecase.countsScope(scope),
+      ...TelegramGroupMappingUsecase.describeRule(rule, resolved),
+      // The RULE's population, unaffected by the search box.
+      total_matched: union.length,
+      total_connected: union.filter((id) => connected.has(id)).length,
+      // Whether an identical rule already exists, so the screen can say so
+      // before the operator presses Save rather than after.
+      duplicate_rule: Boolean(await this.repo.findDuplicateRule(telegram_group_id, rule)),
+      employees: shown.map((employee) =>
+        TelegramGroupMappingUsecase.safeEmployee(employee, connected)
+      ),
     };
   }
 

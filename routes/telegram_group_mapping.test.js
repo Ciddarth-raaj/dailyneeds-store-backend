@@ -139,7 +139,16 @@ describe("the mapping list", () => {
       res
     );
     assert.equal(res.body.code, 200);
-    assert.deepEqual(res.body.mapping_types, MAPPING_TYPES);
+    // The three dimensions the Add Mapping form cascades through, so the
+    // screen never hard-codes them or their labels.
+    assert.deepEqual(
+      res.body.rule_dimensions.map((d) => d.field),
+      ["outlet_id", "department_id", "designation_id"]
+    );
+    assert.deepEqual(
+      res.body.rule_dimensions.map((d) => d.label),
+      ["Outlet", "Department", "Designation"]
+    );
     assert.equal(mapping.calls[0].fn, "getMappings");
     assert.equal(mapping.calls[0].id, 10);
   });
@@ -164,13 +173,38 @@ describe("adding a mapping", () => {
     const routes = routesFor(mapping, { resolve: async () => ALL_BRANCHES });
     const res = fakeRes();
     await find(routes, "POST", "/mappings").handler(
-      { params: { telegram_group_id: "10" }, body: { mapping_type: "OUTLET", target_id: 5 } },
+      { params: { telegram_group_id: "10" }, body: { outlet_id: 5, designation_id: 3 } },
       res
     );
     const call = mapping.calls[0];
     assert.equal(call.fn, "addMapping");
-    assert.deepEqual(call.body, { mapping_type: "OUTLET", target_id: 5 });
+    assert.deepEqual(call.body, { outlet_id: 5, designation_id: 3 });
     assert.deepEqual(call.actor, { employee_id: 7 });
+  });
+
+  it("accepts a rule that narrows NOTHING - that is All Employees", async () => {
+    const mapping = mappingUsecase();
+    const routes = routesFor(mapping, { resolve: async () => ALL_BRANCHES });
+    const res = fakeRes();
+    await find(routes, "POST", "/mappings").handler(
+      { params: { telegram_group_id: "10" }, body: {} },
+      res
+    );
+    assert.equal(mapping.calls[0].fn, "addMapping");
+  });
+
+  it("no longer accepts the single-dimension body", async () => {
+    // `mapping_type` is not a field any more. It must be REFUSED rather than
+    // ignored: silently dropping it would store "All Employees" for somebody
+    // who asked for one outlet, which is the largest population there is.
+    const mapping = mappingUsecase();
+    const routes = routesFor(mapping, { resolve: async () => ALL_BRANCHES });
+    const res = fakeRes();
+    await find(routes, "POST", "/mappings").handler(
+      { params: { telegram_group_id: "10" }, body: { mapping_type: "OUTLET", target_id: 5 } },
+      res
+    );
+    assert.equal(mapping.calls.length, 0);
   });
 
   it("refuses an unknown body field before the usecase sees it", async () => {
@@ -178,7 +212,7 @@ describe("adding a mapping", () => {
     const routes = routesFor(mapping, { resolve: async () => ALL_BRANCHES });
     const res = fakeRes();
     await find(routes, "POST", "/mappings").handler(
-      { params: { telegram_group_id: "10" }, body: { mapping_type: "OUTLET", employee_ids: [1, 2] } },
+      { params: { telegram_group_id: "10" }, body: { outlet_id: 5, employee_ids: [1, 2] } },
       res
     );
     assert.equal(mapping.calls.length, 0, "a hand-picked employee list must not reach the usecase");
@@ -334,10 +368,11 @@ describe("membership endpoints are Phase 3C's, and only Phase 3C's", () => {
     }
   });
 
-  it("with Phase 3C wired, the membership routes are exactly three, all MANAGE-gated", () => {
+  it("with Phase 3C wired, every membership write is MANAGE-gated", () => {
     const routes = routesFor(mappingUsecase(), { resolve: async () => ALL_BRANCHES }, {
       listForGroup: async () => ({ code: 200, data: [] }),
       grantManual: async () => ({ code: 200 }),
+      grantManualBulk: async () => ({ code: 200 }),
       revokeManual: async () => ({ code: 200 }),
       queueHealth: async () => ({ code: 200 }),
       requeue: async () => ({ code: 200 }),
@@ -349,6 +384,7 @@ describe("membership endpoints are Phase 3C's, and only Phase 3C's", () => {
       "GET /:telegram_group_id(\\d+)/membership",
       "GET /membership/queue",
       "POST /:telegram_group_id(\\d+)/membership",
+      "POST /:telegram_group_id(\\d+)/membership/bulk",
       "POST /membership/queue/:telegram_membership_job_id(\\d+)/requeue",
     ].sort());
 

@@ -5,7 +5,11 @@ const {
   PERMISSIONS: P,
   TELEGRAM_GROUP_CATEGORIES,
 } = require("../constants/telegram_group_registry");
-const { MAPPING_TYPES } = require("../constants/telegram_group_mapping");
+const {
+  RULE_DIMENSIONS,
+  RULE_DIMENSION,
+  BULK_GRANT_MAX,
+} = require("../constants/telegram_group_mapping");
 
 /**
  * Telegram Group Registry. Mounted at /telegram-groups.
@@ -211,7 +215,13 @@ class TelegramGroupRegistryRoutes {
           res.json({
             code: 200,
             data: await this.mapping.getMappings(id, { scope }),
-            mapping_types: MAPPING_TYPES,
+            // The vocabulary the Add Mapping form cascades through, so the
+            // screen never hard-codes the dimensions or their labels.
+            rule_dimensions: RULE_DIMENSIONS.map((dimension) => ({
+              dimension,
+              field: RULE_DIMENSION[dimension].field,
+              label: RULE_DIMENSION[dimension].label,
+            })),
           });
         } catch (err) {
           this.fail(res, err);
@@ -225,18 +235,48 @@ class TelegramGroupRegistryRoutes {
       gate.require(P.MANAGE_TELEGRAM_GROUPS),
       async (req, res) => {
         try {
-          this.validate(req.body, {
-            // `any` for both, because the usecase owns the vocabulary AND the
-            // separate refusals - "not a supported type", "takes no target",
-            // "select what this applies to", "no longer exists". A Joi
-            // `valid()` list here would flatten all of those into one.
-            mapping_type: Joi.any().required(),
-            target_id: Joi.any().optional(),
-          });
+          // EVERY DIMENSION IS OPTIONAL AND EVERY ONE IS `any`, because the
+          // usecase owns the vocabulary AND the separate refusals - "select
+          // a valid outlet", "that department no longer exists", "an
+          // identical rule is already on this group". A Joi `number()` here
+          // would flatten all of those into one generic message, and a
+          // `required()` would re-introduce the type-then-target step this
+          // screen exists to remove.
+          this.validate(req.body, this._ruleSchema());
           const id = parseInt(req.params.telegram_group_id, 10);
           res.json(
             await this.mapping.addMapping(id, req.body, await this.permissions.actorFor(req))
           );
+        } catch (err) {
+          this.fail(res, err);
+        }
+        res.end();
+      }
+    );
+
+    /**
+     * PREVIEW - who this rule WOULD cover. Reads, writes nothing.
+     *
+     * POST rather than GET because the body is the rule, and the same
+     * validator decides it here as at save time - so a rule the preview
+     * accepted cannot be refused by Save for a reason the operator never saw.
+     *
+     * `view_telegram_groups`, like every other read on this screen, and the
+     * branch scope is resolved SERVER-SIDE from the caller's current branch
+     * assignment. There is no branch parameter on this route to send.
+     */
+    r.post(
+      "/:telegram_group_id(\\d+)/mapping-preview",
+      gate.require(P.VIEW_TELEGRAM_GROUPS),
+      async (req, res) => {
+        try {
+          this.validate(req.body, { ...this._ruleSchema(), search: Joi.any().optional() });
+          const id = parseInt(req.params.telegram_group_id, 10);
+          const scope = await this.scopeFor(req);
+          res.json({
+            code: 200,
+            data: await this.mapping.previewEmployees(id, { ...req.body, scope }),
+          });
         } catch (err) {
           this.fail(res, err);
         }
@@ -309,6 +349,15 @@ class TelegramGroupRegistryRoutes {
    * granting and revoking are `manage_telegram_groups`, the same key that
    * already decides a group's mappings.
    */
+  /** The three optional dimensions, as a Joi shape. One definition. */
+  _ruleSchema() {
+    const shape = {};
+    for (const dimension of RULE_DIMENSIONS) {
+      shape[RULE_DIMENSION[dimension].field] = Joi.any().optional();
+    }
+    return shape;
+  }
+
   _membershipRoutes(r, gate) {
     if (!this.membershipAdmin) return;
 
@@ -338,6 +387,44 @@ class TelegramGroupRegistryRoutes {
               id,
               req.body.employee_id,
               await this.permissions.actorFor(req)
+            )
+          );
+        } catch (err) {
+          this.fail(res, err);
+        }
+        res.end();
+      }
+    );
+
+    /**
+     * BULK GRANT - "Add Selected Employees" from the multi-level Map screen.
+     *
+     * ONE REQUEST FOR THE WHOLE SELECTION, never one per employee from the
+     * browser. `manage_telegram_groups`, the same key as the single grant,
+     * AND the caller's branch scope, which that key does not widen: the
+     * usecase refuses the whole request if any selected employee is outside
+     * it, and the scope is resolved server-side from the caller's current
+     * branch assignment rather than read from the request.
+     *
+     * A LIST OF IDS, NOT A RULE. This creates MANUAL claims for the people
+     * the operator picked. It does NOT write a mapping rule - inventing a
+     * rule to describe an arbitrary selection is how a group ends up with
+     * configuration nobody chose and nobody can read back.
+     */
+    r.post(
+      "/:telegram_group_id(\\d+)/membership/bulk",
+      gate.require(P.MANAGE_TELEGRAM_GROUPS),
+      async (req, res) => {
+        try {
+          this.validate(req.body, { employee_ids: Joi.array().max(BULK_GRANT_MAX).required() });
+          const id = parseInt(req.params.telegram_group_id, 10);
+          const scope = await this.scopeFor(req);
+          res.json(
+            await this.membershipAdmin.grantManualBulk(
+              id,
+              req.body.employee_ids,
+              await this.permissions.actorFor(req),
+              { scope }
             )
           );
         } catch (err) {

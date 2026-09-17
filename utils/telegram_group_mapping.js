@@ -2,6 +2,11 @@ const { employedOn } = require("./attendance_eligibility");
 const {
   MAPPING_TYPE,
   ALL_EMPLOYEES_TARGET_ID,
+  RULE_DIMENSIONS,
+  RULE_DIMENSION,
+  ANY_TARGET_ID,
+  ANY_LABEL,
+  ALL_EMPLOYEES_LABEL,
 } = require("../constants/telegram_group_mapping");
 
 /**
@@ -48,24 +53,111 @@ const toId = (value) => {
 };
 
 /**
- * The DIMENSION half only - does this employee sit in this outlet /
- * designation / department. Employment is a separate question, asked below,
- * so that neither half can be quietly skipped.
+ * THE ONE PLACE A STORED ROW BECOMES A RULE.
+ *
+ * Returns `{OUTLET, DEPARTMENT, DESIGNATION}` of ids, where 0 means the
+ * dimension is unrestricted. Everything downstream - matching, labelling,
+ * duplicate detection, the preview - reads THIS, so there is exactly one
+ * understanding of what a row means.
+ *
+ * IT ACCEPTS THE LEGACY SHAPE TOO, and that is not a second rule: a
+ * `{mapping_type, target_id}` pair is an ENCODING of a composite rule with
+ * one dimension narrowed, so it is decoded here and joins the same path. The
+ * migration rewrites the stored rows, but request bodies, fixtures and any
+ * row read by code that predates this change still arrive in the old shape,
+ * and a decoder is cheaper to trust than a second matcher.
+ *
+ * COMPOSITE COLUMNS WIN when both are present. After the migration they are
+ * the truth; a stale `mapping_type` alongside them is a leftover, and reading
+ * the leftover is how a two-dimension rule would silently match one.
+ */
+function ruleOf(mapping) {
+  const rule = { OUTLET: ANY_TARGET_ID, DEPARTMENT: ANY_TARGET_ID, DESIGNATION: ANY_TARGET_ID };
+  if (!mapping) return rule;
+
+  let sawComposite = false;
+  for (const dimension of RULE_DIMENSIONS) {
+    const raw = mapping[RULE_DIMENSION[dimension].column];
+    if (raw === undefined) continue;
+    sawComposite = true;
+    const id = toId(raw);
+    rule[dimension] = id === null || id < 0 ? ANY_TARGET_ID : id;
+  }
+  if (sawComposite) return rule;
+
+  // Legacy encoding. ALL_EMPLOYEES narrows nothing, so it is the all-zero
+  // rule; a targeted type narrows exactly its own dimension.
+  const type = mapping.mapping_type;
+  if (!type || type === MAPPING_TYPE.ALL_EMPLOYEES) return rule;
+  if (!RULE_DIMENSIONS.includes(type)) return rule;
+  const target = toId(mapping.target_id);
+  // A targeted legacy row on the sentinel is a row that should never have
+  // been written. It stays unrestricted-on-nothing and matches NOBODY below,
+  // rather than quietly becoming "everybody".
+  rule[type] = target === null || target <= 0 ? -1 : target;
+  return rule;
+}
+
+/**
+ * The DIMENSION half only - does this employee satisfy every narrowed
+ * dimension of this rule. Employment is a separate question, asked below, so
+ * that neither half can be quietly skipped.
+ *
+ * AND ACROSS THE THREE, AND UNRESTRICTED MATCHES EVERYONE. An employee with
+ * no department sits outside any rule that names one, which is correct: the
+ * rule asks for a department and they are in none.
  */
 function matchesDimension(employee, mapping) {
   if (!employee || !mapping) return false;
-  if (mapping.mapping_type === MAPPING_TYPE.ALL_EMPLOYEES) return true;
+  const rule = ruleOf(mapping);
 
-  const column = DIMENSION_COLUMN[mapping.mapping_type];
-  if (!column) return false;
+  for (const dimension of RULE_DIMENSIONS) {
+    const want = rule[dimension];
+    if (want === ANY_TARGET_ID) continue;
+    // The poisoned value `ruleOf` writes for a malformed legacy row. It can
+    // equal no employee's id, so the bad row matches nobody and its failure
+    // stays visible instead of becoming maximal.
+    if (want < 0) return false;
+    const have = toId(employee[RULE_DIMENSION[dimension].employeeColumn]);
+    if (have === null || have !== want) return false;
+  }
+  return true;
+}
 
-  const target = toId(mapping.target_id);
-  // A targeted mapping on the sentinel is not "everybody" - it is a row that
-  // should never have been written. It matches nobody rather than everybody,
-  // because the failure of a bad row must be visible, not maximal.
-  if (target === null || target === ALL_EMPLOYEES_TARGET_ID) return false;
+/**
+ * The rule as a sentence, from ids already resolved to names.
+ *
+ * `resolved` IS EXACTLY WHAT `repository#resolveTargets` RETURNS - a
+ * `Map<dimension, Map<id, {name, active}>>` - and not a look-alike object,
+ * because indexing a Map with `[dimension]` silently yields `undefined` and
+ * every rule would then read as "#5" with nothing failing. A test pins the
+ * resolved case for that reason.
+ *
+ * AN ID WITH NO NAME RENDERS AS THE ID, not as nothing: a rule whose outlet
+ * was deleted must still read as a rule.
+ */
+function ruleLabel(mapping, resolved) {
+  const rule = ruleOf(mapping);
+  const lookup = (dimension) => {
+    if (!resolved) return undefined;
+    const found = typeof resolved.get === "function" ? resolved.get(dimension) : resolved[dimension];
+    return found && typeof found.get === "function" ? found.get(rule[dimension]) : undefined;
+  };
+  const parts = [];
+  for (const dimension of RULE_DIMENSIONS) {
+    const id = rule[dimension];
+    if (id === ANY_TARGET_ID) continue;
+    const found = lookup(dimension);
+    const shown = found && found.name ? found.name : `#${id}`;
+    parts.push(`${RULE_DIMENSION[dimension].label}: ${shown}`);
+  }
+  return parts.length === 0 ? ALL_EMPLOYEES_LABEL : parts.join(" + ");
+}
 
-  return toId(employee[column]) === target;
+/** True when nothing is narrowed - the rule that means everybody. */
+function isAllEmployees(mapping) {
+  const rule = ruleOf(mapping);
+  return RULE_DIMENSIONS.every((dimension) => rule[dimension] === ANY_TARGET_ID);
 }
 
 /**
@@ -134,6 +226,10 @@ function deriveMatches(employees, mappings, businessDate) {
 
 module.exports = {
   DIMENSION_COLUMN,
+  ruleOf,
+  ruleLabel,
+  isAllEmployees,
+  ANY_LABEL,
   matchesDimension,
   matchesMapping,
   employedEmployees,

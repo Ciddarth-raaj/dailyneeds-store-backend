@@ -9,7 +9,29 @@ const {
 const {
   MAPPING_TARGET_SOURCE,
   TARGETED_MAPPING_TYPES,
+  RULE_DIMENSIONS,
+  RULE_DIMENSION,
+  ANY_TARGET_ID,
 } = require("../constants/telegram_group_mapping");
+
+/** The three rule columns, as a SELECT list fragment. One definition. */
+const RULE_COLUMNS = RULE_DIMENSIONS.map((d) => RULE_DIMENSION[d].column);
+
+/** 0 for anything that is not a usable positive id - the unrestricted sentinel. */
+const ruleId = (value) => {
+  const n = Number(value);
+  return Number.isSafeInteger(n) && n > 0 ? n : ANY_TARGET_ID;
+};
+
+/** The stored rule, read off a row. Shape matches `ruleOf`'s input exactly. */
+const ruleFromRow = (row) => {
+  const out = {};
+  for (const dimension of RULE_DIMENSIONS) {
+    const column = RULE_DIMENSION[dimension].column;
+    out[column] = ruleId(row[column]);
+  }
+  return out;
+};
 
 const TABLE = "telegram_group_mapping";
 
@@ -86,7 +108,7 @@ class TelegramGroupMappingRepository {
   async getByGroup(telegram_group_id) {
     const rows = await this._query(
       "GET_BY_GROUP",
-      `SELECT telegram_group_mapping_id, telegram_group_id, mapping_type, target_id,
+      `SELECT telegram_group_mapping_id, telegram_group_id, ${RULE_COLUMNS.join(", ")},
               created_by, created_at
          FROM ${TABLE}
         WHERE telegram_group_id = ?
@@ -96,8 +118,7 @@ class TelegramGroupMappingRepository {
     return (rows || []).map((row) => ({
       telegram_group_mapping_id: Number(row.telegram_group_mapping_id),
       telegram_group_id: Number(row.telegram_group_id),
-      mapping_type: row.mapping_type,
-      target_id: Number(row.target_id),
+      ...ruleFromRow(row),
       created_by: row.created_by === undefined ? null : row.created_by,
       created_at: row.created_at,
     }));
@@ -127,7 +148,8 @@ class TelegramGroupMappingRepository {
   async getAllMappingsWithGroups() {
     const rows = await this._query(
       "ALL_WITH_GROUPS",
-      `SELECT m.telegram_group_mapping_id, m.telegram_group_id, m.mapping_type, m.target_id,
+      `SELECT m.telegram_group_mapping_id, m.telegram_group_id,
+              ${RULE_COLUMNS.map((c) => `m.${c}`).join(", ")},
               g.group_name, g.chat_id, g.category, g.used_for, g.outlet_id,
               g.bot_is_admin, g.is_active
          FROM ${TABLE} m
@@ -138,8 +160,7 @@ class TelegramGroupMappingRepository {
     return (rows || []).map((row) => ({
       telegram_group_mapping_id: Number(row.telegram_group_mapping_id),
       telegram_group_id: Number(row.telegram_group_id),
-      mapping_type: row.mapping_type,
-      target_id: Number(row.target_id),
+      ...ruleFromRow(row),
       group: {
         telegram_group_id: Number(row.telegram_group_id),
         group_name: row.group_name,
@@ -165,7 +186,7 @@ class TelegramGroupMappingRepository {
   async getByIdForGroup(telegram_group_id, telegram_group_mapping_id) {
     const rows = await this._query(
       "GET_BY_ID_FOR_GROUP",
-      `SELECT telegram_group_mapping_id, telegram_group_id, mapping_type, target_id
+      `SELECT telegram_group_mapping_id, telegram_group_id, ${RULE_COLUMNS.join(", ")}
          FROM ${TABLE}
         WHERE telegram_group_id = ? AND telegram_group_mapping_id = ?`,
       [telegram_group_id, telegram_group_mapping_id]
@@ -175,18 +196,25 @@ class TelegramGroupMappingRepository {
     return {
       telegram_group_mapping_id: Number(row.telegram_group_mapping_id),
       telegram_group_id: Number(row.telegram_group_id),
-      mapping_type: row.mapping_type,
-      target_id: Number(row.target_id),
+      ...ruleFromRow(row),
     };
   }
 
-  async findDuplicate(telegram_group_id, mapping_type, target_id) {
+  /**
+   * Is this EXACT rule already on this group - all three dimensions equal.
+   *
+   * A pre-check only, so the user reads a sentence instead of a driver error.
+   * `uq_tgm_group_rule` is what actually decides: two requests can both pass
+   * this in the same instant.
+   */
+  async findDuplicateRule(telegram_group_id, rule) {
+    const where = RULE_COLUMNS.map((c) => `${c} = ?`).join(" AND ");
     const rows = await this._query(
-      "FIND_DUPLICATE",
+      "FIND_DUPLICATE_RULE",
       `SELECT telegram_group_mapping_id
          FROM ${TABLE}
-        WHERE telegram_group_id = ? AND mapping_type = ? AND target_id = ?`,
-      [telegram_group_id, mapping_type, target_id]
+        WHERE telegram_group_id = ? AND ${where}`,
+      [telegram_group_id, ...RULE_COLUMNS.map((c) => ruleId(rule && rule[c]))]
     );
     return (rows && rows[0]) || null;
   }
@@ -397,12 +425,16 @@ class TelegramGroupMappingRepository {
     }
   }
 
-  async create({ telegram_group_id, mapping_type, target_id, created_by = null }, { tx } = {}) {
+  async create({ telegram_group_id, rule, created_by = null }, { tx } = {}) {
     const res = await this._query(
       "CREATE",
-      `INSERT INTO ${TABLE} (telegram_group_id, mapping_type, target_id, created_by)
-       VALUES (?, ?, ?, ?)`,
-      [telegram_group_id, mapping_type, target_id, created_by === undefined ? null : created_by],
+      `INSERT INTO ${TABLE} (telegram_group_id, ${RULE_COLUMNS.join(", ")}, created_by)
+       VALUES (?, ${RULE_COLUMNS.map(() => "?").join(", ")}, ?)`,
+      [
+        telegram_group_id,
+        ...RULE_COLUMNS.map((c) => ruleId(rule && rule[c])),
+        created_by === undefined ? null : created_by,
+      ],
       tx
     );
     return { telegram_group_mapping_id: res.insertId };
@@ -463,3 +495,4 @@ class TelegramGroupMappingRepository {
 module.exports = (db) => new TelegramGroupMappingRepository(db);
 module.exports.TelegramGroupMappingRepository = TelegramGroupMappingRepository;
 module.exports.TABLE = TABLE;
+module.exports.RULE_COLUMNS = RULE_COLUMNS;

@@ -8,6 +8,11 @@ const {
   JOB_REASON,
   JOB_STATUS,
 } = require("../constants/telegram_membership_claim");
+const {
+  BULK_GRANT_MAX,
+  PREVIEW_MESSAGES,
+} = require("../constants/telegram_group_mapping");
+const { EMPLOYEE_BRANCH_SCOPE } = require("../utils/employee_branch_scope");
 
 function validationError(message) {
   const err = new Error(message);
@@ -149,6 +154,114 @@ class TelegramMembershipAdminUsecase {
       }
     });
     return { code: 200, msg: "Manual membership granted" };
+  }
+
+  /**
+   * GRANT MANY, IN ONE TRANSACTION AND ONE REQUEST.
+   *
+   * WHY THIS EXISTS INSTEAD OF A LOOP IN THE BROWSER. "Add the 18 employees I
+   * just selected" as 18 uncontrolled requests is 18 independent
+   * transactions: a dropped connection halfway leaves nine granted and nine
+   * not, with nothing on the screen saying which nine, and the operator's
+   * only recourse is to press the button again and hope the repeats are
+   * harmless. One request, one transaction - all of them or none.
+   *
+   * IT IS BOUNDED. `BULK_GRANT_MAX` employees at most, because every one of
+   * them is a claim, an audit row and a queue row inside the SAME
+   * transaction: an unbounded list is an unbounded transaction holding
+   * unbounded locks, and the operator who pasted the whole company would take
+   * the mapping screen down for everybody else.
+   *
+   * EVERY EMPLOYEE MUST BE THE CALLER'S TO GRANT. `manage_telegram_groups`
+   * says the operator may configure groups; it does not widen which
+   * employees they may reach. The branch scope is resolved server-side and an
+   * id outside it fails the WHOLE request rather than being silently dropped
+   * - a partial success the operator did not ask for and cannot see is worse
+   * than a refusal they can read. A `NONE` scope grants nothing.
+   *
+   * NO TELEGRAM CALL HAPPENS HERE, inside the transaction or outside it. The
+   * claims say the group is required for these people; the worker acts on
+   * the queue rows afterwards, and Phase 3B's join is still the only thing
+   * that puts anybody in a group.
+   *
+   * RE-GRANTING SOMEBODY WHO IS ALREADY MANAGED IS NOT AN ERROR.
+   * `claimRepo.open` is the same upsert a single grant uses, so selecting a
+   * row that is already there is a no-op on the claim and an ordinary audit
+   * row - which is what an operator who could not remember expects.
+   */
+  async grantManualBulk(telegramGroupId, employeeIds, actor = {}, { scope } = {}) {
+    const group = await this._requireGroup(telegramGroupId);
+
+    const ids = [
+      ...new Set(
+        (Array.isArray(employeeIds) ? employeeIds : [])
+          .map(Number)
+          .filter((id) => Number.isSafeInteger(id) && id > 0)
+      ),
+    ];
+    if (ids.length === 0) throw validationError(PREVIEW_MESSAGES.NO_EMPLOYEES);
+    if (ids.length > BULK_GRANT_MAX) throw validationError(PREVIEW_MESSAGES.TOO_MANY_EMPLOYEES);
+
+    const described = await this.claimRepo.describeEmployeesWithBranch(ids);
+    for (const id of ids) {
+      if (!described.has(id)) throw notFound("Employee not found");
+    }
+
+    // FAILS CLOSED. Anything that is not ALL_BRANCHES or a usable
+    // OWN_BRANCHES list permits NOTHING - never everything - which is the
+    // same rule `TelegramGroupMappingUsecase.visibleEmployees` applies to the
+    // preview the operator selected these people from.
+    const kind = (scope && scope.kind) || EMPLOYEE_BRANCH_SCOPE.NONE;
+    if (kind !== EMPLOYEE_BRANCH_SCOPE.ALL_BRANCHES) {
+      const allowed =
+        kind === EMPLOYEE_BRANCH_SCOPE.OWN_BRANCHES
+          ? new Set((scope.store_ids || []).map(Number))
+          : new Set();
+      for (const id of ids) {
+        const employee = described.get(id);
+        const branch = employee.store_id;
+        if (branch === null || !allowed.has(Number(branch))) {
+          throw validationError(PREVIEW_MESSAGES.NOT_IN_SCOPE);
+        }
+      }
+    }
+
+    const actorId = actor && actor.employee_id !== undefined ? actor.employee_id : null;
+
+    await this._inTransaction(async (tx) => {
+      for (const id of ids) {
+        await this.claimRepo.open(
+          {
+            employeeId: id,
+            telegramGroupId: group.telegram_group_id,
+            source: CLAIM_SOURCE.MANUAL,
+            actorEmployeeId: actorId,
+          },
+          { tx }
+        );
+        await this.claimRepo.recordEvent(
+          {
+            employeeId: id,
+            telegramGroupId: group.telegram_group_id,
+            source: CLAIM_SOURCE.MANUAL,
+            eventType: MEMBERSHIP_EVENT.CLAIM_OPENED,
+            detailCode: DETAIL_CODE.MANUAL_GRANT,
+            actorEmployeeId: actorId,
+          },
+          { tx }
+        );
+        if (this.jobRepo) {
+          await this.jobRepo.enqueueEmployee(
+            id,
+            JOB_REASON.MANUAL_GRANTED,
+            { enqueuedBy: actorId },
+            { tx }
+          );
+        }
+      }
+    });
+
+    return { code: 200, msg: `Added ${ids.length} employee(s)`, granted: ids.length };
   }
 
   /**
