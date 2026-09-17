@@ -10,6 +10,7 @@ const GOFRUGAL_DTL = "medishopdb_MED_MRC_DTL";
 const GOFRUGAL_HDR = "medishopdb_MED_MRC_HDR";
 const GOFRUGAL_DIST = "medishopdb_MED_DISTRIBUTOR_MAST";
 const PRODUCT_OFFERS = "product_offers";
+const GRN_VERIFICATIONS = "grn_verifications";
 
 /**
  * Products per `IN (...)` chunk in listLatestGrnPricingByProduct. Kept at or
@@ -1094,6 +1095,105 @@ class StockReceivedRepository {
           );
         });
       });
+    });
+  }
+
+  /**
+   * The verification rows for a set of GRN reference numbers, verifier name
+   * included.
+   *
+   * One query for the whole page: the GRN list renders a Status / Verified By
+   * / Verified At column per row, and a lookup per row would be a round trip
+   * per GRN. `verified_at` is formatted here rather than handed over as a
+   * driver Date, so every caller sees the same server-local wall clock the
+   * row was written with.
+   */
+  listGrnVerificationsByRefnos(refnos) {
+    const keys = [
+      ...new Set(
+        (refnos || [])
+          .filter((refno) => refno != null && String(refno).trim() !== "")
+          .map((refno) => String(refno).trim())
+      ),
+    ];
+
+    return new Promise((resolve, reject) => {
+      if (!keys.length) return resolve([]);
+
+      this.db.query(
+        `SELECT
+            v.mmh_mrc_refno,
+            v.verified_by,
+            emp.employee_name AS verified_by_name,
+            DATE_FORMAT(v.verified_at, '%Y-%m-%d %H:%i:%s') AS verified_at
+         FROM \`${GRN_VERIFICATIONS}\` v
+         LEFT JOIN \`new_employee\` emp ON emp.employee_id = v.verified_by
+         WHERE v.mmh_mrc_refno IN (?)`,
+        [keys],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.STOCK_RECEIVED",
+              code: "REPOSITORY.STOCK_RECEIVED.LIST_GRN_VERIFICATIONS",
+              description: err.toString(),
+              category: "",
+              ref: { count: keys.length },
+            });
+            return reject(err);
+          }
+          resolve(rows || []);
+        }
+      );
+    });
+  }
+
+  /** The verification row for one GRN, or null while it is still pending. */
+  async getGrnVerificationByRefno(refno) {
+    const rows = await this.listGrnVerificationsByRefnos([refno]);
+    return rows[0] ?? null;
+  }
+
+  /**
+   * Records that `verifiedBy` checked this GRN, and answers whether THIS call
+   * is the one that recorded it.
+   *
+   * INSERT IGNORE against the unique key on mmh_mrc_refno, deliberately: a
+   * second approval - a double click, two people at once, a replayed request
+   * - is a no-op that leaves the first verifier and the first timestamp
+   * exactly as they were. An ON DUPLICATE KEY UPDATE here would silently
+   * rewrite the audit trail, which is the one thing this row exists to
+   * prevent. The time is the database's CURRENT_TIMESTAMP default; no caller
+   * supplies it.
+   */
+  insertGrnVerification(refno, verifiedBy) {
+    const refnoKey =
+      refno != null && String(refno).trim() !== "" ? String(refno).trim() : null;
+
+    return new Promise((resolve, reject) => {
+      if (!refnoKey) {
+        return reject(new Error("refno is required to verify a GRN"));
+      }
+
+      this.db.query(
+        `INSERT IGNORE INTO \`${GRN_VERIFICATIONS}\` (mmh_mrc_refno, verified_by)
+         VALUES (?, ?)`,
+        [refnoKey, verifiedBy != null ? verifiedBy : null],
+        (err, result) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.STOCK_RECEIVED",
+              code: "REPOSITORY.STOCK_RECEIVED.VERIFY_GRN",
+              description: err.toString(),
+              category: "",
+              ref: { refno: refnoKey },
+            });
+            return reject(err);
+          }
+          resolve({ created: (result?.affectedRows ?? 0) > 0 });
+        }
+      );
     });
   }
 

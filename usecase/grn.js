@@ -67,6 +67,42 @@ function tagIgnoredItems(items, ignoredSlNos) {
   return items;
 }
 
+/** A GRN with no local verification row has not been verified yet. */
+const PENDING_VERIFICATION = Object.freeze({
+  status: "PENDING",
+  verified_by: null,
+  verified_by_name: null,
+  verified_at: null,
+});
+
+/**
+ * The verification block every GRN payload carries.
+ *
+ * Always present, never undefined: a GRN that predates this feature - which
+ * is every GRN already in GoFrugal - reads as PENDING rather than as a
+ * missing field the frontend has to interpret. The verifier's display NAME
+ * is resolved here too, so a list of fifty GRNs does not turn into fifty
+ * employee lookups from the browser.
+ */
+function verificationOf(row) {
+  if (!row) return { ...PENDING_VERIFICATION };
+  return {
+    status: "VERIFIED",
+    verified_by: row.verified_by ?? null,
+    verified_by_name: row.verified_by_name ?? null,
+    verified_at: row.verified_at ?? null,
+  };
+}
+
+function verificationsByRefno(rows) {
+  const map = new Map();
+  (rows || []).forEach((row) => {
+    if (row?.mmh_mrc_refno == null) return;
+    map.set(String(row.mmh_mrc_refno), verificationOf(row));
+  });
+  return map;
+}
+
 class GrnUsecase {
   constructor(stockReceivedRepo, priceCheckerRepo, hqOffersRepo, offersV3Repo) {
     this.stockReceivedRepo = stockReceivedRepo;
@@ -77,7 +113,19 @@ class GrnUsecase {
 
   async listGrnHeaders(filters = {}) {
     try {
-      return await this.stockReceivedRepo.listGrnHeaders(filters);
+      const headers = await this.stockReceivedRepo.listGrnHeaders(filters);
+      const byRefno = verificationsByRefno(
+        await this.stockReceivedRepo.listGrnVerificationsByRefnos(
+          headers.map((header) => header.mmh_mrc_refno)
+        )
+      );
+      return headers.map((header) => ({
+        ...header,
+        verification:
+          byRefno.get(String(header.mmh_mrc_refno)) ?? {
+            ...PENDING_VERIFICATION,
+          },
+      }));
     } catch (err) {
       logger.Log({
         level: logger.LEVEL.ERROR,
@@ -101,16 +149,24 @@ class GrnUsecase {
           detail.items.map((item) => item.product_id).filter((id) => id != null)
         ),
       ];
-      const [offerDetailsByProductId, ignoredRows] = await Promise.all([
-        findActiveOfferDetails(productIds, this.hqOffersRepo, this.offersV3Repo),
-        this.stockReceivedRepo.listIgnoredGrnIssueKeysByRefno(refno),
-      ]);
+      const [offerDetailsByProductId, ignoredRows, verificationRow] =
+        await Promise.all([
+          findActiveOfferDetails(
+            productIds,
+            this.hqOffersRepo,
+            this.offersV3Repo
+          ),
+          this.stockReceivedRepo.listIgnoredGrnIssueKeysByRefno(refno),
+          this.stockReceivedRepo.getGrnVerificationByRefno(refno),
+        ]);
       tagOfferProducts(detail.items, new Set(offerDetailsByProductId.keys()));
       tagOfferDetails(detail.items, offerDetailsByProductId);
       tagIgnoredItems(
         detail.items,
         new Set(ignoredRows.map((row) => String(row.mmd_mrc_sl_no)))
       );
+
+      detail.verification = verificationOf(verificationRow);
 
       return detail;
     } catch (err) {
@@ -179,6 +235,45 @@ class GrnUsecase {
         description: err.toString(),
         category: "",
         ref: { filters },
+      });
+      throw err;
+    }
+  }
+
+  /**
+   * Marks a GRN as checked and verified by the authenticated caller.
+   *
+   * `verifiedBy` is the employee id the route read off the JWT - the route
+   * never takes it from the request body - and the timestamp is the
+   * database's, written by the column default. The insert is an INSERT
+   * IGNORE, so a GRN that is ALREADY VERIFIED comes back with its original
+   * verifier and time and `already_verified: true`; clicking twice cannot
+   * rewrite who signed it off. Reopening a verification is deliberately not
+   * offered here.
+   */
+  async verifyGrn(refno, verifiedBy) {
+    try {
+      const detail = await this.stockReceivedRepo.listGrnDetailByRefno(refno);
+      if (!detail) return null;
+
+      const { created } = await this.stockReceivedRepo.insertGrnVerification(
+        refno,
+        verifiedBy
+      );
+      const row = await this.stockReceivedRepo.getGrnVerificationByRefno(refno);
+
+      return {
+        already_verified: !created,
+        verification: verificationOf(row),
+      };
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "USECASE.GRN",
+        code: "USECASE.GRN.VERIFY_GRN",
+        description: err.toString(),
+        category: "",
+        ref: { refno },
       });
       throw err;
     }

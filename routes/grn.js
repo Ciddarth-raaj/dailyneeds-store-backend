@@ -1,6 +1,7 @@
 const router = require("express").Router();
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
+const P = require("../constants/grn_permissions");
 
 const ignoreItemSchema = Joi.object({
   refno: Joi.alternatives().try(Joi.string(), Joi.number()).required(),
@@ -30,8 +31,9 @@ function parseOptionalIsoDate(raw, label) {
 }
 
 class GrnRoutes {
-  constructor(grnUsecase) {
+  constructor(grnUsecase, permissions) {
     this.grnUsecase = grnUsecase;
+    this.permissions = permissions;
     this.init();
   }
 
@@ -217,6 +219,62 @@ class GrnRoutes {
       }
       res.end();
     });
+
+    /**
+     * Sign this GRN off as checked and verified.
+     *
+     * THE APPROVER AND THE TIME ARE NOT INPUTS. The verifier is
+     * `req.decoded.employee_id`, taken from the authenticated session that
+     * global auth middleware already validated, and the time is written by
+     * the database's CURRENT_TIMESTAMP default - a client cannot claim either
+     * one. `verify_grn` is what lets the request through; `view_all_grn` only
+     * ever said who may LOOK at a GRN.
+     *
+     * A repeat approval answers 200 with the ORIGINAL verifier and time and
+     * `already_verified: true`, so a double click is harmless and the audit
+     * record is never overwritten.
+     */
+    router.post(
+      "/:refno/verify",
+      this.permissions.require(P.VERIFY_GRN),
+      async (req, res) => {
+        try {
+          const refno =
+            req.params.refno != null ? String(req.params.refno).trim() : "";
+          if (!refno) {
+            res.status(400).json({ code: 400, msg: "refno is required" });
+            res.end();
+            return;
+          }
+
+          const verifiedBy = req.decoded?.employee_id ?? null;
+          if (verifiedBy == null) {
+            res.status(401).json({ code: 401, msg: "Unauthorized" });
+            res.end();
+            return;
+          }
+
+          const result = await this.grnUsecase.verifyGrn(refno, verifiedBy);
+          if (!result) {
+            res.status(404).json({ code: 404, msg: "GRN not found" });
+            res.end();
+            return;
+          }
+
+          res.json({
+            code: 200,
+            msg: result.already_verified
+              ? "This GRN was already verified"
+              : "GRN verified",
+            data: result.verification,
+            meta: { refno, already_verified: result.already_verified },
+          });
+        } catch (err) {
+          respondError(res, err);
+        }
+        res.end();
+      }
+    );
   }
 
   getRouter() {
@@ -224,6 +282,6 @@ class GrnRoutes {
   }
 }
 
-module.exports = (grnUsecase) => {
-  return new GrnRoutes(grnUsecase);
+module.exports = (grnUsecase, permissions) => {
+  return new GrnRoutes(grnUsecase, permissions);
 };

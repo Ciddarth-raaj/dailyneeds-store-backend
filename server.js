@@ -1502,7 +1502,10 @@ class Server {
     const deadStockItemsRouter = require("./routes/dead_stock_items")(
       this.deadStockItemsUsecase
     );
-    const grnRouter = require("./routes/grn")(this.grnUsecase);
+    const grnRouter = require("./routes/grn")(
+      this.grnUsecase,
+      this.permissions
+    );
     const purchaseRefRouter = require("./routes/purchase_ref")(
       this.purchaseRefUsecase
     );
