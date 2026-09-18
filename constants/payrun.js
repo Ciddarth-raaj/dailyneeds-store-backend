@@ -115,13 +115,24 @@ const LIFECYCLE_FILTER = {
  * a payment-readiness question for a later stage, and blocking initialization
  * on it would stop a month being calculated over a fact that does not change
  * a single figure in it.
+ *
+ * NEITHER IS ANYTHING ABOUT ATTENDANCE, AND THAT IS THE POINT OF THIS LIST
+ * NOW. Attendance not yet final, an outstanding regularization and an
+ * outstanding OT approval used to be three of these codes, and they are not
+ * any more: initialization is the moment somebody's EMPLOYMENT and SALARY
+ * facts are taken for a month, and holding six hundred people out of a payrun
+ * because two of them have an OT request open stopped the month starting at
+ * all. They are reported as WARNINGS below, and they remain HARD GATES where
+ * they decide money - `constants/payrun_calculation.js#READY_BLOCKER` refuses
+ * Approve & Lock on all three, unchanged.
+ *
+ * WHAT IS LEFT HERE IS WHAT INITIALIZATION ITSELF CANNOT PROCEED WITHOUT: a
+ * person employed in the month, an approved salary to snapshot, a statutory
+ * setup complete enough to file on, and a month that is not already locked.
  */
 const BLOCK_REASON = {
   NOT_EMPLOYED_IN_MONTH: "NOT_EMPLOYED_IN_MONTH",
   SALARY_NOT_APPROVED: "SALARY_NOT_APPROVED",
-  ATTENDANCE_INCOMPLETE: "ATTENDANCE_INCOMPLETE",
-  PENDING_ATTENDANCE_REGULARIZATION: "PENDING_ATTENDANCE_REGULARIZATION",
-  PENDING_OT_APPROVAL: "PENDING_OT_APPROVAL",
   STATUTORY_SETUP_INCOMPLETE: "STATUTORY_SETUP_INCOMPLETE",
   MONTH_LOCKED: "MONTH_LOCKED",
 };
@@ -131,8 +142,8 @@ const BLOCK_REASON = {
  *
  * TWO STRINGS PER REASON, AND THEY ANSWER DIFFERENT QUESTIONS. The LABEL is
  * the business name of the blocker, and it is what somebody scanning a list of
- * forty employees needs: "Attendance incomplete", not a sentence about an
- * engine. The MESSAGE below explains WHY that blocker exists, and it is what
+ * forty employees needs: "Salary not approved", not a sentence about an
+ * effective-dated resolver. The MESSAGE below explains WHY that blocker exists, and it is what
  * somebody needs once they have stopped on one row and want to know what to go
  * and fix.
  *
@@ -148,9 +159,6 @@ const BLOCK_REASON = {
 const BLOCK_REASON_LABEL = {
   [BLOCK_REASON.NOT_EMPLOYED_IN_MONTH]: "Not employed this month",
   [BLOCK_REASON.SALARY_NOT_APPROVED]: "Salary not approved",
-  [BLOCK_REASON.ATTENDANCE_INCOMPLETE]: "Attendance incomplete",
-  [BLOCK_REASON.PENDING_ATTENDANCE_REGULARIZATION]: "Pending attendance request",
-  [BLOCK_REASON.PENDING_OT_APPROVAL]: "Pending OT approval",
   [BLOCK_REASON.STATUTORY_SETUP_INCOMPLETE]: "Statutory setup incomplete",
   [BLOCK_REASON.MONTH_LOCKED]: "Month locked",
 };
@@ -160,12 +168,6 @@ const BLOCK_REASON_MESSAGE = {
     "Not employed during any part of this month",
   [BLOCK_REASON.SALARY_NOT_APPROVED]:
     "Salary not approved - no approved salary is effective for this month",
-  [BLOCK_REASON.ATTENDANCE_INCOMPLETE]:
-    "Attendance incomplete - this month has not been calculated by the attendance engine",
-  [BLOCK_REASON.PENDING_ATTENDANCE_REGULARIZATION]:
-    "Pending attendance regularization for a date in this month",
-  [BLOCK_REASON.PENDING_OT_APPROVAL]:
-    "Pending OT approval for a date in this month",
   [BLOCK_REASON.STATUTORY_SETUP_INCOMPLETE]:
     "Statutory setup incomplete - PF/ESI applicability or identifiers are missing",
   [BLOCK_REASON.MONTH_LOCKED]:
@@ -177,14 +179,30 @@ const BLOCK_REASON_MESSAGE = {
  * difference between the two lists: a blocking reason stops the month being
  * initialized, a warning is something somebody will have to deal with before
  * the money moves.
+ *
+ * THE THREE ATTENDANCE WARNINGS ARE WHERE THE OLD BLOCKERS WENT. Saying
+ * nothing at all about an unsettled month would be worse than blocking it: the
+ * person working the payrun would initialize, calculate, and only discover at
+ * Approve & Lock that attendance was never final. So the fact is still
+ * reported on the row, in a list that cannot stop anybody - and the refusal
+ * that matters still happens at approval, where the money is committed.
  */
 const WARNING = {
   BANK_DETAILS_MISSING: "BANK_DETAILS_MISSING",
+  ATTENDANCE_INCOMPLETE: "ATTENDANCE_INCOMPLETE",
+  PENDING_ATTENDANCE_REGULARIZATION: "PENDING_ATTENDANCE_REGULARIZATION",
+  PENDING_OT_APPROVAL: "PENDING_OT_APPROVAL",
 };
 
 const WARNING_MESSAGE = {
   [WARNING.BANK_DETAILS_MISSING]:
     "Bank details are missing. This does not block initialization; it is a payment readiness issue.",
+  [WARNING.ATTENDANCE_INCOMPLETE]:
+    "Attendance for this month has not been calculated and settled by the attendance engine. The month may still be initialized; Approve & Lock will refuse until it is final.",
+  [WARNING.PENDING_ATTENDANCE_REGULARIZATION]:
+    "A regularization request for a date in this month is still outstanding. The month may still be initialized; Approve & Lock will refuse until it is decided.",
+  [WARNING.PENDING_OT_APPROVAL]:
+    "An OT approval for a date in this month is still outstanding. The month may still be initialized; Approve & Lock will refuse until it is decided.",
 };
 
 module.exports = {

@@ -455,6 +455,69 @@ describe("a source that moves after the calculation", () => {
     assert.equal(row.status, CALC_STATUS.RECALCULATION_REQUIRED);
     assert.ok(row.recalculation_reasons.some((r) => r.code === "ADJUSTMENTS_CHANGED"));
   });
+  /**
+   * THE MONTHLY PAY TYPE IS AN INPUT LIKE ANY OTHER, and this is what makes it
+   * safe to leave the control on the Calculation & Review screen: changing it
+   * after the month was calculated does not quietly re-sign the calculation.
+   * It goes through the SAME inputs hash the adjustments go through, so the
+   * employee falls to RECALCULATION_REQUIRED, their stored figures stay
+   * exactly as they were, and approval refuses until somebody recalculates.
+   */
+  it("notices a pay type changed after the calculation, and blocks approval", async () => {
+    world.add(1);
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    const before = await rowOf(1);
+    assert.equal(before.status, CALC_STATUS.READY_FOR_APPROVAL);
+
+    await payrun.changePayType({ ...MONTH, employee_id: 1, pay_type: "CASH", actor: ACTOR });
+
+    const row = await rowOf(1);
+    assert.equal(row.pay_type, "CASH", "the live monthly pay type is what the screen shows");
+    assert.equal(row.calculated_pay_type, "BANK", "the CALCULATION still holds the old one");
+    assert.equal(row.status, CALC_STATUS.RECALCULATION_REQUIRED);
+    assert.equal(row.net_pay, before.net_pay, "no stored figure moved");
+
+    const approval = await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(approval.approved_count, 0);
+    assert.equal(approval.blocked_count, 1);
+
+    // And an explicit Recalculate is what settles it.
+    await calculation.calculate({ ...MONTH, employee_ids: [1], mode: "RECALCULATE", actor: ACTOR });
+    const settled = await rowOf(1);
+    assert.equal(settled.status, CALC_STATUS.READY_FOR_APPROVAL);
+    assert.equal(settled.calculated_pay_type, "CASH");
+  });
+
+  it("CASH -> BANK moves it back the same way", async () => {
+    world.add(1);
+    await payrun.changePayType({ ...MONTH, employee_id: 1, pay_type: "CASH", actor: ACTOR });
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal((await rowOf(1)).status, CALC_STATUS.READY_FOR_APPROVAL);
+
+    await payrun.changePayType({ ...MONTH, employee_id: 1, pay_type: "BANK", actor: ACTOR });
+    const row = await rowOf(1);
+    assert.equal(row.pay_type, "BANK");
+    assert.equal(row.status, CALC_STATUS.RECALCULATION_REQUIRED);
+  });
+
+  it("changing it writes only the payrun row - the adjustments are untouched", async () => {
+    world.add(1);
+    await adjustments.saveEmployee({
+      ...MONTH,
+      employee_id: 1,
+      amounts: { [COMPONENT.INCENTIVE]: 1200, [COMPONENT.ADVANCE_RECOVERY]: 300 },
+      actor: ACTOR,
+    });
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    await payrun.changePayType({ ...MONTH, employee_id: 1, pay_type: "CASH", actor: ACTOR });
+
+    assert.deepEqual(world.amounts.get(1), {
+      [COMPONENT.INCENTIVE]: 1200,
+      [COMPONENT.ADVANCE_RECOVERY]: 300,
+    });
+    const detail = await calculation.getEmployee({ ...MONTH, employee_id: 1 });
+    assert.equal(Number(detail.breakup.adjustments.incentive), 1200);
+  });
 });
 
 /* --------------------------------------------------------- recalculating */
@@ -561,25 +624,63 @@ describe("readiness", () => {
     assert.equal((await rowOf(1)).status, CALC_STATUS.READY_FOR_APPROVAL);
   });
 
-  it("blocks approval on pending attendance and pending OT", async () => {
-    world.add(1).add(2);
+  /**
+   * ==================================================================
+   * THE ATTENDANCE GATES LIVE HERE, AND NOWHERE ELSE, AND THEY HOLD.
+   *
+   * Initialization stopped refusing on attendance: an unsettled month, an
+   * open regularization and an open OT approval no longer keep somebody out
+   * of the payrun. THIS is the gate that replaced it, and these tests exist
+   * to prove the change did not quietly move the refusal to nowhere. Each one
+   * asserts the BLOCKER **and** that `approve` actually refuses - a blocker
+   * nobody enforces is a label.
+   * ==================================================================
+   */
+  it("a pending attendance regularization still refuses Approve & Lock", async () => {
+    world.add(1);
     world.pending.set(1, { employee_id: 1, pending_regularizations: 1, pending_ot: 0 });
-    world.pending.set(2, { employee_id: 2, pending_regularizations: 0, pending_ot: 1 });
-    await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
 
     assert.ok((await rowOf(1)).blockers.some((b) => b.code === "PENDING_ATTENDANCE_REGULARIZATION"));
-    assert.ok((await rowOf(2)).blockers.some((b) => b.code === "PENDING_OT_APPROVAL"));
+    const refused = await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(refused.approved_count, 0);
+    assert.equal(refused.blocked_count, 1);
+    assert.notEqual((await rowOf(1)).status, CALC_STATUS.APPROVED_LOCKED);
   });
 
-  it("blocks approval while attendance is not final or the statutory setup is missing", async () => {
-    world.add(1).add(2);
+  it("a pending OT approval still refuses Approve & Lock", async () => {
+    world.add(1);
+    world.pending.set(1, { employee_id: 1, pending_regularizations: 0, pending_ot: 1 });
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+
+    assert.ok((await rowOf(1)).blockers.some((b) => b.code === "PENDING_OT_APPROVAL"));
+    const refused = await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(refused.approved_count, 0);
+    assert.equal(refused.blocked_count, 1);
+    assert.notEqual((await rowOf(1)).status, CALC_STATUS.APPROVED_LOCKED);
+  });
+
+  it("attendance that is not final still refuses Approve & Lock", async () => {
+    world.add(1);
     world.attendance.get(1).is_final = 0;
-    world.employees.get(2).uan = null;
-    world.employees.get(2).pf_number = null;
-    await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
 
     assert.ok((await rowOf(1)).blockers.some((b) => b.code === "ATTENDANCE_INCOMPLETE"));
+    const refused = await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(refused.approved_count, 0);
+    assert.equal(refused.blocked_count, 1);
+    assert.notEqual((await rowOf(1)).status, CALC_STATUS.APPROVED_LOCKED);
+  });
+
+  it("an incomplete statutory setup still refuses Approve & Lock", async () => {
+    world.add(2);
+    world.employees.get(2).uan = null;
+    world.employees.get(2).pf_number = null;
+    await calculation.calculate({ ...MONTH, employee_ids: [2], actor: ACTOR });
+
     assert.ok((await rowOf(2)).blockers.some((b) => b.code === "STATUTORY_SETUP_INCOMPLETE"));
+    const refused = await calculation.approve({ ...MONTH, employee_ids: [2], actor: ACTOR });
+    assert.equal(refused.approved_count, 0);
   });
 });
 
@@ -882,5 +983,437 @@ describe("one employee's breakup", () => {
       () => calculation.getEmployee({ ...MONTH, employee_id: 4242 }),
       /no initialized payrun/
     );
+  });
+});
+
+/* ===================================================================== */
+/*  the month an initialized employee has no attendance for              */
+/* ===================================================================== */
+
+/**
+ * SEPTEMBER 2026, PRODUCTION: one employee initialized, no attendance month,
+ * no final day rows, no approved OT, no adjustment - and Calculation & Review
+ * showed a read failure with every counter at zero.
+ *
+ * THE FAILURE ITSELF WAS SCHEMA DRIFT, not this assembly path: the deployed
+ * `payrun_employee_calculation` was missing eight columns the repository
+ * selects, so the month's SELECT died in MySQL before any of this ran. That is
+ * repaired by `migrations/.../20261024120000-payrun-calculation-column-drift`
+ * and guarded by `migrations/payrun_calculation_column_drift.test.js`.
+ *
+ * THESE TESTS GUARD THE OTHER HALF: that the state itself - an initialized
+ * employee with NOTHING from attendance - is a MONTH THAT LOADS, with the
+ * employee in it, and never an API failure. Initialization stopped refusing on
+ * attendance, so this state is now ordinary rather than impossible, and every
+ * empty collection below has to be a valid input.
+ *
+ * NO RULE MOVES HERE. The employee is NOT_CALCULATED before anybody calculates
+ * them, attendance that is missing is an approval blocker exactly as
+ * attendance that is not final is, and Approve & Lock still refuses.
+ */
+describe("an initialized employee whose attendance does not exist yet", () => {
+  /** Initialized, and nothing whatever from the attendance engine. */
+  const addWithNoAttendance = (employeeId) => {
+    world.add(employeeId);
+    world.attendance.delete(employeeId);  // no attendance_monthly_payroll row
+    world.nrm.delete(employeeId);         // no final attendance_day_calculation rows
+    world.pending.delete(employeeId);     // no approved and no pending OT
+  };
+
+  it("loads the month, and the employee is in it", async () => {
+    addWithNoAttendance(1952);
+
+    const month = await monthView();
+    assert.equal(month.rows.length, 1);
+    assert.equal(month.rows[0].employee_id, 1952);
+    assert.equal(month.period_year, 2026);
+    assert.equal(month.period_month, 8);
+  });
+
+  it("counts the employee as initialized and not calculated", async () => {
+    addWithNoAttendance(1952);
+
+    const month = await monthView();
+    assert.equal(month.summary.initialized, 1);
+    assert.equal(month.summary.not_calculated, 1);
+    assert.equal(month.summary.ready_for_approval, 0);
+    assert.equal(month.summary.approved_locked, 0);
+  });
+
+  it("is NOT_CALCULATED before the first calculation, and says so rather than failing", async () => {
+    addWithNoAttendance(1952);
+
+    const row = await rowOf(1952);
+    assert.equal(row.status, CALC_STATUS.NOT_CALCULATED);
+    assert.ok(row.blockers.some((b) => b.code === "NOT_CALCULATED"));
+    assert.equal(row.net_pay, null);
+    assert.equal(row.payslip_eligible, false);
+  });
+
+  it("loads with no NRM groups at all", async () => {
+    world.add(1952);
+    world.nrm.set(1952, []);  // nothing final, so no NRM evidence
+
+    const month = await monthView();
+    assert.equal(month.summary.initialized, 1);
+    assert.ok(month.rows.some((r) => r.employee_id === 1952));
+  });
+
+  it("loads with no approved OT anywhere in the month", async () => {
+    world.add(1952);
+    world.attendance.get(1952).approved_ot_minutes = 0;
+    world.nrm.set(1952, []);
+
+    const month = await monthView();
+    assert.equal(month.summary.initialized, 1);
+    assert.equal((await rowOf(1952)).status, CALC_STATUS.NOT_CALCULATED);
+  });
+
+  it("loads for NO_ADJUSTMENT_CONFIRMED with no attendance", async () => {
+    addWithNoAttendance(1952);
+    world.states.set(1952, { employee_id: 1952, confirmed_no_adjustment: 1 });
+
+    const row = await rowOf(1952);
+    assert.equal(row.adjustment_state, "NO_ADJUSTMENT_CONFIRMED");
+    assert.equal(row.status, CALC_STATUS.NOT_CALCULATED);
+  });
+
+  /**
+   * THE GATE DID NOT MOVE. A missing attendance month is exactly as much of a
+   * refusal at Approve & Lock as a non-final one - and the refusal is proved
+   * by `approve` declining, not by the blocker being listed.
+   */
+  it("still refuses Approve & Lock once the month has been calculated", async () => {
+    addWithNoAttendance(1952);
+    await calculation.calculate({ ...MONTH, employee_ids: [1952], actor: ACTOR });
+
+    const row = await rowOf(1952);
+    // The month WAS calculated - the refusal below is the approval gate
+    // refusing a calculated employee, not the absence of a calculation. The
+    // VISIBLE status is ATTENDANCE_PENDING, because the figures it produced
+    // were priced from an attendance month that is not settled.
+    assert.equal(row.status, CALC_STATUS.ATTENDANCE_PENDING);
+    assert.ok(row.calculation_hash);
+    assert.ok(row.blockers.some((b) => b.code === "ATTENDANCE_INCOMPLETE"));
+
+    const refused = await calculation.approve({ ...MONTH, employee_ids: [1952], actor: ACTOR });
+    assert.equal(refused.approved_count, 0);
+    assert.equal(refused.blocked_count, 1);
+    assert.notEqual((await rowOf(1952)).status, CALC_STATUS.APPROVED_LOCKED);
+  });
+
+  /**
+   * ONE EMPLOYEE'S MISSING DATA IS ONE EMPLOYEE'S PROBLEM. A month is six
+   * hundred people; one of them with no attendance row must not take the other
+   * five hundred and ninety-nine off the screen.
+   */
+  it("does not take the rest of the month down with it", async () => {
+    world.add(1);                 // ordinary, fully attended
+    addWithNoAttendance(1952);    // nothing from attendance at all
+    world.add(2);
+    world.attendance.get(2).is_final = 0;   // settled by the engine, but not final
+
+    const month = await monthView();
+    assert.equal(month.summary.initialized, 3);
+    assert.deepEqual(month.rows.map((r) => r.employee_id).sort((a, b) => a - b), [1, 2, 1952]);
+    month.rows.forEach((row) => assert.equal(row.status, CALC_STATUS.NOT_CALCULATED));
+  });
+
+  it("leaves an employee with final attendance behaving exactly as before", async () => {
+    world.add(1);
+    addWithNoAttendance(1952);
+    await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
+
+    const ordinary = await rowOf(1);
+    assert.equal(ordinary.status, CALC_STATUS.READY_FOR_APPROVAL);
+    assert.deepEqual(ordinary.blockers, []);
+    assert.equal(ordinary.salary_days, 26);
+    assert.ok(Number(ordinary.net_pay) > 0);
+
+    const approved = await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(approved.approved_count, 1);
+    assert.equal((await rowOf(1)).status, CALC_STATUS.APPROVED_LOCKED);
+    assert.equal((await rowOf(1)).payslip_eligible, true);
+
+    // ...and the one with no attendance is still there, still refused.
+    assert.notEqual((await rowOf(1952)).status, CALC_STATUS.APPROVED_LOCKED);
+  });
+});
+
+/* ===================================================================== */
+/*  a provisional figure is not a result                                 */
+/* ===================================================================== */
+
+/**
+ * SEPTEMBER 2026, EMPLOYEE 1952: the screen read CALCULATED, Salary Days 0,
+ * Extra Days 0, Net Pay 0.00 for somebody whose attendance month had never
+ * been settled. Every one of those zeroes was arithmetic on an attendance
+ * month that does not exist, and in the column a payroll is read from a zero
+ * is a statement that the person earned nothing.
+ *
+ * SO THE VISIBLE STATUS IS ATTENDANCE_PENDING AND THE ATTENDANCE-DEPENDENT
+ * FIGURES ARE ABSENT. The stored calculation is untouched - it is still there,
+ * still compared against the sources, still what a recalculation refreshes -
+ * and what changed is only which of its figures this stage will present as an
+ * answer.
+ *
+ * THE LINE IS DRAWN AT "DOES ATTENDANCE DECIDE THIS". Salary Days, Extra Days,
+ * the OT, the PF, the ESI and the Net Pay are suppressed; the six adjustment
+ * components and the pay type are not, because those are the payrun's own and
+ * are as true now as they will be afterwards.
+ *
+ * AND A GENUINE ZERO IS NOT TOUCHED. The rule reads the attendance's
+ * `is_final`, never the value of a figure, so a settled month that really does
+ * come to nothing still says nothing rather than "not known".
+ */
+describe("attendance that is not settled is shown as pending, not as zero", () => {
+  /** Initialized and calculated, with no attendance row at all. */
+  const calculatedWithNoAttendance = async (employeeId) => {
+    world.add(employeeId);
+    world.attendance.delete(employeeId);
+    world.nrm.delete(employeeId);
+    await calculation.calculate({ ...MONTH, employee_ids: [employeeId], actor: ACTOR });
+  };
+
+  /** Initialized and calculated, with an attendance month the engine has not finalized. */
+  const calculatedWithNonFinalAttendance = async (employeeId) => {
+    world.add(employeeId);
+    world.attendance.get(employeeId).is_final = 0;
+    await calculation.calculate({ ...MONTH, employee_ids: [employeeId], actor: ACTOR });
+  };
+
+  it("a missing attendance month reads ATTENDANCE_PENDING", async () => {
+    await calculatedWithNoAttendance(1952);
+
+    const row = await rowOf(1952);
+    assert.equal(row.status, CALC_STATUS.ATTENDANCE_PENDING);
+    assert.equal(row.status_label, "Attendance pending");
+    assert.equal(row.attendance_pending, true);
+    assert.ok(row.blockers.some((b) => b.code === "ATTENDANCE_INCOMPLETE"));
+  });
+
+  it("an attendance month that is not final reads ATTENDANCE_PENDING", async () => {
+    await calculatedWithNonFinalAttendance(1952);
+
+    const row = await rowOf(1952);
+    assert.equal(row.status, CALC_STATUS.ATTENDANCE_PENDING);
+    assert.equal(row.attendance_pending, true);
+  });
+
+  /**
+   * THE SIX ATTENDANCE-DEPENDENT COLUMNS, EACH ASSERTED BY NAME. `null` is
+   * what the list renders as an em dash; a zero here would be the bug.
+   */
+  it("suppresses Salary Days rather than showing a provisional zero", async () => {
+    await calculatedWithNoAttendance(1952);
+    assert.equal((await rowOf(1952)).salary_days, null);
+  });
+
+  it("suppresses Extra Days rather than showing a provisional zero", async () => {
+    await calculatedWithNoAttendance(1952);
+    assert.equal((await rowOf(1952)).extra_days, null);
+  });
+
+  it("suppresses Approved OT rather than showing a provisional zero", async () => {
+    await calculatedWithNoAttendance(1952);
+    assert.equal((await rowOf(1952)).approved_ot_hours, null);
+  });
+
+  it("suppresses PF rather than showing a provisional zero", async () => {
+    await calculatedWithNoAttendance(1952);
+    assert.equal((await rowOf(1952)).employee_pf, null);
+  });
+
+  it("suppresses ESI rather than showing a provisional zero", async () => {
+    await calculatedWithNoAttendance(1952);
+    assert.equal((await rowOf(1952)).employee_esi, null);
+  });
+
+  it("suppresses Net Pay rather than showing a provisional zero", async () => {
+    await calculatedWithNoAttendance(1952);
+    assert.equal((await rowOf(1952)).net_pay, null);
+  });
+
+  /**
+   * AND THE PAYRUN'S OWN INPUTS SURVIVE, which is the other half of the rule.
+   * Somebody entered these; blanking them would hide work already done.
+   */
+  it("keeps Additions and Deductions, which the payrun owns", async () => {
+    world.add(1952);
+    world.attendance.delete(1952);
+    world.nrm.delete(1952);
+    world.amounts.set(1952, {
+      [COMPONENT.INCENTIVE]: 1500,
+      [COMPONENT.BONUS]: 500,
+      [COMPONENT.ADVANCE_RECOVERY]: 300,
+    });
+    await calculation.calculate({ ...MONTH, employee_ids: [1952], actor: ACTOR });
+
+    const row = await rowOf(1952);
+    assert.equal(row.status, CALC_STATUS.ATTENDANCE_PENDING);
+    assert.equal(Number(row.additions), 2000);
+    assert.equal(Number(row.deductions), 300);
+  });
+
+  it("keeps the pay type visible, and still editable before the lock", async () => {
+    await calculatedWithNoAttendance(1952);
+
+    assert.equal((await rowOf(1952)).pay_type, "BANK");
+
+    // Editable: the adjustments stage still accepts the change, and it drops
+    // the employee to RECALCULATION_REQUIRED through the inputs hash.
+    await payrun.changePayType({ ...MONTH, employee_id: 1952, pay_type: "CASH", actor: ACTOR });
+
+    const after = await rowOf(1952);
+    assert.equal(after.pay_type, "CASH");
+    assert.equal(after.status, CALC_STATUS.RECALCULATION_REQUIRED);
+    // ...and the figures stay suppressed, because the attendance is still not
+    // settled - stale figures from an unsettled month are provisional twice.
+    assert.equal(after.attendance_pending, true);
+    assert.equal(after.net_pay, null);
+  });
+
+  /**
+   * THE DRAWER ANSWERS "WHY IS IT THAT NUMBER", so while there is no number
+   * yet it has to say so rather than explain a zero in five groups.
+   */
+  it("the detail breakup suppresses the same provisional figures", async () => {
+    world.add(1952);
+    world.attendance.delete(1952);
+    world.nrm.delete(1952);
+    world.amounts.set(1952, { [COMPONENT.INCENTIVE]: 1500 });
+    await calculation.calculate({ ...MONTH, employee_ids: [1952], actor: ACTOR });
+
+    const detail = await calculation.getEmployee({ ...MONTH, employee_id: 1952 });
+    assert.equal(detail.status, CALC_STATUS.ATTENDANCE_PENDING);
+    assert.equal(detail.attendance_pending, true);
+
+    const b = detail.breakup;
+    assert.ok(b, "the stored calculation is still there to explain");
+
+    assert.equal(b.salary.salary_days, null);
+    assert.equal(b.salary.salary_earnings, null);
+    assert.equal(b.salary.missing_hours, null);
+    assert.equal(b.salary.missing_hours_deduction, null);
+    assert.equal(b.salary.extra_days, null);
+    assert.equal(b.salary.extra_day_amount, null);
+
+    assert.equal(b.ot.approved_ot_hours, null);
+    assert.equal(b.ot.ot_hourly_rate, null);
+    assert.equal(b.ot.ot_amount, null);
+    assert.deepEqual(b.ot.ot_groups, []);
+
+    assert.equal(b.statutory.pf_wage, null);
+    assert.equal(b.statutory.employee_pf, null);
+    assert.equal(b.statutory.esi_wage, null);
+    assert.equal(b.statutory.employee_esi, null);
+
+    assert.equal(b.final.total_earnings, null);
+    assert.equal(b.final.net_pay, null);
+
+    // The salary snapshot, the adjustments and the pay type are facts that do
+    // not wait on attendance, and are still shown.
+    assert.ok(Number(b.salary.monthly_gross) > 0);
+    assert.ok(Number(b.salary.daily_rate) > 0);
+    assert.equal(Number(b.adjustments.incentive), 1500);
+    assert.equal(b.final.pay_type, "BANK");
+  });
+
+  /**
+   * AND IT COMES BACK. Attendance turning final is a SOURCE moving, so the
+   * employee goes to RECALCULATION_REQUIRED by the existing rule - and after
+   * the recalculation somebody performs, the real figures are shown under an
+   * ordinary status.
+   */
+  it("restores the real figures once attendance is final and recalculated", async () => {
+    await calculatedWithNonFinalAttendance(1952);
+    assert.equal((await rowOf(1952)).net_pay, null);
+
+    // The attendance engine settles the month.
+    const attendance = world.attendance.get(1952);
+    attendance.is_final = 1;
+    attendance.payroll_version = 2;
+    attendance.calculated_at = "2026-09-02 03:00:00.000";
+
+    const stale = await rowOf(1952);
+    assert.equal(stale.status, CALC_STATUS.RECALCULATION_REQUIRED);
+    assert.ok(
+      stale.recalculation_reasons.some((r) => r.code === "ATTENDANCE_CHANGED"),
+      "attendance turning final is a source change"
+    );
+    assert.equal(stale.attendance_pending, false);
+
+    await calculation.calculate({
+      ...MONTH,
+      employee_ids: [1952],
+      mode: "RECALCULATE",
+      actor: ACTOR,
+    });
+
+    const settled = await rowOf(1952);
+    assert.equal(settled.attendance_pending, false);
+    assert.equal(settled.status, CALC_STATUS.READY_FOR_APPROVAL);
+    assert.equal(settled.salary_days, 26);
+    assert.equal(settled.extra_days, 0);
+    assert.ok(Number(settled.net_pay) > 0);
+    assert.notEqual(settled.employee_pf, null);
+    assert.notEqual(settled.employee_esi, null);
+  });
+
+  /**
+   * THE DISTINCTION THE WHOLE CHANGE RESTS ON. A settled month that really
+   * does come to zero says ZERO, because that is a fact about the employee and
+   * somebody has to see it. The rule reads `is_final`, never the figure.
+   */
+  it("a genuine zero from a FINAL attendance month is still a zero", async () => {
+    world.add(1952);
+    const attendance = world.attendance.get(1952);
+    attendance.is_final = 1;      // settled, and the answer is nothing
+    attendance.salary_days = 0;
+    attendance.extra_days = 0;
+    attendance.salary_day_earnings = 0;
+    attendance.extra_day_earnings = 0;
+    attendance.approved_ot_minutes = 0;
+    world.nrm.set(1952, []);
+    await calculation.calculate({ ...MONTH, employee_ids: [1952], actor: ACTOR });
+
+    const row = await rowOf(1952);
+    assert.equal(row.attendance_pending, false);
+    assert.notEqual(row.status, CALC_STATUS.ATTENDANCE_PENDING);
+    assert.equal(row.salary_days, 0);
+    assert.equal(row.extra_days, 0);
+    assert.equal(Number(row.net_pay), 0);
+    assert.notEqual(row.net_pay, null);
+  });
+
+  /** THE GATE IS UNCHANGED, and it refuses through the blocker as it always did. */
+  it("ATTENDANCE_PENDING can never be approved", async () => {
+    await calculatedWithNoAttendance(1952);
+    await calculatedWithNonFinalAttendance(1953);
+
+    for (const employeeId of [1952, 1953]) {
+      assert.equal((await rowOf(employeeId)).status, CALC_STATUS.ATTENDANCE_PENDING);
+      const refused = await calculation.approve({
+        ...MONTH,
+        employee_ids: [employeeId],
+        actor: ACTOR,
+      });
+      assert.equal(refused.approved_count, 0);
+      assert.equal(refused.blocked_count, 1);
+      assert.notEqual((await rowOf(employeeId)).status, CALC_STATUS.APPROVED_LOCKED);
+      assert.equal((await rowOf(employeeId)).payslip_eligible, false);
+    }
+  });
+
+  it("counts them separately from the calculated ones", async () => {
+    await calculatedWithNoAttendance(1952);
+    world.add(1);
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+
+    const month = await monthView();
+    assert.equal(month.summary.initialized, 2);
+    assert.equal(month.summary.attendance_pending, 1);
+    assert.equal(month.summary.ready_for_approval, 1);
+    assert.equal(month.summary.calculated, 0);
   });
 });

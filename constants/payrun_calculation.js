@@ -34,6 +34,12 @@ const CALCULATION_VERSION = 1;
  * that may produce one.
  *
  *   NOT_CALCULATED           initialized, and nothing has been computed yet
+ *   ATTENDANCE_PENDING       computed, but the attendance month it was computed
+ *                            FROM is missing or not final, so the salary, OT
+ *                            and statutory figures are provisional rather than
+ *                            results. See below: this status exists so that a
+ *                            provisional zero is never shown as a calculated
+ *                            one.
  *   CALCULATED               computed, and something still stands between this
  *                            employee and approval - a pending adjustment
  *                            confirmation, a pending OT approval, a
@@ -51,12 +57,35 @@ const CALCULATION_VERSION = 1;
  *                            recalculation, no adjustment edit, no pay type
  *                            change, no salary refresh, no second approval.
  *
+ * WHY `ATTENDANCE_PENDING` IS A STATUS AND NOT ONLY A BLOCKER.
+ *
+ * It was only a blocker, and the screen read CALCULATED, Salary Days 0, Net
+ * Pay 0.00 for an employee whose attendance had never been settled. Every one
+ * of those figures is arithmetic on an attendance month that does not exist
+ * yet, so each zero was the engine's answer to a question nobody has asked -
+ * and on a payroll review screen a zero is a statement that somebody earned
+ * nothing. "Not known yet" and "nothing" are different facts about a person's
+ * pay, and the screen has to say which one it means.
+ *
+ * IT REPLACES `CALCULATED` AND NOTHING ELSE. NOT_CALCULATED still wins (there
+ * are no figures to qualify), RECALCULATION_REQUIRED still wins (the stored
+ * figures are stale, which is the more urgent thing to say, and it is what an
+ * attendance month turning final produces), and APPROVED_LOCKED cannot occur
+ * with attendance outstanding because the approval gate refuses it.
+ *
+ * THE UNDERLYING CALCULATION IS UNTOUCHED. Nothing is deleted, no figure is
+ * recomputed and no arithmetic changes: the row is stored exactly as the
+ * engine produced it, and what changes is what the screen is willing to
+ * present as a RESULT. The `attendance_pending` flag beside this status is
+ * what the presentation layer suppresses figures from.
+ *
  * THERE IS NO `PAID`, NO `PUBLISHED` AND NO `PAYSLIP_GENERATED`. Those are
  * later stages and are not built here; declaring their values now would put
  * states in the enum that nothing can reach and nothing can leave.
  */
 const CALC_STATUS = {
   NOT_CALCULATED: "NOT_CALCULATED",
+  ATTENDANCE_PENDING: "ATTENDANCE_PENDING",
   CALCULATED: "CALCULATED",
   RECALCULATION_REQUIRED: "RECALCULATION_REQUIRED",
   READY_FOR_APPROVAL: "READY_FOR_APPROVAL",
@@ -89,6 +118,7 @@ const STORED_STATUS = {
 /** The compact badge label for each status. Read on a phone; keep them short. */
 const CALC_STATUS_LABEL = {
   [CALC_STATUS.NOT_CALCULATED]: "Not calculated",
+  [CALC_STATUS.ATTENDANCE_PENDING]: "Attendance pending",
   [CALC_STATUS.CALCULATED]: "Calculated",
   [CALC_STATUS.RECALCULATION_REQUIRED]: "Recalculation required",
   [CALC_STATUS.READY_FOR_APPROVAL]: "Ready for approval",
@@ -206,8 +236,15 @@ const READY_BLOCKER_MESSAGE = {
     "This employee's month has not been calculated yet.",
   [READY_BLOCKER.RECALCULATION_REQUIRED]:
     "A source has changed since this calculation. Recalculate this employee before approving them.",
+  /*
+   * IT COVERS BOTH CASES, AND IT USED TO NAME ONLY ONE. An attendance month
+   * that was never calculated and one the engine held dates out of are the
+   * same fact to this stage - the figures priced from it are provisional -
+   * and the message said only the second, which read as wrong to anybody
+   * looking at an employee whose attendance had simply never been run.
+   */
   [READY_BLOCKER.ATTENDANCE_INCOMPLETE]:
-    "Attendance incomplete - the attendance engine has held dates out of this month.",
+    "Attendance for this month is not settled - it has either not been calculated yet, or the attendance engine has held dates out of it. The salary, overtime and statutory figures stay provisional until it is.",
   [READY_BLOCKER.PENDING_ATTENDANCE_REGULARIZATION]:
     "Pending attendance regularization for a date in this month.",
   [READY_BLOCKER.PENDING_OT_APPROVAL]:

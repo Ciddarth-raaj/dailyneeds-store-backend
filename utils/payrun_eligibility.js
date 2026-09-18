@@ -34,7 +34,12 @@ const { PAYMENT_TYPE } = require("./payment_type");
  *
  * THE ORDER THE REASONS COME BACK IN IS FIXED, so a screen listing them and a
  * test asserting them see the same list every time: employment, salary,
- * attendance, regularization, OT, statutory, lock.
+ * statutory, lock.
+ *
+ * ATTENDANCE IS NOT IN THAT LIST, AND HAS NOT BEEN SINCE THE RULE CHANGED.
+ * An unsettled attendance month, an open regularization and an open OT
+ * approval are reported as warnings here and refused at APPROVE & LOCK, by
+ * `utils/payrun_calculation.js`. See `evaluateEmployee` below for why.
  */
 
 /** `YYYY-MM-DD` or null, from a Date, a string, or anything unusable. */
@@ -229,7 +234,9 @@ function reasonOf(code) {
  * @param {object|null} input.attendance        the stored
  *                                              `attendance_monthly_payroll`
  *                                              row, or null when the month has
- *                                              not been calculated
+ *                                              not been calculated. It does
+ *                                              not block; it only decides a
+ *                                              warning.
  * @param {number} input.pending_regularizations  count, for dates in the month
  * @param {number} input.pending_ot               count, for dates in the month
  * @param {boolean} input.month_locked
@@ -278,32 +285,37 @@ function evaluateEmployee(input = {}) {
   }
 
   /*
-   * ATTENDANCE IS CONSUMED, NEVER RECOMPUTED. The month must have been
-   * calculated AND stored by the attendance engine, and the stored row must be
-   * FINAL - `is_final` is false exactly when the engine held dates out because
-   * their punch list is known to be incomplete (see `utils/attendance_payroll.js`).
-   * An employee exempt from biometric attendance still gets a stored row, and
-   * that row is final, so the exemption needs no special case here.
+   * ATTENDANCE DOES NOT BLOCK INITIALIZATION. NOT A MISSING MONTH, NOT A
+   * NON-FINAL ONE, NOT AN OPEN REGULARIZATION AND NOT AN OPEN OT APPROVAL.
+   *
+   * All four used to refuse here, and the refusal was in the wrong place.
+   * Initializing takes the EMPLOYMENT and SALARY facts for a month; attendance
+   * is not snapshotted as a figure at all, only as a REFERENCE to whatever the
+   * engine had, and a later Recalculate is what takes a newer one. So a month
+   * initialized while a regularization is open is not a wrong month - it is a
+   * month that has not been calculated yet. Meanwhile the old rule meant a
+   * single outstanding OT request kept an employee out of the payrun
+   * altogether: nobody could start their month, adjust it, or see it.
+   *
+   * THE CHECK IS NOT GONE FROM THE LIFECYCLE - it moved to where it decides
+   * money. `utils/payrun_calculation.js#evaluateApprovalReadiness` refuses
+   * APPROVE & LOCK on all three, unchanged, and that is the gate that matters:
+   * approval is the point at which a month stops being provisional. Between
+   * the two, Calculation & Review runs on whatever finalized attendance exists
+   * and reports the rest as pending or stale.
+   *
+   * THEY ARE STILL REPORTED, as WARNINGS. Silence would leave somebody to
+   * discover at approval that the month was never settled.
    */
-  if (!attendance) {
-    reasons.push(reasonOf(BLOCK_REASON.ATTENDANCE_INCOMPLETE));
-  } else if (!(attendance.is_final === 1 || attendance.is_final === true)) {
-    reasons.push(reasonOf(BLOCK_REASON.ATTENDANCE_INCOMPLETE));
+  const attendanceWarnings = [];
+  if (!attendance || !(attendance.is_final === 1 || attendance.is_final === true)) {
+    attendanceWarnings.push(WARNING.ATTENDANCE_INCOMPLETE);
   }
-
   if (Number(pending_regularizations) > 0) {
-    reasons.push(reasonOf(BLOCK_REASON.PENDING_ATTENDANCE_REGULARIZATION));
+    attendanceWarnings.push(WARNING.PENDING_ATTENDANCE_REGULARIZATION);
   }
-
-  /*
-   * ONLY APPROVED OT EVER ENTERS PAYROLL, which is already true of the stored
-   * month - the engine holds unsettled OT out of it. This refusal is the other
-   * half of that rule: a month is not initialized while somebody's OT decision
-   * is still outstanding, because taking the snapshot now would freeze a month
-   * that is about to change.
-   */
   if (Number(pending_ot) > 0) {
-    reasons.push(reasonOf(BLOCK_REASON.PENDING_OT_APPROVAL));
+    attendanceWarnings.push(WARNING.PENDING_OT_APPROVAL);
   }
 
   if (!statutorySetupComplete(employee)) {
@@ -326,6 +338,9 @@ function evaluateEmployee(input = {}) {
       message: WARNING_MESSAGE[WARNING.BANK_DETAILS_MISSING],
     });
   }
+  attendanceWarnings.forEach((code) => {
+    warnings.push({ code, message: WARNING_MESSAGE[code] });
+  });
 
   /*
    * AN INITIALIZED EMPLOYEE IS INITIALIZED. The snapshot has been taken; a

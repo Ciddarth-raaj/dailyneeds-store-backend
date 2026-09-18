@@ -331,6 +331,31 @@ class PayrunCalculationUsecase {
       statutory_setup_complete: statutorySetupComplete(employee),
     });
 
+    /**
+     * ================== A PROVISIONAL FIGURE IS NOT A RESULT =============
+     *
+     * WHAT THIS SUPPRESSES AND WHY. Salary Days, Extra Days, the approved OT,
+     * the PF, the ESI and the Net Pay are all arithmetic on the attendance
+     * month. While that month is missing or not final, the engine's answer to
+     * each of them is a PROVISIONAL figure - and a provisional figure of zero,
+     * printed in the column a payroll is read from, is indistinguishable from
+     * a calculated zero. "Nobody has settled this person's attendance yet" and
+     * "this person earned nothing" are different statements about somebody's
+     * pay, and the screen was making the second one.
+     *
+     * IT IS PRESENTATION AND NOTHING ELSE. The stored row is not touched, not
+     * recomputed and not deleted; `internals.stored` below is the calculation
+     * exactly as it was written, which is what `calculate`, `approve` and the
+     * source-change comparison all go on working from. What changes is only
+     * which of its figures this layer is willing to present as an answer.
+     *
+     * A GENUINE ZERO SURVIVES IT. The suppression is decided by whether the
+     * ATTENDANCE IS FINAL, never by whether a figure is zero - so an employee
+     * whose settled month really does come to zero salary days still reads 0,
+     * which is a fact about them and has to be visible.
+     */
+    const attendanceDependent = (value) => (verdict.attendance_pending ? null : value);
+
     return {
       internals: {
         employee,
@@ -366,19 +391,43 @@ class PayrunCalculationUsecase {
         payslip_eligible: verdict.payslip_eligible,
         adjustment_state: adjustmentState,
 
-        /* The compact list's columns. Absent until there is a calculation. */
-        salary_days: stored ? stored.salary_days : null,
-        extra_days: stored ? stored.extra_days : null,
-        approved_ot_hours: stored ? Number(stored.approved_ot_hours) : null,
+        /**
+         * WHETHER THE ATTENDANCE THESE FIGURES WERE PRICED FROM IS SETTLED.
+         *
+         * SENT AS A FACT ON THE ROW rather than left to a browser to infer
+         * from the blocker list, so the rule that decides which figures may be
+         * presented as results lives in one place and cannot be re-derived
+         * slightly differently on a phone.
+         */
+        attendance_pending: verdict.attendance_pending,
+
+        /*
+         * The compact list's columns. Absent until there is a calculation -
+         * AND ABSENT WHILE THE ATTENDANCE IS NOT SETTLED, which is what
+         * `attendanceDependent` below is for.
+         */
+        salary_days: attendanceDependent(stored ? stored.salary_days : null),
+        extra_days: attendanceDependent(stored ? stored.extra_days : null),
+        approved_ot_hours: attendanceDependent(
+          stored ? Number(stored.approved_ot_hours) : null
+        ),
+        /*
+         * ADDITIONS AND DEDUCTIONS ARE NOT SUPPRESSED, and that is the point
+         * of drawing the line where it is drawn. These six components are the
+         * PAYRUN'S OWN inputs - somebody typed them into the adjustments
+         * stage - and they are exactly as true while attendance is outstanding
+         * as they will be afterwards. Blanking them would hide work that has
+         * already been done.
+         */
         additions: stored
           ? Number(stored.incentive) + Number(stored.bonus) + Number(stored.arrears)
           : null,
         deductions: stored
           ? Number(stored.advance_recovery) + Number(stored.shortage_recovery)
           : null,
-        employee_pf: stored ? stored.employee_pf : null,
-        employee_esi: stored ? stored.employee_esi : null,
-        net_pay: stored ? stored.net_pay : null,
+        employee_pf: attendanceDependent(stored ? stored.employee_pf : null),
+        employee_esi: attendanceDependent(stored ? stored.employee_esi : null),
+        net_pay: attendanceDependent(stored ? stored.net_pay : null),
         /*
          * THE LIVE MONTHLY PAY TYPE, not the calculated one. They are the same
          * except in the window between somebody changing it and the employee
@@ -471,6 +520,30 @@ class PayrunCalculationUsecase {
     const presented = this._present(context, employee);
     const stored = presented.internals.stored;
 
+    /**
+     * THE DRAWER FOLLOWS THE LIST'S RULE, through the same flag.
+     *
+     * "Why is it that number" is the question this screen answers, and while
+     * the attendance month is not settled the honest answer to most of it is
+     * "it is not that number yet". So every figure below that is arithmetic on
+     * attendance reads as absent rather than as a confident zero: the salary
+     * days and what they earned, the missing hours and their deduction, the
+     * extra days, the whole of the overtime, the statutory WAGES and
+     * contributions computed on them, and the totals built out of all of it.
+     *
+     * WHAT IS NOT SUPPRESSED, AND EACH FOR A REASON. The Monthly Gross and the
+     * Daily Rate come from the salary snapshot and are true whatever
+     * attendance does. The six adjustment components are the payrun's own
+     * inputs, already entered by somebody. The pay type is a decision, not a
+     * computation. The PF and ESI STATUSES and the ESI contribution-period
+     * evidence say how the statutory questions were answered rather than what
+     * they came to, which is precisely what somebody needs to see while
+     * waiting. And `unresolved`/`errors` are the engine's open questions -
+     * hiding those would hide the reasons.
+     */
+    const pending = presented.row.attendance_pending === true;
+    const provisional = (value) => (pending ? null : value);
+
     return {
       period_year: period.year,
       period_month: period.month,
@@ -487,20 +560,22 @@ class PayrunCalculationUsecase {
             salary: {
               monthly_gross: stored.monthly_gross,
               daily_rate: stored.daily_rate,
-              salary_days: stored.salary_days,
-              salary_earnings: stored.salary_earnings,
-              missing_hours_minutes: stored.missing_hours_minutes,
-              missing_hours: Math.round((Number(stored.missing_hours_minutes) / 60) * 100) / 100,
-              missing_hours_deduction: stored.missing_hours_deduction,
-              extra_days: stored.extra_days,
-              extra_day_amount: stored.extra_day_amount,
+              salary_days: provisional(stored.salary_days),
+              salary_earnings: provisional(stored.salary_earnings),
+              missing_hours_minutes: provisional(stored.missing_hours_minutes),
+              missing_hours: provisional(
+                Math.round((Number(stored.missing_hours_minutes) / 60) * 100) / 100
+              ),
+              missing_hours_deduction: provisional(stored.missing_hours_deduction),
+              extra_days: provisional(stored.extra_days),
+              extra_day_amount: provisional(stored.extra_day_amount),
             },
             ot: {
-              approved_ot_hours: Number(stored.approved_ot_hours),
-              effective_nrm_minutes: stored.effective_nrm_minutes,
-              effective_nrm_source: stored.effective_nrm_source,
-              ot_hourly_rate: stored.ot_hourly_rate,
-              ot_amount: stored.ot_amount,
+              approved_ot_hours: provisional(Number(stored.approved_ot_hours)),
+              effective_nrm_minutes: provisional(stored.effective_nrm_minutes),
+              effective_nrm_source: provisional(stored.effective_nrm_source),
+              ot_hourly_rate: provisional(stored.ot_hourly_rate),
+              ot_amount: provisional(stored.ot_amount),
               /**
                * THE PER-NRM BREAKDOWN THAT PRODUCED THE AMOUNT. One entry is
                * the ordinary case and says the same thing as the two fields
@@ -508,8 +583,8 @@ class PayrunCalculationUsecase {
                * against different NRMs, where those two fields are null and
                * this is the only honest account of the figure.
                */
-              ot_groups: this._json(stored.ot_groups),
-              attendance_ot_earnings: stored.attendance_ot_earnings,
+              ot_groups: pending ? [] : this._json(stored.ot_groups),
+              attendance_ot_earnings: provisional(stored.attendance_ot_earnings),
             },
             adjustments: {
               incentive: stored.incentive,
@@ -522,16 +597,16 @@ class PayrunCalculationUsecase {
             },
             statutory: {
               pf_status: stored.pf_status,
-              pf_wage: stored.pf_wage,
-              employee_pf: stored.employee_pf,
-              employer_epf: stored.employer_epf,
-              employer_eps: stored.employer_eps,
-              employer_pf_total: stored.employer_pf_total,
+              pf_wage: provisional(stored.pf_wage),
+              employee_pf: provisional(stored.employee_pf),
+              employer_epf: provisional(stored.employer_epf),
+              employer_eps: provisional(stored.employer_eps),
+              employer_pf_total: provisional(stored.employer_pf_total),
               esi_status: stored.esi_status,
-              esi_wage: stored.esi_wage,
+              esi_wage: provisional(stored.esi_wage),
               esi_wage_basis: stored.esi_wage_basis,
-              employee_esi: stored.employee_esi,
-              employer_esi: stored.employer_esi,
+              employee_esi: provisional(stored.employee_esi),
+              employer_esi: provisional(stored.employer_esi),
               /**
                * HOW THE CONTRIBUTION-PERIOD QUESTION WAS ANSWERED. A
                * contribution charged on a wage above the ceiling is correct
@@ -549,9 +624,9 @@ class PayrunCalculationUsecase {
                   : Number(stored.esi_contribution_period_continues) === 1,
             },
             final: {
-              total_earnings: stored.total_earnings,
-              total_employee_deductions: stored.total_employee_deductions,
-              net_pay: stored.net_pay,
+              total_earnings: provisional(stored.total_earnings),
+              total_employee_deductions: provisional(stored.total_employee_deductions),
+              net_pay: provisional(stored.net_pay),
               pay_type: stored.pay_type,
             },
             unresolved: this._json(stored.unresolved),
