@@ -752,6 +752,87 @@ describe("approval and immutability", () => {
   });
 });
 
+/* ------------------------------------------- payroll context is not an input */
+
+describe("a caller cannot supply payroll context", () => {
+  /*
+   * THE REGRESSION THIS PINS. A supplied `esi_wage` is AUTHORITATIVE in the
+   * engine — that is what lets a future payrun charge ESI on the wage actually
+   * payable — so a request body carrying one would be choosing its own
+   * statutory result. `{ monthly_gross: 16000, esi_wage: 0 }` would have
+   * stored a salary with no ESI on it at all.
+   *
+   * The route schema refuses the keys, and this is the layer below: even
+   * called directly, the usecase reads none of them. Both matter, because the
+   * usecase is what `createInitialSalary` and `updatePendingSalary` funnel
+   * their caller's whole body into.
+   */
+  const COVERED = { ...EMPLOYEE, esi_applicable: 1 };
+
+  /** The three fields, at values chosen to be visible if they were ever read. */
+  const POISON = {
+    esi_wage: 0,
+    contribution_period_continues: true,
+    employee_contribution_exempt: true,
+  };
+
+  /** The standard answer for a 16000 gross: wages 10000, at 0.75% and 3.25%. */
+  const assertStandard = (esi, ctc) => {
+    assert.equal(esi.status, "APPLIED");
+    assert.equal(esi.esi_wage, 10000);
+    assert.equal(esi.esi_wage_basis, "STANDARD");
+    assert.equal(esi.employee_esi, 75);
+    assert.equal(esi.employer_esi, 325);
+    assert.equal(ctc, 17625);
+  };
+
+  it("IGNORES esi_wage, contribution_period_continues and employee_contribution_exempt", async () => {
+    const uc = build(makeRepo(COVERED));
+    const r = await uc.calculateForEmployee(42, { monthly_gross: 16000, ...POISON });
+    assertStandard(r.esi, r.monthly_ctc);
+    assert.notEqual(r.esi.employee_esi, 0, "an asserted exemption cannot zero a deduction");
+  });
+
+  it("produces the IDENTICAL result with and without them", async () => {
+    const uc = build(makeRepo(COVERED));
+    const poisoned = await uc.calculateForEmployee(42, { monthly_gross: 16000, ...POISON });
+    const clean = await uc.calculateForEmployee(42, { monthly_gross: 16000 });
+    assert.deepEqual(poisoned.esi, clean.esi);
+    assert.equal(poisoned.monthly_ctc, clean.monthly_ctc);
+  });
+
+  it("does not let them reach a STORED row through the create path", async () => {
+    const repo = makeRepo(COVERED);
+    const uc = build(repo);
+    await uc.createInitialSalary(42, { monthly_gross: 16000, ...POISON }, ACTOR);
+    const row = repo.rows[0];
+    assert.equal(row.esi_wage, 10000);
+    assert.equal(row.employee_esi, 75);
+    assert.equal(row.employer_esi, 325);
+    assert.equal(row.monthly_ctc, 17625);
+  });
+
+  it("does not let them reach a stored row through the AMEND path", async () => {
+    const repo = makeRepo(COVERED);
+    const uc = build(repo);
+    const created = await uc.createInitialSalary(42, { monthly_gross: 16000 }, ACTOR);
+    await uc.updatePendingSalary(created.salary_id, { monthly_gross: 16000, ...POISON }, ACTOR);
+    const row = repo.rows[0];
+    assert.equal(row.esi_wage, 10000);
+    assert.equal(row.employee_esi, 75);
+    assert.equal(row.employer_esi, 325);
+  });
+
+  it("an employee genuinely outside the scheme is still NOT_APPLICABLE, not zero-by-assertion", async () => {
+    // The distinction the poison would have blurred: this is a recorded fact
+    // about the employee, and it comes from the employee master.
+    const uc = build(makeRepo({ ...EMPLOYEE, esi_applicable: 0 }));
+    const r = await uc.calculateForEmployee(42, { monthly_gross: 16000, ...POISON });
+    assert.equal(r.esi.status, "NOT_APPLICABLE");
+    assert.equal(r.esi.employer_esi, 0);
+  });
+});
+
 /* ------------------------------------------------------- the period lock */
 
 describe("the salary period lock", () => {
