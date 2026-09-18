@@ -134,9 +134,10 @@ function fakeCalculationRepo(state = {}) {
       saved.calculations.push(rows);
       return { written: rows.length, stale_removed: 0 };
     },
-    saveMonthlyPayroll: async (row) => {
-      saved.monthly.push(row);
-      return [];
+    saveMonthWithPayroll: async ({ rows, monthly }) => {
+      saved.calculations.push(rows);
+      if (monthly) saved.monthly.push(monthly);
+      return { written: (rows || []).length, monthly_written: monthly ? 1 : 0 };
     },
     setBreakOverride: async (id, minutes) => {
       saved.breakOverride.push({ id, minutes });

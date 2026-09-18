@@ -470,6 +470,50 @@ or another employee, is never locked. An employee/month with no
 `payrun_employee_calculation` row has nothing that could be approved, so
 attendance proceeds.
 
+### The other ordering: an approval may not be granted against moved attendance
+
+The row lock settles one direction - approval first, attendance refused. The
+other needs the approval to look again. `_assemble`/`_present` decide readiness
+BEFORE the approval's transaction opens, and `calculation_hash` only says
+whether the PAYRUN row was recalculated, which an attendance write never
+touches. So:
+
+1. the usecase assembles and finds the employee READY;
+2. an attendance write takes the payrun row `FOR UPDATE`, rewrites attendance,
+   commits;
+3. the approval wakes, takes the row lock, finds the hash unchanged;
+4. without a re-read it would approve stale figures.
+
+`repository/payrun_calculation.js#approve` therefore re-reads the **attendance
+sources** on its own connection, inside its own transaction, AFTER the row lock
+and before the status changes, and compares them with the markers the stored
+calculation carries -
+`utils/payrun_calculation.js#attendanceSourceChanges` over
+`ATTENDANCE_SOURCE_KEYS`, a named subset of the existing `SOURCE_KEYS`, not a
+second definition of freshness. A mismatch is the `SOURCE_MOVED` outcome,
+reported as BLOCKED with "recalculate this employee for the month, then
+approve". Nothing is approved, and no audit row is written.
+
+### One month, one transaction
+
+`calculateMonth(persist=true)` writes the day rows and the monthly roll-up
+under one lock in one transaction:
+
+```
+BEGIN
+SELECT payrun_employee_calculation ... FOR UPDATE   (the one gate)
+INSERT ... attendance_day_calculation               (the days)
+INSERT ... attendance_monthly_payroll               (the month)
+COMMIT
+```
+
+They were two calls, which left an approval able to land between them and a
+failed monthly write able to leave a month whose halves disagreed. The lock
+covers the employee/month explicitly as well as every date the day rows touch,
+so a month with no day rows is still gated. There is no public
+`saveMonthlyPayroll` any more: the only writer of `attendance_monthly_payroll`
+is private to the guarded month save.
+
 ## 7d. What a stored row now records about the two break settings
 
 `break_allowance_minutes` is a total, and with both employee settings in play

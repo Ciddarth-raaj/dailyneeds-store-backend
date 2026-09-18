@@ -327,6 +327,48 @@ function sourceHash(markers = {}) {
 }
 
 /**
+ * THE ATTENDANCE SUBSET OF THE SOURCE MARKERS.
+ *
+ * A NAMED SUBSET, NOT A SECOND DEFINITION. These are the seven keys of
+ * `SOURCE_KEYS` above that come from attendance, listed here so the approval's
+ * post-lock revalidation can ask the narrower question - "has ATTENDANCE moved
+ * under this calculation?" - without inventing its own idea of freshness or
+ * re-reading the salary, the statutory flags and the ESI coverage evidence
+ * inside a lock it is holding.
+ *
+ * Every key is spelled in `SOURCE_KEYS`, and a test holds it to that: a marker
+ * added to the source set and forgotten here would be a source the approval
+ * stopped watching at the one moment it matters most.
+ */
+const ATTENDANCE_SOURCE_KEYS = [
+  "attendance_monthly_payroll_id",
+  "attendance_payroll_version",
+  "attendance_calculated_at",
+  "approved_ot_minutes",
+  "effective_nrm_minutes",
+  "effective_nrm_source",
+  "ot_groups",
+];
+
+/**
+ * Has attendance moved under this stored calculation?
+ *
+ * Compares the stored row's attendance markers against the ones read NOW,
+ * using the same `mark()` normalization the hash uses - so "0" and 0 are the
+ * same answer here exactly as they are there, and a difference this reports is
+ * a difference that would have changed `source_hash`.
+ *
+ * Returns the keys that differ, in `SOURCE_KEYS` order, or an empty list. The
+ * caller decides what to do about it; this decides nothing.
+ */
+function attendanceSourceChanges(storedRow = {}, currentMarkers = {}) {
+  const stored = storedMarkers(storedRow || {});
+  return ATTENDANCE_SOURCE_KEYS.filter(
+    (key) => mark(stored[key]) !== mark((currentMarkers || {})[key])
+  );
+}
+
+/**
  * THE PAYRUN'S OWN INPUTS, HASHED SEPARATELY FROM THE SOURCES.
  *
  * TWO HASHES AND NOT ONE, and the separation is the point. A salary revision
@@ -1247,4 +1289,6 @@ module.exports = {
   recalcReasonOf,
   blockerOf,
   SOURCE_KEYS,
+  ATTENDANCE_SOURCE_KEYS,
+  attendanceSourceChanges,
 };

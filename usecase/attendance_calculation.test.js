@@ -91,9 +91,12 @@ function fakeRepo(state = {}) {
       saved.calculations.push(rows);
       return { written: rows.length, stale_removed: 0 };
     },
-    saveMonthlyPayroll: async (row) => {
-      saved.monthly.push(row);
-      return [];
+    // ONE CALL FOR THE MONTH: the day rows and the roll-up together, which is
+    // what the repository now persists in one transaction under one lock.
+    saveMonthWithPayroll: async ({ rows, monthly }) => {
+      saved.calculations.push(rows);
+      if (monthly) saved.monthly.push(monthly);
+      return { written: (rows || []).length, monthly_written: monthly ? 1 : 0 };
     },
   };
 }

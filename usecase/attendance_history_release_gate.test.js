@@ -154,7 +154,17 @@ function world() {
       rows.forEach((row) => state.storedByDate.set(row.attendance_date, { ...row }));
       return { written: rows.length };
     },
-    saveMonthlyPayroll: async () => [],
+    // The month, persisted as one thing - and gated by the same lock, because
+    // the real repository takes it once and holds it across both writes.
+    saveMonthWithPayroll: async ({ employee_id, period_year, period_month, rows, monthly }) => {
+      assertNotLocked([
+        { employee_id, attendance_date: `${period_year}-${String(period_month).padStart(2, "0")}-01` },
+        ...rows,
+      ]);
+      rows.forEach((row) => state.storedByDate.set(row.attendance_date, { ...row }));
+      if (monthly) state.monthly = { ...monthly };
+      return { written: rows.length, monthly_written: monthly ? 1 : 0 };
+    },
   };
 
   return { state, repo, usecase: buildUsecase(repo) };

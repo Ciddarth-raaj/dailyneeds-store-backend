@@ -28,12 +28,16 @@ const { writeCalculationsOnConnection } = require("./attendance_calculation");
  * decision, made afterwards, and a fake that pre-filtered by status would
  * hide exactly the defect this file exists to catch.
  */
-function fakeConnection({ payrun = [] } = {}) {
+function fakeConnection({ payrun = [], failOn = null } = {}) {
   const log = [];
   const connection = {
     query(sql, params, cb) {
       const text = String(sql).replace(/\s+/g, " ").trim();
       log.push({ sql: text, params });
+      if (failOn && text.includes(failOn)) {
+        cb(new Error(`forced failure on ${failOn}`));
+        return;
+      }
       if (/^SELECT/i.test(text)) {
         const [year, month, employeeIds] = params;
         cb(
@@ -410,5 +414,134 @@ describe("the refusal tells the truth and offers no way round it", () => {
         return true;
       }
     );
+  });
+});
+
+/* ============== the month: day rows and roll-up, one transaction, one lock = */
+
+/**
+ * `calculateMonth(persist=true)` used to make two calls - save the days, then
+ * save the monthly roll-up - which left two holes: an approval could take the
+ * payrun row between them, and a monthly write that failed after the daily
+ * write had committed left a month whose halves disagreed. Both are now one
+ * transaction under one lock.
+ */
+describe("saveMonthWithPayroll persists the whole month or none of it", () => {
+  const monthly = { employee_id: 42, period_year: 2026, period_month: 8, salary_days: 26 };
+  const saveMonth = (repo, over = {}) =>
+    repo.saveMonthWithPayroll({
+      employee_id: 42,
+      period_year: 2026,
+      period_month: 8,
+      rows: [row("2026-08-10"), row("2026-08-11")],
+      monthly,
+      ...over,
+    });
+
+  it("BEGIN, lock, days, month, COMMIT - in that order and once each", async () => {
+    const fake = fakeConnection({ payrun: [calculated(42, 2026, 8)] });
+    const result = await saveMonth(buildRepo(pool(fake)));
+
+    const order = fake.log.map((e) =>
+      /^(BEGIN|COMMIT|ROLLBACK|RELEASE)$/.test(e.sql) ? e.sql : e.sql.split(" ")[0]
+    );
+    assert.deepEqual(order, ["BEGIN", "SELECT", "INSERT", "INSERT", "COMMIT", "RELEASE"]);
+    assert.equal(result.written, 2);
+    assert.equal(result.monthly_written, 1);
+  });
+
+  it("the lock is taken after BEGIN and before EITHER write, and is FOR UPDATE", async () => {
+    const fake = fakeConnection({ payrun: [calculated(42, 2026, 8)] });
+    await saveMonth(buildRepo(pool(fake)));
+
+    const at = (pred) => fake.log.findIndex(pred);
+    const beginAt = at((e) => e.sql === "BEGIN");
+    const selectAt = at((e) => /^SELECT/i.test(e.sql));
+    const dayAt = at((e) => /attendance_day_calculation/i.test(e.sql));
+    const monthAt = at((e) => /attendance_monthly_payroll/i.test(e.sql));
+    const commitAt = at((e) => e.sql === "COMMIT");
+
+    assert.ok(beginAt < selectAt && selectAt < dayAt && dayAt < monthAt && monthAt < commitAt);
+    assert.match(fake.log[selectAt].sql, /FOR UPDATE$/);
+    // ONE gate for the whole month, not one per write.
+    assert.equal(fake.log.filter((e) => /^SELECT/i.test(e.sql)).length, 1);
+  });
+
+  it("writes the days into one table and the month into the other", async () => {
+    const fake = fakeConnection({ payrun: [calculated(42, 2026, 8)] });
+    await saveMonth(buildRepo(pool(fake)));
+    const inserts = fake.log.filter((e) => /^INSERT/i.test(e.sql));
+    assert.match(inserts[0].sql, /INSERT INTO attendance_day_calculation/);
+    assert.match(inserts[1].sql, /INSERT INTO attendance_monthly_payroll/);
+    assert.match(inserts[1].sql, /ON DUPLICATE KEY UPDATE/, "idempotent, like the daily write");
+  });
+
+  it("a FAILING monthly write rolls the DAY rows back - no half-written month", async () => {
+    const fake = fakeConnection({
+      payrun: [calculated(42, 2026, 8)],
+      failOn: "attendance_monthly_payroll",
+    });
+    await assert.rejects(() => saveMonth(buildRepo(pool(fake))), /forced failure/);
+    assert.ok(fake.log.some((e) => e.sql === "ROLLBACK"));
+    assert.ok(!fake.log.some((e) => e.sql === "COMMIT"), "the day rows do not survive alone");
+  });
+
+  it("a LOCKED month writes NEITHER table", async () => {
+    const fake = fakeConnection({ payrun: LOCKED_AUGUST });
+    await assert.rejects(() => saveMonth(buildRepo(pool(fake))), /approved and locked/);
+    assert.ok(!fake.log.some((e) => /^INSERT/i.test(e.sql)));
+    assert.ok(fake.log.some((e) => e.sql === "ROLLBACK"));
+  });
+
+  it("locks the month EVEN WITH NO DAY ROWS, so an empty month is still gated", async () => {
+    const fake = fakeConnection({ payrun: LOCKED_AUGUST });
+    await assert.rejects(
+      () => saveMonth(buildRepo(pool(fake)), { rows: [] }),
+      /approved and locked/
+    );
+    const [select] = fake.log.filter((e) => /^SELECT/i.test(e.sql));
+    assert.deepEqual(select.params, [2026, 8, [42]]);
+  });
+
+  it("holds the lock across BOTH writes, so an approval cannot interleave", async () => {
+    // The lock is taken before the first INSERT and released only by the
+    // COMMIT after the second, so there is no instant between the day rows
+    // and the roll-up at which an approval could take the row.
+    const fake = fakeConnection({ payrun: [calculated(42, 2026, 8)] });
+    await saveMonth(buildRepo(pool(fake)));
+    const order = fake.log.map((e) => e.sql);
+    const selectAt = order.findIndex((sql) => /^SELECT/i.test(sql));
+    const commitAt = order.indexOf("COMMIT");
+    const inserts = order
+      .map((sql, i) => (/^INSERT/i.test(sql) ? i : -1))
+      .filter((i) => i >= 0);
+    assert.ok(inserts.every((i) => i > selectAt && i < commitAt));
+  });
+});
+
+describe("no unguarded writer of attendance_monthly_payroll remains", () => {
+  it("the repository exposes no saveMonthlyPayroll", () => {
+    const repo = buildRepo(pool(fakeConnection()));
+    assert.equal(repo.saveMonthlyPayroll, undefined, "the old unguarded method is gone, not deprecated");
+  });
+
+  it("the table is named in exactly one write, inside the guarded month save", () => {
+    const source = fs.readFileSync(path.join(__dirname, "attendance_calculation.js"), "utf8");
+    const writes = source.match(/INSERT INTO attendance_monthly_payroll/g) || [];
+    assert.equal(writes.length, 1);
+    // And the function holding it is private: nothing outside this file can
+    // reach it without going through `saveMonthWithPayroll`.
+    assert.ok(!/module\.exports.*upsertMonthlyPayrollOnConnection/s.test(source));
+  });
+
+  it("no other repository writes that table at all", () => {
+    const dir = __dirname;
+    const offenders = fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith(".js") && !f.endsWith(".test.js") && f !== "attendance_calculation.js")
+      .filter((f) => /(INSERT INTO|UPDATE|DELETE FROM)\s+attendance_monthly_payroll/i.test(
+        fs.readFileSync(path.join(dir, f), "utf8")
+      ));
+    assert.deepEqual(offenders, []);
   });
 });

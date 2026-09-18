@@ -903,17 +903,38 @@ class PayrunCalculationUsecase {
    * APPROVE & LOCK - one employee, a selection, or everybody ready.
    *
    * THE READY RULE IS RE-DECIDED HERE, ON THE SERVER, FROM THE SERVER'S OWN
-   * READS, and every clause of it is checked again at the moment of the
-   * approval: initialized, calculated, no source moved since, attendance
-   * complete, no pending regularization, no pending OT, the adjustment stage
-   * complete for this employee, statutory setup complete, the calculation
-   * itself complete, and not already locked. What a browser last saw may be
-   * minutes old, and an approval is the one act in this feature that cannot be
-   * taken back.
+   * READS, never from what a browser last saw: initialized, calculated, no
+   * source moved since, attendance complete, no pending regularization, no
+   * pending OT, the adjustment stage complete for this employee, statutory
+   * setup complete, the calculation itself complete, and not already locked.
+   * An approval is the one act in this feature that cannot be taken back.
+   *
+   * BUT THAT VERDICT IS REACHED BEFORE THE ROW LOCK, and is therefore a
+   * PRE-CHECK, not the final word. `_assemble` and `_present` run outside the
+   * approval's transaction, so between them and the lock a source can still
+   * move - in particular attendance, which an attendance write may rewrite
+   * without touching this stage's row or its `calculation_hash` at all.
+   *
+   * THE FINAL VERIFICATION IS IN THE REPOSITORY, AFTER THE LOCK.
+   * `repository/payrun_calculation.js#approve` re-reads the payrun row
+   * `FOR UPDATE`, then RE-READS THE ATTENDANCE SOURCES on that same connection
+   * inside that same transaction and compares them with the markers the stored
+   * calculation carries. Only then does the status change. An employee whose
+   * attendance moved in that window comes back `SOURCE_MOVED` and is reported
+   * as BLOCKED with "recalculate, then approve" - never approved against
+   * figures that no longer describe the month.
+   *
+   * The other clauses above remain pre-lock checks, which is sound because
+   * each of them either cannot change without recalculating this row (whose
+   * hash is compared under the lock) or is checked again by the guarded UPDATE
+   * itself. Attendance is the one source another transaction can move
+   * underneath a prepared approval, and it is the one re-read here.
    *
    * THE LOCK IS TAKEN ROW BY ROW IN THE DATABASE, under `FOR UPDATE` and a
    * guarded UPDATE - see `repository/payrun_calculation.js#approve`. Two
-   * people approving at once produce one approval.
+   * people approving at once produce one approval. Attendance writers take the
+   * SAME row lock before modifying attendance, so the two stages serialize on
+   * one key rather than racing.
    *
    * IT LOCKS EMPLOYEES, NOT THE MONTH. Everybody not in this call is exactly
    * as editable afterwards as before it.
@@ -1011,6 +1032,29 @@ class PayrunCalculationUsecase {
             employee_id: entry.employee_id,
             result: ROW_RESULT.LOCKED,
             message: "Already approved and locked. Nothing was changed.",
+          });
+          return;
+        }
+        if (entry.outcome === "SOURCE_MOVED") {
+          /*
+           * THE SOURCE MOVED WHILE THE APPROVAL WAS BEING MADE, and the
+           * repository found it AFTER taking the row lock - which is the only
+           * moment the answer is trustworthy. The calculation is stale: it
+           * prices attendance that has since been rewritten, so it is not
+           * approved and the month must be recalculated first.
+           *
+           * It is reported as BLOCKED, like every other "not approvable right
+           * now" verdict, so no screen needs a new result code to render it.
+           * The changed markers travel with it for the support case that asks
+           * WHICH source moved.
+           */
+          results.push({
+            employee_id: entry.employee_id,
+            result: ROW_RESULT.BLOCKED,
+            source_changed: entry.changed || [],
+            message:
+              "This employee's attendance changed after this calculation was prepared, so the figures are stale. " +
+              "Recalculate this employee for the month, then approve.",
           });
           return;
         }

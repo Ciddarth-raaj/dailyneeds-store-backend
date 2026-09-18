@@ -7,7 +7,13 @@ const {
   rollbackAsync,
 } = require("../utils/batchInsert");
 const { locationPredicate } = require("./payrun");
+const { monthWindow } = require("../utils/payrun_eligibility");
 const { AUDIT_ACTION, STORED_STATUS } = require("../constants/payrun_calculation");
+const {
+  resolveEffectiveNrm,
+  sourceMarkers,
+  attendanceSourceChanges,
+} = require("../utils/payrun_calculation");
 
 /**
  * Payrun Calculation & Review - the reads a calculated month needs, and the
@@ -130,7 +136,7 @@ class PayrunCalculationRepository {
    * `usecase/attendance_calculation.js#calculateMonth`; this statement selects
    * them and no expression in it derives one.
    */
-  async listAttendanceMonths(employeeIds, year, month) {
+  async listAttendanceMonths(employeeIds, year, month, conn = null) {
     if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
     return this._read(
       "LIST-ATTENDANCE-MONTHS",
@@ -143,7 +149,8 @@ class PayrunCalculationRepository {
               DATE_FORMAT(calculated_at, '%Y-%m-%d %H:%i:%s.%f') AS calculated_at
          FROM attendance_monthly_payroll
         WHERE employee_id IN (?) AND period_year = ? AND period_month = ?`,
-      [employeeIds, year, month]
+      [employeeIds, year, month],
+      conn
     );
   }
 
@@ -170,7 +177,7 @@ class PayrunCalculationRepository {
    * ONLY FINAL DATES COUNT. A date the engine has not settled has a punch list
    * known to be incomplete, and its NRM is not evidence of anything.
    */
-  async listEffectiveNrm(employeeIds, from, to) {
+  async listEffectiveNrm(employeeIds, from, to, conn = null) {
     if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
     return this._read(
       "LIST-EFFECTIVE-NRM",
@@ -186,7 +193,8 @@ class PayrunCalculationRepository {
           AND nrm_minutes > 0
         GROUP BY employee_id, nrm_minutes, break_allowance_source
         ORDER BY employee_id`,
-      [employeeIds, from, to]
+      [employeeIds, from, to],
+      conn
     );
   }
 
@@ -489,11 +497,84 @@ class PayrunCalculationRepository {
    * applied to figures nobody looked at. That is the whole of what
    * "approval is recorded against a calculation reference" is for.
    *
+   * ================ AND THE ATTENDANCE SOURCE IS RE-READ AFTER THE LOCK =====
+   *
+   * THE HASH ALONE WAS NOT ENOUGH, because it answers a different question.
+   * `calculation_hash` says "has this payrun row been recalculated since you
+   * looked at it"; it says nothing about whether the ATTENDANCE the row was
+   * calculated from has moved, because attendance moving does not touch the
+   * payrun row at all. The readiness verdict that DOES compare sources is
+   * computed by `_present`, before this transaction begins, which left:
+   *
+   *   1  the usecase assembles and finds the employee READY
+   *   2  an attendance write takes this payrun row FOR UPDATE, rewrites the
+   *      employee's attendance, and commits
+   *   3  this approval wakes, takes the row lock, finds `calculation_hash`
+   *      unchanged - because nothing recalculated the PAYRUN - and approves
+   *   4  a month is approved against attendance nobody priced
+   *
+   * So the attendance markers are read again HERE, on this connection, INSIDE
+   * this transaction, AFTER the row lock, and compared against the ones the
+   * stored calculation carries. Attendance writers take the same row lock
+   * before modifying attendance (`repository/attendance_calculation.js`), so
+   * the two orderings are both settled:
+   *
+   *   approval first     it locks, revalidates, approves; the attendance
+   *                      write then wakes, sees APPROVED_LOCKED and refuses
+   *   attendance first   it locks, writes, commits; this approval then wakes,
+   *                      re-reads attendance, finds it no longer matches the
+   *                      stored calculation and refuses as SOURCE_MOVED
+   *
+   * The comparison is the EXISTING source-marker architecture, narrowed to the
+   * attendance keys - `utils/payrun_calculation.js#attendanceSourceChanges`
+   * over `ATTENDANCE_SOURCE_KEYS` - and not a second definition of freshness.
+   * Only attendance is re-read: it is the source this lock serializes against,
+   * and re-reading the salary, the statutory flags and the ESI coverage
+   * evidence inside a held lock would buy nothing the pre-lock readiness check
+   * does not already cover.
+   *
    * IT LOCKS ONE EMPLOYEE, NEVER THE MONTH. Nothing here writes
    * `payrun_period`, and there is no statement in this file that could: a
    * month-wide lock is exactly what the specification forbids, and the way to
    * guarantee it is not to have the capability.
    */
+  /**
+   * THE ATTENDANCE SOURCE, RE-READ ON A HELD LOCK.
+   *
+   * Runs on the connection it is given - the approval's own, inside the
+   * approval's transaction, after the row is locked - so what it reads is what
+   * is true at the moment of approval and cannot change before the status
+   * does. The reads are the SAME two the assembly uses (`listAttendanceMonths`
+   * and `listEffectiveNrm`), narrowed to one employee, and the markers are
+   * built by the SAME `sourceMarkers`, so this cannot drift into a second
+   * opinion about what attendance freshness means.
+   *
+   * Returns the marker keys that moved, or an empty list.
+   */
+  async _attendanceSourceChangesLocked(conn, { year, month, employee_id, stored }) {
+    const { from, to } = monthWindow(Number(year), Number(month));
+    const [attendanceRows, nrmRows] = await Promise.all([
+      this.listAttendanceMonths([employee_id], year, month, conn),
+      this.listEffectiveNrm([employee_id], from, to, conn),
+    ]);
+
+    const attendance = (attendanceRows || [])[0] || {};
+    const nrm = resolveEffectiveNrm(
+      (nrmRows || []).map((r) => ({
+        nrm_minutes: r.nrm_minutes,
+        break_allowance_source: r.break_allowance_source,
+        day_count: r.day_count,
+        approved_ot_minutes: r.approved_ot_minutes,
+      }))
+    );
+
+    // Only the attendance keys are built out; the salary, statutory and
+    // coverage markers are left at their defaults because they are not what
+    // this comparison asks about.
+    const current = sourceMarkers({ attendance, nrm });
+    return attendanceSourceChanges(stored, current);
+  }
+
   async approve({ year, month, employees, approved_by = null }) {
     if (!Array.isArray(employees) || employees.length === 0) return [];
     const conn = await getConnectionAsync(this.db);
@@ -506,7 +587,11 @@ class PayrunCalculationRepository {
           "LOCK-CALCULATION-ROW",
           `SELECT payrun_calculation_id, payrun_employee_id, employee_id, status,
                   calculation_hash, calculation_version, calculation_revision,
-                  source_hash, net_pay
+                  source_hash, net_pay,
+                  attendance_monthly_payroll_id, attendance_payroll_version,
+                  DATE_FORMAT(attendance_calculated_at, '%Y-%m-%d %H:%i:%s.%f') AS attendance_calculated_at,
+                  approved_ot_minutes, effective_nrm_minutes, effective_nrm_source,
+                  ot_groups
              FROM payrun_employee_calculation
             WHERE period_year = ? AND period_month = ? AND employee_id = ?
             FOR UPDATE`,
@@ -525,6 +610,23 @@ class PayrunCalculationRepository {
         }
         if (entry.calculation_hash && entry.calculation_hash !== row.calculation_hash) {
           results.push({ employee_id: entry.employee_id, outcome: "CALCULATION_MOVED" });
+          continue;
+        }
+
+        // THE AUTHORITATIVE SOURCE CHECK, after the row lock and before the
+        // status changes. Nothing decided before this transaction is trusted.
+        const movedKeys = await this._attendanceSourceChangesLocked(conn, {
+          year,
+          month,
+          employee_id: row.employee_id,
+          stored: row,
+        });
+        if (movedKeys.length > 0) {
+          results.push({
+            employee_id: entry.employee_id,
+            outcome: "SOURCE_MOVED",
+            changed: movedKeys,
+          });
           continue;
         }
 

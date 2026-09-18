@@ -147,7 +147,10 @@ function fakeRepo(state = {}) {
       }
       return { written: rows.length, stale_removed: removed };
     },
-    saveMonthlyPayroll: async () => [],
+    saveMonthWithPayroll: async ({ rows, monthly }) => ({
+      written: (rows || []).length,
+      monthly_written: monthly ? 1 : 0,
+    }),
 
     listEmployeesForRecalculation: async () => state.candidates || [],
     outletExists: async () => true,

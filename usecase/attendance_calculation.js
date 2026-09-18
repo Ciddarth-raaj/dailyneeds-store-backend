@@ -1369,31 +1369,41 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     };
 
     if (persist) {
-      await attendanceCalculationRepo.saveCalculations(days.map(toStorageRow));
-      await attendanceCalculationRepo.saveMonthlyPayroll({
+      // ONE CALL, ONE TRANSACTION, ONE LOCK. The day rows and the monthly
+      // roll-up are the same act of persistence: they used to be two calls,
+      // and a month could be approved between them or left half written when
+      // the second failed. The repository takes the payroll-row lock once and
+      // holds it across both writes - see `saveMonthWithPayroll`.
+      await attendanceCalculationRepo.saveMonthWithPayroll({
         employee_id,
         period_year: y,
         period_month: m,
-        available_from: payroll.available_from,
-        available_to: payroll.available_to,
-        available_dates: payroll.available_dates,
-        notional_offs: payroll.notional_offs,
-        base_days: payroll.base_days,
-        attendance_days: payroll.attendance_days,
-        salary_days: payroll.salary_days,
-        extra_days: payroll.extra_days,
-        monthly_gross: payroll.monthly_gross,
-        daily_rate: payroll.daily_rate,
-        salary_day_earnings: payroll.salary_day_earnings,
-        extra_day_earnings: payroll.extra_day_earnings,
-        shortage_minutes: payroll.shortage_minutes,
-        missing_minute_deduction: payroll.missing_minute_deduction,
-        approved_ot_minutes: payroll.approved_ot_minutes,
-        approved_ot_earnings: payroll.approved_ot_earnings,
-        total_attendance_payable: payroll.total_attendance_payable,
-        held_dates: JSON.stringify(payroll.held_dates || []),
-        is_final: payroll.is_final ? 1 : 0,
-        payroll_version: PAYROLL_VERSION,
+        rows: days.map(toStorageRow),
+        monthly: {
+          employee_id,
+          period_year: y,
+          period_month: m,
+          available_from: payroll.available_from,
+          available_to: payroll.available_to,
+          available_dates: payroll.available_dates,
+          notional_offs: payroll.notional_offs,
+          base_days: payroll.base_days,
+          attendance_days: payroll.attendance_days,
+          salary_days: payroll.salary_days,
+          extra_days: payroll.extra_days,
+          monthly_gross: payroll.monthly_gross,
+          daily_rate: payroll.daily_rate,
+          salary_day_earnings: payroll.salary_day_earnings,
+          extra_day_earnings: payroll.extra_day_earnings,
+          shortage_minutes: payroll.shortage_minutes,
+          missing_minute_deduction: payroll.missing_minute_deduction,
+          approved_ot_minutes: payroll.approved_ot_minutes,
+          approved_ot_earnings: payroll.approved_ot_earnings,
+          total_attendance_payable: payroll.total_attendance_payable,
+          held_dates: JSON.stringify(payroll.held_dates || []),
+          is_final: payroll.is_final ? 1 : 0,
+          payroll_version: PAYROLL_VERSION,
+        },
       });
     }
 

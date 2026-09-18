@@ -192,10 +192,15 @@ async function assertMonthsNotPayrollLocked(connection, rows) {
   if (hits.length > 0) throw payrollLockedError(hits);
 }
 
-async function writeCalculationsOnConnection(connection, rows) {
+/**
+ * The upsert statement itself. PRIVATE, AND DELIBERATELY UNEXPORTED: it takes
+ * no lock, so the only way to reach it is through a caller that has already
+ * taken one. `writeCalculationsOnConnection` below is that caller for every
+ * path but the monthly save, which holds the lock across two tables and calls
+ * this directly rather than gating twice.
+ */
+async function upsertCalculationRows(connection, rows) {
   if (!Array.isArray(rows) || rows.length === 0) return { written: 0 };
-
-  await assertMonthsNotPayrollLocked(connection, rows);
 
   const values = rows.map((row) => CALCULATION_COLUMNS.map((column) => row[column]));
   const updates = CALCULATION_COLUMNS
@@ -211,6 +216,55 @@ async function writeCalculationsOnConnection(connection, rows) {
     [values]
   );
   return { written: rows.length, affected: result ? Number(result.affectedRows) : 0 };
+}
+
+/**
+ * The monthly roll-up's upsert. PRIVATE and unexported for the same reason as
+ * `upsertCalculationRows`: it takes no lock of its own, so it is reachable
+ * only from `saveMonthWithPayroll`, which holds one. There is deliberately no
+ * public `saveMonthlyPayroll` any more - an unguarded writer left lying about
+ * is a writer somebody eventually calls.
+ *
+ * Neutral wage components only (review fix #8). There is no
+ * `statutory_base_*` column: attendance does not decide the PF/ESI base, and
+ * `utils/salary_engine.js` remains the statutory authority.
+ */
+const MONTHLY_PAYROLL_COLUMNS = [
+  "employee_id", "period_year", "period_month", "available_from", "available_to",
+  "available_dates", "notional_offs", "base_days", "attendance_days", "salary_days",
+  "extra_days", "monthly_gross", "daily_rate", "salary_day_earnings", "extra_day_earnings",
+  "shortage_minutes", "missing_minute_deduction", "approved_ot_minutes",
+  "approved_ot_earnings",
+  "total_attendance_payable", "held_dates", "is_final", "payroll_version",
+];
+
+async function upsertMonthlyPayrollOnConnection(connection, row) {
+  const updates = MONTHLY_PAYROLL_COLUMNS
+    .filter((c) => !["employee_id", "period_year", "period_month"].includes(c))
+    .map((c) => `\`${c}\` = VALUES(\`${c}\`)`)
+    .join(", ");
+
+  return queryAsync(
+    connection,
+    `INSERT INTO attendance_monthly_payroll (${MONTHLY_PAYROLL_COLUMNS.map((c) => `\`${c}\``).join(", ")})
+     VALUES (${MONTHLY_PAYROLL_COLUMNS.map(() => "?").join(", ")})
+     ON DUPLICATE KEY UPDATE ${updates}`,
+    MONTHLY_PAYROLL_COLUMNS.map((c) => row[c])
+  );
+}
+
+/**
+ * The guarded writer every other path uses: take the payroll lock, then write.
+ *
+ * Exported so `repository/attendance_regularization.js` can write the
+ * recalculated day in the SAME transaction that records the final approval,
+ * without either repository having to import the other's class - and so that
+ * doing so is gated exactly like every other write.
+ */
+async function writeCalculationsOnConnection(connection, rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return { written: 0 };
+  await assertMonthsNotPayrollLocked(connection, rows);
+  return upsertCalculationRows(connection, rows);
 }
 
 class AttendanceCalculationRepository {
@@ -968,31 +1022,73 @@ class AttendanceCalculationRepository {
     );
   }
 
-  /** The same idempotency, for one employee's month. */
-  async saveMonthlyPayroll(row) {
-    // Neutral wage components only (review fix #8). There is no
-    // `statutory_base_*` column: attendance does not decide the PF/ESI base,
-    // and `utils/salary_engine.js` remains the statutory authority.
-    const columns = [
-      "employee_id", "period_year", "period_month", "available_from", "available_to",
-      "available_dates", "notional_offs", "base_days", "attendance_days", "salary_days",
-      "extra_days", "monthly_gross", "daily_rate", "salary_day_earnings", "extra_day_earnings",
-      "shortage_minutes", "missing_minute_deduction", "approved_ot_minutes",
-      "approved_ot_earnings",
-      "total_attendance_payable", "held_dates", "is_final", "payroll_version",
-    ];
-    const updates = columns
-      .filter((c) => !["employee_id", "period_year", "period_month"].includes(c))
-      .map((c) => `\`${c}\` = VALUES(\`${c}\`)`)
-      .join(", ");
+  /**
+   * THE MONTH, PERSISTED AS ONE THING: the day rows and the monthly roll-up,
+   * in ONE transaction, under ONE payroll-row lock.
+   *
+   * WHY THEY CANNOT BE TWO CALLS. They were, and it left two holes:
+   *
+   *   1  the day rows committed, an approval then took the payrun row and
+   *      locked the month, and the monthly roll-up was written afterwards -
+   *      an attendance figure landing after payroll was approved;
+   *   2  the monthly write failing after the daily write had committed left a
+   *      month whose days said one thing and whose roll-up said another, with
+   *      nothing to show which half was real.
+   *
+   * So the lock is taken once, for the employee/month and for every date the
+   * day rows touch, and held across both writes until the commit. An approval
+   * cannot interleave between them: it wants the same row and waits.
+   *
+   * THE ORDER IS THE CONTRACT:
+   *
+   *   BEGIN
+   *   SELECT payrun_employee_calculation ... FOR UPDATE   (the one gate)
+   *   INSERT ... attendance_day_calculation               (the days)
+   *   INSERT ... attendance_monthly_payroll               (the month)
+   *   COMMIT
+   *
+   * Any failure rolls the whole thing back: neither half survives alone.
+   */
+  async saveMonthWithPayroll({ employee_id, period_year, period_month, rows = [], monthly = null }) {
+    const employeeId = Number(employee_id);
+    const year = Number(period_year);
+    const month = Number(period_month);
+    if (!Number.isInteger(employeeId) || employeeId <= 0) {
+      throw new Error("saveMonthWithPayroll needs an employee_id");
+    }
+    if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) {
+      throw new Error("saveMonthWithPayroll needs a period_year and period_month");
+    }
 
-    return this._read(
-      "SAVE-MONTHLY-PAYROLL",
-      `INSERT INTO attendance_monthly_payroll (${columns.map((c) => `\`${c}\``).join(", ")})
-       VALUES (${columns.map(() => "?").join(", ")})
-       ON DUPLICATE KEY UPDATE ${updates}`,
-      columns.map((c) => row[c])
-    );
+    const connection = await getConnectionAsync(this.db);
+    try {
+      await beginTransactionAsync(connection);
+
+      // ONE GATE, for the month being written AND for every date the day rows
+      // touch. The month itself is named explicitly so that a month with no
+      // day rows at all - an absent employee, an empty window - is still
+      // locked against its own approval.
+      await assertMonthsNotPayrollLocked(connection, [
+        { employee_id: employeeId, attendance_date: `${year}-${String(month).padStart(2, "0")}-01` },
+        ...rows,
+      ]);
+
+      const calculation = await upsertCalculationRows(connection, rows);
+      let monthlyWritten = 0;
+      if (monthly) {
+        await upsertMonthlyPayrollOnConnection(connection, monthly);
+        monthlyWritten = 1;
+      }
+
+      await commitAsync(connection);
+      return { ...calculation, monthly_written: monthlyWritten };
+    } catch (err) {
+      await rollbackAsync(connection);
+      this._log("SAVE-MONTH-WITH-PAYROLL", err);
+      throw err;
+    } finally {
+      connection.release();
+    }
   }
 
   /** Stored calculations, for the read API. */
