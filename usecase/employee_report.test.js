@@ -51,6 +51,14 @@ const allKeys = () => catalogue.FIELDS.filter((f) => f.enabled).map((f) => f.key
 /** The twelve Payroll figures, which are `view_salary` and nothing less. */
 const PAYROLL_KEYS = catalogue.FIELDS.filter((f) => f.group === "Payroll").map((f) => f.key);
 
+/**
+ * The three Aadhaar display fields, which are `view_employee_aadhaar` and
+ * nothing less - status, last four and the verified name alike. Read from the
+ * group rather than spelled out, so a fourth entry added to the group cannot
+ * be added ungated without these tests noticing.
+ */
+const AADHAAR_KEYS = catalogue.FIELDS.filter((f) => f.group === "Aadhaar").map((f) => f.key);
+
 const throwsCode = (fn, code) =>
   assert.throws(fn, (err) => {
     assert.strictEqual(err.code, code, `expected ${code}, got ${err.code}: ${err.message}`);
@@ -128,8 +136,13 @@ test("discovery hides fields the caller may not use", () => {
   for (const gated of ["pan_no", "uan", "pf_number", "esi_number", "bank_name", "account_no", "ifsc"]) {
     assert.ok(!hrKeys.includes(gated), `${gated} must not be offered without sensitive access`);
   }
+  // AND NOT ONE OF THE THREE AADHAAR FIELDS. `view_reports` + `view_employees`
+  // is not a way round `view_employee_aadhaar` - see the dedicated test below.
+  for (const gated of AADHAAR_KEYS) {
+    assert.ok(!hrKeys.includes(gated), `${gated} must not be offered without the Aadhaar key`);
+  }
   // What they may see is still useful.
-  for (const open of ["employee_id", "employee_name", "outlet", "department", "aadhaar_status", "bank_status"]) {
+  for (const open of ["employee_id", "employee_name", "outlet", "department", "bank_status"]) {
     assert.ok(hrKeys.includes(open), `${open} should be discoverable`);
   }
 });
@@ -146,9 +159,10 @@ test("sensitive access reveals the B3 fields, and the admin sees everything", ()
     assert.ok(keys.includes(gated), `${gated} should be discoverable with the key`);
   }
   // AND IT IS NOT A MASTER KEY. `view_employee_sensitive` is B3's, and it does
-  // not reach M2's salary or C2's verified Aadhaar name - each of which has
-  // its own decision and its own key.
-  for (const otherKeys of [...PAYROLL_KEYS, "aadhaar_name"]) {
+  // not reach M2's salary or C2's Aadhaar identity - not the verified name,
+  // and not the status or last four either. Each has its own decision and its
+  // own key.
+  for (const otherKeys of [...PAYROLL_KEYS, ...AADHAAR_KEYS]) {
     assert.ok(!keys.includes(otherKeys), `${otherKeys} is not B3's to grant`);
   }
   assert.deepStrictEqual(
@@ -172,7 +186,7 @@ test("THE SALARY FIGURES ARE `view_salary`, AND NOTHING ELSE OPENS THEM", () => 
     assert.ok(salaryKeys.includes(key), `${key} should be discoverable with view_salary`);
   }
   // And it opens the salary and nothing else: no PAN, no bank, no Aadhaar.
-  for (const other of ["pan_no", "bank_name", "account_no", "payment_type", "aadhaar_name"]) {
+  for (const other of ["pan_no", "bank_name", "account_no", "payment_type", ...AADHAAR_KEYS]) {
     assert.ok(!salaryKeys.includes(other), `view_salary must not reach ${other}`);
   }
   // Somebody without it cannot reach a figure by asking for it directly.
@@ -181,20 +195,94 @@ test("THE SALARY FIGURES ARE `view_salary`, AND NOTHING ELSE OPENS THEM", () => 
   assert.deepStrictEqual(fields.map((f) => f.key), ["employee_id", "monthly_gross"]);
 });
 
-test("THE VERIFIED AADHAAR NAME IS `view_employee_aadhaar`, AND THE NUMBER IS NOWHERE", () => {
-  const field = catalogue.getField("aadhaar_name");
-  assert.strictEqual(field.permission, "view_employee_aadhaar");
-  assert.strictEqual(field.sensitive, true);
+test("ALL THREE AADHAAR FIELDS ARE `view_employee_aadhaar`, AND THE NUMBER IS NOWHERE", () => {
+  // `hr_permissions.VIEW_EMPLOYEE_AADHAAR` governs one question - verification
+  // STATUS, the LAST FOUR digits, and the VERIFIED NAME - and the profile
+  // applies it to all three together. Reports applies exactly the same key, so
+  // a report cannot be the way round it.
+  assert.deepStrictEqual(
+    AADHAAR_KEYS.slice().sort(),
+    ["aadhaar_last4", "aadhaar_name", "aadhaar_status"],
+    "the Aadhaar group is exactly these three, and a fourth must be gated too"
+  );
+  for (const key of AADHAAR_KEYS) {
+    const field = catalogue.getField(key);
+    assert.strictEqual(field.permission, "view_employee_aadhaar", key);
+    assert.strictEqual(field.sensitive, true, `${key} must count towards the export audit`);
+  }
+
+  // 1. view_reports + view_employees, WITHOUT the Aadhaar key, gets none of
+  //    them - not in the catalogue it is offered, and not by asking directly.
+  const hrKeys = discoverFields(hrActor).map((f) => f.key);
+  for (const key of AADHAAR_KEYS) {
+    assert.ok(!hrKeys.includes(key), `${key} must not be offered to a caller without the key`);
+    throwsCode(() => resolveFields([key], hrActor), "UNKNOWN_FIELD");
+    throwsCode(() => resolveFields(["employee_id", key], hrActor), "UNKNOWN_FIELD");
+  }
+  // Nor by filtering on one, which is an oracle even when the column is hidden.
+  throwsCode(
+    () => resolveFilters(
+      { field_filters: [{ field: "aadhaar_status", value: "VERIFIED" }] },
+      hrActor,
+      "strict",
+      ["aadhaar_status"]
+    ),
+    "UNKNOWN_FILTER_FIELD"
+  );
+
+  // 2. WITH the key, all three are usable - discovered, selected and filtered.
   const keys = discoverFields(aadhaarActor).map((f) => f.key);
-  assert.ok(keys.includes("aadhaar_name"));
-  // The status read is not the sensitive pair and not the salary.
+  for (const key of AADHAAR_KEYS) {
+    assert.ok(keys.includes(key), `${key} should be discoverable with the key`);
+  }
+  const { fields, warnings } = resolveFields(["employee_id", ...AADHAAR_KEYS], aadhaarActor);
+  assert.deepStrictEqual(fields.map((f) => f.key), ["employee_id", ...AADHAAR_KEYS]);
+  assert.deepStrictEqual(warnings, []);
+  const filtered = resolveFilters(
+    { field_filters: [{ field: "aadhaar_status", value: "VERIFIED" }] },
+    aadhaarActor,
+    "strict",
+    ["aadhaar_status"]
+  );
+  assert.strictEqual(filtered.field_filters.length, 1);
+
+  // And it opens the Aadhaar identity and nothing else: not the sensitive
+  // pair, not the salary.
   for (const other of ["pan_no", "bank_name", "monthly_gross"]) {
     assert.ok(!keys.includes(other), `view_employee_aadhaar must not reach ${other}`);
   }
-  throwsCode(() => resolveFields(["aadhaar_name"], hrActor), "UNKNOWN_FIELD");
-  // No entry, gated or otherwise, reads a whole Aadhaar.
+
+  // 3. No entry, gated or otherwise, reads a whole Aadhaar - for anybody,
+  //    including an administrator, because the field does not exist.
   const selects = catalogue.FIELDS.map((f) => f.select).join(" ");
   assert.ok(!/aadhaar_number|aadhaar_card_no|aadhaar_ciphertext/.test(selects));
+  for (const forbidden of ["aadhaar_number", "aadhaar_card_no", "aadhaar_ciphertext", "aadhaar_fingerprint"]) {
+    assert.strictEqual(catalogue.getField(forbidden), null, `${forbidden} must not exist`);
+    throwsCode(() => resolveFields([forbidden], adminActor), "UNKNOWN_FIELD");
+  }
+  // The last four stay unfilterable even for a caller who may see them: a
+  // filter on a partial column is an oracle for the digits it hides.
+  assert.ok(!catalogue.getField("aadhaar_last4").filter, "aadhaar_last4 has no filter");
+  throwsCode(
+    () => resolveFilters(
+      { field_filters: [{ field: "aadhaar_last4", value: "4321" }] },
+      aadhaarActor,
+      "strict",
+      ["aadhaar_last4"]
+    ),
+    "UNKNOWN_FILTER_FIELD"
+  );
+});
+
+test("an export naming an Aadhaar field is recorded as sensitive", () => {
+  // `usecase/employee_report_service.js` derives `sensitive_fields_included`
+  // from the catalogue's `sensitive` flag, and that row is the export audit.
+  // Gating a field without marking it sensitive would log the export as if it
+  // had carried nothing of the sort.
+  const { fields } = resolveFields(["employee_id", "aadhaar_status"], aadhaarActor);
+  assert.strictEqual(fields.some((f) => f.sensitive), true);
+  const plain = resolveFields(["employee_id", "employee_name"], hrActor).fields;
+  assert.strictEqual(plain.some((f) => f.sensitive), false);
 });
 
 test("discovery never leaks the SQL behind a field", () => {

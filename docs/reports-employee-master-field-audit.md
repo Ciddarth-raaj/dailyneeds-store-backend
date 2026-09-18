@@ -90,6 +90,40 @@ granting the report keys confers no pay access at all.
 now exists as a gated field is a contradiction rather than a second defence.
 `salary` — the legacy column — stays forbidden.
 
+### The Aadhaar fields carry one key, not one of three
+
+Review correction `DN-REPORTS-EMPLOYEE-MASTER-SYNC-REVIEW1-20260918-002`.
+
+The first pass gated only `aadhaar_name` on `view_employee_aadhaar` and left
+`aadhaar_status` and `aadhaar_last4` open to any caller holding `view_reports`
++ `view_employees`. That contradicted the authorization contract the key is
+declared with in `constants/hr_permissions.js`, which governs one question —
+verification **status**, the **last four** digits and the **verified name** —
+and which the employee profile applies to all three together. A report that
+showed two of the three without the key would have been a way around it.
+
+All three now carry `permission: view_employee_aadhaar` and `sensitive: true`:
+
+| Field | Permission | Note |
+| --- | --- | --- |
+| Aadhaar Status | `view_employee_aadhaar` | ENUM filter, gated with the column |
+| Aadhaar Last 4 | `view_employee_aadhaar` | no filter — partial column, see below |
+| Name as per Aadhaar | `view_employee_aadhaar` | TEXT filter |
+
+`sensitive: true` is the existing mechanism, not a new one: the resolver copies
+it into discovery, and `usecase/employee_report_service.js` derives the export
+audit's `sensitive_fields_included` from it, so an export carrying an Aadhaar
+column is recorded as having carried one.
+
+It is deliberately **not** `view_employee_sensitive`. That key is far broader —
+salary, bank, PAN — and a store manager does not hold it, which is the whole
+reason `view_employee_aadhaar` exists as its own narrow decision.
+
+Nothing was widened. The full Aadhaar still has no catalogue entry at all,
+gated or otherwise; `aadhaar_last4` is still unfilterable; the report dataset
+rights and the branch scope are untouched; and no seeded system template names
+an Aadhaar field, so all five still reconcile unchanged.
+
 ### The salary join
 
 `employee_salary` holds one row per revision, so a plain join on `employee_id`

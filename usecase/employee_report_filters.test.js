@@ -40,6 +40,22 @@ const sensitive = {
   ],
 };
 
+/**
+ * The same caller PLUS `view_employee_aadhaar`. The exception test below is
+ * about which VISIBLE columns offer a filter control, so it needs an actor who
+ * can see `aadhaar_last4` - one of the two masked columns that deliberately
+ * offers none. All three Aadhaar fields are gated on that key, so a caller
+ * without it never sees `aadhaar_last4` at all and the test would be asserting
+ * the exception away rather than pinning it.
+ */
+const sensitivePlusAadhaar = {
+  isAdmin: false,
+  permissions: [
+    ...sensitive.permissions,
+    { permission_key: P.VIEW_EMPLOYEE_AADHAAR },
+  ],
+};
+
 const fieldsFor = (keys, actor = admin) => resolver.resolveFields(keys, actor).fields;
 
 /**
@@ -59,7 +75,7 @@ const filtersFor = (raw, actor = admin, selected) =>
 /* ==================== 13-14. selected column = eligible filter =========== */
 
 test("EVERY FIELD A USER MAY SEE IS FILTERABLE, EXCEPT THE MASKED TWO", () => {
-  const seen = resolver.discoverFields(sensitive);
+  const seen = resolver.discoverFields(sensitivePlusAadhaar);
   const notFilterable = seen.filter((f) => !f.filter).map((f) => f.key);
 
   // TWO EXCEPTIONS FOR ONE REASON AND ONE FOR ANOTHER.
