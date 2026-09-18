@@ -110,7 +110,7 @@ describe("2 punches: the extra break is ignored entirely", () => {
     assert.equal(withExtra.punch_count, 2);
     assert.equal(withExtra.break_allowance_minutes, 60);
     assert.equal(withExtra.break_allowance_source, "SHIFT");
-    assert.equal(withExtra.extra_break_minutes, 0);
+    assert.equal(withExtra.extra_break_minutes_applied, 0);
     assert.equal(withExtra.nrm_minutes, 660);
     assert.equal(withExtra.break_charged_minutes, 60);
     assert.equal(withExtra.worked_minutes, 660);
@@ -139,7 +139,7 @@ describe("4 punches with an extra break of 0 or null: identical to today", () =>
       const result = day({ punches: PUNCHES, extra_break_minutes: value });
       assert.equal(result.break_allowance_minutes, 60);
       assert.equal(result.break_allowance_source, "SHIFT");
-      assert.equal(result.extra_break_minutes, 0);
+      assert.equal(result.extra_break_minutes_applied, 0);
       assert.equal(result.nrm_minutes, base.nrm_minutes);
       assert.equal(result.worked_minutes, base.worked_minutes);
       assert.equal(result.shortage_minutes, base.shortage_minutes);
@@ -156,7 +156,7 @@ describe("4 punches: shift break 1h + extra 0.5h = 1.5h permitted", () => {
     });
 
     assert.equal(result.break_allowance_minutes, 90);
-    assert.equal(result.extra_break_minutes, 30);
+    assert.equal(result.extra_break_minutes_applied, 30);
     assert.equal(result.break_allowance_source, "EMPLOYEE_OVERRIDE");
     assert.equal(result.nrm_minutes, 630); // 720 span - 90 = 10.5 hours
     // The actual OUT -> IN gap is still what is charged.
@@ -231,7 +231,7 @@ describe("more than four punches", () => {
     assert.equal(result.punch_count, 8);
     assert.equal(result.actual_gap_minutes, 45);
     assert.equal(result.break_allowance_minutes, 90);
-    assert.equal(result.extra_break_minutes, 30);
+    assert.equal(result.extra_break_minutes_applied, 30);
     assert.equal(result.nrm_minutes, 630);
     assert.equal(result.worked_minutes, 675);
     assert.equal(result.shortage_minutes, 0);
@@ -241,11 +241,11 @@ describe("more than four punches", () => {
 describe("the days that are not four-punch days", () => {
   it("an absent day and an odd-punch day never carry the extra break", () => {
     assert.equal(day({ punches: [], extra_break_minutes: 30 }).break_allowance_source, "SHIFT");
-    assert.equal(day({ punches: [], extra_break_minutes: 30 }).extra_break_minutes, 0);
+    assert.equal(day({ punches: [], extra_break_minutes: 30 }).extra_break_minutes_applied, 0);
 
     const odd = day({ punches: punches("09:00", "13:00", "14:00"), extra_break_minutes: 30 });
     assert.equal(odd.break_allowance_source, "SHIFT");
-    assert.equal(odd.extra_break_minutes, 0);
+    assert.equal(odd.extra_break_minutes_applied, 0);
     assert.equal(odd.nrm_minutes, 660);
     assert.equal(odd.is_final, false);
   });
@@ -283,7 +283,7 @@ describe("only a COMPLETE punched sequence is credited", () => {
   it("4 punches: applied", () => {
     const result = day({ punches: sequence(4), extra_break_minutes: EXTRA });
     assert.equal(result.punch_count, 4);
-    assert.equal(result.extra_break_minutes, 30);
+    assert.equal(result.extra_break_minutes_applied, 30);
     assert.equal(result.break_allowance_minutes, 90);
     assert.equal(result.break_allowance_source, "EMPLOYEE_OVERRIDE");
     assert.equal(result.nrm_minutes, 630);
@@ -293,7 +293,7 @@ describe("only a COMPLETE punched sequence is credited", () => {
   it("5 punches: NOT applied, and the day is still a missing-punch review", () => {
     const result = day({ punches: sequence(5), extra_break_minutes: EXTRA });
     assert.equal(result.punch_count, 5);
-    assert.equal(result.extra_break_minutes, 0);
+    assert.equal(result.extra_break_minutes_applied, 0);
     assert.equal(result.break_allowance_minutes, 60, "the shift's own break, unextended");
     assert.equal(result.break_allowance_source, "SHIFT");
     assert.equal(result.nrm_minutes, 660);
@@ -305,7 +305,7 @@ describe("only a COMPLETE punched sequence is credited", () => {
   it("6 punches: applied", () => {
     const result = day({ punches: sequence(6), extra_break_minutes: EXTRA });
     assert.equal(result.punch_count, 6);
-    assert.equal(result.extra_break_minutes, 30);
+    assert.equal(result.extra_break_minutes_applied, 30);
     assert.equal(result.break_allowance_minutes, 90);
     assert.equal(result.nrm_minutes, 630);
     assert.equal(result.status, CALC_STATUS.FINAL);
@@ -314,7 +314,7 @@ describe("only a COMPLETE punched sequence is credited", () => {
   it("7 punches: NOT applied, and the day is still a missing-punch review", () => {
     const result = day({ punches: sequence(7), extra_break_minutes: EXTRA });
     assert.equal(result.punch_count, 7);
-    assert.equal(result.extra_break_minutes, 0);
+    assert.equal(result.extra_break_minutes_applied, 0);
     assert.equal(result.break_allowance_minutes, 60);
     assert.equal(result.break_allowance_source, "SHIFT");
     assert.equal(result.nrm_minutes, 660);
@@ -325,7 +325,7 @@ describe("only a COMPLETE punched sequence is credited", () => {
   it("8 punches: applied", () => {
     const result = day({ punches: sequence(8), extra_break_minutes: EXTRA });
     assert.equal(result.punch_count, 8);
-    assert.equal(result.extra_break_minutes, 30);
+    assert.equal(result.extra_break_minutes_applied, 30);
     assert.equal(result.nrm_minutes, 630);
     assert.equal(result.status, CALC_STATUS.FINAL);
   });
@@ -334,7 +334,7 @@ describe("only a COMPLETE punched sequence is credited", () => {
     for (const n of [0, 1, 2, 3]) {
       const list = n === 0 ? [] : sequence(Math.max(n, 2)).slice(0, n);
       const result = day({ punches: list, extra_break_minutes: EXTRA });
-      assert.equal(result.extra_break_minutes, 0, `${n} punches`);
+      assert.equal(result.extra_break_minutes_applied, 0, `${n} punches`);
       assert.equal(result.break_allowance_source, "SHIFT", `${n} punches`);
     }
   });
@@ -363,7 +363,7 @@ describe("the permitted break may never swallow the shift", () => {
     assert.equal(result.is_final, false);
     // NOT capped, and not applied: the row carries the day's own unextended
     // allowance, so nobody reads a permitted break the shift cannot give.
-    assert.equal(result.extra_break_minutes, 0);
+    assert.equal(result.extra_break_minutes_applied, 0);
     assert.equal(result.break_allowance_minutes, 60);
     assert.equal(result.break_allowance_source, "SHIFT");
     assert.ok(result.notes.some((n) => /leaving no working minutes/.test(n)));

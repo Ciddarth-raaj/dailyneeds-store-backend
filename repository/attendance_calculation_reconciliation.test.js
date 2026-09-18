@@ -28,6 +28,13 @@ function fakePool({ failOn = null } = {}) {
         cb(new Error(`forced failure on ${failOn}`));
         return;
       }
+      // A SELECT hands back ROWS, as the driver does - the payroll-lock gate
+      // in front of every write issues one, and an unlocked month is an
+      // empty answer.
+      if (/^SELECT/i.test(text)) {
+        cb(null, []);
+        return;
+      }
       cb(null, { affectedRows: /^DELETE/i.test(text) ? 3 : 1, insertId: 1 });
     },
     beginTransaction: (cb) => { log.push({ sql: "BEGIN" }); cb(null); },
@@ -180,7 +187,23 @@ describe("the DELETE deletes ONLY what the eligibility rule condemns", () => {
   it("runs INSIDE the transaction, after the write, and commits once", async () => {
     const { log } = await run([row("2026-09-01")], ["2026-09-02"]);
     const order = log.map((e) => (/^(BEGIN|COMMIT|ROLLBACK|RELEASE)$/.test(e.sql) ? e.sql : e.sql.split(" ")[0]));
-    assert.deepEqual(order, ["BEGIN", "INSERT", "DELETE", "COMMIT", "RELEASE"]);
+    // Each modification is preceded by its own payroll-lock SELECT, inside
+    // the same transaction: one for the rows being written, one for the
+    // dates being deleted - which carry no row in the batch and would
+    // otherwise pass ungated.
+    assert.deepEqual(order, ["BEGIN", "SELECT", "INSERT", "SELECT", "DELETE", "COMMIT", "RELEASE"]);
+  });
+
+  it("the gate reads the PAYRUN's lock, and nothing else invents one", async () => {
+    const { log } = await run([row("2026-09-01")], ["2026-09-02"]);
+    const selects = log.filter((e) => /^SELECT/i.test(e.sql));
+    assert.equal(selects.length, 2);
+    for (const select of selects) {
+      assert.match(select.sql, /FROM payrun_employee_calculation/);
+      assert.match(select.sql, /WHERE status = \?/);
+      assert.equal(select.params[0], "APPROVED_LOCKED");
+      assert.deepEqual(select.params[1], [42]);
+    }
   });
 
   it("a failing DELETE rolls the write back - never an emptied, unwritten window", async () => {

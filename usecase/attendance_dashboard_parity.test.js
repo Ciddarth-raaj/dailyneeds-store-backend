@@ -118,11 +118,18 @@ function calcRepo(facts) {
       }),
     getApprovedRegularizedPunches: async (_id, from, to) =>
       facts.regularized.filter((r) => r.attendance_date >= from && r.attendance_date <= to),
+    // THE WHOLE EMPLOYEE ROW, as the real query returns it: both the override
+    // and the Extra Break Hours come off the same row, and a fake that
+    // dropped one would let the two paths disagree about it unnoticed.
     getBreakOverride: async () => ({
       special_break_override_minutes: facts.employee.special_break_override_minutes,
+      extra_break_hours: facts.employee.extra_break_hours,
+      attendance_required: facts.employee.attendance_required,
     }),
     getApprovalStateByDate: async (_id, from, to) =>
       facts.approvals.filter((a) => a.attendance_date >= from && a.attendance_date <= to),
+    listCalculations: async ({ from_date, to_date }) =>
+      (facts.stored || []).filter((r) => r.attendance_date >= from_date && r.attendance_date <= to_date),
   };
 }
 
@@ -151,6 +158,8 @@ function dashRepo(facts) {
     listOutlets: async () => [],
     listDesignations: async () => [],
     listActiveWorkShifts: async () => [],
+    getStoredCalculationsForEmployees: async (_ids, from, to) =>
+      (facts.stored || []).filter((r) => r.attendance_date >= from && r.attendance_date <= to),
   };
 }
 
@@ -164,6 +173,7 @@ const baseFacts = (over = {}) => ({
   rawPunches: [],
   regularized: [],
   approvals: [],
+  stored: [],
   ...over,
 });
 
@@ -214,6 +224,12 @@ const ENGINE_FIELDS = [
   "is_final",
   "shift_resolution_status",
   "shift_snapshot_hash",
+  // The two employee-specific settings AS APPLIED, and which answer each
+  // path gave. A dashboard that read the stored row while the employee's own
+  // screen recalculated would differ in exactly these.
+  "break_override_minutes_applied",
+  "extra_break_minutes_applied",
+  "calculation_source",
 ];
 
 const pick = (day) => {
@@ -239,6 +255,33 @@ async function bothPaths(facts, date = DATE) {
     employee: facts.employee,
     dates: [date],
     batch,
+  });
+
+  return { calcDay, dashDay };
+}
+
+/**
+ * The same two paths, asked to READ a date rather than calculate it - which
+ * is what a screen does, and which is where a stored historical row is
+ * supposed to win on both sides.
+ */
+async function bothReadPaths(facts, date, now) {
+  const calc = buildCalculation(calcRepo(facts));
+  const dash = buildDashboard(dashRepo(facts));
+
+  const [calcDay] = await calc.readRange({
+    employee_id: EMP,
+    from_date: date,
+    to_date: date,
+    now,
+  });
+
+  const batch = await dash.loadBatch({ employees: [facts.employee], from: date, to: date });
+  const [dashDay] = dash.computeDaysForEmployee({
+    employee: facts.employee,
+    dates: [date],
+    batch,
+    now,
   });
 
   return { calcDay, dashDay };
@@ -462,5 +505,116 @@ describe("the batched dashboard path agrees with calculateRange", () => {
     dashDays.forEach((day, i) => {
       assert.deepEqual(pick(day), pick(calcDays[i]), `day ${dates[i]} differs between the two paths`);
     });
+  });
+});
+
+/* ================== the same STORED historical date, read by both paths === */
+
+/**
+ * A settled date the two screens must agree about.
+ *
+ * The dashboard aggregates thousands of days into counts a manager acts on,
+ * so "the dashboard recomputed it and the employee's screen read the stored
+ * row" would not be a cosmetic difference - it would be a headcount and a
+ * Need Action queue that contradict the screen opened next. Both sides go
+ * through `utils/attendance_stored_read.js`, and this is what holds them to
+ * it.
+ */
+describe("a stored historical date reads the same on both paths", () => {
+  // A date inside the assignment history this file already sets up, read a
+  // week later: settled, closed, and long since calculated.
+  const PAST = DATE;
+  const NOW = Date.parse("2026-09-18T12:00:00+05:30");
+
+  /** What August was calculated as: the shift's own break, NRM 660. */
+  const storedRow = {
+    employee_id: EMP,
+    attendance_date: PAST,
+    work_shift_id: 7,
+    work_shift_weekly_schedule_id: 70,
+    shift_snapshot: JSON.stringify({ work_shift_id: 7, break_minutes: 60, shift_span_minutes: 720 }),
+    shift_snapshot_hash: "stored-hash",
+    raw_punch_ids: JSON.stringify([1, 2, 3, 4]),
+    effective_punches: JSON.stringify([]),
+    punch_count: 4,
+    attendance_day_count: 1,
+    nrm_minutes: 660,
+    span_minutes: 720,
+    break_allowance_minutes: 60,
+    break_allowance_source: "SHIFT",
+    break_override_minutes_applied: null,
+    extra_break_minutes_applied: 0,
+    actual_gap_minutes: 60,
+    break_charged_minutes: 60,
+    worked_minutes: 660,
+    shortage_minutes: 0,
+    late_minutes: 0,
+    early_exit_minutes: 0,
+    pre_shift_minutes: 0,
+    post_shift_minutes: 0,
+    raw_ot_minutes: 0,
+    ot_offset_minutes: 0,
+    pre_shift_ot_minutes: 0,
+    post_shift_ot_minutes: 0,
+    candidate_ot_minutes: 0,
+    approved_ot_minutes: 0,
+    ot_rate: 1,
+    status: "FINAL",
+    is_final: 1,
+    review_reasons: JSON.stringify([]),
+    approval_request_id: null,
+    calculation_version: 7,
+  };
+
+  // The employee has SINCE been given half an hour of Extra Break Hours, so a
+  // recalculation of this date would now produce 90 / 630. Neither screen may
+  // show that until somebody recalculates.
+  const facts = () =>
+    baseFacts({
+      employee: { ...EMPLOYEE_ROW, extra_break_hours: "0.50" },
+      stored: [storedRow],
+      rawPunches: [
+        punch(`${PAST} 10:00:00`, { punch_id: 1 }),
+        punch(`${PAST} 14:00:00`, { punch_id: 2 }),
+        punch(`${PAST} 15:00:00`, { punch_id: 3 }),
+        punch(`${PAST} 22:00:00`, { punch_id: 4 }),
+      ],
+    });
+
+  it("both return the STORED figures, field for field", async () => {
+    const { calcDay, dashDay } = await bothReadPaths(facts(), PAST, NOW);
+    assert.deepEqual(pick(dashDay), pick(calcDay));
+    assert.equal(calcDay.calculation_source, "STORED");
+  });
+
+  it("and those figures are the stored ones, not a recalculation", async () => {
+    const { calcDay, dashDay } = await bothReadPaths(facts(), PAST, NOW);
+    for (const day of [calcDay, dashDay]) {
+      assert.equal(day.punch_count, 4);
+      assert.equal(day.break_allowance_minutes, 60, "not the 90 a recalculation would give");
+      assert.equal(day.extra_break_minutes_applied, 0);
+      assert.equal(day.nrm_minutes, 660);
+      assert.equal(day.worked_minutes, 660);
+      assert.equal(day.shortage_minutes, 0);
+      assert.equal(day.candidate_ot_minutes, 0);
+      assert.equal(day.approved_ot_minutes, 0);
+      assert.equal(day.status, "FINAL");
+    }
+  });
+
+  it("with NO stored row, both fall back to the engine - and both say so", async () => {
+    const withoutStored = { ...facts(), stored: [] };
+    const { calcDay, dashDay } = await bothReadPaths(withoutStored, PAST, NOW);
+    assert.deepEqual(pick(dashDay), pick(calcDay));
+    assert.equal(calcDay.calculation_source, "LIVE_PREVIEW");
+    assert.equal(calcDay.break_allowance_minutes, 90, "the extra half hour, as it would apply");
+    assert.equal(calcDay.extra_break_minutes_applied, 30);
+  });
+
+  it("while the day is still OPEN, both recompute it - a provisional day is not history", async () => {
+    const duringTheDay = Date.parse(`${PAST}T16:00:00+05:30`);
+    const { calcDay, dashDay } = await bothReadPaths(facts(), PAST, duringTheDay);
+    assert.deepEqual(pick(dashDay), pick(calcDay));
+    assert.equal(calcDay.calculation_source, "LIVE_PREVIEW");
   });
 });

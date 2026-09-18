@@ -383,6 +383,27 @@ class AttendanceDashboardRepository {
    * re-derived from the dated shift history; and the manual void rides along
    * on a LEFT JOIN so "is this punch voided" needs no second query.
    */
+  /**
+   * THE STORED CALCULATIONS for a population over a window, in one read.
+   *
+   * The dashboard must not answer a settled historical date differently from
+   * the employee's own screen, so it reads the same rows that screen reads -
+   * batched, because the dashboard asks for a population and a per-employee
+   * query would be one round trip each. `utils/attendance_stored_read.js`
+   * decides what is DONE with them; this only fetches.
+   */
+  async getStoredCalculationsForEmployees(employeeIds, fromDate, toDate) {
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
+    return this._read(
+      "GET-STORED-CALCULATIONS-BULK",
+      `SELECT c.*, DATE_FORMAT(c.attendance_date, '%Y-%m-%d') AS attendance_date
+         FROM attendance_day_calculation c
+        WHERE c.employee_id IN (?)
+          AND c.attendance_date BETWEEN ? AND ?`,
+      [employeeIds, fromDate, toDate]
+    );
+  }
+
   async getRawPunchesForEmployees(employeeIds, fromCalendarDate, toCalendarDate) {
     if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
     return this._read(

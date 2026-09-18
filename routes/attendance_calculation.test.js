@@ -152,12 +152,28 @@ const permissionsFor = (byDesignation) =>
   });
 
 function fakeUsecase() {
-  const calls = { ranges: [], edits: [] };
+  const calls = { ranges: [], reads: [], edits: [] };
   return {
     calls,
+    // THE PREVIEW PATH: the engine, asked what these dates would say.
     calculateRange: async (args) => {
       calls.ranges.push(args);
       return [{ employee_id: args.employee_id, attendance_date: args.from_date, status: "FINAL" }];
+    },
+    // THE READ PATH: stored history where there is any. Every ordinary read
+    // route goes here, and the tests below assert which of the two a route
+    // reached - a screen that silently previewed instead of reading is the
+    // defect this separation exists to prevent.
+    readRange: async (args) => {
+      calls.reads.push(args);
+      return [
+        {
+          employee_id: args.employee_id,
+          attendance_date: args.from_date,
+          status: "FINAL",
+          calculation_source: "STORED",
+        },
+      ];
     },
     setDateShift: async (args) => {
       calls.edits.push(args);
@@ -195,9 +211,10 @@ describe("GET /attendance/me - self only", () => {
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.code, 200);
     assert.equal(res.body.employee_id, EMPLOYEE_A);
-    assert.deepEqual(usecase.calls.ranges, [
+    assert.deepEqual(usecase.calls.reads, [
       { employee_id: EMPLOYEE_A, from_date: "2026-09-01", to_date: "2026-09-30" },
     ]);
+    assert.deepEqual(usecase.calls.ranges, [], "a read never previews");
   });
 
   it("Employee A cannot retrieve Employee B: an employee_id in the query is REJECTED, not read", async () => {
@@ -258,7 +275,28 @@ describe("GET /attendance/calculated - the HR read of another employee", () => {
       query: { employee_id: String(EMPLOYEE_B), from_date: "2026-09-01", to_date: "2026-09-30" },
     }));
     assert.equal(res.statusCode, 200);
+    // THE STORED HISTORY, not a recalculation of it: an HR read of somebody's
+    // month returns what was calculated for those dates.
+    assert.equal(usecase.calls.reads[0].employee_id, EMPLOYEE_B);
+    assert.equal(usecase.calls.ranges.length, 0);
+    assert.equal(res.body.days[0].calculation_source, "STORED");
+  });
+
+  it("preview=true asks the ENGINE instead, and still stores nothing", async () => {
+    const usecase = fakeUsecase();
+    const routes = buildRoutes(usecase, permissions, null);
+    const res = await invoke(routes, "GET", "/attendance/calculated", staffReq({
+      decoded: { id: 2, employee_id: 303, designation_id: HR_DESIGNATION, user_type: 1 },
+      query: {
+        employee_id: String(EMPLOYEE_B),
+        from_date: "2026-09-01",
+        to_date: "2026-09-30",
+        preview: "true",
+      },
+    }));
+    assert.equal(res.statusCode, 200);
     assert.equal(usecase.calls.ranges[0].employee_id, EMPLOYEE_B);
+    assert.equal(usecase.calls.reads.length, 0);
   });
 });
 

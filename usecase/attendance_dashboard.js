@@ -16,6 +16,10 @@ const { resolveEffectiveRawPunches } = require("../utils/attendance_effective_pu
 const eligibility = require("../utils/attendance_eligibility");
 const { extraBreakMinutes } = require("../utils/employee_extra_break");
 const {
+  byEmployeeAndDate: storedByEmployeeAndDate,
+  resolveDayForRead,
+} = require("../utils/attendance_stored_read");
+const {
   DELIVERY,
   DELIVERY_DETAIL,
   DELIVERY_LABEL,
@@ -47,11 +51,19 @@ const {
  * not a replacement for the per-employee monthly screen, and it is not a
  * second attendance or payroll engine.
  *
- * THE ENGINE REMAINS THE SOURCE OF TRUTH, and this file proves it by calling
- * it. Every number below is derived from `calculateAttendanceDay` over the
- * same effective punch stream, the same dated shift resolution and the same
- * dated configuration version that `usecase/attendance_calculation.js` feeds
- * it. There is no aggregate SQL that counts attendance by itself, because a
+ * STORED HISTORY FIRST, THE ENGINE SECOND - the same order, and the same
+ * module, as the employee's own screen (`utils/attendance_stored_read.js`).
+ * A date that has CLOSED and has a stored calculation is reported FROM that
+ * row: the dashboard aggregates thousands of days into counts somebody acts
+ * on, so recomputing a settled date here while the employee's screen read it
+ * would put two answers to one question in front of the same manager.
+ *
+ * FOR EVERYTHING ELSE THE ENGINE REMAINS THE SOURCE OF TRUTH, and this file
+ * proves it by calling it. Today's date, an open date and a historical date
+ * nobody has ever calculated are derived from `calculateAttendanceDay` over
+ * the same effective punch stream, the same dated shift resolution and the
+ * same dated configuration version that `usecase/attendance_calculation.js`
+ * feeds it. There is no aggregate SQL that counts attendance by itself, because a
  * COUNT(*) with a hand-written WHERE clause would be a second definition of
  * "present" that could disagree with the employee's own screen.
  *
@@ -365,7 +377,7 @@ module.exports = (attendanceDashboardRepo) => {
     const punchFrom = addDays(from, -1);
     const punchTo = addDays(to, 1);
 
-    const [shiftCache, assignments, overrides, rawPunches, regularized, approvals] =
+    const [shiftCache, assignments, overrides, rawPunches, regularized, approvals, stored] =
       await Promise.all([
         loadShiftCache(),
         attendanceDashboardRepo.getShiftAssignmentHistoryForEmployees(employeeIds),
@@ -373,10 +385,17 @@ module.exports = (attendanceDashboardRepo) => {
         attendanceDashboardRepo.getRawPunchesForEmployees(employeeIds, punchFrom, punchTo),
         attendanceDashboardRepo.getApprovedRegularizedPunchesForEmployees(employeeIds, from, to),
         attendanceDashboardRepo.getApprovalStateForEmployees(employeeIds, from, to),
+        // THE STORED HISTORY. A closed date that has one is answered from it,
+        // by the same rule the employee's own screen applies - see
+        // `utils/attendance_stored_read.js`. One read for the population.
+        attendanceDashboardRepo.getStoredCalculationsForEmployees
+          ? attendanceDashboardRepo.getStoredCalculationsForEmployees(employeeIds, from, to)
+          : [],
       ]);
 
     return {
       shiftCache,
+      storedByEmployeeDate: storedByEmployeeAndDate(stored),
       assignmentsByEmployee: groupBy(assignments, (r) => r.employee_id),
       overridesByEmployee: groupBy(overrides, (r) => r.employee_id),
       rawByEmployee: groupBy(rawPunches, (r) => r.employee_id),
@@ -401,7 +420,7 @@ module.exports = (attendanceDashboardRepo) => {
    *   - OT is a claim on a day, never an attendance defect: it is reported
    *     beside the day and never changes its status or its bucket.
    */
-  const computeDaysForEmployee = ({ employee, dates, batch }) => {
+  const computeDaysForEmployee = ({ employee, dates, batch, now = Date.now() }) => {
     const key = String(employee.employee_id);
     const resolver = employeeResolver({
       shiftCache: batch.shiftCache,
@@ -483,8 +502,25 @@ module.exports = (attendanceDashboardRepo) => {
         attendance_required: attendanceRequired(employee),
       });
 
+      // STORED HISTORY WINS HERE TOO, by the SAME rule and the same module
+      // the employee's own screen uses. The dashboard aggregates thousands of
+      // days, so a second answer to "what did this closed date come to" would
+      // not be a cosmetic difference: it would be a headcount, a shortage and
+      // a Need Action queue that disagree with the screen a manager opens
+      // next.
+      const storedRow = batch.storedByEmployeeDate
+        ? batch.storedByEmployeeDate.get(`${Number(employee.employee_id)}:${date}`) || null
+        : null;
+      const day = resolveDayForRead({
+        live: calculated,
+        stored: storedRow,
+        day_closed: storedRow
+          ? isDayClosed({ attendance_date: date, snapshot: resolution.snapshot, now })
+          : false,
+      });
+
       return {
-        ...calculated,
+        ...day,
         shift_resolution_status: resolution.status,
         work_shift_id: resolution.work_shift_id,
         shift_name: resolution.work_shift_id
@@ -681,7 +717,7 @@ module.exports = (attendanceDashboardRepo) => {
     // slice is decided in pass two.
     const partial = [];
     employees.forEach((employee) => {
-      const [day] = computeDaysForEmployee({ employee, dates: [date], batch });
+      const [day] = computeDaysForEmployee({ employee, dates: [date], batch, now });
       if (work_shift_id !== null && Number(day.work_shift_id) !== Number(work_shift_id)) return;
       partial.push({ employee, day });
     });
@@ -1316,7 +1352,7 @@ module.exports = (attendanceDashboardRepo) => {
 
     const perDate = new Map(dates.map((d) => [d, []]));
     candidates.forEach((employee) => {
-      const days_ = computeDaysForEmployee({ employee, dates, batch });
+      const days_ = computeDaysForEmployee({ employee, dates, batch, now });
       days_.forEach((day, i) => {
         const date = dates[i];
         if (!applicableOn(employee, date)) return;

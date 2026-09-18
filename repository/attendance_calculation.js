@@ -1,4 +1,9 @@
 const logger = require("../utils/logger");
+const {
+  PAYROLL_LOCK_STATUS,
+  periodsTouched,
+  payrollLockedError,
+} = require("../utils/attendance_payroll_lock");
 const { JOINED_ON } = require("../utils/joining_date");
 const {
   queryAsync,
@@ -54,7 +59,11 @@ const CALCULATION_COLUMNS = [
   "work_shift_config_version_id",
   "shift_snapshot", "shift_snapshot_hash", "raw_punch_ids", "effective_punches",
   "punch_count", "attendance_day_count", "nrm_minutes", "span_minutes",
-  "break_allowance_minutes", "break_allowance_source", "actual_gap_minutes",
+  "break_allowance_minutes", "break_allowance_source",
+  // What the employee's own settings contributed, as applied. See
+  // `20261025120000-attendance-break-provenance`.
+  "break_override_minutes_applied", "extra_break_minutes_applied",
+  "actual_gap_minutes",
   "break_charged_minutes", "worked_minutes", "shortage_minutes", "late_minutes",
   "early_exit_minutes", "pre_shift_minutes", "post_shift_minutes",
   "raw_ot_minutes", "ot_offset_minutes", "pre_shift_ot_minutes", "post_shift_ot_minutes",
@@ -71,8 +80,59 @@ const CALCULATION_COLUMNS = [
  * write the recalculated day in the SAME transaction that records the final
  * approval, without either repository having to import the other's class.
  */
+/**
+ * THE PAYROLL LOCK GATE, on the connection, before anything is written.
+ *
+ * ONE GATE FOR EVERY WRITER. Each path that persists attendance - the single
+ * recalculation, the bulk run, the monthly `persist=true`, a date-specific
+ * shift correction, the A3 approval that rewrites a day - reaches this file,
+ * and this file reaches the database only through `writeCalculationsOnConnection`
+ * and the reconciling delete beside it. Guarding here therefore guards them
+ * all, including the next one somebody adds; guarding each usecase would not.
+ *
+ * THE LOCK IS THE PAYRUN'S, read where the payrun keeps it:
+ * `payrun_employee_calculation.status = 'APPROVED_LOCKED'` for that employee
+ * and period. This is a READ of another stage's table, deliberately, rather
+ * than a second lock table or a copy of the flag on an attendance row - a
+ * second definition of "locked" is exactly the thing that ends up disagreeing.
+ * The status value comes from `constants/payrun_calculation.js`.
+ *
+ * IT RUNS ON THE CALLER'S CONNECTION, so inside the caller's transaction: the
+ * month cannot be locked between the check and the write by anything that
+ * would be serialized behind it, and a refusal rolls the caller back having
+ * changed nothing.
+ */
+async function assertMonthsNotPayrollLocked(connection, rows) {
+  const { periods, unreadable } = periodsTouched(rows);
+  if (unreadable) {
+    throw new Error("refusing to write attendance: a row has no readable employee and date");
+  }
+  if (periods.length === 0) return;
+
+  const employeeIds = [...new Set(periods.map((p) => p.employee_id))];
+  const locked = await queryAsync(
+    connection,
+    `SELECT employee_id, period_year, period_month
+       FROM payrun_employee_calculation
+      WHERE status = ?
+        AND employee_id IN (?)`,
+    [PAYROLL_LOCK_STATUS, employeeIds]
+  );
+
+  // Narrowed in JS rather than with a compound IN over (employee, year,
+  // month): the employee filter is the selective one, a payrun holds a
+  // handful of months per employee, and the pairing is then plain to read.
+  const lockedKeys = new Set(
+    (Array.isArray(locked) ? locked : []).map((r) => `${Number(r.employee_id)}:${Number(r.period_year)}:${Number(r.period_month)}`)
+  );
+  const hits = periods.filter((p) => lockedKeys.has(`${p.employee_id}:${p.year}:${p.month}`));
+  if (hits.length > 0) throw payrollLockedError(hits);
+}
+
 async function writeCalculationsOnConnection(connection, rows) {
   if (!Array.isArray(rows) || rows.length === 0) return { written: 0 };
+
+  await assertMonthsNotPayrollLocked(connection, rows);
 
   const values = rows.map((row) => CALCULATION_COLUMNS.map((column) => row[column]));
   const updates = CALCULATION_COLUMNS
@@ -616,6 +676,13 @@ class AttendanceCalculationRepository {
 
       let removed = null;
       if (doomed.length > 0) {
+        // THE DELETE IS A MODIFICATION TOO. The upsert above was gated by the
+        // rows it was about to write; a date that is only being REMOVED has
+        // no row in that batch, so it is gated here on its own.
+        await assertMonthsNotPayrollLocked(
+          connection,
+          doomed.map((date) => ({ employee_id: employeeId, attendance_date: date }))
+        );
         removed = await queryAsync(
           connection,
           `DELETE FROM attendance_day_calculation

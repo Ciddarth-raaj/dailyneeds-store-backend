@@ -83,9 +83,11 @@ class AttendanceCalculationRoutes {
      * `employee_id` comes from `req.decoded` and from nowhere else. The query
      * schema has no such field, and Joi refuses unknown keys, so a request
      * that tries to pass one is rejected rather than ignored. This is the same
-     * preview path as `/attendance/calculated`: it calculates and returns, it
-     * stores nothing, and it queues nothing - the OT auto-queue runs only
-     * after a STORED recalculation, which this is not.
+     * READ path as `/attendance/calculated`: stored history for a closed date
+     * that has any, the engine's answer otherwise. It stores nothing and it
+     * queues nothing - the OT auto-queue runs only after a STORED
+     * recalculation, which this is not. An employee reading their own
+     * attendance sees the settled figures, not a projection of them.
      */
     this.router.get("/attendance/me", requireSelf, async (req, res) => {
       try {
@@ -97,7 +99,7 @@ class AttendanceCalculationRoutes {
         if (isValid.error !== null) throw isValid.error;
 
         const employee_id = Number(req.decoded.employee_id);
-        const days = await this.usecase.calculateRange({
+        const days = await this.usecase.readRange({
           employee_id,
           from_date: req.query.from_date,
           to_date: req.query.to_date,
@@ -109,10 +111,18 @@ class AttendanceCalculationRoutes {
     });
 
     /**
-     * Calculate a date range WITHOUT storing anything.
+     * READ a date range. Nothing is stored, by either branch.
      *
-     * The preview a reviewer is shown and the rows that get stored come from
-     * one code path, so what was approved is what lands.
+     * THE DEFAULT IS THE STORED HISTORY. A closed date that has a stored
+     * calculation is returned exactly as it was calculated - opening a screen
+     * does not restate a settled month because somebody has since edited an
+     * Employee Master field. Every day carries `calculation_source`, STORED or
+     * LIVE_PREVIEW, so the caller can tell the two apart.
+     *
+     * `preview=true` ASKS THE ENGINE INSTEAD, over the same code path a
+     * recalculation would use: what these dates WOULD say if they were
+     * recalculated now. It is the reviewer's "what would change" and it
+     * still stores nothing - only Recalculate replaces stored history.
      */
     this.router.get(
       "/attendance/calculated",
@@ -123,11 +133,15 @@ class AttendanceCalculationRoutes {
             employee_id: Joi.number().integer().positive().required(),
             from_date: Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).required(),
             to_date: Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).required(),
+            preview: Joi.string().valid("true", "false").optional(),
           };
           const isValid = Joi.validate(req.query, schema);
           if (isValid.error !== null) throw isValid.error;
 
-          const days = await this.usecase.calculateRange({
+          const read = req.query.preview === "true"
+            ? this.usecase.calculateRange
+            : this.usecase.readRange;
+          const days = await read({
             employee_id: Number(req.query.employee_id),
             from_date: req.query.from_date,
             to_date: req.query.to_date,

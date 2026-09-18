@@ -24,6 +24,13 @@ const {
 const { resolveEffectiveRawPunches } = require("../utils/attendance_effective_punches");
 const eligibility = require("../utils/attendance_eligibility");
 const { extraBreakMinutes } = require("../utils/employee_extra_break");
+const {
+  CALCULATION_SOURCE,
+  asLivePreview,
+  byDate: storedByDate,
+  resolveDayForRead,
+} = require("../utils/attendance_stored_read");
+const { isDayClosed } = require("../utils/attendance_dashboard");
 
 /**
  * Attendance v2 - the orchestration between the repository and the pure
@@ -501,12 +508,26 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    * regularized punch is priced before anyone has agreed to it (review fix #3).
    * It changes nothing in the database by itself.
    */
+  /**
+   * Calculate a range with the engine. THE CALCULATION PATH, not the read
+   * path: everything here is computed from punches, dated shift history and
+   * the employee's CURRENT settings, and every day it returns is therefore a
+   * LIVE_PREVIEW. `readRange` below is what a screen asks; this is what a
+   * recalculation stores and what a preview shows.
+   */
   const calculateRange = async ({
     employee_id,
     from_date,
     to_date,
     assume = null,
     assume_override = null,
+    // THE READ OVERLAY, supplied only by `readRange`. A map of
+    // `YYYY-MM-DD` -> stored row: where one exists for a date that has
+    // CLOSED, that row is what comes back and the engine's answer for that
+    // date is discarded. Absent (the default) nothing is overlaid, which is
+    // what every calculation and every preview wants.
+    stored_days = null,
+    now = Date.now(),
   }) => {
     const from = toDateOnly(from_date);
     const to = toDateOnly(to_date);
@@ -639,9 +660,23 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
         attendance_required: context.attendance_required,
       });
 
+      // STORED HISTORY WINS, when there is any and the date has closed. The
+      // decision is `utils/attendance_stored_read.js`'s, so the dashboard
+      // cannot answer it differently, and the OT claim below is computed from
+      // the day actually being RETURNED - a claim derived from a figure the
+      // caller is not being shown would be its own inconsistency.
+      const storedRow = stored_days ? stored_days.get(date) || null : null;
+      const day = resolveDayForRead({
+        live: calculated,
+        stored: storedRow,
+        day_closed: storedRow
+          ? isDayClosed({ attendance_date: date, snapshot: resolution.snapshot, now })
+          : false,
+      });
+
       return {
-        ...calculated,
-        ...otClaimFor({ day: calculated, otRequest, otSettled }),
+        ...day,
+        ...otClaimFor({ day, otRequest, otSettled }),
         shift_resolution_status: resolution.status,
         // Display only: the live shift name, and whether the date's shift came
         // from the dated history or from a single-date edit.
@@ -653,6 +688,45 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
           ? otRequest.attendance_approval_request_id
           : null,
       };
+    });
+  };
+
+  /**
+   * WHAT A SCREEN ASKS FOR: the stored history where there is any, the
+   * engine's answer where there is not.
+   *
+   * THE ONE READ PATH. `/attendance/calculated`, `/attendance/me`, the
+   * monthly read and the Attendance Dashboard all resolve a date the same
+   * way, through `utils/attendance_stored_read.js`, so two screens cannot
+   * give two answers for one historical date.
+   *
+   * IT WRITES NOTHING. Reading a date never stores it, never repairs it and
+   * never queues anything: a date that has drifted is corrected by somebody
+   * running Recalculate, deliberately, which is also the only thing that can
+   * replace a stored row.
+   */
+  const readRange = async ({ employee_id, from_date, to_date, now = Date.now() }) => {
+    const from = toDateOnly(from_date);
+    const to = toDateOnly(to_date);
+    if (from === null || to === null) {
+      throw validationError("from_date and to_date must be dates as YYYY-MM-DD");
+    }
+    if (from > to) throw validationError("from_date must not be after to_date");
+
+    const stored = attendanceCalculationRepo.listCalculations
+      ? await attendanceCalculationRepo.listCalculations({
+          employee_id: Number(employee_id),
+          from_date: from,
+          to_date: to,
+        })
+      : [];
+
+    return calculateRange({
+      employee_id,
+      from_date: from,
+      to_date: to,
+      stored_days: storedByDate(stored),
+      now,
     });
   };
 
@@ -766,6 +840,12 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     span_minutes: day.span_minutes,
     break_allowance_minutes: day.break_allowance_minutes,
     break_allowance_source: day.break_allowance_source,
+    // PROVENANCE: the two employee settings AS APPLIED on this date, which
+    // the total above cannot be split back into once both are in play.
+    break_override_minutes_applied:
+      day.break_override_minutes_applied === undefined ? null : day.break_override_minutes_applied,
+    extra_break_minutes_applied:
+      day.extra_break_minutes_applied === undefined ? 0 : day.extra_break_minutes_applied,
     actual_gap_minutes: day.actual_gap_minutes,
     break_charged_minutes: day.break_charged_minutes,
     worked_minutes: day.worked_minutes,
@@ -1253,8 +1333,13 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     const from = `${y}-${pad(m)}-01`;
     const to = `${y}-${pad(m)}-${pad(daysInMonth(y, m))}`;
 
+    // READING A MONTH READS ITS STORED HISTORY; STORING ONE CALCULATES IT.
+    // `persist=true` is a write - it is the recalculate key's, not the read
+    // key's - so it must feed the engine's answer to the storage below. A
+    // plain read must not: the month a payroll screen shows is the month that
+    // was calculated, not a re-derivation of it against today's settings.
     const [days, employment, salary, employee] = await Promise.all([
-      calculateRange({ employee_id, from_date: from, to_date: to }),
+      (persist ? calculateRange : readRange)({ employee_id, from_date: from, to_date: to }),
       attendanceCalculationRepo.getEmploymentWindow(employee_id),
       attendanceCalculationRepo.getMonthlyGrossAsOf(employee_id, to),
       attendanceCalculationRepo.getBreakOverride(employee_id),
@@ -1330,6 +1415,8 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     getBreakOverride,
     setBreakOverride,
     calculateRange,
+    readRange,
+    CALCULATION_SOURCE,
     calculateProposedDay,
     attendanceDateForPunchTime,
     recalculateRange,

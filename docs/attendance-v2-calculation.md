@@ -395,6 +395,71 @@ Employee Master's input validation alone, because a shift can be shortened long
 after the hours were recorded. A span of zero is left alone: there is nothing
 to exceed and the day already produces nothing.
 
+## 7b. A read returns the stored history; only Recalculate replaces it
+
+Every attendance screen used to RECALCULATE the date it was asked for, from
+the punches and the employee's settings **as they are now**. That made a
+stored row decorative: a month calculated with no Extra Break Hours showed a
+different permitted break and a different NRM the moment somebody set the
+field today, with nothing recalculated and no record that anything had
+changed.
+
+The read rule, in one place (`utils/attendance_stored_read.js`):
+
+| | |
+|---|---|
+| stored row exists **and** the date has closed | `STORED` - the row, reproduced field for field |
+| open / today, or no stored row | `LIVE_PREVIEW` - the engine's answer, labelled |
+
+"Closed" is `isDayClosed` from `utils/attendance_dashboard.js` - the same
+boundary the dashboard already gated its verdicts on, not a second one. Every
+day carries `calculation_source` so a caller can tell a settled figure from a
+projection, and it is a property of the RESPONSE, not a stored column.
+
+Applied by `/attendance/calculated` (with `?preview=true` for the engine's
+answer), `/attendance/me`, the monthly read, and the Attendance Dashboard -
+which reads the same rows in one batched query and resolves them through the
+same module, so the two screens cannot disagree about one date.
+
+**Reads write nothing.** A date that has drifted is corrected by somebody
+running Recalculate, which is also the only thing that replaces a stored row:
+it calculates from punches, dated shift configuration and the employee's
+current settings and persists the result.
+
+## 7c. A payroll-locked month cannot be touched
+
+`payrun_employee_calculation.status = 'APPROVED_LOCKED'` is the one
+authoritative lock, and nothing here defines a second one. Locking the payrun
+froze the PAY; it did not freeze the attendance rows the pay was computed
+from, so a recalculation could rewrite the NRM, the shortage and the approved
+OT behind an approved month.
+
+The gate is in `repository/attendance_calculation.js`, on the caller's
+connection, in front of both statements that can modify persisted attendance -
+`writeCalculationsOnConnection` and the reconciling DELETE - so every path
+reaches it: single recalculation, bulk recalculation, monthly `persist=true`,
+the single-date shift correction, and the A3 approval that rewrites a day
+inside its own transaction. A locked month raises a `ValidationError` with
+`code: PAYROLL_MONTH_LOCKED` (a 422 naming the month), writes nothing, and
+rolls back.
+
+## 7d. What a stored row now records about the two break settings
+
+`break_allowance_minutes` is a total, and with both employee settings in play
+it cannot be split back into them - neither setting has any change history, so
+once somebody edits one, a historical date could no longer explain its own
+NRM. Two columns record what was APPLIED:
+
+* `break_override_minutes_applied` - the override that replaced the shift
+  break, or `NULL` if none was applied (an applied `0` is a real setting and
+  is not `NULL`)
+* `extra_break_minutes_applied` - the Extra Break Hours added, in minutes;
+  `0` on every day that did not credit them
+
+Rows written before those columns existed keep `NULL` in both. There is no
+backfill: what an old calculation applied cannot be proven after the fact, and
+a guess dressed as provenance is worse than a blank.
+
 ## 8. Neutral wage components — see *The statutory handoff* above.
 
 ## 9. Permission grants

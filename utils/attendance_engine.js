@@ -655,9 +655,21 @@ function calculateAttendanceDay(input = {}) {
     span_minutes: 0,
     break_allowance_minutes: 0,
     break_allowance_source: "SHIFT",
-    // The employee's Extra Break Hours actually credited on this date, in
-    // minutes. Zero on every day that is not a four-or-more-punch day.
-    extra_break_minutes: 0,
+    // PROVENANCE: which employee-specific settings this date actually
+    // applied, as opposed to which were configured. The total allowance
+    // above cannot be split back into the two once both are in play, and
+    // neither setting has any change history, so a date that does not record
+    // them can never explain its own NRM again.
+    //
+    //   break_override_minutes_applied  the override that REPLACED the shift
+    //                                   break, or null if none was applied.
+    //                                   An applied 0 is a real setting and is
+    //                                   not the same as null.
+    //   extra_break_minutes_applied     the Extra Break Hours ADDED, in
+    //                                   minutes. 0 on every day that did not
+    //                                   credit them.
+    break_override_minutes_applied: null,
+    extra_break_minutes_applied: 0,
     actual_gap_minutes: null,
     break_charged_minutes: 0,
     worked_minutes: 0,
@@ -800,7 +812,8 @@ function calculateAttendanceDay(input = {}) {
   // shift's" - which is exactly what an added Extra Break makes it, so the
   // payrun's NRM provenance keeps its two words and gains no third.
   base.break_allowance_source = overrideGiven || extraGiven ? "EMPLOYEE_OVERRIDE" : "SHIFT";
-  base.extra_break_minutes = extraBreak;
+  base.break_override_minutes_applied = overrideGiven ? baseAllowedBreak : null;
+  base.extra_break_minutes_applied = extraBreak;
   base.nrm_minutes = nrm;
   if (overrideConfigured && !overrideGiven && effectivePunches.length > 0) {
     base.notes.push(
