@@ -950,8 +950,9 @@ function computeCalculation(input = {}, config = CONFIG) {
     /*
      * WHAT ATTENDANCE PRICED THE SAME OVERTIME AT, CARRIED FOR RECONCILIATION
      * AND USED FOR NOTHING. The attendance engine prices OT per DATE, on that
-     * date's NRM and that weekday's OT multiplier; the payrun prices it once,
-     * on the month's effective NRM, with no multiplier, because that is the
+     * date's NRM and that weekday's OT multiplier; the payrun prices approved
+     * OT SEPARATELY FOR EACH ATTENDANCE-RESOLVED EFFECTIVE NRM GROUP and sums
+     * the group amounts, with no weekday multiplier, because that is the
      * agreed Daily Needs contract. The two are allowed to differ and the
      * difference is visible rather than silent.
      */
