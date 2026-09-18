@@ -500,4 +500,39 @@ module.exports = {
   // only through the user_type 2 bypass until a designation is given it
   // deliberately on the rights screen.
   CHANGE_PAYRUN_PAY_TYPE: "change_payrun_pay_type",
+
+  // ================================= PAYRUN CALCULATION & APPROVAL =========
+  //
+  // APPROVING AND LOCKING ONE EMPLOYEE'S CALCULATED MONTH.
+  //
+  // THE ONLY NEW KEY THE CALCULATION STAGE NEEDED, and everything else in it
+  // reuses what already exists:
+  //
+  //   view_payroll / view_salary / view_employees   reading a calculated
+  //                    month, which shows per-employee net pay across the
+  //                    company - the same disclosure the earlier stages are
+  //                    governed by
+  //   process_payroll  CALCULATING and RECALCULATING. Initialization claimed
+  //                    this key for Initialize and Adjustments for entering
+  //                    figures; computing the month from them is the same
+  //                    person doing the same job one stage later.
+  //
+  // SO WHY IS THIS ONE SEPARATE. This repository already separates proposing
+  // from approving wherever money is concerned - `add_salary` and
+  // `approve_salary_revision` are two keys for exactly this reason - and this
+  // approval is stronger than a salary approval: it LOCKS the employee's
+  // month, after which the figures cannot be recalculated, the adjustments
+  // cannot be edited and the pay type cannot be changed. Letting
+  // `process_payroll` do it would mean the person who enters an incentive also
+  // signs it off, which is the separation of duties payroll exists to keep.
+  //
+  // IT IS NOT A SECOND WAY TO DO SOMETHING THAT ALREADY HAS A KEY - the test
+  // the Adjustments stage applied when it declined to add one. Nothing in the
+  // system today can approve or lock a payroll month, so this gates an act
+  // rather than duplicating one.
+  //
+  // Declared by the calculation migration and granted to NOBODY, so
+  // administrators only through the user_type 2 bypass until a designation is
+  // given it deliberately on the rights screen.
+  APPROVE_PAYRUN: "approve_payrun",
 };

@@ -112,8 +112,22 @@ const ROW_RESULT = {
 };
 
 class PayrunUsecase {
-  constructor(payrunRepo) {
+  /**
+   * @param payrunRepo         this stage's three tables
+   * @param calculationLocks   OPTIONAL, and one method: which employees'
+   *                           months are approved and locked. A locked month's
+   *                           pay type is part of what the approval committed
+   *                           to, so changing it afterwards is refused - per
+   *                           EMPLOYEE, never per month. The answer belongs to
+   *                           the calculation stage, which is where approval
+   *                           happens; reading its table from here would be a
+   *                           second place that knows what locked means.
+   *                           Absent means nobody is locked, which is the
+   *                           truth before the calculation stage is wired.
+   */
+  constructor(payrunRepo, calculationLocks = null) {
     this.repo = payrunRepo;
+    this.calculationLocks = calculationLocks;
   }
 
   /**
@@ -522,6 +536,27 @@ class PayrunUsecase {
      * in the same words as an employee who has no snapshot, so the refusal
      * confirms nothing about who exists.
      */
+    /*
+     * AN APPROVED EMPLOYEE'S PAY TYPE IS FROZEN. Approval locks the whole of
+     * what the month says about that person, and HOW the money travels is
+     * recorded on the calculation they signed off. It is checked BEFORE the
+     * scope read so that a locked employee is refused in the same words
+     * whoever asks, and it locks one employee: everybody else in the month is
+     * as changeable as they were.
+     */
+    if (this.calculationLocks) {
+      const locked = await this.calculationLocks.listLockedEmployeeIds({
+        year: period.year,
+        month: period.month,
+        employee_ids: [employeeId],
+      });
+      if ((locked || []).map(Number).includes(employeeId)) {
+        throw validationError(
+          "This employee's payroll for the month has been approved and locked. Their pay type cannot be changed."
+        );
+      }
+    }
+
     const population = await this.repo.listPopulation({
       year: period.year,
       month: period.month,
@@ -573,7 +608,8 @@ class PayrunUsecase {
   }
 }
 
-module.exports = (payrunRepo) => new PayrunUsecase(payrunRepo);
+module.exports = (payrunRepo, calculationLocks = null) =>
+  new PayrunUsecase(payrunRepo, calculationLocks);
 module.exports.PayrunUsecase = PayrunUsecase;
 module.exports.ROW_RESULT = ROW_RESULT;
 module.exports.PAY_TYPE = PAY_TYPE;

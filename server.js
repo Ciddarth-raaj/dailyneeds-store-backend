@@ -225,6 +225,16 @@ class Server {
     this.payrunAdjustmentRepo = require("./repository/payrun_adjustment")(
       this.mysql.connection
     );
+    // Payrun Calculation & Review. It owns TWO tables - the per-employee
+    // calculated month and an append-only calculation/approval log - and READS
+    // five it does not own: `payrun_employee`, `attendance_monthly_payroll`,
+    // `attendance_day_calculation` (for the effective NRM the engine already
+    // resolved), the employee master's statutory context, and the adjustment
+    // amounts. It writes none of those five, and it never writes
+    // `payrun_period`: approval locks ONE EMPLOYEE'S month, never the month.
+    this.payrunCalculationRepo = require("./repository/payrun_calculation")(
+      this.mysql.connection
+    );
     // Attendance v2. The reads the calculation engine needs and the writes of
     // what it produced. It SELECTs the Biomax punch tables and never writes
     // them - the receiver process remains their only writer - and the two
@@ -657,16 +667,43 @@ class Server {
     // the pure `utils/payrun_eligibility.js`, and this fetches what they need
     // and performs what they permit. It calculates NO attendance - the payrun
     // consumes the month the attendance engine already stored.
-    this.payrunUsecase = require("./usecase/payrun")(this.payrunRepo);
+    //
+    // IT TAKES THE CALCULATION REPOSITORY FOR ONE READ - which employees are
+    // approved and locked - because a locked month's pay type is part of what
+    // the approval committed to and may not be changed afterwards.
+    this.payrunCalculationLocks = {
+      listLockedEmployeeIds: (args) => this.payrunCalculationRepo.listLockedEmployeeIds(args),
+    };
+    this.payrunUsecase = require("./usecase/payrun")(
+      this.payrunRepo,
+      this.payrunCalculationLocks
+    );
     // Payrun Adjustments V1: the stage after initialization. The rules are in
     // the pure `utils/payrun_adjustments.js` - including the CALCULATION
     // CONTRACT the later calculation stage will consume - and this fetches
     // what they need and performs what they permit. It takes the
     // initialization repository for exactly ONE read: whether the month is
     // locked.
+    // It also takes the lock reader, for the same one question: an approved
+    // employee's adjustments are frozen, per employee and never per month.
     this.payrunAdjustmentUsecase = require("./usecase/payrun_adjustment")(
       this.payrunAdjustmentRepo,
-      this.payrunRepo
+      this.payrunRepo,
+      this.payrunCalculationLocks
+    );
+    // Payrun Calculation & Review: the stage after adjustments, and the one
+    // that approves and locks. The rules are in the pure
+    // `utils/payrun_calculation.js` - which calls `utils/salary_engine.js` for
+    // PF and ESI and `utils/payrun_adjustments.js#computeContract` for the
+    // adjustment deltas rather than reimplementing either - and this fetches
+    // what they need and performs what they permit. It RECREATES NO ATTENDANCE
+    // LOGIC: Salary Days, Extra Days, Missing Hours, the deduction, the
+    // approved OT minutes and the effective NRM are all consumed as the
+    // attendance engine left them.
+    this.payrunCalculationUsecase = require("./usecase/payrun_calculation")(
+      this.payrunCalculationRepo,
+      this.payrunRepo,
+      this.payrunAdjustmentRepo
     );
     // Attendance v2. Orchestration only: the arithmetic is in the pure
     // `utils/attendance_engine.js`, `utils/shiftResolution.js` and
@@ -1362,6 +1399,17 @@ class Server {
       this.sensitive,
       this.employeeBranchScope
     );
+    // Payrun Calculation & Review: a STAGE of the payrun, claiming
+    // /payrun/calculation and nothing else. It adds ONE permission key -
+    // `approve_payrun` - because approving LOCKS an employee's month, and this
+    // repository already separates proposing from approving wherever money is
+    // concerned. Reading and calculating reuse the existing keys.
+    const payrunCalculationRouter = require("./routes/payrun_calculation")(
+      this.payrunCalculationUsecase,
+      this.permissions,
+      this.sensitive,
+      this.employeeBranchScope
+    );
     const storeRouter = require("./routes/store")(this.storeUsecase);
     const outletRouter = require("./routes/outlet")(
       this.outletUsecase,
@@ -1616,6 +1664,8 @@ class Server {
     // defines sits under /payrun/adjustments, which is disjoint from the four
     // the initialization router defines, so neither shadows the other.
     app.use("/", payrunAdjustmentRouter.getRouter());
+    // Likewise /payrun/calculation, which is disjoint from both.
+    app.use("/", payrunCalculationRouter.getRouter());
 
     app.use("/shift", shiftRouter.getRouter());
     // The new payroll/attendance shift master. /shift above is unchanged and

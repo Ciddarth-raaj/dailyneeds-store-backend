@@ -74,6 +74,8 @@ const CONFIRM_RESULT = {
   ALREADY_CONFIRMED: "ALREADY_CONFIRMED",
   HAS_ADJUSTMENT: "HAS_ADJUSTMENT",
   NOT_INITIALIZED: "NOT_INITIALIZED",
+  /** Approved and locked by the calculation stage. Frozen, per employee. */
+  LOCKED: "LOCKED",
 };
 
 class PayrunAdjustmentUsecase {
@@ -83,9 +85,45 @@ class PayrunAdjustmentUsecase {
    * initializing somebody, changing a pay type - is not something this stage
    * is entitled to do, and it calls one method.
    */
-  constructor(adjustmentRepo, payrunRepo) {
+  constructor(adjustmentRepo, payrunRepo, calculationLocks = null) {
     this.repo = adjustmentRepo;
     this.payrun = payrunRepo;
+    /**
+     * WHO IS APPROVED AND LOCKED, ASKED OF THE STAGE THAT OWNS THE LOCK.
+     *
+     * A THIRD COLLABORATOR AND ONE METHOD, exactly as `payrunRepo` above is
+     * here for one read. An approved employee's month is frozen - their
+     * adjustments may not be edited, cleared or confirmed - and the answer to
+     * "is this employee locked" belongs to the calculation stage, which is
+     * where approval happens. Reading `payrun_employee_calculation` from this
+     * file would be a second place that knows what locked means, and the day
+     * the state machine gains a value one of the two would still be checking
+     * the old one.
+     *
+     * OPTIONAL, AND ABSENT MEANS NOBODY IS LOCKED. That is the honest
+     * behaviour for the only case where it is null - a deployment where the
+     * calculation stage has not been wired - because before approval exists,
+     * nothing is approved.
+     */
+    this.calculationLocks = calculationLocks;
+  }
+
+  /**
+   * THE LOCKED EMPLOYEES AMONG THESE, AS A SET.
+   *
+   * FAIL-CLOSED IS NOT AVAILABLE HERE AND WOULD BE WRONG IF IT WERE: a lock
+   * lookup that failed would otherwise block every adjustment in the company
+   * over an unrelated fault. It throws instead, so a genuine failure refuses
+   * the write with an error rather than quietly allowing it.
+   */
+  async _lockedIds({ year, month, employee_ids }) {
+    if (!this.calculationLocks) return new Set();
+    const ids = await this.calculationLocks.listLockedEmployeeIds({
+      year,
+      month,
+      employee_ids,
+    });
+    return new Set((ids || []).map(Number));
   }
 
   _log(level, code, description, ref = {}) {
@@ -151,9 +189,17 @@ class PayrunAdjustmentUsecase {
     ]);
 
     const employeeIds = population.map((e) => e.employee_id);
-    const [amounts, states] = await Promise.all([
+    const [amounts, states, lockedIds] = await Promise.all([
       this.repo.listAmounts({ year: period.year, month: period.month, employee_ids: employeeIds }),
       this.repo.listStates({ year: period.year, month: period.month, employee_ids: employeeIds }),
+      /*
+       * WHO IS FROZEN. It is reported on the row so the screen can draw an
+       * approved employee as read-only rather than offering an edit that the
+       * server will refuse - a button that always fails is worse than no
+       * button. The refusal still happens on the server: this is what to DRAW,
+       * never what is ALLOWED.
+       */
+      this._lockedIds({ year: period.year, month: period.month, employee_ids: employeeIds }),
     ]);
 
     const amountsOf = new Map();
@@ -163,9 +209,14 @@ class PayrunAdjustmentUsecase {
     });
     const stateOf = new Map(states.map((row) => [row.employee_id, row]));
 
-    const rows = population.map((employee) =>
-      this._presentRow(employee, amountsOf.get(employee.employee_id) || {}, stateOf.get(employee.employee_id) || null)
-    );
+    const rows = population.map((employee) => ({
+      ...this._presentRow(
+        employee,
+        amountsOf.get(employee.employee_id) || {},
+        stateOf.get(employee.employee_id) || null
+      ),
+      payroll_locked: lockedIds.has(Number(employee.employee_id)),
+    }));
 
     const wantedState =
       state && Object.values(ADJUSTMENT_STATE).includes(String(state).toUpperCase())
@@ -493,6 +544,19 @@ class PayrunAdjustmentUsecase {
     ]);
     const initializedOf = new Map(population.map((e) => [Number(e.employee_id), e]));
 
+    /*
+     * AND WHICH OF THEM ARE APPROVED AND LOCKED. An import must not move a
+     * figure on a month somebody has already signed off, and the file is
+     * judged against the lock as it is NOW rather than as it was when the
+     * template was exported - which is the same rule every other check in this
+     * validator follows.
+     */
+    const lockedIds = await this._lockedIds({
+      year: period.year,
+      month: period.month,
+      employee_ids: population.map((e) => Number(e.employee_id)),
+    });
+
     const seen = new Map();
     const results = [];
 
@@ -502,7 +566,7 @@ class PayrunAdjustmentUsecase {
       const rowNumber = index + 2;
       if (isEmptyRow(raw, header)) return;
 
-      const result = this._validateRow({ raw, rowNumber, header, initializedOf, seen });
+      const result = this._validateRow({ raw, rowNumber, header, initializedOf, lockedIds, seen });
       if (result.employee_id !== null && result.outcome !== ROW_OUTCOME.INVALID) {
         seen.set(result.employee_id, rowNumber);
       }
@@ -549,7 +613,7 @@ class PayrunAdjustmentUsecase {
    * ALL CELL ERRORS ARE COLLECTED, not just the first. Six components and a
    * remarks column, fixed one upload at a time, is six uploads.
    */
-  _validateRow({ raw, rowNumber, header, initializedOf, seen }) {
+  _validateRow({ raw, rowNumber, header, initializedOf, lockedIds = new Set(), seen }) {
     const errors = [];
     const warnings = [];
 
@@ -584,6 +648,22 @@ class PayrunAdjustmentUsecase {
         `Employee ${employeeId} is not initialized for this payroll month, or is outside your branch scope. ` +
           `Initialize the employee first, then export a fresh template.`,
       ]);
+    }
+
+    /*
+     * AND THEIR MONTH MUST NOT ALREADY BE APPROVED. A locked employee's row is
+     * INVALID rather than skipped, and because this stage refuses a file with
+     * any invalid row, that means the whole import is refused. That is the
+     * right severity: a file containing somebody whose pay was signed off
+     * yesterday is a file somebody built against a stale template, and
+     * applying the other two hundred rows while silently dropping that one is
+     * how a correction goes missing.
+     */
+    if (lockedIds.has(employeeId)) {
+      return this._invalidRow(rowNumber, employeeId, [
+        `Employee ${employeeId}'s payroll for this month has been approved and locked, so their ` +
+          `adjustments cannot be changed. Remove their row and import again.`,
+      ], employee);
     }
 
     /*
@@ -771,6 +851,24 @@ class PayrunAdjustmentUsecase {
       throw err;
     }
 
+    /*
+     * AN APPROVED EMPLOYEE'S MONTH IS FROZEN. Approval locks what somebody is
+     * paid, and an adjustment edited afterwards would change a figure that has
+     * already been signed off - which is the whole reason the lock exists. It
+     * is refused per EMPLOYEE and never per month: their colleagues in the
+     * same month are unaffected.
+     */
+    const locked = await this._lockedIds({
+      year: period.year,
+      month: period.month,
+      employee_ids: [employeeId],
+    });
+    if (locked.has(employeeId)) {
+      throw validationError(
+        "This employee's payroll for the month has been approved and locked. Their adjustments cannot be changed."
+      );
+    }
+
     const parsedAmounts = {};
     const errors = [];
     Object.keys(amounts || {}).forEach((key) => {
@@ -885,8 +983,21 @@ class PayrunAdjustmentUsecase {
     });
     const initializedOf = new Map(population.map((e) => [Number(e.employee_id), e]));
 
+    /*
+     * AN APPROVED EMPLOYEE CANNOT BE CONFIRMED AS HAVING NO ADJUSTMENT, for
+     * the same reason their amounts cannot be edited: the confirmation is part
+     * of what the approval signed off. They are reported per row and the rest
+     * of the batch still goes through, which is how every other row-level
+     * refusal in this stage behaves.
+     */
+    const lockedIds = await this._lockedIds({
+      year: period.year,
+      month: period.month,
+      employee_ids: ids,
+    });
+
     const eligible = ids
-      .filter((id) => initializedOf.has(id))
+      .filter((id) => initializedOf.has(id) && !lockedIds.has(id))
       .map((id) => ({ employee_id: id, payrun_employee_id: initializedOf.get(id).payrun_employee_id }));
 
     const written = await this.repo.confirmNoAdjustment({
@@ -899,7 +1010,9 @@ class PayrunAdjustmentUsecase {
 
     const results = ids.map((id) => ({
       employee_id: id,
-      result: writtenOf.get(id) || CONFIRM_RESULT.NOT_INITIALIZED,
+      result:
+        writtenOf.get(id) ||
+        (lockedIds.has(id) ? CONFIRM_RESULT.LOCKED : CONFIRM_RESULT.NOT_INITIALIZED),
       message:
         writtenOf.get(id) === CONFIRM_RESULT.HAS_ADJUSTMENT
           ? "This employee has an adjustment for this month, so they cannot be confirmed as having none."
@@ -956,8 +1069,8 @@ class PayrunAdjustmentUsecase {
   }
 }
 
-module.exports = (adjustmentRepo, payrunRepo) =>
-  new PayrunAdjustmentUsecase(adjustmentRepo, payrunRepo);
+module.exports = (adjustmentRepo, payrunRepo, calculationLocks = null) =>
+  new PayrunAdjustmentUsecase(adjustmentRepo, payrunRepo, calculationLocks);
 module.exports.PayrunAdjustmentUsecase = PayrunAdjustmentUsecase;
 module.exports.ROW_OUTCOME = ROW_OUTCOME;
 module.exports.CONFIRM_RESULT = CONFIRM_RESULT;
