@@ -32,9 +32,40 @@ describe("the migration identifier", () => {
     .filter((f) => f.endsWith(".js"))
     .map((f) => f.replace(/\.js$/, ""));
 
-  it("is unique", () => {
+  it("is unique - db-migrate runs a file once, by its full name", () => {
     assert.equal(all.filter((f) => f === NAME).length, 1);
-    assert.deepEqual(all.filter((f) => f.slice(0, 14) === NAME.slice(0, 14)), [NAME]);
+  });
+
+  /**
+   * A SHARED TIMESTAMP PREFIX IS NOT A CONFLICT, and this says why rather
+   * than forbidding one.
+   *
+   * `20261024120000-payrun-calculation-column-drift` was written on
+   * `main-autodeploy` the same day as this one and carries the same
+   * timestamp. db-migrate identifies a migration by its FULL name and records
+   * each in its own `migrations` row, so both run, each exactly once; the
+   * shared prefix decides only which of the two goes first, and that is
+   * decided by the remainder of the name ("employee-..." before
+   * "payrun-..."). It would matter if the two touched the same table - one
+   * could then depend on the other's column existing. They do not: this one
+   * alters `new_employee` and that one alters `payrun_employee_calculation`,
+   * so either order produces the same schema.
+   *
+   * The assertion is therefore about INDEPENDENCE, not about uniqueness of
+   * the prefix. A future migration that shares the timestamp AND touches
+   * `new_employee` fails here, which is the case that would genuinely need
+   * renaming.
+   */
+  it("shares its timestamp only with migrations that touch other tables", () => {
+    const sameTimestamp = all.filter((f) => f !== NAME && f.slice(0, 14) === NAME.slice(0, 14));
+    for (const other of sameTimestamp) {
+      const sql = fs.readFileSync(path.join(sqlDir, `${other}-up.sql`), "utf8");
+      const statements = stripComments(sql);
+      assert.ok(
+        !/\bnew_employee\b/.test(statements),
+        `${other} shares this timestamp AND touches new_employee - the order between them would then matter`
+      );
+    }
   });
 
   it("sorts after every migration that existed when it was written", () => {
