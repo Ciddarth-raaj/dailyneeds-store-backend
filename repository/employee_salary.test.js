@@ -486,3 +486,62 @@ describe("M4 — the pending approval queue", () => {
     assert.equal(db.calls.length, 1);
   });
 });
+
+describe("the bulk current-salary read", () => {
+  /*
+   * It feeds the Onboarding queue's Payroll column, and the columns it
+   * returns are the ones `engine.fillStandardEsi` needs to complete a record
+   * stored before ESI had a standard basis. `ctc_status` alone was the bug:
+   * the queue read a stale PENDING while the Employee Master, which runs that
+   * rule, showed the finished CTC for the same employee.
+   */
+  const repo = buildRepo;
+
+  it("returns everything the read-time completion rule reads", async () => {
+    const db = makeDb([]);
+    await repo(db).getCurrentSalaryStatusMany([1, 2], "2026-09-18");
+    const { sql } = db.calls[0];
+    for (const column of [
+      "ctc_status",
+      "esi_status",
+      "monthly_gross",
+      "basic",
+      "conveyance",
+      "hra",
+      "special_allowance",
+      "employer_pf_total",
+      "edli",
+      "pf_admin_charge",
+      "unresolved_notes",
+      "statutory_snapshot",
+    ]) {
+      assert.match(sql, new RegExp(`\\b${column}\\b`), `${column} is needed to complete a record`);
+    }
+  });
+
+  it("is STILL the current-approved rule, with the same tie-break", async () => {
+    // Widening the SELECT must not widen which row comes back: PENDING is
+    // never current, REJECTED is never current, a future-dated approval is
+    // not current yet, and two rows on one date resolve to the later id.
+    const db = makeDb([]);
+    await repo(db).getCurrentSalaryStatusMany([1, 2], "2026-09-18");
+    const { sql, params } = db.calls[0];
+    assert.match(sql, /ORDER BY s2\.`effective_from` DESC, s2\.`salary_id` DESC LIMIT 1/);
+    assert.match(sql, /AND s\.`status` = \?/);
+    assert.match(sql, /AND s\.`effective_from` <= \?/);
+    assert.deepEqual(params, [[1, 2], "APPROVED", "2026-09-18", "APPROVED", "2026-09-18"]);
+  });
+
+  it("is ONE query for many employees", async () => {
+    const db = makeDb([]);
+    await repo(db).getCurrentSalaryStatusMany([1, 2, 3, 4, 5, 6, 7, 8], "2026-09-18");
+    assert.equal(db.calls.length, 1, "a queue of 630 cannot become 630 reads");
+  });
+
+  it("asks for nothing at all when there is nobody to ask about", async () => {
+    const db = makeDb([]);
+    const rows = await repo(db).getCurrentSalaryStatusMany([], "2026-09-18");
+    assert.deepEqual(rows, []);
+    assert.equal(db.calls.length, 0);
+  });
+});

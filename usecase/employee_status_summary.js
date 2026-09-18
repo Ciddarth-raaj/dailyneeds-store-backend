@@ -5,6 +5,14 @@ const { dashboardCompletion } = require("../utils/telegram_membership");
 const { matchesDimension } = require("../utils/telegram_group_mapping");
 const { employedOn } = require("../utils/attendance_eligibility");
 const { istDateOf } = require("../utils/istDate");
+/*
+ * THE SALARY ENGINE, for ONE function: the read-time completion of a record
+ * stored before ESI had a standard basis. This usecase calculates no salary
+ * and must not - `_liveSalaries` runs the same `fillStandardEsi` the Employee
+ * Master runs, so that a queue and a profile cannot disagree about whether an
+ * employee is costed.
+ */
+const salaryEngine = require("../utils/salary_engine");
 
 /**
  * Stage 0C / C3 — the bulk Aadhaar and bank status summary.
@@ -604,6 +612,27 @@ class EmployeeStatusSummaryUsecase {
    * TODAY is the as-of date, the same one `getCurrentSalary` is asked for
    * elsewhere: a revision approved for next month is genuinely not this
    * employee's salary yet.
+   *
+   * IT ASKS THE SAME QUESTION THE PROFILE ASKS, THROUGH THE SAME FUNCTION.
+   *
+   * `ctc_status` as stored is not the answer to "is this employee costed". A
+   * row written before ESI had a standard basis carries PENDING and a null
+   * CTC that the record's own gross, components and snapshot fully determine,
+   * and `engine.fillStandardEsi` completes it at read time - which is exactly
+   * what `usecase/employee_salary.js#_present` does for the Employee Master.
+   * Reading the stored column here instead was the whole of this queue
+   * disagreeing with the profile about the same employee.
+   *
+   * NOTHING IS WRITTEN BACK and no historical row is touched: this is the
+   * same read-time completion, applied in bulk.
+   *
+   * STILL ONE QUERY. The rule is arithmetic over rows already in hand, so the
+   * fix costs no round trip - and it must not, because this runs for ~630
+   * employees on one screen.
+   *
+   * AND STILL TWO BOOLEANS LEAVE THIS METHOD. The amounts exist inside it for
+   * as long as the rule needs them and no longer; the Map it returns carries
+   * no money, so no caller can publish one by accident.
    */
   async _liveSalaries(ids) {
     if (!this.salaryRepo || typeof this.salaryRepo.getCurrentSalaryStatusMany !== "function") {
@@ -612,12 +641,39 @@ class EmployeeStatusSummaryUsecase {
     const rows = await this.salaryRepo.getCurrentSalaryStatusMany(ids, EmployeeStatusSummaryUsecase.today());
     const out = new Map();
     for (const row of rows || []) {
+      const presented = salaryEngine.fillStandardEsi(this._normaliseSalaryRow(row));
       out.set(Number(row.employee_id), {
         hasLiveSalary: true,
-        ctcApplied: String(row.ctc_status) === "APPLIED",
+        ctcApplied: String(presented.ctc_status) === "APPLIED",
       });
     }
     return out;
+  }
+
+  /**
+   * The two JSON columns as objects, exactly as `_present` normalises them.
+   *
+   * The driver hands them back as strings, and `fillStandardEsi` reads
+   * `unresolved_notes` as an array and `statutory_snapshot` as the record's
+   * own rates. A row whose JSON cannot be parsed is passed through with the
+   * field null - the same fallback the profile takes - and the rule then
+   * declines to complete it rather than completing it from a guess.
+   */
+  _normaliseSalaryRow(row) {
+    const parse = (v) => {
+      if (v === null || v === undefined) return null;
+      if (typeof v === "object") return v;
+      try {
+        return JSON.parse(v);
+      } catch (err) {
+        return null;
+      }
+    };
+    return {
+      ...row,
+      unresolved_notes: parse(row.unresolved_notes),
+      statutory_snapshot: parse(row.statutory_snapshot),
+    };
   }
 
   /**

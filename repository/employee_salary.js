@@ -358,15 +358,43 @@ class EmployeeSalaryRepository {
    * they do there, and the subquery is a copy of that ordering rather than a
    * re-derivation of it.
    *
-   * IT RETURNS TWO SCALARS AND NO MONEY. `ctc_status` says whether the
-   * calculation finished; no amount, no breakup, no statutory snapshot and no
-   * unresolved note leaves this method. The caller turns it into "payroll is
-   * set up: yes or no", and a queue needs a badge rather than a payslip.
+   * IT RETURNS WHAT THE READ-TIME RULE NEEDS, AND IT IS INTERNAL.
+   *
+   * `ctc_status` alone USED TO BE enough, and that was the bug: a row stored
+   * before ESI had a standard basis says PENDING, and `engine.fillStandardEsi`
+   * - which `usecase/employee_salary.js#_present` runs on every single-employee
+   * read - completes it at READ TIME without touching the stored row. So the
+   * profile showed a finished CTC while this queue, reading the stale column,
+   * went on calling the same employee Payroll Pending. Two screens, two
+   * answers, one employee.
+   *
+   * The columns below are exactly the ones that rule reads: the structure it
+   * derives the statutory wage from, the employer costs the CTC is the sum of,
+   * and the two JSON columns that say what was unresolved and under which
+   * rates. Nothing else is added.
+   *
+   * NO AMOUNT MAY LEAVE THE CALLER. These rows are an internal input to that
+   * rule, not a payload: `usecase/employee_status_summary.js` turns them into
+   * "payroll is set up: yes or no" and publishes the boolean alone. A queue
+   * needs a badge rather than a payslip, and that is enforced where the
+   * response is built - there is a test on it.
    */
   getCurrentSalaryStatusMany(employeeIds, asOfDate) {
     if (!Array.isArray(employeeIds) || employeeIds.length === 0) return Promise.resolve([]);
     const sql = `
-      SELECT s.\`employee_id\`, s.\`ctc_status\`
+      SELECT s.\`employee_id\`,
+             s.\`ctc_status\`,
+             s.\`esi_status\`,
+             s.\`monthly_gross\`,
+             s.\`basic\`,
+             s.\`conveyance\`,
+             s.\`hra\`,
+             s.\`special_allowance\`,
+             s.\`employer_pf_total\`,
+             s.\`edli\`,
+             s.\`pf_admin_charge\`,
+             s.\`unresolved_notes\`,
+             s.\`statutory_snapshot\`
         FROM \`employee_salary\` s
        WHERE s.\`employee_id\` IN (?)
          AND s.\`status\` = ?

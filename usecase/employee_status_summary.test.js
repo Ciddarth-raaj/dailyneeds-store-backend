@@ -129,9 +129,18 @@ function build({
           queries.push(["salary", ids, asOf]);
           return ids
             .filter((id) => (salaries ? id in salaries : true))
-            // Exactly the two columns the real query selects - no amount,
-            // and not even the effective date.
-            .map((id) => ({ employee_id: id, ctc_status: salaries ? salaries[id] : "APPLIED" }));
+            /*
+             * A fixture value is either a `ctc_status` on its own - which is
+             * every test that only cares whether the salary was costed - or a
+             * whole stored row, for the tests about a row the READ-TIME rule
+             * has to complete. The real query returns the row.
+             */
+            .map((id) => {
+              const value = salaries ? salaries[id] : "APPLIED";
+              return typeof value === "string"
+                ? { employee_id: id, ctc_status: value }
+                : { employee_id: id, ...value };
+            });
         },
       }
     : undefined;
@@ -870,6 +879,234 @@ test("a live, costed salary with a recorded payment route is payroll COMPLETE", 
   assert.deepEqual(rows[0].payroll_missing, []);
   assert.equal(rows[0].hr_onboarding_pending, false, "all four complete");
   assert.deepEqual(rows[0].hr_onboarding_missing, []);
+});
+
+/*
+ * THE QUEUE AND THE PROFILE MUST AGREE ABOUT THE SAME EMPLOYEE.
+ *
+ * A salary approved before ESI had a standard basis is STORED with
+ * `esi_status = PENDING`, a null CTC and an ESI_WAGE_CONTEXT_UNAVAILABLE
+ * note. `engine.fillStandardEsi` completes such a record at READ time - which
+ * is what `usecase/employee_salary.js#_present` has been doing for the
+ * Employee Master - so the profile showed the finished CTC while this queue,
+ * reading the stored `ctc_status` column, went on calling the same employee
+ * Payroll Pending.
+ *
+ * These pin the agreement in both directions: what the rule CAN complete, and
+ * what it must leave alone.
+ */
+
+/** The four components of a 16000 gross, as the engine writes them. */
+const LEGACY_SNAPSHOT = {
+  esi_employee_rate_percent: 0.75,
+  esi_employer_rate_percent: 3.25,
+  esi_coverage_ceiling: 21000,
+  esi_employee_exemption_daily_wage: 176,
+  salary_days_per_month: 26,
+  contribution_rounding: "NEAREST_RUPEE",
+};
+
+/** A stored row as the EARLIER engine wrote one, at a given gross. */
+const legacyRow = (gross, components, notes = [{ code: "ESI_WAGE_CONTEXT_UNAVAILABLE", component: "esi" }]) => ({
+  ctc_status: "PENDING",
+  esi_status: "PENDING",
+  monthly_gross: gross,
+  ...components,
+  employer_pf_total: 1200,
+  edli: 50,
+  pf_admin_charge: 50,
+  // The driver hands JSON columns back as strings, and the rule needs objects.
+  unresolved_notes: JSON.stringify(notes),
+  statutory_snapshot: JSON.stringify(LEGACY_SNAPSHOT),
+});
+
+test("A. THE PRODUCTION BUG: a legacy 16000 row is NOT Payroll Pending", async () => {
+  // Employee View presents this row as Employee ESI 75, Employer ESI 325 and
+  // a CTC of 17625. Before this fix the queue read the stored PENDING and
+  // disagreed with it about the same person on the same day.
+  const { usecase } = build({
+    employees: [{ employee_id: 901, ...account }],
+    verifications: [verified(901)],
+    identities: [901],
+    statutory: { 901: { pf: true, esi: true } },
+    salaries: {
+      901: legacyRow(16000, { basic: 10000, conveyance: 2500, hra: 3500, special_allowance: 0 }),
+    },
+    payroll: { 901: 1 },
+  });
+  const rows = await usecase.list({});
+  assert.equal(rows[0].payroll_pending, false, "the stored column is not the answer");
+  assert.deepEqual(rows[0].payroll_missing, []);
+  assert.equal(rows[0].hr_onboarding_pending, false);
+});
+
+test("A2. and the queue agrees with the Employee Master on the SAME row", async () => {
+  // Not "both say false" by coincidence: the same function, on the same row,
+  // is what produces both answers.
+  const engine = require("../utils/salary_engine");
+  const row = legacyRow(16000, { basic: 10000, conveyance: 2500, hra: 3500, special_allowance: 0 });
+  const presented = engine.fillStandardEsi({
+    ...row,
+    unresolved_notes: JSON.parse(row.unresolved_notes),
+    statutory_snapshot: JSON.parse(row.statutory_snapshot),
+  });
+  assert.equal(presented.employee_esi, 75);
+  assert.equal(presented.employer_esi, 325);
+  assert.equal(presented.monthly_ctc, 17625);
+  assert.equal(presented.ctc_status, "APPLIED");
+
+  const { usecase } = build({
+    employees: [{ employee_id: 902, ...account }],
+    verifications: [verified(902)],
+    identities: [902],
+    statutory: { 902: { pf: true, esi: true } },
+    salaries: { 902: row },
+    payroll: { 902: 1 },
+  });
+  const rows = await usecase.list({});
+  assert.equal(rows[0].payroll_pending, presented.ctc_status !== "APPLIED");
+});
+
+test("B. a GENUINELY unresolved salary stays Payroll Pending", async () => {
+  // Nobody recorded whether this employee is in ESI. The rule declines to
+  // complete that, and the queue must not clear it either.
+  const { usecase } = build({
+    employees: [{ employee_id: 903, ...account }],
+    verifications: [verified(903)],
+    identities: [903],
+    statutory: { 903: { pf: true, esi: true } },
+    salaries: {
+      903: legacyRow(
+        16000,
+        { basic: 10000, conveyance: 2500, hra: 3500, special_allowance: 0 },
+        [{ code: "ESI_APPLICABILITY_NOT_RECORDED", component: "esi" }]
+      ),
+    },
+    payroll: { 903: 1 },
+  });
+  const rows = await usecase.list({});
+  assert.equal(rows[0].payroll_pending, true);
+  assert.deepEqual(rows[0].payroll_missing, ["salary_ctc"]);
+});
+
+test("C. a legacy ABOVE-CEILING row stays Payroll Pending", async () => {
+  // 60000 gross: statutory wages are above the coverage ceiling, and whether
+  // the employee was covered when the contribution period began cannot be
+  // proved from the row alone. That is an open question, not a zero - and not
+  // a finished payroll setup.
+  const { usecase } = build({
+    employees: [{ employee_id: 904, ...account }],
+    verifications: [verified(904)],
+    identities: [904],
+    statutory: { 904: { pf: true, esi: true } },
+    salaries: {
+      904: legacyRow(60000, {
+        basic: 30000,
+        conveyance: 2500,
+        hra: 10000,
+        special_allowance: 17500,
+      }),
+    },
+    payroll: { 904: 1 },
+  });
+  const rows = await usecase.list({});
+  assert.equal(rows[0].payroll_pending, true, "an unprovable period must not be cleared");
+  assert.deepEqual(rows[0].payroll_missing, ["salary_ctc"]);
+});
+
+test("D. a newly stored APPLIED salary is complete, exactly as before", async () => {
+  // A record the current engine wrote never reaches the completion rule at
+  // all, and its stored answer is the answer.
+  const { usecase } = build({
+    employees: [{ employee_id: 905, ...account }],
+    verifications: [verified(905)],
+    identities: [905],
+    statutory: { 905: { pf: true, esi: true } },
+    salaries: {
+      905: {
+        ctc_status: "APPLIED",
+        esi_status: "APPLIED",
+        monthly_gross: 16000,
+        basic: 10000,
+        conveyance: 2500,
+        hra: 3500,
+        special_allowance: 0,
+        employee_esi: 75,
+        employer_esi: 325,
+        monthly_ctc: 17625,
+        unresolved_notes: "[]",
+        statutory_snapshot: JSON.stringify(LEGACY_SNAPSHOT),
+      },
+    },
+    payroll: { 905: 1 },
+  });
+  const rows = await usecase.list({});
+  assert.equal(rows[0].payroll_pending, false);
+  assert.deepEqual(rows[0].payroll_missing, []);
+});
+
+test("E. no live approved salary is still Payroll Pending", async () => {
+  const { usecase } = build({
+    employees: [{ employee_id: 906, ...account }],
+    verifications: [verified(906)],
+    identities: [906],
+    statutory: { 906: { pf: true, esi: true } },
+    salaries: {}, // nothing current for this employee
+    payroll: { 906: 1 },
+  });
+  const rows = await usecase.list({});
+  assert.equal(rows[0].payroll_pending, true);
+  assert.deepEqual(rows[0].payroll_missing, ["salary"]);
+});
+
+test("F. ONE bulk salary read, whatever the head count", async () => {
+  // The rule is arithmetic over rows already in hand. A per-employee read
+  // here is 630 queries to draw one screen, which is why the bulk query
+  // exists at all.
+  const many = Array.from({ length: 40 }, (_, i) => ({ employee_id: 1000 + i, ...account }));
+  const salaries = {};
+  for (const e of many) {
+    salaries[e.employee_id] = legacyRow(16000, {
+      basic: 10000,
+      conveyance: 2500,
+      hra: 3500,
+      special_allowance: 0,
+    });
+  }
+  const { usecase, queries } = build({
+    employees: many,
+    verifications: many.map((e) => verified(e.employee_id)),
+    identities: many.map((e) => e.employee_id),
+    statutory: Object.fromEntries(many.map((e) => [e.employee_id, { pf: true, esi: true }])),
+    salaries,
+    payroll: Object.fromEntries(many.map((e) => [e.employee_id, 1])),
+  });
+  const rows = await usecase.list({});
+  assert.equal(rows.length, 40);
+  assert.equal(queries.filter(([kind]) => kind === "salary").length, 1, "one salary query, not 40");
+  for (const row of rows) assert.equal(row.payroll_pending, false);
+});
+
+test("NO SALARY AMOUNT LEAVES THIS ENDPOINT, though the rule now reads them", async () => {
+  // The bulk read had to widen to run the rule. The RESPONSE must not: a
+  // queue needs a badge, not a payslip, and `view_employee_sensitive` is not
+  // what gates this endpoint.
+  const { usecase } = build({
+    employees: [{ employee_id: 907, ...account }],
+    verifications: [verified(907)],
+    identities: [907],
+    statutory: { 907: { pf: true, esi: true } },
+    salaries: {
+      907: legacyRow(16000, { basic: 10000, conveyance: 2500, hra: 3500, special_allowance: 0 }),
+    },
+    payroll: { 907: 1 },
+  });
+  const rows = await usecase.list({});
+  const serialised = JSON.stringify(rows[0]);
+  for (const leak of ["16000", "17625", "10000", "monthly_gross", "monthly_ctc", "employer_esi", "basic"]) {
+    assert.ok(!serialised.includes(leak), `${leak} must not reach the response`);
+  }
+  assert.equal(rows[0].payroll_pending, false, "only the boolean");
 });
 
 test("NOBODY HAS SAID HOW TO PAY THEM, so payroll is pending", async () => {
