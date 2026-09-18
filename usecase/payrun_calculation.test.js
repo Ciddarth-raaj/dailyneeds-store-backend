@@ -1417,3 +1417,72 @@ describe("attendance that is not settled is shown as pending, not as zero", () =
     assert.equal(month.summary.calculated, 0);
   });
 });
+
+/* ============ the three attendance rules that now share this stage ======== */
+
+/**
+ * ATTENDANCE_PENDING, the post-lock SOURCE_MOVED revalidation and the
+ * attendance writer's payroll lock arrived from two directions - the first
+ * from production, the other two from the attendance feature - and they must
+ * coexist rather than one quietly disabling another.
+ *
+ * They act at three different moments, which is why they can:
+ *
+ *   ATTENDANCE_PENDING   presentation and readiness, BEFORE any approval:
+ *                        unsettled attendance is a blocker and the figures it
+ *                        would have produced are suppressed rather than shown
+ *                        as zeroes.
+ *   SOURCE_MOVED         inside the approval transaction, AFTER the row lock:
+ *                        attendance that moved since the calculation was
+ *                        prepared refuses the approval
+ *                        (`repository/payrun_approval_source_revalidation.test.js`).
+ *   the payroll lock     inside the attendance write's transaction, on the
+ *                        same payrun row: an approved month refuses attendance
+ *                        modification
+ *                        (`repository/attendance_payroll_lock.test.js`).
+ *
+ * What is asserted here is the first one's half of the contract and the fact
+ * that it does not reach - and therefore cannot bypass - the second.
+ */
+describe("ATTENDANCE_PENDING, and what it does NOT bypass", () => {
+  it("an ATTENDANCE_PENDING employee is refused before the approval transaction is ever opened", async () => {
+    world.add(1);
+    world.attendance.get(1).is_final = 0;
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+
+    const row = await rowOf(1);
+    assert.equal(row.status, CALC_STATUS.ATTENDANCE_PENDING);
+    assert.equal(row.attendance_pending, true);
+    assert.ok(row.blockers.some((b) => b.code === "ATTENDANCE_INCOMPLETE"));
+
+    const refused = await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(refused.approved_count, 0);
+    assert.equal(refused.blocked_count, 1);
+    // The row never became APPROVED_LOCKED, so no attendance write is now
+    // locked out on its account either.
+    assert.notEqual((await rowOf(1)).status, CALC_STATUS.APPROVED_LOCKED);
+  });
+
+  it("the attendance gate at Approve & Lock is unchanged: regularization and OT still block", async () => {
+    world.add(2);
+    world.pending.set(2, { employee_id: 2, pending_regularizations: 1, pending_ot: 0 });
+    await calculation.calculate({ ...MONTH, employee_ids: [2], actor: ACTOR });
+    assert.ok((await rowOf(2)).blockers.some((b) => b.code === "PENDING_ATTENDANCE_REGULARIZATION"));
+    assert.equal((await calculation.approve({ ...MONTH, employee_ids: [2], actor: ACTOR })).approved_count, 0);
+
+    world.pending.set(2, { employee_id: 2, pending_regularizations: 0, pending_ot: 1 });
+    await calculation.calculate({ ...MONTH, employee_ids: [2], mode: "RECALCULATE", actor: ACTOR });
+    assert.ok((await rowOf(2)).blockers.some((b) => b.code === "PENDING_OT_APPROVAL"));
+    assert.equal((await calculation.approve({ ...MONTH, employee_ids: [2], actor: ACTOR })).approved_count, 0);
+  });
+
+  it("settled attendance still approves - none of the three blocks a clean month", async () => {
+    world.add(3);
+    await calculation.calculate({ ...MONTH, employee_ids: [3], actor: ACTOR });
+    assert.equal((await rowOf(3)).status, CALC_STATUS.READY_FOR_APPROVAL);
+
+    const approved = await calculation.approve({ ...MONTH, employee_ids: [3], actor: ACTOR });
+    assert.equal(approved.approved_count, 1);
+    assert.equal((await rowOf(3)).status, CALC_STATUS.APPROVED_LOCKED);
+  });
+});
