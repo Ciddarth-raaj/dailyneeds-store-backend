@@ -34,6 +34,22 @@ const sensitiveActor = {
   isAdmin: false,
 };
 const adminActor = { permissions: [], isAdmin: true };
+// M2's salary read, and C2's Aadhaar status read. Each opens exactly its own
+// group and nothing else, which is what the two tests below assert.
+const salaryActor = {
+  permissions: perms("view_employees", "view_salary"),
+  isAdmin: false,
+};
+const aadhaarActor = {
+  permissions: perms("view_employees", "view_employee_aadhaar"),
+  isAdmin: false,
+};
+
+/** Every field key the catalogue can offer anybody. */
+const allKeys = () => catalogue.FIELDS.filter((f) => f.enabled).map((f) => f.key).sort();
+
+/** The twelve Payroll figures, which are `view_salary` and nothing less. */
+const PAYROLL_KEYS = catalogue.FIELDS.filter((f) => f.group === "Payroll").map((f) => f.key);
 
 const throwsCode = (fn, code) =>
   assert.throws(fn, (err) => {
@@ -63,16 +79,38 @@ test("FULL AADHAAR HAS NO CATALOGUE ENTRY AT ALL", () => {
   }
 });
 
-test("SALARY AND PAYMENT TYPE ARE NOT EMPLOYEE MASTER FIELDS", () => {
+test("THE LEGACY `new_employee.salary` COLUMN IS STILL NOT A FIELD", () => {
+  // It is an undated free-text VARCHAR that M2 neither reads nor copies from,
+  // and the Employee Master's Payroll section does not show it. What IS
+  // reported is the current APPROVED `employee_salary` structure, under its
+  // own keys and behind `view_salary` - see the Payroll tests below. Exporting
+  // both would put two different answers to "what is this person paid" in one
+  // row.
   assert.strictEqual(catalogue.getField("salary"), null);
-  assert.strictEqual(catalogue.getField("payment_type"), null);
   const selects = catalogue.FIELDS.map((f) => f.select).join(" ");
-  assert.ok(!/new_employee\.salary/.test(selects), "salary is Payroll's, deferred");
-  assert.ok(!/new_employee\.payment_type/.test(selects));
-  // And no label smuggles them back in.
-  for (const f of catalogue.FIELDS) {
-    assert.ok(!/salary|payment type/i.test(f.label), `${f.key} label mentions pay`);
-  }
+  assert.ok(!/new_employee\.salary/.test(selects), "the legacy column is never selected");
+  assert.ok(catalogue.FORBIDDEN_KEYS.includes("salary"), "and it stays a forbidden key");
+});
+
+test("PAYMENT TYPE IS AN EMPLOYEE MASTER FIELD, AND KEEPS B3's KEY", () => {
+  // The payment ROUTE is what HR records on Payment Details; what somebody is
+  // PAID is the Payroll group. B3 lists the column in
+  // `constants/sensitive_fields.js`, so the catalogue demands exactly the key
+  // B3 demands - no weaker, and not a new right.
+  const field = catalogue.getField("payment_type");
+  assert.ok(field, "payment_type is reportable");
+  assert.strictEqual(field.permission, "view_employee_sensitive");
+  assert.strictEqual(field.sensitive, true);
+  assert.ok(
+    !catalogue.FORBIDDEN_KEYS.includes("payment_type"),
+    "a forbidden key that exists would be a contradiction, not a second defence"
+  );
+  // 1 and 2 leave as words, and anything else as "Not recorded" rather than
+  // as a guess in either direction.
+  assert.strictEqual(field.transform("1"), "Bank");
+  assert.strictEqual(field.transform(2), "Cash");
+  assert.strictEqual(field.transform(null), "Not recorded");
+  assert.strictEqual(field.transform("3"), "Not recorded");
 });
 
 test("the account number is exported masked, never whole", () => {
@@ -96,16 +134,67 @@ test("discovery hides fields the caller may not use", () => {
   }
 });
 
-test("sensitive access reveals the gated fields, and admin too", () => {
+test("sensitive access reveals the B3 fields, and the admin sees everything", () => {
   const keys = discoverFields(sensitiveActor).map((f) => f.key);
-  for (const gated of ["pan_no", "uan", "pf_number", "esi_number", "bank_name", "account_no", "ifsc"]) {
+  for (const gated of [
+    "pan_no", "uan", "pf_number", "esi_number", "bank_name", "account_no", "ifsc",
+    // The four statutory FACTS are in `sensitive_fields.js` beside the numbers
+    // they qualify, so the same key opens them.
+    "pf_applicable", "previous_pf_member", "previous_eps_member", "esi_applicable",
+    "payment_type",
+  ]) {
     assert.ok(keys.includes(gated), `${gated} should be discoverable with the key`);
+  }
+  // AND IT IS NOT A MASTER KEY. `view_employee_sensitive` is B3's, and it does
+  // not reach M2's salary or C2's verified Aadhaar name - each of which has
+  // its own decision and its own key.
+  for (const otherKeys of [...PAYROLL_KEYS, "aadhaar_name"]) {
+    assert.ok(!keys.includes(otherKeys), `${otherKeys} is not B3's to grant`);
   }
   assert.deepStrictEqual(
     discoverFields(adminActor).map((f) => f.key).sort(),
-    keys.sort(),
-    "admin sees the same catalogue"
+    allKeys(),
+    "the user_type 2 bypass reaches every field, as it does everywhere else"
   );
+});
+
+test("THE SALARY FIGURES ARE `view_salary`, AND NOTHING ELSE OPENS THEM", () => {
+  // M2 declared the key for reading a salary structure; the Employee Master's
+  // Payroll section and the Payroll screens already use it. Reports uses the
+  // same one, so granting the report keys confers no pay access at all.
+  assert.ok(PAYROLL_KEYS.length >= 12, "the Payroll group is populated");
+  for (const key of PAYROLL_KEYS) {
+    assert.strictEqual(catalogue.getField(key).permission, "view_salary", key);
+    assert.strictEqual(catalogue.getField(key).sensitive, true, key);
+  }
+  const salaryKeys = discoverFields(salaryActor).map((f) => f.key);
+  for (const key of PAYROLL_KEYS) {
+    assert.ok(salaryKeys.includes(key), `${key} should be discoverable with view_salary`);
+  }
+  // And it opens the salary and nothing else: no PAN, no bank, no Aadhaar.
+  for (const other of ["pan_no", "bank_name", "account_no", "payment_type", "aadhaar_name"]) {
+    assert.ok(!salaryKeys.includes(other), `view_salary must not reach ${other}`);
+  }
+  // Somebody without it cannot reach a figure by asking for it directly.
+  throwsCode(() => resolveFields(["employee_id", "monthly_gross"], sensitiveActor), "UNKNOWN_FIELD");
+  const { fields } = resolveFields(["employee_id", "monthly_gross"], salaryActor);
+  assert.deepStrictEqual(fields.map((f) => f.key), ["employee_id", "monthly_gross"]);
+});
+
+test("THE VERIFIED AADHAAR NAME IS `view_employee_aadhaar`, AND THE NUMBER IS NOWHERE", () => {
+  const field = catalogue.getField("aadhaar_name");
+  assert.strictEqual(field.permission, "view_employee_aadhaar");
+  assert.strictEqual(field.sensitive, true);
+  const keys = discoverFields(aadhaarActor).map((f) => f.key);
+  assert.ok(keys.includes("aadhaar_name"));
+  // The status read is not the sensitive pair and not the salary.
+  for (const other of ["pan_no", "bank_name", "monthly_gross"]) {
+    assert.ok(!keys.includes(other), `view_employee_aadhaar must not reach ${other}`);
+  }
+  throwsCode(() => resolveFields(["aadhaar_name"], hrActor), "UNKNOWN_FIELD");
+  // No entry, gated or otherwise, reads a whole Aadhaar.
+  const selects = catalogue.FIELDS.map((f) => f.select).join(" ");
+  assert.ok(!/aadhaar_number|aadhaar_card_no|aadhaar_ciphertext/.test(selects));
 });
 
 test("discovery never leaks the SQL behind a field", () => {
@@ -320,13 +409,17 @@ test("a missing value becomes null rather than undefined", () => {
 });
 
 /* ====================================== forward-compatibility metadata */
-test("history_backed marks the four placement fields, and nothing else", () => {
+test("history_backed marks the placement fields, and nothing else", () => {
+  // Forward-compatibility metadata: the fields a future as-at resolver could
+  // answer historically. `work_shift` joins them because
+  // `employee_shift_assignment` already keeps that history; nothing consumes
+  // the flag today and it changes no behaviour.
   const backed = catalogue.FIELDS.filter((f) => f.history_backed).map((f) => f.key).sort();
-  assert.deepStrictEqual(backed, ["department", "designation", "outlet", "shift"]);
+  assert.deepStrictEqual(backed, ["department", "designation", "outlet", "shift", "work_shift"]);
 });
 
 test("every field declares a group and a join footprint", () => {
-  const footprints = ["base", "lookup", "c2_identity", "c2_bank", "derived"];
+  const footprints = ["base", "lookup", "c2_identity", "c2_bank", "m2_salary", "derived"];
   for (const f of catalogue.FIELDS) {
     assert.ok(catalogue.GROUP_ORDER.includes(f.group), `${f.key} has an unknown group`);
     assert.ok(footprints.includes(f.join_footprint), `${f.key} has an unknown footprint`);
