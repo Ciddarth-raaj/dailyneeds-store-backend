@@ -3,6 +3,7 @@ const {
   PAY_TYPE_SOURCE,
   STATUS_GROUP,
   BLOCK_REASON,
+  BLOCK_REASON_LABEL,
   BLOCK_REASON_MESSAGE,
   WARNING,
   WARNING_MESSAGE,
@@ -194,9 +195,23 @@ function exitedByMonthEnd({ year, month, ended_on = null }) {
   return Boolean(ended && ended <= to);
 }
 
-/** A reason code paired with the sentence a person reads. */
+/**
+ * A reason, in the three lengths the screens need.
+ *
+ *   code     what a test asserts and a filter could group on
+ *   label    the compact business name, for a badge: "Attendance incomplete"
+ *   message  the sentence that explains WHY, for somebody who has stopped on
+ *            this row and wants to know what to go and fix
+ *
+ * BOTH STRINGS COME FROM `constants/payrun.js` AND NEITHER IS BUILT HERE. A
+ * screen renders whichever length fits; it never composes its own.
+ */
 function reasonOf(code) {
-  return { code, message: BLOCK_REASON_MESSAGE[code] || code };
+  return {
+    code,
+    label: BLOCK_REASON_LABEL[code] || code,
+    message: BLOCK_REASON_MESSAGE[code] || code,
+  };
 }
 
 /**

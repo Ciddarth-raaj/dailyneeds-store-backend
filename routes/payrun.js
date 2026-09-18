@@ -2,7 +2,7 @@ const express = require("express");
 const Joi = require("@hapi/joi");
 const P = require("../constants/hr_permissions");
 const respondError = require("../utils/http");
-const { PAY_TYPES } = require("../constants/payrun");
+const { PAY_TYPES, LIFECYCLE_FILTER } = require("../constants/payrun");
 
 /**
  * Payrun Initialization - the API.
@@ -106,6 +106,14 @@ class PayrunRoutes {
       store_ids: Joi.any().optional(),
       designation_id: Joi.number().integer().positive().optional(),
       status: Joi.string().valid("READY", "BLOCKED", "INITIALIZED").optional(),
+      /*
+       * THE EMPLOYEE LIFECYCLE FILTER, and it is a SEPARATE parameter from
+       * `status` on purpose: one asks what the payrun says about the month,
+       * the other what the employment record says about the person, and every
+       * combination of the two is a real question. EXITED is dated - had they
+       * left by the end of THIS month - and never the master's current status.
+       */
+      lifecycle: Joi.string().valid(...Object.values(LIFECYCLE_FILTER)).optional(),
     };
 
     /**
@@ -134,6 +142,7 @@ class PayrunRoutes {
               store_ids: scoped.store_ids,
               designation_id: req.query.designation_id,
               status: req.query.status,
+              lifecycle: req.query.lifecycle,
             })),
           });
         } catch (err) {

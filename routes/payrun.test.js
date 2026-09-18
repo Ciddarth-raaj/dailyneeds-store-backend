@@ -121,6 +121,42 @@ test("no request body can carry a salary, an attendance reference or a status", 
   });
 });
 
+test("the month read accepts the lifecycle filter, validated against the constant", () => {
+  assert.match(ROUTE_CODE, /lifecycle: Joi\.string\(\)\.valid\(\.\.\.Object\.values\(LIFECYCLE_FILTER\)\)\.optional\(\)/);
+  assert.match(ROUTE_CODE, /lifecycle: req\.query\.lifecycle/);
+  // It is a SEPARATE parameter from status - one filter that meant both would
+  // make "exited and blocked" unaskable.
+  assert.match(ROUTE_CODE, /status: Joi\.string\(\)\.valid\("READY", "BLOCKED", "INITIALIZED"\)\.optional\(\)/);
+});
+
+test("the lifecycle filter is applied on the SERVER, beside the status filter", () => {
+  assert.match(USECASE_CODE, /wantedLifecycle === LIFECYCLE_FILTER\.EXITED/);
+  assert.match(USECASE_CODE, /wantedLifecycle === LIFECYCLE_FILTER\.ACTIVE/);
+  // And it reads the DATED field rather than re-deriving anything.
+  assert.match(USECASE_CODE, /row\.exited_in_month/);
+  // The filter BODY only - not the rest of the file, which legitimately
+  // snapshots a resignation date.
+  const start = USECASE_CODE.indexOf("const filtered = rows.filter");
+  const filterBody = USECASE_CODE.slice(start, USECASE_CODE.indexOf("});", start));
+  assert.ok(
+    !/resignation_date|status !== 1|Date\(/.test(filterBody),
+    "the filter must not re-derive who left - that is exitedByMonthEnd's one job"
+  );
+});
+
+test("the population query is UNCHANGED by the filter - no second date rule in SQL", () => {
+  const population = REPO_CODE.slice(
+    REPO_CODE.indexOf("async listPopulation"),
+    REPO_CODE.indexOf("async listApprovedSalaries")
+  );
+  assert.ok(!/lifecycle|exited/i.test(population), "the lifecycle filter must not reach the SQL");
+});
+
+test("every blocking reason leaves the server with a compact label", () => {
+  assert.match(RULES_CODE, /label: BLOCK_REASON_LABEL\[code\] \|\| code/);
+  assert.match(RULES_CODE, /message: BLOCK_REASON_MESSAGE\[code\] \|\| code/);
+});
+
 test("the branch scope is applied to the writes, not only to the reads", () => {
   const writes = ROUTE_CODE.split(/this\.router\./).slice(1).filter((r) => r.startsWith("post("));
   assert.equal(writes.length, 2);

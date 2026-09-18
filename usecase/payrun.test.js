@@ -19,8 +19,15 @@ const assert = require("node:assert/strict");
 
 const buildUsecase = require("./payrun");
 const { ROW_RESULT } = require("./payrun");
-const { BLOCK_REASON, STATUS_GROUP, PAY_TYPE, PAY_TYPE_SOURCE, PERIOD_STATUS } =
-  require("../constants/payrun");
+const {
+  BLOCK_REASON,
+  BLOCK_REASON_LABEL,
+  STATUS_GROUP,
+  LIFECYCLE_FILTER,
+  PAY_TYPE,
+  PAY_TYPE_SOURCE,
+  PERIOD_STATUS,
+} = require("../constants/payrun");
 
 const YEAR = 2026;
 const MONTH = 8;
@@ -281,6 +288,212 @@ describe("the month's status groups", () => {
     assert.equal(view.rows.length, 1);
     assert.equal(view.summary.total_eligible, 2);
     assert.equal(view.summary.blocked, 1);
+  });
+});
+
+describe("the compact blocking reason label", () => {
+  it("every reason carries a code, a short label and the explaining sentence", async () => {
+    const usecase = buildUsecase(fakeRepo({ salaries: [], attendance: [] }));
+    const row = rowFor(await usecase.getMonth({ year: YEAR, month: MONTH }));
+
+    row.blocking_reasons.forEach((reason) => {
+      assert.ok(reason.code, "a reason with no code cannot be asserted or grouped");
+      assert.ok(reason.label, "a reason with no label cannot go on a badge");
+      assert.ok(reason.message, "a reason with no message cannot be acted on");
+    });
+  });
+
+  it("the label is the BUSINESS NAME and carries no explanation", () => {
+    assert.equal(BLOCK_REASON_LABEL[BLOCK_REASON.ATTENDANCE_INCOMPLETE], "Attendance incomplete");
+    assert.equal(BLOCK_REASON_LABEL[BLOCK_REASON.SALARY_NOT_APPROVED], "Salary not approved");
+    assert.equal(
+      BLOCK_REASON_LABEL[BLOCK_REASON.PENDING_ATTENDANCE_REGULARIZATION],
+      "Pending attendance request"
+    );
+    assert.equal(BLOCK_REASON_LABEL[BLOCK_REASON.PENDING_OT_APPROVAL], "Pending OT approval");
+    assert.equal(
+      BLOCK_REASON_LABEL[BLOCK_REASON.STATUTORY_SETUP_INCOMPLETE],
+      "Statutory setup incomplete"
+    );
+    assert.equal(BLOCK_REASON_LABEL[BLOCK_REASON.MONTH_LOCKED], "Month locked");
+
+    // No label explains itself - that is the message's job. A label with a
+    // dash in it is a sentence that has crept into a badge.
+    Object.values(BLOCK_REASON_LABEL).forEach((label) => {
+      assert.ok(!label.includes(" - "), `"${label}" is a sentence, not a label`);
+      assert.ok(label.length <= 30, `"${label}" is too long for a badge`);
+    });
+  });
+
+  it("EVERY reason code has a label - a new blocker cannot ship unnamed", () => {
+    Object.values(BLOCK_REASON).forEach((code) =>
+      assert.ok(BLOCK_REASON_LABEL[code], `${code} has no compact label`)
+    );
+  });
+
+  it("all of an employee's blockers are reported, not just the first", async () => {
+    const usecase = buildUsecase(
+      fakeRepo({
+        salaries: [],
+        attendance: [],
+        pending: [{ employee_id: 42, pending_regularizations: 1, pending_ot: 1 }],
+      })
+    );
+    const row = rowFor(await usecase.getMonth({ year: YEAR, month: MONTH }));
+    const labels = row.blocking_reasons.map((r) => r.label);
+    assert.ok(labels.includes("Salary not approved"));
+    assert.ok(labels.includes("Attendance incomplete"));
+    assert.ok(labels.includes("Pending attendance request"));
+    assert.ok(labels.includes("Pending OT approval"));
+  });
+});
+
+describe("the lifecycle filter", () => {
+  /** Two employees: one who left inside the month, one still working. */
+  const twoEmployees = () =>
+    fakeRepo({
+      population: [
+        employee({ employee_id: 42, employee_name: "Still Here", resignation_date: null }),
+        employee({
+          employee_id: 43,
+          employee_name: "Has Left",
+          status: 0,
+          resignation_date: "2026-08-20",
+        }),
+      ],
+      salaries: [salary(), salary({ employee_id: 43, salary_id: 901 })],
+      attendance: [attendanceMonth(), attendanceMonth({ employee_id: 43, attendance_monthly_payroll_id: 5002 })],
+    });
+
+  const idsIn = (view) => view.rows.map((r) => r.employee_id);
+
+  it("ALL, or no filter at all, is everybody", async () => {
+    const usecase = buildUsecase(twoEmployees());
+    assert.deepEqual(idsIn(await usecase.getMonth({ year: YEAR, month: MONTH })), [42, 43]);
+    assert.deepEqual(
+      idsIn(await usecase.getMonth({ year: YEAR, month: MONTH, lifecycle: LIFECYCLE_FILTER.ALL })),
+      [42, 43]
+    );
+  });
+
+  it("EXITED is only those who had left by the end of the month", async () => {
+    const usecase = buildUsecase(twoEmployees());
+    const view = await usecase.getMonth({ year: YEAR, month: MONTH, lifecycle: "EXITED" });
+    assert.deepEqual(idsIn(view), [43]);
+    assert.equal(view.rows[0].exited_in_month, true);
+  });
+
+  it("ACTIVE is everybody else", async () => {
+    const usecase = buildUsecase(twoEmployees());
+    const view = await usecase.getMonth({ year: YEAR, month: MONTH, lifecycle: "ACTIVE" });
+    assert.deepEqual(idsIn(view), [42]);
+    assert.equal(view.rows[0].exited_in_month, false);
+  });
+
+  /**
+   * THE RULE THIS FILTER MUST NOT BREAK. Somebody who resigns in September is
+   * ACTIVE in August, whatever the employee master says today - the same dated
+   * answer the badge gives, because it is the same field.
+   */
+  it("EXITED is DATED and never the employee master's current status", async () => {
+    const repo = fakeRepo({
+      population: [
+        employee({ employee_id: 42, status: 0, resignation_date: "2026-09-10" }),
+      ],
+    });
+    const usecase = buildUsecase(repo);
+
+    // August: they had not left yet, so ACTIVE finds them and EXITED does not.
+    assert.deepEqual(idsIn(await usecase.getMonth({ year: YEAR, month: 8, lifecycle: "ACTIVE" })), [42]);
+    assert.deepEqual(idsIn(await usecase.getMonth({ year: YEAR, month: 8, lifecycle: "EXITED" })), []);
+
+    // September: the month they left in.
+    assert.deepEqual(idsIn(await usecase.getMonth({ year: YEAR, month: 9, lifecycle: "EXITED" })), [42]);
+    assert.deepEqual(idsIn(await usecase.getMonth({ year: YEAR, month: 9, lifecycle: "ACTIVE" })), []);
+  });
+
+  it("an inactive status with NO resignation date is never EXITED", async () => {
+    const usecase = buildUsecase(
+      fakeRepo({ population: [employee({ status: 0, resignation_date: null })] })
+    );
+    assert.deepEqual(idsIn(await usecase.getMonth({ year: YEAR, month: MONTH, lifecycle: "EXITED" })), []);
+    assert.deepEqual(idsIn(await usecase.getMonth({ year: YEAR, month: MONTH, lifecycle: "ACTIVE" })), [42]);
+  });
+
+  it("IT COMPOSES WITH STATUS, and the two are independent", async () => {
+    const repo = fakeRepo({
+      population: [
+        employee({ employee_id: 42, employee_name: "Active Ready" }),
+        employee({ employee_id: 43, employee_name: "Exited Ready", status: 0, resignation_date: "2026-08-20" }),
+        employee({ employee_id: 44, employee_name: "Exited Blocked", status: 0, resignation_date: "2026-08-21" }),
+      ],
+      // 44 has no salary, so 44 is the blocked one.
+      salaries: [salary(), salary({ employee_id: 43, salary_id: 901 })],
+      attendance: [
+        attendanceMonth(),
+        attendanceMonth({ employee_id: 43, attendance_monthly_payroll_id: 5002 }),
+        attendanceMonth({ employee_id: 44, attendance_monthly_payroll_id: 5003 }),
+      ],
+    });
+    const usecase = buildUsecase(repo);
+    const month = { year: YEAR, month: MONTH };
+
+    assert.deepEqual(
+      idsIn(await usecase.getMonth({ ...month, lifecycle: "EXITED", status: "BLOCKED" })),
+      [44]
+    );
+    assert.deepEqual(
+      idsIn(await usecase.getMonth({ ...month, lifecycle: "EXITED", status: "READY" })),
+      [43]
+    );
+    assert.deepEqual(
+      idsIn(await usecase.getMonth({ ...month, lifecycle: "ACTIVE", status: "READY" })),
+      [42]
+    );
+    assert.deepEqual(
+      idsIn(await usecase.getMonth({ ...month, lifecycle: "ACTIVE", status: "BLOCKED" })),
+      []
+    );
+  });
+
+  it("EXITED + INITIALIZED finds the leavers whose pay type may need moving", async () => {
+    const repo = twoEmployees();
+    const usecase = buildUsecase(repo);
+    await usecase.initialize({ year: YEAR, month: MONTH, employee_ids: [43], actor: ACTOR });
+
+    const view = await usecase.getMonth({
+      year: YEAR, month: MONTH, lifecycle: "EXITED", status: "INITIALIZED",
+    });
+    assert.deepEqual(idsIn(view), [43]);
+    // And they are still on the Employee Master's pay type - nothing moved
+    // them to CASH automatically. That is the manual act this filter exists
+    // to make findable.
+    assert.equal(view.rows[0].pay_type, PAY_TYPE.BANK);
+  });
+
+  it("the SUMMARY counts the whole month, never the filtered view", async () => {
+    const usecase = buildUsecase(twoEmployees());
+    const view = await usecase.getMonth({ year: YEAR, month: MONTH, lifecycle: "EXITED" });
+    assert.equal(view.rows.length, 1);
+    assert.equal(view.summary.total_eligible, 2, "a filter is a way of looking at the month");
+  });
+
+  it("an unrecognised lifecycle value narrows nothing rather than emptying the month", async () => {
+    const usecase = buildUsecase(twoEmployees());
+    assert.deepEqual(
+      idsIn(await usecase.getMonth({ year: YEAR, month: MONTH, lifecycle: "RETIRED" })),
+      [42, 43]
+    );
+  });
+
+  it("initialization still sees the WHOLE month, whatever the screen was filtered to", async () => {
+    const repo = twoEmployees();
+    const usecase = buildUsecase(repo);
+    // The filter is a reading device; it must not narrow what may be acted on.
+    const out = await usecase.initialize({
+      year: YEAR, month: MONTH, employee_ids: [42, 43], actor: ACTOR,
+    });
+    assert.equal(out.initialized_count, 2);
   });
 });
 

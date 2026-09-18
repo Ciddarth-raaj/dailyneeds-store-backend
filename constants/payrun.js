@@ -74,6 +74,33 @@ const STATUS_GROUP = {
 };
 
 /**
+ * THE EMPLOYEE LIFECYCLE FILTER - a SEPARATE question from the payrun status
+ * above, and the separation is the whole point of it.
+ *
+ *   STATUS     what the PAYRUN says about this employee's month: are they
+ *              ready, blocked, or already initialized
+ *   LIFECYCLE  what the EMPLOYMENT RECORD says: had they left by the end of
+ *              this month, or were they still working
+ *
+ * They are independent, so every combination is a real question somebody asks:
+ * "exited and still blocked" is the leaver whose month nobody can close;
+ * "exited and initialized" is the list whose pay type may need moving to CASH
+ * by hand, which is the reason this filter was asked for.
+ *
+ * EXITED IS DATED, AND IT IS THE SAME DATED ANSWER THE BADGE USES. It means
+ * `exited_in_month` - had they left by the END OF THE SELECTED MONTH - and
+ * never the employee master's current `status`. Somebody who resigned last
+ * week is ACTIVE in every month before that one, and a filter that read
+ * today's status would hide them from their own August payrun. See
+ * `utils/payrun_eligibility.js#exitedByMonthEnd`.
+ */
+const LIFECYCLE_FILTER = {
+  ALL: "ALL",
+  ACTIVE: "ACTIVE",
+  EXITED: "EXITED",
+};
+
+/**
  * EVERY REASON AN EMPLOYEE MAY NOT BE INITIALIZED, as a code and the sentence
  * that goes with it.
  *
@@ -97,6 +124,35 @@ const BLOCK_REASON = {
   PENDING_OT_APPROVAL: "PENDING_OT_APPROVAL",
   STATUTORY_SETUP_INCOMPLETE: "STATUTORY_SETUP_INCOMPLETE",
   MONTH_LOCKED: "MONTH_LOCKED",
+};
+
+/**
+ * THE COMPACT LABEL FOR EACH REASON - what a screen puts on a badge.
+ *
+ * TWO STRINGS PER REASON, AND THEY ANSWER DIFFERENT QUESTIONS. The LABEL is
+ * the business name of the blocker, and it is what somebody scanning a list of
+ * forty employees needs: "Attendance incomplete", not a sentence about an
+ * engine. The MESSAGE below explains WHY that blocker exists, and it is what
+ * somebody needs once they have stopped on one row and want to know what to go
+ * and fix.
+ *
+ * WHY THE LABEL IS SERVER-SIDE RATHER THAN A LOOKUP IN THE BROWSER. The set of
+ * reasons is this module's vocabulary. A screen that mapped codes to its own
+ * labels would be a second copy of that vocabulary, and the day a reason is
+ * added the screen renders a bare code - or worse, nothing - for a blocker
+ * nobody notices is missing. The server already says what is wrong; it now
+ * says it in both lengths, and the screen chooses which to show where.
+ *
+ * KEEP THEM SHORT AND NOUN-LIKE. These are read on a badge on a phone.
+ */
+const BLOCK_REASON_LABEL = {
+  [BLOCK_REASON.NOT_EMPLOYED_IN_MONTH]: "Not employed this month",
+  [BLOCK_REASON.SALARY_NOT_APPROVED]: "Salary not approved",
+  [BLOCK_REASON.ATTENDANCE_INCOMPLETE]: "Attendance incomplete",
+  [BLOCK_REASON.PENDING_ATTENDANCE_REGULARIZATION]: "Pending attendance request",
+  [BLOCK_REASON.PENDING_OT_APPROVAL]: "Pending OT approval",
+  [BLOCK_REASON.STATUTORY_SETUP_INCOMPLETE]: "Statutory setup incomplete",
+  [BLOCK_REASON.MONTH_LOCKED]: "Month locked",
 };
 
 const BLOCK_REASON_MESSAGE = {
@@ -138,7 +194,9 @@ module.exports = {
   PAYRUN_STATUS,
   PERIOD_STATUS,
   STATUS_GROUP,
+  LIFECYCLE_FILTER,
   BLOCK_REASON,
+  BLOCK_REASON_LABEL,
   BLOCK_REASON_MESSAGE,
   WARNING,
   WARNING_MESSAGE,

@@ -5,6 +5,7 @@ const {
   PAYRUN_STATUS,
   PERIOD_STATUS,
   STATUS_GROUP,
+  LIFECYCLE_FILTER,
 } = require("../constants/payrun");
 const {
   monthWindow,
@@ -129,7 +130,14 @@ class PayrunUsecase {
    * company-wide, a list is those branches, and an EMPTY list is no branches
    * at all rather than all of them.
    */
-  async getMonth({ year, month, store_ids = null, designation_id = null, status = null }) {
+  async getMonth({
+    year,
+    month,
+    store_ids = null,
+    designation_id = null,
+    status = null,
+    lifecycle = null,
+  }) {
     const period = normalizeMonth(year, month);
     const { from, to } = monthWindow(period.year, period.month);
 
@@ -226,10 +234,40 @@ class PayrunUsecase {
       };
     });
 
-    const filtered =
+    /*
+     * THE TWO FILTERS ARE INDEPENDENT, AND BOTH ARE APPLIED HERE - on the
+     * server, after the month has been evaluated, which is where the status
+     * filter has always been applied.
+     *
+     * WHY NOT IN SQL. `exited_in_month` is decided by ONE dated rule
+     * (`exitedByMonthEnd`), and putting a resignation-date comparison into the
+     * population query as well would be that rule written twice. Two copies of
+     * a date comparison is exactly what produced the historical-payrun bug -
+     * the badge and the filter would eventually disagree about who left when.
+     * The population read is unchanged; the filtering happens against the
+     * evaluated rows, so the filter and the badge can only ever agree.
+     *
+     * THEY COMPOSE. Status narrows by what the PAYRUN says; lifecycle narrows
+     * by what the EMPLOYMENT RECORD says. "Exited + Blocked" is the leaver
+     * whose month nobody can close; "Exited + Initialized" is the list whose
+     * pay type may need moving to CASH by hand.
+     */
+    const wantedStatus =
       status && Object.values(STATUS_GROUP).includes(String(status).toUpperCase())
-        ? rows.filter((row) => row.status === String(status).toUpperCase())
-        : rows;
+        ? String(status).toUpperCase()
+        : null;
+
+    const wantedLifecycle =
+      lifecycle && Object.values(LIFECYCLE_FILTER).includes(String(lifecycle).toUpperCase())
+        ? String(lifecycle).toUpperCase()
+        : null;
+
+    const filtered = rows.filter((row) => {
+      if (wantedStatus && row.status !== wantedStatus) return false;
+      if (wantedLifecycle === LIFECYCLE_FILTER.EXITED && row.exited_in_month !== true) return false;
+      if (wantedLifecycle === LIFECYCLE_FILTER.ACTIVE && row.exited_in_month === true) return false;
+      return true;
+    });
 
     return {
       period_year: period.year,
