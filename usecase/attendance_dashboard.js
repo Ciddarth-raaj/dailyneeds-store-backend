@@ -14,6 +14,7 @@ const {
 } = require("../utils/shift_config_version");
 const { resolveEffectiveRawPunches } = require("../utils/attendance_effective_punches");
 const eligibility = require("../utils/attendance_eligibility");
+const { extraBreakMinutes } = require("../utils/employee_extra_break");
 const {
   DELIVERY,
   DELIVERY_DETAIL,
@@ -471,6 +472,9 @@ module.exports = (attendanceDashboardRepo) => {
           io_time: p.io_time,
         })),
         break_override_minutes: breakOverrideMinutes(employee),
+        // Same employee row, same rule as A1 - the dashboard and the stored
+        // calculation must not answer this differently.
+        extra_break_minutes: extraBreakMinutes(employee),
         approved_ot_minutes: approvedOt,
         regularization_pending: stillOpen,
         // An exempt employee's day is ATTENDANCE_NOT_REQUIRED: no issue, no

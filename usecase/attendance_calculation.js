@@ -23,6 +23,7 @@ const {
 } = require("../utils/attendance_payroll");
 const { resolveEffectiveRawPunches } = require("../utils/attendance_effective_punches");
 const eligibility = require("../utils/attendance_eligibility");
+const { extraBreakMinutes } = require("../utils/employee_extra_break");
 
 /**
  * Attendance v2 - the orchestration between the repository and the pure
@@ -412,6 +413,10 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       regularized,
       approvals,
       break_override_minutes: breakOverrideMinutes(employee),
+      // The employee's Extra Break Hours, already in whole minutes. Read from
+      // the SAME employee row as the override, on the same one current-value
+      // rule, so the two cannot disagree about which employee they describe.
+      extra_break_minutes: extraBreakMinutes(employee),
       attendance_required: attendanceRequired(employee),
       resolutionFor,
       readCutoff,
@@ -628,6 +633,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
           io_time: p.io_time,
         })),
         break_override_minutes: context.break_override_minutes,
+        extra_break_minutes: context.extra_break_minutes,
         approved_ot_minutes: approvedOt,
         regularization_pending: stillOpen,
         attendance_required: context.attendance_required,

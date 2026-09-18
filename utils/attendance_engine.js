@@ -119,13 +119,18 @@ const BREAK_CREDIT_CUTOFF_MINUTES = 15 * 60;
  *      shift's deduction interval rule settles the late/early minutes the
  *      shortage contains (`applyGrace`).
  *   4  The employee break override applies only on a day with four or more
- *      punches; a two-punch day is charged the shift's break.
+ *      punches; a two-punch day is charged the shift's break. The employee's
+ *      Extra Break Hours are added to the allowance under the SAME rule, and
+ *      are likewise ignored on a two-punch, odd-punch or absent day.
  *   5  The no-lunch rule: a two-punch day ending before 15:00 gets no break
  *      credit against lateness or early out (`BREAK_CREDIT_CUTOFF_MINUTES`).
  *   6  "Exclude Minimum OT": with the shift flag on, only minutes beyond the
  *      OT minimum are paid (post-shift and pre-shift each have their own).
+ *   7  The employee's Extra Break Hours ADD to the day's allowed break, and
+ *      therefore reduce NRM by the same minutes - on a day with four or more
+ *      punches and on no other kind of day.
  */
-const CALCULATION_VERSION = 6;
+const CALCULATION_VERSION = 7;
 
 /** Every value `status` can take. A calculation is never left without one. */
 const CALC_STATUS = Object.freeze({
@@ -569,6 +574,9 @@ function applyGrace({
  * @param {string} [input.shift_status]            RESOLUTION_STATUS from A0
  * @param {number|null} [input.break_override_minutes] the employee's special
  *        break, which REPLACES the shift break and therefore changes NRM
+ * @param {number|null} [input.extra_break_minutes] the employee's Extra Break
+ *        Hours, in whole minutes, which are ADDED to whatever allowance the
+ *        line above resolved and therefore reduce NRM by the same amount
  * @param {number|null} [input.approved_ot_minutes] only FINAL APPROVED OT
  * @param {boolean} [input.regularization_pending]
  * @returns {object} the stable output contract - see the README of the fields
@@ -584,6 +592,7 @@ function calculateAttendanceDay(input = {}) {
     shift = null,
     shift_status = null,
     break_override_minutes = null,
+    extra_break_minutes = null,
     approved_ot_minutes = null,
     regularization_pending = false,
     attendance_required = true,
@@ -626,6 +635,9 @@ function calculateAttendanceDay(input = {}) {
     span_minutes: 0,
     break_allowance_minutes: 0,
     break_allowance_source: "SHIFT",
+    // The employee's Extra Break Hours actually credited on this date, in
+    // minutes. Zero on every day that is not a four-or-more-punch day.
+    extra_break_minutes: 0,
     actual_gap_minutes: null,
     break_charged_minutes: 0,
     worked_minutes: 0,
@@ -704,19 +716,53 @@ function calculateAttendanceDay(input = {}) {
     break_override_minutes !== undefined &&
     Number.isFinite(Number(break_override_minutes));
   const overrideGiven = overrideConfigured && effectivePunches.length >= 4;
-  const allowedBreak = Math.max(
+  const baseAllowedBreak = Math.max(
     0,
     Math.trunc(overrideGiven ? Number(break_override_minutes) : shift.break_minutes || 0)
   );
+
+  // THE EMPLOYEE'S EXTRA BREAK HOURS. Unlike the override above it ADDS to
+  // whatever allowance was just resolved - the shift's break, or the
+  // override that replaced it:
+  //
+  //     employeeAllowedBreak = resolvedAllowedBreak + extraBreak
+  //
+  // and because NRM is span - allowance, the extra minutes come off NRM for
+  // this employee on this date. The Shift Master is never touched: this is an
+  // employee/date adjustment and the shift's own break stays what it is.
+  //
+  // IT OBEYS THE SAME FOUR-PUNCH RULE, for the same reason. A longer personal
+  // allowance is credit against a break the punches can be seen to contain;
+  // a two-punch day has no OUT -> IN evidence of any break at all and is
+  // charged the phased shift allowance exactly as it is today. An odd-punch
+  // or absent day is likewise calculated on the unextended figure.
+  const extraConfigured =
+    extra_break_minutes !== null &&
+    extra_break_minutes !== undefined &&
+    Number.isFinite(Number(extra_break_minutes)) &&
+    Math.trunc(Number(extra_break_minutes)) > 0;
+  const extraGiven = extraConfigured && effectivePunches.length >= 4;
+  const extraBreak = extraGiven ? Math.trunc(Number(extra_break_minutes)) : 0;
+
+  const allowedBreak = Math.max(0, baseAllowedBreak + extraBreak);
   const shiftSpan = Math.max(0, Math.trunc(shift.shift_span_minutes || 0));
   const nrm = Math.max(0, shiftSpan - allowedBreak);
 
   base.break_allowance_minutes = allowedBreak;
-  base.break_allowance_source = overrideGiven ? "EMPLOYEE_OVERRIDE" : "SHIFT";
+  // EMPLOYEE_OVERRIDE means "this allowance is the employee's, not the
+  // shift's" - which is exactly what an added Extra Break makes it, so the
+  // payrun's NRM provenance keeps its two words and gains no third.
+  base.break_allowance_source = overrideGiven || extraGiven ? "EMPLOYEE_OVERRIDE" : "SHIFT";
+  base.extra_break_minutes = extraBreak;
   base.nrm_minutes = nrm;
   if (overrideConfigured && !overrideGiven && effectivePunches.length > 0) {
     base.notes.push(
       "Employee break override not applied: it needs four or more punches, so the shift's break is used"
+    );
+  }
+  if (extraConfigured && !extraGiven && effectivePunches.length > 0) {
+    base.notes.push(
+      "Employee extra break hours not applied: they need four or more punches, so the day's own break allowance is used"
     );
   }
 

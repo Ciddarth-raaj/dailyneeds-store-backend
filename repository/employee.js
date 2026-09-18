@@ -75,6 +75,9 @@ const EMPLOYEE_MASTER_COLUMNS = [
   "new_employee.previous_pf_member",
   "new_employee.previous_eps_member",
   "new_employee.special_break_override_minutes",
+  // Employment Details shows and edits it; attendance adds it to the allowed
+  // break on a four-or-more-punch day.
+  "new_employee.extra_break_hours",
   "new_employee.source_system",
   "new_employee.source_employee_code",
   "new_employee.attendance_required",

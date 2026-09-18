@@ -5,6 +5,7 @@ const { EDITABLE_FIELDS } = require("../repository/employee_master");
 const { getClientIp } = require("../utils/ip");
 const { requireAdmin } = require("../middlewares/admin_only");
 const { EMPLOYMENT_TYPES, GRADES } = require("../utils/employment_classification");
+const { MAX_EXTRA_BREAK_HOURS } = require("../utils/employee_extra_break");
 
 const router = express.Router();
 
@@ -140,6 +141,12 @@ class EmployeeMasterRoutes {
             // both NULL, exactly like every existing employee.
             employment_type: Joi.string().valid(EMPLOYMENT_TYPES).allow("", null).optional(),
             grade: Joi.string().valid(GRADES).allow("", null).optional(),
+            // EXTRA BREAK HOURS, in hours with decimals (half an hour is 0.5).
+            // Optional and blankable: a hire nobody has given an extra break
+            // is created with NULL, which is no extra break at all. The bound
+            // and the rounding live in `utils/employee_extra_break.js`, which
+            // the usecase applies - this only refuses what is not a number.
+            extra_break_hours: Joi.number().min(0).max(MAX_EXTRA_BREAK_HOURS).allow("", null).optional(),
             // Stage 0C / C2. When present, the employee is created with a
             // verified Aadhaar identity attached in the same transaction.
             aadhaar_verification_id: Joi.number().integer().positive().optional(),

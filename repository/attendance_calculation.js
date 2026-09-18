@@ -365,7 +365,8 @@ class AttendanceCalculationRepository {
   async getBreakOverride(employeeId) {
     const rows = await this._read(
       "GET-BREAK-OVERRIDE",
-      `SELECT employee_id, special_break_override_minutes, attendance_required
+      `SELECT employee_id, special_break_override_minutes, extra_break_hours,
+              attendance_required
          FROM new_employee
         WHERE employee_id = ?`,
       [employeeId]

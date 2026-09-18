@@ -13,7 +13,23 @@ const personalDetails = require("../utils/personal_details");
 const {
   normaliseClassificationFields,
 } = require("../utils/employment_classification");
+const { parseExtraBreakHours } = require("../utils/employee_extra_break");
 const { EDITABLE_FIELDS, SECURITY_RELEVANT_FIELDS, LIFECYCLE_CONTROLLED_FIELDS, STATUS } = masterRepo;
+
+/**
+ * EXTRA BREAK HOURS, CHECKED ONCE FOR CREATE AND EDIT ALIKE.
+ *
+ * Returns the fields to merge, and nothing at all when the body does not
+ * mention the column - saving Personal Details must not write an attendance
+ * setting the form never showed. A blank stores NULL, which is "no extra
+ * break" and is what every existing employee already carries.
+ */
+function normaliseExtraBreakHours(fields) {
+  if (!fields || fields.extra_break_hours === undefined) return {};
+  const parsed = parseExtraBreakHours(fields.extra_break_hours);
+  if (!parsed.ok) throw new ValidationError(parsed.reason);
+  return { extra_break_hours: parsed.value };
+}
 
 /**
  * Stage 0C / C2 — HR owns the employee lifecycle locally.
@@ -245,6 +261,7 @@ class EmployeeMasterUsecase {
     // column; a blank one is `null`, which is "not recorded" and is exactly
     // what every existing employee already carries.
     Object.assign(fields, normaliseClassificationFields(fields));
+    Object.assign(fields, normaliseExtraBreakHours(fields));
     // The lifecycle owns these two, and sets them to exactly this.
     fields.date_of_joining = joinedOn;
     fields.status = STATUS.ACTIVE;
@@ -497,6 +514,9 @@ class EmployeeMasterUsecase {
     // field is allowed and stores NULL - "not recorded" is a state HR may
     // return an employee to, not an error.
     patch = normaliseClassificationFields(patch);
+    // Same check, same module, on the same terms: a blank clears the field
+    // and a value out of range is a 422 before anything is written.
+    patch = { ...patch, ...normaliseExtraBreakHours(patch) };
 
     return this.repo.withTransaction(async (tx) => {
       const before = await this.repo.lockEmployee(tx, employeeId);

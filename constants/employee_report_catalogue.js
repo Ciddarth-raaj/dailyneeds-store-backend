@@ -18,7 +18,7 @@ const {
  *
  * ============================================ THE CLASSIFICATION SWEEP ====
  *
- * All 58 columns of `new_employee` were enumerated and classified. The list
+ * All 59 columns of `new_employee` were enumerated and classified. The list
  * held against is `EMPLOYEE_MASTER_COLUMNS` in `repository/employee.js` -
  * the Employee Master's own result contract, which
  * `employee_detail_columns.test.js` already holds against the migrations. So
@@ -27,7 +27,7 @@ const {
  * classified HERE. Every column is accounted for below; none is silently
  * ignored.
  *
- * INCLUDED (40 columns, via the entries in this file):
+ * INCLUDED (41 columns, via the entries in this file):
  *   employee_id, employee_name, father_name, dob, gender, marital_status,
  *   marriage_date, spouse_name, permanent_address, residential_address,
  *   primary_contact_number, alternate_contact_number, email_id, blood_group,
@@ -36,7 +36,7 @@ const {
  *   additional_course, date_of_joining, pan_no, payment_type, status,
  *   resignation_date, default_work_shift_id, pf_applicable, esi_applicable,
  *   previous_pf_member, previous_eps_member, attendance_required,
- *   employment_type, grade
+ *   employment_type, grade, extra_break_hours
  *
  * DELIBERATELY_EXCLUDED (18), each with its reason:
  *   employee_image        operational/internal - a base64 LONGTEXT blob; not
@@ -444,6 +444,32 @@ const FIELDS = [
   // and not a sensitive field - so it is reportable as it is displayed. It is
   // NOT employment status: an employee with No is active, paid and simply not
   // expected to punch.
+  // THE EMPLOYEE'S EXTRA BREAK HOURS. An Employment Details field, edited
+  // under the same `employee_edit` key as branch, department and designation
+  // and shown to everybody who may see the profile, so it is reported as it
+  // is displayed: no permission of its own and not in
+  // `constants/sensitive_fields.js`.
+  //
+  // WHY IT IS HERE AND `special_break_override_minutes` IS NOT. The override
+  // is attendance-screen configuration that appears nowhere on the Employee
+  // Master; this IS an Employee Master field, recorded on the master and
+  // read from it, so the catalogue is where it belongs rather than one
+  // report screen's own column list.
+  //
+  // EXPORTED IN HOURS, AS STORED - the unit the field is labelled in, and a
+  // number a spreadsheet can sum. NULL is blank and never 0: "no extra break
+  // recorded" and "an extra break of nothing" arrive at the same attendance
+  // answer, but a report should not print a figure nobody entered.
+  { key: "extra_break_hours", label: "Extra Break Hours", group: "Employment",
+    select: "new_employee.extra_break_hours", join_footprint: "base",
+    transform: asAmount,
+    // EXACT, and deliberately not a range. The question anybody actually asks
+    // of this column is "who is set to 0.5" - a small set of agreed values,
+    // not a spread - and an exact comparison on a DECIMAL is one MySQL makes
+    // numerically, so 0.5 finds the row stored as 0.50.
+    filter: { type: FILTER.ID },
+    history_backed: false, enabled: true },
+
   { key: "attendance_required", label: "Attendance Required", group: "Employment",
     select: "new_employee.attendance_required", join_footprint: "base",
     transform: ATTENDANCE_REQUIRED_LABEL,

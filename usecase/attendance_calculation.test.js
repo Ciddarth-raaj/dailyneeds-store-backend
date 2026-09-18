@@ -519,3 +519,87 @@ describe("a version document written before grace was versioned", () => {
     assert.equal(day.shortage_minutes, 0);
   });
 });
+
+/* ======================================================= Extra Break Hours */
+
+describe("the employee's Extra Break Hours", () => {
+  const FOUR_PUNCH_DAY = [
+    punch(1, "2026-09-14 09:00:00"),
+    punch(2, "2026-09-14 13:00:00"),
+    punch(3, "2026-09-14 14:30:00"),
+    punch(4, "2026-09-14 21:00:00"),
+    // The next day, punched twice.
+    punch(5, "2026-09-15 09:00:00"),
+    punch(6, "2026-09-15 21:00:00"),
+  ];
+
+  it("is read from the employee row, in hours, and ADDS to the shift's break on a four-punch day", async () => {
+    const usecase = buildUsecase(
+      fakeRepo({
+        rawPunches: FOUR_PUNCH_DAY,
+        employeeRow: {
+          employee_id: 42,
+          special_break_override_minutes: null,
+          extra_break_hours: "0.50",
+        },
+      })
+    );
+
+    const [four, two] = await usecase.calculateRange({
+      employee_id: 42,
+      from_date: "2026-09-14",
+      to_date: "2026-09-15",
+    });
+
+    // Shift break 60 + extra 30 = 90 permitted, so NRM is 720 - 90.
+    assert.equal(four.break_allowance_minutes, 90);
+    assert.equal(four.nrm_minutes, 630);
+    assert.equal(four.break_allowance_source, "EMPLOYEE_OVERRIDE");
+    assert.equal(four.shortage_minutes, 0);
+
+    // THE TWO-PUNCH DAY IS UNTOUCHED: the shift's break, the shift's NRM.
+    assert.equal(two.break_allowance_minutes, 60);
+    assert.equal(two.nrm_minutes, 660);
+    assert.equal(two.break_allowance_source, "SHIFT");
+  });
+
+  it("null and zero hours leave every date exactly as it is today", async () => {
+    const rows = [
+      { employee_id: 42, special_break_override_minutes: null },
+      { employee_id: 42, special_break_override_minutes: null, extra_break_hours: null },
+      { employee_id: 42, special_break_override_minutes: null, extra_break_hours: "0.00" },
+    ];
+    const results = [];
+    for (const employeeRow of rows) {
+      const usecase = buildUsecase(fakeRepo({ rawPunches: FOUR_PUNCH_DAY, employeeRow }));
+      results.push(
+        await usecase.calculateRange({ employee_id: 42, from_date: "2026-09-14", to_date: "2026-09-15" })
+      );
+    }
+    for (const days of results) {
+      assert.equal(days[0].nrm_minutes, 660);
+      assert.equal(days[0].break_allowance_source, "SHIFT");
+      assert.equal(days[1].nrm_minutes, 660);
+    }
+  });
+
+  it("rides on top of the special break override rather than replacing it", async () => {
+    const usecase = buildUsecase(
+      fakeRepo({
+        rawPunches: FOUR_PUNCH_DAY,
+        employeeRow: {
+          employee_id: 42,
+          special_break_override_minutes: 90,
+          extra_break_hours: "0.50",
+        },
+      })
+    );
+    const [four] = await usecase.calculateRange({
+      employee_id: 42,
+      from_date: "2026-09-14",
+      to_date: "2026-09-14",
+    });
+    assert.equal(four.break_allowance_minutes, 120);
+    assert.equal(four.nrm_minutes, 600);
+  });
+});

@@ -59,6 +59,15 @@ const EDITABLE_FIELDS = [
   // `utils/employment_classification.js` before it reaches the column.
   "employment_type",
   "grade",
+  // EXTRA BREAK HOURS. An Employment Details field like the two above, under
+  // the SAME `employee_edit` key, the same branch scope and the same edit
+  // path - the task's permission model, not a new one. Unlike them it DOES
+  // decide something: the attendance engine adds it to the day's allowed
+  // break on a four-or-more-punch day. The usecase checks the value against
+  // `utils/employee_extra_break.js` before it reaches the column, and
+  // changing it recalculates nothing by itself, exactly as changing the
+  // Special Break Duration Override does not.
+  "extra_break_hours",
 ];
 
 /**

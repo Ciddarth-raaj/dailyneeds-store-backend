@@ -341,6 +341,35 @@ the engine calculates. `NULL` means no override; `0` is the real setting "charge
 this employee no break at all", and the two stay distinguishable. No
 effective-date semantics exist on any path.
 
+## 7a. Extra Break Hours add to the day's allowance
+
+`new_employee.extra_break_hours` (DECIMAL, hours) is an **Employee Master**
+field — Employment Details, edited under the ordinary `employee_edit` right,
+reported through the Employee Master field catalogue like any other column. It
+is read the same way the override above is read: **one current value, no
+Effective From**, for every date the engine calculates.
+
+It does not replace the shift's break; it is added to whatever allowance the
+day already resolved:
+
+```
+employeeAllowedBreak = resolvedAllowedBreak + extraBreakHours
+effectiveNrm         = shiftSpan - employeeAllowedBreak
+```
+
+so a 12-hour shift with a 1-hour break and an extra 0.5 hour has a permitted
+break of 1.5 hours and an effective NRM of 10.5 hours. The Shift Master is
+never modified: this is an employee/date adjustment.
+
+**It is credited only on a day with four or more punches**, exactly as the
+override is, and for the same reason — an OUT → IN gap is the only evidence a
+break was taken. A two-punch day ignores it completely and keeps the phased
+break rule of §above unchanged; an odd-punch or absent day likewise. The actual
+break charged is still the sum of the OUT → IN gaps, so only the minutes beyond
+the combined allowance become a shortage, and an unused allowance feeds the
+existing OT rules rather than a new one. `NULL` and `0` both mean "nothing
+extra" and produce exactly today's numbers.
+
 ## 8. Neutral wage components — see *The statutory handoff* above.
 
 ## 9. Permission grants

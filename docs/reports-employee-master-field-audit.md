@@ -57,7 +57,7 @@ the rail.
 Held against `EMPLOYEE_MASTER_COLUMNS` in `repository/employee.js` — the
 Employee Master's own result contract, which
 `repository/employee_detail_columns.test.js` already holds against the
-migrations. All 58 columns are accounted for, plus the Employee Master fields
+migrations. All 59 columns are accounted for, plus the Employee Master fields
 that live in other tables.
 
 ### Missing fields found, and now reportable
@@ -68,6 +68,7 @@ that live in other tables.
 | Grade | `new_employee.grade` | no | none | added, ENUM filter (A–E) |
 | Work Shift | `work_shift.shift_name` via `new_employee.default_work_shift_id` | no | none | added as resolved label, TEXT filter. The existing `shift` key stays: it is the **legacy** `shift_master` roster and a seeded report names it |
 | Attendance Required | `new_employee.attendance_required` | no | none | added, Yes/No, ENUM filter |
+| Extra Break Hours | `new_employee.extra_break_hours` | n/a — new field | none | added with the field itself: Employment group, hours as stored, exact-match filter |
 | PF Applicable | `new_employee.pf_applicable` | no | `view_employee_sensitive` | added, tri-state, Yes/No filter |
 | Existing / Previous PF Member | `new_employee.previous_pf_member` | no | `view_employee_sensitive` | added, tri-state, Yes/No filter |
 | Existing / Previous EPS Member | `new_employee.previous_eps_member` | no | `view_employee_sensitive` | added, tri-state, Yes/No filter |
