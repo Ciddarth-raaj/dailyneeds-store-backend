@@ -557,7 +557,19 @@ describe("the status rules", () => {
     ];
     for (const [over, code] of cases) {
       const v = ready(over);
-      assert.equal(v.status, CALC_STATUS.CALCULATED, `${code} should not be ready`);
+      /*
+       * NOT READY, WHICHEVER OF THE TWO IT READS AS. Attendance that is not
+       * settled says so in the status as well as in the blocker - see
+       * ATTENDANCE_PENDING - and the other five are CALCULATED as before. The
+       * assertion that matters to approval is the same for all six: not
+       * READY_FOR_APPROVAL, and the blocker named.
+       */
+      const expected =
+        code === READY_BLOCKER.ATTENDANCE_INCOMPLETE
+          ? CALC_STATUS.ATTENDANCE_PENDING
+          : CALC_STATUS.CALCULATED;
+      assert.equal(v.status, expected, `${code} should not be ready`);
+      assert.notEqual(v.status, CALC_STATUS.READY_FOR_APPROVAL);
       assert.ok(v.blockers.some((b) => b.code === code), `expected ${code}`);
     }
   });
@@ -612,14 +624,16 @@ describe("the month's counts", () => {
   it("counts every state over the current initialized population", () => {
     const summary = calc.summarize([
       { status: CALC_STATUS.NOT_CALCULATED, payslip_eligible: false },
+      { status: CALC_STATUS.ATTENDANCE_PENDING, payslip_eligible: false },
       { status: CALC_STATUS.CALCULATED, payslip_eligible: false },
       { status: CALC_STATUS.RECALCULATION_REQUIRED, payslip_eligible: false },
       { status: CALC_STATUS.READY_FOR_APPROVAL, payslip_eligible: false },
       { status: CALC_STATUS.APPROVED_LOCKED, payslip_eligible: true },
     ]);
     assert.deepEqual(summary, {
-      initialized: 5,
+      initialized: 6,
       not_calculated: 1,
+      attendance_pending: 1,
       calculated: 1,
       recalculation_required: 1,
       ready_for_approval: 1,

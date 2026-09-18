@@ -1059,12 +1059,34 @@ function deriveStatus(input = {}) {
   const blockers = [];
   const recalcReasons = [];
 
+  /*
+   * IS THE ATTENDANCE THIS MONTH WAS PRICED FROM SETTLED?
+   *
+   * ONE ANSWER, READ IN THREE PLACES BELOW: it decides the approval blocker it
+   * always decided, it decides the visible ATTENDANCE_PENDING status, and it
+   * decides `attendance_pending` - the flag the presentation layer suppresses
+   * provisional figures from. A missing row and a row the engine has not
+   * finalized are the SAME fact here: in both, the salary days, the overtime
+   * and the statutory wages this calculation used are arithmetic on an
+   * attendance month that is not settled yet.
+   */
+  const attendanceFinal = Boolean(
+    attendance && (attendance.is_final === 1 || attendance.is_final === true)
+  );
+
   if (calculation && calculation.status === CALC_STATUS.APPROVED_LOCKED) {
     return {
       status: CALC_STATUS.APPROVED_LOCKED,
       status_label: CALC_STATUS_LABEL[CALC_STATUS.APPROVED_LOCKED],
       blockers: [blockerOf(READY_BLOCKER.ALREADY_LOCKED)],
       recalculation_reasons: [],
+      /*
+       * A LOCKED MONTH IS NEVER PENDING. Approval refuses attendance that is
+       * not final, so a locked employee's figures were computed from a settled
+       * month by construction - and suppressing a figure somebody has signed
+       * off would hide what they signed.
+       */
+      attendance_pending: false,
       /*
        * THE PAYSLIP ELIGIBILITY CONTRACT, AND IT IS DERIVED RATHER THAN
        * STORED. `payslip_eligible` is true for exactly the employees whose
@@ -1086,6 +1108,12 @@ function deriveStatus(input = {}) {
       status_label: CALC_STATUS_LABEL[CALC_STATUS.NOT_CALCULATED],
       blockers,
       recalculation_reasons: [],
+      /*
+       * NOTHING TO SUPPRESS. There are no stored figures at all, so every one
+       * of them is already absent rather than provisional, and NOT_CALCULATED
+       * is the more informative thing to say about this employee.
+       */
+      attendance_pending: false,
       payslip_eligible: false,
     };
   }
@@ -1114,6 +1142,16 @@ function deriveStatus(input = {}) {
       status_label: CALC_STATUS_LABEL[CALC_STATUS.RECALCULATION_REQUIRED],
       blockers,
       recalculation_reasons: recalcReasons,
+      /*
+       * A MOVED SOURCE IS THE MORE URGENT THING TO SAY, so it keeps the
+       * status - and it is exactly what an attendance month turning final
+       * produces, which is how this employee gets back to real figures.
+       *
+       * THE FLAG STILL STANDS THOUGH. Stale figures computed from attendance
+       * that is STILL not settled are provisional twice over, and presenting
+       * their zeroes as results would be the same lie with a warning over it.
+       */
+      attendance_pending: !attendanceFinal,
       payslip_eligible: false,
     };
   }
@@ -1124,7 +1162,7 @@ function deriveStatus(input = {}) {
    * stored flag - a stored "ready" is a flag that goes stale the moment a
    * regularization is raised.
    */
-  if (!attendance || !(attendance.is_final === 1 || attendance.is_final === true)) {
+  if (!attendanceFinal) {
     blockers.push(blockerOf(READY_BLOCKER.ATTENDANCE_INCOMPLETE));
   }
   if (Number(pending_regularizations) > 0) {
@@ -1150,12 +1188,32 @@ function deriveStatus(input = {}) {
     blockers.push(blockerOf(READY_BLOCKER.CALCULATION_INCOMPLETE));
   }
 
-  const status = blockers.length === 0 ? CALC_STATUS.READY_FOR_APPROVAL : CALC_STATUS.CALCULATED;
+  /*
+   * THE VISIBLE STATUS, AND `ATTENDANCE_PENDING` REPLACES `CALCULATED` ONLY.
+   *
+   * A calculated employee with nothing outstanding is READY_FOR_APPROVAL; one
+   * with something outstanding was CALCULATED, whatever the something was -
+   * and that is what put "CALCULATED, Salary Days 0, Net Pay 0.00" on the
+   * screen for somebody whose attendance had never been settled. Where the
+   * outstanding thing is the attendance the figures were priced FROM, the
+   * status says so, because the figures are not results yet.
+   *
+   * IT IS NOT A NEW GATE. `blockers` is unchanged, `payslip_eligible` is
+   * unchanged, and approval reads the blockers rather than the status - so
+   * this employee was refused before and is refused now, by the same rule.
+   */
+  const status =
+    blockers.length === 0
+      ? CALC_STATUS.READY_FOR_APPROVAL
+      : attendanceFinal
+      ? CALC_STATUS.CALCULATED
+      : CALC_STATUS.ATTENDANCE_PENDING;
   return {
     status,
     status_label: CALC_STATUS_LABEL[status],
     blockers,
     recalculation_reasons: [],
+    attendance_pending: !attendanceFinal,
     payslip_eligible: false,
   };
 }
@@ -1173,6 +1231,14 @@ function summarize(rows = []) {
   const summary = {
     initialized: rows.length,
     not_calculated: 0,
+    /*
+     * COUNTED SEPARATELY FROM `calculated`, because it is a separate thing to
+     * do about it: a CALCULATED employee is waiting on a confirmation or an
+     * approval somebody can give, and an ATTENDANCE_PENDING one is waiting on
+     * the attendance month being settled, which is a different person's job.
+     * Rolling them together would hide how much of a month is not costed yet.
+     */
+    attendance_pending: 0,
     calculated: 0,
     recalculation_required: 0,
     ready_for_approval: 0,
@@ -1181,6 +1247,7 @@ function summarize(rows = []) {
   };
   rows.forEach((row) => {
     if (row.status === CALC_STATUS.NOT_CALCULATED) summary.not_calculated += 1;
+    else if (row.status === CALC_STATUS.ATTENDANCE_PENDING) summary.attendance_pending += 1;
     else if (row.status === CALC_STATUS.CALCULATED) summary.calculated += 1;
     else if (row.status === CALC_STATUS.RECALCULATION_REQUIRED) summary.recalculation_required += 1;
     else if (row.status === CALC_STATUS.READY_FOR_APPROVAL) summary.ready_for_approval += 1;
