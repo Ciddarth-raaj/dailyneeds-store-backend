@@ -341,6 +341,17 @@ the engine calculates. `NULL` means no override; `0` is the real setting "charge
 this employee no break at all", and the two stay distinguishable. No
 effective-date semantics exist on any path.
 
+**It needs a complete punched sequence.** Four or more punches AND an even
+number of them — 4, 6, 8 — the same precondition Extra Break Hours has, from
+the same predicate. Until `CALCULATION_VERSION` 8 the override asked only for
+`>= 4`, so a five- or seven-punch day was charged the employee's personal
+break while the engine was simultaneously reporting it as `MISSING_PUNCH` with
+provisional figures. Such a day is now calculated on the shift's own break:
+`break_allowance_source` is `SHIFT`, `break_override_minutes_applied` is
+`NULL`, and the missing-punch status, reason and note are exactly what they
+have always been. Historical rows keep whatever they were stored with; only an
+explicit, permitted recalculation produces a version-8 row.
+
 ## 7a. Extra Break Hours add to the day's allowance
 
 `new_employee.extra_break_hours` (DECIMAL, hours) is an **Employee Master**
@@ -365,9 +376,9 @@ never modified: this is an employee/date adjustment.
 8 and so on — because every punched break is an OUT followed by an IN. An odd
 count (5, 7 …) is a day with a punch missing: the engine returns
 `MISSING_PUNCH` for it and its figures are provisional, so it is calculated on
-the unextended allowance. (The older `special_break_override_minutes` still
-uses a bare `>= 4` and therefore still applies on an odd day; that is existing
-behaviour, reported rather than changed here.) A two-punch day ignores it completely and keeps the phased
+the unextended allowance. **The override obeys the same rule** since
+`CALCULATION_VERSION` 8 — both settings read one shared `completeSequence`
+predicate, so they cannot drift apart again. A two-punch day ignores it completely and keeps the phased
 break rule of §above unchanged; an odd-punch or absent day likewise. The actual
 break charged is still the sum of the OUT → IN gaps, so only the minutes beyond
 the combined allowance become a shortage, and an unused allowance feeds the

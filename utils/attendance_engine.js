@@ -130,8 +130,15 @@ const BREAK_CREDIT_CUTOFF_MINUTES = 15 * 60;
  *      A configured value that would leave no working minutes at all is
  *      refused rather than applied: the date is a BREAK_EXCEEDS_SHIFT review
  *      instead (see `calculateAttendanceDay`).
+ *   8  The employee break override of version 4 now requires the SAME
+ *      complete punched sequence: four or more punches AND an even number of
+ *      them. It had asked only for four or more, so a five- or seven-punch
+ *      day - a day the engine itself reports as MISSING_PUNCH, whose figures
+ *      are provisional - was charged the employee's personal break. Such a
+ *      day is now calculated on the shift's own break, like every other
+ *      incomplete day. Both settings read one shared predicate.
  */
-const CALCULATION_VERSION = 7;
+const CALCULATION_VERSION = 8;
 
 /** Every value `status` can take. A calculation is never left without one. */
 const CALC_STATUS = Object.freeze({
@@ -733,21 +740,40 @@ function calculateAttendanceDay(input = {}) {
     };
   }
 
+  // ============ THE ONE PRECONDITION BOTH EMPLOYEE BREAK SETTINGS SHARE ====
+  //
+  // A COMPLETE PUNCHED SEQUENCE: four or more punches AND an even number of
+  // them - 4, 6, 8 and so on.
+  //
+  // Every punched break is an OUT followed by an IN, so a day whose breaks
+  // are on record has an even punch count. Five or seven punches is a day
+  // with one punch MISSING: the engine returns MISSING_PUNCH for it below,
+  // its figures are provisional until somebody supplies the missing punch,
+  // and a provisional day must not also carry an employee-specific permitted
+  // break that the evidence does not support. A two-punch day has no OUT ->
+  // IN evidence of any break at all and is charged the SHIFT's allowance
+  // under the unchanged phased rule; an absent day is calculated on the
+  // shift's own figure too.
+  //
+  // ONE PREDICATE, BOTH SETTINGS. The override and the Extra Break Hours once
+  // asked this question in two slightly different ways - `>= 4` and
+  // `>= 4 && even` - which is exactly how a five-punch day came to be charged
+  // a personal break while being told a punch was missing. They ask it here,
+  // once, and cannot drift apart again.
+  const completeSequence = effectivePunches.length >= 4 && effectivePunches.length % 2 === 0;
+
   // The employee's special break override REPLACES the shift break (it does
   // not add to it), and because NRM is span - break, changing it changes the
   // number of minutes the employee owes for the day.
   //
-  // IT APPLIES ONLY WHEN THE BREAK WAS PUNCHED: four or more punches, so the
-  // OUT -> IN gaps are on record. A two-punch day has no evidence of any
-  // break at all and is charged the SHIFT's allowance under the phased rule;
-  // a longer personal allowance is not credited against a break nobody can
-  // see was taken. An absent or odd-punch day is likewise calculated on the
-  // shift's own figure.
+  // A CONFIGURED ZERO IS A REAL OVERRIDE - "charge this employee no break at
+  // all" - and is not the same as no override. `overrideConfigured` therefore
+  // tests for a finite number and never for truthiness.
   const overrideConfigured =
     break_override_minutes !== null &&
     break_override_minutes !== undefined &&
     Number.isFinite(Number(break_override_minutes));
-  const overrideGiven = overrideConfigured && effectivePunches.length >= 4;
+  const overrideGiven = overrideConfigured && completeSequence;
   const baseAllowedBreak = Math.max(
     0,
     Math.trunc(overrideGiven ? Number(break_override_minutes) : shift.break_minutes || 0)
@@ -763,26 +789,15 @@ function calculateAttendanceDay(input = {}) {
   // this employee on this date. The Shift Master is never touched: this is an
   // employee/date adjustment and the shift's own break stays what it is.
   //
-  // IT OBEYS THE SAME FOUR-PUNCH RULE, for the same reason. A longer personal
-  // allowance is credit against a break the punches can be seen to contain;
-  // a two-punch day has no OUT -> IN evidence of any break at all and is
-  // charged the phased shift allowance exactly as it is today. An odd-punch
-  // or absent day is likewise calculated on the unextended figure.
+  // IT OBEYS THE SAME `completeSequence` RULE as the override above, from the
+  // same predicate, for the same reason: an allowance is credit against a
+  // break the punches can be seen to contain.
   const extraConfigured =
     extra_break_minutes !== null &&
     extra_break_minutes !== undefined &&
     Number.isFinite(Number(extra_break_minutes)) &&
     Math.trunc(Number(extra_break_minutes)) > 0;
-  //
-  // A COMPLETE SEQUENCE, NOT MERELY FOUR OR MORE. Every punched break is an
-  // OUT followed by an IN, so a day that credits one has an EVEN number of
-  // punches: 4, 6, 8 and so on. Five or seven punches is a day with one
-  // punch missing - the engine returns MISSING_PUNCH for it below and the
-  // figures it reports are provisional - and a provisional day must not
-  // also carry a permitted break the evidence does not support. The old
-  // `>= 4` credited exactly those days.
   const shiftSpan = Math.max(0, Math.trunc(shift.shift_span_minutes || 0));
-  const completeSequence = effectivePunches.length >= 4 && effectivePunches.length % 2 === 0;
   const extraWanted = extraConfigured ? Math.trunc(Number(extra_break_minutes)) : 0;
 
   // THE SAFETY INVARIANT: resolvedAllowedBreak + extraBreak < shiftSpan.
@@ -817,7 +832,7 @@ function calculateAttendanceDay(input = {}) {
   base.nrm_minutes = nrm;
   if (overrideConfigured && !overrideGiven && effectivePunches.length > 0) {
     base.notes.push(
-      "Employee break override not applied: it needs four or more punches, so the shift's break is used"
+      "Employee break override not applied: it needs a complete punched sequence of four or more, so the shift's break is used"
     );
   }
   if (extraWanted > 0 && !extraGiven && !extraBreakExceedsShift && effectivePunches.length > 0) {

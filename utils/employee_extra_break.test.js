@@ -479,9 +479,17 @@ describe("the calculation version history is not rewritten", () => {
     assert.ok(!/Extra Break/i.test(four), "a later rule must never be backdated into an earlier version");
   });
 
-  it("Extra Break Hours is described under version 7, and the version is 7", () => {
-    const seven = history.slice(history.indexOf(" *   7 "));
+  it("Extra Break Hours is described under version 7, and version 7 is still about it", () => {
+    const seven = history.slice(history.indexOf(" *   7 "), history.indexOf(" *   8 "));
     assert.match(seven, /Extra Break Hours/);
-    assert.match(source, /const CALCULATION_VERSION = 7;/);
+    assert.ok(!/override/i.test(seven), "version 8's correction is not backdated into version 7");
+  });
+
+  it("version 8 is the override's complete-sequence correction, and the version is 8", () => {
+    const eight = history.slice(history.indexOf(" *   8 "));
+    assert.match(eight, /override/i);
+    assert.match(eight, /even number/i);
+    assert.match(eight, /MISSING_PUNCH/);
+    assert.match(source, /const CALCULATION_VERSION = 8;/);
   });
 });

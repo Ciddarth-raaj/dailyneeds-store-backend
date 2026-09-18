@@ -230,7 +230,7 @@ describe("A2 case 8 - the employee's special break override replaces the shift b
     assert.equal(result.break_charged_minutes, 60);
     assert.equal(result.worked_minutes, 660);
     assert.equal(result.shortage_minutes, 0);
-    assert.ok(result.notes.some((n) => /four or more punches/.test(n)));
+    assert.ok(result.notes.some((n) => /complete punched sequence of four or more/.test(n)));
   });
 
   it("a zero override on a four-punch day charges the actual gaps against an NRM of the whole span", () => {

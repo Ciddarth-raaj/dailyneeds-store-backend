@@ -306,3 +306,99 @@ describe("THE RELEASE GATE - a stored historical date is not restated by an Empl
     assert.equal(state.storedByDate.get(DATE).nrm_minutes, 660, "a read stored nothing");
   });
 });
+
+/* ============ the version bump does not restate what version 7 stored ==== */
+
+/**
+ * `CALCULATION_VERSION` went from 7 to 8 because the Special Break Override
+ * now needs a complete punched sequence, which changes what a five- or
+ * seven-punch day comes to. A version bump is a statement about what the
+ * ENGINE would produce - it is not an instruction to restate history, and
+ * deploying it must not silently rewrite a stored month.
+ */
+describe("a stored version-7 row survives the version-8 deployment", () => {
+  /** A row stored under version 7, exactly as the old engine wrote it. */
+  const v7Row = (over = {}) => ({
+    employee_id: 42,
+    attendance_date: DATE,
+    work_shift_id: 7,
+    shift_snapshot: JSON.stringify({ work_shift_id: 7, break_minutes: 60, shift_span_minutes: 720 }),
+    shift_snapshot_hash: "v7-hash",
+    raw_punch_ids: JSON.stringify([1, 2, 3, 4]),
+    effective_punches: JSON.stringify([]),
+    punch_count: 4,
+    attendance_day_count: 1,
+    nrm_minutes: 630,
+    span_minutes: 720,
+    break_allowance_minutes: 90,
+    break_allowance_source: "EMPLOYEE_OVERRIDE",
+    break_override_minutes_applied: 90,
+    extra_break_minutes_applied: 0,
+    actual_gap_minutes: 90,
+    break_charged_minutes: 90,
+    worked_minutes: 630,
+    shortage_minutes: 0,
+    candidate_ot_minutes: 0,
+    approved_ot_minutes: 0,
+    status: "FINAL",
+    is_final: 1,
+    review_reasons: JSON.stringify([]),
+    calculation_version: 7,
+    ...over,
+  });
+
+  it("reads as STORED, at its own version, with nothing recalculated", async () => {
+    const { state, usecase } = world();
+    state.storedByDate.set(DATE, v7Row());
+    const before = JSON.stringify(state.storedByDate.get(DATE));
+
+    const day = await readDay(usecase);
+
+    assert.equal(day.calculation_source, CALCULATION_SOURCE.STORED);
+    assert.equal(day.calculation_version, 7, "the row keeps the version it was written under");
+    assert.equal(day.nrm_minutes, 630);
+    assert.equal(day.break_allowance_minutes, 90);
+    assert.equal(day.break_override_minutes_applied, 90);
+    assert.equal(JSON.stringify(state.storedByDate.get(DATE)), before, "and nothing was written");
+  });
+
+  it("an explicit recalculation on an UNLOCKED month produces a version-8 row", async () => {
+    const { state, usecase } = world();
+    state.storedByDate.set(DATE, v7Row());
+
+    await usecase.recalculateRange({ employee_id: 42, from_date: DATE, to_date: DATE });
+
+    const after = state.storedByDate.get(DATE);
+    assert.equal(after.calculation_version, 8);
+    // This employee has no override and no extra break, so the recalculated
+    // day is the shift's own break - which is what makes the restatement
+    // visible: 90/630 was the old stored answer, 60/660 is the new one.
+    assert.equal(after.break_allowance_minutes, 60);
+    assert.equal(after.nrm_minutes, 660);
+    assert.equal(after.break_override_minutes_applied, null);
+
+    const day = await readDay(usecase);
+    assert.equal(day.calculation_source, CALCULATION_SOURCE.STORED);
+    assert.equal(day.calculation_version, 8);
+  });
+
+  it("a LOCKED month refuses the recalculation and keeps its version-7 row", async () => {
+    const { state, usecase } = world();
+    state.storedByDate.set(DATE, v7Row());
+    state.lockedMonths.add("2026-8");
+    const before = JSON.stringify(state.storedByDate.get(DATE));
+
+    await assert.rejects(
+      () => usecase.recalculateRange({ employee_id: 42, from_date: DATE, to_date: DATE }),
+      (err) => {
+        assert.equal(err.code, "PAYROLL_MONTH_LOCKED");
+        return true;
+      }
+    );
+
+    assert.equal(JSON.stringify(state.storedByDate.get(DATE)), before);
+    const day = await readDay(usecase);
+    assert.equal(day.calculation_version, 7, "a locked month keeps the figures it was approved on");
+    assert.equal(day.nrm_minutes, 630);
+  });
+});
