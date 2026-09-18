@@ -1,4 +1,9 @@
 const P = require("./hr_permissions");
+const { PAYMENT_TYPE } = require("./employee_master_sections");
+const {
+  EMPLOYMENT_TYPES,
+  GRADES,
+} = require("../utils/employment_classification");
 
 /**
  * Reports — the Employee Master field catalogue.
@@ -13,37 +18,44 @@ const P = require("./hr_permissions");
  *
  * ============================================ THE CLASSIFICATION SWEEP ====
  *
- * All 47 columns of `new_employee` were enumerated from the migration history
- * and classified. Every one is accounted for below; none is silently ignored.
+ * All 58 columns of `new_employee` were enumerated and classified. The list
+ * held against is `EMPLOYEE_MASTER_COLUMNS` in `repository/employee.js` -
+ * the Employee Master's own result contract, which
+ * `employee_detail_columns.test.js` already holds against the migrations. So
+ * a column added to the employee master fails that test until it is listed
+ * there, and `employee_report_catalogue.test.js` then fails until it is
+ * classified HERE. Every column is accounted for below; none is silently
+ * ignored.
  *
- * INCLUDED (23 columns, via the entries in this file):
+ * INCLUDED (40 columns, via the entries in this file):
  *   employee_id, employee_name, father_name, dob, gender, marital_status,
- *   spouse_name, blood_group, permanent_address, residential_address,
- *   primary_contact_number, alternate_contact_number, email_id,
- *   qualification, additional_course, previous_experience, date_of_joining,
- *   store_id, department_id, designation_id, shift_id, status, pan_no,
- *   uan, pf_number, esi_number, bank_name, ifsc, account_no
+ *   marriage_date, spouse_name, permanent_address, residential_address,
+ *   primary_contact_number, alternate_contact_number, email_id, blood_group,
+ *   qualification, bank_name, ifsc, account_no, esi_number, pf_number, uan,
+ *   store_id, department_id, designation_id, shift_id, previous_experience,
+ *   additional_course, date_of_joining, pan_no, payment_type, status,
+ *   resignation_date, default_work_shift_id, pf_applicable, esi_applicable,
+ *   previous_pf_member, previous_eps_member, attendance_required,
+ *   employment_type, grade
  *
- * PAYROLL_DEFERRED (2):
- *   salary          Payroll owns pay. HR stores an engaged figure; earnings,
- *   payment_type    deductions and net pay are Payroll's, and exporting the
- *                   master figure from an HR report invites it being read as
- *                   pay. Excluded deliberately, not by oversight.
- *
- * DELIBERATELY_EXCLUDED (16), each with its reason:
+ * DELIBERATELY_EXCLUDED (18), each with its reason:
  *   employee_image        operational/internal - a base64 LONGTEXT blob; not
  *                         meaningful in a spreadsheet cell
- *   marriage_date         not meaningful to HR reporting today, and stored as
- *                         VARCHAR with no validated format
  *   introducer_name       operational/internal - recruitment referral notes
  *   introducer_details    operational/internal, LONGTEXT free text
+ *   salary                LEGACY/UNOWNED - a free-text VARCHAR(45) holding one
+ *                         undated number. M2 neither reads it nor copies from
+ *                         it, and the Employee Master's Payroll section does
+ *                         not show it. What IS reported is the current
+ *                         APPROVED `employee_salary` structure, in the Payroll
+ *                         group below, behind `view_salary`. Exporting this
+ *                         column beside those figures would put two different
+ *                         answers to "what is this person paid" in one row
+ *   esi                   deprecated/legacy - superseded by esi_number and by
+ *                         esi_applicable; free text with no agreed meaning
+ *   pf                    deprecated/legacy - superseded by pf_number,
+ *                         pf_applicable and previous_pf_member, same
  *   uniform_qty           operational/internal issue tracking
- *   esi                   deprecated/legacy - superseded by esi_number; a
- *                         yes/no-ish free-text column with no agreed meaning
- *   pf                    deprecated/legacy - superseded by pf_number, same
- *   shift_code            sync artefact - a Digisme-era code duplicating
- *                         shift_id; the resolved shift name is exported
- *                         instead
  *   online_portal         auth/internal - portal access flag
  *   telegram_username     operational/internal messaging handle
  *   aadhaar_card_no       ENCRYPTED/SECURITY - the legacy plaintext Aadhaar
@@ -51,14 +63,34 @@ const P = require("./hr_permissions");
  *                         it; a full Aadhaar must never be exportable, so it
  *                         has no catalogue entry AT ALL rather than a gated
  *                         one (§30)
- *   aadhaar_card_name     security - part of the same legacy Aadhaar record
+ *   aadhaar_card_name     security - part of the same legacy Aadhaar record.
+ *                         The C2 VERIFIED name is reported instead, as
+ *                         `aadhaar_name`, behind `view_employee_aadhaar`
  *   aadhaar_card_image    security - document storage internals
- *   resignation_date      not exported here: the population already excludes
- *                         anyone with a resignation record (see
- *                         repository/employee_scope.js), so the column is
- *                         effectively always empty in this report
+ *   shift_code            sync artefact - a Digisme-era code duplicating
+ *                         shift_id; the resolved shift name is exported
+ *                         instead
+ *   special_break_override_minutes
+ *                         ATTENDANCE ENGINE CONFIGURATION, not an employee
+ *                         master field. It is set on the attendance screens
+ *                         behind `manage_employee_break_override`, appears
+ *                         nowhere on the Employee Master, and means nothing
+ *                         without the NRM rules that read it
+ *   source_system         sync provenance - which system delivered this row
+ *   source_employee_code  sync provenance - that system's own identifier
  *   created_at            operational/internal row metadata
  *   updated_at            operational/internal row metadata
+ *
+ * NOT `new_employee` COLUMNS, and reported from their own tables:
+ *   employee_aadhaar_identity  aadhaar_status, aadhaar_last4, aadhaar_name
+ *   employee_bank_verification bank_status
+ *   employee_salary            the twelve Payroll fields - the CURRENT
+ *                              APPROVED structure as at today, resolved by the
+ *                              same rule `repository/employee_salary.js`
+ *                              #getCurrentSalary uses
+ *   outlets / department / designation / shift_master / work_shift
+ *                              the resolved LABEL for a foreign key, which is
+ *                              what the Employee Master displays
  *
  * ------------------------------------------------------------- join scope
  * `join_footprint` records what a field costs to resolve, so the resolver can
@@ -66,10 +98,12 @@ const P = require("./hr_permissions");
  *
  *   base         a column on new_employee
  *   lookup       one LEFT JOIN to a master (outlets / department /
- *                designation / shift_master)
+ *                designation / shift_master / work_shift)
  *   c2_identity  the C2 Aadhaar identity table
  *   c2_bank      the C2 bank verification, resolved through C2's own status
  *                logic rather than read raw
+ *   m2_salary    the CURRENT APPROVED `employee_salary` row, pinned by a
+ *                correlated subquery so the join can never multiply a row
  *   derived      computed from a base column, no extra table
  *
  * ------------------------------------------------------- history_backed
@@ -114,6 +148,66 @@ const asDate = (value) => {
 };
 
 const EMPLOYMENT_STATUS_LABEL = (value) => (Number(value) === 1 ? "Active" : "Inactive");
+
+/**
+ * A TINYINT(1) that is allowed to be NULL, in words.
+ *
+ * THREE ANSWERS AND NOT TWO, exactly as the Statutory section of the Employee
+ * Master draws them: 1 yes, 0 no, and NULL "Not recorded" - which is a real,
+ * permanent state for every employee who predates the column. Exporting NULL
+ * as "No" would assert a statutory fact nobody has stated, which is the very
+ * inference `20260915120000-m2-salary-engine` refuses to make.
+ */
+const TRISTATE_LABEL = (value) => {
+  if (value === null || value === undefined || value === "") return "Not recorded";
+  return Number(value) === 1 ? "Yes" : "No";
+};
+
+/**
+ * `attendance_required` is NOT NULL DEFAULT 1, so it has only two answers and
+ * gets its own transform rather than borrowing the tri-state one above: a
+ * "Not recorded" that can never occur is a column nobody can trust.
+ */
+const ATTENDANCE_REQUIRED_LABEL = (value) => {
+  // Only 0 is No. Anything else - including an absent value, which the column
+  // cannot produce - is Yes, which is what `AttendanceRequiredSection.jsx`
+  // already does with `value !== false`. A report and the profile must not
+  // disagree about somebody's attendance expectation.
+  if (value === null || value === undefined || String(value).trim() === "") return "Yes";
+  return Number(value) === 0 ? "No" : "Yes";
+};
+
+/**
+ * Bank or Cash, from `constants/employee_master_sections.js` - the same 1/2
+ * the Employee Master's Payment Details section reads and writes. The column
+ * is a VARCHAR, so an unrecognised value is reported as "Not recorded" rather
+ * than guessed at in either direction.
+ */
+/**
+ * A money column, as it is stored.
+ *
+ * DECIMAL arrives from the driver as a string, and it leaves as that string:
+ * no rounding, no currency symbol, no thousands separator. A spreadsheet cell
+ * holding `45000.00` is a number the reader can sum; one holding `Rs 45,000.00`
+ * is text. Formatting is the screen's job and `util/salaryView.js` does it.
+ *
+ * NULL IS BLANK AND NEVER ZERO. An unresolved statutory figure - the PENDING
+ * that `employee_salary` records when a contribution cannot be worked out -
+ * is not a contribution of nothing, and printing 0 for it understates what
+ * the employee is owed and what the employer will pay.
+ */
+const asAmount = (value) => {
+  if (value === null || value === undefined || String(value).trim() === "") return null;
+  return String(value);
+};
+
+const PAYMENT_TYPE_LABEL = (value) => {
+  if (value === null || value === undefined || String(value).trim() === "") return "Not recorded";
+  const n = Number(value);
+  if (n === PAYMENT_TYPE.BANK) return "Bank";
+  if (n === PAYMENT_TYPE.CASH) return "Cash";
+  return "Not recorded";
+};
 
 /**
  * ============================================== FILTERING THE SELECTED FIELD
@@ -185,6 +279,37 @@ const GENDER_OPTIONS = [
 ];
 
 /**
+ * The two classification sets, built from `utils/employment_classification.js`
+ * rather than spelled again here. That module is what the ENUM columns mirror
+ * and what the API validates against, so a value offered here is a value the
+ * column can hold - and adding a grade in one place cannot leave the report
+ * offering a filter that matches nothing.
+ */
+const EMPLOYMENT_TYPE_OPTIONS = EMPLOYMENT_TYPES.map((v) => ({ value: v, label: v }));
+const GRADE_OPTIONS = GRADES.map((v) => ({ value: v, label: `Grade ${v}` }));
+
+/**
+ * YES / NO FOR A NULLABLE FLAG, AND WHY "NOT RECORDED" IS NOT ON THE LIST.
+ *
+ * An ENUM filter is compiled to `expr = ?`, and nothing equals NULL in SQL -
+ * `pf_applicable = 'NULL'` matches no row and would look like a working filter
+ * returning an honest empty answer. Rather than grow a second comparison for
+ * one option, the filter offers the two values a caller can actually ask for.
+ * The COLUMN still exports "Not recorded" through `TRISTATE_LABEL`, so the
+ * unrecorded employees are visible - they are simply not filterable to.
+ */
+const YES_NO_OPTIONS = [
+  { value: "1", label: "Yes" },
+  { value: "0", label: "No" },
+];
+
+/** Bank / Cash, by the ids `employee_master_sections.js` defines. */
+const PAYMENT_TYPE_OPTIONS = [
+  { value: String(PAYMENT_TYPE.BANK), label: "Bank" },
+  { value: String(PAYMENT_TYPE.CASH), label: "Cash" },
+];
+
+/**
  * Every exportable field. `select` is a fixed SQL expression owned by this
  * file; `alias` is what the row comes back as.
  */
@@ -223,6 +348,19 @@ const FIELDS = [
   { key: "spouse_name", label: "Spouse Name", group: "Identity",
     select: "new_employee.spouse_name", join_footprint: "base",
     filter: { type: FILTER.TEXT },
+    history_backed: false, enabled: true },
+
+  // ON THE EMPLOYEE MASTER AND THEREFORE HERE. Excluded by the first sweep as
+  // "not meaningful to HR reporting"; Personal Details displays it, which
+  // settles that question the other way.
+  //
+  // NO FILTER, DELIBERATELY. The column is VARCHAR(45) with no validated
+  // format - unlike `dob` and `date_of_joining`, which are real DATEs - so a
+  // from/to range would be a LEXICAL comparison over whatever text is in
+  // there, and would quietly omit rows whose value is spelled differently. It
+  // is exported, tolerantly, and not filtered on.
+  { key: "marriage_date", label: "Marriage Date", group: "Identity",
+    select: "new_employee.marriage_date", join_footprint: "base", transform: asDate,
     history_backed: false, enabled: true },
 
   { key: "blood_group", label: "Blood Group", group: "Identity",
@@ -269,10 +407,63 @@ const FIELDS = [
     filter: { type: FILTER.MASTER, master: "designations", maps_to: "designation_ids" },
     history_backed: true, default_selected: true, enabled: true },
 
-  { key: "shift", label: "Shift", group: "Employment",
+  // THE LEGACY `shift_master` ROSTER, kept under the key a seeded template
+  // already names. It is NOT the work shift the Employment Details section
+  // shows today - that is `work_shift` below - and the two are different
+  // columns on `new_employee`, so neither can stand in for the other.
+  { key: "shift", label: "Shift (legacy)", group: "Employment",
     select: "shift_master.shift_name", join: "shift_master", join_footprint: "lookup",
     filter: { type: FILTER.TEXT },
     history_backed: true, enabled: true },
+
+  // THE WORK SHIFT THE EMPLOYEE MASTER ACTUALLY DISPLAYS, resolved to its name
+  // from `new_employee.default_work_shift_id` - the column
+  // `repository/employee_work_shift.js` reads and writes. Unassigned is NULL
+  // and exports blank, which is a real state and not an error.
+  { key: "work_shift", label: "Work Shift", group: "Employment",
+    select: "work_shift.shift_name", join: "work_shift", join_footprint: "lookup",
+    filter: { type: FILTER.TEXT },
+    history_backed: true, enabled: true },
+
+  // CLASSIFICATION ONLY, and no permission of its own. Neither column decides
+  // anything in this codebase - not pay, not attendance, not a right - and
+  // neither is in `constants/sensitive_fields.js`, so gating them would invent
+  // a restriction the Employee Master does not apply.
+  { key: "employment_type", label: "Employment Type", group: "Employment",
+    select: "new_employee.employment_type", join_footprint: "base",
+    filter: { type: FILTER.ENUM, options: EMPLOYMENT_TYPE_OPTIONS },
+    history_backed: false, enabled: true },
+
+  { key: "grade", label: "Grade", group: "Employment",
+    select: "new_employee.grade", join_footprint: "base",
+    filter: { type: FILTER.ENUM, options: GRADE_OPTIONS },
+    history_backed: false, enabled: true },
+
+  // WHETHER BIOMETRIC ATTENDANCE IS EXPECTED. Read-only everywhere except an
+  // administrator's own toggle, shown to everybody who may see the profile,
+  // and not a sensitive field - so it is reportable as it is displayed. It is
+  // NOT employment status: an employee with No is active, paid and simply not
+  // expected to punch.
+  { key: "attendance_required", label: "Attendance Required", group: "Employment",
+    select: "new_employee.attendance_required", join_footprint: "base",
+    transform: ATTENDANCE_REQUIRED_LABEL,
+    filter: { type: FILTER.ENUM, options: YES_NO_OPTIONS },
+    history_backed: false, enabled: true },
+
+  // THE DATE RECORDED BY THE RESIGN ACTION. The first sweep excluded it on the
+  // grounds that the population never contains anyone who has left - which is
+  // true of the HR DIRECTORY and deliberately NOT true here: Reports does not
+  // inherit that population rule, and its status filter is what decides who is
+  // in the report. So an Inactive report can now say WHEN, which was the one
+  // thing it could not.
+  { key: "resignation_date", label: "Resignation Date", group: "Employment",
+    select: "DATE_FORMAT(new_employee.resignation_date, '%Y-%m-%d')",
+    // Filtered on the bare DATE column, projected as ISO text - the same
+    // split `date_of_joining` above makes, and for the same reason.
+    filter_select: "new_employee.resignation_date",
+    join_footprint: "base", transform: asDate,
+    filter: { type: FILTER.DATE },
+    history_backed: false, enabled: true },
 
   /* ------------------------------------------------------------- Contact */
   { key: "mobile", label: "Mobile", group: "Contact",
@@ -331,6 +522,22 @@ const FIELDS = [
     join: "aadhaar_identity", join_footprint: "c2_identity",
     history_backed: false, enabled: true },
 
+  // THE VERIFIED LEGAL NAME, and the ONE Aadhaar field with a permission on
+  // it. `hr_permissions.VIEW_EMPLOYEE_AADHAAR` is what the profile requires
+  // before it shows "Name as per Aadhaar", so Reports requires the same key -
+  // otherwise a report would be a way around it, which is exactly what §A of
+  // this catalogue exists to prevent. It is NOT `view_employee_sensitive`:
+  // that key is far broader and a store manager does not hold it.
+  //
+  // It is a name, not an identifier: no digit of the Aadhaar is reachable
+  // through it, and the number itself still has no catalogue entry at all.
+  { key: "aadhaar_name", label: "Name as per Aadhaar", group: "Aadhaar",
+    select: "employee_aadhaar_identity.name_as_per_aadhaar",
+    join: "aadhaar_identity", join_footprint: "c2_identity",
+    permission: P.VIEW_EMPLOYEE_AADHAAR, sensitive: true,
+    filter: { type: FILTER.TEXT },
+    history_backed: false, enabled: true },
+
   /* ----------------------------------------------------------- Statutory */
   // B3 removes these from any response for a caller without the key, so the
   // catalogue gates them the same way rather than relying on the filter to
@@ -359,10 +566,67 @@ const FIELDS = [
     filter: { type: FILTER.TEXT },
     history_backed: false, enabled: true },
 
+  // THE FOUR STATUTORY FACTS THE NUMBERS ABOVE QUALIFY, and every one of them
+  // is in `constants/sensitive_fields.js` - so they carry exactly the key the
+  // numbers do, and no less. B3's own comment is the rule being followed here:
+  // a caller who may not see somebody's PF number has no business learning
+  // whether they have one. Gating them any more weakly would make Reports the
+  // way around B3 that this catalogue exists to refuse.
+  //
+  // They are four separate questions and stay four separate columns, for the
+  // reason M2 gives: EPF membership and EPS membership have two answers, and
+  // the pension split turns on the second one only.
+  { key: "pf_applicable", label: "PF Applicable", group: "Statutory",
+    select: "new_employee.pf_applicable", join_footprint: "base",
+    permission: P.VIEW_EMPLOYEE_SENSITIVE, sensitive: true,
+    transform: TRISTATE_LABEL,
+    filter: { type: FILTER.ENUM, options: YES_NO_OPTIONS },
+    history_backed: false, enabled: true },
+
+  { key: "previous_pf_member", label: "Existing / Previous PF Member", group: "Statutory",
+    select: "new_employee.previous_pf_member", join_footprint: "base",
+    permission: P.VIEW_EMPLOYEE_SENSITIVE, sensitive: true,
+    transform: TRISTATE_LABEL,
+    filter: { type: FILTER.ENUM, options: YES_NO_OPTIONS },
+    history_backed: false, enabled: true },
+
+  { key: "previous_eps_member", label: "Existing / Previous EPS Member", group: "Statutory",
+    select: "new_employee.previous_eps_member", join_footprint: "base",
+    permission: P.VIEW_EMPLOYEE_SENSITIVE, sensitive: true,
+    transform: TRISTATE_LABEL,
+    filter: { type: FILTER.ENUM, options: YES_NO_OPTIONS },
+    history_backed: false, enabled: true },
+
+  { key: "esi_applicable", label: "ESI Applicable", group: "Statutory",
+    select: "new_employee.esi_applicable", join_footprint: "base",
+    permission: P.VIEW_EMPLOYEE_SENSITIVE, sensitive: true,
+    transform: TRISTATE_LABEL,
+    filter: { type: FILTER.ENUM, options: YES_NO_OPTIONS },
+    history_backed: false, enabled: true },
+
   /* ---------------------------------------------------------------- Bank */
   // The verification STATUS is not sensitive under B3 - knowing an account is
   // unverified is what lets HR chase it, and it discloses nothing about the
   // account. The account itself is, and is exported masked even then.
+  // HOW THIS EMPLOYEE IS PAID - the Employee Master's Payment Details section
+  // opens with it, and the bank columns below it only matter when it says
+  // Bank. It was excluded by the first sweep as "Payroll's", which conflated
+  // two different things: what somebody is PAID is Payroll's and stays out of
+  // this group, but the payment ROUTE is an employee master field that HR
+  // records and maintains.
+  //
+  // IT KEEPS ITS EXISTING FIELD-LEVEL PERMISSION AND IS NOT WEAKENED. B3 lists
+  // `payment_type` in `constants/sensitive_fields.js` and strips it from any
+  // response to a caller without `view_employee_sensitive`, so the catalogue
+  // demands the same key - the identical treatment `bank_name`, `ifsc` and
+  // `account_no` already get.
+  { key: "payment_type", label: "Payment Type", group: "Bank",
+    select: "new_employee.payment_type", join_footprint: "base",
+    permission: P.VIEW_EMPLOYEE_SENSITIVE, sensitive: true,
+    transform: PAYMENT_TYPE_LABEL,
+    filter: { type: FILTER.ENUM, options: PAYMENT_TYPE_OPTIONS },
+    history_backed: false, enabled: true },
+
   { key: "bank_status", label: "Bank Verification Status", group: "Bank",
     select: "COALESCE(employee_bank_verification.status, 'NOT_PROVIDED')",
     join: "bank_verification", join_footprint: "c2_bank",
@@ -385,6 +649,110 @@ const FIELDS = [
     permission: P.VIEW_EMPLOYEE_SENSITIVE, sensitive: true,
     filter: { type: FILTER.TEXT },
     history_backed: false, enabled: true },
+
+  /* ------------------------------------------------------------- Payroll */
+  //
+  // THE CURRENT APPROVED SALARY STRUCTURE - the same figures the Employee
+  // Master's Payroll section shows, read from the same table by the same rule.
+  //
+  // NOT `new_employee.salary`. That column is an undated free-text VARCHAR
+  // that M2 neither reads nor copies from, and it has no catalogue entry and
+  // is still in `FORBIDDEN_KEYS`. Everything below comes from `employee_salary`
+  // through the `current_salary` join, which pins ONE row - the latest APPROVED
+  // revision effective on or before today - exactly as
+  // `repository/employee_salary.js#getCurrentSalary` resolves it. An employee
+  // with no approved salary joins to nothing and every column exports blank,
+  // which is the honest answer and not a zero.
+  //
+  // `view_salary`, AND NOT A NEW RIGHT. M2 declared that key for reading a
+  // salary structure and its history, and the Employee Master's Payroll
+  // section and the Payroll screens are already gated on it. Reports uses the
+  // SAME key, so somebody who cannot see a salary on the profile cannot export
+  // one either, and granting the reporting keys confers no pay access
+  // whatsoever. Inventing a `report_salary` right would have been a second
+  // answer to one question.
+  //
+  // NOTHING HERE IS CALCULATED. Every figure was computed by the M2 engine
+  // when the revision was written, against the statutory snapshot of that
+  // moment, and is exported as stored. A report that recomputed a 2026 record
+  // against today's rates is how a payslip and a filing quietly stop agreeing.
+  //
+  // NO AMOUNT IS FILTERABLE. The catalogue has no numeric filter type, and
+  // adding one for this would be a query-builder feature rather than a form
+  // control - see §12. The effective date is a real DATE and is filterable.
+  { key: "salary_effective_from", label: "Salary Effective From", group: "Payroll",
+    select: "DATE_FORMAT(employee_salary.effective_from, '%Y-%m-%d')",
+    filter_select: "employee_salary.effective_from",
+    join: "current_salary", join_footprint: "m2_salary", transform: asDate,
+    permission: P.VIEW_SALARY, sensitive: true,
+    filter: { type: FILTER.DATE },
+    history_backed: false, enabled: true },
+
+  { key: "monthly_gross", label: "Monthly Gross", group: "Payroll",
+    select: "employee_salary.monthly_gross",
+    join: "current_salary", join_footprint: "m2_salary", transform: asAmount,
+    permission: P.VIEW_SALARY, sensitive: true,
+    history_backed: false, enabled: true },
+
+  { key: "daily_salary", label: "Daily Salary (Gross / 26)", group: "Payroll",
+    select: "employee_salary.daily_salary",
+    join: "current_salary", join_footprint: "m2_salary", transform: asAmount,
+    permission: P.VIEW_SALARY, sensitive: true,
+    history_backed: false, enabled: true },
+
+  { key: "basic", label: "Basic", group: "Payroll",
+    select: "employee_salary.basic",
+    join: "current_salary", join_footprint: "m2_salary", transform: asAmount,
+    permission: P.VIEW_SALARY, sensitive: true,
+    history_backed: false, enabled: true },
+
+  { key: "hra", label: "HRA", group: "Payroll",
+    select: "employee_salary.hra",
+    join: "current_salary", join_footprint: "m2_salary", transform: asAmount,
+    permission: P.VIEW_SALARY, sensitive: true,
+    history_backed: false, enabled: true },
+
+  { key: "conveyance", label: "Conveyance", group: "Payroll",
+    select: "employee_salary.conveyance",
+    join: "current_salary", join_footprint: "m2_salary", transform: asAmount,
+    permission: P.VIEW_SALARY, sensitive: true,
+    history_backed: false, enabled: true },
+
+  { key: "special_allowance", label: "Special Allowance", group: "Payroll",
+    select: "employee_salary.special_allowance",
+    join: "current_salary", join_footprint: "m2_salary", transform: asAmount,
+    permission: P.VIEW_SALARY, sensitive: true,
+    history_backed: false, enabled: true },
+
+  { key: "employee_pf", label: "Employee PF", group: "Payroll",
+    select: "employee_salary.employee_pf",
+    join: "current_salary", join_footprint: "m2_salary", transform: asAmount,
+    permission: P.VIEW_SALARY, sensitive: true,
+    history_backed: false, enabled: true },
+
+  { key: "employer_pf_total", label: "Employer PF (total)", group: "Payroll",
+    select: "employee_salary.employer_pf_total",
+    join: "current_salary", join_footprint: "m2_salary", transform: asAmount,
+    permission: P.VIEW_SALARY, sensitive: true,
+    history_backed: false, enabled: true },
+
+  { key: "employee_esi", label: "Employee ESI", group: "Payroll",
+    select: "employee_salary.employee_esi",
+    join: "current_salary", join_footprint: "m2_salary", transform: asAmount,
+    permission: P.VIEW_SALARY, sensitive: true,
+    history_backed: false, enabled: true },
+
+  { key: "employer_esi", label: "Employer ESI", group: "Payroll",
+    select: "employee_salary.employer_esi",
+    join: "current_salary", join_footprint: "m2_salary", transform: asAmount,
+    permission: P.VIEW_SALARY, sensitive: true,
+    history_backed: false, enabled: true },
+
+  { key: "monthly_ctc", label: "Monthly CTC", group: "Payroll",
+    select: "employee_salary.monthly_ctc",
+    join: "current_salary", join_footprint: "m2_salary", transform: asAmount,
+    permission: P.VIEW_SALARY, sensitive: true,
+    history_backed: false, enabled: true },
 ];
 
 /** The joins each `join` name expands to. Fixed text, never caller-derived. */
@@ -396,10 +764,40 @@ const JOINS = {
     "LEFT JOIN designation ON designation.designation_id = new_employee.designation_id",
   shift_master:
     "LEFT JOIN shift_master ON shift_master.shift_id = new_employee.shift_id",
+  work_shift:
+    "LEFT JOIN work_shift ON work_shift.work_shift_id = new_employee.default_work_shift_id",
   aadhaar_identity:
     "LEFT JOIN employee_aadhaar_identity ON employee_aadhaar_identity.employee_id = new_employee.employee_id",
   bank_verification:
     "LEFT JOIN employee_bank_verification ON employee_bank_verification.employee_id = new_employee.employee_id",
+  // THE CURRENT APPROVED SALARY, PINNED TO ONE ROW.
+  //
+  // `employee_salary` holds one row per revision, so a plain
+  // `ON employee_salary.employee_id = new_employee.employee_id` would turn one
+  // employee into one row PER REVISION - an export whose row count silently
+  // disagrees with the preview's, which is the one invariant
+  // `usecase/employee_report_service.js` exists to protect. Joining on the
+  // primary key chosen by a correlated subquery keeps it at most one row.
+  //
+  // The subquery is the same rule, statement for statement, as
+  // `repository/employee_salary.js#getCurrentSalary`: the latest APPROVED
+  // revision effective on or before today, ordered by effective date and then
+  // by id so two rows sharing a date still resolve to the later one. PENDING
+  // is not current because it has not been agreed, REJECTED because it was
+  // refused, and an approved future revision not until its date arrives.
+  //
+  // Fixed text like every other join here - `CURDATE()` and 'APPROVED' are
+  // this file's, and no part of it comes from a caller.
+  current_salary: [
+    "LEFT JOIN employee_salary ON employee_salary.salary_id = (",
+    "         SELECT s.salary_id",
+    "           FROM employee_salary s",
+    "          WHERE s.employee_id = new_employee.employee_id",
+    "            AND s.status = 'APPROVED'",
+    "            AND s.effective_from <= CURDATE()",
+    "          ORDER BY s.effective_from DESC, s.salary_id DESC",
+    "          LIMIT 1)",
+  ].join("\n"),
 };
 
 const GROUP_ORDER = [
@@ -410,6 +808,9 @@ const GROUP_ORDER = [
   "Aadhaar",
   "Statutory",
   "Bank",
+  // Last, and behind `view_salary` to a field. The order mirrors the Employee
+  // Master's own sections, where Payroll is the last one before Documents.
+  "Payroll",
 ];
 
 const BY_KEY = new Map(FIELDS.map((f) => [f.key, f]));
@@ -424,8 +825,18 @@ const FORBIDDEN_KEYS = [
   "aadhaar_ciphertext",
   "aadhaar_fingerprint",
   "account_fingerprint",
+  // The LEGACY free-text column, and only that. `new_employee.salary` is an
+  // undated VARCHAR nothing owns; the current approved structure is reported
+  // through the Payroll group above, under `view_salary`, and under its own
+  // keys - `monthly_gross` and the rest. This entry stops the old column from
+  // ever becoming a field again by the name it is known by.
   "salary",
-  "payment_type",
+  // `payment_type` WAS HERE AND IS NOT ANY MORE. It is an employee master
+  // field the Payment Details section records and displays, so it is now a
+  // catalogue entry - gated on `view_employee_sensitive`, exactly as B3
+  // already gates the column in every other response. Listing it here as well
+  // would mean a forbidden key that exists, which is a contradiction rather
+  // than a second defence.
 ];
 
 /** Every field that carries filter metadata. Never a second hand-kept list. */

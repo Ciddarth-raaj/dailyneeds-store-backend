@@ -62,12 +62,22 @@ test("EVERY FIELD A USER MAY SEE IS FILTERABLE, EXCEPT THE MASKED TWO", () => {
   const seen = resolver.discoverFields(sensitive);
   const notFilterable = seen.filter((f) => !f.filter).map((f) => f.key);
 
-  // The exception, and the reason it is one: both are exported MASKED or
-  // PARTIAL. A filter on either compares the STORED value, so a permitted
-  // user could ask "does anybody's account end 4321" and, by counting
-  // results, walk the number. A masked column that can be filtered is not
-  // masked.
-  assert.deepStrictEqual(notFilterable.sort(), ["aadhaar_last4", "account_no"]);
+  // TWO EXCEPTIONS FOR ONE REASON AND ONE FOR ANOTHER.
+  //
+  // `aadhaar_last4` and `account_no` are exported MASKED or PARTIAL. A filter
+  // on either compares the STORED value, so a permitted user could ask "does
+  // anybody's account end 4321" and, by counting results, walk the number. A
+  // masked column that can be filtered is not masked.
+  //
+  // `marriage_date` is neither masked nor secret: it is VARCHAR(45) with no
+  // validated format, unlike the two real DATE columns beside it, so a
+  // from/to range would be a LEXICAL comparison over free text and would
+  // quietly drop rows spelled differently. A filter that silently omits rows
+  // is worse than no filter.
+  assert.deepStrictEqual(
+    notFilterable.sort(),
+    ["aadhaar_last4", "account_no", "marriage_date"]
+  );
 
   // Everything else offers a control.
   for (const f of seen.filter((x) => x.filter)) {
@@ -79,6 +89,34 @@ test("EVERY FIELD A USER MAY SEE IS FILTERABLE, EXCEPT THE MASKED TWO", () => {
       assert.ok(Array.isArray(f.filter.options) && f.filter.options.length, `${f.key} needs options`);
     }
   }
+});
+
+test("NO SALARY FIGURE IS FILTERABLE, AND THE EFFECTIVE DATE IS", () => {
+  // The catalogue has no numeric control, and inventing one for money would
+  // be a query-builder feature rather than a form - which is the line §12
+  // draws. The effective date is a real DATE column and is filterable like
+  // any other.
+  const catalogue = require("../constants/employee_report_catalogue");
+  const withSalary = {
+    permissions: [{ permission_key: "view_employees" }, { permission_key: "view_salary" }],
+    isAdmin: false,
+  };
+  const payroll = resolver
+    .discoverFields(withSalary)
+    .filter((f) => catalogue.getField(f.key).group === "Payroll");
+  assert.ok(payroll.length >= 12, "the Payroll group is discoverable with the key");
+  for (const f of payroll) {
+    if (f.key === "salary_effective_from") {
+      assert.strictEqual(f.filter.type, "date");
+    } else {
+      assert.strictEqual(f.filter, null, `${f.key} must not be filterable`);
+    }
+  }
+  // And asking for one anyway is refused, not interpolated.
+  assert.throws(
+    () => filtersFor({ field_filters: [{ field: "monthly_gross", value: "45000" }] }, withSalary),
+    (err) => err.code === "UNKNOWN_FILTER_FIELD"
+  );
 });
 
 test("a field the user may NOT see is neither offered nor accepted", () => {
