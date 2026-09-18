@@ -216,6 +216,15 @@ class Server {
     // particular never `new_employee.payment_type`: a payrun pay type is a
     // fact about one month.
     this.payrunRepo = require("./repository/payrun")(this.mysql.connection);
+    // Payrun Adjustments V1. It owns THREE tables of its own - the component
+    // amounts, the per-employee state (remarks and the EXPLICIT no-adjustment
+    // confirmation) and an append-only change log - and READS `payrun_employee`
+    // to learn who is in the month. It has no statement that writes
+    // `payrun_employee`, `new_employee`, `employee_salary` or any attendance
+    // table: an adjustment hangs off an initialized month and cannot create one.
+    this.payrunAdjustmentRepo = require("./repository/payrun_adjustment")(
+      this.mysql.connection
+    );
     // Attendance v2. The reads the calculation engine needs and the writes of
     // what it produced. It SELECTs the Biomax punch tables and never writes
     // them - the receiver process remains their only writer - and the two
@@ -649,6 +658,16 @@ class Server {
     // and performs what they permit. It calculates NO attendance - the payrun
     // consumes the month the attendance engine already stored.
     this.payrunUsecase = require("./usecase/payrun")(this.payrunRepo);
+    // Payrun Adjustments V1: the stage after initialization. The rules are in
+    // the pure `utils/payrun_adjustments.js` - including the CALCULATION
+    // CONTRACT the later calculation stage will consume - and this fetches
+    // what they need and performs what they permit. It takes the
+    // initialization repository for exactly ONE read: whether the month is
+    // locked.
+    this.payrunAdjustmentUsecase = require("./usecase/payrun_adjustment")(
+      this.payrunAdjustmentRepo,
+      this.payrunRepo
+    );
     // Attendance v2. Orchestration only: the arithmetic is in the pure
     // `utils/attendance_engine.js`, `utils/shiftResolution.js` and
     // `utils/attendance_payroll.js`, and this fetches what they need and
@@ -1333,6 +1352,16 @@ class Server {
       this.sensitive,
       this.employeeBranchScope
     );
+    // Payrun Adjustments: a STAGE of the payrun, not a module beside it, so it
+    // claims /payrun/adjustments and nothing else. It adds NO permission key -
+    // reads take the same three `GET /payrun/month` takes, writes take
+    // `process_payroll`, which is the key initialization already claimed.
+    const payrunAdjustmentRouter = require("./routes/payrun_adjustment")(
+      this.payrunAdjustmentUsecase,
+      this.permissions,
+      this.sensitive,
+      this.employeeBranchScope
+    );
     const storeRouter = require("./routes/store")(this.storeUsecase);
     const outletRouter = require("./routes/outlet")(
       this.outletUsecase,
@@ -1583,6 +1612,10 @@ class Server {
     app.use("/reports/employee-master", employeeReportRouter.getRouter());
     // Payrun Initialization. Claims only /payrun, which no other router defines.
     app.use("/", payrunRouter.getRouter());
+    // The order of these two is immaterial: every path the adjustments router
+    // defines sits under /payrun/adjustments, which is disjoint from the four
+    // the initialization router defines, so neither shadows the other.
+    app.use("/", payrunAdjustmentRouter.getRouter());
 
     app.use("/shift", shiftRouter.getRouter());
     // The new payroll/attendance shift master. /shift above is unchanged and
