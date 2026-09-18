@@ -508,29 +508,43 @@ const FIELDS = [
     history_backed: false, enabled: true },
 
   /* ------------------------------------------------------------- Aadhaar */
-  // Status and last four only. There is deliberately NO full-Aadhaar entry -
-  // not a permission-gated one, not a disabled one. A field that does not
-  // exist cannot be exported by a bug in a permission check.
+  // ALL THREE ARE `view_employee_aadhaar`, AND THE NUMBER IS NOWHERE.
+  //
+  // `hr_permissions.VIEW_EMPLOYEE_AADHAAR` is one narrow decision covering one
+  // question - does this employee have a verified Aadhaar, and for a caller
+  // entitled to the profile, the last four digits and the verified name. The
+  // profile applies it to all three together. Reports applies exactly the same
+  // key to the same three, because a report that showed status and last four
+  // to anybody holding `view_reports` + `view_employees` would be a way around
+  // that narrow right - which is precisely what §A of this catalogue exists to
+  // prevent. An earlier revision of this block gated only `aadhaar_name` and
+  // called status and last four open; that was wrong, and this is the fix.
+  //
+  // It is NOT `view_employee_sensitive`: that key is far broader - salary,
+  // bank, PAN - and a store manager does not hold it, which is the whole
+  // reason `view_employee_aadhaar` exists as its own key.
+  //
+  // There is deliberately NO full-Aadhaar entry - not a permission-gated one,
+  // not a disabled one. A field that does not exist cannot be exported by a
+  // bug in a permission check.
   { key: "aadhaar_status", label: "Aadhaar Status", group: "Aadhaar",
     select: "IF(employee_aadhaar_identity.employee_id IS NULL, 'PENDING', 'VERIFIED')",
     join: "aadhaar_identity", join_footprint: "c2_identity",
+    permission: P.VIEW_EMPLOYEE_AADHAAR, sensitive: true,
     filter: { type: FILTER.ENUM, options: AADHAAR_STATUS_OPTIONS },
     history_backed: false, enabled: true },
 
+  // The last four digits, and no filter on them - see the masked-column note
+  // in the filter section above.
   { key: "aadhaar_last4", label: "Aadhaar Last 4", group: "Aadhaar",
     select: "employee_aadhaar_identity.aadhaar_last4",
     join: "aadhaar_identity", join_footprint: "c2_identity",
+    permission: P.VIEW_EMPLOYEE_AADHAAR, sensitive: true,
     history_backed: false, enabled: true },
 
-  // THE VERIFIED LEGAL NAME, and the ONE Aadhaar field with a permission on
-  // it. `hr_permissions.VIEW_EMPLOYEE_AADHAAR` is what the profile requires
-  // before it shows "Name as per Aadhaar", so Reports requires the same key -
-  // otherwise a report would be a way around it, which is exactly what §A of
-  // this catalogue exists to prevent. It is NOT `view_employee_sensitive`:
-  // that key is far broader and a store manager does not hold it.
-  //
-  // It is a name, not an identifier: no digit of the Aadhaar is reachable
-  // through it, and the number itself still has no catalogue entry at all.
+  // THE VERIFIED LEGAL NAME. It is a name, not an identifier: no digit of the
+  // Aadhaar is reachable through it, and the number itself still has no
+  // catalogue entry at all.
   { key: "aadhaar_name", label: "Name as per Aadhaar", group: "Aadhaar",
     select: "employee_aadhaar_identity.name_as_per_aadhaar",
     join: "aadhaar_identity", join_footprint: "c2_identity",
