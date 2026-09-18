@@ -435,13 +435,40 @@ from, so a recalculation could rewrite the NRM, the shortage and the approved
 OT behind an approved month.
 
 The gate is in `repository/attendance_calculation.js`, on the caller's
-connection, in front of both statements that can modify persisted attendance -
-`writeCalculationsOnConnection` and the reconciling DELETE - so every path
-reaches it: single recalculation, bulk recalculation, monthly `persist=true`,
-the single-date shift correction, and the A3 approval that rewrites a day
-inside its own transaction. A locked month raises a `ValidationError` with
-`code: PAYROLL_MONTH_LOCKED` (a 422 naming the month), writes nothing, and
-rolls back.
+connection, inside the caller's transaction, in front of both statements that
+can modify persisted attendance - `writeCalculationsOnConnection` and the
+reconciling DELETE - so every path reaches it: single recalculation, bulk
+recalculation, monthly `persist=true`, the single-date shift correction, and
+the A3 approval that rewrites a day inside its own transaction. A locked month
+raises a `ValidationError` with `code: PAYROLL_MONTH_LOCKED` (a 422 naming the
+month), writes nothing, and rolls back.
+
+**It takes the row lock, it does not merely look.** A read that only searched
+for an already-locked row left a window: attendance checks and finds nothing,
+payrun approval locks the row and sets `APPROVED_LOCKED`, attendance writes -
+and attendance has been modified after payroll was locked. So the gate locks
+the same rows `payrun_calculation.js#approveAndLock` locks, the same way:
+
+```sql
+SELECT employee_id, period_year, period_month, status
+  FROM payrun_employee_calculation
+ WHERE period_year = ? AND period_month = ? AND employee_id IN (?)
+ FOR UPDATE
+```
+
+The status is **not** in the predicate - `WHERE status = 'APPROVED_LOCKED' FOR
+UPDATE` would lock only rows that are already locked, leaving a `CALCULATED`
+row free to be approved underneath the write. The row is located by identity,
+locked, and its status inspected afterwards in application code; the lock is
+held until the attendance transaction commits or rolls back, so the two
+transactions serialize on one key.
+
+Scope is exactly the `(employee, year, month)` combinations the write touches:
+one statement per period naming only that period's employees, visited in a
+fixed order so overlapping attendance writes cannot deadlock. Another month,
+or another employee, is never locked. An employee/month with no
+`payrun_employee_calculation` row has nothing that could be approved, so
+attendance proceeds.
 
 ## 7d. What a stored row now records about the two break settings
 

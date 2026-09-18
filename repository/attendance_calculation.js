@@ -81,7 +81,8 @@ const CALCULATION_COLUMNS = [
  * approval, without either repository having to import the other's class.
  */
 /**
- * THE PAYROLL LOCK GATE, on the connection, before anything is written.
+ * THE PAYROLL LOCK GATE, on the connection, inside the caller's transaction,
+ * before anything is written.
  *
  * ONE GATE FOR EVERY WRITER. Each path that persists attendance - the single
  * recalculation, the bulk run, the monthly `persist=true`, a date-specific
@@ -91,16 +92,52 @@ const CALCULATION_COLUMNS = [
  * all, including the next one somebody adds; guarding each usecase would not.
  *
  * THE LOCK IS THE PAYRUN'S, read where the payrun keeps it:
- * `payrun_employee_calculation.status = 'APPROVED_LOCKED'` for that employee
- * and period. This is a READ of another stage's table, deliberately, rather
- * than a second lock table or a copy of the flag on an attendance row - a
- * second definition of "locked" is exactly the thing that ends up disagreeing.
- * The status value comes from `constants/payrun_calculation.js`.
+ * `payrun_employee_calculation` for that employee and period. This is a READ
+ * of another stage's table, deliberately, rather than a second lock table or a
+ * copy of the flag on an attendance row - a second definition of "locked" is
+ * exactly the thing that ends up disagreeing. The status value compared comes
+ * from `constants/payrun_calculation.js`.
  *
- * IT RUNS ON THE CALLER'S CONNECTION, so inside the caller's transaction: the
- * month cannot be locked between the check and the write by anything that
- * would be serialized behind it, and a refusal rolls the caller back having
- * changed nothing.
+ * ================================================== WHY `FOR UPDATE` =======
+ *
+ * A read that merely LOOKED for an already-locked row was a time-of-check to
+ * time-of-use race, and losing it meant exactly the thing the rule forbids:
+ *
+ *   1  attendance checks, finds no APPROVED_LOCKED row, and proceeds
+ *   2  payrun approval locks that row and sets it to APPROVED_LOCKED
+ *   3  attendance writes `attendance_day_calculation`
+ *   4  attendance has been modified after payroll was locked
+ *
+ * So the gate takes the ROW LOCK the approval takes, on the same rows:
+ * `repository/payrun_calculation.js#approveAndLock` re-reads
+ * `WHERE period_year = ? AND period_month = ? AND employee_id = ? FOR UPDATE`
+ * inside its own transaction, and this reads the same rows the same way. The
+ * two transactions therefore serialize on one key: whichever arrives second
+ * waits for the first to commit and then sees its outcome.
+ *
+ * THE PREDICATE MUST NOT NAME THE STATUS. `WHERE status = 'APPROVED_LOCKED'
+ * FOR UPDATE` locks only rows that are ALREADY locked - a row sitting at
+ * CALCULATED matches nothing, is not locked, and an approval is free to change
+ * it underneath us. The row is located by its identity, locked, and its status
+ * is inspected afterwards IN APPLICATION CODE, which is the only order that
+ * closes the window.
+ *
+ * THE LOCK IS HELD UNTIL THE CALLER COMMITS OR ROLLS BACK, because it is taken
+ * on the caller's connection inside the caller's transaction. Nothing is
+ * released between the check and the write.
+ *
+ * SCOPE: the exact (employee, year, month) combinations this write touches,
+ * and nothing else. A month of an employee that this write does not name is
+ * never locked, so an approval of any other month proceeds while attendance is
+ * being written. The rows are visited in a fixed order - period, then employee
+ * id - so two attendance writes that overlap take the same locks in the same
+ * order rather than deadlocking against each other.
+ *
+ * NO ROW MEANS NOTHING TO LOCK OUT. An employee/month the payrun has never
+ * calculated cannot be approved or locked, so attendance proceeds. (InnoDB
+ * still takes a gap lock for the absent row under REPEATABLE READ, which
+ * happens to serialize a concurrent INSERT of it as well; the rule here does
+ * not depend on that.)
  */
 async function assertMonthsNotPayrollLocked(connection, rows) {
   const { periods, unreadable } = periodsTouched(rows);
@@ -109,23 +146,49 @@ async function assertMonthsNotPayrollLocked(connection, rows) {
   }
   if (periods.length === 0) return;
 
-  const employeeIds = [...new Set(periods.map((p) => p.employee_id))];
-  const locked = await queryAsync(
-    connection,
-    `SELECT employee_id, period_year, period_month
-       FROM payrun_employee_calculation
-      WHERE status = ?
-        AND employee_id IN (?)`,
-    [PAYROLL_LOCK_STATUS, employeeIds]
-  );
+  // One statement per (year, month), each naming only the employees this
+  // write touches in that month - the shape `approveAndLock` locks, widened
+  // to a set rather than repeated per employee. Sorted so the lock order is
+  // the same for every caller.
+  const byPeriod = new Map();
+  for (const period of periods) {
+    const key = `${period.year}:${period.month}`;
+    if (!byPeriod.has(key)) {
+      byPeriod.set(key, { year: period.year, month: period.month, employee_ids: new Set() });
+    }
+    byPeriod.get(key).employee_ids.add(period.employee_id);
+  }
+  const ordered = [...byPeriod.values()].sort((a, b) => a.year - b.year || a.month - b.month);
 
-  // Narrowed in JS rather than with a compound IN over (employee, year,
-  // month): the employee filter is the selective one, a payrun holds a
-  // handful of months per employee, and the pairing is then plain to read.
-  const lockedKeys = new Set(
-    (Array.isArray(locked) ? locked : []).map((r) => `${Number(r.employee_id)}:${Number(r.period_year)}:${Number(r.period_month)}`)
-  );
-  const hits = periods.filter((p) => lockedKeys.has(`${p.employee_id}:${p.year}:${p.month}`));
+  const hits = [];
+  for (const group of ordered) {
+    const employeeIds = [...group.employee_ids].sort((a, b) => a - b);
+    /* eslint-disable no-await-in-loop */
+    const locked = await queryAsync(
+      connection,
+      // NO STATUS IN THE PREDICATE. The row is found by identity and locked
+      // whatever it currently says; what it says is decided below.
+      `SELECT employee_id, period_year, period_month, status
+         FROM payrun_employee_calculation
+        WHERE period_year = ?
+          AND period_month = ?
+          AND employee_id IN (?)
+        FOR UPDATE`,
+      [group.year, group.month, employeeIds]
+    );
+    /* eslint-enable no-await-in-loop */
+
+    for (const row of Array.isArray(locked) ? locked : []) {
+      // INSPECTED AFTER THE LOCK, never in the WHERE clause.
+      if (String(row.status) !== PAYROLL_LOCK_STATUS) continue;
+      hits.push({
+        employee_id: Number(row.employee_id),
+        year: Number(row.period_year),
+        month: Number(row.period_month),
+      });
+    }
+  }
+
   if (hits.length > 0) throw payrollLockedError(hits);
 }
 

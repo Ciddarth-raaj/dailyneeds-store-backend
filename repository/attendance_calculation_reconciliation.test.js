@@ -200,9 +200,11 @@ describe("the DELETE deletes ONLY what the eligibility rule condemns", () => {
     assert.equal(selects.length, 2);
     for (const select of selects) {
       assert.match(select.sql, /FROM payrun_employee_calculation/);
-      assert.match(select.sql, /WHERE status = \?/);
-      assert.equal(select.params[0], "APPROVED_LOCKED");
-      assert.deepEqual(select.params[1], [42]);
+      // The row is LOCKED by identity and its status inspected afterwards -
+      // a predicate naming the status would lock only rows that are already
+      // locked. `attendance_payroll_lock.test.js` holds the full rule.
+      assert.match(select.sql, /FOR UPDATE$/);
+      assert.deepEqual(select.params, [2026, 9, [42]]);
     }
   });
 

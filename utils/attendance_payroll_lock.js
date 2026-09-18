@@ -17,11 +17,19 @@
  * disagreeing - with nothing on either row to say why. A closed month cannot
  * be modified by anyone, and "anyone" includes the attendance engine.
  *
- * WHERE THE CHECK LIVES. On the connection, immediately before the write, in
- * `repository/attendance_calculation.js` - because every path that persists
- * attendance goes through `writeCalculationsOnConnection` or the reconciling
- * delete beside it. Guarding the usecases instead would mean guarding each of
- * them, and the next path to be added would simply not be guarded.
+ * WHERE THE CHECK LIVES. On the connection, inside the caller's transaction,
+ * immediately before the write, in `repository/attendance_calculation.js` -
+ * because every path that persists attendance goes through
+ * `writeCalculationsOnConnection` or the reconciling delete beside it.
+ * Guarding the usecases instead would mean guarding each of them, and the next
+ * path to be added would simply not be guarded.
+ *
+ * AND IT TAKES THE ROW LOCK, `FOR UPDATE`, on the same rows
+ * `payrun_calculation.js#approveAndLock` locks. Merely LOOKING for an
+ * already-locked row leaves the window an approval can land in - check, then
+ * approve-and-lock, then write - so the two transactions are made to serialize
+ * on one key instead. The row's status is inspected after it is locked, never
+ * in the predicate that locks it.
  *
  * This module holds the pure parts: which months a set of rows touches, and
  * the error. The query is the repository's.
@@ -77,14 +85,19 @@ function periodsTouched(rows = []) {
  * a 422 with the message shown to the user - the existing convention for "you
  * may not do this", as against a 500 for "something broke". The locked months
  * travel on the error so a bulk run can report exactly whose month stopped it.
+ *
+ * IT OFFERS NO WAY ROUND ITSELF. The message states the fact and stops: a
+ * closed month is settled, so telling the reader to reopen or unlock it would
+ * be advertising a move the rule does not have. Whoever needs an approved
+ * month revisited takes that up as a payroll decision, not as a step in an
+ * attendance error.
  */
 function payrollLockedError(locked = []) {
   const months = locked
     .map((l) => `${String(l.month).padStart(2, "0")}/${l.year} (employee ${l.employee_id})`)
     .join(", ");
   const err = new Error(
-    `This attendance cannot be changed: the payroll month is approved and locked - ${months}. ` +
-      `A locked month is settled; reopen it in Payrun before recalculating attendance for those dates.`
+    `Attendance cannot be changed because payroll for this month is approved and locked - ${months}.`
   );
   err.name = "ValidationError";
   err.code = "PAYROLL_MONTH_LOCKED";

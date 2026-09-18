@@ -13,21 +13,38 @@
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
 
+const fs = require("fs");
+const path = require("path");
+
 const buildRepo = require("./attendance_calculation");
 const { writeCalculationsOnConnection } = require("./attendance_calculation");
 
 /**
- * A connection that answers the lock SELECT with whatever the test says is
- * locked, and records every statement in order.
+ * A connection standing in for one transaction.
+ *
+ * `payrun` is the payrun_employee_calculation table as the test wants it -
+ * EVERY row, at whatever status, not only the locked ones. The gate locates
+ * rows by identity and locks them; what it does about their status is its
+ * decision, made afterwards, and a fake that pre-filtered by status would
+ * hide exactly the defect this file exists to catch.
  */
-function fakeConnection({ locked = [] } = {}) {
+function fakeConnection({ payrun = [] } = {}) {
   const log = [];
   const connection = {
     query(sql, params, cb) {
       const text = String(sql).replace(/\s+/g, " ").trim();
       log.push({ sql: text, params });
       if (/^SELECT/i.test(text)) {
-        cb(null, locked);
+        const [year, month, employeeIds] = params;
+        cb(
+          null,
+          payrun.filter(
+            (r) =>
+              Number(r.period_year) === Number(year) &&
+              Number(r.period_month) === Number(month) &&
+              employeeIds.includes(Number(r.employee_id))
+          )
+        );
         return;
       }
       cb(null, { affectedRows: 1 });
@@ -65,17 +82,85 @@ const row = (attendance_date, employee_id = 42) => ({
   calculation_version: 7,
 });
 
-const LOCKED_AUGUST = [{ employee_id: 42, period_year: 2026, period_month: 8 }];
+const locked = (employee_id, period_year, period_month) => ({
+  employee_id,
+  period_year,
+  period_month,
+  status: "APPROVED_LOCKED",
+});
+const calculated = (employee_id, period_year, period_month) => ({
+  employee_id,
+  period_year,
+  period_month,
+  status: "CALCULATED",
+});
 
-describe("the gate reads the payrun's own lock", () => {
-  it("asks payrun_employee_calculation for APPROVED_LOCKED, by employee", async () => {
+const LOCKED_AUGUST = [locked(42, 2026, 8)];
+
+describe("the gate reads the payrun's own lock, and LOCKS the row", () => {
+  it("selects FOR UPDATE, on the payrun's own table", async () => {
     const fake = fakeConnection();
     await writeCalculationsOnConnection(fake.connection, [row("2026-08-10")]);
 
     const [select] = fake.log.filter((e) => /^SELECT/i.test(e.sql));
     assert.match(select.sql, /FROM payrun_employee_calculation/);
-    assert.match(select.sql, /WHERE status = \?/);
-    assert.deepEqual(select.params, ["APPROVED_LOCKED", [42]]);
+    assert.match(select.sql, /FOR UPDATE$/, "the row is LOCKED, not merely looked at");
+  });
+
+  it("locates the row by IDENTITY - the status is never in the predicate", async () => {
+    // `WHERE status = 'APPROVED_LOCKED' FOR UPDATE` locks only rows that are
+    // ALREADY locked. A row sitting at CALCULATED matches nothing, is not
+    // locked, and an approval is free to change it between this check and the
+    // write - which is the whole race.
+    const fake = fakeConnection();
+    await writeCalculationsOnConnection(fake.connection, [row("2026-08-10")]);
+
+    const [select] = fake.log.filter((e) => /^SELECT/i.test(e.sql));
+    assert.ok(!/WHERE[^]*status/i.test(select.sql), "no status filter in the locking read");
+    assert.ok(!select.params.includes("APPROVED_LOCKED"));
+    assert.match(select.sql, /WHERE period_year = \? AND period_month = \? AND employee_id IN \(\?\)/);
+    assert.deepEqual(select.params, [2026, 8, [42]]);
+  });
+
+  it("locks the SAME rows, the same way, as payrun approval does", async () => {
+    // `repository/payrun_calculation.js#approveAndLock` re-reads
+    //   WHERE period_year = ? AND period_month = ? AND employee_id = ? FOR UPDATE
+    // so both transactions serialize on one key. This asserts the shape of
+    // the key rather than the text of either statement.
+    const fake = fakeConnection();
+    await writeCalculationsOnConnection(fake.connection, [row("2026-08-10")]);
+    const [select] = fake.log.filter((e) => /^SELECT/i.test(e.sql));
+
+    const approval = fs
+      .readFileSync(path.join(__dirname, "payrun_calculation.js"), "utf8")
+      .replace(/\s+/g, " ");
+    assert.match(
+      approval,
+      /FROM payrun_employee_calculation WHERE period_year = \? AND period_month = \? AND employee_id = \? FOR UPDATE/,
+      "the approval still locks by (period, employee) - if this moved, the gate must move with it"
+    );
+    assert.match(select.sql, /FOR UPDATE$/);
+    assert.deepEqual(select.params.slice(0, 2), [2026, 8]);
+  });
+
+  it("a CALCULATED row is locked, and attendance proceeds", async () => {
+    const fake = fakeConnection({ payrun: [calculated(42, 2026, 8)] });
+    const result = await writeCalculationsOnConnection(fake.connection, [row("2026-08-10")]);
+
+    assert.equal(result.written, 1, "an unlocked month is written");
+    const [select] = fake.log.filter((e) => /^SELECT/i.test(e.sql));
+    assert.match(select.sql, /FOR UPDATE$/, "and its row is held for the rest of the transaction");
+  });
+
+  it("an APPROVED_LOCKED row is locked, and the write is rejected", async () => {
+    const fake = fakeConnection({ payrun: [locked(42, 2026, 8)] });
+    await assert.rejects(
+      () => writeCalculationsOnConnection(fake.connection, [row("2026-08-10")]),
+      /approved and locked/
+    );
+    const [select] = fake.log.filter((e) => /^SELECT/i.test(e.sql));
+    assert.match(select.sql, /FOR UPDATE$/);
+    assert.ok(!fake.log.some((e) => /^INSERT/i.test(e.sql)));
   });
 
   it("invents no second lock table, flag or status of its own", async () => {
@@ -88,7 +173,7 @@ describe("the gate reads the payrun's own lock", () => {
 
 describe("an UNLOCKED month is written exactly as before", () => {
   it("the gate runs first, then the INSERT", async () => {
-    const fake = fakeConnection({ locked: [] });
+    const fake = fakeConnection({ payrun: [] });
     const result = await writeCalculationsOnConnection(fake.connection, [row("2026-08-10")]);
     assert.equal(result.written, 1);
     assert.deepEqual(
@@ -98,14 +183,14 @@ describe("an UNLOCKED month is written exactly as before", () => {
   });
 
   it("a DIFFERENT month of the same employee being locked does not block this one", async () => {
-    const fake = fakeConnection({ locked: LOCKED_AUGUST });
+    const fake = fakeConnection({ payrun: LOCKED_AUGUST });
     const result = await writeCalculationsOnConnection(fake.connection, [row("2026-09-10")]);
     assert.equal(result.written, 1);
     assert.ok(fake.log.some((e) => /^INSERT/i.test(e.sql)));
   });
 
   it("a DIFFERENT employee's lock does not block this one", async () => {
-    const fake = fakeConnection({ locked: [{ employee_id: 99, period_year: 2026, period_month: 8 }] });
+    const fake = fakeConnection({ payrun: [locked(99, 2026, 8)] });
     const result = await writeCalculationsOnConnection(fake.connection, [row("2026-08-10")]);
     assert.equal(result.written, 1);
   });
@@ -113,7 +198,7 @@ describe("an UNLOCKED month is written exactly as before", () => {
 
 describe("a LOCKED month is refused, and nothing is written", () => {
   it("throws a business error naming the month, before any INSERT", async () => {
-    const fake = fakeConnection({ locked: LOCKED_AUGUST });
+    const fake = fakeConnection({ payrun: LOCKED_AUGUST });
     await assert.rejects(
       () => writeCalculationsOnConnection(fake.connection, [row("2026-08-10")]),
       (err) => {
@@ -131,7 +216,7 @@ describe("a LOCKED month is refused, and nothing is written", () => {
   it("one locked date in a batch refuses the WHOLE batch", async () => {
     // A recalculation is a range. Writing the unlocked half and dropping the
     // rest would leave a month half restated with nothing to say which half.
-    const fake = fakeConnection({ locked: LOCKED_AUGUST });
+    const fake = fakeConnection({ payrun: LOCKED_AUGUST });
     await assert.rejects(
       () => writeCalculationsOnConnection(fake.connection, [row("2026-09-01"), row("2026-08-31")]),
       /approved and locked/
@@ -142,7 +227,7 @@ describe("a LOCKED month is refused, and nothing is written", () => {
   it("the reconciling DELETE is refused too, and the transaction rolls back", async () => {
     // A date that is only being REMOVED carries no row in the write batch, so
     // it is gated on its own - otherwise a locked month could be emptied.
-    const fake = fakeConnection({ locked: LOCKED_AUGUST });
+    const fake = fakeConnection({ payrun: LOCKED_AUGUST });
     const repo = buildRepo(pool(fake));
     await assert.rejects(
       () =>
@@ -176,5 +261,154 @@ describe("what the gate refuses to guess", () => {
     const result = await writeCalculationsOnConnection(fake.connection, []);
     assert.deepEqual(result, { written: 0 });
     assert.equal(fake.log.length, 0);
+  });
+});
+
+/* ======================================= scope, ordering and the wording == */
+
+describe("only the employee/months the write touches are locked", () => {
+  it("one statement per period, naming only that period's employees", async () => {
+    const fake = fakeConnection();
+    await writeCalculationsOnConnection(fake.connection, [
+      row("2026-08-10", 42),
+      row("2026-08-11", 42),
+      row("2026-09-01", 42),
+      row("2026-09-02", 7),
+    ]);
+
+    const selects = fake.log.filter((e) => /^SELECT/i.test(e.sql));
+    assert.equal(selects.length, 2, "one per (year, month), not one per row and not one per employee");
+    // Visited in a fixed order - period, then employee id - so two attendance
+    // writes that overlap take the same locks in the same order.
+    assert.deepEqual(selects[0].params, [2026, 8, [42]]);
+    assert.deepEqual(selects[1].params, [2026, 9, [7, 42]]);
+  });
+
+  it("never locks a month the write does not touch", async () => {
+    const fake = fakeConnection({ payrun: [locked(42, 2026, 7), calculated(42, 2026, 9)] });
+    await writeCalculationsOnConnection(fake.connection, [row("2026-08-10", 42)]);
+
+    const selects = fake.log.filter((e) => /^SELECT/i.test(e.sql));
+    assert.equal(selects.length, 1);
+    assert.deepEqual(selects[0].params, [2026, 8, [42]], "July and September are left free to be approved");
+  });
+
+  it("never locks an employee the write does not touch", async () => {
+    const fake = fakeConnection({ payrun: [locked(99, 2026, 8)] });
+    const result = await writeCalculationsOnConnection(fake.connection, [row("2026-08-10", 42)]);
+    assert.equal(result.written, 1);
+    const [select] = fake.log.filter((e) => /^SELECT/i.test(e.sql));
+    assert.deepEqual(select.params[2], [42], "employee 99's locked August is not this write's business");
+  });
+
+  it("no payrun row for that employee/month: nothing can be locked, so attendance proceeds", async () => {
+    const fake = fakeConnection({ payrun: [] });
+    const result = await writeCalculationsOnConnection(fake.connection, [row("2026-08-10")]);
+    assert.equal(result.written, 1);
+    assert.ok(fake.log.some((e) => /^INSERT/i.test(e.sql)));
+  });
+});
+
+describe("the lock is taken before anything is modified", () => {
+  it("SELECT ... FOR UPDATE precedes the upsert", async () => {
+    const fake = fakeConnection({ payrun: [calculated(42, 2026, 8)] });
+    await writeCalculationsOnConnection(fake.connection, [row("2026-08-10")]);
+    const order = fake.log.map((e) => e.sql.split(" ")[0]);
+    assert.deepEqual(order, ["SELECT", "INSERT"]);
+    assert.match(fake.log[0].sql, /FOR UPDATE$/);
+  });
+
+  it("SELECT ... FOR UPDATE precedes the reconciliation DELETE, inside the transaction", async () => {
+    const fake = fakeConnection({ payrun: [calculated(42, 2026, 8)] });
+    const repo = buildRepo(pool(fake));
+    await repo.saveCalculationsWithReconciliation({
+      employee_id: 42,
+      from_date: "2026-08-01",
+      to_date: "2026-08-31",
+      rows: [row("2026-08-10")],
+      ineligible_dates: ["2026-08-11"],
+    });
+
+    const order = fake.log.map((e) =>
+      /^(BEGIN|COMMIT|ROLLBACK|RELEASE)$/.test(e.sql) ? e.sql : e.sql.split(" ")[0]
+    );
+    // The gate is AFTER the transaction begins and BEFORE each modification,
+    // and the locks it takes are held until COMMIT.
+    assert.deepEqual(order, ["BEGIN", "SELECT", "INSERT", "SELECT", "DELETE", "COMMIT", "RELEASE"]);
+    fake.log
+      .filter((e) => /^SELECT/i.test(e.sql))
+      .forEach((e) => assert.match(e.sql, /FOR UPDATE$/));
+  });
+
+  it("a locked month reaches neither the INSERT nor the DELETE, and rolls back", async () => {
+    const fake = fakeConnection({ payrun: LOCKED_AUGUST });
+    const repo = buildRepo(pool(fake));
+    await assert.rejects(
+      () =>
+        repo.saveCalculationsWithReconciliation({
+          employee_id: 42,
+          from_date: "2026-08-01",
+          to_date: "2026-08-31",
+          rows: [row("2026-08-10")],
+          ineligible_dates: ["2026-08-11"],
+        }),
+      /approved and locked/
+    );
+    assert.ok(!fake.log.some((e) => /^(INSERT|UPDATE|DELETE)/i.test(e.sql)), "nothing was modified");
+    assert.ok(fake.log.some((e) => e.sql === "ROLLBACK"));
+    assert.ok(!fake.log.some((e) => e.sql === "COMMIT"));
+  });
+});
+
+describe("the race the row lock closes", () => {
+  it("an approval that lands between check and write waits on THIS transaction's lock", async () => {
+    // The fake cannot run two real transactions, so what is asserted is the
+    // property that makes the race impossible: both statements address the
+    // same rows by the same key, and the attendance one holds them. An
+    // approval arriving after this SELECT blocks on it until attendance
+    // commits or rolls back - it cannot slip in and flip the status.
+    const fake = fakeConnection({ payrun: [calculated(42, 2026, 8)] });
+    const repo = buildRepo(pool(fake));
+
+    await repo.saveCalculationsWithReconciliation({
+      employee_id: 42,
+      from_date: "2026-08-01",
+      to_date: "2026-08-31",
+      rows: [row("2026-08-10")],
+      ineligible_dates: [],
+    });
+
+    const selects = fake.log.filter((e) => /^SELECT/i.test(e.sql));
+    const beginAt = fake.log.findIndex((e) => e.sql === "BEGIN");
+    const commitAt = fake.log.findIndex((e) => e.sql === "COMMIT");
+    const insertAt = fake.log.findIndex((e) => /^INSERT/i.test(e.sql));
+    const selectAt = fake.log.findIndex((e) => /^SELECT/i.test(e.sql));
+
+    assert.ok(beginAt < selectAt, "the lock is taken INSIDE the transaction");
+    assert.ok(selectAt < insertAt, "and before the write");
+    assert.ok(insertAt < commitAt, "and released only by the commit");
+    selects.forEach((e) => {
+      assert.match(e.sql, /FOR UPDATE$/);
+      assert.deepEqual(e.params.slice(0, 2), [2026, 8]);
+    });
+  });
+});
+
+describe("the refusal tells the truth and offers no way round it", () => {
+  it("states the fact, names the month, and never says to reopen or unlock", async () => {
+    const fake = fakeConnection({ payrun: LOCKED_AUGUST });
+    await assert.rejects(
+      () => writeCalculationsOnConnection(fake.connection, [row("2026-08-10")]),
+      (err) => {
+        assert.equal(
+          err.message,
+          "Attendance cannot be changed because payroll for this month is approved and locked - 08/2026 (employee 42)."
+        );
+        assert.ok(!/reopen|unlock|re-open/i.test(err.message), "a closed month is settled");
+        assert.equal(err.name, "ValidationError");
+        assert.equal(err.code, "PAYROLL_MONTH_LOCKED");
+        return true;
+      }
+    );
   });
 });
