@@ -54,6 +54,17 @@ const list = (name, fallback) => {
   return items.length ? items : fallback;
 };
 
+/** A comma-separated list of month numbers (1-12) from the environment. */
+const months = (name, fallback) => {
+  const raw = process.env[name];
+  if (raw === undefined || raw === null || String(raw).trim() === "") return fallback;
+  const items = String(raw)
+    .split(",")
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isInteger(n) && n >= 1 && n <= 12);
+  return items.length ? [...new Set(items)].sort((a, b) => a - b) : fallback;
+};
+
 /**
  * The salary structure itself — the Daily Needs breakup rule, which is a
  * company policy rather than a statutory one, but belongs beside the rates it
@@ -180,6 +191,19 @@ const esi = {
    * nothing and the employer still pays its share in full.
    */
   employeeExemptionDailyWage: num("ESI_EMPLOYEE_EXEMPTION_DAILY_WAGE", 176),
+
+  /**
+   * THE CONTRIBUTION PERIODS, as the months they begin in: 1 April and
+   * 1 October, each running to the day before the next one starts.
+   *
+   * They are not a calendar convenience. Coverage is decided ONCE per period,
+   * at its start or at the employee's entry into it, and an employee who was
+   * covered then stays covered to the end of it even if their wages cross the
+   * ceiling in between — see
+   * `utils/salary_engine.js#resolveContributionPeriodCoverage`. Without the
+   * period there is no way to say how long "until the end" is.
+   */
+  contributionPeriodStartMonths: months("ESI_CONTRIBUTION_PERIOD_START_MONTHS", [4, 10]),
 
   /*
    * WHICH WAGE ESI IS CHARGED ON IS NOT DECLARED HERE. It is the statutory

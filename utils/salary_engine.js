@@ -152,6 +152,14 @@ const UNRESOLVED = {
   EPS_DOB_NOT_RECORDED: "EPS_DOB_NOT_RECORDED",
   ESI_APPLICABILITY_NOT_RECORDED: "ESI_APPLICABILITY_NOT_RECORDED",
   ESI_WAGE_CONTEXT_UNAVAILABLE: "ESI_WAGE_CONTEXT_UNAVAILABLE",
+  /*
+   * Wages are above the ceiling and the server could not prove whether the
+   * employee was covered when this contribution period began — so whether
+   * coverage continues to the end of it is genuinely open. It is a PENDING and
+   * not a zero, because a zero here is an employer contribution that quietly
+   * stops being paid.
+   */
+  ESI_CONTRIBUTION_PERIOD_UNRESOLVED: "ESI_CONTRIBUTION_PERIOD_UNRESOLVED",
 };
 
 /**
@@ -569,6 +577,146 @@ function statutoryWages(components = {}, totalRemunerationRupees, config = CONFI
   };
 }
 
+/* ------------------------------------------- the ESI contribution period */
+
+/**
+ * The contribution period a date falls in.
+ *
+ * Two a year, beginning in the months `config.esi.contributionPeriodStartMonths`
+ * names — 1 April to 30 September, and 1 October to 31 March. A date in
+ * January belongs to the period that STARTED THE PREVIOUS OCTOBER, which is
+ * the case worth writing down: the period a date is in is not always a period
+ * that began in the same calendar year.
+ */
+function contributionPeriodFor(value, config = CONFIG) {
+  const date = toDateOnly(value);
+  if (!date) return null;
+
+  const [year, month] = date.split("-").map(Number);
+  const starts = [...(config.esi.contributionPeriodStartMonths || [])].sort((a, b) => a - b);
+  if (starts.length === 0) return null;
+
+  const dayBefore = (y, m) => {
+    // The day before the 1st of (y, m), which is the last day of the month before.
+    const d = new Date(Date.UTC(y, m - 1, 1));
+    d.setUTCDate(d.getUTCDate() - 1);
+    return toDateOnly(d);
+  };
+
+  const index = starts.filter((m) => m <= month).length - 1;
+  const startMonth = index >= 0 ? starts[index] : starts[starts.length - 1];
+  const startYear = index >= 0 ? year : year - 1;
+
+  /*
+   * The next period begins at the next start month AFTER this one — in the
+   * same year if there is one, otherwise the first start month of the year
+   * after. The year is taken from the START of this period and never from the
+   * date being asked about, which is what makes a January date resolve to the
+   * period that began the previous October and end on the correct 31 March.
+   */
+  const after = starts.filter((m) => m > startMonth);
+  const nextMonth = after.length ? after[0] : starts[0];
+  const nextYear = after.length ? startYear : startYear + 1;
+
+  return {
+    start: `${startYear}-${String(startMonth).padStart(2, "0")}-01`,
+    end: dayBefore(nextYear, nextMonth),
+  };
+}
+
+/**
+ * THE DATE COVERAGE IS DECIDED ON: the contribution period's start, or the day
+ * the employee joined if they joined part-way through it.
+ *
+ * A date of joining AFTER the date being calculated is not an entry into this
+ * period at all, so it is ignored rather than used to look into a future
+ * nobody has lived yet.
+ *
+ * It is its own function because two callers need the same date and must not
+ * each have their own idea of it: this module, to decide coverage, and
+ * `usecase/employee_salary.js`, to look up the approved salary in force then.
+ */
+function contributionPeriodEntryDate(input = {}, config = CONFIG) {
+  const asOf = toDateOnly(input.as_of);
+  const period = contributionPeriodFor(asOf, config);
+  if (!period) return null;
+  const doj = toDateOnly(input.date_of_joining);
+  return doj && doj > period.start && doj <= asOf ? doj : period.start;
+}
+
+/**
+ * IS THIS EMPLOYEE COVERED FOR THE WHOLE OF THIS CONTRIBUTION PERIOD?
+ *
+ * ESI does not stop the moment wages cross the ceiling. Coverage is decided
+ * ONCE per period — at its start, or at the employee's entry into it if they
+ * joined part-way through — and an employee who was covered at that moment
+ * stays covered until the period ends, whatever their wages do in between. At
+ * the NEXT period's start the question is asked afresh, which is why this
+ * needs no recursion: a period start is decided by the wages in force that
+ * day and by nothing carried over from the period before.
+ *
+ * THE FACT IS DERIVED, NEVER ASSERTED. The entry date comes from the period
+ * and the date of joining; the wages in force on that date come from the
+ * employee's own APPROVED salary history; applicability comes from the
+ * employee master. A caller cannot supply any of it — see
+ * `routes/employee_salary.js`, where the three payroll-context keys are
+ * refused — and this function reads nothing a request body could reach.
+ *
+ * WHICH SALARY WAS IN FORCE AT ENTRY. Normally the approved record the server
+ * looked up (`entry_salary`). But a salary being calculated now that is itself
+ * effective on or before the entry date IS the salary in force then — that is
+ * the opening-salary case, where the record under calculation is the only one
+ * there has ever been — so it wins over an older approved record.
+ *
+ * @returns `{ period, entry_date, continues, basis }`. `continues` is null
+ *          when the position at entry cannot be proved, which is never a
+ *          silent false: `calculateEsi` turns it into a PENDING rather than
+ *          into a contribution of zero.
+ */
+function resolveContributionPeriodCoverage(input = {}, config = CONFIG) {
+  const asOf = toDateOnly(input.as_of);
+  const period = contributionPeriodFor(asOf, config);
+  if (!period) return { period: null, entry_date: null, continues: false, basis: "NO_PERIOD_CONTEXT" };
+
+  const entryDate = contributionPeriodEntryDate(input, config);
+
+  const ownEffectiveFrom = toDateOnly(input.own_effective_from);
+  const ownInForceAtEntry = ownEffectiveFrom !== null && ownEffectiveFrom <= entryDate;
+
+  const entrySalary = ownInForceAtEntry
+    ? { ...input.own_components, monthly_gross: input.own_gross }
+    : input.entry_salary || null;
+
+  if (!entrySalary || toPaise(entrySalary.monthly_gross) === null) {
+    return { period, entry_date: entryDate, continues: null, basis: "NO_SALARY_AT_ENTRY" };
+  }
+
+  /*
+   * Applicability is read as the employee master records it TODAY, because
+   * that is the only answer the master holds — there is no history of the
+   * flag. It is the same fact the rest of the calculation runs on, so a
+   * coverage decision cannot disagree with the contribution beside it.
+   */
+  if (triState(input.esi_applicable) !== true) {
+    return { period, entry_date: entryDate, continues: false, basis: "NOT_APPLICABLE_AT_ENTRY" };
+  }
+
+  const wagesAtEntry = statutoryWages(entrySalary, entrySalary.monthly_gross, config);
+  const wages = wagesAtEntry === null ? null : toPaise(wagesAtEntry.statutory_wages);
+  if (wages === null) {
+    return { period, entry_date: entryDate, continues: null, basis: "NO_SALARY_AT_ENTRY" };
+  }
+
+  const covered = wages <= toPaise(config.esi.coverageCeiling);
+  return {
+    period,
+    entry_date: entryDate,
+    continues: covered,
+    basis: covered ? "COVERED_AT_ENTRY" : "ABOVE_CEILING_AT_ENTRY",
+    wages_at_entry: wagesAtEntry.statutory_wages,
+  };
+}
+
 /* ------------------------------------------------------------------- ESI */
 
 /**
@@ -721,6 +869,19 @@ function calculateEsi(context = {}, config = CONFIG) {
   }
 
   if (standard > ceiling && context.contribution_period_continues !== true) {
+    /*
+     * ABOVE THE CEILING IS NOT THE END OF THE QUESTION. Coverage runs to the
+     * end of the contribution period for somebody who was covered when it
+     * began, so "above the ceiling" only means "not covered" once the position
+     * at the start of the period is known. When the server could not establish
+     * it, that is an open question and not a zero — a contribution that
+     * quietly stops is a filing error nobody notices for a year.
+     */
+    if (context.contribution_period_unresolved === true) {
+      return pending(UNRESOLVED.ESI_CONTRIBUTION_PERIOD_UNRESOLVED, {
+        wage_definition: wageDefinition,
+      });
+    }
     return {
       status: STATUS.NOT_APPLICABLE,
       unresolved: [],
@@ -992,6 +1153,38 @@ function calculateSalary(input = {}, config = CONFIG) {
     employee_contribution_exempt: input.employee_contribution_exempt,
   };
 
+  /*
+   * THE CONTRIBUTION-PERIOD FACT, DERIVED HERE AND NOT ACCEPTED FROM ANYBODY.
+   *
+   * It is resolved AFTER the components, because the salary being calculated
+   * is itself the salary in force at entry whenever it is effective on or
+   * before the entry date — the opening-salary case. The server supplies the
+   * approved record in force at entry (`coverage_entry_salary`); everything
+   * else the rule needs is already in this context.
+   *
+   * A TRUSTED CALLER'S OWN ANSWER STILL WINS. A payrun that has established
+   * the position from the wage register passes `contribution_period_continues`
+   * and is not second-guessed; only the absence of one is resolved here.
+   */
+  const coverage = resolveContributionPeriodCoverage(
+    {
+      esi_applicable: input.esi_applicable,
+      date_of_joining: input.date_of_joining,
+      as_of: statutoryContext.as_of,
+      own_effective_from: input.effective_from,
+      own_components: components,
+      own_gross: gross,
+      entry_salary: input.coverage_entry_salary,
+    },
+    config
+  );
+
+  if (statutoryContext.contribution_period_continues === undefined) {
+    statutoryContext.contribution_period_continues =
+      coverage.continues === true ? true : undefined;
+    statutoryContext.contribution_period_unresolved = coverage.continues === null;
+  }
+
   const pf = calculatePf(statutoryContext, config);
   const esi = calculateEsi(statutoryContext, config);
   const ctc = calculateCtc(gross, pf, esi);
@@ -1008,6 +1201,12 @@ function calculateSalary(input = {}, config = CONFIG) {
     override_reason: overrideReason,
     pf,
     esi,
+    /*
+     * HOW THE COVERAGE QUESTION WAS ANSWERED, beside the contribution it
+     * decided. A figure that differs from the ceiling rule alone has to be
+     * able to say why without anybody re-deriving it.
+     */
+    esi_coverage: coverage,
     monthly_ctc: ctc.monthly_ctc,
     ctc_status: ctc.status,
     ctc_pending_components: ctc.pending_components,
@@ -1063,6 +1262,9 @@ module.exports = {
   resolveEpsEligibility,
   calculatePf,
   statutoryWages,
+  contributionPeriodFor,
+  contributionPeriodEntryDate,
+  resolveContributionPeriodCoverage,
   calculateEsi,
   calculateCtc,
   configFromSnapshot,

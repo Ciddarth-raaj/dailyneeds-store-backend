@@ -479,6 +479,206 @@ test("a structure that overspends its remuneration cannot produce a negative wag
   assert.equal(w.statutory_wages, 10000, "the proviso's half still holds");
 });
 
+/* ------------------------------------------- the ESI contribution period */
+
+test("the two contribution periods, including the one that spans a year end", () => {
+  assert.deepEqual(E.contributionPeriodFor("2026-04-01"), {
+    start: "2026-04-01",
+    end: "2026-09-30",
+  });
+  assert.deepEqual(E.contributionPeriodFor("2026-09-30"), {
+    start: "2026-04-01",
+    end: "2026-09-30",
+  });
+  assert.deepEqual(E.contributionPeriodFor("2026-10-01"), {
+    start: "2026-10-01",
+    end: "2027-03-31",
+  });
+  // The case worth writing down: a January date belongs to the period that
+  // began the PREVIOUS October, and ends on the 31 March after it.
+  assert.deepEqual(E.contributionPeriodFor("2027-01-15"), {
+    start: "2026-10-01",
+    end: "2027-03-31",
+  });
+  assert.deepEqual(E.contributionPeriodFor("2027-03-31"), {
+    start: "2026-10-01",
+    end: "2027-03-31",
+  });
+});
+
+test("coverage is decided at the period start, or at entry for a mid-period joiner", () => {
+  const entry = (as_of, date_of_joining) =>
+    E.contributionPeriodEntryDate({ as_of, date_of_joining });
+
+  assert.equal(entry("2026-07-01", "2019-06-01"), "2026-04-01", "an old hand: the period start");
+  assert.equal(entry("2026-07-01", "2026-06-15"), "2026-06-15", "a joiner part-way through");
+  assert.equal(entry("2026-07-01", null), "2026-04-01", "no DOJ recorded: the period start");
+  // A date of joining AFTER the date being calculated is not an entry into
+  // this period, and must not be read as one.
+  assert.equal(entry("2026-07-01", "2026-12-01"), "2026-04-01");
+});
+
+/*
+ * THE SIX CASES THE RULE EXISTS FOR. Each is the whole calculation, because
+ * what matters is the contribution that comes out of it.
+ */
+const COVERED = {
+  pf_applicable: 1,
+  esi_applicable: 1,
+  previous_eps_member: 1,
+  dob: "1990-05-10",
+  date_of_joining: "2020-01-01",
+};
+
+/** An approved record as the server would hand one over, at a given gross. */
+const approvedAt = (gross) => ({ monthly_gross: gross, ...E.calculateBreakup(gross) });
+
+test("1. covered at the period start, wages cross the ceiling mid-period: ESI CONTINUES", () => {
+  // 16000 on 1 April is wages of 10000 — covered. A revision to 60000 from
+  // 1 July puts them well above the 21000 ceiling, and coverage still runs to
+  // 30 September because that is when the contribution period ends.
+  const r = E.calculateSalary({
+    ...COVERED,
+    monthly_gross: 60000,
+    effective_from: "2026-07-01",
+    coverage_entry_salary: approvedAt(16000),
+  });
+  assert.equal(r.esi.status, E.STATUS.APPLIED);
+  assert.ok(r.esi.employer_esi > 0, "the employer goes on contributing for the period");
+  assert.equal(r.esi_coverage.basis, "COVERED_AT_ENTRY");
+  assert.equal(r.esi_coverage.entry_date, "2026-04-01");
+  assert.equal(r.esi_coverage.period.end, "2026-09-30");
+  // And it is charged on the statutory wages of the NEW salary, not on the old
+  // ones: continuation keeps somebody covered, it does not freeze their wage.
+  assert.equal(r.esi.esi_wage, 47500);
+});
+
+test("2. the same employee at the NEXT period start, still above: NOT APPLICABLE", () => {
+  // 1 October asks the question afresh. They are above the ceiling that day,
+  // so nothing carries over from the period that just ended.
+  const r = E.calculateSalary({
+    ...COVERED,
+    monthly_gross: 60000,
+    effective_from: "2026-10-01",
+    coverage_entry_salary: approvedAt(60000),
+  });
+  assert.equal(r.esi.status, E.STATUS.NOT_APPLICABLE);
+  assert.equal(r.esi.employer_esi, 0);
+  assert.equal(r.esi_coverage.basis, "ABOVE_CEILING_AT_ENTRY");
+  assert.equal(r.esi_coverage.entry_date, "2026-10-01");
+});
+
+test("3. a mid-period joiner below the ceiling who then crosses it: CONTINUES", () => {
+  // Joined 15 June on 16000, revised to 60000 from 1 August. Entry into the
+  // period was the day they joined, and they were covered on it.
+  const r = E.calculateSalary({
+    ...COVERED,
+    date_of_joining: "2026-06-15",
+    monthly_gross: 60000,
+    effective_from: "2026-08-01",
+    coverage_entry_salary: approvedAt(16000),
+  });
+  assert.equal(r.esi.status, E.STATUS.APPLIED);
+  assert.equal(r.esi_coverage.entry_date, "2026-06-15");
+  assert.equal(r.esi_coverage.period.end, "2026-09-30");
+});
+
+test("4. somebody who joins ALREADY above the ceiling: NOT APPLICABLE", () => {
+  // No approved history at all — the opening salary IS the salary in force at
+  // entry, so the rule is answered without one.
+  const r = E.calculateSalary({
+    ...COVERED,
+    date_of_joining: "2026-06-15",
+    monthly_gross: 60000,
+    effective_from: "2026-06-15",
+  });
+  assert.equal(r.esi.status, E.STATUS.NOT_APPLICABLE);
+  assert.equal(r.esi_coverage.basis, "ABOVE_CEILING_AT_ENTRY");
+  assert.equal(r.esi_coverage.entry_date, "2026-06-15");
+});
+
+test("5. somebody who stays below the ceiling is APPLIED, and the 16000 case is untouched", () => {
+  const r = E.calculateSalary({
+    ...COVERED,
+    monthly_gross: 16000,
+    effective_from: "2026-04-01",
+  });
+  assert.equal(r.esi.status, E.STATUS.APPLIED);
+  assert.equal(r.esi.esi_wage, 10000);
+  assert.equal(r.esi.employee_esi, 75);
+  assert.equal(r.esi.employer_esi, 325);
+  assert.equal(r.monthly_ctc, 17625);
+});
+
+test("6. esi_applicable = false is NOT APPLICABLE, and no period reasoning applies", () => {
+  const r = E.calculateSalary({
+    ...COVERED,
+    esi_applicable: 0,
+    monthly_gross: 16000,
+    effective_from: "2026-04-01",
+  });
+  assert.equal(r.esi.status, E.STATUS.NOT_APPLICABLE);
+  assert.equal(r.esi_coverage.basis, "NOT_APPLICABLE_AT_ENTRY");
+});
+
+test("the ceiling comparison at entry uses STATUTORY WAGES, not the gross", () => {
+  // 40000 gross is 20000 / 2500 / 10000 / 7500: the gross is above the 21000
+  // ceiling but statutory wages are 27500... still above. 25000 gross is the
+  // case that separates them - wages of 12500 against a gross of 25000 - and
+  // that employee is covered at entry, so a later crossing continues.
+  const r = E.calculateSalary({
+    ...COVERED,
+    monthly_gross: 60000,
+    effective_from: "2026-07-01",
+    coverage_entry_salary: approvedAt(25000),
+  });
+  assert.equal(r.esi_coverage.wages_at_entry, 12500);
+  assert.equal(r.esi_coverage.basis, "COVERED_AT_ENTRY");
+  assert.equal(r.esi.status, E.STATUS.APPLIED);
+});
+
+test("an unprovable position above the ceiling is PENDING, never a zero", () => {
+  // No approved salary at entry, and the record being calculated starts after
+  // it — so whether they were covered when the period began is genuinely open,
+  // and a contribution that quietly stops is the one answer not allowed.
+  const r = E.calculateSalary({
+    ...COVERED,
+    monthly_gross: 60000,
+    effective_from: "2026-08-01",
+  });
+  assert.equal(r.esi_coverage.continues, null);
+  assert.equal(r.esi_coverage.basis, "NO_SALARY_AT_ENTRY");
+  assert.equal(r.esi.status, E.STATUS.PENDING);
+  assert.equal(r.esi.employer_esi, null);
+  assert.equal(r.esi.unresolved[0].code, E.UNRESOLVED.ESI_CONTRIBUTION_PERIOD_UNRESOLVED);
+});
+
+test("the same unprovable position BELOW the ceiling decides nothing and is APPLIED", () => {
+  // Continuation only matters above the ceiling. Somebody plainly inside it is
+  // covered whatever happened at the start of the period.
+  const r = E.calculateSalary({
+    ...COVERED,
+    monthly_gross: 16000,
+    effective_from: "2026-08-01",
+  });
+  assert.equal(r.esi.status, E.STATUS.APPLIED);
+  assert.equal(r.esi.employer_esi, 325);
+});
+
+test("A TRUSTED CALLER'S OWN ANSWER IS NOT SECOND-GUESSED", () => {
+  // A payrun that established the position from the wage register passes it,
+  // and the derived rule must not overrule it.
+  const r = E.calculateSalary({
+    ...COVERED,
+    monthly_gross: 60000,
+    effective_from: "2026-10-01",
+    coverage_entry_salary: approvedAt(60000),
+    contribution_period_continues: true,
+  });
+  assert.equal(r.esi.status, E.STATUS.APPLIED, "the caller's fact wins over the derivation");
+  assert.ok(r.esi.employer_esi > 0);
+});
+
 /* ------------------------------------------------------------------- ESI */
 
 test("ESI not applicable means zeros, not pending", () => {

@@ -260,6 +260,27 @@ class EmployeeSalaryUsecase {
       ? normalizeDate(input.effective_from, "effective_from")
       : engine.resolveOpeningEffectiveFrom(employee.date_of_joining);
 
+    /*
+     * THE CONTRIBUTION-PERIOD EVIDENCE, FETCHED BY THE SERVER.
+     *
+     * ESI coverage is decided once per contribution period and runs to the end
+     * of it, so what matters is the salary that was in force when the period
+     * began — or when the employee joined, if they joined part-way through.
+     * `getCurrentSalary` already answers "the approved salary in force on a
+     * date", which is exactly that question asked of an earlier date.
+     *
+     * IT IS EVIDENCE, NOT AN ANSWER. The engine decides what it means; this
+     * layer only goes and gets it, and a caller cannot influence which date is
+     * asked about — it comes from the period and the date of joining.
+     */
+    const coverageEntryDate = engine.contributionPeriodEntryDate({
+      as_of: effectiveFrom,
+      date_of_joining: employee.date_of_joining,
+    });
+    const coverageEntrySalary = coverageEntryDate
+      ? await this.salaryRepo.getCurrentSalary(employeeId, coverageEntryDate)
+      : null;
+
     const result = engine.calculateSalary({
       monthly_gross: input.monthly_gross,
       manual_components: input.manual_components,
@@ -276,6 +297,9 @@ class EmployeeSalaryUsecase {
       date_of_joining: employee.date_of_joining,
       effective_from: effectiveFrom,
       as_of: effectiveFrom,
+      // The approved salary in force when this contribution period began. The
+      // ONE input to the coverage rule that is not already on this context.
+      coverage_entry_salary: coverageEntrySalary,
       /*
        * NO PAYROLL CONTEXT IS FORWARDED FROM `input`, EVER.
        *
