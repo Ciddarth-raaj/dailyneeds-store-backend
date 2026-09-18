@@ -260,6 +260,27 @@ class EmployeeSalaryUsecase {
       ? normalizeDate(input.effective_from, "effective_from")
       : engine.resolveOpeningEffectiveFrom(employee.date_of_joining);
 
+    /*
+     * THE CONTRIBUTION-PERIOD EVIDENCE, FETCHED BY THE SERVER.
+     *
+     * ESI coverage is decided once per contribution period and runs to the end
+     * of it, so what matters is the salary that was in force when the period
+     * began — or when the employee joined, if they joined part-way through.
+     * `getCurrentSalary` already answers "the approved salary in force on a
+     * date", which is exactly that question asked of an earlier date.
+     *
+     * IT IS EVIDENCE, NOT AN ANSWER. The engine decides what it means; this
+     * layer only goes and gets it, and a caller cannot influence which date is
+     * asked about — it comes from the period and the date of joining.
+     */
+    const coverageEntryDate = engine.contributionPeriodEntryDate({
+      as_of: effectiveFrom,
+      date_of_joining: employee.date_of_joining,
+    });
+    const coverageEntrySalary = coverageEntryDate
+      ? await this.salaryRepo.getCurrentSalary(employeeId, coverageEntryDate)
+      : null;
+
     const result = engine.calculateSalary({
       monthly_gross: input.monthly_gross,
       manual_components: input.manual_components,
@@ -276,11 +297,30 @@ class EmployeeSalaryUsecase {
       date_of_joining: employee.date_of_joining,
       effective_from: effectiveFrom,
       as_of: effectiveFrom,
-      // Monthly-payroll context. Absent today; the engine says so rather than
-      // inventing an ESI wage from the gross.
-      esi_wage: input.esi_wage,
-      contribution_period_continues: input.contribution_period_continues,
-      employee_contribution_exempt: input.employee_contribution_exempt,
+      // The approved salary in force when this contribution period began. The
+      // ONE input to the coverage rule that is not already on this context.
+      coverage_entry_salary: coverageEntrySalary,
+      /*
+       * NO PAYROLL CONTEXT IS FORWARDED FROM `input`, EVER.
+       *
+       * `esi_wage`, `contribution_period_continues` and
+       * `employee_contribution_exempt` decide a statutory amount, and the
+       * engine treats a supplied ESI wage as authoritative over the standard
+       * one — so forwarding a caller's copy of them would let a request body
+       * choose its own ESI. The Salary Master calculates the STANDARD
+       * contribution from the approved structure, the employee master's own
+       * statutory facts and the statutory configuration, and from nothing
+       * else.
+       *
+       * This is the choke point for every write path, not only the preview:
+       * `createInitialSalary` and `updatePendingSalary` both spread their
+       * caller's body into this method, so a key that is not read here cannot
+       * reach a stored row by any route.
+       *
+       * A future payrun is trusted server-side code and calls
+       * `engine.calculateSalary` itself with a wage it derived; it does not go
+       * through this method, and nothing here has to be relaxed for it.
+       */
     });
 
     if (!result.valid) throw validationError(result.errors.join("; "), { errors: result.errors });
@@ -617,13 +657,21 @@ class EmployeeSalaryUsecase {
         return null;
       }
     };
-    return {
+    /*
+     * THE ONE DERIVATION THIS PRESENTER MAKES, and it completes a record
+     * rather than changing one: rows written before ESI had a standard basis
+     * carry a PENDING ESI and a null CTC that the record's own gross,
+     * components and snapshot fully determine. `fillStandardEsi` supplies
+     * exactly those and leaves every genuinely open question alone. Nothing is
+     * written back — a salary record is history.
+     */
+    return engine.fillStandardEsi({
       ...row,
       effective_from: engine.toDateOnly(row.effective_from),
       unresolved_notes: parse(row.unresolved_notes),
       statutory_snapshot: parse(row.statutory_snapshot),
       manual_override: Number(row.manual_override) === 1,
-    };
+    });
   }
 
   /* ----------------------------------------------------- the approval queue */

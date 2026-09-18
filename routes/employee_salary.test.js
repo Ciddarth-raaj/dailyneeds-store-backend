@@ -350,6 +350,140 @@ describe("the manual override guard", () => {
   });
 });
 
+describe("payroll context is not a request field", () => {
+  /*
+   * THE HOLE THIS CLOSES. `esi_wage`, `contribution_period_continues` and
+   * `employee_contribution_exempt` were once accepted on the three calculating
+   * endpoints, against the day monthly payroll could supply them. A supplied
+   * ESI wage is AUTHORITATIVE in the engine, so a caller posting
+   * `{ monthly_gross: 16000, esi_wage: 0 }` could have stored a salary with no
+   * ESI on it — and `employee_contribution_exempt: true` could zero the
+   * employee's statutory deduction by assertion.
+   *
+   * These drive the REAL handlers rather than reading the source, because what
+   * matters is that the request is refused and the usecase never runs — not
+   * that a particular line is absent.
+   */
+  const Joi = require("@hapi/joi");
+
+  /** The router, built over a usecase that records whether it was reached. */
+  function withSpyUsecase() {
+    const calls = [];
+    const spy = new Proxy(
+      {},
+      {
+        get: (_t, name) => async (...args) => {
+          calls.push({ name, args });
+          return { ok: true };
+        },
+      }
+    );
+    const permissions = {
+      require: () => (req, res, next) => next(),
+      requireAll: () => (req, res, next) => next(),
+      actorFor: async () => ({ employeeId: 1, isAdmin: true, permissions: [] }),
+    };
+    const sensitive = {
+      filterResponse: (req, res, next) => next(),
+      guardWrite: (req, res, next) => next(),
+    };
+    const router = buildRoutes(spy, permissions, sensitive).getRouter();
+    return { router, calls };
+  }
+
+  /** Run one route's final handler against a body, and report what came back. */
+  async function post(router, path, body) {
+    /*
+     * THE LAST matching layer, not the first. `employee_salary.js` registers
+     * onto a module-level Express router, so every harness in this file adds
+     * another copy of the route; the one this test built is the newest.
+     */
+    const layer = router.stack.filter((l) => l.route && l.route.path === path).pop();
+    assert.ok(layer, `${path} is routed`);
+    const handler = layer.route.stack[layer.route.stack.length - 1].handle;
+
+    const out = { status: 200, body: null };
+    const res = {
+      status(code) {
+        out.status = code;
+        return res;
+      },
+      json(payload) {
+        out.body = payload;
+        return res;
+      },
+      end() {},
+    };
+    await handler({ body, params: { employee_id: 7, salary_id: 7 }, user: {} }, res);
+    return out;
+  }
+
+  const ENDPOINTS = [
+    ["preview", "/salary/preview/:employee_id"],
+    ["create", "/salary/employee/:employee_id"],
+    ["amend", "/salary/revision/:salary_id"],
+  ];
+
+  const FORBIDDEN = {
+    esi_wage: 0,
+    contribution_period_continues: true,
+    employee_contribution_exempt: true,
+  };
+
+  for (const [name, path] of ENDPOINTS) {
+    for (const [field, value] of Object.entries(FORBIDDEN)) {
+      it(`${name} REFUSES ${field} and never reaches the usecase`, async () => {
+        const { router, calls } = withSpyUsecase();
+        const out = await post(router, path, { monthly_gross: 16000, [field]: value });
+
+        assert.equal(out.status, 400, "an unknown key is a refusal, not a silent drop");
+        assert.match(String(out.body.msg), new RegExp(field), "and the refusal names it");
+        assert.deepEqual(calls, [], "nothing was calculated or stored");
+      });
+    }
+
+    it(`${name} still accepts a legitimate body`, async () => {
+      // The guard must refuse the payroll keys and nothing else: a proposal
+      // that a screen actually sends still goes through.
+      const { router, calls } = withSpyUsecase();
+      const out = await post(router, path, {
+        monthly_gross: 16000,
+        revision_reason: "Annual revision",
+      });
+      assert.equal(out.status, 200);
+      assert.equal(calls.length, 1, "the usecase ran");
+    });
+  }
+
+  it("all three are refused together, and the first one is named", async () => {
+    const { router, calls } = withSpyUsecase();
+    const out = await post(router, "/salary/preview/:employee_id", {
+      monthly_gross: 16000,
+      ...FORBIDDEN,
+    });
+    assert.equal(out.status, 400);
+    assert.deepEqual(calls, []);
+  });
+
+  it("no schema anywhere in this router declares a payroll-context key", () => {
+    // The route-level twin of the usecase regression test: a key nobody
+    // declares cannot be accepted by an endpoint added later either.
+    const source = require("fs").readFileSync(require.resolve("./employee_salary"), "utf8");
+    for (const field of Object.keys(FORBIDDEN)) {
+      assert.ok(
+        !new RegExp(`\\b${field}:\\s*Joi\\.`).test(source),
+        `${field} must not be a request field`
+      );
+    }
+  });
+
+  it("Joi refuses an unknown key by default — the assumption the above rests on", () => {
+    const schema = { monthly_gross: Joi.number().min(0).required() };
+    assert.notEqual(Joi.validate({ monthly_gross: 16000, esi_wage: 0 }, schema).error, null);
+    assert.equal(Joi.validate({ monthly_gross: 16000 }, schema).error, null);
+  });
+});
+
 describe("what the schemas refuse — the server calculates everything", () => {
   const Joi = require("@hapi/joi");
   const source = require("fs").readFileSync(require.resolve("./employee_salary"), "utf8");
@@ -370,6 +504,11 @@ describe("what the schemas refuse — the server calculates everything", () => {
       "daily_salary",
       "pf_wage",
       "statutory_snapshot",
+      // Payroll context decides a contribution just as directly as sending the
+      // contribution would.
+      "esi_wage",
+      "contribution_period_continues",
+      "employee_contribution_exempt",
     ]) {
       assert.ok(
         !new RegExp(`\\b${forbidden}:\\s*Joi\\.`).test(source),

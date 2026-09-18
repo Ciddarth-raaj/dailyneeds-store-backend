@@ -131,21 +131,6 @@ class EmployeeSalaryRoutes {
       special_allowance: Joi.number().min(0).required(),
     });
 
-    /**
-     * The monthly-payroll statutory context.
-     *
-     * Accepted but not yet supplied by anything: ESI is charged on the wage
-     * actually paid in a period, and there is no monthly payroll to report one
-     * yet. The engine answers PENDING without it rather than computing a
-     * contribution off the gross. These keys exist so that M4/M5 is a caller
-     * change and not an engine change.
-     */
-    const payrollContext = {
-      esi_wage: Joi.number().min(0).optional(),
-      contribution_period_continues: Joi.boolean().optional(),
-      employee_contribution_exempt: Joi.boolean().optional(),
-    };
-
     const calculationBody = {
       monthly_gross: Joi.number().min(0).required(),
       effective_from: Joi.string().allow("").allow(null).optional(),
@@ -164,7 +149,25 @@ class EmployeeSalaryRoutes {
        * would make the first salary for every employee unenterable.
        */
       revision_reason: Joi.string().allow("").allow(null).optional(),
-      ...payrollContext,
+      /*
+       * THERE IS NO PAYROLL CONTEXT IN THIS SCHEMA, AND THAT IS THE POINT.
+       *
+       * `esi_wage`, `contribution_period_continues` and
+       * `employee_contribution_exempt` were once accepted here, against the
+       * day monthly payroll could supply them. A browser is not that day. A
+       * supplied ESI wage has PAYROLL precedence in the engine, so a caller
+       * posting `esi_wage: 0` beside a 16000 gross could have stored a salary
+       * with no ESI on it at all, and an `employee_contribution_exempt` could
+       * zero a statutory deduction by assertion. The same is true of a
+       * contribution period that "continues" because somebody said so.
+       *
+       * Joi rejects unknown keys, so leaving them out is not a silent drop:
+       * a caller that sends one gets a 400 naming it rather than a salary
+       * quietly calculated some other way. When a server-side payrun exists it
+       * will call the engine DIRECTLY with a wage it derived itself — the
+       * engine keeps its PAYROLL basis for exactly that — and it will still
+       * not be a field on this request body.
+       */
     };
 
     /**

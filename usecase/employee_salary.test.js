@@ -752,6 +752,250 @@ describe("approval and immutability", () => {
   });
 });
 
+/* ------------------------------------ the ESI contribution period, derived */
+
+describe("ESI contribution-period continuity", () => {
+  /*
+   * THE FACT THE BROWSER MUST NOT SUPPLY, established by the server instead.
+   *
+   * Coverage is decided once per contribution period — 1 April to 30 September
+   * and 1 October to 31 March — and runs to the end of it. The evidence is the
+   * employee's own APPROVED salary history: `getCurrentSalary` asked about the
+   * day the period began, which is a query the repository already had.
+   */
+  const COVERED = { ...EMPLOYEE, esi_applicable: 1 };
+
+  /** An approved record carrying the components the wage definition needs. */
+  const approved = (salary_id, effective_from, gross) => {
+    const engine = require("../utils/salary_engine");
+    return row({
+      salary_id,
+      effective_from,
+      monthly_gross: gross,
+      status: "APPROVED",
+      ...engine.calculateBreakup(gross),
+    });
+  };
+
+  it("continues coverage for somebody covered when the period began", async () => {
+    // Approved on 16000 from 1 April: wages of 10000, inside the ceiling. A
+    // 60000 proposal from 1 July is above it, and ESI still applies because
+    // the period runs to 30 September.
+    const repo = makeRepo(COVERED, [approved(1, "2026-04-01", 16000)]);
+    const r = await build(repo).calculateForEmployee(42, {
+      monthly_gross: 60000,
+      effective_from: "2026-07-01",
+    });
+    assert.equal(r.esi.status, "APPLIED");
+    assert.ok(r.esi.employer_esi > 0);
+    assert.equal(r.esi_coverage.basis, "COVERED_AT_ENTRY");
+    assert.equal(r.esi_coverage.entry_date, "2026-04-01");
+    assert.equal(r.esi_coverage.period.end, "2026-09-30");
+  });
+
+  it("stops at the next period start while they are still above the ceiling", async () => {
+    // The same employee, now with the 60000 approved, asked about 1 October.
+    const repo = makeRepo(COVERED, [
+      approved(1, "2026-04-01", 16000),
+      approved(2, "2026-07-01", 60000),
+    ]);
+    const r = await build(repo).calculateForEmployee(42, {
+      monthly_gross: 60000,
+      effective_from: "2026-10-01",
+    });
+    assert.equal(r.esi.status, "NOT_APPLICABLE");
+    assert.equal(r.esi.employer_esi, 0);
+    assert.equal(r.esi_coverage.entry_date, "2026-10-01");
+    assert.equal(r.esi_coverage.basis, "ABOVE_CEILING_AT_ENTRY");
+  });
+
+  it("reads the position at ENTRY for somebody who joined part-way through", async () => {
+    const repo = makeRepo({ ...COVERED, date_of_joining: "2026-06-15" }, [
+      approved(1, "2026-06-15", 16000),
+    ]);
+    const r = await build(repo).calculateForEmployee(42, {
+      monthly_gross: 60000,
+      effective_from: "2026-08-01",
+    });
+    assert.equal(r.esi.status, "APPLIED");
+    assert.equal(r.esi_coverage.entry_date, "2026-06-15");
+  });
+
+  it("asks the repository about the PERIOD START, not about today", async () => {
+    // The one thing this layer decides is which date the evidence is asked
+    // for, and it is derived from the period and the date of joining — never
+    // from anything a caller sent.
+    const asked = [];
+    const repo = makeRepo(COVERED, [approved(1, "2026-04-01", 16000)]);
+    const inner = repo.getCurrentSalary.bind(repo);
+    repo.getCurrentSalary = async (id, asOf) => {
+      asked.push(asOf);
+      return inner(id, asOf);
+    };
+    await build(repo).calculateForEmployee(42, {
+      monthly_gross: 60000,
+      effective_from: "2026-07-01",
+    });
+    assert.deepEqual(asked, ["2026-04-01"]);
+  });
+
+  it("A CALLER STILL CANNOT ASSERT CONTINUATION the server did not find", async () => {
+    // The blocker this must not reopen: above the ceiling at the period start,
+    // with the request insisting otherwise.
+    const repo = makeRepo(COVERED, [approved(1, "2026-04-01", 60000)]);
+    const r = await build(repo).calculateForEmployee(42, {
+      monthly_gross: 60000,
+      effective_from: "2026-07-01",
+      contribution_period_continues: true,
+      esi_wage: 60000,
+    });
+    assert.equal(r.esi.status, "NOT_APPLICABLE", "the server's own evidence decides");
+    assert.equal(r.esi.employer_esi, 0);
+  });
+
+  it("NULL applicability above the ceiling is PENDING, not zero", async () => {
+    // `esi_applicable` is NULL for every employee the C3 migration touched.
+    // Above the ceiling that used to resolve to NOT_APPLICABLE, on the
+    // reasoning that nobody is covered up there — which contribution periods
+    // made untrue. Whether this employee was in the scheme when the period
+    // began now decides the answer, and nobody has recorded it.
+    const repo = makeRepo({ ...EMPLOYEE, esi_applicable: null }, [
+      approved(1, "2026-04-01", 16000),
+    ]);
+    const r = await build(repo).calculateForEmployee(42, {
+      monthly_gross: 60000,
+      effective_from: "2026-07-01",
+    });
+    assert.equal(r.esi.status, "PENDING");
+    assert.equal(r.esi.employer_esi, null);
+    assert.equal(r.esi.unresolved[0].code, "ESI_APPLICABILITY_NOT_RECORDED");
+    assert.equal(r.esi_coverage.basis, "APPLICABILITY_NOT_RECORDED");
+    assert.equal(r.ctc_status, "PENDING", "and the CTC waits on it rather than understating");
+  });
+
+  it("FALSE applicability is still a settled NOT_APPLICABLE", async () => {
+    const repo = makeRepo({ ...EMPLOYEE, esi_applicable: 0 }, [approved(1, "2026-04-01", 16000)]);
+    const r = await build(repo).calculateForEmployee(42, {
+      monthly_gross: 60000,
+      effective_from: "2026-07-01",
+    });
+    assert.equal(r.esi.status, "NOT_APPLICABLE");
+    assert.equal(r.esi.employer_esi, 0);
+    assert.deepEqual(r.esi.unresolved, []);
+  });
+
+  it("STORES the coverage evidence on the record, inside the snapshot", async () => {
+    // A record has to be able to explain, years later, why ESI was charged on
+    // wages above the ceiling. The snapshot column is JSON and already exists.
+    const repo = makeRepo(COVERED, [approved(1, "2026-04-01", 16000)]);
+    // A revision proposed from 1 July, over the approved April record that is
+    // the evidence the coverage rule reads.
+    await build(repo).createInitialSalary(
+      42,
+      { monthly_gross: 60000, effective_from: "2026-07-01", revision_reason: REASON },
+      ACTOR
+    );
+    const stored = JSON.parse(repo.rows.find((r) => r.status === "PENDING").statutory_snapshot);
+    assert.deepEqual(stored.esi_contribution_period_start_months, [4, 10]);
+    assert.equal(stored.esi_coverage.basis, "COVERED_AT_ENTRY");
+    assert.equal(stored.esi_coverage.entry_date, "2026-04-01");
+    assert.equal(stored.esi_coverage.period.end, "2026-09-30");
+    assert.equal(stored.esi_coverage.wages_at_entry, 10000);
+    assert.equal(stored.esi_coverage.entry_salary_id, 1, "the April record it was decided from");
+    assert.equal(stored.esi_coverage.continues, true);
+  });
+
+  it("leaves the 16000 acceptance case exactly as it was", async () => {
+    const repo = makeRepo(COVERED, [approved(1, "2026-04-01", 16000)]);
+    const r = await build(repo).calculateForEmployee(42, { monthly_gross: 16000 });
+    assert.equal(r.esi.esi_wage, 10000);
+    assert.equal(r.esi.employee_esi, 75);
+    assert.equal(r.esi.employer_esi, 325);
+    assert.equal(r.monthly_ctc, 17625);
+  });
+});
+
+/* ------------------------------------------- payroll context is not an input */
+
+describe("a caller cannot supply payroll context", () => {
+  /*
+   * THE REGRESSION THIS PINS. A supplied `esi_wage` is AUTHORITATIVE in the
+   * engine — that is what lets a future payrun charge ESI on the wage actually
+   * payable — so a request body carrying one would be choosing its own
+   * statutory result. `{ monthly_gross: 16000, esi_wage: 0 }` would have
+   * stored a salary with no ESI on it at all.
+   *
+   * The route schema refuses the keys, and this is the layer below: even
+   * called directly, the usecase reads none of them. Both matter, because the
+   * usecase is what `createInitialSalary` and `updatePendingSalary` funnel
+   * their caller's whole body into.
+   */
+  const COVERED = { ...EMPLOYEE, esi_applicable: 1 };
+
+  /** The three fields, at values chosen to be visible if they were ever read. */
+  const POISON = {
+    esi_wage: 0,
+    contribution_period_continues: true,
+    employee_contribution_exempt: true,
+  };
+
+  /** The standard answer for a 16000 gross: wages 10000, at 0.75% and 3.25%. */
+  const assertStandard = (esi, ctc) => {
+    assert.equal(esi.status, "APPLIED");
+    assert.equal(esi.esi_wage, 10000);
+    assert.equal(esi.esi_wage_basis, "STANDARD");
+    assert.equal(esi.employee_esi, 75);
+    assert.equal(esi.employer_esi, 325);
+    assert.equal(ctc, 17625);
+  };
+
+  it("IGNORES esi_wage, contribution_period_continues and employee_contribution_exempt", async () => {
+    const uc = build(makeRepo(COVERED));
+    const r = await uc.calculateForEmployee(42, { monthly_gross: 16000, ...POISON });
+    assertStandard(r.esi, r.monthly_ctc);
+    assert.notEqual(r.esi.employee_esi, 0, "an asserted exemption cannot zero a deduction");
+  });
+
+  it("produces the IDENTICAL result with and without them", async () => {
+    const uc = build(makeRepo(COVERED));
+    const poisoned = await uc.calculateForEmployee(42, { monthly_gross: 16000, ...POISON });
+    const clean = await uc.calculateForEmployee(42, { monthly_gross: 16000 });
+    assert.deepEqual(poisoned.esi, clean.esi);
+    assert.equal(poisoned.monthly_ctc, clean.monthly_ctc);
+  });
+
+  it("does not let them reach a STORED row through the create path", async () => {
+    const repo = makeRepo(COVERED);
+    const uc = build(repo);
+    await uc.createInitialSalary(42, { monthly_gross: 16000, ...POISON }, ACTOR);
+    const row = repo.rows[0];
+    assert.equal(row.esi_wage, 10000);
+    assert.equal(row.employee_esi, 75);
+    assert.equal(row.employer_esi, 325);
+    assert.equal(row.monthly_ctc, 17625);
+  });
+
+  it("does not let them reach a stored row through the AMEND path", async () => {
+    const repo = makeRepo(COVERED);
+    const uc = build(repo);
+    const created = await uc.createInitialSalary(42, { monthly_gross: 16000 }, ACTOR);
+    await uc.updatePendingSalary(created.salary_id, { monthly_gross: 16000, ...POISON }, ACTOR);
+    const row = repo.rows[0];
+    assert.equal(row.esi_wage, 10000);
+    assert.equal(row.employee_esi, 75);
+    assert.equal(row.employer_esi, 325);
+  });
+
+  it("an employee genuinely outside the scheme is still NOT_APPLICABLE, not zero-by-assertion", async () => {
+    // The distinction the poison would have blurred: this is a recorded fact
+    // about the employee, and it comes from the employee master.
+    const uc = build(makeRepo({ ...EMPLOYEE, esi_applicable: 0 }));
+    const r = await uc.calculateForEmployee(42, { monthly_gross: 16000, ...POISON });
+    assert.equal(r.esi.status, "NOT_APPLICABLE");
+    assert.equal(r.esi.employer_esi, 0);
+  });
+});
+
 /* ------------------------------------------------------- the period lock */
 
 describe("the salary period lock", () => {

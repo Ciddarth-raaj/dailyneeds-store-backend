@@ -43,6 +43,28 @@ const date = (name, fallback) => {
   return /^\d{4}-\d{2}-\d{2}$/.test(String(raw).trim()) ? String(raw).trim() : fallback;
 };
 
+/** A comma-separated list from the environment, lower-cased, or the default. */
+const list = (name, fallback) => {
+  const raw = process.env[name];
+  if (raw === undefined || raw === null || String(raw).trim() === "") return fallback;
+  const items = String(raw)
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  return items.length ? items : fallback;
+};
+
+/** A comma-separated list of month numbers (1-12) from the environment. */
+const months = (name, fallback) => {
+  const raw = process.env[name];
+  if (raw === undefined || raw === null || String(raw).trim() === "") return fallback;
+  const items = String(raw)
+    .split(",")
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isInteger(n) && n >= 1 && n <= 12);
+  return items.length ? [...new Set(items)].sort((a, b) => a - b) : fallback;
+};
+
 /**
  * The salary structure itself — the Daily Needs breakup rule, which is a
  * company policy rather than a statutory one, but belongs beside the rates it
@@ -171,16 +193,67 @@ const esi = {
   employeeExemptionDailyWage: num("ESI_EMPLOYEE_EXEMPTION_DAILY_WAGE", 176),
 
   /**
-   * ISOLATED NUANCE — see `utils/salary_engine.js#esiWageBounds`.
+   * THE CONTRIBUTION PERIODS, as the months they begin in: 1 April and
+   * 1 October, each running to the day before the next one starts.
    *
-   * Travelling allowance is excluded from the statutory definition of wages,
-   * and Conveyance is this structure's travelling allowance. That matters only
-   * for the BOUND the engine uses to decide "definitely outside the scheme"
-   * without a payroll wage, and getting it wrong in the safe direction costs
-   * an unresolved answer rather than a wrong number. It is a flag because it
-   * is not settled by current project material.
+   * They are not a calendar convenience. Coverage is decided ONCE per period,
+   * at its start or at the employee's entry into it, and an employee who was
+   * covered then stays covered to the end of it even if their wages cross the
+   * ceiling in between — see
+   * `utils/salary_engine.js#resolveContributionPeriodCoverage`. Without the
+   * period there is no way to say how long "until the end" is.
    */
-  conveyanceExcludedFromWage: bool("ESI_CONVEYANCE_EXCLUDED_FROM_WAGE", true),
+  contributionPeriodStartMonths: months("ESI_CONTRIBUTION_PERIOD_START_MONTHS", [4, 10]),
+
+  /*
+   * WHICH WAGE ESI IS CHARGED ON IS NOT DECLARED HERE. It is the statutory
+   * wage definition in `wages` below, which ESI shares with every other
+   * contribution that uses it — see `utils/salary_engine.js#statutoryWages`.
+   */
+};
+
+/**
+ * THE STATUTORY WAGE DEFINITION — Code on Social Security, 2020.
+ *
+ * The Code replaced a per-Act list of includes and excludes with ONE
+ * definition of "wages", and it applies to ESI for our payroll periods from
+ * 21 November 2025. Two parts matter to a salary structure:
+ *
+ *   THE EXCLUSIONS. Named heads of remuneration are outside wages. Of this
+ *   structure's four components, HRA and Conveyance (the Code's house rent
+ *   allowance and conveyance allowance) are excluded; Basic and Special
+ *   Allowance are wages, as is any other remuneration the Code does not
+ *   specifically exclude — which is why this is a list of what comes OUT
+ *   rather than a list of what goes in. A component added to the structure
+ *   tomorrow is wages unless somebody names it here.
+ *
+ *   THE 50% PROVISO. If the excluded heads exceed half of total remuneration,
+ *   the excess over that half is ADDED BACK, so statutory wages can never be
+ *   less than 50% of total remuneration. It exists to stop a structure being
+ *   arranged into excluded allowances to shrink the contribution base.
+ *
+ * ONE DEFINITION, EVERY CALLER. The Salary Master's standard wage and the
+ * wage a payrun derives from what is actually payable are the same definition
+ * applied to different remuneration, so both go through the one helper.
+ */
+const wages = {
+  /**
+   * The component names outside wages, matched against the component keys the
+   * engine works in. Overridable as a comma-separated list, because the next
+   * notification to move a head of remuneration in or out of the definition
+   * should be deployable as configuration.
+   */
+  excludedComponents: list("STATUTORY_WAGE_EXCLUDED_COMPONENTS", ["hra", "conveyance"]),
+
+  /** The proviso's floor, as a percentage of total remuneration. */
+  minimumPercentOfRemuneration: num("STATUTORY_WAGE_MINIMUM_PERCENT_OF_REMUNERATION", 50),
+
+  /**
+   * When this definition took effect for our purposes. Stamped onto every
+   * record so that a contribution can say WHICH definition of wages produced
+   * it, rather than the answer having to be inferred from the record's date.
+   */
+  effectiveFrom: date("STATUTORY_WAGE_DEFINITION_EFFECTIVE_FROM", "2025-11-21"),
 };
 
 /**
@@ -205,6 +278,6 @@ const rounding = {
  * findable when a rate change turns out to have been wrong. Bump it whenever
  * a committed default above changes.
  */
-const configVersion = process.env.STATUTORY_CONFIG_VERSION || "M2-2026-04-01";
+const configVersion = process.env.STATUTORY_CONFIG_VERSION || "M2-2026-04-01-CODE-WAGES-ESI-PERIODS";
 
-module.exports = { salary, pf, esi, rounding, configVersion };
+module.exports = { salary, pf, esi, wages, rounding, configVersion };

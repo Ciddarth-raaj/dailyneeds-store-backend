@@ -394,6 +394,291 @@ test("calculateSalary carries the EPS fact through, and does not read the PF one
   assert.deepEqual(withEps.unresolved, []);
 });
 
+/* --------------------------------------------- the statutory wage definition */
+
+test("the wage definition excludes the Code's heads and includes everything else", () => {
+  // The acceptance structure: 16000 gross as 10000 / 2500 / 3500 / 0.
+  const w = E.statutoryWages(
+    { basic: 10000, conveyance: 2500, hra: 3500, special_allowance: 0 },
+    16000
+  );
+  assert.equal(w.total_remuneration, 16000);
+  assert.equal(w.excluded_remuneration, 6000, "HRA 3500 + Conveyance 2500");
+  assert.equal(w.included_remuneration, 10000, "Basic + Special Allowance");
+  assert.equal(w.minimum_wages, 8000, "50% of total remuneration");
+  assert.equal(w.add_back, 0, "6000 excluded is under the 8000 half, so nothing is added back");
+  assert.equal(w.statutory_wages, 10000);
+});
+
+test("a component nobody excluded is wages, without anybody adding it to a list", () => {
+  // The Code makes all remuneration wages EXCEPT what it excludes, so a head
+  // of pay the structure grows tomorrow must land in the contribution base by
+  // itself. Here 1000 of extra remuneration does exactly that.
+  const w = E.statutoryWages(
+    { basic: 10000, conveyance: 2500, hra: 3500, special_allowance: 0, night_allowance: 1000 },
+    17000
+  );
+  assert.equal(w.excluded_remuneration, 6000);
+  assert.equal(w.statutory_wages, 11000);
+});
+
+test("excluded heads at EXACTLY half of remuneration trigger no add-back", () => {
+  // The proviso bites on "exceeds", so the boundary itself is not an excess.
+  const w = E.statutoryWages(
+    { basic: 8000, special_allowance: 2000, hra: 7500, conveyance: 2500 },
+    20000
+  );
+  assert.equal(w.excluded_remuneration, 10000);
+  assert.equal(w.minimum_wages, 10000);
+  assert.equal(w.add_back, 0);
+  assert.equal(w.statutory_wages, 10000);
+});
+
+test("above half, ONLY THE EXCESS over half is added back", () => {
+  // 12500 excluded against a 10000 half: the excess is 2500, and that is what
+  // comes back — not the whole 12500, which would make wages the gross again.
+  const w = E.statutoryWages(
+    { basic: 4000, special_allowance: 3500, hra: 10000, conveyance: 2500 },
+    20000
+  );
+  assert.equal(w.excluded_remuneration, 12500);
+  assert.equal(w.included_remuneration, 7500);
+  assert.equal(w.minimum_wages, 10000);
+  assert.equal(w.add_back, 2500);
+  assert.equal(w.statutory_wages, 10000);
+  assert.notEqual(w.statutory_wages, 20000, "the whole excluded amount is NOT added back");
+  assert.notEqual(w.statutory_wages, 7500, "and the proviso is not ignored either");
+});
+
+test("the add-back floor holds however the structure is arranged", () => {
+  // The proviso's purpose: no arrangement of excluded allowances can take
+  // statutory wages below half of total remuneration.
+  for (const hra of [0, 5000, 10000, 15000, 19000, 20000]) {
+    const w = E.statutoryWages({ basic: 20000 - hra, hra }, 20000);
+    assert.ok(w.statutory_wages >= 10000, `HRA ${hra} must not breach the half`);
+  }
+});
+
+test("which heads are excluded is configuration, not arithmetic", () => {
+  const cfg = {
+    ...CONFIG,
+    wages: { ...CONFIG.wages, excludedComponents: ["conveyance"] },
+  };
+  const w = E.statutoryWages(
+    { basic: 10000, conveyance: 2500, hra: 3500, special_allowance: 0 },
+    16000,
+    cfg
+  );
+  assert.equal(w.excluded_remuneration, 2500, "HRA is wages under this configuration");
+  assert.equal(w.statutory_wages, 13500);
+});
+
+test("a structure that overspends its remuneration cannot produce a negative wage", () => {
+  const w = E.statutoryWages({ hra: 30000, conveyance: 5000 }, 20000);
+  assert.ok(w.statutory_wages >= 0);
+  assert.equal(w.statutory_wages, 10000, "the proviso's half still holds");
+});
+
+/* ------------------------------------------- the ESI contribution period */
+
+test("the two contribution periods, including the one that spans a year end", () => {
+  assert.deepEqual(E.contributionPeriodFor("2026-04-01"), {
+    start: "2026-04-01",
+    end: "2026-09-30",
+  });
+  assert.deepEqual(E.contributionPeriodFor("2026-09-30"), {
+    start: "2026-04-01",
+    end: "2026-09-30",
+  });
+  assert.deepEqual(E.contributionPeriodFor("2026-10-01"), {
+    start: "2026-10-01",
+    end: "2027-03-31",
+  });
+  // The case worth writing down: a January date belongs to the period that
+  // began the PREVIOUS October, and ends on the 31 March after it.
+  assert.deepEqual(E.contributionPeriodFor("2027-01-15"), {
+    start: "2026-10-01",
+    end: "2027-03-31",
+  });
+  assert.deepEqual(E.contributionPeriodFor("2027-03-31"), {
+    start: "2026-10-01",
+    end: "2027-03-31",
+  });
+});
+
+test("coverage is decided at the period start, or at entry for a mid-period joiner", () => {
+  const entry = (as_of, date_of_joining) =>
+    E.contributionPeriodEntryDate({ as_of, date_of_joining });
+
+  assert.equal(entry("2026-07-01", "2019-06-01"), "2026-04-01", "an old hand: the period start");
+  assert.equal(entry("2026-07-01", "2026-06-15"), "2026-06-15", "a joiner part-way through");
+  assert.equal(entry("2026-07-01", null), "2026-04-01", "no DOJ recorded: the period start");
+  // A date of joining AFTER the date being calculated is not an entry into
+  // this period, and must not be read as one.
+  assert.equal(entry("2026-07-01", "2026-12-01"), "2026-04-01");
+});
+
+/*
+ * THE SIX CASES THE RULE EXISTS FOR. Each is the whole calculation, because
+ * what matters is the contribution that comes out of it.
+ */
+const COVERED = {
+  pf_applicable: 1,
+  esi_applicable: 1,
+  previous_eps_member: 1,
+  dob: "1990-05-10",
+  date_of_joining: "2020-01-01",
+};
+
+/** An approved record as the server would hand one over, at a given gross. */
+const approvedAt = (gross) => ({ monthly_gross: gross, ...E.calculateBreakup(gross) });
+
+test("1. covered at the period start, wages cross the ceiling mid-period: ESI CONTINUES", () => {
+  // 16000 on 1 April is wages of 10000 — covered. A revision to 60000 from
+  // 1 July puts them well above the 21000 ceiling, and coverage still runs to
+  // 30 September because that is when the contribution period ends.
+  const r = E.calculateSalary({
+    ...COVERED,
+    monthly_gross: 60000,
+    effective_from: "2026-07-01",
+    coverage_entry_salary: approvedAt(16000),
+  });
+  assert.equal(r.esi.status, E.STATUS.APPLIED);
+  assert.ok(r.esi.employer_esi > 0, "the employer goes on contributing for the period");
+  assert.equal(r.esi_coverage.basis, "COVERED_AT_ENTRY");
+  assert.equal(r.esi_coverage.entry_date, "2026-04-01");
+  assert.equal(r.esi_coverage.period.end, "2026-09-30");
+  // And it is charged on the statutory wages of the NEW salary, not on the old
+  // ones: continuation keeps somebody covered, it does not freeze their wage.
+  assert.equal(r.esi.esi_wage, 47500);
+});
+
+test("2. the same employee at the NEXT period start, still above: NOT APPLICABLE", () => {
+  // 1 October asks the question afresh. They are above the ceiling that day,
+  // so nothing carries over from the period that just ended.
+  const r = E.calculateSalary({
+    ...COVERED,
+    monthly_gross: 60000,
+    effective_from: "2026-10-01",
+    coverage_entry_salary: approvedAt(60000),
+  });
+  assert.equal(r.esi.status, E.STATUS.NOT_APPLICABLE);
+  assert.equal(r.esi.employer_esi, 0);
+  assert.equal(r.esi_coverage.basis, "ABOVE_CEILING_AT_ENTRY");
+  assert.equal(r.esi_coverage.entry_date, "2026-10-01");
+});
+
+test("3. a mid-period joiner below the ceiling who then crosses it: CONTINUES", () => {
+  // Joined 15 June on 16000, revised to 60000 from 1 August. Entry into the
+  // period was the day they joined, and they were covered on it.
+  const r = E.calculateSalary({
+    ...COVERED,
+    date_of_joining: "2026-06-15",
+    monthly_gross: 60000,
+    effective_from: "2026-08-01",
+    coverage_entry_salary: approvedAt(16000),
+  });
+  assert.equal(r.esi.status, E.STATUS.APPLIED);
+  assert.equal(r.esi_coverage.entry_date, "2026-06-15");
+  assert.equal(r.esi_coverage.period.end, "2026-09-30");
+});
+
+test("4. somebody who joins ALREADY above the ceiling: NOT APPLICABLE", () => {
+  // No approved history at all — the opening salary IS the salary in force at
+  // entry, so the rule is answered without one.
+  const r = E.calculateSalary({
+    ...COVERED,
+    date_of_joining: "2026-06-15",
+    monthly_gross: 60000,
+    effective_from: "2026-06-15",
+  });
+  assert.equal(r.esi.status, E.STATUS.NOT_APPLICABLE);
+  assert.equal(r.esi_coverage.basis, "ABOVE_CEILING_AT_ENTRY");
+  assert.equal(r.esi_coverage.entry_date, "2026-06-15");
+});
+
+test("5. somebody who stays below the ceiling is APPLIED, and the 16000 case is untouched", () => {
+  const r = E.calculateSalary({
+    ...COVERED,
+    monthly_gross: 16000,
+    effective_from: "2026-04-01",
+  });
+  assert.equal(r.esi.status, E.STATUS.APPLIED);
+  assert.equal(r.esi.esi_wage, 10000);
+  assert.equal(r.esi.employee_esi, 75);
+  assert.equal(r.esi.employer_esi, 325);
+  assert.equal(r.monthly_ctc, 17625);
+});
+
+test("6. esi_applicable = false is NOT APPLICABLE, and no period reasoning applies", () => {
+  const r = E.calculateSalary({
+    ...COVERED,
+    esi_applicable: 0,
+    monthly_gross: 16000,
+    effective_from: "2026-04-01",
+  });
+  assert.equal(r.esi.status, E.STATUS.NOT_APPLICABLE);
+  assert.equal(r.esi_coverage.basis, "NOT_APPLICABLE_AT_ENTRY");
+});
+
+test("the ceiling comparison at entry uses STATUTORY WAGES, not the gross", () => {
+  // 40000 gross is 20000 / 2500 / 10000 / 7500: the gross is above the 21000
+  // ceiling but statutory wages are 27500... still above. 25000 gross is the
+  // case that separates them - wages of 12500 against a gross of 25000 - and
+  // that employee is covered at entry, so a later crossing continues.
+  const r = E.calculateSalary({
+    ...COVERED,
+    monthly_gross: 60000,
+    effective_from: "2026-07-01",
+    coverage_entry_salary: approvedAt(25000),
+  });
+  assert.equal(r.esi_coverage.wages_at_entry, 12500);
+  assert.equal(r.esi_coverage.basis, "COVERED_AT_ENTRY");
+  assert.equal(r.esi.status, E.STATUS.APPLIED);
+});
+
+test("an unprovable position above the ceiling is PENDING, never a zero", () => {
+  // No approved salary at entry, and the record being calculated starts after
+  // it — so whether they were covered when the period began is genuinely open,
+  // and a contribution that quietly stops is the one answer not allowed.
+  const r = E.calculateSalary({
+    ...COVERED,
+    monthly_gross: 60000,
+    effective_from: "2026-08-01",
+  });
+  assert.equal(r.esi_coverage.continues, null);
+  assert.equal(r.esi_coverage.basis, "NO_SALARY_AT_ENTRY");
+  assert.equal(r.esi.status, E.STATUS.PENDING);
+  assert.equal(r.esi.employer_esi, null);
+  assert.equal(r.esi.unresolved[0].code, E.UNRESOLVED.ESI_CONTRIBUTION_PERIOD_UNRESOLVED);
+});
+
+test("the same unprovable position BELOW the ceiling decides nothing and is APPLIED", () => {
+  // Continuation only matters above the ceiling. Somebody plainly inside it is
+  // covered whatever happened at the start of the period.
+  const r = E.calculateSalary({
+    ...COVERED,
+    monthly_gross: 16000,
+    effective_from: "2026-08-01",
+  });
+  assert.equal(r.esi.status, E.STATUS.APPLIED);
+  assert.equal(r.esi.employer_esi, 325);
+});
+
+test("A TRUSTED CALLER'S OWN ANSWER IS NOT SECOND-GUESSED", () => {
+  // A payrun that established the position from the wage register passes it,
+  // and the derived rule must not overrule it.
+  const r = E.calculateSalary({
+    ...COVERED,
+    monthly_gross: 60000,
+    effective_from: "2026-10-01",
+    coverage_entry_salary: approvedAt(60000),
+    contribution_period_continues: true,
+  });
+  assert.equal(r.esi.status, E.STATUS.APPLIED, "the caller's fact wins over the derivation");
+  assert.ok(r.esi.employer_esi > 0);
+});
+
 /* ------------------------------------------------------------------- ESI */
 
 test("ESI not applicable means zeros, not pending", () => {
@@ -403,26 +688,113 @@ test("ESI not applicable means zeros, not pending", () => {
   assert.equal(esi.employer_esi, 0);
 });
 
-test("ESI does NOT assume the wage is the gross — it returns PENDING with a reason", () => {
-  const esi = E.calculateEsi({ esi_applicable: 1, gross: 15000, conveyance: 2500 });
+test("with no payroll wage the STANDARD monthly contribution is computed, not PENDING", () => {
+  // The Salary Master case, on the whole approved structure: a 15000 gross is
+  // 10000 / 2500 / 2500 / 0, so 5000 is excluded and the statutory wage is the
+  // 10000 of Basic and Special Allowance. 0.75% is 75 and 3.25% is 325.
+  const esi = E.calculateEsi({
+    esi_applicable: 1,
+    gross: 15000,
+    ...E.calculateBreakup(15000),
+  });
+  assert.equal(esi.status, E.STATUS.APPLIED);
+  assert.equal(esi.esi_wage, 10000);
+  assert.equal(esi.esi_wage_basis, E.ESI_WAGE_BASIS.STANDARD);
+  assert.equal(esi.employee_esi, 75);
+  assert.equal(esi.employer_esi, 325);
+  assert.deepEqual(esi.unresolved, []);
+  // The wage says where it came from, so a contribution can be reconciled
+  // without re-deriving the definition.
+  assert.equal(esi.wage_definition.statutory_wages, 10000);
+  assert.equal(esi.wage_definition.add_back, 0);
+});
+
+test("the STANDARD wage is the statutory wage, never the old conservative bound", () => {
+  // The bound this replaced was gross less Conveyance, and it is not the
+  // contribution wage: for this structure it would have charged 12500.
+  const esi = E.calculateEsi({ esi_applicable: 1, gross: 15000, ...E.calculateBreakup(15000) });
+  assert.notEqual(esi.esi_wage, 12500, "gross less Conveyance is a bound, not a wage");
+  assert.equal(esi.esi_wage, 10000);
+});
+
+test("the standard wage carries the 50% add-back through to the contribution", () => {
+  // A structure arranged into excluded allowances: 12500 of a 20000 gross is
+  // HRA and Conveyance, so 2500 comes back and wages are 10000, not 7500.
+  const esi = E.calculateEsi({
+    esi_applicable: 1,
+    gross: 20000,
+    basic: 4000,
+    special_allowance: 3500,
+    hra: 10000,
+    conveyance: 2500,
+  });
+  assert.equal(esi.wage_definition.add_back, 2500);
+  assert.equal(esi.esi_wage, 10000);
+  assert.equal(esi.employer_esi, 325);
+});
+
+test("the STANDARD wage never overrides a wage a payrun worked out", () => {
+  // Same structure, but payroll says only 9000 was payable this month. The
+  // actual wage wins and is labelled as the actual one.
+  const actual = E.calculateEsi({
+    esi_applicable: 1,
+    gross: 15000,
+    ...E.calculateBreakup(15000),
+    esi_wage: 9000,
+  });
+  assert.equal(actual.esi_wage, 9000);
+  assert.equal(actual.esi_wage_basis, E.ESI_WAGE_BASIS.PAYROLL);
+  assert.equal(actual.employer_esi, 293);
+});
+
+test("ESI applicability nobody has recorded is still PENDING, and is not guessed", () => {
+  // The one ESI question a salary structure genuinely cannot answer.
+  const esi = E.calculateEsi({ gross: 15000, ...E.calculateBreakup(15000) });
   assert.equal(esi.status, E.STATUS.PENDING);
   assert.equal(esi.employee_esi, null);
   assert.equal(esi.employer_esi, null);
-  assert.equal(esi.unresolved[0].code, E.UNRESOLVED.ESI_WAGE_CONTEXT_UNAVAILABLE);
+  assert.equal(esi.unresolved[0].code, E.UNRESOLVED.ESI_APPLICABILITY_NOT_RECORDED);
 });
 
 test("somebody too well paid to be covered is resolved without a payroll wage", () => {
-  const esi = E.calculateEsi({ esi_applicable: 1, gross: 50000, conveyance: 2500 });
+  // 50000 gross is 25000 / 2500 / 10000 / 12500, so statutory wages are 37500
+  // — above the 21000 ceiling however the structure is read.
+  const esi = E.calculateEsi({ esi_applicable: 1, gross: 50000, ...E.calculateBreakup(50000) });
   assert.equal(esi.status, E.STATUS.NOT_APPLICABLE);
   assert.equal(esi.employer_esi, 0);
   assert.deepEqual(esi.unresolved, []);
 });
 
-test("the coverage bound excludes Conveyance, so a borderline gross stays pending", () => {
-  // 23000 gross less 2500 conveyance is 20500, under the 21000 ceiling: the
-  // employee might be covered, so the answer is pending rather than "no".
-  const esi = E.calculateEsi({ esi_applicable: 1, gross: 23000, conveyance: 2500 });
-  assert.equal(esi.status, E.STATUS.PENDING);
+test("THE COVERAGE CEILING IS A CEILING ON WAGES, not on the gross", () => {
+  // A 25000 gross is 12500 / 2500 / 10000 / 0: statutory wages are 12500, well
+  // inside the 21000 ceiling, so this employee IS covered. Comparing the gross
+  // — or the old gross-less-Conveyance bound of 22500 — would have put them
+  // outside the scheme and charged nobody anything.
+  const esi = E.calculateEsi({ esi_applicable: 1, gross: 25000, ...E.calculateBreakup(25000) });
+  assert.equal(esi.status, E.STATUS.APPLIED);
+  assert.equal(esi.esi_wage, 12500);
+  assert.equal(esi.employer_esi, 406);
+});
+
+test("a continuing contribution period keeps somebody covered above the ceiling", () => {
+  // Coverage runs to the end of a contribution period even once wages pass the
+  // ceiling, and the standard path must not short-circuit that.
+  const base = { esi_applicable: 1, gross: 60000, ...E.calculateBreakup(60000) };
+  assert.equal(E.calculateEsi(base).status, E.STATUS.NOT_APPLICABLE);
+
+  const continuing = E.calculateEsi({ ...base, contribution_period_continues: true });
+  assert.equal(continuing.status, E.STATUS.APPLIED);
+  assert.equal(continuing.esi_wage_basis, E.ESI_WAGE_BASIS.STANDARD);
+  assert.ok(continuing.employer_esi > 0, "the employer still contributes for the period");
+});
+
+test("a borderline gross is decided on its statutory wages", () => {
+  // 23000 gross is 11500 / 2500 / 9000 / 0. Excluded is 11500 against a half
+  // of 11500 — the boundary, so no add-back — and wages are 11500.
+  const esi = E.calculateEsi({ esi_applicable: 1, gross: 23000, ...E.calculateBreakup(23000) });
+  assert.equal(esi.status, E.STATUS.APPLIED);
+  assert.equal(esi.esi_wage, 11500);
+  assert.equal(esi.wage_definition.add_back, 0);
 });
 
 test("a supplied ESI wage is what gets used", () => {
@@ -464,10 +836,27 @@ test("ESI applicability not recorded is PENDING where it could matter", () => {
   assert.equal(esi.unresolved[0].code, E.UNRESOLVED.ESI_APPLICABILITY_NOT_RECORDED);
 });
 
-test("ESI applicability not recorded still resolves when nobody could be covered", () => {
-  const esi = E.calculateEsi({ esi_applicable: null, gross: 50000, conveyance: 2500 });
-  assert.equal(esi.status, E.STATUS.NOT_APPLICABLE);
-  assert.deepEqual(esi.unresolved, []);
+test("ESI applicability not recorded is PENDING ABOVE THE CEILING TOO", () => {
+  /*
+   * THIS TEST USED TO ASSERT THE OPPOSITE, and the rule it rested on is gone.
+   * "Nobody is covered above the ceiling, so the unrecorded flag cannot change
+   * the answer" was true before contribution periods: it is not true now,
+   * because an employee who was in the scheme when the period began is covered
+   * to the end of it whatever their wages do. So the flag decides the result
+   * at every wage, and nobody having recorded it is a question — not a zero.
+   */
+  const esi = E.calculateEsi({ esi_applicable: null, gross: 50000, ...E.calculateBreakup(50000) });
+  assert.equal(esi.status, E.STATUS.PENDING);
+  assert.equal(esi.employer_esi, null, "not a contribution of zero");
+  assert.equal(esi.unresolved[0].code, E.UNRESOLVED.ESI_APPLICABILITY_NOT_RECORDED);
+});
+
+test("and the same is true of a wage a payrun supplied", () => {
+  // The PAYROLL path carries the identical rule, for the identical reason.
+  const esi = E.calculateEsi({ esi_applicable: null, gross: 50000, esi_wage: 47500 });
+  assert.equal(esi.status, E.STATUS.PENDING);
+  assert.equal(esi.employer_esi, null);
+  assert.equal(esi.unresolved[0].code, E.UNRESOLVED.ESI_APPLICABILITY_NOT_RECORDED);
 });
 
 /* ------------------------------------------------------------------- CTC */
@@ -503,10 +892,12 @@ test("the employee's own PF and ESI are NOT added back into CTC", () => {
 });
 
 test("an unresolved employer cost makes the CTC PENDING rather than a subtotal", () => {
+  // `esi_applicable` is deliberately absent: nobody has recorded whether this
+  // employee is in the scheme, so the employer's ESI is genuinely unknown and
+  // the CTC that would contain it is not a CTC.
   const r = E.calculateSalary({
     monthly_gross: 20000,
     pf_applicable: 1,
-    esi_applicable: 1,
     previous_eps_member: 1,
     dob: "1990-05-10",
     date_of_joining: "2020-01-01",
@@ -515,6 +906,39 @@ test("an unresolved employer cost makes the CTC PENDING rather than a subtotal",
   assert.equal(r.ctc_status, E.STATUS.PENDING);
   assert.equal(r.monthly_ctc, null);
   assert.deepEqual(r.ctc_pending_components, ["employer_esi"]);
+});
+
+test("an approved 16000 salary states its standard ESI and CTC with no payrun", () => {
+  // The Salary Master case end to end: gross 16000 breaks up as 10000 / 2500 /
+  // 3500 / 0, the standard ESI wage is 13500, and the CTC is the gross plus
+  // the employer's costs only — 16000 + 1200 + 50 + 50 + 439.
+  const r = E.calculateSalary({
+    monthly_gross: 16000,
+    pf_applicable: 1,
+    esi_applicable: 1,
+    previous_eps_member: 1,
+    dob: "1990-05-10",
+    date_of_joining: "2020-01-01",
+    effective_from: "2026-04-01",
+  });
+  assert.deepEqual(r.components, {
+    basic: 10000,
+    conveyance: 2500,
+    hra: 3500,
+    special_allowance: 0,
+  });
+  assert.equal(r.esi.status, E.STATUS.APPLIED);
+  assert.equal(r.esi.esi_wage, 10000, "Basic + Special Allowance; HRA and Conveyance are out");
+  assert.equal(r.esi.employee_esi, 75);
+  assert.equal(r.esi.employer_esi, 325);
+  assert.equal(r.ctc_status, E.STATUS.APPLIED);
+  assert.equal(r.monthly_ctc, 17625);
+  assert.deepEqual(r.unresolved, []);
+  // The PF side is untouched by the ESI change.
+  assert.equal(r.pf.employee_pf, 1200);
+  assert.equal(r.pf.employer_pf_total, 1200);
+  assert.equal(r.pf.edli, 50);
+  assert.equal(r.pf.pf_admin_charge, 50);
 });
 
 test("with ESI out of scope the CTC for a 20000 gross resolves", () => {
@@ -613,6 +1037,10 @@ test("every record carries the statutory snapshot that explains it", () => {
   assert.equal(s.esi_coverage_ceiling, 21000);
   assert.equal(s.basic_floor, 10000);
   assert.equal(s.salary_days_per_month, 26);
+  // WHICH DEFINITION OF WAGES produced it, not only which rates.
+  assert.deepEqual(s.wage_excluded_components, ["hra", "conveyance"]);
+  assert.equal(s.wage_minimum_percent_of_remuneration, 50);
+  assert.equal(s.wage_definition_effective_from, "2025-11-21");
   assert.ok(s.config_version, "a version stamp makes a whole generation of records findable");
 });
 
@@ -646,4 +1074,240 @@ test("a tri-state flag distinguishes No from nobody-has-said", () => {
   assert.equal(E.triState(null), null);
   assert.equal(E.triState(undefined), null);
   assert.equal(E.triState(""), null);
+});
+
+/* ------------------------------- records stored before the standard basis */
+
+const LEGACY_ROW = {
+  monthly_gross: 16000,
+  basic: 10000,
+  conveyance: 2500,
+  hra: 3500,
+  special_allowance: 0,
+  pf_status: "APPLIED",
+  employee_pf: 1200,
+  employer_pf_total: 1200,
+  employer_epf: 367,
+  employer_eps: 833,
+  edli: 50,
+  pf_admin_charge: 50,
+  esi_status: "PENDING",
+  esi_wage: null,
+  employee_esi: null,
+  employer_esi: null,
+  monthly_ctc: null,
+  ctc_status: "PENDING",
+  unresolved_notes: [{ code: "ESI_WAGE_CONTEXT_UNAVAILABLE", component: "esi" }],
+  /*
+   * A snapshot as the EARLIER engine wrote one: it carries the rates but no
+   * wage definition, because ESI had no wage to define when this row was
+   * stored. The fill honours the rates it finds and falls back to the current
+   * wage definition, which is the only one this record has ever been under.
+   */
+  statutory_snapshot: {
+    esi_employee_rate_percent: 0.75,
+    esi_employer_rate_percent: 3.25,
+    esi_coverage_ceiling: 21000,
+    esi_employee_exemption_daily_wage: 176,
+    salary_days_per_month: 26,
+    contribution_rounding: "NEAREST_RUPEE",
+  },
+};
+
+test("a record stored before the standard basis reads as the standard amount", () => {
+  const filled = E.fillStandardEsi(LEGACY_ROW);
+  assert.equal(filled.esi_status, E.STATUS.APPLIED);
+  // The same statutory wage a record created today gets on these numbers.
+  assert.equal(filled.esi_wage, 10000);
+  assert.equal(filled.employee_esi, 75);
+  assert.equal(filled.employer_esi, 325);
+  assert.equal(filled.monthly_ctc, 17625);
+  assert.equal(filled.ctc_status, E.STATUS.APPLIED);
+  assert.deepEqual(filled.unresolved_notes, []);
+  // The stored row itself is untouched: this completes a record, it does not
+  // rewrite history.
+  assert.equal(LEGACY_ROW.employer_esi, null);
+  assert.equal(LEGACY_ROW.esi_status, "PENDING");
+});
+
+test("the fill uses the RECORD'S OWN rates, not today's", () => {
+  const filled = E.fillStandardEsi({
+    ...LEGACY_ROW,
+    statutory_snapshot: { ...LEGACY_ROW.statutory_snapshot, esi_employer_rate_percent: 4.75 },
+  });
+  // 4.75% of the 10000 statutory wage is 475.
+  assert.equal(filled.employer_esi, 475);
+});
+
+test("the fill applies the SAME wage definition as a fresh calculation", () => {
+  const filled = E.fillStandardEsi(LEGACY_ROW);
+  const fresh = E.calculateSalary({
+    monthly_gross: LEGACY_ROW.monthly_gross,
+    pf_applicable: 1,
+    esi_applicable: 1,
+    previous_eps_member: 1,
+    dob: "1990-05-10",
+    date_of_joining: "2020-01-01",
+    effective_from: "2026-04-01",
+  });
+  assert.equal(filled.esi_wage, fresh.esi.esi_wage);
+  assert.equal(filled.employee_esi, fresh.esi.employee_esi);
+  assert.equal(filled.employer_esi, fresh.esi.employer_esi);
+  assert.equal(filled.monthly_ctc, fresh.monthly_ctc);
+});
+
+test("the fill honours a wage definition the record DOES carry", () => {
+  // A record stamped with a definition that excluded Conveyance alone is
+  // recomputed under that definition, not under today's.
+  const filled = E.fillStandardEsi({
+    ...LEGACY_ROW,
+    statutory_snapshot: {
+      ...LEGACY_ROW.statutory_snapshot,
+      wage_excluded_components: ["conveyance"],
+      wage_minimum_percent_of_remuneration: 50,
+    },
+  });
+  assert.equal(filled.esi_wage, 13500, "HRA is wages under that definition");
+  assert.equal(filled.employer_esi, 439);
+});
+
+test("a genuinely open ESI question is left open by the fill", () => {
+  const unrecorded = E.fillStandardEsi({
+    ...LEGACY_ROW,
+    unresolved_notes: [{ code: "ESI_APPLICABILITY_NOT_RECORDED", component: "esi" }],
+  });
+  assert.equal(unrecorded.esi_status, E.STATUS.PENDING);
+  assert.equal(unrecorded.employer_esi, null);
+  assert.equal(unrecorded.monthly_ctc, null);
+});
+
+test("the fill touches neither PF nor an unresolved PF note", () => {
+  const withPfNote = E.fillStandardEsi({
+    ...LEGACY_ROW,
+    employer_eps: null,
+    unresolved_notes: [
+      { code: "ESI_WAGE_CONTEXT_UNAVAILABLE", component: "esi" },
+      { code: "EPS_MEMBERSHIP_NOT_RECORDED", component: "employer_eps" },
+    ],
+  });
+  assert.equal(withPfNote.employer_esi, 325);
+  assert.equal(withPfNote.employee_pf, 1200);
+  assert.equal(withPfNote.employer_pf_total, 1200);
+  assert.deepEqual(withPfNote.unresolved_notes, [
+    { code: "EPS_MEMBERSHIP_NOT_RECORDED", component: "employer_eps" },
+  ]);
+});
+
+test("an already-resolved or not-applicable record is returned unchanged", () => {
+  const applied = { ...LEGACY_ROW, esi_status: "APPLIED", employer_esi: 325, unresolved_notes: [] };
+  assert.equal(E.fillStandardEsi(applied), applied);
+  const na = { ...LEGACY_ROW, esi_status: "NOT_APPLICABLE", employer_esi: 0, unresolved_notes: [] };
+  assert.equal(E.fillStandardEsi(na), na);
+});
+
+/* ------------------------- legacy rows and the contribution period ------- */
+
+test("A LEGACY ABOVE-CEILING ROW IS NOT COMPLETED TO ZERO", () => {
+  /*
+   * THE REGRESSION. An employee approved on 16000 from 1 April is covered when
+   * the contribution period begins; a revision to 60000 from 1 July puts their
+   * wages above the ceiling, and coverage still runs to 30 September. If the
+   * legacy presenter answered that July row from the row alone it would say
+   * NOT_APPLICABLE and zero — a contribution dropped for three months, on a
+   * screen, with nothing to show anybody had decided it.
+   *
+   * The row does not carry the salary in force when the period began and this
+   * function has no repository, so the honest answer is the one already on the
+   * record: still open.
+   */
+  const july = E.fillStandardEsi({ ...LEGACY_ROW, monthly_gross: 60000, ...E.calculateBreakup(60000) });
+  assert.equal(july.esi_status, "PENDING");
+  assert.equal(july.employer_esi, null, "NOT a contribution of zero");
+  assert.equal(july.employee_esi, null);
+  assert.equal(july.monthly_ctc, null);
+  assert.deepEqual(july.unresolved_notes, LEGACY_ROW.unresolved_notes, "the question is kept");
+});
+
+test("a legacy row BELOW the ceiling is still completed normally", () => {
+  // Continuation cannot change an answer for somebody plainly inside the
+  // ceiling, so nothing about the April row's treatment changes.
+  const april = E.fillStandardEsi(LEGACY_ROW);
+  assert.equal(april.esi_status, E.STATUS.APPLIED);
+  assert.equal(april.employee_esi, 75);
+  assert.equal(april.employer_esi, 325);
+  assert.equal(april.monthly_ctc, 17625);
+});
+
+/* ------------------------------------- the coverage evidence, persisted -- */
+
+test("the snapshot carries the contribution-period evidence AND its configuration", () => {
+  const r = E.calculateSalary({
+    monthly_gross: 60000,
+    pf_applicable: 1,
+    esi_applicable: 1,
+    previous_eps_member: 1,
+    dob: "1990-05-10",
+    date_of_joining: "2020-01-01",
+    effective_from: "2026-07-01",
+    coverage_entry_salary: { salary_id: 11, monthly_gross: 16000, ...E.calculateBreakup(16000) },
+  });
+  const snap = r.statutory_snapshot;
+  assert.deepEqual(snap.esi_contribution_period_start_months, [4, 10]);
+  assert.deepEqual(snap.esi_coverage, {
+    period: { start: "2026-04-01", end: "2026-09-30" },
+    entry_date: "2026-04-01",
+    continues: true,
+    basis: "COVERED_AT_ENTRY",
+    wages_at_entry: 10000,
+    entry_salary_id: 11,
+  });
+});
+
+test("an opening salary names no entry record, because there is not one yet", () => {
+  // The record being calculated IS the salary in force at entry, and it has no
+  // id until it is stored. An id is not invented for it.
+  const r = E.calculateSalary({
+    monthly_gross: 60000,
+    pf_applicable: 1,
+    esi_applicable: 1,
+    previous_eps_member: 1,
+    dob: "1990-05-10",
+    date_of_joining: "2026-06-15",
+    effective_from: "2026-06-15",
+  });
+  assert.equal(r.statutory_snapshot.esi_coverage.entry_salary_id, null);
+  assert.equal(r.statutory_snapshot.esi_coverage.basis, "ABOVE_CEILING_AT_ENTRY");
+});
+
+test("a record is re-read under the periods IT was written under", () => {
+  const cfg = E.configFromSnapshot({ esi_contribution_period_start_months: [1, 7] });
+  assert.deepEqual(cfg.esi.contributionPeriodStartMonths, [1, 7]);
+  assert.deepEqual(E.contributionPeriodFor("2026-08-01", cfg), {
+    start: "2026-07-01",
+    end: "2026-12-31",
+  });
+  // A snapshot that never carried them falls back to the current configuration.
+  assert.deepEqual(
+    E.configFromSnapshot({}).esi.contributionPeriodStartMonths,
+    CONFIG.esi.contributionPeriodStartMonths
+  );
+});
+
+test("a RESOLVED record is never recalculated because today's configuration moved", () => {
+  // `fillStandardEsi` completes an open question; it does not revisit a
+  // contribution somebody has already been paid or filed on.
+  const resolved = {
+    ...LEGACY_ROW,
+    esi_status: "APPLIED",
+    esi_wage: 10000,
+    employee_esi: 75,
+    employer_esi: 325,
+    monthly_ctc: 17625,
+    unresolved_notes: [],
+  };
+  const cfg = {
+    ...CONFIG,
+    esi: { ...CONFIG.esi, employerRatePercent: 9.99, employeeRatePercent: 9.99 },
+  };
+  assert.equal(E.fillStandardEsi(resolved, cfg), resolved, "returned as it was stored");
 });
