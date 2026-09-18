@@ -361,14 +361,39 @@ so a 12-hour shift with a 1-hour break and an extra 0.5 hour has a permitted
 break of 1.5 hours and an effective NRM of 10.5 hours. The Shift Master is
 never modified: this is an employee/date adjustment.
 
-**It is credited only on a day with four or more punches**, exactly as the
-override is, and for the same reason — an OUT → IN gap is the only evidence a
-break was taken. A two-punch day ignores it completely and keeps the phased
+**It is credited only on a COMPLETE punched sequence of four or more** — 4, 6,
+8 and so on — because every punched break is an OUT followed by an IN. An odd
+count (5, 7 …) is a day with a punch missing: the engine returns
+`MISSING_PUNCH` for it and its figures are provisional, so it is calculated on
+the unextended allowance. (The older `special_break_override_minutes` still
+uses a bare `>= 4` and therefore still applies on an odd day; that is existing
+behaviour, reported rather than changed here.) A two-punch day ignores it completely and keeps the phased
 break rule of §above unchanged; an odd-punch or absent day likewise. The actual
 break charged is still the sum of the OUT → IN gaps, so only the minutes beyond
 the combined allowance become a shortage, and an unused allowance feeds the
 existing OT rules rather than a new one. `NULL` and `0` both mean "nothing
 extra" and produce exactly today's numbers.
+
+### The safety invariant
+
+```
+resolvedAllowedBreak + extraBreak < shiftSpan
+```
+
+A permitted break as long as the shift would leave NRM at zero, which
+`utils/attendance_payroll.js` cannot price and `utils/payrun_calculation.js`
+discards — so an Employee Master typo could otherwise turn a working day into
+an unpayable one in silence. Where a configured Extra Break Hours would cause
+that, the value is **not applied and not capped**: the date becomes a
+`REVIEW_REQUIRED` day carrying `BREAK_EXCEEDS_SHIFT`, is **not final**, and so
+has its shortage and its OT held out of payroll like any unsettled day. The
+row keeps the day's own unextended allowance and NRM. The screens report it in
+the existing **Shift Setup Issue** bucket.
+
+The check is made against the DATE's resolved span rather than trusted to the
+Employee Master's input validation alone, because a shift can be shortened long
+after the hours were recorded. A span of zero is left alone: there is nothing
+to exceed and the day already produces nothing.
 
 ## 8. Neutral wage components — see *The statutory handoff* above.
 

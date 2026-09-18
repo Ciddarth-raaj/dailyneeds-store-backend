@@ -119,16 +119,17 @@ const BREAK_CREDIT_CUTOFF_MINUTES = 15 * 60;
  *      shift's deduction interval rule settles the late/early minutes the
  *      shortage contains (`applyGrace`).
  *   4  The employee break override applies only on a day with four or more
- *      punches; a two-punch day is charged the shift's break. The employee's
- *      Extra Break Hours are added to the allowance under the SAME rule, and
- *      are likewise ignored on a two-punch, odd-punch or absent day.
+ *      punches; a two-punch day is charged the shift's break.
  *   5  The no-lunch rule: a two-punch day ending before 15:00 gets no break
  *      credit against lateness or early out (`BREAK_CREDIT_CUTOFF_MINUTES`).
  *   6  "Exclude Minimum OT": with the shift flag on, only minutes beyond the
  *      OT minimum are paid (post-shift and pre-shift each have their own).
  *   7  The employee's Extra Break Hours ADD to the day's allowed break, and
- *      therefore reduce NRM by the same minutes - on a day with four or more
- *      punches and on no other kind of day.
+ *      therefore reduce NRM by the same minutes - on a COMPLETE punched
+ *      sequence of four or more (4, 6, 8 ...) and on no other kind of day.
+ *      A configured value that would leave no working minutes at all is
+ *      refused rather than applied: the date is a BREAK_EXCEEDS_SHIFT review
+ *      instead (see `calculateAttendanceDay`).
  */
 const CALCULATION_VERSION = 7;
 
@@ -161,6 +162,25 @@ const REVIEW_REASON = Object.freeze({
   MISSING_PUNCH: "MISSING_PUNCH",
   NO_SHIFT_FOR_DATE: "NO_SHIFT_FOR_DATE",
   NO_SCHEDULE_ROW: "NO_SCHEDULE_ROW",
+  /**
+   * The permitted break is as long as the shift, or longer, so the day has
+   * no working minutes left to owe.
+   *
+   * A CONFIGURATION FAULT, reported like the other two: a reason on a
+   * REVIEW_REQUIRED day that is NOT final, so its shortage and its OT are
+   * held out of payroll exactly as an unsettled day's are. It is raised only
+   * where a configured Extra Break Hours would cause it - the Shift Master
+   * already refuses a break longer than its own span
+   * (`utils/workShift.js`), and a day that reaches NRM 0 without an extra
+   * break is whatever it has always been, unchanged.
+   *
+   * WHY NOT A SILENT CAP. Capping the break would pay the day against an NRM
+   * nobody configured, and an NRM of zero is what `utils/attendance_payroll.js`
+   * cannot price and `utils/payrun_calculation.js` discards. An Employee
+   * Master typo must not be able to manufacture either state, so the day is
+   * handed to a human with the cause named.
+   */
+  BREAK_EXCEEDS_SHIFT: "BREAK_EXCEEDS_SHIFT",
 });
 
 /** Where an effective punch came from. Raw is immutable; regularized is not raw. */
@@ -741,11 +761,38 @@ function calculateAttendanceDay(input = {}) {
     extra_break_minutes !== undefined &&
     Number.isFinite(Number(extra_break_minutes)) &&
     Math.trunc(Number(extra_break_minutes)) > 0;
-  const extraGiven = extraConfigured && effectivePunches.length >= 4;
-  const extraBreak = extraGiven ? Math.trunc(Number(extra_break_minutes)) : 0;
+  //
+  // A COMPLETE SEQUENCE, NOT MERELY FOUR OR MORE. Every punched break is an
+  // OUT followed by an IN, so a day that credits one has an EVEN number of
+  // punches: 4, 6, 8 and so on. Five or seven punches is a day with one
+  // punch missing - the engine returns MISSING_PUNCH for it below and the
+  // figures it reports are provisional - and a provisional day must not
+  // also carry a permitted break the evidence does not support. The old
+  // `>= 4` credited exactly those days.
+  const shiftSpan = Math.max(0, Math.trunc(shift.shift_span_minutes || 0));
+  const completeSequence = effectivePunches.length >= 4 && effectivePunches.length % 2 === 0;
+  const extraWanted = extraConfigured ? Math.trunc(Number(extra_break_minutes)) : 0;
+
+  // THE SAFETY INVARIANT: resolvedAllowedBreak + extraBreak < shiftSpan.
+  //
+  // A permitted break as long as the shift leaves NRM at zero, which payroll
+  // treats as unrateable and the payrun discards - so an Employee Master typo
+  // could otherwise turn a real working day into an unpayable one, silently.
+  // It is checked HERE, against the day's own resolved span, rather than
+  // trusted to the Employee Master's input validation alone: the shift can be
+  // shortened long after the hours were recorded, and the value that was
+  // sensible on Monday can be impossible on Tuesday.
+  //
+  // A span of zero is left alone deliberately. There is no working duration
+  // to exceed, the day already produces nothing, and raising a configuration
+  // fault there would change a day the extra break was never going to touch.
+  const extraBreakExceedsShift =
+    completeSequence && extraWanted > 0 && shiftSpan > 0 && baseAllowedBreak + extraWanted >= shiftSpan;
+
+  const extraGiven = completeSequence && extraWanted > 0 && !extraBreakExceedsShift && shiftSpan > 0;
+  const extraBreak = extraGiven ? extraWanted : 0;
 
   const allowedBreak = Math.max(0, baseAllowedBreak + extraBreak);
-  const shiftSpan = Math.max(0, Math.trunc(shift.shift_span_minutes || 0));
   const nrm = Math.max(0, shiftSpan - allowedBreak);
 
   base.break_allowance_minutes = allowedBreak;
@@ -760,9 +807,9 @@ function calculateAttendanceDay(input = {}) {
       "Employee break override not applied: it needs four or more punches, so the shift's break is used"
     );
   }
-  if (extraConfigured && !extraGiven && effectivePunches.length > 0) {
+  if (extraWanted > 0 && !extraGiven && !extraBreakExceedsShift && effectivePunches.length > 0) {
     base.notes.push(
-      "Employee extra break hours not applied: they need four or more punches, so the day's own break allowance is used"
+      "Employee extra break hours not applied: they need a complete punched sequence of four or more, so the day's own break allowance is used"
     );
   }
 
@@ -816,6 +863,31 @@ function calculateAttendanceDay(input = {}) {
       review_reasons: [REVIEW_REASON.MISSING_PUNCH],
       is_final: false,
       notes: ["Odd punch count: one punch is missing and the day is not final"],
+    };
+  }
+
+  // THE INVARIANT, ENFORCED BEFORE ANY MINUTE IS SETTLED.
+  //
+  // Reached only on a complete sequence of four or more, because that is the
+  // only day the extra break is credited on at all. Nothing is capped and
+  // nothing is paid: the break allowance and the NRM on the row are the
+  // day's own UNEXTENDED figures (the extra break was not applied above), the
+  // day is NOT final, and it carries the reason that says why. A day that is
+  // not final has its shortage and its OT held out of payroll by
+  // `utils/attendance_payroll.js`, so no OT can be claimed from a zero NRM
+  // and the date cannot settle as a payable day while the configuration
+  // stands. Correcting the hours - or the shift - and recalculating is what
+  // clears it.
+  if (extraBreakExceedsShift) {
+    return {
+      ...base,
+      status: CALC_STATUS.REVIEW_REQUIRED,
+      review_reasons: [REVIEW_REASON.BREAK_EXCEEDS_SHIFT],
+      is_final: false,
+      notes: [
+        ...base.notes,
+        `Extra Break Hours not applied: the permitted break would be ${baseAllowedBreak + extraWanted} minute(s) of a ${shiftSpan} minute shift, leaving no working minutes. The date is held for review until the employee's Extra Break Hours or the shift is corrected.`,
+      ],
     };
   }
 

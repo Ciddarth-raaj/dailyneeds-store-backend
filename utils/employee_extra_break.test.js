@@ -263,3 +263,225 @@ describe("the extra break rides ON TOP of the special break override", () => {
     assert.equal(result.shortage_minutes, 0);
   });
 });
+
+/* ============================ the sequence must be COMPLETE, not merely 4+ */
+
+describe("only a COMPLETE punched sequence is credited", () => {
+  const EXTRA = 30;
+
+  /** n punches, alternating IN/OUT, inside a 09:00-21:00 shift. */
+  const sequence = (n) => {
+    const times = ["09:00"];
+    // Each extra pair adds a short break and a return, so every count below
+    // is a real stream a device could produce rather than a contrivance.
+    const middles = ["11:00", "11:15", "14:00", "14:15", "17:00", "17:15"];
+    for (let i = 0; i < n - 2; i += 1) times.push(middles[i]);
+    times.push("21:00");
+    return punches(...times);
+  };
+
+  it("4 punches: applied", () => {
+    const result = day({ punches: sequence(4), extra_break_minutes: EXTRA });
+    assert.equal(result.punch_count, 4);
+    assert.equal(result.extra_break_minutes, 30);
+    assert.equal(result.break_allowance_minutes, 90);
+    assert.equal(result.break_allowance_source, "EMPLOYEE_OVERRIDE");
+    assert.equal(result.nrm_minutes, 630);
+    assert.equal(result.status, CALC_STATUS.FINAL);
+  });
+
+  it("5 punches: NOT applied, and the day is still a missing-punch review", () => {
+    const result = day({ punches: sequence(5), extra_break_minutes: EXTRA });
+    assert.equal(result.punch_count, 5);
+    assert.equal(result.extra_break_minutes, 0);
+    assert.equal(result.break_allowance_minutes, 60, "the shift's own break, unextended");
+    assert.equal(result.break_allowance_source, "SHIFT");
+    assert.equal(result.nrm_minutes, 660);
+    assert.equal(result.status, CALC_STATUS.REVIEW_REQUIRED);
+    assert.deepEqual(result.review_reasons, ["MISSING_PUNCH"]);
+    assert.equal(result.is_final, false);
+  });
+
+  it("6 punches: applied", () => {
+    const result = day({ punches: sequence(6), extra_break_minutes: EXTRA });
+    assert.equal(result.punch_count, 6);
+    assert.equal(result.extra_break_minutes, 30);
+    assert.equal(result.break_allowance_minutes, 90);
+    assert.equal(result.nrm_minutes, 630);
+    assert.equal(result.status, CALC_STATUS.FINAL);
+  });
+
+  it("7 punches: NOT applied, and the day is still a missing-punch review", () => {
+    const result = day({ punches: sequence(7), extra_break_minutes: EXTRA });
+    assert.equal(result.punch_count, 7);
+    assert.equal(result.extra_break_minutes, 0);
+    assert.equal(result.break_allowance_minutes, 60);
+    assert.equal(result.break_allowance_source, "SHIFT");
+    assert.equal(result.nrm_minutes, 660);
+    assert.equal(result.status, CALC_STATUS.REVIEW_REQUIRED);
+    assert.deepEqual(result.review_reasons, ["MISSING_PUNCH"]);
+  });
+
+  it("8 punches: applied", () => {
+    const result = day({ punches: sequence(8), extra_break_minutes: EXTRA });
+    assert.equal(result.punch_count, 8);
+    assert.equal(result.extra_break_minutes, 30);
+    assert.equal(result.nrm_minutes, 630);
+    assert.equal(result.status, CALC_STATUS.FINAL);
+  });
+
+  it("0, 1, 2 and 3 punches are never credited either", () => {
+    for (const n of [0, 1, 2, 3]) {
+      const list = n === 0 ? [] : sequence(Math.max(n, 2)).slice(0, n);
+      const result = day({ punches: list, extra_break_minutes: EXTRA });
+      assert.equal(result.extra_break_minutes, 0, `${n} punches`);
+      assert.equal(result.break_allowance_source, "SHIFT", `${n} punches`);
+    }
+  });
+
+  it("an odd day's figures are identical with and without the setting", () => {
+    const withExtra = day({ punches: sequence(5), extra_break_minutes: EXTRA });
+    const without = day({ punches: sequence(5) });
+    for (const k of ["nrm_minutes", "break_allowance_minutes", "span_minutes", "status", "is_final"]) {
+      assert.equal(withExtra[k], without[k], k);
+    }
+  });
+});
+
+/* ================= an impossible value can never make a payable zero-NRM = */
+
+describe("the permitted break may never swallow the shift", () => {
+  // A 12 hour shift with a 1 hour break. An extra 11 hours takes the
+  // permitted break to the whole span; 12 takes it past.
+  const FOUR = () => punches("09:00", "13:00", "14:00", "21:00");
+
+  it("an extra break that would leave NRM at zero is a review, not a calculation", () => {
+    const result = day({ punches: FOUR(), extra_break_minutes: 11 * 60 });
+
+    assert.equal(result.status, CALC_STATUS.REVIEW_REQUIRED);
+    assert.deepEqual(result.review_reasons, ["BREAK_EXCEEDS_SHIFT"]);
+    assert.equal(result.is_final, false);
+    // NOT capped, and not applied: the row carries the day's own unextended
+    // allowance, so nobody reads a permitted break the shift cannot give.
+    assert.equal(result.extra_break_minutes, 0);
+    assert.equal(result.break_allowance_minutes, 60);
+    assert.equal(result.break_allowance_source, "SHIFT");
+    assert.ok(result.notes.some((n) => /leaving no working minutes/.test(n)));
+  });
+
+  it("an extra break longer than the shift is the same review", () => {
+    const result = day({ punches: FOUR(), extra_break_minutes: 12 * 60 });
+    assert.equal(result.status, CALC_STATUS.REVIEW_REQUIRED);
+    assert.deepEqual(result.review_reasons, ["BREAK_EXCEEDS_SHIFT"]);
+    assert.equal(result.is_final, false);
+  });
+
+  it("NO OT and NO settled minutes can come out of it", () => {
+    const result = day({ punches: FOUR(), extra_break_minutes: 11 * 60 });
+    assert.equal(result.candidate_ot_minutes, 0);
+    assert.equal(result.approved_ot_minutes, 0);
+    assert.equal(result.worked_minutes, 0);
+    assert.equal(result.shortage_minutes, 0);
+    assert.notEqual(result.status, CALC_STATUS.FINAL);
+  });
+
+  it("a day that is not final is held out of payroll, so nothing is priced", () => {
+    const result = day({ punches: FOUR(), extra_break_minutes: 11 * 60 });
+    // The rule `utils/attendance_payroll.js` applies: is_final !== true means
+    // the date is HELD - its shortage and OT never reach the month.
+    assert.equal(result.is_final, false);
+  });
+
+  it("the override alone can still leave NRM at zero: this guard is the extra break's", () => {
+    // A 12 hour override on a 12 hour shift is existing behaviour and is NOT
+    // changed here - reported to the reviewer rather than silently widened.
+    const result = day({ punches: FOUR(), break_override_minutes: 12 * 60 });
+    assert.equal(result.nrm_minutes, 0);
+    assert.equal(result.status, CALC_STATUS.FINAL);
+  });
+
+  it("the invariant is checked against the DAY's span, so a later shift change catches it", () => {
+    // The same 1.5h total allowance is fine on a 12 hour shift and impossible
+    // on a 90 minute one - the engine decides per date, not per saved value.
+    const ok = day({ punches: FOUR(), extra_break_minutes: 30 });
+    assert.equal(ok.status, CALC_STATUS.FINAL);
+
+    const shortShift = calculateAttendanceDay({
+      employee_id: 42,
+      attendance_date: DATE,
+      shift: buildShiftSnapshot(
+        {
+          work_shift_id: 7,
+          work_shift_weekly_schedule_id: 71,
+          is_working_day: 1,
+          in_time: "09:00",
+          out_time: "10:30",
+          attendance_day_cutoff: "04:00",
+          break_minutes: 60,
+          ot_rate: 1,
+        },
+        { work_shift_id: 7, shift_code: "GEN", overtime_allowed: 1 },
+        1
+      ),
+      punches: punches("09:00", "09:20", "09:30", "10:30"),
+      extra_break_minutes: 30,
+    });
+    assert.equal(shortShift.status, CALC_STATUS.REVIEW_REQUIRED);
+    assert.deepEqual(shortShift.review_reasons, ["BREAK_EXCEEDS_SHIFT"]);
+  });
+
+  it("an impossible value on a day that never credits it changes nothing", () => {
+    // Two punches: the extra break is ignored entirely, so there is no
+    // configuration fault to raise and the settled two-punch day stands.
+    const two = day({ punches: punches("09:00", "21:00"), extra_break_minutes: 12 * 60 });
+    assert.equal(two.status, CALC_STATUS.FINAL);
+    assert.equal(two.nrm_minutes, 660);
+    assert.equal(two.break_allowance_minutes, 60);
+
+    const odd = day({ punches: punches("09:00", "13:00", "14:00"), extra_break_minutes: 12 * 60 });
+    assert.deepEqual(odd.review_reasons, ["MISSING_PUNCH"]);
+  });
+});
+
+/* ======================================= how the fault reaches the screens */
+
+describe("the configuration fault is routed like the other configuration faults", () => {
+  const { dayIssueKey, ISSUE_KEY } = require("./attendance_dashboard");
+
+  it("reads as a Shift Setup issue rather than a sixth issue key", () => {
+    const result = day({
+      punches: punches("09:00", "13:00", "14:00", "21:00"),
+      extra_break_minutes: 11 * 60,
+    });
+    assert.equal(dayIssueKey(result), ISSUE_KEY.SHIFT_SETUP);
+  });
+
+  it("a five-punch day is still a Missing Punch, not a setup issue", () => {
+    const result = day({
+      punches: punches("09:00", "13:00", "14:00", "17:00", "21:00"),
+      extra_break_minutes: 30,
+    });
+    assert.equal(dayIssueKey(result), ISSUE_KEY.MISSING_PUNCH);
+  });
+});
+
+/* ============================================ the version history is audit */
+
+describe("the calculation version history is not rewritten", () => {
+  const fs = require("fs");
+  const path = require("path");
+  const source = fs.readFileSync(path.join(__dirname, "attendance_engine.js"), "utf8");
+  const history = source.slice(source.indexOf(" *   1  Attendance v2 as approved."), source.indexOf("const CALCULATION_VERSION"));
+
+  it("version 4 describes only what version 4 introduced", () => {
+    const four = history.slice(history.indexOf(" *   4 "), history.indexOf(" *   5 "));
+    assert.match(four, /employee break override applies only on a day with four or more/);
+    assert.ok(!/Extra Break/i.test(four), "a later rule must never be backdated into an earlier version");
+  });
+
+  it("Extra Break Hours is described under version 7, and the version is 7", () => {
+    const seven = history.slice(history.indexOf(" *   7 "));
+    assert.match(seven, /Extra Break Hours/);
+    assert.match(source, /const CALCULATION_VERSION = 7;/);
+  });
+});

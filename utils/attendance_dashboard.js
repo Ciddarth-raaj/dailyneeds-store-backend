@@ -237,6 +237,11 @@ function dayIssueKey(day) {
     case "REVIEW_REQUIRED":
       if (reasons.includes("MISSING_PUNCH") || punchCount % 2 === 1) return ISSUE_KEY.MISSING_PUNCH;
       if (reasons.includes("NO_SCHEDULE_ROW")) return ISSUE_KEY.SHIFT_SETUP;
+      // A permitted break as long as the shift is a configuration fault, and
+      // it is reported in the same bucket as the other two rather than under
+      // a sixth issue key: the reason on the row names the exact cause, and
+      // the screens already know how to route a setup problem.
+      if (reasons.includes("BREAK_EXCEEDS_SHIFT")) return ISSUE_KEY.SHIFT_SETUP;
       if (reasons.includes("NO_SHIFT_FOR_DATE")) return ISSUE_KEY.NO_SHIFT;
       return null;
     default:
