@@ -293,94 +293,111 @@ describe("the monthly pay type", () => {
     assert.equal(rowFor(await cash.getMonth({ year: YEAR, month: MONTH })).pay_type, PAY_TYPE.CASH);
   });
 
-  it("a resigned employee defaults to CASH even though the master says Bank", async () => {
-    const usecase = buildUsecase(
-      fakeRepo({
-        population: [employee({ payment_type: 1, resignation_date: "2026-08-20", status: 0 })],
-      })
-    );
+  /*
+   * ================================================================
+   * THE PAY TYPE DEFAULT IS THE EMPLOYEE MASTER, AND NOTHING ELSE.
+   *
+   * Initialization used to move a leaver to CASH automatically. The business
+   * decided against it: a final settlement paid by bank transfer is ordinary,
+   * and a rule that decided otherwise was making a payment decision on HR's
+   * behalf. Whoever works the month moves the ones that need moving, for the
+   * month it applies to, and that records itself as MANUAL with an audit row.
+   *
+   * These prove the default at the level where a wrong answer would be STORED.
+   * ================================================================
+   */
+  it("a RESIGNED employee whose master says BANK initializes BANK", async () => {
+    const repo = fakeRepo({
+      population: [employee({ payment_type: 1, status: 0, resignation_date: "2026-08-20" })],
+    });
+    const usecase = buildUsecase(repo);
+
     const row = rowFor(await usecase.getMonth({ year: YEAR, month: MONTH }));
-    assert.equal(row.pay_type, PAY_TYPE.CASH);
-    assert.equal(row.pay_type_source, PAY_TYPE_SOURCE.RESIGNED_DEFAULT);
+    assert.equal(row.pay_type, PAY_TYPE.BANK);
+    assert.equal(row.pay_type_source, PAY_TYPE_SOURCE.EMPLOYEE_MASTER);
+
+    await usecase.initialize({ year: YEAR, month: MONTH, employee_ids: [42], actor: ACTOR });
+    assert.equal(repo.inserts[0].pay_type, PAY_TYPE.BANK, "the STORED month is a Bank month");
+    assert.equal(repo.inserts[0].pay_type_source, PAY_TYPE_SOURCE.EMPLOYEE_MASTER);
+  });
+
+  it("a RESIGNED employee whose master says CASH initializes CASH", async () => {
+    const repo = fakeRepo({
+      population: [employee({ payment_type: 2, status: 0, resignation_date: "2026-08-20" })],
+    });
+    const usecase = buildUsecase(repo);
+    await usecase.initialize({ year: YEAR, month: MONTH, employee_ids: [42], actor: ACTOR });
+
+    assert.equal(repo.inserts[0].pay_type, PAY_TYPE.CASH);
+    assert.equal(
+      repo.inserts[0].pay_type_source,
+      PAY_TYPE_SOURCE.EMPLOYEE_MASTER,
+      "inherited from the master - not a resigned default under another name"
+    );
+  });
+
+  it("an ACTIVE employee whose master says BANK initializes BANK", async () => {
+    const repo = fakeRepo();
+    const usecase = buildUsecase(repo);
+    await usecase.initialize({ year: YEAR, month: MONTH, employee_ids: [42], actor: ACTOR });
+    assert.equal(repo.inserts[0].pay_type, PAY_TYPE.BANK);
+    assert.equal(repo.inserts[0].pay_type_source, PAY_TYPE_SOURCE.EMPLOYEE_MASTER);
+  });
+
+  it("NO employment fact changes the default, in any combination", async () => {
+    const facts = [
+      { status: 1, resignation_date: null },
+      { status: 0, resignation_date: null },
+      { status: 0, resignation_date: "2026-08-01" },
+      { status: 0, resignation_date: "2026-08-31" },
+      { status: 0, resignation_date: "2020-01-01" },
+      { status: 1, resignation_date: "2026-09-10" },
+    ];
+    for (const fact of facts) {
+      const usecase = buildUsecase(
+        fakeRepo({ population: [employee({ payment_type: 1, ...fact })] })
+      );
+      const row = rowFor(await usecase.getMonth({ year: YEAR, month: MONTH }));
+      assert.equal(
+        row.pay_type,
+        PAY_TYPE.BANK,
+        `a BANK employee defaulted differently for ${JSON.stringify(fact)}`
+      );
+      assert.equal(row.pay_type_source, PAY_TYPE_SOURCE.EMPLOYEE_MASTER);
+    }
+  });
+
+  it("RESIGNED_DEFAULT no longer exists as a source at all", () => {
+    assert.deepEqual(Object.keys(PAY_TYPE_SOURCE).sort(), ["EMPLOYEE_MASTER", "MANUAL"]);
   });
 
   /*
-   * ================================================================
-   * THE HISTORICAL PAYRUN REGRESSION.
-   *
-   * A payrun is an EFFECTIVE-DATED monthly record, so a resignation dated
-   * AFTER a month must not reach back and change that month. The rule used to
-   * fall back to the employee's CURRENT `status`, which meant August's pay
-   * type flipped to Cash the day somebody resigned in September - and depended
-   * on WHEN the screen was opened. These are the tests that pin that shut, at
-   * the level where the wrong answer would actually be STORED.
-   * ================================================================
+   * The exit badge survives as DISPLAY, because HR now has to move leavers by
+   * hand and needs to see who they are. It is dated - the question is whether
+   * they had left by the end of THIS month - and it moves no pay type.
    */
-  it("August defaults to BANK for somebody who resigns in September", async () => {
+  it("the exit badge is dated, and the pay type ignores it", async () => {
     const usecase = buildUsecase(
       fakeRepo({
-        population: [
-          employee({ payment_type: 1, status: 0, resignation_date: "2026-09-10" }),
-        ],
+        population: [employee({ payment_type: 1, status: 0, resignation_date: "2026-09-10" })],
       })
     );
-    const row = rowFor(await usecase.getMonth({ year: YEAR, month: 8 }));
-    assert.equal(row.resigned, false, "they were not resigned in August");
-    assert.equal(row.pay_type, PAY_TYPE.BANK);
-    assert.equal(row.pay_type_source, PAY_TYPE_SOURCE.EMPLOYEE_MASTER);
-    assert.equal(row.status, STATUS_GROUP.READY, "and August is still initializable");
+    const august = rowFor(await usecase.getMonth({ year: YEAR, month: 8 }));
+    const september = rowFor(await usecase.getMonth({ year: YEAR, month: 9 }));
+
+    assert.equal(august.exited_in_month, false);
+    assert.equal(september.exited_in_month, true);
+    assert.equal(august.pay_type, PAY_TYPE.BANK);
+    assert.equal(september.pay_type, PAY_TYPE.BANK, "the badge changed; the pay type did not");
   });
 
-  it("the SAME employee's September payrun defaults to CASH", async () => {
+  it("the snapshot still records the resignation date - settlement history needs it", async () => {
     const repo = fakeRepo({
-      population: [employee({ payment_type: 1, status: 0, resignation_date: "2026-09-10" })],
-      attendance: [attendanceMonth()],
+      population: [employee({ payment_type: 1, status: 0, resignation_date: "2026-08-20" })],
     });
     const usecase = buildUsecase(repo);
-    const row = rowFor(await usecase.getMonth({ year: YEAR, month: 9 }));
-    assert.equal(row.resigned, true);
-    assert.equal(row.pay_type, PAY_TYPE.CASH);
-    assert.equal(row.pay_type_source, PAY_TYPE_SOURCE.RESIGNED_DEFAULT);
-  });
-
-  it("a resignation on the FINAL DAY of the selected month is CASH for it", async () => {
-    const usecase = buildUsecase(
-      fakeRepo({
-        population: [
-          employee({ payment_type: 1, status: 0, resignation_date: "2026-08-31" }),
-        ],
-      })
-    );
-    const row = rowFor(await usecase.getMonth({ year: YEAR, month: 8 }));
-    assert.equal(row.resigned, true);
-    assert.equal(row.pay_type, PAY_TYPE.CASH);
-  });
-
-  it("an inactive status with NO resignation date does not rewrite the month to CASH", async () => {
-    const usecase = buildUsecase(
-      fakeRepo({
-        population: [employee({ payment_type: 1, status: 0, resignation_date: null })],
-      })
-    );
-    const row = rowFor(await usecase.getMonth({ year: YEAR, month: 8 }));
-    assert.equal(row.resigned, false);
-    assert.equal(row.pay_type, PAY_TYPE.BANK);
-  });
-
-  it("the STORED snapshot carries the dated answer, not today's status", async () => {
-    const repo = fakeRepo({
-      population: [employee({ payment_type: 1, status: 0, resignation_date: "2026-09-10" })],
-    });
-    const usecase = buildUsecase(repo);
-    await usecase.initialize({ year: YEAR, month: 8, employee_ids: [42], actor: ACTOR });
-
-    const stored = repo.inserts[0];
-    assert.equal(stored.period_month, 8);
-    assert.equal(stored.pay_type, PAY_TYPE.BANK, "August was snapshotted as a Bank month");
-    assert.equal(stored.pay_type_source, PAY_TYPE_SOURCE.EMPLOYEE_MASTER);
-    // And the exit date is still recorded on the row, because it is a fact
-    // about the employee that the month has to be able to explain.
-    assert.equal(stored.resignation_date, "2026-09-10");
+    await usecase.initialize({ year: YEAR, month: MONTH, employee_ids: [42], actor: ACTOR });
+    assert.equal(repo.inserts[0].resignation_date, "2026-08-20");
   });
 
   it("HOLD is not a pay type", async () => {
@@ -422,6 +439,19 @@ describe("the monthly pay type", () => {
     const row = september.rows.find((r) => r.employee_id === 42);
     assert.equal(row.pay_type, PAY_TYPE.BANK);
     assert.equal(row.pay_type_source, PAY_TYPE_SOURCE.EMPLOYEE_MASTER);
+
+    // AND INITIALIZING IT STORES BANK. Reading the default back is not the
+    // same claim as storing it: the override must not leak into the next
+    // month's snapshot either.
+    await usecase.initialize({ year: YEAR, month: 9, employee_ids: [42], actor: ACTOR });
+    const stored = repo.inserts.find((r) => r.period_month === 9);
+    assert.equal(stored.pay_type, PAY_TYPE.BANK);
+    assert.equal(stored.pay_type_source, PAY_TYPE_SOURCE.EMPLOYEE_MASTER);
+    // The month that was overridden is untouched by the later initialization.
+    assert.equal(
+      repo.store.find((r) => r.employee_id === 42 && r.period_month === MONTH).pay_type,
+      PAY_TYPE.CASH
+    );
   });
 
   it("an employee with no snapshot for the month cannot have one changed", async () => {

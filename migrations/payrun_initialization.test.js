@@ -79,6 +79,14 @@ describe("the schema is what the rules depend on", () => {
     assert.ok(!/HOLD/.test(statements), "hold is a payroll status, never a pay route");
   });
 
+  it("a pay type comes from the master or from a person - there is no third source", () => {
+    assert.match(statements, /`pay_type_source` ENUM\('EMPLOYEE_MASTER','MANUAL'\) NOT NULL/);
+    assert.ok(
+      !/RESIGNED/.test(statements),
+      "initialization does not default a leaver to CASH; HR moves them, which is MANUAL"
+    );
+  });
+
   it("the month can be locked, and a month with no row is open", () => {
     assert.match(statements, /`status` ENUM\('OPEN','LOCKED'\) NOT NULL DEFAULT 'OPEN'/);
     assert.ok(

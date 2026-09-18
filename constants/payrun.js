@@ -35,12 +35,18 @@ const PAY_TYPES = [PAY_TYPE.BANK, PAY_TYPE.CASH];
 
 /**
  * WHERE A PAYRUN ROW'S PAY TYPE CAME FROM. Stored on the row, because "Cash"
- * alone does not say whether somebody chose it, whether it was inherited from
- * the Employee Master, or whether it is the resigned-employee default.
+ * alone does not say whether somebody chose it for this month or whether it
+ * was inherited from the Employee Master.
+ *
+ * TWO VALUES, AND THERE IS DELIBERATELY NO THIRD. There was a
+ * `RESIGNED_DEFAULT` while initialization moved leavers to CASH automatically;
+ * the business decided against that, so the value is gone rather than left
+ * declared and unreachable. A leaver's month now starts on whatever the
+ * Employee Master says, and a person moves it - which records itself as
+ * MANUAL, with an audit row, exactly like any other change.
  */
 const PAY_TYPE_SOURCE = {
   EMPLOYEE_MASTER: "EMPLOYEE_MASTER",
-  RESIGNED_DEFAULT: "RESIGNED_DEFAULT",
   MANUAL: "MANUAL",
 };
 

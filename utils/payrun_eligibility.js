@@ -74,7 +74,7 @@ function monthWindow(year, month) {
  * people over a data-entry gap rather than a payroll fact. Null means the
  * window is open at that end.
  *
- * NEITHER BOUND READS `status`, for the reason `resignedForMonth` gives below:
+ * NEITHER BOUND READS `status`, for the reason `exitedByMonthEnd` gives below:
  * whether somebody was employed in August is answered by dates, and the
  * current master row cannot answer it.
  */
@@ -123,22 +123,31 @@ function statutorySetupComplete(employee = {}) {
 /**
  * THE PAY TYPE A NEWLY INITIALIZED ROW STARTS ON.
  *
- *   resigned / exited      CASH, whatever the master says. A closed bank
- *                          account is the ordinary case for somebody who has
- *                          left, and a transfer that bounces is a person
- *                          chasing their final pay.
- *   otherwise              whatever the EMPLOYEE MASTER says - 1 Bank, 2 Cash.
+ * THE EMPLOYEE MASTER DECIDES, AND NOTHING ELSE DOES.
+ *
+ *   master says BANK (1)   BANK
+ *   master says CASH (2)   CASH
  *   master says nothing    CASH, the same default `utils/payment_type.js`
  *                          already applies at employee creation, so the two
  *                          places cannot disagree about what silence means.
  *
+ * NO EMPLOYMENT FACT IS READ HERE - not the resignation date, not `status`,
+ * not any lifecycle state - AND THE FUNCTION TAKES NO ARGUMENT THAT COULD
+ * CARRY ONE. That is deliberate and structural rather than a matter of
+ * discipline: this used to default a leaver to CASH automatically, and the
+ * business decided against it. Somebody who has left is moved to CASH by a
+ * person, for the month it applies to, when it actually applies - a final
+ * settlement paid by bank transfer is perfectly ordinary, and a rule that
+ * decided otherwise was quietly making a payment decision on HR's behalf.
+ *
+ * With the parameter gone there is no longer a shape for an employment fact
+ * to arrive in, so this cannot regress by somebody passing one.
+ *
  * IT IS A DEFAULT AND NEVER A VERDICT. Somebody may change it for the month
- * afterwards, and changing it changes this month and nothing else.
+ * afterwards - see the monthly override in `usecase/payrun.js` - and changing
+ * it changes that month and nothing else.
  */
-function defaultPayType(employee = {}, { resigned = false } = {}) {
-  if (resigned) {
-    return { pay_type: PAY_TYPE.CASH, pay_type_source: PAY_TYPE_SOURCE.RESIGNED_DEFAULT };
-  }
+function defaultPayType(employee = {}) {
   const n = Number(employee.payment_type);
   if (n === PAYMENT_TYPE.BANK) {
     return { pay_type: PAY_TYPE.BANK, pay_type_source: PAY_TYPE_SOURCE.EMPLOYEE_MASTER };
@@ -149,47 +158,37 @@ function defaultPayType(employee = {}, { resigned = false } = {}) {
 /**
  * HAD THIS EMPLOYEE LEFT BY THE END OF THE MONTH BEING RUN?
  *
- * THE DATE DECIDES, AND ONLY THE DATE. A payrun is an EFFECTIVE-DATED monthly
- * record, and the question it asks is about the month, not about today.
+ * FOR DISPLAY, AND FOR DISPLAY ONLY. Nothing in the payrun's behaviour turns
+ * on this answer: it does not decide the pay type (see `defaultPayType`, which
+ * cannot even receive it), it does not block a month, and it is not stored.
+ * The screen shows it as a badge so that whoever is working the month can see
+ * at a glance who has left - which is exactly the person they may need to move
+ * to CASH BY HAND, now that nothing does it for them. Removing the badge would
+ * have made that manual step harder at the moment it became the only step.
  *
- * WHY THE CURRENT `status` IS NOT CONSULTED, AND MUST NOT BE. It was, and it
- * was a bug: somebody who worked all of August and resigned on 10 September
- * carries a resigned `status` from that day on, so reading it made August's
- * payrun call them resigned and default their August pay type to CASH -
- * months after August was over, and changing depending on WHEN somebody
- * opened the screen. `status` is a fact about NOW; it has no date on it and
- * cannot answer a question about a month in the past. Letting it decide is
- * the Employee Master rewriting history.
+ * IT IS DATED, AND THAT MATTERS EVEN FOR A BADGE. A payrun is an
+ * effective-dated monthly record, so the question is "had they left by the end
+ * of THIS month", never "are they gone today". Reading the current `status`
+ * here would put a Resigned badge on every past month of somebody who left
+ * last week, which is the same class of error - the Employee Master rewriting
+ * history - that the dated rule below exists to prevent.
  *
- *   exit date on or before the month end   resigned FOR THAT MONTH
- *   exit date after the month end          NOT resigned for that month - the
- *                                          Employee Master's pay type applies
- *                                          normally, exactly as it did then
- *   no exit date at all                    NOT resigned. An undated exit
- *                                          cannot be placed in a month, and
- *                                          guessing "it must have been before
- *                                          this one" would silently rewrite
- *                                          every earlier month to CASH.
- *
- * THIS IS THE SAME PREDICATE THE POPULATION QUERY ALREADY USES, deliberately:
- * `repository/payrun.js#listPopulation` decides who is in the month from
- * `resignation_date` and the joining date and never from `status`, for the
- * reason `repository/attendance_dashboard.js` records at length - `status` is
- * maintained by hand and has been left at 1 for most leavers. Two answers
- * about the same person, one dated and one not, is how a month's population
- * and a month's pay types end up disagreeing.
+ *   exit date on or before the month end   had left by then
+ *   exit date after the month end          had not - they were working
+ *   no exit date at all                    had not. An undated exit cannot be
+ *                                          placed in a month, and guessing
+ *                                          would badge every earlier month
  *
  * WHICH EXIT DATE. `new_employee.resignation_date` - the same column the
- * attendance engine, the dashboard and the population query all read.
- * `employee_employment_period` is the richer lifecycle record and will be the
- * right source eventually, but it is NOT consulted here for exactly the reason
- * `repository/attendance_calculation.js#listEmployeesForRecalculation` and
- * `repository/attendance_dashboard.js#listApplicableEmployees` both state:
- * its C1b backfill still carries rows flagged `needs_review`, so payroll reads
- * the column payroll reads. Changing that is a decision for all of payroll and
- * attendance at once, not something one eligibility rule does on its own.
+ * attendance engine, the dashboard and `repository/payrun.js#listPopulation`
+ * all read. `employee_employment_period` is the richer lifecycle record and
+ * will be the right source eventually, but it is NOT consulted here for the
+ * reason `repository/attendance_calculation.js#listEmployeesForRecalculation`
+ * and `repository/attendance_dashboard.js#listApplicableEmployees` both state:
+ * its C1b backfill still carries rows flagged `needs_review`. Moving off it is
+ * a decision for all of payroll and attendance at once.
  */
-function resignedForMonth({ year, month, ended_on = null }) {
+function exitedByMonthEnd({ year, month, ended_on = null }) {
   const { to } = monthWindow(year, month);
   const ended = toDateOnly(ended_on);
   return Boolean(ended && ended <= to);
@@ -209,7 +208,7 @@ function reasonOf(code) {
  *                                              employment facts, the statutory
  *                                              flags and `payment_type`. Its
  *                                              `status` is deliberately not
- *                                              read: see `resignedForMonth`.
+ *                                              read: see `exitedByMonthEnd`.
  * @param {object|null} input.salary            the APPROVED salary effective
  *                                              for the month, or null
  * @param {object|null} input.attendance        the stored
@@ -238,11 +237,11 @@ function evaluateEmployee(input = {}) {
   } = input;
 
   /*
-   * DATED, NOT CURRENT. `employee.status` is deliberately NOT passed: it says
-   * what is true today and would make a past month's pay type depend on when
-   * somebody happened to open the screen. See `resignedForMonth`.
+   * FOR THE BADGE ON THE SCREEN, AND FOR NOTHING ELSE. It is deliberately not
+   * passed to `defaultPayType`, which takes no such argument: an employment
+   * fact must not move a pay type. See `exitedByMonthEnd`.
    */
-  const resigned = resignedForMonth({
+  const exitedInMonth = exitedByMonthEnd({
     year,
     month,
     ended_on: employee.resignation_date,
@@ -328,11 +327,11 @@ function evaluateEmployee(input = {}) {
       pay_type: existing.pay_type,
       pay_type_source: existing.pay_type_source,
       initialized: true,
-      resigned,
+      exited_in_month: exitedInMonth,
     };
   }
 
-  const { pay_type, pay_type_source } = defaultPayType(employee, { resigned });
+  const { pay_type, pay_type_source } = defaultPayType(employee);
   return {
     status: reasons.length === 0 ? STATUS_GROUP.READY : STATUS_GROUP.BLOCKED,
     blocking_reasons: reasons,
@@ -340,7 +339,7 @@ function evaluateEmployee(input = {}) {
     pay_type,
     pay_type_source,
     initialized: false,
-    resigned,
+    exited_in_month: exitedInMonth,
   };
 }
 
@@ -363,7 +362,7 @@ module.exports = {
   employedInMonth,
   statutorySetupComplete,
   defaultPayType,
-  resignedForMonth,
+  exitedByMonthEnd,
   evaluateEmployee,
   summarize,
 };

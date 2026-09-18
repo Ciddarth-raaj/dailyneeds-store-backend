@@ -212,7 +212,13 @@ class PayrunUsecase {
         warnings: verdict.warnings,
         pay_type: verdict.pay_type,
         pay_type_source: verdict.pay_type_source,
-        resigned: verdict.resigned,
+        /*
+         * A BADGE, NOT A RULE. It says whether this employee had left by the
+         * end of THIS month, so whoever works the month can see who may need
+         * moving to CASH by hand. Nothing defaults from it - see
+         * `defaultPayType`, which cannot receive an employment fact at all.
+         */
+        exited_in_month: verdict.exited_in_month,
         initialized: verdict.initialized,
         initialized_at: snapshot ? snapshot.initialized_at : null,
         initialized_by: snapshot ? snapshot.initialized_by : null,

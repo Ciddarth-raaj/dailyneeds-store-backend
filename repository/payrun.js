@@ -121,9 +121,12 @@ class PayrunRepository {
    * screen that silently omitted them would be worse than one that shows them
    * and lets the eligibility rules speak.
    *
-   * `status` IS STILL SELECTED, because `utils/payrun_eligibility.js` uses it
-   * to decide the RESIGNED pay-type default - which is a different question
-   * from whether the person is in the month at all.
+   * `status` IS NOT SELECTED AT ALL. It was, for a resigned pay-type default
+   * that no longer exists, and nothing else ever read it: membership of the
+   * month is decided by the dated facts above, and the pay type is decided by
+   * the Employee Master's `payment_type` and by nothing else. A column nobody
+   * reads is a column somebody eventually writes a rule against, so it is
+   * simply not loaded.
    *
    * THE COLUMNS ARE NAMED AND MINIMAL. No Aadhaar, no PAN, no photograph. The
    * bank pair is read only to report the payment-readiness WARNING, and the
@@ -155,7 +158,6 @@ class PayrunRepository {
       "LIST-POPULATION",
       `SELECT ne.employee_id,
               ne.employee_name,
-              ne.status,
               ne.store_id,
               o.outlet_name AS store_name,
               ne.designation_id,

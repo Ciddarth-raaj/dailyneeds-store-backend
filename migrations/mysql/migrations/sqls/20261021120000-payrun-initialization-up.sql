@@ -136,17 +136,22 @@ CREATE TABLE IF NOT EXISTS `payrun_employee` (
 
   -- ------------------------------------------------------- the monthly pay type
   -- BANK OR CASH, FOR THIS MONTH ONLY. Defaulted from the Employee Master
-  -- (`payment_type` 1/2), or CASH for somebody who has left, and changeable
-  -- afterwards for this month alone. Changing it NEVER writes back to
-  -- `new_employee` - there is no UPDATE of that column anywhere in this
-  -- feature, and a test asserts it.
+  -- (`payment_type` 1/2) and from NOTHING ELSE, and changeable afterwards for
+  -- this month alone. Changing it NEVER writes back to `new_employee` - there
+  -- is no UPDATE of that column anywhere in this feature, and a test asserts it.
+  --
+  -- NO EMPLOYMENT FACT DEFAULTS THIS COLUMN. Initialization does not move a
+  -- leaver to CASH: a final settlement paid by bank transfer is ordinary, and
+  -- a rule that decided otherwise would be making a payment decision on HR's
+  -- behalf. Whoever works the month moves them, and that records itself as
+  -- MANUAL with an audit row.
   --
   -- THERE IS NO 'HOLD' VALUE. Holding pay is a payroll STATUS, not a route the
   -- money travels by; a held employee still has to have a recorded pay type for
   -- the day the hold lifts.
   `pay_type` ENUM('BANK','CASH') NOT NULL,
-  `pay_type_source` ENUM('EMPLOYEE_MASTER','RESIGNED_DEFAULT','MANUAL') NOT NULL
-    COMMENT 'where the CURRENT value came from - inherited, the resigned default, or somebody chose it',
+  `pay_type_source` ENUM('EMPLOYEE_MASTER','MANUAL') NOT NULL
+    COMMENT 'where the CURRENT value came from - inherited from the master, or somebody chose it for this month',
 
   -- ------------------------------------------------------------------ the row
   -- One value today. The column exists because the stages after this one -

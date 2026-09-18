@@ -23,7 +23,7 @@ const {
   monthWindow,
   daysInMonth,
   employedInMonth,
-  resignedForMonth,
+  exitedByMonthEnd,
   defaultPayType,
   statutorySetupComplete,
   evaluateEmployee,
@@ -44,98 +44,118 @@ describe("the month window", () => {
 });
 
 /* ============================================================================
- * THE REGRESSION: A LATER RESIGNATION MUST NOT REWRITE AN EARLIER MONTH
+ * THE PAY TYPE DEFAULT: THE EMPLOYEE MASTER, AND NOTHING ELSE
  * ==========================================================================*/
 
-describe("resignedForMonth is decided by the date, and only by the date", () => {
-  /**
-   * THE BUG, EXACTLY AS REPORTED. Worked all of August, resigned 10 September.
-   * Viewed in October, `status` says resigned - and August must not care.
-   */
-  it("somebody who resigns in September is NOT resigned for August", () => {
-    assert.equal(
-      resignedForMonth({ year: 2026, month: 8, ended_on: "2026-09-10" }),
-      false
-    );
-  });
-
-  it("the same person IS resigned for their September payrun", () => {
-    assert.equal(
-      resignedForMonth({ year: 2026, month: 9, ended_on: "2026-09-10" }),
-      true
-    );
-  });
-
-  it("a resignation on the FINAL DAY of the month counts as resigned for it", () => {
-    assert.equal(
-      resignedForMonth({ year: 2026, month: 8, ended_on: "2026-08-31" }),
-      true
-    );
-  });
-
-  it("a resignation on the FIRST DAY of the NEXT month does not", () => {
-    assert.equal(
-      resignedForMonth({ year: 2026, month: 8, ended_on: "2026-09-01" }),
-      false
-    );
-  });
-
-  it("no exit date is NOT a resignation, whatever the current status says", () => {
-    assert.equal(resignedForMonth({ year: 2026, month: 8, ended_on: null }), false);
-    // Even when a caller passes the old `status` argument, which the rule no
-    // longer reads: an undated exit cannot be placed in a month, and guessing
-    // would silently rewrite every earlier month to Cash.
-    assert.equal(
-      resignedForMonth({ year: 2026, month: 8, ended_on: null, status: 0 }),
-      false
-    );
-  });
-
-  it("a long-past resignation stays resigned for every month after it", () => {
-    assert.equal(resignedForMonth({ year: 2026, month: 8, ended_on: "2024-01-15" }), true);
-  });
-
-  it("a Date object and a timestamp string are read the same way as a date string", () => {
-    assert.equal(
-      resignedForMonth({ year: 2026, month: 8, ended_on: "2026-09-10 00:00:00" }),
-      false
-    );
-    assert.equal(
-      resignedForMonth({ year: 2026, month: 9, ended_on: new Date(Date.UTC(2026, 8, 10)) }),
-      true
-    );
-  });
-});
-
-describe("the pay type default follows the DATED answer", () => {
-  const employee = { payment_type: BANK };
-
-  it("August defaults to BANK for somebody who resigned in September", () => {
-    const resigned = resignedForMonth({ year: 2026, month: 8, ended_on: "2026-09-10" });
-    assert.deepEqual(defaultPayType(employee, { resigned }), {
+describe("defaultPayType reads the Employee Master and nothing else", () => {
+  it("BANK in the master initializes BANK", () => {
+    assert.deepEqual(defaultPayType({ payment_type: BANK }), {
       pay_type: PAY_TYPE.BANK,
       pay_type_source: PAY_TYPE_SOURCE.EMPLOYEE_MASTER,
     });
   });
 
-  it("their September defaults to CASH", () => {
-    const resigned = resignedForMonth({ year: 2026, month: 9, ended_on: "2026-09-10" });
-    assert.deepEqual(defaultPayType(employee, { resigned }), {
-      pay_type: PAY_TYPE.CASH,
-      pay_type_source: PAY_TYPE_SOURCE.RESIGNED_DEFAULT,
-    });
-  });
-
-  it("a master set to Cash stays Cash, and is not relabelled as a resigned default", () => {
-    assert.deepEqual(defaultPayType({ payment_type: CASH }, { resigned: false }), {
+  it("CASH in the master initializes CASH", () => {
+    assert.deepEqual(defaultPayType({ payment_type: CASH }), {
       pay_type: PAY_TYPE.CASH,
       pay_type_source: PAY_TYPE_SOURCE.EMPLOYEE_MASTER,
     });
   });
 
-  it("an unrecorded payment type is Cash, the same default employee creation applies", () => {
-    assert.equal(defaultPayType({}, { resigned: false }).pay_type, PAY_TYPE.CASH);
-    assert.equal(defaultPayType({ payment_type: null }, {}).pay_type, PAY_TYPE.CASH);
+  it("an unrecorded payment type is CASH, the same default employee creation applies", () => {
+    assert.equal(defaultPayType({}).pay_type, PAY_TYPE.CASH);
+    assert.equal(defaultPayType({ payment_type: null }).pay_type, PAY_TYPE.CASH);
+  });
+
+  /**
+   * THE RULE THAT REPLACED THE RESIGNED DEFAULT, PINNED SHUT.
+   *
+   * Initialization must not move a leaver to CASH: a final settlement paid by
+   * bank transfer is ordinary, and HR moves the ones that need moving. So NO
+   * employment fact may change the answer - not a resignation date, not
+   * `status`, not any lifecycle field somebody adds later.
+   */
+  it("NO employment fact changes the answer, in any combination", () => {
+    const employmentFacts = [
+      {},
+      { status: 0 },
+      { status: 1 },
+      { resignation_date: "2020-01-01" },
+      { resignation_date: "2026-08-15" },
+      { resignation_date: "2026-09-10" },
+      { status: 0, resignation_date: "2024-06-30" },
+      { lifecycle_state: "EXITED" },
+      { employment_period_ended_on: "2024-06-30" },
+    ];
+    employmentFacts.forEach((facts) => {
+      assert.deepEqual(
+        defaultPayType({ payment_type: BANK, ...facts }),
+        { pay_type: PAY_TYPE.BANK, pay_type_source: PAY_TYPE_SOURCE.EMPLOYEE_MASTER },
+        `a BANK employee defaulted differently for ${JSON.stringify(facts)}`
+      );
+      assert.deepEqual(
+        defaultPayType({ payment_type: CASH, ...facts }),
+        { pay_type: PAY_TYPE.CASH, pay_type_source: PAY_TYPE_SOURCE.EMPLOYEE_MASTER },
+        `a CASH employee defaulted differently for ${JSON.stringify(facts)}`
+      );
+    });
+  });
+
+  it("takes only the employee, so an employment fact has no shape to arrive in", () => {
+    // `employee = {}` is a defaulted parameter, so the declared arity is 0.
+    // What matters is that there is no SECOND one: that options object is how
+    // the resigned default got in the first time.
+    assert.equal(
+      defaultPayType.length,
+      0,
+      "defaultPayType must take nothing beyond the employee record"
+    );
+    // And a caller that passes the old options object anyway changes nothing.
+    assert.equal(defaultPayType({ payment_type: BANK }, { resigned: true }).pay_type, PAY_TYPE.BANK);
+  });
+
+  it("RESIGNED_DEFAULT is gone rather than left declared and unreachable", () => {
+    assert.deepEqual(Object.keys(PAY_TYPE_SOURCE).sort(), ["EMPLOYEE_MASTER", "MANUAL"]);
+  });
+});
+
+/* ============================================================================
+ * THE BADGE: DATED, AND DISPLAY ONLY
+ * ==========================================================================*/
+
+describe("exitedByMonthEnd is dated, and decides nothing", () => {
+  it("somebody who leaves in September had not left by the end of August", () => {
+    assert.equal(exitedByMonthEnd({ year: 2026, month: 8, ended_on: "2026-09-10" }), false);
+  });
+
+  it("the same person HAS left by the end of September", () => {
+    assert.equal(exitedByMonthEnd({ year: 2026, month: 9, ended_on: "2026-09-10" }), true);
+  });
+
+  it("an exit on the FINAL DAY of the month counts; the first of the next does not", () => {
+    assert.equal(exitedByMonthEnd({ year: 2026, month: 8, ended_on: "2026-08-31" }), true);
+    assert.equal(exitedByMonthEnd({ year: 2026, month: 8, ended_on: "2026-09-01" }), false);
+  });
+
+  it("no exit date is not an exit, whatever the current status says", () => {
+    assert.equal(exitedByMonthEnd({ year: 2026, month: 8, ended_on: null }), false);
+    assert.equal(
+      exitedByMonthEnd({ year: 2026, month: 8, ended_on: null, status: 0 }),
+      false,
+      "the old status argument is not read even when a caller passes it"
+    );
+  });
+
+  it("a long-past exit stays exited for every month after it", () => {
+    assert.equal(exitedByMonthEnd({ year: 2026, month: 8, ended_on: "2024-01-15" }), true);
+  });
+
+  it("a Date object and a timestamp string read the same as a date string", () => {
+    assert.equal(exitedByMonthEnd({ year: 2026, month: 8, ended_on: "2026-09-10 00:00:00" }), false);
+    assert.equal(
+      exitedByMonthEnd({ year: 2026, month: 9, ended_on: new Date(Date.UTC(2026, 8, 10)) }),
+      true
+    );
   });
 });
 
@@ -188,7 +208,7 @@ describe("statutorySetupComplete", () => {
 
 /* ===================================================== the whole decision == */
 
-describe("evaluateEmployee does not read the current status either", () => {
+describe("evaluateEmployee defaults the pay type from the master alone", () => {
   const base = {
     salary: { monthly_gross: 26000 },
     attendance: { is_final: 1 },
@@ -205,45 +225,78 @@ describe("evaluateEmployee does not read the current status either", () => {
     ...over,
   });
 
-  it("August is READY and BANK for somebody whose record now says resigned", () => {
+  it("a resigned employee whose master says BANK initializes BANK", () => {
+    const verdict = evaluateEmployee({
+      year: 2026,
+      month: 9,
+      employee: employee({ payment_type: BANK, status: 0, resignation_date: "2026-09-10" }),
+      ...base,
+    });
+    assert.equal(verdict.pay_type, PAY_TYPE.BANK);
+    assert.equal(verdict.pay_type_source, PAY_TYPE_SOURCE.EMPLOYEE_MASTER);
+    assert.equal(verdict.status, "READY");
+  });
+
+  it("a resigned employee whose master says CASH initializes CASH - as the MASTER's value", () => {
+    const verdict = evaluateEmployee({
+      year: 2026,
+      month: 9,
+      employee: employee({ payment_type: CASH, status: 0, resignation_date: "2026-09-10" }),
+      ...base,
+    });
+    assert.equal(verdict.pay_type, PAY_TYPE.CASH);
+    assert.equal(
+      verdict.pay_type_source,
+      PAY_TYPE_SOURCE.EMPLOYEE_MASTER,
+      "CASH here is inherited, not a resigned default wearing a new name"
+    );
+  });
+
+  it("an active employee whose master says BANK initializes BANK", () => {
     const verdict = evaluateEmployee({
       year: 2026,
       month: 8,
-      employee: employee({ status: 0, resignation_date: "2026-09-10" }),
+      employee: employee({ payment_type: BANK, status: 1, resignation_date: null }),
       ...base,
     });
-    assert.equal(verdict.status, "READY");
-    assert.equal(verdict.resigned, false);
     assert.equal(verdict.pay_type, PAY_TYPE.BANK);
     assert.equal(verdict.pay_type_source, PAY_TYPE_SOURCE.EMPLOYEE_MASTER);
   });
 
-  it("September for the same person is CASH", () => {
-    const verdict = evaluateEmployee({
+  it("the month an employee leaves in defaults exactly as every other month does", () => {
+    const leaving = {
       year: 2026,
       month: 9,
-      employee: employee({ status: 0, resignation_date: "2026-09-10" }),
+      employee: employee({ payment_type: BANK, status: 0, resignation_date: "2026-09-10" }),
       ...base,
-    });
-    assert.equal(verdict.resigned, true);
-    assert.equal(verdict.pay_type, PAY_TYPE.CASH);
-    assert.equal(verdict.pay_type_source, PAY_TYPE_SOURCE.RESIGNED_DEFAULT);
+    };
+    const august = {
+      ...leaving,
+      month: 8,
+      employee: employee({ payment_type: BANK, status: 1, resignation_date: null }),
+    };
+    assert.equal(evaluateEmployee(leaving).pay_type, evaluateEmployee(august).pay_type);
   });
 
-  it("an inactive status with NO exit date never rewrites an earlier month", () => {
+  it("the badge is dated, and does not follow the pay type", () => {
+    const record = employee({ payment_type: BANK, status: 0, resignation_date: "2026-09-10" });
+    assert.equal(evaluateEmployee({ year: 2026, month: 8, employee: record, ...base }).exited_in_month, false);
+    assert.equal(evaluateEmployee({ year: 2026, month: 9, employee: record, ...base }).exited_in_month, true);
+    // Both months still default to the master's BANK.
+    assert.equal(evaluateEmployee({ year: 2026, month: 8, employee: record, ...base }).pay_type, PAY_TYPE.BANK);
+    assert.equal(evaluateEmployee({ year: 2026, month: 9, employee: record, ...base }).pay_type, PAY_TYPE.BANK);
+  });
+
+  it("an undated exit with an inactive status still changes nothing", () => {
     const verdict = evaluateEmployee({
       year: 2026,
       month: 8,
-      employee: employee({ status: 0, resignation_date: null }),
+      employee: employee({ payment_type: BANK, status: 0, resignation_date: null }),
       ...base,
     });
-    assert.equal(verdict.resigned, false);
-    assert.equal(verdict.pay_type, PAY_TYPE.BANK, "the master's pay type still applies");
-    assert.equal(
-      verdict.status,
-      "READY",
-      "and an undated exit must not block the month either - only dates decide"
-    );
+    assert.equal(verdict.pay_type, PAY_TYPE.BANK);
+    assert.equal(verdict.exited_in_month, false);
+    assert.equal(verdict.status, "READY");
   });
 
   it("the verdict for a past month does not change when the record changes later", () => {
@@ -254,13 +307,12 @@ describe("evaluateEmployee does not read the current status either", () => {
       ...base,
     };
     const before = evaluateEmployee(august);
-    // The same August, read after the person resigned in September.
     const after = evaluateEmployee({
       ...august,
       employee: employee({ status: 0, resignation_date: "2026-09-10" }),
     });
     assert.equal(before.pay_type, after.pay_type);
-    assert.equal(before.resigned, after.resigned);
+    assert.equal(before.exited_in_month, after.exited_in_month);
     assert.equal(before.status, after.status);
   });
 });
