@@ -853,6 +853,58 @@ describe("ESI contribution-period continuity", () => {
     assert.equal(r.esi.employer_esi, 0);
   });
 
+  it("NULL applicability above the ceiling is PENDING, not zero", async () => {
+    // `esi_applicable` is NULL for every employee the C3 migration touched.
+    // Above the ceiling that used to resolve to NOT_APPLICABLE, on the
+    // reasoning that nobody is covered up there — which contribution periods
+    // made untrue. Whether this employee was in the scheme when the period
+    // began now decides the answer, and nobody has recorded it.
+    const repo = makeRepo({ ...EMPLOYEE, esi_applicable: null }, [
+      approved(1, "2026-04-01", 16000),
+    ]);
+    const r = await build(repo).calculateForEmployee(42, {
+      monthly_gross: 60000,
+      effective_from: "2026-07-01",
+    });
+    assert.equal(r.esi.status, "PENDING");
+    assert.equal(r.esi.employer_esi, null);
+    assert.equal(r.esi.unresolved[0].code, "ESI_APPLICABILITY_NOT_RECORDED");
+    assert.equal(r.esi_coverage.basis, "APPLICABILITY_NOT_RECORDED");
+    assert.equal(r.ctc_status, "PENDING", "and the CTC waits on it rather than understating");
+  });
+
+  it("FALSE applicability is still a settled NOT_APPLICABLE", async () => {
+    const repo = makeRepo({ ...EMPLOYEE, esi_applicable: 0 }, [approved(1, "2026-04-01", 16000)]);
+    const r = await build(repo).calculateForEmployee(42, {
+      monthly_gross: 60000,
+      effective_from: "2026-07-01",
+    });
+    assert.equal(r.esi.status, "NOT_APPLICABLE");
+    assert.equal(r.esi.employer_esi, 0);
+    assert.deepEqual(r.esi.unresolved, []);
+  });
+
+  it("STORES the coverage evidence on the record, inside the snapshot", async () => {
+    // A record has to be able to explain, years later, why ESI was charged on
+    // wages above the ceiling. The snapshot column is JSON and already exists.
+    const repo = makeRepo(COVERED, [approved(1, "2026-04-01", 16000)]);
+    // A revision proposed from 1 July, over the approved April record that is
+    // the evidence the coverage rule reads.
+    await build(repo).createInitialSalary(
+      42,
+      { monthly_gross: 60000, effective_from: "2026-07-01", revision_reason: REASON },
+      ACTOR
+    );
+    const stored = JSON.parse(repo.rows.find((r) => r.status === "PENDING").statutory_snapshot);
+    assert.deepEqual(stored.esi_contribution_period_start_months, [4, 10]);
+    assert.equal(stored.esi_coverage.basis, "COVERED_AT_ENTRY");
+    assert.equal(stored.esi_coverage.entry_date, "2026-04-01");
+    assert.equal(stored.esi_coverage.period.end, "2026-09-30");
+    assert.equal(stored.esi_coverage.wages_at_entry, 10000);
+    assert.equal(stored.esi_coverage.entry_salary_id, 1, "the April record it was decided from");
+    assert.equal(stored.esi_coverage.continues, true);
+  });
+
   it("leaves the 16000 acceptance case exactly as it was", async () => {
     const repo = makeRepo(COVERED, [approved(1, "2026-04-01", 16000)]);
     const r = await build(repo).calculateForEmployee(42, { monthly_gross: 16000 });

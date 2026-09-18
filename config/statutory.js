@@ -278,6 +278,6 @@ const rounding = {
  * findable when a rate change turns out to have been wrong. Bump it whenever
  * a committed default above changes.
  */
-const configVersion = process.env.STATUTORY_CONFIG_VERSION || "M2-2026-04-01-CODE-WAGES";
+const configVersion = process.env.STATUTORY_CONFIG_VERSION || "M2-2026-04-01-CODE-WAGES-ESI-PERIODS";
 
 module.exports = { salary, pf, esi, wages, rounding, configVersion };

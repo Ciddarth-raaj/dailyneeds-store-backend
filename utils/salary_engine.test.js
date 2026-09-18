@@ -836,10 +836,27 @@ test("ESI applicability not recorded is PENDING where it could matter", () => {
   assert.equal(esi.unresolved[0].code, E.UNRESOLVED.ESI_APPLICABILITY_NOT_RECORDED);
 });
 
-test("ESI applicability not recorded still resolves when nobody could be covered", () => {
-  const esi = E.calculateEsi({ esi_applicable: null, gross: 50000, conveyance: 2500 });
-  assert.equal(esi.status, E.STATUS.NOT_APPLICABLE);
-  assert.deepEqual(esi.unresolved, []);
+test("ESI applicability not recorded is PENDING ABOVE THE CEILING TOO", () => {
+  /*
+   * THIS TEST USED TO ASSERT THE OPPOSITE, and the rule it rested on is gone.
+   * "Nobody is covered above the ceiling, so the unrecorded flag cannot change
+   * the answer" was true before contribution periods: it is not true now,
+   * because an employee who was in the scheme when the period began is covered
+   * to the end of it whatever their wages do. So the flag decides the result
+   * at every wage, and nobody having recorded it is a question — not a zero.
+   */
+  const esi = E.calculateEsi({ esi_applicable: null, gross: 50000, ...E.calculateBreakup(50000) });
+  assert.equal(esi.status, E.STATUS.PENDING);
+  assert.equal(esi.employer_esi, null, "not a contribution of zero");
+  assert.equal(esi.unresolved[0].code, E.UNRESOLVED.ESI_APPLICABILITY_NOT_RECORDED);
+});
+
+test("and the same is true of a wage a payrun supplied", () => {
+  // The PAYROLL path carries the identical rule, for the identical reason.
+  const esi = E.calculateEsi({ esi_applicable: null, gross: 50000, esi_wage: 47500 });
+  assert.equal(esi.status, E.STATUS.PENDING);
+  assert.equal(esi.employer_esi, null);
+  assert.equal(esi.unresolved[0].code, E.UNRESOLVED.ESI_APPLICABILITY_NOT_RECORDED);
 });
 
 /* ------------------------------------------------------------------- CTC */
@@ -1186,4 +1203,111 @@ test("an already-resolved or not-applicable record is returned unchanged", () =>
   assert.equal(E.fillStandardEsi(applied), applied);
   const na = { ...LEGACY_ROW, esi_status: "NOT_APPLICABLE", employer_esi: 0, unresolved_notes: [] };
   assert.equal(E.fillStandardEsi(na), na);
+});
+
+/* ------------------------- legacy rows and the contribution period ------- */
+
+test("A LEGACY ABOVE-CEILING ROW IS NOT COMPLETED TO ZERO", () => {
+  /*
+   * THE REGRESSION. An employee approved on 16000 from 1 April is covered when
+   * the contribution period begins; a revision to 60000 from 1 July puts their
+   * wages above the ceiling, and coverage still runs to 30 September. If the
+   * legacy presenter answered that July row from the row alone it would say
+   * NOT_APPLICABLE and zero — a contribution dropped for three months, on a
+   * screen, with nothing to show anybody had decided it.
+   *
+   * The row does not carry the salary in force when the period began and this
+   * function has no repository, so the honest answer is the one already on the
+   * record: still open.
+   */
+  const july = E.fillStandardEsi({ ...LEGACY_ROW, monthly_gross: 60000, ...E.calculateBreakup(60000) });
+  assert.equal(july.esi_status, "PENDING");
+  assert.equal(july.employer_esi, null, "NOT a contribution of zero");
+  assert.equal(july.employee_esi, null);
+  assert.equal(july.monthly_ctc, null);
+  assert.deepEqual(july.unresolved_notes, LEGACY_ROW.unresolved_notes, "the question is kept");
+});
+
+test("a legacy row BELOW the ceiling is still completed normally", () => {
+  // Continuation cannot change an answer for somebody plainly inside the
+  // ceiling, so nothing about the April row's treatment changes.
+  const april = E.fillStandardEsi(LEGACY_ROW);
+  assert.equal(april.esi_status, E.STATUS.APPLIED);
+  assert.equal(april.employee_esi, 75);
+  assert.equal(april.employer_esi, 325);
+  assert.equal(april.monthly_ctc, 17625);
+});
+
+/* ------------------------------------- the coverage evidence, persisted -- */
+
+test("the snapshot carries the contribution-period evidence AND its configuration", () => {
+  const r = E.calculateSalary({
+    monthly_gross: 60000,
+    pf_applicable: 1,
+    esi_applicable: 1,
+    previous_eps_member: 1,
+    dob: "1990-05-10",
+    date_of_joining: "2020-01-01",
+    effective_from: "2026-07-01",
+    coverage_entry_salary: { salary_id: 11, monthly_gross: 16000, ...E.calculateBreakup(16000) },
+  });
+  const snap = r.statutory_snapshot;
+  assert.deepEqual(snap.esi_contribution_period_start_months, [4, 10]);
+  assert.deepEqual(snap.esi_coverage, {
+    period: { start: "2026-04-01", end: "2026-09-30" },
+    entry_date: "2026-04-01",
+    continues: true,
+    basis: "COVERED_AT_ENTRY",
+    wages_at_entry: 10000,
+    entry_salary_id: 11,
+  });
+});
+
+test("an opening salary names no entry record, because there is not one yet", () => {
+  // The record being calculated IS the salary in force at entry, and it has no
+  // id until it is stored. An id is not invented for it.
+  const r = E.calculateSalary({
+    monthly_gross: 60000,
+    pf_applicable: 1,
+    esi_applicable: 1,
+    previous_eps_member: 1,
+    dob: "1990-05-10",
+    date_of_joining: "2026-06-15",
+    effective_from: "2026-06-15",
+  });
+  assert.equal(r.statutory_snapshot.esi_coverage.entry_salary_id, null);
+  assert.equal(r.statutory_snapshot.esi_coverage.basis, "ABOVE_CEILING_AT_ENTRY");
+});
+
+test("a record is re-read under the periods IT was written under", () => {
+  const cfg = E.configFromSnapshot({ esi_contribution_period_start_months: [1, 7] });
+  assert.deepEqual(cfg.esi.contributionPeriodStartMonths, [1, 7]);
+  assert.deepEqual(E.contributionPeriodFor("2026-08-01", cfg), {
+    start: "2026-07-01",
+    end: "2026-12-31",
+  });
+  // A snapshot that never carried them falls back to the current configuration.
+  assert.deepEqual(
+    E.configFromSnapshot({}).esi.contributionPeriodStartMonths,
+    CONFIG.esi.contributionPeriodStartMonths
+  );
+});
+
+test("a RESOLVED record is never recalculated because today's configuration moved", () => {
+  // `fillStandardEsi` completes an open question; it does not revisit a
+  // contribution somebody has already been paid or filed on.
+  const resolved = {
+    ...LEGACY_ROW,
+    esi_status: "APPLIED",
+    esi_wage: 10000,
+    employee_esi: 75,
+    employer_esi: 325,
+    monthly_ctc: 17625,
+    unresolved_notes: [],
+  };
+  const cfg = {
+    ...CONFIG,
+    esi: { ...CONFIG.esi, employerRatePercent: 9.99, employeeRatePercent: 9.99 },
+  };
+  assert.equal(E.fillStandardEsi(resolved, cfg), resolved, "returned as it was stored");
 });
