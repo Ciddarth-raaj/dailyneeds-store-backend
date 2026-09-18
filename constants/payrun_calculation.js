@@ -111,6 +111,14 @@ const RECALC_REASON = {
   APPROVED_OT_CHANGED: "APPROVED_OT_CHANGED",
   EFFECTIVE_NRM_CHANGED: "EFFECTIVE_NRM_CHANGED",
   STATUTORY_CONTEXT_CHANGED: "STATUTORY_CONTEXT_CHANGED",
+  /**
+   * THE ESI CONTRIBUTION-PERIOD BASIS MOVED, and it is its own code rather
+   * than part of SALARY_CHANGED above. Coverage is decided from the approved
+   * salary in force when the contribution period BEGAN - often a much older
+   * record than the one pricing this month - so "a salary changed" would send
+   * somebody to look in the wrong place.
+   */
+  ESI_COVERAGE_CHANGED: "ESI_COVERAGE_CHANGED",
   /*
    * THE PAYRUN'S OWN INPUTS, AND THEY ARE A SEPARATE CODE FROM THE FOUR ABOVE.
    * An adjustment or a pay type change is not a source mutating under a frozen
@@ -131,6 +139,7 @@ const RECALC_REASON_LABEL = {
   [RECALC_REASON.APPROVED_OT_CHANGED]: "Approved OT changed",
   [RECALC_REASON.EFFECTIVE_NRM_CHANGED]: "Effective NRM changed",
   [RECALC_REASON.STATUTORY_CONTEXT_CHANGED]: "Statutory setup changed",
+  [RECALC_REASON.ESI_COVERAGE_CHANGED]: "ESI contribution period changed",
   [RECALC_REASON.ADJUSTMENTS_CHANGED]: "Adjustments changed",
   [RECALC_REASON.PAY_TYPE_CHANGED]: "Pay type changed",
   [RECALC_REASON.CALCULATION_FAILED]: "Calculation did not complete",
@@ -147,6 +156,8 @@ const RECALC_REASON_MESSAGE = {
     "The effective NRM attendance resolved for this employee has changed. Recalculate to price OT on the current one.",
   [RECALC_REASON.STATUTORY_CONTEXT_CHANGED]:
     "PF or ESI applicability has changed for this employee since this calculation. Recalculate to apply the current statutory setup.",
+  [RECALC_REASON.ESI_COVERAGE_CHANGED]:
+    "The approved salary in force when this ESI contribution period began is not the one this calculation resolved coverage from. Recalculate to decide coverage on the current history.",
   [RECALC_REASON.ADJUSTMENTS_CHANGED]:
     "This employee's adjustments have been edited since this calculation. Recalculate so the net pay matches them.",
   [RECALC_REASON.PAY_TYPE_CHANGED]:

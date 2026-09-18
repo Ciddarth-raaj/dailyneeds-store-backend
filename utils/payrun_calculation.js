@@ -90,13 +90,17 @@ const intOr0 = (value) => {
 /* ------------------------------------------------------- the effective NRM */
 
 /**
- * THE EMPLOYEE'S EFFECTIVE NRM FOR THE MONTH, AND WHERE IT CAME FROM.
+ * THE EMPLOYEE'S OVERTIME, SPLIT BY THE NRM EACH HOUR OF IT WAS WORKED
+ * AGAINST.
  *
- * WHAT IS BEING ANSWERED. OT is priced per HOUR, so the month needs one hourly
- * rate, so it needs one NRM. Attendance resolves an NRM per DATE - it has to,
- * because a shortage on a 12-hour day is worth less per minute than one on an
- * 8-hour day - and this rolls those per-date answers up into the one figure
- * the OT rate is built from.
+ * WHAT IS BEING ANSWERED, AND WHY IT IS NOT "ONE NRM FOR THE MONTH". OT is
+ * priced per hour, and the hourly rate is Daily Rate / NRM - so an hour worked
+ * on an 8-hour day and an hour worked on an 11-hour day are worth DIFFERENT
+ * amounts. An employee who has approved OT on both kinds of day has no single
+ * correct monthly NRM, and choosing one would misprice every hour worked
+ * against the other: on the example of 120 minutes at NRM 11h and 60 minutes
+ * at NRM 8h, pricing all 180 on either NRM is wrong for a third or two thirds
+ * of it. So each group is priced on its own NRM and the amounts are summed.
  *
  * THE INPUT IS ALREADY-GROUPED ATTENDANCE, never a shift row. Each group is
  * `{ nrm_minutes, break_allowance_source, day_count, approved_ot_minutes }` as
@@ -104,34 +108,42 @@ const intOr0 = (value) => {
  * MASTER IS NOT CONSULTED ANYWHERE IN THIS STAGE: attendance has already
  * applied the employee's lunch/break override (`special_break_override_minutes`)
  * and reading the master again would be a second answer that disagrees with
- * the one the month was actually calculated on.
+ * the one the month was actually calculated on. An employee with no override
+ * gets attendance's shift-derived NRM; one with an override gets attendance's
+ * employee-specific NRM; the payrun asks which it was and never decides it.
  *
- * WHICH GROUP WINS, and the order is the rule:
+ * WHAT COMES BACK:
  *
- *   1. the group carrying the most APPROVED OT MINUTES. This is the NRM that
- *      the overtime was actually worked against, and overtime is the only
- *      thing the monthly NRM is used to price. Pricing a month's OT on an NRM
- *      from days that carry no OT would be arithmetic about the wrong days.
- *   2. failing that - nobody has any approved OT - the group covering the most
- *      DAYS, which is the employee's ordinary working pattern for the month.
- *   3. ties break towards the LARGER NRM, deliberately. A larger NRM is a
- *      lower hourly rate; where the month is genuinely ambiguous, the payrun
- *      does not resolve the ambiguity in the direction of paying more.
+ *   ot_groups        one entry per NRM that carries APPROVED OT, each with its
+ *                    own minutes and its own source. This is what prices the
+ *                    overtime, and it is the whole of it.
+ *   nrm_minutes      A SINGLE REPRESENTATIVE NRM, and ONLY when there is
+ *                    genuinely one. With one OT group it is that group's -
+ *                    the ordinary case, and the screen goes on showing one NRM
+ *                    and one hourly rate. With SEVERAL it is NULL, deliberately:
+ *                    there is no single rate, and reporting one would be
+ *                    reporting a figure that priced none of the money. With no
+ *                    OT at all it is the month's ordinary pattern - the NRM
+ *                    covering the most days - which prices nothing and is
+ *                    shown so somebody can see what an hour would have cost.
+ *   nrm_is_mixed     whether the month had more than one NRM at all.
  *
- * THE SOURCE IS THE WINNING GROUP'S OWN, so an employee whose override applies
- * to the days their OT was worked on reports EMPLOYEE_OVERRIDE and everybody
- * else reports SHIFT. That is what makes two employees on one shift able to
- * have different OT rates, and makes the row say why.
+ * ZERO-NRM GROUPS ARE DROPPED. An NRM of zero is a rest day or a misconfigured
+ * schedule; it cannot price an hour, and dividing by it is how a payroll
+ * screen ends up showing Infinity. A group's OT minutes go with it - see
+ * `computeCalculation`, which refuses to price approved OT it has no NRM for
+ * rather than paying nothing for it.
  *
- * ZERO-NRM GROUPS ARE DROPPED. An NRM of zero is a rest day or a
- * misconfigured schedule; it cannot price an hour and dividing by it is how a
- * payroll screen ends up showing Infinity.
+ * GROUPS WITH NO APPROVED OT REACH NO OT FIGURE. They are counted for the
+ * ordinary-pattern fallback above and for nothing else, so a month of
+ * twenty-six 8-hour days and one approved OT hour on a 12-hour day prices that
+ * hour at the 12-hour rate.
  */
 function resolveEffectiveNrm(groups = []) {
   const usable = (groups || [])
     .map((g) => ({
       nrm_minutes: intOr0(g.nrm_minutes),
-      source:
+      nrm_source:
         String(g.break_allowance_source || NRM_SOURCE.SHIFT).toUpperCase() ===
         NRM_SOURCE.EMPLOYEE_OVERRIDE
           ? NRM_SOURCE.EMPLOYEE_OVERRIDE
@@ -141,30 +153,69 @@ function resolveEffectiveNrm(groups = []) {
     }))
     .filter((g) => g.nrm_minutes > 0);
 
+  /*
+   * THE OT-CARRYING GROUPS, MERGED BY (NRM, SOURCE) AND IN A FIXED ORDER.
+   *
+   * MERGED, because the repository groups by NRM **and** by break source, and
+   * the same NRM can legitimately arrive from both - an override that happens
+   * to equal the shift's own break gives two rows that must not be priced as
+   * two rates. SORTED BY NRM, so the stored breakdown and its hash are stable
+   * across reads: an order that depended on how MySQL returned the rows would
+   * make an identical month hash differently on a different day.
+   */
+  const byRate = new Map();
+  usable
+    .filter((g) => g.approved_ot_minutes > 0)
+    .forEach((g) => {
+      const key = `${g.nrm_minutes}|${g.nrm_source}`;
+      const existing = byRate.get(key);
+      if (existing) existing.approved_ot_minutes += g.approved_ot_minutes;
+      else byRate.set(key, { ...g });
+    });
+
+  const otGroups = [...byRate.values()]
+    .sort((a, b) => a.nrm_minutes - b.nrm_minutes || (a.nrm_source < b.nrm_source ? -1 : 1))
+    .map((g) => ({
+      nrm_minutes: g.nrm_minutes,
+      nrm_source: g.nrm_source,
+      approved_ot_minutes: g.approved_ot_minutes,
+    }));
+
   if (usable.length === 0) {
-    return { nrm_minutes: null, nrm_source: null };
+    return { nrm_minutes: null, nrm_source: null, nrm_is_mixed: false, ot_groups: [] };
   }
 
-  const anyOt = usable.some((g) => g.approved_ot_minutes > 0);
-  const weight = (g) => (anyOt ? g.approved_ot_minutes : g.day_count);
-
-  const winner = usable.reduce((best, g) => {
-    if (best === null) return g;
-    if (weight(g) !== weight(best)) return weight(g) > weight(best) ? g : best;
-    // The tie-break: the larger NRM, which is the lower hourly rate.
-    return g.nrm_minutes > best.nrm_minutes ? g : best;
-  }, null);
+  /*
+   * THE REPRESENTATIVE NRM. One OT group is one rate and is reported as one;
+   * several is NO single rate, and null is the honest answer rather than the
+   * largest, the commonest or the first. Nothing is priced from this value -
+   * `ot_groups` above prices the overtime - so a null here costs no money and
+   * only changes what a screen may show.
+   */
+  let representative = null;
+  if (otGroups.length === 1) {
+    representative = otGroups[0];
+  } else if (otGroups.length === 0) {
+    representative = usable.reduce((best, g) => {
+      if (best === null) return g;
+      if (g.day_count !== best.day_count) return g.day_count > best.day_count ? g : best;
+      // The tie-break: the larger NRM, which is the lower hourly rate. Where
+      // the month is genuinely ambiguous, the payrun does not resolve the
+      // ambiguity in the direction of paying more.
+      return g.nrm_minutes > best.nrm_minutes ? g : best;
+    }, null);
+  }
 
   return {
-    nrm_minutes: winner.nrm_minutes,
-    nrm_source: winner.source,
+    nrm_minutes: representative ? representative.nrm_minutes : null,
+    nrm_source: representative ? representative.nrm_source : null,
     /*
-     * REPORTED SO A SCREEN CAN SAY THE MONTH WAS NOT UNIFORM. It changes no
-     * figure - the winning NRM above is what prices the OT - but "this
-     * employee worked two different shift lengths this month" is the first
-     * thing somebody asks when an OT rate looks unfamiliar.
+     * REPORTED SO A SCREEN CAN SAY THE MONTH WAS NOT UNIFORM - and, when the
+     * OT itself spans more than one NRM, so it can show the breakdown instead
+     * of a single misleading rate.
      */
     nrm_is_mixed: usable.length > 1,
+    ot_groups: otGroups,
   };
 }
 
@@ -198,6 +249,7 @@ function sourceMarkers({
   attendance = {},
   nrm = {},
   statutory = {},
+  coverage = {},
 } = {}) {
   return {
     salary_id: salary.salary_id ?? null,
@@ -212,9 +264,37 @@ function sourceMarkers({
 
     effective_nrm_minutes: nrm.nrm_minutes ?? null,
     effective_nrm_source: nrm.nrm_source ?? null,
+    /**
+     * THE WHOLE OT SPLIT, NOT JUST THE HEADLINE NRM. The overtime is priced
+     * per NRM group, so a month that moved 60 approved minutes from an 8-hour
+     * day to an 11-hour one is a month that must be recalculated - and with a
+     * single marker for one representative NRM, that move would be invisible:
+     * the total minutes and the headline NRM can both be unchanged while the
+     * amount is different. The groups are already in a fixed order (see
+     * `resolveEffectiveNrm`), so an identical split always marks identically.
+     */
+    ot_groups: (nrm.ot_groups || [])
+      .map((g) => `${g.nrm_minutes}:${g.nrm_source}:${g.approved_ot_minutes}`)
+      .join(","),
 
     pf_applicable: statutory.pf_applicable ?? null,
     esi_applicable: statutory.esi_applicable ?? null,
+
+    /**
+     * THE ESI CONTRIBUTION-PERIOD BASIS IS A SOURCE IN ITS OWN RIGHT.
+     *
+     * Coverage is decided from the APPROVED SALARY IN FORCE AT THE PERIOD'S
+     * ENTRY DATE, which is a different record from the one pricing the month -
+     * often a much older one. A revision back-dated into the previous
+     * September can therefore change whether this January is covered at all,
+     * without touching `salary_id` or any other marker above. So the entry
+     * date, the record found there and the position it established are all
+     * marked, and a change to any of them makes the stored calculation
+     * RECALCULATION_REQUIRED.
+     */
+    esi_coverage_entry_date: coverage.entry_date ?? null,
+    esi_coverage_entry_salary_id: coverage.entry_salary_id ?? null,
+    esi_coverage_entry_gross: coverage.entry_gross ?? null,
   };
 }
 
@@ -234,8 +314,12 @@ const SOURCE_KEYS = [
   "approved_ot_minutes",
   "effective_nrm_minutes",
   "effective_nrm_source",
+  "ot_groups",
   "pf_applicable",
   "esi_applicable",
+  "esi_coverage_entry_date",
+  "esi_coverage_entry_salary_id",
+  "esi_coverage_entry_gross",
 ];
 
 function sourceHash(markers = {}) {
@@ -300,13 +384,73 @@ function detectChanges(stored = {}, current = {}) {
     reasons.push(RECALC_REASON.ATTENDANCE_CHANGED);
   }
   if (differs("approved_ot_minutes")) reasons.push(RECALC_REASON.APPROVED_OT_CHANGED);
-  if (differs("effective_nrm_minutes") || differs("effective_nrm_source")) {
+  if (
+    differs("effective_nrm_minutes") ||
+    differs("effective_nrm_source") ||
+    /*
+     * THE SPLIT COUNTS AS AN NRM CHANGE, because that is what it is: the same
+     * total minutes worked against different NRMs is a different OT amount,
+     * and the person reading the badge needs to go and look at the same place.
+     */
+    differs("ot_groups")
+  ) {
     reasons.push(RECALC_REASON.EFFECTIVE_NRM_CHANGED);
   }
   if (differs("pf_applicable") || differs("esi_applicable")) {
     reasons.push(RECALC_REASON.STATUTORY_CONTEXT_CHANGED);
   }
+  /*
+   * THE ESI COVERAGE BASIS IS ITS OWN REASON. "A salary changed" would send
+   * somebody to look at this month's revision, which is not where the change
+   * is: the record that moved is the one in force when the contribution period
+   * began, possibly months earlier.
+   */
+  if (
+    differs("esi_coverage_entry_date") ||
+    differs("esi_coverage_entry_salary_id") ||
+    differs("esi_coverage_entry_gross")
+  ) {
+    reasons.push(RECALC_REASON.ESI_COVERAGE_CHANGED);
+  }
   return reasons;
+}
+
+/**
+ * THE MARKER SET A **STORED** CALCULATION CONSUMED, read back off its row.
+ *
+ * WHY THIS EXISTS RATHER THAN COMPARING THE ROW DIRECTLY. Most markers are
+ * stored under their own names and compare as they are - but the OT split is
+ * stored as the PRICED breakdown (`ot_groups`, with hours, rates and amounts
+ * on it, because that is what a payslip has to be able to show), while the
+ * marker is the bare NRM-to-minutes split. Comparing the column against the
+ * marker string would find a difference on every single read, and every
+ * calculated employee would read as stale forever - a failure that looks like
+ * working stale-detection and is in fact total.
+ *
+ * SO THE TRANSLATION LIVES HERE, once, beside the marker definition it has to
+ * agree with.
+ */
+function storedMarkers(row = {}) {
+  const groups = (() => {
+    const raw = row.ot_groups;
+    if (Array.isArray(raw)) return raw;
+    if (typeof raw === "string" && raw.trim() !== "") {
+      try {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch (err) {
+        return [];
+      }
+    }
+    return [];
+  })();
+
+  return {
+    ...row,
+    ot_groups: groups
+      .map((g) => `${g.nrm_minutes}:${g.nrm_source}:${g.approved_ot_minutes}`)
+      .join(","),
+  };
 }
 
 /** A reason, in the three lengths the screens need. See `constants/payrun.js`. */
@@ -357,6 +501,14 @@ function computeCalculation(input = {}, config = CONFIG) {
     amounts = {},
     statutory = {},
     as_of = null,
+    /**
+     * THE APPROVED SALARY IN FORCE WHEN THIS CONTRIBUTION PERIOD BEGAN - or
+     * when the employee joined, if they joined part-way through it. The one
+     * piece of evidence the coverage rule cannot derive for itself; the
+     * repository reads it from the employee's own salary history at the entry
+     * date the engine names. See the ESI section below.
+     */
+    coverage_entry_salary = null,
   } = input;
 
   const errors = [];
@@ -404,36 +556,97 @@ function computeCalculation(input = {}, config = CONFIG) {
    * and it is the only one this file names.
    */
   const approvedOtMinutes = intOr0(attendance.approved_ot_minutes);
-  const nrmMinutes = nrm && nrm.nrm_minutes ? intOr0(nrm.nrm_minutes) : null;
   const approvedOtHours = Math.round((approvedOtMinutes / 60) * 10000) / 10000;
+  const otGroups = (nrm && Array.isArray(nrm.ot_groups) ? nrm.ot_groups : []).map((g) => ({
+    ...g,
+  }));
+  const nrmMinutes = nrm && nrm.nrm_minutes ? intOr0(nrm.nrm_minutes) : null;
 
   /*
-   * OT HOURLY RATE = PER-DAY SALARY / EFFECTIVE NRM (in hours), and OT AMOUNT
-   * = APPROVED HOURS x THAT RATE. Unrounded through the multiplication and
-   * rounded once at the end, so an employee with thirty OT hours does not
-   * carry thirty rounding errors.
+   * OT IS PRICED GROUP BY GROUP, AND THE TOTAL IS THEIR SUM.
    *
-   * THE NRM IS THE EMPLOYEE'S EFFECTIVE ONE and never the shift master's - see
-   * `resolveEffectiveNrm`. Where no NRM could be resolved the OT is reported
-   * as an amount that could not be priced rather than as zero: a zero is an
-   * employee quietly not paid for approved overtime, which is the kind of
-   * error nobody notices until they complain.
+   *   OT amount for a group = its Approved OT Hours
+   *                           x (Per-Day Salary / its Effective NRM in hours)
+   *   OT amount             = the sum of the groups
+   *
+   * WHY NOT ONE RATE FOR THE MONTH. The hourly rate is Daily Rate / NRM, so an
+   * hour worked against an 8-hour NRM and an hour worked against an 11-hour
+   * one are worth different amounts. An employee with approved OT on both has
+   * no single correct rate, and applying either to all of it misprices
+   * whichever hours belong to the other. Attendance has already resolved the
+   * employee-specific NRM per date - override and all - so the split is read
+   * from its answer and never re-derived here.
+   *
+   * THERE IS NO WEEKDAY MULTIPLIER ANYWHERE IN THIS ARITHMETIC. Attendance's
+   * own `approved_ot_earnings` applies the Work Shift's weekday OT rate; the
+   * agreed Daily Needs payrun formula does not, and that figure is carried on
+   * the row for reconciliation and reaches no total. There is no reference to
+   * `ot_rate` in this file.
+   *
+   * EACH GROUP IS ROUNDED ONCE, at its own total, rather than per hour - so
+   * thirty OT hours do not carry thirty rounding errors - and the group
+   * amounts are summed as integer paise.
    */
-  let otHourlyRatePaise = null;
   let otAmountPaise = 0;
-  if (approvedOtMinutes > 0) {
-    if (dailyRatePaise === null || nrmMinutes === null || nrmMinutes <= 0) {
-      errors.push(
-        "Approved OT cannot be priced: no effective NRM was resolved from this employee's attendance for the month"
-      );
-    } else {
-      const perHour = dailyRatePaise / (nrmMinutes / 60);
-      otHourlyRatePaise = Math.round(perHour);
-      otAmountPaise = Math.round((approvedOtMinutes / 60) * perHour);
+  let otHourlyRatePaise = null;
+  const otBreakdown = [];
+
+  const groupedOtMinutes = otGroups.reduce((total, g) => total + intOr0(g.approved_ot_minutes), 0);
+
+  if (dailyRatePaise === null) {
+    if (approvedOtMinutes > 0) {
+      errors.push("Approved OT cannot be priced: this month has no daily rate to price an hour with");
     }
-  } else if (dailyRatePaise !== null && nrmMinutes !== null && nrmMinutes > 0) {
-    // No overtime, but the rate is still reported - somebody reviewing the
-    // month should be able to see what an hour would have cost.
+  } else if (approvedOtMinutes > 0 && otGroups.length === 0) {
+    /*
+     * APPROVED OT WITH NO NRM TO PRICE IT ON IS AN ERROR, NEVER A ZERO. A zero
+     * is an employee quietly not paid for overtime somebody approved, which is
+     * the kind of mistake nobody notices until they complain.
+     */
+    errors.push(
+      "Approved OT cannot be priced: no effective NRM was resolved from this employee's attendance for the month"
+    );
+  } else if (otGroups.length > 0) {
+    otGroups.forEach((group) => {
+      const minutes = intOr0(group.approved_ot_minutes);
+      const perHour = dailyRatePaise / (group.nrm_minutes / 60);
+      const amount = Math.round((minutes / 60) * perHour);
+      otAmountPaise += amount;
+      otBreakdown.push({
+        nrm_minutes: group.nrm_minutes,
+        nrm_source: group.nrm_source,
+        approved_ot_minutes: minutes,
+        approved_ot_hours: Math.round((minutes / 60) * 10000) / 10000,
+        ot_hourly_rate: toRupees(Math.round(perHour)),
+        ot_amount: toRupees(amount),
+      });
+    });
+
+    /*
+     * THE HEADLINE RATE IS REPORTED ONLY WHEN THERE IS ONE. With a single
+     * group it is that group's - the ordinary case, and the screen goes on
+     * showing one NRM and one hourly rate. With several, it stays null and the
+     * breakdown above is what the screen shows: a single rate there would be a
+     * figure that priced none of the money.
+     */
+    if (otBreakdown.length === 1) otHourlyRatePaise = toPaise(otBreakdown[0].ot_hourly_rate);
+
+    /*
+     * THE MONTHLY ROLL-UP AND ITS OWN DAY ROWS MUST AGREE ABOUT HOW MUCH OT
+     * WAS APPROVED. They are two views of one fact, written by one engine, and
+     * when they disagree this calculation cannot know which is right - so it
+     * says so rather than paying whichever it happened to read. Blocking the
+     * approval is the point: a silent difference here is money.
+     */
+    if (groupedOtMinutes !== approvedOtMinutes) {
+      errors.push(
+        `Approved OT does not reconcile: the attendance month reports ${approvedOtMinutes} minutes ` +
+          `and its day rows report ${groupedOtMinutes}. Recalculate the attendance for this month.`
+      );
+    }
+  } else if (nrmMinutes !== null && nrmMinutes > 0) {
+    // No overtime at all, but the rate is still reported - somebody reviewing
+    // the month should be able to see what an hour would have cost.
     otHourlyRatePaise = Math.round(dailyRatePaise / (nrmMinutes / 60));
   }
 
@@ -548,13 +761,106 @@ function computeCalculation(input = {}, config = CONFIG) {
     config
   );
 
-  const esi = engine.calculateEsi(
+  /*
+   * ================================ THE CONTRIBUTION PERIOD, RESOLVED ======
+   *
+   * ESI DOES NOT STOP THE MOMENT WAGES CROSS THE CEILING. Coverage is decided
+   * ONCE per contribution period - at its start, or at the employee's entry
+   * into it if they joined part-way through - and somebody covered at that
+   * moment stays covered to the end of the period whatever their wages do in
+   * between. A payrun that asked only "is this month's wage above the
+   * ceiling?" would stop contributing for exactly the employees the
+   * continuation rule exists to protect, and a contribution that quietly stops
+   * is a filing error nobody notices for a year.
+   *
+   * THE RULE IS THE SALARY ENGINE'S AND IS NOT REIMPLEMENTED HERE.
+   * `resolveContributionPeriodCoverage` already decides it - the period from
+   * `contributionPeriodFor`, the entry date from `contributionPeriodEntryDate`,
+   * the wages at entry through the same `statutoryWages` definition - and this
+   * is the same call `usecase/employee_salary.js` makes for the Salary Master.
+   * What the payrun supplies is the one piece of evidence the rule cannot
+   * derive: the APPROVED salary that was in force at the entry date, which the
+   * repository looked up from the employee's own salary history.
+   *
+   * NOTHING HERE COMES FROM A CLIENT. The entry date is derived from the
+   * period and the date of joining, the entry salary is the server's own read,
+   * and there is no key on this function's input that a request body could
+   * reach.
+   */
+  const coverage = engine.resolveContributionPeriodCoverage(
     {
       esi_applicable: snapshot.esi_applicable,
-      esi_wage: wageDefinition === null ? null : wageDefinition.statutory_wages,
+      date_of_joining: snapshot.date_of_joining ?? statutory.date_of_joining ?? null,
+      as_of,
+      entry_salary: coverage_entry_salary,
     },
     config
   );
+
+  const esiWageRupees = wageDefinition === null ? null : wageDefinition.statutory_wages;
+  const esiWagePaise = toPaise(esiWageRupees);
+  const coverageCeilingPaise = toPaise(config.esi.coverageCeiling);
+
+  /*
+   * AN UNPROVABLE POSITION AT ENTRY IS A QUESTION, NOT A ZERO - AND ONLY WHERE
+   * IT DECIDES ANYTHING.
+   *
+   * `continues === null` means the server could not establish whether this
+   * employee was in the scheme when the period began: no approved salary at
+   * the entry date, or applicability never recorded. That matters only ABOVE
+   * the ceiling, because at or below it the employee is covered either way and
+   * the contribution is the same whichever the answer would have been. So the
+   * question is raised exactly where it changes the money, and an employee
+   * carrying it cannot be approved - see `deriveStatus`, which refuses an
+   * incomplete calculation.
+   *
+   * WHY THIS IS DECIDED HERE RATHER THAN IN `calculateEsi`. That function's
+   * SUPPLIED-WAGE path treats a wage above the ceiling with no established
+   * continuation as simply not covered, which is right for a caller that has
+   * no period context at all. The payrun HAS the context and has failed to
+   * resolve it, which is a different situation and must not read as a No.
+   */
+  const coverageUnresolvedAboveCeiling =
+    coverage.continues === null &&
+    esiWagePaise !== null &&
+    coverageCeilingPaise !== null &&
+    esiWagePaise > coverageCeilingPaise;
+
+  let esi;
+  if (coverageUnresolvedAboveCeiling) {
+    esi = {
+      status: engine.STATUS.PENDING,
+      unresolved: [
+        {
+          code:
+            coverage.basis === "APPLICABILITY_NOT_RECORDED"
+              ? engine.UNRESOLVED.ESI_APPLICABILITY_NOT_RECORDED
+              : engine.UNRESOLVED.ESI_CONTRIBUTION_PERIOD_UNRESOLVED,
+          component: "esi",
+        },
+      ],
+      esi_wage: null,
+      employee_esi: null,
+      employer_esi: null,
+    };
+  } else {
+    esi = engine.calculateEsi(
+      {
+        esi_applicable: snapshot.esi_applicable,
+        esi_wage: esiWageRupees,
+        /*
+         * `true` OR `undefined`, NEVER `false`, which is the shape the engine
+         * documents: a proven continuation keeps somebody covered above the
+         * ceiling, and its absence simply leaves the ordinary ceiling test to
+         * decide. Passing `false` would be asserting a position the coverage
+         * rule did not take.
+         */
+        contribution_period_continues: coverage.continues === true ? true : undefined,
+        contribution_period_unresolved: coverage.continues === null,
+      },
+      config
+    );
+  }
   (esi.unresolved || []).forEach((u) => unresolved.push({ ...u, stage: "esi" }));
 
   /* ----------------------------------------------------------- THE TOTALS */
@@ -562,8 +868,24 @@ function computeCalculation(input = {}, config = CONFIG) {
   const employeePfPaise = toPaise(pf.employee_pf);
   const employeeEsiPaise = toPaise(esi.employee_esi);
 
-  if (employeePfPaise === null) errors.push("Employee PF is unresolved for this employee");
-  if (employeeEsiPaise === null) errors.push("Employee ESI is unresolved for this employee");
+  /*
+   * AN UNRESOLVED CONTRIBUTION IS NOT A FAILED CALCULATION, AND IT IS NOT A
+   * ZERO EITHER.
+   *
+   * The statutory engine answers what it cannot establish with a named
+   * question rather than a plausible number - an unrecorded applicability, a
+   * contribution period whose entry position could not be proved - and that is
+   * a REAL result which has to be stored, shown and acted on. So the row is
+   * written, carrying the question.
+   *
+   * WHAT IT CANNOT HAVE IS A NET PAY. Subtracting an unknown deduction as
+   * though it were zero would produce a net pay that is too high by exactly
+   * the contribution nobody has worked out, and that figure would sit on a
+   * review screen looking finished. The totals below are therefore null until
+   * both contributions are known, and `is_complete` is false, which stops the
+   * employee being approved.
+   */
+  const contributionsResolved = employeePfPaise !== null && employeeEsiPaise !== null;
 
   /*
    * THE NET PAY IDENTITY, WRITTEN ONCE, IN THE ORDER THE CONTRACT STATES IT.
@@ -584,13 +906,12 @@ function computeCalculation(input = {}, config = CONFIG) {
   const totalEarningsPaise =
     salaryEarningsPaise + extraDayAmountPaise + otAmountPaise + additionsPaise;
 
-  const totalEmployeeDeductionsPaise =
-    missingDeductionPaise +
-    (employeePfPaise || 0) +
-    (employeeEsiPaise || 0) +
-    deductionsFromNetPaise;
+  const totalEmployeeDeductionsPaise = contributionsResolved
+    ? missingDeductionPaise + employeePfPaise + employeeEsiPaise + deductionsFromNetPaise
+    : null;
 
-  const netPayPaise = totalEarningsPaise - totalEmployeeDeductionsPaise;
+  const netPayPaise =
+    totalEmployeeDeductionsPaise === null ? null : totalEarningsPaise - totalEmployeeDeductionsPaise;
 
   return {
     calculation_version: CALCULATION_VERSION,
@@ -612,8 +933,20 @@ function computeCalculation(input = {}, config = CONFIG) {
     effective_nrm_minutes: nrmMinutes,
     effective_nrm_source: nrm ? nrm.nrm_source ?? null : null,
     effective_nrm_is_mixed: nrm ? nrm.nrm_is_mixed === true : false,
+    /**
+     * THE HEADLINE RATE, AND IT IS NULL WHEN THE MONTH HAS MORE THAN ONE.
+     * `ot_groups` below is what priced the overtime in that case, and a single
+     * rate here would be a figure that priced none of it.
+     */
     ot_hourly_rate: toRupees(otHourlyRatePaise),
     ot_amount: toRupees(otAmountPaise),
+    /**
+     * HOW THE OVERTIME WAS ACTUALLY PRICED: one entry per NRM that carried
+     * approved OT, each with its own minutes, its own source and its own rate.
+     * With one entry it says the same thing as the two fields above; with more
+     * than one it is the only honest account of the amount.
+     */
+    ot_groups: otBreakdown,
     /*
      * WHAT ATTENDANCE PRICED THE SAME OVERTIME AT, CARRIED FOR RECONCILIATION
      * AND USED FOR NOTHING. The attendance engine prices OT per DATE, on that
@@ -649,6 +982,19 @@ function computeCalculation(input = {}, config = CONFIG) {
     employee_esi: esi.employee_esi,
     employer_esi: esi.employer_esi,
     esi_wage_definition: wageDefinition,
+    /**
+     * HOW THE COVERAGE QUESTION WAS ANSWERED, beside the contribution it
+     * decided - the same pair `calculateSalary` returns for the Salary Master.
+     * A contribution that differs from what the ceiling rule alone would give
+     * has to be able to say why without anybody re-deriving it, and "covered
+     * at entry, so covered to the end of the period" is that reason.
+     */
+    esi_period_start: coverage.period ? coverage.period.start : null,
+    esi_period_end: coverage.period ? coverage.period.end : null,
+    esi_coverage_entry_date: coverage.entry_date ?? null,
+    esi_coverage_entry_salary_id: coverage.entry_salary_id ?? null,
+    esi_coverage_basis: coverage.basis ?? null,
+    esi_contribution_period_continues: coverage.continues,
 
     /* --------------------------------------------------------- FINAL */
     total_earnings: toRupees(totalEarningsPaise),
@@ -873,6 +1219,10 @@ function calculationHash(result = {}) {
     result.esi_wage,
     result.employee_esi,
     result.employer_esi,
+    result.esi_contribution_period_continues,
+    (result.ot_groups || [])
+      .map((g) => `${g.nrm_minutes}:${g.approved_ot_minutes}:${g.ot_amount}`)
+      .join(","),
     result.total_earnings,
     result.total_employee_deductions,
     result.net_pay,
@@ -885,6 +1235,7 @@ module.exports = {
   toRupees,
   resolveEffectiveNrm,
   sourceMarkers,
+  storedMarkers,
   sourceHash,
   inputsHash,
   detectChanges,

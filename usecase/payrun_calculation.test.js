@@ -101,15 +101,28 @@ class World {
       approved_ot_earnings: 0,
       ...(over.attendance || {}),
     });
-    this.nrm.set(employeeId, [
-      {
-        employee_id: employeeId,
-        nrm_minutes: 480,
-        break_allowance_source: NRM_SOURCE.SHIFT,
-        day_count: 26,
-        approved_ot_minutes: 0,
-      },
-    ]);
+    /*
+     * THE DAY-LEVEL NRM EVIDENCE, CARRYING THE SAME APPROVED OT the monthly
+     * roll-up above reports. The two are one engine's two views of one fact
+     * and the calculation refuses them when they disagree, so a fixture that
+     * let them drift would be testing the wrong thing.
+     *
+     * The default is one 8-hour group carrying the whole month's approved OT;
+     * a test that needs the overtime split across NRMs passes its own groups.
+     */
+    const monthlyOt = Number(this.attendance.get(employeeId).approved_ot_minutes || 0);
+    this.nrm.set(
+      employeeId,
+      (over.nrm_groups || [
+        {
+          nrm_minutes: 480,
+          break_allowance_source: NRM_SOURCE.SHIFT,
+          day_count: 26,
+          approved_ot_minutes: monthlyOt,
+        },
+      ]).map((g) => ({ employee_id: employeeId, ...g }))
+    );
+
     // Confirmed as having no adjustment, so the ordinary employee is READY and
     // each test can take exactly one thing away.
     this.states.set(employeeId, { employee_id: employeeId, confirmed_no_adjustment: 1, remarks: null });
@@ -692,6 +705,157 @@ describe("what a lock refuses", () => {
     assert.equal(one.payslip_eligible, true);
     assert.equal(two.payslip_eligible, false);
     assert.equal(view.summary.payslip_eligible, 1);
+  });
+});
+
+/* ------------------------------- the two rules the review pass corrected */
+
+describe("the ESI contribution period, through the stage", () => {
+  /**
+   * THE EVIDENCE IS FETCHED BY THE SERVER, at the date the salary engine names
+   * - which is a DIFFERENT date from the one the month is priced on, and
+   * usually an earlier one. This proves the stage goes and gets it rather than
+   * handing `calculateEsi` a wage and nothing else.
+   */
+  it("reads the approved salary in force at the contribution period's entry", async () => {
+    world.add(1, {
+      employee: {
+        monthly_gross: 40000,
+        basic: 20000,
+        conveyance: 2500,
+        hra: 10000,
+        special_allowance: 7500,
+      },
+      attendance: { salary_day_earnings: 40000 },
+    });
+    /* Covered when the period began in April; well above the ceiling now. */
+    world.salaries.set(1, {
+      employee_id: 1,
+      salary_id: 77,
+      effective_from: "2026-04-01",
+      monthly_gross: 20000,
+      basic: 10000,
+      conveyance: 2500,
+      hra: 4000,
+      special_allowance: 3500,
+    });
+
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    const detail = await calculation.getEmployee({ ...MONTH, employee_id: 1 });
+
+    assert.equal(detail.breakup.statutory.esi_coverage_basis, "COVERED_AT_ENTRY");
+    assert.equal(detail.breakup.statutory.esi_contribution_period_continues, true);
+    assert.equal(detail.breakup.statutory.esi_period_start, "2026-04-01");
+    assert.ok(
+      Number(detail.breakup.statutory.employee_esi) > 0,
+      "a covered employee contributes even above the ceiling"
+    );
+  });
+
+  /**
+   * THE COVERAGE BASIS IS A SOURCE. A revision back-dated into the month the
+   * period began changes whether this month is covered while every other
+   * marker stays put, so it has to make the calculation stale - with its own
+   * reason, because "a salary changed" would send somebody to look at this
+   * month's revision rather than at last April's.
+   */
+  it("goes stale when the entry salary changes, with its own reason", async () => {
+    world.add(1);
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal((await rowOf(1)).status, CALC_STATUS.READY_FOR_APPROVAL);
+
+    world.salaries.set(1, {
+      employee_id: 1,
+      salary_id: 999,
+      effective_from: "2026-04-01",
+      monthly_gross: 26000,
+      basic: 13000,
+      conveyance: 2500,
+      hra: 5000,
+      special_allowance: 5500,
+    });
+
+    const row = await rowOf(1);
+    assert.equal(row.status, CALC_STATUS.RECALCULATION_REQUIRED);
+    assert.ok(row.recalculation_reasons.some((r) => r.code === "ESI_COVERAGE_CHANGED"));
+  });
+
+  /** An unprovable position blocks the approval rather than zeroing quietly. */
+  it("blocks approval when the position at entry cannot be established", async () => {
+    world.add(1, {
+      employee: {
+        monthly_gross: 40000,
+        basic: 20000,
+        conveyance: 2500,
+        hra: 10000,
+        special_allowance: 7500,
+      },
+      attendance: { salary_day_earnings: 40000 },
+    });
+    world.salaries.delete(1); // nothing in force at entry
+
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    const row = await rowOf(1);
+
+    assert.equal(row.employee_esi, null, "never a silent zero");
+    assert.ok(row.blockers.some((b) => b.code === "CALCULATION_INCOMPLETE"));
+
+    const refused = await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(refused.approved_count, 0);
+  });
+});
+
+describe("overtime across two NRMs, through the stage", () => {
+  it("stores the per-group breakdown and the summed amount", async () => {
+    world.add(1, {
+      attendance: { approved_ot_minutes: 180 },
+      nrm_groups: [
+        { nrm_minutes: 660, break_allowance_source: "SHIFT", day_count: 10, approved_ot_minutes: 120 },
+        { nrm_minutes: 480, break_allowance_source: "SHIFT", day_count: 16, approved_ot_minutes: 60 },
+      ],
+    });
+
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    const detail = await calculation.getEmployee({ ...MONTH, employee_id: 1 });
+
+    assert.equal(Number(detail.breakup.ot.ot_amount), 306.82);
+    assert.equal(detail.breakup.ot.ot_groups.length, 2);
+    assert.equal(detail.breakup.ot.ot_hourly_rate, null, "no single rate is claimed");
+    assert.deepEqual(
+      detail.breakup.ot.ot_groups.map((g) => [g.nrm_minutes, g.ot_amount]),
+      [[480, 125], [660, 181.82]]
+    );
+  });
+
+  /**
+   * MOVING OT BETWEEN NRMS IS A SOURCE CHANGE, even when the total minutes and
+   * the headline NRM are unchanged. Without the split in the markers it would
+   * be invisible - and the amount would be different.
+   */
+  it("goes stale when the same total OT moves to a different NRM", async () => {
+    world.add(1, {
+      attendance: { approved_ot_minutes: 120 },
+      nrm_groups: [
+        { nrm_minutes: 480, break_allowance_source: "SHIFT", day_count: 20, approved_ot_minutes: 120 },
+        { nrm_minutes: 660, break_allowance_source: "SHIFT", day_count: 6, approved_ot_minutes: 0 },
+      ],
+    });
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    const before = await rowOf(1);
+    assert.equal(before.status, CALC_STATUS.READY_FOR_APPROVAL);
+
+    world.nrm.set(1, [
+      { employee_id: 1, nrm_minutes: 480, break_allowance_source: "SHIFT", day_count: 20, approved_ot_minutes: 0 },
+      { employee_id: 1, nrm_minutes: 660, break_allowance_source: "SHIFT", day_count: 6, approved_ot_minutes: 120 },
+    ]);
+
+    const after = await rowOf(1);
+    assert.equal(after.status, CALC_STATUS.RECALCULATION_REQUIRED);
+    assert.ok(after.recalculation_reasons.some((r) => r.code === "EFFECTIVE_NRM_CHANGED"));
+
+    await calculation.calculate({ ...MONTH, employee_ids: [1], mode: "RECALCULATE", actor: ACTOR });
+    const detail = await calculation.getEmployee({ ...MONTH, employee_id: 1 });
+    assert.equal(Number(detail.breakup.ot.ot_amount), 181.82, "repriced on the NRM it moved to");
   });
 });
 

@@ -9,6 +9,7 @@ const {
 const { monthWindow, statutorySetupComplete } = require("../utils/payrun_eligibility");
 const { deriveState } = require("../utils/payrun_adjustments");
 const calc = require("../utils/payrun_calculation");
+const engine = require("../utils/salary_engine");
 const {
   validationError,
   normalizeMonth,
@@ -163,6 +164,56 @@ class PayrunCalculationUsecase {
       });
       return map;
     };
+
+    /*
+     * ===================== THE ESI CONTRIBUTION-PERIOD EVIDENCE, FETCHED ====
+     *
+     * ESI coverage is decided ONCE per contribution period and runs to the end
+     * of it, so what decides it is the approved salary that was in force when
+     * the period BEGAN - or when the employee joined, if they joined part-way
+     * through. That is a different record from the one pricing this month, and
+     * often a much older one.
+     *
+     * THE DATE IS THE ENGINE'S, NOT THIS LAYER'S.
+     * `contributionPeriodEntryDate` derives it from the period and the date of
+     * joining; nothing here invents one, and a request body cannot reach it.
+     * This is the same call `usecase/employee_salary.js` makes for the Salary
+     * Master, against the same resolver - one rule, two callers.
+     *
+     * READ ONCE PER DISTINCT DATE, NOT ONCE PER EMPLOYEE. A month has ONE
+     * contribution period, so almost everybody shares the period's start date;
+     * only employees who joined part-way through it have one of their own.
+     * Six hundred employees therefore cost one read plus one per mid-period
+     * joiner, rather than six hundred - the batching rule every payrun
+     * repository keeps.
+     */
+    const asOf = to;
+    const entryDateOf = new Map();
+    population.forEach((employee) => {
+      const entryDate = engine.contributionPeriodEntryDate({
+        as_of: asOf,
+        date_of_joining: employee.date_of_joining,
+      });
+      entryDateOf.set(Number(employee.employee_id), entryDate);
+    });
+
+    const idsByEntryDate = new Map();
+    entryDateOf.forEach((entryDate, employeeId) => {
+      if (!entryDate) return;
+      if (!idsByEntryDate.has(entryDate)) idsByEntryDate.set(entryDate, []);
+      idsByEntryDate.get(entryDate).push(employeeId);
+    });
+
+    const entrySalaryOf = new Map();
+    await Promise.all(
+      [...idsByEntryDate.entries()].map(async ([entryDate, employeeIds]) => {
+        const rows = await this.payrunRepo.listApprovedSalaries(employeeIds, entryDate);
+        (rows || []).forEach((row) => {
+          const key = Number(row.employee_id);
+          if (!entrySalaryOf.has(key)) entrySalaryOf.set(key, row);
+        });
+      })
+    );
     const group = (rows) => {
       const map = new Map();
       (rows || []).forEach((row) => {
@@ -189,6 +240,8 @@ class PayrunCalculationUsecase {
       nrmOf: group(nrmGroups),
       statutoryOf: index(statutory),
       salaryOf: index(salaries),
+      entryDateOf,
+      entrySalaryOf,
       pendingOf: index(pending),
       amountsOf,
       stateOf: index(states),
@@ -230,11 +283,25 @@ class PayrunCalculationUsecase {
      * calculation's own markers are what they were when it ran. The comparison
      * between the two is the whole of source-change detection.
      */
+    /*
+     * THE COVERAGE EVIDENCE AS A SOURCE MARKER. The entry DATE, the record
+     * found at it and that record's gross - because a revision back-dated into
+     * the month the contribution period began changes whether this month is
+     * covered, while `salary_id` and every other marker stay exactly as they
+     * were. Without these three, that change would be invisible.
+     */
+    const entryDate = context.entryDateOf.get(id) || null;
+    const entrySalary = context.entrySalaryOf.get(id) || null;
     const currentMarkers = calc.sourceMarkers({
       salary: salary || {},
       attendance: attendance || {},
       nrm,
       statutory,
+      coverage: {
+        entry_date: entryDate,
+        entry_salary_id: entrySalary ? entrySalary.salary_id : null,
+        entry_gross: entrySalary ? entrySalary.monthly_gross : null,
+      },
     });
     const currentSourceHash = calc.sourceHash(currentMarkers);
     const currentInputsHash = calc.inputsHash({ amounts, pay_type: employee.pay_type });
@@ -250,7 +317,13 @@ class PayrunCalculationUsecase {
         : null,
       current_source_hash: currentSourceHash,
       current_inputs_hash: currentInputsHash,
-      change_reasons: stored ? calc.detectChanges(stored, currentMarkers) : [],
+      /*
+       * THE STORED ROW IS TRANSLATED BACK INTO MARKERS BEFORE IT IS COMPARED -
+       * see `storedMarkers`. The OT split is stored as the priced breakdown
+       * and marked as the bare split, and comparing one against the other
+       * would report every calculated employee as stale on every read.
+       */
+      change_reasons: stored ? calc.detectChanges(calc.storedMarkers(stored), currentMarkers) : [],
       attendance,
       pending_regularizations: Number(counts.pending_regularizations || 0),
       pending_ot: Number(counts.pending_ot || 0),
@@ -265,6 +338,7 @@ class PayrunCalculationUsecase {
         nrm,
         statutory,
         amounts,
+        entrySalary,
         currentMarkers,
         currentSourceHash,
         currentInputsHash,
@@ -427,6 +501,14 @@ class PayrunCalculationUsecase {
               effective_nrm_source: stored.effective_nrm_source,
               ot_hourly_rate: stored.ot_hourly_rate,
               ot_amount: stored.ot_amount,
+              /**
+               * THE PER-NRM BREAKDOWN THAT PRODUCED THE AMOUNT. One entry is
+               * the ordinary case and says the same thing as the two fields
+               * above; more than one is a month whose overtime was worked
+               * against different NRMs, where those two fields are null and
+               * this is the only honest account of the figure.
+               */
+              ot_groups: this._json(stored.ot_groups),
               attendance_ot_earnings: stored.attendance_ot_earnings,
             },
             adjustments: {
@@ -450,6 +532,21 @@ class PayrunCalculationUsecase {
               esi_wage_basis: stored.esi_wage_basis,
               employee_esi: stored.employee_esi,
               employer_esi: stored.employer_esi,
+              /**
+               * HOW THE CONTRIBUTION-PERIOD QUESTION WAS ANSWERED. A
+               * contribution charged on a wage above the ceiling is correct
+               * when coverage continues from the period's entry, and this is
+               * what lets the screen say so instead of looking like an error.
+               */
+              esi_period_start: stored.esi_period_start,
+              esi_period_end: stored.esi_period_end,
+              esi_coverage_entry_date: stored.esi_coverage_entry_date,
+              esi_coverage_basis: stored.esi_coverage_basis,
+              esi_contribution_period_continues:
+                stored.esi_contribution_period_continues === null ||
+                stored.esi_contribution_period_continues === undefined
+                  ? null
+                  : Number(stored.esi_contribution_period_continues) === 1,
             },
             final: {
               total_earnings: stored.total_earnings,
@@ -664,7 +761,7 @@ class PayrunCalculationUsecase {
    * own. Nothing here writes either.
    */
   _buildRow(context, presented, actor) {
-    const { employee, attendance, nrm, statutory, amounts } = presented.internals;
+    const { employee, attendance, nrm, statutory, amounts, entrySalary } = presented.internals;
 
     const result = calc.computeCalculation({
       snapshot: employee,
@@ -673,6 +770,13 @@ class PayrunCalculationUsecase {
       amounts,
       statutory,
       as_of: context.window.to,
+      /*
+       * THE APPROVED SALARY IN FORCE AT THE CONTRIBUTION PERIOD'S ENTRY DATE.
+       * The server's own read, from the employee's own salary history, at a
+       * date the salary engine named. The coverage rule itself is the engine's
+       * and runs inside `computeCalculation`.
+       */
+      coverage_entry_salary: entrySalary,
     });
 
     const hash = calc.calculationHash(result);
@@ -723,6 +827,7 @@ class PayrunCalculationUsecase {
         approved_ot_hours: result.approved_ot_hours,
         ot_hourly_rate: result.ot_hourly_rate,
         ot_amount: result.ot_amount,
+        ot_groups: JSON.stringify(result.ot_groups || []),
         attendance_ot_earnings: result.attendance_ot_earnings,
 
         incentive: result.incentive,
@@ -744,6 +849,35 @@ class PayrunCalculationUsecase {
         esi_wage_basis: result.esi_wage_basis,
         employee_esi: result.employee_esi,
         employer_esi: result.employer_esi,
+        esi_period_start: result.esi_period_start,
+        esi_period_end: result.esi_period_end,
+        esi_coverage_entry_date: result.esi_coverage_entry_date,
+        /*
+         * THE RECORD COVERAGE WAS DECIDED FROM. `resolveContributionPeriodCoverage`
+         * returns null for it in the opening-salary case - where the salary
+         * being calculated IS the one in force at entry - which cannot arise
+         * in a payrun, since a payrun always prices an already-approved
+         * record. It is stored as it comes back either way.
+         */
+        esi_coverage_entry_salary_id: result.esi_coverage_entry_salary_id,
+        /*
+         * THE ENTRY RECORD'S GROSS, STORED BECAUSE IT IS A SOURCE MARKER AND
+         * FOR NO OTHER REASON. It is taken from the marker set rather than
+         * from the engine's answer, so the value compared on the next read is
+         * byte for byte the value that was compared on this one - which is the
+         * whole mechanism of stale detection, and the place where a value
+         * marked but never stored would make every calculation read as stale
+         * forever.
+         */
+        esi_coverage_entry_gross: markers.esi_coverage_entry_gross,
+        esi_coverage_basis: result.esi_coverage_basis,
+        esi_contribution_period_continues:
+          result.esi_contribution_period_continues === null ||
+          result.esi_contribution_period_continues === undefined
+            ? null
+            : result.esi_contribution_period_continues
+            ? 1
+            : 0,
 
         total_earnings: result.total_earnings,
         total_employee_deductions: result.total_employee_deductions,

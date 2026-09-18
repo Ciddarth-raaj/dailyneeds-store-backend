@@ -135,9 +135,25 @@ CREATE TABLE IF NOT EXISTS `payrun_employee_calculation` (
   -- The two may differ and the difference is visible rather than silent.
   `approved_ot_minutes`    INT NOT NULL DEFAULT 0,
   `approved_ot_hours`      DECIMAL(10,4) NOT NULL DEFAULT 0,
-  `ot_hourly_rate`         DECIMAL(12,2) NULL DEFAULT NULL COMMENT 'Daily Rate / Effective NRM hours',
+  `ot_hourly_rate`         DECIMAL(12,2) NULL DEFAULT NULL
+    COMMENT 'Daily Rate / Effective NRM hours. NULL when the month has more than one OT NRM - see ot_groups',
   `ot_amount`              DECIMAL(12,2) NULL DEFAULT NULL,
-  `attendance_ot_earnings` DECIMAL(12,2) NULL DEFAULT NULL COMMENT 'reconciliation only',
+  -- HOW THE OVERTIME WAS ACTUALLY PRICED: one entry per NRM that carried
+  -- approved OT, each with its own minutes, source and rate.
+  --
+  -- WHY A BREAKDOWN AND NOT ONE RATE. The hourly rate is Daily Rate / NRM, so
+  -- an hour worked against an 8-hour NRM and an hour worked against an 11-hour
+  -- one are worth different amounts. An employee with approved OT on both has
+  -- no single correct rate, and applying either to all of it misprices
+  -- whichever hours belong to the other. The groups come from
+  -- `attendance_day_calculation`, which has already resolved the
+  -- employee-specific NRM per date; the payrun consumes that split and never
+  -- re-derives it.
+  --
+  -- JSON, because the shape is a small list owned entirely by this row and
+  -- read only with it. A child table would be a join on every payslip to
+  -- reconstruct a figure this row already states.
+  `ot_groups`              JSON NULL COMMENT 'per-NRM OT breakdown that produced ot_amount',
 
   -- -------------------------------------------------------- the adjustments
   -- ONE COLUMN PER COMPONENT rather than a join at read time, for the same
@@ -177,6 +193,35 @@ CREATE TABLE IF NOT EXISTS `payrun_employee_calculation` (
   `esi_wage_basis` VARCHAR(32) NULL DEFAULT NULL,
   `employee_esi`   DECIMAL(12,2) NULL DEFAULT NULL,
   `employer_esi`   DECIMAL(12,2) NULL DEFAULT NULL,
+
+  -- HOW THE CONTRIBUTION-PERIOD QUESTION WAS ANSWERED, stored beside the
+  -- contribution it decided.
+  --
+  -- ESI DOES NOT STOP WHEN WAGES CROSS THE CEILING. Coverage is decided once
+  -- per contribution period - at its start, or at the employee's entry into it
+  -- if they joined part-way through - and somebody covered at that moment stays
+  -- covered to the end of the period whatever their wages do in between. A
+  -- contribution that differs from what the ceiling alone would give has to be
+  -- able to say why, months later, without anybody re-deriving it.
+  --
+  -- THE ENTRY RECORD IS NAMED because it is a SOURCE: a revision back-dated
+  -- into the month the period began changes whether this month is covered,
+  -- while `salary_id` above stays exactly as it was. It is part of the source
+  -- hash for that reason.
+  --
+  -- `esi_contribution_period_continues` IS NULLABLE AND THE NULL MEANS
+  -- SOMETHING: the server could not establish the position at entry. Above the
+  -- ceiling that is an open question and the contribution is stored as
+  -- unresolved rather than as a zero - see the `unresolved` column.
+  `esi_period_start`            DATE NULL DEFAULT NULL,
+  `esi_period_end`              DATE NULL DEFAULT NULL,
+  `esi_coverage_entry_date`     DATE NULL DEFAULT NULL,
+  `esi_coverage_entry_salary_id` INT NULL DEFAULT NULL,
+  `esi_coverage_entry_gross`    DECIMAL(12,2) NULL DEFAULT NULL
+    COMMENT 'the gross of that record. Stored because it is a source marker, not for arithmetic',
+  `esi_coverage_basis`          VARCHAR(48) NULL DEFAULT NULL,
+  `esi_contribution_period_continues` TINYINT(1) NULL DEFAULT NULL
+    COMMENT '1 covered at entry, 0 not, NULL could not be established',
 
   -- ----------------------------------------------------------------- final
   `total_earnings`            DECIMAL(12,2) NULL DEFAULT NULL,

@@ -56,19 +56,61 @@ const ATTENDANCE = {
   approved_ot_earnings: 0,
 };
 
-const NRM = { nrm_minutes: 480, nrm_source: NRM_SOURCE.SHIFT, nrm_is_mixed: false };
-
 const STATUTORY = { dob: "1990-06-15", previous_eps_member: 0 };
 
-const run = (overrides = {}) =>
-  calc.computeCalculation({
+/**
+ * The approved salary in force when the contribution period began. The
+ * ordinary case - the same salary, unchanged since - so coverage is decided on
+ * the same wage the month is priced on.
+ */
+const ENTRY_SALARY = {
+  salary_id: 41,
+  monthly_gross: 26000,
+  basic: 13000,
+  conveyance: 2500,
+  hra: 5000,
+  special_allowance: 5500,
+};
+
+/**
+ * THE NRM ALWAYS COMES THROUGH `resolveEffectiveNrm`, FROM GROUPED ATTENDANCE,
+ * because that is the only way a caller gets one in production. A fixture that
+ * hand-built the resolved shape could keep passing after the resolver stopped
+ * producing it - and the OT split is exactly the part where that would matter.
+ *
+ * The default is one 8-hour group covering the month, carrying whatever
+ * approved OT the attendance fixture says: one NRM, one rate, the ordinary case.
+ */
+const nrmFor = (attendance, groups) =>
+  calc.resolveEffectiveNrm(
+    groups || [
+      {
+        nrm_minutes: 480,
+        break_allowance_source: NRM_SOURCE.SHIFT,
+        day_count: 26,
+        approved_ot_minutes: attendance.approved_ot_minutes || 0,
+      },
+    ]
+  );
+
+const run = (overrides = {}) => {
+  const attendance = { ...ATTENDANCE, ...(overrides.attendance || {}) };
+  return calc.computeCalculation({
     snapshot: { ...SNAPSHOT, ...(overrides.snapshot || {}) },
-    attendance: { ...ATTENDANCE, ...(overrides.attendance || {}) },
-    nrm: overrides.nrm === undefined ? NRM : overrides.nrm,
+    attendance,
+    nrm:
+      overrides.nrm !== undefined
+        ? overrides.nrm
+        : nrmFor(attendance, overrides.nrmGroups),
     amounts: overrides.amounts || {},
     statutory: { ...STATUTORY, ...(overrides.statutory || {}) },
     as_of: "2026-08-31",
+    coverage_entry_salary:
+      overrides.coverage_entry_salary === undefined
+        ? ENTRY_SALARY
+        : overrides.coverage_entry_salary,
   });
+};
 
 /* ======================================================== the calculation */
 
@@ -169,7 +211,7 @@ describe("overtime", () => {
    * kind of mistake nobody notices until they complain.
    */
   it("refuses to price approved OT with no effective NRM, rather than paying nothing", () => {
-    const r = run({ attendance: { approved_ot_minutes: 120 }, nrm: { nrm_minutes: null } });
+    const r = run({ attendance: { approved_ot_minutes: 120 }, nrmGroups: [] });
     assert.equal(r.is_complete, false);
     assert.ok(r.errors.some((e) => /effective NRM/i.test(e)));
   });
@@ -199,19 +241,37 @@ describe("the effective NRM", () => {
     assert.equal(resolved.nrm_minutes, 450);
     assert.equal(resolved.nrm_source, NRM_SOURCE.EMPLOYEE_OVERRIDE);
 
-    const sameShift = run({ nrm: resolved, attendance: { approved_ot_minutes: 60 } });
+    const sameShift = run({
+      attendance: { approved_ot_minutes: 60 },
+      nrmGroups: [
+        {
+          nrm_minutes: 450,
+          break_allowance_source: "EMPLOYEE_OVERRIDE",
+          day_count: 26,
+          approved_ot_minutes: 60,
+        },
+      ],
+    });
     // 1000 / 7.5 hours, rounded to the rupee - a different rate from the
     // colleague above, and the row says exactly why.
     assert.equal(sameShift.ot_hourly_rate, 133.33);
   });
 
-  it("prefers the NRM the approved overtime was actually worked against", () => {
+  /**
+   * A GROUP WITH NO APPROVED OT PRICES NOTHING. The overtime was worked on the
+   * 10-hour days, so the 8-hour days - however many of them there are - reach
+   * no OT figure at all.
+   */
+  it("prices OT on the NRM it was worked against, not on the month's commonest", () => {
     const resolved = calc.resolveEffectiveNrm([
       { nrm_minutes: 480, break_allowance_source: "SHIFT", day_count: 24, approved_ot_minutes: 0 },
       { nrm_minutes: 600, break_allowance_source: "SHIFT", day_count: 2, approved_ot_minutes: 180 },
     ]);
-    assert.equal(resolved.nrm_minutes, 600);
+    assert.equal(resolved.nrm_minutes, 600, "one OT group is still one reported rate");
     assert.equal(resolved.nrm_is_mixed, true);
+    assert.deepEqual(resolved.ot_groups, [
+      { nrm_minutes: 600, nrm_source: "SHIFT", approved_ot_minutes: 180 },
+    ]);
   });
 
   it("falls back to the month's ordinary pattern when nobody worked overtime", () => {
@@ -223,7 +283,12 @@ describe("the effective NRM", () => {
   });
 
   it("has no answer at all when attendance resolved none, rather than inventing one", () => {
-    assert.deepEqual(calc.resolveEffectiveNrm([]), { nrm_minutes: null, nrm_source: null });
+    assert.deepEqual(calc.resolveEffectiveNrm([]), {
+      nrm_minutes: null,
+      nrm_source: null,
+      nrm_is_mixed: false,
+      ot_groups: [],
+    });
   });
 });
 
@@ -381,7 +446,7 @@ describe("source changes", () => {
     calc.sourceMarkers({
       salary: { salary_id: 5, effective_from: "2026-04-01", monthly_gross: 26000 },
       attendance: { ...ATTENDANCE },
-      nrm: NRM,
+      nrm: nrmFor(ATTENDANCE),
       statutory: { pf_applicable: 1, esi_applicable: 1 },
       ...over,
     });
@@ -570,5 +635,321 @@ describe("the calculation hash", () => {
     const b = run({ amounts: { [COMPONENT.INCENTIVE]: 1 } });
     assert.equal(calc.calculationHash(a), calc.calculationHash(run()));
     assert.notEqual(calc.calculationHash(a), calc.calculationHash(b));
+  });
+});
+
+/* ============================================ the ESI contribution period */
+
+/**
+ * ESI DOES NOT STOP THE MOMENT WAGES CROSS THE CEILING.
+ *
+ * Coverage is decided ONCE per contribution period - at its start, or at the
+ * employee's entry into it if they joined part-way through - and somebody
+ * covered at that moment stays covered to the end of the period whatever their
+ * wages do in between. The rule is `salary_engine.resolveContributionPeriodCoverage`'s
+ * and is not reimplemented in the payrun; what these tests prove is that the
+ * payrun ASKS it, with the right evidence, and honours the answer.
+ */
+describe("the ESI contribution period", () => {
+  /** A month priced well above the ESI ceiling. */
+  const ABOVE_CEILING = {
+    snapshot: {
+      monthly_gross: 40000,
+      basic: 20000,
+      conveyance: 2500,
+      hra: 10000,
+      special_allowance: 7500,
+    },
+    attendance: { salary_day_earnings: 40000 },
+  };
+
+  /** The salary in force at entry - low enough to have been covered then. */
+  const COVERED_AT_ENTRY = {
+    salary_id: 11,
+    monthly_gross: 20000,
+    basic: 10000,
+    conveyance: 2500,
+    hra: 4000,
+    special_allowance: 3500,
+  };
+
+  it("keeps a covered employee covered when their wage later rises above the ceiling", () => {
+    const r = run({ ...ABOVE_CEILING, coverage_entry_salary: COVERED_AT_ENTRY });
+
+    assert.equal(r.esi_coverage_basis, "COVERED_AT_ENTRY");
+    assert.equal(r.esi_contribution_period_continues, true);
+    assert.equal(r.esi_status, "APPLIED");
+    assert.ok(Number(r.employee_esi) > 0, "a covered employee still contributes");
+    // AND IT IS CHARGED ON THE MONTH'S OWN WAGE, not on the entry wage.
+    assert.ok(Number(r.esi_wage) > 21000);
+    assert.equal(r.is_complete, true);
+  });
+
+  it("resolves the period itself rather than being told what it is", () => {
+    const r = run({ coverage_entry_salary: COVERED_AT_ENTRY });
+    // 31 August falls in the period that began on 1 April.
+    assert.equal(r.esi_period_start, "2026-04-01");
+    assert.equal(r.esi_period_end, "2026-09-30");
+    assert.equal(r.esi_coverage_entry_date, "2026-04-01");
+    assert.equal(r.esi_coverage_entry_salary_id, 11);
+  });
+
+  it("applies the existing statutory rule to somebody already above the ceiling at entry", () => {
+    const r = run({
+      ...ABOVE_CEILING,
+      coverage_entry_salary: {
+        salary_id: 12,
+        monthly_gross: 40000,
+        basic: 20000,
+        conveyance: 2500,
+        hra: 10000,
+        special_allowance: 7500,
+      },
+    });
+    assert.equal(r.esi_coverage_basis, "ABOVE_CEILING_AT_ENTRY");
+    assert.equal(r.esi_contribution_period_continues, false);
+    assert.equal(Number(r.employee_esi), 0);
+    // It is a settled answer, not an open question, so it does not block.
+    assert.equal(r.is_complete, true);
+  });
+
+  /**
+   * AN UNPROVABLE POSITION IS A QUESTION, NEVER A SILENT ZERO. A contribution
+   * that quietly stops is a filing error nobody notices for a year, so the
+   * employee cannot be approved until somebody settles it.
+   */
+  it("refuses to answer when the position at entry cannot be established", () => {
+    const r = run({ ...ABOVE_CEILING, coverage_entry_salary: null });
+
+    assert.equal(r.esi_coverage_basis, "NO_SALARY_AT_ENTRY");
+    assert.equal(r.esi_contribution_period_continues, null);
+    assert.equal(r.esi_status, "PENDING");
+    assert.equal(r.employee_esi, null, "never a zero");
+    assert.ok(
+      r.unresolved.some((u) => u.code === "ESI_CONTRIBUTION_PERIOD_UNRESOLVED"),
+      "the open question is named"
+    );
+    assert.equal(r.is_complete, false, "an open statutory question blocks approval");
+  });
+
+  /**
+   * AN UNRESOLVED CONTRIBUTION MUST NOT PRODUCE A NET PAY. Subtracting an
+   * unknown deduction as though it were zero would overstate the net pay by
+   * exactly the contribution nobody has worked out - and that figure would sit
+   * on a review screen looking finished.
+   */
+  it("reports no net pay at all rather than one that omits the unresolved contribution", () => {
+    const r = run({ ...ABOVE_CEILING, coverage_entry_salary: null });
+    assert.equal(r.employee_esi, null);
+    assert.equal(r.net_pay, null);
+    assert.equal(r.total_employee_deductions, null);
+    // The earnings side is known and is still reported.
+    assert.equal(r.total_earnings, 40000);
+    assert.equal(r.is_complete, false);
+  });
+
+  /**
+   * AND ONLY WHERE IT DECIDES ANYTHING. At or below the ceiling the employee is
+   * covered whichever way the entry question would have gone, so an unprovable
+   * position is not raised as a question that stops a month for no reason.
+   */
+  it("does not raise the question at or below the ceiling, where it changes nothing", () => {
+    const r = run({ coverage_entry_salary: null });
+    assert.equal(r.esi_status, "APPLIED");
+    assert.ok(Number(r.employee_esi) > 0);
+    assert.equal(r.is_complete, true);
+  });
+
+  /**
+   * THE PAYRUN'S OWN EXCLUSIONS ARE UNTOUCHED BY ANY OF THIS. Coverage decides
+   * WHETHER a contribution is charged; the wage it is charged on is still
+   * eligible normal salary earnings only.
+   */
+  it("still excludes Extra Days, OT and the three additions from the ESI wage", () => {
+    const plain = run({ coverage_entry_salary: COVERED_AT_ENTRY });
+    const loaded = run({
+      coverage_entry_salary: COVERED_AT_ENTRY,
+      attendance: {
+        extra_days: 3,
+        extra_day_earnings: 3000,
+        approved_ot_minutes: 600,
+      },
+      amounts: {
+        [COMPONENT.INCENTIVE]: 4000,
+        [COMPONENT.BONUS]: 2000,
+        [COMPONENT.ARREARS]: 1500,
+      },
+    });
+
+    assert.ok(Number(loaded.ot_amount) > 0 && Number(loaded.extra_day_amount) > 0);
+    assert.equal(loaded.esi_wage, plain.esi_wage);
+    assert.equal(loaded.employee_esi, plain.employee_esi);
+    assert.equal(loaded.pf_wage, plain.pf_wage);
+    assert.equal(loaded.employee_pf, plain.employee_pf);
+  });
+
+  /**
+   * THE COVERAGE BASIS IS A SOURCE IN ITS OWN RIGHT. A revision back-dated into
+   * the month the period began changes whether this month is covered, while
+   * `salary_id` and every other marker stay exactly as they were - so it is
+   * marked separately and reported with its own reason.
+   */
+  it("makes a changed entry-salary a RECALCULATION_REQUIRED with its own reason", () => {
+    const base = {
+      salary: { salary_id: 5, effective_from: "2026-04-01", monthly_gross: 26000 },
+      attendance: { ...ATTENDANCE },
+      nrm: nrmFor(ATTENDANCE),
+      statutory: { pf_applicable: 1, esi_applicable: 1 },
+      coverage: { entry_date: "2026-04-01", entry_salary_id: 11, entry_gross: 20000 },
+    };
+    const before = calc.sourceMarkers(base);
+
+    for (const moved of [
+      { entry_date: "2026-05-14", entry_salary_id: 11, entry_gross: 20000 },
+      { entry_date: "2026-04-01", entry_salary_id: 12, entry_gross: 20000 },
+      { entry_date: "2026-04-01", entry_salary_id: 11, entry_gross: 24000 },
+    ]) {
+      const after = calc.sourceMarkers({ ...base, coverage: moved });
+      assert.deepEqual(calc.detectChanges(before, after), [RECALC_REASON.ESI_COVERAGE_CHANGED]);
+      assert.notEqual(calc.sourceHash(before), calc.sourceHash(after));
+    }
+  });
+});
+
+/* ====================================== OT across several effective NRMs */
+
+describe("overtime worked against more than one NRM", () => {
+  /**
+   * THE CASE THE REVIEW FOUND. 120 approved minutes on 11-hour days and 60 on
+   * 8-hour days are worth different amounts per hour, and choosing one NRM for
+   * all 180 misprices whichever hours belong to the other.
+   *
+   *   660 min NRM -> 1000 / 11 = 90.91/hr -> 2 hours = 181.82
+   *   480 min NRM -> 1000 / 8  = 125/hr   -> 1 hour  = 125.00
+   *                                                    ------
+   *                                                    306.82
+   */
+  it("prices each group on its own NRM and sums them", () => {
+    const r = run({
+      attendance: { approved_ot_minutes: 180 },
+      nrmGroups: [
+        { nrm_minutes: 660, break_allowance_source: "SHIFT", day_count: 10, approved_ot_minutes: 120 },
+        { nrm_minutes: 480, break_allowance_source: "SHIFT", day_count: 16, approved_ot_minutes: 60 },
+      ],
+    });
+
+    assert.equal(r.ot_amount, 306.82);
+    assert.equal(r.errors.length, 0);
+
+    const [eight, eleven] = r.ot_groups;
+    assert.equal(eight.nrm_minutes, 480);
+    assert.equal(eight.ot_hourly_rate, 125);
+    assert.equal(eight.ot_amount, 125);
+    assert.equal(eleven.nrm_minutes, 660);
+    assert.equal(eleven.ot_hourly_rate, 90.91);
+    assert.equal(eleven.ot_amount, 181.82);
+
+    /*
+     * AND NO SINGLE RATE IS REPORTED, because there is not one. A headline
+     * rate here would be a figure that priced none of the money.
+     */
+    assert.equal(r.ot_hourly_rate, null);
+    assert.equal(r.effective_nrm_minutes, null);
+    assert.equal(r.effective_nrm_is_mixed, true);
+  });
+
+  /** Neither single-NRM answer is what the month is worth. */
+  it("is not the same as pricing everything on either one of them", () => {
+    const split = run({
+      attendance: { approved_ot_minutes: 180 },
+      nrmGroups: [
+        { nrm_minutes: 660, break_allowance_source: "SHIFT", day_count: 10, approved_ot_minutes: 120 },
+        { nrm_minutes: 480, break_allowance_source: "SHIFT", day_count: 16, approved_ot_minutes: 60 },
+      ],
+    });
+    const allEleven = run({
+      attendance: { approved_ot_minutes: 180 },
+      nrmGroups: [
+        { nrm_minutes: 660, break_allowance_source: "SHIFT", day_count: 26, approved_ot_minutes: 180 },
+      ],
+    });
+    const allEight = run({
+      attendance: { approved_ot_minutes: 180 },
+      nrmGroups: [
+        { nrm_minutes: 480, break_allowance_source: "SHIFT", day_count: 26, approved_ot_minutes: 180 },
+      ],
+    });
+
+    assert.equal(allEleven.ot_amount, 272.73);
+    assert.equal(allEight.ot_amount, 375);
+    assert.notEqual(split.ot_amount, allEleven.ot_amount);
+    assert.notEqual(split.ot_amount, allEight.ot_amount);
+  });
+
+  it("leaves the single-NRM month exactly as it was", () => {
+    const r = run({ attendance: { approved_ot_minutes: 120 } });
+    assert.equal(r.ot_amount, 250);
+    assert.equal(r.ot_hourly_rate, 125);
+    assert.equal(r.effective_nrm_minutes, 480);
+    assert.equal(r.ot_groups.length, 1);
+  });
+
+  it("prices an employee's override NRM at the override's own rate", () => {
+    const r = run({
+      attendance: { approved_ot_minutes: 60 },
+      nrmGroups: [
+        {
+          nrm_minutes: 450,
+          break_allowance_source: "EMPLOYEE_OVERRIDE",
+          day_count: 26,
+          approved_ot_minutes: 60,
+        },
+      ],
+    });
+    assert.equal(r.ot_hourly_rate, 133.33); // 1000 / 7.5
+    assert.equal(r.effective_nrm_source, "EMPLOYEE_OVERRIDE");
+    assert.equal(r.ot_groups[0].nrm_source, "EMPLOYEE_OVERRIDE");
+  });
+
+  it("ignores a group that carries no approved OT", () => {
+    const withIdleGroup = run({
+      attendance: { approved_ot_minutes: 120 },
+      nrmGroups: [
+        { nrm_minutes: 480, break_allowance_source: "SHIFT", day_count: 20, approved_ot_minutes: 120 },
+        { nrm_minutes: 660, break_allowance_source: "SHIFT", day_count: 6, approved_ot_minutes: 0 },
+      ],
+    });
+    assert.equal(withIdleGroup.ot_amount, 250);
+    assert.equal(withIdleGroup.ot_groups.length, 1);
+  });
+
+  /**
+   * THE MONTHLY ROLL-UP AND ITS OWN DAY ROWS MUST AGREE. They are one engine's
+   * two views of one fact, and a silent difference between them is money.
+   */
+  it("refuses a month whose day rows disagree with its roll-up about approved OT", () => {
+    const r = run({
+      attendance: { approved_ot_minutes: 240 },
+      nrmGroups: [
+        { nrm_minutes: 480, break_allowance_source: "SHIFT", day_count: 26, approved_ot_minutes: 120 },
+      ],
+    });
+    assert.equal(r.is_complete, false);
+    assert.ok(r.errors.some((e) => /does not reconcile/i.test(e)));
+  });
+
+  /**
+   * THE WEEKDAY MULTIPLIER IS ATTENDANCE'S AND NEVER THE PAYRUN'S. The agreed
+   * Daily Needs formula is Daily Rate / Effective NRM x Approved Hours, with
+   * no multiplier, and attendance's own figure is carried for reconciliation
+   * and reaches no total.
+   */
+  it("applies no weekday multiplier, whatever attendance priced the same OT at", () => {
+    const r = run({
+      attendance: { approved_ot_minutes: 120, approved_ot_earnings: 500, ot_rate: 2 },
+    });
+    assert.equal(r.ot_amount, 250, "the payrun's own formula, unmultiplied");
+    assert.equal(r.attendance_ot_earnings, 500, "carried for reconciliation");
+    assert.equal(r.total_earnings, 26000 + 250, "and attendance's figure is in no total");
   });
 });

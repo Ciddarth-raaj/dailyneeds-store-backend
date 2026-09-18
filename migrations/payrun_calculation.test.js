@@ -139,6 +139,11 @@ describe("the schema enforces the rules rather than trusting the application", (
       "`pf_wage`", "`employee_pf`", "`employer_epf`", "`employer_eps`",
       "`esi_wage`", "`employee_esi`", "`employer_esi`",
       "`total_earnings`", "`total_employee_deductions`", "`net_pay`", "`pay_type`",
+      // The per-NRM OT breakdown that produced `ot_amount`, and how the ESI
+      // contribution-period question was answered.
+      "`ot_groups`",
+      "`esi_period_start`", "`esi_period_end`", "`esi_coverage_entry_date`",
+      "`esi_coverage_basis`", "`esi_contribution_period_continues`",
     ]) {
       assert.ok(statements.includes(column), `missing ${column}`);
     }
@@ -154,6 +159,10 @@ describe("the schema enforces the rules rather than trusting the application", (
       "`attendance_monthly_payroll_id`", "`attendance_payroll_version`",
       "`attendance_calculated_at`", "`approved_ot_minutes`",
       "`effective_nrm_minutes`", "`pf_applicable`", "`esi_applicable`",
+      // The ESI coverage basis is a source in its own right: the record in
+      // force at the period's entry decides whether this month is covered,
+      // and it is a different record from the one pricing the month.
+      "`esi_coverage_entry_salary_id`", "`esi_coverage_entry_gross`",
       "`source_hash`", "`inputs_hash`",
     ]) {
       assert.ok(statements.includes(column), `missing ${column}`);
