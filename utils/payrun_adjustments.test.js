@@ -28,6 +28,8 @@ const {
   COMPONENTS,
   ADJUSTMENT_STATE,
   COMPONENT_KIND,
+  PAY_AFFECTING_COMPONENT_KEYS,
+  isPayAffecting,
 } = require("../constants/payrun_adjustments");
 
 /* ==================================================== V1 is exactly six */
@@ -59,6 +61,22 @@ describe("V1 is a closed list of six components", () => {
       assert.equal(c.pf, false, `${c.key} must not attract PF in V1`);
       assert.equal(c.esi, false, `${c.key} must not attract ESI in V1`);
     });
+  });
+
+  it("names the five PAY-AFFECTING components, and Balance Advance is not one", () => {
+    // Derived from the kinds rather than listed by hand, so a seventh
+    // component joins the set by declaring its kind.
+    assert.deepEqual(PAY_AFFECTING_COMPONENT_KEYS, [
+      "INCENTIVE",
+      "BONUS",
+      "ARREARS",
+      "ADVANCE_RECOVERY",
+      "SHORTAGE_RECOVERY",
+    ]);
+    assert.equal(isPayAffecting("BALANCE_ADVANCE"), false);
+    PAY_AFFECTING_COMPONENT_KEYS.forEach((key) =>
+      assert.equal(isPayAffecting(key), true, `${key} must be pay-affecting`)
+    );
   });
 
   it("classifies the three additions, the two deductions and the one informational", () => {
@@ -205,11 +223,35 @@ describe("the calculation contract", () => {
     assert.equal(c.earned_gross_delta, 0);
   });
 
+  it("HAS_ADJUSTMENT counts only the pay-affecting components", () => {
+    // `has_adjustment` answers "does this change what they are paid";
+    // `has_any_value` answers "is there anything to store". Balance Advance is
+    // the one component where the two differ, and they must not be conflated -
+    // the first decides the month's state, the second decides what is saved.
+    const balanceOnly = computeContract({ [COMPONENT.BALANCE_ADVANCE]: 8500 });
+    assert.equal(balanceOnly.has_adjustment, false);
+    assert.equal(balanceOnly.has_any_value, true);
+    assert.equal(balanceOnly.informational, 8500);
+
+    for (const key of [
+      COMPONENT.INCENTIVE,
+      COMPONENT.BONUS,
+      COMPONENT.ARREARS,
+      COMPONENT.ADVANCE_RECOVERY,
+      COMPONENT.SHORTAGE_RECOVERY,
+    ]) {
+      const c = computeContract({ [key]: 1 });
+      assert.equal(c.has_adjustment, true, `${key} must count as an adjustment`);
+      assert.equal(c.has_any_value, true);
+    }
+  });
+
   it("an empty month contributes nothing and is not 'has adjustment'", () => {
     const c = computeContract({});
     assert.equal(c.net_pay_delta, 0);
     assert.equal(c.has_adjustment, false);
     assert.equal(computeContract({ INCENTIVE: 0, BONUS: "" }).has_adjustment, false);
+    assert.equal(computeContract({}).has_any_value, false);
   });
 });
 
@@ -238,14 +280,44 @@ describe("the adjustment state", () => {
     assert.equal(deriveState({ amounts: { BONUS: 1 } }), ADJUSTMENT_STATE.HAS_ADJUSTMENT);
   });
 
-  it("an INFORMATIONAL-only value still counts as having an adjustment", () => {
-    // Somebody entered a Balance Advance. It changes no total, but it is a
-    // deliberate entry about this employee's month and they are no longer
-    // somebody nobody has looked at.
+  it("BALANCE ADVANCE ALONE IS NOT AN ADJUSTMENT - it stays PENDING", () => {
+    /*
+     * The rule the whole informational kind exists for. A Balance Advance
+     * changes no figure on the pay side, so recording one says nothing about
+     * whether this employee has an adjustment this month - and leaving them
+     * HAS_ADJUSTMENT over it would mean the month could never be finished
+     * while advance balances were being maintained.
+     */
     assert.equal(
-      deriveState({ amounts: { BALANCE_ADVANCE: 5000 } }),
-      ADJUSTMENT_STATE.HAS_ADJUSTMENT
+      deriveState({ amounts: { BALANCE_ADVANCE: 8500 } }),
+      ADJUSTMENT_STATE.NO_ADJUSTMENT_PENDING_CONFIRMATION
     );
+  });
+
+  it("a Balance Advance may coexist with a CONFIRMED no-adjustment", () => {
+    // "This employee owes 8,500 and has no adjustment this month" is an
+    // ordinary, true statement, and the state machine has to be able to hold
+    // it.
+    assert.equal(
+      deriveState({ amounts: { BALANCE_ADVANCE: 8500 }, confirmed_no_adjustment: true }),
+      ADJUSTMENT_STATE.NO_ADJUSTMENT_CONFIRMED
+    );
+  });
+
+  it("a PAY-AFFECTING component beside a Balance Advance does make it an adjustment", () => {
+    for (const key of [
+      COMPONENT.INCENTIVE,
+      COMPONENT.BONUS,
+      COMPONENT.ARREARS,
+      COMPONENT.ADVANCE_RECOVERY,
+      COMPONENT.SHORTAGE_RECOVERY,
+    ]) {
+      assert.equal(
+        deriveState({ amounts: { BALANCE_ADVANCE: 8500, [key]: 100 } }),
+        ADJUSTMENT_STATE.HAS_ADJUSTMENT,
+        `${key} beside a Balance Advance must be an adjustment`
+      );
+    }
   });
 
   it("AN ADJUSTMENT AFTER A CONFIRMATION LEAVES CONFIRMED - the transition", () => {

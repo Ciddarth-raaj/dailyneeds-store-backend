@@ -163,6 +163,60 @@ test("the sensitive filter and write guard are mounted", () => {
   assert.match(ROUTE_CODE, /this\.sensitive\.guardWrite/);
 });
 
+test("BALANCE ADVANCE IS INFORMATIONAL EVERYWHERE, NOT JUST IN THE CONTRACT", () => {
+  /*
+   * The rule has to hold in FOUR places or it holds in none, and three of them
+   * are easy to fix and forget:
+   *
+   *   the contract      `has_adjustment` must not count the informational sum
+   *   the revocation    a stored Balance Advance must not revoke a confirmation
+   *   the confirm guard a stored Balance Advance must not block one
+   *   the import        a Balance-Advance-only row is not With Adjustments
+   *
+   * Each is asserted against the source because each is a place somebody could
+   * reintroduce "any stored row means an adjustment" without a behavioural
+   * test noticing until a real month was being confirmed.
+   */
+
+  // 1. The contract sums only the pay-affecting totals.
+  assert.match(RULES_CODE, /has_adjustment:\s*additions \+ deductions > 0/);
+  assert.ok(
+    !/has_adjustment:\s*additions \+ deductions \+ informational/.test(RULES_CODE),
+    "the contract counts the informational total as an adjustment"
+  );
+
+  // 2 and 3. The repository decides both on the PAY-AFFECTING set.
+  assert.match(REPO_CODE, /payAffectingRemains/);
+  assert.ok(
+    !/const mustRevoke[^;]*anyAmountRemains/.test(REPO_CODE),
+    "a confirmation is revoked by any stored row rather than by a pay-affecting one"
+  );
+  assert.match(
+    REPO_CODE,
+    /CHECK-AMOUNTS-BEFORE-CONFIRM[\s\S]{0,400}component IN \(\?\)/,
+    "the confirm guard must filter to the pay-affecting components IN THE STATEMENT, so FOR UPDATE locks exactly those rows"
+  );
+  assert.match(REPO_CODE, /PAY_AFFECTING_COMPONENT_KEYS/);
+
+  // 4. The import classifies on the pay-affecting value...
+  assert.match(USECASE_CODE, /outcome: hasPayAffectingValue/);
+  // ...but persists on whether there is anything to write, which is what keeps
+  // a Balance-Advance-only row from being silently dropped.
+  assert.match(USECASE_CODE, /isPayAffecting\(column\.key\)/);
+  assert.match(USECASE_CODE, /\.filter\(\(row\) => row\.valid\)/);
+});
+
+test("the pay-affecting set is DERIVED from the component kinds, not listed by hand", () => {
+  const constants = strip(read("constants/payrun_adjustments.js"));
+  assert.match(constants, /PAY_AFFECTING_COMPONENT_KEYS = COMPONENTS\.filter/);
+  // A second hand-written list of the five is exactly how the day a seventh
+  // component is added it silently becomes informational.
+  assert.ok(
+    !/PAY_AFFECTING_COMPONENT_KEYS = \[\s*"/.test(constants),
+    "the pay-affecting set is hard-coded rather than derived from the kinds"
+  );
+});
+
 test("the locked month is enforced on every write path", () => {
   const writes = ["async confirm(", "async saveEmployee(", "async confirmNoAdjustment("];
   writes.forEach((entry) => {

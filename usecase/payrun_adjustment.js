@@ -4,6 +4,7 @@ const {
   COMPONENTS,
   COMPONENT_KEYS,
   COMPONENT_BY_KEY,
+  isPayAffecting,
   ADJUSTMENT_STATE,
   ADJUSTMENT_STATE_LABEL,
   CHANGE_SOURCE,
@@ -361,8 +362,27 @@ class PayrunAdjustmentUsecase {
       };
     }
 
+    /*
+     * EVERY VALID ROW IS APPLIED, AND THE CLASSIFICATION DECIDES NOTHING HERE.
+     *
+     * WHY NOT "ONLY THE ROWS WITH AN ADJUSTMENT". Two rows would be lost by
+     * that, and both matter:
+     *
+     *   a row carrying only a BALANCE ADVANCE has no adjustment on it by the
+     *   rule above, and its 8,500 still has to reach the database
+     *
+     *   a row where somebody DELETED an amount carries nothing at all, and it
+     *   is precisely the row that has to be applied - a blank cell in a column
+     *   the file contains means CLEAR, and dropping the row would make an
+     *   adjustment impossible to take back through the file it was entered by
+     *
+     * APPLYING A ROW THAT CHANGES NOTHING COSTS NOTHING. The repository reads
+     * the employee's current amounts under `FOR UPDATE` and writes, counts and
+     * audits only what actually differs, so an untouched export re-imported is
+     * a no-op rather than two hundred spurious audit rows.
+     */
     const entries = validated.results
-      .filter((row) => row.outcome === ROW_OUTCOME.WITH_ADJUSTMENT || row.remarks_given)
+      .filter((row) => row.valid)
       .map((row) => ({
         employee_id: row.employee_id,
         payrun_employee_id: row.payrun_employee_id,
@@ -587,7 +607,19 @@ class PayrunAdjustmentUsecase {
     }
 
     const amounts = {};
-    let hasValue = false;
+    /*
+     * TWO QUESTIONS, NOT ONE, AND THIS ROW ANSWERS THEM DIFFERENTLY.
+     *
+     *   hasPayAffectingValue  does this row give the employee money or take
+     *                         some off? That is what makes it an ADJUSTMENT,
+     *                         and it is what the preview counts.
+     *   hasAnyValue           is there anything on this row to SAVE at all?
+     *                         A Balance Advance on its own answers yes here
+     *                         and no above: it must be written to the month,
+     *                         and it must leave the employee pending.
+     */
+    let hasPayAffectingValue = false;
+    let hasAnyValue = false;
 
     header.componentColumns.forEach((column) => {
       const cell = cellOf(raw, column.header);
@@ -608,7 +640,8 @@ class PayrunAdjustmentUsecase {
       }
 
       amounts[column.key] = parsed.amount;
-      hasValue = true;
+      hasAnyValue = true;
+      if (isPayAffecting(column.key)) hasPayAffectingValue = true;
     });
 
     const remarksGiven = header.hasRemarks;
@@ -648,11 +681,22 @@ class PayrunAdjustmentUsecase {
       informational: contract.informational,
       net_pay_delta: contract.net_pay_delta,
       /*
-       * A ROW WITH NO VALUES IS "PENDING", NEVER "CONFIRMED". It is a valid
-       * row that says nothing, and the employee it names still needs the
-       * explicit confirmation step.
+       * A ROW WITH NO PAY-AFFECTING VALUE IS "PENDING", NEVER "CONFIRMED".
+       * That covers the empty row AND the row carrying only a Balance
+       * Advance: both are valid rows that say nothing about whether this
+       * employee has an adjustment, and the employee they name still needs
+       * the explicit confirmation step.
        */
-      outcome: hasValue ? ROW_OUTCOME.WITH_ADJUSTMENT : ROW_OUTCOME.NO_ADJUSTMENT_PENDING,
+      outcome: hasPayAffectingValue
+        ? ROW_OUTCOME.WITH_ADJUSTMENT
+        : ROW_OUTCOME.NO_ADJUSTMENT_PENDING,
+      /*
+       * WHETHER THERE IS ANYTHING TO WRITE, which is deliberately NOT the
+       * same question as the outcome above - see `confirm`, which saves on
+       * this rather than on the classification, so a Balance-Advance-only row
+       * is stored even though it leaves its employee pending.
+       */
+      has_values: hasAnyValue,
     };
   }
 
@@ -667,6 +711,7 @@ class PayrunAdjustmentUsecase {
       amounts: {},
       remarks: null,
       remarks_given: false,
+      has_values: false,
       valid: false,
       errors,
       warnings: [],

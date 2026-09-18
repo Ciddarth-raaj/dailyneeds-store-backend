@@ -5,7 +5,12 @@ const {
   commitAsync,
   rollbackAsync,
 } = require("../utils/batchInsert");
-const { AUDIT_ACTION, CHANGE_SOURCE } = require("../constants/payrun_adjustments");
+const {
+  AUDIT_ACTION,
+  CHANGE_SOURCE,
+  PAY_AFFECTING_COMPONENT_KEYS,
+  isPayAffecting,
+} = require("../constants/payrun_adjustments");
 
 /**
  * Payrun Adjustments V1 - the reads the stage needs, and the writes it makes.
@@ -198,12 +203,19 @@ class PayrunAdjustmentRepository {
    *             not wipe the Bonus somebody entered by hand last week.
    *   remarks   `undefined` leaves them, `null` clears them, a string sets them.
    *
-   * A CONFIRMATION IS REVOKED BY THE ARRIVAL OF AN ADJUSTMENT, IN THE SAME
-   * TRANSACTION. This is the transition the specification asks to be defined:
-   * once any amount is stored for an employee, `confirmed_no_adjustment` is
-   * set back to 0 and its actor and timestamp are cleared, and the revocation
-   * is logged. Leaving the flag set and relying on the read-side ordering
-   * would work today and would be a lie in the table.
+   * A CONFIRMATION IS REVOKED BY THE ARRIVAL OF A PAY-AFFECTING ADJUSTMENT, IN
+   * THE SAME TRANSACTION, AND BY NOTHING ELSE. Once an Incentive, Bonus,
+   * Arrears, Advance Recovery or Shortage Recovery is stored,
+   * `confirmed_no_adjustment` is set back to 0, its actor and timestamp are
+   * cleared, and the revocation is logged.
+   *
+   * A BALANCE ADVANCE DOES NOT REVOKE ANYTHING. It changes no figure on the
+   * payslip's pay side, so a confirmation given for this month stays true
+   * after somebody records the employee's remaining advance balance. Revoking
+   * on it would mean the person recording balances silently un-confirming
+   * employees somebody else had already signed off, with no figure having
+   * changed - and the month would never finish while balances were being
+   * maintained.
    *
    * EVERY CHANGE IS AUDITED WITH BOTH AMOUNTS. The old value is read inside
    * the transaction, so the log says what it actually replaced rather than
@@ -247,7 +259,6 @@ class PayrunAdjustmentRepository {
 
         const audits = [];
         let wrote = false;
-        let anyAmountRemains = current.length > 0;
 
         const amounts = entry.amounts || {};
         for (const component of Object.keys(amounts)) {
@@ -289,7 +300,15 @@ class PayrunAdjustmentRepository {
           audits.push([AUDIT_ACTION.SET_AMOUNT, component, old, next]);
         }
 
-        anyAmountRemains = currentOf.size > 0;
+        /*
+         * IS A PAY-AFFECTING ADJUSTMENT STILL STORED FOR THIS EMPLOYEE? That,
+         * and not "is any row stored", is what decides whether a confirmation
+         * can survive. `currentOf` has been kept in step with every insert and
+         * delete above, so this is the state as it will be committed.
+         */
+        const payAffectingRemains = [...currentOf.keys()].some((component) =>
+          isPayAffecting(component)
+        );
 
         /*
          * THE STATE ROW. It is written when there are remarks to store, or
@@ -313,8 +332,9 @@ class PayrunAdjustmentRepository {
         const remarksChanged =
           remarksGiven && String(state ? state.remarks || "" : "") !== String(nextRemarks || "");
 
-        // AN ADJUSTMENT REVOKES A CONFIRMATION. See the note above.
-        const mustRevoke = Boolean(state && state.confirmed_no_adjustment) && anyAmountRemains;
+        // A PAY-AFFECTING ADJUSTMENT REVOKES A CONFIRMATION; an informational
+        // one never does. See the note above.
+        const mustRevoke = Boolean(state && state.confirmed_no_adjustment) && payAffectingRemains;
 
         if (remarksChanged || mustRevoke) {
           await this._read(
@@ -326,11 +346,11 @@ class PayrunAdjustmentRepository {
              ON DUPLICATE KEY UPDATE
                     remarks = ${remarksGiven ? "VALUES(remarks)" : "remarks"},
                     confirmed_no_adjustment =
-                      IF(${anyAmountRemains ? 1 : 0}, 0, confirmed_no_adjustment),
+                      IF(${payAffectingRemains ? 1 : 0}, 0, confirmed_no_adjustment),
                     confirmed_by =
-                      IF(${anyAmountRemains ? 1 : 0}, NULL, confirmed_by),
+                      IF(${payAffectingRemains ? 1 : 0}, NULL, confirmed_by),
                     confirmed_at =
-                      IF(${anyAmountRemains ? 1 : 0}, NULL, confirmed_at)`,
+                      IF(${payAffectingRemains ? 1 : 0}, NULL, confirmed_at)`,
             [payrunEmployeeId, year, month, employeeId, nextRemarks === undefined ? null : nextRemarks],
             conn
           );
@@ -381,11 +401,17 @@ class PayrunAdjustmentRepository {
    * two code paths for one decision is how one of them ends up missing the
    * check below.
    *
-   * AN EMPLOYEE WHO HAS AN ADJUSTMENT CANNOT BE CONFIRMED AS HAVING NONE, and
-   * this is checked HERE, inside the transaction, against the amounts as they
-   * are at this instant - not against what the screen was showing. The screen's
-   * copy is minutes old, and "confirmed no adjustment" on somebody with a
-   * 5,000 Incentive is a contradiction the month would carry to the payslip.
+   * AN EMPLOYEE WHO HAS A PAY-AFFECTING ADJUSTMENT CANNOT BE CONFIRMED AS
+   * HAVING NONE, and this is checked HERE, inside the transaction, against the
+   * amounts as they are at this instant - not against what the screen was
+   * showing. The screen's copy is minutes old, and "confirmed no adjustment"
+   * on somebody with a 5,000 Incentive is a contradiction the month would
+   * carry to the payslip.
+   *
+   * A STORED BALANCE ADVANCE IS NOT SUCH A CONTRADICTION AND MUST NOT BLOCK
+   * THE CONFIRMATION. "This employee owes 8,500 and has no adjustment this
+   * month" is an ordinary, true statement, and refusing to record it would
+   * leave every employee repaying an advance permanently pending.
    * Such an employee is reported back as SKIPPED rather than failing the batch:
    * one person edited in another tab must not stop the other seventy being
    * confirmed.
@@ -409,12 +435,20 @@ class PayrunAdjustmentRepository {
       for (const employee of employees) {
         const employeeId = employee.employee_id;
         /* eslint-disable no-await-in-loop */
+        /*
+         * ONLY THE PAY-AFFECTING COMPONENTS ARE LOOKED FOR, and the filter is
+         * IN THE STATEMENT rather than applied to the rows afterwards: the
+         * `FOR UPDATE` must lock exactly the rows this decision depends on, so
+         * that a concurrent Incentive cannot be inserted between the check and
+         * the confirmation.
+         */
         const amounts = await this._read(
           "CHECK-AMOUNTS-BEFORE-CONFIRM",
           `SELECT component FROM payrun_employee_adjustment
             WHERE period_year = ? AND period_month = ? AND employee_id = ?
+              AND component IN (?)
             FOR UPDATE`,
-          [year, month, employeeId],
+          [year, month, employeeId, PAY_AFFECTING_COMPONENT_KEYS],
           conn
         );
         if (amounts.length > 0) {

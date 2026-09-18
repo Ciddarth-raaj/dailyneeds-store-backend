@@ -19,7 +19,7 @@ const { describe, it, beforeEach } = require("node:test");
 const assert = require("node:assert/strict");
 
 const buildUsecase = require("./payrun_adjustment");
-const { ADJUSTMENT_STATE } = require("../constants/payrun_adjustments");
+const { ADJUSTMENT_STATE, isPayAffecting } = require("../constants/payrun_adjustments");
 
 /* ============================================================== the fakes */
 
@@ -96,8 +96,9 @@ class FakeAdjustmentRepo {
         });
         wrote = true;
       }
-      // AN ADJUSTMENT REVOKES A CONFIRMATION, in the same call.
-      if (Object.keys(current).length > 0) {
+      // A PAY-AFFECTING ADJUSTMENT REVOKES A CONFIRMATION, in the same call.
+      // An informational one never does - see `repository/payrun_adjustment.js`.
+      if (Object.keys(current).some(isPayAffecting)) {
         const s = this.states.get(entry.employee_id);
         if (s && Number(s.confirmed_no_adjustment) === 1) {
           this.states.set(entry.employee_id, {
@@ -118,8 +119,11 @@ class FakeAdjustmentRepo {
   async confirmNoAdjustment({ employees, actor_id }) {
     this.writes += 1;
     return employees.map((employee) => {
+      // Only a PAY-AFFECTING amount blocks the confirmation; a stored Balance
+      // Advance must not, which is what the real statement's `component IN (?)`
+      // predicate achieves.
       const amounts = this.amounts.get(employee.employee_id) || {};
-      if (Object.keys(amounts).length > 0) {
+      if (Object.keys(amounts).some(isPayAffecting)) {
         return { employee_id: employee.employee_id, result: "HAS_ADJUSTMENT" };
       }
       const state = this.states.get(employee.employee_id);
@@ -550,6 +554,182 @@ describe("the explicit No Adjustment confirmation", () => {
   });
 });
 
+describe("BALANCE ADVANCE IS INFORMATIONAL, NOT AN ADJUSTMENT", () => {
+  let repo;
+  let usecase;
+
+  beforeEach(() => {
+    repo = new FakeAdjustmentRepo();
+    repo.initialized = [employee(1, "Asha"), employee(2, "Bala")];
+    usecase = buildUsecase(repo, new FakePayrunRepo());
+  });
+
+  const stateOf = async (employeeId) =>
+    (await usecase.getMonth(MONTH)).rows.find((r) => r.employee_id === employeeId).adjustment_state;
+
+  it("a Balance Advance alone leaves the employee PENDING CONFIRMATION", async () => {
+    const saved = await usecase.saveEmployee({
+      ...MONTH, employee_id: 1, amounts: { BALANCE_ADVANCE: 8500 }, ...ACTOR,
+    });
+    // It is stored...
+    assert.equal(repo.amounts.get(1).BALANCE_ADVANCE, 8500);
+    assert.equal(saved.row.amounts.BALANCE_ADVANCE, 8500);
+    // ...and it is not an adjustment.
+    assert.equal(saved.row.adjustment_state, ADJUSTMENT_STATE.NO_ADJUSTMENT_PENDING_CONFIRMATION);
+    assert.equal((await usecase.getMonth(MONTH)).summary.has_adjustment_count, 0);
+  });
+
+  it("an employee with a Balance Advance CAN be confirmed as having no adjustment", async () => {
+    await usecase.saveEmployee({ ...MONTH, employee_id: 1, amounts: { BALANCE_ADVANCE: 8500 }, ...ACTOR });
+
+    const result = await usecase.confirmNoAdjustment({ ...MONTH, employee_ids: [1], ...ACTOR });
+    assert.equal(result.confirmed_count, 1);
+    assert.equal(result.has_adjustment_count, 0, "a Balance Advance must not block the confirmation");
+
+    const row = (await usecase.getMonth(MONTH)).rows.find((r) => r.employee_id === 1);
+    assert.equal(row.adjustment_state, ADJUSTMENT_STATE.NO_ADJUSTMENT_CONFIRMED);
+    // The balance is still there afterwards - the point of the whole rule.
+    assert.equal(row.amounts.BALANCE_ADVANCE, 8500);
+    assert.equal(row.informational, 8500);
+  });
+
+  it("EDITING A BALANCE ADVANCE DOES NOT REVOKE A CONFIRMATION", async () => {
+    await usecase.confirmNoAdjustment({ ...MONTH, employee_ids: [1], ...ACTOR });
+    assert.equal(await stateOf(1), ADJUSTMENT_STATE.NO_ADJUSTMENT_CONFIRMED);
+
+    await usecase.saveEmployee({ ...MONTH, employee_id: 1, amounts: { BALANCE_ADVANCE: 8500 }, ...ACTOR });
+    assert.equal(await stateOf(1), ADJUSTMENT_STATE.NO_ADJUSTMENT_CONFIRMED);
+
+    // And changing it again, and clearing it, leave the confirmation alone.
+    await usecase.saveEmployee({ ...MONTH, employee_id: 1, amounts: { BALANCE_ADVANCE: 6000 }, ...ACTOR });
+    assert.equal(await stateOf(1), ADJUSTMENT_STATE.NO_ADJUSTMENT_CONFIRMED);
+    await usecase.saveEmployee({ ...MONTH, employee_id: 1, amounts: { BALANCE_ADVANCE: null }, ...ACTOR });
+    assert.equal(await stateOf(1), ADJUSTMENT_STATE.NO_ADJUSTMENT_CONFIRMED);
+
+    const row = (await usecase.getMonth(MONTH)).rows.find((r) => r.employee_id === 1);
+    assert.equal(row.confirmed_no_adjustment, true);
+    assert.equal(row.confirmed_by, 77, "the original confirmer is untouched");
+  });
+
+  it("A PAY-AFFECTING COMPONENT STILL REVOKES A CONFIRMATION", async () => {
+    await usecase.confirmNoAdjustment({ ...MONTH, employee_ids: [1], ...ACTOR });
+    await usecase.saveEmployee({ ...MONTH, employee_id: 1, amounts: { BALANCE_ADVANCE: 8500 }, ...ACTOR });
+    assert.equal(await stateOf(1), ADJUSTMENT_STATE.NO_ADJUSTMENT_CONFIRMED);
+
+    await usecase.saveEmployee({ ...MONTH, employee_id: 1, amounts: { INCENTIVE: 500 }, ...ACTOR });
+
+    const row = (await usecase.getMonth(MONTH)).rows.find((r) => r.employee_id === 1);
+    assert.equal(row.adjustment_state, ADJUSTMENT_STATE.HAS_ADJUSTMENT);
+    assert.equal(row.confirmed_no_adjustment, false, "the stored flag must be cleared");
+    assert.equal(row.confirmed_by, null);
+    // The balance survived the revocation; it was never what was in question.
+    assert.equal(row.amounts.BALANCE_ADVANCE, 8500);
+  });
+
+  it("each of the five pay-affecting components revokes a confirmation", async () => {
+    for (const key of [
+      "INCENTIVE", "BONUS", "ARREARS", "ADVANCE_RECOVERY", "SHORTAGE_RECOVERY",
+    ]) {
+      /* eslint-disable no-await-in-loop */
+      repo = new FakeAdjustmentRepo();
+      repo.initialized = [employee(1, "Asha")];
+      usecase = buildUsecase(repo, new FakePayrunRepo());
+      await usecase.confirmNoAdjustment({ ...MONTH, employee_ids: [1], ...ACTOR });
+      await usecase.saveEmployee({ ...MONTH, employee_id: 1, amounts: { [key]: 100 }, ...ACTOR });
+      const row = (await usecase.getMonth(MONTH)).rows.find((r) => r.employee_id === 1);
+      assert.equal(row.adjustment_state, ADJUSTMENT_STATE.HAS_ADJUSTMENT, `${key} must revoke`);
+      assert.equal(row.confirmed_no_adjustment, false, `${key} must clear the flag`);
+      /* eslint-enable no-await-in-loop */
+    }
+  });
+
+  it("an IMPORT row with only a Balance Advance is PENDING, not With Adjustments", async () => {
+    const preview = await usecase.preview({
+      ...MONTH,
+      headers: HEADERS,
+      rows: [row(1, "Asha", { "Balance Advance": "8500" })],
+    });
+    assert.equal(preview.with_adjustments, 0);
+    assert.equal(preview.no_adjustment_pending_confirmation, 1);
+    assert.equal(preview.invalid_rows, 0);
+    assert.equal(preview.rows[0].outcome, "NO_ADJUSTMENT_PENDING");
+    assert.equal(preview.rows[0].informational, 8500);
+    assert.equal(preview.rows[0].net_pay_delta, 0);
+  });
+
+  it("an IMPORT row with a Balance Advance AND a recovery is With Adjustments", async () => {
+    const preview = await usecase.preview({
+      ...MONTH,
+      headers: HEADERS,
+      rows: [row(1, "Asha", { "Balance Advance": "8500", "Advance Recovery": "1500" })],
+    });
+    assert.equal(preview.with_adjustments, 1);
+    assert.equal(preview.no_adjustment_pending_confirmation, 0);
+    assert.equal(preview.rows[0].outcome, "WITH_ADJUSTMENT");
+    assert.equal(preview.rows[0].net_pay_delta, -1500);
+    assert.equal(preview.rows[0].informational, 8500);
+  });
+
+  it("A BALANCE-ADVANCE-ONLY IMPORT ROW IS STILL SAVED, and still leaves them pending", async () => {
+    /*
+     * The classification decides what the month SAYS; it must not decide what
+     * is WRITTEN. Dropping this row would silently discard the balance.
+     */
+    const result = await usecase.confirm(
+      {
+        ...MONTH,
+        headers: HEADERS,
+        rows: [
+          row(1, "Asha", { "Balance Advance": "8500" }),
+          row(2, "Bala", { Incentive: "1000" }),
+        ],
+      },
+      ACTOR
+    );
+    assert.equal(result.applied, true);
+    assert.equal(repo.amounts.get(1).BALANCE_ADVANCE, 8500, "the balance must reach the database");
+
+    const view = await usecase.getMonth(MONTH);
+    assert.equal(
+      view.rows.find((r) => r.employee_id === 1).adjustment_state,
+      ADJUSTMENT_STATE.NO_ADJUSTMENT_PENDING_CONFIRMATION
+    );
+    assert.equal(view.summary.has_adjustment_count, 1, "only Bala has an adjustment");
+    assert.equal(view.summary.pending_adjustment_confirmation_count, 1);
+  });
+
+  it("the completion summary follows the same rule", async () => {
+    await usecase.saveEmployee({ ...MONTH, employee_id: 1, amounts: { BALANCE_ADVANCE: 8500 }, ...ACTOR });
+    await usecase.saveEmployee({ ...MONTH, employee_id: 2, amounts: { BALANCE_ADVANCE: 200 }, ...ACTOR });
+
+    let summary = (await usecase.getMonth(MONTH)).summary;
+    assert.equal(summary.has_adjustment_count, 0);
+    assert.equal(summary.pending_adjustment_confirmation_count, 2);
+    assert.equal(summary.is_complete, false, "balances alone do not finish a month");
+
+    await usecase.confirmNoAdjustment({ ...MONTH, employee_ids: [1, 2], ...ACTOR });
+    summary = (await usecase.getMonth(MONTH)).summary;
+    assert.equal(summary.no_adjustment_confirmed_count, 2);
+    assert.equal(summary.pending_adjustment_confirmation_count, 0);
+    assert.equal(summary.is_complete, true);
+  });
+
+  it("the CALCULATION CONTRACT is unchanged - a balance moves no money", async () => {
+    const saved = await usecase.saveEmployee({
+      ...MONTH,
+      employee_id: 1,
+      amounts: { BALANCE_ADVANCE: 8500, INCENTIVE: 1000, ADVANCE_RECOVERY: 400 },
+      ...ACTOR,
+    });
+    assert.equal(saved.row.net_pay_delta, 600, "1000 - 400, with the 8500 contributing nothing");
+    assert.equal(saved.row.additions, 1000);
+    assert.equal(saved.row.deductions, 400);
+    assert.equal(saved.row.informational, 8500);
+    assert.equal(saved.row.pf_wage_delta, 0);
+    assert.equal(saved.row.esi_wage_delta, 0);
+  });
+});
+
 describe("manual editing", () => {
   let repo;
   let usecase;
@@ -599,6 +779,8 @@ describe("manual editing", () => {
     assert.equal(saved.row.amounts.BALANCE_ADVANCE, 18000);
     assert.equal(saved.row.net_pay_delta, 0);
     assert.equal(saved.row.informational, 18000);
+    // And it does not make them an employee with an adjustment.
+    assert.equal(saved.row.adjustment_state, ADJUSTMENT_STATE.NO_ADJUSTMENT_PENDING_CONFIRMATION);
   });
 
   it("refuses an employee who is not initialized for the month", async () => {

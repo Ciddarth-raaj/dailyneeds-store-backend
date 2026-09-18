@@ -128,6 +128,36 @@ const COMPONENTS = [
 ];
 
 const COMPONENT_KEYS = COMPONENTS.map((c) => c.key);
+
+/**
+ * THE PAY-AFFECTING COMPONENTS - the five that move money, and the ONE
+ * DISTINCTION THE WHOLE ADJUSTMENT STATE TURNS ON.
+ *
+ * "HAS AN ADJUSTMENT" MEANS "SOMETHING HERE CHANGES WHAT THIS PERSON IS PAID",
+ * and Balance Advance does not. It is a figure carried so a payslip can print
+ * the employee's remaining advance balance; recording it asserts nothing about
+ * whether they have an adjustment this month.
+ *
+ * SO AN EMPLOYEE MAY HAVE A BALANCE ADVANCE OF 8,500 **AND** BE CONFIRMED AS
+ * HAVING NO ADJUSTMENT, and that combination is not a contradiction - it is
+ * the ordinary case for anybody repaying an advance in instalments who has
+ * nothing unusual in this particular month. Treating the informational figure
+ * as an adjustment would force whoever records it to either leave the employee
+ * permanently pending or lie about the balance, and it would revoke a
+ * confirmation somebody had already given for a reason that changes no figure.
+ *
+ * DERIVED FROM THE KIND RATHER THAN LISTED BY HAND, so a seventh component
+ * joins this set by declaring its kind and not by being remembered here.
+ */
+const PAY_AFFECTING_KINDS = [COMPONENT_KIND.ADDITION, COMPONENT_KIND.DEDUCTION];
+const PAY_AFFECTING_COMPONENT_KEYS = COMPONENTS.filter((c) =>
+  PAY_AFFECTING_KINDS.includes(c.kind)
+).map((c) => c.key);
+
+/** Does this component key change what somebody is paid? */
+function isPayAffecting(key) {
+  return PAY_AFFECTING_COMPONENT_KEYS.includes(key);
+}
 const COMPONENT_BY_KEY = COMPONENTS.reduce((map, c) => {
   map[c.key] = c;
   return map;
@@ -219,6 +249,8 @@ module.exports = {
   COMPONENTS,
   COMPONENT_KEYS,
   COMPONENT_BY_KEY,
+  PAY_AFFECTING_COMPONENT_KEYS,
+  isPayAffecting,
   REFERENCE_COLUMNS,
   REMARKS_COLUMN,
   REMARKS_MAX_LENGTH,

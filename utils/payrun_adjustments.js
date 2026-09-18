@@ -215,7 +215,35 @@ function computeContract(amountsByComponent = {}) {
     earned_gross_delta: 0,
     pf_wage_delta: toAmount(pf),
     esi_wage_delta: toAmount(esi),
-    has_adjustment: additions + deductions + informational > 0,
+    /**
+     * DOES THIS EMPLOYEE HAVE AN ADJUSTMENT? ONLY A PAY-AFFECTING COMPONENT
+     * COUNTS, AND THE INFORMATIONAL TOTAL IS DELIBERATELY NOT IN THIS SUM.
+     *
+     * An adjustment is something that changes what somebody is paid. Balance
+     * Advance changes nothing - it is carried so a payslip can print the
+     * remaining advance balance - so recording one asserts nothing about
+     * whether this month has an adjustment in it.
+     *
+     * SO AN EMPLOYEE MAY HAVE A BALANCE ADVANCE **AND** BE CONFIRMED AS HAVING
+     * NO ADJUSTMENT. That is the ordinary case for anybody repaying an advance
+     * who has nothing unusual this month. Counting the informational figure
+     * here would force whoever records the balance to leave that employee
+     * permanently pending, or to omit the balance to get the month finished -
+     * and it would revoke a confirmation somebody had already given over a
+     * figure that moves no money.
+     *
+     * `informational` IS STILL REPORTED ABOVE. It is a value the month holds
+     * and the payslip prints; what it is not is an adjustment.
+     */
+    has_adjustment: additions + deductions > 0,
+    /**
+     * IS ANY VALUE STORED AT ALL, pay-affecting or not? A DIFFERENT QUESTION,
+     * and the two are needed for different jobs: this one decides whether
+     * there is anything to SAVE, `has_adjustment` decides what the month SAYS
+     * about the employee. A Balance-Advance-only row must be written to the
+     * database and must still leave its employee pending confirmation.
+     */
+    has_any_value: additions + deductions + informational > 0,
   };
 }
 
@@ -231,6 +259,11 @@ function computeContract(amountsByComponent = {}) {
  * the same transaction as the write - belt and braces, deliberately, because
  * these two facts living in two tables is exactly the situation where they
  * drift.
+ *
+ * AN INFORMATIONAL VALUE ALONE IS NOT AN ADJUSTMENT AND DOES NOT DECIDE
+ * ANYTHING HERE. Somebody with a Balance Advance of 8,500 and nothing else is
+ * PENDING until they are explicitly confirmed, and CONFIRMED afterwards - with
+ * the 8,500 still stored against their month. See `computeContract`.
  *
  * AND THE FALL-THROUGH IS PENDING, WHICH IS WHY NEW EMPLOYEES NEED NO JOB.
  * An employee initialized five minutes ago has no component rows and no
