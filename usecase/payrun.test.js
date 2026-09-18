@@ -27,6 +27,7 @@ const {
   PAY_TYPE,
   PAY_TYPE_SOURCE,
   PERIOD_STATUS,
+  WARNING,
 } = require("../constants/payrun");
 
 const YEAR = 2026;
@@ -159,6 +160,7 @@ const rowFor = (view, employeeId = 42) =>
   view.rows.find((r) => r.employee_id === employeeId);
 
 const reasonCodes = (row) => row.blocking_reasons.map((r) => r.code);
+const warningCodes = (row) => (row.warnings || []).map((w) => w.code);
 
 describe("the month's status groups", () => {
   it("an eligible active employee is READY", async () => {
@@ -178,35 +180,78 @@ describe("the month's status groups", () => {
     assert.ok(reasonCodes(row).includes(BLOCK_REASON.SALARY_NOT_APPROVED));
   });
 
-  it("a month the attendance engine has not calculated BLOCKS", async () => {
+  /*
+   * ATTENDANCE DOES NOT BLOCK INITIALIZATION. Four tests, one for each shape
+   * the old rule refused, and a fifth for all three at once - because the old
+   * rule pushed a reason per fact and an employee with every one of them open
+   * is exactly the person the change exists for.
+   *
+   * THEY ARE STILL REPORTED, as warnings, and they are still REFUSED AT
+   * APPROVE & LOCK - see `utils/payrun_calculation.test.js`.
+   */
+  it("a month the attendance engine has not calculated is still READY", async () => {
     const usecase = buildUsecase(fakeRepo({ attendance: [] }));
     const row = rowFor(await usecase.getMonth({ year: YEAR, month: MONTH }));
-    assert.ok(reasonCodes(row).includes(BLOCK_REASON.ATTENDANCE_INCOMPLETE));
+    assert.equal(row.status, STATUS_GROUP.READY);
+    assert.deepEqual(row.blocking_reasons, []);
+    assert.ok(warningCodes(row).includes(WARNING.ATTENDANCE_INCOMPLETE));
   });
 
-  it("a calculated but UNSETTLED month blocks - is_final is the test, not existence", async () => {
+  it("a calculated but UNSETTLED month is still READY", async () => {
     const usecase = buildUsecase(
       fakeRepo({ attendance: [attendanceMonth({ is_final: 0 })] })
     );
     const row = rowFor(await usecase.getMonth({ year: YEAR, month: MONTH }));
-    assert.ok(reasonCodes(row).includes(BLOCK_REASON.ATTENDANCE_INCOMPLETE));
+    assert.equal(row.status, STATUS_GROUP.READY);
+    assert.deepEqual(row.blocking_reasons, []);
+    assert.ok(warningCodes(row).includes(WARNING.ATTENDANCE_INCOMPLETE));
   });
 
-  it("an unresolved regularization blocks", async () => {
+  it("an unresolved regularization does not block", async () => {
     const usecase = buildUsecase(
       fakeRepo({ pending: [{ employee_id: 42, pending_regularizations: 1, pending_ot: 0 }] })
     );
     const row = rowFor(await usecase.getMonth({ year: YEAR, month: MONTH }));
-    assert.ok(reasonCodes(row).includes(BLOCK_REASON.PENDING_ATTENDANCE_REGULARIZATION));
-    assert.ok(!reasonCodes(row).includes(BLOCK_REASON.PENDING_OT_APPROVAL));
+    assert.equal(row.status, STATUS_GROUP.READY);
+    assert.deepEqual(row.blocking_reasons, []);
+    assert.ok(warningCodes(row).includes(WARNING.PENDING_ATTENDANCE_REGULARIZATION));
+    assert.ok(!warningCodes(row).includes(WARNING.PENDING_OT_APPROVAL));
   });
 
-  it("an unresolved OT approval blocks", async () => {
+  it("an unresolved OT approval does not block", async () => {
     const usecase = buildUsecase(
       fakeRepo({ pending: [{ employee_id: 42, pending_regularizations: 0, pending_ot: 2 }] })
     );
     const row = rowFor(await usecase.getMonth({ year: YEAR, month: MONTH }));
-    assert.ok(reasonCodes(row).includes(BLOCK_REASON.PENDING_OT_APPROVAL));
+    assert.equal(row.status, STATUS_GROUP.READY);
+    assert.deepEqual(row.blocking_reasons, []);
+    assert.ok(warningCodes(row).includes(WARNING.PENDING_OT_APPROVAL));
+  });
+
+  it("all three at once still leaves the employee READY", async () => {
+    const usecase = buildUsecase(
+      fakeRepo({
+        attendance: [],
+        pending: [{ employee_id: 42, pending_regularizations: 3, pending_ot: 2 }],
+      })
+    );
+    const view = await usecase.getMonth({ year: YEAR, month: MONTH });
+    const row = rowFor(view);
+    assert.equal(row.status, STATUS_GROUP.READY);
+    assert.deepEqual(row.blocking_reasons, []);
+    assert.equal(view.summary.ready, 1);
+    assert.equal(view.summary.blocked, 0);
+    assert.deepEqual(warningCodes(row).slice().sort(), [
+      WARNING.ATTENDANCE_INCOMPLETE,
+      WARNING.PENDING_ATTENDANCE_REGULARIZATION,
+      WARNING.PENDING_OT_APPROVAL,
+    ].sort());
+  });
+
+  it("attendance is not a blocking reason the vocabulary even has any more", () => {
+    assert.ok(!Object.keys(BLOCK_REASON).includes("ATTENDANCE_INCOMPLETE"));
+    assert.ok(!Object.keys(BLOCK_REASON).includes("PENDING_ATTENDANCE_REGULARIZATION"));
+    assert.ok(!Object.keys(BLOCK_REASON).includes("PENDING_OT_APPROVAL"));
   });
 
   it("an unanswered PF/ESI applicability blocks - NULL is not 'no'", async () => {
@@ -304,13 +349,11 @@ describe("the compact blocking reason label", () => {
   });
 
   it("the label is the BUSINESS NAME and carries no explanation", () => {
-    assert.equal(BLOCK_REASON_LABEL[BLOCK_REASON.ATTENDANCE_INCOMPLETE], "Attendance incomplete");
     assert.equal(BLOCK_REASON_LABEL[BLOCK_REASON.SALARY_NOT_APPROVED], "Salary not approved");
     assert.equal(
-      BLOCK_REASON_LABEL[BLOCK_REASON.PENDING_ATTENDANCE_REGULARIZATION],
-      "Pending attendance request"
+      BLOCK_REASON_LABEL[BLOCK_REASON.NOT_EMPLOYED_IN_MONTH],
+      "Not employed this month"
     );
-    assert.equal(BLOCK_REASON_LABEL[BLOCK_REASON.PENDING_OT_APPROVAL], "Pending OT approval");
     assert.equal(
       BLOCK_REASON_LABEL[BLOCK_REASON.STATUTORY_SETUP_INCOMPLETE],
       "Statutory setup incomplete"
@@ -335,6 +378,7 @@ describe("the compact blocking reason label", () => {
     const usecase = buildUsecase(
       fakeRepo({
         salaries: [],
+        population: [employee({ pf_applicable: null })],
         attendance: [],
         pending: [{ employee_id: 42, pending_regularizations: 1, pending_ot: 1 }],
       })
@@ -342,9 +386,10 @@ describe("the compact blocking reason label", () => {
     const row = rowFor(await usecase.getMonth({ year: YEAR, month: MONTH }));
     const labels = row.blocking_reasons.map((r) => r.label);
     assert.ok(labels.includes("Salary not approved"));
-    assert.ok(labels.includes("Attendance incomplete"));
-    assert.ok(labels.includes("Pending attendance request"));
-    assert.ok(labels.includes("Pending OT approval"));
+    assert.ok(labels.includes("Statutory setup incomplete"));
+    // And the attendance facts are there, as warnings, not as blockers.
+    assert.ok(warningCodes(row).includes(WARNING.ATTENDANCE_INCOMPLETE));
+    assert.ok(warningCodes(row).includes(WARNING.PENDING_OT_APPROVAL));
   });
 });
 
@@ -750,7 +795,7 @@ describe("initialization", () => {
       population: [
         employee(),
         employee({ employee_id: 43, employee_name: "No Salary" }),
-        employee({ employee_id: 44, employee_name: "Pending OT" }),
+        employee({ employee_id: 44, employee_name: "No Statutory", pf_applicable: null }),
       ],
       salaries: [salary(), salary({ employee_id: 44, salary_id: 901 })],
       attendance: [
@@ -772,9 +817,63 @@ describe("initialization", () => {
     assert.equal(out.results[1].result, ROW_RESULT.BLOCKED);
     assert.ok(out.results[1].message.match(/Salary not approved/));
     assert.equal(out.results[2].result, ROW_RESULT.BLOCKED);
-    assert.ok(out.results[2].message.match(/Pending OT approval/));
+    assert.ok(out.results[2].message.match(/Statutory setup incomplete/));
+    // 44's open OT approval is NOT what stopped them - the statutory gap is.
+    assert.ok(!out.results[2].message.match(/OT/));
     // Only the eligible row was written.
     assert.deepEqual(repo.inserts.map((r) => r.employee_id), [42]);
+  });
+
+  /*
+   * THE FOUR NON-ATTENDANCE BLOCKERS STILL BLOCK INITIALIZE ITSELF, not just
+   * the status on the screen. Each one alone, at the point where the row would
+   * otherwise be written.
+   */
+  it("salary not approved still refuses the write", async () => {
+    const repo = fakeRepo({ salaries: [] });
+    const out = await buildUsecase(repo).initialize({
+      year: YEAR, month: MONTH, employee_ids: [42], actor: ACTOR,
+    });
+    assert.equal(out.results[0].result, ROW_RESULT.BLOCKED);
+    assert.ok(out.results[0].message.match(/Salary not approved/));
+    assert.equal(repo.inserts.length, 0);
+  });
+
+  it("an incomplete statutory setup still refuses the write", async () => {
+    const repo = fakeRepo({ population: [employee({ pf_applicable: null })] });
+    const out = await buildUsecase(repo).initialize({
+      year: YEAR, month: MONTH, employee_ids: [42], actor: ACTOR,
+    });
+    assert.equal(out.results[0].result, ROW_RESULT.BLOCKED);
+    assert.ok(out.results[0].message.match(/Statutory setup incomplete/));
+    assert.equal(repo.inserts.length, 0);
+  });
+
+  it("somebody not employed in the month still refuses the write", async () => {
+    const repo = fakeRepo({
+      population: [employee({ date_of_joining: "2026-09-01" })],
+    });
+    const out = await buildUsecase(repo).initialize({
+      year: YEAR, month: MONTH, employee_ids: [42], actor: ACTOR,
+    });
+    assert.equal(out.results[0].result, ROW_RESULT.BLOCKED);
+    assert.ok(out.results[0].message.match(/Not employed/));
+    assert.equal(repo.inserts.length, 0);
+  });
+
+  it("an employee with nothing but attendance outstanding IS written", async () => {
+    const repo = fakeRepo({
+      attendance: [],
+      pending: [{ employee_id: 42, pending_regularizations: 2, pending_ot: 3 }],
+    });
+    const out = await buildUsecase(repo).initialize({
+      year: YEAR, month: MONTH, employee_ids: [42], actor: ACTOR,
+    });
+    assert.equal(out.results[0].result, ROW_RESULT.INITIALIZED);
+    assert.deepEqual(repo.inserts.map((r) => r.employee_id), [42]);
+    // No attendance to reference yet. The calculation stage sees the real one
+    // arrive as a source change and asks for a Recalculate.
+    assert.equal(repo.inserts[0].attendance_monthly_payroll_id, null);
   });
 
   it("a blocked row never reaches the database, even alone", async () => {
@@ -819,7 +918,9 @@ describe("initialization", () => {
     const usecase = buildUsecase(repo);
     await usecase.initialize({ year: YEAR, month: MONTH, employee_ids: [42], actor: ACTOR });
 
-    // A regularization is raised after the snapshot was taken.
+    // Their approved salary is withdrawn after the snapshot was taken.
+    repo.listApprovedSalaries = async () => [];
+    // And a regularization is raised.
     repo.listPendingApprovals = async () => [
       { employee_id: 42, pending_regularizations: 1, pending_ot: 0 },
     ];
@@ -827,7 +928,8 @@ describe("initialization", () => {
     assert.equal(row.status, STATUS_GROUP.INITIALIZED);
     // The reason is still reported - a Recalculate will have to deal with it -
     // but it no longer decides the group.
-    assert.ok(reasonCodes(row).includes(BLOCK_REASON.PENDING_ATTENDANCE_REGULARIZATION));
+    assert.ok(reasonCodes(row).includes(BLOCK_REASON.SALARY_NOT_APPROVED));
+    assert.ok(warningCodes(row).includes(WARNING.PENDING_ATTENDANCE_REGULARIZATION));
   });
 
   it("the snapshot is what the month is read from afterwards, not the live salary", async () => {

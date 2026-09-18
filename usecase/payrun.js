@@ -38,8 +38,14 @@ const {
  *
  * NO ATTENDANCE IS CALCULATED HERE, and none is recalculated. The payrun READS
  * `attendance_monthly_payroll` - the row the attendance engine stores - and
- * refuses a month the engine has not settled. There is no punch, shift or
- * minute anywhere in this feature.
+ * records a REFERENCE to it. It does NOT refuse a month the engine has not
+ * settled: an unsettled month, an open regularization and an open OT approval
+ * are reported on the row and refused at APPROVE & LOCK, which is where the
+ * money is committed. Initializing an employee whose attendance is still
+ * moving snapshots a null reference, and the calculation stage then sees the
+ * real one arrive as a source change and demands a Recalculate - which is the
+ * behaviour that already existed for a salary revision. There is no punch,
+ * shift or minute anywhere in this feature.
  *
  * NOTHING A CLIENT SENDS BECOMES A STORED VALUE, except the two things a
  * client is entitled to choose: WHICH employees to initialize and WHICH of the
