@@ -985,3 +985,155 @@ describe("one employee's breakup", () => {
     );
   });
 });
+
+/* ===================================================================== */
+/*  the month an initialized employee has no attendance for              */
+/* ===================================================================== */
+
+/**
+ * SEPTEMBER 2026, PRODUCTION: one employee initialized, no attendance month,
+ * no final day rows, no approved OT, no adjustment - and Calculation & Review
+ * showed a read failure with every counter at zero.
+ *
+ * THE FAILURE ITSELF WAS SCHEMA DRIFT, not this assembly path: the deployed
+ * `payrun_employee_calculation` was missing eight columns the repository
+ * selects, so the month's SELECT died in MySQL before any of this ran. That is
+ * repaired by `migrations/.../20261024120000-payrun-calculation-column-drift`
+ * and guarded by `migrations/payrun_calculation_column_drift.test.js`.
+ *
+ * THESE TESTS GUARD THE OTHER HALF: that the state itself - an initialized
+ * employee with NOTHING from attendance - is a MONTH THAT LOADS, with the
+ * employee in it, and never an API failure. Initialization stopped refusing on
+ * attendance, so this state is now ordinary rather than impossible, and every
+ * empty collection below has to be a valid input.
+ *
+ * NO RULE MOVES HERE. The employee is NOT_CALCULATED before anybody calculates
+ * them, attendance that is missing is an approval blocker exactly as
+ * attendance that is not final is, and Approve & Lock still refuses.
+ */
+describe("an initialized employee whose attendance does not exist yet", () => {
+  /** Initialized, and nothing whatever from the attendance engine. */
+  const addWithNoAttendance = (employeeId) => {
+    world.add(employeeId);
+    world.attendance.delete(employeeId);  // no attendance_monthly_payroll row
+    world.nrm.delete(employeeId);         // no final attendance_day_calculation rows
+    world.pending.delete(employeeId);     // no approved and no pending OT
+  };
+
+  it("loads the month, and the employee is in it", async () => {
+    addWithNoAttendance(1952);
+
+    const month = await monthView();
+    assert.equal(month.rows.length, 1);
+    assert.equal(month.rows[0].employee_id, 1952);
+    assert.equal(month.period_year, 2026);
+    assert.equal(month.period_month, 8);
+  });
+
+  it("counts the employee as initialized and not calculated", async () => {
+    addWithNoAttendance(1952);
+
+    const month = await monthView();
+    assert.equal(month.summary.initialized, 1);
+    assert.equal(month.summary.not_calculated, 1);
+    assert.equal(month.summary.ready_for_approval, 0);
+    assert.equal(month.summary.approved_locked, 0);
+  });
+
+  it("is NOT_CALCULATED before the first calculation, and says so rather than failing", async () => {
+    addWithNoAttendance(1952);
+
+    const row = await rowOf(1952);
+    assert.equal(row.status, CALC_STATUS.NOT_CALCULATED);
+    assert.ok(row.blockers.some((b) => b.code === "NOT_CALCULATED"));
+    assert.equal(row.net_pay, null);
+    assert.equal(row.payslip_eligible, false);
+  });
+
+  it("loads with no NRM groups at all", async () => {
+    world.add(1952);
+    world.nrm.set(1952, []);  // nothing final, so no NRM evidence
+
+    const month = await monthView();
+    assert.equal(month.summary.initialized, 1);
+    assert.ok(month.rows.some((r) => r.employee_id === 1952));
+  });
+
+  it("loads with no approved OT anywhere in the month", async () => {
+    world.add(1952);
+    world.attendance.get(1952).approved_ot_minutes = 0;
+    world.nrm.set(1952, []);
+
+    const month = await monthView();
+    assert.equal(month.summary.initialized, 1);
+    assert.equal((await rowOf(1952)).status, CALC_STATUS.NOT_CALCULATED);
+  });
+
+  it("loads for NO_ADJUSTMENT_CONFIRMED with no attendance", async () => {
+    addWithNoAttendance(1952);
+    world.states.set(1952, { employee_id: 1952, confirmed_no_adjustment: 1 });
+
+    const row = await rowOf(1952);
+    assert.equal(row.adjustment_state, "NO_ADJUSTMENT_CONFIRMED");
+    assert.equal(row.status, CALC_STATUS.NOT_CALCULATED);
+  });
+
+  /**
+   * THE GATE DID NOT MOVE. A missing attendance month is exactly as much of a
+   * refusal at Approve & Lock as a non-final one - and the refusal is proved
+   * by `approve` declining, not by the blocker being listed.
+   */
+  it("still refuses Approve & Lock once the month has been calculated", async () => {
+    addWithNoAttendance(1952);
+    await calculation.calculate({ ...MONTH, employee_ids: [1952], actor: ACTOR });
+
+    const row = await rowOf(1952);
+    // The month WAS calculated - the refusal below is the approval gate
+    // refusing a calculated employee, not the absence of a calculation.
+    assert.equal(row.status, CALC_STATUS.CALCULATED);
+    assert.ok(row.calculation_hash);
+    assert.ok(row.blockers.some((b) => b.code === "ATTENDANCE_INCOMPLETE"));
+
+    const refused = await calculation.approve({ ...MONTH, employee_ids: [1952], actor: ACTOR });
+    assert.equal(refused.approved_count, 0);
+    assert.equal(refused.blocked_count, 1);
+    assert.notEqual((await rowOf(1952)).status, CALC_STATUS.APPROVED_LOCKED);
+  });
+
+  /**
+   * ONE EMPLOYEE'S MISSING DATA IS ONE EMPLOYEE'S PROBLEM. A month is six
+   * hundred people; one of them with no attendance row must not take the other
+   * five hundred and ninety-nine off the screen.
+   */
+  it("does not take the rest of the month down with it", async () => {
+    world.add(1);                 // ordinary, fully attended
+    addWithNoAttendance(1952);    // nothing from attendance at all
+    world.add(2);
+    world.attendance.get(2).is_final = 0;   // settled by the engine, but not final
+
+    const month = await monthView();
+    assert.equal(month.summary.initialized, 3);
+    assert.deepEqual(month.rows.map((r) => r.employee_id).sort((a, b) => a - b), [1, 2, 1952]);
+    month.rows.forEach((row) => assert.equal(row.status, CALC_STATUS.NOT_CALCULATED));
+  });
+
+  it("leaves an employee with final attendance behaving exactly as before", async () => {
+    world.add(1);
+    addWithNoAttendance(1952);
+    await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
+
+    const ordinary = await rowOf(1);
+    assert.equal(ordinary.status, CALC_STATUS.READY_FOR_APPROVAL);
+    assert.deepEqual(ordinary.blockers, []);
+    assert.equal(ordinary.salary_days, 26);
+    assert.ok(Number(ordinary.net_pay) > 0);
+
+    const approved = await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(approved.approved_count, 1);
+    assert.equal((await rowOf(1)).status, CALC_STATUS.APPROVED_LOCKED);
+    assert.equal((await rowOf(1)).payslip_eligible, true);
+
+    // ...and the one with no attendance is still there, still refused.
+    assert.notEqual((await rowOf(1952)).status, CALC_STATUS.APPROVED_LOCKED);
+  });
+});

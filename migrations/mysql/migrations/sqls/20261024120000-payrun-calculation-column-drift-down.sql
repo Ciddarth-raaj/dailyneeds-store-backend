@@ -1,0 +1,13 @@
+-- Reverses nothing, deliberately.
+--
+-- The up-migration adds nine NULLable columns to `payrun_employee_calculation`
+-- that the application reads and writes on every calculation. Dropping them
+-- would not return the database to a state anything can run against - it would
+-- return it to the broken state this migration exists to repair, and it would
+-- destroy the stored ESI contribution-period evidence and per-NRM OT breakdown
+-- of every month calculated since, which are the figures an approved payroll
+-- has to be able to explain itself with.
+--
+-- The whole stage is dropped by `20261023120000-payrun-calculation-down.sql`,
+-- which is the honest way to undo it.
+DO 0;
