@@ -1384,7 +1384,11 @@ class Server {
       this.employeeBankUsecase,
       this.employeeStatusSummaryUsecase,
       this.ifscLookupUsecase,
-      this.employeeBranchScope
+      this.employeeBranchScope,
+      // Read-only, for `/hr/employees/outlets`: the branch dropdown the
+      // employee screens use, narrowed to the caller's authorized branches.
+      // `/outlet/directory` stays company-wide for the filters that need it.
+      this.outletUsecase
     );
     // Employee Master Bulk Export / Import. Mounted at /hr with the other
     // employee writes; it claims only the /hr/employees/bulk endpoints,
