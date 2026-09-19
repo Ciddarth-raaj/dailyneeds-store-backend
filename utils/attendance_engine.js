@@ -137,8 +137,16 @@ const BREAK_CREDIT_CUTOFF_MINUTES = 15 * 60;
  *      are provisional - was charged the employee's personal break. Such a
  *      day is now calculated on the shift's own break, like every other
  *      incomplete day. Both settings read one shared predicate.
+ *   9  THE PAYROLL BASE NRM. Regular time, overtime and shortage are measured
+ *      against `base_nrm_minutes` - the PERMANENT shift's NRM for the date -
+ *      rather than against the NRM of the shift the date was calculated
+ *      under. The two differ only on a date carrying an approved one-day
+ *      shift override, where the temporary shift decides every attendance
+ *      rule and the permanent one decides the entitlement. `regular_minutes`
+ *      and `base_nrm_minutes` are stored on the row, and the two-punch OT
+ *      restriction is expressed as the uncharged break it always stood for.
  */
-const CALCULATION_VERSION = 8;
+const CALCULATION_VERSION = 9;
 
 /** Every value `status` can take. A calculation is never left without one. */
 const CALC_STATUS = Object.freeze({
@@ -623,6 +631,8 @@ function calculateAttendanceDay(input = {}) {
     approved_ot_minutes = null,
     regularization_pending = false,
     attendance_required = true,
+    base_nrm_minutes = null,
+    base_shift = null,
   } = input;
 
   const rawPunches = orderPunches(punches, attendance_date);
@@ -659,6 +669,15 @@ function calculateAttendanceDay(input = {}) {
     punch_count: effectivePunches.length,
     attendance_day_count: 0,
     nrm_minutes: 0,
+    // THE PAYROLL BASE. On an ordinary day these are the day's own NRM and
+    // its own shift. On a day carrying an APPROVED ONE-DAY SHIFT OVERRIDE
+    // they are the PERMANENT shift's - see `resolvePayrollNrm` below for why
+    // the two have to be separate concepts on the same row.
+    base_nrm_minutes: 0,
+    base_work_shift_id: base_shift ? Number(base_shift.work_shift_id) || null : null,
+    // Regular = MIN(worked, base NRM). Stored rather than re-derived so a
+    // payslip query never has to know the rule.
+    regular_minutes: 0,
     span_minutes: 0,
     break_allowance_minutes: 0,
     break_allowance_source: "SHIFT",
@@ -822,6 +841,60 @@ function calculateAttendanceDay(input = {}) {
   const allowedBreak = Math.max(0, baseAllowedBreak + extraBreak);
   const nrm = Math.max(0, shiftSpan - allowedBreak);
 
+  /*
+   * THE PAYROLL BASE NRM, AND WHY IT IS NOT ALWAYS THE DAY'S OWN NRM.
+   *
+   * `nrm` above is the NRM of the shift this date was CALCULATED under - the
+   * one that decides the expected in and out, the lunch and break rules, the
+   * late and early-going flags and how many punches the day should contain.
+   * On an ordinary date that is also the employee's entitlement, so the two
+   * are the same number and nothing below changes.
+   *
+   * On a date carrying an APPROVED ONE-DAY SHIFT OVERRIDE they are NOT the
+   * same. An employee whose permanent shift is 6pm-10pm (4h) and who is
+   * approved to work 10am-10pm for one Saturday is still ENTITLED to 4h: the
+   * longer day is overtime, not a larger regular day, and the salary master
+   * is untouched. Measuring regular time against the temporary shift would
+   * pay 10h of regular and no overtime; measuring SHORTAGE against it would
+   * invent 7h of shortage for somebody who worked 3h of a 4h entitlement.
+   *
+   * So the three PAY figures - regular, overtime and shortage - are measured
+   * against `payrollNrm`, the base/permanent shift's NRM for the date, while
+   * every ATTENDANCE rule above and below goes on reading the resolved
+   * shift's own snapshot. `base_nrm_minutes` is supplied by the caller
+   * (`usecase/attendance_calculation.js`, which resolves the permanent
+   * assignment history for the date alongside the override); when it is not
+   * supplied the day's own NRM is the base, which is every ordinary date.
+   */
+  /*
+   * The base NRM is computed HERE, from the base shift's own snapshot, rather
+   * than handed in as a number - so it goes through exactly the same break
+   * rules the day's own NRM went through (the employee's break override
+   * REPLACES the shift break, their Extra Break Hours are ADDED to it, and
+   * both need a complete punched sequence). A caller computing it separately
+   * would be a second implementation of that rule, and the first one to drift.
+   *
+   * `base_nrm_minutes` remains as an explicit escape hatch for tests and for
+   * a caller that has the figure already; `base_shift` wins when both arrive.
+   */
+  let payrollNrm = nrm;
+  if (base_shift && Number(base_shift.work_shift_id) !== Number(shift.work_shift_id)) {
+    const baseSpan = Math.max(0, Math.trunc(base_shift.shift_span_minutes || 0));
+    const baseBreak = Math.max(
+      0,
+      Math.trunc(overrideGiven ? Number(break_override_minutes) : base_shift.break_minutes || 0)
+    );
+    const baseExtra = extraGiven && baseBreak + extraWanted < baseSpan ? extraWanted : 0;
+    payrollNrm = Math.max(0, baseSpan - (baseBreak + baseExtra));
+  } else if (
+    base_nrm_minutes !== null &&
+    base_nrm_minutes !== undefined &&
+    Number.isFinite(Number(base_nrm_minutes))
+  ) {
+    payrollNrm = Math.max(0, Math.trunc(Number(base_nrm_minutes)));
+  }
+  base.base_nrm_minutes = payrollNrm;
+
   base.break_allowance_minutes = allowedBreak;
   // EMPLOYEE_OVERRIDE means "this allowance is the employee's, not the
   // shift's" - which is exactly what an added Extra Break makes it, so the
@@ -928,7 +1001,21 @@ function calculateAttendanceDay(input = {}) {
     // No OUT/IN evidence exists, so there is nothing to say the break was
     // short. Surplus from an uncharged break must not become OT; only time
     // genuinely beyond the shift span can.
-    otBasis = Math.max(0, span - shiftSpan);
+    // THE UNCHARGED BREAK, not a fixed span comparison.
+    //
+    // This used to read `span - shiftSpan`, which is the same number whenever
+    // the pay base IS the day's own shift: surplus = span - breakCharged -
+    // (shiftSpan - allowedBreak), so subtracting the break the day was
+    // credited but cannot prove it took - `allowedBreak - breakCharged` -
+    // leaves exactly `span - shiftSpan`. Written this way it stays correct on
+    // a one-day override, where the surplus is measured against the BASE
+    // shift and the old form would have suppressed genuine overtime for the
+    // hours between the base shift's span and the longer temporary one.
+    otBasis = Math.max(
+      0,
+      Math.max(0, Math.max(0, span - breakCharged) - payrollNrm) -
+        Math.max(0, allowedBreak - breakCharged)
+    );
     base.notes.push(TWO_PUNCH_OT_NOTE);
   } else {
     // Every OUT -> next IN gap, summed. No gap is singled out as "the lunch
@@ -943,8 +1030,9 @@ function calculateAttendanceDay(input = {}) {
   }
 
   const worked = Math.max(0, span - breakCharged);
-  const rawShortage = Math.max(0, nrm - worked);
-  const surplus = Math.max(0, worked - nrm);
+  // Against the PAYROLL BASE, never against a temporary shift's own NRM.
+  const rawShortage = Math.max(0, payrollNrm - worked);
+  const surplus = Math.max(0, worked - payrollNrm);
 
   // The no-lunch rule: a two-punch day whose last punch is before the cutoff.
   const breakCreditWithheld =
@@ -959,7 +1047,7 @@ function calculateAttendanceDay(input = {}) {
     break_credit_withheld: breakCreditWithheld,
     late_minutes: base.late_minutes || 0,
     early_exit_minutes: base.early_exit_minutes || 0,
-    nrm_minutes: nrm,
+    nrm_minutes: payrollNrm,
     shift,
   });
   const shortage = grace.shortage_minutes;
@@ -967,6 +1055,7 @@ function calculateAttendanceDay(input = {}) {
   base.actual_gap_minutes = actualGaps;
   base.break_charged_minutes = breakCharged;
   base.worked_minutes = worked;
+  base.regular_minutes = Math.min(worked, payrollNrm);
   base.shortage_minutes = shortage;
   base.grace_forgiven_minutes = grace.grace_forgiven_minutes;
   base.late_charged_minutes = grace.late_charged_minutes;

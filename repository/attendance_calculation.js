@@ -58,13 +58,18 @@ const CALCULATION_COLUMNS = [
   "employee_id", "attendance_date", "work_shift_id", "work_shift_weekly_schedule_id",
   "work_shift_config_version_id",
   "shift_snapshot", "shift_snapshot_hash", "raw_punch_ids", "effective_punches",
-  "punch_count", "attendance_day_count", "nrm_minutes", "span_minutes",
+  "punch_count", "attendance_day_count", "nrm_minutes",
+  // The PAYROLL BASE: the permanent shift's NRM for the date, and the shift
+  // it came from. Equal to `nrm_minutes` on every date without an approved
+  // one-day shift override. See `20261029120000-shift-change-request`.
+  "base_nrm_minutes", "base_work_shift_id",
+  "span_minutes",
   "break_allowance_minutes", "break_allowance_source",
   // What the employee's own settings contributed, as applied. See
   // `20261025120000-attendance-break-provenance`.
   "break_override_minutes_applied", "extra_break_minutes_applied",
   "actual_gap_minutes",
-  "break_charged_minutes", "worked_minutes", "shortage_minutes", "late_minutes",
+  "break_charged_minutes", "worked_minutes", "regular_minutes", "shortage_minutes", "late_minutes",
   "early_exit_minutes", "pre_shift_minutes", "post_shift_minutes",
   "raw_ot_minutes", "ot_offset_minutes", "pre_shift_ot_minutes", "post_shift_ot_minutes",
   "candidate_ot_minutes", "approved_ot_minutes",
@@ -867,6 +872,43 @@ class AttendanceCalculationRepository {
     } finally {
       connection.release();
     }
+  }
+
+  /**
+   * WHICH of these (employee, date) pairs fall in a payroll-locked month.
+   *
+   * READ-ONLY AND OUTSIDE ANY TRANSACTION, and therefore deliberately NOT the
+   * rule: `assertMonthsNotPayrollLocked` above, which takes the row lock
+   * inside the writing transaction, remains the only thing that can actually
+   * stop a write, and nothing here weakens it. This exists so that a path
+   * which is about to REFUSE AN ACTION rather than write a number - filing a
+   * shift request, approving one, dating a permanent shift change into a
+   * closed month - can say so before it starts, in a sentence that names the
+   * month. A lock landing between this check and the write is exactly the
+   * race the transactional guard is there for.
+   *
+   * @param {Array} rows  `[{ employee_id, attendance_date }]`
+   * @returns {Array} `[{ employee_id, year, month }]`, empty when none
+   */
+  async findPayrollLockedPeriods(rows = []) {
+    const { periods } = periodsTouched(rows);
+    if (periods.length === 0) return [];
+
+    const found = [];
+    for (const period of periods) {
+      /* eslint-disable no-await-in-loop */
+      const hit = await this._read(
+        "FIND-PAYROLL-LOCKED",
+        `SELECT employee_id, period_year, period_month, status
+           FROM payrun_employee_calculation
+          WHERE period_year = ? AND period_month = ? AND employee_id = ? AND status = ?
+          LIMIT 1`,
+        [period.year, period.month, period.employee_id, PAYROLL_LOCK_STATUS]
+      );
+      /* eslint-enable no-await-in-loop */
+      if (hit.length > 0) found.push(period);
+    }
+    return found;
   }
 
   /* ------------------------------------------- bulk recalculation */

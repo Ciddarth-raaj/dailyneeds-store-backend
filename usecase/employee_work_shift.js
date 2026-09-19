@@ -1,4 +1,6 @@
 const { istToday } = require("../utils/istDate");
+const { resolveAssignmentForDate, toDateOnly } = require("../utils/shiftResolution");
+const { payrollLockedActionError } = require("../utils/attendance_payroll_lock");
 
 const {
   ASSIGNMENT_STATUS,
@@ -163,10 +165,57 @@ class EmployeeWorkShiftUsecase {
      * assigns, exactly as before.
      */
     this.punchRedriveService = null;
+    /**
+     * The attendance calculation usecase and its repository, wired by
+     * `server.js` after all three exist. Optional: without them an
+     * effective-dated shift change still records history, and simply reports
+     * that the affected dates must be recalculated by hand - which is exactly
+     * what `correctAssignment` has always done.
+     */
+    this.attendanceCalculationUsecase = null;
+    this.attendanceCalculationRepo = null;
   }
 
   setPunchRedriveService(service) {
     this.punchRedriveService = service || null;
+  }
+
+  setAttendanceCalculation(usecase, repo) {
+    this.attendanceCalculationUsecase = usecase || null;
+    this.attendanceCalculationRepo = repo || null;
+  }
+
+  /**
+   * Refuse a change that would reach into a payroll-locked month.
+   *
+   * THE DATES CHECKED ARE THE DATES THE CHANGE WOULD MOVE - `effective_from`
+   * and every date after it up to today, because an effective-dated change is
+   * open-ended forward and recalculating it rewrites all of them. A change
+   * dated into the FUTURE touches no settled date at all and is checked
+   * against nothing; it becomes checkable, like any other date, when it
+   * arrives.
+   *
+   * This is the early, speaking refusal. The rule that cannot be bypassed is
+   * still the `FOR UPDATE` guard inside the write transaction.
+   */
+  async _assertUnlockedFrom(employeeId, effectiveFrom, today, action) {
+    if (!this.attendanceCalculationRepo) return;
+    if (effectiveFrom > today) return;
+
+    // One probe per calendar month from the effective date to today: the lock
+    // is monthly, so a date per month answers for the whole of it.
+    const probes = [];
+    let cursor = `${effectiveFrom.slice(0, 7)}-01`;
+    const lastMonth = `${today.slice(0, 7)}-01`;
+    while (cursor <= lastMonth) {
+      probes.push({ employee_id: employeeId, attendance_date: cursor });
+      const y = Number(cursor.slice(0, 4));
+      const m = Number(cursor.slice(5, 7));
+      cursor = m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, "0")}-01`;
+    }
+
+    const locked = await this.attendanceCalculationRepo.findPayrollLockedPeriods(probes);
+    if (locked.length > 0) throw payrollLockedActionError(locked, action);
   }
 
   /** Never let re-derivation fail an assignment that has already committed. */
@@ -403,6 +452,187 @@ class EmployeeWorkShiftUsecase {
       shift_code: shift.shift_code,
       shift_name: shift.shift_name,
       punch_redrive: punchRedrive,
+    };
+  }
+
+  /**
+   * EDIT SHIFT ASSIGNMENT - the employee's PERMANENT shift, from a date.
+   *
+   * WHAT IT IS, AND WHY IT IS A THIRD PATH. `assign` moves somebody to a new
+   * shift TODAY and has no date field, which is right for the bulk roster
+   * screen and useless for "she moves to the evening shift from the 1st".
+   * `correctAssignment` says a past record was WRONG, which is a different
+   * assertion and carries a different word on the row. This one says the
+   * roster CHANGES from a stated date - the date may be in the past, today,
+   * or in the future - and it is the flow the approved task describes.
+   *
+   * THE RESULT, stated exactly:
+   *
+   *     effective_from = 01/09     01-14 Sep resolve to the NEW shift
+   *     ... and a later row dated 15/09 makes 01-14 the old one and 15
+   *     onwards the new one. NOTHING BEFORE THE EFFECTIVE DATE MOVES, because
+   *     resolution reads the greatest `effective_from <= date` and this
+   *     appends rather than editing.
+   *
+   * NO HISTORY IS OVERWRITTEN OR DELETED. Ever. A further row is appended and
+   * the previous rows stay exactly as they were, which is what makes the
+   * history panel an audit trail rather than a current-value display.
+   *
+   * THE PAYROLL LOCK IS CHECKED HERE **AND** AT THE WRITE. Here, so the save
+   * is refused with a sentence naming the locked month instead of appearing
+   * to work; and at the write, inside the transaction and under a row lock,
+   * because that is the guard a race cannot get past. A backdate into an open
+   * month is allowed exactly as the task specifies.
+   *
+   * RECALCULATION IS AUTOMATIC AND BOUNDED. Unlike `correctAssignment`, which
+   * deliberately leaves the re-run to a human, a shift change recalculates
+   * from the effective date to today - those are precisely the dates whose
+   * NRM, shortage and overtime have just changed, and leaving them stale
+   * would leave the screens disagreeing with the history. A future-dated
+   * change recalculates nothing: there is nothing yet to recalculate.
+   */
+  async changeAssignment(payload = {}) {
+    const employeeId = Number(payload.employee_id);
+    if (!Number.isInteger(employeeId) || employeeId <= 0) {
+      throw validationError("employee_id is required and must be an employee id");
+    }
+
+    const workShiftId = Number(payload.work_shift_id);
+    if (!Number.isInteger(workShiftId) || workShiftId <= 0) {
+      throw validationError("work_shift_id is required and must be a work shift id");
+    }
+
+    const effectiveFrom = toDateOnly(payload.effective_from);
+    if (effectiveFrom === null) {
+      throw validationError(
+        "effective_from is required and must be a date as YYYY-MM-DD - a shift change must say which date it applies from"
+      );
+    }
+
+    const reason = typeof payload.reason === "string" ? payload.reason.trim() : "";
+    if (reason.length < 5) {
+      throw validationError("A reason of at least 5 characters is required");
+    }
+
+    const existing = await this.repo.findExistingEmployeeIds([employeeId]);
+    if (!existing || existing.length === 0) {
+      return { code: 422, msg: `No employee exists for id ${employeeId}` };
+    }
+
+    const shift = await this.repo.getActiveWorkShift(workShiftId);
+    if (!shift) return { code: 404, msg: "Work shift not found" };
+    if (!Number(shift.active)) {
+      return { code: 422, msg: "That work shift is inactive and cannot be assigned" };
+    }
+
+    // The shift being moved AWAY from, as the resolver sees it on the
+    // effective date - recorded on the response so the screen can state the
+    // change rather than only its destination.
+    const history = await this.repo.listAssignmentHistory(employeeId);
+    const previous = resolveAssignmentForDate(history, effectiveFrom);
+    if (previous && Number(previous.work_shift_id) === workShiftId) {
+      return {
+        code: 422,
+        msg: `That employee is already on ${shift.shift_code || shift.shift_name} from ${effectiveFrom}`,
+      };
+    }
+
+    const today = istToday(payload.today);
+    await this._assertUnlockedFrom(employeeId, effectiveFrom, today, "This shift change");
+
+    const result = await this.repo.changeAssignment({
+      employeeId,
+      workShiftId,
+      effectiveFrom,
+      note: reason,
+      createdBy: payload.actor_employee_id === undefined ? null : payload.actor_employee_id,
+    });
+
+    // The employee's CURRENT shift follows only a change that is in force.
+    // A change dated into next month has not happened yet.
+    if (effectiveFrom <= today) {
+      await this.repo.setDefaultWorkShift(employeeId, workShiftId);
+    }
+
+    const punchRedrive = await this._redrive([employeeId]);
+
+    // Recalculate exactly the dates this moved: the effective date to today.
+    let recalculated = null;
+    if (effectiveFrom <= today && this.attendanceCalculationUsecase) {
+      try {
+        recalculated = await this.attendanceCalculationUsecase.recalculateAndStore({
+          employee_id: employeeId,
+          from_date: effectiveFrom,
+          to_date: today,
+        });
+      } catch (err) {
+        // The history is committed and correct. A failed re-run is reported,
+        // never swallowed and never allowed to undo the assignment.
+        recalculated = { error: err && err.message ? err.message : String(err) };
+      }
+    }
+
+    return {
+      ...result,
+      shift_code: shift.shift_code,
+      shift_name: shift.shift_name,
+      previous_work_shift_id: previous ? Number(previous.work_shift_id) : null,
+      reason,
+      effective_from: effectiveFrom,
+      is_future_dated: effectiveFrom > today,
+      punch_redrive: punchRedrive,
+      recalculated,
+      msg:
+        effectiveFrom > today
+          ? `Recorded. ${shift.shift_code || shift.shift_name} applies from ${effectiveFrom}; nothing before it is affected.`
+          : `Recorded. ${shift.shift_code || shift.shift_name} applies from ${effectiveFrom}; attendance from that date has been recalculated and nothing before it is affected.`,
+    };
+  }
+
+  /**
+   * SHIFT HISTORY for one employee: every dated row, newest first.
+   *
+   * `is_current` is the RESOLVER's answer for today, not a column and not the
+   * first row: a future-dated change sits at the top of the list and is
+   * explicitly NOT current, which is precisely the thing a reader would
+   * otherwise get wrong.
+   */
+  async assignmentHistory(employeeId, { today = null } = {}) {
+    const id = Number(employeeId);
+    if (!Number.isInteger(id) || id <= 0) {
+      throw validationError("employee_id must be an employee id");
+    }
+
+    const rows = await this.repo.listAssignmentHistory(id);
+    const businessToday = istToday(today);
+    const current = resolveAssignmentForDate(rows, businessToday);
+    const currentId = current ? Number(current.employee_work_shift_assignment_id) : null;
+
+    return {
+      code: 200,
+      employee_id: id,
+      data: rows.map((row) => {
+        const rowId = Number(row.employee_work_shift_assignment_id);
+        const effectiveFrom = toDateOnly(row.effective_from);
+        return {
+          employee_work_shift_assignment_id: rowId,
+          effective_from: effectiveFrom,
+          work_shift_id: Number(row.work_shift_id),
+          shift_code: row.shift_code || null,
+          shift_name: row.shift_name || null,
+          work_shift_active:
+            row.work_shift_active === null || row.work_shift_active === undefined
+              ? null
+              : Boolean(Number(row.work_shift_active)),
+          source: row.source,
+          reason: row.note || null,
+          changed_by_employee_id: row.created_by === null ? null : Number(row.created_by),
+          changed_by_name: row.changed_by_name || null,
+          changed_at: row.created_at,
+          is_current: currentId !== null && rowId === currentId,
+          is_future_dated: effectiveFrom !== null && effectiveFrom > businessToday,
+        };
+      }),
     };
   }
 

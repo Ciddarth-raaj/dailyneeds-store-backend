@@ -390,6 +390,32 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       return resolution;
     };
 
+    /**
+     * The PERMANENT shift for a date - the dated assignment history ALONE,
+     * with the single-date overrides deliberately not passed.
+     *
+     * This is what the day's pay entitlement is measured against. On an
+     * ordinary date it resolves to the very same shift as `resolutionFor`,
+     * and the engine notices that the two ids match and changes nothing. On a
+     * date carrying an approved one-day override the two differ, and that
+     * difference is the whole point: the temporary shift decides the day's
+     * rules, the permanent one decides its regular time, its overtime split
+     * and its shortage.
+     */
+    const baseResolutions = new Map();
+    const baseResolutionFor = (date) => {
+      if (baseResolutions.has(date)) return baseResolutions.get(date);
+      const resolution = resolveShiftForDate({
+        assignments,
+        overrides: [],
+        attendanceDate: date,
+        readSchedule,
+        readShiftConfig,
+      });
+      baseResolutions.set(date, resolution);
+      return resolution;
+    };
+
     /** The shift's display name, from the live master row. Null if unknown. */
     const shiftNameFor = (workShiftId) => {
       const loaded = shiftCache.get(Number(workShiftId));
@@ -426,6 +452,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       extra_break_minutes: extraBreakMinutes(employee),
       attendance_required: attendanceRequired(employee),
       resolutionFor,
+      baseResolutionFor,
       readCutoff,
       shiftNameFor,
     };
@@ -658,6 +685,9 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
         approved_ot_minutes: approvedOt,
         regularization_pending: stillOpen,
         attendance_required: context.attendance_required,
+        // The PAYROLL BASE. Ignored by the engine whenever it names the same
+        // shift the day was calculated under, which is every ordinary date.
+        base_shift: context.baseResolutionFor(date).snapshot,
       });
 
       // STORED HISTORY WINS, when there is any and the date has closed. The
@@ -837,6 +867,8 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     punch_count: day.punch_count,
     attendance_day_count: day.attendance_day_count,
     nrm_minutes: day.nrm_minutes,
+    base_nrm_minutes: day.base_nrm_minutes === undefined ? day.nrm_minutes : day.base_nrm_minutes,
+    base_work_shift_id: day.base_work_shift_id === undefined ? null : day.base_work_shift_id,
     span_minutes: day.span_minutes,
     break_allowance_minutes: day.break_allowance_minutes,
     break_allowance_source: day.break_allowance_source,
@@ -849,6 +881,10 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     actual_gap_minutes: day.actual_gap_minutes,
     break_charged_minutes: day.break_charged_minutes,
     worked_minutes: day.worked_minutes,
+    regular_minutes:
+      day.regular_minutes === undefined
+        ? Math.min(day.worked_minutes || 0, day.nrm_minutes || 0)
+        : day.regular_minutes,
     shortage_minutes: day.shortage_minutes,
     late_minutes: day.late_minutes,
     early_exit_minutes: day.early_exit_minutes,

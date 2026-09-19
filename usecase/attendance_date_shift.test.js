@@ -230,7 +230,23 @@ describe("setDateShift", () => {
     assert.equal(stored.work_shift_id, 8);
     assert.equal(result.day.work_shift_id, 8);
     assert.equal(result.day.late_minutes, 240);
-    assert.ok(result.day.candidate_ot_minutes > 0, "the recalculated day now carries OT");
+
+    // THE ATTENDANCE RULES MOVED TO THE OVERRIDE; THE ENTITLEMENT DID NOT.
+    //
+    // The lateness above is the override's: 10:00 against a 06:00 start. The
+    // day's PAY, though, is still measured against the shift this employee is
+    // permanently on - LATE, 10:00-22:00, 660 minutes of NRM - because a
+    // one-date shift says which hours the day is judged by and says nothing
+    // about what the employee is entitled to be paid for it. So 660 worked
+    // minutes against a 660-minute entitlement is a full regular day with no
+    // overtime and no shortage, and NOT (as it read before the base NRM
+    // existed) an eight-hour day with four hours of overtime on it.
+    assert.equal(result.day.base_nrm_minutes, 660, "the PERMANENT shift's NRM");
+    assert.equal(result.day.nrm_minutes, 420, "the override's own NRM, for the day's rules");
+    assert.equal(result.day.worked_minutes, 660);
+    assert.equal(result.day.regular_minutes, 660);
+    assert.equal(result.day.shortage_minutes, 0);
+    assert.equal(result.day.candidate_ot_minutes, 0, "nothing beyond the base entitlement was worked");
 
     // Nothing was written to the employee's current shift or to the history:
     // the fake has no such method and none was called.

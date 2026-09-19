@@ -119,6 +119,8 @@ describe("the legacy shift mapping", () => {
     // assignment names back to the user.
     // M1 added the options read (`listActiveWorkShiftOptions`): one more
     // SELECT of `ws.shift_code` and its ORDER BY, both on the work_shift master.
+    // The shift-history read (`listAssignmentHistory`) adds one more, likewise
+    // joined from `work_shift`.
     const occurrences = code.match(/[A-Za-z_.]*shift_code/g) || [];
     assert.deepEqual(occurrences.sort(), [
       "shift_code",
@@ -128,13 +130,20 @@ describe("the legacy shift mapping", () => {
       "ws.shift_code",
       "ws.shift_code",
       "ws.shift_code",
+      "ws.shift_code",
     ]);
   });
 
   it("writes exactly one column on new_employee, and it is the new one", () => {
+    // TWO writers now - the bulk assignment and the single-employee
+    // effective-dated change - and the point of the test is unchanged: both
+    // set `default_work_shift_id` and nothing else, so no legacy shift column
+    // on `new_employee` is ever written from here.
     const updates = code.match(/UPDATE new_employee SET [^"`]*/g) || [];
-    assert.equal(updates.length, 1);
-    assert.match(updates[0], /^UPDATE new_employee SET default_work_shift_id = \? WHERE employee_id IN \(\?\)/);
+    assert.deepEqual(updates.map((u) => u.trim()).sort(), [
+      "UPDATE new_employee SET default_work_shift_id = ? WHERE employee_id = ?",
+      "UPDATE new_employee SET default_work_shift_id = ? WHERE employee_id IN (?)",
+    ]);
   });
 
   it("never SELECTs * from an employee table", () => {

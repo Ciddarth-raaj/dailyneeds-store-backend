@@ -339,6 +339,114 @@ class EmployeeWorkShiftRepository {
     });
   }
 
+  /**
+   * The EFFECTIVE-DATED permanent shift change.
+   *
+   * One further APPENDED row, exactly like `correctAssignment` above and like
+   * every other row of this table - nothing is updated and nothing is deleted,
+   * so the shift that applied to a date before `effective_from` goes on being
+   * resolvable from history for ever. `source = 'SHIFT_CHANGE'` distinguishes
+   * it from an ordinary assignment (always dated today) and from a correction
+   * (which asserts a past record was wrong).
+   *
+   * `default_work_shift_id` is written ONLY when the change takes effect on or
+   * before today - and by the caller, not here. A change dated into next month
+   * has not happened yet, and the employee's current shift is still their
+   * current shift until it does.
+   */
+  async changeAssignment({ employeeId, workShiftId, effectiveFrom, note, createdBy }) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `INSERT INTO employee_work_shift_assignment
+           (employee_id, work_shift_id, effective_from, source, note, created_by)
+         VALUES (?, ?, ?, 'SHIFT_CHANGE', ?, ?)`,
+        [employeeId, workShiftId, effectiveFrom, note, createdBy === undefined ? null : createdBy],
+        (err, result) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.EMPLOYEE_WORK_SHIFT",
+              code: "REPOSITORY.EMPLOYEE_WORK_SHIFT.CHANGE-ASSIGNMENT",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve({
+            code: 200,
+            employee_work_shift_assignment_id: result ? result.insertId : null,
+            employee_id: employeeId,
+            work_shift_id: workShiftId,
+            effective_from: effectiveFrom,
+            source: "SHIFT_CHANGE",
+          });
+        }
+      );
+    });
+  }
+
+  /** Set the employee's CURRENT shift. Used only when a change is in force today. */
+  async setDefaultWorkShift(employeeId, workShiftId) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        "UPDATE new_employee SET default_work_shift_id = ? WHERE employee_id = ?",
+        [workShiftId, employeeId],
+        (err) => (err ? reject(err) : resolve({ code: 200 }))
+      );
+    });
+  }
+
+  /**
+   * One employee's whole shift history, NEWEST FIRST, for the history panel.
+   *
+   * Every row, including the ones a later row has superseded: the screen shows
+   * what was true and when it was decided, so nothing is filtered out for
+   * being old. Which row is CURRENT is the resolver's answer, not a column,
+   * and the usecase marks it from `resolveAssignmentForDate` rather than
+   * letting the SQL guess.
+   */
+  async listAssignmentHistory(employeeId) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT a.employee_work_shift_assignment_id,
+                a.employee_id,
+                a.work_shift_id,
+                a.effective_from,
+                a.source,
+                a.note,
+                a.created_by,
+                a.created_at,
+                ws.shift_code,
+                ws.shift_name,
+                ws.active AS work_shift_active,
+                ne.employee_name AS changed_by_name
+           FROM employee_work_shift_assignment a
+           LEFT JOIN work_shift ws ON ws.work_shift_id = a.work_shift_id
+           LEFT JOIN new_employee ne ON ne.employee_id = a.created_by
+          WHERE a.employee_id = ?
+          ORDER BY a.effective_from DESC, a.employee_work_shift_assignment_id DESC`,
+        [employeeId],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.EMPLOYEE_WORK_SHIFT",
+              code: "REPOSITORY.EMPLOYEE_WORK_SHIFT.LIST-ASSIGNMENT-HISTORY",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(rows || []);
+        }
+      );
+    });
+  }
+
   async assignWorkShift(employeeIds, workShiftId, options = {}) {
     const connection = await getConnectionAsync(this.db);
     try {
