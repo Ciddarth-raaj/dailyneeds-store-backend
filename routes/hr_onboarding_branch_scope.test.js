@@ -78,6 +78,10 @@ const HR = { designation: 23, employee: 903, store: MOOLAKULAM };
 const HR_NO_SENSITIVE = { designation: 24, employee: 904, store: MOOLAKULAM };
 /** An administrator: `user_type = 2`, no keys at all, every branch. */
 const ADMIN = { designation: 25, employee: 905, store: KATHIRKAMAM };
+/** Payroll, branch-scoped: runs the payrun for their own outlet. */
+const PAYROLL_MANAGER = { designation: 27, employee: 907, store: KATHIRKAMAM };
+/** Payroll, company-wide: the same screens over every branch. */
+const PAYROLL_HR = { designation: 28, employee: 908, store: MOOLAKULAM };
 
 const GRANTS = {
   // The write keys too: a store manager onboards their own staff, which is
@@ -103,6 +107,16 @@ const GRANTS = {
     P.EMPLOYEE_SCOPE_ALL_BRANCHES,
   ],
   [ADMIN.designation]: [],
+  // PAYROLL. The payrun's reads take three keys together, and its rows go
+  // through the SAME `employee_branch_scope` as the employee list - which is
+  // why the payroll screens' outlet pickers are scoped by that scope too.
+  [PAYROLL_MANAGER.designation]: [P.VIEW_EMPLOYEES, P.VIEW_PAYROLL, P.VIEW_SALARY],
+  [PAYROLL_HR.designation]: [
+    P.VIEW_EMPLOYEES,
+    P.VIEW_PAYROLL,
+    P.VIEW_SALARY,
+    P.EMPLOYEE_SCOPE_ALL_BRANCHES,
+  ],
 };
 
 /** The employee table the branch resolver reads. Every actor is active. */
@@ -112,6 +126,8 @@ const EMPLOYEES = [
   { employee_id: HR.employee, store_id: MOOLAKULAM, status: 1 },
   { employee_id: HR_NO_SENSITIVE.employee, store_id: MOOLAKULAM, status: 1 },
   { employee_id: ADMIN.employee, store_id: KATHIRKAMAM, status: 1 },
+  { employee_id: PAYROLL_MANAGER.employee, store_id: KATHIRKAMAM, status: 1 },
+  { employee_id: PAYROLL_HR.employee, store_id: MOOLAKULAM, status: 1 },
 ];
 
 /* ---------------------------------------------------------- the doubles */
@@ -153,6 +169,15 @@ const employeeUsecase = {
   },
 };
 
+/** What the payrun was asked for. The payroll MATH is not touched here. */
+const payrunCalls = [];
+const payrunUsecase = {
+  getMonth: async (input) => {
+    payrunCalls.push(input);
+    return { year: input.year, month: input.month, employees: [] };
+  },
+};
+
 let server, port;
 
 before(async () => {
@@ -190,8 +215,13 @@ before(async () => {
     outletUsecase
   );
   const employees = require("./employee")(employeeUsecase, permissions, sensitive, branchScope);
+  // THE PAYRUN, on the SAME branch scope - which is the whole reason the
+  // payroll screens share the employee outlet source.
+  delete require.cache[require.resolve("./payrun")];
+  const payrun = require("./payrun")(payrunUsecase, permissions, sensitive, branchScope);
   app.use("/hr", master.getRouter());
   app.use("/employee", employees.getRouter());
+  app.use("/", payrun.getRouter());
 
   server = await new Promise((r) => {
     const s = app.listen(0, "127.0.0.1", () => r(s));
@@ -646,5 +676,85 @@ describe("the employee screens' outlet source and branch writes", () => {
     const r = await post(`/hr/employee/${HR.employee}/edit`, HR, { store_id: MOOLAKULAM });
     assert.equal(r.status, 200);
     assert.equal(r.body.employee_id, HR.employee);
+  });
+});
+
+/* ================= PAYROLL shares the same scope and the same source === */
+
+/**
+ * PAYROLL WAS THE LAST EMPLOYEE-SCOPED SURFACE READING THE COMPANY-WIDE
+ * OUTLET DIRECTORY. `routes/payrun.js` resolves its rows through
+ * `employee_branch_scope` - the same middleware as the employee list - so a
+ * branch-scoped payroll user already saw only their own branch's payrun, while
+ * the Location dropdown beside it named every outlet in the company. The
+ * picker and the rows disagreed, and the disagreement was a disclosure.
+ *
+ * Payrun Initialization and the payroll employee picker (Salary Revision &
+ * History) now read `GET /hr/employees/outlets`. Nothing about payroll
+ * calculation, salary logic, the payrun workflow or approval rules is touched
+ * by that - these assert the SCOPE and the REFUSAL only.
+ *
+ * SALARY APPROVAL IS DELIBERATELY NOT HERE. Its queue,
+ * `GET /hr/salary/pending`, is intentionally company-wide - it takes no branch
+ * scope and is gated on three keys instead - so its dropdown correctly still
+ * names every outlet. See `customHooks/useOutlets.test.js`.
+ */
+describe("payroll: the branch scope and the outlet source", () => {
+  it("serves a branch-scoped payroll user only their own outlet", async () => {
+    const r = await call("/hr/employees/outlets", PAYROLL_MANAGER);
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body, [{ outlet_id: KATHIRKAMAM, outlet_name: "Kathirkamam" }]);
+  });
+
+  it("NEVER SENDS A FOREIGN OUTLET NAME to a branch-scoped payroll user", async () => {
+    // Asserted on the raw body: the leak is the bytes, not the parse.
+    const r = await call("/hr/employees/outlets", PAYROLL_MANAGER);
+    for (const foreign of ["Moolakulam", "Villianur", `"outlet_id":${MOOLAKULAM}`]) {
+      assert.ok(!r.text.includes(foreign), `${foreign} must not be sent`);
+    }
+  });
+
+  it("narrows the PAYRUN ITSELF to their branch when they ask for nothing", async () => {
+    const r = await call("/payrun/month?year=2026&month=4", PAYROLL_MANAGER);
+    assert.equal(r.status, 200);
+    assert.deepEqual(payrunCalls[payrunCalls.length - 1].store_ids, [KATHIRKAMAM]);
+  });
+
+  it("REJECTS A MANIPULATED FOREIGN OUTLET ID on the payrun", async () => {
+    // The dropdown cannot offer Moolakulam any more; this proves it would not
+    // matter if it did. The refusal is the server's, on the same
+    // `listFilters` the employee list uses.
+    const before = payrunCalls.length;
+    const r = await call(`/payrun/month?year=2026&month=4&store_ids[]=${MOOLAKULAM}`, PAYROLL_MANAGER);
+    assert.equal(r.status, 403);
+    assert.equal(r.body.error, "OUT_OF_BRANCH");
+    assert.equal(payrunCalls.length, before, "the payrun usecase was never reached");
+  });
+
+  it("honours their OWN branch as a filter - narrowing is not widening", async () => {
+    const r = await call(`/payrun/month?year=2026&month=4&store_ids[]=${KATHIRKAMAM}`, PAYROLL_MANAGER);
+    assert.equal(r.status, 200);
+    assert.deepEqual(payrunCalls[payrunCalls.length - 1].store_ids, [KATHIRKAMAM]);
+  });
+
+  it("gives an all-branch payroll user every outlet and an unrestricted payrun", async () => {
+    const outlets = await call("/hr/employees/outlets", PAYROLL_HR);
+    assert.equal(outlets.status, 200);
+    assert.deepEqual(outlets.body.map((o) => o.outlet_id).sort((a, b) => a - b), [KATHIRKAMAM, MOOLAKULAM, 9]);
+
+    const month = await call("/payrun/month?year=2026&month=4", PAYROLL_HR);
+    assert.equal(month.status, 200);
+    // `null` is NO RESTRICTION, and must not be confused with `[]`.
+    assert.equal(payrunCalls[payrunCalls.length - 1].store_ids, null);
+  });
+
+  it("gives an administrator the same, through the user_type bypass", async () => {
+    const outlets = await call("/hr/employees/outlets", ADMIN, { userType: 2 });
+    assert.equal(outlets.status, 200);
+    assert.equal(outlets.body.length, OUTLETS.length);
+
+    const month = await call("/payrun/month?year=2026&month=4", ADMIN, { userType: 2 });
+    assert.equal(month.status, 200);
+    assert.equal(payrunCalls[payrunCalls.length - 1].store_ids, null);
   });
 });
