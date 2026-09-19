@@ -7,18 +7,28 @@
  * TWO INDEPENDENT QUESTIONS, ASSERTED SEPARATELY, because they are separate
  * rules and a test that conflated them would pass while one of them was gone:
  *
- *   MAY THIS CALLER DO THIS AT ALL?   `employee_create` OR `employee_edit` to
- *                                     generate a link or disconnect;
- *                                     `view_employees` to read the status.
+ *   MAY THIS CALLER DO THIS AT ALL?   `employee_create` AND `employee_edit`,
+ *                                     BOTH, to generate a link or
+ *                                     disconnect; `view_employees` to read
+ *                                     the status.
  *   WHICH EMPLOYEES MAY THEY TOUCH?   the REAL branch scope middleware, built
  *                                     over an in-memory employee table by
  *                                     `test_support/employee_branch_scope.js`
  *                                     - HR and administrators company-wide,
  *                                     everybody else their own store.
  *
- * THE OR MATTERS. Finishing Telegram setup for an employee who already exists
- * must not require the right to CREATE employees - that is the approved rule,
- * and `permissions.require(A, B)` is already OR (`keys.some`).
+ * THE AND MATTERS, AND IT IS THE POINT OF THIS FILE. The mutation pair used
+ * to be an OR, so `employee_edit` alone opened the QR. The approved rule is
+ * now the conjunction: attaching, replacing or retiring an employee's
+ * Telegram identity needs BOTH `employee_create` AND `employee_edit`, and
+ * neither key alone is enough. `permissions.requireAll(A, B)` is that AND
+ * (`keys.every`), and the guard-shape tests below assert the MODE as well as
+ * the keys, so a silent slide back to `require` fails here rather than in
+ * production.
+ *
+ * NO NEW TELEGRAM PERMISSION KEY EXISTS. "mints no new permission key" in
+ * `employee_telegram_groups.test.js` pins that, and the change is purely the
+ * connective between two keys that already existed.
  */
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
@@ -124,15 +134,15 @@ describe("the endpoints and their keys", () => {
     );
   });
 
-  it("link-token is employee_create OR employee_edit - NOT create alone", () => {
+  it("link-token is employee_create AND employee_edit - both, not either", () => {
     const route = routesOf().find((r) => r.path.endsWith("/link-token"));
-    assert.equal(route.guard.mode, "any");
+    assert.equal(route.guard.mode, "all");
     assert.deepEqual(route.guard.keys.sort(), [P.EMPLOYEE_CREATE, P.EMPLOYEE_EDIT].sort());
   });
 
-  it("disconnect carries the same pair", () => {
+  it("disconnect carries the same pair, and the same AND", () => {
     const route = routesOf().find((r) => r.path.endsWith("/disconnect"));
-    assert.equal(route.guard.mode, "any");
+    assert.equal(route.guard.mode, "all");
     assert.deepEqual(route.guard.keys.sort(), [P.EMPLOYEE_CREATE, P.EMPLOYEE_EDIT].sort());
   });
 
@@ -250,6 +260,12 @@ describe("the REAL branch scope decides which employees are reachable", () => {
       if (isAdmin || asked.some((k) => keys.includes(k))) return next();
       return res.status(403).json({ code: 403, msg: "You do not have permission to perform this action" });
     },
+    // The AND the Telegram mutations now carry. Same 403 body as `require`,
+    // so a caller learns no more from being refused one way than the other.
+    requireAll: (...asked) => async (req, res, next) => {
+      if (isAdmin || asked.every((k) => keys.includes(k))) return next();
+      return res.status(403).json({ code: 403, msg: "You do not have permission to perform this action" });
+    },
   });
 
   /** Runs the route's whole middleware chain, as Express would. */
@@ -272,9 +288,14 @@ describe("the REAL branch scope decides which employees are reachable", () => {
 
   const LINK = "/employee/:employee_id/telegram/link-token";
 
+  // The store manager the branch tests use holds BOTH mutation keys, because
+  // that is what the rule now requires before the branch question is even
+  // reached. The key tests below prove that holding one is not enough.
+  const MANAGER_KEYS = [P.EMPLOYEE_EDIT, P.EMPLOYEE_CREATE];
+
   it("a store manager MAY generate a link for their own store's employee", async () => {
     const usecase = usecaseSpy();
-    const permissions = permissionsFor([P.EMPLOYEE_EDIT]);
+    const permissions = permissionsFor(MANAGER_KEYS);
     const res = await call(usecase, permissions, buildScopeFor(permissions, EMPLOYEES), {
       path: LINK,
       req: { params: { employee_id: "200" }, body: {}, decoded: { user_type: 1 }, auth: { employeeId: 100, userId: 5 } },
@@ -286,7 +307,8 @@ describe("the REAL branch scope decides which employees are reachable", () => {
 
   it("A STORE MANAGER MAY NOT TOUCH ANOTHER STORE'S EMPLOYEE", async () => {
     const usecase = usecaseSpy();
-    const permissions = permissionsFor([P.EMPLOYEE_EDIT]);
+    // Both keys held: the refusal below is the BRANCH refusing, not the keys.
+    const permissions = permissionsFor(MANAGER_KEYS);
     const res = await call(usecase, permissions, buildScopeFor(permissions, EMPLOYEES), {
       path: LINK,
       req: { params: { employee_id: "300" }, body: {}, decoded: { user_type: 1 }, auth: { employeeId: 100, userId: 5 } },
@@ -298,7 +320,7 @@ describe("the REAL branch scope decides which employees are reachable", () => {
 
   it("a non-existent employee is refused the SAME WAY, so ids cannot be probed", async () => {
     const usecase = usecaseSpy();
-    const permissions = permissionsFor([P.EMPLOYEE_EDIT]);
+    const permissions = permissionsFor(MANAGER_KEYS);
     const scope = buildScopeFor(permissions, EMPLOYEES);
 
     const missing = await call(usecase, permissions, scope, {
@@ -316,7 +338,11 @@ describe("the REAL branch scope decides which employees are reachable", () => {
 
   it("HR - the all-branches key - reaches every store", async () => {
     const usecase = usecaseSpy();
-    const permissions = permissionsFor([P.EMPLOYEE_EDIT, P.EMPLOYEE_SCOPE_ALL_BRANCHES]);
+    const permissions = permissionsFor([
+      P.EMPLOYEE_EDIT,
+      P.EMPLOYEE_CREATE,
+      P.EMPLOYEE_SCOPE_ALL_BRANCHES,
+    ]);
     const res = await call(usecase, permissions, buildScopeFor(permissions, EMPLOYEES), {
       path: LINK,
       req: { params: { employee_id: "300" }, body: {}, decoded: { user_type: 1 }, auth: { employeeId: 400, userId: 6 } },
@@ -349,16 +375,81 @@ describe("the REAL branch scope decides which employees are reachable", () => {
     assert.deepEqual(usecase.calls, []);
   });
 
-  it("employee_create alone is enough - and so is employee_edit alone", async () => {
-    for (const key of [P.EMPLOYEE_CREATE, P.EMPLOYEE_EDIT]) {
+  /*
+   * THE CONJUNCTION, END TO END. Each of these runs the real middleware chain
+   * against an IN-SCOPE employee (200 is the manager's own store), so the only
+   * thing that can decide the answer is the key pair.
+   */
+
+  it("EMPLOYEE_EDIT ALONE IS NOT ENOUGH - the QR is refused", async () => {
+    const usecase = usecaseSpy();
+    const permissions = permissionsFor([P.EMPLOYEE_EDIT]);
+    const res = await call(usecase, permissions, buildScopeFor(permissions, EMPLOYEES), {
+      path: LINK,
+      req: { params: { employee_id: "200" }, body: {}, decoded: { user_type: 1 }, auth: { employeeId: 100 } },
+    });
+
+    assert.equal(res.statusCode, 403);
+    assert.deepEqual(usecase.calls, [], "the usecase is never reached");
+  });
+
+  it("EMPLOYEE_CREATE ALONE IS NOT ENOUGH EITHER", async () => {
+    const usecase = usecaseSpy();
+    const permissions = permissionsFor([P.EMPLOYEE_CREATE]);
+    const res = await call(usecase, permissions, buildScopeFor(permissions, EMPLOYEES), {
+      path: LINK,
+      req: { params: { employee_id: "200" }, body: {}, decoded: { user_type: 1 }, auth: { employeeId: 100 } },
+    });
+
+    assert.equal(res.statusCode, 403);
+    assert.deepEqual(usecase.calls, []);
+  });
+
+  it("BOTH KEYS TOGETHER open it", async () => {
+    const usecase = usecaseSpy();
+    const permissions = permissionsFor([P.EMPLOYEE_CREATE, P.EMPLOYEE_EDIT]);
+    const res = await call(usecase, permissions, buildScopeFor(permissions, EMPLOYEES), {
+      path: LINK,
+      req: { params: { employee_id: "200" }, body: {}, decoded: { user_type: 1 }, auth: { employeeId: 100 } },
+    });
+
+    assert.equal(res.body.code, 200);
+    assert.deepEqual(usecase.calls[0].slice(0, 2), ["startLink", 200]);
+  });
+
+  it("DISCONNECT ANSWERS THE SAME WAY - one key refused, both allowed", async () => {
+    for (const keys of [[P.EMPLOYEE_EDIT], [P.EMPLOYEE_CREATE]]) {
       const usecase = usecaseSpy();
-      const permissions = permissionsFor([key]);
+      const permissions = permissionsFor(keys);
       const res = await call(usecase, permissions, buildScopeFor(permissions, EMPLOYEES), {
-        path: LINK,
+        path: "/employee/:employee_id/telegram/disconnect",
         req: { params: { employee_id: "200" }, body: {}, decoded: { user_type: 1 }, auth: { employeeId: 100 } },
       });
-      assert.equal(res.body.code, 200, `${key} alone must be enough`);
+      assert.equal(res.statusCode, 403, `${keys.join()} alone must be refused`);
+      assert.deepEqual(usecase.calls, []);
     }
+
+    const usecase = usecaseSpy();
+    const permissions = permissionsFor([P.EMPLOYEE_CREATE, P.EMPLOYEE_EDIT]);
+    const res = await call(usecase, permissions, buildScopeFor(permissions, EMPLOYEES), {
+      path: "/employee/:employee_id/telegram/disconnect",
+      req: { params: { employee_id: "200" }, body: {}, decoded: { user_type: 1 }, auth: { employeeId: 100 } },
+    });
+    assert.equal(res.body.code, 200);
+    assert.deepEqual(usecase.calls[0].slice(0, 2), ["disconnect", 200]);
+  });
+
+  it("VIEWING THE STATUS IS UNCHANGED - view_employees alone still reads it", async () => {
+    const usecase = usecaseSpy();
+    const permissions = permissionsFor([P.VIEW_EMPLOYEES]);
+    const res = await call(usecase, permissions, buildScopeFor(permissions, EMPLOYEES), {
+      path: "/employee/:employee_id/telegram",
+      method: "GET",
+      req: { params: { employee_id: "200" }, query: {}, decoded: { user_type: 1 }, auth: { employeeId: 100 } },
+    });
+
+    assert.equal(res.body.code, 200);
+    assert.deepEqual(usecase.calls[0].slice(0, 2), ["getStatus", 200]);
   });
 
   it("the status read is refused out of scope as well", async () => {
@@ -376,7 +467,7 @@ describe("the REAL branch scope decides which employees are reachable", () => {
 
   it("a caller whose own branch cannot be resolved is refused - it FAILS CLOSED", async () => {
     const usecase = usecaseSpy();
-    const permissions = permissionsFor([P.EMPLOYEE_EDIT]);
+    const permissions = permissionsFor(MANAGER_KEYS);
     const res = await call(usecase, permissions, buildScopeFor(permissions, EMPLOYEES), {
       path: LINK,
       // A login with no employee record behind it - a break-glass or system

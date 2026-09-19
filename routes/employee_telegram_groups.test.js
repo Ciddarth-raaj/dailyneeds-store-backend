@@ -17,7 +17,14 @@ const P = require("../constants/hr_permissions");
 const tagging = {
   require: (...keys) => {
     const mw = (req, res, next) => next();
-    mw.__guard = { keys };
+    mw.__guard = { keys, mode: "any" };
+    return mw;
+  },
+  // The mutation guard. `requireAll` is AND, and the write test below asserts
+  // the MODE as well as the keys so a slide back to OR fails here.
+  requireAll: (...keys) => {
+    const mw = (req, res, next) => next();
+    mw.__guard = { keys, mode: "all" };
     return mw;
   },
   actorFor: async () => ({ employee_id: 7 }),
@@ -107,12 +114,14 @@ describe("the two endpoints", () => {
   it("READ is view_employees - the same key as every other employee status", () => {
     assert.deepEqual(find(routes, "GET", "/telegram/groups").guard, {
       keys: [P.VIEW_EMPLOYEES],
+      mode: "any",
     });
   });
 
-  it("WRITE is the employee_create OR employee_edit pair, as Telegram onboarding already is", () => {
+  it("WRITE is employee_create AND employee_edit, as Telegram onboarding now is", () => {
     assert.deepEqual(find(routes, "POST", "join-link").guard, {
       keys: [P.EMPLOYEE_CREATE, P.EMPLOYEE_EDIT],
+      mode: "all",
     });
   });
 

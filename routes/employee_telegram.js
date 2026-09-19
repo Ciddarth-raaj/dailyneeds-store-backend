@@ -5,9 +5,9 @@ const P = require("../constants/hr_permissions");
 /**
  * EMPLOYEE TELEGRAM SETUP. Mounted at /hr, beside the other employee routers.
  *
- *   POST /employee/:employee_id/telegram/link-token   employee_create OR employee_edit
+ *   POST /employee/:employee_id/telegram/link-token   employee_create AND employee_edit
  *   GET  /employee/:employee_id/telegram              view_employees
- *   POST /employee/:employee_id/telegram/disconnect   employee_create OR employee_edit
+ *   POST /employee/:employee_id/telegram/disconnect   employee_create AND employee_edit
  *
  * EVERY ROUTE NAMES AN EMPLOYEE, AND EVERY ROUTE CARRIES
  * `requireEmployeeInScope()` immediately after its permission check. That is
@@ -18,11 +18,28 @@ const P = require("../constants/hr_permissions");
  * non-existent employee id is refused the same way as an out-of-branch one, so
  * ids cannot be enumerated by watching the answer change.
  *
- * `permissions.require(A, B)` IS ALREADY OR. It is the existing helper's
- * documented behaviour (`keys.some(...)`), so "employee_create OR
- * employee_edit" needs no new middleware - which matters, because the approved
- * rule is precisely that finishing Telegram setup for an EXISTING employee
- * must not require the right to CREATE employees.
+ * THE MUTATION PAIR IS AN AND, AND THAT IS A DELIBERATE CHANGE. These three
+ * endpoints used to read `permissions.require(A, B)`, which is OR
+ * (`keys.some(...)`), on the argument that finishing setup for an EXISTING
+ * employee should not require the right to CREATE employees. The approved rule
+ * is now the stricter one: attaching, replacing or retiring an employee's
+ * Telegram IDENTITY is a joint decision, so a non-administrator must hold BOTH
+ * `employee_create` AND `employee_edit`. Neither key alone opens it.
+ *
+ * `permissions.requireAll(A, B)` IS THAT AND - the existing helper's
+ * documented AND semantics (`keys.every(...)`) - so no new middleware and NO
+ * NEW PERMISSION KEY is minted for Telegram. The two keys already exist, are
+ * already on the Permission Matrix, and are already what the Employee Master
+ * grants; only the connective between them has changed.
+ *
+ * THE READS ARE UNTOUCHED. Seeing that an employee reads TELEGRAM PENDING is
+ * still `view_employees`, the same key as every other status on those screens.
+ * Nothing here narrows who may LOOK.
+ *
+ * AND THE BRANCH SCOPE IS UNTOUCHED TOO. `requireEmployeeInScope()` still runs
+ * on every route, so a store manager holding both keys reaches their own
+ * store's employees and nobody else's, HR with `employee_scope_all_branches`
+ * reaches every store, and an administrator keeps the existing bypass.
  *
  * A SEPARATE ROUTER, NOT AN ADDITION TO `routes/employee_master.js`. That file
  * holds a module-level `router` shared by the module and mounts B3's
@@ -94,7 +111,7 @@ class EmployeeTelegramRoutes {
      */
     r.post(
       "/employee/:employee_id/telegram/link-token",
-      gate.require(P.EMPLOYEE_CREATE, P.EMPLOYEE_EDIT),
+      gate.requireAll(P.EMPLOYEE_CREATE, P.EMPLOYEE_EDIT),
       this.branchScope.requireEmployeeInScope(),
       async (req, res) => {
         try {
@@ -147,7 +164,7 @@ class EmployeeTelegramRoutes {
      */
     r.post(
       "/employee/:employee_id/telegram/disconnect",
-      gate.require(P.EMPLOYEE_CREATE, P.EMPLOYEE_EDIT),
+      gate.requireAll(P.EMPLOYEE_CREATE, P.EMPLOYEE_EDIT),
       this.branchScope.requireEmployeeInScope(),
       async (req, res) => {
         try {
@@ -204,8 +221,9 @@ class EmployeeTelegramRoutes {
      * Issue this employee's join link for one group.
      *
      * The mutation pair the rest of Telegram onboarding uses -
-     * `employee_create OR employee_edit` - plus the branch guard, so a
-     * manager cannot generate a link for another branch's employee.
+     * `employee_create` AND `employee_edit`, both of them - plus the branch
+     * guard, so a manager cannot generate a link for another branch's
+     * employee.
      *
      * THE BODY MUST BE EMPTY. Nothing about this request may come from the
      * browser except which employee and which group, and both are checked
@@ -213,7 +231,7 @@ class EmployeeTelegramRoutes {
      */
     r.post(
       "/employee/:employee_id/telegram/groups/:telegram_group_id(\\d+)/join-link",
-      gate.require(P.EMPLOYEE_CREATE, P.EMPLOYEE_EDIT),
+      gate.requireAll(P.EMPLOYEE_CREATE, P.EMPLOYEE_EDIT),
       this.branchScope.requireEmployeeInScope(),
       async (req, res) => {
         try {
