@@ -59,7 +59,56 @@ and is refused by the Mini App.
 The token travels in its own header, **`x-telegram-session`**, never
 `x-access-token`.
 
+## The bot's home menu
+
+A plain `/start` in the private bot chat answers with **Daily Needs Employee
+Services** and three inline `web_app` buttons — My Attendance, Corrections,
+Help — for a Telegram account with an active `employee_telegram_identity`.
+Anyone else gets one flat sentence telling them to complete Telegram setup
+through Daily Needs, and nothing about any employee.
+
+The same menu is attached to the **Telegram connected successfully ✅**
+message the instant verification finishes, so an employee never has to
+discover that typing `/start` produces buttons. The success text and every
+check that leads to it are unchanged.
+
+### Why plain `/start` is safe to claim
+
+`usecase/passwordReset.js#parseStartPayload` is `/^\/start(?:@\w+)?\s+(\S+)$/`
+— the `\s+(\S+)` makes a payload **mandatory**, so a bare `/start` has never
+matched it and still does not. The menu's predicate is the exact complement
+(`\s*$`), which makes the two mutually exclusive by construction:
+
+| Message | Owner |
+| --- | --- |
+| `/start` | `telegram_employee_menu` |
+| `/start e_<token>` | `employee_telegram_link` |
+| `/start <48-hex>` | password reset (the poller's own branch) |
+| `/setup` in a group | group detection (observer, claims nothing) |
+
+`usecase/telegram_update_ownership.test.js` runs the **real** predicates over
+a corpus of updates and fails if any update is ever claimed twice — replacing
+an older "one claimer per update type" count, which would have been satisfied
+by two overlapping claimers on different types and broken by two safe ones on
+the same type. There is still exactly one `getUpdates` owner, no webhook, and
+`ALLOWED_UPDATES` is unchanged (`message`, `chat_join_request`).
+
 ## The API
+
+### Mini App deep links
+
+| URL | Opens |
+| --- | --- |
+| `<base>` | My Attendance |
+| `<base>?section=attendance` | My Attendance |
+| `<base>?section=corrections` | Corrections |
+| `<base>?section=help` | Help |
+| `<base>?section=corrections&date=YYYY-MM-DD` | Corrections, that date highlighted (the 06:00 alert) |
+
+`section` and `date` are **navigation only and carry zero authority**. An
+unknown, empty, absent or hostile `section` falls back to My Attendance; a
+`date` the employee is not entitled to is simply not in the list the server
+returns, so it highlights nothing. Neither is ever sent to the API.
 
 | Method | Path | What it does |
 | --- | --- | --- |
@@ -133,6 +182,27 @@ registration**. What it needs operationally is:
 * `ATTENDANCE_CORRECTION_MINI_APP_URL` set to it
 * the private employee↔bot chat (which the alert already uses)
 * an active `employee_telegram_identity` for the employee
+
+`ATTENDANCE_CORRECTION_MINI_APP_URL` is the **only** place the Mini App's
+address is configured. No hostname is hard-coded in application logic; every
+URL is built by `utils/telegram_mini_app_url.js` from that value, and a test
+greps that file for `dnds.co.in` to keep it that way.
+
+### The permanent Telegram menu button — set by hand, once
+
+This is a **BotFather / global bot setting**, not something the application
+touches. No deploy reads it, writes it or depends on it, and nothing in this
+codebase calls the Bot API to change it.
+
+Set it manually in BotFather:
+
+| Setting | Value |
+| --- | --- |
+| Menu button text | `My Attendance` |
+| Web App URL | `https://dnds.co.in/telegram/attendance` |
+
+It is a convenience — the bot's `/start` menu and the alert button both work
+without it.
 
 ## The frontend shell
 

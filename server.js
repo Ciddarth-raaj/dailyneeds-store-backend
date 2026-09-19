@@ -906,8 +906,33 @@ class Server {
     // so the claim holds even if this handler throws or times out.
     this.employeeTelegramLinkUsecase = require("./usecase/employee_telegram_link")(
       this.employeeTelegramRepo,
-      require("./services/telegram")()
+      require("./services/telegram")(),
+      // So a successful verification shows the SAME home menu the bot's
+      // `/start` shows, on the same message. Read lazily; no URL configured
+      // means the connected message keeps exactly its current shape.
+      { getMiniAppUrl: () => process.env.ATTENDANCE_CORRECTION_MINI_APP_URL || null }
     );
+    // THE BOT'S HOME MENU. A plain `/start` in a private chat - the one thing
+    // the password-reset parser has never matched, because its regex requires
+    // a payload (`\s+(\S+)$`). This handler CLAIMS it so the guarantee is
+    // structural rather than a property of that regex staying as it is.
+    //
+    // It is registered BEFORE the employee-link handler only for readability;
+    // ordering cannot move a claim between handlers, because the dispatcher
+    // resolves every predicate before running any handler and the two
+    // predicates are mutually exclusive (payload vs no payload).
+    this.telegramEmployeeMenuUsecase = require("./usecase/telegram_employee_menu")({
+      identityRepo: this.employeeTelegramRepo,
+      telegram: require("./services/telegram")(),
+      getMiniAppUrl: () => process.env.ATTENDANCE_CORRECTION_MINI_APP_URL || null,
+      log: require("./utils/logger"),
+    });
+    this.telegramUpdateDispatcher.register({
+      name: "telegram_employee_menu",
+      updateTypes: ["message"],
+      claims: (update) => this.telegramEmployeeMenuUsecase.claims(update),
+      handle: (update) => this.telegramEmployeeMenuUsecase.handle(update),
+    });
     this.telegramUpdateDispatcher.register({
       name: "employee_telegram_link",
       updateTypes: ["message"],

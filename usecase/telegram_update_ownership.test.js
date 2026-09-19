@@ -164,7 +164,7 @@ describe("the dispatcher", () => {
     );
   });
 
-  it("the EMPLOYEE handler is the only claimer, and it claims by namespace", () => {
+  it("the EMPLOYEE handler claims by namespace", () => {
     const server = strip(read("server.js"));
     const block = /name: "employee_telegram_link"[\s\S]*?\}\);/.exec(server);
     assert.ok(block, "the employee handler is registered on the dispatcher");
@@ -172,37 +172,110 @@ describe("the dispatcher", () => {
     assert.match(block[0], /updateTypes: \["message"\]/);
   });
 
-  it("AT MOST ONE CLAIMER PER UPDATE TYPE - the invariant the dispatcher enforces", () => {
-    // This was a count of every `claims:` in the wiring, back when only the
-    // employee deep link claimed anything. Phase 3B legitimately claims
-    // `chat_join_request`, and `_resolveClaim` resolves ownership only among
-    // the handlers registered FOR THAT TYPE - so two claimers on different
-    // types can never conflict, while two on the SAME type still would.
+  it("the HOME MENU handler claims plain /start, and declares its type", () => {
+    const server = strip(read("server.js"));
+    const block = /name: "telegram_employee_menu"[\s\S]*?\}\);/.exec(server);
+    assert.ok(block, "the menu handler is registered on the dispatcher");
+    assert.match(block[0], /claims\s*:/, "it declares a claim predicate");
+    assert.match(block[0], /updateTypes: \["message"\]/);
+  });
+
+  it("NO TWO CLAIMERS CAN CLAIM THE SAME UPDATE - the invariant itself", () => {
+    // ================================================================
+    // THIS WAS A COUNT, TWICE OVER, AND IS NOW THE INVARIANT IT STOOD IN FOR.
     //
-    // The count is therefore replaced by the invariant it was standing in
-    // for, which is strictly stronger: a second `message` claimer fails this
-    // exactly as it failed the old assertion.
+    // First it counted every `claims:` in the wiring, back when only the
+    // employee deep link claimed anything. Phase 3B legitimately claimed
+    // `chat_join_request`, so it became a count PER TYPE - because
+    // `_resolveClaim` resolves ownership only among the handlers registered
+    // for that type.
+    //
+    // The home menu now legitimately claims `message` alongside the employee
+    // deep link, and "one claimer per type" would fail it. But that count was
+    // never the property worth having: what the dispatcher logs as a
+    // CLAIM-CONFLICT, and what would actually hurt, is TWO HANDLERS CLAIMING
+    // ONE UPDATE. Two claimers on the same type are perfectly safe when their
+    // predicates cannot both match - and are a bug when they can, which a
+    // count can detect in neither direction.
+    //
+    // So this now RUNS THE REAL PREDICATES over a corpus of representative
+    // updates and asserts no update is ever claimed twice. A third `message`
+    // claimer that overlapped either existing one would fail this; one that
+    // genuinely could not would pass, correctly.
+    // ================================================================
     const server = strip(read("server.js"));
     const registrations = server.match(/\.register\(\{[\s\S]*?\n    \}\);/g) || [];
-    assert.ok(registrations.length >= 3, `expected the dispatcher registrations, saw ${registrations.length}`);
+    assert.ok(registrations.length >= 4, `expected the dispatcher registrations, saw ${registrations.length}`);
 
     const claimersByType = new Map();
     for (const block of registrations) {
       if (!/claims\s*:/.test(block)) continue;
       const types = /updateTypes:\s*\[([^\]]*)\]/.exec(block);
       assert.ok(types, `a claiming handler must declare its update types: ${block.slice(0, 60)}`);
+      const name = (/name:\s*"([^"]+)"/.exec(block) || [])[1];
       for (const raw of types[1].split(",")) {
         const type = raw.trim().replace(/^["']|["']$/g, "");
         if (!type) continue;
-        claimersByType.set(type, (claimersByType.get(type) || 0) + 1);
+        claimersByType.set(type, [...(claimersByType.get(type) || []), name]);
       }
     }
 
-    for (const [type, count] of claimersByType) {
-      assert.equal(count, 1, `${type} has ${count} claimers - that is a CLAIM-CONFLICT at runtime`);
+    // The claimers we expect, by type. A NEW one appearing here without this
+    // test being updated is exactly the review moment worth having.
+    assert.deepEqual(
+      Object.fromEntries([...claimersByType.entries()].map(([k, v]) => [k, v.sort()])),
+      {
+        message: ["employee_telegram_link", "telegram_employee_menu"],
+        chat_join_request: ["employee_telegram_join_request"],
+      }
+    );
+
+    // ---- the real predicates, over a corpus ----
+    const menu = require("../usecase/telegram_employee_menu")({
+      identityRepo: { getActiveIdentityByTelegramUser: async () => null },
+      telegram: { sendMessage: async () => ({}) },
+      getMiniAppUrl: () => null,
+    });
+    const link = require("../usecase/employee_telegram_link")(
+      { getEmployeeForVerification: async () => null },
+      { sendMessage: async () => ({}) }
+    );
+
+    const privateMsg = (text, extra = {}) => ({
+      message: { chat: { id: 1, type: "private" }, from: { id: 5 }, text, ...extra },
+    });
+    const corpus = [
+      privateMsg("/start"),
+      privateMsg("/start "),
+      privateMsg("/start@dnds_bot"),
+      privateMsg("/start e_abcdef"),
+      privateMsg(`/start ${"a".repeat(48)}`),
+      privateMsg("/start one two"),
+      privateMsg("/setup"),
+      privateMsg("hello"),
+      privateMsg(undefined, { contact: { phone_number: "1" } }),
+      { message: { chat: { id: -100, type: "supergroup" }, from: { id: 5 }, text: "/start" } },
+      { message: { chat: { id: -100, type: "group" }, from: { id: 5 }, text: "/setup" } },
+      {},
+      { message: null },
+    ];
+
+    const messageClaimers = [
+      ["telegram_employee_menu", (u) => menu.claims(u)],
+      ["employee_telegram_link", (u) => link.claims(u)],
+    ];
+
+    for (const update of corpus) {
+      const owners = messageClaimers.filter(([, p]) => p(update) === true).map(([n]) => n);
+      assert.ok(
+        owners.length <= 1,
+        `${JSON.stringify(update)} claimed by ${owners.join(" AND ")} - a CLAIM-CONFLICT`
+      );
     }
-    // And the two we expect are exactly the two that exist.
-    assert.deepEqual([...claimersByType.keys()].sort(), ["chat_join_request", "message"]);
+
+    // Not vacuous: each claimer really does own its own case.
+    assert.equal(menu.claims(privateMsg("/start")), true);
+    assert.equal(link.claims(privateMsg("/start e_abcdef")), true);
   });
 
   it("THE CLAIM PREDICATE IS SYNCHRONOUS AND TOUCHES NO REPOSITORY", () => {

@@ -318,9 +318,13 @@ describe("Telegram Mini App readiness", () => {
     await notifier.run({ today: TODAY });
     const button = telegramService.sent[0].options.replyMarkup.inlineKeyboard[0][0];
     assert.equal(button.text, "Regularise Attendance");
+    // OPENS CORRECTIONS DIRECTLY. The employee tapped a button about a
+    // missing punch; landing them on My Attendance and asking them to find
+    // the right tab is a step they should not have to take. The date
+    // highlights the card once there - navigation, never authority.
     assert.equal(
       button.web_app.url,
-      "https://app.example.com/telegram/attendance?date=2026-09-18"
+      "https://app.example.com/telegram/attendance?section=corrections&date=2026-09-18"
     );
   });
 
@@ -340,5 +344,22 @@ describe("Telegram Mini App readiness", () => {
     const url = telegramService.sent[0].options.replyMarkup.inlineKeyboard[0][0].web_app.url;
     assert.ok(!/employee/i.test(url), url);
     assert.ok(!/punch/i.test(url), url);
+    assert.ok(!/\b42\b|\b5\b/.test(url.replace(/2026-09-18/, "")), url);
+  });
+
+  /**
+   * THE URL IS BUILT IN ONE PLACE. If this file ever grows its own template
+   * string again, the employee-id guarantee stops being structural and goes
+   * back to being a thing somebody has to remember.
+   */
+  it("builds its URL through the shared helper, not a local template", () => {
+    const src = require("fs").readFileSync(
+      require.resolve("../usecase/attendance_missing_telegram"),
+      "utf8"
+    );
+    assert.match(src, /require\("\.\.\/utils\/telegram_mini_app_url"\)/);
+    const fn = /function correctionButton\([\s\S]*?\n\}/.exec(src)[0];
+    assert.ok(!/\$\{.*\}\?/.test(fn), "no hand-built query string");
+    assert.ok(!/replace\(\/\\\/\+/.test(fn), "no local trailing-slash handling");
   });
 });

@@ -39,13 +39,19 @@
  * URL configured the message goes out with no keyboard at all and everything
  * else is unchanged: delivery never depends on the Mini App existing.
  *
- * THE URL CARRIES A NAVIGATION HINT AND NOTHING ELSE. `?date=` tells the Mini
- * App which card to preselect. It is NOT authority and the Mini App does not
- * treat it as any: identity comes from Telegram's signed `initData`, and the
- * list of dates comes from the server for the employee that signature
- * resolves to. `employee_id` is deliberately NOT in the URL - a query-string
- * employee id would be a value a browser could change, and there must be no
- * such value anywhere in this feature.
+ * THE URL CARRIES NAVIGATION AND NOTHING ELSE. `?section=corrections` opens
+ * the Corrections tab directly - the employee tapped a button about a missing
+ * punch, so landing them on My Attendance and asking them to find the right
+ * tab is a step they should not have to take - and `&date=` tells the Mini App
+ * which card to highlight once there. NEITHER IS AUTHORITY: identity comes
+ * from Telegram's signed `initData`, and the list of dates comes from the
+ * server for the employee that signature resolves to, so a date the employee
+ * is not entitled to simply is not in the list and highlights nothing.
+ *
+ * `employee_id` is deliberately NOT in the URL - a query-string employee id
+ * would be a value a browser could change - and it is not merely left out
+ * here: the URL is built by `utils/telegram_mini_app_url.js`, which has no
+ * parameter for one.
  *
  * ============================== THE EMPLOYEE IS NOT TOLD THEIR PUNCH COUNT =
  *
@@ -58,6 +64,7 @@
  */
 
 const missing = require("../utils/attendance_missing");
+const { webAppButton, SECTION } = require("../utils/telegram_mini_app_url");
 
 /** The outcome vocabulary. Stored as-is in the ledger's `status` column. */
 const OUTCOME = Object.freeze({
@@ -151,19 +158,16 @@ function buildCorrectionTarget(candidate) {
  * Null means the message is sent with no keyboard at all - alert delivery
  * does not depend on the Mini App being deployed.
  *
- * THE URL CARRIES `?date=` AND NOTHING ELSE. It is a navigation hint the Mini
- * App may use to preselect a card. No `employee_id`: identity is Telegram's
- * signed `initData` resolved against `employee_telegram_identity` on the
- * server, and a query-string employee id would be a value the employee's own
- * browser could edit.
+ * THE URL IS BUILT BY `utils/telegram_mini_app_url.js`, the one place any
+ * Mini App URL is built. It opens Corrections and highlights this date; there
+ * is no parameter for an employee id anywhere on that path.
  */
 function correctionButton(candidate, miniAppUrl) {
-  if (!miniAppUrl) return null;
-  const base = String(miniAppUrl).replace(/\/+$/, "");
-  const url = `${base}?date=${encodeURIComponent(candidate.attendance_date)}`;
-  return {
-    inlineKeyboard: [[{ text: CORRECTION_BUTTON_TEXT, web_app: { url } }]],
-  };
+  const button = webAppButton(miniAppUrl, CORRECTION_BUTTON_TEXT, {
+    section: SECTION.CORRECTIONS,
+    date: candidate.attendance_date,
+  });
+  return button === null ? null : { inlineKeyboard: [[button]] };
 }
 
 /**

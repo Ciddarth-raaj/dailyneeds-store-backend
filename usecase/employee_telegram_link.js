@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const logger = require("../utils/logger");
+const { buildMenuKeyboard } = require("./telegram_employee_menu");
 const { normalizeIndianMobile, mobilesMatch } = require("../utils/mobile_number");
 const { employedOn } = require("../utils/attendance_eligibility");
 const { istDateOf } = require("../utils/istDate");
@@ -157,6 +158,17 @@ class EmployeeTelegramLinkUsecase {
     this.repo = repo;
     this.telegram = telegram;
     this.now = deps.now || (() => new Date());
+    /**
+     * The Mini App base URL, read LAZILY and OPTIONALLY.
+     *
+     * Optional so every existing caller and every existing test that builds
+     * this class with two arguments keeps working unchanged - without it the
+     * connected message is exactly what it was, text and no keyboard. Lazily
+     * because the URL is configuration, and reading it at construction time
+     * would freeze the value at boot.
+     */
+    this.getMiniAppUrl =
+      typeof deps.getMiniAppUrl === "function" ? deps.getMiniAppUrl : () => null;
   }
 
   _log(code, description, ref = {}) {
@@ -557,7 +569,22 @@ class EmployeeTelegramLinkUsecase {
       telegramUserId,
       detail: "verified",
     });
-    await this._say(chatId, BOT_MESSAGE.CONNECTED);
+    // THE SUCCESS TEXT IS UNCHANGED, and so is everything that decided we
+    // reached it - the contact check, the mobile comparison, the duplicate
+    // check and the finalisation are all above this line and untouched.
+    //
+    // WHAT IS ADDED IS THE MENU, attached to that same message. The employee
+    // has just proved who they are; making them then discover that typing
+    // `/start` produces buttons is a step nobody would guess. It is the SAME
+    // menu `usecase/telegram_employee_menu.js` builds - one definition, shown
+    // in two places - and it is omitted entirely when no Mini App URL is
+    // configured, leaving the message exactly as it is in production today.
+    const keyboard = buildMenuKeyboard(this.getMiniAppUrl());
+    await this._say(
+      chatId,
+      BOT_MESSAGE.CONNECTED,
+      keyboard ? { replyMarkup: keyboard } : {}
+    );
     return { outcome: PENDING_OUTCOME.VERIFIED, employeeId };
   }
 

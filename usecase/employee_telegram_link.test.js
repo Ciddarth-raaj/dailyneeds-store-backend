@@ -334,7 +334,11 @@ const setup = (overrides = {}) => {
   });
   const repo = makeRepo(store);
   const telegram = makeTelegram(overrides.telegram);
-  const usecase = buildUsecase(repo, telegram);
+  // The Mini App URL is OPTIONAL: pass one to exercise the post-verification
+  // menu, leave it out and the connected message is exactly what it was.
+  const usecase = buildUsecase(repo, telegram, {
+    getMiniAppUrl: () => overrides.miniAppUrl || null,
+  });
   return { store, repo, telegram, usecase };
 };
 
@@ -541,8 +545,8 @@ describe("/start", () => {
 /* -------------------------------------------------------- the contact leg */
 
 describe("the shared contact", () => {
-  const openSession = async () => {
-    const ctx = setup();
+  const openSession = async (overrides = {}) => {
+    const ctx = setup(overrides);
     const token = tokenFrom(await ctx.usecase.startLink(7));
     await ctx.usecase.onStart(token, startMessage(token));
     ctx.telegram.sent.length = 0;
@@ -563,6 +567,9 @@ describe("the shared contact", () => {
     assert.equal(store.identities[0].verified_mobile, "9876543210");
     assert.equal(telegram.sent.at(-1).text, BOT_MESSAGE.CONNECTED);
     assert.ok(store.audit.some((a) => a.event === AUDIT_EVENT.CONNECTED));
+    // No Mini App URL in this harness, so the message is unchanged from
+    // production: text, and no keyboard.
+    assert.equal(telegram.sent.at(-1).options.replyMarkup, undefined);
   });
 
   it("accepts Telegram's own snake_case contact shape too", async () => {
@@ -1433,5 +1440,88 @@ describe("`employed today` is the INDIAN day, not the host's", () => {
       else process.env.TZ = original;
     }
     assert.deepEqual(outcomes, [200, 200, 200], "one answer, whatever the host thinks");
+  });
+});
+
+/* ===================================================================
+ * THE MENU SHOWN THE MOMENT VERIFICATION SUCCEEDS
+ *
+ * An employee who has just proved who they are should not then have to
+ * discover that typing `/start` produces buttons. The success TEXT is
+ * unchanged and every security check that led to it is untouched; what is
+ * added is the same home menu, on the same message.
+ * =================================================================== */
+const MINI_APP = "https://dnds.co.in/telegram/attendance";
+
+describe("the menu after a successful connection", () => {
+  const openSession = async (overrides = {}) => {
+    const ctx = setup(overrides);
+    const token = tokenFrom(await ctx.usecase.startLink(7));
+    await ctx.usecase.onStart(token, startMessage(token));
+    ctx.telegram.sent.length = 0;
+    return ctx;
+  };
+
+  const connect = (ctx) =>
+    ctx.usecase.onContact({
+      chat: { id: 555, type: "private" },
+      from: { id: 4242, first_name: "Asha" },
+      contact: { phone_number: "+919876543210", user_id: 4242, first_name: "Asha" },
+    });
+
+  it("keeps the success text EXACTLY and attaches the three menu buttons", async () => {
+    const ctx = await openSession({ miniAppUrl: MINI_APP });
+    const outcome = await connect(ctx);
+
+    assert.equal(outcome.outcome, PENDING_OUTCOME.VERIFIED);
+    const message = ctx.telegram.sent.at(-1);
+    assert.equal(message.text, BOT_MESSAGE.CONNECTED);
+    assert.equal(message.text, "Telegram connected successfully ✅");
+
+    const rows = message.options.replyMarkup.inlineKeyboard;
+    assert.deepEqual(rows.map((r) => r[0].text), ["My Attendance", "Corrections", "Help"]);
+    assert.deepEqual(rows.map((r) => r[0].web_app.url), [
+      `${MINI_APP}?section=attendance`,
+      `${MINI_APP}?section=corrections`,
+      `${MINI_APP}?section=help`,
+    ]);
+  });
+
+  it("is the SAME menu the bot's /start builds - one definition, two places", async () => {
+    const { buildMenuKeyboard } = require("./telegram_employee_menu");
+    const ctx = await openSession({ miniAppUrl: MINI_APP });
+    await connect(ctx);
+    assert.deepEqual(
+      ctx.telegram.sent.at(-1).options.replyMarkup,
+      buildMenuKeyboard(MINI_APP)
+    );
+  });
+
+  it("carries no employee id", async () => {
+    const ctx = await openSession({ miniAppUrl: MINI_APP });
+    await connect(ctx);
+    const text = JSON.stringify(ctx.telegram.sent.at(-1).options.replyMarkup);
+    assert.ok(!/employee/i.test(text), text);
+    assert.ok(!/\b7\b/.test(text), text);
+  });
+
+  it("with NO Mini App URL the connected message is unchanged - text, no keyboard", async () => {
+    const ctx = await openSession();
+    const outcome = await connect(ctx);
+    assert.equal(outcome.outcome, PENDING_OUTCOME.VERIFIED);
+    assert.equal(ctx.telegram.sent.at(-1).text, BOT_MESSAGE.CONNECTED);
+    assert.equal(ctx.telegram.sent.at(-1).options.replyMarkup, undefined);
+  });
+
+  /**
+   * The keyboard rides the existing `_say`, so a Telegram failure is still
+   * swallowed and the identity is still written - the verification result
+   * must not depend on a message being delivered.
+   */
+  it("a send failure does not undo the verification", async () => {
+    const ctx = await openSession({ miniAppUrl: MINI_APP, telegram: { failSend: true } });
+    const outcome = await connect(ctx);
+    assert.equal(outcome.outcome, PENDING_OUTCOME.VERIFIED);
+    assert.equal(ctx.store.identities.length, 1);
   });
 });
