@@ -110,6 +110,18 @@ const oddDay = (employee_id) => ({
   is_final: false,
 });
 
+/** A complete FINAL day for A, with 45 minutes of overtime the engine found. */
+const otDay = (employee_id) => ({
+  employee_id,
+  attendance_date: "2026-09-14",
+  shift_snapshot: { work_shift_id: 7, snapshot_hash: "abc" },
+  punch_count: 2,
+  candidate_ot_minutes: 45,
+  worked_minutes: 705,
+  status: "FINAL",
+  is_final: true,
+});
+
 function wire(state = {}) {
   const calls = { created: [], ranges: [] };
   const repo = {
@@ -123,6 +135,7 @@ function wire(state = {}) {
       requester_class: null,
     }),
     findOpenRequest: async () => state.openRequest || null,
+    findRequestsForDates: async () => state.requestsForDate || [],
     createRequest: async ({ request, chain, punch }) => {
       calls.created.push({ request, chain, punch });
       return { attendance_approval_request_id: 501, total_stages: chain.length };
@@ -131,7 +144,10 @@ function wire(state = {}) {
   const calculation = {
     calculateRange: async (args) => {
       calls.ranges.push(args);
-      return [oddDay(args.employee_id)];
+      // `otDay` is a COMPLETE day with overtime on it - what the OT route
+      // needs, and deliberately the engine's own figure rather than
+      // anything the caller could have influenced.
+      return [state.otDay ? otDay(args.employee_id) : oddDay(args.employee_id)];
     },
     attendanceDateForPunchTime: async () => "2026-09-14",
     calculateProposedDay: async ({ employee_id }) => ({
@@ -228,6 +244,113 @@ describe("POST /attendance/me/regularization", () => {
     }));
     assert.equal(sys.statusCode, 403);
     const anon = await invoke(routes, "POST", "/attendance/me/regularization", { query: {}, body: goodBody });
+    assert.equal(anon.statusCode, 401);
+    assert.equal(calls.created.length, 0);
+  });
+});
+
+/**
+ * THE OT REQUEST, from the router down.
+ *
+ * The employee is the token's and the minutes are the engine's - neither is
+ * a field on this endpoint, and both are proved here rather than trusted to
+ * the screen that happens to omit them today.
+ */
+describe("POST /attendance/me/ot-request", () => {
+  const otBody = { attendance_date: "2026-09-14", reason: "Stock count ran late" };
+
+  it("submits against the CALLER and stores the engine's own OT minutes", async () => {
+    const { routes, calls } = wire({ otDay: true });
+    const res = await invoke(routes, "POST", "/attendance/me/ot-request", selfReq(otBody));
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.equal(calls.created.length, 1);
+    assert.equal(calls.created[0].request.requested_for_employee_id, EMPLOYEE_A);
+    assert.equal(calls.created[0].request.requested_by_employee_id, EMPLOYEE_A);
+    assert.equal(calls.created[0].request.request_type, "OT");
+    assert.equal(calls.created[0].request.candidate_ot_minutes, 45, "the engine's figure");
+    assert.equal(calls.created[0].punch, null, "an OT request carries no punch");
+    calls.ranges.forEach((r) => assert.equal(r.employee_id, EMPLOYEE_A));
+  });
+
+  it("cannot be pointed at Employee B, however the payload is dressed up", async () => {
+    for (const extra of [
+      { requested_for_employee_id: EMPLOYEE_B },
+      { employee_id: EMPLOYEE_B },
+    ]) {
+      const { routes, calls } = wire({ otDay: true });
+      // eslint-disable-next-line no-await-in-loop
+      const res = await invoke(routes, "POST", "/attendance/me/ot-request", selfReq({ ...otBody, ...extra }));
+      assert.equal(res.statusCode, 400, JSON.stringify(extra));
+      assert.equal(calls.created.length, 0);
+    }
+  });
+
+  it("has no field for a duration: minutes sent by a client are refused outright", async () => {
+    for (const extra of [
+      { candidate_ot_minutes: 600 },
+      { approved_ot_minutes: 600 },
+      { ot_minutes: 600 },
+    ]) {
+      const { routes, calls } = wire({ otDay: true });
+      // eslint-disable-next-line no-await-in-loop
+      const res = await invoke(routes, "POST", "/attendance/me/ot-request", selfReq({ ...otBody, ...extra }));
+      assert.equal(res.statusCode, 400, JSON.stringify(extra));
+      assert.match(res.body.msg, /is not allowed/);
+      assert.equal(calls.created.length, 0);
+    }
+  });
+
+  it("requires a reason, exactly as the correction request does", async () => {
+    const { routes, calls } = wire({ otDay: true });
+    for (const reason of [undefined, "", "abc"]) {
+      // eslint-disable-next-line no-await-in-loop
+      const res = await invoke(routes, "POST", "/attendance/me/ot-request", selfReq({ ...otBody, reason }));
+      assert.equal(res.statusCode, 400, `reason=${JSON.stringify(reason)}`);
+    }
+    assert.equal(calls.created.length, 0);
+  });
+
+  it("refuses a second OT request for a date that already has one", async () => {
+    const { routes, calls } = wire({
+      otDay: true,
+      requestsForDate: [
+        { attendance_approval_request_id: 480, request_type: "OT", status: "PENDING", attendance_date: "2026-09-14" },
+      ],
+    });
+    const res = await invoke(routes, "POST", "/attendance/me/ot-request", selfReq(otBody));
+    assert.equal(res.statusCode, 400);
+    assert.match(res.body.msg, /already pending \(#480\)/);
+    assert.equal(calls.created.length, 0);
+  });
+
+  it("refuses OT while an attendance correction on the date is still open", async () => {
+    const { routes, calls } = wire({
+      otDay: true,
+      requestsForDate: [
+        { attendance_approval_request_id: 481, request_type: "REGULARIZATION", status: "PENDING", attendance_date: "2026-09-14" },
+      ],
+    });
+    const res = await invoke(routes, "POST", "/attendance/me/ot-request", selfReq(otBody));
+    assert.equal(res.statusCode, 400);
+    assert.match(res.body.msg, /open attendance request \(#481\); OT can be requested once it is decided/);
+    assert.equal(calls.created.length, 0);
+  });
+
+  it("refuses an incomplete day - its overtime is a guess until the punch is corrected", async () => {
+    const { routes, calls } = wire();
+    const res = await invoke(routes, "POST", "/attendance/me/ot-request", selfReq(otBody));
+    assert.equal(res.statusCode, 400);
+    assert.match(res.body.msg, /not a complete attendance day/);
+    assert.equal(calls.created.length, 0);
+  });
+
+  it("a system account cannot raise one; an unauthenticated call cannot either", async () => {
+    const { routes, calls } = wire({ otDay: true });
+    const sys = await invoke(routes, "POST", "/attendance/me/ot-request", selfReq(otBody, {
+      id: 1, employee_id: null, designation_id: null, user_type: 1, is_system_account: true,
+    }));
+    assert.equal(sys.statusCode, 403);
+    const anon = await invoke(routes, "POST", "/attendance/me/ot-request", { query: {}, body: otBody });
     assert.equal(anon.statusCode, 401);
     assert.equal(calls.created.length, 0);
   });
