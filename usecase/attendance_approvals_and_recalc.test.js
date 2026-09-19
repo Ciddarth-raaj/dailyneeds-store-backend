@@ -93,7 +93,14 @@ function build(state = {}) {
     getApprovalStateByDate: async (employeeId, from, to) =>
       store.requests
         .filter((r) => r.requested_for_employee_id === employeeId && r.status !== "CANCELLED" && r.attendance_date >= from && r.attendance_date <= to)
-        .map((r) => ({ ...r })),
+        .map((r) => ({
+          ...r,
+          // Mirrors the correlated subquery in the repository: the remarks of
+          // the latest step that REJECTED, and null when nothing rejected.
+          rejection_remarks: (store.steps
+            .filter((x) => x.attendance_approval_request_id === r.attendance_approval_request_id && x.decision === "REJECTED")
+            .sort((a, b) => b.stage_no - a.stage_no)[0] || {}).remarks || null,
+        })),
     getEmploymentWindow: async (id) => EMPLOYEES.find((e) => e.employee_id === Number(id)) || null,
     getMonthlyGrossAsOf: async () => null,
     saveCalculations: async (rows) => { saved.calculations.push(rows); return { written: rows.length }; },
@@ -180,7 +187,29 @@ function build(state = {}) {
     listStepsForRequests: async (ids) => store.steps.filter((s) => ids.includes(s.attendance_approval_request_id)),
     listPendingFor: async () => [],
     listForEmployee: async () => [],
-    closeOtAtPayrollLock: async () => ({ rejected_pending: 0, closed_unrequested: 0 }),
+    closeOtAtPayrollLock: async ({ employee_id, from_date, to_date, pending_closure, unrequested_closure, unrequested }) => {
+      let rejected_pending = 0;
+      store.requests
+        .filter((r) => r.requested_for_employee_id === employee_id && r.request_type === "OT" && r.status === "PENDING" && r.attendance_date >= from_date && r.attendance_date <= to_date)
+        .forEach((r) => {
+          r.status = "REJECTED";
+          r.closure_reason = pending_closure.code;
+          r.decided_at = "2026-10-01 00:00:00";
+          rejected_pending += 1;
+        });
+      (unrequested || []).forEach((u) => {
+        const id = nextId; nextId += 1;
+        store.requests.push({
+          attendance_approval_request_id: id, request_type: "OT", requested_for_employee_id: employee_id,
+          requested_by_employee_id: u.closed_by, attendance_date: u.attendance_date, outlet_id: u.outlet_id,
+          requester_class: u.requester_class, reason: "Closed at payroll lock", candidate_ot_minutes: u.candidate_ot_minutes,
+          approved_ot_minutes: 0, auto_created: 1, status: "REJECTED", current_stage_no: 1, total_stages: 1,
+          finalization_state: "NOT_REQUIRED", closure_reason: unrequested_closure.code,
+          created_at: "2026-10-01 00:00:00", decided_at: "2026-10-01 00:00:00", punch: null,
+        });
+      });
+      return { rejected_pending, closed_unrequested: (unrequested || []).length };
+    },
   };
 
   const calculation = buildCalculation(calcRepo);
@@ -540,5 +569,149 @@ describe("bulk recalculation", () => {
     assert.equal(keys.length, 6);
     assert.equal(new Set(keys).size, 3, "the second run addresses the same three (employee, date) keys");
     assert.equal(w.saved.runs.length, 2, "and each run is its own audit row");
+  });
+});
+
+/* ======================================== the employee's own request tabs */
+
+/**
+ * WHAT THE EMPLOYEE'S OWN OT REQUESTS TAB IS BUILT FROM.
+ *
+ * The tab reads `/attendance/me`, which is this `readRange`, and renders the
+ * fields below. Nothing on the screen recomputes overtime, so these are the
+ * contract: if a field stops arriving, the tab stops being able to show the
+ * state without inventing one.
+ */
+describe("Employee OT Requests - the day fields the tab renders", () => {
+  const OT_DATE = "2026-09-14";
+  const range = (employee_id) => ({ employee_id, from_date: OT_DATE, to_date: OT_DATE });
+  const otWorld = () => build({ rawPunches: lateDay(43, OT_DATE) });
+  const readDay = async (w, employee_id = 43) => (await w.calculation.readRange(range(employee_id)))[0];
+
+  it("an unclaimed complete day offers the ENGINE's eligible OT, not a stored or sent one", async () => {
+    const w = otWorld();
+    const day = await readDay(w);
+    assert.equal(day.status, CALC_STATUS.FINAL);
+    assert.equal(day.ot_claim_state, "AVAILABLE");
+    assert.equal(day.candidate_ot_minutes, 90);
+    assert.equal(day.ot_request_id, null);
+    assert.equal(day.correction_state, "NONE");
+  });
+
+  it("a submitted request shows requested minutes, reason and submitted time", async () => {
+    const w = otWorld();
+    await w.regularization.raiseOtRequest({ actor: { employee_id: 43, user_type: 1 }, attendance_date: OT_DATE, reason: "Stock count ran late", today: TODAY });
+    const day = await readDay(w);
+    assert.equal(day.ot_claim_state, "REQUEST_PENDING");
+    assert.equal(day.ot_requested_minutes, 90, "the server's candidate, stored on the request");
+    assert.equal(day.ot_reason, "Stock count ran late");
+    assert.equal(day.ot_requested_at, "2026-09-15 09:00:00");
+    assert.equal(day.ot_decided_at, null);
+    assert.equal(day.ot_rejection_remarks, null);
+  });
+
+  it("a rejected request carries the approver's REJECTION REASON onto the day", async () => {
+    const w = otWorld();
+    const raised = await w.regularization.raiseOtRequest({ actor: { employee_id: 43, user_type: 1 }, attendance_date: OT_DATE, reason: "Stock count ran late", today: TODAY });
+    await w.regularization.decide({
+      actor: { employee_id: 7, user_type: 1 },
+      request_id: raised.attendance_approval_request_id,
+      decision: STEP_DECISION.REJECTED,
+      remarks: "Stock count was not approved in advance",
+    });
+    const day = await readDay(w);
+    assert.equal(day.ot_claim_state, "REJECTED");
+    assert.equal(day.ot_rejection_remarks, "Stock count was not approved in advance");
+    assert.equal(day.ot_decided_at, "2026-09-16 10:00:00");
+    assert.equal(day.ot_closure_reason, null, "a human rejection is not a payroll-lock closure");
+  });
+
+  it("one claim per date: a second OT request for the same date is refused", async () => {
+    const w = otWorld();
+    await w.regularization.raiseOtRequest({ actor: { employee_id: 43, user_type: 1 }, attendance_date: OT_DATE, reason: "Stock count ran late", today: TODAY });
+    await assert.rejects(
+      w.regularization.raiseOtRequest({ actor: { employee_id: 43, user_type: 1 }, attendance_date: OT_DATE, reason: "Asking again", today: TODAY }),
+      /is already pending/
+    );
+    assert.equal(w.store.requests.filter((r) => r.request_type === REQUEST_TYPE.OT).length, 1);
+  });
+
+  it("a locked payroll month closes the claim and no OT can be requested for it afterwards", async () => {
+    const w = otWorld();
+    const before = await readDay(w);
+    assert.equal(before.ot_claim_state, "AVAILABLE");
+
+    await w.regularization.closeOtForPayrollLock({
+      employee_id: 43, from_date: "2026-09-01", to_date: "2026-09-30", days: [before], actor_employee_id: 8,
+    });
+
+    const after = await readDay(w);
+    assert.equal(after.ot_claim_state, "CLOSED_AT_PAYROLL_LOCK");
+    assert.equal(after.ot_closure_reason, "NOT_REQUESTED_BEFORE_PAYROLL_LOCK");
+    await assert.rejects(
+      w.regularization.raiseOtRequest({ actor: { employee_id: 43, user_type: 1 }, attendance_date: OT_DATE, reason: "Please reopen this", today: TODAY }),
+      /has already been decided/
+    );
+  });
+});
+
+/**
+ * THE CORRECTION DEPENDENCY, end to end: OT is not requestable while the
+ * date's attendance is still in question, and what becomes requestable
+ * afterwards is a FRESH calculation of the corrected day, never the figure
+ * from before it.
+ */
+describe("Employee OT Requests - the correction dependency", () => {
+  const DATE = "2026-09-14";
+  // One punch: a missing-punch day. The correction supplies the 23:30 close,
+  // and only THEN does the day have any overtime at all.
+  const missingWorld = () => build({ rawPunches: [punch(1, 42, `${DATE} 10:00:00`)] });
+  const readDay = async (w) => (await w.calculation.readRange({ employee_id: 42, from_date: DATE, to_date: DATE }))[0];
+
+  it("a pending correction blocks the OT request, and the day says a correction is pending", async () => {
+    const w = missingWorld();
+    await w.regularization.raiseRequest({ actor: { employee_id: 42, user_type: 1 }, requested_for_employee_id: 42, attendance_date: DATE, reason: "Terminal offline at close", punch_time: `${DATE} 23:30:00` });
+
+    const day = await readDay(w);
+    assert.equal(day.correction_state, "PENDING");
+    assert.equal(day.correction_reason, "Terminal offline at close");
+    assert.equal(day.correction_requested_at, "2026-09-15 09:00:00");
+    assert.equal(day.ot_claim_state, "NONE", "nothing to claim while the day is in question");
+
+    await assert.rejects(
+      w.regularization.raiseOtRequest({ actor: { employee_id: 42, user_type: 1 }, attendance_date: DATE, reason: "Stayed back for stock", today: TODAY }),
+      /has an open attendance request .*OT can be requested once it is decided/
+    );
+  });
+
+  it("once the correction is finally approved the OT comes from a FRESH calculation of the corrected day", async () => {
+    const w = missingWorld();
+    const raised = await w.regularization.raiseRequest({ actor: { employee_id: 42, user_type: 1 }, requested_for_employee_id: 42, attendance_date: DATE, reason: "Terminal offline at close", punch_time: `${DATE} 23:30:00` });
+    const id = raised.attendance_approval_request_id;
+    await w.regularization.decide({ actor: { employee_id: 7, user_type: 1 }, request_id: id, decision: STEP_DECISION.APPROVED });
+    await w.regularization.decide({ actor: { employee_id: 10, user_type: 1 }, request_id: id, decision: STEP_DECISION.APPROVED });
+    await w.regularization.decide({ actor: { employee_id: 8, user_type: 1 }, request_id: id, decision: STEP_DECISION.APPROVED });
+
+    // The approved punch is now effective, exactly as it is in production.
+    w.calcRepo.getApprovedRegularizedPunches = async () => [{ punch_id: 77, employee_id: 42, attendance_date: DATE, io_time: `${DATE} 23:30:00` }];
+
+    const day = await readDay(w);
+    assert.equal(day.correction_state, "APPROVED");
+    assert.equal(day.status, CALC_STATUS.FINAL);
+    assert.equal(day.ot_claim_state, "AVAILABLE");
+    assert.equal(day.candidate_ot_minutes, 90, "the corrected day's OT, not the pre-correction figure");
+
+    const ot = await w.regularization.raiseOtRequest({ actor: { employee_id: 42, user_type: 1 }, attendance_date: DATE, reason: "Stayed back for stock", today: TODAY });
+    assert.equal(ot.candidate_ot_minutes, 90, "recalculated at submission, never sent by the client");
+  });
+
+  it("a rejected correction carries its rejection reason onto the day too", async () => {
+    const w = missingWorld();
+    const raised = await w.regularization.raiseRequest({ actor: { employee_id: 42, user_type: 1 }, requested_for_employee_id: 42, attendance_date: DATE, reason: "Terminal offline at close", punch_time: `${DATE} 23:30:00` });
+    await w.regularization.decide({ actor: { employee_id: 7, user_type: 1 }, request_id: raised.attendance_approval_request_id, decision: STEP_DECISION.REJECTED, remarks: "You were marked off duty that evening" });
+    const day = await readDay(w);
+    assert.equal(day.correction_state, "REJECTED");
+    assert.equal(day.correction_rejection_remarks, "You were marked off duty that evening");
+    assert.equal(day.correction_decided_at, "2026-09-16 10:00:00");
   });
 });

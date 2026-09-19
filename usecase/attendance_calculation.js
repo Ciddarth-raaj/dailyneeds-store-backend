@@ -155,6 +155,10 @@ function otClaimFor({ day, otRequest, otSettled }) {
     ot_closure_reason: otRequest ? otRequest.closure_reason || null : null,
     ot_requested_at: otRequest ? otRequest.created_at || null : null,
     ot_decided_at: otRequest ? otRequest.decided_at || null : null,
+    // The approver's own words, from the step that rejected. Null unless a
+    // human rejected it - a payroll-lock closure has `ot_closure_reason`
+    // instead, and an approval has nothing to explain.
+    ot_rejection_remarks: otRequest ? otRequest.rejection_remarks || null : null,
   };
 
   if (otRequest) {
@@ -173,6 +177,45 @@ function otClaimFor({ day, otRequest, otSettled }) {
   if (candidate > 0 && day.is_final === true && day.status === CALC_STATUS.FINAL) {
     claim.ot_claim_state = OT_CLAIM_STATE.AVAILABLE;
   }
+  return claim;
+}
+
+/** The states an attendance CORRECTION on a day can be in. */
+const CORRECTION_STATE = Object.freeze({
+  NONE: "NONE",
+  PENDING: "PENDING",
+  APPROVED: "APPROVED",
+  REJECTED: "REJECTED",
+});
+
+/**
+ * The attendance correction filed against a day, if any.
+ *
+ * The MIRROR of `otClaimFor`, for the other request type, and for the same
+ * reason: a day already carries whether a correction is holding it open
+ * (`regularization_pending`, which is what the Missing Punch / Regularization
+ * Pending badge is drawn from), but not WHAT was asked, WHEN, or why it was
+ * refused. An employee's own request list needs those three, and reading
+ * them off the request row the range already loaded costs no extra query.
+ *
+ * IT DECIDES NO ATTENDANCE STATE. The day's status is the engine's, exactly
+ * as before; these fields describe the REQUEST beside it and nothing else.
+ * A legacy REGULARIZATION_WITH_OT request is a correction here, as it is
+ * everywhere else in this file.
+ */
+function correctionClaimFor({ approval }) {
+  const claim = {
+    correction_request_id: approval ? approval.attendance_approval_request_id : null,
+    correction_state: CORRECTION_STATE.NONE,
+    correction_reason: approval ? approval.reason || null : null,
+    correction_requested_at: approval ? approval.created_at || null : null,
+    correction_decided_at: approval ? approval.decided_at || null : null,
+    correction_rejection_remarks: approval ? approval.rejection_remarks || null : null,
+  };
+  if (!approval) return claim;
+  if (approval.status === "PENDING") claim.correction_state = CORRECTION_STATE.PENDING;
+  else if (approval.status === "APPROVED") claim.correction_state = CORRECTION_STATE.APPROVED;
+  else claim.correction_state = CORRECTION_STATE.REJECTED;
   return claim;
 }
 
@@ -677,6 +720,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       return {
         ...day,
         ...otClaimFor({ day, otRequest, otSettled }),
+        ...correctionClaimFor({ approval }),
         shift_resolution_status: resolution.status,
         // Display only: the live shift name, and whether the date's shift came
         // from the dated history or from a single-date edit.
