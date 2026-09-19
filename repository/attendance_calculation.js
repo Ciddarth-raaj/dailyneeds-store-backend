@@ -1181,3 +1181,14 @@ module.exports = (db) => new AttendanceCalculationRepository(db);
 module.exports.AttendanceCalculationRepository = AttendanceCalculationRepository;
 module.exports.CALCULATION_COLUMNS = CALCULATION_COLUMNS;
 module.exports.writeCalculationsOnConnection = writeCalculationsOnConnection;
+/**
+ * THE PAYROLL LOCK, exported so that every write which could invalidate a
+ * settled month takes the SAME row lock in the SAME transaction.
+ *
+ * `repository/employee_work_shift.js` reuses it for the effective-dated shift
+ * change: that write does not touch `attendance_day_calculation`, but it
+ * decides which shift a settled month's attendance would be recalculated
+ * under, which is the same fact by a different route. A second, weaker
+ * implementation is exactly what this export exists to prevent.
+ */
+module.exports.assertMonthsNotPayrollLocked = assertMonthsNotPayrollLocked;

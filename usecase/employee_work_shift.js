@@ -1,5 +1,10 @@
 const { istToday } = require("../utils/istDate");
-const { resolveAssignmentForDate, toDateOnly } = require("../utils/shiftResolution");
+const {
+  resolveAssignmentForDate,
+  affectedRangeForNewAssignment,
+  monthProbesForRange,
+  toDateOnly,
+} = require("../utils/shiftResolution");
 const { payrollLockedActionError } = require("../utils/attendance_payroll_lock");
 
 const {
@@ -186,37 +191,28 @@ class EmployeeWorkShiftUsecase {
   }
 
   /**
-   * Refuse a change that would reach into a payroll-locked month.
+   * The FRIENDLY pre-flight: refuse early, in a sentence naming the month.
    *
-   * THE DATES CHECKED ARE THE DATES THE CHANGE WOULD MOVE - `effective_from`
-   * and every date after it up to today, because an effective-dated change is
-   * open-ended forward and recalculating it rewrites all of them. A change
-   * dated into the FUTURE touches no settled date at all and is checked
-   * against nothing; it becomes checkable, like any other date, when it
-   * arrives.
+   * IT IS NOT THE BOUNDARY, and nothing here should be read as though it
+   * were. It holds no lock, so a month can close between its answer and the
+   * write. The boundary is `assertMonthsNotPayrollLocked` inside the write
+   * transaction (`repository/employee_work_shift.js#changeAssignment`),
+   * which takes `FOR UPDATE` on the same rows `approveAndLock` locks. This
+   * exists so the common case fails with a readable message instead of an
+   * exception from the depths of a transaction.
    *
-   * This is the early, speaking refusal. The rule that cannot be bypassed is
-   * still the `FOR UPDATE` guard inside the write transaction.
+   * It asks about the dates the change ACTUALLY moves - the same range the
+   * transaction computes - so it cannot refuse a backdated row over a month
+   * that a later assignment already governs.
    */
-  async _assertUnlockedFrom(employeeId, effectiveFrom, today, action) {
-    if (!this.attendanceCalculationRepo) return;
-    if (effectiveFrom > today) return;
-
-    // One probe per calendar month from the effective date to today: the lock
-    // is monthly, so a date per month answers for the whole of it.
-    const probes = [];
-    let cursor = `${effectiveFrom.slice(0, 7)}-01`;
-    const lastMonth = `${today.slice(0, 7)}-01`;
-    while (cursor <= lastMonth) {
-      probes.push({ employee_id: employeeId, attendance_date: cursor });
-      const y = Number(cursor.slice(0, 4));
-      const m = Number(cursor.slice(5, 7));
-      cursor = m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, "0")}-01`;
-    }
-
-    const locked = await this.attendanceCalculationRepo.findPayrollLockedPeriods(probes);
+  async _preflightUnlocked(employeeId, range, action) {
+    if (!this.attendanceCalculationRepo || !range) return;
+    const locked = await this.attendanceCalculationRepo.findPayrollLockedPeriods(
+      monthProbesForRange({ employeeId, from: range.from, to: range.to })
+    );
     if (locked.length > 0) throw payrollLockedActionError(locked, action);
   }
+
 
   /** Never let re-derivation fail an assignment that has already committed. */
   async _redrive(employeeIds) {
@@ -538,54 +534,127 @@ class EmployeeWorkShiftUsecase {
     }
 
     const today = istToday(payload.today);
-    await this._assertUnlockedFrom(employeeId, effectiveFrom, today, "This shift change");
 
+    /*
+     * A FUTURE EFFECTIVE DATE IS REFUSED, and this is a deliberate scope
+     * decision rather than an oversight.
+     *
+     * The dated history alone would resolve a future date correctly - the
+     * attendance engine reads it per date and would pick the new shift up
+     * when the date arrived. But `new_employee.default_work_shift_id` is
+     * still read as CURRENT STATE by the employee list, the profile, the
+     * assignment screen and Add Employee, and NOTHING in this system moves
+     * that column on a date: there is no scheduled reconciliation, no job
+     * and no trigger. A future-dated change would therefore sit correct in
+     * the history and wrong in the column from the day it took effect until
+     * somebody happened to save something.
+     *
+     * Building a scheduler for it was not part of this work, so the feature
+     * refuses what it cannot honour. A change is filed on the day it takes
+     * effect, or backdated afterwards - both of which this path does
+     * correctly and immediately.
+     */
+    if (effectiveFrom > today) {
+      throw validationError(
+        `effective_from cannot be in the future - file the change on the day it takes effect. ${effectiveFrom} is after ${today}.`
+      );
+    }
+
+    // The dates this row will actually move, for the pre-flight message. The
+    // transaction computes it again, under a lock, and that one is the rule.
+    const affected = affectedRangeForNewAssignment({ assignments: history, effectiveFrom, today });
+    await this._preflightUnlocked(employeeId, affected, "This shift change");
+
+    /*
+     * THE WRITE. Inside its own transaction it re-reads and locks the
+     * history, takes the payroll lock on the months the change really
+     * touches, inserts, and reconciles `default_work_shift_id` to the
+     * RESOLVER's answer for today - which is not necessarily the shift just
+     * inserted, because a later assignment may already govern today.
+     */
     const result = await this.repo.changeAssignment({
       employeeId,
       workShiftId,
       effectiveFrom,
       note: reason,
       createdBy: payload.actor_employee_id === undefined ? null : payload.actor_employee_id,
+      today,
     });
-
-    // The employee's CURRENT shift follows only a change that is in force.
-    // A change dated into next month has not happened yet.
-    if (effectiveFrom <= today) {
-      await this.repo.setDefaultWorkShift(employeeId, workShiftId);
-    }
 
     const punchRedrive = await this._redrive([employeeId]);
 
-    // Recalculate exactly the dates this moved: the effective date to today.
+    // Recalculate exactly the dates this moved - the transaction's own
+    // answer, which stops at the day a later assignment takes over.
+    const range = {
+      from: result.affected_from || affected.from,
+      to: result.affected_to || affected.to,
+    };
     let recalculated = null;
-    if (effectiveFrom <= today && this.attendanceCalculationUsecase) {
+    let recalculationError = null;
+    if (this.attendanceCalculationUsecase) {
       try {
         recalculated = await this.attendanceCalculationUsecase.recalculateRange({
           employee_id: employeeId,
-          from_date: effectiveFrom,
-          to_date: today,
+          from_date: range.from,
+          to_date: range.to,
         });
       } catch (err) {
-        // The history is committed and correct. A failed re-run is reported,
-        // never swallowed and never allowed to undo the assignment.
-        recalculated = { error: err && err.message ? err.message : String(err) };
+        recalculationError = err && err.message ? err.message : String(err);
       }
+    } else {
+      recalculationError = "No attendance calculation service is wired";
     }
 
-    return {
+    const shiftName = shift.shift_code || shift.shift_name;
+    const common = {
       ...result,
       shift_code: shift.shift_code,
       shift_name: shift.shift_name,
       previous_work_shift_id: previous ? Number(previous.work_shift_id) : null,
       reason,
       effective_from: effectiveFrom,
-      is_future_dated: effectiveFrom > today,
+      is_future_dated: false,
       punch_redrive: punchRedrive,
+      // The range a retry must re-run. Returned on success too, so the caller
+      // never has to re-derive it.
+      recalculation_range: range,
+    };
+
+    /*
+     * A FAILED RECALCULATION IS NOT A SUCCESS, and must not be reported as
+     * one.
+     *
+     * The assignment is committed and correct - rolling it back would mean
+     * undoing a transaction that has already returned - but the attendance
+     * behind it is now STALE: it still carries the old shift's NRM, its
+     * shortage and its overtime for dates that no longer resolve to that
+     * shift. Payroll reads those rows. So the caller is told, in a state it
+     * cannot mistake for completion, and is given the exact range to retry.
+     */
+    if (recalculationError !== null) {
+      return {
+        ...common,
+        code: 207,
+        partial: true,
+        recalculation_failed: true,
+        recalculated: null,
+        recalculation_error: recalculationError,
+        msg:
+          `The shift change was SAVED (${shiftName} from ${effectiveFrom}), but attendance for ` +
+          `${range.from} to ${range.to} could NOT be recalculated and is still calculated under the ` +
+          `old shift. Re-run the recalculation for that range before this month is processed.`,
+      };
+    }
+
+    return {
+      ...common,
+      code: 200,
+      partial: false,
+      recalculation_failed: false,
       recalculated,
       msg:
-        effectiveFrom > today
-          ? `Recorded. ${shift.shift_code || shift.shift_name} applies from ${effectiveFrom}; nothing before it is affected.`
-          : `Recorded. ${shift.shift_code || shift.shift_name} applies from ${effectiveFrom}; attendance from that date has been recalculated and nothing before it is affected.`,
+        `Recorded. ${shiftName} applies from ${effectiveFrom}; attendance for ${range.from} to ` +
+        `${range.to} has been recalculated and nothing before it is affected.`,
     };
   }
 

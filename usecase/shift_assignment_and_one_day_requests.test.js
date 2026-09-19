@@ -26,6 +26,12 @@ const buildWorkShift = require("./employee_work_shift");
 const buildShiftTelegram = require("./attendance_shift_change_telegram");
 const { REQUEST_TYPE, REQUEST_STATUS, STEP_DECISION, APPROVER_ROLE } =
   require("../utils/attendance_approval_chain");
+const {
+  affectedRangeForNewAssignment,
+  monthProbesForRange,
+  resolveAssignmentForDate,
+} = require("../utils/shiftResolution");
+const { payrollLockedError } = require("../utils/attendance_payroll_lock");
 
 /* ============================================================== fixtures */
 
@@ -90,7 +96,7 @@ const IDENTITIES = {
  * the real `findPayrollLockedPeriods` answers from `payrun_employee_calculation`.
  */
 function build(state = {}) {
-  const saved = { calculations: [], overrides: [], defaultShiftWrites: [] };
+  const saved = { calculations: [], overrides: [], defaultShiftWrites: [], lockProbes: [] };
   const store = { requests: [], steps: [], telegram: [] };
   const overrides = [...(state.overrides || [])];
   const assignments = state.assignments || {
@@ -128,7 +134,12 @@ function build(state = {}) {
     getEmploymentWindow: async (id) => EMPLOYEES.find((e) => e.employee_id === Number(id)) || null,
     getMonthlyGrossAsOf: async () => null,
     saveCalculations: async (rows) => { saved.calculations.push(rows); return { written: rows.length }; },
-    saveCalculationsWithReconciliation: async ({ rows }) => { saved.calculations.push(rows); return { written: rows.length, stale_removed: 0 }; },
+    saveCalculationsWithReconciliation: async ({ rows }) => {
+      // How a test makes the RECALCULATION fail while the assignment stands.
+      if (state.recalculationFails) throw new Error("ER_LOCK_WAIT_TIMEOUT: the recalculation could not be stored");
+      saved.calculations.push(rows);
+      return { written: rows.length, stale_removed: 0 };
+    },
     saveDateShiftOverrideWithCalculation: async ({ override, rows }) => {
       const id = nextOverrideId; nextOverrideId += 1;
       overrides.push({ attendance_date_shift_override_id: id, ...override });
@@ -270,15 +281,51 @@ function build(state = {}) {
     findExistingEmployeeIds: async (ids) => ids.filter((id) => EMPLOYEES.some((e) => e.employee_id === id)),
     getActiveWorkShift: async (id) => (SHIFTS[id] ? { ...SHIFTS[id].config } : null),
     listAssignmentHistory: async (id) => [...(assignments[id] || [])].sort((a, b) => (a.effective_from < b.effective_from ? 1 : -1)),
-    changeAssignment: async ({ employeeId, workShiftId, effectiveFrom, note, createdBy }) => {
+    /*
+     * THE REAL TRANSACTION, MIRRORED - and it has to be, because everything
+     * the review found lives inside it: the lock is taken AFTER the
+     * pre-flight and at write time, the affected range stops where a later
+     * assignment takes over, and `default_work_shift_id` is the RESOLVER's
+     * answer for today rather than the shift just inserted.
+     *
+     * `state.lockBeforeWrite` is how a test makes the month close in the gap
+     * the pre-flight cannot cover.
+     */
+    changeAssignment: async ({ employeeId, workShiftId, effectiveFrom, note, createdBy, today: writeToday }) => {
+      const before = assignments[employeeId] || [];
+
+      if (state.lockBeforeWrite) lockedMonths.add(state.lockBeforeWrite);
+
+      const affected = affectedRangeForNewAssignment({
+        assignments: before,
+        effectiveFrom,
+        today: writeToday,
+      });
+      if (affected) {
+        const probes = monthProbesForRange({ employeeId, from: affected.from, to: affected.to });
+        saved.lockProbes.push(probes.map((p) => p.attendance_date));
+        const hit = probes
+          .map((p) => ({ employee_id: employeeId, year: Number(p.attendance_date.slice(0, 4)), month: Number(p.attendance_date.slice(5, 7)) }))
+          .filter((p) => lockedMonths.has(`${p.year}-${p.month}`));
+        if (hit.length > 0) throw payrollLockedError(hit);
+      }
+
       const id = nextAssignmentId; nextAssignmentId += 1;
-      assignments[employeeId] = [
-        ...(assignments[employeeId] || []),
-        { employee_work_shift_assignment_id: id, employee_id: employeeId, work_shift_id: workShiftId, effective_from: effectiveFrom, source: "SHIFT_CHANGE", note, created_by: createdBy, created_at: "2026-09-19 11:00:00" },
-      ];
-      return { code: 200, employee_work_shift_assignment_id: id, employee_id: employeeId, work_shift_id: workShiftId, effective_from: effectiveFrom, source: "SHIFT_CHANGE" };
+      const row = { employee_work_shift_assignment_id: id, employee_id: employeeId, work_shift_id: workShiftId, effective_from: effectiveFrom, source: "SHIFT_CHANGE", note, created_by: createdBy, created_at: "2026-09-19 11:00:00" };
+      assignments[employeeId] = [...before, row];
+
+      const current = resolveAssignmentForDate(assignments[employeeId], writeToday);
+      const currentShiftId = current ? Number(current.work_shift_id) : null;
+      if (currentShiftId !== null) saved.defaultShiftWrites.push({ employeeId, workShiftId: currentShiftId });
+
+      return {
+        code: 200, employee_work_shift_assignment_id: id, employee_id: employeeId,
+        work_shift_id: workShiftId, effective_from: effectiveFrom, source: "SHIFT_CHANGE",
+        current_work_shift_id: currentShiftId,
+        affected_from: affected ? affected.from : null,
+        affected_to: affected ? affected.to : null,
+      };
     },
-    setDefaultWorkShift: async (employeeId, workShiftId) => { saved.defaultShiftWrites.push({ employeeId, workShiftId }); return { code: 200 }; },
     getEmployeeWorkShift: async () => null,
     listForAssignment: async () => [],
     getWorkShiftWorkingTimes: async () => [],
@@ -361,20 +408,29 @@ describe("A. Edit Shift Assignment - effective from a date", () => {
     assert.equal(oldest.is_current, false);
   });
 
-  it("a FUTURE effective date is recorded, is not current, and does not touch the employee's shift today", async () => {
+  it("a FUTURE effective date is REFUSED, because nothing in this system would activate it", async () => {
+    /*
+     * The dated history would resolve a future date correctly. The column
+     * every current-state consumer reads - `new_employee.default_work_shift_id`
+     * - would not: no job, no trigger and no scheduled reconciliation moves
+     * it on a date, so a future-dated change would be right in the history
+     * and wrong in the column from the day it took effect. The feature
+     * refuses what it cannot honour.
+     */
     const world = build();
-    const result = await world.workShift.changeAssignment({
-      employee_id: EMPLOYEE, work_shift_id: LONG, effective_from: "2026-10-01",
-      reason: "From next month", actor_employee_id: 7, today: TODAY,
-    });
-    assert.equal(result.is_future_dated, true);
-    assert.deepEqual(world.saved.defaultShiftWrites, [], "today's shift is not moved by a change that has not happened");
+    await assert.rejects(
+      () => world.workShift.changeAssignment({
+        employee_id: EMPLOYEE, work_shift_id: LONG, effective_from: "2026-10-01",
+        reason: "From next month", actor_employee_id: 7, today: TODAY,
+      }),
+      /effective_from cannot be in the future/
+    );
 
     const history = await world.workShift.assignmentHistory(EMPLOYEE, { today: TODAY });
-    assert.equal(history.data[0].is_future_dated, true);
-    assert.equal(history.data[0].is_current, false, "the newest row is not necessarily the current one");
-    assert.equal(history.data[1].is_current, true);
+    assert.equal(history.data.length, 1, "nothing was appended");
+    assert.deepEqual(world.saved.defaultShiftWrites, [], "and no current shift was written");
   });
+
 
   it("a RETROACTIVE change into an UNLOCKED month is allowed, and recalculates from the effective date", async () => {
     const world = build({ rawPunches: [punch(1, EMPLOYEE, "2026-09-10 18:00:00"), punch(2, EMPLOYEE, "2026-09-10 22:00:00")] });
@@ -406,10 +462,47 @@ describe("A. Edit Shift Assignment - effective from a date", () => {
     assert.deepEqual(world.saved.defaultShiftWrites, []);
   });
 
-  it("the lock is checked for EVERY month the change would move, not only the effective one", async () => {
-    // Effective in August, today in September: September is locked, and the
-    // change would rewrite it too.
-    const world = build({ lockedMonths: ["2026-9"] });
+  it("the lock is checked for every month the change ACTUALLY moves - and not for months a later assignment already governs", async () => {
+    /*
+     * 20 Aug inserted into a history that already says 01 Sep moves 20-31
+     * August and nothing else: every September date still resolves through
+     * the September row. Locking September would refuse a change that was
+     * never going to reach it.
+     */
+    const world = build({
+      lockedMonths: ["2026-9"],
+      assignments: {
+        [EMPLOYEE]: [
+          { employee_work_shift_assignment_id: 1, employee_id: EMPLOYEE, work_shift_id: EVE, effective_from: "2026-08-01", source: "MIGRATION_BACKFILL", note: null, created_by: null, created_at: "2026-08-01 10:00:00" },
+          { employee_work_shift_assignment_id: 2, employee_id: EMPLOYEE, work_shift_id: EVE, effective_from: "2026-09-01", source: "ASSIGNMENT", note: null, created_by: null, created_at: "2026-09-01 10:00:00" },
+        ],
+      },
+    });
+
+    const result = await world.workShift.changeAssignment({
+      employee_id: EMPLOYEE, work_shift_id: LONG, effective_from: "2026-08-20",
+      reason: "August cover, September already reassigned", actor_employee_id: 7, today: TODAY,
+    });
+    assert.equal(result.code, 200, "a locked September does not refuse an August-only change");
+    assert.deepEqual(
+      { from: result.affected_from, to: result.affected_to },
+      { from: "2026-08-20", to: "2026-08-31" },
+      "the range stops the day before the next assignment"
+    );
+    assert.deepEqual(world.saved.lockProbes, [["2026-08-01"]], "September was never probed");
+  });
+
+  it("but a change that DOES span into a locked month is refused", async () => {
+    // The same August date with NO later assignment behind it: the range now
+    // runs 20 Aug to today, which reaches into the locked September.
+    const world = build({
+      lockedMonths: ["2026-9"],
+      assignments: {
+        [EMPLOYEE]: [
+          { employee_work_shift_assignment_id: 1, employee_id: EMPLOYEE, work_shift_id: EVE, effective_from: "2026-08-01", source: "MIGRATION_BACKFILL", note: null, created_by: null, created_at: "2026-08-01 10:00:00" },
+        ],
+      },
+    });
     await assert.rejects(
       () => world.workShift.changeAssignment({
         employee_id: EMPLOYEE, work_shift_id: LONG, effective_from: "2026-08-20",
@@ -418,6 +511,140 @@ describe("A. Edit Shift Assignment - effective from a date", () => {
       (err) => err.code === "PAYROLL_MONTH_LOCKED"
     );
   });
+
+  /* ========================= the write-time boundary, not the pre-flight == */
+
+  it("THE RACE: the month closes between the pre-flight and the write, and the write refuses it", async () => {
+    /*
+     * The pre-flight holds no lock, so it can only ever be a courtesy. This
+     * test makes the month close in exactly the window it cannot cover - the
+     * fake locks it after the pre-flight has answered and before the insert,
+     * which is what `assertMonthsNotPayrollLocked`'s `FOR UPDATE` on the
+     * payrun rows exists to serialize in production.
+     *
+     * NOTHING may be written.
+     */
+    const world = build({ lockBeforeWrite: "2026-9" });
+
+    await assert.rejects(
+      () => world.workShift.changeAssignment({
+        employee_id: EMPLOYEE, work_shift_id: LONG, effective_from: "2026-09-10",
+        reason: "Racing a payroll lock", actor_employee_id: 7, today: TODAY,
+      }),
+      (err) => {
+        assert.equal(err.code, "PAYROLL_MONTH_LOCKED", "refused by the WRITE, after the pre-flight passed");
+        return true;
+      }
+    );
+
+    const history = await world.workShift.assignmentHistory(EMPLOYEE, { today: TODAY });
+    assert.equal(history.data.length, 1, "no assignment row was inserted");
+    assert.deepEqual(world.saved.defaultShiftWrites, [], "and no current shift was written");
+    assert.deepEqual(world.saved.calculations, [], "and nothing was recalculated");
+  });
+
+  /* ================== the current shift is resolved, never assumed ======== */
+
+  it("a BACKDATED change behind a later assignment leaves the CURRENT shift alone", async () => {
+    /*
+     *   01 Sep  A          insert 05 Sep = C, today 19 Sep
+     *   15 Sep  B
+     *
+     * Correct resolution: 01-04 A, 05-14 C, 15 onward B. The employee is
+     * still on B today, so `default_work_shift_id` must stay B - stamping
+     * the shift just inserted would make the column disagree with every
+     * date it claims to describe.
+     */
+    const world = build({
+      assignments: {
+        [EMPLOYEE]: [
+          { employee_work_shift_assignment_id: 1, employee_id: EMPLOYEE, work_shift_id: EVE, effective_from: "2026-09-01", source: "MIGRATION_BACKFILL", note: null, created_by: null, created_at: "2026-09-01 10:00:00" },
+          { employee_work_shift_assignment_id: 2, employee_id: EMPLOYEE, work_shift_id: SAME, effective_from: "2026-09-15", source: "ASSIGNMENT", note: null, created_by: null, created_at: "2026-09-15 10:00:00" },
+        ],
+      },
+    });
+
+    const result = await world.workShift.changeAssignment({
+      employee_id: EMPLOYEE, work_shift_id: LONG, effective_from: "2026-09-05",
+      reason: "Covered the long shift that fortnight", actor_employee_id: 7, today: TODAY,
+    });
+
+    assert.equal(result.current_work_shift_id, SAME, "the later assignment still governs today");
+    assert.deepEqual(world.saved.defaultShiftWrites, [{ employeeId: EMPLOYEE, workShiftId: SAME }]);
+    assert.notEqual(result.current_work_shift_id, LONG, "NOT the shift just inserted");
+
+    // And the history resolves exactly as stated.
+    const history = await world.workShift.assignmentHistory(EMPLOYEE, { today: TODAY });
+    const current = history.data.find((r) => r.is_current);
+    assert.equal(current.work_shift_id, SAME);
+    assert.equal(current.effective_from, "2026-09-15");
+  });
+
+  it("an ORDINARY change with nothing later does move the current shift", async () => {
+    const world = build({
+      assignments: {
+        [EMPLOYEE]: [
+          { employee_work_shift_assignment_id: 1, employee_id: EMPLOYEE, work_shift_id: EVE, effective_from: "2026-09-01", source: "MIGRATION_BACKFILL", note: null, created_by: null, created_at: "2026-09-01 10:00:00" },
+        ],
+      },
+    });
+
+    const result = await world.workShift.changeAssignment({
+      employee_id: EMPLOYEE, work_shift_id: LONG, effective_from: "2026-09-10",
+      reason: "Moved to the long shift", actor_employee_id: 7, today: TODAY,
+    });
+
+    assert.equal(result.current_work_shift_id, LONG);
+    assert.deepEqual(world.saved.defaultShiftWrites, [{ employeeId: EMPLOYEE, workShiftId: LONG }]);
+    assert.deepEqual(
+      { from: result.affected_from, to: result.affected_to },
+      { from: "2026-09-10", to: TODAY }
+    );
+  });
+
+  /* ================ a failed recalculation is not a success ============== */
+
+  it("a RECALCULATION FAILURE is reported as a partial failure, never as a completed save", async () => {
+    const world = build({ recalculationFails: true, rawPunches: [punch(1, EMPLOYEE, "2026-09-12 18:00:00"), punch(2, EMPLOYEE, "2026-09-12 22:00:00")] });
+
+    const result = await world.workShift.changeAssignment({
+      employee_id: EMPLOYEE, work_shift_id: LONG, effective_from: "2026-09-10",
+      reason: "Moved to the long shift", actor_employee_id: 7, today: TODAY,
+    });
+
+    assert.notEqual(result.code, 200, "a screen checking code === 200 must NOT see a success");
+    assert.equal(result.code, 207);
+    assert.equal(result.partial, true);
+    assert.equal(result.recalculation_failed, true);
+    assert.equal(result.recalculated, null);
+    assert.ok(result.recalculation_error, "the reason travels with it");
+    // The words matter: nothing may claim the attendance was recalculated.
+    assert.match(result.msg, /SAVED/);
+    assert.match(result.msg, /could NOT be recalculated/);
+    assert.ok(!/has been recalculated/.test(result.msg));
+    // And the caller is handed the exact range to retry.
+    assert.deepEqual(result.recalculation_range, { from: "2026-09-10", to: TODAY });
+
+    // The assignment itself IS committed - the history is correct, and it is
+    // the attendance behind it that is stale.
+    const history = await world.workShift.assignmentHistory(EMPLOYEE, { today: TODAY });
+    assert.equal(history.data.length, 2);
+    assert.equal(history.data[0].effective_from, "2026-09-10");
+  });
+
+  it("a successful change says so, and carries the range it re-ran", async () => {
+    const world = build();
+    const result = await world.workShift.changeAssignment({
+      employee_id: EMPLOYEE, work_shift_id: LONG, effective_from: "2026-09-10",
+      reason: "Moved to the long shift", actor_employee_id: 7, today: TODAY,
+    });
+    assert.equal(result.code, 200);
+    assert.equal(result.partial, false);
+    assert.equal(result.recalculation_failed, false);
+    assert.ok(result.recalculated);
+    assert.match(result.msg, /has been recalculated/);
+  });
+
 
   it("a reason is mandatory, and an effective date is never defaulted", async () => {
     const world = build();

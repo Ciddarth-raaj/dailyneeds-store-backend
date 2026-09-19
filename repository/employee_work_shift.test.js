@@ -146,6 +146,49 @@ describe("the legacy shift mapping", () => {
     ]);
   });
 
+  /*
+   * THE WRITE-TIME BOUNDARY, asserted against the SOURCE - because a fake
+   * repository cannot prove that the real one opens a transaction, and this
+   * is the guarantee the whole payroll-lock rule rests on.
+   */
+  it("the effective-dated change is transactional, takes the SHARED payroll lock, and reconciles the default inside it", () => {
+    const fn = code.slice(code.indexOf("async changeAssignment("), code.indexOf("async listAssignmentHistory("));
+
+    // One transaction around the whole thing.
+    assert.match(fn, /beginTransactionAsync\(connection\)/);
+    assert.match(fn, /commitAsync\(connection\)/);
+    assert.match(fn, /rollbackAsync\(connection\)/);
+
+    // The employee's history is locked before anything is decided from it.
+    assert.match(fn, /FROM employee_work_shift_assignment[\s\S]*?WHERE employee_id = \?[\s\S]*?FOR UPDATE/);
+
+    // THE payroll lock - imported, not re-implemented here.
+    assert.match(fn, /assertMonthsNotPayrollLocked\(\s*connection,/);
+    assert.match(code, /require\("\.\/attendance_calculation"\)/);
+    assert.ok(
+      !/payrun_employee_calculation/.test(code),
+      "the lock query belongs to attendance_calculation.js and is not copied here"
+    );
+
+    // The lock is taken BEFORE the insert, not after it.
+    assert.ok(
+      fn.indexOf("assertMonthsNotPayrollLocked") < fn.indexOf("INSERT INTO employee_work_shift_assignment"),
+      "the lock is taken before the row is written"
+    );
+
+    // The current shift is the RESOLVER's answer, never the inserted id.
+    assert.match(fn, /resolveAssignmentForDate\(after, today\)/);
+    assert.match(fn, /UPDATE new_employee SET default_work_shift_id = \? WHERE employee_id = \?/);
+    assert.ok(
+      fn.indexOf("INSERT INTO employee_work_shift_assignment") < fn.indexOf("resolveAssignmentForDate"),
+      "the default is resolved over the history AFTER the insert"
+    );
+    assert.ok(
+      !/setDefaultWorkShift/.test(code),
+      "there is no standalone setter left to bypass the reconciliation"
+    );
+  });
+
   it("never SELECTs * from an employee table", () => {
     assert.ok(!/SELECT\s+\*/i.test(code), "every column is named");
   });
