@@ -13,6 +13,7 @@
  *   GET /employee/employees             the population
  *   GET /hr/employees/status-summary    the onboarding state of that
  *                                       population
+ *   GET /hr/employees/outlets           the branches it may be filtered by
  *
  * WHY BOTH, AND WHY HERE. A frontend filter is not a security boundary, and
  * neither is one of two endpoints. If the summary were scoped less tightly
@@ -115,6 +116,19 @@ const statusSummaryUsecase = {
   },
 };
 
+/**
+ * THE COMPANY-WIDE OUTLET TABLE. Deliberately larger than any one caller's
+ * scope, and containing a name a branch-scoped caller must never receive:
+ * `/outlet/directory` returns all of this to anybody logged in, which is why
+ * the employee screens may not use it.
+ */
+const OUTLETS = [
+  { outlet_id: KATHIRKAMAM, outlet_name: "Kathirkamam" },
+  { outlet_id: MOOLAKULAM, outlet_name: "Moolakulam" },
+  { outlet_id: 9, outlet_name: "Villianur" },
+];
+const outletUsecase = { getDirectory: async () => OUTLETS.map((o) => ({ ...o })) };
+
 /** What the employee list was asked for, and WITH WHICH ACTOR. */
 const listCalls = [];
 const employeeUsecase = {
@@ -157,7 +171,8 @@ before(async () => {
   delete require.cache[require.resolve("./employee_master")];
   delete require.cache[require.resolve("./employee")];
   const master = require("./employee_master")(
-    {}, permissions, sensitive, null, null, statusSummaryUsecase, null, branchScope
+    {}, permissions, sensitive, null, null, statusSummaryUsecase, null, branchScope,
+    outletUsecase
   );
   const employees = require("./employee")(employeeUsecase, permissions, sensitive, branchScope);
   app.use("/hr", master.getRouter());
@@ -255,6 +270,22 @@ describe("a store manager holding the dashboard right", () => {
     assert.deepEqual(lastSummary().filters.store_ids, [KATHIRKAMAM]);
   });
 
+  it("CANNOT RETRIEVE A FOREIGN OUTLET NAME FROM THE PAGE'S OUTLET SOURCE", async () => {
+    // THE POINT OF THE ENDPOINT. The company has three outlets and this
+    // caller is authorised for one, so one is what crosses the wire - the
+    // other two names are never sent and there is nothing for the browser to
+    // hide. A client-side filter over the company-wide directory would have
+    // passed a rendering test and failed this one.
+    const r = await call("/hr/employees/outlets", STORE_MANAGER);
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body, [{ outlet_id: KATHIRKAMAM, outlet_name: "Kathirkamam" }]);
+    // Asserted against the RAW RESPONSE TEXT, because the leak being tested
+    // is the bytes in the body and not the shape they parse into.
+    assert.ok(!r.text.includes("Moolakulam"), "a foreign outlet name must not be sent");
+    assert.ok(!r.text.includes("Villianur"), "a foreign outlet name must not be sent");
+    assert.ok(!r.text.includes(`"outlet_id":${MOOLAKULAM}`), "nor a foreign outlet id");
+  });
+
   it("is told nothing sensitive - the payment route stays its own right", async () => {
     const r = await call("/hr/employees/status-summary", STORE_MANAGER);
     assert.equal(r.status, 200);
@@ -274,6 +305,12 @@ describe("a store manager WITHOUT the dashboard right", () => {
     // Master - and still does not open the queue.
     assert.ok(!GRANTS[PLAIN_MANAGER.designation].includes(P.VIEW_HR_ONBOARDING_DASHBOARD));
     assert.ok(GRANTS[PLAIN_MANAGER.designation].includes(P.VIEW_EMPLOYEES));
+  });
+
+  it("STILL GETS NO FOREIGN OUTLET NAME - the outlet source is scoped too", async () => {
+    const r = await call("/hr/employees/outlets", PLAIN_MANAGER);
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body, [{ outlet_id: KATHIRKAMAM, outlet_name: "Kathirkamam" }]);
   });
 
   it("STILL GETS NO MORE DATA THAN THEIR OWN STORE from either endpoint", async () => {
@@ -303,6 +340,15 @@ describe("a caller holding employee_scope_all_branches", () => {
     assert.equal(lastList().actor.branch_scope.kind, EMPLOYEE_BRANCH_SCOPE.ALL_BRANCHES);
   });
 
+  it("receives EVERY outlet, because every branch is theirs", async () => {
+    const r = await call("/hr/employees/outlets", HR);
+    assert.equal(r.status, 200);
+    assert.deepEqual(
+      r.body.map((o) => o.outlet_name),
+      ["Kathirkamam", "Moolakulam", "Villianur"]
+    );
+  });
+
   it("may still narrow to one branch by asking", async () => {
     const r = await call(`/hr/employees/status-summary?store_ids[]=${KATHIRKAMAM}`, HR);
     assert.equal(r.status, 200);
@@ -321,6 +367,12 @@ describe("an administrator", () => {
     const list = await call("/employee/employees", ADMIN, { userType: 2 });
     assert.equal(list.status, 200);
     assert.equal(lastList().actor.branch_scope.kind, EMPLOYEE_BRANCH_SCOPE.ALL_BRANCHES);
+  });
+
+  it("receives every outlet as well", async () => {
+    const r = await call("/hr/employees/outlets", ADMIN, { userType: 2 });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.length, OUTLETS.length);
   });
 
   it("is not restricted by their own employee record's branch", async () => {
@@ -358,5 +410,47 @@ describe("the sensitive payment data is a separate right from the screen", () =>
       disclosePaymentRoute: false,
     });
     assert.equal(lastSummary().filters.store_ids, undefined, "their reach is unaffected");
+  });
+});
+
+/* ================= the outlet source is the SCOPE, not the population === */
+
+describe("the outlets endpoint answers about the scope, never about the rows", () => {
+  it("is stable - it asks the branch scope and never the employee population", () => {
+    // ITEM 2 IN CODE. A dropdown derived from the employees currently on
+    // screen loses an authorised branch the moment that branch has no
+    // matching row - an empty store, an active search, another status filter
+    // selected. So the endpoint reads `listFilters(req, null)`, which is the
+    // caller's authorised branches, and consults the outlet table only for a
+    // name. Nothing in its path touches an employee row or a query filter.
+    const src = require("fs").readFileSync(require("path").join(__dirname, "employee_master.js"), "utf8");
+    const route = src.slice(src.indexOf('router.get("/employees/outlets"'));
+    const body = route.slice(0, route.indexOf("\n    });"));
+    assert.match(body, /listFilters\(req, null\)/, "the scope, with no requested filter");
+    assert.match(body, /this\.outlets\.getDirectory\(\)/, "names only");
+    assert.ok(!/status-?summary|employeeUsecase|req\.query/.test(body),
+      "the answer must not depend on the employee population or on a query filter");
+  });
+
+  it("returns an authorised branch even when it holds no employees", async () => {
+    // Villianur has no employee in the fixture table at all, and HR still
+    // gets it: it is a branch they may filter by, and saying otherwise would
+    // tell them the store does not exist.
+    assert.ok(!EMPLOYEES.some((e) => Number(e.store_id) === 9), "nobody works at Villianur here");
+    const r = await call("/hr/employees/outlets", HR);
+    assert.ok(
+      r.body.some((o) => Number(o.outlet_id) === 9),
+      "an authorised branch with no employees is still a branch"
+    );
+  });
+
+  it("`[]` authorised branches is no outlet, never every outlet", async () => {
+    // An actor with no resolvable branch FAILS CLOSED. The dangerous bug
+    // would be collapsing `[]` (no branch) into `null` (no restriction) and
+    // handing them the company.
+    const NOBODY = { designation: STORE_MANAGER.designation, employee: 999, store: null };
+    const r = await call("/hr/employees/outlets", NOBODY);
+    assert.equal(r.status, 403, "an unresolvable branch is refused, not widened");
+    assert.ok(!r.text.includes("Kathirkamam"));
   });
 });

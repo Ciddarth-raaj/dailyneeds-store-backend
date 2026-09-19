@@ -32,7 +32,8 @@ class EmployeeMasterRoutes {
     bankUsecase,
     statusSummaryUsecase,
     ifscLookupUsecase,
-    branchScope
+    branchScope,
+    outletUsecase
   ) {
     // EMPLOYEE BRANCH SCOPE. Required, not optional - see routes/employee.js.
     if (!branchScope) {
@@ -46,6 +47,9 @@ class EmployeeMasterRoutes {
     this.bank = bankUsecase || null;
     this.statusSummary = statusSummaryUsecase || null;
     this.ifsc = ifscLookupUsecase || null;
+    // READ-ONLY, and only ever `getDirectory()`. Used to put a NAME on the
+    // branches the scope already decided - see `/employees/outlets`.
+    this.outlets = outletUsecase || null;
     this.setupRoutes();
   }
 
@@ -398,6 +402,78 @@ class EmployeeMasterRoutes {
         res.end();
       }
     );
+
+    /* ------------------------------------------- the branches I may filter */
+    /**
+     * THE OUTLETS THIS CALLER MAY FILTER EMPLOYEES BY.
+     *
+     * WHY THIS EXISTS AT ALL. The employee screens need a branch dropdown, and
+     * the only list available was `GET /outlet/directory` - which is
+     * DELIBERATELY company-wide and behind no permission, because a purchase
+     * or accounts filter is meant to name every branch. Pointing an
+     * employee screen at it meant a branch-scoped store manager was sent
+     * every outlet in the company, id and name, and the browser then hid the
+     * ones they may not use. That is not an authorization boundary: the
+     * response had already crossed the wire, and the whole list was visible
+     * in the network tab. This returns only what the caller may know about,
+     * so there is nothing to hide.
+     *
+     * `/outlet/directory` IS LEFT EXACTLY AS IT IS. Narrowing it would break
+     * the callers it was widened for, and those callers are not wrong -
+     * "every branch" is the right answer for a purchase filter and the wrong
+     * one for an employee filter. Two questions, two endpoints.
+     *
+     * IT IS THE SAME BRANCH SCOPE AS THE LIST AND THE SUMMARY, and not a
+     * second one: `listFilters` with no requested filter IS the caller's
+     * authorized branches. So this endpoint cannot disagree with the employee
+     * list about which branches exist for this caller - they are computed by
+     * the same middleware from the same employee record.
+     *
+     * IT IS THE SCOPE, NOT THE POPULATION. An authorized branch with no
+     * employees in it is still returned, because it is still a branch this
+     * caller may filter by and a dropdown that dropped it would be telling
+     * them they have no such store. The answer therefore does not move when
+     * employees are added, resigned, or filtered on screen.
+     *
+     * `view_employees` is the right, because this says which branches an
+     * employee reader may narrow to and is useless to anybody who may not
+     * read employees. It discloses an outlet id and an outlet name and
+     * nothing else - the same two columns the public directory returns.
+     */
+    router.get("/employees/outlets", this.permissions.require(P.VIEW_EMPLOYEES), async (req, res) => {
+      try {
+        if (!this.outlets) {
+          res.json({ code: 503, msg: "The outlet directory is not configured on this server" });
+          res.end();
+          return;
+        }
+        // No requested filter: this asks what the caller's scope IS.
+        const scoped = await this.branchScope.listFilters(req, null);
+        if (!scoped.ok) {
+          this.branchScope.refuse(res, scoped);
+          res.end();
+          return;
+        }
+
+        const directory = await this.outlets.getDirectory();
+        const rows = Array.isArray(directory) ? directory : [];
+
+        // `null` is NO RESTRICTION - an all-branches caller - and `[]` is NO
+        // AUTHORIZED BRANCH. Collapsing the two would hand a caller with no
+        // branch the whole company, which is the exact inversion the branch
+        // scope exists to prevent, so they are matched separately.
+        if (scoped.store_ids === null) {
+          res.json(rows);
+          res.end();
+          return;
+        }
+        const allowed = new Set(scoped.store_ids.map((id) => Number(id)));
+        res.json(rows.filter((o) => allowed.has(Number(o.outlet_id))));
+      } catch (err) {
+        this._fail(res, err);
+      }
+      res.end();
+    });
 
     /* ---------------------------------------------- the list status columns */
     /**
@@ -931,7 +1007,8 @@ module.exports = (
   bankUsecase,
   statusSummaryUsecase,
   ifscLookupUsecase,
-  branchScope
+  branchScope,
+  outletUsecase
 ) =>
   new EmployeeMasterRoutes(
     employeeMasterUsecase,
@@ -941,5 +1018,6 @@ module.exports = (
     bankUsecase,
     statusSummaryUsecase,
     ifscLookupUsecase,
-    branchScope
+    branchScope,
+    outletUsecase
   );
