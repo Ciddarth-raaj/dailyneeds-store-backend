@@ -149,8 +149,16 @@ const BREAK_CREDIT_CUTOFF_MINUTES = 15 * 60;
  *      worked): the late and early-going rules still report their flags, but
  *      they do not charge, because they are measuring against hours the
  *      employee was never entitled to.
+ *  10  OT AUTHORISED BY AN APPROVED ONE-DAY SHIFT CHANGE. A date whose shift
+ *      came from a finally approved SHIFT_CHANGE request needs no separate OT
+ *      request for the overtime that shift produces: `shift_authorised_ot_minutes`
+ *      is derived from the actual minutes on every calculation, never frozen
+ *      at approval, and `excess_ot_minutes` - what falls outside the approved
+ *      window - keeps the ordinary request path. `approved_ot_minutes` is the
+ *      authorised portion plus whatever a request approved of the excess, so
+ *      no minute can be approved twice.
  */
-const CALCULATION_VERSION = 9;
+const CALCULATION_VERSION = 10;
 
 /** Every value `status` can take. A calculation is never left without one. */
 const CALC_STATUS = Object.freeze({
@@ -637,6 +645,10 @@ function calculateAttendanceDay(input = {}) {
     attendance_required = true,
     base_nrm_minutes = null,
     base_shift = null,
+    // The date's shift override is backed by a FINALLY APPROVED one-day
+    // SHIFT_CHANGE request. See `resolveShiftAuthorisedOvertime` below.
+    shift_authorised = false,
+    shift_change_request_id = null,
   } = input;
 
   const rawPunches = orderPunches(punches, attendance_date);
@@ -682,6 +694,19 @@ function calculateAttendanceDay(input = {}) {
     // Regular = MIN(worked, base NRM). Stored rather than re-derived so a
     // payslip query never has to know the rule.
     regular_minutes: 0,
+    /*
+     * SHIFT-AUTHORISED OT. The portion of this day's overtime that an
+     * approved one-day shift change already authorises, and which therefore
+     * needs no separate OT request; `excess_ot_minutes` is what is left for
+     * the ordinary OT request path. On every other date the first is 0 and
+     * the second is the whole candidate, which is what every existing caller
+     * already assumed.
+     */
+    shift_authorised_ot_minutes: 0,
+    excess_ot_minutes: 0,
+    approved_ot_source: null,
+    shift_change_request_id:
+      shift_change_request_id === undefined ? null : shift_change_request_id,
     span_minutes: 0,
     break_allowance_minutes: 0,
     break_allowance_source: "SHIFT",
@@ -1117,10 +1142,78 @@ function calculateAttendanceDay(input = {}) {
   base.ot_offset_minutes = overtime.ot_offset_minutes;
   base.candidate_ot_minutes = overtime.candidate_ot_minutes;
 
+  /*
+   * ============ OT AUTHORISED BY AN APPROVED ONE-DAY SHIFT CHANGE =========
+   *
+   * When this date's shift came from a FINALLY APPROVED SHIFT_CHANGE
+   * request, that approval is itself the authorisation for the overtime the
+   * longer shift produces: the employee is not asked to file a second
+   * request for the very hours somebody already agreed they should work.
+   *
+   * IT IS DERIVED, EVERY TIME, FROM THE ACTUAL MINUTES. Nothing is frozen at
+   * approval - a request approved before the day is worked authorises 0 on
+   * the day it is approved and the right figure once the punches arrive,
+   * because this runs again on every calculation. A later correction that
+   * raises or lowers the worked minutes moves it in the same way.
+   *
+   * THE WINDOW MATTERS. What was approved is a SHIFT - 10:00 to 22:00, say -
+   * not unlimited overtime on that date. So the authorised portion is the OT
+   * earned INSIDE that window, and the engine already measures what falls
+   * outside it:
+   *
+   *     pre_shift_minutes   worked before the approved in-time
+   *     post_shift_minutes  worked after the approved out-time
+   *
+   * and prices each side separately (`pre_shift_ot_minutes`,
+   * `post_shift_ot_minutes`). So:
+   *
+   *     excess    = pre_shift_ot_minutes
+   *               + MIN(post_shift_minutes, post_shift_ot_minutes)
+   *     authorised = MAX(0, candidate_ot_minutes - excess)
+   *
+   * The post term is bounded by BOTH the raw minutes beyond the out-time and
+   * the OT actually priced in that bucket, because `post_shift_ot_minutes`
+   * also carries in-window earnings (an unused break), which the shift
+   * change DID authorise. Bounding it this way can only ever move minutes
+   * from the automatic side to the requestable one, never the reverse.
+   *
+   * The excess keeps the ordinary OT path: the employee requests it, and an
+   * approver decides it, exactly as on any other date.
+   */
+  if (shift_authorised) {
+    const preExcess = Math.max(0, Math.trunc(base.pre_shift_ot_minutes || 0));
+    const postExcess = Math.min(
+      Math.max(0, Math.trunc(base.post_shift_minutes || 0)),
+      Math.max(0, Math.trunc(base.post_shift_ot_minutes || 0))
+    );
+    const excess = Math.min(base.candidate_ot_minutes, preExcess + postExcess);
+    base.shift_authorised_ot_minutes = Math.max(0, base.candidate_ot_minutes - excess);
+    base.excess_ot_minutes = excess;
+    base.approved_ot_source = base.shift_authorised_ot_minutes > 0 ? "SHIFT_CHANGE" : null;
+    if (excess > 0) {
+      base.notes.push(
+        `Approved shift change authorises ${base.shift_authorised_ot_minutes} OT minute(s); ${excess} minute(s) fall outside the approved shift and remain claimable`
+      );
+    }
+  } else {
+    base.shift_authorised_ot_minutes = 0;
+    base.excess_ot_minutes = base.candidate_ot_minutes;
+  }
+
+  /*
+   * APPROVED OT: the shift-authorised portion, plus whatever a separate OT
+   * REQUEST approved of the excess - and the request can never reach the
+   * authorised portion, which is what stops the same minute being paid
+   * twice through two different approvals.
+   */
   const approved = Math.max(0, Math.trunc(Number(approved_ot_minutes) || 0));
   // Approved OT can never exceed what was actually earned: an approval is a
   // decision about the candidate, not a licence to invent minutes.
-  base.approved_ot_minutes = Math.min(approved, base.candidate_ot_minutes);
+  const approvedFromRequest = Math.min(approved, base.excess_ot_minutes);
+  base.approved_ot_minutes = Math.min(
+    base.shift_authorised_ot_minutes + approvedFromRequest,
+    base.candidate_ot_minutes
+  );
 
   if (regularization_pending) {
     base.status = CALC_STATUS.REGULARIZATION_PENDING;

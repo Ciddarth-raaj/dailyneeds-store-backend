@@ -128,6 +128,9 @@ const OT_CLAIM_STATE = Object.freeze({
   APPROVED: "APPROVED",
   REJECTED: "REJECTED",
   CLOSED_AT_PAYROLL_LOCK: "CLOSED_AT_PAYROLL_LOCK",
+  // Authorised by an approved one-day SHIFT CHANGE. There is no OT request
+  // and there must not be one: the approval already happened, under Shift.
+  APPROVED_VIA_SHIFT_CHANGE: "APPROVED_VIA_SHIFT_CHANGE",
 });
 
 /**
@@ -147,8 +150,25 @@ const OT_CLAIM_STATE = Object.freeze({
  */
 function otClaimFor({ day, otRequest, otSettled }) {
   const candidate = Math.max(0, Math.trunc(Number(day.candidate_ot_minutes) || 0));
+  /*
+   * THE PORTION AN APPROVED SHIFT CHANGE ALREADY AUTHORISES, and what is
+   * left for the ordinary request path. On every other date the first is 0
+   * and the second is the whole candidate, so nothing below changes for
+   * them.
+   */
+  const authorised = Math.max(0, Math.trunc(Number(day.shift_authorised_ot_minutes) || 0));
+  const claimable =
+    day.excess_ot_minutes === undefined || day.excess_ot_minutes === null
+      ? candidate
+      : Math.max(0, Math.trunc(Number(day.excess_ot_minutes) || 0));
   const claim = {
     ot_claim_state: OT_CLAIM_STATE.NONE,
+    // What the shift change authorised, what it did not, and which request
+    // said so - the three facts the employee's screen and payroll both need.
+    ot_shift_authorised_minutes: authorised,
+    ot_claimable_minutes: claimable,
+    ot_authorising_request_id:
+      authorised > 0 ? day.shift_change_request_id || null : null,
     ot_request_id: otRequest ? otRequest.attendance_approval_request_id : null,
     ot_requested_minutes: otRequest ? Number(otRequest.candidate_ot_minutes || 0) : null,
     ot_reason: otRequest ? otRequest.reason || null : null,
@@ -174,7 +194,23 @@ function otClaimFor({ day, otRequest, otSettled }) {
     return claim;
   }
 
-  if (candidate > 0 && day.is_final === true && day.status === CALC_STATUS.FINAL) {
+  /*
+   * NOTHING WAS REQUESTED. Three outcomes, in this order:
+   *
+   *   the shift change authorised OT, and there is claimable excess left
+   *     -> APPROVED_VIA_SHIFT_CHANGE, and the screen offers the EXCESS only
+   *   the shift change authorised all of it
+   *     -> APPROVED_VIA_SHIFT_CHANGE, and nothing is offered at all
+   *   no authorisation
+   *     -> AVAILABLE, the ordinary path, unchanged
+   *
+   * A day that is not complete and FINAL offers nothing either way: its
+   * overtime is a guess until the missing punch is supplied.
+   */
+  const settledDay = day.is_final === true && day.status === CALC_STATUS.FINAL;
+  if (authorised > 0 && settledDay) {
+    claim.ot_claim_state = OT_CLAIM_STATE.APPROVED_VIA_SHIFT_CHANGE;
+  } else if (claimable > 0 && settledDay) {
     claim.ot_claim_state = OT_CLAIM_STATE.AVAILABLE;
   }
   return claim;
@@ -408,6 +444,16 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
         employee_id,
         attendance_date: toDateOnly(assume_override.attendance_date),
         work_shift_id: Number(assume_override.work_shift_id),
+        // A SHIFT_CHANGE being finally approved in the caller's own
+        // transaction: the override row and the approved request do not exist
+        // to be joined yet, so the decision states the authorisation it is
+        // about to write. Anything else assumed - a management date-shift
+        // edit - authorises nothing, exactly as its stored row would not.
+        shift_change_approved: assume_override.shift_change_approved === true ? 1 : 0,
+        attendance_approval_request_id:
+          assume_override.attendance_approval_request_id === undefined
+            ? null
+            : assume_override.attendance_approval_request_id,
       });
     }
 
@@ -788,6 +834,14 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
         // The PAYROLL BASE. Ignored by the engine whenever it names the same
         // shift the day was calculated under, which is every ordinary date.
         base_shift: context.baseResolutionFor(date).snapshot,
+        // Does an APPROVED employee shift request stand behind this date's
+        // shift? If so the overtime that shift produces is already
+        // authorised and needs no second request.
+        shift_authorised: !!(resolution.assignment && resolution.assignment.shift_change_approved),
+        shift_change_request_id:
+          resolution.assignment && resolution.assignment.shift_change_approved
+            ? resolution.assignment.attendance_approval_request_id || null
+            : null,
       });
 
       // STORED HISTORY WINS, when there is any and the date has closed. The
@@ -998,6 +1052,18 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     post_shift_ot_minutes: day.post_shift_ot_minutes,
     candidate_ot_minutes: day.candidate_ot_minutes,
     approved_ot_minutes: day.approved_ot_minutes,
+    // WHY this day has approved OT, on the row payroll reads - so the
+    // question is answerable without re-resolving the override and its
+    // request. Null on every ordinary date.
+    shift_authorised_ot_minutes:
+      day.shift_authorised_ot_minutes === undefined ? 0 : day.shift_authorised_ot_minutes,
+    // SHIFT_CHANGE when an approved shift authorised it; OT_REQUEST when an
+    // ordinary OT approval did; NULL when no OT is approved at all.
+    approved_ot_source:
+      day.approved_ot_source ||
+      (Number(day.approved_ot_minutes) > 0 ? "OT_REQUEST" : null),
+    ot_authorising_request_id:
+      day.approved_ot_source === "SHIFT_CHANGE" ? day.shift_change_request_id || null : null,
     ot_rate: day.ot_rate,
     status: day.status,
     is_final: day.is_final ? 1 : 0,

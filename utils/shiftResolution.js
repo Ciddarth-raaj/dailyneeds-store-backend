@@ -369,6 +369,14 @@ function resolveShiftForDate({
         work_shift_id: override.work_shift_id,
         effective_from: date,
         source: "DATE_OVERRIDE",
+        // Carried through so the engine can tell an override the EMPLOYEE was
+        // granted from one a manager simply applied: only the first
+        // authorises the overtime the longer shift produces.
+        shift_change_approved: Number(override.shift_change_approved) === 1,
+        attendance_approval_request_id:
+          override.attendance_approval_request_id === undefined
+            ? null
+            : override.attendance_approval_request_id,
       }
     : resolveAssignmentForDate(assignments, date);
 

@@ -453,8 +453,31 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
         `${date} is not a complete attendance day yet, so its overtime cannot be requested`
       );
     }
-    const candidate = Math.max(0, Math.trunc(Number(day.candidate_ot_minutes) || 0));
+    /*
+     * WHAT MAY BE CLAIMED IS NOT ALWAYS THE WHOLE CANDIDATE.
+     *
+     * On a date whose shift came from an approved SHIFT_CHANGE request, the
+     * overtime that shift produced is already authorised by that approval -
+     * asking the employee to request it again would be asking twice for one
+     * decision, and approving it again would risk paying one minute through
+     * two records. Only the EXCESS, earned outside the approved shift's own
+     * window, still needs a request.
+     *
+     * `excess_ot_minutes` is the engine's figure and equals the whole
+     * candidate on every ordinary date, so nothing changes for them.
+     */
+    const claimable =
+      day.excess_ot_minutes === undefined || day.excess_ot_minutes === null
+        ? Math.max(0, Math.trunc(Number(day.candidate_ot_minutes) || 0))
+        : Math.max(0, Math.trunc(Number(day.excess_ot_minutes) || 0));
+    const authorised = Math.max(0, Math.trunc(Number(day.shift_authorised_ot_minutes) || 0));
+    const candidate = claimable;
     if (candidate <= 0) {
+      if (authorised > 0) {
+        throw validationError(
+          `${date} is covered by an approved shift change, which already authorises its ${authorised} overtime minute(s) - there is nothing left to request`
+        );
+      }
       throw validationError(`${date} has no overtime calculated, so there is nothing to request`);
     }
 
@@ -835,8 +858,24 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
           from_date: request.attendance_date,
           to_date: request.attendance_date,
         });
+        /*
+         * Clamped to what is CLAIMABLE now, which on a shift-authorised date
+         * is the excess and not the whole candidate. This is the second half
+         * of the no-double-pay rule: the engine adds the authorised portion
+         * itself, so an OT approval that could reach it would pay those
+         * minutes twice.
+         */
         const eligible = currentDay
-          ? Math.max(0, Math.trunc(Number(currentDay.candidate_ot_minutes) || 0))
+          ? Math.max(
+              0,
+              Math.trunc(
+                Number(
+                  currentDay.excess_ot_minutes === undefined || currentDay.excess_ot_minutes === null
+                    ? currentDay.candidate_ot_minutes
+                    : currentDay.excess_ot_minutes
+                ) || 0
+              )
+            )
           : 0;
         approvedOt = Math.min(claimed, eligible);
       } else {
@@ -865,6 +904,15 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
           ? {
               attendance_date: request.attendance_date,
               work_shift_id: Number(request.requested_work_shift_id),
+              // THE APPROVAL IS THE AUTHORISATION. The override row and this
+              // decision commit together, so the day computed here must be
+              // the day the override will produce - including the OT the
+              // approved shift authorises. If the work has already happened
+              // that figure appears immediately; if it has not, it is 0 now
+              // and derived from the punches whenever they arrive, because
+              // the stored override carries the same link.
+              shift_change_approved: true,
+              attendance_approval_request_id: Number(request_id),
             }
           : undefined,
       assume: {

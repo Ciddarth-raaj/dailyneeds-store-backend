@@ -54,6 +54,70 @@ they are the temporary shift's and the approver needs to see them — but they d
 not **charge**, because they would be measuring against hours the employee was
 never entitled to. The day carries a note saying so.
 
+## An approved shift change IS the OT authorisation for its date
+
+The employee does not file a second request for the overtime the approved
+longer shift produces. The approval already happened, under **Shift**.
+
+**It is derived, never frozen.** A request can be approved *before* the date is
+worked, when the right answer is zero; the authorisation lives in the link that
+already existed —
+
+```
+attendance_date_shift_override.attendance_approval_request_id
+  -> attendance_approval_request  (SHIFT_CHANGE, APPROVED, SETTLED)
+```
+
+— which `getDateShiftOverrides` reads as `shift_change_approved` on **every**
+calculation. So punches arriving later, a regularized missing punch, or any
+recalculation moves the figure in both directions, and payroll always consumes
+the current engine result.
+
+A **direct management date-shift override** has no request behind it, so it
+authorises nothing: nobody agreed with the employee that they would work longer.
+An **intermediate** approval and a **rejection** authorise nothing either.
+
+### The formula, and the fields it uses
+
+```
+excess     = pre_shift_ot_minutes
+           + MIN(post_shift_minutes, post_shift_ot_minutes)
+authorised = MAX(0, candidate_ot_minutes - excess)
+```
+
+`pre_shift_minutes` / `post_shift_minutes` are the engine's own measure of work
+**outside** the approved window (before the in-time, after the out-time), and
+each side is priced separately. The post term is bounded by both the raw minutes
+beyond the out-time and the OT actually priced in that bucket, because
+`post_shift_ot_minutes` also carries in-window earnings (an unused break) that
+the shift change *did* authorise. That bound can only move minutes from the
+automatic side to the requestable one, never the reverse.
+
+The **excess keeps the ordinary path**: the employee requests it, an approver
+decides it. `raiseOtRequest` claims the excess (and refuses outright when the
+shift change covers everything), and an OT approval is clamped to the excess —
+so no minute can be approved through two records:
+
+```
+approved_ot_minutes = MIN(authorised + MIN(request_approved, excess), candidate)
+```
+
+### Audit
+
+`attendance_day_calculation` carries `shift_authorised_ot_minutes`,
+`approved_ot_source` (`SHIFT_CHANGE` / `OT_REQUEST`) and
+`ot_authorising_request_id`, so a payslip query answers *why* a minute was
+approved without re-resolving anything. The request, its approvers, its final
+timestamp, the requested shift and the base shift are all still on the request
+and its steps.
+
+### On the screens
+
+The employee's OT tab shows **"Approved via Shift Change"** with the authorising
+request, and offers Request OT only for the excess. The Approval Centre grows no
+duplicate OT row — the Shift tab holds the approval, and the OT tab still lists
+standalone OT requests only.
+
 ## Only a longer shift may be requested
 
 `requested NRM > base NRM`, enforced in `raiseShiftChangeRequest` and offered

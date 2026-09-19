@@ -31,10 +31,17 @@ describe(NAME, () => {
   });
 
   it("sorts after every migration that existed when it was written", () => {
+    // The set AS IT WAS. Comparing against everything on disk would make this
+    // fail the moment a LATER migration is added, which is not a defect - the
+    // property worth pinning is that this one runs after the schema it
+    // assumes, not that it is forever the newest.
+    const PREDECESSORS_AT_WRITING = "20261029120000";
     const others = fs
       .readdirSync(path.join(__dirname, "mysql/migrations"))
       .filter((f) => f.endsWith(".js") && f !== `${NAME}.js`)
-      .map((f) => f.replace(/\.js$/, ""));
+      .map((f) => f.replace(/\.js$/, ""))
+      .filter((name) => name < PREDECESSORS_AT_WRITING);
+    assert.ok(others.length > 0, "there were migrations before this one");
     for (const other of others) {
       assert.ok(other < NAME, `${other} must sort before this migration`);
     }

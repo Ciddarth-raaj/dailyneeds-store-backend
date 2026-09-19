@@ -492,10 +492,18 @@ describe("the calculation version history is not rewritten", () => {
     assert.match(eight, /MISSING_PUNCH/);
   });
 
-  it("version 9 is the payroll base NRM, and the version is 9", () => {
-    const nine = history.slice(history.indexOf(" *   9 "));
+  it("version 9 is the payroll base NRM", () => {
+    const nine = history.slice(history.indexOf(" *   9 "), history.indexOf(" *  10 "));
     assert.match(nine, /base_nrm_minutes/);
     assert.match(nine, /regular_minutes/);
-    assert.match(source, /const CALCULATION_VERSION = 9;/);
+    assert.ok(!/SHIFT_CHANGE/.test(nine), "version 10's rule is not backdated into version 9");
+  });
+
+  it("version 10 is the shift-authorised OT, and the version is 10", () => {
+    const ten = history.slice(history.indexOf(" *  10 "));
+    assert.match(ten, /shift_authorised_ot_minutes/);
+    assert.match(ten, /excess_ot_minutes/);
+    assert.match(ten, /never frozen/);
+    assert.match(source, /const CALCULATION_VERSION = 10;/);
   });
 });

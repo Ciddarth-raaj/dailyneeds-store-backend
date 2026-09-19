@@ -114,8 +114,26 @@ function build(state = {}) {
 
   const calcRepo = {
     getShiftAssignmentHistory: async (id) => assignments[id] || [],
+    /*
+     * The REAL query joins the override to its authorising request and
+     * answers `shift_change_approved`. The fake must do the same, or a test
+     * of the shift-authorised OT rule would pass against a fake that simply
+     * agreed with it.
+     */
     getDateShiftOverrides: async (id, from, to) =>
-      overrides.filter((o) => o.employee_id === id && o.attendance_date >= from && o.attendance_date <= to),
+      overrides
+        .filter((o) => o.employee_id === id && o.attendance_date >= from && o.attendance_date <= to)
+        .map((o) => {
+          const request = store.requests.find(
+            (r) => r.attendance_approval_request_id === o.attendance_approval_request_id
+          );
+          const approved =
+            !!request &&
+            request.request_type === "SHIFT_CHANGE" &&
+            request.status === "APPROVED" &&
+            request.finalization_state === "SETTLED";
+          return { ...o, shift_change_approved: approved ? 1 : 0 };
+        }),
     getWorkShiftWithSchedule: async (id) => SHIFTS[id] || null,
     getWorkShiftConfigVersions: async () => [],
     listActiveWorkShiftOptions: async () =>
@@ -214,7 +232,14 @@ function build(state = {}) {
       let overrideId = null;
       if (args.shiftOverride) {
         overrideId = nextOverrideId; nextOverrideId += 1;
-        overrides.push({ attendance_date_shift_override_id: overrideId, ...args.shiftOverride });
+        overrides.push({
+          attendance_date_shift_override_id: overrideId,
+          ...args.shiftOverride,
+          // The link the authorisation is read through, exactly as the real
+          // INSERT writes it.
+          attendance_approval_request_id: args.requestId,
+          source: "APPROVED_REQUEST",
+        });
         saved.overrides.push(args.shiftOverride);
       }
       saved.calculations.push(args.calculations || []);
@@ -362,7 +387,9 @@ function build(state = {}) {
   });
   regularization.setShiftChangeNotifier(shiftTelegram);
 
-  return { calculation, regularization, workShift, shiftTelegram, telegramCalls, store, saved, overrides, assignments };
+  // `state` is returned so a test can make punches ARRIVE after an approval -
+  // the fake reads it on every call, exactly as the database would.
+  return { calculation, regularization, workShift, shiftTelegram, telegramCalls, store, saved, overrides, assignments, state };
 }
 
 const self = (employeeId) => ({ employee_id: employeeId, user_type: 1, branch_scope: ALL_BRANCHES });
@@ -1345,5 +1372,253 @@ describe("D/E. the unified approval centre - filters and outlet scope", () => {
     assert.equal(shift.rows.length, 2);
     assert.deepEqual(attendance.rows, []);
     assert.deepEqual(ot.rows, []);
+  });
+});
+
+/* ========== an approved shift change IS the OT authorisation for its date == */
+
+describe("B. OT authorised by an approved one-day shift change", () => {
+  const DATE = "2026-09-18";
+
+  /** Punches inside the approved 10:00-22:00 window, ending at `out`. */
+  const worked = (out) => [
+    punch(1, EMPLOYEE, `${DATE} 10:00:00`),
+    punch(2, EMPLOYEE, `${DATE} ${out}`),
+  ];
+
+  const approveFully = async (world) => {
+    const raised = await world.regularization.raiseShiftChangeRequest({
+      actor: self(EMPLOYEE), attendance_date: DATE, work_shift_id: LONG,
+      reason: "Covering the full day", today: TODAY,
+    });
+    const id = raised.attendance_approval_request_id;
+    await world.regularization.decide({ actor: approver(7), request_id: id, decision: STEP_DECISION.APPROVED });
+    const final = await world.regularization.decide({ actor: approver(8), request_id: id, decision: STEP_DECISION.APPROVED });
+    return { id, final };
+  };
+
+  const dayOf = async (world) => {
+    const [day] = await world.calculation.calculateRange({
+      employee_id: EMPLOYEE, from_date: DATE, to_date: DATE,
+    });
+    return day;
+  };
+
+  it("1. approved AFTER the work: 9h worked on a 4h base pays 4 regular and 5 AUTOMATIC OT", async () => {
+    // 10:00-20:00 is ten hours of span and nine of work: the approved shift
+    // charges an hour's break, which is the point of measuring ACTUAL minutes.
+    const world = build({ rawPunches: worked("20:00:00") });
+    const { final } = await approveFully(world);
+    const day = await dayOf(world);
+
+    assert.equal(day.worked_minutes, 540);
+    assert.equal(day.regular_minutes, 240, "MIN(worked, base NRM)");
+    assert.equal(day.shift_authorised_ot_minutes, 300, "MAX(0, worked - base NRM), inside the approved window");
+    assert.equal(day.approved_ot_minutes, 300, "and it is APPROVED, with no OT request anywhere");
+    assert.equal(day.shortage_minutes, 0);
+    assert.equal(day.approved_ot_source, "SHIFT_CHANGE");
+    assert.equal(day.ot_claim_state, "APPROVED_VIA_SHIFT_CHANGE");
+    assert.equal(day.ot_request_id, null, "no OT request was created");
+    assert.ok(final.attendance_date_shift_override_id, "the override carries the authorisation");
+  });
+
+  it("2. approved BEFORE the work: 0 now, and derived automatically once the punches arrive", async () => {
+    // No punches at all when the request is approved.
+    const world = build({ rawPunches: [] });
+    await approveFully(world);
+
+    const before = await dayOf(world);
+    assert.equal(before.shift_authorised_ot_minutes, 0, "nothing is worked, so nothing is authorised yet");
+    assert.equal(before.approved_ot_minutes, 0);
+
+    // The employee works the date. Nothing re-approves anything; the same
+    // stored override is read again and the figure is derived from the
+    // actual minutes.
+    world.state.rawPunches = worked("20:00:00");
+    const after = await dayOf(world);
+    assert.equal(after.shift_authorised_ot_minutes, 300);
+    assert.equal(after.approved_ot_minutes, 300);
+    assert.equal(after.ot_claim_state, "APPROVED_VIA_SHIFT_CHANGE");
+  });
+
+  it("3./4./5. the authorised figure follows the ACTUAL minutes", async () => {
+    for (const [out, expected] of [
+      // worked 7h, 4h and 3h respectively, after the approved shift's break.
+      ["18:00:00", { regular: 240, ot: 180, shortage: 0 }],
+      ["14:00:00", { regular: 240, ot: 0, shortage: 0 }],
+      ["13:00:00", { regular: 180, ot: 0, shortage: 60 }],
+    ]) {
+      /* eslint-disable no-await-in-loop */
+      const world = build({ rawPunches: worked(out) });
+      await approveFully(world);
+      const day = await dayOf(world);
+      /* eslint-enable no-await-in-loop */
+      assert.equal(day.regular_minutes, expected.regular, `regular for ${out}`);
+      assert.equal(day.shift_authorised_ot_minutes, expected.ot, `authorised OT for ${out}`);
+      assert.equal(day.approved_ot_minutes, expected.ot, `approved OT for ${out}`);
+      assert.equal(day.shortage_minutes, expected.shortage, `shortage for ${out}`);
+    }
+  });
+
+  it("6. a PENDING shift change authorises nothing", async () => {
+    const world = build({ rawPunches: worked("19:00:00") });
+    await world.regularization.raiseShiftChangeRequest({
+      actor: self(EMPLOYEE), attendance_date: DATE, work_shift_id: LONG,
+      reason: "Covering the full day", today: TODAY,
+    });
+    const day = await dayOf(world);
+    assert.equal(day.shift_authorised_ot_minutes, 0);
+    assert.equal(day.approved_ot_minutes, 0);
+    assert.equal(day.work_shift_id, EVE, "and the shift has not moved either");
+  });
+
+  it("6b. an INTERMEDIATE approval authorises nothing", async () => {
+    const world = build({ rawPunches: worked("19:00:00") });
+    const raised = await world.regularization.raiseShiftChangeRequest({
+      actor: self(EMPLOYEE), attendance_date: DATE, work_shift_id: LONG,
+      reason: "Covering the full day", today: TODAY,
+    });
+    const first = await world.regularization.decide({
+      actor: approver(7), request_id: raised.attendance_approval_request_id, decision: STEP_DECISION.APPROVED,
+    });
+    assert.equal(first.status, REQUEST_STATUS.PENDING, "there is a stage left");
+    const day = await dayOf(world);
+    assert.equal(day.shift_authorised_ot_minutes, 0);
+    assert.equal(day.approved_ot_minutes, 0);
+  });
+
+  it("7. a REJECTED shift change authorises nothing", async () => {
+    const world = build({ rawPunches: worked("19:00:00") });
+    const raised = await world.regularization.raiseShiftChangeRequest({
+      actor: self(EMPLOYEE), attendance_date: DATE, work_shift_id: LONG,
+      reason: "Covering the full day", today: TODAY,
+    });
+    await world.regularization.decide({
+      actor: approver(7), request_id: raised.attendance_approval_request_id,
+      decision: STEP_DECISION.REJECTED, remarks: "We have cover that day",
+    });
+    const day = await dayOf(world);
+    assert.equal(day.shift_authorised_ot_minutes, 0);
+    assert.equal(day.approved_ot_minutes, 0);
+    assert.notEqual(day.ot_claim_state, "APPROVED_VIA_SHIFT_CHANGE");
+  });
+
+  it("8. an ORDINARY day with overtime is unchanged: AVAILABLE, and a request is still required", async () => {
+    // No shift change at all - the employee simply worked past their own shift.
+    const world = build({
+      rawPunches: [punch(1, EMPLOYEE, `${DATE} 18:00:00`), punch(2, EMPLOYEE, `${DATE} 23:30:00`)],
+    });
+    const day = await dayOf(world);
+    assert.ok(day.candidate_ot_minutes > 0);
+    assert.equal(day.shift_authorised_ot_minutes, 0, "nobody authorised anything");
+    assert.equal(day.approved_ot_minutes, 0);
+    assert.equal(day.ot_claim_state, "AVAILABLE", "the ordinary path, unchanged");
+    assert.equal(day.ot_claimable_minutes, day.candidate_ot_minutes);
+  });
+
+  it("9. a MANAGEMENT date-shift override is not an employee authorisation", async () => {
+    const world = build({ rawPunches: worked("19:00:00") });
+    await world.calculation.setDateShift({
+      employee_id: EMPLOYEE, attendance_date: DATE, work_shift_id: LONG, actor_employee_id: 7,
+    });
+    const day = await dayOf(world);
+    assert.equal(day.work_shift_id, LONG, "the shift did move");
+    assert.equal(day.shift_authorised_ot_minutes, 0, "but nobody agreed with the EMPLOYEE to work longer");
+    assert.equal(day.ot_claim_state, "AVAILABLE", "so the OT keeps the ordinary request path");
+  });
+
+  it("10./11. a later punch correction moves the authorised OT in BOTH directions", async () => {
+    const world = build({ rawPunches: worked("18:00:00") });
+    await approveFully(world);
+    assert.equal((await dayOf(world)).shift_authorised_ot_minutes, 180, "7h worked");
+
+    // More minutes: a correction adds an hour.
+    world.state.rawPunches = worked("19:00:00");
+    assert.equal((await dayOf(world)).shift_authorised_ot_minutes, 240, "8h worked - it rose");
+
+    // Fewer minutes: a correction takes two away.
+    world.state.rawPunches = worked("16:00:00");
+    assert.equal((await dayOf(world)).shift_authorised_ot_minutes, 60, "6h worked - it fell");
+
+    // And below the base NRM there is none at all.
+    world.state.rawPunches = worked("13:00:00");
+    const short = await dayOf(world);
+    assert.equal(short.shift_authorised_ot_minutes, 0);
+    assert.equal(short.shortage_minutes, 60);
+  });
+
+  it("12. a payroll-locked date cannot have its shift-authorised OT rewritten", async () => {
+    const world = build({ rawPunches: worked("19:00:00"), lockedMonths: ["2026-9"] });
+    // The approval itself is refused while the month is locked...
+    const raised = await world.regularization.raiseShiftChangeRequest({
+      actor: self(EMPLOYEE), attendance_date: DATE, work_shift_id: LONG,
+      reason: "Covering the full day", today: TODAY,
+    }).catch((err) => err);
+    assert.equal(raised.code, "PAYROLL_MONTH_LOCKED", "and the request cannot even be filed");
+    assert.deepEqual(world.saved.overrides, [], "so no override, and no authorisation");
+  });
+
+  it("15./16. OT outside the approved window stays claimable, and cannot be paid twice", async () => {
+    // In at 08:00 (two hours before the approved shift) and out at 23:30
+    // (ninety minutes after it).
+    const world = build({
+      rawPunches: [punch(1, EMPLOYEE, `${DATE} 08:00:00`), punch(2, EMPLOYEE, `${DATE} 23:30:00`)],
+    });
+    await approveFully(world);
+    const day = await dayOf(world);
+
+    assert.ok(day.candidate_ot_minutes > 0);
+    assert.equal(
+      day.shift_authorised_ot_minutes + day.excess_ot_minutes,
+      day.candidate_ot_minutes,
+      "the two halves are exactly the candidate - no minute is in both, and none is lost"
+    );
+    assert.ok(day.excess_ot_minutes > 0, "the time outside the approved shift is NOT automatic");
+    assert.equal(day.ot_claimable_minutes, day.excess_ot_minutes, "and only that is offered");
+
+    // An OT request on this date may claim the EXCESS only.
+    const ot = await world.regularization.raiseOtRequest({
+      actor: self(EMPLOYEE), attendance_date: DATE, reason: "Stayed past the approved shift", today: TODAY,
+    });
+    assert.equal(ot.candidate_ot_minutes, day.excess_ot_minutes, "the claim is the excess, not the whole day");
+
+    const id = ot.attendance_approval_request_id;
+    await world.regularization.decide({ actor: approver(7), request_id: id, decision: STEP_DECISION.APPROVED });
+    await world.regularization.decide({ actor: approver(8), request_id: id, decision: STEP_DECISION.APPROVED });
+
+    const paid = await dayOf(world);
+    assert.equal(
+      paid.approved_ot_minutes,
+      day.shift_authorised_ot_minutes + day.excess_ot_minutes,
+      "authorised + approved excess"
+    );
+    assert.equal(paid.approved_ot_minutes, paid.candidate_ot_minutes, "and never more than the day earned");
+  });
+
+  it("16b. an OT request cannot be raised for a date the shift change fully authorises", async () => {
+    const world = build({ rawPunches: worked("20:00:00") });
+    await approveFully(world);
+    await assert.rejects(
+      () => world.regularization.raiseOtRequest({
+        actor: self(EMPLOYEE), attendance_date: DATE, reason: "Asking for it again", today: TODAY,
+      }),
+      /already authorises its 300 overtime minute\(s\)/
+    );
+  });
+
+  it("14. the approval centre grows no duplicate OT row - the approval lives under Shift", async () => {
+    const world = build({ rawPunches: worked("19:00:00") });
+    await approveFully(world);
+
+    const ot = await world.regularization.listApprovals({
+      actor: approver(7), request_type: REQUEST_TYPE.OT, status: "ALL",
+    });
+    assert.deepEqual(ot.rows, [], "no OT request was fabricated to carry the approval");
+
+    const shift = await world.regularization.listApprovals({
+      actor: approver(7), request_type: REQUEST_TYPE.SHIFT_CHANGE, status: "APPROVED",
+    });
+    assert.equal(shift.rows.length, 1, "the approval is on the Shift tab, where it happened");
+    assert.equal(shift.rows[0].status, REQUEST_STATUS.APPROVED);
   });
 });

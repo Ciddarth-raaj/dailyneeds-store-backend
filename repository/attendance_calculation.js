@@ -73,6 +73,10 @@ const CALCULATION_COLUMNS = [
   "early_exit_minutes", "pre_shift_minutes", "post_shift_minutes",
   "raw_ot_minutes", "ot_offset_minutes", "pre_shift_ot_minutes", "post_shift_ot_minutes",
   "candidate_ot_minutes", "approved_ot_minutes",
+  // WHY a day has approved OT. `shift_authorised_ot_minutes` is the part an
+  // approved SHIFT_CHANGE authorised and for which no OT request exists; the
+  // source and the request id are the audit trail beside it.
+  "shift_authorised_ot_minutes", "approved_ot_source", "ot_authorising_request_id",
   "ot_rate", "status", "is_final", "review_reasons", "approval_request_id",
   "calculation_version",
 ];
@@ -335,17 +339,40 @@ class AttendanceCalculationRepository {
   async getDateShiftOverrides(employeeId, fromDate, toDate) {
     return this._read(
       "GET-DATE-SHIFT-OVERRIDES",
-      `SELECT attendance_date_shift_override_id,
-              employee_id,
-              work_shift_id,
-              previous_work_shift_id,
-              changed_by,
-              DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date,
-              DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at
-         FROM attendance_date_shift_override
-        WHERE employee_id = ?
-          AND attendance_date BETWEEN ? AND ?
-        ORDER BY attendance_date ASC, attendance_date_shift_override_id ASC`,
+      // IS THIS OVERRIDE BACKED BY AN APPROVED EMPLOYEE REQUEST?
+      //
+      // The link already exists - an approved SHIFT_CHANGE writes the
+      // override with its own request id and `source = 'APPROVED_REQUEST'` -
+      // so the authorisation is a JOIN and not a new table, a new flag or a
+      // second approval flow. The request must be FINALLY approved and
+      // SETTLED: an intermediate stage authorises nothing, and a rejection
+      // authorises nothing.
+      //
+      // A DIRECT MANAGEMENT EDIT IS NOT AN EMPLOYEE AUTHORISATION. An
+      // override written on the attendance screen has no request behind it,
+      // so `shift_change_approved` is 0 and the date keeps the ordinary OT
+      // request path - which is the honest answer: nobody agreed with the
+      // employee that they would work longer hours.
+      `SELECT o.attendance_date_shift_override_id,
+              o.employee_id,
+              o.work_shift_id,
+              o.previous_work_shift_id,
+              o.changed_by,
+              o.source,
+              o.attendance_approval_request_id,
+              CASE WHEN r.attendance_approval_request_id IS NOT NULL
+                    AND r.request_type = 'SHIFT_CHANGE'
+                    AND r.status = 'APPROVED'
+                    AND r.finalization_state = 'SETTLED'
+                   THEN 1 ELSE 0 END AS shift_change_approved,
+              DATE_FORMAT(o.attendance_date, '%Y-%m-%d') AS attendance_date,
+              DATE_FORMAT(o.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
+         FROM attendance_date_shift_override o
+         LEFT JOIN attendance_approval_request r
+           ON r.attendance_approval_request_id = o.attendance_approval_request_id
+        WHERE o.employee_id = ?
+          AND o.attendance_date BETWEEN ? AND ?
+        ORDER BY o.attendance_date ASC, o.attendance_date_shift_override_id ASC`,
       [employeeId, fromDate, toDate]
     );
   }
