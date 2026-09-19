@@ -22,7 +22,7 @@ const EMPLOYEE = 77;
 const GOOD_TOKEN = "good-mini-app-token";
 
 /** Records every employee id the usecase was asked about. */
-const calls = { list: [], detail: [], submit: [], month: [] };
+const calls = { list: [], detail: [], submit: [], month: [], ot: [] };
 
 const sessionUsecase = {
   exchange: async ({ initData }) => {
@@ -64,6 +64,11 @@ const miniAppUsecase = {
     calls.submit.push([employeeId, body]);
     return { code: 200, status: "PENDING" };
   },
+  submitOtRequest: async (employeeId, body) => {
+    calls.ot.push([employeeId, body]);
+    // The minutes come BACK from the server; they never went in.
+    return { code: 200, status: "PENDING", attendance_date: body.attendance_date, candidate_ot_minutes: 90 };
+  },
 };
 
 let server;
@@ -93,20 +98,22 @@ const authed = { "x-telegram-session": GOOD_TOKEN };
 
 describe("the public-route registration", () => {
   /**
-   * These four step past the global `x-access-token` gate. If one were ever
+   * These five step past the global `x-access-token` gate. If one were ever
    * added to the router and NOT to the map, it would 403 for every Mini App
    * user; if one were removed from the router but left in the map, it would
    * be a path advertised as open. Both are caught here.
    */
-  it("names exactly the four Mini App paths, and each with one method", () => {
+  it("names exactly the five Mini App paths, and each with one method", () => {
     const paths = Object.keys(unProtectedRoutes).filter((p) => p.startsWith("/telegram/"));
     assert.deepEqual(paths.sort(), [
       "/telegram/attendance/date",
       "/telegram/attendance/missing-dates",
       "/telegram/attendance/month",
+      "/telegram/attendance/ot-request",
       "/telegram/attendance/regularization",
       "/telegram/attendance/session",
     ]);
+    assert.deepEqual(unProtectedRoutes["/telegram/attendance/ot-request"].methods, { post: true });
     assert.deepEqual(unProtectedRoutes["/telegram/attendance/month"].methods, { get: true });
     assert.deepEqual(unProtectedRoutes["/telegram/attendance/session"].methods, { post: true });
     assert.deepEqual(unProtectedRoutes["/telegram/attendance/missing-dates"].methods, { get: true });
@@ -292,9 +299,12 @@ describe("what this namespace does NOT expose", () => {
       "/telegram/attendance/date",
       "/telegram/attendance/missing-dates",
       "/telegram/attendance/month",
+      "/telegram/attendance/ot-request",
       "/telegram/attendance/regularization",
       "/telegram/attendance/session",
     ]);
+    // `ot-request` RAISES one; it decides nothing. The exclusions below are
+    // about approval, and "approv" still matches nothing.
     assert.ok(!routes.some((p) => /approv|decision|pending|employee/i.test(p)));
   });
 });
@@ -340,5 +350,82 @@ describe("My Attendance over HTTP", () => {
       assert.equal((await res.json()).code, 422, `${month} must be refused`);
     }
     assert.equal((await (await get("/telegram/attendance/month", authed)).json()).code, 422);
+  });
+});
+
+/* ============================================ the OT request endpoint */
+
+/**
+ * THE OT REQUEST FROM TELEGRAM.
+ *
+ * The same claims the regularisation endpoint makes, for the second request
+ * type, plus the one that is specific to OT: THE BROWSER HAS NO FIELD FOR A
+ * DURATION. These are asserted over real HTTP because they are claims about
+ * what a browser can put on the wire.
+ */
+describe("POST /telegram/attendance/ot-request", () => {
+  const otBody = { attendance_date: "2026-09-17", reason: "Stock count ran late" };
+
+  it("needs the scoped token; no token and a login token are both 401", async () => {
+    assert.equal((await post("/telegram/attendance/ot-request", otBody)).status, 401);
+    assert.equal(
+      (await post("/telegram/attendance/ot-request", otBody, { "x-access-token": GOOD_TOKEN })).status,
+      401
+    );
+  });
+
+  it("accepts exactly a date and a reason, for the TOKEN's employee", async () => {
+    calls.ot.length = 0;
+    const res = await post("/telegram/attendance/ot-request", otBody, authed);
+    const body = await res.json();
+    assert.equal(body.code, 200);
+    assert.deepEqual(calls.ot, [[EMPLOYEE, { attendance_date: "2026-09-17", reason: "Stock count ran late" }]]);
+    // The figure is the SERVER's, handed back rather than taken in.
+    assert.equal(body.candidate_ot_minutes, 90);
+  });
+
+  it("cannot be pointed at another employee, however the payload is dressed up", async () => {
+    for (const extra of [{ employee_id: 78 }, { requested_for_employee_id: 78 }]) {
+      calls.ot.length = 0;
+      // eslint-disable-next-line no-await-in-loop
+      const res = await post("/telegram/attendance/ot-request", { ...otBody, ...extra }, authed);
+      // eslint-disable-next-line no-await-in-loop
+      assert.equal((await res.json()).code, 422, JSON.stringify(extra));
+      assert.deepEqual(calls.ot, [], "nothing was raised for anybody");
+    }
+  });
+
+  it("HAS NO FIELD FOR A DURATION: OT minutes from Telegram are refused outright", async () => {
+    for (const extra of [
+      { candidate_ot_minutes: 600 },
+      { approved_ot_minutes: 600 },
+      { ot_minutes: 600 },
+      { minutes: 600 },
+    ]) {
+      calls.ot.length = 0;
+      // eslint-disable-next-line no-await-in-loop
+      const res = await post("/telegram/attendance/ot-request", { ...otBody, ...extra }, authed);
+      // eslint-disable-next-line no-await-in-loop
+      assert.equal((await res.json()).code, 422, JSON.stringify(extra));
+      assert.deepEqual(calls.ot, []);
+    }
+  });
+
+  it("a missing or too-short reason is refused, as it is on the correction", async () => {
+    for (const reason of [undefined, "", "abc"]) {
+      // eslint-disable-next-line no-await-in-loop
+      const res = await post("/telegram/attendance/ot-request", { ...otBody, reason }, authed);
+      // eslint-disable-next-line no-await-in-loop
+      assert.equal((await res.json()).code, 422, `reason=${JSON.stringify(reason)}`);
+    }
+  });
+
+  it("a punch_time is refused - an OT request is not a correction", async () => {
+    const res = await post(
+      "/telegram/attendance/ot-request",
+      { ...otBody, punch_time: "2026-09-17 23:30:00" },
+      authed
+    );
+    assert.equal((await res.json()).code, 422);
   });
 });
