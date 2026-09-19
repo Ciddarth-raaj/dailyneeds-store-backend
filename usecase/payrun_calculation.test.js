@@ -1417,3 +1417,193 @@ describe("attendance that is not settled is shown as pending, not as zero", () =
     assert.equal(month.summary.calculated, 0);
   });
 });
+
+/* ===================================================================== */
+/*  attendance accepted for payroll, through the calculation stage       */
+/* ===================================================================== */
+
+/**
+ * WHAT A CLOSE DOES AT THIS STAGE, AND WHAT IT CAREFULLY DOES NOT.
+ *
+ * IT DOES: satisfy the attendance part of approval readiness, so the employee
+ * can be approved on a basis somebody accepted; and stop the figures being
+ * suppressed, because an accepted basis is what this person is being paid on
+ * and has to be visible before anybody signs it.
+ *
+ * IT DOES NOT: claim the attendance is final, hide a later source change, or
+ * survive as a reason to skip a recalculation. The close is about the gate,
+ * never about the arithmetic.
+ */
+describe("attendance closed for payroll", () => {
+  /** Unsettled attendance, with a pending regularization and a pending OT. */
+  const unsettled = (employeeId, over = {}) => {
+    world.add(employeeId, over);
+    world.attendance.get(employeeId).is_final = 0;
+    world.pending.set(employeeId, {
+      employee_id: employeeId,
+      pending_regularizations: 1,
+      pending_ot: 1,
+    });
+  };
+
+  it("an employee who was NOT closed stays blocked from approval", async () => {
+    unsettled(1);
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+
+    const row = await rowOf(1);
+    assert.equal(row.status, CALC_STATUS.ATTENDANCE_PENDING);
+    assert.ok(row.blockers.some((b) => b.code === "ATTENDANCE_INCOMPLETE"));
+    assert.ok(row.blockers.some((b) => b.code === "PENDING_ATTENDANCE_REGULARIZATION"));
+    assert.ok(row.blockers.some((b) => b.code === "PENDING_OT_APPROVAL"));
+
+    const refused = await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(refused.approved_count, 0);
+    assert.equal(refused.blocked_count, 1);
+  });
+
+  it("a closed employee can be calculated and shows the accepted figures", async () => {
+    unsettled(1, { employee: { attendance_closed_for_payroll: 1 } });
+    const result = await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(result.calculated_count, 1);
+
+    const row = await rowOf(1);
+    /* NOT suppressed: an accepted basis is not provisional. */
+    assert.equal(row.attendance_pending, false);
+    assert.notEqual(row.salary_days, null);
+    assert.notEqual(row.net_pay, null);
+    assert.equal(row.attendance_closed_for_payroll, true);
+  });
+
+  it("a close satisfies the attendance portion of approval readiness", async () => {
+    unsettled(1, { employee: { attendance_closed_for_payroll: 1 } });
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+
+    const row = await rowOf(1);
+    assert.equal(row.status, CALC_STATUS.READY_FOR_APPROVAL);
+    assert.deepEqual(row.blockers, []);
+
+    const approved = await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(approved.approved_count, 1);
+    assert.equal((await rowOf(1)).status, CALC_STATUS.APPROVED_LOCKED);
+  });
+
+  /**
+   * AND THE OTHER GATES ARE UNTOUCHED. The close accepts ATTENDANCE. It is not
+   * a general waiver, and an employee whose adjustment stage is incomplete is
+   * refused exactly as before.
+   */
+  it("it waives attendance and nothing else", async () => {
+    unsettled(2, { employee: { attendance_closed_for_payroll: 1 } });
+    world.states.delete(2); // nobody has confirmed the adjustments
+    await calculation.calculate({ ...MONTH, employee_ids: [2], actor: ACTOR });
+
+    const row = await rowOf(2);
+    assert.ok(row.blockers.some((b) => b.code === "ADJUSTMENT_PENDING_CONFIRMATION"));
+    assert.notEqual(row.status, CALC_STATUS.READY_FOR_APPROVAL);
+    const refused = await calculation.approve({ ...MONTH, employee_ids: [2], actor: ACTOR });
+    assert.equal(refused.approved_count, 0);
+  });
+
+  /* ------------ 12-13: a source that moves AFTER the close -------------- */
+
+  it("attendance changing after the close requires an explicit recalculation", async () => {
+    unsettled(1, { employee: { attendance_closed_for_payroll: 1 } });
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal((await rowOf(1)).status, CALC_STATUS.READY_FOR_APPROVAL);
+
+    const storedBefore = { ...world.calculations.get(1) };
+
+    // The regularization is decided and attendance is re-run.
+    const attendance = world.attendance.get(1);
+    attendance.is_final = 1;
+    attendance.payroll_version = 2;
+    attendance.calculated_at = "2026-09-02 03:00:00.000";
+    attendance.salary_days = 25;
+
+    const stale = await rowOf(1);
+    assert.equal(stale.status, CALC_STATUS.RECALCULATION_REQUIRED);
+    assert.ok(stale.recalculation_reasons.some((r) => r.code === "ATTENDANCE_CHANGED"));
+
+    /* NOTHING WAS SILENTLY REPLACED. The stored figures are exactly what they
+       were; only the status says they no longer describe the sources. */
+    assert.deepEqual({ ...world.calculations.get(1) }, storedBefore);
+
+    const refused = await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(refused.approved_count, 0);
+  });
+
+  it("approved OT granted after the close is named as the reason", async () => {
+    unsettled(1, { employee: { attendance_closed_for_payroll: 1 } });
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+
+    world.attendance.get(1).approved_ot_minutes = 60;
+    world.nrm.set(1, [
+      { employee_id: 1, nrm_minutes: 480, break_allowance_source: NRM_SOURCE.SHIFT, day_count: 26, approved_ot_minutes: 60 },
+    ]);
+
+    const stale = await rowOf(1);
+    assert.equal(stale.status, CALC_STATUS.RECALCULATION_REQUIRED);
+    assert.ok(
+      stale.recalculation_reasons.some((r) => r.code === "APPROVED_OT_CHANGED"),
+      "the reason should name the overtime"
+    );
+  });
+
+  it("the close survives the recalculation it required", async () => {
+    unsettled(1, { employee: { attendance_closed_for_payroll: 1 } });
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+
+    world.attendance.get(1).payroll_version = 2;
+    assert.equal((await rowOf(1)).status, CALC_STATUS.RECALCULATION_REQUIRED);
+
+    await calculation.calculate({ ...MONTH, employee_ids: [1], mode: "RECALCULATE", actor: ACTOR });
+
+    const row = await rowOf(1);
+    /* The snapshot's close is untouched by any calculation path, so the
+       employee is ready again without anybody closing them a second time. */
+    assert.equal(row.attendance_closed_for_payroll, true);
+    assert.equal(row.status, CALC_STATUS.READY_FOR_APPROVAL);
+  });
+
+  it("a locked employee is frozen, close or no close", async () => {
+    unsettled(1, { employee: { attendance_closed_for_payroll: 1 } });
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+
+    const before = { ...world.calculations.get(1) };
+    world.attendance.get(1).payroll_version = 9;
+
+    const row = await rowOf(1);
+    assert.equal(row.status, CALC_STATUS.APPROVED_LOCKED);
+
+    const refused = await calculation.calculate({
+      ...MONTH, employee_ids: [1], mode: "RECALCULATE", actor: ACTOR,
+    });
+    assert.equal(refused.recalculated_count || 0, 0);
+    assert.deepEqual({ ...world.calculations.get(1) }, before);
+  });
+
+  /**
+   * AND THE DISTINCTION SURVIVES. A closed employee's figures are real and
+   * shown - including a genuine zero - but the row still says the basis was
+   * accepted rather than settled, so nobody reads it as a finished month.
+   */
+  it("a genuine zero on an accepted basis still displays as zero", async () => {
+    world.add(1, { employee: { attendance_closed_for_payroll: 1 } });
+    const attendance = world.attendance.get(1);
+    attendance.is_final = 0;
+    attendance.salary_days = 0;
+    attendance.extra_days = 0;
+    attendance.salary_day_earnings = 0;
+    attendance.extra_day_earnings = 0;
+    world.nrm.set(1, []);
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+
+    const row = await rowOf(1);
+    assert.equal(row.attendance_pending, false);
+    assert.equal(row.salary_days, 0);
+    assert.notEqual(row.salary_days, null);
+    assert.equal(Number(row.net_pay), 0);
+    assert.equal(row.attendance_closed_for_payroll, true);
+  });
+});

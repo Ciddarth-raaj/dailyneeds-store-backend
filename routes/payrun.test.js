@@ -159,7 +159,10 @@ test("every blocking reason leaves the server with a compact label", () => {
 
 test("the branch scope is applied to the writes, not only to the reads", () => {
   const writes = ROUTE_CODE.split(/this\.router\./).slice(1).filter((r) => r.startsWith("post("));
-  assert.equal(writes.length, 2);
+  /* Initialize, change pay type, and close attendance for payroll. The count
+     is pinned so that a fourth write cannot be added without this test being
+     read - which is the point at which somebody has to think about scope. */
+  assert.equal(writes.length, 3);
   writes.forEach((route) => assert.match(route, /await this\._scope\(req, res/));
 });
 
@@ -209,6 +212,14 @@ function spyUsecase() {
     },
     async getPayTypeAudit(args) {
       calls.push(["getPayTypeAudit", args]);
+      return [];
+    },
+    async closeAttendanceForPayroll(args) {
+      calls.push(["closeAttendanceForPayroll", args]);
+      return { closed_count: 1, skipped_count: 0, failed_count: 0, results: [] };
+    },
+    async getAttendanceCloseAudit(args) {
+      calls.push(["getAttendanceCloseAudit", args]);
       return [];
     },
   };
@@ -326,4 +337,76 @@ test("an authorized initialize reaches the usecase with the SERVER's actor and s
   assert.deepEqual(args.employee_ids, [42, 43]);
   assert.equal(args.actor.employeeId, 2);
   assert.equal(args.store_ids, null);
+});
+
+/* ================================ close attendance for payroll =========== */
+
+/**
+ * THE AUTHORIZATION IS THE SERVER'S, and this is the test that says so. A
+ * screen that hides the button hides a button; this endpoint is reachable with
+ * curl, and closing somebody's attendance decides what they are paid.
+ */
+test("closing attendance is refused without the permission", async () => {
+  const usecase = spyUsecase();
+  const res = await request(appWith(denyPermissions(), usecase), {
+    method: "POST",
+    url: "/payrun/attendance/close",
+    body: { year: 2026, month: 8, employee_ids: [42] },
+  });
+  assert.equal(res.status, 403);
+  assert.equal(usecase.calls.length, 0, "the usecase must not be reached");
+});
+
+test("the close endpoint is gated on its own key, not on a borrowed one", () => {
+  const route = ROUTE_CODE.split(/this\.router\./)
+    .find((r) => r.includes('"/payrun/attendance/close"'));
+  assert.ok(route, "the close route is not where it was");
+  assert.match(route, /requireAll\(P\.VIEW_EMPLOYEES, P\.CLOSE_PAYRUN_ATTENDANCE\)/);
+  /* Not the processing key and not the approval key - see hr_permissions.js. */
+  assert.ok(!/P\.PROCESS_PAYROLL/.test(route));
+  assert.ok(!/P\.APPROVE_PAYRUN/.test(route));
+});
+
+test("the close endpoint takes no figure, no request id and no closed_by", async () => {
+  const usecase = spyUsecase();
+  const res = await request(appWith(okPermissions(), usecase), {
+    method: "POST",
+    url: "/payrun/attendance/close",
+    body: { year: 2026, month: 8, employee_ids: [42], closed_by: 999 },
+  });
+  /* Joi runs without allowUnknown, so a body naming closed_by is refused
+     outright rather than quietly ignored. */
+  assert.equal(res.status, 400);
+  assert.equal(usecase.calls.length, 0);
+});
+
+test("who closed it is the server's identity", async () => {
+  const usecase = spyUsecase();
+  const res = await request(appWith(okPermissions(), usecase), {
+    method: "POST",
+    url: "/payrun/attendance/close",
+    body: { year: 2026, month: 8, employee_ids: [42] },
+  });
+  assert.equal(res.status, 200);
+  const [, args] = usecase.calls.find(([name]) => name === "closeAttendanceForPayroll");
+  assert.deepEqual(args.actor, { userId: 1, employeeId: 2 });
+});
+
+test("the month read accepts the shared search and the attendance tab", async () => {
+  const usecase = spyUsecase();
+  const res = await request(appWith(okPermissions(), usecase), {
+    url: "/payrun/month?year=2026&month=8&search=priya&attendance_status=PENDING",
+  });
+  assert.equal(res.status, 200);
+  const [, args] = usecase.calls.find(([name]) => name === "getMonth");
+  assert.equal(args.search, "priya");
+  assert.equal(args.attendance_status, "PENDING");
+});
+
+test("an unknown attendance tab is refused rather than ignored", async () => {
+  const usecase = spyUsecase();
+  const res = await request(appWith(okPermissions(), usecase), {
+    url: "/payrun/month?year=2026&month=8&attendance_status=WHATEVER",
+  });
+  assert.equal(res.status, 400);
 });

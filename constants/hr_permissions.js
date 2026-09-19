@@ -535,4 +535,39 @@ module.exports = {
   // administrators only through the user_type 2 bypass until a designation is
   // given it deliberately on the rights screen.
   APPROVE_PAYRUN: "approve_payrun",
+
+  // ================================= CLOSE ATTENDANCE FOR PAYROLL ==========
+  //
+  // ACCEPTING THE ATTENDANCE AS IT STANDS, for one employee and one month, so
+  // that payroll can close a month rather than wait indefinitely for a missing
+  // punch nobody is going to regularize.
+  //
+  // WHY IT IS ITS OWN KEY AND NOT ONE OF THE THREE THAT EXIST.
+  //
+  //   NOT `process_payroll`. That key enters incentives and calculates, and it
+  //            is held by whoever works the month. Folding this into it would
+  //            silently hand every existing holder the power to waive a gate
+  //            that decides what somebody is paid - a widening nobody granted.
+  //
+  //   NOT `approve_payrun`. This repository separates proposing from approving
+  //            wherever money is concerned; `add_salary` and
+  //            `approve_salary_revision` are two keys for exactly that reason.
+  //            One person who could both waive the attendance gate and then
+  //            sign the month off is that separation undone.
+  //
+  // SO THE MONTH TAKES THREE HANDS where it matters: the processor prepares
+  // it, somebody holding THIS key accepts the attendance basis, and the
+  // approver signs it. Any two of them may be the same person where an
+  // organization chooses that - but it has to be chosen, on the rights screen,
+  // rather than inherited.
+  //
+  // WHAT IT DOES NOT GRANT. It decides no attendance request. A holder cannot
+  // approve a regularization, grant OT or alter a punch through it; those
+  // remain the attendance screens' own keys. It records a PAYROLL decision
+  // about attendance that is already unresolved.
+  //
+  // Declared by the attendance-close migration and granted to NOBODY, so it
+  // reaches a designation only by a deliberate grant; administrators keep the
+  // existing user_type 2 bypass.
+  CLOSE_PAYRUN_ATTENDANCE: "close_payrun_attendance",
 };

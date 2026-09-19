@@ -6,11 +6,15 @@ const {
   PERIOD_STATUS,
   STATUS_GROUP,
   LIFECYCLE_FILTER,
+  ATTENDANCE_STATUS,
+  CLOSE_RESULT,
+  CLOSE_RESULT_MESSAGE,
 } = require("../constants/payrun");
 const {
   monthWindow,
   evaluateEmployee,
   summarize,
+  attendanceStatusOf,
 } = require("../utils/payrun_eligibility");
 
 /**
@@ -117,6 +121,34 @@ const ROW_RESULT = {
   NOT_IN_SCOPE: "NOT_IN_SCOPE",
 };
 
+/**
+ * ONE SEARCH, USED BY ALL THREE PAYRUN STAGES.
+ *
+ * Initialization, Adjustments and Calculation & Review each show the same
+ * people, and somebody who typed a name into one and moved to the next should
+ * find the same person there. Three copies of "does this row match" is three
+ * chances for one of them to stop matching on employee id, or to start being
+ * case-sensitive, and the person hunting for one employee in three hundred
+ * would have no way to tell which.
+ *
+ * WHAT IT MATCHES: the employee id and the name, plus the location where the
+ * row already carries one. It adds NO database work and no join - the rows are
+ * already loaded and already carry these fields, which is exactly why mobile
+ * is not searchable here and is not worth a join to make so.
+ *
+ * CASE-INSENSITIVE, AND PARTIAL. "PRIYANGA", "priya" and "1952" all find the
+ * same person, because somebody looking for an employee should not have to
+ * know how their name was capitalized when it was typed in.
+ */
+function matchesSearch(row, search) {
+  const needle = search === null || search === undefined ? "" : String(search).trim().toLowerCase();
+  if (needle === "") return true;
+  const haystack = `${row.employee_id} ${row.employee_name || ""} ${
+    row.location || row.store_name || ""
+  }`.toLowerCase();
+  return haystack.includes(needle);
+}
+
 class PayrunUsecase {
   /**
    * @param payrunRepo         this stage's three tables
@@ -157,6 +189,8 @@ class PayrunUsecase {
     designation_id = null,
     status = null,
     lifecycle = null,
+    search = null,
+    attendance_status = null,
   }) {
     const period = normalizeMonth(year, month);
     const { from, to } = monthWindow(period.year, period.month);
@@ -212,6 +246,24 @@ class PayrunUsecase {
       });
 
       /*
+       * WHETHER ATTENDANCE IS READY, PENDING OR CLOSED FOR PAYROLL, decided
+       * here rather than discovered two stages later at Approve & Lock.
+       *
+       * THE CLOSE IS READ FROM THE SNAPSHOT, which is where a person's
+       * decision was stored; nothing in this expression infers one. An
+       * employee with no snapshot has not been initialized and so cannot have
+       * been closed, which `Boolean(undefined)` already says correctly.
+       */
+      const attendance = attendanceStatusOf({
+        attendance: attendanceRow,
+        pending_regularizations: Number(counts.pending_regularizations || 0),
+        pending_ot: Number(counts.pending_ot || 0),
+        closed_for_payroll: Boolean(
+          snapshot && Number(snapshot.attendance_closed_for_payroll) === 1
+        ),
+      });
+
+      /*
        * THE ACCOUNT NUMBER NEVER LEAVES THE SERVER. The repository reads the
        * bank pair only so that the missing-details WARNING can be raised; what
        * goes out is the warning, and the columns themselves are dropped here.
@@ -247,6 +299,20 @@ class PayrunUsecase {
          * `defaultPayType`, which cannot receive an employment fact at all.
          */
         exited_in_month: verdict.exited_in_month,
+
+        /*
+         * THE ATTENDANCE DIMENSION. Separate from `status` above, which says
+         * where the employee has got to in the PAYRUN - the two overlap and
+         * both are true at once, which is the ordinary state of a month end.
+         */
+        attendance_status: attendance.status,
+        attendance_status_label: attendance.status_label,
+        attendance_unresolved: attendance.unresolved,
+        attendance_unresolved_count: attendance.unresolved_count,
+        attendance_closeable: attendance.closeable && verdict.initialized === true,
+        attendance_closed_by: snapshot ? snapshot.attendance_closed_by : null,
+        attendance_closed_at: snapshot ? snapshot.attendance_closed_at : null,
+
         initialized: verdict.initialized,
         initialized_at: snapshot ? snapshot.initialized_at : null,
         initialized_by: snapshot ? snapshot.initialized_by : null,
@@ -282,10 +348,24 @@ class PayrunUsecase {
         ? String(lifecycle).toUpperCase()
         : null;
 
+    /*
+     * THE ATTENDANCE TAB IS A THIRD INDEPENDENT NARROWING, and it composes
+     * with the other two exactly as they compose with each other: "Attendance
+     * Pending + Initialized" is the queue Close for Payroll exists to work
+     * through.
+     */
+    const wantedAttendance =
+      attendance_status &&
+      Object.values(ATTENDANCE_STATUS).includes(String(attendance_status).toUpperCase())
+        ? String(attendance_status).toUpperCase()
+        : null;
+
     const filtered = rows.filter((row) => {
       if (wantedStatus && row.status !== wantedStatus) return false;
       if (wantedLifecycle === LIFECYCLE_FILTER.EXITED && row.exited_in_month !== true) return false;
       if (wantedLifecycle === LIFECYCLE_FILTER.ACTIVE && row.exited_in_month === true) return false;
+      if (wantedAttendance && row.attendance_status !== wantedAttendance) return false;
+      if (!matchesSearch(row, search)) return false;
       return true;
     });
 
@@ -612,6 +692,223 @@ class PayrunUsecase {
       employee_id: employeeId,
     });
   }
+
+  /* ==================================================================== */
+  /*  close attendance for payroll                                        */
+  /* ==================================================================== */
+
+  /**
+   * ACCEPT THE ATTENDANCE AS IT STANDS, for a selection of employees.
+   *
+   * ONE IMPLEMENTATION FOR ONE EMPLOYEE AND FOR FORTY, because the single case
+   * posts a list of one. Two paths would be two chances for the individual one
+   * to keep a check the bulk one quietly lost, and this act removes what would
+   * otherwise stop an approval.
+   *
+   * IT APPROVES NOTHING IN ATTENDANCE. No regularization is decided, no OT is
+   * granted, no punch is invented and no request is closed or deleted. This
+   * usecase has no reference to an attendance write method and its repository
+   * has no statement that could reach one; what it records is that PAYROLL
+   * accepted the consequence of those items being open.
+   *
+   * WHAT IS REFUSED, AND EVERY REFUSAL IS PER EMPLOYEE:
+   *
+   *   a locked MONTH refuses the whole request, as every other payrun write
+   *   an employee with no snapshot          NOT_IN_SCOPE
+   *   an employee already approved & locked LOCKED - the lock is the final
+   *                                         boundary and a close is a change
+   *   an employee already closed            ALREADY_CLOSED, no second audit row
+   *   an employee whose attendance is settled  NOTHING_TO_CLOSE - accepting a
+   *                                         basis nobody is waiting on would
+   *                                         write an audit row recording a
+   *                                         decision that was never needed
+   *
+   * ONE EMPLOYEE'S FAILURE IS ONE EMPLOYEE'S. Each is attempted on its own and
+   * a thrown error is caught and reported as FAILED for that employee, so a
+   * bulk close of forty does not lose thirty-nine because one row has bad data.
+   */
+  async closeAttendanceForPayroll({
+    year,
+    month,
+    employee_ids = null,
+    all_pending = false,
+    store_ids = null,
+    actor = null,
+  }) {
+    const period = normalizeMonth(year, month);
+    const { from, to } = monthWindow(period.year, period.month);
+
+    const wantsAll = all_pending === true || all_pending === "true";
+    if (wantsAll && employee_ids !== undefined && employee_ids !== null) {
+      throw validationError("Send either employee_ids or all_pending, not both");
+    }
+    const requested = wantsAll ? null : normalizeEmployeeIds(employee_ids);
+
+    const periodRow = await this.repo.getPeriod(period.year, period.month);
+    if (periodRow && periodRow.status === PERIOD_STATUS.LOCKED) {
+      throw validationError(
+        `Payroll month ${period.year}-${String(period.month).padStart(2, "0")} is locked and cannot be changed`
+      );
+    }
+
+    /*
+     * THE MONTH IS RE-READ HERE AND THE DECISION IS MADE FROM IT, never from
+     * anything the request supplied. A browser sending "these are pending"
+     * would be acting on a month that may be minutes old, and the figures
+     * written into the audit have to be the ones the server can see NOW.
+     */
+    const month_view = await this.getMonth({
+      year: period.year,
+      month: period.month,
+      store_ids,
+    });
+    const rowOf = new Map(month_view.rows.map((row) => [Number(row.employee_id), row]));
+
+    /*
+     * WHO IS IN SCOPE. `all_pending` is resolved on the SERVER from the month
+     * it just read - the employees whose attendance is genuinely unresolved
+     * and not already closed - rather than from a list a screen believes.
+     */
+    const targets = wantsAll
+      ? month_view.rows.filter((row) => row.attendance_closeable === true).map((row) => Number(row.employee_id))
+      : requested;
+
+    const attendanceRows = await this.repo.listAttendanceMonths(
+      targets,
+      period.year,
+      period.month
+    );
+    const attendanceOf = new Map(
+      (attendanceRows || []).map((row) => [Number(row.employee_id), row])
+    );
+
+    const results = [];
+    for (const employeeId of targets) {
+      const row = rowOf.get(Number(employeeId));
+      const record = (result) =>
+        results.push({
+          employee_id: Number(employeeId),
+          result,
+          message: CLOSE_RESULT_MESSAGE[result],
+        });
+
+      if (!row || row.initialized !== true) {
+        record(CLOSE_RESULT.NOT_IN_SCOPE);
+        continue;
+      }
+      if (row.attendance_status === ATTENDANCE_STATUS.READY) {
+        record(CLOSE_RESULT.NOTHING_TO_CLOSE);
+        continue;
+      }
+      if (row.attendance_status === ATTENDANCE_STATUS.CLOSED_FOR_PAYROLL) {
+        record(CLOSE_RESULT.ALREADY_CLOSED);
+        continue;
+      }
+
+      /*
+       * A LOCKED EMPLOYEE IS REFUSED BEFORE THE WRITE as well as inside it.
+       * The repository guards the statement; this reports the reason in the
+       * caller's own words rather than as a bare failure.
+       */
+      if (this.calculationLocks) {
+        const locked = await this.calculationLocks.listLockedEmployeeIds({
+          year: period.year,
+          month: period.month,
+          employee_ids: [Number(employeeId)],
+        });
+        if ((locked || []).map(Number).includes(Number(employeeId))) {
+          record(CLOSE_RESULT.LOCKED);
+          continue;
+        }
+      }
+
+      const attendance = attendanceOf.get(Number(employeeId)) || null;
+
+      try {
+        const outcome = await this.repo.closeAttendanceForPayroll({
+          year: period.year,
+          month: period.month,
+          employee_id: Number(employeeId),
+          closed_by: actor && actor.employeeId !== undefined ? actor.employeeId : null,
+          /*
+           * THE BASIS PAYROLL IS ACCEPTING, copied from what the server can
+           * see at this moment. `attendance_monthly_payroll` is upserted in
+           * place by the attendance engine, so a reference alone would point
+           * at a row whose numbers have moved by the time anybody asks what
+           * was accepted - see the migration's header.
+           */
+          basis: {
+            attendance_monthly_payroll_id: attendance
+              ? attendance.attendance_monthly_payroll_id
+              : null,
+            attendance_payroll_version: attendance ? attendance.payroll_version : null,
+            attendance_calculated_at: attendance ? attendance.calculated_at : null,
+            attendance_was_final: Boolean(
+              attendance && (attendance.is_final === 1 || attendance.is_final === true)
+            ),
+            salary_days: attendance ? attendance.salary_days : null,
+            extra_days: attendance ? attendance.extra_days : null,
+            shortage_minutes: attendance ? attendance.shortage_minutes : null,
+            missing_minute_deduction: attendance ? attendance.missing_minute_deduction : null,
+            approved_ot_minutes: attendance ? attendance.approved_ot_minutes : null,
+            effective_nrm_minutes: null,
+            effective_nrm_source: null,
+            ot_groups: null,
+            held_dates: attendance && Array.isArray(attendance.held_dates)
+              ? attendance.held_dates
+              : null,
+            pending_regularizations: row.attendance_unresolved
+              .filter((item) => item.code === "PENDING_REGULARIZATION")
+              .reduce((total, item) => total + item.count, 0),
+            pending_ot: row.attendance_unresolved
+              .filter((item) => item.code === "PENDING_OT")
+              .reduce((total, item) => total + item.count, 0),
+          },
+        });
+        record(outcome);
+      } catch (err) {
+        /*
+         * ONE EMPLOYEE'S FAILURE IS ONE EMPLOYEE'S. The batch goes on and the
+         * row says so, rather than forty people losing a close because one had
+         * unreadable data.
+         */
+        record(CLOSE_RESULT.FAILED);
+      }
+    }
+
+    const count = (result) => results.filter((r) => r.result === result).length;
+    return {
+      period_year: period.year,
+      period_month: period.month,
+      closed_count: count(CLOSE_RESULT.CLOSED),
+      /*
+       * SKIPPED IS EVERY "NOTHING HAPPENED AND THAT IS FINE OR EXPECTED", and
+       * FAILED is only a genuine error. Rolling the two together would hide
+       * real failures among the already-closed.
+       */
+      skipped_count:
+        count(CLOSE_RESULT.ALREADY_CLOSED) +
+        count(CLOSE_RESULT.NOTHING_TO_CLOSE) +
+        count(CLOSE_RESULT.LOCKED) +
+        count(CLOSE_RESULT.NOT_IN_SCOPE),
+      failed_count: count(CLOSE_RESULT.FAILED),
+      results,
+    };
+  }
+
+  /** The close history for one employee's month. Append only, newest first. */
+  async getAttendanceCloseAudit({ year, month, employee_id }) {
+    const period = normalizeMonth(year, month);
+    const employeeId = intOrNull(employee_id);
+    if (employeeId === null || employeeId <= 0) {
+      throw validationError("employee_id must be a positive integer");
+    }
+    return this.repo.listAttendanceCloseAudit({
+      year: period.year,
+      month: period.month,
+      employee_id: employeeId,
+    });
+  }
 }
 
 module.exports = (payrunRepo, calculationLocks = null) =>
@@ -623,3 +920,4 @@ module.exports.validationError = validationError;
 module.exports.normalizeMonth = normalizeMonth;
 module.exports.normalizePayType = normalizePayType;
 module.exports.normalizeEmployeeIds = normalizeEmployeeIds;
+module.exports.matchesSearch = matchesSearch;

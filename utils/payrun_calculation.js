@@ -1054,6 +1054,7 @@ function deriveStatus(input = {}) {
     pending_ot = 0,
     adjustment_state = null,
     statutory_setup_complete = true,
+    attendance_closed_for_payroll = false,
   } = input;
 
   const blockers = [];
@@ -1073,6 +1074,27 @@ function deriveStatus(input = {}) {
   const attendanceFinal = Boolean(
     attendance && (attendance.is_final === 1 || attendance.is_final === true)
   );
+
+  /*
+   * ============ THE TWO WAYS THE ATTENDANCE GATE CAN BE SATISFIED ==========
+   *
+   * A. the attendance month is genuinely final, with nothing outstanding; or
+   * B. a person holding `close_payrun_attendance` explicitly ACCEPTED the
+   *    attendance as it stood, for this employee and this month.
+   *
+   * THERE IS NO THIRD WAY, and in particular there is no inference. Nothing
+   * here turns an old month, a small number of held dates or a filtered screen
+   * into an accepted basis: B is a stored decision somebody made and this
+   * reads it. That is the whole of what "Do not silently treat pending
+   * attendance as closed" means in code.
+   *
+   * THE CLOSE SATISFIES THE GATE; IT DOES NOT CLAIM THE ATTENDANCE IS FINAL.
+   * `attendanceFinal` above is untouched by it, so the status still says
+   * CLOSED rather than pretending the month settled, and a screen can tell the
+   * two apart - which matters, because one of them means somebody accepted a
+   * known gap.
+   */
+  const attendanceAccepted = attendanceFinal || attendance_closed_for_payroll === true;
 
   if (calculation && calculation.status === CALC_STATUS.APPROVED_LOCKED) {
     return {
@@ -1151,7 +1173,7 @@ function deriveStatus(input = {}) {
        * that is STILL not settled are provisional twice over, and presenting
        * their zeroes as results would be the same lie with a warning over it.
        */
-      attendance_pending: !attendanceFinal,
+      attendance_pending: !attendanceAccepted,
       payslip_eligible: false,
     };
   }
@@ -1162,14 +1184,27 @@ function deriveStatus(input = {}) {
    * stored flag - a stored "ready" is a flag that goes stale the moment a
    * regularization is raised.
    */
-  if (!attendanceFinal) {
+  if (!attendanceAccepted) {
     blockers.push(blockerOf(READY_BLOCKER.ATTENDANCE_INCOMPLETE));
   }
-  if (Number(pending_regularizations) > 0) {
-    blockers.push(blockerOf(READY_BLOCKER.PENDING_ATTENDANCE_REGULARIZATION));
-  }
-  if (Number(pending_ot) > 0) {
-    blockers.push(blockerOf(READY_BLOCKER.PENDING_OT_APPROVAL));
+  /*
+   * AN OPEN REGULARIZATION AND AN OPEN OT APPROVAL ARE EXACTLY WHAT A CLOSE
+   * ACCEPTS, so they stop blocking once one has been made - and only then.
+   * Leaving them blocking after a close would make the close do nothing at all
+   * for the commonest reason a month cannot be finished, which is the case it
+   * was built for.
+   *
+   * THE REQUESTS THEMSELVES ARE UNTOUCHED. They are still open, still in the
+   * approver's queue and still in their own history; what has been decided is
+   * that THIS MONTH'S PAY no longer waits for them.
+   */
+  if (attendance_closed_for_payroll !== true) {
+    if (Number(pending_regularizations) > 0) {
+      blockers.push(blockerOf(READY_BLOCKER.PENDING_ATTENDANCE_REGULARIZATION));
+    }
+    if (Number(pending_ot) > 0) {
+      blockers.push(blockerOf(READY_BLOCKER.PENDING_OT_APPROVAL));
+    }
   }
   /*
    * THE ADJUSTMENT STAGE MUST BE COMPLETE FOR THIS EMPLOYEE, and "complete"
@@ -1205,7 +1240,7 @@ function deriveStatus(input = {}) {
   const status =
     blockers.length === 0
       ? CALC_STATUS.READY_FOR_APPROVAL
-      : attendanceFinal
+      : attendanceAccepted
       ? CALC_STATUS.CALCULATED
       : CALC_STATUS.ATTENDANCE_PENDING;
   return {
@@ -1213,7 +1248,13 @@ function deriveStatus(input = {}) {
     status_label: CALC_STATUS_LABEL[status],
     blockers,
     recalculation_reasons: [],
-    attendance_pending: !attendanceFinal,
+    /*
+     * AND THE FIGURES COME BACK. `attendance_pending` is what suppresses the
+     * provisional Salary Days, OT, PF, ESI and Net Pay, and an accepted basis
+     * is no longer provisional: it is what this employee is being paid on, so
+     * it has to be visible before anybody approves it.
+     */
+    attendance_pending: !attendanceAccepted,
     payslip_eligible: false,
   };
 }

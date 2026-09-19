@@ -2,7 +2,7 @@ const express = require("express");
 const Joi = require("@hapi/joi");
 const P = require("../constants/hr_permissions");
 const respondError = require("../utils/http");
-const { PAY_TYPES, LIFECYCLE_FILTER } = require("../constants/payrun");
+const { PAY_TYPES, LIFECYCLE_FILTER, ATTENDANCE_STATUS } = require("../constants/payrun");
 
 /**
  * Payrun Initialization - the API.
@@ -114,6 +114,18 @@ class PayrunRoutes {
        * left by the end of THIS month - and never the master's current status.
        */
       lifecycle: Joi.string().valid(...Object.values(LIFECYCLE_FILTER)).optional(),
+      /*
+       * THE ATTENDANCE TAB, a third independent narrowing beside `status` and
+       * `lifecycle`: one asks what the payrun says, one what the employment
+       * record says, and this what ATTENDANCE says. All three compose.
+       */
+      attendance_status: Joi.string().valid(...Object.values(ATTENDANCE_STATUS)).optional(),
+      /*
+       * THE SHARED SEARCH. Bounded at 120 characters and trimmed, exactly as
+       * the Adjustments and Calculation stages already bound theirs - the
+       * three stages answer one search box and must accept the same input.
+       */
+      search: Joi.string().trim().max(120).allow("").optional(),
     };
 
     /**
@@ -143,6 +155,8 @@ class PayrunRoutes {
               designation_id: req.query.designation_id,
               status: req.query.status,
               lifecycle: req.query.lifecycle,
+              attendance_status: req.query.attendance_status,
+              search: req.query.search,
             })),
           });
         } catch (err) {
@@ -262,6 +276,96 @@ class PayrunRoutes {
           res.json({
             code: 200,
             history: await this.usecase.getPayTypeAudit({
+              year: Number(req.query.year),
+              month: Number(req.query.month),
+              employee_id: Number(req.query.employee_id),
+            }),
+          });
+        } catch (err) {
+          this._fail(res, err);
+        }
+      }
+    );
+
+    /**
+     * CLOSE ATTENDANCE FOR PAYROLL - one employee or a selection.
+     *
+     * `close_payrun_attendance`, WHICH IS A KEY OF ITS OWN and deliberately
+     * neither `process_payroll` nor `approve_payrun` - see
+     * `constants/hr_permissions.js` for why the month takes three hands. The
+     * check is HERE, on the server: a screen that hides the button is a screen
+     * that hides a button, and this endpoint is reachable without it.
+     *
+     * IT DECIDES NO ATTENDANCE REQUEST. The body cannot name a punch, a
+     * regularization or an OT request, and the usecase behind it has no way to
+     * write an attendance table.
+     *
+     * ONE LIST FOR ONE EMPLOYEE AND FOR FORTY, as every other payrun bulk
+     * action: the single case posts a list of one, so the two cannot drift.
+     */
+    this.router.post(
+      "/payrun/attendance/close",
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.CLOSE_PAYRUN_ATTENDANCE),
+      async (req, res) => {
+        try {
+          const isValid = Joi.validate(req.body, {
+            year: Joi.number().integer().min(2000).max(2100).required(),
+            month: Joi.number().integer().min(1).max(12).required(),
+            employee_ids: Joi.array()
+              .items(Joi.number().integer().positive())
+              .min(1)
+              .max(1000)
+              .optional(),
+            all_pending: Joi.boolean().optional(),
+          });
+          if (isValid.error !== null) throw isValid.error;
+
+          const scoped = await this._scope(req, res, null);
+          if (!scoped) return;
+
+          res.json({
+            code: 200,
+            ...(await this.usecase.closeAttendanceForPayroll({
+              year: Number(req.body.year),
+              month: Number(req.body.month),
+              employee_ids: req.body.employee_ids,
+              all_pending: req.body.all_pending,
+              store_ids: scoped.store_ids,
+              /* WHO CLOSED IT IS THE SERVER'S IDENTITY, never the body's. */
+              actor: await this.permissions.actorFor(req),
+            })),
+          });
+        } catch (err) {
+          this._fail(res, err);
+        }
+      }
+    );
+
+    /**
+     * THE CLOSE HISTORY for one employee's month - append only, newest first.
+     *
+     * READ WITH THE SAME KEYS THE MONTH IS READ WITH. It carries attendance
+     * figures and no salary, so it needs no stronger right than the screen it
+     * is opened from.
+     */
+    this.router.get(
+      "/payrun/attendance/close/history",
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.VIEW_PAYROLL),
+      async (req, res) => {
+        try {
+          const isValid = Joi.validate(req.query, {
+            year: Joi.number().integer().min(2000).max(2100).required(),
+            month: Joi.number().integer().min(1).max(12).required(),
+            employee_id: Joi.number().integer().positive().required(),
+          });
+          if (isValid.error !== null) throw isValid.error;
+
+          const scoped = await this._scope(req, res, null);
+          if (!scoped) return;
+
+          res.json({
+            code: 200,
+            history: await this.usecase.getAttendanceCloseAudit({
               year: Number(req.query.year),
               month: Number(req.query.month),
               employee_id: Number(req.query.employee_id),

@@ -329,6 +329,13 @@ class PayrunCalculationUsecase {
       pending_ot: Number(counts.pending_ot || 0),
       adjustment_state: adjustmentState,
       statutory_setup_complete: statutorySetupComplete(employee),
+      /*
+       * THE ACCEPTED ATTENDANCE BASIS, read from the snapshot rather than
+       * inferred from anything on this screen. It satisfies the attendance
+       * part of approval readiness and nothing else - see `deriveStatus`.
+       */
+      attendance_closed_for_payroll:
+        Number(employee.attendance_closed_for_payroll) === 1,
     });
 
     /**
@@ -400,6 +407,16 @@ class PayrunCalculationUsecase {
          * slightly differently on a phone.
          */
         attendance_pending: verdict.attendance_pending,
+        /*
+         * CLOSED IS NOT THE SAME AS SETTLED, and the row says which. An
+         * employee whose attendance was accepted with known gaps must be
+         * distinguishable from one whose month genuinely finished - the
+         * figures are equally real, but only one of them was complete.
+         */
+        attendance_closed_for_payroll:
+          Number(employee.attendance_closed_for_payroll) === 1,
+        attendance_closed_by: employee.attendance_closed_by ?? null,
+        attendance_closed_at: employee.attendance_closed_at ?? null,
 
         /*
          * The compact list's columns. Absent until there is a calculation -

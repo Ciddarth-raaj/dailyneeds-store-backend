@@ -7,6 +7,11 @@ const {
   BLOCK_REASON_MESSAGE,
   WARNING,
   WARNING_MESSAGE,
+  ATTENDANCE_STATUS,
+  ATTENDANCE_STATUS_LABEL,
+  ATTENDANCE_UNRESOLVED,
+  ATTENDANCE_UNRESOLVED_LABEL,
+  ATTENDANCE_UNRESOLVED_MESSAGE,
 } = require("../constants/payrun");
 const { PAYMENT_TYPE } = require("./payment_type");
 
@@ -375,14 +380,173 @@ function evaluateEmployee(input = {}) {
 
 /** The four counts the screen's summary cards show. */
 function summarize(rows = []) {
-  const summary = { total_eligible: 0, ready: 0, blocked: 0, initialized: 0 };
+  const summary = {
+    total_eligible: 0,
+    ready: 0,
+    blocked: 0,
+    initialized: 0,
+    /*
+     * ============ TWO DIMENSIONS, AND THE SUMMARY SAYS SO ==================
+     *
+     * `ready`, `blocked` and `initialized` are MUTUALLY EXCLUSIVE workflow
+     * states: every eligible employee is in exactly one, and they add up to
+     * `total_eligible`.
+     *
+     * THE TWO BELOW ARE NOT PART OF THAT SUM AND MUST NOT BE READ AS IF THEY
+     * WERE. Attendance readiness is a different question from where somebody
+     * has got to in the payrun, and the two genuinely overlap: an INITIALIZED
+     * employee can be attendance-pending, which is the ordinary case at month
+     * end and the whole reason Close for Payroll exists. Forcing them into one
+     * exclusive list would mean either losing the workflow state or losing the
+     * attendance fact, and a screen that added all five together would report
+     * more employees than the month contains.
+     *
+     * So they are counted independently, named for the dimension they belong
+     * to, and the screen labels them as such.
+     */
+    attendance_pending: 0,
+    attendance_closed_for_payroll: 0,
+  };
   rows.forEach((row) => {
     summary.total_eligible += 1;
     if (row.status === STATUS_GROUP.READY) summary.ready += 1;
     else if (row.status === STATUS_GROUP.BLOCKED) summary.blocked += 1;
     else if (row.status === STATUS_GROUP.INITIALIZED) summary.initialized += 1;
+
+    if (row.attendance_status === ATTENDANCE_STATUS.PENDING) summary.attendance_pending += 1;
+    else if (row.attendance_status === ATTENDANCE_STATUS.CLOSED_FOR_PAYROLL) {
+      summary.attendance_closed_for_payroll += 1;
+    }
   });
   return summary;
+}
+
+/* ============================ attendance readiness, for payroll's purposes */
+
+/**
+ * IS THE ATTENDANCE MONTH SETTLED - the one question, answered once.
+ *
+ * `attendance_monthly_payroll.is_final` is DERIVED by
+ * `utils/attendance_payroll.js` as "no dates were held out", and a missing row
+ * is not final either: there is nothing to pay from. Both are the same fact to
+ * payroll and are answered together here so that no caller has to remember the
+ * missing-row case.
+ */
+function attendanceIsFinal(attendance) {
+  return Boolean(
+    attendance && (attendance.is_final === 1 || attendance.is_final === true)
+  );
+}
+
+/**
+ * EVERYTHING ABOUT THIS EMPLOYEE'S ATTENDANCE THAT PAYROLL IS STILL WAITING
+ * ON, named, counted, and with the dates where the engine named them.
+ *
+ * IT DERIVES NOTHING ABOUT ATTENDANCE and recomputes nothing. Every value
+ * below is read from what the attendance engine already stored - `is_final`,
+ * `held_dates` - or from the pending-request counts the payrun already reads
+ * for its own warnings. There is no punch, no shift and no minute in this
+ * function, because `usecase/attendance_calculation.js` owns those and a
+ * second opinion here would be a second answer.
+ *
+ * THE DATES ARE CARRIED, NOT JUST THE COUNT. The engine stores WHICH dates it
+ * held out, so the screen can link straight to each one rather than telling
+ * somebody that two unnamed dates are wrong.
+ */
+function attendanceUnresolved({
+  attendance = null,
+  pending_regularizations = 0,
+  pending_ot = 0,
+} = {}) {
+  const items = [];
+  const heldDates = Array.isArray(attendance && attendance.held_dates)
+    ? attendance.held_dates
+    : [];
+
+  const add = (code, count, dates = []) => {
+    items.push({
+      code,
+      label: ATTENDANCE_UNRESOLVED_LABEL[code],
+      message: ATTENDANCE_UNRESOLVED_MESSAGE[code],
+      count,
+      dates,
+    });
+  };
+
+  if (!attendance) {
+    add(ATTENDANCE_UNRESOLVED.NO_ATTENDANCE_MONTH, 1);
+  } else if (!attendanceIsFinal(attendance)) {
+    /*
+     * THE HELD DATES ARE THE COUNT WHERE THERE ARE ANY. A month can be
+     * non-final with an empty `held_dates` only if the stored row predates the
+     * column; one unnamed item is the honest count there rather than zero,
+     * which would read as "nothing is wrong".
+     */
+    add(
+      ATTENDANCE_UNRESOLVED.ATTENDANCE_NOT_FINAL,
+      heldDates.length > 0 ? heldDates.length : 1,
+      heldDates
+    );
+  }
+
+  const regularizations = Math.max(0, Math.trunc(Number(pending_regularizations) || 0));
+  if (regularizations > 0) add(ATTENDANCE_UNRESOLVED.PENDING_REGULARIZATION, regularizations);
+
+  const ot = Math.max(0, Math.trunc(Number(pending_ot) || 0));
+  if (ot > 0) add(ATTENDANCE_UNRESOLVED.PENDING_OT, ot);
+
+  return items;
+}
+
+/**
+ * READY, PENDING, OR CLOSED FOR PAYROLL.
+ *
+ * THE ORDER OF THE THREE ANSWERS IS THE RULE. Settled attendance reads READY
+ * whether or not anybody closed it, because that is the stronger statement and
+ * the close has become irrelevant to it. Otherwise an explicit close reads
+ * CLOSED_FOR_PAYROLL. Otherwise PENDING.
+ *
+ * A CLOSE IS NEVER INFERRED. Nothing here turns PENDING into CLOSED because a
+ * month looks old, because a screen filtered for it, or because the unresolved
+ * items are few: `closed_for_payroll` is a stored decision a person made, and
+ * this function only reads it.
+ */
+function attendanceStatusOf({
+  attendance = null,
+  pending_regularizations = 0,
+  pending_ot = 0,
+  closed_for_payroll = false,
+} = {}) {
+  const unresolved = attendanceUnresolved({
+    attendance,
+    pending_regularizations,
+    pending_ot,
+  });
+
+  const status =
+    unresolved.length === 0
+      ? ATTENDANCE_STATUS.READY
+      : closed_for_payroll === true
+      ? ATTENDANCE_STATUS.CLOSED_FOR_PAYROLL
+      : ATTENDANCE_STATUS.PENDING;
+
+  return {
+    status,
+    status_label: ATTENDANCE_STATUS_LABEL[status],
+    unresolved,
+    /*
+     * THE COUNT THE CONFIRMATION DIALOG SHOWS. "32 employees selected, 41
+     * unresolved attendance items" is built by summing this across a
+     * selection, so it is computed once, here, rather than in a browser.
+     */
+    unresolved_count: unresolved.reduce((total, item) => total + item.count, 0),
+    /*
+     * WHETHER A CLOSE WOULD DO ANYTHING. False for a settled employee, which
+     * is what makes bulk close skip them rather than writing an audit row
+     * recording that nothing was accepted.
+     */
+    closeable: unresolved.length > 0 && closed_for_payroll !== true,
+  };
 }
 
 module.exports = {
@@ -395,4 +559,7 @@ module.exports = {
   exitedByMonthEnd,
   evaluateEmployee,
   summarize,
+  attendanceIsFinal,
+  attendanceUnresolved,
+  attendanceStatusOf,
 };

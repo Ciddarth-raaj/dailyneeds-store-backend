@@ -82,6 +82,11 @@ class PayrunCalculationRepository {
    * is performed FROM the snapshot: the structure components, the statutory
    * flags and the frozen pay type are its inputs. The account number, the
    * Aadhaar and the PAN are not among them and are not selected.
+   *
+   * THE ATTENDANCE CLOSE COMES WITH IT. Whether payroll accepted this
+   * employee's attendance as it stood is a fact ABOUT this month's snapshot,
+   * and the approval gate needs it for every row - reading it here rather than
+   * per employee is the batching rule this file exists to keep.
    */
   async listInitialized({ year, month, store_ids = null, employee_ids = null }) {
     const where = ["pe.period_year = ?", "pe.period_month = ?"];
@@ -109,7 +114,10 @@ class PayrunCalculationRepository {
               pe.monthly_gross, pe.daily_salary,
               pe.basic, pe.conveyance, pe.hra, pe.special_allowance,
               pe.pf_applicable, pe.esi_applicable, pe.uan, pe.pf_number, pe.esi_number,
-              pe.pay_type, pe.pay_type_source
+              pe.pay_type, pe.pay_type_source,
+              pe.attendance_closed_for_payroll,
+              pe.attendance_closed_by,
+              DATE_FORMAT(pe.attendance_closed_at, '%Y-%m-%d %H:%i:%s') AS attendance_closed_at
          FROM payrun_employee pe
         WHERE ${where.join(" AND ")}
         ORDER BY pe.employee_id`,
