@@ -335,9 +335,29 @@ function resolveIdentity(decoded) {
   return null;
 }
 
-/** Session-state row for a non-system account: the employee must exist and be active. */
+/**
+ * Session-state row for a non-system account: the employee must exist and be
+ * active.
+ *
+ * TWO KINDS OF ACCOUNT ARE NOT A PERSON, and an employee's status says
+ * nothing about either of them:
+ *
+ *   is_system_account   break-glass. No employee row at all.
+ *   is_service_account  an integration. It may still CARRY an employee_id -
+ *                       `purchase_api` does, and its live pre-Stage-0A token
+ *                       depends on that link resolving - but the employee is
+ *                       not its principal. Employee 1 resigning is not a
+ *                       reason for the Tally bridge to stop working, exactly
+ *                       as employee 1's joining date was not.
+ *
+ * A service account is still judged by `user.status`, which every caller of
+ * this function checks alongside it. Setting `user.status = 0` remains the
+ * way to switch an integration off, and it takes effect within the session
+ * cache window.
+ */
 function employeeActive(state) {
   if (Number(state.is_system_account) === 1) return true;
+  if (Number(state.is_service_account) === 1) return true;
   if (state.employee_id === null || state.employee_id === undefined) return false;
   return Number(state.employee_status) === 1;
 }
@@ -434,6 +454,13 @@ function create(deps = {}) {
     // A legacy token must resolve to a genuine employee-linked account and
     // never to a system account. With the usecase available this is
     // checked against the database, cached briefly, failing closed.
+    //
+    // EVERY CHECK HERE STAYS AS IT WAS for a service account except the
+    // employee-status one: the row must still exist, still be enabled, still
+    // be non-system, and still carry exactly the employee_id the token
+    // claims. That is what keeps the integration's already-installed legacy
+    // token verifying, and it is why the employee link is not being cut in
+    // this change.
     if (legacy && userUsecase) {
       try {
         const state = await loadSession(userId);
@@ -456,8 +483,16 @@ function create(deps = {}) {
     // them, but nothing refused their existing session. Now every request
     // from an employee-linked account is checked against the employee's
     // status (cached for tokenValidFromCacheMs). System accounts have no
-    // employee and are judged by user.status alone. Reactivating the
-    // employee reinstates access with no change to the user row.
+    // employee and are judged by user.status alone; so is a service
+    // account, which `employeeActive` excuses from the employee check
+    // WITHOUT excusing it from `user.status` immediately below.
+    // Reactivating the employee reinstates access with no change to the
+    // user row.
+    //
+    // `isSystemAccount` here comes from the TOKEN, which is right: only a
+    // break-glass credential claims `sys`. Service-account-ness is never a
+    // claim - it is read from the row, inside `employeeActive`, so a token
+    // cannot assert it.
     if (!legacy && userUsecase && config.login.employeeStatusCheck && !isSystemAccount) {
       try {
         const state = await loadSession(userId);

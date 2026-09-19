@@ -216,6 +216,7 @@ class UserUsecase {
     }
 
     const isSystem = Number(row.is_system_account) === 1;
+    const isServiceAccount = Number(row.is_service_account) === 1;
     const audited = { ...base, userId: row.user_id, transport: meta.transport === "query" ? "legacy_query_string" : undefined };
 
     // Locked accounts still pay for a verification, so the lock is not observable by timing.
@@ -248,7 +249,15 @@ class UserUsecase {
     // C2: a real employee must be active. A system account has no employee
     // row and is judged only by its own status — it must not depend on
     // new_employee, and it must not be given a fake one.
-    if (!isSystem) {
+    //
+    // A SERVICE ACCOUNT IS JUDGED THE SAME WAY, for the same reason the
+    // per-request middleware excuses it: the employee it may be linked to is
+    // not its principal. This keeps the login path and `employeeActive`
+    // saying the same thing, and it is what lets a future auth_ver 2
+    // integration credential be issued and used once the account is finally
+    // detached from its employee. `row.status` is still checked above, so
+    // disabling the account still refuses the login.
+    if (!isSystem && !isServiceAccount) {
       if (row.employee_id === null || row.employee_id === undefined) {
         await this.audit("login_inactive", { ...audited, detail: "no_employee_row" });
         return BAD_CREDENTIALS;

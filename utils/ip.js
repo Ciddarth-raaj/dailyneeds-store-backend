@@ -259,14 +259,45 @@ function normalizeIpPolicy(value) {
  *                   everyone); otherwise the branch list, empty enforced as
  *                   "nowhere" for the same reason as above.
  *
+ * A SERVICE ACCOUNT IS JUDGED ON ITS OWN, and never follows a branch:
+ *
+ *   unrestricted  → exempt, and it has to be SAID. This is the only way an
+ *                   integration reaches "any network", and an administrator
+ *                   chose it explicitly.
+ *   custom        → its OWN allow-list, with no branch union. The machine
+ *                   that runs the integration has a fixed address; that
+ *                   address is the policy.
+ *   branch        → there is no branch to follow, so this is the
+ *                   UNCONFIGURED state, and it resolves to "nowhere"
+ *                   (`exempt: false`, no rules). A service account whose
+ *                   policy was never set is refused, loudly and
+ *                   recoverably, rather than inheriting a person's network
+ *                   or silently becoming unrestricted. `branch` is the
+ *                   column default, so this is what an account flagged
+ *                   without a policy gets - which is why the data change
+ *                   that sets the flag sets the policy in the same
+ *                   statement.
+ *
  * `source` says which arm decided, for the admin screen and for logs.
  */
 function resolveIpPolicy(row) {
   const r = row || {};
   const policy = normalizeIpPolicy(r.ip_policy) || "branch";
   const isAdmin = Number(r.user_type) === ADMIN_USER_TYPE;
-  const branchEnabled = toBoolean(r.branch_enabled, false);
+  const isService = toBoolean(r.is_service_account, false);
+  // A service account never reads the branch columns, whatever the query
+  // put in them.
+  const branchEnabled = !isService && toBoolean(r.branch_enabled, false);
   const branchRules = branchEnabled ? parseAllowList(r.branch_ips) : [];
+
+  if (isService) {
+    if (policy === "unrestricted") return { exempt: true, rules: [], source: "service-unrestricted" };
+    if (policy === "custom") {
+      return { exempt: false, rules: parseAllowList(r.allowed_ips), source: "service-custom" };
+    }
+    // `branch` on an account that has no branch: not configured.
+    return { exempt: false, rules: [], source: "service-unconfigured" };
+  }
 
   if (policy === "unrestricted") {
     return { exempt: true, rules: [], source: "unrestricted" };

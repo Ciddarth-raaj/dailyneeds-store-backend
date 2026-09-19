@@ -48,6 +48,7 @@ const CREDENTIAL_COLUMNS = `
   u.locked_until AS locked_until,
   u.token_valid_from AS token_valid_from,
   u.is_system_account AS is_system_account,
+  u.is_service_account AS is_service_account,
   u.ip_policy AS ip_policy,
   u.allowed_ips AS allowed_ips,
   o.ip_restriction_enabled AS branch_enabled,
@@ -254,7 +255,8 @@ class UserRepository {
   getSessionState(userId) {
     return this._query(
       "GET-SESSION-STATE",
-      `SELECT u.user_id, u.employee_id, u.status, u.token_valid_from, u.must_change_password, u.is_system_account,
+      `SELECT u.user_id, u.employee_id, u.status, u.token_valid_from, u.must_change_password,
+              u.is_system_account, u.is_service_account,
               ne.status AS employee_status
        FROM \`user\` u
        LEFT JOIN new_employee ne ON ne.employee_id = u.employee_id
@@ -272,16 +274,32 @@ class UserRepository {
     );
   }
 
+  /**
+   * THE JOIN IS CONDITIONAL, AND THAT IS THE POINT.
+   *
+   * A service account carries an `employee_id` only because it was
+   * provisioned against one. Following it to that employee's branch would
+   * make the integration's network policy a side effect of where a person
+   * works: move the employee to another outlet, or turn that outlet's IP
+   * switch on, and the integration is locked out with IP_NOT_ALLOWED - the
+   * same class of failure as the revocation this branch already fixed.
+   *
+   * `AND u.is_service_account = 0` on the join means the branch columns come
+   * back NULL for a service account, so there is no inherited rule to leak
+   * even if a future reader forgets. `resolveIpPolicy` refuses to read them
+   * for such an account as well; one of the two is redundant on purpose.
+   */
   getIpPolicy(userId) {
     return this._query(
       "GET-IP-POLICY",
       `SELECT u.user_type AS user_type,
               u.ip_policy AS ip_policy,
               u.allowed_ips AS allowed_ips,
+              u.is_service_account AS is_service_account,
               o.ip_restriction_enabled AS branch_enabled,
               o.allowed_ips AS branch_ips
        FROM \`user\` u
-       LEFT JOIN new_employee ne ON ne.employee_id = u.employee_id
+       LEFT JOIN new_employee ne ON ne.employee_id = u.employee_id AND u.is_service_account = 0
        LEFT JOIN outlets o ON o.outlet_id = ne.store_id
        WHERE u.user_id = ?`,
       [userId],
@@ -299,6 +317,7 @@ class UserRepository {
               u.allowed_ips AS allowed_ips,
               u.employee_id AS employee_id,
               u.is_system_account AS is_system_account,
+              u.is_service_account AS is_service_account,
               ne.employee_name AS employee_name,
               ne.store_id AS store_id,
               o.outlet_name AS store_name,
