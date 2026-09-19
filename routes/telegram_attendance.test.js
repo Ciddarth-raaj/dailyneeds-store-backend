@@ -289,6 +289,28 @@ describe("the submit contract", () => {
   });
 });
 
+/**
+ * EVERY write and read on this router carries the Telegram gate, and the
+ * only exception is the one endpoint whose whole job is to prove identity.
+ * Asserted STRUCTURALLY so a route added later cannot quietly skip it.
+ */
+describe("the Telegram gate is mandatory on every route but the session exchange", () => {
+  it("every handler except /session runs behind _requireSession", () => {
+    const router = buildRouter(sessionUsecase, miniAppUsecase).getRouter();
+    const guarded = router.stack
+      .filter((l) => l.route)
+      .map((l) => ({ path: l.route.path, handlers: l.route.stack.length }));
+    guarded.forEach(({ path, handlers }) => {
+      if (path === "/telegram/attendance/session") {
+        assert.equal(handlers, 1, "the session exchange is the identity proof itself");
+        return;
+      }
+      assert.equal(handlers, 2, `${path} must be [guard, handler]`);
+    });
+    assert.ok(guarded.length >= 6);
+  });
+});
+
 describe("what this namespace does NOT expose", () => {
   it("has no approval, no decision and no queue route", () => {
     const routes = buildRouter(sessionUsecase, miniAppUsecase)
@@ -366,12 +388,25 @@ describe("My Attendance over HTTP", () => {
 describe("POST /telegram/attendance/ot-request", () => {
   const otBody = { attendance_date: "2026-09-17", reason: "Stock count ran late" };
 
-  it("needs the scoped token; no token and a login token are both 401", async () => {
-    assert.equal((await post("/telegram/attendance/ot-request", otBody)).status, 401);
-    assert.equal(
-      (await post("/telegram/attendance/ot-request", otBody, { "x-access-token": GOOD_TOKEN })).status,
-      401
-    );
+  /**
+   * THE REGRESSION THAT MATTERS MOST. The path is in `unProtectedRoutes`,
+   * so the global `x-access-token` gate does NOT run for it - which is
+   * exactly why a direct, unauthenticated POST must be proved to die at
+   * this router's own gate, and to reach the usecase never.
+   */
+  it("a direct unauthenticated POST is refused and reaches the usecase never", async () => {
+    calls.ot.length = 0;
+    for (const headers of [
+      {},                                        // nothing at all
+      { "x-access-token": GOOD_TOKEN },          // an ordinary login token
+      { "x-telegram-session": "" },              // an empty session header
+      { "x-telegram-session": "forged" },        // an invalid/expired one
+    ]) {
+      // eslint-disable-next-line no-await-in-loop
+      const res = await post("/telegram/attendance/ot-request", otBody, headers);
+      assert.equal(res.status, 401, JSON.stringify(headers));
+    }
+    assert.deepEqual(calls.ot, [], "submitOtRequest was never executed");
   });
 
   it("accepts exactly a date and a reason, for the TOKEN's employee", async () => {
