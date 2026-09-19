@@ -145,6 +145,10 @@ const BREAK_CREDIT_CUTOFF_MINUTES = 15 * 60;
  *      rule and the permanent one decides the entitlement. `regular_minutes`
  *      and `base_nrm_minutes` are stored on the row, and the two-punch OT
  *      restriction is expressed as the uncharged break it always stood for.
+ *      On such a date the shortage is the arithmetic MAX(0, base NRM -
+ *      worked): the late and early-going rules still report their flags, but
+ *      they do not charge, because they are measuring against hours the
+ *      employee was never entitled to.
  */
 const CALCULATION_VERSION = 9;
 
@@ -878,7 +882,10 @@ function calculateAttendanceDay(input = {}) {
    * a caller that has the figure already; `base_shift` wins when both arrive.
    */
   let payrollNrm = nrm;
+  // True only on a date whose shift is NOT the employee's permanent one.
+  let payrollBaseDiffers = false;
   if (base_shift && Number(base_shift.work_shift_id) !== Number(shift.work_shift_id)) {
+    payrollBaseDiffers = true;
     const baseSpan = Math.max(0, Math.trunc(base_shift.shift_span_minutes || 0));
     const baseBreak = Math.max(
       0,
@@ -1050,17 +1057,39 @@ function calculateAttendanceDay(input = {}) {
     nrm_minutes: payrollNrm,
     shift,
   });
-  const shortage = grace.shortage_minutes;
+  /*
+   * ON AN OVERRIDE DAY THE SHORTAGE IS ARITHMETIC, NOT A DEDUCTION RULE.
+   *
+   *     shortage = MAX(0, base NRM - worked)
+   *
+   * and nothing else. The late and early-going rules above still RUN - the
+   * flags are the temporary shift's and are reported as such - but they may
+   * not charge against the day, because on an override day they are measuring
+   * against hours the employee was never entitled to in the first place.
+   * Somebody permanently on 18:00-22:00, approved to cover 10:00-22:00 and
+   * leaving at 13:00, is nine hours "early" against the temporary shift; they
+   * are one hour short of their four-hour entitlement, and the interval rule
+   * would otherwise turn that into a whole missing day.
+   *
+   * On every ordinary date the two shifts are the same shift, this is false,
+   * and the deduction rules decide the shortage exactly as they always have.
+   */
+  const shortage = payrollBaseDiffers ? rawShortage : grace.shortage_minutes;
 
   base.actual_gap_minutes = actualGaps;
   base.break_charged_minutes = breakCharged;
   base.worked_minutes = worked;
   base.regular_minutes = Math.min(worked, payrollNrm);
   base.shortage_minutes = shortage;
-  base.grace_forgiven_minutes = grace.grace_forgiven_minutes;
-  base.late_charged_minutes = grace.late_charged_minutes;
-  base.early_exit_charged_minutes = grace.early_exit_charged_minutes;
-  if (shortage !== rawShortage - grace.grace_forgiven_minutes && !breakCreditWithheld) {
+  base.grace_forgiven_minutes = payrollBaseDiffers ? 0 : grace.grace_forgiven_minutes;
+  base.late_charged_minutes = payrollBaseDiffers ? 0 : grace.late_charged_minutes;
+  base.early_exit_charged_minutes = payrollBaseDiffers ? 0 : grace.early_exit_charged_minutes;
+  if (payrollBaseDiffers && (grace.late_charged_minutes > 0 || grace.early_exit_charged_minutes > 0)) {
+    base.notes.push(
+      "One-day shift: lateness and early going are measured against the day's shift and reported, but the shortage is the base shift's entitlement less the minutes worked"
+    );
+  }
+  if (!payrollBaseDiffers && shortage !== rawShortage - grace.grace_forgiven_minutes && !breakCreditWithheld) {
     base.notes.push(
       `Deduction rule: late charged ${grace.late_charged_minutes} minute(s), early out charged ${grace.early_exit_charged_minutes} minute(s) under the shift's interval rule`
     );

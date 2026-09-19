@@ -560,7 +560,7 @@ class EmployeeWorkShiftUsecase {
     let recalculated = null;
     if (effectiveFrom <= today && this.attendanceCalculationUsecase) {
       try {
-        recalculated = await this.attendanceCalculationUsecase.recalculateAndStore({
+        recalculated = await this.attendanceCalculationUsecase.recalculateRange({
           employee_id: employeeId,
           from_date: effectiveFrom,
           to_date: today,

@@ -494,7 +494,10 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
     if (!shift) return null;
     const name = shift.shift_code || shift.shift_name || null;
     if (!shift.in_time || !shift.out_time) return name;
-    return `${name ? `${name} ` : ""}${shift.in_time}-${shift.out_time}`;
+    // HH:MM. The seconds a TIME column carries are noise in a message an
+    // approver reads on a phone.
+    const hhmm = (t) => String(t).slice(0, 5);
+    return `${name ? `${name} ` : ""}${hhmm(shift.in_time)}-${hhmm(shift.out_time)}`;
   };
 
   /** How far ahead a one-day shift may be asked for. A roster, not a plan. */
