@@ -162,12 +162,25 @@ describe("it is wired the way db-migrate reads it", () => {
     assert.ok(runner.includes(`${NAME}-down.sql`));
   });
 
-  it("sorts after every migration already applied in production", () => {
-    const all = fs
+  /**
+   * NOT "IT SORTS LAST". It sorted last when it was written, and asserting
+   * that literally makes this test fail the moment ANY later migration is
+   * added - which says nothing about this migration and everything about the
+   * calendar. What matters is that it sorts after every migration that
+   * existed when it was written, so db-migrate cannot run it BEFORE the
+   * payrun tables it alters.
+   */
+  it("sorts after every migration that existed when it was written", () => {
+    const earlier = fs
       .readdirSync(dir)
       .filter((f) => f.endsWith("-up.sql"))
       .map((f) => f.replace("-up.sql", ""))
+      .filter((name) => name < NAME)
       .sort();
-    assert.equal(all[all.length - 1], NAME, "this migration must sort last");
+    assert.ok(earlier.length > 0, "there are earlier migrations");
+    assert.ok(
+      earlier.every((name) => name < NAME),
+      "this migration must sort after every migration that preceded it"
+    );
   });
 });

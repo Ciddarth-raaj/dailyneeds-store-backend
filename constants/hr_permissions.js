@@ -388,6 +388,41 @@ module.exports = {
   // `resolveLocationScope` in `routes/attendance_dashboard.js`.
   VIEW_ATTENDANCE_DASHBOARD: "view_attendance_dashboard",
 
+  // ======================================= MISSING ATTENDANCE REPORT =======
+  //
+  // The Missing Attendance Report: every COMPLETED past attendance date on
+  // which an eligible employee recorded a POSITIVE, ODD number of punches -
+  // one punch of a pair never arrived. Zero punches is absence and is not
+  // this report; today is never on it, because today is still being punched.
+  //
+  // TWO KEYS, READ AND EXPORT, exactly as the raw Attendance List has
+  // `view_raw_attendance` and `export_raw_attendance`. Taking a spreadsheet
+  // of every branch's gaps off the premises is a different decision from
+  // looking at the screen, and the split is what lets a manager be given the
+  // second without the first, or the first without the second.
+  //
+  // ITS OWN KEY, NOT `view_attendance_dashboard` AND NOT
+  // `view_calculated_attendance`. The dashboard key answers "how is the
+  // company doing on ONE date"; the calculated key answers "may this person
+  // open ONE employee's month". This is a third question - a cross-employee,
+  // cross-date list of one specific defect - and a designation can now be
+  // given the chasing list without either of the others.
+  //
+  // IT GRANTS NO WRITE OF ANY KIND. Holding it regularizes nothing, approves
+  // nothing, edits no punch and recalculates no date. The router is GET-only.
+  //
+  // AND IT DOES NOT SETTLE WHICH BRANCHES. Like every dashboard key, the
+  // caller's LOCATION scope is resolved separately by
+  // `middlewares/dashboard_scope.js` and fails closed - so a branch manager
+  // granted this key sees their own branch and gains no visibility into
+  // anybody else's merely because a new report exists.
+  //
+  // GRANTED TO NOBODY BY MIGRATION. A list of every employee's attendance
+  // gaps across every branch is a capability rather than a convenience, so it
+  // is assigned deliberately, per designation, on the rights screen.
+  VIEW_MISSING_ATTENDANCE_REPORT: "view_missing_attendance_report",
+  EXPORT_MISSING_ATTENDANCE_REPORT: "export_missing_attendance_report",
+
   // ================================================ GLOBAL DASHBOARD ACCESS =
   //
   // ONE FEATURE KEY PER DASHBOARD, and ONE STORE SCOPE shared by all of them.

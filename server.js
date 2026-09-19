@@ -250,6 +250,14 @@ class Server {
     this.attendanceDashboardRepo = require("./repository/attendance_dashboard")(
       this.mysql.connection
     );
+    // Missing Attendance: the report's OWN two reads - the candidate
+    // population, and the notification ledger the 06:00 Telegram job claims
+    // against. It reads NO attendance table: punches, dated shifts, stored
+    // calculations and approvals all come from the dashboard repository
+    // above, which is what keeps the report agreeing with the screens.
+    this.attendanceMissingRepo = require("./repository/attendance_missing")(
+      this.mysql.connection
+    );
     // Attendance v2 / A3. The regularization and OT approval store. It cannot
     // reach `biomax_punch` at all: an approved manual punch is a row in its
     // own table, and the raw punch stays exactly as the device sent it.
@@ -727,6 +735,27 @@ class Server {
       this.attendanceDashboardRepo,
       this.attendanceDashboardUsecase
     );
+    // MISSING ATTENDANCE - one rule, two consumers. The report and the 06:00
+    // Telegram job both call this usecase; neither has a population of its
+    // own. It reuses the dashboard usecase's batched reads and day
+    // computation verbatim, so "punch count" means the same thing here as on
+    // every attendance screen. It writes nothing.
+    this.attendanceMissingUsecase = require("./usecase/attendance_missing")(
+      this.attendanceMissingRepo,
+      this.attendanceDashboardUsecase
+    );
+    // The alert side of the same rule. It decides HOW a message is addressed,
+    // sent, recorded and retried - never WHO gets one, which is the usecase
+    // above and only that.
+    this.attendanceMissingTelegram = require("./usecase/attendance_missing_telegram")({
+      attendanceMissingUsecase: this.attendanceMissingUsecase,
+      attendanceMissingRepo: this.attendanceMissingRepo,
+      telegramService: require("./services/telegram")(),
+      // No Mini App exists in this repository yet, so no button is attached.
+      // When one does, this is the single value that turns it on - no
+      // message, schedule, ledger or population rule has to move.
+      miniAppUrl: process.env.ATTENDANCE_CORRECTION_MINI_APP_URL || null,
+    });
     // Attendance v2 / A3. Handed the calculation usecase as well, because a
     // request is validated against what the engine actually says is wrong with
     // the date, and a final approval recalculates that date immediately.
@@ -1371,6 +1400,16 @@ class Server {
       this.attendanceStaffingUsecase,
       this.dashboardScope
     );
+    // The Missing Attendance Report: read-only rows and their Excel export.
+    // Behind the SAME Global Dashboard resolver as the dashboard above, so a
+    // branch manager sees their own branch here and nothing more - a new
+    // report widens nobody. The export needs a second key on top.
+    const attendanceMissingRouter = require("./routes/attendance_missing")(
+      this.attendanceMissingUsecase,
+      this.permissions,
+      this.sensitive,
+      this.dashboardScope
+    );
     const attendanceRegularizationRouter = require("./routes/attendance_regularization")(
       this.attendanceRegularizationUsecase,
       this.permissions,
@@ -1682,6 +1721,7 @@ class Server {
     // the bare `/attendance` prefix.
     app.use("/", attendanceCalculationRouter.getRouter());
     app.use("/", attendanceDashboardRouter.getRouter());
+    app.use("/", attendanceMissingRouter.getRouter());
     app.use("/", attendanceRegularizationRouter.getRouter());
     app.use("/", attendanceApproverSetupRouter.getRouter());
     app.use("/attendance", attendanceRawRouter.getRouter());
@@ -2062,6 +2102,60 @@ class Server {
     // delta, so a minute lost to a deploy or a vendor blip is recovered by
     // the next poll and today never needs the recovery job. A tick arriving
     // while the previous run is still in flight is skipped, not queued.
+    /**
+     * MISSING ATTENDANCE ALERTS - 06:00 IST, yesterday only.
+     *
+     * "0 6 * * *" in `CRON_TIMEZONE`, which `services/cron_service.js` pins
+     * to Asia/Kolkata. The job asks the SHARED rule for yesterday's Missing
+     * Attendance (`usecase/attendance_missing.js#getTelegramCandidates` - the
+     * report's own builder with the window pinned) and messages each employee
+     * privately. It never computes a population of its own, so it cannot
+     * disagree with the report a manager opens at 09:00.
+     *
+     * OFF BY DEFAULT, AND DELIBERATELY. `ATTENDANCE_MISSING_TELEGRAM_ENABLED`
+     * must be set to "true" before a single message is sent. The feature is
+     * complete and tested, but the first run messages every employee who
+     * missed a punch yesterday, on their personal Telegram, at six in the
+     * morning - that is an operational decision for a person to make on a
+     * chosen day, not something a deploy should start doing by itself. With
+     * the flag unset the job is registered, logs that it is disabled, and
+     * sends nothing.
+     *
+     * RE-RUNNING IT IS SAFE. Every send is claimed against a UNIQUE
+     * (employee, attendance_date) key before it is attempted, so a retry, a
+     * second instance or a manual re-run sends nothing new.
+     *
+     * ONE FAILURE IS ONE FAILURE. The batch catches per employee; a blocked
+     * bot or a deleted chat is recorded FAILED and the loop carries on. The
+     * wrapper below catches anything that escapes so a cron tick can never
+     * take the process down.
+     */
+    this.cronService.register("attendance_missing_telegram", "0 6 * * *", async () => {
+      if (String(process.env.ATTENDANCE_MISSING_TELEGRAM_ENABLED || "").toLowerCase() !== "true") {
+        console.log(
+          "[CRON] attendance_missing_telegram — ATTENDANCE_MISSING_TELEGRAM_ENABLED is not 'true'; nothing sent"
+        );
+        return;
+      }
+      try {
+        const summary = await this.attendanceMissingTelegram.run();
+        console.log(
+          `[CRON] attendance_missing_telegram ${summary.attendance_date}: ` +
+            `${summary.sent} sent, ${summary.failed} failed, ${summary.skipped} skipped ` +
+            `of ${summary.candidates} candidate(s)`
+        );
+      } catch (err) {
+        logger.Log({
+          level: logger.LEVEL.ERROR,
+          component: "CRON.ATTENDANCE_MISSING_TELEGRAM",
+          code: "CRON.ATTENDANCE_MISSING_TELEGRAM.RUN",
+          description: err.toString(),
+          category: "",
+          ref: {},
+        });
+      }
+    });
+
     this.cronService.register("digisme_attendance_live", "* * * * *", async () => {
       return await this.digismeAttendanceSyncUsecase.runLive();
     });
