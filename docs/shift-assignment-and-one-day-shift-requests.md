@@ -137,14 +137,45 @@ hours as "Closed – Payroll Locked".
 whichever route approved it, with `approved_via_shift_change`,
 `approved_via_ot_request` and `approved_minutes_preserved` broken out beside it.
 
-### Audit
+### Audit: two components, because a day can have both
 
-`attendance_day_calculation` carries `shift_authorised_ot_minutes`,
-`approved_ot_source` (`SHIFT_CHANGE` / `OT_REQUEST`) and
-`ot_authorising_request_id`, so a payslip query answers *why* a minute was
-approved without re-resolving anything. The request, its approvers, its final
-timestamp, the requested shift and the base shift are all still on the request
-and its steps.
+One date can carry approved OT from **two** decisions — the approved shift
+change, and a standalone OT request for the excess. So each is stored with its
+own minutes and its own authorising request:
+
+| Column | Meaning |
+| --- | --- |
+| `shift_authorised_ot_minutes` | what the approved shift change authorised |
+| `shift_authorising_request_id` | the SHIFT_CHANGE request that did so |
+| `ot_request_approved_minutes` | what a standalone OT request approved (the excess) |
+| `ot_request_id` | the OT request that did so |
+
+and the invariant holds on every row:
+
+```
+shift_authorised_ot_minutes + ot_request_approved_minutes = approved_ot_minutes
+approved_ot_minutes        <= candidate_ot_minutes
+ot_request_approved_minutes<= excess_ot_minutes
+```
+
+So `Approved OT = 5h30` decomposes exactly: *5h00 by shift request #101, 0h30
+by OT request #202*. Each id is written only when its own component actually
+approved minutes, so an id on the row always means "this decision approved
+these minutes" and never merely "this request exists".
+
+**`approval_request_id` is deliberately not used for this.** Its meaning is
+broader than OT and on a corrected day it names the *correction*, so a mixed day
+with a correction on it would have pointed the audit at the wrong record.
+
+**The source is derived, never stored** — `MIXED` when both components are
+positive, otherwise `SHIFT_CHANGE`, `OT_REQUEST` or null. A stored enum beside
+the figures it describes is one more thing that can contradict them.
+
+**The ids are decisions; the minutes are recalculated.** A later correction that
+lowers the excess clamps `ot_request_approved_minutes` down — the approved
+request still stands, but nobody is paid for minutes the employee no longer
+earned. The request, its approvers, its final timestamp, the requested shift and
+the base shift all remain on the request and its steps.
 
 ### On the screens
 

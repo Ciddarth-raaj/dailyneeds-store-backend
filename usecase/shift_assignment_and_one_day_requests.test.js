@@ -140,7 +140,26 @@ function build(state = {}) {
       Object.values(SHIFTS).map((s) => ({ work_shift_id: s.config.work_shift_id, shift_code: s.config.shift_code, shift_name: s.config.shift_name })),
     getRawPunchesByCalendarWindow: async (id, from, to) =>
       (state.rawPunches || []).filter((p) => p.employee_id === id && p.punch_date >= from && p.punch_date <= to),
-    getApprovedRegularizedPunches: async () => [],
+    // An APPROVED and SETTLED correction's punch counts on the day, exactly
+    // as the real query returns it.
+    getApprovedRegularizedPunches: async (id, from, to) =>
+      store.requests
+        .filter(
+          (r) =>
+            r.requested_for_employee_id === id &&
+            r.punch &&
+            r.status === "APPROVED" &&
+            r.finalization_state === "SETTLED" &&
+            r.attendance_date >= from &&
+            r.attendance_date <= to
+        )
+        .map((r) => ({
+          attendance_regularized_punch_id: r.attendance_approval_request_id,
+          employee_id: id,
+          attendance_date: r.attendance_date,
+          io_time: r.punch.punch_time,
+          punch_id: null,
+        })),
     getBreakOverride: async () => null,
     // Every column the real query returns, `requested_work_shift_id` included:
     // a fake that returned less would make the day's shift-request fields
@@ -189,12 +208,20 @@ function build(state = {}) {
     },
     findRequestsForDates: async (id, dates) =>
       store.requests.filter((r) => r.requested_for_employee_id === id && dates.includes(r.attendance_date) && r.status !== "CANCELLED"),
-    createRequest: async ({ request, chain }) => {
+    findOpenRequest: async (id, date) =>
+      store.requests.find(
+        (r) => r.requested_for_employee_id === id && r.attendance_date === date && r.status === "PENDING"
+      ) || null,
+    createRequest: async ({ request, chain, punch: manual }) => {
       const id = nextId; nextId += 1;
       store.requests.push({
         attendance_approval_request_id: id, ...request, status: "PENDING", current_stage_no: 1,
         total_stages: chain.length, finalization_state: "NOT_REQUIRED", approved_ot_minutes: null,
         closure_reason: null, created_at: "2026-09-19 09:00:00", decided_at: null,
+        // The proposed punch, kept so an APPROVED correction can become an
+        // effective punch on the day - as the real regularized-punch table
+        // does.
+        punch: manual || null,
       });
       chain.forEach((s) => store.steps.push({
         attendance_approval_request_id: id, attendance_approval_step_id: id * 10 + s.stage_no,
@@ -209,7 +236,13 @@ function build(state = {}) {
     getRequest: async (id) => {
       const r = store.requests.find((x) => x.attendance_approval_request_id === Number(id));
       if (!r) return null;
-      return { ...r, steps: store.steps.filter((s) => s.attendance_approval_request_id === r.attendance_approval_request_id), regularized_punch: null };
+      return {
+        ...r,
+        steps: store.steps.filter((s) => s.attendance_approval_request_id === r.attendance_approval_request_id),
+        regularized_punch: r.punch
+          ? { attendance_regularized_punch_id: r.attendance_approval_request_id, punch_time: r.punch.punch_time }
+          : null,
+      };
     },
     decideStage: async (args) => {
       const r = store.requests.find((x) => x.attendance_approval_request_id === args.requestId);
@@ -1887,5 +1920,248 @@ describe("B. payroll lock over a shift-authorised date", () => {
     assert.equal(result.approved_via_shift_change, 1);
     assert.equal(result.approved_via_ot_request, 0);
     assert.equal(result.approved_minutes_preserved, 300);
+  });
+});
+
+/* ============== the two approved-OT components, and their audit trail === */
+
+describe("B. approved OT decomposes into its two components", () => {
+  const DATE = "2026-09-18";
+
+  const INSIDE = [punch(1, EMPLOYEE, `${DATE} 10:00:00`), punch(2, EMPLOYEE, `${DATE} 20:00:00`)];
+  const OUTSIDE = [punch(1, EMPLOYEE, `${DATE} 08:00:00`), punch(2, EMPLOYEE, `${DATE} 23:30:00`)];
+
+  const approveShift = async (world) => {
+    const raised = await world.regularization.raiseShiftChangeRequest({
+      actor: self(EMPLOYEE), attendance_date: DATE, work_shift_id: LONG,
+      reason: "Covering the full day", today: TODAY,
+    });
+    const id = raised.attendance_approval_request_id;
+    await world.regularization.decide({ actor: approver(7), request_id: id, decision: STEP_DECISION.APPROVED });
+    await world.regularization.decide({ actor: approver(8), request_id: id, decision: STEP_DECISION.APPROVED });
+    return id;
+  };
+
+  const approveOt = async (world) => {
+    const ot = await world.regularization.raiseOtRequest({
+      actor: self(EMPLOYEE), attendance_date: DATE, reason: "Stayed past the approved shift", today: TODAY,
+    });
+    const id = ot.attendance_approval_request_id;
+    await world.regularization.decide({ actor: approver(7), request_id: id, decision: STEP_DECISION.APPROVED });
+    await world.regularization.decide({ actor: approver(8), request_id: id, decision: STEP_DECISION.APPROVED });
+    return id;
+  };
+
+  const dayOf = async (world) => {
+    const [day] = await world.calculation.calculateRange({
+      employee_id: EMPLOYEE, from_date: DATE, to_date: DATE,
+    });
+    return day;
+  };
+
+  /** The row as it is STORED - what a payroll audit actually reads. */
+  const storedRow = async (world) => world.calculation.toStorageRow(await dayOf(world));
+
+  const assertInvariant = (day) => {
+    assert.ok(day.shift_authorised_ot_minutes >= 0);
+    assert.ok(day.ot_request_approved_minutes >= 0);
+    assert.equal(
+      day.shift_authorised_ot_minutes + day.ot_request_approved_minutes,
+      day.approved_ot_minutes,
+      "the two components sum to the total"
+    );
+    assert.ok(day.approved_ot_minutes <= day.candidate_ot_minutes, "and never exceed what was earned");
+    assert.ok(
+      day.ot_request_approved_minutes <= day.excess_ot_minutes,
+      "the request's share never reaches the authorised portion"
+    );
+  };
+
+  it("1. SHIFT ONLY: the whole total is the shift component, and names the shift request", async () => {
+    const world = build({ rawPunches: INSIDE });
+    const shiftId = await approveShift(world);
+    const day = await dayOf(world);
+    const row = await storedRow(world);
+
+    assert.equal(day.approved_ot_minutes, 300);
+    assert.equal(day.shift_authorised_ot_minutes, 300);
+    assert.equal(day.ot_request_approved_minutes, 0);
+    assert.equal(day.approved_ot_source, "SHIFT_CHANGE");
+    assertInvariant(day);
+
+    assert.equal(row.shift_authorised_ot_minutes, 300);
+    assert.equal(row.shift_authorising_request_id, shiftId);
+    assert.equal(row.ot_request_approved_minutes, 0);
+    assert.equal(row.ot_request_id, null, "no OT request approved anything, so no id is claimed");
+  });
+
+  it("2. OT ONLY: the whole total is the request component, and names the OT request", async () => {
+    // No shift change: an ordinary day worked past the employee's own shift.
+    const world = build({
+      rawPunches: [punch(1, EMPLOYEE, `${DATE} 18:00:00`), punch(2, EMPLOYEE, `${DATE} 23:30:00`)],
+    });
+    const otId = await approveOt(world);
+    const day = await dayOf(world);
+    const row = await storedRow(world);
+
+    assert.ok(day.approved_ot_minutes > 0);
+    assert.equal(day.shift_authorised_ot_minutes, 0);
+    assert.equal(day.ot_request_approved_minutes, day.approved_ot_minutes);
+    assert.equal(day.approved_ot_source, "OT_REQUEST");
+    assertInvariant(day);
+
+    assert.equal(row.shift_authorised_ot_minutes, 0);
+    assert.equal(row.shift_authorising_request_id, null);
+    assert.equal(row.ot_request_id, otId);
+  });
+
+  it("3./11. MIXED: both components, both request ids, and the source says MIXED", async () => {
+    const world = build({ rawPunches: OUTSIDE });
+    const shiftId = await approveShift(world);
+    const before = await dayOf(world);
+    const authorised = before.shift_authorised_ot_minutes;
+    const excess = before.excess_ot_minutes;
+    assert.ok(authorised > 0 && excess > 0);
+
+    const otId = await approveOt(world);
+    const day = await dayOf(world);
+    const row = await storedRow(world);
+
+    assert.equal(day.approved_ot_minutes, authorised + excess);
+    assert.equal(day.shift_authorised_ot_minutes, authorised);
+    assert.equal(day.ot_request_approved_minutes, excess);
+    assert.equal(day.approved_ot_source, "MIXED");
+    assertInvariant(day);
+
+    // The audit can name BOTH decisions, and they are different requests.
+    assert.equal(row.shift_authorising_request_id, shiftId);
+    assert.equal(row.ot_request_id, otId);
+    assert.notEqual(row.shift_authorising_request_id, row.ot_request_id);
+  });
+
+  it("4. a MIXED day carrying an attendance CORRECTION still names the right two requests", async () => {
+    /*
+     * `approval_request_id` on the stored row prefers the CORRECTION when a
+     * date has one, which is why it must never be the OT provenance. This is
+     * that exact day: a correction, a shift change and an OT request, all on
+     * one date.
+     */
+    const world = build({
+      rawPunches: [punch(1, EMPLOYEE, `${DATE} 08:00:00`), punch(2, EMPLOYEE, `${DATE} 23:30:00`), punch(3, EMPLOYEE, `${DATE} 23:45:00`)],
+    });
+    // An odd punch count: the date needs a correction, which is filed and approved.
+    const correction = await world.regularization.raiseRequest({
+      actor: self(EMPLOYEE), requested_for_employee_id: EMPLOYEE, attendance_date: DATE,
+      reason: "Terminal missed the last punch", punch_time: `${DATE} 23:50:00`,
+    });
+    const correctionId = correction.attendance_approval_request_id;
+    await world.regularization.decide({ actor: approver(7), request_id: correctionId, decision: STEP_DECISION.APPROVED });
+    await world.regularization.decide({ actor: approver(8), request_id: correctionId, decision: STEP_DECISION.APPROVED });
+
+    const shiftId = await approveShift(world);
+    const otId = await approveOt(world);
+
+    const row = await storedRow(world);
+    assert.equal(row.shift_authorising_request_id, shiftId, "the SHIFT request, not the correction");
+    assert.equal(row.ot_request_id, otId, "the OT request, not the correction");
+    assert.notEqual(row.shift_authorising_request_id, correctionId);
+    assert.notEqual(row.ot_request_id, correctionId);
+    assertInvariant(await dayOf(world));
+  });
+
+  it("5./6./7. a PENDING, REJECTED or CLOSED excess contributes nothing to the request component", async () => {
+    // PENDING
+    const pendingWorld = build({ rawPunches: OUTSIDE });
+    await approveShift(pendingWorld);
+    const authorised = (await dayOf(pendingWorld)).shift_authorised_ot_minutes;
+    await pendingWorld.regularization.raiseOtRequest({
+      actor: self(EMPLOYEE), attendance_date: DATE, reason: "Stayed past the approved shift", today: TODAY,
+    });
+    const pending = await dayOf(pendingWorld);
+    assert.equal(pending.ot_request_approved_minutes, 0);
+    assert.equal(pending.approved_ot_minutes, authorised);
+    assert.equal(pending.approved_ot_source, "SHIFT_CHANGE");
+    assertInvariant(pending);
+
+    // REJECTED
+    const rejectedWorld = build({ rawPunches: OUTSIDE });
+    await approveShift(rejectedWorld);
+    const rejectedOt = await rejectedWorld.regularization.raiseOtRequest({
+      actor: self(EMPLOYEE), attendance_date: DATE, reason: "Stayed past the approved shift", today: TODAY,
+    });
+    await rejectedWorld.regularization.decide({
+      actor: approver(7), request_id: rejectedOt.attendance_approval_request_id,
+      decision: STEP_DECISION.REJECTED, remarks: "Not authorised to stay that late",
+    });
+    const rejected = await dayOf(rejectedWorld);
+    assert.equal(rejected.ot_request_approved_minutes, 0);
+    assert.equal(rejected.approved_ot_minutes, authorised);
+    assertInvariant(rejected);
+
+    // CLOSED at payroll lock
+    const closedWorld = build({ rawPunches: OUTSIDE });
+    await approveShift(closedWorld);
+    await closedWorld.regularization.closeOtForPayrollLock({
+      employee_id: EMPLOYEE, from_date: "2026-09-01", to_date: "2026-09-30",
+      days: [await dayOf(closedWorld)], actor_employee_id: 8,
+    });
+    const closed = await dayOf(closedWorld);
+    assert.equal(closed.ot_request_approved_minutes, 0);
+    assert.equal(closed.approved_ot_minutes, authorised);
+    const closedRow = await storedRow(closedWorld);
+    assert.equal(closedRow.ot_request_id, null, "a closure approved nothing, so it claims no id");
+    assertInvariant(closed);
+  });
+
+  it("8./9. a later correction moves the components, and the request's share clamps down", async () => {
+    const world = build({ rawPunches: OUTSIDE });
+    await approveShift(world);
+    const otId = await approveOt(world);
+
+    const before = await dayOf(world);
+    assert.equal(before.approved_ot_minutes, before.shift_authorised_ot_minutes + before.ot_request_approved_minutes);
+    assert.ok(before.ot_request_approved_minutes > 0);
+
+    // A correction removes the time outside the approved shift entirely, so
+    // there is no excess left for the approved request to be paid against.
+    world.state.rawPunches = INSIDE;
+    const after = await dayOf(world);
+
+    assert.equal(after.excess_ot_minutes, 0, "nothing outside the approved shift any more");
+    assert.equal(after.ot_request_approved_minutes, 0, "so the request's share clamps to nothing");
+    assert.equal(after.shift_authorised_ot_minutes, 300);
+    assert.equal(after.approved_ot_minutes, 300, "and the total follows the ACTUAL minutes");
+    assertInvariant(after);
+
+    // The decision still exists; it is the MINUTES that were recalculated.
+    const request = world.store.requests.find((r) => r.attendance_approval_request_id === otId);
+    assert.equal(request.status, REQUEST_STATUS.APPROVED);
+  });
+
+  it("10./12. the invariant holds on every shape of day, and the payroll total is unchanged", async () => {
+    for (const [punches, approve] of [
+      [INSIDE, ["shift"]],
+      [OUTSIDE, ["shift"]],
+      [OUTSIDE, ["shift", "ot"]],
+      [[punch(1, EMPLOYEE, `${DATE} 18:00:00`), punch(2, EMPLOYEE, `${DATE} 23:30:00`)], ["ot"]],
+      [[punch(1, EMPLOYEE, `${DATE} 18:00:00`), punch(2, EMPLOYEE, `${DATE} 22:00:00`)], []],
+    ]) {
+      /* eslint-disable no-await-in-loop */
+      const world = build({ rawPunches: punches });
+      if (approve.includes("shift")) await approveShift(world);
+      if (approve.includes("ot")) await approveOt(world);
+      const day = await dayOf(world);
+      const row = await storedRow(world);
+      /* eslint-enable no-await-in-loop */
+
+      assertInvariant(day);
+      // Payroll reads one number, and it is unchanged by the decomposition.
+      assert.equal(row.approved_ot_minutes, day.approved_ot_minutes);
+      assert.equal(
+        row.shift_authorised_ot_minutes + row.ot_request_approved_minutes,
+        row.approved_ot_minutes,
+        "the STORED row decomposes exactly too"
+      );
+    }
   });
 });

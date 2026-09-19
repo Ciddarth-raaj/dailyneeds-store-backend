@@ -42,11 +42,25 @@ describe(NAME, () => {
     }
   });
 
-  it("stores the ANSWER and its provenance - never the authorisation itself", () => {
+  it("stores TWO components, each with its own authorising request", () => {
     const [alter] = up;
+    // One date can carry approved OT from two decisions - the shift change
+    // and an OT request for the excess - so each is stored with its own
+    // minutes and its own id. A single source column could only ever have
+    // described half of such a day.
     assert.match(alter, /ADD COLUMN `shift_authorised_ot_minutes` INT NOT NULL DEFAULT 0/);
-    assert.match(alter, /ADD COLUMN `approved_ot_source` ENUM\('OT_REQUEST','SHIFT_CHANGE'\) NULL/);
-    assert.match(alter, /ADD COLUMN `ot_authorising_request_id` BIGINT UNSIGNED NULL/);
+    assert.match(alter, /ADD COLUMN `shift_authorising_request_id` BIGINT UNSIGNED NULL/);
+    assert.match(alter, /ADD COLUMN `ot_request_approved_minutes` INT NOT NULL DEFAULT 0/);
+    assert.match(alter, /ADD COLUMN `ot_request_id` BIGINT UNSIGNED NULL/);
+
+    // NO STORED SOURCE ENUM. It is derived from the two figures where it is
+    // wanted, so it cannot contradict them.
+    // (The comment block explains WHY there is no such column; the statements
+    // are what must not declare one.)
+    assert.ok(
+      !up.some((statement) => /approved_ot_source/.test(statement)),
+      "the source is derived, not stored"
+    );
 
     // No flag on the OVERRIDE and no new table: the authorisation is the link
     // that already exists, and a second copy of it could drift from the first.
@@ -64,8 +78,9 @@ describe(NAME, () => {
     const dropped = down.join(" ");
     for (const column of [
       "shift_authorised_ot_minutes",
-      "approved_ot_source",
-      "ot_authorising_request_id",
+      "shift_authorising_request_id",
+      "ot_request_approved_minutes",
+      "ot_request_id",
     ]) {
       assert.match(dropped, new RegExp(`DROP COLUMN \`${column}\``), column);
     }

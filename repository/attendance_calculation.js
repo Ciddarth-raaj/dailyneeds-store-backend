@@ -73,10 +73,11 @@ const CALCULATION_COLUMNS = [
   "early_exit_minutes", "pre_shift_minutes", "post_shift_minutes",
   "raw_ot_minutes", "ot_offset_minutes", "pre_shift_ot_minutes", "post_shift_ot_minutes",
   "candidate_ot_minutes", "approved_ot_minutes",
-  // WHY a day has approved OT. `shift_authorised_ot_minutes` is the part an
-  // approved SHIFT_CHANGE authorised and for which no OT request exists; the
-  // source and the request id are the audit trail beside it.
-  "shift_authorised_ot_minutes", "approved_ot_source", "ot_authorising_request_id",
+  // WHY a day has approved OT, as TWO components that sum to it - because one
+  // date can carry both an approved shift change and an approved excess, and
+  // a single source column could only have described half of such a day.
+  "shift_authorised_ot_minutes", "shift_authorising_request_id",
+  "ot_request_approved_minutes", "ot_request_id",
   "ot_rate", "status", "is_final", "review_reasons", "approval_request_id",
   "calculation_version",
 ];

@@ -156,7 +156,11 @@ const BREAK_CREDIT_CUTOFF_MINUTES = 15 * 60;
  *      at approval, and `excess_ot_minutes` - what falls outside the approved
  *      window - keeps the ordinary request path. `approved_ot_minutes` is the
  *      authorised portion plus whatever a request approved of the excess, so
- *      no minute can be approved twice.
+ *      no minute can be approved twice. The two components are reported
+ *      separately (`shift_authorised_ot_minutes`,
+ *      `ot_request_approved_minutes`) and ALWAYS sum to it, because one date
+ *      can carry both kinds of approval and an audit must be able to
+ *      decompose the total exactly.
  */
 const CALCULATION_VERSION = 10;
 
@@ -703,8 +707,11 @@ function calculateAttendanceDay(input = {}) {
      * already assumed.
      */
     shift_authorised_ot_minutes: 0,
+    // The OTHER component: what a standalone OT request approved of the
+    // excess. The two ALWAYS sum to `approved_ot_minutes`, which is what
+    // lets an audit decompose a mixed day exactly rather than inferring it.
+    ot_request_approved_minutes: 0,
     excess_ot_minutes: 0,
-    approved_ot_source: null,
     shift_change_request_id:
       shift_change_request_id === undefined ? null : shift_change_request_id,
     span_minutes: 0,
@@ -1189,7 +1196,6 @@ function calculateAttendanceDay(input = {}) {
     const excess = Math.min(base.candidate_ot_minutes, preExcess + postExcess);
     base.shift_authorised_ot_minutes = Math.max(0, base.candidate_ot_minutes - excess);
     base.excess_ot_minutes = excess;
-    base.approved_ot_source = base.shift_authorised_ot_minutes > 0 ? "SHIFT_CHANGE" : null;
     if (excess > 0) {
       base.notes.push(
         `Approved shift change authorises ${base.shift_authorised_ot_minutes} OT minute(s); ${excess} minute(s) fall outside the approved shift and remain claimable`
@@ -1208,11 +1214,24 @@ function calculateAttendanceDay(input = {}) {
    */
   const approved = Math.max(0, Math.trunc(Number(approved_ot_minutes) || 0));
   // Approved OT can never exceed what was actually earned: an approval is a
-  // decision about the candidate, not a licence to invent minutes.
-  const approvedFromRequest = Math.min(approved, base.excess_ot_minutes);
+  // decision about the candidate, not a licence to invent minutes. The
+  // request's component is additionally capped at the EXCESS, so it can never
+  // reach minutes the shift change already authorised.
+  base.ot_request_approved_minutes = Math.min(approved, base.excess_ot_minutes);
   base.approved_ot_minutes = Math.min(
-    base.shift_authorised_ot_minutes + approvedFromRequest,
+    base.shift_authorised_ot_minutes + base.ot_request_approved_minutes,
     base.candidate_ot_minutes
+  );
+  /*
+   * THE INVARIANT, enforced rather than assumed: the two components sum to
+   * the total. The cap above can only bite when the two together exceed what
+   * the day earned, and in that case the request's share is what gives way -
+   * the shift change's authorisation was granted first and is not reduced by
+   * a later claim.
+   */
+  base.ot_request_approved_minutes = Math.max(
+    0,
+    base.approved_ot_minutes - base.shift_authorised_ot_minutes
   );
 
   if (regularization_pending) {

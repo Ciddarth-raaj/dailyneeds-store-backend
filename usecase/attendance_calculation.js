@@ -148,6 +148,27 @@ const OT_CLAIM_STATE = Object.freeze({
  * Only a complete FINAL day can offer OT: an incomplete day's overtime is
  * a guess until the missing punch is supplied, and that is a regularization.
  */
+/**
+ * WHICH DECISIONS APPROVED THIS DAY'S OT - derived from the components, never
+ * stored beside them.
+ *
+ *   both > 0   MIXED          an approved shift change AND an approved excess
+ *   shift > 0  SHIFT_CHANGE
+ *   request>0  OT_REQUEST
+ *   neither    null
+ *
+ * A stored enum could disagree with the two figures it describes; a derived
+ * one cannot.
+ */
+function approvedOtSource(day) {
+  const shift = Math.max(0, Math.trunc(Number(day && day.shift_authorised_ot_minutes) || 0));
+  const request = Math.max(0, Math.trunc(Number(day && day.ot_request_approved_minutes) || 0));
+  if (shift > 0 && request > 0) return "MIXED";
+  if (shift > 0) return "SHIFT_CHANGE";
+  if (request > 0) return "OT_REQUEST";
+  return null;
+}
+
 function otClaimFor({ day, otRequest, otSettled }) {
   const candidate = Math.max(0, Math.trunc(Number(day.candidate_ot_minutes) || 0));
   /*
@@ -167,6 +188,14 @@ function otClaimFor({ day, otRequest, otSettled }) {
     // said so - the three facts the employee's screen and payroll both need.
     ot_shift_authorised_minutes: authorised,
     ot_claimable_minutes: claimable,
+    // The OTHER component, and the SOURCE derived from the two. The source is
+    // derived and never stored: an enum kept beside the figures it describes
+    // is one more thing that can contradict them.
+    ot_request_approved_minutes: Math.max(
+      0,
+      Math.trunc(Number(day.ot_request_approved_minutes) || 0)
+    ),
+    approved_ot_source: approvedOtSource(day),
     ot_authorising_request_id:
       authorised > 0 ? day.shift_change_request_id || null : null,
     // What became of the CLAIMABLE remainder, which on an ordinary date is
@@ -1075,18 +1104,25 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     post_shift_ot_minutes: day.post_shift_ot_minutes,
     candidate_ot_minutes: day.candidate_ot_minutes,
     approved_ot_minutes: day.approved_ot_minutes,
-    // WHY this day has approved OT, on the row payroll reads - so the
-    // question is answerable without re-resolving the override and its
-    // request. Null on every ordinary date.
+    /*
+     * WHY this day has approved OT, as TWO components on the row payroll
+     * reads - so a payslip investigation can decompose the total exactly
+     * ("5h00 by shift request #101, 0h30 by OT request #202") without
+     * re-resolving the override, and without guessing from
+     * `approval_request_id`, whose meaning is broader than OT and which on
+     * a corrected day names the CORRECTION.
+     *
+     * Each id is stored only when its own component actually approved
+     * minutes, so an id on the row always means "this decision approved
+     * these minutes" and never merely "this request exists".
+     */
     shift_authorised_ot_minutes:
       day.shift_authorised_ot_minutes === undefined ? 0 : day.shift_authorised_ot_minutes,
-    // SHIFT_CHANGE when an approved shift authorised it; OT_REQUEST when an
-    // ordinary OT approval did; NULL when no OT is approved at all.
-    approved_ot_source:
-      day.approved_ot_source ||
-      (Number(day.approved_ot_minutes) > 0 ? "OT_REQUEST" : null),
-    ot_authorising_request_id:
-      day.approved_ot_source === "SHIFT_CHANGE" ? day.shift_change_request_id || null : null,
+    shift_authorising_request_id:
+      Number(day.shift_authorised_ot_minutes) > 0 ? day.shift_change_request_id || null : null,
+    ot_request_approved_minutes:
+      day.ot_request_approved_minutes === undefined ? 0 : day.ot_request_approved_minutes,
+    ot_request_id: Number(day.ot_request_approved_minutes) > 0 ? day.ot_request_id || null : null,
     ot_rate: day.ot_rate,
     status: day.status,
     is_final: day.is_final ? 1 : 0,
