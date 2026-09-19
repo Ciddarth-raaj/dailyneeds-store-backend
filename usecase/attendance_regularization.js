@@ -106,6 +106,9 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
       employee_id: Number(row.employee_id),
       employee_name: row.employee_name,
       outlet_id: row.outlet_id === null || row.outlet_id === undefined ? null : Number(row.outlet_id),
+      // Named, because the Telegram message states the outlet and an id is
+      // not something an approver can read.
+      outlet_name: row.outlet_name || null,
       designation_id: row.designation_id,
       designation_name: row.designation_name,
       // Authority is granted, never inferred.
@@ -115,6 +118,20 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
       requester_class_is_default: !row.requester_class,
       is_store_manager: row.approver_role === APPROVER_ROLE.STORE_MANAGER,
     };
+  };
+
+  /**
+   * THE FIRST-APPROVER NOTIFIER, set by `server.js` after both exist.
+   *
+   * Optional, and deliberately reachable from ONE place: the moment a shift
+   * change request is created. `decide` does not hold it and cannot call it,
+   * which is how "only the first approver is messaged" is a property of the
+   * code rather than a rule somebody has to remember - a later stage has no
+   * path to a message at all.
+   */
+  let shiftChangeNotifier = null;
+  const setShiftChangeNotifier = (notifier) => {
+    shiftChangeNotifier = notifier || null;
   };
 
   /** The exact closure wording the payroll lock records. */
@@ -472,6 +489,14 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
     };
   };
 
+  /** "MORN 06:00-14:00", or the code alone when the times are unknown. */
+  const shiftLabel = (shift) => {
+    if (!shift) return null;
+    const name = shift.shift_code || shift.shift_name || null;
+    if (!shift.in_time || !shift.out_time) return name;
+    return `${name ? `${name} ` : ""}${shift.in_time}-${shift.out_time}`;
+  };
+
   /** How far ahead a one-day shift may be asked for. A roster, not a plan. */
   const MAX_FORWARD_DAYS = 60;
 
@@ -614,10 +639,30 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
       punch: null,
     });
 
+    // TELEGRAM, TO THE FIRST APPROVER, ONCE. It never throws into this
+    // function: the request is created and committed, and a Telegram outage
+    // must not undo an employee's submission or hide it from the web queue.
+    let telegramNotification = { sent: false, reason: "NO_NOTIFIER_WIRED" };
+    if (shiftChangeNotifier && typeof shiftChangeNotifier.notifyFirstApprover === "function") {
+      telegramNotification = await shiftChangeNotifier.notifyFirstApprover({
+        attendance_approval_request_id: created.attendance_approval_request_id,
+        employee_id: employeeId,
+        employee_name: identity.employee_name,
+        outlet_id: identity.outlet_id,
+        outlet_name: identity.outlet_name || null,
+        attendance_date: date,
+        base_shift_label: shiftLabel(resolved.base),
+        requested_shift_label: shiftLabel(resolved),
+        reason: reason.trim(),
+        chain,
+      });
+    }
+
     return {
       ...created,
       request_type: REQUEST_TYPE.SHIFT_CHANGE,
       attendance_date: date,
+      telegram: telegramNotification,
       requested_work_shift_id: requestedShiftId,
       requested_shift_code: resolved.shift_code,
       requested_shift_name: resolved.shift_name,
@@ -1184,6 +1229,25 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
         not_actionable_reason: verdict.allowed ? null : verdict.reason,
         // The proposed missing punch (regularization only).
         proposed_punch_time: row.proposed_punch_time || null,
+        // SHIFT_CHANGE: the two shifts, as the Shift tab's table names them.
+        // Null on every other type rather than absent, so one row shape
+        // serves all three tabs.
+        requested_work_shift_id:
+          row.requested_work_shift_id === null || row.requested_work_shift_id === undefined
+            ? null
+            : Number(row.requested_work_shift_id),
+        requested_shift_code: row.requested_shift_code || null,
+        requested_shift_name: row.requested_shift_name || null,
+        base_work_shift_id:
+          row.base_work_shift_id === null || row.base_work_shift_id === undefined
+            ? null
+            : Number(row.base_work_shift_id),
+        base_shift_code: row.base_shift_code || null,
+        base_shift_name: row.base_shift_name || null,
+        designation_id: row.designation_id === null || row.designation_id === undefined ? null : Number(row.designation_id),
+        // "Approval Stage", as the Shift table's own column: which of how
+        // many, and who it is with.
+        approval_stage: `${Number(row.current_stage_no)} of ${Number(row.total_stages)}`,
         // The day, live for pending rows and stored for history.
         shift_name: row.shift_name || (day ? day.shift_name : null) || null,
         shift_code: snapshot ? snapshot.shift_code || null : null,
@@ -1191,6 +1255,19 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
         shift_out_time: snapshot ? snapshot.out_time || null : null,
         effective_punches: Array.isArray(punches) ? punches : [],
         nrm_minutes: day ? day.nrm_minutes : row.nrm_minutes,
+        // The PAYROLL BASE for the date. On the OT tab this is the "Regular
+        // NRM" column, and on a date carrying an approved one-day shift it is
+        // deliberately NOT the NRM above.
+        base_nrm_minutes: day
+          ? day.base_nrm_minutes
+          : row.base_nrm_minutes === null || row.base_nrm_minutes === undefined
+          ? row.nrm_minutes
+          : row.base_nrm_minutes,
+        regular_minutes: day
+          ? day.regular_minutes
+          : row.regular_minutes === null || row.regular_minutes === undefined
+          ? null
+          : row.regular_minutes,
         worked_minutes: day ? day.worked_minutes : row.worked_minutes,
         shortage_minutes: day ? day.shortage_minutes : row.shortage_minutes,
         // OT: what was claimed when raised, what the engine finds eligible,
@@ -1291,6 +1368,7 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
     raiseOtRequest,
     raiseShiftChangeRequest,
     shiftChangeOptions,
+    setShiftChangeNotifier,
     MAX_FORWARD_DAYS,
     closeOtForPayrollLock,
     decide,

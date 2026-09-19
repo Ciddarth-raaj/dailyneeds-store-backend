@@ -79,12 +79,14 @@ class AttendanceRegularizationRepository {
       `SELECT ne.employee_id,
               ne.employee_name,
               ne.store_id      AS outlet_id,
+              o.outlet_name,
               ne.designation_id,
               d.designation_name,
               r.approver_role,
               r.requester_class
          FROM new_employee ne
          LEFT JOIN designation d ON d.designation_id = ne.designation_id
+         LEFT JOIN outlets o ON o.outlet_id = ne.store_id
          LEFT JOIN attendance_approval_role r ON r.designation_id = ne.designation_id
         WHERE ne.employee_id = ?`,
       [employeeId]

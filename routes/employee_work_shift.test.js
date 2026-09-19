@@ -69,14 +69,16 @@ const find = (method, path) =>
   guards.find((g) => g.method === method && g.path === path);
 
 describe("the endpoints", () => {
-  it("defines exactly the three reads, the bulk write and the correction", () => {
+  it("defines exactly the four reads, the bulk write, the correction and the effective-dated change", () => {
     assert.deepEqual(
       guards.map((g) => `${g.method} ${g.path}`).sort(),
       [
         "GET /work-shift-assignments",
         "GET /work-shift-assignments/employee/:employee_id",
+        "GET /work-shift-assignments/history/:employee_id",
         "GET /work-shift-assignments/options",
         "POST /work-shift-assignments/bulk",
+        "POST /work-shift-assignments/change",
         "POST /work-shift-assignments/correction",
       ]
     );
@@ -96,6 +98,28 @@ describe("the endpoints", () => {
     // And the ordinary write does NOT accept that key as an alternative.
     const bulk = find("POST", "/work-shift-assignments/bulk");
     assert.ok(!JSON.stringify(bulk.guard).includes("correct_employee_shift_assignment"));
+  });
+
+  /**
+   * The three write paths are three KEYS. `assign` cannot date anything, the
+   * correction says a record was wrong, and the change says the roster moves
+   * from a date - and holding one of those keys grants neither of the others.
+   */
+  it("the effective-dated change is its own endpoint behind its own permission", () => {
+    const { guard } = find("POST", "/work-shift-assignments/change");
+    assert.equal(guard.mode, "all");
+    assert.deepEqual(guard.keys, [P.EMPLOYEE_EDIT, P.EDIT_SHIFT_ASSIGNMENT_EFFECTIVE_DATED]);
+
+    const bulk = find("POST", "/work-shift-assignments/bulk");
+    assert.ok(!JSON.stringify(bulk.guard).includes("edit_shift_assignment_effective_dated"));
+    const correction = find("POST", "/work-shift-assignments/correction");
+    assert.ok(!JSON.stringify(correction.guard).includes("edit_shift_assignment_effective_dated"));
+  });
+
+  it("the shift history is a READ, behind the view keys and not the edit one", () => {
+    const { guard } = find("GET", "/work-shift-assignments/history/:employee_id");
+    assert.deepEqual(guard.keys, [P.VIEW_EMPLOYEES, P.VIEW_SHIFT_ASSIGNMENTS]);
+    assert.ok(!JSON.stringify(guard).includes("edit"));
   });
 
   it("M1: the options read is declared BEFORE the :employee_id read, so 'options' is never an id", () => {

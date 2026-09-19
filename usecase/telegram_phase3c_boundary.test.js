@@ -41,7 +41,14 @@ describe("the poller is exactly as Phase 3B left it", () => {
 
   it("chat_member is still NOT subscribed", () => {
     const service = strip(read("services/telegram.js"));
-    assert.match(service, /ALLOWED_UPDATES = \["message", "chat_join_request"\]/);
+    // `callback_query` joined the list for the shift-request buttons. It is
+    // named here rather than left to a loose regex so that the NEXT update
+    // type to be switched on has to come past this test too.
+    assert.match(
+      service,
+      /ALLOWED_UPDATES = \["message", "chat_join_request", "callback_query"\]/
+    );
+    assert.ok(!/"chat_member"/.test(service), "chat_member is still not subscribed");
   });
 });
 
