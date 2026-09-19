@@ -190,8 +190,11 @@ module.exports = ({
       token,
       expires_in: ttlSeconds,
       session_id: sessionId,
+      // NO `employee_id`. The browser has no use for one and must never be
+      // in a position to send one back; the id lives in the token's SIGNED
+      // `emp` claim, which the server reads and the client cannot alter, and
+      // in the audit log above.
       employee: {
-        employee_id: employeeId,
         // For the greeting line only. It is NOT an identity and nothing
         // downstream matches on it.
         first_name: verified.first_name,

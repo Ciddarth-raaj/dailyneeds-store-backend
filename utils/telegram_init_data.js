@@ -18,18 +18,31 @@
  * ===================================== THE ALGORITHM, AS TELEGRAM WRITES IT
  *
  *   1. take the `initData` query string exactly as Telegram handed it over
- *   2. remove the `hash` field; keep every other field VERBATIM (already
- *      percent-decoded once, values untouched - `user` stays the JSON text
- *      it is, because that text is what was signed)
+ *   2. remove the `hash` field AND NOTHING ELSE; keep every other field
+ *      VERBATIM (already percent-decoded once, values untouched - `user`
+ *      stays the JSON text it is, because that text is what was signed)
  *   3. sort the remaining `key=value` lines by key and join them with "\n"
  *      -> the data-check-string
  *   4. secret_key = HMAC_SHA256(key: "WebAppData", message: bot_token)
  *   5. expected  = HMAC_SHA256(key: secret_key,   message: data-check-string)
  *   6. compare hex(expected) with the supplied `hash` in CONSTANT TIME
  *
- * `signature` IS EXCLUDED from the data-check-string as well. It is the
- * newer Ed25519 third-party signature; it is not part of what the HMAC
- * covers, and leaving it in makes every genuine payload fail.
+ * ================================= `signature` IS PART OF THE HASH ========
+ *
+ * A current Telegram client sends BOTH `hash` (this bot-token HMAC) and
+ * `signature` (a newer Ed25519 signature for THIRD-PARTY validation, which
+ * this file does not implement and does not need - we are the bot).
+ *
+ * `signature` IS A RECEIVED FIELD, so it stays in the data-check-string for
+ * the HMAC. Only `hash` comes out. It is left out solely when checking the
+ * Ed25519 signature itself - a different algorithm, over a differently
+ * prefixed message, which is not what happens here.
+ *
+ * DROPPING IT IS NOT A HARMLESS EXTRA CHECK - it is a total outage: every
+ * payload from a client new enough to send `signature` would compute a
+ * different hash and be refused as forged. `utils/telegram_init_data.test.js`
+ * pins this against a published capture that carries both fields, and that
+ * test fails if `signature` is ever excluded again.
  *
  * ======================================================= FRESHNESS =========
  *
@@ -67,8 +80,12 @@ const REJECT = Object.freeze({
   BOT_TOKEN_MISSING: "TELEGRAM_BOT_TOKEN_MISSING",
 });
 
-/** `hash` and `signature` are the proof, not part of what was signed. */
-const NOT_SIGNED = new Set(["hash", "signature"]);
+/**
+ * `hash` is the proof and is the ONLY field left out of what it covers.
+ * `signature` is NOT here - see the header; it is a received field and
+ * Telegram hashed it along with everything else.
+ */
+const NOT_SIGNED = new Set(["hash"]);
 
 class InitDataError extends Error {
   constructor(code) {
@@ -210,9 +227,13 @@ function validateInitData(initData, options = {}) {
 
 /**
  * TEST SUPPORT, and nothing else uses it: build correctly signed `initData`
- * for a given bot token. It is the same code path as verification, which is
- * the point - a test that hand-rolled the HMAC would prove only that two
- * copies of the same mistake agree.
+ * for a given bot token. It shares `dataCheckString` with verification, so
+ * a payload it builds carries whatever fields it is given - `signature`
+ * included - through the same rule.
+ *
+ * IT IS NOT THE PROOF THAT THE RULE IS RIGHT. Two copies of one mistake
+ * agree with each other perfectly, which is why the test file ALSO pins a
+ * published Telegram capture whose `hash` this code had no part in making.
  */
 function signInitData(fields, botToken) {
   const pairs = new Map(Object.entries(fields));

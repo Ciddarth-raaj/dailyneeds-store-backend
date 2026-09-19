@@ -78,8 +78,10 @@ describe("exchanging signed initData", () => {
     const usecase = build([LINKED]);
     const out = await usecase.exchange({ initData: initDataFor(501) });
     assert.equal(out.code, 200);
-    assert.equal(out.employee.employee_id, 77);
     assert.ok(typeof out.token === "string" && out.token.length > 0);
+    // The employee is in the token's SIGNED claim, not in the body.
+    assert.equal(await usecase.authenticate(out.token).then((s) => s.employee_id), 77);
+    assert.equal(out.employee.employee_id, undefined);
     assert.ok(out.expires_in > 0 && out.expires_in <= 30 * 60, "the session is short-lived");
   });
 
@@ -246,5 +248,78 @@ describe("the audit trail", () => {
     const usecase = build([LINKED], { log: { LEVEL: { INFO: "info" }, Log: (l) => lines.push(l) } });
     await assert.rejects(() => usecase.exchange({ initData: initDataFor(777) }));
     assert.ok(lines.some((l) => /NO-MAPPING/.test(l.code) && l.ref.telegram_user_id === 777));
+  });
+});
+
+/**
+ * ============ END TO END: THE REAL AUTH MIDDLEWARE, THE REAL JWT SERVICE ===
+ *
+ * The suite above proves the claim shape through `resolveIdentity`. This one
+ * proves the CONSEQUENCE: a Mini App token, minted by the real
+ * `services/jwt` with the repository's own key, presented to the real
+ * `middlewares/auth.js` as `x-access-token`, is refused 403 - exactly as an
+ * unauthenticated request is.
+ *
+ * It uses the tracked key pair rather than the generated one above, because
+ * the middleware resolves its verification key from configuration and must
+ * be able to verify the token before it can decide to refuse it. A token it
+ * could not even verify would prove nothing about the claim shape.
+ */
+describe("a Mini App token on an ordinary route", () => {
+  const realJwt = require("../services/jwt");
+  const authMiddleware = require("../middlewares/auth");
+
+  const runMiddleware = (headers, pathName = "/attendance/me", method = "GET") =>
+    new Promise((resolve) => {
+      const res = {
+        statusCode: 200,
+        body: null,
+        status(code) {
+          this.statusCode = code;
+          return this;
+        },
+        json(payload) {
+          this.body = payload;
+          resolve({ status: this.statusCode, body: payload, passed: false });
+          return this;
+        },
+        end() {},
+      };
+      authMiddleware({ headers, path: pathName, method }, res, () =>
+        resolve({ status: 200, body: null, passed: true })
+      );
+    });
+
+  it("is refused 403 - it is not a dnds.co.in session", async () => {
+    const usecase = buildSession({
+      identityRepo: fakeIdentityRepo([LINKED]),
+      jwtService: realJwt,
+      getBotToken: () => BOT_TOKEN,
+      now: () => NOW_MS,
+    });
+    const { token } = await usecase.exchange({ initData: initDataFor(501) });
+
+    // The token really is valid and really does name employee 77...
+    assert.equal((await usecase.authenticate(token)).employee_id, 77);
+
+    // ...and the ordinary middleware still refuses it.
+    const out = await runMiddleware({ "x-access-token": token });
+    assert.equal(out.passed, false, "the request must not reach the route");
+    assert.equal(out.body.code, 403);
+  });
+
+  it("an ordinary employee token on the same route is NOT refused - the test can tell them apart", async () => {
+    const loginToken = await realJwt.sign(
+      { auth_ver: 2, sub: "12", id: 12, employee_id: 77, user_type: 1 },
+      "1d"
+    );
+    const out = await runMiddleware({ "x-access-token": loginToken });
+    assert.equal(out.passed, true, "a real session token passes the same middleware");
+  });
+
+  it("no token is refused the same way, so 403 is the honest comparison", async () => {
+    const out = await runMiddleware({});
+    assert.equal(out.passed, false);
+    assert.equal(out.body.code, 403);
   });
 });

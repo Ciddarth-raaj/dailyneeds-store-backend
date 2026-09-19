@@ -6,7 +6,8 @@ const respondError = require("../utils/http");
  * THE TELEGRAM ATTENDANCE MINI APP API.
  *
  *   POST /telegram/attendance/session          exchange signed initData
- *   GET  /telegram/attendance/missing-dates    this employee's dates
+ *   GET  /telegram/attendance/month            My Attendance, one month
+ *   GET  /telegram/attendance/missing-dates    Corrections, this employee's
  *   GET  /telegram/attendance/date             one date, read-only
  *   POST /telegram/attendance/regularization   raise the normal request
  *
@@ -119,6 +120,28 @@ class TelegramAttendanceRoutes {
         if (isValid.error !== null) throw isValid.error;
 
         res.json(await this.miniApp.listMissingDates(req.miniApp.employee_id));
+      } catch (err) {
+        TelegramAttendanceRoutes._respond(res, err);
+      }
+    });
+
+    /**
+     * MY ATTENDANCE: one month of the authenticated employee's own days.
+     *
+     * READ-ONLY, and the month is the ONLY parameter. The employee comes from
+     * `req.miniApp.employee_id`; there is no field for an employee, an
+     * outlet, a store, a designation or an approval role, and Joi refuses
+     * unknown keys, so none of them can be supplied. The days are whatever
+     * `attendance_calculation#readRange` returns - the same read
+     * `/attendance/me` serves - and no attendance state is decided here.
+     */
+    r.get("/telegram/attendance/month", guard, async (req, res) => {
+      try {
+        const schema = { month: Joi.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).required() };
+        const isValid = Joi.validate(req.query || {}, schema);
+        if (isValid.error !== null) throw isValid.error;
+
+        res.json(await this.miniApp.getMonth(req.miniApp.employee_id, req.query.month));
       } catch (err) {
         TelegramAttendanceRoutes._respond(res, err);
       }

@@ -22,7 +22,7 @@ const EMPLOYEE = 77;
 const GOOD_TOKEN = "good-mini-app-token";
 
 /** Records every employee id the usecase was asked about. */
-const calls = { list: [], detail: [], submit: [] };
+const calls = { list: [], detail: [], submit: [], month: [] };
 
 const sessionUsecase = {
   exchange: async ({ initData }) => {
@@ -50,15 +50,19 @@ const sessionUsecase = {
 const miniAppUsecase = {
   listMissingDates: async (employeeId) => {
     calls.list.push(employeeId);
-    return { code: 200, employee_id: employeeId, dates: [] };
+    return { code: 200, dates: [] };
+  },
+  getMonth: async (employeeId, month) => {
+    calls.month.push([employeeId, month]);
+    return { code: 200, month, days: [] };
   },
   getDateDetail: async (employeeId, date) => {
     calls.detail.push([employeeId, date]);
-    return { code: 200, employee_id: employeeId, attendance_date: date };
+    return { code: 200, attendance_date: date };
   },
   submitRegularization: async (employeeId, body) => {
     calls.submit.push([employeeId, body]);
-    return { code: 200, employee_id: employeeId, status: "PENDING" };
+    return { code: 200, status: "PENDING" };
   },
 };
 
@@ -99,9 +103,11 @@ describe("the public-route registration", () => {
     assert.deepEqual(paths.sort(), [
       "/telegram/attendance/date",
       "/telegram/attendance/missing-dates",
+      "/telegram/attendance/month",
       "/telegram/attendance/regularization",
       "/telegram/attendance/session",
     ]);
+    assert.deepEqual(unProtectedRoutes["/telegram/attendance/month"].methods, { get: true });
     assert.deepEqual(unProtectedRoutes["/telegram/attendance/session"].methods, { post: true });
     assert.deepEqual(unProtectedRoutes["/telegram/attendance/missing-dates"].methods, { get: true });
     assert.deepEqual(unProtectedRoutes["/telegram/attendance/date"].methods, { get: true });
@@ -157,12 +163,15 @@ describe("the scoped token is the only way in", () => {
   });
 });
 
-describe("the browser cannot name another employee", () => {
+describe("the browser cannot choose, supply or control the employee", () => {
   it("the missing-date list is always for the token's employee", async () => {
     calls.list.length = 0;
     const res = await get("/telegram/attendance/missing-dates", authed);
-    assert.equal((await res.json()).employee_id, EMPLOYEE);
+    assert.equal((await res.json()).code, 200);
+    // The employee came from the TOKEN, not from the request...
     assert.deepEqual(calls.list, [EMPLOYEE]);
+    // ...and is not handed back to the browser either.
+    assert.equal((await (await get("/telegram/attendance/missing-dates", authed)).json()).employee_id, undefined);
   });
 
   it("an employee_id in the QUERY STRING is refused", async () => {
@@ -282,9 +291,54 @@ describe("what this namespace does NOT expose", () => {
     assert.deepEqual(routes.sort(), [
       "/telegram/attendance/date",
       "/telegram/attendance/missing-dates",
+      "/telegram/attendance/month",
       "/telegram/attendance/regularization",
       "/telegram/attendance/session",
     ]);
     assert.ok(!routes.some((p) => /approv|decision|pending|employee/i.test(p)));
+  });
+});
+
+describe("My Attendance over HTTP", () => {
+  it("needs the scoped token like every other read", async () => {
+    assert.equal((await get("/telegram/attendance/month?month=2026-08")).status, 401);
+  });
+
+  it("is always for the token's employee, and returns no employee id", async () => {
+    calls.month.length = 0;
+    const res = await get("/telegram/attendance/month?month=2026-08", authed);
+    const body = await res.json();
+    assert.equal(body.code, 200);
+    assert.equal(body.employee_id, undefined);
+    assert.deepEqual(calls.month, [[EMPLOYEE, "2026-08"]]);
+  });
+
+  /**
+   * THE WHOLE POINT, restated for this route: there is no parameter for an
+   * employee, an outlet, a store, a designation or an approval role, and an
+   * unknown key is a 422 rather than something quietly ignored.
+   */
+  it("refuses every parameter except the month", async () => {
+    for (const extra of [
+      "employee_id=78",
+      "requested_for_employee_id=78",
+      "store_id=3",
+      "outlet_id=3",
+      "designation_id=9",
+      "approver_role=STORE_MANAGER",
+    ]) {
+      calls.month.length = 0;
+      const res = await get(`/telegram/attendance/month?month=2026-08&${extra}`, authed);
+      assert.equal((await res.json()).code, 422, `${extra} must be refused`);
+      assert.deepEqual(calls.month, [], `${extra} read nothing for anybody`);
+    }
+  });
+
+  it("validates the month at the edge of the router", async () => {
+    for (const month of ["2026-13", "2026-00", "2026-9", "26-08", "2026-08-01", "august"]) {
+      const res = await get(`/telegram/attendance/month?month=${month}`, authed);
+      assert.equal((await res.json()).code, 422, `${month} must be refused`);
+    }
+    assert.equal((await (await get("/telegram/attendance/month", authed)).json()).code, 422);
   });
 });

@@ -259,6 +259,7 @@ const unProtectedRoutes = {
   // The paths are static because this map is an exact `req.path` lookup: a
   // `/date/:attendance_date` route could not be named here.
   "/telegram/attendance/session": { methods: { post: true } },
+  "/telegram/attendance/month": { methods: { get: true } },
   "/telegram/attendance/missing-dates": { methods: { get: true } },
   "/telegram/attendance/date": { methods: { get: true } },
   "/telegram/attendance/regularization": { methods: { post: true } },
