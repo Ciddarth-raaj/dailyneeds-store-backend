@@ -205,6 +205,111 @@ const WARNING_MESSAGE = {
     "An OT approval for a date in this month is still outstanding. The month may still be initialized; Approve & Lock will refuse until it is decided.",
 };
 
+/**
+ * ================== IS THIS EMPLOYEE'S ATTENDANCE READY FOR PAYROLL? =======
+ *
+ * THREE STATES, AND THEY ARE ABOUT PAYROLL READINESS RATHER THAN ABOUT
+ * ATTENDANCE'S OWN OPINION OF ITSELF.
+ *
+ *   READY               the attendance month is final AND nothing about it is
+ *                       still outstanding. Approve & Lock will not refuse on
+ *                       attendance grounds.
+ *   PENDING             something is unsettled - the month is not final, or a
+ *                       regularization or an OT approval is still open. The
+ *                       employee may still be initialized, adjusted and
+ *                       calculated; only Approve & Lock refuses.
+ *   CLOSED_FOR_PAYROLL  something was unsettled and a person holding
+ *                       `close_payrun_attendance` decided to pay on the
+ *                       attendance as it stood. The underlying requests are
+ *                       untouched and still open; what changed is that payroll
+ *                       accepted the consequence.
+ *
+ * WHY READY IS NOT SIMPLY `is_final`, WHICH IS THE TRAP HERE.
+ * `utils/attendance_engine.js` states that a day's attendance state and its OT
+ * claim state are SEPARATE: a complete, valid day is FINAL whether or not its
+ * candidate overtime has been approved. So an employee can be `is_final = 1`
+ * and still carry a pending OT approval that Approve & Lock refuses on. A
+ * READY badge derived from `is_final` alone would therefore promise something
+ * the approval gate goes on to deny - which is the whole failure this column
+ * exists to prevent. All three signals decide it.
+ *
+ * CLOSED_FOR_PAYROLL WINS OVER PENDING, and that is the point of it. It does
+ * NOT win over READY: an employee whose attendance genuinely settled after
+ * being closed reads READY, because that is the stronger and truer statement.
+ */
+const ATTENDANCE_STATUS = {
+  READY: "READY",
+  PENDING: "PENDING",
+  CLOSED_FOR_PAYROLL: "CLOSED_FOR_PAYROLL",
+};
+
+const ATTENDANCE_STATUS_LABEL = {
+  [ATTENDANCE_STATUS.READY]: "Ready",
+  [ATTENDANCE_STATUS.PENDING]: "Pending",
+  [ATTENDANCE_STATUS.CLOSED_FOR_PAYROLL]: "Closed for payroll",
+};
+
+/**
+ * WHAT IS UNRESOLVED, NAMED RATHER THAN COUNTED INTO ONE NUMBER.
+ *
+ * "3 unresolved items" sends somebody looking in three places. These four say
+ * WHICH place, and the screen turns each into a link to the attendance screen
+ * that can actually settle it.
+ */
+const ATTENDANCE_UNRESOLVED = {
+  NO_ATTENDANCE_MONTH: "NO_ATTENDANCE_MONTH",
+  ATTENDANCE_NOT_FINAL: "ATTENDANCE_NOT_FINAL",
+  PENDING_REGULARIZATION: "PENDING_REGULARIZATION",
+  PENDING_OT: "PENDING_OT",
+};
+
+const ATTENDANCE_UNRESOLVED_LABEL = {
+  [ATTENDANCE_UNRESOLVED.NO_ATTENDANCE_MONTH]: "Attendance not calculated",
+  [ATTENDANCE_UNRESOLVED.ATTENDANCE_NOT_FINAL]: "Attendance month not final",
+  [ATTENDANCE_UNRESOLVED.PENDING_REGULARIZATION]: "Pending regularization",
+  [ATTENDANCE_UNRESOLVED.PENDING_OT]: "Pending OT approval",
+};
+
+/** What each unresolved item means, and what settling it would take. */
+const ATTENDANCE_UNRESOLVED_MESSAGE = {
+  [ATTENDANCE_UNRESOLVED.NO_ATTENDANCE_MONTH]:
+    "The attendance engine has not calculated this month for this employee, so there are no attendance figures to pay from yet.",
+  [ATTENDANCE_UNRESOLVED.ATTENDANCE_NOT_FINAL]:
+    "The attendance engine held dates out of this month because their punch list is incomplete. Their shortage and overtime are not in the payroll figures.",
+  [ATTENDANCE_UNRESOLVED.PENDING_REGULARIZATION]:
+    "A regularization request for a date in this month has not been decided. Until it is, that date is not settled.",
+  [ATTENDANCE_UNRESOLVED.PENDING_OT]:
+    "An OT approval for a date in this month has not been decided. Only approved OT is ever paid, so the amount can still change.",
+};
+
+/**
+ * THE OUTCOME OF ONE EMPLOYEE'S CLOSE, in the same shape every other payrun
+ * bulk action reports - so that one employee and forty report identically.
+ */
+const CLOSE_RESULT = {
+  CLOSED: "CLOSED",
+  ALREADY_CLOSED: "ALREADY_CLOSED",
+  NOTHING_TO_CLOSE: "NOTHING_TO_CLOSE",
+  LOCKED: "LOCKED",
+  MONTH_LOCKED: "MONTH_LOCKED",
+  NOT_IN_SCOPE: "NOT_IN_SCOPE",
+  FAILED: "FAILED",
+};
+
+const CLOSE_RESULT_MESSAGE = {
+  [CLOSE_RESULT.CLOSED]: "Attendance closed for payroll.",
+  [CLOSE_RESULT.ALREADY_CLOSED]:
+    "Attendance was already closed for payroll for this month. Nothing was changed.",
+  [CLOSE_RESULT.NOTHING_TO_CLOSE]:
+    "This employee's attendance is already settled, so there is nothing to close.",
+  [CLOSE_RESULT.LOCKED]:
+    "This employee's payroll month is approved and locked. Nothing about it can be changed.",
+  [CLOSE_RESULT.MONTH_LOCKED]: "This payroll month is locked.",
+  [CLOSE_RESULT.NOT_IN_SCOPE]:
+    "This employee has no initialized payrun for the month, or is outside your branch scope.",
+  [CLOSE_RESULT.FAILED]: "This employee's attendance could not be closed.",
+};
+
 module.exports = {
   PAY_TYPE,
   PAY_TYPES,
@@ -218,4 +323,11 @@ module.exports = {
   BLOCK_REASON_MESSAGE,
   WARNING,
   WARNING_MESSAGE,
+  ATTENDANCE_STATUS,
+  ATTENDANCE_STATUS_LABEL,
+  ATTENDANCE_UNRESOLVED,
+  ATTENDANCE_UNRESOLVED_LABEL,
+  ATTENDANCE_UNRESOLVED_MESSAGE,
+  CLOSE_RESULT,
+  CLOSE_RESULT_MESSAGE,
 };

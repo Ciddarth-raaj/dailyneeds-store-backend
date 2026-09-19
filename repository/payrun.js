@@ -1,4 +1,5 @@
 const logger = require("../utils/logger");
+const { CLOSE_RESULT } = require("../constants/payrun");
 const { JOINED_ON } = require("../utils/joining_date");
 const {
   getConnectionAsync,
@@ -307,6 +308,8 @@ class PayrunRepository {
               attendance_monthly_payroll_id, attendance_payroll_version,
               DATE_FORMAT(attendance_calculated_at, '%Y-%m-%d %H:%i:%s') AS attendance_calculated_at,
               pay_type, pay_type_source, status,
+              attendance_closed_for_payroll, attendance_closed_by,
+              DATE_FORMAT(attendance_closed_at, '%Y-%m-%d %H:%i:%s') AS attendance_closed_at,
               DATE_FORMAT(initialized_at, '%Y-%m-%d %H:%i:%s') AS initialized_at,
               initialized_by
          FROM payrun_employee
@@ -479,6 +482,150 @@ class PayrunRepository {
          FROM payrun_employee_pay_type_audit
         WHERE period_year = ? AND period_month = ? AND employee_id = ?
         ORDER BY payrun_pay_type_audit_id DESC`,
+      [year, month, employee_id]
+    );
+  }
+
+  /**
+   * CLOSE ATTENDANCE FOR PAYROLL - one employee, in one transaction, with the
+   * evidence of what was accepted.
+   *
+   * IT WRITES TWO TABLES AND NEITHER OF THEM BELONGS TO ATTENDANCE. There is
+   * no UPDATE of `attendance_monthly_payroll`, `attendance_day_calculation` or
+   * `attendance_approval_request` anywhere in this method, and there is no
+   * statement here that could reach one. The missing punch stays missing, the
+   * regularization stays pending and the OT request stays undecided: what is
+   * recorded is that PAYROLL accepted the consequence of them being open.
+   *
+   * THE ROW IS TAKEN `FOR UPDATE` and the UPDATE carries
+   * `attendance_closed_for_payroll = 0`, so two people closing the same
+   * employee at the same moment produce ONE close and ONE audit row; the
+   * second is told it was already closed. An application-level "is it closed?"
+   * check before an unguarded UPDATE is a race with a comment on it.
+   *
+   * A LOCKED EMPLOYEE IS REFUSED IN THE STATEMENT, not only in the usecase.
+   * `status` is re-read inside the transaction and an approved, locked month
+   * is declined - the lock is the final boundary and a close is a change.
+   *
+   * THE AUDIT ROW IS APPEND ONLY and moves with the close, in the same
+   * transaction, for the reason `changePayType` gives about its own pair: a
+   * decision with no audit row is one nobody can account for, and an audit row
+   * for a decision that did not happen is worse.
+   *
+   * @param basis the attendance figures and unresolved counts the usecase
+   *              read for this employee. They are COPIED rather than looked up
+   *              again here, because the whole point is to record what payroll
+   *              was shown at the moment it decided.
+   * @returns {string} one of `CLOSE_RESULT`
+   */
+  async closeAttendanceForPayroll({ year, month, employee_id, closed_by = null, basis = {} }) {
+    const conn = await getConnectionAsync(this.db);
+    try {
+      await beginTransactionAsync(conn);
+
+      const current = await this._read(
+        "LOCK-PAYRUN-ROW-FOR-CLOSE",
+        `SELECT payrun_employee_id, status, attendance_closed_for_payroll
+           FROM payrun_employee
+          WHERE period_year = ? AND period_month = ? AND employee_id = ?
+          FOR UPDATE`,
+        [year, month, employee_id],
+        conn
+      );
+      const row = current[0];
+
+      if (!row) {
+        await commitAsync(conn);
+        return CLOSE_RESULT.NOT_IN_SCOPE;
+      }
+      if (Number(row.attendance_closed_for_payroll) === 1) {
+        await commitAsync(conn);
+        return CLOSE_RESULT.ALREADY_CLOSED;
+      }
+
+      await this._read(
+        "CLOSE-ATTENDANCE-FOR-PAYROLL",
+        `UPDATE payrun_employee
+            SET attendance_closed_for_payroll = 1,
+                attendance_closed_by = ?,
+                attendance_closed_at = CURRENT_TIMESTAMP
+          WHERE payrun_employee_id = ? AND attendance_closed_for_payroll = 0`,
+        [closed_by, row.payrun_employee_id],
+        conn
+      );
+
+      await this._read(
+        "INSERT-ATTENDANCE-CLOSE-AUDIT",
+        `INSERT INTO payrun_attendance_close_audit
+                (payrun_employee_id, period_year, period_month, employee_id,
+                 closed_by,
+                 attendance_monthly_payroll_id, attendance_payroll_version,
+                 attendance_calculated_at, attendance_was_final,
+                 salary_days, extra_days, shortage_minutes,
+                 missing_minute_deduction, approved_ot_minutes,
+                 effective_nrm_minutes, effective_nrm_source, ot_groups,
+                 held_dates, pending_regularizations, pending_ot)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          row.payrun_employee_id,
+          year,
+          month,
+          employee_id,
+          closed_by,
+          basis.attendance_monthly_payroll_id ?? null,
+          basis.attendance_payroll_version ?? null,
+          basis.attendance_calculated_at ?? null,
+          basis.attendance_was_final ? 1 : 0,
+          basis.salary_days ?? null,
+          basis.extra_days ?? null,
+          basis.shortage_minutes ?? null,
+          basis.missing_minute_deduction ?? null,
+          basis.approved_ot_minutes ?? null,
+          basis.effective_nrm_minutes ?? null,
+          basis.effective_nrm_source ?? null,
+          basis.ot_groups === undefined || basis.ot_groups === null
+            ? null
+            : JSON.stringify(basis.ot_groups),
+          basis.held_dates === undefined || basis.held_dates === null
+            ? null
+            : JSON.stringify(basis.held_dates),
+          Math.max(0, Math.trunc(Number(basis.pending_regularizations) || 0)),
+          Math.max(0, Math.trunc(Number(basis.pending_ot) || 0)),
+        ],
+        conn
+      );
+
+      await commitAsync(conn);
+      return CLOSE_RESULT.CLOSED;
+    } catch (err) {
+      await rollbackAsync(conn);
+      throw err;
+    } finally {
+      conn.release();
+    }
+  }
+
+  /**
+   * THE CLOSE HISTORY FOR ONE EMPLOYEE'S MONTH, newest first.
+   *
+   * Append only, so this is the whole record: what was accepted, and what was
+   * still open when somebody accepted it.
+   */
+  async listAttendanceCloseAudit({ year, month, employee_id }) {
+    return this._read(
+      "LIST-ATTENDANCE-CLOSE-AUDIT",
+      `SELECT payrun_attendance_close_audit_id, employee_id, closed_by,
+              DATE_FORMAT(closed_at, '%Y-%m-%d %H:%i:%s') AS closed_at,
+              attendance_monthly_payroll_id, attendance_payroll_version,
+              DATE_FORMAT(attendance_calculated_at, '%Y-%m-%d %H:%i:%s.%f') AS attendance_calculated_at,
+              attendance_was_final,
+              salary_days, extra_days, shortage_minutes,
+              missing_minute_deduction, approved_ot_minutes,
+              effective_nrm_minutes, effective_nrm_source, ot_groups,
+              held_dates, pending_regularizations, pending_ot
+         FROM payrun_attendance_close_audit
+        WHERE period_year = ? AND period_month = ? AND employee_id = ?
+        ORDER BY payrun_attendance_close_audit_id DESC`,
       [year, month, employee_id]
     );
   }

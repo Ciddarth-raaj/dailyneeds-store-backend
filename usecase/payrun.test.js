@@ -28,6 +28,8 @@ const {
   PAY_TYPE_SOURCE,
   PERIOD_STATUS,
   WARNING,
+  ATTENDANCE_STATUS,
+  CLOSE_RESULT,
 } = require("../constants/payrun");
 
 const YEAR = 2026;
@@ -139,6 +141,28 @@ function fakeRepo({
         pay_type: r.pay_type,
         pay_type_source: r.pay_type_source,
       }));
+    },
+    /*
+     * THE CLOSE WRITE, faked with the real one's guards: the locked-row
+     * refusal and the "already closed does nothing" rule, both of which the
+     * real statement enforces in SQL. The audit is append only here too, so a
+     * test can assert that a second close adds no second row.
+     */
+    closeAudit: [],
+    async closeAttendanceForPayroll({ year, month, employee_id, closed_by, basis }) {
+      const row = store.find(
+        (r) => r.employee_id === employee_id && r.period_year === year && r.period_month === month
+      );
+      if (!row) return CLOSE_RESULT.NOT_IN_SCOPE;
+      if (Number(row.attendance_closed_for_payroll) === 1) return CLOSE_RESULT.ALREADY_CLOSED;
+      row.attendance_closed_for_payroll = 1;
+      row.attendance_closed_by = closed_by;
+      row.attendance_closed_at = "2026-09-05 12:00:00";
+      this.closeAudit.push({ employee_id, year, month, closed_by, ...basis });
+      return CLOSE_RESULT.CLOSED;
+    },
+    async listAttendanceCloseAudit({ employee_id }) {
+      return this.closeAudit.filter((a) => a.employee_id === employee_id);
     },
     async changePayType({ employee_id, pay_type, changed_by }) {
       const row = store.find((r) => r.employee_id === employee_id);
@@ -943,5 +967,536 @@ describe("initialization", () => {
     const row = rowFor(await usecase.getMonth({ year: YEAR, month: MONTH }));
     assert.equal(Number(row.monthly_gross), 26000, "the snapshot did not silently move");
     assert.equal(row.salary_id, 900);
+  });
+});
+
+/* ===================================================================== */
+/*  attendance readiness, and Close for Payroll                          */
+/* ===================================================================== */
+
+/**
+ * MONTH END FOR TWO HUNDRED PEOPLE. A handful always have a missing punch
+ * nobody is going to regularize, and payroll cannot wait for them forever.
+ *
+ * THE SHAPE OF THE ANSWER: Initialization says whether attendance is READY,
+ * PENDING or CLOSED FOR PAYROLL and WHY it is pending, so nobody discovers it
+ * two stages later at Approve & Lock; and a person holding
+ * `close_payrun_attendance` may accept the attendance as it stands, which is
+ * recorded with the basis they accepted and what was still open.
+ *
+ * WHAT A CLOSE IS NOT. It decides no attendance request. Every test below that
+ * closes anything also asserts that the attendance the engine stored, and the
+ * pending requests, are exactly as they were.
+ */
+describe("attendance readiness on Initialization", () => {
+  const initialized = (over = {}) => ({
+    payrun_employee_id: 1,
+    period_year: YEAR,
+    period_month: MONTH,
+    employee_id: 42,
+    salary_id: 900,
+    monthly_gross: 26000,
+    pay_type: PAY_TYPE.BANK,
+    pay_type_source: PAY_TYPE_SOURCE.EMPLOYEE_MASTER,
+    initialized_at: "2026-09-01 10:00:00",
+    initialized_by: 7,
+    attendance_closed_for_payroll: 0,
+    ...over,
+  });
+
+  /* ---- 1-3: attendance never blocks Initialization (production rule) --- */
+
+  it("unfinished attendance still allows Initialization", async () => {
+    const usecase = buildUsecase(fakeRepo({ attendance: [attendanceMonth({ is_final: 0 })] }));
+    const row = rowFor(await usecase.getMonth({ year: YEAR, month: MONTH }));
+    assert.equal(row.status, STATUS_GROUP.READY);
+    assert.deepEqual(reasonCodes(row), []);
+    assert.ok(warningCodes(row).includes(WARNING.ATTENDANCE_INCOMPLETE));
+  });
+
+  it("a pending regularization still allows Initialization", async () => {
+    const usecase = buildUsecase(
+      fakeRepo({ pending: [{ employee_id: 42, pending_regularizations: 2, pending_ot: 0 }] })
+    );
+    const row = rowFor(await usecase.getMonth({ year: YEAR, month: MONTH }));
+    assert.equal(row.status, STATUS_GROUP.READY);
+    assert.deepEqual(reasonCodes(row), []);
+  });
+
+  it("a pending OT approval still allows Initialization", async () => {
+    const usecase = buildUsecase(
+      fakeRepo({ pending: [{ employee_id: 42, pending_regularizations: 0, pending_ot: 1 }] })
+    );
+    const row = rowFor(await usecase.getMonth({ year: YEAR, month: MONTH }));
+    assert.equal(row.status, STATUS_GROUP.READY);
+    assert.deepEqual(reasonCodes(row), []);
+  });
+
+  /* ---------------------- 4-5: PENDING, and why -------------------------- */
+
+  it("shows PENDING, and says exactly what is unresolved", async () => {
+    const usecase = buildUsecase(
+      fakeRepo({
+        attendance: [attendanceMonth({ is_final: 0, held_dates: ["2026-08-03", "2026-08-04"] })],
+        pending: [{ employee_id: 42, pending_regularizations: 2, pending_ot: 1 }],
+      })
+    );
+    const row = rowFor(await usecase.getMonth({ year: YEAR, month: MONTH }));
+
+    assert.equal(row.attendance_status, ATTENDANCE_STATUS.PENDING);
+    const codes = row.attendance_unresolved.map((u) => u.code);
+    assert.deepEqual(codes, ["ATTENDANCE_NOT_FINAL", "PENDING_REGULARIZATION", "PENDING_OT"]);
+
+    const byCode = new Map(row.attendance_unresolved.map((u) => [u.code, u]));
+    assert.equal(byCode.get("ATTENDANCE_NOT_FINAL").count, 2);
+    assert.deepEqual(byCode.get("ATTENDANCE_NOT_FINAL").dates, ["2026-08-03", "2026-08-04"]);
+    assert.equal(byCode.get("PENDING_REGULARIZATION").count, 2);
+    assert.equal(byCode.get("PENDING_OT").count, 1);
+    /* The total the bulk confirmation shows: 2 held dates + 2 + 1. */
+    assert.equal(row.attendance_unresolved_count, 5);
+  });
+
+  it("a settled month with nothing outstanding is READY", async () => {
+    const usecase = buildUsecase(fakeRepo());
+    const row = rowFor(await usecase.getMonth({ year: YEAR, month: MONTH }));
+    assert.equal(row.attendance_status, ATTENDANCE_STATUS.READY);
+    assert.deepEqual(row.attendance_unresolved, []);
+    assert.equal(row.attendance_unresolved_count, 0);
+  });
+
+  /**
+   * THE TRAP THE ENGINE SETS, AND THE REASON READY IS NOT `is_final`.
+   * `utils/attendance_engine.js` finalizes a complete day whether or not its
+   * overtime has been decided, so `is_final = 1` with a pending OT approval is
+   * an ordinary state - and Approve & Lock refuses it. READY must not promise
+   * otherwise.
+   */
+  it("a FINAL month with pending OT is PENDING, not READY", async () => {
+    const usecase = buildUsecase(
+      fakeRepo({
+        attendance: [attendanceMonth({ is_final: 1 })],
+        pending: [{ employee_id: 42, pending_regularizations: 0, pending_ot: 1 }],
+      })
+    );
+    const row = rowFor(await usecase.getMonth({ year: YEAR, month: MONTH }));
+    assert.equal(row.attendance_status, ATTENDANCE_STATUS.PENDING);
+    assert.deepEqual(row.attendance_unresolved.map((u) => u.code), ["PENDING_OT"]);
+  });
+
+  it("a missing attendance month is PENDING and says so", async () => {
+    const usecase = buildUsecase(fakeRepo({ attendance: [] }));
+    const row = rowFor(await usecase.getMonth({ year: YEAR, month: MONTH }));
+    assert.equal(row.attendance_status, ATTENDANCE_STATUS.PENDING);
+    assert.deepEqual(row.attendance_unresolved.map((u) => u.code), ["NO_ATTENDANCE_MONTH"]);
+  });
+
+  /* ------------------- 6-8: the individual close ------------------------- */
+
+  it("closes one employee's attendance for payroll", async () => {
+    const repo = fakeRepo({
+      attendance: [attendanceMonth({ is_final: 0, held_dates: ["2026-08-03"] })],
+      pending: [{ employee_id: 42, pending_regularizations: 1, pending_ot: 1 }],
+      existing: [initialized()],
+    });
+    const usecase = buildUsecase(repo);
+
+    const result = await usecase.closeAttendanceForPayroll({
+      year: YEAR,
+      month: MONTH,
+      employee_ids: [42],
+      actor: ACTOR,
+    });
+
+    assert.equal(result.closed_count, 1);
+    assert.equal(result.skipped_count, 0);
+    assert.equal(result.failed_count, 0);
+    assert.equal(result.results[0].result, CLOSE_RESULT.CLOSED);
+
+    const row = rowFor(await usecase.getMonth({ year: YEAR, month: MONTH }));
+    assert.equal(row.attendance_status, ATTENDANCE_STATUS.CLOSED_FOR_PAYROLL);
+    /* The unresolved items are STILL REPORTED - they did not go away, they
+       were accepted, and the screen must keep saying what was accepted. */
+    assert.equal(row.attendance_unresolved_count, 3);
+  });
+
+  it("the close mutates no attendance record and decides no request", async () => {
+    const attendance = [attendanceMonth({ is_final: 0, held_dates: ["2026-08-03"] })];
+    const pending = [{ employee_id: 42, pending_regularizations: 1, pending_ot: 1 }];
+    const before = JSON.stringify({ attendance, pending });
+
+    const repo = fakeRepo({ attendance, pending, existing: [initialized()] });
+    const usecase = buildUsecase(repo);
+    await usecase.closeAttendanceForPayroll({
+      year: YEAR,
+      month: MONTH,
+      employee_ids: [42],
+      actor: ACTOR,
+    });
+
+    assert.equal(JSON.stringify({ attendance, pending }), before, "attendance was mutated");
+    /* And the usecase has no way to reach an attendance write at all. */
+    assert.equal(typeof repo.approveRegularization, "undefined");
+    assert.equal(typeof repo.approveOt, "undefined");
+  });
+
+  it("records who closed it, the basis accepted, and what was still open", async () => {
+    const repo = fakeRepo({
+      attendance: [
+        attendanceMonth({
+          is_final: 0,
+          payroll_version: 3,
+          held_dates: ["2026-08-03", "2026-08-11"],
+          salary_days: 24,
+          extra_days: 1,
+          shortage_minutes: 95,
+          missing_minute_deduction: 365.38,
+          approved_ot_minutes: 120,
+        }),
+      ],
+      pending: [{ employee_id: 42, pending_regularizations: 2, pending_ot: 1 }],
+      existing: [initialized()],
+    });
+    const usecase = buildUsecase(repo);
+    await usecase.closeAttendanceForPayroll({
+      year: YEAR,
+      month: MONTH,
+      employee_ids: [42],
+      actor: ACTOR,
+    });
+
+    assert.equal(repo.closeAudit.length, 1);
+    const audit = repo.closeAudit[0];
+    assert.equal(audit.closed_by, 7);
+    assert.equal(audit.attendance_monthly_payroll_id, 5001);
+    assert.equal(audit.attendance_payroll_version, 3);
+    assert.equal(audit.attendance_was_final, false);
+    assert.equal(audit.salary_days, 24);
+    assert.equal(audit.extra_days, 1);
+    assert.equal(audit.shortage_minutes, 95);
+    assert.equal(audit.missing_minute_deduction, 365.38);
+    assert.equal(audit.approved_ot_minutes, 120);
+    assert.deepEqual(audit.held_dates, ["2026-08-03", "2026-08-11"]);
+    assert.equal(audit.pending_regularizations, 2);
+    assert.equal(audit.pending_ot, 1);
+  });
+
+  it("a second close adds no second audit row", async () => {
+    const repo = fakeRepo({
+      attendance: [attendanceMonth({ is_final: 0 })],
+      existing: [initialized()],
+    });
+    const usecase = buildUsecase(repo);
+    const args = { year: YEAR, month: MONTH, employee_ids: [42], actor: ACTOR };
+
+    await usecase.closeAttendanceForPayroll(args);
+    const second = await usecase.closeAttendanceForPayroll(args);
+
+    assert.equal(second.closed_count, 0);
+    assert.equal(second.skipped_count, 1);
+    assert.equal(second.results[0].result, CLOSE_RESULT.ALREADY_CLOSED);
+    assert.equal(repo.closeAudit.length, 1);
+  });
+
+  /* ------------------- 15-16: the bulk close ---------------------------- */
+
+  it("bulk close processes the valid rows and skips the rest, with reasons", async () => {
+    const repo = fakeRepo({
+      population: [employee(), employee({ employee_id: 43 }), employee({ employee_id: 44 })],
+      salaries: [salary(), salary({ employee_id: 43 }), salary({ employee_id: 44 })],
+      attendance: [
+        attendanceMonth({ is_final: 0 }),                       // 42 closeable
+        attendanceMonth({ employee_id: 43, is_final: 1 }),      // 43 settled
+        attendanceMonth({ employee_id: 44, is_final: 0 }),      // 44 not initialized
+      ],
+      existing: [initialized(), initialized({ payrun_employee_id: 2, employee_id: 43 })],
+    });
+    const usecase = buildUsecase(repo);
+
+    const result = await usecase.closeAttendanceForPayroll({
+      year: YEAR,
+      month: MONTH,
+      employee_ids: [42, 43, 44],
+      actor: ACTOR,
+    });
+
+    assert.equal(result.closed_count, 1);
+    assert.equal(result.failed_count, 0);
+    assert.equal(result.skipped_count, 2);
+
+    const byId = new Map(result.results.map((r) => [r.employee_id, r]));
+    assert.equal(byId.get(42).result, CLOSE_RESULT.CLOSED);
+    assert.equal(byId.get(43).result, CLOSE_RESULT.NOTHING_TO_CLOSE);
+    assert.equal(byId.get(44).result, CLOSE_RESULT.NOT_IN_SCOPE);
+    /* Every skipped row carries a reason a person can act on. */
+    result.results.forEach((r) => assert.ok(r.message && r.message.length > 0));
+  });
+
+  it("one employee failing does not lose the rest of the batch", async () => {
+    const repo = fakeRepo({
+      population: [employee(), employee({ employee_id: 43 })],
+      salaries: [salary(), salary({ employee_id: 43 })],
+      attendance: [attendanceMonth({ is_final: 0 }), attendanceMonth({ employee_id: 43, is_final: 0 })],
+      existing: [initialized(), initialized({ payrun_employee_id: 2, employee_id: 43 })],
+    });
+    const good = repo.closeAttendanceForPayroll.bind(repo);
+    repo.closeAttendanceForPayroll = async (args) => {
+      if (args.employee_id === 42) throw new Error("unreadable row");
+      return good(args);
+    };
+    const usecase = buildUsecase(repo);
+
+    const result = await usecase.closeAttendanceForPayroll({
+      year: YEAR,
+      month: MONTH,
+      employee_ids: [42, 43],
+      actor: ACTOR,
+    });
+
+    assert.equal(result.failed_count, 1);
+    assert.equal(result.closed_count, 1);
+    const byId = new Map(result.results.map((r) => [r.employee_id, r]));
+    assert.equal(byId.get(42).result, CLOSE_RESULT.FAILED);
+    assert.equal(byId.get(43).result, CLOSE_RESULT.CLOSED);
+  });
+
+  it("all_pending closes only what the SERVER finds pending", async () => {
+    const repo = fakeRepo({
+      population: [employee(), employee({ employee_id: 43 })],
+      salaries: [salary(), salary({ employee_id: 43 })],
+      attendance: [attendanceMonth({ is_final: 0 }), attendanceMonth({ employee_id: 43, is_final: 1 })],
+      existing: [initialized(), initialized({ payrun_employee_id: 2, employee_id: 43 })],
+    });
+    const usecase = buildUsecase(repo);
+
+    const result = await usecase.closeAttendanceForPayroll({
+      year: YEAR,
+      month: MONTH,
+      all_pending: true,
+      actor: ACTOR,
+    });
+
+    assert.equal(result.closed_count, 1);
+    assert.equal(result.results.length, 1);
+    assert.equal(result.results[0].employee_id, 42);
+  });
+
+  it("refuses employee_ids and all_pending together rather than guessing", async () => {
+    const usecase = buildUsecase(fakeRepo({ existing: [initialized()] }));
+    await assert.rejects(
+      () =>
+        usecase.closeAttendanceForPayroll({
+          year: YEAR,
+          month: MONTH,
+          employee_ids: [42],
+          all_pending: true,
+          actor: ACTOR,
+        }),
+      /not both/
+    );
+  });
+
+  it("a locked payroll month refuses the whole request", async () => {
+    const repo = fakeRepo({
+      attendance: [attendanceMonth({ is_final: 0 })],
+      existing: [initialized()],
+      period: { status: PERIOD_STATUS.LOCKED },
+    });
+    const usecase = buildUsecase(repo);
+    await assert.rejects(
+      () =>
+        usecase.closeAttendanceForPayroll({
+          year: YEAR,
+          month: MONTH,
+          employee_ids: [42],
+          actor: ACTOR,
+        }),
+      /locked/
+    );
+    assert.equal(repo.closeAudit.length, 0);
+  });
+
+  /* 14: an approved and locked employee is the final immutable boundary */
+  it("an approved and locked employee cannot be closed", async () => {
+    const repo = fakeRepo({
+      attendance: [attendanceMonth({ is_final: 0 })],
+      existing: [initialized()],
+    });
+    const locks = { listLockedEmployeeIds: async () => [42] };
+    const usecase = buildUsecase(repo, locks);
+
+    const result = await usecase.closeAttendanceForPayroll({
+      year: YEAR,
+      month: MONTH,
+      employee_ids: [42],
+      actor: ACTOR,
+    });
+
+    assert.equal(result.closed_count, 0);
+    assert.equal(result.results[0].result, CLOSE_RESULT.LOCKED);
+    assert.equal(repo.closeAudit.length, 0);
+  });
+});
+
+/* ===================================================================== */
+/*  search, tabs and the two-dimensional summary                         */
+/* ===================================================================== */
+
+describe("finding one employee in a month of three hundred", () => {
+  const people = () =>
+    fakeRepo({
+      population: [
+        employee({ employee_id: 1952, employee_name: "Priyanga P" }),
+        employee({ employee_id: 77, employee_name: "Ramesh Kumar" }),
+        employee({ employee_id: 1953, employee_name: "ANITHA R" }),
+      ],
+      salaries: [salary({ employee_id: 1952 }), salary({ employee_id: 77 }), salary({ employee_id: 1953 })],
+      attendance: [
+        attendanceMonth({ employee_id: 1952 }),
+        attendanceMonth({ employee_id: 77 }),
+        attendanceMonth({ employee_id: 1953 }),
+      ],
+    });
+
+  const idsFor = async (search) => {
+    const usecase = buildUsecase(people());
+    const view = await usecase.getMonth({ year: YEAR, month: MONTH, search });
+    return view.rows.map((r) => r.employee_id);
+  };
+
+  it("finds an employee by id, including a partial one", async () => {
+    assert.deepEqual(await idsFor("1952"), [1952]);
+    assert.deepEqual((await idsFor("195")).sort(), [1952, 1953]);
+  });
+
+  it("finds an employee by a partial name", async () => {
+    assert.deepEqual(await idsFor("priya"), [1952]);
+    assert.deepEqual(await idsFor("Kumar"), [77]);
+  });
+
+  it("is case-insensitive in both directions", async () => {
+    assert.deepEqual(await idsFor("PRIYANGA"), [1952]);
+    assert.deepEqual(await idsFor("anitha"), [1953]);
+    assert.deepEqual(await idsFor("AnItHa"), [1953]);
+  });
+
+  it("an empty search is not a filter", async () => {
+    assert.equal((await idsFor("")).length, 3);
+    assert.equal((await idsFor("   ")).length, 3);
+    assert.equal((await idsFor(null)).length, 3);
+  });
+
+  it("the summary counts the whole month, never the search", async () => {
+    const usecase = buildUsecase(people());
+    const view = await usecase.getMonth({ year: YEAR, month: MONTH, search: "priya" });
+    assert.equal(view.rows.length, 1);
+    assert.equal(view.summary.total_eligible, 3);
+  });
+});
+
+describe("the month summary's two dimensions", () => {
+  /**
+   * THE WORKFLOW COUNTS ADD UP; THE ATTENDANCE COUNT DOES NOT JOIN THEM.
+   *
+   * `ready`, `blocked` and `initialized` are mutually exclusive and sum to
+   * `total_eligible`. `attendance_pending` is a DIFFERENT QUESTION about the
+   * same people, and an initialized employee can be attendance-pending - which
+   * is the ordinary month end and the reason Close for Payroll exists. Adding
+   * all four together would report more employees than the month contains.
+   */
+  it("workflow states are exclusive and sum to the population", async () => {
+    const usecase = buildUsecase(
+      fakeRepo({
+        population: [employee(), employee({ employee_id: 43 }), employee({ employee_id: 44, resignation_date: "2020-01-01" })],
+        salaries: [salary(), salary({ employee_id: 43 })],
+        attendance: [attendanceMonth(), attendanceMonth({ employee_id: 43, is_final: 0 })],
+        existing: [
+          {
+            payrun_employee_id: 1, period_year: YEAR, period_month: MONTH, employee_id: 43,
+            salary_id: 900, monthly_gross: 26000, pay_type: PAY_TYPE.BANK,
+            pay_type_source: PAY_TYPE_SOURCE.EMPLOYEE_MASTER,
+            initialized_at: "2026-09-01 10:00:00", initialized_by: 7,
+            attendance_closed_for_payroll: 0,
+          },
+        ],
+      })
+    );
+    const { summary } = await usecase.getMonth({ year: YEAR, month: MONTH });
+
+    assert.equal(
+      summary.ready + summary.blocked + summary.initialized,
+      summary.total_eligible,
+      "the workflow states must partition the population"
+    );
+  });
+
+  it("attendance pending is counted independently and may overlap initialized", async () => {
+    const usecase = buildUsecase(
+      fakeRepo({
+        attendance: [attendanceMonth({ is_final: 0 })],
+        existing: [
+          {
+            payrun_employee_id: 1, period_year: YEAR, period_month: MONTH, employee_id: 42,
+            salary_id: 900, monthly_gross: 26000, pay_type: PAY_TYPE.BANK,
+            pay_type_source: PAY_TYPE_SOURCE.EMPLOYEE_MASTER,
+            initialized_at: "2026-09-01 10:00:00", initialized_by: 7,
+            attendance_closed_for_payroll: 0,
+          },
+        ],
+      })
+    );
+    const { summary, rows } = await usecase.getMonth({ year: YEAR, month: MONTH });
+
+    /* THE SAME EMPLOYEE IS IN BOTH, which is the whole point. */
+    assert.equal(summary.initialized, 1);
+    assert.equal(summary.attendance_pending, 1);
+    assert.equal(summary.total_eligible, 1);
+    assert.equal(rows[0].status, STATUS_GROUP.INITIALIZED);
+    assert.equal(rows[0].attendance_status, ATTENDANCE_STATUS.PENDING);
+  });
+
+  it("a closed employee moves from the pending count to the closed count", async () => {
+    const repo = fakeRepo({
+      attendance: [attendanceMonth({ is_final: 0 })],
+      existing: [
+        {
+          payrun_employee_id: 1, period_year: YEAR, period_month: MONTH, employee_id: 42,
+          salary_id: 900, monthly_gross: 26000, pay_type: PAY_TYPE.BANK,
+          pay_type_source: PAY_TYPE_SOURCE.EMPLOYEE_MASTER,
+          initialized_at: "2026-09-01 10:00:00", initialized_by: 7,
+          attendance_closed_for_payroll: 0,
+        },
+      ],
+    });
+    const usecase = buildUsecase(repo);
+
+    assert.equal((await usecase.getMonth({ year: YEAR, month: MONTH })).summary.attendance_pending, 1);
+    await usecase.closeAttendanceForPayroll({ year: YEAR, month: MONTH, employee_ids: [42], actor: ACTOR });
+
+    const after = (await usecase.getMonth({ year: YEAR, month: MONTH })).summary;
+    assert.equal(after.attendance_pending, 0);
+    assert.equal(after.attendance_closed_for_payroll, 1);
+  });
+
+  it("the attendance tab narrows the month, and composes with the others", async () => {
+    const usecase = buildUsecase(
+      fakeRepo({
+        population: [employee(), employee({ employee_id: 43 })],
+        salaries: [salary(), salary({ employee_id: 43 })],
+        attendance: [attendanceMonth({ is_final: 0 }), attendanceMonth({ employee_id: 43, is_final: 1 })],
+      })
+    );
+    const pending = await usecase.getMonth({
+      year: YEAR, month: MONTH, attendance_status: ATTENDANCE_STATUS.PENDING,
+    });
+    assert.deepEqual(pending.rows.map((r) => r.employee_id), [42]);
+
+    const both = await usecase.getMonth({
+      year: YEAR, month: MONTH,
+      attendance_status: ATTENDANCE_STATUS.PENDING,
+      status: STATUS_GROUP.READY,
+    });
+    assert.deepEqual(both.rows.map((r) => r.employee_id), [42]);
+    /* And the summary still counts the whole month. */
+    assert.equal(pending.summary.total_eligible, 2);
   });
 });

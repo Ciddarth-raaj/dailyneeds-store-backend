@@ -1,0 +1,14 @@
+-- Reverses the Close Attendance for Payroll migration.
+--
+-- The audit table goes; the three columns on `payrun_employee` stay.
+--
+-- WHY THE COLUMNS STAY. Dropping them would destroy the record of which
+-- employees were paid on an accepted attendance basis, for months that may
+-- already be approved and locked. The columns are additive and nullable and
+-- cost a reverted deployment nothing, which is not true of the fact they hold.
+--
+-- The permission key is NOT deleted, for the reason the initialization
+-- down-migration records: `all_permissions` is a catalogue, a designation may
+-- have been granted the key in the meantime, and deleting the row would leave
+-- `permissions` pointing at a key that no longer exists.
+DROP TABLE IF EXISTS `payrun_attendance_close_audit`;
