@@ -42,6 +42,8 @@
  * outright for a payroll-locked month (`utils/attendance_payroll_lock.js`).
  */
 
+const { punchEvidenceStale } = require("./attendance_missing_punch");
+
 const CALCULATION_SOURCE = Object.freeze({
   STORED: "STORED",
   LIVE_PREVIEW: "LIVE_PREVIEW",
@@ -152,6 +154,16 @@ function hydrateStoredDay(row, { live = null } = {}) {
     // is the reference list; the objects behind them are not stored.
     day.raw_punches = live.raw_punches || [];
     day.excluded_punches = live.excluded_punches || [];
+    // WHETHER THE STORED PUNCHES ARE STILL THE PUNCHES. No figure is
+    // recalculated and nothing is repaired - this only STATES that the row
+    // was calculated from a different set of punches than the device now
+    // shows, so a screen and the regularization guard agree about it instead
+    // of each discovering it separately. See `utils/attendance_missing_punch.js`.
+    day.punch_evidence_stale = punchEvidenceStale(day, live);
+    day.live_punch_count = Number(live.punch_count) || 0;
+  } else {
+    day.punch_evidence_stale = false;
+    day.live_punch_count = null;
   }
   return day;
 }
@@ -170,7 +182,13 @@ function useStoredDay({ stored = null, day_closed = false } = {}) {
 /** The live day, labelled. A read that computes is a preview and says so. */
 function asLivePreview(day) {
   if (!day) return day;
-  return { ...day, calculation_source: CALCULATION_SOURCE.LIVE_PREVIEW };
+  // A live day IS its own evidence: there is no stored row to have drifted.
+  return {
+    ...day,
+    calculation_source: CALCULATION_SOURCE.LIVE_PREVIEW,
+    punch_evidence_stale: false,
+    live_punch_count: Number(day.punch_count) || 0,
+  };
 }
 
 /**

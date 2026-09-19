@@ -13,6 +13,7 @@ const {
 } = require("../utils/attendance_approval_chain");
 const { CALC_STATUS, addDays } = require("../utils/attendance_engine");
 const { toDateOnly } = require("../utils/shiftResolution");
+const { missingPunchEligibility } = require("../utils/attendance_missing_punch");
 
 /** MySQL's TINYINT(1), a JS boolean and a string "1" all mean the same thing. */
 const tinyBool = (value) => value === true || Number(value) === 1;
@@ -164,6 +165,30 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
   };
 
   /**
+   * ONE date, resolved exactly as a screen resolves it.
+   *
+   * `readRange` is the read path (`utils/attendance_stored_read.js`): stored
+   * history where the date has closed and has a row, the engine's answer
+   * otherwise, and either way it reports whether the stored punches still
+   * match the device's. A calculation usecase without it - the older fakes -
+   * falls back to the live calculation, which is what this used to do.
+   */
+  const readCanonicalDay = async (employeeId, date) => {
+    const read = attendanceCalculationUsecase.readRange
+      ? await attendanceCalculationUsecase.readRange({
+          employee_id: employeeId,
+          from_date: date,
+          to_date: date,
+        })
+      : await attendanceCalculationUsecase.calculateRange({
+          employee_id: employeeId,
+          from_date: date,
+          to_date: date,
+        });
+    return (read || [])[0] || null;
+  };
+
+  /**
    * Raise a MISSING PUNCH regularization for ONE date.
    *
    * Attendance correction only. The request carries the proposed punch, the
@@ -197,14 +222,15 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
       );
     }
 
-    // Recalculate the date now rather than trusting anything the caller sent.
-    // What is being regularized has to be what the engine actually says is
-    // wrong with the date, not what a screen believed a while ago.
-    const [day] = await attendanceCalculationUsecase.calculateRange({
-      employee_id: forEmployeeId,
-      from_date: date,
-      to_date: date,
-    });
+    // THE CANONICAL DAY, read the way the employee's screen reads it.
+    // Nothing the caller sent is trusted; what is resolved here is the SAME
+    // day `/attendance/me` returns for this date - the stored row where the
+    // date has closed and has one, the engine's answer where it has not - so
+    // the punches this guard counts are the punches the employee was shown.
+    // Reading through `calculateRange` instead counted a second, live set,
+    // and a date whose stored row had since drifted was refused as "a
+    // complete day" while the modal listed a single punch.
+    const day = await readCanonicalDay(forEmployeeId, date);
 
     if (!day || !day.shift_snapshot) {
       throw validationError(
@@ -245,14 +271,14 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
     }
     const requiresApproval = !policy || tinyBool(policy.regularization_requires_approval);
 
-    if (day.punch_count % 2 !== 1) {
-      // Nothing is missing, so a manual punch here would be an edit to a
-      // complete day rather than a regularization. Refused, not ignored. (OT
-      // on a complete day is an OT request, not this.)
-      throw validationError(
-        `${date} has ${day.punch_count} punches - a punch cannot be added to a complete day`
-      );
-    }
+    // Nothing missing means a manual punch here would be an edit to a
+    // complete day rather than a regularization; drifted punch evidence means
+    // neither count can be trusted until the date is recalculated. Both are
+    // decided by the shared rule the screen also applies, so the button and
+    // the guard can never disagree. Refused, not ignored. (OT on a complete
+    // day is an OT request, not this.)
+    const eligibility = missingPunchEligibility(day);
+    if (!eligibility.allowed) throw validationError(eligibility.message);
     if (!punch_time) {
       throw validationError("punch_time is required when a punch is missing");
     }
