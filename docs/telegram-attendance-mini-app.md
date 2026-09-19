@@ -104,11 +104,22 @@ the same type. There is still exactly one `getUpdates` owner, no webhook, and
 | `<base>?section=corrections` | Corrections |
 | `<base>?section=help` | Help |
 | `<base>?section=corrections&date=YYYY-MM-DD` | Corrections, that date highlighted (the 06:00 alert) |
+| `<base>?date=YYYY-MM-DD` | Corrections, that date highlighted (**legacy** alert buttons already sent) |
 
-`section` and `date` are **navigation only and carry zero authority**. An
-unknown, empty, absent or hostile `section` falls back to My Attendance; a
-`date` the employee is not entitled to is simply not in the list the server
-returns, so it highlights nothing. Neither is ever sent to the API.
+The rule, in precedence order: an explicit **recognised** `section` wins
+outright (`?section=attendance&date=…` stays on My Attendance); otherwise a
+**valid** `date` means Corrections; otherwise My Attendance. An invalid date
+is no date (`?date=yesterday` → My Attendance), and an unrecognised section is
+no section, so a legacy date beside one is still honoured.
+
+The bare-`date` case exists for backward compatibility: buttons in that older
+shape are already in employees' chats and stay tappable indefinitely, so they
+must land where they promised.
+
+`section` and `date` are **navigation only and carry zero authority**. They
+choose a tab and a highlight; a `date` the employee is not entitled to is
+simply not in the list the server returns, so it highlights nothing. Neither
+is ever sent to the API.
 
 | Method | Path | What it does |
 | --- | --- | --- |
