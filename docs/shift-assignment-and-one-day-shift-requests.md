@@ -140,6 +140,23 @@ The screen shows 207 as a red *"Saved, but attendance was NOT recalculated"*
 warning with a Retry button over the exact range. Nothing on that path claims
 the attendance was recalculated.
 
+### The retry keeps the change's own authority
+
+`POST /hr/work-shift-assignments/recalculate` — `employee_edit` +
+`edit_shift_assignment_effective_dated`, plus `requireEmployeeInScope()`. NOT
+`/attendance/calculated/recalculate-bulk`, which is the general tool (any
+employee, any outlet, any designation) behind `recalculate_attendance`, a key a
+shift editor need not hold: retrying there would have refused exactly the person
+entitled to finish the job, and granting them that key to avoid the refusal
+would have handed them the general tool.
+
+Narrow by construction: one employee named in the body and checked against the
+caller's branch scope, an explicit range validated against **that employee's own
+assignment history** (nothing before their first dated assignment, nothing after
+today), no `store_id` or `designation_id` to widen it with — Joi refuses unknown
+keys — and the payroll lock unchanged and still decisive on the calculation's own
+transactional write. `/attendance/calculated/recalculate-bulk` is untouched.
+
 ## Telegram
 
 Only the **first** approver is messaged, and that is a property of the wiring

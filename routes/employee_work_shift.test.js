@@ -69,7 +69,7 @@ const find = (method, path) =>
   guards.find((g) => g.method === method && g.path === path);
 
 describe("the endpoints", () => {
-  it("defines exactly the four reads, the bulk write, the correction and the effective-dated change", () => {
+  it("defines exactly the four reads, the bulk write, the correction, the effective-dated change and its recovery", () => {
     assert.deepEqual(
       guards.map((g) => `${g.method} ${g.path}`).sort(),
       [
@@ -80,6 +80,7 @@ describe("the endpoints", () => {
         "POST /work-shift-assignments/bulk",
         "POST /work-shift-assignments/change",
         "POST /work-shift-assignments/correction",
+        "POST /work-shift-assignments/recalculate",
       ]
     );
   });
@@ -114,6 +115,38 @@ describe("the endpoints", () => {
     assert.ok(!JSON.stringify(bulk.guard).includes("edit_shift_assignment_effective_dated"));
     const correction = find("POST", "/work-shift-assignments/correction");
     assert.ok(!JSON.stringify(correction.guard).includes("edit_shift_assignment_effective_dated"));
+  });
+
+  /*
+   * THE RECOVERY PATH KEEPS THE CHANGE'S OWN AUTHORITY.
+   *
+   * A manager entitled to move one employee's shift must be able to finish
+   * the job when the recalculation behind it fails - and must NOT thereby
+   * acquire `recalculate_attendance`, which points the general tool at any
+   * employee, outlet or designation.
+   */
+  it("the recalculation retry needs the SAME two keys as the change, and never the general recalculation key", () => {
+    const { guard } = find("POST", "/work-shift-assignments/recalculate");
+    assert.equal(guard.mode, "all");
+    assert.deepEqual(guard.keys, [P.EMPLOYEE_EDIT, P.EDIT_SHIFT_ASSIGNMENT_EFFECTIVE_DATED]);
+    assert.ok(!JSON.stringify(guard).includes("recalculate_attendance"));
+
+    // And it is scoped to an employee the caller may reach, like every other
+    // route on this router.
+    const fs = require("fs");
+    const path = require("path");
+    const code = fs.readFileSync(path.join(__dirname, "employee_work_shift.js"), "utf8");
+    const route = code.slice(
+      code.indexOf('"/work-shift-assignments/recalculate"'),
+      code.indexOf('"/work-shift-assignments/history/:employee_id"')
+    );
+    assert.match(route, /requireEmployeeInScope\(\)/);
+
+    // ONE employee, an explicit range, and nothing that could widen it.
+    assert.match(route, /employee_id: Joi\.number\(\)\.integer\(\)\.positive\(\)\.required\(\)/);
+    assert.match(route, /from_date: Joi\.string\(\)/);
+    assert.match(route, /to_date: Joi\.string\(\)/);
+    assert.ok(!/store_id|designation_id|employee_ids/.test(route), "no bulk or scope widening parameter");
   });
 
   it("the shift history is a READ, behind the view keys and not the edit one", () => {

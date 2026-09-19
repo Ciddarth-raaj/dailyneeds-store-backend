@@ -659,6 +659,97 @@ class EmployeeWorkShiftUsecase {
   }
 
   /**
+   * RE-RUN THE RECALCULATION A SHIFT CHANGE OWED BUT COULD NOT FINISH.
+   *
+   * ================================ WHY THIS IS NOT Recalculate Attendance ==
+   *
+   * `/attendance/calculated/recalculate-bulk` is the general tool: any
+   * employee, any outlet, any designation, any range, behind
+   * `recalculate_attendance` - a key the migration grants to nobody because
+   * it rewrites the rows payroll reads for whoever it is pointed at.
+   *
+   * A shift editor need not hold it, and giving it to them so that they can
+   * clean up after their own save would hand them the general tool for the
+   * sake of a specific recovery. So the recovery lives HERE, inside the
+   * authority the caller already used: the same two keys as the change
+   * itself, the same employee-scope guard, ONE employee, an explicit range,
+   * and no outlet or designation parameter to widen it with.
+   *
+   * IT IS RECOVERY, NOT A SECOND WAY IN. Everything it can do, the change it
+   * follows had already done: the same usecase, the same engine, the same
+   * transactional payroll lock at the write. What it cannot do is name
+   * anybody else, or any range this employee's own history does not cover.
+   */
+  async recalculateAfterChange(payload = {}) {
+    const employeeId = Number(payload.employee_id);
+    if (!Number.isInteger(employeeId) || employeeId <= 0) {
+      throw validationError("employee_id is required and must be an employee id");
+    }
+    if (!this.attendanceCalculationUsecase) {
+      return { code: 503, msg: "Attendance recalculation is not available on this server" };
+    }
+
+    const from = toDateOnly(payload.from_date);
+    const to = toDateOnly(payload.to_date);
+    if (from === null || to === null) {
+      throw validationError("from_date and to_date are required and must be dates as YYYY-MM-DD");
+    }
+    if (from > to) throw validationError("from_date must not be after to_date");
+
+    const existing = await this.repo.findExistingEmployeeIds([employeeId]);
+    if (!existing || existing.length === 0) {
+      return { code: 422, msg: `No employee exists for id ${employeeId}` };
+    }
+
+    /*
+     * THE RANGE MUST BE ONE THIS EMPLOYEE'S OWN HISTORY COVERS.
+     *
+     * Not an arbitrary window: a date before their first dated assignment
+     * resolves to NO_SHIFT and re-running it would write a row saying so
+     * over whatever is there, and a future date has nothing to calculate.
+     * Both ends are checked against facts about THIS employee rather than
+     * against a constant.
+     */
+    const today = istToday(payload.today);
+    const history = await this.repo.listAssignmentHistory(employeeId);
+    if (!history || history.length === 0) {
+      return { code: 422, msg: "That employee has no dated shift assignment, so there is nothing to recalculate" };
+    }
+    const firstAssigned = history
+      .map((row) => toDateOnly(row.effective_from))
+      .filter((date) => date !== null)
+      .sort()[0];
+
+    if (from < firstAssigned) {
+      throw validationError(
+        `from_date is before this employee's first shift assignment (${firstAssigned}), so those dates have no shift to recalculate under`
+      );
+    }
+    if (to > today) {
+      throw validationError("to_date cannot be in the future");
+    }
+
+    // The friendly refusal. The rule is still the transactional lock the
+    // calculation takes on its own write.
+    await this._preflightUnlocked(employeeId, { from, to }, "This recalculation");
+
+    const recalculated = await this.attendanceCalculationUsecase.recalculateRange({
+      employee_id: employeeId,
+      from_date: from,
+      to_date: to,
+    });
+
+    return {
+      code: 200,
+      employee_id: employeeId,
+      from_date: from,
+      to_date: to,
+      recalculated,
+      msg: `Attendance for ${from} to ${to} has been recalculated.`,
+    };
+  }
+
+  /**
    * SHIFT HISTORY for one employee: every dated row, newest first.
    *
    * `is_current` is the RESOLVER's answer for today, not a column and not the

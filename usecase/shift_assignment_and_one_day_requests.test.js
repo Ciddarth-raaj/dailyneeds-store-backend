@@ -659,6 +659,68 @@ describe("A. Edit Shift Assignment - effective from a date", () => {
   });
 });
 
+/* ============ the recovery path, inside the change's own authority ====== */
+
+describe("A. re-running the recalculation a shift change could not finish", () => {
+  it("re-runs the exact employee and range, through the same calculation usecase", async () => {
+    const world = build({ rawPunches: [punch(1, EMPLOYEE, "2026-09-12 18:00:00"), punch(2, EMPLOYEE, "2026-09-12 22:00:00")] });
+
+    const result = await world.workShift.recalculateAfterChange({
+      employee_id: EMPLOYEE, from_date: "2026-09-10", to_date: "2026-09-15", today: TODAY,
+    });
+
+    assert.equal(result.code, 200);
+    assert.equal(result.employee_id, EMPLOYEE);
+    assert.deepEqual([result.from_date, result.to_date], ["2026-09-10", "2026-09-15"]);
+    assert.ok(result.recalculated, "the calculation usecase actually ran");
+    assert.match(result.msg, /has been recalculated/);
+  });
+
+  it("refuses a LOCKED payroll range - the recovery never reopens a settled month", async () => {
+    const world = build({ lockedMonths: ["2026-9"] });
+    await assert.rejects(
+      () => world.workShift.recalculateAfterChange({
+        employee_id: EMPLOYEE, from_date: "2026-09-10", to_date: "2026-09-15", today: TODAY,
+      }),
+      (err) => {
+        assert.equal(err.code, "PAYROLL_MONTH_LOCKED");
+        return true;
+      }
+    );
+    assert.deepEqual(world.saved.calculations, [], "nothing was written");
+  });
+
+  it("refuses a range this employee's own history does not cover", async () => {
+    const world = build();
+    // Their first dated assignment is 01 Sep.
+    await assert.rejects(
+      () => world.workShift.recalculateAfterChange({
+        employee_id: EMPLOYEE, from_date: "2026-08-01", to_date: "2026-09-15", today: TODAY,
+      }),
+      /before this employee's first shift assignment/
+    );
+    await assert.rejects(
+      () => world.workShift.recalculateAfterChange({
+        employee_id: EMPLOYEE, from_date: "2026-09-10", to_date: "2026-12-31", today: TODAY,
+      }),
+      /to_date cannot be in the future/
+    );
+    assert.deepEqual(world.saved.calculations, []);
+  });
+
+  it("names ONE employee and has no parameter that could widen it", async () => {
+    const world = build();
+    await assert.rejects(
+      () => world.workShift.recalculateAfterChange({ from_date: "2026-09-10", to_date: "2026-09-15", today: TODAY }),
+      /employee_id is required/
+    );
+    const unknown = await world.workShift.recalculateAfterChange({
+      employee_id: 999, from_date: "2026-09-10", to_date: "2026-09-15", today: TODAY,
+    });
+    assert.equal(unknown.code, 422);
+  });
+});
+
 /* ================================ B. the employee's one-day shift request = */
 
 describe("B. the one-day shift request - what may be asked for", () => {
