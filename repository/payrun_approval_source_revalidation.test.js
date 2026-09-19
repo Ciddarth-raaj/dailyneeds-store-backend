@@ -309,3 +309,64 @@ describe("the attendance marker subset is the source set's, not a second one", (
     assert.match(source, /attendanceSourceChanges\(stored, current\)/);
   });
 });
+
+/* ============ Close for Payroll does NOT reach this gate ================= */
+
+/**
+ * THE TWO FEATURES MEET HERE, AND THIS IS WHERE IT MATTERS MOST.
+ *
+ * "Close Attendance for Payroll" lets payroll accept UNSETTLED attendance as
+ * the basis for a month - it satisfies the readiness blocker that would
+ * otherwise stop an approval. The obvious fear is that it becomes a way to
+ * approve a month whose attendance has since MOVED, which is precisely what
+ * this revalidation exists to refuse.
+ *
+ * IT CANNOT, AND THE REASON IS STRUCTURAL RATHER THAN CAREFUL. The close is
+ * stored on `payrun_employee`; this transaction reads
+ * `payrun_employee_calculation`, `attendance_monthly_payroll` and
+ * `attendance_day_calculation`, and nothing else. There is no statement in
+ * `approve` that reads a close column, so no close can be consulted by it,
+ * let alone honoured.
+ *
+ * THE TWO ANSWER DIFFERENT QUESTIONS, which is why both can be true at once:
+ *
+ *   the close says  "we accept the attendance AS IT WAS when we looked"
+ *   this gate says  "and it is still what it was when you pressed Approve"
+ *
+ * An employee who was closed and whose attendance then moved is refused here,
+ * exactly like anybody else, and must be recalculated first.
+ */
+describe("an accepted attendance basis is still revalidated", () => {
+  it("refuses a closed employee whose attendance moved after the close", async () => {
+    const pool = fakePool({ attendance: { ...CURRENT_ATTENDANCE, payroll_version: 4 } });
+    const [result] = await approve(pool);
+
+    assert.equal(result.outcome, "SOURCE_MOVED");
+    assert.ok(result.changed.length > 0);
+    assert.equal(approvalUpdates(pool.log).length, 0, "no status was changed");
+    assert.equal(auditInserts(pool.log).length, 0);
+  });
+
+  it("never reads a close column, so a close cannot influence it", () => {
+    const pool = fakePool();
+    return approve(pool).then(() => {
+      const everything = pool.log.map((e) => String(e.sql)).join(" ");
+      assert.ok(
+        !/attendance_closed_for_payroll/i.test(everything),
+        "the approval transaction consults the close"
+      );
+      assert.ok(
+        !/FROM payrun_employee\b(?!_)/i.test(everything),
+        "the approval transaction reads the snapshot the close lives on"
+      );
+    });
+  });
+
+  it("still approves a closed employee whose sources have NOT moved", async () => {
+    /* The close is not a licence to approve a stale month - and equally it is
+       not a curse: unchanged sources approve exactly as they always did. */
+    const pool = fakePool();
+    const [result] = await approve(pool);
+    assert.equal(result.outcome, "APPROVED");
+  });
+});
