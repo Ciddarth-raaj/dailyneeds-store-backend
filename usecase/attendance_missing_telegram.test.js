@@ -87,16 +87,47 @@ const build = ({ data, chats, alreadyClaimed, failFor, configured, miniAppUrl = 
 };
 
 describe("the message", () => {
-  it("is the approved text, with the date and the real punch count", () => {
+  it("is the approved text: the date, and NO punch count", () => {
     assert.equal(
       buildNotifier.buildMessage({ attendance_date: YESTERDAY, punch_count: 3 }),
       [
         "Good morning.",
         "Your attendance for 18 Sep 2026 has a missing punch.",
-        "Punches recorded: 3",
         "Please submit the required attendance correction.",
       ].join("\n")
     );
+  });
+
+  /**
+   * THE RULE, ASSERTED AGAINST THE SENT MESSAGE RATHER THAN THE BUILDER.
+   * A punch count could come back through a template, an interpolation or a
+   * future line; this looks at what actually reached Telegram.
+   */
+  it("never tells the employee how many punches were recorded", async () => {
+    const { notifier, telegramService } = build({
+      data: [candidate(42, 7)],
+      chats: [{ employee_id: 42, private_chat_id: 9001 }],
+    });
+    await notifier.run({ today: TODAY });
+    const text = telegramService.sent[0].msg;
+    assert.ok(!/punches recorded/i.test(text), text);
+    assert.ok(!/\b7\b/.test(text), text);
+    assert.match(text, /18 Sep 2026/);
+  });
+
+  it("the historical catch-up message names every date and no count", () => {
+    assert.equal(
+      buildNotifier.buildHistoricalMessage(["2026-09-05", "2026-09-11", "2026-09-18"]),
+      [
+        "Good morning.",
+        "You have missing attendance punches on the following dates:",
+        "05 Sep 2026",
+        "11 Sep 2026",
+        "18 Sep 2026",
+        "Please submit the required attendance corrections.",
+      ].join("\n")
+    );
+    assert.equal(buildNotifier.buildHistoricalMessage([]), null);
   });
 
   it("is sent as PLAIN TEXT, so no database value can break the whole batch", async () => {
@@ -278,18 +309,36 @@ describe("Telegram Mini App readiness", () => {
     assert.equal(telegramService.sent[0].options.replyMarkup, undefined);
   });
 
-  it("attaches a Correct Attendance web_app button once a Mini App URL is configured", async () => {
+  it("attaches a Regularise Attendance web_app button once a Mini App URL is configured", async () => {
     const { notifier, telegramService } = build({
       data: [candidate(42)],
       chats: [{ employee_id: 42, private_chat_id: 9001 }],
-      miniAppUrl: "https://app.example.com/correct-attendance/",
+      miniAppUrl: "https://app.example.com/telegram/attendance/",
     });
     await notifier.run({ today: TODAY });
     const button = telegramService.sent[0].options.replyMarkup.inlineKeyboard[0][0];
-    assert.equal(button.text, "Correct Attendance");
+    assert.equal(button.text, "Regularise Attendance");
     assert.equal(
       button.web_app.url,
-      "https://app.example.com/correct-attendance?employee_id=42&attendance_date=2026-09-18"
+      "https://app.example.com/telegram/attendance?date=2026-09-18"
     );
+  });
+
+  /**
+   * THE URL IS A NAVIGATION HINT, NOT AN IDENTITY. An employee id in the
+   * query string would be a value the employee's own WebView could edit, and
+   * the Mini App would then be one forgotten server-side check away from
+   * showing somebody else's attendance. There is no such value to forget.
+   */
+  it("puts NO employee id and NO punch count in the Mini App URL", async () => {
+    const { notifier, telegramService } = build({
+      data: [candidate(42, 5)],
+      chats: [{ employee_id: 42, private_chat_id: 9001 }],
+      miniAppUrl: "https://app.example.com/telegram/attendance",
+    });
+    await notifier.run({ today: TODAY });
+    const url = telegramService.sent[0].options.replyMarkup.inlineKeyboard[0][0].web_app.url;
+    assert.ok(!/employee/i.test(url), url);
+    assert.ok(!/punch/i.test(url), url);
   });
 });

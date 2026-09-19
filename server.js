@@ -756,6 +756,25 @@ class Server {
       // message, schedule, ledger or population rule has to move.
       miniAppUrl: process.env.ATTENDANCE_CORRECTION_MINI_APP_URL || null,
     });
+    // THE TELEGRAM ATTENDANCE MINI APP.
+    //
+    // Two usecases, deliberately separate. The SESSION one is the only place
+    // an employee identity is decided: Telegram's signed `initData`, verified
+    // against the bot token, resolved through `employee_telegram_identity`
+    // where `disconnected_at IS NULL`. The MINI APP one owns no attendance
+    // rule at all - it reads the shared Missing Attendance population, the
+    // ordinary calculated-attendance read, and raises the ORDINARY
+    // regularization request through the usecase below it.
+    //
+    // The bot token is read lazily and never stored here, so a deployment
+    // without TELEGRAM_BOT_TOKEN refuses Mini App sessions with a clear code
+    // instead of failing to start.
+    this.telegramAttendanceSessionUsecase = require("./usecase/telegram_attendance_session")({
+      identityRepo: this.employeeTelegramRepo,
+      jwtService: require("./services/jwt"),
+      getBotToken: () => process.env.TELEGRAM_BOT_TOKEN || null,
+      log: require("./utils/logger"),
+    });
     // Attendance v2 / A3. Handed the calculation usecase as well, because a
     // request is validated against what the engine actually says is wrong with
     // the date, and a final approval recalculates that date immediately.
@@ -764,6 +783,14 @@ class Server {
       this.attendanceCalculationUsecase,
       this.attendanceApproverSetupRepo
     );
+    // Built AFTER the regularization usecase, because it reads
+    // MAX_BACKDATE_DAYS from it rather than restating the number.
+    this.telegramAttendanceMiniAppUsecase = require("./usecase/telegram_attendance_miniapp")({
+      attendanceMissingUsecase: this.attendanceMissingUsecase,
+      attendanceCalculationUsecase: this.attendanceCalculationUsecase,
+      attendanceRegularizationUsecase: this.attendanceRegularizationUsecase,
+      log: require("./utils/logger"),
+    });
     this.attendanceApproverSetupUsecase = require("./usecase/attendance_approver_setup")(
       this.attendanceApproverSetupRepo
     );
@@ -1415,6 +1442,10 @@ class Server {
       this.permissions,
       this.sensitive
     );
+    const telegramAttendanceRouter = require("./routes/telegram_attendance")(
+      this.telegramAttendanceSessionUsecase,
+      this.telegramAttendanceMiniAppUsecase
+    );
     const attendanceApproverSetupRouter = require("./routes/attendance_approver_setup")(
       this.attendanceApproverSetupUsecase,
       this.permissions
@@ -1724,6 +1755,7 @@ class Server {
     app.use("/", attendanceMissingRouter.getRouter());
     app.use("/", attendanceRegularizationRouter.getRouter());
     app.use("/", attendanceApproverSetupRouter.getRouter());
+    app.use("/", telegramAttendanceRouter.getRouter());
     app.use("/attendance", attendanceRawRouter.getRouter());
     app.use("/store", storeRouter.getRouter());
     app.use("/outlet", outletRouter.getRouter());

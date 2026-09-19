@@ -32,19 +32,29 @@
  *   EVERY OUTCOME IS      SENT / FAILED / SKIPPED, with a short reason code,
  *   RECORDED              in `attendance_missing_notification`.
  *
- * ======================================== TELEGRAM MINI APP READINESS ======
+ * ========================================= THE TELEGRAM ATTENDANCE MINI APP =
  *
- * The notification row and the result record carry exactly what a "Correct
- * Attendance" button needs and nothing more: `employee_id`, `attendance_date`
- * and `punch_count`. `buildCorrectionTarget` names that triple in one place,
- * and `correctionButton` turns it into an inline `web_app` keyboard IF - and
- * only if - a Mini App base URL is configured.
+ * `correctionButton` attaches ONE inline `web_app` button - "Regularise
+ * Attendance" - IF, and only if, a Mini App base URL is configured. With no
+ * URL configured the message goes out with no keyboard at all and everything
+ * else is unchanged: delivery never depends on the Mini App existing.
  *
- * NO MINI APP IS BUILT HERE, and none is assumed to exist. With no URL
- * configured (the default, and the state of this repository today) the
- * message goes out with no keyboard at all and everything else is unchanged.
- * When the Mini App does exist, the button is one configured value away and
- * no message, schedule, ledger or population rule has to move.
+ * THE URL CARRIES A NAVIGATION HINT AND NOTHING ELSE. `?date=` tells the Mini
+ * App which card to preselect. It is NOT authority and the Mini App does not
+ * treat it as any: identity comes from Telegram's signed `initData`, and the
+ * list of dates comes from the server for the employee that signature
+ * resolves to. `employee_id` is deliberately NOT in the URL - a query-string
+ * employee id would be a value a browser could change, and there must be no
+ * such value anywhere in this feature.
+ *
+ * ============================== THE EMPLOYEE IS NOT TOLD THEIR PUNCH COUNT =
+ *
+ * `buildMessage` names the DATE and asks for a correction. It does not say
+ * how many punches were recorded, because that number answers no question the
+ * employee can act on and invites an argument with a machine. The count is
+ * still computed, still stored on the notification ledger row, still on the
+ * Missing Attendance report and still in every calculation - it is only
+ * absent from what the employee reads.
  */
 
 const missing = require("../utils/attendance_missing");
@@ -78,28 +88,54 @@ function displayDate(dateOnly) {
  *
  * `services/telegram.js` defaults to legacy Markdown, which REJECTS THE WHOLE
  * MESSAGE when interpolated text contains an unbalanced `_`, `*` or backtick.
- * Nothing is interpolated here today but the date and a number - but the
+ * Nothing is interpolated here today but the date - but the
  * plain path costs nothing and means a future line carrying an employee name
  * or a shift code cannot silently stop the whole batch. The existing security
  * alerts take the same path for the same reason.
  */
-function buildMessage({ attendance_date, punch_count }) {
+function buildMessage({ attendance_date }) {
   return [
     "Good morning.",
     `Your attendance for ${displayDate(attendance_date)} has a missing punch.`,
-    `Punches recorded: ${punch_count}`,
     "Please submit the required attendance correction.",
   ].join("\n");
 }
 
 /**
- * THE MINI APP HANDOFF, named once.
+ * THE FUTURE ONE-TIME HISTORICAL CATCH-UP MESSAGE, written now and sent by
+ * nothing.
  *
- * Everything a "Correct Attendance" screen needs to open on the right day for
- * the right person - and deliberately nothing else. It is not a token and
- * grants nothing: the Mini App will authenticate the employee through
- * Telegram's own `initData` exactly as any other Mini App does, and these
- * three values only tell it which date to show.
+ * NO JOB CALLS THIS. It exists so that when a catch-up is approved, the
+ * message it sends is this one rather than a second message format invented
+ * under time pressure - and so the "no punch counts to the employee" rule is
+ * already true of it. The Mini App needs no change to serve it: its list
+ * already returns EVERY actionable date inside the regularisation window, so
+ * one button over several dates opens exactly the right screen.
+ */
+function buildHistoricalMessage(attendanceDates) {
+  const dates = (Array.isArray(attendanceDates) ? attendanceDates : [])
+    .map((d) => displayDate(d))
+    .filter((d) => d !== "");
+  if (dates.length === 0) return null;
+  return [
+    "Good morning.",
+    "You have missing attendance punches on the following dates:",
+    ...dates,
+    "Please submit the required attendance corrections.",
+  ].join("\n");
+}
+
+/** The label on the button, in one place so the message and the tests agree. */
+const CORRECTION_BUTTON_TEXT = "Regularise Attendance";
+
+/**
+ * THE INTERNAL HANDOFF RECORD, named once.
+ *
+ * This is what the ledger and the batch summary carry so a later reader can
+ * see which employee and date a message was about, and how odd the day was.
+ * IT IS NOT WHAT THE EMPLOYEE SEES and it is not what goes in the URL: the
+ * punch count here is an audit fact, and `employee_id` never leaves the
+ * server.
  */
 function buildCorrectionTarget(candidate) {
   return {
@@ -112,16 +148,21 @@ function buildCorrectionTarget(candidate) {
 /**
  * The inline keyboard, or null when no Mini App is configured.
  *
- * Null is the normal answer today and the message is sent without a keyboard.
+ * Null means the message is sent with no keyboard at all - alert delivery
+ * does not depend on the Mini App being deployed.
+ *
+ * THE URL CARRIES `?date=` AND NOTHING ELSE. It is a navigation hint the Mini
+ * App may use to preselect a card. No `employee_id`: identity is Telegram's
+ * signed `initData` resolved against `employee_telegram_identity` on the
+ * server, and a query-string employee id would be a value the employee's own
+ * browser could edit.
  */
 function correctionButton(candidate, miniAppUrl) {
   if (!miniAppUrl) return null;
-  const target = buildCorrectionTarget(candidate);
-  const url = `${String(miniAppUrl).replace(/\/+$/, "")}?employee_id=${encodeURIComponent(
-    target.employee_id
-  )}&attendance_date=${encodeURIComponent(target.attendance_date)}`;
+  const base = String(miniAppUrl).replace(/\/+$/, "");
+  const url = `${base}?date=${encodeURIComponent(candidate.attendance_date)}`;
   return {
-    inlineKeyboard: [[{ text: "Correct Attendance", web_app: { url } }]],
+    inlineKeyboard: [[{ text: CORRECTION_BUTTON_TEXT, web_app: { url } }]],
   };
 }
 
@@ -319,12 +360,23 @@ module.exports = ({
     return summary;
   };
 
-  return { OUTCOME, REASON, buildMessage, buildCorrectionTarget, correctionButton, run };
+  return {
+    OUTCOME,
+    REASON,
+    CORRECTION_BUTTON_TEXT,
+    buildMessage,
+    buildHistoricalMessage,
+    buildCorrectionTarget,
+    correctionButton,
+    run,
+  };
 };
 
 module.exports.OUTCOME = OUTCOME;
 module.exports.REASON = REASON;
+module.exports.CORRECTION_BUTTON_TEXT = CORRECTION_BUTTON_TEXT;
 module.exports.buildMessage = buildMessage;
+module.exports.buildHistoricalMessage = buildHistoricalMessage;
 module.exports.buildCorrectionTarget = buildCorrectionTarget;
 module.exports.correctionButton = correctionButton;
 module.exports.displayDate = displayDate;

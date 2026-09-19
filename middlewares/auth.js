@@ -246,6 +246,23 @@ const unProtectedRoutes = {
   // "/tally/expenses": { methods: { get: true } },
   // "/tally/purchase": { methods: { get: true } },
   // "/tally/debit-note": { methods: { get: true } },
+  // TELEGRAM ATTENDANCE MINI APP. A Mini App runs inside Telegram with no
+  // dnds.co.in session and no way to obtain one - most employees have no
+  // login at all - so these four step past the `x-access-token` gate for the
+  // same reason `/user/login` and `/user/forgot-password` do, and for no
+  // other. They are NOT unauthenticated: `routes/telegram_attendance.js`
+  // applies its own, stricter gate on every one of them. `/session` proves
+  // identity with Telegram's own signature over `initData`; the other three
+  // require the short-lived scoped token that call returns, in a SEPARATE
+  // header (`x-telegram-session`), and refuse an ordinary login token.
+  //
+  // The paths are static because this map is an exact `req.path` lookup: a
+  // `/date/:attendance_date` route could not be named here.
+  "/telegram/attendance/session": { methods: { post: true } },
+  "/telegram/attendance/missing-dates": { methods: { get: true } },
+  "/telegram/attendance/date": { methods: { get: true } },
+  "/telegram/attendance/regularization": { methods: { post: true } },
+
   "/purchase-tally": { methods: { post: true } },
   "/purchase": { methods: { post: true } },
   // "/debit-note-tally": { methods: { post: true } },
