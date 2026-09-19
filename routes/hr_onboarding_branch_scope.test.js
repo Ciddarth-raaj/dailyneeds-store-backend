@@ -80,13 +80,22 @@ const HR_NO_SENSITIVE = { designation: 24, employee: 904, store: MOOLAKULAM };
 const ADMIN = { designation: 25, employee: 905, store: KATHIRKAMAM };
 
 const GRANTS = {
-  [STORE_MANAGER.designation]: [P.VIEW_EMPLOYEES, P.VIEW_HR_ONBOARDING_DASHBOARD],
+  // The write keys too: a store manager onboards their own staff, which is
+  // exactly why the branch rules on create and edit have to hold.
+  [STORE_MANAGER.designation]: [
+    P.VIEW_EMPLOYEES,
+    P.VIEW_HR_ONBOARDING_DASHBOARD,
+    P.EMPLOYEE_CREATE,
+    P.EMPLOYEE_EDIT,
+  ],
   [PLAIN_MANAGER.designation]: [P.VIEW_EMPLOYEES],
   [HR.designation]: [
     P.VIEW_EMPLOYEES,
     P.VIEW_HR_ONBOARDING_DASHBOARD,
     P.EMPLOYEE_SCOPE_ALL_BRANCHES,
     P.VIEW_EMPLOYEE_SENSITIVE,
+    P.EMPLOYEE_CREATE,
+    P.EMPLOYEE_EDIT,
   ],
   [HR_NO_SENSITIVE.designation]: [
     P.VIEW_EMPLOYEES,
@@ -131,6 +140,12 @@ const outletUsecase = { getDirectory: async () => OUTLETS.map((o) => ({ ...o }))
 
 /** What the employee list was asked for, and WITH WHICH ACTOR. */
 const listCalls = [];
+/** The writes the branch rules guard. The lifecycle itself is tested in C2. */
+const masterUsecase = {
+  createEmployee: async (input) => ({ code: 200, employee_id: 1234, input }),
+  editEmployee: async (id) => ({ code: 200, employee_id: id }),
+};
+
 const employeeUsecase = {
   get: async (query, actor) => {
     listCalls.push({ query, actor });
@@ -171,7 +186,7 @@ before(async () => {
   delete require.cache[require.resolve("./employee_master")];
   delete require.cache[require.resolve("./employee")];
   const master = require("./employee_master")(
-    {}, permissions, sensitive, null, null, statusSummaryUsecase, null, branchScope,
+    masterUsecase, permissions, sensitive, null, null, statusSummaryUsecase, null, branchScope,
     outletUsecase
   );
   const employees = require("./employee")(employeeUsecase, permissions, sensitive, branchScope);
@@ -213,6 +228,26 @@ const call = async (p, who, opts) => {
     body = text;
   }
   return { status: res.status, body, text };
+};
+
+/** The same, for a write. The branch rules apply to bodies as well as queries. */
+const post = async (p, who, body, opts) => {
+  const res = await fetch(`http://127.0.0.1:${port}${p}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-access-token": await tokenFor(who, opts) },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e) {
+    parsed = text;
+  }
+  // These routes answer 200-with-a-code for some refusals and a real status
+  // for others, so the status a test asserts is the one the CALLER sees.
+  const status = parsed && parsed.code && res.status === 200 ? parsed.code : res.status;
+  return { status, body: parsed, text };
 };
 
 const lastSummary = () => summaryCalls[summaryCalls.length - 1];
@@ -452,5 +487,164 @@ describe("the outlets endpoint answers about the scope, never about the rows", (
     const r = await call("/hr/employees/outlets", NOBODY);
     assert.equal(r.status, 403, "an unresolvable branch is refused, not widened");
     assert.ok(!r.text.includes("Kathirkamam"));
+  });
+});
+
+/* ================= the permission model, pinned ========================= */
+
+/**
+ * ONE COHERENT MODEL, AND A TEST THAT SAYS SO, because the three concerns are
+ * easy to collapse into each other by accident and the collapse is invisible
+ * until somebody is wrongly let in or wrongly refused.
+ *
+ *   ACCESS     `view_hr_onboarding_dashboard` - may you open the work queue.
+ *              Checked in the browser, because the screen is the thing being
+ *              opened; there is no server resource that IS the screen.
+ *   THE DATA   `view_employees` - may you read employees at all. Every one of
+ *              the three endpoints behind this screen requires it, because
+ *              each returns employees or something about them.
+ *   SCOPE      `employee_branch_scope` - WHICH employees. Never a permission
+ *              key, never an access decision.
+ *   SENSITIVE  `view_employee_sensitive` - the payment route and the PF/ESI
+ *              applicability columns, independently of all of the above.
+ *
+ * WHY THE OUTLETS ENDPOINT TAKES `view_employees` AND NOT THE DASHBOARD KEY.
+ * It is the EMPLOYEE outlet source, shared by Employee Master, New Employee,
+ * the employee profile and Employee Shift Assignment - none of which hold the
+ * dashboard right and all of which need their branch dropdown narrowed. Gating
+ * it on the dashboard key would break those four screens to no benefit, and
+ * would make the dashboard key a data permission, which is exactly the
+ * collapse this model avoids. It is consistent with its two siblings, which
+ * take `view_employees` for the same reason.
+ *
+ * AND WHY A DASHBOARD-RIGHT HOLDER IS NOT BROKEN BY THAT. A caller with the
+ * dashboard right but without `view_employees` cannot use the screen under
+ * ANY model: the employee list refuses them and the queue is empty. The
+ * outlet endpoint is not what stops them, and granting it to them alone would
+ * hand them a list of branch names and nothing to put in it.
+ */
+describe("the HR Onboarding permission model", () => {
+  it("gates all three of the screen's endpoints on `view_employees`", () => {
+    const src = require("fs").readFileSync(require("path").join(__dirname, "employee_master.js"), "utf8");
+    for (const route of ["/employees/status-summary", "/employees/outlets"]) {
+      const at = src.indexOf(`router.get("${route}"`);
+      assert.ok(at > -1, `${route} exists`);
+      const decl = src.slice(at, at + 200);
+      assert.match(decl, /this\.permissions\.require\(P\.VIEW_EMPLOYEES\)/, `${route} takes view_employees`);
+    }
+    const emp = require("fs").readFileSync(require("path").join(__dirname, "employee.js"), "utf8");
+    const at = emp.indexOf('router.get("/employees"');
+    assert.match(emp.slice(at, at + 200), /this\.permissions\.require\(P\.VIEW_EMPLOYEES\)/);
+  });
+
+  it("gates NONE of them on the dashboard right - that right is the screen's", () => {
+    // The dashboard right must not become a data permission. If it appeared
+    // on one of these endpoints, Employee Master and New Employee would start
+    // requiring HR's work-queue right to draw a branch dropdown.
+    const src = require("fs").readFileSync(require("path").join(__dirname, "employee_master.js"), "utf8");
+    const at = src.indexOf('router.get("/employees/outlets"');
+    const route = src.slice(at, src.indexOf("\n    });", at));
+    assert.ok(
+      !/VIEW_HR_ONBOARDING_DASHBOARD/.test(route),
+      "the shared employee outlet source must not require the dashboard right"
+    );
+  });
+
+  it("gates none of them on the branch-scope key - scope is not access", () => {
+    const src = require("fs").readFileSync(require("path").join(__dirname, "employee_master.js"), "utf8");
+    assert.ok(
+      !/require\(P\.EMPLOYEE_SCOPE_ALL_BRANCHES\)/.test(src),
+      "the all-branches key must never be used as a permission gate"
+    );
+  });
+
+  it("a dashboard-right holder WITHOUT `view_employees` is refused the data", async () => {
+    // The honest consequence of the model, asserted rather than assumed: the
+    // right opens the screen, it does not read employees.
+    const DASH_ONLY = { designation: 26, employee: 906, store: KATHIRKAMAM };
+    GRANTS[DASH_ONLY.designation] = [P.VIEW_HR_ONBOARDING_DASHBOARD];
+    EMPLOYEES.push({ employee_id: DASH_ONLY.employee, store_id: KATHIRKAMAM, status: 1 });
+
+    for (const path of ["/hr/employees/status-summary", "/hr/employees/outlets", "/employee/employees"]) {
+      const r = await call(path, DASH_ONLY);
+      assert.equal(r.status, 403, `${path} must refuse them`);
+    }
+  });
+});
+
+/* ========== the employee screens share this outlet source ============== */
+
+/**
+ * EMPLOYEE MASTER, NEW EMPLOYEE, THE EMPLOYEE PROFILE AND EMPLOYEE SHIFT
+ * ASSIGNMENT all draw a branch dropdown, and all four now read
+ * `GET /hr/employees/outlets` instead of the company-wide
+ * `/outlet/directory`. The stakes rise across them:
+ *
+ *   the list        a FILTER. A foreign name is a disclosure.
+ *   new employee    the outlet IS the branch the employee is created into.
+ *   the profile     changing it is a BRANCH TRANSFER.
+ *
+ * So these assert the SERVER's answer for each shape, not what React drew.
+ * A dropdown is UX; `checkTargetBranch` is the boundary, and it is asserted
+ * below for both the create and the transfer.
+ */
+describe("the employee screens' outlet source and branch writes", () => {
+  it("serves a branch-scoped user only their own outlet, whatever the screen", async () => {
+    // One endpoint, one answer, for all four screens - which is the point of
+    // sharing it. `view_employees` is what each of those screens already has.
+    const r = await call("/hr/employees/outlets", STORE_MANAGER);
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body, [{ outlet_id: KATHIRKAMAM, outlet_name: "Kathirkamam" }]);
+    assert.ok(!r.text.includes("Moolakulam") && !r.text.includes("Villianur"));
+  });
+
+  it("serves an all-branch user every outlet, for the same screens", async () => {
+    const r = await call("/hr/employees/outlets", HR);
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body.map((o) => o.outlet_id).sort((a, b) => a - b), [KATHIRKAMAM, MOOLAKULAM, 9]);
+  });
+
+  it("REFUSES A CREATE INTO A FOREIGN BRANCH - the dropdown is not the guard", async () => {
+    // New Employee with a hand-edited `store_id`. The form cannot offer
+    // Moolakulam any more; this proves it would not matter if it did.
+    const r = await post("/hr/employee", STORE_MANAGER, {
+      employee_name: "Someone",
+      date_of_joining: "2026-01-01",
+      store_id: MOOLAKULAM,
+      designation_id: 3,
+      department_id: 4,
+    });
+    assert.equal(r.status, 403);
+    assert.equal(r.body.error, "OUT_OF_BRANCH_TRANSFER");
+  });
+
+  it("ALLOWS A CREATE INTO THEIR OWN BRANCH - the rule narrows, it does not block", async () => {
+    const r = await post("/hr/employee", STORE_MANAGER, {
+      employee_name: "Someone",
+      date_of_joining: "2026-01-01",
+      store_id: KATHIRKAMAM,
+      designation_id: 3,
+      department_id: 4,
+    });
+    // A real 200, not merely "not 403" - a 500 would also be "not 403" and
+    // would hide the rule having refused for the wrong reason.
+    assert.equal(r.status, 200);
+    assert.equal(r.body.employee_id, 1234);
+  });
+
+  it("REFUSES A TRANSFER OUT OF SCOPE from the employee profile", async () => {
+    // Employment Details naming another branch for an employee the caller
+    // may otherwise edit. `store_id` on the edit body is a transfer.
+    const r = await post(`/hr/employee/${STORE_MANAGER.employee}/edit`, STORE_MANAGER, {
+      store_id: MOOLAKULAM,
+    });
+    assert.equal(r.status, 403);
+    assert.equal(r.body.error, "OUT_OF_BRANCH_TRANSFER");
+  });
+
+  it("an all-branch user keeps the transfer capability", async () => {
+    const r = await post(`/hr/employee/${HR.employee}/edit`, HR, { store_id: MOOLAKULAM });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.employee_id, HR.employee);
   });
 });
