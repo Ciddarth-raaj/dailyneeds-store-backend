@@ -102,6 +102,41 @@ so no minute can be approved through two records:
 approved_ot_minutes = MIN(authorised + MIN(request_approved, excess), candidate)
 ```
 
+### At payroll lock
+
+The lock closes **the claimable remainder**, not the claim state:
+
+```
+claimable = excess_ot_minutes            (the whole candidate on an ordinary date)
+unclaimed = no OT request exists on the date
+close IF  unclaimed AND claimable > 0    -> NOT_REQUESTED_BEFORE_PAYROLL_LOCK
+```
+
+It used to select `ot_claim_state === "AVAILABLE"`, which was the same thing
+until an approved shift change could authorise *part* of a day: such a date
+reads `APPROVED_VIA_SHIFT_CHANGE`, so the old filter skipped it and any
+unrequested excess survived the lock unresolved — the screen still offering to
+claim it and the backend refusing the click.
+
+| Excess at lock | What happens |
+| --- | --- |
+| Never requested | Closed as `NOT_REQUESTED_BEFORE_PAYROLL_LOCK`, carrying **the excess minutes** |
+| Requested, pending | Rejected as `NOT_APPROVED_BEFORE_PAYROLL_LOCK` (the existing pending path) |
+| Already approved | Preserved and payable |
+| None | Nothing is filed — no closure record is fabricated |
+
+**The authorised portion is never touched.** It was approved, under Shift,
+before the month closed, and a closed period does not un-approve what was
+approved before it — exactly as it does not touch a settled OT approval. So the
+day carries two facts: `ot_claim_state = APPROVED_VIA_SHIFT_CHANGE` (the
+headline, and what payroll owes) and `ot_excess_state` (what became of the
+remainder). A closed 30-minute excess never presents a day of five approved
+hours as "Closed – Payroll Locked".
+
+`approved_preserved` counts every day leaving the lock with approved OT,
+whichever route approved it, with `approved_via_shift_change`,
+`approved_via_ot_request` and `approved_minutes_preserved` broken out beside it.
+
 ### Audit
 
 `attendance_day_calculation` carries `shift_authorised_ot_minutes`,

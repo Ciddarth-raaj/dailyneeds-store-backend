@@ -169,6 +169,10 @@ function otClaimFor({ day, otRequest, otSettled }) {
     ot_claimable_minutes: claimable,
     ot_authorising_request_id:
       authorised > 0 ? day.shift_change_request_id || null : null,
+    // What became of the CLAIMABLE remainder, which on an ordinary date is
+    // the whole day and on an authorised one is only the excess.
+    ot_excess_state: OT_CLAIM_STATE.NONE,
+    ot_excess_minutes: claimable,
     ot_request_id: otRequest ? otRequest.attendance_approval_request_id : null,
     ot_requested_minutes: otRequest ? Number(otRequest.candidate_ot_minutes || 0) : null,
     ot_reason: otRequest ? otRequest.reason || null : null,
@@ -181,16 +185,34 @@ function otClaimFor({ day, otRequest, otSettled }) {
     ot_rejection_remarks: otRequest ? otRequest.rejection_remarks || null : null,
   };
 
+  /*
+   * THE EXCESS'S OWN STATE, kept apart from the day's headline.
+   *
+   * An OT request on a shift-authorised date is about the EXCESS - the
+   * minutes earned outside the approved shift - and nothing else. Letting its
+   * state become the day's would mean a closed or rejected 30-minute excess
+   * presenting a day carrying five approved hours as "Closed - Payroll
+   * Locked", which is not what happened to those five hours and not what
+   * payroll owes. So the request's state is reported as `ot_excess_state`,
+   * and the day's own state stays what the shift change made it.
+   *
+   * On a date with no authorisation the two are the same value, which is
+   * every ordinary date and every existing caller.
+   */
   if (otRequest) {
+    let requestState;
     if (otRequest.status === "PENDING" || (otRequest.status === "APPROVED" && !otSettled)) {
-      claim.ot_claim_state = OT_CLAIM_STATE.REQUEST_PENDING;
+      requestState = OT_CLAIM_STATE.REQUEST_PENDING;
     } else if (otRequest.status === "APPROVED") {
-      claim.ot_claim_state = OT_CLAIM_STATE.APPROVED;
+      requestState = OT_CLAIM_STATE.APPROVED;
     } else if (otRequest.closure_reason) {
-      claim.ot_claim_state = OT_CLAIM_STATE.CLOSED_AT_PAYROLL_LOCK;
+      requestState = OT_CLAIM_STATE.CLOSED_AT_PAYROLL_LOCK;
     } else {
-      claim.ot_claim_state = OT_CLAIM_STATE.REJECTED;
+      requestState = OT_CLAIM_STATE.REJECTED;
     }
+    claim.ot_excess_state = requestState;
+    claim.ot_claim_state =
+      authorised > 0 ? OT_CLAIM_STATE.APPROVED_VIA_SHIFT_CHANGE : requestState;
     return claim;
   }
 
@@ -208,6 +230,7 @@ function otClaimFor({ day, otRequest, otSettled }) {
    * overtime is a guess until the missing punch is supplied.
    */
   const settledDay = day.is_final === true && day.status === CALC_STATUS.FINAL;
+  if (claimable > 0 && settledDay) claim.ot_excess_state = OT_CLAIM_STATE.AVAILABLE;
   if (authorised > 0 && settledDay) {
     claim.ot_claim_state = OT_CLAIM_STATE.APPROVED_VIA_SHIFT_CHANGE;
   } else if (claimable > 0 && settledDay) {

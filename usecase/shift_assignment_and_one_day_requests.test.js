@@ -293,7 +293,65 @@ function build(state = {}) {
     listStepsForRequests: async (ids) => store.steps.filter((s) => ids.includes(s.attendance_approval_request_id)),
     listPendingFor: async () => [],
     listForEmployee: async () => [],
-    closeOtAtPayrollLock: async () => ({ rejected_pending: 0, closed_unrequested: 0 }),
+    /*
+     * THE REAL CLOSURE, mirrored: a REJECTED OT record per unrequested date
+     * carrying the minutes it closed, and every PENDING OT request in the
+     * period rejected with the pending closure reason. Idempotent, because
+     * the real one skips a date that already has any OT record.
+     */
+    closeOtAtPayrollLock: async ({ unrequested = [], pending_closure, unrequested_closure, from_date, to_date }) => {
+      let closedUnrequested = 0;
+      let rejectedPending = 0;
+
+      store.requests
+        .filter(
+          (r) =>
+            r.request_type === "OT" &&
+            r.status === "PENDING" &&
+            r.attendance_date >= from_date &&
+            r.attendance_date <= to_date
+        )
+        .forEach((r) => {
+          r.status = "REJECTED";
+          r.closure_reason = pending_closure.code;
+          r.approved_ot_minutes = 0;
+          r.finalization_state = "SETTLED";
+          r.decided_at = "2026-09-30 10:00:00";
+          rejectedPending += 1;
+        });
+
+      unrequested.forEach((u) => {
+        const already = store.requests.find(
+          (r) => r.request_type === "OT" && r.attendance_date === u.attendance_date && r.status !== "CANCELLED"
+        );
+        if (already) return; // idempotent: a date with any OT record is left alone
+        const id = nextId; nextId += 1;
+        store.requests.push({
+          attendance_approval_request_id: id,
+          request_type: "OT",
+          requested_for_employee_id: EMPLOYEE,
+          requested_by_employee_id: EMPLOYEE,
+          attendance_date: u.attendance_date,
+          outlet_id: u.outlet_id,
+          requester_class: u.requester_class,
+          reason: unrequested_closure.label,
+          // THE MINUTES IT CLOSED - the excess, not the whole candidate.
+          candidate_ot_minutes: u.candidate_ot_minutes,
+          approved_ot_minutes: 0,
+          auto_created: 1,
+          status: "REJECTED",
+          closure_reason: unrequested_closure.code,
+          current_stage_no: 1,
+          total_stages: 1,
+          finalization_state: "SETTLED",
+          created_at: "2026-09-30 10:00:00",
+          decided_at: "2026-09-30 10:00:00",
+        });
+        closedUnrequested += 1;
+      });
+
+      return { rejected_pending: rejectedPending, closed_unrequested: closedUnrequested };
+    },
   };
 
   /** Employee-level chain: 7 First, 8 Final, for everybody. */
@@ -1620,5 +1678,214 @@ describe("B. OT authorised by an approved one-day shift change", () => {
     });
     assert.equal(shift.rows.length, 1, "the approval is on the Shift tab, where it happened");
     assert.equal(shift.rows[0].status, REQUEST_STATUS.APPROVED);
+  });
+});
+
+/* ===== the payroll lock closes the EXCESS, and never the authorised part == */
+
+describe("B. payroll lock over a shift-authorised date", () => {
+  const DATE = "2026-09-18";
+  const MONTH = { from_date: "2026-09-01", to_date: "2026-09-30" };
+
+  /** In at 08:00 and out at 23:30: inside AND outside the approved 10-22. */
+  const OUTSIDE = [
+    punch(1, EMPLOYEE, `${DATE} 08:00:00`),
+    punch(2, EMPLOYEE, `${DATE} 23:30:00`),
+  ];
+  /** Wholly inside the approved shift: nine hours worked, no excess. */
+  const INSIDE = [
+    punch(1, EMPLOYEE, `${DATE} 10:00:00`),
+    punch(2, EMPLOYEE, `${DATE} 20:00:00`),
+  ];
+
+  const approveFully = async (world) => {
+    const raised = await world.regularization.raiseShiftChangeRequest({
+      actor: self(EMPLOYEE), attendance_date: DATE, work_shift_id: LONG,
+      reason: "Covering the full day", today: TODAY,
+    });
+    const id = raised.attendance_approval_request_id;
+    await world.regularization.decide({ actor: approver(7), request_id: id, decision: STEP_DECISION.APPROVED });
+    await world.regularization.decide({ actor: approver(8), request_id: id, decision: STEP_DECISION.APPROVED });
+    return id;
+  };
+
+  const dayOf = async (world) => {
+    const [day] = await world.calculation.calculateRange({
+      employee_id: EMPLOYEE, from_date: DATE, to_date: DATE,
+    });
+    return day;
+  };
+
+  const lock = async (world, days) =>
+    world.regularization.closeOtForPayrollLock({
+      employee_id: EMPLOYEE, ...MONTH, days, actor_employee_id: 8,
+    });
+
+  it("1./2. closes the EXCESS only, and the authorised minutes stay approved and payable", async () => {
+    const world = build({ rawPunches: OUTSIDE });
+    await approveFully(world);
+
+    const before = await dayOf(world);
+    const authorised = before.shift_authorised_ot_minutes;
+    const excess = before.excess_ot_minutes;
+    assert.ok(authorised > 0 && excess > 0, "the day has both portions");
+    assert.equal(before.approved_ot_minutes, authorised);
+
+    const result = await lock(world, [before]);
+    assert.equal(result.closed_unrequested, 1, "the unclaimed excess was closed");
+
+    // The closure record carries the EXCESS, never the whole candidate.
+    const closure = world.store.requests.find((r) => r.request_type === "OT");
+    assert.equal(closure.candidate_ot_minutes, excess);
+    assert.equal(closure.closure_reason, "NOT_REQUESTED_BEFORE_PAYROLL_LOCK");
+    assert.notEqual(closure.candidate_ot_minutes, before.candidate_ot_minutes);
+
+    // And the approved minutes did not move.
+    const after = await dayOf(world);
+    assert.equal(after.shift_authorised_ot_minutes, authorised, "still authorised");
+    assert.equal(after.approved_ot_minutes, authorised, "still payable");
+  });
+
+  it("3. the day still reads as approved via the shift change, with the excess closed beside it", async () => {
+    const world = build({ rawPunches: OUTSIDE });
+    await approveFully(world);
+    await lock(world, [await dayOf(world)]);
+
+    const after = await dayOf(world);
+    // NOT "Closed - Payroll Locked" for the whole date: the five hours were
+    // approved before the month closed and are not un-approved by it.
+    assert.equal(after.ot_claim_state, "APPROVED_VIA_SHIFT_CHANGE");
+    assert.equal(after.ot_excess_state, "CLOSED_AT_PAYROLL_LOCK", "and the excess says what became of it");
+    assert.ok(after.ot_shift_authorised_minutes > 0);
+    // Nothing is claimable any more, so no screen can offer Request OT.
+    assert.equal(after.ot_claimable_minutes, after.excess_ot_minutes);
+    assert.equal(after.ot_closure_reason, "NOT_REQUESTED_BEFORE_PAYROLL_LOCK");
+  });
+
+  it("4. a date with NO excess has nothing closed - no OT record is fabricated", async () => {
+    const world = build({ rawPunches: INSIDE });
+    await approveFully(world);
+    const day = await dayOf(world);
+    assert.equal(day.excess_ot_minutes, 0);
+    assert.equal(day.shift_authorised_ot_minutes, 300);
+
+    const result = await lock(world, [day]);
+    assert.equal(result.closed_unrequested, 0);
+    assert.deepEqual(world.store.requests.filter((r) => r.request_type === "OT"), []);
+    assert.equal((await dayOf(world)).approved_ot_minutes, 300);
+  });
+
+  it("5. a PENDING excess request is closed at the lock; the authorised portion is untouched", async () => {
+    const world = build({ rawPunches: OUTSIDE });
+    await approveFully(world);
+    const before = await dayOf(world);
+    const authorised = before.shift_authorised_ot_minutes;
+
+    await world.regularization.raiseOtRequest({
+      actor: self(EMPLOYEE), attendance_date: DATE, reason: "Stayed past the approved shift", today: TODAY,
+    });
+    const pendingDay = await dayOf(world);
+    assert.equal(pendingDay.ot_excess_state, "REQUEST_PENDING");
+    assert.equal(pendingDay.ot_claim_state, "APPROVED_VIA_SHIFT_CHANGE", "the approved part is not 'pending'");
+
+    const result = await lock(world, [pendingDay]);
+    assert.equal(result.rejected_pending, 1);
+    assert.equal(result.closed_unrequested, 0, "there was a request, so nothing is filed as unrequested");
+
+    const after = await dayOf(world);
+    assert.equal(after.approved_ot_minutes, authorised, "the 300 remain approved");
+    assert.equal(after.ot_excess_state, "CLOSED_AT_PAYROLL_LOCK");
+    assert.equal(after.ot_claim_state, "APPROVED_VIA_SHIFT_CHANGE", "and the day does not read as rejected");
+  });
+
+  it("6. an APPROVED excess survives the lock, and both portions stay payable", async () => {
+    const world = build({ rawPunches: OUTSIDE });
+    await approveFully(world);
+    const before = await dayOf(world);
+    const authorised = before.shift_authorised_ot_minutes;
+    const excess = before.excess_ot_minutes;
+
+    const ot = await world.regularization.raiseOtRequest({
+      actor: self(EMPLOYEE), attendance_date: DATE, reason: "Stayed past the approved shift", today: TODAY,
+    });
+    const id = ot.attendance_approval_request_id;
+    await world.regularization.decide({ actor: approver(7), request_id: id, decision: STEP_DECISION.APPROVED });
+    await world.regularization.decide({ actor: approver(8), request_id: id, decision: STEP_DECISION.APPROVED });
+
+    const approvedDay = await dayOf(world);
+    assert.equal(approvedDay.approved_ot_minutes, authorised + excess);
+
+    const result = await lock(world, [approvedDay]);
+    assert.equal(result.closed_unrequested, 0);
+    assert.equal(result.rejected_pending, 0, "an approved claim is not reopened to be closed");
+
+    const after = await dayOf(world);
+    assert.equal(after.approved_ot_minutes, authorised + excess, "both portions still payable");
+  });
+
+  it("7. an ORDINARY available day is closed exactly as before", async () => {
+    // No shift change anywhere: the whole candidate is the claimable figure.
+    const world = build({
+      rawPunches: [punch(1, EMPLOYEE, `${DATE} 18:00:00`), punch(2, EMPLOYEE, `${DATE} 23:30:00`)],
+    });
+    const day = await dayOf(world);
+    assert.equal(day.ot_claim_state, "AVAILABLE");
+    assert.ok(day.candidate_ot_minutes > 0);
+
+    const result = await lock(world, [day]);
+    assert.equal(result.closed_unrequested, 1);
+    const closure = world.store.requests.find((r) => r.request_type === "OT");
+    assert.equal(closure.candidate_ot_minutes, day.candidate_ot_minutes, "the whole candidate, as before");
+    assert.equal(closure.closure_reason, "NOT_REQUESTED_BEFORE_PAYROLL_LOCK");
+  });
+
+  it("8. running the lock twice closes nothing twice", async () => {
+    const world = build({ rawPunches: OUTSIDE });
+    await approveFully(world);
+    const first = await lock(world, [await dayOf(world)]);
+    assert.equal(first.closed_unrequested, 1);
+
+    const second = await lock(world, [await dayOf(world)]);
+    assert.equal(second.closed_unrequested, 0, "the date already has an OT record");
+    assert.equal(world.store.requests.filter((r) => r.request_type === "OT").length, 1);
+  });
+
+  it("9. a closure can never reduce the approved minutes below what the shift change authorised", async () => {
+    const world = build({ rawPunches: OUTSIDE });
+    await approveFully(world);
+    const before = await dayOf(world);
+    await lock(world, [before]);
+    const after = await dayOf(world);
+
+    assert.ok(after.approved_ot_minutes >= after.shift_authorised_ot_minutes);
+    assert.equal(after.approved_ot_minutes, before.shift_authorised_ot_minutes);
+  });
+
+  it("10. payroll consumes the authorised minutes plus SETTLED excess, and never the closed excess", async () => {
+    const world = build({ rawPunches: OUTSIDE });
+    await approveFully(world);
+    const before = await dayOf(world);
+    await lock(world, [before]);
+    const after = await dayOf(world);
+
+    // approved_ot_minutes is what payroll reads. The closed excess is not in it.
+    assert.equal(after.approved_ot_minutes, after.shift_authorised_ot_minutes);
+    assert.ok(after.excess_ot_minutes > 0, "the excess still exists as a figure");
+    assert.ok(
+      after.approved_ot_minutes < after.candidate_ot_minutes,
+      "and is deliberately NOT paid, because nobody approved it in time"
+    );
+  });
+
+  it("the summary counts approved days truthfully, whichever approved them", async () => {
+    const world = build({ rawPunches: INSIDE });
+    await approveFully(world);
+    const day = await dayOf(world);
+    const result = await lock(world, [day]);
+
+    assert.equal(result.approved_preserved, 1, "a shift-authorised day IS an approved day");
+    assert.equal(result.approved_via_shift_change, 1);
+    assert.equal(result.approved_via_ot_request, 0);
+    assert.equal(result.approved_minutes_preserved, 300);
   });
 });

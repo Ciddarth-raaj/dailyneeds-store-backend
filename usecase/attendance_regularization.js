@@ -1021,18 +1021,64 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
       throw validationError("from_date and to_date must be dates as YYYY-MM-DD");
     }
 
+    /*
+     * WHAT IS UNRESOLVED IS THE CLAIMABLE PORTION, NOT THE CLAIM STATE.
+     *
+     * This used to select `ot_claim_state === "AVAILABLE"`, which was the
+     * same thing while every day's overtime was either wholly claimable or
+     * wholly claimed. It stopped being the same thing when an approved shift
+     * change began authorising part of a day: such a date reads
+     * APPROVED_VIA_SHIFT_CHANGE, so the old filter skipped it entirely - and
+     * any EXCESS earned outside the approved shift, which nobody had
+     * requested, survived the lock unresolved. The employee's screen went on
+     * offering to claim it and the backend refused the click, which is the
+     * one outcome the payroll-lock rule exists to prevent.
+     *
+     * So the question asked of each day is now the right one: how many
+     * minutes are still CLAIMABLE and unclaimed?
+     *
+     *   claimable = excess_ot_minutes        (the whole candidate on an
+     *                                         ordinary date, so nothing
+     *                                         changes for one)
+     *   unclaimed = no OT request exists on the date
+     *
+     * THE AUTHORISED PORTION IS NOT TOUCHED. It is already approved, by a
+     * decision taken under Shift, and a closed period does not un-approve
+     * what was approved before it closed - exactly as it does not touch a
+     * settled OT approval. Only the claimable remainder is closed, and the
+     * closure record carries THAT figure, so the day afterwards reads
+     * "approved via shift change: 5h" and "excess: 30m, closed" - two facts,
+     * neither hiding the other.
+     */
+    const claimableOf = (day) =>
+      day.excess_ot_minutes === undefined || day.excess_ot_minutes === null
+        ? Math.max(0, Math.trunc(Number(day.candidate_ot_minutes) || 0))
+        : Math.max(0, Math.trunc(Number(day.excess_ot_minutes) || 0));
+
+    // A date that already carries an OT request of any kind is the pending /
+    // approved / rejected path's business, not this one's.
+    const hasOtRequest = (day) =>
+      (day.ot_request_id !== null && day.ot_request_id !== undefined) ||
+      day.ot_claim_state === "REQUEST_PENDING" ||
+      day.ot_claim_state === "APPROVED" ||
+      day.ot_claim_state === "REJECTED" ||
+      day.ot_claim_state === "CLOSED_AT_PAYROLL_LOCK";
+
     const unrequested = (days || [])
       .filter(
         (day) =>
           day &&
           day.attendance_date >= from &&
           day.attendance_date <= to &&
-          day.ot_claim_state === "AVAILABLE" &&
-          Number(day.candidate_ot_minutes) > 0
+          !hasOtRequest(day) &&
+          claimableOf(day) > 0
       )
       .map((day) => ({
         attendance_date: day.attendance_date,
-        candidate_ot_minutes: Math.max(0, Math.trunc(Number(day.candidate_ot_minutes) || 0)),
+        // THE EXCESS, never the whole candidate: closing the candidate on a
+        // shift-authorised date would write a record claiming to close
+        // minutes that are already approved.
+        candidate_ot_minutes: claimableOf(day),
       }));
 
     let identity = null;
@@ -1058,7 +1104,30 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
       to_date: to,
       closed_unrequested: closed.closed_unrequested || 0,
       rejected_pending: closed.rejected_pending || 0,
-      approved_preserved: (days || []).filter((d) => d && d.ot_claim_state === "APPROVED").length,
+      /*
+       * WHAT SURVIVED THE LOCK, counted truthfully.
+       *
+       * `approved_preserved` counted days whose OT REQUEST was approved,
+       * which was every approved day until an approved shift change could
+       * also carry approved OT without a request. A count that quietly
+       * excluded those would have understated exactly the minutes this
+       * release added. It now counts every day leaving the lock with
+       * approved OT on it, and the two sources are broken out beside it so
+       * the number can still be read either way.
+       */
+      approved_preserved: (days || []).filter(
+        (d) => d && (d.ot_claim_state === "APPROVED" || d.ot_claim_state === "APPROVED_VIA_SHIFT_CHANGE")
+      ).length,
+      approved_via_ot_request: (days || []).filter((d) => d && d.ot_claim_state === "APPROVED").length,
+      approved_via_shift_change: (days || []).filter(
+        (d) => d && d.ot_claim_state === "APPROVED_VIA_SHIFT_CHANGE"
+      ).length,
+      // The minutes, not just the days: what payroll still owes after the
+      // lock, and the figure a closure can never reduce.
+      approved_minutes_preserved: (days || []).reduce(
+        (total, d) => total + Math.max(0, Math.trunc(Number(d && d.approved_ot_minutes) || 0)),
+        0
+      ),
       unrequested_dates: unrequested.map((u) => u.attendance_date),
     };
   };
