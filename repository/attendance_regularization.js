@@ -102,7 +102,9 @@ class AttendanceRegularizationRepository {
               outlet_id, requester_class, reason,
               candidate_ot_minutes, approved_ot_minutes,
               status, current_stage_no, total_stages,
-              finalization_state, auto_created, chain_source
+              finalization_state, auto_created, chain_source,
+              requested_work_shift_id, base_work_shift_id,
+              telegram_chat_id, telegram_message_id
          FROM attendance_approval_request
         WHERE attendance_approval_request_id = ?`,
       [requestId]
@@ -116,7 +118,7 @@ class AttendanceRegularizationRepository {
               s.approver_employee_id, s.approval_level, a.employee_name AS approver_name,
               s.decision, s.decided_by_employee_id,
               DATE_FORMAT(s.decided_at, '%Y-%m-%d %H:%i:%s') AS decided_at,
-              s.remarks, s.acted_as_admin_override
+              s.remarks, s.acted_as_admin_override, s.decision_source
          FROM attendance_approval_step s
          LEFT JOIN new_employee a ON a.employee_id = s.approver_employee_id
         WHERE s.attendance_approval_request_id = ?
@@ -373,6 +375,11 @@ class AttendanceRegularizationRepository {
         request.auto_created ? 1 : 0,
         chain.length,
         request.chain_source === undefined ? null : request.chain_source,
+        // SHIFT_CHANGE only. NULL on every other request type, which is what
+        // keeps one insert serving all three rather than a second one that
+        // would have to be kept in step with this.
+        request.requested_work_shift_id === undefined ? null : request.requested_work_shift_id,
+        request.base_work_shift_id === undefined ? null : request.base_work_shift_id,
       ];
       const inserted = autoApproved
         ? await queryAsync(
@@ -381,8 +388,9 @@ class AttendanceRegularizationRepository {
                (request_type, requested_for_employee_id, requested_by_employee_id,
                 attendance_date, outlet_id, requester_class, reason,
                 candidate_ot_minutes, auto_created, status, current_stage_no, total_stages,
-                chain_source, approved_ot_minutes, finalization_state, decided_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'APPROVED', 1, ?, ?, 0, 'SETTLED', CURRENT_TIMESTAMP(3))`,
+                chain_source, requested_work_shift_id, base_work_shift_id,
+                approved_ot_minutes, finalization_state, decided_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'APPROVED', 1, ?, ?, ?, ?, 0, 'SETTLED', CURRENT_TIMESTAMP(3))`,
             requestParams
           )
         : await queryAsync(
@@ -391,8 +399,8 @@ class AttendanceRegularizationRepository {
                (request_type, requested_for_employee_id, requested_by_employee_id,
                 attendance_date, outlet_id, requester_class, reason,
                 candidate_ot_minutes, auto_created, status, current_stage_no, total_stages,
-                chain_source)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 1, ?, ?)`,
+                chain_source, requested_work_shift_id, base_work_shift_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 1, ?, ?, ?, ?)`,
             requestParams
           );
       const requestId = inserted.insertId;
@@ -500,6 +508,8 @@ class AttendanceRegularizationRepository {
     adminOverride,
     next,
     calculations = null,
+    decisionSource = "WEB",
+    shiftOverride = null,
   }) {
     const connection = await getConnectionAsync(this.db);
     try {
@@ -509,11 +519,19 @@ class AttendanceRegularizationRepository {
         connection,
         `UPDATE attendance_approval_step
             SET decision = ?, decided_by_employee_id = ?, decided_at = CURRENT_TIMESTAMP(3),
-                remarks = ?, acted_as_admin_override = ?
+                decision_source = ?, remarks = ?, acted_as_admin_override = ?
           WHERE attendance_approval_request_id = ?
             AND stage_no = ?
             AND decision = 'PENDING'`,
-        [decision, actorId, remarks || null, adminOverride ? 1 : 0, requestId, stageNo]
+        [
+          decision,
+          actorId,
+          decisionSource === "TELEGRAM" ? "TELEGRAM" : "WEB",
+          remarks || null,
+          adminOverride ? 1 : 0,
+          requestId,
+          stageNo,
+        ]
       );
       if (!stepResult || Number(stepResult.affectedRows) !== 1) {
         await rollbackAsync(connection);
@@ -551,6 +569,38 @@ class AttendanceRegularizationRepository {
         return { code: 409, msg: "This request moved while you were deciding it - reload and try again" };
       }
 
+      // THE APPROVED ONE-DAY SHIFT, written in THIS transaction.
+      //
+      // A final approval of a SHIFT_CHANGE request is the only thing that
+      // makes the requested shift effective, and it becomes effective by the
+      // same `attendance_date_shift_override` row a management edit writes -
+      // one table, one resolver, one precedence rule. Writing it here rather
+      // than after the commit is the same invariant the recalculated day
+      // already has: there is no ordering in which the request reads APPROVED
+      // while the date still resolves to the old shift.
+      let overrideId = null;
+      if (shiftOverride) {
+        const insertedOverride = await queryAsync(
+          connection,
+          `INSERT INTO attendance_date_shift_override
+             (employee_id, attendance_date, work_shift_id, previous_work_shift_id,
+              changed_by, attendance_approval_request_id, source, reason)
+           VALUES (?, ?, ?, ?, ?, ?, 'APPROVED_REQUEST', ?)`,
+          [
+            shiftOverride.employee_id,
+            shiftOverride.attendance_date,
+            shiftOverride.work_shift_id,
+            shiftOverride.previous_work_shift_id === undefined
+              ? null
+              : shiftOverride.previous_work_shift_id,
+            actorId,
+            requestId,
+            shiftOverride.reason || null,
+          ]
+        );
+        overrideId = insertedOverride ? insertedOverride.insertId : null;
+      }
+
       // The day the decision produced, stored before the commit. If this
       // throws, the catch below rolls the decision back with it.
       const stored = await writeCalculationsOnConnection(connection, calculations || []);
@@ -562,6 +612,7 @@ class AttendanceRegularizationRepository {
         current_stage_no: next.current_stage_no,
         finalization_state: finalizationState,
         calculations_written: stored.written,
+        attendance_date_shift_override_id: overrideId,
       };
     } catch (err) {
       await rollbackAsync(connection);
@@ -641,10 +692,25 @@ class AttendanceRegularizationRepository {
    * The same clause serves the list and the count, so "pending with me"
    * moves the moment Replace Approver moves a step.
    */
-  _approvalScope({ request_type, status, approver_roles, outlet_id, actor_employee_id, is_admin }) {
+  _approvalScope({
+    request_type,
+    status,
+    approver_roles,
+    outlet_id,
+    actor_employee_id,
+    is_admin,
+    filter_outlet_ids = null,
+    filter_employee_id = null,
+    filter_designation_id = null,
+    permitted_outlet_ids = null,
+  }) {
     const roles = Array.isArray(approver_roles) ? approver_roles : [];
-    const where = ["r.request_type = ?"];
-    const params = [request_type];
+    // `request_type` may be a list: the unified approval centre asks for one
+    // tab at a time, but REGULARIZATION historically shares its queue with
+    // the legacy REGULARIZATION_WITH_OT rows and they belong on that tab.
+    const types = Array.isArray(request_type) ? request_type : [request_type];
+    const where = ["r.request_type IN (?)"];
+    const params = [types];
     const outlet = outlet_id === undefined ? null : outlet_id;
 
     if (status === "PENDING") {
@@ -694,6 +760,44 @@ class AttendanceRegularizationRepository {
       where.push("r.requested_by_employee_id <> ?");
       params.push(actor_employee_id, actor_employee_id);
     }
+
+    /*
+     * THE OUTLET SCOPE, AND THE FILTERS, ARE TWO DIFFERENT THINGS.
+     *
+     * `permitted_outlet_ids` is AUTHORIZATION: the outlets this actor may see
+     * requests from at all. It is resolved server-side from the actor's own
+     * branch scope and never from anything the client sent, and it FAILS
+     * CLOSED - an empty list renders `1 = 0` rather than "no restriction",
+     * the same rule `repository/employee_scope.js#accessScope` follows and
+     * for the same reason: a caller that forgets to resolve it returns
+     * nothing and is noticed. `null` means an actor with no restriction at
+     * all (an administrator, or a company-wide scope).
+     *
+     * `filter_outlet_ids` is a CHOICE the user made on the screen. It can
+     * only ever narrow what the line above already allows, so a client asking
+     * for an outlet it has no rights to gets nothing rather than an error -
+     * and, more importantly, gets nothing rather than the rows.
+     */
+    if (Array.isArray(permitted_outlet_ids)) {
+      if (permitted_outlet_ids.length === 0) where.push("1 = 0");
+      else {
+        where.push("r.outlet_id IN (?)");
+        params.push(permitted_outlet_ids);
+      }
+    }
+    if (Array.isArray(filter_outlet_ids) && filter_outlet_ids.length > 0) {
+      where.push("r.outlet_id IN (?)");
+      params.push(filter_outlet_ids);
+    }
+    if (filter_employee_id) {
+      where.push("r.requested_for_employee_id = ?");
+      params.push(Number(filter_employee_id));
+    }
+    if (filter_designation_id) {
+      where.push("ne.designation_id = ?");
+      params.push(Number(filter_designation_id));
+    }
+
     return { where: where.join(" AND "), params };
   }
 
@@ -723,7 +827,15 @@ class AttendanceRegularizationRepository {
               DATE_FORMAT(p.punch_time, '%Y-%m-%d %H:%i:%s') AS proposed_punch_time,
               c.shift_snapshot, c.effective_punches, c.nrm_minutes, c.worked_minutes,
               c.shortage_minutes, c.candidate_ot_minutes AS stored_candidate_ot_minutes,
-              c.status AS stored_status, ws.shift_name
+              c.status AS stored_status, ws.shift_name,
+              c.base_nrm_minutes, c.regular_minutes,
+              -- SHIFT_CHANGE: the shift asked for and the permanent one it
+              -- would stand in for, named from the master so the queue can be
+              -- read without a second query per row.
+              r.requested_work_shift_id, r.base_work_shift_id,
+              rws.shift_code AS requested_shift_code, rws.shift_name AS requested_shift_name,
+              bws.shift_code AS base_shift_code, bws.shift_name AS base_shift_name,
+              ne.designation_id
          FROM attendance_approval_request r
          JOIN attendance_approval_step s
            ON s.attendance_approval_request_id = r.attendance_approval_request_id
@@ -736,6 +848,8 @@ class AttendanceRegularizationRepository {
            ON c.employee_id = r.requested_for_employee_id
           AND c.attendance_date = r.attendance_date
          LEFT JOIN work_shift ws ON ws.work_shift_id = c.work_shift_id
+         LEFT JOIN work_shift rws ON rws.work_shift_id = r.requested_work_shift_id
+         LEFT JOIN work_shift bws ON bws.work_shift_id = r.base_work_shift_id
         WHERE ${where}
         ORDER BY r.status = 'PENDING' DESC, r.attendance_date DESC, r.attendance_approval_request_id DESC
         LIMIT ? OFFSET ?`,
@@ -748,11 +862,16 @@ class AttendanceRegularizationRepository {
     const { where, params } = this._approvalScope(filters);
     const rows = await this._read(
       "COUNT-APPROVALS",
+      // `new_employee` is joined here as well as on the list, and for one
+      // reason only: the designation filter is a predicate on it, and a count
+      // that could not express the same predicate as the list would be a
+      // count of something else.
       `SELECT COUNT(*) AS n
          FROM attendance_approval_request r
          JOIN attendance_approval_step s
            ON s.attendance_approval_request_id = r.attendance_approval_request_id
           AND s.stage_no = r.current_stage_no
+         LEFT JOIN new_employee ne ON ne.employee_id = r.requested_for_employee_id
         WHERE ${where}`,
       params
     );

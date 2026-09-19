@@ -154,9 +154,30 @@ function build(state = {}) {
       return { code: 200, status: r.status, current_stage_no: r.current_stage_no, finalization_state: r.finalization_state, calculations_written: (args.calculations || []).length };
     },
     // The scope, mirrored from the SQL in the repository.
-    _visible: ({ request_type, status, approver_roles, outlet_id, actor_employee_id, is_admin }) =>
+    _visible: ({
+      request_type,
+      status,
+      approver_roles,
+      outlet_id,
+      actor_employee_id,
+      is_admin,
+      permitted_outlet_ids = null,
+      filter_outlet_ids = null,
+      filter_employee_id = null,
+      filter_designation_id = null,
+    }) =>
       store.requests.filter((r) => {
-        if (r.request_type !== request_type) return false;
+        const types = Array.isArray(request_type) ? request_type : [request_type];
+        if (!types.includes(r.request_type)) return false;
+        // The outlet SCOPE fails closed, exactly as the SQL does; the chosen
+        // filters can only narrow it further.
+        if (Array.isArray(permitted_outlet_ids) && !permitted_outlet_ids.includes(r.outlet_id)) return false;
+        if (Array.isArray(filter_outlet_ids) && filter_outlet_ids.length > 0 && !filter_outlet_ids.includes(r.outlet_id)) return false;
+        if (filter_employee_id && r.requested_for_employee_id !== Number(filter_employee_id)) return false;
+        if (filter_designation_id) {
+          const e = EMPLOYEES.find((x) => x.employee_id === r.requested_for_employee_id) || {};
+          if (Number(e.designation_id) !== Number(filter_designation_id)) return false;
+        }
         if (status === "PENDING") {
           if (r.status !== "PENDING") return false;
           const s = store.steps.find((x) => x.attendance_approval_request_id === r.attendance_approval_request_id && x.stage_no === r.current_stage_no);
@@ -189,6 +210,14 @@ function build(state = {}) {
   return { calcRepo, regRepo, calculation, regularization, store, saved };
 }
 
+/**
+ * The actor's OUTLET SCOPE, as `middlewares/employee_branch_scope.js` resolves
+ * it. The approval centre fails CLOSED without one - an actor with no resolved
+ * scope sees nothing - so every actor in these tests carries the company-wide
+ * scope explicitly rather than relying on its absence to mean "no restriction".
+ */
+const ALL_BRANCHES = { kind: "ALL_BRANCHES", store_ids: null };
+
 const TODAY = "2026-09-20";
 const lateDay = (employee_id, date) => [punch(employee_id * 10, employee_id, `${date} 10:00:00`), punch(employee_id * 10 + 1, employee_id, `${date} 23:30:00`)];
 
@@ -201,14 +230,14 @@ describe("Attendance Approval - REGULARIZATION pending with me", () => {
   };
   const raiseAll = async (world) => {
     const { regularization } = world;
-    await regularization.raiseRequest({ actor: { employee_id: 42, user_type: 1 }, requested_for_employee_id: 42, attendance_date: "2026-09-14", reason: "Terminal offline at close", punch_time: "2026-09-14 22:00:00" });
-    await regularization.raiseRequest({ actor: { employee_id: 44, user_type: 1 }, requested_for_employee_id: 44, attendance_date: "2026-09-14", reason: "Terminal offline at close", punch_time: "2026-09-14 22:00:00" });
-    await regularization.raiseOtRequest({ actor: { employee_id: 43, user_type: 1 }, attendance_date: "2026-09-14", reason: "Stock count ran late", today: TODAY });
+    await regularization.raiseRequest({ actor: { employee_id: 42, user_type: 1, branch_scope: ALL_BRANCHES }, requested_for_employee_id: 42, attendance_date: "2026-09-14", reason: "Terminal offline at close", punch_time: "2026-09-14 22:00:00" });
+    await regularization.raiseRequest({ actor: { employee_id: 44, user_type: 1, branch_scope: ALL_BRANCHES }, requested_for_employee_id: 44, attendance_date: "2026-09-14", reason: "Terminal offline at close", punch_time: "2026-09-14 22:00:00" });
+    await regularization.raiseOtRequest({ actor: { employee_id: 43, user_type: 1, branch_scope: ALL_BRANCHES }, attendance_date: "2026-09-14", reason: "Stock count ran late", today: TODAY });
   };
 
   it("1/2. contains REGULARIZATION only - the OT request on the same outlet does not appear", async () => {
     const world = seed(); await raiseAll(world);
-    const result = await world.regularization.listApprovals({ actor: { employee_id: 7, user_type: 1 }, request_type: REQUEST_TYPE.REGULARIZATION, status: "PENDING" });
+    const result = await world.regularization.listApprovals({ actor: { employee_id: 7, user_type: 1, branch_scope: ALL_BRANCHES }, request_type: REQUEST_TYPE.REGULARIZATION, status: "PENDING" });
     assert.ok(result.rows.length > 0);
     result.rows.forEach((r) => assert.equal(r.request_type, REQUEST_TYPE.REGULARIZATION));
     assert.ok(!result.rows.some((r) => r.employee_id === 43), "43's OT request is not attendance approval");
@@ -216,27 +245,27 @@ describe("Attendance Approval - REGULARIZATION pending with me", () => {
 
   it("3/4. pending with me is the actor's CURRENT actionable stage, scoped to their outlet", async () => {
     const world = seed(); await raiseAll(world);
-    const mgr3 = await world.regularization.listApprovals({ actor: { employee_id: 7, user_type: 1 }, request_type: REQUEST_TYPE.REGULARIZATION, status: "PENDING" });
+    const mgr3 = await world.regularization.listApprovals({ actor: { employee_id: 7, user_type: 1, branch_scope: ALL_BRANCHES }, request_type: REQUEST_TYPE.REGULARIZATION, status: "PENDING" });
     assert.deepEqual(mgr3.rows.map((r) => r.employee_id), [42], "only outlet 3's request, not outlet 5's");
     assert.equal(mgr3.total, 1);
     assert.equal(mgr3.rows[0].actionable, true);
     assert.equal(mgr3.rows[0].current_stage_role, APPROVER_ROLE.STORE_MANAGER);
 
-    const mgr5 = await world.regularization.listApprovals({ actor: { employee_id: 9, user_type: 1 }, request_type: REQUEST_TYPE.REGULARIZATION, status: "PENDING" });
+    const mgr5 = await world.regularization.listApprovals({ actor: { employee_id: 9, user_type: 1, branch_scope: ALL_BRANCHES }, request_type: REQUEST_TYPE.REGULARIZATION, status: "PENDING" });
     assert.deepEqual(mgr5.rows.map((r) => r.employee_id), [44]);
 
     // HR's stage is 3; nothing is with HR yet, so HR's pending is empty and
     // so is the count - the count is type-specific and stage-specific.
-    const hr = await world.regularization.listApprovals({ actor: { employee_id: 8, user_type: 1 }, request_type: REQUEST_TYPE.REGULARIZATION, status: "PENDING" });
+    const hr = await world.regularization.listApprovals({ actor: { employee_id: 8, user_type: 1, branch_scope: ALL_BRANCHES }, request_type: REQUEST_TYPE.REGULARIZATION, status: "PENDING" });
     assert.equal(hr.rows.length, 0);
-    assert.deepEqual(await world.regularization.countPending({ actor: { employee_id: 8, user_type: 1 }, request_type: REQUEST_TYPE.REGULARIZATION }), { request_type: "REGULARIZATION", pending_with_me: 0 });
-    assert.deepEqual(await world.regularization.countPending({ actor: { employee_id: 7, user_type: 1 }, request_type: REQUEST_TYPE.REGULARIZATION }), { request_type: "REGULARIZATION", pending_with_me: 1 });
-    assert.deepEqual(await world.regularization.countPending({ actor: { employee_id: 7, user_type: 1 }, request_type: REQUEST_TYPE.OT }), { request_type: "OT", pending_with_me: 1 });
+    assert.deepEqual(await world.regularization.countPending({ actor: { employee_id: 8, user_type: 1, branch_scope: ALL_BRANCHES }, request_type: REQUEST_TYPE.REGULARIZATION }), { request_type: "REGULARIZATION", pending_with_me: 0 });
+    assert.deepEqual(await world.regularization.countPending({ actor: { employee_id: 7, user_type: 1, branch_scope: ALL_BRANCHES }, request_type: REQUEST_TYPE.REGULARIZATION }), { request_type: "REGULARIZATION", pending_with_me: 1 });
+    assert.deepEqual(await world.regularization.countPending({ actor: { employee_id: 7, user_type: 1, branch_scope: ALL_BRANCHES }, request_type: REQUEST_TYPE.OT }), { request_type: "OT", pending_with_me: 1 });
   });
 
   it("returns the inline detail: existing punches, the proposed punch, the reason, NRM/worked/shortage, the chain", async () => {
     const world = seed(); await raiseAll(world);
-    const [row] = (await world.regularization.listApprovals({ actor: { employee_id: 7, user_type: 1 }, request_type: REQUEST_TYPE.REGULARIZATION, status: "PENDING" })).rows;
+    const [row] = (await world.regularization.listApprovals({ actor: { employee_id: 7, user_type: 1, branch_scope: ALL_BRANCHES }, request_type: REQUEST_TYPE.REGULARIZATION, status: "PENDING" })).rows;
     assert.equal(row.employee_name, "Asha");
     assert.equal(row.attendance_date, "2026-09-14");
     assert.equal(row.shift_name, "Late Shift");
@@ -254,24 +283,24 @@ describe("Attendance Approval - REGULARIZATION pending with me", () => {
   it("5. the requester never sees their own request as pending with them", async () => {
     const world = build({ rawPunches: [punch(1, 7, "2026-09-14 10:00:00")] });
     // The Store Manager raises their own regularization (Manager chain: Ops -> HR).
-    await world.regularization.raiseRequest({ actor: { employee_id: 7, user_type: 1 }, requested_for_employee_id: 7, attendance_date: "2026-09-14", reason: "Terminal offline at close", punch_time: "2026-09-14 22:00:00" });
-    const own = await world.regularization.listApprovals({ actor: { employee_id: 7, user_type: 1 }, request_type: REQUEST_TYPE.REGULARIZATION, status: "PENDING" });
+    await world.regularization.raiseRequest({ actor: { employee_id: 7, user_type: 1, branch_scope: ALL_BRANCHES }, requested_for_employee_id: 7, attendance_date: "2026-09-14", reason: "Terminal offline at close", punch_time: "2026-09-14 22:00:00" });
+    const own = await world.regularization.listApprovals({ actor: { employee_id: 7, user_type: 1, branch_scope: ALL_BRANCHES }, request_type: REQUEST_TYPE.REGULARIZATION, status: "PENDING" });
     assert.equal(own.rows.length, 0);
-    const ops = await world.regularization.listApprovals({ actor: { employee_id: 10, user_type: 1 }, request_type: REQUEST_TYPE.REGULARIZATION, status: "PENDING" });
+    const ops = await world.regularization.listApprovals({ actor: { employee_id: 10, user_type: 1, branch_scope: ALL_BRANCHES }, request_type: REQUEST_TYPE.REGULARIZATION, status: "PENDING" });
     assert.equal(ops.rows.length, 1);
     await assert.rejects(
-      world.regularization.decide({ actor: { employee_id: 7, user_type: 2 }, request_id: ops.rows[0].attendance_approval_request_id, decision: STEP_DECISION.APPROVED }),
+      world.regularization.decide({ actor: { employee_id: 7, user_type: 2, branch_scope: ALL_BRANCHES }, request_id: ops.rows[0].attendance_approval_request_id, decision: STEP_DECISION.APPROVED }),
       /your own attendance/
     );
   });
 
   it("6/7. final attendance approval approves no OT, and the corrected day's OT is AVAILABLE", async () => {
     const world = build({ rawPunches: [punch(1, 42, "2026-09-14 10:00:00")] });
-    const raised = await world.regularization.raiseRequest({ actor: { employee_id: 42, user_type: 1 }, requested_for_employee_id: 42, attendance_date: "2026-09-14", reason: "Terminal offline at close", punch_time: "2026-09-15 00:30:00" });
+    const raised = await world.regularization.raiseRequest({ actor: { employee_id: 42, user_type: 1, branch_scope: ALL_BRANCHES }, requested_for_employee_id: 42, attendance_date: "2026-09-14", reason: "Terminal offline at close", punch_time: "2026-09-15 00:30:00" });
     const id = raised.attendance_approval_request_id;
-    await world.regularization.decide({ actor: { employee_id: 7, user_type: 1 }, request_id: id, decision: STEP_DECISION.APPROVED });
-    await world.regularization.decide({ actor: { employee_id: 10, user_type: 1 }, request_id: id, decision: STEP_DECISION.APPROVED });
-    const final = await world.regularization.decide({ actor: { employee_id: 8, user_type: 1 }, request_id: id, decision: STEP_DECISION.APPROVED });
+    await world.regularization.decide({ actor: { employee_id: 7, user_type: 1, branch_scope: ALL_BRANCHES }, request_id: id, decision: STEP_DECISION.APPROVED });
+    await world.regularization.decide({ actor: { employee_id: 10, user_type: 1, branch_scope: ALL_BRANCHES }, request_id: id, decision: STEP_DECISION.APPROVED });
+    const final = await world.regularization.decide({ actor: { employee_id: 8, user_type: 1, branch_scope: ALL_BRANCHES }, request_id: id, decision: STEP_DECISION.APPROVED });
     assert.equal(final.status, REQUEST_STATUS.APPROVED);
     assert.equal(final.approved_ot_minutes, 0);
     assert.equal(final.ot_now_available, 150);
@@ -285,7 +314,7 @@ describe("Attendance Approval - REGULARIZATION pending with me", () => {
     assert.equal(day.approved_ot_minutes, 0);
 
     // And it now appears in HR's approved history, but not their pending.
-    const hist = await world.regularization.listApprovals({ actor: { employee_id: 8, user_type: 1 }, request_type: REQUEST_TYPE.REGULARIZATION, status: "APPROVED" });
+    const hist = await world.regularization.listApprovals({ actor: { employee_id: 8, user_type: 1, branch_scope: ALL_BRANCHES }, request_type: REQUEST_TYPE.REGULARIZATION, status: "APPROVED" });
     assert.equal(hist.rows.length, 1);
     assert.equal(hist.rows[0].decided_by_name, "HR");
     assert.equal(hist.rows[0].actionable, false);
@@ -293,8 +322,8 @@ describe("Attendance Approval - REGULARIZATION pending with me", () => {
 
   it("refuses a request type or status it does not know", async () => {
     const world = build();
-    await assert.rejects(world.regularization.listApprovals({ actor: { employee_id: 8, user_type: 1 }, request_type: "REGULARIZATION_WITH_OT" }), /REGULARIZATION or OT/);
-    await assert.rejects(world.regularization.listApprovals({ actor: { employee_id: 8, user_type: 1 }, request_type: "OT", status: "CANCELLED" }), /PENDING, APPROVED, REJECTED or ALL/);
+    await assert.rejects(world.regularization.listApprovals({ actor: { employee_id: 8, user_type: 1, branch_scope: ALL_BRANCHES }, request_type: "REGULARIZATION_WITH_OT" }), /REGULARIZATION, OT or SHIFT_CHANGE/);
+    await assert.rejects(world.regularization.listApprovals({ actor: { employee_id: 8, user_type: 1, branch_scope: ALL_BRANCHES }, request_type: "OT", status: "CANCELLED" }), /PENDING, APPROVED, REJECTED or ALL/);
   });
 });
 
@@ -304,15 +333,15 @@ describe("OT Approval - pending, approved, rejected, all", () => {
   const seed = async () => {
     const world = build({ rawPunches: [...lateDay(42, "2026-09-14"), ...lateDay(43, "2026-09-15"), ...lateDay(44, "2026-09-14"), punch(1, 42, "2026-09-16 10:00:00")] });
     const { regularization } = world;
-    const a = await regularization.raiseOtRequest({ actor: { employee_id: 42, user_type: 1 }, attendance_date: "2026-09-14", reason: "Stock count ran late", today: TODAY });
-    const b = await regularization.raiseOtRequest({ actor: { employee_id: 43, user_type: 1 }, attendance_date: "2026-09-15", reason: "Covered the evening", today: TODAY });
-    const c = await regularization.raiseOtRequest({ actor: { employee_id: 44, user_type: 1 }, attendance_date: "2026-09-14", reason: "Delivery came late", today: TODAY });
-    await regularization.raiseRequest({ actor: { employee_id: 42, user_type: 1 }, requested_for_employee_id: 42, attendance_date: "2026-09-16", reason: "Terminal offline at close", punch_time: "2026-09-16 22:00:00" });
+    const a = await regularization.raiseOtRequest({ actor: { employee_id: 42, user_type: 1, branch_scope: ALL_BRANCHES }, attendance_date: "2026-09-14", reason: "Stock count ran late", today: TODAY });
+    const b = await regularization.raiseOtRequest({ actor: { employee_id: 43, user_type: 1, branch_scope: ALL_BRANCHES }, attendance_date: "2026-09-15", reason: "Covered the evening", today: TODAY });
+    const c = await regularization.raiseOtRequest({ actor: { employee_id: 44, user_type: 1, branch_scope: ALL_BRANCHES }, attendance_date: "2026-09-14", reason: "Delivery came late", today: TODAY });
+    await regularization.raiseRequest({ actor: { employee_id: 42, user_type: 1, branch_scope: ALL_BRANCHES }, requested_for_employee_id: 42, attendance_date: "2026-09-16", reason: "Terminal offline at close", punch_time: "2026-09-16 22:00:00" });
     return { world, a: a.attendance_approval_request_id, b: b.attendance_approval_request_id, c: c.attendance_approval_request_id };
   };
-  const mgr3 = { employee_id: 7, user_type: 1 };
-  const ops = { employee_id: 10, user_type: 1 };
-  const hr = { employee_id: 8, user_type: 1 };
+  const mgr3 = { employee_id: 7, user_type: 1, branch_scope: ALL_BRANCHES };
+  const ops = { employee_id: 10, user_type: 1, branch_scope: ALL_BRANCHES };
+  const hr = { employee_id: 8, user_type: 1, branch_scope: ALL_BRANCHES };
 
   it("8. the pending tab has OT requests only, scoped to the actor's stage and outlet", async () => {
     const { world } = await seed();
@@ -374,7 +403,7 @@ describe("OT Approval - pending, approved, rejected, all", () => {
     assert.equal(closed.actionable, false);
 
     // The outlet-5 manager sees only their own outlet, in every tab.
-    const mgr5All = await world.regularization.listApprovals({ actor: { employee_id: 9, user_type: 1 }, request_type: REQUEST_TYPE.OT, status: "ALL" });
+    const mgr5All = await world.regularization.listApprovals({ actor: { employee_id: 9, user_type: 1, branch_scope: ALL_BRANCHES }, request_type: REQUEST_TYPE.OT, status: "ALL" });
     assert.deepEqual(mgr5All.rows.map((r) => r.attendance_approval_request_id), [c]);
     // A pending count never counts history.
     assert.deepEqual(await world.regularization.countPending({ actor: mgr3, request_type: REQUEST_TYPE.OT }), { request_type: "OT", pending_with_me: 0 });
@@ -384,7 +413,7 @@ describe("OT Approval - pending, approved, rejected, all", () => {
   it("somebody with no approver role sees nothing in any tab", async () => {
     const { world } = await seed();
     for (const status of ["PENDING", "APPROVED", "REJECTED", "ALL"]) {
-      const r = await world.regularization.listApprovals({ actor: { employee_id: 42, user_type: 1 }, request_type: REQUEST_TYPE.OT, status });
+      const r = await world.regularization.listApprovals({ actor: { employee_id: 42, user_type: 1, branch_scope: ALL_BRANCHES }, request_type: REQUEST_TYPE.OT, status });
       assert.equal(r.rows.length, 0, status);
       assert.equal(r.total, 0, status);
     }

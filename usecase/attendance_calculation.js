@@ -1446,6 +1446,86 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     return result;
   };
 
+  /**
+   * The SHIFT AS IT WOULD APPLY to one employee on one date - for a shift
+   * they are not necessarily on.
+   *
+   * Used by the one-day shift request to answer the two questions it must
+   * answer before a request may exist: does this shift even run on that
+   * weekday, and is its NRM actually LONGER than the employee's own? Both go
+   * through the very resolver the calculation uses, on the configuration
+   * VERSION in force on that date, so the figure the employee is shown and
+   * the figure the day is later calculated under are the same figure.
+   *
+   * `work_shift_id` omitted asks about the employee's OWN shift for the date,
+   * which is the base the comparison is made against.
+   */
+  const shiftForDate = async ({ employee_id, attendance_date, work_shift_id = null }) => {
+    const employeeId = Number(employee_id);
+    const date = toDateOnly(attendance_date);
+    if (!Number.isInteger(employeeId) || employeeId <= 0) {
+      throw validationError("employee_id is required and must be an employee id");
+    }
+    if (date === null) throw validationError("attendance_date must be a date as YYYY-MM-DD");
+
+    const context = await buildContext({
+      employee_id: employeeId,
+      from: date,
+      to: date,
+      assume_override: work_shift_id ? { attendance_date: date, work_shift_id } : null,
+    });
+
+    // With an assumed override the resolution IS the asked-about shift; with
+    // none it is the employee's own, from the dated history.
+    const resolution = context.resolutionFor(date);
+    const snapshot = resolution.snapshot;
+    return {
+      employee_id: employeeId,
+      attendance_date: date,
+      status: resolution.status,
+      work_shift_id: resolution.work_shift_id,
+      shift_code: snapshot ? snapshot.shift_code : null,
+      shift_name: resolution.work_shift_id ? context.shiftNameFor(resolution.work_shift_id) : null,
+      in_time: snapshot ? snapshot.in_time : null,
+      out_time: snapshot ? snapshot.out_time : null,
+      break_minutes: snapshot ? snapshot.break_minutes : null,
+      is_working_day: snapshot ? snapshot.is_working_day : null,
+      // NRM as the engine computes it from the shift alone: span less the
+      // shift's own break. The employee's break override and Extra Break
+      // Hours are deliberately NOT applied - they need a punched sequence
+      // that does not exist yet on a date being requested in advance, and
+      // this figure exists to COMPARE two shifts with each other.
+      nrm_minutes: snapshot ? Math.max(0, (snapshot.shift_span_minutes || 0) - (snapshot.break_minutes || 0)) : null,
+      // The PERMANENT shift for the date, whatever was asked about: the
+      // comparison's other side, resolved from history with the overrides
+      // withheld.
+      base: (() => {
+        const baseResolution = context.baseResolutionFor(date);
+        const baseSnapshot = baseResolution.snapshot;
+        return {
+          status: baseResolution.status,
+          work_shift_id: baseResolution.work_shift_id,
+          shift_code: baseSnapshot ? baseSnapshot.shift_code : null,
+          shift_name: baseResolution.work_shift_id
+            ? context.shiftNameFor(baseResolution.work_shift_id)
+            : null,
+          in_time: baseSnapshot ? baseSnapshot.in_time : null,
+          out_time: baseSnapshot ? baseSnapshot.out_time : null,
+          is_working_day: baseSnapshot ? baseSnapshot.is_working_day : null,
+          nrm_minutes: baseSnapshot
+            ? Math.max(0, (baseSnapshot.shift_span_minutes || 0) - (baseSnapshot.break_minutes || 0))
+            : null,
+        };
+      })(),
+    };
+  };
+
+  /** The payroll lock, asked before an action rather than before a write. */
+  const findPayrollLockedPeriods = (rows) =>
+    attendanceCalculationRepo.findPayrollLockedPeriods
+      ? attendanceCalculationRepo.findPayrollLockedPeriods(rows)
+      : Promise.resolve([]);
+
   return {
     MAX_RANGE_DAYS,
     CALC_STATUS,
@@ -1469,6 +1549,8 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     recalculateBulk,
     listRecalculationRuns,
     setDateShift,
+    shiftForDate,
+    findPayrollLockedPeriods,
     listDateShiftOptions,
     calculateMonth,
   };
