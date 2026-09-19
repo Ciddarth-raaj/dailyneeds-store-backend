@@ -16,6 +16,22 @@ const logger = require("../utils/logger");
 
 const SYSTEM_GUARD = "AND `is_system_account` = 0";
 
+/**
+ * The guard for a write addressed by `employee_id` rather than by
+ * `user_id` - a revocation or a status change that an EMPLOYEE lifecycle
+ * event implies.
+ *
+ * It excludes two kinds of login that are not that employee's session:
+ * the break-glass account (which is never employee-linked in the first
+ * place), and an INTEGRATION account that carries an employee_id only
+ * because it was provisioned against one. Correcting an employee's joining
+ * date is not a reason to log the Tally bridge out.
+ *
+ * Revoking a service account deliberately remains possible - through
+ * `bumpTokenValidFrom(userId)`, which names the account itself.
+ */
+const EMPLOYEE_SCOPE_GUARD = "AND `is_system_account` = 0 AND `is_service_account` = 0";
+
 /** Columns the login path needs. `password` and `password_hash` included on purpose; nothing else reads them. */
 const CREDENTIAL_COLUMNS = `
   u.user_id AS user_id,
@@ -113,7 +129,7 @@ class UserRepository {
       `SELECT u.user_id, u.username, u.employee_id, u.user_type, u.status,
               u.password_algo, u.must_change_password, u.password_flag_reason,
               u.failed_login_count, u.locked_until, u.last_login_at,
-              u.is_system_account, u.token_valid_from,
+              u.is_system_account, u.is_service_account, u.token_valid_from,
               ne.employee_name, ne.store_id, ne.status AS employee_status
        FROM \`user\` u
        LEFT JOIN new_employee ne ON ne.employee_id = u.employee_id
@@ -220,13 +236,15 @@ class UserRepository {
    * old token would start working again. It is the same `token_valid_from`
    * mechanism C4/C5 already use - no second session system.
    *
-   * The system guard is present as everywhere else: the break-glass account
-   * is never attached to an employee and must never be locked out by a sync.
+   * The guard is the EMPLOYEE-SCOPE one: the break-glass account is never
+   * attached to an employee and must never be locked out by a sync, and an
+   * integration account attached to an employee is not that employee's
+   * session and must not be revoked by their lifecycle either.
    */
   bumpTokenValidFromByEmployeeId(employeeId) {
     return this._query(
       "BUMP-TOKEN-VALID-FROM-BY-EMPLOYEE",
-      `UPDATE \`user\` SET \`token_valid_from\` = NOW() WHERE \`employee_id\` = ? ${SYSTEM_GUARD}`,
+      `UPDATE \`user\` SET \`token_valid_from\` = NOW() WHERE \`employee_id\` = ? ${EMPLOYEE_SCOPE_GUARD}`,
       [employeeId],
       { employeeId }
     );
@@ -249,7 +267,7 @@ class UserRepository {
   updateStatus(employee) {
     return this._query(
       "UPDATE-STATUS",
-      `UPDATE \`user\` SET \`status\` = ? WHERE \`employee_id\` = ? ${SYSTEM_GUARD}`,
+      `UPDATE \`user\` SET \`status\` = ? WHERE \`employee_id\` = ? ${EMPLOYEE_SCOPE_GUARD}`,
       [employee.status, employee.employee_id]
     );
   }
@@ -410,3 +428,4 @@ module.exports = (db) => {
   return new UserRepository(db);
 };
 module.exports.SYSTEM_GUARD = SYSTEM_GUARD;
+module.exports.EMPLOYEE_SCOPE_GUARD = EMPLOYEE_SCOPE_GUARD;

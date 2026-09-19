@@ -321,10 +321,19 @@ class EmployeeMasterRepository {
     return res.insertId;
   }
 
-  /** Stage 0A revocation, inside the caller's transaction so a rollback undoes it. */
+  /**
+   * Stage 0A revocation, inside the caller's transaction so a rollback undoes it.
+   *
+   * Addressed by `employee_id`, so it carries the same two exclusions the
+   * user repository's employee-scoped writes carry: the break-glass account,
+   * and an INTEGRATION account that holds this employee_id only because it
+   * was provisioned against the employee. An HR edit to a person's record is
+   * not a reason to revoke a machine's token.
+   */
   async bumpTokenValidFrom(tx, employeeId) {
     const res = await tx.query(
-      "UPDATE `user` SET `token_valid_from` = NOW() WHERE `employee_id` = ? AND `is_system_account` = 0",
+      "UPDATE `user` SET `token_valid_from` = NOW() WHERE `employee_id` = ? " +
+        "AND `is_system_account` = 0 AND `is_service_account` = 0",
       [employeeId]
     );
     return res.affectedRows;

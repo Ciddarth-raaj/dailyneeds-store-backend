@@ -539,9 +539,16 @@ class EmployeeMasterUsecase {
         }
       }
 
-      const securityRelevant = offered.filter(
-        (k) => SECURITY_RELEVANT_FIELDS.includes(k) && String(patch[k]) !== String(before[k])
-      );
+      // NULL AND BLANK ARE THE SAME ABSENCE, and comparing them with
+      // `String()` alone is not: `String(null)` is "null" and `String("")`
+      // is "", so resending an unchanged empty designation or branch read as
+      // a change - and a security-relevant "change" revokes every session on
+      // that employee_id. An editor that resends the fields it was given is
+      // the normal case, so that misread turned routine saves into
+      // revocations. Two real values still compare exactly as before.
+      const changedFrom = (k) => String(patch[k] ?? "") !== String(before[k] ?? "");
+
+      const securityRelevant = offered.filter((k) => SECURITY_RELEVANT_FIELDS.includes(k) && changedFrom(k));
 
       const changed = await this.repo.updateEmployee(tx, employeeId, patch);
 
@@ -562,6 +569,11 @@ class EmployeeMasterUsecase {
       // in - and an edit that changes a phone number cannot. Enqueuing on
       // the second would queue reconciliation for every routine edit in the
       // company, so the comparison is against the row we locked, by value.
+      // Deliberately the EXACT comparison, not `changedFrom`. A spurious
+      // reconciliation job is a no-op the worker resolves; a spurious
+      // revocation logs a machine out. Only the second one needed fixing,
+      // and widening the first would change Telegram queueing behaviour in
+      // the same change as an authentication fix.
       const mappingRelevant = offered.filter(
         (k) => MAPPING_RELEVANT_FIELDS.includes(k) && String(patch[k]) !== String(before[k])
       );

@@ -1,0 +1,37 @@
+-- Integration / service accounts: `user`.`is_service_account`.
+--
+-- WHY THIS COLUMN EXISTS.
+--
+-- Every employee-wide revocation this system performs is keyed by
+-- `employee_id`:
+--
+--   UPDATE `user` SET `token_valid_from` = NOW()
+--    WHERE `employee_id` = ? AND `is_system_account` = 0
+--
+-- That is correct for the human logins attached to an employee - a
+-- resignation, a rejoin or a branch/designation change must end their
+-- sessions. It is wrong for an INTEGRATION login that happens to carry the
+-- same `employee_id` because it was provisioned against an employee row:
+-- correcting that employee's joining date, or moving their branch, then
+-- silently revokes the integration's token and the integration stops
+-- working with TOKEN_REVOKED. That is what took the Tally integration down.
+--
+-- `is_system_account` could not be reused for this. It means break-glass:
+-- `employee_id IS NULL`, no employee checks, credentials rotated only by
+-- script, and a token carrying `sys: true`. An integration account that
+-- already holds a live employee-linked token cannot be moved into that
+-- shape without invalidating the token it is using.
+--
+-- So this is a SECOND, narrower marker. It says exactly one thing: this
+-- login is not a person, so an EMPLOYEE lifecycle event is not about it.
+-- Per-account operations (an explicit revoke of this user_id, disabling the
+-- account, rotating its credential) are untouched and still work.
+--
+-- Additive, defaulted, and read by nothing until the guards ship: every
+-- existing row is 0, which is exactly today's behaviour.
+--
+-- It sets NO account's flag. Marking a specific production login as an
+-- integration account is a reviewed data change, not a schema change - see
+-- scripts/auth/service-accounts.sql.
+ALTER TABLE `user`
+  ADD COLUMN `is_service_account` TINYINT(1) NOT NULL DEFAULT 0 AFTER `is_system_account`;
