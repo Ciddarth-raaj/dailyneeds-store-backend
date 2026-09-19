@@ -10,8 +10,9 @@ const respondError = require("../utils/http");
  *   GET  /telegram/attendance/missing-dates    Corrections, this employee's
  *   GET  /telegram/attendance/date             one date, read-only
  *   POST /telegram/attendance/regularization   raise the normal request
+ *   POST /telegram/attendance/ot-request       raise the normal OT request
  *
- * =============================== WHY THESE FOUR ARE "UNPROTECTED" ROUTES ===
+ * =============================== WHY THESE FIVE ARE "UNPROTECTED" ROUTES ===
  *
  * They are listed in `middlewares/auth.js#unProtectedRoutes` for one reason:
  * a Telegram Mini App has NO dnds.co.in session and cannot get one. Most
@@ -23,7 +24,7 @@ const respondError = require("../utils/http");
  * point of the call.
  *
  * `/telegram/attendance/session` proves identity with Telegram's own
- * signature. The other three require `x-telegram-session`, the short-lived
+ * signature. The other four require `x-telegram-session`, the short-lived
  * scoped token that call returns, and refuse anything else - including a
  * perfectly valid dnds.co.in login token, which carries no `scope` claim
  * and is rejected by `telegram_attendance_session#authenticate`.
@@ -193,6 +194,47 @@ class TelegramAttendanceRoutes {
               punch_time: req.body.punch_time,
               reason: req.body.reason,
             },
+            { session_id: req.miniApp.session_id, telegram_user_id: req.miniApp.telegram_user_id }
+          )
+        );
+      } catch (err) {
+        TelegramAttendanceRoutes._respond(res, err);
+      }
+    });
+
+    /**
+     * Raise the NORMAL Daily Needs OT request.
+     *
+     * A THIN AUTHENTICATED DELEGATION AND NOTHING ELSE. The route exists
+     * only because a Mini App cannot present the dnds.co.in session that
+     * `POST /attendance/me/ot-request` requires - that endpoint takes its
+     * employee from `req.decoded`, which a Telegram caller has no way to
+     * populate. So this one resolves the employee from the verified Telegram
+     * session instead and hands the SAME two fields to the SAME usecase:
+     * `attendanceRegularizationUsecase#raiseOtRequest`, through
+     * `miniApp.submitOtRequest`. There is no second OT engine, no second set
+     * of eligibility rules and no Telegram approval path.
+     *
+     * TWO FIELDS, AND NEITHER IS A DURATION. `candidate_ot_minutes`,
+     * `approved_ot_minutes`, `ot_minutes`, `employee_id` and
+     * `requested_for_employee_id` are all unknown keys here, and Joi refuses
+     * unknown keys - so each is a 422, never a value that is ignored today
+     * and read tomorrow. The minutes are recalculated on the server at
+     * submission, and the client has no field with which to disagree.
+     */
+    r.post("/telegram/attendance/ot-request", guard, async (req, res) => {
+      try {
+        const schema = {
+          attendance_date: Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).required(),
+          reason: Joi.string().min(5).max(500).required(),
+        };
+        const isValid = Joi.validate(req.body || {}, schema);
+        if (isValid.error !== null) throw isValid.error;
+
+        res.json(
+          await this.miniApp.submitOtRequest(
+            req.miniApp.employee_id,
+            { attendance_date: req.body.attendance_date, reason: req.body.reason },
             { session_id: req.miniApp.session_id, telegram_user_id: req.miniApp.telegram_user_id }
           )
         );

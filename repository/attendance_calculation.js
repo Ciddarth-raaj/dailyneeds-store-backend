@@ -582,8 +582,21 @@ class AttendanceCalculationRepository {
               candidate_ot_minutes, approved_ot_minutes, finalization_state,
               auto_created, reason, closure_reason,
               DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
-              DATE_FORMAT(decided_at, '%Y-%m-%d %H:%i:%s') AS decided_at
-         FROM attendance_approval_request
+              DATE_FORMAT(decided_at, '%Y-%m-%d %H:%i:%s') AS decided_at,
+              -- WHY A REJECTION WAS REJECTED. The remarks live on the STEP
+              -- that rejected, not on the request, and a rejection ends the
+              -- chain at exactly one step - so the latest REJECTED step is
+              -- the rejection. Read here rather than in a second round trip
+              -- because the employee's own screens show the reason beside
+              -- the status, and a status without its reason is what sends
+              -- people to ask their manager what happened.
+              (SELECT s.remarks
+                 FROM attendance_approval_step s
+                WHERE s.attendance_approval_request_id = r.attendance_approval_request_id
+                  AND s.decision = 'REJECTED'
+                ORDER BY s.stage_no DESC
+                LIMIT 1) AS rejection_remarks
+         FROM attendance_approval_request r
         WHERE requested_for_employee_id = ?
           AND attendance_date BETWEEN ? AND ?
           AND status <> 'CANCELLED'

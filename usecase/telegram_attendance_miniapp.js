@@ -468,6 +468,69 @@ module.exports = ({
     };
   };
 
+  /**
+   * RAISE THE NORMAL OT REQUEST. The exact mirror of `submitRegularization`,
+   * and for the same reason: it is a delegation, not a second flow.
+   *
+   * IT OWNS NO OT RULE WHATSOEVER. `attendanceRegularizationUsecase
+   * #raiseOtRequest` is the one OT business path in this backend - the web
+   * `POST /attendance/me/ot-request` reaches it too, by exactly this call -
+   * and every question that decides the outcome is its:
+   *
+   *   how much OT      it RECALCULATES the date server-side and stores THAT
+   *                    candidate. Nothing reaches it from here but a date
+   *                    and a reason; there is no minutes argument to pass
+   *                    and no way to make one.
+   *   may it be asked  the complete-FINAL-day rule, the one-claim-per-date
+   *                    rule, the open-correction refusal, the backdate
+   *                    window and the future-date refusal.
+   *   who is asking    `employeeId`, which the router takes from the
+   *                    verified Telegram session and from nothing else.
+   *   who approves it  the existing chain. Nobody approves anything from
+   *                    inside Telegram.
+   *
+   * A day closed by the payroll lock already carries a decided OT request,
+   * so the one-claim-per-date rule refuses it - no extra check here, and no
+   * second definition of what "closed" means.
+   */
+  const submitOtRequest = async (
+    employeeId,
+    { attendance_date, reason },
+    { session_id = null, telegram_user_id = null } = {}
+  ) => {
+    const id = Number(employeeId);
+    if (!Number.isInteger(id) || id <= 0) throw validationError("An employee identity is required");
+
+    const result = await attendanceRegularizationUsecase.raiseOtRequest({
+      actor: { employee_id: id },
+      attendance_date,
+      reason,
+    });
+
+    const requestId = result.attendance_approval_request_id || result.request_id || null;
+
+    audit("OT-REQUEST-SUBMITTED", "Telegram Mini App OT request submitted", {
+      employee_id: id,
+      attendance_date: result.attendance_date,
+      request_id: requestId,
+      candidate_ot_minutes: result.candidate_ot_minutes,
+      session_id,
+      telegram_user_id,
+    });
+
+    // NARROWED, NOT SPREAD - as above. `candidate_ot_minutes` is included
+    // because it is the figure the confirmation states, and it is the
+    // SERVER's: it comes back from the usecase that calculated it, never
+    // from anything the browser sent.
+    return {
+      code: 200,
+      request_id: requestId,
+      status: result.status || null,
+      attendance_date: result.attendance_date,
+      candidate_ot_minutes: result.candidate_ot_minutes,
+    };
+  };
+
   return {
     DATE_STATE,
     STATE_LABEL,
@@ -478,6 +541,7 @@ module.exports = ({
     getDateDetail,
     getMonth,
     submitRegularization,
+    submitOtRequest,
   };
 };
 

@@ -248,11 +248,11 @@ const unProtectedRoutes = {
   // "/tally/debit-note": { methods: { get: true } },
   // TELEGRAM ATTENDANCE MINI APP. A Mini App runs inside Telegram with no
   // dnds.co.in session and no way to obtain one - most employees have no
-  // login at all - so these four step past the `x-access-token` gate for the
+  // login at all - so these five step past the `x-access-token` gate for the
   // same reason `/user/login` and `/user/forgot-password` do, and for no
   // other. They are NOT unauthenticated: `routes/telegram_attendance.js`
   // applies its own, stricter gate on every one of them. `/session` proves
-  // identity with Telegram's own signature over `initData`; the other three
+  // identity with Telegram's own signature over `initData`; the other four
   // require the short-lived scoped token that call returns, in a SEPARATE
   // header (`x-telegram-session`), and refuse an ordinary login token.
   //
@@ -263,6 +263,7 @@ const unProtectedRoutes = {
   "/telegram/attendance/missing-dates": { methods: { get: true } },
   "/telegram/attendance/date": { methods: { get: true } },
   "/telegram/attendance/regularization": { methods: { post: true } },
+  "/telegram/attendance/ot-request": { methods: { post: true } },
 
   "/purchase-tally": { methods: { post: true } },
   "/purchase": { methods: { post: true } },
