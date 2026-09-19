@@ -32,6 +32,12 @@ const P = require("../constants/hr_permissions");
  * already on the Permission Matrix, and are already what the Employee Master
  * grants; only the connective between them has changed.
  *
+ * IT IS THE THREE IDENTITY MUTATIONS AND NOTHING ELSE. The Phase 3B group
+ * JOIN-LINK endpoint further down keeps its OR: its screen draws the button
+ * from group state and is not passed the permission, so an AND there would
+ * only produce a visible button that 403s. The comment on that route says so
+ * in full, and says what tightening it would take.
+ *
  * THE READS ARE UNTOUCHED. Seeing that an employee reads TELEGRAM PENDING is
  * still `view_employees`, the same key as every other status on those screens.
  * Nothing here narrows who may LOOK.
@@ -220,10 +226,26 @@ class EmployeeTelegramRoutes {
     /**
      * Issue this employee's join link for one group.
      *
-     * The mutation pair the rest of Telegram onboarding uses -
-     * `employee_create` AND `employee_edit`, both of them - plus the branch
-     * guard, so a manager cannot generate a link for another branch's
-     * employee.
+     * `employee_create` OR `employee_edit`, plus the branch guard, so a
+     * manager cannot generate a link for another branch's employee.
+     *
+     * DELIBERATELY STILL AN OR, AND NOT THE IDENTITY RULE ABOVE. The three
+     * IDENTITY mutations - link-token, disconnect, and the reconnect that
+     * reuses link-token - were tightened to `requireAll`, and this endpoint
+     * was briefly tightened with them. It has been put back, because the
+     * screen cannot honour it: `components/hr/TelegramRequiredGroups.jsx`
+     * draws Join Link / New Link from GROUP STATE and is never passed
+     * `canManageTelegram`, so an AND here would leave a visible button that
+     * answers 403 - a worse bug than the one being fixed.
+     *
+     * Joining a group is also not the decision the conjunction exists for.
+     * That rule guards attaching, replacing or retiring an employee's
+     * Telegram IDENTITY; adding an already-identified employee to a group
+     * they are mapped to is ordinary onboarding follow-through.
+     *
+     * TIGHTENING THIS IS ITS OWN CHANGE, and it starts on the screen: pass
+     * the permission into `TelegramRequiredGroups`, hide the button, then
+     * move this line. Not before.
      *
      * THE BODY MUST BE EMPTY. Nothing about this request may come from the
      * browser except which employee and which group, and both are checked
@@ -231,7 +253,7 @@ class EmployeeTelegramRoutes {
      */
     r.post(
       "/employee/:employee_id/telegram/groups/:telegram_group_id(\\d+)/join-link",
-      gate.requireAll(P.EMPLOYEE_CREATE, P.EMPLOYEE_EDIT),
+      gate.require(P.EMPLOYEE_CREATE, P.EMPLOYEE_EDIT),
       this.branchScope.requireEmployeeInScope(),
       async (req, res) => {
         try {

@@ -118,10 +118,22 @@ describe("the two endpoints", () => {
     });
   });
 
-  it("WRITE is employee_create AND employee_edit, as Telegram onboarding now is", () => {
+  it("WRITE IS STILL employee_create OR employee_edit - NOT the identity AND", () => {
+    /*
+     * THE IDENTITY MUTATIONS WERE TIGHTENED AND THIS ONE WAS NOT, and the
+     * MODE is asserted so that is a decision rather than a leftover.
+     *
+     * `components/hr/TelegramRequiredGroups.jsx` draws Join Link / New Link
+     * from GROUP STATE and is never passed `canManageTelegram`, so requiring
+     * both keys here would leave a visible button answering 403. Joining a
+     * group an employee is already mapped to is also not the decision the
+     * conjunction guards, which is attaching or retiring their IDENTITY.
+     *
+     * Tightening it starts on the screen, not here.
+     */
     assert.deepEqual(find(routes, "POST", "join-link").guard, {
       keys: [P.EMPLOYEE_CREATE, P.EMPLOYEE_EDIT],
-      mode: "all",
+      mode: "any",
     });
   });
 
