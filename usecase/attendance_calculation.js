@@ -219,6 +219,44 @@ function correctionClaimFor({ approval }) {
   return claim;
 }
 
+/** The states a ONE-DAY SHIFT CHANGE request on a day can be in. */
+const SHIFT_CHANGE_STATE = Object.freeze({
+  NONE: "NONE",
+  PENDING: "PENDING",
+  APPROVED: "APPROVED",
+  REJECTED: "REJECTED",
+});
+
+/**
+ * The one-day shift change request filed against a day, if any.
+ *
+ * The third mirror of `otClaimFor`, for the third request type, and it
+ * DECIDES NOTHING. A pending shift request does not hold the date open, does
+ * not mark it REGULARIZATION_PENDING and does not change which shift the day
+ * is calculated under - only a final approval does that, and it does it by
+ * writing an `attendance_date_shift_override` row that the resolver reads
+ * like any other. These fields describe the REQUEST beside the day so the
+ * employee's own screen can say what they asked for and what came of it.
+ */
+function shiftChangeClaimFor({ shiftRequest }) {
+  const claim = {
+    shift_change_request_id: shiftRequest ? shiftRequest.attendance_approval_request_id : null,
+    shift_change_state: SHIFT_CHANGE_STATE.NONE,
+    shift_change_requested_work_shift_id: shiftRequest
+      ? shiftRequest.requested_work_shift_id || null
+      : null,
+    shift_change_reason: shiftRequest ? shiftRequest.reason || null : null,
+    shift_change_requested_at: shiftRequest ? shiftRequest.created_at || null : null,
+    shift_change_decided_at: shiftRequest ? shiftRequest.decided_at || null : null,
+    shift_change_rejection_remarks: shiftRequest ? shiftRequest.rejection_remarks || null : null,
+  };
+  if (!shiftRequest) return claim;
+  if (shiftRequest.status === "PENDING") claim.shift_change_state = SHIFT_CHANGE_STATE.PENDING;
+  else if (shiftRequest.status === "APPROVED") claim.shift_change_state = SHIFT_CHANGE_STATE.APPROVED;
+  else claim.shift_change_state = SHIFT_CHANGE_STATE.REJECTED;
+  return claim;
+}
+
 module.exports = (attendanceCalculationRepo, options = {}) => {
   /**
    * The OT request collaborator, injected rather than required.
@@ -627,17 +665,29 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       regularizedByDate.get(date).push(row);
     });
 
-    // TWO SLOTS PER DATE, because Missing Punch and OT are two separate
-    // requests now. `regularization` is the attendance correction (a
-    // REGULARIZATION request, or a legacy REGULARIZATION_WITH_OT one); `ot`
-    // is the employee's OT claim (an OT request). Among several rows of one
-    // kind the newest wins, which is the one that is not CANCELLED.
+    // THREE SLOTS PER DATE, one per kind of request. `regularization` is the
+    // attendance correction (a REGULARIZATION request, or a legacy
+    // REGULARIZATION_WITH_OT one); `ot` is the employee's OT claim; `shift`
+    // is a one-day shift change request. Among several rows of one kind the
+    // newest wins, which is the one that is not CANCELLED.
+    //
+    // THE THIRD SLOT IS NOT COSMETIC. This used to be "OT, or else a
+    // correction", and a SHIFT_CHANGE request therefore fell into the
+    // correction slot - which would have held the date out of payroll as
+    // REGULARIZATION_PENDING while a shift request sat in the queue, and
+    // reported that request to the employee as a correction, with its reason,
+    // on the Corrections tab. A shift request is neither: it proposes no
+    // punch, it corrects nothing, and while it is pending the date is an
+    // ordinary date calculated under the employee's ordinary shift.
     const approvalByDate = new Map();
     (context.approvals || []).forEach((row) => {
       const date = toDateOnly(row.attendance_date);
-      if (!approvalByDate.has(date)) approvalByDate.set(date, { regularization: null, ot: null });
+      if (!approvalByDate.has(date)) {
+        approvalByDate.set(date, { regularization: null, ot: null, shift: null });
+      }
       const slot = approvalByDate.get(date);
       if (row.request_type === "OT") slot.ot = row;
+      else if (row.request_type === "SHIFT_CHANGE") slot.shift = row;
       else slot.regularization = row;
     });
 
@@ -646,9 +696,10 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     return dates.map((date) => {
       const resolution = context.resolutionFor(date);
 
-      const slots = approvalByDate.get(date) || { regularization: null, ot: null };
+      const slots = approvalByDate.get(date) || { regularization: null, ot: null, shift: null };
       let approval = slots.regularization;
       let otRequest = slots.ot;
+      let shiftRequest = slots.shift;
       let regularizedPunches = regularizedByDate.get(date) || [];
 
       if (assumedDate !== null && assumedDate === date) {
@@ -674,6 +725,12 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
         };
         if (assumed.request_type === "OT") {
           otRequest = assumed;
+        } else if (assumed.request_type === "SHIFT_CHANGE") {
+          // A shift decision being committed in this very transaction. The
+          // shift it makes effective reaches the calculation through
+          // `assume_override`, which is what actually changes the day; this
+          // slot only carries the REQUEST's state for the read.
+          shiftRequest = assumed;
         } else {
           approval = assumed;
           regularizedPunches =
@@ -751,6 +808,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
         ...day,
         ...otClaimFor({ day, otRequest, otSettled }),
         ...correctionClaimFor({ approval }),
+        ...shiftChangeClaimFor({ shiftRequest }),
         shift_resolution_status: resolution.status,
         // Display only: the live shift name, and whether the date's shift came
         // from the dated history or from a single-date edit.

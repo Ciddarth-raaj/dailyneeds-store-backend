@@ -581,6 +581,12 @@ class AttendanceCalculationRepository {
               request_type, status, current_stage_no, total_stages,
               candidate_ot_minutes, approved_ot_minutes, finalization_state,
               auto_created, reason, closure_reason,
+              -- SHIFT_CHANGE only, and NULL on every other row: the shift the
+              -- employee asked for. The day's own shift is the resolver's
+              -- answer and is not this - a pending request changes nothing -
+              -- but the employee's own screen has to be able to say what they
+              -- asked for while it is still pending.
+              requested_work_shift_id,
               DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
               DATE_FORMAT(decided_at, '%Y-%m-%d %H:%i:%s') AS decided_at,
               -- WHY A REJECTION WAS REJECTED. The remarks live on the STEP

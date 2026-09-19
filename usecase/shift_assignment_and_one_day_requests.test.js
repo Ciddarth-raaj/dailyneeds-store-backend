@@ -118,8 +118,13 @@ function build(state = {}) {
       (state.rawPunches || []).filter((p) => p.employee_id === id && p.punch_date >= from && p.punch_date <= to),
     getApprovedRegularizedPunches: async () => [],
     getBreakOverride: async () => null,
+    // Every column the real query returns, `requested_work_shift_id` included:
+    // a fake that returned less would make the day's shift-request fields
+    // pass here and be null in production.
     getApprovalStateByDate: async (id, from, to) =>
-      store.requests.filter((r) => r.requested_for_employee_id === id && r.attendance_date >= from && r.attendance_date <= to).map((r) => ({ ...r })),
+      store.requests
+        .filter((r) => r.requested_for_employee_id === id && r.attendance_date >= from && r.attendance_date <= to)
+        .map((r) => ({ ...r, rejection_remarks: null })),
     getEmploymentWindow: async (id) => EMPLOYEES.find((e) => e.employee_id === Number(id)) || null,
     getMonthlyGrossAsOf: async () => null,
     saveCalculations: async (rows) => { saved.calculations.push(rows); return { written: rows.length }; },
@@ -700,6 +705,66 @@ describe("B. the approved one-day shift - the day's rules and the day's pay", ()
       decision: STEP_DECISION.REJECTED, remarks: "Payroll for that month is closed",
     });
     assert.equal(closed.status, REQUEST_STATUS.REJECTED);
+  });
+});
+
+/* ========================== the three request types do not blur into one == */
+
+describe("a pending shift request is not a correction, and does not hold the day open", () => {
+  const DATE = "2026-09-18";
+  const DAY = [
+    punch(1, EMPLOYEE, `${DATE} 18:00:00`),
+    punch(2, EMPLOYEE, `${DATE} 22:00:00`),
+  ];
+
+  /*
+   * INTEGRATION REGRESSION. The per-date request slots were "OT, or else a
+   * correction", so a SHIFT_CHANGE request landed in the correction slot -
+   * which would have marked the date REGULARIZATION_PENDING while a shift
+   * request sat in the queue (holding it out of payroll for a day with
+   * nothing wrong with it) and reported that request to the employee as a
+   * correction, with its reason, on the Corrections tab.
+   */
+  it("the day stays FINAL, on the employee's ordinary shift, with no correction against it", async () => {
+    const world = build({ rawPunches: DAY });
+
+    const [before] = await world.calculation.calculateRange({
+      employee_id: EMPLOYEE, from_date: DATE, to_date: DATE,
+    });
+    assert.equal(before.status, "FINAL");
+
+    await world.regularization.raiseShiftChangeRequest({
+      actor: self(EMPLOYEE), attendance_date: DATE, work_shift_id: LONG,
+      reason: "Covering the full day", today: TODAY,
+    });
+
+    const [during] = await world.calculation.calculateRange({
+      employee_id: EMPLOYEE, from_date: DATE, to_date: DATE,
+    });
+    assert.equal(during.status, "FINAL", "a pending shift request holds nothing open");
+    assert.equal(during.is_final, true);
+    assert.equal(during.work_shift_id, EVE, "and moves no shift");
+    // The correction slot is the OTHER request type's, and stays empty.
+    assert.equal(during.correction_state, "NONE");
+    assert.equal(during.correction_request_id, null);
+    assert.equal(during.correction_reason, null);
+    // The shift request reports itself, in its own fields.
+    assert.equal(during.shift_change_state, "PENDING");
+    assert.equal(during.shift_change_requested_work_shift_id, LONG);
+    assert.equal(during.shift_change_reason, "Covering the full day");
+  });
+
+  it("and the OT slot is untouched, so the date's OT claim is still its own", async () => {
+    const world = build({ rawPunches: DAY });
+    await world.regularization.raiseShiftChangeRequest({
+      actor: self(EMPLOYEE), attendance_date: DATE, work_shift_id: LONG,
+      reason: "Covering the full day", today: TODAY,
+    });
+    const [day] = await world.calculation.calculateRange({
+      employee_id: EMPLOYEE, from_date: DATE, to_date: DATE,
+    });
+    assert.equal(day.ot_request_id, null);
+    assert.notEqual(day.ot_claim_state, "PENDING");
   });
 });
 
