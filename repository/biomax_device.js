@@ -136,7 +136,29 @@ class BiomaxDeviceRepository {
     );
   }
 
-  /** Cloud IDs that have punched but have no registry row. */
+  /**
+   * Cloud IDs of PHYSICAL TERMINALS that contacted the receiver live and are
+   * not in the registry.
+   *
+   * A DIGISME_IMPORT ROW IS NOT A DEVICE. The DigiSME Excel import and the
+   * DigiSME API sync both write `dev_id = NULL` with
+   * `ingest_source = 'DIGISME_IMPORT'` (biomax/store.js insertImportedPunch):
+   * they are an attendance INGESTION SOURCE, not a terminal. Left to the
+   * plain "no matching biomax_device" test, every one of those rows failed
+   * the join on a NULL dev_id and the whole lot collapsed into a single
+   * phantom row - an "unregistered device" with no Cloud ID and a punch
+   * count in the thousands, which an administrator can neither register nor
+   * dismiss. `dev_id IS NOT NULL` alone would fix that, and the
+   * ingest_source test is stated anyway so the intent survives a future
+   * source that does carry an identifier.
+   *
+   * LIVE ONLY, not HISTORICAL_PULL. This list exists to answer one
+   * question: which terminal is talking to us right now that we do not know
+   * about? A GET_LOG_DATA pull is backfilled history, requested by us for a
+   * device we already decided to pull from; it is not a terminal announcing
+   * itself. (Consequence worth knowing: a device whose punches arrived ONLY
+   * through a historical pull would not be listed here.)
+   */
   unregisteredSeen() {
     return this._q(
       "UNREGISTERED-SEEN",
@@ -146,7 +168,9 @@ class BiomaxDeviceRepository {
               MAX(p.source_ip) AS last_source_ip
          FROM biomax_punch p
          LEFT JOIN biomax_device bd ON bd.dev_id = p.dev_id
-        WHERE bd.biomax_device_id IS NULL
+        WHERE p.ingest_source = 'LIVE'
+          AND p.dev_id IS NOT NULL
+          AND bd.biomax_device_id IS NULL
         GROUP BY p.dev_id ORDER BY last_punch DESC`,
       []
     );
