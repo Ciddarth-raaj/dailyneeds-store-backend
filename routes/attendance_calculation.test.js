@@ -73,7 +73,22 @@ describe("the endpoints and their guards", () => {
       mode: "any",
       keys: [P.RECALCULATE_ATTENDANCE],
     });
-    assert.deepEqual(find("GET", "/attendance/calculated/recalculate-runs").guard, {
+
+
+    /*
+     * AND THE SHIFT EDITOR'S RECOVERY DOES NOT REACH IT. That path
+     * (`POST /hr/work-shift-assignments/recalculate`) re-runs ONE employee
+     * over ONE range under the shift-change keys; this one points the
+     * general engine at any employee, outlet or designation and keeps its
+     * own key, which the migration grants to nobody. Holding the shift keys
+     * grants nothing here.
+     */
+    assert.ok(
+      !JSON.stringify(find("POST", "/attendance/calculated/recalculate-bulk").guard).includes(
+        "edit_shift_assignment_effective_dated"
+      ),
+      "the shift-change keys are not an alternative route into bulk recalculation"
+    );    assert.deepEqual(find("GET", "/attendance/calculated/recalculate-runs").guard, {
       mode: "any",
       keys: [P.RECALCULATE_ATTENDANCE],
     });

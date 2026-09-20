@@ -105,9 +105,35 @@ function payrollLockedError(locked = []) {
   return err;
 }
 
+/**
+ * The PRE-FLIGHT error, for a caller that is about to ask for something a
+ * locked month will refuse.
+ *
+ * The guard that actually protects the data is the `FOR UPDATE` check in
+ * `repository/attendance_calculation.js`, inside the writing transaction; it
+ * is the one that cannot be bypassed and it is not replaced by anything here.
+ * This is what lets a SUBMIT or an APPROVE fail early and say why, instead of
+ * doing the work and dying at the write - and it matters most for the paths
+ * that change a shift, because those refuse an action rather than a number:
+ * "you may not file this request" has to be said before the request exists.
+ *
+ * Same name, same code and the same locked-month payload as the write-time
+ * error, so a screen reads one shape of refusal wherever it came from.
+ */
+function payrollLockedActionError(locked = [], action = "This change") {
+  const err = payrollLockedError(locked);
+  const months = locked
+    .map((l) => `${String(l.month).padStart(2, "0")}/${l.year}`)
+    .filter((m, i, all) => all.indexOf(m) === i)
+    .join(", ");
+  err.message = `${action} cannot be made because payroll for ${months} is approved and locked.`;
+  return err;
+}
+
 module.exports = {
   PAYROLL_LOCK_STATUS,
   periodOf,
   periodsTouched,
   payrollLockedError,
+  payrollLockedActionError,
 };

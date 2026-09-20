@@ -27,6 +27,17 @@ const tagging = {
   },
 };
 
+/** EVERY guard on a route, in order - a route may carry more than one. */
+function allGuardsOf(routes, method, path) {
+  for (const layer of routes.getRouter().stack) {
+    if (!layer.route) continue;
+    if (Object.keys(layer.route.methods)[0].toUpperCase() !== method) continue;
+    if (layer.route.path !== path) continue;
+    return layer.route.stack.map((s) => s.handle.__guard).filter(Boolean);
+  }
+  return [];
+}
+
 function guardsOf(routes) {
   const guards = [];
   for (const layer of routes.getRouter().stack) {
@@ -42,16 +53,18 @@ const guards = guardsOf(buildRoutes({}, tagging, null));
 const find = (method, path) => guards.find((g) => g.method === method && g.path === path);
 
 describe("the endpoints and their guards", () => {
-  it("adds the self-only raise beside the existing four", () => {
+  it("adds the self-only raise beside the existing four, and the one-day shift request beside them", () => {
     assert.deepEqual(
       guards.map((g) => `${g.method} ${g.path}`).sort(),
       [
         "GET /attendance/approvals",
         "GET /attendance/approvals/count",
+        "GET /attendance/me/shift-change/options",
         "GET /attendance/regularization/:request_id",
         "GET /attendance/regularization/pending",
         "POST /attendance/me/ot-request",
         "POST /attendance/me/regularization",
+        "POST /attendance/me/shift-change",
         "POST /attendance/regularization",
         "POST /attendance/regularization/:request_id/decision",
       ]
@@ -61,6 +74,18 @@ describe("the endpoints and their guards", () => {
   it("the approval screens' list and count are behind view_attendance_approvals", () => {
     assert.deepEqual(find("GET", "/attendance/approvals").guard, { mode: "any", keys: [P.VIEW_ATTENDANCE_APPROVALS] });
     assert.deepEqual(find("GET", "/attendance/approvals/count").guard, { mode: "any", keys: [P.VIEW_ATTENDANCE_APPROVALS] });
+  });
+
+  it("the one-day shift request carries BOTH guards: self, so it can only ever be your own attendance, and the key, which reaches the endpoint", () => {
+    const routes = buildRoutes({}, tagging, null);
+    assert.deepEqual(allGuardsOf(routes, "POST", "/attendance/me/shift-change"), [
+      { mode: "self", keys: [] },
+      { mode: "any", keys: [P.RAISE_SHIFT_CHANGE_REQUEST] },
+    ]);
+    assert.deepEqual(allGuardsOf(routes, "GET", "/attendance/me/shift-change/options"), [
+      { mode: "self", keys: [] },
+      { mode: "any", keys: [P.RAISE_SHIFT_CHANGE_REQUEST] },
+    ]);
   });
 
   it("the self raises need an employee identity and no permission key; the HR raise is unchanged", () => {

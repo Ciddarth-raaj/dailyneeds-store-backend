@@ -3,6 +3,13 @@ const { JOINED_ON } = require("../utils/joining_date");
 const { effectiveFromNotBeforeCutover } = require("../constants/attendance_v2");
 const { accessScope } = require("./employee_scope");
 const {
+  resolveAssignmentForDate,
+  affectedRangeForNewAssignment,
+  monthProbesForRange,
+} = require("../utils/shiftResolution");
+// THE PAYROLL LOCK, not a second copy of it. See the export's own comment.
+const { assertMonthsNotPayrollLocked } = require("./attendance_calculation");
+const {
   queryAsync,
   getConnectionAsync,
   beginTransactionAsync,
@@ -334,6 +341,202 @@ class EmployeeWorkShiftRepository {
             effective_from: effectiveFrom,
             source: "CORRECTION",
           });
+        }
+      );
+    });
+  }
+
+  /**
+   * The EFFECTIVE-DATED permanent shift change.
+   *
+   * One further APPENDED row, exactly like `correctAssignment` above and like
+   * every other row of this table - nothing is updated and nothing is deleted,
+   * so the shift that applied to a date before `effective_from` goes on being
+   * resolvable from history for ever. `source = 'SHIFT_CHANGE'` distinguishes
+   * it from an ordinary assignment (always dated today) and from a correction
+   * (which asserts a past record was wrong).
+   *
+   * `default_work_shift_id` is written ONLY when the change takes effect on or
+   * before today - and by the caller, not here. A change dated into next month
+   * has not happened yet, and the employee's current shift is still their
+   * current shift until it does.
+   */
+  async changeAssignment({ employeeId, workShiftId, effectiveFrom, note, createdBy, today }) {
+    const connection = await getConnectionAsync(this.db);
+    try {
+      await beginTransactionAsync(connection);
+
+      /*
+       * THE EMPLOYEE'S HISTORY, LOCKED FOR THE LIFE OF THIS TRANSACTION.
+       *
+       * Two things are read from it - which dates this row actually moves,
+       * and which shift is current once it exists - and both would be wrong
+       * if a second change landed in between. `FOR UPDATE` on this
+       * employee's rows serializes two changes to one person against each
+       * other and against nobody else.
+       */
+      const before = await queryAsync(
+        connection,
+        `SELECT employee_work_shift_assignment_id, employee_id, work_shift_id,
+                DATE_FORMAT(effective_from, '%Y-%m-%d') AS effective_from
+           FROM employee_work_shift_assignment
+          WHERE employee_id = ?
+          FOR UPDATE`,
+        [employeeId]
+      );
+
+      /*
+       * THE PAYROLL LOCK, TAKEN HERE AND NOT BEFORE.
+       *
+       * This is the boundary. The usecase's pre-flight check is a courtesy
+       * that lets a save fail with a readable sentence; it holds no lock and
+       * a month can close in the microseconds after it answers. This call
+       * takes `FOR UPDATE` on the very `payrun_employee_calculation` rows
+       * `payrun_calculation.js#approveAndLock` locks, on THIS connection,
+       * inside THIS transaction - so a concurrent approve-and-lock either
+       * commits before us (and we see APPROVED_LOCKED and throw) or waits
+       * behind us (and finds the assignment already written). There is no
+       * interleaving in which both succeed.
+       *
+       * IT IS ASKED ABOUT THE DATES THIS ROW ACTUALLY MOVES, computed from
+       * the history just locked: a row superseded by a later assignment
+       * cannot reach the months after that assignment, and locking them
+       * would refuse a change that was never going to touch them.
+       */
+      const affected = affectedRangeForNewAssignment({
+        assignments: before,
+        effectiveFrom,
+        today,
+      });
+      if (affected) {
+        await assertMonthsNotPayrollLocked(
+          connection,
+          monthProbesForRange({ employeeId, from: affected.from, to: affected.to })
+        );
+      }
+
+      const inserted = await queryAsync(
+        connection,
+        `INSERT INTO employee_work_shift_assignment
+           (employee_id, work_shift_id, effective_from, source, note, created_by)
+         VALUES (?, ?, ?, 'SHIFT_CHANGE', ?, ?)`,
+        [employeeId, workShiftId, effectiveFrom, note, createdBy === undefined ? null : createdBy]
+      );
+
+      /*
+       * THE CURRENT SHIFT IS RESOLVED, NEVER ASSUMED.
+       *
+       * `default_work_shift_id` is what every legacy and current-state
+       * consumer reads, and it must agree with the dated history. Writing
+       * the shift that was just inserted is only correct when nothing later
+       * exists: inserting `05 Sep = C` into a history that already says
+       * `15 Sep = B` leaves B current, and stamping C would have made the
+       * column disagree with every date it describes.
+       *
+       * So the column is set to the RESOLVER's answer for today, over the
+       * history as it stands after the insert - the same pure function the
+       * attendance engine resolves a date with, not a second rule.
+       */
+      const after = [
+        ...before,
+        {
+          employee_work_shift_assignment_id: inserted ? inserted.insertId : Number.MAX_SAFE_INTEGER,
+          employee_id: employeeId,
+          work_shift_id: workShiftId,
+          effective_from: effectiveFrom,
+        },
+      ];
+      const current = resolveAssignmentForDate(after, today);
+      const currentShiftId = current ? Number(current.work_shift_id) : null;
+      if (currentShiftId !== null) {
+        await queryAsync(
+          connection,
+          "UPDATE new_employee SET default_work_shift_id = ? WHERE employee_id = ?",
+          [currentShiftId, employeeId]
+        );
+      }
+
+      await commitAsync(connection);
+      return {
+        code: 200,
+        employee_work_shift_assignment_id: inserted ? inserted.insertId : null,
+        employee_id: employeeId,
+        work_shift_id: workShiftId,
+        effective_from: effectiveFrom,
+        source: "SHIFT_CHANGE",
+        // What the column now says, and the dates this row moved - both are
+        // the transaction's own answers, not the caller's guesses.
+        current_work_shift_id: currentShiftId,
+        affected_from: affected ? affected.from : null,
+        affected_to: affected ? affected.to : null,
+      };
+    } catch (err) {
+      await rollbackAsync(connection);
+      // A payroll-locked month is a business refusal, not a fault: it travels
+      // to the caller as it is, with its code and its months.
+      if (!err || err.code !== "PAYROLL_MONTH_LOCKED") {
+        logger.Log({
+          level: logger.LEVEL.ERROR,
+          component: "REPOSITORY.EMPLOYEE_WORK_SHIFT",
+          code: "REPOSITORY.EMPLOYEE_WORK_SHIFT.CHANGE-ASSIGNMENT",
+          description: err && err.toString ? err.toString() : String(err),
+          category: "",
+          ref: {},
+        });
+      }
+      throw err;
+    } finally {
+      connection.release();
+    }
+  }
+
+
+
+
+  /**
+   * One employee's whole shift history, NEWEST FIRST, for the history panel.
+   *
+   * Every row, including the ones a later row has superseded: the screen shows
+   * what was true and when it was decided, so nothing is filtered out for
+   * being old. Which row is CURRENT is the resolver's answer, not a column,
+   * and the usecase marks it from `resolveAssignmentForDate` rather than
+   * letting the SQL guess.
+   */
+  async listAssignmentHistory(employeeId) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT a.employee_work_shift_assignment_id,
+                a.employee_id,
+                a.work_shift_id,
+                a.effective_from,
+                a.source,
+                a.note,
+                a.created_by,
+                a.created_at,
+                ws.shift_code,
+                ws.shift_name,
+                ws.active AS work_shift_active,
+                ne.employee_name AS changed_by_name
+           FROM employee_work_shift_assignment a
+           LEFT JOIN work_shift ws ON ws.work_shift_id = a.work_shift_id
+           LEFT JOIN new_employee ne ON ne.employee_id = a.created_by
+          WHERE a.employee_id = ?
+          ORDER BY a.effective_from DESC, a.employee_work_shift_assignment_id DESC`,
+        [employeeId],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.EMPLOYEE_WORK_SHIFT",
+              code: "REPOSITORY.EMPLOYEE_WORK_SHIFT.LIST-ASSIGNMENT-HISTORY",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(rows || []);
         }
       );
     });

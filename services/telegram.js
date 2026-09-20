@@ -54,7 +54,15 @@ const client = BOT_TOKEN ? new TelegramClient({ accessToken: BOT_TOKEN }) : null
  * it, not here - `usecase/telegram_update_dispatcher.js` can already route it
  * the day it is switched on.
  */
-const ALLOWED_UPDATES = ["message", "chat_join_request"];
+/*
+ * `callback_query` IS ON, and it is on for exactly one feature: the first
+ * approver's Approve / Reject buttons on a one-day shift change request
+ * (`usecase/attendance_shift_change_telegram.js`). Unlike `chat_member` below
+ * it produces no ambient traffic at all - a callback query exists only when
+ * somebody taps a button this backend itself put on a message - so turning it
+ * on costs nothing until a button is tapped.
+ */
+const ALLOWED_UPDATES = ["message", "chat_join_request", "callback_query"];
 
 const NOT_CONFIGURED = "Telegram is not configured (TELEGRAM_BOT_TOKEN missing)";
 const requireClient = () => {
@@ -166,6 +174,33 @@ class Telegram {
     const options = { timeout: 0, allowedUpdates: ALLOWED_UPDATES };
     if (offset !== undefined && offset !== null) options.offset = offset;
     return requireClient().getUpdates(options);
+  }
+
+  /**
+   * Acknowledge a tapped inline button.
+   *
+   * Telegram shows a spinner on the button until this is called and gives up
+   * after a few seconds, so it is called on EVERY path - including the ones
+   * that refuse - and the text is what the approver sees as a toast.
+   */
+  async answerCallbackQuery(callbackQueryId, text = null) {
+    const options = {};
+    if (text) options.text = String(text).slice(0, 200);
+    return requireClient().answerCallbackQuery(callbackQueryId, options);
+  }
+
+  /**
+   * Replace a message's buttons - in practice, take them away.
+   *
+   * A decided request must not go on offering Approve and Reject: the second
+   * tap is already refused by the database, but a button that is still there
+   * invites it.
+   */
+  async editMessageReplyMarkup(chatId, messageId, replyMarkup) {
+    return requireClient().editMessageReplyMarkup(replyMarkup, {
+      chatId,
+      messageId,
+    });
   }
 
   /* ------------------------------------ Phase 3B: group membership ------ */

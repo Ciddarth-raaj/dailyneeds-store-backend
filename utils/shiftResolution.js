@@ -369,6 +369,14 @@ function resolveShiftForDate({
         work_shift_id: override.work_shift_id,
         effective_from: date,
         source: "DATE_OVERRIDE",
+        // Carried through so the engine can tell an override the EMPLOYEE was
+        // granted from one a manager simply applied: only the first
+        // authorises the overtime the longer shift produces.
+        shift_change_approved: Number(override.shift_change_approved) === 1,
+        attendance_approval_request_id:
+          override.attendance_approval_request_id === undefined
+            ? null
+            : override.attendance_approval_request_id,
       }
     : resolveAssignmentForDate(assignments, date);
 
@@ -414,8 +422,86 @@ function resolveShiftForDate({
   };
 }
 
+/**
+ * THE DATES A NEW ASSIGNMENT ROW ACTUALLY MOVES.
+ *
+ * An effective-dated row is open-ended FORWARD, but only until the next row
+ * that already exists takes over. Inserting `15 Aug = C` into
+ *
+ *     01 Aug  A
+ *     01 Sep  B
+ *
+ * moves 15-31 August and NOTHING in September, because the 1 September row
+ * still wins every September date. Treating the range as "effective_from to
+ * today" would lock, and recalculate, a September that this change cannot
+ * touch - and a locked September would then refuse a change that was never
+ * going to reach it.
+ *
+ * THE END IS ALSO CAPPED AT TODAY, because a date in the future has no
+ * attendance to move yet.
+ *
+ * @returns {{from: string, to: string}|null} null when the row moves nothing
+ *   (it is dated after today, or a later row starts on the same day).
+ */
+function affectedRangeForNewAssignment({ assignments, effectiveFrom, today }) {
+  const from = toDateOnly(effectiveFrom);
+  const businessToday = toDateOnly(today);
+  if (from === null || businessToday === null) return null;
+  if (from > businessToday) return null;
+
+  // The earliest EXISTING row that starts strictly after the new one. From
+  // its date onward the new row is superseded and changes nothing.
+  let supersededFrom = null;
+  (Array.isArray(assignments) ? assignments : []).forEach((row) => {
+    if (!row) return;
+    const rowFrom = toDateOnly(row.effective_from);
+    if (rowFrom === null || rowFrom <= from) return;
+    if (supersededFrom === null || rowFrom < supersededFrom) supersededFrom = rowFrom;
+  });
+
+  const lastAffected = supersededFrom === null ? businessToday : minDate(addDay(supersededFrom, -1), businessToday);
+  if (lastAffected < from) return null;
+  return { from, to: lastAffected };
+}
+
+/** `YYYY-MM-DD` plus or minus whole days, computed in UTC so no zone moves it. */
+function addDay(dateOnly, days) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateOnly));
+  if (!m) return dateOnly;
+  const at = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]) + days);
+  return new Date(at).toISOString().slice(0, 10);
+}
+
+const minDate = (a, b) => (a < b ? a : b);
+
+/**
+ * One probe row per CALENDAR MONTH the range touches.
+ *
+ * The payroll lock is monthly, so one date inside a month answers for the
+ * whole of it - and a lock check given thirty dates would take thirty times
+ * the locks for the same answer.
+ */
+function monthProbesForRange({ employeeId, from, to }) {
+  const start = toDateOnly(from);
+  const end = toDateOnly(to);
+  if (start === null || end === null || start > end) return [];
+
+  const probes = [];
+  let cursor = `${start.slice(0, 7)}-01`;
+  const last = `${end.slice(0, 7)}-01`;
+  while (cursor <= last) {
+    probes.push({ employee_id: employeeId, attendance_date: cursor });
+    const y = Number(cursor.slice(0, 4));
+    const m = Number(cursor.slice(5, 7));
+    cursor = m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, "0")}-01`;
+  }
+  return probes;
+}
+
 module.exports = {
   RESOLUTION_STATUS,
+  affectedRangeForNewAssignment,
+  monthProbesForRange,
   SHIFT_SNAPSHOT_VERSION,
   toDateOnly,
   dayOfWeek,

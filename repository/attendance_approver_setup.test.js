@@ -117,11 +117,14 @@ describe("the approval scope after the employee-level chain", () => {
   it("26-27. 'pending with me' is the actor's own snapshotted steps OR their role steps - so a reassigned step moves queues and counts together", async () => {
     const withRole = await capture((r) => r.countApprovals({ request_type: "OT", status: "PENDING", approver_roles: ["HR"], outlet_id: 3, actor_employee_id: 44, is_admin: false }));
     assert.match(withRole.sql, /\(\(s\.approver_employee_id IS NULL AND s\.approver_role IN \(\?\) AND \(s\.approver_role <> 'STORE_MANAGER' OR s\.outlet_id = \?\)\) OR s\.approver_employee_id = \?\)/);
-    assert.deepEqual(withRole.params, ["OT", ["HR"], 3, 44, 44, 44]);
+    // The type travels as a LIST: one tab of the approval centre may cover
+    // more than one stored request_type (Attendance covers the legacy
+    // REGULARIZATION_WITH_OT rows), so the predicate is `IN (?)` throughout.
+    assert.deepEqual(withRole.params, [["OT"], ["HR"], 3, 44, 44, 44]);
     const noRole = await capture((r) => r.countApprovals({ request_type: "REGULARIZATION", status: "PENDING", approver_roles: [], outlet_id: 3, actor_employee_id: 44, is_admin: false }));
     assert.match(noRole.sql, /s\.approver_employee_id = \?/);
     assert.ok(!/1 = 0/.test(noRole.sql), "a person with no role still has an employee-level queue");
-    assert.deepEqual(noRole.params, ["REGULARIZATION", 44, 44, 44]);
+    assert.deepEqual(noRole.params, [["REGULARIZATION"], 44, 44, 44]);
   });
 
   it("a role-based step stays with its role; an employee-level step is never matched by role", async () => {
@@ -143,8 +146,11 @@ describe("the approval scope after the employee-level chain", () => {
       punch: null,
     });
     const req = log.find((l) => /INSERT INTO attendance_approval_request/.test(l.sql));
-    assert.match(req.sql, /chain_source\) VALUES/);
-    assert.equal(req.params[req.params.length - 1], "EMPLOYEE");
+    // The two shift columns follow `chain_source` and are NULL on every
+    // request that is not a SHIFT_CHANGE, which is what lets one insert serve
+    // all three request types.
+    assert.match(req.sql, /chain_source, requested_work_shift_id, base_work_shift_id\) VALUES/);
+    assert.deepEqual(req.params.slice(-3), ["EMPLOYEE", null, null]);
     const steps = log.find((l) => /INSERT INTO attendance_approval_step/.test(l.sql));
     assert.match(steps.sql, /approver_employee_id, approval_level\) VALUES \?/);
     assert.deepEqual(steps.params[0], [[9, 1, "EMPLOYEE", null, 11, "FIRST"], [9, 2, "EMPLOYEE", null, 33, "FINAL"]]);

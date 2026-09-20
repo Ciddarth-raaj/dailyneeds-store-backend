@@ -495,6 +495,33 @@ module.exports = {
   // `/attendance/me` surface has no shift-editing endpoint at all.
   EDIT_ATTENDANCE_DATE_SHIFT: "edit_attendance_date_shift",
 
+  // The EFFECTIVE-DATED permanent shift change ("Edit Shift Assignment").
+  //
+  // One employee, one new shift, one stated date it applies from, and a
+  // mandatory reason. It is neither of the two keys above: `assign` is always
+  // dated today and has no date field at all, and the correction key means
+  // "the record of the past was wrong". This one means "the roster changes
+  // from this date", which may be a past date (if payroll for it is unlocked)
+  // or a future one, and it appends a further history row rather than editing
+  // or deleting any that exist.
+  EDIT_SHIFT_ASSIGNMENT_EFFECTIVE_DATED: "edit_shift_assignment_effective_dated",
+
+  // The employee's ONE-DAY shift change REQUEST - for THEMSELVES only.
+  //
+  // An employee never changes the effective shift of a date; they ask, and an
+  // approver decides. The route derives the employee from the session token
+  // and the body has no field to name anybody else, so this key can only ever
+  // act on its holder's own attendance.
+  RAISE_SHIFT_CHANGE_REQUEST: "raise_shift_change_request",
+
+  // Reaching the shift-request decision endpoint. NOT the authority to decide
+  // a particular stage of a particular request - that is `canApprove`, from
+  // the actor's mapped approval role, their outlet and whose request it is.
+  APPROVE_SHIFT_CHANGE_REQUEST: "approve_shift_change_request",
+
+  // Seeing the Shift tab of the unified Attendance Approval Centre.
+  VIEW_SHIFT_CHANGE_REQUESTS: "view_shift_change_requests",
+
   // Attendance - VOID a raw BIOMAX / IMPORT punch.
   //
   // Excludes ONE raw punch from attendance calculation, with a mandatory

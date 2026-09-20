@@ -298,6 +298,28 @@ module.exports = (attendanceDashboardRepo) => {
       return resolution;
     };
 
+    /**
+     * The PERMANENT shift for a date - the assignment history alone, with the
+     * single-date overrides deliberately withheld. It is what the day's
+     * regular time, overtime and shortage are measured against; see the same
+     * function, for the same reason, in `usecase/attendance_calculation.js`.
+     * The dashboard resolves it too, because the dashboard and the employee's
+     * own screen must not answer the same date differently.
+     */
+    const baseResolutions = new Map();
+    const baseResolutionFor = (date) => {
+      if (baseResolutions.has(date)) return baseResolutions.get(date);
+      const resolution = resolveShiftForDate({
+        assignments,
+        overrides: [],
+        attendanceDate: date,
+        readSchedule,
+        readShiftConfig,
+      });
+      baseResolutions.set(date, resolution);
+      return resolution;
+    };
+
     /** The cutoff that applied on a date, for RE-DATING a punch. Same as A1. */
     const readCutoff = (date) => {
       const resolution = resolutionFor(date);
@@ -320,7 +342,7 @@ module.exports = (attendanceDashboardRepo) => {
       return config && config.shift_code ? config.shift_code : null;
     };
 
-    return { resolutionFor, readCutoff, shiftNameFor, shiftCodeFor };
+    return { resolutionFor, baseResolutionFor, readCutoff, shiftNameFor, shiftCodeFor };
   };
 
   /**
@@ -496,6 +518,7 @@ module.exports = (attendanceDashboardRepo) => {
         extra_break_minutes: extraBreakMinutes(employee),
         approved_ot_minutes: approvedOt,
         regularization_pending: stillOpen,
+        base_shift: resolver.baseResolutionFor(date).snapshot,
         // An exempt employee's day is ATTENDANCE_NOT_REQUIRED: no issue, no
         // review reason, and in particular no "No Shift Assigned" for want
         // of a roster they were never meant to have.

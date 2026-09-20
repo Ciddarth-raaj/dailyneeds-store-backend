@@ -238,6 +238,138 @@ class EmployeeWorkShiftRoutes {
     );
 
     /**
+     * EDIT SHIFT ASSIGNMENT - the employee's PERMANENT shift, from a date.
+     *
+     * The third and last of the three write paths, and the one the approved
+     * "Edit Shift Assignment" screen posts to:
+     *
+     *   assign      today, in bulk, no date field at all
+     *   correction  a past date, because the record was WRONG
+     *   this one    a stated date - past, today or future - because the
+     *               roster CHANGES from it
+     *
+     * `edit_shift_assignment_effective_dated` is granted by migration to
+     * nobody: moving somebody's shift moves the NRM, the shortage and the
+     * overtime of every date from the effective one onward, and therefore
+     * their pay. The employee scope guard applies as it does everywhere else
+     * on this router, so a manager cannot reach an employee outside their
+     * outlets.
+     *
+     * A date inside a payroll-locked month is refused by the usecase before
+     * anything is written, and by the transactional guard on the write if the
+     * month closes in between.
+     */
+    router.post(
+      "/work-shift-assignments/change",
+      this.permissions.requireAll(P.EMPLOYEE_EDIT, P.EDIT_SHIFT_ASSIGNMENT_EFFECTIVE_DATED),
+      this.branchScope.requireEmployeeInScope(),
+      async (req, res) => {
+        try {
+          const schema = {
+            employee_id: Joi.number().integer().positive().required(),
+            work_shift_id: Joi.number().integer().positive().required(),
+            effective_from: Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).required(),
+            reason: Joi.string().min(5).max(500).required(),
+          };
+          const isValid = Joi.validate(req.body, schema);
+          if (isValid.error !== null) throw isValid.error;
+
+          res.json(
+            await this.usecase.changeAssignment({
+              employee_id: req.body.employee_id,
+              work_shift_id: req.body.work_shift_id,
+              effective_from: req.body.effective_from,
+              reason: req.body.reason,
+              actor_employee_id: req.decoded ? req.decoded.employee_id : null,
+            })
+          );
+        } catch (err) {
+          respondError(res, err);
+        }
+
+        res.end();
+      }
+    );
+
+    /**
+     * RE-RUN the recalculation an effective-dated change owed but could not
+     * finish - the recovery path for a 207 from the route above.
+     *
+     * THE SAME AUTHORITY AS THE CHANGE, and deliberately not
+     * `recalculate_attendance`: a manager entitled to move one employee's
+     * shift need not hold the general recalculation key, and handing it to
+     * them so they can clean up after their own save would give them the
+     * general tool - every employee, every outlet, every designation - for
+     * the sake of one specific recovery.
+     *
+     * NARROW BY CONSTRUCTION, not by convention:
+     *
+     *   - ONE employee, named in the body, and behind the same
+     *     `requireEmployeeInScope()` guard as every other route here, so a
+     *     branch-scoped caller cannot reach somebody else's employee.
+     *   - NO `store_id` and NO `designation_id`. Joi refuses unknown keys, so
+     *     sending one is a 400 rather than a widening.
+     *   - an explicit range, which the usecase checks against THIS employee's
+     *     own assignment history.
+     *   - the payroll lock is unchanged and still decides, transactionally,
+     *     on the calculation's own write.
+     *
+     * `/attendance/calculated/recalculate-bulk` is untouched and still
+     * requires `recalculate_attendance`.
+     */
+    router.post(
+      "/work-shift-assignments/recalculate",
+      this.permissions.requireAll(P.EMPLOYEE_EDIT, P.EDIT_SHIFT_ASSIGNMENT_EFFECTIVE_DATED),
+      this.branchScope.requireEmployeeInScope(),
+      async (req, res) => {
+        try {
+          const schema = {
+            employee_id: Joi.number().integer().positive().required(),
+            from_date: Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).required(),
+            to_date: Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).required(),
+          };
+          const isValid = Joi.validate(req.body, schema);
+          if (isValid.error !== null) throw isValid.error;
+
+          res.json(
+            await this.usecase.recalculateAfterChange({
+              employee_id: req.body.employee_id,
+              from_date: req.body.from_date,
+              to_date: req.body.to_date,
+            })
+          );
+        } catch (err) {
+          respondError(res, err);
+        }
+
+        res.end();
+      }
+    );
+
+    /**
+     * SHIFT HISTORY for one employee: every dated row, newest first, with who
+     * changed it, when, and why.
+     *
+     * Read-only, and behind the ordinary view keys rather than the edit one:
+     * seeing which shift somebody was on in September is not the authority to
+     * change it.
+     */
+    router.get(
+      "/work-shift-assignments/history/:employee_id",
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.VIEW_SHIFT_ASSIGNMENTS),
+      this.branchScope.requireEmployeeInScope(),
+      async (req, res) => {
+        try {
+          res.json(await this.usecase.assignmentHistory(req.params.employee_id));
+        } catch (err) {
+          respondError(res, err);
+        }
+
+        res.end();
+      }
+    );
+
+    /**
      * CORRECT a historical assignment. A different endpoint, a different
      * permission and a different shape from `assign` above, deliberately:
      *

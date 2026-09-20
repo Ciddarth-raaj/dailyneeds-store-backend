@@ -33,6 +33,7 @@ const assert = require("node:assert/strict");
 const buildUsecase = require("./attendance_calculation");
 const { CALCULATION_SOURCE } = require("../utils/attendance_stored_read");
 const { payrollLockedError, periodsTouched } = require("../utils/attendance_payroll_lock");
+const { CALCULATION_VERSION } = require("../utils/attendance_engine");
 
 /** A fixed "now": mid-September, so every August date has long since closed. */
 const NOW = Date.parse("2026-09-18T12:00:00+05:30");
@@ -316,7 +317,7 @@ describe("THE RELEASE GATE - a stored historical date is not restated by an Empl
  * ENGINE would produce - it is not an instruction to restate history, and
  * deploying it must not silently rewrite a stored month.
  */
-describe("a stored version-7 row survives the version-8 deployment", () => {
+describe("a stored version-7 row survives a later deployment", () => {
   /** A row stored under version 7, exactly as the old engine wrote it. */
   const v7Row = (over = {}) => ({
     employee_id: 42,
@@ -362,14 +363,14 @@ describe("a stored version-7 row survives the version-8 deployment", () => {
     assert.equal(JSON.stringify(state.storedByDate.get(DATE)), before, "and nothing was written");
   });
 
-  it("an explicit recalculation on an UNLOCKED month produces a version-8 row", async () => {
+  it("an explicit recalculation on an UNLOCKED month produces a current-version row", async () => {
     const { state, usecase } = world();
     state.storedByDate.set(DATE, v7Row());
 
     await usecase.recalculateRange({ employee_id: 42, from_date: DATE, to_date: DATE });
 
     const after = state.storedByDate.get(DATE);
-    assert.equal(after.calculation_version, 8);
+    assert.equal(after.calculation_version, CALCULATION_VERSION);
     // This employee has no override and no extra break, so the recalculated
     // day is the shift's own break - which is what makes the restatement
     // visible: 90/630 was the old stored answer, 60/660 is the new one.
@@ -379,7 +380,7 @@ describe("a stored version-7 row survives the version-8 deployment", () => {
 
     const day = await readDay(usecase);
     assert.equal(day.calculation_source, CALCULATION_SOURCE.STORED);
-    assert.equal(day.calculation_version, 8);
+    assert.equal(day.calculation_version, CALCULATION_VERSION);
   });
 
   it("a LOCKED month refuses the recalculation and keeps its version-7 row", async () => {

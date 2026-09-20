@@ -25,13 +25,34 @@ const { requireSelf } = require("./attendance_calculation");
  * first approver is somebody else rather than themselves-with-a-check.
  */
 class AttendanceRegularizationRoutes {
-  constructor(attendanceRegularizationUsecase, permissions, sensitive) {
+  constructor(attendanceRegularizationUsecase, permissions, sensitive, branchScope = null) {
     this.usecase = attendanceRegularizationUsecase;
     this.permissions = permissions;
     this.sensitive = sensitive;
+    /**
+     * `middlewares/employee_branch_scope.js`. It is what resolves WHICH
+     * OUTLETS this caller may see requests from, from the server's own facts
+     * and never from the query string. The approval usecase fails closed
+     * without it, so a wiring that forgets it shows an empty queue rather
+     * than the whole company.
+     */
+    this.branchScope = branchScope;
     this.router = express.Router();
 
     this.init();
+  }
+
+  /** The actor, with its outlet scope attached. Never from the client. */
+  async _actor(req) {
+    if (this.branchScope && typeof this.branchScope.actorFor === "function") {
+      const actor = await this.branchScope.actorFor(req);
+      return {
+        ...actor,
+        employee_id: Number(req.decoded.employee_id),
+        user_type: req.decoded.user_type,
+      };
+    }
+    return { employee_id: Number(req.decoded.employee_id), user_type: req.decoded.user_type };
   }
 
   /** A 403 that names the reason, for the authority check the chain performs. */
@@ -41,6 +62,83 @@ class AttendanceRegularizationRoutes {
       return;
     }
     respondError(res, err);
+  }
+
+  /**
+   * THE SHIFT KEYS ARE AN ADDITIONAL GATE, NEVER A REPLACEMENT.
+   *
+   * `view_attendance_approvals` and `approve_attendance_regularization` still
+   * decide whether a caller may reach the approval API at all; these two
+   * middlewares add `view_shift_change_requests` / `approve_shift_change_request`
+   * ON TOP of them, and only for SHIFT_CHANGE. Attendance and OT pass through
+   * both untouched, which is why the generic key is never re-checked here:
+   * its own middleware has already run.
+   *
+   * `permissions.hasAll` is the repo's own finer-grained check, so the
+   * administrator bypass (`user_type` 2 -> "allow all") continues to work
+   * exactly as it does for every other key rather than being special-cased.
+   *
+   * THE AUTHORITY CHECK IS UNCHANGED AND STILL MANDATORY. Holding both keys
+   * only gets the caller as far as `canApprove`, which decides whether they
+   * may act on THIS stage of THIS request from their mapped role, their
+   * outlet and whose request it is.
+   */
+  static _forbidden(res) {
+    res.status(403).json({
+      code: 403,
+      msg: "You do not have permission to perform this action",
+    });
+  }
+
+  /**
+   * For the TYPED list endpoints, whose `request_type` is a required,
+   * whitelisted query parameter. Nothing else is trusted: a value that is not
+   * exactly `SHIFT_CHANGE` cannot reach a SHIFT_CHANGE row - `typesForTab`
+   * maps REGULARIZATION to the two regularization types and every other tab
+   * to itself - and anything unreadable is refused by the handler's own Joi
+   * schema a moment later.
+   */
+  _requireShiftViewForTypedQuery() {
+    return async (req, res, next) => {
+      try {
+        if (String(req.query.request_type) !== "SHIFT_CHANGE") return next();
+        if (await this.permissions.hasAll(req, P.VIEW_SHIFT_CHANGE_REQUESTS)) return next();
+        return AttendanceRegularizationRoutes._forbidden(res);
+      } catch (err) {
+        return AttendanceRegularizationRoutes._respond(res, err);
+      }
+    };
+  }
+
+  /**
+   * For the endpoints addressed BY REQUEST ID, where the type is a property of
+   * the stored record and never something the caller may assert. The request
+   * is read server-side and its own `request_type` decides; a client cannot
+   * reach a SHIFT_CHANGE without the Shift key by calling the detail or
+   * decision route directly, and cannot pretend a SHIFT_CHANGE is an OT by
+   * sending a type, because neither route reads one.
+   *
+   * A 404 for a request that does not exist is returned here rather than
+   * inside the handler, so an unknown id looks the same to a caller with the
+   * Shift key and one without it.
+   */
+  _requireShiftKeyForStoredRequest(key) {
+    return async (req, res, next) => {
+      try {
+        const request = await this.usecase.getRequest(Number(req.params.request_id));
+        if (!request) {
+          res.status(404).json({ code: 404, msg: "No such request" });
+          return;
+        }
+        // Handed on so the handler does not read the same row twice.
+        req.storedApprovalRequest = request;
+        if (String(request.request_type) !== "SHIFT_CHANGE") return next();
+        if (await this.permissions.hasAll(req, key)) return next();
+        return AttendanceRegularizationRoutes._forbidden(res);
+      } catch (err) {
+        return AttendanceRegularizationRoutes._respond(res, err);
+      }
+    };
   }
 
   init() {
@@ -93,6 +191,83 @@ class AttendanceRegularizationRoutes {
         AttendanceRegularizationRoutes._respond(res, err);
       }
     });
+
+    /**
+     * MY ATTENDANCE: ask to work ANOTHER SHIFT on ONE date.
+     *
+     * A REQUEST, never a change. Nothing this endpoint writes makes any shift
+     * effective - the row is PENDING, the resolver reads no pending request,
+     * and only the final approval writes the one-date override. The next day
+     * is not touched by it either, then or after approval: an override is one
+     * date by construction.
+     *
+     * FOR YOURSELF ONLY, and by construction rather than by a check: the
+     * employee is `req.decoded.employee_id` and the body has no field naming
+     * anybody else, so Joi answers 400 to an attempt rather than obeying it.
+     * `raise_shift_change_request` gates reaching it at all; it cannot widen
+     * whose attendance it acts on.
+     */
+    this.router.post(
+      "/attendance/me/shift-change",
+      requireSelf,
+      this.permissions.require(P.RAISE_SHIFT_CHANGE_REQUEST),
+      async (req, res) => {
+        try {
+          const schema = {
+            attendance_date: Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).required(),
+            work_shift_id: Joi.number().integer().min(1).required(),
+            reason: Joi.string().min(5).max(500).required(),
+          };
+          const isValid = Joi.validate(req.body, schema);
+          if (isValid.error !== null) throw isValid.error;
+
+          const result = await this.usecase.raiseShiftChangeRequest({
+            actor: {
+              employee_id: Number(req.decoded.employee_id),
+              user_type: req.decoded.user_type,
+            },
+            attendance_date: req.body.attendance_date,
+            work_shift_id: req.body.work_shift_id,
+            reason: req.body.reason,
+          });
+          res.json({ code: 200, ...result });
+        } catch (err) {
+          AttendanceRegularizationRoutes._respond(res, err);
+        }
+      }
+    );
+
+    /**
+     * The shifts you MAY ask for on a date: active, running that weekday, and
+     * longer than your own.
+     *
+     * A CONVENIENCE FOR THE SCREEN AND NOT THE RULE. The submit endpoint
+     * re-derives every one of those conditions server-side and refuses
+     * anything that fails them, so a hand-made request cannot get past a
+     * filtered dropdown.
+     */
+    this.router.get(
+      "/attendance/me/shift-change/options",
+      requireSelf,
+      this.permissions.require(P.RAISE_SHIFT_CHANGE_REQUEST),
+      async (req, res) => {
+        try {
+          const schema = {
+            attendance_date: Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).required(),
+          };
+          const isValid = Joi.validate(req.query, schema);
+          if (isValid.error !== null) throw isValid.error;
+
+          const result = await this.usecase.shiftChangeOptions({
+            actor: { employee_id: Number(req.decoded.employee_id) },
+            attendance_date: req.query.attendance_date,
+          });
+          res.json({ code: 200, ...result });
+        } catch (err) {
+          AttendanceRegularizationRoutes._respond(res, err);
+        }
+      }
+    );
 
     /**
      * Raise a request for one date.
@@ -191,23 +366,33 @@ class AttendanceRegularizationRoutes {
     this.router.get(
       "/attendance/approvals",
       this.permissions.require(P.VIEW_ATTENDANCE_APPROVALS),
+      this._requireShiftViewForTypedQuery(),
       async (req, res) => {
         try {
           const schema = {
-            request_type: Joi.string().valid("REGULARIZATION", "OT").required(),
+            request_type: Joi.string().valid("REGULARIZATION", "OT", "SHIFT_CHANGE").required(),
             status: Joi.string().valid("PENDING", "APPROVED", "REJECTED", "ALL").optional(),
             limit: Joi.number().integer().min(1).max(500).optional(),
             offset: Joi.number().integer().min(0).optional(),
+            // The unified approval centre's filters. They NARROW what the
+            // caller's outlet scope already allows and can never widen it:
+            // an outlet the caller has no rights to simply matches nothing.
+            outlet_ids: Joi.string().allow("").optional(),
+            employee_id: Joi.number().integer().min(1).optional(),
+            designation_id: Joi.number().integer().min(1).optional(),
           };
           const isValid = Joi.validate(req.query, schema);
           if (isValid.error !== null) throw isValid.error;
 
           const result = await this.usecase.listApprovals({
-            actor: { employee_id: Number(req.decoded.employee_id), user_type: req.decoded.user_type },
+            actor: await this._actor(req),
             request_type: req.query.request_type,
             status: req.query.status || "PENDING",
             limit: req.query.limit ? Number(req.query.limit) : 200,
             offset: req.query.offset ? Number(req.query.offset) : 0,
+            outlet_ids: AttendanceRegularizationRoutes._idList(req.query.outlet_ids),
+            employee_id: req.query.employee_id ? Number(req.query.employee_id) : null,
+            designation_id: req.query.designation_id ? Number(req.query.designation_id) : null,
           });
           res.json({ code: 200, ...result });
         } catch (err) {
@@ -220,14 +405,25 @@ class AttendanceRegularizationRoutes {
     this.router.get(
       "/attendance/approvals/count",
       this.permissions.require(P.VIEW_ATTENDANCE_APPROVALS),
+      this._requireShiftViewForTypedQuery(),
       async (req, res) => {
         try {
-          const schema = { request_type: Joi.string().valid("REGULARIZATION", "OT").required() };
+          const schema = {
+            request_type: Joi.string().valid("REGULARIZATION", "OT", "SHIFT_CHANGE").required(),
+            outlet_ids: Joi.string().allow("").optional(),
+            employee_id: Joi.number().integer().min(1).optional(),
+            designation_id: Joi.number().integer().min(1).optional(),
+          };
           const isValid = Joi.validate(req.query, schema);
           if (isValid.error !== null) throw isValid.error;
+          // Counted under the SAME filters the table is showing, so the
+          // number over a filtered list is a count of that list.
           const result = await this.usecase.countPending({
-            actor: { employee_id: Number(req.decoded.employee_id), user_type: req.decoded.user_type },
+            actor: await this._actor(req),
             request_type: req.query.request_type,
+            outlet_ids: AttendanceRegularizationRoutes._idList(req.query.outlet_ids),
+            employee_id: req.query.employee_id ? Number(req.query.employee_id) : null,
+            designation_id: req.query.designation_id ? Number(req.query.designation_id) : null,
           });
           res.json({ code: 200, ...result });
         } catch (err) {
@@ -236,7 +432,15 @@ class AttendanceRegularizationRoutes {
       }
     );
 
-    /** The queue: requests whose current stage this caller could decide. */
+    /**
+     * The LEGACY queue: requests whose current stage this caller could decide.
+     *
+     * Attendance and OT only. It predates the unified approval centre, takes
+     * no request-type filter and is reached with the generic view key alone,
+     * so SHIFT_CHANGE is excluded in the repository query rather than shown
+     * to somebody who does not hold `view_shift_change_requests`. The Shift
+     * queue is `/attendance/approvals?request_type=SHIFT_CHANGE`.
+     */
     this.router.get(
       "/attendance/regularization/pending",
       this.permissions.require(P.VIEW_ATTENDANCE_APPROVALS),
@@ -264,13 +468,11 @@ class AttendanceRegularizationRoutes {
     this.router.get(
       "/attendance/regularization/:request_id",
       this.permissions.require(P.VIEW_ATTENDANCE_APPROVALS),
+      this._requireShiftKeyForStoredRequest(P.VIEW_SHIFT_CHANGE_REQUESTS),
       async (req, res) => {
         try {
-          const request = await this.usecase.getRequest(Number(req.params.request_id));
-          if (!request) {
-            res.status(404).json({ code: 404, msg: "No such request" });
-            return;
-          }
+          // Already read, and already type-checked, by the middleware above.
+          const request = req.storedApprovalRequest;
           res.json({ code: 200, request });
         } catch (err) {
           AttendanceRegularizationRoutes._respond(res, err);
@@ -291,6 +493,7 @@ class AttendanceRegularizationRoutes {
     this.router.post(
       "/attendance/regularization/:request_id/decision",
       this.permissions.require(P.APPROVE_ATTENDANCE_REGULARIZATION),
+      this._requireShiftKeyForStoredRequest(P.APPROVE_SHIFT_CHANGE_REQUEST),
       async (req, res) => {
         try {
           const schema = {
@@ -301,13 +504,14 @@ class AttendanceRegularizationRoutes {
           if (isValid.error !== null) throw isValid.error;
 
           const result = await this.usecase.decide({
-            actor: {
-              employee_id: Number(req.decoded.employee_id),
-              user_type: req.decoded.user_type,
-            },
+            actor: await this._actor(req),
             request_id: Number(req.params.request_id),
             decision: req.body.decision,
             remarks: req.body.remarks || null,
+            // The WEB app. The Telegram surface calls the same `decide` with
+            // its own source, so the two act on one record and the step says
+            // which of them did.
+            source: "WEB",
           });
           res.status(result.code === 409 ? 409 : 200).json(result);
         } catch (err) {
@@ -318,11 +522,21 @@ class AttendanceRegularizationRoutes {
 
   }
 
+  /** `"3,5"` or `"3"` -> `[3, 5]`; anything unreadable is simply not a filter. */
+  static _idList(value) {
+    if (value === undefined || value === null || value === "") return null;
+    const ids = String(value)
+      .split(",")
+      .map((part) => Number(String(part).trim()))
+      .filter((id) => Number.isInteger(id) && id > 0);
+    return ids.length > 0 ? ids : null;
+  }
+
   getRouter() {
     return this.router;
   }
 }
 
-module.exports = (attendanceRegularizationUsecase, permissions, sensitive) =>
-  new AttendanceRegularizationRoutes(attendanceRegularizationUsecase, permissions, sensitive);
+module.exports = (attendanceRegularizationUsecase, permissions, sensitive, branchScope) =>
+  new AttendanceRegularizationRoutes(attendanceRegularizationUsecase, permissions, sensitive, branchScope);
 module.exports.AttendanceRegularizationRoutes = AttendanceRegularizationRoutes;

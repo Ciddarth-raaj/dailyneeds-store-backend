@@ -802,6 +802,32 @@ class Server {
     this.attendanceCalculationUsecase.setOtRequestService(
       this.attendanceRegularizationUsecase
     );
+    // EDIT SHIFT ASSIGNMENT needs the calculation usecase for two things: to
+    // ask, before it writes, whether the effective date reaches into a
+    // payroll-locked month, and to recalculate the dates a change has just
+    // moved. Injected here rather than as a constructor argument because the
+    // work shift usecase is built well before the calculation one - the same
+    // reason the two hooks above are injected.
+    this.employeeWorkShiftUsecase.setAttendanceCalculation(
+      this.attendanceCalculationUsecase,
+      this.attendanceCalculationRepo
+    );
+
+    // THE ONE-DAY SHIFT REQUEST ON TELEGRAM. It owns no decision path of its
+    // own: both buttons call the regularization usecase's `decide`, so the
+    // authority check, the payroll lock and the transaction are the web app's.
+    this.attendanceShiftChangeTelegramUsecase = require("./usecase/attendance_shift_change_telegram")({
+      regularizationUsecase: this.attendanceRegularizationUsecase,
+      employeeTelegramRepo: this.employeeTelegramRepo,
+      telegram: require("./services/telegram")(),
+      webBaseUrl: process.env.WEB_APP_BASE_URL || null,
+    });
+    // ONLY THE FIRST APPROVER IS MESSAGED, and this is the only call site
+    // that messages anybody: `decide` has no hook into Telegram at all, so a
+    // second or third approver cannot be notified by any path.
+    this.attendanceRegularizationUsecase.setShiftChangeNotifier(
+      this.attendanceShiftChangeTelegramUsecase
+    );
     // Recalculate also re-derives the range's undatable punches, so the
     // Punch Audit stops reporting "No Shift" for an employee whose shift was
     // assigned after their punches arrived. Injected rather than required for
@@ -897,6 +923,15 @@ class Server {
       // `handleMessage` RETURNS a detection object - a truthy value that means
       // nothing about ownership, which is why ownership is a predicate.
       handle: (update) => this.telegramGroupDetectionUsecase.handleMessage(update.message),
+    });
+    // The shift request's Approve / Reject buttons, and the reply that
+    // carries a rejection reason. It CLAIMS both, so the password-reset
+    // branch never answers "that link has expired" to an approver's reply.
+    this.telegramUpdateDispatcher.register({
+      name: "attendance_shift_change",
+      updateTypes: ["callback_query", "message"],
+      claims: (update) => this.attendanceShiftChangeTelegramUsecase.claims(update),
+      handle: (update) => this.attendanceShiftChangeTelegramUsecase.handle(update),
     });
     // EMPLOYEE TELEGRAM LINKING. Registered on the same dispatcher, and it is
     // the first handler that CLAIMS: an employee deep link is `/start e_…`,
@@ -1469,7 +1504,10 @@ class Server {
     const attendanceRegularizationRouter = require("./routes/attendance_regularization")(
       this.attendanceRegularizationUsecase,
       this.permissions,
-      this.sensitive
+      this.sensitive,
+      // WHICH OUTLETS this caller may see requests from, resolved from the
+      // server's own facts. The approval centre fails closed without it.
+      this.employeeBranchScope
     );
     const telegramAttendanceRouter = require("./routes/telegram_attendance")(
       this.telegramAttendanceSessionUsecase,

@@ -81,6 +81,11 @@ const REQUEST_TYPE = Object.freeze({
   REGULARIZATION: "REGULARIZATION",
   OT: "OT",
   REGULARIZATION_WITH_OT: "REGULARIZATION_WITH_OT",
+  // The employee's ONE-DAY shift change. It walks the very same chain as the
+  // other two - same steps, same `canApprove`, same `advance` - because an
+  // approval hierarchy that differed by request type would be a second
+  // hierarchy to keep in step with the first.
+  SHIFT_CHANGE: "SHIFT_CHANGE",
 });
 
 const REQUEST_STATUS = Object.freeze({

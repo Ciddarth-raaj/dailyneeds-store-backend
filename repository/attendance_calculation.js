@@ -58,16 +58,26 @@ const CALCULATION_COLUMNS = [
   "employee_id", "attendance_date", "work_shift_id", "work_shift_weekly_schedule_id",
   "work_shift_config_version_id",
   "shift_snapshot", "shift_snapshot_hash", "raw_punch_ids", "effective_punches",
-  "punch_count", "attendance_day_count", "nrm_minutes", "span_minutes",
+  "punch_count", "attendance_day_count", "nrm_minutes",
+  // The PAYROLL BASE: the permanent shift's NRM for the date, and the shift
+  // it came from. Equal to `nrm_minutes` on every date without an approved
+  // one-day shift override. See `20261029120000-shift-change-request`.
+  "base_nrm_minutes", "base_work_shift_id",
+  "span_minutes",
   "break_allowance_minutes", "break_allowance_source",
   // What the employee's own settings contributed, as applied. See
   // `20261025120000-attendance-break-provenance`.
   "break_override_minutes_applied", "extra_break_minutes_applied",
   "actual_gap_minutes",
-  "break_charged_minutes", "worked_minutes", "shortage_minutes", "late_minutes",
+  "break_charged_minutes", "worked_minutes", "regular_minutes", "shortage_minutes", "late_minutes",
   "early_exit_minutes", "pre_shift_minutes", "post_shift_minutes",
   "raw_ot_minutes", "ot_offset_minutes", "pre_shift_ot_minutes", "post_shift_ot_minutes",
   "candidate_ot_minutes", "approved_ot_minutes",
+  // WHY a day has approved OT, as TWO components that sum to it - because one
+  // date can carry both an approved shift change and an approved excess, and
+  // a single source column could only have described half of such a day.
+  "shift_authorised_ot_minutes", "shift_authorising_request_id",
+  "ot_request_approved_minutes", "ot_request_id",
   "ot_rate", "status", "is_final", "review_reasons", "approval_request_id",
   "calculation_version",
 ];
@@ -330,17 +340,40 @@ class AttendanceCalculationRepository {
   async getDateShiftOverrides(employeeId, fromDate, toDate) {
     return this._read(
       "GET-DATE-SHIFT-OVERRIDES",
-      `SELECT attendance_date_shift_override_id,
-              employee_id,
-              work_shift_id,
-              previous_work_shift_id,
-              changed_by,
-              DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date,
-              DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at
-         FROM attendance_date_shift_override
-        WHERE employee_id = ?
-          AND attendance_date BETWEEN ? AND ?
-        ORDER BY attendance_date ASC, attendance_date_shift_override_id ASC`,
+      // IS THIS OVERRIDE BACKED BY AN APPROVED EMPLOYEE REQUEST?
+      //
+      // The link already exists - an approved SHIFT_CHANGE writes the
+      // override with its own request id and `source = 'APPROVED_REQUEST'` -
+      // so the authorisation is a JOIN and not a new table, a new flag or a
+      // second approval flow. The request must be FINALLY approved and
+      // SETTLED: an intermediate stage authorises nothing, and a rejection
+      // authorises nothing.
+      //
+      // A DIRECT MANAGEMENT EDIT IS NOT AN EMPLOYEE AUTHORISATION. An
+      // override written on the attendance screen has no request behind it,
+      // so `shift_change_approved` is 0 and the date keeps the ordinary OT
+      // request path - which is the honest answer: nobody agreed with the
+      // employee that they would work longer hours.
+      `SELECT o.attendance_date_shift_override_id,
+              o.employee_id,
+              o.work_shift_id,
+              o.previous_work_shift_id,
+              o.changed_by,
+              o.source,
+              o.attendance_approval_request_id,
+              CASE WHEN r.attendance_approval_request_id IS NOT NULL
+                    AND r.request_type = 'SHIFT_CHANGE'
+                    AND r.status = 'APPROVED'
+                    AND r.finalization_state = 'SETTLED'
+                   THEN 1 ELSE 0 END AS shift_change_approved,
+              DATE_FORMAT(o.attendance_date, '%Y-%m-%d') AS attendance_date,
+              DATE_FORMAT(o.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
+         FROM attendance_date_shift_override o
+         LEFT JOIN attendance_approval_request r
+           ON r.attendance_approval_request_id = o.attendance_approval_request_id
+        WHERE o.employee_id = ?
+          AND o.attendance_date BETWEEN ? AND ?
+        ORDER BY o.attendance_date ASC, o.attendance_date_shift_override_id ASC`,
       [employeeId, fromDate, toDate]
     );
   }
@@ -576,6 +609,12 @@ class AttendanceCalculationRepository {
               request_type, status, current_stage_no, total_stages,
               candidate_ot_minutes, approved_ot_minutes, finalization_state,
               auto_created, reason, closure_reason,
+              -- SHIFT_CHANGE only, and NULL on every other row: the shift the
+              -- employee asked for. The day's own shift is the resolver's
+              -- answer and is not this - a pending request changes nothing -
+              -- but the employee's own screen has to be able to say what they
+              -- asked for while it is still pending.
+              requested_work_shift_id,
               DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
               DATE_FORMAT(decided_at, '%Y-%m-%d %H:%i:%s') AS decided_at,
               -- WHY A REJECTION WAS REJECTED. The remarks live on the STEP
@@ -882,6 +921,43 @@ class AttendanceCalculationRepository {
     }
   }
 
+  /**
+   * WHICH of these (employee, date) pairs fall in a payroll-locked month.
+   *
+   * READ-ONLY AND OUTSIDE ANY TRANSACTION, and therefore deliberately NOT the
+   * rule: `assertMonthsNotPayrollLocked` above, which takes the row lock
+   * inside the writing transaction, remains the only thing that can actually
+   * stop a write, and nothing here weakens it. This exists so that a path
+   * which is about to REFUSE AN ACTION rather than write a number - filing a
+   * shift request, approving one, dating a permanent shift change into a
+   * closed month - can say so before it starts, in a sentence that names the
+   * month. A lock landing between this check and the write is exactly the
+   * race the transactional guard is there for.
+   *
+   * @param {Array} rows  `[{ employee_id, attendance_date }]`
+   * @returns {Array} `[{ employee_id, year, month }]`, empty when none
+   */
+  async findPayrollLockedPeriods(rows = []) {
+    const { periods } = periodsTouched(rows);
+    if (periods.length === 0) return [];
+
+    const found = [];
+    for (const period of periods) {
+      /* eslint-disable no-await-in-loop */
+      const hit = await this._read(
+        "FIND-PAYROLL-LOCKED",
+        `SELECT employee_id, period_year, period_month, status
+           FROM payrun_employee_calculation
+          WHERE period_year = ? AND period_month = ? AND employee_id = ? AND status = ?
+          LIMIT 1`,
+        [period.year, period.month, period.employee_id, PAYROLL_LOCK_STATUS]
+      );
+      /* eslint-enable no-await-in-loop */
+      if (hit.length > 0) found.push(period);
+    }
+    return found;
+  }
+
   /* ------------------------------------------- bulk recalculation */
 
   /**
@@ -1133,3 +1209,14 @@ module.exports = (db) => new AttendanceCalculationRepository(db);
 module.exports.AttendanceCalculationRepository = AttendanceCalculationRepository;
 module.exports.CALCULATION_COLUMNS = CALCULATION_COLUMNS;
 module.exports.writeCalculationsOnConnection = writeCalculationsOnConnection;
+/**
+ * THE PAYROLL LOCK, exported so that every write which could invalidate a
+ * settled month takes the SAME row lock in the SAME transaction.
+ *
+ * `repository/employee_work_shift.js` reuses it for the effective-dated shift
+ * change: that write does not touch `attendance_day_calculation`, but it
+ * decides which shift a settled month's attendance would be recalculated
+ * under, which is the same fact by a different route. A second, weaker
+ * implementation is exactly what this export exists to prevent.
+ */
+module.exports.assertMonthsNotPayrollLocked = assertMonthsNotPayrollLocked;

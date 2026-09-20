@@ -225,8 +225,13 @@ describe("the dispatcher", () => {
     assert.deepEqual(
       Object.fromEntries([...claimersByType.entries()].map(([k, v]) => [k, v.sort()])),
       {
-        message: ["employee_telegram_link", "telegram_employee_menu"],
+        message: [
+          "attendance_shift_change",
+          "employee_telegram_link",
+          "telegram_employee_menu",
+        ],
         chat_join_request: ["employee_telegram_join_request"],
+        callback_query: ["attendance_shift_change"],
       }
     );
 
@@ -240,6 +245,13 @@ describe("the dispatcher", () => {
       { getEmployeeForVerification: async () => null },
       { sendMessage: async () => ({}) }
     );
+    // The shift request claims a `message` ONLY when it is a reply to its own
+    // reject prompt, which is why it can share the type with the two above.
+    const shift = require("../usecase/attendance_shift_change_telegram")({
+      regularizationUsecase: {},
+      employeeTelegramRepo: {},
+      telegram: { isConfigured: () => false, sendMessage: async () => ({}) },
+    });
 
     const privateMsg = (text, extra = {}) => ({
       message: { chat: { id: 1, type: "private" }, from: { id: 5 }, text, ...extra },
@@ -253,6 +265,12 @@ describe("the dispatcher", () => {
       privateMsg("/start one two"),
       privateMsg("/setup"),
       privateMsg("hello"),
+      // A reply to the reject prompt, and a reply to something else - the
+      // second must be claimed by nobody rather than by the shift handler.
+      privateMsg("Not enough cover that day", {
+        reply_to_message: { text: "Reject shift request #77\n\nReply to this message with the reason." },
+      }),
+      privateMsg("Not enough cover that day", { reply_to_message: { text: "Some other message" } }),
       privateMsg(undefined, { contact: { phone_number: "1" } }),
       { message: { chat: { id: -100, type: "supergroup" }, from: { id: 5 }, text: "/start" } },
       { message: { chat: { id: -100, type: "group" }, from: { id: 5 }, text: "/setup" } },
@@ -263,6 +281,7 @@ describe("the dispatcher", () => {
     const messageClaimers = [
       ["telegram_employee_menu", (u) => menu.claims(u)],
       ["employee_telegram_link", (u) => link.claims(u)],
+      ["attendance_shift_change", (u) => shift.claims(u)],
     ];
 
     for (const update of corpus) {
@@ -276,6 +295,16 @@ describe("the dispatcher", () => {
     // Not vacuous: each claimer really does own its own case.
     assert.equal(menu.claims(privateMsg("/start")), true);
     assert.equal(link.claims(privateMsg("/start e_abcdef")), true);
+    assert.equal(
+      shift.claims(
+        privateMsg("Not enough cover that day", {
+          reply_to_message: { text: "Reject shift request #77" },
+        })
+      ),
+      true
+    );
+    assert.equal(shift.claims({ callback_query: { data: "sc:77:A" } }), true);
+    assert.equal(shift.claims({ callback_query: { data: "approve_po_5" } }), false);
   });
 
   it("THE CLAIM PREDICATE IS SYNCHRONOUS AND TOUCHES NO REPOSITORY", () => {
@@ -293,7 +322,14 @@ describe("the dispatcher", () => {
     const service = strip(read("services/telegram.js"));
     const list = /const ALLOWED_UPDATES = (\[[^\]]*\])/.exec(service);
     assert.ok(list, "the allowed updates are one named constant");
-    assert.deepEqual(JSON.parse(list[1].replace(/'/g, '"')), ["message", "chat_join_request"]);
+    assert.deepEqual(JSON.parse(list[1].replace(/'/g, '"')), [
+      "message",
+      "chat_join_request",
+      // The shift request's Approve / Reject buttons. A callback query exists
+      // only when somebody taps a button this backend put there, so it adds
+      // no ambient traffic to the one stream.
+      "callback_query",
+    ]);
     assert.ok(
       !/chat_member/.test(list[1]),
       "chat_member belongs to the membership phase that consumes it"

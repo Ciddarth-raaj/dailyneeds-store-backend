@@ -137,8 +137,32 @@ const BREAK_CREDIT_CUTOFF_MINUTES = 15 * 60;
  *      are provisional - was charged the employee's personal break. Such a
  *      day is now calculated on the shift's own break, like every other
  *      incomplete day. Both settings read one shared predicate.
+ *   9  THE PAYROLL BASE NRM. Regular time, overtime and shortage are measured
+ *      against `base_nrm_minutes` - the PERMANENT shift's NRM for the date -
+ *      rather than against the NRM of the shift the date was calculated
+ *      under. The two differ only on a date carrying an approved one-day
+ *      shift override, where the temporary shift decides every attendance
+ *      rule and the permanent one decides the entitlement. `regular_minutes`
+ *      and `base_nrm_minutes` are stored on the row, and the two-punch OT
+ *      restriction is expressed as the uncharged break it always stood for.
+ *      On such a date the shortage is the arithmetic MAX(0, base NRM -
+ *      worked): the late and early-going rules still report their flags, but
+ *      they do not charge, because they are measuring against hours the
+ *      employee was never entitled to.
+ *  10  OT AUTHORISED BY AN APPROVED ONE-DAY SHIFT CHANGE. A date whose shift
+ *      came from a finally approved SHIFT_CHANGE request needs no separate OT
+ *      request for the overtime that shift produces: `shift_authorised_ot_minutes`
+ *      is derived from the actual minutes on every calculation, never frozen
+ *      at approval, and `excess_ot_minutes` - what falls outside the approved
+ *      window - keeps the ordinary request path. `approved_ot_minutes` is the
+ *      authorised portion plus whatever a request approved of the excess, so
+ *      no minute can be approved twice. The two components are reported
+ *      separately (`shift_authorised_ot_minutes`,
+ *      `ot_request_approved_minutes`) and ALWAYS sum to it, because one date
+ *      can carry both kinds of approval and an audit must be able to
+ *      decompose the total exactly.
  */
-const CALCULATION_VERSION = 8;
+const CALCULATION_VERSION = 10;
 
 /** Every value `status` can take. A calculation is never left without one. */
 const CALC_STATUS = Object.freeze({
@@ -623,6 +647,12 @@ function calculateAttendanceDay(input = {}) {
     approved_ot_minutes = null,
     regularization_pending = false,
     attendance_required = true,
+    base_nrm_minutes = null,
+    base_shift = null,
+    // The date's shift override is backed by a FINALLY APPROVED one-day
+    // SHIFT_CHANGE request. See `resolveShiftAuthorisedOvertime` below.
+    shift_authorised = false,
+    shift_change_request_id = null,
   } = input;
 
   const rawPunches = orderPunches(punches, attendance_date);
@@ -659,6 +689,31 @@ function calculateAttendanceDay(input = {}) {
     punch_count: effectivePunches.length,
     attendance_day_count: 0,
     nrm_minutes: 0,
+    // THE PAYROLL BASE. On an ordinary day these are the day's own NRM and
+    // its own shift. On a day carrying an APPROVED ONE-DAY SHIFT OVERRIDE
+    // they are the PERMANENT shift's - see `resolvePayrollNrm` below for why
+    // the two have to be separate concepts on the same row.
+    base_nrm_minutes: 0,
+    base_work_shift_id: base_shift ? Number(base_shift.work_shift_id) || null : null,
+    // Regular = MIN(worked, base NRM). Stored rather than re-derived so a
+    // payslip query never has to know the rule.
+    regular_minutes: 0,
+    /*
+     * SHIFT-AUTHORISED OT. The portion of this day's overtime that an
+     * approved one-day shift change already authorises, and which therefore
+     * needs no separate OT request; `excess_ot_minutes` is what is left for
+     * the ordinary OT request path. On every other date the first is 0 and
+     * the second is the whole candidate, which is what every existing caller
+     * already assumed.
+     */
+    shift_authorised_ot_minutes: 0,
+    // The OTHER component: what a standalone OT request approved of the
+    // excess. The two ALWAYS sum to `approved_ot_minutes`, which is what
+    // lets an audit decompose a mixed day exactly rather than inferring it.
+    ot_request_approved_minutes: 0,
+    excess_ot_minutes: 0,
+    shift_change_request_id:
+      shift_change_request_id === undefined ? null : shift_change_request_id,
     span_minutes: 0,
     break_allowance_minutes: 0,
     break_allowance_source: "SHIFT",
@@ -822,6 +877,63 @@ function calculateAttendanceDay(input = {}) {
   const allowedBreak = Math.max(0, baseAllowedBreak + extraBreak);
   const nrm = Math.max(0, shiftSpan - allowedBreak);
 
+  /*
+   * THE PAYROLL BASE NRM, AND WHY IT IS NOT ALWAYS THE DAY'S OWN NRM.
+   *
+   * `nrm` above is the NRM of the shift this date was CALCULATED under - the
+   * one that decides the expected in and out, the lunch and break rules, the
+   * late and early-going flags and how many punches the day should contain.
+   * On an ordinary date that is also the employee's entitlement, so the two
+   * are the same number and nothing below changes.
+   *
+   * On a date carrying an APPROVED ONE-DAY SHIFT OVERRIDE they are NOT the
+   * same. An employee whose permanent shift is 6pm-10pm (4h) and who is
+   * approved to work 10am-10pm for one Saturday is still ENTITLED to 4h: the
+   * longer day is overtime, not a larger regular day, and the salary master
+   * is untouched. Measuring regular time against the temporary shift would
+   * pay 10h of regular and no overtime; measuring SHORTAGE against it would
+   * invent 7h of shortage for somebody who worked 3h of a 4h entitlement.
+   *
+   * So the three PAY figures - regular, overtime and shortage - are measured
+   * against `payrollNrm`, the base/permanent shift's NRM for the date, while
+   * every ATTENDANCE rule above and below goes on reading the resolved
+   * shift's own snapshot. `base_nrm_minutes` is supplied by the caller
+   * (`usecase/attendance_calculation.js`, which resolves the permanent
+   * assignment history for the date alongside the override); when it is not
+   * supplied the day's own NRM is the base, which is every ordinary date.
+   */
+  /*
+   * The base NRM is computed HERE, from the base shift's own snapshot, rather
+   * than handed in as a number - so it goes through exactly the same break
+   * rules the day's own NRM went through (the employee's break override
+   * REPLACES the shift break, their Extra Break Hours are ADDED to it, and
+   * both need a complete punched sequence). A caller computing it separately
+   * would be a second implementation of that rule, and the first one to drift.
+   *
+   * `base_nrm_minutes` remains as an explicit escape hatch for tests and for
+   * a caller that has the figure already; `base_shift` wins when both arrive.
+   */
+  let payrollNrm = nrm;
+  // True only on a date whose shift is NOT the employee's permanent one.
+  let payrollBaseDiffers = false;
+  if (base_shift && Number(base_shift.work_shift_id) !== Number(shift.work_shift_id)) {
+    payrollBaseDiffers = true;
+    const baseSpan = Math.max(0, Math.trunc(base_shift.shift_span_minutes || 0));
+    const baseBreak = Math.max(
+      0,
+      Math.trunc(overrideGiven ? Number(break_override_minutes) : base_shift.break_minutes || 0)
+    );
+    const baseExtra = extraGiven && baseBreak + extraWanted < baseSpan ? extraWanted : 0;
+    payrollNrm = Math.max(0, baseSpan - (baseBreak + baseExtra));
+  } else if (
+    base_nrm_minutes !== null &&
+    base_nrm_minutes !== undefined &&
+    Number.isFinite(Number(base_nrm_minutes))
+  ) {
+    payrollNrm = Math.max(0, Math.trunc(Number(base_nrm_minutes)));
+  }
+  base.base_nrm_minutes = payrollNrm;
+
   base.break_allowance_minutes = allowedBreak;
   // EMPLOYEE_OVERRIDE means "this allowance is the employee's, not the
   // shift's" - which is exactly what an added Extra Break makes it, so the
@@ -928,7 +1040,21 @@ function calculateAttendanceDay(input = {}) {
     // No OUT/IN evidence exists, so there is nothing to say the break was
     // short. Surplus from an uncharged break must not become OT; only time
     // genuinely beyond the shift span can.
-    otBasis = Math.max(0, span - shiftSpan);
+    // THE UNCHARGED BREAK, not a fixed span comparison.
+    //
+    // This used to read `span - shiftSpan`, which is the same number whenever
+    // the pay base IS the day's own shift: surplus = span - breakCharged -
+    // (shiftSpan - allowedBreak), so subtracting the break the day was
+    // credited but cannot prove it took - `allowedBreak - breakCharged` -
+    // leaves exactly `span - shiftSpan`. Written this way it stays correct on
+    // a one-day override, where the surplus is measured against the BASE
+    // shift and the old form would have suppressed genuine overtime for the
+    // hours between the base shift's span and the longer temporary one.
+    otBasis = Math.max(
+      0,
+      Math.max(0, Math.max(0, span - breakCharged) - payrollNrm) -
+        Math.max(0, allowedBreak - breakCharged)
+    );
     base.notes.push(TWO_PUNCH_OT_NOTE);
   } else {
     // Every OUT -> next IN gap, summed. No gap is singled out as "the lunch
@@ -943,8 +1069,9 @@ function calculateAttendanceDay(input = {}) {
   }
 
   const worked = Math.max(0, span - breakCharged);
-  const rawShortage = Math.max(0, nrm - worked);
-  const surplus = Math.max(0, worked - nrm);
+  // Against the PAYROLL BASE, never against a temporary shift's own NRM.
+  const rawShortage = Math.max(0, payrollNrm - worked);
+  const surplus = Math.max(0, worked - payrollNrm);
 
   // The no-lunch rule: a two-punch day whose last punch is before the cutoff.
   const breakCreditWithheld =
@@ -959,19 +1086,42 @@ function calculateAttendanceDay(input = {}) {
     break_credit_withheld: breakCreditWithheld,
     late_minutes: base.late_minutes || 0,
     early_exit_minutes: base.early_exit_minutes || 0,
-    nrm_minutes: nrm,
+    nrm_minutes: payrollNrm,
     shift,
   });
-  const shortage = grace.shortage_minutes;
+  /*
+   * ON AN OVERRIDE DAY THE SHORTAGE IS ARITHMETIC, NOT A DEDUCTION RULE.
+   *
+   *     shortage = MAX(0, base NRM - worked)
+   *
+   * and nothing else. The late and early-going rules above still RUN - the
+   * flags are the temporary shift's and are reported as such - but they may
+   * not charge against the day, because on an override day they are measuring
+   * against hours the employee was never entitled to in the first place.
+   * Somebody permanently on 18:00-22:00, approved to cover 10:00-22:00 and
+   * leaving at 13:00, is nine hours "early" against the temporary shift; they
+   * are one hour short of their four-hour entitlement, and the interval rule
+   * would otherwise turn that into a whole missing day.
+   *
+   * On every ordinary date the two shifts are the same shift, this is false,
+   * and the deduction rules decide the shortage exactly as they always have.
+   */
+  const shortage = payrollBaseDiffers ? rawShortage : grace.shortage_minutes;
 
   base.actual_gap_minutes = actualGaps;
   base.break_charged_minutes = breakCharged;
   base.worked_minutes = worked;
+  base.regular_minutes = Math.min(worked, payrollNrm);
   base.shortage_minutes = shortage;
-  base.grace_forgiven_minutes = grace.grace_forgiven_minutes;
-  base.late_charged_minutes = grace.late_charged_minutes;
-  base.early_exit_charged_minutes = grace.early_exit_charged_minutes;
-  if (shortage !== rawShortage - grace.grace_forgiven_minutes && !breakCreditWithheld) {
+  base.grace_forgiven_minutes = payrollBaseDiffers ? 0 : grace.grace_forgiven_minutes;
+  base.late_charged_minutes = payrollBaseDiffers ? 0 : grace.late_charged_minutes;
+  base.early_exit_charged_minutes = payrollBaseDiffers ? 0 : grace.early_exit_charged_minutes;
+  if (payrollBaseDiffers && (grace.late_charged_minutes > 0 || grace.early_exit_charged_minutes > 0)) {
+    base.notes.push(
+      "One-day shift: lateness and early going are measured against the day's shift and reported, but the shortage is the base shift's entitlement less the minutes worked"
+    );
+  }
+  if (!payrollBaseDiffers && shortage !== rawShortage - grace.grace_forgiven_minutes && !breakCreditWithheld) {
     base.notes.push(
       `Deduction rule: late charged ${grace.late_charged_minutes} minute(s), early out charged ${grace.early_exit_charged_minutes} minute(s) under the shift's interval rule`
     );
@@ -999,10 +1149,90 @@ function calculateAttendanceDay(input = {}) {
   base.ot_offset_minutes = overtime.ot_offset_minutes;
   base.candidate_ot_minutes = overtime.candidate_ot_minutes;
 
+  /*
+   * ============ OT AUTHORISED BY AN APPROVED ONE-DAY SHIFT CHANGE =========
+   *
+   * When this date's shift came from a FINALLY APPROVED SHIFT_CHANGE
+   * request, that approval is itself the authorisation for the overtime the
+   * longer shift produces: the employee is not asked to file a second
+   * request for the very hours somebody already agreed they should work.
+   *
+   * IT IS DERIVED, EVERY TIME, FROM THE ACTUAL MINUTES. Nothing is frozen at
+   * approval - a request approved before the day is worked authorises 0 on
+   * the day it is approved and the right figure once the punches arrive,
+   * because this runs again on every calculation. A later correction that
+   * raises or lowers the worked minutes moves it in the same way.
+   *
+   * THE WINDOW MATTERS. What was approved is a SHIFT - 10:00 to 22:00, say -
+   * not unlimited overtime on that date. So the authorised portion is the OT
+   * earned INSIDE that window, and the engine already measures what falls
+   * outside it:
+   *
+   *     pre_shift_minutes   worked before the approved in-time
+   *     post_shift_minutes  worked after the approved out-time
+   *
+   * and prices each side separately (`pre_shift_ot_minutes`,
+   * `post_shift_ot_minutes`). So:
+   *
+   *     excess    = pre_shift_ot_minutes
+   *               + MIN(post_shift_minutes, post_shift_ot_minutes)
+   *     authorised = MAX(0, candidate_ot_minutes - excess)
+   *
+   * The post term is bounded by BOTH the raw minutes beyond the out-time and
+   * the OT actually priced in that bucket, because `post_shift_ot_minutes`
+   * also carries in-window earnings (an unused break), which the shift
+   * change DID authorise. Bounding it this way can only ever move minutes
+   * from the automatic side to the requestable one, never the reverse.
+   *
+   * The excess keeps the ordinary OT path: the employee requests it, and an
+   * approver decides it, exactly as on any other date.
+   */
+  if (shift_authorised) {
+    const preExcess = Math.max(0, Math.trunc(base.pre_shift_ot_minutes || 0));
+    const postExcess = Math.min(
+      Math.max(0, Math.trunc(base.post_shift_minutes || 0)),
+      Math.max(0, Math.trunc(base.post_shift_ot_minutes || 0))
+    );
+    const excess = Math.min(base.candidate_ot_minutes, preExcess + postExcess);
+    base.shift_authorised_ot_minutes = Math.max(0, base.candidate_ot_minutes - excess);
+    base.excess_ot_minutes = excess;
+    if (excess > 0) {
+      base.notes.push(
+        `Approved shift change authorises ${base.shift_authorised_ot_minutes} OT minute(s); ${excess} minute(s) fall outside the approved shift and remain claimable`
+      );
+    }
+  } else {
+    base.shift_authorised_ot_minutes = 0;
+    base.excess_ot_minutes = base.candidate_ot_minutes;
+  }
+
+  /*
+   * APPROVED OT: the shift-authorised portion, plus whatever a separate OT
+   * REQUEST approved of the excess - and the request can never reach the
+   * authorised portion, which is what stops the same minute being paid
+   * twice through two different approvals.
+   */
   const approved = Math.max(0, Math.trunc(Number(approved_ot_minutes) || 0));
   // Approved OT can never exceed what was actually earned: an approval is a
-  // decision about the candidate, not a licence to invent minutes.
-  base.approved_ot_minutes = Math.min(approved, base.candidate_ot_minutes);
+  // decision about the candidate, not a licence to invent minutes. The
+  // request's component is additionally capped at the EXCESS, so it can never
+  // reach minutes the shift change already authorised.
+  base.ot_request_approved_minutes = Math.min(approved, base.excess_ot_minutes);
+  base.approved_ot_minutes = Math.min(
+    base.shift_authorised_ot_minutes + base.ot_request_approved_minutes,
+    base.candidate_ot_minutes
+  );
+  /*
+   * THE INVARIANT, enforced rather than assumed: the two components sum to
+   * the total. The cap above can only bite when the two together exceed what
+   * the day earned, and in that case the request's share is what gives way -
+   * the shift change's authorisation was granted first and is not reduced by
+   * a later claim.
+   */
+  base.ot_request_approved_minutes = Math.max(
+    0,
+    base.approved_ot_minutes - base.shift_authorised_ot_minutes
+  );
 
   if (regularization_pending) {
     base.status = CALC_STATUS.REGULARIZATION_PENDING;
