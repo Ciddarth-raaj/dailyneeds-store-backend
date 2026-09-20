@@ -454,6 +454,80 @@ describe("an employee who works across all outlets creates no outlet's gap", () 
     assert.equal(res.roaming.total, 0);
   });
 
+  /**
+   * THE FILTER MUST NOT UNDO THE FLAG.
+   *
+   * The outlet filter is applied to the POPULATION in SQL, on `store_id` -
+   * which a roaming employee still has, because it is the branch that owns
+   * their record. So selecting the Warehouse legitimately LOADS them. What
+   * must not then happen is the narrowed view quietly putting them back into
+   * that outlet's Expected and Gap, which is the same fault the flag exists to
+   * remove, reachable by a different route.
+   */
+  it("an outlet filter loads the roaming employee but still counts them nowhere", async () => {
+    const { uc } = build(pair);
+    const res = await uc.getSnapshot({ store_ids: [9], now: ist(DATE, 10, 0) });
+    assert.equal(res.expected_now, 1, "only the warehouse's own employee");
+    assert.equal(res.gap, 1);
+    assert.equal(res.roaming.total, 1, "and they are still visible, apart");
+    const row = res.coverage.find((c) => Number(c.store_id) === 9);
+    assert.equal(row.expected_now, 1);
+    assert.equal(row.gap, 1);
+  });
+
+  it("every coverage row sums to Expected Now, with the roaming employee in none of them", async () => {
+    const { uc } = build({
+      employees: [
+        employee(1, warehouse()),
+        employee(2, warehouse({ works_all_locations: 1 })),
+        employee(3, { store_id: 1, outlet_name: "Vallalar Salai" }),
+      ],
+      assignments: [assign(1, 1), assign(2, 1), assign(3, 1)],
+      rawPunches: [],
+    });
+    const res = await uc.getSnapshot({ now: ist(DATE, 10, 0) });
+    const summed = res.coverage.reduce((a, c) => a + c.expected_now, 0);
+    assert.equal(summed, res.expected_now, "the grid explains exactly the headline");
+    assert.equal(res.expected_now, 2, "and the roaming employee is in neither");
+    assert.equal(res.roaming.expected_now, 1);
+  });
+
+  /**
+   * A DESIGNATION FILTER IS THE OTHER ROUTE IN, and it behaves the same way:
+   * it narrows who is loaded and decides nothing about where they are counted.
+   */
+  it("a designation filter does not count them into an outlet either", async () => {
+    const { uc } = build(pair);
+    const res = await uc.getSnapshot({ designation_id: 5, now: ist(DATE, 10, 0) });
+    assert.equal(res.expected_now, 1);
+    assert.equal(res.roaming.total, 1);
+  });
+
+  /**
+   * THE EXPECTED-NOW DRILLDOWN is the list a manager opens FROM the card, so
+   * it must name the same people the card counted and no others.
+   */
+  it("the Expected Now drilldown does not list the roaming employee", async () => {
+    const { uc } = build(pair);
+    const res = await uc.getStaffingDrilldown({
+      bucket: "EXPECTED",
+      store_ids: [9],
+      now: ist(DATE, 10, 0),
+    });
+    assert.equal(res.total, 1);
+    assert.deepEqual(res.rows.map((r) => r.employee_id), [1]);
+  });
+
+  it("nor does the Gap drilldown", async () => {
+    const { uc } = build(pair);
+    const res = await uc.getStaffingDrilldown({
+      bucket: "GAP",
+      store_ids: [9],
+      now: ist(DATE, 10, 0),
+    });
+    assert.deepEqual(res.rows.map((r) => r.employee_id), [1]);
+  });
+
   it("the roaming drilldown bucket pages the same rows", async () => {
     const { uc } = build(pair);
     const res = await uc.getStaffingDrilldown({ bucket: "ROAMING", now: ist(DATE, 10, 0) });
@@ -514,6 +588,30 @@ describe("today cannot show Missing Punch while the day is still running", () =>
   });
 
   /**
+   * THREE PUNCHES IS THE SAME FAULT AS ONE, and the reason it needs its own
+   * case is that 1 is easy to special-case and 3 is not. Somebody who punched
+   * IN, OUT for a break and IN again has an odd count and is at work.
+   */
+  it("does not label THREE punches on a running day a Missing Punch either", async () => {
+    const { uc } = build({
+      employees: [employee(1)],
+      assignments: [assign(1, 1)],
+      rawPunches: [
+        punch(1, `${DATE} 09:02:00`, 11),
+        punch(1, `${DATE} 13:00:00`, 12),
+        punch(1, `${DATE} 14:05:00`, 13),
+      ],
+    });
+    const res = await uc.getSnapshot({ now: ist(DATE, 15, 0) });
+    assert.deepEqual(
+      res.attention_preview.filter((i) => i.reason_key === "MISSING_PUNCH"),
+      [],
+      "7, 9 and 101 behave the same way; none of them is a list entry"
+    );
+    assert.equal(res.gap, 0, "they are recorded IN at their own outlet");
+  });
+
+  /**
    * THE OTHER HALF: the verdict is not abolished, it is DEFERRED. A completed
    * date with an odd count is exactly what the Missing Attendance Report
    * reports and exactly what this panel must keep showing.
@@ -529,6 +627,48 @@ describe("today cannot show Missing Punch while the day is still running", () =>
     const missing = res.attention_preview.filter((i) => i.reason_key === "MISSING_PUNCH");
     assert.equal(missing.length, 1);
     assert.equal(missing[0].attendance_date, yesterday);
+  });
+
+  it("reports THREE punches on a completed earlier date as a Missing Punch", async () => {
+    const yesterday = "2026-09-11";
+    const { uc } = build({
+      employees: [employee(1)],
+      assignments: [assign(1, 1)],
+      rawPunches: [
+        punch(1, `${yesterday} 09:02:00`, 11),
+        punch(1, `${yesterday} 13:00:00`, 12),
+        punch(1, `${yesterday} 14:05:00`, 13),
+      ],
+    });
+    const res = await uc.getSnapshot({ now: ist(DATE, 13, 8) });
+    const missing = res.attention_preview.filter((i) => i.reason_key === "MISSING_PUNCH");
+    assert.equal(missing.length, 1);
+    assert.equal(missing[0].attendance_date, yesterday);
+  });
+
+  /**
+   * AN EVEN COUNT ON A COMPLETED DAY IS A COMPLETE DAY. Reported here because
+   * the fix is a gate in front of an existing verdict, and a gate that also
+   * let an even day through would be a new fault in the other direction.
+   */
+  it("reports NO missing-punch issue for an EVEN count on a completed date", async () => {
+    const yesterday = "2026-09-11";
+    for (const times of [
+      ["09:02:00", "18:30:00"],
+      ["09:02:00", "13:00:00", "14:05:00", "18:30:00"],
+    ]) {
+      const { uc } = build({
+        employees: [employee(1)],
+        assignments: [assign(1, 1)],
+        rawPunches: times.map((t, i) => punch(1, `${yesterday} ${t}`, 11 + i)),
+      });
+      const res = await uc.getSnapshot({ now: ist(DATE, 13, 8) });
+      assert.deepEqual(
+        res.attention_preview.filter((i) => i.reason_key === "MISSING_PUNCH"),
+        [],
+        `${times.length} punches`
+      );
+    }
   });
 
   it("names the date it is about, so a completed day is not read as today's", async () => {

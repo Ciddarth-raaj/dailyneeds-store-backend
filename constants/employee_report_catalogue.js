@@ -27,7 +27,7 @@ const {
  * classified HERE. Every column is accounted for below; none is silently
  * ignored.
  *
- * INCLUDED (41 columns, via the entries in this file):
+ * INCLUDED (42 columns, via the entries in this file):
  *   employee_id, employee_name, father_name, dob, gender, marital_status,
  *   marriage_date, spouse_name, permanent_address, residential_address,
  *   primary_contact_number, alternate_contact_number, email_id, blood_group,
@@ -36,7 +36,7 @@ const {
  *   additional_course, date_of_joining, pan_no, payment_type, status,
  *   resignation_date, default_work_shift_id, pf_applicable, esi_applicable,
  *   previous_pf_member, previous_eps_member, attendance_required,
- *   employment_type, grade, extra_break_hours
+ *   employment_type, grade, extra_break_hours, works_all_locations
  *
  * DELIBERATELY_EXCLUDED (18), each with its reason:
  *   employee_image        operational/internal - a base64 LONGTEXT blob; not
@@ -162,6 +162,34 @@ const TRISTATE_LABEL = (value) => {
   if (value === null || value === undefined || value === "") return "Not recorded";
   return Number(value) === 1 ? "Yes" : "No";
 };
+
+/**
+ * DUTY LOCATION - which outlet's staffing this employee is counted into.
+ *
+ * REPORTED IN THE WORDS THE SCREENS USE, never as the column name and never
+ * as 1/0. `works_all_locations` is a database identifier; nobody reading a
+ * staffing report should have to know it, and a bare 1 in a column called
+ * "Duty Location" says nothing at all. The two strings below are the same two
+ * the employee profile card and the Attendance & Staffing dashboard show, so a
+ * report, a profile and a dashboard cannot describe the same person in three
+ * different vocabularies.
+ *
+ * NOT NULL DEFAULT 0, so like `attendance_required` it has exactly two answers
+ * and gets its own transform rather than the tri-state one: a "Not recorded"
+ * that can never occur is a column nobody can trust. Only a 1 is roaming;
+ * anything else - including an absent value the column cannot produce - reads
+ * as the fixed outlet, which is the conservative answer and the same one
+ * `utils/employee_location.js#worksAllLocations` gives.
+ */
+const DUTY_LOCATION_LABEL = (value) => {
+  if (value === null || value === undefined || String(value).trim() === "") return "Fixed outlet";
+  return Number(value) === 1 ? "All Locations / Roaming" : "Fixed outlet";
+};
+
+const DUTY_LOCATION_OPTIONS = [
+  { value: "0", label: "Fixed outlet" },
+  { value: "1", label: "All Locations / Roaming" },
+];
 
 /**
  * `attendance_required` is NOT NULL DEFAULT 1, so it has only two answers and
@@ -474,6 +502,20 @@ const FIELDS = [
     select: "new_employee.attendance_required", join_footprint: "base",
     transform: ATTENDANCE_REQUIRED_LABEL,
     filter: { type: FILTER.ENUM, options: YES_NO_OPTIONS },
+    history_backed: false, enabled: true },
+
+  /**
+   * DUTY LOCATION sits beside Attendance Required and is a DIFFERENT fact.
+   * Attendance Required says whether the person is expected to punch at all;
+   * this says whether their shift belongs to one outlet's staffing or to none
+   * of them individually. The Outlet column keeps its ordinary meaning either
+   * way - it is the branch that owns the record, which is why a roaming
+   * employee still appears under their branch in an outlet-filtered report.
+   */
+  { key: "works_all_locations", label: "Duty Location", group: "Employment",
+    select: "new_employee.works_all_locations", join_footprint: "base",
+    transform: DUTY_LOCATION_LABEL,
+    filter: { type: FILTER.ENUM, options: DUTY_LOCATION_OPTIONS },
     history_backed: false, enabled: true },
 
   // THE DATE RECORDED BY THE RESIGN ACTION. The first sweep excluded it on the
