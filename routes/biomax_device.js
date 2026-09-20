@@ -7,6 +7,7 @@ const respondError = require("../utils/http");
  * Biomax device management. Mounted at /attendance/devices.
  *
  *   GET  /                    list, with current location and status    view_biomax_devices
+ *   GET  /receiver-health      receiver status + connection counts        view_biomax_devices
  *   GET  /unregistered        Cloud IDs that punched but are not registered  view_biomax_devices
  *   GET  /details             one device: periods and event history        view_biomax_devices
  *   POST /create              add a device with its first period           manage_biomax_devices
@@ -39,6 +40,21 @@ class BiomaxDeviceRoutes {
     r.get("/", P_.require(P.VIEW_BIOMAX_DEVICES), async (req, res) => {
       try {
         res.json({ code: 200, data: await this.usecase.list() });
+      } catch (err) {
+        this.fail(res, err);
+      }
+    });
+
+    /**
+     * Receiver health + a count of each connection state.
+     *
+     * Separate from GET / on purpose: the device list must render even when
+     * the receiver cannot be probed, so the screen asks for the two
+     * independently and a failure here leaves the table alone.
+     */
+    r.get("/receiver-health", P_.require(P.VIEW_BIOMAX_DEVICES), async (req, res) => {
+      try {
+        res.json({ code: 200, data: await this.usecase.receiverHealth() });
       } catch (err) {
         this.fail(res, err);
       }

@@ -583,10 +583,24 @@ function createStore(pool, options = {}) {
     return true;
   }
 
+  /**
+   * The last punch THIS RECEIVER took off the wire, for /healthz.
+   *
+   * Scoped to LIVE rows with a dev_id, because the question /healthz answers
+   * is "is the Biomax receiver still receiving?" - and only a live
+   * realtime_glog from a terminal is evidence of that. A DigiSME row
+   * (ingest_source DIGISME_IMPORT, dev_id NULL) is written by the API sync
+   * or an Excel import, through a code path the receiver never runs; a
+   * HISTORICAL_PULL row is backfill. Counting either would let a receiver
+   * that has been deaf for hours report a fresh last_punch_received, which
+   * is the exact failure a health endpoint exists to catch.
+   */
   async function lastPunchAt() {
     const rows = await q(
-      "SELECT DATE_FORMAT(MAX(received_at), '%Y-%m-%d %H:%i:%s') AS last_received FROM biomax_punch",
-      []
+      `SELECT DATE_FORMAT(MAX(received_at), '%Y-%m-%d %H:%i:%s') AS last_received
+         FROM biomax_punch
+        WHERE ingest_source = ? AND dev_id IS NOT NULL`,
+      [INGEST_SOURCE.LIVE]
     );
     return rows && rows[0] ? rows[0].last_received : null;
   }

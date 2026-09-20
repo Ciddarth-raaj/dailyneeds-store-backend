@@ -91,8 +91,8 @@ describe("/attendance/devices", () => {
   const reads = guards.filter((g) => g.method === "GET");
   const writes = guards.filter((g) => g.method === "POST");
 
-  it("defines three reads and five writes", () => {
-    assert.deepEqual(reads.map((g) => g.path).sort(), ["/", "/details", "/unregistered"]);
+  it("defines four reads and five writes", () => {
+    assert.deepEqual(reads.map((g) => g.path).sort(), ["/", "/details", "/receiver-health", "/unregistered"]);
     assert.deepEqual(writes.map((g) => g.path).sort(), ["/assign", "/correct-cloud-id", "/create", "/deactivate", "/update-details"]);
   });
 
