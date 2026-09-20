@@ -42,9 +42,23 @@ class Server {
       await this.initDrivers();
 
       this.initRepositories();
+
+      // The GST registration this server files for. Structure comes from the
+      // migration, the values from the environment, and this is where they
+      // meet - before SandboxService, which hands the registration to
+      // GSTAuthentication. It never throws: an unconfigured registration
+      // leaves GST taxpayer calls refusing with a configuration error while
+      // every other module boots normally.
+      this.gstOwnGstinBootstrap = require("./services/gst_own_gstin_bootstrap")({
+        gstOwnGstinRepo: this.gstOwnGstinRepo,
+      });
+      await this.gstOwnGstinBootstrap.run();
+
       const SandboxService = require("./services/sandbox");
       this.sandboxService = new SandboxService({
         gstTaxpayerSessionRepo: this.sandboxGstTaxpayerSessionRepo,
+        gstRegistrationProvider: () =>
+          this.gstOwnGstinBootstrap.getRegistration(),
       });
       await this.sandboxService.initialize();
       this.initUsecases();
@@ -154,6 +168,9 @@ class Server {
       require("./repository/sandbox_gst_taxpayer_session")(
         this.mysql.connection
       );
+    this.gstOwnGstinRepo = require("./repository/gst_own_gstin")(
+      this.mysql.connection
+    );
     this.departmentRepo = require("./repository/department")(
       this.mysql.connection
     );

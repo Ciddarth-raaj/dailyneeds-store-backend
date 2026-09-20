@@ -1,4 +1,7 @@
 const logger = require("../utils/logger");
+const {
+  NOT_CONFIGURED_MSG: GST_REGISTRATION_NOT_CONFIGURED_MSG,
+} = require("../services/gst_authentication");
 
 /** Sandbox GSTIN search: wait after HTTP 429 before retrying (B2B vendor resolution). */
 const SANDBOX_GSTIN_SEARCH_429_WAIT_MS = 60 * 1000;
@@ -146,14 +149,47 @@ class GstUsecase {
     };
   }
 
+  /**
+   * Phase 1A: the GSTIN and portal username are configuration, so "no
+   * registration" is a distinct, reportable state from "no GST auth service".
+   * Same 503 shape as every other GST configuration refusal - the message
+   * names the environment variables and never a value.
+   */
+  _noRegistrationResponse() {
+    return {
+      code: 503,
+      gst_registration_configured: false,
+      msg: GST_REGISTRATION_NOT_CONFIGURED_MSG,
+    };
+  }
+
   _cloneJson(obj) {
     return JSON.parse(JSON.stringify(obj));
   }
 
+  /**
+   * The GST Portal screen reads this directly, so it must not describe a
+   * session the rest of the system refuses to use.
+   *
+   * WITH NO REGISTRATION CONFIGURED there is nothing truthful to report. The
+   * stored row may still hold a token with a comfortable expiry, and every
+   * taxpayer operation will nonetheless refuse; showing that row would put
+   * "session active" on screen beside endpoints answering 503. So the table
+   * is NOT read at all in that state - a status endpoint that discloses
+   * unusable session timings is worse than one that says the configuration
+   * is missing.
+   *
+   * IT DOES NOT CALL `ensureTaxpayerTokenUsableForGstApis()`. That method
+   * clears sessions and can trigger a refresh; a read-only status request
+   * must have no side effects. `loadFromDatabase()` only reads.
+   */
   async getTaxpayerSessionStatus() {
     const ga = this._gstAuth();
     if (!ga) {
       return { ...this._noGstAuthResponse(), session: null };
+    }
+    if (!ga.isRegistrationConfigured()) {
+      return { ...this._noRegistrationResponse(), session: null };
     }
     await ga.loadFromDatabase();
     return {
@@ -169,6 +205,9 @@ class GstUsecase {
     const ga = this._gstAuth();
     if (!ga) {
       return this._noGstAuthResponse();
+    }
+    if (!ga.isRegistrationConfigured()) {
+      return this._noRegistrationResponse();
     }
     await ga.loadFromDatabase();
     const sessionBefore = ga.getTaxpayerSessionStatusPayload();
@@ -191,6 +230,9 @@ class GstUsecase {
     const ga = this._gstAuth();
     if (!ga) {
       return this._noGstAuthResponse();
+    }
+    if (!ga.isRegistrationConfigured()) {
+      return this._noRegistrationResponse();
     }
     const res = await ga.verifyTaxpayerOtp(otp);
     await ga.loadFromDatabase();
