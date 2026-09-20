@@ -1360,7 +1360,10 @@ class Server {
     );
     const assetRouter = require("./routes/asset")(this.assetUsecase);
     const exampleRouter = require("./routes/example")(this.exampleUsecase);
-    const gstRouter = require("./routes/gst")(this.gstUsecase);
+    const gstRouter = require("./routes/gst")(
+      this.gstUsecase,
+      this.permissions
+    );
     const departmentRouter = require("./routes/department")(
       this.departmentUsecase,
       this.permissions
@@ -1606,13 +1609,16 @@ class Server {
     );
     const purchaseRouter = require("./routes/purchase")(this.purchaseUsecase);
     const purchaseGstRouter = require("./routes/purchase_gst")(
-      this.purchaseGstUsecase
+      this.purchaseGstUsecase,
+      this.permissions
     );
     const purchaseGstMatchRouter = require("./routes/purchase_gst_match")(
-      this.gstPurchaseMatchUsecase
+      this.gstPurchaseMatchUsecase,
+      this.permissions
     );
     const purchaseGstNo2aRouter = require("./routes/purchase_gst_no_2a")(
-      this.gstPurchaseNo2aUsecase
+      this.gstPurchaseNo2aUsecase,
+      this.permissions
     );
     const purchaseTallyRouter = require("./routes/purchase_tally")(
       this.purchaseTallyUsecase

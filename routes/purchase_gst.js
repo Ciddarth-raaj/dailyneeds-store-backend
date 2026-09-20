@@ -1,15 +1,17 @@
 const router = require("express").Router();
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
+const P = require("../constants/gst_permissions");
 
 class PurchaseGstRoutes {
-  constructor(purchaseGstUsecase) {
+  constructor(purchaseGstUsecase, permissions) {
     this.purchaseGstUsecase = purchaseGstUsecase;
+    this.permissions = permissions;
     this.init();
   }
 
   init() {
-    router.get("/", async (req, res) => {
+    router.get("/", this.permissions.require(...P.PURCHASE_GST_READER_KEYS), async (req, res) => {
       try {
         const { error, value } = Joi.object({
           retail_outlet_id: Joi.number(),
@@ -33,7 +35,7 @@ class PurchaseGstRoutes {
       res.end();
     });
 
-    router.get("/:id", async (req, res) => {
+    router.get("/:id", this.permissions.require(...P.PURCHASE_GST_READER_KEYS), async (req, res) => {
       try {
         const id = parseInt(req.params.id, 10);
         if (!Number.isFinite(id)) {
@@ -53,7 +55,7 @@ class PurchaseGstRoutes {
       res.end();
     });
 
-    router.post("/bulk-delete", async (req, res) => {
+    router.post("/bulk-delete", this.permissions.require(P.DELETE_TALLY_PURCHASES), async (req, res) => {
       try {
         const { error, value } = Joi.object({
           gst_tally_purchase_ids: Joi.array()
@@ -80,7 +82,7 @@ class PurchaseGstRoutes {
       res.end();
     });
 
-    router.delete("/:id", async (req, res) => {
+    router.delete("/:id", this.permissions.require(P.DELETE_TALLY_PURCHASES), async (req, res) => {
       try {
         const id = parseInt(req.params.id, 10);
         if (!Number.isFinite(id)) {
@@ -106,6 +108,6 @@ class PurchaseGstRoutes {
   }
 }
 
-module.exports = (purchaseGstUsecase) => {
-  return new PurchaseGstRoutes(purchaseGstUsecase);
+module.exports = (purchaseGstUsecase, permissions) => {
+  return new PurchaseGstRoutes(purchaseGstUsecase, permissions);
 };

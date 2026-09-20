@@ -1,15 +1,17 @@
 const router = require("express").Router();
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
+const P = require("../constants/gst_permissions");
 
 class PurchaseGstNo2aRoutes {
-  constructor(gstPurchaseNo2aUsecase) {
+  constructor(gstPurchaseNo2aUsecase, permissions) {
     this.gstPurchaseNo2aUsecase = gstPurchaseNo2aUsecase;
+    this.permissions = permissions;
     this.init();
   }
 
   init() {
-    router.get("/", async (req, res) => {
+    router.get("/", this.permissions.require(P.VIEW_GST_GSTR2A_PURCHASE_REGISTER), async (req, res) => {
       try {
         const { error, value } = Joi.object({
           dist_bill_from_date: Joi.date(),
@@ -33,7 +35,7 @@ class PurchaseGstNo2aRoutes {
       res.end();
     });
 
-    router.post("/", async (req, res) => {
+    router.post("/", this.permissions.require(P.VIEW_GST_GSTR2A_PURCHASE_REGISTER), async (req, res) => {
       try {
         const { error, value } = Joi.object({
           gst_tally_purchase_ids: Joi.array()
@@ -61,7 +63,7 @@ class PurchaseGstNo2aRoutes {
       res.end();
     });
 
-    router.delete("/:gstTallyPurchaseId", async (req, res) => {
+    router.delete("/:gstTallyPurchaseId", this.permissions.require(P.VIEW_GST_GSTR2A_PURCHASE_REGISTER), async (req, res) => {
       try {
         const id = parseInt(req.params.gstTallyPurchaseId, 10);
         if (!Number.isFinite(id)) {
@@ -87,6 +89,6 @@ class PurchaseGstNo2aRoutes {
   }
 }
 
-module.exports = (gstPurchaseNo2aUsecase) => {
-  return new PurchaseGstNo2aRoutes(gstPurchaseNo2aUsecase);
+module.exports = (gstPurchaseNo2aUsecase, permissions) => {
+  return new PurchaseGstNo2aRoutes(gstPurchaseNo2aUsecase, permissions);
 };

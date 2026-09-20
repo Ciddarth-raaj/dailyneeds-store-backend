@@ -2,17 +2,19 @@ const router = require("express").Router();
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
 const { REQUIRES_OTP_CODE } = require("../services/gst_authentication");
+const P = require("../constants/gst_permissions");
 
 const GSTIN_PATTERN = /^[0-9A-Z]{15}$/;
 
 class GstRoutes {
-  constructor(gstUsecase) {
+  constructor(gstUsecase, permissions) {
     this.gstUsecase = gstUsecase;
+    this.permissions = permissions;
     this.init();
   }
 
   init() {
-    router.get("/taxpayer/session", async (req, res) => {
+    router.get("/taxpayer/session", this.permissions.require(...P.GST_MODULE_SESSION_KEYS), async (req, res) => {
       try {
         const payload = await this.gstUsecase.getTaxpayerSessionStatus();
         res.json(payload);
@@ -22,7 +24,7 @@ class GstRoutes {
       res.end();
     });
 
-    router.get("/taxpayer/session/check", async (req, res) => {
+    router.get("/taxpayer/session/check", this.permissions.require(...P.GST_MODULE_SESSION_KEYS), async (req, res) => {
       try {
         const block = await this.gstUsecase.assertTaxpayerSessionForGstApis();
         if (block) {
@@ -45,7 +47,7 @@ class GstRoutes {
       res.end();
     });
 
-    router.post("/taxpayer/otp/request", async (req, res) => {
+    router.post("/taxpayer/otp/request", this.permissions.require(...P.GST_MODULE_SESSION_KEYS), async (req, res) => {
       try {
         const payload = await this.gstUsecase.requestTaxpayerOtp();
         const http =
@@ -64,7 +66,7 @@ class GstRoutes {
         .required(),
     };
 
-    router.post("/taxpayer/otp/verify", async (req, res) => {
+    router.post("/taxpayer/otp/verify", this.permissions.require(...P.GST_MODULE_SESSION_KEYS), async (req, res) => {
       try {
         const isValid = Joi.validate(req.body, otpBodySchema);
         if (isValid.error !== null) {
@@ -82,7 +84,7 @@ class GstRoutes {
       res.end();
     });
 
-    router.post("/taxpayer/revalidate", async (req, res) => {
+    router.post("/taxpayer/revalidate", this.permissions.require(...P.GST_MODULE_SESSION_KEYS), async (req, res) => {
       try {
         const isValid = Joi.validate(req.body, otpBodySchema);
         if (isValid.error !== null) {
@@ -100,7 +102,7 @@ class GstRoutes {
       res.end();
     });
 
-    router.get("/vendor-filing-dates", async (req, res) => {
+    router.get("/vendor-filing-dates", this.permissions.require(P.VIEW_GST_FILING_DATES), async (req, res) => {
       try {
         const payload = await this.gstUsecase.getAllVendorFilingDates();
         const http =
@@ -112,7 +114,7 @@ class GstRoutes {
       res.end();
     });
 
-    router.get("/fetch-log/latest", async (req, res) => {
+    router.get("/fetch-log/latest", this.permissions.require(...P.FETCH_LOG_READER_KEYS), async (req, res) => {
       try {
         const payload = await this.gstUsecase.getLatestFetchLog();
         const http =
@@ -124,7 +126,7 @@ class GstRoutes {
       res.end();
     });
 
-    router.get("/vendors", async (req, res) => {
+    router.get("/vendors", this.permissions.require(...P.VENDOR_READER_KEYS), async (req, res) => {
       try {
         const payload = await this.gstUsecase.getAllVendors();
         res.json(payload);
@@ -139,7 +141,7 @@ class GstRoutes {
      * GET /gst/b2b/invoices?from_period=YYYY-MM&to_period=YYYY-MM
      * The per-month /b2b/invoices/:year/:month form below is unchanged.
      */
-    router.get("/b2b/invoices", async (req, res) => {
+    router.get("/b2b/invoices", this.permissions.require(P.VIEW_GST_GSTR2A_PURCHASE_REGISTER), async (req, res) => {
       try {
         const periodSchema = Joi.string()
           .trim()
@@ -183,7 +185,7 @@ class GstRoutes {
       res.end();
     });
 
-    router.get("/b2b/invoices/:year/:month", async (req, res) => {
+    router.get("/b2b/invoices/:year/:month", this.permissions.require(P.VIEW_GST_GSTR2A_PURCHASE_REGISTER), async (req, res) => {
       try {
         const paramsSchema = {
           year: Joi.string()
@@ -226,7 +228,7 @@ class GstRoutes {
       res.end();
     });
 
-    router.get("/gstr-2a/b2b/:year/:month", async (req, res) => {
+    router.get("/gstr-2a/b2b/:year/:month", this.permissions.require(P.SYNC_GST_GSTR2A_B2B), async (req, res) => {
       try {
         const paramsSchema = {
           year: Joi.string()
@@ -281,7 +283,7 @@ class GstRoutes {
       res.end();
     });
 
-    router.post("/search", async (req, res) => {
+    router.post("/search", this.permissions.require(P.VIEW_GST_VENDORS), async (req, res) => {
       try {
         const schema = {
           gstin: Joi.string()
@@ -319,6 +321,6 @@ class GstRoutes {
   }
 }
 
-module.exports = (gstUsecase) => {
-  return new GstRoutes(gstUsecase);
+module.exports = (gstUsecase, permissions) => {
+  return new GstRoutes(gstUsecase, permissions);
 };

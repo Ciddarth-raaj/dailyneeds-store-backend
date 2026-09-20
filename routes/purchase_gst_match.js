@@ -1,6 +1,7 @@
 const router = require("express").Router();
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
+const P = require("../constants/gst_permissions");
 
 /** "YYYY-MM" -> year*100 + month, the form the repository compares on. */
 function periodToNumber(period) {
@@ -9,8 +10,9 @@ function periodToNumber(period) {
 }
 
 class PurchaseGstMatchRoutes {
-  constructor(gstPurchaseMatchUsecase) {
+  constructor(gstPurchaseMatchUsecase, permissions) {
     this.gstPurchaseMatchUsecase = gstPurchaseMatchUsecase;
+    this.permissions = permissions;
     this.init();
   }
 
@@ -23,7 +25,7 @@ class PurchaseGstMatchRoutes {
       matched_by: Joi.number().integer().required(),
     });
 
-    router.get("/", async (req, res) => {
+    router.get("/", this.permissions.require(P.VIEW_GST_GSTR2A_PURCHASE_REGISTER), async (req, res) => {
       try {
         const { error, value } = Joi.object({
           from_date: Joi.date(),
@@ -92,7 +94,7 @@ class PurchaseGstMatchRoutes {
       res.end();
     });
 
-    router.post("/", async (req, res) => {
+    router.post("/", this.permissions.require(P.VIEW_GST_GSTR2A_PURCHASE_REGISTER), async (req, res) => {
       try {
         const { error, value } = upsertSchema.validate(req.body);
         if (error) {
@@ -108,7 +110,7 @@ class PurchaseGstMatchRoutes {
       res.end();
     });
 
-    router.delete("/:id", async (req, res) => {
+    router.delete("/:id", this.permissions.require(P.VIEW_GST_GSTR2A_PURCHASE_REGISTER), async (req, res) => {
       try {
         const id = parseInt(req.params.id, 10);
         if (!Number.isFinite(id)) {
@@ -134,6 +136,6 @@ class PurchaseGstMatchRoutes {
   }
 }
 
-module.exports = (gstPurchaseMatchUsecase) => {
-  return new PurchaseGstMatchRoutes(gstPurchaseMatchUsecase);
+module.exports = (gstPurchaseMatchUsecase, permissions) => {
+  return new PurchaseGstMatchRoutes(gstPurchaseMatchUsecase, permissions);
 };
