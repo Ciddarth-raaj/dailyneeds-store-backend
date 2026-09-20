@@ -423,3 +423,46 @@ describe("DigiSME import: insertPunch with source DIGISME_IMPORT", () => {
     assert.deepEqual(ins.params.slice(-2), ["LIVE", null]);
   });
 });
+
+/* ======================== /healthz: the receiver's own reception ======= */
+
+describe("lastPunchAt answers for the RECEIVER, not for attendance at large", () => {
+  it("counts only LIVE rows that carry a dev_id", async () => {
+    const pool = fakePool();
+    const store = createStore(pool);
+    pool.responses.push([{ last_received: "2026-09-20 12:34:18" }]);
+    const got = await store.lastPunchAt();
+
+    const q = pool.log[pool.log.length - 1];
+    assert.match(q.sql, /FROM biomax_punch WHERE ingest_source = \? AND dev_id IS NOT NULL/);
+    assert.deepEqual(q.params, ["LIVE"]);
+    assert.equal(got, "2026-09-20 12:34:18");
+  });
+
+  it("a DigiSME import or API sync cannot advance it", () => {
+    // DIGISME_IMPORT rows are written with dev_id NULL (insertImportedPunch),
+    // so they are excluded twice over - by the source and by the Cloud ID.
+    const pool = fakePool();
+    const store = createStore(pool);
+    return store.lastPunchAt().then(() => {
+      const { sql, params } = pool.log[pool.log.length - 1];
+      assert.ok(!params.includes("DIGISME_IMPORT"));
+      assert.ok(!/MAX\(received_at\)[\s\S]*FROM biomax_punch\s*$/.test(sql), "the unscoped form is what this replaces");
+      assert.match(sql, /dev_id IS NOT NULL/);
+    });
+  });
+
+  it("a historical pull is backfill, not reception, and is excluded too", async () => {
+    const pool = fakePool();
+    const store = createStore(pool);
+    await store.lastPunchAt();
+    assert.deepEqual(pool.log[pool.log.length - 1].params, ["LIVE"]);
+  });
+
+  it("no punch at all still reads as null, not as an error", async () => {
+    const pool = fakePool();
+    const store = createStore(pool);
+    pool.responses.push([{ last_received: null }]);
+    assert.equal(await store.lastPunchAt(), null);
+  });
+});
