@@ -330,19 +330,127 @@ describe("bootstrap", () => {
     assert.equal(res.configured, false);
   });
 
-  it("falls back to the stored registration when the env is unset", async () => {
-    const repo = fakeGstOwnGstinRepo([
-      {
-        gstin: FAKE_GSTIN_A,
-        portal_username: FAKE_USER_A,
-        is_active: true,
-        is_default: true,
-      },
-    ]);
-    const b = new GstOwnGstinBootstrap({ gstOwnGstinRepo: repo, env: {} });
-    const res = await b.run();
-    assert.equal(res.configured, true);
-    assert.equal(b.getRegistration().gstin, FAKE_GSTIN_A);
+  /**
+   * FIX 1: THE ENVIRONMENT IS THE SOURCE OF TRUTH.
+   *
+   * An earlier draft fell back to the stored row when the environment was
+   * absent, so a server booted without the variables "kept working". That
+   * makes yesterday's registration the authority. The case that matters is a
+   * TYPO: one wrong character must fail where somebody sees it, not quietly
+   * carry on filing against the previous registration.
+   */
+  describe("env is the source of truth - no database fallback", () => {
+    const storedRepo = () =>
+      fakeGstOwnGstinRepo([
+        {
+          gstin: FAKE_GSTIN_A,
+          portal_username: FAKE_USER_A,
+          is_active: true,
+          is_default: true,
+        },
+      ]);
+
+    it("stored registration + MISSING env => configured:false", async () => {
+      const repo = storedRepo();
+      const b = new GstOwnGstinBootstrap({ gstOwnGstinRepo: repo, env: {} });
+      const res = await b.run();
+      assert.equal(res.configured, false);
+      assert.equal(
+        b.getRegistration(),
+        null,
+        "the stored row must NOT be used",
+      );
+      assert.equal(repo.rows.length, 1, "and must NOT be deleted");
+    });
+
+    it("stored registration + MALFORMED GSTIN env => configured:false", async () => {
+      const repo = storedRepo();
+      const b = new GstOwnGstinBootstrap({
+        gstOwnGstinRepo: repo,
+        env: envFor("29ABCDE1234F1X5", FAKE_USER_A), // the fixed 'Z' is wrong
+      });
+      const res = await b.run();
+      assert.equal(res.configured, false);
+      assert.equal(b.getRegistration(), null);
+      assert.match(b.getUnconfiguredReason(), /15-character GSTIN/);
+      assert.equal(repo.rows.length, 1);
+    });
+
+    it("stored registration + MISSING username => configured:false", async () => {
+      const repo = storedRepo();
+      const b = new GstOwnGstinBootstrap({
+        gstOwnGstinRepo: repo,
+        env: { GST_OWN_GSTIN: FAKE_GSTIN_A },
+      });
+      const res = await b.run();
+      assert.equal(res.configured, false);
+      assert.equal(b.getRegistration(), null);
+      assert.match(b.getUnconfiguredReason(), /GST_PORTAL_USERNAME/);
+    });
+
+    it("none of those cases ever returns the stored registration", async () => {
+      for (const env of [
+        {},
+        envFor("29ABCDE1234F1X5", FAKE_USER_A),
+        { GST_OWN_GSTIN: FAKE_GSTIN_A },
+        { GST_PORTAL_USERNAME: FAKE_USER_A },
+        envFor(FAKE_GSTIN_A, "   "),
+      ]) {
+        const b = new GstOwnGstinBootstrap({
+          gstOwnGstinRepo: storedRepo(),
+          env,
+        });
+        await b.run();
+        assert.equal(b.getRegistration(), null);
+        assert.equal(b.isConfigured(), false);
+      }
+    });
+
+    it("the bootstrap never reads the table when env is invalid", async () => {
+      let reads = 0;
+      const repo = {
+        async getActive() {
+          reads += 1;
+          return {
+            own_gstin_id: 1,
+            gstin: FAKE_GSTIN_A,
+            portal_username: FAKE_USER_A,
+          };
+        },
+        async getByGstin() {
+          reads += 1;
+          return null;
+        },
+        async upsertFromConfig() {
+          throw new Error("must not be called");
+        },
+      };
+      await new GstOwnGstinBootstrap({ gstOwnGstinRepo: repo, env: {} }).run();
+      assert.equal(
+        reads,
+        0,
+        "an invalid env must not consult the table at all",
+      );
+    });
+
+    it("boot still survives, and recovers when valid env returns", async () => {
+      const repo = storedRepo();
+      const bad = new GstOwnGstinBootstrap({ gstOwnGstinRepo: repo, env: {} });
+      await bad.run(); // must not throw
+      assert.equal(bad.getRegistration(), null);
+
+      const good = new GstOwnGstinBootstrap({
+        gstOwnGstinRepo: repo,
+        env: envFor(FAKE_GSTIN_A, FAKE_USER_A),
+      });
+      await good.run();
+      assert.equal(good.getRegistration().gstin, FAKE_GSTIN_A);
+      assert.equal(
+        repo.rows.length,
+        1,
+        "the same row is reused, not duplicated",
+      );
+    });
   });
 });
 
@@ -559,6 +667,184 @@ describe("a taxpayer token belongs to the registration it was minted for", () =>
       portal_username: FAKE_USER_A,
     });
     assert.equal(await good.getTaxpayerAccessTokenForGstApis(), "stored-jwt");
+  });
+});
+
+/**
+ * FIX 2: NO TAXPAYER JWT MAY LEAVE THE SERVER UNTIL ITS BINDING IS PROVEN.
+ *
+ * The request path checked this from the start. The RENEWAL CRON did not, and
+ * it runs every two minutes without a user request - so it, not a user, would
+ * have been the first thing to send the migrated `own_gstin_id = NULL` session
+ * to Sandbox. Every test here counts HTTP requests, because the assertion
+ * that matters is not "it returned an error", it is "nothing was sent".
+ */
+describe("the renewal cron cannot refresh an unbound or mismatched JWT", () => {
+  const now = Date.now();
+
+  /** A session inside the renewal window: expiry is within RENEWAL_LEAD_MS. */
+  const renewableSession = (ownGstinId) => ({
+    own_gstin_id: ownGstinId,
+    taxpayer_access_token: "stored-jwt",
+    token_expires_at_ms: now + 60 * 1000,
+    last_otp_verified_at_ms: now - 60 * 1000,
+    session_expires_at_ms: now + 20 * 24 * 60 * 60 * 1000,
+  });
+
+  /** Counts every outbound POST and answers with a fresh token. */
+  function countingAxios() {
+    const axios = require("axios");
+    const original = axios.post;
+    const calls = [];
+    axios.post = async (url, body, opts) => {
+      calls.push({ url, body, opts });
+      return {
+        status: 200,
+        data: { code: 200, data: { access_token: "refreshed-jwt" } },
+      };
+    };
+    return {
+      calls,
+      restore: () => {
+        axios.post = original;
+      },
+    };
+  }
+
+  const REG = {
+    own_gstin_id: 5,
+    gstin: FAKE_GSTIN_A,
+    portal_username: FAKE_USER_A,
+  };
+
+  it("MATCHING binding: the cron may refresh", async () => {
+    const { calls, restore } = countingAxios();
+    try {
+      const repo = fakeSessionRepo(renewableSession(5));
+      const res = await authFor(repo, REG).refreshIfWithinRenewalWindow();
+      assert.notEqual(res.skipped, true, `unexpected skip: ${res.reason}`);
+      assert.equal(res.refreshed, true);
+      assert.equal(calls.length, 1, "exactly one refresh request");
+      assert.equal(repo.state.taxpayer_access_token, "refreshed-jwt");
+    } finally {
+      restore();
+    }
+  });
+
+  it("NULL binding: ZERO HTTP requests", async () => {
+    const { calls, restore } = countingAxios();
+    try {
+      const repo = fakeSessionRepo(renewableSession(null));
+      const res = await authFor(repo, REG).refreshIfWithinRenewalWindow();
+      assert.equal(calls.length, 0, "the unbound JWT must never be sent");
+      assert.equal(res.skipped, true);
+      assert.equal(res.reason, "gstin_binding_mismatch");
+    } finally {
+      restore();
+    }
+  });
+
+  it("MISMATCHED binding: ZERO HTTP requests", async () => {
+    const { calls, restore } = countingAxios();
+    try {
+      const repo = fakeSessionRepo(renewableSession(5));
+      const other = { ...REG, own_gstin_id: 6, gstin: FAKE_GSTIN_B };
+      const res = await authFor(repo, other).refreshIfWithinRenewalWindow();
+      assert.equal(calls.length, 0, "a cross-GSTIN JWT must never be sent");
+      assert.equal(res.skipped, true);
+      assert.equal(res.reason, "gstin_binding_mismatch");
+    } finally {
+      restore();
+    }
+  });
+
+  it("the mismatched cron path CLEARS the stored session", async () => {
+    const { restore } = countingAxios();
+    try {
+      const repo = fakeSessionRepo(renewableSession(null));
+      await authFor(repo, REG).refreshIfWithinRenewalWindow();
+      assert.equal(repo.state.taxpayer_access_token, null);
+      assert.equal(repo.state.own_gstin_id, null);
+      assert.equal(repo.state.last_otp_verified_at_ms, null);
+    } finally {
+      restore();
+    }
+  });
+
+  it("NO REGISTRATION: the cron skips and sends nothing", async () => {
+    const { calls, restore } = countingAxios();
+    try {
+      const repo = fakeSessionRepo(renewableSession(5));
+      const res = await authFor(repo, null).refreshIfWithinRenewalWindow();
+      assert.equal(calls.length, 0);
+      assert.equal(res.skipped, true);
+      assert.equal(res.reason, "no_gst_registration");
+    } finally {
+      restore();
+    }
+  });
+
+  it("DIRECT refreshTaxpayerSession with a mismatch: ZERO HTTP requests", async () => {
+    const { calls, restore } = countingAxios();
+    try {
+      const repo = fakeSessionRepo(renewableSession(5));
+      const other = { ...REG, own_gstin_id: 99 };
+      await assert.rejects(
+        () => authFor(repo, other).refreshTaxpayerSession(),
+        /does not belong to the configured GST registration/,
+      );
+      assert.equal(calls.length, 0);
+      assert.equal(repo.state.taxpayer_access_token, null, "and it is cleared");
+    } finally {
+      restore();
+    }
+  });
+
+  it("DIRECT refreshTaxpayerSession with no registration: ZERO HTTP requests", async () => {
+    const { calls, restore } = countingAxios();
+    try {
+      const repo = fakeSessionRepo(renewableSession(5));
+      await assert.rejects(() => authFor(repo, null).refreshTaxpayerSession());
+      assert.equal(calls.length, 0);
+      assert.equal(
+        repo.state.taxpayer_access_token,
+        "stored-jwt",
+        "no registration is not a binding failure, so nothing is cleared",
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  it("DIRECT refreshTaxpayerSession with a matching binding still works", async () => {
+    const { calls, restore } = countingAxios();
+    try {
+      const repo = fakeSessionRepo(renewableSession(5));
+      await authFor(repo, REG).refreshTaxpayerSession();
+      assert.equal(calls.length, 1);
+      assert.equal(repo.state.taxpayer_access_token, "refreshed-jwt");
+    } finally {
+      restore();
+    }
+  });
+
+  it("the binding helper does not recurse into refresh", async () => {
+    // ensure() refreshes an EXPIRED token, and refresh() asserts the binding.
+    // If the helper refreshed, that would loop. One request proves it does not.
+    const { calls, restore } = countingAxios();
+    try {
+      const repo = fakeSessionRepo({
+        ...renewableSession(5),
+        token_expires_at_ms: now - 1000, // already expired -> ensure() refreshes
+      });
+      await authFor(repo, REG).ensureTaxpayerTokenUsableForGstApis();
+      assert.ok(
+        calls.length <= 1,
+        `expected at most one refresh, saw ${calls.length}`,
+      );
+    } finally {
+      restore();
+    }
   });
 });
 

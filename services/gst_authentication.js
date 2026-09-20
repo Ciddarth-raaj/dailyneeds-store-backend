@@ -251,38 +251,34 @@ class GSTAuthentication {
   }
 
   /**
-   * @returns {Promise<null | object>} null if taxpayer JWT can be used for GST taxpayer APIs.
+   * THE ONE BINDING CHECK. No taxpayer JWT may leave this server until its
+   * GSTIN binding has been proven, and there is exactly one place that proves
+   * it so the rule cannot drift between callers.
+   *
+   * IT DOES NOT REFRESH, and that is load-bearing:
+   * `ensureTaxpayerTokenUsableForGstApis()` calls `refreshTaxpayerSession()`
+   * when the token has expired, and `refreshTaxpayerSession()` calls this. A
+   * helper that refreshed would close that loop. This only reads, compares,
+   * and clears.
+   *
+   * @returns {Promise<{ ok: true, registration: object }
+   *                  | { ok: false, code: "NO_REGISTRATION"|"BINDING_MISMATCH", block?: object }>}
    */
-  async ensureTaxpayerTokenUsableForGstApis() {
+  async _assertSessionBinding() {
     const registration = this.getRegistration();
     if (!registration) {
-      return {
-        code: 503,
-        gst_registration_configured: false,
-        msg: NOT_CONFIGURED_MSG,
-      };
+      return { ok: false, code: "NO_REGISTRATION" };
     }
 
     await this.loadFromDatabase();
-    const now = Date.now();
 
-    /**
-     * A TOKEN BELONGS TO THE REGISTRATION IT WAS MINTED FOR.
-     *
-     * Before the GSTIN was configuration this could not be wrong. Now it can:
-     * change GST_OWN_GSTIN, restart, and the stored JWT is a credential for a
-     * registration nobody is filing for any more. Presenting it would be
-     * acting as the wrong taxpayer, so it is cleared and OTP is required.
-     *
-     * A NULL binding is treated the same way, and that is what makes the
-     * migration safe - the existing production row carries NULL, so it is
-     * refused once rather than assumed to belong to whoever is configured
-     * today. One OTP, and the session is bound from then on.
-     */
-    if (
-      this._taxpayerToken &&
-      this._sessionOwnGstinId !== registration.own_gstin_id
-    ) {
+    // Nothing stored is not a binding failure - it is simply "no session",
+    // which the callers already handle as "run OTP".
+    if (!this._taxpayerToken) {
+      return { ok: true, registration };
+    }
+
+    if (this._sessionOwnGstinId !== registration.own_gstin_id) {
       const wasUnbound = this._sessionOwnGstinId == null;
       await this._clearFullSession();
       logger.Log({
@@ -295,11 +291,40 @@ class GSTAuthentication {
         category: "",
         ref: {},
       });
-      return this.buildRequiresOtpError({
-        gstin_binding_mismatch: true,
-        msg: "The stored GST taxpayer session does not belong to the configured GST registration. Run request OTP + verify.",
-      });
+      return { ok: false, code: "BINDING_MISMATCH" };
     }
+
+    return { ok: true, registration };
+  }
+
+  /** The 428 payload a binding failure produces on the request path. */
+  _bindingMismatchBlock() {
+    return this.buildRequiresOtpError({
+      gstin_binding_mismatch: true,
+      msg: "The stored GST taxpayer session does not belong to the configured GST registration. Run request OTP + verify.",
+    });
+  }
+
+  _noRegistrationBlock() {
+    return {
+      code: 503,
+      gst_registration_configured: false,
+      msg: NOT_CONFIGURED_MSG,
+    };
+  }
+
+  /**
+   * @returns {Promise<null | object>} null if taxpayer JWT can be used for GST taxpayer APIs.
+   */
+  async ensureTaxpayerTokenUsableForGstApis() {
+    const bound = await this._assertSessionBinding();
+    if (!bound.ok) {
+      return bound.code === "NO_REGISTRATION"
+        ? this._noRegistrationBlock()
+        : this._bindingMismatchBlock();
+    }
+
+    const now = Date.now();
 
     if (this.isSessionWallExpired()) {
       await this._clearFullSession();
@@ -534,15 +559,28 @@ class GSTAuthentication {
   }
 
   async refreshTaxpayerSession() {
+    // THE JWT IS ABOUT TO BE SENT. Prove its binding first - this is the last
+    // gate before `_refreshHeaders(this._taxpayerToken)` puts it on the wire,
+    // and it is reached both directly and from the renewal cron.
+    //
+    // `_assertSessionBinding()` also performs the `loadFromDatabase()` this
+    // method used to do for itself, and it does NOT refresh, so calling it
+    // here cannot recurse back into this method.
+    const bound = await this._assertSessionBinding();
+    if (!bound.ok) {
+      throw new Error(
+        bound.code === "NO_REGISTRATION"
+          ? NOT_CONFIGURED_MSG
+          : "GST taxpayer refresh blocked: the stored session does not belong to the configured GST registration"
+      );
+    }
+
     if (this.requiresGstTaxpayerRevalidation() || this.isSessionWallExpired()) {
       throw new Error(
         "GST taxpayer refresh blocked: OTP revalidation or new session required"
       );
     }
 
-    if (!this._taxpayerToken) {
-      await this.loadFromDatabase();
-    }
     if (!this._taxpayerToken) {
       throw new Error(
         "GST taxpayer session missing; complete OTP verify flow first"
@@ -604,7 +642,22 @@ class GSTAuthentication {
   }
 
   async refreshIfWithinRenewalWindow() {
-    await this.loadFromDatabase();
+    // THE CRON PATH, and the reason this check is here rather than only in
+    // `ensureTaxpayerTokenUsableForGstApis()`: this runs every two minutes
+    // without a user request, so it would otherwise be the FIRST thing to
+    // send the migrated `own_gstin_id = NULL` session to Sandbox - before any
+    // request-path guard ever ran. It returns a skipped result rather than
+    // throwing, because a cron that throws is a log line nobody reads.
+    const bound = await this._assertSessionBinding();
+    if (!bound.ok) {
+      return {
+        skipped: true,
+        reason:
+          bound.code === "NO_REGISTRATION"
+            ? "no_gst_registration"
+            : "gstin_binding_mismatch",
+      };
+    }
 
     if (this.isSessionWallExpired()) {
       await this._clearFullSession();

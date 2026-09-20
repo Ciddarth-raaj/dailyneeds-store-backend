@@ -8,6 +8,11 @@ const {
 /**
  * Put the environment's GST registration into the database, once per boot.
  *
+ * THE ENVIRONMENT IS THE SOURCE OF TRUTH: env -> bootstrap -> database. The
+ * table is persisted configuration and audit state, never the authority. With
+ * no valid environment configuration there is NO registration, whatever the
+ * table happens to hold.
+ *
  * MIGRATION IS STRUCTURE, THIS IS DATA. `20261029120000-gst-own-gstin`
  * creates an empty table; the company's GSTIN and portal username arrive
  * here, from the environment, at runtime. That split is what keeps the
@@ -54,18 +59,19 @@ class GstOwnGstinBootstrap {
         category: "",
         ref: {},
       });
-      // Fall back to whatever is already stored, so a server started without
-      // the variables still reports the registration it has rather than
-      // pretending none exists.
-      try {
-        const existing = await this.gstOwnGstinRepo.getActive();
-        if (existing) {
-          this._registration = existing;
-          return { configured: true, created: false, fromDatabase: true };
-        }
-      } catch (_) {
-        /* fall through to unconfigured */
-      }
+      // NO DATABASE FALLBACK, deliberately.
+      //
+      // An earlier draft read the stored row here so a server started without
+      // the variables "kept working". That inverts the authority: the
+      // environment configures this server, the table records what the
+      // environment said. Reading the row back when the environment is absent
+      // or invalid makes yesterday's registration the authority, and the case
+      // that matters is a TYPO - one wrong character in GST_OWN_GSTIN would
+      // have silently carried on filing against the previous registration
+      // instead of failing where somebody would see it.
+      //
+      // The row is NOT deleted. It stays as configuration/audit state and
+      // becomes usable again the moment valid environment values return.
       return { configured: false, reason: cfg.reason };
     }
 

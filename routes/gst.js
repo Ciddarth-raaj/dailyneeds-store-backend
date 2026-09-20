@@ -6,6 +6,31 @@ const P = require("../constants/gst_permissions");
 
 const GSTIN_PATTERN = /^[0-9A-Z]{15}$/;
 
+/**
+ * The HTTP status for a taxpayer OTP payload.
+ *
+ * The provider's own status wins when there is one - a Sandbox 422 must stay
+ * a 422. The fallback used to be a bare 502, which was right while the only
+ * way to reach it was a transport failure. It stopped being right when the
+ * usecase started returning `{ code: 503 }` for "no GST registration
+ * configured": the body said 503 and the wire said 502, so a client that
+ * routed on HTTP status saw a bad gateway rather than a configuration
+ * problem it could act on.
+ *
+ * So an explicit, legitimate HTTP code in the body is honoured, and 502
+ * remains the fallback for everything else.
+ */
+function otpHttpStatus(payload) {
+  if (payload && payload.axios_http_status != null) {
+    return payload.axios_http_status;
+  }
+  const code = payload && payload.code;
+  if (Number.isInteger(code) && code >= 400 && code <= 599) {
+    return code;
+  }
+  return 502;
+}
+
 class GstRoutes {
   constructor(gstUsecase, permissions) {
     this.gstUsecase = gstUsecase;
@@ -50,8 +75,7 @@ class GstRoutes {
     router.post("/taxpayer/otp/request", this.permissions.require(...P.GST_MODULE_SESSION_KEYS), async (req, res) => {
       try {
         const payload = await this.gstUsecase.requestTaxpayerOtp();
-        const http =
-          payload.axios_http_status != null ? payload.axios_http_status : 502;
+        const http = otpHttpStatus(payload);
         res.status(http).json(payload);
       } catch (err) {
         respondError(res, err);
@@ -75,8 +99,7 @@ class GstRoutes {
         const payload = await this.gstUsecase.verifyTaxpayerOtp(
           isValid.value.otp
         );
-        const http =
-          payload.axios_http_status != null ? payload.axios_http_status : 502;
+        const http = otpHttpStatus(payload);
         res.status(http).json(payload);
       } catch (err) {
         respondError(res, err);
@@ -93,8 +116,7 @@ class GstRoutes {
         const payload = await this.gstUsecase.revalidateTaxpayerWithOtp(
           isValid.value.otp
         );
-        const http =
-          payload.axios_http_status != null ? payload.axios_http_status : 502;
+        const http = otpHttpStatus(payload);
         res.status(http).json(payload);
       } catch (err) {
         respondError(res, err);
