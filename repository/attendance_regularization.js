@@ -633,6 +633,17 @@ class AttendanceRegularizationRepository {
    * a queue that shows somebody a row they can never action is a bug even when
    * the action would correctly be refused.
    */
+  /**
+   * THE LEGACY QUEUE, AND WHY IT EXCLUDES SHIFT_CHANGE.
+   *
+   * `GET /attendance/regularization/pending` predates the unified approval
+   * centre. It takes no request-type filter and is reached with
+   * `view_attendance_approvals` alone, so a SHIFT_CHANGE row returned here
+   * would be a Shift queue that nobody needed `view_shift_change_requests`
+   * to read - which is exactly what that key exists to prevent. The Shift
+   * queue is `/attendance/approvals?request_type=SHIFT_CHANGE`, which does
+   * enforce it. Attendance and OT are unaffected.
+   */
   async listPendingFor({ approver_roles, outlet_id, actor_employee_id, limit = 200 }) {
     // An actor with no role still has a queue: the employee-level steps that
     // name them. The IN (?) below needs a non-empty list, so an impossible
@@ -658,6 +669,7 @@ class AttendanceRegularizationRepository {
          LEFT JOIN outlets o ON o.outlet_id = r.outlet_id
         WHERE r.status = 'PENDING'
           AND s.decision = 'PENDING'
+          AND r.request_type <> 'SHIFT_CHANGE'
           AND (
                 (s.approver_employee_id IS NULL
                  AND s.approver_role IN (?)

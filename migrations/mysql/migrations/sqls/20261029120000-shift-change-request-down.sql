@@ -1,4 +1,4 @@
--- Reverses 20261028120000-shift-change-request-up.sql.
+-- Reverses 20261029120000-shift-change-request-up.sql.
 --
 -- The permission rows are deleted only where nothing has been granted them;
 -- a key a designation holds is left in place rather than silently revoked.

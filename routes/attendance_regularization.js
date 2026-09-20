@@ -64,6 +64,83 @@ class AttendanceRegularizationRoutes {
     respondError(res, err);
   }
 
+  /**
+   * THE SHIFT KEYS ARE AN ADDITIONAL GATE, NEVER A REPLACEMENT.
+   *
+   * `view_attendance_approvals` and `approve_attendance_regularization` still
+   * decide whether a caller may reach the approval API at all; these two
+   * middlewares add `view_shift_change_requests` / `approve_shift_change_request`
+   * ON TOP of them, and only for SHIFT_CHANGE. Attendance and OT pass through
+   * both untouched, which is why the generic key is never re-checked here:
+   * its own middleware has already run.
+   *
+   * `permissions.hasAll` is the repo's own finer-grained check, so the
+   * administrator bypass (`user_type` 2 -> "allow all") continues to work
+   * exactly as it does for every other key rather than being special-cased.
+   *
+   * THE AUTHORITY CHECK IS UNCHANGED AND STILL MANDATORY. Holding both keys
+   * only gets the caller as far as `canApprove`, which decides whether they
+   * may act on THIS stage of THIS request from their mapped role, their
+   * outlet and whose request it is.
+   */
+  static _forbidden(res) {
+    res.status(403).json({
+      code: 403,
+      msg: "You do not have permission to perform this action",
+    });
+  }
+
+  /**
+   * For the TYPED list endpoints, whose `request_type` is a required,
+   * whitelisted query parameter. Nothing else is trusted: a value that is not
+   * exactly `SHIFT_CHANGE` cannot reach a SHIFT_CHANGE row - `typesForTab`
+   * maps REGULARIZATION to the two regularization types and every other tab
+   * to itself - and anything unreadable is refused by the handler's own Joi
+   * schema a moment later.
+   */
+  _requireShiftViewForTypedQuery() {
+    return async (req, res, next) => {
+      try {
+        if (String(req.query.request_type) !== "SHIFT_CHANGE") return next();
+        if (await this.permissions.hasAll(req, P.VIEW_SHIFT_CHANGE_REQUESTS)) return next();
+        return AttendanceRegularizationRoutes._forbidden(res);
+      } catch (err) {
+        return AttendanceRegularizationRoutes._respond(res, err);
+      }
+    };
+  }
+
+  /**
+   * For the endpoints addressed BY REQUEST ID, where the type is a property of
+   * the stored record and never something the caller may assert. The request
+   * is read server-side and its own `request_type` decides; a client cannot
+   * reach a SHIFT_CHANGE without the Shift key by calling the detail or
+   * decision route directly, and cannot pretend a SHIFT_CHANGE is an OT by
+   * sending a type, because neither route reads one.
+   *
+   * A 404 for a request that does not exist is returned here rather than
+   * inside the handler, so an unknown id looks the same to a caller with the
+   * Shift key and one without it.
+   */
+  _requireShiftKeyForStoredRequest(key) {
+    return async (req, res, next) => {
+      try {
+        const request = await this.usecase.getRequest(Number(req.params.request_id));
+        if (!request) {
+          res.status(404).json({ code: 404, msg: "No such request" });
+          return;
+        }
+        // Handed on so the handler does not read the same row twice.
+        req.storedApprovalRequest = request;
+        if (String(request.request_type) !== "SHIFT_CHANGE") return next();
+        if (await this.permissions.hasAll(req, key)) return next();
+        return AttendanceRegularizationRoutes._forbidden(res);
+      } catch (err) {
+        return AttendanceRegularizationRoutes._respond(res, err);
+      }
+    };
+  }
+
   init() {
     if (this.sensitive) {
       this.router.use("/attendance/regularization", this.sensitive.filterResponse);
@@ -289,6 +366,7 @@ class AttendanceRegularizationRoutes {
     this.router.get(
       "/attendance/approvals",
       this.permissions.require(P.VIEW_ATTENDANCE_APPROVALS),
+      this._requireShiftViewForTypedQuery(),
       async (req, res) => {
         try {
           const schema = {
@@ -327,6 +405,7 @@ class AttendanceRegularizationRoutes {
     this.router.get(
       "/attendance/approvals/count",
       this.permissions.require(P.VIEW_ATTENDANCE_APPROVALS),
+      this._requireShiftViewForTypedQuery(),
       async (req, res) => {
         try {
           const schema = {
@@ -353,7 +432,15 @@ class AttendanceRegularizationRoutes {
       }
     );
 
-    /** The queue: requests whose current stage this caller could decide. */
+    /**
+     * The LEGACY queue: requests whose current stage this caller could decide.
+     *
+     * Attendance and OT only. It predates the unified approval centre, takes
+     * no request-type filter and is reached with the generic view key alone,
+     * so SHIFT_CHANGE is excluded in the repository query rather than shown
+     * to somebody who does not hold `view_shift_change_requests`. The Shift
+     * queue is `/attendance/approvals?request_type=SHIFT_CHANGE`.
+     */
     this.router.get(
       "/attendance/regularization/pending",
       this.permissions.require(P.VIEW_ATTENDANCE_APPROVALS),
@@ -381,13 +468,11 @@ class AttendanceRegularizationRoutes {
     this.router.get(
       "/attendance/regularization/:request_id",
       this.permissions.require(P.VIEW_ATTENDANCE_APPROVALS),
+      this._requireShiftKeyForStoredRequest(P.VIEW_SHIFT_CHANGE_REQUESTS),
       async (req, res) => {
         try {
-          const request = await this.usecase.getRequest(Number(req.params.request_id));
-          if (!request) {
-            res.status(404).json({ code: 404, msg: "No such request" });
-            return;
-          }
+          // Already read, and already type-checked, by the middleware above.
+          const request = req.storedApprovalRequest;
           res.json({ code: 200, request });
         } catch (err) {
           AttendanceRegularizationRoutes._respond(res, err);
@@ -408,6 +493,7 @@ class AttendanceRegularizationRoutes {
     this.router.post(
       "/attendance/regularization/:request_id/decision",
       this.permissions.require(P.APPROVE_ATTENDANCE_REGULARIZATION),
+      this._requireShiftKeyForStoredRequest(P.APPROVE_SHIFT_CHANGE_REQUEST),
       async (req, res) => {
         try {
           const schema = {
