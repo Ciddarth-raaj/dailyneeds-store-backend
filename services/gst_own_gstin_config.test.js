@@ -848,6 +848,136 @@ describe("the renewal cron cannot refresh an unbound or mismatched JWT", () => {
   });
 });
 
+/**
+ * The status endpoint must not describe a session the rest of the system
+ * refuses to use. These drive `usecase/gst.js` itself, because the claim is
+ * not "it returns 503" - the route tests cover that - it is that THE SESSION
+ * TABLE IS NEVER READ when there is no registration, so no stale timing can
+ * reach the screen and no side effect can run on a read-only request.
+ */
+describe("getTaxpayerSessionStatus does not report an unusable session", () => {
+  const buildGstUsecase = require("../usecase/gst");
+
+  /** Counts reads so "did not touch the table" is provable, not asserted. */
+  function countingSessionRepo(initial) {
+    const inner = fakeSessionRepo(initial);
+    const counts = { reads: 0, writes: 0 };
+    return {
+      counts,
+      state: inner.state,
+      async getSingleton() {
+        counts.reads += 1;
+        return inner.getSingleton();
+      },
+      async updateAfterOtpVerify(p) {
+        counts.writes += 1;
+        return inner.updateAfterOtpVerify(p);
+      },
+      async updateAfterTokenRefresh(t, e) {
+        counts.writes += 1;
+        return inner.updateAfterTokenRefresh(t, e);
+      },
+      async clearTaxpayerJwtOnly() {
+        counts.writes += 1;
+        return inner.clearTaxpayerJwtOnly();
+      },
+      async clearFullSession() {
+        counts.writes += 1;
+        return inner.clearFullSession();
+      },
+    };
+  }
+
+  const liveSession = () => ({
+    own_gstin_id: 5,
+    taxpayer_access_token: "stored-jwt",
+    token_expires_at_ms: Date.now() + 60 * 60 * 1000,
+    last_otp_verified_at_ms: Date.now() - 60 * 1000,
+    session_expires_at_ms: Date.now() + 20 * 24 * 60 * 60 * 1000,
+  });
+
+  const usecaseFor = (sessionRepo, registration) =>
+    buildGstUsecase(
+      {
+        isEnabled: () => true,
+        gstAuthentication: authFor(sessionRepo, registration),
+      },
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+    );
+
+  const REG = {
+    own_gstin_id: 5,
+    gstin: FAKE_GSTIN_A,
+    portal_username: FAKE_USER_A,
+  };
+
+  it("CONFIGURED: reports the session, code 200, unchanged", async () => {
+    const repo = countingSessionRepo(liveSession());
+    const res = await usecaseFor(repo, REG).getTaxpayerSessionStatus();
+    assert.equal(res.code, 200);
+    assert.equal(res.session.has_taxpayer_token, true);
+    assert.ok(
+      repo.counts.reads >= 1,
+      "the configured path does read the table",
+    );
+  });
+
+  it("NOT CONFIGURED: 503, session null, and the table is NEVER READ", async () => {
+    const repo = countingSessionRepo(liveSession());
+    const res = await usecaseFor(repo, null).getTaxpayerSessionStatus();
+
+    assert.equal(res.code, 503);
+    assert.equal(res.gst_registration_configured, false);
+    assert.equal(res.session, null);
+    assert.equal(repo.counts.reads, 0, "a stale session must not even be read");
+  });
+
+  it("it is READ-ONLY: no clear, no refresh, no write of any kind", async () => {
+    const repo = countingSessionRepo(liveSession());
+    await usecaseFor(repo, null).getTaxpayerSessionStatus();
+    await usecaseFor(repo, REG).getTaxpayerSessionStatus();
+
+    assert.equal(
+      repo.counts.writes,
+      0,
+      "a status read must have no side effect",
+    );
+    assert.equal(
+      repo.state.taxpayer_access_token,
+      "stored-jwt",
+      "the stored session must survive a status request untouched",
+    );
+  });
+
+  it("a mismatched binding is NOT cleared by merely reading status", async () => {
+    // ensureTaxpayerTokenUsableForGstApis() would clear this. The status
+    // endpoint must not call it - clearing somebody's session because a
+    // screen polled is a side effect on a GET.
+    const repo = countingSessionRepo(liveSession());
+    const other = { ...REG, own_gstin_id: 99 };
+    await usecaseFor(repo, other).getTaxpayerSessionStatus();
+    assert.equal(repo.counts.writes, 0);
+    assert.equal(repo.state.taxpayer_access_token, "stored-jwt");
+  });
+
+  it("the 503 message carries no GSTIN and no username", async () => {
+    const repo = countingSessionRepo(liveSession());
+    const res = await usecaseFor(repo, null).getTaxpayerSessionStatus();
+    const body = JSON.stringify(res);
+    assert.equal(
+      body.match(/[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]/),
+      null,
+    );
+    assert.ok(!body.includes(FAKE_USER_A));
+    assert.match(res.msg, /GST_OWN_GSTIN/);
+  });
+});
+
 describe("no production identity in this branch", () => {
   it("this test file uses only obviously synthetic values", () => {
     const self = fs.readFileSync(__filename, "utf8");

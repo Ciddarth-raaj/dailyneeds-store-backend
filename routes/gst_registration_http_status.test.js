@@ -83,7 +83,9 @@ const gstUsecase = {
     return payload && payload.__block ? payload.__block : null;
   },
   async getTaxpayerSessionStatus() {
-    return { code: 200, session: { has_taxpayer_token: false } };
+    return payload && payload.__status
+      ? payload.__status
+      : { code: 200, session: { has_taxpayer_token: false } };
   },
 };
 
@@ -247,5 +249,64 @@ describe("the 502 fallback survives for everything else", () => {
     payload = { code: 429, msg: "rate limited upstream" };
     const res = await call("POST", "/gst/taxpayer/otp/request");
     assert.equal(res.status, 429);
+  });
+});
+
+/**
+ * GET /gst/taxpayer/session is read by the GST Portal screen directly. With no
+ * registration configured it used to answer HTTP 200 describing the stored
+ * session - "active", with a comfortable expiry - while every taxpayer
+ * operation beside it refused. The screen said working, the system said no.
+ */
+describe("GET /gst/taxpayer/session reflects configuration state", () => {
+  it("configured: unchanged HTTP 200 with the session payload", async () => {
+    const session = {
+      has_taxpayer_token: true,
+      token_expires_at_ms: 1790000000000,
+      session_expires_at_ms: 1792000000000,
+      last_otp_verified_at_ms: 1789000000000,
+      revalidation_required_after_ms: 1791500000000,
+      needs_revalidation: false,
+      session_expired: false,
+    };
+    payload = { __status: { code: 200, session } };
+    const res = await call("GET", "/gst/taxpayer/session");
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body, { code: 200, session });
+  });
+
+  it("NOT configured: HTTP 503 with session null", async () => {
+    payload = { __status: { ...NOT_CONFIGURED_BODY, session: null } };
+    const res = await call("GET", "/gst/taxpayer/session");
+    assert.equal(res.status, 503, "the status line must say 503");
+    assert.equal(res.body.code, 503);
+    assert.equal(res.body.gst_registration_configured, false);
+    assert.equal(res.body.session, null);
+  });
+
+  it("no stale session timings are exposed when unconfigured", async () => {
+    payload = { __status: { ...NOT_CONFIGURED_BODY, session: null } };
+    const res = await call("GET", "/gst/taxpayer/session");
+    const body = JSON.stringify(res.body);
+    for (const leak of [
+      "has_taxpayer_token",
+      "token_expires_at_ms",
+      "session_expires_at_ms",
+      "last_otp_verified_at_ms",
+    ]) {
+      assert.ok(!body.includes(leak), `${leak} must not be reported`);
+    }
+  });
+
+  it("the message names variables, never a GSTIN or username", async () => {
+    payload = { __status: { ...NOT_CONFIGURED_BODY, session: null } };
+    const res = await call("GET", "/gst/taxpayer/session");
+    assert.match(res.body.msg, /GST_OWN_GSTIN/);
+    assert.match(res.body.msg, /GST_PORTAL_USERNAME/);
+    assert.equal(
+      res.body.msg.match(/[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]/),
+      null,
+      "no GSTIN-shaped value in the message",
+    );
   });
 });

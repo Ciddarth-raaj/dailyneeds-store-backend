@@ -167,10 +167,29 @@ class GstUsecase {
     return JSON.parse(JSON.stringify(obj));
   }
 
+  /**
+   * The GST Portal screen reads this directly, so it must not describe a
+   * session the rest of the system refuses to use.
+   *
+   * WITH NO REGISTRATION CONFIGURED there is nothing truthful to report. The
+   * stored row may still hold a token with a comfortable expiry, and every
+   * taxpayer operation will nonetheless refuse; showing that row would put
+   * "session active" on screen beside endpoints answering 503. So the table
+   * is NOT read at all in that state - a status endpoint that discloses
+   * unusable session timings is worse than one that says the configuration
+   * is missing.
+   *
+   * IT DOES NOT CALL `ensureTaxpayerTokenUsableForGstApis()`. That method
+   * clears sessions and can trigger a refresh; a read-only status request
+   * must have no side effects. `loadFromDatabase()` only reads.
+   */
   async getTaxpayerSessionStatus() {
     const ga = this._gstAuth();
     if (!ga) {
       return { ...this._noGstAuthResponse(), session: null };
+    }
+    if (!ga.isRegistrationConfigured()) {
+      return { ...this._noRegistrationResponse(), session: null };
     }
     await ga.loadFromDatabase();
     return {

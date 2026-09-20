@@ -42,7 +42,10 @@ class GstRoutes {
     router.get("/taxpayer/session", this.permissions.require(...P.GST_MODULE_SESSION_KEYS), async (req, res) => {
       try {
         const payload = await this.gstUsecase.getTaxpayerSessionStatus();
-        res.json(payload);
+        // A configuration refusal must reach the client as 503, not as a 200
+        // carrying a 503 body - the GST Portal screen routes on the status.
+        // Success is unchanged: HTTP 200 with { code: 200, session }.
+        res.status(payload && payload.code === 503 ? 503 : 200).json(payload);
       } catch (err) {
         respondError(res, err);
       }
