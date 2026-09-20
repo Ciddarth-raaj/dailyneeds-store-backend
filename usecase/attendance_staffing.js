@@ -11,6 +11,24 @@ const {
   locationDelivery,
 } = require("../utils/attendance_dashboard");
 const { PUNCH_SOURCE } = require("../utils/attendance_engine");
+/**
+ * THE COMPLETED-DAY RULE, borrowed rather than restated. `Missing Punch` is
+ * the Missing Attendance Report's verdict and this screen must not invent a
+ * second definition of it - see `buildAttention` below.
+ */
+const { isCompletedAttendanceDate } = require("../utils/attendance_missing");
+/**
+ * WHO IS EXPECTED AT A PARTICULAR OUTLET, and who is expected across all of
+ * them. A roaming employee is a full member of every attendance population on
+ * this screen and of none of the per-outlet ones.
+ */
+const {
+  ROAMING_LABEL,
+  ROAMING_GROUP_KEY,
+  locationGroupKeyOf,
+  locationGroupLabelOf,
+  worksAllLocations,
+} = require("../utils/employee_location");
 const {
   GAP,
   GAP_CLASSES,
@@ -21,6 +39,7 @@ const {
   RECORDED,
   activeDuty,
   classifyExpected,
+  classifyRoaming,
   dutyInterval,
   elapsedSince,
   minuteToClock,
@@ -110,6 +129,9 @@ const BUCKET = Object.freeze({
   EARLY: "EARLY",
   NO_ACTIVE_SHIFT: "NO_ACTIVE_SHIFT",
   NEEDS_ATTENTION: "NEEDS_ATTENTION",
+  // Employees whose duty is not tied to one outlet. Their own bucket because
+  // they are in no outlet's Expected Now and must still be openable.
+  ROAMING: "ROAMING",
 });
 
 const BUCKET_LABEL = Object.freeze({
@@ -127,6 +149,7 @@ const BUCKET_LABEL = Object.freeze({
   EARLY: "Recorded IN before the shift starts",
   NO_ACTIVE_SHIFT: "Recorded IN with no active shift",
   NEEDS_ATTENTION: "Needs attention now",
+  ROAMING: ROAMING_LABEL,
 });
 
 const BUCKETS = Object.freeze(Object.keys(BUCKET));
@@ -392,6 +415,7 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
       business_date: businessDate,
       now_minute: nowParts.minutes,
       rostered: [],
+      roaming: [],
       unknown_expectation: [],
       early: [],
       no_active_shift: [],
@@ -451,6 +475,18 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
     const nowAbsolute = nowParts.minutes;
 
     const rostered = [];
+    /**
+     * ON DUTY NOW, BUT NOT AT ANY ONE OUTLET.
+     *
+     * A SECOND LIST RATHER THAN A FLAG ON THE FIRST, deliberately. Every
+     * per-outlet figure on this screen - Expected Now, Gap, the coverage grid,
+     * the gap classes - is an aggregation over `rostered`, and a flag would
+     * mean each of them had to remember to filter. One that forgot would put a
+     * chain-wide employee back into one branch's staffing gap, which is the
+     * exact fault this exists to remove. Being in a different list, they cannot
+     * be counted by an aggregation that does not name them.
+     */
+    const roaming = [];
     const unknownExpectation = [];
     const early = [];
     const noActiveShift = [];
@@ -583,6 +619,46 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
         locationsAvailable: ctx.locations_available,
       });
 
+      /**
+       * A ROAMING EMPLOYEE IS CLASSIFIED ON STATE ALONE and allocated to no
+       * outlet. `store_id` is still theirs and still travels on the row - it
+       * is the branch that owns the record and the reason a branch manager can
+       * see them at all - but it is NOT an expectation, so it is not compared
+       * with where they punched and their shift is not one branch's to cover.
+       */
+      if (worksAllLocations(employee)) {
+        roaming.push(redactPunchOutlet({
+          ...employeeRow(employee),
+          attendance_date: duty.attendance_date,
+          work_shift_id: duty.day.work_shift_id === null ? null : Number(duty.day.work_shift_id),
+          interval: shiftInterval(duty.interval, offsetOf(duty.attendance_date)),
+          shift_code: duty.day.shift_code || duty.day.shift_name || null,
+          scheduled_start: minuteToClock(duty.interval.start),
+          scheduled_end: minuteToClock(duty.interval.end),
+          recorded_state: observed.state,
+          recorded_since: minuteToClock(observed.since_minute),
+          recorded_minutes: elapsedSince(observed.since_minute, duty.now_minute),
+          minutes_since_start: elapsedSince(duty.interval.start, duty.now_minute),
+          punch_outlet_id: observed.punch_outlet_id,
+          punch_outlet_name: observed.punch_outlet_name,
+          location_known: observed.location_known,
+          location_basis: observed.location_basis,
+          session_date: observed.attendance_date,
+          works_all_locations: true,
+          gap_class: classifyRoaming({
+            recorded_state: observed.state,
+            ambiguous_session: observed.ambiguous,
+          }),
+          gap_label: GAP_LABEL[
+            classifyRoaming({
+              recorded_state: observed.state,
+              ambiguous_session: observed.ambiguous,
+            })
+          ],
+        }));
+        return;
+      }
+
       const expectedOutletId =
         employee.store_id === null || employee.store_id === undefined
           ? null
@@ -634,6 +710,7 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
     const attention = await buildAttention({
       byEmployee: ctx.byEmployee,
       rostered,
+      roaming,
       unknownExpectation,
       businessDate,
       previousDate,
@@ -643,6 +720,7 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
     return {
       ...base,
       rostered,
+      roaming,
       unknown_expectation: unknownExpectation,
       early,
       no_active_shift: noActiveShift,
@@ -672,6 +750,8 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
     const snap = await buildSnapshot(input);
 
     const totals = reconcileGap(snap.rostered);
+    // Their own tally, never added into `totals` and never into `coverage`.
+    const roamingTotals = reconcileGap(snap.roaming);
     const coverage = buildCoverage(snap.rostered, snap.delivery);
     const next = buildNextHour(snap);
 
@@ -725,6 +805,15 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
       attention_preview: preview(snap.attention),
       attention_total: snap.attention.length,
       attention_preview_truncated: snap.attention.length > PREVIEW_LIMIT,
+      /**
+       * THE SAME PREVIEW, GROUPED STORE-WISE - not a second, longer list.
+       *
+       * It is built from `attention_preview` and not from the whole list, so
+       * the group counts describe exactly the rows that travel and the panel
+       * cannot show a heading with a count it has no rows for. `See all` still
+       * goes to the drilldown, which pages the full population.
+       */
+      attention_groups: groupAttentionByLocation(preview(snap.attention)),
 
       next_hour: next,
 
@@ -736,6 +825,32 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
         cross_location_arrivals: preview(crossLocation),
         cross_location_total: crossLocation.length,
         location_unverified_total: unverifiedLocation.length,
+      },
+      /**
+       * ON DUTY NOW, ACROSS ALL LOCATIONS - reported, and reported APART.
+       *
+       * These employees are counted in NO outlet's Expected Now and in no
+       * outlet's Gap, which is what stops one branch carrying a permanent
+       * shortfall for somebody whose work is the whole chain. They are not
+       * hidden either: a headcount that shrank for an invisible reason is
+       * worse than one that says why, so the figure and the rows are here
+       * under their own name.
+       */
+      roaming: {
+        label: ROAMING_LABEL,
+        expected_now: roamingTotals.expected,
+        recorded_in: roamingTotals.recorded_in_at_expected,
+        gap: roamingTotals.gap,
+        gap_by_class: roamingTotals.by_class,
+        reconciles: roamingTotals.reconciles,
+        preview: preview(orderForDisplay(snap.roaming)),
+        total: snap.roaming.length,
+        preview_truncated: snap.roaming.length > PREVIEW_LIMIT,
+        note:
+          "Employees whose duty is not tied to one outlet. They are active, rostered and expected " +
+          "to punch, and they are counted in no single outlet's Expected Now or Gap - a shift " +
+          "worked across the chain is not one branch's to cover. Recorded IN at any location " +
+          "counts as recorded IN for them.",
       },
       unknown_expectation: preview(snap.unknown_expectation),
       unknown_expectation_total: snap.unknown_expectation.length,
@@ -755,6 +870,14 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
           "Applicable employees whose assigned duty interval contains the as-of time: shift start <= now < shift end. The interval is the shift's own in-time to out-time - not normal hours, and not reduced by a break allowance.",
         recorded_in:
           "Expected employees whose latest interpretable punch state as of now is an IN, AT THEIR EXPECTED LOCATION. An IN whose punch location cannot be established is counted separately and credited to no outlet. Recorded IN does NOT mean actively working or available at a counter.",
+        roaming:
+          "Employees marked All Locations / Roaming on the employee master. They are ordinary " +
+          "active employees - rostered, expected to punch, present in attendance, in the Missing " +
+          "Attendance Report and in payroll - but their duty is not tied to one outlet, so they " +
+          "add to no single outlet's Expected Now and can create no single outlet's Gap. They " +
+          "keep their owning branch in store_id, which is what authorization scope reads; the " +
+          "flag changes only which staffing figure they are counted into. It is set per employee " +
+          "and is never inferred from a designation.",
         gap:
           "Expected Now minus Recorded IN at the expected location, broken into mutually exclusive reasons. It is 'not recorded IN against schedule' - not absence, and not a confirmed shortage.",
         next_hour:
@@ -895,6 +1018,8 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
         return byName(snap.no_active_shift);
       case BUCKET.NEEDS_ATTENTION:
         return snap.attention;
+      case BUCKET.ROAMING:
+        return orderForDisplay(snap.roaming);
       default:
         return [];
     }
@@ -940,6 +1065,12 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
         ? null
         : Number(employee.designation_id),
     designation_name: employee.designation_name || null,
+    // Carried on EVERY row, so the store-wise grouping and every consumer can
+    // tell a chain-wide employee from one of the branch's own without going
+    // back to the employee master - and so a row that reaches a list by a path
+    // nobody thought about is still grouped correctly rather than filed under
+    // whichever branch happens to own the record.
+    works_all_locations: worksAllLocations(employee),
   });
 
   /**
@@ -1133,13 +1264,13 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
   const buildAttention = async ({
     byEmployee,
     rostered,
+    roaming,
     unknownExpectation,
     businessDate,
     previousDate,
     now,
   }) => {
     const items = [];
-    const rosteredById = new Map(rostered.map((r) => [String(r.employee_id), r]));
 
     unknownExpectation.forEach((r) => {
       items.push({
@@ -1153,7 +1284,19 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
       });
     });
 
-    rostered.forEach((r) => {
+    /**
+     * ROAMING EMPLOYEES ARE INCLUDED HERE, and only here.
+     *
+     * They are in no outlet's Expected or Gap, which is the whole point of the
+     * flag - but "not one branch's shortfall" is not "nobody's problem". A
+     * chain-wide employee who has not punched after their shift started is
+     * exactly as actionable as anybody else, so they appear on this list under
+     * their own heading. What cannot appear for them is a LOCATION verdict:
+     * `classifyRoaming` never produces IN_ELSEWHERE, IN_LOCATION_UNKNOWN or
+     * EXPECTED_LOCATION_UNKNOWN, so the three location reasons below simply
+     * never match one of their rows.
+     */
+    [...rostered, ...roaming].forEach((r) => {
       const key =
         r.gap_class === GAP.NO_CHECK_IN
           ? ATTENTION.NO_CHECK_IN
@@ -1174,6 +1317,7 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
         outlet_name: r.outlet_name,
         designation_id: r.designation_id,
         designation_name: r.designation_name,
+        works_all_locations: r.works_all_locations === true,
         attendance_date: r.attendance_date,
         reason_key: key,
         reason: ATTENTION_LABEL[key],
@@ -1216,14 +1360,47 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
           dateOf.set(String(day.ot_request_id), { employee, date, key: ATTENTION.OT_PENDING });
         }
 
-        const issue = dashboardIssueKey(day, { day_closed: closed });
+        /**
+         * MISSING PUNCH IS A VERDICT ON A COMPLETED DAY, AND TODAY IS NEVER
+         * ONE - the rule the Missing Attendance Report already owns, called
+         * rather than restated.
+         *
+         * WHAT WENT WRONG. This screen had its own completeness test:
+         * `isDayClosed`, the per-employee cutoff. That test answers a
+         * different question - "can this attendance date still take punches" -
+         * and the two answers are not the same date. The report's rule is
+         * `isCompletedAttendanceDate`: strictly before TODAY's IST business
+         * date, full stop. An employee who is standing at the counter having
+         * punched IN and not yet OUT has exactly one punch, an odd count, and
+         * the engine calls that MISSING_PUNCH because from its point of view
+         * the pair is incomplete. Labelling that "Missing Punch" at one in the
+         * afternoon tells a manager to chase a correction for a day that has
+         * not happened yet, and tells the employee their attendance is broken
+         * while they are still working it.
+         *
+         * BOTH GATES ARE APPLIED, and they are not redundant. The completed-
+         * date rule is the FLOOR that nothing may lower: today and every
+         * future date are out whatever any cutoff says, and a caller cannot
+         * widen it. `isDayClosed` stays in front of it because a completed
+         * date can still be open for one employee whose night shift claims
+         * this morning, and reporting that person's running session as a
+         * missing punch is the same error one day earlier.
+         *
+         * WHAT THE CURRENT DAY SHOWS INSTEAD. Nothing is invented for it:
+         * today's live states already exist above and are the honest ones -
+         * "No check-in after shift start" for somebody whose shift has begun
+         * and who has not punched, and no item at all for somebody recorded IN
+         * with a pair still open, because that person is simply at work.
+         */
+        const completed = isCompletedAttendanceDate(date, businessDate);
+        const issue = dashboardIssueKey(day, { day_closed: closed && completed });
         if (issue === ISSUE_KEY.MISSING_PUNCH) {
           items.push({
             ...employeeRow(employee),
             attendance_date: date,
             reason_key: ATTENTION.MISSING_PUNCH,
             reason: ATTENTION_LABEL.MISSING_PUNCH,
-            detail: `An odd number of punches on a closed attendance day (${date})`,
+            detail: `An odd number of punches on the completed attendance day ${date}`,
             target: ATTENTION_TARGET.MISSING_PUNCH,
             age_minutes: null,
             owner_name: null,
@@ -1274,6 +1451,62 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
         a.employee_id - b.employee_id
     );
   };
+
+  /**
+   * THE SAME ATTENTION LIST, GROUPED STORE-WISE.
+   *
+   * WHY. A flat list of names across eight branches is not a work list: the
+   * person reading it is responsible for one or two of them, and the first
+   * thing they do is scan for their own. So the rows are grouped by the
+   * location the employee belongs to, each group headed by its name and its
+   * count.
+   *
+   * IT IS A REGROUPING AND NOTHING ELSE. The same items, in the same order
+   * within each group, from the same server-side computation - so the group
+   * counts add up to `attention_total` exactly. The filters and the search
+   * were applied to the POPULATION long before this, in SQL, so grouping
+   * cannot widen what a viewer sees: a location they may not see has no
+   * employees in the list and therefore no group.
+   *
+   * EACH EMPLOYEE APPEARS UNDER EXACTLY ONE HEADING. `locationGroupKeyOf` is
+   * a total function of one row - roaming first, otherwise `store_id`,
+   * otherwise `none` - so no row can land in two groups and none can be
+   * dropped for want of one. An employee with SEVERAL items (a missing punch
+   * yesterday and no check-in today) keeps both, under that one heading: those
+   * are two pieces of work, and collapsing them would hide one.
+   *
+   * THE ROAMING GROUP IS LAST AND IS NOT AN OUTLET. It carries no `store_id`,
+   * so nothing downstream can add its count into a branch's figures.
+   */
+  function groupAttentionByLocation(items) {
+    const groups = new Map();
+    (items || []).forEach((item) => {
+      const key = locationGroupKeyOf(item);
+      if (!groups.has(key)) {
+        groups.set(key, {
+          group_key: key,
+          store_id:
+            key === ROAMING_GROUP_KEY || key === "none" ? null : Number(key),
+          outlet_name: locationGroupLabelOf(item),
+          works_all_locations: key === ROAMING_GROUP_KEY,
+          items: [],
+        });
+      }
+      groups.get(key).items.push(item);
+    });
+
+    return [...groups.values()]
+      .map((g) => ({ ...g, count: g.items.length }))
+      .sort(
+        (a, b) =>
+          // Roaming last: it is a heading about everywhere, and reading it
+          // between two branch names invites it being taken for one.
+          a.works_all_locations - b.works_all_locations ||
+          // Then "no outlet on record", which is a data fault rather than a place.
+          (a.store_id === null) - (b.store_id === null) ||
+          String(a.outlet_name).localeCompare(String(b.outlet_name))
+      );
+  }
 
   /** Minutes a request has been waiting, from the request's own created_at. */
   function pendingMinutes(createdAt, now) {

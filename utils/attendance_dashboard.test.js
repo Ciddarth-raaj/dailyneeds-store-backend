@@ -541,3 +541,87 @@ describe("time parsing", () => {
     assert.equal(timeMinutes("25:00"), null);
   });
 });
+
+/* ---------------------------------------- the completed-day floor on a verdict */
+
+/**
+ * `dashboardIssueKey` HAS TWO GATES, AND THE SECOND IS A FLOOR.
+ *
+ * `day_closed` answers a per-employee question about a cutoff: can this
+ * attendance date still take punches. "Is this day finished" is blunter, and
+ * `utils/attendance_missing.js` already owns the answer that the Missing
+ * Attendance Report and the 06:00 Telegram job both use - strictly before
+ * today's IST business date. Asserted here against that module's own helper,
+ * so the two cannot drift apart unnoticed.
+ */
+describe("MISSING_PUNCH and ABSENT are withheld from the current date", () => {
+  const { isCompletedAttendanceDate } = require("./attendance_missing");
+  const missingDay = { status: "REVIEW_REQUIRED", review_reasons: ["MISSING_PUNCH"], punch_count: 1 };
+  const absentDay = { status: "ABSENT", review_reasons: [], punch_count: 0 };
+  const TODAY = "2026-09-20";
+
+  it("withholds both on today EVEN IF the caller asserts the day is closed", () => {
+    [missingDay, absentDay].forEach((day) => {
+      assert.equal(
+        dashboardIssueKey(day, {
+          day_closed: true,
+          attendance_date: TODAY,
+          today: TODAY,
+        }),
+        null
+      );
+    });
+  });
+
+  it("withholds them on a FUTURE date as well", () => {
+    assert.equal(
+      dashboardIssueKey(missingDay, {
+        day_closed: true,
+        attendance_date: "2026-09-21",
+        today: TODAY,
+      }),
+      null
+    );
+  });
+
+  it("reports them on a completed date, as it always did", () => {
+    assert.equal(
+      dashboardIssueKey(missingDay, {
+        day_closed: true,
+        attendance_date: "2026-09-19",
+        today: TODAY,
+      }),
+      ISSUE_KEY.MISSING_PUNCH
+    );
+  });
+
+  it("agrees date for date with the Missing Attendance Report's own rule", () => {
+    ["2026-09-18", "2026-09-19", "2026-09-20", "2026-09-21"].forEach((date) => {
+      const reported =
+        dashboardIssueKey(missingDay, { day_closed: true, attendance_date: date, today: TODAY }) !==
+        null;
+      assert.equal(reported, isCompletedAttendanceDate(date, TODAY), date);
+    });
+  });
+
+  it("a completed date that is still OPEN for this employee is withheld too", () => {
+    // A night shift's date can be completed by the calendar and still be
+    // taking punches this morning. Both gates must pass.
+    assert.equal(
+      dashboardIssueKey(missingDay, {
+        day_closed: false,
+        attendance_date: "2026-09-19",
+        today: TODAY,
+      }),
+      null
+    );
+  });
+
+  it("omitting the two new arguments leaves the previous behaviour exactly as it was", () => {
+    assert.equal(
+      dashboardIssueKey(missingDay, { day_closed: true }),
+      ISSUE_KEY.MISSING_PUNCH
+    );
+    assert.equal(dashboardIssueKey(missingDay, { day_closed: false }), null);
+  });
+});

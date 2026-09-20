@@ -454,6 +454,40 @@ function classifyExpected({
 }
 
 /**
+ * The same verdict for somebody whose duty is NOT TIED TO ONE OUTLET.
+ *
+ * WHY IT IS A SEPARATE FUNCTION AND NOT A FLAG ON THE ONE ABOVE. Every
+ * location branch in `classifyExpected` asks the same question - "is this
+ * person where their schedule says they should be" - and for a roaming
+ * employee that question has no subject. There IS no expected outlet, so
+ * EXPECTED_LOCATION_UNKNOWN would be a fault report about a value that is
+ * absent ON PURPOSE, IN_ELSEWHERE would flag every ordinary visit to a branch
+ * as needing verification, and IN_LOCATION_UNKNOWN would demand a terminal
+ * mapping that settles nothing. Reusing the fixed-location classifier with a
+ * null expectation is exactly how a deliberate absence becomes a permanent
+ * alarm.
+ *
+ * SO ONLY THE STATE DECIDES. Recorded IN anywhere at all is covered: for this
+ * employee, anywhere IS the expected location. NONE, OUT and an
+ * unestablishable session keep the same three meanings they have everywhere
+ * else, so a roaming employee who has not punched is still visible as one -
+ * being untied to a branch is not an exemption from turning up.
+ *
+ * NOTHING HERE IS ALLOCATED TO AN OUTLET. These rows are counted in their own
+ * total and never in any location's Expected or Gap; that separation is the
+ * caller's, and `usecase/attendance_staffing.js` keeps the two populations in
+ * two lists rather than one list with a flag, so no aggregation can include
+ * them by forgetting to filter.
+ */
+function classifyRoaming({ recorded_state, ambiguous_session = false }) {
+  if (ambiguous_session) return GAP.INDETERMINATE;
+  if (recorded_state === RECORDED.NONE) return GAP.NO_CHECK_IN;
+  if (recorded_state === RECORDED.OUT) return GAP.RECORDED_OUT;
+  if (recorded_state !== RECORDED.IN) return GAP.INDETERMINATE;
+  return GAP.COVERED;
+}
+
+/**
  * Tally a classified expected population and CHECK that it adds up.
  *
  * `reconciles` is returned rather than assumed: a breakdown that does not sum
@@ -585,6 +619,7 @@ module.exports = {
   IN_WITHOUT_LOCATION_CREDIT,
   VERIFICATION_CLASSES,
   classifyExpected,
+  classifyRoaming,
   reconcileGap,
   upcomingTransitions,
   minuteToClock,
