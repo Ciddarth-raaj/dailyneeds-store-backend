@@ -23,6 +23,9 @@
  * period before the device's latest punch needs an explicit confirmation).
  */
 
+const { withConnection, summarise, readThresholds } = require("../utils/biomax_connection");
+const { checkReceiverHealth } = require("../utils/biomax_receiver_health");
+
 const CLOUD_ID_RE = /^[A-Za-z0-9]{6,32}$/;
 const DATETIME_RE = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/;
 
@@ -58,14 +61,53 @@ function normaliseDateTime(value, name) {
 const before = (a, b) => a < b;
 
 class BiomaxDeviceUsecase {
-  constructor(deviceRepo) {
+  constructor(deviceRepo, deps = {}) {
     this.deviceRepo = deviceRepo;
+    // Injectable so the connection rule can be tested at a fixed instant and
+    // the receiver probe without a receiver.
+    this.now = deps.now || (() => Date.now());
+    this.receiverHealthCheck = deps.checkReceiverHealth || checkReceiverHealth;
+    this.env = deps.env || process.env;
   }
 
   /* ---------------------------------------------------------------- reads */
 
-  list() {
-    return this.deviceRepo.list();
+  /**
+   * Every device, each carrying BOTH states: `status` (the administrative
+   * ACTIVE/INACTIVE the repository derives from the open location period)
+   * and `connection_status` (whether the terminal is actually reaching
+   * DNDS). The two are computed from different facts and never overwrite
+   * one another - an ACTIVE device that stopped polling reads
+   * ACTIVE + OFFLINE, which is precisely the row somebody must act on.
+   *
+   * The timeout rule lives here and only here; the screen renders the word
+   * the server chose.
+   */
+  async list() {
+    const rows = await this.deviceRepo.list();
+    const options = { now: this.now(), env: this.env };
+    return rows.map((row) => withConnection(row, options));
+  }
+
+  /**
+   * The Devices screen header: the receiver's own health plus a count of
+   * each connection state.
+   *
+   * The probe is awaited alongside the device list but its failure is
+   * contained: `checkReceiverHealth` resolves to UNAVAILABLE rather than
+   * rejecting, so the counts - which come from last_seen_at in our own
+   * database - are unaffected by whether the receiver answered.
+   */
+  async receiverHealth() {
+    const [devices, receiver] = await Promise.all([
+      this.list(),
+      this.receiverHealthCheck({ env: this.env }),
+    ]);
+    return {
+      receiver,
+      devices: summarise(devices),
+      thresholds: readThresholds(this.env),
+    };
   }
 
   async details(biomax_device_id) {
@@ -78,7 +120,7 @@ class BiomaxDeviceUsecase {
     ]);
     const current = assignments.find((a) => a.effective_to === null) || null;
     return {
-      ...device,
+      ...withConnection(device, { now: this.now(), env: this.env }),
       status: current ? "ACTIVE" : "INACTIVE",
       current_assignment: current,
       assignments,
@@ -338,7 +380,7 @@ function parseJson(v) {
   }
 }
 
-module.exports = (deviceRepo) => new BiomaxDeviceUsecase(deviceRepo);
+module.exports = (deviceRepo, deps) => new BiomaxDeviceUsecase(deviceRepo, deps);
 module.exports.BiomaxDeviceUsecase = BiomaxDeviceUsecase;
 module.exports.normaliseDateTime = normaliseDateTime;
 module.exports.CLOUD_ID_RE = CLOUD_ID_RE;
