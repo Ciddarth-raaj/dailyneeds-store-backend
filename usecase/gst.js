@@ -1,4 +1,7 @@
 const logger = require("../utils/logger");
+const {
+  NOT_CONFIGURED_MSG: GST_REGISTRATION_NOT_CONFIGURED_MSG,
+} = require("../services/gst_authentication");
 
 /** Sandbox GSTIN search: wait after HTTP 429 before retrying (B2B vendor resolution). */
 const SANDBOX_GSTIN_SEARCH_429_WAIT_MS = 60 * 1000;
@@ -146,6 +149,20 @@ class GstUsecase {
     };
   }
 
+  /**
+   * Phase 1A: the GSTIN and portal username are configuration, so "no
+   * registration" is a distinct, reportable state from "no GST auth service".
+   * Same 503 shape as every other GST configuration refusal - the message
+   * names the environment variables and never a value.
+   */
+  _noRegistrationResponse() {
+    return {
+      code: 503,
+      gst_registration_configured: false,
+      msg: GST_REGISTRATION_NOT_CONFIGURED_MSG,
+    };
+  }
+
   _cloneJson(obj) {
     return JSON.parse(JSON.stringify(obj));
   }
@@ -170,6 +187,9 @@ class GstUsecase {
     if (!ga) {
       return this._noGstAuthResponse();
     }
+    if (!ga.isRegistrationConfigured()) {
+      return this._noRegistrationResponse();
+    }
     await ga.loadFromDatabase();
     const sessionBefore = ga.getTaxpayerSessionStatusPayload();
     const res = await ga.requestTaxpayerOtp();
@@ -191,6 +211,9 @@ class GstUsecase {
     const ga = this._gstAuth();
     if (!ga) {
       return this._noGstAuthResponse();
+    }
+    if (!ga.isRegistrationConfigured()) {
+      return this._noRegistrationResponse();
     }
     const res = await ga.verifyTaxpayerOtp(otp);
     await ga.loadFromDatabase();

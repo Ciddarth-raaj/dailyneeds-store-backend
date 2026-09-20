@@ -12,6 +12,15 @@ const FALLBACK_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 class SandboxService {
   constructor(options = {}) {
     this.gstTaxpayerSessionRepo = options.gstTaxpayerSessionRepo || null;
+    /**
+     * Supplies the configured GST registration to GSTAuthentication. The
+     * GSTIN and portal username used to be constants in that file; they are
+     * configuration now (see services/gst_own_gstin_bootstrap.js).
+     */
+    this.gstRegistrationProvider =
+      typeof options.gstRegistrationProvider === "function"
+        ? options.gstRegistrationProvider
+        : () => null;
     this.apiKey = options.apiKey ?? process.env.SANDBOX_API_KEY;
     this.apiSecret = options.apiSecret ?? process.env.SANDBOX_API_SECRET;
     this.baseUrl = (
@@ -36,6 +45,7 @@ class SandboxService {
           gstApiVersion: this.gstApiVersion,
           getSandboxAccessToken: () => this.getAccessToken(),
           sessionRepo: this.gstTaxpayerSessionRepo,
+          registrationProvider: () => this.gstRegistrationProvider(),
         })
       : null;
   }

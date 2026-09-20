@@ -3,12 +3,22 @@ const jwt = require("jsonwebtoken");
 const logger = require("../utils/logger");
 
 /**
- * HARDCODED GST portal credentials for Sandbox taxpayer OTP + session APIs.
- * Replace with the GST portal username (typically email) and 15-char GSTIN.
+ * The GST portal username and GSTIN used by the Sandbox taxpayer OTP and
+ * session APIs are CONFIGURATION, not constants.
+ *
+ * They were two string literals here until Phase 1A. A company identifier in
+ * source is a company identifier in git history forever, and changing the
+ * registration meant a code change and a deploy. They now come from
+ * `gst_own_gstin`, populated at boot from the environment by
+ * `services/gst_own_gstin_bootstrap.js`.
+ *
+ * `registrationProvider` is how this service reads them: a function returning
+ * the active registration, or null when none is configured. Null is not an
+ * edge case to paper over - it is a refusal, surfaced as the same 428/503
+ * shape every other GST configuration failure uses.
+ *
  * @see https://developer.sandbox.co.in/recipes/gst/authentication/generate_tax_payer_session
  */
-const SANDBOX_GST_TAXPAYER_USERNAME = "DAILY567";
-const SANDBOX_GST_TAXPAYER_GSTIN = "34AAJFD4987C1ZD";
 
 const MS_DAY = 24 * 60 * 60 * 1000;
 /** GST portal session: OTP must be repeated after this window (29 days from last verify). */
@@ -20,6 +30,10 @@ const RENEWAL_LEAD_MS = 15 * 60 * 1000;
 
 const REQUIRES_OTP_CODE = 428;
 
+/** Named variables and a shape, never a value. */
+const NOT_CONFIGURED_MSG =
+  "GST taxpayer registration is not configured on this server (set GST_OWN_GSTIN and GST_PORTAL_USERNAME)";
+
 class GSTAuthentication {
   /**
    * @param {{
@@ -27,7 +41,8 @@ class GSTAuthentication {
    *   apiKey: string,
    *   gstApiVersion: string,
    *   getSandboxAccessToken: () => Promise<string>,
-   *   sessionRepo: object
+   *   sessionRepo: object,
+   *   registrationProvider?: () => ({ own_gstin_id: number, gstin: string, portal_username: string } | null)
    * }} deps
    */
   constructor(deps) {
@@ -36,19 +51,49 @@ class GSTAuthentication {
     this.gstApiVersion = deps.gstApiVersion;
     this.getSandboxAccessToken = deps.getSandboxAccessToken;
     this.sessionRepo = deps.sessionRepo;
+    this.registrationProvider =
+      typeof deps.registrationProvider === "function"
+        ? deps.registrationProvider
+        : () => null;
     this._taxpayerToken = null;
     this._taxpayerTokenExpiresAtMs = null;
     this._lastOtpVerifiedAtMs = null;
     this._sessionExpiresAtMs = null;
+    /** gst_own_gstin.own_gstin_id the stored JWT was minted for; null = unbound. */
+    this._sessionOwnGstinId = null;
     this._refreshPromise = null;
   }
 
-  getHardcodedUsername() {
-    return SANDBOX_GST_TAXPAYER_USERNAME;
+  /** The configured registration, or null. Never throws. */
+  getRegistration() {
+    try {
+      return this.registrationProvider() || null;
+    } catch (_) {
+      return null;
+    }
   }
 
-  getHardcodedGstin() {
-    return SANDBOX_GST_TAXPAYER_GSTIN;
+  isRegistrationConfigured() {
+    return this.getRegistration() !== null;
+  }
+
+  /**
+   * The registration, or an Error carrying the same `gstOtpPayload` shape the
+   * OTP path already uses - so an unconfigured server refuses through the
+   * channel every caller already handles, rather than a new one.
+   */
+  _requireRegistration() {
+    const reg = this.getRegistration();
+    if (!reg) {
+      const err = new Error(NOT_CONFIGURED_MSG);
+      err.gstOtpPayload = {
+        code: 503,
+        gst_registration_configured: false,
+        msg: NOT_CONFIGURED_MSG,
+      };
+      throw err;
+    }
+    return reg;
   }
 
   _otpHeaders(sandboxJwt) {
@@ -123,6 +168,8 @@ class GSTAuthentication {
 
   async loadFromDatabase() {
     const row = await this.sessionRepo.getSingleton();
+    this._sessionOwnGstinId =
+      row.own_gstin_id != null ? Number(row.own_gstin_id) : null;
     this._taxpayerToken = row.taxpayer_access_token || null;
     this._taxpayerTokenExpiresAtMs =
       row.token_expires_at_ms != null ? Number(row.token_expires_at_ms) : null;
@@ -207,8 +254,52 @@ class GSTAuthentication {
    * @returns {Promise<null | object>} null if taxpayer JWT can be used for GST taxpayer APIs.
    */
   async ensureTaxpayerTokenUsableForGstApis() {
+    const registration = this.getRegistration();
+    if (!registration) {
+      return {
+        code: 503,
+        gst_registration_configured: false,
+        msg: NOT_CONFIGURED_MSG,
+      };
+    }
+
     await this.loadFromDatabase();
     const now = Date.now();
+
+    /**
+     * A TOKEN BELONGS TO THE REGISTRATION IT WAS MINTED FOR.
+     *
+     * Before the GSTIN was configuration this could not be wrong. Now it can:
+     * change GST_OWN_GSTIN, restart, and the stored JWT is a credential for a
+     * registration nobody is filing for any more. Presenting it would be
+     * acting as the wrong taxpayer, so it is cleared and OTP is required.
+     *
+     * A NULL binding is treated the same way, and that is what makes the
+     * migration safe - the existing production row carries NULL, so it is
+     * refused once rather than assumed to belong to whoever is configured
+     * today. One OTP, and the session is bound from then on.
+     */
+    if (
+      this._taxpayerToken &&
+      this._sessionOwnGstinId !== registration.own_gstin_id
+    ) {
+      const wasUnbound = this._sessionOwnGstinId == null;
+      await this._clearFullSession();
+      logger.Log({
+        level: logger.LEVEL.WARN,
+        component: "SERVICE.GST_AUTHENTICATION",
+        code: "SERVICE.GST_AUTHENTICATION.GSTIN-BINDING-MISMATCH",
+        description: wasUnbound
+          ? "Stored taxpayer session is not bound to a GST registration; cleared and OTP required."
+          : "Stored taxpayer session belongs to a different GST registration; cleared and OTP required.",
+        category: "",
+        ref: {},
+      });
+      return this.buildRequiresOtpError({
+        gstin_binding_mismatch: true,
+        msg: "The stored GST taxpayer session does not belong to the configured GST registration. Run request OTP + verify.",
+      });
+    }
 
     if (this.isSessionWallExpired()) {
       await this._clearFullSession();
@@ -292,11 +383,15 @@ class GSTAuthentication {
     this._lastOtpVerifiedAtMs = now;
     this._sessionExpiresAtMs = sessionExpMs;
 
+    const reg = this.getRegistration();
+    this._sessionOwnGstinId = reg ? reg.own_gstin_id : null;
+
     await this.sessionRepo.updateAfterOtpVerify({
       taxpayerAccessToken: token,
       tokenExpiresAtMs: tokenExpMs,
       lastOtpVerifiedAtMs: now,
       sessionExpiresAtMs: sessionExpMs,
+      ownGstinId: this._sessionOwnGstinId,
     });
   }
 
@@ -317,6 +412,7 @@ class GSTAuthentication {
   }
 
   async _clearFullSession() {
+    this._sessionOwnGstinId = null;
     this._taxpayerToken = null;
     this._taxpayerTokenExpiresAtMs = null;
     this._lastOtpVerifiedAtMs = null;
@@ -381,13 +477,14 @@ class GSTAuthentication {
   }
 
   async requestTaxpayerOtp() {
+    const registration = this._requireRegistration();
     const sandboxJwt = await this.getSandboxAccessToken();
     const url = `${this.baseUrl}/gst/compliance/tax-payer/otp`;
     const res = await axios.post(
       url,
       {
-        username: SANDBOX_GST_TAXPAYER_USERNAME,
-        gstin: SANDBOX_GST_TAXPAYER_GSTIN,
+        username: registration.portal_username,
+        gstin: registration.gstin,
       },
       {
         headers: this._otpHeaders(sandboxJwt),
@@ -399,14 +496,15 @@ class GSTAuthentication {
   }
 
   async verifyTaxpayerOtp(otp) {
+    const registration = this._requireRegistration();
     const sandboxJwt = await this.getSandboxAccessToken();
     const q = encodeURIComponent(String(otp).trim());
     const url = `${this.baseUrl}/gst/compliance/tax-payer/otp/verify?otp=${q}`;
     const res = await axios.post(
       url,
       {
-        username: SANDBOX_GST_TAXPAYER_USERNAME,
-        gstin: SANDBOX_GST_TAXPAYER_GSTIN,
+        username: registration.portal_username,
+        gstin: registration.gstin,
       },
       {
         headers: this._otpHeaders(sandboxJwt),
@@ -558,9 +656,8 @@ class GSTAuthentication {
 }
 
 module.exports = GSTAuthentication;
-module.exports.SANDBOX_GST_TAXPAYER_USERNAME = SANDBOX_GST_TAXPAYER_USERNAME;
-module.exports.SANDBOX_GST_TAXPAYER_GSTIN = SANDBOX_GST_TAXPAYER_GSTIN;
 module.exports.RENEWAL_LEAD_MS = RENEWAL_LEAD_MS;
 module.exports.REVALIDATION_REQUIRED_AFTER_MS = REVALIDATION_REQUIRED_AFTER_MS;
 module.exports.SESSION_MAX_MS = SESSION_MAX_MS;
 module.exports.REQUIRES_OTP_CODE = REQUIRES_OTP_CODE;
+module.exports.NOT_CONFIGURED_MSG = NOT_CONFIGURED_MSG;

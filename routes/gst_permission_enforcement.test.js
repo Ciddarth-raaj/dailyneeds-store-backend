@@ -469,7 +469,8 @@ const ENDPOINTS = [
   {
     m: "POST",
     u: "/gst/search",
-    body: { gstin: "34AAJFD4987C1ZD" },
+    // Synthetic and valid-shaped; never a real registration.
+    body: { gstin: "29ABCDE1234F1Z5" },
     allow: ["vendors"],
   },
 
