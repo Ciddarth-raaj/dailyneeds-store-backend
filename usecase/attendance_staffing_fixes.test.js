@@ -612,11 +612,20 @@ describe("today cannot show Missing Punch while the day is still running", () =>
   });
 
   /**
-   * THE OTHER HALF: the verdict is not abolished, it is DEFERRED. A completed
-   * date with an odd count is exactly what the Missing Attendance Report
-   * reports and exactly what this panel must keep showing.
+   * THE VERDICT IS NOT ABOLISHED - IT BELONGS TO ANOTHER SCREEN.
+   *
+   * An odd punch count on a FINISHED day is a real attendance exception, and
+   * the Missing Attendance Report exists for exactly it: it reports it and the
+   * 06:00 job chases it. What must not happen is this live staffing board
+   * ALSO carrying it, which made a reader decide, row by row, which of two
+   * workflows a row belonged to. A date chip made that legible; it did not
+   * make it one workflow.
+   *
+   * So the assertion is the absence, and it is checked on the whole list and
+   * on the grouped one - a row that slipped into a group without being in the
+   * preview would be invisible to a test that only read one of them.
    */
-  it("still reports a Missing Punch on a COMPLETED earlier date", async () => {
+  it("does NOT put a completed earlier date's Missing Punch on this panel", async () => {
     const yesterday = "2026-09-11";
     const { uc } = build({
       employees: [employee(1)],
@@ -624,12 +633,19 @@ describe("today cannot show Missing Punch while the day is still running", () =>
       rawPunches: [punch(1, `${yesterday} 09:02:00`, 11)],
     });
     const res = await uc.getSnapshot({ now: ist(DATE, 13, 8) });
-    const missing = res.attention_preview.filter((i) => i.reason_key === "MISSING_PUNCH");
-    assert.equal(missing.length, 1);
-    assert.equal(missing[0].attendance_date, yesterday);
+    assert.deepEqual(
+      res.attention_preview.filter((i) => i.reason_key === "MISSING_PUNCH"),
+      [],
+      "completed-day exceptions are the Missing Attendance Report's"
+    );
+    assert.deepEqual(
+      res.attention_groups.flatMap((g) => g.items).filter((i) => i.reason_key === "MISSING_PUNCH"),
+      [],
+      "and not in a group either"
+    );
   });
 
-  it("reports THREE punches on a completed earlier date as a Missing Punch", async () => {
+  it("does not put THREE punches on a completed earlier date here either", async () => {
     const yesterday = "2026-09-11";
     const { uc } = build({
       employees: [employee(1)],
@@ -641,49 +657,51 @@ describe("today cannot show Missing Punch while the day is still running", () =>
       ],
     });
     const res = await uc.getSnapshot({ now: ist(DATE, 13, 8) });
-    const missing = res.attention_preview.filter((i) => i.reason_key === "MISSING_PUNCH");
-    assert.equal(missing.length, 1);
-    assert.equal(missing[0].attendance_date, yesterday);
+    assert.deepEqual(
+      res.attention_preview.filter((i) => i.reason_key === "MISSING_PUNCH"),
+      []
+    );
   });
 
   /**
-   * AN EVEN COUNT ON A COMPLETED DAY IS A COMPLETE DAY. Reported here because
-   * the fix is a gate in front of an existing verdict, and a gate that also
-   * let an even day through would be a new fault in the other direction.
+   * THE WHOLE PANEL IS ONE DATE, and this is the assertion that keeps it that
+   * way as items are added. A future reason that quietly reached back a day
+   * fails here even if nobody thinks to test that reason specifically.
    */
-  it("reports NO missing-punch issue for an EVEN count on a completed date", async () => {
-    const yesterday = "2026-09-11";
-    for (const times of [
-      ["09:02:00", "18:30:00"],
-      ["09:02:00", "13:00:00", "14:05:00", "18:30:00"],
-    ]) {
-      const { uc } = build({
-        employees: [employee(1)],
-        assignments: [assign(1, 1)],
-        rawPunches: times.map((t, i) => punch(1, `${yesterday} ${t}`, 11 + i)),
-      });
-      const res = await uc.getSnapshot({ now: ist(DATE, 13, 8) });
-      assert.deepEqual(
-        res.attention_preview.filter((i) => i.reason_key === "MISSING_PUNCH"),
-        [],
-        `${times.length} punches`
-      );
-    }
-  });
-
-  it("names the date it is about, so a completed day is not read as today's", async () => {
+  it("every row on the panel is about the current business date", async () => {
     const yesterday = "2026-09-11";
     const { uc } = build({
-      employees: [employee(1)],
-      assignments: [assign(1, 1)],
-      rawPunches: [punch(1, `${yesterday} 09:02:00`, 11)],
+      employees: [employee(1), employee(2), employee(3)],
+      assignments: [assign(1, 1), assign(2, 1), assign(3, 1)],
+      rawPunches: [
+        // 1: an odd sequence on a completed day.
+        punch(1, `${yesterday} 09:02:00`, 11),
+        // 2: IN today, no OUT yet.
+        punch(2, `${DATE} 09:02:00`, 21),
+        // 3: nothing at all today.
+      ],
     });
     const res = await uc.getSnapshot({ now: ist(DATE, 13, 8) });
-    const item = res.attention_preview.find((i) => i.reason_key === "MISSING_PUNCH");
-    assert.ok(
-      item.detail.includes(yesterday) && /completed/i.test(item.detail),
-      `detail must name the completed date: ${item.detail}`
+    const dates = [...new Set(res.attention_preview.map((i) => i.attendance_date).filter(Boolean))];
+    assert.deepEqual(dates, [DATE]);
+    assert.deepEqual(
+      res.attention_groups.flatMap((g) => g.items).map((i) => i.attendance_date),
+      res.attention_groups.flatMap((g) => g.items).map(() => DATE)
     );
+  });
+
+  /**
+   * AND THE PANEL'S VOCABULARY NO LONGER CONTAINS THE REASON AT ALL, which is
+   * different from gating it. A gate is a line somebody can move; an absent
+   * key has to be reintroduced deliberately, and this fails when it is.
+   */
+  it("MISSING_PUNCH is not a reason this panel can produce", async () => {
+    // The factory exposes its vocabulary; build one to read it.
+    const { ATTENTION, ATTENTION_LABEL, ATTENTION_TARGET, ATTENTION_ORDER } = build({}).uc;
+    assert.equal(ATTENTION.MISSING_PUNCH, undefined);
+    assert.equal(ATTENTION_LABEL.MISSING_PUNCH, undefined);
+    assert.equal(ATTENTION_TARGET.MISSING_PUNCH, undefined);
+    assert.ok(!ATTENTION_ORDER.includes("MISSING_PUNCH"));
   });
 
   /**
@@ -709,29 +727,90 @@ describe("today cannot show Missing Punch while the day is still running", () =>
   });
 });
 
-/* ------------------------------------------------- the rule is the shared one */
+/* ---------------------------- the exception still has a home: the report ---- */
 
 /**
- * THE DASHBOARD AND THE REPORT MUST NOT HOLD TWO DEFINITIONS of a completed
- * attendance date. `utils/attendance_missing.js` owns it - the Missing
- * Attendance Report and the 06:00 Telegram job both call it - and this screen
- * calls the same function rather than restating the comparison. A second copy
- * is how somebody gets chased for a day the report does not show.
+ * REMOVING A ROW FROM ONE SCREEN MUST NOT REMOVE THE WORK.
+ *
+ * The staffing panel no longer shows a completed-day odd sequence. That is
+ * only correct if the Missing Attendance Report still does - otherwise this
+ * change has quietly stopped anybody being asked to fix those days, which is
+ * the worst possible outcome and exactly the kind of thing a per-screen test
+ * cannot notice. So the same employee, the same date and the same punch is
+ * put through BOTH usecases and asserted in opposite directions.
  */
-describe("the completed-day rule is borrowed, not restated", () => {
-  const fs = require("fs");
-  const path = require("path");
-  const source = fs.readFileSync(path.join(__dirname, "attendance_staffing.js"), "utf8");
-  const { isCompletedAttendanceDate } = require("../utils/attendance_missing");
+describe("a completed-day odd sequence leaves the panel and stays on the report", () => {
+  const buildMissing = require("./attendance_missing");
 
-  it("calls the Missing Attendance Report's own rule", () => {
-    assert.ok(source.includes('require("../utils/attendance_missing")'));
-    assert.ok(source.includes("isCompletedAttendanceDate("));
+  const REPORT_TODAY = DATE;
+  const REPORT_YESTERDAY = "2026-09-11";
+
+  /** The dashboard repo the report reads, with one employee and one punch. */
+  const reportState = {
+    employees: [employee(1)],
+    assignments: [assign(1, 1)],
+    rawPunches: [punch(1, `${REPORT_YESTERDAY} 09:02:00`, 11)],
+  };
+
+  const missingUsecase = () => {
+    const repo = fakeRepo(reportState);
+    const missingRepo = {
+      listCandidateEmployees: async () => reportState.employees,
+      getActiveTelegramChats: async () => [],
+      listNotificationsForDate: async () => [],
+      claim: async () => ({ claimed: true }),
+      settle: async () => ({}),
+      releaseClaim: async () => ({}),
+    };
+    return buildMissing(missingRepo, buildDashboard(repo), {
+      now: () => ist(REPORT_TODAY, 9, 0),
+    });
+  };
+
+  it("is NOT on the staffing panel", async () => {
+    const { uc } = build(reportState);
+    const res = await uc.getSnapshot({ now: ist(REPORT_TODAY, 13, 8) });
+    assert.deepEqual(
+      res.attention_preview.filter((i) => i.reason_key === "MISSING_PUNCH"),
+      []
+    );
   });
 
-  it("and that rule says today is never completed", () => {
-    assert.equal(isCompletedAttendanceDate(DATE, DATE), false);
-    assert.equal(isCompletedAttendanceDate("2026-09-11", DATE), true);
-    assert.equal(isCompletedAttendanceDate("2026-09-13", DATE), false);
+  it("IS on the Missing Attendance Report, with the date and the count", async () => {
+    const { data } = await missingUsecase().getReport(
+      { from_date: "2026-09-01", to_date: REPORT_TODAY },
+      { today: REPORT_TODAY }
+    );
+    assert.equal(data.length, 1, "the work did not disappear with the row");
+    assert.equal(data[0].employee_id, 1);
+    assert.equal(data[0].attendance_date, REPORT_YESTERDAY);
+    assert.equal(data[0].punch_count, 1);
+    assert.equal(data[0].status, "Missing Attendance");
+  });
+
+  it("and TODAY is still not on the report either - the rule is unchanged there", async () => {
+    const todayOnly = {
+      employees: [employee(1)],
+      assignments: [assign(1, 1)],
+      rawPunches: [punch(1, `${REPORT_TODAY} 09:02:00`, 11)],
+    };
+    const repo = fakeRepo(todayOnly);
+    const uc = buildMissing(
+      {
+        listCandidateEmployees: async () => todayOnly.employees,
+        getActiveTelegramChats: async () => [],
+        listNotificationsForDate: async () => [],
+        claim: async () => ({ claimed: true }),
+        settle: async () => ({}),
+        releaseClaim: async () => ({}),
+      },
+      buildDashboard(repo),
+      { now: () => ist(REPORT_TODAY, 9, 0) }
+    );
+    const { data } = await uc.getReport(
+      { from_date: "2026-09-01", to_date: REPORT_TODAY },
+      { today: REPORT_TODAY }
+    );
+    assert.deepEqual(data, [], "an employee still at work is on neither screen");
   });
 });

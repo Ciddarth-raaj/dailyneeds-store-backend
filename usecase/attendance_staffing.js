@@ -3,20 +3,23 @@ const {
   DELIVERY,
   DELIVERY_DETAIL,
   DELIVERY_LABEL,
-  ISSUE_KEY,
   ISSUE_LABEL,
-  dashboardIssueKey,
-  isDayClosed,
   istNowParts,
   locationDelivery,
 } = require("../utils/attendance_dashboard");
 const { PUNCH_SOURCE } = require("../utils/attendance_engine");
 /**
- * THE COMPLETED-DAY RULE, borrowed rather than restated. `Missing Punch` is
- * the Missing Attendance Report's verdict and this screen must not invent a
- * second definition of it - see `buildAttention` below.
+ * `isDayClosed`, `dashboardIssueKey`, `ISSUE_KEY` and the Missing Attendance
+ * Report's `isCompletedAttendanceDate` ARE DELIBERATELY NOT IMPORTED HERE.
+ *
+ * They were, while this screen still reported MISSING PUNCH for the previous
+ * attendance date behind a pair of gates. It no longer reports it at all: a
+ * completed-day attendance exception belongs to the Missing Attendance Report,
+ * which owns the verdict, shows it and chases it at 06:00. An unused import of
+ * a day-verdict helper is an invitation to gate one back in, so there is none -
+ * this file has no access to a settled day verdict, and the only thing it can
+ * say about an attendance day is what is live on it.
  */
-const { isCompletedAttendanceDate } = require("../utils/attendance_missing");
 /**
  * WHO IS EXPECTED AT A PARTICULAR OUTLET, and who is expected across all of
  * them. A roaming employee is a full member of every attendance population on
@@ -170,7 +173,12 @@ const ATTENTION = Object.freeze({
   INDETERMINATE: "INDETERMINATE",
   REGULARIZATION_PENDING: "REGULARIZATION_PENDING",
   OT_PENDING: "OT_PENDING",
-  MISSING_PUNCH: "MISSING_PUNCH",
+  // THERE IS NO MISSING_PUNCH REASON ON THIS PANEL, and its absence is the
+  // feature. An odd punch count on a FINISHED day is a completed-day
+  // attendance exception; the Missing Attendance Report owns it, reports it
+  // and chases it. A live staffing board that also carried it made the reader
+  // decide, row by row, which of two workflows they were in. Adding the key
+  // back here would bring that back with it.
 });
 
 const ATTENTION_LABEL = Object.freeze({
@@ -182,7 +190,6 @@ const ATTENTION_LABEL = Object.freeze({
   INDETERMINATE: "Punch state needs verification",
   REGULARIZATION_PENDING: ISSUE_LABEL.REGULARIZATION_PENDING,
   OT_PENDING: "OT Approval Pending",
-  MISSING_PUNCH: ISSUE_LABEL.MISSING_PUNCH,
 });
 
 /**
@@ -199,7 +206,6 @@ const ATTENTION_TARGET = Object.freeze({
   INDETERMINATE: "ATTENDANCE_DETAIL",
   REGULARIZATION_PENDING: "APPROVAL_QUEUE",
   OT_PENDING: "OT_APPROVAL_QUEUE",
-  MISSING_PUNCH: "ATTENDANCE_DETAIL",
 });
 
 /** Worked in this order. Operational now first, then waiting approvals. */
@@ -212,7 +218,6 @@ const ATTENTION_ORDER = Object.freeze([
   ATTENTION.INDETERMINATE,
   ATTENTION.REGULARIZATION_PENDING,
   ATTENTION.OT_PENDING,
-  ATTENTION.MISSING_PUNCH,
 ]);
 
 module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
@@ -713,7 +718,6 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
       roaming,
       unknownExpectation,
       businessDate,
-      previousDate,
       now,
     });
 
@@ -1252,9 +1256,10 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
    * plausible-looking owner would be an invention, and an invented owner is how
    * a real person gets chased for somebody else's task.
    *
-   * MISSING PUNCH IS ONLY REPORTED ON A CLOSED SESSION. An odd punch count
-   * during a running shift is somebody at work; `dashboardIssueKey` already
-   * gates that and is reused rather than restated.
+   * IT IS ABOUT THE CURRENT BUSINESS DATE ONLY. Completed-day attendance
+   * exceptions - an odd punch count on a finished day - belong to the Missing
+   * Attendance Report and are not repeated here; see the block below for why
+   * that separation is the point rather than an omission.
    *
    * PAYROLL READINESS IS DELIBERATELY ABSENT. The scope allows it "only if a
    * real existing readiness state is already available", and there is none: no
@@ -1267,7 +1272,6 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
     roaming,
     unknownExpectation,
     businessDate,
-    previousDate,
     now,
   }) => {
     const items = [];
@@ -1328,85 +1332,69 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
       });
     });
 
-    /* ------ waiting approvals and settled missing punches, per date ----- */
+    /* ----------------- waiting approvals, on the current date ----------- */
 
+    /**
+     * THE CURRENT BUSINESS DATE, AND NOTHING ELSE.
+     *
+     * THIS PANEL IS TITLED "NOW", AND IT IS ONLY ABOUT NOW. It used to also
+     * carry MISSING PUNCH for the previous attendance date, and that is what
+     * made the screen confusing: an odd punch count on a finished day is a
+     * COMPLETED-DAY ATTENDANCE EXCEPTION, worked from the MISSING ATTENDANCE
+     * REPORT, which exists for exactly that and chases it by Telegram at 06:00.
+     * Putting the same item on a live staffing board mixed two workflows in one
+     * list, and no amount of labelling the date fixed that - the reader still
+     * has to decide, row by row, which job they are doing.
+     *
+     * SO IT IS NOT HERE AT ALL, AND NOT MERELY GATED. There is no MISSING_PUNCH
+     * reason on this panel, no `previousDate` in this function, and no way for
+     * one to reappear: `utils/attendance_missing.js` owns that verdict and
+     * `usecase/attendance_missing.js` is the only place it is reported. Nothing
+     * is lost - every completed-day odd sequence is on that report whether or
+     * not anybody opens this screen.
+     *
+     * WHAT THE CURRENT DAY SHOWS INSTEAD is what was always true of it: "No
+     * check-in after shift start" for somebody whose shift has begun and who
+     * has not punched, and NO ITEM AT ALL for somebody recorded IN whose pair
+     * is still open - 1, 3 or 5 punches - because that person is simply at
+     * work. Both come from the live classification above, not from a day
+     * verdict.
+     *
+     * A WAITING APPROVAL IS SCOPED THE SAME WAY, for the same reason. The
+     * Attendance Approval Centre filters on status and approver and NOT on
+     * attendance date (`listApprovalQueue` in
+     * `repository/attendance_regularization.js`), so a request raised about an
+     * earlier day is on that queue whether or not it is also echoed here.
+     * Echoing it made this panel a second, partial approval queue; scoping it
+     * to today keeps the panel's definition one sentence long and loses no
+     * request.
+     */
     const pendingRequestIds = [];
     const dateOf = new Map();
 
     byEmployee.forEach(({ employee, days }) => {
-      [businessDate, previousDate].forEach((date) => {
-        const day = days[date];
-        if (!day) return;
+      const day = days[businessDate];
+      if (!day) return;
 
-        const closed = isDayClosed({
-          attendance_date: date,
-          snapshot: day.shift_snapshot || null,
-          now,
+      // A WAITING REQUEST, not a day status. The day's own status only reads
+      // REGULARIZATION_PENDING on an odd punch count, so keying off it would
+      // hide every request raised against an even-count day.
+      if (day.regularization_request_id && day.regularization_request_pending) {
+        pendingRequestIds.push(day.regularization_request_id);
+        dateOf.set(String(day.regularization_request_id), {
+          employee,
+          date: businessDate,
+          key: ATTENTION.REGULARIZATION_PENDING,
         });
-
-        // A WAITING REQUEST, not a day status. The day's own status only reads
-        // REGULARIZATION_PENDING on an odd punch count, so keying off it would
-        // hide every request raised against an even-count day.
-        if (day.regularization_request_id && day.regularization_request_pending) {
-          pendingRequestIds.push(day.regularization_request_id);
-          dateOf.set(String(day.regularization_request_id), {
-            employee,
-            date,
-            key: ATTENTION.REGULARIZATION_PENDING,
-          });
-        }
-        if (day.ot_request_pending && day.ot_request_id) {
-          pendingRequestIds.push(day.ot_request_id);
-          dateOf.set(String(day.ot_request_id), { employee, date, key: ATTENTION.OT_PENDING });
-        }
-
-        /**
-         * MISSING PUNCH IS A VERDICT ON A COMPLETED DAY, AND TODAY IS NEVER
-         * ONE - the rule the Missing Attendance Report already owns, called
-         * rather than restated.
-         *
-         * WHAT WENT WRONG. This screen had its own completeness test:
-         * `isDayClosed`, the per-employee cutoff. That test answers a
-         * different question - "can this attendance date still take punches" -
-         * and the two answers are not the same date. The report's rule is
-         * `isCompletedAttendanceDate`: strictly before TODAY's IST business
-         * date, full stop. An employee who is standing at the counter having
-         * punched IN and not yet OUT has exactly one punch, an odd count, and
-         * the engine calls that MISSING_PUNCH because from its point of view
-         * the pair is incomplete. Labelling that "Missing Punch" at one in the
-         * afternoon tells a manager to chase a correction for a day that has
-         * not happened yet, and tells the employee their attendance is broken
-         * while they are still working it.
-         *
-         * BOTH GATES ARE APPLIED, and they are not redundant. The completed-
-         * date rule is the FLOOR that nothing may lower: today and every
-         * future date are out whatever any cutoff says, and a caller cannot
-         * widen it. `isDayClosed` stays in front of it because a completed
-         * date can still be open for one employee whose night shift claims
-         * this morning, and reporting that person's running session as a
-         * missing punch is the same error one day earlier.
-         *
-         * WHAT THE CURRENT DAY SHOWS INSTEAD. Nothing is invented for it:
-         * today's live states already exist above and are the honest ones -
-         * "No check-in after shift start" for somebody whose shift has begun
-         * and who has not punched, and no item at all for somebody recorded IN
-         * with a pair still open, because that person is simply at work.
-         */
-        const completed = isCompletedAttendanceDate(date, businessDate);
-        const issue = dashboardIssueKey(day, { day_closed: closed && completed });
-        if (issue === ISSUE_KEY.MISSING_PUNCH) {
-          items.push({
-            ...employeeRow(employee),
-            attendance_date: date,
-            reason_key: ATTENTION.MISSING_PUNCH,
-            reason: ATTENTION_LABEL.MISSING_PUNCH,
-            detail: `An odd number of punches on the completed attendance day ${date}`,
-            target: ATTENTION_TARGET.MISSING_PUNCH,
-            age_minutes: null,
-            owner_name: null,
-          });
-        }
-      });
+      }
+      if (day.ot_request_pending && day.ot_request_id) {
+        pendingRequestIds.push(day.ot_request_id);
+        dateOf.set(String(day.ot_request_id), {
+          employee,
+          date: businessDate,
+          key: ATTENTION.OT_PENDING,
+        });
+      }
     });
 
     // The approver the system itself names for each waiting request. One read,

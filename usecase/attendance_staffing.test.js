@@ -1211,8 +1211,8 @@ describe("the session that describes an employee now, across midnight", () => {
 
   it("AN UNMATCHED IN FROM A CLOSED SESSION IS NOT CARRIED FORWARD", async () => {
     // A single IN at 09:00 yesterday with no OUT. Yesterday's session closed at
-    // 04:00 this morning. At 14:00 today this employee must not read as IN - the
-    // exact defect. It is a missing punch on a closed day, reported as such.
+    // 04:00 this morning. At 14:00 today this employee must not read as IN -
+    // the exact defect - and today's own answer is NO_CHECK_IN.
     const { uc } = build({
       ...dayStaff,
       rawPunches: [punch(1, "2026-09-12 09:00:00", 1)],
@@ -1220,9 +1220,19 @@ describe("the session that describes an employee now, across midnight", () => {
     const res = await uc.getSnapshot({ now: ist("2026-09-13", 14, 0) });
     assert.equal(res.recorded_in, 0, "not recorded IN today on yesterday's evidence");
     assert.equal(res.gap_by_class.find((c) => c.key === "NO_CHECK_IN").count, 1);
-    const missing = res.attention_preview.filter((a) => a.reason_key === "MISSING_PUNCH");
-    assert.equal(missing.length, 1, "and the odd count on the closed day is surfaced");
-    assert.equal(missing[0].attendance_date, "2026-09-12");
+    // THE ODD COUNT ON YESTERDAY IS REAL AND IS NOT THIS SCREEN'S. It is a
+    // completed-day attendance exception, and the Missing Attendance Report
+    // owns it - this panel is about the current business date only, so the
+    // reader is never asked to decide which of two workflows a row belongs to.
+    assert.deepEqual(
+      res.attention_preview.filter((a) => a.reason_key === "MISSING_PUNCH"),
+      []
+    );
+    assert.deepEqual(
+      res.attention_preview.map((a) => a.attendance_date).filter(Boolean),
+      ["2026-09-13"],
+      "every attention row is about today"
+    );
   });
 
   it("TODAY'S NEWER OUT BEATS YESTERDAY'S IN", async () => {
