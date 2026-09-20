@@ -763,7 +763,14 @@ module.exports = (attendanceDashboardRepo) => {
         snapshot: day.shift_snapshot || null,
         now,
       });
-      const issueKey = dashboardIssueKey(day, { day_closed: dayClosed });
+      // The completed-day floor as well as the cutoff: a date that IS today
+      // in IST never carries a settled MISSING_PUNCH or ABSENT verdict, however
+      // its cutoff reads. Same rule as the Missing Attendance Report's.
+      const issueKey = dashboardIssueKey(day, {
+        day_closed: dayClosed,
+        attendance_date: date,
+        today: istNowParts(now).date,
+      });
       const slice = presenceSlice({
         day,
         resolution_status: day.shift_resolution_status,

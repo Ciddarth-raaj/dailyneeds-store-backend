@@ -451,6 +451,69 @@ class EmployeeMasterUsecase {
     });
   }
 
+  /* ---------------------------------------------------- location scope -- */
+
+  /**
+   * ALL LOCATIONS / ROAMING - an employee whose duty is not tied to one outlet.
+   *
+   * WHAT IT CHANGES, AND ONLY THIS. Such an employee is not counted into any
+   * single outlet's Expected Now or Gap on the Attendance & Staffing
+   * dashboard, and a punch at any outlet is ordinary rather than
+   * "recorded IN elsewhere - verification needed". They remain an active
+   * employee: still rostered on a shift, still expected to punch, still in
+   * attendance, in the Missing Attendance Report and in payroll, and still
+   * owned by the branch in `store_id` so their own manager still sees them.
+   *
+   * IT IS A PER-EMPLOYEE FACT, NEVER A DESIGNATION RULE. No job title is
+   * named here or in any code that reads the column: a designation one person
+   * holds today three people hold next year, two of whom sit in one building,
+   * and a rule nobody can see is a rule nobody can correct without a deploy.
+   *
+   * ADMINISTRATORS ONLY, and the check is on the route
+   * (`middlewares/admin_only.js`) rather than in a permission key, because a
+   * key is grantable and the requirement is that HR and Store Managers cannot
+   * hold it - the same reasoning `attendance_required` records. This usecase
+   * is not reachable from any other path: the field is off `EDITABLE_FIELDS`,
+   * so the generic edit refuses it by name, and the legacy
+   * `/employee/updatedata` schema does not list it either.
+   */
+  async getWorksAllLocations(employeeId) {
+    const id = Number(employeeId);
+    if (!Number.isInteger(id) || id <= 0) throw new ValidationError("employee_id must be a positive integer");
+    const row = await this.repo.getWorksAllLocations(id);
+    if (!row) throw new NotFoundError(`employee ${id} does not exist`);
+    return { code: 200, ...row };
+  }
+
+  async setWorksAllLocations(employeeId, roaming, { actorEmployeeId = null } = {}) {
+    const id = Number(employeeId);
+    if (!Number.isInteger(id) || id <= 0) throw new ValidationError("employee_id must be a positive integer");
+    if (typeof roaming !== "boolean") {
+      throw new ValidationError("works_all_locations must be true or false");
+    }
+
+    return this.repo.withTransaction(async (tx) => {
+      const before = await this.repo.lockEmployee(tx, id);
+      if (!before) throw new NotFoundError(`employee ${id} does not exist`);
+
+      const result = await this.repo.setWorksAllLocations(tx, id, roaming);
+
+      this._log(
+        logger.LEVEL.INFO,
+        "WORKS-ALL-LOCATIONS",
+        `employee ${id}: works_all_locations set to ${roaming ? 1 : 0}`,
+        { employeeId: id, actorEmployeeId, works_all_locations: roaming }
+      );
+
+      return {
+        code: 200,
+        employee_id: id,
+        works_all_locations: roaming,
+        changed: result.changed > 0,
+      };
+    });
+  }
+
   /* ==================================================================== */
   /*  edit                                                                */
   /* ==================================================================== */

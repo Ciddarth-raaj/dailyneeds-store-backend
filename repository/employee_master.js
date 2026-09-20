@@ -428,6 +428,50 @@ class EmployeeMasterRepository {
     return { matched: Number(res.affectedRows || 0), changed: Number(res.changedRows || 0) };
   }
 
+  /* -------------------------------------------------- location scope ---- */
+
+  /**
+   * Whether this employee's duty is tied to one outlet.
+   *
+   * DELIBERATELY NOT ON `EDITABLE_FIELDS`, for the same reason
+   * `attendance_required` is not: that allowlist is what the `employee_edit`
+   * route may write and `employee_edit` is HR's key, while this switch is
+   * administrators only. Keeping it off the list means the generic edit path
+   * refuses it by name without any extra check, and the only way in is the
+   * dedicated action below.
+   *
+   * `store_id` IS NOT TOUCHED HERE AND MUST NOT BE. It remains the owning
+   * branch, which every authorization scope reads; clearing it for a roaming
+   * employee would make that person invisible to their own manager.
+   */
+  async getWorksAllLocations(employeeId) {
+    const rows = await this._read(
+      "GET-WORKS-ALL-LOCATIONS",
+      `SELECT employee_id, employee_name, store_id, works_all_locations
+         FROM new_employee WHERE employee_id = ?`,
+      [employeeId]
+    );
+    if (!rows || !rows[0]) return null;
+    return {
+      employee_id: Number(rows[0].employee_id),
+      employee_name: rows[0].employee_name,
+      store_id: rows[0].store_id === null || rows[0].store_id === undefined ? null : Number(rows[0].store_id),
+      works_all_locations: Number(rows[0].works_all_locations) === 1,
+    };
+  }
+
+  /**
+   * Set it. `changedRows` distinguishes a real change from setting it to what
+   * it already was, which is a legitimate no-op and not an error.
+   */
+  async setWorksAllLocations(tx, employeeId, roaming) {
+    const res = await tx.query(
+      "UPDATE new_employee SET works_all_locations = ? WHERE employee_id = ?",
+      [roaming ? 1 : 0, employeeId]
+    );
+    return { matched: Number(res.affectedRows || 0), changed: Number(res.changedRows || 0) };
+  }
+
   /**
    * Candidates for the pre-create duplicate warning.
    *

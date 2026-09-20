@@ -158,6 +158,7 @@ class AttendanceMissingRepository {
               ne.special_break_override_minutes,
               ne.extra_break_hours,
               ne.attendance_required,
+              ne.works_all_locations,
               o.outlet_name, o.outlet_nickname,
               d.designation_name,
               dept.department_name,

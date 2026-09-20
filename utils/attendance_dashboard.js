@@ -269,10 +269,34 @@ function dayIssueKey(day) {
  * looked at, so they are reported immediately - that is the whole point of
  * surfacing them.
  */
-function dashboardIssueKey(day, { day_closed = false } = {}) {
+/**
+ * AND A SECOND GATE, WHICH IS A FLOOR: the CURRENT IST date can never carry a
+ * settled verdict, whatever any cutoff says.
+ *
+ * `day_closed` answers "can this attendance date still take punches", which is
+ * a per-employee question about a cutoff. "Is this day finished" is a
+ * different and blunter one, and `utils/attendance_missing.js` already owns
+ * the answer the Missing Attendance Report and the 06:00 Telegram job both
+ * use: strictly before today's IST business date. That rule cannot be
+ * imported here - `attendance_missing` depends on this module's neighbours and
+ * a cycle would be worse than the two lines below - so it is applied by the
+ * CALLER passing `attendance_date` and `today`, and it is spelled out in
+ * `utils/attendance_dashboard.test.js` against the report's own helper so the
+ * two cannot drift apart unnoticed.
+ *
+ * BOTH ARE OPTIONAL AND THE OMISSION IS SAFE IN ONE DIRECTION ONLY: a caller
+ * that passes neither gets exactly the old behaviour, and a caller that passes
+ * both can only ever get FEWER settled verdicts, never more. There is no
+ * argument to this function that can put MISSING_PUNCH or ABSENT onto today.
+ */
+function dashboardIssueKey(day, { day_closed = false, attendance_date = null, today = null } = {}) {
   const key = dayIssueKey(day);
   if (key === null) return null;
-  if (!day_closed && (key === ISSUE_KEY.MISSING_PUNCH || key === ISSUE_KEY.ABSENT)) return null;
+  if (key !== ISSUE_KEY.MISSING_PUNCH && key !== ISSUE_KEY.ABSENT) return key;
+  if (!day_closed) return null;
+  if (attendance_date !== null && today !== null && !(datePart(attendance_date) < datePart(today))) {
+    return null;
+  }
   return key;
 }
 

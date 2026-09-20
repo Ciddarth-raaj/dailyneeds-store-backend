@@ -315,6 +315,65 @@ class EmployeeMasterRoutes {
       }
     );
 
+    /* ------------------------------------------------- location scope */
+    /**
+     * ALL LOCATIONS / ROAMING. Read is an ordinary employee-master read:
+     * anybody who may see the profile may see whether this person's duty is
+     * tied to one outlet.
+     */
+    router.get(
+      "/employee/:employee_id/location-scope",
+      this.permissions.require(P.VIEW_EMPLOYEES),
+      this.branchScope.requireEmployeeInScope(),
+      async (req, res) => {
+        try {
+          res.json(await this.usecase.getWorksAllLocations(req.params.employee_id));
+        } catch (err) {
+          this._fail(res, err);
+        }
+        res.end();
+      }
+    );
+
+    /**
+     * WRITE IS ADMINISTRATORS ONLY, enforced here and not merely hidden in
+     * the web app, for the same reason `attendance-required` is:
+     * `requireAdmin` checks `user_type = 2` directly rather than a permission
+     * key, because a key can be granted to a designation and the requirement
+     * is that HR and Store Managers cannot change who is counted into a
+     * branch's staffing.
+     *
+     * There is no other way in. The column is absent from `EDITABLE_FIELDS`,
+     * so `POST /employee/:id/edit` answers "not an editable employee field";
+     * and the legacy `/employee/updatedata` schema does not list it, so that
+     * route 422s a body that names it.
+     */
+    router.post(
+      "/employee/:employee_id/location-scope",
+      requireAdmin,
+      this.branchScope.requireEmployeeInScope(),
+      async (req, res) => {
+        try {
+          const isValid = Joi.validate(
+            req.body,
+            Joi.object().keys({ works_all_locations: Joi.boolean().required() }).unknown(false)
+          );
+          if (isValid.error !== null) throw isValid.error;
+
+          res.json(
+            await this.usecase.setWorksAllLocations(
+              req.params.employee_id,
+              req.body.works_all_locations === true || req.body.works_all_locations === "true",
+              { actorEmployeeId: this._actor(req) }
+            )
+          );
+        } catch (err) {
+          this._fail(res, err);
+        }
+        res.end();
+      }
+    );
+
     /* ----------------------------------------------------- joining date */
     /**
      * Correcting a wrongly recorded joining date. `employee_edit`, the same
