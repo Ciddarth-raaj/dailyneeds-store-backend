@@ -632,4 +632,35 @@ module.exports = {
   // reaches a designation only by a deliberate grant; administrators keep the
   // existing user_type 2 bypass.
   CLOSE_PAYRUN_ATTENDANCE: "close_payrun_attendance",
+
+  // ============================================ STAFF BUDGET MASTER ========
+  //
+  // THE APPROVED HEADCOUNT PLAN: how many positions management has approved
+  // for each Location -> Department -> Designation -> Shift, and - where a
+  // monthly rate is configured for that designation and shift - what that
+  // plan costs per month.
+  //
+  // READ AND WRITE ARE SEPARATE KEYS because they are separate decisions. A
+  // store or operations lead may legitimately need to see the approved plan
+  // for a location without being able to move a number in it; the plan is a
+  // management commitment, and changing one is not the same act as reading
+  // one.
+  //
+  // WHAT THESE ARE NOT. They are not the legacy /store-budget screen's
+  // `view_store_budget` / `add_store_budger`, which stay exactly where they
+  // are on a feature this one supersedes but does not touch. And they are not
+  // an employee-data right: the Staff Budget screen reads four masters and
+  // its own table, and shows nothing about any individual.
+  //
+  // `EDIT_STAFF_BUDGET` also gates rate configuration. Configuring what a
+  // shift costs per month is a budget-owner's act, not a separate role, and a
+  // third key held by nobody would only mean the rates never get set.
+  //
+  // GRANTED TO NOBODY BY THE MIGRATION. Staff Budget is approved manpower, so
+  // who may read it and who may change it are decisions to be made
+  // deliberately on the permissions screen rather than inherited from a
+  // designation a migration happened to name. Administrators reach both
+  // through the user_type 2 bypass and need no grant.
+  VIEW_STAFF_BUDGET: "view_staff_budget",
+  EDIT_STAFF_BUDGET: "edit_staff_budget",
 };

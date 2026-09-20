@@ -197,6 +197,12 @@ class Server {
     // The new payroll/attendance shift master. Separate from shiftRepo above,
     // which still owns the legacy `shift_master` table.
     this.workShiftRepo = require("./repository/work_shift")(this.mysql.connection);
+    // The Staff Budget Master: the approved headcount plan on
+    // Location -> Department -> Designation -> Shift. It owns `staff_budget`,
+    // `staff_budget_rate` and `staff_budget_history`, READS the four masters
+    // for their names and active flags, and never touches the legacy `budget`
+    // table that budgetRepo above still owns.
+    this.staffBudgetRepo = require("./repository/staff_budget")(this.mysql.connection);
     // The manual employee -> work shift mapping. It owns exactly one column,
     // `new_employee.default_work_shift_id`, and never touches the legacy
     // `shift_id` / `shift_code` pair that employeeRepo still reads.
@@ -643,6 +649,7 @@ class Server {
     );
     this.shiftUsecase = require("./usecase/shift")(this.shiftRepo);
     this.workShiftUsecase = require("./usecase/work_shift")(this.workShiftRepo);
+    this.staffBudgetUsecase = require("./usecase/staff_budget")(this.staffBudgetRepo);
     // Attendance - Part 1. Exports are audited through the same
     // report_export_log the Reports module writes.
     this.attendanceRawUsecase = require("./usecase/attendance_raw")(
@@ -1438,6 +1445,12 @@ class Server {
       this.workShiftUsecase,
       this.permissions
     );
+    // The Staff Budget Master. Every one of its endpoints carries a
+    // permission guard - see routes/staff_budget.js.
+    const staffBudgetRouter = require("./routes/staff_budget")(
+      this.staffBudgetUsecase,
+      this.permissions
+    );
     // Attendance - Part 1: the Attendance List, the Punch Audit and the
     // Biomax device registry.
     const attendanceRawRouter = require("./routes/attendance_raw")(
@@ -1814,6 +1827,7 @@ class Server {
     // The new payroll/attendance shift master. /shift above is unchanged and
     // still serves the legacy `shift_master` system.
     app.use("/work-shift", workShiftRouter.getRouter());
+    app.use("/staff-budget", staffBudgetRouter.getRouter());
     // Attendance is its own top-level module beside HR, as the frontend's
     // navigation already anticipates. Devices first: Express tries routers
     // in order and /attendance/devices must not be swallowed by /attendance.
