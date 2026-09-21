@@ -657,6 +657,251 @@ describe("F. the shape of the result", () => {
 
 /* ========================================================================= */
 
+describe("C2. the headline actionable count is scoped and filtered like the rows", () => {
+  /**
+   * `meta.actionable_count` is the number the screen leads with: how many
+   * employee/dates can raise a shift change, look like they need to, and have
+   * not raised one.
+   *
+   * IT MUST ANSWER THE QUESTION HR IS CURRENTLY ASKING. It is counted AFTER
+   * the population has been scoped and filtered - branch scope, date range,
+   * outlet, employee, designation and search all narrow it - and BEFORE the
+   * three ACTIONABLE-STATE filters are applied, so it keeps saying how much
+   * work there is while HR is looking at some other cut of the same data.
+   *
+   * A count that ignored the outlet would be worse than no count: a branch
+   * manager would be shown the company's backlog as if it were theirs.
+   */
+  const TWO_DATES = { from: "2026-09-17", to: YESTERDAY };
+
+  /**
+   * Four actionable employee/dates in total:
+   *   outlet 1  employees 42 and 43, both dates  -> 4
+   *   outlet 2  employee 55, neither date actionable (already on the long
+   *             shift, so it can never be raised)
+   */
+  const world = () => ({
+    employees: [
+      employee(42, { store_id: 1, designation_id: 5 }),
+      employee(43, { store_id: 1, designation_id: 9 }),
+      employee(55, { store_id: 2, designation_id: 5, employee_name: "Other Branch" }),
+    ],
+    assignments: [
+      assignment(42, SHORT_SHIFT),
+      assignment(43, SHORT_SHIFT),
+      assignment(55, LONG_SHIFT),
+    ],
+    rawPunches: [
+      ...pair(42, "2026-09-17", 10, 22),
+      ...pair(42, YESTERDAY, 10, 22),
+      ...pair(43, "2026-09-17", 10, 22),
+      ...pair(43, YESTERDAY, 10, 22),
+      ...pair(55, "2026-09-17", 9, 22),
+      ...pair(55, YESTERDAY, 9, 22),
+    ],
+  });
+
+  const countFor = async (over = {}) => {
+    const { usecase } = build(world());
+    const { meta } = await usecase.getReport({
+      from_date: TWO_DATES.from,
+      to_date: TWO_DATES.to,
+      store_ids: null,
+      ...over,
+    });
+    return meta.actionable_count;
+  };
+
+  it("counts every actionable record in the unfiltered window", async () => {
+    assert.equal(await countFor(), 4);
+  });
+
+  it("follows the BRANCH SCOPE the server decided", async () => {
+    // Outlet 1 holds all four; outlet 2 holds none.
+    assert.equal(await countFor({ store_ids: [1] }), 4);
+    assert.equal(await countFor({ store_ids: [2] }), 0);
+    // An empty authorized set counts nothing, rather than everything.
+    assert.equal(await countFor({ store_ids: [] }), 0);
+  });
+
+  it("follows the DATE RANGE", async () => {
+    assert.equal(await countFor({ from_date: YESTERDAY, to_date: YESTERDAY }), 2);
+    assert.equal(await countFor({ from_date: "2026-09-17", to_date: "2026-09-17" }), 2);
+  });
+
+  it("follows the OUTLET filter", async () => {
+    assert.equal(await countFor({ store_ids: [2] }), 0);
+    assert.notEqual(await countFor({ store_ids: [1] }), await countFor({ store_ids: [2] }));
+  });
+
+  it("follows the EMPLOYEE filter", async () => {
+    assert.equal(await countFor({ employee_id: 42 }), 2);
+    assert.equal(await countFor({ employee_id: 55 }), 0);
+  });
+
+  it("follows the DESIGNATION filter", async () => {
+    assert.equal(await countFor({ designation_id: 9 }), 2);
+    assert.equal(await countFor({ designation_id: 5, store_ids: [1] }), 2);
+  });
+
+  /**
+   * ...AND IGNORES EXACTLY THREE THINGS.
+   *
+   * Can Raise, Worked Longer and Request Status are the actionable STATE
+   * itself. Counting them would make the headline say "2 of 2" whatever HR
+   * looked at, which is not a number - it is a tautology.
+   */
+  it("ignores the three actionable-state filters, and only those", async () => {
+    const base = await countFor();
+    assert.equal(await countFor({ can_raise: "NO" }), base);
+    assert.equal(await countFor({ worked_longer: "NO" }), base);
+    assert.equal(await countFor({ request_status: "APPROVED" }), base);
+    assert.equal(
+      await countFor({ can_raise: "NO", worked_longer: "NO", request_status: "REJECTED" }),
+      base
+    );
+  });
+
+  it("the rows themselves still obey all of the filters", async () => {
+    const { usecase } = build(world());
+    const { data, meta } = await usecase.getReport({
+      from_date: TWO_DATES.from,
+      to_date: TWO_DATES.to,
+      store_ids: [1],
+      can_raise: "NO",
+    });
+    // Nothing in outlet 1 is un-raisable, so the visible set is empty...
+    assert.deepEqual(data, []);
+    assert.equal(meta.row_count, 0);
+    // ...while the headline still reports the work waiting in that outlet.
+    assert.equal(meta.actionable_count, 4);
+  });
+});
+
+/* ========================================================================= */
+
+describe("F2. the shift a day is measured against is the one DATED to that day", () => {
+  /**
+   * THE REGRESSION THIS SUITE EXISTS FOR.
+   *
+   * "Worked Longer Than Assigned Shift?" must be measured against the shift
+   * that was EFFECTIVE FOR THAT EMPLOYEE ON THAT ATTENDANCE DATE, resolved
+   * from the dated assignment history - never against their current or
+   * default shift. `new_employee.default_work_shift_id` is current state; a
+   * report that read it would rewrite every historical date the moment
+   * somebody's roster changed, and would do it silently.
+   *
+   * THE FIXTURE IS THE CASE THAT CATCHES IT. Employee 60 worked an EARLY
+   * 06:00-10:00 shift (NRM 240) and was moved, effective 18 September, to the
+   * long 10:00-22:00 one (NRM 660). The two dates are chosen so that reading
+   * the WRONG shift flips the answer in BOTH directions:
+   *
+   *   17 Sep  punched 06:00-12:00   360 worked
+   *           against 240 (correct, dated)  -> Worked Longer YES
+   *           against 660 (current shift)   -> would read NO
+   *
+   *   18 Sep  punched 10:00-18:00   420 worked after the hour's break
+   *           against 660 (correct, dated)  -> Worked Longer NO
+   *           against 240 (old shift)       -> would read YES
+   *
+   * So neither a stale nor a current reading can pass this by accident.
+   */
+  const EARLY_SHIFT = 9; // 06:00-10:00, NRM 240
+  const BEFORE = "2026-09-17";
+  const AFTER = "2026-09-18";
+
+  const movedEmployee = () => ({
+    employees: [employee(60)],
+    configs: [...CONFIGS, shiftConfig(EARLY_SHIFT, "Early")],
+    schedules: [...SCHEDULES, ...scheduleRows(EARLY_SHIFT, "06:00:00", "10:00:00", 0, 240)],
+    assignments: [
+      assignment(60, EARLY_SHIFT, "2026-01-01"),
+      // THE ROSTER CHANGE, effective-dated. It must move AFTER and nothing else.
+      assignment(60, LONG_SHIFT, AFTER),
+    ],
+    rawPunches: [...pair(60, BEFORE, 6, 12), ...pair(60, AFTER, 10, 18)],
+  });
+
+  const reportRows = async () => {
+    const { usecase } = build(movedEmployee());
+    const { data } = await usecase.getReport({
+      from_date: BEFORE,
+      to_date: AFTER,
+      store_ids: null,
+    });
+    return {
+      before: data.find((r) => r.attendance_date === BEFORE),
+      after: data.find((r) => r.attendance_date === AFTER),
+    };
+  };
+
+  it("a date BEFORE the change is measured against the shift in force then", async () => {
+    const { before } = await reportRows();
+    assert.equal(before.assigned_work_shift_id, EARLY_SHIFT);
+    assert.equal(before.assigned_shift_name, "Early");
+    assert.equal(before.assigned_nrm_minutes, 240, "the 06:00-10:00 shift's NRM, not the new one's");
+    assert.equal(before.worked_minutes, 360);
+    assert.equal(before.worked_longer, true);
+    assert.equal(before.extra_minutes, 120);
+  });
+
+  it("a date ON OR AFTER the change is measured against the new shift", async () => {
+    const { after } = await reportRows();
+    assert.equal(after.assigned_work_shift_id, LONG_SHIFT);
+    assert.equal(after.assigned_shift_name, "Full Day");
+    assert.equal(after.assigned_nrm_minutes, 660, "the 10:00-22:00 shift's NRM");
+    assert.equal(
+      after.worked_longer,
+      false,
+      "the OLD shift's 240 must not be what this day is judged against"
+    );
+    assert.equal(after.extra_minutes, 0);
+  });
+
+  it("the current shift does NOT rewrite the historical answer", async () => {
+    const { before, after } = await reportRows();
+    // One employee, one report, two different baselines - which is only
+    // possible if the baseline is resolved per date.
+    assert.notEqual(before.assigned_work_shift_id, after.assigned_work_shift_id);
+    assert.notEqual(before.assigned_nrm_minutes, after.assigned_nrm_minutes);
+    // And the two verdicts differ in the direction the dated shift dictates,
+    // even though the LATER day is the longer stretch of clock time.
+    assert.equal(before.worked_longer, true);
+    assert.equal(after.worked_longer, false);
+  });
+
+  it("eligibility is dated too - the longer-shift test uses that date's base shift", async () => {
+    const { before, after } = await reportRows();
+    // On 17 Sep the base is the 240 shift, so the 660 one is a longer option.
+    assert.equal(before.can_raise, true);
+    // On 18 Sep the base IS the longest shift, so there is nothing to move to.
+    assert.equal(after.can_raise, false);
+    assert.equal(after.eligibility_reason_code, "NO_LONGER_SHIFT");
+  });
+
+  it("the report reads no current-shift column at all", () => {
+    const fs = require("fs");
+    const path = require("path");
+    const sources = ["usecase/attendance_shift_change_report.js", "repository/attendance_shift_change_report.js"]
+      .map((rel) => fs.readFileSync(path.join(__dirname, "..", rel), "utf8"))
+      // Comments may DISCUSS the column; code must not read it.
+      .map((src) => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, ""))
+      .join("\n");
+    assert.ok(
+      !/default_work_shift_id/.test(sources),
+      "the report reads the employee's CURRENT shift"
+    );
+    assert.ok(
+      !/\bne\.shift_id\b/.test(sources),
+      "the report reads the legacy current-shift column"
+    );
+    // The dated resolver is what it uses, with overrides withheld.
+    assert.match(sources, /baseResolutionFor\(date\)/);
+  });
+});
+
+/* ========================================================================= */
+
 describe("G. THE PARITY TEST: the report's verdict IS the production rule's", () => {
   /**
    * The one that matters.

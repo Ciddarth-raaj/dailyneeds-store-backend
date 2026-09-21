@@ -280,10 +280,12 @@ function decidePreconditions({
  * and LOOK LIKE THEY NEED TO, but it authorises nothing: a day worked long
  * with no longer shift on the master is still not raisable.
  *
- * Measured against `base_nrm_minutes` - the PERMANENT shift's NRM for the
- * date, which is what the engine pays regular time against - and not against
- * an override's, so a day already calculated under an approved longer shift
- * does not read as "worked longer" a second time.
+ * Measured against `base_nrm_minutes`, which the caller must resolve as the
+ * NRM OF THE SHIFT EFFECTIVE ON THAT ATTENDANCE DATE - from the dated
+ * assignment history, never from the employee's current or default shift, or
+ * a roster change would re-judge every historical day behind it. The
+ * single-date overrides are withheld, so a day already calculated under an
+ * approved longer shift does not read as "worked longer" a second time.
  */
 function workedLongerThanAssigned({ worked_minutes, base_nrm_minutes }) {
   const worked = Number(worked_minutes);

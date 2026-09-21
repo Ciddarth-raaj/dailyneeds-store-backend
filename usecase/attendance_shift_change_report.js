@@ -7,7 +7,8 @@
  *   Can Raise Shift Change?            would `raiseShiftChangeRequest`
  *                                      ACCEPT a request for this date?
  *   Worked Longer Than Assigned Shift? did the punches actually run past the
- *                                      permanent shift's normal minutes?
+ *                                      normal minutes of the shift DATED TO
+ *                                      THAT DAY?
  *   Request Status                     what the approval workflow says:
  *                                      Not Raised | Pending | Approved |
  *                                      Rejected.
@@ -482,12 +483,27 @@ module.exports = (
   /**
    * One report row.
    *
-   * ASSIGNED SHIFT IS THE PERMANENT ONE for the date, because that is what a
-   * shift change is measured against and what regular time is paid against.
+   * ASSIGNED SHIFT IS THE ONE EFFECTIVE ON THIS ATTENDANCE DATE, resolved
+   * from the dated assignment history by `baseResolutionFor` - NOT the
+   * employee's current or default shift.
+   *
+   * THAT DISTINCTION IS THE WHOLE POINT ON A HISTORICAL DATE. Somebody moved
+   * from a 06:00-10:00 shift to a 10:00-22:00 one in September did not
+   * retrospectively owe twelve-hour days in August, and a report measuring
+   * August against their CURRENT shift would silently re-judge every day they
+   * ever worked the moment their roster changed.
+   * `new_employee.default_work_shift_id` is current state and is never read
+   * here; `F2.` in the test suite is the regression that holds this.
+   *
+   * The single-date overrides are withheld - `resolutionFor` would answer
+   * with an approved shift change already applied, and comparing a granted
+   * override against itself would read as "no longer shift available" the day
+   * after one was approved.
+   *
    * WORKED and EXTRA come from the engine's own day - the same minutes the
-   * employee's screen shows - and EXTRA is what was worked beyond the
-   * permanent shift's normal minutes, which is the figure a shift change
-   * exists to regularise.
+   * employee's screen shows - and EXTRA is what was worked beyond that dated
+   * shift's normal minutes, which is the figure a shift change exists to
+   * regularise.
    */
   const shapeRow = ({ employee, day, date, baseResolution, baseNrm, verdict, request, resolver }) => {
     const punches = Array.isArray(day.effective_punches) ? day.effective_punches : [];
