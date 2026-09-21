@@ -70,6 +70,7 @@ const FILTER_SCHEMA = {
     .valid("ALL", "NOT_RAISED", "PENDING", "APPROVED", "REJECTED")
     .allow(null, "")
     .optional(),
+  hr_eligibility: Joi.string().valid("ALL", "ALLOWED", "BLOCKED").allow(null, "").optional(),
   search: Joi.string().max(100).allow(null, "").optional(),
 };
 
@@ -93,9 +94,16 @@ const EXPORT_COLUMNS = [
   { header: "Actual Last Punch", key: "last_punch", width: 18 },
   { header: "Worked Hours", key: "worked_hours", width: 14 },
   { header: "Extra Hours", key: "extra_hours", width: 13 },
-  { header: "Can Raise Shift Change?", key: "can_raise", width: 22 },
+  { header: "Can Raise by System?", key: "can_raise", width: 20 },
   { header: "Worked Longer Than Assigned Shift?", key: "worked_longer", width: 32 },
   { header: "Eligibility Reason", key: "eligibility_reason", width: 52 },
+  // THE HR GATE, EXPORTED BESIDE THE SYSTEM ONE and never folded into it -
+  // the spreadsheet answers the same three questions the screen does.
+  { header: "HR Eligibility", key: "hr_eligibility", width: 16 },
+  { header: "HR Block Reason", key: "hr_block_reason", width: 40 },
+  { header: "Blocked By", key: "hr_blocked_by", width: 22 },
+  { header: "Blocked At", key: "hr_blocked_at", width: 20 },
+  { header: "Effective Can Raise?", key: "effective_can_raise", width: 20 },
   { header: "Request Status", key: "request_status", width: 16 },
   { header: "Request ID", key: "request_id", width: 12 },
 ];
@@ -133,6 +141,11 @@ function exportRow(row) {
     can_raise: yesNo(row.can_raise),
     worked_longer: yesNo(row.worked_longer),
     eligibility_reason: row.eligibility_reason || "",
+    hr_eligibility: row.hr_eligibility || "",
+    hr_block_reason: row.hr_block_reason || "",
+    hr_blocked_by: row.hr_blocked_by || "",
+    hr_blocked_at: row.hr_blocked_at || "",
+    effective_can_raise: yesNo(row.effective_can_raise),
     request_status: row.request_status,
     request_id: row.request_id === null ? "" : row.request_id,
   };
@@ -171,6 +184,7 @@ class AttendanceShiftChangeReportRoutes {
       can_raise: query.can_raise || "ALL",
       worked_longer: query.worked_longer || "ALL",
       request_status: query.request_status || "ALL",
+      hr_eligibility: query.hr_eligibility || "ALL",
       search: query.search ? String(query.search).trim() : null,
     };
   }
