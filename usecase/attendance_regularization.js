@@ -15,6 +15,7 @@ const { CALC_STATUS, addDays } = require("../utils/attendance_engine");
 const { toDateOnly } = require("../utils/shiftResolution");
 const { EMPLOYEE_BRANCH_SCOPE } = require("../utils/employee_branch_scope");
 const { payrollLockedActionError } = require("../utils/attendance_payroll_lock");
+const shiftChangeEligibility = require("../utils/shift_change_eligibility");
 
 /** MySQL's TINYINT(1), a JS boolean and a string "1" all mean the same thing. */
 const tinyBool = (value) => value === true || Number(value) === 1;
@@ -83,8 +84,15 @@ function validationError(message) {
   return err;
 }
 
-/** How far back a date may be regularized. A month of slack, not a decade. */
-const MAX_BACKDATE_DAYS = 45;
+/**
+ * How far back a date may be regularized. A month of slack, not a decade.
+ *
+ * DEFINED IN `utils/shift_change_eligibility.js` AND IMPORTED HERE, so the
+ * window this file enforces and the window the Shift Change Eligibility
+ * report prints as a reason are the same number rather than two 45s that
+ * somebody has to remember to change together.
+ */
+const { MAX_BACKDATE_DAYS, MAX_FORWARD_DAYS } = shiftChangeEligibility;
 
 /**
  * `approverSetupRepo` is the EMPLOYEE-LEVEL approver store (Attendance
@@ -523,9 +531,6 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
     return `${name ? `${name} ` : ""}${hhmm(shift.in_time)}-${hhmm(shift.out_time)}`;
   };
 
-  /** How far ahead a one-day shift may be asked for. A roster, not a plan. */
-  const MAX_FORWARD_DAYS = 60;
-
   /**
    * THE EMPLOYEE'S ONE-DAY SHIFT CHANGE REQUEST.
    *
@@ -577,23 +582,51 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
     }
 
     const businessToday = istToday(today);
-    if (date < addDays(businessToday, -MAX_BACKDATE_DAYS)) {
-      throw validationError(`A shift change can be requested for the last ${MAX_BACKDATE_DAYS} days only`);
-    }
-    if (date > addDays(businessToday, MAX_FORWARD_DAYS)) {
-      throw validationError(`A shift change can be requested up to ${MAX_FORWARD_DAYS} days ahead only`);
-    }
+
+    /**
+     * EVERY REFUSAL BELOW IS `utils/shift_change_eligibility.js#decidePreconditions`,
+     * AND NOT A TEST WRITTEN HERE.
+     *
+     * It is the SAME function the Shift Change Eligibility report calls for
+     * its "Can Raise Shift Change?" column, so a date HR is told is raisable
+     * is a date this function accepts, and a No in the report carries the
+     * very sentence the employee would have been shown. The rule cannot drift
+     * between the two screens because there is only one copy of it.
+     *
+     * It is called as each fact becomes known rather than once at the end:
+     * the reads are ordered so an out-of-window date still costs nothing, and
+     * a pure decision function evaluated on a prefix of the facts returns the
+     * same first refusal it would on all of them.
+     */
+    const gate = (facts) => {
+      const blocked = shiftChangeEligibility.decidePreconditions({
+        attendance_date: date,
+        today: businessToday,
+        ...facts,
+      });
+      if (!blocked) return;
+      // The payroll lock keeps its own error SHAPE - callers branch on it and
+      // the response carries the locked periods - while the rule that decided
+      // it stays in the shared file with the others.
+      if (blocked.reason_code === shiftChangeEligibility.SHIFT_CHANGE_REASON.PAYROLL_LOCKED) {
+        throw payrollLockedActionError(blocked.payroll_locked, "A shift change for this date");
+      }
+      throw validationError(blocked.reason);
+    };
+
+    gate({});
 
     // PAYROLL LOCK, BEFORE THE REQUEST EXISTS. A date in a settled month can
     // no longer be recalculated by anybody, so a request for it could never
     // be approved; letting it be filed would only put a row in the queue that
     // has to be rejected by hand.
+    let locked = [];
     if (typeof attendanceCalculationUsecase.findPayrollLockedPeriods === "function") {
-      const locked = await attendanceCalculationUsecase.findPayrollLockedPeriods([
+      locked = await attendanceCalculationUsecase.findPayrollLockedPeriods([
         { employee_id: employeeId, attendance_date: date },
       ]);
-      if (locked.length > 0) throw payrollLockedActionError(locked, "A shift change for this date");
     }
+    gate({ payroll_locked: locked });
 
     const identity = await resolveIdentity(employeeId);
 
@@ -602,13 +635,7 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
     // already-decided cases too, and says which.
     const existing = await attendanceRegularizationRepo.findRequestsForDates(employeeId, [date]);
     const priorShift = (existing || []).find((r) => r.request_type === REQUEST_TYPE.SHIFT_CHANGE);
-    if (priorShift && priorShift.status !== REQUEST_STATUS.REJECTED) {
-      throw validationError(
-        `A shift change for ${date} ${
-          priorShift.status === REQUEST_STATUS.PENDING ? "is already pending" : "has already been approved"
-        } (#${priorShift.attendance_approval_request_id})`
-      );
-    }
+    gate({ payroll_locked: locked, existing_request: priorShift || null });
 
     // The two shifts, resolved through the calculation's own resolver on the
     // configuration version in force for that date.
@@ -618,11 +645,15 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
       work_shift_id: requestedShiftId,
     });
 
-    if (resolved.base.work_shift_id === null) {
-      throw validationError(
-        `You have no work shift assigned for ${date}, so there is no shift to change from`
-      );
-    }
+    gate({
+      payroll_locked: locked,
+      existing_request: priorShift || null,
+      base_work_shift_id:
+        resolved.base.work_shift_id === null || resolved.base.work_shift_id === undefined
+          ? null
+          : Number(resolved.base.work_shift_id),
+    });
+
     if (Number(resolved.base.work_shift_id) === requestedShiftId) {
       throw validationError(`That is already your shift for ${date}`);
     }
@@ -635,9 +666,19 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
 
     const requestedNrm = Number(resolved.nrm_minutes);
     const baseNrm = Number(resolved.base.nrm_minutes);
-    if (!(requestedNrm > baseNrm)) {
+    // THE LONGER-ONLY RULE, from the shared file. The report asks whether ANY
+    // shift would satisfy it; this asks whether the ONE the employee named
+    // does. Same predicate, same sentence, one place.
+    if (
+      !shiftChangeEligibility.hasLongerShiftOption({
+        base_nrm_minutes: baseNrm,
+        candidates: [{ is_working_day: resolved.is_working_day, nrm_minutes: requestedNrm }],
+      })
+    ) {
       throw validationError(
-        "Temporary shift requests are only allowed for shifts with longer working hours than your normal shift."
+        shiftChangeEligibility.REASON_TEXT[
+          shiftChangeEligibility.SHIFT_CHANGE_REASON.NO_LONGER_SHIFT
+        ]
       );
     }
 
@@ -712,6 +753,15 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
    * not the rule - `raiseShiftChangeRequest` re-derives every one of these
    * conditions on the server and refuses anything that fails them, so a
    * hand-made request cannot get past a filtered dropdown.
+   *
+   * THE LONGER-SHIFT TEST IS THE SHARED ONE, `hasLongerShiftOption`, and is
+   * not written out again here. This function used to carry its own copy of
+   * the predicate, which was harmless only for as long as the two agreed: a
+   * dropdown that offered a shift the submit path then refused would send an
+   * employee round a loop they cannot get out of, and one that HID a shift
+   * the submit path would have accepted would silently deny them a
+   * regularisation they were entitled to. Same helper, same conditions, one
+   * place - so the options offered and the request accepted cannot drift.
    */
   const shiftChangeOptions = async ({ actor, attendance_date }) => {
     const employeeId = Number(actor && actor.employee_id);
@@ -739,8 +789,19 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
         work_shift_id: id,
       });
       /* eslint-enable no-await-in-loop */
-      if (!candidate.is_working_day || candidate.nrm_minutes === null) continue;
-      if (!(Number(candidate.nrm_minutes) > Number(base.base.nrm_minutes))) continue;
+      // `!!` because the helper rejects only an explicit `false`, while
+      // `shiftForDate` reports "no snapshot for this date" as `null` - which
+      // this loop has always treated as "does not run", and still must.
+      if (
+        !shiftChangeEligibility.hasLongerShiftOption({
+          base_nrm_minutes: base.base.nrm_minutes,
+          candidates: [
+            { is_working_day: !!candidate.is_working_day, nrm_minutes: candidate.nrm_minutes },
+          ],
+        })
+      ) {
+        continue;
+      }
       options.push({
         work_shift_id: id,
         shift_code: candidate.shift_code,

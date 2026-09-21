@@ -2097,6 +2097,17 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       ? attendanceCalculationRepo.findPayrollLockedPeriods(rows)
       : Promise.resolve([]);
 
+  /**
+   * The same answer for MANY employee/date pairs at once, for reports.
+   *
+   * Falls back to the per-period form when the repository predates it, so a
+   * caller never has to ask which one it has.
+   */
+  const findPayrollLockedPeriodsBulk = (rows) =>
+    attendanceCalculationRepo.findPayrollLockedPeriodsBulk
+      ? attendanceCalculationRepo.findPayrollLockedPeriodsBulk(rows)
+      : findPayrollLockedPeriods(rows);
+
   return {
     MAX_RANGE_DAYS,
     CALC_STATUS,
@@ -2127,6 +2138,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     setDateShift,
     shiftForDate,
     findPayrollLockedPeriods,
+    findPayrollLockedPeriodsBulk,
     listDateShiftOptions,
     calculateMonth,
   };
