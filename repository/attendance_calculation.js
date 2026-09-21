@@ -1042,7 +1042,13 @@ class AttendanceCalculationRepository {
       ),
       this._read(
         "LIST-SHIFT-PROPAGATION-LOCKED",
-        `SELECT employee_id, period_year, period_month
+        // `locked_at` travels with the month because WHEN it was locked
+        // decides whether a skip is legitimate. A month locked BEFORE this
+        // propagation was owed is simply settled; a month locked AFTER it was
+        // owed was approved against attendance this rule change had not
+        // reached yet, and that is reported rather than skipped silently.
+        `SELECT employee_id, period_year, period_month,
+                DATE_FORMAT(locked_at, '%Y-%m-%d %H:%i:%s.%f') AS locked_at
            FROM payrun_employee_calculation
           WHERE employee_id IN (?) AND status = ?`,
         [employeeIds, PAYROLL_LOCK_STATUS]
@@ -1089,9 +1095,11 @@ class AttendanceCalculationRepository {
       entryFor(row.employee_id).override_dates.push(row.attendance_date);
     });
     (locked || []).forEach((row) => {
-      entryFor(row.employee_id).locked_months.push(
-        `${Number(row.period_year)}-${String(Number(row.period_month)).padStart(2, "0")}`
-      );
+      const entry = entryFor(row.employee_id);
+      const month = `${Number(row.period_year)}-${String(Number(row.period_month)).padStart(2, "0")}`;
+      entry.locked_months.push(month);
+      entry.locked_at = entry.locked_at || {};
+      entry.locked_at[month] = row.locked_at || null;
     });
 
     return [...byEmployee.values()];
@@ -1330,6 +1338,7 @@ class AttendanceCalculationRepository {
       "READ-CLAIMED-RECALCULATION-RUN",
       `SELECT attendance_recalculation_run_id, requested_by_employee_id, trigger_source,
               work_shift_id, employee_id, store_id, designation_id, attempts,
+              DATE_FORMAT(queued_at, '%Y-%m-%d %H:%i:%s.%f') AS queued_at,
               DATE_FORMAT(from_date, '%Y-%m-%d') AS from_date,
               DATE_FORMAT(to_date, '%Y-%m-%d') AS to_date
          FROM attendance_recalculation_run
@@ -1337,6 +1346,27 @@ class AttendanceCalculationRepository {
       [runId]
     );
     return rows && rows[0] ? rows[0] : null;
+  }
+
+  /**
+   * THE RUN'S REAL SCOPE, written once the worker has derived it.
+   *
+   * The queued row carries a placeholder - zero employees and the widest
+   * range a propagation could possibly have - because the save's transaction
+   * is not the place to resolve a population. This replaces it with what the
+   * run is actually going to do, BEFORE it starts doing it, so the
+   * Recalculate Attendance screen never shows "3 / 0 employees" or a
+   * cutover-to-today range for a run that touched four dates.
+   */
+  async updateRecalculationRunScope(runId, { employees_targeted, from_date, to_date }) {
+    if (!runId) return;
+    await this._read(
+      "UPDATE-RECALCULATION-RUN-SCOPE",
+      `UPDATE attendance_recalculation_run
+          SET employees_targeted = ?, from_date = ?, to_date = ?
+        WHERE attendance_recalculation_run_id = ?`,
+      [Number(employees_targeted) || 0, from_date, to_date, runId]
+    );
   }
 
   /** Still alive, still working. */
@@ -1422,9 +1452,17 @@ class AttendanceCalculationRepository {
   async retryRecalculationRun(runId) {
     const result = await this._read(
       "RETRY-RECALCULATION-RUN",
+      // EVERY FIGURE OF THE PREVIOUS ATTEMPT GOES. A retried run has not
+      // recalculated anything yet, and leaving last time's counts and errors
+      // on it would have the screen reporting a finished attempt as the state
+      // of a pending one. The scope goes back to "not yet derived": the next
+      // claim re-derives and rewrites it.
       `UPDATE attendance_recalculation_run
           SET status = 'QUEUED', attempts = 0, heartbeat_at = NULL,
-              completed_at = NULL, last_error = NULL
+              completed_at = NULL, last_error = NULL,
+              employees_targeted = 0, employees_completed = 0, employees_failed = 0,
+              days_processed = 0, days_skipped_locked = 0, errors = NULL,
+              queued_at = CURRENT_TIMESTAMP(3)
         WHERE attendance_recalculation_run_id = ?
           AND trigger_source = 'WORK_SHIFT_SAVE'
           AND status IN ('FAILED', 'COMPLETED_WITH_ERRORS')`,

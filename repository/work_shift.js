@@ -191,9 +191,12 @@ async function appendConfigVersionOnConnection(connection, work_shift_id, option
  * here are the widest the scope could possibly be (the v2 cutover to today);
  * the run's real range is written when it finishes.
  *
- * ONE PENDING JOB PER SHIFT. Three edits in a minute owe one propagation,
- * not three: a run still QUEUED for this shift is reused. It has not started,
- * so it will see all three changes when it does.
+ * ONE PENDING JOB PER SHIFT, ENFORCED BY THE DATABASE. Three edits in a
+ * minute owe one propagation, not three: a run still QUEUED for this shift is
+ * reused, and since it has not started it will see all three changes when it
+ * does. The SELECT below is the fast path; the guarantee is the UNIQUE key on
+ * the generated `pending_work_shift_id` column, which is what stops two saves
+ * that both looked and both found nothing.
  */
 async function enqueuePropagationOnConnection(connection, work_shift_id, options = {}) {
   const [pending] = await queryAsync(
@@ -211,20 +214,48 @@ async function enqueuePropagationOnConnection(connection, work_shift_id, options
     return { run_id: Number(pending.attendance_recalculation_run_id), reused: true };
   }
 
-  const queued = await queryAsync(
-    connection,
-    `INSERT INTO attendance_recalculation_run
-       (requested_by_employee_id, trigger_source, from_date, to_date,
-        work_shift_id, employees_targeted, status)
-     VALUES (?, 'WORK_SHIFT_SAVE', ?, ?, ?, 0, 'QUEUED')`,
-    [
-      options.created_by === undefined ? null : options.created_by,
-      V2_CUTOVER_DATE,
-      istToday(options.effective_from),
-      work_shift_id,
-    ]
-  );
-  return { run_id: queued ? Number(queued.insertId) : null, reused: false };
+  try {
+    const queued = await queryAsync(
+      connection,
+      `INSERT INTO attendance_recalculation_run
+         (requested_by_employee_id, trigger_source, from_date, to_date,
+          work_shift_id, employees_targeted, status, queued_at)
+       VALUES (?, 'WORK_SHIFT_SAVE', ?, ?, ?, 0, 'QUEUED', CURRENT_TIMESTAMP(3))`,
+      [
+        options.created_by === undefined ? null : options.created_by,
+        // A PLACEHOLDER RANGE, and it is replaced. The widest the scope could
+        // possibly be, so a queued row is not nonsense to read; the worker
+        // writes the REAL range and the REAL employee count over it before it
+        // starts (`updateRecalculationRunScope`).
+        V2_CUTOVER_DATE,
+        istToday(options.effective_from),
+        work_shift_id,
+      ]
+    );
+    return { run_id: queued ? Number(queued.insertId) : null, reused: false };
+  } catch (err) {
+    // THE INVARIANT IS THE DATABASE'S, NOT THE SELECT'S. Two saves committing
+    // at the same moment both find no queued row above; the UNIQUE key on the
+    // generated `pending_work_shift_id` is what actually stops the second
+    // INSERT, and the loser reuses the row that won rather than failing a
+    // save over a job that already exists.
+    if (err && err.code === "ER_DUP_ENTRY") {
+      const [winner] = await queryAsync(
+        connection,
+        `SELECT attendance_recalculation_run_id
+           FROM attendance_recalculation_run
+          WHERE pending_work_shift_id = ?`,
+        [work_shift_id]
+      );
+      if (winner) {
+        return {
+          run_id: Number(winner.attendance_recalculation_run_id),
+          reused: true,
+        };
+      }
+    }
+    throw err;
+  }
 }
 
 class WorkShiftRepository {

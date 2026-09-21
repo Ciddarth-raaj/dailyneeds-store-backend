@@ -133,6 +133,7 @@ function propagationForEmployee({
   assignments,
   overrideDates = [],
   lockedMonths = [],
+  lockedAt = {},
   workShiftId,
   today,
   cutover = V2_CUTOVER_DATE,
@@ -231,7 +232,15 @@ function propagationForEmployee({
       })),
     skipped_locked_months: [...skipped].sort().map((month) => {
       const entry = skippedByLock.get(month) || { month, from_date: `${month}-01`, to_date: `${month}-01` };
-      return { ...entry, day_count: dayCount(entry.from_date, entry.to_date) };
+      return {
+        ...entry,
+        day_count: dayCount(entry.from_date, entry.to_date),
+        // WHEN the month was locked, carried through so the caller can tell a
+        // settled month from one that was locked while this very propagation
+        // was already owed. `lockedAt[month]` is absent for a lock nobody
+        // recorded a time for, and unknown is not treated as late.
+        locked_at: (lockedAt || {})[month] || null,
+      };
     }),
   };
 }
@@ -260,6 +269,7 @@ function propagationScope({ workShiftId, employees, today, cutover = V2_CUTOVER_
       assignments: entry.assignments,
       overrideDates: entry.override_dates,
       lockedMonths: entry.locked_months,
+      lockedAt: entry.locked_at,
       workShiftId,
       today,
       cutover,
@@ -274,6 +284,42 @@ function propagationScope({ workShiftId, employees, today, cutover = V2_CUTOVER_
   return { work, skipped_locked: skippedLocked };
 }
 
+/**
+ * DOES THIS SHIFT DECIDE THIS EMPLOYEE'S MONTH?
+ *
+ * The question payroll's Approve & Lock asks about a pending propagation:
+ * would that shift's rule change have reached THIS employee in THIS month?
+ * It is answered by the same `propagationForEmployee` the worker's scope
+ * comes from - not by a second idea of "affected" - with no locked months
+ * passed, because the month being asked about is precisely the one that is
+ * NOT locked yet.
+ *
+ * @param {string} month `YYYY-MM`
+ */
+function governsEmployeeMonth({
+  employee,
+  assignments,
+  overrideDates = [],
+  workShiftId,
+  month,
+  today,
+  cutover = V2_CUTOVER_DATE,
+}) {
+  const monthEnd = endOfMonth(`${month}-01`);
+  const { buckets } = propagationForEmployee({
+    employee,
+    assignments,
+    overrideDates,
+    lockedMonths: [],
+    workShiftId,
+    // A month that has ENDED is asked about in full. Using today would make
+    // the answer depend on when the approval happens to be run.
+    today: monthEnd > toDateOnly(today) ? monthEnd : toDateOnly(today),
+    cutover,
+  });
+  return buckets.some((bucket) => bucket.month === month);
+}
+
 module.exports = {
   monthOf,
   monthAfter,
@@ -282,6 +328,7 @@ module.exports = {
   addDaysUtc,
   dayCount,
   assignedIntervals,
+  governsEmployeeMonth,
   propagationForEmployee,
   propagationScope,
 };

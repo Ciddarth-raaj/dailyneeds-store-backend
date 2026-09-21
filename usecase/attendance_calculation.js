@@ -1592,6 +1592,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     work_shift_id,
     actor_employee_id = null,
     run_id = null,
+    queued_at = null,
     today = null,
     onProgress = null,
   }) => {
@@ -1610,6 +1611,29 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       today: todayIs(today),
     });
 
+    // THE REAL SCOPE, OVER THE PLACEHOLDER, BEFORE ANY WORK IS DONE.
+    //
+    // The queued row was written by the shift save's own transaction with
+    // zero employees and the widest range a propagation could have, because
+    // resolving a population is not something a save should do. Now that the
+    // scope IS resolved, the row is corrected - so the screen shows what this
+    // run is actually doing, and so a run that turns out to have nothing left
+    // to do does not keep pretending it had work.
+    if (run_id && attendanceCalculationRepo.updateRecalculationRunScope) {
+      const dates = work.length > 0 ? work : skipped_locked;
+      await attendanceCalculationRepo.updateRecalculationRunScope(run_id, {
+        employees_targeted: new Set(work.map((w) => w.employee_id)).size,
+        from_date:
+          dates.length > 0
+            ? dates.reduce((min, d) => (d.from_date < min ? d.from_date : min), dates[0].from_date)
+            : todayIs(today),
+        to_date:
+          dates.length > 0
+            ? dates.reduce((max, d) => (d.to_date > max ? d.to_date : max), dates[0].to_date)
+            : todayIs(today),
+      });
+    }
+
     let runId = run_id;
     if (runId === null && work.length > 0 && attendanceCalculationRepo.insertRecalculationRun) {
       runId = await attendanceCalculationRepo.insertRecalculationRun({
@@ -1624,6 +1648,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     }
 
     const errors = [];
+    const lockedAfterQueue = new Set();
     // EMPLOYEE-LEVEL COUNTS ARE MUTUALLY EXCLUSIVE. An employee whose
     // September succeeded and whose October failed is a FAILED employee, not
     // both a completed and a failed one: the per-month detail lives in
@@ -1639,6 +1664,31 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       (sum, entry) => sum + (Number(entry.day_count) || 0),
       0
     );
+
+    // A MONTH LOCKED AFTER THIS PROPAGATION WAS OWED IS NOT AN ORDINARY SKIP.
+    //
+    // Payroll's Approve & Lock refuses to lock a month with a propagation
+    // still pending for it, so this should not happen. If it does - a lock
+    // that landed in the gap between that guard's read and this run reaching
+    // the month, or a row locked by some path that predates the guard - then
+    // a month has been settled against attendance this rule change never
+    // reached, and nobody would ever find out from a silent skip. It is
+    // recorded as an error on the run: visible, retryable, and naming the
+    // employee and month a human has to look at.
+    (queued_at ? skipped_locked : []).forEach((entry) => {
+      if (!entry.locked_at || entry.locked_at <= queued_at) return;
+      errors.push({
+        employee_id: entry.employee_id,
+        period: `${entry.month.slice(5, 7)}/${entry.month.slice(0, 4)}`,
+        from_date: entry.from_date,
+        to_date: entry.to_date,
+        message:
+          `Payroll for ${entry.month} was approved and locked at ${entry.locked_at}, after this ` +
+          "shift-rule recalculation was queued. That month is frozen at figures calculated " +
+          "before the rule changed, and only payroll can decide what to do about it.",
+      });
+      lockedAfterQueue.add(entry.employee_id);
+    });
     const skippedLockedMonths = new Set(
       skipped_locked.map((entry) => `${entry.employee_id}|${entry.month}`)
     );
@@ -1680,6 +1730,8 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       }
       /* eslint-enable no-await-in-loop */
     }
+
+    lockedAfterQueue.forEach((id) => failedEmployees.add(id));
 
     const targeted = new Set(work.map((w) => w.employee_id)).size;
     const completed = [...succeededMonths.keys()].filter((id) => !failedEmployees.has(id)).length;
@@ -1756,6 +1808,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
           work_shift_id: Number(run.work_shift_id),
           actor_employee_id: run.requested_by_employee_id || null,
           run_id: runId,
+          queued_at: run.queued_at || null,
           today,
           onProgress: () => attendanceCalculationRepo.heartbeatRecalculationRun(runId),
         });

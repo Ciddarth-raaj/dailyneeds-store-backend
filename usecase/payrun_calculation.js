@@ -1150,6 +1150,35 @@ class PayrunCalculationUsecase {
           });
           return;
         }
+        if (entry.outcome === "RECALCULATION_PENDING") {
+          /*
+           * A WORK SHIFT RULE CHANGED WHILE THIS MONTH WAS STILL OPEN, and
+           * the recalculation it owes this employee has not finished. Locking
+           * now would settle the month on figures the rule change supersedes,
+           * and a locked month cannot be revisited - so the approval waits
+           * for the recalculation instead, which is minutes at most.
+           *
+           * BLOCKED, like every other "not approvable right now" verdict, so
+           * no screen needs a new result code. The run ids travel with it:
+           * they are what the Recalculate Attendance screen shows, and a run
+           * that FAILED is retried from there.
+           */
+          const runs = entry.pending_recalculations || [];
+          const failed = runs.filter((r) => r.status === "FAILED" || r.status === "COMPLETED_WITH_ERRORS");
+          results.push({
+            employee_id: entry.employee_id,
+            result: ROW_RESULT.BLOCKED,
+            pending_recalculations: runs,
+            message:
+              failed.length > 0
+                ? "A work shift rule changed and its attendance recalculation did not finish " +
+                  `(run #${failed[0].run_id}). Retry it on Recalculate Attendance, then approve.`
+                : "A work shift rule changed while this month was open and the attendance " +
+                  `recalculation is still running (run #${runs[0] ? runs[0].run_id : "?"}). ` +
+                  "Approve once it has completed.",
+          });
+          return;
+        }
         results.push({
           employee_id: entry.employee_id,
           result: ROW_RESULT.BLOCKED,

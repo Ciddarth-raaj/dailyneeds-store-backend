@@ -34,6 +34,7 @@ const assert = require("node:assert/strict");
 const buildCalculation = require("../usecase/attendance_calculation");
 const buildWorkShift = require("../usecase/work_shift");
 const { buildConfigVersion, configVersionHash } = require("../utils/shift_config_version");
+const { governsEmployeeMonth } = require("../utils/shift_propagation");
 
 /** The business date every test in this file runs on. */
 const TODAY = "2026-09-21";
@@ -136,6 +137,7 @@ function world({ lockedMonths = [] } = {}) {
     punches: [],
     stored: new Map(), // `${employee}|${date}` -> stored row
     lockedMonths: new Set(lockedMonths), // `${employee}|YYYY-MM`
+    lockedAt: new Map(),
     assignments: new Map([
       [ALICE, [{ employee_work_shift_assignment_id: 1, employee_id: ALICE, work_shift_id: SHIFT, effective_from: "2026-01-01" }]],
       [BOB, [{ employee_work_shift_assignment_id: 2, employee_id: BOB, work_shift_id: SHIFT, effective_from: "2026-01-01" }]],
@@ -231,6 +233,7 @@ function world({ lockedMonths = [] } = {}) {
               to_date: TODAY,
               employees_targeted: 0,
               attempts: 0,
+              queued_at: state.now,
               status: "QUEUED",
             });
             propagationRunId = state.runs.length;
@@ -313,6 +316,9 @@ function world({ lockedMonths = [] } = {}) {
         locked_months: [...state.lockedMonths]
           .filter((key) => key.startsWith(`${employeeId}|`))
           .map((key) => key.split("|")[1]),
+        locked_at: [...state.lockedMonths]
+          .filter((key) => key.startsWith(`${employeeId}|`))
+          .reduce((acc, key) => ({ ...acc, [key.split("|")[1]]: state.lockedAt.get(key) || null }), {}),
       }));
     },
     // The queue, as three rows of SQL do it.
@@ -334,6 +340,10 @@ function world({ lockedMonths = [] } = {}) {
       run.attempts += 1;
       run.heartbeat_at = state.now;
       return { ...run };
+    },
+    updateRecalculationRunScope: async (runId, scope) => {
+      const run = state.runs[runId - 1];
+      if (run) Object.assign(run, scope);
     },
     heartbeatRecalculationRun: async (runId) => {
       state.heartbeats.push(runId);
@@ -372,9 +382,21 @@ function world({ lockedMonths = [] } = {}) {
       const run = state.runs[runId - 1];
       if (!run || run.trigger_source !== "WORK_SHIFT_SAVE") return false;
       if (!["FAILED", "COMPLETED_WITH_ERRORS"].includes(run.status)) return false;
-      run.status = "QUEUED";
-      run.attempts = 0;
-      run.last_error = null;
+      // Every figure of the previous attempt goes, exactly as the UPDATE does.
+      Object.assign(run, {
+        status: "QUEUED",
+        attempts: 0,
+        last_error: null,
+        completed_at: null,
+        heartbeat_at: null,
+        employees_targeted: 0,
+        employees_completed: 0,
+        employees_failed: 0,
+        days_processed: 0,
+        days_skipped_locked: 0,
+        errors: null,
+        queued_at: state.now,
+      });
       return true;
     },
     getRecalculationRun: async (runId) => state.runs[runId - 1] || null,
@@ -409,12 +431,55 @@ function world({ lockedMonths = [] } = {}) {
     },
   };
 
+  /**
+   * PAYROLL'S APPROVE & LOCK, reduced to the two things this file is about:
+   * it refuses while an unresolved propagation governs the employee's month,
+   * and otherwise it locks. The real guard is
+   * `repository/payrun_calculation.js#_pendingShiftPropagationLocked`, driven
+   * against its own statements in
+   * `repository/payrun_approval_propagation_guard.test.js`; what is reused
+   * HERE is the applicability rule it calls, so the two cannot disagree about
+   * which months a pending run covers.
+   */
+  const approveAndLock = async (employeeId, month) => {
+    const unresolved = state.runs.filter(
+      (r) =>
+        r.trigger_source === "WORK_SHIFT_SAVE" &&
+        ["QUEUED", "RUNNING", "FAILED", "COMPLETED_WITH_ERRORS"].includes(r.status)
+    );
+    const blocking = unresolved.filter((r) =>
+      governsEmployeeMonth({
+        employee: state.employment.get(employeeId) || { attendance_required: 1 },
+        assignments: state.assignments.get(employeeId) || [],
+        overrideDates: (state.overrides.get(employeeId) || [])
+          .filter((o) => Number(o.work_shift_id) === Number(r.work_shift_id))
+          .map((o) => o.attendance_date),
+        workShiftId: Number(r.work_shift_id),
+        month,
+        today: TODAY,
+      })
+    );
+    if (blocking.length > 0) {
+      return {
+        outcome: "RECALCULATION_PENDING",
+        pending_recalculations: blocking.map((r) => ({
+          run_id: r.attendance_recalculation_run_id,
+          work_shift_id: r.work_shift_id,
+          status: r.status,
+        })),
+      };
+    }
+    state.lockedMonths.add(`${employeeId}|${month}`);
+    state.lockedAt.set(`${employeeId}|${month}`, "2026-09-21 18:00:00.000");
+    return { outcome: "APPROVED" };
+  };
+
   // TODAY IS PINNED. The propagation never reaches a future date, so a test
   // that agreed with the wall clock would start failing on its own one day.
   const calculation = buildCalculation(calculationRepo, { today: TODAY });
   const workShift = buildWorkShift(workShiftRepo);
 
-  return { state, calculation, workShift, appendVersion, isLocked };
+  return { state, calculation, workShift, appendVersion, isLocked, approveAndLock };
 }
 
 /**
@@ -780,6 +845,207 @@ describe("work shift rule propagation", () => {
 
     assert.equal(storedOt(w, CARL, "2026-09-15"), 110, "the overridden date uses 9 TO 6's new rule");
     assert.equal(storedOt(w, CARL, "2026-09-13"), 100, "his ordinary days are not this shift's");
+  });
+});
+
+describe("payroll cannot overtake a pending propagation", () => {
+  it("THE REQUIRED SEQUENCE: blocked before the worker, approved after it, frozen afterwards", async () => {
+    const w = await seedSeptember();
+    assert.equal(storedOt(w, ALICE, "2026-09-13"), 100, "1. 13-Sep pays 100 under the 20 minute minimum");
+
+    // 2 + 3. The rule changes and commits with its queued propagation.
+    const save = await saveMinimumOt(w, 10);
+    assert.equal(w.state.runs[0].status, "QUEUED");
+
+    // 4. The worker has NOT run.
+    // 5. Approve & Lock must refuse, and say why.
+    const blocked = await w.approveAndLock(ALICE, "2026-09");
+    assert.equal(blocked.outcome, "RECALCULATION_PENDING");
+    assert.deepEqual(blocked.pending_recalculations, [
+      { run_id: save.config_version.propagation_run_id, work_shift_id: SHIFT, status: "QUEUED" },
+    ]);
+    assert.equal(w.isLocked(ALICE, "2026-09-13"), false, "nothing was settled");
+
+    // 6. The worker runs.
+    await drainQueue(w);
+    assert.equal(storedOt(w, ALICE, "2026-09-13"), 110);
+    assert.equal(w.state.runs[0].status, "COMPLETED");
+
+    // 7. Now it approves.
+    const approved = await w.approveAndLock(ALICE, "2026-09");
+    assert.equal(approved.outcome, "APPROVED");
+
+    // 8. A later rule change leaves the settled month alone.
+    await saveMinimumOt(w, 5);
+    await drainQueue(w);
+    assert.equal(storedOt(w, ALICE, "2026-09-13"), 110, "September is frozen at what was approved");
+  });
+
+  it("a RUNNING propagation blocks too", async () => {
+    const w = await seedSeptember();
+    await saveMinimumOt(w, 10);
+    w.state.runs[0].status = "RUNNING";
+    assert.equal((await w.approveAndLock(ALICE, "2026-09")).outcome, "RECALCULATION_PENDING");
+  });
+
+  it("a FAILED propagation blocks: nobody knows whether it reached this month", async () => {
+    const w = await seedSeptember();
+    await saveMinimumOt(w, 10);
+    w.state.runs[0].status = "FAILED";
+    assert.equal((await w.approveAndLock(ALICE, "2026-09")).outcome, "RECALCULATION_PENDING");
+
+    // And the retry clears the way once it completes.
+    await w.calculation.retryRecalculationRun(1);
+    await drainQueue(w);
+    assert.equal((await w.approveAndLock(ALICE, "2026-09")).outcome, "APPROVED");
+  });
+
+  it("COMPLETED_WITH_ERRORS blocks the employee whose month is in the unresolved run", async () => {
+    const w = await seedSeptember();
+    await saveMinimumOt(w, 10);
+    w.state.runs[0].status = "COMPLETED_WITH_ERRORS";
+    assert.equal((await w.approveAndLock(ALICE, "2026-09")).outcome, "RECALCULATION_PENDING");
+  });
+
+  it("an unrelated shift's propagation does not block", async () => {
+    const w = await seedSeptember();
+    await saveMinimumOt(w, 10);
+    // Carl is on the other shift and was never on 9 TO 6.
+    assert.equal((await w.approveAndLock(CARL, "2026-09")).outcome, "APPROVED");
+  });
+
+  it("a month locked while the propagation was pending is reported, never skipped silently", async () => {
+    // The guard above should prevent this. If a lock lands anyway - through a
+    // path that predates the guard, or in the instant between its read and
+    // this run reaching the month - the month has been settled on attendance
+    // the rule change never reached, and that must be visible.
+    const w = await seedSeptember();
+    await saveMinimumOt(w, 10);
+    w.state.lockedMonths.add(`${ALICE}|2026-09`);
+    w.state.lockedAt.set(`${ALICE}|2026-09`, new Date(w.state.now + 60000).toISOString());
+
+    await drainQueue(w);
+
+    const run = w.state.runs[0];
+    assert.equal(run.status, "COMPLETED_WITH_ERRORS");
+    const reported = run.errors.find((e) => e.employee_id === ALICE);
+    assert.ok(reported, "the employee-month is named");
+    assert.match(reported.message, /was approved and locked at .*after this shift-rule recalculation was queued/s);
+    assert.equal(storedOt(w, ALICE, "2026-09-13"), 100, "and the locked month is untouched");
+  });
+});
+
+describe("the run row tells the truth about its own scope", () => {
+  it("the queued placeholder is replaced with the REAL employees and dates", async () => {
+    const w = await seedSeptember();
+    const save = await saveMinimumOt(w, 10);
+
+    const queued = w.state.runs[0];
+    assert.equal(queued.employees_targeted, 0, "the save could not know, and did not guess");
+    assert.equal(queued.from_date, "2026-09-01");
+
+    await drainQueue(w);
+
+    const run = w.state.runs[save.config_version.propagation_run_id - 1];
+    assert.equal(run.employees_targeted, 3, "Alice, Bob and Dee are on this shift");
+    assert.equal(run.employees_completed, 3);
+    assert.equal(run.employees_failed, 0);
+    assert.ok(
+      run.employees_completed <= run.employees_targeted,
+      "never 3 / 0 - the screen shows completed out of targeted"
+    );
+    assert.equal(run.from_date, "2026-09-01", "the first open affected date");
+    assert.equal(run.to_date, TODAY, "and the last");
+    assert.equal(run.status, "COMPLETED");
+  });
+
+  it("the range is the range actually affected, not the cutover-to-today placeholder", async () => {
+    const w = await seedSeptember();
+    // Everyone leaves the shift after 14-Sep, so the affected window ends there.
+    [ALICE, BOB, DEE].forEach((id) => {
+      w.state.assignments.set(id, [
+        ...w.state.assignments.get(id),
+        {
+          employee_work_shift_assignment_id: 50 + id,
+          employee_id: id,
+          work_shift_id: OTHER_SHIFT,
+          effective_from: "2026-09-15",
+        },
+      ]);
+    });
+
+    await saveMinimumOt(w, 10);
+    await drainQueue(w);
+
+    const run = w.state.runs[0];
+    assert.equal(run.to_date, "2026-09-14", "not today, because the shift stopped governing then");
+  });
+
+  it("no open work left: the run finishes honestly at zero rather than keeping the placeholder", async () => {
+    const w = await seedSeptember();
+    await saveMinimumOt(w, 10);
+    // Every affected month is locked before the worker gets there.
+    [ALICE, BOB, DEE].forEach((id) => w.state.lockedMonths.add(`${id}|2026-09`));
+
+    await drainQueue(w);
+
+    const run = w.state.runs[0];
+    assert.equal(run.employees_targeted, 0);
+    assert.equal(run.employees_completed, 0);
+    assert.equal(run.days_processed, 0);
+    assert.ok(run.days_skipped_locked > 0, "the days it did not touch are counted");
+    assert.equal(run.status, "COMPLETED");
+    // The range now describes the SKIPPED work rather than a window of work
+    // that never existed: here that is the same September span, and what
+    // matters is that no employee is claimed as targeted.
+    assert.equal(run.from_date, "2026-09-01");
+    assert.equal(
+      run.employees_completed,
+      0,
+      "a run that recalculated nothing says so, instead of inheriting the placeholder"
+    );
+  });
+
+  it("RETRY clears the previous attempt's figures, and the next claim re-derives them", async () => {
+    const w = await seedSeptember();
+    await saveMinimumOt(w, 10);
+    await drainQueue(w);
+
+    // Dirty it the way a partly failed attempt would.
+    Object.assign(w.state.runs[0], {
+      status: "COMPLETED_WITH_ERRORS",
+      employees_completed: 2,
+      employees_failed: 1,
+      days_processed: 40,
+      days_skipped_locked: 9,
+      errors: [{ employee_id: ALICE, message: "stale" }],
+      last_error: "stale",
+      completed_at: "2026-09-21 10:00:00",
+    });
+
+    await w.calculation.retryRecalculationRun(1);
+
+    const requeued = w.state.runs[0];
+    assert.equal(requeued.status, "QUEUED");
+    assert.equal(requeued.attempts, 0);
+    assert.equal(requeued.employees_targeted, 0, "the scope is pending again until re-derived");
+    assert.equal(requeued.employees_completed, 0);
+    assert.equal(requeued.employees_failed, 0);
+    assert.equal(requeued.days_processed, 0);
+    assert.equal(requeued.days_skipped_locked, 0);
+    assert.equal(requeued.errors, null);
+    assert.equal(requeued.last_error, null);
+    assert.equal(requeued.completed_at, null);
+    assert.equal(requeued.heartbeat_at, null);
+
+    await drainQueue(w);
+
+    const done = w.state.runs[0];
+    assert.equal(done.status, "COMPLETED");
+    assert.equal(done.employees_targeted, 3, "re-derived, not inherited");
+    assert.equal(done.employees_completed, 3);
+    assert.equal(done.employees_failed, 0);
+    assert.deepEqual(done.errors, []);
   });
 });
 

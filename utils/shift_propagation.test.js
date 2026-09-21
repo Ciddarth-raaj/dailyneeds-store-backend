@@ -173,7 +173,7 @@ describe("one employee's share of a rule change", () => {
     const { buckets, skipped_locked_months } = scopeOf({ lockedMonths: ["2026-09"] });
     assert.deepEqual(buckets, []);
     assert.deepEqual(skipped_locked_months, [
-      { month: "2026-09", from_date: "2026-09-01", to_date: TODAY, day_count: 21 },
+      { month: "2026-09", from_date: "2026-09-01", to_date: TODAY, day_count: 21, locked_at: null },
     ]);
   });
 

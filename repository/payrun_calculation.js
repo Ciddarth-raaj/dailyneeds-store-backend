@@ -14,6 +14,8 @@ const {
   sourceMarkers,
   attendanceSourceChanges,
 } = require("../utils/payrun_calculation");
+const { governsEmployeeMonth } = require("../utils/shift_propagation");
+const { istToday } = require("../utils/istDate");
 
 /**
  * Payrun Calculation & Review - the reads a calculated month needs, and the
@@ -583,6 +585,150 @@ class PayrunCalculationRepository {
     return attendanceSourceChanges(stored, current);
   }
 
+  /**
+   * A WORK SHIFT RULE CHANGE THAT HAS NOT REACHED THIS MONTH YET.
+   *
+   * =========================================================== WHY =========
+   *
+   * A shift rule saved while a month is open must be propagated into that
+   * month BEFORE payroll settles it. The propagation is deliberately
+   * asynchronous - it can be hundreds of employee-months - and that opens a
+   * race the lock itself cannot see:
+   *
+   *   1  the rule changes and commits, owing a QUEUED propagation
+   *   2  the worker has not reached this employee's month yet
+   *   3  Approve & Lock runs against the OLD stored attendance
+   *   4  the month becomes APPROVED_LOCKED
+   *   5  the worker arrives, is correctly refused by the payroll lock
+   *   6  payroll is frozen forever on figures the rule change superseded
+   *
+   * Nothing downstream can repair 6: a locked month is settled by design. So
+   * the approval must refuse to settle a month that is still owed a
+   * recalculation.
+   *
+   * ==================================================== WHY IT IS HERE =====
+   *
+   * ON THE APPROVAL'S OWN CONNECTION, INSIDE ITS TRANSACTION, AFTER the row
+   * is locked and BEFORE the status changes - beside the attendance-source
+   * revalidation, for the same reason that one is here rather than in the
+   * usecase: a check made before the transaction can be overtaken by the
+   * thing it is checking for. `FOR UPDATE` on the unresolved runs is what
+   * settles the two orderings against a Work Shift save committing at the
+   * same moment:
+   *
+   *   save first       its QUEUED row is committed and visible; this read
+   *                    finds it and the approval is refused
+   *   approval first   the read holds the index range it scanned, so the
+   *                    save's INSERT waits for this transaction to finish;
+   *                    the rule change therefore lands AFTER the month was
+   *                    locked, which is an ordinary settled month and
+   *                    correctly skipped by the propagation
+   *
+   * And because no lock can be perfect against a path that does not take it,
+   * the worker ALSO reports any month it finds locked after its own run was
+   * queued (`usecase/attendance_calculation.js`), so a month settled on stale
+   * attendance can never be a silent skip.
+   *
+   * ======================================================= UNRESOLVED ======
+   *
+   * QUEUED, RUNNING, FAILED and COMPLETED_WITH_ERRORS all mean "this rule
+   * change may not have reached that month". Only COMPLETED is clear.
+   *
+   * ==================================================== EMPLOYEE-SPECIFIC ==
+   *
+   * An unresolved run blocks only the employees and months that shift
+   * actually governs, answered by the SAME dated logic the propagation's own
+   * scope comes from - `utils/shift_propagation.js#governsEmployeeMonth` over
+   * that employee's assignment history, their overrides onto that shift and
+   * their employment. Somebody who has never been on the edited shift is not
+   * held up by it.
+   *
+   * THE COMMON CASE COSTS ONE INDEXED READ. With no unresolved propagation
+   * anywhere - which is almost always - this returns after the first
+   * statement and asks nothing else.
+   */
+  async _pendingShiftPropagationLocked(conn, { employee_id, year, month }) {
+    const unresolved = await this._read(
+      "LOCK-UNRESOLVED-SHIFT-PROPAGATIONS",
+      `SELECT attendance_recalculation_run_id, work_shift_id, status
+         FROM attendance_recalculation_run
+        WHERE trigger_source = 'WORK_SHIFT_SAVE'
+          AND status IN ('QUEUED', 'RUNNING', 'FAILED', 'COMPLETED_WITH_ERRORS')
+        ORDER BY attendance_recalculation_run_id ASC
+        FOR UPDATE`,
+      [],
+      conn
+    );
+    const runs = Array.isArray(unresolved) ? unresolved : [];
+    if (runs.length === 0) return [];
+
+    const shiftIds = [...new Set(runs.map((r) => Number(r.work_shift_id)).filter(Boolean))];
+    if (shiftIds.length === 0) return [];
+
+    // This employee's dated facts, on the same connection. One employee, so
+    // three small indexed reads - and only when something is actually
+    // unresolved.
+    const [employment, assignments, overrides] = await Promise.all([
+      this._read(
+        "PENDING-PROPAGATION-EMPLOYMENT",
+        `SELECT ne.employee_id, ne.attendance_required,
+                DATE_FORMAT((${JOINED_ON("ne")}), '%Y-%m-%d') AS date_of_joining,
+                DATE_FORMAT(ne.resignation_date, '%Y-%m-%d') AS resignation_date
+           FROM new_employee ne
+          WHERE ne.employee_id = ?`,
+        [employee_id],
+        conn
+      ),
+      this._read(
+        "PENDING-PROPAGATION-ASSIGNMENTS",
+        `SELECT employee_work_shift_assignment_id, employee_id, work_shift_id,
+                DATE_FORMAT(effective_from, '%Y-%m-%d') AS effective_from
+           FROM employee_work_shift_assignment
+          WHERE employee_id = ?
+          ORDER BY effective_from ASC, employee_work_shift_assignment_id ASC`,
+        [employee_id],
+        conn
+      ),
+      this._read(
+        "PENDING-PROPAGATION-OVERRIDES",
+        `SELECT work_shift_id, DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date
+           FROM attendance_date_shift_override
+          WHERE employee_id = ? AND work_shift_id IN (?)
+          GROUP BY work_shift_id, attendance_date`,
+        [employee_id, shiftIds],
+        conn
+      ),
+    ]);
+
+    const monthKey = `${year}-${String(month).padStart(2, "0")}`;
+    const employee = (Array.isArray(employment) ? employment : [])[0] || null;
+    const today = istToday();
+
+    const blocking = [];
+    runs.forEach((run) => {
+      const workShiftId = Number(run.work_shift_id);
+      if (!workShiftId) return;
+      const governs = governsEmployeeMonth({
+        employee,
+        assignments: Array.isArray(assignments) ? assignments : [],
+        overrideDates: (Array.isArray(overrides) ? overrides : [])
+          .filter((o) => Number(o.work_shift_id) === workShiftId)
+          .map((o) => o.attendance_date),
+        workShiftId,
+        month: monthKey,
+        today,
+      });
+      if (governs) {
+        blocking.push({
+          run_id: Number(run.attendance_recalculation_run_id),
+          work_shift_id: workShiftId,
+          status: run.status,
+        });
+      }
+    });
+    return blocking;
+  }
+
   async approve({ year, month, employees, approved_by = null }) {
     if (!Array.isArray(employees) || employees.length === 0) return [];
     const conn = await getConnectionAsync(this.db);
@@ -634,6 +780,22 @@ class PayrunCalculationRepository {
             employee_id: entry.employee_id,
             outcome: "SOURCE_MOVED",
             changed: movedKeys,
+          });
+          continue;
+        }
+
+        // AND THE PENDING SHIFT-RULE RECALCULATION, on the same held lock.
+        // A month may not be settled while a rule change is still owed to it.
+        const pending = await this._pendingShiftPropagationLocked(conn, {
+          employee_id: row.employee_id,
+          year,
+          month,
+        });
+        if (pending.length > 0) {
+          results.push({
+            employee_id: entry.employee_id,
+            outcome: "RECALCULATION_PENDING",
+            pending_recalculations: pending,
           });
           continue;
         }
