@@ -281,6 +281,15 @@ class Server {
     this.attendanceMissingRepo = require("./repository/attendance_missing")(
       this.mysql.connection
     );
+    // SHIFT CHANGE ELIGIBILITY REPORT. Two reads of its own - the population
+    // and the SHIFT_CHANGE requests for it - and no write statement at all.
+    // Like Missing Attendance it reads no attendance table: punches, dated
+    // shifts, stored calculations and approvals come from the dashboard
+    // repository above, which is what keeps the report agreeing with the
+    // screens.
+    this.attendanceShiftChangeReportRepo = require("./repository/attendance_shift_change_report")(
+      this.mysql.connection
+    );
     // Attendance v2 / A3. The regularization and OT approval store. It cannot
     // reach `biomax_punch` at all: an approved manual punch is a row in its
     // own table, and the raw punch stays exactly as the device sent it.
@@ -767,6 +776,20 @@ class Server {
     this.attendanceMissingUsecase = require("./usecase/attendance_missing")(
       this.attendanceMissingRepo,
       this.attendanceDashboardUsecase
+    );
+    // SHIFT CHANGE ELIGIBILITY - HR's view of the employee's own rule.
+    //
+    // "Can Raise Shift Change?" is decided by
+    // `utils/shift_change_eligibility.js#decide`, the SAME function
+    // `raiseShiftChangeRequest` refuses with, so the report and the Telegram
+    // Mini App cannot disagree about who may raise one. It reuses the
+    // dashboard usecase's batched reads and day computation for the worked
+    // minutes, and the calculation usecase for the active shift master and
+    // the payroll-lock read. It writes nothing.
+    this.attendanceShiftChangeReportUsecase = require("./usecase/attendance_shift_change_report")(
+      this.attendanceShiftChangeReportRepo,
+      this.attendanceDashboardUsecase,
+      this.attendanceCalculationUsecase
     );
     // The alert side of the same rule. It decides HOW a message is addressed,
     // sent, recorded and retried - never WHO gets one, which is the usecase
@@ -1534,6 +1557,16 @@ class Server {
       this.sensitive,
       this.dashboardScope
     );
+    // The Shift Change Eligibility Report: read-only rows and their Excel
+    // export, behind the SAME Global Dashboard resolver, so a branch user
+    // sees their own outlet here and nothing more. The export needs a second
+    // key on top. Neither route can raise or decide a request.
+    const attendanceShiftChangeReportRouter = require("./routes/attendance_shift_change_report")(
+      this.attendanceShiftChangeReportUsecase,
+      this.permissions,
+      this.sensitive,
+      this.dashboardScope
+    );
     const attendanceRegularizationRouter = require("./routes/attendance_regularization")(
       this.attendanceRegularizationUsecase,
       this.permissions,
@@ -1857,6 +1890,7 @@ class Server {
     app.use("/", attendanceCalculationRouter.getRouter());
     app.use("/", attendanceDashboardRouter.getRouter());
     app.use("/", attendanceMissingRouter.getRouter());
+    app.use("/", attendanceShiftChangeReportRouter.getRouter());
     app.use("/", attendanceRegularizationRouter.getRouter());
     app.use("/", attendanceApproverSetupRouter.getRouter());
     app.use("/", telegramAttendanceRouter.getRouter());
