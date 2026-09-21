@@ -753,6 +753,15 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
    * not the rule - `raiseShiftChangeRequest` re-derives every one of these
    * conditions on the server and refuses anything that fails them, so a
    * hand-made request cannot get past a filtered dropdown.
+   *
+   * THE LONGER-SHIFT TEST IS THE SHARED ONE, `hasLongerShiftOption`, and is
+   * not written out again here. This function used to carry its own copy of
+   * the predicate, which was harmless only for as long as the two agreed: a
+   * dropdown that offered a shift the submit path then refused would send an
+   * employee round a loop they cannot get out of, and one that HID a shift
+   * the submit path would have accepted would silently deny them a
+   * regularisation they were entitled to. Same helper, same conditions, one
+   * place - so the options offered and the request accepted cannot drift.
    */
   const shiftChangeOptions = async ({ actor, attendance_date }) => {
     const employeeId = Number(actor && actor.employee_id);
@@ -780,8 +789,19 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
         work_shift_id: id,
       });
       /* eslint-enable no-await-in-loop */
-      if (!candidate.is_working_day || candidate.nrm_minutes === null) continue;
-      if (!(Number(candidate.nrm_minutes) > Number(base.base.nrm_minutes))) continue;
+      // `!!` because the helper rejects only an explicit `false`, while
+      // `shiftForDate` reports "no snapshot for this date" as `null` - which
+      // this loop has always treated as "does not run", and still must.
+      if (
+        !shiftChangeEligibility.hasLongerShiftOption({
+          base_nrm_minutes: base.base.nrm_minutes,
+          candidates: [
+            { is_working_day: !!candidate.is_working_day, nrm_minutes: candidate.nrm_minutes },
+          ],
+        })
+      ) {
+        continue;
+      }
       options.push({
         work_shift_id: id,
         shift_code: candidate.shift_code,

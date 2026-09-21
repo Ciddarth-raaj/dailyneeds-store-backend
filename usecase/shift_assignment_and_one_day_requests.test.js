@@ -22,6 +22,7 @@ const assert = require("node:assert/strict");
 
 const buildCalculation = require("./attendance_calculation");
 const buildRegularization = require("./attendance_regularization");
+const shiftChangeEligibility = require("../utils/shift_change_eligibility");
 const buildWorkShift = require("./employee_work_shift");
 const buildShiftTelegram = require("./attendance_shift_change_telegram");
 const { REQUEST_TYPE, REQUEST_STATUS, STEP_DECISION, APPROVER_ROLE } =
@@ -51,6 +52,19 @@ const weekly = (workShiftId, inTime, outTime, breakMinutes) =>
     break_minutes: breakMinutes,
     ot_rate: 1,
   }));
+
+/**
+ * A fixture shift's NRM on any day: the span less its own break, which is
+ * exactly what `shiftForDate` reports and what the shared longer-shift helper
+ * compares. Derived from the SHIFTS fixture rather than hardcoded, so a change
+ * to the fixture cannot quietly invalidate the assertions built on it.
+ */
+const nrmOf = (workShiftId) => {
+  const row = SHIFTS[workShiftId].schedule[0];
+  const mins = (t) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
+  const span = mins(row.out_time) - mins(row.in_time);
+  return Math.max(0, (span < 0 ? span + 24 * 60 : span) - row.break_minutes);
+};
 
 const config = (id, code, name, active = 1) => ({
   work_shift_id: id, shift_code: code, shift_name: name, active,
@@ -879,6 +893,108 @@ describe("B. the one-day shift request - what may be asked for", () => {
       /longer working hours than your normal shift/
     );
     assert.equal(world.store.requests.length, 0);
+  });
+
+  /**
+   * ============ THE DROPDOWN AND THE SUBMIT PATH SHARE ONE PREDICATE ========
+   *
+   * `shiftChangeOptions` used to carry its own copy of "is this shift longer
+   * than mine". It agreed with `raiseShiftChangeRequest` only for as long as
+   * nobody edited one of them: a dropdown offering a shift the submit path
+   * then refuses sends an employee round a loop they cannot escape, and one
+   * hiding a shift the submit path would have accepted silently denies them a
+   * regularisation they were entitled to.
+   *
+   * Both now call `utils/shift_change_eligibility.js#hasLongerShiftOption`.
+   * These three tests hold that: the offered set IS what the helper decides,
+   * everything offered is actually accepted, and when nothing is longer both
+   * paths say so.
+   */
+  it("the options are DERIVED from the shared helper, not from a predicate of their own", async () => {
+    const world = build();
+    const { options, base } = await world.regularization.shiftChangeOptions({
+      actor: self(EMPLOYEE), attendance_date: DATE,
+    });
+
+    // The expected set is computed by asking the SHARED HELPER about each
+    // shift in the master - so this asserts agreement with the helper rather
+    // than restating an answer, and it moves if the helper ever moves.
+    const expected = Object.keys(SHIFTS)
+      .map(Number)
+      .filter((id) => id !== Number(base.work_shift_id))
+      .filter((id) =>
+        shiftChangeEligibility.hasLongerShiftOption({
+          base_nrm_minutes: base.nrm_minutes,
+          candidates: [{ is_working_day: true, nrm_minutes: nrmOf(id) }],
+        })
+      )
+      .sort((a, b) => a - b);
+
+    assert.deepEqual(options.map((o) => o.work_shift_id).sort((a, b) => a - b), expected);
+    assert.ok(expected.length > 0, "the fixture must offer at least one longer shift");
+
+    // ...and the RESPONSE SHAPE is unchanged by the refactor.
+    options.forEach((o) => {
+      assert.deepEqual(
+        Object.keys(o).sort(),
+        ["in_time", "nrm_minutes", "out_time", "shift_code", "shift_name", "work_shift_id"]
+      );
+    });
+  });
+
+  it("every shift the dropdown offers is ACCEPTED by the authoritative submit path", async () => {
+    const { options } = await build().regularization.shiftChangeOptions({
+      actor: self(EMPLOYEE), attendance_date: DATE,
+    });
+    assert.ok(options.length > 0);
+
+    for (const option of options) {
+      // A fresh world per submission: one open request per employee per date
+      // is the rule, so a second submit would be refused for that reason and
+      // would prove nothing about the predicate.
+      const world = build();
+      /* eslint-disable no-await-in-loop */
+      const created = await world.regularization.raiseShiftChangeRequest({
+        actor: self(EMPLOYEE), attendance_date: DATE, work_shift_id: option.work_shift_id,
+        reason: "Covering the late delivery", today: TODAY,
+      });
+      /* eslint-enable no-await-in-loop */
+      assert.equal(created.requested_work_shift_id, option.work_shift_id);
+      assert.equal(created.requested_nrm_minutes, option.nrm_minutes);
+      assert.equal(world.store.requests.length, 1);
+    }
+  });
+
+  it("when NO longer shift exists, the dropdown and the submit path agree", async () => {
+    // The employee is already on the longest shift in the master.
+    const onTheLongest = {
+      assignments: {
+        [EMPLOYEE]: [
+          { employee_work_shift_assignment_id: 1, employee_id: EMPLOYEE, work_shift_id: LONG, effective_from: "2026-09-01", source: "MIGRATION_BACKFILL", note: null, created_by: null, created_at: "2026-09-01 10:00:00" },
+        ],
+      },
+    };
+
+    const { options, base } = await build(onTheLongest).regularization.shiftChangeOptions({
+      actor: self(EMPLOYEE), attendance_date: DATE,
+    });
+    assert.equal(base.work_shift_id, LONG);
+    assert.deepEqual(options, [], "nothing may be offered when nothing is longer");
+
+    // And the submit path refuses every one of them, with the shared sentence.
+    for (const id of Object.keys(SHIFTS).map(Number).filter((id) => id !== LONG)) {
+      const world = build(onTheLongest);
+      /* eslint-disable no-await-in-loop */
+      await assert.rejects(
+        () => world.regularization.raiseShiftChangeRequest({
+          actor: self(EMPLOYEE), attendance_date: DATE, work_shift_id: id,
+          reason: "Asking for one the screen did not offer", today: TODAY,
+        }),
+        /longer working hours than your normal shift/
+      );
+      /* eslint-enable no-await-in-loop */
+      assert.equal(world.store.requests.length, 0);
+    }
   });
 
   it("the OPTIONS the screen offers are exactly the ones the server would accept", async () => {
