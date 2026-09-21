@@ -442,7 +442,7 @@ describe("review fix #1 - recalculation re-dates raw punches through the histori
 
 /* ================================================================== #2 === */
 
-describe("review fix #2 (revised) - the LATEST shift rule governs every OPEN date, and a LOCKED month is frozen", () => {
+describe("review fix #2 (revised) - the LATEST shift rule governs every calculation", () => {
   /**
    * The rule this suite now encodes, and the reason it changed.
    *
@@ -453,14 +453,20 @@ describe("review fix #2 (revised) - the LATEST shift rule governs every OPEN dat
    * rule nobody believed in any more and only a manual, per-date fix could
    * bring it into line.
    *
-   * The boundary is now the PAYROLL LOCK rather than the attendance date:
+   * The boundary is now the PAYROLL LOCK rather than the attendance date,
+   * and - this is the part that is easy to get wrong - the lock is NOT a
+   * configuration rule:
    *
    *   OPEN month   -> the LATEST configuration, for every date in it.
-   *   LOCKED month -> the version dated to that day, exactly as before.
+   *   LOCKED month -> the STORED calculation is the truth. Nothing is
+   *                   recalculated into it (the `FOR UPDATE` gate refuses the
+   *                   write) and a settled date is READ from its stored row.
+   *                   Reconstructing it from "the version dated to that day"
+   *                   would misstate any day that was legitimately
+   *                   recalculated under a later rule before the lock.
    *
    * `work_shift_config_version` is unchanged and still written on every save;
-   * it simply stops deciding an open date and remains the audit record of
-   * what a settled one was paid under.
+   * it stops deciding calculations altogether and remains audit history.
    */
   const versions = () => [
     versionRow(1, "2026-09-01", shiftConfig(), lateShiftSchedule()),
@@ -526,7 +532,20 @@ describe("review fix #2 (revised) - the LATEST shift rule governs every OPEN dat
     assert.equal(october.shift_snapshot.config_version_id, 2);
   });
 
-  it("a LOCKED month keeps the configuration that applied then", async () => {
+  it("a payroll-LOCKED month is frozen by its STORED ROW, not by resolving an old version", async () => {
+    // THE SEQUENCE THAT DECIDES THIS. 13-Sep was calculated under the old
+    // rule; the rule changed on the 21st while September was open, so 13-Sep
+    // was legitimately recalculated under the NEW rule; September was then
+    // locked. The truth about 13-Sep is now that new-rule figure - and the
+    // version dated to 13-Sep says the old one. So the freeze cannot be a
+    // configuration rule: it is the stored row plus the write gate.
+    //
+    // The gate itself is `assertMonthsNotPayrollLocked` in the repository,
+    // proved against a lock-enforcing fake in
+    // `usecase/work_shift_rule_propagation.test.js`. What is asserted here is
+    // the half that belongs to this file: the engine does NOT reach back for
+    // a dated version, so nothing can reconstruct a settled day differently
+    // from the way it was settled.
     const { calculation } = wire({
       configVersions: versions(),
       rawPunches: punchesOn("2026-09-14", "2026-09-15"),
@@ -540,22 +559,15 @@ describe("review fix #2 (revised) - the LATEST shift rule governs every OPEN dat
       to_date: "2026-09-14",
     });
 
-    assert.equal(september.break_allowance_minutes, 60, "September's break, not today's");
-    assert.equal(september.nrm_minutes, 660);
-    assert.equal(september.candidate_ot_minutes, 150, "September's OT rules");
-    assert.equal(september.shift_snapshot.config_version_id, 1);
-    assert.equal(
-      september.shift_snapshot.attendance_day_cutoff,
-      "04:00:00",
-      "and the cutoff read for a settled punch is the settled one"
-    );
+    assert.equal(september.shift_snapshot.config_version_id, 2, "the current version, not September's");
+    assert.equal(september.break_allowance_minutes, 30);
   });
 
-  it("recalculating a settled (locked) September date after the edit reproduces the same row", async () => {
+  it("recalculating an OPEN September date twice under the same configuration is idempotent", async () => {
     const state = {
       configVersions: versions(),
       rawPunches: punchesOn("2026-09-14", "2026-09-15"),
-      lockedPeriods: ["2026-09"],
+      ...liveAfterEdit,
     };
     const before = wire(state);
     await before.calculation.recalculateRange({
@@ -564,7 +576,7 @@ describe("review fix #2 (revised) - the LATEST shift rule governs every OPEN dat
       to_date: "2026-09-14",
     });
 
-    const after = wire({ ...state, ...liveAfterEdit });
+    const after = wire(state);
     await after.calculation.recalculateRange({
       employee_id: EMPLOYEE,
       from_date: "2026-09-14",
@@ -574,32 +586,26 @@ describe("review fix #2 (revised) - the LATEST shift rule governs every OPEN dat
     assert.deepEqual(
       after.calculationRepo.saved.calculations[0],
       before.calculationRepo.saved.calculations[0],
-      "the stored audit artifact must not be silently replaced with today's settings"
+      "a recalculation that changes nothing writes the same row"
     );
   });
 
-  it("falls back to the live tables, and says so, for a LOCKED date before the first version", async () => {
+  it("falls back to the live tables, and says so, when a shift has no version history at all", async () => {
     const { calculation } = wire({
-      configVersions: versions(),
-      lockedPeriods: ["2026-08"],
-      assignments: [
-        {
-          employee_work_shift_assignment_id: 1,
-          work_shift_id: 7,
-          effective_from: "2026-08-01",
-        },
-      ],
-      rawPunches: punchesOn("2026-08-14", "2026-08-15"),
+      configVersions: [],
+      rawPunches: punchesOn("2026-09-14", "2026-09-15"),
+      ...liveAfterEdit,
     });
-    const [august] = await calculation.calculateRange({
+    const [september] = await calculation.calculateRange({
       employee_id: EMPLOYEE,
-      from_date: "2026-08-14",
-      to_date: "2026-08-14",
+      from_date: "2026-09-14",
+      to_date: "2026-09-14",
     });
-    assert.equal(august.shift_snapshot.config_version_id, null);
+    assert.equal(september.shift_snapshot.config_version_id, null);
+    assert.equal(september.break_allowance_minutes, 30, "and it is today's configuration");
   });
 
-  it("an OPEN date before the first version row reads the latest version, not the live fallback", async () => {
+  it("a date before the first version row still reads the latest version", async () => {
     const { calculation } = wire({
       configVersions: versions(),
       assignments: [

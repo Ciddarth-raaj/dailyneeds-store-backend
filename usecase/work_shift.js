@@ -6,24 +6,32 @@ const {
 /**
  * What the save tells the person who made it, in one sentence.
  *
- * A shift rule change now moves attendance days that were calculated weeks
- * ago, and a silent save would give no sign of it. The two numbers that
- * matter are the days brought up to date and the days deliberately left
- * alone because their payroll month is locked.
+ * A shift rule change moves attendance days that were calculated weeks ago,
+ * and a silent save would give no sign of it. The save does NOT wait for that
+ * work, so the sentence reports what was STARTED, not what was finished: the
+ * counts belong to the run, which the Recalculate Attendance screen shows and
+ * which can be retried if it fails.
  */
 function recalculationMessage(recalculation) {
   if (!recalculation || recalculation.skipped) return "Shift updated.";
-  if (recalculation.status === "FAILED" && recalculation.error) {
-    return `Shift updated, but the attendance recalculation failed: ${recalculation.error}`;
+  if (recalculation.error) {
+    return `Shift updated, but the attendance recalculation could not be queued: ${recalculation.error}`;
   }
-  const recalculated = Number(recalculation.attendance_days_recalculated) || 0;
-  const skipped = Number(recalculation.attendance_days_skipped_locked) || 0;
-  const base = `Shift updated. ${recalculated} open attendance ${
-    recalculated === 1 ? "day" : "days"
-  } recalculated. ${skipped} locked ${skipped === 1 ? "day" : "days"} skipped.`;
-  return recalculation.errors && recalculation.errors.length > 0
-    ? `${base} ${recalculation.errors.length} employee-month(s) could not be recalculated.`
-    : base;
+  if (!recalculation.queued) {
+    return "Shift updated. No open attendance days needed recalculating.";
+  }
+  const months = Number(recalculation.employee_months_targeted) || 0;
+  const employees = Number(recalculation.employees_targeted) || 0;
+  const skipped = Number(recalculation.months_skipped_locked) || 0;
+  const skippedText =
+    skipped > 0
+      ? ` ${skipped} payroll-locked ${skipped === 1 ? "month is" : "months are"} skipped.`
+      : "";
+  return (
+    `Shift updated. Attendance recalculation started (run #${recalculation.run_id}) for ` +
+    `${employees} ${employees === 1 ? "employee" : "employees"} across ${months} open ` +
+    `${months === 1 ? "month" : "months"}.${skippedText}`
+  );
 }
 
 /**
@@ -63,13 +71,15 @@ class WorkShiftUsecase {
    * answers by appending a version row or not. Renaming a shift recalculates
    * nothing.
    *
-   * OUTSIDE THE SAVE'S TRANSACTION, deliberately. The recalculation touches
-   * many employees over several months and takes the payroll-row lock per
-   * month as it goes; holding the Work Shift write open across all of that
-   * would keep row locks on `work_shift` for the duration and make a shift
-   * edit block on attendance. The save is committed and durable first, and
-   * the recalculation is then reported - including its failures - rather than
-   * being allowed to undo it.
+   * QUEUED, NOT RUN, AND OUTSIDE THE SAVE'S TRANSACTION. The recalculation
+   * can touch hundreds of employee-months and takes the payroll-row lock per
+   * month as it goes: running it here would make the Work Shift screen wait
+   * through all of it, or time out, and holding the save's transaction open
+   * across it would keep row locks on `work_shift` for the duration. So the
+   * save commits, ONE row is written to say the propagation is owed, and the
+   * worker (`processQueuedRecalculations`, on the cron) does the work. That
+   * row is committed, so a pm2 restart cannot lose the request; it is
+   * visible, retryable, and it reports its own counts when it finishes.
    */
   async _propagate(result, { work_shift_id, actor_employee_id }) {
     if (!result || result.code !== 200) return result;
@@ -79,21 +89,21 @@ class WorkShiftUsecase {
     }
     if (
       !this.attendanceRecalculationService ||
-      typeof this.attendanceRecalculationService.recalculateForShiftConfigChange !== "function"
+      typeof this.attendanceRecalculationService.queueShiftConfigRecalculation !== "function"
     ) {
       return result;
     }
 
     let recalculation;
     try {
-      recalculation = await this.attendanceRecalculationService.recalculateForShiftConfigChange({
+      recalculation = await this.attendanceRecalculationService.queueShiftConfigRecalculation({
         work_shift_id: work_shift_id || result.work_shift_id,
         actor_employee_id: actor_employee_id === undefined ? null : actor_employee_id,
       });
     } catch (err) {
-      // The shift IS saved. A recalculation that fell over is reported as a
+      // The shift IS saved. A queue insert that fell over is reported as a
       // failure of the recalculation, never as a failure of the save.
-      recalculation = { status: "FAILED", error: err && err.message ? err.message : String(err) };
+      recalculation = { queued: false, error: err && err.message ? err.message : String(err) };
     }
 
     return { ...result, recalculation, msg: recalculationMessage(recalculation) };

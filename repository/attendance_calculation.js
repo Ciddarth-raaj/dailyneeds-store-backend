@@ -961,56 +961,127 @@ class AttendanceCalculationRepository {
   }
 
   /**
-   * THE BLAST RADIUS OF A SHIFT RULE CHANGE, in ONE query.
+   * THE BLAST RADIUS OF A SHIFT RULE CHANGE - the DATED FACTS, in four
+   * queries, whatever the size of the population.
    *
-   * Every (employee, month) that holds a calculated day which was decided by
-   * this work shift - either as the day's own shift or as the PERMANENT shift
-   * its pay is measured against - with the days it holds, the first and last
-   * of them, and whether payroll has locked that month.
+   * DISCOVERY IS FROM THE ASSIGNMENT HISTORY, NOT FROM STORED CALCULATIONS.
+   * "Who had this shift on which dates" is a question the effective-dated
+   * assignment history answers; `attendance_day_calculation` answers only
+   * "whose days happen to have been calculated already", and a date nobody
+   * has ever calculated is precisely the date a rule change must reach.
    *
-   * GROUPED BY MONTH, NOT LISTED BY DATE, for two reasons. The payroll lock
-   * is a monthly fact, so the month is the unit the skip decision is taken
-   * on; and the recalculation path this feeds takes a RANGE per employee, so
-   * a month of somebody's dates is one call rather than thirty. A shift worn
-   * by three hundred people across two open months is one query and six
-   * hundred ranges - never a query per date.
+   * Four statements, and none of them is per employee:
    *
-   * ONLY STORED DAYS COUNT. A date nobody has calculated has nothing to
-   * bring up to date, and including it would recalculate dates the change
-   * cannot have affected.
+   *   1. the employees this shift has ever governed - assigned to it, or
+   *      given it for a single date by an override;
+   *   2. their WHOLE assignment history, because an interval's END is the
+   *      next assignment whatever shift that is, plus the employment bounds
+   *      the shared eligibility rule reads;
+   *   3. the single-date overrides ONTO this shift;
+   *   4. the payroll-LOCKED months of those employees.
    *
-   * @returns {Array} `[{ employee_id, period_year, period_month, day_count,
-   *                      from_date, to_date, payroll_locked }]`
+   * `utils/shift_propagation.js` turns them into month-sized work. It is
+   * pure, so the whole rule - assignment intervals, employment, today, the
+   * payroll floor - is arithmetic that can be tested without a database.
+   *
+   * A date assigned to this shift but overridden AWAY from it is deliberately
+   * still in scope: this shift stays the PERMANENT shift the day's regular
+   * time, overtime split and shortage are measured against.
    */
-  async listShiftImpactedMonths(work_shift_id) {
-    const rows = await this._read(
-      "LIST-SHIFT-IMPACTED-MONTHS",
-      `SELECT adc.employee_id,
-              YEAR(adc.attendance_date)  AS period_year,
-              MONTH(adc.attendance_date) AS period_month,
-              COUNT(*)                   AS day_count,
-              DATE_FORMAT(MIN(adc.attendance_date), '%Y-%m-%d') AS from_date,
-              DATE_FORMAT(MAX(adc.attendance_date), '%Y-%m-%d') AS to_date,
-              MAX(CASE WHEN pec.status = ? THEN 1 ELSE 0 END)   AS payroll_locked
-         FROM attendance_day_calculation adc
-         LEFT JOIN payrun_employee_calculation pec
-                ON pec.employee_id  = adc.employee_id
-               AND pec.period_year  = YEAR(adc.attendance_date)
-               AND pec.period_month = MONTH(adc.attendance_date)
-        WHERE adc.work_shift_id = ? OR adc.base_work_shift_id = ?
-        GROUP BY adc.employee_id, YEAR(adc.attendance_date), MONTH(adc.attendance_date)
-        ORDER BY adc.employee_id ASC, period_year ASC, period_month ASC`,
-      [PAYROLL_LOCK_STATUS, work_shift_id, work_shift_id]
+  async listShiftPropagationFacts(work_shift_id) {
+    const ids = await this._read(
+      "LIST-SHIFT-PROPAGATION-EMPLOYEES",
+      `SELECT DISTINCT employee_id
+         FROM employee_work_shift_assignment
+        WHERE work_shift_id = ?
+        UNION
+       SELECT DISTINCT employee_id
+         FROM attendance_date_shift_override
+        WHERE work_shift_id = ?`,
+      [work_shift_id, work_shift_id]
     );
-    return (rows || []).map((row) => ({
-      employee_id: Number(row.employee_id),
-      period_year: Number(row.period_year),
-      period_month: Number(row.period_month),
-      day_count: Number(row.day_count) || 0,
-      from_date: row.from_date,
-      to_date: row.to_date,
-      payroll_locked: Number(row.payroll_locked) === 1,
-    }));
+    const employeeIds = [...new Set((ids || []).map((row) => Number(row.employee_id)))];
+    if (employeeIds.length === 0) return [];
+
+    const [assignments, overrides, locked] = await Promise.all([
+      this._read(
+        "LIST-SHIFT-PROPAGATION-HISTORY",
+        `SELECT a.employee_work_shift_assignment_id, a.employee_id, a.work_shift_id,
+                DATE_FORMAT(a.effective_from, '%Y-%m-%d') AS effective_from,
+                ne.employee_name, ne.attendance_required,
+                DATE_FORMAT((${JOINED_ON("ne")}), '%Y-%m-%d') AS date_of_joining,
+                DATE_FORMAT(ne.resignation_date, '%Y-%m-%d') AS resignation_date
+           FROM employee_work_shift_assignment a
+           JOIN new_employee ne ON ne.employee_id = a.employee_id
+          WHERE a.employee_id IN (?)
+          ORDER BY a.employee_id ASC, a.effective_from ASC,
+                   a.employee_work_shift_assignment_id ASC`,
+        [employeeIds]
+      ),
+      this._read(
+        "LIST-SHIFT-PROPAGATION-OVERRIDES",
+        `SELECT employee_id, DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date
+           FROM attendance_date_shift_override
+          WHERE work_shift_id = ? AND employee_id IN (?)
+          GROUP BY employee_id, attendance_date`,
+        [work_shift_id, employeeIds]
+      ),
+      this._read(
+        "LIST-SHIFT-PROPAGATION-LOCKED",
+        `SELECT employee_id, period_year, period_month
+           FROM payrun_employee_calculation
+          WHERE employee_id IN (?) AND status = ?`,
+        [employeeIds, PAYROLL_LOCK_STATUS]
+      ),
+    ]);
+
+    // An employee reachable ONLY through an override has no row in the
+    // assignment query, so the employment facts are carried per employee from
+    // whichever query found them and the entry is created either way.
+    const byEmployee = new Map();
+    const entryFor = (employeeId) => {
+      const id = Number(employeeId);
+      if (!byEmployee.has(id)) {
+        byEmployee.set(id, {
+          employee_id: id,
+          employee: null,
+          assignments: [],
+          override_dates: [],
+          locked_months: [],
+        });
+      }
+      return byEmployee.get(id);
+    };
+    employeeIds.forEach(entryFor);
+
+    (assignments || []).forEach((row) => {
+      const entry = entryFor(row.employee_id);
+      entry.assignments.push({
+        employee_work_shift_assignment_id: Number(row.employee_work_shift_assignment_id),
+        employee_id: Number(row.employee_id),
+        work_shift_id: Number(row.work_shift_id),
+        effective_from: row.effective_from,
+      });
+      if (!entry.employee) {
+        entry.employee = {
+          employee_id: Number(row.employee_id),
+          employee_name: row.employee_name || null,
+          attendance_required: row.attendance_required,
+          date_of_joining: row.date_of_joining,
+          resignation_date: row.resignation_date,
+        };
+      }
+    });
+    (overrides || []).forEach((row) => {
+      entryFor(row.employee_id).override_dates.push(row.attendance_date);
+    });
+    (locked || []).forEach((row) => {
+      entryFor(row.employee_id).locked_months.push(
+        `${Number(row.period_year)}-${String(Number(row.period_month)).padStart(2, "0")}`
+      );
+    });
+
+    return [...byEmployee.values()];
   }
 
   /* ------------------------------------------- bulk recalculation */
@@ -1099,7 +1170,10 @@ class AttendanceCalculationRepository {
     return rows.length > 0;
   }
 
-  /** Open a run record: RUNNING, with what was asked and by whom. */
+  /**
+   * Open a run record. RUNNING for a manual run that is already executing,
+   * QUEUED for one a worker will pick up later.
+   */
   async insertRecalculationRun(run) {
     const result = await this._read(
       "INSERT-RECALCULATION-RUN",
@@ -1107,7 +1181,7 @@ class AttendanceCalculationRepository {
          (requested_by_employee_id, trigger_source, from_date, to_date,
           employee_id, store_id, designation_id, work_shift_id,
           employees_targeted, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'RUNNING')`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         run.requested_by_employee_id === undefined ? null : run.requested_by_employee_id,
         run.trigger_source || "MANUAL",
@@ -1118,6 +1192,7 @@ class AttendanceCalculationRepository {
         run.designation_id || null,
         run.work_shift_id || null,
         run.employees_targeted,
+        run.status === "QUEUED" ? "QUEUED" : "RUNNING",
       ]
     );
     return result && result.insertId ? Number(result.insertId) : null;
@@ -1143,6 +1218,175 @@ class AttendanceCalculationRepository {
         runId,
       ]
     );
+  }
+
+  /* ------------------------------------------------- the run QUEUE */
+
+  /**
+   * CLAIM the oldest queued run, atomically.
+   *
+   * ONE UPDATE, guarded by `status = 'QUEUED'` in its own WHERE clause, so
+   * two workers - two pm2 instances, or a tick that overlapped its
+   * predecessor - cannot both take the same row: the second one updates zero
+   * rows and gets nothing. The id is chosen in a subquery and the status is
+   * re-checked in the outer predicate, which is what makes the claim itself
+   * the lock rather than something taken around it.
+   *
+   * `attempts` is incremented BY the claim, not by the outcome, so a run that
+   * kills the process mid-flight still counts as having been tried.
+   */
+  async claimNextQueuedRun() {
+    const [candidate] = await this._read(
+      "PEEK-QUEUED-RECALCULATION-RUN",
+      // ONLY A QUEUED PROPAGATION IS THE WORKER'S. A manual bulk run is
+      // executed by the request that asked for it and is RUNNING while that
+      // request works; nothing here may touch one.
+      `SELECT attendance_recalculation_run_id
+         FROM attendance_recalculation_run
+        WHERE status = 'QUEUED' AND trigger_source = 'WORK_SHIFT_SAVE'
+        ORDER BY attendance_recalculation_run_id ASC
+        LIMIT 1`
+    );
+    if (!candidate) return null;
+    const runId = Number(candidate.attendance_recalculation_run_id);
+
+    const claimed = await this._read(
+      "CLAIM-QUEUED-RECALCULATION-RUN",
+      `UPDATE attendance_recalculation_run
+          SET status = 'RUNNING',
+              attempts = attempts + 1,
+              started_at = CURRENT_TIMESTAMP(3),
+              heartbeat_at = CURRENT_TIMESTAMP(3)
+        WHERE attendance_recalculation_run_id = ?
+          AND status = 'QUEUED'
+          AND trigger_source = 'WORK_SHIFT_SAVE'`,
+      [runId]
+    );
+    // Somebody else took it between the peek and the claim. Not an error and
+    // not a retry: the next tick picks up whatever is still queued.
+    if (!claimed || Number(claimed.affectedRows) === 0) return null;
+
+    const rows = await this._read(
+      "READ-CLAIMED-RECALCULATION-RUN",
+      `SELECT attendance_recalculation_run_id, requested_by_employee_id, trigger_source,
+              work_shift_id, employee_id, store_id, designation_id, attempts,
+              DATE_FORMAT(from_date, '%Y-%m-%d') AS from_date,
+              DATE_FORMAT(to_date, '%Y-%m-%d') AS to_date
+         FROM attendance_recalculation_run
+        WHERE attendance_recalculation_run_id = ?`,
+      [runId]
+    );
+    return rows && rows[0] ? rows[0] : null;
+  }
+
+  /** Still alive, still working. */
+  async heartbeatRecalculationRun(runId) {
+    if (!runId) return;
+    await this._read(
+      "HEARTBEAT-RECALCULATION-RUN",
+      `UPDATE attendance_recalculation_run
+          SET heartbeat_at = CURRENT_TIMESTAMP(3)
+        WHERE attendance_recalculation_run_id = ? AND status = 'RUNNING'`,
+      [runId]
+    );
+  }
+
+  /**
+   * A run whose worker died - a pm2 restart mid-flight - back to QUEUED, or
+   * to FAILED once it has used up its attempts.
+   *
+   * STALENESS IS A HEARTBEAT, NOT A CLOCK ON THE ROW's AGE: a legitimately
+   * long run beats while it works, so only one that has stopped beating is
+   * recovered. The recalculation itself is idempotent - it recomputes from
+   * raw punches and upserts - so re-running a half-finished run repeats work
+   * rather than corrupting it.
+   *
+   * AND IT TOUCHES PROPAGATIONS ONLY. A MANUAL bulk run is RUNNING for as
+   * long as the request that started it is working and never beats, so
+   * recovering "a RUNNING run with no recent heartbeat" would declare a
+   * perfectly healthy manual run dead, requeue it, and hand the worker a run
+   * with no shift to propagate. `trigger_source` is the whole guard.
+   */
+  async requeueStaleRecalculationRuns({ staleSeconds = 600, maxAttempts = 3 } = {}) {
+    const requeued = await this._read(
+      "REQUEUE-STALE-RECALCULATION-RUNS",
+      `UPDATE attendance_recalculation_run
+          SET status = 'QUEUED', heartbeat_at = NULL
+        WHERE status = 'RUNNING'
+          AND trigger_source = 'WORK_SHIFT_SAVE'
+          AND attempts < ?
+          AND (heartbeat_at IS NULL OR heartbeat_at < DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL ? SECOND))`,
+      [maxAttempts, staleSeconds]
+    );
+    const abandoned = await this._read(
+      "ABANDON-EXHAUSTED-RECALCULATION-RUNS",
+      `UPDATE attendance_recalculation_run
+          SET status = 'FAILED',
+              completed_at = CURRENT_TIMESTAMP(3),
+              last_error = CONCAT('abandoned after ', attempts, ' attempts without completing')
+        WHERE status = 'RUNNING'
+          AND trigger_source = 'WORK_SHIFT_SAVE'
+          AND attempts >= ?
+          AND (heartbeat_at IS NULL OR heartbeat_at < DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL ? SECOND))`,
+      [maxAttempts, staleSeconds]
+    );
+    return {
+      requeued: requeued ? Number(requeued.affectedRows) : 0,
+      abandoned: abandoned ? Number(abandoned.affectedRows) : 0,
+    };
+  }
+
+  /** The whole attempt fell over: record why, so a retry has something to read. */
+  async failRecalculationRun(runId, message) {
+    if (!runId) return;
+    await this._read(
+      "FAIL-RECALCULATION-RUN",
+      `UPDATE attendance_recalculation_run
+          SET status = 'FAILED', completed_at = CURRENT_TIMESTAMP(3), last_error = ?
+        WHERE attendance_recalculation_run_id = ?`,
+      [String(message || "").slice(0, 2000), runId]
+    );
+  }
+
+  /**
+   * RETRY: put a finished-but-unsatisfactory run back in the queue.
+   *
+   * Only a QUEUED-able propagation that FAILED or COMPLETED_WITH_ERRORS may
+   * be retried, and the guards are in the statement rather than in a read
+   * beside it, so a run that completed cleanly cannot be re-run by a racing
+   * second click. A manual bulk run is not retryable from here: nothing would
+   * pick it up, because the worker only runs propagations. `attempts` is reset,
+   * because a retry somebody asked for is a fresh decision, not a continuation
+   * of the automatic recovery budget.
+   */
+  async retryRecalculationRun(runId) {
+    const result = await this._read(
+      "RETRY-RECALCULATION-RUN",
+      `UPDATE attendance_recalculation_run
+          SET status = 'QUEUED', attempts = 0, heartbeat_at = NULL,
+              completed_at = NULL, last_error = NULL
+        WHERE attendance_recalculation_run_id = ?
+          AND trigger_source = 'WORK_SHIFT_SAVE'
+          AND status IN ('FAILED', 'COMPLETED_WITH_ERRORS')`,
+      [runId]
+    );
+    return result ? Number(result.affectedRows) > 0 : false;
+  }
+
+  /** One run, for a status poll after a save. */
+  async getRecalculationRun(runId) {
+    const rows = await this._read(
+      "GET-RECALCULATION-RUN",
+      `SELECT attendance_recalculation_run_id, status, trigger_source, work_shift_id,
+              employees_targeted, employees_completed, employees_failed,
+              days_processed, days_skipped_locked, attempts, last_error, errors,
+              DATE_FORMAT(started_at, '%Y-%m-%d %H:%i:%s') AS started_at,
+              DATE_FORMAT(completed_at, '%Y-%m-%d %H:%i:%s') AS completed_at
+         FROM attendance_recalculation_run
+        WHERE attendance_recalculation_run_id = ?`,
+      [runId]
+    );
+    return rows && rows[0] ? rows[0] : null;
   }
 
   /** Recent runs, newest first, for the Recalculate Attendance screen. */

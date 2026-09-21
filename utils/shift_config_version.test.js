@@ -219,7 +219,8 @@ describe("the lateness and early-out settings are versioned", () => {
 describe("which version a CALCULATION runs under", () => {
   const {
     latestConfigVersion,
-    resolveConfigVersionForCalculation,
+    configVersionForCalculation,
+    resolveConfigVersionForDate,
   } = require("../utils/shift_config_version");
 
   const versions = [
@@ -235,27 +236,24 @@ describe("which version a CALCULATION runs under", () => {
     assert.equal(latestConfigVersion(null), null);
   });
 
-  it("an OPEN date reads the latest configuration, whatever its own date", () => {
-    const row = resolveConfigVersionForCalculation(versions, "2026-09-13", { payrollLocked: false });
-    assert.equal(row.work_shift_config_version_id, 3);
+  it("a calculation always reads the latest, whatever date it is calculating", () => {
+    assert.equal(configVersionForCalculation(versions).work_shift_config_version_id, 3);
   });
 
-  it("an open date is the DEFAULT: the lock has to be asserted, never assumed", () => {
+  it("no date is consulted at all - that is the point", () => {
+    // A settled month is frozen by its STORED ROW and by the write gate, not
+    // by reconstructing a version from the attendance date. See the comment
+    // on `configVersionForCalculation`: a September date recalculated under
+    // an October rule BEFORE the month locked was settled under that October
+    // rule, and the version dated to September would misstate it.
+    assert.equal(configVersionForCalculation.length, 1, "it takes versions and nothing else");
+  });
+
+  it("the dated resolver is still there, for AUDIT: what was in force on a day", () => {
     assert.equal(
-      resolveConfigVersionForCalculation(versions, "2026-09-13").work_shift_config_version_id,
-      3
+      resolveConfigVersionForDate(versions, "2026-09-13").work_shift_config_version_id,
+      1
     );
-  });
-
-  it("a LOCKED date reads the version in force on that day", () => {
-    const row = resolveConfigVersionForCalculation(versions, "2026-09-13", { payrollLocked: true });
-    assert.equal(row.work_shift_config_version_id, 1);
-  });
-
-  it("a LOCKED date before the first version has nothing dated to read", () => {
-    assert.equal(
-      resolveConfigVersionForCalculation(versions, "2026-08-13", { payrollLocked: true }),
-      null
-    );
+    assert.equal(resolveConfigVersionForDate(versions, "2026-08-13"), null);
   });
 });

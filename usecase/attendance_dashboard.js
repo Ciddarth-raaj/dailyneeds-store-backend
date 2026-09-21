@@ -8,7 +8,7 @@ const {
 } = require("../utils/attendance_engine");
 const { RESOLUTION_STATUS, resolveShiftForDate, toDateOnly } = require("../utils/shiftResolution");
 const {
-  resolveConfigVersionForCalculation,
+  configVersionForCalculation,
   toShiftDefinition,
   VERSIONED_CONFIG_COLUMNS,
 } = require("../utils/shift_config_version");
@@ -242,7 +242,7 @@ module.exports = (attendanceDashboardRepo) => {
    * employee because a fourteen-day trend resolves the same (shift, date) pair
    * repeatedly.
    */
-  const employeeResolver = ({ shiftCache, assignments, overrides, isLockedDate = () => false }) => {
+  const employeeResolver = ({ shiftCache, assignments, overrides }) => {
     const definitions = new Map();
     const definitionFor = (workShiftId, date) => {
       const key = `${workShiftId}|${date}`;
@@ -250,12 +250,11 @@ module.exports = (attendanceDashboardRepo) => {
       const loaded = shiftCache.get(Number(workShiftId));
       let definition = null;
       if (loaded) {
-        // OPEN month -> today's configuration; LOCKED month -> the version
-        // dated to that day. The same call the calculation usecase makes, so
-        // the preview and the stored recalculation cannot disagree.
-        const versionRow = resolveConfigVersionForCalculation(loaded.versions, date, {
-          payrollLocked: isLockedDate(date),
-        });
+        // The CURRENT configuration, the same call the calculation usecase
+        // makes, so a preview and a stored recalculation cannot disagree. A
+        // settled date is answered from its stored row, not from here - see
+        // `utils/attendance_stored_read.js`.
+        const versionRow = configVersionForCalculation(loaded.versions);
         definition = versionRow
           ? withLiveDefaults(toShiftDefinition(versionRow, workShiftId), loaded.live)
           : loaded.live
@@ -404,7 +403,7 @@ module.exports = (attendanceDashboardRepo) => {
     const punchFrom = addDays(from, -1);
     const punchTo = addDays(to, 1);
 
-    const [shiftCache, assignments, overrides, rawPunches, regularized, approvals, stored, locked] =
+    const [shiftCache, assignments, overrides, rawPunches, regularized, approvals, stored] =
       await Promise.all([
         loadShiftCache(),
         attendanceDashboardRepo.getShiftAssignmentHistoryForEmployees(employeeIds),
@@ -418,22 +417,10 @@ module.exports = (attendanceDashboardRepo) => {
         attendanceDashboardRepo.getStoredCalculationsForEmployees
           ? attendanceDashboardRepo.getStoredCalculationsForEmployees(employeeIds, from, to)
           : [],
-        // Which months of this window are settled. It decides only WHICH
-        // configuration a date is previewed under - the dashboard writes
-        // nothing either way.
-        attendanceDashboardRepo.listPayrollLockedPeriods
-          ? attendanceDashboardRepo.listPayrollLockedPeriods(employeeIds, punchFrom, punchTo)
-          : [],
       ]);
 
     return {
       shiftCache,
-      lockedMonths: new Set(
-        (locked || []).map(
-          (row) =>
-            `${Number(row.employee_id)}|${row.period_year}-${String(row.period_month).padStart(2, "0")}`
-        )
-      ),
       storedByEmployeeDate: storedByEmployeeAndDate(stored),
       assignmentsByEmployee: groupBy(assignments, (r) => r.employee_id),
       overridesByEmployee: groupBy(overrides, (r) => r.employee_id),
@@ -465,10 +452,6 @@ module.exports = (attendanceDashboardRepo) => {
       shiftCache: batch.shiftCache,
       assignments: batch.assignmentsByEmployee.get(key) || [],
       overrides: batch.overridesByEmployee.get(key) || [],
-      isLockedDate: (date) =>
-        (batch.lockedMonths || new Set()).has(
-          `${Number(employee.employee_id)}|${String(date || "").slice(0, 7)}`
-        ),
     });
 
     const from = dates[0];

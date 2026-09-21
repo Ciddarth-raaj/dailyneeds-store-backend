@@ -273,34 +273,36 @@ function latestConfigVersion(versions) {
 }
 
 /**
- * WHICH version a CALCULATION must run under - the rule the whole Work Shift
- * propagation fix turns on.
+ * WHICH version a CALCULATION runs under: ALWAYS THE LATEST. No date is
+ * consulted, and that is the whole of the rule.
  *
- * The business rule, stated once so both the calculation usecase and the
- * dashboard read the same sentence:
+ * WHY THERE IS NO DATED BRANCH HERE, not even for a settled month. It is
+ * tempting to say "a locked month reads the version dated to that day", and
+ * it is wrong:
  *
- *   OPEN month   -> the LATEST configuration, whatever the attendance date.
- *                   A shift rule is a statement about how the shift works,
- *                   not a statement about one day, so correcting it corrects
- *                   every day payroll has not yet settled. This is what makes
- *                   a minimum-OT change on the 20th move the 13th.
+ *   13-Sep is calculated under a 20 minute minimum.
+ *   21-Sep the minimum is changed to 10, September still being open.
+ *   13-Sep is recalculated and now pays under the 10 minute rule.
+ *   September is then locked.
  *
- *   LOCKED month -> the version in force ON THAT DATE. Payroll has been
- *                   processed against those numbers and they are frozen; the
- *                   dated history is what says what they were.
+ * The truth about 13-Sep is now the 10 minute result - but the version dated
+ * to 13-Sep says 20. Reconstructing a settled day from its attendance date
+ * would quietly restate what payroll actually paid.
  *
- * `work_shift_config_version` therefore stops CONTROLLING an open date and
- * becomes what it was always best at: the audit trail of what a settled date
- * was actually paid under.
+ * SO THE FREEZE IS NOT A CONFIGURATION RULE AT ALL. A locked month is frozen
+ * because its stored `attendance_day_calculation` row is the truth and no
+ * write is permitted into it (`utils/attendance_payroll_lock.js`, enforced
+ * `FOR UPDATE` in the repository), and because a settled date is READ from
+ * that stored row (`utils/attendance_stored_read.js`) rather than recomputed.
+ * The configuration snapshot that day was calculated under travels ON the
+ * stored row - `work_shift_config_version_id`, `shift_snapshot` - which is
+ * where any caller needing that metadata must take it from.
  *
- * Returns null when the shift has no version rows at all, or - for a locked
- * date - when the date precedes the first version row. Both mean "the live
- * tables answer", and the caller says so with `from_live`.
+ * `work_shift_config_version` therefore remains pure audit history: it
+ * records what each save changed and when, and it decides nothing.
  */
-function resolveConfigVersionForCalculation(versions, attendanceDate, { payrollLocked = false } = {}) {
-  return payrollLocked
-    ? resolveConfigVersionForDate(versions, attendanceDate)
-    : latestConfigVersion(versions);
+function configVersionForCalculation(versions) {
+  return latestConfigVersion(versions);
 }
 
 /**
@@ -349,6 +351,6 @@ module.exports = {
   configVersionHash,
   resolveConfigVersionForDate,
   latestConfigVersion,
-  resolveConfigVersionForCalculation,
+  configVersionForCalculation,
   toShiftDefinition,
 };

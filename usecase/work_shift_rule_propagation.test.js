@@ -10,11 +10,15 @@
  *
  * THE RULE NOW. The boundary is the PAYROLL LOCK, not the date:
  *
- *   open month   -> the LATEST shift configuration, for every date in it
- *   locked month -> the version dated to that day, frozen, never rewritten
+ *   open month   -> the LATEST shift configuration, for every date in it,
+ *                   whether or not that date has ever been calculated
+ *   locked month -> the STORED calculation is the truth; nothing is
+ *                   recalculated, re-read or rewritten, and the frozen row
+ *                   keeps whatever rule it was last calculated under - which
+ *                   is NOT necessarily the rule in force on its own date
  *
- * and saving a shift automatically recalculates the open days already
- * calculated under it.
+ * and saving a shift QUEUES a durable background recalculation of the open
+ * days that shift governs.
  *
  * WHAT IS REAL HERE. The real `usecase/work_shift.js`, the real
  * `usecase/attendance_calculation.js`, the real engine and the real pure
@@ -31,11 +35,15 @@ const buildCalculation = require("../usecase/attendance_calculation");
 const buildWorkShift = require("../usecase/work_shift");
 const { buildConfigVersion, configVersionHash } = require("../utils/shift_config_version");
 
+/** The business date every test in this file runs on. */
+const TODAY = "2026-09-21";
+
 const SHIFT = 5; // "9 TO 6"
 const OTHER_SHIFT = 6;
 const ALICE = 101; // on 9 TO 6 all year
 const BOB = 202; // on 9 TO 6, but with a locked September
 const CARL = 303; // on the OTHER shift - must never be touched
+const DEE = 404; // on 9 TO 6, and nobody has ever calculated a day for them
 
 /** The 9 TO 6 weekly schedule. Seven working days keeps the fixture readable. */
 const scheduleFor = (workShiftId, overrides = {}) =>
@@ -132,8 +140,13 @@ function world({ lockedMonths = [] } = {}) {
       [ALICE, [{ employee_work_shift_assignment_id: 1, employee_id: ALICE, work_shift_id: SHIFT, effective_from: "2026-01-01" }]],
       [BOB, [{ employee_work_shift_assignment_id: 2, employee_id: BOB, work_shift_id: SHIFT, effective_from: "2026-01-01" }]],
       [CARL, [{ employee_work_shift_assignment_id: 3, employee_id: CARL, work_shift_id: OTHER_SHIFT, effective_from: "2026-01-01" }]],
+      [DEE, [{ employee_work_shift_assignment_id: 4, employee_id: DEE, work_shift_id: SHIFT, effective_from: "2026-01-01" }]],
     ]),
+    overrides: new Map(),
+    employment: new Map(),
     runs: [],
+    heartbeats: [],
+    now: Date.now(),
     recalculatedRanges: [],
   };
 
@@ -194,7 +207,17 @@ function world({ lockedMonths = [] } = {}) {
         (p) => Number(p.employee_id) === Number(employeeId) && p.punch_date >= from && p.punch_date <= to
       ),
     getApprovedRegularizedPunches: async () => [],
-    getDateShiftOverrides: async () => [],
+    getDateShiftOverrides: async (employeeId, from, to) =>
+      (state.overrides.get(Number(employeeId)) || [])
+        .filter((o) => o.attendance_date >= from && o.attendance_date <= to)
+        .map((o, index) => ({
+          attendance_date_shift_override_id: index + 1,
+          employee_id: Number(employeeId),
+          attendance_date: o.attendance_date,
+          work_shift_id: Number(o.work_shift_id),
+          shift_change_approved: 1,
+          attendance_approval_request_id: null,
+        })),
     getBreakOverride: async () => null,
     getApprovalStateByDate: async () => [],
     getEmploymentWindow: async (employeeId) => ({
@@ -212,30 +235,93 @@ function world({ lockedMonths = [] } = {}) {
           year: Number(String(row.attendance_date).slice(0, 4)),
           month: Number(String(row.attendance_date).slice(5, 7)),
         })),
-    // The real query's GROUP BY, over the same stored rows.
-    listShiftImpactedMonths: async (workShiftId) => {
-      const buckets = new Map();
-      [...state.stored.values()].forEach((row) => {
-        if (Number(row.work_shift_id) !== Number(workShiftId)) return;
-        const key = `${row.employee_id}|${monthOf(row.attendance_date)}`;
-        if (!buckets.has(key)) {
-          buckets.set(key, {
-            employee_id: Number(row.employee_id),
-            period_year: Number(String(row.attendance_date).slice(0, 4)),
-            period_month: Number(String(row.attendance_date).slice(5, 7)),
-            day_count: 0,
-            from_date: row.attendance_date,
-            to_date: row.attendance_date,
-            payroll_locked: isLocked(row.employee_id, row.attendance_date),
-          });
-        }
-        const bucket = buckets.get(key);
-        bucket.day_count += 1;
-        if (row.attendance_date < bucket.from_date) bucket.from_date = row.attendance_date;
-        if (row.attendance_date > bucket.to_date) bucket.to_date = row.attendance_date;
-      });
-      return [...buckets.values()];
+    // The real discovery: the DATED FACTS, never the stored rows.
+    listShiftPropagationFacts: async (workShiftId) => {
+      const ids = [...state.assignments.keys()].filter(
+        (employeeId) =>
+          state.assignments.get(employeeId).some((a) => Number(a.work_shift_id) === Number(workShiftId)) ||
+          (state.overrides.get(employeeId) || []).some((o) => Number(o.work_shift_id) === Number(workShiftId))
+      );
+      return ids.map((employeeId) => ({
+        employee_id: employeeId,
+        employee: {
+          employee_id: employeeId,
+          attendance_required: 1,
+          date_of_joining: (state.employment.get(employeeId) || {}).date_of_joining || "2020-01-01",
+          resignation_date: (state.employment.get(employeeId) || {}).resignation_date || null,
+        },
+        assignments: state.assignments.get(employeeId),
+        override_dates: (state.overrides.get(employeeId) || [])
+          .filter((o) => Number(o.work_shift_id) === Number(workShiftId))
+          .map((o) => o.attendance_date),
+        locked_months: [...state.lockedMonths]
+          .filter((key) => key.startsWith(`${employeeId}|`))
+          .map((key) => key.split("|")[1]),
+      }));
     },
+    // The queue, as three rows of SQL do it.
+    insertRecalculationRun: async (run) => {
+      state.runs.push({
+        attendance_recalculation_run_id: state.runs.length + 1,
+        attempts: 0,
+        ...run,
+        status: run.status === "QUEUED" ? "QUEUED" : "RUNNING",
+      });
+      return state.runs.length;
+    },
+    claimNextQueuedRun: async () => {
+      const run = state.runs.find(
+        (r) => r.status === "QUEUED" && r.trigger_source === "WORK_SHIFT_SAVE"
+      );
+      if (!run) return null;
+      run.status = "RUNNING";
+      run.attempts += 1;
+      run.heartbeat_at = state.now;
+      return { ...run };
+    },
+    heartbeatRecalculationRun: async (runId) => {
+      state.heartbeats.push(runId);
+      const run = state.runs[runId - 1];
+      if (run) run.heartbeat_at = state.now;
+    },
+    requeueStaleRecalculationRuns: async ({ staleSeconds = 600, maxAttempts = 3 } = {}) => {
+      let requeued = 0;
+      let abandoned = 0;
+      state.runs.forEach((run) => {
+        if (run.status !== "RUNNING" || run.trigger_source !== "WORK_SHIFT_SAVE") return;
+        const stale = run.heartbeat_at === null || run.heartbeat_at === undefined
+          ? true
+          : state.now - run.heartbeat_at > staleSeconds * 1000;
+        if (!stale) return;
+        if (run.attempts >= maxAttempts) {
+          run.status = "FAILED";
+          run.last_error = `abandoned after ${run.attempts} attempts without completing`;
+          abandoned += 1;
+        } else {
+          run.status = "QUEUED";
+          run.heartbeat_at = null;
+          requeued += 1;
+        }
+      });
+      return { requeued, abandoned };
+    },
+    failRecalculationRun: async (runId, message) => {
+      const run = state.runs[runId - 1];
+      if (run) {
+        run.status = "FAILED";
+        run.last_error = message;
+      }
+    },
+    retryRecalculationRun: async (runId) => {
+      const run = state.runs[runId - 1];
+      if (!run || run.trigger_source !== "WORK_SHIFT_SAVE") return false;
+      if (!["FAILED", "COMPLETED_WITH_ERRORS"].includes(run.status)) return false;
+      run.status = "QUEUED";
+      run.attempts = 0;
+      run.last_error = null;
+      return true;
+    },
+    getRecalculationRun: async (runId) => state.runs[runId - 1] || null,
     saveCalculationsWithReconciliation: async ({ employee_id, from_date, to_date, rows }) => {
       // THE PAYROLL LOCK GATE, mirrored. The real one is `FOR UPDATE` inside
       // the write transaction; this is here so a test that writes into a
@@ -248,27 +334,52 @@ function world({ lockedMonths = [] } = {}) {
         err.code = "PAYROLL_MONTH_LOCKED";
         throw err;
       }
+      // A deliberate failure, to prove what the counting does with one.
+      if (
+        state.failRange &&
+        Number(employee_id) === state.failRange.employee_id &&
+        from_date >= state.failRange.from_date
+      ) {
+        throw new Error("the punch store is unreachable");
+      }
       state.recalculatedRanges.push({ employee_id, from_date, to_date });
       (rows || []).forEach((row) => {
         state.stored.set(`${row.employee_id}|${row.attendance_date}`, row);
       });
       return { written: (rows || []).length, stale_removed: 0 };
     },
-    insertRecalculationRun: async (run) => {
-      state.runs.push({ ...run, status: "RUNNING" });
-      return state.runs.length;
-    },
     finishRecalculationRun: async (runId, outcome) => {
       state.runs[runId - 1] = { ...state.runs[runId - 1], ...outcome };
     },
   };
 
-  const calculation = buildCalculation(calculationRepo);
+  // TODAY IS PINNED. The propagation never reaches a future date, so a test
+  // that agreed with the wall clock would start failing on its own one day.
+  const calculation = buildCalculation(calculationRepo, { today: TODAY });
   const workShift = buildWorkShift(workShiftRepo);
   workShift.setAttendanceRecalculationService(calculation);
 
   return { state, calculation, workShift, appendVersion, isLocked };
 }
+
+/**
+ * Run the queued propagation, the way the cron does.
+ *
+ * Every save QUEUES; nothing recalculates until the worker ticks. Tests that
+ * want the result therefore tick it explicitly, which is also what proves the
+ * save itself does none of the work.
+ */
+const drainQueue = async (w, { ticks = 5, today = TODAY } = {}) => {
+  const results = [];
+  for (let i = 0; i < ticks; i += 1) {
+    /* eslint-disable no-await-in-loop */
+    const tick = await w.calculation.processQueuedRecalculations({ today });
+    /* eslint-enable no-await-in-loop */
+    results.push(tick);
+    if (!tick.claimed) break;
+  }
+  return results;
+};
 
 /** The stored OT for a date, as the engine last wrote it. */
 const storedOt = (w, employeeId, date) => {
@@ -318,8 +429,15 @@ describe("work shift rule propagation", () => {
     assert.equal(storedOt(w, ALICE, "2026-09-13"), 100, "120 earned, 20 excluded");
 
     const result = await saveMinimumOt(w, 10);
-
     assert.equal(result.code, 200);
+    assert.equal(
+      storedOt(w, ALICE, "2026-09-13"),
+      100,
+      "the SAVE itself recalculates nothing - it queues"
+    );
+
+    await drainQueue(w);
+
     assert.equal(
       storedOt(w, ALICE, "2026-09-13"),
       110,
@@ -327,67 +445,137 @@ describe("work shift rule propagation", () => {
     );
   });
 
-  it("saving the shift reports what it did", async () => {
+  it("THE FULL SEQUENCE: open recalc under the new rule, then lock, then another rule change", async () => {
+    // This is the case that decides what a locked month means. 13-Sep is
+    // calculated under the 20 minute minimum; the minimum becomes 10 while
+    // September is open, so 13-Sep correctly becomes 110; September is then
+    // locked; a later change to 5 must leave 13-Sep at 110 - NOT at the 100
+    // the version dated to 13-Sep would reconstruct.
     const w = await seedSeptember();
-    const result = await saveMinimumOt(w, 10);
-
-    assert.equal(result.recalculation.status, "COMPLETED");
-    // Two employees x four dates: their two punched days plus the day either
-    // side, which is recalculated because a cutoff change can move a punch
-    // onto the neighbouring attendance date. The widening is clamped to the
-    // month.
-    assert.equal(result.recalculation.attendance_days_recalculated, 8);
-    assert.equal(result.recalculation.attendance_days_skipped_locked, 0);
-    assert.equal(result.msg, "Shift updated. 8 open attendance days recalculated. 0 locked days skipped.");
-  });
-
-  it("a LOCKED month is skipped entirely and its days do not move", async () => {
-    const w = await seedSeptember();
-    // Payroll approves and locks Bob's September, after his days were settled.
-    w.state.lockedMonths.add(`${BOB}|2026-09`);
-    const before = storedOt(w, BOB, "2026-09-13");
-    assert.equal(before, 100);
-
-    const result = await saveMinimumOt(w, 10);
-
-    assert.equal(storedOt(w, BOB, "2026-09-13"), 100, "the settled day is untouched");
-    assert.equal(storedOt(w, ALICE, "2026-09-13"), 110, "and the open one is not");
-    assert.equal(result.recalculation.attendance_days_skipped_locked, 2, "Bob's two locked days");
-    assert.equal(result.recalculation.months_skipped_locked, 1);
-    assert.equal(result.recalculation.employees_targeted, 1, "only Alice had anything to recalculate");
-    assert.equal(
-      w.state.recalculatedRanges.every((r) => r.employee_id === ALICE),
-      true,
-      "the locked employee-month was never even attempted"
-    );
-  });
-
-  it("a locked month stays frozen through a SECOND shift change, and a manual recalculate cannot move it either", async () => {
-    const w = await seedSeptember();
-    w.state.lockedMonths.add(`${BOB}|2026-09`);
+    assert.equal(storedOt(w, ALICE, "2026-09-13"), 100);
 
     await saveMinimumOt(w, 10);
+    await drainQueue(w);
+    assert.equal(storedOt(w, ALICE, "2026-09-13"), 110, "open September takes the new rule");
+
+    // Payroll approves and locks September.
+    w.state.lockedMonths.add(`${ALICE}|2026-09`);
+
     await saveMinimumOt(w, 5);
+    await drainQueue(w);
 
-    assert.equal(storedOt(w, BOB, "2026-09-13"), 100);
-
+    assert.equal(
+      storedOt(w, ALICE, "2026-09-13"),
+      110,
+      "the frozen result stands: not 115 from the new rule, and not 100 from the rule dated to 13-Sep"
+    );
     await assert.rejects(
       () =>
         w.calculation.recalculateRange({
-          employee_id: BOB,
+          employee_id: ALICE,
           from_date: "2026-09-13",
           to_date: "2026-09-14",
         }),
       (err) => err.code === "PAYROLL_MONTH_LOCKED",
-      "the payroll lock refuses the write, exactly as it did before this change"
+      "and a manual recalculation cannot move it either"
     );
+    assert.equal(storedOt(w, ALICE, "2026-09-13"), 110);
+  });
+
+  it("saving the shift returns promptly and says what was STARTED", async () => {
+    const w = await seedSeptember();
+    const result = await saveMinimumOt(w, 10);
+
+    assert.equal(result.recalculation.queued, true);
+    assert.equal(result.recalculation.status, "QUEUED");
+    assert.equal(
+      result.recalculation.employees_targeted,
+      3,
+      "Alice, Bob and Dee are on this shift - Dee has never been calculated"
+    );
+    assert.equal(result.recalculation.employee_months_targeted, 3);
+    assert.equal(
+      result.msg,
+      "Shift updated. Attendance recalculation started (run #1) for 3 employees across 3 open months."
+    );
+    assert.equal(w.state.recalculatedRanges.length, 0, "no recalculation happened in the request");
+  });
+
+  it("AN OPEN DATE THAT WAS NEVER CALCULATED is recalculated too", async () => {
+    // Discovery is from the assignment history, not from stored rows: this
+    // employee punched but nobody has ever run attendance for them.
+    const w = await seedSeptember();
+    w.state.punches.push(...workedDay(41, DEE, "2026-09-10"));
+    assert.equal(w.state.stored.get(`${DEE}|2026-09-10`), undefined);
+
+    await saveMinimumOt(w, 10);
+    await drainQueue(w);
+
+    assert.equal(
+      storedOt(w, DEE, "2026-09-10"),
+      110,
+      "a date with no stored calculation is exactly the date that needed the new rule"
+    );
+  });
+
+  it("the whole open window is covered - from the shift assignment to today, never beyond", async () => {
+    const w = await seedSeptember();
+    await saveMinimumOt(w, 10);
+    await drainQueue(w);
+
+    const alice = w.state.recalculatedRanges.filter((r) => r.employee_id === ALICE);
+    assert.equal(alice.length, 1, "one range for September");
+    assert.equal(alice[0].from_date, "2026-09-01", "from the assignment, not from the first stored day");
+    assert.equal(alice[0].to_date, TODAY, "to today");
+    assert.equal(
+      w.state.recalculatedRanges.every((r) => r.to_date <= TODAY),
+      true,
+      "and never into the future"
+    );
+  });
+
+  it("a LOCKED month is skipped entirely and its days do not move", async () => {
+    const w = await seedSeptember();
+    w.state.lockedMonths.add(`${BOB}|2026-09`);
     assert.equal(storedOt(w, BOB, "2026-09-13"), 100);
+
+    const save = await saveMinimumOt(w, 10);
+    await drainQueue(w);
+
+    assert.equal(storedOt(w, BOB, "2026-09-13"), 100, "the settled day is untouched");
+    assert.equal(storedOt(w, ALICE, "2026-09-13"), 110, "and the open one is not");
+    assert.equal(
+      save.recalculation.employees_targeted,
+      2,
+      "Alice and Dee; Bob's only open month is the one that was locked"
+    );
+    assert.equal(save.recalculation.months_skipped_locked, 1);
+    assert.equal(
+      w.state.recalculatedRanges.some((r) => r.employee_id === BOB),
+      false,
+      "the locked employee-month was never even attempted"
+    );
+  });
+
+  it("a month that locks BETWEEN the scope read and the write is refused and counted, not lost", async () => {
+    const w = await seedSeptember();
+    await saveMinimumOt(w, 10);
+    // The lock lands after the run was queued, before the worker gets there.
+    w.state.lockedMonths.add(`${BOB}|2026-09`);
+    await drainQueue(w);
+
+    assert.equal(storedOt(w, BOB, "2026-09-13"), 100, "the write gate refused it");
+    assert.equal(storedOt(w, ALICE, "2026-09-13"), 110);
+    const run = w.state.runs[0];
+    assert.equal(run.status, "COMPLETED", "a refusal by the lock is not an error");
+    assert.equal(run.employees_failed, 0);
+    assert.ok(run.days_skipped_locked > 0, "and it is reported as skipped");
   });
 
   it("the MANUAL Recalculate uses the latest shift configuration for an open date", async () => {
     const w = await seedSeptember();
-    // The shift is edited with propagation unwired, so only the manual run
-    // can be what brings the date up to date.
+    // Saved with propagation unwired, so only the manual run can be what
+    // brings the date up to date.
     w.workShift.setAttendanceRecalculationService(null);
     await saveMinimumOt(w, 10);
     assert.equal(storedOt(w, ALICE, "2026-09-13"), 100, "nothing has recalculated it yet");
@@ -406,6 +594,7 @@ describe("work shift rule propagation", () => {
     const carlBefore = storedOt(w, CARL, "2026-09-13");
 
     await saveMinimumOt(w, 10);
+    await drainQueue(w);
 
     assert.equal(storedOt(w, CARL, "2026-09-13"), carlBefore, "another shift's employee is untouched");
     assert.equal(
@@ -413,37 +602,41 @@ describe("work shift rule propagation", () => {
       false,
       "and was never recalculated at all"
     );
-    // Every range stays inside September, the month the lock decision was
-    // taken on, and inside the shift's own employees.
     w.state.recalculatedRanges.forEach((range) => {
       assert.equal(monthOf(range.from_date), "2026-09");
       assert.equal(monthOf(range.to_date), "2026-09");
-      assert.equal([ALICE, BOB].includes(range.employee_id), true);
+      assert.equal([ALICE, BOB, DEE].includes(range.employee_id), true);
     });
   });
 
-  it("a save that changes nothing calculable recalculates nothing", async () => {
+  it("a save that changes nothing calculable queues nothing", async () => {
     const w = await seedSeptember();
     const result = await w.workShift.update(SHIFT, {
       work_shift_details: { overtime_minimum_minutes: 20 },
       actor_employee_id: 7,
     });
     assert.deepEqual(result.recalculation, { skipped: true, reason: "CONFIGURATION_UNCHANGED" });
-    assert.equal(w.state.recalculatedRanges.length, 0);
+    assert.equal(w.state.runs.length, 0);
   });
 
-  it("the run is auditable: who, which shift, and that a shift save started it", async () => {
+  it("the run is auditable: who, which shift, that a shift save started it, and how it ended", async () => {
     const w = await seedSeptember();
     await saveMinimumOt(w, 10, 77);
 
     assert.equal(w.state.runs.length, 1);
+    assert.equal(w.state.runs[0].status, "QUEUED", "durable before anything runs");
+    assert.equal(w.state.runs[0].trigger_source, "WORK_SHIFT_SAVE");
+    assert.equal(w.state.runs[0].work_shift_id, SHIFT);
+    assert.equal(w.state.runs[0].requested_by_employee_id, 77);
+
+    await drainQueue(w);
+
     const run = w.state.runs[0];
-    assert.equal(run.trigger_source, "WORK_SHIFT_SAVE");
-    assert.equal(run.work_shift_id, SHIFT);
-    assert.equal(run.requested_by_employee_id, 77);
     assert.equal(run.status, "COMPLETED");
-    assert.equal(run.days_processed, 8);
+    assert.equal(run.attempts, 1);
+    assert.ok(run.days_processed > 0);
     assert.equal(run.days_skipped_locked, 0);
+    assert.ok(w.state.heartbeats.length > 0, "a long run beats while it works");
   });
 
   it("the employee's shift on the DATE still decides which shift's rules apply", async () => {
@@ -473,7 +666,127 @@ describe("work shift rule propagation", () => {
 
     // Editing 9 TO 6 now reaches 13-Sep and not 14-Sep.
     await saveMinimumOt(w, 10);
+    await drainQueue(w);
     assert.equal(storedOt(w, ALICE, "2026-09-13"), 110);
     assert.equal(storedOt(w, ALICE, "2026-09-14"), 100, "14-Sep is the other shift's day");
+    // And the range stops where the assignment does.
+    const alice = w.state.recalculatedRanges.filter((r) => r.employee_id === ALICE);
+    assert.equal(alice[alice.length - 1].to_date, "2026-09-13");
+  });
+
+  it("a single-date override ONTO this shift brings that date into scope", async () => {
+    const w = await seedSeptember();
+    // Carl is on the other shift, but 15-Sep was moved onto 9 TO 6.
+    w.state.overrides.set(CARL, [{ attendance_date: "2026-09-15", work_shift_id: SHIFT }]);
+    w.state.punches.push(...workedDay(51, CARL, "2026-09-15"));
+
+    await saveMinimumOt(w, 10);
+    await drainQueue(w);
+
+    assert.equal(storedOt(w, CARL, "2026-09-15"), 110, "the overridden date uses 9 TO 6's new rule");
+    assert.equal(storedOt(w, CARL, "2026-09-13"), 100, "his ordinary days are not this shift's");
+  });
+});
+
+describe("the recalculation queue", () => {
+  it("survives a worker that died mid-run: stale RUNNING is requeued and finishes", async () => {
+    const w = await seedSeptember();
+    await saveMinimumOt(w, 10);
+
+    // The worker claims the run and the process dies before finishing.
+    const run = await w.state.runs[0];
+    run.status = "RUNNING";
+    run.attempts = 1;
+    run.heartbeat_at = w.state.now - 20 * 60 * 1000;
+
+    const ticks = await drainQueue(w);
+    assert.equal(ticks[0].recovered.requeued, 1, "the stale run came back to the queue");
+    assert.equal(w.state.runs[0].status, "COMPLETED");
+    assert.equal(storedOt(w, ALICE, "2026-09-13"), 110, "and the work actually happened");
+  });
+
+  it("gives up after too many attempts rather than looping forever", async () => {
+    const w = await seedSeptember();
+    await saveMinimumOt(w, 10);
+    const run = w.state.runs[0];
+    run.status = "RUNNING";
+    run.attempts = 3;
+    run.heartbeat_at = w.state.now - 20 * 60 * 1000;
+
+    await w.calculation.processQueuedRecalculations({ today: TODAY });
+
+    assert.equal(run.status, "FAILED");
+    assert.match(run.last_error, /abandoned after 3 attempts/);
+  });
+
+  it("a MANUAL bulk run is never claimed, requeued or abandoned by the worker", async () => {
+    // A manual run is executed by the request that asked for it: it is
+    // RUNNING for as long as that takes and it never heartbeats, so a
+    // recovery that went by heartbeat alone would declare it dead, requeue
+    // it, and hand the worker a run with no shift to propagate.
+    const w = await seedSeptember();
+    w.state.runs.push({
+      attendance_recalculation_run_id: 1,
+      trigger_source: "MANUAL",
+      status: "RUNNING",
+      attempts: 0,
+      heartbeat_at: null,
+      work_shift_id: null,
+    });
+
+    const tick = await w.calculation.processQueuedRecalculations({ today: TODAY });
+
+    assert.equal(tick.recovered.requeued, 0);
+    assert.equal(tick.recovered.abandoned, 0);
+    assert.equal(tick.claimed, null);
+    assert.equal(w.state.runs[0].status, "RUNNING", "the manual run is left entirely alone");
+
+    const retried = await w.calculation.retryRecalculationRun(1);
+    assert.equal(retried.code, 422, "and it is not retryable from the queue either");
+  });
+
+  it("a failed run is retryable, and a clean one is not", async () => {
+    const w = await seedSeptember();
+    await saveMinimumOt(w, 10);
+    w.state.runs[0].status = "FAILED";
+
+    const retried = await w.calculation.retryRecalculationRun(1);
+    assert.equal(retried.code, 200);
+    assert.equal(w.state.runs[0].status, "QUEUED");
+
+    await drainQueue(w);
+    assert.equal(w.state.runs[0].status, "COMPLETED");
+
+    const again = await w.calculation.retryRecalculationRun(1);
+    assert.equal(again.code, 422, "a run that completed cleanly is not re-runnable");
+  });
+
+  it("one employee with a failed month and a succeeded month counts as ONE failed employee", async () => {
+    const w = await seedSeptember();
+    // Two open months for Alice, and the second one blows up.
+    w.state.punches.push(...workedDay(61, ALICE, "2026-10-05"));
+    w.state.assignments.set(ALICE, w.state.assignments.get(ALICE));
+    w.state.failRange = { employee_id: ALICE, from_date: "2026-10-01" };
+
+    // Saved and run in late October, so both September and October are in
+    // scope for everybody the shift governs.
+    await w.workShift.update(SHIFT, {
+      work_shift_details: { overtime_minimum_minutes: 10 },
+      actor_employee_id: 7,
+    });
+    const ticks = await drainQueue(w, { today: "2026-10-20" });
+    assert.ok(ticks[0].claimed);
+
+    const run = w.state.runs[0];
+    assert.equal(run.employees_failed, 1);
+    assert.equal(
+      run.employees_completed,
+      2,
+      "Bob and Dee completed; Alice is counted once, as failed, not also as completed"
+    );
+    assert.equal(run.status, "COMPLETED_WITH_ERRORS");
+    assert.equal(run.errors.length, 1);
+    assert.equal(run.errors[0].employee_id, ALICE);
+    assert.equal(run.errors[0].period, "10/2026");
   });
 });

@@ -58,14 +58,31 @@ describe("the endpoints and their guards", () => {
         "GET /attendance/calculated/break-override/:employee_id",
         "GET /attendance/calculated/date-shift/options",
         "GET /attendance/calculated/recalculate-runs",
+        // One run, polled after a Work Shift save queued a propagation.
+        "GET /attendance/calculated/recalculate-runs/:run_id",
         "GET /attendance/me",
         "GET /attendance/payroll/monthly",
         "POST /attendance/calculated/break-override",
         "POST /attendance/calculated/date-shift",
         "POST /attendance/calculated/recalculate",
         "POST /attendance/calculated/recalculate-bulk",
+        // Put a failed run - or one that completed with errors - back in the
+        // queue. Same key as running one.
+        "POST /attendance/calculated/recalculate-runs/retry",
       ]
     );
+  });
+
+  it("the queue's status and retry endpoints are behind recalculate_attendance too", () => {
+    [
+      ["GET", "/attendance/calculated/recalculate-runs/:run_id"],
+      ["POST", "/attendance/calculated/recalculate-runs/retry"],
+    ].forEach(([method, path]) => {
+      assert.deepEqual(find(method, path).guard, {
+        mode: "any",
+        keys: [P.RECALCULATE_ATTENDANCE],
+      });
+    });
   });
 
   it("bulk recalculation and its run history are behind recalculate_attendance", () => {

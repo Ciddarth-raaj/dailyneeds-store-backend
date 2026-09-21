@@ -287,6 +287,59 @@ class AttendanceCalculationRoutes {
 
 
     /**
+     * ONE run, for polling after a Work Shift save queued one.
+     *
+     * Same key as the runs list: being allowed to recalculate is what lets
+     * somebody see how a recalculation went.
+     */
+    this.router.get(
+      "/attendance/calculated/recalculate-runs/:run_id",
+      this.permissions.require(P.RECALCULATE_ATTENDANCE),
+      async (req, res) => {
+        try {
+          const runId = Number(req.params.run_id);
+          if (!Number.isInteger(runId) || runId <= 0) {
+            res.status(400).json({ code: 400, msg: "run_id must be a run id" });
+            return;
+          }
+          const run = await this.usecase.getRecalculationRun(runId);
+          if (!run) {
+            res.status(404).json({ code: 404, msg: "No such recalculation run" });
+            return;
+          }
+          res.json({ code: 200, run });
+        } catch (err) {
+          respondError(res, err);
+        }
+      }
+    );
+
+    /**
+     * RETRY a run that failed, or that completed with errors.
+     *
+     * It does not re-run anything here: it puts the run back in the QUEUE and
+     * the worker picks it up, which is the same path the original attempt
+     * took. A run that completed cleanly is refused - 422 - rather than
+     * silently re-queued.
+     */
+    this.router.post(
+      "/attendance/calculated/recalculate-runs/retry",
+      this.permissions.require(P.RECALCULATE_ATTENDANCE),
+      async (req, res) => {
+        try {
+          const schema = { run_id: Joi.number().integer().positive().required() };
+          const isValid = Joi.validate(req.body, schema);
+          if (isValid.error !== null) throw isValid.error;
+
+          const result = await this.usecase.retryRecalculationRun(req.body.run_id);
+          res.status(result.code === 200 ? 200 : result.code).json(result);
+        } catch (err) {
+          respondError(res, err);
+        }
+      }
+    );
+
+    /**
      * The SINGLE-DATE shift edit.
      *
      * `edit_attendance_date_shift`, granted by migration to nobody. Body is

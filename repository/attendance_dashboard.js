@@ -1,6 +1,5 @@
 const logger = require("../utils/logger");
 const { JOINED_ON } = require("../utils/joining_date");
-const { PAYROLL_LOCK_STATUS } = require("../utils/attendance_payroll_lock");
 
 /**
  * Attendance Dashboard - the reads.
@@ -404,39 +403,6 @@ class AttendanceDashboardRepository {
         WHERE c.employee_id IN (?)
           AND c.attendance_date BETWEEN ? AND ?`,
       [employeeIds, fromDate, toDate]
-    );
-  }
-
-  /**
-   * WHICH (employee, month) of this window payroll has approved and LOCKED.
-   *
-   * ONE read for the whole population, because the dashboard's live preview
-   * has to know - per date - whether the shift configuration it calculates
-   * under is today's (open month) or the one dated to that day (locked
-   * month). See `utils/shift_config_version.js#resolveConfigVersionForCalculation`.
-   *
-   * READ-ONLY AND OUTSIDE ANY TRANSACTION. The dashboard writes nothing, so
-   * there is no lock to take here; the `FOR UPDATE` gate in
-   * `repository/attendance_calculation.js` remains the only thing that stops
-   * a write.
-   *
-   * @returns {Array} `[{ employee_id, period_year, period_month }]`
-   */
-  async listPayrollLockedPeriods(employeeIds, fromDate, toDate) {
-    if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
-    return this._read(
-      "LIST-PAYROLL-LOCKED-PERIODS",
-      `SELECT employee_id, period_year, period_month
-         FROM payrun_employee_calculation
-        WHERE employee_id IN (?)
-          AND status = ?
-          AND (period_year * 100 + period_month) BETWEEN ? AND ?`,
-      [
-        employeeIds,
-        PAYROLL_LOCK_STATUS,
-        Number(String(fromDate).slice(0, 4)) * 100 + Number(String(fromDate).slice(5, 7)),
-        Number(String(toDate).slice(0, 4)) * 100 + Number(String(toDate).slice(5, 7)),
-      ]
     );
   }
 

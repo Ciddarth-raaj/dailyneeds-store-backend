@@ -2028,6 +2028,22 @@ class Server {
       }
     );
 
+    // EVERY MINUTE - the attendance recalculation queue.
+    //
+    // A Work Shift save writes a QUEUED run row and returns; this is what
+    // picks it up, and what recovers a run whose worker died mid-flight (a
+    // pm2 restart) by requeueing it once its heartbeat goes stale. One run
+    // per tick, never re-entrant: see `processQueuedRecalculations`. With no
+    // queued run the tick is two cheap indexed statements.
+    const ATTENDANCE_RECALCULATION_QUEUE_CRON = "* * * * *";
+    this.cronService.register(
+      "attendance_recalculation_queue",
+      ATTENDANCE_RECALCULATION_QUEUE_CRON,
+      async () => {
+        await this.attendanceCalculationUsecase.processQueuedRecalculations();
+      }
+    );
+
     // EVERY THREE SECONDS - pick up `/start <token>` messages sent to the
     // Telegram bot and finish linking. Polling rather than a webhook, so the
     // API does not have to be reachable from the internet over HTTPS.

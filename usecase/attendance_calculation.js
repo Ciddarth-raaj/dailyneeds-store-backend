@@ -9,12 +9,10 @@ const {
 const {
   RESOLUTION_STATUS,
   resolveShiftForDate,
-  monthProbesForRange,
   toDateOnly,
 } = require("../utils/shiftResolution");
 const {
-  resolveConfigVersionForCalculation,
-  latestConfigVersion,
+  configVersionForCalculation,
   toShiftDefinition,
   VERSIONED_CONFIG_COLUMNS,
 } = require("../utils/shift_config_version");
@@ -33,6 +31,8 @@ const {
   resolveDayForRead,
 } = require("../utils/attendance_stored_read");
 const { isDayClosed } = require("../utils/attendance_dashboard");
+const { propagationScope } = require("../utils/shift_propagation");
+const { istToday } = require("../utils/istDate");
 
 /**
  * Attendance v2 - the orchestration between the repository and the pure
@@ -359,6 +359,22 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    * here raises an OT request: candidate overtime is a figure the engine
    * reports, and it becomes a request only when the employee asks for it.
    */
+  /**
+   * TODAY, injectable.
+   *
+   * The propagation's upper bound is today - nothing future is calculated -
+   * and a test that had to agree with the wall clock would start failing on
+   * its own one day. `options.today` may be a `YYYY-MM-DD` string or a
+   * function returning one; production passes neither and gets the IST
+   * business date.
+   */
+  const todayIs = (override) => {
+    const explicit = toDateOnly(override);
+    if (explicit !== null) return explicit;
+    const configured = typeof options.today === "function" ? options.today() : options.today;
+    return toDateOnly(configured) || istToday();
+  };
+
   let otRequestService = options.ot_request_service || null;
   const setOtRequestService = (service) => {
     otRequestService = service || null;
@@ -513,27 +529,6 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
 
     const shiftCache = await loadShiftCache([...(assignments || []), ...overrides]);
 
-    // WHICH MONTHS OF THIS WINDOW ARE SETTLED.
-    //
-    // One probe per calendar month the window touches - at most three, for a
-    // 62-day range widened by a day at each end - answered by the same
-    // read-only lock query every other pre-flight uses. It decides which
-    // CONFIGURATION a date calculates under, and nothing else: it is not a
-    // permission to write, and the `FOR UPDATE` gate in the repository
-    // remains the only thing that can stop one.
-    const lockedMonths = new Set(
-      (
-        (await findPayrollLockedPeriods(
-          monthProbesForRange({
-            employeeId: Number(employee_id),
-            from: punchWindowFrom,
-            to: punchWindowTo,
-          })
-        )) || []
-      ).map((p) => `${p.year}-${String(p.month).padStart(2, "0")}`)
-    );
-    const isLockedDate = (date) => lockedMonths.has(String(date || "").slice(0, 7));
-
     // (shift, date) -> the configuration VERSION in force then. Memoized
     // because a month resolves the same pair thirty times.
     const definitions = new Map();
@@ -544,27 +539,20 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       const loaded = shiftCache.get(Number(workShiftId));
       let definition = null;
       if (loaded) {
-        // OPEN DATE -> the LATEST configuration; LOCKED DATE -> the one dated
-        // to that day. The rule itself is in
-        // `utils/shift_config_version.js#resolveConfigVersionForCalculation`,
-        // which the dashboard reads too, so the two cannot drift apart.
-        const locked = isLockedDate(date);
-        const versionRow = resolveConfigVersionForCalculation(loaded.versions, date, {
-          payrollLocked: locked,
-        });
+        // THE CURRENT CONFIGURATION, for every date this engine calculates.
+        // A calculation only ever happens for a date payroll has not settled
+        // - a locked month is refused at the write and READ from its stored
+        // row - so there is no date here whose rules are supposed to be
+        // historical. See
+        // `utils/shift_config_version.js#configVersionForCalculation`.
+        const versionRow = configVersionForCalculation(loaded.versions);
         definition = versionRow
           ? withLiveDefaults(toShiftDefinition(versionRow, workShiftId), loaded.live)
-          : // Nothing dated to read - a locked date before the first version
-            // row, or a shift with no version history at all. The live tables
-            // answer and say so. The migration seeds a version at the v2
-            // cutover, so for a locked date this is only reachable earlier
-            // than v2 itself.
+          : // A shift with no version history at all: the live tables answer
+            // and say so.
             loaded.live
             ? {
                 ...loaded.live,
-                // An OPEN date under the live tables is still calculated
-                // under today's configuration - the stamp simply records
-                // that no version row described it.
                 config_version_id: null,
                 config_version_hash: null,
                 config_effective_from: null,
@@ -1568,150 +1556,145 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
   };
 
   /**
-   * WORK SHIFT RULE PROPAGATION - what a Work Shift save now does to the days
-   * already calculated under that shift.
+   * WORK SHIFT RULE PROPAGATION - what a Work Shift save does to the days
+   * that shift decides.
    *
    * THE RULE. A shift's configuration is a statement about how the shift
-   * works, not about one day, so correcting it corrects every attendance date
-   * whose payroll month is still OPEN - including dates in the past. A month
-   * payroll has approved and LOCKED is settled and is not touched at all:
-   * not recalculated, not re-read, not rewritten.
+   * works, not about one day, so changing it changes every attendance date
+   * that shift governs whose payroll month is still OPEN - including dates in
+   * the past, and including dates nobody has calculated yet. A month payroll
+   * has approved and LOCKED is settled: its stored rows are the truth and it
+   * is not recalculated, re-read or rewritten.
    *
-   * IT DUPLICATES NO ARITHMETIC. Every affected (employee, month) is handed
-   * to `recalculateRange` - the same path the Recalculate button runs - so
-   * there is exactly one recalculation in this codebase and this is a caller
-   * of it, not a copy.
+   * WHAT IS IN SCOPE is decided from the DATED FACTS by
+   * `utils/shift_propagation.js` - the assignment history, the single-date
+   * overrides, the employment bounds, today, and the payroll floor - never
+   * from which days happen to have a stored row already.
+   *
+   * IT DUPLICATES NO ARITHMETIC. Every (employee, month) is handed to
+   * `recalculateRange`, the same path the Recalculate button runs.
    *
    * IT IS NOT THE PAYROLL LOCK. The months it skips are read outside any
-   * transaction and could in principle close between the read and the write;
-   * that race is exactly what the `FOR UPDATE` gate in
+   * transaction and one could close between that read and the write; that
+   * race is exactly what the `FOR UPDATE` gate in
    * `repository/attendance_calculation.js` exists for, and a month that locks
-   * underneath this is refused there and counted as skipped below. Nothing
-   * here weakens or bypasses that gate - it only avoids doing work that gate
-   * would reject.
+   * underneath this run is refused there and counted as skipped. Nothing here
+   * weakens or bypasses that gate - it only avoids work the gate would reject.
    *
-   * IT NEVER FAILS THE SAVE. The shift has already been written when this
-   * runs; a recalculation that cannot complete is reported, per employee,
-   * beside the counts. Whoever reads the result can run Recalculate by hand,
-   * which is the same code path.
-   *
-   * @returns {object} counts, the run id that audits it, and per-employee errors
+   * @param {number} work_shift_id
+   * @param {number|null} actor_employee_id  stamped on the run record
+   * @param {number|null} run_id             an already-created run to report
+   *                                         into (the queued job's own row)
+   * @param {function|null} onProgress       called between employee-months,
+   *                                         so a long run can heartbeat
    */
   const recalculateForShiftConfigChange = async ({
     work_shift_id,
     actor_employee_id = null,
+    run_id = null,
+    today = null,
+    onProgress = null,
   }) => {
     const workShiftId = Number(work_shift_id);
     if (!Number.isInteger(workShiftId) || workShiftId <= 0) {
       throw validationError("work_shift_id is required and must be a work shift id");
     }
-    if (!attendanceCalculationRepo.listShiftImpactedMonths) {
+    if (!attendanceCalculationRepo.listShiftPropagationFacts) {
       return { skipped: true, reason: "NOT_SUPPORTED" };
     }
 
-    const months = (await attendanceCalculationRepo.listShiftImpactedMonths(workShiftId)) || [];
-    const open = months.filter((m) => !m.payroll_locked);
-    const locked = months.filter((m) => m.payroll_locked);
-    const lockedDays = locked.reduce((sum, m) => sum + (Number(m.day_count) || 0), 0);
+    const employees = (await attendanceCalculationRepo.listShiftPropagationFacts(workShiftId)) || [];
+    const { work, skipped_locked } = propagationScope({
+      workShiftId,
+      employees,
+      today: todayIs(today),
+    });
 
-    if (open.length === 0) {
-      return {
-        run_id: null,
+    let runId = run_id;
+    if (runId === null && work.length > 0 && attendanceCalculationRepo.insertRecalculationRun) {
+      runId = await attendanceCalculationRepo.insertRecalculationRun({
+        requested_by_employee_id: actor_employee_id,
+        trigger_source: "WORK_SHIFT_SAVE",
         work_shift_id: workShiftId,
-        status: "COMPLETED",
-        employees_targeted: 0,
-        employees_completed: 0,
-        employees_failed: 0,
-        attendance_days_recalculated: 0,
-        attendance_days_skipped_locked: lockedDays,
-        months_skipped_locked: locked.length,
-        errors: [],
-      };
+        from_date: work.reduce((min, w) => (w.from_date < min ? w.from_date : min), work[0].from_date),
+        to_date: work.reduce((max, w) => (w.to_date > max ? w.to_date : max), work[0].to_date),
+        employees_targeted: new Set(work.map((w) => w.employee_id)).size,
+        status: "RUNNING",
+      });
     }
 
-    const runId = attendanceCalculationRepo.insertRecalculationRun
-      ? await attendanceCalculationRepo.insertRecalculationRun({
-          requested_by_employee_id: actor_employee_id,
-          trigger_source: "WORK_SHIFT_SAVE",
-          work_shift_id: workShiftId,
-          from_date: open.reduce((min, m) => (m.from_date < min ? m.from_date : min), open[0].from_date),
-          to_date: open.reduce((max, m) => (m.to_date > max ? m.to_date : max), open[0].to_date),
-          employee_id: null,
-          store_id: null,
-          designation_id: null,
-          employees_targeted: new Set(open.map((m) => m.employee_id)).size,
-        })
-      : null;
-
     const errors = [];
-    const completedEmployees = new Set();
+    // EMPLOYEE-LEVEL COUNTS ARE MUTUALLY EXCLUSIVE. An employee whose
+    // September succeeded and whose October failed is a FAILED employee, not
+    // both a completed and a failed one: the per-month detail lives in
+    // `errors`, and the headline count must not add up to more employees than
+    // the run touched.
+    const succeededMonths = new Map(); // employee -> count
+    const failedEmployees = new Set();
     let daysRecalculated = 0;
-    let skippedLockedDays = lockedDays;
-    let monthsSkippedLocked = locked.length;
+    let monthsRecalculated = 0;
+    // The days this run will not touch because their month is settled,
+    // counted from the scope rather than by enumerating a settled month.
+    let skippedLockedDays = skipped_locked.reduce(
+      (sum, entry) => sum + (Number(entry.day_count) || 0),
+      0
+    );
+    const skippedLockedMonths = new Set(
+      skipped_locked.map((entry) => `${entry.employee_id}|${entry.month}`)
+    );
 
-    for (const month of open) {
-      // ONE DAY OF SLACK AT EACH END, CLAMPED TO THE MONTH. A cutoff change
-      // can move a punch onto the neighbouring attendance date, so the day
-      // either side of the stored block is recalculated too - but never past
-      // the month boundary, because the month is the unit the lock decision
-      // was taken on and a range that crossed it could carry work into a
-      // month this run has not checked.
-      const monthStart = `${month.period_year}-${String(month.period_month).padStart(2, "0")}-01`;
-      const monthEnd = addDays(
-        month.period_month === 12
-          ? `${month.period_year + 1}-01-01`
-          : `${month.period_year}-${String(month.period_month + 1).padStart(2, "0")}-01`,
-        -1
-      );
-      const from = (() => {
-        const widened = addDays(month.from_date, -1);
-        return widened < monthStart ? monthStart : widened;
-      })();
-      const to = (() => {
-        const widened = addDays(month.to_date, 1);
-        return widened > monthEnd ? monthEnd : widened;
-      })();
-
+    for (const item of work) {
       /* eslint-disable no-await-in-loop */
       try {
         const result = await recalculateRange({
-          employee_id: month.employee_id,
-          from_date: from,
-          to_date: to,
+          employee_id: item.employee_id,
+          from_date: item.from_date,
+          to_date: item.to_date,
         });
         daysRecalculated += Number(result.written) || 0;
-        completedEmployees.add(month.employee_id);
+        monthsRecalculated += 1;
+        succeededMonths.set(item.employee_id, (succeededMonths.get(item.employee_id) || 0) + 1);
       } catch (err) {
-        // A month that locked between the read above and the write is not an
+        // A month that locked between the scope read and the write is not an
         // error: it is the lock doing its job, and it is counted as skipped.
         if (err && err.code === "PAYROLL_MONTH_LOCKED") {
-          skippedLockedDays += Number(month.day_count) || 0;
-          monthsSkippedLocked += 1;
+          skippedLockedMonths.add(`${item.employee_id}|${item.month}`);
+          skippedLockedDays += Number(item.day_count) || 0;
         } else {
+          failedEmployees.add(item.employee_id);
           errors.push({
-            employee_id: month.employee_id,
-            period: `${String(month.period_month).padStart(2, "0")}/${month.period_year}`,
+            employee_id: item.employee_id,
+            period: `${String(item.period_month).padStart(2, "0")}/${item.period_year}`,
+            from_date: item.from_date,
+            to_date: item.to_date,
             message: err && err.message ? err.message : String(err),
           });
+        }
+      }
+      if (onProgress) {
+        try {
+          await onProgress({ processed: monthsRecalculated + errors.length, total: work.length });
+        } catch (progressErr) {
+          // A heartbeat that fails must never fail the run it is reporting on.
         }
       }
       /* eslint-enable no-await-in-loop */
     }
 
-    const targeted = new Set(open.map((m) => m.employee_id)).size;
-    const failedEmployees = new Set(errors.map((e) => e.employee_id)).size;
+    const targeted = new Set(work.map((w) => w.employee_id)).size;
+    const completed = [...succeededMonths.keys()].filter((id) => !failedEmployees.has(id)).length;
     const status =
       errors.length === 0
         ? "COMPLETED"
-        : completedEmployees.size === 0
+        : completed === 0
         ? "FAILED"
         : "COMPLETED_WITH_ERRORS";
 
     if (runId && attendanceCalculationRepo.finishRecalculationRun) {
       await attendanceCalculationRepo.finishRecalculationRun(runId, {
         status,
-        employees_completed: completedEmployees.size,
-        employees_failed: failedEmployees,
+        employees_completed: completed,
+        employees_failed: failedEmployees.size,
         days_processed: daysRecalculated,
         days_skipped_locked: skippedLockedDays,
         errors,
@@ -1723,14 +1706,170 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       work_shift_id: workShiftId,
       status,
       employees_targeted: targeted,
-      employees_completed: completedEmployees.size,
-      employees_failed: failedEmployees,
+      employees_completed: completed,
+      employees_failed: failedEmployees.size,
+      employee_months_targeted: work.length,
+      employee_months_recalculated: monthsRecalculated,
       attendance_days_recalculated: daysRecalculated,
       attendance_days_skipped_locked: skippedLockedDays,
-      months_skipped_locked: monthsSkippedLocked,
+      months_skipped_locked: skippedLockedMonths.size,
       errors,
     };
   };
+
+  /**
+   * QUEUE a propagation. This is what a Work Shift save calls.
+   *
+   * ONE COMMITTED INSERT and nothing else, so the save's HTTP request returns
+   * immediately however many people are on the shift. The row is the job: it
+   * survives a pm2 restart, it is visible on the Recalculate Attendance
+   * screen from the moment it exists, and the worker below picks it up.
+   *
+   * THE RANGE ON THE ROW IS PROVISIONAL. It is what the shift's dated facts
+   * say the propagation covers WHEN QUEUED, recorded so the queued row means
+   * something to a human reading it; the worker re-derives the scope when it
+   * runs, because an assignment can change and a month can lock in between.
+   */
+  const queueShiftConfigRecalculation = async ({
+    work_shift_id,
+    actor_employee_id = null,
+    today = null,
+  }) => {
+    const workShiftId = Number(work_shift_id);
+    if (!Number.isInteger(workShiftId) || workShiftId <= 0) {
+      throw validationError("work_shift_id is required and must be a work shift id");
+    }
+    if (
+      !attendanceCalculationRepo.listShiftPropagationFacts ||
+      !attendanceCalculationRepo.insertRecalculationRun
+    ) {
+      return { queued: false, reason: "NOT_SUPPORTED" };
+    }
+
+    const employees = (await attendanceCalculationRepo.listShiftPropagationFacts(workShiftId)) || [];
+    const { work, skipped_locked } = propagationScope({
+      workShiftId,
+      employees,
+      today: todayIs(today),
+    });
+
+    if (work.length === 0) {
+      return {
+        queued: false,
+        reason: "NOTHING_OPEN_TO_RECALCULATE",
+        employees_targeted: 0,
+        employee_months_targeted: 0,
+        months_skipped_locked: skipped_locked.length,
+      };
+    }
+
+    const runId = await attendanceCalculationRepo.insertRecalculationRun({
+      requested_by_employee_id: actor_employee_id,
+      trigger_source: "WORK_SHIFT_SAVE",
+      work_shift_id: workShiftId,
+      from_date: work.reduce((min, w) => (w.from_date < min ? w.from_date : min), work[0].from_date),
+      to_date: work.reduce((max, w) => (w.to_date > max ? w.to_date : max), work[0].to_date),
+      employees_targeted: new Set(work.map((w) => w.employee_id)).size,
+      status: "QUEUED",
+    });
+
+    return {
+      queued: true,
+      run_id: runId,
+      work_shift_id: workShiftId,
+      status: "QUEUED",
+      employees_targeted: new Set(work.map((w) => w.employee_id)).size,
+      employee_months_targeted: work.length,
+      months_skipped_locked: skipped_locked.length,
+    };
+  };
+
+  /**
+   * THE WORKER TICK. Recover what died, then process ONE queued run.
+   *
+   * ONE PER TICK on purpose: a tick that drained the whole queue would hold
+   * the pool for as long as the queue is long and would starve the requests
+   * the same process is serving. The cron ticks again in a minute, and a
+   * backlog drains at one run a minute rather than in one burst.
+   *
+   * RE-ENTRANT NEVER. `processQueuedRecalculations` is guarded in-process so
+   * a tick that overruns its minute makes the next one a no-op, and the
+   * `status = 'QUEUED'` claim in the repository is what makes that safe
+   * across processes as well.
+   *
+   * IT NEVER THROWS. A failed run is recorded ON the run - FAILED, with the
+   * message - so the screen can show it and somebody can retry it; throwing
+   * would only reach the cron's console.
+   */
+  let workerBusy = false;
+  const processQueuedRecalculations = async ({ today = null } = {}) => {
+    if (workerBusy) return { skipped: "in_progress" };
+    if (!attendanceCalculationRepo.claimNextQueuedRun) return { skipped: "not_supported" };
+    workerBusy = true;
+    try {
+      const recovered = attendanceCalculationRepo.requeueStaleRecalculationRuns
+        ? await attendanceCalculationRepo.requeueStaleRecalculationRuns()
+        : { requeued: 0, abandoned: 0 };
+
+      const run = await attendanceCalculationRepo.claimNextQueuedRun();
+      if (!run) return { recovered, claimed: null };
+
+      const runId = Number(run.attendance_recalculation_run_id);
+      try {
+        if (!run.work_shift_id) {
+          throw validationError("a queued run carries no work shift to propagate");
+        }
+        const result = await recalculateForShiftConfigChange({
+          work_shift_id: Number(run.work_shift_id),
+          actor_employee_id: run.requested_by_employee_id || null,
+          run_id: runId,
+          today,
+          onProgress: () => attendanceCalculationRepo.heartbeatRecalculationRun(runId),
+        });
+        return { recovered, claimed: runId, result };
+      } catch (err) {
+        if (attendanceCalculationRepo.failRecalculationRun) {
+          await attendanceCalculationRepo.failRecalculationRun(
+            runId,
+            err && err.message ? err.message : String(err)
+          );
+        }
+        return {
+          recovered,
+          claimed: runId,
+          error: err && err.message ? err.message : String(err),
+        };
+      }
+    } finally {
+      workerBusy = false;
+    }
+  };
+
+  /** Put a failed or partly failed run back in the queue. */
+  const retryRecalculationRun = async (run_id) => {
+    const runId = Number(run_id);
+    if (!Number.isInteger(runId) || runId <= 0) {
+      throw validationError("run_id is required and must be a run id");
+    }
+    if (!attendanceCalculationRepo.retryRecalculationRun) {
+      return { code: 400, msg: "Retrying a run is not supported" };
+    }
+    const requeued = await attendanceCalculationRepo.retryRecalculationRun(runId);
+    if (!requeued) {
+      return {
+        code: 422,
+        msg:
+          "Only a shift-rule recalculation that failed, or completed with errors, " +
+          "can be retried. Run a manual recalculation again from this screen instead.",
+      };
+    }
+    return { code: 200, run_id: runId, status: "QUEUED" };
+  };
+
+  const getRecalculationRun = async (run_id) =>
+    attendanceCalculationRepo.getRecalculationRun
+      ? attendanceCalculationRepo.getRecalculationRun(Number(run_id))
+      : null;
 
   const listRecalculationRuns = async (limit = 20) =>
     attendanceCalculationRepo.listRecalculationRuns
@@ -1971,6 +2110,10 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     setPunchRedriveService,
     closeOtForPayrollLock,
     recalculateForShiftConfigChange,
+    queueShiftConfigRecalculation,
+    processQueuedRecalculations,
+    retryRecalculationRun,
+    getRecalculationRun,
     getBreakOverride,
     setBreakOverride,
     calculateRange,
