@@ -958,6 +958,53 @@ class AttendanceCalculationRepository {
     return found;
   }
 
+  /**
+   * THE SAME QUESTION AS `findPayrollLockedPeriods`, FOR A WHOLE REPORT, IN
+   * ONE STATEMENT.
+   *
+   * The per-request form above loops one `LIMIT 1` per employee-month, which
+   * is exactly right when a person is filing one request and exactly wrong
+   * when the Shift Change Eligibility report asks about two thousand
+   * employees across a date range: that is the N+1 a multi-outlet report must
+   * not have.
+   *
+   * The ANSWER IS IDENTICAL - same table, same `status`, same
+   * (year, month, employee) triple - so the two cannot disagree about whether
+   * a month is closed. Only the number of round trips differs.
+   *
+   * READ-ONLY. It is a SELECT and closes nothing, opens nothing and writes
+   * nothing: a locked month is as untouched after this call as before it.
+   */
+  async findPayrollLockedPeriodsBulk(rows = []) {
+    const { periods } = periodsTouched(rows);
+    if (periods.length === 0) return [];
+
+    // One OR-group per period. The triple is indexed by the table's own
+    // (period_year, period_month, employee_id) key, so this is a series of
+    // index lookups in a single round trip rather than a scan.
+    const clause = periods.map(() => "(period_year = ? AND period_month = ? AND employee_id = ?)").join(" OR ");
+    const params = [];
+    periods.forEach((p) => params.push(p.year, p.month, p.employee_id));
+    params.push(PAYROLL_LOCK_STATUS);
+
+    const hits = await this._read(
+      "FIND-PAYROLL-LOCKED-BULK",
+      `SELECT employee_id, period_year, period_month
+         FROM payrun_employee_calculation
+        WHERE (${clause})
+          AND status = ?`,
+      params
+    );
+
+    const locked = new Set(
+      (hits || []).map((h) => `${Number(h.employee_id)}:${Number(h.period_year)}:${Number(h.period_month)}`)
+    );
+    // Shaped EXACTLY as `findPayrollLockedPeriods` returns - `{employee_id,
+    // year, month}` - so a caller can swap one for the other without
+    // reshaping, and `payrollLockedActionError` names the same months.
+    return periods.filter((p) => locked.has(`${p.employee_id}:${p.year}:${p.month}`));
+  }
+
   /* ------------------------------------------- bulk recalculation */
 
   /**

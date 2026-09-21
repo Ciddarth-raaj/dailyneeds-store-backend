@@ -1690,6 +1690,14 @@ module.exports = (attendanceDashboardRepo) => {
     applicableOn,
     computeDaysForEmployee,
     loadBatch,
+    // EXPORTED FOR THE SHIFT CHANGE ELIGIBILITY REPORT, which needs the
+    // PERMANENT shift for a date (`baseResolutionFor`) and the dated snapshot
+    // of a CANDIDATE shift it is comparing against - both over the same
+    // `shiftCache` `loadBatch` already loaded. Building a second resolver
+    // there would have been a second answer to "which version of shift 7
+    // applied on this Tuesday", which is the one question every attendance
+    // screen has to agree on.
+    employeeResolver,
     getFilters,
     getOverview,
     getDrilldown,

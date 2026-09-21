@@ -423,6 +423,33 @@ module.exports = {
   VIEW_MISSING_ATTENDANCE_REPORT: "view_missing_attendance_report",
   EXPORT_MISSING_ATTENDANCE_REPORT: "export_missing_attendance_report",
 
+  // ========================== SHIFT CHANGE ELIGIBILITY REPORT (Attendance) =
+  //
+  // WHO MAY RAISE A ONE-DAY SHIFT CHANGE RIGHT NOW, AND WHO ALREADY HAS.
+  // HR's list for regularising days that ran longer than the roster: one row
+  // per employee per date, with the production eligibility rule's own verdict
+  // and the approval workflow's own status beside it.
+  //
+  // READ AND EXPORT, SPLIT, for the reason every other report splits them: a
+  // spreadsheet of every branch's long days leaving the premises is a
+  // different decision from looking at the screen.
+  //
+  // IT GRANTS NO WRITE OF ANY KIND, AND IN PARTICULAR IT IS NOT
+  // `raise_shift_change_request` OR `approve_shift_change_request`. Holding
+  // these keys shows a list; raising a request is still the employee's own
+  // route and deciding one is still the approver's, each behind its own key
+  // and re-checked there. Nothing on this report's router can reach either.
+  //
+  // AND IT DOES NOT SETTLE WHICH BRANCHES. Like every dashboard key, the
+  // caller's LOCATION scope is resolved separately by
+  // `middlewares/dashboard_scope.js` and fails closed - so a branch manager
+  // granted this key sees their own branch and gains no visibility into
+  // anybody else's merely because a new report exists.
+  //
+  // GRANTED TO NOBODY BY MIGRATION, per designation, on the rights screen.
+  VIEW_SHIFT_CHANGE_ELIGIBILITY_REPORT: "view_shift_change_eligibility_report",
+  EXPORT_SHIFT_CHANGE_ELIGIBILITY_REPORT: "export_shift_change_eligibility_report",
+
   // ================================================ GLOBAL DASHBOARD ACCESS =
   //
   // ONE FEATURE KEY PER DASHBOARD, and ONE STORE SCOPE shared by all of them.
