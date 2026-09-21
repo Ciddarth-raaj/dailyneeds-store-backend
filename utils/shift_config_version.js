@@ -244,6 +244,66 @@ function resolveConfigVersionForDate(versions, attendanceDate) {
 }
 
 /**
+ * The LATEST version of a shift - its configuration as it stands TODAY.
+ *
+ * The greatest `effective_from`, and among equal dates the greatest id, with
+ * no date to compare against: the same tie-break as the dated resolver, asked
+ * without a question about history.
+ */
+function latestConfigVersion(versions) {
+  if (!Array.isArray(versions)) return null;
+
+  let best = null;
+  let bestFrom = null;
+  let bestId = -1;
+
+  versions.forEach((row) => {
+    if (!row) return;
+    const from = toDateOnly(row.effective_from);
+    if (from === null) return;
+    const id = Number(row.work_shift_config_version_id) || 0;
+    if (bestFrom === null || from > bestFrom || (from === bestFrom && id > bestId)) {
+      best = row;
+      bestFrom = from;
+      bestId = id;
+    }
+  });
+
+  return best;
+}
+
+/**
+ * WHICH version a CALCULATION must run under - the rule the whole Work Shift
+ * propagation fix turns on.
+ *
+ * The business rule, stated once so both the calculation usecase and the
+ * dashboard read the same sentence:
+ *
+ *   OPEN month   -> the LATEST configuration, whatever the attendance date.
+ *                   A shift rule is a statement about how the shift works,
+ *                   not a statement about one day, so correcting it corrects
+ *                   every day payroll has not yet settled. This is what makes
+ *                   a minimum-OT change on the 20th move the 13th.
+ *
+ *   LOCKED month -> the version in force ON THAT DATE. Payroll has been
+ *                   processed against those numbers and they are frozen; the
+ *                   dated history is what says what they were.
+ *
+ * `work_shift_config_version` therefore stops CONTROLLING an open date and
+ * becomes what it was always best at: the audit trail of what a settled date
+ * was actually paid under.
+ *
+ * Returns null when the shift has no version rows at all, or - for a locked
+ * date - when the date precedes the first version row. Both mean "the live
+ * tables answer", and the caller says so with `from_live`.
+ */
+function resolveConfigVersionForCalculation(versions, attendanceDate, { payrollLocked = false } = {}) {
+  return payrollLocked
+    ? resolveConfigVersionForDate(versions, attendanceDate)
+    : latestConfigVersion(versions);
+}
+
+/**
  * A resolved version turned back into the `{config, schedule}` pair the shift
  * resolver consumes, so a versioned read and a live read are the same shape
  * and `utils/shiftResolution.js` does not have to know which it got.
@@ -288,5 +348,7 @@ module.exports = {
   buildConfigVersion,
   configVersionHash,
   resolveConfigVersionForDate,
+  latestConfigVersion,
+  resolveConfigVersionForCalculation,
   toShiftDefinition,
 };

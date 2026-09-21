@@ -9,10 +9,12 @@ const {
 const {
   RESOLUTION_STATUS,
   resolveShiftForDate,
+  monthProbesForRange,
   toDateOnly,
 } = require("../utils/shiftResolution");
 const {
-  resolveConfigVersionForDate,
+  resolveConfigVersionForCalculation,
+  latestConfigVersion,
   toShiftDefinition,
   VERSIONED_CONFIG_COLUMNS,
 } = require("../utils/shift_config_version");
@@ -511,6 +513,27 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
 
     const shiftCache = await loadShiftCache([...(assignments || []), ...overrides]);
 
+    // WHICH MONTHS OF THIS WINDOW ARE SETTLED.
+    //
+    // One probe per calendar month the window touches - at most three, for a
+    // 62-day range widened by a day at each end - answered by the same
+    // read-only lock query every other pre-flight uses. It decides which
+    // CONFIGURATION a date calculates under, and nothing else: it is not a
+    // permission to write, and the `FOR UPDATE` gate in the repository
+    // remains the only thing that can stop one.
+    const lockedMonths = new Set(
+      (
+        (await findPayrollLockedPeriods(
+          monthProbesForRange({
+            employeeId: Number(employee_id),
+            from: punchWindowFrom,
+            to: punchWindowTo,
+          })
+        )) || []
+      ).map((p) => `${p.year}-${String(p.month).padStart(2, "0")}`)
+    );
+    const isLockedDate = (date) => lockedMonths.has(String(date || "").slice(0, 7));
+
     // (shift, date) -> the configuration VERSION in force then. Memoized
     // because a month resolves the same pair thirty times.
     const definitions = new Map();
@@ -521,15 +544,32 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       const loaded = shiftCache.get(Number(workShiftId));
       let definition = null;
       if (loaded) {
-        const versionRow = resolveConfigVersionForDate(loaded.versions, date);
+        // OPEN DATE -> the LATEST configuration; LOCKED DATE -> the one dated
+        // to that day. The rule itself is in
+        // `utils/shift_config_version.js#resolveConfigVersionForCalculation`,
+        // which the dashboard reads too, so the two cannot drift apart.
+        const locked = isLockedDate(date);
+        const versionRow = resolveConfigVersionForCalculation(loaded.versions, date, {
+          payrollLocked: locked,
+        });
         definition = versionRow
           ? withLiveDefaults(toShiftDefinition(versionRow, workShiftId), loaded.live)
-          : // Before the first version row there is nothing dated to read, so
-            // the live tables answer and say so. The migration seeds a version
-            // at the v2 cutover, so this is only reachable for dates earlier
+          : // Nothing dated to read - a locked date before the first version
+            // row, or a shift with no version history at all. The live tables
+            // answer and say so. The migration seeds a version at the v2
+            // cutover, so for a locked date this is only reachable earlier
             // than v2 itself.
             loaded.live
-            ? { ...loaded.live, config_version_id: null, config_version_hash: null, config_effective_from: null, from_live: true }
+            ? {
+                ...loaded.live,
+                // An OPEN date under the live tables is still calculated
+                // under today's configuration - the stamp simply records
+                // that no version row described it.
+                config_version_id: null,
+                config_version_hash: null,
+                config_effective_from: null,
+                from_live: true,
+              }
             : null;
       }
       definitions.set(key, definition);
@@ -1527,6 +1567,171 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     };
   };
 
+  /**
+   * WORK SHIFT RULE PROPAGATION - what a Work Shift save now does to the days
+   * already calculated under that shift.
+   *
+   * THE RULE. A shift's configuration is a statement about how the shift
+   * works, not about one day, so correcting it corrects every attendance date
+   * whose payroll month is still OPEN - including dates in the past. A month
+   * payroll has approved and LOCKED is settled and is not touched at all:
+   * not recalculated, not re-read, not rewritten.
+   *
+   * IT DUPLICATES NO ARITHMETIC. Every affected (employee, month) is handed
+   * to `recalculateRange` - the same path the Recalculate button runs - so
+   * there is exactly one recalculation in this codebase and this is a caller
+   * of it, not a copy.
+   *
+   * IT IS NOT THE PAYROLL LOCK. The months it skips are read outside any
+   * transaction and could in principle close between the read and the write;
+   * that race is exactly what the `FOR UPDATE` gate in
+   * `repository/attendance_calculation.js` exists for, and a month that locks
+   * underneath this is refused there and counted as skipped below. Nothing
+   * here weakens or bypasses that gate - it only avoids doing work that gate
+   * would reject.
+   *
+   * IT NEVER FAILS THE SAVE. The shift has already been written when this
+   * runs; a recalculation that cannot complete is reported, per employee,
+   * beside the counts. Whoever reads the result can run Recalculate by hand,
+   * which is the same code path.
+   *
+   * @returns {object} counts, the run id that audits it, and per-employee errors
+   */
+  const recalculateForShiftConfigChange = async ({
+    work_shift_id,
+    actor_employee_id = null,
+  }) => {
+    const workShiftId = Number(work_shift_id);
+    if (!Number.isInteger(workShiftId) || workShiftId <= 0) {
+      throw validationError("work_shift_id is required and must be a work shift id");
+    }
+    if (!attendanceCalculationRepo.listShiftImpactedMonths) {
+      return { skipped: true, reason: "NOT_SUPPORTED" };
+    }
+
+    const months = (await attendanceCalculationRepo.listShiftImpactedMonths(workShiftId)) || [];
+    const open = months.filter((m) => !m.payroll_locked);
+    const locked = months.filter((m) => m.payroll_locked);
+    const lockedDays = locked.reduce((sum, m) => sum + (Number(m.day_count) || 0), 0);
+
+    if (open.length === 0) {
+      return {
+        run_id: null,
+        work_shift_id: workShiftId,
+        status: "COMPLETED",
+        employees_targeted: 0,
+        employees_completed: 0,
+        employees_failed: 0,
+        attendance_days_recalculated: 0,
+        attendance_days_skipped_locked: lockedDays,
+        months_skipped_locked: locked.length,
+        errors: [],
+      };
+    }
+
+    const runId = attendanceCalculationRepo.insertRecalculationRun
+      ? await attendanceCalculationRepo.insertRecalculationRun({
+          requested_by_employee_id: actor_employee_id,
+          trigger_source: "WORK_SHIFT_SAVE",
+          work_shift_id: workShiftId,
+          from_date: open.reduce((min, m) => (m.from_date < min ? m.from_date : min), open[0].from_date),
+          to_date: open.reduce((max, m) => (m.to_date > max ? m.to_date : max), open[0].to_date),
+          employee_id: null,
+          store_id: null,
+          designation_id: null,
+          employees_targeted: new Set(open.map((m) => m.employee_id)).size,
+        })
+      : null;
+
+    const errors = [];
+    const completedEmployees = new Set();
+    let daysRecalculated = 0;
+    let skippedLockedDays = lockedDays;
+    let monthsSkippedLocked = locked.length;
+
+    for (const month of open) {
+      // ONE DAY OF SLACK AT EACH END, CLAMPED TO THE MONTH. A cutoff change
+      // can move a punch onto the neighbouring attendance date, so the day
+      // either side of the stored block is recalculated too - but never past
+      // the month boundary, because the month is the unit the lock decision
+      // was taken on and a range that crossed it could carry work into a
+      // month this run has not checked.
+      const monthStart = `${month.period_year}-${String(month.period_month).padStart(2, "0")}-01`;
+      const monthEnd = addDays(
+        month.period_month === 12
+          ? `${month.period_year + 1}-01-01`
+          : `${month.period_year}-${String(month.period_month + 1).padStart(2, "0")}-01`,
+        -1
+      );
+      const from = (() => {
+        const widened = addDays(month.from_date, -1);
+        return widened < monthStart ? monthStart : widened;
+      })();
+      const to = (() => {
+        const widened = addDays(month.to_date, 1);
+        return widened > monthEnd ? monthEnd : widened;
+      })();
+
+      /* eslint-disable no-await-in-loop */
+      try {
+        const result = await recalculateRange({
+          employee_id: month.employee_id,
+          from_date: from,
+          to_date: to,
+        });
+        daysRecalculated += Number(result.written) || 0;
+        completedEmployees.add(month.employee_id);
+      } catch (err) {
+        // A month that locked between the read above and the write is not an
+        // error: it is the lock doing its job, and it is counted as skipped.
+        if (err && err.code === "PAYROLL_MONTH_LOCKED") {
+          skippedLockedDays += Number(month.day_count) || 0;
+          monthsSkippedLocked += 1;
+        } else {
+          errors.push({
+            employee_id: month.employee_id,
+            period: `${String(month.period_month).padStart(2, "0")}/${month.period_year}`,
+            message: err && err.message ? err.message : String(err),
+          });
+        }
+      }
+      /* eslint-enable no-await-in-loop */
+    }
+
+    const targeted = new Set(open.map((m) => m.employee_id)).size;
+    const failedEmployees = new Set(errors.map((e) => e.employee_id)).size;
+    const status =
+      errors.length === 0
+        ? "COMPLETED"
+        : completedEmployees.size === 0
+        ? "FAILED"
+        : "COMPLETED_WITH_ERRORS";
+
+    if (runId && attendanceCalculationRepo.finishRecalculationRun) {
+      await attendanceCalculationRepo.finishRecalculationRun(runId, {
+        status,
+        employees_completed: completedEmployees.size,
+        employees_failed: failedEmployees,
+        days_processed: daysRecalculated,
+        days_skipped_locked: skippedLockedDays,
+        errors,
+      });
+    }
+
+    return {
+      run_id: runId,
+      work_shift_id: workShiftId,
+      status,
+      employees_targeted: targeted,
+      employees_completed: completedEmployees.size,
+      employees_failed: failedEmployees,
+      attendance_days_recalculated: daysRecalculated,
+      attendance_days_skipped_locked: skippedLockedDays,
+      months_skipped_locked: monthsSkippedLocked,
+      errors,
+    };
+  };
+
   const listRecalculationRuns = async (limit = 20) =>
     attendanceCalculationRepo.listRecalculationRuns
       ? (await attendanceCalculationRepo.listRecalculationRuns(limit)).map((r) => ({
@@ -1765,6 +1970,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     setOtRequestService,
     setPunchRedriveService,
     closeOtForPayrollLock,
+    recalculateForShiftConfigChange,
     getBreakOverride,
     setBreakOverride,
     calculateRange,

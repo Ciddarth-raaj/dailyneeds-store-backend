@@ -113,6 +113,17 @@ function fakeCalculationRepo(state = {}) {
     getApprovedRegularizedPunches: async () => state.regularized || [],
     getBreakOverride: async () => state.employeeRow || null,
     getApprovalStateByDate: async () => state.approvals || [],
+    // `["2026-09"]` - the months payroll has approved and locked. The real
+    // query answers from `payrun_employee_calculation`; what the engine does
+    // with the answer is what these tests are about.
+    findPayrollLockedPeriods: async (rows = []) =>
+      (rows || [])
+        .filter((row) => (state.lockedPeriods || []).includes(String(row.attendance_date).slice(0, 7)))
+        .map((row) => ({
+          employee_id: Number(row.employee_id),
+          year: Number(String(row.attendance_date).slice(0, 4)),
+          month: Number(String(row.attendance_date).slice(5, 7)),
+        })),
     getEmploymentWindow: async () => ({
       employee_id: EMPLOYEE,
       status: 1,
@@ -431,11 +442,25 @@ describe("review fix #1 - recalculation re-dates raw punches through the histori
 
 /* ================================================================== #2 === */
 
-describe("review fix #2 - a Work Shift edit cannot move a settled historical date", () => {
+describe("review fix #2 (revised) - the LATEST shift rule governs every OPEN date, and a LOCKED month is frozen", () => {
   /**
-   * September is calculated under the September version; a version effective
-   * from 1st October changes the break, the cutoff and the OT rules. The
-   * September figures must be byte-for-byte what they were.
+   * The rule this suite now encodes, and the reason it changed.
+   *
+   * The original fix made a Work Shift edit unable to move ANY earlier date,
+   * by dating the configuration the way the assignment is dated. That froze
+   * too much: a shift rule corrected in September was not applied to the
+   * September days payroll had not yet settled, so the month paid under a
+   * rule nobody believed in any more and only a manual, per-date fix could
+   * bring it into line.
+   *
+   * The boundary is now the PAYROLL LOCK rather than the attendance date:
+   *
+   *   OPEN month   -> the LATEST configuration, for every date in it.
+   *   LOCKED month -> the version dated to that day, exactly as before.
+   *
+   * `work_shift_config_version` is unchanged and still written on every save;
+   * it simply stops deciding an open date and remains the audit record of
+   * what a settled one was paid under.
    */
   const versions = () => [
     versionRow(1, "2026-09-01", shiftConfig(), lateShiftSchedule()),
@@ -447,19 +472,22 @@ describe("review fix #2 - a Work Shift edit cannot move a settled historical dat
     ),
   ];
 
+  /** The live tables as they stand after that October edit. */
+  const liveAfterEdit = {
+    liveConfig: { overtime_minimum_minutes: 240, maximum_ot_minutes_per_day: 30 },
+    liveSchedule: { break_minutes: 30, attendance_day_cutoff: "01:00:00" },
+  };
+
   const punchesOn = (date, nextDate) => [
     punch(1, `${date} 10:00:00`),
     punch(2, `${nextDate} 00:30:00`),
   ];
 
-  it("an earlier date keeps the configuration that applied then", async () => {
+  it("an OPEN earlier date is calculated under the LATEST configuration", async () => {
     const { calculation } = wire({
       configVersions: versions(),
       rawPunches: punchesOn("2026-09-14", "2026-09-15"),
-      // The LIVE tables now hold the October settings, as they would after the
-      // edit. A date in September must not read them.
-      liveConfig: { overtime_minimum_minutes: 240, maximum_ot_minutes_per_day: 30 },
-      liveSchedule: { break_minutes: 30, attendance_day_cutoff: "01:00:00" },
+      ...liveAfterEdit,
     });
 
     const [september] = await calculation.calculateRange({
@@ -468,18 +496,22 @@ describe("review fix #2 - a Work Shift edit cannot move a settled historical dat
       to_date: "2026-09-14",
     });
 
-    assert.equal(september.break_allowance_minutes, 60, "September's break, not October's");
-    assert.equal(september.nrm_minutes, 660);
-    assert.equal(september.worked_minutes, 810);
-    assert.equal(september.candidate_ot_minutes, 150, "September's OT rules, not October's");
-    assert.equal(september.shift_snapshot.config_version_id, 1);
-    assert.equal(september.punch_count, 2, "and September's 04:00 cutoff still claims 00:30");
+    assert.equal(september.break_allowance_minutes, 30, "the CURRENT break, not September's");
+    assert.equal(september.nrm_minutes, 690);
+    assert.equal(september.worked_minutes, 840);
+    assert.equal(
+      september.candidate_ot_minutes,
+      0,
+      "150 earned minutes now fall under the current 240 minute minimum"
+    );
+    assert.equal(september.punch_count, 2, "the current 01:00 cutoff still claims the 00:30 punch");
   });
 
-  it("a later date uses the new configuration", async () => {
+  it("a later date uses the new configuration too - one rule, not two", async () => {
     const { calculation } = wire({
       configVersions: versions(),
       rawPunches: punchesOn("2026-10-14", "2026-10-15"),
+      ...liveAfterEdit,
     });
 
     const [october] = await calculation.calculateRange({
@@ -488,68 +520,42 @@ describe("review fix #2 - a Work Shift edit cannot move a settled historical dat
       to_date: "2026-10-14",
     });
 
-    assert.equal(october.break_allowance_minutes, 30, "October's break");
+    assert.equal(october.break_allowance_minutes, 30);
     assert.equal(october.nrm_minutes, 690);
-    assert.equal(
-      october.candidate_ot_minutes,
-      0,
-      "the same 150 earned minutes now fall under October's 240 minute minimum and qualify for nothing"
-    );
+    assert.equal(october.candidate_ot_minutes, 0);
     assert.equal(october.shift_snapshot.config_version_id, 2);
   });
 
-  it("October's per-day cap is October's, on a day that does qualify under it", async () => {
-    const { calculation } = wire({
-      configVersions: versions(),
-      // 10:00 to 05:00 the next morning: far past the 240 minute minimum.
-      rawPunches: [punch(1, "2026-10-14 10:00:00"), punch(2, "2026-10-15 00:55:00")],
-    });
-    const [october] = await calculation.calculateRange({
-      employee_id: EMPLOYEE,
-      from_date: "2026-10-14",
-      to_date: "2026-10-14",
-    });
-    assert.equal(october.punch_count, 2, "October's 01:00 cutoff still claims a 00:55 finish");
-    assert.equal(october.raw_ot_minutes, 175);
-    assert.equal(october.candidate_ot_minutes, 0, "175 is still under the 240 minute minimum");
-
-    const { calculation: september } = wire({
-      configVersions: versions(),
-      rawPunches: [punch(1, "2026-09-14 10:00:00"), punch(2, "2026-09-15 00:55:00")],
-    });
-    const [sept] = await september.calculateRange({
-      employee_id: EMPLOYEE,
-      from_date: "2026-09-14",
-      to_date: "2026-09-14",
-    });
-    assert.equal(
-      sept.candidate_ot_minutes,
-      175,
-      "the identical day in September, under September's rules, pays all of it"
-    );
-  });
-
-  it("the October cutoff does NOT retroactively re-date a September punch", async () => {
-    // October's cutoff is 01:00, which would still claim a 00:30 punch - so
-    // this asserts the far stronger thing: the cutoff READ for a September
-    // punch is September's, and the version id on the row proves which.
+  it("a LOCKED month keeps the configuration that applied then", async () => {
     const { calculation } = wire({
       configVersions: versions(),
       rawPunches: punchesOn("2026-09-14", "2026-09-15"),
+      lockedPeriods: ["2026-09"],
+      ...liveAfterEdit,
     });
+
     const [september] = await calculation.calculateRange({
       employee_id: EMPLOYEE,
       from_date: "2026-09-14",
       to_date: "2026-09-14",
     });
-    assert.equal(september.shift_snapshot.attendance_day_cutoff, "04:00:00");
+
+    assert.equal(september.break_allowance_minutes, 60, "September's break, not today's");
+    assert.equal(september.nrm_minutes, 660);
+    assert.equal(september.candidate_ot_minutes, 150, "September's OT rules");
     assert.equal(september.shift_snapshot.config_version_id, 1);
+    assert.equal(
+      september.shift_snapshot.attendance_day_cutoff,
+      "04:00:00",
+      "and the cutoff read for a settled punch is the settled one"
+    );
   });
 
-  it("recalculating a settled September date after the edit reproduces the same row", async () => {
+  it("recalculating a settled (locked) September date after the edit reproduces the same row", async () => {
     const state = {
       configVersions: versions(),
       rawPunches: punchesOn("2026-09-14", "2026-09-15"),
+      lockedPeriods: ["2026-09"],
     };
     const before = wire(state);
     await before.calculation.recalculateRange({
@@ -558,11 +564,7 @@ describe("review fix #2 - a Work Shift edit cannot move a settled historical dat
       to_date: "2026-09-14",
     });
 
-    const after = wire({
-      ...state,
-      liveConfig: { overtime_minimum_minutes: 240, maximum_ot_minutes_per_day: 30 },
-      liveSchedule: { break_minutes: 30, attendance_day_cutoff: "01:00:00" },
-    });
+    const after = wire({ ...state, ...liveAfterEdit });
     await after.calculation.recalculateRange({
       employee_id: EMPLOYEE,
       from_date: "2026-09-14",
@@ -576,9 +578,10 @@ describe("review fix #2 - a Work Shift edit cannot move a settled historical dat
     );
   });
 
-  it("falls back to the live tables, and says so, for a date before the first version", async () => {
+  it("falls back to the live tables, and says so, for a LOCKED date before the first version", async () => {
     const { calculation } = wire({
       configVersions: versions(),
+      lockedPeriods: ["2026-08"],
       assignments: [
         {
           employee_work_shift_assignment_id: 1,
@@ -594,6 +597,28 @@ describe("review fix #2 - a Work Shift edit cannot move a settled historical dat
       to_date: "2026-08-14",
     });
     assert.equal(august.shift_snapshot.config_version_id, null);
+  });
+
+  it("an OPEN date before the first version row reads the latest version, not the live fallback", async () => {
+    const { calculation } = wire({
+      configVersions: versions(),
+      assignments: [
+        {
+          employee_work_shift_assignment_id: 1,
+          work_shift_id: 7,
+          effective_from: "2026-08-01",
+        },
+      ],
+      rawPunches: punchesOn("2026-08-14", "2026-08-15"),
+      ...liveAfterEdit,
+    });
+    const [august] = await calculation.calculateRange({
+      employee_id: EMPLOYEE,
+      from_date: "2026-08-14",
+      to_date: "2026-08-14",
+    });
+    assert.equal(august.shift_snapshot.config_version_id, 2);
+    assert.equal(august.break_allowance_minutes, 30);
   });
 });
 

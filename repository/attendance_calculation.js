@@ -455,7 +455,9 @@ class AttendanceCalculationRepository {
    *
    * Append-only. There is no UPDATE or DELETE of this table anywhere in this
    * backend - a Work Shift edit APPENDS a version, which is what stops an edit
-   * today from moving a settled figure from September.
+   * today from moving a figure in a payroll-LOCKED month. An OPEN date reads
+   * the latest version instead: see
+   * `utils/shift_config_version.js#resolveConfigVersionForCalculation`.
    */
   async getWorkShiftConfigVersions(workShiftId) {
     return this._read(
@@ -958,6 +960,59 @@ class AttendanceCalculationRepository {
     return found;
   }
 
+  /**
+   * THE BLAST RADIUS OF A SHIFT RULE CHANGE, in ONE query.
+   *
+   * Every (employee, month) that holds a calculated day which was decided by
+   * this work shift - either as the day's own shift or as the PERMANENT shift
+   * its pay is measured against - with the days it holds, the first and last
+   * of them, and whether payroll has locked that month.
+   *
+   * GROUPED BY MONTH, NOT LISTED BY DATE, for two reasons. The payroll lock
+   * is a monthly fact, so the month is the unit the skip decision is taken
+   * on; and the recalculation path this feeds takes a RANGE per employee, so
+   * a month of somebody's dates is one call rather than thirty. A shift worn
+   * by three hundred people across two open months is one query and six
+   * hundred ranges - never a query per date.
+   *
+   * ONLY STORED DAYS COUNT. A date nobody has calculated has nothing to
+   * bring up to date, and including it would recalculate dates the change
+   * cannot have affected.
+   *
+   * @returns {Array} `[{ employee_id, period_year, period_month, day_count,
+   *                      from_date, to_date, payroll_locked }]`
+   */
+  async listShiftImpactedMonths(work_shift_id) {
+    const rows = await this._read(
+      "LIST-SHIFT-IMPACTED-MONTHS",
+      `SELECT adc.employee_id,
+              YEAR(adc.attendance_date)  AS period_year,
+              MONTH(adc.attendance_date) AS period_month,
+              COUNT(*)                   AS day_count,
+              DATE_FORMAT(MIN(adc.attendance_date), '%Y-%m-%d') AS from_date,
+              DATE_FORMAT(MAX(adc.attendance_date), '%Y-%m-%d') AS to_date,
+              MAX(CASE WHEN pec.status = ? THEN 1 ELSE 0 END)   AS payroll_locked
+         FROM attendance_day_calculation adc
+         LEFT JOIN payrun_employee_calculation pec
+                ON pec.employee_id  = adc.employee_id
+               AND pec.period_year  = YEAR(adc.attendance_date)
+               AND pec.period_month = MONTH(adc.attendance_date)
+        WHERE adc.work_shift_id = ? OR adc.base_work_shift_id = ?
+        GROUP BY adc.employee_id, YEAR(adc.attendance_date), MONTH(adc.attendance_date)
+        ORDER BY adc.employee_id ASC, period_year ASC, period_month ASC`,
+      [PAYROLL_LOCK_STATUS, work_shift_id, work_shift_id]
+    );
+    return (rows || []).map((row) => ({
+      employee_id: Number(row.employee_id),
+      period_year: Number(row.period_year),
+      period_month: Number(row.period_month),
+      day_count: Number(row.day_count) || 0,
+      from_date: row.from_date,
+      to_date: row.to_date,
+      payroll_locked: Number(row.payroll_locked) === 1,
+    }));
+  }
+
   /* ------------------------------------------- bulk recalculation */
 
   /**
@@ -1049,16 +1104,19 @@ class AttendanceCalculationRepository {
     const result = await this._read(
       "INSERT-RECALCULATION-RUN",
       `INSERT INTO attendance_recalculation_run
-         (requested_by_employee_id, from_date, to_date, employee_id, store_id, designation_id,
+         (requested_by_employee_id, trigger_source, from_date, to_date,
+          employee_id, store_id, designation_id, work_shift_id,
           employees_targeted, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'RUNNING')`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'RUNNING')`,
       [
         run.requested_by_employee_id === undefined ? null : run.requested_by_employee_id,
+        run.trigger_source || "MANUAL",
         run.from_date,
         run.to_date,
         run.employee_id || null,
         run.store_id || null,
         run.designation_id || null,
+        run.work_shift_id || null,
         run.employees_targeted,
       ]
     );
@@ -1072,13 +1130,15 @@ class AttendanceCalculationRepository {
       "FINISH-RECALCULATION-RUN",
       `UPDATE attendance_recalculation_run
           SET status = ?, employees_completed = ?, employees_failed = ?,
-              days_processed = ?, errors = ?, completed_at = CURRENT_TIMESTAMP(3)
+              days_processed = ?, days_skipped_locked = ?, errors = ?,
+              completed_at = CURRENT_TIMESTAMP(3)
         WHERE attendance_recalculation_run_id = ?`,
       [
         outcome.status,
         outcome.employees_completed,
         outcome.employees_failed,
         outcome.days_processed,
+        Number(outcome.days_skipped_locked) || 0,
         JSON.stringify(outcome.errors || []),
         runId,
       ]
@@ -1099,12 +1159,14 @@ class AttendanceCalculationRepository {
               r.store_id, o.outlet_name,
               r.designation_id, d.designation_name,
               r.employees_targeted, r.employees_completed, r.employees_failed,
-              r.days_processed, r.status, r.errors
+              r.days_processed, r.days_skipped_locked, r.status, r.errors,
+              r.trigger_source, r.work_shift_id, ws.shift_code, ws.shift_name
          FROM attendance_recalculation_run r
          LEFT JOIN new_employee rb ON rb.employee_id = r.requested_by_employee_id
          LEFT JOIN new_employee e ON e.employee_id = r.employee_id
          LEFT JOIN outlets o ON o.outlet_id = r.store_id
          LEFT JOIN designation d ON d.designation_id = r.designation_id
+         LEFT JOIN work_shift ws ON ws.work_shift_id = r.work_shift_id
         ORDER BY r.attendance_recalculation_run_id DESC
         LIMIT ?`,
       [Number(limit) > 0 ? Number(limit) : 20]

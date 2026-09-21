@@ -859,6 +859,14 @@ class Server {
     this.attendanceCalculationUsecase.setPunchRedriveService(
       this.attendanceImportUsecase
     );
+    // WORK SHIFT RULE PROPAGATION. Saving a shift rule recalculates the open
+    // attendance days already calculated under that shift, and skips every
+    // payroll-locked month. Injected here rather than required inside the
+    // work shift usecase because that usecase is built first - the same
+    // one-way wiring the two services above use.
+    this.workShiftUsecase.setAttendanceRecalculationService(
+      this.attendanceCalculationUsecase
+    );
     // Void Punch. Handed the calculation usecase for the date the punch
     // belongs to and for the recalculation afterwards, and the
     // regularization repository to refuse a void while a request on that

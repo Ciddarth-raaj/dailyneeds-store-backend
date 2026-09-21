@@ -38,13 +38,15 @@
  * no longer matches the one the current configuration produces, the shift
  * definition has been edited since, and that is visible rather than silent.
  *
- * THE SHIFT DEFINITION IS DATED TOO (review fix #2). `readSchedule` and
- * `readShiftConfig` are now handed the ATTENDANCE DATE as well as the shift
- * id, so the caller can hand back the configuration VERSION that applied on
- * that date (see `utils/shift_config_version.js`) rather than whatever the
- * live `work_shift` row says today. Resolving a date therefore answers both
- * halves of the question - which shift, and which version of it - and editing
- * a Work Shift tomorrow cannot move a settled September figure.
+ * THE SHIFT DEFINITION IS ASKED FOR PER DATE TOO. `readSchedule` and
+ * `readShiftConfig` are handed the ATTENDANCE DATE as well as the shift id,
+ * so the caller can hand back the right configuration for that date.
+ * WHICH one is right is not decided here and never was: it is
+ * `utils/shift_config_version.js#resolveConfigVersionForCalculation`, and its
+ * answer is today's configuration for a date whose payroll month is still
+ * OPEN, and the version dated to that day for one payroll has LOCKED. A
+ * settled September figure therefore still cannot be moved by an edit made
+ * today, while an open September date is corrected by it.
  */
 
 const crypto = require("crypto");

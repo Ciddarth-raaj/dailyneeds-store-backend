@@ -215,3 +215,47 @@ describe("the lateness and early-out settings are versioned", () => {
     assert.equal(b.config.late_exclude_grace_from_deduction, 0);
   });
 });
+
+describe("which version a CALCULATION runs under", () => {
+  const {
+    latestConfigVersion,
+    resolveConfigVersionForCalculation,
+  } = require("../utils/shift_config_version");
+
+  const versions = [
+    { work_shift_config_version_id: 1, effective_from: "2026-09-01" },
+    { work_shift_config_version_id: 2, effective_from: "2026-10-01" },
+    // Two saves on the same day: the later id is the later truth.
+    { work_shift_config_version_id: 3, effective_from: "2026-10-01" },
+  ];
+
+  it("the latest is the greatest effective_from, and then the greatest id", () => {
+    assert.equal(latestConfigVersion(versions).work_shift_config_version_id, 3);
+    assert.equal(latestConfigVersion([]), null);
+    assert.equal(latestConfigVersion(null), null);
+  });
+
+  it("an OPEN date reads the latest configuration, whatever its own date", () => {
+    const row = resolveConfigVersionForCalculation(versions, "2026-09-13", { payrollLocked: false });
+    assert.equal(row.work_shift_config_version_id, 3);
+  });
+
+  it("an open date is the DEFAULT: the lock has to be asserted, never assumed", () => {
+    assert.equal(
+      resolveConfigVersionForCalculation(versions, "2026-09-13").work_shift_config_version_id,
+      3
+    );
+  });
+
+  it("a LOCKED date reads the version in force on that day", () => {
+    const row = resolveConfigVersionForCalculation(versions, "2026-09-13", { payrollLocked: true });
+    assert.equal(row.work_shift_config_version_id, 1);
+  });
+
+  it("a LOCKED date before the first version has nothing dated to read", () => {
+    assert.equal(
+      resolveConfigVersionForCalculation(versions, "2026-08-13", { payrollLocked: true }),
+      null
+    );
+  });
+});

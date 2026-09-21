@@ -4,6 +4,29 @@ const {
 } = require("../utils/workShift");
 
 /**
+ * What the save tells the person who made it, in one sentence.
+ *
+ * A shift rule change now moves attendance days that were calculated weeks
+ * ago, and a silent save would give no sign of it. The two numbers that
+ * matter are the days brought up to date and the days deliberately left
+ * alone because their payroll month is locked.
+ */
+function recalculationMessage(recalculation) {
+  if (!recalculation || recalculation.skipped) return "Shift updated.";
+  if (recalculation.status === "FAILED" && recalculation.error) {
+    return `Shift updated, but the attendance recalculation failed: ${recalculation.error}`;
+  }
+  const recalculated = Number(recalculation.attendance_days_recalculated) || 0;
+  const skipped = Number(recalculation.attendance_days_skipped_locked) || 0;
+  const base = `Shift updated. ${recalculated} open attendance ${
+    recalculated === 1 ? "day" : "days"
+  } recalculated. ${skipped} locked ${skipped === 1 ? "day" : "days"} skipped.`;
+  return recalculation.errors && recalculation.errors.length > 0
+    ? `${base} ${recalculation.errors.length} employee-month(s) could not be recalculated.`
+    : base;
+}
+
+/**
  * Shaped so utils/http.js `respondError` answers 400 with the detail, the way
  * a Joi failure already does.
  */
@@ -17,6 +40,63 @@ function validationError(errors) {
 class WorkShiftUsecase {
   constructor(workShiftRepo) {
     this.workShiftRepo = workShiftRepo;
+    this.attendanceRecalculationService = null;
+  }
+
+  /**
+   * The attendance recalculation a shift save now triggers.
+   *
+   * INJECTED, exactly as every other cross-usecase call in this codebase is,
+   * because `server.js` builds the work shift usecase before the attendance
+   * one. Left unwired - in a unit test, or in a deployment that does not run
+   * attendance v2 - a save behaves precisely as it did before.
+   */
+  setAttendanceRecalculationService(service) {
+    this.attendanceRecalculationService = service || null;
+  }
+
+  /**
+   * PROPAGATE THE NEW RULE, after the save has committed.
+   *
+   * Only when the save actually CHANGED the shift's calculating configuration
+   * - which is the same question `appendConfigVersionOnConnection` already
+   * answers by appending a version row or not. Renaming a shift recalculates
+   * nothing.
+   *
+   * OUTSIDE THE SAVE'S TRANSACTION, deliberately. The recalculation touches
+   * many employees over several months and takes the payroll-row lock per
+   * month as it goes; holding the Work Shift write open across all of that
+   * would keep row locks on `work_shift` for the duration and make a shift
+   * edit block on attendance. The save is committed and durable first, and
+   * the recalculation is then reported - including its failures - rather than
+   * being allowed to undo it.
+   */
+  async _propagate(result, { work_shift_id, actor_employee_id }) {
+    if (!result || result.code !== 200) return result;
+    const changed = result.config_version && result.config_version.appended === true;
+    if (!changed) {
+      return { ...result, recalculation: { skipped: true, reason: "CONFIGURATION_UNCHANGED" } };
+    }
+    if (
+      !this.attendanceRecalculationService ||
+      typeof this.attendanceRecalculationService.recalculateForShiftConfigChange !== "function"
+    ) {
+      return result;
+    }
+
+    let recalculation;
+    try {
+      recalculation = await this.attendanceRecalculationService.recalculateForShiftConfigChange({
+        work_shift_id: work_shift_id || result.work_shift_id,
+        actor_employee_id: actor_employee_id === undefined ? null : actor_employee_id,
+      });
+    } catch (err) {
+      // The shift IS saved. A recalculation that fell over is reported as a
+      // failure of the recalculation, never as a failure of the save.
+      recalculation = { status: "FAILED", error: err && err.message ? err.message : String(err) };
+    }
+
+    return { ...result, recalculation, msg: recalculationMessage(recalculation) };
   }
 
   /**
@@ -73,6 +153,8 @@ class WorkShiftUsecase {
     // appends, so "who changed this shift, and when did it start applying" has
     // an answer. It reaches nothing else - the `work_shift` row itself is
     // written exactly as it always was.
+    // A brand new shift has no attendance calculated under it, so nothing is
+    // propagated here - the save is returned exactly as it always was.
     return this.workShiftRepo.createWorkShiftWithSchedule(config, weeklySchedule, {
       created_by: payload.actor_employee_id === undefined ? null : payload.actor_employee_id,
     });
@@ -118,8 +200,15 @@ class WorkShiftUsecase {
       ]);
     }
 
-    return this.workShiftRepo.updateWorkShiftWithSchedule(work_shift_id, config, weeklySchedule, {
-      created_by: payload.actor_employee_id === undefined ? null : payload.actor_employee_id,
+    const result = await this.workShiftRepo.updateWorkShiftWithSchedule(
+      work_shift_id,
+      config,
+      weeklySchedule,
+      { created_by: payload.actor_employee_id === undefined ? null : payload.actor_employee_id }
+    );
+    return this._propagate(result, {
+      work_shift_id,
+      actor_employee_id: payload.actor_employee_id,
     });
   }
 
@@ -130,8 +219,12 @@ class WorkShiftUsecase {
     const { errors, value } = validateWeeklySchedule(rows);
     if (errors.length > 0) throw validationError(errors);
 
-    return this.workShiftRepo.updateWorkShiftWithSchedule(work_shift_id, {}, value, {
+    const result = await this.workShiftRepo.updateWorkShiftWithSchedule(work_shift_id, {}, value, {
       created_by: options.actor_employee_id === undefined ? null : options.actor_employee_id,
+    });
+    return this._propagate(result, {
+      work_shift_id,
+      actor_employee_id: options.actor_employee_id,
     });
   }
 
