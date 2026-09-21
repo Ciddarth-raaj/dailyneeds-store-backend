@@ -70,6 +70,7 @@ const { addDays, datePart } = require("../utils/attendance_engine");
 const { istToday } = require("../utils/istDate");
 const eligibility = require("../utils/attendance_eligibility");
 const shiftChange = require("../utils/shift_change_eligibility");
+const shiftChangeBlock = require("../utils/shift_change_block");
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -97,6 +98,7 @@ const NOT_RAISED = "Not Raised";
 
 /** The filter vocabulary the screen and the export share. */
 const REQUEST_STATUS_FILTER = Object.freeze(["ALL", "NOT_RAISED", "PENDING", "APPROVED", "REJECTED"]);
+const HR_ELIGIBILITY_FILTER = shiftChangeBlock.HR_ELIGIBILITY_FILTER;
 const TRISTATE_FILTER = Object.freeze(["ALL", "YES", "NO"]);
 
 function validationError(message) {
@@ -175,8 +177,33 @@ module.exports = (
   attendanceShiftChangeReportRepo,
   attendanceDashboardUsecase,
   attendanceCalculationUsecase,
+  /**
+   * The HR block ledger. OPTIONAL: without it no row is ever blocked and the
+   * report behaves exactly as it did before this feature, which is what lets
+   * the pre-existing suites build this usecase with three arguments.
+   */
+  attendanceShiftChangeBlockRepo = null,
   options = {}
 ) => {
+  /**
+   * THE BLOCK REPOSITORY SLOT WAS ADDED AFTER THE OPTIONS SLOT EXISTED, so a
+   * caller written against the older four-argument form passes its `options`
+   * where the repository now sits. Silently accepting that would leave such a
+   * caller with a real clock where it asked for a pinned one - a test that
+   * still passes while asserting nothing about the date it pinned.
+   *
+   * A repository has methods; an options bag does not. That is the whole
+   * test, and it is made once, here, rather than being guessed at each use.
+   */
+  if (
+    attendanceShiftChangeBlockRepo &&
+    typeof attendanceShiftChangeBlockRepo.listActiveForPopulation !== "function" &&
+    typeof attendanceShiftChangeBlockRepo.findActive !== "function"
+  ) {
+    options = attendanceShiftChangeBlockRepo;
+    attendanceShiftChangeBlockRepo = null;
+  }
+
   // THE CLOCK IS INJECTED, so a test pins "today" - which decides the whole
   // backdating window - and production passes nothing.
   const clock = typeof options.now === "function" ? options.now : () => Date.now();
@@ -214,6 +241,7 @@ module.exports = (
       can_raise: oneOf(query.can_raise, TRISTATE_FILTER, "can_raise"),
       worked_longer: oneOf(query.worked_longer, TRISTATE_FILTER, "worked_longer"),
       request_status: oneOf(query.request_status, REQUEST_STATUS_FILTER, "request_status"),
+      hr_eligibility: oneOf(query.hr_eligibility, HR_ELIGIBILITY_FILTER, "hr_eligibility"),
       search: optionalText(query.search),
     };
   };
@@ -325,7 +353,7 @@ module.exports = (
     const dates = dateList(filters.from_date, filters.to_date);
     const employeeIds = employees.map((e) => Number(e.employee_id));
 
-    const [batch, shiftMaster, requests] = await Promise.all([
+    const [batch, shiftMaster, requests, blocks] = await Promise.all([
       attendanceDashboardUsecase.loadBatch({
         employees,
         from: filters.from_date,
@@ -337,6 +365,17 @@ module.exports = (
         from_date: filters.from_date,
         to_date: filters.to_date,
       }),
+      // THE HR BLOCKS, IN ONE STATEMENT FOR THE WHOLE POPULATION - never one
+      // per row. Same shape as the request read beside it, and the same
+      // reason: a multi-outlet date range is thousands of employee/date pairs.
+      attendanceShiftChangeBlockRepo &&
+      typeof attendanceShiftChangeBlockRepo.listActiveForPopulation === "function"
+        ? attendanceShiftChangeBlockRepo.listActiveForPopulation({
+            employee_ids: employeeIds,
+            from_date: filters.from_date,
+            to_date: filters.to_date,
+          })
+        : [],
     ]);
 
     const shifts = Array.isArray(shiftMaster) ? shiftMaster : (shiftMaster && shiftMaster.data) || [];
@@ -353,6 +392,12 @@ module.exports = (
     const requestByKey = new Map();
     (requests || []).forEach((r) => {
       requestByKey.set(`${Number(r.employee_id)}:${toDateOnly(r.attendance_date)}`, r);
+    });
+
+    /** The ACTIVE HR block per (employee, date), indexed in memory. */
+    const blockByKey = new Map();
+    (blocks || []).forEach((b) => {
+      blockByKey.set(shiftChangeBlock.blockKey(b.employee_id, toDateOnly(b.attendance_date)), b);
     });
 
     // THE PAYROLL LOCKS FOR EVERY ROW, IN ONE READ. Asked as employee-months,
@@ -421,6 +466,8 @@ module.exports = (
         const baseNrm = shiftChange.nrmOfSnapshot(baseResolution.snapshot);
 
         const request = requestByKey.get(`${Number(employee.employee_id)}:${date}`) || null;
+        const activeBlock =
+          blockByKey.get(shiftChangeBlock.blockKey(employee.employee_id, date)) || null;
 
         // ================= THE RULE. NOT RESTATED, CALLED. =================
         const verdict = shiftChange.decide({
@@ -437,7 +484,17 @@ module.exports = (
         });
 
         rows.push(
-          shapeRow({ employee, day, date, baseResolution, baseNrm, verdict, request, resolver })
+          shapeRow({
+            employee,
+            day,
+            date,
+            baseResolution,
+            baseNrm,
+            verdict,
+            request,
+            resolver,
+            activeBlock,
+          })
         );
       });
     });
@@ -450,8 +507,18 @@ module.exports = (
 
     // Counted BEFORE the view filters, so the screen can say how many rows
     // HR's actionable question has even while they are looking at another cut.
+    // HR-BLOCKED ROWS ARE NOT ACTIONABLE, so they leave this count as well as
+    // the default view. The headline answers "how much work is waiting", and
+    // a date HR has already decided about is finished work, not waiting work.
+    // It still ignores only the four state filters (Can Raise, Worked Longer,
+    // HR Eligibility, Request Status) - scope, dates, outlet, employee,
+    // designation and search all narrow it, exactly as before.
     meta.actionable_count = rows.filter(
-      (r) => r.can_raise && r.worked_longer && r.request_status === NOT_RAISED
+      (r) =>
+        r.can_raise &&
+        !r.hr_blocked &&
+        r.worked_longer &&
+        r.request_status === NOT_RAISED
     ).length;
 
     const visible = rows.filter((row) => matchesView(row, filters));
@@ -470,6 +537,8 @@ module.exports = (
     if (filters.can_raise === "NO" && row.can_raise) return false;
     if (filters.worked_longer === "YES" && !row.worked_longer) return false;
     if (filters.worked_longer === "NO" && row.worked_longer) return false;
+    if (filters.hr_eligibility === "ALLOWED" && row.hr_blocked) return false;
+    if (filters.hr_eligibility === "BLOCKED" && !row.hr_blocked) return false;
     if (filters.request_status !== "ALL") {
       const wanted =
         filters.request_status === "NOT_RAISED"
@@ -505,13 +574,30 @@ module.exports = (
    * shift's normal minutes, which is the figure a shift change exists to
    * regularise.
    */
-  const shapeRow = ({ employee, day, date, baseResolution, baseNrm, verdict, request, resolver }) => {
+  const shapeRow = ({
+    employee,
+    day,
+    date,
+    baseResolution,
+    baseNrm,
+    verdict,
+    request,
+    resolver,
+    activeBlock = null,
+  }) => {
     const punches = Array.isArray(day.effective_punches) ? day.effective_punches : [];
     const workedMinutes = Number(day.worked_minutes) || 0;
     const extraMinutes = Math.max(0, workedMinutes - (Number(baseNrm) || 0));
     const workedLonger = shiftChange.workedLongerThanAssigned({
       worked_minutes: workedMinutes,
       base_nrm_minutes: baseNrm,
+    });
+
+    const hrBlocked = shiftChangeBlock.isActive(activeBlock);
+    const effective = shiftChangeBlock.effectiveVerdict({
+      system: verdict,
+      active_block: activeBlock,
+      attendance_date: date,
     });
 
     return {
@@ -555,10 +641,33 @@ module.exports = (
       extra_minutes: extraMinutes,
       extra_hours: asHours(extraMinutes),
 
-      // "Can Raise Shift Change?" - the production rule's verdict, verbatim.
+      // "Can Raise by System?" - the production rule's verdict, verbatim. The
+      // HR block never overwrites it: HR needs to see that the system WOULD
+      // have allowed this, which is precisely why a block was needed.
       can_raise: verdict.can_raise,
       eligibility_reason_code: verdict.reason_code,
       eligibility_reason: verdict.reason,
+
+      // ================= THE HR GATE, REPORTED BESIDE THE SYSTEM ONE =======
+      //
+      // `effectiveVerdict` is the SHARED composition - the same function the
+      // submit path and the options path compose with - so the report cannot
+      // say a date is raisable that the backend would refuse, or the reverse.
+      hr_eligibility: hrBlocked
+        ? shiftChangeBlock.HR_ELIGIBILITY.BLOCKED
+        : shiftChangeBlock.HR_ELIGIBILITY.ALLOWED,
+      hr_blocked: hrBlocked,
+      hr_block_reason: activeBlock ? activeBlock.reason : null,
+      hr_blocked_by_employee_id: activeBlock ? activeBlock.blocked_by_employee_id : null,
+      hr_blocked_by: activeBlock ? activeBlock.blocked_by_employee_name || null : null,
+      hr_blocked_at: activeBlock ? activeBlock.blocked_at : null,
+      hr_block_id: activeBlock ? activeBlock.attendance_shift_change_block_id : null,
+
+      // EFFECTIVE = system AND not blocked. One value, so a screen never has
+      // to combine two columns and risk combining them differently.
+      effective_can_raise: effective.can_raise,
+      effective_reason: effective.reason,
+      effective_reason_code: effective.reason_code,
 
       // A SEPARATE FACT, from the punches. It authorises nothing.
       worked_longer: workedLonger,
@@ -584,6 +693,7 @@ module.exports = (
     MAX_POPULATION,
     REQUEST_STATUS_FILTER,
     TRISTATE_FILTER,
+    HR_ELIGIBILITY_FILTER,
     NOT_RAISED,
     businessToday,
     normalizeFilters,
@@ -595,5 +705,6 @@ module.exports = (
 module.exports.MAX_RANGE_DAYS = MAX_RANGE_DAYS;
 module.exports.MAX_POPULATION = MAX_POPULATION;
 module.exports.REQUEST_STATUS_FILTER = REQUEST_STATUS_FILTER;
+module.exports.HR_ELIGIBILITY_FILTER = HR_ELIGIBILITY_FILTER;
 module.exports.TRISTATE_FILTER = TRISTATE_FILTER;
 module.exports.NOT_RAISED = NOT_RAISED;

@@ -290,6 +290,12 @@ class Server {
     this.attendanceShiftChangeReportRepo = require("./repository/attendance_shift_change_report")(
       this.mysql.connection
     );
+    // THE HR SHIFT CHANGE BLOCK LEDGER. One table, no DELETE anywhere in it:
+    // a removed block keeps its row and gains its removal columns, so the
+    // history of who blocked whom, when and why is permanent.
+    this.attendanceShiftChangeBlockRepo = require("./repository/attendance_shift_change_block")(
+      this.mysql.connection
+    );
     // Attendance v2 / A3. The regularization and OT approval store. It cannot
     // reach `biomax_punch` at all: an approved manual punch is a row in its
     // own table, and the raw punch stays exactly as the device sent it.
@@ -789,7 +795,9 @@ class Server {
     this.attendanceShiftChangeReportUsecase = require("./usecase/attendance_shift_change_report")(
       this.attendanceShiftChangeReportRepo,
       this.attendanceDashboardUsecase,
-      this.attendanceCalculationUsecase
+      this.attendanceCalculationUsecase,
+      // Bulk-loaded per report, never per row.
+      this.attendanceShiftChangeBlockRepo
     );
     // The alert side of the same rule. It decides HOW a message is addressed,
     // sent, recorded and retried - never WHO gets one, which is the usecase
@@ -828,7 +836,21 @@ class Server {
     this.attendanceRegularizationUsecase = require("./usecase/attendance_regularization")(
       this.attendanceRegularizationRepo,
       this.attendanceCalculationUsecase,
-      this.attendanceApproverSetupRepo
+      this.attendanceApproverSetupRepo,
+      // THE HR BLOCK, ENFORCED ON THE AUTHORITATIVE PATH. Passing the ledger
+      // here is what makes `raiseShiftChangeRequest` and `shiftChangeOptions`
+      // refuse a blocked date - the web form, the Telegram Mini App and any
+      // direct API call alike. Without it both behave exactly as they did
+      // before the feature.
+      this.attendanceShiftChangeBlockRepo
+    );
+    // THE WRITE SIDE of the eligibility report: mark not eligible, and remove
+    // that block again. Built AFTER the regularization usecase, because it
+    // re-decides eligibility through that usecase's own read-only probe
+    // rather than from the report row the browser is holding.
+    this.attendanceShiftChangeBlockUsecase = require("./usecase/attendance_shift_change_block")(
+      this.attendanceShiftChangeBlockRepo,
+      this.attendanceRegularizationUsecase
     );
     // Built AFTER the regularization usecase, because it reads
     // MAX_BACKDATE_DAYS from it rather than restating the number.
@@ -1567,6 +1589,15 @@ class Server {
       this.sensitive,
       this.dashboardScope
     );
+    // The HR block's own router, deliberately separate from the report's so
+    // the report keeps its provable GET-only guarantee. Behind the WRITE key
+    // `manage_shift_change_eligibility` and the employee branch scope.
+    const attendanceShiftChangeBlockRouter = require("./routes/attendance_shift_change_block")(
+      this.attendanceShiftChangeBlockUsecase,
+      this.permissions,
+      this.sensitive,
+      this.employeeBranchScope
+    );
     const attendanceRegularizationRouter = require("./routes/attendance_regularization")(
       this.attendanceRegularizationUsecase,
       this.permissions,
@@ -1891,6 +1922,7 @@ class Server {
     app.use("/", attendanceDashboardRouter.getRouter());
     app.use("/", attendanceMissingRouter.getRouter());
     app.use("/", attendanceShiftChangeReportRouter.getRouter());
+    app.use("/", attendanceShiftChangeBlockRouter.getRouter());
     app.use("/", attendanceRegularizationRouter.getRouter());
     app.use("/", attendanceApproverSetupRouter.getRouter());
     app.use("/", telegramAttendanceRouter.getRouter());

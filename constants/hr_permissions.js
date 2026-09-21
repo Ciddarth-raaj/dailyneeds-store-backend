@@ -450,6 +450,26 @@ module.exports = {
   VIEW_SHIFT_CHANGE_ELIGIBILITY_REPORT: "view_shift_change_eligibility_report",
   EXPORT_SHIFT_CHANGE_ELIGIBILITY_REPORT: "export_shift_change_eligibility_report",
 
+  // THE HR BLOCK - a WRITE key, and deliberately not either of the two above.
+  //
+  // It permits marking an employee/date NOT ELIGIBLE so a shift change request
+  // can never be raised for it, and removing that block again. Reading the
+  // report and changing somebody's eligibility are different decisions: a
+  // designation can hold the read key alone, and an auditor should.
+  //
+  // IT IS NOT AN APPROVAL KEY EITHER. A block is not a rejection - there is
+  // usually no request to reject - so this grants nothing on the approval
+  // chain, and a PENDING request is deliberately out of its reach: rejecting
+  // that is `approve_shift_change_request` on the ordinary queue.
+  //
+  // BRANCH SCOPE IS SETTLED SEPARATELY, by the existing employee branch-scope
+  // convention, against the employee's CURRENT store resolved on the server.
+  // Holding this key company-wide and holding it for one branch are the same
+  // key with different scopes.
+  //
+  // GRANTED TO NOBODY BY MIGRATION.
+  MANAGE_SHIFT_CHANGE_ELIGIBILITY: "manage_shift_change_eligibility",
+
   // ================================================ GLOBAL DASHBOARD ACCESS =
   //
   // ONE FEATURE KEY PER DASHBOARD, and ONE STORE SCOPE shared by all of them.
