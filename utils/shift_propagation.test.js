@@ -11,7 +11,6 @@ const assert = require("node:assert/strict");
 
 const {
   assignedIntervals,
-  propagationFloor,
   propagationForEmployee,
   propagationScope,
 } = require("../utils/shift_propagation");
@@ -79,17 +78,43 @@ describe("which dates a shift governed", () => {
   });
 });
 
-describe("the payroll floor", () => {
-  it("is the day after the latest locked month", () => {
-    assert.equal(propagationFloor(["2026-09", "2026-10"]), "2026-11-01");
+describe("the payroll lock is a fact about ONE month", () => {
+  const scopeAcross = (lockedMonths) =>
+    propagationForEmployee({
+      employee: employee(),
+      assignments: [assignment(1, SHIFT, "2026-07-01")],
+      lockedMonths,
+      workShiftId: SHIFT,
+      today: "2026-09-21",
+      // The v2 cutover is the only absolute floor; these tests reach back
+      // past it on purpose, to prove the lock is what decides and not a
+      // high-water mark.
+      cutover: "2026-07-01",
+    });
+
+  it("July open, August LOCKED, September open: July and September are recalculated, August is not", () => {
+    const { buckets, skipped_locked_months } = scopeAcross(["2026-08"]);
+    assert.deepEqual(
+      buckets.map((b) => b.month),
+      ["2026-07", "2026-09"],
+      "August being settled says NOTHING about July"
+    );
+    assert.deepEqual(
+      skipped_locked_months.map((s) => s.month),
+      ["2026-08"]
+    );
+    assert.equal(skipped_locked_months[0].day_count, 31, "and the whole of it is counted as skipped");
   });
 
-  it("is the v2 cutover when nothing is locked", () => {
-    assert.equal(propagationFloor([]), "2026-09-01");
+  it("two locked months are each skipped, and the months between them are not", () => {
+    const { buckets } = scopeAcross(["2026-07", "2026-09"]);
+    assert.deepEqual(buckets.map((b) => b.month), ["2026-08"]);
   });
 
-  it("never goes below the cutover", () => {
-    assert.equal(propagationFloor(["2025-01"]), "2026-09-01");
+  it("nothing locked means every month is open", () => {
+    const { buckets, skipped_locked_months } = scopeAcross([]);
+    assert.deepEqual(buckets.map((b) => b.month), ["2026-07", "2026-08", "2026-09"]);
+    assert.deepEqual(skipped_locked_months, []);
   });
 });
 
@@ -152,7 +177,7 @@ describe("one employee's share of a rule change", () => {
     ]);
   });
 
-  it("everything at or below the latest locked month is settled, so work starts after it", () => {
+  it("a locked month is skipped without taking the months after it with it", () => {
     const { buckets } = propagationForEmployee({
       employee: employee(),
       assignments: [assignment(1, SHIFT, "2026-09-01")],
@@ -191,6 +216,54 @@ describe("one employee's share of a rule change", () => {
   it("an override inside its own assignment window does not recalculate the month twice", () => {
     const { buckets } = scopeOf({ overrideDates: ["2026-09-15"] });
     assert.equal(buckets.length, 1);
+  });
+});
+
+describe("an employee discovered ONLY through a single-date override", () => {
+  // They have no assignment row for this shift at all - the override is the
+  // whole of their connection to it - so their employment facts have to be
+  // fetched independently of the assignment history. Absent facts read as
+  // unbounded and attendance-required, which would recalculate a date the
+  // person did not work here.
+  const overrideOnly = (employeeOverrides) =>
+    propagationForEmployee({
+      employee: employee(employeeOverrides),
+      assignments: [],
+      overrideDates: ["2026-09-15"],
+      workShiftId: SHIFT,
+      today: TODAY,
+    });
+
+  it("an employed date is in scope", () => {
+    assert.deepEqual(
+      overrideOnly({}).buckets.map((b) => [b.from_date, b.to_date]),
+      [["2026-09-15", "2026-09-15"]]
+    );
+  });
+
+  it("a date BEFORE they joined is not", () => {
+    assert.deepEqual(overrideOnly({ date_of_joining: "2026-09-16" }).buckets, []);
+  });
+
+  it("a date AFTER they resigned is not", () => {
+    assert.deepEqual(overrideOnly({ resignation_date: "2026-09-14" }).buckets, []);
+  });
+
+  it("somebody exempt from attendance is not", () => {
+    assert.deepEqual(overrideOnly({ attendance_required: 0 }).buckets, []);
+  });
+
+  it("a locked month freezes the overridden date like any other", () => {
+    const { buckets, skipped_locked_months } = propagationForEmployee({
+      employee: employee(),
+      assignments: [],
+      overrideDates: ["2026-09-15"],
+      lockedMonths: ["2026-09"],
+      workShiftId: SHIFT,
+      today: TODAY,
+    });
+    assert.deepEqual(buckets, []);
+    assert.deepEqual(skipped_locked_months.map((m) => m.month), ["2026-09"]);
   });
 });
 

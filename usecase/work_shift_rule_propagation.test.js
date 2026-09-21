@@ -185,13 +185,69 @@ function world({ lockedMonths = [] } = {}) {
       return live ? { ...live.config, weekly_schedule: live.schedule } : null;
     },
     getWeeklySchedule: async (id) => (state.live.get(Number(id)) || { schedule: [] }).schedule,
+    /**
+     * ONE TRANSACTION, as `repository/work_shift.js` runs it: the live rows,
+     * the appended version AND the propagation obligation commit together or
+     * not at all. The fake works on copies and only publishes them at the
+     * end, so `enqueueThrows` rolls the whole save back the way MySQL would.
+     */
     updateWorkShiftWithSchedule: async (id, config, schedule, options = {}) => {
       const live = state.live.get(Number(id));
       if (!live) return { code: 404, msg: "Work shift not found" };
-      live.config = { ...live.config, ...config };
-      if (schedule) live.schedule = schedule.map((row) => ({ ...row, work_shift_id: Number(id) }));
-      const version = appendVersion(Number(id), options.effective_from || "2026-09-20");
-      return { code: 200, work_shift_id: Number(id), config_version: version };
+
+      const nextConfig = { ...live.config, ...config };
+      const nextSchedule = schedule
+        ? schedule.map((row) => ({ ...row, work_shift_id: Number(id) }))
+        : live.schedule;
+      const history = state.versions.get(Number(id));
+      const rollbackTo = history.length;
+
+      const previous = { config: live.config, schedule: live.schedule };
+      live.config = nextConfig;
+      live.schedule = nextSchedule;
+
+      try {
+        const version = appendVersion(Number(id), options.effective_from || "2026-09-20");
+        let propagationRunId = null;
+        if (version.appended) {
+          if (state.enqueueThrows) throw new Error(state.enqueueThrows);
+          // One pending job per shift, exactly as the real INSERT's guard.
+          const pending = state.runs.find(
+            (r) =>
+              Number(r.work_shift_id) === Number(id) &&
+              r.trigger_source === "WORK_SHIFT_SAVE" &&
+              r.status === "QUEUED"
+          );
+          if (pending) {
+            propagationRunId = pending.attendance_recalculation_run_id;
+          } else {
+            state.runs.push({
+              attendance_recalculation_run_id: state.runs.length + 1,
+              trigger_source: "WORK_SHIFT_SAVE",
+              work_shift_id: Number(id),
+              requested_by_employee_id:
+                options.created_by === undefined ? null : options.created_by,
+              from_date: "2026-09-01",
+              to_date: TODAY,
+              employees_targeted: 0,
+              attempts: 0,
+              status: "QUEUED",
+            });
+            propagationRunId = state.runs.length;
+          }
+        }
+        return {
+          code: 200,
+          work_shift_id: Number(id),
+          config_version: { ...version, propagation_run_id: propagationRunId },
+        };
+      } catch (err) {
+        // ROLLBACK: the configuration AND the version go back.
+        live.config = previous.config;
+        live.schedule = previous.schedule;
+        history.length = rollbackTo;
+        throw err;
+      }
     },
   };
 
@@ -357,7 +413,6 @@ function world({ lockedMonths = [] } = {}) {
   // that agreed with the wall clock would start failing on its own one day.
   const calculation = buildCalculation(calculationRepo, { today: TODAY });
   const workShift = buildWorkShift(workShiftRepo);
-  workShift.setAttendanceRecalculationService(calculation);
 
   return { state, calculation, workShift, appendVersion, isLocked };
 }
@@ -486,19 +541,17 @@ describe("work shift rule propagation", () => {
     const w = await seedSeptember();
     const result = await saveMinimumOt(w, 10);
 
-    assert.equal(result.recalculation.queued, true);
-    assert.equal(result.recalculation.status, "QUEUED");
-    assert.equal(
-      result.recalculation.employees_targeted,
-      3,
-      "Alice, Bob and Dee are on this shift - Dee has never been calculated"
-    );
-    assert.equal(result.recalculation.employee_months_targeted, 3);
+    assert.equal(w.state.runs.length, 1, "the obligation is committed with the rule change");
+    assert.equal(w.state.runs[0].status, "QUEUED");
+    assert.equal(result.config_version.propagation_run_id, 1);
     assert.equal(
       result.msg,
-      "Shift updated. Attendance recalculation started (run #1) for 3 employees across 3 open months."
+      "Shift updated. Attendance recalculation queued (run #1): every open attendance day " +
+        "on this shift will be recalculated under the new rule, and payroll-locked months are skipped."
     );
     assert.equal(w.state.recalculatedRanges.length, 0, "no recalculation happened in the request");
+    // The counts belong to the RUN, and the run has not started yet.
+    assert.equal(w.state.runs[0].employees_targeted, 0);
   });
 
   it("AN OPEN DATE THAT WAS NEVER CALCULATED is recalculated too", async () => {
@@ -539,17 +592,17 @@ describe("work shift rule propagation", () => {
     w.state.lockedMonths.add(`${BOB}|2026-09`);
     assert.equal(storedOt(w, BOB, "2026-09-13"), 100);
 
-    const save = await saveMinimumOt(w, 10);
-    await drainQueue(w);
+    await saveMinimumOt(w, 10);
+    const ticks = await drainQueue(w);
 
     assert.equal(storedOt(w, BOB, "2026-09-13"), 100, "the settled day is untouched");
     assert.equal(storedOt(w, ALICE, "2026-09-13"), 110, "and the open one is not");
     assert.equal(
-      save.recalculation.employees_targeted,
+      ticks[0].result.employees_targeted,
       2,
       "Alice and Dee; Bob's only open month is the one that was locked"
     );
-    assert.equal(save.recalculation.months_skipped_locked, 1);
+    assert.equal(ticks[0].result.months_skipped_locked, 1);
     assert.equal(
       w.state.recalculatedRanges.some((r) => r.employee_id === BOB),
       false,
@@ -574,9 +627,8 @@ describe("work shift rule propagation", () => {
 
   it("the MANUAL Recalculate uses the latest shift configuration for an open date", async () => {
     const w = await seedSeptember();
-    // Saved with propagation unwired, so only the manual run can be what
-    // brings the date up to date.
-    w.workShift.setAttendanceRecalculationService(null);
+    // The save queues a propagation; this test never drains it, so only the
+    // MANUAL recalculation below can be what brings the date up to date.
     await saveMinimumOt(w, 10);
     assert.equal(storedOt(w, ALICE, "2026-09-13"), 100, "nothing has recalculated it yet");
 
@@ -615,8 +667,51 @@ describe("work shift rule propagation", () => {
       work_shift_details: { overtime_minimum_minutes: 20 },
       actor_employee_id: 7,
     });
-    assert.deepEqual(result.recalculation, { skipped: true, reason: "CONFIGURATION_UNCHANGED" });
+    assert.equal(result.config_version.appended, false, "no version, so no obligation");
+    assert.equal(result.config_version.propagation_run_id, null);
+    assert.equal(result.msg, "Shift updated.");
     assert.equal(w.state.runs.length, 0);
+  });
+
+  it("A COMMITTED RULE CAN NEVER BECOME AN UNQUEUED ORPHAN", async () => {
+    // The failure this guards against: the configuration commits, the queue
+    // INSERT fails, nothing propagates - and the retry is a no-op because the
+    // content is now UNCHANGED, so no version is appended and no propagation
+    // is ever attempted. The rule would be live with the old figures stored
+    // and nothing anywhere would say so.
+    const w = await seedSeptember();
+    w.state.enqueueThrows = "the queue table is unreachable";
+
+    await assert.rejects(() => saveMinimumOt(w, 10), /queue table is unreachable/);
+
+    // NEITHER committed.
+    assert.equal(w.state.runs.length, 0);
+    assert.equal(
+      w.state.live.get(SHIFT).config.overtime_minimum_minutes,
+      20,
+      "the rule change rolled back with the obligation it could not record"
+    );
+    assert.equal(w.state.versions.get(SHIFT).length, 1, "and no version was appended");
+
+    // So the retry is a REAL save again, not an UNCHANGED no-op.
+    w.state.enqueueThrows = null;
+    const retry = await saveMinimumOt(w, 10);
+    assert.equal(retry.config_version.appended, true);
+    assert.equal(retry.config_version.propagation_run_id, 1);
+
+    await drainQueue(w);
+    assert.equal(storedOt(w, ALICE, "2026-09-13"), 110);
+  });
+
+  it("several edits in a row owe ONE propagation, and it sees all of them", async () => {
+    const w = await seedSeptember();
+    await saveMinimumOt(w, 15);
+    await saveMinimumOt(w, 10);
+
+    assert.equal(w.state.runs.length, 1, "the queued run is reused, not duplicated");
+
+    await drainQueue(w);
+    assert.equal(storedOt(w, ALICE, "2026-09-13"), 110, "and it applied the LAST rule");
   });
 
   it("the run is auditable: who, which shift, that a shift save started it, and how it ended", async () => {

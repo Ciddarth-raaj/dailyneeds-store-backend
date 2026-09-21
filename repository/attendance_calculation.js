@@ -961,7 +961,7 @@ class AttendanceCalculationRepository {
   }
 
   /**
-   * THE BLAST RADIUS OF A SHIFT RULE CHANGE - the DATED FACTS, in four
+   * THE BLAST RADIUS OF A SHIFT RULE CHANGE - the DATED FACTS, in five
    * queries, whatever the size of the population.
    *
    * DISCOVERY IS FROM THE ASSIGNMENT HISTORY, NOT FROM STORED CALCULATIONS.
@@ -970,15 +970,16 @@ class AttendanceCalculationRepository {
    * "whose days happen to have been calculated already", and a date nobody
    * has ever calculated is precisely the date a rule change must reach.
    *
-   * Four statements, and none of them is per employee:
+   * Five statements, and none of them is per employee:
    *
    *   1. the employees this shift has ever governed - assigned to it, or
    *      given it for a single date by an override;
-   *   2. their WHOLE assignment history, because an interval's END is the
-   *      next assignment whatever shift that is, plus the employment bounds
-   *      the shared eligibility rule reads;
-   *   3. the single-date overrides ONTO this shift;
-   *   4. the payroll-LOCKED months of those employees.
+   *   2. the employment facts the shared eligibility rule reads - for EVERY
+   *      discovered employee, including one found only through an override;
+   *   3. their WHOLE assignment history, because an interval's END is the
+   *      next assignment whatever shift that is;
+   *   4. the single-date overrides ONTO this shift;
+   *   5. the payroll-LOCKED months of those employees.
    *
    * `utils/shift_propagation.js` turns them into month-sized work. It is
    * pure, so the whole rule - assignment intervals, employment, today, the
@@ -1003,16 +1004,29 @@ class AttendanceCalculationRepository {
     const employeeIds = [...new Set((ids || []).map((row) => Number(row.employee_id)))];
     if (employeeIds.length === 0) return [];
 
-    const [assignments, overrides, locked] = await Promise.all([
+    const [employment, assignments, overrides, locked] = await Promise.all([
+      // EMPLOYMENT FOR EVERY DISCOVERED EMPLOYEE, on its own and not as a
+      // join onto the assignment history. An employee can reach this list
+      // through a single-date override alone, with no assignment row at all;
+      // taking their joining date, resignation date and `attendance_required`
+      // from the assignment query would leave exactly those people with NO
+      // employment facts, and the shared eligibility rule reads absent facts
+      // as unbounded and attendance-required. Somebody who left in July would
+      // then have July recalculated.
+      this._read(
+        "LIST-SHIFT-PROPAGATION-EMPLOYMENT",
+        `SELECT ne.employee_id, ne.employee_name, ne.attendance_required,
+                DATE_FORMAT((${JOINED_ON("ne")}), '%Y-%m-%d') AS date_of_joining,
+                DATE_FORMAT(ne.resignation_date, '%Y-%m-%d') AS resignation_date
+           FROM new_employee ne
+          WHERE ne.employee_id IN (?)`,
+        [employeeIds]
+      ),
       this._read(
         "LIST-SHIFT-PROPAGATION-HISTORY",
         `SELECT a.employee_work_shift_assignment_id, a.employee_id, a.work_shift_id,
-                DATE_FORMAT(a.effective_from, '%Y-%m-%d') AS effective_from,
-                ne.employee_name, ne.attendance_required,
-                DATE_FORMAT((${JOINED_ON("ne")}), '%Y-%m-%d') AS date_of_joining,
-                DATE_FORMAT(ne.resignation_date, '%Y-%m-%d') AS resignation_date
+                DATE_FORMAT(a.effective_from, '%Y-%m-%d') AS effective_from
            FROM employee_work_shift_assignment a
-           JOIN new_employee ne ON ne.employee_id = a.employee_id
           WHERE a.employee_id IN (?)
           ORDER BY a.employee_id ASC, a.effective_from ASC,
                    a.employee_work_shift_assignment_id ASC`,
@@ -1035,9 +1049,9 @@ class AttendanceCalculationRepository {
       ),
     ]);
 
-    // An employee reachable ONLY through an override has no row in the
-    // assignment query, so the employment facts are carried per employee from
-    // whichever query found them and the entry is created either way.
+    // Every discovered employee gets an entry, whether or not they have an
+    // assignment row: an override-only employee is a real case and their
+    // employment bounds are not optional.
     const byEmployee = new Map();
     const entryFor = (employeeId) => {
       const id = Number(employeeId);
@@ -1054,23 +1068,22 @@ class AttendanceCalculationRepository {
     };
     employeeIds.forEach(entryFor);
 
+    (employment || []).forEach((row) => {
+      entryFor(row.employee_id).employee = {
+        employee_id: Number(row.employee_id),
+        employee_name: row.employee_name || null,
+        attendance_required: row.attendance_required,
+        date_of_joining: row.date_of_joining,
+        resignation_date: row.resignation_date,
+      };
+    });
     (assignments || []).forEach((row) => {
-      const entry = entryFor(row.employee_id);
-      entry.assignments.push({
+      entryFor(row.employee_id).assignments.push({
         employee_work_shift_assignment_id: Number(row.employee_work_shift_assignment_id),
         employee_id: Number(row.employee_id),
         work_shift_id: Number(row.work_shift_id),
         effective_from: row.effective_from,
       });
-      if (!entry.employee) {
-        entry.employee = {
-          employee_id: Number(row.employee_id),
-          employee_name: row.employee_name || null,
-          attendance_required: row.attendance_required,
-          date_of_joining: row.date_of_joining,
-          resignation_date: row.resignation_date,
-        };
-      }
     });
     (overrides || []).forEach((row) => {
       entryFor(row.employee_id).override_dates.push(row.attendance_date);

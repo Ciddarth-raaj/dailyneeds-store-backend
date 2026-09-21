@@ -28,12 +28,13 @@
  *      contributes nothing at all.
  *   3. TODAY. Never a future date. Tomorrow has no punches and calculating it
  *      would store a day nobody has worked yet.
- *   4. THE PAYROLL FLOOR. Nothing on or before the employee's LATEST
- *      payroll-locked month, and nothing before the v2 cutover. Payroll has
- *      moved past those months; they are settled, their stored rows are the
- *      truth, and the write gate would refuse them anyway. Any locked month
- *      ABOVE the floor - an out-of-order lock - is skipped individually as
- *      well, and counted, so a skip is never silent.
+ *   4. THE PAYROLL LOCK, MONTH BY MONTH. A month is skipped if and only if
+ *      THAT employee's payroll for THAT month is approved and locked. It is
+ *      NOT inferred from any other month: payroll having settled August says
+ *      nothing about July, and a July that is still open must receive the new
+ *      rule like any other open month. Every skipped month is counted, with
+ *      the days it holds, so a skip is never silent. The only absolute floor
+ *      is the v2 cutover, before which no attendance date exists at all.
  *
  * WHAT COMES OUT is month-sized work: one bucket per (employee, calendar
  * month), because the payroll lock is a monthly fact and because the
@@ -117,22 +118,6 @@ function addDaysUtc(date, days) {
 }
 
 /**
- * The FLOOR for one employee: the first date a propagation may touch.
- *
- * The day after their latest payroll-locked month, never earlier than the v2
- * cutover. Everything at or below it is settled or predates v2.
- */
-function propagationFloor(lockedMonths, cutover = V2_CUTOVER_DATE) {
-  const latest = (lockedMonths || []).reduce(
-    (max, month) => (max === null || month > max ? month : max),
-    null
-  );
-  const afterLock = latest === null ? null : monthAfter(latest);
-  if (afterLock === null) return cutover;
-  return afterLock > cutover ? afterLock : cutover;
-}
-
-/**
  * The work a shift rule change creates for ONE employee, as month buckets.
  *
  * @param {object} employee        employment facts: attendance_required, joining, resignation
@@ -155,7 +140,6 @@ function propagationForEmployee({
   const end = toDateOnly(today);
   if (end === null) return { buckets: [], skipped_locked_months: [] };
 
-  const floor = propagationFloor(lockedMonths, cutover);
   const lockedSet = new Set(lockedMonths || []);
 
   // The dates this shift decides, as ranges: the assignment intervals, plus
@@ -168,10 +152,10 @@ function propagationForEmployee({
       .map((date) => ({ from: date, to: date })),
   ];
 
-  // Clamped to today and to employment - the shared rule, not a fourth copy
-  // of a bound. The PAYROLL FLOOR is applied second, on purpose: what it
-  // removes has to be REPORTED as skipped rather than silently vanish, and
-  // that can only be seen against the window before it was applied.
+  // Clamped to today, to the cutover and to employment - the shared rule,
+  // not a fourth copy of a bound. The payroll lock is applied per MONTH
+  // below, against this window, so that what it removes is reported as
+  // skipped rather than silently vanishing.
   const applicable = [];
   ranges.forEach((range) => {
     const from = range.from > cutover ? range.from : cutover;
@@ -181,9 +165,10 @@ function propagationForEmployee({
     if (window) applicable.push(window);
   });
 
-  // Every locked month this shift would otherwise have reached, whether the
-  // floor excluded it or it sits above the floor out of order - WITH the days
-  // it holds, so "Y locked days skipped" is a number and not a shrug.
+  // Every locked month this shift would otherwise have reached - WITH the
+  // days it holds, so "Y locked days skipped" is a number and not a shrug.
+  // ONE MONTH'S LOCK SAYS NOTHING ABOUT ANOTHER'S: August being settled does
+  // not close July, and July is recalculated if July is open.
   const skippedByLock = new Map();
   (lockedMonths || []).forEach((month) => {
     const monthStart = `${month}-01`;
@@ -202,19 +187,14 @@ function propagationForEmployee({
     });
   });
 
-  const clamped = [];
-  applicable.forEach((range) => {
-    const from = range.from > floor ? range.from : floor;
-    if (from > range.to) return;
-    clamped.push({ from, to: range.to });
-  });
+
 
   // Split into calendar months, dropping the locked ones. Overlapping ranges
   // - an override inside its own assignment interval - merge into one bucket
   // per month rather than recalculating the month twice.
   const buckets = new Map();
   const skipped = new Set(skippedByLock.keys());
-  clamped.forEach((range) => {
+  applicable.forEach((range) => {
     let cursor = range.from;
     let guard = 0;
     while (cursor <= range.to && guard <= 400) {
@@ -302,7 +282,6 @@ module.exports = {
   addDaysUtc,
   dayCount,
   assignedIntervals,
-  propagationFloor,
   propagationForEmployee,
   propagationScope,
 };

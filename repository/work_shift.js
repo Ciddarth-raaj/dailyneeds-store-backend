@@ -8,6 +8,7 @@ const {
 } = require("../utils/batchInsert");
 const { buildConfigVersion, configVersionHash } = require("../utils/shift_config_version");
 const { istToday } = require("../utils/istDate");
+const { V2_CUTOVER_DATE } = require("../constants/attendance_v2");
 
 const WEEKLY_SCHEDULE_COLUMNS = [
   "work_shift_id",
@@ -144,11 +145,86 @@ async function appendConfigVersionOnConnection(connection, work_shift_id, option
     ]
   );
 
+  // THE OUTBOX, IN THE SAME TRANSACTION AS THE RULE CHANGE.
+  const propagation =
+    options.propagate === false
+      ? { run_id: null, reused: false }
+      : await enqueuePropagationOnConnection(connection, work_shift_id, options);
+
   return {
     appended: true,
     hash,
     work_shift_config_version_id: inserted ? inserted.insertId : null,
+    propagation_run_id: propagation.run_id,
+    propagation_reused: propagation.reused,
   };
+}
+
+/**
+ * THE PROPAGATION OBLIGATION, WRITTEN WITH THE RULE THAT CREATES IT.
+ *
+ * ============================================ WHY IT IS IN HERE ============
+ *
+ * A changed shift rule must reach every open attendance date that shift
+ * governs. That work is far too big for the save's own request, so it is
+ * QUEUED - and a queue row written AFTER the save committed can fail on its
+ * own, which is the one failure the whole rule cannot survive:
+ *
+ *   1  the configuration and its version commit;
+ *   2  the queue INSERT fails;
+ *   3  nothing propagates;
+ *   4  the user saves again to fix it - and the content is now UNCHANGED, so
+ *      no version is appended and no propagation is attempted, ever.
+ *
+ * The rule change would be permanently live with the old figures still
+ * stored, and nothing anywhere would say so.
+ *
+ * So the obligation is written HERE, on the caller's connection, inside the
+ * caller's transaction, immediately after the version row it belongs to.
+ * Either the new configuration AND the promise to propagate it commit, or
+ * neither does: a save that cannot record the obligation is not a save.
+ *
+ * IT RECORDS ONLY THE OBLIGATION, NEVER THE WORK. No employee is looked up,
+ * no month is resolved and no attendance is touched - that is the worker's
+ * job, done later and asynchronously, and it re-derives the scope then
+ * because assignments change and months lock in between. The dates stored
+ * here are the widest the scope could possibly be (the v2 cutover to today);
+ * the run's real range is written when it finishes.
+ *
+ * ONE PENDING JOB PER SHIFT. Three edits in a minute owe one propagation,
+ * not three: a run still QUEUED for this shift is reused. It has not started,
+ * so it will see all three changes when it does.
+ */
+async function enqueuePropagationOnConnection(connection, work_shift_id, options = {}) {
+  const [pending] = await queryAsync(
+    connection,
+    `SELECT attendance_recalculation_run_id
+       FROM attendance_recalculation_run
+      WHERE work_shift_id = ?
+        AND trigger_source = 'WORK_SHIFT_SAVE'
+        AND status = 'QUEUED'
+      ORDER BY attendance_recalculation_run_id ASC
+      LIMIT 1`,
+    [work_shift_id]
+  );
+  if (pending) {
+    return { run_id: Number(pending.attendance_recalculation_run_id), reused: true };
+  }
+
+  const queued = await queryAsync(
+    connection,
+    `INSERT INTO attendance_recalculation_run
+       (requested_by_employee_id, trigger_source, from_date, to_date,
+        work_shift_id, employees_targeted, status)
+     VALUES (?, 'WORK_SHIFT_SAVE', ?, ?, ?, 0, 'QUEUED')`,
+    [
+      options.created_by === undefined ? null : options.created_by,
+      V2_CUTOVER_DATE,
+      istToday(options.effective_from),
+      work_shift_id,
+    ]
+  );
+  return { run_id: queued ? Number(queued.insertId) : null, reused: false };
 }
 
 class WorkShiftRepository {
@@ -312,8 +388,13 @@ class WorkShiftRepository {
       await this.replaceWeeklySchedule(connection, work_shift_id, weeklySchedule);
 
       // The first configuration version, in the same transaction as the shift
-      // it describes, so a shift can never exist without one.
-      const version = await appendConfigVersionOnConnection(connection, work_shift_id, options);
+      // it describes, so a shift can never exist without one. NO PROPAGATION:
+      // a shift that did not exist a moment ago governs no attendance date,
+      // so there is nothing to bring up to date.
+      const version = await appendConfigVersionOnConnection(connection, work_shift_id, {
+        ...options,
+        propagate: false,
+      });
 
       await commitAsync(connection);
       return { code: 200, work_shift_id, config_version: version };

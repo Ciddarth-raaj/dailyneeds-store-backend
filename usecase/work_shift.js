@@ -6,31 +6,18 @@ const {
 /**
  * What the save tells the person who made it, in one sentence.
  *
- * A shift rule change moves attendance days that were calculated weeks ago,
- * and a silent save would give no sign of it. The save does NOT wait for that
- * work, so the sentence reports what was STARTED, not what was finished: the
- * counts belong to the run, which the Recalculate Attendance screen shows and
- * which can be retried if it fails.
+ * A shift rule change reaches attendance days that were calculated weeks ago,
+ * and a silent save would give no sign of it. The save does NOT do that work
+ * and does not wait for it, so the sentence reports the RUN that now owes it:
+ * the counts belong to the run, which the Recalculate Attendance screen shows
+ * and which can be retried if it fails.
  */
-function recalculationMessage(recalculation) {
-  if (!recalculation || recalculation.skipped) return "Shift updated.";
-  if (recalculation.error) {
-    return `Shift updated, but the attendance recalculation could not be queued: ${recalculation.error}`;
-  }
-  if (!recalculation.queued) {
-    return "Shift updated. No open attendance days needed recalculating.";
-  }
-  const months = Number(recalculation.employee_months_targeted) || 0;
-  const employees = Number(recalculation.employees_targeted) || 0;
-  const skipped = Number(recalculation.months_skipped_locked) || 0;
-  const skippedText =
-    skipped > 0
-      ? ` ${skipped} payroll-locked ${skipped === 1 ? "month is" : "months are"} skipped.`
-      : "";
+function recalculationMessage(propagationRunId) {
+  if (!propagationRunId) return "Shift updated.";
   return (
-    `Shift updated. Attendance recalculation started (run #${recalculation.run_id}) for ` +
-    `${employees} ${employees === 1 ? "employee" : "employees"} across ${months} open ` +
-    `${months === 1 ? "month" : "months"}.${skippedText}`
+    `Shift updated. Attendance recalculation queued (run #${propagationRunId}): ` +
+    "every open attendance day on this shift will be recalculated under the new rule, " +
+    "and payroll-locked months are skipped."
   );
 }
 
@@ -48,65 +35,24 @@ function validationError(errors) {
 class WorkShiftUsecase {
   constructor(workShiftRepo) {
     this.workShiftRepo = workShiftRepo;
-    this.attendanceRecalculationService = null;
   }
 
   /**
-   * The attendance recalculation a shift save now triggers.
+   * WHAT A RULE-CHANGING SAVE SAYS.
    *
-   * INJECTED, exactly as every other cross-usecase call in this codebase is,
-   * because `server.js` builds the work shift usecase before the attendance
-   * one. Left unwired - in a unit test, or in a deployment that does not run
-   * attendance v2 - a save behaves precisely as it did before.
+   * The propagation is NOT started here and is not this usecase's to start:
+   * `repository/work_shift.js` writes the obligation in the SAME transaction
+   * as the configuration version, so a committed rule change and the promise
+   * to propagate it can never come apart. If the queue row could not be
+   * written, the save itself rolled back and there is nothing to report.
+   *
+   * All this does is put the run's id in front of the person who made the
+   * change.
    */
-  setAttendanceRecalculationService(service) {
-    this.attendanceRecalculationService = service || null;
-  }
-
-  /**
-   * PROPAGATE THE NEW RULE, after the save has committed.
-   *
-   * Only when the save actually CHANGED the shift's calculating configuration
-   * - which is the same question `appendConfigVersionOnConnection` already
-   * answers by appending a version row or not. Renaming a shift recalculates
-   * nothing.
-   *
-   * QUEUED, NOT RUN, AND OUTSIDE THE SAVE'S TRANSACTION. The recalculation
-   * can touch hundreds of employee-months and takes the payroll-row lock per
-   * month as it goes: running it here would make the Work Shift screen wait
-   * through all of it, or time out, and holding the save's transaction open
-   * across it would keep row locks on `work_shift` for the duration. So the
-   * save commits, ONE row is written to say the propagation is owed, and the
-   * worker (`processQueuedRecalculations`, on the cron) does the work. That
-   * row is committed, so a pm2 restart cannot lose the request; it is
-   * visible, retryable, and it reports its own counts when it finishes.
-   */
-  async _propagate(result, { work_shift_id, actor_employee_id }) {
+  _withRecalculationMessage(result) {
     if (!result || result.code !== 200) return result;
-    const changed = result.config_version && result.config_version.appended === true;
-    if (!changed) {
-      return { ...result, recalculation: { skipped: true, reason: "CONFIGURATION_UNCHANGED" } };
-    }
-    if (
-      !this.attendanceRecalculationService ||
-      typeof this.attendanceRecalculationService.queueShiftConfigRecalculation !== "function"
-    ) {
-      return result;
-    }
-
-    let recalculation;
-    try {
-      recalculation = await this.attendanceRecalculationService.queueShiftConfigRecalculation({
-        work_shift_id: work_shift_id || result.work_shift_id,
-        actor_employee_id: actor_employee_id === undefined ? null : actor_employee_id,
-      });
-    } catch (err) {
-      // The shift IS saved. A queue insert that fell over is reported as a
-      // failure of the recalculation, never as a failure of the save.
-      recalculation = { queued: false, error: err && err.message ? err.message : String(err) };
-    }
-
-    return { ...result, recalculation, msg: recalculationMessage(recalculation) };
+    const runId = result.config_version ? result.config_version.propagation_run_id : null;
+    return { ...result, msg: recalculationMessage(runId) };
   }
 
   /**
@@ -216,10 +162,7 @@ class WorkShiftUsecase {
       weeklySchedule,
       { created_by: payload.actor_employee_id === undefined ? null : payload.actor_employee_id }
     );
-    return this._propagate(result, {
-      work_shift_id,
-      actor_employee_id: payload.actor_employee_id,
-    });
+    return this._withRecalculationMessage(result);
   }
 
   /**
@@ -232,10 +175,7 @@ class WorkShiftUsecase {
     const result = await this.workShiftRepo.updateWorkShiftWithSchedule(work_shift_id, {}, value, {
       created_by: options.actor_employee_id === undefined ? null : options.actor_employee_id,
     });
-    return this._propagate(result, {
-      work_shift_id,
-      actor_employee_id: options.actor_employee_id,
-    });
+    return this._withRecalculationMessage(result);
   }
 
   /** Active/inactive toggle. */

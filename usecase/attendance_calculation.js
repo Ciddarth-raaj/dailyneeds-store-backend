@@ -1718,73 +1718,6 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
   };
 
   /**
-   * QUEUE a propagation. This is what a Work Shift save calls.
-   *
-   * ONE COMMITTED INSERT and nothing else, so the save's HTTP request returns
-   * immediately however many people are on the shift. The row is the job: it
-   * survives a pm2 restart, it is visible on the Recalculate Attendance
-   * screen from the moment it exists, and the worker below picks it up.
-   *
-   * THE RANGE ON THE ROW IS PROVISIONAL. It is what the shift's dated facts
-   * say the propagation covers WHEN QUEUED, recorded so the queued row means
-   * something to a human reading it; the worker re-derives the scope when it
-   * runs, because an assignment can change and a month can lock in between.
-   */
-  const queueShiftConfigRecalculation = async ({
-    work_shift_id,
-    actor_employee_id = null,
-    today = null,
-  }) => {
-    const workShiftId = Number(work_shift_id);
-    if (!Number.isInteger(workShiftId) || workShiftId <= 0) {
-      throw validationError("work_shift_id is required and must be a work shift id");
-    }
-    if (
-      !attendanceCalculationRepo.listShiftPropagationFacts ||
-      !attendanceCalculationRepo.insertRecalculationRun
-    ) {
-      return { queued: false, reason: "NOT_SUPPORTED" };
-    }
-
-    const employees = (await attendanceCalculationRepo.listShiftPropagationFacts(workShiftId)) || [];
-    const { work, skipped_locked } = propagationScope({
-      workShiftId,
-      employees,
-      today: todayIs(today),
-    });
-
-    if (work.length === 0) {
-      return {
-        queued: false,
-        reason: "NOTHING_OPEN_TO_RECALCULATE",
-        employees_targeted: 0,
-        employee_months_targeted: 0,
-        months_skipped_locked: skipped_locked.length,
-      };
-    }
-
-    const runId = await attendanceCalculationRepo.insertRecalculationRun({
-      requested_by_employee_id: actor_employee_id,
-      trigger_source: "WORK_SHIFT_SAVE",
-      work_shift_id: workShiftId,
-      from_date: work.reduce((min, w) => (w.from_date < min ? w.from_date : min), work[0].from_date),
-      to_date: work.reduce((max, w) => (w.to_date > max ? w.to_date : max), work[0].to_date),
-      employees_targeted: new Set(work.map((w) => w.employee_id)).size,
-      status: "QUEUED",
-    });
-
-    return {
-      queued: true,
-      run_id: runId,
-      work_shift_id: workShiftId,
-      status: "QUEUED",
-      employees_targeted: new Set(work.map((w) => w.employee_id)).size,
-      employee_months_targeted: work.length,
-      months_skipped_locked: skipped_locked.length,
-    };
-  };
-
-  /**
    * THE WORKER TICK. Recover what died, then process ONE queued run.
    *
    * ONE PER TICK on purpose: a tick that drained the whole queue would hold
@@ -2121,7 +2054,6 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     setPunchRedriveService,
     closeOtForPayrollLock,
     recalculateForShiftConfigChange,
-    queueShiftConfigRecalculation,
     processQueuedRecalculations,
     retryRecalculationRun,
     getRecalculationRun,
