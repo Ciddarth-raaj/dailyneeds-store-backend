@@ -1,0 +1,64 @@
+# Deploy backend to dnds-be on push to main-autodeploy.
+#
+# Required GitHub Actions secrets:
+#   SSH_PRIVATE_KEY  - private key with access to dnds-be (e.g. ~/.ssh/dnds-gha-deploy)
+#   SSH_HOST         - 3.109.76.230
+#   SSH_USER         - ec2-user
+#
+# One-time setup:
+#   1. Install the matching public key in ec2-user's authorized_keys on dnds-be.
+#   2. On the server, ensure ~/dailyneeds-store-backend can git fetch/pull (private
+#      repo credentials on the server — separate from the Actions→server key).
+#   3. Server clone must be able to check out main-autodeploy.
+#
+# DB credentials stay on the server (migrations/mysql/database.json) — not in Actions.
+#
+# Note: "on" is quoted so YAML 1.1 does not treat it as a boolean (true).
+
+name: Deploy Backend
+
+"on":
+  push:
+    branches:
+      - main-autodeploy
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/dnds_gha_deploy
+          chmod 600 ~/.ssh/dnds_gha_deploy
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Deploy on server
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/dnds_gha_deploy \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "${SSH_USER}@${SSH_HOST}" \
+            'set -euo pipefail
+             cd ~/dailyneeds-store-backend
+             git fetch origin
+             git checkout main-autodeploy
+             git pull origin main-autodeploy
+             npm i
+             cd migrations/mysql
+             db-migrate up
+             cd ../..
+             pm2 reload 0'

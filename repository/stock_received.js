@@ -130,6 +130,9 @@ function shapeStockReceivedProduct(row) {
     de_name: row.de_name != null ? row.de_name : null,
     de_display_name: row.de_display_name != null ? row.de_display_name : null,
     image_link: link,
+    pareto: row.de_bill_count_level != null ? row.de_bill_count_level : null,
+    purchase_uom: row.purchase_uom != null ? row.purchase_uom : null,
+    store_uom: row.store_uom != null ? row.store_uom : null,
   };
 }
 
@@ -576,6 +579,9 @@ class StockReceivedRepository {
         const sql = `SELECT pt.product_id,
             pt.de_name,
             pt.de_display_name,
+            pt.de_bill_count_level,
+            pt.purchase_uom,
+            pt.store_uom,
             (
               SELECT pi.image_url
               FROM product_images pi
