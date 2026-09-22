@@ -48,6 +48,11 @@ const assert = require("node:assert/strict");
 
 const buildBlockRepo = require("./attendance_shift_change_block");
 const buildRegularizationRepo = require("./attendance_regularization");
+const { EMPLOYEE_BRANCH_SCOPE } = require("../utils/employee_branch_scope");
+
+/** The server-resolved scopes these tests act with. */
+const ALL_BRANCHES = { kind: EMPLOYEE_BRANCH_SCOPE.ALL_BRANCHES, store_ids: null };
+const STORE_1 = { kind: EMPLOYEE_BRANCH_SCOPE.OWN_BRANCHES, store_ids: [1] };
 
 const EMPLOYEE = 42;
 const DATE = "2026-09-18";
@@ -60,7 +65,17 @@ const LONG_SHIFT = 8;
 
 function lockingPool() {
   /** Committed rows. Shared by every connection, as one database is. */
-  const db = { blocks: [], requests: [], steps: [], nextBlockId: 1, nextRequestId: 900 };
+  const db = {
+    blocks: [],
+    requests: [],
+    steps: [],
+    // THE EMPLOYEE TABLE, so a TRANSFER is a real committed write that the
+    // locked read can observe - which is the whole subject of the branch-scope
+    // race below.
+    employees: [{ employee_id: EMPLOYEE, store_id: 1 }],
+    nextBlockId: 1,
+    nextRequestId: 900,
+  };
 
   /** Who holds each row lock, and who is queued behind them. */
   const locks = new Map();
@@ -159,10 +174,49 @@ function lockingPool() {
       };
 
       // ---- THE SHARED LOCK -------------------------------------------------
+      // Returns the employee's CURRENT branch, read at the moment the lock is
+      // granted - so a transfer that committed first is visible, and one that
+      // has not yet run cannot slip in afterwards.
       if (/FROM new_employee/.test(text) && /FOR UPDATE/.test(text)) {
-        acquire(`employee:${args[0]}`, txId).then(() =>
-          callback(null, [{ employee_id: args[0] }])
+        acquire(`employee:${args[0]}`, txId).then(() => {
+          const row = db.employees.find((e) => Number(e.employee_id) === Number(args[0]));
+          trace.push(`tx${txId} READ employee -> store ${row ? row.store_id : "none"}`);
+          callback(null, row ? [{ employee_id: row.employee_id, store_id: row.store_id }] : []);
+        });
+        return;
+      }
+
+      // ---- A TRANSFER, which must queue behind the same lock ---------------
+      if (/UPDATE new_employee/.test(text)) {
+        acquire(`employee:${args[1]}`, txId).then(() => {
+          const row = db.employees.find((e) => Number(e.employee_id) === Number(args[1]));
+          if (row) row.store_id = args[0];
+          trace.push(`tx${txId} TRANSFER employee ${args[1]} -> store ${args[0]}`);
+          callback(null, { affectedRows: row ? 1 : 0 });
+        });
+        return;
+      }
+
+      // ---- the removal UPDATE ---------------------------------------------
+      if (/UPDATE attendance_shift_change_block/.test(text)) {
+        const [removedBy, removedByUser, removalReason, employeeId, attendanceDate] = args;
+        const active = db.blocks.find(
+          (b) =>
+            Number(b.employee_id) === Number(employeeId) &&
+            b.attendance_date === attendanceDate &&
+            !b.removed_at
         );
+        if (!active) {
+          trace.push(`tx${txId} UPDATE block -> 0 rows`);
+          callback(null, { affectedRows: 0 });
+          return;
+        }
+        active.removed_at = "2026-09-19 12:00:00";
+        active.removed_by_employee_id = removedBy;
+        active.removed_by_user_id = removedByUser;
+        active.removal_reason = removalReason;
+        trace.push(`tx${txId} UPDATE block -> removed`);
+        callback(null, { affectedRows: 1 });
         return;
       }
 
@@ -231,7 +285,13 @@ function lockingPool() {
           attendance_date,
           outlet_id,
           reason,
+          // The removal columns exist and are NULL while the block is active,
+          // as the real table declares them - so "nothing was written here"
+          // is assertable rather than indistinguishable from `undefined`.
           removed_at: null,
+          removed_by_employee_id: null,
+          removed_by_user_id: null,
+          removal_reason: null,
         });
         trace.push(`tx${txId} INSERT block #${id}`);
         callback(null, { insertId: id, affectedRows: 1 });
@@ -285,12 +345,43 @@ function lockingPool() {
 const blockArgs = (over = {}) => ({
   employee_id: EMPLOYEE,
   attendance_date: DATE,
-  outlet_id: 1,
   reason: "Punch timing is incorrect",
   blocked_by_employee_id: 900,
   blocked_by_user_id: 7,
+  // The server-resolved scope travels with the write and is re-checked under
+  // the lock. There is no `outlet_id` here on purpose: the audit snapshot is
+  // the branch read under that lock, never a value a caller supplied.
+  scope: ALL_BRANCHES,
   ...over,
 });
+
+const removeArgs = (over = {}) => ({
+  employee_id: EMPLOYEE,
+  attendance_date: DATE,
+  removed_by_employee_id: 900,
+  removed_by_user_id: 7,
+  removal_reason: "Punch corrected after review",
+  scope: ALL_BRANCHES,
+  ...over,
+});
+
+/** A transfer, as a competing transaction that must queue on the same lock. */
+const transfer = async (pool, { employee_id = EMPLOYEE, to_store }) =>
+  new Promise((resolve, reject) => {
+    pool.getConnection((err, connection) => {
+      if (err) return reject(err);
+      connection.beginTransaction(() => {
+        connection.query(
+          "UPDATE new_employee SET store_id = ? WHERE employee_id = ?",
+          [to_store, employee_id],
+          (qErr) => {
+            if (qErr) return reject(qErr);
+            connection.commit(() => resolve());
+          }
+        );
+      });
+    });
+  });
 
 const requestArgs = (over = {}) => ({
   request: {
@@ -597,6 +688,186 @@ describe("C. a rejected request racing a fresh re-raise and a block", () => {
     const wonBlock = blockResult.created === true;
     if (wonBlock) assert.equal(requestResult.hr_blocked, true);
     else assert.ok(blockResult.conflicting_request);
+  });
+});
+
+describe("E. BRANCH TRANSFER vs BLOCK / UNBLOCK - the authorization boundary", () => {
+  /**
+   * THE TOCTOU THE USECASE'S PRE-CHECK CANNOT CLOSE.
+   *
+   *   HR (store 1) reads the employee -> store 1 -> pre-check passes
+   *   a transfer commits              -> store 2
+   *   HR's transaction takes the lock and writes
+   *   =  a store-1 manager has just modified a store-2 employee
+   *
+   * The fix is that the branch is authorized against the row read UNDER THE
+   * EMPLOYEE LOCK, inside the same transaction as the write. These tests force
+   * the transfer to land in exactly that window.
+   *
+   * The pre-check is deliberately NOT exercised here - these call the
+   * repository directly, so what passes or fails is the locked check alone.
+   * That is the point: if the locked check were removed, the usecase's earlier
+   * one could not save these.
+   */
+
+  it("A. transfer commits FIRST, then the block gets the lock -> REFUSED", async () => {
+    const pool = lockingPool();
+    const blocks = buildBlockRepo(pool);
+
+    // The employee moves out of the actor's branch before the block runs -
+    // exactly the state HR's stale pre-check would have missed.
+    await transfer(pool, { to_store: 2 });
+
+    await assert.rejects(
+      () => blocks.create(blockArgs({ scope: STORE_1 })),
+      (err) => {
+        assert.equal(err.out_of_scope, true, "refused as an authorization outcome");
+        assert.equal(err.code, 403);
+        return true;
+      }
+    );
+
+    assert.equal(pool.db.blocks.length, 0, "nothing was inserted");
+  });
+
+  it("A2. the transfer lands in the WINDOW, after a pre-check and before the lock", async () => {
+    const pool = lockingPool();
+    const blocks = buildBlockRepo(pool);
+
+    // Stand in for the usecase's pre-check: the employee is in store 1 here,
+    // so a caller scoped to store 1 would have been allowed to proceed.
+    const preCheck = pool.db.employees[0].store_id;
+    assert.equal(preCheck, 1, "the pre-check would have passed");
+
+    // The transfer now commits, before the block transaction takes the lock.
+    await transfer(pool, { to_store: 2 });
+
+    await assert.rejects(() => blocks.create(blockArgs({ scope: STORE_1 })), /branch/);
+    assert.equal(pool.db.blocks.length, 0);
+    assert.ok(
+      pool.trace.some((l) => /READ employee -> store 2/.test(l)),
+      `the locked read must see the NEW branch:\n${pool.trace.join("\n")}`
+    );
+  });
+
+  it("B. the block gets the lock FIRST -> succeeds, and the transfer waits", async () => {
+    const pool = lockingPool();
+    const blocks = buildBlockRepo(pool);
+
+    // Freeze the block transaction after it has read (and locked) the
+    // employee, then start a transfer that must queue behind it.
+    const resume = pool.holdAfter(/FROM new_employee/);
+    const blockPromise = blocks.create(blockArgs({ scope: STORE_1 }));
+    await new Promise((r) => setImmediate(r));
+
+    const transferPromise = transfer(pool, { to_store: 2 });
+    await new Promise((r) => setImmediate(r));
+
+    assert.equal(
+      pool.db.employees[0].store_id,
+      1,
+      `the transfer ran while the block held the lock:\n${pool.trace.join("\n")}`
+    );
+
+    resume();
+    const result = await blockPromise;
+    await transferPromise;
+
+    assert.equal(result.created, true, "the block succeeded");
+    // THE AUDIT SNAPSHOT IS THE BRANCH IT WAS AUTHORIZED AGAINST.
+    assert.equal(pool.db.blocks[0].outlet_id, 1);
+    // ...and the transfer committed afterwards, once the lock was released.
+    assert.equal(pool.db.employees[0].store_id, 2);
+  });
+
+  it("C. transfer commits first, then UNBLOCK -> REFUSED, block untouched", async () => {
+    const pool = lockingPool();
+    const blocks = buildBlockRepo(pool);
+
+    await blocks.create(blockArgs({ scope: STORE_1 }));
+    assert.equal(pool.db.blocks.length, 1);
+
+    await transfer(pool, { to_store: 2 });
+
+    await assert.rejects(
+      () => blocks.remove(removeArgs({ scope: STORE_1 })),
+      (err) => {
+        assert.equal(err.out_of_scope, true);
+        return true;
+      }
+    );
+
+    // THE BLOCK IS UNCHANGED: still active, and no removal actor or reason
+    // was written.
+    const row = pool.db.blocks[0];
+    assert.equal(row.removed_at, null, "the block is still active");
+    assert.equal(row.removal_reason, null, "no removal reason was written");
+    assert.equal(row.removed_by_employee_id, null, "no removal actor was written");
+  });
+
+  it("D. UNBLOCK gets the lock first -> succeeds atomically, transfer waits", async () => {
+    const pool = lockingPool();
+    const blocks = buildBlockRepo(pool);
+    await blocks.create(blockArgs({ scope: STORE_1 }));
+
+    const resume = pool.holdAfter(/FROM new_employee/);
+    const removePromise = blocks.remove(removeArgs({ scope: STORE_1 }));
+    await new Promise((r) => setImmediate(r));
+
+    const transferPromise = transfer(pool, { to_store: 2 });
+    await new Promise((r) => setImmediate(r));
+
+    assert.equal(pool.db.employees[0].store_id, 1, "the transfer waited for the lock");
+    assert.equal(pool.db.blocks[0].removed_at, null, "and the removal had not yet landed");
+
+    resume();
+    const result = await removePromise;
+    await transferPromise;
+
+    assert.equal(result.removed, true);
+    assert.ok(pool.db.blocks[0].removed_at, "removed inside the locked transaction");
+    assert.equal(pool.db.blocks[0].removal_reason, "Punch corrected after review");
+    assert.equal(pool.db.employees[0].store_id, 2, "the transfer then proceeded");
+  });
+
+  it("E. an ALL_BRANCHES actor is unaffected by a transfer", async () => {
+    const pool = lockingPool();
+    const blocks = buildBlockRepo(pool);
+
+    await transfer(pool, { to_store: 2 });
+
+    const created = await blocks.create(blockArgs({ scope: ALL_BRANCHES }));
+    assert.equal(created.created, true, "company-wide scope covers every branch");
+    // The audit snapshot follows the employee to their new branch.
+    assert.equal(pool.db.blocks[0].outlet_id, 2);
+
+    await transfer(pool, { to_store: 3 });
+    const removed = await blocks.remove(removeArgs({ scope: ALL_BRANCHES }));
+    assert.equal(removed.removed, true, "and unblocking is equally unaffected");
+  });
+
+  it("a caller arriving with NO scope is refused, never treated as unrestricted", async () => {
+    const pool = lockingPool();
+    const blocks = buildBlockRepo(pool);
+    await assert.rejects(() => blocks.create(blockArgs({ scope: null })), /branch/);
+    await assert.rejects(() => blocks.create(blockArgs({ scope: undefined })), /branch/);
+    assert.equal(pool.db.blocks.length, 0);
+  });
+
+  it("both writes authorize AFTER taking the lock, never before", async () => {
+    const pool = lockingPool();
+    const blocks = buildBlockRepo(pool);
+
+    await blocks.create(blockArgs({ scope: STORE_1 }));
+    pool.trace.length = 0;
+    await blocks.remove(removeArgs({ scope: STORE_1 }));
+
+    // In the removal transaction the employee read (which is the lock) must
+    // precede the UPDATE that writes.
+    const lockAt = pool.trace.findIndex((l) => /LOCK employee:/.test(l));
+    const writeAt = pool.trace.findIndex((l) => /UPDATE block/.test(l));
+    assert.ok(lockAt !== -1 && writeAt !== -1);
+    assert.ok(lockAt < writeAt, `unblock wrote before locking:\n${pool.trace.join("\n")}`);
   });
 });
 
