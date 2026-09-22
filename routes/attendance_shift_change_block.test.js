@@ -313,3 +313,111 @@ describe("the payload is validated on the server", () => {
     assert.notEqual(res.body.code, 200, "an outlet_id must not be quietly accepted");
   });
 });
+
+/**
+ * EMPLOYEE-ID ENUMERATION, on all three employee-targeted endpoints.
+ *
+ * `middlewares/employee_branch_scope.js#requireEmployeeInScope` exists so a
+ * branch-scoped caller gets the SAME answer for "an employee you may not see"
+ * and "an employee that does not exist". Without it, a Moolakulam manager
+ * could walk the id space and learn exactly which ids are real by watching
+ * "No such employee" turn into "not your branch".
+ *
+ * These endpoints are employee-targeted writes and reads, so they carry the
+ * guard like every other employee route. The assertions below compare the two
+ * refusals to EACH OTHER rather than to a fixed string: what matters is that
+ * they are indistinguishable, not what they happen to say.
+ *
+ * The guard is an OUTER check only. The authoritative branch decision is
+ * still taken inside the write transaction under `FOR UPDATE`, and
+ * `repository/attendance_shift_change_block_concurrency.test.js` continues to
+ * prove that; nothing here replaces it.
+ */
+const MISSING = 99999; // no row in EMPLOYEES at all
+
+describe("employee ids cannot be enumerated through the block endpoints", () => {
+  const cases = [
+    { what: "block", method: "POST", path: BLOCK, make: body, seenKey: "block" },
+    { what: "unblock", method: "POST", path: UNBLOCK, make: removeBody, seenKey: "unblock" },
+    {
+      what: "history",
+      method: "GET",
+      path: (id) => `${BLOCK}/history?employee_id=${id}&attendance_date=2026-09-18`,
+      seenKey: "history",
+    },
+  ];
+
+  const request = (c, who, id) =>
+    c.method === "GET"
+      ? call("GET", c.path(id), who)
+      : call(c.method, c.path, who, c.make(id));
+
+  for (const c of cases) {
+    it(`A+B. ${c.what}: another branch and a non-existent id are indistinguishable`, async () => {
+      seen[c.seenKey] = null;
+      const other = await request(c, STORE_MANAGER, TARGET_OTHER);
+      assert.equal(other.status, 403, `${c.what}: an employee in ECR must be 403`);
+      assert.equal(
+        seen[c.seenKey],
+        null,
+        `${c.what}: the guard must refuse BEFORE the usecase is reached`
+      );
+
+      seen[c.seenKey] = null;
+      const missing = await request(c, STORE_MANAGER, MISSING);
+      assert.equal(missing.status, 403, `${c.what}: a non-existent id must be 403 too`);
+      assert.equal(seen[c.seenKey], null, `${c.what}: and must not reach the usecase either`);
+
+      // THE POINT: byte-identical answers. A difference of any kind - status,
+      // code, message or error key - is an enumeration oracle.
+      assert.equal(missing.status, other.status, `${c.what}: same HTTP status`);
+      assert.deepEqual(
+        missing.body,
+        other.body,
+        `${c.what}: the two refusals must be indistinguishable`
+      );
+      assert.doesNotMatch(
+        JSON.stringify(missing.body),
+        /no such employee/i,
+        `${c.what}: existence must not be disclosed to a branch-scoped caller`
+      );
+    });
+
+    it(`C. ${c.what}: an own-branch employee reaches the usecase normally`, async () => {
+      seen[c.seenKey] = null;
+      const res = await request(c, STORE_MANAGER, TARGET_OWN);
+      assert.equal(res.body.code, 200, `${c.what}: own branch is allowed through`);
+      assert.ok(seen[c.seenKey], `${c.what}: the usecase was reached`);
+      assert.equal(Number(seen[c.seenKey].employee_id), TARGET_OWN);
+      assert.equal(
+        seen[c.seenKey].scope.kind,
+        EMPLOYEE_BRANCH_SCOPE.OWN_BRANCHES,
+        `${c.what}: and still carries the caller's own scope to the locked re-check`
+      );
+    });
+
+    it(`D. ${c.what}: an ALL_BRANCHES caller still reaches the usecase for a missing id`, async () => {
+      seen[c.seenKey] = null;
+      const res = await request(c, HR_MANAGER, MISSING);
+      assert.ok(
+        seen[c.seenKey],
+        `${c.what}: the guard must not refuse a company-wide caller - the ` +
+          `handler owns "No such employee" for them`
+      );
+      assert.equal(Number(seen[c.seenKey].employee_id), MISSING);
+      assert.equal(seen[c.seenKey].scope.kind, EMPLOYEE_BRANCH_SCOPE.ALL_BRANCHES);
+      assert.notEqual(res.status, 403, `${c.what}: not a scope refusal for an admin-class caller`);
+    });
+  }
+
+  it("D2. a user_type administrator is unaffected on every endpoint", async () => {
+    for (const c of cases) {
+      seen[c.seenKey] = null;
+      /* eslint-disable no-await-in-loop */
+      await request(c, { ...ADMIN, opts: { userType: 2 } }, MISSING);
+      /* eslint-enable no-await-in-loop */
+      assert.ok(seen[c.seenKey], `${c.what}: the administrator bypass still reaches the usecase`);
+      assert.equal(seen[c.seenKey].scope.kind, EMPLOYEE_BRANCH_SCOPE.ALL_BRANCHES);
+    }
+  });
+});

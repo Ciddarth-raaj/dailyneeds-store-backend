@@ -25,9 +25,17 @@ const respondError = require("../utils/http");
  *                                  grants NOTHING here.
  *   WHICH EMPLOYEES?               the EMPLOYEE BRANCH SCOPE, resolved by the
  *                                  shared middleware from the caller's own
- *                                  identity, and applied in the usecase
- *                                  against the employee's CURRENT store as
- *                                  read from `new_employee`.
+ *                                  identity, and applied TWICE. Once HERE, as
+ *                                  `requireEmployeeInScope()`, which refuses
+ *                                  an out-of-branch employee and a
+ *                                  non-existent id with the SAME answer so
+ *                                  ids cannot be enumerated. And again inside
+ *                                  the write transaction, against the
+ *                                  employee's CURRENT store read under
+ *                                  `FOR UPDATE` - which is what actually
+ *                                  authorizes the write and closes the
+ *                                  branch-transfer race the outer guard
+ *                                  cannot see.
  *   IS THE ACTION MEANINGFUL?      re-decided in the usecase from live facts -
  *                                  never from the report row the browser is
  *                                  holding.
@@ -102,6 +110,36 @@ class AttendanceShiftChangeBlockRoutes {
     };
   }
 
+  /**
+   * THE OUTER PRIVACY GUARD, the shared one and not a second implementation.
+   *
+   * `middlewares/employee_branch_scope.js#requireEmployeeInScope` reads the
+   * employee from `:employee_id`, then `query.employee_id`, then
+   * `body.employee_id` - which is the POSTs' body and the GET's query with no
+   * custom reader needed - and gives a branch-scoped caller ONE refusal for
+   * an employee in another branch AND for an id that does not exist. That is
+   * the point of it: answering "no such employee" for one and "not your
+   * branch" for the other lets a branch manager enumerate employee ids by
+   * watching which answer comes back.
+   *
+   * IT DOES NOT REPLACE THE LOCKED CHECK IN THE REPOSITORY. This runs before
+   * the handler, against a read that holds no lock, so an employee
+   * transferred between here and the write would slip past it. The
+   * authoritative decision is still made inside the write transaction, under
+   * `SELECT ... FOR UPDATE` on the employee's own row. The two are different
+   * jobs: this one hides WHETHER an employee exists, that one decides whether
+   * the write may happen.
+   *
+   * A router built without the middleware (some route tests) keeps its old
+   * behaviour and is authorized by the usecase and the locked check alone.
+   */
+  _inScope() {
+    if (!this.branchScope || typeof this.branchScope.requireEmployeeInScope !== "function") {
+      return (req, res, next) => next();
+    }
+    return this.branchScope.requireEmployeeInScope();
+  }
+
   init() {
     const base = "/attendance/shift-change-eligibility/block";
 
@@ -113,6 +151,7 @@ class AttendanceShiftChangeBlockRoutes {
     this.router.post(
       base,
       this.permissions.require(P.MANAGE_SHIFT_CHANGE_ELIGIBILITY),
+      this._inScope(),
       async (req, res) => {
         try {
           const isValid = Joi.validate(req.body, BLOCK_SCHEMA);
@@ -138,6 +177,7 @@ class AttendanceShiftChangeBlockRoutes {
     this.router.post(
       `${base}/remove`,
       this.permissions.require(P.MANAGE_SHIFT_CHANGE_ELIGIBILITY),
+      this._inScope(),
       async (req, res) => {
         try {
           const isValid = Joi.validate(req.body, UNBLOCK_SCHEMA);
@@ -167,6 +207,7 @@ class AttendanceShiftChangeBlockRoutes {
     this.router.get(
       `${base}/history`,
       this.permissions.require(P.MANAGE_SHIFT_CHANGE_ELIGIBILITY),
+      this._inScope(),
       async (req, res) => {
         try {
           const isValid = Joi.validate(req.query, HISTORY_SCHEMA);
