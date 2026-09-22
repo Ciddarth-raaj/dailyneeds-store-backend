@@ -936,3 +936,116 @@ describe("H. the shared rule is the only rule", () => {
     );
   });
 });
+
+/* ===================================================================== */
+
+/**
+ * THE WORK SHIFT RULE PROPAGATION FEATURE, AND THIS ONE, IN THE SAME WORLD.
+ *
+ * Propagation landed in production after this feature was written. It changes
+ * an employee's EFFECTIVE-DATED shift and recalculates the dates that change
+ * moves - including, potentially, a date HR has blocked.
+ *
+ * The block is a statement about a DATE, not about a shift. Nothing the
+ * propagation engine does to the shift history may revive a blocked date:
+ * the ledger row is keyed by employee and date and is untouched by a
+ * recalculation, so the options endpoint and the authoritative submit path
+ * must both still refuse afterwards.
+ *
+ * The assignment array here is the same mutable array the dashboard fake
+ * reads on every call, so pushing a row into it is exactly what a committed
+ * propagation write looks like to the read side.
+ */
+describe("G. compatibility with Work Shift rule propagation", () => {
+  it("1. a propagated shift change over a blocked date leaves the block active and both paths refusing", async () => {
+    const assignments = [assignment(EMPLOYEE, SHORT_SHIFT)];
+    const world = build({ assignments });
+
+    // Before anything, the date is genuinely raisable - otherwise the
+    // refusals below would prove nothing.
+    const openOptions = await world.regularization.shiftChangeOptions({
+      actor: { employee_id: EMPLOYEE },
+      attendance_date: DATE,
+    });
+    assert.equal(openOptions.can_raise, true, "raisable before the block");
+
+    await blockIt(world);
+
+    // PROPAGATION RUNS: a new effective-dated assignment lands BEFORE the
+    // blocked date and moves the employee onto a different base shift, which
+    // is what forces that date to be recalculated.
+    assignments.push({
+      employee_work_shift_assignment_id: 99001,
+      employee_id: EMPLOYEE,
+      work_shift_id: LONG_SHIFT,
+      effective_from: "2026-09-01",
+      source: "SHIFT_CHANGE",
+    });
+
+    // THE SHIFT HISTORY REALLY DID CHANGE for the blocked date. Asserting
+    // this is what stops the test degenerating into "ran the same thing
+    // twice": the base shift the engine resolves for DATE is a different
+    // shift after the propagated row than it was before it.
+    const openBase = openOptions.base && Number(openOptions.base.work_shift_id);
+    assert.equal(openBase, SHORT_SHIFT, "the base shift before propagation");
+    const probed = await world.regularization.shiftChangeEligibilityFor({
+      employee_id: EMPLOYEE,
+      attendance_date: DATE,
+      today: TODAY,
+    });
+    assert.ok(probed, "the engine still resolves the date after propagation");
+    assert.equal(
+      Number(probed.base && probed.base.work_shift_id),
+      LONG_SHIFT,
+      "propagation moved the blocked date onto the other shift"
+    );
+
+    // THE BLOCK SURVIVED, unchanged, and is still the active one.
+    const active = await world.blockRepo.findActive(EMPLOYEE, DATE);
+    assert.ok(active, "the block is still active after propagation");
+    assert.equal(active.removed_at, null, "propagation did not remove it");
+    assert.equal(active.attendance_date, DATE);
+
+    // THE OPTIONS ENDPOINT STILL REFUSES, and offers nothing.
+    const after = await world.regularization.shiftChangeOptions({
+      actor: { employee_id: EMPLOYEE },
+      attendance_date: DATE,
+    });
+    assert.equal(after.can_raise, false, "options still refuse after propagation");
+    assert.equal(after.hr_blocked, true);
+    assert.deepEqual(after.options || [], [], "no shift is offered on a blocked date");
+
+    // THE AUTHORITATIVE SUBMIT STILL REFUSES.
+    const before = world.created.length;
+    const refusal = await raise(world, { work_shift_id: SHORT_SHIFT });
+    assert.match(refusal, /not allowed for 18\/09\/2026/);
+    assert.equal(world.created.length, before, "no request was written");
+  });
+
+  it("2. unblocking after propagation returns the date to whatever the NEW shift history says", async () => {
+    const assignments = [assignment(EMPLOYEE, SHORT_SHIFT)];
+    const world = build({ assignments });
+
+    await blockIt(world);
+    assignments.push({
+      employee_work_shift_assignment_id: 99002,
+      employee_id: EMPLOYEE,
+      work_shift_id: SHORT_SHIFT,
+      effective_from: "2026-09-01",
+      source: "SHIFT_CHANGE",
+    });
+
+    await unblockIt(world);
+
+    // The block is gone - and the verdict now comes from the engine alone,
+    // over the history propagation left behind, not from anything this
+    // feature remembered.
+    assert.equal(await world.blockRepo.findActive(EMPLOYEE, DATE), null);
+    const after = await world.regularization.shiftChangeOptions({
+      actor: { employee_id: EMPLOYEE },
+      attendance_date: DATE,
+    });
+    assert.equal(after.hr_blocked, undefined === after.hr_blocked ? undefined : false);
+    assert.equal(after.can_raise, true, "the system rule decides again once the block is gone");
+  });
+});
