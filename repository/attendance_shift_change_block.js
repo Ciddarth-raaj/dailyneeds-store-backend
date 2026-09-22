@@ -1,4 +1,11 @@
 const logger = require("../utils/logger");
+const {
+  queryAsync,
+  getConnectionAsync,
+  beginTransactionAsync,
+  commitAsync,
+  rollbackAsync,
+} = require("../utils/batchInsert");
 
 /**
  * THE HR SHIFT CHANGE BLOCK LEDGER.
@@ -20,6 +27,44 @@ const logger = require("../utils/logger");
  * file's job is to turn that refusal into a business answer rather than a raw
  * `ER_DUP_ENTRY` - see `create` below.
  *
+ * ================== THE CROSS-TABLE RACE, AND THE LOCK THAT CLOSES IT =====
+ *
+ * The unique key stops two BLOCKS racing each other. It cannot stop a block
+ * racing the EMPLOYEE'S OWN SUBMIT, because those write different tables:
+ *
+ *   HR       checks "no open request"  -> passes
+ *   employee checks "no active block"  -> passes
+ *   employee inserts the request
+ *   HR       inserts the block
+ *   =        a PENDING request AND an active block. Forbidden.
+ *
+ * Both writers therefore serialize on ONE deterministic row - the employee's
+ * own `new_employee` row, taken with `SELECT ... FOR UPDATE` as the FIRST
+ * statement of the transaction, BEFORE either side reads what it is checking
+ * for. Whoever takes it goes first; the other waits, then re-reads and sees
+ * the committed truth. See `SHARED_LOCK_SQL` below and the matching lock in
+ * `repository/attendance_regularization.js#createRequest`.
+ *
+ * WHY THE EMPLOYEE ROW AND NOT THE BLOCK ROWS. The pair being coordinated
+ * usually has NO row in either table yet, and `FOR UPDATE` over an empty range
+ * takes a GAP lock: two transactions can both hold one and then deadlock on
+ * each other's insert-intention. The employee row always exists, so the lock
+ * is a single record lock - no gaps, no deadlock, and the same one for both
+ * paths. `new_employee` is already the row-lock point for four repositories
+ * (employee master, lifecycle, and the two Telegram ones), so this introduces
+ * no new lock target.
+ *
+ * LOCK ORDER, WHICH IS THE WHOLE DEADLOCK STORY: `new_employee` FIRST, then
+ * `attendance_shift_change_block` and `attendance_approval_request`. Both
+ * paths do it in that order and nothing in this repository takes them in the
+ * other. Anything added later must keep to it.
+ *
+ * THE COST, STATED: this serializes SHIFT CHANGE writes for one employee -
+ * their own submit and HR's block cannot proceed at the same instant. It does
+ * not serialize different employees, and it deliberately does not touch
+ * REGULARIZATION or OT requests, which are a different claim and race nothing
+ * here.
+ *
  * NO `SELECT *`. Every column is named. Every date leaves as TEXT through
  * DATE_FORMAT - the API pool sets no `dateStrings`, so a bare DATE would
  * arrive as a JS Date built at local midnight and every bound would move a day
@@ -28,6 +73,18 @@ const logger = require("../utils/logger");
 
 /** MySQL's duplicate-key error, which here means "somebody blocked it first". */
 const DUPLICATE_KEY = "ER_DUP_ENTRY";
+
+/**
+ * THE SHARED SERIALIZATION POINT for shift-change writes about one employee.
+ *
+ * Exported so the request path locks the IDENTICAL row with the IDENTICAL
+ * statement - a second, subtly different lock would serialize nothing. It is
+ * always the first statement in the transaction.
+ */
+const SHARED_LOCK_SQL = `SELECT employee_id
+         FROM new_employee
+        WHERE employee_id = ?
+        FOR UPDATE`;
 
 /** The columns every read of a block returns, named once. */
 const BLOCK_COLUMNS = `attendance_shift_change_block_id,
@@ -194,21 +251,86 @@ class AttendanceShiftChangeBlockRepository {
     blocked_by_employee_id = null,
     blocked_by_user_id = null,
   }) {
-    const result = await this._query(
-      "CREATE-BLOCK",
-      `INSERT INTO attendance_shift_change_block
-         (employee_id, attendance_date, outlet_id, reason,
-          blocked_by_employee_id, blocked_by_user_id)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [employee_id, attendance_date, outlet_id, reason, blocked_by_employee_id, blocked_by_user_id],
-      { rethrowDuplicate: true }
-    );
-    if (result && result.duplicate) return { created: false, duplicate: true, insert_id: null };
-    return {
-      created: true,
-      duplicate: false,
-      insert_id: result && result.insertId ? result.insertId : null,
-    };
+    const connection = await getConnectionAsync(this.db);
+    try {
+      await beginTransactionAsync(connection);
+
+      // 1. THE SHARED LOCK, FIRST AND ALWAYS. Until this returns, no shift
+      //    change request for this employee can be inserted, because
+      //    `createRequest` takes the same row before its own checks.
+      await queryAsync(connection, SHARED_LOCK_SQL, [employee_id]);
+
+      // 2. NOW the conflicting-request read is trustworthy: anything the
+      //    employee committed is visible, and nothing new can arrive while we
+      //    hold the lock. A PENDING request means the approval queue owns this
+      //    date; an APPROVED one means it is settled. Either way a block is
+      //    refused - and refused HERE, inside the transaction, rather than by
+      //    a check the race could have overtaken.
+      const conflicting = await queryAsync(
+        connection,
+        `SELECT attendance_approval_request_id, status
+           FROM attendance_approval_request
+          WHERE requested_for_employee_id = ?
+            AND attendance_date = ?
+            AND request_type = 'SHIFT_CHANGE'
+            AND status IN ('PENDING', 'APPROVED')
+          ORDER BY attendance_approval_request_id DESC
+          LIMIT 1`,
+        [employee_id, attendance_date]
+      );
+      if (conflicting && conflicting.length > 0) {
+        await rollbackAsync(connection);
+        return {
+          created: false,
+          duplicate: false,
+          conflicting_request: {
+            attendance_approval_request_id: conflicting[0].attendance_approval_request_id,
+            status: conflicting[0].status,
+          },
+          insert_id: null,
+        };
+      }
+
+      // 3. THE INSERT. The unique key over the generated `active_block`
+      //    column remains the backstop for two blocks racing - the lock makes
+      //    that case wait rather than collide, but the key is what guarantees
+      //    it whatever happens.
+      let inserted;
+      try {
+        inserted = await queryAsync(
+          connection,
+          `INSERT INTO attendance_shift_change_block
+             (employee_id, attendance_date, outlet_id, reason,
+              blocked_by_employee_id, blocked_by_user_id)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [employee_id, attendance_date, outlet_id, reason, blocked_by_employee_id, blocked_by_user_id]
+        );
+      } catch (err) {
+        await rollbackAsync(connection);
+        // An ORDINARY OUTCOME, not a fault: somebody blocked it first.
+        if (err && err.code === DUPLICATE_KEY) {
+          return { created: false, duplicate: true, insert_id: null };
+        }
+        throw err;
+      }
+
+      await commitAsync(connection);
+      return {
+        created: true,
+        duplicate: false,
+        insert_id: inserted && inserted.insertId ? inserted.insertId : null,
+      };
+    } catch (err) {
+      try {
+        await rollbackAsync(connection);
+      } catch (rollbackErr) {
+        this._log("CREATE-BLOCK-ROLLBACK", rollbackErr);
+      }
+      this._log("CREATE-BLOCK", err);
+      throw err;
+    } finally {
+      if (connection && typeof connection.release === "function") connection.release();
+    }
   }
 
   /**
@@ -251,4 +373,5 @@ class AttendanceShiftChangeBlockRepository {
 module.exports = (db) => new AttendanceShiftChangeBlockRepository(db);
 module.exports.AttendanceShiftChangeBlockRepository = AttendanceShiftChangeBlockRepository;
 module.exports.BLOCK_COLUMNS = BLOCK_COLUMNS;
+module.exports.SHARED_LOCK_SQL = SHARED_LOCK_SQL;
 module.exports.DUPLICATE_KEY = DUPLICATE_KEY;
