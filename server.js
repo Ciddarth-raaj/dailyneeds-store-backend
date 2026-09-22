@@ -14,6 +14,10 @@ const HttpServer = require("http").createServer(app);
 
 const logger = require("./utils/logger");
 const { ALERTS_TELEGRAM_CHAT_ID, DIGISME_ATTENDANCE_ALERT_CHAT_ID } = require("./constants/telegram");
+const {
+  isDigismeAttendanceCronEnabled,
+  DIGISME_ATTENDANCE_CRON_DISABLED_LOG,
+} = require("./services/digisme_attendance_cron_flag");
 
 /**
  * Express `trust proxy` from TRUST_PROXY. Default: loopback (nginx on the
@@ -2374,16 +2378,37 @@ class Server {
       }
     });
 
-    this.cronService.register("digisme_attendance_live", "* * * * *", async () => {
-      return await this.digismeAttendanceSyncUsecase.runLive();
-    });
+    /**
+     * THE KILL SWITCH. `DIGISME_ATTENDANCE_CRON_ENABLED=false` (case
+     * insensitive) leaves BOTH DigiSME jobs unregistered - not registered
+     * and returning early. Absent or any other value keeps them exactly as
+     * they were, so this changes nothing for a deploy that never sets it.
+     * `CRON_DISABLED` is a separate, wider switch and is untouched.
+     *
+     * The flag is read from `process.env` at registration time, which is
+     * after `constants/telegram.js` has already run `dotenv.config()` at the
+     * top of this file, so a value in `.env` is visible here.
+     *
+     * The block below is executed verbatim by
+     * `services/digisme_attendance_cron_flag.test.js` between its markers -
+     * keep them.
+     */
+    /* digisme-cron-gate:start */
+    if (isDigismeAttendanceCronEnabled(process.env)) {
+      this.cronService.register("digisme_attendance_live", "* * * * *", async () => {
+        return await this.digismeAttendanceSyncUsecase.runLive();
+      });
 
-    // Four times a day: today-3, today-2, yesterday - for vendor-delayed
-    // records only. :45 is chosen because every other in-process cron sits
-    // at :00, :15 or :30, so a recovery run never contends with one.
-    this.cronService.register("digisme_attendance_recovery", "45 6,12,18,23 * * *", async () => {
-      return await this.digismeAttendanceSyncUsecase.runHistorical();
-    });
+      // Four times a day: today-3, today-2, yesterday - for vendor-delayed
+      // records only. :45 is chosen because every other in-process cron sits
+      // at :00, :15 or :30, so a recovery run never contends with one.
+      this.cronService.register("digisme_attendance_recovery", "45 6,12,18,23 * * *", async () => {
+        return await this.digismeAttendanceSyncUsecase.runHistorical();
+      });
+    } else {
+      console.log(DIGISME_ATTENDANCE_CRON_DISABLED_LOG);
+    }
+    /* digisme-cron-gate:end */
 
     this.synker.initCronJobs(this.cronService, this.apiSyncLogger);
     this.cronService.start();
