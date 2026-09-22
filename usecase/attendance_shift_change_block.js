@@ -195,9 +195,34 @@ module.exports = (attendanceShiftChangeBlockRepo, attendanceRegularizationUsecas
       blocked_by_user_id: actor && actor.user_id ? Number(actor.user_id) : null,
     });
 
-    // THE RACE, ANSWERED AS BUSINESS. Somebody blocked it between our check
-    // and our insert; the database refused the second row and the honest
-    // answer is that the date is blocked - which is what they wanted.
+    /**
+     * THE RACES, ANSWERED AS BUSINESS RATHER THAN AS SQL.
+     *
+     * `create` holds the shared employee lock across its own check and insert,
+     * so both of these are decided by the database and not by the check above.
+     *
+     * A CONFLICTING REQUEST means the employee committed one while HR was
+     * deciding: the date now belongs to the approval queue, and the refusal
+     * says so and names the request. This is the cross-table race, and losing
+     * it must never leave a block sitting beside a pending request.
+     *
+     * A DUPLICATE means another HR user blocked it first. The date IS blocked,
+     * which is what this caller wanted - but this call did not do it and must
+     * not claim the audit.
+     */
+    if (!created.created && created.conflicting_request) {
+      const { status, attendance_approval_request_id: id } = created.conflicting_request;
+      const err = validationError(
+        status === "APPROVED"
+          ? `A shift change request for this date was approved while you were deciding (#${id}), so it cannot be blocked.`
+          : `A shift change request for this date was raised while you were deciding (#${id}). Reject it through the approval flow instead of blocking the date.`
+      );
+      err.refusal_code =
+        status === "APPROVED"
+          ? shiftChangeBlock.BLOCK_REFUSAL.REQUEST_APPROVED
+          : shiftChangeBlock.BLOCK_REFUSAL.REQUEST_PENDING;
+      throw err;
+    }
     if (!created.created) {
       const err = validationError("This employee and date are already blocked by HR.");
       err.refusal_code = shiftChangeBlock.BLOCK_REFUSAL.ALREADY_BLOCKED;

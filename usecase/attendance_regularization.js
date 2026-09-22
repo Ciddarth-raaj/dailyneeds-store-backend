@@ -522,6 +522,23 @@ module.exports = (
       punch: null,
     });
 
+    /**
+     * THE RACE, LOST. `createRequest` takes the shared employee lock and
+     * re-reads the block inside its own transaction, so it - not the check
+     * above - is what actually guarantees a request and a block cannot both
+     * appear. When it reports one, nothing was inserted and the employee is
+     * told exactly what they would have been told had HR committed a moment
+     * earlier: the same sentence, from the same shared helper.
+     */
+    if (created && created.hr_blocked) {
+      throw validationError(
+        shiftChangeBlock.blockMessage({
+          attendance_date: date,
+          reason: created.block ? created.block.reason : null,
+        })
+      );
+    }
+
     return {
       ...created,
       request_type: REQUEST_TYPE.OT,
