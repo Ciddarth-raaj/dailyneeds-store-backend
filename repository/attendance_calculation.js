@@ -1398,10 +1398,44 @@ class AttendanceCalculationRepository {
    * with no shift to propagate. `trigger_source` is the whole guard.
    */
   async requeueStaleRecalculationRuns({ staleSeconds = 600, maxAttempts = 3 } = {}) {
+    // FIRST, COALESCE. A stale run whose shift ALREADY has a newer queued run
+    // cannot be put back in the queue: the unique key on
+    // `pending_work_shift_id` would refuse it, and every tick would then die
+    // on the same row and never get as far as claiming the newer one. It also
+    // should not be requeued even if it could be, because that newer run will
+    // apply the SAME latest configuration to the SAME open attendance - two
+    // obligations, one piece of work.
+    //
+    // So the older run is closed as SUPERSEDED, pointing at the run that took
+    // it over. Terminal and resolved: payroll does not wait for it, Retry does
+    // not reopen it, and the row is kept as history rather than deleted.
+    const superseded = await this._read(
+      "SUPERSEDE-STALE-RECALCULATION-RUNS",
+      `UPDATE attendance_recalculation_run stale
+         JOIN (SELECT work_shift_id,
+                      MIN(attendance_recalculation_run_id) AS successor_id
+                 FROM attendance_recalculation_run
+                WHERE status = 'QUEUED'
+                  AND trigger_source = 'WORK_SHIFT_SAVE'
+                  AND work_shift_id IS NOT NULL
+                GROUP BY work_shift_id) queued
+           ON queued.work_shift_id = stale.work_shift_id
+          SET stale.status = 'SUPERSEDED',
+              stale.superseded_by_run_id = queued.successor_id,
+              stale.completed_at = CURRENT_TIMESTAMP(3),
+              stale.heartbeat_at = NULL
+        WHERE stale.status = 'RUNNING'
+          AND stale.trigger_source = 'WORK_SHIFT_SAVE'
+          AND stale.attendance_recalculation_run_id <> queued.successor_id
+          AND (stale.heartbeat_at IS NULL
+               OR stale.heartbeat_at < DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL ? SECOND))`,
+      [staleSeconds]
+    );
+
     const requeued = await this._read(
       "REQUEUE-STALE-RECALCULATION-RUNS",
       `UPDATE attendance_recalculation_run
-          SET status = 'QUEUED', heartbeat_at = NULL
+          SET status = 'QUEUED', heartbeat_at = NULL, queued_at = CURRENT_TIMESTAMP(3)
         WHERE status = 'RUNNING'
           AND trigger_source = 'WORK_SHIFT_SAVE'
           AND attempts < ?
@@ -1421,6 +1455,7 @@ class AttendanceCalculationRepository {
       [maxAttempts, staleSeconds]
     );
     return {
+      superseded: superseded ? Number(superseded.affectedRows) : 0,
       requeued: requeued ? Number(requeued.affectedRows) : 0,
       abandoned: abandoned ? Number(abandoned.affectedRows) : 0,
     };
@@ -1439,7 +1474,8 @@ class AttendanceCalculationRepository {
   }
 
   /**
-   * RETRY: put a finished-but-unsatisfactory run back in the queue.
+   * RETRY: put a finished-but-unsatisfactory run back in the queue - unless a
+   * newer queued run for the same shift already owes that work.
    *
    * Only a QUEUED-able propagation that FAILED or COMPLETED_WITH_ERRORS may
    * be retried, and the guards are in the statement rather than in a read
@@ -1450,6 +1486,50 @@ class AttendanceCalculationRepository {
    * of the automatic recovery budget.
    */
   async retryRecalculationRun(runId) {
+    // THE SAME COALESCING THE RECOVERY DOES, for the same reason. If this
+    // shift already has a queued run, that run carries the latest
+    // configuration over the same open attendance: retrying this one would
+    // collide with the unique key and, if it somehow did not, would duplicate
+    // the work. It is closed as SUPERSEDED and the caller is told which run
+    // now owes the propagation.
+    const [target] = await this._read(
+      "READ-RUN-FOR-RETRY",
+      `SELECT attendance_recalculation_run_id, work_shift_id, status, trigger_source
+         FROM attendance_recalculation_run
+        WHERE attendance_recalculation_run_id = ?`,
+      [runId]
+    );
+    if (
+      !target ||
+      target.trigger_source !== "WORK_SHIFT_SAVE" ||
+      !["FAILED", "COMPLETED_WITH_ERRORS"].includes(String(target.status))
+    ) {
+      return { requeued: false };
+    }
+
+    const [successor] = await this._read(
+      "FIND-QUEUED-SUCCESSOR",
+      `SELECT attendance_recalculation_run_id
+         FROM attendance_recalculation_run
+        WHERE pending_work_shift_id = ?
+          AND attendance_recalculation_run_id <> ?
+        LIMIT 1`,
+      [target.work_shift_id, runId]
+    );
+    if (successor) {
+      const supersededId = Number(successor.attendance_recalculation_run_id);
+      await this._read(
+        "SUPERSEDE-RETRIED-RECALCULATION-RUN",
+        `UPDATE attendance_recalculation_run
+            SET status = 'SUPERSEDED', superseded_by_run_id = ?,
+                completed_at = CURRENT_TIMESTAMP(3), heartbeat_at = NULL
+          WHERE attendance_recalculation_run_id = ?
+            AND status IN ('FAILED', 'COMPLETED_WITH_ERRORS')`,
+        [supersededId, runId]
+      );
+      return { requeued: false, superseded_by_run_id: supersededId };
+    }
+
     const result = await this._read(
       "RETRY-RECALCULATION-RUN",
       // EVERY FIGURE OF THE PREVIOUS ATTEMPT GOES. A retried run has not
@@ -1459,7 +1539,7 @@ class AttendanceCalculationRepository {
       // claim re-derives and rewrites it.
       `UPDATE attendance_recalculation_run
           SET status = 'QUEUED', attempts = 0, heartbeat_at = NULL,
-              completed_at = NULL, last_error = NULL,
+              completed_at = NULL, last_error = NULL, superseded_by_run_id = NULL,
               employees_targeted = 0, employees_completed = 0, employees_failed = 0,
               days_processed = 0, days_skipped_locked = 0, errors = NULL,
               queued_at = CURRENT_TIMESTAMP(3)
@@ -1468,7 +1548,7 @@ class AttendanceCalculationRepository {
           AND status IN ('FAILED', 'COMPLETED_WITH_ERRORS')`,
       [runId]
     );
-    return result ? Number(result.affectedRows) > 0 : false;
+    return { requeued: result ? Number(result.affectedRows) > 0 : false };
   }
 
   /** One run, for a status poll after a save. */
@@ -1476,6 +1556,7 @@ class AttendanceCalculationRepository {
     const rows = await this._read(
       "GET-RECALCULATION-RUN",
       `SELECT attendance_recalculation_run_id, status, trigger_source, work_shift_id,
+              superseded_by_run_id,
               employees_targeted, employees_completed, employees_failed,
               days_processed, days_skipped_locked, attempts, last_error, errors,
               DATE_FORMAT(started_at, '%Y-%m-%d %H:%i:%s') AS started_at,
@@ -1502,7 +1583,8 @@ class AttendanceCalculationRepository {
               r.designation_id, d.designation_name,
               r.employees_targeted, r.employees_completed, r.employees_failed,
               r.days_processed, r.days_skipped_locked, r.status, r.errors,
-              r.trigger_source, r.work_shift_id, ws.shift_code, ws.shift_name
+              r.trigger_source, r.work_shift_id, r.superseded_by_run_id,
+              ws.shift_code, ws.shift_name
          FROM attendance_recalculation_run r
          LEFT JOIN new_employee rb ON rb.employee_id = r.requested_by_employee_id
          LEFT JOIN new_employee e ON e.employee_id = r.employee_id

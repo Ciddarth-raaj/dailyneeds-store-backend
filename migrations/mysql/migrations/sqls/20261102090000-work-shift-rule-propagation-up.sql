@@ -22,7 +22,7 @@
 
 ALTER TABLE `attendance_recalculation_run`
   MODIFY COLUMN `status`
-    ENUM('QUEUED','RUNNING','COMPLETED','COMPLETED_WITH_ERRORS','FAILED')
+    ENUM('QUEUED','RUNNING','COMPLETED','COMPLETED_WITH_ERRORS','FAILED','SUPERSEDED')
     NOT NULL DEFAULT 'RUNNING',
   ADD COLUMN `trigger_source` ENUM('MANUAL','WORK_SHIFT_SAVE') NOT NULL DEFAULT 'MANUAL'
     COMMENT 'what started this run' AFTER `requested_by_employee_id`,
@@ -36,6 +36,8 @@ ALTER TABLE `attendance_recalculation_run`
     COMMENT 'last sign of life from the worker processing this run',
   ADD COLUMN `last_error` TEXT NULL
     COMMENT 'why the last attempt failed, when it failed as a whole',
+  ADD COLUMN `superseded_by_run_id` BIGINT UNSIGNED NULL
+    COMMENT 'the newer queued propagation for the same shift that took this run\'s work over',
   ADD COLUMN `queued_at` TIMESTAMP(3) NULL
     COMMENT 'when the propagation obligation was recorded; survives every claim, unlike started_at',
   ADD KEY `idx_arr_queue` (`status`, `trigger_source`, `attendance_recalculation_run_id`);
@@ -52,6 +54,15 @@ ALTER TABLE `attendance_recalculation_run`
 --
 -- The loser of the race now gets ER_DUP_ENTRY instead of writing a duplicate,
 -- and `repository/work_shift.js` reuses the row that won.
+--
+-- SUPERSEDED IS WHY THE INVARIANT DOES NOT DEADLOCK ITS OWN RECOVERY. A stale
+-- RUNNING run cannot be put back to QUEUED when a newer queued run already
+-- owns that shift - the unique key would refuse it - and that newer run
+-- carries the SAME latest configuration across the SAME open attendance, so a
+-- second obligation would be duplicated work, not lost work. The older run is
+-- therefore closed as SUPERSEDED, pointing at the run that took it over: a
+-- terminal, resolved state that payroll does not wait for and Retry does not
+-- reopen, and a historical row that is kept rather than deleted.
 ALTER TABLE `attendance_recalculation_run`
   ADD COLUMN `pending_work_shift_id` INT
     GENERATED ALWAYS AS (

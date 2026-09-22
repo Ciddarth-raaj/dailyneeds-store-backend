@@ -214,6 +214,9 @@ function world({ lockedMonths = [] } = {}) {
         if (version.appended) {
           if (state.enqueueThrows) throw new Error(state.enqueueThrows);
           // One pending job per shift, exactly as the real INSERT's guard.
+          // The UNIQUE key covers QUEUED rows only, so a RUNNING run does
+          // NOT stop a new obligation being recorded: the running one may
+          // already be past the dates this save changed.
           const pending = state.runs.find(
             (r) =>
               Number(r.work_shift_id) === Number(id) &&
@@ -351,14 +354,36 @@ function world({ lockedMonths = [] } = {}) {
       if (run) run.heartbeat_at = state.now;
     },
     requeueStaleRecalculationRuns: async ({ staleSeconds = 600, maxAttempts = 3 } = {}) => {
+      if (state.requeueThrows) throw new Error(state.requeueThrows);
+      let superseded = 0;
       let requeued = 0;
       let abandoned = 0;
+      const queuedFor = (shiftId, exceptId) =>
+        state.runs.find(
+          (r) =>
+            r.status === "QUEUED" &&
+            r.trigger_source === "WORK_SHIFT_SAVE" &&
+            Number(r.work_shift_id) === Number(shiftId) &&
+            r.attendance_recalculation_run_id !== exceptId
+        );
+
       state.runs.forEach((run) => {
         if (run.status !== "RUNNING" || run.trigger_source !== "WORK_SHIFT_SAVE") return;
         const stale = run.heartbeat_at === null || run.heartbeat_at === undefined
           ? true
           : state.now - run.heartbeat_at > staleSeconds * 1000;
         if (!stale) return;
+
+        // COALESCE FIRST. A newer queued run for the same shift already owes
+        // this work, and the unique key would refuse a second queued row.
+        const successor = queuedFor(run.work_shift_id, run.attendance_recalculation_run_id);
+        if (successor) {
+          run.status = "SUPERSEDED";
+          run.superseded_by_run_id = successor.attendance_recalculation_run_id;
+          run.heartbeat_at = null;
+          superseded += 1;
+          return;
+        }
         if (run.attempts >= maxAttempts) {
           run.status = "FAILED";
           run.last_error = `abandoned after ${run.attempts} attempts without completing`;
@@ -369,7 +394,7 @@ function world({ lockedMonths = [] } = {}) {
           requeued += 1;
         }
       });
-      return { requeued, abandoned };
+      return { superseded, requeued, abandoned };
     },
     failRecalculationRun: async (runId, message) => {
       const run = state.runs[runId - 1];
@@ -380,8 +405,21 @@ function world({ lockedMonths = [] } = {}) {
     },
     retryRecalculationRun: async (runId) => {
       const run = state.runs[runId - 1];
-      if (!run || run.trigger_source !== "WORK_SHIFT_SAVE") return false;
-      if (!["FAILED", "COMPLETED_WITH_ERRORS"].includes(run.status)) return false;
+      if (!run || run.trigger_source !== "WORK_SHIFT_SAVE") return { requeued: false };
+      if (!["FAILED", "COMPLETED_WITH_ERRORS"].includes(run.status)) return { requeued: false };
+
+      const successor = state.runs.find(
+        (r) =>
+          r.status === "QUEUED" &&
+          r.trigger_source === "WORK_SHIFT_SAVE" &&
+          Number(r.work_shift_id) === Number(run.work_shift_id) &&
+          r.attendance_recalculation_run_id !== runId
+      );
+      if (successor) {
+        run.status = "SUPERSEDED";
+        run.superseded_by_run_id = successor.attendance_recalculation_run_id;
+        return { requeued: false, superseded_by_run_id: successor.attendance_recalculation_run_id };
+      }
       // Every figure of the previous attempt goes, exactly as the UPDATE does.
       Object.assign(run, {
         status: "QUEUED",
@@ -395,9 +433,10 @@ function world({ lockedMonths = [] } = {}) {
         days_processed: 0,
         days_skipped_locked: 0,
         errors: null,
+        superseded_by_run_id: null,
         queued_at: state.now,
       });
-      return true;
+      return { requeued: true };
     },
     getRecalculationRun: async (runId) => state.runs[runId - 1] || null,
     saveCalculationsWithReconciliation: async ({ employee_id, from_date, to_date, rows }) => {
@@ -426,8 +465,10 @@ function world({ lockedMonths = [] } = {}) {
       });
       return { written: (rows || []).length, stale_removed: 0 };
     },
+    // An UPDATE, so a caller holding the row sees the new values - as it
+    // would re-reading it from the database.
     finishRecalculationRun: async (runId, outcome) => {
-      state.runs[runId - 1] = { ...state.runs[runId - 1], ...outcome };
+      Object.assign(state.runs[runId - 1], outcome);
     },
   };
 
@@ -1078,6 +1119,134 @@ describe("the recalculation queue", () => {
 
     assert.equal(run.status, "FAILED");
     assert.match(run.last_error, /abandoned after 3 attempts/);
+  });
+
+  it("STALE RUNNING + a newer QUEUED run for the same shift: the old one is superseded, the new one drains", async () => {
+    // The collision the unique pending-job key creates: run A is RUNNING, the
+    // shift is edited again so run B is queued, then A's worker dies. A
+    // cannot go back to QUEUED - B owns that shift's pending slot - and a
+    // tick that tried would throw on every future tick and never claim B.
+    const w = await seedSeptember();
+    await saveMinimumOt(w, 15);
+    const runA = w.state.runs[0];
+    runA.status = "RUNNING";
+    runA.attempts = 1;
+    runA.heartbeat_at = w.state.now;
+
+    // The shift is edited again while A is running: B is correctly created.
+    await saveMinimumOt(w, 10);
+    assert.equal(w.state.runs.length, 2, "a RUNNING run does not absorb a new obligation");
+    const runB = w.state.runs[1];
+    assert.equal(runB.status, "QUEUED");
+
+    // A's worker dies.
+    runA.heartbeat_at = w.state.now - 20 * 60 * 1000;
+
+    const ticks = await drainQueue(w);
+
+    assert.equal(ticks[0].recovered.superseded, 1);
+    assert.equal(ticks[0].recovered.requeued, 0, "it was never put back in the queue");
+    assert.equal(runA.status, "SUPERSEDED");
+    assert.equal(runA.superseded_by_run_id, runB.attendance_recalculation_run_id);
+    assert.equal(ticks[0].claimed, runB.attendance_recalculation_run_id, "and B was claimed");
+    assert.equal(runB.status, "COMPLETED");
+    assert.equal(storedOt(w, ALICE, "2026-09-13"), 110, "the latest rule reached the open dates");
+  });
+
+  it("FAILED A + QUEUED B for the same shift: Retry on A closes it, B stays the one obligation", async () => {
+    const w = await seedSeptember();
+    await saveMinimumOt(w, 15);
+    const runA = w.state.runs[0];
+    runA.status = "RUNNING";
+    runA.heartbeat_at = w.state.now;
+    await saveMinimumOt(w, 10);
+    const runB = w.state.runs[1];
+    runA.status = "FAILED";
+
+    const retried = await w.calculation.retryRecalculationRun(
+      runA.attendance_recalculation_run_id
+    );
+
+    assert.equal(retried.code, 200);
+    assert.equal(retried.status, "SUPERSEDED");
+    assert.equal(retried.superseded_by_run_id, runB.attendance_recalculation_run_id);
+    assert.match(retried.msg, /newer recalculation \(run #2\) is already queued/);
+    assert.equal(runA.status, "SUPERSEDED", "no second queued obligation was created");
+    assert.equal(
+      w.state.runs.filter((r) => r.status === "QUEUED").length,
+      1,
+      "exactly one pending job for the shift"
+    );
+
+    await drainQueue(w);
+    assert.equal(runB.status, "COMPLETED");
+    assert.equal(storedOt(w, ALICE, "2026-09-13"), 110);
+  });
+
+  it("different shifts do NOT coalesce", async () => {
+    const w = await seedSeptember();
+    await saveMinimumOt(w, 10);
+    const runA = w.state.runs[0];
+    runA.status = "RUNNING";
+    runA.attempts = 1;
+    runA.heartbeat_at = w.state.now - 20 * 60 * 1000;
+
+    // A queued run for ANOTHER shift must not adopt this one's work.
+    await w.workShift.update(OTHER_SHIFT, {
+      work_shift_details: { overtime_minimum_minutes: 10 },
+      actor_employee_id: 7,
+    });
+
+    const ticks = await drainQueue(w);
+
+    assert.equal(ticks[0].recovered.superseded, 0);
+    assert.equal(ticks[0].recovered.requeued, 1, "the stale run for shift 5 is requeued normally");
+    assert.equal(runA.status, "COMPLETED", "and it runs");
+  });
+
+  it("payroll ignores a SUPERSEDED run but still waits for the run that replaced it", async () => {
+    const w = await seedSeptember();
+    await saveMinimumOt(w, 15);
+    const runA = w.state.runs[0];
+    runA.status = "RUNNING";
+    runA.heartbeat_at = w.state.now;
+    await saveMinimumOt(w, 10);
+    const runB = w.state.runs[1];
+    runA.heartbeat_at = w.state.now - 20 * 60 * 1000;
+
+    // Recovery has closed A as superseded (proved in the case above); B is
+    // still queued and still owes the work.
+    runA.status = "SUPERSEDED";
+    runA.superseded_by_run_id = runB.attendance_recalculation_run_id;
+
+    const blocked = await w.approveAndLock(ALICE, "2026-09");
+    assert.equal(blocked.outcome, "RECALCULATION_PENDING");
+    assert.deepEqual(
+      blocked.pending_recalculations.map((p) => p.run_id),
+      [runB.attendance_recalculation_run_id],
+      "the superseded run is not among the things payroll is waiting for"
+    );
+
+    await drainQueue(w);
+
+    // Once B completes, payroll is clear.
+    assert.equal(runB.status, "COMPLETED");
+    assert.equal((await w.approveAndLock(ALICE, "2026-09")).outcome, "APPROVED");
+    assert.equal(storedOt(w, ALICE, "2026-09-13"), 110);
+  });
+
+  it("a recovery that throws does not stop the tick from claiming the queued run", async () => {
+    const w = await seedSeptember();
+    await saveMinimumOt(w, 10);
+    const original = w.state.requeueThrows;
+    w.state.requeueThrows = "deadlock found when trying to get lock";
+
+    const tick = await w.calculation.processQueuedRecalculations({ today: TODAY });
+
+    assert.match(tick.recovered.error, /deadlock/);
+    assert.equal(tick.claimed, 1, "the queue still drained");
+    assert.equal(w.state.runs[0].status, "COMPLETED");
+    w.state.requeueThrows = original;
   });
 
   it("a MANUAL bulk run is never claimed, requeued or abandoned by the worker", async () => {

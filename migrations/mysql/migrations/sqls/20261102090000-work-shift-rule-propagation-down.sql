@@ -3,6 +3,7 @@ ALTER TABLE `attendance_recalculation_run`
   DROP COLUMN `pending_work_shift_id`,
   DROP KEY `idx_arr_queue`,
   DROP COLUMN `queued_at`,
+  DROP COLUMN `superseded_by_run_id`,
   DROP COLUMN `last_error`,
   DROP COLUMN `heartbeat_at`,
   DROP COLUMN `attempts`,

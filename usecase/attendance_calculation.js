@@ -1792,9 +1792,20 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     if (!attendanceCalculationRepo.claimNextQueuedRun) return { skipped: "not_supported" };
     workerBusy = true;
     try {
-      const recovered = attendanceCalculationRepo.requeueStaleRecalculationRuns
-        ? await attendanceCalculationRepo.requeueStaleRecalculationRuns()
-        : { requeued: 0, abandoned: 0 };
+      // RECOVERY MUST NEVER STOP THE QUEUE FROM DRAINING. It is housekeeping
+      // for runs whose worker died; the tick's actual job is the run waiting
+      // behind it. A recovery that throws - a lock timeout, a deadlock, a
+      // constraint nobody predicted - is reported on the tick and the claim
+      // still happens, so one unrecoverable row can never make every tick a
+      // no-op for everybody else.
+      let recovered = { superseded: 0, requeued: 0, abandoned: 0 };
+      try {
+        if (attendanceCalculationRepo.requeueStaleRecalculationRuns) {
+          recovered = await attendanceCalculationRepo.requeueStaleRecalculationRuns();
+        }
+      } catch (err) {
+        recovered = { error: err && err.message ? err.message : String(err) };
+      }
 
       const run = await attendanceCalculationRepo.claimNextQueuedRun();
       if (!run) return { recovered, claimed: null };
@@ -1840,8 +1851,27 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     if (!attendanceCalculationRepo.retryRecalculationRun) {
       return { code: 400, msg: "Retrying a run is not supported" };
     }
-    const requeued = await attendanceCalculationRepo.retryRecalculationRun(runId);
-    if (!requeued) {
+    const outcome = await attendanceCalculationRepo.retryRecalculationRun(runId);
+    // The older forms answered a bare boolean; both shapes are accepted so a
+    // partially deployed pair cannot turn a successful retry into a 422.
+    const result = typeof outcome === "boolean" ? { requeued: outcome } : outcome || {};
+
+    if (result.superseded_by_run_id) {
+      // A NEWER QUEUED RUN FOR THE SAME SHIFT ALREADY OWES THIS WORK. It
+      // carries the same latest configuration over the same open attendance,
+      // so this run is closed rather than duplicated - and the caller is sent
+      // to the run that is actually going to do it.
+      return {
+        code: 200,
+        run_id: runId,
+        status: "SUPERSEDED",
+        superseded_by_run_id: result.superseded_by_run_id,
+        msg:
+          `A newer recalculation (run #${result.superseded_by_run_id}) is already queued for this ` +
+          "shift and will apply the latest rules. This run has been closed as superseded.",
+      };
+    }
+    if (!result.requeued) {
       return {
         code: 422,
         msg:
