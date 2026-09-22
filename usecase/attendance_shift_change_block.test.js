@@ -22,6 +22,7 @@ const buildRegularization = require("../usecase/attendance_regularization");
 const buildBlock = require("../usecase/attendance_shift_change_block");
 const buildReport = require("../usecase/attendance_shift_change_report");
 const shiftChangeBlock = require("../utils/shift_change_block");
+const { isEmployeeInScope } = require("../utils/employee_branch_scope");
 const { EMPLOYEE_BRANCH_SCOPE } = require("../utils/employee_branch_scope");
 
 const TODAY = "2026-09-19";
@@ -153,6 +154,13 @@ const assignment = (employeeId, workShiftId) => ({
  * rather than throwing - and `remove` matches only a row whose `removed_at` is
  * still null, exactly as the UPDATE's `AND removed_at IS NULL` does. Rows are
  * never dropped, so history accumulates here as it does there.
+ *
+ * IT ALSO MODELS THE LOCKED BRANCH CHECK. Both writes authorize the scope
+ * they are handed against the employee's CURRENT store and stamp that store
+ * as the audit snapshot, exactly as the real repository does under the
+ * employee row lock. A fake that skipped it would let these tests pass while
+ * the authorization boundary was missing - the interleaved proof lives in
+ * `repository/attendance_shift_change_block_concurrency.test.js`.
  */
 function fakeBlockRepo(state = {}) {
   const rows = [];
@@ -185,6 +193,16 @@ function fakeBlockRepo(state = {}) {
         )
         .sort((a, b) => b.attendance_shift_change_block_id - a.attendance_shift_change_block_id),
     create: async (row) => {
+      // THE LOCKED BRANCH CHECK, modelled.
+      const subject = employees.find((e) => Number(e.employee_id) === Number(row.employee_id));
+      if (!subject) return { created: false, duplicate: false, missing_employee: true };
+      if (!isEmployeeInScope(row.scope, subject.store_id)) {
+        const err = new Error("You do not have access to this employee's branch.");
+        err.name = "ForbiddenError";
+        err.code = 403;
+        err.out_of_scope = true;
+        throw err;
+      }
       // THE UNIQUE KEY, in memory.
       const clash = rows.find(
         (r) =>
@@ -198,6 +216,8 @@ function fakeBlockRepo(state = {}) {
       rows.push({
         attendance_shift_change_block_id: id,
         ...row,
+        // The audit snapshot is the LIVE store, as the real insert records it.
+        outlet_id: subject.store_id,
         blocked_at: `${TODAY} 11:00:00`,
         blocked_by_employee_name: `Employee ${row.blocked_by_employee_id}`,
         removed_at: null,
@@ -208,6 +228,15 @@ function fakeBlockRepo(state = {}) {
       return { created: true, duplicate: false, insert_id: id };
     },
     remove: async ({ employee_id, attendance_date, ...rest }) => {
+      const subject = employees.find((e) => Number(e.employee_id) === Number(employee_id));
+      if (!subject) return { removed: false, missing_employee: true };
+      if (!isEmployeeInScope(rest.scope, subject.store_id)) {
+        const err = new Error("You do not have access to this employee's branch.");
+        err.name = "ForbiddenError";
+        err.code = 403;
+        err.out_of_scope = true;
+        throw err;
+      }
       const active = rows.find(
         (r) =>
           Number(r.employee_id) === Number(employee_id) &&
@@ -639,6 +668,49 @@ describe("D. authorization", () => {
     await assert.rejects(() => blockIt(world, { reason: "no" }), /reason for blocking/);
     await blockIt(world);
     await assert.rejects(() => unblockIt(world, { removal_reason: "" }), /reason for removing/);
+  });
+});
+
+describe("D2. the locked branch check is the boundary, not the pre-check", () => {
+  it("a transfer between the pre-check and the write is refused by the repository", async () => {
+    const world = build();
+
+    // The pre-check will pass: the employee is in the actor's branch when the
+    // usecase reads them. The transfer then lands before the write - modelled
+    // by moving the employee the instant the repository is entered, which is
+    // exactly the window the locked check exists to cover.
+    const innerCreate = world.blockRepo.create;
+    world.blockRepo.create = async (row) => {
+      world.employees[0].store_id = OTHER_OUTLET;
+      return innerCreate(row);
+    };
+
+    await assert.rejects(
+      () => blockIt(world, { scope: OWN_OUTLET }),
+      (err) => {
+        assert.equal(err.out_of_scope, true, "the repository's locked refusal, surfaced as-is");
+        assert.equal(err.code, 403);
+        return true;
+      }
+    );
+    assert.equal(world.blockRepo.rows.length, 0, "nothing was written");
+  });
+
+  it("the same holds for a removal", async () => {
+    const world = build();
+    await blockIt(world, { scope: OWN_OUTLET });
+
+    const innerRemove = world.blockRepo.remove;
+    world.blockRepo.remove = async (row) => {
+      world.employees[0].store_id = OTHER_OUTLET;
+      return innerRemove(row);
+    };
+
+    await assert.rejects(() => unblockIt(world, { scope: OWN_OUTLET }), (err) => {
+      assert.equal(err.out_of_scope, true);
+      return true;
+    });
+    assert.equal(world.blockRepo.rows[0].removed_at, null, "the block survives the refusal");
   });
 });
 

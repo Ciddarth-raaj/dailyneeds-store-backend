@@ -118,9 +118,16 @@ module.exports = (attendanceShiftChangeBlockRepo, attendanceRegularizationUsecas
   };
 
   /**
-   * THE BRANCH GATE. `scope` is resolved by the route from the caller's own
-   * identity; this only ever narrows. An actor whose scope cannot see the
-   * employee's CURRENT branch is refused, whatever they sent.
+   * THE BRANCH PRE-CHECK - a cheap, friendly refusal, and NOT the boundary.
+   *
+   * It reads the employee outside any transaction, so between it and the write
+   * the employee can be transferred. The AUTHORITATIVE check is made by the
+   * repository against the row read UNDER THE EMPLOYEE LOCK, in the same
+   * transaction as the write (see
+   * `repository/attendance_shift_change_block.js#lockedRowInScope`). This one
+   * exists so the common case fails fast with a clear message rather than
+   * after a transaction, and it can never grant anything the locked check
+   * would refuse.
    */
   const authorizeBranch = (scope, employee) => {
     if (!isEmployeeInScope(scope, employee.store_id)) {
@@ -187,10 +194,12 @@ module.exports = (attendanceShiftChangeBlockRepo, attendanceRegularizationUsecas
     const created = await attendanceShiftChangeBlockRepo.create({
       employee_id: employeeId,
       attendance_date: date,
-      // AUDIT ONLY. Authorization used the live store above; this records
-      // where they were when the decision was taken.
-      outlet_id: employee.store_id,
       reason: blockReason,
+      // THE AUTHORIZATION BOUNDARY travels with the write: the repository
+      // re-checks it against the branch it reads under the employee lock, and
+      // records THAT branch as the audit snapshot. No outlet id is passed from
+      // here, because the value this usecase read may already be stale.
+      scope,
       blocked_by_employee_id: actor && actor.employee_id ? Number(actor.employee_id) : null,
       blocked_by_user_id: actor && actor.user_id ? Number(actor.user_id) : null,
     });
@@ -272,6 +281,8 @@ module.exports = (attendanceShiftChangeBlockRepo, attendanceRegularizationUsecas
       removed_by_employee_id: actor && actor.employee_id ? Number(actor.employee_id) : null,
       removed_by_user_id: actor && actor.user_id ? Number(actor.user_id) : null,
       removal_reason: why,
+      // Re-checked under the lock, in the same transaction as the UPDATE.
+      scope,
     });
 
     // Lost the race to another remover. The block IS gone, which is what they

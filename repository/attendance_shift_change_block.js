@@ -1,4 +1,5 @@
 const logger = require("../utils/logger");
+const { isEmployeeInScope } = require("../utils/employee_branch_scope");
 const {
   queryAsync,
   getConnectionAsync,
@@ -81,10 +82,48 @@ const DUPLICATE_KEY = "ER_DUP_ENTRY";
  * statement - a second, subtly different lock would serialize nothing. It is
  * always the first statement in the transaction.
  */
-const SHARED_LOCK_SQL = `SELECT employee_id
+const SHARED_LOCK_SQL = `SELECT employee_id, store_id
          FROM new_employee
         WHERE employee_id = ?
         FOR UPDATE`;
+
+/**
+ * THE BRANCH CHECK, MADE WHILE THE EMPLOYEE ROW IS LOCKED.
+ *
+ * ================== WHY THE USECASE'S EARLIER CHECK IS NOT ENOUGH =========
+ *
+ * The usecase reads the employee and authorizes before this transaction
+ * begins. Between that read and this write the employee can be TRANSFERRED:
+ *
+ *   HR (store 1 scope) reads employee -> store_id 1 -> passes
+ *   a transfer commits             -> store_id 2
+ *   HR's transaction takes the lock and inserts
+ *   =  a store-1 manager has just modified a store-2 employee
+ *
+ * So the row read UNDER THE LOCK is the authorization boundary, and the
+ * earlier check is only a cheap, friendly refusal. `store_id` comes back from
+ * `SHARED_LOCK_SQL` itself - the same statement, so there is no second read to
+ * drift - and is tested with the SAME pure helper the rest of the application
+ * uses. No second branch rule is invented here, and no store id from the
+ * browser is ever consulted.
+ *
+ * ALL_BRANCHES and the administrator bypass pass through unchanged: they are
+ * `isEmployeeInScope`'s own answer, not a special case written here.
+ */
+function lockedRowInScope(scope, lockedRow) {
+  if (!scope) return false;
+  const storeId = lockedRow && lockedRow.store_id !== undefined ? lockedRow.store_id : null;
+  return isEmployeeInScope(scope, storeId);
+}
+
+/** The refusal a locked branch check produces. Shaped like the usecase's 403. */
+function outOfScopeError() {
+  const err = new Error("You do not have access to this employee's branch.");
+  err.name = "ForbiddenError";
+  err.code = 403;
+  err.out_of_scope = true;
+  return err;
+}
 
 /** The columns every read of a block returns, named once. */
 const BLOCK_COLUMNS = `attendance_shift_change_block_id,
@@ -246,10 +285,13 @@ class AttendanceShiftChangeBlockRepository {
   async create({
     employee_id,
     attendance_date,
-    outlet_id = null,
     reason,
     blocked_by_employee_id = null,
     blocked_by_user_id = null,
+    // THE SERVER-RESOLVED SCOPE, normalized by the branch-scope middleware.
+    // It is required: a caller that reaches here without one is refused, so a
+    // missing scope can never read as "no restriction".
+    scope = null,
   }) {
     const connection = await getConnectionAsync(this.db);
     try {
@@ -257,10 +299,26 @@ class AttendanceShiftChangeBlockRepository {
 
       // 1. THE SHARED LOCK, FIRST AND ALWAYS. Until this returns, no shift
       //    change request for this employee can be inserted, because
-      //    `createRequest` takes the same row before its own checks.
-      await queryAsync(connection, SHARED_LOCK_SQL, [employee_id]);
+      //    `createRequest` takes the same row before its own checks. It also
+      //    returns the employee's branch, which step 2 authorizes against.
+      const lockedRows = await queryAsync(connection, SHARED_LOCK_SQL, [employee_id]);
+      const lockedRow = lockedRows && lockedRows.length > 0 ? lockedRows[0] : null;
+      if (!lockedRow) {
+        await rollbackAsync(connection);
+        return { created: false, duplicate: false, missing_employee: true, insert_id: null };
+      }
 
-      // 2. NOW the conflicting-request read is trustworthy: anything the
+      // 2. AUTHORIZE AGAINST THE LOCKED BRANCH. This - not the usecase's
+      //    earlier read - is the authorization boundary: the employee cannot
+      //    be transferred out from under it while the lock is held, so a
+      //    transfer that commits before this point is SEEN here and refuses
+      //    the write. Nothing has been inserted at this stage.
+      if (!lockedRowInScope(scope, lockedRow)) {
+        await rollbackAsync(connection);
+        throw outOfScopeError();
+      }
+
+      // 3. NOW the conflicting-request read is trustworthy: anything the
       //    employee committed is visible, and nothing new can arrive while we
       //    hold the lock. A PENDING request means the approval queue owns this
       //    date; an APPROVED one means it is settled. Either way a block is
@@ -291,7 +349,7 @@ class AttendanceShiftChangeBlockRepository {
         };
       }
 
-      // 3. THE INSERT. The unique key over the generated `active_block`
+      // 4. THE INSERT. The unique key over the generated `active_block`
       //    column remains the backstop for two blocks racing - the lock makes
       //    that case wait rather than collide, but the key is what guarantees
       //    it whatever happens.
@@ -303,7 +361,17 @@ class AttendanceShiftChangeBlockRepository {
              (employee_id, attendance_date, outlet_id, reason,
               blocked_by_employee_id, blocked_by_user_id)
            VALUES (?, ?, ?, ?, ?, ?)`,
-          [employee_id, attendance_date, outlet_id, reason, blocked_by_employee_id, blocked_by_user_id]
+          [
+            employee_id,
+            attendance_date,
+            // THE AUDIT SNAPSHOT IS THE LOCKED, LIVE BRANCH - the very value
+            // the authorization above was decided on. A value passed in by a
+            // caller could disagree with what was actually authorized.
+            lockedRow.store_id === undefined ? null : lockedRow.store_id,
+            reason,
+            blocked_by_employee_id,
+            blocked_by_user_id,
+          ]
         );
       } catch (err) {
         await rollbackAsync(connection);
@@ -326,7 +394,9 @@ class AttendanceShiftChangeBlockRepository {
       } catch (rollbackErr) {
         this._log("CREATE-BLOCK-ROLLBACK", rollbackErr);
       }
-      this._log("CREATE-BLOCK", err);
+      // An out-of-scope refusal is an AUTHORIZATION OUTCOME, not a fault, and
+      // does not belong in the error log beside real failures.
+      if (!err || !err.out_of_scope) this._log("CREATE-BLOCK", err);
       throw err;
     } finally {
       if (connection && typeof connection.release === "function") connection.release();
@@ -336,12 +406,20 @@ class AttendanceShiftChangeBlockRepository {
   /**
    * Remove the ACTIVE block for this employee/date.
    *
-   * `AND removed_at IS NULL` is the whole concurrency story: two simultaneous
-   * removals both run this UPDATE, the first matches one row and the second
-   * matches none, and `affectedRows` says which happened. Neither can
-   * overwrite the other's actor or reason, so the history cannot be corrupted
-   * by a double click - and the row that records the removal is the one that
-   * actually performed it.
+   * TRANSACTIONAL, AND AUTHORIZED UNDER THE SAME LOCK AS `create`. Un-blocking
+   * is as much a change to somebody's eligibility as blocking is, so it gets
+   * the same boundary: a manager must not be able to lift a block after the
+   * employee has moved out of their branch merely because they opened the
+   * report before the transfer.
+   *
+   * ORDER, IDENTICAL TO EVERY OTHER PATH: `new_employee` first, then
+   * `attendance_shift_change_block`. Never the reverse.
+   *
+   * `AND removed_at IS NULL` on the UPDATE remains the concurrency story for
+   * two simultaneous removals: the first matches one row, the second matches
+   * none, and neither can overwrite the other's actor or reason. It is now
+   * inside the lock as well, so the two guarantees compose rather than
+   * competing.
    *
    * IT IS AN UPDATE, NEVER A DELETE. The block stays in the table for ever,
    * now carrying who removed it, when and why.
@@ -352,21 +430,54 @@ class AttendanceShiftChangeBlockRepository {
     removed_by_employee_id = null,
     removed_by_user_id = null,
     removal_reason,
+    scope = null,
   }) {
-    const result = await this._query(
-      "REMOVE-BLOCK",
-      `UPDATE attendance_shift_change_block
-          SET removed_at = CURRENT_TIMESTAMP(3),
-              removed_by_employee_id = ?,
-              removed_by_user_id = ?,
-              removal_reason = ?
-        WHERE employee_id = ?
-          AND attendance_date = ?
-          AND removed_at IS NULL`,
-      [removed_by_employee_id, removed_by_user_id, removal_reason, employee_id, attendance_date]
-    );
-    const affected = result && result.affectedRows !== undefined ? Number(result.affectedRows) : 0;
-    return { removed: affected > 0 };
+    const connection = await getConnectionAsync(this.db);
+    try {
+      await beginTransactionAsync(connection);
+
+      // 1. THE SHARED LOCK, FIRST.
+      const lockedRows = await queryAsync(connection, SHARED_LOCK_SQL, [employee_id]);
+      const lockedRow = lockedRows && lockedRows.length > 0 ? lockedRows[0] : null;
+      if (!lockedRow) {
+        await rollbackAsync(connection);
+        return { removed: false, missing_employee: true };
+      }
+
+      // 2. AUTHORIZE AGAINST THE LOCKED BRANCH, before anything is written.
+      if (!lockedRowInScope(scope, lockedRow)) {
+        await rollbackAsync(connection);
+        throw outOfScopeError();
+      }
+
+      // 3. ONLY NOW the removal itself.
+      const result = await queryAsync(
+        connection,
+        `UPDATE attendance_shift_change_block
+            SET removed_at = CURRENT_TIMESTAMP(3),
+                removed_by_employee_id = ?,
+                removed_by_user_id = ?,
+                removal_reason = ?
+          WHERE employee_id = ?
+            AND attendance_date = ?
+            AND removed_at IS NULL`,
+        [removed_by_employee_id, removed_by_user_id, removal_reason, employee_id, attendance_date]
+      );
+      const affected = result && result.affectedRows !== undefined ? Number(result.affectedRows) : 0;
+
+      await commitAsync(connection);
+      return { removed: affected > 0 };
+    } catch (err) {
+      try {
+        await rollbackAsync(connection);
+      } catch (rollbackErr) {
+        this._log("REMOVE-BLOCK-ROLLBACK", rollbackErr);
+      }
+      if (!err || !err.out_of_scope) this._log("REMOVE-BLOCK", err);
+      throw err;
+    } finally {
+      if (connection && typeof connection.release === "function") connection.release();
+    }
   }
 }
 
