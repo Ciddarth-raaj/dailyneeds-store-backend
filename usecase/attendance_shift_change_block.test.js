@@ -23,6 +23,7 @@ const buildBlock = require("../usecase/attendance_shift_change_block");
 const buildReport = require("../usecase/attendance_shift_change_report");
 const shiftChangeBlock = require("../utils/shift_change_block");
 const { isEmployeeInScope } = require("../utils/employee_branch_scope");
+const { fakeBlockRepo } = require("./shift_change_block_ledger.fake");
 const { EMPLOYEE_BRANCH_SCOPE } = require("../utils/employee_branch_scope");
 
 const TODAY = "2026-09-19";
@@ -145,113 +146,6 @@ const assignment = (employeeId, workShiftId) => ({
 });
 
 /* ----------------------------------------------------------- the fakes */
-
-/**
- * THE LEDGER, WITH THE REAL TABLE'S INVARIANT.
- *
- * `create` refuses a second ACTIVE row for one employee/date exactly as
- * `uq_ascb_active_per_employee_date` does - by returning `{duplicate:true}`
- * rather than throwing - and `remove` matches only a row whose `removed_at` is
- * still null, exactly as the UPDATE's `AND removed_at IS NULL` does. Rows are
- * never dropped, so history accumulates here as it does there.
- *
- * IT ALSO MODELS THE LOCKED BRANCH CHECK. Both writes authorize the scope
- * they are handed against the employee's CURRENT store and stamp that store
- * as the audit snapshot, exactly as the real repository does under the
- * employee row lock. A fake that skipped it would let these tests pass while
- * the authorization boundary was missing - the interleaved proof lives in
- * `repository/attendance_shift_change_block_concurrency.test.js`.
- */
-function fakeBlockRepo(state = {}) {
-  const rows = [];
-  let nextId = 1;
-  const employees = state.employees || [employee(EMPLOYEE)];
-
-  return {
-    rows,
-    getEmployeeForBlock: async (employeeId) =>
-      employees.find((e) => Number(e.employee_id) === Number(employeeId)) || null,
-    findActive: async (employeeId, date) =>
-      rows.find(
-        (r) =>
-          Number(r.employee_id) === Number(employeeId) &&
-          r.attendance_date === date &&
-          !r.removed_at
-      ) || null,
-    listActiveForPopulation: async ({ employee_ids, from_date, to_date }) =>
-      rows.filter(
-        (r) =>
-          employee_ids.map(Number).includes(Number(r.employee_id)) &&
-          r.attendance_date >= from_date &&
-          r.attendance_date <= to_date &&
-          !r.removed_at
-      ),
-    listHistory: async (employeeId, date) =>
-      rows
-        .filter(
-          (r) => Number(r.employee_id) === Number(employeeId) && r.attendance_date === date
-        )
-        .sort((a, b) => b.attendance_shift_change_block_id - a.attendance_shift_change_block_id),
-    create: async (row) => {
-      // THE LOCKED BRANCH CHECK, modelled.
-      const subject = employees.find((e) => Number(e.employee_id) === Number(row.employee_id));
-      if (!subject) return { created: false, duplicate: false, missing_employee: true };
-      if (!isEmployeeInScope(row.scope, subject.store_id)) {
-        const err = new Error("You do not have access to this employee's branch.");
-        err.name = "ForbiddenError";
-        err.code = 403;
-        err.out_of_scope = true;
-        throw err;
-      }
-      // THE UNIQUE KEY, in memory.
-      const clash = rows.find(
-        (r) =>
-          Number(r.employee_id) === Number(row.employee_id) &&
-          r.attendance_date === row.attendance_date &&
-          !r.removed_at
-      );
-      if (clash) return { created: false, duplicate: true, insert_id: null };
-      const id = nextId;
-      nextId += 1;
-      rows.push({
-        attendance_shift_change_block_id: id,
-        ...row,
-        // The audit snapshot is the LIVE store, as the real insert records it.
-        outlet_id: subject.store_id,
-        blocked_at: `${TODAY} 11:00:00`,
-        blocked_by_employee_name: `Employee ${row.blocked_by_employee_id}`,
-        removed_at: null,
-        removed_by_employee_id: null,
-        removed_by_user_id: null,
-        removal_reason: null,
-      });
-      return { created: true, duplicate: false, insert_id: id };
-    },
-    remove: async ({ employee_id, attendance_date, ...rest }) => {
-      const subject = employees.find((e) => Number(e.employee_id) === Number(employee_id));
-      if (!subject) return { removed: false, missing_employee: true };
-      if (!isEmployeeInScope(rest.scope, subject.store_id)) {
-        const err = new Error("You do not have access to this employee's branch.");
-        err.name = "ForbiddenError";
-        err.code = 403;
-        err.out_of_scope = true;
-        throw err;
-      }
-      const active = rows.find(
-        (r) =>
-          Number(r.employee_id) === Number(employee_id) &&
-          r.attendance_date === attendance_date &&
-          !r.removed_at
-      );
-      if (!active) return { removed: false };
-      active.removed_at = `${TODAY} 12:00:00`;
-      active.removed_by_employee_id = rest.removed_by_employee_id;
-      active.removed_by_user_id = rest.removed_by_user_id;
-      active.removal_reason = rest.removal_reason;
-      return { removed: true };
-    },
-  };
-}
 
 function fakeDashboardRepo(state = {}) {
   return {
@@ -940,24 +834,28 @@ describe("H. the shared rule is the only rule", () => {
 /* ===================================================================== */
 
 /**
- * THE WORK SHIFT RULE PROPAGATION FEATURE, AND THIS ONE, IN THE SAME WORLD.
+ * AN EFFECTIVE-DATED ASSIGNMENT CHANGE, OVER A BLOCKED DATE.
  *
- * Propagation landed in production after this feature was written. It changes
- * an employee's EFFECTIVE-DATED shift and recalculates the dates that change
- * moves - including, potentially, a date HR has blocked.
+ * NOT Work Shift rule propagation. Propagation is a Work Shift save that
+ * appends a config version, queues a durable recalculation run and lets the
+ * worker drain it; it writes no `employee_work_shift_assignment` row at all.
+ * That interaction is proven end to end, through the real save path and the
+ * real worker, in
+ * `usecase/shift_change_block_propagation_compatibility.test.js` - this is
+ * not that proof and must not be read as one.
  *
- * The block is a statement about a DATE, not about a shift. Nothing the
- * propagation engine does to the shift history may revive a blocked date:
- * the ledger row is keyed by employee and date and is untouched by a
- * recalculation, so the options endpoint and the authoritative submit path
- * must both still refuse afterwards.
+ * What it does cover is the neighbouring case: somebody moves the employee
+ * onto a different shift with an effective date that lands BEFORE a date HR
+ * has blocked. The block is a statement about a DATE, not about a shift, so
+ * the ledger row must be untouched by the move and both refusing paths must
+ * go on refusing.
  *
  * The assignment array here is the same mutable array the dashboard fake
- * reads on every call, so pushing a row into it is exactly what a committed
- * propagation write looks like to the read side.
+ * reads on every call, so pushing a row into it is what a committed
+ * assignment write looks like to the read side.
  */
-describe("G. compatibility with Work Shift rule propagation", () => {
-  it("1. a propagated shift change over a blocked date leaves the block active and both paths refusing", async () => {
+describe("G. an effective-dated assignment change does not disturb the block", () => {
+  it("1. moving the employee's shift across a blocked date leaves the block active and both paths refusing", async () => {
     const assignments = [assignment(EMPLOYEE, SHORT_SHIFT)];
     const world = build({ assignments });
 
@@ -971,9 +869,8 @@ describe("G. compatibility with Work Shift rule propagation", () => {
 
     await blockIt(world);
 
-    // PROPAGATION RUNS: a new effective-dated assignment lands BEFORE the
-    // blocked date and moves the employee onto a different base shift, which
-    // is what forces that date to be recalculated.
+    // A new effective-dated assignment lands BEFORE the blocked date and
+    // moves the employee onto a different base shift.
     assignments.push({
       employee_work_shift_assignment_id: 99001,
       employee_id: EMPLOYEE,
@@ -985,7 +882,7 @@ describe("G. compatibility with Work Shift rule propagation", () => {
     // THE SHIFT HISTORY REALLY DID CHANGE for the blocked date. Asserting
     // this is what stops the test degenerating into "ran the same thing
     // twice": the base shift the engine resolves for DATE is a different
-    // shift after the propagated row than it was before it.
+    // shift after the new assignment row than it was before it.
     const openBase = openOptions.base && Number(openOptions.base.work_shift_id);
     assert.equal(openBase, SHORT_SHIFT, "the base shift before propagation");
     const probed = await world.regularization.shiftChangeEligibilityFor({
@@ -993,17 +890,17 @@ describe("G. compatibility with Work Shift rule propagation", () => {
       attendance_date: DATE,
       today: TODAY,
     });
-    assert.ok(probed, "the engine still resolves the date after propagation");
+    assert.ok(probed, "the engine still resolves the date after the assignment change");
     assert.equal(
       Number(probed.base && probed.base.work_shift_id),
       LONG_SHIFT,
-      "propagation moved the blocked date onto the other shift"
+      "the assignment moved the blocked date onto the other shift"
     );
 
     // THE BLOCK SURVIVED, unchanged, and is still the active one.
     const active = await world.blockRepo.findActive(EMPLOYEE, DATE);
-    assert.ok(active, "the block is still active after propagation");
-    assert.equal(active.removed_at, null, "propagation did not remove it");
+    assert.ok(active, "the block is still active after the assignment change");
+    assert.equal(active.removed_at, null, "the assignment change did not remove it");
     assert.equal(active.attendance_date, DATE);
 
     // THE OPTIONS ENDPOINT STILL REFUSES, and offers nothing.
@@ -1011,7 +908,7 @@ describe("G. compatibility with Work Shift rule propagation", () => {
       actor: { employee_id: EMPLOYEE },
       attendance_date: DATE,
     });
-    assert.equal(after.can_raise, false, "options still refuse after propagation");
+    assert.equal(after.can_raise, false, "options still refuse after the assignment change");
     assert.equal(after.hr_blocked, true);
     assert.deepEqual(after.options || [], [], "no shift is offered on a blocked date");
 
@@ -1022,7 +919,7 @@ describe("G. compatibility with Work Shift rule propagation", () => {
     assert.equal(world.created.length, before, "no request was written");
   });
 
-  it("2. unblocking after propagation returns the date to whatever the NEW shift history says", async () => {
+  it("2. unblocking afterwards returns the date to whatever the NEW shift history says", async () => {
     const assignments = [assignment(EMPLOYEE, SHORT_SHIFT)];
     const world = build({ assignments });
 
@@ -1038,8 +935,8 @@ describe("G. compatibility with Work Shift rule propagation", () => {
     await unblockIt(world);
 
     // The block is gone - and the verdict now comes from the engine alone,
-    // over the history propagation left behind, not from anything this
-    // feature remembered.
+    // over the history the assignment change left behind, not from anything
+    // this feature remembered.
     assert.equal(await world.blockRepo.findActive(EMPLOYEE, DATE), null);
     const after = await world.regularization.shiftChangeOptions({
       actor: { employee_id: EMPLOYEE },
