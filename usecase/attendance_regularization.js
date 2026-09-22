@@ -16,6 +16,7 @@ const { toDateOnly } = require("../utils/shiftResolution");
 const { EMPLOYEE_BRANCH_SCOPE } = require("../utils/employee_branch_scope");
 const { payrollLockedActionError } = require("../utils/attendance_payroll_lock");
 const shiftChangeEligibility = require("../utils/shift_change_eligibility");
+const shiftChangeBlock = require("../utils/shift_change_block");
 
 /** MySQL's TINYINT(1), a JS boolean and a string "1" all mean the same thing. */
 const tinyBool = (value) => value === true || Number(value) === 1;
@@ -101,7 +102,21 @@ const { MAX_BACKDATE_DAYS, MAX_FORWARD_DAYS } = shiftChangeEligibility;
  * no active mapping yet. With it, `resolveChain` snapshots the mapped approver
  * ids onto the request at creation. ONE chain per request, never a mix.
  */
-module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, approverSetupRepo = null) => {
+module.exports = (
+  attendanceRegularizationRepo,
+  attendanceCalculationUsecase,
+  approverSetupRepo = null,
+  /**
+   * THE HR BLOCK LEDGER, OPTIONAL BY CONSTRUCTION.
+   *
+   * Without it every path behaves exactly as it did before this feature - no
+   * block is ever found, so nothing is ever blocked. That is what lets the
+   * existing suites build this usecase with three arguments and keep passing,
+   * and it means a deployment that has the code but not the table degrades to
+   * the old behaviour rather than to an exception.
+   */
+  shiftChangeBlockRepo = null
+) => {
   /**
    * The two facts about a person the chain needs: which chain their own
    * request follows, and which stages they may decide.
@@ -507,6 +522,23 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
       punch: null,
     });
 
+    /**
+     * THE RACE, LOST. `createRequest` takes the shared employee lock and
+     * re-reads the block inside its own transaction, so it - not the check
+     * above - is what actually guarantees a request and a block cannot both
+     * appear. When it reports one, nothing was inserted and the employee is
+     * told exactly what they would have been told had HR committed a moment
+     * earlier: the same sentence, from the same shared helper.
+     */
+    if (created && created.hr_blocked) {
+      throw validationError(
+        shiftChangeBlock.blockMessage({
+          attendance_date: date,
+          reason: created.block ? created.block.reason : null,
+        })
+      );
+    }
+
     return {
       ...created,
       request_type: REQUEST_TYPE.OT,
@@ -637,6 +669,28 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
     const priorShift = (existing || []).find((r) => r.request_type === REQUEST_TYPE.SHIFT_CHANGE);
     gate({ payroll_locked: locked, existing_request: priorShift || null });
 
+    /**
+     * THE HR BLOCK, ENFORCED HERE AND NOT ONLY ON A SCREEN.
+     *
+     * This is the authoritative gate: the web form, the Telegram Mini App and
+     * a hand-made API call all arrive at this function, so a block that is
+     * only a hidden button is not a block at all.
+     *
+     * IT SITS AFTER THE PAYROLL LOCK AND THE EXISTING-REQUEST CHECK ON
+     * PURPOSE. A locked month and an already-pending request are facts HR
+     * cannot change by blocking, and reporting "HR blocked this date" over
+     * either would hide the reason the date is really closed. The block only
+     * ever speaks when the system would otherwise have said yes - which is
+     * exactly what `effectiveVerdict` encodes, and why the composition lives
+     * in the shared file rather than being spelled out again here.
+     */
+    const activeBlock = await activeBlockFor(employeeId, date);
+    if (shiftChangeBlock.isActive(activeBlock)) {
+      throw validationError(
+        shiftChangeBlock.blockMessage({ attendance_date: date, reason: activeBlock.reason })
+      );
+    }
+
     // The two shifts, resolved through the calculation's own resolver on the
     // configuration version in force for that date.
     const resolved = await attendanceCalculationUsecase.shiftForDate({
@@ -746,6 +800,98 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
   };
 
   /**
+   * THE ACTIVE HR BLOCK for an employee/date, or null when there is none.
+   *
+   * ONE READ, SHARED BY BOTH PATHS, so the dropdown and the submit path can
+   * never disagree about whether a date is blocked. Absent the repository it
+   * answers null, which is the pre-feature behaviour.
+   */
+  const activeBlockFor = async (employeeId, date) => {
+    if (!shiftChangeBlockRepo || typeof shiftChangeBlockRepo.findActive !== "function") return null;
+    return shiftChangeBlockRepo.findActive(employeeId, date);
+  };
+
+  /**
+   * WOULD A SHIFT CHANGE BE ALLOWED FOR THIS EMPLOYEE/DATE, RIGHT NOW?
+   *
+   * A READ-ONLY probe that runs the SAME gates `raiseShiftChangeRequest` runs
+   * and creates nothing. It exists so the HR block screen can re-check the
+   * live system verdict at write time instead of trusting a report row the
+   * browser has been holding - a row that may be minutes old and may have been
+   * overtaken by a payroll close or somebody else's request.
+   *
+   * IT ADDS NO RULE OF ITS OWN. The window, the payroll lock, the existing
+   * request and the longer-shift test are `shift_change_eligibility.decide`
+   * exactly as the submit path applies them; the HR block is composed on top
+   * by `shift_change_block.effectiveVerdict`, never folded into the system
+   * verdict, so both figures stay separately readable.
+   */
+  const shiftChangeEligibilityFor = async ({ employee_id, attendance_date, today = null }) => {
+    const employeeId = Number(employee_id);
+    const date = toDateOnly(attendance_date);
+    if (!Number.isInteger(employeeId) || employeeId <= 0) {
+      throw validationError("employee_id is required and must be an employee id");
+    }
+    if (date === null) throw validationError("attendance_date must be a date as YYYY-MM-DD");
+
+    const businessToday = istToday(today);
+
+    let locked = [];
+    if (typeof attendanceCalculationUsecase.findPayrollLockedPeriods === "function") {
+      locked = await attendanceCalculationUsecase.findPayrollLockedPeriods([
+        { employee_id: employeeId, attendance_date: date },
+      ]);
+    }
+
+    const existing = await attendanceRegularizationRepo.findRequestsForDates(employeeId, [date]);
+    const priorShift = (existing || []).find((r) => r.request_type === REQUEST_TYPE.SHIFT_CHANGE) || null;
+
+    // The base shift and the candidate set, through the SAME options builder
+    // the employee's dropdown uses - so "is there a longer shift" is answered
+    // once, by `hasLongerShiftOption`, and not re-derived here.
+    const offered = await shiftChangeOptions({
+      actor: { employee_id: employeeId },
+      attendance_date: date,
+      // The options call must not apply the block itself here: this probe
+      // reports the SYSTEM verdict and composes the block separately below.
+      skip_block: true,
+    });
+
+    const system = shiftChangeEligibility.decide({
+      attendance_date: date,
+      today: businessToday,
+      payroll_locked: locked,
+      existing_request: priorShift,
+      base_work_shift_id:
+        offered.base && offered.base.work_shift_id !== null && offered.base.work_shift_id !== undefined
+          ? Number(offered.base.work_shift_id)
+          : null,
+      has_longer_option: (offered.options || []).length > 0,
+    });
+
+    const block = await activeBlockFor(employeeId, date);
+    const effective = shiftChangeBlock.effectiveVerdict({
+      system,
+      active_block: block,
+      attendance_date: date,
+    });
+
+    return {
+      employee_id: employeeId,
+      attendance_date: date,
+      system,
+      active_block: block,
+      effective,
+      request_state: priorShift
+        ? priorShift.status
+        : shiftChangeBlock.REQUEST_STATE.NOT_RAISED,
+      request: priorShift,
+      base: offered.base,
+      options: offered.options,
+    };
+  };
+
+  /**
    * The shifts an employee may ASK FOR on a date: active shifts that run that
    * weekday and whose NRM is longer than their own.
    *
@@ -763,17 +909,56 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
    * regularisation they were entitled to. Same helper, same conditions, one
    * place - so the options offered and the request accepted cannot drift.
    */
-  const shiftChangeOptions = async ({ actor, attendance_date }) => {
+  const shiftChangeOptions = async ({ actor, attendance_date, skip_block = false }) => {
     const employeeId = Number(actor && actor.employee_id);
     const date = toDateOnly(attendance_date);
     if (date === null) throw validationError("attendance_date must be a date as YYYY-MM-DD");
+
+    /**
+     * THE BLOCK IS APPLIED HERE TOO, AND FIRST.
+     *
+     * The options endpoint and the submit endpoint must never disagree: a
+     * dropdown that still offers three longer shifts for a date the submit
+     * path will refuse sends an employee round a loop they cannot get out of,
+     * and it is the screen, not the rule, that looks broken.
+     *
+     * So a blocked date returns NO OPTIONS and says why, in the same sentence
+     * the submit path refuses with. `can_raise` is reported on every response
+     * - true or false - so the caller never has to infer the answer from an
+     * empty list, which could equally mean "no longer shift exists".
+     *
+     * `skip_block` is for ONE internal caller - `shiftChangeEligibilityFor`,
+     * which needs the SYSTEM verdict on its own before composing the block on
+     * top. It is not reachable from any route.
+     */
+    if (!skip_block) {
+      const block = await activeBlockFor(employeeId, date);
+      if (shiftChangeBlock.isActive(block)) {
+        return {
+          attendance_date: date,
+          base: null,
+          options: [],
+          can_raise: false,
+          hr_blocked: true,
+          block_reason: block.reason,
+          reason: shiftChangeBlock.blockMessage({ attendance_date: date, reason: block.reason }),
+        };
+      }
+    }
 
     const base = await attendanceCalculationUsecase.shiftForDate({
       employee_id: employeeId,
       attendance_date: date,
     });
     if (base.base.work_shift_id === null) {
-      return { attendance_date: date, base: base.base, options: [] };
+      return {
+        attendance_date: date,
+        base: base.base,
+        options: [],
+        can_raise: false,
+        hr_blocked: false,
+        reason: `You have no work shift assigned for ${date}, so there is no shift to change from`,
+      };
     }
 
     const all = await attendanceCalculationUsecase.listDateShiftOptions();
@@ -811,7 +996,21 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
         nrm_minutes: Number(candidate.nrm_minutes),
       });
     }
-    return { attendance_date: date, base: base.base, options };
+    return {
+      attendance_date: date,
+      base: base.base,
+      options,
+      // Consistent with the submit path: options exist only when a longer
+      // shift exists AND no HR block applies.
+      can_raise: options.length > 0,
+      hr_blocked: false,
+      reason:
+        options.length > 0
+          ? null
+          : shiftChangeEligibility.REASON_TEXT[
+              shiftChangeEligibility.SHIFT_CHANGE_REASON.NO_LONGER_SHIFT
+            ],
+    };
   };
 
   /**
@@ -1549,6 +1748,8 @@ module.exports = (attendanceRegularizationRepo, attendanceCalculationUsecase, ap
     raiseOtRequest,
     raiseShiftChangeRequest,
     shiftChangeOptions,
+    shiftChangeEligibilityFor,
+    activeBlockFor,
     setShiftChangeNotifier,
     MAX_FORWARD_DAYS,
     closeOtForPayrollLock,

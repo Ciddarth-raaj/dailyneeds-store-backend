@@ -7,6 +7,10 @@ const {
   rollbackAsync,
 } = require("../utils/batchInsert");
 const { writeCalculationsOnConnection } = require("./attendance_calculation");
+// THE SHARED SERIALIZATION POINT, imported rather than re-typed: the block
+// path and this one must lock the IDENTICAL row with the IDENTICAL statement,
+// and two copies of a lock serialize nothing.
+const { SHARED_LOCK_SQL } = require("./attendance_shift_change_block");
 
 /**
  * Attendance v2 / A3 - the regularization and OT approval store.
@@ -358,6 +362,54 @@ class AttendanceRegularizationRepository {
     const connection = await getConnectionAsync(this.db);
     try {
       await beginTransactionAsync(connection);
+
+      /**
+       * ============ THE HR BLOCK, CHECKED UNDER THE SHARED LOCK ============
+       *
+       * SHIFT_CHANGE ONLY. Regularization and OT race nothing here and are
+       * deliberately left untouched - they take no lock and read no block.
+       *
+       * The usecase already refused a blocked date before calling this. That
+       * check cannot be the guarantee: between it and this insert, HR may have
+       * committed a block. So the date is re-read HERE, after taking the
+       * employee row with `FOR UPDATE`, which is the same row and the same
+       * statement `attendance_shift_change_block#create` takes before ITS
+       * checks. Whoever wins the lock commits; the loser waits, re-reads, and
+       * sees the other's work.
+       *
+       * LOCK ORDER: `new_employee` first, then the block and request tables.
+       * Both paths, always. Nothing here takes them in the other order.
+       */
+      if (request.request_type === "SHIFT_CHANGE") {
+        await queryAsync(connection, SHARED_LOCK_SQL, [request.requested_for_employee_id]);
+
+        const blocked = await queryAsync(
+          connection,
+          `SELECT attendance_shift_change_block_id, reason,
+                  DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date
+             FROM attendance_shift_change_block
+            WHERE employee_id = ?
+              AND attendance_date = ?
+              AND removed_at IS NULL
+            LIMIT 1`,
+          [request.requested_for_employee_id, request.attendance_date]
+        );
+        if (blocked && blocked.length > 0) {
+          await rollbackAsync(connection);
+          // Handed back as a RESULT, not thrown: the usecase owns the wording
+          // the employee sees, and it is the same sentence whichever path
+          // discovered the block.
+          return {
+            created: false,
+            hr_blocked: true,
+            block: {
+              attendance_shift_change_block_id: blocked[0].attendance_shift_change_block_id,
+              reason: blocked[0].reason,
+              attendance_date: blocked[0].attendance_date,
+            },
+          };
+        }
+      }
 
       // A shift whose policy needs no approval settles the request in the
       // same transaction it is raised in: APPROVED, SETTLED, its one step
