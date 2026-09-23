@@ -187,25 +187,24 @@ describe("A/B. the schedules, in Asia/Kolkata, in the required order", () => {
     );
   });
 
-  it("the morning order is 06:45 DigiSME recovery < 06:55 recalculation < 07:00 Telegram", () => {
-    // Read from the REAL registrations, so moving any one of the three out of
-    // order fails here.
+  it("the morning order is 06:55 recalculation < 07:00 Telegram, and depends on no DigiSME job", () => {
+    // Read from the REAL registrations, so moving either one out of order
+    // fails here. Attendance comes from the direct Biomax receiver; the
+    // recalculation rebuilds recent days from its raw punches and the
+    // Telegram reads the result.
     const scheduleOf = (name) => {
       const m = new RegExp(`register\\(\\s*"${name}",\\s*"([^"]+)"`).exec(code);
       assert.ok(m, `${name} is registered`);
       return m[1];
     };
-    // The earliest firing at or after 06:00, in minutes past midnight.
-    const morningMinute = (expr) => {
-      const [minute, hours] = expr.split(" ");
-      const hour = hours.split(",").map(Number).filter((h) => h >= 6).sort((a, b) => a - b)[0];
-      return hour * 60 + Number(minute);
+    const minuteOf = (expr) => {
+      const [minute, hour] = expr.split(" ").map(Number);
+      return hour * 60 + minute;
     };
-    const recovery = morningMinute(scheduleOf("digisme_attendance_recovery"));
-    const recalculation = morningMinute(scheduleOf("attendance_daily_recalculation"));
-    const telegram = morningMinute(scheduleOf("attendance_missing_telegram"));
-    assert.deepEqual([recovery, recalculation, telegram], [6 * 60 + 45, 6 * 60 + 55, 7 * 60]);
-    assert.ok(recovery < recalculation && recalculation < telegram);
+    const recalculation = minuteOf(scheduleOf("attendance_daily_recalculation"));
+    const telegram = minuteOf(scheduleOf("attendance_missing_telegram"));
+    assert.deepEqual([recalculation, telegram], [6 * 60 + 55, 7 * 60]);
+    assert.ok(recalculation < telegram);
   });
 });
 
