@@ -26,8 +26,15 @@
  *   2. EMPLOYMENT. Joining and resignation, through the one shared rule in
  *      `utils/attendance_eligibility.js`. Somebody exempt from attendance
  *      contributes nothing at all.
- *   3. TODAY. Never a future date. Tomorrow has no punches and calculating it
- *      would store a day nobody has worked yet.
+ *   3. THE CLOSED-DAY RULE. Never a date whose attendance day is still open,
+ *      and so never today or a future date: a stored row for an open day is a
+ *      snapshot of a half-finished day that would later be read back as
+ *      history. Today can never have closed (a date closes at its following
+ *      midnight at the earliest), so the scope ends YESTERDAY at the latest -
+ *      `latestClosableDate`. Whether yesterday itself has closed depends on
+ *      that employee's shift cutoff on that date, which only the calculation
+ *      resolves: `recalculateRange` applies `isDayClosed` per date and
+ *      persists only the closed ones (`utils/attendance_persist_guard.js`).
  *   4. THE PAYROLL LOCK, MONTH BY MONTH. A month is skipped if and only if
  *      THAT employee's payroll for THAT month is approved and locked. It is
  *      NOT inferred from any other month: payroll having settled August says
@@ -45,6 +52,7 @@
 const { toDateOnly } = require("./shiftResolution");
 const eligibility = require("./attendance_eligibility");
 const { V2_CUTOVER_DATE } = require("../constants/attendance_v2");
+const { latestClosableDate } = require("./attendance_persist_guard");
 
 /** `YYYY-MM` of a date. String compare is date compare. */
 const monthOf = (date) => String(date).slice(0, 7);
@@ -125,7 +133,8 @@ function addDaysUtc(date, days) {
  * @param {string[]} overrideDates single-date overrides ONTO this shift
  * @param {string[]} lockedMonths  `YYYY-MM` months payroll has locked for them
  * @param {number} workShiftId
- * @param {string} today
+ * @param {string} today  the IST business date now; the scope ends the day
+ *                         before it (`latestClosableDate`)
  * @returns {{buckets: object[], skipped_locked_months: string[]}}
  */
 function propagationForEmployee({
@@ -138,7 +147,7 @@ function propagationForEmployee({
   today,
   cutover = V2_CUTOVER_DATE,
 }) {
-  const end = toDateOnly(today);
+  const end = latestClosableDate(today);
   if (end === null) return { buckets: [], skipped_locked_months: [] };
 
   const lockedSet = new Set(lockedMonths || []);
@@ -153,8 +162,8 @@ function propagationForEmployee({
       .map((date) => ({ from: date, to: date })),
   ];
 
-  // Clamped to today, to the cutover and to employment - the shared rule,
-  // not a fourth copy of a bound. The payroll lock is applied per MONTH
+  // Clamped to the latest closable date, to the cutover and to employment -
+  // the shared rule, not a fourth copy of a bound. The payroll lock is applied per MONTH
   // below, against this window, so that what it removes is reported as
   // skipped rather than silently vanishing.
   const applicable = [];
@@ -305,16 +314,20 @@ function governsEmployeeMonth({
   today,
   cutover = V2_CUTOVER_DATE,
 }) {
-  const monthEnd = endOfMonth(`${month}-01`);
+  // The day AFTER the month, as "today", so the scope - which ends the day
+  // before today - reaches the month's last day.
+  const nextMonthStart = monthAfter(month);
   const { buckets } = propagationForEmployee({
     employee,
     assignments,
     overrideDates,
     lockedMonths: [],
     workShiftId,
-    // A month that has ENDED is asked about in full. Using today would make
-    // the answer depend on when the approval happens to be run.
-    today: monthEnd > toDateOnly(today) ? monthEnd : toDateOnly(today),
+    // A month is asked about IN FULL, whether or not it has ended. Using
+    // today would make the answer depend on when the approval happens to be
+    // run - and this asks whether the shift GOVERNS the month, not which of
+    // its days are closed yet.
+    today: nextMonthStart > toDateOnly(today) ? nextMonthStart : toDateOnly(today),
     cutover,
   });
   return buckets.some((bucket) => bucket.month === month);

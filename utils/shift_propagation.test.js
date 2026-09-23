@@ -18,6 +18,9 @@ const {
 const SHIFT = 5;
 const OTHER = 6;
 const TODAY = "2026-09-21";
+// The latest date whose attendance day CAN have closed on TODAY. Whether it
+// actually has depends on the cutoff, which `recalculateRange` decides.
+const YESTERDAY = "2026-09-20";
 
 const employee = (overrides = {}) => ({
   attendance_required: 1,
@@ -128,23 +131,36 @@ describe("one employee's share of a rule change", () => {
       ...overrides,
     });
 
-  it("covers the whole open window, from the assignment to today", () => {
+  it("covers the whole open window, from the assignment to the day BEFORE today - today's attendance day is never closed", () => {
     const { buckets } = scopeOf();
     assert.deepEqual(buckets, [
       {
         month: "2026-09",
         from_date: "2026-09-01",
-        to_date: TODAY,
+        to_date: YESTERDAY,
         period_year: 2026,
         period_month: 9,
-        day_count: 21,
+        day_count: 20,
       },
     ]);
   });
 
-  it("never reaches a future date", () => {
+  it("never reaches today or a future date", () => {
     const { buckets } = scopeOf({ today: "2026-09-10" });
-    assert.equal(buckets[0].to_date, "2026-09-10");
+    assert.equal(buckets[0].to_date, "2026-09-09");
+  });
+
+  it("an assignment that starts TODAY has nothing closed to recalculate yet", () => {
+    const { buckets } = scopeOf({ assignments: [assignment(1, SHIFT, TODAY)] });
+    assert.deepEqual(buckets, []);
+  });
+
+  it("a single-date override onto the shift for TODAY is not in scope until the day has closed", () => {
+    const { buckets } = scopeOf({
+      assignments: [assignment(1, OTHER, "2026-09-01")],
+      overrideDates: [TODAY],
+    });
+    assert.deepEqual(buckets, []);
   });
 
   it("stops where the assignment stops", () => {
@@ -173,7 +189,7 @@ describe("one employee's share of a rule change", () => {
     const { buckets, skipped_locked_months } = scopeOf({ lockedMonths: ["2026-09"] });
     assert.deepEqual(buckets, []);
     assert.deepEqual(skipped_locked_months, [
-      { month: "2026-09", from_date: "2026-09-01", to_date: TODAY, day_count: 21, locked_at: null },
+      { month: "2026-09", from_date: "2026-09-01", to_date: YESTERDAY, day_count: 20, locked_at: null },
     ]);
   });
 
@@ -197,7 +213,7 @@ describe("one employee's share of a rule change", () => {
       [
         ["2026-09", "2026-09-01", "2026-09-30"],
         ["2026-10", "2026-10-01", "2026-10-31"],
-        ["2026-11", "2026-11-01", "2026-11-05"],
+        ["2026-11", "2026-11-01", "2026-11-04"],
       ]
     );
   });

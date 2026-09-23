@@ -4,7 +4,8 @@
  * The world these tests run in - the fakes, the queue, the worker tick and
  * the September seed - lives in `work_shift_rule_propagation.harness.js`,
  * shared with the cross-feature compatibility suite so there is one harness
- * and not two. The assertions are unchanged.
+ * and not two. The upper bound is the latest CLOSED attendance date, not
+ * today: see `utils/attendance_persist_guard.js`.
  */
 
 const { describe, it } = require("node:test");
@@ -30,6 +31,10 @@ const {
   saveMinimumOt,
   seedSeptember,
 } = require("./work_shift_rule_propagation.harness");
+
+// The latest date that can have closed on TODAY. The harness shift's cutoff is
+// 04:00, so by the end of TODAY it HAS closed.
+const YESTERDAY = "2026-09-20";
 
 describe("work shift rule propagation", () => {
   it("the regression case: 120 raw OT, minimum 20 -> 100, and the same day becomes 110 when the minimum drops to 10", async () => {
@@ -124,7 +129,7 @@ describe("work shift rule propagation", () => {
     );
   });
 
-  it("the whole open window is covered - from the shift assignment to today, never beyond", async () => {
+  it("the whole open window is covered - from the shift assignment to the latest CLOSED date, never today or beyond", async () => {
     const w = await seedSeptember();
     await saveMinimumOt(w, 10);
     await drainQueue(w);
@@ -132,12 +137,14 @@ describe("work shift rule propagation", () => {
     const alice = w.state.recalculatedRanges.filter((r) => r.employee_id === ALICE);
     assert.equal(alice.length, 1, "one range for September");
     assert.equal(alice[0].from_date, "2026-09-01", "from the assignment, not from the first stored day");
-    assert.equal(alice[0].to_date, TODAY, "to today");
+    assert.equal(alice[0].to_date, YESTERDAY, "to yesterday - today's attendance day has not closed");
     assert.equal(
-      w.state.recalculatedRanges.every((r) => r.to_date <= TODAY),
+      w.state.recalculatedRanges.every((r) => r.to_date < TODAY),
       true,
-      "and never into the future"
+      "and never today or the future"
     );
+    assert.equal(w.state.stored.has(`${ALICE}|${TODAY}`), false, "no row is stored for today");
+    assert.equal(w.state.stored.has(`${ALICE}|${YESTERDAY}`), true, "yesterday closed at 04:00 today and is stored");
   });
 
   it("a LOCKED month is skipped entirely and its days do not move", async () => {
@@ -443,7 +450,7 @@ describe("the run row tells the truth about its own scope", () => {
       "never 3 / 0 - the screen shows completed out of targeted"
     );
     assert.equal(run.from_date, "2026-09-01", "the first open affected date");
-    assert.equal(run.to_date, TODAY, "and the last");
+    assert.equal(run.to_date, YESTERDAY, "and the last date that can have closed - not today");
     assert.equal(run.status, "COMPLETED");
   });
 
@@ -765,5 +772,35 @@ describe("the recalculation queue", () => {
     assert.equal(run.errors.length, 1);
     assert.equal(run.errors[0].employee_id, ALICE);
     assert.equal(run.errors[0].period, "10/2026");
+  });
+});
+
+describe("propagation persists only CLOSED attendance dates (overnight cutoff)", () => {
+  // IST instants. The harness shift closes each date at 04:00 the next morning.
+  const ist = (date, hh, mm = 0) =>
+    Date.parse(`${date}T${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:00+05:30`);
+
+  const runAt = async (now) => {
+    const w = await seedSeptember();
+    w.state.punches.push(...workedDay(41, ALICE, "2026-09-19"), ...workedDay(51, ALICE, YESTERDAY));
+    await saveMinimumOt(w, 10);
+    const ticks = await drainQueue(w, { now });
+    return { w, result: ticks[0].result };
+  };
+
+  it("at 02:00 today, YESTERDAY is still open under its 04:00 cutoff and is NOT stored", async () => {
+    const { w, result } = await runAt(ist(TODAY, 2));
+    assert.equal(w.state.stored.has(`${ALICE}|2026-09-19`), true, "the day before closed and is stored");
+    assert.equal(w.state.stored.has(`${ALICE}|${YESTERDAY}`), false, "yesterday is still open: not persisted");
+    assert.equal(w.state.stored.has(`${ALICE}|${TODAY}`), false, "today never is");
+    assert.ok(result.attendance_days_skipped_open >= 1, "and the skip is reported, not hidden");
+    assert.equal(result.status, "COMPLETED");
+  });
+
+  it("at 04:00 today, yesterday has closed and IS stored", async () => {
+    const { w, result } = await runAt(ist(TODAY, 4));
+    assert.equal(w.state.stored.has(`${ALICE}|${YESTERDAY}`), true);
+    assert.equal(w.state.stored.has(`${ALICE}|${TODAY}`), false);
+    assert.equal(result.attendance_days_skipped_open, 0);
   });
 });

@@ -33,6 +33,8 @@ const {
 const { isDayClosed } = require("../utils/attendance_dashboard");
 const { propagationScope } = require("../utils/shift_propagation");
 const { istToday } = require("../utils/istDate");
+const { partitionClosedDays, endOfIstDay } = require("../utils/attendance_persist_guard");
+const { payrollLockedError } = require("../utils/attendance_payroll_lock");
 
 /**
  * Attendance v2 - the orchestration between the repository and the pure
@@ -362,8 +364,8 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
   /**
    * TODAY, injectable.
    *
-   * The propagation's upper bound is today - nothing future is calculated -
-   * and a test that had to agree with the wall clock would start failing on
+   * The propagation's candidate dates end before today - today's attendance
+   * day is never closed, and only closed dates are persisted - and a test that had to agree with the wall clock would start failing on
    * its own one day. `options.today` may be a `YYYY-MM-DD` string or a
    * function returning one; production passes neither and gets the IST
    * business date.
@@ -373,6 +375,29 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     if (explicit !== null) return explicit;
     const configured = typeof options.today === "function" ? options.today() : options.today;
     return toDateOnly(configured) || istToday();
+  };
+
+  /**
+   * NOW, injectable - the instant the closed-date guard is evaluated at.
+   *
+   * An explicit instant wins; then `options.now` (an epoch, a Date, or a
+   * function returning either); then, for a caller that pinned only a business
+   * DATE (`today` here or `options.today`), the last minute of that IST day -
+   * so a pinned "today" is still open and everything before it whose cutoff
+   * has passed is closed. Production passes none of them and gets the clock.
+   */
+  const nowIs = (override = null, todayOverride = null) => {
+    const asInstant = (value) =>
+      value instanceof Date ? value.getTime() : typeof value === "number" && Number.isFinite(value) ? value : null;
+    const explicit = asInstant(override);
+    if (explicit !== null) return explicit;
+    const configured = asInstant(typeof options.now === "function" ? options.now() : options.now);
+    if (configured !== null) return configured;
+    const pinnedDate =
+      toDateOnly(todayOverride) ||
+      toDateOnly(typeof options.today === "function" ? options.today() : options.today);
+    if (pinnedDate !== null) return endOfIstDay(pinnedDate);
+    return Date.now();
   };
 
   let otRequestService = options.ot_request_service || null;
@@ -1195,8 +1220,19 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    * simply reports it; the day shows "OT Available" and the employee raises
    * the OT request themselves, with a reason (`raiseOtRequest` in the
    * regularization usecase). The old automatic OT queue is gone.
+   *
+   * ONLY CLOSED DATES ARE PERSISTED (`utils/attendance_persist_guard.js`).
+   * The requested window may run into today or the future - a month-to-date
+   * run is the ordinary request - but a date whose attendance day has not
+   * closed under its own shift snapshot and cutoff is calculated, NOT stored,
+   * and reported in `skipped_open_dates` with the reason and the moment it
+   * closes. `days` holds the persisted days only, so nothing reports a date as
+   * processed that was not. An open date stays readable as LIVE_PREVIEW, and
+   * any row it already has is left exactly as it was: skipping is not deleting.
+   * Every path through here obeys it - the single endpoint, each employee of
+   * a bulk run, Work Shift propagation, an assignment change, a punch void.
    */
-  const recalculateRange = async ({ employee_id, from_date, to_date }) => {
+  const recalculateRange = async ({ employee_id, from_date, to_date, now = null }) => {
     const employeeId = Number(employee_id);
     const from = toDateOnly(from_date);
     const to = toDateOnly(to_date);
@@ -1232,13 +1268,33 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
         })
       : null;
 
-    const days = window
+    const calculated = window
       ? await calculateRange({
           employee_id: employeeId,
           from_date: window.from,
           to_date: window.to,
         })
       : [];
+
+    // THE CLOSED-DATE GUARD. Decided per date from the snapshot the day was
+    // calculated under, at one instant for the whole window.
+    const { closed: days, skipped: skippedOpenDates } = partitionClosedDays({
+      days: calculated,
+      now: nowIs(now),
+    });
+
+    // THE PAYROLL LOCK STILL REFUSES WHAT IT REFUSED BEFORE. A date the
+    // guard holds back never reaches the transactional gate, so a request
+    // whose only dates in a locked month are open ones would otherwise
+    // succeed quietly where it used to be refused. Asked here for exactly
+    // those dates; the `FOR UPDATE` gate remains the rule for every row that
+    // IS written.
+    if (skippedOpenDates.length > 0 && attendanceCalculationRepo.findPayrollLockedPeriods) {
+      const locked = await attendanceCalculationRepo.findPayrollLockedPeriods(
+        skippedOpenDates.map((entry) => ({ employee_id: employeeId, attendance_date: entry.attendance_date }))
+      );
+      if (locked && locked.length > 0) throw payrollLockedError(locked);
+    }
 
     // The dates the shared rule excludes, over the REQUESTED window - stated
     // positively, independently of whatever the engine did or did not return.
@@ -1257,6 +1313,9 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       from_date: from,
       to_date: to,
       days,
+      // Eligible dates that were calculated but NOT persisted because their
+      // attendance day has not closed. Each still reads as LIVE_PREVIEW.
+      skipped_open_dates: skippedOpenDates,
       // What the eligibility rule did to the requested window, stated rather
       // than silently applied: an empty result is otherwise indistinguishable
       // from a run that found nothing.
@@ -1395,6 +1454,11 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    *
    * NO OT REQUEST IS CREATED. Candidate OT a recalculation finds is
    * AVAILABLE for the employee to request. No punch is written.
+   *
+   * A RANGE INTO TODAY OR THE FUTURE IS ACCEPTED, and only its CLOSED dates
+   * are stored - see `recalculateRange`. The summary reports the open ones
+   * (`attendance_days_skipped_open`, `open_dates_skipped`), so "through the
+   * 30th" is never read back as "stored through the 30th".
    */
   const MAX_BULK_EMPLOYEES = 2000;
 
@@ -1405,6 +1469,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     store_id = null,
     designation_id = null,
     actor_employee_id = null,
+    now = null,
   }) => {
     const from = toDateOnly(from_date);
     const to = toDateOnly(to_date);
@@ -1492,6 +1557,14 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     let completed = 0;
     let daysProcessed = 0;
     let staleRemoved = 0;
+    // ONE INSTANT FOR THE WHOLE RUN, so two employees on the same shift cannot
+    // get different open/closed answers for one date because the run took a
+    // few seconds. Open and future dates are calculated but not persisted -
+    // see `recalculateRange` - and are counted here rather than passed off
+    // as processed.
+    const runNow = nowIs(now);
+    let daysSkippedOpen = 0;
+    const skippedOpenDates = new Set();
     for (const target of processed) {
       /* eslint-disable no-await-in-loop */
       try {
@@ -1504,10 +1577,15 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
           employee_id: Number(target.employee_id),
           from_date: from,
           to_date: to,
+          now: runNow,
         });
         if (isEligible(target)) completed += 1;
         daysProcessed += Number(result.written) || 0;
         staleRemoved += Number(result.stale_removed) || 0;
+        (result.skipped_open_dates || []).forEach((entry) => {
+          daysSkippedOpen += 1;
+          skippedOpenDates.add(entry.attendance_date);
+        });
       } catch (err) {
         errors.push({
           employee_id: Number(target.employee_id),
@@ -1548,6 +1626,12 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       // Reported, never silent: a run that removed rows has to say so, and
       // the employees it removed them for have to be nameable afterwards.
       stale_rows_removed: staleRemoved,
+      // Employee-days in the requested range whose attendance day had not
+      // closed when the run started: calculated, NOT stored, still read live.
+      // `open_dates_skipped` is the distinct dates, so "through the 30th" is
+      // never mistaken for "stored through the 30th".
+      attendance_days_skipped_open: daysSkippedOpen,
+      open_dates_skipped: [...skippedOpenDates].sort(),
       employees_reconciled: processed.length,
       employees_excluded: excluded.length,
       excluded,
@@ -1568,8 +1652,9 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    *
    * WHAT IS IN SCOPE is decided from the DATED FACTS by
    * `utils/shift_propagation.js` - the assignment history, the single-date
-   * overrides, the employment bounds, today, and the payroll floor - never
-   * from which days happen to have a stored row already.
+   * overrides, the employment bounds, the latest date that can have closed,
+   * and the payroll floor - never from which days happen to have a stored row
+   * already. It persists only CLOSED dates, exactly as a manual run does.
    *
    * IT DUPLICATES NO ARITHMETIC. Every (employee, month) is handed to
    * `recalculateRange`, the same path the Recalculate button runs.
@@ -1594,6 +1679,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     run_id = null,
     queued_at = null,
     today = null,
+    now = null,
     onProgress = null,
   }) => {
     const workShiftId = Number(work_shift_id);
@@ -1693,6 +1779,13 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       skipped_locked.map((entry) => `${entry.employee_id}|${entry.month}`)
     );
 
+    // THE SAME CLOSED-DATE RULE AS A MANUAL RUN. The scope already ends the
+    // day before today (today is never closed); whether that last day - or
+    // any other - has closed under its own cutoff is decided per date by
+    // `recalculateRange`, at one instant for the whole run.
+    const runNow = nowIs(now, today);
+    let daysSkippedOpen = 0;
+
     for (const item of work) {
       /* eslint-disable no-await-in-loop */
       try {
@@ -1700,7 +1793,9 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
           employee_id: item.employee_id,
           from_date: item.from_date,
           to_date: item.to_date,
+          now: runNow,
         });
+        daysSkippedOpen += (result.skipped_open_dates || []).length;
         daysRecalculated += Number(result.written) || 0;
         monthsRecalculated += 1;
         succeededMonths.set(item.employee_id, (succeededMonths.get(item.employee_id) || 0) + 1);
@@ -1764,6 +1859,9 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       employee_months_recalculated: monthsRecalculated,
       attendance_days_recalculated: daysRecalculated,
       attendance_days_skipped_locked: skippedLockedDays,
+      // Dates in scope whose attendance day had not closed yet (an overnight
+      // cutoff can hold yesterday open): not persisted, still read live.
+      attendance_days_skipped_open: daysSkippedOpen,
       months_skipped_locked: skippedLockedMonths.size,
       errors,
     };
@@ -1787,7 +1885,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    * would only reach the cron's console.
    */
   let workerBusy = false;
-  const processQueuedRecalculations = async ({ today = null } = {}) => {
+  const processQueuedRecalculations = async ({ today = null, now = null } = {}) => {
     if (workerBusy) return { skipped: "in_progress" };
     if (!attendanceCalculationRepo.claimNextQueuedRun) return { skipped: "not_supported" };
     workerBusy = true;
@@ -1821,6 +1919,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
           run_id: runId,
           queued_at: run.queued_at || null,
           today,
+          now,
           onProgress: () => attendanceCalculationRepo.heartbeatRecalculationRun(runId),
         });
         return { recovered, claimed: runId, result };
@@ -1945,7 +2044,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    * a question v2 does not answer, so the month is priced on one rate and the
    * choice is stated here rather than buried.
    */
-  const calculateMonth = async ({ employee_id, year, month, persist = false }) => {
+  const calculateMonth = async ({ employee_id, year, month, persist = false, now = null }) => {
     const y = Number(year);
     const m = Number(month);
     if (!Number.isInteger(y) || !Number.isInteger(m) || m < 1 || m > 12) {
@@ -1992,6 +2091,15 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     };
 
     if (persist) {
+      // THE CLOSED-DATE GUARD, as for every general recalculation: a month
+      // persisted mid-month stores its closed days only. The open and future
+      // ones are reported, and keep reading live until they close and are
+      // recalculated. The monthly roll-up is stored exactly as before - it
+      // is the month's figure as of now, and was never final while any of
+      // its days were open.
+      const { closed, skipped } = partitionClosedDays({ days, now: nowIs(now) });
+      result.skipped_open_dates = skipped;
+
       // ONE CALL, ONE TRANSACTION, ONE LOCK. The day rows and the monthly
       // roll-up are the same act of persistence: they used to be two calls,
       // and a month could be approved between them or left half written when
@@ -2001,7 +2109,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
         employee_id,
         period_year: y,
         period_month: m,
-        rows: days.map(toStorageRow),
+        rows: closed.map(toStorageRow),
         monthly: {
           employee_id,
           period_year: y,

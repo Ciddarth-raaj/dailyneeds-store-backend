@@ -537,8 +537,9 @@ function world({ lockedMonths = [] } = {}) {
     return { outcome: "APPROVED" };
   };
 
-  // TODAY IS PINNED. The propagation never reaches a future date, so a test
-  // that agreed with the wall clock would start failing on its own one day.
+  // TODAY IS PINNED. The propagation never reaches a date that has not
+  // closed, so a test that agreed with the wall clock would start failing on
+  // its own one day.
   const calculation = buildCalculation(calculationRepo, { today: TODAY });
   const workShift = buildWorkShift(workShiftRepo);
 
@@ -552,11 +553,13 @@ function world({ lockedMonths = [] } = {}) {
  * want the result therefore tick it explicitly, which is also what proves the
  * save itself does none of the work.
  */
-const drainQueue = async (w, { ticks = 5, today = TODAY } = {}) => {
+const drainQueue = async (w, { ticks = 5, today = TODAY, now = null } = {}) => {
   const results = [];
   for (let i = 0; i < ticks; i += 1) {
     /* eslint-disable no-await-in-loop */
-    const tick = await w.calculation.processQueuedRecalculations({ today });
+    // `now` pins the INSTANT the closed-date guard is evaluated at; left
+    // null, it is the last minute of `today`.
+    const tick = await w.calculation.processQueuedRecalculations({ today, now });
     /* eslint-enable no-await-in-loop */
     results.push(tick);
     if (!tick.claimed) break;

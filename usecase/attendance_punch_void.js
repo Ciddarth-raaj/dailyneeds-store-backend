@@ -168,6 +168,10 @@ module.exports = (punchVoidRepo, attendanceCalculationUsecase, attendanceRegular
     let recalculated = false;
     let recalculationError = null;
     let day = null;
+    // A date whose attendance day has not closed yet is not stored by a
+    // recalculation (`utils/attendance_persist_guard.js`); it already reads
+    // live, void included, and is stored by a recalculation after it closes.
+    let stillOpen = false;
     try {
       const result = await attendanceCalculationUsecase.recalculateRange({
         employee_id: employeeId,
@@ -176,6 +180,10 @@ module.exports = (punchVoidRepo, attendanceCalculationUsecase, attendanceRegular
       });
       recalculated = true;
       day = result && Array.isArray(result.days) ? result.days[0] || null : null;
+      stillOpen =
+        !!result &&
+        Array.isArray(result.skipped_open_dates) &&
+        result.skipped_open_dates.some((entry) => entry.attendance_date === attendanceDate);
     } catch (err) {
       recalculationError = err && err.message ? err.message : String(err);
     }
@@ -196,7 +204,10 @@ module.exports = (punchVoidRepo, attendanceCalculationUsecase, attendanceRegular
       recalculated,
       recalculation_error: recalculationError,
       day,
-      msg: recalculated
+      attendance_day_open: stillOpen,
+      msg: recalculated && stillOpen
+        ? `Punch voided. ${attendanceDate} is still open, so it is shown live and is stored by the next recalculation after the day closes`
+        : recalculated
         ? `Punch voided and ${attendanceDate} recalculated`
         : `Punch voided, but ${attendanceDate} could NOT be recalculated: ${recalculationError}. Run Recalculate Attendance for this employee and date.`,
     };

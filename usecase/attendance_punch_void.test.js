@@ -68,6 +68,15 @@ function fakeCalculation(state = {}) {
     recalculateRange: async (args) => {
       calls.recalculated.push(args);
       if (state.recalcThrows) throw new Error(state.recalcThrows);
+      if (state.dayOpen) {
+        // The closed-date guard: an open date is calculated, not stored.
+        return {
+          ...args,
+          written: 0,
+          days: [],
+          skipped_open_dates: [{ attendance_date: args.from_date, reason: "DAY_OPEN", closes_at: null }],
+        };
+      }
       return { ...args, written: 1, days: [{ attendance_date: args.from_date, punch_count: 2, status: "FINAL" }] };
     },
   };
@@ -237,6 +246,16 @@ describe("a successful void", () => {
     assert.equal(result.recalculation_error, null);
     assert.equal(result.day.attendance_date, "2026-09-14");
     assert.match(result.msg, /voided and 2026-09-14 recalculated/);
+  });
+
+  it("a void on a date whose attendance day is still OPEN says so: it reads live and is not stored yet", async () => {
+    const { usecase } = wire({ calc: { dayOpen: true } });
+    const result = await usecase.voidPunch({ biomax_punch_id: 1001, reason: "Duplicate device punch", actor: ACTOR });
+    assert.equal(result.code, 200);
+    assert.equal(result.recalculated, true);
+    assert.equal(result.attendance_day_open, true);
+    assert.equal(result.day, null);
+    assert.match(result.msg, /2026-09-14 is still open, so it is shown live/);
   });
 
   it("if the recalculation fails AFTER the void is stored, the answer does not lie: void saved, recalculated false, the error named", async () => {
