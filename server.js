@@ -2321,9 +2321,9 @@ class Server {
     // the next poll and today never needs the recovery job. A tick arriving
     // while the previous run is still in flight is skipped, not queued.
     /**
-     * DAILY AUTOMATIC ATTENDANCE RECALCULATION - 06:45 IST, today-3..yesterday.
+     * DAILY AUTOMATIC ATTENDANCE RECALCULATION - 06:50 IST, today-3..yesterday.
      *
-     * "45 6 * * *" in `CRON_TIMEZONE` (Asia/Kolkata). Re-runs the last three
+     * "50 6 * * *" in `CRON_TIMEZONE` (Asia/Kolkata). Re-runs the last three
      * days through the Recalculate Attendance screen's own path, so a punch
      * that arrived after its date was already stored (a delayed Biomax upload,
      * a DigiSME recovery import) is picked up by the next morning's run.
@@ -2335,8 +2335,15 @@ class Server {
      * table can only say MANUAL or WORK_SHIFT_SAVE) and is audited in
      * `api_sync_log` as `attendance_daily_recalculation`, source `cron`.
      *
-     * It runs BEFORE the 07:00 Missing Attendance Telegram below, so that job
-     * reads yesterday from refreshed attendance. The job never throws and
+     * THE MORNING ORDER IS DELIBERATE:
+     *   06:45  DigiSME attendance recovery (below) imports late punches for
+     *          today-3..yesterday
+     *   06:50  this recalculation - AFTER that import, never concurrently
+     *          with it, so it stores the punches the recovery just brought in
+     *   07:00  Missing Attendance Telegram - reads yesterday from the
+     *          refreshed attendance
+     * `usecase/attendance_daily_recalculation.test.js` fails if the three
+     * schedules stop being in that order. The job never throws and
      * does not overlap itself; a failure is logged and the 07:00 job is a
      * separate registration that runs regardless.
      */
@@ -2345,7 +2352,7 @@ class Server {
       apiSyncLogger: this.apiSyncLogger,
       logger,
     });
-    this.cronService.register("attendance_daily_recalculation", "45 6 * * *", async () => {
+    this.cronService.register("attendance_daily_recalculation", "50 6 * * *", async () => {
       await this.attendanceDailyRecalculation.run();
     });
 
@@ -2353,7 +2360,7 @@ class Server {
      * MISSING ATTENDANCE ALERTS - 07:00 IST, yesterday only.
      *
      * "0 7 * * *" in `CRON_TIMEZONE`, which `services/cron_service.js` pins
-     * to Asia/Kolkata. It runs fifteen minutes AFTER the 06:45 daily
+     * to Asia/Kolkata. It runs ten minutes AFTER the 06:50 daily
      * attendance recalculation, so yesterday's candidates are computed from
      * the refreshed stored attendance. The job asks the SHARED rule for yesterday's Missing
      * Attendance (`usecase/attendance_missing.js#getTelegramCandidates` - the

@@ -1,5 +1,5 @@
 /**
- * THE DAILY 06:45 AUTOMATIC ATTENDANCE RECALCULATION, and the 07:00 Missing
+ * THE DAILY 06:50 AUTOMATIC ATTENDANCE RECALCULATION, and the 07:00 Missing
  * Attendance Telegram that must run after it.
  *
  *   node --test usecase/attendance_daily_recalculation.test.js
@@ -27,7 +27,7 @@ const ist = (date, hh, mm = 0) =>
   Date.parse(`${date}T${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:00+05:30`);
 
 const DAY = 7; // 09:30-18:30, cutoff 04:00 next morning
-const OVERNIGHT = 8; // 22:00-07:00, cutoff 09:00 next morning - still OPEN at 06:45
+const OVERNIGHT = 8; // 22:00-07:00, cutoff 09:00 next morning - still OPEN at 06:50
 const weekly = (id, inTime, outTime, cutoff) =>
   Array.from({ length: 7 }, (_, d) => ({
     work_shift_weekly_schedule_id: id * 10 + d,
@@ -146,8 +146,8 @@ describe("A/B. the schedules, in Asia/Kolkata, in the required order", () => {
   const server = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
   const code = server.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 
-  it("A. the daily recalculation is registered at 06:45", () => {
-    assert.match(code, /register\(\s*"attendance_daily_recalculation",\s*"45 6 \* \* \*"/);
+  it("A. the daily recalculation is registered at 06:50", () => {
+    assert.match(code, /register\(\s*"attendance_daily_recalculation",\s*"50 6 \* \* \*"/);
     assert.match(code, /this\.attendanceDailyRecalculation\.run\(\)/);
   });
 
@@ -171,7 +171,7 @@ describe("A/B. the schedules, in Asia/Kolkata, in the required order", () => {
     console.log = () => {};
     try {
       const service = new CronService();
-      service.register("attendance_daily_recalculation", "45 6 * * *", async () => {});
+      service.register("attendance_daily_recalculation", "50 6 * * *", async () => {});
       service.register("attendance_missing_telegram", "0 7 * * *", async () => {});
       service.start();
     } finally {
@@ -181,18 +181,31 @@ describe("A/B. the schedules, in Asia/Kolkata, in the required order", () => {
     assert.deepEqual(
       scheduled.map((s) => [s.expr, s.opts.timezone]),
       [
-        ["45 6 * * *", "Asia/Kolkata"],
+        ["50 6 * * *", "Asia/Kolkata"],
         ["0 7 * * *", "Asia/Kolkata"],
       ]
     );
   });
 
-  it("the recalculation (06:45) is ordered before the Telegram (07:00)", () => {
-    const minuteOf = (expr) => {
-      const [m, h] = expr.split(" ").map(Number);
-      return h * 60 + m;
+  it("the morning order is 06:45 DigiSME recovery < 06:50 recalculation < 07:00 Telegram", () => {
+    // Read from the REAL registrations, so moving any one of the three out of
+    // order fails here.
+    const scheduleOf = (name) => {
+      const m = new RegExp(`register\\(\\s*"${name}",\\s*"([^"]+)"`).exec(code);
+      assert.ok(m, `${name} is registered`);
+      return m[1];
     };
-    assert.ok(minuteOf("45 6 * * *") < minuteOf("0 7 * * *"));
+    // The earliest firing at or after 06:00, in minutes past midnight.
+    const morningMinute = (expr) => {
+      const [minute, hours] = expr.split(" ");
+      const hour = hours.split(",").map(Number).filter((h) => h >= 6).sort((a, b) => a - b)[0];
+      return hour * 60 + Number(minute);
+    };
+    const recovery = morningMinute(scheduleOf("digisme_attendance_recovery"));
+    const recalculation = morningMinute(scheduleOf("attendance_daily_recalculation"));
+    const telegram = morningMinute(scheduleOf("attendance_missing_telegram"));
+    assert.deepEqual([recovery, recalculation, telegram], [6 * 60 + 45, 6 * 60 + 50, 7 * 60]);
+    assert.ok(recovery < recalculation && recalculation < telegram);
   });
 });
 
@@ -203,7 +216,7 @@ describe("C. the rolling window is today-3 through yesterday", () => {
     assert.deepEqual(dailyRecalculationWindow("2026-09-24"), { from_date: "2026-09-21", to_date: "2026-09-23" });
   });
 
-  it("the 06:45 run on 2026-09-24 asks recalculateBulk for exactly that range, as a SYSTEM run", async () => {
+  it("the 06:50 run on 2026-09-24 asks recalculateBulk for exactly that range, as a SYSTEM run", async () => {
     const calls = [];
     const fake = {
       recalculateBulk: async (args) => {
@@ -211,11 +224,11 @@ describe("C. the rolling window is today-3 through yesterday", () => {
         return { status: "COMPLETED", errors: [], employees_targeted: 219, attendance_days_processed: 657 };
       },
     };
-    const { daily, audit } = job(fake, ist("2026-09-24", 6, 45));
+    const { daily, audit } = job(fake, ist("2026-09-24", 6, 50));
     const summary = await daily.run();
     assert.deepEqual(
       calls.map(({ from_date, to_date, actor_employee_id, record_run, now }) => ({ from_date, to_date, actor_employee_id, record_run, now })),
-      [{ from_date: "2026-09-21", to_date: "2026-09-23", actor_employee_id: null, record_run: false, now: ist("2026-09-24", 6, 45) }]
+      [{ from_date: "2026-09-21", to_date: "2026-09-23", actor_employee_id: null, record_run: false, now: ist("2026-09-24", 6, 50) }]
     );
     assert.equal(summary.trigger, "DAILY_AUTO");
     assert.equal(summary.status, "COMPLETED");
@@ -241,7 +254,7 @@ describe("C. the rolling window is today-3 through yesterday", () => {
 
   it("writes NO attendance_recalculation_run row - it is not a manual run", async () => {
     const c = company({ rawPunches: [punch(1, 1952, "2026-09-22 09:30:00"), punch(2, 1952, "2026-09-22 18:30:00")] });
-    const { daily } = job(buildCalculation(c.repo), ist("2026-09-24", 6, 45));
+    const { daily } = job(buildCalculation(c.repo), ist("2026-09-24", 6, 50));
     await daily.run();
     assert.equal(c.runRows.length, 0);
   });
@@ -250,7 +263,7 @@ describe("C. the rolling window is today-3 through yesterday", () => {
 /* ================================================================ D / E */
 
 describe("D/E. the closed-date guard stays authoritative", () => {
-  it("D. yesterday still open under an overnight cutoff (09:00) is skipped at 06:45; E. closed dates are stored", async () => {
+  it("D. yesterday still open under an overnight cutoff (09:00) is skipped at 06:50; E. closed dates are stored", async () => {
     const c = company({
       employees: { 1952: DAY, 2001: OVERNIGHT },
       rawPunches: [
@@ -258,7 +271,7 @@ describe("D/E. the closed-date guard stays authoritative", () => {
         punch(3, 2001, "2026-09-23 22:00:00"), punch(4, 2001, "2026-09-24 06:30:00"),
       ],
     });
-    const { daily } = job(buildCalculation(c.repo), ist("2026-09-24", 6, 45));
+    const { daily } = job(buildCalculation(c.repo), ist("2026-09-24", 6, 50));
     const summary = await daily.run();
 
     assert.ok(c.row(1952, "2026-09-23"), "E. the day shift's 23rd closed at 04:00 and is stored");
@@ -270,7 +283,7 @@ describe("D/E. the closed-date guard stays authoritative", () => {
     assert.equal(summary.status, "COMPLETED", "an open date is a skip, not an error");
 
     // The next morning's window still contains the 23rd, and it has closed.
-    const next = job(buildCalculation(c.repo), ist("2026-09-25", 6, 45));
+    const next = job(buildCalculation(c.repo), ist("2026-09-25", 6, 50));
     await next.daily.run();
     assert.equal(c.row(2001, "2026-09-23").punch_count, 2, "picked up by the following run");
   });
@@ -289,7 +302,7 @@ describe("F. payroll-locked dates remain unchanged", () => {
         punch(4, 1952, "2026-10-01 09:30:00"), punch(5, 1952, "2026-10-01 18:30:00"),
       ],
     });
-    const { daily, audit } = job(buildCalculation(c.repo), ist("2026-10-02", 6, 45));
+    const { daily, audit } = job(buildCalculation(c.repo), ist("2026-10-02", 6, 50));
     const summary = await daily.run();
 
     assert.deepEqual(c.row(1952, "2026-09-30"), settled, "the locked row is exactly as it was");
@@ -311,14 +324,14 @@ describe("G. a late punch for 22-Sep is repaired by the next morning's run", () 
     });
     const calculation = buildCalculation(c.repo);
 
-    await job(calculation, ist("2026-09-23", 6, 45)).daily.run(); // window 20..22
+    await job(calculation, ist("2026-09-23", 6, 50)).daily.run(); // window 20..22
     assert.equal(c.row(1952, D).punch_count, 3, "first stored calculation");
 
     c.raw.push(punch(12592, 1952, `${D} 18:32:17`)); // the delayed LIVE punch
     const [stale] = await calculation.readRange({ employee_id: 1952, from_date: D, to_date: D, now: ist("2026-09-23", 12) });
     assert.equal(stale.punch_count, 3, "until the next run the stored row still wins (known, accepted window)");
 
-    await job(calculation, ist("2026-09-24", 6, 45)).daily.run(); // window 21..23
+    await job(calculation, ist("2026-09-24", 6, 50)).daily.run(); // window 21..23
     assert.equal(c.row(1952, D).punch_count, 4);
     const [read] = await calculation.readRange({ employee_id: 1952, from_date: D, to_date: D, now: ist("2026-09-24", 7) });
     assert.equal(read.calculation_source, CALCULATION_SOURCE.STORED);
@@ -341,7 +354,7 @@ describe("H. the job never overlaps itself", () => {
         });
       },
     };
-    const { daily, lines, audit } = job(fake, ist("2026-09-24", 6, 45));
+    const { daily, lines, audit } = job(fake, ist("2026-09-24", 6, 50));
     const first = daily.run();
     await new Promise((r) => setImmediate(r));
     assert.equal(daily.isRunning(), true);
@@ -369,7 +382,7 @@ describe("H. the job never overlaps itself", () => {
 describe("I. a failure is logged and never stops the 07:00 Telegram", () => {
   it("a throwing recalculation resolves to a FAILED summary, is logged and audited, and does not throw", async () => {
     const fake = { recalculateBulk: async () => { throw new Error("ER_LOCK_WAIT_TIMEOUT"); } };
-    const { daily, audit, errors } = job(fake, ist("2026-09-24", 6, 45));
+    const { daily, audit, errors } = job(fake, ist("2026-09-24", 6, 50));
     const summary = await daily.run();
     assert.equal(summary.status, "FAILED");
     assert.equal(summary.message, "ER_LOCK_WAIT_TIMEOUT");
@@ -389,7 +402,7 @@ describe("I. a failure is logged and never stops the 07:00 Telegram", () => {
         attendance_days_processed: 3,
       }),
     };
-    const { daily, audit, errors } = job(fake, ist("2026-09-24", 6, 45));
+    const { daily, audit, errors } = job(fake, ist("2026-09-24", 6, 50));
     const summary = await daily.run();
     assert.equal(summary.status, "COMPLETED_WITH_ERRORS");
     assert.equal(summary.employees_failed, 1);
@@ -397,7 +410,7 @@ describe("I. a failure is logged and never stops the 07:00 Telegram", () => {
     assert.equal(errors[0].code, "CRON.ATTENDANCE_DAILY_RECALCULATION.EMPLOYEE_ERRORS");
   });
 
-  it("the two are separate cron registrations: a failing 06:45 job does not prevent the 07:00 one from firing", async () => {
+  it("the two are separate cron registrations: a failing 06:50 job does not prevent the 07:00 one from firing", async () => {
     const CronService = require("../services/cron_service");
     const nodeCron = require("node-cron");
     const original = nodeCron.schedule;
@@ -416,10 +429,10 @@ describe("I. a failure is logged and never stops the 07:00 Telegram", () => {
       const service = new CronService();
       // Even a daily job that DID throw (it does not - see above) is caught by
       // the cron wrapper and cannot affect another registration.
-      service.register("attendance_daily_recalculation", "45 6 * * *", async () => { throw new Error("boom"); });
+      service.register("attendance_daily_recalculation", "50 6 * * *", async () => { throw new Error("boom"); });
       service.register("attendance_missing_telegram", "0 7 * * *", async () => { telegramRan = true; });
       service.start();
-      scheduled.get("45 6 * * *")();
+      scheduled.get("50 6 * * *")();
       await new Promise((r) => setImmediate(r));
       scheduled.get("0 7 * * *")();
       await new Promise((r) => setImmediate(r));
@@ -429,6 +442,6 @@ describe("I. a failure is logged and never stops the 07:00 Telegram", () => {
       console.error = errLog;
     }
     assert.equal(telegramRan, true);
-    assert.equal(cronErrors.length, 1, "the 06:45 failure was logged by the wrapper, not thrown");
+    assert.equal(cronErrors.length, 1, "the 06:50 failure was logged by the wrapper, not thrown");
   });
 });

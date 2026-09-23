@@ -47,7 +47,7 @@ const API_SYNC_TYPES = [
     label: "DigiSME Attendance Recovery",
     match: "/attendance/digisme/recovery",
   },
-  // The DAILY 06:45 automatic attendance recalculation
+  // The DAILY 06:50 automatic attendance recalculation
   // (usecase/attendance_daily_recalculation.js). Like the DigiSME entries,
   // `match` is a path no route exposes: the job is cron-only and writes its
   // own `api_sync_log` row (source 'cron', no employee), and this entry is

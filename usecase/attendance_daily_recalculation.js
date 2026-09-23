@@ -1,5 +1,5 @@
 /**
- * THE DAILY AUTOMATIC ATTENDANCE RECALCULATION - 06:45 IST, today-3..yesterday.
+ * THE DAILY AUTOMATIC ATTENDANCE RECALCULATION - 06:50 IST, today-3..yesterday.
  *
  * ================================================================ WHY ======
  *
@@ -12,7 +12,11 @@
  * ever. This job re-runs the last three closed-or-closing days every morning,
  * so such a punch is picked up by the next morning's run:
  *
- *   2026-09-24 06:45  ->  2026-09-21 .. 2026-09-23
+ *   2026-09-24 06:50  ->  2026-09-21 .. 2026-09-23
+ *
+ * 06:50, NOT 06:45: the DigiSME recovery job imports late punches for the same
+ * three days at 06:45, and this must run after it rather than concurrently
+ * with it. The 07:00 Missing Attendance Telegram then reads the result.
  *
  * ========================================================= WHAT IT IS ======
  *
