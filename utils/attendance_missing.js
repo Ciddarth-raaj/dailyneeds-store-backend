@@ -21,7 +21,7 @@
  *                                 gets REPORTED and CHASED.
  *
  * WHY A MODULE AND NOT A `WHERE` CLAUSE IN A REPORT. Two consumers exist from
- * day one - the Missing Attendance Report a human opens, and the 06:00
+ * day one - the Missing Attendance Report a human opens, and the 07:00
  * Telegram job that messages the employee - and the whole point of the
  * feature is that they name the SAME people. A rule written twice is a rule
  * that disagrees with itself the first time either copy is edited, and the
@@ -103,7 +103,7 @@ function latestReportableDate(today) {
   return on === null ? null : addDays(on, -1);
 }
 
-/** The date this feature means by "yesterday" - the 06:00 job's whole window. */
+/** The date this feature means by "yesterday" - the 07:00 job's whole window. */
 const yesterdayOf = latestReportableDate;
 
 /** Condition 2 alone: has this attendance date completed? */

@@ -4,7 +4,7 @@
  * ============================================ WHY THIS FILE IS THE ONLY ONE =
  *
  * Two things consume Missing Attendance: the report a manager opens, and the
- * 06:00 job that messages each employee privately on Telegram. They MUST name
+ * 07:00 job that messages each employee privately on Telegram. They MUST name
  * the same people, so there is exactly one place the population is built -
  * `findMissingAttendance` below - and both consumers call it:
  *
@@ -328,7 +328,7 @@ module.exports = (attendanceMissingRepo, attendanceDashboardUsecase, options = {
    * ===================== THE TELEGRAM CANDIDATES ===========================
    *
    * YESTERDAY, EVERY BRANCH, THE SAME RULE. This function adds no predicate:
-   * it pins the window to the one date the 06:00 job is about and calls the
+   * it pins the window to the one date the 07:00 job is about and calls the
    * same builder the report calls. Whatever the report would show for
    * yesterday is exactly who is messaged.
    *

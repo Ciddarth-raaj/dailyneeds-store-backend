@@ -15,7 +15,7 @@ const { PUNCH_SOURCE } = require("../utils/attendance_engine");
  * They were, while this screen still reported MISSING PUNCH for the previous
  * attendance date behind a pair of gates. It no longer reports it at all: a
  * completed-day attendance exception belongs to the Missing Attendance Report,
- * which owns the verdict, shows it and chases it at 06:00. An unused import of
+ * which owns the verdict, shows it and chases it at 07:00. An unused import of
  * a day-verdict helper is an invitation to gate one back in, so there is none -
  * this file has no access to a settled day verdict, and the only thing it can
  * say about an attendance day is what is live on it.
@@ -1341,7 +1341,7 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
      * carry MISSING PUNCH for the previous attendance date, and that is what
      * made the screen confusing: an odd punch count on a finished day is a
      * COMPLETED-DAY ATTENDANCE EXCEPTION, worked from the MISSING ATTENDANCE
-     * REPORT, which exists for exactly that and chases it by Telegram at 06:00.
+     * REPORT, which exists for exactly that and chases it by Telegram at 07:00.
      * Putting the same item on a live staffing board mixed two workflows in one
      * list, and no amount of labelling the date fixed that - the reader still
      * has to decide, row by row, which job they are doing.

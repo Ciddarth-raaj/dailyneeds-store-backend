@@ -276,7 +276,7 @@ function dayIssueKey(day) {
  * `day_closed` answers "can this attendance date still take punches", which is
  * a per-employee question about a cutoff. "Is this day finished" is a
  * different and blunter one, and `utils/attendance_missing.js` already owns
- * the answer the Missing Attendance Report and the 06:00 Telegram job both
+ * the answer the Missing Attendance Report and the 07:00 Telegram job both
  * use: strictly before today's IST business date. That rule cannot be
  * imported here - `attendance_missing` depends on this module's neighbours and
  * a cycle would be worse than the two lines below - so it is applied by the

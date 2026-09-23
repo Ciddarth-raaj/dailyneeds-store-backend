@@ -8,7 +8,7 @@
  *
  *   which dates are missing   `usecase/attendance_missing.js`
  *                             #findMissingAttendance - the SAME builder the
- *                             Missing Attendance report and the 06:00
+ *                             Missing Attendance report and the 07:00
  *                             Telegram job use. The odd-punch test, the
  *                             zero-punch exclusion, the eligibility test and
  *                             the "today is never reportable" clamp are all
@@ -176,7 +176,7 @@ module.exports = ({
       to_date: w.to,
       today: w.today,
       // The employee is pinned here and comes from the session. `store_ids`
-      // is null for the same reason the 06:00 job passes null: there is no
+      // is null for the same reason the 07:00 job passes null: there is no
       // branch decision to make when somebody is reading their OWN dates.
       store_ids: null,
       department_id: null,

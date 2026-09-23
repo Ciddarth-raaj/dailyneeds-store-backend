@@ -1,6 +1,6 @@
 # Telegram Attendance Mini App — regularising a missing punch from Telegram
 
-The 06:00 Missing Attendance alert carries a **Regularise Attendance** button.
+The 07:00 Missing Attendance alert carries a **Regularise Attendance** button.
 Tapping it opens a Telegram Mini App with two sections:
 
 * **My Attendance** (the default) — the employee's own calculated month,
@@ -103,7 +103,7 @@ the same type. There is still exactly one `getUpdates` owner, no webhook, and
 | `<base>?section=attendance` | My Attendance |
 | `<base>?section=corrections` | Corrections |
 | `<base>?section=help` | Help |
-| `<base>?section=corrections&date=YYYY-MM-DD` | Corrections, that date highlighted (the 06:00 alert) |
+| `<base>?section=corrections&date=YYYY-MM-DD` | Corrections, that date highlighted (the 07:00 alert) |
 | `<base>?date=YYYY-MM-DD` | Corrections, that date highlighted (**legacy** alert buttons already sent) |
 
 The rule, in precedence order: an explicit **recognised** `section` wins
@@ -138,7 +138,7 @@ is an exact `req.path` lookup, which is why the date is a query parameter.
 ## What is reused, and what is not rebuilt
 
 * **who is missing** — `usecase/attendance_missing.js#findMissingAttendance`,
-  the same builder the Missing Attendance report and the 06:00 job use. The
+  the same builder the Missing Attendance report and the 07:00 job use. The
   odd-punch test, the zero-punch exclusion, the eligibility test and the
   "today is never reportable" clamp are `utils/attendance_missing.js`.
   Nothing in the Mini App counts punches.

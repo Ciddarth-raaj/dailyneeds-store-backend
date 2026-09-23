@@ -19,7 +19,7 @@ const { JOINED_ON } = require("../utils/joining_date");
  *                            carrying the dated facts so the shared
  *                            eligibility rule can decide PER DATE in memory.
  *   the notification table   `attendance_missing_notification`, which exists
- *                            so the 06:00 Telegram job cannot message the
+ *                            so the 07:00 Telegram job cannot message the
  *                            same person twice about the same date.
  *
  * NO `SELECT *`. Every column is named. Every date leaves as TEXT through

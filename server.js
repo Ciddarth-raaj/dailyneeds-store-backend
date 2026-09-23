@@ -274,7 +274,7 @@ class Server {
       this.mysql.connection
     );
     // Missing Attendance: the report's OWN two reads - the candidate
-    // population, and the notification ledger the 06:00 Telegram job claims
+    // population, and the notification ledger the 07:00 Telegram job claims
     // against. It reads NO attendance table: punches, dated shifts, stored
     // calculations and approvals all come from the dashboard repository
     // above, which is what keeps the report agreeing with the screens.
@@ -774,7 +774,7 @@ class Server {
       this.attendanceDashboardRepo,
       this.attendanceDashboardUsecase
     );
-    // MISSING ATTENDANCE - one rule, two consumers. The report and the 06:00
+    // MISSING ATTENDANCE - one rule, two consumers. The report and the 07:00
     // Telegram job both call this usecase; neither has a population of its
     // own. It reuses the dashboard usecase's batched reads and day
     // computation verbatim, so "punch count" means the same thing here as on
@@ -2321,10 +2321,41 @@ class Server {
     // the next poll and today never needs the recovery job. A tick arriving
     // while the previous run is still in flight is skipped, not queued.
     /**
-     * MISSING ATTENDANCE ALERTS - 06:00 IST, yesterday only.
+     * DAILY AUTOMATIC ATTENDANCE RECALCULATION - 06:45 IST, today-3..yesterday.
      *
-     * "0 6 * * *" in `CRON_TIMEZONE`, which `services/cron_service.js` pins
-     * to Asia/Kolkata. The job asks the SHARED rule for yesterday's Missing
+     * "45 6 * * *" in `CRON_TIMEZONE` (Asia/Kolkata). Re-runs the last three
+     * days through the Recalculate Attendance screen's own path, so a punch
+     * that arrived after its date was already stored (a delayed Biomax upload,
+     * a DigiSME recovery import) is picked up by the next morning's run.
+     * Only CLOSED dates are stored and payroll-locked months are refused, by
+     * the same rules as a manual run - see
+     * `usecase/attendance_daily_recalculation.js`.
+     *
+     * SYSTEM-INITIATED: it writes no `attendance_recalculation_run` row (that
+     * table can only say MANUAL or WORK_SHIFT_SAVE) and is audited in
+     * `api_sync_log` as `attendance_daily_recalculation`, source `cron`.
+     *
+     * It runs BEFORE the 07:00 Missing Attendance Telegram below, so that job
+     * reads yesterday from refreshed attendance. The job never throws and
+     * does not overlap itself; a failure is logged and the 07:00 job is a
+     * separate registration that runs regardless.
+     */
+    this.attendanceDailyRecalculation = require("./usecase/attendance_daily_recalculation")({
+      calculation: this.attendanceCalculationUsecase,
+      apiSyncLogger: this.apiSyncLogger,
+      logger,
+    });
+    this.cronService.register("attendance_daily_recalculation", "45 6 * * *", async () => {
+      await this.attendanceDailyRecalculation.run();
+    });
+
+    /**
+     * MISSING ATTENDANCE ALERTS - 07:00 IST, yesterday only.
+     *
+     * "0 7 * * *" in `CRON_TIMEZONE`, which `services/cron_service.js` pins
+     * to Asia/Kolkata. It runs fifteen minutes AFTER the 06:45 daily
+     * attendance recalculation, so yesterday's candidates are computed from
+     * the refreshed stored attendance. The job asks the SHARED rule for yesterday's Missing
      * Attendance (`usecase/attendance_missing.js#getTelegramCandidates` - the
      * report's own builder with the window pinned) and messages each employee
      * privately. It never computes a population of its own, so it cannot
@@ -2333,7 +2364,7 @@ class Server {
      * OFF BY DEFAULT, AND DELIBERATELY. `ATTENDANCE_MISSING_TELEGRAM_ENABLED`
      * must be set to "true" before a single message is sent. The feature is
      * complete and tested, but the first run messages every employee who
-     * missed a punch yesterday, on their personal Telegram, at six in the
+     * missed a punch yesterday, on their personal Telegram, at seven in the
      * morning - that is an operational decision for a person to make on a
      * chosen day, not something a deploy should start doing by itself. With
      * the flag unset the job is registered, logs that it is disabled, and
@@ -2348,7 +2379,7 @@ class Server {
      * wrapper below catches anything that escapes so a cron tick can never
      * take the process down.
      */
-    this.cronService.register("attendance_missing_telegram", "0 6 * * *", async () => {
+    this.cronService.register("attendance_missing_telegram", "0 7 * * *", async () => {
       if (String(process.env.ATTENDANCE_MISSING_TELEGRAM_ENABLED || "").toLowerCase() !== "true") {
         console.log(
           "[CRON] attendance_missing_telegram — ATTENDANCE_MISSING_TELEGRAM_ENABLED is not 'true'; nothing sent"

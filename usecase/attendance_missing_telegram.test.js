@@ -1,5 +1,5 @@
 /**
- * THE 06:00 MISSING ATTENDANCE ALERT.
+ * THE 07:00 MISSING ATTENDANCE ALERT.
  *
  *   node --test usecase/attendance_missing_telegram.test.js
  *

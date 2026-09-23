@@ -550,7 +550,7 @@ describe("time parsing", () => {
  * `day_closed` answers a per-employee question about a cutoff: can this
  * attendance date still take punches. "Is this day finished" is blunter, and
  * `utils/attendance_missing.js` already owns the answer that the Missing
- * Attendance Report and the 06:00 Telegram job both use - strictly before
+ * Attendance Report and the 07:00 Telegram job both use - strictly before
  * today's IST business date. Asserted here against that module's own helper,
  * so the two cannot drift apart unnoticed.
  */

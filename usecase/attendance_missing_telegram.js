@@ -1,5 +1,5 @@
 /**
- * THE 06:00 MISSING ATTENDANCE ALERT - one private message per employee per
+ * THE 07:00 MISSING ATTENDANCE ALERT - one private message per employee per
  * attendance date, for yesterday only.
  *
  * ============================================== WHAT DECIDES WHO IS MESSAGED

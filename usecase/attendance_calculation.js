@@ -1509,6 +1509,12 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     designation_id = null,
     actor_employee_id = null,
     now = null,
+    // INTERNAL, never a route field. `false` for a SYSTEM-initiated run (the
+    // daily 06:45 recalculation): it writes no `attendance_recalculation_run`
+    // row, because that table can only say MANUAL or WORK_SHIFT_SAVE and a
+    // scheduled run is neither - it would read as a manual run nobody asked
+    // for. That caller records its own outcome in `api_sync_log` instead.
+    record_run = true,
   }) => {
     const from = toDateOnly(from_date);
     const to = toDateOnly(to_date);
@@ -1580,7 +1586,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       );
     }
 
-    const runId = attendanceCalculationRepo.insertRecalculationRun
+    const runId = record_run && attendanceCalculationRepo.insertRecalculationRun
       ? await attendanceCalculationRepo.insertRecalculationRun({
           requested_by_employee_id: actor_employee_id,
           from_date: from,
@@ -1630,6 +1636,10 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
           employee_id: Number(target.employee_id),
           employee_name: target.employee_name || null,
           message: err && err.message ? err.message : String(err),
+          // The machine-readable reason, when there is one - so a caller can
+          // tell a payroll-locked refusal (the lock doing its job) from a
+          // failure.
+          ...(err && err.code ? { code: err.code } : {}),
         });
       }
       /* eslint-enable no-await-in-loop */

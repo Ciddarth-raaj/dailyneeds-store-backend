@@ -4,7 +4,7 @@
  * ============================================ WHY THIS FILE EXISTS =========
  *
  * Three features now open the Telegram Attendance Mini App - the bot's home
- * menu, the 06:00 Regularise Attendance alert, and the menu shown the moment
+ * menu, the 07:00 Regularise Attendance alert, and the menu shown the moment
  * an employee finishes Telegram verification. Three hand-built template
  * strings would drift: one would forget to strip a trailing slash, one would
  * encode a parameter differently, and - the failure that actually matters -
