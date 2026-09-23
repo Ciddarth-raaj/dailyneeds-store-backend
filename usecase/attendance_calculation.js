@@ -400,6 +400,25 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     return Date.now();
   };
 
+  /**
+   * IS THIS CALCULATED DAY'S ATTENDANCE DAY CLOSED? The one question every
+   * writer of `attendance_day_calculation` asks before it stores a day.
+   *
+   * `day` is a day `calculateRange` returned - it carries the shift snapshot
+   * it was calculated under, which is what decides the cutoff. The answer is
+   * `utils/attendance_persist_guard.js`'s, at this usecase's clock (or the
+   * instant / pinned business date the caller passes), so a regularization,
+   * an approval and a shift edit decide "open" exactly as a recalculation
+   * does. `{ closed, reason, closes_at }`; reason/closes_at are null when
+   * closed.
+   */
+  const attendanceDayState = (day, { now = null, today = null } = {}) => {
+    const { closed, skipped } = partitionClosedDays({ days: day ? [day] : [], now: nowIs(now, today) });
+    if (closed.length === 1) return { closed: true, reason: null, closes_at: null };
+    const entry = skipped[0] || { reason: "DAY_OPEN", closes_at: null };
+    return { closed: false, reason: entry.reason, closes_at: entry.closes_at };
+  };
+
   let otRequestService = options.ot_request_service || null;
   const setOtRequestService = (service) => {
     otRequestService = service || null;
@@ -1341,7 +1360,9 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    * The day is calculated under the new shift BEFORE anything is written, and
    * the override row and the recalculated day are then stored in ONE
    * transaction, so the shift can never be changed with the stored attendance
-   * left showing the old one.
+   * left showing the old one. An OPEN or FUTURE date stores the override
+   * alone - see below - because a day row written before the attendance day
+   * closes would later be read back as that date's settled history.
    *
    * IDEMPOTENT. If the date already resolves to the requested shift - a retry
    * of a save that committed, or a no-op edit - no second override row is
@@ -1349,7 +1370,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    * upsert a recalculation performs. Every appended row is the audit line:
    * employee, date, the shift before, the shift after, who, when.
    */
-  const setDateShift = async ({ employee_id, attendance_date, work_shift_id, actor_employee_id }) => {
+  const setDateShift = async ({ employee_id, attendance_date, work_shift_id, actor_employee_id, now = null }) => {
     const employeeId = Number(employee_id);
     if (!Number.isInteger(employeeId) || employeeId <= 0) {
       throw validationError("employee_id is required and must be an employee id");
@@ -1390,6 +1411,16 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       );
     }
 
+    // THE OVERRIDE IS A DECISION; THE DAY ROW IS A CALCULATION. The edit is
+    // allowed for any date the screen shows - today and a future roster date
+    // included - but a day row is stored only once that date's attendance
+    // day has CLOSED (under the NEW shift's cutoff, which is the one the day
+    // will be calculated under). Until then the override alone is saved, the
+    // date reads LIVE_PREVIEW under the new shift, and the first ordinary
+    // recalculation after it closes stores it.
+    const dayState = attendanceDayState(after, { now });
+    const rows = dayState.closed ? [toStorageRow(after)] : [];
+
     const changed = previousShiftId !== workShiftId;
     let stored;
     if (changed) {
@@ -1401,10 +1432,12 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
           previous_work_shift_id: previousShiftId,
           changed_by: actor_employee_id === undefined ? null : actor_employee_id,
         },
-        rows: [toStorageRow(after)],
+        rows,
       });
+    } else if (rows.length > 0) {
+      stored = await attendanceCalculationRepo.saveCalculations(rows);
     } else {
-      stored = await attendanceCalculationRepo.saveCalculations([toStorageRow(after)]);
+      stored = { written: 0 };
     }
 
     return {
@@ -1420,6 +1453,12 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
           ? stored.attendance_date_shift_override_id
           : null,
       day: after,
+      // Was the recalculated day stored? False while the date is still open:
+      // `attendance_deferred` then says why and when it closes.
+      attendance_persisted: rows.length > 0,
+      attendance_deferred: dayState.closed
+        ? null
+        : { reason: dayState.reason, closes_at: dayState.closes_at },
     };
   };
 
@@ -2260,6 +2299,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     listRecalculationRuns,
     setDateShift,
     shiftForDate,
+    attendanceDayState,
     findPayrollLockedPeriods,
     findPayrollLockedPeriodsBulk,
     listDateShiftOptions,

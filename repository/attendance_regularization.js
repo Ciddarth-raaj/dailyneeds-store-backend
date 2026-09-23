@@ -6,7 +6,10 @@ const {
   commitAsync,
   rollbackAsync,
 } = require("../utils/batchInsert");
-const { writeCalculationsOnConnection } = require("./attendance_calculation");
+const {
+  writeCalculationsOnConnection,
+  assertMonthsNotPayrollLocked,
+} = require("./attendance_calculation");
 // THE SHARED SERIALIZATION POINT, imported rather than re-typed: the block
 // path and this one must lock the IDENTICAL row with the IDENTICAL statement,
 // and two copies of a lock serialize nothing.
@@ -37,6 +40,27 @@ const { SHARED_LOCK_SQL } = require("./attendance_shift_change_block");
  * afterwards, which left a window in which a request was APPROVED - and its OT
  * therefore payable - while the stored day still said otherwise. There is now
  * no such window: if the day cannot be stored, the approval does not happen.
+ *
+ * ...UNLESS THE ATTENDANCE DAY IS STILL OPEN. A day row written before the
+ * date's attendance day closes is a snapshot of a half-finished day, and once
+ * the date closes every read returns it as settled history
+ * (`utils/attendance_persist_guard.js`). So the invariant is now two
+ * sentences, and the usecase decides which applies from the date's own shift
+ * snapshot and cutoff:
+ *
+ *   CLOSED date   decision (+ override) + the recalculated day, ONE commit -
+ *                 exactly as before.
+ *   OPEN date     decision (+ override) ONE commit, and NO day row. The date
+ *                 has no stored row to be stale against: it reads
+ *                 LIVE_PREVIEW from the committed decision, and the first
+ *                 ordinary recalculation after it closes stores it. That is a
+ *                 complete, successful write - `calculations` is simply empty -
+ *                 and the payroll lock is still taken on the date
+ *                 (`attendanceLock`), so a locked month refuses it as before.
+ *
+ * Only a SHIFT_CHANGE may be FINALLY approved while its date is open, and
+ * intermediate stages and rejections of any type may be decided; the usecase
+ * refuses final settlement of a regularization or of OT until the day closes.
  */
 
 class AttendanceRegularizationRepository {
@@ -552,6 +576,9 @@ class AttendanceRegularizationRepository {
    * invariant is legible in the data and not only in this comment. It reaches
    * SETTLED in the same commit as APPROVED; a request that is APPROVED but not
    * SETTLED cannot exist, and payroll treats anything else as not yet final.
+   * SETTLED means the DECISION is final and effective - the resolver and the
+   * punch query read it - not that a day row was written: on an open date
+   * there is none yet, by design (see the file header).
    */
   async decideStage({
     requestId,
@@ -564,6 +591,11 @@ class AttendanceRegularizationRepository {
     calculations = null,
     decisionSource = "WEB",
     shiftOverride = null,
+    // `{ employee_id, attendance_date }` - the date this decision is about.
+    // Gated for the payroll lock whether or not a day row is written with it:
+    // on an OPEN date `calculations` is deliberately empty, and the decision
+    // (and any override) must still be refused in a locked month.
+    attendanceLock = null,
   }) {
     const connection = await getConnectionAsync(this.db);
     try {
@@ -632,6 +664,12 @@ class AttendanceRegularizationRepository {
       // than after the commit is the same invariant the recalculated day
       // already has: there is no ordering in which the request reads APPROVED
       // while the date still resolves to the old shift.
+      if (attendanceLock && attendanceLock.employee_id && attendanceLock.attendance_date) {
+        await assertMonthsNotPayrollLocked(connection, [
+          { employee_id: attendanceLock.employee_id, attendance_date: attendanceLock.attendance_date },
+        ]);
+      }
+
       let overrideId = null;
       if (shiftOverride) {
         const insertedOverride = await queryAsync(
@@ -656,7 +694,9 @@ class AttendanceRegularizationRepository {
       }
 
       // The day the decision produced, stored before the commit. If this
-      // throws, the catch below rolls the decision back with it.
+      // throws, the catch below rolls the decision back with it. EMPTY on a
+      // date whose attendance day is still open: the decision commits alone,
+      // by design, and the date is stored once it closes.
       const stored = await writeCalculationsOnConnection(connection, calculations || []);
 
       await commitAsync(connection);

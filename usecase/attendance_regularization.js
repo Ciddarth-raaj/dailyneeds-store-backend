@@ -17,6 +17,7 @@ const { EMPLOYEE_BRANCH_SCOPE } = require("../utils/employee_branch_scope");
 const { payrollLockedActionError } = require("../utils/attendance_payroll_lock");
 const shiftChangeEligibility = require("../utils/shift_change_eligibility");
 const shiftChangeBlock = require("../utils/shift_change_block");
+const { partitionClosedDays, endOfIstDay } = require("../utils/attendance_persist_guard");
 
 /** MySQL's TINYINT(1), a JS boolean and a string "1" all mean the same thing. */
 const tinyBool = (value) => value === true || Number(value) === 1;
@@ -77,6 +78,17 @@ const { istToday } = require("../utils/istDate");
  * transaction and hands the rows to the repository, which writes them inside
  * it. A storage failure rolls the decision back; there is no window in which a
  * request is APPROVED while the stored day is still the one from before it.
+ *
+ * NO DAY ROW IS WRITTEN FOR AN ATTENDANCE DAY THAT HAS NOT CLOSED
+ * (`utils/attendance_persist_guard.js`, the same rule recalculation obeys).
+ * What that means per path:
+ *   - a regularization on a shift that needs no approval is auto-approved
+ *     only once the day has closed; before that the raise is refused;
+ *   - OT can be requested, and any regularization or OT finally approved,
+ *     only once the day has closed; earlier stages and rejections are fine;
+ *   - a SHIFT_CHANGE may be finally approved for an open or future date: the
+ *     approval and its override commit, with no day row, and the date reads
+ *     live under the approved shift until it closes and is recalculated.
  */
 
 function validationError(message) {
@@ -117,6 +129,37 @@ module.exports = (
    */
   shiftChangeBlockRepo = null
 ) => {
+  /**
+   * HAS THIS DAY'S ATTENDANCE DAY CLOSED? Asked before anything here settles a
+   * decision into a stored `attendance_day_calculation` row.
+   *
+   * The calculation usecase answers it - the same `utils/attendance_persist_guard.js`
+   * rule, at the same clock, that decides whether a recalculation may store a
+   * date - so there is ONE definition of an open day. A collaborator that
+   * predates that method (older fakes) is answered by the same guard directly:
+   * the given instant, else the last minute of a pinned business date, else
+   * the clock.
+   */
+  const dayStateOf = (day, { now = null, today = null } = {}) => {
+    if (typeof attendanceCalculationUsecase.attendanceDayState === "function") {
+      return attendanceCalculationUsecase.attendanceDayState(day, { now, today });
+    }
+    const instant =
+      typeof now === "number" ? now : now instanceof Date ? now.getTime() : today ? endOfIstDay(today) : Date.now();
+    const { closed, skipped } = partitionClosedDays({ days: day ? [day] : [], now: instant });
+    if (closed.length === 1) return { closed: true, reason: null, closes_at: null };
+    const entry = skipped[0] || { reason: "DAY_OPEN", closes_at: null };
+    return { closed: false, reason: entry.reason, closes_at: entry.closes_at };
+  };
+
+  /** The refusal every "not until the day closes" rule answers with. */
+  const dayOpenError = (message) => {
+    const err = validationError(message);
+    err.code = "ATTENDANCE_DAY_OPEN";
+    return err;
+  };
+  const closesPhrase = (state) => (state && state.closes_at ? ` (it closes at ${state.closes_at})` : "");
+
   /**
    * The two facts about a person the chain needs: which chain their own
    * request follows, and which stages they may decide.
@@ -220,6 +263,8 @@ module.exports = (
     attendance_date,
     reason,
     punch_time = null,
+    today = null,
+    now = null,
   }) => {
     const date = toDateOnly(attendance_date);
     if (date === null) throw validationError("attendance_date must be a date as YYYY-MM-DD");
@@ -347,6 +392,20 @@ module.exports = (
     // same transaction, exactly as a final approval would store it.
     let auto_approve = null;
     if (!requiresApproval) {
+      // AN AUTO-APPROVAL IS A FINAL SETTLEMENT, so it waits for the day to
+      // close. On an open day an odd punch count is not yet a MISSING punch -
+      // the employee may simply not have punched out - and settling it now
+      // would store a half-finished day that later reads as history. Refused,
+      // with nothing written; the day keeps reading live, and the same request
+      // succeeds once the attendance day has closed.
+      const dayState = dayStateOf(day, { now, today });
+      if (!dayState.closed) {
+        throw dayOpenError(
+          `${date} is still open${closesPhrase(dayState)}. This work shift auto-approves regularizations, ` +
+            "so a missing punch can be regularized once the attendance day has closed - until then the day " +
+            "is shown live and a punch that arrives will still count."
+        );
+      }
       chain = [{ stage_no: 1, approver_role: APPROVER_ROLE.ADMIN, outlet_id: null }];
       chain_source = "SHIFT_POLICY_NO_APPROVAL";
       const [correctedDay] = await attendanceCalculationUsecase.calculateRange({
@@ -419,7 +478,7 @@ module.exports = (
    * claim per date - a fresh claim after rejection is not a policy this
    * invents); the date is in the future or older than the backdate window.
    */
-  const raiseOtRequest = async ({ actor, attendance_date, reason, today = null }) => {
+  const raiseOtRequest = async ({ actor, attendance_date, reason, today = null, now = null }) => {
     const employeeId = Number(actor && actor.employee_id);
     if (!Number.isInteger(employeeId) || employeeId <= 0) {
       throw validationError("An employee identity is required to request OT");
@@ -470,6 +529,16 @@ module.exports = (
     });
     if (!day || !day.shift_snapshot) {
       throw validationError(`${date} has no work shift resolved, so there is no overtime to request`);
+    }
+    // NOT BEFORE THE DAY CLOSES. `date <= today` is not enough: today, and
+    // under an overnight cutoff yesterday, can still be taking punches, and a
+    // day that looks FINAL with an even punch count at 18:00 can gain two more
+    // before its cutoff. Overtime is claimed against the finished day.
+    const dayState = dayStateOf(day, { now, today });
+    if (!dayState.closed) {
+      throw dayOpenError(
+        `${date}'s attendance day is still open${closesPhrase(dayState)}, so its overtime cannot be requested yet`
+      );
     }
     if (day.is_final !== true || day.status !== CALC_STATUS.FINAL || day.punch_count % 2 === 1) {
       throw validationError(
@@ -1031,7 +1100,7 @@ module.exports = (
    * whose day has not been recalculated. The recalculation is idempotent, so a
    * retried approval cannot double anything.
    */
-  const decide = async ({ actor, request_id, decision, remarks = null, source = "WEB" }) => {
+  const decide = async ({ actor, request_id, decision, remarks = null, source = "WEB", now = null }) => {
     if (decision !== STEP_DECISION.APPROVED && decision !== STEP_DECISION.REJECTED) {
       throw validationError("decision must be APPROVED or REJECTED");
     }
@@ -1193,6 +1262,37 @@ module.exports = (
       },
     });
 
+    /*
+     * THE DECISION AND THE DAY ROW ARE TWO THINGS, and only a CLOSED day gets
+     * the second. Decided against the day as this decision produces it - for
+     * an approved SHIFT_CHANGE that is the requested shift's snapshot and
+     * cutoff, which is the one the date will be calculated under.
+     *
+     *   closed      decision + day row, one commit, exactly as before.
+     *   open        a SHIFT_CHANGE may be finally approved: the approval and
+     *               its override commit, the date reads LIVE_PREVIEW under the
+     *               approved shift, and it is stored by the first ordinary
+     *               recalculation after it closes. Any type's intermediate
+     *               stage, and any rejection, is recorded the same way - a
+     *               decision with no day row.
+     *               A REGULARIZATION or OT final approval is REFUSED: it is
+     *               the final settlement of a day that is not finished, and it
+     *               can be given once the day closes.
+     */
+    const dayState = dayStateOf(
+      correctedDay || { attendance_date: request.attendance_date, shift_snapshot: null },
+      { now }
+    );
+    if (!dayState.closed && next.status === REQUEST_STATUS.APPROVED && !isShiftRequest) {
+      throw dayOpenError(
+        `${request.attendance_date}'s attendance day is still open${closesPhrase(dayState)}. ` +
+          (carriesOt ? "Overtime" : "A regularization") +
+          " can be finally approved once the day has closed; the request stays pending until then."
+      );
+    }
+    const calculations =
+      dayState.closed && correctedDay ? [attendanceCalculationUsecase.toStorageRow(correctedDay)] : [];
+
     const saved = await attendanceRegularizationRepo.decideStage({
       requestId: Number(request_id),
       stageNo: Number(step.stage_no),
@@ -1201,7 +1301,13 @@ module.exports = (
       remarks,
       adminOverride: verdict.as_admin_override,
       next: { ...next, approved_ot_minutes: approvedOt },
-      calculations: correctedDay ? [attendanceCalculationUsecase.toStorageRow(correctedDay)] : [],
+      calculations,
+      // The payroll lock, taken on the date whether or not a day row goes
+      // with the decision.
+      attendanceLock: {
+        employee_id: request.requested_for_employee_id,
+        attendance_date: request.attendance_date,
+      },
       decisionSource: source === "TELEGRAM" ? "TELEGRAM" : "WEB",
       // THE APPROVED SHIFT BECOMES EFFECTIVE HERE AND NOWHERE ELSE, in the
       // same transaction as the decision and the recalculated day. It is an
@@ -1241,6 +1347,13 @@ module.exports = (
           ? null
           : saved.attendance_date_shift_override_id,
       recalculated: correctedDay || null,
+      // Was that day STORED with the decision? False while the attendance day
+      // is still open - it then reads live from the committed decision, and
+      // `attendance_deferred` says until when.
+      attendance_persisted: calculations.length > 0,
+      attendance_deferred: dayState.closed
+        ? null
+        : { reason: dayState.reason, closes_at: dayState.closes_at },
       // Attendance approval corrects attendance only. If the corrected day now
       // earns overtime, it is merely AVAILABLE - the employee claims it.
       ot_now_available:

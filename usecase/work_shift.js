@@ -16,8 +16,9 @@ function recalculationMessage(propagationRunId) {
   if (!propagationRunId) return "Shift updated.";
   return (
     `Shift updated. Attendance recalculation queued (run #${propagationRunId}): ` +
-    "every open attendance day on this shift will be recalculated under the new rule, " +
-    "and payroll-locked months are skipped."
+    "every finished attendance day on this shift in an open payroll month will be recalculated " +
+    "and stored under the new rule. Days still in progress are shown live under the new rule and " +
+    "are stored by the next recalculation after they close. Payroll-locked months are skipped."
   );
 }
 

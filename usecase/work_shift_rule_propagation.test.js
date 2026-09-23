@@ -104,8 +104,10 @@ describe("work shift rule propagation", () => {
     assert.equal(result.config_version.propagation_run_id, 1);
     assert.equal(
       result.msg,
-      "Shift updated. Attendance recalculation queued (run #1): every open attendance day " +
-        "on this shift will be recalculated under the new rule, and payroll-locked months are skipped."
+      "Shift updated. Attendance recalculation queued (run #1): every finished attendance day " +
+        "on this shift in an open payroll month will be recalculated and stored under the new rule. " +
+        "Days still in progress are shown live under the new rule and are stored by the next " +
+        "recalculation after they close. Payroll-locked months are skipped."
     );
     assert.equal(w.state.recalculatedRanges.length, 0, "no recalculation happened in the request");
     // The counts belong to the RUN, and the run has not started yet.

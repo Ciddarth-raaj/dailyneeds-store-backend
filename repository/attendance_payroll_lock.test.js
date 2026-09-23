@@ -545,3 +545,80 @@ describe("no unguarded writer of attendance_monthly_payroll remains", () => {
     assert.deepEqual(offenders, []);
   });
 });
+
+/*
+ * THE DEFERRED (OPEN-DATE) WRITES. A decision about a date whose attendance
+ * day has not closed is committed WITHOUT its day row
+ * (`utils/attendance_persist_guard.js`). The lock used to be taken because a
+ * day row was written; with no day row it must still be taken, on the date,
+ * before the decision's own writes - so a locked month refuses the decision
+ * exactly as before, inside the transaction.
+ */
+describe("a decision committed WITHOUT its day row is still gated", () => {
+  const RegularizationRepo = require("./attendance_regularization");
+  const index = (log, pattern) => log.findIndex((e) => pattern.test(e.sql));
+
+  const decide = (repo) =>
+    repo.decideStage({
+      requestId: 501,
+      stageNo: 1,
+      decision: "APPROVED",
+      actorId: 1,
+      remarks: null,
+      adminOverride: false,
+      next: { status: "APPROVED", current_stage_no: 1, approved_ot_minutes: 0 },
+      calculations: [],
+      shiftOverride: { employee_id: 42, attendance_date: "2026-08-23", work_shift_id: 9, previous_work_shift_id: 7, reason: "cover" },
+      attendanceLock: { employee_id: 42, attendance_date: "2026-08-23" },
+    });
+
+  it("setDateShift's override alone: locked month -> refused before the INSERT, rolled back", async () => {
+    const fake = fakeConnection({ payrun: LOCKED_AUGUST });
+    const repo = buildRepo(pool(fake));
+    await assert.rejects(
+      repo.saveDateShiftOverrideWithCalculation({
+        override: { employee_id: 42, attendance_date: "2026-08-23", work_shift_id: 9, previous_work_shift_id: 7, changed_by: 1 },
+        rows: [],
+      }),
+      (err) => err.code === "PAYROLL_MONTH_LOCKED"
+    );
+    assert.equal(index(fake.log, /INSERT INTO attendance_date_shift_override/), -1);
+    assert.ok(fake.log.some((e) => e.sql === "ROLLBACK"));
+  });
+
+  it("setDateShift's override alone: unlocked -> BEGIN, FOR UPDATE, INSERT override, COMMIT, and NO day row", async () => {
+    const fake = fakeConnection({ payrun: [calculated(42, 2026, 8)] });
+    const repo = buildRepo(pool(fake));
+    await repo.saveDateShiftOverrideWithCalculation({
+      override: { employee_id: 42, attendance_date: "2026-08-23", work_shift_id: 9, previous_work_shift_id: 7, changed_by: 1 },
+      rows: [],
+    });
+    const lock = index(fake.log, /FOR UPDATE/);
+    const insert = index(fake.log, /INSERT INTO attendance_date_shift_override/);
+    assert.ok(lock > 0 && insert > lock, "the lock precedes the override");
+    assert.equal(index(fake.log, /INSERT INTO attendance_day_calculation/), -1);
+    assert.equal(fake.log[fake.log.length - 2].sql, "COMMIT");
+  });
+
+  it("an approval with its day deferred: locked month -> refused inside the transaction, nothing survives", async () => {
+    const fake = fakeConnection({ payrun: LOCKED_AUGUST });
+    const repo = RegularizationRepo(pool(fake));
+    await assert.rejects(decide(repo), (err) => err.code === "PAYROLL_MONTH_LOCKED");
+    assert.equal(index(fake.log, /INSERT INTO attendance_date_shift_override/), -1);
+    assert.ok(fake.log.some((e) => e.sql === "ROLLBACK"));
+    assert.ok(!fake.log.some((e) => e.sql === "COMMIT"));
+  });
+
+  it("an approval with its day deferred: unlocked -> decision + override commit, and NO day row", async () => {
+    const fake = fakeConnection({ payrun: [] });
+    const repo = RegularizationRepo(pool(fake));
+    const saved = await decide(repo);
+    assert.equal(saved.code, 200);
+    assert.equal(saved.calculations_written, 0);
+    const lock = index(fake.log, /FOR UPDATE/);
+    const insert = index(fake.log, /INSERT INTO attendance_date_shift_override/);
+    assert.ok(lock > 0 && insert > lock);
+    assert.equal(index(fake.log, /INSERT INTO attendance_day_calculation/), -1);
+    assert.ok(fake.log.some((e) => e.sql === "COMMIT"));
+  });
+});

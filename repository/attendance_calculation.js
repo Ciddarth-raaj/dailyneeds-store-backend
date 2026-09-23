@@ -881,6 +881,11 @@ class AttendanceCalculationRepository {
    * Record a single-date shift override AND the recalculated day it produces,
    * in ONE transaction.
    *
+   * `rows` may be EMPTY: for a date whose attendance day has not closed the
+   * usecase deliberately stores the override alone - the date reads live
+   * under it until it closes - and that is a complete, successful write, not
+   * half of one.
+   *
    * Either both land or neither does: an override row without its recalculated
    * day would leave the stored attendance - the rows payroll reads - showing
    * the old shift while the resolver already says the new one. The override is
@@ -893,6 +898,15 @@ class AttendanceCalculationRepository {
     const connection = await getConnectionAsync(this.db);
     try {
       await beginTransactionAsync(connection);
+
+      // THE OVERRIDE IS GATED ON ITS OWN. It used to be covered by the day row
+      // written beside it; on a date whose attendance day is still open the
+      // usecase stores the override WITHOUT a day row (see `setDateShift`),
+      // and a shift change inside a payroll-locked month must be refused
+      // either way. Same lock, same statement, taken first.
+      await assertMonthsNotPayrollLocked(connection, [
+        { employee_id: override.employee_id, attendance_date: override.attendance_date },
+      ]);
 
       const inserted = await queryAsync(
         connection,

@@ -552,11 +552,11 @@ describe("the monthly persist obeys the same rule", () => {
   });
 });
 
-describe("the EXEMPT path: the single-date shift edit", () => {
-  it("still stores the edited date with its override in one transaction, even while that date is open", async () => {
-    // Deliberately unchanged: the override row and the day row are one
-    // committed act (`saveDateShiftOverrideWithCalculation`). This pins the
-    // exemption so that narrowing it is a conscious decision.
+describe("the single-date shift edit obeys the same rule (formerly exempt)", () => {
+  it("on an OPEN date it saves the override alone - no day row - and says so", async () => {
+    // The override is the decision and is committed; the day row waits for
+    // the close. Full coverage of this path, and of the approval paths, is in
+    // `usecase/attendance_open_day_decisions.test.js`.
     const repo = fakeRepo({ rawPunches: [...PRIYANGA.firstThree] });
     const { usecase } = build(repo, ist(PRIYANGA.date, 12, 0));
 
@@ -567,7 +567,8 @@ describe("the EXEMPT path: the single-date shift edit", () => {
       actor_employee_id: 1,
     });
     assert.equal(result.changed, true);
-    assert.equal(repo.calls.overrides.length, 1);
-    assert.ok(repo.row(PRIYANGA.date), "the transactional shift edit writes its day, as before");
+    assert.equal(repo.calls.overrides.length, 1, "the override is saved");
+    assert.equal(repo.row(PRIYANGA.date), null, "no attendance_day_calculation row for the open date");
+    assert.equal(result.attendance_persisted, false);
   });
 });
