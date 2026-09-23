@@ -2321,9 +2321,9 @@ class Server {
     // the next poll and today never needs the recovery job. A tick arriving
     // while the previous run is still in flight is skipped, not queued.
     /**
-     * DAILY AUTOMATIC ATTENDANCE RECALCULATION - 06:50 IST, today-3..yesterday.
+     * DAILY AUTOMATIC ATTENDANCE RECALCULATION - 06:55 IST, today-3..yesterday.
      *
-     * "50 6 * * *" in `CRON_TIMEZONE` (Asia/Kolkata). Re-runs the last three
+     * "55 6 * * *" in `CRON_TIMEZONE` (Asia/Kolkata). Re-runs the last three
      * days through the Recalculate Attendance screen's own path, so a punch
      * that arrived after its date was already stored (a delayed Biomax upload,
      * a DigiSME recovery import) is picked up by the next morning's run.
@@ -2335,13 +2335,15 @@ class Server {
      * table can only say MANUAL or WORK_SHIFT_SAVE) and is audited in
      * `api_sync_log` as `attendance_daily_recalculation`, source `cron`.
      *
-     * THE MORNING ORDER IS DELIBERATE:
-     *   06:45  DigiSME attendance recovery (below) imports late punches for
-     *          today-3..yesterday
-     *   06:50  this recalculation - AFTER that import, never concurrently
-     *          with it, so it stores the punches the recovery just brought in
-     *   07:00  Missing Attendance Telegram - reads yesterday from the
-     *          refreshed attendance
+     * THE MORNING ORDER IS DELIBERATE, and it is an order of SCHEDULED START
+     * TIMES. Cron guarantees when each job starts, not that the previous one
+     * has finished:
+     *   06:45  DigiSME attendance recovery (below) is scheduled - it imports
+     *          late punches for today-3..yesterday
+     *   06:55  this recalculation is scheduled after it, leaving the recovery
+     *          a ten-minute start-time buffer
+     *   07:00  Missing Attendance Telegram is scheduled, to read yesterday
+     *          from the recalculated attendance
      * `usecase/attendance_daily_recalculation.test.js` fails if the three
      * schedules stop being in that order. The job never throws and
      * does not overlap itself; a failure is logged and the 07:00 job is a
@@ -2352,7 +2354,7 @@ class Server {
       apiSyncLogger: this.apiSyncLogger,
       logger,
     });
-    this.cronService.register("attendance_daily_recalculation", "50 6 * * *", async () => {
+    this.cronService.register("attendance_daily_recalculation", "55 6 * * *", async () => {
       await this.attendanceDailyRecalculation.run();
     });
 
@@ -2360,9 +2362,9 @@ class Server {
      * MISSING ATTENDANCE ALERTS - 07:00 IST, yesterday only.
      *
      * "0 7 * * *" in `CRON_TIMEZONE`, which `services/cron_service.js` pins
-     * to Asia/Kolkata. It runs ten minutes AFTER the 06:50 daily
+     * to Asia/Kolkata. It is scheduled five minutes after the 06:55 daily
      * attendance recalculation, so yesterday's candidates are computed from
-     * the refreshed stored attendance. The job asks the SHARED rule for yesterday's Missing
+     * the recalculated stored attendance. The job asks the SHARED rule for yesterday's Missing
      * Attendance (`usecase/attendance_missing.js#getTelegramCandidates` - the
      * report's own builder with the window pinned) and messages each employee
      * privately. It never computes a population of its own, so it cannot
