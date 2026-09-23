@@ -883,13 +883,27 @@ class AttendanceRegularizationRepository {
      * only ever narrow what the line above already allows, so a client asking
      * for an outlet it has no rights to gets nothing rather than an error -
      * and, more importantly, gets nothing rather than the rows.
+     *
+     * A STEP THAT NAMES THE ACTOR IS NOT HIDDEN BY THEIR BRANCH. Attendance
+     * Approver Setup may name an approver from any branch, and `canApprove`
+     * lets exactly that person decide the step wherever they sit. Hiding
+     * the row by branch left requests in nobody's queue: the named approver
+     * could decide them but never see them, and nobody else may decide
+     * them. So the outlet scope still governs role steps and admin-style
+     * browsing, and a step addressed to this actor by id is theirs on either
+     * side of it - the current stage for PENDING, any stage for history.
      */
     if (Array.isArray(permitted_outlet_ids)) {
-      if (permitted_outlet_ids.length === 0) where.push("1 = 0");
-      else {
-        where.push("r.outlet_id IN (?)");
-        params.push(permitted_outlet_ids);
-      }
+      const outletClause = permitted_outlet_ids.length === 0 ? "1 = 0" : "r.outlet_id IN (?)";
+      if (permitted_outlet_ids.length > 0) params.push(permitted_outlet_ids);
+      const namedClause =
+        status === "PENDING"
+          ? "s.approver_employee_id = ?"
+          : `EXISTS (SELECT 1 FROM attendance_approval_step y
+                      WHERE y.attendance_approval_request_id = r.attendance_approval_request_id
+                        AND y.approver_employee_id = ?)`;
+      where.push(`(${outletClause} OR ${namedClause})`);
+      params.push(actor_employee_id === undefined ? null : actor_employee_id);
     }
     if (Array.isArray(filter_outlet_ids) && filter_outlet_ids.length > 0) {
       where.push("r.outlet_id IN (?)");

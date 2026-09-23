@@ -157,3 +157,57 @@ describe("the approval scope after the employee-level chain", () => {
     log.forEach((l) => assert.ok(!/biomax/i.test(l.sql)));
   });
 });
+
+/*
+ * EMPLOYEE 106 (Kumaraguru). His Attendance Approver Setup names approvers
+ * who sit at other outlets. The branch scope used to be ANDed on as a bare
+ * `r.outlet_id IN (?)`, which hid his requests from exactly the people the
+ * chain named - on the Attendance tab and the OT tab alike, since both run
+ * through this one clause. A step that names the actor now passes the
+ * branch test; everything else about the scope is unchanged.
+ */
+describe("the outlet scope does not hide a step addressed to the actor (employee 106)", () => {
+  const capture = async (fn) => { const { db, log } = fakeDb(() => [{ n: 0 }]); await fn(buildRegRepo(db)); return log[0]; };
+  const placeholders = (sql) => (sql.match(/\?/g) || []).length;
+  const scope106 = { approver_roles: [], outlet_id: 5, actor_employee_id: 9, is_admin: false, permitted_outlet_ids: [5] };
+
+  for (const type of ["REGULARIZATION", "OT"]) {
+    it(`${type} PENDING: branch OR the current step names the actor, in the list and the count`, async () => {
+      const count = await capture((r) => r.countApprovals({ request_type: type, status: "PENDING", ...scope106 }));
+      assert.match(count.sql, /\(r\.outlet_id IN \(\?\) OR s\.approver_employee_id = \?\)/);
+      assert.ok(!/AND r\.outlet_id IN \(\?\) AND/.test(count.sql), "the branch is no longer a bare AND");
+      assert.deepEqual(count.params, [[type], 9, 9, 9, [5], 9]);
+      assert.equal(placeholders(count.sql), count.params.length);
+
+      const list = await capture((r) => r.listApprovals({ request_type: type, status: "PENDING", ...scope106, limit: 10, offset: 0 }));
+      assert.match(list.sql, /\(r\.outlet_id IN \(\?\) OR s\.approver_employee_id = \?\)/);
+      assert.deepEqual(list.params, [[type], 9, 9, 9, [5], 9, 10, 0]);
+      assert.equal(placeholders(list.sql), list.params.length);
+    });
+
+    it(`${type} history: branch OR ANY step names the actor`, async () => {
+      const list = await capture((r) => r.listApprovals({ request_type: type, status: "ALL", ...scope106, limit: 10, offset: 0 }));
+      assert.match(list.sql, /\(r\.outlet_id IN \(\?\) OR EXISTS \(SELECT 1 FROM attendance_approval_step y WHERE y\.attendance_approval_request_id = r\.attendance_approval_request_id AND y\.approver_employee_id = \?\)\)/);
+      assert.equal(placeholders(list.sql), list.params.length);
+    });
+  }
+
+  it("still FAILS CLOSED for everything that does not name the actor: an empty scope is `1 = 0 OR named`", async () => {
+    const count = await capture((r) => r.countApprovals({ request_type: "OT", status: "PENDING", ...scope106, permitted_outlet_ids: [] }));
+    assert.match(count.sql, /\(1 = 0 OR s\.approver_employee_id = \?\)/);
+    assert.deepEqual(count.params, [["OT"], 9, 9, 9, 9]);
+    assert.equal(placeholders(count.sql), count.params.length);
+  });
+
+  it("role steps keep the branch rule: an HR actor with roles is still narrowed by branch for non-named rows", async () => {
+    const count = await capture((r) => r.countApprovals({ request_type: "OT", status: "PENDING", approver_roles: ["HR"], outlet_id: 1, actor_employee_id: 8, is_admin: false, permitted_outlet_ids: [1] }));
+    assert.deepEqual(count.params, [["OT"], ["HR"], 1, 8, 8, 8, [1], 8]);
+    assert.equal(placeholders(count.sql), count.params.length);
+  });
+
+  it("an unrestricted actor (null scope) gets no branch clause at all, as before", async () => {
+    const count = await capture((r) => r.countApprovals({ request_type: "OT", status: "PENDING", ...scope106, permitted_outlet_ids: null }));
+    assert.ok(!/outlet_id IN/.test(count.sql));
+    assert.deepEqual(count.params, [["OT"], 9, 9, 9]);
+  });
+});
