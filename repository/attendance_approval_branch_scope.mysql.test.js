@@ -41,6 +41,7 @@ const STRANGER_APPROVER = 203; // somebody else's approver
 const UNMAPPED_MANAGER = 107; // warehouse, role chain OPERATIONS_MANAGER -> HR
 const STORE_B_STAFF = 108;
 const STORE_A_MANAGER = 204; // STORE_MANAGER role at STORE_A
+const STORE_A_STAFF = 109;
 
 const SCHEMA = [
   `CREATE TABLE outlets (outlet_id INT PRIMARY KEY, outlet_name VARCHAR(80))`,
@@ -102,6 +103,12 @@ const REQUESTS = [
   // 5. A STORE_B role chain at its Store Manager stage - STORE_A's manager may not see it.
   { id: 5, type: "OT", for: STORE_B_STAFF, outlet: STORE_B, stage: 1, source: "ROLE", ot: 30,
     steps: [["STORE_MANAGER", STORE_B, null, null, "PENDING"], ["OPERATIONS_MANAGER", null, null, null, "PENDING"], ["HR", null, null, null, "PENDING"]] },
+  // 6. STORE_A's own role chain at its Store Manager stage - STORE_A's manager's.
+  { id: 6, type: "OT", for: STORE_A_STAFF, outlet: STORE_A, stage: 1, source: "ROLE", ot: 45,
+    steps: [["STORE_MANAGER", STORE_A, null, null, "PENDING"], ["OPERATIONS_MANAGER", null, null, null, "PENDING"], ["HR", null, null, null, "PENDING"]] },
+  // 7. A misconfigured chain that names the requester as their OWN approver.
+  { id: 7, type: "REGULARIZATION", for: FIRST, outlet: STORE_A, stage: 1, source: "EMPLOYEE",
+    steps: [["EMPLOYEE", null, FIRST, "FINAL", "PENDING"]] },
 ];
 
 const query = (pool, sql, params = []) =>
@@ -124,6 +131,7 @@ describe("approval queue outlet scope, as SQL (employee 106 shape)", { skip: !UR
       [FINAL, "Final Approver", HEAD_OFFICE, 24],
       [STRANGER_APPROVER, "Other Approver", STORE_B, 23],
       [STORE_A_MANAGER, "Store A Manager", STORE_A, 2],
+      [STORE_A_STAFF, "Store A Staff", STORE_A, 22],
     ]]);
     for (const r of REQUESTS) {
       await query(
@@ -201,7 +209,24 @@ describe("approval queue outlet scope, as SQL (employee 106 shape)", { skip: !UR
       { actor_employee_id: STORE_A_MANAGER, approver_roles: ["STORE_MANAGER"], outlet_id: STORE_A, permitted_outlet_ids: [STORE_A] },
       { request_type: ["OT"], status: "ALL", limit: 50 }
     );
-    assert.deepEqual(ids(await repo.listApprovals(storeManager)), [], "STORE_B's Store Manager stage is STORE_B's");
+    assert.deepEqual(ids(await repo.listApprovals(storeManager)), [6], "their own outlet's #6 only - STORE_B's Store Manager stage (#5) is STORE_B's");
+  });
+
+  it("a Store Manager stays OUTLET-SPECIFIC while PENDING: their own outlet's stage, never another's", async () => {
+    const storeManager = { actor_employee_id: STORE_A_MANAGER, approver_roles: ["STORE_MANAGER"], outlet_id: STORE_A, permitted_outlet_ids: [STORE_A] };
+    const f = scope(storeManager, { request_type: ["OT"], limit: 50 });
+    assert.deepEqual(ids(await repo.listApprovals(f)), [6], "STORE_A's stage yes, STORE_B's (#5) no");
+    assert.equal(await repo.countApprovals(f), 1);
+    // Even with an empty branch scope the role cannot reach another outlet's stage.
+    const unscoped = scope({ ...storeManager, permitted_outlet_ids: [] }, { request_type: ["OT"], limit: 50 });
+    assert.deepEqual(ids(await repo.listApprovals(unscoped)), [6]);
+  });
+
+  it("nobody sees their OWN request, even on a chain that names them as its approver", async () => {
+    const f = scope(firstApprover, { request_type: ["REGULARIZATION", "REGULARIZATION_WITH_OT"], limit: 50 });
+    assert.ok(!ids(await repo.listApprovals(f)).includes(7));
+    const history = scope(firstApprover, { request_type: ["REGULARIZATION", "REGULARIZATION_WITH_OT"], status: "ALL", limit: 50 });
+    assert.ok(!ids(await repo.listApprovals(history)).includes(7));
   });
 
   it("an EMPTY branch scope still fails closed for everything the chain does not address to the actor", async () => {
