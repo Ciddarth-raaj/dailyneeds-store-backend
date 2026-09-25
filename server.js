@@ -97,6 +97,9 @@ class Server {
       PUT: "\x1b[33m",
     };
     app.use("*", (req, _, next) => {
+      // TEMPORARY - arrival instant, so utils/attendance_read_timing.js can
+      // report the time spent in auth and the other middleware.
+      req.receivedAtMs = Number(process.hrtime.bigint()) / 1e6;
       if (global.isDev()) {
         console.log(colours[req.method] + req.method, "\x1b[0m" + req.baseUrl);
       }
