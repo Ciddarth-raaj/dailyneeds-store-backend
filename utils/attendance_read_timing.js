@@ -225,8 +225,30 @@ function instrument(label, handler) {
   };
 }
 
+/**
+ * Count every statement a caller issues on a connection it took itself (a
+ * transaction), for the current context only. Returns the function that
+ * puts the connection back exactly as it was - call it BEFORE the connection
+ * is released, because the pool hands the same object to somebody else.
+ * Without a context this changes nothing and the restore is a no-op.
+ */
+function observeConnection(connection, { wait_ms = null } = {}) {
+  const ctx = current();
+  if (!ctx || !connection || typeof connection.query !== "function") return () => {};
+  if (typeof wait_ms === "number") recordQuery(ctx, { code: "TX-CONNECTION", wait_ms, exec_ms: 0, rows: 0 });
+  const original = connection.query;
+  connection.query = function observedQuery(...args) {
+    ctx.statements = (ctx.statements || 0) + 1;
+    return original.apply(this, args);
+  };
+  return () => {
+    connection.query = original;
+  };
+}
+
 module.exports = {
   create,
+  observeConnection,
   current,
   run,
   phase,

@@ -36,6 +36,7 @@ const { istToday } = require("../utils/istDate");
 const { partitionClosedDays, endOfIstDay } = require("../utils/attendance_persist_guard");
 const { payrollLockedError } = require("../utils/attendance_payroll_lock");
 const readTiming = require("../utils/attendance_read_timing");
+const recalcTiming = require("../utils/attendance_recalc_timing");
 
 /**
  * Attendance v2 - the orchestration between the repository and the pure
@@ -1377,7 +1378,19 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    * Every path through here obeys it - the single endpoint, each employee of
    * a bulk run, Work Shift propagation, an assignment change, a punch void.
    */
-  const recalculateRange = async ({ employee_id, from_date, to_date, now = null }) => {
+  const recalculateRange = async ({
+    employee_id,
+    from_date,
+    to_date,
+    now = null,
+    // INTERNAL, bulk runs only: the `{ from, to }` window a bulk run has
+    // ALREADY re-derived this employee's undatable punches over, in one
+    // batched pass before any employee was calculated. The re-derive here is
+    // skipped only when that is exactly the window it would have used; any
+    // other window - the employment facts moved since the run read them -
+    // re-derives here as it always did.
+    punches_redriven_for = null,
+  }) => {
     const employeeId = Number(employee_id);
     const from = toDateOnly(from_date);
     const to = toDateOnly(to_date);
@@ -1395,7 +1408,9 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     // which is the same unbounded treatment an absent joining date has
     // always had.
     const employment = attendanceCalculationRepo.getEmploymentWindow
-      ? await attendanceCalculationRepo.getEmploymentWindow(employeeId)
+      ? await readTiming.phase("employment_lookup", () =>
+          attendanceCalculationRepo.getEmploymentWindow(employeeId)
+        )
       : null;
     const window = eligibility.eligibleWindow(employment, from, to);
 
@@ -1405,13 +1420,22 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     // and nothing else - and re-deriving would in any case not change the
     // outcome for a date nobody is going to calculate.
     // See `setPunchRedriveService` for why Recalculate owns this.
-    const redrive = window
-      ? await redrivePunches({
-          employee_ids: [employeeId],
-          from: window.from,
-          to: window.to,
-        })
-      : null;
+    const alreadyRedriven =
+      !!window &&
+      !!punches_redriven_for &&
+      punches_redriven_for.from === window.from &&
+      punches_redriven_for.to === window.to;
+    const redrive = window && !alreadyRedriven
+      ? await readTiming.phase("punch_redrive", () =>
+          redrivePunches({
+            employee_ids: [employeeId],
+            from: window.from,
+            to: window.to,
+          })
+        )
+      : alreadyRedriven
+        ? { batched: true }
+        : null;
 
     const calculated = window
       ? await calculateRange({
@@ -1435,8 +1459,10 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     // those dates; the `FOR UPDATE` gate remains the rule for every row that
     // IS written.
     if (skippedOpenDates.length > 0 && attendanceCalculationRepo.findPayrollLockedPeriods) {
-      const locked = await attendanceCalculationRepo.findPayrollLockedPeriods(
-        skippedOpenDates.map((entry) => ({ employee_id: employeeId, attendance_date: entry.attendance_date }))
+      const locked = await readTiming.phase("payroll_lock_preflight", () =>
+        attendanceCalculationRepo.findPayrollLockedPeriods(
+          skippedOpenDates.map((entry) => ({ employee_id: employeeId, attendance_date: entry.attendance_date }))
+        )
       );
       if (locked && locked.length > 0) throw payrollLockedError(locked);
     }
@@ -1445,13 +1471,15 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     // positively, independently of whatever the engine did or did not return.
     const ineligibleDates = eligibility.ineligibleDatesIn(employment, from, to);
 
-    const stored = await attendanceCalculationRepo.saveCalculationsWithReconciliation({
-      employee_id: employeeId,
-      from_date: from,
-      to_date: to,
-      rows: days.map(toStorageRow),
-      ineligible_dates: ineligibleDates,
-    });
+    const stored = await readTiming.phase("write", () =>
+      attendanceCalculationRepo.saveCalculationsWithReconciliation({
+        employee_id: employeeId,
+        from_date: from,
+        to_date: to,
+        rows: days.map(toStorageRow),
+        ineligible_dates: ineligibleDates,
+      })
+    );
 
     return {
       employee_id: employeeId,
@@ -1695,6 +1723,143 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    */
   const MAX_BULK_EMPLOYEES = 2000;
 
+  /**
+   * HOW MANY EMPLOYEES A BULK RUN RECALCULATES AT ONCE.
+   *
+   * THE POOL IS THE CONSTRAINT, not the CPU. The API has ONE 10-connection
+   * MySQL pool shared by every request and every cron job, and a single
+   * employee's recalculation already fans out to six parallel reads. Two
+   * employees at once can therefore ask for twelve connections, and anything
+   * above that queues every interactive request behind the bulk run. So the
+   * width is small, fixed and clamped: 1 (strictly sequential, the old
+   * behaviour) to MAX_BULK_CONCURRENCY. `ATTENDANCE_BULK_CONCURRENCY` sets it
+   * per process; the constructor option `bulk_concurrency` sets it for tests.
+   *
+   * THE DEFAULT IS 1 - sequential, exactly as before. Measured against a
+   * production-shaped copy, two employees at once already fills the ten
+   * connections and roughly doubles an interactive read's p95, while the
+   * batched punch re-derive below removes most of the run's time without
+   * touching the pool at all. Raise it deliberately, per process, once the
+   * per-employee timing lines show how much pool headroom production has.
+   *
+   * CONCURRENCY NEVER CHANGES WHAT IS WRITTEN. Each employee is still one
+   * `recalculateRange`, one transaction, one payroll-lock gate on that
+   * employee's own rows; the months of one employee in a propagation run
+   * stay strictly in order.
+   */
+  const MAX_BULK_CONCURRENCY = 3;
+  const DEFAULT_BULK_CONCURRENCY = 1;
+  const bulkConcurrency = () => {
+    const raw =
+      options.bulk_concurrency !== undefined && options.bulk_concurrency !== null
+        ? options.bulk_concurrency
+        : process.env.ATTENDANCE_BULK_CONCURRENCY;
+    const n = Number(raw);
+    if (raw === undefined || raw === null || raw === "" || !Number.isInteger(n)) return DEFAULT_BULK_CONCURRENCY;
+    return Math.min(MAX_BULK_CONCURRENCY, Math.max(1, n));
+  };
+
+  /**
+   * `fn` over every item, at most `limit` at a time, results in ITEM ORDER.
+   * `fn` must not throw - the callers below catch per item - but a throw is
+   * still captured on its slot rather than abandoning the other workers.
+   */
+  const runBounded = async (items, limit, fn) => {
+    const results = new Array(items.length);
+    let next = 0;
+    const worker = async () => {
+      while (next < items.length) {
+        const index = next;
+        next += 1;
+        /* eslint-disable no-await-in-loop */
+        try {
+          results[index] = await fn(items[index], index);
+        } catch (err) {
+          results[index] = { err };
+        }
+        /* eslint-enable no-await-in-loop */
+      }
+    };
+    await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker));
+    return results;
+  };
+
+  /**
+   * ONE punch re-derive for a batch, instead of one per employee.
+   *
+   * `recalculateRange` re-derives an employee's undatable punches over their
+   * eligible window before calculating. The query behind it
+   * (`undatedPunches`) cannot use an employee index - an UNMATCHED punch has
+   * no employee id, so it is found by its raw code as well - and it scans the
+   * whole window's punches every time. Once per employee that is most of a
+   * bulk run's time. Here it is done ONCE per distinct window, for up to
+   * REDRIVE_BATCH_EMPLOYEES employees per statement, BEFORE any employee is
+   * calculated - so every employee's punches are still re-derived before
+   * that employee's calculation, exactly as before.
+   *
+   * @param {Array<{employee_id:number, from:string, to:string}>} entries
+   * @returns {{ windows: Map<number, Map<string, {from,to}>>, ms: number }}
+   *   the windows that WERE re-derived, per employee. A batch whose re-derive
+   *   failed is left out, so those employees re-derive individually inside
+   *   `recalculateRange`, as they always did.
+   */
+  const REDRIVE_BATCH_EMPLOYEES = 200;
+  // The row cap of `repository/attendance_import.js#undatedPunches`.
+  const REDRIVE_SCAN_LIMIT = 50000;
+  const redriveBatch = async (entries) => {
+    const windows = new Map();
+    const t = readTiming.nowMs();
+    if (!punchRedriveService || typeof punchRedriveService.redriveUndated !== "function") {
+      return { windows, ms: 0 };
+    }
+    const groups = new Map();
+    entries.forEach((entry) => {
+      const key = `${entry.from}|${entry.to}`;
+      if (!groups.has(key)) groups.set(key, { from: entry.from, to: entry.to, ids: new Set() });
+      groups.get(key).ids.add(Number(entry.employee_id));
+    });
+    for (const group of groups.values()) {
+      const ids = [...group.ids].sort((a, b) => a - b);
+      for (let i = 0; i < ids.length; i += REDRIVE_BATCH_EMPLOYEES) {
+        const chunk = ids.slice(i, i + REDRIVE_BATCH_EMPLOYEES);
+        /* eslint-disable no-await-in-loop */
+        const outcome = await redrivePunches({ employee_ids: chunk, from: group.from, to: group.to });
+        /* eslint-enable no-await-in-loop */
+        if (outcome && outcome.error) continue;
+        // `undatedPunches` reads at most REDRIVE_SCAN_LIMIT rows. A batch that
+        // came back full may have been cut short where each employee alone
+        // would not have been, so none of its employees count as re-derived.
+        if (outcome && Number(outcome.scanned) >= REDRIVE_SCAN_LIMIT) continue;
+        chunk.forEach((id) => {
+          if (!windows.has(id)) windows.set(id, new Map());
+          windows.get(id).set(`${group.from}|${group.to}`, { from: group.from, to: group.to });
+        });
+      }
+    }
+    return { windows, ms: readTiming.nowMs() - t };
+  };
+  const redrivenWindow = (redriven, employeeId, from, to) => {
+    const byWindow = redriven.windows.get(Number(employeeId));
+    return (byWindow && byWindow.get(`${from}|${to}`)) || null;
+  };
+
+  /**
+   * A DEADLOCK IS RETRIED ONCE, for that employee alone. MySQL rolls the
+   * whole transaction back when it picks a deadlock victim, so nothing of the
+   * attempt was written and repeating it is the same idempotent upsert. Any
+   * other error - the payroll lock refusing, a real failure - is returned
+   * exactly as before.
+   */
+  const isDeadlock = (err) => !!err && (err.code === "ER_LOCK_DEADLOCK" || err.errno === 1213);
+  const withDeadlockRetry = async (fn) => {
+    try {
+      return await fn();
+    } catch (err) {
+      if (!isDeadlock(err)) throw err;
+      return fn();
+    }
+  };
+
   const recalculateBulk = async ({
     from_date,
     to_date,
@@ -1804,20 +1969,63 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     const runNow = nowIs(now);
     let daysSkippedOpen = 0;
     const skippedOpenDates = new Set();
-    for (const target of processed) {
-      /* eslint-disable no-await-in-loop */
+    const runStartedAt = recalcTiming.isoNow();
+    const runT0 = readTiming.nowMs();
+
+    // The punch re-derive, once for the batch - see `redriveBatch`. Only the
+    // employees `recalculateRange` would re-derive for: eligible ones, over
+    // their eligible window.
+    const redriven = await redriveBatch(
+      targets
+        .map((e) => ({ employee_id: Number(e.employee_id), window: eligibility.eligibleWindow(e, from, to) }))
+        .filter((e) => e.window)
+        .map((e) => ({ employee_id: e.employee_id, from: e.window.from, to: e.window.to }))
+    );
+
+    const concurrency = bulkConcurrency();
+    const outcomes = await runBounded(processed, concurrency, async (target) => {
+      const employeeId = Number(target.employee_id);
+      const window = eligibility.eligibleWindow(target, from, to);
       try {
         // The whole requested range is handed over. `recalculateRange` clamps
         // it to the employee's eligible window through the shared rule and
         // reconciles the REST of the window - which is exactly why the clamp
         // is no longer applied here: clamping twice would hide the ineligible
         // dates from the reconciliation that has to delete their stale rows.
-        const result = await recalculateRange({
-          employee_id: Number(target.employee_id),
-          from_date: from,
-          to_date: to,
-          now: runNow,
-        });
+        const result = await withDeadlockRetry(() =>
+          recalcTiming.timeEmployee(
+            {
+              run_id: runId,
+              source: record_run ? "MANUAL" : "SYSTEM",
+              employee_id: employeeId,
+              from,
+              to,
+              queued_at: runStartedAt,
+              claimed_at: runStartedAt,
+            },
+            () =>
+              recalculateRange({
+                employee_id: employeeId,
+                from_date: from,
+                to_date: to,
+                now: runNow,
+                punches_redriven_for: window
+                  ? redrivenWindow(redriven, employeeId, window.from, window.to)
+                  : null,
+              })
+          )
+        );
+        return { result };
+      } catch (err) {
+        return { err };
+      }
+    });
+
+    // Tallied in CANDIDATE ORDER whatever order the workers finished in, so
+    // the summary and its error list read exactly as a sequential run's.
+    processed.forEach((target, index) => {
+      const { result, err } = outcomes[index] || {};
+      if (!err && result) {
         if (isEligible(target)) completed += 1;
         daysProcessed += Number(result.written) || 0;
         staleRemoved += Number(result.stale_removed) || 0;
@@ -1825,19 +2033,18 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
           daysSkippedOpen += 1;
           skippedOpenDates.add(entry.attendance_date);
         });
-      } catch (err) {
-        errors.push({
-          employee_id: Number(target.employee_id),
-          employee_name: target.employee_name || null,
-          message: err && err.message ? err.message : String(err),
-          // The machine-readable reason, when there is one - so a caller can
-          // tell a payroll-locked refusal (the lock doing its job) from a
-          // failure.
-          ...(err && err.code ? { code: err.code } : {}),
-        });
+        return;
       }
-      /* eslint-enable no-await-in-loop */
-    }
+      errors.push({
+        employee_id: Number(target.employee_id),
+        employee_name: target.employee_name || null,
+        message: err && err.message ? err.message : String(err),
+        // The machine-readable reason, when there is one - so a caller can
+        // tell a payroll-locked refusal (the lock doing its job) from a
+        // failure.
+        ...(err && err.code ? { code: err.code } : {}),
+      });
+    });
 
     const status =
       errors.length === 0
@@ -1855,6 +2062,19 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
         errors,
       });
     }
+
+    recalcTiming.logRun({
+      run_id: runId,
+      source: record_run ? "MANUAL" : "SYSTEM",
+      status,
+      employees: processed.length,
+      items: processed.length,
+      concurrency,
+      total_ms: readTiming.nowMs() - runT0,
+      redrive_ms: redriven.ms,
+      from_date: from,
+      to_date: to,
+    });
 
     return {
       run_id: runId,
@@ -1921,6 +2141,8 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     actor_employee_id = null,
     run_id = null,
     queued_at = null,
+    // When the queue worker claimed the run - timing only.
+    claimed_at = null,
     today = null,
     now = null,
     onProgress = null,
@@ -2028,46 +2250,93 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     // `recalculateRange`, at one instant for the whole run.
     const runNow = nowIs(now, today);
     let daysSkippedOpen = 0;
+    const runT0 = readTiming.nowMs();
+    const claimedAt = claimed_at || recalcTiming.isoNow();
 
-    for (const item of work) {
-      /* eslint-disable no-await-in-loop */
-      try {
-        const result = await recalculateRange({
-          employee_id: item.employee_id,
-          from_date: item.from_date,
-          to_date: item.to_date,
-          now: runNow,
-        });
+    // The punch re-derive, once per distinct month window for the whole run -
+    // see `redriveBatch`. `recalculateRange` skips its own only where its
+    // eligible window is exactly the one re-derived here.
+    const redriven = await redriveBatch(
+      work.map((item) => ({ employee_id: item.employee_id, from: item.from_date, to: item.to_date }))
+    );
+
+    // ONE WORKER PER EMPLOYEE, the employee's months IN ORDER inside it: two
+    // months of one employee never write at the same time, and the tallies
+    // below are made in `work` order whatever order the workers finish in.
+    const byEmployee = new Map();
+    work.forEach((item, index) => {
+      if (!byEmployee.has(item.employee_id)) byEmployee.set(item.employee_id, []);
+      byEmployee.get(item.employee_id).push({ item, index });
+    });
+    const outcomes = new Array(work.length);
+    let progressed = 0;
+    const concurrency = bulkConcurrency();
+    await runBounded([...byEmployee.values()], concurrency, async (entries) => {
+      for (const { item, index } of entries) {
+        /* eslint-disable no-await-in-loop */
+        try {
+          const result = await withDeadlockRetry(() =>
+            recalcTiming.timeEmployee(
+              {
+                run_id: runId,
+                source: "WORK_SHIFT_SAVE",
+                employee_id: item.employee_id,
+                from: item.from_date,
+                to: item.to_date,
+                queued_at,
+                claimed_at: claimedAt,
+              },
+              () =>
+                recalculateRange({
+                  employee_id: item.employee_id,
+                  from_date: item.from_date,
+                  to_date: item.to_date,
+                  now: runNow,
+                  punches_redriven_for: redrivenWindow(redriven, item.employee_id, item.from_date, item.to_date),
+                })
+            )
+          );
+          outcomes[index] = { result };
+        } catch (err) {
+          outcomes[index] = { err };
+        }
+        progressed += 1;
+        if (onProgress) {
+          try {
+            await onProgress({ processed: progressed, total: work.length });
+          } catch (progressErr) {
+            // A heartbeat that fails must never fail the run it is reporting on.
+          }
+        }
+        /* eslint-enable no-await-in-loop */
+      }
+    });
+
+    work.forEach((item, index) => {
+      const { result, err } = outcomes[index] || {};
+      if (!err && result) {
         daysSkippedOpen += (result.skipped_open_dates || []).length;
         daysRecalculated += Number(result.written) || 0;
         monthsRecalculated += 1;
         succeededMonths.set(item.employee_id, (succeededMonths.get(item.employee_id) || 0) + 1);
-      } catch (err) {
-        // A month that locked between the scope read and the write is not an
-        // error: it is the lock doing its job, and it is counted as skipped.
-        if (err && err.code === "PAYROLL_MONTH_LOCKED") {
-          skippedLockedMonths.add(`${item.employee_id}|${item.month}`);
-          skippedLockedDays += Number(item.day_count) || 0;
-        } else {
-          failedEmployees.add(item.employee_id);
-          errors.push({
-            employee_id: item.employee_id,
-            period: `${String(item.period_month).padStart(2, "0")}/${item.period_year}`,
-            from_date: item.from_date,
-            to_date: item.to_date,
-            message: err && err.message ? err.message : String(err),
-          });
-        }
+        return;
       }
-      if (onProgress) {
-        try {
-          await onProgress({ processed: monthsRecalculated + errors.length, total: work.length });
-        } catch (progressErr) {
-          // A heartbeat that fails must never fail the run it is reporting on.
-        }
+      // A month that locked between the scope read and the write is not an
+      // error: it is the lock doing its job, and it is counted as skipped.
+      if (err && err.code === "PAYROLL_MONTH_LOCKED") {
+        skippedLockedMonths.add(`${item.employee_id}|${item.month}`);
+        skippedLockedDays += Number(item.day_count) || 0;
+      } else {
+        failedEmployees.add(item.employee_id);
+        errors.push({
+          employee_id: item.employee_id,
+          period: `${String(item.period_month).padStart(2, "0")}/${item.period_year}`,
+          from_date: item.from_date,
+          to_date: item.to_date,
+          message: err && err.message ? err.message : String(err),
+        });
       }
-      /* eslint-enable no-await-in-loop */
-    }
+    });
 
     lockedAfterQueue.forEach((id) => failedEmployees.add(id));
 
@@ -2090,6 +2359,20 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
         errors,
       });
     }
+
+    recalcTiming.logRun({
+      run_id: runId,
+      source: "WORK_SHIFT_SAVE",
+      status,
+      employees: targeted,
+      items: work.length,
+      concurrency,
+      total_ms: readTiming.nowMs() - runT0,
+      redrive_ms: redriven.ms,
+      work_shift_id: workShiftId,
+      queued_at,
+      claimed_at: claimedAt,
+    });
 
     return {
       run_id: runId,
@@ -2161,6 +2444,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
           actor_employee_id: run.requested_by_employee_id || null,
           run_id: runId,
           queued_at: run.queued_at || null,
+          claimed_at: run.claimed_at || null,
           today,
           now,
           onProgress: () => attendanceCalculationRepo.heartbeatRecalculationRun(runId),

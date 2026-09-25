@@ -917,7 +917,11 @@ class AttendanceCalculationRepository {
       }
     }
 
+    const askedAt = readTiming.nowMs();
     const connection = await getConnectionAsync(this.db);
+    // Bulk-run timing only (a no-op without a timing context): the wait for
+    // this connection and the statements the transaction issues.
+    const unobserve = readTiming.observeConnection(connection, { wait_ms: readTiming.nowMs() - askedAt });
     try {
       await beginTransactionAsync(connection);
 
@@ -951,6 +955,7 @@ class AttendanceCalculationRepository {
       this._log("SAVE-CALCULATIONS-WITH-RECONCILIATION", err);
       throw err;
     } finally {
+      unobserve();
       connection.release();
     }
   }
@@ -1431,6 +1436,7 @@ class AttendanceCalculationRepository {
       `SELECT attendance_recalculation_run_id, requested_by_employee_id, trigger_source,
               work_shift_id, employee_id, store_id, designation_id, attempts,
               DATE_FORMAT(queued_at, '%Y-%m-%d %H:%i:%s.%f') AS queued_at,
+              DATE_FORMAT(started_at, '%Y-%m-%d %H:%i:%s.%f') AS claimed_at,
               DATE_FORMAT(from_date, '%Y-%m-%d') AS from_date,
               DATE_FORMAT(to_date, '%Y-%m-%d') AS to_date
          FROM attendance_recalculation_run
