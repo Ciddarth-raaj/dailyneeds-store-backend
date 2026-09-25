@@ -1,4 +1,5 @@
 const logger = require("../utils/logger");
+const { activeOverrideCondition } = require("../utils/shift_override_active");
 const { JOINED_ON } = require("../utils/joining_date");
 const {
   EFFECTIVE_TIME_JOIN,
@@ -306,12 +307,13 @@ class AttendanceDashboardRepository {
     if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
     return this._read(
       "GET-DATE-SHIFT-OVERRIDES-BULK",
-      `SELECT attendance_date_shift_override_id, employee_id, work_shift_id,
-              DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date
-         FROM attendance_date_shift_override
-        WHERE employee_id IN (?)
-          AND attendance_date BETWEEN ? AND ?
-        ORDER BY employee_id ASC, attendance_date ASC, attendance_date_shift_override_id ASC`,
+      `SELECT o.attendance_date_shift_override_id, o.employee_id, o.work_shift_id,
+              DATE_FORMAT(o.attendance_date, '%Y-%m-%d') AS attendance_date
+         FROM attendance_date_shift_override o
+        WHERE o.employee_id IN (?)
+          AND o.attendance_date BETWEEN ? AND ?
+          AND ${activeOverrideCondition("o")}
+        ORDER BY o.employee_id ASC, o.attendance_date ASC, o.attendance_date_shift_override_id ASC`,
       [employeeIds, fromDate, toDate]
     );
   }

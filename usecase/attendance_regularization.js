@@ -1128,12 +1128,31 @@ module.exports = (
    *
    * PAYROLL LOCK, unchanged and with no override.
    *
-   * SHIFT_CHANGE IS NOT REVOCABLE HERE.
+   * SHIFT_CHANGE - the one type whose two outcomes differ:
+   *
+   *   APPROVED  -> CANCELLED. The approval's one-day override stops applying
+   *                (the row stays as history; every reader skips an override
+   *                whose request is CANCELLED), the date is recalculated on
+   *                the shift that applies without it - the permanent shift,
+   *                or an earlier override - and the OT that shift authorised
+   *                is gone with it. REFUSED while any OT decision stands on
+   *                the date (open, approved or rejected): on a shift-changed
+   *                date OT is measured against the approved shift, so that
+   *                claim must be revoked first and made again against the
+   *                real day.
+   *   REJECTED  -> REOPENED. The rejecting stage goes back to PENDING and
+   *                the request resumes there, in that approver's queue;
+   *                earlier approvals stand. Only where the shift request
+   *                workflow would accept the request now: inside the date
+   *                window, not payroll-locked, no HR block, and no other open
+   *                or approved shift request for the date.
+   *   PENDING   -> refused: it is still in approval.
    */
   const REVOCABLE_TYPES = [
     REQUEST_TYPE.REGULARIZATION,
     REQUEST_TYPE.REGULARIZATION_WITH_OT,
     REQUEST_TYPE.OT,
+    REQUEST_TYPE.SHIFT_CHANGE,
   ];
 
   const revokeDecision = async ({ actor, request_id, stage_no = null, reason, now = null }) => {
@@ -1157,11 +1176,7 @@ module.exports = (
     const { request, steps } = snapshot;
 
     if (!REVOCABLE_TYPES.includes(request.request_type)) {
-      throw validationError(
-        request.request_type === REQUEST_TYPE.SHIFT_CHANGE
-          ? "A shift change decision cannot be revoked here"
-          : `A ${request.request_type} decision cannot be revoked`
-      );
+      throw validationError(`A ${request.request_type} decision cannot be revoked`);
     }
     if (request.status === REQUEST_STATUS.CANCELLED) throw validationError("This request has already been revoked");
     if (request.closure_reason) {
@@ -1169,6 +1184,11 @@ module.exports = (
         "This request was closed by the payroll lock, not by an approver, and cannot be revoked"
       );
     }
+    const isShift = request.request_type === REQUEST_TYPE.SHIFT_CHANGE;
+    if (isShift && request.status === REQUEST_STATUS.PENDING) {
+      throw validationError("This shift change request is still in approval - there is no decision to revoke");
+    }
+    const reopen = isShift && request.status === REQUEST_STATUS.REJECTED;
 
     /*
      * WHICH DECISION IS BEING VOIDED. For a decided request, the stage that
@@ -1195,6 +1215,9 @@ module.exports = (
       }
       stageNo = Number(target.stage_no);
       originalDecision = target.decision;
+      if (reopen && originalDecision !== STEP_DECISION.REJECTED) {
+        throw validationError("A rejected shift change reopens at the stage that rejected it");
+      }
     } else {
       const prior =
         typeof attendanceRegularizationRepo.getLatestRevocation === "function"
@@ -1210,21 +1233,74 @@ module.exports = (
     }
 
     const employeeId = Number(request.requested_for_employee_id);
+    let locked = [];
     if (typeof attendanceCalculationUsecase.findPayrollLockedPeriods === "function") {
-      const locked = await attendanceCalculationUsecase.findPayrollLockedPeriods([
+      locked = await attendanceCalculationUsecase.findPayrollLockedPeriods([
         { employee_id: employeeId, attendance_date: request.attendance_date },
       ]);
       if (locked.length > 0) throw payrollLockedActionError(locked, "This revocation");
     }
 
-    // The day WITHOUT this request - no approval state from it, no punch of
-    // it - which is exactly what it is once it is cancelled.
-    const [voidedDay] = await attendanceCalculationUsecase.calculateRange({
-      employee_id: employeeId,
-      from_date: request.attendance_date,
-      to_date: request.attendance_date,
-      exclude_request_id: requestId,
-    });
+    if (reopen) {
+      // THE SHIFT REQUEST WORKFLOW'S OWN GATES, as `raiseShiftChangeRequest`
+      // applies them: the date window and the payroll lock
+      // (`decidePreconditions`), another open or approved shift request for
+      // the date, and the HR block. A request the workflow would refuse now
+      // is not put back in front of an approver.
+      const existing = await attendanceRegularizationRepo.findRequestsForDates(employeeId, [request.attendance_date]);
+      const rival = (existing || []).find(
+        (r) =>
+          r.request_type === REQUEST_TYPE.SHIFT_CHANGE &&
+          Number(r.attendance_approval_request_id) !== requestId &&
+          (r.status === REQUEST_STATUS.PENDING || r.status === REQUEST_STATUS.APPROVED)
+      );
+      const blocked = shiftChangeEligibility.decidePreconditions({
+        attendance_date: request.attendance_date,
+        today: istToday(),
+        payroll_locked: locked,
+        existing_request: rival || null,
+      });
+      if (blocked) throw validationError(`This rejection cannot be reopened: ${blocked.reason}`);
+      const activeBlock = await activeBlockFor(employeeId, request.attendance_date);
+      if (shiftChangeBlock.isActive(activeBlock)) {
+        throw validationError(
+          `This rejection cannot be reopened: ${shiftChangeBlock.blockMessage({
+            attendance_date: request.attendance_date,
+            reason: activeBlock.reason,
+          })}`
+        );
+      }
+    }
+
+    // THE DAY AS THE REVOCATION LEAVES IT. Cancelled: the day WITHOUT this
+    // request - no approval state from it, no punch of it, and for an
+    // approved SHIFT_CHANGE no override of it, so the date is dated and
+    // calculated on the shift that applies without it and its authorised OT
+    // is gone. Reopened: the day with the request PENDING again, which for a
+    // shift request changes only the request state beside the day.
+    const [voidedDay] = await attendanceCalculationUsecase.calculateRange(
+      reopen
+        ? {
+            employee_id: employeeId,
+            from_date: request.attendance_date,
+            to_date: request.attendance_date,
+            assume: {
+              attendance_approval_request_id: requestId,
+              attendance_date: request.attendance_date,
+              request_type: request.request_type,
+              status: REQUEST_STATUS.PENDING,
+              candidate_ot_minutes: request.candidate_ot_minutes,
+              reason: request.reason,
+              approved_ot_minutes: 0,
+            },
+          }
+        : {
+            employee_id: employeeId,
+            from_date: request.attendance_date,
+            to_date: request.attendance_date,
+            exclude_request_id: requestId,
+          }
+    );
     const dayState = dayStateOf(
       voidedDay || { attendance_date: request.attendance_date, shift_snapshot: null },
       { now }
@@ -1985,7 +2061,12 @@ module.exports = (
           !row.closure_reason &&
           (row.status === REQUEST_STATUS.APPROVED ||
             row.status === REQUEST_STATUS.REJECTED ||
-            (row.status === REQUEST_STATUS.PENDING && (revocationsByRequest.get(id) || []).length > 0)),
+            // A request the EARLIER reopening revoke left pending may still
+            // be voided - never a reopened Shift rejection, which is simply
+            // back in approval.
+            (row.status === REQUEST_STATUS.PENDING &&
+              row.request_type !== REQUEST_TYPE.SHIFT_CHANGE &&
+              (revocationsByRequest.get(id) || []).length > 0)),
         revoked: row.status === REQUEST_STATUS.CANCELLED && (revocationsByRequest.get(id) || []).length > 0,
         revocations: (revocationsByRequest.get(id) || []).map((v) => ({
           attendance_approval_revocation_id: Number(v.attendance_approval_revocation_id),
@@ -2234,7 +2315,9 @@ module.exports = (
                 new_status: done.status,
                 message:
                   action === BULK_ACTION.REVOKE
-                    ? "Revoked - the request is cancelled"
+                    ? done.status === REQUEST_STATUS.PENDING
+                      ? `Revoked - the rejection is withdrawn and the request is back in approval at stage ${done.reopened_stage_no}`
+                      : "Revoked - the request is cancelled"
                     : done.status === REQUEST_STATUS.PENDING
                     ? "Passed to the next stage"
                     : done.status === REQUEST_STATUS.APPROVED
@@ -2242,6 +2325,11 @@ module.exports = (
                     : "Rejected",
               });
               if (done.current_stage_no !== undefined) result.current_stage_no = done.current_stage_no;
+            } else if (done && done.code === 409 && done.reason_code) {
+              // A RULE the transaction applied on the locked rows (an OT
+              // claim standing on the date, a competing request) - skipped,
+              // with the rule, exactly as a pre-check refusal would be.
+              Object.assign(result, { outcome: BULK_OUTCOME.SKIPPED, code: done.reason_code, message: done.msg });
             } else {
               Object.assign(result, {
                 outcome: BULK_OUTCOME.FAILED,

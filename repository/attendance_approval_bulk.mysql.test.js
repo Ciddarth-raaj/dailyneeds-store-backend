@@ -133,6 +133,7 @@ const TABLES = [
   "new_employee",
 ];
 
+const OUTCOME_MIGRATION = path.join(__dirname, "..", "migrations/mysql/migrations/sqls/20261106120000-attendance-approval-revocation-outcome-up.sql");
 const q = (pool, sql, params = []) =>
   new Promise((resolve, reject) => pool.query(sql, params, (err, rows) => (err ? reject(err) : resolve(rows))));
 
@@ -148,6 +149,7 @@ describe("bulk approval actions, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
     for (const t of TABLES) await q(pool, `DROP TABLE IF EXISTS ${t}`);
     for (const ddl of SCHEMA) await q(pool, ddl);
     await q(pool, fs.readFileSync(REVOCATION_MIGRATION, "utf8"));
+    await q(pool, fs.readFileSync(OUTCOME_MIGRATION, "utf8"));
     await q(pool, fs.readFileSync(BULK_MIGRATION, "utf8"));
     repo = buildRepo(pool);
     calcRepo = buildCalcRepo(pool);
@@ -332,20 +334,15 @@ describe("bulk approval actions, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
     }
   });
 
-  it("14. Attendance revoke is unchanged (CANCELLED, punch no longer effective); a Shift decision is still NOT revocable", async () => {
+  it("14. Attendance revoke is unchanged: CANCELLED, and its punch no longer effective (Shift revoke: attendance_shift_revoke.mysql.test.js)", async () => {
     await seed({ id: 100, type: "REGULARIZATION", status: "APPROVED", stage: 1, finalization: "SETTLED", steps: APPROVED_FINAL });
     await q(pool, "INSERT INTO attendance_regularized_punch (attendance_approval_request_id, employee_id, attendance_date, punch_time, created_by) VALUES (100, ?, ?, ?, ?)", [EMP, DATE, `${DATE} 18:00:00`, EMP]);
-    await seed({ id: 101, type: "SHIFT_CHANGE", emp: EMP2, status: "APPROVED", stage: 1, finalization: "SETTLED", steps: APPROVED_FINAL });
     const att = await bulk({ action: "REVOKE", request_type: "REGULARIZATION", revoke_actor: adminRevoker, items: [{ request_id: 100 }], reason: "wrong punch" });
     assert.equal(att.results[0].outcome, "SUCCEEDED");
+    assert.equal(att.results[0].new_status, "CANCELLED");
     assert.equal((await request(100)).status, "CANCELLED");
     assert.deepEqual(await calcRepo.getApprovedRegularizedPunches(EMP, DATE, DATE), []);
-
-    const shift = await bulk({ action: "REVOKE", request_type: "SHIFT_CHANGE", revoke_actor: adminRevoker, items: [{ request_id: 101 }], reason: "wrong shift" });
-    assert.equal(shift.results[0].outcome, "SKIPPED");
-    assert.match(shift.results[0].message, /shift change decision cannot be revoked/);
-    assert.equal((await request(101)).status, "APPROVED", "the Shift rule is not changed to suit bulk");
-    assert.equal((await revocations(101)).length, 0);
+    assert.equal((await revocations(100))[0].new_request_status, "CANCELLED");
   });
 
   it("bulk APPROVE on the Shift tab runs the single Shift approval: the one-day override is written with it", async () => {

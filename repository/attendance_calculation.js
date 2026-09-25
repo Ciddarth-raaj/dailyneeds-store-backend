@@ -1,4 +1,5 @@
 const logger = require("../utils/logger");
+const { activeOverrideCondition } = require("../utils/shift_override_active");
 const {
   PAYROLL_LOCK_STATUS,
   periodsTouched,
@@ -378,6 +379,7 @@ class AttendanceCalculationRepository {
            ON r.attendance_approval_request_id = o.attendance_approval_request_id
         WHERE o.employee_id = ?
           AND o.attendance_date BETWEEN ? AND ?
+          AND ${activeOverrideCondition("o")}
         ORDER BY o.attendance_date ASC, o.attendance_date_shift_override_id ASC`,
       [employeeId, fromDate, toDate]
     );
@@ -1025,9 +1027,10 @@ class AttendanceCalculationRepository {
          FROM employee_work_shift_assignment
         WHERE work_shift_id = ?
         UNION
-       SELECT DISTINCT employee_id
-         FROM attendance_date_shift_override
-        WHERE work_shift_id = ?`,
+       SELECT DISTINCT o.employee_id
+         FROM attendance_date_shift_override o
+        WHERE o.work_shift_id = ?
+          AND ${activeOverrideCondition("o")}`,
       [work_shift_id, work_shift_id]
     );
     const employeeIds = [...new Set((ids || []).map((row) => Number(row.employee_id)))];
@@ -1063,10 +1066,11 @@ class AttendanceCalculationRepository {
       ),
       this._read(
         "LIST-SHIFT-PROPAGATION-OVERRIDES",
-        `SELECT employee_id, DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date
-           FROM attendance_date_shift_override
-          WHERE work_shift_id = ? AND employee_id IN (?)
-          GROUP BY employee_id, attendance_date`,
+        `SELECT o.employee_id, DATE_FORMAT(o.attendance_date, '%Y-%m-%d') AS attendance_date
+           FROM attendance_date_shift_override o
+          WHERE o.work_shift_id = ? AND o.employee_id IN (?)
+            AND ${activeOverrideCondition("o")}
+          GROUP BY o.employee_id, o.attendance_date`,
         [work_shift_id, employeeIds]
       ),
       this._read(

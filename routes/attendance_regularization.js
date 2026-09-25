@@ -522,9 +522,11 @@ class AttendanceRegularizationRoutes {
     );
 
     /**
-     * ADMIN REVOKE: VOID a decided REGULARIZATION or OT request. It becomes
-     * CANCELLED - it is not reopened, and its steps keep their decisions - and
-     * the employee may raise a fresh request for the date.
+     * ADMIN REVOKE a decided request. Attendance, OT and an APPROVED Shift
+     * are VOIDED - CANCELLED, steps kept, the date recalculated without it
+     * (for Shift: its one-day override stops applying), and the employee may
+     * raise a fresh request. A REJECTED Shift is REOPENED at the stage that
+     * rejected it. See `usecase/attendance_regularization.js#revokeDecision`.
      *
      * ITS OWN ENDPOINT, never a third value of `decision` above: approving and
      * rejecting move a chain forward and are open to every approver the chain

@@ -28,7 +28,10 @@ describe(NAME, () => {
     // Sorts after every migration that existed when it was written; the only
     // ones after it are the ones added since, named here so a new one is a
     // deliberate addition to this list.
-    const LATER = ["20261105120000-attendance-approval-bulk-action.js"];
+    const LATER = [
+      "20261105120000-attendance-approval-bulk-action.js",
+      "20261106120000-attendance-approval-revocation-outcome.js",
+    ];
     assert.deepEqual(others.filter((f) => f > `${NAME}.js`).sort(), LATER);
   });
 

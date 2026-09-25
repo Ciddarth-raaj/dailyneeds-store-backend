@@ -273,9 +273,9 @@ describe("who may revoke, and what", () => {
     await assert.rejects(() => revoke(w), /already been revoked/);
   });
 
-  it("14. a SHIFT_CHANGE decision is refused", async () => {
-    const w = world({ request: { ...OT_REQUEST, request_type: "SHIFT_CHANGE" }, punches: OT_DAY });
-    await assert.rejects(() => revoke(w), /shift change decision cannot be revoked/);
+  it("14. a SHIFT_CHANGE still in approval is refused (a decided one is revocable - usecase/shift_assignment_and_one_day_requests.test.js F.)", async () => {
+    const w = world({ request: { ...OT_REQUEST, request_type: "SHIFT_CHANGE", status: "PENDING", steps: chain(["APPROVED", "PENDING", "PENDING"]) }, punches: OT_DAY });
+    await assert.rejects(() => revoke(w), /shift change request is still in approval/);
     assert.equal(w.calls.revokeRequest.length, 0);
   });
 

@@ -118,6 +118,7 @@ const TABLES = [
   "new_employee",
 ];
 
+const OUTCOME_MIGRATION = path.join(__dirname, "..", "migrations/mysql/migrations/sqls/20261106120000-attendance-approval-revocation-outcome-up.sql");
 const q = (pool, sql, params = []) =>
   new Promise((resolve, reject) => pool.query(sql, params, (err, rows) => (err ? reject(err) : resolve(rows))));
 
@@ -133,6 +134,7 @@ describe("admin revoke = VOID, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL i
     for (const t of TABLES) await q(pool, `DROP TABLE IF EXISTS ${t}`);
     for (const ddl of SCHEMA) await q(pool, ddl);
     await q(pool, fs.readFileSync(MIGRATION, "utf8"));
+    await q(pool, fs.readFileSync(OUTCOME_MIGRATION, "utf8"));
     repo = buildRepo(pool);
     calcRepo = buildCalcRepo(pool);
   });
@@ -419,9 +421,13 @@ describe("admin revoke = VOID, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL i
     assert.equal((await state(102)).r.status, "APPROVED");
   });
 
-  it("no statement anywhere resets approval steps to PENDING, and the audit is append-only", () => {
+  it("only a REJECTED SHIFT's reopen resets a step to PENDING - an OT or Attendance revoke never rewinds a chain - and the audit is append-only", () => {
     const src = fs.readFileSync(path.join(__dirname, "attendance_regularization.js"), "utf8");
-    assert.ok(!/SET decision = 'PENDING'/.test(src), "a revoke never rewinds a chain");
+    const resets = [...src.matchAll(/SET decision = 'PENDING'/g)];
+    assert.equal(resets.length, 1, "exactly one statement resets a step");
+    const reopenBlock = src.slice(src.indexOf("if (reopen) {"), src.indexOf("} else {", src.indexOf("if (reopen) {")));
+    assert.ok(reopenBlock.includes("SET decision = 'PENDING'"), "and it is the rejected-Shift reopen");
+    assert.match(reopenBlock, /AND decision = 'REJECTED'/, "it reopens only the rejecting stage");
     const dirs = ["repository", "usecase", "routes", "services", "utils"].map((d) => path.join(__dirname, "..", d));
     for (const dir of dirs) {
       for (const f of fs.readdirSync(dir).filter((n) => n.endsWith(".js") && !n.endsWith(".test.js"))) {

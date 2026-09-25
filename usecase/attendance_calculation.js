@@ -517,7 +517,14 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    * proposed-punch calculation, so all three see one definition of "what
    * applied on this date".
    */
-  const buildContext = async ({ employee_id, from, to, assume_override = null, assume_io_times = null }) => {
+  const buildContext = async ({
+    employee_id,
+    from,
+    to,
+    assume_override = null,
+    assume_io_times = null,
+    exclude_request_id = null,
+  }) => {
     // ONE day of slack at the END for DATING - see the file header. A punch on
     // the morning after `to` can belong to `to`; a punch before `from` can
     // never belong to `from`.
@@ -571,7 +578,15 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     // An override that is being SAVED joins the stored ones in memory only, so
     // the day can be calculated under it inside the transaction that records
     // it. It carries the greatest id by construction, so it wins the date.
-    const overrides = [...(storedOverrides || [])];
+    // A SHIFT_CHANGE approval being REVOKED: its override is withdrawn with
+    // it, here, before any punch is dated - the shift decides the cutoff, so
+    // the day without the approval must be dated without it too. Any other
+    // override on the date (a management edit, an earlier row) stays.
+    const withdrawnRequest =
+      exclude_request_id === null || exclude_request_id === undefined ? null : Number(exclude_request_id);
+    const overrides = (storedOverrides || []).filter(
+      (row) => withdrawnRequest === null || Number(row && row.attendance_approval_request_id) !== withdrawnRequest
+    );
     if (assume_override) {
       overrides.push({
         attendance_date_shift_override_id: Number.MAX_SAFE_INTEGER,
@@ -825,8 +840,9 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     // THE DAY AS IF ONE REQUEST DID NOT EXIST. An administrator's revocation
     // CANCELS a request inside the transaction that asks for this day, so the
     // committed row must already be the day without it: no approval state
-    // from it and no regularized punch of it. Only that one request is
-    // withdrawn - any other request on the date is read as stored.
+    // from it, no regularized punch of it and - for an approved SHIFT_CHANGE -
+    // no override of it. Only that one request is withdrawn - any other
+    // request or override on the date is read as stored.
     exclude_request_id = null,
     // THE READ OVERLAY, supplied only by `readRange`. A map of
     // `YYYY-MM-DD` -> stored row: where one exists for a date that has
@@ -848,7 +864,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       throw validationError(`A range may cover at most ${MAX_RANGE_DAYS} days`);
     }
 
-    const context = await buildContext({ employee_id, from, to, assume_override, assume_io_times });
+    const context = await buildContext({ employee_id, from, to, assume_override, assume_io_times, exclude_request_id });
     if (exclude_request_id !== null && exclude_request_id !== undefined) {
       const withdrawn = Number(exclude_request_id);
       const kept = (row) => Number(row && row.attendance_approval_request_id) !== withdrawn;

@@ -1,4 +1,5 @@
 const logger = require("../utils/logger");
+const { activeOverrideCondition } = require("../utils/shift_override_active");
 const { JOINED_ON } = require("../utils/joining_date");
 const {
   getConnectionAsync,
@@ -691,10 +692,11 @@ class PayrunCalculationRepository {
       ),
       this._read(
         "PENDING-PROPAGATION-OVERRIDES",
-        `SELECT work_shift_id, DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date
-           FROM attendance_date_shift_override
-          WHERE employee_id = ? AND work_shift_id IN (?)
-          GROUP BY work_shift_id, attendance_date`,
+        `SELECT o.work_shift_id, DATE_FORMAT(o.attendance_date, '%Y-%m-%d') AS attendance_date
+           FROM attendance_date_shift_override o
+          WHERE o.employee_id = ? AND o.work_shift_id IN (?)
+            AND ${activeOverrideCondition("o")}
+          GROUP BY o.work_shift_id, o.attendance_date`,
         [employee_id, shiftIds],
         conn
       ),

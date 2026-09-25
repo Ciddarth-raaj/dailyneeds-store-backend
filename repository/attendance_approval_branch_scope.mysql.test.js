@@ -126,6 +126,7 @@ const REQUESTS = [
     steps: [["EMPLOYEE", null, FIRST, "FINAL", "PENDING"]] },
 ];
 
+const OUTCOME_MIGRATION = path.join(__dirname, "..", "migrations/mysql/migrations/sqls/20261106120000-attendance-approval-revocation-outcome-up.sql");
 const query = (pool, sql, params = []) =>
   new Promise((resolve, reject) => pool.query(sql, params, (err, rows) => (err ? reject(err) : resolve(rows))));
 
@@ -138,6 +139,7 @@ describe("approval queue outlet scope, as SQL (employee 106 shape)", { skip: !UR
     for (const t of TABLES) await query(pool, `DROP TABLE IF EXISTS ${t}`);
     for (const ddl of SCHEMA) await query(pool, ddl);
     await query(pool, fs.readFileSync(REVOCATION_MIGRATION, "utf8"));
+    await query(pool, fs.readFileSync(OUTCOME_MIGRATION, "utf8"));
     await query(pool, "INSERT INTO outlets VALUES ?", [[[WAREHOUSE, "Warehouse"], [STORE_A, "Store A"], [HEAD_OFFICE, "Head Office"], [STORE_B, "Store B"]]]);
     await query(pool, "INSERT INTO new_employee VALUES ?", [[
       [ROAMER, "Roaming Operations", WAREHOUSE, 20],

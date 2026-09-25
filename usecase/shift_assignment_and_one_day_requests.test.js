@@ -140,6 +140,14 @@ function build(state = {}) {
     getDateShiftOverrides: async (id, from, to) =>
       overrides
         .filter((o) => o.employee_id === id && o.attendance_date >= from && o.attendance_date <= to)
+        // `utils/shift_override_active.js`, as the real query: an override
+        // whose authorising request was REVOKED (CANCELLED) no longer applies.
+        .filter(
+          (o) =>
+            !store.requests.some(
+              (r) => r.attendance_approval_request_id === o.attendance_approval_request_id && r.status === "CANCELLED"
+            )
+        )
         .map((o) => {
           const request = store.requests.find(
             (r) => r.attendance_approval_request_id === o.attendance_approval_request_id
@@ -186,7 +194,8 @@ function build(state = {}) {
     // pass here and be null in production.
     getApprovalStateByDate: async (id, from, to) =>
       store.requests
-        .filter((r) => r.requested_for_employee_id === id && r.attendance_date >= from && r.attendance_date <= to)
+        // `status <> 'CANCELLED'`, as the real query.
+        .filter((r) => r.requested_for_employee_id === id && r.attendance_date >= from && r.attendance_date <= to && r.status !== "CANCELLED")
         .map((r) => ({ ...r, rejection_remarks: null })),
     getEmploymentWindow: async (id) => EMPLOYEES.find((e) => e.employee_id === Number(id)) || null,
     getMonthlyGrossAsOf: async () => null,
@@ -263,6 +272,32 @@ function build(state = {}) {
           ? { attendance_regularized_punch_id: r.attendance_approval_request_id, punch_time: r.punch.punch_time }
           : null,
       };
+    },
+    // ADMIN REVOKE. The snapshot and the state change the real transaction
+    // makes (repository/attendance_shift_revoke.mysql.test.js proves the SQL):
+    // an approved request is CANCELLED with its steps untouched; a rejected
+    // SHIFT_CHANGE is REOPENED at the rejecting stage.
+    getRevocationSnapshot: async (id) => {
+      const r = store.requests.find((x) => x.attendance_approval_request_id === Number(id));
+      if (!r) return null;
+      const steps = store.steps.filter((st) => st.attendance_approval_request_id === r.attendance_approval_request_id);
+      return { request: { ...r, closure_reason: r.closure_reason || null }, steps: steps.map((st) => ({ ...st })), fingerprint: `fp-${id}-${r.status}` };
+    },
+    getLatestRevocation: async () => null,
+    revokeRequest: async (args) => {
+      saved.revocations = saved.revocations || [];
+      saved.revocations.push(args);
+      const r = store.requests.find((x) => x.attendance_approval_request_id === args.requestId);
+      const reopen = r.request_type === "SHIFT_CHANGE" && r.status === "REJECTED";
+      if (reopen) {
+        const st = store.steps.find((x) => x.attendance_approval_request_id === args.requestId && x.stage_no === args.stageNo);
+        Object.assign(st, { decision: "PENDING", decided_by_employee_id: null, decided_at: null, remarks: null, decision_source: null });
+        Object.assign(r, { status: "PENDING", current_stage_no: args.stageNo, finalization_state: "NOT_REQUIRED", decided_at: null });
+      } else {
+        Object.assign(r, { status: "CANCELLED", approved_ot_minutes: 0, finalization_state: "SETTLED" });
+      }
+      saved.calculations.push(args.calculations || []);
+      return { code: 200, status: r.status, reopened_stage_no: reopen ? args.stageNo : null };
     },
     decideStage: async (args) => {
       const r = store.requests.find((x) => x.attendance_approval_request_id === args.requestId);
@@ -473,7 +508,7 @@ function build(state = {}) {
   };
 
   const calculation = buildCalculation(calcRepo);
-  const regularization = buildRegularization(regRepo, calculation, approverSetupRepo);
+  const regularization = buildRegularization(regRepo, calculation, approverSetupRepo, state.shiftChangeBlockRepo || null);
   calculation.setOtRequestService(regularization);
 
   const workShift = buildWorkShift(workShiftRepo);
@@ -2507,5 +2542,229 @@ describe("C. one-day shift change that EXTENDS the day: 09:00-18:00 -> 09:00-21:
     const permanent = await w.calculation.shiftForDate({ employee_id: EMPLOYEE, attendance_date: DATE });
     assert.equal(permanent.base.work_shift_id, GEN, "the permanent shift for the 18th is still 09:00-18:00");
     assert.equal(permanent.work_shift_id, G21, "while the date itself resolves to the approved shift");
+  });
+});
+
+/* ===================================== ADMIN REVOKE of a one-day shift */
+
+describe("F. Admin Revoke of a one-day SHIFT change - single and bulk, on the production engine", () => {
+  const DATE = "2026-09-18";
+  const ADMIN = { employee_id: 900, user_id: 5, user_type: 2, branch_scope: ALL_BRANCHES };
+  const worked = [punch(1, EMPLOYEE, `${DATE} 10:00:00`), punch(2, EMPLOYEE, `${DATE} 20:00:00`)];
+
+  const raise = (world) =>
+    world.regularization.raiseShiftChangeRequest({
+      actor: self(EMPLOYEE), attendance_date: DATE, work_shift_id: LONG, reason: "Covering the full day", today: TODAY,
+    });
+  const approveFully = async (world) => {
+    const { attendance_approval_request_id: id } = await raise(world);
+    await world.regularization.decide({ actor: approver(7), request_id: id, decision: STEP_DECISION.APPROVED });
+    await world.regularization.decide({ actor: approver(8), request_id: id, decision: STEP_DECISION.APPROVED });
+    return id;
+  };
+  const rejectAtFinal = async (world) => {
+    const { attendance_approval_request_id: id } = await raise(world);
+    await world.regularization.decide({ actor: approver(7), request_id: id, decision: STEP_DECISION.APPROVED });
+    await world.regularization.decide({ actor: approver(8), request_id: id, decision: STEP_DECISION.REJECTED, remarks: "not needed that day" });
+    return id;
+  };
+  const dayOf = async (world) =>
+    (await world.calculation.calculateRange({ employee_id: EMPLOYEE, from_date: DATE, to_date: DATE }))[0];
+  const requestOf = (world, id) => world.store.requests.find((r) => r.attendance_approval_request_id === id);
+  const stepsOf = (world, id) =>
+    world.store.steps.filter((s) => s.attendance_approval_request_id === id).map((s) => [s.stage_no, s.decision, s.decided_by_employee_id]);
+  // The fields that make the day what it is - compared with a day on which
+  // the employee never had the shift approved at all.
+  const essence = (d) => ({
+    work_shift_id: d.work_shift_id, status: d.status, punch_count: d.punch_count,
+    effective_punches: JSON.stringify(d.effective_punches), worked_minutes: d.worked_minutes,
+    regular_minutes: d.regular_minutes, nrm_minutes: d.nrm_minutes, shortage_minutes: d.shortage_minutes,
+    candidate_ot_minutes: d.candidate_ot_minutes, approved_ot_minutes: d.approved_ot_minutes,
+    shift_authorised_ot_minutes: d.shift_authorised_ot_minutes, shift_authorising_request_id: d.shift_authorising_request_id,
+    ot_claim_state: d.ot_claim_state,
+  });
+  const neverApproved = async () => essence(await dayOf(build({ rawPunches: worked })));
+
+  it("1./5./6./7. APPROVED Shift -> Revoke: CANCELLED; the override stops applying; the day is recalculated exactly as if the shift had never been approved", async () => {
+    const world = build({ rawPunches: worked });
+    const id = await approveFully(world);
+    const before = await dayOf(world);
+    assert.equal(before.work_shift_id, LONG, "sanity: the approved one-day shift applies");
+    assert.equal(before.shift_authorised_ot_minutes, 300, "sanity: and authorises 300 OT");
+    assert.equal(before.ot_claim_state, "APPROVED_VIA_SHIFT_CHANGE");
+    const overridesBefore = world.overrides.length;
+
+    const out = await world.regularization.revokeDecision({ actor: ADMIN, request_id: id, reason: "approved in error" });
+    assert.equal(out.code, 200);
+    assert.equal(out.status, "CANCELLED");
+    assert.equal(requestOf(world, id).status, "CANCELLED");
+    assert.deepEqual(stepsOf(world, id), [[1, "APPROVED", 7], [2, "APPROVED", 8]], "the chain keeps its decisions");
+    assert.equal(world.overrides.length, overridesBefore, "5. the override row is kept as history - not deleted");
+
+    // 7. The day handed to the revoke transaction, and the day read live
+    // afterwards, are both the day as it would be had the shift never been
+    // approved: the permanent shift, its NRM and shortage, no authorised OT.
+    const handed = world.saved.revocations[0].calculations;
+    assert.equal(handed.length, 1, "a closed day is rewritten in the same transaction");
+    const after = await dayOf(world);
+    const baseline = await neverApproved();
+    assert.deepEqual(essence(after), baseline);
+    assert.equal(after.work_shift_id, EVE, "5. back on the permanent shift");
+    assert.equal(after.shift_authorised_ot_minutes, 0, "6. the shift-authorised OT is gone");
+    assert.equal(after.approved_ot_minutes, 0);
+    assert.notEqual(after.ot_claim_state, "APPROVED_VIA_SHIFT_CHANGE");
+    assert.equal(Number(handed[0].shift_authorised_ot_minutes), 0, "the stored row pays no shift-authorised OT");
+    assert.equal(Number(handed[0].approved_ot_minutes), 0);
+    assert.equal(handed[0].shift_authorising_request_id, null, "and names no authorising request");
+    assert.equal(Number(handed[0].work_shift_id), Number(baseline.work_shift_id));
+    assert.equal(after.shift_change_state, "NONE", "the date carries no shift request any more");
+  });
+
+  it("after an approved Shift is revoked the employee may ask again - a NEW request", async () => {
+    const world = build({ rawPunches: worked });
+    const id = await approveFully(world);
+    await world.regularization.revokeDecision({ actor: ADMIN, request_id: id, reason: "approved in error" });
+    const again = await raise(world);
+    assert.notEqual(again.attendance_approval_request_id, id);
+  });
+
+  it("2. REJECTED Shift -> Revoke: REOPENED at the rejecting stage, back in that approver's queue, and can be approved again", async () => {
+    const world = build({ rawPunches: worked });
+    const id = await rejectAtFinal(world);
+    assert.equal((await dayOf(world)).work_shift_id, EVE, "sanity: a rejection changed nothing");
+
+    const out = await world.regularization.revokeDecision({ actor: ADMIN, request_id: id, reason: "rejected in error" });
+    assert.equal(out.status, "PENDING");
+    assert.equal(out.reopened_stage_no, 2);
+    assert.equal(requestOf(world, id).status, "PENDING");
+    assert.equal(requestOf(world, id).current_stage_no, 2);
+    assert.deepEqual(stepsOf(world, id), [[1, "APPROVED", 7], [2, "PENDING", null]], "the earlier approval stands; the rejecting stage is open again");
+    assert.equal(world.saved.revocations[0].stageNo, 2);
+    assert.equal(world.saved.revocations[0].originalDecision, "REJECTED");
+
+    const queue = await world.regularization.listApprovals({ actor: approver(8), request_type: "SHIFT_CHANGE", status: "PENDING" });
+    const row = queue.rows.find((r) => r.attendance_approval_request_id === id);
+    assert.ok(row && row.actionable, "the Final approver can act on it again");
+    assert.equal(row.revocable, false, "a reopened request is in approval - nothing to revoke");
+
+    // The day is untouched by the reopen: a pending shift request changes no attendance.
+    assert.equal((await dayOf(world)).work_shift_id, EVE);
+    assert.equal((await dayOf(world)).shift_change_state, "PENDING");
+
+    await world.regularization.decide({ actor: approver(8), request_id: id, decision: STEP_DECISION.APPROVED });
+    const approvedNow = await dayOf(world);
+    assert.equal(approvedNow.work_shift_id, LONG, "approved on the second look: the shift applies");
+    assert.equal(approvedNow.shift_authorised_ot_minutes, 300);
+  });
+
+  it("a rejected Shift is NOT reopened where the shift request workflow would refuse it now", async () => {
+    // The employee asked again after the rejection.
+    const world = build({ rawPunches: worked });
+    const id = await rejectAtFinal(world);
+    const fresh = await raise(world);
+    await assert.rejects(
+      () => world.regularization.revokeDecision({ actor: ADMIN, request_id: id, reason: "rejected in error" }),
+      new RegExp(`cannot be reopened: .*already pending \\(#${fresh.attendance_approval_request_id}\\)`)
+    );
+    assert.equal(requestOf(world, id).status, "REJECTED");
+
+    // HR blocks shift changes on the date AFTER the request was rejected.
+    const hr = { active: false };
+    const blocked = build({
+      rawPunches: worked,
+      shiftChangeBlockRepo: { findActive: async () => (hr.active ? { reason: "stock count", removed_at: null } : null) },
+    });
+    const id2 = await rejectAtFinal(blocked);
+    hr.active = true;
+    await assert.rejects(
+      () => blocked.regularization.revokeDecision({ actor: ADMIN, request_id: id2, reason: "rejected in error" }),
+      /cannot be reopened: Shift change request is not allowed .*HR marked this date as not eligible: stock count/
+    );
+    assert.equal(requestOf(blocked, id2).status, "REJECTED");
+  });
+
+  /** The same requests, steps and overrides, in a world whose September payroll is LOCKED. */
+  const lockedCopyOf = (world) => {
+    const locked = build({ rawPunches: worked, lockedMonths: ["2026-9"] });
+    locked.store.requests.push(...world.store.requests.map((r) => ({ ...r })));
+    locked.store.steps.push(...world.store.steps.map((st) => ({ ...st })));
+    locked.overrides.push(...world.overrides.map((o) => ({ ...o })));
+    return locked;
+  };
+
+  it("8. a payroll-LOCKED month: neither an approved nor a rejected Shift can be revoked, and nothing changes", async () => {
+    const approvedWorld = build({ rawPunches: worked });
+    const approvedId = await approveFully(approvedWorld);
+    const lockedApproved = lockedCopyOf(approvedWorld);
+    await assert.rejects(
+      () => lockedApproved.regularization.revokeDecision({ actor: ADMIN, request_id: approvedId, reason: "approved in error" }),
+      (err) => err.code === "PAYROLL_MONTH_LOCKED"
+    );
+    assert.equal(requestOf(lockedApproved, approvedId).status, "APPROVED");
+    assert.equal((await dayOf(lockedApproved)).work_shift_id, LONG, "the locked day keeps its approved shift");
+    assert.equal((lockedApproved.saved.revocations || []).length, 0, "the transaction is never reached");
+
+    const rejectedWorld = build({ rawPunches: worked });
+    const rejectedId = await rejectAtFinal(rejectedWorld);
+    const lockedRejected = lockedCopyOf(rejectedWorld);
+    await assert.rejects(
+      () => lockedRejected.regularization.revokeDecision({ actor: ADMIN, request_id: rejectedId, reason: "rejected in error" }),
+      (err) => err.code === "PAYROLL_MONTH_LOCKED"
+    );
+    assert.equal(requestOf(lockedRejected, rejectedId).status, "REJECTED");
+  });
+
+  it("9. an out-of-scope user cannot revoke - a non-administrator, even the Final approver", async () => {
+    const world = build({ rawPunches: worked });
+    const id = await approveFully(world);
+    for (const actor of [approver(8), approver(7), self(EMPLOYEE)]) {
+      /* eslint-disable-next-line no-await-in-loop */
+      await assert.rejects(
+        () => world.regularization.revokeDecision({ actor, request_id: id, reason: "approved in error" }),
+        (err) => err.name === "ForbiddenError"
+      );
+    }
+    assert.equal(requestOf(world, id).status, "APPROVED");
+  });
+
+  it("a Shift request still in approval has no decision to revoke", async () => {
+    const world = build({ rawPunches: worked });
+    const { attendance_approval_request_id: id } = await raise(world);
+    await assert.rejects(
+      () => world.regularization.revokeDecision({ actor: ADMIN, request_id: id, reason: "not needed" }),
+      /still in approval/
+    );
+  });
+
+  it("3./4./11. BULK Shift revoke calls the same single revoke: approved -> CANCELLED, rejected -> reopened, and a refusal is skipped", async () => {
+    const world = build({ rawPunches: worked });
+    const approvedId = await approveFully(world);
+    // A second employee's rejected Shift on the same date.
+    const other = await world.regularization.raiseShiftChangeRequest({
+      actor: self(43), attendance_date: DATE, work_shift_id: LONG, reason: "Covering the full day", today: TODAY,
+    });
+    const rejectedId = other.attendance_approval_request_id;
+    await world.regularization.decide({ actor: approver(8), request_id: rejectedId, decision: STEP_DECISION.APPROVED }).catch(() => {});
+    const stepNow = world.store.steps.find((s) => s.attendance_approval_request_id === rejectedId && s.decision === "PENDING");
+    await world.regularization.decide({
+      actor: stepNow.approver_employee_id === 7 ? approver(7) : approver(8), request_id: rejectedId, decision: STEP_DECISION.REJECTED, remarks: "not needed that day",
+    });
+    const pendingOne = (await world.regularization.raiseShiftChangeRequest({
+      actor: self(EMPLOYEE), attendance_date: "2026-09-17", work_shift_id: LONG, reason: "Covering the full day", today: TODAY,
+    })).attendance_approval_request_id;
+
+    const out = await world.regularization.bulkAction({
+      actor: ADMIN, revoke_actor: ADMIN, action: "REVOKE", request_type: "SHIFT_CHANGE", reason: "decided in error",
+      items: [{ request_id: approvedId, status: "APPROVED" }, { request_id: rejectedId, status: "REJECTED" }, { request_id: pendingOne }],
+    });
+    const byId = Object.fromEntries(out.results.map((r) => [r.request_id, r]));
+    assert.deepEqual(out.summary, { requested: 3, succeeded: 2, skipped: 0, failed: 1 });
+    assert.deepEqual([byId[approvedId].previous_status, byId[approvedId].new_status], ["APPROVED", "CANCELLED"]);
+    assert.deepEqual([byId[rejectedId].previous_status, byId[rejectedId].new_status], ["REJECTED", "PENDING"]);
+    assert.match(byId[rejectedId].message, /back in approval at stage \d/);
+    assert.equal(byId[pendingOne].code, "STATE_CHANGED", "a pending one is not revocable from the Approved/Rejected tabs");
+    assert.equal((await dayOf(world)).work_shift_id, EVE, "the approved one's override no longer applies");
+    // The same single-record method did the work, once per request.
+    assert.deepEqual(world.saved.revocations.map((r) => r.requestId), [approvedId, rejectedId]);
   });
 });

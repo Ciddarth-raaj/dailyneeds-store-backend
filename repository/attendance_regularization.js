@@ -832,6 +832,12 @@ class AttendanceRegularizationRepository {
       await rollbackAsync(connection);
       return { code: 409, msg };
     };
+    // A refusal the caller should report as a RULE (skipped), not as a state
+    // that moved underneath it: a dependent OT claim, a conflicting request.
+    const refuseRule = async (reason_code, msg) => {
+      await rollbackAsync(connection);
+      return { code: 409, reason_code, msg };
+    };
     try {
       await beginTransactionAsync(connection);
 
@@ -862,6 +868,10 @@ class AttendanceRegularizationRepository {
         );
       }
       if (request.status === "CANCELLED") return await refuse("This request has already been revoked");
+      const isShift = request.request_type === "SHIFT_CHANGE";
+      if (request.status === "PENDING" && isShift) {
+        return await refuse("This shift change request is still in approval - there is no decision to revoke");
+      }
       if (request.status === "PENDING") {
         // Only a request the earlier (reopening) revoke put back in the queue.
         const [prior] = await queryAsync(
@@ -880,6 +890,13 @@ class AttendanceRegularizationRepository {
       // An APPROVED correction is what any OT on the date was claimed
       // against. Withdrawing it under an open or approved OT claim would
       // leave that claim priced on a day that no longer exists.
+      //
+      // An APPROVED SHIFT_CHANGE is what the date's OT is MEASURED against:
+      // on that date an OT request claims only the excess beyond the approved
+      // shift. Withdrawing the shift re-prices every OT figure on the date, so
+      // ANY OT decision still standing on it - open, approved or rejected
+      // (a rejection of the excess is not a rejection of the whole) - must be
+      // revoked first, and the employee then claims against the real day.
       if (request.request_type !== "OT" && request.status === "APPROVED") {
         const dependents = await queryAsync(
           connection,
@@ -889,16 +906,69 @@ class AttendanceRegularizationRepository {
               AND attendance_date = ?
               AND attendance_approval_request_id <> ?
               AND request_type = 'OT'
-              AND status IN ('PENDING', 'APPROVED')
+              AND status IN (${isShift ? "'PENDING', 'APPROVED', 'REJECTED'" : "'PENDING', 'APPROVED'"})
+              AND closure_reason IS NULL
             ORDER BY attendance_approval_request_id`,
           [employeeId, request.attendance_date, requestId]
         );
         if (dependents && dependents.length > 0) {
           const d = dependents[0];
-          return await refuse(
+          return await refuseRule(
+            "DEPENDENT_OT",
             `${request.attendance_date} has a ${String(d.status).toLowerCase()} OT request ` +
-              `(#${d.attendance_approval_request_id}) claimed against this correction; revoke that one first`
+              `(#${d.attendance_approval_request_id}) ${isShift ? "measured against this shift change" : "claimed against this correction"}; revoke that one first`
           );
+        }
+      }
+
+      // A REJECTED SHIFT_CHANGE is REOPENED, not voided. The employee may
+      // have asked again since the rejection (a rejection never blocks a
+      // fresh attempt); reopening beside another open or approved shift
+      // request for the date would give the date two competing shifts.
+      const reopen = isShift && request.status === "REJECTED";
+      if (reopen) {
+        const [rival] = await queryAsync(
+          connection,
+          `SELECT attendance_approval_request_id, status
+             FROM attendance_approval_request
+            WHERE requested_for_employee_id = ?
+              AND attendance_date = ?
+              AND attendance_approval_request_id <> ?
+              AND request_type = 'SHIFT_CHANGE'
+              AND status IN ('PENDING', 'APPROVED')
+            ORDER BY attendance_approval_request_id
+            LIMIT 1`,
+          [employeeId, request.attendance_date, requestId]
+        );
+        if (rival) {
+          return await refuseRule(
+            "CONFLICTING_REQUEST",
+            `${request.attendance_date} already has a ${String(rival.status).toLowerCase()} shift change request ` +
+              `(#${rival.attendance_approval_request_id}); this rejection cannot be reopened beside it`
+          );
+        }
+        // The HR block, re-read under the employee lock the block screen takes
+        // too (`SHARED_LOCK_SQL`), so a block laid while this was in flight
+        // cannot be overtaken: whichever commits second sees the other.
+        const [block] = await queryAsync(
+          connection,
+          `SELECT reason FROM attendance_shift_change_block
+            WHERE employee_id = ? AND attendance_date = ? AND removed_at IS NULL
+            LIMIT 1`,
+          [employeeId, request.attendance_date]
+        );
+        if (block) {
+          return await refuseRule(
+            "HR_BLOCKED",
+            `HR has blocked shift change requests for ${request.attendance_date}; this rejection cannot be reopened`
+          );
+        }
+        const rejecting = (steps || []).find((st) => Number(st.stage_no) === Number(stageNo));
+        const laterOpen = (steps || []).every(
+          (st) => Number(st.stage_no) <= Number(stageNo) || st.decision === "PENDING"
+        );
+        if (!rejecting || rejecting.decision !== "REJECTED" || !laterOpen) {
+          return await refuse("This request's approval chain cannot be reopened at that stage");
         }
       }
 
@@ -907,18 +977,73 @@ class AttendanceRegularizationRepository {
         { employee_id: employeeId, attendance_date: request.attendance_date },
       ]);
 
-      // 6. VOID the request. The steps keep their decisions.
-      const updated = await queryAsync(
-        connection,
-        `UPDATE attendance_approval_request
-            SET status = 'CANCELLED', approved_ot_minutes = 0, finalization_state = 'SETTLED'
-          WHERE attendance_approval_request_id = ?
-            AND status IN ('APPROVED', 'REJECTED', 'PENDING')`,
-        [requestId]
-      );
-      if (!updated || Number(updated.affectedRows) !== 1) {
-        return await refuse("This request changed while you were revoking it - reload and try again");
+      // 6. VOID the request - or, for a rejected SHIFT_CHANGE, REOPEN it.
+      if (reopen) {
+        // THE ONE PLACE A DECIDED STEP GOES BACK TO PENDING: the rejecting
+        // stage of a rejected SHIFT_CHANGE, so the chain resumes exactly where
+        // it stopped. Earlier approvals stand; later stages were never
+        // reached. The rejection itself survives in the audit row below.
+        const reopenedStep = await queryAsync(
+          connection,
+          `UPDATE attendance_approval_step
+              SET decision = 'PENDING', decided_by_employee_id = NULL, decided_at = NULL,
+                  remarks = NULL, acted_as_admin_override = 0, decision_source = NULL
+            WHERE attendance_approval_request_id = ?
+              AND stage_no = ?
+              AND decision = 'REJECTED'`,
+          [requestId, Number(stageNo)]
+        );
+        let reopenedRequest;
+        try {
+          reopenedRequest = await queryAsync(
+            connection,
+            `UPDATE attendance_approval_request
+                SET status = 'PENDING', current_stage_no = ?, finalization_state = 'NOT_REQUIRED',
+                    decided_at = NULL
+              WHERE attendance_approval_request_id = ?
+                AND status = 'REJECTED'`,
+            [Number(stageNo), requestId]
+          );
+        } catch (err) {
+          // The one-open-request key: another request took the date's open
+          // shift slot between the check above and this write.
+          if (err && err.code === "ER_DUP_ENTRY") {
+            return await refuseRule("CONFLICTING_REQUEST", `${request.attendance_date} already has an open shift change request`);
+          }
+          throw err;
+        }
+        if (
+          !reopenedStep || Number(reopenedStep.affectedRows) !== 1 ||
+          !reopenedRequest || Number(reopenedRequest.affectedRows) !== 1
+        ) {
+          return await refuse("This request changed while you were revoking it - reload and try again");
+        }
+      } else {
+        // The steps keep their decisions. For an approved SHIFT_CHANGE its
+        // override row stays as history and stops applying the moment this
+        // commits: every reader skips an override whose request is CANCELLED
+        // (`utils/shift_override_active.js`).
+        const updated = await queryAsync(
+          connection,
+          `UPDATE attendance_approval_request
+              SET status = 'CANCELLED', approved_ot_minutes = 0, finalization_state = 'SETTLED'
+            WHERE attendance_approval_request_id = ?
+              AND status IN ('APPROVED', 'REJECTED', 'PENDING')`,
+          [requestId]
+        );
+        if (!updated || Number(updated.affectedRows) !== 1) {
+          return await refuse("This request changed while you were revoking it - reload and try again");
+        }
       }
+      const withdrawnOverrides =
+        isShift && request.status === "APPROVED"
+          ? await queryAsync(
+              connection,
+              `SELECT attendance_date_shift_override_id FROM attendance_date_shift_override
+                WHERE attendance_approval_request_id = ?`,
+              [requestId]
+            )
+          : [];
 
       // 7. The audit.
       const target = (steps || []).find((st) => Number(st.stage_no) === Number(stageNo)) || {};
@@ -931,8 +1056,9 @@ class AttendanceRegularizationRepository {
             original_acted_as_admin_override, original_decision_source,
             original_request_status, original_current_stage_no, original_finalization_state,
             original_approved_ot_minutes, original_request_decided_at,
+            new_request_status, reopened_stage_no, withdrawn_override_ids,
             reset_steps, revoked_by_employee_id, revoked_by_user_id, reason, calculations_written)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           requestId,
           request.request_type,
@@ -953,6 +1079,11 @@ class AttendanceRegularizationRepository {
           request.finalization_state || null,
           nullableId(request.approved_ot_minutes),
           request.decided_at || null,
+          reopen ? "PENDING" : "CANCELLED",
+          reopen ? Number(stageNo) : null,
+          isShift && request.status === "APPROVED"
+            ? JSON.stringify((withdrawnOverrides || []).map((o) => Number(o.attendance_date_shift_override_id)))
+            : null,
           JSON.stringify(
             (steps || []).map((st) => ({
               stage_no: Number(st.stage_no),
@@ -982,10 +1113,12 @@ class AttendanceRegularizationRepository {
         code: 200,
         attendance_approval_request_id: Number(requestId),
         attendance_approval_revocation_id: inserted ? Number(inserted.insertId) : null,
-        status: "CANCELLED",
+        status: reopen ? "PENDING" : "CANCELLED",
+        reopened_stage_no: reopen ? Number(stageNo) : null,
         original_request_status: request.status,
         original_decision: originalDecision,
         revoked_stage_no: Number(stageNo),
+        withdrawn_override_ids: (withdrawnOverrides || []).map((o) => Number(o.attendance_date_shift_override_id)),
         calculations_written: stored.written,
       };
     } catch (err) {
