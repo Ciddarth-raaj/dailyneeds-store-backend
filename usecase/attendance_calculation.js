@@ -799,6 +799,12 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     to_date,
     assume = null,
     assume_override = null,
+    // THE DAY AS IF ONE REQUEST DID NOT EXIST. An administrator's revocation
+    // CANCELS a request inside the transaction that asks for this day, so the
+    // committed row must already be the day without it: no approval state
+    // from it and no regularized punch of it. Only that one request is
+    // withdrawn - any other request on the date is read as stored.
+    exclude_request_id = null,
     // THE READ OVERLAY, supplied only by `readRange`. A map of
     // `YYYY-MM-DD` -> stored row: where one exists for a date that has
     // CLOSED, that row is what comes back and the engine's answer for that
@@ -820,6 +826,12 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     }
 
     const context = await buildContext({ employee_id, from, to, assume_override });
+    if (exclude_request_id !== null && exclude_request_id !== undefined) {
+      const withdrawn = Number(exclude_request_id);
+      const kept = (row) => Number(row && row.attendance_approval_request_id) !== withdrawn;
+      context.approvals = (context.approvals || []).filter(kept);
+      context.regularized = (context.regularized || []).filter(kept);
+    }
     const { byDate: rawByDate, excludedByDate } = groupRawPunchesByAttendanceDate({
       rawPunches: context.rawPunches,
       readCutoff: context.readCutoff,

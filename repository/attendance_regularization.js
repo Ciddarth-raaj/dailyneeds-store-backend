@@ -774,51 +774,52 @@ class AttendanceRegularizationRepository {
   }
 
   /**
-   * ADMIN REVOKE, THE WRITE: reopen ONE request at ONE stage, in ONE
-   * transaction. Everything below commits together or not at all:
+   * ADMIN REVOKE, THE WRITE: VOID one decided request, in ONE transaction.
+   *
+   * A revocation CANCELS the request. It does not reopen it: the request
+   * leaves every queue, its approval steps keep the decisions they were given
+   * (they are its history now), and the employee is back where they were
+   * before they asked - a fresh request, with a new id and a new chain, is
+   * theirs to raise. `CANCELLED` is the status the schema already has for a
+   * request that no longer counts, and every reader already treats it so:
+   * the calculation, the queues, the one-open-request key and the
+   * one-OT-claim check all skip it.
+   *
+   * Everything below commits together or not at all:
    *
    *   1  SELECT new_employee ... FOR UPDATE      the shared employee lock
-   *      (`SHARED_LOCK_SQL`) - the same row, the same statement and the same
-   *      first position `createRequest` uses, so a request being RAISED for
-   *      this employee and this reopening serialize instead of each passing
-   *      the other's conflict check.
-   *   2  the steps FOR UPDATE, then the request FOR UPDATE - STEP BEFORE
-   *      REQUEST, the order `decideStage` writes them in, so a concurrent
-   *      decision and this revocation queue behind each other rather than
-   *      deadlock.
+   *      (`SHARED_LOCK_SQL`), the lock `createRequest` takes first, so a fresh
+   *      request and this cancellation serialize.
+   *   2  the steps FOR UPDATE, then the request FOR UPDATE - the order
+   *      `decideStage` writes them in, so a concurrent decision and this
+   *      revocation queue rather than deadlock.
    *   3  the locked re-read is compared with the usecase's unlocked read
-   *      (`expectedFingerprint`). ANY difference - a stage decided, the
-   *      request moved, a remark changed - is a 409: the reopened day was
-   *      computed against a state that no longer exists.
+   *      (`expectedFingerprint`); any difference is a 409, because the day
+   *      was computed against a state that no longer exists.
    *   4  the rules, re-checked on the locked rows: a revocable type, not a
-   *      payroll-lock closure, the target stage exists and is APPROVED or
-   *      REJECTED, and no OTHER request on the date conflicts with the
-   *      reopened one (below).
+   *      payroll-lock closure, a request that is DECIDED (APPROVED or
+   *      REJECTED) - or one the earlier reopening revoke left PENDING, which
+   *      this lets an administrator finally void - and no OT on the date that
+   *      depends on an approved correction being withdrawn.
    *   5  the payroll lock, `payrun_employee_calculation ... FOR UPDATE`,
    *      taken whether or not a day row is written.
-   *   6  the target step and every later step -> PENDING, cleared; the
-   *      request -> PENDING at the target stage, approved OT cleared, not
-   *      settled, not decided.
-   *   7  the audit row, holding every original value step 6 cleared.
-   *   8  the recalculated day (`writeCalculationsOnConnection`, which asserts
-   *      the payroll lock again under the same row lock).
-   *
-   * CONFLICTS - what reopening may not create:
-   *   - a second OPEN attendance/OT request on the date. The database's
-   *     `uq_aareq_open_per_employee_date` refuses it anyway; this says so in
-   *     a sentence first, and the duplicate-key error is mapped to the same
-   *     409 in case a row appeared between the two.
-   *   - a reopened REGULARIZATION while another request on the date is
-   *     APPROVED: an approved OT claim was granted against the corrected day,
-   *     and a second approved correction would be two corrections of one day.
-   *     The administrator revokes that one first.
+   *   6  the request -> CANCELLED, its approved OT -> 0. THE STEPS ARE NOT
+   *      TOUCHED.
+   *   7  the audit row: the decision being voided, the request as it stood,
+   *      and the whole chain as it stood (`reset_steps` - the column name
+   *      predates this rule; it now holds the chain snapshot, and nothing is
+   *      reset).
+   *   8  the recalculated day, without this request
+   *      (`writeCalculationsOnConnection`, which asserts the payroll lock
+   *      again under the same row lock).
    *
    * Returns `{ code: 200, ... }`, or `{ code: 409, msg }` after a rollback. A
    * payroll lock or a storage failure THROWS, after the rollback.
    */
-  async revokeStage({
+  async revokeRequest({
     requestId,
     stageNo,
+    originalDecision,
     expectedFingerprint,
     employeeId,
     actor,
@@ -860,41 +861,45 @@ class AttendanceRegularizationRepository {
           "This request was closed by the payroll lock, not by an approver, and cannot be revoked"
         );
       }
-      const target = (steps || []).find((st) => Number(st.stage_no) === Number(stageNo));
-      if (!target) return await refuse(`This request has no stage ${stageNo}`);
-      if (target.decision !== "APPROVED" && target.decision !== "REJECTED") {
-        return await refuse(
-          `Stage ${stageNo} has no decision to revoke - it is ${String(target.decision).toLowerCase()}`
+      if (request.status === "CANCELLED") return await refuse("This request has already been revoked");
+      if (request.status === "PENDING") {
+        // Only a request the earlier (reopening) revoke put back in the queue.
+        const [prior] = await queryAsync(
+          connection,
+          `SELECT COUNT(*) AS n FROM attendance_approval_revocation WHERE attendance_approval_request_id = ?`,
+          [requestId]
         );
+        if (!prior || Number(prior.n) === 0) {
+          return await refuse("This request is still in approval - an approver can reject it; there is no decision to revoke");
+        }
+      }
+      if (originalDecision !== "APPROVED" && originalDecision !== "REJECTED") {
+        return await refuse("There is no decision to revoke on this request");
       }
 
-      const others = await queryAsync(
-        connection,
-        `SELECT attendance_approval_request_id, request_type, status
-           FROM attendance_approval_request
-          WHERE requested_for_employee_id = ?
-            AND attendance_date = ?
-            AND attendance_approval_request_id <> ?
-            AND request_type <> 'SHIFT_CHANGE'
-            AND status IN ('PENDING', 'APPROVED')
-          ORDER BY attendance_approval_request_id`,
-        [employeeId, request.attendance_date, requestId]
-      );
-      const open = (others || []).find((o) => o.status === "PENDING");
-      if (open) {
-        return await refuse(
-          `${request.attendance_date} already has an open ${open.request_type} request ` +
-            `(#${open.attendance_approval_request_id}); decide or revoke that one first - ` +
-            "a date can have only one open attendance or OT request"
+      // An APPROVED correction is what any OT on the date was claimed
+      // against. Withdrawing it under an open or approved OT claim would
+      // leave that claim priced on a day that no longer exists.
+      if (request.request_type !== "OT" && request.status === "APPROVED") {
+        const dependents = await queryAsync(
+          connection,
+          `SELECT attendance_approval_request_id, status
+             FROM attendance_approval_request
+            WHERE requested_for_employee_id = ?
+              AND attendance_date = ?
+              AND attendance_approval_request_id <> ?
+              AND request_type = 'OT'
+              AND status IN ('PENDING', 'APPROVED')
+            ORDER BY attendance_approval_request_id`,
+          [employeeId, request.attendance_date, requestId]
         );
-      }
-      const approvedOther = (others || []).find((o) => o.status === "APPROVED");
-      if (request.request_type !== "OT" && approvedOther) {
-        return await refuse(
-          `${request.attendance_date} has an approved ${approvedOther.request_type} request ` +
-            `(#${approvedOther.attendance_approval_request_id}) that depends on the corrected day; ` +
-            "revoke that one first"
-        );
+        if (dependents && dependents.length > 0) {
+          const d = dependents[0];
+          return await refuse(
+            `${request.attendance_date} has a ${String(d.status).toLowerCase()} OT request ` +
+              `(#${d.attendance_approval_request_id}) claimed against this correction; revoke that one first`
+          );
+        }
       }
 
       // 5. The payroll lock, whether or not a day row goes with this.
@@ -902,36 +907,21 @@ class AttendanceRegularizationRepository {
         { employee_id: employeeId, attendance_date: request.attendance_date },
       ]);
 
-      // 6. Reset: the target stage and every later one, then the request.
-      const reset = (steps || []).filter((st) => Number(st.stage_no) >= Number(stageNo));
-      await queryAsync(
+      // 6. VOID the request. The steps keep their decisions.
+      const updated = await queryAsync(
         connection,
-        `UPDATE attendance_approval_step
-            SET decision = 'PENDING', decided_by_employee_id = NULL, decided_at = NULL,
-                remarks = NULL, acted_as_admin_override = 0, decision_source = NULL
+        `UPDATE attendance_approval_request
+            SET status = 'CANCELLED', approved_ot_minutes = 0, finalization_state = 'SETTLED'
           WHERE attendance_approval_request_id = ?
-            AND stage_no >= ?`,
-        [requestId, stageNo]
+            AND status IN ('APPROVED', 'REJECTED', 'PENDING')`,
+        [requestId]
       );
-      try {
-        await queryAsync(
-          connection,
-          `UPDATE attendance_approval_request
-              SET status = 'PENDING', current_stage_no = ?, approved_ot_minutes = NULL,
-                  finalization_state = 'NOT_REQUIRED', decided_at = NULL
-            WHERE attendance_approval_request_id = ?`,
-          [stageNo, requestId]
-        );
-      } catch (err) {
-        if (err && err.code === "ER_DUP_ENTRY") {
-          return await refuse(
-            `${request.attendance_date} already has an open attendance or OT request; decide or revoke that one first`
-          );
-        }
-        throw err;
+      if (!updated || Number(updated.affectedRows) !== 1) {
+        return await refuse("This request changed while you were revoking it - reload and try again");
       }
 
-      // 7. The audit, holding every original value step 6 cleared.
+      // 7. The audit.
+      const target = (steps || []).find((st) => Number(st.stage_no) === Number(stageNo)) || {};
       const inserted = await queryAsync(
         connection,
         `INSERT INTO attendance_approval_revocation
@@ -952,7 +942,7 @@ class AttendanceRegularizationRepository {
           target.approver_role || null,
           target.approval_level || null,
           nullableId(target.approver_employee_id),
-          target.decision,
+          originalDecision,
           nullableId(target.decided_by_employee_id),
           target.decided_at || null,
           target.remarks || null,
@@ -964,7 +954,7 @@ class AttendanceRegularizationRepository {
           nullableId(request.approved_ot_minutes),
           request.decided_at || null,
           JSON.stringify(
-            reset.map((st) => ({
+            (steps || []).map((st) => ({
               stage_no: Number(st.stage_no),
               approver_role: st.approver_role,
               approval_level: st.approval_level || null,
@@ -984,7 +974,7 @@ class AttendanceRegularizationRepository {
         ]
       );
 
-      // 8. The reopened day. A failure here rolls everything above back.
+      // 8. The day without it. A failure here rolls everything above back.
       const stored = await writeCalculationsOnConnection(connection, calculations || []);
 
       await commitAsync(connection);
@@ -992,20 +982,33 @@ class AttendanceRegularizationRepository {
         code: 200,
         attendance_approval_request_id: Number(requestId),
         attendance_approval_revocation_id: inserted ? Number(inserted.insertId) : null,
-        status: "PENDING",
-        current_stage_no: Number(stageNo),
-        reset_stage_nos: reset.map((st) => Number(st.stage_no)),
+        status: "CANCELLED",
         original_request_status: request.status,
-        original_decision: target.decision,
+        original_decision: originalDecision,
+        revoked_stage_no: Number(stageNo),
         calculations_written: stored.written,
       };
     } catch (err) {
       await rollbackAsync(connection);
-      this._log("REVOKE-STAGE", err);
+      this._log("REVOKE-REQUEST", err);
       throw err;
     } finally {
       connection.release();
     }
+  }
+
+  /** The newest revocation of one request, or null - what a re-revocation of a reopened request voids. */
+  async getLatestRevocation(requestId) {
+    const [row] = await this._read(
+      "LATEST-REVOCATION",
+      `SELECT revoked_stage_no, original_decision
+         FROM attendance_approval_revocation
+        WHERE attendance_approval_request_id = ?
+        ORDER BY attendance_approval_revocation_id DESC
+        LIMIT 1`,
+      [requestId]
+    );
+    return row || null;
   }
 
   /** The revocations of these requests, newest first, for the approval screen. */
@@ -1179,7 +1182,14 @@ class AttendanceRegularizationRepository {
       where.push("r.status = ?");
       params.push(status);
     } else {
-      where.push("r.status <> 'CANCELLED'");
+      // ALL: every outcome - including a request an administrator REVOKED,
+      // which is CANCELLED with a revocation on record and belongs in the
+      // history with its old chain. Nothing else is ever cancelled.
+      where.push(
+        `(r.status <> 'CANCELLED'
+          OR EXISTS (SELECT 1 FROM attendance_approval_revocation rv
+                      WHERE rv.attendance_approval_request_id = r.attendance_approval_request_id))`
+      );
     }
     if (authority) {
       where.push(authority.sql);

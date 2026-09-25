@@ -522,17 +522,19 @@ class AttendanceRegularizationRoutes {
     );
 
     /**
-     * ADMIN REVOKE: undo one stage decision of a REGULARIZATION or OT request
-     * and reopen the chain from that stage.
+     * ADMIN REVOKE: VOID a decided REGULARIZATION or OT request. It becomes
+     * CANCELLED - it is not reopened, and its steps keep their decisions - and
+     * the employee may raise a fresh request for the date.
      *
      * ITS OWN ENDPOINT, never a third value of `decision` above: approving and
      * rejecting move a chain forward and are open to every approver the chain
-     * names; revoking moves it BACK and is open to administrators alone.
+     * names; revoking voids the whole request and is open to administrators
+     * alone.
      *
      * The guard below checks `user_type` 2 on the authenticated token and
      * nothing grantable - no permission key, no designation, no approver
      * role reaches it - and `revokeDecision` checks it again. The body
-     * carries the stage and the reason and nothing else: Joi refuses any
+     * carries the reason (and optionally the stage) and nothing else: Joi refuses any
      * other field, so a client cannot supply the type, the employee, the
      * original decision, the minutes or the actor.
      */
@@ -552,7 +554,9 @@ class AttendanceRegularizationRoutes {
       }
       try {
         const schema = {
-          stage_no: Joi.number().integer().min(1).required(),
+          // Optional: by default the stage that DECIDED the request is the
+          // one recorded as revoked. The request as a whole is voided either way.
+          stage_no: Joi.number().integer().min(1).optional(),
           reason: Joi.string().trim().min(5).max(500).required(),
         };
         const isValid = Joi.validate(req.body, schema);
@@ -568,7 +572,7 @@ class AttendanceRegularizationRoutes {
             user_type: req.decoded.user_type,
           },
           request_id: Number(req.params.request_id),
-          stage_no: Number(req.body.stage_no),
+          stage_no: req.body.stage_no === undefined ? null : Number(req.body.stage_no),
           reason: req.body.reason,
         });
         res.status(result.code === 409 ? 409 : 200).json(result);

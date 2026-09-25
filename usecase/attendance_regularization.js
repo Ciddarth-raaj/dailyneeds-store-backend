@@ -1094,49 +1094,40 @@ module.exports = (
   };
 
   /**
-   * ADMIN REVOKE - undo ONE stage decision of a REGULARIZATION or OT request
-   * and reopen the chain FROM that stage.
+   * ADMIN REVOKE - VOID a decided REGULARIZATION or OT request.
    *
-   *   S1 APPROVED -> S2 APPROVED -> Final APPROVED, revoke S2
-   *     S1 APPROVED -> S2 PENDING -> Final PENDING, request PENDING at S2
+   *   #100 OT, Final APPROVED -> revoke -> #100 CANCELLED
+   *   the employee's day: NOT REQUESTED, with Request OT offered again
+   *   they request again -> #101 PENDING, a new chain from its first stage
    *
-   * The revoked stage and EVERY LATER stage go back to PENDING, because a
-   * later decision was made on top of the one being withdrawn and cannot
-   * stand without it. Earlier stages keep their decisions. The request is the
-   * SAME request - same id, same chain snapshot, same approvers - reopened;
-   * nothing is created, so the one-request-per-date and one-OT-claim-per-date
-   * rules hold exactly as they did.
+   * A REVOCATION IS NOT A REOPENING. The old request never comes back to a
+   * queue and its approval steps keep the decisions they were given - that
+   * chain is history now, readable on the request and in the revocation
+   * audit. What the employee gets back is their right to ask again, as a
+   * NEW request with a new id and a fresh chain; the one-OT-claim-per-date
+   * and one-open-request-per-date rules already ignore a CANCELLED request,
+   * so nothing stands in the way of that.
    *
-   * WHO. An administrator - `user_type` 2 - and nobody else: not HR, not an
-   * Operations Manager, not a Store Manager, not the approver named on the
-   * stage. The route refuses everybody else first (`middlewares/admin_only`);
-   * this refuses them again, so the rule does not depend on the route.
+   * WHAT IT DOES TO ATTENDANCE. The day is recalculated as if the request
+   * had never been made, in the revocation's own transaction:
+   *   OT              no approved OT from it; the day's OT is AVAILABLE again
+   *                   (Not Requested, with Request OT);
+   *   REGULARIZATION  its punch stops counting; if the day is incomplete
+   *                   without it, the employee may raise a fresh correction.
+   * A REJECTED request changed nothing when it was rejected, and voiding it
+   * changes nothing but its status - which is what frees the date for a
+   * fresh request.
    *
-   * WHAT THE CLIENT MAY SAY. The request id, the stage number and a reason.
-   * The type, the employee, the date, the original decision, the approved
-   * minutes and the actor are all read from the stored rows and the
-   * authenticated session.
+   * WHO. An administrator - `user_type` 2 - and nobody else. The route
+   * refuses everybody else first; this refuses them again.
    *
-   * WHAT IT DOES TO ATTENDANCE. The request goes back to PENDING, which is
-   * exactly the state the engine already knows how to calculate:
-   *   REGULARIZATION  the proposed punch counts only for an APPROVED+SETTLED
-   *                   request, so it stops being effective and the date is
-   *                   held out of payroll as a pending correction again;
-   *   OT              the approved minutes are cleared on the request, the day
-   *                   shows the claim PENDING, and it pays nothing until it is
-   *                   approved again.
-   * The day is computed NOW with the reopened state assumed - the same
-   * `assume` path a decision uses - and written in the revocation's own
-   * transaction, so there is no moment at which the request is reopened and
-   * the stored day still pays the old decision (or the reverse).
+   * WHAT THE CLIENT MAY SAY. The request id and a reason (and, optionally,
+   * which decided stage it is revoking - by default the stage that decided
+   * the request). Everything else is read from the stored rows.
    *
-   * PAYROLL LOCK, unchanged and with no override: a locked employee/month is
-   * refused here in a sentence, and again under the row lock in the
-   * transaction.
+   * PAYROLL LOCK, unchanged and with no override.
    *
-   * SHIFT_CHANGE IS NOT REVOCABLE HERE: its final approval writes a one-date
-   * shift override that a reopened request would have to withdraw, which is
-   * a different operation this feature deliberately does not attempt.
+   * SHIFT_CHANGE IS NOT REVOCABLE HERE.
    */
   const REVOCABLE_TYPES = [
     REQUEST_TYPE.REGULARIZATION,
@@ -1144,16 +1135,18 @@ module.exports = (
     REQUEST_TYPE.OT,
   ];
 
-  const revokeDecision = async ({ actor, request_id, stage_no, reason, now = null }) => {
+  const revokeDecision = async ({ actor, request_id, stage_no = null, reason, now = null }) => {
     if (!actor || Number(actor.user_type) !== ADMIN_USER_TYPE) {
       const err = new Error("Only an administrator can revoke an approval decision");
       err.name = "ForbiddenError";
       throw err;
     }
     const requestId = Number(request_id);
-    const stageNo = Number(stage_no);
     if (!Number.isInteger(requestId) || requestId <= 0) throw validationError("request_id must be a request id");
-    if (!Number.isInteger(stageNo) || stageNo <= 0) throw validationError("stage_no must be a stage number");
+    const askedStage = stage_no === null || stage_no === undefined || stage_no === "" ? null : Number(stage_no);
+    if (askedStage !== null && (!Number.isInteger(askedStage) || askedStage <= 0)) {
+      throw validationError("stage_no must be a stage number");
+    }
     const why = typeof reason === "string" ? reason.trim() : "";
     if (why.length < 5) throw validationError("A revoke reason of at least 5 characters is required");
     if (why.length > 500) throw validationError("A revoke reason may be at most 500 characters");
@@ -1169,18 +1162,50 @@ module.exports = (
           : `A ${request.request_type} decision cannot be revoked`
       );
     }
-    if (request.status === REQUEST_STATUS.CANCELLED) throw validationError("A cancelled request cannot be revoked");
+    if (request.status === REQUEST_STATUS.CANCELLED) throw validationError("This request has already been revoked");
     if (request.closure_reason) {
       throw validationError(
         "This request was closed by the payroll lock, not by an approver, and cannot be revoked"
       );
     }
-    const target = (steps || []).find((st) => Number(st.stage_no) === stageNo);
-    if (!target) throw validationError(`This request has no stage ${stageNo}`);
-    if (target.decision !== STEP_DECISION.APPROVED && target.decision !== STEP_DECISION.REJECTED) {
-      throw validationError(
-        `Stage ${stageNo} has no decision to revoke - it is ${String(target.decision).toLowerCase()}`
-      );
+
+    /*
+     * WHICH DECISION IS BEING VOIDED. For a decided request, the stage that
+     * decided it: the REJECTED step, or the last APPROVED one. A request the
+     * earlier, REOPENING revoke put back in the queue has had that decision
+     * cleared from its steps - it survives only in the previous revocation's
+     * audit row, which is where it is read from.
+     */
+    const decided = (steps || []).filter(
+      (st) => st.decision === STEP_DECISION.APPROVED || st.decision === STEP_DECISION.REJECTED
+    );
+    let stageNo;
+    let originalDecision;
+    if (request.status === REQUEST_STATUS.APPROVED || request.status === REQUEST_STATUS.REJECTED) {
+      const deciding =
+        (steps || []).find((st) => st.decision === STEP_DECISION.REJECTED) || decided[decided.length - 1] || null;
+      const target =
+        askedStage === null ? deciding : (steps || []).find((st) => Number(st.stage_no) === askedStage) || null;
+      if (!target) throw validationError(`This request has no stage ${askedStage}`);
+      if (target.decision !== STEP_DECISION.APPROVED && target.decision !== STEP_DECISION.REJECTED) {
+        throw validationError(
+          `Stage ${target.stage_no} has no decision to revoke - it is ${String(target.decision).toLowerCase()}`
+        );
+      }
+      stageNo = Number(target.stage_no);
+      originalDecision = target.decision;
+    } else {
+      const prior =
+        typeof attendanceRegularizationRepo.getLatestRevocation === "function"
+          ? await attendanceRegularizationRepo.getLatestRevocation(requestId)
+          : null;
+      if (!prior) {
+        throw validationError(
+          "This request is still in approval - an approver can reject it; there is no decision to revoke"
+        );
+      }
+      stageNo = Number(prior.revoked_stage_no);
+      originalDecision = prior.original_decision;
     }
 
     const employeeId = Number(request.requested_for_employee_id);
@@ -1191,37 +1216,25 @@ module.exports = (
       if (locked.length > 0) throw payrollLockedActionError(locked, "This revocation");
     }
 
-    // The day as the REOPENED request produces it: PENDING, no approved OT,
-    // no effective regularized punch.
-    const [reopenedDay] = await attendanceCalculationUsecase.calculateRange({
+    // The day WITHOUT this request - no approval state from it, no punch of
+    // it - which is exactly what it is once it is cancelled.
+    const [voidedDay] = await attendanceCalculationUsecase.calculateRange({
       employee_id: employeeId,
       from_date: request.attendance_date,
       to_date: request.attendance_date,
-      assume: {
-        attendance_approval_request_id: requestId,
-        attendance_date: request.attendance_date,
-        request_type: request.request_type,
-        status: REQUEST_STATUS.PENDING,
-        candidate_ot_minutes: request.candidate_ot_minutes,
-        reason: request.reason,
-        approved_ot_minutes: 0,
-        regularized_punch: null,
-      },
+      exclude_request_id: requestId,
     });
-    // Only a CLOSED day gets a stored row - the rule every writer obeys. A
-    // decided regularization or OT always belongs to a closed day, so this
-    // is the ordinary case; an open one is reopened and read live until it
-    // closes, exactly as an undecided request would be.
     const dayState = dayStateOf(
-      reopenedDay || { attendance_date: request.attendance_date, shift_snapshot: null },
+      voidedDay || { attendance_date: request.attendance_date, shift_snapshot: null },
       { now }
     );
     const calculations =
-      dayState.closed && reopenedDay ? [attendanceCalculationUsecase.toStorageRow(reopenedDay)] : [];
+      dayState.closed && voidedDay ? [attendanceCalculationUsecase.toStorageRow(voidedDay)] : [];
 
-    const result = await attendanceRegularizationRepo.revokeStage({
+    const result = await attendanceRegularizationRepo.revokeRequest({
       requestId,
       stageNo,
+      originalDecision,
       expectedFingerprint: snapshot.fingerprint,
       employeeId,
       actor: {
@@ -1237,7 +1250,6 @@ module.exports = (
       request_type: request.request_type,
       attendance_date: request.attendance_date,
       employee_id: employeeId,
-      revoked_stage_no: stageNo,
       attendance_persisted: calculations.length > 0,
     };
   };
@@ -1961,15 +1973,19 @@ module.exports = (
           decided_at: st.decided_at || null,
           remarks: st.remarks || null,
           acted_as_admin_override: Number(st.acted_as_admin_override) === 1,
-          // May the VIEWER revoke this decision? The server's answer, so the
-          // screen offers the control exactly where `revokeDecision` would
-          // accept it - and the endpoint still decides for itself.
-          revocable:
-            isAdmin &&
-            REVOCABLE_TYPES.includes(row.request_type) &&
-            !row.closure_reason &&
-            (st.decision === STEP_DECISION.APPROVED || st.decision === STEP_DECISION.REJECTED),
         })),
+        // May the VIEWER revoke this request? The server's answer, so the
+        // screen offers the control exactly where `revokeDecision` would
+        // accept it - and the endpoint still decides for itself. A decided
+        // request, or one the earlier reopening revoke put back in the queue.
+        revocable:
+          isAdmin &&
+          REVOCABLE_TYPES.includes(row.request_type) &&
+          !row.closure_reason &&
+          (row.status === REQUEST_STATUS.APPROVED ||
+            row.status === REQUEST_STATUS.REJECTED ||
+            (row.status === REQUEST_STATUS.PENDING && (revocationsByRequest.get(id) || []).length > 0)),
+        revoked: row.status === REQUEST_STATUS.CANCELLED && (revocationsByRequest.get(id) || []).length > 0,
         revocations: (revocationsByRequest.get(id) || []).map((v) => ({
           attendance_approval_revocation_id: Number(v.attendance_approval_revocation_id),
           revoked_stage_no: Number(v.revoked_stage_no),

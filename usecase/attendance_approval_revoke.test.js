@@ -1,5 +1,6 @@
 /**
- * ADMIN REVOKE - the rule, the reopened day, and the HTTP boundary.
+ * ADMIN REVOKE = VOID - the rule, the day without the request, a fresh
+ * request afterwards, and the HTTP boundary.
  *
  *   node --test usecase/attendance_approval_revoke.test.js
  *
@@ -9,7 +10,8 @@
  * against MariaDB in `repository/attendance_approval_revoke.mysql.test.js`;
  * this file proves what the usecase hands that transaction: who may ask, what
  * may be revoked, and above all the DAY it computes for the reopened request,
- * by the production engine.
+ * by the production engine, and that a CANCELLED request frees the date for
+ * a fresh one.
  *
  *   GEN  09:00-18:00, 60m break  NRM 480, OT allowed
  */
@@ -54,7 +56,7 @@ const chain = (decisions) =>
   }));
 
 function world({ request, punches, regularizedPunchTime = null, lockedMonths = [] }) {
-  const calls = { revokeStage: [] };
+  const calls = { revokeRequest: [], createRequest: [] };
   const store = { request: { ...request } };
 
   const calcRepo = {
@@ -71,9 +73,11 @@ function world({ request, punches, regularizedPunchTime = null, lockedMonths = [
     // correction's punch counts, and the request row is what it is.
     getApprovedRegularizedPunches: async () =>
       regularizedPunchTime && store.request.status === "APPROVED" && store.request.finalization_state === "SETTLED"
-        ? [{ attendance_regularized_punch_id: 55, employee_id: EMP, attendance_date: DATE, io_time: regularizedPunchTime, punch_id: null }]
+        ? [{ attendance_regularized_punch_id: 55, attendance_approval_request_id: store.request.attendance_approval_request_id, employee_id: EMP, attendance_date: DATE, io_time: regularizedPunchTime, punch_id: null }]
         : [],
-    getApprovalStateByDate: async () => [{ ...store.request, rejection_remarks: null }],
+    // `status <> 'CANCELLED'`, as the real query.
+    getApprovalStateByDate: async () =>
+      store.request.status === "CANCELLED" ? [] : [{ ...store.request, rejection_remarks: null }],
     getBreakOverride: async () => null,
     getEmploymentWindow: async () => ({ employee_id: EMP, date_of_joining: "2020-01-01", resignation_date: null }),
     findPayrollLockedPeriods: async (rows) =>
@@ -88,24 +92,26 @@ function world({ request, punches, regularizedPunchTime = null, lockedMonths = [
       Number(id) === Number(store.request.attendance_approval_request_id)
         ? { request: { ...store.request }, steps: store.request.steps.map((s) => ({ ...s })), fingerprint: `fp-${id}` }
         : null,
+    getLatestRevocation: async () => store.priorRevocation || null,
     // What the transaction is handed; applied here only so a follow-up call
-    // sees the reopened request. The real reset is the MariaDB suite's.
-    revokeStage: async (args) => {
-      calls.revokeStage.push(args);
-      store.request.status = "PENDING";
-      store.request.current_stage_no = args.stageNo;
-      store.request.approved_ot_minutes = null;
-      store.request.finalization_state = "NOT_REQUIRED";
-      store.request.steps = store.request.steps.map((s) =>
-        s.stage_no >= args.stageNo ? { ...s, decision: "PENDING", decided_by_employee_id: null, decided_at: null } : s
-      );
-      return { code: 200, status: "PENDING", current_stage_no: args.stageNo, calculations_written: args.calculations.length };
+    // sees the CANCELLED request. The real write is the MariaDB suite's.
+    revokeRequest: async (args) => {
+      calls.revokeRequest.push(args);
+      store.request.status = "CANCELLED";
+      store.request.approved_ot_minutes = 0;
+      return { code: 200, status: "CANCELLED", calculations_written: args.calculations.length };
     },
-    findRequestsForDates: async () => [store.request],
+    // `status <> 'CANCELLED'`, as the real query.
+    findRequestsForDates: async () => (store.request.status === "CANCELLED" ? [] : [store.request]),
+    findOpenRequest: async () => (store.request.status === "PENDING" ? store.request : null),
+    createRequest: async (args) => {
+      calls.createRequest.push(args);
+      return { attendance_approval_request_id: 172, total_stages: args.chain.length };
+    },
     getApprovalIdentity: async (id) => ({ employee_id: id, employee_name: "X", outlet_id: 3, approver_role: null, requester_class: null }),
   };
   const regularization = buildRegularization(regRepo, calculation);
-  return { calculation, regularization, calls, store };
+  return { calculation, regularization, calls, store, calcRepo };
 }
 
 const OT_REQUEST = {
@@ -122,20 +128,22 @@ const REG_REQUEST = {
 const OT_DAY = [punch(1, `${DATE} 09:00:00`), punch(2, `${DATE} 21:00:00`)];
 
 const revoke = (w, extra = {}) =>
-  w.regularization.revokeDecision({ actor: ADMIN, request_id: 71, stage_no: 3, reason: "approved by mistake", ...extra });
+  w.regularization.revokeDecision({ actor: ADMIN, request_id: 71, reason: "approved by mistake", ...extra });
 
-describe("what revoking does to the day", () => {
-  it("1. OT: before, the day pays 180 approved OT; the revoked day handed to the transaction pays 0", async () => {
+describe("what revoking does to the day, and to the employee's next request", () => {
+  it("1./8. OT: before, the day pays 180 approved OT; the day handed to the transaction is the day WITHOUT the request", async () => {
     const w = world({ request: OT_REQUEST, punches: OT_DAY });
     const [before] = await w.calculation.calculateRange({ employee_id: EMP, from_date: DATE, to_date: DATE });
     assert.equal(before.approved_ot_minutes, 180, "sanity: the stored approval pays today");
 
     const out = await revoke(w);
     assert.equal(out.code, 200);
-    assert.equal(w.calls.revokeStage.length, 1);
-    const call = w.calls.revokeStage[0];
+    assert.equal(out.status, "CANCELLED");
+    assert.equal(w.calls.revokeRequest.length, 1);
+    const call = w.calls.revokeRequest[0];
     assert.equal(call.requestId, 71);
-    assert.equal(call.stageNo, 3);
+    assert.equal(call.stageNo, 3, "the stage that DECIDED the request is the one recorded");
+    assert.equal(call.originalDecision, "APPROVED");
     assert.equal(call.employeeId, EMP, "the employee comes from the stored request");
     assert.equal(call.expectedFingerprint, "fp-71", "the transaction is told exactly what was read");
     assert.equal(call.reason, "approved by mistake");
@@ -144,32 +152,73 @@ describe("what revoking does to the day", () => {
     const row = call.calculations[0];
     assert.equal(row.employee_id, EMP);
     assert.equal(row.attendance_date, DATE);
-    assert.equal(row.approved_ot_minutes, 0, "payroll sees zero payable OT from the reopened request");
+    assert.equal(row.approved_ot_minutes, 0, "payroll sees zero payable OT from the revoked request");
     assert.equal(row.ot_request_approved_minutes, 0);
-    assert.equal(Number(row.candidate_ot_minutes), 180, "the OT is still AVAILABLE - the claim is simply pending again");
+    assert.equal(Number(row.candidate_ot_minutes), 180, "the OT is still there to be claimed");
   });
 
-  it("2. REGULARIZATION: the approved punch stops being effective in the revoked day", async () => {
+  it("4. after the revoke the day reads NOT REQUESTED - OT AVAILABLE, with no request against it", async () => {
+    const w = world({ request: OT_REQUEST, punches: OT_DAY });
+    await revoke(w);
+    const [after] = await w.calculation.calculateRange({ employee_id: EMP, from_date: DATE, to_date: DATE });
+    assert.equal(after.ot_claim_state, "AVAILABLE", "the screen's Not Requested + Request OT");
+    assert.equal(after.ot_request_id, null);
+    assert.equal(after.approved_ot_minutes, 0);
+  });
+
+  it("5./6. the employee can request OT again for that date - a NEW request, a fresh chain", async () => {
+    const w = world({ request: OT_REQUEST, punches: OT_DAY });
+    await revoke(w);
+    const raised = await w.regularization.raiseOtRequest({
+      actor: { employee_id: EMP }, attendance_date: DATE, reason: "stock audit - again", today: "2026-09-25",
+    });
+    assert.equal(raised.attendance_approval_request_id, 172, "a new request id");
+    assert.notEqual(raised.attendance_approval_request_id, 71);
+    assert.equal(w.calls.createRequest.length, 1);
+    const created = w.calls.createRequest[0];
+    assert.equal(created.request.request_type, "OT");
+    assert.equal(created.request.candidate_ot_minutes, 180);
+    assert.ok(created.chain.length > 0 && created.chain[0].stage_no === 1, "a fresh chain from its first stage");
+  });
+
+  it("before a revoke, the one-OT-claim rule still refuses a second request", async () => {
+    const w = world({ request: OT_REQUEST, punches: OT_DAY });
+    await assert.rejects(
+      () => w.regularization.raiseOtRequest({ actor: { employee_id: EMP }, attendance_date: DATE, reason: "again please", today: "2026-09-25" }),
+      /An OT request for 2026-09-10 has already been approved \(#71\)/
+    );
+  });
+
+  it("9. REGULARIZATION: the approved punch is not in the day handed to the transaction", async () => {
     const w = world({ request: { ...REG_REQUEST }, punches: [punch(1, `${DATE} 09:00:00`)], regularizedPunchTime: `${DATE} 18:00:00` });
     const [before] = await w.calculation.calculateRange({ employee_id: EMP, from_date: DATE, to_date: DATE });
     assert.equal(before.punch_count, 2, "sanity: today the approved punch completes the day");
 
-    await w.regularization.revokeDecision({ actor: ADMIN, request_id: 72, stage_no: 3, reason: "wrong punch time" });
-    const row = w.calls.revokeStage[0].calculations[0];
+    await w.regularization.revokeDecision({ actor: ADMIN, request_id: 72, reason: "wrong punch time" });
+    const row = w.calls.revokeRequest[0].calculations[0];
     assert.equal(row.punch_count, 1, "the regularized punch is gone from the day");
     assert.ok(!String(row.effective_punches).includes("18:00"), "and from its effective punches");
-    assert.equal(Number(row.is_final), 0, "the date is held out of payroll again while the correction is pending");
   });
 
-  it("3./4./5. the stage asked for is the stage reopened - earlier stages are the transaction's to keep", async () => {
-    for (const stage of [1, 2, 3]) {
-      const w = world({ request: OT_REQUEST, punches: OT_DAY });
-      /* eslint-disable-next-line no-await-in-loop */
-      await revoke(w, { stage_no: stage });
-      assert.equal(w.calls.revokeStage[0].stageNo, stage);
-    }
-    const rejected = world({ request: { ...OT_REQUEST, status: "REJECTED", current_stage_no: 2, approved_ot_minutes: null, steps: chain(["APPROVED", "REJECTED", "PENDING"]) }, punches: OT_DAY });
-    assert.equal((await revoke(rejected, { stage_no: 2 })).code, 200, "a REJECTED stage can be revoked too");
+  it("10. REJECTED correction: voided, and a fresh correction for the incomplete day is accepted", async () => {
+    const rejected = { ...REG_REQUEST, status: "REJECTED", current_stage_no: 2, approved_ot_minutes: null, steps: chain(["APPROVED", "REJECTED", "PENDING"]) };
+    const w = world({ request: rejected, punches: [punch(1, `${DATE} 09:00:00`)] });
+    const out = await w.regularization.revokeDecision({ actor: ADMIN, request_id: 72, reason: "rejected in error" });
+    assert.equal(out.code, 200);
+    assert.equal(w.calls.revokeRequest[0].stageNo, 2, "the REJECTED stage is the deciding one");
+    assert.equal(w.calls.revokeRequest[0].originalDecision, "REJECTED");
+    const raised = await w.regularization.raiseRequest({
+      actor: { employee_id: EMP, user_type: 1 }, requested_for_employee_id: EMP, attendance_date: DATE, punch_time: `${DATE} 18:00:00`, reason: "forgot to punch out", today: "2026-09-25",
+    });
+    assert.equal(raised.attendance_approval_request_id, 172);
+  });
+
+  it("a stage may be named, and must be a decided one", async () => {
+    const w = world({ request: OT_REQUEST, punches: OT_DAY });
+    await revoke(w, { stage_no: 2 });
+    assert.equal(w.calls.revokeRequest[0].stageNo, 2);
+    const w2 = world({ request: { ...OT_REQUEST, status: "REJECTED", steps: chain(["APPROVED", "REJECTED", "PENDING"]) }, punches: OT_DAY });
+    await assert.rejects(() => revoke(w2, { stage_no: 3 }), /Stage 3 has no decision to revoke/);
   });
 });
 
@@ -177,7 +226,7 @@ describe("who may revoke, and what", () => {
   const refusedAs = async (actor) => {
     const w = world({ request: OT_REQUEST, punches: OT_DAY });
     await assert.rejects(() => revoke(w, { actor }), (err) => err.name === "ForbiddenError");
-    assert.equal(w.calls.revokeStage.length, 0, "the transaction is never reached");
+    assert.equal(w.calls.revokeRequest.length, 0, "the transaction is never reached");
   };
 
   it("6. an ordinary user is refused", () => refusedAs({ employee_id: 42, user_type: 1 }));
@@ -195,26 +244,39 @@ describe("who may revoke, and what", () => {
       const w = world({ request: OT_REQUEST, punches: OT_DAY });
       /* eslint-disable-next-line no-await-in-loop */
       await assert.rejects(() => revoke(w, { reason }), /reason of at least 5 characters/);
-      assert.equal(w.calls.revokeStage.length, 0);
+      assert.equal(w.calls.revokeRequest.length, 0);
     }
   });
 
   it("9. a payroll-locked month is refused before anything is computed", async () => {
     const w = world({ request: OT_REQUEST, punches: OT_DAY, lockedMonths: ["2026-9"] });
     await assert.rejects(() => revoke(w), (err) => err.code === "PAYROLL_MONTH_LOCKED" && /This revocation/.test(err.message));
-    assert.equal(w.calls.revokeStage.length, 0);
+    assert.equal(w.calls.revokeRequest.length, 0);
   });
 
-  it("13. a PENDING stage has nothing to revoke", async () => {
+  it("a request still in approval is refused - there is no decision to void; an approver can reject it", async () => {
     const w = world({ request: { ...OT_REQUEST, status: "PENDING", current_stage_no: 2, approved_ot_minutes: null, steps: chain(["APPROVED", "PENDING", "PENDING"]) }, punches: OT_DAY });
-    await assert.rejects(() => revoke(w, { stage_no: 2 }), /no decision to revoke - it is pending/);
-    assert.equal(w.calls.revokeStage.length, 0);
+    await assert.rejects(() => revoke(w), /still in approval/);
+    assert.equal(w.calls.revokeRequest.length, 0);
+  });
+
+  it("a request the EARLIER reopening revoke left pending is voided, with the decision that revoke recorded", async () => {
+    const w = world({ request: { ...OT_REQUEST, status: "PENDING", current_stage_no: 3, approved_ot_minutes: null, steps: chain(["APPROVED", "APPROVED", "PENDING"]) }, punches: OT_DAY });
+    w.store.priorRevocation = { revoked_stage_no: 3, original_decision: "APPROVED" };
+    assert.equal((await revoke(w)).code, 200);
+    assert.equal(w.calls.revokeRequest[0].stageNo, 3);
+    assert.equal(w.calls.revokeRequest[0].originalDecision, "APPROVED");
+  });
+
+  it("an already-revoked request is refused", async () => {
+    const w = world({ request: { ...OT_REQUEST, status: "CANCELLED" }, punches: OT_DAY });
+    await assert.rejects(() => revoke(w), /already been revoked/);
   });
 
   it("14. a SHIFT_CHANGE decision is refused", async () => {
     const w = world({ request: { ...OT_REQUEST, request_type: "SHIFT_CHANGE" }, punches: OT_DAY });
     await assert.rejects(() => revoke(w), /shift change decision cannot be revoked/);
-    assert.equal(w.calls.revokeStage.length, 0);
+    assert.equal(w.calls.revokeRequest.length, 0);
   });
 
   it("a payroll-lock CLOSURE, a missing stage and a missing request are refused", async () => {
@@ -223,16 +285,14 @@ describe("who may revoke, and what", () => {
     const w = world({ request: OT_REQUEST, punches: OT_DAY });
     await assert.rejects(() => revoke(w, { stage_no: 4 }), /no stage 4/);
     await assert.rejects(() => revoke(w, { request_id: 999 }), /No such request/);
-    assert.equal(w.calls.revokeStage.length + closed.calls.revokeStage.length, 0);
+    assert.equal(w.calls.revokeRequest.length + closed.calls.revokeRequest.length, 0);
   });
 
-  it("16. ONE OT CLAIM PER DATE still holds after a revoke: the reopened claim blocks a second one", async () => {
+  it("14. revoking never touches the shift-change path: no override is written, none is assumed", async () => {
     const w = world({ request: OT_REQUEST, punches: OT_DAY });
     await revoke(w);
-    await assert.rejects(
-      () => w.regularization.raiseOtRequest({ actor: { employee_id: EMP }, attendance_date: DATE, reason: "again please", today: "2026-09-25" }),
-      /An OT request for 2026-09-10 is already pending \(#71\)/
-    );
+    const [after] = await w.calculation.calculateRange({ employee_id: EMP, from_date: DATE, to_date: DATE });
+    assert.equal(after.work_shift_id, 1, "the date keeps its own shift");
   });
 });
 
@@ -315,8 +375,17 @@ describe("POST /attendance/approvals/:request_id/revoke", () => {
     }
   });
 
-  it("a missing or short reason, or no stage, is a 400", async () => {
-    for (const body of [{ stage_no: 2 }, { stage_no: 2, reason: "oops" }, { reason: "approved by mistake" }, { stage_no: 0, reason: "approved by mistake" }]) {
+  it("the stage is OPTIONAL: a reason alone voids the request, with the deciding stage found by the server", async () => {
+    const usecase = spy();
+    const res = await post(buildRoutes(usecase, allowAll, null, null), PATH, req({ id: 5, employee_id: 900, user_type: 2 }, { reason: "approved by mistake" }));
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(usecase.calls, [
+      { actor: { employee_id: 900, user_id: 5, user_type: 2 }, request_id: 71, stage_no: null, reason: "approved by mistake" },
+    ]);
+  });
+
+  it("a missing or short reason, or a stage that is not a stage, is a 400", async () => {
+    for (const body of [{ stage_no: 2 }, { stage_no: 2, reason: "oops" }, {}, { stage_no: 0, reason: "approved by mistake" }]) {
       const usecase = spy();
       /* eslint-disable-next-line no-await-in-loop */
       const res = await post(buildRoutes(usecase, allowAll, null, null), PATH, req({ id: 5, employee_id: 900, user_type: 2 }, body));
@@ -333,37 +402,52 @@ describe("POST /attendance/approvals/:request_id/revoke", () => {
 
 /* ======================================== the screen is told what it may offer */
 
-describe("listApprovals: `revocable` per step, for administrators only, and the audit", () => {
-  const listWorld = () => {
+describe("listApprovals: `revocable` per REQUEST, for administrators only; a revoked request shows as revoked", () => {
+  const listWorld = (status = "APPROVED", revocations = []) => {
     const row = {
-      attendance_approval_request_id: 71, request_type: "OT", status: "APPROVED", requested_for_employee_id: EMP,
+      attendance_approval_request_id: 71, request_type: "OT", status, requested_for_employee_id: EMP,
       requested_by_employee_id: EMP, employee_name: "Staff", attendance_date: DATE, outlet_id: 3, outlet_name: "S",
-      reason: "x", candidate_ot_minutes: 180, approved_ot_minutes: 180, current_stage_no: 3, total_stages: 3,
+      reason: "x", candidate_ot_minutes: 180, approved_ot_minutes: status === "CANCELLED" ? 0 : 180, current_stage_no: 3, total_stages: 3,
       finalization_state: "SETTLED", closure_reason: null, chain_source: "EMPLOYEE",
     };
     const regRepo = {
       getApprovalIdentity: async (id) => ({ employee_id: id, employee_name: "A", outlet_id: 1, approver_role: null, requester_class: null }),
       listApprovals: async () => [row],
       countApprovals: async () => 1,
-      listStepsForRequests: async () => chain(["APPROVED", "REJECTED", "PENDING"]).map((s) => ({ ...s, attendance_approval_request_id: 71 })),
-      listRevocationsForRequests: async () => [{
-        attendance_approval_revocation_id: 1, attendance_approval_request_id: 71, revoked_stage_no: 3,
-        revoked_approval_level: "FINAL", original_decision: "APPROVED", original_decided_by_name: "Final",
-        original_decided_at: "2026-09-11 10:00:00", original_request_status: "APPROVED", original_approved_ot_minutes: 95,
-        revoked_by_employee_id: 900, revoked_by_name: "Admin", revoked_at: "2026-09-12 09:00:00", reason: "approved by mistake",
-      }],
+      listStepsForRequests: async () => chain(["APPROVED", "APPROVED", "APPROVED"]).map((s) => ({ ...s, attendance_approval_request_id: 71 })),
+      listRevocationsForRequests: async () => revocations,
     };
     return buildRegularization(regRepo, { calculateRange: async () => [] });
   };
+  const AUDIT = [{
+    attendance_approval_revocation_id: 1, attendance_approval_request_id: 71, revoked_stage_no: 3,
+    revoked_approval_level: "FINAL", original_decision: "APPROVED", original_decided_by_name: "Final",
+    original_decided_at: "2026-09-11 10:00:00", original_request_status: "APPROVED", original_approved_ot_minutes: 95,
+    revoked_by_employee_id: 900, revoked_by_name: "Admin", revoked_at: "2026-09-12 09:00:00", reason: "approved by mistake",
+  }];
+  const admin = { employee_id: 900, user_type: 2, branch_scope: { kind: "ALL_BRANCHES" } };
 
-  it("an administrator is offered Revoke on the APPROVED and REJECTED steps, never on a PENDING one", async () => {
-    const out = await listWorld().listApprovals({ actor: { employee_id: 900, user_type: 2, branch_scope: { kind: "ALL_BRANCHES" } }, request_type: "OT", status: "ALL" });
-    assert.deepEqual(out.rows[0].chain.map((s) => s.revocable), [true, true, false]);
-    assert.deepEqual(out.rows[0].revocations.map((v) => [v.revoked_stage_no, v.original_approved_ot_minutes, v.reason]), [[3, 95, "approved by mistake"]]);
+  it("an administrator is offered Revoke on an APPROVED or REJECTED request", async () => {
+    for (const status of ["APPROVED", "REJECTED"]) {
+      /* eslint-disable-next-line no-await-in-loop */
+      const out = await listWorld(status).listApprovals({ actor: admin, request_type: "OT", status: "ALL" });
+      assert.equal(out.rows[0].revocable, true, status);
+      assert.equal(out.rows[0].revoked, false);
+    }
   });
 
   it("nobody else is offered it", async () => {
     const out = await listWorld().listApprovals({ actor: { employee_id: 9, user_type: 1, branch_scope: { kind: "ALL_BRANCHES" } }, request_type: "OT", status: "ALL" });
-    assert.deepEqual(out.rows[0].chain.map((s) => s.revocable), [false, false, false]);
+    assert.equal(out.rows[0].revocable, false);
+  });
+
+  it("11. a revoked request: CANCELLED, flagged revoked, not revocable again, its chain decisions and its audit intact", async () => {
+    const out = await listWorld("CANCELLED", AUDIT).listApprovals({ actor: admin, request_type: "OT", status: "ALL" });
+    const row = out.rows[0];
+    assert.equal(row.status, "CANCELLED");
+    assert.equal(row.revoked, true);
+    assert.equal(row.revocable, false);
+    assert.deepEqual(row.chain.map((s) => s.decision), ["APPROVED", "APPROVED", "APPROVED"], "the old chain is history, unchanged");
+    assert.deepEqual(row.revocations.map((v) => [v.revoked_stage_no, v.original_decision, v.original_approved_ot_minutes, v.reason]), [[3, "APPROVED", 95, "approved by mistake"]]);
   });
 });

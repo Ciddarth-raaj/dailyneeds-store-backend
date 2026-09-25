@@ -26,8 +26,18 @@
 const { describe, it, before, after } = require("node:test");
 const assert = require("node:assert/strict");
 
+const fs = require("fs");
+const path = require("path");
+
 const URL = process.env.ATTENDANCE_TEST_MYSQL;
 const buildRepo = require("./attendance_regularization");
+// The history tab reads the revocation audit (a revoked, CANCELLED request is
+// shown there), so the table is built - from its migration file, as deployed.
+const REVOCATION_MIGRATION = path.join(
+  __dirname,
+  "..",
+  "migrations/mysql/migrations/sqls/20261103120000-attendance-approval-revocation-up.sql"
+);
 
 const WAREHOUSE = 1;
 const STORE_A = 5;
@@ -77,6 +87,7 @@ const SCHEMA = [
      base_nrm_minutes INT NULL, regular_minutes INT NULL)`,
 ];
 const TABLES = [
+  "attendance_approval_revocation",
   "attendance_day_calculation",
   "attendance_regularized_punch",
   "attendance_approval_step",
@@ -126,6 +137,7 @@ describe("approval queue outlet scope, as SQL (employee 106 shape)", { skip: !UR
     pool = require("mysql").createPool(URL);
     for (const t of TABLES) await query(pool, `DROP TABLE IF EXISTS ${t}`);
     for (const ddl of SCHEMA) await query(pool, ddl);
+    await query(pool, fs.readFileSync(REVOCATION_MIGRATION, "utf8"));
     await query(pool, "INSERT INTO outlets VALUES ?", [[[WAREHOUSE, "Warehouse"], [STORE_A, "Store A"], [HEAD_OFFICE, "Head Office"], [STORE_B, "Store B"]]]);
     await query(pool, "INSERT INTO new_employee VALUES ?", [[
       [ROAMER, "Roaming Operations", WAREHOUSE, 20],
