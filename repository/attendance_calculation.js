@@ -18,6 +18,7 @@ const {
   commitAsync,
   rollbackAsync,
 } = require("../utils/batchInsert");
+const readTiming = require("../utils/attendance_read_timing");
 
 /**
  * Attendance v2 - the reads the calculation engine needs, and the writes of
@@ -301,7 +302,10 @@ class AttendanceCalculationRepository {
 
   _read(code, sql, params) {
     return new Promise((resolve, reject) => {
-      this.db.query(sql, params, (err, rows) => {
+      // `timedQuery` is `this.db.query` unless a month read is being timed
+      // (utils/attendance_read_timing.js), in which case it is the same query
+      // with its pool wait and execution time recorded.
+      readTiming.timedQuery(this.db, code, sql, params, (err, rows) => {
         if (err) {
           this._log(code, err);
           reject(err);
@@ -476,6 +480,65 @@ class AttendanceCalculationRepository {
         WHERE work_shift_id = ?
         ORDER BY effective_from ASC, work_shift_config_version_id ASC`,
       [workShiftId]
+    );
+  }
+
+  /**
+   * `getWorkShiftWithSchedule` for SEVERAL shifts: the same columns, in two
+   * reads for all of them instead of two per shift. The caller groups by
+   * `work_shift_id`; the schedule rows come back ordered exactly as the
+   * single-shift read orders them within each shift.
+   */
+  async getWorkShiftConfigsByIds(workShiftIds) {
+    if (!Array.isArray(workShiftIds) || workShiftIds.length === 0) return [];
+    return this._read(
+      "GET-WORK-SHIFT-CONFIGS-BULK",
+      `SELECT work_shift_id, shift_code, shift_name, active,
+              overtime_allowed, overtime_minimum_minutes,
+              overtime_rounding_method, overtime_rounding_interval_minutes,
+              overtime_minimum_threshold_only, overtime_minimum_excluded, maximum_ot_minutes_per_day,
+              pre_shift_overtime_allowed, pre_shift_overtime_minimum_minutes,
+              pre_shift_overtime_rounding_method,
+              pre_shift_overtime_rounding_interval_minutes, pre_shift_overtime_minimum_excluded,
+              late_offset_against_overtime, early_exit_offset_against_overtime,
+            late_grace_minutes, late_deduction_interval_minutes, late_deduct_minutes,
+            late_exclude_grace_from_deduction,
+            early_exit_grace_minutes, early_exit_deduction_interval_minutes,
+            early_exit_deduct_minutes
+         FROM work_shift
+        WHERE work_shift_id IN (?)`,
+      [workShiftIds]
+    );
+  }
+
+  async getWorkShiftSchedulesByIds(workShiftIds) {
+    if (!Array.isArray(workShiftIds) || workShiftIds.length === 0) return [];
+    return this._read(
+      "GET-WORK-SHIFT-SCHEDULES-BULK",
+      `SELECT work_shift_weekly_schedule_id, work_shift_id, day_of_week, is_working_day,
+              TIME_FORMAT(in_time, '%H:%i:%s')               AS in_time,
+              TIME_FORMAT(out_time, '%H:%i:%s')              AS out_time,
+              TIME_FORMAT(attendance_day_cutoff, '%H:%i:%s') AS attendance_day_cutoff,
+              break_minutes, normal_work_minutes, ot_rate
+         FROM work_shift_weekly_schedule
+        WHERE work_shift_id IN (?)
+        ORDER BY work_shift_id ASC, day_of_week ASC`,
+      [workShiftIds]
+    );
+  }
+
+  /** `getWorkShiftConfigVersions` for several shifts, same order within each. */
+  async getWorkShiftConfigVersionsByIds(workShiftIds) {
+    if (!Array.isArray(workShiftIds) || workShiftIds.length === 0) return [];
+    return this._read(
+      "GET-WORK-SHIFT-CONFIG-VERSIONS-BULK",
+      `SELECT work_shift_config_version_id, work_shift_id,
+              DATE_FORMAT(effective_from, '%Y-%m-%d') AS effective_from,
+              config_hash, config_document, source
+         FROM work_shift_config_version
+        WHERE work_shift_id IN (?)
+        ORDER BY work_shift_id ASC, effective_from ASC, work_shift_config_version_id ASC`,
+      [workShiftIds]
     );
   }
 

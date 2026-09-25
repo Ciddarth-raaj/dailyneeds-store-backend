@@ -35,6 +35,7 @@ const { propagationScope } = require("../utils/shift_propagation");
 const { istToday } = require("../utils/istDate");
 const { partitionClosedDays, endOfIstDay } = require("../utils/attendance_persist_guard");
 const { payrollLockedError } = require("../utils/attendance_payroll_lock");
+const readTiming = require("../utils/attendance_read_timing");
 
 /**
  * Attendance v2 - the orchestration between the repository and the pure
@@ -497,6 +498,43 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
   const loadShiftCache = async (assignments) => {
     const ids = [...new Set((assignments || []).map((a) => Number(a.work_shift_id)))];
     const cache = new Map();
+
+    // BULK: three reads for every shift the range references, not three per
+    // shift one after another. The rows are grouped back into exactly the
+    // `{ live: { config, schedule }, versions }` shape the per-shift reads
+    // below produce, so nothing downstream can tell which path ran.
+    if (
+      ids.length > 0 &&
+      typeof attendanceCalculationRepo.getWorkShiftConfigsByIds === "function" &&
+      typeof attendanceCalculationRepo.getWorkShiftSchedulesByIds === "function" &&
+      typeof attendanceCalculationRepo.getWorkShiftConfigVersionsByIds === "function"
+    ) {
+      const [configs, schedules, versionRows] = await Promise.all([
+        attendanceCalculationRepo.getWorkShiftConfigsByIds(ids),
+        attendanceCalculationRepo.getWorkShiftSchedulesByIds(ids),
+        attendanceCalculationRepo.getWorkShiftConfigVersionsByIds(ids),
+      ]);
+      const byShift = (rows) => {
+        const map = new Map();
+        (rows || []).forEach((row) => {
+          const id = Number(row.work_shift_id);
+          if (!map.has(id)) map.set(id, []);
+          map.get(id).push(row);
+        });
+        return map;
+      };
+      const configById = byShift(configs);
+      const scheduleById = byShift(schedules);
+      const versionsById = byShift(versionRows);
+      for (const id of ids) {
+        const config = (configById.get(id) || [])[0] || null;
+        const live = config ? { config, schedule: scheduleById.get(id) || [] } : null;
+        const versions = versionsById.get(id) || [];
+        if (live || versions.length > 0) cache.set(id, { live, versions });
+      }
+      return cache;
+    }
+
     for (const id of ids) {
       // Sequential on purpose: a handful of ids, and the pool is shared with
       // every other request on this process.
@@ -540,19 +578,31 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     const punchWindowFrom = addDays(from, -1);
     const punchWindowTo = addDays(to, 1);
 
+    // Each read is named for the temporary read timing (a no-op outside a
+    // timed request). They run in parallel, so their durations overlap.
+    const t = readTiming.phase;
     const [assignments, fetchedRawPunches, regularized, employee, approvals, storedOverrides] =
       await Promise.all([
-        attendanceCalculationRepo.getShiftAssignmentHistory(employee_id),
-        attendanceCalculationRepo.getRawPunchesByCalendarWindow(employee_id, punchWindowFrom, punchWindowTo),
-        attendanceCalculationRepo.getApprovedRegularizedPunches(employee_id, from, to),
-        attendanceCalculationRepo.getBreakOverride(employee_id),
-        attendanceCalculationRepo.getApprovalStateByDate(employee_id, from, to),
+        t("shift_assignment_lookup", () => attendanceCalculationRepo.getShiftAssignmentHistory(employee_id)),
+        t("raw_punch_lookup", () =>
+          attendanceCalculationRepo.getRawPunchesByCalendarWindow(employee_id, punchWindowFrom, punchWindowTo)
+        ),
+        t("regularized_punch_lookup", () =>
+          attendanceCalculationRepo.getApprovedRegularizedPunches(employee_id, from, to)
+        ),
+        t("employee_settings_lookup", () => attendanceCalculationRepo.getBreakOverride(employee_id)),
+        // ONE read answers corrections, OT requests and shift-change requests.
+        t("correction_ot_request_lookup", () =>
+          attendanceCalculationRepo.getApprovalStateByDate(employee_id, from, to)
+        ),
         // Single-date overrides. The cutoff rule can date a punch one day back,
         // so the day AFTER `to` is read as well: dating that punch needs the
         // shift that applied on its own date.
-        attendanceCalculationRepo.getDateShiftOverrides
-          ? attendanceCalculationRepo.getDateShiftOverrides(employee_id, from, punchWindowTo)
-          : [],
+        t("shift_override_lookup", () =>
+          attendanceCalculationRepo.getDateShiftOverrides
+            ? attendanceCalculationRepo.getDateShiftOverrides(employee_id, from, punchWindowTo)
+            : []
+        ),
       ]);
 
     // A DEVICE TIME CORRECTION being applied or reverted, in memory only:
@@ -606,7 +656,9 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       });
     }
 
-    const shiftCache = await loadShiftCache([...(assignments || []), ...overrides]);
+    const shiftCache = await readTiming.phase("shift_definition_lookup", () =>
+      loadShiftCache([...(assignments || []), ...overrides])
+    );
 
     // (shift, date) -> the configuration VERSION in force then. Memoized
     // because a month resolves the same pair thirty times.
@@ -850,6 +902,11 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     // date is discarded. Absent (the default) nothing is overlaid, which is
     // what every calculation and every preview wants.
     stored_days = null,
+    // The same overlay, as a function returning a promise of it. `readRange`
+    // passes this instead of `stored_days` so the stored rows are read
+    // ALONGSIDE the context rather than before it - one database round trip
+    // fewer on the screen's critical path. What comes back is identical.
+    stored_days_loader = null,
     now = Date.now(),
   }) => {
     const from = toDateOnly(from_date);
@@ -859,12 +916,19 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     }
     if (from > to) throw validationError("from_date must not be after to_date");
 
-    const dates = dateRange(from, to);
+    const dates = readTiming.phaseSync("date_generation", () => dateRange(from, to));
     if (dates.length > MAX_RANGE_DAYS) {
       throw validationError(`A range may cover at most ${MAX_RANGE_DAYS} days`);
     }
 
-    const context = await buildContext({ employee_id, from, to, assume_override, assume_io_times, exclude_request_id });
+    const [context, loadedStoredDays] = await readTiming.phase("db_reads_wall", () =>
+      Promise.all([
+        buildContext({ employee_id, from, to, assume_override, assume_io_times, exclude_request_id }),
+        typeof stored_days_loader === "function"
+          ? readTiming.phase("stored_calculation_lookup", () => stored_days_loader())
+          : stored_days,
+      ])
+    );
     if (exclude_request_id !== null && exclude_request_id !== undefined) {
       const withdrawn = Number(exclude_request_id);
       const kept = (row) => Number(row && row.attendance_approval_request_id) !== withdrawn;
@@ -913,8 +977,11 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     });
 
     const assumedDate = assume ? toDateOnly(assume.attendance_date) : null;
+    const storedDays = loadedStoredDays || null;
 
-    return dates.map((date) => {
+    // "live_calculation" in the read timing: the engine over every date, plus
+    // the stored-or-live decision per date. No database access happens here.
+    return readTiming.phaseSync("live_calculation", () => dates.map((date) => {
       const resolution = context.resolutionFor(date);
 
       const slots = approvalByDate.get(date) || { regularization: null, ot: null, shift: null };
@@ -1024,7 +1091,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       // cannot answer it differently, and the OT claim below is computed from
       // the day actually being RETURNED - a claim derived from a figure the
       // caller is not being shown would be its own inconsistency.
-      const storedRow = stored_days ? stored_days.get(date) || null : null;
+      const storedRow = storedDays ? storedDays.get(date) || null : null;
       const day = resolveDayForRead({
         live: calculated,
         stored: storedRow,
@@ -1049,7 +1116,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
           ? otRequest.attendance_approval_request_id
           : null,
       };
-    });
+    }));
   };
 
   /**
@@ -1074,19 +1141,24 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     }
     if (from > to) throw validationError("from_date must not be after to_date");
 
-    const stored = attendanceCalculationRepo.listCalculations
-      ? await attendanceCalculationRepo.listCalculations({
-          employee_id: Number(employee_id),
-          from_date: from,
-          to_date: to,
-        })
-      : [];
+    // Read alongside the calculation context, not before it: the same rows,
+    // one round trip fewer in sequence.
+    const loadStored = async () =>
+      storedByDate(
+        attendanceCalculationRepo.listCalculations
+          ? await attendanceCalculationRepo.listCalculations({
+              employee_id: Number(employee_id),
+              from_date: from,
+              to_date: to,
+            })
+          : []
+      );
 
     return calculateRange({
       employee_id,
       from_date: from,
       to_date: to,
-      stored_days: storedByDate(stored),
+      stored_days_loader: loadStored,
       now,
     });
   };

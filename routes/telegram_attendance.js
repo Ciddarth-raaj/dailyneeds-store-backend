@@ -1,6 +1,7 @@
 const express = require("express");
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
+const readTiming = require("../utils/attendance_read_timing");
 
 /**
  * THE TELEGRAM ATTENDANCE MINI APP API.
@@ -136,7 +137,11 @@ class TelegramAttendanceRoutes {
      * `attendance_calculation#readRange` returns - the same read
      * `/attendance/me` serves - and no attendance state is decided here.
      */
-    r.get("/telegram/attendance/month", guard, async (req, res) => {
+    //
+    // TEMPORARY `readTiming.instrument` - see utils/attendance_read_timing.js.
+    // The session check (`guard`) runs before it and is reported as
+    // "middleware".
+    r.get("/telegram/attendance/month", guard, readTiming.instrument("telegram_month", async (req, res) => {
       try {
         const schema = { month: Joi.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).required() };
         const isValid = Joi.validate(req.query || {}, schema);
@@ -146,7 +151,7 @@ class TelegramAttendanceRoutes {
       } catch (err) {
         TelegramAttendanceRoutes._respond(res, err);
       }
-    });
+    }));
 
     /** One date: shift, existing punches (read-only) and current state. */
     r.get("/telegram/attendance/date", guard, async (req, res) => {
