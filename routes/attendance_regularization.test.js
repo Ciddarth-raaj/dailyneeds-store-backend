@@ -62,6 +62,10 @@ describe("the endpoints and their guards", () => {
         "GET /attendance/me/shift-change/options",
         "GET /attendance/regularization/:request_id",
         "GET /attendance/regularization/pending",
+        // ADMIN REVOKE: its own endpoint, administrators only - checked in the
+        // handler on user_type, not by a grantable key (see
+        // usecase/attendance_approval_revoke.test.js for the refusals).
+        "POST /attendance/approvals/:request_id/revoke",
         "POST /attendance/me/ot-request",
         "POST /attendance/me/regularization",
         "POST /attendance/me/shift-change",

@@ -3,6 +3,7 @@ const Joi = require("@hapi/joi");
 const P = require("../constants/hr_permissions");
 const respondError = require("../utils/http");
 const { requireSelf } = require("./attendance_calculation");
+const { isAdminRequest } = require("../middlewares/admin_only");
 
 /**
  * Attendance v2 / A3 - the regularization and OT approval API.
@@ -520,6 +521,61 @@ class AttendanceRegularizationRoutes {
       }
     );
 
+    /**
+     * ADMIN REVOKE: undo one stage decision of a REGULARIZATION or OT request
+     * and reopen the chain from that stage.
+     *
+     * ITS OWN ENDPOINT, never a third value of `decision` above: approving and
+     * rejecting move a chain forward and are open to every approver the chain
+     * names; revoking moves it BACK and is open to administrators alone.
+     *
+     * The guard below checks `user_type` 2 on the authenticated token and
+     * nothing grantable - no permission key, no designation, no approver
+     * role reaches it - and `revokeDecision` checks it again. The body
+     * carries the stage and the reason and nothing else: Joi refuses any
+     * other field, so a client cannot supply the type, the employee, the
+     * original decision, the minutes or the actor.
+     */
+    this.router.post("/attendance/approvals/:request_id/revoke", async (req, res) => {
+      // `isAdminRequest` is `middlewares/admin_only`'s own test (user_type 2
+      // on the verified token). The refusal is worded as the permission
+      // middleware's, because the web app treats any OTHER 403 as a dead
+      // session and sends the user to /login - a non-administrator who
+      // reaches this must be told no, not signed out.
+      if (!req.decoded) return res.status(401).json({ code: 401, msg: "Unauthorized" });
+      if (!isAdminRequest(req)) {
+        return res.status(403).json({
+          code: 403,
+          msg: "You do not have permission to perform this action",
+          error: "ADMIN_ONLY",
+        });
+      }
+      try {
+        const schema = {
+          stage_no: Joi.number().integer().min(1).required(),
+          reason: Joi.string().trim().min(5).max(500).required(),
+        };
+        const isValid = Joi.validate(req.body, schema);
+        if (isValid.error !== null) throw isValid.error;
+
+        const result = await this.usecase.revokeDecision({
+          actor: {
+            employee_id:
+              req.decoded.employee_id === null || req.decoded.employee_id === undefined
+                ? null
+                : Number(req.decoded.employee_id),
+            user_id: req.decoded.id === null || req.decoded.id === undefined ? null : Number(req.decoded.id),
+            user_type: req.decoded.user_type,
+          },
+          request_id: Number(req.params.request_id),
+          stage_no: Number(req.body.stage_no),
+          reason: req.body.reason,
+        });
+        res.status(result.code === 409 ? 409 : 200).json(result);
+      } catch (err) {
+        AttendanceRegularizationRoutes._respond(res, err);
+      }
+    });
   }
 
   /** `"3,5"` or `"3"` -> `[3, 5]`; anything unreadable is simply not a filter. */
