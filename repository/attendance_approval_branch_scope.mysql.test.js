@@ -106,6 +106,10 @@ const REQUESTS = [
   // 6. STORE_A's own role chain at its Store Manager stage - STORE_A's manager's.
   { id: 6, type: "OT", for: STORE_A_STAFF, outlet: STORE_A, stage: 1, source: "ROLE", ot: 45,
     steps: [["STORE_MANAGER", STORE_A, null, null, "PENDING"], ["OPERATIONS_MANAGER", null, null, null, "PENDING"], ["HR", null, null, null, "PENDING"]] },
+  // 8. THE SCREENSHOT'S DIRECTION: another outlet's staff, whose chain names
+  //    the warehouse-owned roamer as SECOND LEVEL, now at that stage.
+  { id: 8, type: "OT", for: STORE_B_STAFF, outlet: STORE_B, stage: 2, source: "EMPLOYEE", ot: 60,
+    steps: [["EMPLOYEE", null, STRANGER_APPROVER, "FIRST", "APPROVED"], ["EMPLOYEE", null, ROAMER, "SECOND", "PENDING"], ["EMPLOYEE", null, FINAL, "FINAL", "PENDING"]] },
   // 7. A misconfigured chain that names the requester as their OWN approver.
   { id: 7, type: "REGULARIZATION", for: FIRST, outlet: STORE_A, stage: 1, source: "EMPLOYEE",
     steps: [["EMPLOYEE", null, FIRST, "FINAL", "PENDING"]] },
@@ -241,7 +245,19 @@ describe("approval queue outlet scope, as SQL (employee 106 shape)", { skip: !UR
   });
 
   it("nobody sees their own request, whatever the scope", async () => {
-    const f = scope({ actor_employee_id: ROAMER, approver_roles: [], outlet_id: WAREHOUSE, permitted_outlet_ids: [WAREHOUSE] }, { request_type: ["REGULARIZATION", "REGULARIZATION_WITH_OT"], status: "ALL", limit: 50 });
-    assert.deepEqual(ids(await repo.listApprovals(f)), []);
+    const f = scope({ actor_employee_id: ROAMER, approver_roles: [], outlet_id: WAREHOUSE, permitted_outlet_ids: [WAREHOUSE] }, { request_type: ["REGULARIZATION", "REGULARIZATION_WITH_OT", "OT"], status: "ALL", limit: 50 });
+    const seen = ids(await repo.listApprovals(f));
+    assert.ok(!seen.includes(1) && !seen.includes(2), "the roamer's own #1 and #2 are never in their own queue");
+  });
+
+  it("THE ROAMER AS APPROVER: another outlet's request at the roamer's Second Level is in the roamer's Pending, and counted", async () => {
+    const roamer = { actor_employee_id: ROAMER, approver_roles: [], outlet_id: WAREHOUSE, permitted_outlet_ids: [WAREHOUSE] };
+    const f = scope(roamer, { request_type: ["OT"], limit: 50 });
+    const rows = await repo.listApprovals(f);
+    assert.deepEqual(ids(rows), [8]);
+    assert.equal(Number(rows[0].current_stage_approver_employee_id), ROAMER);
+    assert.equal(await repo.countApprovals(f), 1);
+    // And nobody else's pending queue gains it: the Final approver is not yet due.
+    assert.ok(!ids(await repo.listApprovals(scope(finalApprover, { request_type: ["OT"], limit: 50 }))).includes(8));
   });
 });
