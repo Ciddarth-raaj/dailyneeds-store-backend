@@ -110,6 +110,9 @@ const IDENTITIES = {
  * the real `findPayrollLockedPeriods` answers from `payrun_employee_calculation`.
  */
 function build(state = {}) {
+  // The shift master. A describe block may bring its own; the default is the
+  // four shifts above.
+  const shifts = state.shifts || SHIFTS;
   const saved = { calculations: [], overrides: [], defaultShiftWrites: [], lockProbes: [] };
   const store = { requests: [], steps: [], telegram: [] };
   const overrides = [...(state.overrides || [])];
@@ -148,10 +151,13 @@ function build(state = {}) {
             request.finalization_state === "SETTLED";
           return { ...o, shift_change_approved: approved ? 1 : 0 };
         }),
-    getWorkShiftWithSchedule: async (id) => SHIFTS[id] || null,
+    getWorkShiftWithSchedule: async (id) => shifts[id] || null,
     getWorkShiftConfigVersions: async () => [],
     listActiveWorkShiftOptions: async () =>
-      Object.values(SHIFTS).map((s) => ({ work_shift_id: s.config.work_shift_id, shift_code: s.config.shift_code, shift_name: s.config.shift_name })),
+      // `WHERE active = 1`, as the real query.
+      Object.values(shifts)
+        .filter((s) => Number(s.config.active) === 1)
+        .map((s) => ({ work_shift_id: s.config.work_shift_id, shift_code: s.config.shift_code, shift_name: s.config.shift_name })),
     getRawPunchesByCalendarWindow: async (id, from, to) =>
       (state.rawPunches || []).filter((p) => p.employee_id === id && p.punch_date >= from && p.punch_date <= to),
     // An APPROVED and SETTLED correction's punch counts on the day, exactly
@@ -303,7 +309,9 @@ function build(state = {}) {
         if (!types.includes(r.request_type)) return false;
         if (status === "PENDING" && r.status !== "PENDING") return false;
         if ((status === "APPROVED" || status === "REJECTED") && r.status !== status) return false;
-        if (Array.isArray(permitted_outlet_ids) && !permitted_outlet_ids.includes(r.outlet_id)) return false;
+        // The outlet scope never hides a row the chain addresses to a
+        // non-admin actor - and those are the only rows they see (below).
+        if (is_admin && Array.isArray(permitted_outlet_ids) && !permitted_outlet_ids.includes(r.outlet_id)) return false;
         if (Array.isArray(filter_outlet_ids) && filter_outlet_ids.length > 0 && !filter_outlet_ids.includes(r.outlet_id)) return false;
         if (filter_employee_id && r.requested_for_employee_id !== Number(filter_employee_id)) return false;
         if (filter_designation_id) {
@@ -328,10 +336,10 @@ function build(state = {}) {
       employee_name: (EMPLOYEES.find((e) => e.employee_id === r.requested_for_employee_id) || {}).employee_name,
       designation_id: (EMPLOYEES.find((e) => e.employee_id === r.requested_for_employee_id) || {}).designation_id,
       outlet_name: `Outlet ${r.outlet_id}`,
-      requested_shift_code: r.requested_work_shift_id ? SHIFTS[r.requested_work_shift_id].config.shift_code : null,
-      requested_shift_name: r.requested_work_shift_id ? SHIFTS[r.requested_work_shift_id].config.shift_name : null,
-      base_shift_code: r.base_work_shift_id ? SHIFTS[r.base_work_shift_id].config.shift_code : null,
-      base_shift_name: r.base_work_shift_id ? SHIFTS[r.base_work_shift_id].config.shift_name : null,
+      requested_shift_code: r.requested_work_shift_id ? shifts[r.requested_work_shift_id].config.shift_code : null,
+      requested_shift_name: r.requested_work_shift_id ? shifts[r.requested_work_shift_id].config.shift_name : null,
+      base_shift_code: r.base_work_shift_id ? shifts[r.base_work_shift_id].config.shift_code : null,
+      base_shift_name: r.base_work_shift_id ? shifts[r.base_work_shift_id].config.shift_name : null,
       proposed_punch_time: null, shift_snapshot: null, effective_punches: null,
       nrm_minutes: null, worked_minutes: null, shortage_minutes: null,
       stored_candidate_ot_minutes: 0, stored_status: null, shift_name: null,
@@ -409,7 +417,7 @@ function build(state = {}) {
   const workShiftRepo = {
     saved,
     findExistingEmployeeIds: async (ids) => ids.filter((id) => EMPLOYEES.some((e) => e.employee_id === id)),
-    getActiveWorkShift: async (id) => (SHIFTS[id] ? { ...SHIFTS[id].config } : null),
+    getActiveWorkShift: async (id) => (shifts[id] ? { ...shifts[id].config } : null),
     listAssignmentHistory: async (id) => [...(assignments[id] || [])].sort((a, b) => (a.effective_from < b.effective_from ? 1 : -1)),
     /*
      * THE REAL TRANSACTION, MIRRORED - and it has to be, because everything
@@ -1543,7 +1551,19 @@ describe("D/E. the unified approval centre - filters and outlet scope", () => {
     assert.deepEqual(contradictory.rows, [], "the filters combine rather than override each other");
   });
 
-  it("OUTLET SCOPE IS NOT A FILTER: a caller scoped to one outlet cannot ask for another", async () => {
+  /*
+   * THE OUTLET SCOPE NEVER HIDES A STAGE THE CHAIN ADDRESSES TO YOU.
+   *
+   * Approver 7 is the FIRST approver in every employee's Approver Setup here -
+   * 43's included, although 43 belongs to outlet 5 and 7 sits at outlet 3.
+   * `canApprove` lets 7 decide 43's stage (on this screen or from Telegram),
+   * so a queue scoped to outlet 3 that dropped 43's row would be hiding work
+   * only 7 can do: the production defect behind employee 106 disappearing
+   * from Attendance and OT Approval. These two cases used to assert that
+   * hiding; they now assert the opposite, and that the scope still hides
+   * everything the chain does NOT address to the actor.
+   */
+  it("OUTLET SCOPE NEVER HIDES YOUR OWN STAGE: a named approver sees it from another branch", async () => {
     const world = await seed();
     const scoped = {
       employee_id: 7, user_type: 1,
@@ -1553,22 +1573,39 @@ describe("D/E. the unified approval centre - filters and outlet scope", () => {
     const own = await world.regularization.listApprovals({
       actor: scoped, request_type: REQUEST_TYPE.SHIFT_CHANGE, status: "PENDING",
     });
-    assert.deepEqual(own.rows.map((r) => r.employee_id), [EMPLOYEE]);
+    assert.deepEqual(own.rows.map((r) => r.employee_id).sort(), [EMPLOYEE, 43]);
+    assert.equal(own.total, 2, "and the count agrees with the list");
 
+    // A CHOSEN outlet still only narrows.
     const asked = await world.regularization.listApprovals({
       actor: scoped, request_type: REQUEST_TYPE.SHIFT_CHANGE, status: "PENDING", outlet_ids: [5],
     });
-    assert.deepEqual(asked.rows, [], "asking for an outlet you have no rights to returns nothing, not everything");
+    assert.deepEqual(asked.rows.map((r) => r.employee_id), [43]);
+
+    // And somebody the chain does NOT name - outlet 5's own Store Manager,
+    // scoped to outlet 5 - sees nothing: the exception is the chain, only.
+    const bystander = await world.regularization.listApprovals({
+      actor: { employee_id: 9, user_type: 1, branch_scope: { kind: "OWN_BRANCHES", store_ids: [5] } },
+      request_type: REQUEST_TYPE.SHIFT_CHANGE, status: "PENDING",
+    });
+    assert.deepEqual(bystander.rows, []);
   });
 
-  it("AND IT FAILS CLOSED: an actor with no resolved scope sees nothing at all", async () => {
+  it("AND IT STILL FAILS CLOSED: with no resolved scope, only the stages addressed to you", async () => {
     const world = await seed();
-    const unscoped = await world.regularization.listApprovals({
+    const addressed = await world.regularization.listApprovals({
       actor: { employee_id: 7, user_type: 1 },
       request_type: REQUEST_TYPE.SHIFT_CHANGE,
       status: "PENDING",
     });
-    assert.deepEqual(unscoped.rows, []);
+    assert.deepEqual(addressed.rows.map((r) => r.employee_id).sort(), [EMPLOYEE, 43]);
+
+    const bystander = await world.regularization.listApprovals({
+      actor: { employee_id: 9, user_type: 1 },
+      request_type: REQUEST_TYPE.SHIFT_CHANGE,
+      status: "PENDING",
+    });
+    assert.deepEqual(bystander.rows, []);
   });
 
   it("the three tabs are three filters on one queue, and never mix", async () => {
@@ -2279,5 +2316,196 @@ describe("B. approved OT decomposes into its two components", () => {
         "the STORED row decomposes exactly too"
       );
     }
+  });
+});
+
+/* ===== C. EXTENDING THE DAY: 09:00-18:00 -> 09:00-21:00, for one date only == */
+
+/**
+ * The production report: staff on 09:00-18:00 could not ask for 09:00-21:00
+ * for one day. The business rule, stated by these cases:
+ *
+ *   - a one-day shift change may EXTEND working hours and never reduce them,
+ *     judged on NRM (span less the shift's own break), strictly greater;
+ *   - the requested shift must be ACTIVE and must RUN on that weekday;
+ *   - the base is the permanent shift the DATED assignment history gives for
+ *     that date - never today's shift;
+ *   - once finally approved it applies to that ONE date; the permanent shift
+ *     stays 09:00-18:00, and the extra time is `shift_authorised_ot_minutes`.
+ *
+ *   GEN    09:00-18:00, 60m break  NRM 480  the permanent shift for the date
+ *   G21    09:00-21:00, 60m break  NRM 660  longer; does not run on Sunday
+ *   EQ     09:00-19:00, 120m break NRM 480  equal   - refused
+ *   SHORT  09:00-17:00, 60m break  NRM 420  shorter - refused
+ *   OFF21  09:00-21:00, 60m break  NRM 660  longer but INACTIVE - refused
+ *   LATE   12:00-22:00, 60m break  NRM 540  the employee's shift from TODAY on
+ */
+describe("C. one-day shift change that EXTENDS the day: 09:00-18:00 -> 09:00-21:00", () => {
+  const GEN = 21;
+  const G21 = 22;
+  const EQ = 23;
+  const SHORT = 24;
+  const OFF21 = 25;
+  const LATE = 26;
+  const everyDayBut = (rows, restDays) =>
+    rows.map((r) => (restDays.includes(r.day_of_week) ? { ...r, is_working_day: 0, in_time: null, out_time: null } : r));
+
+  const EXTEND_SHIFTS = {
+    [GEN]: { config: config(GEN, "GEN", "General 09-18"), schedule: weekly(GEN, "09:00:00", "18:00:00", 60) },
+    [G21]: { config: config(G21, "G21", "Extended 09-21"), schedule: everyDayBut(weekly(G21, "09:00:00", "21:00:00", 60), [0]) },
+    [EQ]: { config: config(EQ, "EQ", "Equal 09-19"), schedule: weekly(EQ, "09:00:00", "19:00:00", 120) },
+    [SHORT]: { config: config(SHORT, "SHORT", "Short 09-17"), schedule: weekly(SHORT, "09:00:00", "17:00:00", 60) },
+    [OFF21]: { config: config(OFF21, "OFF21", "Retired 09-21", 0), schedule: weekly(OFF21, "09:00:00", "21:00:00", 60) },
+    [LATE]: { config: config(LATE, "LATE", "Late 12-22"), schedule: weekly(LATE, "12:00:00", "22:00:00", 60) },
+  };
+
+  // FRIDAY 18 September, a working day for every shift above. The employee
+  // was on GEN from 1 September and moves PERMANENTLY to LATE from TODAY
+  // (Saturday 19 September): today's shift is not the one that applied on
+  // the 18th, and the 18th must be judged on the 18th's.
+  const DATE = "2026-09-18";
+  const SUNDAY = "2026-09-13";
+  const history = () => ({
+    [EMPLOYEE]: [
+      { employee_work_shift_assignment_id: 1, employee_id: EMPLOYEE, work_shift_id: GEN, effective_from: "2026-09-01", source: "MIGRATION_BACKFILL" },
+      { employee_work_shift_assignment_id: 2, employee_id: EMPLOYEE, work_shift_id: LATE, effective_from: TODAY, source: "SHIFT_CHANGE" },
+    ],
+  });
+  const world = (extra = {}) => build({ shifts: EXTEND_SHIFTS, assignments: history(), ...extra });
+  const raise = (w, work_shift_id, date = DATE) =>
+    w.regularization.raiseShiftChangeRequest({
+      actor: self(EMPLOYEE), attendance_date: date, work_shift_id,
+      reason: "Covering the evening rush", today: TODAY,
+    });
+  const refusal = async (promise) => {
+    try {
+      await promise;
+    } catch (err) {
+      return err.message;
+    }
+    assert.fail("expected the request to be refused");
+    return null;
+  };
+
+  it("the inputs, resolved: dated base GEN 09:00-18:00 NRM 480; G21 working, 60m break, NRM 660", async () => {
+    const w = world();
+    const target = await w.calculation.shiftForDate({ employee_id: EMPLOYEE, attendance_date: DATE, work_shift_id: G21 });
+    assert.equal(target.base.work_shift_id, GEN, "the DATED assignment for the 18th, not today's LATE");
+    assert.equal(target.base.in_time, "09:00:00");
+    assert.equal(target.base.out_time, "18:00:00");
+    assert.equal(target.base.is_working_day, true);
+    assert.equal(target.base.nrm_minutes, 480, "540 span less the 60 minute break");
+    assert.equal(target.work_shift_id, G21);
+    assert.equal(target.is_working_day, true);
+    assert.equal(target.break_minutes, 60);
+    assert.equal(target.nrm_minutes, 660, "720 span less the 60 minute break");
+  });
+
+  it("09:00-18:00 -> 09:00-21:00 is OFFERED and ACCEPTED", async () => {
+    const w = world();
+    const offered = await w.regularization.shiftChangeOptions({ actor: self(EMPLOYEE), attendance_date: DATE });
+    assert.equal(offered.can_raise, true);
+    assert.equal(offered.base.work_shift_id, GEN);
+    assert.deepEqual(
+      offered.options.map((o) => [o.work_shift_id, o.in_time, o.out_time, o.nrm_minutes]),
+      [[G21, "09:00:00", "21:00:00", 660], [LATE, "12:00:00", "22:00:00", 540]],
+      "only the longer ACTIVE shifts - never EQ, SHORT, the inactive OFF21 or GEN itself"
+    );
+
+    const raised = await raise(w, G21);
+    assert.equal(raised.requested_work_shift_id, G21);
+    assert.equal(raised.base_work_shift_id, GEN, "the dated base is what is snapshotted");
+    assert.equal(raised.requested_nrm_minutes, 660);
+    assert.equal(raised.base_nrm_minutes, 480);
+    assert.equal(w.store.requests[0].status, "PENDING");
+  });
+
+  it("EQUAL NRM is refused: 09:00-19:00 with a 120m break is 480, the same as the base", async () => {
+    const w = world();
+    assert.match(await refusal(raise(w, EQ)), /only allowed for shifts with longer working hours/);
+    assert.equal(w.store.requests.length, 0);
+  });
+
+  it("SHORTER NRM is refused: a shift change never reduces the day", async () => {
+    const w = world();
+    assert.match(await refusal(raise(w, SHORT)), /only allowed for shifts with longer working hours/);
+    assert.equal(w.store.requests.length, 0);
+  });
+
+  it("a target shift that does NOT RUN on that weekday is refused, and not offered", async () => {
+    const w = world();
+    const offered = await w.regularization.shiftChangeOptions({ actor: self(EMPLOYEE), attendance_date: SUNDAY });
+    assert.ok(!offered.options.some((o) => o.work_shift_id === G21), "G21 has Sunday off");
+    assert.match(await refusal(raise(w, G21, SUNDAY)), /does not run on 2026-09-13/);
+    assert.equal(w.store.requests.length, 0);
+  });
+
+  it("an INACTIVE shift is refused at submit as well as hidden from the dropdown", async () => {
+    const w = world();
+    assert.match(await refusal(raise(w, OFF21)), /not active/);
+    assert.equal(w.store.requests.length, 0);
+  });
+
+  it("the DATED assignment is the base, not today's shift: on and after TODAY the base is LATE", async () => {
+    const w = world();
+    // The 18th: GEN is the base, so G21 is longer and offered.
+    const past = await w.regularization.shiftChangeOptions({ actor: self(EMPLOYEE), attendance_date: DATE });
+    assert.equal(past.base.work_shift_id, GEN);
+    // The 21st (a Monday): LATE is the base (NRM 540), and G21 is still longer.
+    const future = await w.regularization.shiftChangeOptions({ actor: self(EMPLOYEE), attendance_date: "2026-09-21" });
+    assert.equal(future.base.work_shift_id, LATE);
+    assert.equal(future.base.nrm_minutes, 540);
+    assert.deepEqual(future.options.map((o) => o.work_shift_id), [G21]);
+  });
+
+  it("the protections still hold: one open request per date, and a locked month", async () => {
+    const w = world();
+    await raise(w, G21);
+    assert.match(await refusal(raise(w, G21)), /already pending/);
+
+    const locked = world({ lockedMonths: ["2026-9"] });
+    const err = await raise(locked, G21).catch((e) => e);
+    assert.ok(err instanceof Error);
+    assert.equal(locked.store.requests.length, 0);
+  });
+
+  it("finally approved, it applies to THAT DATE ONLY; the extra 3h is shift-authorised OT; the permanent shift is untouched", async () => {
+    const w = world({
+      rawPunches: [
+        punch(1, EMPLOYEE, "2026-09-17 09:00:00"), punch(2, EMPLOYEE, "2026-09-17 18:00:00"),
+        punch(3, EMPLOYEE, `${DATE} 09:00:00`), punch(4, EMPLOYEE, `${DATE} 21:00:00`),
+      ],
+    });
+    const historyBefore = JSON.stringify(w.assignments[EMPLOYEE]);
+
+    const raised = await raise(w, G21);
+    const id = raised.attendance_approval_request_id;
+    await w.regularization.decide({ actor: approver(7), request_id: id, decision: STEP_DECISION.APPROVED });
+    const final = await w.regularization.decide({ actor: approver(8), request_id: id, decision: STEP_DECISION.APPROVED });
+    assert.equal(w.store.requests[0].status, "APPROVED");
+    assert.ok(final.attendance_date_shift_override_id, "the one-date override is written by the final approval");
+
+    const [before, day] = await w.calculation.calculateRange({ employee_id: EMPLOYEE, from_date: "2026-09-17", to_date: DATE });
+
+    // THE APPROVED DATE: calculated under G21, paid against GEN.
+    assert.equal(day.work_shift_id, G21);
+    assert.equal(day.worked_minutes, 660, "09:00-21:00 less G21's 60m break");
+    assert.equal(day.base_nrm_minutes, 480, "regular time is still measured against the permanent 09:00-18:00");
+    assert.equal(day.regular_minutes, 480);
+    assert.equal(day.shift_authorised_ot_minutes, 180, "the three extra hours, authorised by the approval");
+    assert.equal(day.approved_ot_minutes, 180);
+    assert.equal(day.approved_ot_source, "SHIFT_CHANGE");
+    assert.equal(day.shortage_minutes, 0);
+
+    // THE DAY BEFORE: untouched, GEN, no authorised OT.
+    assert.equal(before.work_shift_id, GEN);
+    assert.equal(before.shift_authorised_ot_minutes || 0, 0);
+
+    // THE OVERRIDE IS ONE DATE, AND THE PERMANENT SHIFT HISTORY IS UNCHANGED.
+    assert.deepEqual(w.overrides.map((o) => [o.attendance_date, o.work_shift_id]), [[DATE, G21]]);
+    assert.equal(JSON.stringify(w.assignments[EMPLOYEE]), historyBefore);
+    const permanent = await w.calculation.shiftForDate({ employee_id: EMPLOYEE, attendance_date: DATE });
+    assert.equal(permanent.base.work_shift_id, GEN, "the permanent shift for the 18th is still 09:00-18:00");
+    assert.equal(permanent.work_shift_id, G21, "while the date itself resolves to the approved shift");
   });
 });

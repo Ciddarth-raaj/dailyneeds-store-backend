@@ -780,6 +780,17 @@ module.exports = (
     if (Number(resolved.base.work_shift_id) === requestedShiftId) {
       throw validationError(`That is already your shift for ${date}`);
     }
+    // ONLY AN ACTIVE SHIFT, as the dropdown offers. `shiftChangeOptions`
+    // builds its list from the active shifts alone, so without this a
+    // hand-made request could name a retired shift the screen never showed -
+    // the two paths would disagree about the very rule they share.
+    if (typeof attendanceCalculationUsecase.listDateShiftOptions === "function") {
+      const listed = await attendanceCalculationUsecase.listDateShiftOptions();
+      const active = Array.isArray(listed) ? listed : (listed && listed.data) || [];
+      if (!active.some((s) => Number(s.work_shift_id) === requestedShiftId)) {
+        throw validationError("That work shift is not active, so it cannot be requested");
+      }
+    }
     if (resolved.work_shift_id === null || resolved.nrm_minutes === null) {
       throw validationError(`That work shift has no schedule for ${date}`);
     }

@@ -819,49 +819,58 @@ class AttendanceRegularizationRepository {
     const params = [types];
     const outlet = outlet_id === undefined ? null : outlet_id;
 
+    /*
+     * THE ACTOR'S AUTHORITY OVER A REQUEST, from its chain alone: the stage
+     * (the CURRENT one for PENDING, ANY one for history) is addressed to them
+     * by name, or carries one of their roles - a Store Manager's only for
+     * their own outlet. Built once, because it is used twice below: as the
+     * visibility rule itself, and as what the outlet scope may never hide.
+     * `null` for an administrator, who is not narrowed by it.
+     */
+    let authority = null;
+    if (!is_admin) {
+      if (status === "PENDING") {
+        authority =
+          roles.length === 0
+            ? { sql: "s.approver_employee_id = ?", params: [actor_employee_id] }
+            : {
+                sql: `((s.approver_employee_id IS NULL AND s.approver_role IN (?)
+                        AND (s.approver_role <> 'STORE_MANAGER' OR s.outlet_id = ?))
+                       OR s.approver_employee_id = ?)`,
+                params: [roles, outlet, actor_employee_id],
+              };
+      } else {
+        authority =
+          roles.length === 0
+            ? {
+                sql: `EXISTS (SELECT 1 FROM attendance_approval_step x
+                               WHERE x.attendance_approval_request_id = r.attendance_approval_request_id
+                                 AND x.approver_employee_id = ?)`,
+                params: [actor_employee_id],
+              }
+            : {
+                sql: `EXISTS (SELECT 1 FROM attendance_approval_step x
+                               WHERE x.attendance_approval_request_id = r.attendance_approval_request_id
+                                 AND ((x.approver_employee_id IS NULL AND x.approver_role IN (?)
+                                       AND (x.approver_role <> 'STORE_MANAGER' OR x.outlet_id = ?))
+                                      OR x.approver_employee_id = ?))`,
+                params: [roles, outlet, actor_employee_id],
+              };
+      }
+    }
+
     if (status === "PENDING") {
       where.push("r.status = 'PENDING'");
       where.push("s.decision = 'PENDING'");
-      if (!is_admin) {
-        if (roles.length === 0) where.push("s.approver_employee_id = ?");
-        else {
-          where.push(
-            `((s.approver_employee_id IS NULL AND s.approver_role IN (?)
-               AND (s.approver_role <> 'STORE_MANAGER' OR s.outlet_id = ?))
-              OR s.approver_employee_id = ?)`
-          );
-          params.push(roles, outlet);
-        }
-        params.push(actor_employee_id);
-      }
+    } else if (status === "APPROVED" || status === "REJECTED") {
+      where.push("r.status = ?");
+      params.push(status);
     } else {
-      if (status === "APPROVED" || status === "REJECTED") {
-        where.push("r.status = ?");
-        params.push(status);
-      } else {
-        where.push("r.status <> 'CANCELLED'");
-      }
-      if (!is_admin) {
-        if (roles.length === 0) {
-          where.push(
-            `EXISTS (SELECT 1 FROM attendance_approval_step x
-                      WHERE x.attendance_approval_request_id = r.attendance_approval_request_id
-                        AND x.approver_employee_id = ?)`
-          );
-          params.push(actor_employee_id);
-        } else {
-          where.push(
-            `EXISTS (SELECT 1 FROM attendance_approval_step x
-                      WHERE x.attendance_approval_request_id = r.attendance_approval_request_id
-                        AND ((x.approver_employee_id IS NULL AND x.approver_role IN (?)
-                              AND (x.approver_role <> 'STORE_MANAGER' OR x.outlet_id = ?))
-                             OR x.approver_employee_id = ?))`
-          );
-          params.push(roles, outlet, actor_employee_id);
-        }
-      }
+      where.push("r.status <> 'CANCELLED'");
     }
-    if (!is_admin) {
+    if (authority) {
+      where.push(authority.sql);
+      params.push(...authority.params);
       where.push("r.requested_for_employee_id <> ?");
       where.push("r.requested_by_employee_id <> ?");
       params.push(actor_employee_id, actor_employee_id);
@@ -879,16 +888,35 @@ class AttendanceRegularizationRepository {
      * nothing and is noticed. `null` means an actor with no restriction at
      * all (an administrator, or a company-wide scope).
      *
+     * IT NEVER HIDES A REQUEST THE CHAIN ADDRESSES TO THIS ACTOR. Attendance
+     * Approver Setup may name ANY active employee as a person's approver, in
+     * any branch, and `canApprove` lets that person decide the stage - from
+     * this screen or from Telegram - whatever their branch. Company-wide
+     * roles (Operations, HR) are likewise not outlet-bound in `canApprove`.
+     * The outlet scope used to be a flat `r.outlet_id IN (...)` on top of
+     * that, so a request from an employee OWNED by one branch (a roaming
+     * operations employee kept on the warehouse's books, say) vanished from
+     * the queue AND the count of an approver sitting in another - while
+     * remaining theirs to decide. A queue that hides work its owner must do
+     * is not a narrower scope, it is a lost request. So the chain's own
+     * authority is the exception to the branch scope, and nothing else is:
+     * a row this actor has no stage on is still refused outside their
+     * branches, and still refused everywhere when the scope is empty.
+     *
      * `filter_outlet_ids` is a CHOICE the user made on the screen. It can
      * only ever narrow what the line above already allows, so a client asking
      * for an outlet it has no rights to gets nothing rather than an error -
      * and, more importantly, gets nothing rather than the rows.
      */
     if (Array.isArray(permitted_outlet_ids)) {
-      if (permitted_outlet_ids.length === 0) where.push("1 = 0");
-      else {
-        where.push("r.outlet_id IN (?)");
-        params.push(permitted_outlet_ids);
+      const inBranch = permitted_outlet_ids.length === 0 ? "1 = 0" : "r.outlet_id IN (?)";
+      const branchParams = permitted_outlet_ids.length === 0 ? [] : [permitted_outlet_ids];
+      if (authority) {
+        where.push(`(${inBranch} OR ${authority.sql})`);
+        params.push(...branchParams, ...authority.params);
+      } else {
+        where.push(inBranch);
+        params.push(...branchParams);
       }
     }
     if (Array.isArray(filter_outlet_ids) && filter_outlet_ids.length > 0) {

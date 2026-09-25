@@ -1000,7 +1000,9 @@ describe("G. THE PARITY TEST: the report's verdict IS the production rule's", ()
       },
       {
         shiftForDate,
-        listDateShiftOptions: async () => [],
+        // The SAME active-shift list the report reads: production's submit
+        // path now refuses a shift that is not on it, as the dropdown does.
+        listDateShiftOptions: calculation.listDateShiftOptions,
         findPayrollLockedPeriods: async (rows) => calculation.findPayrollLockedPeriodsBulk(rows),
       },
       {

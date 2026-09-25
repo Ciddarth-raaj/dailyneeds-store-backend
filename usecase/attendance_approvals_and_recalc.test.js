@@ -176,9 +176,12 @@ function build(state = {}) {
       store.requests.filter((r) => {
         const types = Array.isArray(request_type) ? request_type : [request_type];
         if (!types.includes(r.request_type)) return false;
-        // The outlet SCOPE fails closed, exactly as the SQL does; the chosen
-        // filters can only narrow it further.
-        if (Array.isArray(permitted_outlet_ids) && !permitted_outlet_ids.includes(r.outlet_id)) return false;
+        // The outlet SCOPE fails closed, exactly as the SQL does, EXCEPT for a
+        // request whose chain gives this actor authority - which is every row
+        // a non-admin can see at all (the checks below), so for them the scope
+        // hides nothing the chain addresses to them. The chosen filters can
+        // only narrow it further.
+        if (is_admin && Array.isArray(permitted_outlet_ids) && !permitted_outlet_ids.includes(r.outlet_id)) return false;
         if (Array.isArray(filter_outlet_ids) && filter_outlet_ids.length > 0 && !filter_outlet_ids.includes(r.outlet_id)) return false;
         if (filter_employee_id && r.requested_for_employee_id !== Number(filter_employee_id)) return false;
         if (filter_designation_id) {
