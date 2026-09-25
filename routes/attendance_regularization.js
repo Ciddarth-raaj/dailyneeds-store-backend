@@ -580,6 +580,119 @@ class AttendanceRegularizationRoutes {
         AttendanceRegularizationRoutes._respond(res, err);
       }
     });
+
+    /**
+     * "SELECT ALL MATCHING THE FILTERS" for a bulk action: the ids of one
+     * tab's requests, under the caller's scope and the screen's filters, that
+     * the caller could put through `action` now. The same key and the same
+     * Shift gate as the list itself; the bulk action re-checks every id.
+     */
+    this.router.get(
+      "/attendance/approvals/bulk-targets",
+      this.permissions.require(P.VIEW_ATTENDANCE_APPROVALS),
+      this._requireShiftViewForTypedQuery(),
+      async (req, res) => {
+        try {
+          const schema = {
+            request_type: Joi.string().valid("REGULARIZATION", "OT", "SHIFT_CHANGE").required(),
+            status: Joi.string().valid("PENDING", "APPROVED", "REJECTED").required(),
+            action: Joi.string().valid("APPROVE", "REJECT", "REVOKE").required(),
+            outlet_ids: Joi.string().allow("").optional(),
+            employee_id: Joi.number().integer().min(1).optional(),
+            designation_id: Joi.number().integer().min(1).optional(),
+          };
+          const isValid = Joi.validate(req.query, schema);
+          if (isValid.error !== null) throw isValid.error;
+          const result = await this.usecase.listBulkTargets({
+            actor: await this._actor(req),
+            request_type: req.query.request_type,
+            status: req.query.status,
+            action: req.query.action,
+            outlet_ids: AttendanceRegularizationRoutes._idList(req.query.outlet_ids),
+            employee_id: req.query.employee_id ? Number(req.query.employee_id) : null,
+            designation_id: req.query.designation_id ? Number(req.query.designation_id) : null,
+          });
+          res.json({ code: 200, ...result });
+        } catch (err) {
+          AttendanceRegularizationRoutes._respond(res, err);
+        }
+      }
+    );
+
+    /**
+     * BULK Approve / Reject / Revoke - a THIN LOOP over the single-record
+     * actions, never a second workflow.
+     *
+     * The gates are the single endpoints' own, for the whole call: Approve and
+     * Reject need `approve_attendance_regularization` (and, on the Shift tab,
+     * `approve_shift_change_request` too), exactly as the decision route
+     * does; Revoke is for administrators (`user_type` 2) only, exactly as the
+     * revoke route is, with the same session-safe refusal. Then every id is
+     * handed to `decide` / `revokeDecision`, which re-reads the stored request
+     * and applies every rule a single action does; the usecase also refuses
+     * any id that is not of this tab's type, so the Shift gate cannot be
+     * sidestepped by sending a SHIFT_CHANGE id under another tab.
+     *
+     * One record's refusal never fails the call: the response is 200 with a
+     * per-record result and a summary.
+     */
+    this.router.post("/attendance/approvals/bulk", async (req, res) => {
+      if (!req.decoded) return res.status(401).json({ code: 401, msg: "Unauthorized" });
+      try {
+        const schema = {
+          action: Joi.string().valid("APPROVE", "REJECT", "REVOKE").required(),
+          request_type: Joi.string().valid("REGULARIZATION", "OT", "SHIFT_CHANGE").required(),
+          items: Joi.array()
+            .items(
+              Joi.object({
+                request_id: Joi.number().integer().min(1).required(),
+                current_stage_no: Joi.number().integer().min(1).optional(),
+                status: Joi.string().valid("PENDING", "APPROVED", "REJECTED").optional(),
+              })
+            )
+            .min(1)
+            .max(this.usecase.MAX_BULK_ITEMS || 100)
+            .required(),
+          reason: Joi.string().allow("").trim().max(500).optional(),
+        };
+        const isValid = Joi.validate(req.body, schema);
+        if (isValid.error !== null) throw isValid.error;
+
+        if (req.body.action === "REVOKE") {
+          if (!isAdminRequest(req)) {
+            return res.status(403).json({
+              code: 403,
+              msg: "You do not have permission to perform this action",
+              error: "ADMIN_ONLY",
+            });
+          }
+        } else {
+          const keys =
+            req.body.request_type === "SHIFT_CHANGE"
+              ? [P.APPROVE_ATTENDANCE_REGULARIZATION, P.APPROVE_SHIFT_CHANGE_REQUEST]
+              : [P.APPROVE_ATTENDANCE_REGULARIZATION];
+          if (!(await this.permissions.hasAll(req, ...keys))) return AttendanceRegularizationRoutes._forbidden(res);
+        }
+
+        const nullableNumber = (value) => (value === null || value === undefined ? null : Number(value));
+        const result = await this.usecase.bulkAction({
+          // Exactly the actor each single-record route builds.
+          actor: { ...(await this._actor(req)), user_id: nullableNumber(req.decoded.id) },
+          revoke_actor: {
+            employee_id: nullableNumber(req.decoded.employee_id),
+            user_id: nullableNumber(req.decoded.id),
+            user_type: req.decoded.user_type,
+          },
+          action: req.body.action,
+          request_type: req.body.request_type,
+          items: req.body.items,
+          reason: req.body.reason || null,
+        });
+        res.json(result);
+      } catch (err) {
+        AttendanceRegularizationRoutes._respond(res, err);
+      }
+    });
   }
 
   /** `"3,5"` or `"3"` -> `[3, 5]`; anything unreadable is simply not a filter. */

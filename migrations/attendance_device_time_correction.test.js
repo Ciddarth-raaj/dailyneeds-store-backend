@@ -25,7 +25,11 @@ describe(NAME, () => {
     assert.ok(js.includes(`${NAME}-up.sql`));
     assert.ok(js.includes(`${NAME}-down.sql`));
     const others = fs.readdirSync(path.join(__dirname, "mysql/migrations")).filter((f) => /^\d{14}-.*\.js$/.test(f));
-    assert.equal(others.sort().pop(), `${NAME}.js`);
+    // Sorts after every migration that existed when it was written; the only
+    // ones after it are the ones added since, named here so a new one is a
+    // deliberate addition to this list.
+    const LATER = ["20261105120000-attendance-approval-bulk-action.js"];
+    assert.deepEqual(others.filter((f) => f > `${NAME}.js`).sort(), LATER);
   });
 
   it("creates exactly two guarded tables and alters, drops, updates or deletes nothing", () => {

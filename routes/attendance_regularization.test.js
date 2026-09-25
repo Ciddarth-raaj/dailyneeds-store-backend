@@ -58,6 +58,9 @@ describe("the endpoints and their guards", () => {
       guards.map((g) => `${g.method} ${g.path}`).sort(),
       [
         "GET /attendance/approvals",
+        // BULK: the ids a "select all matching" would action, and the thin
+        // loop over the single-record actions (routes/attendance_approval_bulk.test.js).
+        "GET /attendance/approvals/bulk-targets",
         "GET /attendance/approvals/count",
         "GET /attendance/me/shift-change/options",
         "GET /attendance/regularization/:request_id",
@@ -66,6 +69,7 @@ describe("the endpoints and their guards", () => {
         // handler on user_type, not by a grantable key (see
         // usecase/attendance_approval_revoke.test.js for the refusals).
         "POST /attendance/approvals/:request_id/revoke",
+        "POST /attendance/approvals/bulk",
         "POST /attendance/me/ot-request",
         "POST /attendance/me/regularization",
         "POST /attendance/me/shift-change",

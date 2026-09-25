@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const {
   REQUESTER_CLASS,
   APPROVER_ROLE,
@@ -2012,6 +2013,374 @@ module.exports = (
     return { rows: shaped, total, request_type, status, limit, offset, approver_roles: roles };
   };
 
+  /**
+   * BULK ACTIONS - Approve, Reject and Revoke many requests of ONE tab at once.
+   *
+   * NOT A SECOND WORKFLOW. Every selected request goes, one at a time, through
+   * the very same `decide` or `revokeDecision` the single-record endpoints
+   * call, so the authority check (`canApprove`), the payroll lock, the
+   * open-day rule, the OT clamp, the shift override, the fingerprint and
+   * `FOR UPDATE` checks, the transaction and the request's own history are
+   * exactly those of a single action and cannot drift from them. What this
+   * adds is only what a batch needs:
+   *
+   *   - the TAB. Every id is re-read from the database and must be of the
+   *     tab's request type, so a SHIFT_CHANGE cannot ride in under the OT tab
+   *     (and past the Shift key the route checked for the tab);
+   *   - the state the approver SAW. A request that is no longer in the state
+   *     it was selected in - decided by somebody else, moved to another
+   *     stage, revoked - is reported as changed and left alone, instead of
+   *     being decided at a stage the approver never looked at;
+   *   - PARTIAL SUCCESS. One record's refusal never stops the others, and a
+   *     record that succeeded stays done;
+   *   - one log row PER RECORD under one operation id.
+   *
+   * NOTHING FROM THE CLIENT IS TRUSTED BEYOND THE IDS. The type, employee,
+   * status, stage, minutes and decision history are all read from the stored
+   * request by the single-record method.
+   */
+  const BULK_ACTION = Object.freeze({ APPROVE: "APPROVE", REJECT: "REJECT", REVOKE: "REVOKE" });
+  const BULK_OUTCOME = Object.freeze({ SUCCEEDED: "SUCCEEDED", SKIPPED: "SKIPPED", FAILED: "FAILED" });
+  // One HTTP call. The screen sends a larger selection in chunks of this or
+  // fewer, so no single request runs long enough to meet a proxy timeout.
+  const MAX_BULK_ITEMS = 100;
+  // "Select all matching the filters": the most ids one call will return.
+  const MAX_BULK_TARGETS = 1000;
+
+  /**
+   * Why a single-record action refused, as a bulk outcome. A business rule
+   * that said no is SKIPPED - nothing was attempted against the data; a
+   * record whose state moved underneath, or an unexpected error, is FAILED.
+   */
+  const bulkRefusal = (err) => {
+    if (err && err.name === "ForbiddenError") {
+      return { outcome: BULK_OUTCOME.SKIPPED, code: "NOT_PERMITTED", message: err.message };
+    }
+    if (err && err.code === "PAYROLL_MONTH_LOCKED") {
+      return { outcome: BULK_OUTCOME.SKIPPED, code: "PAYROLL_LOCKED", message: err.message };
+    }
+    if (err && err.code === "ATTENDANCE_DAY_OPEN") {
+      return { outcome: BULK_OUTCOME.SKIPPED, code: "DAY_OPEN", message: err.message };
+    }
+    if (err && err.name === "ValidationError") {
+      return { outcome: BULK_OUTCOME.SKIPPED, code: "NOT_ELIGIBLE", message: err.message };
+    }
+    return {
+      outcome: BULK_OUTCOME.FAILED,
+      code: "ERROR",
+      message: "The action could not be completed for this request; it was not changed.",
+    };
+  };
+
+  const bulkReasonCheck = (action, reason) => {
+    const why = typeof reason === "string" ? reason.trim() : "";
+    if (action === BULK_ACTION.REJECT && why.length < 5) {
+      throw validationError("A rejection reason of at least 5 characters is required");
+    }
+    if (action === BULK_ACTION.REVOKE && why.length < 5) {
+      throw validationError("A revoke reason of at least 5 characters is required");
+    }
+    if (why.length > 500) throw validationError("A reason may be at most 500 characters");
+    return why;
+  };
+
+  /**
+   * The ids, in the order given, each with the state the screen showed.
+   * `current_stage_no` (Approve / Reject) and `status` (Revoke) are what the
+   * approver saw; either may be omitted, and then only the server's own
+   * status rule applies.
+   */
+  const bulkItems = (items) => {
+    if (!Array.isArray(items) || items.length === 0) throw validationError("Select at least one request");
+    if (items.length > MAX_BULK_ITEMS) {
+      throw validationError(`At most ${MAX_BULK_ITEMS} requests can be actioned in one call`);
+    }
+    const seen = new Set();
+    const out = [];
+    for (const raw of items) {
+      const item = raw !== null && typeof raw === "object" ? raw : { request_id: raw };
+      const id = Number(item.request_id);
+      if (!Number.isInteger(id) || id <= 0) throw validationError("Every request_id must be a request id");
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const stage = item.current_stage_no === null || item.current_stage_no === undefined ? null : Number(item.current_stage_no);
+      out.push({
+        request_id: id,
+        current_stage_no: Number.isInteger(stage) && stage > 0 ? stage : null,
+        status: typeof item.status === "string" ? item.status : null,
+      });
+    }
+    return out;
+  };
+
+  const bulkAction = async ({
+    actor,
+    revoke_actor = null,
+    action,
+    request_type,
+    items,
+    reason = null,
+    now = null,
+    bulk_operation_id = null,
+  }) => {
+    if (!Object.values(BULK_ACTION).includes(action)) {
+      throw validationError("action must be APPROVE, REJECT or REVOKE");
+    }
+    if (!APPROVAL_TYPES.includes(request_type)) {
+      throw validationError("request_type must be REGULARIZATION, OT or SHIFT_CHANGE");
+    }
+    const why = bulkReasonCheck(action, reason);
+    const targets = bulkItems(items);
+    if (action === BULK_ACTION.REVOKE && (!revoke_actor || Number(revoke_actor.user_type) !== ADMIN_USER_TYPE)) {
+      const err = new Error("Only an administrator can revoke an approval decision");
+      err.name = "ForbiddenError";
+      throw err;
+    }
+    const operationId = bulk_operation_id || crypto.randomUUID();
+    const tabTypes = typesForTab(request_type);
+    const logActor =
+      action === BULK_ACTION.REVOKE
+        ? { employee_id: revoke_actor.employee_id, user_id: revoke_actor.user_id }
+        : {
+            employee_id:
+              actor && actor.employee_id !== null && actor.employee_id !== undefined && Number(actor.employee_id) > 0
+                ? Number(actor.employee_id)
+                : null,
+            user_id: actor && actor.user_id !== undefined ? actor.user_id : null,
+          };
+
+    const results = [];
+    /* eslint-disable no-await-in-loop */
+    // ONE AT A TIME, on purpose: each record is its own transaction, and two
+    // records of the same employee and date must not race each other's
+    // recalculation.
+    for (const target of targets) {
+      const result = {
+        request_id: target.request_id,
+        request_type: null,
+        employee_id: null,
+        attendance_date: null,
+        previous_status: null,
+        new_status: null,
+        outcome: null,
+        code: null,
+        message: null,
+      };
+      try {
+        const request = await attendanceRegularizationRepo.getRequest(target.request_id);
+        if (!request) {
+          Object.assign(result, { outcome: BULK_OUTCOME.SKIPPED, code: "NOT_FOUND", message: "No such request" });
+        } else {
+          result.request_type = request.request_type;
+          result.employee_id = Number(request.requested_for_employee_id);
+          result.attendance_date = request.attendance_date;
+          result.previous_status = request.status;
+          const seenStage = target.current_stage_no;
+          if (!tabTypes.includes(request.request_type)) {
+            Object.assign(result, {
+              outcome: BULK_OUTCOME.SKIPPED,
+              code: "WRONG_TYPE",
+              message: `This is a ${request.request_type} request, not one of this tab's`,
+            });
+          } else if (action !== BULK_ACTION.REVOKE && request.status !== REQUEST_STATUS.PENDING) {
+            Object.assign(result, {
+              outcome: BULK_OUTCOME.FAILED,
+              code: "STATE_CHANGED",
+              message: `The request is now ${request.status} - it was not changed`,
+            });
+          } else if (
+            action !== BULK_ACTION.REVOKE &&
+            seenStage !== null &&
+            Number(request.current_stage_no) !== seenStage
+          ) {
+            Object.assign(result, {
+              outcome: BULK_OUTCOME.FAILED,
+              code: "STATE_CHANGED",
+              message: `The request moved from stage ${seenStage} to stage ${request.current_stage_no} since it was loaded - it was not changed`,
+            });
+          } else if (
+            action === BULK_ACTION.REVOKE &&
+            request.status !== REQUEST_STATUS.APPROVED &&
+            request.status !== REQUEST_STATUS.REJECTED
+          ) {
+            Object.assign(result, {
+              outcome: BULK_OUTCOME.FAILED,
+              code: "STATE_CHANGED",
+              message: `The request is now ${request.status} - it was not changed`,
+            });
+          } else if (action === BULK_ACTION.REVOKE && target.status && target.status !== request.status) {
+            Object.assign(result, {
+              outcome: BULK_OUTCOME.FAILED,
+              code: "STATE_CHANGED",
+              message: `The request was ${target.status} when loaded and is now ${request.status} - it was not changed`,
+            });
+          } else {
+            // THE SINGLE-RECORD ACTION, unchanged.
+            const done =
+              action === BULK_ACTION.REVOKE
+                ? await revokeDecision({ actor: revoke_actor, request_id: target.request_id, reason: why, now })
+                : await decide({
+                    actor,
+                    request_id: target.request_id,
+                    decision: action === BULK_ACTION.APPROVE ? STEP_DECISION.APPROVED : STEP_DECISION.REJECTED,
+                    remarks: why || null,
+                    source: "WEB",
+                    now,
+                  });
+            if (done && done.code === 200) {
+              Object.assign(result, {
+                outcome: BULK_OUTCOME.SUCCEEDED,
+                code: "OK",
+                new_status: done.status,
+                message:
+                  action === BULK_ACTION.REVOKE
+                    ? "Revoked - the request is cancelled"
+                    : done.status === REQUEST_STATUS.PENDING
+                    ? "Passed to the next stage"
+                    : done.status === REQUEST_STATUS.APPROVED
+                    ? "Finally approved"
+                    : "Rejected",
+              });
+              if (done.current_stage_no !== undefined) result.current_stage_no = done.current_stage_no;
+            } else {
+              Object.assign(result, {
+                outcome: BULK_OUTCOME.FAILED,
+                code: done && done.code === 409 ? "STATE_CHANGED" : "ERROR",
+                message: (done && done.msg) || "The request was not changed",
+              });
+            }
+          }
+        }
+      } catch (err) {
+        Object.assign(result, bulkRefusal(err));
+      }
+
+      // THE PER-RECORD LOG. The action has already committed or been
+      // refused; a log write that fails does not undo it, and is reported.
+      try {
+        if (typeof attendanceRegularizationRepo.recordBulkActionItem === "function") {
+          await attendanceRegularizationRepo.recordBulkActionItem({
+            bulk_operation_id: operationId,
+            action,
+            request_id: result.request_id,
+            request_type: result.request_type,
+            employee_id: result.employee_id,
+            attendance_date: result.attendance_date,
+            previous_status: result.previous_status,
+            new_status: result.new_status,
+            outcome: result.outcome,
+            outcome_reason: result.outcome === BULK_OUTCOME.SUCCEEDED ? null : result.message,
+            reason: why || null,
+            acted_by_employee_id: logActor.employee_id,
+            acted_by_user_id: logActor.user_id,
+          });
+          result.logged = true;
+        } else {
+          result.logged = false;
+        }
+      } catch (err) {
+        result.logged = false;
+      }
+      results.push(result);
+    }
+    /* eslint-enable no-await-in-loop */
+
+    const summary = { requested: targets.length, succeeded: 0, skipped: 0, failed: 0 };
+    results.forEach((r) => {
+      if (r.outcome === BULK_OUTCOME.SUCCEEDED) summary.succeeded += 1;
+      else if (r.outcome === BULK_OUTCOME.SKIPPED) summary.skipped += 1;
+      else summary.failed += 1;
+    });
+    return { code: 200, bulk_operation_id: operationId, action, request_type, summary, results };
+  };
+
+  /**
+   * "SELECT ALL MATCHING THE FILTERS": the requests of one tab, under the
+   * caller's own scope and the screen's filters, that this caller could put
+   * through `action` right now - the same query as the list, then the same
+   * test the row shows (`actionable` for Approve / Reject, `revocable` for
+   * Revoke). Only ids and the state to check them against are returned; the
+   * bulk action re-reads and re-checks every one of them anyway.
+   */
+  const listBulkTargets = async ({
+    actor,
+    request_type,
+    status,
+    action,
+    outlet_ids = null,
+    employee_id = null,
+    designation_id = null,
+  }) => {
+    if (!APPROVAL_TYPES.includes(request_type)) {
+      throw validationError("request_type must be REGULARIZATION, OT or SHIFT_CHANGE");
+    }
+    if (!Object.values(BULK_ACTION).includes(action)) {
+      throw validationError("action must be APPROVE, REJECT or REVOKE");
+    }
+    const wanted = action === BULK_ACTION.REVOKE ? ["APPROVED", "REJECTED"] : ["PENDING"];
+    if (!wanted.includes(status)) {
+      throw validationError(`${action} applies to ${wanted.join(" or ")} requests`);
+    }
+    const isAdmin = Number(actor.user_type) === ADMIN_USER_TYPE;
+    if (action === BULK_ACTION.REVOKE && (!isAdmin || !REVOCABLE_TYPES.some((t) => typesForTab(request_type).includes(t)))) {
+      return { items: [], total: 0, truncated: false };
+    }
+    const identity = await resolveIdentity(actor.employee_id);
+    const scope = {
+      request_type: typesForTab(request_type),
+      status,
+      approver_roles: rolesFor(identity, actor),
+      outlet_id: identity.outlet_id,
+      actor_employee_id: identity.employee_id,
+      is_admin: isAdmin,
+      ...screenFilters({ actor, outlet_ids, employee_id, designation_id }),
+    };
+    const [rows, total] = await Promise.all([
+      attendanceRegularizationRepo.listApprovals({ ...scope, limit: MAX_BULK_TARGETS, offset: 0 }),
+      attendanceRegularizationRepo.countApprovals(scope),
+    ]);
+    let eligible;
+    if (action === BULK_ACTION.REVOKE) {
+      eligible = rows.filter((row) => REVOCABLE_TYPES.includes(row.request_type) && !row.closure_reason);
+    } else {
+      const steps = await attendanceRegularizationRepo.listStepsForRequests(
+        rows.map((r) => Number(r.attendance_approval_request_id))
+      );
+      const byId = new Map(rows.map((r) => [Number(r.attendance_approval_request_id), r]));
+      const current = new Map();
+      steps.forEach((st) => {
+        const id = Number(st.attendance_approval_request_id);
+        const row = byId.get(id);
+        if (row && Number(st.stage_no) === Number(row.current_stage_no)) current.set(id, st);
+      });
+      eligible = rows.filter((row) => {
+        const step = current.get(Number(row.attendance_approval_request_id));
+        return (
+          step &&
+          canApprove(
+            step,
+            {
+              employee_id: identity.employee_id,
+              user_type: actor.user_type,
+              outlet_id: identity.outlet_id,
+              approver_roles: identity.approver_roles,
+            },
+            row
+          ).allowed
+        );
+      });
+    }
+    return {
+      items: eligible.map((row) => ({
+        request_id: Number(row.attendance_approval_request_id),
+        current_stage_no: Number(row.current_stage_no),
+        status: row.status,
+      })),
+      total: Number(total) || 0,
+      truncated: Number(total) > rows.length,
+    };
+  };
+
   /** "Pending with me", counted in SQL for one request type. */
   const countPending = async ({
     actor,
@@ -2086,6 +2455,11 @@ module.exports = (
     decide,
     revokeDecision,
     REVOCABLE_TYPES,
+    bulkAction,
+    listBulkTargets,
+    BULK_ACTION,
+    BULK_OUTCOME,
+    MAX_BULK_ITEMS,
     listApprovals,
     countPending,
     listPending,

@@ -1032,6 +1032,40 @@ class AttendanceRegularizationRepository {
     );
   }
 
+  /**
+   * One BULK-ACTION log row: what a bulk Approve / Reject / Revoke did to ONE
+   * selected request, under the operation's id. Written AFTER the record's own
+   * action committed (or was refused) - that action's own step or revocation
+   * row is the request's history and is written by `decideStage` /
+   * `revokeRequest` exactly as for a single action. Append-only.
+   */
+  async recordBulkActionItem(item) {
+    const nullable = (value) => (value === null || value === undefined ? null : value);
+    await this._read(
+      "RECORD-BULK-ACTION-ITEM",
+      `INSERT INTO attendance_approval_bulk_action_item
+         (bulk_operation_id, action, attendance_approval_request_id, request_type,
+          requested_for_employee_id, attendance_date, previous_status, new_status,
+          outcome, outcome_reason, reason, acted_by_employee_id, acted_by_user_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        item.bulk_operation_id,
+        item.action,
+        item.request_id,
+        nullable(item.request_type),
+        nullable(item.employee_id),
+        nullable(item.attendance_date),
+        nullable(item.previous_status),
+        nullable(item.new_status),
+        item.outcome,
+        item.outcome_reason ? String(item.outcome_reason).slice(0, 500) : null,
+        item.reason ? String(item.reason).slice(0, 500) : null,
+        nullable(item.acted_by_employee_id),
+        nullable(item.acted_by_user_id),
+      ]
+    );
+  }
+
 
   /**
    * The pending queue for one actor: requests whose CURRENT stage is one this
