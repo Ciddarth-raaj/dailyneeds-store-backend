@@ -26,6 +26,8 @@ const {
   resolveEffectiveRawPunchesByEmployee,
 } = require("../utils/attendance_effective_punches");
 
+const { REASON_CODES: TIME_CORRECTION_REASON_LABEL } = require("../constants/attendance_device_time_correction");
+
 const RANGE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_LIST_DAYS = 92;
 const MAX_AUDIT_DAYS = 31;
@@ -281,12 +283,18 @@ class AttendanceRawUsecase {
 
   async auditCsv(query) {
     const { meta, data } = await this.audit(query);
-    const header = ["Calendar Date", "Time", "Attendance Date", "Employee Code", "Employee Name", "Home Outlet", "Punch Location", "Device", "Cloud ID", "Source IP", "Device Status", "Derivation Status", "Cutoff Applied", "Retransmits", "Punch ID", "Source", "Effective Status", "Effective Reason", "Void Reason", "Voided By", "Voided At"];
+    const header = ["Calendar Date", "Time", "Attendance Date", "Employee Code", "Employee Name", "Home Outlet", "Punch Location", "Device", "Cloud ID", "Source IP", "Device Status", "Derivation Status", "Cutoff Applied", "Retransmits", "Punch ID", "Source", "Effective Status", "Effective Reason", "Void Reason", "Voided By", "Voided At", "Original Device Time", "Device Time Correction", "Correction Offset (min)", "Correction Reason", "Corrected By", "Corrected At"];
     const rows = data.map((p) => [
       toDisplayDate(p.calendar_date), p.clock_time, toDisplayDate(p.attendance_date), p.user_id, p.employee_name || "", p.home_outlet || "",
       p.punch_outlet || "", p.device_label || "", p.dev_id, p.source_ip || "", p.device_status, p.derivation_status || "NO_DERIVED_ROW", p.cutoff_applied || "", String(p.retransmit_count || 0),
       String(p.biomax_punch_id), p.punch_source || "", EFFECTIVE_STATUS_LABEL[p.effective_status] || "", p.effective_reason || "",
       p.void_reason || "", p.voided_by_name || "", p.voided_at || "",
+      p.time_corrected ? p.original_clock_time || "" : "",
+      p.time_corrected ? `#${p.time_correction_id}` : "",
+      p.time_corrected ? String(p.time_correction_offset_minutes) : "",
+      p.time_corrected ? p.time_correction_reason || "" : "",
+      p.time_corrected ? p.time_corrected_by_name || "" : "",
+      p.time_corrected ? p.time_corrected_at || "" : "",
     ]);
     return { header, rows, meta, dataset_key: "RAW_ATTENDANCE_PUNCHES", filename: `punch-audit-${meta.from}-to-${meta.to}.csv` };
   }
@@ -378,6 +386,38 @@ function presentPunch(row) {
     voided_at: voidId ? row.voided_at || null : null,
     effective_status: voidId ? EFFECTIVE_PUNCH_STATUS.VOIDED : null,
     effective_reason: voidId ? row.void_reason || null : null,
+    // DEVICE TIME CORRECTION. `io_time` / `clock_time` above are the
+    // EFFECTIVE time; while an administrator's correction is active these
+    // say what the device originally stamped and who corrected it, so the
+    // audit reads as a device-clock correction and never as a regularization.
+    ...presentTimeCorrection(row),
+  };
+}
+
+/** The device time correction on a punch row, or all-null when there is none. */
+function presentTimeCorrection(row) {
+  const id =
+    row.time_correction_id === null || row.time_correction_id === undefined ? null : Number(row.time_correction_id);
+  return {
+    original_io_time: row.original_io_time || row.io_time || null,
+    original_clock_time: row.original_clock_time || row.clock_time || null,
+    time_corrected: id !== null,
+    time_correction_id: id,
+    time_correction_batch_ref: id !== null ? row.time_correction_batch_ref || null : null,
+    time_correction_offset_minutes:
+      id !== null && row.time_correction_offset_minutes !== null && row.time_correction_offset_minutes !== undefined
+        ? Number(row.time_correction_offset_minutes)
+        : null,
+    time_correction_reason_code: id !== null ? row.time_correction_reason_code || null : null,
+    time_correction_reason:
+      id !== null ? TIME_CORRECTION_REASON_LABEL[row.time_correction_reason_code] || row.time_correction_reason_code || null : null,
+    time_correction_remarks: id !== null ? row.time_correction_remarks || null : null,
+    time_corrected_by_employee_id:
+      id !== null && row.time_corrected_by_employee_id !== null && row.time_corrected_by_employee_id !== undefined
+        ? Number(row.time_corrected_by_employee_id)
+        : null,
+    time_corrected_by_name: id !== null ? row.time_corrected_by_name || null : null,
+    time_corrected_at: id !== null ? row.time_corrected_at || null : null,
   };
 }
 
@@ -429,6 +469,10 @@ function pivot(rows) {
       biomax_punch_id: p.biomax_punch_id,
       time: p.clock_time,
       io_time: p.io_time,
+      // Set when an administrator corrected this device's clock; `time`
+      // above is then the corrected time.
+      original_time: p.time_corrected ? p.original_clock_time : null,
+      time_correction_id: p.time_correction_id,
       calendar_date: p.calendar_date,
       dev_id: p.dev_id,
       device_label: p.device_label,

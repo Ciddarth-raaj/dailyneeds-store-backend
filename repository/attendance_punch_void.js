@@ -1,5 +1,6 @@
 const logger = require("../utils/logger");
 const { queryAsync } = require("../utils/batchInsert");
+const { EFFECTIVE_TIME_JOIN, EFFECTIVE_IO_TIME } = require("./lib/effective_punch_time");
 
 /**
  * The manual void of a raw punch - `attendance_punch_void`.
@@ -52,7 +53,8 @@ class AttendancePunchVoidRepository {
               p.dev_id,
               p.user_id,
               p.ingest_source,
-              DATE_FORMAT(p.io_time, '%Y-%m-%d %H:%i:%s') AS io_time,
+              -- EFFECTIVE time: a corrected device clock dates the punch.
+              DATE_FORMAT(${EFFECTIVE_IO_TIME}, '%Y-%m-%d %H:%i:%s') AS io_time,
               DATE_FORMAT(p.punch_date, '%Y-%m-%d')       AS punch_date,
               d.employee_id,
               DATE_FORMAT(d.attendance_date, '%Y-%m-%d')  AS ingest_attendance_date,
@@ -65,6 +67,7 @@ class AttendancePunchVoidRepository {
          LEFT JOIN biomax_punch_derived d ON d.biomax_punch_id = p.biomax_punch_id
          LEFT JOIN new_employee e ON e.employee_id = d.employee_id AND e.employee_id > 0
          LEFT JOIN attendance_punch_void v ON v.biomax_punch_id = p.biomax_punch_id
+         ${EFFECTIVE_TIME_JOIN}
         WHERE p.biomax_punch_id = ?`,
       [biomaxPunchId]
     );

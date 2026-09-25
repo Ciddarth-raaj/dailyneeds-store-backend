@@ -329,6 +329,11 @@ class Server {
     this.attendancePunchVoidRepo = require("./repository/attendance_punch_void")(
       this.mysql.connection
     );
+    // Device Time Correction: the additive correction rows beside raw punches
+    // whose terminal clock was wrong. Never writes `biomax_punch`.
+    this.attendanceDeviceTimeCorrectionRepo = require("./repository/attendance_device_time_correction")(
+      this.mysql.connection
+    );
     this.biomaxImportStore = require("./biomax/store").createStore(this.mysql.connection);
     this.storeRepo = require("./repository/store")(this.mysql.connection);
     this.outletRepo = require("./repository/outlet")(this.mysql.connection);
@@ -916,6 +921,13 @@ class Server {
       this.attendancePunchVoidRepo,
       this.attendanceCalculationUsecase,
       this.attendanceRegularizationRepo
+    );
+    // Device Time Correction (administrators only). Handed the calculation
+    // usecase to date the moved punches and to calculate the corrected days,
+    // which the repository stores in the correction's own transaction.
+    this.attendanceDeviceTimeCorrectionUsecase = require("./usecase/attendance_device_time_correction")(
+      this.attendanceDeviceTimeCorrectionRepo,
+      this.attendanceCalculationUsecase
     );
     // M5: Bulk Salary Upload. A BATCH over the lifecycle above rather than a
     // second one - it is handed the same repository and the same usecase, and
@@ -1614,6 +1626,9 @@ class Server {
       this.telegramAttendanceSessionUsecase,
       this.telegramAttendanceMiniAppUsecase
     );
+    const attendanceDeviceTimeCorrectionRouter = require("./routes/attendance_device_time_correction")(
+      this.attendanceDeviceTimeCorrectionUsecase
+    );
     const attendanceApproverSetupRouter = require("./routes/attendance_approver_setup")(
       this.attendanceApproverSetupUsecase,
       this.permissions
@@ -1929,6 +1944,9 @@ class Server {
     app.use("/", attendanceShiftChangeBlockRouter.getRouter());
     app.use("/", attendanceRegularizationRouter.getRouter());
     app.use("/", attendanceApproverSetupRouter.getRouter());
+    // Full `/attendance/device-time-corrections` paths; before the Part 1
+    // router, which claims the bare `/attendance` prefix.
+    app.use("/", attendanceDeviceTimeCorrectionRouter.getRouter());
     app.use("/", telegramAttendanceRouter.getRouter());
     app.use("/attendance", attendanceRawRouter.getRouter());
     app.use("/store", storeRouter.getRouter());
