@@ -5,20 +5,19 @@
  *
  * A stored `attendance_day_calculation` row is what every read returns once
  * its date has closed, and nothing replaces it when a punch for that date
- * arrives LATER: the direct Biomax receiver stores raw punches and
- * deliberately recalculates nothing, and the DigiSME recovery job imports
- * late punches for the last three days four times a day. A delayed punch for
- * 22-Sep that lands after 22-Sep was stored would otherwise be ignored for
- * ever. This job re-runs the last three closed-or-closing days every morning,
- * so such a punch is picked up by the next morning's run:
+ * arrives LATER: the direct Biomax receiver - the attendance source - stores
+ * raw punches and deliberately recalculates nothing. A delayed device punch
+ * for 22-Sep that lands after 22-Sep was stored would otherwise be ignored for
+ * ever. This job rebuilds the last three closed-or-closing days from the raw
+ * punches every morning, so such a punch is picked up by the next morning's
+ * run:
  *
  *   2026-09-24 06:55  ->  2026-09-21 .. 2026-09-23
  *
- * SCHEDULE: the DigiSME recovery job, which imports late punches for the same
- * three days, is scheduled at 06:45; this job is scheduled after it at 06:55;
- * the Missing Attendance Telegram is scheduled at 07:00. These are START times
- * - cron does not wait for one job to finish before starting the next - and
- * the ten minutes give the recovery a start-time buffer.
+ * SCHEDULE: this job is scheduled at 06:55 and the Missing Attendance
+ * Telegram at 07:00, so the Telegram reads yesterday from the recalculated
+ * attendance. These are START times - cron does not wait for one job to
+ * finish before starting the next.
  *
  * ========================================================= WHAT IT IS ======
  *
@@ -54,8 +53,8 @@
  *
  * NON-REENTRANT. A run still in flight makes the next invocation a logged
  * no-op; it is never queued behind it. The guard is in-process, which is
- * sound for the same reason the DigiSME crons' guards are: the API runs as
- * ONE pm2 fork-mode process (`services/digisme_cron_topology.test.js`).
+ * sound because the API runs as ONE pm2 fork-mode process
+ * (`services/digisme_cron_topology.test.js` fails if that changes).
  *
  * IT NEVER THROWS. Every failure is caught, logged and returned as a FAILED
  * summary, so a bad morning cannot take down the API or stop the 07:00

@@ -14,6 +14,10 @@ const HttpServer = require("http").createServer(app);
 
 const logger = require("./utils/logger");
 const { ALERTS_TELEGRAM_CHAT_ID, DIGISME_ATTENDANCE_ALERT_CHAT_ID } = require("./constants/telegram");
+const {
+  isDigismeAttendanceCronEnabled,
+  DIGISME_ATTENDANCE_CRON_DISABLED_LOG,
+} = require("./services/digisme_attendance_cron_flag");
 
 /**
  * Express `trust proxy` from TRUST_PROXY. Default: loopback (nginx on the
@@ -2323,10 +2327,11 @@ class Server {
     /**
      * DAILY AUTOMATIC ATTENDANCE RECALCULATION - 06:55 IST, today-3..yesterday.
      *
-     * "55 6 * * *" in `CRON_TIMEZONE` (Asia/Kolkata). Re-runs the last three
-     * days through the Recalculate Attendance screen's own path, so a punch
-     * that arrived after its date was already stored (a delayed Biomax upload,
-     * a DigiSME recovery import) is picked up by the next morning's run.
+     * "55 6 * * *" in `CRON_TIMEZONE` (Asia/Kolkata). Rebuilds the last three
+     * days of attendance from the raw punches - the direct Biomax receiver's
+     * record is the truth - through the Recalculate Attendance screen's own
+     * path, so a delayed device punch that arrived after its date was already
+     * stored is picked up by the next morning's run.
      * Only CLOSED dates are stored and payroll-locked months are refused, by
      * the same rules as a manual run - see
      * `usecase/attendance_daily_recalculation.js`.
@@ -2335,16 +2340,12 @@ class Server {
      * table can only say MANUAL or WORK_SHIFT_SAVE) and is audited in
      * `api_sync_log` as `attendance_daily_recalculation`, source `cron`.
      *
-     * THE MORNING ORDER IS DELIBERATE, and it is an order of SCHEDULED START
-     * TIMES. Cron guarantees when each job starts, not that the previous one
-     * has finished:
-     *   06:45  DigiSME attendance recovery (below) is scheduled - it imports
-     *          late punches for today-3..yesterday
-     *   06:55  this recalculation is scheduled after it, leaving the recovery
-     *          a ten-minute start-time buffer
+     * THE MORNING ORDER, as SCHEDULED START TIMES (cron guarantees when each
+     * job starts, not that the previous one has finished):
+     *   06:55  this recalculation is scheduled
      *   07:00  Missing Attendance Telegram is scheduled, to read yesterday
      *          from the recalculated attendance
-     * `usecase/attendance_daily_recalculation.test.js` fails if the three
+     * `usecase/attendance_daily_recalculation.test.js` fails if the two
      * schedules stop being in that order. The job never throws and
      * does not overlap itself; a failure is logged and the 07:00 job is a
      * separate registration that runs regardless.
@@ -2414,16 +2415,45 @@ class Server {
       }
     });
 
-    this.cronService.register("digisme_attendance_live", "* * * * *", async () => {
-      return await this.digismeAttendanceSyncUsecase.runLive();
-    });
+    /**
+     * THE KILL SWITCH. `DIGISME_ATTENDANCE_CRON_ENABLED=false` (case
+     * insensitive, surrounding whitespace ignored) leaves BOTH DigiSME
+     * attendance jobs unregistered - not registered and returning early - and
+     * logs one line saying so. Attendance comes from the direct Biomax
+     * receiver now; with the jobs unregistered nothing calls `runLive` or
+     * `runHistorical`, so no DigiSME request is made and no DigiSME failure
+     * alert can be sent by these crons. Absent or any other value keeps both
+     * jobs exactly as they were. `CRON_DISABLED` is a separate, wider switch
+     * and is untouched. See `services/digisme_attendance_cron_flag.js`.
+     *
+     * The usecase above is still constructed either way: its constructor makes
+     * no call, starts no timer and sends nothing, so leaving it in place keeps
+     * this change to the registration site alone.
+     *
+     * The flag is read from `process.env` here, after `constants/telegram.js`
+     * has run `dotenv.config()` at the top of this file, so a value in `.env`
+     * is visible.
+     *
+     * The block below is executed verbatim by
+     * `services/digisme_attendance_cron_flag.test.js` between its markers -
+     * keep them.
+     */
+    /* digisme-cron-gate:start */
+    if (isDigismeAttendanceCronEnabled(process.env)) {
+      this.cronService.register("digisme_attendance_live", "* * * * *", async () => {
+        return await this.digismeAttendanceSyncUsecase.runLive();
+      });
 
-    // Four times a day: today-3, today-2, yesterday - for vendor-delayed
-    // records only. :45 is chosen because every other in-process cron sits
-    // at :00, :15 or :30, so a recovery run never contends with one.
-    this.cronService.register("digisme_attendance_recovery", "45 6,12,18,23 * * *", async () => {
-      return await this.digismeAttendanceSyncUsecase.runHistorical();
-    });
+      // Four times a day: today-3, today-2, yesterday - for vendor-delayed
+      // records only. :45 is chosen because every other in-process cron sits
+      // at :00, :15 or :30, so a recovery run never contends with one.
+      this.cronService.register("digisme_attendance_recovery", "45 6,12,18,23 * * *", async () => {
+        return await this.digismeAttendanceSyncUsecase.runHistorical();
+      });
+    } else {
+      console.log(DIGISME_ATTENDANCE_CRON_DISABLED_LOG);
+    }
+    /* digisme-cron-gate:end */
 
     this.synker.initCronJobs(this.cronService, this.apiSyncLogger);
     this.cronService.start();
