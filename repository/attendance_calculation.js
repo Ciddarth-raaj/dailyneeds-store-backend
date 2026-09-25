@@ -6,6 +6,11 @@ const {
 } = require("../utils/attendance_payroll_lock");
 const { JOINED_ON } = require("../utils/joining_date");
 const {
+  EFFECTIVE_TIME_JOIN,
+  EFFECTIVE_IO_TIME,
+  CORRECTION_COLUMNS,
+} = require("./lib/effective_punch_time");
+const {
   queryAsync,
   getConnectionAsync,
   beginTransactionAsync,
@@ -505,13 +510,20 @@ class AttendanceCalculationRepository {
     // is unique per raw punch and is never deleted, so a LEFT JOIN answers
     // "is this punch voided" without a second query. The raw row itself is
     // still read exactly as stored.
+    //
+    // `io_time` is the EFFECTIVE time: the active DEVICE TIME CORRECTION's
+    // corrected time where one exists, else the raw device time
+    // (`repository/lib/effective_punch_time.js`). `original_io_time` is always
+    // the raw one. A correction never moves a punch off its calendar date
+    // (the usecase refuses one that would), so `punch_date` still selects it.
     return this._read(
       "GET-RAW-PUNCHES-BY-CALENDAR-WINDOW",
       `SELECT p.biomax_punch_id                            AS punch_id,
               d.employee_id,
               DATE_FORMAT(p.punch_date, '%Y-%m-%d')        AS punch_date,
               DATE_FORMAT(d.attendance_date, '%Y-%m-%d')   AS ingest_attendance_date,
-              DATE_FORMAT(p.io_time, '%Y-%m-%d %H:%i:%s')  AS io_time,
+              DATE_FORMAT(${EFFECTIVE_IO_TIME}, '%Y-%m-%d %H:%i:%s') AS io_time,
+              ${CORRECTION_COLUMNS},
               p.dev_id,
               p.ingest_source,
               v.attendance_punch_void_id,
@@ -520,10 +532,11 @@ class AttendanceCalculationRepository {
               DATE_FORMAT(v.voided_at, '%Y-%m-%d %H:%i:%s') AS voided_at
          FROM biomax_punch_derived d
          JOIN biomax_punch p ON p.biomax_punch_id = d.biomax_punch_id
+         ${EFFECTIVE_TIME_JOIN}
          LEFT JOIN attendance_punch_void v ON v.biomax_punch_id = p.biomax_punch_id
         WHERE d.employee_id = ?
           AND p.punch_date BETWEEN ? AND ?
-        ORDER BY p.io_time ASC, p.biomax_punch_id ASC`,
+        ORDER BY ${EFFECTIVE_IO_TIME} ASC, p.biomax_punch_id ASC`,
       [employeeId, fromCalendarDate, toCalendarDate]
     );
   }
@@ -774,6 +787,8 @@ class AttendanceCalculationRepository {
    *
    *   biomax_punch, biomax_punch_derived   raw, append-only, someone else's
    *   attendance_punch_void                a human said this punch is void
+   *   attendance_device_time_correction*  a human said this device's clock
+   *                                        was wrong
    *   attendance_approval_request          a human decided this
    *   attendance_regularized_punch         a human supplied this
    *   attendance_date_shift_override       the audit line of a shift edit

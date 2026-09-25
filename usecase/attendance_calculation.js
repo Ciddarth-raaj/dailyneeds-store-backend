@@ -517,7 +517,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    * proposed-punch calculation, so all three see one definition of "what
    * applied on this date".
    */
-  const buildContext = async ({ employee_id, from, to, assume_override = null }) => {
+  const buildContext = async ({ employee_id, from, to, assume_override = null, assume_io_times = null }) => {
     // ONE day of slack at the END for DATING - see the file header. A punch on
     // the morning after `to` can belong to `to`; a punch before `from` can
     // never belong to `from`.
@@ -533,7 +533,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     const punchWindowFrom = addDays(from, -1);
     const punchWindowTo = addDays(to, 1);
 
-    const [assignments, rawPunches, regularized, employee, approvals, storedOverrides] =
+    const [assignments, fetchedRawPunches, regularized, employee, approvals, storedOverrides] =
       await Promise.all([
         attendanceCalculationRepo.getShiftAssignmentHistory(employee_id),
         attendanceCalculationRepo.getRawPunchesByCalendarWindow(employee_id, punchWindowFrom, punchWindowTo),
@@ -547,6 +547,26 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
           ? attendanceCalculationRepo.getDateShiftOverrides(employee_id, from, punchWindowTo)
           : [],
       ]);
+
+    // A DEVICE TIME CORRECTION being applied or reverted, in memory only:
+    // `punch_id -> io_time` replaces the effective time of exactly those raw
+    // punches, so the day can be calculated as it WILL read once the
+    // correction commits - inside the transaction that records it. Every
+    // other punch is read exactly as stored.
+    const assumedTimes =
+      assume_io_times instanceof Map
+        ? assume_io_times
+        : assume_io_times
+          ? new Map(Object.entries(assume_io_times))
+          : null;
+    const rawPunches =
+      assumedTimes && assumedTimes.size > 0
+        ? (fetchedRawPunches || []).map((punch) =>
+            assumedTimes.has(String(punch.punch_id))
+              ? { ...punch, io_time: assumedTimes.get(String(punch.punch_id)) }
+              : punch
+          )
+        : fetchedRawPunches;
 
     // An override that is being SAVED joins the stored ones in memory only, so
     // the day can be calculated under it inside the transaction that records
@@ -799,6 +819,9 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     to_date,
     assume = null,
     assume_override = null,
+    // `punch_id -> effective io_time` for a device time correction being
+    // applied or reverted - see `buildContext`. Absent everywhere else.
+    assume_io_times = null,
     // THE DAY AS IF ONE REQUEST DID NOT EXIST. An administrator's revocation
     // CANCELS a request inside the transaction that asks for this day, so the
     // committed row must already be the day without it: no approval state
@@ -825,7 +848,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       throw validationError(`A range may cover at most ${MAX_RANGE_DAYS} days`);
     }
 
-    const context = await buildContext({ employee_id, from, to, assume_override });
+    const context = await buildContext({ employee_id, from, to, assume_override, assume_io_times });
     if (exclude_request_id !== null && exclude_request_id !== undefined) {
       const withdrawn = Number(exclude_request_id);
       const kept = (row) => Number(row && row.attendance_approval_request_id) !== withdrawn;
@@ -1102,6 +1125,25 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
   };
 
   /**
+   * `attendanceDateForPunchTime` for SEVERAL times of one employee near one
+   * date, reading the dated shift history once. Same rule, same cutoff: the
+   * device time correction dates every punch's original and corrected time
+   * with it. A time that cannot be dated (no shift) comes back null.
+   */
+  const attendanceDatesForPunchTimes = async ({ employee_id, near_date, punch_times }) => {
+    const anchor = toDateOnly(near_date);
+    if (anchor === null) return (punch_times || []).map(() => null);
+    const context = await buildContext({
+      employee_id,
+      from: addDays(anchor, -1),
+      to: addDays(anchor, 1),
+    });
+    return (punch_times || []).map((time) =>
+      attendanceDateForPunch({ ioTime: time, readCutoff: context.readCutoff })
+    );
+  };
+
+  /**
    * Read and set the employee's Special Break Duration Override (review #7).
    *
    * ONE CURRENT VALUE, NO EFFECTIVE DATE, exactly as the product contract
@@ -1356,6 +1398,74 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       excluded_reason: window ? null : eligibility.exclusionReason(employment, from),
       punch_redrive: redrive,
       ...stored,
+    };
+  };
+
+  /**
+   * DEVICE TIME CORRECTION - the days a correction (or its reversal) produces,
+   * calculated BEFORE anything is written, for the caller to store in the
+   * same transaction as the correction itself.
+   *
+   * This is `setDateShift`'s pattern: the engine runs over the raw punches
+   * with the corrected (or, for a revert, the original) times ASSUMED in
+   * memory, through the ordinary `calculateRange`, so every derived value -
+   * first IN, last OUT, worked, late, early exit, shortage, missing punch,
+   * OT and authorised OT, status and review reasons - comes from the one
+   * engine and nothing is bypassed.
+   *
+   * The same two rules `recalculateRange` applies to what it stores:
+   *
+   *   - ELIGIBILITY. A date outside the employee's employment, or any date of
+   *     an employee exempt from attendance, is not calculated and is reported
+   *     in `ineligible_dates`. Nothing is deleted here: the reconciliation of
+   *     ineligible rows belongs to Recalculate, not to a clock correction.
+   *   - CLOSED DATES ONLY. A date whose attendance day has not closed is
+   *     calculated but NOT returned as a row to store; it reads live - with
+   *     the correction - and is stored by the first recalculation after it
+   *     closes (the daily 06:55 run included). Reported in
+   *     `skipped_open_dates`.
+   *
+   * @param {object} input
+   * @param {number} input.employee_id
+   * @param {string[]} input.attendance_dates  the attendance dates whose
+   *        punches the correction moves (usually one; two when a punch near
+   *        the cutoff changes day)
+   * @param {Map|object} input.assume_io_times  punch_id -> effective io_time
+   * @returns {{rows: object[], days: object[], skipped_open_dates: object[], ineligible_dates: string[]}}
+   */
+  const calculateForTimeCorrection = async ({ employee_id, attendance_dates, assume_io_times, now = null }) => {
+    const employeeId = Number(employee_id);
+    if (!Number.isInteger(employeeId) || employeeId <= 0) {
+      throw validationError("employee_id is required and must be an employee id");
+    }
+    const dates = [...new Set((attendance_dates || []).map(toDateOnly).filter(Boolean))].sort();
+    if (dates.length === 0) return { rows: [], days: [], skipped_open_dates: [], ineligible_dates: [] };
+
+    const employment = attendanceCalculationRepo.getEmploymentWindow
+      ? await attendanceCalculationRepo.getEmploymentWindow(employeeId)
+      : null;
+    const eligible = dates.filter((date) => eligibility.eligibleWindow(employment, date, date));
+    const ineligibleDates = dates.filter((date) => !eligible.includes(date));
+    if (eligible.length === 0) {
+      return { rows: [], days: [], skipped_open_dates: [], ineligible_dates: ineligibleDates };
+    }
+
+    const wanted = new Set(eligible);
+    const calculated = (
+      await calculateRange({
+        employee_id: employeeId,
+        from_date: eligible[0],
+        to_date: eligible[eligible.length - 1],
+        assume_io_times,
+      })
+    ).filter((day) => wanted.has(day.attendance_date));
+
+    const { closed, skipped } = partitionClosedDays({ days: calculated, now: nowIs(now) });
+    return {
+      rows: closed.map(toStorageRow),
+      days: closed,
+      skipped_open_dates: skipped,
+      ineligible_dates: ineligibleDates,
     };
   };
 
@@ -2316,6 +2426,8 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     CALCULATION_SOURCE,
     calculateProposedDay,
     attendanceDateForPunchTime,
+    calculateForTimeCorrection,
+    attendanceDatesForPunchTimes,
     recalculateRange,
     recalculateBulk,
     listRecalculationRuns,

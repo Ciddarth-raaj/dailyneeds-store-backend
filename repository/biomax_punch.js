@@ -1,5 +1,6 @@
 const logger = require("../utils/logger");
 const { queryAsync } = require("../utils/batchInsert");
+const { EFFECTIVE_TIME_JOIN, EFFECTIVE_IO_TIME } = require("./lib/effective_punch_time");
 
 /**
  * READ-ONLY access to the Biomax punch tables for the API.
@@ -26,6 +27,16 @@ const { queryAsync } = require("../utils/batchInsert");
  * [effective_from, effective_to) contains the punch's io_time. An IMPORTED
  * punch (DigiSME Excel, dev_id NULL) has no terminal and therefore no
  * location; it is a normal, non-quarantined punch with a blank location.
+ *
+ * TIMES ARE EFFECTIVE (`repository/lib/effective_punch_time.js`). `io_time`
+ * and `clock_time` are the active DEVICE TIME CORRECTION's corrected time
+ * where one exists, else the raw device time; `original_io_time` and
+ * `original_clock_time` are ALWAYS the raw device time, and the correction's
+ * batch, reason and actor ride on the row so the Punch Audit can say plainly
+ * that an administrator corrected the device clock. Punch LOCATION is still
+ * resolved by the raw device time: that is the clock the assignment period
+ * was compared with when the punch arrived, and the one the correction's own
+ * outlet criterion used.
  */
 
 const DEVICE_STATUS_SQL = `CASE
@@ -40,8 +51,18 @@ const PUNCH_COLUMNS = `
   p.dev_id,
   p.user_id,
   p.io_time_raw,
-  DATE_FORMAT(p.io_time, '%Y-%m-%d %H:%i:%s')      AS io_time,
-  DATE_FORMAT(p.io_time, '%H:%i:%s')               AS clock_time,
+  DATE_FORMAT(${EFFECTIVE_IO_TIME}, '%Y-%m-%d %H:%i:%s') AS io_time,
+  DATE_FORMAT(${EFFECTIVE_IO_TIME}, '%H:%i:%s')    AS clock_time,
+  DATE_FORMAT(p.io_time, '%Y-%m-%d %H:%i:%s')      AS original_io_time,
+  DATE_FORMAT(p.io_time, '%H:%i:%s')               AS original_clock_time,
+  tc.attendance_device_time_correction_id          AS time_correction_id,
+  tc.offset_minutes                                AS time_correction_offset_minutes,
+  tcb.batch_ref                                    AS time_correction_batch_ref,
+  tcb.reason_code                                  AS time_correction_reason_code,
+  tcb.remarks                                      AS time_correction_remarks,
+  tcb.applied_by_employee_id                       AS time_corrected_by_employee_id,
+  tce.employee_name                                AS time_corrected_by_name,
+  DATE_FORMAT(tcb.applied_at, '%Y-%m-%d %H:%i:%s') AS time_corrected_at,
   DATE_FORMAT(p.punch_date, '%Y-%m-%d')            AS calendar_date,
   p.source_ip,
   p.ingest_source,
@@ -86,7 +107,11 @@ const PUNCH_JOINS = `
         AND (bda.effective_to IS NULL OR p.io_time < bda.effective_to)
   LEFT JOIN outlets o_dev           ON o_dev.outlet_id = bda.outlet_id
   LEFT JOIN attendance_punch_void v ON v.biomax_punch_id = p.biomax_punch_id
-  LEFT JOIN new_employee ve         ON ve.employee_id = v.voided_by_employee_id`;
+  LEFT JOIN new_employee ve         ON ve.employee_id = v.voided_by_employee_id
+  ${EFFECTIVE_TIME_JOIN}
+  LEFT JOIN attendance_device_time_correction tcb
+         ON tcb.attendance_device_time_correction_id = tc.attendance_device_time_correction_id
+  LEFT JOIN new_employee tce        ON tce.employee_id = tcb.applied_by_employee_id`;
 
 class BiomaxPunchRepository {
   constructor(db) {
@@ -142,7 +167,7 @@ class BiomaxPunchRepository {
       "LIST-DATED",
       `SELECT ${PUNCH_COLUMNS} ${PUNCH_JOINS}
         WHERE ${where.join(" AND ")}
-        ORDER BY d.attendance_date, d.employee_id, p.io_time, p.biomax_punch_id`,
+        ORDER BY d.attendance_date, d.employee_id, ${EFFECTIVE_IO_TIME}, p.biomax_punch_id`,
       params
     );
   }
@@ -228,7 +253,7 @@ class BiomaxPunchRepository {
       "LIST-PUNCHES",
       `SELECT ${PUNCH_COLUMNS} ${PUNCH_JOINS}
         WHERE ${where.join(" AND ")}
-        ORDER BY p.io_time, p.biomax_punch_id
+        ORDER BY ${EFFECTIVE_IO_TIME}, p.biomax_punch_id
         LIMIT ${limit} OFFSET ${offset}`,
       params
     );
@@ -251,15 +276,16 @@ class BiomaxPunchRepository {
       "LIST-PUNCH-STREAM",
       `SELECT p.biomax_punch_id,
               d.employee_id,
-              DATE_FORMAT(p.io_time, '%Y-%m-%d %H:%i:%s') AS io_time,
+              DATE_FORMAT(${EFFECTIVE_IO_TIME}, '%Y-%m-%d %H:%i:%s') AS io_time,
               p.ingest_source,
               v.attendance_punch_void_id
          FROM biomax_punch_derived d
          JOIN biomax_punch p ON p.biomax_punch_id = d.biomax_punch_id
+         ${EFFECTIVE_TIME_JOIN}
          LEFT JOIN attendance_punch_void v ON v.biomax_punch_id = p.biomax_punch_id
         WHERE d.employee_id IN (?)
           AND p.punch_date BETWEEN ? AND ?
-        ORDER BY d.employee_id, p.io_time, p.biomax_punch_id`,
+        ORDER BY d.employee_id, ${EFFECTIVE_IO_TIME}, p.biomax_punch_id`,
       [ids, f.from, f.to]
     );
   }

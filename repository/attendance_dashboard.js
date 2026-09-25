@@ -1,5 +1,10 @@
 const logger = require("../utils/logger");
 const { JOINED_ON } = require("../utils/joining_date");
+const {
+  EFFECTIVE_TIME_JOIN,
+  EFFECTIVE_IO_TIME,
+  CORRECTION_COLUMNS,
+} = require("./lib/effective_punch_time");
 
 /**
  * Attendance Dashboard - the reads.
@@ -414,17 +419,19 @@ class AttendanceDashboardRepository {
               d.employee_id,
               DATE_FORMAT(p.punch_date, '%Y-%m-%d')        AS punch_date,
               DATE_FORMAT(d.attendance_date, '%Y-%m-%d')   AS ingest_attendance_date,
-              DATE_FORMAT(p.io_time, '%Y-%m-%d %H:%i:%s')  AS io_time,
+              DATE_FORMAT(${EFFECTIVE_IO_TIME}, '%Y-%m-%d %H:%i:%s') AS io_time,
+              ${CORRECTION_COLUMNS},
               p.dev_id,
               p.ingest_source,
               v.attendance_punch_void_id,
               v.reason                                     AS void_reason
          FROM biomax_punch_derived d
          JOIN biomax_punch p ON p.biomax_punch_id = d.biomax_punch_id
+         ${EFFECTIVE_TIME_JOIN}
          LEFT JOIN attendance_punch_void v ON v.biomax_punch_id = p.biomax_punch_id
         WHERE d.employee_id IN (?)
           AND p.punch_date BETWEEN ? AND ?
-        ORDER BY d.employee_id ASC, p.io_time ASC, p.biomax_punch_id ASC`,
+        ORDER BY d.employee_id ASC, ${EFFECTIVE_IO_TIME} ASC, p.biomax_punch_id ASC`,
       [employeeIds, fromCalendarDate, toCalendarDate]
     );
   }
@@ -517,7 +524,8 @@ class AttendanceDashboardRepository {
       `SELECT p.biomax_punch_id AS punch_id,
               d.employee_id,
               ne.employee_name,
-              DATE_FORMAT(p.io_time, '%Y-%m-%d %H:%i:%s')     AS io_time,
+              DATE_FORMAT(${EFFECTIVE_IO_TIME}, '%Y-%m-%d %H:%i:%s') AS io_time,
+              ${CORRECTION_COLUMNS},
               DATE_FORMAT(p.received_at, '%Y-%m-%d %H:%i:%s') AS received_at,
               DATE_FORMAT(d.attendance_date, '%Y-%m-%d')      AS ingest_attendance_date,
               d.derivation_status,
@@ -536,6 +544,7 @@ class AttendanceDashboardRepository {
                AND asg.effective_from <= p.io_time
                AND (asg.effective_to IS NULL OR asg.effective_to > p.io_time)
          LEFT JOIN outlets po ON po.outlet_id = asg.outlet_id
+         ${EFFECTIVE_TIME_JOIN}
          LEFT JOIN attendance_punch_void v ON v.biomax_punch_id = p.biomax_punch_id
         WHERE p.biomax_punch_id IN (?)
         ORDER BY p.received_at DESC, p.biomax_punch_id DESC`,
@@ -601,7 +610,8 @@ class AttendanceDashboardRepository {
       `SELECT p.biomax_punch_id AS punch_id,
               d.employee_id,
               ne.employee_name,
-              DATE_FORMAT(p.io_time, '%Y-%m-%d %H:%i:%s')     AS io_time,
+              DATE_FORMAT(${EFFECTIVE_IO_TIME}, '%Y-%m-%d %H:%i:%s') AS io_time,
+              ${CORRECTION_COLUMNS},
               DATE_FORMAT(p.received_at, '%Y-%m-%d %H:%i:%s') AS received_at,
               DATE_FORMAT(d.attendance_date, '%Y-%m-%d')      AS ingest_attendance_date,
               d.derivation_status,
@@ -620,6 +630,7 @@ class AttendanceDashboardRepository {
                AND asg.effective_from <= p.io_time
                AND (asg.effective_to IS NULL OR asg.effective_to > p.io_time)
          LEFT JOIN outlets po ON po.outlet_id = asg.outlet_id
+         ${EFFECTIVE_TIME_JOIN}
          LEFT JOIN attendance_punch_void v ON v.biomax_punch_id = p.biomax_punch_id
         ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
         ORDER BY p.received_at DESC, p.biomax_punch_id DESC
