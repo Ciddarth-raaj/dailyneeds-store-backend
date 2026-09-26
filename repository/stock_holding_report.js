@@ -467,6 +467,11 @@ class StockHoldingReportRepository {
     }
 
     return getConnectionAsync(this.db).then(async (connection) => {
+      // Released exactly once. The count below runs on the pool AFTER the
+      // connection went back; if it failed, the catch used to roll back and
+      // release the connection a second time - by then possibly another
+      // request's connection.
+      let released = false;
       try {
         await beginTransactionAsync(connection);
         const rows = buildItemInsertRows(stockHoldingReportId, items);
@@ -474,13 +479,16 @@ class StockHoldingReportRepository {
         await enrichItemsSnapshot(connection, stockHoldingReportId);
         await commitAsync(connection);
         connection.release();
+        released = true;
         const item_count = await this.getItemCountByReportId(
           stockHoldingReportId
         );
         return { inserted: items.length, item_count };
       } catch (err) {
-        await rollbackAsync(connection);
-        connection.release();
+        if (!released) {
+          await rollbackAsync(connection);
+          connection.release();
+        }
         throw err;
       }
     });

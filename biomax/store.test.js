@@ -43,8 +43,10 @@ function fakePool() {
     responses,
     query: conn.query,
     getConnection: (cb) => cb(null, conn),
+    _conn: conn,
   };
 }
+const conn = (pool) => pool._conn;
 
 const punch = {
   dev_id: "C2695C56D30E1430",
@@ -400,6 +402,24 @@ describe("DigiSME import: insertPunch with source DIGISME_IMPORT", () => {
     assert.ok(!pool.log.some((l) => /biomax_punch_derived/.test(l.sql)));
     const look = pool.log.find((l) => /SELECT biomax_punch_id FROM biomax_punch WHERE dev_id IS NULL AND ingest_source = \?/.test(l.sql));
     assert.deepEqual(look.params, ["DIGISME_IMPORT", "1952", "20260910091500"]);
+  });
+
+  it("the duplicate's id is read on the connection the call already holds, never a second pool connection (no self-wait when the pool is saturated)", async () => {
+    const poolQueries = [];
+    const onConnection = pool.query;
+    pool.query = (sql, params, cb) => {
+      poolQueries.push(sql);
+      return onConnection(sql, params, cb);
+    };
+    pool.getConnection = (cb) => cb(null, { ...conn(pool), query: onConnection });
+    const dup = Object.assign(new Error("Duplicate entry"), { code: "ER_DUP_ENTRY" });
+    pool.responses.push(dup, [{ biomax_punch_id: 321 }]);
+    const r = await store.insertPunch(imported, derived, { source: "DIGISME_IMPORT", importBatchId: 7 });
+    assert.equal(r.biomax_punch_id, 321);
+    assert.deepEqual(poolQueries, [], "no pool query while the connection was held");
+    const i = pool.log.findIndex((l) => /SELECT biomax_punch_id FROM biomax_punch WHERE dev_id IS NULL/.test(l.sql));
+    const rel = pool.log.findIndex((l) => l.sql === "RELEASE");
+    assert.ok(i !== -1 && rel > i, "looked up before the connection was released");
   });
 
   it("any other error propagates and rolls back", async () => {

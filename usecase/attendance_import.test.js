@@ -496,6 +496,22 @@ describe("commit", () => {
     assert.match(repo.batches[0].error_message, /gone/);
   });
 
+  for (const code of ["DB_UNAVAILABLE", "DB_ACQUIRE_TIMEOUT", "DB_BUSY", "POOL_CLOSED", "EHOSTUNREACH"]) {
+    it(`an unavailable database (${code}, from the pool's admission layer) stops the commit too - not one FAILED item per row`, async () => {
+      const pv = await uc.preview(await xlsx(ROWS), {});
+      let calls = 0;
+      store.insertPunch = async () => {
+        calls += 1;
+        const e = new Error(`db ${code}`);
+        e.code = code;
+        throw e;
+      };
+      await assert.rejects(uc.commit(pv.batch.import_batch_id, {}), new RegExp(code));
+      assert.equal(calls, 1, "stopped at the first item");
+      assert.equal(repo.batches[0].status, "FAILED");
+    });
+  }
+
   it("existing LIVE insertion and retransmission dedup are unchanged by the import store contract", async () => {
     const a = await store.insertPunch({ dev_id: "D", user_id: "1", io_time_raw: "20260910090000" }, {}, {});
     const b = await store.insertPunch({ dev_id: "D", user_id: "1", io_time_raw: "20260910090000" }, {}, {});

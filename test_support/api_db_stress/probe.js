@@ -13,14 +13,14 @@
  *   - HTTP requests in flight, started, finished, and client-aborted
  *     (response closed before it was finished)
  *
- * One JSON line per second to PROBE_OUT (default /tmp/api-probe.jsonl).
+ * One JSON line per second to PROBE_OUT (default <os tmpdir>/api-probe.jsonl).
  * Test harness only.
  */
 const fs = require("fs");
 const http = require("http");
 const { monitorEventLoopDelay } = require("perf_hooks");
 
-const OUT = process.env.PROBE_OUT || "/tmp/api-probe.jsonl";
+const OUT = process.env.PROBE_OUT || `${require("os").tmpdir()}/api-probe.jsonl`;
 const INTERVAL = Number(process.env.PROBE_INTERVAL_MS || 1000);
 const t0 = Date.now();
 
@@ -85,6 +85,7 @@ function sample() {
     external_mb: mb(m.external),
     array_buffers_mb: mb(m.arrayBuffers || 0),
     eld_p50_ms: Math.round(eld.percentile(50) / 1e6),
+    eld_p95_ms: Math.round(eld.percentile(95) / 1e6),
     eld_p99_ms: Math.round(eld.percentile(99) / 1e6),
     eld_max_ms: Math.round(eld.max / 1e6),
     handles: process._getActiveHandles().length,
@@ -105,13 +106,20 @@ function sample() {
         active: st.active,
         circuit: st.circuit.state,
         interactive_waiting: st.lanes.interactive.waiting,
+        attendance_waiting: st.lanes.attendance_read ? st.lanes.attendance_read.waiting : 0,
         background_waiting: st.lanes.background.waiting,
-        refused_busy: st.lanes.interactive.refused_busy + st.lanes.background.refused_busy,
-        timed_out: st.lanes.interactive.timed_out + st.lanes.background.timed_out,
-        refused_unavailable: st.lanes.interactive.refused_unavailable + st.lanes.background.refused_unavailable,
-        flushed_on_open: st.lanes.interactive.flushed_on_open + st.lanes.background.flushed_on_open,
+        interactive_active: st.lanes.interactive.active,
+        attendance_active: st.lanes.attendance_read ? st.lanes.attendance_read.active : 0,
+        background_active: st.lanes.background.active,
+        refused_busy: Object.values(st.lanes).reduce((a, l) => a + l.refused_busy, 0),
+        timed_out: Object.values(st.lanes).reduce((a, l) => a + l.timed_out, 0),
+        refused_unavailable: Object.values(st.lanes).reduce((a, l) => a + l.refused_unavailable, 0),
+        flushed_on_open: Object.values(st.lanes).reduce((a, l) => a + l.flushed_on_open, 0),
+        circuit_opens: st.circuit.opens,
         connect_failures: st.connect_failures,
         query_timeouts: st.query_timeouts,
+        straggler_failures_ignored: st.straggler_failures_ignored,
+        straggler_successes_ignored: st.straggler_successes_ignored,
       };
     }),
   };
@@ -119,3 +127,34 @@ function sample() {
   fs.appendFileSync(OUT, JSON.stringify(line) + "\n");
 }
 setInterval(sample, INTERVAL).unref();
+
+// CIRCUIT_TRACE_MS=<n>: poll every guarded pool's circuit every n ms and
+// append each state change to PROBE_OUT.circuit (one JSON line each), with
+// the pool's permits in use and refusal counters at that instant. Reading
+// the state is what acquire() itself does (open -> half_open on time).
+if (Number(process.env.CIRCUIT_TRACE_MS) > 0) {
+  const last = new Map();
+  setInterval(() => {
+    for (const g of guarded) {
+      const st = g.stats();
+      const prev = last.get(st.name);
+      if (prev !== st.circuit.state) {
+        last.set(st.name, st.circuit.state);
+        fs.appendFileSync(`${OUT}.circuit`, JSON.stringify({
+          at_ms: Date.now() - t0,
+          pool: st.name,
+          from: prev || null,
+          to: st.circuit.state,
+          opens: st.circuit.opens,
+          open_ms: st.circuit.open_ms,
+          last_error: st.circuit.last_error,
+          active: st.active,
+          refused_unavailable: Object.values(st.lanes).reduce((a, l) => a + l.refused_unavailable, 0),
+          flushed_on_open: Object.values(st.lanes).reduce((a, l) => a + l.flushed_on_open, 0),
+          straggler_failures_ignored: st.straggler_failures_ignored,
+          straggler_successes_ignored: st.straggler_successes_ignored,
+        }) + "\n");
+      }
+    }
+  }, Number(process.env.CIRCUIT_TRACE_MS)).unref();
+}

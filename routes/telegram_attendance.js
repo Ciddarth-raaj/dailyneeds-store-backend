@@ -2,6 +2,7 @@ const express = require("express");
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
 const readTiming = require("../utils/attendance_read_timing");
+const { inLane } = require("../utils/db_admission");
 
 /**
  * THE TELEGRAM ATTENDANCE MINI APP API.
@@ -141,7 +142,8 @@ class TelegramAttendanceRoutes {
     // TEMPORARY `readTiming.instrument` - see utils/attendance_read_timing.js.
     // The session check (`guard`) runs before it and is reported as
     // "middleware".
-    r.get("/telegram/attendance/month", guard, readTiming.instrument("telegram_month", async (req, res) => {
+    // DB lane `attendance_read`: capped share of the pool (utils/db_admission.js).
+    r.get("/telegram/attendance/month", guard, readTiming.instrument("telegram_month", inLane("attendance_read", async (req, res) => {
       try {
         const schema = { month: Joi.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).required() };
         const isValid = Joi.validate(req.query || {}, schema);
@@ -151,7 +153,7 @@ class TelegramAttendanceRoutes {
       } catch (err) {
         TelegramAttendanceRoutes._respond(res, err);
       }
-    }));
+    })));
 
     /** One date: shift, existing punches (read-only) and current state. */
     r.get("/telegram/attendance/date", guard, async (req, res) => {

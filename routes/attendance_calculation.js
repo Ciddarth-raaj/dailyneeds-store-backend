@@ -3,6 +3,7 @@ const Joi = require("@hapi/joi");
 const P = require("../constants/hr_permissions");
 const respondError = require("../utils/http");
 const readTiming = require("../utils/attendance_read_timing");
+const { inLane } = require("../utils/db_admission");
 
 /**
  * Attendance v2 - the calculated attendance and monthly payroll API.
@@ -93,7 +94,8 @@ class AttendanceCalculationRoutes {
     //
     // TEMPORARY `readTiming.instrument`: a `Server-Timing` header and a slow
     // log line - see utils/attendance_read_timing.js. It changes no answer.
-    this.router.get("/attendance/me", requireSelf, readTiming.instrument("attendance_me", async (req, res) => {
+    // DB lane `attendance_read`: capped share of the pool (utils/db_admission.js).
+    this.router.get("/attendance/me", requireSelf, readTiming.instrument("attendance_me", inLane("attendance_read", async (req, res) => {
       try {
         const schema = {
           from_date: Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).required(),
@@ -113,7 +115,7 @@ class AttendanceCalculationRoutes {
       } catch (err) {
         respondError(res, err);
       }
-    }));
+    })));
 
     /**
      * READ a date range. Nothing is stored, by either branch.

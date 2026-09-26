@@ -2144,7 +2144,27 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    * would only reach the cron's console.
    */
   let workerBusy = false;
-  const processQueuedRecalculations = async ({ today = null, now = null } = {}) => {
+  const workerState = { busy: false, ticks: 0, skipped_in_progress: 0, last_started_at: null, last_finished_at: null, last_outcome: null };
+  /** For the runtime stats line: is the worker running, and how did the last tick end. */
+  const getRecalculationWorkerState = () => ({ ...workerState, busy: workerBusy });
+  const processQueuedRecalculations = async (options = {}) => {
+    if (workerBusy) {
+      workerState.skipped_in_progress += 1;
+      return { skipped: "in_progress" };
+    }
+    workerState.ticks += 1;
+    workerState.last_started_at = new Date().toISOString();
+    let outcome = "error";
+    try {
+      const result = await processQueuedRecalculationsOnce(options);
+      outcome = result && result.error ? "run_failed" : result && result.claimed ? "run_done" : result && result.skipped ? `skipped_${result.skipped}` : "idle";
+      return result;
+    } finally {
+      workerState.last_finished_at = new Date().toISOString();
+      workerState.last_outcome = outcome;
+    }
+  };
+  const processQueuedRecalculationsOnce = async ({ today = null, now = null } = {}) => {
     if (workerBusy) return { skipped: "in_progress" };
     if (!attendanceCalculationRepo.claimNextQueuedRun) return { skipped: "not_supported" };
     workerBusy = true;
@@ -2505,6 +2525,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     closeOtForPayrollLock,
     recalculateForShiftConfigChange,
     processQueuedRecalculations,
+    getRecalculationWorkerState,
     retryRecalculationRun,
     getRecalculationRun,
     getBreakOverride,

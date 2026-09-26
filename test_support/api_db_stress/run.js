@@ -18,11 +18,16 @@
  *   SLOW_MS         for SCENARIO=slow                        (default 2000)
  *   HEAP_MB         --max-old-space-size for the server      (default unset)
  *   CRON            1 = crons run as in production           (default 1)
+ *   BURST_N         "morning burst": N different employees open My
+ *                   Attendance at the same instant ...        (default 0 = off)
+ *   BURST_AT_S      ... at these seconds from start, comma-separated
+ *                   (default "20"); results are reported as phase "burst"
  *   OUT             summary JSON path
  *
  * Needs: MariaDB with the migrated schema + test_support/api_db_stress/seed.sql,
- * faultProxy.js on 0.0.0.0:13306 -> 3306 with control port 13399, config.json
- * naming the DB as 198.51.100.7:13306 and `ip addr add 198.51.100.7/32 dev lo`
+ * faultProxy.js on 0.0.0.0:<port> -> 3306 with control port CTL_PORT (13399),
+ * config.json naming the DB as DB_ALIAS:<port> (198.51.100.7) and
+ * `ip addr add <DB_ALIAS>/32 dev lo`
  * (root; see README.md in this directory).
  */
 const { spawn } = require("child_process");
@@ -49,14 +54,19 @@ const C = {
   slowMs: num("SLOW_MS", 2000),
   heapMb: env.HEAP_MB ? Number(env.HEAP_MB) : null,
   cron: env.CRON === undefined ? true : env.CRON === "1",
+  burstN: num("BURST_N", 0),
+  burstAt: String(env.BURST_AT_S || "20").split(",").map(Number).filter(Number.isFinite),
   port: num("API_PORT", 18080),
-  out: env.OUT || `/tmp/claude-0/api-stress-${env.SCENARIO || "handshake_hang"}.json`,
+  out: env.OUT || `${require("os").tmpdir()}/api-stress-${env.SCENARIO || "handshake_hang"}.json`,
 };
 const ROOT = path.join(__dirname, "..", "..");
-const PROBE = `/tmp/claude-0/probe-${process.pid}.jsonl`;
+// Fault-proxy control port and the DB address config.json names (see README).
+const CTL_PORT = Number(process.env.CTL_PORT || 13399);
+const DB_ALIAS = process.env.DB_ALIAS || "198.51.100.7";
+const PROBE = `${require("os").tmpdir()}/probe-${process.pid}.jsonl`;
 
 const ctl = (p) =>
-  new Promise((resolve) => http.get({ host: "127.0.0.1", port: 13399, path: p }, (r) => { let b = ""; r.on("data", (d) => (b += d)); r.on("end", () => resolve(b)); }).on("error", () => resolve(null)));
+  new Promise((resolve) => http.get({ host: "127.0.0.1", port: CTL_PORT, path: p }, (r) => { let b = ""; r.on("data", (d) => (b += d)); r.on("end", () => resolve(b)); }).on("error", () => resolve(null)));
 
 function get(pathname, headers) {
   return new Promise((resolve) => {
@@ -68,8 +78,18 @@ function get(pathname, headers) {
       resolve({ ms: Date.now() - t0, ...r });
     };
     const req = http.get({ host: "127.0.0.1", port: C.port, path: pathname, headers, agent: false }, (res) => {
-      res.resume();
-      res.on("end", () => done({ status: res.statusCode }));
+      // Some routes answer an error with HTTP 200 and {"code":500} in the
+      // body (e.g. /designation/permissions), so the body's own code counts:
+      // 200 + code >= 500 is reported as "app_500", not success.
+      let head = "";
+      res.on("data", (d) => {
+        if (head.length < 64) head += d.toString("utf8", 0, Math.min(d.length, 64));
+      });
+      res.on("end", () => {
+        const m = /^\{"code":(\d{3})/.exec(head);
+        const appCode = m ? Number(m[1]) : null;
+        done({ status: res.statusCode === 200 && appCode !== null && appCode >= 500 ? "app_500" : res.statusCode });
+      });
       res.on("error", () => done({ status: "reset" }));
     });
     req.setTimeout(C.clientTimeoutMs, () => {
@@ -91,11 +111,11 @@ const { execSync } = require("child_process");
 function netUnreachable(on) {
   const sh = (c) => { try { execSync(c, { stdio: "ignore" }); } catch (e) { /* already in that state */ } };
   if (on) {
-    sh("ip addr del 198.51.100.7/32 dev lo");
-    sh("ip route add unreachable 198.51.100.7/32");
+    sh(`ip addr del ${DB_ALIAS}/32 dev lo`);
+    sh(`ip route add unreachable ${DB_ALIAS}/32`);
   } else {
-    sh("ip route del unreachable 198.51.100.7/32");
-    sh("ip addr add 198.51.100.7/32 dev lo");
+    sh(`ip route del unreachable ${DB_ALIAS}/32`);
+    sh(`ip addr add ${DB_ALIAS}/32 dev lo`);
   }
 }
 
@@ -172,6 +192,23 @@ async function main() {
     while (accO >= 1) { fire("ordinary"); accO -= 1; }
   }, 50);
 
+  // Morning burst(s): N different employees at the same instant.
+  const burstResults = [];
+  const burstTimers = C.burstN > 0
+    ? C.burstAt.map((at, wave) =>
+        setTimeout(() => {
+          for (let k = 0; k < C.burstN; k += 1) {
+            const emp = (wave * C.burstN + k) % 300;
+            inflight += 1;
+            get(`/telegram/attendance/month?month=2026-09`, { "x-telegram-session": monthTokens[emp] }).then((r) => {
+              inflight -= 1;
+              burstResults.push({ wave, ...r });
+            });
+          }
+        }, at * 1000)
+      )
+    : [];
+
   // Fault schedule.
   let faultApplied = false;
   let recovered = false;
@@ -207,6 +244,7 @@ async function main() {
   clearInterval(loadTimer);
   clearInterval(faultTimer);
   clearInterval(proxyTimer);
+  burstTimers.forEach(clearTimeout);
   await ctl("/mode/pass");
   // Anything still outstanding at the client has already passed CLIENT_TIMEOUT_MS or is about to.
   const tWait = Date.now();
@@ -238,6 +276,19 @@ async function main() {
       };
     }
   }
+  if (burstResults.length) {
+    const codes = {};
+    burstResults.forEach((r) => (codes[r.status] = (codes[r.status] || 0) + 1));
+    phases.burst = {
+      sent: burstResults.length,
+      ok: burstResults.filter((r) => r.status === 200).length,
+      codes,
+      p50_ms: pct(burstResults.map((r) => r.ms), 50),
+      p95_ms: pct(burstResults.map((r) => r.ms), 95),
+      p99_ms: pct(burstResults.map((r) => r.ms), 99),
+      max_ms: Math.max(...burstResults.map((r) => r.ms)),
+    };
+  }
   const mainPool = (p) => (p.pools || []).find((x) => x.name === "dnds_api_test") || {};
   const every = (n) => probe.filter((_, i) => i % n === 0);
   const summary = {
@@ -263,10 +314,23 @@ async function main() {
     })),
     peaks: {
       queued: Math.max(0, ...probe.map((p) => mainPool(p).queued || 0)),
-      guard_waiting: Math.max(0, ...probe.map((p) => { const g = (p.guard || []).find((x) => x.name === "main"); return g ? g.interactive_waiting + g.background_waiting : 0; })),
+      guard_waiting: Math.max(0, ...probe.map((p) => { const g = (p.guard || []).find((x) => x.name === "main"); return g ? g.interactive_waiting + (g.attendance_waiting || 0) + g.background_waiting : 0; })),
+      guard_interactive_waiting: Math.max(0, ...probe.map((p) => { const g = (p.guard || []).find((x) => x.name === "main"); return g ? g.interactive_waiting : 0; })),
+      guard_attendance_waiting: Math.max(0, ...probe.map((p) => { const g = (p.guard || []).find((x) => x.name === "main"); return g ? g.attendance_waiting || 0 : 0; })),
+      guard_background_waiting: Math.max(0, ...probe.map((p) => { const g = (p.guard || []).find((x) => x.name === "main"); return g ? g.background_waiting : 0; })),
+      guard_attendance_active: Math.max(0, ...probe.map((p) => { const g = (p.guard || []).find((x) => x.name === "main"); return g ? g.attendance_active || 0 : 0; })),
+      guard_background_active: Math.max(0, ...probe.map((p) => { const g = (p.guard || []).find((x) => x.name === "main"); return g ? g.background_active || 0 : 0; })),
+      http_in_flight_peak_server: Math.max(0, ...probe.map((p) => p.http.in_flight)),
       heap_mb: Math.max(0, ...probe.map((p) => p.heap_used_mb)),
       rss_mb: Math.max(0, ...probe.map((p) => p.rss_mb)),
       eld_max_ms: Math.max(0, ...probe.map((p) => p.eld_max_ms)),
+      // Per-second event-loop p95: the worst second, and the median second.
+      eld_p95_worst_second_ms: Math.max(0, ...probe.map((p) => p.eld_p95_ms || 0)),
+      eld_p95_median_second_ms: pct(probe.map((p) => p.eld_p95_ms || 0), 50),
+      // DB work running: mysqljs connections checked out (all - free).
+      db_running: Math.max(0, ...probe.map((p) => (mainPool(p).all || 0) - (mainPool(p).free || 0))),
+      guard_active: Math.max(0, ...probe.map((p) => { const g = (p.guard || []).find((x) => x.name === "main"); return g ? g.active : 0; })),
+      guard_interactive_active: Math.max(0, ...probe.map((p) => { const g = (p.guard || []).find((x) => x.name === "main"); return g ? g.interactive_active || 0 : 0; })),
       http_in_flight: Math.max(0, ...probe.map((p) => p.http.in_flight)),
       db_tcp_open: Math.max(0, ...proxySeries.map((p) => p.open)),
     },
@@ -278,7 +342,18 @@ async function main() {
       http_in_flight_server: lastProbe.http.in_flight,
       http_aborted_total: lastProbe.http.aborted,
       pools: lastProbe.pools,
+      admission_totals: ((lastProbe.guard || []).find((x) => x.name === "main")) || null,
     },
+    probe_file: PROBE,
+    // What the server itself said: circuit transitions it logged, cron ticks
+    // it skipped, cron errors, and its last SERVER.RUNTIME.STATS line.
+    server_log: {
+      circuit_lines: (srvLog.match(/[^\n]*DB_CIRCUIT_[A-Z]+[^\n]*/g) || []).slice(0, 20).map((l) => l.slice(0, 400)),
+      cron_skip_lines: (srvLog.match(/\[CRON\][^\n]*tick skipped[^\n]*/g) || []).slice(0, 40),
+      cron_error_line_count: (srvLog.match(/\[CRON\] [a-z_]+ [^\n]*(Error|ECONN|EHOST|PROTOCOL|DB_)/g) || []).length,
+      last_runtime_stats: ((srvLog.match(/[^\n]*SERVER\.RUNTIME\.STATS[^\n]*/g) || []).slice(-1)[0]) || null,
+    },
+    circuit_trace: fs.existsSync(`${PROBE}.circuit`) ? fs.readFileSync(`${PROBE}.circuit`, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : null,
     client_outstanding_at_end: inflight,
     db_tcp_series_every_10s: proxySeries.filter((_, i) => i % 10 === 0),
   };

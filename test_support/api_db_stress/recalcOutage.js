@@ -28,18 +28,20 @@ const C = {
   outageS: num("OUTAGE_S", 180),
   recoverS: num("RECOVER_S", 240),
   port: num("API_PORT", 18081),
-  out: env.OUT || "/tmp/claude-0/recalc-outage.json",
+  out: env.OUT || `${require("os").tmpdir()}/recalc-outage.json`,
 };
 const ROOT = path.join(__dirname, "..", "..");
-const PROBE = `/tmp/claude-0/probe-recalc-${process.pid}.jsonl`;
-const ctl = (p) => new Promise((r) => http.get({ host: "127.0.0.1", port: 13399, path: p }, (x) => { x.resume(); x.on("end", r); }).on("error", r));
+const CTL_PORT = Number(process.env.CTL_PORT || 13399);
+const DB_ALIAS = process.env.DB_ALIAS || "198.51.100.7";
+const PROBE = `${require("os").tmpdir()}/probe-recalc-${process.pid}.jsonl`;
+const ctl = (p) => new Promise((r) => http.get({ host: "127.0.0.1", port: CTL_PORT, path: p }, (x) => { x.resume(); x.on("end", r); }).on("error", r));
 const db = mysql.createConnection({ host: "127.0.0.1", port: 3306, user: "bm", password: "bm", database: "dnds_api_test" });
 const q = (sql, p) => new Promise((res, rej) => db.query(sql, p, (e, r) => (e ? rej(e) : res(r))));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function netUnreachable(on) {
   const sh = (c) => { try { execSync(c, { stdio: "ignore" }); } catch (e) { /* ok */ } };
-  if (on) { sh("ip addr del 198.51.100.7/32 dev lo"); sh("ip route add unreachable 198.51.100.7/32"); }
-  else { sh("ip route del unreachable 198.51.100.7/32"); sh("ip addr add 198.51.100.7/32 dev lo"); }
+  if (on) { sh(`ip addr del ${DB_ALIAS}/32 dev lo`); sh(`ip route add unreachable ${DB_ALIAS}/32`); }
+  else { sh(`ip route del unreachable ${DB_ALIAS}/32`); sh(`ip addr add ${DB_ALIAS}/32 dev lo`); }
 }
 
 (async () => {
@@ -72,8 +74,27 @@ function netUnreachable(on) {
     const p = lines.length ? JSON.parse(lines[lines.length - 1]) : null;
     const main = p ? p.pools.find((x) => x.name === "dnds_api_test") : null;
     const g = p && p.guard ? p.guard.find((x) => x.name === "main") : null;
+    // The fixed server's own view (SERVER.RUNTIME.STATS, if DB_STATS_INTERVAL_MS
+    // is set): recalculation worker state, the cron's run/skip counters, the
+    // background lane. Absent before the fix.
+    const statsLines = log.match(/[^\n]*SERVER\.RUNTIME\.STATS[^\n]*/g) || [];
+    let rs = null;
+    try {
+      rs = statsLines.length ? JSON.parse(statsLines[statsLines.length - 1]).ref : null;
+    } catch (e) {
+      rs = null;
+    }
+    const cronJob = rs && rs.cron
+      ? { running: rs.cron.running.includes("attendance_recalculation_queue"), skips: rs.cron.skips.attendance_recalculation_queue || { overlap: 0, db_unavailable: 0 } }
+      : null;
     series.push({
       t: Math.round((Date.now() - T0) / 1000),
+      worker: rs ? rs.attendance_recalculation_worker : undefined,
+      cron: cronJob || undefined,
+      background_lane: rs && rs.db && rs.db.main ? rs.db.main.lanes.background : undefined,
+      circuit: rs && rs.db && rs.db.main ? rs.db.main.circuit : undefined,
+      rss_mb: p ? p.rss_mb : null,
+      handles: p ? p.handles : null,
       phase,
       run: row,
       mysql_queued: main ? main.queued : null,
@@ -84,15 +105,19 @@ function netUnreachable(on) {
     });
   };
 
-  // Wait for the claim (the cron fires on the minute).
-  for (let i = 0; i < 90; i += 1) {
-    await sleep(2000);
-    const [r] = await q("SELECT status, employees_completed FROM attendance_recalculation_run WHERE attendance_recalculation_run_id = ?", [runId]);
-    if (r && r.status === "RUNNING" && Number(r.employees_completed) >= 0) break;
+  // Wait for the claim (the cron fires on the minute), polling fast: a
+  // 300-employee run takes ~15 s, and the outage must land MID-run.
+  for (let i = 0; i < 90 * 4; i += 1) {
+    await sleep(250);
+    const [r] = await q("SELECT status FROM attendance_recalculation_run WHERE attendance_recalculation_run_id = ?", [runId]);
+    if (r && r.status === "RUNNING") break;
   }
   await snap("claimed");
-  await sleep(15000); // let it get into the run
+  await sleep(Number(env.CUT_AFTER_MS || 3000)); // into the run, well before it can finish
   await snap("pre_outage");
+  if (series[series.length - 1].run.status !== "RUNNING") {
+    console.error("the run was not RUNNING when the outage started - not a mid-run test");
+  }
 
   if (C.scenario === "unreachable") netUnreachable(true);
   else await ctl(`/mode/${C.scenario}`);
@@ -120,6 +145,9 @@ function netUnreachable(on) {
     peak_heap_mb: Math.max(0, ...series.map((s) => s.heap_mb || 0)),
     series,
     cron_log: (log.match(/\[CRON\] attendance_recalculation_queue[^\n]*/g) || []).slice(0, 20),
+    // The server's own SERVER.RUNTIME.STATS lines (set DB_STATS_INTERVAL_MS):
+    // the first one logged during the outage and the last one.
+    runtime_stats_lines: (log.match(/[^\n]*SERVER\.RUNTIME\.STATS[^\n]*/g) || []).filter((l, i, a) => i === Math.floor(a.length / 2) || i === a.length - 1),
   };
   fs.writeFileSync(C.out, JSON.stringify(summary, null, 1));
   console.log(JSON.stringify({ out: C.out, final_run: summary.final_run, peak_mysql_queued: summary.peak_mysql_queued, peak_heap_mb: summary.peak_heap_mb }));

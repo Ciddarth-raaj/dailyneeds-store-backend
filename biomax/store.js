@@ -391,7 +391,12 @@ function createStore(pool, options = {}) {
       } catch (err) {
         if (err && err.code === "ER_DUP_ENTRY") {
           await rollbackAsync(connection).catch(() => {});
-          const existing = await q(
+          // On the connection this call already holds (rolled back, so it
+          // reads committed data exactly as a fresh pool connection would),
+          // not the pool: asking the pool for a SECOND connection while
+          // holding one could wait on itself when the pool is saturated.
+          const existing = await cq(
+            connection,
             `SELECT biomax_punch_id FROM biomax_punch
               WHERE dev_id IS NULL AND ingest_source = ? AND user_id = ? AND io_time_raw = ?`,
             [INGEST_SOURCE.DIGISME_IMPORT, punch.user_id, punch.io_time_raw]

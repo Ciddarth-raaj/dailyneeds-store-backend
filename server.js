@@ -10,6 +10,9 @@ const express = require("express");
 const app = express();
 const compression = require("compression");
 const bodyParser = require("body-parser");
+const { runInLane } = require("./utils/db_admission");
+const { createRuntimeStats } = require("./utils/runtime_stats");
+const { installProcessLifecycle } = require("./utils/process_lifecycle");
 const HttpServer = require("http").createServer(app);
 
 const logger = require("./utils/logger");
@@ -76,6 +79,15 @@ class Server {
   }
 
   initExpress() {
+    this.runtimeStats = createRuntimeStats({
+      pools: { main: this.mysql.connection, gofrugal: this.mysqlGofrugal.connection },
+      workerState: () =>
+        this.attendanceCalculationUsecase && this.attendanceCalculationUsecase.getRecalculationWorkerState
+          ? this.attendanceCalculationUsecase.getRecalculationWorkerState()
+          : null,
+      logger,
+      intervalMs: Number(process.env.DB_STATS_INTERVAL_MS) || 60000,
+    });
     // In production the app sits behind a reverse proxy, so the socket
     // address is the proxy's. `trust proxy` makes Express read the real
     // client from X-Forwarded-For, which is what the IP restriction checks.
@@ -115,6 +127,12 @@ class Server {
         extended: true,
       })
     );
+    // DB admission (utils/db_admission.js): everything below runs in the
+    // `interactive` DB lane with the request as its context, for per-route
+    // DB wait metrics. After body parsing on purpose - body-parser calls on
+    // from the request stream's own async context, which would drop it.
+    app.use((req, res, next) => runInLane("interactive", next, { req }));
+    app.use(this.runtimeStats.httpCounter);
     app.use(express.static(__dirname + "/views", { maxAge: "30 days" }));
   }
 
@@ -2056,7 +2074,8 @@ class Server {
       PURCHASE_ACK_GOFRUGAL_CRON,
       async () => {
         await this.purchaseAcknowledgementUsecase.syncFromGofrugal(null);
-      }
+      },
+      { requires: ["main", "gofrugal"] }
     );
 
     // 11PM everyday
@@ -2108,7 +2127,8 @@ class Server {
       PURCHASE_REF_WARM_CRON,
       async () => {
         await this.purchaseRefUsecase.refresh();
-      }
+      },
+      { requires: ["main", "gofrugal"] }
     );
 
     // EVERY MINUTE - the attendance recalculation queue.
@@ -2477,7 +2497,18 @@ class Server {
     /* digisme-cron-gate:end */
 
     this.synker.initCronJobs(this.cronService, this.apiSyncLogger);
+    // While the main database's circuit is open, cron ticks are skipped
+    // instead of queued against it (services/cron_service.js).
+    this.cronService.setDbUnavailableProbe((poolName) => {
+      const driver = poolName === "gofrugal" ? this.mysqlGofrugal : this.mysql;
+      return driver && driver.connection && typeof driver.connection.isUnavailable === "function"
+        ? driver.connection.isUnavailable()
+        : false;
+    });
     this.cronService.start();
+    this.runtimeStats.cronService = this.cronService;
+    this.runtimeStats.lifecycle = this.lifecycle;
+    this.runtimeStats.start();
 
     // Wire synker back into cleaningPackingUsecase after service creation
     if (this.cleaningPackingUsecase && this.cleaningPackingUsecase.setSynker) {
@@ -2493,47 +2524,48 @@ class Server {
     }
   }
 
+  /**
+   * Stop crons, stop accepting HTTP, end every pool. Awaitable; the caller
+   * (utils/process_lifecycle.js) bounds it with a deadline and then exits.
+   */
   onClose() {
     if (this.cronService) {
       this.cronService.stopAll();
     }
-    //Close all DB Connections
-    this.drivers.map((m) => {
-      m.close();
-    });
-
+    if (this.runtimeStats) this.runtimeStats.stop();
     HttpServer.close();
+    //Close all DB Connections
+    return Promise.all(
+      this.drivers.map(
+        (m) =>
+          new Promise((resolve) => {
+            if (!m || !m.connection) return resolve();
+            try {
+              m.connection.end(() => resolve());
+            } catch (e) {
+              resolve();
+            }
+          })
+      )
+    );
   }
 }
 
 const server = new Server();
 
-[
-  "SIGINT",
-  "SIGTERM",
-  "SIGQUIT",
-  "exit",
-  "uncaughtException",
-  "SIGUSR1",
-  "SIGUSR2",
-].forEach((eventType) => {
-  process.on(eventType, (err = "") => {
-    process.removeAllListeners();
-
-    let error = err.toString();
-
-    if (err.stack) {
-      error = err.stack;
-    }
-
+// How the process ends - fatal error exits 1 (pm2 restarts it), a signal
+// exits 0, both after stopping crons, HTTP and pools under a deadline. See
+// utils/process_lifecycle.js for why the old handler left a zombie.
+server.lifecycle = installProcessLifecycle({
+  onClose: () => server.onClose(),
+  // A deploy's reload (signal, exit 0) is not an error; a crash is.
+  log: (code, description, ref) =>
     logger.Log({
-      level: logger.LEVEL.ERROR,
+      level: ref && ref.exit_code === 0 ? logger.LEVEL.INFO : logger.LEVEL.ERROR,
       component: "SERVER",
-      code: "SERVER.EXIT",
-      description: error,
+      code,
+      description,
       category: "",
-      ref: {},
-    });
-    server.onClose();
-  });
+      ref: ref || {},
+    }),
 });

@@ -533,10 +533,26 @@ class AttendanceImportUsecase {
   }
 }
 
-/** A lost connection is fatal to the batch; anything else is one item's failure. */
+/**
+ * A lost or unavailable database is fatal to the batch; anything else is one
+ * item's failure. The DB_* codes and POOL_CLOSED come from the pool's
+ * admission layer (utils/db_admission.js) - "the database is down / busy /
+ * the pool is shutting down" - and must stop the commit exactly as a lost
+ * connection does, not be recorded against every remaining item.
+ */
+const CONNECTION_LOSS_CODES = new Set([
+  "PROTOCOL_CONNECTION_LOST",
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+  "EHOSTUNREACH",
+  "PROTOCOL_ENQUEUE_AFTER_FATAL_ERROR",
+  "DB_UNAVAILABLE",
+  "DB_ACQUIRE_TIMEOUT",
+  "DB_BUSY",
+  "POOL_CLOSED",
+]);
 function isConnectionLoss(err) {
-  const code = err && err.code;
-  return code === "PROTOCOL_CONNECTION_LOST" || code === "ECONNREFUSED" || code === "ETIMEDOUT" || code === "PROTOCOL_ENQUEUE_AFTER_FATAL_ERROR";
+  return !!err && CONNECTION_LOSS_CODES.has(err.code);
 }
 
 module.exports = (repo, store) => new AttendanceImportUsecase(repo, store);

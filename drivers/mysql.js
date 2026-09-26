@@ -3,6 +3,14 @@ const config = require("../config.json");
 const env = global.env;
 
 const logger = require("../utils/logger");
+const { guardPool, poolOptionsFromEnv } = require("../utils/db_admission");
+
+const admissionLog = {
+  error: (code, description, ref) =>
+    logger.Log({ level: logger.LEVEL.ERROR, component: "DRIVER", code: `DRIVER.${code}`, description, category: "", ref: ref || {} }),
+  info: (code, description, ref) =>
+    logger.Log({ level: logger.LEVEL.INFO, component: "DRIVER", code: `DRIVER.${code}`, description, category: "", ref: ref || {} }),
+};
 
 class MySqlModel {
   constructor() {
@@ -11,8 +19,13 @@ class MySqlModel {
 
   connect() {
     return new Promise((resolve, reject) => {
-      this.connection = mysql.createPool({
+      const rawPool = mysql.createPool({
         connectionLimit: 10,
+        // See utils/db_admission.js: connect + handshake + pre-use ping are
+        // bounded (mysqljs's acquireTimeout covers the handshake), and the
+        // guard keeps mysqljs's own waiter queue empty; queueLimit is only
+        // the backstop that makes it provably bounded.
+        ...poolOptionsFromEnv(process.env).mysql,
         host: config.db.mysql[env].host,
         user: config.db.mysql[env].username,
         password: config.db.mysql[env].password,
@@ -22,6 +35,11 @@ class MySqlModel {
         supportBigNumbers: true,
         bigNumberStrings: true
       });
+      // DB_ADMISSION=off (the rollback switch) leaves the pool exactly as it was.
+      const admission = poolOptionsFromEnv(process.env);
+      this.connection = admission.enabled
+        ? guardPool(rawPool, { name: "main", log: admissionLog, ...admission.guard })
+        : rawPool;
 
       this.connection.getConnection((err, connection) => {
         if (err) {
