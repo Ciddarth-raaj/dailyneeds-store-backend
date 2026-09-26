@@ -88,23 +88,31 @@ within its lane's deadline (5 s / 5 s / 60 s).
   from crons or background jobs in the `background` lane (10 min).
   `DB_*_QUERY_TIMEOUT_MS=0` disables a lane's default without redeploying.
 - When it fires: mysqljs errors the statement `PROTOCOL_SEQUENCE_TIMEOUT`
-  (fatal) and destroys the connection; the permit is returned; it counts as a
-  database failure for the circuit.
+  (fatal) and destroys the connection; the permit is returned. A timeout on
+  a `pool.query` statement also counts as a database failure for the
+  circuit; a timeout on a statement run over a connection from
+  `getConnection` (transactions) does not - that connection is destroyed and
+  its permit returned, and the circuit only learns of an unhealthy database
+  when the next connection attempt fails.
 - **The server can keep executing it.** MySQL notices a vanished client only
   when it next writes to the socket. An open transaction is rolled back when
   the server sees the disconnect; an **autocommit write can still commit
   after the client gave up**. Bound: a timed-out statement returns its permit
   while the server may still be running it, so abandoned statements are not
-  capped by the pool size alone. What caps them is the circuit: timeouts count
-  as database failures, so after `DB_CIRCUIT_FAILURES` (3) consecutive ones
-  it opens. While OPEN nothing is sent; in HALF_OPEN only the single probe
-  caller runs (one connection, statements one at a time, and a timed-out
-  statement destroys that connection). So per pool at most
-  `connectionLimit` (10) statements can be abandoned per CLOSED -> OPEN
-  transition, plus at most 1 per failed probe (probes are >= 5 s apart, at
-  most one per 10 s once the period has doubled); a new CLOSED -> OPEN
-  transition needs a successful probe first. Before, every queued waiter eventually
-  ran, however long ago its client left.
+  capped by the pool size alone.
+  - Every statement needs a permit while it runs and gives it up only when
+    it finishes or times out, so per pool at most `connectionLimit` (10)
+    statements can be abandoned per statement-timeout period of the lanes
+    involved (interactive 120 s, attendance_read 60 s, background 10 min) -
+    i.e. at most ~10 a minute even if every statement hangs.
+  - For `pool.query` statements the circuit tightens that: after
+    `DB_CIRCUIT_FAILURES` (3) consecutive timeouts it opens. While OPEN
+    nothing is sent; in HALF_OPEN only the single probe caller runs (one
+    connection, statements one at a time, and a timed-out statement destroys
+    that connection); a new CLOSED -> OPEN transition needs a successful
+    probe first.
+  - Before, every queued waiter eventually ran, however long ago its client
+    left.
 
 ## Transactions
 
@@ -358,3 +366,28 @@ follow-up.
 `AsyncResource.bind` bug found here (drops `thisArg`) is a Node 14 bug the
 code now works around. The fix is tested on Node 14.21.3 and Node 22.
 Upgrading is a separate project.
+
+## Rollout and rollback
+
+No new environment variable is required; pm2 memory limits and the global
+body parser are unchanged by this deployment. The normal backend deploy also
+reloads `biomax-receiver`; the receiver's own code, pools and ACK path are
+unchanged (the only `biomax/store.js` change is the DigiSME-import duplicate
+lookup the API uses), but check it after every deploy.
+
+After deploying, verify: the deployed SHA; `pm2 list` (API and receiver
+online, restart counts not climbing); `SERVER.RUNTIME.STATS` for the main
+pool - `mysql.queued` 0, `admission.waiting` near 0, circuit `closed`,
+`refused_busy` 0; heap/RSS flat over the first hour; a My Attendance month
+page; a Work Shift save that queues a recalculation run and completes;
+no unexpected `DB_BUSY` / `DB_UNAVAILABLE` / `DB_ACQUIRE_TIMEOUT` in the error
+log; receiver `/healthz`, its RSS/heap, its pool `queued` 0, and a fresh
+punch stored.
+
+Rollback:
+1. fast - set `DB_ADMISSION=off` for the API and reload it: both pools are
+   built exactly as before (no guard, no extra mysqljs options); the cron
+   gate then never skips and the lanes do nothing. The new exit handling
+   and the stats line stay.
+2. full - revert the DB-backpressure application commit(s) on
+   `main-autodeploy` and let it redeploy (the harness commit is test-only).
