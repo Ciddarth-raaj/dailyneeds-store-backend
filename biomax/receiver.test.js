@@ -333,13 +333,13 @@ describe("receiver", () => {
       assert.equal(raw.length, 0);
     });
 
-    it("oversized body: truncated frame preserved as oversized, no punch, OK", async () => {
+    it("oversized body: NOT acknowledged, no punch, never preserved truncated", async () => {
       const big = Buffer.alloc(5000, 0x41);
       const { raw } = await send(port, punchFrame({ body: big }));
-      assert.equal(protocol.parseReplyHeaders(raw).headers.response_code, "OK");
-      assert.equal(store.state.raw[0].outcome, "oversized");
-      assert.ok(store.state.raw[0].raw_frame.length < 5000);
+      assert.equal(raw.length, 0, "zero ACK bytes - the terminal keeps it and retries");
       assert.equal(store.state.punches.size, 0);
+      assert.ok(!store.calls.some((c) => c[0] === "insertRawRequest" && store.state.raw.some((r) => r.outcome !== "oversized")), "no durability row");
+      assert.ok(log.lines.some((l) => l.code === "OVERSIZED_PUNCH_REFUSED"));
     });
 
     it("a punch without dev_id is preserved, not stored as a punch", async () => {

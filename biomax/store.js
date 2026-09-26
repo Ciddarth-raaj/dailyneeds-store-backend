@@ -51,6 +51,9 @@ const {
 
 const SCHEDULE_CACHE_MS = 60 * 1000;
 
+/** biomax_raw_request.raw_frame is a BLOB: 65535 bytes, headers included. */
+const RAW_FRAME_MAX_BYTES = 65535;
+
 /** How a punch row got here (biomax_punch.ingest_source). */
 const INGEST_SOURCE = { LIVE: "LIVE", HISTORICAL_PULL: "HISTORICAL_PULL", DIGISME_IMPORT: "DIGISME_IMPORT" };
 
@@ -428,11 +431,26 @@ function createStore(pool, options = {}) {
     }
   }
 
-  async function insertRawRequest(entry) {
+  /**
+   * One biomax_raw_request row. raw_frame is a BLOB (65535 bytes): a longer
+   * frame is cut to fit - fine for a diagnostic row, never for durability.
+   * With `requireComplete` (the receiver's R1 path: a frame ACKed on the
+   * strength of this row) a frame that would not fit whole is REFUSED with
+   * BIOMAX_FRAME_TOO_LARGE_TO_PRESERVE and nothing is written.
+   */
+  async function insertRawRequest(entry, options = {}) {
+    if (options.requireComplete) {
+      const len = entry.raw_frame ? (Buffer.isBuffer(entry.raw_frame) ? entry.raw_frame.length : Buffer.byteLength(String(entry.raw_frame))) : 0;
+      if (len > RAW_FRAME_MAX_BYTES) {
+        const err = new Error(`frame of ${len} bytes cannot be preserved whole (raw_frame holds ${RAW_FRAME_MAX_BYTES})`);
+        err.code = "BIOMAX_FRAME_TOO_LARGE_TO_PRESERVE";
+        throw err;
+      }
+    }
     const frame = entry.raw_frame
       ? Buffer.isBuffer(entry.raw_frame)
-        ? entry.raw_frame.subarray(0, 65535)
-        : Buffer.from(String(entry.raw_frame)).subarray(0, 65535)
+        ? entry.raw_frame.subarray(0, RAW_FRAME_MAX_BYTES)
+        : Buffer.from(String(entry.raw_frame)).subarray(0, RAW_FRAME_MAX_BYTES)
       : null;
     await q(
       `INSERT INTO biomax_raw_request
@@ -766,4 +784,4 @@ function poolClosedError() {
   return err;
 }
 
-module.exports = { createPool, createStore, SCHEDULE_CACHE_MS, INGEST_SOURCE, sha256 };
+module.exports = { createPool, createStore, SCHEDULE_CACHE_MS, INGEST_SOURCE, RAW_FRAME_MAX_BYTES, sha256 };

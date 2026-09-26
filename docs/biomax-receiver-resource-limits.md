@@ -106,9 +106,21 @@ the API pool without them and is unchanged.
 
 ### What did not change
 
-- **R1.** A punch is ACKed `OK` only after `insertPunch` (or, for an
-  unparseable, header-less, oversized or flood-capped frame,
-  `insertRawRequest`) has returned. Those writes are awaited *before* the
+- **R1.** A punch is ACKed `OK` only after `insertPunch` has returned, or,
+  for an unparseable, header-less or flood-capped frame, after
+  `insertRawRequest` has committed the **complete** frame
+  (`requireComplete`; a frame longer than `raw_frame`'s 65535 bytes is
+  refused, never cut to fit). A body over `BIOMAX_MAX_BODY` (64 KB - a real
+  punch is ~144 bytes) is **refused with zero reply bytes** - no truncated
+  copy is kept or counted as durable - and recorded as bounded metadata only:
+  `OVERSIZED_PUNCH_REFUSED` (error level, once a minute per device, with
+  dev_id, Content-Length, bytes received, source IP, time and the sha256 of
+  the complete body streamed through without being kept, up to
+  `BIOMAX_OVERSIZED_PUNCH_HASH_MAX`, 1 MB; a body declared larger is refused
+  unread), `oversized_punch_refused` in `/healthz` and STATS, and a
+  rate-limited headers-only `oversized` diagnostic row whose reason starts
+  `REFUSED, NOT ACKNOWLEDGED`. (Before 2026-09 an oversized punch was stored
+  truncated and ACKed.) Those writes are awaited *before* the
   reply, on the receiver pool, never through the droppable housekeeping
   queue. (The flood-capped case is a change: before 2026-09 it was ACKed
   with at most one raw row per hour.) If a limit above stops them - pool queue

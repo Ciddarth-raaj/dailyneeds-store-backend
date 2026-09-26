@@ -19,10 +19,14 @@
  *        uncaptured, treated as potentially biometric/sensitive) is answered
  *        the same way by default and its body is hashed and discarded, never
  *        stored or logged (handleEnroll).
- *   R1   a punch is acknowledged `response_code: OK` only after its bytes
- *        are durable - a punch row (new or duplicate) or a raw-request row.
- *        If neither commit succeeds the socket is closed with NO reply, so
- *        the device keeps the punch and retries.
+ *   R1   a punch is acknowledged `response_code: OK` only after EITHER the
+ *        punch row is committed (new or duplicate) OR the COMPLETE received
+ *        frame is committed as a raw-request row. A body over
+ *        BIOMAX_MAX_BODY, or a frame too long for raw_frame to hold whole,
+ *        is never preserved truncated: it is refused with NO reply and
+ *        OVERSIZED_PUNCH_REFUSED metadata (refuseOversizedPunch). If no
+ *        commit succeeds the socket is closed with NO reply, so the device
+ *        keeps the punch and retries.
  *   R2   a retransmitted punch is a counter bump on the unique key, still OK.
  *   R5   the employee code is matched numerically but strictly, never to 0.
  *   R18  the attendance date comes from the employee's assigned shift and
@@ -150,6 +154,10 @@ function readConfig(env = process.env) {
     // this caps request memory as well (Node closes sockets beyond it; a
     // device just retries).
     maxConnections: int("BIOMAX_MAX_CONNECTIONS", 200),
+    // A realtime_glog over maxBodyBytes is REFUSED (never ACKed). Its body
+    // is streamed through a hash without being kept, up to this many bytes;
+    // a body declared or found larger is refused without reading further.
+    oversizedPunchHashMaxBytes: int("BIOMAX_OVERSIZED_PUNCH_HASH_MAX", 1024 * 1024),
     // The receiver's pool (still connectionLimit 3): how many waiters it may
     // queue, how long a wait for a connection and a single statement may
     // take. A punch that hits any of these is refused with no ACK (R1).
@@ -217,34 +225,75 @@ function rebuildFrame(req, body) {
 }
 
 /**
- * Read the body up to maxBytes. `keep: false` reads and discards (the bytes
- * are only hashed) - for a frame whose content we must not retain.
- * `hash: true` adds the sha256 of what was read (up to the limit).
+ * Read the body up to maxBytes.
+ *
+ *   keep: false        read and discard (the bytes are only hashed) - for a
+ *                      frame whose content we must not retain
+ *   hash: true         sha256 of what was read (up to maxBytes)
+ *   discardOnOverflow  once the body passes maxBytes, drop everything kept
+ *                      so far and keep nothing more: an oversized body is
+ *                      never held, truncated or otherwise
+ *   hashAll            with hash: keep hashing past maxBytes, so the hash is
+ *                      of the COMPLETE body as received
+ *   streamMax          stop reading after this many bytes (resolves with
+ *                      streamAborted; the caller closes the socket) - bounds
+ *                      the time and CPU one request can take
  */
 function readBody(req, maxBytes, opts = {}) {
   const keep = opts.keep !== false;
   const hash = opts.hash ? crypto.createHash("sha256") : null;
+  const streamMax = Number.isFinite(opts.streamMax) && opts.streamMax > 0 ? opts.streamMax : null;
   return new Promise((resolve, reject) => {
-    const chunks = [];
+    let chunks = [];
     let size = 0;
     let oversized = false;
+    let settled = false;
+    const finish = (extra) => {
+      if (settled) return;
+      settled = true;
+      const complete = !extra || !extra.streamAborted;
+      resolve({
+        body: keep && !(oversized && opts.discardOnOverflow) ? Buffer.concat(chunks) : EMPTY,
+        oversized,
+        size,
+        sha256: hash && complete && (!oversized || opts.hashAll) ? hash.digest("hex") : null,
+        ...(extra || {}),
+      });
+      chunks = [];
+    };
     req.on("data", (chunk) => {
-      if (oversized) {
-        size += chunk.length;
+      if (settled) return;
+      size += chunk.length;
+      if (streamMax !== null && size > streamMax) {
+        oversized = true;
+        req.pause();
+        finish({ streamAborted: true });
         return;
       }
-      size += chunk.length;
+      if (oversized) {
+        if (hash && opts.hashAll) hash.update(chunk);
+        return;
+      }
       let part = chunk;
       if (size > maxBytes) {
         oversized = true;
+        if (opts.discardOnOverflow) {
+          chunks = [];
+          if (hash && opts.hashAll) hash.update(chunk);
+          return;
+        }
         // Keep what we have (truncated) for diagnosis; stop buffering.
         part = chunk.subarray(0, Math.max(0, maxBytes - (size - chunk.length)));
       }
       if (hash) hash.update(part);
       if (keep) chunks.push(part);
     });
-    req.on("end", () => resolve({ body: keep ? Buffer.concat(chunks) : EMPTY, oversized, size, sha256: hash ? hash.digest("hex") : null }));
-    req.on("error", reject);
+    req.on("end", () => finish());
+    req.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    });
   });
 }
 
@@ -275,6 +324,7 @@ function createReceiver({ store, log, spool, flood, config, health, housekeeper,
   const requestCounts = new Map();
   const touchTotals = { submitted: 0, skipped_interval: 0, not_accepted: 0 };
   let healthRequests = 0;
+  const oversizedPunch = { refused: 0, last: null, byDev: new Map() };
   let inFlight = 0;
   function countRequest(code) {
     let k = code ? String(code).slice(0, 40) : "(none)";
@@ -353,11 +403,14 @@ function createReceiver({ store, log, spool, flood, config, health, housekeeper,
       bytes: frame.length,
     };
 
+    // Over the body limit: a real punch is ~144 bytes, so this is abnormal,
+    // and we do not have the complete frame to preserve. NO ACK - the
+    // terminal keeps it and retries - and only metadata is recorded.
+    if (oversized) {
+      return refuseOversizedPunch(ctx, base, "body_over_limit");
+    }
     if (!envelope.dev_id) {
       return preserveAndAck(ctx, "unparsed", "missing dev_id header", base);
-    }
-    if (oversized) {
-      return preserveAndAck(ctx, "oversized", `body exceeded ${cfg.maxBodyBytes} bytes`, base);
     }
 
     const parsed = protocol.parsePunchBody(body);
@@ -504,13 +557,80 @@ function createReceiver({ store, log, spool, flood, config, health, housekeeper,
   /** Preserve a frame we could not turn into a punch, then ACK (R1). */
   async function preserveAndAck(ctx, outcome, reason, base, logExtra) {
     const { res, frame, started } = ctx;
+    // The OK below rests on this row holding the COMPLETE frame. A frame
+    // that cannot fit raw_frame whole (headers + a body just under the
+    // limit can) is refused, never preserved truncated and ACKed.
+    if (frame.length > RAW_FRAME_MAX) {
+      return refuseOversizedPunch(ctx, base, "frame_too_large_to_preserve");
+    }
     try {
-      await store.insertRawRequest({ ...base, outcome, reason, byte_length: frame.length, raw_frame: frame });
+      await store.insertRawRequest({ ...base, outcome, reason, byte_length: frame.length, raw_frame: frame }, { requireComplete: true });
     } catch (err) {
       return storeFailure(ctx, err, base, `${outcome}: ${reason}`);
     }
     reply(res, protocol.ACK_OK);
     logger.request({ ...base, ...(logExtra || {}), outcome, reason, duration_ms: Date.now() - started, error: true });
+  }
+
+  /**
+   * A realtime_glog we cannot make durable whole: NO ACK, socket closed, the
+   * terminal retries. Bounded metadata only - dev_id, lengths, source,
+   * time, and the sha256 of the complete body when it was streamed through
+   * (never the body itself, never spooled). OVERSIZED_PUNCH_REFUSED is
+   * logged at error level at most once a minute per device (the next line
+   * carries the count); a headers-only diagnostic row goes through the
+   * ordinary, rate-limited diagnostic path and is NOT evidence of
+   * durability - nothing was acknowledged.
+   */
+  function refuseOversizedPunch(ctx, base, why) {
+    const { req, envelope, sourceIp, started } = ctx;
+    const t = clock();
+    oversizedPunch.refused += 1;
+    const dev = envelope.dev_id || "-";
+    const meta = {
+      dev_id: envelope.dev_id,
+      request_code: protocol.REQUEST_PUNCH,
+      source_ip: sourceIp,
+      received_at: new Date(t).toISOString(),
+      why,
+      content_length: envelope.content_length,
+      bytes_received: ctx.bytesReceived,
+      frame_bytes: ctx.frame ? ctx.frame.length : null,
+      limit: cfg.maxBodyBytes,
+      body_sha256: ctx.bodySha256 || null,
+      hashed: !!ctx.bodySha256,
+    };
+    oversizedPunch.last = meta;
+    const minute = Math.floor(t / 60000);
+    let entry = oversizedPunch.byDev.get(dev);
+    if (!entry) {
+      if (oversizedPunch.byDev.size >= 1000) oversizedPunch.byDev.clear();
+      entry = { minute: null, suppressed: 0 };
+      oversizedPunch.byDev.set(dev, entry);
+    }
+    if (entry.minute !== minute) {
+      entry.minute = minute;
+      logger.error("OVERSIZED_PUNCH_REFUSED", `realtime_glog from ${dev} refused, NOT acknowledged (${why}); the terminal will retry`, {
+        ...meta,
+        suppressed_since_last_line: entry.suppressed || undefined,
+        refused_total: oversizedPunch.refused,
+        duration_ms: Date.now() - started,
+      });
+      entry.suppressed = 0;
+    } else {
+      entry.suppressed += 1;
+    }
+    const verdict = diag.check(`${dev}|oversized_punch`, `${dev}|oversized_punch|${meta.body_sha256 || meta.content_length}`);
+    if (verdict.write) {
+      submitRaw("raw_oversized_punch_refused", {
+        ...base,
+        outcome: "oversized",
+        reason: `REFUSED, NOT ACKNOWLEDGED (${why}): content-length ${meta.content_length} received ${meta.bytes_received} sha256 ${meta.body_sha256 ? meta.body_sha256.slice(0, 16) : "n/a"}${suppressedNote(verdict.suppressed)}`,
+        byte_length: meta.bytes_received || 0,
+        raw_frame: rebuildFrame(req, EMPTY), // headers only
+      });
+    }
+    refuse(req);
   }
 
   /** Nothing durable: spool for diagnosis, no ACK, error log. */
@@ -766,6 +886,7 @@ function createReceiver({ store, log, spool, flood, config, health, housekeeper,
         failed: s.housekeeping.failed,
       },
       diagnostics: s.diagnostics,
+      oversized_punch_refused: s.oversized_punch_refused.total,
       requests_by_code: s.requests_by_code,
     };
     res.writeHead(db.ok ? 200 : 503, { "Content-Type": "application/json" });
@@ -789,6 +910,7 @@ function createReceiver({ store, log, spool, flood, config, health, housekeeper,
       housekeeping: hk.stats(),
       diagnostics: diag.stats(),
       device_touch: { ...touchTotals, interval_ms: cfg.deviceTouchIntervalMs },
+      oversized_punch_refused: { total: oversizedPunch.refused, last: oversizedPunch.last },
       pool: typeof store.poolStats === "function" ? store.poolStats() : null,
       health_pool: healthStore !== store && typeof healthStore.poolStats === "function" ? healthStore.poolStats() : null,
       health_probe: healthMonitor.status(),
@@ -810,10 +932,15 @@ function createReceiver({ store, log, spool, flood, config, health, housekeeper,
     countRequest(classified.code);
     const limit = classified.kind === "cmd_result" ? cfg.commandResultMaxBodyBytes : cfg.maxBodyBytes;
 
+    // A realtime_glog announced as larger than we would even hash is refused
+    // before its body is read: no ACK, metadata only.
+    if (classified.kind === "punch" && envelope.content_length !== null && envelope.content_length > cfg.maxBodyBytes && envelope.content_length > cfg.oversizedPunchHashMaxBytes) {
+      return refuseOversizedPunch({ req, envelope, sourceIp, started, bytesReceived: 0, bodySha256: null, frame: null }, { dev_id: envelope.dev_id, request_code: classified.code, source_ip: sourceIp, bytes: 0 }, "declared_over_hash_limit");
+    }
+
     // A result the device announces as larger than we can keep whole is
     // refused before a byte of it is buffered: no ACK, so it is retried
-    // later (and the limit can be raised deliberately). Punches keep their
-    // preserve-truncated-and-ACK behaviour, which is what R1 wants for them.
+    // later (and the limit can be raised deliberately).
     if (classified.kind === "cmd_result" && envelope.content_length !== null && envelope.content_length > limit) {
       logger.request({ request_code: classified.code, dev_id: envelope.dev_id, source_ip: sourceIp, outcome: "oversized_refused", content_length: envelope.content_length, limit, duration_ms: Date.now() - started, error: true });
       return refuse(req);
@@ -824,7 +951,12 @@ function createReceiver({ store, log, spool, flood, config, health, housekeeper,
     const isEnroll = classified.kind === "enroll";
     let read;
     try {
-      read = await readBody(req, limit, { keep: !isEnroll, hash: isEnroll || classified.unknown });
+      read =
+        classified.kind === "punch"
+          ? // Kept only while within the limit; past it, nothing is kept and
+            // the complete body is hashed for the refusal record.
+            await readBody(req, limit, { hash: true, hashAll: true, discardOnOverflow: true, streamMax: Math.max(cfg.oversizedPunchHashMaxBytes, limit) })
+          : await readBody(req, limit, { keep: !isEnroll, hash: isEnroll || classified.unknown });
     } catch (err) {
       logger.request({ request_code: classified.code || null, dev_id: envelope.dev_id, source_ip: sourceIp, outcome: "read_error", error: err.message, duration_ms: Date.now() - started });
       return refuse(req);
@@ -832,6 +964,10 @@ function createReceiver({ store, log, spool, flood, config, health, housekeeper,
 
     const frame = rebuildFrame(req, read.body);
     const ctx = { req, res, envelope, body: read.body, frame, sourceIp, sourcePort, started, oversized: read.oversized, bytesReceived: read.size, bodySha256: read.sha256 };
+    if (read.streamAborted) {
+      // Past even the hashing cap: stop reading now.
+      return refuseOversizedPunch(ctx, { dev_id: envelope.dev_id, request_code: classified.code, source_ip: sourceIp, bytes: frame.length }, "stream_over_hash_limit");
+    }
 
     if (classified.kind === "punch") return handlePunch(ctx);
     if (classified.kind === "cmd_result") return handleCmdResult(ctx, classified);

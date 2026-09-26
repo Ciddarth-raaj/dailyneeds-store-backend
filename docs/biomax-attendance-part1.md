@@ -55,8 +55,10 @@ on that device, which is the property the receiver relies on for safety.
 ## 3. Rules (numbered; tests cite them)
 
 - **R1** ACK only what is durable: `OK` after the punch row (new or
-  duplicate) or a raw-request row is committed; otherwise close with no
-  reply so the device retries.
+  duplicate) or a raw-request row holding the COMPLETE received frame is
+  committed; otherwise close with no reply so the device retries. A body
+  over `BIOMAX_MAX_BODY` is refused unacknowledged, never preserved
+  truncated (amended 2026-09; see `docs/biomax-receiver-resource-limits.md`).
 - **R2** Dedup is the unique key `(dev_id, user_id, io_time_raw)` with a
   retransmit counter. Transport only.
 - **R3** `io_time` never passes through a JS Date: `STR_TO_DATE` in the
