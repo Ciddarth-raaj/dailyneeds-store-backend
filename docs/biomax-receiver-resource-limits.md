@@ -66,13 +66,16 @@ SELECT digest_text, count_star, avg_timer_wait/1e9 avg_ms, max_timer_wait/1e9 ma
 
 ## What `realtime_enroll_data` is
 
-The terminal pushing a user's **enrolment record** - the biometric
-templates (face/finger) and profile it has just captured or changed - to its
-server in real time. It carries no `io_time` and no attendance; nothing in
-it can become a punch. It is also biometric personal data, which this system
-has no use for and no business storing. The size (26–35 KB) matches a
-face template. So it is **not persisted**: the body is read, hashed and
-discarded; a diagnostic row keeps the headers, the size and the hash.
+**Not confirmed.** There is no captured `realtime_enroll_data` frame and no
+protocol definition for it in this repository. From the name and the
+vendor's request-code vocabulary it is *believed* to be the terminal pushing
+user enrollment/profile data to its server, and it is **treated as
+potentially biometric/sensitive until a protocol capture confirms its
+structure**. It is not the punch code (`realtime_glog` is the only one), so
+nothing in it is turned into attendance. The body is therefore **not
+persisted and not logged**: it is read, hashed and discarded; a diagnostic
+row keeps the headers, the size and the hash. A deliberate, access-controlled
+capture is what would settle what it contains.
 
 What the device expects back has not been captured. `ERROR_NO_CMD` (what it
 got before, and still gets by default) apparently makes it re-send.
@@ -85,14 +88,15 @@ receiver's cost per frame is now a read, a hash and a reply.
 
 | Where | Before | Now |
 |---|---|---|
-| Post-reply work (last-seen, raw rows, pull status) | awaited in the handler | `biomax/housekeeping.js`: runs at most `BIOMAX_HOUSEKEEPING_CONCURRENCY` (1) at a time, at most `BIOMAX_HOUSEKEEPING_MAX_PENDING` (100) jobs / `..._MAX_PENDING_BYTES` (4 MB) waiting; beyond that **dropped, counted, logged once a minute** |
+| Post-reply work (last-seen, raw rows, pull status) | awaited in the handler | `biomax/housekeeping.js`: at most `BIOMAX_HOUSEKEEPING_CONCURRENCY` (1) running, both lanes together. **Ordinary lane** (last-seen, diagnostics): at most `BIOMAX_HOUSEKEEPING_MAX_PENDING` (100) jobs / `..._MAX_PENDING_BYTES` (4 MB) waiting. **Critical lane** (pull status): at most `BIOMAX_HOUSEKEEPING_MAX_CRITICAL_PENDING` (32) jobs / `..._MAX_CRITICAL_PENDING_BYTES` (64 KB, each job charged >= 256 B) waiting, always started first, coalesced per (pull, trans_id). Beyond either lane's bounds: **dropped, counted, logged once a minute** (`HOUSEKEEPING_DROPPED` / `CRITICAL_DROPPED`). Worst case waiting: 132 jobs, ~4.06 MB of payload |
 | `last_seen_at` | UPDATE on every request | at most once per device per `BIOMAX_DEVICE_TOUCH_INTERVAL_MS` (60 s) for non-punch traffic; every punch still writes (`last_punch_at`); a repeat while one is queued is coalesced |
 | Unknown request codes | full raw row per request | raw row (verbatim, as before) once per identical frame per `BIOMAX_DIAG_WINDOW_MS` (1 h), at most `BIOMAX_DIAG_PER_SOURCE` (6) per device+code and `BIOMAX_DIAG_MAX_PER_WINDOW` (120) in all; the next row says `+N suppressed` |
 | `realtime_enroll_data` | "unknown", full BLOB row per retry | own kind; body never kept; same rate limits; headers-only row |
 | Pool waiters | unbounded | `BIOMAX_DB_QUEUE_LIMIT` (50), then `POOL_ENQUEUELIMIT` |
 | Waiting for a connection | forever | `BIOMAX_DB_ACQUIRE_TIMEOUT_MS` (5000) |
 | One statement | forever | `BIOMAX_DB_QUERY_TIMEOUT_MS` (10000) |
-| `/healthz` | same pool, no deadline | own 1-connection pool, answer within `BIOMAX_HEALTH_DB_BUDGET_MS` (500) - the API probes with 800 ms - result cached `BIOMAX_HEALTH_CACHE_MS` (2000) |
+| `/healthz` | same pool, no deadline | **no DB I/O at all**: reports the last result of a background probe (`biomax/healthMonitor.js`) with its age. The probe runs on its own 1-connection pool, one at a time, `BIOMAX_HEALTH_PROBE_INTERVAL_MS` (5000) after the previous one *settled*, recorded as failed after `BIOMAX_HEALTH_PROBE_TIMEOUT_MS` (2000); a result older than 3 x interval + timeout reports `db:false`, `stale` |
+| Flood-capped unregistered punch | ACKed; one raw row per hour, the rest discarded | awaited `flood_capped` raw row **before** `OK`; no reply if it fails (R1) |
 | Sockets | unlimited | `BIOMAX_MAX_CONNECTIONS` (200) - each holds at most `BIOMAX_MAX_BODY` |
 | Shutdown | pool ended under queued work: one `Pool is closed` error line per queued job | server closed -> housekeeping closed (waiting jobs dropped and counted; nothing new starts) -> pools ended, a statement still running after 500 ms has its connection destroyed |
 
@@ -103,8 +107,11 @@ the API pool without them and is unchanged.
 ### What did not change
 
 - **R1.** A punch is ACKed `OK` only after `insertPunch` (or, for an
-  unparseable frame, `insertRawRequest`) has returned. Those writes are
-  still awaited *before* the reply. If a limit above stops them - pool queue
+  unparseable, header-less, oversized or flood-capped frame,
+  `insertRawRequest`) has returned. Those writes are awaited *before* the
+  reply, on the receiver pool, never through the droppable housekeeping
+  queue. (The flood-capped case is a change: before 2026-09 it was ACKed
+  with at most one raw row per hour.) If a limit above stops them - pool queue
   full, no connection in 5 s, statement over 10 s - that is a store error:
   frame spooled, socket closed, **no reply**, device retries. That is the
   same path a dead database always took.
@@ -113,8 +120,11 @@ the API pool without them and is unchanged.
   committed server-side whose reply was lost to a timeout is retransmitted
   and lands on that key.
 - **Historical pull.** `send_cmd_result` is still stored whole before `OK`;
-  `markPullReceiving` is now a *critical* housekeeping job (never dropped for
-  capacity, same order). Command claim on `receive_cmd` is unchanged.
+  `markPullReceiving` is now a *critical* housekeeping job (own bounded lane,
+  started before ordinary work, coalesced per pull). If that lane is full it
+  is dropped and counted; the next matched block for the pull submits it
+  again, and a command left SENT is at worst re-sent after its lease
+  (harmless - GET_LOG_DATA is read-only and blocks are deduplicated). Command claim on `receive_cmd` is unchanged.
 - Replies to every request code are byte-for-byte what they were
   (`ERROR_NO_CMD` for enrolment unless `BIOMAX_ENROLL_DATA_REPLY=OK`).
 - No schema change: enrolment rows use the existing
@@ -132,9 +142,9 @@ It is bounded by that ratio, not by traffic.
 
 `GET /healthz` (loopback, port 7005) now also returns `process`
 (uptime, heap/RSS/external MB, in-flight requests), `db_check` (ok, error,
-latency, cached, budget), `pool` (connection_limit, queue_limit, all, free,
+stale, checked_at, age_ms, latency, consecutive failures, probe in flight), `pool` (connection_limit, queue_limit, all, free,
 acquiring, **queued**), `housekeeping` (pending, running, pending_bytes,
-**dropped**, coalesced, failed), `diagnostics` (rows written, suppressed as
+critical_pending, **dropped**, **critical_dropped**, coalesced, failed), `diagnostics` (rows written, suppressed as
 identical / by rate) and `requests_by_code`. `ok`, `db` and
 `last_punch_received` mean what they meant; the API's
 `utils/biomax_receiver_health.js` passes on only those.
@@ -144,7 +154,9 @@ Every `BIOMAX_STATS_INTERVAL_MS` (60 s) the receiver logs one
 housekeeping counts and device-touch counts).
 
 Error-level lines to alert on: `BIOMAX.RECEIVER.HOUSEKEEPING_DROPPED` (queue
-full - the database is not keeping up), `BIOMAX.RECEIVER.HOUSEKEEPING_FAILED`
+full - the database is not keeping up), `BIOMAX.RECEIVER.CRITICAL_DROPPED`
+(critical lane full), `BIOMAX.RECEIVER.HEALTH_DB_FAILED` (background probe
+failing; first failure then every 12th), `BIOMAX.RECEIVER.HOUSEKEEPING_FAILED`
 (job name + error; at most 10 a minute, the next line carries the count of
 the rest), `BIOMAX.RECEIVER.STORE_ERROR` (a punch was refused - the device
 will retry).

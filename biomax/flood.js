@@ -9,8 +9,12 @@
  *   perDay           stored punches per unknown dev_id per calendar day
  *   devicesPerDay    distinct unknown dev_ids admitted per calendar day
  *
- * Beyond a cap the frame is NOT stored but IS still acknowledged, so a
- * runaway device cannot turn into a retry storm against us. Registered
+ * Beyond a cap the frame is NOT made a punch row. It is preserved as a
+ * `flood_capped` biomax_raw_request row (awaited, on the receiver pool) and
+ * only then acknowledged, so a runaway device cannot turn into a retry storm
+ * against us and no capped frame is ever ACKed without its bytes being
+ * durable (R1). If that raw write fails there is no reply and the device
+ * retries. Registered
  * devices are never capped: their retransmissions are already row-free under
  * the unique key (R2).
  *

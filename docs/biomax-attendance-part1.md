@@ -77,8 +77,10 @@ on that device, which is the property the receiver relies on for safety.
   Location (device registry, resolved by time) are separate and neither
   writes the other.
 - **R13** Flood caps for unregistered devices: 30/min, 2000/day per Cloud
-  ID, 20 distinct unknown Cloud IDs/day; capped frames are ACKed, not stored,
-  one raw row per hour.
+  ID, 20 distinct unknown Cloud IDs/day; a capped frame is not made a punch
+  row but is preserved as a `flood_capped` raw row and ACKed only once that
+  row is committed (R1; amended 2026-09 - it used to be ACKed with one raw row
+  per hour and the rest discarded).
 - **R14** The Attendance List has no device or punch-location filter and
   answers 400 to one; those live on the Punch Audit.
 - **R16** Anything derived from current-state tables is computed once at

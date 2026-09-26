@@ -15,9 +15,10 @@
  *        two empty command headers), and an unknown code is also recorded -
  *        once per identical frame and at most BIOMAX_DIAG_PER_SOURCE times
  *        per device and code per BIOMAX_DIAG_WINDOW_MS, never once per retry.
- *        `realtime_enroll_data` (a biometric enrolment upload, not
- *        attendance) is answered the same way by default and its body is
- *        hashed and discarded, never stored (handleEnroll).
+ *        `realtime_enroll_data` (believed to be enrollment/profile data -
+ *        uncaptured, treated as potentially biometric/sensitive) is answered
+ *        the same way by default and its body is hashed and discarded, never
+ *        stored or logged (handleEnroll).
  *   R1   a punch is acknowledged `response_code: OK` only after its bytes
  *        are durable - a punch row (new or duplicate) or a raw-request row.
  *        If neither commit succeeds the socket is closed with NO reply, so
@@ -99,6 +100,7 @@ const { createFloodGuard } = require("./flood");
 const { createLog } = require("./log");
 const { createSpool } = require("./spool");
 const { createHousekeeper, createDiagLimiter } = require("./housekeeping");
+const { createHealthMonitor } = require("./healthMonitor");
 const commands = require("./commands");
 
 /**
@@ -156,18 +158,20 @@ function readConfig(env = process.env) {
       acquireTimeoutMs: int("BIOMAX_DB_ACQUIRE_TIMEOUT_MS", 5000),
       queryTimeoutMs: int("BIOMAX_DB_QUERY_TIMEOUT_MS", 10000),
     },
-    // /healthz: its own one-connection pool, a hard budget for the DB check
-    // (under the API probe's 800 ms), and a short cache so a burst of probes
-    // is one query.
+    // /healthz never does DB I/O. A background monitor probes on its own
+    // one-connection pool: one probe at a time, every intervalMs after the
+    // previous one settled, recorded as failed after timeoutMs; /healthz
+    // reports the last result and its age.
     health: {
-      dbBudgetMs: int("BIOMAX_HEALTH_DB_BUDGET_MS", 500),
-      cacheMs: int("BIOMAX_HEALTH_CACHE_MS", 2000),
-      queryTimeoutMs: int("BIOMAX_HEALTH_QUERY_TIMEOUT_MS", 3000),
+      intervalMs: int("BIOMAX_HEALTH_PROBE_INTERVAL_MS", 5000),
+      timeoutMs: int("BIOMAX_HEALTH_PROBE_TIMEOUT_MS", 2000),
     },
     housekeeping: {
       concurrency: int("BIOMAX_HOUSEKEEPING_CONCURRENCY", 1),
       maxPending: int("BIOMAX_HOUSEKEEPING_MAX_PENDING", 100),
       maxPendingBytes: int("BIOMAX_HOUSEKEEPING_MAX_PENDING_BYTES", 4 * 1024 * 1024),
+      maxCriticalPending: int("BIOMAX_HOUSEKEEPING_MAX_CRITICAL_PENDING", 32),
+      maxCriticalPendingBytes: int("BIOMAX_HOUSEKEEPING_MAX_CRITICAL_PENDING_BYTES", 64 * 1024),
     },
     // last_seen_at is written at most this often per device for non-punch
     // traffic (a punch always writes). The connectivity thresholds it feeds
@@ -254,9 +258,11 @@ function createReceiver({ store, log, spool, flood, config, health, housekeeper,
   const spooler = spool || createSpool(cfg.spoolDir);
   const guard = flood || createFloodGuard({ limits: cfg.flood });
   const clock = now || (() => Date.now());
-  // What /healthz asks. In production a store on its own one-connection
-  // pool (createRuntime); in tests the ordinary store.
+  // What the background health probe asks. In production a store on its
+  // own one-connection pool (createRuntime); in tests the ordinary store.
   const healthStore = health || store;
+  const healthMonitor = createHealthMonitor({ probe: healthStore, intervalMs: cfg.health.intervalMs, timeoutMs: cfg.health.timeoutMs, now: clock, log: logger });
+  healthMonitor.start();
   const hk = housekeeper || createHousekeeper({ ...cfg.housekeeping, log: logger, now: clock });
   const diag = createDiagLimiter({ ...cfg.diag, now: clock });
   const startedAt = clock();
@@ -371,12 +377,15 @@ function createReceiver({ store, log, spool, flood, config, health, housekeeper,
     if (!device) {
       const admitted = guard.admit(envelope.dev_id);
       if (!admitted.allowed) {
-        if (guard.oncePerHour(`flood:${envelope.dev_id}`)) {
-          submitRaw("raw_flood_capped", { ...base, outcome: "flood_capped", reason: admitted.reason, byte_length: frame.length, raw_frame: frame });
-        }
-        logger.request({ ...base, outcome: "flood_capped", reason: admitted.reason, user_id: parsed.punch.user_id, io_time_raw: parsed.punch.io_time_raw, duration_ms: Date.now() - started, error: true });
-        reply(res, protocol.ACK_OK);
-        return;
+        // Beyond the cap the frame is not made a punch row, but its bytes
+        // are still made durable BEFORE the OK (R1): an awaited raw row on
+        // the receiver pool, exactly like an unparseable frame. If that
+        // write fails, times out or finds the pool full: no reply, the
+        // device retries. Never through the droppable housekeeping queue.
+        return preserveAndAck(ctx, "flood_capped", admitted.reason, base, {
+          user_id: parsed.punch.user_id,
+          io_time_raw: parsed.punch.io_time_raw,
+        });
       }
     }
 
@@ -493,7 +502,7 @@ function createReceiver({ store, log, spool, flood, config, health, housekeeper,
   }
 
   /** Preserve a frame we could not turn into a punch, then ACK (R1). */
-  async function preserveAndAck(ctx, outcome, reason, base) {
+  async function preserveAndAck(ctx, outcome, reason, base, logExtra) {
     const { res, frame, started } = ctx;
     try {
       await store.insertRawRequest({ ...base, outcome, reason, byte_length: frame.length, raw_frame: frame });
@@ -501,7 +510,7 @@ function createReceiver({ store, log, spool, flood, config, health, housekeeper,
       return storeFailure(ctx, err, base, `${outcome}: ${reason}`);
     }
     reply(res, protocol.ACK_OK);
-    logger.request({ ...base, outcome, reason, duration_ms: Date.now() - started, error: true });
+    logger.request({ ...base, ...(logExtra || {}), outcome, reason, duration_ms: Date.now() - started, error: true });
   }
 
   /** Nothing durable: spool for diagnosis, no ACK, error log. */
@@ -578,11 +587,12 @@ function createReceiver({ store, log, spool, flood, config, health, housekeeper,
   }
 
   /**
-   * realtime_enroll_data: the terminal uploading a user's enrolment record
-   * (biometric templates + profile). NOT attendance - there is no io_time in
-   * it and nothing here could become a punch - so it is never parsed, never
-   * stored and never retained: the body was read, hashed and dropped before
-   * this runs. The reply is cfg.enrollReply (ERROR_NO_CMD unless
+   * realtime_enroll_data: believed to be the terminal uploading user
+   * enrollment/profile data. No capture or protocol definition exists, so
+   * the body is treated as potentially biometric/sensitive: it is never
+   * parsed, stored, logged or retained - it was read, hashed and dropped
+   * before this runs - and nothing here can become a punch (only
+   * realtime_glog is attendance). The reply is cfg.enrollReply (ERROR_NO_CMD unless
    * BIOMAX_ENROLL_DATA_REPLY=OK). One diagnostic row per identical upload
    * per window, headers + size + hash only, rate-limited like any unknown
    * code; the rest are counted.
@@ -603,7 +613,7 @@ function createReceiver({ store, log, spool, flood, config, health, housekeeper,
       submitRaw("raw_enroll_data", {
         ...base,
         outcome: "unknown_request_code",
-        reason: `realtime_enroll_data (biometric enrolment, not attendance): body ${bodyBytes} B sha256 ${String(ctx.bodySha256).slice(0, 16)} NOT stored, reply ${cfg.enrollReply}${suppressedNote(verdict.suppressed)}`,
+        reason: `realtime_enroll_data (believed enrollment/profile data, treated as sensitive): body ${bodyBytes} B sha256 ${String(ctx.bodySha256).slice(0, 16)} NOT stored, reply ${cfg.enrollReply}${suppressedNote(verdict.suppressed)}`,
         byte_length: frame.length + bodyBytes,
         raw_frame: frame, // headers only - the body was never kept
       });
@@ -697,8 +707,13 @@ function createReceiver({ store, log, spool, flood, config, health, housekeeper,
       // is answered (no more re-sends) and the pull is receiving. Critical:
       // never dropped for queue capacity (and a later matched block would
       // redo it anyway - the UPDATEs are guarded on status).
+      // Critical lane: started before any ordinary job, bounded on its own,
+      // and coalesced per (pull, trans_id) - a burst of blocks for one pull
+      // is one waiting UPDATE, not one per block. If even that lane is full
+      // (the DB has been stuck for a long time) the drop is counted and
+      // logged; the next matched block for the pull re-submits it.
       const transId = envelope.trans_id;
-      hk.submit({ name: "mark_pull_receiving", critical: true, run: () => store.markPullReceiving(pullId, transId) });
+      hk.submit({ name: "mark_pull_receiving", critical: true, key: `pull:${pullId}:${transId}`, run: () => store.markPullReceiving(pullId, transId) });
     }
     if (match !== commands.MATCH.MATCHED && stored.outcome === "stored") {
       submitRaw("raw_unmatched_cmd_result", { ...base, outcome: "unknown_request_code", reason: `send_cmd_result ${match}: trans_id ${JSON.stringify(envelope.trans_id)}`, byte_length: frame.length, raw_frame: frame });
@@ -708,80 +723,52 @@ function createReceiver({ store, log, spool, flood, config, health, housekeeper,
 
   /* --------------------------------------------------------- /healthz -- */
 
-  // One DB check at a time, on the health store; a result is reused for
-  // cfg.health.cacheMs. A check still running when the budget ends keeps
-  // running (single-flight) and the NEXT probe gets its answer.
-  let healthInflight = null;
-  let healthCache = null; // {db, last, error, latency_ms, at}
-  function probeDb() {
-    if (healthInflight) return healthInflight;
-    const t0 = clock();
-    healthInflight = (async () => {
-      try {
-        const ok = await healthStore.ping();
-        const last = await healthStore.lastPunchAt();
-        return { db: ok === true, last, error: null };
-      } catch (err) {
-        return { db: false, last: healthCache ? healthCache.last : null, error: err && err.code ? String(err.code) : "error" };
-      }
-    })().then((r) => {
-      healthCache = { ...r, latency_ms: clock() - t0, at: clock() };
-      healthInflight = null;
-      return healthCache;
-    });
-    return healthInflight;
-  }
-
-  function withinBudget(promise, ms) {
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => resolve(null), ms);
-      promise.then((v) => {
-        clearTimeout(timer);
-        resolve(v);
-      });
-    });
-  }
-
-  async function handleHealth(res) {
+  /**
+   * Synchronous: no DB I/O, no await. Process state is live; DB state is
+   * whatever the background monitor last recorded, with its age. So the
+   * answer is immediate however many probes arrive and however sick the
+   * database is, and probing /healthz harder never probes the DB harder.
+   */
+  function handleHealth(res) {
     healthRequests += 1;
-    let check;
-    if (healthCache && clock() - healthCache.at < cfg.health.cacheMs) {
-      check = { ...healthCache, cached: true };
-    } else {
-      const got = await withinBudget(probeDb(), cfg.health.dbBudgetMs);
-      check = got
-        ? { ...got, cached: false }
-        : { db: false, last: healthCache ? healthCache.last : null, error: "timeout", latency_ms: null, at: null, cached: false };
-    }
+    const db = healthMonitor.status();
     const s = stats();
     const body = {
       // `ok`/`db`/`last_punch_received` keep their meaning for the API's
-      // probe (utils/biomax_receiver_health.js): ok = able to store.
-      ok: check.db,
-      db: check.db,
-      last_punch_received: check.last,
+      // probe (utils/biomax_receiver_health.js): ok = able to store, as of
+      // the last background probe (a stale result counts as not able).
+      ok: db.ok,
+      db: db.ok,
+      last_punch_received: db.last_punch_received,
       node: process.versions.node,
       process: { ok: true, uptime_s: s.uptime_s, memory: s.memory, in_flight_requests: s.in_flight_requests },
       db_check: {
-        ok: check.db,
-        error: check.error || undefined,
-        latency_ms: check.latency_ms,
-        cached: check.cached,
-        budget_ms: cfg.health.dbBudgetMs,
+        ok: db.ok,
+        error: db.error,
+        stale: db.stale,
+        checked_at: db.checked_at,
+        age_ms: db.age_ms,
+        latency_ms: db.latency_ms,
+        consecutive_failures: db.consecutive_failures,
+        probe_in_flight: db.probe_in_flight,
+        interval_ms: db.interval_ms,
+        timeout_ms: db.timeout_ms,
       },
       pool: s.pool,
       housekeeping: {
         pending: s.housekeeping.pending,
         running: s.housekeeping.running,
         pending_bytes: s.housekeeping.pending_bytes,
+        critical_pending: s.housekeeping.critical_pending,
         dropped: s.housekeeping.dropped,
+        critical_dropped: s.housekeeping.critical_dropped,
         coalesced: s.housekeeping.coalesced,
         failed: s.housekeeping.failed,
       },
       diagnostics: s.diagnostics,
       requests_by_code: s.requests_by_code,
     };
-    res.writeHead(check.db ? 200 : 503, { "Content-Type": "application/json" });
+    res.writeHead(db.ok ? 200 : 503, { "Content-Type": "application/json" });
     res.end(JSON.stringify(body));
   }
 
@@ -804,6 +791,7 @@ function createReceiver({ store, log, spool, flood, config, health, housekeeper,
       device_touch: { ...touchTotals, interval_ms: cfg.deviceTouchIntervalMs },
       pool: typeof store.poolStats === "function" ? store.poolStats() : null,
       health_pool: healthStore !== store && typeof healthStore.poolStats === "function" ? healthStore.poolStats() : null,
+      health_probe: healthMonitor.status(),
     };
   }
 
@@ -812,7 +800,10 @@ function createReceiver({ store, log, spool, flood, config, health, housekeeper,
     const sourceIp = req.socket.remoteAddress || null;
     const sourcePort = req.socket.remotePort || null;
 
-    if (req.method === "GET" && req.url === "/healthz") return handleHealth(res);
+    if (req.method === "GET" && req.url === "/healthz") {
+      handleHealth(res);
+      return;
+    }
 
     const envelope = protocol.readEnvelope(req.headers);
     const classified = protocol.classifyRequest(req.headers);
@@ -885,6 +876,7 @@ function createReceiver({ store, log, spool, flood, config, health, housekeeper,
    * caller may end the pool without a tail of "Pool is closed" failures.
    */
   async function close({ serverTimeoutMs = 0, housekeepingTimeoutMs = 2000 } = {}) {
+    healthMonitor.stop();
     await new Promise((resolve) => {
       // serverTimeoutMs: stop WAITING for in-flight requests after this long
       // (0 = wait for all). They keep running; a punch that has not been
@@ -1003,13 +995,16 @@ function createRuntime({ dbConfig, log, env = process.env, config } = {}) {
     connectTimeoutMs: cfg.db.acquireTimeoutMs,
   });
   const store = createStore(pool, { acquireTimeoutMs: cfg.db.acquireTimeoutMs, queryTimeoutMs: cfg.db.queryTimeoutMs });
+  // One connection, one waiter: the monitor never has more than one probe
+  // in flight. Every step is under the probe timeout, so a probe always
+  // settles and the next one can be scheduled.
   const healthPool = createPool(dbConfig, {
     connectionLimit: 1,
-    queueLimit: 2,
-    acquireTimeoutMs: cfg.health.queryTimeoutMs,
-    connectTimeoutMs: cfg.health.queryTimeoutMs,
+    queueLimit: 1,
+    acquireTimeoutMs: cfg.health.timeoutMs,
+    connectTimeoutMs: cfg.health.timeoutMs,
   });
-  const healthStore = createStore(healthPool, { acquireTimeoutMs: cfg.health.queryTimeoutMs, queryTimeoutMs: cfg.health.queryTimeoutMs });
+  const healthStore = createStore(healthPool, { acquireTimeoutMs: cfg.health.timeoutMs, queryTimeoutMs: cfg.health.timeoutMs });
   const receiver = createReceiver({ store, log: logger, health: healthStore, config: cfg });
 
   const statsTimer = setInterval(() => {

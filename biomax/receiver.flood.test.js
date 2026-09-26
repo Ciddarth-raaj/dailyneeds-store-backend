@@ -94,7 +94,24 @@ function makeStore({ slowHousekeeping = true } = {}) {
     },
     insertRawRequest(entry) {
       state.rawCalls += 1;
+      // A test may take over the durable raw writes of one outcome.
+      if (state.rawHook && state.rawHook.outcome === entry.outcome) {
+        return state.rawHook.run(entry).then(() => {
+          state.raw.push(entry);
+        });
+      }
       state.raw.push(entry);
+      return slow();
+    },
+    async findCommandByTransId(transId) {
+      const m = /^HP(\d+)$/.exec(transId || "");
+      return m ? { biomax_device_command_id: Number(m[1]), biomax_historical_pull_id: Number(m[1]), trans_id: transId, dev_id: "C2695C56D30E1430", cmd_code: "GET_LOG_DATA", status: "SENT" } : null;
+    },
+    async insertResultBlock(block) {
+      return { outcome: "stored", body_sha256: "0".repeat(64) };
+    },
+    markPullReceiving() {
+      state.markCalls = (state.markCalls || 0) + 1;
       return slow();
     },
     touchDevice(devId, opts) {
@@ -264,7 +281,7 @@ describe("realtime_enroll_data flood against a database that takes 30 s", () => 
     assert.ok(store.state.rawCalls <= 9, `raw rows attempted: ${store.state.rawCalls}`);
     // Coalesced last-seen: one per device per interval.
     assert.ok(store.state.touchCalls <= 3, `touches attempted: ${store.state.touchCalls}`);
-    // What IS retained while the DB hangs: headers only, never the biometric body.
+    // What IS retained while the DB hangs: headers only, never the (potentially sensitive) body.
     for (const r of store.state.raw) assert.ok(r.raw_frame.length < 1024, `raw_frame ${r.raw_frame.length} bytes`);
 
     // Before the fix: ~1500 x (30 KB body + 30 KB frame + request objects)
@@ -300,19 +317,26 @@ describe("realtime_enroll_data flood against a database that takes 30 s", () => 
     assert.ok(body.requests_by_code.realtime_enroll_data > 0);
   });
 
-  it("/healthz reports db:false within its budget when the DB check itself hangs", async () => {
+  it("/healthz never waits on the DB: a hanging probe shows up as not_checked_yet, then timeout", async () => {
     await receiver.close({ serverTimeoutMs: 100, housekeepingTimeoutMs: 10 });
-    receiver = createReceiver({ store, log, health: makeHealthStore({ hangs: true }), config: { spoolDir, health: { dbBudgetMs: 200 } } });
+    receiver = createReceiver({ store, log, health: makeHealthStore({ hangs: true }), config: { spoolDir, health: { intervalMs: 50, timeoutMs: 200 } } });
     port = (await receiver.listen(0, "127.0.0.1")).port;
+
+    const first = await send(port, healthz, 800);
+    assert.equal(first.timedOut, undefined);
+    assert.ok(first.ms < 100, `${first.ms} ms`);
+    assert.match(first.raw.toString("latin1"), /^HTTP\/1\.1 503/);
+    assert.equal(healthBody(first).db_check.error, "not_checked_yet");
+
+    await new Promise((r) => setTimeout(r, 300));
     const r = await send(port, healthz, 800);
-    assert.equal(r.timedOut, undefined);
-    assert.match(r.raw.toString("latin1"), /^HTTP\/1\.1 503/);
+    assert.ok(r.ms < 100, `${r.ms} ms`);
     const body = healthBody(r);
     assert.equal(body.ok, false);
     assert.equal(body.db, false);
     assert.equal(body.db_check.error, "timeout");
+    assert.equal(body.db_check.probe_in_flight, true, "the one probe is still stuck; no second one was started");
     assert.equal(body.process.ok, true, "the process itself is fine and says so");
-    assert.ok(r.ms < 700, `${r.ms} ms`);
   });
 
   it("a real punch during the flood is ACKed OK only after insertPunch returns (R1)", async () => {
@@ -368,6 +392,198 @@ describe("realtime_enroll_data flood against a database that takes 30 s", () => 
     assert.equal(hk.running, 1);
     assert.equal(hk.pending, 1);
     assert.equal(hk.coalesced, 1);
+  });
+});
+
+describe("R1 for flood-capped unregistered punches, with the housekeeping queue full", () => {
+  let store;
+  let log;
+  let receiver;
+  let port;
+  beforeEach(async () => {
+    store = makeStore();
+    log = makeLog();
+    receiver = createReceiver({
+      store,
+      log,
+      health: makeHealthStore(),
+      flood: require("./flood").createFloodGuard({ limits: { perMinute: 1, perDay: 100, devicesPerDay: 5 } }),
+      config: { spoolDir: fs.mkdtempSync(path.join(os.tmpdir(), "biomax-cap-")), housekeeping: { concurrency: 1, maxPending: 5 } },
+    });
+    port = (await receiver.listen(0, "127.0.0.1")).port;
+    // Fill the housekeeping queue: distinct unknown frames whose raw rows
+    // hang "in the database" until well past the point of being dropped.
+    for (let i = 0; i < 20; i += 1) await send(port, frame(`FILL${String(i).padStart(8, "0")}`, "upload_photo", Buffer.from(`x${i}`)));
+    const hk = receiver.stats().housekeeping;
+    assert.equal(hk.pending, 5, "ordinary lane full");
+    assert.ok(hk.dropped > 0, "and dropping");
+    // The unregistered device's first punch is admitted (and stored) ...
+    const admitted = await send(port, punchFrame("20260926110000", "UNREG000001"));
+    assert.equal(admitted.headers.response_code, "OK");
+  });
+  afterEach(async () => {
+    await receiver.close({ serverTimeoutMs: 200, housekeepingTimeoutMs: 10 });
+    store.state.hanging.forEach((h) => h.release());
+  });
+
+  it("... the capped one gets NO reply while its raw row is not committed", async () => {
+    const pending = hang();
+    store.state.rawHook = { outcome: "flood_capped", run: () => pending.promise };
+    const r = await send(port, punchFrame("20260926110100", "UNREG000001"), 600);
+    assert.equal(r.timedOut, true);
+    assert.equal(r.raw.length, 0, "no OK before the bytes are durable");
+    pending.release();
+  });
+
+  it("... gets NO reply, and the socket is closed, when the raw row fails (pool full / timeout)", async () => {
+    store.state.rawHook = { outcome: "flood_capped", run: () => Promise.reject(Object.assign(new Error("Queue limit reached."), { code: "POOL_ENQUEUELIMIT" })) };
+    const r = await send(port, punchFrame("20260926110200", "UNREG000001"), 2000);
+    assert.equal(r.timedOut, undefined, "closed, not left hanging");
+    assert.equal(r.raw.length, 0, "nothing at all written back");
+    const line = log.lines.find((l) => l.outcome === "store_error");
+    assert.ok(line && /POOL_ENQUEUELIMIT|Queue limit/.test(line.error));
+    assert.ok(fs.existsSync(line.spooled), "frame spooled for diagnosis");
+  });
+
+  it("... gets OK only once its raw row IS committed - whatever the housekeeping queue is doing", async () => {
+    store.state.rawHook = { outcome: "flood_capped", run: () => Promise.resolve() };
+    const r = await send(port, punchFrame("20260926110300", "UNREG000001"));
+    assert.equal(r.headers.response_code, "OK");
+    const row = store.state.raw.find((x) => x.outcome === "flood_capped");
+    assert.ok(row, "durable flood_capped row");
+    assert.ok(row.raw_frame.toString("latin1").includes('"io_time":"20260926110300"'), "the punch's own bytes");
+    assert.equal(receiver.stats().housekeeping.pending, 5, "it did not go through the (full) queue");
+  });
+});
+
+describe("critical lane under a flood of matched send_cmd_result blocks, DB blocked", () => {
+  it("pull bookkeeping stays bounded and coalesced per pull; blocks are still ACKed only after insertResultBlock", async (t) => {
+    const store = makeStore();
+    const receiver = createReceiver({ store, log: makeLog(), health: makeHealthStore(), config: { spoolDir: os.tmpdir(), housekeeping: { concurrency: 1, maxPending: 10, maxCriticalPending: 8 } } });
+    const { port } = await receiver.listen(0, "127.0.0.1");
+    try {
+      let maxCritical = 0;
+      const replies = [];
+      // 40 distinct pulls x 10 blocks each, 20 at a time.
+      const frames = [];
+      for (let p = 0; p < 40; p += 1) {
+        for (let b = 0; b < 10; b += 1) {
+          frames.push(frame("C2695C56D30E1430", "send_cmd_result", Buffer.from(`block ${p}/${b}`), `trans_id: HP${1000 + p}\r\ncmd_code: GET_LOG_DATA\r\nblk_no: ${b}\r\n`));
+        }
+      }
+      let i = 0;
+      await Promise.all(
+        Array.from({ length: 20 }, async () => {
+          while (i < frames.length) {
+            replies.push(await send(port, frames[i++]));
+            maxCritical = Math.max(maxCritical, receiver.stats().housekeeping.critical_pending);
+          }
+        })
+      );
+      assert.ok(replies.every((r) => r.headers.response_code === "OK"));
+      const hk = receiver.stats().housekeeping;
+      t.diagnostic(`critical/cmd_result: ${replies.length} blocks OK, max critical depth ${maxCritical}, coalesced ${hk.coalesced}, critical_dropped ${hk.critical_dropped}`);
+      assert.ok(maxCritical <= 8, `critical depth ${maxCritical}`);
+      assert.ok(hk.pending <= 18, `total depth ${hk.pending}`);
+      assert.ok(hk.coalesced > 0, "repeat blocks of a waiting pull coalesce");
+      assert.ok(hk.critical_dropped > 0, "and beyond the lane's cap they are dropped, counted");
+      assert.equal(store.state.markCalls, 1, "nothing else ran while the DB is blocked");
+    } finally {
+      await receiver.close({ serverTimeoutMs: 200, housekeepingTimeoutMs: 10 });
+      store.state.hanging.forEach((h) => h.release());
+    }
+  });
+});
+
+describe("/healthz with the database unreachable for a long time, polled aggressively", () => {
+  it("every health request is immediate, and DB probes do not scale with health traffic", async (t) => {
+    let pings = 0;
+    let concurrent = 0;
+    let maxConcurrent = 0;
+    // Unreachable: every ping "connects" for 150 ms and then fails.
+    const unreachable = {
+      ping() {
+        pings += 1;
+        concurrent += 1;
+        maxConcurrent = Math.max(maxConcurrent, concurrent);
+        return new Promise((resolve, reject) =>
+          setTimeout(() => {
+            concurrent -= 1;
+            reject(Object.assign(new Error("connect ETIMEDOUT"), { code: "ETIMEDOUT" }));
+          }, 150)
+        );
+      },
+      lastPunchAt: () => Promise.resolve(null),
+    };
+    const store = makeStore({ slowHousekeeping: false });
+    const receiver = createReceiver({ store, log: makeLog(), health: unreachable, config: { spoolDir: os.tmpdir(), health: { intervalMs: 100, timeoutMs: 100 } } });
+    const { port } = await receiver.listen(0, "127.0.0.1");
+    try {
+      const t0 = Date.now();
+      const results = [];
+      // ~3 s of 20 concurrent pollers hammering /healthz.
+      await Promise.all(
+        Array.from({ length: 20 }, async () => {
+          while (Date.now() - t0 < 3000) results.push(await send(port, healthz, 800));
+        })
+      );
+      const elapsed = Date.now() - t0;
+      t.diagnostic(`health/unreachable(fake): ${results.length} requests in ${elapsed} ms, slowest ${Math.max(...results.map((r) => r.ms))} ms, ${pings} probes, max concurrent probes ${maxConcurrent}`);
+      assert.ok(results.length > 1000, `${results.length} health requests`);
+      assert.ok(results.every((r) => !r.timedOut && r.raw.length > 0), "every one answered");
+      const slowest = Math.max(...results.map((r) => r.ms));
+      assert.ok(slowest < 200, `slowest health reply ${slowest} ms`);
+      assert.ok(results.slice(10).every((r) => healthBody(r).db === false));
+      // One probe per (interval + time to fail) = ~250 ms -> ~12 in 3 s,
+      // whatever the request rate.
+      assert.ok(pings <= Math.ceil(elapsed / 250) + 2, `${pings} probes for ${results.length} requests`);
+      assert.equal(maxConcurrent, 1, "never more than one probe in flight");
+    } finally {
+      await receiver.close();
+    }
+  });
+
+  it("with the real mysql driver against a host that accepts TCP and never answers, connection attempts track the probe interval, not the health rate", async (t) => {
+    const { createRuntime } = require("./receiver");
+    let attempts = 0;
+    const sockets = new Set();
+    const blackhole = net.createServer((sock) => {
+      attempts += 1;
+      sockets.add(sock);
+      sock.on("close", () => sockets.delete(sock));
+      sock.on("error", () => {});
+    });
+    await new Promise((r) => blackhole.listen(0, "127.0.0.1", r));
+    const dbConfig = { host: "127.0.0.1", port: blackhole.address().port, username: "u", password: "p", database: "d" };
+    const runtime = createRuntime({
+      dbConfig,
+      log: makeLog(),
+      env: { BIOMAX_SPOOL_DIR: os.tmpdir(), BIOMAX_HEALTH_PROBE_INTERVAL_MS: "200", BIOMAX_HEALTH_PROBE_TIMEOUT_MS: "300" },
+    });
+    const { port } = await runtime.receiver.listen(0, "127.0.0.1");
+    try {
+      const t0 = Date.now();
+      const results = [];
+      await Promise.all(
+        Array.from({ length: 10 }, async () => {
+          while (Date.now() - t0 < 4000) results.push(await send(port, healthz, 800));
+        })
+      );
+      const elapsed = Date.now() - t0;
+      t.diagnostic(`health/blackhole(mysql): ${results.length} requests in ${elapsed} ms, slowest ${Math.max(...results.map((r) => r.ms))} ms, ${attempts} TCP connection attempts`);
+      assert.ok(results.length > 500, `${results.length} health requests`);
+      assert.ok(results.every((r) => !r.timedOut && r.raw.length > 0));
+      assert.ok(Math.max(...results.map((r) => r.ms)) < 200);
+      const last = healthBody(results[results.length - 1]);
+      assert.equal(last.db, false);
+      // Each attempt costs a 300 ms connect timeout plus a 200 ms pause.
+      assert.ok(attempts <= Math.ceil(elapsed / 500) + 2, `${attempts} TCP connection attempts for ${results.length} health requests`);
+      assert.ok(attempts >= 2, "the monitor did keep probing");
+    } finally {
+      await runtime.stop();
+      sockets.forEach((s) => s.destroy());
+      await new Promise((r) => blackhole.close(r));
+    }
   });
 });
 
@@ -437,7 +653,7 @@ describe("realtime_enroll_data", () => {
       const row = store.state.raw[0];
       assert.equal(row.outcome, "unknown_request_code", "an existing ENUM value - no migration");
       assert.equal(row.request_code, "realtime_enroll_data");
-      assert.match(row.reason, /biometric enrolment, not attendance.*NOT stored/);
+      assert.match(row.reason, /believed enrollment\/profile data, treated as sensitive.*NOT stored/);
       assert.ok(row.raw_frame.length < 1024, "headers only");
       assert.ok(!row.raw_frame.toString("latin1").includes("enroll_data_array"), "no body bytes");
       assert.equal(row.byte_length, f.length, "the size of what arrived is still recorded");

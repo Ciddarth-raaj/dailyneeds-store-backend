@@ -37,14 +37,17 @@ const REQUEST_POLL = "receive_cmd";
  */
 const REQUEST_CMD_RESULT = "send_cmd_result";
 /**
- * The terminal pushing a user's ENROLMENT record - the biometric templates
- * (face/finger) and profile it just captured or changed - to the server in
- * real time. It is not a punch and carries no attendance: nothing in it has
- * an io_time. Observed in production 2026-09 at 26-35 KB a frame, re-sent
- * over and over by several terminals. Classified on its own so the receiver
- * can answer it cheaply and never keep the biometric body (see receiver.js,
- * handleEnroll); it used to fall through to "unknown request code" and cost a
- * full BLOB row per retry.
+ * NOT CAPTURED: there is no frame of this request code and no protocol
+ * definition for it in this repository. From its name and the vendor's
+ * request-code vocabulary it is BELIEVED to be the terminal pushing user
+ * enrollment/profile data to its server, and it is treated as potentially
+ * biometric/sensitive until a protocol capture confirms its structure. It is
+ * not a punch code (only realtime_glog is), so nothing in it is ever turned
+ * into attendance. Observed in production 2026-09 at 26-35 KB a frame,
+ * re-sent over and over by several terminals. Classified on its own so the
+ * receiver can answer it cheaply and never keep or log its body (see
+ * receiver.js, handleEnroll); it used to fall through to "unknown request
+ * code" and cost a full BLOB row per retry.
  */
 const REQUEST_ENROLL = "realtime_enroll_data";
 

@@ -89,13 +89,46 @@ describe("housekeeper", () => {
     g.resolve();
   });
 
-  it("a critical job is never dropped for capacity", () => {
-    const hk = createHousekeeper({ concurrency: 1, maxPending: 1, log: makeLog() });
+  it("critical jobs have their own lane: not blocked by a full ordinary lane, but bounded themselves", () => {
+    const log = makeLog();
+    const hk = createHousekeeper({ concurrency: 1, maxPending: 1, maxCriticalPending: 2, log });
     const g = gate();
     hk.submit({ name: "block", run: () => g.promise });
     hk.submit({ name: "filler", run: () => Promise.resolve() });
-    assert.equal(hk.submit({ name: "filler", run: () => Promise.resolve() }), "dropped");
-    assert.equal(hk.submit({ name: "mark_pull_receiving", critical: true, run: () => Promise.resolve() }), "accepted");
+    assert.equal(hk.submit({ name: "filler", run: () => Promise.resolve() }), "dropped", "ordinary lane full");
+    assert.equal(hk.submit({ name: "mark_pull_receiving", critical: true, key: "pull:1", run: () => Promise.resolve() }), "accepted");
+    assert.equal(hk.submit({ name: "mark_pull_receiving", critical: true, key: "pull:1", run: () => Promise.resolve() }), "coalesced");
+    assert.equal(hk.submit({ name: "mark_pull_receiving", critical: true, key: "pull:2", run: () => Promise.resolve() }), "accepted");
+    assert.equal(hk.submit({ name: "mark_pull_receiving", critical: true, key: "pull:3", run: () => Promise.resolve() }), "dropped", "critical lane has its own cap");
+    const s = hk.stats();
+    assert.equal(s.critical_pending, 2);
+    assert.equal(s.critical_dropped, 1);
+    assert.equal(s.dropped, 1);
+    assert.equal(log.lines.filter((l) => l.code === "CRITICAL_DROPPED").length, 1);
+    g.resolve();
+  });
+
+  it("critical jobs run before any waiting ordinary job", async () => {
+    const hk = createHousekeeper({ concurrency: 1, maxPending: 50, log: makeLog() });
+    const order = [];
+    const g = gate();
+    hk.submit({ name: "block", run: () => g.promise });
+    for (let i = 0; i < 20; i += 1) hk.submit({ name: "diag", run: () => order.push(`diag${i}`) });
+    hk.submit({ name: "mark_pull_receiving", critical: true, run: () => order.push("CRITICAL") });
+    g.resolve();
+    await hk.idle();
+    assert.equal(order[0], "CRITICAL", "ordinary diagnostics cannot starve it");
+    assert.equal(order.length, 21);
+  });
+
+  it("a critical job is charged at least CRITICAL_MIN_BYTES, so the byte cap bounds it too", () => {
+    const { CRITICAL_MIN_BYTES } = require("./housekeeping");
+    const hk = createHousekeeper({ concurrency: 1, maxCriticalPending: 1000, maxCriticalPendingBytes: CRITICAL_MIN_BYTES * 3, log: makeLog() });
+    const g = gate();
+    hk.submit({ name: "block", run: () => g.promise });
+    const out = [];
+    for (let i = 0; i < 5; i += 1) out.push(hk.submit({ name: "c", critical: true, bytes: 1, run: () => Promise.resolve() }));
+    assert.deepEqual(out, ["accepted", "accepted", "accepted", "dropped", "dropped"]);
     g.resolve();
   });
 
@@ -138,6 +171,72 @@ describe("housekeeper", () => {
     const t0 = Date.now();
     await hk.close({ timeoutMs: 50 });
     assert.ok(Date.now() - t0 < 1000);
+  });
+});
+
+describe("critical-lane flood while the database is blocked", () => {
+  it("200,000 distinct critical jobs: depth and memory stay bounded, work resumes when the DB does", async (t) => {
+    const v8 = require("v8");
+    const vm = require("vm");
+    v8.setFlagsFromString("--expose-gc");
+    const gc = vm.runInNewContext("gc");
+
+    const log = makeLog();
+    const hk = createHousekeeper({ concurrency: 1, maxPending: 100, maxCriticalPending: 32, log });
+    const blocked = [];
+    const run = () => {
+      const g = gate();
+      blocked.push(g);
+      return g.promise;
+    };
+    // An ordinary job is stuck "in the database"; so will the first critical be.
+    hk.submit({ name: "touch_device", run });
+
+    gc();
+    const before = process.memoryUsage().heapUsed;
+    let maxDepth = 0;
+    let maxCritical = 0;
+    let maxBytes = 0;
+    const payload = "x".repeat(40); // a trans_id-sized string captured per job
+    for (let i = 0; i < 200000; i += 1) {
+      const transId = `${payload}${i}`;
+      hk.submit({ name: "mark_pull_receiving", critical: true, key: `pull:${i}:${transId}`, run: () => run(transId) });
+      if (i % 3 === 0) hk.submit({ name: "raw_unknown_request_code", bytes: 30000, run });
+      if (i % 1000 === 0) {
+        const s = hk.stats();
+        maxDepth = Math.max(maxDepth, s.pending);
+        maxCritical = Math.max(maxCritical, s.critical_pending);
+        maxBytes = Math.max(maxBytes, s.pending_bytes);
+      }
+    }
+    gc();
+    const grew = process.memoryUsage().heapUsed - before;
+    const s = hk.stats();
+
+    t.diagnostic(`critical-flood: max critical depth ${maxCritical}, max total depth ${maxDepth}, max pending bytes ${maxBytes}, critical_dropped ${s.critical_dropped}, ordinary dropped ${s.dropped}, heap growth ${(grew / 1048576).toFixed(2)} MB`);
+    assert.ok(maxCritical <= 32 && s.critical_pending <= 32, `critical depth ${maxCritical}`);
+    assert.ok(maxDepth <= 132 && s.pending <= 132, `total depth ${maxDepth}`);
+    assert.ok(maxBytes <= 4 * 1024 * 1024 + 64 * 1024, `bytes ${maxBytes}`);
+    assert.equal(s.running, 1);
+    assert.equal(blocked.length, 1, "nothing else started while the DB is stuck");
+    assert.equal(s.critical_dropped, 200000 - 32);
+    assert.ok(grew < 5 * 1024 * 1024, `heap grew ${(grew / 1048576).toFixed(2)} MB for 200k submissions`);
+    assert.ok(log.lines.filter((l) => l.code === "CRITICAL_DROPPED").length <= 2, "logged once a minute, not per drop");
+
+    // The DB comes back: critical work goes first, then the rest drains.
+    blocked[0].resolve();
+    // Release everything that starts from now on, recording its lane.
+    while (hk.stats().running || hk.stats().pending) {
+      await new Promise((r) => setImmediate(r));
+      while (blocked.length > 1) {
+        const g = blocked.splice(1, 1)[0];
+        g.resolve();
+      }
+    }
+    await hk.idle();
+    const after = hk.stats();
+    assert.equal(after.by_job.mark_pull_receiving.completed, 32);
+    assert.equal(after.pending, 0);
   });
 });
 

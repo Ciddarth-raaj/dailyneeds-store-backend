@@ -439,14 +439,24 @@ describe("receiver", () => {
       assert.equal(store.state.punches.size, 2);
     });
 
-    it("beyond the per-minute cap: not stored, still OK, one flood_capped row", async () => {
+    it("beyond the per-minute cap: no punch row, but every capped frame is preserved raw BEFORE its OK (R1)", async () => {
       for (let i = 0; i < 5; i += 1) {
         const { raw } = await send(port, punchFrame({ dev_id: "FLOOD00001", io_time: `2026091502300${i}` }));
         assert.equal(protocol.parseReplyHeaders(raw).headers.response_code, "OK", `frame ${i}`);
       }
       assert.equal(store.state.punches.size, 3, "cap of 3 per minute in this test");
-      assert.equal(store.state.raw.filter((r) => r.outcome === "flood_capped").length, 1);
+      const capped = store.state.raw.filter((r) => r.outcome === "flood_capped");
+      assert.equal(capped.length, 2, "one durable raw row per capped frame");
+      assert.ok(capped.every((r) => r.raw_frame.toString("latin1").includes("FLOOD00001")), "the frame's own bytes");
       assert.ok(log.lines.some((l) => l.outcome === "flood_capped" && l.error));
+    });
+
+    it("a capped frame whose raw row cannot be written gets NO reply (R1)", async () => {
+      for (let i = 0; i < 3; i += 1) await send(port, punchFrame({ dev_id: "FLOOD00002", io_time: `2026091502310${i}` }));
+      store.state.failRaw = new Error("BIOMAX_POOL_ACQUIRE_TIMEOUT");
+      const { raw } = await send(port, punchFrame({ dev_id: "FLOOD00002", io_time: "20260915023109" }));
+      assert.equal(raw.length, 0, "nothing written back");
+      assert.ok(log.lines.some((l) => l.outcome === "store_error"));
     });
 
     it("beyond the distinct-devices cap: the third unknown device is capped", async () => {

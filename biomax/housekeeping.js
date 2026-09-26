@@ -10,19 +10,33 @@
  * limit: a noisy device plus a slow database used to turn into an unbounded
  * backlog of retained requests (the 2026-09 biomax-receiver OOM).
  *
- * Three limits, all counted, none silent:
+ * Two lanes, each with its own hard bounds, all counted, none silent:
  *
- *   concurrency      jobs running at once - i.e. at most this many pool
- *                    connections are ever spent on housekeeping, so punches
- *                    always have the rest
- *   maxPending       jobs waiting; beyond it a new job is DROPPED (counted,
- *                    logged at most once a minute with totals)
- *   maxPendingBytes  bytes of payload (raw frames) waiting, same rule
+ *   concurrency              jobs running at once, both lanes together - at
+ *                            most this many pool connections are ever spent
+ *                            on housekeeping, so punches always have the rest
+ *   ordinary lane            last-seen upkeep, diagnostic raw rows
+ *     maxPending               jobs waiting
+ *     maxPendingBytes          payload bytes (raw frames) waiting
+ *   critical lane            rare state transitions (a pull becoming
+ *                            RECEIVING) - small, and must not be starved
+ *     maxCriticalPending       jobs waiting
+ *     maxCriticalPendingBytes  bytes waiting; a critical job is charged at
+ *                              least CRITICAL_MIN_BYTES whatever it declares
+ *
+ * Beyond its lane's bounds a new job is DROPPED - counted, and logged at
+ * most once a minute per lane (HOUSEKEEPING_DROPPED / CRITICAL_DROPPED). No
+ * class of job can grow a queue without limit: the most that can ever be
+ * waiting is maxPending + maxCriticalPending jobs.
+ *
+ * Priority: whenever a slot frees, a waiting critical job is started before
+ * any ordinary one. So ordinary traffic can delay a critical job by at most
+ * the jobs already RUNNING (each bounded by the store's acquire + query
+ * deadlines), never by the ones waiting.
  *
  * A job may carry a `key`: a second job with the same key while the first
- * is still waiting is COALESCED into it (counted). A `critical` job - small,
- * rare state transitions such as a pull becoming RECEIVING - is never
- * dropped for capacity; it still waits its turn behind `concurrency`.
+ * is still waiting is COALESCED into it (counted) - repeated state
+ * transitions for the same pull collapse to one.
  *
  * Nothing here ever writes to the database itself and nothing is awaited by
  * a request. A job that fails is logged (HOUSEKEEPING_FAILED, with its name
@@ -32,17 +46,25 @@
  * stream of "Pool is closed" failures.
  */
 
+/** What a critical job is charged at minimum: its closure, key and entry. */
+const CRITICAL_MIN_BYTES = 256;
+
 function createHousekeeper(options = {}) {
   const concurrency = positive(options.concurrency, 1);
   const maxPending = positive(options.maxPending, 100);
   const maxPendingBytes = positive(options.maxPendingBytes, 4 * 1024 * 1024);
+  const maxCriticalPending = positive(options.maxCriticalPending, 32);
+  const maxCriticalPendingBytes = positive(options.maxCriticalPendingBytes, 64 * 1024);
   const failureLogPerMinute = positive(options.failureLogPerMinute, 10);
   const log = options.log || { error() {}, info() {} };
   const now = options.now || (() => Date.now());
 
-  const queue = [];
+  const lanes = {
+    ordinary: { queue: [], bytes: 0, max: maxPending, maxBytes: maxPendingBytes, dropCode: "HOUSEKEEPING_DROPPED", dropMinute: null, dropsSinceLog: 0 },
+    critical: { queue: [], bytes: 0, max: maxCriticalPending, maxBytes: maxCriticalPendingBytes, dropCode: "CRITICAL_DROPPED", dropMinute: null, dropsSinceLog: 0 },
+  };
   const pendingKeys = new Map(); // key -> job (waiting only)
-  let pendingBytes = 0;
+  const waiting = () => lanes.ordinary.queue.length + lanes.critical.queue.length;
   let running = 0;
   let closed = false;
   let idleWaiters = [];
@@ -52,6 +74,7 @@ function createHousekeeper(options = {}) {
     completed: 0,
     failed: 0,
     dropped: 0,
+    critical_dropped: 0,
     coalesced: 0,
     dropped_on_shutdown: 0,
     rejected_after_close: 0,
@@ -67,26 +90,26 @@ function createHousekeeper(options = {}) {
     return s;
   };
 
-  // Rate-limited logging: one DROPPED line a minute, N FAILED lines a minute.
-  let dropMinute = null;
-  let dropsSinceLog = 0;
+  // Rate-limited logging: one DROPPED line a minute per lane, N FAILED
+  // lines a minute.
   let failMinute = null;
   let failsThisMinute = 0;
   let failsSuppressed = 0;
 
-  function noteDrop(name, reason) {
-    dropsSinceLog += 1;
+  function noteDrop(lane, laneName, name, reason) {
+    lane.dropsSinceLog += 1;
     const m = Math.floor(now() / 60000);
-    if (m === dropMinute) return;
-    dropMinute = m;
-    log.error("HOUSEKEEPING_DROPPED", `housekeeping queue full (${reason}); ${dropsSinceLog} job(s) dropped since the last report`, {
+    if (m === lane.dropMinute) return;
+    lane.dropMinute = m;
+    log.error(lane.dropCode, `housekeeping ${laneName} lane full (${reason}); ${lane.dropsSinceLog} job(s) dropped since the last report`, {
       job: name,
-      dropped_since_last_report: dropsSinceLog,
-      pending: queue.length,
-      pending_bytes: pendingBytes,
-      dropped_total: totals.dropped,
+      lane: laneName,
+      dropped_since_last_report: lane.dropsSinceLog,
+      pending: lane.queue.length,
+      pending_bytes: lane.bytes,
+      dropped_total: laneName === "critical" ? totals.critical_dropped : totals.dropped,
     });
-    dropsSinceLog = 0;
+    lane.dropsSinceLog = 0;
   }
 
   function noteFailure(name, err) {
@@ -124,30 +147,34 @@ function createHousekeeper(options = {}) {
       s.coalesced += 1;
       return "coalesced";
     }
-    const bytes = Number.isFinite(job.bytes) && job.bytes > 0 ? job.bytes : 0;
-    if (!job.critical) {
-      const reason = queue.length >= maxPending ? `${maxPending} jobs waiting` : pendingBytes + bytes > maxPendingBytes ? `${maxPendingBytes} bytes waiting` : null;
-      if (reason) {
-        totals.dropped += 1;
-        s.dropped += 1;
-        noteDrop(name, reason);
-        return "dropped";
-      }
+    const laneName = job.critical ? "critical" : "ordinary";
+    const lane = lanes[laneName];
+    const declared = Number.isFinite(job.bytes) && job.bytes > 0 ? job.bytes : 0;
+    const bytes = job.critical ? Math.max(declared, CRITICAL_MIN_BYTES) : declared;
+    const reason = lane.queue.length >= lane.max ? `${lane.max} jobs waiting` : lane.bytes + bytes > lane.maxBytes ? `${lane.maxBytes} bytes waiting` : null;
+    if (reason) {
+      if (job.critical) totals.critical_dropped += 1;
+      else totals.dropped += 1;
+      s.dropped += 1;
+      noteDrop(lane, laneName, name, reason);
+      return "dropped";
     }
     totals.submitted += 1;
     s.submitted += 1;
-    const entry = { name, run: job.run, key: job.key || null, bytes };
-    queue.push(entry);
-    pendingBytes += bytes;
+    const entry = { name, run: job.run, key: job.key || null, bytes, lane };
+    lane.queue.push(entry);
+    lane.bytes += bytes;
     if (entry.key) pendingKeys.set(entry.key, entry);
     pump();
     return "accepted";
   }
 
   function pump() {
-    while (!closed && running < concurrency && queue.length) {
-      const job = queue.shift();
-      pendingBytes -= job.bytes;
+    while (!closed && running < concurrency && waiting()) {
+      // Critical first, always.
+      const lane = lanes.critical.queue.length ? lanes.critical : lanes.ordinary;
+      const job = lane.queue.shift();
+      lane.bytes -= job.bytes;
       if (job.key && pendingKeys.get(job.key) === job) pendingKeys.delete(job.key);
       running += 1;
       let p;
@@ -176,7 +203,7 @@ function createHousekeeper(options = {}) {
       ).then(() => {
         running -= 1;
         pump();
-        if (running === 0 && queue.length === 0) {
+        if (running === 0 && waiting() === 0) {
           const waiters = idleWaiters;
           idleWaiters = [];
           waiters.forEach((w) => w());
@@ -187,7 +214,7 @@ function createHousekeeper(options = {}) {
 
   /** Resolves once nothing is running or waiting (tests, shutdown). */
   function idle() {
-    if (running === 0 && queue.length === 0) return Promise.resolve();
+    if (running === 0 && waiting() === 0) return Promise.resolve();
     return new Promise((resolve) => idleWaiters.push(resolve));
   }
 
@@ -198,10 +225,12 @@ function createHousekeeper(options = {}) {
   function close({ timeoutMs = 2000 } = {}) {
     if (!closed) {
       closed = true;
-      totals.dropped_on_shutdown += queue.length;
-      queue.length = 0;
+      totals.dropped_on_shutdown += waiting();
+      lanes.ordinary.queue.length = 0;
+      lanes.critical.queue.length = 0;
+      lanes.ordinary.bytes = 0;
+      lanes.critical.bytes = 0;
       pendingKeys.clear();
-      pendingBytes = 0;
     }
     if (running === 0) return Promise.resolve(stats());
     return new Promise((resolve) => {
@@ -219,12 +248,18 @@ function createHousekeeper(options = {}) {
       names[k] = { ...v };
     });
     return {
-      pending: queue.length,
-      pending_bytes: pendingBytes,
+      pending: waiting(),
+      pending_bytes: lanes.ordinary.bytes + lanes.critical.bytes,
       running,
       concurrency,
+      ordinary_pending: lanes.ordinary.queue.length,
+      ordinary_pending_bytes: lanes.ordinary.bytes,
+      critical_pending: lanes.critical.queue.length,
+      critical_pending_bytes: lanes.critical.bytes,
       max_pending: maxPending,
       max_pending_bytes: maxPendingBytes,
+      max_critical_pending: maxCriticalPending,
+      max_critical_pending_bytes: maxCriticalPendingBytes,
       closed,
       ...totals,
       by_job: names,
@@ -318,4 +353,4 @@ function positive(v, fallback) {
   return Number.isFinite(v) && v > 0 ? v : fallback;
 }
 
-module.exports = { createHousekeeper, createDiagLimiter };
+module.exports = { createHousekeeper, createDiagLimiter, CRITICAL_MIN_BYTES };

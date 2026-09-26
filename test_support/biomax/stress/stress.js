@@ -9,8 +9,8 @@
  * What it does, all at once for DURATION_S:
  *
  *   enroll flood   RATE requests/s of request_code realtime_enroll_data, bodies
- *                  of 25-35 KB (length-prefixed JSON with a base64 "template",
- *                  the shape the terminals use), spread over the 7 real Cloud IDs
+ *                  of 25-35 KB (length-prefixed JSON with a random base64 blob -
+ *                  a SYNTHETIC stand-in, the real structure is uncaptured), spread over the 7 real Cloud IDs
  *   polls          each device sends receive_cmd every POLL_MS
  *   punches        one NEW realtime_glog every PUNCH_MS, and every third one is
  *                  re-sent (a retransmission) to check dedup
