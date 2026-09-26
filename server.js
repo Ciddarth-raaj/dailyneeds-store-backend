@@ -2555,7 +2555,8 @@ const server = new Server();
 
 // How the process ends - fatal error exits 1 (pm2 restarts it), a signal
 // exits 0, both after stopping crons, HTTP and pools under a deadline. See
-// utils/process_lifecycle.js for why the old handler left a zombie.
+// utils/process_lifecycle.js for how the old handler exited (wrong code,
+// timing dependent on open handles).
 server.lifecycle = installProcessLifecycle({
   onClose: () => server.onClose(),
   // A deploy's reload (signal, exit 0) is not an error; a crash is.

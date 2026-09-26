@@ -3,12 +3,17 @@
  *
  *   NODE_BIN=... node test_support/api_db_stress/zombie.js
  *
- * Boots the server (crons off), waits until it answers, then either
- *   fatal:   a preload throws an uncaught exception 2 s after boot, or
- *   sigterm: the harness sends SIGTERM (what pm2 stop/reload sends first)
- * and reports, over the next 15 s: is the process still alive, does the
- * port still accept connections, what did it exit with and how fast.
- * "alive but not listening" is the zombie pm2 shows as `online`.
+ * Boots the server (crons off unless ZOMBIE_CRON=1), waits until it answers,
+ * then one of:
+ *   fatal:          a preload throws an uncaught exception 8 s after boot
+ *   sigterm:        the harness sends SIGTERM (what pm2 stop/reload sends first)
+ *   fatal_db_stuck: the DB goes silent with a request's query in flight,
+ *                   then the uncaught exception
+ * and reports, over the next 20 s: is the process still alive, does the
+ * port still accept connections, what did it exit with, how fast, and at
+ * which log level. `zombie: true` means it was seen alive with its port
+ * already closed for at least one sample - a window, not necessarily a
+ * permanent state; `exit_after_ms` says how long it lasted.
  */
 const { spawn } = require("child_process");
 const fs = require("fs");

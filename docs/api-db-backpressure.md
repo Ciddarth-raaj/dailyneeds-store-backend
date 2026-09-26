@@ -345,11 +345,14 @@ never ended. With the fix a DB wait ends within its lane deadline (5 s /
 ZIP downloads need long responses - `requestTimeout` covers receiving the
 request only, not the response, so it would not cut those.
 
-**3. No pm2 `max_memory_restart`.** Containment only: it restarts the
-process after the damage (in-flight requests lost), and does not stop the
-growth. If added, set it well above normal peak (e.g. `1500M` against a
-~150-270 MB healthy peak) so it never fires in normal operation. Not a
-substitute for the fix.
+**3. No pm2 `max_memory_restart`.** Unchanged by this deployment - pm2
+memory limits stay as they are. A memory-based restart is containment only
+(it restarts the process after the damage, losing in-flight requests, and
+does not stop the growth), and any threshold has to be sized to the actual
+host: the production machine has only ~904 MiB of RAM, shared with the
+Biomax receiver and the OS, so a value such as 1500M would never fire and
+is not a safeguard there. A host-level memory safeguard is a separate
+follow-up.
 
 **4. Node 14 is end of life** (April 2023): no security fixes; the
 `AsyncResource.bind` bug found here (drops `thisArg`) is a Node 14 bug the

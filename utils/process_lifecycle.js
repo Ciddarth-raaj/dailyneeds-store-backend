@@ -3,10 +3,15 @@
  *
  * BEFORE: one handler for SIGINT/SIGTERM/SIGQUIT/SIGUSR1/SIGUSR2, 'exit' and
  * 'uncaughtException' called `process.removeAllListeners()`, stopped the
- * crons, ended both pools and closed the HTTP server - and never exited. After
- * an uncaught exception the process therefore stayed alive with no listener,
- * no pools and no crons: pm2 reported it `online` while every request was
- * refused, and nothing restarted it (test_support/api_db_stress/zombie.js).
+ * crons, started ending both pools, closed the HTTP server and never called
+ * `process.exit`. How the process then ended depended on which handles were
+ * still open. Measured on Node 14.21.3 (test_support/api_db_stress/zombie.js):
+ * an uncaught exception exited with code 0 (a crash reported as a clean exit);
+ * SIGTERM exited 0 but was logged as an ERROR; with a query stuck on a silent
+ * database the process stayed alive with its HTTP port already closed for
+ * ~3.5 s and then exited 1 only because a second, unrelated error surfaced.
+ * It was not shown to stay alive indefinitely - the defect is a wrong and
+ * handle-dependent exit, not a proven permanent zombie.
  *
  * NOW:
  *   fatal (uncaughtException)       log once -> stop crons, stop accepting
