@@ -12,7 +12,12 @@
  *
  *   R10  the `request_code` header alone decides: `realtime_glog` is a
  *        punch; anything else is answered as a poll (`ERROR_NO_CMD` with the
- *        two empty command headers), and an unknown code is also recorded.
+ *        two empty command headers), and an unknown code is also recorded -
+ *        once per identical frame and at most BIOMAX_DIAG_PER_SOURCE times
+ *        per device and code per BIOMAX_DIAG_WINDOW_MS, never once per retry.
+ *        `realtime_enroll_data` (a biometric enrolment upload, not
+ *        attendance) is answered the same way by default and its body is
+ *        hashed and discarded, never stored (handleEnroll).
  *   R1   a punch is acknowledged `response_code: OK` only after its bytes
  *        are durable - a punch row (new or duplicate) or a raw-request row.
  *        If neither commit succeeds the socket is closed with NO reply, so
@@ -51,15 +56,32 @@
  *                     times (GET_LOG_DATA is read-only and result blocks are
  *                     deduplicated, so a repeat is harmless).
  *
+ * BOUNDED BY CONSTRUCTION (the 2026-09 OOM, see docs/biomax-receiver-resource-limits.md):
+ *
+ *   Nothing is awaited after a reply. Device last-seen upkeep, diagnostic
+ *   rows and pull bookkeeping go to a bounded housekeeping queue
+ *   (housekeeping.js) that uses at most BIOMAX_HOUSEKEEPING_CONCURRENCY of
+ *   the pool's connections and drops - counted and logged - rather than
+ *   grows. Every DB wait has a deadline (BIOMAX_DB_ACQUIRE_TIMEOUT_MS,
+ *   BIOMAX_DB_QUERY_TIMEOUT_MS) and the pool's own queue a limit
+ *   (BIOMAX_DB_QUEUE_LIMIT). /healthz probes the database on its OWN
+ *   one-connection pool within BIOMAX_HEALTH_DB_BUDGET_MS, so it answers
+ *   while the receiver's pool is saturated. A punch that meets any of these
+ *   limits before it is durable is refused with no reply - R1 exactly as
+ *   before - and the device retries.
+ *
  * WHAT IT NEVER DOES: pair IN/OUT, compute hours, apply grace, breaks, OT,
  * or status. It stores and dates. Part 2 is elsewhere. It never queues a
  * command itself and never issues anything but GET_LOG_DATA
  * (biomax/commands.js refuses the rest by name).
  *
  * Usage:  BIOMAX_PORT=7005 node biomax/receiver.js
- * Health: GET /healthz  -> {"ok":true,"db":true,"last_punch_received":...}
+ * Health: GET /healthz  -> {"ok":true,"db":true,"last_punch_received":...,
+ *                            "process":{...},"db_check":{...},"pool":{...},
+ *                            "housekeeping":{...},"requests_by_code":{...}}
  */
 
+const crypto = require("crypto");
 const http = require("http");
 const path = require("path");
 
@@ -76,6 +98,7 @@ const punchDates = (ioTimeRaw) => {
 const { createFloodGuard } = require("./flood");
 const { createLog } = require("./log");
 const { createSpool } = require("./spool");
+const { createHousekeeper, createDiagLimiter } = require("./housekeeping");
 const commands = require("./commands");
 
 /**
@@ -121,8 +144,64 @@ function readConfig(env = process.env) {
       perDay: int("BIOMAX_UNREG_PER_DAY", 2000),
       devicesPerDay: int("BIOMAX_UNREG_DEVICES_PER_DAY", 20),
     },
+    // Concurrent sockets. Each can hold at most maxBodyBytes of body, so
+    // this caps request memory as well (Node closes sockets beyond it; a
+    // device just retries).
+    maxConnections: int("BIOMAX_MAX_CONNECTIONS", 200),
+    // The receiver's pool (still connectionLimit 3): how many waiters it may
+    // queue, how long a wait for a connection and a single statement may
+    // take. A punch that hits any of these is refused with no ACK (R1).
+    db: {
+      queueLimit: int("BIOMAX_DB_QUEUE_LIMIT", 50),
+      acquireTimeoutMs: int("BIOMAX_DB_ACQUIRE_TIMEOUT_MS", 5000),
+      queryTimeoutMs: int("BIOMAX_DB_QUERY_TIMEOUT_MS", 10000),
+    },
+    // /healthz: its own one-connection pool, a hard budget for the DB check
+    // (under the API probe's 800 ms), and a short cache so a burst of probes
+    // is one query.
+    health: {
+      dbBudgetMs: int("BIOMAX_HEALTH_DB_BUDGET_MS", 500),
+      cacheMs: int("BIOMAX_HEALTH_CACHE_MS", 2000),
+      queryTimeoutMs: int("BIOMAX_HEALTH_QUERY_TIMEOUT_MS", 3000),
+    },
+    housekeeping: {
+      concurrency: int("BIOMAX_HOUSEKEEPING_CONCURRENCY", 1),
+      maxPending: int("BIOMAX_HOUSEKEEPING_MAX_PENDING", 100),
+      maxPendingBytes: int("BIOMAX_HOUSEKEEPING_MAX_PENDING_BYTES", 4 * 1024 * 1024),
+    },
+    // last_seen_at is written at most this often per device for non-punch
+    // traffic (a punch always writes). The connectivity thresholds it feeds
+    // are 15 and 60 minutes.
+    deviceTouchIntervalMs: int("BIOMAX_DEVICE_TOUCH_INTERVAL_MS", 60000),
+    // Diagnostic raw rows for unknown codes and enrolment uploads.
+    diag: {
+      windowMs: int("BIOMAX_DIAG_WINDOW_MS", 60 * 60 * 1000),
+      perSource: int("BIOMAX_DIAG_PER_SOURCE", 6),
+      maxPerWindow: int("BIOMAX_DIAG_MAX_PER_WINDOW", 120),
+    },
+    // What a realtime_enroll_data gets back. ERROR_NO_CMD (the default) is
+    // exactly what it got before this code knew the name. "OK" is what the
+    // device presumably wants and may stop its re-sending; it is an opt-in
+    // until a capture of DigiSME's own reply to this code confirms it.
+    enrollReply: /^ok$/i.test(String(env.BIOMAX_ENROLL_DATA_REPLY === undefined ? "" : env.BIOMAX_ENROLL_DATA_REPLY).trim()) ? protocol.ACK_OK : protocol.ACK_NO_CMD,
+    statsIntervalMs: int("BIOMAX_STATS_INTERVAL_MS", 60000),
   };
 }
+
+/** Shallow merge, one level deep for the grouped settings. */
+function mergeConfig(base, over) {
+  const out = { ...base, ...(over || {}) };
+  for (const k of ["flood", "db", "health", "housekeeping", "diag"]) {
+    if (over && over[k]) out[k] = { ...base[k], ...over[k] };
+  }
+  return out;
+}
+
+/** biomax_raw_request.raw_frame keeps 65535 bytes; never pin more than that. */
+const RAW_FRAME_MAX = 65535;
+const diagFrame = (buf) => (buf && buf.length > RAW_FRAME_MAX ? Buffer.from(buf.subarray(0, RAW_FRAME_MAX)) : buf);
+const EMPTY = Buffer.alloc(0);
+const MAX_COUNTED_CODES = 32;
 
 /** Rebuild the frame as the device sent it, for the raw-request table. */
 function rebuildFrame(req, body) {
@@ -133,23 +212,34 @@ function rebuildFrame(req, body) {
   return Buffer.concat([Buffer.from(`${lines.join("\r\n")}\r\n\r\n`, "latin1"), body || Buffer.alloc(0)]);
 }
 
-function readBody(req, maxBytes) {
+/**
+ * Read the body up to maxBytes. `keep: false` reads and discards (the bytes
+ * are only hashed) - for a frame whose content we must not retain.
+ * `hash: true` adds the sha256 of what was read (up to the limit).
+ */
+function readBody(req, maxBytes, opts = {}) {
+  const keep = opts.keep !== false;
+  const hash = opts.hash ? crypto.createHash("sha256") : null;
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
     let oversized = false;
     req.on("data", (chunk) => {
-      if (oversized) return;
+      if (oversized) {
+        size += chunk.length;
+        return;
+      }
       size += chunk.length;
+      let part = chunk;
       if (size > maxBytes) {
         oversized = true;
         // Keep what we have (truncated) for diagnosis; stop buffering.
-        chunks.push(chunk.subarray(0, Math.max(0, maxBytes - (size - chunk.length))));
-        return;
+        part = chunk.subarray(0, Math.max(0, maxBytes - (size - chunk.length)));
       }
-      chunks.push(chunk);
+      if (hash) hash.update(part);
+      if (keep) chunks.push(part);
     });
-    req.on("end", () => resolve({ body: Buffer.concat(chunks), oversized, size }));
+    req.on("end", () => resolve({ body: keep ? Buffer.concat(chunks) : EMPTY, oversized, size, sha256: hash ? hash.digest("hex") : null }));
     req.on("error", reject);
   });
 }
@@ -158,14 +248,73 @@ function readBody(req, maxBytes) {
  * Build the receiver around injected collaborators, so the end-to-end test
  * can run it on port 0 with a fake store and a fixed clock.
  */
-function createReceiver({ store, log, spool, flood, config } = {}) {
-  const cfg = { ...readConfig(), ...(config || {}) };
+function createReceiver({ store, log, spool, flood, config, health, housekeeper, now } = {}) {
+  const cfg = mergeConfig(readConfig(), config);
   const logger = log || createLog();
   const spooler = spool || createSpool(cfg.spoolDir);
   const guard = flood || createFloodGuard({ limits: cfg.flood });
+  const clock = now || (() => Date.now());
+  // What /healthz asks. In production a store on its own one-connection
+  // pool (createRuntime); in tests the ordinary store.
+  const healthStore = health || store;
+  const hk = housekeeper || createHousekeeper({ ...cfg.housekeeping, log: logger, now: clock });
+  const diag = createDiagLimiter({ ...cfg.diag, now: clock });
+  const startedAt = clock();
 
   // Unregistered devices we have already announced this process lifetime.
   const announcedUnregistered = new Set();
+
+  // Counters for /healthz and the STATS line. Request codes are whatever a
+  // client sends, so the map is capped.
+  const requestCounts = new Map();
+  const touchTotals = { submitted: 0, skipped_interval: 0, not_accepted: 0 };
+  let healthRequests = 0;
+  let inFlight = 0;
+  function countRequest(code) {
+    let k = code ? String(code).slice(0, 40) : "(none)";
+    if (!requestCounts.has(k) && requestCounts.size >= MAX_COUNTED_CODES) k = "(other)";
+    requestCounts.set(k, (requestCounts.get(k) || 0) + 1);
+  }
+
+  /** A diagnostic raw row, off the request path, holding only its own bytes. */
+  function submitRaw(name, entry) {
+    const raw = entry.raw_frame ? diagFrame(entry.raw_frame) : null;
+    const row = { ...entry, raw_frame: raw };
+    return hk.submit({ name, bytes: raw ? raw.length : 0, run: () => store.insertRawRequest(row) });
+  }
+
+  /**
+   * last_seen_at upkeep. A punch always writes (it also sets last_punch_at);
+   * anything else at most once per deviceTouchIntervalMs per device. A
+   * write still waiting in the queue absorbs a repeat (same key).
+   */
+  const lastTouch = new Map(); // dev_id -> ms of the last accepted touch
+  function touch(devId, { punch }) {
+    if (!devId) return;
+    const t = clock();
+    if (!punch) {
+      const last = lastTouch.get(devId);
+      if (last !== undefined && t - last < cfg.deviceTouchIntervalMs) {
+        touchTotals.skipped_interval += 1;
+        return;
+      }
+    }
+    const verdict = hk.submit({
+      name: punch ? "touch_device_punch" : "touch_device",
+      key: `touch:${devId}:${punch ? "p" : "s"}`,
+      run: () => store.touchDevice(devId, { punch: !!punch }),
+    });
+    if (verdict === "accepted" || verdict === "coalesced") {
+      if (lastTouch.size >= 1000 && !lastTouch.has(devId)) lastTouch.clear();
+      lastTouch.set(devId, t);
+      touchTotals.submitted += 1;
+    } else {
+      touchTotals.not_accepted += 1;
+    }
+  }
+
+  /** `+N suppressed` suffix for a diagnostic reason. */
+  const suppressedNote = (n) => (n ? `; +${n} suppressed since the last row` : "");
 
   function reply(res, kind) {
     // setHeader keeps insertion order, and unlike the array form of
@@ -223,7 +372,7 @@ function createReceiver({ store, log, spool, flood, config } = {}) {
       const admitted = guard.admit(envelope.dev_id);
       if (!admitted.allowed) {
         if (guard.oncePerHour(`flood:${envelope.dev_id}`)) {
-          await safeRaw({ ...base, outcome: "flood_capped", reason: admitted.reason, byte_length: frame.length, raw_frame: frame });
+          submitRaw("raw_flood_capped", { ...base, outcome: "flood_capped", reason: admitted.reason, byte_length: frame.length, raw_frame: frame });
         }
         logger.request({ ...base, outcome: "flood_capped", reason: admitted.reason, user_id: parsed.punch.user_id, io_time_raw: parsed.punch.io_time_raw, duration_ms: Date.now() - started, error: true });
         reply(res, protocol.ACK_OK);
@@ -294,7 +443,8 @@ function createReceiver({ store, log, spool, flood, config } = {}) {
     }
 
     // Durable. Acknowledge FIRST, then the housekeeping that must never
-    // stand between a stored punch and its ACK.
+    // stand between a stored punch and its ACK - queued, not awaited, so
+    // this request is finished (and its buffers free) the moment we return.
     reply(res, protocol.ACK_OK);
 
     const outcome = result.outcome === "duplicate" ? "duplicate" : device ? "stored" : "stored_unregistered";
@@ -312,10 +462,10 @@ function createReceiver({ store, log, spool, flood, config } = {}) {
     });
 
     if (device) {
-      await safe(() => store.touchDevice(envelope.dev_id, { punch: true }));
+      touch(envelope.dev_id, { punch: true });
     } else if (!announcedUnregistered.has(envelope.dev_id)) {
       announcedUnregistered.add(envelope.dev_id);
-      await safeRaw({ ...base, outcome: "unregistered_device_first_seen", reason: "no biomax_device row for this Cloud ID; punches are stored and quarantined until it is registered", byte_length: frame.length, raw_frame: frame });
+      submitRaw("raw_unregistered_first_seen", { ...base, outcome: "unregistered_device_first_seen", reason: "no biomax_device row for this Cloud ID; punches are stored and quarantined until it is registered", byte_length: frame.length, raw_frame: frame });
     }
 
     if (
@@ -323,7 +473,7 @@ function createReceiver({ store, log, spool, flood, config } = {}) {
       (derived.status === STATUS.MISSING_CUTOFF || derived.status === STATUS.NO_SCHEDULE_ROW) &&
       guard.oncePerHour(`config:${derived.work_shift_id}:${derived.status}`)
     ) {
-      await safeRaw({
+      submitRaw("raw_config_error", {
         ...base,
         outcome: "config_error",
         reason: `${derived.status}: work_shift_id ${derived.work_shift_id} has no usable Attendance Day Cutoff for the previous weekday; punches are held in the review queue`,
@@ -405,17 +555,61 @@ function createReceiver({ store, log, spool, flood, config } = {}) {
         }
         replyCommand(res, command);
         logger.request({ ...base, outcome: "command_sent", trans_id: command.trans_id, cmd_code: command.cmd_code, begin_time: command.begin_time, end_time: command.end_time, attempt: command.attempt_count, biomax_historical_pull_id: command.biomax_historical_pull_id, duration_ms: Date.now() - started });
-        await safe(() => store.touchDevice(envelope.dev_id, { punch: false }));
+        touch(envelope.dev_id, { punch: false });
         return;
       }
     }
 
     reply(res, protocol.ACK_NO_CMD);
     if (classified.unknown) {
-      await safeRaw({ ...base, outcome: "unknown_request_code", reason: `request_code ${JSON.stringify(classified.code)}`, byte_length: frame.length, raw_frame: frame });
+      // Preserved verbatim - the first identical frame per window, and at
+      // most diag.perSource per device and code. A device re-sending the
+      // same thing all day is one row plus a count, not a row per retry.
+      const dev = envelope.dev_id || "-";
+      const verdict = diag.check(`${dev}|${classified.code}`, `${dev}|${classified.code}|${ctx.bodySha256}`);
+      if (verdict.write) {
+        submitRaw("raw_unknown_request_code", { ...base, outcome: "unknown_request_code", reason: `request_code ${JSON.stringify(classified.code)}${suppressedNote(verdict.suppressed)}`, byte_length: frame.length, raw_frame: frame });
+        logger.request({ ...base, outcome: "unknown_request_code", suppressed_since_last: verdict.suppressed || undefined, duration_ms: Date.now() - started, error: true });
+      }
+    } else {
+      logger.request({ ...base, outcome: "poll", duration_ms: Date.now() - started });
     }
-    logger.request({ ...base, outcome: classified.unknown ? "unknown_request_code" : "poll", duration_ms: Date.now() - started, error: classified.unknown });
-    if (envelope.dev_id) await safe(() => store.touchDevice(envelope.dev_id, { punch: false }));
+    touch(envelope.dev_id, { punch: false });
+  }
+
+  /**
+   * realtime_enroll_data: the terminal uploading a user's enrolment record
+   * (biometric templates + profile). NOT attendance - there is no io_time in
+   * it and nothing here could become a punch - so it is never parsed, never
+   * stored and never retained: the body was read, hashed and dropped before
+   * this runs. The reply is cfg.enrollReply (ERROR_NO_CMD unless
+   * BIOMAX_ENROLL_DATA_REPLY=OK). One diagnostic row per identical upload
+   * per window, headers + size + hash only, rate-limited like any unknown
+   * code; the rest are counted.
+   */
+  function handleEnroll(ctx, classified) {
+    const { res, envelope, frame, sourceIp, started } = ctx;
+    const bodyBytes = ctx.bytesReceived || 0;
+    const base = {
+      dev_id: envelope.dev_id,
+      request_code: classified.code,
+      source_ip: sourceIp,
+      bytes: frame.length + bodyBytes,
+    };
+    reply(res, cfg.enrollReply);
+    const dev = envelope.dev_id || "-";
+    const verdict = diag.check(`${dev}|${classified.code}`, `${dev}|${classified.code}|${ctx.bodySha256}`);
+    if (verdict.write) {
+      submitRaw("raw_enroll_data", {
+        ...base,
+        outcome: "unknown_request_code",
+        reason: `realtime_enroll_data (biometric enrolment, not attendance): body ${bodyBytes} B sha256 ${String(ctx.bodySha256).slice(0, 16)} NOT stored, reply ${cfg.enrollReply}${suppressedNote(verdict.suppressed)}`,
+        byte_length: frame.length + bodyBytes,
+        raw_frame: frame, // headers only - the body was never kept
+      });
+      logger.request({ ...base, outcome: "enroll_data", reply: cfg.enrollReply, body_sha256: ctx.bodySha256, oversized: ctx.oversized || undefined, suppressed_since_last: verdict.suppressed || undefined, duration_ms: Date.now() - started });
+    }
+    touch(envelope.dev_id, { punch: false });
   }
 
   /**
@@ -500,26 +694,117 @@ function createReceiver({ store, log, spool, flood, config } = {}) {
 
     if (match === commands.MATCH.MATCHED) {
       // Any matched block, first or repeated, proves delivery: the command
-      // is answered (no more re-sends) and the pull is receiving.
-      await safe(() => store.markPullReceiving(pullId, envelope.trans_id));
+      // is answered (no more re-sends) and the pull is receiving. Critical:
+      // never dropped for queue capacity (and a later matched block would
+      // redo it anyway - the UPDATEs are guarded on status).
+      const transId = envelope.trans_id;
+      hk.submit({ name: "mark_pull_receiving", critical: true, run: () => store.markPullReceiving(pullId, transId) });
     }
     if (match !== commands.MATCH.MATCHED && stored.outcome === "stored") {
-      await safeRaw({ ...base, outcome: "unknown_request_code", reason: `send_cmd_result ${match}: trans_id ${JSON.stringify(envelope.trans_id)}`, byte_length: frame.length, raw_frame: frame });
+      submitRaw("raw_unmatched_cmd_result", { ...base, outcome: "unknown_request_code", reason: `send_cmd_result ${match}: trans_id ${JSON.stringify(envelope.trans_id)}`, byte_length: frame.length, raw_frame: frame });
     }
-    await safe(() => store.touchDevice(envelope.dev_id, { punch: false }));
+    touch(envelope.dev_id, { punch: false });
+  }
+
+  /* --------------------------------------------------------- /healthz -- */
+
+  // One DB check at a time, on the health store; a result is reused for
+  // cfg.health.cacheMs. A check still running when the budget ends keeps
+  // running (single-flight) and the NEXT probe gets its answer.
+  let healthInflight = null;
+  let healthCache = null; // {db, last, error, latency_ms, at}
+  function probeDb() {
+    if (healthInflight) return healthInflight;
+    const t0 = clock();
+    healthInflight = (async () => {
+      try {
+        const ok = await healthStore.ping();
+        const last = await healthStore.lastPunchAt();
+        return { db: ok === true, last, error: null };
+      } catch (err) {
+        return { db: false, last: healthCache ? healthCache.last : null, error: err && err.code ? String(err.code) : "error" };
+      }
+    })().then((r) => {
+      healthCache = { ...r, latency_ms: clock() - t0, at: clock() };
+      healthInflight = null;
+      return healthCache;
+    });
+    return healthInflight;
+  }
+
+  function withinBudget(promise, ms) {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(null), ms);
+      promise.then((v) => {
+        clearTimeout(timer);
+        resolve(v);
+      });
+    });
   }
 
   async function handleHealth(res) {
-    let db = false;
-    let last = null;
-    try {
-      db = await store.ping();
-      last = await store.lastPunchAt();
-    } catch (err) {
-      db = false;
+    healthRequests += 1;
+    let check;
+    if (healthCache && clock() - healthCache.at < cfg.health.cacheMs) {
+      check = { ...healthCache, cached: true };
+    } else {
+      const got = await withinBudget(probeDb(), cfg.health.dbBudgetMs);
+      check = got
+        ? { ...got, cached: false }
+        : { db: false, last: healthCache ? healthCache.last : null, error: "timeout", latency_ms: null, at: null, cached: false };
     }
-    res.writeHead(db ? 200 : 503, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: db, db, last_punch_received: last, node: process.versions.node }));
+    const s = stats();
+    const body = {
+      // `ok`/`db`/`last_punch_received` keep their meaning for the API's
+      // probe (utils/biomax_receiver_health.js): ok = able to store.
+      ok: check.db,
+      db: check.db,
+      last_punch_received: check.last,
+      node: process.versions.node,
+      process: { ok: true, uptime_s: s.uptime_s, memory: s.memory, in_flight_requests: s.in_flight_requests },
+      db_check: {
+        ok: check.db,
+        error: check.error || undefined,
+        latency_ms: check.latency_ms,
+        cached: check.cached,
+        budget_ms: cfg.health.dbBudgetMs,
+      },
+      pool: s.pool,
+      housekeeping: {
+        pending: s.housekeeping.pending,
+        running: s.housekeeping.running,
+        pending_bytes: s.housekeeping.pending_bytes,
+        dropped: s.housekeeping.dropped,
+        coalesced: s.housekeeping.coalesced,
+        failed: s.housekeeping.failed,
+      },
+      diagnostics: s.diagnostics,
+      requests_by_code: s.requests_by_code,
+    };
+    res.writeHead(check.db ? 200 : 503, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(body));
+  }
+
+  /** Everything worth watching, for /healthz and the periodic STATS line. */
+  function stats() {
+    const m = process.memoryUsage();
+    const mb = (b) => Math.round((b / 1048576) * 10) / 10;
+    const codes = {};
+    requestCounts.forEach((v, k) => {
+      codes[k] = v;
+    });
+    return {
+      uptime_s: Math.round((clock() - startedAt) / 1000),
+      memory: { heap_used_mb: mb(m.heapUsed), heap_total_mb: mb(m.heapTotal), rss_mb: mb(m.rss), external_mb: mb(m.external) },
+      in_flight_requests: inFlight,
+      health_requests: healthRequests,
+      requests_by_code: codes,
+      housekeeping: hk.stats(),
+      diagnostics: diag.stats(),
+      device_touch: { ...touchTotals, interval_ms: cfg.deviceTouchIntervalMs },
+      pool: typeof store.poolStats === "function" ? store.poolStats() : null,
+      health_pool: healthStore !== store && typeof healthStore.poolStats === "function" ? healthStore.poolStats() : null,
+    };
   }
 
   async function handle(req, res) {
@@ -531,6 +816,7 @@ function createReceiver({ store, log, spool, flood, config } = {}) {
 
     const envelope = protocol.readEnvelope(req.headers);
     const classified = protocol.classifyRequest(req.headers);
+    countRequest(classified.code);
     const limit = classified.kind === "cmd_result" ? cfg.commandResultMaxBodyBytes : cfg.maxBodyBytes;
 
     // A result the device announces as larger than we can keep whole is
@@ -542,33 +828,33 @@ function createReceiver({ store, log, spool, flood, config } = {}) {
       return refuse(req);
     }
 
+    // An enrolment upload is read and hashed, never kept; an unknown code is
+    // kept (it may be preserved) and hashed so identical retries coalesce.
+    const isEnroll = classified.kind === "enroll";
     let read;
     try {
-      read = await readBody(req, limit);
+      read = await readBody(req, limit, { keep: !isEnroll, hash: isEnroll || classified.unknown });
     } catch (err) {
       logger.request({ request_code: classified.code || null, dev_id: envelope.dev_id, source_ip: sourceIp, outcome: "read_error", error: err.message, duration_ms: Date.now() - started });
       return refuse(req);
     }
 
     const frame = rebuildFrame(req, read.body);
-    const ctx = { req, res, envelope, body: read.body, frame, sourceIp, sourcePort, started, oversized: read.oversized, bytesReceived: read.size };
+    const ctx = { req, res, envelope, body: read.body, frame, sourceIp, sourcePort, started, oversized: read.oversized, bytesReceived: read.size, bodySha256: read.sha256 };
 
     if (classified.kind === "punch") return handlePunch(ctx);
     if (classified.kind === "cmd_result") return handleCmdResult(ctx, classified);
+    if (isEnroll) return handleEnroll(ctx, classified);
     return handlePoll(ctx, classified);
   }
 
-  async function safe(fn) {
-    try {
-      await fn();
-    } catch (err) {
-      logger.error("HOUSEKEEPING_FAILED", err && err.message ? err.message : String(err));
-    }
-  }
-  const safeRaw = (entry) => safe(() => store.insertRawRequest(entry));
   const nullable = (v) => (v === undefined ? null : v);
 
   const server = http.createServer((req, res) => {
+    inFlight += 1;
+    res.once("close", () => {
+      inFlight -= 1;
+    });
     handle(req, res).catch((err) => {
       logger.error("UNHANDLED", err && err.stack ? err.stack : String(err));
       try {
@@ -580,6 +866,7 @@ function createReceiver({ store, log, spool, flood, config } = {}) {
   });
   server.timeout = cfg.socketTimeoutMs;
   server.keepAliveTimeout = 1000;
+  server.maxConnections = cfg.maxConnections;
 
   function listen(port = cfg.port, host = cfg.host) {
     return new Promise((resolve, reject) => {
@@ -591,11 +878,27 @@ function createReceiver({ store, log, spool, flood, config } = {}) {
     });
   }
 
-  function close() {
-    return new Promise((resolve) => server.close(() => resolve()));
+  /**
+   * Stop accepting, let in-flight requests finish, then stop housekeeping:
+   * what has not started is dropped (counted), what is running gets
+   * housekeepingTimeoutMs. After this nothing touches the store, so the
+   * caller may end the pool without a tail of "Pool is closed" failures.
+   */
+  async function close({ serverTimeoutMs = 0, housekeepingTimeoutMs = 2000 } = {}) {
+    await new Promise((resolve) => {
+      // serverTimeoutMs: stop WAITING for in-flight requests after this long
+      // (0 = wait for all). They keep running; a punch that has not been
+      // ACKed by the hard exit is retransmitted (R1).
+      const timer = serverTimeoutMs > 0 ? setTimeout(resolve, serverTimeoutMs) : null;
+      server.close(() => {
+        if (timer) clearTimeout(timer);
+        resolve();
+      });
+    });
+    return hk.close({ timeoutMs: housekeepingTimeoutMs });
   }
 
-  return { server, handle, listen, close, config: cfg };
+  return { server, handle, listen, close, stats, housekeeping: hk, config: cfg };
 }
 
 /* ----------------------------------------------------------------- main -- */
@@ -633,14 +936,12 @@ async function main() {
     console.error(`biomax-receiver: config.json has no db.mysql.${dbEnv} block`);
     process.exit(78);
   }
-  const { createPool, createStore } = require("./store");
-  const pool = createPool(dbConfig);
-  const store = createStore(pool);
   const log = createLog();
+  const runtime = createRuntime({ dbConfig, log });
 
-  await store.ping();
+  await runtime.store.ping();
 
-  const receiver = createReceiver({ store, log });
+  const receiver = runtime.receiver;
   const address = await receiver.listen();
   log.info("STARTED", `listening on ${address.address}:${address.port}`, {
     node: process.versions.node,
@@ -653,6 +954,13 @@ async function main() {
     command_lease_seconds: receiver.config.commandLeaseSeconds,
     command_max_attempts: receiver.config.commandMaxAttempts,
     flood: receiver.config.flood,
+    max_connections: receiver.config.maxConnections,
+    db_limits: receiver.config.db,
+    health: receiver.config.health,
+    housekeeping: receiver.config.housekeeping,
+    device_touch_interval_ms: receiver.config.deviceTouchIntervalMs,
+    diag: receiver.config.diag,
+    enroll_reply: receiver.config.enrollReply,
   });
 
   let stopping = false;
@@ -663,13 +971,69 @@ async function main() {
     // Stop accepting; in-flight requests finish. A request cut off by the
     // hard exit below simply gets no ACK and is retransmitted (R1).
     const timer = setTimeout(() => process.exit(0), 5000);
-    await receiver.close();
-    await store.close();
+    const summary = await runtime.stop();
+    log.info("STOPPED", "receiver closed", summary);
     clearTimeout(timer);
     process.exit(0);
   };
   process.on("SIGTERM", () => stop("SIGTERM"));
   process.on("SIGINT", () => stop("SIGINT"));
+}
+
+/**
+ * The production wiring, shared by main() and the stress harness:
+ *
+ *   pool        the receiver's own, connectionLimit 3 (unchanged), with a
+ *               bounded waiter queue and acquire/query deadlines
+ *   healthPool  ONE connection, used by /healthz only, so a saturated main
+ *               pool can never make the health check wait behind it
+ *   STATS       one log line every statsIntervalMs: memory, pool depth,
+ *               housekeeping, diagnostics, request counts by code
+ *
+ * stop(): server closed -> housekeeping closed (nothing new, pending
+ * dropped) -> pools ended, in that order.
+ */
+function createRuntime({ dbConfig, log, env = process.env, config } = {}) {
+  const { createPool, createStore } = require("./store");
+  const cfg = mergeConfig(readConfig(env), config);
+  const logger = log || createLog();
+  const pool = createPool(dbConfig, {
+    queueLimit: cfg.db.queueLimit,
+    acquireTimeoutMs: cfg.db.acquireTimeoutMs,
+    connectTimeoutMs: cfg.db.acquireTimeoutMs,
+  });
+  const store = createStore(pool, { acquireTimeoutMs: cfg.db.acquireTimeoutMs, queryTimeoutMs: cfg.db.queryTimeoutMs });
+  const healthPool = createPool(dbConfig, {
+    connectionLimit: 1,
+    queueLimit: 2,
+    acquireTimeoutMs: cfg.health.queryTimeoutMs,
+    connectTimeoutMs: cfg.health.queryTimeoutMs,
+  });
+  const healthStore = createStore(healthPool, { acquireTimeoutMs: cfg.health.queryTimeoutMs, queryTimeoutMs: cfg.health.queryTimeoutMs });
+  const receiver = createReceiver({ store, log: logger, health: healthStore, config: cfg });
+
+  const statsTimer = setInterval(() => {
+    try {
+      logger.info("STATS", "receiver resource snapshot", receiver.stats());
+    } catch (err) {
+      /* a log line is never worth a crash */
+    }
+  }, cfg.statsIntervalMs);
+  if (typeof statsTimer.unref === "function") statsTimer.unref();
+
+  let stopped = null;
+  function stop() {
+    if (stopped) return stopped;
+    clearInterval(statsTimer);
+    stopped = (async () => {
+      const housekeeping = await receiver.close({ serverTimeoutMs: 2500, housekeepingTimeoutMs: 1500 });
+      await Promise.all([store.close({ timeoutMs: 500 }), healthStore.close({ timeoutMs: 500 })]);
+      return { housekeeping };
+    })();
+    return stopped;
+  }
+
+  return { pool, healthPool, store, healthStore, receiver, stats: () => receiver.stats(), stop, config: cfg };
 }
 
 if (require.main === module) {
@@ -679,4 +1043,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createReceiver, readConfig, rebuildFrame, assertRuntime, MIN_NODE_MAJOR, TESTED_NODE_MAJORS, DEFAULT_COMMAND_RESULT_MAX_BODY, HARD_COMMAND_RESULT_MAX_BODY };
+module.exports = { createReceiver, createRuntime, readConfig, rebuildFrame, assertRuntime, MIN_NODE_MAJOR, TESTED_NODE_MAJORS, DEFAULT_COMMAND_RESULT_MAX_BODY, HARD_COMMAND_RESULT_MAX_BODY };

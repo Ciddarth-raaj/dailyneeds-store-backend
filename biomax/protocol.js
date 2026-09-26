@@ -36,6 +36,17 @@ const REQUEST_POLL = "receive_cmd";
  * receiver keeps whatever arrives under it byte for byte.
  */
 const REQUEST_CMD_RESULT = "send_cmd_result";
+/**
+ * The terminal pushing a user's ENROLMENT record - the biometric templates
+ * (face/finger) and profile it just captured or changed - to the server in
+ * real time. It is not a punch and carries no attendance: nothing in it has
+ * an io_time. Observed in production 2026-09 at 26-35 KB a frame, re-sent
+ * over and over by several terminals. Classified on its own so the receiver
+ * can answer it cheaply and never keep the biometric body (see receiver.js,
+ * handleEnroll); it used to fall through to "unknown request code" and cost a
+ * full BLOB row per retry.
+ */
+const REQUEST_ENROLL = "realtime_enroll_data";
 
 const ACK_OK = "OK";
 const ACK_NO_CMD = "ERROR_NO_CMD";
@@ -77,6 +88,7 @@ function classifyRequest(headers) {
   if (code === REQUEST_PUNCH) return { kind: "punch", code, unknown: false };
   if (code === REQUEST_POLL) return { kind: "poll", code, unknown: false };
   if (code === REQUEST_CMD_RESULT) return { kind: "cmd_result", code, unknown: false };
+  if (code === REQUEST_ENROLL) return { kind: "enroll", code, unknown: false };
   return { kind: "poll", code, unknown: true };
 }
 
@@ -320,6 +332,7 @@ module.exports = {
   REQUEST_PUNCH,
   REQUEST_POLL,
   REQUEST_CMD_RESULT,
+  REQUEST_ENROLL,
   ACK_OK,
   ACK_NO_CMD,
   DEFAULT_MAX_BODY_BYTES,

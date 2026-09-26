@@ -161,7 +161,11 @@ recorded as technical debt (§10).
 
 Env: `BIOMAX_PORT` (7005), `BIOMAX_HOST`, `BIOMAX_MAX_BODY`,
 `BIOMAX_SOCKET_TIMEOUT_MS`, `BIOMAX_SPOOL_DIR`, `BIOMAX_UNREG_PER_MINUTE`,
-`BIOMAX_UNREG_PER_DAY`, `BIOMAX_UNREG_DEVICES_PER_DAY`. DB from the same
+`BIOMAX_UNREG_PER_DAY`, `BIOMAX_UNREG_DEVICES_PER_DAY`, plus the resource
+limits (`BIOMAX_DB_*`, `BIOMAX_HEALTH_*`, `BIOMAX_HOUSEKEEPING_*`,
+`BIOMAX_DEVICE_TOUCH_INTERVAL_MS`, `BIOMAX_DIAG_*`, `BIOMAX_MAX_CONNECTIONS`,
+`BIOMAX_ENROLL_DATA_REPLY`) in `docs/biomax-receiver-resource-limits.md`.
+DB from the same
 `config.json` `db.mysql[env]` section as `drivers/mysql.js` (the primary
 application database; never the GoFrugal pool).
 

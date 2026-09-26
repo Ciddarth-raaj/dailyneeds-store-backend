@@ -466,3 +466,86 @@ describe("lastPunchAt answers for the RECEIVER, not for attendance at large", ()
     assert.equal(await store.lastPunchAt(), null);
   });
 });
+
+/* ============== deadlines and pool visibility (the 2026-09 OOM) ======== */
+
+describe("deadlines: off by default, enforced when the receiver asks", () => {
+  it("without options a store queries exactly as before (the API's import store)", async () => {
+    const pool = fakePool();
+    const store = createStore(pool);
+    await store.ping();
+    assert.equal(pool.log[0].sql, "SELECT 1");
+  });
+
+  it("acquireTimeoutMs: a saturated pool fails fast with BIOMAX_POOL_ACQUIRE_TIMEOUT, and a late connection goes straight back", async () => {
+    let late = null;
+    let released = 0;
+    const pool = { getConnection: (cb) => (late = cb) };
+    const store = createStore(pool, { acquireTimeoutMs: 30, queryTimeoutMs: 1000 });
+    const t0 = Date.now();
+    await assert.rejects(store.insertRawRequest({ outcome: "unparsed" }), (err) => err.code === "BIOMAX_POOL_ACQUIRE_TIMEOUT");
+    assert.ok(Date.now() - t0 < 500);
+    late(null, { release: () => released++, query() {} });
+    assert.equal(released, 1);
+  });
+
+  it("a punch that cannot get a connection in time is an error - the receiver's no-ACK path (R1)", async () => {
+    const pool = { getConnection() {} };
+    const store = createStore(pool, { acquireTimeoutMs: 20 });
+    await assert.rejects(store.insertPunch(punch, derived), /BIOMAX_POOL_ACQUIRE_TIMEOUT|no database connection/);
+  });
+
+  it("queryTimeoutMs is passed to every statement, inside the punch transaction too", async () => {
+    const seen = [];
+    const conn = {
+      query(opts, params, cb) {
+        seen.push(typeof opts === "object" ? opts.timeout : "none");
+        cb(null, { affectedRows: 1, insertId: 5 });
+      },
+      beginTransaction: (cb) => cb(null),
+      commit(opts, cb) {
+        seen.push(`commit:${opts.timeout}`);
+        cb(null);
+      },
+      rollback: (cb) => cb(null),
+      release() {},
+    };
+    const store = createStore({ getConnection: (cb) => cb(null, conn) }, { acquireTimeoutMs: 100, queryTimeoutMs: 1234 });
+    const got = await store.insertPunch(punch, derived);
+    assert.equal(got.outcome, "stored");
+    assert.deepEqual(seen, [1234, 1234, "commit:1234"]);
+  });
+
+  it("poolStats reads the mysql pool's counters, and nulls for anything else", () => {
+    const pool = { config: { connectionLimit: 3, queueLimit: 50 }, _allConnections: [1, 2, 3], _freeConnections: [], _acquiringConnections: [], _connectionQueue: [1, 2] };
+    assert.deepEqual(createStore(pool).poolStats(), { connection_limit: 3, queue_limit: 50, all: 3, free: 0, acquiring: 0, queued: 2, closed: false });
+    assert.equal(createStore(fakePool()).poolStats().queued, null);
+  });
+
+  it("after close() nothing reaches the pool, and close({timeoutMs}) destroys a connection stuck in a statement", async () => {
+    let destroyed = 0;
+    let ended = 0;
+    const stuck = { destroy: () => destroyed++ };
+    const pool = { _allConnections: [stuck], end: () => ended++, getConnection: () => assert.fail("pool used after close") };
+    const store = createStore(pool, { acquireTimeoutMs: 100 });
+    await store.close({ timeoutMs: 20 });
+    assert.equal(ended, 1);
+    assert.equal(destroyed, 1);
+    await assert.rejects(store.touchDevice("X", {}), (err) => err.code === "POOL_CLOSED");
+  });
+});
+
+describe("createPool", () => {
+  it("keeps connectionLimit 3 and sets a bounded waiter queue when asked", () => {
+    const { createPool } = require("./store");
+    const pool = createPool({ host: "127.0.0.1", username: "u", password: "p", database: "d", port: 3306 }, { queueLimit: 50, acquireTimeoutMs: 5000 });
+    assert.equal(pool.config.connectionLimit, 3);
+    assert.equal(pool.config.queueLimit, 50);
+    assert.equal(pool.config.acquireTimeout, 5000);
+    const unchanged = createPool({ host: "127.0.0.1", username: "u", password: "p", database: "d", port: 3306 });
+    assert.equal(unchanged.config.connectionLimit, 3);
+    assert.equal(unchanged.config.queueLimit, 0);
+    pool.end(() => {});
+    unchanged.end(() => {});
+  });
+});

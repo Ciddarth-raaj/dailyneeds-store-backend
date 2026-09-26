@@ -16,9 +16,12 @@ unchanged.
 
 ## Why `last_seen_at`, never `last_punch_at`
 
-`biomax/receiver.js` calls `store.touchDevice(dev_id, { punch: false })` on
-**every** request, including the bare `receive_cmd` poll a terminal sends
-when nobody is standing in front of it. `last_punch_at` only moves when an
+`biomax/receiver.js` refreshes `last_seen_at` on **any** request, including
+the bare `receive_cmd` poll a terminal sends when nobody is standing in front
+of it - at most once per device per `BIOMAX_DEVICE_TOUCH_INTERVAL_MS`
+(default 60 s) for non-punch traffic, and on every punch (see
+`docs/biomax-receiver-resource-limits.md`). That granularity is far inside
+the 15/60-minute thresholds below. `last_punch_at` only moves when an
 employee puts a face to the terminal, so a healthy device in a quiet outlet
 would look dead by that measure all night.
 

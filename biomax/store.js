@@ -56,9 +56,23 @@ const INGEST_SOURCE = { LIVE: "LIVE", HISTORICAL_PULL: "HISTORICAL_PULL", DIGISM
 
 const sha256 = (buf) => crypto.createHash("sha256").update(buf).digest("hex");
 
-function createPool(dbConfig) {
+/**
+ * The receiver's pool. `connectionLimit` stays 3 - the fix for the 2026-09
+ * OOM was to stop queueing unbounded work on it, not to widen it.
+ *
+ * options.queueLimit    waiters the pool will hold before failing fast with
+ *                       POOL_ENQUEUELIMIT (mysql's own default, 0, is
+ *                       unlimited - that queue was the leak)
+ * options.acquireTimeoutMs / connectTimeoutMs  how long connecting or the
+ *                       pre-use ping of a pooled connection may take
+ * options.connectionLimit  3 unless said otherwise (the /healthz pool uses 1)
+ */
+function createPool(dbConfig, options = {}) {
   return mysql.createPool({
-    connectionLimit: 3,
+    connectionLimit: Number.isSafeInteger(options.connectionLimit) && options.connectionLimit > 0 ? options.connectionLimit : 3,
+    queueLimit: Number.isSafeInteger(options.queueLimit) && options.queueLimit >= 0 ? options.queueLimit : 0,
+    ...(options.acquireTimeoutMs ? { acquireTimeout: options.acquireTimeoutMs } : {}),
+    ...(options.connectTimeoutMs ? { connectTimeout: options.connectTimeoutMs } : {}),
     host: dbConfig.host,
     user: dbConfig.username,
     password: dbConfig.password,
@@ -76,13 +90,71 @@ function createPool(dbConfig) {
  * @param {object} pool a `mysql` pool (or anything with .query/.getConnection)
  * @param {object} [options]
  * @param {function} [options.now] clock, for the schedule cache
+ * @param {number} [options.acquireTimeoutMs] give up waiting for a pooled
+ *   connection after this long (error code BIOMAX_POOL_ACQUIRE_TIMEOUT).
+ *   mysql's own acquireTimeout does NOT cover time spent in the pool's
+ *   queue, only connecting - this does.
+ * @param {number} [options.queryTimeoutMs] per-statement timeout (mysql's
+ *   `timeout`; the connection is destroyed, which rolls back any open
+ *   transaction server-side).
+ *
+ * Both are off unless given: the API's DigiSME import builds a store on the
+ * API pool and keeps its behaviour. The receiver always passes them.
  */
 function createStore(pool, options = {}) {
   const now = options.now || (() => Date.now());
   const scheduleCache = new Map(); // `${shift}:${dow}` -> {at, row}
   const assignmentCache = new Map(); // `assignments:${employee}` -> {at, rows}
+  const acquireTimeoutMs = positiveOrNull(options.acquireTimeoutMs);
+  const queryTimeoutMs = positiveOrNull(options.queryTimeoutMs);
+  const timed = acquireTimeoutMs !== null || queryTimeoutMs !== null;
+  let closed = false;
 
-  const q = (sql, params) => queryAsync(pool, sql, params);
+  /** A pooled connection, or an error within acquireTimeoutMs. */
+  function acquire() {
+    if (closed) return Promise.reject(poolClosedError());
+    if (acquireTimeoutMs === null) return getConnectionAsync(pool);
+    return new Promise((resolve, reject) => {
+      let expired = false;
+      const timer = setTimeout(() => {
+        expired = true;
+        const err = new Error(`no database connection within ${acquireTimeoutMs} ms (receiver pool saturated)`);
+        err.code = "BIOMAX_POOL_ACQUIRE_TIMEOUT";
+        reject(err);
+      }, acquireTimeoutMs);
+      pool.getConnection((err, connection) => {
+        clearTimeout(timer);
+        if (expired) {
+          // Too late for the caller; hand it straight back.
+          if (connection) connection.release();
+          return;
+        }
+        if (err) reject(err);
+        else resolve(connection);
+      });
+    });
+  }
+
+  /** One statement on a held connection, under queryTimeoutMs. */
+  function cq(connection, sql, params) {
+    if (queryTimeoutMs === null) return queryAsync(connection, sql, params);
+    return queryAsync(connection, { sql, timeout: queryTimeoutMs }, params);
+  }
+  function commitT(connection) {
+    if (queryTimeoutMs === null) return commitAsync(connection);
+    return new Promise((resolve, reject) => connection.commit({ timeout: queryTimeoutMs }, (err) => (err ? reject(err) : resolve())));
+  }
+
+  async function q(sql, params) {
+    if (closed) throw poolClosedError();
+    if (!timed) return queryAsync(pool, sql, params);
+    const connection = await acquire();
+    try {
+      return await cq(connection, sql, params);
+    } finally {
+      connection.release();
+    }
+  }
 
   /* ------------------------------------------------------------- reads -- */
 
@@ -172,7 +244,7 @@ function createStore(pool, options = {}) {
     if (source === INGEST_SOURCE.HISTORICAL_PULL && !pullId) {
       throw new Error("a HISTORICAL_PULL punch must name its biomax_historical_pull_id");
     }
-    const connection = await getConnectionAsync(pool);
+    const connection = await acquire();
     try {
       await beginTransactionAsync(connection);
 
@@ -180,19 +252,19 @@ function createStore(pool, options = {}) {
       // retransmission counter (that means "the device re-sent a live
       // punch"), not the source, nothing. Same unique key, looked up first.
       if (source === INGEST_SOURCE.HISTORICAL_PULL) {
-        const existing = await queryAsync(
+        const existing = await cq(
           connection,
           `SELECT biomax_punch_id FROM biomax_punch
             WHERE dev_id = ? AND user_id = ? AND io_time_raw = ?`,
           [punch.dev_id, punch.user_id, punch.io_time_raw]
         );
         if (existing && existing[0]) {
-          await commitAsync(connection);
+          await commitT(connection);
           return { outcome: "duplicate", biomax_punch_id: Number(existing[0].biomax_punch_id) };
         }
       }
 
-      const result = await queryAsync(
+      const result = await cq(
         connection,
         `INSERT INTO biomax_punch
            (dev_id, user_id, io_time_raw, io_time,
@@ -230,12 +302,12 @@ function createStore(pool, options = {}) {
 
       // mysql: affectedRows 1 = inserted, 2 = existing row updated.
       if (result.affectedRows !== 1) {
-        await commitAsync(connection);
+        await commitT(connection);
         return { outcome: "duplicate", biomax_punch_id: null };
       }
       const punchId = result.insertId;
 
-      await queryAsync(
+      await cq(
         connection,
         `INSERT INTO biomax_punch_derived
            (biomax_punch_id, attendance_date, derivation_status,
@@ -256,7 +328,7 @@ function createStore(pool, options = {}) {
         ]
       );
 
-      await commitAsync(connection);
+      await commitT(connection);
       return { outcome: "stored", biomax_punch_id: Number(punchId) };
     } catch (err) {
       await rollbackAsync(connection).catch(() => {});
@@ -282,12 +354,12 @@ function createStore(pool, options = {}) {
    */
   async function insertImportedPunch(punch, derived, options) {
     if (!options.importBatchId) throw new Error("a DIGISME_IMPORT punch must name its import_batch_id");
-    const connection = await getConnectionAsync(pool);
+    const connection = await acquire();
     try {
       await beginTransactionAsync(connection);
       let result;
       try {
-        result = await queryAsync(
+        result = await cq(
           connection,
           `INSERT INTO biomax_punch
              (dev_id, user_id, io_time_raw, io_time,
@@ -326,7 +398,7 @@ function createStore(pool, options = {}) {
         throw err;
       }
       const punchId = result.insertId;
-      await queryAsync(
+      await cq(
         connection,
         `INSERT INTO biomax_punch_derived
            (biomax_punch_id, attendance_date, derivation_status,
@@ -346,7 +418,7 @@ function createStore(pool, options = {}) {
           derived.cutoff_applied,
         ]
       );
-      await commitAsync(connection);
+      await commitT(connection);
       return { outcome: "stored", biomax_punch_id: Number(punchId) };
     } catch (err) {
       await rollbackAsync(connection).catch(() => {});
@@ -378,7 +450,12 @@ function createStore(pool, options = {}) {
     );
   }
 
-  /** last_seen_at on every request; first_seen_at once; last_punch_at on punches. */
+  /**
+   * first_seen_at once; last_seen_at; last_punch_at on punches. The receiver
+   * no longer calls this on every request: it goes through the housekeeping
+   * queue, at most once per device per BIOMAX_DEVICE_TOUCH_INTERVAL_MS for
+   * polls and other traffic, and for every punch.
+   */
   async function touchDevice(devId, { punch } = {}) {
     await q(
       `UPDATE biomax_device
@@ -411,10 +488,10 @@ function createStore(pool, options = {}) {
   async function claimPendingCommand(devId, sourceIp, options = {}) {
     const leaseSeconds = Number.isSafeInteger(options.leaseSeconds) && options.leaseSeconds > 0 ? options.leaseSeconds : 600;
     const maxAttempts = Number.isSafeInteger(options.maxAttempts) && options.maxAttempts > 0 ? options.maxAttempts : 3;
-    const connection = await getConnectionAsync(pool);
+    const connection = await acquire();
     try {
       await beginTransactionAsync(connection);
-      const rows = await queryAsync(
+      const rows = await cq(
         connection,
         `SELECT biomax_device_command_id, biomax_historical_pull_id, trans_id, dev_id, cmd_code, begin_time, end_time, status, attempt_count
            FROM biomax_device_command
@@ -430,10 +507,10 @@ function createStore(pool, options = {}) {
       );
       const command = rows && rows[0] ? rows[0] : null;
       if (!command) {
-        await commitAsync(connection);
+        await commitT(connection);
         return null;
       }
-      const claimed = await queryAsync(
+      const claimed = await cq(
         connection,
         `UPDATE biomax_device_command
             SET status = 'SENT',
@@ -449,14 +526,14 @@ function createStore(pool, options = {}) {
         await rollbackAsync(connection);
         return null;
       }
-      await queryAsync(
+      await cq(
         connection,
         `UPDATE biomax_historical_pull
             SET status = 'WAITING_DEVICE', sent_at = COALESCE(sent_at, NOW(3))
           WHERE biomax_historical_pull_id = ? AND status = 'REQUESTED'`,
         [command.biomax_historical_pull_id]
       );
-      await commitAsync(connection);
+      await commitT(connection);
       return {
         biomax_device_command_id: Number(command.biomax_device_command_id),
         biomax_historical_pull_id: Number(command.biomax_historical_pull_id),
@@ -605,10 +682,57 @@ function createStore(pool, options = {}) {
     return rows && rows[0] ? rows[0].last_received : null;
   }
 
-  function close() {
+  /**
+   * The pool's own counters, for /healthz and the periodic STATS line.
+   * mysql 2.x keeps them in underscore fields; read defensively so a fake
+   * pool (or a driver upgrade) yields nulls, never a crash.
+   */
+  function poolStats() {
+    const len = (a) => (Array.isArray(a) ? a.length : null);
+    const config = pool && pool.config ? pool.config : {};
+    return {
+      connection_limit: typeof config.connectionLimit === "number" ? config.connectionLimit : null,
+      queue_limit: typeof config.queueLimit === "number" ? config.queueLimit : null,
+      all: len(pool && pool._allConnections),
+      free: len(pool && pool._freeConnections),
+      acquiring: len(pool && pool._acquiringConnections),
+      queued: len(pool && pool._connectionQueue),
+      closed,
+    };
+  }
+
+  /**
+   * End the pool. pool.end() waits for every connection's current statement
+   * to finish before its QUIT; with `timeoutMs` a statement still running
+   * after that long has its connection destroyed instead (the server rolls
+   * back an open transaction; an un-ACKed punch is retransmitted, R1).
+   */
+  function close({ timeoutMs = 0 } = {}) {
+    closed = true;
     return new Promise((resolve) => {
-      if (pool && typeof pool.end === "function") pool.end(() => resolve());
-      else resolve();
+      if (!pool || typeof pool.end !== "function") return resolve();
+      const connections = Array.isArray(pool._allConnections) ? pool._allConnections.slice() : [];
+      let done = false;
+      let timer = null;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        if (timer) clearTimeout(timer);
+        resolve();
+      };
+      if (timeoutMs > 0) {
+        timer = setTimeout(() => {
+          connections.forEach((c) => {
+            try {
+              c.destroy();
+            } catch (e) {
+              /* already gone */
+            }
+          });
+          finish();
+        }, timeoutMs);
+      }
+      pool.end(() => finish());
     });
   }
 
@@ -627,8 +751,19 @@ function createStore(pool, options = {}) {
     markPullFailed,
     ping,
     lastPunchAt,
+    poolStats,
     close,
   };
+}
+
+function positiveOrNull(v) {
+  return Number.isFinite(v) && v > 0 ? v : null;
+}
+
+function poolClosedError() {
+  const err = new Error("Pool is closed.");
+  err.code = "POOL_CLOSED";
+  return err;
 }
 
 module.exports = { createPool, createStore, SCHEDULE_CACHE_MS, INGEST_SOURCE, sha256 };
