@@ -30,3 +30,10 @@ Use short kebab-case names derived from the request, for example:
 - `feat/price-checker`
 - `fix/migration-timeout`
 - `chore/autodeploy-agents`
+
+## Code changes
+
+- Make the smallest change that solves the request. Do not edit unrelated files.
+- Add or update tests only when the change needs them.
+- Do not change the database unless the request cannot be done without a schema or data change.
+- When a database change is required, add a db-migrate migration under `migrations/mysql` with `up` and `down`. Follow the existing SQL-file pattern in `migrations/mysql/migrations/` and `migrations/mysql/migrations/sqls/`. Do not change the schema by hand.
