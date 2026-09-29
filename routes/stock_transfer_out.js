@@ -10,10 +10,19 @@ function parseOptionalIsoDate(raw, label) {
     return { ok: false, msg: `${label} must be YYYY-MM-DD` };
   }
   const d = new Date(`${s}T00:00:00Z`);
-  if (Number.isNaN(d.getTime())) {
+  // `new Date` rolls 2026-02-31 over to March; a real date round-trips unchanged.
+  if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== s) {
     return { ok: false, msg: `${label} is not a valid calendar date` };
   }
   return { ok: true, value: s };
+}
+
+function parseIntInRange(raw, label, min, max) {
+  const s = raw === undefined || raw === null ? "" : String(raw).trim();
+  if (!/^\d+$/.test(s) || Number(s) < min || Number(s) > max) {
+    return { ok: false, msg: `${label} must be an integer from ${min} to ${max}` };
+  }
+  return { ok: true, value: Number(s) };
 }
 
 class StockTransferOutRoutes {
@@ -50,6 +59,23 @@ class StockTransferOutRoutes {
           to_date: toParsed.value,
         });
         res.json({ code: 200, data: list });
+      } catch (err) {
+        respondError(res, err);
+      }
+      res.end();
+    });
+
+    router.get("/calendar", async (req, res) => {
+      try {
+        const year = parseIntInRange(req.query.year, "year", 2000, 2100);
+        const month = parseIntInRange(req.query.month, "month", 1, 12);
+        if (!year.ok || !month.ok) {
+          res.status(400).json({ code: 400, msg: (!year.ok ? year : month).msg });
+          res.end();
+          return;
+        }
+        const days = await this.stockTransferOutUsecase.getCalendar(year.value, month.value);
+        res.json({ code: 200, data: days });
       } catch (err) {
         respondError(res, err);
       }

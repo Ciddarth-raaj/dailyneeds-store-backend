@@ -37,6 +37,38 @@ class StoCheckUsecase {
     }
   }
 
+  async getByDnRefNos(dn_ref_nos) {
+    try {
+      return await this.stoCheckRepo.getByDnRefNos(dn_ref_nos);
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "USECASE.STO_CHECK",
+        code: "USECASE.STO_CHECK.GET_BY_DN_REF_NOS",
+        description: err.toString(),
+        category: "",
+        ref: {},
+      });
+      throw err;
+    }
+  }
+
+  async getCheckedDnRefNos(dn_ref_nos) {
+    try {
+      return await this.stoCheckRepo.getCheckedDnRefNos(dn_ref_nos);
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "USECASE.STO_CHECK",
+        code: "USECASE.STO_CHECK.GET_CHECKED_DN_REF_NOS",
+        description: err.toString(),
+        category: "",
+        ref: {},
+      });
+      throw err;
+    }
+  }
+
   async getOne(dn_ref_no, product_id) {
     try {
       return await this.stoCheckRepo.getOne(dn_ref_no, product_id);

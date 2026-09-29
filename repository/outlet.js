@@ -322,6 +322,51 @@ class OutletRepository {
     });
   }
 
+  /**
+   * `getOutletByGofrugalId` for many ids in one query. Returns
+   * `{ [String(gofrugal_id)]: outlet }`; where two outlets share an id the
+   * lowest outlet_id wins. The outlet master is small, so no chunking.
+   */
+  getOutletsByGofrugalIds(gofrugal_ids) {
+    return new Promise((resolve, reject) => {
+      const ids = [
+        ...new Set(
+          (gofrugal_ids || [])
+            .filter((id) => id != null && id !== "")
+            .map((id) => String(id))
+        ),
+      ];
+      if (ids.length === 0) {
+        resolve({});
+        return;
+      }
+      this.db.query(
+        `SELECT * FROM outlets WHERE gofrugal_id IN (${ids.map(() => "?").join(",")}) ORDER BY outlet_id`,
+        ids,
+        (err, docs) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.OUTLET",
+              code: "REPOSITORY.OUTLET.GET-BY-GOFRUGAL-IDS",
+              description: err.toString(),
+              category: "",
+              ref: { count: ids.length },
+            });
+            reject(err);
+            return;
+          }
+          const byId = {};
+          (docs || []).forEach((row) => {
+            const key = String(row.gofrugal_id);
+            if (!(key in byId)) byId[key] = row;
+          });
+          resolve(byId);
+        }
+      );
+    });
+  }
+
   bulkCreate(rows) {
     return new Promise((resolve, reject) => {
       if (!Array.isArray(rows) || rows.length === 0) {
