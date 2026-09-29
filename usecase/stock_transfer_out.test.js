@@ -279,6 +279,17 @@ describe("2. is_checked=true does not load or enrich unchecked history", () => {
   });
 });
 
+describe("all mode (no is_checked)", () => {
+  it("returns checked and unchecked STOs, each flagged, newest first", async () => {
+    const { usecase } = wire(dataset({ n: 4 })); // Dn_no 1 and 3 checked
+    const list = await usecase.get({ from_date: "2026-09-15", to_date: "2026-09-15" });
+    assert.deepEqual(
+      list.map((h) => [h.Dn_no, h.is_checked, h.file_items.length, h.items.length]),
+      [[4, false, 0, 3], [3, true, 2, 3], [2, false, 0, 3], [1, true, 2, 3]]
+    );
+  });
+});
+
 describe("3/4. branch and sto_check enrichment are batched", () => {
   it("one outlet query over the distinct Cust_Codes, one sto_check query over the refs", async () => {
     const { usecase, app } = wire(dataset({ n: 25 }));
@@ -454,6 +465,26 @@ describe("9. calendar month boundaries", () => {
     assert.equal(ctx.gofrugal.queries.length + ctx.app.queries.length, 2);
     assert.equal(dtlQueries(ctx.gofrugal.queries).length, 0);
     assert.doesNotMatch(ctx.app.queries[0].sql, /product_table/);
+  });
+
+  it("year boundary: Dec 31 23:59:59 is December, Jan 1 00:00:00 is January", async () => {
+    const tables = dataset({
+      hdr: [
+        { Dn_no: 1, Dn_Ref_no: 11, DN_date: "2026-11-30 23:59:59", Cust_Code: 101 },
+        { Dn_no: 2, Dn_Ref_no: 12, DN_date: "2026-12-31 23:59:59", Cust_Code: 101 },
+        { Dn_no: 3, Dn_Ref_no: 13, DN_date: "2027-01-01 00:00:00", Cust_Code: 101 },
+      ],
+      checkedEvery: 0,
+    });
+    const { usecase } = wire(tables);
+    assert.deepEqual(await usecase.getCalendar(2026, 12), [
+      { date: "2026-12-31", total: 1, checked: 0, unchecked: 1 },
+    ]);
+    assert.deepEqual(await usecase.getCalendar(2027, 1), [
+      { date: "2027-01-01", total: 1, checked: 0, unchecked: 1 },
+    ]);
+    const day = await usecase.get({ from_date: "2026-12-31", to_date: "2026-12-31" });
+    assert.deepEqual(day.map((h) => h.Dn_no), [2]);
   });
 
   it("December rolls into the next year", async () => {
