@@ -28,11 +28,46 @@ class CronService {
   constructor() {
     this.jobs = [];
     this.tasks = [];
+    /** Names of preventOverlap jobs whose previous run has not settled yet. */
+    this.running = new Set();
   }
 
-  /** @param {string} name @param {string} schedule @param {() => void | Promise<void>} task */
-  register(name, schedule, task) {
-    this.jobs.push({ name, schedule, task });
+  /**
+   * @param {string} name @param {string} schedule @param {() => void | Promise<void>} task
+   * @param {{ preventOverlap?: boolean }} [options]
+   *   preventOverlap: node-cron fires on schedule whether or not the previous
+   *   run finished. With this set, a tick that arrives while the job is still
+   *   running is skipped (and logged). The guard is per process: it holds
+   *   because the API runs as ONE PM2 fork instance. Cluster mode or a second
+   *   instance would each get their own guard.
+   */
+  register(name, schedule, task, options = {}) {
+    this.jobs.push({ name, schedule, task, preventOverlap: !!options.preventOverlap });
+  }
+
+  /**
+   * Run one registered job the way a schedule tick does. Resolves when it has
+   * settled; never rejects (errors are logged, as for a scheduled run).
+   * @returns {Promise<"ran" | "failed" | "skipped_overlap">}
+   */
+  async runJob(job) {
+    const { name, task, preventOverlap } = job;
+    if (preventOverlap) {
+      if (this.running.has(name)) {
+        console.warn(`[CRON] "${name}" skipped - previous run still active`);
+        return "skipped_overlap";
+      }
+      this.running.add(name);
+    }
+    try {
+      await task();
+      return "ran";
+    } catch (err) {
+      console.error(`[CRON] ${name}`, err);
+      return "failed";
+    } finally {
+      if (preventOverlap) this.running.delete(name);
+    }
   }
 
   start() {
@@ -44,7 +79,8 @@ class CronService {
       console.log(`[CRON] CRON_DISABLED=true — ${this.jobs.length} job(s) registered, none scheduled: ${this.jobs.map((j) => j.name).join(", ")}`);
       return;
     }
-    this.jobs.forEach(({ name, schedule, task }) => {
+    this.jobs.forEach((job) => {
+      const { name, schedule } = job;
       if (!isFieldCountValid(schedule)) {
         console.error(
           `[CRON] invalid schedule for "${name}": ${schedule} — expected 5 fields (minute hour day month weekday) or 6 (second first)`
@@ -58,9 +94,7 @@ class CronService {
       const t = cron.schedule(
         schedule,
         () => {
-          Promise.resolve(task()).catch((err) =>
-            console.error(`[CRON] ${name}`, err)
-          );
+          this.runJob(job);
         },
         { timezone: CRON_TIMEZONE }
       );

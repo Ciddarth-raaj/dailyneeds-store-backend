@@ -3,6 +3,29 @@ const telegram = require("../services/telegram")();
 const PDFService = require("../services/pdf");
 const S3 = require("../services/s3");
 const { STOCK_CHECKER_TELEGRAM_CHAT_ID } = require("../constants/telegram");
+const { getSelectedExecutable, withTimeout } = require("../services/pdf_browser");
+
+const PENDING_REPORT_JOB = "stock_checker_pending_daily_report";
+const DEFAULT_PENDING_REPORT_TIMEOUT_MS = 10 * 60 * 1000;
+/** After a job timeout, how long to wait for Chrome cleanup before returning. */
+const PENDING_REPORT_CLEANUP_GRACE_MS = 15000;
+
+function pendingReportTimeoutMs(env = process.env) {
+  const n = Number(env.STOCK_CHECKER_REPORT_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_PENDING_REPORT_TIMEOUT_MS;
+}
+
+function throwIfAborted(signal) {
+  if (signal && signal.aborted) throw signal.reason;
+}
+
+function staged(stage, promise) {
+  return Promise.resolve(promise).catch((err) => {
+    const e = err instanceof Error ? err : new Error(String(err));
+    if (!e.stage) e.stage = stage;
+    throw e;
+  });
+}
 
 function escapeMarkdown(text) {
   if (text == null || typeof text !== "string") return "";
@@ -69,6 +92,8 @@ class StockCheckerUsecase {
   constructor(stockCheckerRepo, outletRepo) {
     this.stockCheckerRepo = stockCheckerRepo;
     this.outletRepo = outletRepo;
+    /** Single-flight guard for runDailyPendingStockCheckReport (cron + manual route). */
+    this.pendingReportRunning = false;
   }
 
   async getAll() {
@@ -358,131 +383,274 @@ class StockCheckerUsecase {
 
   /**
    * Pending = missing item for any active outlet except outlet_id 1.
-   * One PDF per branch with pending rows; each sent via Telegram to STOCK_CHECKER_TELEGRAM_CHAT_ID (cron 20:00 or manual).
-   * @returns {Promise<{ code: number, pending_count?: number, skipped?: string, message?: string }>}
+   * One PDF per branch with pending rows; each sent via Telegram to STOCK_CHECKER_TELEGRAM_CHAT_ID (cron 23:00 or manual).
+   *
+   * Guarantees (2026-09 orphaned-Chrome incident):
+   *  - single flight: a call while a run is active returns `skipped: "already_running"`
+   *    (in-process guard - the API is one PM2 fork instance);
+   *  - ONE browser for all branches, closed (and its process group swept) in `finally`;
+   *  - the whole run is limited to STOCK_CHECKER_REPORT_TIMEOUT_MS (default 10 min):
+   *    on expiry Chrome is closed, the error is logged and thrown, and the guard clears.
+   *
+   * @param {{ trigger?: "cron" | "manual" }} [opts]
+   * @returns {Promise<{ code: number, pending_count?: number, branch_reports?: number, skipped?: string, message?: string }>}
    */
-  async runDailyPendingStockCheckReport() {
-    try {
-      const outlets = await this.outletRepo.get();
-      const requiredOutlets = requiredOutletsForStockCheck(outlets);
-      if (requiredOutlets.length === 0) {
-        logger.Log({
-          level: logger.LEVEL.WARN,
-          component: "USECASE.STOCK_CHECKER",
-          code: "USECASE.STOCK_CHECKER.DAILY_PENDING_REPORT_SKIP",
-          description: "No active outlets (excluding id 1) for stock check scope",
-          category: "",
-          ref: {},
-        });
-        return {
-          code: 200,
-          skipped: "no_outlets",
-          message: "No active outlets (excluding id 1) for stock check scope",
-          pending_count: 0,
-        };
-      }
-
-      const pendingRows = await this.stockCheckerRepo.listPendingStockCheckerHeaders();
-      if (!pendingRows.length) {
-        await telegram.sendMessage(
-          STOCK_CHECKER_TELEGRAM_CHAT_ID,
-          "📋 *Daily pending stock checks* (20:00)\n\n" +
-          "No pending stock checks - every open check has entries for all required branches."
-        );
-        return {
-          code: 200,
-          pending_count: 0,
-          message: "No pending stock checks; Telegram notification sent",
-        };
-      }
-
-      const ids = pendingRows.map((r) => r.stock_checker_id);
-      const itemsById = await this.stockCheckerRepo.getItemsByStockCheckerIds(ids);
-
-      // Build report grouped by branch: for each required outlet, list products not yet filled.
-      const outletNameById = new Map(
-        requiredOutlets.map((o) => [
-          Number(o.outlet_id),
-          (o.outlet_name && String(o.outlet_name).trim()) || `Branch ${Number(o.outlet_id)}`,
-        ])
-      );
-
-      const missingByBranch = new Map(); // branch_id -> [{ product_id, product_name }]
-      for (const r of pendingRows) {
-        const productName =
-          (r.product_de_name && String(r.product_de_name).trim()) ||
-          (r.product_de_display_name && String(r.product_de_display_name).trim()) ||
-          `Product ${r.product_id}`;
-        const items =
-          itemsById[r.stock_checker_id] ||
-          itemsById[String(r.stock_checker_id)] ||
-          [];
-        const presentBranchIds = new Set(
-          (items || []).map((it) => Number(it.branch_id)).filter((x) => Number.isFinite(x))
-        );
-
-        for (const o of requiredOutlets) {
-          const bid = Number(o.outlet_id);
-          if (!presentBranchIds.has(bid)) {
-            const arr = missingByBranch.get(bid) || [];
-            arr.push({ product_id: r.product_id, product_name: productName });
-            missingByBranch.set(bid, arr);
-          }
-        }
-      }
-
-      const sections = requiredOutlets
-        .map((o) => {
-          const bid = Number(o.outlet_id);
-          const rows = missingByBranch.get(bid) || [];
-          return {
-            branch_id: bid,
-            branch_name: outletNameById.get(bid) || `Branch ${bid}`,
-            rows,
-          };
-        })
-        .filter((sec) => (sec.rows || []).length > 0);
-
-      const generatedAt = new Date();
-      const baseTs = Date.now();
-      for (let i = 0; i < sections.length; i++) {
-        const sec = sections[i];
-        const pdfBuffer = await PDFService.generateStockCheckerPendingReportPDF({
-          generatedAt,
-          sections: [sec],
-        });
-        const fileName = `stock_checker/pending_report_branch_${sec.branch_id}_${baseTs}_${i}.pdf`;
-        const s3Url = await S3.uploadFile(
-          undefined,
-          fileName,
-          "application/pdf",
-          pdfBuffer
-        );
-        const rowCount = (sec.rows || []).length;
-        await telegram.sendDocument(
-          STOCK_CHECKER_TELEGRAM_CHAT_ID,
-          s3Url,
-          `📋 Pending stock checks - ${sec.branch_name} (${rowCount} product(s)).`
-        );
-      }
-
+  async runDailyPendingStockCheckReport({ trigger = "manual" } = {}) {
+    if (this.pendingReportRunning) {
+      logger.Log({
+        level: "warn", // logger.LEVEL.WARN ("warning") is dropped by winston
+        component: "USECASE.STOCK_CHECKER",
+        code: "USECASE.STOCK_CHECKER.DAILY_PENDING_REPORT_SKIP",
+        description: "Previous pending stock check report is still running; skipped",
+        category: "",
+        ref: { job: PENDING_REPORT_JOB, trigger, skipped: "already_running" },
+      });
       return {
         code: 200,
-        pending_count: pendingRows.length,
-        branch_reports: sections.length,
-        message: `${sections.length} PDF(s) generated and sent to Telegram`,
+        skipped: "already_running",
+        message: "A pending stock check report is already running",
       };
+    }
+    this.pendingReportRunning = true;
+
+    const startedAt = Date.now();
+    const timeoutMs = pendingReportTimeoutMs();
+    const controller = new AbortController();
+    const progress = { stage: "query", pdfs_generated: 0, sent: 0, branch_reports: 0 };
+    let timer;
+    let timedOut = false;
+
+    const run = this.runPendingStockCheckReportBody(controller.signal, progress, trigger);
+    // If the timeout wins, `run` settles later on its own; never unhandled.
+    run.catch(() => {});
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        const err = new Error(
+          `${PENDING_REPORT_JOB} timed out after ${timeoutMs} ms (stage: ${progress.stage})`
+        );
+        err.name = "TimeoutError";
+        err.stage = progress.stage;
+        controller.abort(err); // closes Chrome via withBrowser's abort hook
+        reject(err);
+      }, timeoutMs);
+    });
+
+    try {
+      const result = await Promise.race([run, timeout]);
+      logger.Log({
+        level: logger.LEVEL.INFO,
+        component: "USECASE.STOCK_CHECKER",
+        code: "USECASE.STOCK_CHECKER.DAILY_PENDING_REPORT_DONE",
+        description: `${PENDING_REPORT_JOB} succeeded`,
+        category: "",
+        ref: {
+          job: PENDING_REPORT_JOB,
+          trigger,
+          success: true,
+          duration_ms: Date.now() - startedAt,
+          branch_reports: progress.branch_reports,
+          pdfs_generated: progress.pdfs_generated,
+          sent: progress.sent,
+          assets_degraded: !!progress.assets_degraded,
+        },
+      });
+      return result;
     } catch (err) {
+      if (timedOut) {
+        // Let withBrowser's finally (close + process-group sweep) finish
+        // before the guard clears, but never wait on it indefinitely.
+        await withTimeout(run.catch(() => {}), PENDING_REPORT_CLEANUP_GRACE_MS, "cleanup").catch(
+          () => {}
+        );
+      }
       logger.Log({
         level: logger.LEVEL.ERROR,
         component: "USECASE.STOCK_CHECKER",
         code: "USECASE.STOCK_CHECKER.DAILY_PENDING_REPORT",
         description: err.toString(),
         category: "",
-        ref: {},
+        ref: {
+          job: PENDING_REPORT_JOB,
+          trigger,
+          success: false,
+          stage: err.stage || progress.stage,
+          timed_out: timedOut,
+          duration_ms: Date.now() - startedAt,
+          branch_reports: progress.branch_reports,
+          pdfs_generated: progress.pdfs_generated,
+          sent: progress.sent,
+        },
       });
       throw err;
+    } finally {
+      clearTimeout(timer);
+      if (!controller.signal.aborted) controller.abort(new Error("run finished"));
+      this.pendingReportRunning = false;
     }
+  }
+
+  /** The report itself; see runDailyPendingStockCheckReport for the guarantees around it. */
+  async runPendingStockCheckReportBody(signal, progress, trigger) {
+    progress.stage = "query";
+    const outlets = await this.outletRepo.get();
+    const requiredOutlets = requiredOutletsForStockCheck(outlets);
+    if (requiredOutlets.length === 0) {
+      logger.Log({
+        level: logger.LEVEL.WARN,
+        component: "USECASE.STOCK_CHECKER",
+        code: "USECASE.STOCK_CHECKER.DAILY_PENDING_REPORT_SKIP",
+        description: "No active outlets (excluding id 1) for stock check scope",
+        category: "",
+        ref: {},
+      });
+      return {
+        code: 200,
+        skipped: "no_outlets",
+        message: "No active outlets (excluding id 1) for stock check scope",
+        pending_count: 0,
+      };
+    }
+
+    const pendingRows = await this.stockCheckerRepo.listPendingStockCheckerHeaders();
+    throwIfAborted(signal);
+    if (!pendingRows.length) {
+      progress.stage = "telegram";
+      await staged(
+        "telegram",
+        telegram.sendMessage(
+          STOCK_CHECKER_TELEGRAM_CHAT_ID,
+          "📋 *Daily pending stock checks* (20:00)\n\n" +
+          "No pending stock checks - every open check has entries for all required branches."
+        )
+      );
+      return {
+        code: 200,
+        pending_count: 0,
+        message: "No pending stock checks; Telegram notification sent",
+      };
+    }
+
+    const ids = pendingRows.map((r) => r.stock_checker_id);
+    const itemsById = await this.stockCheckerRepo.getItemsByStockCheckerIds(ids);
+    throwIfAborted(signal);
+
+    // Build report grouped by branch: for each required outlet, list products not yet filled.
+    const outletNameById = new Map(
+      requiredOutlets.map((o) => [
+        Number(o.outlet_id),
+        (o.outlet_name && String(o.outlet_name).trim()) || `Branch ${Number(o.outlet_id)}`,
+      ])
+    );
+
+    const missingByBranch = new Map(); // branch_id -> [{ product_id, product_name }]
+    for (const r of pendingRows) {
+      const productName =
+        (r.product_de_name && String(r.product_de_name).trim()) ||
+        (r.product_de_display_name && String(r.product_de_display_name).trim()) ||
+        `Product ${r.product_id}`;
+      const items =
+        itemsById[r.stock_checker_id] ||
+        itemsById[String(r.stock_checker_id)] ||
+        [];
+      const presentBranchIds = new Set(
+        (items || []).map((it) => Number(it.branch_id)).filter((x) => Number.isFinite(x))
+      );
+
+      for (const o of requiredOutlets) {
+        const bid = Number(o.outlet_id);
+        if (!presentBranchIds.has(bid)) {
+          const arr = missingByBranch.get(bid) || [];
+          arr.push({ product_id: r.product_id, product_name: productName });
+          missingByBranch.set(bid, arr);
+        }
+      }
+    }
+
+    const sections = requiredOutlets
+      .map((o) => {
+        const bid = Number(o.outlet_id);
+        const rows = missingByBranch.get(bid) || [];
+        return {
+          branch_id: bid,
+          branch_name: outletNameById.get(bid) || `Branch ${bid}`,
+          rows,
+        };
+      })
+      .filter((sec) => (sec.rows || []).length > 0);
+    progress.branch_reports = sections.length;
+
+    progress.stage = "launch";
+    const executable = getSelectedExecutable();
+    logger.Log({
+      level: logger.LEVEL.INFO,
+      component: "USECASE.STOCK_CHECKER",
+      code: "USECASE.STOCK_CHECKER.DAILY_PENDING_REPORT_START",
+      description: `${PENDING_REPORT_JOB} started`,
+      category: "",
+      ref: {
+        job: PENDING_REPORT_JOB,
+        trigger,
+        branch_reports: sections.length,
+        executable: executable.display,
+        executable_source: executable.source,
+      },
+    });
+
+    const generatedAt = new Date();
+    const baseTs = Date.now();
+    // One browser for every branch: page -> PDF -> upload -> Telegram per
+    // branch, then close. Sending stays per branch so a later failure does
+    // not hold back the reports already made.
+    await PDFService.withBrowser(
+      async (session) => {
+        for (let i = 0; i < sections.length; i++) {
+          const sec = sections[i];
+          const pdfBuffer = await PDFService.renderStockCheckerPendingReportPDF(session, {
+            generatedAt,
+            sections: [sec],
+          });
+          progress.pdfs_generated += 1;
+          if (session.assetsDegraded) progress.assets_degraded = true;
+          throwIfAborted(signal);
+
+          progress.stage = "upload";
+          const fileName = `stock_checker/pending_report_branch_${sec.branch_id}_${baseTs}_${i}.pdf`;
+          const s3Url = await staged(
+            "upload",
+            S3.uploadFile(undefined, fileName, "application/pdf", pdfBuffer)
+          );
+          throwIfAborted(signal);
+
+          progress.stage = "telegram";
+          const rowCount = (sec.rows || []).length;
+          await staged(
+            "telegram",
+            telegram.sendDocument(
+              STOCK_CHECKER_TELEGRAM_CHAT_ID,
+              s3Url,
+              `📋 Pending stock checks - ${sec.branch_name} (${rowCount} product(s)).`
+            )
+          );
+          progress.sent += 1;
+          throwIfAborted(signal);
+        }
+      },
+      {
+        signal,
+        onStage: (stage) => {
+          progress.stage = stage;
+        },
+      }
+    );
+    progress.stage = "done";
+
+    return {
+      code: 200,
+      pending_count: pendingRows.length,
+      branch_reports: sections.length,
+      message: `${sections.length} PDF(s) generated and sent to Telegram`,
+    };
   }
 }
 

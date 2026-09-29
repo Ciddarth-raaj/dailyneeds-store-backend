@@ -2059,14 +2059,20 @@ class Server {
       }
     );
 
-    // 11PM everyday
+    // 11PM everyday. preventOverlap: a run still going at the next tick is
+    // skipped rather than started twice (it launches Chrome). The use case
+    // also has its own single-flight guard and an overall time limit, which
+    // cover the manual POST /stock-checker/pending-daily-report as well.
     const STOCK_CHECKER_PENDING_CRON = "0 23 * * *";
     this.cronService.register(
       "stock_checker_pending_daily_report",
       STOCK_CHECKER_PENDING_CRON,
       async () => {
-        await this.stockCheckerUsecase.runDailyPendingStockCheckReport();
-      }
+        await this.stockCheckerUsecase.runDailyPendingStockCheckReport({
+          trigger: "cron",
+        });
+      },
+      { preventOverlap: true }
     );
 
     // 6AM everyday - materialise recurring tasks that fall due today.
@@ -2494,6 +2500,14 @@ class Server {
   }
 
   onClose() {
+    // First, while nothing else can fail before it: Chrome started for PDFs
+    // runs in its own process group and would outlive this process (the
+    // removeAllListeners() below also drops puppeteer's own kill-on-exit).
+    try {
+      require("./services/pdf_browser").killActiveBrowsers();
+    } catch (_) {
+      /* never block shutdown */
+    }
     if (this.cronService) {
       this.cronService.stopAll();
     }

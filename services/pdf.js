@@ -1,99 +1,36 @@
-const puppeteer = require("puppeteer");
-const fs = require("fs");
 const logger = require("../utils/logger");
-const { IS_PROD } = require("../constants");
+const { withBrowser } = require("./pdf_browser");
 
-const PUPPETEER_ARGS = [
-  "--no-sandbox",
-  "--disable-setuid-sandbox",
-  "--disable-dev-shm-usage",
-  "--disable-gpu",
-  "--no-zygote",
-  "--disable-background-networking",
-  "--disable-extensions",
-  "--disable-software-rasterizer",
-  "--disable-sync",
-  "--disable-translate",
-  "--disable-default-apps",
-  "--disable-features=site-per-process,IsolateOrigins",
-  "--js-flags=--lite-mode",
-];
+/** A4 with 10mm margins - shared by every report below. */
+const A4_PDF_OPTIONS = {
+  format: "A4",
+  printBackground: true,
+  margin: {
+    top: "10mm",
+    right: "10mm",
+    bottom: "10mm",
+    left: "10mm",
+  },
+  preferCSSPageSize: true,
+};
 
-/**
- * Production (`IS_PROD`): fixed Chrome path on the server (previous behaviour).
- * Development (`IS_PROD` false): `PUPPETEER_EXECUTABLE_PATH` / `CHROME_PATH` if present, else bundled Chromium.
- */
-function buildPuppeteerLaunchOptions() {
-  if (IS_PROD) {
-    return {
-      headless: "new",
-      executablePath: "/usr/bin/google-chrome-stable",
-      dumpio: true,
-      args: PUPPETEER_ARGS,
-      timeout: 0,
-    };
-  }
-  const opts = {
-    headless: "new",
-    dumpio: true,
-    args: PUPPETEER_ARGS,
-    timeout: 0,
-  };
-  const fromEnv =
-    process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_PATH || "";
-  if (fromEnv) {
-    try {
-      if (fs.existsSync(fromEnv)) {
-        opts.executablePath = fromEnv;
-      }
-    } catch (e) {
-      /* use bundled */
-    }
-  }
-  return opts;
+/** One browser, one PDF. Launch/close and every timeout live in pdf_browser.js. */
+function renderSinglePdf(html) {
+  return withBrowser((session) => session.renderPdf(html, A4_PDF_OPTIONS));
 }
 
 class PDFService {
   async generatePurchaseOrderPDF(purchaseOrderData) {
-    let browser;
     try {
-      browser = await puppeteer.launch(buildPuppeteerLaunchOptions());
-      const page = await browser.newPage();
-
-      // Generate HTML content for the purchase order
-      const htmlContent = this.generatePurchaseOrderHTML(purchaseOrderData);
-
-      await page.setContent(htmlContent, { waitUntil: "networkidle0" });
-
-      // Generate PDF
-      const pdfBuffer = await page.pdf({
-        format: "A4",
-        printBackground: true,
-        margin: {
-          top: "10mm",
-          right: "10mm",
-          bottom: "10mm",
-          left: "10mm",
-        },
-        preferCSSPageSize: true,
-      });
-
-      await page.close();
-      await browser.close();
-      return pdfBuffer;
+      return await renderSinglePdf(this.generatePurchaseOrderHTML(purchaseOrderData));
     } catch (error) {
-      if (browser) {
-        try {
-          await browser.close();
-        } catch (e) { }
-      }
       logger.Log({
         level: logger.LEVEL.ERROR,
         component: "SERVICE",
         code: "SERVICE.PDF.GENERATE",
         description: error.toString(),
         category: "",
-        ref: { purchase_order_id: purchaseOrderData.purchase_order_id },
+        ref: { purchase_order_id: purchaseOrderData.purchase_order_id, stage: error.stage },
       });
       throw error;
     }
@@ -518,39 +455,16 @@ class PDFService {
   }
 
   async generateProductSalesOffersBulkPDF(data) {
-    let browser;
     try {
-      browser = await puppeteer.launch(buildPuppeteerLaunchOptions());
-      const page = await browser.newPage();
-      const htmlContent = this.generateProductSalesOffersBulkHTML(data);
-      await page.setContent(htmlContent, { waitUntil: "networkidle0" });
-      const pdfBuffer = await page.pdf({
-        format: "A4",
-        printBackground: true,
-        margin: {
-          top: "10mm",
-          right: "10mm",
-          bottom: "10mm",
-          left: "10mm",
-        },
-        preferCSSPageSize: true,
-      });
-      await page.close();
-      await browser.close();
-      return pdfBuffer;
+      return await renderSinglePdf(this.generateProductSalesOffersBulkHTML(data));
     } catch (error) {
-      if (browser) {
-        try {
-          await browser.close();
-        } catch (e) { }
-      }
       logger.Log({
         level: logger.LEVEL.ERROR,
         component: "SERVICE",
         code: "SERVICE.PDF.GENERATE_PRODUCT_SALES_OFFERS",
         description: error.toString(),
         category: "",
-        ref: {},
+        ref: { stage: error.stage },
       });
       throw error;
     }
@@ -800,42 +714,35 @@ class PDFService {
   }
 
   async generateStockCheckerPendingReportPDF(data) {
-    let browser;
     try {
-      browser = await puppeteer.launch(buildPuppeteerLaunchOptions());
-      const page = await browser.newPage();
-      const htmlContent = this.generateStockCheckerPendingReportHTML(data);
-      await page.setContent(htmlContent, { waitUntil: "networkidle0" });
-      const pdfBuffer = await page.pdf({
-        format: "A4",
-        printBackground: true,
-        margin: {
-          top: "10mm",
-          right: "10mm",
-          bottom: "10mm",
-          left: "10mm",
-        },
-        preferCSSPageSize: true,
-      });
-      await page.close();
-      await browser.close();
-      return pdfBuffer;
+      return await renderSinglePdf(this.generateStockCheckerPendingReportHTML(data));
     } catch (error) {
-      if (browser) {
-        try {
-          await browser.close();
-        } catch (e) { }
-      }
       logger.Log({
         level: logger.LEVEL.ERROR,
         component: "SERVICE",
         code: "SERVICE.PDF.GENERATE_STOCK_CHECKER_PENDING",
         description: error.toString(),
         category: "",
-        ref: {},
+        ref: { stage: error.stage },
       });
       throw error;
     }
+  }
+
+  /**
+   * Stock-checker report on a browser the caller already holds (see
+   * PDFService.withBrowser), so a multi-branch run launches Chrome once.
+   */
+  renderStockCheckerPendingReportPDF(session, data) {
+    return session.renderPdf(
+      this.generateStockCheckerPendingReportHTML(data),
+      A4_PDF_OPTIONS
+    );
+  }
+
+  /** @see ./pdf_browser.js withBrowser */
+  withBrowser(fn, opts) {
+    return withBrowser(fn, opts);
   }
 
   generateStockCheckerPendingReportHTML(data) {
