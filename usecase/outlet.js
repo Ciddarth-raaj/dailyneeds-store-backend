@@ -104,6 +104,9 @@ class OutletUsecase {
       }
     });
   }
+  getOutletsByGofrugalIds(gofrugal_ids) {
+    return this.outletRepo.getOutletsByGofrugalIds(gofrugal_ids);
+  }
   updateOutletDetails(outlet) {
     return new Promise(async (resolve, reject) => {
       try {

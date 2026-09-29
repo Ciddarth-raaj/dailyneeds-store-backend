@@ -2,6 +2,15 @@ const logger = require("../utils/logger");
 
 const TABLE = "sto_check";
 
+/** Upper bound on the values bound into one `IN (...)` list. */
+const IN_CHUNK_SIZE = 1000;
+
+function chunkValues(values, size = IN_CHUNK_SIZE) {
+  const out = [];
+  for (let i = 0; i < values.length; i += size) out.push(values.slice(i, i + size));
+  return out;
+}
+
 class StoCheckRepository {
   constructor(db) {
     this.db = db;
@@ -59,6 +68,86 @@ class StoCheckRepository {
         }
       );
     });
+  }
+
+  /**
+   * `getByDnRefNo` for many references in one round trip (chunked `IN`).
+   * Same columns, ordered by dn_ref_no then product_id.
+   */
+  async getByDnRefNos(dnRefNos) {
+    const unique = [...new Set((dnRefNos || []).filter((r) => r != null))];
+    if (unique.length === 0) return [];
+    const parts = await Promise.all(
+      chunkValues(unique).map(
+        (part) =>
+          new Promise((resolve, reject) => {
+            this.db.query(
+              `SELECT sc.dn_ref_no, sc.product_id, sc.file_qty, sc.created_at, sc.updated_at,
+                      pt.de_name, pt.de_display_name
+               FROM \`${TABLE}\` sc
+               LEFT JOIN product_table pt ON pt.product_id = sc.product_id
+               WHERE sc.dn_ref_no IN (${part.map(() => "?").join(",")})
+               ORDER BY sc.dn_ref_no ASC, sc.product_id ASC`,
+              part,
+              (err, rows) => {
+                if (err) {
+                  logger.Log({
+                    level: logger.LEVEL.ERROR,
+                    component: "REPOSITORY.STO_CHECK",
+                    code: "REPOSITORY.STO_CHECK.GET_BY_DN_REF_NOS",
+                    description: err.toString(),
+                    category: "",
+                    ref: { count: part.length },
+                  });
+                  return reject(err);
+                }
+                resolve(rows || []);
+              }
+            );
+          })
+      )
+    );
+    return parts.flat();
+  }
+
+  /**
+   * The dn_ref_no values that have at least one sto_check row. With
+   * `dnRefNos`, only those among them; without, every checked reference.
+   * Reads the primary key (dn_ref_no, product_id) only - no product join.
+   */
+  async getCheckedDnRefNos(dnRefNos) {
+    const run = (sql, params) =>
+      new Promise((resolve, reject) => {
+        this.db.query(sql, params, (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.STO_CHECK",
+              code: "REPOSITORY.STO_CHECK.GET_CHECKED_DN_REF_NOS",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            return reject(err);
+          }
+          resolve((rows || []).map((r) => r.dn_ref_no));
+        });
+      });
+
+    if (dnRefNos === undefined) {
+      return run(`SELECT DISTINCT dn_ref_no FROM \`${TABLE}\``, []);
+    }
+    const unique = [...new Set((dnRefNos || []).filter((r) => r != null))];
+    if (unique.length === 0) return [];
+    const parts = await Promise.all(
+      chunkValues(unique).map((part) =>
+        run(
+          `SELECT DISTINCT dn_ref_no FROM \`${TABLE}\` WHERE dn_ref_no IN (${part.map(() => "?").join(",")})`,
+          part
+        )
+      )
+    );
+    return parts.flat();
   }
 
   getOne(dn_ref_no, product_id) {
