@@ -430,10 +430,38 @@ class EmployeeReportRoutes {
       this._sendHeaders(res, prepared, "text/csv; charset=utf-8");
       timer = setTimeout(() => res.destroy(), reportConfig.EXPORT_TIMEOUT_MS);
 
+      /**
+       * BACKPRESSURE WITHOUT THE WRITE CALLBACK. The app-wide `compression`
+       * middleware replaces `res.write(chunk, encoding)` and, when it gzips
+       * (every browser asks it to), never calls a callback passed there - an
+       * export awaiting one stalled after the first page until the timer
+       * above killed it. `write()`'s return value and the `drain` event are
+       * what compression does forward, so wait on those, or on `close`.
+       */
+      let wake = null;
+      const release = () => {
+        if (wake) {
+          const w = wake;
+          wake = null;
+          w();
+        }
+      };
+      res.on("drain", release);
+      res.on("close", release);
+      const closed = () => res.destroyed || res.writableEnded;
+      const write = async (text) => {
+        if (closed()) throw new Error("The export stream closed before it finished");
+        if (res.write(text)) return;
+        await new Promise((resolve) => {
+          wake = resolve;
+        });
+        if (closed()) throw new Error("The export stream closed before it finished");
+      };
+
       // A BOM, so Excel opens a UTF-8 CSV as UTF-8 rather than as the local
       // code page - otherwise every non-ASCII name arrives mangled.
-      res.write("﻿");
-      res.write(`${prepared.fields.map((f) => csvCell(f.label)).join(",")}\r\n`);
+      await write("﻿");
+      await write(`${prepared.fields.map((f) => csvCell(f.label)).join(",")}\r\n`);
 
       const written = await this.service.streamRows(prepared, (rows) => {
         const chunk = rows
@@ -442,13 +470,21 @@ class EmployeeReportRoutes {
         // Respect backpressure: without this a fast query outruns a slow
         // client and the rows queue in memory, which is the thing streaming
         // was meant to avoid.
-        return new Promise((resolve, reject) => {
-          res.write(`${chunk}\r\n`, (err) => (err ? reject(err) : resolve()));
-        });
+        return write(`${chunk}\r\n`);
       });
 
-      clearTimeout(timer);
+      // Only a file the client was sent in full is audited as an export: wait
+      // for `finish` (everything flushed), still under the deadline above; a
+      // `close` first means the client went away and nothing is recorded.
+      if (closed()) throw new Error("The export stream closed before it finished");
+      const finished = new Promise((resolve) => {
+        res.once("finish", () => resolve(true));
+        res.once("close", () => resolve(res.writableFinished));
+      });
       res.end();
+      const complete = await finished;
+      clearTimeout(timer);
+      if (!complete) throw new Error("The export stream closed before it finished");
 
       await this.service.recordExport({ ...prepared, row_count: written }, actor);
     } catch (err) {
