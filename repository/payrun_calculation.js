@@ -1,3 +1,4 @@
+const { closePendingPermissionsForLock } = require("./lib/attendance_permission_guard");
 const logger = require("../utils/logger");
 const { activeOverrideCondition } = require("../utils/shift_override_active");
 const { JOINED_ON } = require("../utils/joining_date");
@@ -836,11 +837,24 @@ class PayrunCalculationRepository {
           conn
         );
 
+        // PENDING PERMISSION REQUESTS CLOSE WITH THE MONTH, in this same
+        // transaction: once the row above is APPROVED_LOCKED no decision can
+        // pay them, so none may go on claiming to be pending. They become
+        // "Closed - Not approved before payroll lock", exactly as the OT
+        // closure shapes a closed claim. Approved, rejected and revoked
+        // requests, and DIRECT grants, are untouched.
+        const permissionClosure = await closePendingPermissionsForLock(conn, {
+          employee_id: row.employee_id,
+          year,
+          month,
+        });
+
         results.push({
           employee_id: entry.employee_id,
           outcome: "APPROVED",
           calculation_hash: row.calculation_hash,
           net_pay: row.net_pay,
+          permissions_closed: permissionClosure.closed,
         });
       }
 

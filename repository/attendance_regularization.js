@@ -14,6 +14,8 @@ const {
 // path and this one must lock the IDENTICAL row with the IDENTICAL statement,
 // and two copies of a lock serialize nothing.
 const { SHARED_LOCK_SQL } = require("./attendance_shift_change_block");
+const permissionGuard = require("./lib/attendance_permission_guard");
+const { PERMISSION_COLUMNS, PERMISSION_FROM } = require("./lib/attendance_permission_select");
 
 /*
  * ADMIN REVOKE - the two reads a revocation is decided on, as constants,
@@ -425,10 +427,33 @@ class AttendanceRegularizationRepository {
    * has already been raised (Replace Approver does that explicitly, and only
    * for undecided steps).
    */
-  async createRequest({ request, chain, punch, auto_approve = null }) {
+  async createRequest({ request, chain, punch, auto_approve = null, permissions = null }) {
     const connection = await getConnectionAsync(this.db);
     try {
       await beginTransactionAsync(connection);
+
+      /**
+       * ============ A PERMISSION REQUEST: NO OVERLAP, UNDER THE LOCK ======
+       *
+       * The usecase already refused an overlapping window. That check cannot
+       * be the guarantee: a DIRECT grant for the same employee may commit
+       * between it and this insert. Both writers take the employee row
+       * `FOR UPDATE` first (the same statement), then re-read the live
+       * windows, so whichever commits second sees the first.
+       */
+      if (request.request_type === "PERMISSION") {
+        await permissionGuard.lockEmployee(connection, request.requested_for_employee_id);
+        const overlaps = await permissionGuard.findLiveOverlaps(
+          connection,
+          request.requested_for_employee_id,
+          request.attendance_date,
+          permissions || []
+        );
+        if (overlaps && overlaps.length > 0) {
+          await rollbackAsync(connection);
+          return { created: false, permission_overlap: true, overlaps };
+        }
+      }
 
       /**
        * ============ THE HR BLOCK, CHECKED UNDER THE SHARED LOCK ============
@@ -572,6 +597,30 @@ class AttendanceRegularizationRepository {
         );
       }
 
+      // A PERMISSION request's windows are its payload, written now for the
+      // same reason the regularized punch is: every approver in the chain
+      // agrees to a specific window, not to the idea of one. They reach the
+      // calculation only once the request is APPROVED and SETTLED.
+      const permissionIds = [];
+      if (request.request_type === "PERMISSION") {
+        for (const w of permissions || []) {
+          /* eslint-disable no-await-in-loop */
+          permissionIds.push(
+            await permissionGuard.insertPermission(connection, {
+              ...w,
+              employee_id: request.requested_for_employee_id,
+              attendance_date: request.attendance_date,
+              source: "REQUEST",
+              attendance_approval_request_id: requestId,
+              reason: w.reason || request.reason,
+              outlet_id: request.outlet_id,
+              created_by_employee_id: request.requested_by_employee_id,
+            })
+          );
+          /* eslint-enable no-await-in-loop */
+        }
+      }
+
       // The corrected day, committed with the auto-approval - a request that
       // is APPROVED while the stored day still shows the missing punch must
       // not exist, exactly as for a decided one.
@@ -588,6 +637,7 @@ class AttendanceRegularizationRepository {
         status: autoApproved ? "APPROVED" : "PENDING",
         finalization_state: autoApproved ? "SETTLED" : "NOT_REQUIRED",
         calculations_written: calculationsWritten,
+        ...(request.request_type === "PERMISSION" ? { attendance_permission_ids: permissionIds } : {}),
       };
     } catch (err) {
       await rollbackAsync(connection);
@@ -1245,6 +1295,7 @@ class AttendanceRegularizationRepository {
         WHERE r.status = 'PENDING'
           AND s.decision = 'PENDING'
           AND r.request_type <> 'SHIFT_CHANGE'
+          AND r.request_type <> 'PERMISSION'
           AND (
                 (s.approver_employee_id IS NULL
                  AND s.approver_role IN (?)
@@ -1503,6 +1554,23 @@ class AttendanceRegularizationRepository {
   }
 
   /** Every step of these requests, with the decider's name, one query. */
+  /**
+   * The permission windows of PERMISSION requests, for the Approval Centre -
+   * the period each approver is agreeing to. The same SELECT every other
+   * permission reader uses.
+   */
+  async listPermissionsForRequests(requestIds) {
+    if (!Array.isArray(requestIds) || requestIds.length === 0) return [];
+    return this._read(
+      "LIST-PERMISSIONS-FOR-REQUESTS",
+      `SELECT ${PERMISSION_COLUMNS}
+         ${PERMISSION_FROM}
+        WHERE p.attendance_approval_request_id IN (?)
+        ORDER BY p.attendance_approval_request_id ASC, p.permission_from ASC`,
+      [requestIds]
+    );
+  }
+
   async listStepsForRequests(requestIds) {
     if (!Array.isArray(requestIds) || requestIds.length === 0) return [];
     return this._read(

@@ -354,7 +354,7 @@ describe("Attendance Approval - REGULARIZATION pending with me", () => {
 
   it("refuses a request type or status it does not know", async () => {
     const world = build();
-    await assert.rejects(world.regularization.listApprovals({ actor: { employee_id: 8, user_type: 1, branch_scope: ALL_BRANCHES }, request_type: "REGULARIZATION_WITH_OT" }), /REGULARIZATION, OT or SHIFT_CHANGE/);
+    await assert.rejects(world.regularization.listApprovals({ actor: { employee_id: 8, user_type: 1, branch_scope: ALL_BRANCHES }, request_type: "REGULARIZATION_WITH_OT" }), /REGULARIZATION, OT, SHIFT_CHANGE or PERMISSION/);
     await assert.rejects(world.regularization.listApprovals({ actor: { employee_id: 8, user_type: 1, branch_scope: ALL_BRANCHES }, request_type: "OT", status: "CANCELLED" }), /PENDING, APPROVED, REJECTED or ALL/);
   });
 });

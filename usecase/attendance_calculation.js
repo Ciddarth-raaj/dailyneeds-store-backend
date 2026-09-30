@@ -2503,6 +2503,10 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       out_time: snapshot ? snapshot.out_time : null,
       break_minutes: snapshot ? snapshot.break_minutes : null,
       is_working_day: snapshot ? snapshot.is_working_day : null,
+      // The span, so a PERMISSION window can be placed inside the shift -
+      // including one that runs past midnight - without re-resolving it.
+      shift_span_minutes: snapshot ? snapshot.shift_span_minutes || 0 : null,
+      attendance_required: context.attendance_required,
       // NRM as the engine computes it from the shift alone: span less the
       // shift's own break. The employee's break override and Extra Break
       // Hours are deliberately NOT applied - they need a punched sequence

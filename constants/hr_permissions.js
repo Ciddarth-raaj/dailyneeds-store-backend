@@ -710,4 +710,30 @@ module.exports = {
   // through the user_type 2 bypass and need no grant.
   VIEW_STAFF_BUDGET: "view_staff_budget",
   EDIT_STAFF_BUDGET: "edit_staff_budget",
+
+  // Attendance PERMISSION - paid forgiven shortage, never worked time
+  // (migration 20261107120000-attendance-permission). All GRANTED TO NOBODY.
+  //
+  // The Permission register, the Permission tab of the Approval Centre and
+  // the bulk preview.
+  VIEW_ATTENDANCE_PERMISSIONS: "view_attendance_permissions",
+  // Request a Permission for YOURSELF. The route derives the employee from
+  // the session token; the body has no field to name anybody else.
+  RAISE_ATTENDANCE_PERMISSION_REQUEST: "raise_attendance_permission_request",
+  // Raise a Permission REQUEST for an employee inside your outlet scope. It
+  // still walks that employee's approval chain, and you cannot decide it.
+  RAISE_ATTENDANCE_PERMISSION_FOR_OTHERS: "raise_attendance_permission_for_others",
+  // Reaching the Permission decision endpoint. NOT the authority to decide a
+  // particular stage - that is `canApprove`, exactly as for every request.
+  APPROVE_ATTENDANCE_PERMISSION: "approve_attendance_permission",
+  // A DIRECT management grant, effective at once, to employees you choose
+  // inside your outlet scope - the management "go home early" decision.
+  GRANT_ATTENDANCE_PERMISSION: "grant_attendance_permission",
+  // A DIRECT grant to whole outlets, or to every eligible employee in your
+  // outlet scope - the festival early release. Needs the key above as well.
+  GRANT_ATTENDANCE_PERMISSION_BULK: "grant_attendance_permission_bulk",
+  // Revoke a DIRECT grant (one, or a whole bulk grant) inside your outlet
+  // scope. A REQUEST permission is revoked through the ordinary approval
+  // revoke, which stays with administrators.
+  REVOKE_ATTENDANCE_PERMISSION: "revoke_attendance_permission",
 };

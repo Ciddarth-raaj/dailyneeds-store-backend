@@ -31,6 +31,11 @@ function monthBounds(date) {
   return [`${date.slice(0, 7)}-01`, `${date.slice(0, 7)}-${String(last).padStart(2, "0")}`];
 }
 const { istToday } = require("../utils/istDate");
+const {
+  PERMISSION_CLOSURE_LABEL,
+  resolvePermissionWindows,
+  permissionForDisplay,
+} = require("../utils/attendance_permission");
 
 /**
  * Attendance v2 / A3 - raising and deciding a regularization or OT request.
@@ -881,6 +886,145 @@ module.exports = (
   };
 
   /**
+   * Raise a PERMISSION request: leave early, come in late, or be away for a
+   * period of ONE date's shift, without a salary deduction for it - if the
+   * approval chain agrees.
+   *
+   * For YOURSELF, or - with `raise_attendance_permission_for_others`, checked
+   * by the route together with the employee's outlet scope - for an employee.
+   * Either way it walks the employee's ordinary attendance approval chain:
+   * the same `resolveChain`, the same `canApprove` (nobody decides a request
+   * they raised or are the subject of), the same payroll lock and the same
+   * revoke path as every other attendance request.
+   *
+   * The windows are CLOCK TIMES inside the date's resolved shift - or "from
+   * a time to the scheduled shift end" - and are refused if they reach
+   * outside it, overlap each other, cover the whole shift (that is leave) or
+   * overlap a live permission already on the date. What is stored is the
+   * window as approved; what it COVERS is decided by the engine on every
+   * calculation, and only ever the chargeable shortage inside it.
+   *
+   * Refused: a date in a payroll-locked month, outside the request window
+   * (the same backdate / forward limits as a shift request), with no working
+   * shift, for an employee who is not required to punch, or with a PERMISSION
+   * request already pending on it.
+   */
+  const raisePermissionRequest = async ({
+    actor,
+    requested_for_employee_id = null,
+    attendance_date,
+    windows,
+    reason,
+    remarks = null,
+    today = null,
+  }) => {
+    const actorId = Number(actor && actor.employee_id);
+    if (!Number.isInteger(actorId) || actorId <= 0) {
+      throw validationError("An employee identity is required to request a permission");
+    }
+    const forId =
+      requested_for_employee_id === null || requested_for_employee_id === undefined
+        ? actorId
+        : Number(requested_for_employee_id);
+    if (!Number.isInteger(forId) || forId <= 0) {
+      throw validationError("requested_for_employee_id must be an employee id");
+    }
+    const date = toDateOnly(attendance_date);
+    if (date === null) throw validationError("attendance_date must be a date as YYYY-MM-DD");
+    const why = typeof reason === "string" ? reason.trim() : "";
+    if (why.length < 5) throw validationError("A reason of at least 5 characters is required");
+    if (why.length > 500) throw validationError("A reason may be at most 500 characters");
+
+    const businessToday = istToday(today);
+    if (date < addDays(businessToday, -MAX_BACKDATE_DAYS)) {
+      throw validationError(`A permission can be requested for at most ${MAX_BACKDATE_DAYS} days back`);
+    }
+    if (date > addDays(businessToday, MAX_FORWARD_DAYS)) {
+      throw validationError(`A permission can be requested at most ${MAX_FORWARD_DAYS} days ahead`);
+    }
+
+    // PAYROLL LOCK, BEFORE THE REQUEST EXISTS - a permission against a
+    // settled month could never be approved.
+    if (typeof attendanceCalculationUsecase.findPayrollLockedPeriods === "function") {
+      const locked = await attendanceCalculationUsecase.findPayrollLockedPeriods([
+        { employee_id: forId, attendance_date: date },
+      ]);
+      if (locked.length > 0) throw payrollLockedActionError(locked, "A permission for this date");
+    }
+
+    const shift = await attendanceCalculationUsecase.shiftForDate({ employee_id: forId, attendance_date: date });
+    if (shift && shift.attendance_required === false) {
+      throw validationError("This employee is not required to punch, so there is no shortage a permission could cover");
+    }
+    const resolved = resolvePermissionWindows({ attendance_date: date, shift, windows, clip: false });
+    if (!resolved.ok) throw validationError(resolved.message);
+
+    const existing = await attendanceRegularizationRepo.findRequestsForDates(forId, [date]);
+    const pending = (existing || []).find(
+      (r) => r.request_type === REQUEST_TYPE.PERMISSION && r.status === REQUEST_STATUS.PENDING
+    );
+    if (pending) {
+      throw validationError(
+        `A permission request for ${date} is already pending (#${pending.attendance_approval_request_id})`
+      );
+    }
+
+    const identity = await resolveIdentity(forId);
+    const { chain, source: chain_source } = await resolveChain(identity);
+    const created = await attendanceRegularizationRepo.createRequest({
+      request: {
+        request_type: REQUEST_TYPE.PERMISSION,
+        requested_for_employee_id: forId,
+        requested_by_employee_id: actorId,
+        attendance_date: date,
+        outlet_id: identity.outlet_id,
+        requester_class: identity.requester_class,
+        reason: why,
+        candidate_ot_minutes: 0,
+        auto_created: false,
+        chain_source,
+      },
+      chain,
+      punch: null,
+      permissions: resolved.windows.map((w) => ({
+        permission_from: w.permission_from,
+        permission_to: w.permission_to,
+        to_shift_end: w.to_shift_end,
+        permission_minutes: w.permission_minutes,
+        reason: why,
+        remarks: remarks ? String(remarks).trim().slice(0, 500) || null : null,
+        work_shift_id: shift.work_shift_id === undefined ? null : shift.work_shift_id,
+        created_by_user_id:
+          actor.user_id === null || actor.user_id === undefined ? null : Number(actor.user_id),
+      })),
+    });
+    if (created && created.permission_overlap) {
+      throw validationError(
+        `This window overlaps a permission already on ${date}; revoke or reject that one first`
+      );
+    }
+
+    return {
+      ...created,
+      request_type: REQUEST_TYPE.PERMISSION,
+      requested_for_employee_id: forId,
+      attendance_date: date,
+      windows: resolved.windows.map((w) => ({
+        permission_from: w.permission_from,
+        permission_to: w.permission_to,
+        to_shift_end: w.to_shift_end,
+        permission_minutes: w.permission_minutes,
+      })),
+      shift_from: resolved.shift_from,
+      shift_to: resolved.shift_to,
+      chain,
+      chain_source,
+      requester_class: identity.requester_class,
+      requester_class_is_default: identity.requester_class_is_default,
+    };
+  };
+
+  /**
    * THE ACTIVE HR BLOCK for an employee/date, or null when there is none.
    *
    * ONE READ, SHARED BY BOTH PATHS, so the dropdown and the submit path can
@@ -1153,6 +1297,10 @@ module.exports = (
     REQUEST_TYPE.REGULARIZATION_WITH_OT,
     REQUEST_TYPE.OT,
     REQUEST_TYPE.SHIFT_CHANGE,
+    // PERMISSION revokes exactly as an attendance correction does: APPROVED
+    // or REJECTED -> CANCELLED, and the day is recalculated without its
+    // windows in the revocation's own transaction.
+    REQUEST_TYPE.PERMISSION,
   ];
 
   const revokeDecision = async ({ actor, request_id, stage_no = null, reason, now = null }) => {
@@ -1397,6 +1545,11 @@ module.exports = (
 
     const isOtRequest = request.request_type === REQUEST_TYPE.OT;
     const isShiftRequest = request.request_type === REQUEST_TYPE.SHIFT_CHANGE;
+    // A PERMISSION is normally approved BEFORE the date is worked (a festival
+    // release, a known appointment), exactly like a shift change: its final
+    // approval on an open day commits the decision, and the date is stored
+    // with the permission applied once it closes.
+    const isPermissionRequest = request.request_type === REQUEST_TYPE.PERMISSION;
     const carriesOt = isOtRequest || request.request_type === REQUEST_TYPE.REGULARIZATION_WITH_OT;
 
     /*
@@ -1532,7 +1685,7 @@ module.exports = (
       correctedDay || { attendance_date: request.attendance_date, shift_snapshot: null },
       { now }
     );
-    if (!dayState.closed && next.status === REQUEST_STATUS.APPROVED && !isShiftRequest) {
+    if (!dayState.closed && next.status === REQUEST_STATUS.APPROVED && !isShiftRequest && !isPermissionRequest) {
       throw dayOpenError(
         `${request.attendance_date}'s attendance day is still open${closesPhrase(dayState)}. ` +
           (carriesOt ? "Overtime" : "A regularization") +
@@ -1765,7 +1918,12 @@ module.exports = (
     return roles;
   };
 
-  const APPROVAL_TYPES = [REQUEST_TYPE.REGULARIZATION, REQUEST_TYPE.OT, REQUEST_TYPE.SHIFT_CHANGE];
+  const APPROVAL_TYPES = [
+    REQUEST_TYPE.REGULARIZATION,
+    REQUEST_TYPE.OT,
+    REQUEST_TYPE.SHIFT_CHANGE,
+    REQUEST_TYPE.PERMISSION,
+  ];
 
   /**
    * The request types ONE TAB of the approval centre shows.
@@ -1861,7 +2019,7 @@ module.exports = (
     designation_id = null,
   }) => {
     if (!APPROVAL_TYPES.includes(request_type)) {
-      throw validationError("request_type must be REGULARIZATION, OT or SHIFT_CHANGE");
+      throw validationError("request_type must be REGULARIZATION, OT, SHIFT_CHANGE or PERMISSION");
     }
     if (!APPROVAL_STATUSES.includes(status)) {
       throw validationError("status must be PENDING, APPROVED, REJECTED or ALL");
@@ -1899,6 +2057,18 @@ module.exports = (
       if (!revocationsByRequest.has(id)) revocationsByRequest.set(id, []);
       revocationsByRequest.get(id).push(v);
     });
+    // PERMISSION: the windows each request asks for, in one read.
+    const permissionsByRequest = new Map();
+    if (request_type === REQUEST_TYPE.PERMISSION && typeof attendanceRegularizationRepo.listPermissionsForRequests === "function") {
+      const permissionRows = await attendanceRegularizationRepo.listPermissionsForRequests(
+        rows.map((r) => Number(r.attendance_approval_request_id))
+      );
+      (permissionRows || []).forEach((p) => {
+        const id = Number(p.attendance_approval_request_id);
+        if (!permissionsByRequest.has(id)) permissionsByRequest.set(id, []);
+        permissionsByRequest.get(id).push(p);
+      });
+    }
     const stepsByRequest = new Map();
     steps.forEach((st) => {
       const id = Number(st.attendance_approval_request_id);
@@ -1925,6 +2095,35 @@ module.exports = (
       }
       const snapshot = day ? day.shift_snapshot : parseJson(row.shift_snapshot, null);
       const punches = day ? day.effective_punches : parseJson(row.effective_punches, []);
+
+      // PERMISSION, PENDING: what the day becomes IF this request is
+      // approved - the same engine with the approval assumed, nothing
+      // stored - so the approver sees the shortage it would forgive, not
+      // only the window it asks for.
+      let permissionPreview = null;
+      if (row.request_type === REQUEST_TYPE.PERMISSION && row.status === REQUEST_STATUS.PENDING) {
+        /* eslint-disable no-await-in-loop */
+        const [assumed] = await attendanceCalculationUsecase.calculateRange({
+          employee_id: Number(row.requested_for_employee_id),
+          from_date: row.attendance_date,
+          to_date: row.attendance_date,
+          assume: {
+            attendance_approval_request_id: id,
+            attendance_date: row.attendance_date,
+            request_type: REQUEST_TYPE.PERMISSION,
+            status: REQUEST_STATUS.APPROVED,
+          },
+        });
+        /* eslint-enable no-await-in-loop */
+        permissionPreview = assumed
+          ? {
+              shortage_before_permission_minutes: assumed.shortage_before_permission_minutes,
+              permission_minutes: assumed.permission_minutes,
+              shortage_after_permission_minutes: assumed.shortage_minutes,
+              calculation_source: assumed.calculation_source || null,
+            }
+          : null;
+      }
 
       const verdict =
         row.status === REQUEST_STATUS.PENDING && currentStep
@@ -1966,9 +2165,12 @@ module.exports = (
         decided_by_employee_id: decidedStep ? decidedStep.decided_by_employee_id : null,
         decided_by_name: decidedStep ? decidedStep.decided_by_name || null : null,
         closure_reason: row.closure_reason || null,
-        closure_label: row.closure_reason && OT_CLOSURE[row.closure_reason]
-          ? OT_CLOSURE[row.closure_reason].label
-          : null,
+        closure_label:
+          row.closure_reason && row.request_type === REQUEST_TYPE.PERMISSION
+            ? PERMISSION_CLOSURE_LABEL
+            : row.closure_reason && OT_CLOSURE[row.closure_reason]
+            ? OT_CLOSURE[row.closure_reason].label
+            : null,
         current_stage_no: Number(row.current_stage_no),
         total_stages: Number(row.total_stages),
         current_stage_role: currentStep ? currentStep.approver_role : null,
@@ -2000,6 +2202,10 @@ module.exports = (
         base_shift_code: row.base_shift_code || null,
         base_shift_name: row.base_shift_name || null,
         designation_id: row.designation_id === null || row.designation_id === undefined ? null : Number(row.designation_id),
+        // PERMISSION: the windows asked for, and (pending only) what they
+        // would forgive. Empty / null on every other type.
+        permissions: (permissionsByRequest.get(id) || []).map(permissionForDisplay),
+        permission_preview: permissionPreview,
         // "Approval Stage", as the Shift table's own column: which of how
         // many, and who it is with.
         approval_stage: `${Number(row.current_stage_no)} of ${Number(row.total_stages)}`,
@@ -2208,7 +2414,7 @@ module.exports = (
       throw validationError("action must be APPROVE, REJECT or REVOKE");
     }
     if (!APPROVAL_TYPES.includes(request_type)) {
-      throw validationError("request_type must be REGULARIZATION, OT or SHIFT_CHANGE");
+      throw validationError("request_type must be REGULARIZATION, OT, SHIFT_CHANGE or PERMISSION");
     }
     const why = bulkReasonCheck(action, reason);
     const targets = bulkItems(items);
@@ -2400,7 +2606,7 @@ module.exports = (
     designation_id = null,
   }) => {
     if (!APPROVAL_TYPES.includes(request_type)) {
-      throw validationError("request_type must be REGULARIZATION, OT or SHIFT_CHANGE");
+      throw validationError("request_type must be REGULARIZATION, OT, SHIFT_CHANGE or PERMISSION");
     }
     if (!Object.values(BULK_ACTION).includes(action)) {
       throw validationError("action must be APPROVE, REJECT or REVOKE");
@@ -2478,7 +2684,7 @@ module.exports = (
     designation_id = null,
   }) => {
     if (!APPROVAL_TYPES.includes(request_type)) {
-      throw validationError("request_type must be REGULARIZATION, OT or SHIFT_CHANGE");
+      throw validationError("request_type must be REGULARIZATION, OT, SHIFT_CHANGE or PERMISSION");
     }
     const identity = await resolveIdentity(actor.employee_id);
     // "Pending with me" is counted under THE SAME filters the list is showing,
@@ -2540,6 +2746,7 @@ module.exports = (
     setShiftChangeNotifier,
     MAX_FORWARD_DAYS,
     closeOtForPayrollLock,
+    raisePermissionRequest,
     decide,
     revokeDecision,
     REVOCABLE_TYPES,

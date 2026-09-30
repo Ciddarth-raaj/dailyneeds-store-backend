@@ -60,6 +60,8 @@ const PERMISSION_STATE = Object.freeze({
 
 /** Why a pending Permission request was closed by the payroll lock. */
 const PERMISSION_CLOSURE_REASON = "NOT_APPROVED_BEFORE_PAYROLL_LOCK";
+/** The wording the employee and the approver read for it. */
+const PERMISSION_CLOSURE_LABEL = "Closed – Not approved before payroll lock";
 
 /**
  * The derived state of one permission row as the repository returns it:
@@ -281,10 +283,157 @@ function allocatePermission({
   };
 }
 
+/* ------------------------------------------- clock times -> the windows */
+
+const MINUTES_PER_DAY = 1440;
+
+/** `HH:MM[:SS]` -> minutes since midnight, else null. */
+function clockToMinutes(value) {
+  const m = /^(\d{1,2}):(\d{2})(?::\d{2})?$/.exec(String(value === undefined || value === null ? "" : value).trim());
+  if (!m) return null;
+  const h = Number(m[1]);
+  const mi = Number(m[2]);
+  if (h > 23 || mi > 59) return null;
+  return h * 60 + mi;
+}
+
+/** `YYYY-MM-DD` + n days, by UTC arithmetic. */
+function addDaysUtc(dateOnly, n) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateOnly));
+  if (!m) return null;
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) + n * 86400000);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+}
+
+/** An absolute minute from the attendance date's midnight -> `YYYY-MM-DD HH:MM:SS`. */
+function minuteToDateTime(attendanceDate, minute) {
+  const dayOffset = Math.floor(minute / MINUTES_PER_DAY);
+  const inDay = minute - dayOffset * MINUTES_PER_DAY;
+  const date = addDaysUtc(attendanceDate, dayOffset);
+  return `${date} ${String(Math.floor(inDay / 60)).padStart(2, "0")}:${String(inDay % 60).padStart(2, "0")}:00`;
+}
+
+const PERMISSION_WINDOW_ERROR = Object.freeze({
+  NO_SHIFT: "NO_SHIFT",
+  NOT_WORKING_DAY: "NOT_WORKING_DAY",
+  BAD_TIME: "BAD_TIME",
+  EMPTY_WINDOW: "EMPTY_WINDOW",
+  OUTSIDE_SHIFT: "OUTSIDE_SHIFT",
+  WHOLE_SHIFT: "WHOLE_SHIFT",
+  OVERLAPPING_WINDOWS: "OVERLAPPING_WINDOWS",
+});
+
+/**
+ * Turn requested clock windows into stored date-time windows INSIDE the
+ * date's resolved shift.
+ *
+ * `shift` is `{in_time, shift_span_minutes, is_working_day}` for the date.
+ * Each window is `{from_time, to_time}` or `{from_time, to_shift_end: true}`.
+ * A clock time earlier than the shift's in-time is read as the next calendar
+ * morning when the shift runs past midnight - an 18:00-02:00 shift's "01:00"
+ * is 01:00 the following day, as a punch would be.
+ *
+ *   clip = false  (one employee, a person choosing the times) - a window
+ *                 reaching outside the shift is REFUSED, so nobody approves a
+ *                 period the calculation would silently cut down.
+ *   clip = true   (a bulk grant, one rule for many different shifts) - each
+ *                 window is cut to the employee's own shift; a window that
+ *                 then covers nothing, or the whole shift, is refused for
+ *                 that employee. A whole shift away is leave, not permission.
+ *
+ * Returns `{ ok: true, windows: [...] }` or `{ ok: false, code, message }`.
+ */
+function resolvePermissionWindows({ attendance_date, shift, windows = [], clip = false } = {}) {
+  const fail = (code, message) => ({ ok: false, code, message });
+  if (!shift || shift.in_time === null || shift.in_time === undefined) {
+    return fail(PERMISSION_WINDOW_ERROR.NO_SHIFT, `No work shift is assigned for ${attendance_date}`);
+  }
+  if (!(shift.is_working_day === true || Number(shift.is_working_day) === 1)) {
+    return fail(PERMISSION_WINDOW_ERROR.NOT_WORKING_DAY, `${attendance_date} is not a working day on this shift`);
+  }
+  const shiftIn = clockToMinutes(shift.in_time);
+  const span = Math.max(0, Math.trunc(Number(shift.shift_span_minutes) || 0));
+  if (shiftIn === null || span <= 0) {
+    return fail(PERMISSION_WINDOW_ERROR.NO_SHIFT, `The work shift for ${attendance_date} has no hours`);
+  }
+  const shiftEnd = shiftIn + span;
+  const place = (m) => (m >= shiftIn ? m : m + MINUTES_PER_DAY <= shiftEnd ? m + MINUTES_PER_DAY : m);
+  const label = (m) => minuteToDateTime(attendance_date, m).slice(11, 16);
+
+  if (!Array.isArray(windows) || windows.length === 0) {
+    return fail(PERMISSION_WINDOW_ERROR.EMPTY_WINDOW, "At least one permission window is required");
+  }
+
+  const out = [];
+  for (const w of windows) {
+    const fromClock = clockToMinutes(w && w.from_time);
+    const toShiftEnd = Boolean(w && w.to_shift_end);
+    const toClock = toShiftEnd ? null : clockToMinutes(w && w.to_time);
+    if (fromClock === null || (!toShiftEnd && toClock === null)) {
+      return fail(PERMISSION_WINDOW_ERROR.BAD_TIME, "Permission times must be HH:MM");
+    }
+    let from = place(fromClock);
+    let to = toShiftEnd ? shiftEnd : place(toClock);
+    if (!toShiftEnd && to <= from) to += MINUTES_PER_DAY;
+
+    if (clip) {
+      from = Math.max(from, shiftIn);
+      to = Math.min(to, shiftEnd);
+      if (to <= from) {
+        return fail(
+          PERMISSION_WINDOW_ERROR.OUTSIDE_SHIFT,
+          `The window falls outside the shift (${label(shiftIn)} - ${label(shiftEnd)})`
+        );
+      }
+    } else if (from < shiftIn || to > shiftEnd || to <= from) {
+      return fail(
+        PERMISSION_WINDOW_ERROR.OUTSIDE_SHIFT,
+        `A permission must lie inside the scheduled shift (${label(shiftIn)} - ${label(shiftEnd)})`
+      );
+    }
+    if (from <= shiftIn && to >= shiftEnd) {
+      return fail(
+        PERMISSION_WINDOW_ERROR.WHOLE_SHIFT,
+        "A permission cannot cover the whole shift - a day away is leave, not permission"
+      );
+    }
+    out.push({
+      from_minute: from,
+      to_minute: to,
+      permission_from: minuteToDateTime(attendance_date, from),
+      permission_to: minuteToDateTime(attendance_date, to),
+      to_shift_end: toShiftEnd,
+      permission_minutes: to - from,
+    });
+  }
+
+  const merged = mergeIntervals(out.map((w) => [w.from_minute, w.to_minute]));
+  if (totalMinutes(merged) !== out.reduce((sum, w) => sum + w.permission_minutes, 0)) {
+    return fail(PERMISSION_WINDOW_ERROR.OVERLAPPING_WINDOWS, "The permission windows overlap each other");
+  }
+  if (merged.length === 1 && merged[0][0] <= shiftIn && merged[0][1] >= shiftEnd) {
+    return fail(
+      PERMISSION_WINDOW_ERROR.WHOLE_SHIFT,
+      "A permission cannot cover the whole shift - a day away is leave, not permission"
+    );
+  }
+  return {
+    ok: true,
+    shift_from: minuteToDateTime(attendance_date, shiftIn),
+    shift_to: minuteToDateTime(attendance_date, shiftEnd),
+    windows: out.sort((a, b) => a.from_minute - b.from_minute),
+  };
+}
+
 module.exports = {
+  PERMISSION_WINDOW_ERROR,
+  resolvePermissionWindows,
+  clockToMinutes,
+  minuteToDateTime,
   PERMISSION_SOURCE,
   PERMISSION_STATE,
   PERMISSION_CLOSURE_REASON,
+  PERMISSION_CLOSURE_LABEL,
   permissionState,
   isPermissionEffective,
   resolvePermissionRows,
