@@ -1,5 +1,5 @@
 /**
- * 20261107120000-employee-attendance-calculation-mode, as SQL text.
+ * 20261108120000-employee-attendance-calculation-mode, as SQL text.
  *
  *   node --test migrations/employee_attendance_calculation_mode.test.js
  *
@@ -13,7 +13,7 @@ const assert = require("node:assert/strict");
 const fs = require("fs");
 const path = require("path");
 
-const NAME = "20261107120000-employee-attendance-calculation-mode";
+const NAME = "20261108120000-employee-attendance-calculation-mode";
 const DIR = path.join(__dirname, "mysql/migrations");
 const read = (f) => fs.readFileSync(path.join(DIR, f), "utf8");
 const statements = (sql) =>
@@ -54,8 +54,15 @@ describe(NAME, () => {
       alter,
       /ADD COLUMN `attendance_calculation_mode` ENUM\('SHIFT_BASED','PRESENT_ABSENT_ONLY'\) NOT NULL DEFAULT 'SHIFT_BASED'/
     );
-    assert.equal(up.filter((s) => /^ALTER/i.test(s)).length, 1, "no other table is altered");
+    assert.equal(up.filter((s) => /^ALTER/i.test(s)).length, 2, "no other table is altered");
     assert.equal(up.filter((s) => /^DROP|^TRUNCATE/i.test(s)).length, 0);
+  });
+
+  it("widens the month fingerprint for its version prefix, and only widens it", () => {
+    const alter = up.find((s) => /^ALTER TABLE `attendance_monthly_payroll`/.test(s));
+    assert.match(alter, /^ALTER TABLE `attendance_monthly_payroll`\s+MODIFY COLUMN `day_rows_fingerprint` VARCHAR\(80\) NULL DEFAULT NULL\s+COMMENT '[^']+'$/);
+    const { dayRowsFingerprint } = require("../utils/attendance_month_freshness");
+    assert.ok(dayRowsFingerprint([]).length <= 80);
   });
 
   it("the column is written by every guarded attendance write", () => {
@@ -63,7 +70,7 @@ describe(NAME, () => {
     assert.match(repo, /"attendance_calculation_mode",\n\];/);
   });
 
-  it("down removes exactly what up added", () => {
+  it("down removes exactly what up added, and leaves the widened fingerprint wide", () => {
     assert.deepEqual(down, [
       "ALTER TABLE `attendance_day_calculation` DROP COLUMN `attendance_calculation_mode`",
       "DROP TABLE IF EXISTS `employee_attendance_calculation_mode`",

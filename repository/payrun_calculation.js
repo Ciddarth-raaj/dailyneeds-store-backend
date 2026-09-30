@@ -1,3 +1,5 @@
+const { dayRowsSql, monthFreshness } = require("../utils/attendance_month_freshness");
+const { closePendingPermissionsForLock } = require("./lib/attendance_permission_guard");
 const logger = require("../utils/logger");
 const { activeOverrideCondition } = require("../utils/shift_override_active");
 const { JOINED_ON } = require("../utils/joining_date");
@@ -562,6 +564,61 @@ class PayrunCalculationRepository {
    *
    * Returns the marker keys that moved, or an empty list.
    */
+  /**
+   * IS THE MONTHLY ATTENDANCE THIS CALCULATION PRICED STILL THE CURRENT ONE,
+   * AND IS IT CURRENT WITH ITS DAYS? Asked on the held payrun-row lock, with
+   * LOCKING reads (`LOCK IN SHARE MODE`), because Approve & Lock approves many
+   * employees in one transaction and a plain read would answer from the
+   * snapshot taken at the first of them - not from what is committed now.
+   *
+   *   1. The summary's identity (id, version, calculated_at) must be the one
+   *      the calculation recorded - else SOURCE_MOVED, as the source check.
+   *   2. The summary's day fingerprint must match the stored day rows as they
+   *      stand - else ATTENDANCE_STALE: a day moved (a permission, an
+   *      approval, a void, a daily recalculation) since the month was
+   *      persisted, so the summary still carries the old shortage or OT.
+   *      A summary with no fingerprint predates this check and is STALE.
+   *
+   * Returns null when the month may lock, or the outcome that refuses it.
+   * Every attendance writer takes this same payrun row FOR UPDATE before it
+   * writes, and waits while it is held here, so nothing can move between
+   * this answer and the status change.
+   */
+  async _attendanceFreshnessLocked(conn, { year, month, employee_id, stored }) {
+    const mark = (v) => (v === null || v === undefined || v === "" ? "" : String(v));
+    const [monthly] = await this._read(
+      "LOCK-ATTENDANCE-MONTH",
+      `SELECT attendance_monthly_payroll_id, payroll_version,
+              DATE_FORMAT(calculated_at, '%Y-%m-%d %H:%i:%s.%f') AS calculated_at,
+              day_rows_fingerprint
+         FROM attendance_monthly_payroll
+        WHERE employee_id = ? AND period_year = ? AND period_month = ?
+        LOCK IN SHARE MODE`,
+      [employee_id, year, month],
+      conn
+    );
+    const current = monthly || {};
+    const moved = [
+      ["attendance_monthly_payroll_id", current.attendance_monthly_payroll_id],
+      ["attendance_payroll_version", current.payroll_version],
+      ["attendance_calculated_at", current.calculated_at],
+    ]
+      .filter(([key, value]) => mark(value) !== mark(stored && stored[key]))
+      .map(([key]) => key);
+    if (moved.length > 0) return { outcome: "SOURCE_MOVED", changed: moved };
+
+    const { from, to } = monthWindow(Number(year), Number(month));
+    const dayRows = await this._read(
+      "LOCK-ATTENDANCE-DAYS",
+      dayRowsSql("LOCK IN SHARE MODE"),
+      [employee_id, from, to],
+      conn
+    );
+    const verdict = monthFreshness({ monthly: monthly || null, dayRows: Array.isArray(dayRows) ? dayRows : [] });
+    if (verdict.state === "STALE") return { outcome: "ATTENDANCE_STALE", reason: verdict.reason };
+    return null;
+  }
+
   async _attendanceSourceChangesLocked(conn, { year, month, employee_id, stored }) {
     const { from, to } = monthWindow(Number(year), Number(month));
     const [attendanceRows, nrmRows] = await Promise.all([
@@ -786,6 +843,20 @@ class PayrunCalculationRepository {
           continue;
         }
 
+        // AND THE MONTHLY SUMMARY MUST BE CURRENT WITH ITS DAYS, on the same
+        // held lock. A permission, an approval or a void rewrites DAYS; only
+        // the month persist rewrites the summary this calculation priced.
+        const freshness = await this._attendanceFreshnessLocked(conn, {
+          year,
+          month,
+          employee_id: row.employee_id,
+          stored: row,
+        });
+        if (freshness) {
+          results.push({ employee_id: entry.employee_id, ...freshness });
+          continue;
+        }
+
         // AND THE PENDING SHIFT-RULE RECALCULATION, on the same held lock.
         // A month may not be settled while a rule change is still owed to it.
         const pending = await this._pendingShiftPropagationLocked(conn, {
@@ -836,11 +907,24 @@ class PayrunCalculationRepository {
           conn
         );
 
+        // PENDING PERMISSION REQUESTS CLOSE WITH THE MONTH, in this same
+        // transaction: once the row above is APPROVED_LOCKED no decision can
+        // pay them, so none may go on claiming to be pending. They become
+        // "Closed - Not approved before payroll lock", exactly as the OT
+        // closure shapes a closed claim. Approved, rejected and revoked
+        // requests, and DIRECT grants, are untouched.
+        const permissionClosure = await closePendingPermissionsForLock(conn, {
+          employee_id: row.employee_id,
+          year,
+          month,
+        });
+
         results.push({
           employee_id: entry.employee_id,
           outcome: "APPROVED",
           calculation_hash: row.calculation_hash,
           net_pay: row.net_pay,
+          permissions_closed: permissionClosure.closed,
         });
       }
 

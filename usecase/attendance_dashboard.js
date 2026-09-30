@@ -6,6 +6,7 @@ const {
   addDays,
   dayDelta,
 } = require("../utils/attendance_engine");
+const { resolvePermissionRows, permissionsByDate } = require("../utils/attendance_permission");
 const { RESOLUTION_STATUS, resolveShiftForDate, toDateOnly } = require("../utils/shiftResolution");
 const {
   configVersionForCalculation,
@@ -415,7 +416,7 @@ module.exports = (attendanceDashboardRepo) => {
     const punchFrom = addDays(from, -1);
     const punchTo = addDays(to, 1);
 
-    const [shiftCache, assignments, overrides, rawPunches, regularized, approvals, stored, modes] =
+    const [shiftCache, assignments, overrides, rawPunches, regularized, approvals, stored, permissions, modes] =
       await Promise.all([
         loadShiftCache(),
         attendanceDashboardRepo.getShiftAssignmentHistoryForEmployees(employeeIds),
@@ -428,6 +429,11 @@ module.exports = (attendanceDashboardRepo) => {
         // `utils/attendance_stored_read.js`. One read for the population.
         attendanceDashboardRepo.getStoredCalculationsForEmployees
           ? attendanceDashboardRepo.getStoredCalculationsForEmployees(employeeIds, from, to)
+          : [],
+        // PERMISSION rows, resolved per date by the same shared rule the
+        // employee's own screen uses.
+        attendanceDashboardRepo.getPermissionsForEmployees
+          ? attendanceDashboardRepo.getPermissionsForEmployees(employeeIds, from, to)
           : [],
         // The effective-dated Attendance Calculation Type, one read for the
         // population. Absent reader -> nobody has a row -> SHIFT_BASED.
@@ -444,6 +450,7 @@ module.exports = (attendanceDashboardRepo) => {
       rawByEmployee: groupBy(rawPunches, (r) => r.employee_id),
       regularizedByEmployee: groupBy(regularized, (r) => r.employee_id),
       approvalsByEmployee: groupBy(approvals, (r) => r.employee_id),
+      permissionsByEmployee: groupBy(permissions || [], (r) => r.employee_id),
       modesByEmployee: groupBy(modes, (r) => r.employee_id),
     };
   };
@@ -490,11 +497,18 @@ module.exports = (attendanceDashboardRepo) => {
     const approvalByDate = new Map();
     (batch.approvalsByEmployee.get(key) || []).forEach((row) => {
       const date = toDateOnly(row.attendance_date);
+      // A PERMISSION request proposes no punch and corrects nothing: it must
+      // never hold the date as REGULARIZATION_PENDING. Its state reaches the
+      // day through its permission rows, exactly as in `calculateRange`.
+      if (row.request_type === "PERMISSION") return;
       if (!approvalByDate.has(date)) approvalByDate.set(date, { regularization: null, ot: null });
       const slot = approvalByDate.get(date);
       if (row.request_type === "OT") slot.ot = row;
       else slot.regularization = row;
     });
+    const permissionRowsByDate = permissionsByDate(batch.permissionsByEmployee
+      ? batch.permissionsByEmployee.get(key) || []
+      : []);
 
     const isSettled = (row) =>
       !!row &&
@@ -525,9 +539,11 @@ module.exports = (attendanceDashboardRepo) => {
         (approval.status === "PENDING" ||
           (approval.status === "APPROVED" && !regularizationSettled));
 
+      const datePermissions = resolvePermissionRows(permissionRowsByDate.get(date) || []);
       const calculated = calculateAttendanceDay({
         employee_id: Number(employee.employee_id),
         attendance_date: date,
+        permissions: datePermissions.effective,
         shift: resolution.snapshot,
         shift_status: resolution.status,
         punches: byDate.get(date) || [],

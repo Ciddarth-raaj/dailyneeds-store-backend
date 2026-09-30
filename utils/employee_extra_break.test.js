@@ -499,11 +499,19 @@ describe("the calculation version history is not rewritten", () => {
     assert.ok(!/SHIFT_CHANGE/.test(nine), "version 10's rule is not backdated into version 9");
   });
 
-  it("version 10 is the shift-authorised OT, and the version is 10", () => {
-    const ten = history.slice(history.indexOf(" *  10 "));
+  it("version 10 is the shift-authorised OT", () => {
+    const ten = history.slice(history.indexOf(" *  10 "), history.indexOf(" *  11 "));
     assert.match(ten, /shift_authorised_ot_minutes/);
     assert.match(ten, /excess_ot_minutes/);
     assert.match(ten, /never frozen/);
-    assert.match(source, /const CALCULATION_VERSION = 10;/);
+    assert.ok(!/PERMISSION/.test(ten), "version 11's rule is not backdated into version 10");
+  });
+
+  it("version 11 is Permission, and the version is 11", () => {
+    const eleven = history.slice(history.indexOf(" *  11 "));
+    assert.match(eleven, /PERMISSION/);
+    assert.match(eleven, /AFTER grace/);
+    assert.match(eleven, /never create OT/);
+    assert.match(source, /const CALCULATION_VERSION = 11;/);
   });
 });

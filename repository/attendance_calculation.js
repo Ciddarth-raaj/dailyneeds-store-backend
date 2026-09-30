@@ -1,3 +1,5 @@
+const { dayRowsSql, dayRowsFingerprint, monthWindow } = require("../utils/attendance_month_freshness");
+const { PERMISSION_COLUMNS, PERMISSION_FROM } = require("./lib/attendance_permission_select");
 const logger = require("../utils/logger");
 const { activeOverrideCondition } = require("../utils/shift_override_active");
 const {
@@ -87,8 +89,14 @@ const CALCULATION_COLUMNS = [
   "ot_request_approved_minutes", "ot_request_id",
   "ot_rate", "status", "is_final", "review_reasons", "approval_request_id",
   "calculation_version",
+  // PERMISSION - paid forgiven shortage, never worked time. What the date's
+  // effective permissions actually covered; `shortage_minutes` above is the
+  // charge after them. See `20261107120000-attendance-permission`.
+  "permission_ids", "permission_window_minutes", "permission_minutes",
+  "permission_late_minutes", "permission_early_minutes", "permission_away_minutes",
+  "shortage_before_permission_minutes", "payable_minutes",
   // Which Attendance Calculation Type produced the row. See
-  // `20261107120000-employee-attendance-calculation-mode`.
+  // `20261108120000-employee-attendance-calculation-mode`.
   "attendance_calculation_mode",
 ];
 
@@ -160,11 +168,29 @@ const CALCULATION_COLUMNS = [
  * not depend on that.)
  */
 async function assertMonthsNotPayrollLocked(connection, rows) {
+  const hits = await lockPayrollMonthsOnConnection(connection, rows);
+  if (hits.length > 0) throw payrollLockedError(hits);
+}
+
+/**
+ * THE SAME ROW LOCK, WITHOUT THE REFUSAL: take `FOR UPDATE` on the payrun
+ * rows these (employee, date) pairs fall in and return which of them are
+ * APPROVED_LOCKED.
+ *
+ * WHY A LOCK THAT DOES NOT REFUSE. A caller that must take this lock FIRST -
+ * so that it acquires its locks in the same order Approve & Lock does
+ * (payrun row, then the rows it writes) - may still have a legitimate thing
+ * to do in a locked month. A rejection is the case: it changes no payable
+ * attendance, and a request nobody may reject is a request nobody can ever
+ * close. The caller decides what a locked month forbids; the lock is the
+ * same either way, held until its transaction ends.
+ */
+async function lockPayrollMonthsOnConnection(connection, rows) {
   const { periods, unreadable } = periodsTouched(rows);
   if (unreadable) {
     throw new Error("refusing to write attendance: a row has no readable employee and date");
   }
-  if (periods.length === 0) return;
+  if (periods.length === 0) return [];
 
   // One statement per (year, month), each naming only the employees this
   // write touches in that month - the shape `approveAndLock` locks, widened
@@ -208,8 +234,7 @@ async function assertMonthsNotPayrollLocked(connection, rows) {
       });
     }
   }
-
-  if (hits.length > 0) throw payrollLockedError(hits);
+  return hits;
 }
 
 /**
@@ -256,6 +281,11 @@ const MONTHLY_PAYROLL_COLUMNS = [
   "shortage_minutes", "missing_minute_deduction", "approved_ot_minutes",
   "approved_ot_earnings",
   "total_attendance_payable", "held_dates", "is_final", "payroll_version",
+  "permission_minutes",
+  // What the summary was made from: a fingerprint of the stored day rows,
+  // taken inside the month persist's own transaction. Approve & Lock
+  // compares it with the days as they stand - `utils/attendance_month_freshness.js`.
+  "day_rows_fingerprint",
 ];
 
 async function upsertMonthlyPayrollOnConnection(connection, row) {
@@ -269,7 +299,13 @@ async function upsertMonthlyPayrollOnConnection(connection, row) {
     `INSERT INTO attendance_monthly_payroll (${MONTHLY_PAYROLL_COLUMNS.map((c) => `\`${c}\``).join(", ")})
      VALUES (${MONTHLY_PAYROLL_COLUMNS.map(() => "?").join(", ")})
      ON DUPLICATE KEY UPDATE ${updates}`,
-    MONTHLY_PAYROLL_COLUMNS.map((c) => row[c])
+    MONTHLY_PAYROLL_COLUMNS.map((c) =>
+      // A GUARD, not the source of the value: the usecase always supplies the
+      // applied Permission total. An older caller that predates the column
+      // must not fail the NOT NULL write - and a missing Permission total can
+      // only ever mean "none applied".
+      c === "permission_minutes" && (row[c] === undefined || row[c] === null) ? 0 : row[c]
+    )
   );
 }
 
@@ -350,6 +386,24 @@ class AttendanceCalculationRepository {
    * greatest id per date. The table is append-only, so this is a plain read
    * of what every edit recorded.
    */
+  /**
+   * Every permission row of the employee over the range, in EVERY state -
+   * pending, approved, revoked - because the screens show them all. Which of
+   * them reach the engine is decided in one place,
+   * `utils/attendance_permission.js#resolvePermissionRows`.
+   */
+  async getPermissionsForRange(employeeId, fromDate, toDate) {
+    return this._read(
+      "GET-PERMISSIONS",
+      `SELECT ${PERMISSION_COLUMNS}
+         ${PERMISSION_FROM}
+        WHERE p.employee_id = ?
+          AND p.attendance_date BETWEEN ? AND ?
+        ORDER BY p.attendance_date ASC, p.permission_from ASC, p.attendance_permission_id ASC`,
+      [employeeId, fromDate, toDate]
+    );
+  }
+
   async getDateShiftOverrides(employeeId, fromDate, toDate) {
     return this._read(
       "GET-DATE-SHIFT-OVERRIDES",
@@ -1770,7 +1824,15 @@ class AttendanceCalculationRepository {
       const calculation = await upsertCalculationRows(connection, rows);
       let monthlyWritten = 0;
       if (monthly) {
-        await upsertMonthlyPayrollOnConnection(connection, monthly);
+        // THE DAYS THIS SUMMARY WAS MADE FROM, read back after writing them,
+        // on this connection, under this transaction's payroll-row lock -
+        // exactly the rows that are stored, not the ones the caller passed.
+        const { from, to } = monthWindow(year, month);
+        const stored = await queryAsync(connection, dayRowsSql(), [employeeId, from, to]);
+        await upsertMonthlyPayrollOnConnection(connection, {
+          ...monthly,
+          day_rows_fingerprint: dayRowsFingerprint(stored),
+        });
         monthlyWritten = 1;
       }
 
@@ -1813,6 +1875,7 @@ class AttendanceCalculationRepository {
 module.exports = (db) => new AttendanceCalculationRepository(db);
 module.exports.AttendanceCalculationRepository = AttendanceCalculationRepository;
 module.exports.CALCULATION_COLUMNS = CALCULATION_COLUMNS;
+module.exports.MONTHLY_PAYROLL_COLUMNS = MONTHLY_PAYROLL_COLUMNS;
 module.exports.writeCalculationsOnConnection = writeCalculationsOnConnection;
 /**
  * THE PAYROLL LOCK, exported so that every write which could invalidate a
@@ -1825,3 +1888,4 @@ module.exports.writeCalculationsOnConnection = writeCalculationsOnConnection;
  * implementation is exactly what this export exists to prevent.
  */
 module.exports.assertMonthsNotPayrollLocked = assertMonthsNotPayrollLocked;
+module.exports.lockPayrollMonthsOnConnection = lockPayrollMonthsOnConnection;

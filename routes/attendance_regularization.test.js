@@ -71,8 +71,12 @@ describe("the endpoints and their guards", () => {
         "POST /attendance/approvals/:request_id/revoke",
         "POST /attendance/approvals/bulk",
         "POST /attendance/me/ot-request",
+        // PERMISSION: for yourself (self + key), or for an employee in your
+        // outlet scope (for-others key + scope check in the handler).
+        "POST /attendance/me/permission-request",
         "POST /attendance/me/regularization",
         "POST /attendance/me/shift-change",
+        "POST /attendance/permission-request",
         "POST /attendance/regularization",
         "POST /attendance/regularization/:request_id/decision",
       ]

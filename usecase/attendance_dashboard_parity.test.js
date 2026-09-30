@@ -128,6 +128,8 @@ function calcRepo(facts) {
     }),
     getApprovalStateByDate: async (_id, from, to) =>
       facts.approvals.filter((a) => a.attendance_date >= from && a.attendance_date <= to),
+    getPermissionsForRange: async (_id, from, to) =>
+      (facts.permissions || []).filter((p) => p.attendance_date >= from && p.attendance_date <= to),
     listCalculations: async ({ from_date, to_date }) =>
       (facts.stored || []).filter((r) => r.attendance_date >= from_date && r.attendance_date <= to_date),
   };
@@ -158,6 +160,8 @@ function dashRepo(facts) {
     listOutlets: async () => [],
     listDesignations: async () => [],
     listActiveWorkShifts: async () => [],
+    getPermissionsForEmployees: async (_ids, from, to) =>
+      (facts.permissions || []).filter((p) => p.attendance_date >= from && p.attendance_date <= to),
     getStoredCalculationsForEmployees: async (_ids, from, to) =>
       (facts.stored || []).filter((r) => r.attendance_date >= from && r.attendance_date <= to),
   };
@@ -230,6 +234,12 @@ const ENGINE_FIELDS = [
   "break_override_minutes_applied",
   "extra_break_minutes_applied",
   "calculation_source",
+  // PERMISSION: which rows count and what they covered must be one answer.
+  "permission_ids",
+  "permission_window_minutes",
+  "permission_minutes",
+  "shortage_before_permission_minutes",
+  "payable_minutes",
 ];
 
 const pick = (day) => {
@@ -440,6 +450,56 @@ describe("the batched dashboard path agrees with calculateRange", () => {
           finalization_state: "SETTLED",
           candidate_ot_minutes: 90,
           approved_ot_minutes: 60,
+        },
+      ],
+    }),
+
+    "a DIRECT permission covering an early finish": baseFacts({
+      rawPunches: [
+        punch(`${DATE} 10:00:00`, { punch_id: 1 }),
+        punch(`${DATE} 19:00:00`, { punch_id: 2 }),
+      ],
+      permissions: [
+        {
+          attendance_permission_id: 31,
+          employee_id: EMP,
+          attendance_date: DATE,
+          permission_from: `${DATE} 19:00:00`,
+          permission_to: `${DATE} 22:00:00`,
+          source: "DIRECT",
+          revoked_at: null,
+        },
+      ],
+    }),
+
+    "a PENDING permission request neither pays nor holds the day": baseFacts({
+      rawPunches: [
+        punch(`${DATE} 11:00:00`, { punch_id: 1 }),
+        punch(`${DATE} 22:00:00`, { punch_id: 2 }),
+      ],
+      approvals: [
+        {
+          attendance_approval_request_id: 81,
+          requested_for_employee_id: EMP,
+          attendance_date: DATE,
+          request_type: "PERMISSION",
+          status: "PENDING",
+          finalization_state: "NOT_REQUIRED",
+          candidate_ot_minutes: 0,
+          approved_ot_minutes: null,
+        },
+      ],
+      permissions: [
+        {
+          attendance_permission_id: 32,
+          employee_id: EMP,
+          attendance_date: DATE,
+          permission_from: `${DATE} 10:00:00`,
+          permission_to: `${DATE} 11:00:00`,
+          source: "REQUEST",
+          attendance_approval_request_id: 81,
+          request_status: "PENDING",
+          finalization_state: "NOT_REQUIRED",
         },
       ],
     }),

@@ -309,6 +309,12 @@ class Server {
     this.attendanceRegularizationRepo = require("./repository/attendance_regularization")(
       this.mysql.connection
     );
+    // Attendance PERMISSION: DIRECT (management) grants, their revoke, the
+    // bulk operation log and the register. Requested permissions live in the
+    // regularization store above, as PERMISSION requests.
+    this.attendancePermissionRepo = require("./repository/attendance_permission")(
+      this.mysql.connection
+    );
     // Attendance Approver Setup: the EMPLOYEE-LEVEL approver master and its
     // append-only audit. Read by the regularization usecase to resolve a new
     // request's chain; an unmapped employee falls back to the role chain.
@@ -864,6 +870,13 @@ class Server {
       // direct API call alike. Without it both behave exactly as they did
       // before the feature.
       this.attendanceShiftChangeBlockRepo
+    );
+    // DIRECT permission grants: preview, apply, revoke, register. Handed the
+    // calculation usecase because every grant and revoke stores the day it
+    // produces through the ordinary calculation path, never a patched figure.
+    this.attendancePermissionUsecase = require("./usecase/attendance_permission")(
+      this.attendancePermissionRepo,
+      this.attendanceCalculationUsecase
     );
     // THE WRITE SIDE of the eligibility report: mark not eligible, and remove
     // that block again. Built AFTER the regularization usecase, because it
@@ -1636,6 +1649,13 @@ class Server {
       // server's own facts. The approval centre fails closed without it.
       this.employeeBranchScope
     );
+    const attendancePermissionRouter = require("./routes/attendance_permission")(
+      this.attendancePermissionUsecase,
+      this.permissions,
+      this.sensitive,
+      // The outlet scope every grant, revoke and register read is confined to.
+      this.employeeBranchScope
+    );
     const telegramAttendanceRouter = require("./routes/telegram_attendance")(
       this.telegramAttendanceSessionUsecase,
       this.telegramAttendanceMiniAppUsecase
@@ -1957,6 +1977,7 @@ class Server {
     app.use("/", attendanceShiftChangeReportRouter.getRouter());
     app.use("/", attendanceShiftChangeBlockRouter.getRouter());
     app.use("/", attendanceRegularizationRouter.getRouter());
+    app.use("/", attendancePermissionRouter.getRouter());
     app.use("/", attendanceApproverSetupRouter.getRouter());
     // Full `/attendance/device-time-corrections` paths; before the Part 1
     // router, which claims the bare `/attendance` prefix.

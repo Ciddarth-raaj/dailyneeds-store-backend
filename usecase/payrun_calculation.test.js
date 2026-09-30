@@ -1676,3 +1676,39 @@ describe("attendance closed for payroll", () => {
     assert.equal(row.attendance_closed_for_payroll, true);
   });
 });
+
+/* ============ a stale monthly attendance summary is refused, with why ==== */
+
+describe("ATTENDANCE_STALE at Approve & Lock", () => {
+  it("is BLOCKED with the instruction to recalculate attendance, and nothing is locked", async () => {
+    const { calcRepo } = build();
+    world.add(1);
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    calcRepo.approve = async ({ employees }) =>
+      employees.map((e) => ({ employee_id: e.employee_id, outcome: "ATTENDANCE_STALE", reason: "DAYS_CHANGED" }));
+    const out = await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(out.approved_count, 0);
+    assert.equal(out.blocked_count, 1);
+    const [row] = out.results;
+    assert.equal(row.attendance_stale, "DAYS_CHANGED");
+    assert.match(row.message, /Recalculate Attendance for this employee and month/);
+    assert.notEqual((await rowOf(1)).status, CALC_STATUS.APPROVED_LOCKED);
+  });
+
+  it("an UNTRACKED summary is refused with the upgrade condition, not the stale-days message", async () => {
+    const { calcRepo } = build();
+    world.add(1);
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    calcRepo.approve = async ({ employees }) =>
+      employees.map((e) => ({ employee_id: e.employee_id, outcome: "ATTENDANCE_STALE", reason: "UNTRACKED" }));
+    const out = await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(out.blocked_count, 1);
+    const [row] = out.results;
+    assert.equal(row.attendance_stale, "UNTRACKED");
+    assert.match(row.message, /before attendance freshness tracking was introduced/);
+    assert.match(row.message, /Recalculate Attendance once/);
+    assert.match(row.message, /then recalculate Payroll before approving and locking/);
+    assert.doesNotMatch(row.message, /days changed/);
+    assert.notEqual((await rowOf(1)).status, CALC_STATUS.APPROVED_LOCKED);
+  });
+});

@@ -9,11 +9,15 @@ const {
 const {
   writeCalculationsOnConnection,
   assertMonthsNotPayrollLocked,
+  lockPayrollMonthsOnConnection,
 } = require("./attendance_calculation");
+const { payrollLockedError } = require("../utils/attendance_payroll_lock");
 // THE SHARED SERIALIZATION POINT, imported rather than re-typed: the block
 // path and this one must lock the IDENTICAL row with the IDENTICAL statement,
 // and two copies of a lock serialize nothing.
 const { SHARED_LOCK_SQL } = require("./attendance_shift_change_block");
+const permissionGuard = require("./lib/attendance_permission_guard");
+const { PERMISSION_COLUMNS, PERMISSION_FROM } = require("./lib/attendance_permission_select");
 
 /*
  * ADMIN REVOKE - the two reads a revocation is decided on, as constants,
@@ -425,10 +429,54 @@ class AttendanceRegularizationRepository {
    * has already been raised (Replace Approver does that explicitly, and only
    * for undecided steps).
    */
-  async createRequest({ request, chain, punch, auto_approve = null }) {
+  async createRequest({ request, chain, punch, auto_approve = null, permissions = null }) {
     const connection = await getConnectionAsync(this.db);
     try {
       await beginTransactionAsync(connection);
+
+      /**
+       * THE PAYROLL ROW FIRST, for every request type - the lock order every
+       * request writer shares with Approve & Lock (payrun row, then request
+       * rows), so creating a request can never hold a request row while
+       * waiting for a payrun row that Approve & Lock holds while waiting for
+       * that request row. For most types this only takes the lock: raising a
+       * request is not an attendance write. A PERMISSION request, and a
+       * self-settling (auto-approved) correction, are refused in a locked
+       * month below and at their own writes.
+       */
+      await lockPayrollMonthsOnConnection(connection, [
+        { employee_id: request.requested_for_employee_id, attendance_date: request.attendance_date },
+      ]);
+
+      /**
+       * ============ A PERMISSION REQUEST: NO OVERLAP, UNDER THE LOCK ======
+       *
+       * The usecase already refused an overlapping window. That check cannot
+       * be the guarantee: a DIRECT grant for the same employee may commit
+       * between it and this insert. Both writers take the employee row
+       * `FOR UPDATE` first (the same statement), then re-read the live
+       * windows, so whichever commits second sees the first.
+       */
+      if (request.request_type === "PERMISSION") {
+        // The payroll row FIRST (the order every Permission write and Approve
+        // & Lock share), and a locked month refused inside the transaction -
+        // the pre-check in the usecase holds no lock, and a month can lock in
+        // the moment after it answers.
+        await assertMonthsNotPayrollLocked(connection, [
+          { employee_id: request.requested_for_employee_id, attendance_date: request.attendance_date },
+        ]);
+        await permissionGuard.lockEmployee(connection, request.requested_for_employee_id);
+        const overlaps = await permissionGuard.findLiveOverlaps(
+          connection,
+          request.requested_for_employee_id,
+          request.attendance_date,
+          permissions || []
+        );
+        if (overlaps && overlaps.length > 0) {
+          await rollbackAsync(connection);
+          return { created: false, permission_overlap: true, overlaps };
+        }
+      }
 
       /**
        * ============ THE HR BLOCK, CHECKED UNDER THE SHARED LOCK ============
@@ -572,6 +620,30 @@ class AttendanceRegularizationRepository {
         );
       }
 
+      // A PERMISSION request's windows are its payload, written now for the
+      // same reason the regularized punch is: every approver in the chain
+      // agrees to a specific window, not to the idea of one. They reach the
+      // calculation only once the request is APPROVED and SETTLED.
+      const permissionIds = [];
+      if (request.request_type === "PERMISSION") {
+        for (const w of permissions || []) {
+          /* eslint-disable no-await-in-loop */
+          permissionIds.push(
+            await permissionGuard.insertPermission(connection, {
+              ...w,
+              employee_id: request.requested_for_employee_id,
+              attendance_date: request.attendance_date,
+              source: "REQUEST",
+              attendance_approval_request_id: requestId,
+              reason: w.reason || request.reason,
+              outlet_id: request.outlet_id,
+              created_by_employee_id: request.requested_by_employee_id,
+            })
+          );
+          /* eslint-enable no-await-in-loop */
+        }
+      }
+
       // The corrected day, committed with the auto-approval - a request that
       // is APPROVED while the stored day still shows the missing punch must
       // not exist, exactly as for a decided one.
@@ -588,6 +660,7 @@ class AttendanceRegularizationRepository {
         status: autoApproved ? "APPROVED" : "PENDING",
         finalization_state: autoApproved ? "SETTLED" : "NOT_REQUIRED",
         calculations_written: calculationsWritten,
+        ...(request.request_type === "PERMISSION" ? { attendance_permission_ids: permissionIds } : {}),
       };
     } catch (err) {
       await rollbackAsync(connection);
@@ -639,10 +712,43 @@ class AttendanceRegularizationRepository {
     // on an OPEN date `calculations` is deliberately empty, and the decision
     // (and any override) must still be refused in a locked month.
     attendanceLock = null,
+    // PERMISSION only: a REJECTION may be recorded in a payroll-locked month
+    // (it forgives nothing and pays nothing). Every other request type keeps
+    // the existing rule - any decision in a locked month is refused here.
+    allowRejectWhenLocked = false,
   }) {
     const connection = await getConnectionAsync(this.db);
     try {
       await beginTransactionAsync(connection);
+
+      /*
+       * THE PAYROLL ROW LOCK, FIRST - before the step or the request is
+       * touched.
+       *
+       * Approve & Lock takes the payrun row and THEN the rows it writes (it
+       * closes the month's pending PERMISSION requests). Taking the payrun
+       * row here only after updating the step and the request was the
+       * opposite order, and two transactions each holding one lock and
+       * waiting for the other's is a deadlock. Both paths now take the payrun
+       * row first, so one simply waits for the other.
+       *
+       * The lock is held to the end of this transaction exactly as before -
+       * the protection is not weakened, only taken earlier. What a locked
+       * month forbids is unchanged: any decision is refused - except, for a
+       * PERMISSION request (`allowRejectWhenLocked`), a REJECTION, which
+       * forgives nothing and pays nothing; it is recorded and nothing is
+       * written to the locked month's attendance with it.
+       */
+      let monthLocked = false;
+      if (attendanceLock && attendanceLock.employee_id && attendanceLock.attendance_date) {
+        const hits = await lockPayrollMonthsOnConnection(connection, [
+          { employee_id: attendanceLock.employee_id, attendance_date: attendanceLock.attendance_date },
+        ]);
+        if (hits.length > 0) {
+          if (!(allowRejectWhenLocked && decision === "REJECTED")) throw payrollLockedError(hits);
+          monthLocked = true;
+        }
+      }
 
       const stepResult = await queryAsync(
         connection,
@@ -707,12 +813,6 @@ class AttendanceRegularizationRepository {
       // than after the commit is the same invariant the recalculated day
       // already has: there is no ordering in which the request reads APPROVED
       // while the date still resolves to the old shift.
-      if (attendanceLock && attendanceLock.employee_id && attendanceLock.attendance_date) {
-        await assertMonthsNotPayrollLocked(connection, [
-          { employee_id: attendanceLock.employee_id, attendance_date: attendanceLock.attendance_date },
-        ]);
-      }
-
       let overrideId = null;
       if (shiftOverride) {
         const insertedOverride = await queryAsync(
@@ -740,7 +840,9 @@ class AttendanceRegularizationRepository {
       // throws, the catch below rolls the decision back with it. EMPTY on a
       // date whose attendance day is still open: the decision commits alone,
       // by design, and the date is stored once it closes.
-      const stored = await writeCalculationsOnConnection(connection, calculations || []);
+      // A rejection in a locked month records the decision and writes no
+      // attendance: the month's stored days are frozen with its pay.
+      const stored = await writeCalculationsOnConnection(connection, monthLocked ? [] : calculations || []);
 
       await commitAsync(connection);
       return {
@@ -826,6 +928,9 @@ class AttendanceRegularizationRepository {
     reason,
     revocableTypes,
     calculations = [],
+    // The request's date, so the payroll row can be locked FIRST - see
+    // `decideStage`. Optional for older callers, which keep the old order.
+    attendanceDate = null,
   }) {
     const connection = await getConnectionAsync(this.db);
     const refuse = async (msg) => {
@@ -840,6 +945,15 @@ class AttendanceRegularizationRepository {
     };
     try {
       await beginTransactionAsync(connection);
+
+      // 0. THE PAYROLL ROW, before anything else - the order Approve & Lock
+      // takes its locks in (payrun row, then request rows), so a revoke and a
+      // lock of the same month queue behind each other instead of
+      // deadlocking. A revoke is refused in a locked month either way; this
+      // only decides WHEN the lock is taken, and it is held to the end.
+      if (attendanceDate) {
+        await assertMonthsNotPayrollLocked(connection, [{ employee_id: employeeId, attendance_date: attendanceDate }]);
+      }
 
       // 1. The employee, first.
       const employee = await queryAsync(connection, SHARED_LOCK_SQL, [employeeId]);
@@ -1245,6 +1359,7 @@ class AttendanceRegularizationRepository {
         WHERE r.status = 'PENDING'
           AND s.decision = 'PENDING'
           AND r.request_type <> 'SHIFT_CHANGE'
+          AND r.request_type <> 'PERMISSION'
           AND (
                 (s.approver_employee_id IS NULL
                  AND s.approver_role IN (?)
@@ -1503,6 +1618,23 @@ class AttendanceRegularizationRepository {
   }
 
   /** Every step of these requests, with the decider's name, one query. */
+  /**
+   * The permission windows of PERMISSION requests, for the Approval Centre -
+   * the period each approver is agreeing to. The same SELECT every other
+   * permission reader uses.
+   */
+  async listPermissionsForRequests(requestIds) {
+    if (!Array.isArray(requestIds) || requestIds.length === 0) return [];
+    return this._read(
+      "LIST-PERMISSIONS-FOR-REQUESTS",
+      `SELECT ${PERMISSION_COLUMNS}
+         ${PERMISSION_FROM}
+        WHERE p.attendance_approval_request_id IN (?)
+        ORDER BY p.attendance_approval_request_id ASC, p.permission_from ASC`,
+      [requestIds]
+    );
+  }
+
   async listStepsForRequests(requestIds) {
     if (!Array.isArray(requestIds) || requestIds.length === 0) return [];
     return this._read(

@@ -6,6 +6,20 @@ const { requireSelf } = require("./attendance_calculation");
 const { isAdminRequest } = require("../middlewares/admin_only");
 
 /**
+ * THE ADDITIONAL KEY PER REQUEST TYPE, on top of the generic approval keys.
+ * SHIFT_CHANGE and PERMISSION each have their own view and approve key; a
+ * type not named here (REGULARIZATION, OT) needs the generic keys alone.
+ */
+const TYPE_VIEW_KEY = Object.freeze({
+  SHIFT_CHANGE: P.VIEW_SHIFT_CHANGE_REQUESTS,
+  PERMISSION: P.VIEW_ATTENDANCE_PERMISSIONS,
+});
+const TYPE_APPROVE_KEY = Object.freeze({
+  SHIFT_CHANGE: P.APPROVE_SHIFT_CHANGE_REQUEST,
+  PERMISSION: P.APPROVE_ATTENDANCE_PERMISSION,
+});
+
+/**
  * Attendance v2 / A3 - the regularization and OT approval API.
  *
  * NO FRONTEND IS BUILT FOR THIS YET, and none is assumed. These endpoints are
@@ -102,8 +116,10 @@ class AttendanceRegularizationRoutes {
   _requireShiftViewForTypedQuery() {
     return async (req, res, next) => {
       try {
-        if (String(req.query.request_type) !== "SHIFT_CHANGE") return next();
-        if (await this.permissions.hasAll(req, P.VIEW_SHIFT_CHANGE_REQUESTS)) return next();
+        // The same additional-gate rule for PERMISSION, with its own key.
+        const key = TYPE_VIEW_KEY[String(req.query.request_type)];
+        if (!key) return next();
+        if (await this.permissions.hasAll(req, key)) return next();
         return AttendanceRegularizationRoutes._forbidden(res);
       } catch (err) {
         return AttendanceRegularizationRoutes._respond(res, err);
@@ -123,7 +139,10 @@ class AttendanceRegularizationRoutes {
    * inside the handler, so an unknown id looks the same to a caller with the
    * Shift key and one without it.
    */
-  _requireShiftKeyForStoredRequest(key) {
+  _requireShiftKeyForStoredRequest(keysByType) {
+    // A single key is the SHIFT_CHANGE gate, as it always was; a map names
+    // the additional key per request type (SHIFT_CHANGE, PERMISSION).
+    const byType = typeof keysByType === "string" ? { SHIFT_CHANGE: keysByType } : keysByType || {};
     return async (req, res, next) => {
       try {
         const request = await this.usecase.getRequest(Number(req.params.request_id));
@@ -133,7 +152,8 @@ class AttendanceRegularizationRoutes {
         }
         // Handed on so the handler does not read the same row twice.
         req.storedApprovalRequest = request;
-        if (String(request.request_type) !== "SHIFT_CHANGE") return next();
+        const key = byType[String(request.request_type)];
+        if (!key) return next();
         if (await this.permissions.hasAll(req, key)) return next();
         return AttendanceRegularizationRoutes._forbidden(res);
       } catch (err) {
@@ -359,6 +379,104 @@ class AttendanceRegularizationRoutes {
     });
 
     /**
+     * PERMISSION REQUESTS - leave early, come in late, or be away for a
+     * period of one date's shift without a salary deduction, IF the approval
+     * chain agrees. Two routes, one usecase:
+     *
+     *   /attendance/me/permission-request  for YOURSELF; the employee is the
+     *                                      token's, and the body has no field
+     *                                      to name anybody else.
+     *   /attendance/permission-request     for an employee INSIDE YOUR OUTLET
+     *                                      SCOPE, with the for-others key.
+     *
+     * Either way the request walks the EMPLOYEE's ordinary approval chain,
+     * and the raiser can never decide it (`canApprove`). The body carries
+     * clock windows and a reason only; the shift, the minutes and the chain
+     * are the server's.
+     */
+    const permissionWindowSchema = Joi.array()
+      .items(
+        Joi.object({
+          from_time: Joi.string().regex(/^\d{2}:\d{2}$/).required(),
+          to_time: Joi.string().regex(/^\d{2}:\d{2}$/).optional(),
+          to_shift_end: Joi.boolean().optional(),
+        }).xor("to_time", "to_shift_end")
+      )
+      .min(1)
+      .max(3)
+      .required();
+    const permissionActor = (req) => ({
+      employee_id: Number(req.decoded.employee_id),
+      user_id: req.decoded.id === null || req.decoded.id === undefined ? null : Number(req.decoded.id),
+      user_type: req.decoded.user_type,
+    });
+
+    this.router.post(
+      "/attendance/me/permission-request",
+      requireSelf,
+      this.permissions.require(P.RAISE_ATTENDANCE_PERMISSION_REQUEST),
+      async (req, res) => {
+        try {
+          const schema = {
+            attendance_date: Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).required(),
+            windows: permissionWindowSchema,
+            reason: Joi.string().trim().min(5).max(500).required(),
+            remarks: Joi.string().allow("").max(500).optional(),
+          };
+          const isValid = Joi.validate(req.body, schema);
+          if (isValid.error !== null) throw isValid.error;
+          const result = await this.usecase.raisePermissionRequest({
+            actor: permissionActor(req),
+            attendance_date: req.body.attendance_date,
+            windows: req.body.windows,
+            reason: req.body.reason,
+            remarks: req.body.remarks || null,
+          });
+          res.json({ code: 200, ...result });
+        } catch (err) {
+          AttendanceRegularizationRoutes._respond(res, err);
+        }
+      }
+    );
+
+    this.router.post(
+      "/attendance/permission-request",
+      this.permissions.require(P.RAISE_ATTENDANCE_PERMISSION_FOR_OTHERS),
+      async (req, res) => {
+        try {
+          const schema = {
+            employee_id: Joi.number().integer().min(1).required(),
+            attendance_date: Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).required(),
+            windows: permissionWindowSchema,
+            reason: Joi.string().trim().min(5).max(500).required(),
+            remarks: Joi.string().allow("").max(500).optional(),
+          };
+          const isValid = Joi.validate(req.body, schema);
+          if (isValid.error !== null) throw isValid.error;
+          // THE OUTLET SCOPE, from the server's own facts. Fails closed: a
+          // wiring without the scope refuses rather than reaching everybody.
+          if (!this.branchScope || typeof this.branchScope.checkEmployee !== "function") {
+            return AttendanceRegularizationRoutes._forbidden(res);
+          }
+          const scoped = await this.branchScope.checkEmployee(req, req.body.employee_id);
+          if (!scoped.ok) return this.branchScope.refuse(res, scoped);
+
+          const result = await this.usecase.raisePermissionRequest({
+            actor: permissionActor(req),
+            requested_for_employee_id: Number(req.body.employee_id),
+            attendance_date: req.body.attendance_date,
+            windows: req.body.windows,
+            reason: req.body.reason,
+            remarks: req.body.remarks || null,
+          });
+          return res.json({ code: 200, ...result });
+        } catch (err) {
+          return AttendanceRegularizationRoutes._respond(res, err);
+        }
+      }
+    );
+
+    /**
      * The approval screens. ONE request type per call, so Attendance Approval
      * (REGULARIZATION) and OT Approval (OT) never mix; PENDING is "pending
      * with me" and history is scoped to what the caller's role entitled them
@@ -371,7 +489,7 @@ class AttendanceRegularizationRoutes {
       async (req, res) => {
         try {
           const schema = {
-            request_type: Joi.string().valid("REGULARIZATION", "OT", "SHIFT_CHANGE").required(),
+            request_type: Joi.string().valid("REGULARIZATION", "OT", "SHIFT_CHANGE", "PERMISSION").required(),
             status: Joi.string().valid("PENDING", "APPROVED", "REJECTED", "ALL").optional(),
             limit: Joi.number().integer().min(1).max(500).optional(),
             offset: Joi.number().integer().min(0).optional(),
@@ -410,7 +528,7 @@ class AttendanceRegularizationRoutes {
       async (req, res) => {
         try {
           const schema = {
-            request_type: Joi.string().valid("REGULARIZATION", "OT", "SHIFT_CHANGE").required(),
+            request_type: Joi.string().valid("REGULARIZATION", "OT", "SHIFT_CHANGE", "PERMISSION").required(),
             outlet_ids: Joi.string().allow("").optional(),
             employee_id: Joi.number().integer().min(1).optional(),
             designation_id: Joi.number().integer().min(1).optional(),
@@ -469,7 +587,7 @@ class AttendanceRegularizationRoutes {
     this.router.get(
       "/attendance/regularization/:request_id",
       this.permissions.require(P.VIEW_ATTENDANCE_APPROVALS),
-      this._requireShiftKeyForStoredRequest(P.VIEW_SHIFT_CHANGE_REQUESTS),
+      this._requireShiftKeyForStoredRequest(TYPE_VIEW_KEY),
       async (req, res) => {
         try {
           // Already read, and already type-checked, by the middleware above.
@@ -494,7 +612,7 @@ class AttendanceRegularizationRoutes {
     this.router.post(
       "/attendance/regularization/:request_id/decision",
       this.permissions.require(P.APPROVE_ATTENDANCE_REGULARIZATION),
-      this._requireShiftKeyForStoredRequest(P.APPROVE_SHIFT_CHANGE_REQUEST),
+      this._requireShiftKeyForStoredRequest(TYPE_APPROVE_KEY),
       async (req, res) => {
         try {
           const schema = {
@@ -596,7 +714,7 @@ class AttendanceRegularizationRoutes {
       async (req, res) => {
         try {
           const schema = {
-            request_type: Joi.string().valid("REGULARIZATION", "OT", "SHIFT_CHANGE").required(),
+            request_type: Joi.string().valid("REGULARIZATION", "OT", "SHIFT_CHANGE", "PERMISSION").required(),
             status: Joi.string().valid("PENDING", "APPROVED", "REJECTED").required(),
             action: Joi.string().valid("APPROVE", "REJECT", "REVOKE").required(),
             outlet_ids: Joi.string().allow("").optional(),
@@ -643,7 +761,7 @@ class AttendanceRegularizationRoutes {
       try {
         const schema = {
           action: Joi.string().valid("APPROVE", "REJECT", "REVOKE").required(),
-          request_type: Joi.string().valid("REGULARIZATION", "OT", "SHIFT_CHANGE").required(),
+          request_type: Joi.string().valid("REGULARIZATION", "OT", "SHIFT_CHANGE", "PERMISSION").required(),
           items: Joi.array()
             .items(
               Joi.object({
@@ -669,10 +787,10 @@ class AttendanceRegularizationRoutes {
             });
           }
         } else {
-          const keys =
-            req.body.request_type === "SHIFT_CHANGE"
-              ? [P.APPROVE_ATTENDANCE_REGULARIZATION, P.APPROVE_SHIFT_CHANGE_REQUEST]
-              : [P.APPROVE_ATTENDANCE_REGULARIZATION];
+          const extra = TYPE_APPROVE_KEY[req.body.request_type];
+          const keys = extra
+            ? [P.APPROVE_ATTENDANCE_REGULARIZATION, extra]
+            : [P.APPROVE_ATTENDANCE_REGULARIZATION];
           if (!(await this.permissions.hasAll(req, ...keys))) return AttendanceRegularizationRoutes._forbidden(res);
         }
 

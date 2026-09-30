@@ -1150,6 +1150,37 @@ class PayrunCalculationUsecase {
           });
           return;
         }
+        if (entry.outcome === "ATTENDANCE_STALE") {
+          /*
+           * THE MONTHLY ATTENDANCE SUMMARY IS OLDER THAN ITS DAYS. A day was
+           * rewritten after the month was last persisted - a permission
+           * granted, approved or revoked, a correction or OT approval, a
+           * voided punch, the daily recalculation - so the summary this
+           * calculation priced still carries the old shortage or OT. Locking
+           * it would pay figures the days no longer support, and a locked
+           * month cannot be revisited. BLOCKED, with what to do.
+           */
+          results.push({
+            employee_id: entry.employee_id,
+            result: ROW_RESULT.BLOCKED,
+            attendance_stale: entry.reason || "DAYS_CHANGED",
+            message:
+              entry.reason === "UNTRACKED"
+                ? /*
+                   * THE UPGRADE CONDITION, said as one. A summary stored before
+                   * the fingerprint existed, or fingerprinted under an earlier
+                   * FINGERPRINT_VERSION, is never trusted; storing the month
+                   * once through the normal path gives it a current one.
+                   */
+                  "Attendance for this employee/month was calculated before attendance freshness tracking was " +
+                  "introduced (or under an earlier tracking definition). Recalculate Attendance once (store this month's attendance), then recalculate Payroll " +
+                  "before approving and locking."
+                : "This employee's attendance days changed after the monthly attendance was calculated (for example a " +
+                  "permission, correction or OT decision). Recalculate Attendance for this employee and month, " +
+                  "recalculate payroll, then approve.",
+          });
+          return;
+        }
         if (entry.outcome === "RECALCULATION_PENDING") {
           /*
            * A WORK SHIFT RULE CHANGED WHILE THIS MONTH WAS STILL OPEN, and

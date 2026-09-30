@@ -88,6 +88,7 @@
  */
 
 const { ATTENDANCE_CALCULATION_MODE } = require("./attendance_calculation_mode");
+const { allocatePermission, clipIntervals, totalMinutes } = require("./attendance_permission");
 
 const MINUTES_PER_DAY = 1440;
 
@@ -163,8 +164,18 @@ const BREAK_CREDIT_CUTOFF_MINUTES = 15 * 60;
  *      `ot_request_approved_minutes`) and ALWAYS sum to it, because one date
  *      can carry both kinds of approval and an audit must be able to
  *      decompose the total exactly.
+ *  11  PERMISSION. An approved Permission window (an approved and settled
+ *      PERMISSION request, or an unrevoked DIRECT management grant) is
+ *      applied AFTER grace and BEFORE the remaining deduction rule: it
+ *      covers only the late, early-out and mid-shift-away minutes that are
+ *      still chargeable after grace and that fall inside the window, and the
+ *      interval rule prices what is left. `shortage_minutes` is the charge
+ *      after it; `shortage_before_permission_minutes`, `permission_minutes`
+ *      (split late / early / away) and `payable_minutes` sit beside it.
+ *      Worked, regular and every OT figure are untouched - a permission is
+ *      paid forgiven shortage, never worked time, and can never create OT.
  */
-const CALCULATION_VERSION = 10;
+const CALCULATION_VERSION = 11;
 
 /** Every value `status` can take. A calculation is never left without one. */
 const CALC_STATUS = Object.freeze({
@@ -554,6 +565,14 @@ function applyGrace({
   nrm_minutes = null,
   break_credit_withheld = false,
   shift,
+  // PERMISSION (see `utils/attendance_permission.js`). Omitted, or with no
+  // windows, and the result is exactly what it was before Permission
+  // existed. Minutes are absolute from the attendance date's midnight:
+  //   intervals    the effective permission windows
+  //   shift_in     the shift's in-time; shift_end = shift_in + span
+  //   first_minute / last_minute  the first and last effective punch
+  //   gap_windows  every OUT -> next IN gap, as [start, end)
+  permission = null,
 } = {}) {
   const int = (v) => Math.max(0, Math.trunc(Number(v) || 0));
   const shortage = int(shortage_minutes);
@@ -596,11 +615,65 @@ function applyGrace({
     int(cfg.early_exit_deduct_minutes)
   );
 
-  let settled = otherShortage + lateCharged + earlyCharged;
-  if (nrm_minutes !== null && nrm_minutes !== undefined) settled = Math.min(settled, int(nrm_minutes));
+  let settledBefore = otherShortage + lateCharged + earlyCharged;
+  if (nrm_minutes !== null && nrm_minutes !== undefined) {
+    settledBefore = Math.min(settledBefore, int(nrm_minutes));
+  }
+
+  // 4. PERMISSION - after grace, before the remaining deduction rule.
+  //
+  // Only the minutes STILL COUNTED after grace can be covered, and only where
+  // they fall inside an approved window: grace forgives the first minutes of
+  // a late arrival, so the window a permission can reach starts after them,
+  // and grace and permission can never forgive the same minute twice. The
+  // interval rule then prices what is left, which is why a permission is
+  // taken off the COUNTED minutes rather than off the charged figure.
+  let permissionLate = 0;
+  let permissionEarly = 0;
+  let permissionAway = 0;
+  let settled = settledBefore;
+  const windows = permission && Array.isArray(permission.intervals) ? permission.intervals : [];
+  if (windows.length > 0) {
+    const shiftIn = Number(permission.shift_in);
+    const shiftEnd = Number(permission.shift_end);
+    const first = Number(permission.first_minute);
+    const last = Number(permission.last_minute);
+    const alloc = allocatePermission({
+      permission_intervals: windows,
+      late_counted: lateCounted,
+      late_window: Number.isFinite(shiftIn) && Number.isFinite(first) ? [shiftIn + lateForgiven, first] : null,
+      early_counted: earlyCounted,
+      early_window: Number.isFinite(last) && Number.isFinite(shiftEnd) ? [last, shiftEnd] : null,
+      away_counted: otherShortage,
+      gap_windows: permission.gap_windows || [],
+    });
+    permissionLate = alloc.late;
+    permissionEarly = alloc.early;
+    permissionAway = alloc.away;
+    const lateAfter = charge(
+      lateCounted - permissionLate,
+      int(cfg.late_deduction_interval_minutes),
+      int(cfg.late_deduct_minutes)
+    );
+    const earlyAfter = charge(
+      earlyCounted - permissionEarly,
+      int(cfg.early_exit_deduction_interval_minutes),
+      int(cfg.early_exit_deduct_minutes)
+    );
+    settled = otherShortage - permissionAway + lateAfter + earlyAfter;
+    if (nrm_minutes !== null && nrm_minutes !== undefined) settled = Math.min(settled, int(nrm_minutes));
+    // A permission can only ever LOWER the charge. The interval rule is
+    // monotonic, so this holds by construction; it is asserted rather than
+    // assumed because it is the whole promise of the feature.
+    settled = Math.min(settled, settledBefore);
+  }
 
   return {
     shortage_minutes: settled,
+    shortage_before_permission_minutes: settledBefore,
+    permission_late_minutes: permissionLate,
+    permission_early_minutes: permissionEarly,
+    permission_away_minutes: permissionAway,
     grace_forgiven_minutes: Math.min(lateRaw, lateForgiven) + Math.min(earlyRaw, earlyForgiven),
     late_forgiven_minutes: lateForgiven,
     early_forgiven_minutes: earlyForgiven,
@@ -647,7 +720,12 @@ const PRESENT_ABSENT_ONLY_NOTE =
  * final) exactly as the shift engine holds one. A day that is already Present
  * cannot be changed by a correction, so it stays FINAL.
  */
-function calculatePresentAbsentOnlyDay({ base, effectivePunches, regularization_pending = false }) {
+function calculatePresentAbsentOnlyDay({
+  base,
+  effectivePunches,
+  regularization_pending = false,
+  has_permission = false,
+}) {
   const day = {
     ...base,
     attendance_calculation_mode: ATTENDANCE_CALCULATION_MODE.PRESENT_ABSENT_ONLY,
@@ -658,7 +736,13 @@ function calculatePresentAbsentOnlyDay({ base, effectivePunches, regularization_
     base_work_shift_id: null,
     ot_rate: null,
     review_reasons: [],
-    notes: [PRESENT_ABSENT_ONLY_NOTE],
+    // A PERMISSION forgives shortage against a shift. This mode has neither,
+    // so an effective permission on the date applies nothing - the same
+    // convention as an absent or a no-shift day: nothing recorded as applied,
+    // `permission_minutes` 0, and the day says why.
+    notes: has_permission
+      ? [PRESENT_ABSENT_ONLY_NOTE, "Permission does not apply: Present/Absent Only calculates no shortage to excuse"]
+      : [PRESENT_ABSENT_ONLY_NOTE],
   };
 
   if (effectivePunches.length > 0) {
@@ -716,6 +800,12 @@ function calculateAttendanceDay(input = {}) {
     // SHIFT_CHANGE request. See `resolveShiftAuthorisedOvertime` below.
     shift_authorised = false,
     shift_change_request_id = null,
+    // EFFECTIVE Permission windows only - an approved and settled REQUEST or
+    // an unrevoked DIRECT grant; the caller filters with
+    // `utils/attendance_permission.js#isPermissionEffective`. Each is
+    // `{attendance_permission_id, source, permission_from, permission_to}`,
+    // the two times `YYYY-MM-DD HH:MM:SS` wall clock like a punch.
+    permissions = [],
     // The employee's Attendance Calculation Type ON THIS DATE, resolved by
     // the caller from the effective-dated history
     // (`utils/attendance_calculation_mode.js`). Absent means SHIFT_BASED,
@@ -818,6 +908,35 @@ function calculateAttendanceDay(input = {}) {
     post_shift_ot_minutes: 0,
     ot_offset_minutes: 0,
     approved_ot_minutes: 0,
+    /*
+     * PERMISSION - PAID FORGIVEN SHORTAGE, NEVER WORKED TIME.
+     *
+     *   permission_ids                     the effective permissions the date
+     *                                      carried (whether or not any minute
+     *                                      of them was needed)
+     *   permission_window_minutes          their windows, merged and clipped
+     *                                      to the date's resolved shift
+     *   permission_minutes                 what actually covered chargeable
+     *                                      shortage: late + early + away
+     *   shortage_before_permission_minutes the charge grace and the deduction
+     *                                      rule would have made without it
+     *   shortage_minutes (above)           the charge AFTER permission - the
+     *                                      one figure payroll prices
+     *   payable_minutes                    base NRM less the charged
+     *                                      shortage; overtime is separate and
+     *                                      permission never touches it
+     *
+     * `worked_minutes`, `regular_minutes` and every OT field are computed from
+     * the punches alone and are identical with or without a permission.
+     */
+    permission_ids: [],
+    permission_window_minutes: 0,
+    permission_minutes: 0,
+    permission_late_minutes: 0,
+    permission_early_minutes: 0,
+    permission_away_minutes: 0,
+    shortage_before_permission_minutes: 0,
+    payable_minutes: 0,
     ot_rate: shift ? shift.ot_rate : null,
     is_final: false,
     status: CALC_STATUS.REVIEW_REQUIRED,
@@ -851,7 +970,12 @@ function calculateAttendanceDay(input = {}) {
   // PRESENT/ABSENT ONLY - settled before the no-shift verdict, because this
   // mode needs no shift at all.
   if (attendance_calculation_mode === ATTENDANCE_CALCULATION_MODE.PRESENT_ABSENT_ONLY) {
-    return calculatePresentAbsentOnlyDay({ base, effectivePunches, regularization_pending });
+    return calculatePresentAbsentOnlyDay({
+      base,
+      effectivePunches,
+      regularization_pending,
+      has_permission: (permissions || []).some((p) => p && p.permission_from && p.permission_to),
+    });
   }
 
   // A date with no resolvable shift produces no numbers at all. It is never
@@ -1030,6 +1154,30 @@ function calculateAttendanceDay(input = {}) {
     );
   }
 
+  // THE DATE'S PERMISSION WINDOWS, clipped to the resolved shift. A window
+  // outside the shift's own hours covers nothing: there is no shortage there
+  // to forgive, and a permission is never a way to reach overtime.
+  const shiftInMinute = timeToMinutes(shift.in_time);
+  const shiftEndMinute = shiftInMinute === null ? null : shiftInMinute + shiftSpan;
+  const effectivePermissions = (permissions || []).filter(
+    (p) => p && p.permission_from && p.permission_to
+  );
+  const permissionWindows =
+    shiftInMinute === null
+      ? []
+      : clipIntervals(
+          effectivePermissions.map((p) => [
+            absoluteMinutes({ io_time: p.permission_from }, attendance_date),
+            absoluteMinutes({ io_time: p.permission_to }, attendance_date),
+          ]),
+          shiftInMinute,
+          shiftEndMinute
+        );
+  base.permission_ids = effectivePermissions
+    .map((p) => (p.attendance_permission_id === undefined ? null : p.attendance_permission_id))
+    .filter((id) => id !== null);
+  base.permission_window_minutes = totalMinutes(permissionWindows);
+
   // Nobody punched. Absent is a real, final answer: no day counted, and NO
   // shortage either - an absent day is simply not paid, and also charging the
   // whole NRM as a shortage would deduct for a day that was never credited.
@@ -1039,6 +1187,12 @@ function calculateAttendanceDay(input = {}) {
       status: CALC_STATUS.ABSENT,
       attendance_day_count: 0,
       is_final: true,
+      // A permission covers part of a day that was attended. It does not
+      // turn an absence into a paid day - that would be leave.
+      notes:
+        base.permission_window_minutes > 0
+          ? [...base.notes, "Permission does not apply to an absent day"]
+          : base.notes,
     };
   }
 
@@ -1079,7 +1233,12 @@ function calculateAttendanceDay(input = {}) {
         : CALC_STATUS.REVIEW_REQUIRED,
       review_reasons: [REVIEW_REASON.MISSING_PUNCH],
       is_final: false,
-      notes: ["Odd punch count: one punch is missing and the day is not final"],
+      notes: [
+        "Odd punch count: one punch is missing and the day is not final",
+        ...(base.permission_window_minutes > 0
+          ? ["Permission is applied once the missing punch is resolved"]
+          : []),
+      ],
     };
   }
 
@@ -1158,6 +1317,24 @@ function calculateAttendanceDay(input = {}) {
     base.notes.push("Left before 15:00: no lunch taken, so the break is not credited against lateness or early out");
   }
 
+  // Every OUT -> next IN gap, as a clock window, for a permission that covers
+  // time away in the middle of the shift. A two-punch day has none.
+  const gapWindows = [];
+  for (let i = 1; i + 1 < effectivePunches.length; i += 2) {
+    gapWindows.push([effectivePunches[i].minute, effectivePunches[i + 1].minute]);
+  }
+  const permissionInput =
+    permissionWindows.length > 0
+      ? {
+          intervals: permissionWindows,
+          shift_in: shiftInMinute,
+          shift_end: shiftEndMinute,
+          first_minute: first.minute,
+          last_minute: last.minute,
+          gap_windows: gapWindows,
+        }
+      : null;
+
   const grace = applyGrace({
     shortage_minutes: rawShortage,
     break_credit_withheld: breakCreditWithheld,
@@ -1165,6 +1342,7 @@ function calculateAttendanceDay(input = {}) {
     early_exit_minutes: base.early_exit_minutes || 0,
     nrm_minutes: payrollNrm,
     shift,
+    permission: payrollBaseDiffers ? null : permissionInput,
   });
   /*
    * ON AN OVERRIDE DAY THE SHORTAGE IS ARITHMETIC, NOT A DEDUCTION RULE.
@@ -1183,7 +1361,51 @@ function calculateAttendanceDay(input = {}) {
    * On every ordinary date the two shifts are the same shift, this is false,
    * and the deduction rules decide the shortage exactly as they always have.
    */
-  const shortage = payrollBaseDiffers ? rawShortage : grace.shortage_minutes;
+  let shortage = payrollBaseDiffers ? rawShortage : grace.shortage_minutes;
+
+  /*
+   * PERMISSION ON A ONE-DAY SHIFT OVERRIDE. The shortage there is arithmetic
+   * against the base NRM and no late/early rule charges, so there is no
+   * attribution to take a permission off. The permission covers the
+   * resolved shift's uncovered minutes it overlaps - late, early and the
+   * gaps - and never more than the arithmetic shortage itself.
+   */
+  let permissionLate = payrollBaseDiffers ? 0 : grace.permission_late_minutes;
+  let permissionEarly = payrollBaseDiffers ? 0 : grace.permission_early_minutes;
+  let permissionAway = payrollBaseDiffers ? 0 : grace.permission_away_minutes;
+  const shortageBeforePermission = payrollBaseDiffers ? rawShortage : grace.shortage_before_permission_minutes;
+  if (payrollBaseDiffers && permissionInput) {
+    let room = rawShortage;
+    const alloc = allocatePermission({
+      permission_intervals: permissionWindows,
+      late_counted: base.late_minutes || 0,
+      late_window: shiftInMinute === null ? null : [shiftInMinute, first.minute],
+      early_counted: base.early_exit_minutes || 0,
+      early_window: shiftEndMinute === null ? null : [last.minute, shiftEndMinute],
+      away_counted: actualGaps || 0,
+      gap_windows: gapWindows,
+    });
+    permissionLate = Math.min(alloc.late, room);
+    room -= permissionLate;
+    permissionEarly = Math.min(alloc.early, room);
+    room -= permissionEarly;
+    permissionAway = Math.min(alloc.away, room);
+    shortage = Math.max(0, rawShortage - permissionLate - permissionEarly - permissionAway);
+  }
+  base.permission_late_minutes = permissionLate;
+  base.permission_early_minutes = permissionEarly;
+  base.permission_away_minutes = permissionAway;
+  base.permission_minutes = permissionLate + permissionEarly + permissionAway;
+  base.shortage_before_permission_minutes = shortageBeforePermission;
+  base.payable_minutes = Math.max(0, payrollNrm - shortage);
+  if (base.permission_minutes > 0) {
+    base.notes.push(
+      `Permission: ${base.permission_minutes} minute(s) of paid permission (not worked) forgiven from the shortage` +
+        ` (late ${permissionLate}, early out ${permissionEarly}, away ${permissionAway})`
+    );
+  } else if (base.permission_window_minutes > 0) {
+    base.notes.push("Permission: no chargeable shortage fell inside the permitted window");
+  }
 
   base.actual_gap_minutes = actualGaps;
   base.break_charged_minutes = breakCharged;
@@ -1198,7 +1420,11 @@ function calculateAttendanceDay(input = {}) {
       "One-day shift: lateness and early going are measured against the day's shift and reported, but the shortage is the base shift's entitlement less the minutes worked"
     );
   }
-  if (!payrollBaseDiffers && shortage !== rawShortage - grace.grace_forgiven_minutes && !breakCreditWithheld) {
+  if (
+    !payrollBaseDiffers &&
+    shortageBeforePermission !== rawShortage - grace.grace_forgiven_minutes &&
+    !breakCreditWithheld
+  ) {
     base.notes.push(
       `Deduction rule: late charged ${grace.late_charged_minutes} minute(s), early out charged ${grace.early_exit_charged_minutes} minute(s) under the shift's interval rule`
     );

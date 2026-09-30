@@ -34,7 +34,9 @@ const sqlOf = (file) =>
     .split("\n")
     .filter((line) => !/^\s*--/.test(line))
     .join("\n")
-    .split(";")
+    // a statement ends at a semicolon closing its line: a COMMENT string may
+    // carry one of its own
+    .split(/;\s*(?:\n|$)/)
     .map((s) => s.trim())
     .filter(Boolean);
 
@@ -48,12 +50,16 @@ function dayTableDdl() {
     "20261025120000-attendance-break-provenance-up.sql",
     "20261029120000-shift-change-request-up.sql",
     "20261030120000-shift-authorised-ot-up.sql",
+    "20261107120000-attendance-permission-up.sql",
   ].flatMap((f) => sqlOf(f).filter((s) => /^ALTER TABLE `?attendance_day_calculation`?/.test(s)));
   return [withoutFks, ...alters];
 }
 
-const FEATURE = sqlOf("20261107120000-employee-attendance-calculation-mode-up.sql");
-const TABLES = ["employee_attendance_calculation_mode", "attendance_day_calculation", "payrun_employee_calculation", "new_employee"];
+const FEATURE = sqlOf("20261108120000-employee-attendance-calculation-mode-up.sql");
+const TABLES = [
+  "employee_attendance_calculation_mode", "attendance_day_calculation", "attendance_monthly_payroll",
+  "payrun_employee_calculation", "new_employee",
+];
 
 const q = (pool, sql, params = []) =>
   new Promise((resolve, reject) => pool.query(sql, params, (err, rows) => (err ? reject(err) : resolve(rows))));
@@ -72,6 +78,15 @@ describe("Attendance Calculation Type, as SQL", { skip: !URL && "ATTENDANCE_TEST
          status VARCHAR(32) NOT NULL, PRIMARY KEY (employee_id, period_year, period_month)) ENGINE=InnoDB`
     );
     for (const ddl of dayTableDdl()) await q(pool, ddl);
+    // The month summary's fingerprint as the Permission migration leaves it,
+    // holding a version-1 hash, to prove the widening keeps it.
+    await q(
+      pool,
+      `CREATE TABLE attendance_monthly_payroll (
+         employee_id INT NOT NULL, period_year INT NOT NULL, period_month INT NOT NULL,
+         day_rows_fingerprint CHAR(64) NULL DEFAULT NULL) ENGINE=InnoDB`
+    );
+    await q(pool, `INSERT INTO attendance_monthly_payroll VALUES (42, 2026, 9, '${"a".repeat(64)}')`);
     // A row stored BEFORE the feature exists, to prove what the default says about it.
     await q(
       pool,
@@ -93,6 +108,18 @@ describe("Attendance Calculation Type, as SQL", { skip: !URL && "ATTENDANCE_TEST
   it("a row stored before the feature reads SHIFT_BASED - the default states what calculated it", async () => {
     const [row] = await q(pool, "SELECT attendance_calculation_mode FROM attendance_day_calculation WHERE attendance_date = '2026-08-20'");
     assert.equal(row.attendance_calculation_mode, "SHIFT_BASED");
+  });
+
+  it("widens the month fingerprint for its version prefix and keeps every existing value", async () => {
+    const [col] = await q(pool, "SHOW COLUMNS FROM attendance_monthly_payroll WHERE Field = 'day_rows_fingerprint'");
+    assert.equal(col.Type, "varchar(80)");
+    assert.equal(col.Null, "YES");
+    const [row] = await q(pool, "SELECT day_rows_fingerprint AS f FROM attendance_monthly_payroll WHERE employee_id = 42");
+    assert.equal(row.f, "a".repeat(64));
+    const { dayRowsFingerprint } = require("../utils/attendance_month_freshness");
+    const v2 = dayRowsFingerprint([]);
+    await q(pool, "UPDATE attendance_monthly_payroll SET day_rows_fingerprint = ? WHERE employee_id = 42", [v2]);
+    assert.equal((await q(pool, "SELECT day_rows_fingerprint AS f FROM attendance_monthly_payroll WHERE employee_id = 42"))[0].f, v2);
   });
 
   it("appends a dated row, and the history reads back newest first with the actor's name", async () => {

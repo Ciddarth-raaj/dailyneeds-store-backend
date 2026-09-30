@@ -1,3 +1,4 @@
+const { PERMISSION_COLUMNS, PERMISSION_FROM } = require("./lib/attendance_permission_select");
 const logger = require("../utils/logger");
 const { activeOverrideCondition } = require("../utils/shift_override_active");
 const { JOINED_ON } = require("../utils/joining_date");
@@ -504,6 +505,24 @@ class AttendanceDashboardRepository {
           AND attendance_date BETWEEN ? AND ?
           AND status <> 'CANCELLED'
         ORDER BY employee_id ASC, attendance_date ASC, attendance_approval_request_id ASC`,
+      [employeeIds, fromDate, toDate]
+    );
+  }
+
+  /**
+   * Permission rows for MANY employees, in every state. Mirrors
+   * `getPermissionsForRange` - the same SELECT - so the dashboard and the
+   * employee's own screen resolve a date's permissions identically.
+   */
+  async getPermissionsForEmployees(employeeIds, fromDate, toDate) {
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
+    return this._read(
+      "GET-PERMISSIONS-BULK",
+      `SELECT ${PERMISSION_COLUMNS}
+         ${PERMISSION_FROM}
+        WHERE p.employee_id IN (?)
+          AND p.attendance_date BETWEEN ? AND ?
+        ORDER BY p.employee_id ASC, p.attendance_date ASC, p.permission_from ASC, p.attendance_permission_id ASC`,
       [employeeIds, fromDate, toDate]
     );
   }

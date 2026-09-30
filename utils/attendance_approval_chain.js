@@ -86,6 +86,10 @@ const REQUEST_TYPE = Object.freeze({
   // approval hierarchy that differed by request type would be a second
   // hierarchy to keep in step with the first.
   SHIFT_CHANGE: "SHIFT_CHANGE",
+  // A PERMISSION to work fewer hours without a deduction (late in, early
+  // out, away during the shift). Same chain, same `canApprove`, same
+  // `advance`; its windows are payload rows of `attendance_permission`.
+  PERMISSION: "PERMISSION",
 });
 
 const REQUEST_STATUS = Object.freeze({

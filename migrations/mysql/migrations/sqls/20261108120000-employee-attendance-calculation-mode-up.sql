@@ -8,8 +8,9 @@
 --                        with none is Absent. No shift is needed and none is
 --                        read: no late, early, shortage, NO_SHIFT or OT.
 --
--- ADDITIVE ONLY. One new table and one new column with a default. No
--- existing row is rewritten and no permission is granted or revoked.
+-- ADDITIVE ONLY. One new table, one new column with a default, and one
+-- existing column widened. No existing row is rewritten and no permission is
+-- granted or revoked.
 --
 -- 1. THE HISTORY. Append-only, exactly like `employee_work_shift_assignment`:
 --    rows are INSERTed and never UPDATEd or DELETEd, and a date resolves to
@@ -46,3 +47,15 @@ CREATE TABLE IF NOT EXISTS `employee_attendance_calculation_mode` (
 ALTER TABLE `attendance_day_calculation`
   ADD COLUMN `attendance_calculation_mode` ENUM('SHIFT_BASED','PRESENT_ABSENT_ONLY') NOT NULL DEFAULT 'SHIFT_BASED'
     COMMENT 'the employee attendance calculation mode this date was calculated under';
+
+-- 3. ROOM FOR A VERSIONED MONTH FINGERPRINT. The day's calculation mode is now
+--    one of the fields the monthly day-rows fingerprint is taken over
+--    (utils/attendance_month_freshness.js), and the stored value is
+--    `v2:<sha256>` (67 characters) so a fingerprint taken under the earlier
+--    field list is recognisable and read as UNTRACKED rather than as a day
+--    that changed. Widening only: every existing value is kept as it is, and
+--    none is rewritten here - the month-fingerprint bootstrap rebuilds them
+--    through the normal month persist.
+ALTER TABLE `attendance_monthly_payroll`
+  MODIFY COLUMN `day_rows_fingerprint` VARCHAR(80) NULL DEFAULT NULL
+    COMMENT '<version>:sha256 of the stored day rows this summary was calculated from - see utils/attendance_month_freshness.js';

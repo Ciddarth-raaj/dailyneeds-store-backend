@@ -143,6 +143,17 @@ function hydrateStoredDay(row, { live = null } = {}) {
     // which is what calculated every one of them.
     attendance_calculation_mode: row.attendance_calculation_mode || "SHIFT_BASED",
     calculated_at: row.calculated_at === undefined ? null : row.calculated_at,
+    // PERMISSION, as stored. A row written before the columns existed
+    // carries no permission (0) and cannot prove its before-permission
+    // shortage or its payable minutes (NULL) - reported as such, not guessed.
+    permission_ids: parseJson(row.permission_ids, []),
+    permission_window_minutes: int0(row.permission_window_minutes),
+    permission_minutes: int0(row.permission_minutes),
+    permission_late_minutes: int0(row.permission_late_minutes),
+    permission_early_minutes: int0(row.permission_early_minutes),
+    permission_away_minutes: int0(row.permission_away_minutes),
+    shortage_before_permission_minutes: intOrNull(row.shortage_before_permission_minutes),
+    payable_minutes: intOrNull(row.payable_minutes),
     // The stored row narrates nothing; the notes belonged to a calculation
     // that ran when the date was stored and are not reproduced.
     notes: [],

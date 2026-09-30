@@ -44,6 +44,11 @@ const { istToday } = require("../utils/istDate");
 const { partitionClosedDays, endOfIstDay } = require("../utils/attendance_persist_guard");
 const { payrollLockedError } = require("../utils/attendance_payroll_lock");
 const readTiming = require("../utils/attendance_read_timing");
+const {
+  resolvePermissionRows,
+  permissionsByDate,
+  permissionForDisplay,
+} = require("../utils/attendance_permission");
 
 /**
  * Attendance v2 - the orchestration between the repository and the pure
@@ -589,7 +594,16 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     // Each read is named for the temporary read timing (a no-op outside a
     // timed request). They run in parallel, so their durations overlap.
     const t = readTiming.phase;
-    const [assignments, fetchedRawPunches, regularized, employee, approvals, storedOverrides, modeHistory] =
+    const [
+      assignments,
+      fetchedRawPunches,
+      regularized,
+      employee,
+      approvals,
+      storedOverrides,
+      permissions,
+      modeHistory,
+    ] =
       await Promise.all([
         t("shift_assignment_lookup", () => attendanceCalculationRepo.getShiftAssignmentHistory(employee_id)),
         t("raw_punch_lookup", () =>
@@ -609,6 +623,13 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
         t("shift_override_lookup", () =>
           attendanceCalculationRepo.getDateShiftOverrides
             ? attendanceCalculationRepo.getDateShiftOverrides(employee_id, from, punchWindowTo)
+            : []
+        ),
+        // PERMISSION rows in every state; which reach the engine is decided
+        // per date by `resolvePermissionRows`.
+        t("permission_lookup", () =>
+          attendanceCalculationRepo.getPermissionsForRange
+            ? attendanceCalculationRepo.getPermissionsForRange(employee_id, from, to)
             : []
         ),
         // The employee's effective-dated Attendance Calculation Type. The
@@ -805,6 +826,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       rawPunches,
       regularized,
       approvals,
+      permissions: permissions || [],
       break_override_minutes: breakOverrideMinutes(employee),
       // The employee's Extra Break Hours, already in whole minutes. Read from
       // the SAME employee row as the override, on the same one current-value
@@ -919,6 +941,12 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     // no override of it. Only that one request is withdrawn - any other
     // request or override on the date is read as stored.
     exclude_request_id = null,
+    // A PERMISSION change being committed in the caller's own transaction -
+    // a DIRECT grant (`add`) or revoke (`exclude_ids`) - so the stored day is
+    // the day as it will read once the change commits. The `assume` of a
+    // PERMISSION request and `exclude_request_id` are folded in below; see
+    // `utils/attendance_permission.js#resolvePermissionRows`.
+    assume_permissions = null,
     // THE READ OVERLAY, supplied only by `readRange`. A map of
     // `YYYY-MM-DD` -> stored row: where one exists for a date that has
     // CLOSED, that row is what comes back and the engine's answer for that
@@ -965,6 +993,25 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       to,
     });
 
+    // THE PERMISSION OVERLAY, in one object: whatever the caller is about
+    // to commit, plus a PERMISSION request being decided (`assume`) or
+    // revoked (`exclude_request_id`) in the same transaction.
+    const permissionOverlay = {
+      ...(assume_permissions || {}),
+      exclude_request_id:
+        exclude_request_id === null || exclude_request_id === undefined ? null : exclude_request_id,
+      approve_request_id:
+        assume && assume.request_type === "PERMISSION" && assume.status === "APPROVED"
+          ? assume.attendance_approval_request_id
+          : null,
+    };
+    const permissionRowsByDate = permissionsByDate([
+      ...(context.permissions || []),
+      ...((assume_permissions && assume_permissions.add) || []),
+    ]);
+    const permissionsFor = (date) =>
+      resolvePermissionRows(permissionRowsByDate.get(date) || [], { ...permissionOverlay, add: [] });
+
     const regularizedByDate = new Map();
     (context.regularized || []).forEach((row) => {
       const date = toDateOnly(row.attendance_date);
@@ -996,6 +1043,10 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       const slot = approvalByDate.get(date);
       if (row.request_type === "OT") slot.ot = row;
       else if (row.request_type === "SHIFT_CHANGE") slot.shift = row;
+      // A PERMISSION request is not an attendance correction: it proposes
+      // no punch and must never hold the date as REGULARIZATION_PENDING.
+      // Its state reaches the day through its permission rows.
+      else if (row.request_type === "PERMISSION") return;
       else slot.regularization = row;
     });
 
@@ -1036,7 +1087,9 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
           // the settled one, committed with the approval.
           finalization_state: assume.status === "APPROVED" ? "SETTLED" : "NOT_REQUIRED",
         };
-        if (assumed.request_type === "OT") {
+        if (assumed.request_type === "PERMISSION") {
+          // Carried by `permissionOverlay`; it touches no request slot.
+        } else if (assumed.request_type === "OT") {
           otRequest = assumed;
         } else if (assumed.request_type === "SHIFT_CHANGE") {
           // A shift decision being committed in this very transaction. The
@@ -1081,9 +1134,11 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
         !!approval &&
         (approval.status === "PENDING" || (approval.status === "APPROVED" && !regularizationSettled));
 
+      const datePermissions = permissionsFor(date);
       const calculated = calculateAttendanceDay({
         employee_id,
         attendance_date: date,
+        permissions: datePermissions.effective,
         shift: resolution.snapshot,
         shift_status: resolution.status,
         punches: rawByDate.get(date) || [],
@@ -1141,6 +1196,10 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
         ...otClaimFor({ day, otRequest, otSettled }),
         ...correctionClaimFor({ approval }),
         ...shiftChangeClaimFor({ shiftRequest }),
+        // The evidence beside the figures: every permission of the date in
+        // every state, so a screen can show a pending request, a revoked
+        // grant and what was applied. The minutes are the day's own.
+        permissions: datePermissions.all.map(permissionForDisplay),
         // On a Present/Absent Only day the roster decides nothing, so a
         // missing one is not reported as a setup gap - see
         // `utils/attendance_calculation_mode.js#MODE_RESOLUTION_STATUS`.
@@ -1386,6 +1445,15 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     review_reasons: JSON.stringify(day.review_reasons || []),
     approval_request_id: day.approval_request_id,
     calculation_version: CALCULATION_VERSION,
+    permission_ids: JSON.stringify(day.permission_ids || []),
+    permission_window_minutes: day.permission_window_minutes || 0,
+    permission_minutes: day.permission_minutes || 0,
+    permission_late_minutes: day.permission_late_minutes || 0,
+    permission_early_minutes: day.permission_early_minutes || 0,
+    permission_away_minutes: day.permission_away_minutes || 0,
+    shortage_before_permission_minutes:
+      day.shortage_before_permission_minutes === undefined ? null : day.shortage_before_permission_minutes,
+    payable_minutes: day.payable_minutes === undefined ? null : day.payable_minutes,
     attendance_calculation_mode: day.attendance_calculation_mode || ATTENDANCE_CALCULATION_MODE.SHIFT_BASED,
   });
 
@@ -2434,6 +2502,11 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
           approved_ot_minutes: payroll.approved_ot_minutes,
           approved_ot_earnings: payroll.approved_ot_earnings,
           total_attendance_payable: payroll.total_attendance_payable,
+          // The Permission the ENGINE APPLIED on the month's final days, as
+          // summed by `computeMonthlyAttendancePayroll` from each day's
+          // `permission_minutes` - never the requested window. 0 when none
+          // applied; the column is NOT NULL.
+          permission_minutes: Number.isFinite(payroll.permission_minutes) ? payroll.permission_minutes : 0,
           held_dates: JSON.stringify(payroll.held_dates || []),
           is_final: payroll.is_final ? 1 : 0,
           payroll_version: PAYROLL_VERSION,
@@ -2488,6 +2561,10 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       out_time: snapshot ? snapshot.out_time : null,
       break_minutes: snapshot ? snapshot.break_minutes : null,
       is_working_day: snapshot ? snapshot.is_working_day : null,
+      // The span, so a PERMISSION window can be placed inside the shift -
+      // including one that runs past midnight - without re-resolving it.
+      shift_span_minutes: snapshot ? snapshot.shift_span_minutes || 0 : null,
+      attendance_required: context.attendance_required,
       // NRM as the engine computes it from the shift alone: span less the
       // shift's own break. The employee's break override and Extra Break
       // Hours are deliberately NOT applied - they need a punched sequence
@@ -2531,6 +2608,56 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
         ? await attendanceCalculationRepo.getAttendanceCalculationModeHistory(Number(employee_id))
         : [];
     return resolveAttendanceCalculationMode(history, date);
+  };
+
+  /**
+   * RE-PERSIST AN EMPLOYEE'S MONTH AFTER A CHANGE THAT MOVED ITS DAYS - the
+   * existing month persist (`calculateMonth(persist=true)`), not a second
+   * payroll path.
+   *
+   * Called after a Permission change has COMMITTED (final approval, a grant,
+   * a revoke). The change rewrote the DAY; payroll reads the monthly
+   * summary, which only the month persist writes. If a summary already
+   * exists for the month it is rewritten now, so it carries the new shortage
+   * and a fresh fingerprint of its days. If none exists yet there is nothing
+   * stale to refresh: the month is persisted, with the permission in it,
+   * whenever it is first calculated.
+   *
+   * NEVER THE GUARANTEE ON ITS OWN. It runs after the change committed and
+   * can fail (a lock timeout, a locked month) - it reports, never throws, and
+   * the change stands. What makes a stale summary unpayable is Approve &
+   * Lock's own check (`repository/payrun_calculation.js#_attendanceFreshnessLocked`):
+   * a month whose summary no longer matches its days is refused, whether or
+   * not this refresh ran.
+   */
+  const refreshPersistedMonth = async ({ employee_id, attendance_date, now = null }) => {
+    const date = toDateOnly(attendance_date);
+    const employeeId = Number(employee_id);
+    if (date === null || !Number.isInteger(employeeId) || employeeId <= 0) {
+      return { refreshed: false, reason: "INVALID" };
+    }
+    const year = Number(date.slice(0, 4));
+    const month = Number(date.slice(5, 7));
+    try {
+      const existing = attendanceCalculationRepo.getMonthlyPayroll
+        ? await attendanceCalculationRepo.getMonthlyPayroll({
+            employee_id: employeeId,
+            period_year: year,
+            period_month: month,
+          })
+        : null;
+      if (!existing) return { refreshed: false, reason: "NO_SUMMARY", year, month };
+      await calculateMonth({ employee_id: employeeId, year, month, persist: true, now });
+      return { refreshed: true, year, month };
+    } catch (err) {
+      return {
+        refreshed: false,
+        reason: (err && err.code) || "ERROR",
+        message: err && err.message ? err.message : String(err),
+        year,
+        month,
+      };
+    }
   };
 
   /** The payroll lock, asked before an action rather than before a write. */
@@ -2586,5 +2713,6 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     findPayrollLockedPeriodsBulk,
     listDateShiftOptions,
     calculateMonth,
+    refreshPersistedMonth,
   };
 };

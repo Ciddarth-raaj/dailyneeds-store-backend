@@ -28,7 +28,7 @@ const buildRaw = require("../usecase/attendance_raw");
 const SQLS = path.join(__dirname, "..", "migrations/mysql/migrations/sqls");
 const TIME_CORRECTION = path.join(SQLS, "20261104120000-attendance-device-time-correction-up.sql");
 const MODE_TABLE = fs
-  .readFileSync(path.join(SQLS, "20261107120000-employee-attendance-calculation-mode-up.sql"), "utf8")
+  .readFileSync(path.join(SQLS, "20261108120000-employee-attendance-calculation-mode-up.sql"), "utf8")
   .split("\n")
   .filter((l) => !/^\s*--/.test(l))
   .join("\n")
