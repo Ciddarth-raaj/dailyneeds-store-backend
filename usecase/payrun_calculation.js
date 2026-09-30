@@ -1166,8 +1166,14 @@ class PayrunCalculationUsecase {
             attendance_stale: entry.reason || "DAYS_CHANGED",
             message:
               entry.reason === "UNTRACKED"
-                ? "This employee's monthly attendance was calculated before freshness tracking existed, so it cannot be " +
-                  "proven current. Recalculate Attendance for this employee and month, recalculate payroll, then approve."
+                ? /*
+                   * THE UPGRADE CONDITION, said as one. A summary stored before
+                   * the fingerprint existed is never trusted; storing the month
+                   * once through the normal path gives it one.
+                   */
+                  "Attendance for this employee/month was calculated before attendance freshness tracking was " +
+                  "introduced. Recalculate Attendance once (store this month's attendance), then recalculate Payroll " +
+                  "before approving and locking."
                 : "This employee's attendance days changed after the monthly attendance was calculated (for example a " +
                   "permission, correction or OT decision). Recalculate Attendance for this employee and month, " +
                   "recalculate payroll, then approve.",

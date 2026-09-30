@@ -1694,4 +1694,21 @@ describe("ATTENDANCE_STALE at Approve & Lock", () => {
     assert.match(row.message, /Recalculate Attendance for this employee and month/);
     assert.notEqual((await rowOf(1)).status, CALC_STATUS.APPROVED_LOCKED);
   });
+
+  it("an UNTRACKED summary is refused with the upgrade condition, not the stale-days message", async () => {
+    const { calcRepo } = build();
+    world.add(1);
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    calcRepo.approve = async ({ employees }) =>
+      employees.map((e) => ({ employee_id: e.employee_id, outcome: "ATTENDANCE_STALE", reason: "UNTRACKED" }));
+    const out = await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(out.blocked_count, 1);
+    const [row] = out.results;
+    assert.equal(row.attendance_stale, "UNTRACKED");
+    assert.match(row.message, /before attendance freshness tracking was introduced/);
+    assert.match(row.message, /Recalculate Attendance once/);
+    assert.match(row.message, /then recalculate Payroll before approving and locking/);
+    assert.doesNotMatch(row.message, /days changed/);
+    assert.notEqual((await rowOf(1)).status, CALC_STATUS.APPROVED_LOCKED);
+  });
 });
