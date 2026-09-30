@@ -173,6 +173,68 @@ class BiomaxPunchRepository {
   }
 
   /**
+   * The punches ingest could NOT date for want of a shift (`NO_SHIFT`), by
+   * CALENDAR date, under the Attendance List's own filters.
+   *
+   * READ ONLY, and nothing here changes how ingest derives a punch. The
+   * usecase keeps only those whose employee is Present/Absent Only on the
+   * punch's calendar date - for them the calendar date IS the attendance
+   * date and no shift is expected - and lists them there. Exempt employees
+   * stay out, exactly as the banners already leave them out.
+   */
+  listUndatedNoShift(f) {
+    const where = [
+      "p.punch_date BETWEEN ? AND ?",
+      "d.derivation_status = 'NO_SHIFT'",
+      "d.employee_id IS NOT NULL",
+      "COALESCE(e.attendance_required, 1) = 1",
+    ];
+    const params = [f.from, f.to];
+    if (f.home_outlet_id !== undefined && f.home_outlet_id !== null) {
+      where.push("d.home_outlet_id = ?");
+      params.push(f.home_outlet_id);
+    }
+    if (f.department_id !== undefined && f.department_id !== null) {
+      where.push("d.department_id = ?");
+      params.push(f.department_id);
+    }
+    if (f.search) {
+      where.push("(p.user_id = ? OR e.employee_name LIKE ?)");
+      params.push(f.search, `%${f.search}%`);
+    }
+    return this._read(
+      "LIST-UNDATED-NO-SHIFT",
+      `SELECT ${PUNCH_COLUMNS} ${PUNCH_JOINS}
+        WHERE ${where.join(" AND ")}
+        ORDER BY p.punch_date, d.employee_id, ${EFFECTIVE_IO_TIME}, p.biomax_punch_id`,
+      params
+    );
+  }
+
+  /**
+   * The `NO_SHIFT` punches the banners count, per employee and CALENDAR
+   * date, so the usecase can tell which of them belong to a Present/Absent
+   * Only date (not a fault) - the same population `summary` counts.
+   */
+  summaryNoShiftDays(f) {
+    return this._read(
+      "SUMMARY-NO-SHIFT-DAYS",
+      `SELECT d.employee_id,
+              DATE_FORMAT(p.punch_date, '%Y-%m-%d') AS calendar_date,
+              COUNT(*) AS punches
+         FROM biomax_punch p
+         JOIN biomax_punch_derived d ON d.biomax_punch_id = p.biomax_punch_id
+         LEFT JOIN new_employee e ON e.employee_id = d.employee_id AND e.employee_id > 0
+        WHERE p.punch_date BETWEEN ? AND ?
+          AND d.derivation_status = 'NO_SHIFT'
+          AND d.employee_id IS NOT NULL
+          AND COALESCE(e.attendance_required, 1) = 1
+        GROUP BY d.employee_id, p.punch_date`,
+      [f.from, f.to]
+    );
+  }
+
+  /**
    * Punch Audit rows: one per physical punch, any status, by CALENDAR date.
    *
    * @param {object} f  {from, to, dev_id?, punch_outlet_id?, device_status?,

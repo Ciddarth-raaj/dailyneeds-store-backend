@@ -174,6 +174,55 @@ describe("Attendance Calculation Type, as SQL", { skip: !URL && "ATTENDANCE_TEST
     assert.equal(day.work_shift_id, null);
   });
 
+  it("the Employee Report's as-of-today SQL agrees with the JS resolver, row for row", async () => {
+    const catalogue = require("../constants/employee_report_catalogue");
+    const { istToday } = require("../utils/istDate");
+    const { addDays } = require("../utils/attendance_engine");
+    const today = istToday();
+    const yesterday = addDays(today, -1);
+    const tomorrow = addDays(today, 1);
+    // 101 no history; 102 PAO since yesterday; 103 PAO only from tomorrow;
+    // 104 PAO since yesterday, back to SHIFT_BASED today; 105 two rows on
+    // the SAME date - the greater id wins.
+    await q(pool, "INSERT INTO new_employee VALUES (101,'a'),(102,'b'),(103,'c'),(104,'d'),(105,'e')");
+    const rows = [
+      [102, "PRESENT_ABSENT_ONLY", yesterday],
+      [103, "PRESENT_ABSENT_ONLY", tomorrow],
+      [104, "PRESENT_ABSENT_ONLY", yesterday],
+      [104, "SHIFT_BASED", today],
+      [105, "SHIFT_BASED", today],
+      [105, "PRESENT_ABSENT_ONLY", today],
+    ];
+    for (const [id, mode, from] of rows) {
+      await q(pool, "INSERT INTO employee_attendance_calculation_mode (employee_id, calculation_mode, effective_from) VALUES (?,?,?)", [id, mode, from]);
+    }
+    const field = catalogue.getField("attendance_calculation_mode");
+    const got = await q(
+      pool,
+      `SELECT new_employee.employee_id, ${field.select} AS mode
+         FROM new_employee
+         ${catalogue.JOINS[field.join]}
+        WHERE new_employee.employee_id BETWEEN 101 AND 105
+        ORDER BY new_employee.employee_id`
+    );
+    assert.equal(got.length, 5, "never more than one row per employee");
+    const history = await q(
+      pool,
+      "SELECT employee_attendance_calculation_mode_id, employee_id, calculation_mode, DATE_FORMAT(effective_from, '%Y-%m-%d') AS effective_from FROM employee_attendance_calculation_mode"
+    );
+    for (const row of got) {
+      const expected = resolveAttendanceCalculationMode(
+        history.filter((h) => Number(h.employee_id) === Number(row.employee_id)),
+        today
+      );
+      assert.equal(row.mode, expected, `employee ${row.employee_id}`);
+    }
+    assert.deepEqual(
+      got.map((r) => field.transform(r.mode)),
+      ["Shift Based", "Present/Absent Only", "Shift Based", "Shift Based", "Present/Absent Only"]
+    );
+  });
+
   it("and the same writer refuses that day in the locked August", async () => {
     const storage = buildCalculation({}).toStorageRow(
       calculateAttendanceDay({

@@ -503,11 +503,20 @@ test("history_backed marks the placement fields, and nothing else", () => {
   // `employee_shift_assignment` already keeps that history; nothing consumes
   // the flag today and it changes no behaviour.
   const backed = catalogue.FIELDS.filter((f) => f.history_backed).map((f) => f.key).sort();
-  assert.deepStrictEqual(backed, ["department", "designation", "outlet", "shift", "work_shift"]);
+  // `attendance_calculation_mode` is backed by its own effective-dated history
+  // table and is ALREADY read as at a date (today).
+  assert.deepStrictEqual(backed, [
+    "attendance_calculation_mode",
+    "department",
+    "designation",
+    "outlet",
+    "shift",
+    "work_shift",
+  ]);
 });
 
 test("every field declares a group and a join footprint", () => {
-  const footprints = ["base", "lookup", "c2_identity", "c2_bank", "m2_salary", "derived"];
+  const footprints = ["base", "lookup", "c2_identity", "c2_bank", "m2_salary", "attendance_mode", "derived"];
   for (const f of catalogue.FIELDS) {
     assert.ok(catalogue.GROUP_ORDER.includes(f.group), `${f.key} has an unknown group`);
     assert.ok(footprints.includes(f.join_footprint), `${f.key} has an unknown footprint`);
@@ -541,4 +550,36 @@ test("'inactive' selects on the employment status column, including NULL", () =>
   const { fields } = resolveFields(["employee_id"], adminActor);
   const { sql } = buildQuery(fields, resolveFilters({ status: "inactive" }));
   assert.match(sql, /new_employee\.status <> 1 OR new_employee\.status IS NULL/);
+});
+
+/* ============================================ Attendance Calculation Type */
+
+test("ATTENDANCE CALCULATION TYPE: an ordinary Employment field - no key of its own, words not codes", () => {
+  const field = catalogue.getField("attendance_calculation_mode");
+  assert.ok(field, "reportable");
+  assert.strictEqual(field.label, "Attendance Calculation Type");
+  assert.strictEqual(field.group, "Employment");
+  assert.strictEqual(field.permission, undefined, "the same visibility as the Employment Details it is shown on");
+  assert.ok(discoverFields(hrActor).some((f) => f.key === "attendance_calculation_mode"));
+  assert.strictEqual(field.transform("SHIFT_BASED"), "Shift Based");
+  assert.strictEqual(field.transform("PRESENT_ABSENT_ONLY"), "Present/Absent Only");
+  // The select already COALESCEs a missing history to SHIFT_BASED; the
+  // transform agrees rather than printing a blank.
+  assert.strictEqual(field.transform(null), "Shift Based");
+});
+
+test("ATTENDANCE CALCULATION TYPE: one row per employee, outlet scope and count untouched", () => {
+  const { fields } = resolveFields(["employee_id", "attendance_calculation_mode"], adminActor);
+  const filters = resolveFilters({ outlet_ids: [2], status: "all" });
+  const page = buildQuery(fields, filters);
+  const count = buildQuery(fields, filters, { count: true });
+  // The outlet predicate is exactly what it is without the field.
+  const without = buildQuery(resolveFields(["employee_id"], adminActor).fields, filters);
+  assert.deepStrictEqual(page.params.slice(0, without.params.length), without.params);
+  assert.ok(/new_employee\.store_id/.test(page.sql) && /new_employee\.store_id/.test(without.sql));
+  // Joined on the ONE history row the subquery picks (LIMIT 1), as at today.
+  assert.match(page.sql, /current_attendance_mode\.employee_attendance_calculation_mode_id = \(/);
+  assert.match(page.sql, /LIMIT 1\)/);
+  assert.match(page.sql, /COALESCE\(current_attendance_mode\.calculation_mode, 'SHIFT_BASED'\) AS c1/);
+  assert.ok(/COUNT\(\*\)/.test(count.sql));
 });

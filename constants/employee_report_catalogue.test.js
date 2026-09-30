@@ -200,6 +200,7 @@ test("every join is fixed text naming a table this file knows", () => {
   const tables = [
     "outlets", "department", "designation", "shift_master", "work_shift",
     "employee_aadhaar_identity", "employee_bank_verification", "employee_salary",
+    "employee_attendance_calculation_mode",
   ];
   for (const [name, sql] of Object.entries(catalogue.JOINS)) {
     assert.match(sql, /^LEFT JOIN /, `${name} must be a LEFT JOIN`);

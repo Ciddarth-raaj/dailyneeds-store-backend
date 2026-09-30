@@ -407,3 +407,44 @@ test("the xlsx worksheet is created WITH its views, never assigned them", async 
   assert.match(fn, /addWorksheet\("Report",\s*\{\s*views:\s*\[\{ state: "frozen", ySplit: 1 \}\],?\s*\}\)/);
   assert.ok(!/sheet\.views\s*=/.test(fn), "views must never be assigned on a WorksheetWriter");
 });
+
+/* ============== Attendance Calculation Type, in both export formats ====== */
+
+test("ATTENDANCE CALCULATION TYPE EXPORTS AS WORDS, IN BOTH FORMATS, FROM THE AS-OF-TODAY JOIN", async () => {
+  const rows = [
+    // The select is COALESCE(..., 'SHIFT_BASED'), so the database answers a
+    // code for every employee - no history row reads SHIFT_BASED.
+    { c0: 1, c1: "Ravi", c2: "SHIFT_BASED" },
+    { c0: 2, c1: "Meena", c2: "PRESENT_ABSENT_ONLY" },
+  ];
+  const seen = [];
+  const db = {
+    query(sql, params, cb) {
+      seen.push(sql);
+      return fakeDb(rows).query(sql, params, cb);
+    },
+  };
+  const body = {
+    template_id: 1,
+    field_keys: ["employee_id", "employee_name", "attendance_calculation_mode"],
+    filters: { status: "active", outlet_ids: [], department_ids: [], designation_ids: [], search: "", field_filters: [] },
+  };
+  const server = serve({ db });
+  try {
+    const csv = csvLines((await post(server, "/export/csv", body)).body);
+    assert.strictEqual(csv[0], "Employee ID,Employee Name,Attendance Calculation Type");
+    assert.strictEqual(csv[1], "1,Ravi,Shift Based");
+    assert.strictEqual(csv[2], "2,Meena,Present/Absent Only");
+
+    const { rows: sheet } = await readSheet((await post(server, "/export/xlsx", body)).body);
+    assert.deepStrictEqual(sheet[0], ["Employee ID", "Employee Name", "Attendance Calculation Type"]);
+    assert.deepStrictEqual(sheet[2], ["2", "Meena", "Present/Absent Only"]);
+
+    // The value is the row IN EFFECT on today's IST date - never a later,
+    // scheduled one.
+    const data = seen.find((s) => /employee_attendance_calculation_mode/.test(s) && !/COUNT\(\*\)/.test(s));
+    assert.match(data, /m\.effective_from <= DATE\(UTC_TIMESTAMP\(\) \+ INTERVAL 330 MINUTE\)/);
+  } finally {
+    server.close();
+  }
+});

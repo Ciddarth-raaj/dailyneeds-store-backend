@@ -203,6 +203,8 @@ function fakeRepo(state = {}) {
       }),
     getApprovedRegularizedPunchesForEmployees: async () => state.regularized || [],
     getApprovalStateForEmployees: async () => state.approvals || [],
+    // The effective-dated Attendance Calculation Type. No rows = Shift Based.
+    getAttendanceCalculationModeHistoryForEmployees: async () => state.modes || [],
     listPunchesByIds: async (ids) => {
       calls.punchesByIds = ids;
       if (state.punchLocationsThrow) throw new Error("punch read failed");
@@ -2159,5 +2161,78 @@ describe("employees are resolved per date, not once for the business date", () =
     assert.equal(dashboard.applicableOn({ resignation_date: SEP12 }, SEP13), false);
     assert.equal(dashboard.applicableOn({ resignation_date: SEP13 }, SEP13), true);
     assert.equal(dashboard.applicableOn({}, SEP13), true, "unreadable dates leave it unbounded");
+  });
+});
+
+/* ================================= Present/Absent Only, staffing + dashboard */
+
+describe("Present/Absent Only - no shift is not a follow-up item or a setup gap", () => {
+  const pao = (employee_id, effective_from = "2026-01-01") => ({
+    employee_attendance_calculation_mode_id: employee_id,
+    employee_id,
+    calculation_mode: "PRESENT_ABSENT_ONLY",
+    effective_from,
+  });
+
+  it("recorded IN with no active shift: a Shift Based employee is followed up, a Present/Absent Only one is not", async () => {
+    const { uc } = build({
+      employees: [employee(1), employee(2), employee(3)],
+      // 3 has NO shift assignment at all.
+      assignments: [assign(1, 1), assign(2, 1)],
+      rawPunches: [
+        punch(1, `${DATE} 09:00:00`, 1),
+        punch(2, `${DATE} 09:00:00`, 2),
+        punch(3, `${DATE} 09:00:00`, 3),
+      ],
+      modes: [pao(2), pao(3)],
+    });
+    const res = await uc.getSnapshot({ now: ist(DATE, 21, 30) });
+    assert.deepEqual(res.additional.no_active_shift.map((r) => r.employee_id), [1]);
+    assert.equal(
+      (res.unknown_expectation || []).filter((r) => r.employee_id === 3).length,
+      0,
+      "a Present/Absent Only employee with no shift is not 'No shift assigned for this date'"
+    );
+  });
+
+  it("the mode is the DATE's: effective tomorrow, today is still followed up", async () => {
+    const tomorrow = (() => {
+      const d = new Date(`${DATE}T00:00:00Z`);
+      d.setUTCDate(d.getUTCDate() + 1);
+      return d.toISOString().slice(0, 10);
+    })();
+    const { uc } = build({
+      employees: [employee(2)],
+      assignments: [assign(2, 1)],
+      rawPunches: [punch(2, `${DATE} 09:00:00`, 2)],
+      modes: [pao(2, tomorrow)],
+    });
+    const res = await uc.getSnapshot({ now: ist(DATE, 21, 30) });
+    assert.deepEqual(res.additional.no_active_shift.map((r) => r.employee_id), [2]);
+  });
+
+  it("the dashboard: no No Shift issue, no Unresolved, and a Present/Absent Only shift-panel row", async () => {
+    const repo = fakeRepo({
+      employees: [employee(3), employee(4)],
+      // Neither has a shift. 3 is Present/Absent Only; 4 is a real setup gap.
+      assignments: [],
+      rawPunches: [punch(3, `${DATE} 09:00:00`, 3)],
+      modes: [pao(3)],
+    });
+    const dash = buildDashboard(repo);
+    const now = ist(DATE, 23, 30);
+    const drill = await dash.getDrilldown({ attendance_date: DATE, bucket: "TOTAL", now });
+    const rows = drill.employees;
+    const three = rows.find((r) => r.employee_id === 3);
+    const four = rows.find((r) => r.employee_id === 4);
+    assert.equal(three.issue_key, null, "Present, not No Shift");
+    assert.equal(three.slice, "CHECKED_IN");
+    assert.equal(three.unresolved_reason, null);
+    assert.equal(three.status, "FINAL");
+    assert.equal(four.issue_key, "NO_SHIFT", "a Shift Based employee without a shift is still reported");
+
+    const overview = await dash.getOverview({ attendance_date: DATE, now });
+    const panel = JSON.stringify(overview);
+    assert.match(panel, /Present\/Absent Only/);
   });
 });

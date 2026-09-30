@@ -450,6 +450,9 @@ module.exports = (
         shiftCache: batch.shiftCache,
         assignments: batch.assignmentsByEmployee.get(String(employee.employee_id)) || [],
         overrides: batch.overridesByEmployee.get(String(employee.employee_id)) || [],
+        // The dated Attendance Calculation Type, so a Present/Absent Only
+        // date reads "not applicable" here exactly as the request path does.
+        modeHistory: batch.modesByEmployee ? batch.modesByEmployee.get(String(employee.employee_id)) || [] : [],
       });
 
       days.forEach((day) => {
@@ -475,6 +478,7 @@ module.exports = (
           today,
           payroll_locked: locksFor(Number(employee.employee_id), date),
           existing_request: request,
+          attendance_calculation_mode: resolver.modeFor(date),
           base_work_shift_id: baseShiftId,
           has_longer_option: shiftChange.hasLongerShiftOption({
             base_nrm_minutes: baseNrm,

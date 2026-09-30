@@ -704,7 +704,10 @@ class Server {
     // report_export_log the Reports module writes.
     this.attendanceRawUsecase = require("./usecase/attendance_raw")(
       this.biomaxPunchRepo,
-      this.reportTemplateRepo
+      this.reportTemplateRepo,
+      // The effective-dated Attendance Calculation Type, so a Present/Absent
+      // Only employee's shift-less punches are not reported as a fault.
+      this.attendanceDashboardRepo
     );
     this.biomaxDeviceUsecase = require("./usecase/biomax_device")(this.biomaxDeviceRepo);
     this.biomaxHistoricalPullUsecase = require("./usecase/biomax_historical_pull")(this.biomaxHistoricalPullRepo);

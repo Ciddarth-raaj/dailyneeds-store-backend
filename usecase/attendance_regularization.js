@@ -699,6 +699,10 @@ module.exports = (
 
     const businessToday = istToday(today);
 
+    // The Attendance Calculation Type FOR THIS DATE, resolved first: on a
+    // Present/Absent Only date the request is refused whatever else is true.
+    const attendanceMode = await attendanceModeFor(employeeId, date);
+
     /**
      * EVERY REFUSAL BELOW IS `utils/shift_change_eligibility.js#decidePreconditions`,
      * AND NOT A TEST WRITTEN HERE.
@@ -718,6 +722,7 @@ module.exports = (
       const blocked = shiftChangeEligibility.decidePreconditions({
         attendance_date: date,
         today: businessToday,
+        attendance_calculation_mode: attendanceMode,
         ...facts,
       });
       if (!blocked) return;
@@ -901,6 +906,16 @@ module.exports = (
    * never disagree about whether a date is blocked. Absent the repository it
    * answers null, which is the pre-feature behaviour.
    */
+  /**
+   * The employee's Attendance Calculation Type on a date, from the ONE
+   * effective-dated resolver the calculation uses. Absent the reader (older
+   * fakes) it is undefined, which the shift change rule reads as "not read".
+   */
+  const attendanceModeFor = async (employeeId, date) =>
+    typeof attendanceCalculationUsecase.attendanceCalculationModeFor === "function"
+      ? attendanceCalculationUsecase.attendanceCalculationModeFor({ employee_id: employeeId, attendance_date: date })
+      : undefined;
+
   const activeBlockFor = async (employeeId, date) => {
     if (!shiftChangeBlockRepo || typeof shiftChangeBlockRepo.findActive !== "function") return null;
     return shiftChangeBlockRepo.findActive(employeeId, date);
@@ -957,6 +972,7 @@ module.exports = (
       today: businessToday,
       payroll_locked: locked,
       existing_request: priorShift,
+      attendance_calculation_mode: await attendanceModeFor(employeeId, date),
       base_work_shift_id:
         offered.base && offered.base.work_shift_id !== null && offered.base.work_shift_id !== undefined
           ? Number(offered.base.work_shift_id)
@@ -1026,6 +1042,21 @@ module.exports = (
      * which needs the SYSTEM verdict on its own before composing the block on
      * top. It is not reachable from any route.
      */
+    // PRESENT/ABSENT ONLY: no options at all, in the submit path's sentence.
+    const attendanceMode = await attendanceModeFor(employeeId, date);
+    if (isPresentAbsentOnly(attendanceMode)) {
+      return {
+        attendance_date: date,
+        base: null,
+        options: [],
+        can_raise: false,
+        hr_blocked: false,
+        attendance_calculation_mode: attendanceMode,
+        reason:
+          shiftChangeEligibility.REASON_TEXT[shiftChangeEligibility.SHIFT_CHANGE_REASON.PRESENT_ABSENT_ONLY],
+      };
+    }
+
     if (!skip_block) {
       const block = await activeBlockFor(employeeId, date);
       if (shiftChangeBlock.isActive(block)) {

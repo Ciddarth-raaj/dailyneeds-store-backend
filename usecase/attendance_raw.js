@@ -27,6 +27,23 @@ const {
 } = require("../utils/attendance_effective_punches");
 
 const { REASON_CODES: TIME_CORRECTION_REASON_LABEL } = require("../constants/attendance_device_time_correction");
+const {
+  ATTENDANCE_CALCULATION_MODE,
+  ATTENDANCE_CALCULATION_MODE_LABEL,
+  isPresentAbsentOnly,
+  modeResolver,
+} = require("../utils/attendance_calculation_mode");
+
+/**
+ * What a Present/Absent Only punch's ingest status is SHOWN as.
+ *
+ * The receiver stores `NO_SHIFT` for a punch it could not date for want of a
+ * shift, and that stored value is left exactly as it is. But on a date the
+ * employee is Present/Absent Only, having no shift is expected - the engine
+ * dates the punch by the calendar and needs none - so the screens and the
+ * CSV say which rule applies instead of reporting a fault.
+ */
+const PRESENT_ABSENT_ONLY_DISPLAY = `Attendance Mode: ${ATTENDANCE_CALCULATION_MODE_LABEL.PRESENT_ABSENT_ONLY}`;
 
 const RANGE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_LIST_DAYS = 92;
@@ -92,9 +109,64 @@ class AttendanceRawUsecase {
    * @param {object} [exportLog] anything with logExport(entry) - the report
    *        template repository, so exports land in report_export_log
    */
-  constructor(punchRepo, exportLog) {
+  constructor(punchRepo, exportLog, modeHistoryRepo) {
     this.punchRepo = punchRepo;
     this.exportLog = exportLog || null;
+    // Anything with `getAttendanceCalculationModeHistoryForEmployees(ids)` -
+    // the dashboard repository's batched read of the effective-dated
+    // Attendance Calculation Type. Absent, every date is SHIFT_BASED and
+    // these views behave exactly as they always have.
+    this.modeHistoryRepo = modeHistoryRepo || null;
+  }
+
+  /**
+   * `(employee_id, date) -> mode` for the listed employees, through the ONE
+   * resolver the attendance engine uses, per DATE - never today's setting.
+   */
+  async modeLookup(employeeIds) {
+    const ids = [...new Set((employeeIds || []).filter((id) => id !== null && id !== undefined).map(Number))];
+    if (
+      ids.length === 0 ||
+      !this.modeHistoryRepo ||
+      typeof this.modeHistoryRepo.getAttendanceCalculationModeHistoryForEmployees !== "function"
+    ) {
+      return () => ATTENDANCE_CALCULATION_MODE.SHIFT_BASED;
+    }
+    const rows = await this.modeHistoryRepo.getAttendanceCalculationModeHistoryForEmployees(ids);
+    const byEmployee = new Map();
+    (rows || []).forEach((row) => {
+      const key = Number(row.employee_id);
+      if (!byEmployee.has(key)) byEmployee.set(key, []);
+      byEmployee.get(key).push(row);
+    });
+    const resolvers = new Map();
+    return (employeeId, date) => {
+      const key = Number(employeeId);
+      if (!byEmployee.has(key) || !date) return ATTENDANCE_CALCULATION_MODE.SHIFT_BASED;
+      if (!resolvers.has(key)) resolvers.set(key, modeResolver(byEmployee.get(key)));
+      return resolvers.get(key)(date);
+    };
+  }
+
+  /**
+   * The banner counts, less the `NO_SHIFT` punches that fall on a
+   * Present/Absent Only date: those are not in anybody's to-do list.
+   */
+  async countsFor(range) {
+    const summary = await this.punchRepo.summary(range);
+    const counts = summariseCounts(summary);
+    if (!this.modeHistoryRepo || typeof this.punchRepo.summaryNoShiftDays !== "function") return counts;
+    const days = (await this.punchRepo.summaryNoShiftDays(range)) || [];
+    const modeFor = await this.modeLookup(days.map((d) => d.employee_id));
+    const expected = days
+      .filter((d) => isPresentAbsentOnly(modeFor(d.employee_id, d.calendar_date)))
+      .reduce((sum, d) => sum + (Number(d.punches) || 0), 0);
+    return {
+      ...counts,
+      no_shift_punches: Math.max(0, counts.no_shift_punches - expected),
+      undated_punches: Math.max(0, counts.undated_punches - expected),
+      present_absent_only_punches: expected,
+    };
   }
 
   /* ------------------------------------------------------ Attendance List */
@@ -129,16 +201,34 @@ class AttendanceRawUsecase {
    */
   async list(query) {
     const filters = this.listFilters(query);
-    const rows = await this.punchRepo.listDated(filters);
+    const dated = await this.punchRepo.listDated(filters);
+
+    // PRESENT/ABSENT ONLY punches ingest could not date (no shift): shown on
+    // their CALENDAR date, which is the attendance date for that mode. The
+    // stored row is not touched - only this response dates them.
+    const undated =
+      this.modeHistoryRepo && typeof this.punchRepo.listUndatedNoShift === "function"
+        ? (await this.punchRepo.listUndatedNoShift(filters)) || []
+        : [];
+    const modeFor = await this.modeLookup([...dated, ...undated].map((r) => r.employee_id));
+    const rows = [
+      ...dated,
+      ...undated
+        .filter((r) => isPresentAbsentOnly(modeFor(r.employee_id, r.calendar_date)))
+        .map((r) => ({ ...r, attendance_date: r.calendar_date })),
+    ]
+      .map((r) => ({ ...r, attendance_calculation_mode: modeFor(r.employee_id, r.attendance_date) }))
+      .sort(byListOrder);
+
     const { data, maxPunchCount, quarantined } = pivot(rows);
-    const summary = await this.punchRepo.summary({ from: filters.from, to: filters.to });
+    const counts = await this.countsFor({ from: filters.from, to: filters.to });
     return {
       meta: {
         ...filters,
         row_count: data.length,
         max_punch_count: maxPunchCount,
         quarantined_punches: quarantined,
-        ...summariseCounts(summary),
+        ...counts,
       },
       data,
     };
@@ -205,10 +295,30 @@ class AttendanceRawUsecase {
   async audit(query) {
     const filters = this.auditFilters(query);
     const rows = await this.punchRepo.listPunches(filters);
-    const data = rows.map(presentPunch);
+    const presented = rows.map(presentPunch);
+
+    // The Attendance Calculation Type of each punch's DATE: the date ingest
+    // gave it, or - for a punch ingest could not date - its calendar date,
+    // which is where Present/Absent Only allocates it.
+    const modeFor = await this.modeLookup(presented.map((p) => p.employee_id));
+    presented.forEach((p) => {
+      p.attendance_calculation_mode =
+        p.employee_id === null ? null : modeFor(p.employee_id, p.attendance_date || p.calendar_date);
+      p.derivation_display = expectedNoShift(p) ? PRESENT_ABSENT_ONLY_DISPLAY : null;
+    });
+
+    // A Present/Absent Only punch is not a review item merely for having no
+    // shift. It leaves the review queue and the NO_SHIFT / UNDATED issue
+    // lists - unless its DEVICE is also a problem, which still needs review.
+    const data = presented.filter((p) => {
+      if (!expectedNoShift(p)) return true;
+      if (filters.issue === "NO_SHIFT" || filters.issue === "UNDATED") return false;
+      if (filters.review === "needs_review") return hasDeviceIssue(p);
+      return true;
+    });
     await this.attachEffectiveStatus(data, filters);
     return {
-      meta: { ...filters, row_count: rows.length },
+      meta: { ...filters, row_count: data.length },
       data,
     };
   }
@@ -251,7 +361,8 @@ class AttendanceRawUsecase {
   async summary(query) {
     checkRange(query.from, query.to, MAX_LIST_DAYS);
     const summary = await this.punchRepo.summary({ from: query.from, to: query.to });
-    return { from: query.from, to: query.to, ...summariseCounts(summary), unregistered_devices_detail: summary.unregistered };
+    const counts = await this.countsFor({ from: query.from, to: query.to });
+    return { from: query.from, to: query.to, ...counts, unregistered_devices_detail: summary.unregistered };
   }
 
   /* ------------------------------------------------------------- exports */
@@ -286,7 +397,7 @@ class AttendanceRawUsecase {
     const header = ["Calendar Date", "Time", "Attendance Date", "Employee Code", "Employee Name", "Home Outlet", "Punch Location", "Device", "Cloud ID", "Source IP", "Device Status", "Derivation Status", "Cutoff Applied", "Retransmits", "Punch ID", "Source", "Effective Status", "Effective Reason", "Void Reason", "Voided By", "Voided At", "Original Device Time", "Device Time Correction", "Correction Offset (min)", "Correction Reason", "Corrected By", "Corrected At"];
     const rows = data.map((p) => [
       toDisplayDate(p.calendar_date), p.clock_time, toDisplayDate(p.attendance_date), p.user_id, p.employee_name || "", p.home_outlet || "",
-      p.punch_outlet || "", p.device_label || "", p.dev_id, p.source_ip || "", p.device_status, p.derivation_status || "NO_DERIVED_ROW", p.cutoff_applied || "", String(p.retransmit_count || 0),
+      p.punch_outlet || "", p.device_label || "", p.dev_id, p.source_ip || "", p.device_status, p.derivation_display || p.derivation_status || "NO_DERIVED_ROW", p.cutoff_applied || "", String(p.retransmit_count || 0),
       String(p.biomax_punch_id), p.punch_source || "", EFFECTIVE_STATUS_LABEL[p.effective_status] || "", p.effective_reason || "",
       p.void_reason || "", p.voided_by_name || "", p.voided_at || "",
       p.time_corrected ? p.original_clock_time || "" : "",
@@ -322,6 +433,30 @@ class AttendanceRawUsecase {
 
 /* ------------------------------------------------------------ helpers -- */
 
+/** A NO_SHIFT punch on a Present/Absent Only date: no shift is expected. */
+function expectedNoShift(p) {
+  return p.derivation_status === "NO_SHIFT" && isPresentAbsentOnly(p.attendance_calculation_mode);
+}
+
+/** The device half of the review queue's condition, as the SQL states it. */
+function hasDeviceIssue(p) {
+  return Boolean(p.dev_id) && (p.device_status === "UNREGISTERED_DEVICE" || p.device_status === "INACTIVE_DEVICE");
+}
+
+/** The Attendance List's order: date, employee, instant, id. */
+function byListOrder(a, b) {
+  const da = String(a.attendance_date || "");
+  const db = String(b.attendance_date || "");
+  if (da !== db) return da < db ? -1 : 1;
+  const ea = Number(a.employee_id);
+  const eb = Number(b.employee_id);
+  if (ea !== eb) return ea - eb;
+  const ta = String(a.io_time || "");
+  const tb = String(b.io_time || "");
+  if (ta !== tb) return ta < tb ? -1 : 1;
+  return Number(a.biomax_punch_id) - Number(b.biomax_punch_id);
+}
+
 /** The wording of the effective status, for the CSV. */
 const EFFECTIVE_STATUS_LABEL = Object.freeze({
   USED: "Used",
@@ -354,6 +489,7 @@ function presentPunch(row) {
     calendar_date: row.calendar_date,
     attendance_date: row.attendance_date || null,
     derivation_status: row.derivation_status || null,
+    attendance_calculation_mode: row.attendance_calculation_mode || null,
     employee_id: row.employee_id === null || row.employee_id === undefined ? null : Number(row.employee_id),
     employee_name: row.employee_name || null,
     employee_status: row.employee_status === null || row.employee_status === undefined ? null : Number(row.employee_status),
@@ -451,6 +587,9 @@ function pivot(rows) {
         home_outlet: p.home_outlet,
         home_outlet_code: p.home_outlet_code,
         clock_date: p.attendance_date,
+        // Which attendance rule governs this employee/date, so the screen can
+        // say "Attendance Mode: Present/Absent Only" where it helps.
+        attendance_calculation_mode: p.attendance_calculation_mode,
         punches: [],
         punch_count: 0,
         distinct_punch_outlets: [],
@@ -527,7 +666,8 @@ function toDisplayDate(iso) {
   return `${iso.slice(8, 10)}/${iso.slice(5, 7)}/${iso.slice(0, 4)}`;
 }
 
-module.exports = (punchRepo, exportLog) => new AttendanceRawUsecase(punchRepo, exportLog);
+module.exports = (punchRepo, exportLog, modeHistoryRepo) =>
+  new AttendanceRawUsecase(punchRepo, exportLog, modeHistoryRepo);
 module.exports.AttendanceRawUsecase = AttendanceRawUsecase;
 module.exports.pivot = pivot;
 module.exports.presentPunch = presentPunch;

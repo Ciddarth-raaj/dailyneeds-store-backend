@@ -71,6 +71,10 @@ const SHIFT_CHANGE_REASON = Object.freeze({
   ALREADY_APPROVED: "ALREADY_APPROVED",
   NO_BASE_SHIFT: "NO_BASE_SHIFT",
   NO_LONGER_SHIFT: "NO_LONGER_SHIFT",
+  // The employee's Attendance Calculation Type on the date is
+  // PRESENT_ABSENT_ONLY: the date is calculated without any shift, so there
+  // is no shift to change and nothing a changed one could authorise.
+  PRESENT_ABSENT_ONLY: "PRESENT_ABSENT_ONLY",
 });
 
 /**
@@ -85,6 +89,8 @@ const REASON_TEXT = Object.freeze({
   [SHIFT_CHANGE_REASON.TOO_FAR_AHEAD]: `A shift change can be requested up to ${MAX_FORWARD_DAYS} days ahead only`,
   [SHIFT_CHANGE_REASON.NO_LONGER_SHIFT]:
     "Temporary shift requests are only allowed for shifts with longer working hours than your normal shift.",
+  [SHIFT_CHANGE_REASON.PRESENT_ABSENT_ONLY]:
+    "Shift Change is not applicable because this employee uses Present/Absent Only attendance.",
 });
 
 /** `YYYY-MM-DD` plus `n` days, by UTC arithmetic on the parts. No zone involved. */
@@ -172,12 +178,14 @@ function decide({
   existing_request = null,
   base_work_shift_id = null,
   has_longer_option = false,
+  attendance_calculation_mode = undefined,
 }) {
   const blocked = decidePreconditions({
     attendance_date,
     today,
     payroll_locked,
     existing_request,
+    attendance_calculation_mode,
     // `decide` is the COMPLETE form - every fact is in - so an absent shift is
     // an unassigned one here, never an unread one.
     base_work_shift_id: base_work_shift_id === undefined ? null : base_work_shift_id,
@@ -222,6 +230,10 @@ function decidePreconditions({
   // arrives, so a caller that has not resolved the shift yet must not be told
   // there is no shift - it simply is not this call's turn to judge that.
   base_work_shift_id = undefined,
+  // The employee's Attendance Calculation Type FOR THIS DATE, resolved from
+  // the effective-dated history (`utils/attendance_calculation_mode.js`).
+  // Undefined means "not read" and decides nothing.
+  attendance_calculation_mode = undefined,
 }) {
   const verdict = (reason_code, reason) => ({
     can_raise: false,
@@ -229,6 +241,13 @@ function decidePreconditions({
     reason: reason || REASON_TEXT[reason_code] || "",
     payroll_locked,
   });
+
+  // FIRST, because it is not a question of timing, locks or requests: on a
+  // Present/Absent Only date a shift change has no meaning at all - whether
+  // or not an old shift assignment still exists.
+  if (attendance_calculation_mode === "PRESENT_ABSENT_ONLY") {
+    return verdict(SHIFT_CHANGE_REASON.PRESENT_ABSENT_ONLY);
+  }
 
   if (attendance_date < addDays(today, -MAX_BACKDATE_DAYS)) {
     return verdict(SHIFT_CHANGE_REASON.TOO_OLD);

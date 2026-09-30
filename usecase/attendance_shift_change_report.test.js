@@ -161,6 +161,7 @@ function fakeDashboardRepo(state = {}) {
     getApprovedRegularizedPunchesForEmployees: async () => state.regularized || [],
     getApprovalStateForEmployees: async () => state.approvals || [],
     getStoredCalculationsForEmployees: async () => state.stored || [],
+    getAttendanceCalculationModeHistoryForEmployees: async () => state.modes || [],
   };
 }
 
@@ -1138,5 +1139,39 @@ describe("G. THE PARITY TEST: the report's verdict IS the production rule's", ()
         );
       }
     });
+  });
+});
+
+describe("F. Present/Absent Only: the report says what the request path says", () => {
+  const pao = (employeeId, effective_from) => ({
+    employee_attendance_calculation_mode_id: employeeId,
+    employee_id: employeeId,
+    calculation_mode: "PRESENT_ABSENT_ONLY",
+    effective_from,
+  });
+
+  it("a Present/Absent Only date is not raisable, with the business message - even with a shift assigned", async () => {
+    const { usecase } = build({
+      employees: [employee(42)],
+      assignments: [assignment(42, SHORT_SHIFT)],
+      rawPunches: pair(42, YESTERDAY, 10, 22),
+      modes: [pao(42, YESTERDAY)],
+    });
+    const row = only((await usecase.getReport(oneDay())).data);
+    assert.equal(row.can_raise, false);
+    assert.equal(row.eligibility_reason_code, "PRESENT_ABSENT_ONLY");
+    assert.match(row.eligibility_reason, /Shift Change is not applicable because this employee uses Present\/Absent Only attendance\./);
+  });
+
+  it("a change effective only AFTER the date leaves the date's Shift Based answer alone", async () => {
+    const { usecase } = build({
+      employees: [employee(42)],
+      assignments: [assignment(42, SHORT_SHIFT)],
+      rawPunches: pair(42, YESTERDAY, 10, 22),
+      modes: [pao(42, TODAY)],
+    });
+    const row = only((await usecase.getReport(oneDay())).data);
+    assert.equal(row.can_raise, true);
+    assert.equal(row.eligibility_reason_code, "ELIGIBLE");
   });
 });

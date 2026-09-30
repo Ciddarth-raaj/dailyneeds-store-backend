@@ -30,6 +30,7 @@ const {
   isPresentAbsentOnly,
   modeResolver,
   modeAwareCutoffReader,
+  resolveAttendanceCalculationMode,
 } = require("../utils/attendance_calculation_mode");
 const {
   CALCULATION_SOURCE,
@@ -2517,6 +2518,21 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     };
   };
 
+  /**
+   * The employee's Attendance Calculation Type ON ONE DATE, for a caller
+   * outside a calculation (the shift change request paths). The same history
+   * read and the same resolver `buildContext` uses - one rule, not a copy.
+   */
+  const attendanceCalculationModeFor = async ({ employee_id, attendance_date }) => {
+    const date = toDateOnly(attendance_date);
+    if (date === null) throw validationError("attendance_date must be a date as YYYY-MM-DD");
+    const history =
+      typeof attendanceCalculationRepo.getAttendanceCalculationModeHistory === "function"
+        ? await attendanceCalculationRepo.getAttendanceCalculationModeHistory(Number(employee_id))
+        : [];
+    return resolveAttendanceCalculationMode(history, date);
+  };
+
   /** The payroll lock, asked before an action rather than before a write. */
   const findPayrollLockedPeriods = (rows) =>
     attendanceCalculationRepo.findPayrollLockedPeriods
@@ -2564,6 +2580,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     listRecalculationRuns,
     setDateShift,
     shiftForDate,
+    attendanceCalculationModeFor,
     attendanceDayState,
     findPayrollLockedPeriods,
     findPayrollLockedPeriodsBulk,

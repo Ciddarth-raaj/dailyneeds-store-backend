@@ -88,6 +88,10 @@ const {
  *                              APPROVED structure as at today, resolved by the
  *                              same rule `repository/employee_salary.js`
  *                              #getCurrentSalary uses
+ *   employee_attendance_calculation_mode
+ *                              attendance_calculation_mode - the Attendance
+ *                              Calculation Type IN EFFECT TODAY, resolved by
+ *                              the same rule the attendance engine uses
  *   outlets / department / designation / shift_master / work_shift
  *                              the resolved LABEL for a foreign key, which is
  *                              what the Employee Master displays
@@ -102,6 +106,8 @@ const {
  *   c2_identity  the C2 Aadhaar identity table
  *   c2_bank      the C2 bank verification, resolved through C2's own status
  *                logic rather than read raw
+ *   attendance_mode  the Attendance Calculation Type IN EFFECT TODAY (IST),
+ *                pinned to one history row by a correlated subquery
  *   m2_salary    the CURRENT APPROVED `employee_salary` row, pinned by a
  *                correlated subquery so the join can never multiply a row
  *   derived      computed from a base column, no extra table
@@ -326,6 +332,18 @@ const GRADE_OPTIONS = GRADES.map((v) => ({ value: v, label: `Grade ${v}` }));
  * The COLUMN still exports "Not recorded" through `TRISTATE_LABEL`, so the
  * unrecorded employees are visible - they are simply not filterable to.
  */
+/**
+ * ATTENDANCE CALCULATION TYPE, in the words the Employee Master shows. The
+ * stored codes are the history table's ENUM; no row at all is Shift Based.
+ */
+const ATTENDANCE_CALCULATION_MODE_OPTIONS = [
+  { value: "SHIFT_BASED", label: "Shift Based" },
+  { value: "PRESENT_ABSENT_ONLY", label: "Present/Absent Only" },
+];
+
+const ATTENDANCE_CALCULATION_MODE_REPORT_LABEL = (value) =>
+  value === "PRESENT_ABSENT_ONLY" ? "Present/Absent Only" : "Shift Based";
+
 const YES_NO_OPTIONS = [
   { value: "1", label: "Yes" },
   { value: "0", label: "No" },
@@ -517,6 +535,19 @@ const FIELDS = [
     transform: DUTY_LOCATION_LABEL,
     filter: { type: FILTER.ENUM, options: DUTY_LOCATION_OPTIONS },
     history_backed: false, enabled: true },
+
+  // THE ATTENDANCE CALCULATION TYPE IN EFFECT TODAY. An Employment Details
+  // setting, shown to everybody who may see the profile, so it has no
+  // permission of its own. It is effective-dated: the value reported is the
+  // history row in force on today's IST date (`current_attendance_mode`
+  // below), so a change scheduled for next month is NOT shown as though it
+  // were already active. No row at all is Shift Based, the default.
+  { key: "attendance_calculation_mode", label: "Attendance Calculation Type", group: "Employment",
+    select: "COALESCE(current_attendance_mode.calculation_mode, 'SHIFT_BASED')",
+    join: "current_attendance_mode", join_footprint: "attendance_mode",
+    transform: ATTENDANCE_CALCULATION_MODE_REPORT_LABEL,
+    filter: { type: FILTER.ENUM, options: ATTENDANCE_CALCULATION_MODE_OPTIONS },
+    history_backed: true, enabled: true },
 
   // THE DATE RECORDED BY THE RESIGN ACTION. The first sweep excluded it on the
   // grounds that the population never contains anyone who has left - which is
@@ -870,6 +901,27 @@ const JOINS = {
   //
   // Fixed text like every other join here - `CURDATE()` and 'APPROVED' are
   // this file's, and no part of it comes from a caller.
+  // THE ATTENDANCE CALCULATION TYPE IN EFFECT TODAY, PINNED TO ONE ROW.
+  //
+  // The same rule as `utils/attendance_calculation_mode.js#
+  // resolveModeRowForDate`, statement for statement - the latest row
+  // effective on or before the date, then the greatest id - asked for
+  // TODAY'S IST DATE (UTC + 5:30, computed in SQL so the server's own zone
+  // cannot move it). Joined on the primary key the subquery picks, so an
+  // employee is never multiplied into one row per history row. No row = NULL,
+  // which the field reports as Shift Based. A parity test holds this against
+  // the JS resolver on a real database
+  // (`repository/employee_attendance_mode.mysql.test.js`).
+  current_attendance_mode: [
+    "LEFT JOIN employee_attendance_calculation_mode current_attendance_mode",
+    "       ON current_attendance_mode.employee_attendance_calculation_mode_id = (",
+    "         SELECT m.employee_attendance_calculation_mode_id",
+    "           FROM employee_attendance_calculation_mode m",
+    "          WHERE m.employee_id = new_employee.employee_id",
+    "            AND m.effective_from <= DATE(UTC_TIMESTAMP() + INTERVAL 330 MINUTE)",
+    "          ORDER BY m.effective_from DESC, m.employee_attendance_calculation_mode_id DESC",
+    "          LIMIT 1)",
+  ].join("\n"),
   current_salary: [
     "LEFT JOIN employee_salary ON employee_salary.salary_id = (",
     "         SELECT s.salary_id",
@@ -940,4 +992,6 @@ module.exports = {
   maskAccount,
   asDate,
   EMPLOYMENT_STATUS_LABEL,
+  ATTENDANCE_CALCULATION_MODE_OPTIONS,
+  ATTENDANCE_CALCULATION_MODE_REPORT_LABEL,
 };

@@ -939,3 +939,34 @@ A future effective date is allowed. **Nothing is recalculated by saving**
 (the Extra Break Hours precedent): the response names the already-stored
 range that needs Recalculate Attendance, which then goes through the ordinary
 write gate.
+
+## Present/Absent Only across the other attendance views
+
+* **One-Day Shift Change is refused** on a Present/Absent Only date, whatever
+  shift assignment still exists: `SHIFT_CHANGE_REASON.PRESENT_ABSENT_ONLY`
+  in `utils/shift_change_eligibility.js#decidePreconditions`, checked first.
+  The request path, the options dropdown, the eligibility probe and the Shift
+  Change Eligibility report all read it from the same dated resolver
+  (`attendanceCalculationModeFor` / the dashboard `modeFor`), so they refuse
+  with one sentence: *Shift Change is not applicable because this employee
+  uses Present/Absent Only attendance.*
+* **Raw punch views.** The receiver keeps storing `NO_SHIFT` for a punch it
+  cannot date; nothing about ingest changes. `usecase/attendance_raw.js`
+  resolves each punch's date's mode (the ingest date, or the calendar date
+  for an undated punch) and, on a Present/Absent Only date, shows
+  *Attendance Mode: Present/Absent Only* instead of the no-shift fault: the
+  Attendance List banner counts and the Punch Audit review queue / `NO_SHIFT`
+  and `UNDATED` issue lists leave such punches out (a device problem still
+  keeps a punch in review), the Punch Audit and its CSV show the mode, and
+  the Attendance List shows the punches on their calendar date.
+* **Missing Attendance / the 07:00 reminder / staffing** - a one-punch
+  Present/Absent Only day is Present: it is excluded by
+  `utils/attendance_missing.js` (`EXCLUSION.PRESENT_ABSENT_ONLY`), so neither
+  the report nor the reminder chases it, and staffing does not list the
+  employee as "still recorded IN with no active shift".
+* **Employee Report**: `attendance_calculation_mode` ("Attendance
+  Calculation Type", *Shift Based* / *Present/Absent Only*) is the history
+  row in effect on today's IST date - a scheduled future change is not shown
+  as active. The report has no as-of date; the join mirrors
+  `resolveModeRowForDate` statement for statement (as the salary join mirrors
+  `getCurrentSalary`) and a MariaDB test holds the two to the same answers.

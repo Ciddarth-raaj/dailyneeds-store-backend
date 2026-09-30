@@ -189,6 +189,9 @@ function build(state = {}) {
           punch_id: null,
         })),
     getBreakOverride: async () => null,
+    // The effective-dated Attendance Calculation Type history, per employee.
+    // Absent from `state` = no rows = Shift Based, as for every existing test.
+    getAttendanceCalculationModeHistory: async (id) => ((state.modes || {})[id] || []),
     // Every column the real query returns, `requested_work_shift_id` included:
     // a fake that returned less would make the day's shift-request fields
     // pass here and be null in production.
@@ -2766,5 +2769,88 @@ describe("F. Admin Revoke of a one-day SHIFT change - single and bulk, on the pr
     assert.equal((await dayOf(world)).work_shift_id, EVE, "the approved one's override no longer applies");
     // The same single-record method did the work, once per request.
     assert.deepEqual(world.saved.revocations.map((r) => r.requestId), [approvedId, rejectedId]);
+  });
+});
+
+/* ============ Present/Absent Only: a One-Day Shift Change does not apply == */
+
+describe("B. the one-day shift request - Present/Absent Only employees", () => {
+  const NOT_APPLICABLE = "Shift Change is not applicable because this employee uses Present/Absent Only attendance.";
+  const modeFrom = (effective_from) => ({
+    [EMPLOYEE]: [
+      { employee_attendance_calculation_mode_id: 1, employee_id: EMPLOYEE, calculation_mode: "PRESENT_ABSENT_ONLY", effective_from },
+    ],
+  });
+  const raise = (world, date) =>
+    world.regularization.raiseShiftChangeRequest({
+      actor: self(EMPLOYEE), attendance_date: date, work_shift_id: LONG,
+      reason: "Covering the full day", today: TODAY,
+    });
+
+  it("Present/Absent Only -> refused with the business message, nothing created", async () => {
+    const world = build({ modes: modeFrom("2026-09-01") });
+    await assert.rejects(() => raise(world, "2026-09-26"), (err) => err.message === NOT_APPLICABLE);
+    assert.equal(world.store.requests.length, 0);
+  });
+
+  it("refused although the employee STILL has a shift assignment (EVE since 01/09)", async () => {
+    const world = build({ modes: modeFrom("2026-09-01") });
+    assert.equal(world.assignments[EMPLOYEE][0].work_shift_id, EVE, "the old assignment is still there");
+    const resolved = await world.calculation.shiftForDate({ employee_id: EMPLOYEE, attendance_date: "2026-09-26" });
+    assert.equal(resolved.base.work_shift_id, EVE, "and still resolves");
+    await assert.rejects(() => raise(world, "2026-09-26"), (err) => err.message === NOT_APPLICABLE);
+  });
+
+  it("Shift Based (no history) -> the existing behaviour, unchanged", async () => {
+    const world = build();
+    const raised = await raise(world, "2026-09-26");
+    assert.equal(raised.request_type, REQUEST_TYPE.SHIFT_CHANGE);
+    assert.equal(raised.base_work_shift_id, EVE);
+    assert.equal(world.store.requests.length, 1);
+  });
+
+  it("effective-date boundary: the day before is Shift Based, the effective date is refused", async () => {
+    const world = build({ modes: modeFrom("2026-09-26") });
+    const before = await raise(world, "2026-09-25");
+    assert.equal(before.request_type, REQUEST_TYPE.SHIFT_CHANGE, "25/09 is still Shift Based");
+    await assert.rejects(() => raise(world, "2026-09-26"), (err) => err.message === NOT_APPLICABLE);
+    assert.equal(world.store.requests.length, 1);
+  });
+
+  it("a later return to Shift Based makes the date raisable again (the DATE's mode, not today's)", async () => {
+    const world = build({
+      modes: {
+        [EMPLOYEE]: [
+          { employee_attendance_calculation_mode_id: 1, employee_id: EMPLOYEE, calculation_mode: "PRESENT_ABSENT_ONLY", effective_from: "2026-09-01" },
+          { employee_attendance_calculation_mode_id: 2, employee_id: EMPLOYEE, calculation_mode: "SHIFT_BASED", effective_from: "2026-09-26" },
+        ],
+      },
+    });
+    await assert.rejects(() => raise(world, "2026-09-25"), (err) => err.message === NOT_APPLICABLE);
+    const raised = await raise(world, "2026-09-26");
+    assert.equal(raised.request_type, REQUEST_TYPE.SHIFT_CHANGE);
+  });
+
+  it("the options dropdown and the eligibility probe say the same thing", async () => {
+    const world = build({ modes: modeFrom("2026-09-01") });
+    const options = await world.regularization.shiftChangeOptions({ actor: self(EMPLOYEE), attendance_date: "2026-09-26" });
+    assert.equal(options.can_raise, false);
+    assert.deepEqual(options.options, []);
+    assert.equal(options.reason, NOT_APPLICABLE);
+    assert.equal(options.attendance_calculation_mode, "PRESENT_ABSENT_ONLY");
+
+    const probe = await world.regularization.shiftChangeEligibilityFor({
+      employee_id: EMPLOYEE, attendance_date: "2026-09-26", today: TODAY,
+    });
+    assert.equal(probe.system.can_raise, false);
+    assert.equal(probe.system.reason_code, shiftChangeEligibility.SHIFT_CHANGE_REASON.PRESENT_ABSENT_ONLY);
+    assert.equal(probe.system.reason, NOT_APPLICABLE);
+  });
+
+  it("the Shift Based options are unchanged", async () => {
+    const world = build();
+    const options = await world.regularization.shiftChangeOptions({ actor: self(EMPLOYEE), attendance_date: "2026-09-26" });
+    assert.ok(options.options.some((o) => Number(o.work_shift_id) === LONG));
+    assert.equal(options.attendance_calculation_mode, undefined);
   });
 });
