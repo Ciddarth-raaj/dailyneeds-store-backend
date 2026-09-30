@@ -25,6 +25,13 @@ const { resolveEffectiveRawPunches } = require("../utils/attendance_effective_pu
 const eligibility = require("../utils/attendance_eligibility");
 const { extraBreakMinutes } = require("../utils/employee_extra_break");
 const {
+  ATTENDANCE_CALCULATION_MODE,
+  MODE_RESOLUTION_STATUS,
+  isPresentAbsentOnly,
+  modeResolver,
+  modeAwareCutoffReader,
+} = require("../utils/attendance_calculation_mode");
+const {
   CALCULATION_SOURCE,
   asLivePreview,
   byDate: storedByDate,
@@ -581,7 +588,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     // Each read is named for the temporary read timing (a no-op outside a
     // timed request). They run in parallel, so their durations overlap.
     const t = readTiming.phase;
-    const [assignments, fetchedRawPunches, regularized, employee, approvals, storedOverrides] =
+    const [assignments, fetchedRawPunches, regularized, employee, approvals, storedOverrides, modeHistory] =
       await Promise.all([
         t("shift_assignment_lookup", () => attendanceCalculationRepo.getShiftAssignmentHistory(employee_id)),
         t("raw_punch_lookup", () =>
@@ -601,6 +608,14 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
         t("shift_override_lookup", () =>
           attendanceCalculationRepo.getDateShiftOverrides
             ? attendanceCalculationRepo.getDateShiftOverrides(employee_id, from, punchWindowTo)
+            : []
+        ),
+        // The employee's effective-dated Attendance Calculation Type. The
+        // WHOLE history, like the shift history: a month resolves thirty
+        // dates, and the resolver picks per date.
+        t("attendance_mode_lookup", () =>
+          typeof attendanceCalculationRepo.getAttendanceCalculationModeHistory === "function"
+            ? attendanceCalculationRepo.getAttendanceCalculationModeHistory(employee_id)
             : []
         ),
       ]);
@@ -769,7 +784,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
      * punch lands on is reproducible from history rather than inherited from
      * whatever shift the employee happens to be on today.
      */
-    const readCutoff = (date) => {
+    const readShiftCutoff = (date) => {
       const resolution = resolutionFor(date);
       if (!resolution || !resolution.snapshot) return null;
       return {
@@ -777,6 +792,12 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
         attendance_day_cutoff: resolution.snapshot.attendance_day_cutoff,
       };
     };
+
+    // THE ATTENDANCE CALCULATION TYPE ON A DATE, from the dated history -
+    // never the employee's current setting. A Present/Absent Only date has
+    // no shift, so it claims no punch of the following morning.
+    const modeFor = modeResolver(modeHistory);
+    const readCutoff = modeAwareCutoffReader(readShiftCutoff, modeFor);
 
     return {
       assignments,
@@ -792,6 +813,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       resolutionFor,
       baseResolutionFor,
       readCutoff,
+      modeFor,
       shiftNameFor,
     };
   };
@@ -983,6 +1005,8 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     // the stored-or-live decision per date. No database access happens here.
     return readTiming.phaseSync("live_calculation", () => dates.map((date) => {
       const resolution = context.resolutionFor(date);
+      const mode = context.modeFor(date);
+      const presentAbsentOnly = isPresentAbsentOnly(mode);
 
       const slots = approvalByDate.get(date) || { regularization: null, ot: null, shift: null };
       let approval = slots.regularization;
@@ -1084,6 +1108,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
           resolution.assignment && resolution.assignment.shift_change_approved
             ? resolution.assignment.attendance_approval_request_id || null
             : null,
+        attendance_calculation_mode: mode,
       });
 
       // STORED HISTORY WINS, when there is any and the date has closed. The
@@ -1096,20 +1121,37 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
         live: calculated,
         stored: storedRow,
         day_closed: storedRow
-          ? isDayClosed({ attendance_date: date, snapshot: resolution.snapshot, now })
+          ? isDayClosed({
+              attendance_date: date,
+              // A Present/Absent Only date has no shift and closes at
+              // midnight - the same close its stored row was persisted under.
+              snapshot: presentAbsentOnly ? null : resolution.snapshot,
+              now,
+            })
           : false,
       });
 
+      // The decorations describe the day RETURNED - a stored row carries the
+      // mode it was calculated under, which a later backdated change does
+      // not alter until the date is recalculated.
+      const returnedPresentAbsentOnly = isPresentAbsentOnly(day.attendance_calculation_mode);
       return {
         ...day,
         ...otClaimFor({ day, otRequest, otSettled }),
         ...correctionClaimFor({ approval }),
         ...shiftChangeClaimFor({ shiftRequest }),
-        shift_resolution_status: resolution.status,
+        // On a Present/Absent Only day the roster decides nothing, so a
+        // missing one is not reported as a setup gap - see
+        // `utils/attendance_calculation_mode.js#MODE_RESOLUTION_STATUS`.
+        shift_resolution_status: returnedPresentAbsentOnly ? MODE_RESOLUTION_STATUS : resolution.status,
         // Display only: the live shift name, and whether the date's shift came
         // from the dated history or from a single-date edit.
-        shift_name: resolution.work_shift_id ? context.shiftNameFor(resolution.work_shift_id) : null,
-        shift_source: resolution.assignment ? resolution.assignment.source || null : null,
+        shift_name:
+          !returnedPresentAbsentOnly && resolution.work_shift_id
+            ? context.shiftNameFor(resolution.work_shift_id)
+            : null,
+        shift_source:
+          !returnedPresentAbsentOnly && resolution.assignment ? resolution.assignment.source || null : null,
         approval_request_id: approval
           ? approval.attendance_approval_request_id
           : otRequest
@@ -1343,6 +1385,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     review_reasons: JSON.stringify(day.review_reasons || []),
     approval_request_id: day.approval_request_id,
     calculation_version: CALCULATION_VERSION,
+    attendance_calculation_mode: day.attendance_calculation_mode || ATTENDANCE_CALCULATION_MODE.SHIFT_BASED,
   });
 
   /**

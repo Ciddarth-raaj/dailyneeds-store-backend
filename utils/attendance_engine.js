@@ -87,6 +87,8 @@
  * the break was short; see `TWO_PUNCH_OT_NOTE` below.
  */
 
+const { ATTENDANCE_CALCULATION_MODE } = require("./attendance_calculation_mode");
+
 const MINUTES_PER_DAY = 1440;
 
 /** The phase-in point of the break rule: six hours, in minutes. */
@@ -607,6 +609,67 @@ function applyGrace({
   };
 }
 
+const PRESENT_ABSENT_ONLY_NOTE =
+  "Attendance mode: Present/Absent Only - any valid attendance is a complete payable day; no shift timing, shortage or OT is calculated";
+
+/**
+ * ONE DATE UNDER PRESENT/ABSENT ONLY.
+ *
+ * WHAT QUALIFIES AS "ATTENDANCE EXISTS": at least one EFFECTIVE punch dated to
+ * this attendance date - a raw BIOMAX or IMPORT punch that survived the
+ * manual voids and the ten-minute duplicate rule
+ * (`utils/attendance_effective_punches.js`, unchanged), or an APPROVED and
+ * SETTLED regularized punch. That is the same canonical stream the shift
+ * engine pairs; nothing here reads a second source, and no raw punch
+ * integrity rule is relaxed.
+ *
+ *   one or more effective punches -> FINAL, attendance_day_count 1
+ *   none                          -> ABSENT, final, count 0
+ *
+ * Punch COUNT, ORDER and DURATION decide nothing: one punch, an odd number,
+ * a ten-minute stay, a late arrival or an early exit are all simply Present.
+ * So none of the shift rules can reach the day - no pairing, no MISSING_PUNCH,
+ * no break or Extra Break Hours, no BREAK_EXCEEDS_SHIFT, no NRM, no late or
+ * early minutes, no shortage, no candidate or shift-authorised OT, and no
+ * NO_SHIFT_FOR_DATE: the day neither needs nor reads a shift, and it stores
+ * none (no shift id, no snapshot), which is also what makes it close at
+ * midnight rather than at a shift's cutoff.
+ *
+ * PAYROLL NEEDS NOTHING SPECIAL. `utils/attendance_payroll.js` prices a day
+ * from `attendance_day_count`, `is_final`, `shortage_minutes` and
+ * `approved_ot_minutes`: count 1, final, shortage 0 and OT 0 is one complete
+ * attendance day with no deduction. NRM is stored as 0 because there is no
+ * shift duration; with no shortage and no OT on the day nothing divides by it.
+ *
+ * AN OPEN CORRECTION. A pending regularization matters only while the day
+ * has no attendance at all: its proposed punch is the one thing that could
+ * still make it Present, so the day is held as REGULARIZATION_PENDING (not
+ * final) exactly as the shift engine holds one. A day that is already Present
+ * cannot be changed by a correction, so it stays FINAL.
+ */
+function calculatePresentAbsentOnlyDay({ base, effectivePunches, regularization_pending = false }) {
+  const day = {
+    ...base,
+    attendance_calculation_mode: ATTENDANCE_CALCULATION_MODE.PRESENT_ABSENT_ONLY,
+    work_shift_id: null,
+    work_shift_weekly_schedule_id: null,
+    shift_snapshot: null,
+    shift_snapshot_hash: null,
+    base_work_shift_id: null,
+    ot_rate: null,
+    review_reasons: [],
+    notes: [PRESENT_ABSENT_ONLY_NOTE],
+  };
+
+  if (effectivePunches.length > 0) {
+    return { ...day, status: CALC_STATUS.FINAL, attendance_day_count: 1, is_final: true };
+  }
+  if (regularization_pending) {
+    return { ...day, status: CALC_STATUS.REGULARIZATION_PENDING, attendance_day_count: 0, is_final: false };
+  }
+  return { ...day, status: CALC_STATUS.ABSENT, attendance_day_count: 0, is_final: true };
+}
+
 /**
  * Calculate one employee's one attendance date.
  *
@@ -653,6 +716,11 @@ function calculateAttendanceDay(input = {}) {
     // SHIFT_CHANGE request. See `resolveShiftAuthorisedOvertime` below.
     shift_authorised = false,
     shift_change_request_id = null,
+    // The employee's Attendance Calculation Type ON THIS DATE, resolved by
+    // the caller from the effective-dated history
+    // (`utils/attendance_calculation_mode.js`). Absent means SHIFT_BASED,
+    // which is every date that has no history row.
+    attendance_calculation_mode = ATTENDANCE_CALCULATION_MODE.SHIFT_BASED,
   } = input;
 
   const rawPunches = orderPunches(punches, attendance_date);
@@ -755,6 +823,9 @@ function calculateAttendanceDay(input = {}) {
     status: CALC_STATUS.REVIEW_REQUIRED,
     review_reasons: [],
     notes: [],
+    // Which rule produced this day. Stored on the row, so a stored date
+    // still explains itself after the employee's setting changes again.
+    attendance_calculation_mode: ATTENDANCE_CALCULATION_MODE.SHIFT_BASED,
   };
 
   // EXEMPT FROM BIOMETRIC ATTENDANCE, and therefore settled before any
@@ -775,6 +846,12 @@ function calculateAttendanceDay(input = {}) {
       review_reasons: [],
       notes: ["Biometric attendance is not required for this employee"],
     };
+  }
+
+  // PRESENT/ABSENT ONLY - settled before the no-shift verdict, because this
+  // mode needs no shift at all.
+  if (attendance_calculation_mode === ATTENDANCE_CALCULATION_MODE.PRESENT_ABSENT_ONLY) {
+    return calculatePresentAbsentOnlyDay({ base, effectivePunches, regularization_pending });
   }
 
   // A date with no resolvable shift produces no numbers at all. It is never
@@ -1272,6 +1349,7 @@ module.exports = {
   REVIEW_REASON,
   PUNCH_SOURCE,
   TWO_PUNCH_OT_NOTE,
+  PRESENT_ABSENT_ONLY_NOTE,
   clockMinutes,
   datePart,
   addDays,

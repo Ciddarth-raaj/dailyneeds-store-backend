@@ -139,6 +139,9 @@ function hydrateStoredDay(row, { live = null } = {}) {
         ? null
         : Number(row.approval_request_id),
     calculation_version: intOrNull(row.calculation_version),
+    // Rows written before the column existed read its default, SHIFT_BASED,
+    // which is what calculated every one of them.
+    attendance_calculation_mode: row.attendance_calculation_mode || "SHIFT_BASED",
     calculated_at: row.calculated_at === undefined ? null : row.calculated_at,
     // The stored row narrates nothing; the notes belonged to a calculation
     // that ran when the date was stored and are not reproduced.

@@ -16,6 +16,13 @@ const { resolveEffectiveRawPunches } = require("../utils/attendance_effective_pu
 const eligibility = require("../utils/attendance_eligibility");
 const { extraBreakMinutes } = require("../utils/employee_extra_break");
 const {
+  MODE_RESOLUTION_STATUS,
+  ATTENDANCE_CALCULATION_MODE_LABEL,
+  isPresentAbsentOnly,
+  modeResolver,
+  modeAwareCutoffReader,
+} = require("../utils/attendance_calculation_mode");
+const {
   byEmployeeAndDate: storedByEmployeeAndDate,
   resolveDayForRead,
 } = require("../utils/attendance_stored_read");
@@ -242,7 +249,7 @@ module.exports = (attendanceDashboardRepo) => {
    * employee because a fourteen-day trend resolves the same (shift, date) pair
    * repeatedly.
    */
-  const employeeResolver = ({ shiftCache, assignments, overrides }) => {
+  const employeeResolver = ({ shiftCache, assignments, overrides, modeHistory = [] }) => {
     const definitions = new Map();
     const definitionFor = (workShiftId, date) => {
       const key = `${workShiftId}|${date}`;
@@ -325,7 +332,7 @@ module.exports = (attendanceDashboardRepo) => {
     };
 
     /** The cutoff that applied on a date, for RE-DATING a punch. Same as A1. */
-    const readCutoff = (date) => {
+    const readShiftCutoff = (date) => {
       const resolution = resolutionFor(date);
       if (!resolution || !resolution.snapshot) return null;
       return {
@@ -333,6 +340,11 @@ module.exports = (attendanceDashboardRepo) => {
         attendance_day_cutoff: resolution.snapshot.attendance_day_cutoff,
       };
     };
+
+    // The dated Attendance Calculation Type, through the SAME resolver A1
+    // uses; a Present/Absent Only date claims no following-morning punch.
+    const modeFor = modeResolver(modeHistory);
+    const readCutoff = modeAwareCutoffReader(readShiftCutoff, modeFor);
 
     const shiftNameFor = (workShiftId) => {
       const loaded = shiftCache.get(Number(workShiftId));
@@ -346,7 +358,7 @@ module.exports = (attendanceDashboardRepo) => {
       return config && config.shift_code ? config.shift_code : null;
     };
 
-    return { resolutionFor, baseResolutionFor, readCutoff, shiftNameFor, shiftCodeFor };
+    return { resolutionFor, baseResolutionFor, readCutoff, modeFor, shiftNameFor, shiftCodeFor };
   };
 
   /**
@@ -403,7 +415,7 @@ module.exports = (attendanceDashboardRepo) => {
     const punchFrom = addDays(from, -1);
     const punchTo = addDays(to, 1);
 
-    const [shiftCache, assignments, overrides, rawPunches, regularized, approvals, stored] =
+    const [shiftCache, assignments, overrides, rawPunches, regularized, approvals, stored, modes] =
       await Promise.all([
         loadShiftCache(),
         attendanceDashboardRepo.getShiftAssignmentHistoryForEmployees(employeeIds),
@@ -417,6 +429,11 @@ module.exports = (attendanceDashboardRepo) => {
         attendanceDashboardRepo.getStoredCalculationsForEmployees
           ? attendanceDashboardRepo.getStoredCalculationsForEmployees(employeeIds, from, to)
           : [],
+        // The effective-dated Attendance Calculation Type, one read for the
+        // population. Absent reader -> nobody has a row -> SHIFT_BASED.
+        typeof attendanceDashboardRepo.getAttendanceCalculationModeHistoryForEmployees === "function"
+          ? attendanceDashboardRepo.getAttendanceCalculationModeHistoryForEmployees(employeeIds)
+          : [],
       ]);
 
     return {
@@ -427,6 +444,7 @@ module.exports = (attendanceDashboardRepo) => {
       rawByEmployee: groupBy(rawPunches, (r) => r.employee_id),
       regularizedByEmployee: groupBy(regularized, (r) => r.employee_id),
       approvalsByEmployee: groupBy(approvals, (r) => r.employee_id),
+      modesByEmployee: groupBy(modes, (r) => r.employee_id),
     };
   };
 
@@ -452,6 +470,7 @@ module.exports = (attendanceDashboardRepo) => {
       shiftCache: batch.shiftCache,
       assignments: batch.assignmentsByEmployee.get(key) || [],
       overrides: batch.overridesByEmployee.get(key) || [],
+      modeHistory: batch.modesByEmployee ? batch.modesByEmployee.get(key) || [] : [],
     });
 
     const from = dates[0];
@@ -486,6 +505,8 @@ module.exports = (attendanceDashboardRepo) => {
 
     return dates.map((date) => {
       const resolution = resolver.resolutionFor(date);
+      const mode = resolver.modeFor(date);
+      const presentAbsentOnly = isPresentAbsentOnly(mode);
       const slots = approvalByDate.get(date) || { regularization: null, ot: null };
       const approval = slots.regularization;
       const otRequest = slots.ot;
@@ -527,6 +548,7 @@ module.exports = (attendanceDashboardRepo) => {
         // review reason, and in particular no "No Shift Assigned" for want
         // of a roster they were never meant to have.
         attendance_required: attendanceRequired(employee),
+        attendance_calculation_mode: mode,
       });
 
       // STORED HISTORY WINS HERE TOO, by the SAME rule and the same module
@@ -542,21 +564,27 @@ module.exports = (attendanceDashboardRepo) => {
         live: calculated,
         stored: storedRow,
         day_closed: storedRow
-          ? isDayClosed({ attendance_date: date, snapshot: resolution.snapshot, now })
+          ? isDayClosed({
+              attendance_date: date,
+              snapshot: presentAbsentOnly ? null : resolution.snapshot,
+              now,
+            })
           : false,
       });
 
+      // A Present/Absent Only day reads no roster, so it reports none: no
+      // shift, and no NO_SHIFT gap for want of one. Decided by the day
+      // RETURNED, as on the calculation path.
+      const returnedPresentAbsentOnly = isPresentAbsentOnly(day.attendance_calculation_mode);
+      const rosterShiftId = returnedPresentAbsentOnly ? null : resolution.work_shift_id;
       return {
         ...day,
-        shift_resolution_status: resolution.status,
-        work_shift_id: resolution.work_shift_id,
-        shift_name: resolution.work_shift_id
-          ? resolver.shiftNameFor(resolution.work_shift_id)
-          : null,
-        shift_code: resolution.work_shift_id
-          ? resolver.shiftCodeFor(resolution.work_shift_id)
-          : null,
-        shift_source: resolution.assignment ? resolution.assignment.source || null : null,
+        shift_resolution_status: returnedPresentAbsentOnly ? MODE_RESOLUTION_STATUS : resolution.status,
+        work_shift_id: rosterShiftId,
+        shift_name: rosterShiftId ? resolver.shiftNameFor(rosterShiftId) : null,
+        shift_code: rosterShiftId ? resolver.shiftCodeFor(rosterShiftId) : null,
+        shift_source:
+          !returnedPresentAbsentOnly && resolution.assignment ? resolution.assignment.source || null : null,
         // The OT CLAIM, kept strictly beside the attendance status. A pending
         // OT request never moves a normal day into Need Action.
         ot_request_id: otRequest ? otRequest.attendance_approval_request_id : null,
@@ -762,11 +790,16 @@ module.exports = (attendanceDashboardRepo) => {
         snapshot: day.shift_snapshot || null,
         now,
       });
-      const shiftStarted = hasShiftStarted({
-        attendance_date: date,
-        snapshot: day.shift_snapshot || null,
-        now,
-      });
+      // Present/Absent Only has no shift to start: the day is "started" once
+      // the date itself has begun, so a no-punch employee reads Not Yet
+      // Checked In rather than Shift Not Started.
+      const shiftStarted = isPresentAbsentOnly(day.attendance_calculation_mode)
+        ? Number.isFinite(nowOnDateAxis(date, now)) && nowOnDateAxis(date, now) >= 0
+        : hasShiftStarted({
+            attendance_date: date,
+            snapshot: day.shift_snapshot || null,
+            now,
+          });
       // The completed-day floor as well as the cutoff: a date that IS today
       // in IST never carries a settled MISSING_PUNCH or ABSENT verdict, however
       // its cutoff reads. Same rule as the Missing Attendance Report's.
@@ -1022,11 +1055,19 @@ module.exports = (attendanceDashboardRepo) => {
     const isGap = (r) =>
       r.shift_resolution_status === RESOLUTION_STATUS.NO_SHIFT_FOR_DATE ||
       r.shift_resolution_status === RESOLUTION_STATUS.NO_SCHEDULE_ROW;
+    // Present/Absent Only employees are grouped on one row of their own: the
+    // roster governs none of them, and it is neither a shift nor a gap.
+    const isModeRow = (r) => r.shift_resolution_status === MODE_RESOLUTION_STATUS;
     const keyOf = (r) =>
-      isGap(r) ? `gap:${r.shift_resolution_status}:${r.work_shift_id === null ? "none" : r.work_shift_id}` : `shift:${r.work_shift_id}`;
+      isModeRow(r)
+        ? "mode:PRESENT_ABSENT_ONLY"
+        : isGap(r)
+        ? `gap:${r.shift_resolution_status}:${r.work_shift_id === null ? "none" : r.work_shift_id}`
+        : `shift:${r.work_shift_id}`;
     const keys = [...new Set(rows.map(keyOf))];
     const tally = tallyBy(rows, keyOf, keys);
     const labelOf = (r) => {
+      if (isModeRow(r)) return ATTENDANCE_CALCULATION_MODE_LABEL.PRESENT_ABSENT_ONLY;
       const name = r.shift_code || r.shift_name || (r.work_shift_id ? `Shift ${r.work_shift_id}` : null);
       if (!isGap(r)) return name || "Shift (unnamed)";
       if (r.shift_resolution_status === RESOLUTION_STATUS.NO_SHIFT_FOR_DATE) {

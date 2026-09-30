@@ -841,3 +841,101 @@ error and a `msg` naming the date, which Recalculate Attendance repairs.
 The DigiSME import and the Biomax receiver are unchanged: a raw punch within
 ten minutes of another is still committed and still received, and the
 calculation layer ignores it.
+
+---
+
+# Employee Attendance Calculation Type (Shift Based / Present/Absent Only)
+
+An employee-level, **effective-dated** attendance policy. It is configured per
+employee - never by designation, department or employee id in code - on
+Employee Master -> Employment Details.
+
+| Type | A date is |
+|---|---|
+| `SHIFT_BASED` (default) | calculated exactly as everything above describes. Unchanged. |
+| `PRESENT_ABSENT_ONLY` | **Present** (`FINAL`, `attendance_day_count = 1`) with any attendance, **Absent** (`ABSENT`, final, count 0) with none. |
+
+## Where it lives
+
+| Concern | File |
+|---|---|
+| The one resolver (`getEmployeeAttendanceCalculationType`) | `utils/attendance_calculation_mode.js` (pure) |
+| The engine branch | `utils/attendance_engine.js#calculatePresentAbsentOnlyDay` |
+| History read for the engine | `repository/attendance_calculation.js#getAttendanceCalculationModeHistory`, `repository/attendance_dashboard.js#getAttendanceCalculationModeHistoryForEmployees` |
+| The Employee Master write | `repository/employee_attendance_mode.js`, `usecase/employee_attendance_mode.js`, `routes/employee_master.js` |
+
+## Effective dating
+
+`employee_attendance_calculation_mode` is append-only, exactly like
+`employee_work_shift_assignment`: a date resolves to the row with the greatest
+`effective_from <= date`, ties broken by the greatest id, and **no row at all
+is `SHIFT_BASED`**. Nothing is backfilled, so every existing employee stays
+Shift Based until somebody states otherwise from a date. A later change never
+reinterprets an earlier date, and a recalculation of September resolves
+September's mode - never the employee's current one.
+
+Both calculating paths - `usecase/attendance_calculation.js#buildContext`
+(preview, stored recalculation, bulk run, approvals, voids, device time
+correction, the month) and the batched `usecase/attendance_dashboard.js`
+(dashboard, staffing, missing attendance) - load the history and ask the same
+`modeResolver` per date. `attendance_day_calculation.attendance_calculation_mode`
+records which mode produced each stored row (existing rows: `SHIFT_BASED`, the
+column default, which is what calculated them).
+
+## What "attendance exists" means
+
+At least one **effective** punch dated to the attendance date: a raw
+`biomax_punch` (BIOMAX or IMPORT, matched to the employee through
+`biomax_punch_derived.employee_id`) that survives the manual void and the
+ten-minute duplicate rule, or an approved and settled regularized punch - the
+same canonical stream the shift engine pairs. Punch count, order and duration
+decide nothing: one punch, an odd count, ten minutes, a late arrival or an
+early exit are all Present. No raw-punch integrity rule is relaxed.
+
+A Present/Absent Only date has no shift, so it claims no punch of the
+following morning: its punches are dated by the calendar. A Shift Based
+previous night keeps its cutoff, so the 00:30 end of the last shift-based
+night stays on that night.
+
+## What a Present/Absent Only day does NOT produce
+
+No shift is resolved or recorded (`work_shift_id`, `shift_snapshot` NULL), so
+there is no `NO_SHIFT_FOR_DATE` / `NO_SCHEDULE_ROW`, no `MISSING_PUNCH`, no
+break / Extra Break Hours / `BREAK_EXCEEDS_SHIFT`, no NRM (stored 0), no late
+or early minutes, no shortage, no candidate OT and no shift-authorised OT.
+Approved OT is 0. The day closes at midnight.
+
+The attendance exemption (`attendance_required = 0`) still takes precedence,
+and the employment window still bounds every date. There is no Holiday,
+Leave or Weekly-Off day status anywhere in this system; the month's notional
+offs are applied by `utils/attendance_payroll.js` to Present/Absent Only months
+exactly as to any other.
+
+A pending missing-punch correction holds a day only while it has no
+attendance (`REGULARIZATION_PENDING`); a Present day stays Present. New
+missing-punch and OT requests are refused on such dates with a message naming
+the mode.
+
+## Payroll
+
+Nothing special: `utils/attendance_payroll.js` prices a day from
+`attendance_day_count`, `is_final`, `shortage_minutes` and
+`approved_ot_minutes`, so a Present day is one complete attendance day with no
+deduction. With no shortage and no OT on the day its NRM of 0 is never divided
+by, and `listEffectiveNrm` simply leaves it out of the OT pricing groups.
+
+## Changing the setting
+
+`GET  /hr/employee/:employee_id/attendance-calculation-mode` - `view_employees` + branch scope.
+`POST /hr/employee/:employee_id/attendance-calculation-mode` - `employee_edit` + branch scope,
+the Employment Details save's own guards; body `{ calculation_mode, effective_from, note? }`,
+nothing else. No new permission key.
+
+The write appends a row inside a transaction that locks the employee and the
+history and takes `assertMonthsNotPayrollLocked` on every month the row
+changes (effective date up to the next later row, or today) - so a change
+that would reach a payroll-locked month is refused, and there is no bypass.
+A future effective date is allowed. **Nothing is recalculated by saving**
+(the Extra Break Hours precedent): the response names the already-stored
+range that needs Recalculate Attendance, which then goes through the ordinary
+write gate.

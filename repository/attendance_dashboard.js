@@ -296,6 +296,20 @@ class AttendanceDashboardRepository {
     );
   }
 
+  /** Every listed employee's Attendance Calculation Type history, in one read. */
+  async getAttendanceCalculationModeHistoryForEmployees(employeeIds) {
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
+    return this._read(
+      "GET-ATTENDANCE-MODE-HISTORY-BULK",
+      `SELECT employee_attendance_calculation_mode_id, employee_id, calculation_mode,
+              DATE_FORMAT(effective_from, '%Y-%m-%d') AS effective_from
+         FROM employee_attendance_calculation_mode
+        WHERE employee_id IN (?)
+        ORDER BY employee_id ASC, effective_from ASC, employee_attendance_calculation_mode_id ASC`,
+      [employeeIds]
+    );
+  }
+
   /**
    * Single-date shift overrides for the listed employees over a window.
    *

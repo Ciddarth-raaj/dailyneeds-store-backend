@@ -33,7 +33,8 @@ class EmployeeMasterRoutes {
     statusSummaryUsecase,
     ifscLookupUsecase,
     branchScope,
-    outletUsecase
+    outletUsecase,
+    attendanceModeUsecase
   ) {
     // EMPLOYEE BRANCH SCOPE. Required, not optional - see routes/employee.js.
     if (!branchScope) {
@@ -50,6 +51,8 @@ class EmployeeMasterRoutes {
     // READ-ONLY, and only ever `getDirectory()`. Used to put a NAME on the
     // branches the scope already decided - see `/employees/outlets`.
     this.outlets = outletUsecase || null;
+    // Employment Details -> Attendance Calculation Type (effective-dated).
+    this.attendanceMode = attendanceModeUsecase || null;
     this.setupRoutes();
   }
 
@@ -258,6 +261,82 @@ class EmployeeMasterRoutes {
       }
       res.end();
     });
+
+    /* ------------------------------------ attendance calculation type */
+    /**
+     * EMPLOYMENT DETAILS -> ATTENDANCE CALCULATION TYPE, effective-dated.
+     *
+     * The SAME guards as the Employment Details save above, in the same
+     * order: `employee_edit` to write (`view_employees` to read), then the
+     * employee branch scope, under the router-wide sensitive-field guards. A
+     * caller who may not edit this employee's employment information cannot
+     * reach the setting by this route either; no new permission key exists.
+     *
+     * It is a route of its own rather than a field on `/edit` because it is
+     * not a column: a change APPENDS a dated history row, and the body must
+     * say which date it applies from.
+     */
+    router.get(
+      "/employee/:employee_id/attendance-calculation-mode",
+      this.permissions.require(P.VIEW_EMPLOYEES),
+      this.branchScope.requireEmployeeInScope(),
+      async (req, res) => {
+        try {
+          if (!this.attendanceMode) {
+            res.json({ code: 503, msg: "Attendance calculation type is not available" });
+          } else {
+            res.json(await this.attendanceMode.getMode(Number(req.params.employee_id)));
+          }
+        } catch (err) {
+          this._fail(res, err);
+        }
+        res.end();
+      }
+    );
+
+    router.post(
+      "/employee/:employee_id/attendance-calculation-mode",
+      this.permissions.require(P.EMPLOYEE_EDIT),
+      this.branchScope.requireEmployeeInScope(),
+      async (req, res) => {
+        try {
+          const employeeId = Number(req.params.employee_id);
+          if (!Number.isInteger(employeeId) || employeeId <= 0) {
+            res.json({ code: 422, msg: "employee_id must be a positive integer" });
+            res.end();
+            return;
+          }
+          const isValid = Joi.validate(
+            req.body,
+            Joi.object()
+              .keys({
+                calculation_mode: Joi.string().valid("SHIFT_BASED", "PRESENT_ABSENT_ONLY").required(),
+                effective_from: Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).required(),
+                note: Joi.string().allow("", null).max(255).optional(),
+              })
+              .unknown(false)
+          );
+          if (isValid.error !== null) throw isValid.error;
+          if (!this.attendanceMode) {
+            res.json({ code: 503, msg: "Attendance calculation type is not available" });
+            res.end();
+            return;
+          }
+          res.json(
+            await this.attendanceMode.changeMode({
+              employee_id: employeeId,
+              calculation_mode: req.body.calculation_mode,
+              effective_from: req.body.effective_from,
+              note: req.body.note || "",
+              actor_employee_id: this._actor(req),
+            })
+          );
+        } catch (err) {
+          this._fail(res, err);
+        }
+        res.end();
+      }
+    );
 
     /* ---------------------------------------------- attendance required */
     /**
@@ -1067,7 +1146,8 @@ module.exports = (
   statusSummaryUsecase,
   ifscLookupUsecase,
   branchScope,
-  outletUsecase
+  outletUsecase,
+  attendanceModeUsecase
 ) =>
   new EmployeeMasterRoutes(
     employeeMasterUsecase,
@@ -1078,5 +1158,6 @@ module.exports = (
     statusSummaryUsecase,
     ifscLookupUsecase,
     branchScope,
-    outletUsecase
+    outletUsecase,
+    attendanceModeUsecase
   );

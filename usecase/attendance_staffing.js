@@ -1,3 +1,4 @@
+const { isPresentAbsentOnly } = require("../utils/attendance_calculation_mode");
 const { addDays, dayDelta } = require("../utils/attendance_engine");
 const {
   DELIVERY,
@@ -585,6 +586,10 @@ module.exports = (attendanceDashboardRepo, dashboardUsecase) => {
             resolution_status: todaysDay.shift_resolution_status,
           });
         }
+
+        // A Present/Absent Only employee has no shift by design, so "recorded
+        // IN with no active shift" is not a follow-up item for them.
+        if (todaysDay && isPresentAbsentOnly(todaysDay.attendance_calculation_mode)) return;
 
         const observed = observe({
           candidates: dutyCandidates,

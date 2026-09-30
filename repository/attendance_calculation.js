@@ -87,6 +87,9 @@ const CALCULATION_COLUMNS = [
   "ot_request_approved_minutes", "ot_request_id",
   "ot_rate", "status", "is_final", "review_reasons", "approval_request_id",
   "calculation_version",
+  // Which Attendance Calculation Type produced the row. See
+  // `20261107120000-employee-attendance-calculation-mode`.
+  "attendance_calculation_mode",
 ];
 
 /**
@@ -397,6 +400,26 @@ class AttendanceCalculationRepository {
          FROM work_shift
         WHERE active = 1
         ORDER BY shift_code, shift_name`
+    );
+  }
+
+  /**
+   * One employee's whole effective-dated Attendance Calculation Type
+   * history, oldest first. The resolver in
+   * `utils/attendance_calculation_mode.js` picks per date; no row at all is
+   * SHIFT_BASED.
+   */
+  async getAttendanceCalculationModeHistory(employeeId) {
+    return this._read(
+      "GET-ATTENDANCE-MODE-HISTORY",
+      `SELECT employee_attendance_calculation_mode_id,
+              employee_id,
+              calculation_mode,
+              DATE_FORMAT(effective_from, '%Y-%m-%d') AS effective_from
+         FROM employee_attendance_calculation_mode
+        WHERE employee_id = ?
+        ORDER BY effective_from ASC, employee_attendance_calculation_mode_id ASC`,
+      [employeeId]
     );
   }
 

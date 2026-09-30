@@ -31,6 +31,7 @@ describe(NAME, () => {
     const LATER = [
       "20261105120000-attendance-approval-bulk-action.js",
       "20261106120000-attendance-approval-revocation-outcome.js",
+      "20261107120000-employee-attendance-calculation-mode.js",
     ];
     assert.deepEqual(others.filter((f) => f > `${NAME}.js`).sort(), LATER);
   });

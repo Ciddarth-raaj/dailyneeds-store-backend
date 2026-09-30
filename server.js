@@ -634,6 +634,12 @@ class Server {
       this.ifscMasterRepo,
       this.sandboxBankService
     );
+    // EMPLOYEE ATTENDANCE CALCULATION TYPE. The effective-dated history the
+    // attendance engine resolves per date; this is its Employee Master editor.
+    this.employeeAttendanceModeUsecase = require("./usecase/employee_attendance_mode")(
+      require("./repository/employee_attendance_mode")(this.mysql.connection),
+      this.attendanceCalculationRepo
+    );
     this.employeeMasterUsecase = require("./usecase/employee_master")(
       this.employeeMasterRepo,
       this.employeeLifecycleUsecase,
@@ -1479,7 +1485,9 @@ class Server {
       // Read-only, for `/hr/employees/outlets`: the branch dropdown the
       // employee screens use, narrowed to the caller's authorized branches.
       // `/outlet/directory` stays company-wide for the filters that need it.
-      this.outletUsecase
+      this.outletUsecase,
+      // Employment Details -> Attendance Calculation Type, effective-dated.
+      this.employeeAttendanceModeUsecase
     );
     // Employee Master Bulk Export / Import. Mounted at /hr with the other
     // employee writes; it claims only the /hr/employees/bulk endpoints,

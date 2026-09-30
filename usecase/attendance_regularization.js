@@ -1,3 +1,4 @@
+const { isPresentAbsentOnly } = require("../utils/attendance_calculation_mode");
 const crypto = require("crypto");
 const {
   REQUESTER_CLASS,
@@ -294,6 +295,13 @@ module.exports = (
       to_date: date,
     });
 
+    // PRESENT/ABSENT ONLY: presence is any punch at all, so no punch is ever
+    // "missing" and there is nothing for a correction to complete.
+    if (day && isPresentAbsentOnly(day.attendance_calculation_mode)) {
+      throw validationError(
+        `${date} is calculated as Present/Absent Only for this employee: there is no missing punch to regularize`
+      );
+    }
     if (!day || !day.shift_snapshot) {
       throw validationError(
         `${date} has no work shift resolved for this employee, so there is nothing to calculate yet`
@@ -528,6 +536,12 @@ module.exports = (
       from_date: date,
       to_date: date,
     });
+    // PRESENT/ABSENT ONLY calculates no overtime from punches, by design.
+    if (day && isPresentAbsentOnly(day.attendance_calculation_mode)) {
+      throw validationError(
+        `${date} is calculated as Present/Absent Only for this employee, which calculates no overtime - there is nothing to request`
+      );
+    }
     if (!day || !day.shift_snapshot) {
       throw validationError(`${date} has no work shift resolved, so there is no overtime to request`);
     }

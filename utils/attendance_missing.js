@@ -43,6 +43,7 @@
 const { toDateOnly } = require("./shiftResolution");
 const { addDays } = require("./attendance_engine");
 const eligibility = require("./attendance_eligibility");
+const { isPresentAbsentOnly } = require("./attendance_calculation_mode");
 
 /** What the Status column says. One string, so the screen and the export agree. */
 const MISSING_ATTENDANCE_STATUS = "Missing Attendance";
@@ -53,6 +54,9 @@ const EXCLUSION = Object.freeze({
   DATE_NOT_COMPLETED: "DATE_NOT_COMPLETED",
   NO_PUNCHES: "NO_PUNCHES",
   EVEN_PUNCH_COUNT: "EVEN_PUNCH_COUNT",
+  // The date is calculated under Present/Absent Only, where any punch at
+  // all is Present: an odd count is not a missing punch there.
+  PRESENT_ABSENT_ONLY: "PRESENT_ABSENT_ONLY",
 });
 
 /**
@@ -156,6 +160,7 @@ function exclusionReason({ employee, date, day, today }) {
   const count = punchCountOf(day ? day.punch_count : null);
   if (count === null || count === 0) return EXCLUSION.NO_PUNCHES;
   if (count % 2 === 0) return EXCLUSION.EVEN_PUNCH_COUNT;
+  if (day && isPresentAbsentOnly(day.attendance_calculation_mode)) return EXCLUSION.PRESENT_ABSENT_ONLY;
   return null;
 }
 
