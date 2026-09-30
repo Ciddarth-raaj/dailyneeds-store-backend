@@ -131,6 +131,40 @@ function modeAwareCutoffReader(readCutoff, modeFor) {
 }
 
 /**
+ * THE ATTENDANCE DATE A RAW PUNCH IS PRESENTED UNDER on a read-only punch
+ * screen, given only what ingest stored - the same answer the engine's
+ * dating gives (`modeAwareCutoffReader` + `attendanceDateForPunch`).
+ *
+ * Ingest dated a punch with the SHIFT's cutoff (or could not date it). The
+ * engine asks whether the PREVIOUS day claims a punch, and a Present/Absent
+ * Only day claims nothing. So:
+ *
+ *   ingest date is a Present/Absent Only date  -> the CALENDAR date
+ *        (the 02:00 punch ingest moved back onto 01/10 is 02/10's)
+ *   ingest date is a Shift Based date          -> the ingest date, unchanged
+ *        (including the last shift-based night's 00:30 OUT at a transition)
+ *   ingest could not date it                   -> the calendar date if that
+ *        date is Present/Absent Only; otherwise null, as before
+ *
+ * Whether the employee has, had or will have a shift plays no part: only the
+ * mode of the date does. Raw punches are never changed by this - it decides
+ * what a READ shows.
+ *
+ * @param {object} input
+ * @param {string} input.calendar_date           `YYYY-MM-DD` of the punch instant
+ * @param {string|null} input.ingest_attendance_date  what ingest stored
+ * @param {function} input.modeFor               `(date) -> mode` for the employee
+ */
+function presentedAttendanceDate({ calendar_date, ingest_attendance_date = null, modeFor }) {
+  const calendar = toDateOnly(calendar_date);
+  const ingest = toDateOnly(ingest_attendance_date);
+  if (ingest === null) {
+    return calendar !== null && isPresentAbsentOnly(modeFor(calendar)) ? calendar : null;
+  }
+  return isPresentAbsentOnly(modeFor(ingest)) ? calendar : ingest;
+}
+
+/**
  * The dates a new history row actually changes: from its effective date up
  * to the day before the next EXISTING row that starts after it, or open-ended
  * (`to: null`) when none does.
@@ -158,5 +192,6 @@ module.exports = {
   resolveAttendanceCalculationMode,
   modeResolver,
   modeAwareCutoffReader,
+  presentedAttendanceDate,
   affectedRangeForNewMode,
 };

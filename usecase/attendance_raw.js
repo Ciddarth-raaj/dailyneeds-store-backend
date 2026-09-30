@@ -32,6 +32,7 @@ const {
   ATTENDANCE_CALCULATION_MODE_LABEL,
   isPresentAbsentOnly,
   modeResolver,
+  presentedAttendanceDate,
 } = require("../utils/attendance_calculation_mode");
 
 /**
@@ -203,21 +204,32 @@ class AttendanceRawUsecase {
     const filters = this.listFilters(query);
     const dated = await this.punchRepo.listDated(filters);
 
-    // PRESENT/ABSENT ONLY punches ingest could not date (no shift): shown on
-    // their CALENDAR date, which is the attendance date for that mode. The
-    // stored row is not touched - only this response dates them.
-    const undated =
-      this.modeHistoryRepo && typeof this.punchRepo.listUndatedNoShift === "function"
-        ? (await this.punchRepo.listUndatedNoShift(filters)) || []
+    // ON A PRESENT/ABSENT ONLY DATE THE CALENDAR DATE IS THE ATTENDANCE DATE,
+    // whatever shift the employee has, had or will have - so a punch ingest
+    // dated by a shift cutoff (or could not date) is presented on its
+    // calendar date, and the calendar window is read as well so a punch that
+    // belongs inside the range is not lost for having been dated outside it.
+    // `presentedAttendanceDate` is the rule; the stored rows are not touched.
+    const candidates =
+      this.modeHistoryRepo && typeof this.punchRepo.listCalendarCandidates === "function"
+        ? (await this.punchRepo.listCalendarCandidates(filters)) || []
         : [];
-    const modeFor = await this.modeLookup([...dated, ...undated].map((r) => r.employee_id));
-    const rows = [
-      ...dated,
-      ...undated
-        .filter((r) => isPresentAbsentOnly(modeFor(r.employee_id, r.calendar_date)))
-        .map((r) => ({ ...r, attendance_date: r.calendar_date })),
-    ]
-      .map((r) => ({ ...r, attendance_calculation_mode: modeFor(r.employee_id, r.attendance_date) }))
+    const modeFor = await this.modeLookup([...dated, ...candidates].map((r) => r.employee_id));
+    const rows = [...dated, ...candidates]
+      .map((r) => {
+        const date = presentedAttendanceDate({
+          calendar_date: r.calendar_date,
+          ingest_attendance_date: r.attendance_date,
+          modeFor: (d) => modeFor(r.employee_id, d),
+        });
+        return {
+          ...r,
+          ingest_attendance_date: r.attendance_date || null,
+          attendance_date: date,
+          attendance_calculation_mode: date === null ? null : modeFor(r.employee_id, date),
+        };
+      })
+      .filter((r) => r.attendance_date !== null && r.attendance_date >= filters.from && r.attendance_date <= filters.to)
       .sort(byListOrder);
 
     const { data, maxPunchCount, quarantined } = pivot(rows);
@@ -294,16 +306,35 @@ class AttendanceRawUsecase {
    */
   async audit(query) {
     const filters = this.auditFilters(query);
-    const rows = await this.punchRepo.listPunches(filters);
+    // `attendance_date` is matched against the PRESENTED date below, not the
+    // ingest column, so a Present/Absent Only punch is found under its
+    // calendar date - which is where the Attendance List row linking here
+    // shows it. Without a mode reader nothing is re-dated and the database
+    // filters as it always has.
+    const byPresentedDate = Boolean(this.modeHistoryRepo && filters.attendance_date);
+    const rows = await this.punchRepo.listPunches(
+      byPresentedDate ? { ...filters, attendance_date: null } : filters
+    );
     const presented = rows.map(presentPunch);
 
-    // The Attendance Calculation Type of each punch's DATE: the date ingest
-    // gave it, or - for a punch ingest could not date - its calendar date,
-    // which is where Present/Absent Only allocates it.
+    // Each punch's attendance date as the Attendance List presents it
+    // (`presentedAttendanceDate`: the calendar date on a Present/Absent Only
+    // date, the ingest date otherwise), and that date's mode.
     const modeFor = await this.modeLookup(presented.map((p) => p.employee_id));
     presented.forEach((p) => {
-      p.attendance_calculation_mode =
-        p.employee_id === null ? null : modeFor(p.employee_id, p.attendance_date || p.calendar_date);
+      if (p.employee_id === null) {
+        p.attendance_calculation_mode = null;
+        p.derivation_display = null;
+        return;
+      }
+      const date = presentedAttendanceDate({
+        calendar_date: p.calendar_date,
+        ingest_attendance_date: p.attendance_date,
+        modeFor: (d) => modeFor(p.employee_id, d),
+      });
+      p.ingest_attendance_date = p.attendance_date;
+      p.attendance_date = date;
+      p.attendance_calculation_mode = modeFor(p.employee_id, date || p.calendar_date);
       p.derivation_display = expectedNoShift(p) ? PRESENT_ABSENT_ONLY_DISPLAY : null;
     });
 
@@ -311,6 +342,7 @@ class AttendanceRawUsecase {
     // shift. It leaves the review queue and the NO_SHIFT / UNDATED issue
     // lists - unless its DEVICE is also a problem, which still needs review.
     const data = presented.filter((p) => {
+      if (byPresentedDate && p.attendance_date !== filters.attendance_date) return false;
       if (!expectedNoShift(p)) return true;
       if (filters.issue === "NO_SHIFT" || filters.issue === "UNDATED") return false;
       if (filters.review === "needs_review") return hasDeviceIssue(p);

@@ -2236,3 +2236,84 @@ describe("Present/Absent Only - no shift is not a follow-up item or a setup gap"
     assert.match(panel, /Present\/Absent Only/);
   });
 });
+
+/* ====== Present/Absent Only on the dashboard: by MODE, never by "no shift" */
+
+describe("dashboard - the Present/Absent Only row and its drilldown are by attendance mode", () => {
+  const pao = (employee_id, effective_from = "2026-01-01") => ({
+    employee_attendance_calculation_mode_id: employee_id,
+    employee_id,
+    calculation_mode: "PRESENT_ABSENT_ONLY",
+    effective_from,
+  });
+  // 11 PAO + no shift | 12 PAO + shift | 13 SB + no shift | 14 SB + shift
+  // 15 PAO only from the day AFTER DATE (Shift Based on DATE, has a shift)
+  // 16 PAO + no shift, at ANOTHER outlet
+  const nextDay = (() => {
+    const d = new Date(`${DATE}T00:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + 1);
+    return d.toISOString().slice(0, 10);
+  })();
+  const facts = () => ({
+    employees: [employee(11), employee(12), employee(13), employee(14), employee(15), employee(16, { store_id: 2, outlet_name: "ECR" })],
+    assignments: [assign(12, 1), assign(14, 1), assign(15, 1)],
+    rawPunches: [punch(11, `${DATE} 09:00:00`, 1), punch(12, `${DATE} 09:00:00`, 2)],
+    modes: [pao(11), pao(12), pao(15, nextDay), pao(16)],
+  });
+  const now = ist(DATE, 23, 30);
+  const ids = (res) => res.employees.map((e) => e.employee_id).sort((a, b) => a - b);
+
+  it("1-5. membership is the day's mode: PAO with or without a shift in; Shift Based with or without a shift out; the effective date decides", async () => {
+    const dash = buildDashboard(fakeRepo(facts()));
+    const drill = await dash.getDrilldown({ attendance_date: DATE, bucket: "TOTAL", attendance_mode: "PRESENT_ABSENT_ONLY", now });
+    assert.deepEqual(ids(drill), [11, 12, 16]);
+    assert.equal(drill.applied_filters.attendance_mode, "PRESENT_ABSENT_ONLY");
+    // 15 is Present/Absent Only only from tomorrow: on DATE it is Shift Based.
+    const tomorrow = await dash.getDrilldown({ attendance_date: nextDay, bucket: "TOTAL", attendance_mode: "PRESENT_ABSENT_ONLY", now: ist(nextDay, 23, 30) });
+    assert.ok(ids(tomorrow).includes(15));
+  });
+
+  it("6. the panel row's count is the drilldown's population", async () => {
+    const dash = buildDashboard(fakeRepo(facts()));
+    const overview = await dash.getOverview({ attendance_date: DATE, now });
+    const row = overview.by_shift.find((r) => r.attendance_mode === "PRESENT_ABSENT_ONLY");
+    assert.equal(row.shift_label, "Present/Absent Only");
+    assert.equal(row.setup_gap, false, "never a setup gap");
+    assert.equal(row.work_shift_id, null);
+    const drill = await dash.getDrilldown({ attendance_date: DATE, bucket: "TOTAL", attendance_mode: "PRESENT_ABSENT_ONLY", now });
+    assert.equal(row.expected, drill.total);
+    assert.equal(drill.total, 3);
+  });
+
+  it("7. outlet scope narrows the panel and the drilldown alike", async () => {
+    const dash = buildDashboard(fakeRepo(facts()));
+    const overview = await dash.getOverview({ attendance_date: DATE, store_ids: [1], now });
+    const row = overview.by_shift.find((r) => r.attendance_mode === "PRESENT_ABSENT_ONLY");
+    const drill = await dash.getDrilldown({ attendance_date: DATE, bucket: "TOTAL", attendance_mode: "PRESENT_ABSENT_ONLY", store_ids: [1], now });
+    assert.deepEqual(ids(drill), [11, 12], "the other outlet's employee is out");
+    assert.equal(row.expected, drill.total);
+    const other = await dash.getDrilldown({ attendance_date: DATE, bucket: "TOTAL", attendance_mode: "PRESENT_ABSENT_ONLY", store_ids: [2], now });
+    assert.deepEqual(ids(other), [16]);
+  });
+
+  it("8. the Shift Based No Shift behaviour is unchanged: 13 alone is the setup gap, and in the No Shift bucket", async () => {
+    const dash = buildDashboard(fakeRepo(facts()));
+    const overview = await dash.getOverview({ attendance_date: DATE, now });
+    const gap = overview.by_shift.find((r) => r.setup_gap && r.work_shift_id === null);
+    assert.equal(gap.shift_label, "No shift assigned");
+    assert.equal(gap.attendance_mode, null);
+    const noShift = await dash.getDrilldown({ attendance_date: DATE, bucket: "NO_SHIFT", now });
+    assert.deepEqual(ids(noShift), [13]);
+    assert.equal(gap.expected, noShift.total);
+    const shiftBased = await dash.getDrilldown({ attendance_date: DATE, bucket: "TOTAL", attendance_mode: "SHIFT_BASED", now });
+    assert.deepEqual(ids(shiftBased), [13, 14, 15]);
+  });
+
+  it("an unknown attendance_mode is refused, not ignored", async () => {
+    const dash = buildDashboard(fakeRepo(facts()));
+    await assert.rejects(
+      () => dash.getDrilldown({ attendance_date: DATE, bucket: "TOTAL", attendance_mode: "NO_SHIFT", now }),
+      /attendance_mode/
+    );
+  });
+});

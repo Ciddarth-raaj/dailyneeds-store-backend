@@ -211,7 +211,8 @@ function rawWorld() {
       { employee_id: 52, calendar_date: "2026-10-02", punches: 1 },
     ],
     listDated: async () => dated,
-    listUndatedNoShift: async () => noShift,
+    // Calendar-window candidates the dated query did not return (all undated here).
+    listCalendarCandidates: async () => noShift,
     // The SQL's own review / issue conditions, as the real query applies them.
     listPunches: async (f) =>
       [...noShift, ...dated].filter((p) => {

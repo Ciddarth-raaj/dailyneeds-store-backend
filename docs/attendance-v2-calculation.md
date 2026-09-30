@@ -970,3 +970,21 @@ write gate.
   as active. The report has no as-of date; the join mirrors
   `resolveModeRowForDate` statement for statement (as the salary join mirrors
   `getCurrentSalary`) and a MariaDB test holds the two to the same answers.
+* **Attendance List date = the engine's date.** `presentedAttendanceDate`
+  (`utils/attendance_calculation_mode.js`) presents each raw punch under the
+  date the engine would give it, from what ingest stored: a punch ingest
+  dated to a Present/Absent Only date is shown on its CALENDAR date (the
+  02:00 punch ingest moved back onto 01/10 by a shift cutoff is 02/10's); a
+  Shift Based ingest date is kept, including the last shift-based night's
+  after-midnight OUT at a transition; an undated punch is shown only on a
+  Present/Absent Only calendar date. Whether the employee has, had or will
+  have a shift plays no part. `listCalendarCandidates` reads the calendar
+  window as well, so a punch that belongs inside the range is found although
+  ingest dated it outside. The Punch Audit's Attendance Date and its
+  `attendance_date` filter use the same presented date. Raw rows are unchanged.
+* **Dashboard Present/Absent Only row** is grouped by each day's own
+  `attendance_calculation_mode` and carries `attendance_mode`; clicking it
+  opens `drilldown?bucket=TOTAL&attendance_mode=PRESENT_ABSENT_ONLY`, which
+  filters the SAME population by that mode - so the count and the list agree,
+  a Shift Based employee with no shift stays in the No Shift gap, and a
+  Present/Absent Only employee with a shift is in the Present/Absent Only row.

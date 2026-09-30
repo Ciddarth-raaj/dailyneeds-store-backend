@@ -847,6 +847,10 @@ module.exports = (attendanceDashboardRepo) => {
           .filter((id) => id !== null && id !== undefined),
         status: day.status,
         shift_resolution_status: day.shift_resolution_status,
+        // The day's OWN Attendance Calculation Type - the calculated (or
+        // stored) day's provenance, from the dated resolver. This, and not
+        // the absence of a shift, is what Present/Absent Only membership is.
+        attendance_calculation_mode: day.attendance_calculation_mode || "SHIFT_BASED",
         day_closed: dayClosed,
         shift_started: shiftStarted,
         // Delivery state for this employee's location, carried on the row so
@@ -1056,8 +1060,11 @@ module.exports = (attendanceDashboardRepo) => {
       r.shift_resolution_status === RESOLUTION_STATUS.NO_SHIFT_FOR_DATE ||
       r.shift_resolution_status === RESOLUTION_STATUS.NO_SCHEDULE_ROW;
     // Present/Absent Only employees are grouped on one row of their own: the
-    // roster governs none of them, and it is neither a shift nor a gap.
-    const isModeRow = (r) => r.shift_resolution_status === MODE_RESOLUTION_STATUS;
+    // roster governs none of them, and it is neither a shift nor a gap. The
+    // DAY'S MODE decides membership - never "has no shift": a Shift Based
+    // employee with no shift is a setup gap, and a Present/Absent Only one
+    // with a shift still belongs here.
+    const isModeRow = (r) => isPresentAbsentOnly(r.attendance_calculation_mode);
     const keyOf = (r) =>
       isModeRow(r)
         ? "mode:PRESENT_ABSENT_ONLY"
@@ -1079,12 +1086,17 @@ module.exports = (attendanceDashboardRepo) => {
     const shiftIds = new Map(
       rows.map((r) => [String(keyOf(r)), r.work_shift_id === null ? null : Number(r.work_shift_id)])
     );
-    const gaps = new Map(rows.map((r) => [String(keyOf(r)), isGap(r)]));
+    const gaps = new Map(rows.map((r) => [String(keyOf(r)), !isModeRow(r) && isGap(r)]));
+    const modes = new Map(rows.map((r) => [String(keyOf(r)), isModeRow(r) ? r.attendance_calculation_mode : null]));
     return [...tally.entries()]
       .map(([key, counters]) => ({
         work_shift_id: shiftIds.get(key) === undefined ? null : shiftIds.get(key),
         shift_label: labels.get(key) || String(key),
         setup_gap: gaps.get(key) === true,
+        // Set on the Present/Absent Only row only. The screen opens that row's
+        // list with `attendance_mode`, so it lists exactly this group - by
+        // mode, never by "no shift id".
+        attendance_mode: modes.get(key) || null,
         expected: counters.total,
         checked_in: counters[PRESENCE_SLICE.CHECKED_IN],
         not_yet_checked_in: counters[PRESENCE_SLICE.NOT_YET_CHECKED_IN],
@@ -1266,10 +1278,20 @@ module.exports = (attendanceDashboardRepo) => {
     designation_id = null,
     work_shift_id = null,
     search = null,
+    // An Attendance Calculation Type. Narrows to the days calculated under it
+    // - the shift panel's Present/Absent Only row - by each day's own mode.
+    attendance_mode = null,
     limit = 50,
     offset = 0,
     now = Date.now(),
   }) => {
+    if (attendance_mode !== null && attendance_mode !== undefined && attendance_mode !== "") {
+      if (attendance_mode !== "SHIFT_BASED" && attendance_mode !== "PRESENT_ABSENT_ONLY") {
+        throw validationError("attendance_mode must be SHIFT_BASED or PRESENT_ABSENT_ONLY");
+      }
+    } else {
+      attendance_mode = null;
+    }
     const pick = (() => {
       switch (bucket) {
         case "TOTAL":
@@ -1316,6 +1338,7 @@ module.exports = (attendanceDashboardRepo) => {
       .filter(pick)
       // The location panel's unassigned row, as an explicit selection.
       .filter((r) => (store_unassigned ? r.store_id === null : true))
+      .filter((r) => (attendance_mode ? r.attendance_calculation_mode === attendance_mode : true))
       .sort((a, b) =>
         String(a.outlet_name || "").localeCompare(String(b.outlet_name || "")) ||
         String(a.employee_name || "").localeCompare(String(b.employee_name || ""))
@@ -1338,6 +1361,7 @@ module.exports = (attendanceDashboardRepo) => {
         designation_id: designation_id === null ? null : Number(designation_id),
         work_shift_id: work_shift_id === null ? null : Number(work_shift_id),
         search: search || null,
+        attendance_mode,
       },
       employees: matched.slice(start, start + size),
     };

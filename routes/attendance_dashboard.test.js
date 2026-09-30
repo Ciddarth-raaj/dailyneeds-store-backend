@@ -666,6 +666,19 @@ describe("the browser's outlet filter is a FILTER, never authorization", () => {
     );
     assert.equal(seen.drilldown.store_unassigned, true);
   });
+
+  it("the drilldown carries the Present/Absent Only row's attendance mode, and refuses any other value", async () => {
+    await call(
+      `/attendance/dashboard/drilldown?attendance_date=${DATE}&bucket=TOTAL&attendance_mode=PRESENT_ABSENT_ONLY`,
+      tokenFor()
+    );
+    assert.equal(seen.drilldown.attendance_mode, "PRESENT_ABSENT_ONLY");
+    const bad = await call(
+      `/attendance/dashboard/drilldown?attendance_date=${DATE}&bucket=TOTAL&attendance_mode=NO_SHIFT`,
+      tokenFor()
+    );
+    assert.equal(bad.body.code, 422);
+  });
 });
 
 /* ==================================================================== */

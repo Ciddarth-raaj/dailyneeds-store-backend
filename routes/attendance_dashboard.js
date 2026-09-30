@@ -244,6 +244,9 @@ class AttendanceDashboardRoutes {
               )
               .required(),
             store_unassigned: Joi.boolean().optional(),
+            // The shift panel's Present/Absent Only row: that attendance mode,
+            // by each day's own mode - not "no shift".
+            attendance_mode: Joi.string().valid("SHIFT_BASED", "PRESENT_ABSENT_ONLY").optional(),
             limit: Joi.number().integer().min(1).max(200).optional(),
             offset: Joi.number().integer().min(0).optional(),
           });
@@ -251,6 +254,7 @@ class AttendanceDashboardRoutes {
 
           const result = await this.usecase.getDrilldown({
             ...this._filters(req, req.query),
+            attendance_mode: req.query.attendance_mode || null,
             bucket: req.query.bucket,
             limit: req.query.limit,
             offset: req.query.offset,

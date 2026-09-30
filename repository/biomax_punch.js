@@ -173,23 +173,26 @@ class BiomaxPunchRepository {
   }
 
   /**
-   * The punches ingest could NOT date for want of a shift (`NO_SHIFT`), by
-   * CALENDAR date, under the Attendance List's own filters.
+   * The Attendance List's CALENDAR-WINDOW candidates: every matched punch
+   * whose CALENDAR date is in the range but which `listDated` did not return
+   * - undated by ingest, or ingest-dated OUTSIDE the range - under the same
+   * filters.
    *
-   * READ ONLY, and nothing here changes how ingest derives a punch. The
-   * usecase keeps only those whose employee is Present/Absent Only on the
-   * punch's calendar date - for them the calendar date IS the attendance
-   * date and no shift is expected - and lists them there. Exempt employees
-   * stay out, exactly as the banners already leave them out.
+   * READ ONLY. On a Present/Absent Only date the calendar date, not the
+   * ingest (shift-cutoff) date, is the attendance date, so such a punch can
+   * belong inside the range although ingest put it outside, or nowhere. The
+   * usecase decides which of these to show (`presentedAttendanceDate`); a
+   * Shift Based punch here keeps its ingest date and so stays out, exactly as
+   * before. Exempt employees stay out, as the banners leave them out.
    */
-  listUndatedNoShift(f) {
+  listCalendarCandidates(f) {
     const where = [
       "p.punch_date BETWEEN ? AND ?",
-      "d.derivation_status = 'NO_SHIFT'",
+      "(d.attendance_date IS NULL OR d.attendance_date < ? OR d.attendance_date > ?)",
       "d.employee_id IS NOT NULL",
       "COALESCE(e.attendance_required, 1) = 1",
     ];
-    const params = [f.from, f.to];
+    const params = [f.from, f.to, f.from, f.to];
     if (f.home_outlet_id !== undefined && f.home_outlet_id !== null) {
       where.push("d.home_outlet_id = ?");
       params.push(f.home_outlet_id);
@@ -203,7 +206,7 @@ class BiomaxPunchRepository {
       params.push(f.search, `%${f.search}%`);
     }
     return this._read(
-      "LIST-UNDATED-NO-SHIFT",
+      "LIST-CALENDAR-CANDIDATES",
       `SELECT ${PUNCH_COLUMNS} ${PUNCH_JOINS}
         WHERE ${where.join(" AND ")}
         ORDER BY p.punch_date, d.employee_id, ${EFFECTIVE_IO_TIME}, p.biomax_punch_id`,
