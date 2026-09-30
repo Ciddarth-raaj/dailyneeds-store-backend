@@ -1,4 +1,5 @@
 const { isPresentAbsentOnly } = require("../utils/attendance_calculation_mode");
+const { permissionNotApplicableError, PERMISSION_NOT_APPLICABLE_MESSAGE } = require("../utils/attendance_permission");
 const crypto = require("crypto");
 const {
   REQUESTER_CLASS,
@@ -977,6 +978,12 @@ module.exports = (
       if (locked.length > 0) throw payrollLockedActionError(locked, "A permission for this date");
     }
 
+    // PRESENT/ABSENT ONLY ON THIS DATE: nothing is short, so a permission
+    // is not applicable. Said before the shift is read, so the answer is the
+    // same with or without a shift. The insert guard refuses it again inside
+    // the write's transaction - that one no race gets past.
+    if (isPresentAbsentOnly(await attendanceModeFor(forId, date))) throw permissionNotApplicableError();
+
     const shift = await attendanceCalculationUsecase.shiftForDate({ employee_id: forId, attendance_date: date });
     if (shift && shift.attendance_required === false) {
       throw validationError("This employee is not required to punch, so there is no shortage a permission could cover");
@@ -1631,6 +1638,23 @@ module.exports = (
       if (locked.length > 0) throw payrollLockedActionError(locked, "This approval");
     }
 
+    /*
+     * A PERMISSION ON A PRESENT/ABSENT ONLY DATE IS NOT APPROVED. A request
+     * raised before the date became Present/Absent Only (the mode is
+     * effective-dated and can be set after the request) may still be pending;
+     * approving it would record a permission the date cannot use. REJECTING
+     * it stays allowed, exactly as for a locked month, so it can be closed
+     * with no new state. Its window is kept for audit either way, and the
+     * engine applies any permission on such a date as zero.
+     */
+    if (
+      decision === STEP_DECISION.APPROVED &&
+      isPermissionRequest &&
+      isPresentAbsentOnly(await attendanceModeFor(request.requested_for_employee_id, request.attendance_date))
+    ) {
+      throw permissionNotApplicableError();
+    }
+
     // The approved figure is set on FINAL approval only, and it can NEVER
     // exceed the eligible OT. For an OT request that is the LOWER of what was
     // claimed when it was raised and what the engine calculates for the date
@@ -2185,7 +2209,16 @@ module.exports = (
           },
         });
         /* eslint-enable no-await-in-loop */
-        permissionPreview = assumed
+        // On a Present/Absent Only date there is nothing to preview: approval
+        // is refused (see decide), so the approver is told why instead of
+        // being shown "short 0 - permission covers 0 - short 0".
+        permissionPreview = assumed && isPresentAbsentOnly(assumed.attendance_calculation_mode)
+          ? {
+              not_applicable: true,
+              attendance_calculation_mode: assumed.attendance_calculation_mode,
+              message: PERMISSION_NOT_APPLICABLE_MESSAGE,
+            }
+          : assumed
           ? {
               shortage_before_permission_minutes: assumed.shortage_before_permission_minutes,
               permission_minutes: assumed.permission_minutes,

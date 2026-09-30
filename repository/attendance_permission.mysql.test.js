@@ -25,6 +25,16 @@ const { closePendingPermissionsForLock } = require("./lib/attendance_permission_
 const SQLS = path.join(__dirname, "..", "migrations/mysql/migrations/sqls");
 const UP = fs.readFileSync(path.join(SQLS, "20261107120000-attendance-permission-up.sql"), "utf8");
 const DOWN = fs.readFileSync(path.join(SQLS, "20261107120000-attendance-permission-down.sql"), "utf8");
+// The Attendance Calculation Type history, from the migration that sorts after
+// this one - the table the Permission insert guard reads.
+const MODE_HISTORY_TABLE = fs
+  .readFileSync(path.join(SQLS, "20261108120000-employee-attendance-calculation-mode-up.sql"), "utf8")
+  .split("\n")
+  .filter((line) => !/^\s*--/.test(line))
+  .join("\n")
+  .split(/;\s*(?:\n|$)/)
+  .map((st) => st.trim())
+  .find((st) => /^CREATE TABLE IF NOT EXISTS `employee_attendance_calculation_mode`/.test(st));
 
 const NEW_DAY_COLUMNS = [
   "permission_ids", "permission_window_minutes", "permission_minutes", "permission_late_minutes",
@@ -98,7 +108,7 @@ const TABLES = [
   "attendance_permission_bulk_item", "attendance_permission", "attendance_permission_bulk_operation",
   "attendance_monthly_payroll", "attendance_day_calculation", "payrun_employee_calculation",
   "attendance_approval_step", "attendance_approval_request", "permissions", "all_permissions",
-  "outlets", "new_employee",
+  "outlets", "new_employee", "employee_attendance_calculation_mode",
 ];
 
 const q = (pool, sql, params = []) =>
@@ -140,6 +150,7 @@ describe("attendance permission, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
     pool = require("mysql").createPool(`${URL}${URL.includes("?") ? "&" : "?"}connectionLimit=6&multipleStatements=true`);
     for (const t of TABLES) await q(pool, `DROP TABLE IF EXISTS ${t}`);
     for (const ddl of SCHEMA) await q(pool, ddl);
+    await q(pool, MODE_HISTORY_TABLE);
     repo = buildPermissionRepo(pool);
     regRepo = buildRegularizationRepo(pool);
   });
@@ -164,7 +175,7 @@ describe("attendance permission, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
 
   describe("the transactions", () => {
     beforeEach(async () => {
-      for (const t of ["attendance_permission_bulk_item", "attendance_permission", "attendance_permission_bulk_operation", "attendance_day_calculation", "payrun_employee_calculation", "attendance_approval_step", "attendance_approval_request", "outlets", "new_employee"]) {
+      for (const t of ["attendance_permission_bulk_item", "attendance_permission", "attendance_permission_bulk_operation", "attendance_day_calculation", "payrun_employee_calculation", "attendance_approval_step", "attendance_approval_request", "outlets", "new_employee", "employee_attendance_calculation_mode"]) {
         await q(pool, `DELETE FROM ${t}`);
       }
       await q(pool, "INSERT INTO outlets VALUES (3, 'Main'), (5, 'East')");
@@ -281,6 +292,62 @@ describe("attendance permission, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
       assert.equal(mine.rows[0].created_by_name, "Boss");
       assert.equal((await repo.list({ store_ids: null, from_date: DATE, to_date: DATE })).total, 2);
       assert.equal((await repo.list({ store_ids: [], from_date: DATE, to_date: DATE })).total, 0, "an empty scope sees nothing");
+    });
+
+    describe("PRESENT/ABSENT ONLY: a new Permission is not applicable on the date", () => {
+      const NOT_APPLICABLE = "Permission is not applicable because this employee uses Present/Absent Only attendance.";
+      const setMode = (employee, mode, from) =>
+        q(pool, "INSERT INTO employee_attendance_calculation_mode (employee_id, calculation_mode, effective_from) VALUES (?, ?, ?)", [employee, mode, from]);
+      const on = (date, from = "20:00", to = "22:00") => ({
+        permission_from: `${date} ${from}:00`, permission_to: `${date} ${to}:00`, to_shift_end: false, permission_minutes: 120,
+      });
+      const grantOn = (date, employee = EMP) =>
+        repo.grant({ employee_id: employee, attendance_date: date, windows: [on(date)], header: HEADER, calculations: [] });
+      const refused = (err) => err.name === "ValidationError" && err.code === "PERMISSION_NOT_APPLICABLE_PRESENT_ABSENT_ONLY" && err.message === NOT_APPLICABLE;
+      const count = async (table) => Number((await q(pool, `SELECT COUNT(*) AS n FROM ${table}`))[0].n);
+
+      it("a direct grant is refused and writes nothing - whatever the grantor's rights", async () => {
+        await setMode(EMP, "PRESENT_ABSENT_ONLY", "2026-09-01");
+        await assert.rejects(grantOn(DATE), refused);
+        assert.equal(await count("attendance_permission"), 0);
+      });
+
+      it("a request is refused and rolls back with its request row and steps", async () => {
+        await setMode(EMP, "PRESENT_ABSENT_ONLY", "2026-09-01");
+        await assert.rejects(createPermissionRequest([window("20:00", "22:00")]), refused);
+        assert.equal(await count("attendance_permission"), 0);
+        assert.equal(await count("attendance_approval_request"), 0);
+        assert.equal(await count("attendance_approval_step"), 0);
+      });
+
+      it("Shift Based through 30/09, Present/Absent Only from 01/10: 30/09 allowed, 01/10 and 02/10 refused", async () => {
+        await setMode(EMP, "PRESENT_ABSENT_ONLY", "2026-10-01");
+        assert.equal((await grantOn("2026-09-30")).code, 200);
+        await assert.rejects(grantOn("2026-10-01"), refused);
+        await assert.rejects(grantOn("2026-10-02"), refused);
+      });
+
+      it("Present/Absent Only through 15/10, Shift Based from 16/10: 15/10 refused, 16/10 allowed", async () => {
+        await setMode(EMP, "PRESENT_ABSENT_ONLY", "2026-10-01");
+        await setMode(EMP, "SHIFT_BASED", "2026-10-16");
+        await assert.rejects(grantOn("2026-10-15"), refused);
+        assert.equal((await grantOn("2026-10-16")).code, 200);
+      });
+
+      it("another employee, and an employee with no mode row, are untouched", async () => {
+        await setMode(OTHER, "PRESENT_ABSENT_ONLY", "2026-09-01");
+        assert.equal((await grantOn(DATE, EMP)).code, 200);
+        await assert.rejects(grantOn(DATE, OTHER), refused);
+      });
+
+      it("a historical permission on a date that later became Present/Absent Only is kept exactly as it was", async () => {
+        const { attendance_permission_ids: [id] } = await grantOn(DATE);
+        const before = await q(pool, `SELECT * FROM attendance_permission WHERE attendance_permission_id = ${id}`);
+        await setMode(EMP, "PRESENT_ABSENT_ONLY", "2026-09-01");
+        await assert.rejects(grantOn(DATE), refused, "a NEW one is refused");
+        const after = await q(pool, `SELECT * FROM attendance_permission WHERE attendance_permission_id = ${id}`);
+        assert.deepEqual(after, before, "not deleted, revoked or rewritten");
+      });
     });
 
     it("the bulk log keeps one row per employee considered", async () => {

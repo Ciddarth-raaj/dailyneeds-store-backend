@@ -47,7 +47,10 @@ const {
   resolvePermissionWindows,
   resolvePermissionRows,
   permissionForDisplay,
+  PERMISSION_NOT_APPLICABLE_CODE,
+  PERMISSION_NOT_APPLICABLE_MESSAGE,
 } = require("../utils/attendance_permission");
+const { isPresentAbsentOnly } = require("../utils/attendance_calculation_mode");
 
 const TARGET_MODE = Object.freeze({ EMPLOYEES: "EMPLOYEES", OUTLETS: "OUTLETS", ALL: "ALL" });
 const OUTCOME = Object.freeze({ SUCCEEDED: "SUCCEEDED", SKIPPED: "SKIPPED", FAILED: "FAILED" });
@@ -65,6 +68,7 @@ const SKIP = Object.freeze({
   OUTSIDE_SHIFT: "The window falls outside their shift",
   WHOLE_SHIFT: "The window covers their whole shift - that is leave, not permission",
   OVERLAP: "Already has a permission overlapping this window",
+  PRESENT_ABSENT_ONLY: PERMISSION_NOT_APPLICABLE_MESSAGE,
 });
 
 /** Up to this many employees in one preview or apply. */
@@ -94,6 +98,12 @@ const ids = (list) =>
   );
 
 module.exports = (permissionRepo, calculationUsecase) => {
+  /** The employee's Attendance Calculation Type on the date - the one resolver. */
+  const modeOn = async (employeeId, date) =>
+    typeof calculationUsecase.attendanceCalculationModeFor === "function"
+      ? calculationUsecase.attendanceCalculationModeFor({ employee_id: employeeId, attendance_date: date })
+      : undefined;
+
   /**
    * What the grant asks for, validated and normalised once, so preview and
    * apply cannot read the same body two ways.
@@ -230,6 +240,12 @@ module.exports = (permissionRepo, calculationUsecase) => {
       stillIn.filter((c) => !lockedIds.has(Number(c.employee_id))),
       CONCURRENCY,
       async (c) => {
+        // PRESENT/ABSENT ONLY ON THE DATE: not applicable, whatever the
+        // grantor's rights - their rights decide who they may grant to, the
+        // employee's attendance type decides whether a grant applies at all.
+        if (isPresentAbsentOnly(await modeOn(Number(c.employee_id), grant.attendance_date))) {
+          return { c, notApplicable: true };
+        }
         const shift = await calculationUsecase.shiftForDate({
           employee_id: Number(c.employee_id),
           attendance_date: grant.attendance_date,
@@ -240,7 +256,11 @@ module.exports = (permissionRepo, calculationUsecase) => {
     stillIn.filter((c) => lockedIds.has(Number(c.employee_id))).forEach((c) => exclude(c, "PAYROLL_LOCKED"));
 
     const eligible = [];
-    for (const { c, shift, placed } of resolved) {
+    for (const { c, shift, placed, notApplicable } of resolved) {
+      if (notApplicable) {
+        exclude(c, "PRESENT_ABSENT_ONLY");
+        continue;
+      }
       if (!placed.ok) {
         exclude(c, placed.code);
         continue;
@@ -428,6 +448,13 @@ module.exports = (permissionRepo, calculationUsecase) => {
         }
         /* eslint-enable no-await-in-loop */
       } catch (err) {
+        // The insert guard's refusal - the date became Present/Absent Only
+        // after the preview - is a skip with its reason, not a failure.
+        if (err && err.code === PERMISSION_NOT_APPLICABLE_CODE) {
+          // eslint-disable-next-line no-await-in-loop
+          await record({ ...base, outcome: OUTCOME.SKIPPED, code: "PRESENT_ABSENT_ONLY", message: SKIP.PRESENT_ABSENT_ONLY });
+          continue;
+        }
         const lockedMonth = err && err.code === "PAYROLL_MONTH_LOCKED";
         // eslint-disable-next-line no-await-in-loop
         await record({

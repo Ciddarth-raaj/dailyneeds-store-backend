@@ -100,6 +100,8 @@ class AttendancePermissionRepository {
       // the payroll row, then the employee, then the permission rows.
       await assertMonthsNotPayrollLocked(connection, [{ employee_id, attendance_date }]);
       await guard.lockEmployee(connection, employee_id);
+      // Applicability before overlap, so the answer is the rule, not a clash.
+      await guard.assertPermissionApplicable(connection, employee_id, attendance_date);
       const overlaps = await guard.findLiveOverlaps(connection, employee_id, attendance_date, windows);
       if (overlaps && overlaps.length > 0) {
         await rollbackAsync(connection);

@@ -56,7 +56,7 @@ const punch = (id, ioTime) => ({
   ingest_attendance_date: ioTime.slice(0, 10), dev_id: "D", ingest_source: "LIVE",
 });
 
-function build({ rawPunches = [], locked = [], summaries = [], refreshFails = false } = {}) {
+function build({ rawPunches = [], locked = [], summaries = [], refreshFails = false, modes = [] } = {}) {
   const store = { requests: [], steps: [], permissions: [], decided: [], revoked: [], months: [] };
   let nextRequest = 900;
   let nextPermission = 1;
@@ -78,6 +78,12 @@ function build({ rawPunches = [], locked = [], summaries = [], refreshFails = fa
     getRawPunchesByCalendarWindow: async (e, from, to) => rawPunches.filter((p) => p.employee_id === e && p.punch_date >= from && p.punch_date <= to),
     getApprovedRegularizedPunches: async () => [],
     getBreakOverride: async () => null,
+    // The Attendance Calculation Type history (append-only, oldest first).
+    // `modes` is live: a test may push a row after raising a request.
+    getAttendanceCalculationModeHistory: async (e) =>
+      modes
+        .filter((m) => m.employee_id === e)
+        .map((m, i) => ({ employee_attendance_calculation_mode_id: i + 1, ...m })),
     getApprovalStateByDate: async (e, from, to) =>
       store.requests.filter((r) => r.requested_for_employee_id === e && r.status !== "CANCELLED" && r.attendance_date >= from && r.attendance_date <= to),
     getPermissionsForRange: async (e, from, to) =>
@@ -354,5 +360,91 @@ describe("THE MONTHLY SUMMARY FOLLOWS A PERMISSION CHANGE", () => {
     const out = await world.regularization.decide({ actor: as(7), request_id: id, decision: STEP_DECISION.REJECTED, remarks: "Not this week" });
     assert.equal(out.month_refresh, null);
     assert.equal(world.store.months.length, 0);
+  });
+});
+
+describe("PRESENT/ABSENT ONLY: Permission is not applicable on the date", () => {
+  const NOT_APPLICABLE = "Permission is not applicable because this employee uses Present/Absent Only attendance.";
+  const refused = (err) => err.name === "ValidationError" && err.message === NOT_APPLICABLE;
+  const pao = (from) => ({ employee_id: 42, calculation_mode: "PRESENT_ABSENT_ONLY", effective_from: from });
+  const sb = (from) => ({ employee_id: 42, calculation_mode: "SHIFT_BASED", effective_from: from });
+  const on = (world, date) => raise(world, { attendance_date: date, today: "2026-10-20" });
+
+  it("a request is refused with the rule's sentence, and nothing is created - even though a shift is assigned", async () => {
+    const world = build({ rawPunches: LEFT_AT_20, modes: [pao("2026-09-01")] });
+    await assert.rejects(raise(world), refused);
+    assert.equal(world.store.requests.length, 0);
+    assert.equal(world.store.permissions.length, 0);
+  });
+
+  it("Shift Based through 30/09, Present/Absent Only from 01/10: 30/09 allowed, 01/10 and 02/10 refused", async () => {
+    const world = build({ modes: [pao("2026-10-01")] });
+    assert.equal((await on(world, "2026-09-30")).request_type, REQUEST_TYPE.PERMISSION);
+    await assert.rejects(on(world, "2026-10-01"), refused);
+    await assert.rejects(on(world, "2026-10-02"), refused);
+  });
+
+  it("Present/Absent Only through 15/10, Shift Based from 16/10: 15/10 refused, 16/10 allowed", async () => {
+    const world = build({ modes: [pao("2026-10-01"), sb("2026-10-16")] });
+    await assert.rejects(on(world, "2026-10-15"), refused);
+    assert.equal((await on(world, "2026-10-16")).request_type, REQUEST_TYPE.PERMISSION);
+  });
+
+  it("the date's own mode decides, not today's: a Present/Absent Only employee may still ask for an earlier Shift Based date", async () => {
+    const world = build({ rawPunches: LEFT_AT_20, modes: [pao("2026-09-15")] });
+    // TODAY (20/09) is Present/Absent Only; the requested 14/09 is not.
+    assert.equal((await raise(world)).request_type, REQUEST_TYPE.PERMISSION);
+  });
+
+  it("a request raised before the date became Present/Absent Only cannot be approved; it can be rejected, and its record is kept", async () => {
+    const modes = [];
+    const world = build({ rawPunches: LEFT_AT_20, modes });
+    const { attendance_approval_request_id: id } = await raise(world);
+    modes.push(pao("2026-09-01"));
+    await assert.rejects(world.regularization.decide({ actor: as(7), request_id: id, decision: STEP_DECISION.APPROVED }), refused);
+    assert.equal(world.store.decided.length, 0, "no stage was decided");
+    await world.regularization.decide({ actor: as(7), request_id: id, decision: STEP_DECISION.REJECTED, remarks: "Present/Absent Only" });
+    assert.equal(world.store.requests[0].status, "REJECTED");
+    assert.equal(world.store.permissions.length, 1, "the window stays for audit");
+  });
+
+  it("a Permission approved before the date became Present/Absent Only stays visible and applies nothing", async () => {
+    const modes = [];
+    const world = build({ rawPunches: LEFT_AT_20, modes });
+    const { attendance_approval_request_id: id } = await raise(world);
+    await approveAll(world, id);
+    assert.equal((await dayOf(world)).permission_minutes, 120, "applied while Shift Based");
+    modes.push(pao("2026-09-01"));
+    const day = await dayOf(world);
+    assert.equal(day.attendance_calculation_mode, "PRESENT_ABSENT_ONLY");
+    assert.equal(day.attendance_day_count, 1);
+    assert.equal(day.shortage_minutes, 0);
+    assert.equal(day.permission_minutes, 0, "no shortage corrected, no pay effect");
+    assert.equal(day.permissions.length, 1, "the record is still shown");
+    assert.equal(day.permissions[0].state, "APPROVED", "not rejected or cancelled");
+    assert.ok(day.notes.includes("Permission does not apply: Present/Absent Only calculates no shortage to excuse"));
+    assert.equal(world.store.requests[0].status, "APPROVED");
+  });
+
+  it("the Approval Centre says why instead of previewing 'short 0 - covers 0 - short 0'", async () => {
+    const modes = [];
+    const listing = build({ rawPunches: LEFT_AT_20, modes });
+    await raise(listing);
+    modes.push(pao("2026-09-01"));
+    const regRepo = {
+      getApprovalIdentity: async (id) => EMPLOYEES[id],
+      listApprovals: async () => listing.store.requests.map((r) => ({ ...r, requested_by_employee_id: 42, created_at: "2026-09-15 09:00:00" })),
+      countApprovals: async () => 1,
+      listStepsForRequests: async () => listing.store.steps,
+      listPermissionsForRequests: async () => listing.store.permissions.map((p) => ({ ...p, request_status: "PENDING" })),
+    };
+    const reg = buildRegularization(regRepo, listing.calculation);
+    const [row] = (await reg.listApprovals({ actor: as(7), request_type: REQUEST_TYPE.PERMISSION, status: "PENDING" })).rows;
+    assert.deepEqual(row.permission_preview, {
+      not_applicable: true,
+      attendance_calculation_mode: "PRESENT_ABSENT_ONLY",
+      message: NOT_APPLICABLE,
+    });
+    assert.equal(row.permissions.length, 1, "the window asked for is still listed");
   });
 });

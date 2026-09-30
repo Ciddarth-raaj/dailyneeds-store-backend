@@ -63,6 +63,29 @@ const readTiming = require("../utils/attendance_read_timing");
  * final approval and the recalculated day it produces commit together or not
  * at all (review fix #4).
  */
+/**
+ * One employee's Attendance Calculation Type history, oldest first - the
+ * rows `utils/attendance_calculation_mode.js` resolves a date from. ONE
+ * statement for the repository read and for a writer reading it on its own
+ * connection; `lockClause` (`LOCK IN SHARE MODE`) makes that a locking read
+ * of the latest committed rows.
+ */
+function attendanceModeHistorySql(lockClause = "") {
+  return `SELECT employee_attendance_calculation_mode_id,
+                 employee_id,
+                 calculation_mode,
+                 DATE_FORMAT(effective_from, '%Y-%m-%d') AS effective_from
+            FROM employee_attendance_calculation_mode
+           WHERE employee_id = ?
+           ORDER BY effective_from ASC, employee_attendance_calculation_mode_id ASC
+           ${lockClause}`;
+}
+
+async function readAttendanceModeHistoryOnConnection(connection, employeeId, lockClause = "") {
+  const rows = await queryAsync(connection, attendanceModeHistorySql(lockClause), [employeeId]);
+  return Array.isArray(rows) ? rows : [];
+}
+
 const CALCULATION_COLUMNS = [
   "employee_id", "attendance_date", "work_shift_id", "work_shift_weekly_schedule_id",
   "work_shift_config_version_id",
@@ -464,17 +487,7 @@ class AttendanceCalculationRepository {
    * SHIFT_BASED.
    */
   async getAttendanceCalculationModeHistory(employeeId) {
-    return this._read(
-      "GET-ATTENDANCE-MODE-HISTORY",
-      `SELECT employee_attendance_calculation_mode_id,
-              employee_id,
-              calculation_mode,
-              DATE_FORMAT(effective_from, '%Y-%m-%d') AS effective_from
-         FROM employee_attendance_calculation_mode
-        WHERE employee_id = ?
-        ORDER BY effective_from ASC, employee_attendance_calculation_mode_id ASC`,
-      [employeeId]
-    );
+    return this._read("GET-ATTENDANCE-MODE-HISTORY", attendanceModeHistorySql(), [employeeId]);
   }
 
   /** The same, for many employees at once. Keyed by the caller. */
@@ -1877,6 +1890,7 @@ module.exports.AttendanceCalculationRepository = AttendanceCalculationRepository
 module.exports.CALCULATION_COLUMNS = CALCULATION_COLUMNS;
 module.exports.MONTHLY_PAYROLL_COLUMNS = MONTHLY_PAYROLL_COLUMNS;
 module.exports.writeCalculationsOnConnection = writeCalculationsOnConnection;
+module.exports.readAttendanceModeHistoryOnConnection = readAttendanceModeHistoryOnConnection;
 /**
  * THE PAYROLL LOCK, exported so that every write which could invalidate a
  * settled month takes the SAME row lock in the SAME transaction.

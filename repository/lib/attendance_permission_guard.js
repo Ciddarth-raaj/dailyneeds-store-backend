@@ -8,7 +8,13 @@
  * Approve & Lock, so the same rule is never typed twice.
  */
 const { queryAsync } = require("../../utils/batchInsert");
-const { PERMISSION_CLOSURE_REASON, PERMISSION_CLOSURE_LABEL } = require("../../utils/attendance_permission");
+const {
+  PERMISSION_CLOSURE_REASON,
+  PERMISSION_CLOSURE_LABEL,
+  permissionNotApplicableError,
+} = require("../../utils/attendance_permission");
+const { resolveAttendanceCalculationMode, isPresentAbsentOnly } = require("../../utils/attendance_calculation_mode");
+const { readAttendanceModeHistoryOnConnection } = require("../attendance_calculation");
 
 /**
  * THE SERIALIZATION POINT: the employee row, `FOR UPDATE`. The same statement
@@ -59,8 +65,36 @@ async function findLiveOverlaps(connection, employeeId, attendanceDate, windows 
   );
 }
 
-/** One `attendance_permission` row. */
+/**
+ * IS A PERMISSION APPLICABLE TO THIS EMPLOYEE ON THIS DATE? Throws the
+ * business-rule refusal when the date's effective Attendance Calculation
+ * Type is PRESENT_ABSENT_ONLY - there is no shortage for it to forgive.
+ *
+ * THE DATE'S OWN MODE, from the one effective-dated resolver the calculation
+ * uses - never today's mode, a shift or a designation. A LOCKING read on the
+ * caller's connection: every writer has already locked the employee row,
+ * which is the lock a mode change (`repository/employee_attendance_mode.js`)
+ * takes too, so the mode read here is the latest committed one and cannot
+ * change before this transaction commits.
+ *
+ * Who may write a Permission is authorization, decided before this; whether
+ * one applies to this employee/date is this rule, and no right bypasses it.
+ */
+async function assertPermissionApplicable(connection, employeeId, attendanceDate) {
+  const history = await readAttendanceModeHistoryOnConnection(connection, Number(employeeId), "LOCK IN SHARE MODE");
+  if (isPresentAbsentOnly(resolveAttendanceCalculationMode(history, attendanceDate))) {
+    throw permissionNotApplicableError();
+  }
+}
+
+/**
+ * One `attendance_permission` row. EVERY writer of a new Permission - a
+ * request being raised, a direct or bulk grant - comes through here, so the
+ * applicability rule is enforced here, inside the writer's transaction: a
+ * refusal rolls the whole write back (the request row with it).
+ */
 async function insertPermission(connection, row) {
+  await assertPermissionApplicable(connection, row.employee_id, row.attendance_date);
   const result = await queryAsync(
     connection,
     `INSERT INTO attendance_permission
@@ -166,5 +200,6 @@ module.exports = {
   lockEmployee,
   findLiveOverlaps,
   insertPermission,
+  assertPermissionApplicable,
   closePendingPermissionsForLock,
 };

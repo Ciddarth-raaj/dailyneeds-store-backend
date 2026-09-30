@@ -425,7 +425,33 @@ function resolvePermissionWindows({ attendance_date, shift, windows = [], clip =
   };
 }
 
+/*
+ * PRESENT/ABSENT ONLY: PERMISSION IS NOT APPLICABLE.
+ *
+ * A Permission forgives shortage against a shift. On a date whose effective
+ * Attendance Calculation Type is PRESENT_ABSENT_ONLY there is no late, early
+ * or short for it to forgive, so a new one is refused - requested, granted
+ * or approved. The date's own effective mode decides (the one resolver in
+ * utils/attendance_calculation_mode.js), never today's mode, a shift or a
+ * designation. Historical records on such a date are left exactly as they
+ * are; the engine applies them as zero.
+ */
+const PERMISSION_NOT_APPLICABLE_CODE = "PERMISSION_NOT_APPLICABLE_PRESENT_ABSENT_ONLY";
+const PERMISSION_NOT_APPLICABLE_MESSAGE =
+  "Permission is not applicable because this employee uses Present/Absent Only attendance.";
+
+/** The refusal, in the repo's business-rule convention (HTTP 400). */
+function permissionNotApplicableError() {
+  const err = new Error(PERMISSION_NOT_APPLICABLE_MESSAGE);
+  err.name = "ValidationError";
+  err.code = PERMISSION_NOT_APPLICABLE_CODE;
+  return err;
+}
+
 module.exports = {
+  PERMISSION_NOT_APPLICABLE_CODE,
+  PERMISSION_NOT_APPLICABLE_MESSAGE,
+  permissionNotApplicableError,
   PERMISSION_WINDOW_ERROR,
   resolvePermissionWindows,
   clockToMinutes,

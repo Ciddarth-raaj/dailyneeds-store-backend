@@ -12,6 +12,7 @@ const assert = require("node:assert/strict");
 
 const buildCalculation = require("./attendance_calculation");
 const buildPermission = require("./attendance_permission");
+const { permissionNotApplicableError } = require("../utils/attendance_permission");
 
 const DATE = "2026-09-14"; // closed by the time the tests run
 const TODAY = "2026-09-20";
@@ -57,7 +58,7 @@ const punch = (id, employee_id, ioTime) => ({
 // Everybody on the late shift leaves at 19:00.
 const PUNCHES = [1, 5, 9].flatMap((e) => [punch(e * 10, e, `${DATE} 10:00:00`), punch(e * 10 + 1, e, `${DATE} 19:00:00`)]);
 
-function build({ locked = [], existing = [], failFor = [], summaries = false } = {}) {
+function build({ locked = [], existing = [], failFor = [], summaries = false, modes = [], notApplicableAtWrite = [] } = {}) {
   const store = { permissions: [...existing], operations: [], items: [], grants: [], revokes: [], months: [] };
   let nextId = 100;
   const empOf = (id) => EMPLOYEES.find((e) => e.employee_id === Number(id));
@@ -69,6 +70,8 @@ function build({ locked = [], existing = [], failFor = [], summaries = false } =
     getRawPunchesByCalendarWindow: async (e, from, to) => PUNCHES.filter((p) => p.employee_id === e && p.punch_date >= from && p.punch_date <= to),
     getApprovedRegularizedPunches: async () => [],
     getBreakOverride: async (e) => ({ attendance_required: empOf(e).attendance_required }),
+    getAttendanceCalculationModeHistory: async (e) =>
+      modes.filter((m) => m.employee_id === e).map((m, i) => ({ employee_attendance_calculation_mode_id: i + 1, ...m })),
     getApprovalStateByDate: async () => [],
     getPermissionsForRange: async (e, from, to) => store.permissions.filter((p) => p.employee_id === e && p.attendance_date >= from && p.attendance_date <= to),
     getEmploymentWindow: async (e) => ({ ...empOf(e), status: 1 }),
@@ -91,6 +94,8 @@ function build({ locked = [], existing = [], failFor = [], summaries = false } =
     recordBulkItem: async (item) => store.items.push(item),
     grant: async ({ employee_id, attendance_date, windows, header, calculations }) => {
       if (failFor.includes(employee_id)) throw new Error("ER_LOCK_WAIT_TIMEOUT");
+      // The insert guard's own refusal, as the repository throws it.
+      if (notApplicableAtWrite.includes(employee_id)) throw permissionNotApplicableError();
       store.grants.push({ employee_id, calculations });
       const ids = windows.map((w) => {
         const id = nextId++;
@@ -305,5 +310,45 @@ describe("THE MONTHLY SUMMARY FOLLOWS A DIRECT GRANT OR REVOKE", () => {
     const out = await permission.revoke({ actor: GRANTOR, scope_store_ids: null, attendance_permission_id: row.attendance_permission_id, reason: "Store stayed open" });
     assert.equal(out.month_refresh.refreshed, true);
     assert.equal(store.months[0].monthly.shortage_minutes, 180);
+  });
+});
+
+describe("PRESENT/ABSENT ONLY: a grant does not reach the employee on the date", () => {
+  const NOT_APPLICABLE = "Permission is not applicable because this employee uses Present/Absent Only attendance.";
+  const pao = (employee_id, from = "2026-09-01") => ({ employee_id, calculation_mode: "PRESENT_ABSENT_ONLY", effective_from: from });
+
+  it("the preview leaves them out with the rule's sentence - an administrator's rights do not change it", async () => {
+    const { permission } = build({ modes: [pao(1)] });
+    const admin = { ...GRANTOR, user_type: 2 };
+    const p = await permission.preview({ actor: admin, scope_store_ids: null, ...FESTIVAL });
+    assert.equal(p.eligible.some((e) => e.employee_id === 1), false);
+    const out = p.excluded.find((e) => e.employee_id === 1);
+    assert.deepEqual({ code: out.code, message: out.message }, { code: "PRESENT_ABSENT_ONLY", message: NOT_APPLICABLE });
+    assert.ok(p.eligible.some((e) => e.employee_id === 5), "a Shift Based colleague is still granted");
+  });
+
+  it("an individual grant to them has nobody to reach and is refused", async () => {
+    const { permission, store } = build({ modes: [pao(1)] });
+    const one = { ...FESTIVAL, target_mode: "EMPLOYEES", employee_ids: [1] };
+    const p = await permission.preview({ actor: GRANTOR, scope_store_ids: null, ...one });
+    assert.equal(p.can_apply, false);
+    await assert.rejects(permission.apply({ actor: GRANTOR, scope_store_ids: null, fingerprint: p.fingerprint, ...one }), /Nobody in this grant/);
+    assert.equal(store.permissions.length, 0);
+  });
+
+  it("the date's mode, not today's: Present/Absent Only only from the day after is still granted", async () => {
+    const { permission } = build({ modes: [pao(1, "2026-09-15")] });
+    const p = await permission.preview({ actor: GRANTOR, scope_store_ids: null, ...FESTIVAL });
+    assert.ok(p.eligible.some((e) => e.employee_id === 1));
+  });
+
+  it("refused at the write (the date became Present/Absent Only after the preview) is a skip with the reason, not a failure", async () => {
+    const { permission } = build({ notApplicableAtWrite: [1] });
+    const p = await permission.preview({ actor: GRANTOR, scope_store_ids: null, ...FESTIVAL });
+    const r = await permission.apply({ actor: GRANTOR, scope_store_ids: null, fingerprint: p.fingerprint, ...FESTIVAL });
+    const anu = r.results.find((x) => x.employee_id === 1);
+    assert.deepEqual({ outcome: anu.outcome, code: anu.code, message: anu.message }, { outcome: "SKIPPED", code: "PRESENT_ABSENT_ONLY", message: NOT_APPLICABLE });
+    assert.equal(r.summary.failed, 0);
+    assert.equal(r.results.find((x) => x.employee_id === 5).outcome, "SUCCEEDED");
   });
 });

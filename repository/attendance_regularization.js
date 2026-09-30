@@ -466,6 +466,12 @@ class AttendanceRegularizationRepository {
           { employee_id: request.requested_for_employee_id, attendance_date: request.attendance_date },
         ]);
         await permissionGuard.lockEmployee(connection, request.requested_for_employee_id);
+        // Applicability before overlap, so the answer is the rule, not a clash.
+        await permissionGuard.assertPermissionApplicable(
+          connection,
+          request.requested_for_employee_id,
+          request.attendance_date
+        );
         const overlaps = await permissionGuard.findLiveOverlaps(
           connection,
           request.requested_for_employee_id,
