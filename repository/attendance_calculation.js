@@ -296,7 +296,13 @@ async function upsertMonthlyPayrollOnConnection(connection, row) {
     `INSERT INTO attendance_monthly_payroll (${MONTHLY_PAYROLL_COLUMNS.map((c) => `\`${c}\``).join(", ")})
      VALUES (${MONTHLY_PAYROLL_COLUMNS.map(() => "?").join(", ")})
      ON DUPLICATE KEY UPDATE ${updates}`,
-    MONTHLY_PAYROLL_COLUMNS.map((c) => row[c])
+    MONTHLY_PAYROLL_COLUMNS.map((c) =>
+      // A GUARD, not the source of the value: the usecase always supplies the
+      // applied Permission total. An older caller that predates the column
+      // must not fail the NOT NULL write - and a missing Permission total can
+      // only ever mean "none applied".
+      c === "permission_minutes" && (row[c] === undefined || row[c] === null) ? 0 : row[c]
+    )
   );
 }
 

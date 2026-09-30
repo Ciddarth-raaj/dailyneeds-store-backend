@@ -2449,6 +2449,11 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
           approved_ot_minutes: payroll.approved_ot_minutes,
           approved_ot_earnings: payroll.approved_ot_earnings,
           total_attendance_payable: payroll.total_attendance_payable,
+          // The Permission the ENGINE APPLIED on the month's final days, as
+          // summed by `computeMonthlyAttendancePayroll` from each day's
+          // `permission_minutes` - never the requested window. 0 when none
+          // applied; the column is NOT NULL.
+          permission_minutes: Number.isFinite(payroll.permission_minutes) ? payroll.permission_minutes : 0,
           held_dates: JSON.stringify(payroll.held_dates || []),
           is_final: payroll.is_final ? 1 : 0,
           payroll_version: PAYROLL_VERSION,

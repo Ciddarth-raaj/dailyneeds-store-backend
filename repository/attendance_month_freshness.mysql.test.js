@@ -313,6 +313,73 @@ describe("monthly attendance freshness and lock order, as SQL", { skip: !URL && 
     });
   });
 
+  describe("THE REAL MONTH PERSIST against permission_minutes INT NOT NULL", () => {
+    const buildUsecase = require("../usecase/attendance_calculation");
+    const AFTER_MONTH = new Date("2026-10-05T00:00:00+05:30");
+    const punch = (id, ioTime) => ({ punch_id: id, employee_id: EMP, attendance_date: ioTime.slice(0, 10), io_time: ioTime, dev_id: "D1", ingest_source: "LIVE" });
+    const grant = (id, from, to) => ({
+      attendance_permission_id: id, employee_id: EMP, attendance_date: DATE,
+      permission_from: `${DATE} ${from}:00`, permission_to: `${DATE} ${to}:00`, to_shift_end: to === "22:00" ? 1 : 0,
+      permission_minutes: 240, reason: "Festival", source: "DIRECT", attendance_approval_request_id: null,
+      bulk_operation_id: null, revoked_at: null,
+    });
+    /** The engine's reads faked; the WRITE is the real repository on MariaDB. */
+    const usecaseOver = (permissions) =>
+      buildUsecase({
+        getShiftAssignmentHistory: async () => [{ employee_work_shift_assignment_id: 1, employee_id: EMP, work_shift_id: 7, effective_from: "2026-09-01", source: "MIGRATION_BACKFILL" }],
+        getWorkShiftWithSchedule: async (id) => ({
+          config: { work_shift_id: id, shift_code: "S7", overtime_allowed: 1, overtime_minimum_minutes: 0, overtime_rounding_method: "NONE", overtime_rounding_interval_minutes: 0, overtime_minimum_threshold_only: 0, maximum_ot_minutes_per_day: null },
+          schedule: Array.from({ length: 7 }, (_, d) => ({ work_shift_weekly_schedule_id: 70 + d, work_shift_id: id, day_of_week: d, is_working_day: 1, in_time: "10:00:00", out_time: "22:00:00", attendance_day_cutoff: "04:00:00", break_minutes: 60, normal_work_minutes: 660, ot_rate: 1 })),
+        }),
+        getWorkShiftConfigVersions: async () => [],
+        getRawPunchesByCalendarWindow: async (_e, from, to) =>
+          [punch(1, `${DATE} 10:00:00`), punch(2, `${DATE} 20:00:00`)].filter((p) => p.io_time.slice(0, 10) >= from && p.io_time.slice(0, 10) <= to),
+        getApprovedRegularizedPunches: async () => [],
+        getBreakOverride: async () => ({ employee_id: EMP, special_break_override_minutes: null }),
+        getApprovalStateByDate: async () => [],
+        getPermissionsForRange: async () => permissions,
+        getEmploymentWindow: async () => ({ employee_id: EMP, status: 1, date_of_joining: "2020-01-01", resignation_date: null }),
+        getMonthlyGrossAsOf: async () => ({ salary_id: 9, monthly_gross: "26000.00", effective_from: "2026-04-01" }),
+        saveMonthWithPayroll: (args) => calcRepo.saveMonthWithPayroll(args),
+      });
+    const stored = async () =>
+      (await q(pool, "SELECT permission_minutes, shortage_minutes, day_rows_fingerprint FROM attendance_monthly_payroll WHERE employee_id = ?", [EMP]))[0];
+
+    it("the column is NOT NULL, and an explicit NULL is refused - the production failure", async () => {
+      const [col] = await q(pool, "SHOW COLUMNS FROM attendance_monthly_payroll WHERE Field = 'permission_minutes'");
+      assert.equal(col.Null, "NO");
+      await assert.rejects(
+        q(pool, "INSERT INTO attendance_monthly_payroll (employee_id, period_year, period_month, permission_minutes) VALUES (?, ?, ?, NULL)", [EMP, YEAR, MONTH]),
+        /ER_BAD_NULL_ERROR/
+      );
+    });
+
+    it("a month with no Permission persists, storing 0 and a fingerprint", async () => {
+      await usecaseOver([]).calculateMonth({ employee_id: EMP, year: YEAR, month: MONTH, persist: true, now: AFTER_MONTH });
+      const row = await stored();
+      assert.equal(Number(row.permission_minutes), 0);
+      assert.match(row.day_rows_fingerprint, /^[0-9a-f]{64}$/);
+    });
+
+    it("a month with a Permission stores the ENGINE-APPLIED minutes, not the 240-minute window", async () => {
+      const result = await usecaseOver([grant(41, "18:00", "22:00")]).calculateMonth({ employee_id: EMP, year: YEAR, month: MONTH, persist: true, now: AFTER_MONTH });
+      const day = result.days.find((d) => d.attendance_date === DATE);
+      assert.equal(day.permission_window_minutes, 240);
+      assert.equal(day.permission_minutes, 120);
+      const row = await stored();
+      assert.equal(Number(row.permission_minutes), 120);
+      const [dayRow] = await q(pool, "SELECT permission_minutes FROM attendance_day_calculation WHERE employee_id = ? AND attendance_date = ?", [EMP, DATE]);
+      assert.equal(Number(dayRow.permission_minutes), 120, "the month equals what the stored day applied");
+    });
+
+    it("the repository guard: a caller without the field still writes 0, never NULL", async () => {
+      const m = monthly(120);
+      delete m.permission_minutes;
+      await calcRepo.saveMonthWithPayroll({ employee_id: EMP, period_year: YEAR, period_month: MONTH, rows: [day(DATE)], monthly: m });
+      assert.equal(Number((await stored()).permission_minutes), 0);
+    });
+  });
+
   describe("THE ONE-TIME BOOTSTRAP: old summaries are rebuilt, never certified", () => {
     const fingerprintOf = async () =>
       (await q(pool, "SELECT day_rows_fingerprint AS f, shortage_minutes AS s FROM attendance_monthly_payroll WHERE employee_id = ?", [EMP]))[0];

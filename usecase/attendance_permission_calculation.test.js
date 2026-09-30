@@ -229,3 +229,112 @@ describe("what is stored", () => {
     assert.equal(row.calculation_version, 11);
   });
 });
+
+/* ======== the monthly summary carries the APPLIED Permission, never NULL === */
+
+describe("calculateMonth(persist=true): the monthly permission_minutes", () => {
+  const { MONTHLY_PAYROLL_COLUMNS } = require("../repository/attendance_calculation");
+  const { computeMonthlyAttendancePayroll } = require("../utils/attendance_payroll");
+  // After September has closed, so every date is stored and final.
+  const AFTER_MONTH = new Date("2026-10-05T00:00:00+05:30");
+  const leftAt20 = (date, id) => [punch(id, `${date} 10:00:00`), punch(id + 1, `${date} 20:00:00`)];
+  const window = (id, date, from, to, over = {}) =>
+    direct({
+      attendance_permission_id: id,
+      attendance_date: date,
+      permission_from: `${date} ${from}:00`,
+      permission_to: `${date} ${to}:00`,
+      to_shift_end: to === "22:00" ? 1 : 0,
+      permission_minutes: (Number(to.slice(0, 2)) * 60 + Number(to.slice(3))) - (Number(from.slice(0, 2)) * 60 + Number(from.slice(3))),
+      ...over,
+    });
+
+  const persistMonth = async (state) => {
+    const repo = fakeRepo(state);
+    const result = await buildUsecase(repo).calculateMonth({ employee_id: EMP, year: 2026, month: 9, persist: true, now: AFTER_MONTH });
+    return { result, monthly: repo.saved.monthly, days: result.days };
+  };
+
+  it("1. no Permission in the month: stored as 0, not NULL", async () => {
+    const { monthly } = await persistMonth({ rawPunches: leftAt20("2026-09-14", 1) });
+    assert.equal(monthly.permission_minutes, 0);
+  });
+
+  it("every column the month write sends is supplied (only the fingerprint is the repository's)", async () => {
+    const { monthly } = await persistMonth({ rawPunches: leftAt20("2026-09-14", 1) });
+    for (const col of MONTHLY_PAYROLL_COLUMNS.filter((c) => c !== "day_rows_fingerprint")) {
+      assert.notEqual(monthly[col], undefined, `${col} is missing from the monthly row`);
+    }
+  });
+
+  it("2. Permission on one day: the month carries that day's applied minutes", async () => {
+    const { monthly, days } = await persistMonth({ rawPunches: leftAt20(DATE, 1), permissions: [direct()] });
+    const applied = days.find((d) => d.attendance_date === DATE).permission_minutes;
+    assert.equal(applied, 120);
+    assert.equal(monthly.permission_minutes, 120);
+  });
+
+  it("3. Permission on several days: the sum of applied minutes; revoked, rejected and pending add nothing", async () => {
+    const { monthly, days } = await persistMonth({
+      rawPunches: [
+        ...leftAt20("2026-09-14", 1),
+        ...leftAt20("2026-09-15", 3),
+        ...leftAt20("2026-09-16", 5),
+        ...leftAt20("2026-09-17", 7),
+      ],
+      permissions: [
+        window(21, "2026-09-14", "20:00", "22:00"),
+        window(22, "2026-09-15", "21:00", "22:00"),
+        window(23, "2026-09-16", "21:30", "22:00"),
+        window(24, "2026-09-17", "20:00", "22:00", { revoked_at: "2026-09-17 12:00:00" }),
+        requested("REJECTED", { attendance_permission_id: 25, attendance_date: "2026-09-17", permission_from: "2026-09-17 20:00:00", permission_to: "2026-09-17 22:00:00" }),
+        requested("PENDING", { attendance_permission_id: 26, attendance_date: "2026-09-17", permission_from: "2026-09-17 20:00:00", permission_to: "2026-09-17 22:00:00" }),
+      ],
+    });
+    const byDate = Object.fromEntries(days.map((d) => [d.attendance_date, d.permission_minutes]));
+    assert.deepEqual([byDate["2026-09-14"], byDate["2026-09-15"], byDate["2026-09-16"], byDate["2026-09-17"]], [120, 60, 30, 0]);
+    assert.equal(monthly.permission_minutes, 210);
+  });
+
+  it("4. more requested than chargeable: only the engine-applied minutes count", async () => {
+    // 18:00-22:00 is 240 minutes of window, but she worked until 20:00:
+    // only the 120 minutes of actual shortage can be forgiven.
+    const { monthly, days } = await persistMonth({ rawPunches: leftAt20(DATE, 1), permissions: [window(31, DATE, "18:00", "22:00")] });
+    const day = days.find((d) => d.attendance_date === DATE);
+    assert.equal(day.permission_window_minutes, 240);
+    assert.equal(day.permission_minutes, 120);
+    assert.equal(monthly.permission_minutes, 120);
+  });
+
+  it("5. every other monthly figure is exactly the payroll roll-up's, as before", async () => {
+    for (const state of [
+      { rawPunches: leftAt20(DATE, 1) },
+      { rawPunches: leftAt20(DATE, 1), permissions: [direct()] },
+    ]) {
+      const { result, monthly, days } = await persistMonth(state);
+      const payroll = computeMonthlyAttendancePayroll({
+        employee_id: EMP, year: 2026, month: 9, monthly_gross: "26000.00", days,
+        joined_on: "2020-01-01", ended_on: null, attendance_required: true,
+      });
+      for (const col of [
+        "available_from", "available_to", "available_dates", "notional_offs", "base_days", "attendance_days",
+        "salary_days", "extra_days", "monthly_gross", "daily_rate", "salary_day_earnings", "extra_day_earnings",
+        "shortage_minutes", "missing_minute_deduction", "approved_ot_minutes", "approved_ot_earnings",
+        "total_attendance_payable", "permission_minutes",
+      ]) {
+        assert.deepEqual(monthly[col], payroll[col], col);
+        assert.deepEqual(monthly[col], result[col], `${col} as returned`);
+      }
+      assert.equal(monthly.held_dates, JSON.stringify(payroll.held_dates || []));
+    }
+  });
+
+  it("the Permission lowers the monthly shortage and leaves worked minutes and OT alone", async () => {
+    const without = await persistMonth({ rawPunches: leftAt20(DATE, 1) });
+    const withIt = await persistMonth({ rawPunches: leftAt20(DATE, 1), permissions: [direct()] });
+    assert.equal(without.monthly.shortage_minutes - withIt.monthly.shortage_minutes, 120);
+    assert.equal(withIt.monthly.approved_ot_minutes, without.monthly.approved_ot_minutes);
+    const worked = (r) => r.days.reduce((n, d) => n + (d.worked_minutes || 0), 0);
+    assert.equal(worked(withIt), worked(without));
+  });
+});
