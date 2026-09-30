@@ -225,15 +225,48 @@ state and origin) beside the figures.
 
 ## Deploying
 
-1. Run migration `20261107120000-attendance-permission` (additive; the down
-   migration refuses to drop the enum value while PERMISSION requests exist).
-2. Deploy backend, then frontend.
-3. Grant the keys on the designation rights screen.
+1. Merge and deploy backend, then frontend (`main-autodeploy`). The backend
+   deploy runs `db-migrate up`, which applies
+   `20261107120000-attendance-permission` (additive; the down migration
+   refuses to drop the enum value while PERMISSION requests exist).
+2. Verify the migration is recorded (`migrations` table) and the columns exist.
+3. **Bootstrap the unlocked monthly summaries** (below).
+4. Recalculate payroll for the affected month (Payrun > Calculation & Review
+   > Recalculate) so its source markers match the re-stored attendance.
+5. Grant the keys on the designation rights screen, to the intended
+   designations only.
 
-Every monthly summary persisted before this migration has
-`day_rows_fingerprint = NULL` and is refused at Approve & Lock as `UNTRACKED`
-until its month is recalculated once (Recalculate Attendance, then payroll).
-Plan that recalculation for any month to be locked after deploy.
+### Bootstrap: no SQL backfill
+
+Every monthly summary stored before this migration has
+`day_rows_fingerprint = NULL` and is refused at Approve & Lock as `UNTRACKED`.
+It is **never** given a fingerprint by SQL: a summary may already be stale
+against its day rows, and a fingerprint written over today's days without
+rebuilding the totals would certify figures nobody rebuilt. Each unlocked
+summary is instead stored again through the normal path,
+`calculateMonth({ ..., persist: true })`, which rebuilds the totals and takes
+the fingerprint from the days the same transaction stored:
+
+    # inventory: months with summaries, how many untracked / payroll locked
+    NODE_ENV=production node scripts/attendance/month-fingerprint-bootstrap.js
+    # dry run for the open month(s): who would be re-stored, who is locked
+    NODE_ENV=production node scripts/attendance/month-fingerprint-bootstrap.js --month 2026-09
+    # apply
+    NODE_ENV=production node scripts/attendance/month-fingerprint-bootstrap.js --month 2026-09 --apply
+
+The script writes no SQL of its own. A payroll-locked month is skipped and
+never unlocked; one locked while it runs is refused by the persist's own
+`FOR UPDATE` check and reported. It exits 1 if any employee-month failed or
+was left without a fingerprint. `--employee <id>` re-runs one employee.
+
+A single employee-month can also be stored through the API the script calls:
+`GET /attendance/payroll/monthly?employee_id=&year=&month=&persist=true`
+(`view_attendance_payroll` + `recalculate_attendance`).
+
+**Recalculate Attendance (the bulk screen and the daily run) stores DAY rows
+only; it does not store the monthly summary.** A summary refused as stale is
+fixed by storing the month (the script, or the API above), then
+recalculating payroll.
 
 The migration keeps the repository's forward sequence: identifiers here run
 ahead of the calendar (`20261106120000` was added before it), so the name
@@ -246,8 +279,11 @@ recalculation is needed for dates without one.
 
 ## Known limits
 
-- **Months persisted before deploy** are `UNTRACKED` and must be recalculated
-  once before they can be approved and locked (see Deploying).
+- **Months persisted before deploy** are `UNTRACKED` and must be stored once
+  through the bootstrap before they can be approved and locked (see Deploying).
+- **No screen stores the monthly summary.** The Recalculate Attendance screen
+  writes days only; storing a month is the script or the monthly API (as
+  before this release).
 - **Refresh is best effort.** If the month re-persist after a decision fails
   (for example the month is locked meanwhile), the decision stands and the
   guard refuses the lock until the month is recalculated.

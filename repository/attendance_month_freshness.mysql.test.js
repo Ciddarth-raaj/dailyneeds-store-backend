@@ -30,6 +30,7 @@ const buildRegRepo = require("./attendance_regularization");
 const buildPayrunRepo = require("./payrun_calculation");
 const { closePendingPermissionsForLock } = require("./lib/attendance_permission_guard");
 const { resolveEffectiveNrm } = require("../utils/payrun_calculation");
+const bootstrap = require("../scripts/attendance/month-fingerprint-bootstrap");
 
 const SQLS = path.join(__dirname, "..", "migrations/mysql/migrations/sqls");
 const UP = fs.readFileSync(path.join(SQLS, "20261107120000-attendance-permission-up.sql"), "utf8");
@@ -309,6 +310,83 @@ describe("monthly attendance freshness and lock order, as SQL", { skip: !URL && 
       const [outcome] = await approveAndLock();
       assert.equal(outcome.outcome, "ATTENDANCE_STALE");
       assert.equal(outcome.reason, "UNTRACKED");
+    });
+  });
+
+  describe("THE ONE-TIME BOOTSTRAP: old summaries are rebuilt, never certified", () => {
+    const fingerprintOf = async () =>
+      (await q(pool, "SELECT day_rows_fingerprint AS f, shortage_minutes AS s FROM attendance_monthly_payroll WHERE employee_id = ?", [EMP]))[0];
+    const query = (sql, params) => q(pool, sql, params);
+    /** A pre-release summary: stored, then its fingerprint absent, then a day changed under it. */
+    const oldStaleSummary = async () => {
+      await persistMonth(120, [day(DATE)]);
+      await q(pool, "UPDATE attendance_monthly_payroll SET day_rows_fingerprint = NULL");
+      await calcRepo.saveCalculations([day(DATE, { shortage_minutes: 30 })]);
+    };
+    /* The engine's answer for the month now: what `calculateMonth(persist=true)` stores. */
+    const calculateMonth = async ({ employee_id, year, month, persist }) => {
+      assert.deepEqual({ employee_id, year, month, persist }, { employee_id: EMP, year: YEAR, month: MONTH, persist: true });
+      await persistMonth(30, [day(DATE, { shortage_minutes: 30 })]);
+    };
+
+    it("an unlocked untracked summary is REBUILT with its fingerprint, and then locks after payroll is recalculated", async () => {
+      await oldStaleSummary();
+      await calculatePayroll();
+      const [refused] = await approveAndLock();
+      assert.equal(refused.outcome, "ATTENDANCE_STALE");
+      assert.equal(refused.reason, "UNTRACKED");
+
+      const [month] = await bootstrap.run({ query, calculateMonth, months: [{ year: YEAR, month: MONTH }], apply: true });
+      assert.deepEqual(month.restored, [EMP]);
+      assert.deepEqual(month.still_without_fingerprint, []);
+      const after = await fingerprintOf();
+      assert.match(after.f, /^[0-9a-f]{64}$/);
+      assert.equal(Number(after.s), 30, "the totals were rebuilt from the days, not the old 120 kept");
+
+      assert.equal((await approveAndLock())[0].outcome, "SOURCE_MOVED", "payroll must be recalculated next");
+      await calculatePayroll();
+      assert.equal((await approveAndLock())[0].outcome, "APPROVED");
+    });
+
+    it("a payroll-locked month is skipped: not recalculated, not unlocked, no fingerprint written", async () => {
+      await oldStaleSummary();
+      await calculatePayroll();
+      await q(pool, "UPDATE payrun_employee_calculation SET status = 'APPROVED_LOCKED' WHERE employee_id = ?", [EMP]);
+      const [month] = await bootstrap.run({
+        query,
+        calculateMonth: async () => assert.fail("a locked month must not be re-stored"),
+        months: [{ year: YEAR, month: MONTH }],
+        apply: true,
+      });
+      assert.deepEqual(month.skipped_payroll_locked, [EMP]);
+      assert.equal(month.to_restore, 0);
+      const after = await fingerprintOf();
+      assert.equal(after.f, null);
+      assert.equal(Number(after.s), 120);
+      assert.equal(await payrunStatus(), "APPROVED_LOCKED");
+    });
+
+    it("a month locked between the plan and the write is refused by the persist's own lock and reported", async () => {
+      await oldStaleSummary();
+      await calculatePayroll();
+      const [month] = await bootstrap.run({
+        query,
+        calculateMonth: async (args) => {
+          await q(pool, "UPDATE payrun_employee_calculation SET status = 'APPROVED_LOCKED' WHERE employee_id = ?", [EMP]);
+          return calculateMonth(args);
+        },
+        months: [{ year: YEAR, month: MONTH }],
+        apply: true,
+      });
+      assert.deepEqual(month.locked_during_run, [EMP]);
+      assert.deepEqual(month.restored, []);
+      assert.equal((await fingerprintOf()).f, null);
+      assert.equal(bootstrap.succeeded([month]), true, "a lock is a skip, not a failure");
+    });
+
+    it("the inventory counts summaries, untracked and payroll-locked per month", async () => {
+      await oldStaleSummary();
+      assert.deepEqual(await bootstrap.inventory(query), [{ month: "2026-09", summaries: 1, untracked: 1, payroll_locked: 0 }]);
     });
   });
 
