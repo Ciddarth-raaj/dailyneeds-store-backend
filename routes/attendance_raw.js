@@ -142,17 +142,43 @@ class AttendanceRawRoutes {
       res.setHeader("Cache-Control", "no-store");
       timer = setTimeout(() => res.destroy(), 60000);
 
-      res.write("﻿");
-      res.write(`${prepared.header.map(csvCell).join(",")}\r\n`);
+      /**
+       * BACKPRESSURE WITHOUT THE WRITE CALLBACK. The app-wide `compression`
+       * middleware replaces `res.write(chunk, encoding)` and, when it gzips
+       * (every browser asks it to), never calls a callback passed there - an
+       * export awaiting one stalled after the header row until the timer
+       * above killed it. `write()`'s return value and the `drain` event are
+       * what compression does forward, so wait on those, or on `close`.
+       */
+      let wake = null;
+      const release = () => {
+        if (wake) {
+          const w = wake;
+          wake = null;
+          w();
+        }
+      };
+      res.on("drain", release);
+      res.on("close", release);
+      const closed = () => res.destroyed || res.writableEnded;
+      const write = async (text) => {
+        if (closed()) throw new Error("The export stream closed before it finished");
+        if (res.write(text)) return;
+        await new Promise((resolve) => {
+          wake = resolve;
+        });
+        if (closed()) throw new Error("The export stream closed before it finished");
+      };
+
+      await write("﻿");
+      await write(`${prepared.header.map(csvCell).join(",")}\r\n`);
       for (let i = 0; i < prepared.rows.length; i += 500) {
         const chunk = prepared.rows
           .slice(i, i + 500)
           .map((row) => row.map(csvCell).join(","))
           .join("\r\n");
         // Respect backpressure so a fast query never outruns a slow client.
-        await new Promise((resolve, reject) => {
-          res.write(`${chunk}\r\n`, (err) => (err ? reject(err) : resolve()));
-        });
+        await write(`${chunk}\r\n`);
       }
       clearTimeout(timer);
       res.end();
