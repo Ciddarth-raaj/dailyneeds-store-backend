@@ -108,7 +108,7 @@ The existing lock and nothing else:
 | Action in a locked month | |
 |---|---|
 | create (request or grant), approve, revoke | **refused** - checked up front (`findPayrollLockedPeriods`) and again at the write under the row lock (`assertMonthsNotPayrollLocked`) |
-| reject a pending request | **allowed** - it changes no attendance and pays nothing |
+| reject a pending PERMISSION request | **allowed** - it changes no attendance and pays nothing; no day is written (`allowRejectWhenLocked`, PERMISSION only - every other request type keeps the existing rule that any decision in a locked month is refused) |
 | Approve & Lock of the payrun | closes the employee's **pending** PERMISSION requests for the month in the same transaction, as `REJECTED` with `closure_reason = NOT_APPROVED_BEFORE_PAYROLL_LOCK` and every undecided step `SKIPPED` (the OT closure's shape) |
 
 ## Recalculation
@@ -124,6 +124,52 @@ recalculated day in their own transaction. Permission does the same:
   preview and the daily 06:55 run stores it once it closes.
 
 No calculated figure is ever patched.
+
+### Monthly freshness
+
+Payroll reads `attendance_monthly_payroll`, which only the month persist
+(`calculateMonth(persist=true)` -> `saveMonthWithPayroll`) writes. Two things
+keep a Permission from being lost between the day and the payslip:
+
+1. **Refresh.** After a Permission is finally approved, granted (per employee)
+   or revoked, the usecase re-persists that employee/month through the
+   existing month persist (`refreshPersistedMonth`), when a monthly summary
+   already exists. The result carries `month_refresh`
+   (`{refreshed, year, month}` or `{refreshed:false, reason}`). A failed
+   refresh never undoes the committed decision; the guard below still holds.
+2. **Guard at Approve & Lock.** Every month persist stores
+   `day_rows_fingerprint` - a SHA-256 over the stored day rows it was built
+   from (`utils/attendance_month_freshness.js`, read back on the same
+   connection after the days are written). Approve & Lock re-reads the monthly
+   row and the day rows with `LOCK IN SHARE MODE` inside its transaction and
+   recomputes the fingerprint. If it differs (`DAYS_CHANGED`) or is NULL
+   (`UNTRACKED`, a summary persisted before this release), that employee is
+   **BLOCKED** with `attendance_stale` and a message to recalculate Attendance,
+   then payroll, then approve. Nothing is locked and no audit row is written.
+   After a refresh, the payrun row reads `SOURCE_MOVED` until payroll is
+   recalculated, as for any other attendance change.
+
+The fingerprint is content, not a timestamp: `ON UPDATE CURRENT_TIMESTAMP`
+only moves when a value changes, and an identical rewrite must not read as
+stale. The share-mode reads matter because Approve & Lock handles several
+employees in one transaction and a plain read would see its opening snapshot.
+
+### Lock order
+
+Every writer takes locks in one global order:
+
+    payrun row (payrun_employee_calculation, FOR UPDATE)
+      -> employee row (new_employee, FOR UPDATE)
+        -> request / step / permission rows
+
+`decideStage`, `revokeRequest` (given the date), `createRequest`, direct grant
+and direct revoke all lock the payrun row first; Approve & Lock already takes
+it first and then closes the pending PERMISSION requests. Protection is not
+weakened: the payroll-lock check still runs under that row lock, and every
+path still re-checks under its own row locks. The MariaDB race test
+(`repository/attendance_month_freshness.mysql.test.js`) runs 25 rounds of a
+decision against a lock transaction; the previous order deadlocked on the
+first round, this order has none.
 
 ## Rights (all granted by migration to nobody)
 
@@ -184,6 +230,15 @@ state and origin) beside the figures.
 2. Deploy backend, then frontend.
 3. Grant the keys on the designation rights screen.
 
+Every monthly summary persisted before this migration has
+`day_rows_fingerprint = NULL` and is refused at Approve & Lock as `UNTRACKED`
+until its month is recalculated once (Recalculate Attendance, then payroll).
+Plan that recalculation for any month to be locked after deploy.
+
+The migration keeps the repository's forward sequence: identifiers here run
+ahead of the calendar (`20261106120000` was added before it), so the name
+sorts after every existing migration and collides with none.
+
 Stored days keep `calculation_version` 10 until recalculated; nothing is
 recalculated on deploy. Until a date carries a permission, version 11 produces
 exactly the version-10 figures (the existing suites pass unchanged), so no
@@ -191,22 +246,15 @@ recalculation is needed for dates without one.
 
 ## Known limits
 
-- **Monthly roll-up freshness.** The payrun reads
-  `attendance_monthly_payroll` (`missing_minute_deduction`), and that row is
-  written only by the month persist (`calculateMonth(persist=true)` - the
-  Recalculate Attendance path). A decision, grant or revoke rewrites the stored
-  DAY only, so the month must be re-persisted (and the payrun recalculated)
-  before Approve & Lock for the permission to reach pay. This is exactly how
-  every existing approval (regularization, OT, shift change) behaves today;
-  Permission neither fixes nor worsens it, and it is worth a separate change.
-- **Lock ordering.** Approve & Lock now also locks the month's pending PERMISSION
-  requests. A permission decision racing Approve & Lock for the same employee
-  can deadlock; InnoDB aborts one and the user retries. Neither can commit a
-  half state.
+- **Months persisted before deploy** are `UNTRACKED` and must be recalculated
+  once before they can be approved and locked (see Deploying).
+- **Refresh is best effort.** If the month re-persist after a decision fails
+  (for example the month is locked meanwhile), the decision stands and the
+  guard refuses the lock until the month is recalculated.
 - **Replace Approver** moves pending REGULARIZATION/OT steps only (SHIFT_CHANGE
-  was already excluded); PERMISSION follows SHIFT_CHANGE.
-- No Telegram notification is sent for Permission requests yet.
+  was already excluded); PERMISSION follows SHIFT_CHANGE (follow-up).
+- No Telegram notification is sent for Permission requests yet (follow-up).
 - An employee's outlet is their current `store_id` (there is no transfer
-  history); scope checks use it.
+  history); scope checks use it (historical outlet scope is a follow-up).
 - A bulk preview/apply resolves each employee's shift individually; one grant
   is capped at 1,500 employees.
