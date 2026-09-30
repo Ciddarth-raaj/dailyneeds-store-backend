@@ -56,8 +56,8 @@ const punch = (id, ioTime) => ({
   ingest_attendance_date: ioTime.slice(0, 10), dev_id: "D", ingest_source: "LIVE",
 });
 
-function build({ rawPunches = [], locked = [] } = {}) {
-  const store = { requests: [], steps: [], permissions: [], decided: [], revoked: [] };
+function build({ rawPunches = [], locked = [], summaries = [], refreshFails = false } = {}) {
+  const store = { requests: [], steps: [], permissions: [], decided: [], revoked: [], months: [] };
   let nextRequest = 900;
   let nextPermission = 1;
   const requestOf = (id) => store.requests.find((r) => r.attendance_approval_request_id === Number(id));
@@ -84,6 +84,14 @@ function build({ rawPunches = [], locked = [] } = {}) {
       store.permissions.filter((p) => p.employee_id === e && p.attendance_date >= from && p.attendance_date <= to).map(joined),
     getEmploymentWindow: async () => ({ employee_id: 42, status: 1, date_of_joining: "2020-01-01", resignation_date: null }),
     getMonthlyGrossAsOf: async () => null,
+    // A monthly summary exists only for the months listed in `summaries`.
+    getMonthlyPayroll: async ({ period_year, period_month }) =>
+      summaries.includes(`${period_year}-${String(period_month).padStart(2, "0")}`) ? { attendance_monthly_payroll_id: 1 } : null,
+    saveMonthWithPayroll: async (args) => {
+      if (refreshFails) throw Object.assign(new Error("ER_LOCK_WAIT_TIMEOUT"), { code: "ER_LOCK_WAIT_TIMEOUT" });
+      store.months.push(args);
+      return { written: args.rows.length, monthly_written: 1 };
+    },
     findPayrollLockedPeriods: async (rows) =>
       rows.some((r) => locked.includes(String(r.attendance_date).slice(0, 7))) ? [{ employee_id: 42, period: "2026-09" }] : [],
   };
@@ -295,5 +303,56 @@ describe("the Approval Centre's Permission tab", () => {
       { before: row.permission_preview.shortage_before_permission_minutes, covered: row.permission_preview.permission_minutes, after: row.permission_preview.shortage_after_permission_minutes },
       { before: 120, covered: 120, after: 0 }
     );
+  });
+});
+
+describe("THE MONTHLY SUMMARY FOLLOWS A PERMISSION CHANGE", () => {
+  it("a final approval re-persists an existing summary through the month persist, with the permission in it", async () => {
+    const world = build({ rawPunches: LEFT_AT_20, summaries: ["2026-09"] });
+    const { attendance_approval_request_id: id } = await raise(world);
+    await world.regularization.decide({ actor: as(7), request_id: id, decision: STEP_DECISION.APPROVED });
+    assert.equal(world.store.months.length, 0, "an intermediate stage changes nothing payable");
+    await world.regularization.decide({ actor: as(10), request_id: id, decision: STEP_DECISION.APPROVED });
+    const final = await world.regularization.decide({ actor: as(8), request_id: id, decision: STEP_DECISION.APPROVED });
+    assert.deepEqual({ refreshed: final.month_refresh.refreshed, year: final.month_refresh.year, month: final.month_refresh.month }, { refreshed: true, year: 2026, month: 9 });
+    assert.equal(world.store.months.length, 1);
+    assert.equal(world.store.months[0].monthly.shortage_minutes, 0, "the summary carries the forgiven shortage");
+  });
+
+  it("no summary yet: nothing to refresh, and nothing is created", async () => {
+    const world = build({ rawPunches: LEFT_AT_20 });
+    const { attendance_approval_request_id: id } = await raise(world);
+    let last;
+    for (const a of [7, 10, 8]) last = await world.regularization.decide({ actor: as(a), request_id: id, decision: STEP_DECISION.APPROVED });
+    assert.equal(last.month_refresh.reason, "NO_SUMMARY");
+    assert.equal(world.store.months.length, 0);
+  });
+
+  it("a refresh that fails is reported, and the approval stands (Approve & Lock refuses the stale month)", async () => {
+    const world = build({ rawPunches: LEFT_AT_20, summaries: ["2026-09"], refreshFails: true });
+    const { attendance_approval_request_id: id } = await raise(world);
+    let last;
+    for (const a of [7, 10, 8]) last = await world.regularization.decide({ actor: as(a), request_id: id, decision: STEP_DECISION.APPROVED });
+    assert.equal(last.code, 200);
+    assert.equal(last.month_refresh.refreshed, false);
+    assert.equal(last.month_refresh.reason, "ER_LOCK_WAIT_TIMEOUT");
+  });
+
+  it("revoking an approved Permission re-persists the month without it", async () => {
+    const world = build({ rawPunches: LEFT_AT_20, summaries: ["2026-09"] });
+    const { attendance_approval_request_id: id } = await raise(world);
+    await approveAll(world, id);
+    world.store.months.length = 0;
+    const out = await world.regularization.revokeDecision({ actor: as(1, { user_type: 2 }), request_id: id, reason: "Approved by mistake" });
+    assert.equal(out.month_refresh.refreshed, true);
+    assert.equal(world.store.months[0].monthly.shortage_minutes, 120);
+  });
+
+  it("a rejection changes nothing payable and refreshes nothing", async () => {
+    const world = build({ rawPunches: LEFT_AT_20, summaries: ["2026-09"] });
+    const { attendance_approval_request_id: id } = await raise(world);
+    const out = await world.regularization.decide({ actor: as(7), request_id: id, decision: STEP_DECISION.REJECTED, remarks: "Not this week" });
+    assert.equal(out.month_refresh, null);
+    assert.equal(world.store.months.length, 0);
   });
 });

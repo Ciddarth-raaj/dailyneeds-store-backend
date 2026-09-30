@@ -57,8 +57,8 @@ const punch = (id, employee_id, ioTime) => ({
 // Everybody on the late shift leaves at 19:00.
 const PUNCHES = [1, 5, 9].flatMap((e) => [punch(e * 10, e, `${DATE} 10:00:00`), punch(e * 10 + 1, e, `${DATE} 19:00:00`)]);
 
-function build({ locked = [], existing = [], failFor = [] } = {}) {
-  const store = { permissions: [...existing], operations: [], items: [], grants: [], revokes: [] };
+function build({ locked = [], existing = [], failFor = [], summaries = false } = {}) {
+  const store = { permissions: [...existing], operations: [], items: [], grants: [], revokes: [], months: [] };
   let nextId = 100;
   const empOf = (id) => EMPLOYEES.find((e) => e.employee_id === Number(id));
 
@@ -73,6 +73,11 @@ function build({ locked = [], existing = [], failFor = [] } = {}) {
     getPermissionsForRange: async (e, from, to) => store.permissions.filter((p) => p.employee_id === e && p.attendance_date >= from && p.attendance_date <= to),
     getEmploymentWindow: async (e) => ({ ...empOf(e), status: 1 }),
     getMonthlyGrossAsOf: async () => null,
+    getMonthlyPayroll: async () => (summaries ? { attendance_monthly_payroll_id: 1 } : null),
+    saveMonthWithPayroll: async (args) => {
+      store.months.push(args);
+      return { written: args.rows.length, monthly_written: 1 };
+    },
     findPayrollLockedPeriods: async (rows) => rows.filter((r) => locked.includes(Number(r.employee_id))).map((r) => ({ employee_id: r.employee_id, year: 2026, month: 9 })),
     findPayrollLockedPeriodsBulk: async (rows) => rows.filter((r) => locked.includes(Number(r.employee_id))).map((r) => ({ employee_id: r.employee_id, year: 2026, month: 9 })),
   };
@@ -277,5 +282,28 @@ describe("revoke", () => {
     assert.equal(r.summary.succeeded, 2);
     assert.ok(store.revokes.every((x) => x.revoke_bulk_operation_id === op));
     assert.ok(store.permissions.every((p) => p.revoked_at));
+  });
+});
+
+describe("THE MONTHLY SUMMARY FOLLOWS A DIRECT GRANT OR REVOKE", () => {
+  it("each granted employee's existing summary is re-persisted with the permission", async () => {
+    const { permission, store } = build({ summaries: true });
+    const p = await permission.preview({ actor: GRANTOR, scope_store_ids: null, ...FESTIVAL });
+    const r = await permission.apply({ actor: GRANTOR, scope_store_ids: null, fingerprint: p.fingerprint, ...FESTIVAL });
+    const granted = r.results.filter((x) => x.outcome === "SUCCEEDED");
+    assert.ok(granted.every((x) => x.month_refresh && x.month_refresh.refreshed));
+    assert.deepEqual(store.months.map((m) => m.employee_id).sort(), [1, 5]);
+    store.months.forEach((m) => assert.equal(m.monthly.shortage_minutes, 0));
+  });
+
+  it("a direct revoke re-persists the month without the grant", async () => {
+    const { permission, store } = build({ summaries: true });
+    const p = await permission.preview({ actor: GRANTOR, scope_store_ids: null, ...FESTIVAL });
+    await permission.apply({ actor: GRANTOR, scope_store_ids: null, fingerprint: p.fingerprint, ...FESTIVAL });
+    store.months.length = 0;
+    const row = store.permissions.find((x) => x.employee_id === 1);
+    const out = await permission.revoke({ actor: GRANTOR, scope_store_ids: null, attendance_permission_id: row.attendance_permission_id, reason: "Store stayed open" });
+    assert.equal(out.month_refresh.refreshed, true);
+    assert.equal(store.months[0].monthly.shortage_minutes, 180);
   });
 });

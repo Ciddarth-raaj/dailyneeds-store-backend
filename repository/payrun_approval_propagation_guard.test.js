@@ -19,6 +19,7 @@
  * revalidation, and it is driven here against the statements `approve()`
  * actually issues, in order.
  */
+const { dayRowsFingerprint } = require("../utils/attendance_month_freshness");
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
 
@@ -67,6 +68,11 @@ const NRM = [
     approved_ot_minutes: 120,
   },
 ];
+
+// The summary was persisted from exactly these stored days, so it is CURRENT
+// with them (utils/attendance_month_freshness.js). A test that moves a day
+// without re-persisting the month is what makes it stale.
+ATTENDANCE.day_rows_fingerprint = dayRowsFingerprint(NRM);
 
 /**
  * `runs` are the unresolved WORK_SHIFT_SAVE recalculations the database

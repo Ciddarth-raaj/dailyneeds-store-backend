@@ -97,6 +97,10 @@ describe("up", () => {
     }
   });
 
+  it("the monthly summary records the day rows it was made from, NULL on older summaries", () => {
+    assert.match(sql, /ADD COLUMN `day_rows_fingerprint` CHAR\(64\) NULL DEFAULT NULL/);
+  });
+
   it("declares every key and grants none of them", () => {
     for (const key of KEYS) {
       assert.match(sql, new RegExp(`INSERT INTO \`all_permissions\` \\(\`permission_key\`\\) SELECT '${key}' FROM DUAL WHERE NOT EXISTS`), key);
@@ -118,7 +122,7 @@ describe("down", () => {
     }
     assert.match(sql, /`open_request_group` ENUM\('ATT','SHIFT'\) GENERATED ALWAYS AS/);
     assert.match(sql, /ENUM\('REGULARIZATION','OT','REGULARIZATION_WITH_OT','SHIFT_CHANGE'\) NOT NULL/);
-    assert.match(sql, /ALTER TABLE `attendance_monthly_payroll` DROP COLUMN `permission_minutes`/);
+    assert.match(sql, /ALTER TABLE `attendance_monthly_payroll` DROP COLUMN `day_rows_fingerprint`, DROP COLUMN `permission_minutes`/);
   });
   it("removes a key only while nobody holds it", () => {
     assert.match(sql, /AND NOT EXISTS \( SELECT 1 FROM `permissions` `p`/);

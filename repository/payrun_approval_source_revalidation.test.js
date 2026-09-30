@@ -20,6 +20,7 @@
  * the attendance source it returns can CHANGE between the pre-approval read
  * and the locked revalidation, which is precisely the window.
  */
+const { dayRowsFingerprint } = require("../utils/attendance_month_freshness");
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("fs");
@@ -70,6 +71,11 @@ const CURRENT_NRM = [
     approved_ot_minutes: 120,
   },
 ];
+
+// The summary was persisted from exactly these stored days, so it is CURRENT
+// with them (utils/attendance_month_freshness.js). A test that moves a day
+// without re-persisting the month is what makes it stale.
+CURRENT_ATTENDANCE.day_rows_fingerprint = dayRowsFingerprint(CURRENT_NRM);
 
 /**
  * A pool that records statements and answers each table from the state the

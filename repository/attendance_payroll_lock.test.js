@@ -445,7 +445,9 @@ describe("saveMonthWithPayroll persists the whole month or none of it", () => {
     const order = fake.log.map((e) =>
       /^(BEGIN|COMMIT|ROLLBACK|RELEASE)$/.test(e.sql) ? e.sql : e.sql.split(" ")[0]
     );
-    assert.deepEqual(order, ["BEGIN", "SELECT", "INSERT", "INSERT", "COMMIT", "RELEASE"]);
+    // The second SELECT reads back the stored days the summary is written
+    // from, for its freshness fingerprint (utils/attendance_month_freshness.js).
+    assert.deepEqual(order, ["BEGIN", "SELECT", "INSERT", "SELECT", "INSERT", "COMMIT", "RELEASE"]);
     assert.equal(result.written, 2);
     assert.equal(result.monthly_written, 1);
   });
@@ -457,14 +459,15 @@ describe("saveMonthWithPayroll persists the whole month or none of it", () => {
     const at = (pred) => fake.log.findIndex(pred);
     const beginAt = at((e) => e.sql === "BEGIN");
     const selectAt = at((e) => /^SELECT/i.test(e.sql));
-    const dayAt = at((e) => /attendance_day_calculation/i.test(e.sql));
+    const dayAt = at((e) => /^INSERT INTO attendance_day_calculation/i.test(e.sql));
     const monthAt = at((e) => /attendance_monthly_payroll/i.test(e.sql));
     const commitAt = at((e) => e.sql === "COMMIT");
 
     assert.ok(beginAt < selectAt && selectAt < dayAt && dayAt < monthAt && monthAt < commitAt);
     assert.match(fake.log[selectAt].sql, /FOR UPDATE$/);
-    // ONE gate for the whole month, not one per write.
-    assert.equal(fake.log.filter((e) => /^SELECT/i.test(e.sql)).length, 1);
+    // ONE gate for the whole month, not one per write. (The only other
+    // SELECT is the read-back of the days just written, which locks nothing.)
+    assert.equal(fake.log.filter((e) => /FOR UPDATE/i.test(e.sql)).length, 1);
   });
 
   it("writes the days into one table and the month into the other", async () => {
