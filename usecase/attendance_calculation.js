@@ -2537,6 +2537,56 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     };
   };
 
+  /**
+   * RE-PERSIST AN EMPLOYEE'S MONTH AFTER A CHANGE THAT MOVED ITS DAYS - the
+   * existing month persist (`calculateMonth(persist=true)`), not a second
+   * payroll path.
+   *
+   * Called after a Permission change has COMMITTED (final approval, a grant,
+   * a revoke). The change rewrote the DAY; payroll reads the monthly
+   * summary, which only the month persist writes. If a summary already
+   * exists for the month it is rewritten now, so it carries the new shortage
+   * and a fresh fingerprint of its days. If none exists yet there is nothing
+   * stale to refresh: the month is persisted, with the permission in it,
+   * whenever it is first calculated.
+   *
+   * NEVER THE GUARANTEE ON ITS OWN. It runs after the change committed and
+   * can fail (a lock timeout, a locked month) - it reports, never throws, and
+   * the change stands. What makes a stale summary unpayable is Approve &
+   * Lock's own check (`repository/payrun_calculation.js#_attendanceFreshnessLocked`):
+   * a month whose summary no longer matches its days is refused, whether or
+   * not this refresh ran.
+   */
+  const refreshPersistedMonth = async ({ employee_id, attendance_date, now = null }) => {
+    const date = toDateOnly(attendance_date);
+    const employeeId = Number(employee_id);
+    if (date === null || !Number.isInteger(employeeId) || employeeId <= 0) {
+      return { refreshed: false, reason: "INVALID" };
+    }
+    const year = Number(date.slice(0, 4));
+    const month = Number(date.slice(5, 7));
+    try {
+      const existing = attendanceCalculationRepo.getMonthlyPayroll
+        ? await attendanceCalculationRepo.getMonthlyPayroll({
+            employee_id: employeeId,
+            period_year: year,
+            period_month: month,
+          })
+        : null;
+      if (!existing) return { refreshed: false, reason: "NO_SUMMARY", year, month };
+      await calculateMonth({ employee_id: employeeId, year, month, persist: true, now });
+      return { refreshed: true, year, month };
+    } catch (err) {
+      return {
+        refreshed: false,
+        reason: (err && err.code) || "ERROR",
+        message: err && err.message ? err.message : String(err),
+        year,
+        month,
+      };
+    }
+  };
+
   /** The payroll lock, asked before an action rather than before a write. */
   const findPayrollLockedPeriods = (rows) =>
     attendanceCalculationRepo.findPayrollLockedPeriods
@@ -2589,5 +2639,6 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     findPayrollLockedPeriodsBulk,
     listDateShiftOptions,
     calculateMonth,
+    refreshPersistedMonth,
   };
 };

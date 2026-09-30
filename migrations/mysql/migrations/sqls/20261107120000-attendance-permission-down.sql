@@ -23,6 +23,7 @@ DELETE FROM `all_permissions`
    );
 
 ALTER TABLE `attendance_monthly_payroll`
+  DROP COLUMN `day_rows_fingerprint`,
   DROP COLUMN `permission_minutes`;
 
 ALTER TABLE `attendance_day_calculation`

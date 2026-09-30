@@ -163,7 +163,16 @@ ALTER TABLE `attendance_day_calculation`
 
 ALTER TABLE `attendance_monthly_payroll`
   ADD COLUMN `permission_minutes` INT NOT NULL DEFAULT 0
-    COMMENT 'paid permission forgiven on the month''s final days - for display; the deduction already reflects it';
+    COMMENT 'paid permission forgiven on the month''s final days - for display; the deduction already reflects it',
+  -- THE SUMMARY'S FRESHNESS. A fingerprint of the stored day rows the month
+  -- persist wrote this summary from. A permission (or any approval, void or
+  -- daily recalculation) rewrites DAYS only; Approve & Lock compares this
+  -- with the days as they stand and refuses to lock a month whose summary
+  -- no longer matches them. NULL on every summary written before this
+  -- release: such a month is treated as stale and persisted once more before
+  -- it can lock - a guess about an old summary is not a basis for pay.
+  ADD COLUMN `day_rows_fingerprint` CHAR(64) NULL DEFAULT NULL
+    COMMENT 'sha256 of the stored day rows this summary was calculated from; see utils/attendance_month_freshness.js';
 
 -- ========================================================== permissions ====
 --   view_attendance_permissions            the Permission register        NOBODY

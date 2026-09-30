@@ -421,7 +421,8 @@ module.exports = (permissionRepo, calculationUsecase) => {
           calculations,
         });
         if (saved.code === 200) {
-          await record({ ...base, outcome: OUTCOME.SUCCEEDED, attendance_permission_id: saved.attendance_permission_ids[0], recalculated: calculations.length > 0, permission_minutes: e.permission_minutes });
+          const monthRefresh = await refreshMonth(e.employee_id, grant.attendance_date, now);
+          await record({ ...base, outcome: OUTCOME.SUCCEEDED, attendance_permission_id: saved.attendance_permission_ids[0], recalculated: calculations.length > 0, permission_minutes: e.permission_minutes, month_refresh: monthRefresh });
         } else {
           await record({ ...base, outcome: OUTCOME.SKIPPED, code: "OVERLAP", message: SKIP.OVERLAP });
         }
@@ -453,6 +454,17 @@ module.exports = (permissionRepo, calculationUsecase) => {
       results,
     };
   };
+
+  /**
+   * Re-persist the employee's month after a committed change moved its day -
+   * the existing month persist, a no-op while the month has no summary.
+   * Reports, never throws: Approve & Lock refuses a stale summary whatever
+   * happens here.
+   */
+  const refreshMonth = async (employee_id, attendance_date, now) =>
+    typeof calculationUsecase.refreshPersistedMonth === "function"
+      ? calculationUsecase.refreshPersistedMonth({ employee_id, attendance_date, now })
+      : { refreshed: false, reason: "NOT_WIRED" };
 
   /** A permission the caller may act on, or the same "not found" for both. */
   const inScope = (row, scope_store_ids) =>
@@ -497,8 +509,13 @@ module.exports = (permissionRepo, calculationUsecase) => {
       revoke_bulk_operation_id,
       calculations,
     });
+    const monthRefresh =
+      result && result.code === 200
+        ? await refreshMonth(Number(permission.employee_id), permission.attendance_date, now)
+        : null;
     return {
       ...result,
+      month_refresh: monthRefresh,
       attendance_permission_id: Number(permission.attendance_permission_id),
       employee_id: Number(permission.employee_id),
       attendance_date: permission.attendance_date,

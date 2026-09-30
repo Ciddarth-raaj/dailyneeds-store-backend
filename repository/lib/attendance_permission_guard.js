@@ -118,6 +118,13 @@ async function closePendingPermissionsForLock(connection, { employee_id, year, m
   const from = `${year}-${String(month).padStart(2, "0")}-01`;
   const last = new Date(Date.UTC(Number(year), Number(month), 0)).getUTCDate();
   const to = `${year}-${String(month).padStart(2, "0")}-${String(last).padStart(2, "0")}`;
+  // A LOCKING read, so it sees the latest committed rows. Approve & Lock
+  // approves several employees in ONE transaction, and a plain read there
+  // would answer from the snapshot taken at the first of them - missing a
+  // request committed since. The range scan also locks the employee's other
+  // request rows for the month; that cannot deadlock, because every writer
+  // of request rows (decide, revoke, create) takes this employee's payrun
+  // row FIRST - which Approve & Lock already holds - before touching them.
   const rows = await queryAsync(
     connection,
     `SELECT attendance_approval_request_id

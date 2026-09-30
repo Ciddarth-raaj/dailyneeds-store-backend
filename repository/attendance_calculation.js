@@ -1,3 +1,4 @@
+const { dayRowsSql, dayRowsFingerprint, monthWindow } = require("../utils/attendance_month_freshness");
 const { PERMISSION_COLUMNS, PERMISSION_FROM } = require("./lib/attendance_permission_select");
 const logger = require("../utils/logger");
 const { activeOverrideCondition } = require("../utils/shift_override_active");
@@ -164,11 +165,29 @@ const CALCULATION_COLUMNS = [
  * not depend on that.)
  */
 async function assertMonthsNotPayrollLocked(connection, rows) {
+  const hits = await lockPayrollMonthsOnConnection(connection, rows);
+  if (hits.length > 0) throw payrollLockedError(hits);
+}
+
+/**
+ * THE SAME ROW LOCK, WITHOUT THE REFUSAL: take `FOR UPDATE` on the payrun
+ * rows these (employee, date) pairs fall in and return which of them are
+ * APPROVED_LOCKED.
+ *
+ * WHY A LOCK THAT DOES NOT REFUSE. A caller that must take this lock FIRST -
+ * so that it acquires its locks in the same order Approve & Lock does
+ * (payrun row, then the rows it writes) - may still have a legitimate thing
+ * to do in a locked month. A rejection is the case: it changes no payable
+ * attendance, and a request nobody may reject is a request nobody can ever
+ * close. The caller decides what a locked month forbids; the lock is the
+ * same either way, held until its transaction ends.
+ */
+async function lockPayrollMonthsOnConnection(connection, rows) {
   const { periods, unreadable } = periodsTouched(rows);
   if (unreadable) {
     throw new Error("refusing to write attendance: a row has no readable employee and date");
   }
-  if (periods.length === 0) return;
+  if (periods.length === 0) return [];
 
   // One statement per (year, month), each naming only the employees this
   // write touches in that month - the shape `approveAndLock` locks, widened
@@ -212,8 +231,7 @@ async function assertMonthsNotPayrollLocked(connection, rows) {
       });
     }
   }
-
-  if (hits.length > 0) throw payrollLockedError(hits);
+  return hits;
 }
 
 /**
@@ -261,6 +279,10 @@ const MONTHLY_PAYROLL_COLUMNS = [
   "approved_ot_earnings",
   "total_attendance_payable", "held_dates", "is_final", "payroll_version",
   "permission_minutes",
+  // What the summary was made from: a fingerprint of the stored day rows,
+  // taken inside the month persist's own transaction. Approve & Lock
+  // compares it with the days as they stand - `utils/attendance_month_freshness.js`.
+  "day_rows_fingerprint",
 ];
 
 async function upsertMonthlyPayrollOnConnection(connection, row) {
@@ -1773,7 +1795,15 @@ class AttendanceCalculationRepository {
       const calculation = await upsertCalculationRows(connection, rows);
       let monthlyWritten = 0;
       if (monthly) {
-        await upsertMonthlyPayrollOnConnection(connection, monthly);
+        // THE DAYS THIS SUMMARY WAS MADE FROM, read back after writing them,
+        // on this connection, under this transaction's payroll-row lock -
+        // exactly the rows that are stored, not the ones the caller passed.
+        const { from, to } = monthWindow(year, month);
+        const stored = await queryAsync(connection, dayRowsSql(), [employeeId, from, to]);
+        await upsertMonthlyPayrollOnConnection(connection, {
+          ...monthly,
+          day_rows_fingerprint: dayRowsFingerprint(stored),
+        });
         monthlyWritten = 1;
       }
 
@@ -1816,6 +1846,7 @@ class AttendanceCalculationRepository {
 module.exports = (db) => new AttendanceCalculationRepository(db);
 module.exports.AttendanceCalculationRepository = AttendanceCalculationRepository;
 module.exports.CALCULATION_COLUMNS = CALCULATION_COLUMNS;
+module.exports.MONTHLY_PAYROLL_COLUMNS = MONTHLY_PAYROLL_COLUMNS;
 module.exports.writeCalculationsOnConnection = writeCalculationsOnConnection;
 /**
  * THE PAYROLL LOCK, exported so that every write which could invalidate a
@@ -1828,3 +1859,4 @@ module.exports.writeCalculationsOnConnection = writeCalculationsOnConnection;
  * implementation is exactly what this export exists to prevent.
  */
 module.exports.assertMonthsNotPayrollLocked = assertMonthsNotPayrollLocked;
+module.exports.lockPayrollMonthsOnConnection = lockPayrollMonthsOnConnection;

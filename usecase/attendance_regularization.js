@@ -158,6 +158,12 @@ module.exports = (
     return { closed: false, reason: entry.reason, closes_at: entry.closes_at };
   };
 
+  /** Re-persist the month a committed change touched; reports, never throws. */
+  const refreshMonthAfter = async (employeeId, date, now) =>
+    typeof attendanceCalculationUsecase.refreshPersistedMonth === "function"
+      ? attendanceCalculationUsecase.refreshPersistedMonth({ employee_id: employeeId, attendance_date: date, now })
+      : { refreshed: false, reason: "NOT_WIRED" };
+
   /** The refusal every "not until the day closes" rule answers with. */
   const dayOpenError = (message) => {
     const err = validationError(message);
@@ -1469,9 +1475,16 @@ module.exports = (
       reason: why,
       revocableTypes: REVOCABLE_TYPES,
       calculations,
+      attendanceDate: request.attendance_date,
     });
+    // Revoking a Permission request changes what its day forgives.
+    const monthRefresh =
+      request.request_type === REQUEST_TYPE.PERMISSION && result && result.code === 200
+        ? await refreshMonthAfter(employeeId, request.attendance_date, now)
+        : null;
     return {
       ...result,
+      month_refresh: monthRefresh,
       request_type: request.request_type,
       attendance_date: request.attendance_date,
       employee_id: employeeId,
@@ -1710,6 +1723,9 @@ module.exports = (
         employee_id: request.requested_for_employee_id,
         attendance_date: request.attendance_date,
       },
+      // A Permission may be REJECTED in a locked month (it pays nothing);
+      // every other type keeps the existing refusal.
+      allowRejectWhenLocked: isPermissionRequest,
       decisionSource: source === "TELEGRAM" ? "TELEGRAM" : "WEB",
       // THE APPROVED SHIFT BECOMES EFFECTIVE HERE AND NOWHERE ELSE, in the
       // same transaction as the decision and the recalculated day. It is an
@@ -1732,8 +1748,17 @@ module.exports = (
     });
     if (saved.code !== 200) return saved;
 
+    // A PERMISSION finally approved moves the day it covers; the monthly
+    // summary payroll reads is re-persisted through the existing month path
+    // (a no-op when the month has no summary yet). See `refreshPersistedMonth`.
+    const monthRefresh =
+      isPermissionRequest && saved.status === REQUEST_STATUS.APPROVED
+        ? await refreshMonthAfter(request.requested_for_employee_id, request.attendance_date, now)
+        : null;
+
     return {
       code: 200,
+      month_refresh: monthRefresh,
       attendance_approval_request_id: Number(request_id),
       stage_no: Number(step.stage_no),
       decision,

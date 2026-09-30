@@ -81,9 +81,9 @@ class AttendancePermissionRepository {
    * ONE DIRECT GRANT for one employee/date, atomically:
    *
    *   BEGIN
+   *   payrun_employee_calculation ... FOR UPDATE   the payroll lock gate
    *   new_employee ... FOR UPDATE              the shared serialization point
    *   live windows overlapping these?          -> refused, nothing written
-   *   payrun_employee_calculation ... FOR UPDATE   the payroll lock gate
    *   INSERT attendance_permission (one per window)
    *   INSERT ... attendance_day_calculation    (a closed day only)
    *   COMMIT
@@ -96,13 +96,15 @@ class AttendancePermissionRepository {
     const connection = await getConnectionAsync(this.db);
     try {
       await beginTransactionAsync(connection);
+      // LOCK ORDER, shared by every Permission write and by Approve & Lock:
+      // the payroll row, then the employee, then the permission rows.
+      await assertMonthsNotPayrollLocked(connection, [{ employee_id, attendance_date }]);
       await guard.lockEmployee(connection, employee_id);
       const overlaps = await guard.findLiveOverlaps(connection, employee_id, attendance_date, windows);
       if (overlaps && overlaps.length > 0) {
         await rollbackAsync(connection);
         return { code: 409, reason: "OVERLAP", overlaps };
       }
-      await assertMonthsNotPayrollLocked(connection, [{ employee_id, attendance_date }]);
 
       const ids = [];
       for (const w of windows) {
@@ -149,15 +151,22 @@ class AttendancePermissionRepository {
     const connection = await getConnectionAsync(this.db);
     try {
       await beginTransactionAsync(connection);
-      const rows = await queryAsync(
-        connection,
-        `SELECT attendance_permission_id, employee_id, source, revoked_at,
+      const ROW_SQL = `SELECT attendance_permission_id, employee_id, source, revoked_at,
                 DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date
            FROM attendance_permission
-          WHERE attendance_permission_id = ?
-          FOR UPDATE`,
-        [attendance_permission_id]
-      );
+          WHERE attendance_permission_id = ?`;
+      // The row's employee and date name the payroll row, which is locked
+      // FIRST (the shared order); the permission row is then locked and
+      // re-read. Its employee and date never change, so the two reads agree.
+      const [located] = await queryAsync(connection, ROW_SQL, [attendance_permission_id]);
+      if (!located) {
+        await rollbackAsync(connection);
+        return { code: 404, reason: "NOT_FOUND" };
+      }
+      await assertMonthsNotPayrollLocked(connection, [
+        { employee_id: located.employee_id, attendance_date: located.attendance_date },
+      ]);
+      const rows = await queryAsync(connection, `${ROW_SQL} FOR UPDATE`, [attendance_permission_id]);
       const row = (rows || [])[0];
       if (!row) {
         await rollbackAsync(connection);
@@ -171,9 +180,6 @@ class AttendancePermissionRepository {
         await rollbackAsync(connection);
         return { code: 409, reason: "ALREADY_REVOKED" };
       }
-      await assertMonthsNotPayrollLocked(connection, [
-        { employee_id: row.employee_id, attendance_date: row.attendance_date },
-      ]);
       const updated = await queryAsync(
         connection,
         `UPDATE attendance_permission
