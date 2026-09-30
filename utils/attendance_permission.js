@@ -95,6 +95,104 @@ function isPermissionEffective(row = {}) {
   return f === undefined || f === null || f === "SETTLED";
 }
 
+/* ------------------------------------------------ rows -> the calculation */
+
+/**
+ * THE ONE PLACE a date's permission rows are turned into what the engine
+ * reads, shared by the calculation usecase and the dashboard so the two can
+ * never disagree about a date.
+ *
+ * `overlay` describes a change that is being committed in the caller's own
+ * transaction and is therefore not in the rows yet - exactly as `assume`
+ * does for an approval:
+ *
+ *   add                  DIRECT rows being granted now (no id yet)
+ *   exclude_ids          permission ids being revoked now
+ *   exclude_request_id   a PERMISSION request being revoked now
+ *   approve_request_id   a PERMISSION request being finally approved now:
+ *                        its rows count as APPROVED + SETTLED
+ *
+ * Returns every row with its derived `state` (for display) and the subset
+ * that is effective (for the engine).
+ */
+function resolvePermissionRows(rows = [], overlay = null) {
+  const o = overlay || {};
+  const excludeIds = new Set((o.exclude_ids || []).map((id) => String(id)));
+  const excludeRequest =
+    o.exclude_request_id === null || o.exclude_request_id === undefined ? null : Number(o.exclude_request_id);
+  const approveRequest =
+    o.approve_request_id === null || o.approve_request_id === undefined ? null : Number(o.approve_request_id);
+
+  const all = [...(rows || []), ...(o.add || [])]
+    .filter((row) => row && !excludeIds.has(String(row.attendance_permission_id)))
+    .map((row) => {
+      const requestId =
+        row.attendance_approval_request_id === null || row.attendance_approval_request_id === undefined
+          ? null
+          : Number(row.attendance_approval_request_id);
+      if (row.source === PERMISSION_SOURCE.REQUEST && requestId !== null && requestId === excludeRequest) {
+        return { ...row, request_status: "CANCELLED" };
+      }
+      if (row.source === PERMISSION_SOURCE.REQUEST && requestId !== null && requestId === approveRequest) {
+        return { ...row, request_status: "APPROVED", finalization_state: "SETTLED" };
+      }
+      return row;
+    })
+    .map((row) => ({ ...row, state: permissionState(row) }));
+
+  return { all, effective: all.filter(isPermissionEffective) };
+}
+
+/** Rows grouped by `attendance_date` (`YYYY-MM-DD`). */
+function permissionsByDate(rows = []) {
+  const map = new Map();
+  for (const row of rows || []) {
+    if (!row || !row.attendance_date) continue;
+    const date = String(row.attendance_date).slice(0, 10);
+    if (!map.has(date)) map.set(date, []);
+    map.get(date).push(row);
+  }
+  return map;
+}
+
+const hhmm = (value) => {
+  const m = /(\d{2}):(\d{2})(?::\d{2})?$/.exec(String(value || "").trim());
+  return m ? `${m[1]}:${m[2]}` : null;
+};
+
+/**
+ * What a screen shows for one permission beside the day. Figures come from
+ * the day itself (`permission_minutes`); this is the evidence: the window,
+ * its origin, its state and who did what.
+ */
+function permissionForDisplay(row = {}) {
+  const num = (v) => (v === null || v === undefined ? null : Number(v));
+  return {
+    attendance_permission_id: num(row.attendance_permission_id),
+    source: row.source,
+    state: row.state || permissionState(row),
+    attendance_date: row.attendance_date ? String(row.attendance_date).slice(0, 10) : null,
+    permission_from: row.permission_from || null,
+    permission_to: row.permission_to || null,
+    from_time: hhmm(row.permission_from),
+    to_time: hhmm(row.permission_to),
+    to_shift_end: Number(row.to_shift_end) === 1,
+    permission_minutes: num(row.permission_minutes),
+    reason: row.reason || null,
+    remarks: row.remarks || null,
+    attendance_approval_request_id: num(row.attendance_approval_request_id),
+    bulk_operation_id: row.bulk_operation_id || null,
+    created_by_employee_id: num(row.created_by_employee_id),
+    created_by_name: row.created_by_name || null,
+    created_at: row.created_at || null,
+    revoked_by_employee_id: num(row.revoked_by_employee_id),
+    revoked_by_name: row.revoked_by_name || null,
+    revoked_at: row.revoked_at || null,
+    revoke_reason: row.revoke_reason || null,
+    closure_reason: row.closure_reason || null,
+  };
+}
+
 /* -------------------------------------------------------------- intervals */
 
 const int = (v) => Math.trunc(Number(v));
@@ -189,6 +287,9 @@ module.exports = {
   PERMISSION_CLOSURE_REASON,
   permissionState,
   isPermissionEffective,
+  resolvePermissionRows,
+  permissionsByDate,
+  permissionForDisplay,
   mergeIntervals,
   clipIntervals,
   totalMinutes,

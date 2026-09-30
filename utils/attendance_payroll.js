@@ -212,6 +212,7 @@ function emptyPayrollShape({ employee_id, year, month, window, split, grossPaise
     extra_day_earnings: toRupees(dailyRatePaise === null ? null : 0),
 
     shortage_minutes: 0,
+    permission_minutes: 0,
     missing_minute_deduction: toRupees(dailyRatePaise === null ? null : 0),
 
     approved_ot_minutes: 0,
@@ -248,6 +249,9 @@ function computeMonthlyAttendancePayroll(input = {}) {
 
   let attendedDays = 0;
   let shortageMinutes = 0;
+  // Paid permission forgiven on final days - DISPLAY ONLY. The shortage
+  // above is already the charge after permission, so this prices nothing.
+  let permissionMinutes = 0;
   let approvedOtMinutes = 0;
   let deductionPaise = 0;
   let otEarningsPaise = 0;
@@ -349,6 +353,7 @@ function computeMonthlyAttendancePayroll(input = {}) {
     const shortage = Math.max(0, Math.trunc(day.shortage_minutes || 0));
     const approvedOt = Math.max(0, Math.trunc(day.approved_ot_minutes || 0));
     shortageMinutes += shortage;
+    permissionMinutes += Math.max(0, Math.trunc(day.permission_minutes || 0));
     approvedOtMinutes += approvedOt;
 
     if (dailyRatePaise === null) return;
@@ -414,6 +419,7 @@ function computeMonthlyAttendancePayroll(input = {}) {
     extra_day_earnings: toRupees(extraEarningsPaise),
 
     shortage_minutes: shortageMinutes,
+    permission_minutes: permissionMinutes,
     missing_minute_deduction: toRupees(deduction),
 
     approved_ot_minutes: approvedOtMinutes,

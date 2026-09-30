@@ -1,3 +1,4 @@
+const { PERMISSION_COLUMNS, PERMISSION_FROM } = require("./lib/attendance_permission_select");
 const logger = require("../utils/logger");
 const { activeOverrideCondition } = require("../utils/shift_override_active");
 const {
@@ -87,6 +88,12 @@ const CALCULATION_COLUMNS = [
   "ot_request_approved_minutes", "ot_request_id",
   "ot_rate", "status", "is_final", "review_reasons", "approval_request_id",
   "calculation_version",
+  // PERMISSION - paid forgiven shortage, never worked time. What the date's
+  // effective permissions actually covered; `shortage_minutes` above is the
+  // charge after them. See `20261107120000-attendance-permission`.
+  "permission_ids", "permission_window_minutes", "permission_minutes",
+  "permission_late_minutes", "permission_early_minutes", "permission_away_minutes",
+  "shortage_before_permission_minutes", "payable_minutes",
 ];
 
 /**
@@ -253,6 +260,7 @@ const MONTHLY_PAYROLL_COLUMNS = [
   "shortage_minutes", "missing_minute_deduction", "approved_ot_minutes",
   "approved_ot_earnings",
   "total_attendance_payable", "held_dates", "is_final", "payroll_version",
+  "permission_minutes",
 ];
 
 async function upsertMonthlyPayrollOnConnection(connection, row) {
@@ -347,6 +355,24 @@ class AttendanceCalculationRepository {
    * greatest id per date. The table is append-only, so this is a plain read
    * of what every edit recorded.
    */
+  /**
+   * Every permission row of the employee over the range, in EVERY state -
+   * pending, approved, revoked - because the screens show them all. Which of
+   * them reach the engine is decided in one place,
+   * `utils/attendance_permission.js#resolvePermissionRows`.
+   */
+  async getPermissionsForRange(employeeId, fromDate, toDate) {
+    return this._read(
+      "GET-PERMISSIONS",
+      `SELECT ${PERMISSION_COLUMNS}
+         ${PERMISSION_FROM}
+        WHERE p.employee_id = ?
+          AND p.attendance_date BETWEEN ? AND ?
+        ORDER BY p.attendance_date ASC, p.permission_from ASC, p.attendance_permission_id ASC`,
+      [employeeId, fromDate, toDate]
+    );
+  }
+
   async getDateShiftOverrides(employeeId, fromDate, toDate) {
     return this._read(
       "GET-DATE-SHIFT-OVERRIDES",

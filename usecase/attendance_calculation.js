@@ -36,6 +36,11 @@ const { istToday } = require("../utils/istDate");
 const { partitionClosedDays, endOfIstDay } = require("../utils/attendance_persist_guard");
 const { payrollLockedError } = require("../utils/attendance_payroll_lock");
 const readTiming = require("../utils/attendance_read_timing");
+const {
+  resolvePermissionRows,
+  permissionsByDate,
+  permissionForDisplay,
+} = require("../utils/attendance_permission");
 
 /**
  * Attendance v2 - the orchestration between the repository and the pure
@@ -581,7 +586,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     // Each read is named for the temporary read timing (a no-op outside a
     // timed request). They run in parallel, so their durations overlap.
     const t = readTiming.phase;
-    const [assignments, fetchedRawPunches, regularized, employee, approvals, storedOverrides] =
+    const [assignments, fetchedRawPunches, regularized, employee, approvals, storedOverrides, permissions] =
       await Promise.all([
         t("shift_assignment_lookup", () => attendanceCalculationRepo.getShiftAssignmentHistory(employee_id)),
         t("raw_punch_lookup", () =>
@@ -601,6 +606,13 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
         t("shift_override_lookup", () =>
           attendanceCalculationRepo.getDateShiftOverrides
             ? attendanceCalculationRepo.getDateShiftOverrides(employee_id, from, punchWindowTo)
+            : []
+        ),
+        // PERMISSION rows in every state; which reach the engine is decided
+        // per date by `resolvePermissionRows`.
+        t("permission_lookup", () =>
+          attendanceCalculationRepo.getPermissionsForRange
+            ? attendanceCalculationRepo.getPermissionsForRange(employee_id, from, to)
             : []
         ),
       ]);
@@ -783,6 +795,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       rawPunches,
       regularized,
       approvals,
+      permissions: permissions || [],
       break_override_minutes: breakOverrideMinutes(employee),
       // The employee's Extra Break Hours, already in whole minutes. Read from
       // the SAME employee row as the override, on the same one current-value
@@ -896,6 +909,12 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     // no override of it. Only that one request is withdrawn - any other
     // request or override on the date is read as stored.
     exclude_request_id = null,
+    // A PERMISSION change being committed in the caller's own transaction -
+    // a DIRECT grant (`add`) or revoke (`exclude_ids`) - so the stored day is
+    // the day as it will read once the change commits. The `assume` of a
+    // PERMISSION request and `exclude_request_id` are folded in below; see
+    // `utils/attendance_permission.js#resolvePermissionRows`.
+    assume_permissions = null,
     // THE READ OVERLAY, supplied only by `readRange`. A map of
     // `YYYY-MM-DD` -> stored row: where one exists for a date that has
     // CLOSED, that row is what comes back and the engine's answer for that
@@ -942,6 +961,25 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       to,
     });
 
+    // THE PERMISSION OVERLAY, in one object: whatever the caller is about
+    // to commit, plus a PERMISSION request being decided (`assume`) or
+    // revoked (`exclude_request_id`) in the same transaction.
+    const permissionOverlay = {
+      ...(assume_permissions || {}),
+      exclude_request_id:
+        exclude_request_id === null || exclude_request_id === undefined ? null : exclude_request_id,
+      approve_request_id:
+        assume && assume.request_type === "PERMISSION" && assume.status === "APPROVED"
+          ? assume.attendance_approval_request_id
+          : null,
+    };
+    const permissionRowsByDate = permissionsByDate([
+      ...(context.permissions || []),
+      ...((assume_permissions && assume_permissions.add) || []),
+    ]);
+    const permissionsFor = (date) =>
+      resolvePermissionRows(permissionRowsByDate.get(date) || [], { ...permissionOverlay, add: [] });
+
     const regularizedByDate = new Map();
     (context.regularized || []).forEach((row) => {
       const date = toDateOnly(row.attendance_date);
@@ -973,6 +1011,10 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       const slot = approvalByDate.get(date);
       if (row.request_type === "OT") slot.ot = row;
       else if (row.request_type === "SHIFT_CHANGE") slot.shift = row;
+      // A PERMISSION request is not an attendance correction: it proposes
+      // no punch and must never hold the date as REGULARIZATION_PENDING.
+      // Its state reaches the day through its permission rows.
+      else if (row.request_type === "PERMISSION") return;
       else slot.regularization = row;
     });
 
@@ -1011,7 +1053,9 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
           // the settled one, committed with the approval.
           finalization_state: assume.status === "APPROVED" ? "SETTLED" : "NOT_REQUIRED",
         };
-        if (assumed.request_type === "OT") {
+        if (assumed.request_type === "PERMISSION") {
+          // Carried by `permissionOverlay`; it touches no request slot.
+        } else if (assumed.request_type === "OT") {
           otRequest = assumed;
         } else if (assumed.request_type === "SHIFT_CHANGE") {
           // A shift decision being committed in this very transaction. The
@@ -1056,9 +1100,11 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
         !!approval &&
         (approval.status === "PENDING" || (approval.status === "APPROVED" && !regularizationSettled));
 
+      const datePermissions = permissionsFor(date);
       const calculated = calculateAttendanceDay({
         employee_id,
         attendance_date: date,
+        permissions: datePermissions.effective,
         shift: resolution.snapshot,
         shift_status: resolution.status,
         punches: rawByDate.get(date) || [],
@@ -1105,6 +1151,10 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
         ...otClaimFor({ day, otRequest, otSettled }),
         ...correctionClaimFor({ approval }),
         ...shiftChangeClaimFor({ shiftRequest }),
+        // The evidence beside the figures: every permission of the date in
+        // every state, so a screen can show a pending request, a revoked
+        // grant and what was applied. The minutes are the day's own.
+        permissions: datePermissions.all.map(permissionForDisplay),
         shift_resolution_status: resolution.status,
         // Display only: the live shift name, and whether the date's shift came
         // from the dated history or from a single-date edit.
@@ -1343,6 +1393,15 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     review_reasons: JSON.stringify(day.review_reasons || []),
     approval_request_id: day.approval_request_id,
     calculation_version: CALCULATION_VERSION,
+    permission_ids: JSON.stringify(day.permission_ids || []),
+    permission_window_minutes: day.permission_window_minutes || 0,
+    permission_minutes: day.permission_minutes || 0,
+    permission_late_minutes: day.permission_late_minutes || 0,
+    permission_early_minutes: day.permission_early_minutes || 0,
+    permission_away_minutes: day.permission_away_minutes || 0,
+    shortage_before_permission_minutes:
+      day.shortage_before_permission_minutes === undefined ? null : day.shortage_before_permission_minutes,
+    payable_minutes: day.payable_minutes === undefined ? null : day.payable_minutes,
   });
 
   /**
