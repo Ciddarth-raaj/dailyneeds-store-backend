@@ -434,6 +434,17 @@ class Server {
     this.advanceRequestRepo = require("./repository/advance_request")(
       this.mysql.connection
     );
+    // LR Follow-up: the follow-ups and their history, the minimal Credit
+    // Purchase entry, and the one Transporter Master both sources share.
+    this.lrFollowupRepo = require("./repository/lr_followup")(
+      this.mysql.connection
+    );
+    this.creditPurchaseRepo = require("./repository/credit_purchase")(
+      this.mysql.connection
+    );
+    this.transporterMasterRepo = require("./repository/transporter_master")(
+      this.mysql.connection
+    );
     this.telegramDepartmentsRepo = require("./repository/telegram_departments")(
       this.mysql.connection
     );
@@ -1280,8 +1291,22 @@ class Server {
         membershipQueue: this.telegramMembershipJobRepo,
       }
     );
+    this.transporterMasterUsecase = require("./usecase/transporter_master")(
+      this.transporterMasterRepo
+    );
+    this.lrFollowupUsecase = require("./usecase/lr_followup")(
+      this.lrFollowupRepo,
+      this.transporterMasterUsecase
+    );
+    this.creditPurchaseUsecase = require("./usecase/credit_purchase")(
+      this.creditPurchaseRepo,
+      this.lrFollowupUsecase,
+      this.transporterMasterUsecase
+    );
+    // A paid advance opens its LR Follow-up in the payment's transaction.
     this.advanceRequestUsecase = require("./usecase/advance_request")(
-      this.advanceRequestRepo
+      this.advanceRequestRepo,
+      { lrFollowup: this.lrFollowupUsecase }
     );
     this.ticketUsecase = require("./usecase/ticket")(
       this.ticketRepo,
@@ -1807,6 +1832,20 @@ class Server {
       this.advanceRequestUsecase,
       this.permissions
     );
+    const lrFollowupRouter = require("./routes/lr_followup")(
+      this.lrFollowupUsecase,
+      this.permissions,
+      this.dashboardScope
+    );
+    const creditPurchaseRouter = require("./routes/credit_purchase")(
+      this.creditPurchaseUsecase,
+      this.permissions,
+      this.dashboardScope
+    );
+    const transporterMasterRouter = require("./routes/transporter_master")(
+      this.transporterMasterUsecase,
+      this.permissions
+    );
     const ticketRouter = require("./routes/ticket")(
       this.ticketUsecase,
       this.permissions
@@ -2023,6 +2062,9 @@ class Server {
     app.use("/eb-master-list", ebMasterListRouter.getRouter());
     app.use("/ticket", ticketRouter.getRouter());
     app.use("/advance-request", advanceRequestRouter.getRouter());
+    app.use("/lr-followup", lrFollowupRouter.getRouter());
+    app.use("/credit-purchase", creditPurchaseRouter.getRouter());
+    app.use("/transporter-master", transporterMasterRouter.getRouter());
     app.use("/telegram-departments", telegramDepartmentsRouter.getRouter());
     app.use("/job-worksheet", jobWorksheetRouter.getRouter());
     app.use("/sticker-types", stickerTypesRouter.getRouter());

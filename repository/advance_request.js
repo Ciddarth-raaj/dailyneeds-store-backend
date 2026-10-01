@@ -1,5 +1,6 @@
 // repository/advance_request.js
 const logger = require("../utils/logger");
+const { withTransaction } = require("../utils/transaction");
 
 /** Columns a caller is allowed to sort the list by. */
 const SORTABLE = {
@@ -48,10 +49,13 @@ class AdvanceRequestRepository {
     this.db = db;
   }
 
-  /** Runs a query, logging failures the same way across every method. */
-  run(code, sql, params = []) {
+  /**
+   * Runs a query, logging failures the same way across every method. Given
+   * a `conn` it runs on that connection, inside the caller's transaction.
+   */
+  run(code, sql, params = [], conn = null) {
     return new Promise((resolve, reject) => {
-      this.db.query(sql, params, (err, result) => {
+      (conn || this.db).query(sql, params, (err, result) => {
         if (err) {
           logger.Log({
             level: logger.LEVEL.ERROR,
@@ -180,7 +184,12 @@ class AdvanceRequestRepository {
    * read, and the second write would silently overwrite the first. Here the
    * second matches no rows, and the usecase turns that into a 409.
    */
-  updateStage(id, expectedStatus, nextStatus, fields) {
+  /** Runs `work(conn)` in one transaction (used by the A3 payment step). */
+  transaction(work) {
+    return withTransaction(this.db, work);
+  }
+
+  updateStage(id, expectedStatus, nextStatus, fields, conn = null) {
     const assignments = ["status = ?"];
     const params = [nextStatus];
 
@@ -196,7 +205,8 @@ class AdvanceRequestRepository {
       `UPDATE advance_requests
           SET ${assignments.join(", ")}
         WHERE advance_request_id = ? AND status = ?`,
-      [...params, id, expectedStatus]
+      [...params, id, expectedStatus],
+      conn
     ).then((res) => ({ code: 200, affectedRows: res.affectedRows }));
   }
 
@@ -226,7 +236,7 @@ class AdvanceRequestRepository {
 
   // --------------------------------------------------------------- activity
 
-  createActivity(requestId, employeeId, field, oldValue, newValue) {
+  createActivity(requestId, employeeId, field, oldValue, newValue, conn = null) {
     return this.run(
       "ACTIVITY.CREATE",
       `INSERT INTO advance_request_activity
@@ -238,7 +248,8 @@ class AdvanceRequestRepository {
         field,
         oldValue === null || oldValue === undefined ? null : String(oldValue),
         newValue === null || newValue === undefined ? null : String(newValue),
-      ]
+      ],
+      conn
     ).then((res) => ({ code: 200, id: res.insertId }));
   }
 

@@ -33,6 +33,8 @@ describe(NAME, () => {
       "20261106120000-attendance-approval-revocation-outcome.js",
       "20261107120000-attendance-permission.js",
       "20261108120000-employee-attendance-calculation-mode.js",
+      "20261109110000-transporter-master.js",
+      "20261109120000-lr-followup.js",
     ];
     assert.deepEqual(others.filter((f) => f > `${NAME}.js`).sort(), LATER);
   });

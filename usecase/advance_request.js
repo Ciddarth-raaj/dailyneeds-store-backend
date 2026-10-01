@@ -65,8 +65,14 @@ const describeStatus = (status) => {
 };
 
 class AdvanceRequestUsecase {
-  constructor(advanceRequestRepo) {
+  /**
+   * `lrFollowup` is optional: given one, a payment opens the LR Follow-up
+   * for the advance in the same transaction as the status change. The
+   * workflow itself - stages, statuses, guards - does not depend on it.
+   */
+  constructor(advanceRequestRepo, { lrFollowup = null } = {}) {
     this.advanceRequestRepo = advanceRequestRepo;
+    this.lrFollowup = lrFollowup;
   }
 
   async create(request) {
@@ -108,7 +114,7 @@ class AdvanceRequestUsecase {
    * The repository only updates rows still holding `expectedStatus`, so a
    * second caller racing the first changes nothing and is told why.
    */
-  async applyStage(id, stage, nextStatus, fields, employeeId) {
+  async applyStage(id, stage, nextStatus, fields, employeeId, { afterTransition = null } = {}) {
     const existing = await this.advanceRequestRepo.getById(id);
     if (!existing) throw notFound("Advance request not found");
 
@@ -116,29 +122,44 @@ class AdvanceRequestUsecase {
       throw conflict(describeStatus(existing.status));
     }
 
-    // The update matches on the status just read, not on a fixed one: a stage
-    // that accepts several starting statuses must still only write over the
-    // exact row state this caller saw.
-    const result = await this.advanceRequestRepo.updateStage(
-      id,
-      existing.status,
-      nextStatus,
-      fields
-    );
+    // The status change and its activity row, and - when a stage has one -
+    // whatever must happen with it. Run on a transaction connection when
+    // there is follow-on work, so all of it commits or none of it does.
+    const transition = async (conn) => {
+      // The update matches on the status just read, not on a fixed one: a
+      // stage that accepts several starting statuses must still only write
+      // over the exact row state this caller saw.
+      const result = await this.advanceRequestRepo.updateStage(
+        id,
+        existing.status,
+        nextStatus,
+        fields,
+        conn
+      );
 
-    // No rows matched: someone else moved it between the read and the write.
-    if (result.affectedRows === 0) {
-      const current = await this.advanceRequestRepo.getById(id);
-      throw conflict(describeStatus(current ? current.status : "gone"));
+      // No rows matched: someone else moved it between the read and the write.
+      if (result.affectedRows === 0) {
+        const current = await this.advanceRequestRepo.getById(id);
+        throw conflict(describeStatus(current ? current.status : "gone"));
+      }
+
+      await this.advanceRequestRepo.createActivity(
+        id,
+        employeeId,
+        "status",
+        existing.status,
+        nextStatus,
+        conn
+      );
+
+      if (afterTransition) await afterTransition(conn);
+    };
+
+    if (afterTransition) {
+      await this.advanceRequestRepo.transaction(transition);
+    } else {
+      await transition(null);
     }
-
-    await this.advanceRequestRepo.createActivity(
-      id,
-      employeeId,
-      "status",
-      existing.status,
-      nextStatus
-    );
 
     return this.getById(id);
   }
@@ -235,7 +256,16 @@ class AdvanceRequestUsecase {
         paid_by: employeeId ?? null,
         paid_at: new Date(),
       },
-      employeeId
+      employeeId,
+      {
+        // Paid is where the goods follow-up begins. Written in the payment's
+        // own transaction: a paid advance never exists without its LR
+        // Follow-up, and a failed follow-up leaves the payment unrecorded
+        // rather than silently untracked.
+        afterTransition: this.lrFollowup
+          ? (conn) => this.lrFollowup.createForPaidAdvance(id, employeeId ?? null, conn)
+          : null,
+      }
     );
   }
 
@@ -339,6 +369,6 @@ class AdvanceRequestUsecase {
   }
 }
 
-module.exports = (advanceRequestRepo) => {
-  return new AdvanceRequestUsecase(advanceRequestRepo);
+module.exports = (advanceRequestRepo, options) => {
+  return new AdvanceRequestUsecase(advanceRequestRepo, options);
 };
