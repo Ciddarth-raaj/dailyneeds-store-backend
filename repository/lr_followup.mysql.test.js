@@ -572,6 +572,87 @@ describe("LR Follow-up, as SQL", { skip: !URL && "LR_TEST_MYSQL is not set" }, (
     });
   });
 
+  // ------------------------------------------------------------ over HTTP
+
+  describe("end to end over HTTP, real routes and real SQL", () => {
+    it("transporter -> credit purchase -> LR update -> follow-up -> goods received", async () => {
+      const express = require("express");
+      const app = express();
+      app.use(express.json());
+      app.use((req, res, next) => {
+        req.decoded = { employee_id: EMP, user_type: 2 };
+        req.auth = { userId: 1, employeeId: EMP, isSystemAccount: false };
+        next();
+      });
+      const permissions = { require: () => (req, res, next) => next() };
+      const scope = {
+        DASHBOARD_SCOPE: { NONE: "NONE" },
+        resolveDashboardScope: async () => ({ kind: "ALL_STORES", store_ids: null }),
+      };
+      app.use("/transporter-master", require("../routes/transporter_master")(transporters, permissions).getRouter());
+      app.use("/credit-purchase", require("../routes/credit_purchase")(credit, permissions, scope).getRouter());
+      app.use("/lr-followup", require("../routes/lr_followup")(lr, permissions, scope).getRouter());
+      const server = await new Promise((resolve) => {
+        const s = app.listen(0, () => resolve(s));
+      });
+      const base = `http://127.0.0.1:${server.address().port}`;
+      const call = (method, path, body) =>
+        fetch(`${base}${path}`, {
+          method,
+          headers: { "content-type": "application/json" },
+          body: body ? JSON.stringify(body) : undefined,
+        }).then(async (r) => ({ status: r.status, body: await r.json() }));
+
+      try {
+        const t = await call("POST", "/transporter-master", { transporter_name: "KPN Parcel", contact_no: "+91 91234 56789" });
+        assert.equal(t.status, 201);
+        assert.equal(t.body.data.contact_no, "9123456789");
+        const dup = await call("POST", "/transporter-master", { transporter_name: "kpn  parcel", contact_no: "9123456789" });
+        assert.equal(dup.status, 409);
+        const badPhone = await call("POST", "/transporter-master", { transporter_name: "X", contact_no: "123" });
+        assert.equal(badPhone.status, 422);
+
+        const options = await call("GET", "/transporter-master/options");
+        assert.equal(options.body.data.length, 2);
+
+        const cp = await call("POST", "/credit-purchase", {
+          distributor_code: 11, bill_reference: "KF/77", amount: 999.5, bill_date: "2026-09-30",
+          outlet_id: 2, transporter_id: t.body.data.transporter_id, request_key: "rk-http-1",
+        });
+        assert.equal(cp.status, 201);
+        const fid = cp.body.data.lr_followup_id;
+        assert.ok(fid);
+
+        const lrUpdate = await call("PATCH", `/lr-followup/${fid}/lr`, { lr_no: "LR-555", dispatch_date: "2026-10-01", request_key: "rk-http-2" });
+        assert.equal(lrUpdate.status, 200);
+        assert.equal(lrUpdate.body.data.status, "IN_TRANSIT");
+        assert.equal(lrUpdate.body.data.transporter_name, "KPN Parcel");
+
+        const fu = await call("POST", `/lr-followup/${fid}/follow-ups`, { remark: "Shipment in transit.", next_follow_up_date: "2026-10-02" });
+        assert.equal(fu.status, 201);
+
+        const list = await call("GET", "/lr-followup?source_type=CREDIT_PURCHASE");
+        assert.equal(list.body.data.count, 1);
+        assert.equal(list.body.data.items[0].source_ref, `CP-${cp.body.data.credit_purchase_id}`);
+
+        const received = await call("POST", `/lr-followup/${fid}/goods-received`, { remark: "Received in full" });
+        assert.equal(received.status, 200);
+        assert.equal(received.body.data.status, "CLOSED");
+        const again = await call("POST", `/lr-followup/${fid}/goods-received`, {});
+        assert.equal(again.status, 409);
+
+        const card = await call("GET", `/lr-followup/by-source/CREDIT_PURCHASE/${cp.body.data.credit_purchase_id}`);
+        assert.equal(card.body.data.followup.status, "CLOSED");
+        assert.equal(card.body.data.exception, null);
+
+        const types = (await call("GET", `/lr-followup/${fid}`)).body.data.activity.map((a) => a.activity_type);
+        assert.deepEqual(types, ["CREATED", "LR_UPDATE", "FOLLOW_UP", "GOODS_RECEIVED", "CLOSED"]);
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    });
+  });
+
   // ------------------------------------------------------------ audit safety
 
   describe("audit safety", () => {
