@@ -52,6 +52,7 @@ const ACTIVITY = Object.freeze({
   EXPECTED_DELIVERY_CHANGE: "EXPECTED_DELIVERY_CHANGE",
   GOODS_RECEIVED: "GOODS_RECEIVED",
   CLOSED: "CLOSED",
+  CLOSED_WITHOUT_RECEIPT: "CLOSED_WITHOUT_RECEIPT",
   BACKFILL: "BACKFILL",
   VERIFICATION_DECISION: "VERIFICATION_DECISION",
 });
@@ -69,6 +70,17 @@ const DECISION = Object.freeze({
   CANCELLED: "CANCELLED",
 });
 
+/**
+ * The closure reasons that mean NO STOCK WAS RECEIVED. Reporting separates
+ * these from GOODS_RECEIVED; the database refuses a receipt date or
+ * receiver on any of them.
+ */
+const NON_RECEIPT_REASONS = Object.freeze([
+  CLOSURE_REASON.REFUNDED,
+  CLOSURE_REASON.ADJUSTED,
+  CLOSURE_REASON.CANCELLED,
+]);
+
 /** A follow-up open for business may be closed without receipt for these. */
 const NON_RECEIPT_DECISIONS = Object.freeze([
   DECISION.REFUNDED,
@@ -81,6 +93,8 @@ const PERMISSION = Object.freeze({
   UPDATE: "update_lr_followup",
   MARK_RECEIVED: "mark_lr_goods_received",
   MANAGE_LEGACY: "manage_lr_legacy_verification",
+  CLOSE_WITHOUT_RECEIPT: "close_lr_followup_without_receipt",
+  ALL_STORES: "lr_followup_all_stores",
   VIEW_CREDIT_PURCHASE: "view_credit_purchase",
   CREATE_CREDIT_PURCHASE: "create_credit_purchase",
 });
@@ -196,6 +210,19 @@ function isOverdue(row, today) {
   return Boolean(expected) && expected < today;
 }
 
+/**
+ * How a follow-up ended, for screens and reports: "CLOSED - GOODS_RECEIVED",
+ * "CLOSED - REFUNDED", ... ; null while it is still open.
+ */
+function closureOutcome(row) {
+  if (!row || row.status !== STATUS.CLOSED) return null;
+  return `${STATUS.CLOSED} - ${row.closure_reason || "UNKNOWN"}`;
+}
+
+/** True only for a follow-up closed because the stock physically arrived. */
+const isStockReceived = (row) =>
+  Boolean(row) && row.status === STATUS.CLOSED && row.closure_reason === CLOSURE_REASON.GOODS_RECEIVED;
+
 const followupRef = (id) => (id ? `${REF_PREFIX.FOLLOWUP}-${id}` : null);
 
 function sourceRef(row) {
@@ -216,6 +243,8 @@ function decorate(row, today) {
   return {
     ...row,
     followup_ref: followupRef(row.lr_followup_id),
+    closure_outcome: closureOutcome(row),
+    stock_received: isStockReceived(row),
     source_ref: sourceRef(row),
     ageing_days: ageing,
     ageing_bucket: ageingBucket(ageing),
@@ -251,6 +280,7 @@ module.exports = {
   ACTIVITY,
   DECISION,
   NON_RECEIPT_DECISIONS,
+  NON_RECEIPT_REASONS,
   PERMISSION,
   AGEING_BUCKETS,
   REF_PREFIX,
@@ -268,6 +298,8 @@ module.exports = {
   isOverdue,
   followupRef,
   sourceRef,
+  closureOutcome,
+  isStockReceived,
   decorate,
   outcomeForDecision,
 };

@@ -9,9 +9,11 @@ DROP TABLE IF EXISTS credit_purchases;
 
 DELETE FROM `permissions` WHERE `permission_key` IN (
   'view_lr_followup', 'update_lr_followup', 'mark_lr_goods_received',
-  'manage_lr_legacy_verification', 'view_credit_purchase', 'create_credit_purchase'
+  'manage_lr_legacy_verification', 'view_credit_purchase', 'create_credit_purchase',
+  'close_lr_followup_without_receipt', 'lr_followup_all_stores'
 );
 DELETE FROM `all_permissions` WHERE `permission_key` IN (
   'view_lr_followup', 'update_lr_followup', 'mark_lr_goods_received',
-  'manage_lr_legacy_verification', 'view_credit_purchase', 'create_credit_purchase'
+  'manage_lr_legacy_verification', 'view_credit_purchase', 'create_credit_purchase',
+  'close_lr_followup_without_receipt', 'lr_followup_all_stores'
 );

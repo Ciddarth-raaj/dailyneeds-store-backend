@@ -261,6 +261,13 @@ class LrFollowupRepository {
       clause += " AND f.distributor_code = ?";
       params.push(filters.distributor_code);
     }
+    // Reporting: stock actually received vs. resolved without receipt.
+    if (filters.closure_reason === "WITHOUT_RECEIPT") {
+      clause += " AND f.closure_reason IN ('REFUNDED','ADJUSTED','CANCELLED')";
+    } else if (filters.closure_reason) {
+      clause += " AND f.closure_reason = ?";
+      params.push(filters.closure_reason);
+    }
     if (filters.transporter_id) {
       clause += " AND f.transporter_id = ?";
       params.push(filters.transporter_id);
@@ -347,7 +354,11 @@ class LrFollowupRepository {
          COALESCE(SUM(CASE WHEN f.status IN (${open}) THEN f.amount END), 0) AS outstanding_amount,
          SUM(f.status = 'VERIFICATION_REQUIRED')                            AS verification_required,
          SUM(f.status IN (${open}) AND f.next_follow_up_date IS NOT NULL
-             AND f.next_follow_up_date <= ?)                                AS follow_up_due
+             AND f.next_follow_up_date <= ?)                                AS follow_up_due,
+         SUM(f.status = 'CLOSED' AND f.closure_reason = 'GOODS_RECEIVED')   AS closed_goods_received,
+         SUM(f.status = 'CLOSED' AND f.closure_reason = 'REFUNDED')         AS closed_refunded,
+         SUM(f.status = 'CLOSED' AND f.closure_reason = 'ADJUSTED')         AS closed_adjusted,
+         SUM(f.status = 'CLOSED' AND f.closure_reason = 'CANCELLED')        AS closed_cancelled
        FROM lr_followup f
       WHERE 1 = 1 ${scope.clause}`,
       [
@@ -374,6 +385,11 @@ class LrFollowupRepository {
         outstanding_amount: Number(r.outstanding_amount || 0),
         verification_required: n(r.verification_required),
         follow_up_due: n(r.follow_up_due),
+        closed_goods_received: n(r.closed_goods_received),
+        closed_refunded: n(r.closed_refunded),
+        closed_adjusted: n(r.closed_adjusted),
+        closed_cancelled: n(r.closed_cancelled),
+        closed_without_receipt: n(r.closed_refunded) + n(r.closed_adjusted) + n(r.closed_cancelled),
       };
     });
   }

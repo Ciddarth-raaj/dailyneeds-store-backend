@@ -65,13 +65,14 @@ class CreditPurchaseRepository {
     return this.run(
       "INSERT",
       `INSERT INTO credit_purchases
-         (distributor_code, bill_reference, amount, bill_date, outlet_id,
-          transporter_id, lr_no, dispatch_date, expected_delivery_date,
+         (distributor_code, bill_reference, bill_reference_key, amount, bill_date,
+          outlet_id, transporter_id, lr_no, dispatch_date, expected_delivery_date,
           remarks, request_key, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         purchase.distributor_code,
         purchase.bill_reference,
+        purchase.bill_reference_key,
         purchase.amount,
         purchase.bill_date,
         purchase.outlet_id,
@@ -87,13 +88,13 @@ class CreditPurchaseRepository {
     ).then((res) => res.insertId);
   }
 
-  /** The purchase already raised for this supplier bill, if any. */
-  findBySupplierBill(distributorCode, billReference, conn = null) {
+  /** The purchase already raised for this supplier bill (normalised key), if any. */
+  findBySupplierBill(distributorCode, billReferenceKey, conn = null) {
     return this.run(
       "BYBILL",
       `SELECT credit_purchase_id FROM credit_purchases
-        WHERE distributor_code = ? AND bill_reference = ?`,
-      [distributorCode, billReference],
+        WHERE distributor_code = ? AND bill_reference_key = ?`,
+      [distributorCode, billReferenceKey],
       conn
     ).then((rows) => (rows[0] ? Number(rows[0].credit_purchase_id) : null));
   }

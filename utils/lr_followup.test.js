@@ -71,3 +71,16 @@ describe("legacy decisions", () => {
     assert.throws(() => R.outcomeForDecision("LOST", {}), (e) => e.name === "BusinessRuleError");
   });
 });
+
+describe("closure outcome", () => {
+  it("names how it closed, and separates stock received from everything else", () => {
+    assert.equal(R.closureOutcome({ status: "CLOSED", closure_reason: "GOODS_RECEIVED" }), "CLOSED - GOODS_RECEIVED");
+    assert.equal(R.closureOutcome({ status: "CLOSED", closure_reason: "REFUNDED" }), "CLOSED - REFUNDED");
+    assert.equal(R.closureOutcome({ status: "IN_TRANSIT" }), null);
+    assert.equal(R.isStockReceived({ status: "CLOSED", closure_reason: "GOODS_RECEIVED" }), true);
+    for (const reason of R.NON_RECEIPT_REASONS) {
+      assert.equal(R.isStockReceived({ status: "CLOSED", closure_reason: reason }), false);
+    }
+    assert.deepEqual([...R.NON_RECEIPT_REASONS].sort(), ["ADJUSTED", "CANCELLED", "REFUNDED"]);
+  });
+});

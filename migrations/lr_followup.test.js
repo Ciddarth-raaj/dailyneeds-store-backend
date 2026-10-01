@@ -63,6 +63,18 @@ describe("up", () => {
     assert.doesNotMatch(l, /transporter_name/);
   });
 
+  it("duplicate bills are caught on the normalised key, not the generated id", () => {
+    assert.match(l, /bill_reference_key VARCHAR\(100\) NOT NULL/);
+    assert.match(l, /UNIQUE KEY uq_credpur_supplier_bill \(distributor_code, bill_reference_key\)/);
+  });
+
+  it("closure outcomes cannot be confused: receipt and non-receipt are checked by the database", () => {
+    assert.match(l, /closure_reason ENUM\('GOODS_RECEIVED','REFUNDED','ADJUSTED','CANCELLED'\)/);
+    assert.match(l, /CONSTRAINT chk_lrf_outcome CHECK/);
+    assert.match(l, /closure_reason IN \('REFUNDED','ADJUSTED','CANCELLED'\) AND goods_received_at IS NULL AND goods_received_by IS NULL AND closure_remark IS NOT NULL/);
+    assert.match(l, /'CLOSED_WITHOUT_RECEIPT'/);
+  });
+
   it("history cannot be cascaded away", () => {
     assert.match(l, /CONSTRAINT fk_lrfa_followup FOREIGN KEY \(lr_followup_id\) REFERENCES lr_followup\(lr_followup_id\) \)/);
     assert.doesNotMatch(l, /ON DELETE CASCADE/i);
@@ -75,9 +87,11 @@ describe("up", () => {
       ...[...l.matchAll(/SELECT '([a-z_]+)' FROM DUAL/g)].map((m) => m[1]),
     ];
     assert.deepEqual(keys.sort(), [
+      "close_lr_followup_without_receipt",
       "create_credit_purchase",
       "create_transporter_master",
       "edit_transporter_master",
+      "lr_followup_all_stores",
       "manage_lr_legacy_verification",
       "mark_lr_goods_received",
       "update_lr_followup",

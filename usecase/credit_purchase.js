@@ -1,5 +1,6 @@
 const { istDateOf } = require("../utils/istDate");
 const { toDateOnly } = require("../utils/lr_followup");
+const { cleanBillReference, billReferenceKey } = require("../utils/credit_purchase");
 
 /**
  * The minimal Credit Purchase entry.
@@ -11,8 +12,8 @@ const { toDateOnly } = require("../utils/lr_followup");
  * Duplicate protection, three layers deep:
  *   * the client's request_key - one press of Save is one purchase, however
  *     often the request is retried;
- *   * supplier + bill reference is unique - the same supplier bill cannot be
- *     entered twice;
+ *   * supplier + NORMALISED bill reference is unique (utils/credit_purchase.js)
+ *     - the same supplier bill cannot be entered twice, however it is typed;
  *   * one follow-up per credit_purchase_id, by unique key.
  */
 
@@ -44,22 +45,34 @@ class CreditPurchaseUsecase {
   validate(data) {
     const today = this.today();
     const bill = toDateOnly(data.bill_date);
-    if (!bill) throw named("BusinessRuleError", "Invoice / Bill Date is required.");
-    if (bill > today) throw named("BusinessRuleError", "Invoice / Bill Date cannot be in the future.");
+    if (!bill) throw named("BusinessRuleError", "Bill / Invoice Date is required.");
+    if (bill > today) throw named("BusinessRuleError", "Bill / Invoice Date cannot be in the future.");
     const dispatch = toDateOnly(data.dispatch_date);
     if (dispatch && dispatch > today) throw named("BusinessRuleError", "Dispatch Date cannot be in the future.");
     if (dispatch && dispatch < bill) {
-      throw named("BusinessRuleError", "Dispatch Date cannot be before the Invoice / Bill Date.");
+      throw named("BusinessRuleError", "Dispatch Date cannot be before the Bill / Invoice Date.");
     }
     const expected = toDateOnly(data.expected_delivery_date);
     if (expected && expected < bill) {
-      throw named("BusinessRuleError", "Expected Delivery Date cannot be before the Invoice / Bill Date.");
+      throw named("BusinessRuleError", "Expected Delivery Date cannot be before the Bill / Invoice Date.");
     }
-    const billReference = String(data.bill_reference || "").trim();
-    if (!billReference) throw named("BusinessRuleError", "Credit Purchase / Bill Reference is required.");
+    const billReference = cleanBillReference(data.bill_reference);
+    const billKey = billReferenceKey(billReference);
+    if (!billReference || !billKey) throw named("BusinessRuleError", "Bill / Invoice Reference is required.");
+    if (data.transporter_id === undefined || data.transporter_id === null || data.transporter_id === "") {
+      throw named("BusinessRuleError", "Transporter is required - select one from the Transporter Master.");
+    }
+    if (data.distributor_code === undefined || data.distributor_code === null) {
+      throw named("BusinessRuleError", "Supplier is required.");
+    }
+    if (data.outlet_id === undefined || data.outlet_id === null) {
+      throw named("BusinessRuleError", "Receiving Outlet / Location is required.");
+    }
+    if (!(Number(data.amount) > 0)) throw named("BusinessRuleError", "Amount must be greater than 0.");
     return {
       distributor_code: data.distributor_code,
       bill_reference: billReference,
+      bill_reference_key: billKey,
       amount: data.amount,
       bill_date: bill,
       outlet_id: data.outlet_id,
@@ -86,7 +99,11 @@ class CreditPurchaseUsecase {
           if (replay) return replay;
         }
 
-        const existing = await this.repo.findBySupplierBill(purchase.distributor_code, purchase.bill_reference, conn);
+        const existing = await this.repo.findBySupplierBill(
+          purchase.distributor_code,
+          purchase.bill_reference_key,
+          conn
+        );
         if (existing) {
           throw named(
             "ConflictError",

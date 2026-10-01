@@ -1832,15 +1832,23 @@ class Server {
       this.advanceRequestUsecase,
       this.permissions
     );
+    // LR Follow-up's OWN branch rule (utils/lr_followup_scope.js), not the
+    // dashboard scope: the follow-up desk is company-wide by its own key,
+    // and that key widens no dashboard. It reads only the employee's live
+    // branch and status, through the same small repository.
+    const lrScope = require("./utils/lr_followup_scope").createLrScope(
+      this.permissions,
+      this.dashboardScopeRepo
+    );
     const lrFollowupRouter = require("./routes/lr_followup")(
       this.lrFollowupUsecase,
       this.permissions,
-      this.dashboardScope
+      lrScope
     );
     const creditPurchaseRouter = require("./routes/credit_purchase")(
       this.creditPurchaseUsecase,
       this.permissions,
-      this.dashboardScope
+      lrScope
     );
     const transporterMasterRouter = require("./routes/transporter_master")(
       this.transporterMasterUsecase,

@@ -455,18 +455,18 @@ describe("LR Follow-up, as SQL", { skip: !URL && "LR_TEST_MYSQL is not set" }, (
       // Mark Goods Received is not the legacy path.
       await assert.rejects(lr.markGoodsReceived(fa, {}, EMP, null), (e) => e.name === "ConflictError");
 
-      await lr.resolve(fa, { decision: "GOODS_RECEIVED", remark: "GRN checked: arrived 3 Aug", received_at: "2026-08-03T10:00:00+05:30" }, EMP, null);
+      await lr.resolveLegacy(fa, { decision: "GOODS_RECEIVED", remark: "GRN checked: arrived 3 Aug", received_at: "2026-08-03T10:00:00+05:30" }, EMP, null);
       const da = await lr.getDetail(fa, null);
       assert.equal(da.status, "CLOSED");
       assert.equal(da.closure_reason, "GOODS_RECEIVED");
 
-      await lr.resolve(fb, { decision: "STILL_PENDING", remark: "Supplier yet to dispatch" }, EMP, null);
+      await lr.resolveLegacy(fb, { decision: "STILL_PENDING", remark: "Supplier yet to dispatch" }, EMP, null);
       summary = await lr.summary(null);
       assert.equal(summary.total_open, 1);
       assert.equal(summary.verification_required, 0);
 
       // A decided row cannot be decided again; every decision is in the history.
-      await assert.rejects(lr.resolve(fa, { decision: "REFUNDED", remark: "x" }, EMP, null), (e) => e.name === "ConflictError");
+      await assert.rejects(lr.resolveLegacy(fa, { decision: "REFUNDED", remark: "x" }, EMP, null), (e) => e.name === "ConflictError");
       const decisions = await q("SELECT * FROM lr_followup_activity WHERE activity_type = 'VERIFICATION_DECISION'");
       assert.equal(decisions.length, 2);
 
@@ -580,15 +580,17 @@ describe("LR Follow-up, as SQL", { skip: !URL && "LR_TEST_MYSQL is not set" }, (
       const app = express();
       app.use(express.json());
       app.use((req, res, next) => {
-        req.decoded = { employee_id: EMP, user_type: 2 };
+        req.decoded = { employee_id: EMP, user_type: 1 };
         req.auth = { userId: 1, employeeId: EMP, isSystemAccount: false };
         next();
       });
       const permissions = { require: () => (req, res, next) => next() };
-      const scope = {
-        DASHBOARD_SCOPE: { NONE: "NONE" },
-        resolveDashboardScope: async () => ({ kind: "ALL_STORES", store_ids: null }),
-      };
+      // The REAL LR scope rule over the real employee table: EMP (store 1)
+      // holds lr_followup_all_stores, so the CP below for store 2 is visible.
+      const scope = require("../utils/lr_followup_scope").createLrScope(
+        { ADMIN_USER_TYPE: 2, has: async (r, key) => key === "lr_followup_all_stores" },
+        { getEmployeeStore: async (id) => ({ ...(await q("SELECT employee_id, store_id, 1 AS employee_status FROM new_employee WHERE employee_id = ?", [id]))[0] }) }
+      );
       app.use("/transporter-master", require("../routes/transporter_master")(transporters, permissions).getRouter());
       app.use("/credit-purchase", require("../routes/credit_purchase")(credit, permissions, scope).getRouter());
       app.use("/lr-followup", require("../routes/lr_followup")(lr, permissions, scope).getRouter());
@@ -607,6 +609,10 @@ describe("LR Follow-up, as SQL", { skip: !URL && "LR_TEST_MYSQL is not set" }, (
         const t = await call("POST", "/transporter-master", { transporter_name: "KPN Parcel", contact_no: "+91 91234 56789" });
         assert.equal(t.status, 201);
         assert.equal(t.body.data.contact_no, "9123456789");
+        const noTransporter = await call("POST", "/credit-purchase", {
+          distributor_code: 11, bill_reference: "KF/76", amount: 1, bill_date: "2026-09-30", outlet_id: 2,
+        });
+        assert.equal(noTransporter.status, 400);
         const dup = await call("POST", "/transporter-master", { transporter_name: "kpn  parcel", contact_no: "9123456789" });
         assert.equal(dup.status, 409);
         const badPhone = await call("POST", "/transporter-master", { transporter_name: "X", contact_no: "123" });
@@ -645,11 +651,151 @@ describe("LR Follow-up, as SQL", { skip: !URL && "LR_TEST_MYSQL is not set" }, (
         assert.equal(card.body.data.followup.status, "CLOSED");
         assert.equal(card.body.data.exception, null);
 
-        const types = (await call("GET", `/lr-followup/${fid}`)).body.data.activity.map((a) => a.activity_type);
-        assert.deepEqual(types, ["CREATED", "LR_UPDATE", "FOLLOW_UP", "GOODS_RECEIVED", "CLOSED"]);
+        const detail = (await call("GET", `/lr-followup/${fid}`)).body.data;
+        assert.deepEqual(detail.activity.map((a) => a.activity_type), ["CREATED", "LR_UPDATE", "FOLLOW_UP", "GOODS_RECEIVED", "CLOSED"]);
+        assert.equal(detail.closure_outcome, "CLOSED - GOODS_RECEIVED");
+        assert.equal(detail.stock_received, true);
+
+        // A second credit purchase, closed WITHOUT receipt over HTTP.
+        const cp2 = await call("POST", "/credit-purchase", {
+          distributor_code: 11, bill_reference: "KF/78", amount: 50, bill_date: "2026-09-30",
+          outlet_id: 1, transporter_id: t.body.data.transporter_id,
+        });
+        const f2 = cp2.body.data.lr_followup_id;
+        const closed = await call("POST", `/lr-followup/${f2}/close-without-receipt`, { closure_reason: "CANCELLED", remark: "Supplier cancelled the order" });
+        assert.equal(closed.status, 200);
+        assert.equal(closed.body.data.closure_outcome, "CLOSED - CANCELLED");
+        assert.equal(closed.body.data.stock_received, false);
+        const stock = (await call("GET", "/lr-followup?status=CLOSED&closure_reason=GOODS_RECEIVED")).body.data;
+        const without = (await call("GET", "/lr-followup?status=CLOSED&closure_reason=WITHOUT_RECEIPT")).body.data;
+        assert.deepEqual([stock.count, without.count], [1, 1]);
       } finally {
         await new Promise((resolve) => server.close(resolve));
       }
+    });
+  });
+
+  // ------------------------------------------------------------ corrections
+
+  describe("Credit Purchase: transporter mandatory, duplicates normalised", () => {
+    it("refuses a credit purchase with no transporter", async () => {
+      await assert.rejects(credit.create(creditInput({ transporter_id: null }), EMP, null), (e) => /Transporter is required/.test(e.message));
+      await assert.rejects(q(
+        "INSERT INTO credit_purchases (distributor_code, bill_reference, bill_reference_key, amount, bill_date, outlet_id, transporter_id, created_by) VALUES (11, 'X', 'X', 1, '2026-09-30', 1, NULL, 501)"
+      ), /cannot be null/i);
+      assert.equal((await q("SELECT * FROM credit_purchases")).length, 0);
+    });
+
+    it("the same supplier bill typed differently is a duplicate; another supplier's is not", async () => {
+      await credit.create(creditInput({ bill_reference: "KF/2026/101" }), EMP, null);
+      for (const typed of ["kf-2026-101", " KF 2026 101 ", "Kf.2026.101"]) {
+        await assert.rejects(
+          credit.create(creditInput({ bill_reference: typed, request_key: `k-${typed}` }), EMP, null),
+          (e) => e.name === "ConflictError",
+          typed
+        );
+      }
+      await credit.create(creditInput({ distributor_code: 10, bill_reference: "kf-2026-101" }), EMP, null);
+      assert.equal((await q("SELECT * FROM credit_purchases")).length, 2);
+      assert.equal((await q("SELECT * FROM lr_followup")).length, 2);
+    });
+
+    it("two people entering the same bill at once: one purchase, one follow-up", async () => {
+      const outcomes = await Promise.allSettled([
+        credit.create(creditInput({ bill_reference: "KF/9", request_key: "a" }), EMP, null),
+        credit.create(creditInput({ bill_reference: "kf 9", request_key: "b" }), EMP, null),
+      ]);
+      assert.equal(outcomes.filter((o) => o.status === "fulfilled").length, 1);
+      assert.equal(outcomes.find((o) => o.status === "rejected").reason.name, "ConflictError");
+      assert.equal((await q("SELECT * FROM lr_followup")).length, 1);
+    });
+  });
+
+  describe("closure outcomes", () => {
+    let fid;
+    beforeEach(async () => {
+      const id = await paidAdvance();
+      fid = (await followupsFor(id))[0].lr_followup_id;
+    });
+
+    it("closing without receipt keeps the reason, remark, user and time - and no receipt", async () => {
+      clock.set("2026-10-02T06:00:00Z");
+      const d = await lr.closeWithoutReceipt(fid, { closure_reason: "REFUNDED", remark: "Supplier refunded in full" }, EMP, null);
+      assert.equal(d.status, "CLOSED");
+      assert.equal(d.closure_reason, "REFUNDED");
+      assert.equal(d.closure_outcome, "CLOSED - REFUNDED");
+      assert.equal(d.stock_received, false);
+      assert.equal(d.closure_remark, "Supplier refunded in full");
+      assert.equal(Number(d.closed_by), EMP);
+      assert.ok(d.closed_at);
+      assert.equal(d.goods_received_at, null);
+      assert.equal(d.goods_received_by, null);
+      const last = (await history(fid)).pop();
+      assert.equal(last.activity_type, "CLOSED_WITHOUT_RECEIPT");
+      assert.equal(Number(last.created_by), EMP);
+      assert.match(last.remark, /WITHOUT stock receipt/);
+    });
+
+    it("needs a remark and a non-receipt reason, and cannot close twice", async () => {
+      await assert.rejects(lr.closeWithoutReceipt(fid, { closure_reason: "REFUNDED", remark: " " }, EMP, null), (e) => e.name === "BusinessRuleError");
+      await assert.rejects(lr.closeWithoutReceipt(fid, { closure_reason: "GOODS_RECEIVED", remark: "x" }, EMP, null), (e) => e.name === "BusinessRuleError");
+      await lr.closeWithoutReceipt(fid, { closure_reason: "ADJUSTED", remark: "Adjusted against next bill" }, EMP, null);
+      await assert.rejects(lr.closeWithoutReceipt(fid, { closure_reason: "CANCELLED", remark: "x" }, EMP, null), (e) => e.name === "ConflictError");
+      await assert.rejects(lr.markGoodsReceived(fid, {}, EMP, null), (e) => e.name === "ConflictError");
+    });
+
+    it("the database itself refuses an outcome that mixes receipt and non-receipt", async () => {
+      const base = "UPDATE lr_followup SET status = 'CLOSED', closed_at = NOW(), closed_by = 501";
+      await assert.rejects(q(`${base}, closure_reason = 'REFUNDED', closure_remark = 'x', goods_received_by = 501, goods_received_at = NOW() WHERE lr_followup_id = ?`, [fid]), /chk_lrf_outcome/);
+      await assert.rejects(q(`${base}, closure_reason = 'CANCELLED', closure_remark = NULL WHERE lr_followup_id = ?`, [fid]), /chk_lrf_outcome/);
+      await assert.rejects(q(`${base}, closure_reason = 'GOODS_RECEIVED' WHERE lr_followup_id = ?`, [fid]), /chk_lrf_outcome/);
+      await assert.rejects(q("UPDATE lr_followup SET status = 'CLOSED', closure_reason = 'REFUNDED', closure_remark = 'x', closed_at = NOW() WHERE lr_followup_id = ?", [fid]), /chk_lrf_closed/);
+    });
+
+    it("reports split stock received from resolved without receipt", async () => {
+      const second = (await followupsFor(await paidAdvance()))[0].lr_followup_id;
+      const third = (await followupsFor(await paidAdvance()))[0].lr_followup_id;
+      await lr.markGoodsReceived(fid, {}, EMP, null);
+      await lr.closeWithoutReceipt(second, { closure_reason: "CANCELLED", remark: "Order cancelled" }, EMP, null);
+      await lr.closeWithoutReceipt(third, { closure_reason: "REFUNDED", remark: "Refunded" }, EMP, null);
+      const s = await lr.summary(null);
+      assert.deepEqual(
+        [s.closed_goods_received, s.closed_cancelled, s.closed_refunded, s.closed_adjusted, s.closed_without_receipt],
+        [1, 1, 1, 0, 2]
+      );
+      assert.equal((await lr.list({ status: "CLOSED", closure_reason: "GOODS_RECEIVED" }, null, 50, 0)).count, 1);
+      assert.equal((await lr.list({ status: "CLOSED", closure_reason: "WITHOUT_RECEIPT" }, null, 50, 0)).count, 2);
+    });
+
+    it("a legacy row resolved as refunded is recorded as closed without receipt", async () => {
+      const res = await q(
+        "INSERT INTO advance_requests (distributor_code, amount, outlet_id, status, created_by, paid_at) VALUES (10, 1, 1, 'paid', 501, '2026-08-01 10:00:00')"
+      );
+      await lr.backfill(EMP);
+      const legacyId = (await followupsFor(res.insertId))[0].lr_followup_id;
+      await assert.rejects(lr.closeWithoutReceipt(legacyId, { closure_reason: "REFUNDED", remark: "x" }, EMP, null), (e) => e.name === "ConflictError");
+      const d = await lr.resolveLegacy(legacyId, { decision: "REFUNDED", remark: "Refund received 10 Aug" }, EMP, null);
+      assert.equal(d.closure_outcome, "CLOSED - REFUNDED");
+      assert.deepEqual((await history(legacyId)).map((a) => a.activity_type), ["BACKFILL", "VERIFICATION_DECISION", "CLOSED_WITHOUT_RECEIPT"]);
+    });
+  });
+
+  describe("LR scope - the follow-up desk is company-wide by its own key", () => {
+    it("an all-stores LR user sees every branch's follow-ups, an own-store user only theirs", async () => {
+      await paidAdvance({ outlet: 1 });
+      await paidAdvance({ outlet: 2 });
+      await q("UPDATE new_employee SET store_id = 2 WHERE employee_id = 503");
+      const { createLrScope } = require("../utils/lr_followup_scope");
+      const repo = {
+        getEmployeeStore: async (id) =>
+          (await q("SELECT employee_id, store_id, 1 AS employee_status FROM new_employee WHERE employee_id = ?", [id]))[0],
+      };
+      const desk = createLrScope({ has: async (r, k) => k === "lr_followup_all_stores" }, repo);
+      const storeUser = createLrScope({ has: async (r, k) => k === "dashboard_scope_all_stores" }, repo);
+      const deskIds = await desk.storeIds({ decoded: { employee_id: 503, user_type: 1 } });
+      const storeIds = await storeUser.storeIds({ decoded: { employee_id: 503, user_type: 1 } });
+      assert.equal((await lr.list({}, deskIds, 50, 0)).count, 2);
+      assert.equal((await lr.list({}, storeIds, 50, 0)).count, 1); // the dashboard key widens nothing here
     });
   });
 

@@ -563,6 +563,7 @@ class LrFollowupUsecase {
         {
           status: STATUS.CLOSED,
           closure_reason: CLOSURE_REASON.GOODS_RECEIVED,
+          closure_remark: remark || null,
           goods_received_at: receivedAt,
           goods_received_by: actorId,
           closed_at: at,
@@ -601,15 +602,12 @@ class LrFollowupUsecase {
   }
 
   /**
-   * A recorded decision, for two cases:
-   *
-   *   * a VERIFICATION_REQUIRED (legacy) follow-up: any of the five answers;
-   *   * a live follow-up whose goods will never come: refunded, adjusted or
-   *     cancelled only - received goes through Mark Goods Received.
-   *
-   * A remark is required for every decision; it is the audit's "why".
+   * Legacy Follow-up Verification: the answer for a backfilled
+   * (VERIFICATION_REQUIRED) follow-up. Goods Still Pending puts it on the
+   * live dashboard; every other answer closes it with that answer as the
+   * closure reason. Remark mandatory; the original advance is never touched.
    */
-  async resolve(id, data, actorId, storeIds) {
+  async resolveLegacy(id, data, actorId, storeIds) {
     const decision = data.decision;
     if (!DECISION[decision]) throw invalid(`Unknown decision: ${decision}`);
     const remark = clean(data.remark);
@@ -624,20 +622,19 @@ class LrFollowupUsecase {
       if (isTerminal(row.status)) {
         throw conflict(`${followupRef(row.lr_followup_id)} is already closed.`);
       }
-      const legacy = row.status === STATUS.VERIFICATION_REQUIRED;
-      if (!legacy && !NON_RECEIPT_DECISIONS.includes(decision)) {
+      if (row.status !== STATUS.VERIFICATION_REQUIRED) {
         throw conflict(
-          decision === DECISION.GOODS_RECEIVED
-            ? "Use Mark Goods Received for a live follow-up."
-            : "This follow-up is not waiting for verification."
+          `${followupRef(row.lr_followup_id)} is not waiting for verification. ` +
+            "Use Mark Goods Received, or Close without receipt."
         );
       }
 
       const outcome = outcomeForDecision(decision, row);
-      const fields = { status: outcome.status };
+      const fields = { status: outcome.status, latest_remark: remark, last_follow_up_at: at };
       if (outcome.status === STATUS.CLOSED) {
         Object.assign(fields, {
           closure_reason: outcome.closure_reason,
+          closure_remark: remark,
           closed_at: at,
           closed_by: actorId,
           next_follow_up_date: null,
@@ -647,8 +644,6 @@ class LrFollowupUsecase {
           fields.goods_received_by = actorId;
         }
       }
-      fields.latest_remark = remark;
-      fields.last_follow_up_at = at;
 
       const affected = await this.repo.update(id, row.status, fields, conn);
       if (affected === 0) throw conflict("This follow-up changed while you were working on it. Reload it.");
@@ -656,13 +651,13 @@ class LrFollowupUsecase {
       await this.repo.insertActivity(
         {
           lr_followup_id: id,
-          activity_type: legacy ? ACTIVITY.VERIFICATION_DECISION : ACTIVITY.CLOSED,
+          activity_type: ACTIVITY.VERIFICATION_DECISION,
           remark: `${DECISION_LABEL[decision]}: ${remark}`,
           old_status: row.status,
           new_status: outcome.status,
           details: {
             decision,
-            legacy,
+            closure_reason: outcome.closure_reason,
             received_at: receivedAt ? receivedAt.toISOString() : null,
           },
           request_key: data.request_key ?? null,
@@ -670,19 +665,79 @@ class LrFollowupUsecase {
         },
         conn
       );
-      if (legacy && outcome.status === STATUS.CLOSED) {
+      if (outcome.status === STATUS.CLOSED) {
+        const received = outcome.closure_reason === CLOSURE_REASON.GOODS_RECEIVED;
         await this.repo.insertActivity(
           {
             lr_followup_id: id,
-            activity_type: ACTIVITY.CLOSED,
-            remark: `Closed on verification: ${DECISION_LABEL[decision].toLowerCase()}.`,
+            activity_type: received ? ACTIVITY.CLOSED : ACTIVITY.CLOSED_WITHOUT_RECEIPT,
+            remark: received
+              ? "Closed on verification: goods received."
+              : `Closed on verification WITHOUT stock receipt: ${DECISION_LABEL[decision].toLowerCase()}.`,
             old_status: STATUS.VERIFICATION_REQUIRED,
             new_status: STATUS.CLOSED,
+            details: { closure_reason: outcome.closure_reason },
             created_by: actorId,
           },
           conn
         );
       }
+    });
+  }
+
+  /**
+   * The exceptional close of a LIVE follow-up whose goods will never come:
+   * REFUNDED, ADJUSTED or CANCELLED. Its own permission and endpoint, a
+   * mandatory remark, the user and time on the row and in the history - and
+   * a closure reason that reporting can never confuse with goods received.
+   * The database refuses a receipt date or receiver on such a row.
+   */
+  async closeWithoutReceipt(id, data, actorId, storeIds) {
+    const reason = data.closure_reason;
+    if (!NON_RECEIPT_DECISIONS.includes(reason)) {
+      throw invalid("Closure reason must be Refunded, Adjusted or Cancelled.");
+    }
+    const remark = clean(data.remark);
+    if (!remark) throw invalid("A remark is required to close a follow-up without receipt.");
+
+    return this.mutate(id, storeIds, data.request_key, async (row, conn, at) => {
+      if (isTerminal(row.status)) {
+        throw conflict(`${followupRef(row.lr_followup_id)} is already closed.`);
+      }
+      if (row.status === STATUS.VERIFICATION_REQUIRED) {
+        throw conflict(`${followupRef(row.lr_followup_id)} is a legacy row: record it on Legacy Verification.`);
+      }
+
+      const affected = await this.repo.update(
+        id,
+        row.status,
+        {
+          status: STATUS.CLOSED,
+          closure_reason: reason,
+          closure_remark: remark,
+          closed_at: at,
+          closed_by: actorId,
+          next_follow_up_date: null,
+          latest_remark: remark,
+          last_follow_up_at: at,
+        },
+        conn
+      );
+      if (affected === 0) throw conflict("This follow-up changed while you were working on it. Reload it.");
+
+      await this.repo.insertActivity(
+        {
+          lr_followup_id: id,
+          activity_type: ACTIVITY.CLOSED_WITHOUT_RECEIPT,
+          remark: `Closed WITHOUT stock receipt - ${DECISION_LABEL[reason]}: ${remark}`,
+          old_status: row.status,
+          new_status: STATUS.CLOSED,
+          details: { closure_reason: reason },
+          request_key: data.request_key ?? null,
+          created_by: actorId,
+        },
+        conn
+      );
     });
   }
 

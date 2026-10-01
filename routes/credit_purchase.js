@@ -40,10 +40,10 @@ const forbidden = (message, reason) => {
 };
 
 class CreditPurchaseRoutes {
-  constructor(usecase, permissions, dashboardScope) {
+  constructor(usecase, permissions, lrScope) {
     this.usecase = usecase;
     this.permissions = permissions;
-    this.dashboardScope = dashboardScope;
+    this.lrScope = lrScope;
     this.router = express.Router();
     this.init();
   }
@@ -54,15 +54,13 @@ class CreditPurchaseRoutes {
     return result.value;
   }
 
-  async storeIds(req, featureKey) {
-    const scope = await this.dashboardScope.resolveDashboardScope(req, featureKey);
-    if (scope.kind === this.dashboardScope.DASHBOARD_SCOPE.NONE) {
-      throw forbidden(
-        "Your account has no branch scope for Credit Purchases. Ask an administrator to grant Own Store or All Stores.",
-        scope.reason
-      );
-    }
-    return scope.store_ids;
+  /**
+   * The branches this caller may see: null = all, [id] = their own. The
+   * module's own rule (utils/lr_followup_scope.js), not the dashboard
+   * scope. The feature key was already checked by the route guard.
+   */
+  storeIds(req) {
+    return this.lrScope.storeIds(req);
   }
 
   handle(fn) {
@@ -91,7 +89,7 @@ class CreditPurchaseRoutes {
           to_date: date.allow("").optional(),
           search: Joi.string().max(100).allow("").optional(),
         });
-        const storeIds = await this.storeIds(req, PERMISSION.VIEW_CREDIT_PURCHASE);
+        const storeIds = await this.storeIds(req);
         const data = await this.usecase.list(
           {
             distributor_code: q.distributor_code,
@@ -111,7 +109,7 @@ class CreditPurchaseRoutes {
       "/:id(\\d+)",
       needs(PERMISSION.VIEW_CREDIT_PURCHASE),
       this.handle(async (req, res) => {
-        const storeIds = await this.storeIds(req, PERMISSION.VIEW_CREDIT_PURCHASE);
+        const storeIds = await this.storeIds(req);
         res.json({ code: 200, data: await this.usecase.getById(parseInt(req.params.id, 10), storeIds) });
       })
     );
@@ -121,7 +119,7 @@ class CreditPurchaseRoutes {
       needs(PERMISSION.CREATE_CREDIT_PURCHASE),
       this.handle(async (req, res) => {
         const body = this.validate(req.body, createSchema);
-        const storeIds = await this.storeIds(req, PERMISSION.CREATE_CREDIT_PURCHASE);
+        const storeIds = await this.storeIds(req);
         const data = await this.usecase.create(
           body,
           requireEmployee(req, "Raising a credit purchase"),
@@ -137,5 +135,5 @@ class CreditPurchaseRoutes {
   }
 }
 
-module.exports = (usecase, permissions, dashboardScope) =>
-  new CreditPurchaseRoutes(usecase, permissions, dashboardScope);
+module.exports = (usecase, permissions, lrScope) =>
+  new CreditPurchaseRoutes(usecase, permissions, lrScope);

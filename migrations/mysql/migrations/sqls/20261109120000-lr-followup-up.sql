@@ -11,7 +11,7 @@
 -- the audited legacy / admin decision, when the money was refunded,
 -- adjusted or the order cancelled).
 --
--- Three new tables, six permission keys, nothing else. Builds on
+-- Three new tables, eight permission keys, nothing else. Builds on
 -- 20261109110000-transporter-master:
 --
 --   credit_purchases       the minimal Credit Purchase entry, raised in dnds.
@@ -36,7 +36,12 @@ CREATE TABLE credit_purchases (
     credit_purchase_id     BIGINT PRIMARY KEY AUTO_INCREMENT,
     -- Same supplier master as advance_requests.distributor_code.
     distributor_code       INT NOT NULL,
-    bill_reference         VARCHAR(100) NOT NULL COMMENT 'Credit purchase / supplier bill reference',
+    bill_reference         VARCHAR(100) NOT NULL COMMENT 'Bill / invoice reference as entered (trimmed)',
+    -- The duplicate-protection key: upper-cased, with spaces and the
+    -- separators people type inconsistently (- / . _ \ #) removed, so
+    -- "KF/2026/101", "kf-2026-101" and "KF 2026 101" are one bill
+    -- (utils/credit_purchase.js billReferenceKey).
+    bill_reference_key     VARCHAR(100) NOT NULL,
     amount                 DECIMAL(12,2) NOT NULL,
     bill_date              DATE NOT NULL COMMENT 'Invoice / bill date; the follow-up ages from here',
     outlet_id              INT NOT NULL COMMENT 'Receiving outlet / location',
@@ -56,8 +61,9 @@ CREATE TABLE credit_purchases (
     updated_at             TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                                      ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uq_credpur_request_key (request_key),
-    -- One supplier bill is one credit purchase.
-    UNIQUE KEY uq_credpur_supplier_bill (distributor_code, bill_reference),
+    -- One supplier bill is one credit purchase, however the reference was
+    -- typed. Not the generated id: two entries of the same bill collide here.
+    UNIQUE KEY uq_credpur_supplier_bill (distributor_code, bill_reference_key),
     KEY idx_credpur_outlet (outlet_id),
     KEY idx_credpur_date (bill_date),
     CONSTRAINT fk_credpur_distributor FOREIGN KEY (distributor_code)
@@ -90,7 +96,11 @@ CREATE TABLE lr_followup (
     status                  ENUM('DISPATCH_PENDING','IN_TRANSIT','GOODS_RECEIVED',
                                  'CLOSED','VERIFICATION_REQUIRED')
                             NOT NULL DEFAULT 'DISPATCH_PENDING',
+    -- WHY it closed. GOODS_RECEIVED is stock actually received; REFUNDED,
+    -- ADJUSTED and CANCELLED are resolved WITHOUT receipt. Reports split on
+    -- this column; the status stays CLOSED for all four.
     closure_reason          ENUM('GOODS_RECEIVED','REFUNDED','ADJUSTED','CANCELLED') NULL,
+    closure_remark          VARCHAR(1000) NULL COMMENT 'mandatory for a closure without receipt',
     goods_received_at       DATETIME NULL,
     goods_received_by       INT(11) NULL,
 
@@ -122,10 +132,23 @@ CREATE TABLE lr_followup (
      OR (source_type = 'CREDIT_PURCHASE'
             AND credit_purchase_id IS NOT NULL AND advance_request_id IS NULL)
     ),
-    -- A closed follow-up always says when and why.
+    -- A closed follow-up always says when, who and why; an open one has no
+    -- closure at all.
     CONSTRAINT chk_lrf_closed CHECK (
-        (status = 'CLOSED' AND closed_at IS NOT NULL AND closure_reason IS NOT NULL)
-     OR (status <> 'CLOSED')
+        (status = 'CLOSED' AND closed_at IS NOT NULL AND closed_by IS NOT NULL
+            AND closure_reason IS NOT NULL)
+     OR (status <> 'CLOSED' AND closure_reason IS NULL AND closed_at IS NULL)
+    ),
+    -- Receipt and non-receipt can never be confused: only GOODS_RECEIVED
+    -- carries a receiver; a closure without receipt carries no receipt date
+    -- or receiver, and must say why.
+    CONSTRAINT chk_lrf_outcome CHECK (
+        (closure_reason IS NULL
+            AND goods_received_at IS NULL AND goods_received_by IS NULL)
+     OR (closure_reason = 'GOODS_RECEIVED' AND goods_received_by IS NOT NULL)
+     OR (closure_reason IN ('REFUNDED','ADJUSTED','CANCELLED')
+            AND goods_received_at IS NULL AND goods_received_by IS NULL
+            AND closure_remark IS NOT NULL AND closure_remark <> '')
     ),
 
     KEY idx_lrf_status_expected (status, expected_delivery_date),
@@ -149,7 +172,8 @@ CREATE TABLE lr_followup_activity (
     lr_followup_id          BIGINT NOT NULL,
     activity_type           ENUM('CREATED','FOLLOW_UP','LR_UPDATE',
                                  'EXPECTED_DELIVERY_CHANGE','GOODS_RECEIVED',
-                                 'CLOSED','BACKFILL','VERIFICATION_DECISION')
+                                 'CLOSED','CLOSED_WITHOUT_RECEIPT','BACKFILL',
+                                 'VERIFICATION_DECISION')
                             NOT NULL,
     remark                  VARCHAR(1000) NULL,
     old_status              VARCHAR(32) NULL,
@@ -194,6 +218,18 @@ INSERT INTO `all_permissions` (`permission_key`)
 INSERT INTO `all_permissions` (`permission_key`)
   SELECT 'create_credit_purchase' FROM DUAL
    WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'create_credit_purchase');
+
+-- The exceptional close of a live follow-up (refunded / adjusted /
+-- cancelled) is its own admin decision, separate from verifying legacy rows.
+INSERT INTO `all_permissions` (`permission_key`)
+  SELECT 'close_lr_followup_without_receipt' FROM DUAL
+   WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'close_lr_followup_without_receipt');
+-- WHERE, not what: company-wide LR follow-up visibility for the follow-up
+-- desk. Independent of the dashboard store-scope keys, so granting it widens
+-- no dashboard, and holding a dashboard scope widens no follow-up.
+INSERT INTO `all_permissions` (`permission_key`)
+  SELECT 'lr_followup_all_stores' FROM DUAL
+   WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'lr_followup_all_stores');
 
 -- REPORT ONLY: how many paid advances the backfill will bring in.
 SELECT COUNT(*) AS `PAID_ADVANCES_AWAITING_BACKFILL_run_it_on_the_legacy_screen`

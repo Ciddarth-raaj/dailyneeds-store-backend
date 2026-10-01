@@ -19,9 +19,21 @@ const buildCredit = require("./credit_purchase");
 const buildTransporter = require("./transporter_master");
 
 const NONE = "NONE";
+/**
+ * Stands in for utils/lr_followup_scope.js#createLrScope, answering from the
+ * scope the test chose - a NONE scope refuses exactly as the real one does.
+ */
 const fakeScope = (decide) => ({
-  DASHBOARD_SCOPE: { NONE, ALL_STORES: "ALL_STORES", OWN_STORE: "OWN_STORE" },
-  resolveDashboardScope: async (req) => decide(req),
+  storeIds: async (req) => {
+    const scope = decide(req);
+    if (scope.kind === NONE) {
+      const err = new Error("No branch scope for LR Follow-up.");
+      err.name = "ForbiddenError";
+      err.reason = scope.reason;
+      throw err;
+    }
+    return scope.store_ids;
+  },
 });
 
 function guardTable(router) {
@@ -58,7 +70,8 @@ describe("every endpoint carries the right key", () => {
         "PATCH /:id(\\d+)/lr": ["update_lr_followup"],
         "POST /:id(\\d+)/follow-ups": ["update_lr_followup"],
         "POST /:id(\\d+)/goods-received": ["mark_lr_goods_received"],
-        "POST /:id(\\d+)/resolve": ["manage_lr_legacy_verification"],
+        "POST /:id(\\d+)/legacy-decision": ["manage_lr_legacy_verification"],
+        "POST /:id(\\d+)/close-without-receipt": ["close_lr_followup_without_receipt"],
       }
     );
   });
@@ -141,7 +154,11 @@ describe("17 and 18. enforced on the server", () => {
     held = new Set(["view_lr_followup"]);
     assert.equal((await call("POST", "/lr-followup/5/goods-received", {})).status, 403);
     assert.equal((await call("PATCH", "/lr-followup/5/lr", { lr_no: "X" })).status, 403);
-    assert.equal((await call("POST", "/lr-followup/5/resolve", { decision: "REFUNDED", remark: "x" })).status, 403);
+    assert.equal((await call("POST", "/lr-followup/5/legacy-decision", { decision: "REFUNDED", remark: "x" })).status, 403);
+    assert.equal(
+      (await call("POST", "/lr-followup/5/close-without-receipt", { closure_reason: "REFUNDED", remark: "x" })).status,
+      403
+    );
     assert.equal((await call("POST", "/credit-purchase", {})).status, 403);
     assert.equal(calls.length, 0);
   });
@@ -155,7 +172,7 @@ describe("17 and 18. enforced on the server", () => {
     // The web app keeps the session only for this exact wording; any other
     // 403 sends the user to /login (util/handle403.js in the frontend).
     assert.equal(r.body.msg, "You do not have permission to perform this action");
-    assert.match(r.body.detail, /branch scope/);
+    assert.match(r.body.detail, /branch scope/i);
     assert.equal((await call("POST", "/lr-followup/5/goods-received", {})).status, 403);
     assert.equal(calls.length, 0);
   });
@@ -178,6 +195,27 @@ describe("17 and 18. enforced on the server", () => {
     assert.equal((await call("POST", "/lr-followup/legacy/backfill")).status, 403);
     scope = { kind: "ALL_STORES", store_ids: null };
     assert.equal((await call("POST", "/lr-followup/legacy/backfill")).status, 200);
+  });
+
+  it("closing without receipt needs its own admin key - the legacy key is not enough - and a remark", async () => {
+    held = new Set(["manage_lr_legacy_verification"]);
+    scope = { kind: "ALL_STORES", store_ids: null };
+    assert.equal(
+      (await call("POST", "/lr-followup/5/close-without-receipt", { closure_reason: "CANCELLED", remark: "Order cancelled" })).status,
+      403
+    );
+    held = new Set(["close_lr_followup_without_receipt"]);
+    const before = calls.length;
+    assert.equal((await call("POST", "/lr-followup/5/close-without-receipt", { closure_reason: "CANCELLED" })).status, 400);
+    assert.equal((await call("POST", "/lr-followup/5/close-without-receipt", { closure_reason: "CANCELLED", remark: "  " })).status, 400);
+    assert.equal(
+      (await call("POST", "/lr-followup/5/close-without-receipt", { closure_reason: "GOODS_RECEIVED", remark: "x" })).status,
+      400 // receipt is never a "without receipt" reason
+    );
+    assert.equal(calls.length, before);
+    const ok = await call("POST", "/lr-followup/5/close-without-receipt", { closure_reason: "REFUNDED", remark: "Supplier refunded" });
+    assert.equal(ok.status, 200);
+    assert.equal(calls[calls.length - 1].name, "closeWithoutReceipt");
   });
 
   it("validates bodies before anything runs", async () => {

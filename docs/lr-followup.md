@@ -44,18 +44,42 @@ Two migrations, both additive (no existing table altered, no existing row writte
 
 **`20261109120000-lr-followup`**
 
-* `credit_purchases` - supplier, bill reference, amount, bill date, receiving
-  outlet, `transporter_id` (FK), optional LR No. / dispatch / expected date,
-  remarks, created by/at. Unique `(distributor_code, bill_reference)` and
-  unique `request_key`.
+* `credit_purchases` - supplier, bill / invoice reference, amount, bill /
+  invoice date, receiving outlet, `transporter_id` (FK, **NOT NULL**),
+  optional LR No. / dispatch / expected date, remarks, created by/at.
+  Duplicates: unique `(distributor_code, bill_reference_key)`, where the key
+  is the reference upper-cased with spaces and `- / . _ \ #` removed
+  (`utils/credit_purchase.js`) - "KF/2026/101", "kf-2026-101" and
+  "KF 2026 101" are one bill. Plus unique `request_key` for double clicks.
 * `lr_followup` - one row per source. `source_type`, `advance_request_id`
   (**unique**, FK) or `credit_purchase_id` (**unique**, FK), a CHECK that
   exactly one is set, copied supplier/outlet/amount/`source_date`
   (advance `paid_at`, or bill date), `lr_no`, `transporter_id` (FK),
   `dispatch_date`, `expected_delivery_date`, `status`, `closure_reason`,
+  `closure_remark`,
   `goods_received_at/by`, `is_legacy`, `last_follow_up_at`,
   `next_follow_up_date`, `latest_remark`, `created/updated/closed_at`.
-  A CHECK makes `CLOSED` always carry `closed_at` and `closure_reason`.
+  Two CHECKs keep outcomes honest: `chk_lrf_closed` (CLOSED always has
+  `closed_at`, `closed_by`, `closure_reason`; an open row has none) and
+  `chk_lrf_outcome` (only `GOODS_RECEIVED` carries a receiver; `REFUNDED` /
+  `ADJUSTED` / `CANCELLED` carry no receipt date or receiver and must have a
+  `closure_remark`).
+
+### Closure outcomes
+
+The workflow status stays `CLOSED`; **`closure_reason` says how**:
+
+| Outcome | Meaning | How |
+|---|---|---|
+| `CLOSED – GOODS_RECEIVED` | stock physically received | Mark Goods Received (`mark_lr_goods_received`), or a legacy "Goods Received" decision |
+| `CLOSED – REFUNDED` / `ADJUSTED` / `CANCELLED` | resolved **without** stock | Close without receipt (`close_lr_followup_without_receipt`), or the same legacy decision; remark mandatory |
+
+Every closure records user (`closed_by`) and time (`closed_at`) on the row
+and an activity row (`CLOSED` or `CLOSED_WITHOUT_RECEIPT`). The dashboard
+summary returns `closed_goods_received` separately from
+`closed_refunded` / `closed_adjusted` / `closed_cancelled` /
+`closed_without_receipt`, and the list filters on
+`closure_reason=GOODS_RECEIVED|WITHOUT_RECEIPT|REFUNDED|ADJUSTED|CANCELLED`.
 * `lr_followup_activity` - append-only history: `activity_type`, `remark`,
   `old_status`, `new_status`, `next_follow_up_date`, `details`,
   `request_key` (unique per follow-up), `created_by`, `created_at`. The
@@ -75,26 +99,38 @@ into SQL.
 | LR / dispatch update | `PATCH /lr-followup/:id/lr` | `update_lr_followup` | All fields optional; LR No. or dispatch date → In Transit; clearing them → back to pending. Transporter must be active unless unchanged. |
 | Add follow-up | `POST /lr-followup/:id/follow-ups` | `update_lr_followup` | Remark required; always a new history row. |
 | Mark goods received | `POST /lr-followup/:id/goods-received` | `mark_lr_goods_received` | Row lock + status guard; writes GOODS_RECEIVED then CLOSED; a second call is 409. |
-| Legacy decision / close without receipt | `POST /lr-followup/:id/resolve` | `manage_lr_legacy_verification` | Remark required. Legacy: received / still pending / refunded / adjusted / cancelled. Live: refunded / adjusted / cancelled only. |
-| Backfill | `POST /lr-followup/legacy/backfill` | `manage_lr_legacy_verification` + All Stores | Idempotent. |
+| Legacy decision | `POST /lr-followup/:id/legacy-decision` | `manage_lr_legacy_verification` | Verification Required rows only. Received / still pending / refunded / adjusted / cancelled; remark required. |
+| Close without receipt | `POST /lr-followup/:id/close-without-receipt` | `close_lr_followup_without_receipt` | Live rows only. Refunded / adjusted / cancelled; remark required; never readable as received. |
+| Backfill | `POST /lr-followup/legacy/backfill` | `manage_lr_legacy_verification` + LR all-stores scope | Idempotent. |
 | Transporter Master | `/transporter-master` (`GET`, `GET /:id`, `POST`, `PATCH /:id`, `GET /options`) | `view/create/edit_transporter_master` | `/options` (active only) is also open to `create_credit_purchase` and `update_lr_followup`. |
 
 Every mutation accepts a client `request_key`: a retried submission returns
 the current state and writes nothing.
 
-Branch scope: every LR Follow-up and Credit Purchase endpoint resolves the
-Dashboard Store Scope. Own Store sees only its outlet; a follow-up of another
-branch reads as 404. No scope granted → 403 (sent with the permission
-middleware's wording so the web app does not end the session).
+Branch scope - the module's OWN rule (`utils/lr_followup_scope.js`), not the
+Dashboard Store Scope:
+
+* administrator, or holder of **`lr_followup_all_stores`** → every branch
+  (the company-wide follow-up desk; no branch of their own needed);
+* anyone else → their own branch from Employee Master, read live;
+* inactive employee, or no branch and no all-stores key → 403.
+
+The `dashboard_scope_*` keys play no part: granting the follow-up desk
+company-wide follow-ups widens no dashboard, and a dashboard All Stores key
+widens no follow-up. A follow-up of another branch reads as 404. A 403 is
+sent with the permission middleware's wording so the web app does not end
+the session.
 
 ## 4. Go-live
 
 1. Deploy backend; `db-migrate up` runs both migrations. The second prints how
    many paid advances await the backfill.
 2. Grant keys on the designation permissions screen (nothing is granted by
-   the migration). Each user also needs **Dashboard Store Scope: Own Store or
-   All Stores**.
-3. As an All Stores holder of `manage_lr_legacy_verification`, open
+   the migration). The follow-up desk needs **LR Follow-up: All Stores**
+   (`lr_followup_all_stores`) to see every branch; without it a user sees
+   their own branch only. Grant **Close LR Follow-up Without Receipt** only
+   to whoever may record refunds / adjustments / cancellations.
+3. As a holder of `manage_lr_legacy_verification` and `lr_followup_all_stores`, open
    **Purchase / LR Follow-up → Legacy Follow-up Verification** and press
    **Run Backfill**. Every paid advance without a follow-up comes in as
    *Verification Required*, keeping its `paid_at`. Re-running creates nothing.

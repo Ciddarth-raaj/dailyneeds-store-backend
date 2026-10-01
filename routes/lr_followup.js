@@ -12,8 +12,9 @@ const { PERMISSION, SOURCE_TYPE, STATUS, DECISION, AGEING_BUCKETS } = require(".
  * access layer keeps them:
  *
  *   1. the permission key for the ACTION (route middleware), and
- *   2. the BRANCH SCOPE (own store / all stores), resolved from the server's
- *      own facts by `dashboardScope.resolveDashboardScope`. A follow-up of
+ *   2. the BRANCH SCOPE, by the module's own rule (utils/lr_followup_scope.js):
+ *      administrators and holders of `lr_followup_all_stores` see every
+ *      branch, everyone else their own store, read live. A follow-up of
  *      another branch reads as "not found" - knowing an id is not access.
  *
  * Follow-ups are created only by the two triggers (Advance paid, Credit
@@ -48,10 +49,16 @@ const receivedSchema = {
   request_key: requestKey,
 };
 
-const resolveSchema = {
+const legacyDecisionSchema = {
   decision: Joi.string().valid(Object.keys(DECISION)).required(),
   remark: Joi.string().max(1000).required(),
   received_at: Joi.string().max(40).allow(null, "").optional(),
+  request_key: requestKey,
+};
+
+const closeWithoutReceiptSchema = {
+  closure_reason: Joi.string().valid(["REFUNDED", "ADJUSTED", "CANCELLED"]).required(),
+  remark: Joi.string().trim().min(1).max(1000).required(),
   request_key: requestKey,
 };
 
@@ -78,6 +85,9 @@ const listSchema = {
   to_date: optionalDate,
   ageing: Joi.string().valid(AGEING_BUCKETS.map((b) => b.key)).optional(),
   overdue_only: Joi.boolean().optional(),
+  closure_reason: Joi.string()
+    .valid(["GOODS_RECEIVED", "REFUNDED", "ADJUSTED", "CANCELLED", "WITHOUT_RECEIPT"])
+    .optional(),
   search: Joi.string().max(100).allow("").optional(),
   sort_by: Joi.string().valid(SORT_FIELDS).optional(),
   sort_dir: Joi.string().valid(["asc", "desc"]).optional(),
@@ -91,10 +101,10 @@ const forbidden = (message, reason) => {
 };
 
 class LrFollowupRoutes {
-  constructor(usecase, permissions, dashboardScope) {
+  constructor(usecase, permissions, lrScope) {
     this.usecase = usecase;
     this.permissions = permissions;
-    this.dashboardScope = dashboardScope;
+    this.lrScope = lrScope;
     this.router = express.Router();
     this.init();
   }
@@ -109,15 +119,13 @@ class LrFollowupRoutes {
    * The branches this caller may see for `featureKey`: null = all, [id] =
    * their own. Refuses - never widens - when no scope is granted.
    */
-  async storeIds(req, featureKey) {
-    const scope = await this.dashboardScope.resolveDashboardScope(req, featureKey);
-    if (scope.kind === this.dashboardScope.DASHBOARD_SCOPE.NONE) {
-      throw forbidden(
-        "Your account has no branch scope for LR Follow-up. Ask an administrator to grant Own Store or All Stores.",
-        scope.reason
-      );
-    }
-    return scope.store_ids;
+  /**
+   * The branches this caller may see: null = all, [id] = their own. The
+   * module's own rule (utils/lr_followup_scope.js), not the dashboard
+   * scope. The feature key was already checked by the route guard.
+   */
+  storeIds(req) {
+    return this.lrScope.storeIds(req);
   }
 
   handle(fn) {
@@ -139,7 +147,7 @@ class LrFollowupRoutes {
       "/summary",
       needs(PERMISSION.VIEW),
       this.handle(async (req, res) => {
-        const storeIds = await this.storeIds(req, PERMISSION.VIEW);
+        const storeIds = await this.storeIds(req);
         res.json({ code: 200, data: await this.usecase.summary(storeIds) });
       })
     );
@@ -149,7 +157,7 @@ class LrFollowupRoutes {
       needs(PERMISSION.VIEW),
       this.handle(async (req, res) => {
         const q = this.validate(req.query, listSchema);
-        const storeIds = await this.storeIds(req, PERMISSION.VIEW);
+        const storeIds = await this.storeIds(req);
         const bucket = AGEING_BUCKETS.find((b) => b.key === q.ageing);
         const data = await this.usecase.list(
           {
@@ -160,6 +168,7 @@ class LrFollowupRoutes {
             from_date: q.from_date || undefined,
             to_date: q.to_date || undefined,
             overdue_only: q.overdue_only,
+            closure_reason: q.closure_reason,
             search: q.search,
             ageing_min: bucket ? bucket.min : undefined,
             ageing_max: bucket ? bucket.max : undefined,
@@ -179,7 +188,7 @@ class LrFollowupRoutes {
       needs(PERMISSION.MANAGE_LEGACY),
       this.handle(async (req, res) => {
         const q = this.validate(req.query, { include_decided: Joi.boolean().optional() });
-        const storeIds = await this.storeIds(req, PERMISSION.MANAGE_LEGACY);
+        const storeIds = await this.storeIds(req);
         res.json({ code: 200, data: await this.usecase.legacyQueue(storeIds, q) });
       })
     );
@@ -190,9 +199,9 @@ class LrFollowupRoutes {
       "/legacy/backfill",
       needs(PERMISSION.MANAGE_LEGACY),
       this.handle(async (req, res) => {
-        const storeIds = await this.storeIds(req, PERMISSION.MANAGE_LEGACY);
+        const storeIds = await this.storeIds(req);
         if (storeIds !== null) {
-          throw forbidden("The backfill covers every branch and needs All Stores scope.", "OWN_STORE_ONLY");
+          throw forbidden("The backfill covers every branch and needs 'LR Follow-up: All Stores'.", "OWN_STORE_ONLY");
         }
         const data = await this.usecase.backfill(requireEmployee(req, "Running the LR follow-up backfill"));
         res.json({ code: 200, data });
@@ -203,7 +212,7 @@ class LrFollowupRoutes {
       "/by-source/:type(ADVANCE_REQUEST|CREDIT_PURCHASE)/:sourceId(\\d+)",
       needs(PERMISSION.VIEW),
       this.handle(async (req, res) => {
-        const storeIds = await this.storeIds(req, PERMISSION.VIEW);
+        const storeIds = await this.storeIds(req);
         const data = await this.usecase.getBySource(
           req.params.type,
           parseInt(req.params.sourceId, 10),
@@ -217,7 +226,7 @@ class LrFollowupRoutes {
       "/:id(\\d+)",
       needs(PERMISSION.VIEW),
       this.handle(async (req, res) => {
-        const storeIds = await this.storeIds(req, PERMISSION.VIEW);
+        const storeIds = await this.storeIds(req);
         res.json({ code: 200, data: await this.usecase.getDetail(id(req), storeIds) });
       })
     );
@@ -227,7 +236,7 @@ class LrFollowupRoutes {
       needs(PERMISSION.UPDATE),
       this.handle(async (req, res) => {
         const body = this.validate(req.body, lrSchema);
-        const storeIds = await this.storeIds(req, PERMISSION.UPDATE);
+        const storeIds = await this.storeIds(req);
         const data = await this.usecase.updateLr(
           id(req),
           body,
@@ -243,7 +252,7 @@ class LrFollowupRoutes {
       needs(PERMISSION.UPDATE),
       this.handle(async (req, res) => {
         const body = this.validate(req.body, followUpSchema);
-        const storeIds = await this.storeIds(req, PERMISSION.UPDATE);
+        const storeIds = await this.storeIds(req);
         const data = await this.usecase.addFollowUp(
           id(req),
           body,
@@ -259,7 +268,7 @@ class LrFollowupRoutes {
       needs(PERMISSION.MARK_RECEIVED),
       this.handle(async (req, res) => {
         const body = this.validate(req.body, receivedSchema);
-        const storeIds = await this.storeIds(req, PERMISSION.MARK_RECEIVED);
+        const storeIds = await this.storeIds(req);
         const data = await this.usecase.markGoodsReceived(
           id(req),
           body,
@@ -270,16 +279,37 @@ class LrFollowupRoutes {
       })
     );
 
+    // Legacy Follow-up Verification: the answer for a backfilled row.
     router.post(
-      "/:id(\\d+)/resolve",
+      "/:id(\\d+)/legacy-decision",
       needs(PERMISSION.MANAGE_LEGACY),
       this.handle(async (req, res) => {
-        const body = this.validate(req.body, resolveSchema);
-        const storeIds = await this.storeIds(req, PERMISSION.MANAGE_LEGACY);
-        const data = await this.usecase.resolve(
+        const body = this.validate(req.body, legacyDecisionSchema);
+        const storeIds = await this.storeIds(req);
+        const data = await this.usecase.resolveLegacy(
           id(req),
           body,
-          requireEmployee(req, "Recording a follow-up decision"),
+          requireEmployee(req, "Recording a legacy verification decision"),
+          storeIds
+        );
+        res.json({ code: 200, data });
+      })
+    );
+
+    // The exceptional close of a LIVE follow-up whose goods will never
+    // come: refunded, adjusted / settled or cancelled. Its own admin key,
+    // its own endpoint, a mandatory remark - and a closure reason that can
+    // never be read as goods received.
+    router.post(
+      "/:id(\\d+)/close-without-receipt",
+      needs(PERMISSION.CLOSE_WITHOUT_RECEIPT),
+      this.handle(async (req, res) => {
+        const body = this.validate(req.body, closeWithoutReceiptSchema);
+        const storeIds = await this.storeIds(req);
+        const data = await this.usecase.closeWithoutReceipt(
+          id(req),
+          body,
+          requireEmployee(req, "Closing a follow-up without receipt"),
           storeIds
         );
         res.json({ code: 200, data });
@@ -292,4 +322,4 @@ class LrFollowupRoutes {
   }
 }
 
-module.exports = (usecase, permissions, dashboardScope) => new LrFollowupRoutes(usecase, permissions, dashboardScope);
+module.exports = (usecase, permissions, lrScope) => new LrFollowupRoutes(usecase, permissions, lrScope);
