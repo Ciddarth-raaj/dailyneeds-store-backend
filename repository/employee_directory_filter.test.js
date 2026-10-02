@@ -62,7 +62,7 @@ test("NO RESIGNATIONS: the exclusion is absent entirely", () => {
 
 test("ONE RESIGNATION: excluded, with a single bound list", () => {
   const sql = rendered(["Ada Lovelace"], {});
-  assert.match(sql, /WHERE new_employee\.employee_name NOT IN \('Ada Lovelace'\)/);
+  assert.match(sql, /WHERE \(new_employee\.employee_name NOT IN \('Ada Lovelace'\) OR new_employee\.status = 1\)/);
   assert.ok(!/IS NULL/.test(sql), "the broken second arm is gone");
 });
 
@@ -71,7 +71,7 @@ test("TWO RESIGNATIONS NO LONGER PRODUCE ER_OPERAND_COLUMNS", () => {
   const sql = rendered(["Ada Lovelace", "Grace Hopper"], {});
   assert.match(
     sql,
-    /WHERE new_employee\.employee_name NOT IN \('Ada Lovelace', 'Grace Hopper'\)/
+    /WHERE \(new_employee\.employee_name NOT IN \('Ada Lovelace', 'Grace Hopper'\) OR new_employee\.status = 1\)/
   );
   // The shape that MySQL rejected must not appear anywhere.
   assert.ok(!/'Ada Lovelace', 'Grace Hopper' IS NULL/.test(sql));
@@ -104,7 +104,7 @@ test("the store and designation filters are unchanged, and still in order", () =
   const sql = rendered(["Ada"], { store_ids: [2, 3], designation_ids: [15] });
   assert.match(
     sql,
-    /WHERE new_employee\.employee_name NOT IN \('Ada'\) AND new_employee\.store_id IN \(2, 3\) AND new_employee\.designation_id IN \(15\)/
+    /WHERE \(new_employee\.employee_name NOT IN \('Ada'\) OR new_employee\.status = 1\) AND new_employee\.store_id IN \(2, 3\) AND new_employee\.designation_id IN \(15\)/
   );
 });
 

@@ -115,6 +115,26 @@ function accessScope(actor, { alias = "new_employee" } = {}) {
  * when there is nobody to exclude, the predicate is simply omitted.
  *
  * The `employee_name` keying is deliberately left alone - see KNOWN DEBT.
+ *
+ * AN ACTIVE EMPLOYEE IS NEVER HIDDEN BY IT. A name in `resignation` only
+ * removes a row whose `new_employee.status` is not 1. Every resignation path
+ * already sets `status = 0` on the person who left (the legacy screen in
+ * `usecase/resignation.js`, the HR Resign action in `markResigned`), so for
+ * them the exclusion is unchanged. What it no longer does is hide somebody
+ * who is employed today merely because a `resignation` row carries their
+ * name:
+ *
+ *   a NAMESAKE      a different, earlier employee with the same name left
+ *   a REJOIN        HR Resign writes a row; HR Rejoin sets `status = 1` and,
+ *                   by design, never deletes it
+ *   a VOIDED row    `voided_at` is set but the name is still selected
+ *
+ * Each of those made a live, payroll-active employee vanish from the
+ * directory, the onboarding queue and every picker built on this list, while
+ * the search (`getEmployeeByFilter`, `status = 1`, no name exclusion) still
+ * found them. `status` is the one active flag the rest of the application
+ * runs on, so it decides here too. The branch restriction is a separate
+ * condition ANDed beside this one and is not affected.
  */
 function directoryPopulation(resignedNames) {
   const names = Array.isArray(resignedNames) ? resignedNames : [];
@@ -122,7 +142,7 @@ function directoryPopulation(resignedNames) {
     return { conditions: [], params: [] };
   }
   return {
-    conditions: ["new_employee.employee_name NOT IN (?)"],
+    conditions: ["(new_employee.employee_name NOT IN (?) OR new_employee.status = 1)"],
     params: [names],
   };
 }

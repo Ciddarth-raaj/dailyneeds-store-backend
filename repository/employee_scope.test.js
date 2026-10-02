@@ -43,7 +43,10 @@ test("with no resignations and no filters, there is no clause at all", () => {
 
 test("resigned names are excluded, bound once", () => {
   const { where, params } = buildEmployeeScope(["Ramesh Kumar", "Suresh"], {});
-  assert.strictEqual(norm(where), "WHERE new_employee.employee_name NOT IN (?)");
+  assert.strictEqual(
+    norm(where),
+    "WHERE (new_employee.employee_name NOT IN (?) OR new_employee.status = 1)"
+  );
   assert.deepStrictEqual(params, [["Ramesh Kumar", "Suresh"]]);
 });
 
@@ -69,7 +72,7 @@ test("BOTH FILTERS KEEP STORE BEFORE DESIGNATION", () => {
   });
   assert.strictEqual(
     norm(where),
-    "WHERE new_employee.employee_name NOT IN (?) " +
+    "WHERE (new_employee.employee_name NOT IN (?) OR new_employee.status = 1) " +
       "AND new_employee.store_id IN (?) AND new_employee.designation_id IN (?)"
   );
   assert.deepStrictEqual(params, [["Gone"], [2], [15]]);
@@ -163,7 +166,9 @@ test("ACCESS SCOPE AND DIRECTORY POPULATION ARE DIFFERENT CONCEPTS", () => {
 
   // Population: a legacy rule belonging to one screen.
   const pop = directoryPopulation(["Gone"]);
-  assert.deepStrictEqual(pop.conditions, ["new_employee.employee_name NOT IN (?)"]);
+  assert.deepStrictEqual(pop.conditions, [
+    "(new_employee.employee_name NOT IN (?) OR new_employee.status = 1)",
+  ]);
   assert.deepStrictEqual(pop.params, [["Gone"]]);
 
   // And nothing to exclude means no condition, not a true one.
@@ -227,7 +232,7 @@ test("THE DIRECTORY STILL COMPOSES BOTH", () => {
   });
   assert.strictEqual(
     norm(where),
-    "WHERE new_employee.employee_name NOT IN (?) " +
+    "WHERE (new_employee.employee_name NOT IN (?) OR new_employee.status = 1) " +
       "AND new_employee.store_id IN (?) AND new_employee.designation_id IN (?)"
   );
   assert.deepStrictEqual(params, [["Gone"], [2], [15]]);
