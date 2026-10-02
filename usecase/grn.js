@@ -127,22 +127,27 @@ class GrnUsecase {
     this.offersV3Repo = offersV3Repo;
   }
 
+  /** Headers with the verification block the list grid renders. */
+  async withVerification(headers) {
+    const byRefno = verificationsByRefno(
+      await this.stockReceivedRepo.listGrnVerificationsByRefnos(
+        headers.map((header) => header.mmh_mrc_refno)
+      )
+    );
+    return headers.map((header) => ({
+      ...header,
+      verification: isGrnVerifiable(header.mmh_mrc_dt)
+        ? byRefno.get(String(header.mmh_mrc_refno)) ?? {
+            ...PENDING_VERIFICATION,
+          }
+        : null,
+    }));
+  }
+
   async listGrnHeaders(filters = {}) {
     try {
       const headers = await this.stockReceivedRepo.listGrnHeaders(filters);
-      const byRefno = verificationsByRefno(
-        await this.stockReceivedRepo.listGrnVerificationsByRefnos(
-          headers.map((header) => header.mmh_mrc_refno)
-        )
-      );
-      return headers.map((header) => ({
-        ...header,
-        verification: isGrnVerifiable(header.mmh_mrc_dt)
-          ? byRefno.get(String(header.mmh_mrc_refno)) ?? {
-              ...PENDING_VERIFICATION,
-            }
-          : null,
-      }));
+      return await this.withVerification(headers);
     } catch (err) {
       logger.Log({
         level: logger.LEVEL.ERROR,
@@ -151,6 +156,29 @@ class GrnUsecase {
         description: err.toString(),
         category: "",
         ref: {},
+      });
+      throw err;
+    }
+  }
+
+  /**
+   * GRN No search across every date. Rows have the list's shape, verification
+   * included; `truncated` says more GRNs matched than `limit` returned.
+   */
+  async searchGrnHeaders(term, limit = 50) {
+    try {
+      const rows = await this.stockReceivedRepo.searchGrnHeaders(term, limit + 1);
+      const truncated = rows.length > limit;
+      const data = await this.withVerification(rows.slice(0, limit));
+      return { data, truncated };
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "USECASE.GRN",
+        code: "USECASE.GRN.SEARCH_GRN_HEADERS",
+        description: err.toString(),
+        category: "",
+        ref: { term },
       });
       throw err;
     }

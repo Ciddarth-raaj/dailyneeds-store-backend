@@ -6,6 +6,10 @@ const {
   VERIFICATION_START_DATE,
 } = require("../constants/grn_verification");
 
+/** GRN No search: the longest term accepted, and the most rows returned. */
+const SEARCH_MAX_LENGTH = 50;
+const SEARCH_LIMIT = 50;
+
 const ignoreItemSchema = Joi.object({
   refno: Joi.alternatives().try(Joi.string(), Joi.number()).required(),
   sl_no: Joi.alternatives().try(Joi.string(), Joi.number()).required(),
@@ -86,6 +90,51 @@ class GrnRoutes {
       }
       res.end();
     });
+
+    /**
+     * GRN No search across the WHOLE history - deliberately no date filter,
+     * so a GRN is found without knowing which day it was received.
+     *
+     * Guarded by `view_all_grn`, the key the All GRN screen is gated on, so
+     * search can never show a GRN to somebody who could not open the list.
+     * It returns the same rows /list would (GoFrugal GRN headers carry no
+     * outlet or location, and /list applies none), just matched on number.
+     */
+    router.get(
+      "/search",
+      this.permissions.require(P.VIEW_ALL_GRN),
+      async (req, res) => {
+        try {
+          const q = req.query.q != null ? String(req.query.q).trim() : "";
+          if (!q) {
+            res.status(400).json({ code: 400, msg: "q is required" });
+            res.end();
+            return;
+          }
+          if (q.length > SEARCH_MAX_LENGTH) {
+            res.status(400).json({
+              code: 400,
+              msg: `q must be at most ${SEARCH_MAX_LENGTH} characters`,
+            });
+            res.end();
+            return;
+          }
+
+          const { data, truncated } = await this.grnUsecase.searchGrnHeaders(
+            q,
+            SEARCH_LIMIT
+          );
+          res.json({
+            code: 200,
+            data,
+            meta: { q, count: data.length, limit: SEARCH_LIMIT, truncated },
+          });
+        } catch (err) {
+          respondError(res, err);
+        }
+        res.end();
+      }
+    );
 
     router.get("/detail", async (req, res) => {
       try {
