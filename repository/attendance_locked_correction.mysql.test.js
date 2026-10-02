@@ -169,15 +169,17 @@ describe("locked-period correction, as SQL", { skip: !URL && "ATTENDANCE_TEST_MY
     }
   };
   const corrected = (o = {}) => ({ employee_id: EMP, attendance_date: DATE, punch_count: 4, approved_ot_minutes: 205, status: "FINAL", ...o });
+  const IMPACT = {
+    worked_minutes: { before: 685, after: 655, change: -30 },
+    break_charged_minutes: { before: 30, after: 60, change: 30 },
+    ot_eligible_minutes: { before: 235, after: 205, change: -30 },
+    approved_ot_minutes: { before: 235, after: 205, change: -30 },
+  };
+  const REVERSED = Object.fromEntries(Object.entries(IMPACT).map(([k, v]) => [k, { before: v.after, after: v.before, change: -v.change }]));
   const EVENT = {
     old_calculation: { punch_count: 2, approved_ot_minutes: 235 },
     new_calculation: { punch_count: 4, approved_ot_minutes: 205 },
-    payroll_difference: {
-      basis: { payrun_calculation_id: 1, calculation_hash: "f".repeat(32), daily_rate: 1000, frozen_net_pay: 24500 },
-      components: { approved_ot: { before: 235, after: 205, amount: -66.67 } },
-      net_difference: -66.67, absolute_amount: 66.67, direction: "RECOVERABLE_FROM_EMPLOYEE",
-      adjustment_status: "PENDING_ADJUSTMENT", statutory_recomputed: false,
-    },
+    impact: IMPACT,
   };
   const decideFinal = (extra = {}) =>
     repo.decideStage({
@@ -205,10 +207,12 @@ describe("locked-period correction, as SQL", { skip: !URL && "ATTENDANCE_TEST_MY
     assert.equal(ev.attendance_approval_request_id, 300);
     assert.equal(ev.authorised_by_employee_id, AUTHORISER);
     assert.equal(ev.authorisation_reason, "Lunch was taken; device missed it");
-    assert.equal(ev.direction, "RECOVERABLE_FROM_EMPLOYEE");
-    assert.equal(Number(ev.net_difference), -66.67);
-    assert.equal(ev.adjustment_status, "PENDING_ADJUSTMENT");
-    assert.equal(ev.payrun_calculation_hash, "f".repeat(32));
+    assert.deepEqual(
+      [ev.old_worked_minutes, ev.new_worked_minutes, ev.old_break_charged_minutes, ev.new_break_charged_minutes,
+        ev.old_ot_eligible_minutes, ev.new_ot_eligible_minutes, ev.old_approved_ot_minutes, ev.new_approved_ot_minutes],
+      [685, 655, 30, 60, 235, 205, 235, 205]
+    );
+    assert.ok(!Object.keys(ev).some((k) => /net_pay|difference|direction|adjustment|applied_|payrun/.test(k)), "no money columns");
     assert.deepEqual(await payrun(), before, "the frozen payrun row is never written");
   });
 
@@ -274,16 +278,16 @@ describe("locked-period correction, as SQL", { skip: !URL && "ATTENDANCE_TEST_MY
       actor: { employee_id: AUTHORISER, user_id: 5 }, reason: "Lunch was punched on paper after all",
       revocableTypes: REVOCABLE, calculations: [corrected({ punch_count: 2, approved_ot_minutes: 235 })],
       attendanceDate: DATE,
-      lockedCorrection: { event: { ...EVENT, payroll_difference: { ...EVENT.payroll_difference, net_difference: 66.67, direction: "PAYABLE_TO_EMPLOYEE" } } },
+      lockedCorrection: { event: { ...EVENT, impact: REVERSED } },
     });
     assert.equal(out.code, 200);
     assert.equal(out.status, "CANCELLED");
     assert.deepEqual(await storedDay(), { punch_count: 2, approved_ot_minutes: 235 });
     assert.equal((await auth()).status, "REVOKED");
     const evs = await events();
-    assert.deepEqual(evs.map((e) => [e.event_type, Number(e.net_difference), e.direction]), [
-      ["APPROVAL", -66.67, "RECOVERABLE_FROM_EMPLOYEE"],
-      ["REVOKE", 66.67, "PAYABLE_TO_EMPLOYEE"],
+    assert.deepEqual(evs.map((e) => [e.event_type, e.old_approved_ot_minutes, e.new_approved_ot_minutes]), [
+      ["APPROVAL", 235, 205],
+      ["REVOKE", 205, 235],
     ]);
     assert.equal(evs[1].event_reason, "Lunch was punched on paper after all");
     assert.equal(evs[1].actor_user_id, 5);
@@ -327,29 +331,8 @@ describe("locked-period correction, as SQL", { skip: !URL && "ATTENDANCE_TEST_MY
     assert.match(notLocked.msg, /not locked/);
   });
 
-  it("request settlement moves exactly the netted pending events to SETTLED, once, and touches nothing else", async () => {
-    await seed({ stage: 2 });
-    const { locked_correction_event_id: id } = await decideFinal();
-    const [{ attendance_locked_period_authorisation_id: authId }] = await q(pool, "SELECT attendance_locked_period_authorisation_id FROM attendance_locked_period_authorisation WHERE attendance_approval_request_id = 300");
-    const before = (await events())[0];
-    // A stale set (an id that is not the pending set) writes nothing.
-    assert.equal((await repo.settleLockedCorrectionRequest({ authorisation_id: authId, event_ids: [id, 999], applied_by: HR, applied_note: "stale", applied_payroll_year: 2026, applied_payroll_month: 10 })).updated, 0);
-    const first = await repo.settleLockedCorrectionRequest({ authorisation_id: authId, event_ids: [id], applied_by: HR, applied_note: "Shortage recovery in Oct", applied_payroll_year: 2026, applied_payroll_month: 10 });
-    assert.equal(first.updated, 1);
-    const again = await repo.settleLockedCorrectionRequest({ authorisation_id: authId, event_ids: [id], applied_by: HR, applied_note: "twice", applied_payroll_year: 2026, applied_payroll_month: 11 });
-    assert.equal(again.updated, 0);
-    const after = (await events())[0];
-    assert.equal(after.adjustment_status, "SETTLED");
-    assert.equal(after.applied_by, HR);
-    assert.equal(after.applied_payroll_month, 10);
-    for (const k of ["old_calculation", "new_calculation", "payroll_difference", "net_difference", "direction"]) {
-      assert.deepEqual(after[k], before[k], k);
-    }
-  });
-
-  it("frozen payrun and stored day reads", async () => {
-    const frozen = await repo.getFrozenPayrun(EMP, DATE);
-    assert.equal(Number(frozen.daily_rate), 1000);
+  it("the stored day read", async () => {
     assert.equal((await repo.getStoredDay(EMP, DATE)).punch_count, 2);
   });
+
 });

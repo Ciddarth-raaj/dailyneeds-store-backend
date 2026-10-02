@@ -22,12 +22,7 @@ const shiftChangeEligibility = require("../utils/shift_change_eligibility");
 const shiftChangeBlock = require("../utils/shift_change_block");
 const { partitionClosedDays, endOfIstDay } = require("../utils/attendance_persist_guard");
 const { validateBreakPair } = require("../utils/attendance_break_regularization");
-const {
-  priceLockedDayCorrection,
-  attendanceSummary,
-  outstandingAdjustment,
-  withEffectiveStatus,
-} = require("../utils/attendance_locked_correction");
+const { attendanceSummary, attendanceImpact } = require("../utils/attendance_locked_correction");
 
 /** MySQL's TINYINT(1), a JS boolean and a string "1" all mean the same thing. */
 const tinyBool = (value) => value === true || Number(value) === 1;
@@ -286,25 +281,6 @@ module.exports = (
     Number(authorisation.authorised_by_employee_id) === Number(actorEmployeeId)
       ? LOCKED_AUTHORISER_REASON
       : null;
-
-  /** A stored correction event, its JSON parsed, for screens. */
-  const parseEventJson = (v) => {
-    if (v === null || v === undefined || typeof v === "object") return v === undefined ? null : v;
-    try {
-      return JSON.parse(v);
-    } catch (e) {
-      return null;
-    }
-  };
-  const lockedEventForDisplay = (row) => ({
-    ...row,
-    old_calculation: parseEventJson(row.old_calculation),
-    new_calculation: parseEventJson(row.new_calculation),
-    payroll_difference: parseEventJson(row.payroll_difference),
-    net_difference: row.net_difference === null || row.net_difference === undefined ? null : Number(row.net_difference),
-    frozen_net_pay: row.frozen_net_pay === null || row.frozen_net_pay === undefined ? null : Number(row.frozen_net_pay),
-    statutory_recomputed: Number(row.statutory_recomputed) === 1,
-  });
 
   const REGULARIZATION_KIND = Object.freeze({
     MISSING_PUNCH: "MISSING_PUNCH",
@@ -1679,22 +1655,19 @@ module.exports = (
       dayState.closed && voidedDay ? [attendanceCalculationUsecase.toStorageRow(voidedDay)] : [];
 
     // The REVOKE event: the stored (corrected) day, the day without the
-    // request, and that change priced on the SAME frozen payrun row. Appended;
-    // the approval event is never touched.
+    // request, and how worked time, break and OT moved back. Appended; the
+    // approval event is never touched.
     let lockedCorrection = null;
     if (lockedRevoke) {
       if (calculations.length !== 1) {
         throw validationError("The day without this correction could not be calculated for the locked payroll date");
       }
-      const [storedDay, frozen] = await Promise.all([
-        attendanceRegularizationRepo.getStoredDay(employeeId, request.attendance_date),
-        attendanceRegularizationRepo.getFrozenPayrun(employeeId, request.attendance_date),
-      ]);
+      const storedDay = await attendanceRegularizationRepo.getStoredDay(employeeId, request.attendance_date);
       lockedCorrection = {
         event: {
           old_calculation: attendanceSummary(storedDay),
           new_calculation: attendanceSummary(voidedDay),
-          payroll_difference: priceLockedDayCorrection({ frozen, old_day: storedDay, new_day: calculations[0] }),
+          impact: attendanceImpact(storedDay, calculations[0]),
         },
       };
     }
@@ -1740,8 +1713,9 @@ module.exports = (
    * The caller holds `correct_locked_attendance` and the employee is in their
    * outlet scope (both checked by the route). Here: a reason, a pending
    * REGULARIZATION, and SEPARATION OF DUTIES - neither the person who raised
-   * the request nor the employee it is for may authorise it. The repository
-   * re-checks the lock and the request state in its own transaction.
+   * the request, the employee it is for, nor anyone who already decided a
+   * stage may authorise it. The repository re-checks the lock and the request
+   * state in its own transaction.
    */
   const authoriseLockedCorrection = async ({ actor, request_id, reason }) => {
     const why = typeof reason === "string" ? reason.trim() : "";
@@ -1789,102 +1763,6 @@ module.exports = (
   const requestEmployeeId = async (request_id) => {
     const request = await attendanceRegularizationRepo.getRequest(request_id);
     return request ? Number(request.requested_for_employee_id) : null;
-  };
-
-  /** One correction event (employee, date, status), or null. */
-  const getLockedCorrectionEvent = (event_id) => attendanceRegularizationRepo.getLockedCorrectionEvent(event_id);
-
-  /**
-   * PAYROLL'S VIEW. `corrections`: every event, immutable, as recorded.
-   * `outstanding`: per correction REQUEST, the derived net of its unsettled
-   * events - only where that net is not zero. A correction revoked before
-   * either side was settled nets to 0 and is not actionable; its events stay
-   * in `corrections` (and in the Day Detail) for audit.
-   */
-  const listLockedCorrections = async (filters = {}) => {
-    const all = (await attendanceRegularizationRepo.listLockedCorrectionEvents({ ...filters, adjustment_status: null })).map(
-      lockedEventForDisplay
-    );
-    const byRequest = new Map();
-    all.forEach((e) => {
-      const key = Number(e.attendance_approval_request_id);
-      if (!byRequest.has(key)) byRequest.set(key, []);
-      byRequest.get(key).push(e);
-    });
-    const outstanding = [];
-    const history = [];
-    byRequest.forEach((events, requestId) => {
-      // Each event carries its DERIVED status (NETTED_OFF inside a net of 0).
-      withEffectiveStatus(events).forEach((e) => history.push(e));
-      const o = outstandingAdjustment(events);
-      if (!o.actionable) return;
-      const first = events[events.length - 1];
-      outstanding.push({
-        attendance_approval_request_id: requestId,
-        attendance_locked_period_authorisation_id: Number(first.attendance_locked_period_authorisation_id),
-        employee_id: Number(first.employee_id),
-        employee_name: first.employee_name || null,
-        store_id: first.store_id === undefined ? null : first.store_id,
-        attendance_date: first.attendance_date,
-        ...o,
-      });
-    });
-    history.sort(
-      (a, b) => Number(b.attendance_locked_period_correction_event_id) - Number(a.attendance_locked_period_correction_event_id)
-    );
-    // A status filter means the EFFECTIVE status: PENDING_ADJUSTMENT never
-    // returns a netted-off event, and NETTED_OFF can be asked for.
-    const corrections = filters.adjustment_status
-      ? history.filter((e) => e.effective_adjustment_status === filters.adjustment_status)
-      : history;
-    return { corrections, outstanding };
-  };
-
-  /**
-   * SETTLE A REQUEST'S OUTSTANDING ADJUSTMENT - Payroll, once, in a LATER
-   * payroll month, with a note saying how (which adjustment field). Every
-   * unsettled event of the request is marked settled together, because their
-   * net is what was applied. Refused when nothing is outstanding.
-   */
-  const settleLockedCorrection = async ({ actor, request_id, applied_payroll_year, applied_payroll_month, applied_note }) => {
-    const note = typeof applied_note === "string" ? applied_note.trim() : "";
-    if (note.length < 5) throw validationError("A settlement note of at least 5 characters is required");
-    const year = Number(applied_payroll_year);
-    const month = Number(applied_payroll_month);
-    if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) {
-      throw validationError("applied_payroll_year and applied_payroll_month must name a payroll month");
-    }
-    const auth = await attendanceRegularizationRepo.getLockedAuthorisation(request_id);
-    if (!auth) throw validationError(`Request #${request_id} has no locked-period correction`);
-    const events = await attendanceRegularizationRepo.listLockedCorrectionEvents({
-      authorisation_id: auth.attendance_locked_period_authorisation_id,
-      limit: 500,
-    });
-    const outstanding = outstandingAdjustment(events);
-    if (!outstanding.actionable) {
-      throw validationError(`Nothing is outstanding for request #${request_id}: ${outstanding.label}`);
-    }
-    const corrected = Number(auth.attendance_date.slice(0, 4)) * 12 + Number(auth.attendance_date.slice(5, 7));
-    if (year * 12 + month <= corrected) {
-      throw validationError("A locked-period difference is settled in a LATER payroll month than the one it corrects");
-    }
-    const { updated } = await attendanceRegularizationRepo.settleLockedCorrectionRequest({
-      authorisation_id: auth.attendance_locked_period_authorisation_id,
-      event_ids: outstanding.pending_event_ids,
-      applied_by: Number(actor.employee_id) || null,
-      applied_note: note,
-      applied_payroll_year: year,
-      applied_payroll_month: month,
-    });
-    if (updated === 0) throw validationError("This correction changed while you were settling it - reload");
-    return {
-      code: 200,
-      attendance_approval_request_id: Number(request_id),
-      settled_event_ids: outstanding.pending_event_ids,
-      net_difference: outstanding.net_difference,
-      direction: outstanding.direction,
-      adjustment_status: "SETTLED",
-    };
   };
 
   /**
@@ -2203,9 +2081,9 @@ module.exports = (
       dayState.closed && correctedDay ? [attendanceCalculationUsecase.toStorageRow(correctedDay)] : [];
 
     // THE LOCKED-PERIOD EVENT, on the FINAL approval of an authorised
-    // correction: the stored day payroll was calculated from, the corrected
-    // day, and the difference priced on the frozen payrun row - which is read
-    // and never written.
+    // correction: the stored day before, the corrected day, and how worked
+    // time, break and OT moved - in minutes. Attendance only; the frozen
+    // payrun row is neither read nor written.
     let lockedCorrection = null;
     if (lockedAuthorisation) {
       lockedCorrection = { event: null };
@@ -2213,14 +2091,14 @@ module.exports = (
         if (calculations.length !== 1) {
           throw validationError("The corrected day could not be calculated for this locked payroll date");
         }
-        const [storedDay, frozen] = await Promise.all([
-          attendanceRegularizationRepo.getStoredDay(request.requested_for_employee_id, request.attendance_date),
-          attendanceRegularizationRepo.getFrozenPayrun(request.requested_for_employee_id, request.attendance_date),
-        ]);
+        const storedDay = await attendanceRegularizationRepo.getStoredDay(
+          request.requested_for_employee_id,
+          request.attendance_date
+        );
         lockedCorrection.event = {
           old_calculation: attendanceSummary(storedDay),
           new_calculation: attendanceSummary(correctedDay),
-          payroll_difference: priceLockedDayCorrection({ frozen, old_day: storedDay, new_day: calculations[0] }),
+          impact: attendanceImpact(storedDay, calculations[0]),
         };
       }
     }
@@ -3333,10 +3211,6 @@ module.exports = (
     revokeDecision,
     authoriseLockedCorrection,
     requestEmployeeId,
-    listLockedCorrections,
-    getLockedCorrectionEvent,
-    settleLockedCorrection,
-    lockedEventForDisplay,
     REVOCABLE_TYPES,
     bulkAction,
     listBulkTargets,

@@ -1,5 +1,5 @@
 /**
- * LOCKED-PERIOD CORRECTION, end to end through the REAL calculation and
+ * LOCKED-PERIOD CORRECTION (attendance and OT only - no money), end to end through the REAL calculation and
  * regularization usecases, over a stateful fake repository that mirrors the
  * SQL gate (the gate itself is proven against MariaDB in
  * repository/attendance_locked_correction.mysql.test.js).
@@ -54,7 +54,6 @@ function world({ punches, approvedOt = 0 }) {
   const authOf = (id) => store.auths.find((a) => a.attendance_approval_request_id === Number(id)) || null;
   const lockedPeriods = (rows) =>
     (rows || []).filter((r) => String(r.attendance_date).startsWith("2026-09")).map((r) => ({ employee_id: Number(r.employee_id), year: 2026, month: 9 }));
-  const FROZEN = { payrun_calculation_id: 77, daily_rate: "1000.00", net_pay: "24500.00", calculation_hash: "f".repeat(32), ot_groups: null, status: "APPROVED_LOCKED" };
 
   const calculation = buildCalculation({
     getShiftAssignmentHistory: async () => [{ employee_work_shift_assignment_id: 1, employee_id: EMP, work_shift_id: 1, effective_from: "2026-09-01" }],
@@ -88,8 +87,7 @@ function world({ punches, approvedOt = 0 }) {
     store.events.push({
       attendance_locked_period_correction_event_id: store.events.length + 1, authorisation_id: a.id, request_id: a.attendance_approval_request_id,
       event_type: type, actor_employee_id: actor, event_reason: reason, authorised_by_employee_id: a.authorised_by_employee_id,
-      authorisation_reason: a.authorisation_reason, ...event, net_difference: event.payroll_difference.net_difference,
-      direction: event.payroll_difference.direction, adjustment_status: event.payroll_difference.adjustment_status,
+      authorisation_reason: a.authorisation_reason, ...event,
       employee_id: EMP, attendance_date: DATE,
     });
     return store.events.length;
@@ -128,7 +126,6 @@ function world({ punches, approvedOt = 0 }) {
       return { code: 200, status: "AUTHORISED", attendance_approval_request_id: request_id };
     },
     getStoredDay: async () => store.storedDay,
-    getFrozenPayrun: async () => FROZEN,
     decideStage: async (args) => {
       const r = byId(args.requestId);
       const locked = lockedPeriods([args.attendanceLock]).length > 0;
@@ -170,18 +167,6 @@ function world({ punches, approvedOt = 0 }) {
       byId(args.requestId).status = "CANCELLED";
       return { code: 200, status: "CANCELLED", locked_correction_event_id: eventId };
     },
-    listLockedCorrectionEvents: async ({ authorisation_id = null } = {}) =>
-      store.events
-        .filter((e) => authorisation_id === null || e.authorisation_id === Number(authorisation_id))
-        .map((e) => ({ ...e, attendance_locked_period_authorisation_id: e.authorisation_id, attendance_approval_request_id: e.request_id }))
-        .reverse(),
-    settleLockedCorrectionRequest: async ({ authorisation_id, event_ids, applied_by, applied_note, applied_payroll_year, applied_payroll_month }) => {
-      const pending = store.events.filter((e) => e.authorisation_id === Number(authorisation_id) && e.adjustment_status === "PENDING_ADJUSTMENT");
-      const same = pending.length === event_ids.length && pending.every((e) => event_ids.includes(e.attendance_locked_period_correction_event_id));
-      if (!same) return { updated: 0 };
-      pending.forEach((e) => Object.assign(e, { adjustment_status: "SETTLED", applied_by, applied_note, applied_payroll_year, applied_payroll_month }));
-      return { updated: pending.length };
-    },
   };
   const regularization = buildRegularization(regRepo, calculation);
   const read = async () => (await calculation.calculateRange({ employee_id: EMP, from_date: DATE, to_date: DATE }))[0];
@@ -197,8 +182,10 @@ const approveAll = async (w, id) => {
   return out;
 };
 
-describe("DECREASE - Missing Lunch Punches on a locked 12-09 with OT 235 approved", () => {
-  it("raise -> authorisation required -> separate authorise -> chain -> recoverable difference -> revoke -> settle", async () => {
+const MONEY = /daily_rate|net_pay|rupee|paise|payroll_difference|net_difference|PAYABLE|RECOVERABLE|PENDING_ADJUSTMENT|NETTED_OFF|adjustment|applied_/i;
+
+describe("12-09 locked: Missing Lunch Punches with OT 235 approved - attendance and OT only", () => {
+  it("raise -> authorisation required -> separate authorise -> chain -> before/after recorded -> revoke appends", async () => {
     const w = world({ punches: [raw(1, "10:09"), raw(2, "22:04")], approvedOt: 235 });
     await w.init();
 
@@ -208,7 +195,6 @@ describe("DECREASE - Missing Lunch Punches on a locked 12-09 with OT 235 approve
       /locked/i
     );
 
-    // Manager/HR raise: created, needing authorisation. Nothing written.
     const raised = await w.regularization.raiseRequest({
       actor: MANAGER, requested_for_employee_id: EMP, attendance_date: DATE, reason: "Missing Lunch Punches",
       break_out_time: at("14:00"), break_in_time: at("15:00"), allow_locked_period: true,
@@ -217,72 +203,40 @@ describe("DECREASE - Missing Lunch Punches on a locked 12-09 with OT 235 approve
     assert.equal(raised.auto_approved, false);
     const id = raised.attendance_approval_request_id;
 
-    // No stage can approve before authorisation.
     await assert.rejects(w.regularization.decide({ actor: ADMIN, request_id: id, decision: "APPROVED" }), /Locked-period authorisation required/);
-
-    // Separation of duties: the raiser cannot authorise; nor can the employee.
     await assert.rejects(w.regularization.authoriseLockedCorrection({ actor: MANAGER, request_id: id, reason: "I raised it" }), /cannot authorise/);
     await assert.rejects(w.regularization.authoriseLockedCorrection({ actor: { employee_id: EMP }, request_id: id, reason: "my own day" }), /cannot authorise/);
     await assert.rejects(w.regularization.authoriseLockedCorrection({ actor: AUTHORISER, request_id: id, reason: "x" }), /at least 5/);
+    assert.equal((await w.regularization.authoriseLockedCorrection({ actor: AUTHORISER, request_id: id, reason: "Lunch confirmed by store CCTV" })).status, "AUTHORISED");
 
-    const auth = await w.regularization.authoriseLockedCorrection({ actor: AUTHORISER, request_id: id, reason: "Lunch confirmed by store CCTV" });
-    assert.equal(auth.status, "AUTHORISED");
-
-    // The ordinary chain, then the final approval writes the corrected day.
     const final = await approveAll(w, id);
     assert.equal(final.status, "APPROVED");
     const lc = final.locked_correction;
-    assert.equal(lc.old_calculation.worked_minutes, 685);
-    assert.equal(lc.old_calculation.approved_ot_minutes, 235);
-    assert.equal(lc.new_calculation.worked_minutes, 655);
-    assert.equal(lc.new_calculation.approved_ot_minutes, 205);
     assert.deepEqual(lc.new_calculation.effective_punches.map((p) => `${p.io_time.slice(11, 16)}${p.source === "REGULARIZED" ? "*" : ""}`), ["10:09", "14:00*", "15:00*", "22:04"]);
-    // 235 -> 205 approved OT at NRM 450 on the frozen 1,000.00 daily rate.
-    assert.deepEqual(lc.payroll_difference.components.approved_ot, { before: 235, after: 205, amount: -66.66 });
-    assert.equal(lc.payroll_difference.net_difference, -66.66);
-    assert.equal(lc.payroll_difference.direction, "RECOVERABLE_FROM_EMPLOYEE");
-    assert.equal(lc.payroll_difference.adjustment_status, "PENDING_ADJUSTMENT");
-    assert.equal(lc.payroll_difference.basis.payrun_calculation_id, 77);
+    assert.deepEqual(lc.impact, {
+      worked_minutes: { before: 685, after: 655, change: -30 },
+      break_charged_minutes: { before: 30, after: 60, change: 30 },
+      ot_eligible_minutes: { before: 235, after: 205, change: -30 },
+      approved_ot_minutes: { before: 235, after: 205, change: -30 },
+    });
+    assert.ok(!MONEY.test(JSON.stringify(lc)), "no money on the event");
     assert.equal(w.store.auths[0].status, "APPLIED");
     assert.equal(w.store.events[0].authorisation_reason, "Lunch confirmed by store CCTV");
     assert.equal(w.store.storedDay.approved_ot_minutes, 205);
 
-    // Settlement: a later month only, a note required, once.
-    await assert.rejects(w.regularization.settleLockedCorrection({ actor: { employee_id: 9 }, request_id: id, applied_payroll_year: 2026, applied_payroll_month: 9, applied_note: "Shortage recovery" }), /LATER payroll month/);
-    await assert.rejects(w.regularization.settleLockedCorrection({ actor: { employee_id: 9 }, request_id: id, applied_payroll_year: 2026, applied_payroll_month: 10, applied_note: "x" }), /note/);
-
-    // REVOKE: the key (administrators hold it), a reason, an appended event.
-    await assert.rejects(
-      w.regularization.revokeDecision({ actor: { ...ADMIN, user_type: 1 }, request_id: id, reason: "not an admin" }),
-      /administrator/
-    );
+    // REVOKE: administrators (who hold the key), a reason, an appended event.
+    await assert.rejects(w.regularization.revokeDecision({ actor: { ...ADMIN, user_type: 1 }, request_id: id, reason: "not an admin" }), /administrator/);
     const revoked = await w.regularization.revokeDecision({ actor: ADMIN, request_id: id, reason: "Lunch was punched on paper after all" });
     assert.equal(revoked.status, "CANCELLED");
-    assert.equal(revoked.locked_correction.payroll_difference.net_difference, 66.66);
-    assert.equal(revoked.locked_correction.payroll_difference.direction, "PAYABLE_TO_EMPLOYEE");
-    assert.equal(revoked.locked_correction.new_calculation.approved_ot_minutes, 235);
-    assert.deepEqual(w.store.events.map((e) => [e.event_type, e.net_difference, e.adjustment_status]), [
-      ["APPROVAL", -66.66, "PENDING_ADJUSTMENT"],
-      ["REVOKE", 66.66, "PENDING_ADJUSTMENT"],
-    ]);
+    assert.deepEqual(revoked.locked_correction.impact.approved_ot_minutes, { before: 205, after: 235, change: 30 });
+    assert.deepEqual(revoked.locked_correction.impact.worked_minutes, { before: 655, after: 685, change: 30 });
+    assert.deepEqual(w.store.events.map((e) => [e.event_type, e.impact.approved_ot_minutes.change]), [["APPROVAL", -30], ["REVOKE", 30]]);
     assert.equal(w.store.auths[0].status, "REVOKED");
     assert.equal(w.store.storedDay.approved_ot_minutes, 235);
-
-    // SCENARIO A: revoked before either side was settled. Both immutable
-    // events stay PENDING in the record, but the derived outstanding nets to
-    // zero: nothing is actionable and there is nothing to settle.
-    const { outstanding, corrections } = await w.regularization.listLockedCorrections();
-    assert.deepEqual(outstanding, [], "not in Payroll's actionable list");
-    assert.equal(corrections.length, 2, "the full history is still listed");
-    await assert.rejects(
-      w.regularization.settleLockedCorrection({ actor: { employee_id: 9 }, request_id: id, applied_payroll_year: 2026, applied_payroll_month: 10, applied_note: "Netted off" }),
-      /Nothing is outstanding.*NETTED_OFF — no payroll adjustment required/
-    );
+    assert.ok(!MONEY.test(JSON.stringify(w.store.events)), "no money on any event");
   });
-});
 
-describe("INCREASE - a held missing-punch day on a locked month", () => {
-  it("10:09 only -> missing 22:04 OUT regularized: the held day becomes final; no approved OT, so no money moves", async () => {
+  it("a held missing-punch day becomes final: the before/after shows it, OT eligible 235 now visible", async () => {
     const w = world({ punches: [raw(1, "10:09")] });
     await w.init();
     assert.equal(Number(w.store.storedDay.is_final), 0, "held: odd punches");
@@ -292,72 +246,10 @@ describe("INCREASE - a held missing-punch day on a locked month", () => {
     });
     await w.regularization.authoriseLockedCorrection({ actor: AUTHORISER, request_id: raised.attendance_approval_request_id, reason: "Closing duty confirmed" });
     const final = await approveAll(w, raised.attendance_approval_request_id);
-    const d = final.locked_correction.payroll_difference;
-    // OT eligible 235 on the corrected two-punch day, but a regularization
-    // approves no OT (it is claimed separately, and in a locked month the
-    // claim is closed) - so the day becomes final with no shortage and no
-    // approved OT, and no money moves.
+    assert.equal(final.locked_correction.old_calculation.is_final, false);
     assert.equal(final.locked_correction.new_calculation.is_final, true);
-    assert.equal(final.locked_correction.new_calculation.candidate_ot_minutes, 235);
-    assert.equal(d.components.attendance_days.amount, 0, "the day already counted while held");
-    assert.equal(d.direction, "NO_DIFFERENCE");
-    assert.equal(d.adjustment_status, "NOT_REQUIRED");
-  });
-
-  it("an increase in payable OT is PAYABLE_TO_EMPLOYEE (priced on the frozen basis)", async () => {
-    // Approved OT capped at 205 by an applied lunch correction; revoking it
-    // returns the day to 235 payable - +30 minutes, payable to the employee.
-    const w = world({ punches: [raw(1, "10:09"), raw(2, "22:04")], approvedOt: 235 });
-    await w.init();
-    const raised = await w.regularization.raiseRequest({
-      actor: MANAGER, requested_for_employee_id: EMP, attendance_date: DATE, reason: "Missing Lunch Punches",
-      break_out_time: at("14:00"), break_in_time: at("15:00"), allow_locked_period: true,
-    });
-    await w.regularization.authoriseLockedCorrection({ actor: AUTHORISER, request_id: raised.attendance_approval_request_id, reason: "Lunch confirmed" });
-    await approveAll(w, raised.attendance_approval_request_id);
-    const revoked = await w.regularization.revokeDecision({ actor: ADMIN, request_id: raised.attendance_approval_request_id, reason: "Reverse the lunch" });
-    assert.equal(revoked.locked_correction.payroll_difference.direction, "PAYABLE_TO_EMPLOYEE");
-    assert.equal(revoked.locked_correction.payroll_difference.components.approved_ot.amount, 66.66);
-  });
-});
-
-
-describe("SCENARIO B - approve, settle, then revoke", () => {
-  it("the settled recovery is not netted away; the revoke's payable stays outstanding on its own", async () => {
-    const w = world({ punches: [raw(1, "10:09"), raw(2, "22:04")], approvedOt: 235 });
-    await w.init();
-    const raised = await w.regularization.raiseRequest({
-      actor: MANAGER, requested_for_employee_id: EMP, attendance_date: DATE, reason: "Missing Lunch Punches",
-      break_out_time: at("14:00"), break_in_time: at("15:00"), allow_locked_period: true,
-    });
-    const id = raised.attendance_approval_request_id;
-    await w.regularization.authoriseLockedCorrection({ actor: AUTHORISER, request_id: id, reason: "Lunch confirmed" });
-    await approveAll(w, id);
-
-    // Outstanding before settlement: the approval's recovery.
-    let list = await w.regularization.listLockedCorrections();
-    assert.equal(list.outstanding.length, 1);
-    assert.equal(list.outstanding[0].net_difference, -66.66);
-    assert.equal(list.outstanding[0].direction, "RECOVERABLE_FROM_EMPLOYEE");
-
-    // Payroll applies it in October and marks the REQUEST settled - once.
-    const settled = await w.regularization.settleLockedCorrection({ actor: { employee_id: 9 }, request_id: id, applied_payroll_year: 2026, applied_payroll_month: 10, applied_note: "Shortage recovery, October payrun" });
-    assert.deepEqual(settled.settled_event_ids, [1]);
-    assert.equal((await w.regularization.listLockedCorrections()).outstanding.length, 0);
-
-    // Later revoked: a NEW payable, independently pending.
-    await w.regularization.revokeDecision({ actor: ADMIN, request_id: id, reason: "Lunch was punched on paper after all" });
-    list = await w.regularization.listLockedCorrections();
-    assert.equal(list.outstanding.length, 1);
-    assert.equal(list.outstanding[0].net_difference, 66.66);
-    assert.equal(list.outstanding[0].direction, "PAYABLE_TO_EMPLOYEE");
-    assert.deepEqual(list.outstanding[0].pending_event_ids, [2]);
-    assert.deepEqual(w.store.events.map((e) => [e.event_type, e.net_difference, e.adjustment_status]), [
-      ["APPROVAL", -66.66, "SETTLED"],
-      ["REVOKE", 66.66, "PENDING_ADJUSTMENT"],
-    ]);
-    const done = await w.regularization.settleLockedCorrection({ actor: { employee_id: 9 }, request_id: id, applied_payroll_year: 2026, applied_payroll_month: 11, applied_note: "Arrears, November payrun" });
-    assert.deepEqual(done.settled_event_ids, [2]);
+    assert.equal(final.locked_correction.impact.ot_eligible_minutes.after, 235);
+    assert.equal(final.locked_correction.impact.approved_ot_minutes.after, 0, "a regularization approves no OT");
   });
 });
 
@@ -441,60 +333,32 @@ describe("the approval list does not offer the authoriser a stage", () => {
 });
 
 
-describe("REPORTING: a netted-off correction is not pending payroll work", () => {
-  const approveRevoke = async ({ settleFirst }) => {
-    const w = world({ punches: [raw(1, "10:09"), raw(2, "22:04")], approvedOt: 235 });
-    await w.init();
-    const raised = await w.regularization.raiseRequest({
-      actor: MANAGER, requested_for_employee_id: EMP, attendance_date: DATE, reason: "Missing Lunch Punches",
-      break_out_time: at("14:00"), break_in_time: at("15:00"), allow_locked_period: true,
-    });
-    const id = raised.attendance_approval_request_id;
-    await w.regularization.authoriseLockedCorrection({ actor: AUTHORISER, request_id: id, reason: "Lunch confirmed" });
-    await approveAll(w, id);
-    if (settleFirst) {
-      await w.regularization.settleLockedCorrection({ actor: { employee_id: 9 }, request_id: id, applied_payroll_year: 2026, applied_payroll_month: 10, applied_note: "Shortage recovery, October" });
-    }
-    await w.regularization.revokeDecision({ actor: ADMIN, request_id: id, reason: "Reverse the lunch" });
-    return w;
+describe("the approval list does not offer the authoriser a stage", () => {
+  const listWorld = (authorisedBy) => {
+    const row = {
+      attendance_approval_request_id: 900, request_type: "REGULARIZATION", status: "PENDING", requested_for_employee_id: EMP,
+      requested_by_employee_id: 7, employee_name: "Staff", attendance_date: DATE, outlet_id: 3, outlet_name: "S",
+      reason: "Missing Lunch Punches", candidate_ot_minutes: 0, approved_ot_minutes: null, current_stage_no: 1, total_stages: 1,
+      finalization_state: "NOT_REQUIRED", closure_reason: null, chain_source: "ROLE",
+      locked_period_status: "AUTHORISED", locked_period_authorised_by: authorisedBy,
+    };
+    const regRepo = {
+      getApprovalIdentity: async (id) => ({ employee_id: id, employee_name: "A", outlet_id: 1, approver_role: null, requester_class: null }),
+      listApprovals: async () => [row],
+      countApprovals: async () => 1,
+      listStepsForRequests: async () => [{ attendance_approval_request_id: 900, attendance_approval_step_id: 1, stage_no: 1, approver_role: "HR", outlet_id: null, decision: "PENDING" }],
+      listRevocationsForRequests: async () => [],
+    };
+    return buildRegularization(regRepo, { calculateRange: async () => [] });
   };
+  const admin = (id) => ({ employee_id: id, user_type: 2, branch_scope: { kind: "ALL_BRANCHES" } });
 
-  it("A: both events read NETTED_OFF, the pending count and the PENDING filter are empty, the history is complete", async () => {
-    const w = await approveRevoke({ settleFirst: false });
-    const all = await w.regularization.listLockedCorrections();
-    assert.equal(all.outstanding.length, 0, "pending count 0");
-    assert.deepEqual(all.corrections.map((e) => [e.event_type, e.adjustment_status, e.effective_adjustment_status]), [
-      ["REVOKE", "PENDING_ADJUSTMENT", "NETTED_OFF"],
-      ["APPROVAL", "PENDING_ADJUSTMENT", "NETTED_OFF"],
-    ]);
-    assert.equal((await w.regularization.listLockedCorrections({ adjustment_status: "PENDING_ADJUSTMENT" })).corrections.length, 0);
-    assert.equal((await w.regularization.listLockedCorrections({ adjustment_status: "NETTED_OFF" })).corrections.length, 2);
-    // The stored events are exactly as written.
-    assert.deepEqual(w.store.events.map((e) => [e.net_difference, e.adjustment_status]), [[-66.66, "PENDING_ADJUSTMENT"], [66.66, "PENDING_ADJUSTMENT"]]);
-    // The Day Detail read carries the derived state and the full history.
-    w.calculation.setLockedCorrectionReader(async () =>
-      w.store.auths.map((a) => ({
-        attendance_locked_period_authorisation_id: a.id, attendance_approval_request_id: a.attendance_approval_request_id,
-        attendance_date: DATE, status: a.status, request_status: "CANCELLED", authorised_by_employee_id: a.authorised_by_employee_id,
-        events: w.store.events.map((e) => ({ ...e })),
-      }))
-    );
-    const [day] = await w.calculation.markPayrollLocked(EMP, [await w.read()]);
-    const c = day.locked_period_correction;
-    assert.deepEqual(c.events.map((e) => [e.event_type, e.effective_adjustment_status]), [["APPROVAL", "NETTED_OFF"], ["REVOKE", "NETTED_OFF"]]);
-    assert.equal(c.outstanding.state, "NETTED_OFF");
-    assert.equal(c.outstanding.actionable, false);
-    assert.equal(c.outstanding.label, "NETTED_OFF — no payroll adjustment required");
-  });
-
-  it("B: an earlier SETTLED event is not netted - the revoke stays pending and is counted", async () => {
-    const w = await approveRevoke({ settleFirst: true });
-    const all = await w.regularization.listLockedCorrections();
-    assert.equal(all.outstanding.length, 1, "pending count 1");
-    assert.deepEqual(all.corrections.map((e) => [e.event_type, e.effective_adjustment_status]), [
-      ["REVOKE", "PENDING_ADJUSTMENT"],
-      ["APPROVAL", "SETTLED"],
-    ]);
-    assert.equal((await w.regularization.listLockedCorrections({ adjustment_status: "PENDING_ADJUSTMENT" })).corrections.length, 1);
+  it("the authorising administrator sees it not actionable, with the reason; another administrator can act", async () => {
+    const mine = await listWorld(901).listApprovals({ actor: admin(901), request_type: "REGULARIZATION", status: "PENDING" });
+    assert.equal(mine.rows[0].actionable, false);
+    assert.match(mine.rows[0].not_actionable_reason, /another approver must approve/);
+    assert.equal(mine.rows[0].locked_period_status, "AUTHORISED");
+    const other = await listWorld(901).listApprovals({ actor: admin(902), request_type: "REGULARIZATION", status: "PENDING" });
+    assert.equal(other.rows[0].actionable, true);
   });
 });

@@ -79,11 +79,9 @@ describe("the endpoints and their guards", () => {
         "POST /attendance/permission-request",
         "POST /attendance/regularization",
         "POST /attendance/regularization/:request_id/decision",
-        // LOCKED-PERIOD CORRECTION: the separate authorisation, Payroll's
-        // list and the manual settlement.
-        "GET /attendance/locked-period-corrections",
+        // LOCKED-PERIOD CORRECTION: the separate authorisation (no payroll
+        // list, no settlement - attendance only).
         "POST /attendance/regularization/:request_id/locked-period-authorisation",
-        "POST /attendance/locked-period-corrections/requests/:request_id/settle",
       ].sort()
     );
   });
@@ -520,38 +518,26 @@ describe("POST /attendance/regularization - a missed break", () => {
 
 
 /**
- * LOCKED-PERIOD CORRECTION routes: the key, the outlet scope, the settlement.
+ * LOCKED-PERIOD CORRECTION routes: the key and the outlet scope.
  */
 describe("locked-period correction routes", () => {
   const allGuards = guardsOf(buildRoutes({}, tagging, null));
   const g = (m, p) => allGuards.find((x) => x.method === m && x.path === p);
-  it("authorise needs correct_locked_attendance; settle needs process_payroll", () => {
+  it("authorise needs correct_locked_attendance; there is no payroll list or settlement endpoint", () => {
     assert.deepEqual(g("POST", "/attendance/regularization/:request_id/locked-period-authorisation").guard, { mode: "any", keys: [P.CORRECT_LOCKED_ATTENDANCE] });
-    assert.deepEqual(g("POST", "/attendance/locked-period-corrections/requests/:request_id/settle").guard, { mode: "any", keys: [P.PROCESS_PAYROLL] });
+    assert.ok(!allGuards.some((x) => /locked-period-corrections|settle/.test(x.path)));
   });
 
   const scope = {
     checkEmployee: async (req, id) => (Number(id) === 303 ? { ok: false, msg: "Not in your branch" } : { ok: true }),
     refuse: (res, o) => res.status(403).json({ code: 403, msg: o.msg }),
-    resolve: async () => ({ kind: "OWN_BRANCHES", store_ids: [3] }),
   };
   const wireLocked = (held, employeeFor = 202) => {
-    const calls = { authorised: [], raised: [], settled: [] };
+    const calls = { authorised: [], raised: [] };
     const usecase = {
-      requestEmployeeId: async (id) => (Number(id) === 901 ? 303 : employeeFor),
+      requestEmployeeId: async () => employeeFor,
       authoriseLockedCorrection: async (args) => { calls.authorised.push(args); return { status: "AUTHORISED" }; },
       raiseRequest: async (args) => { calls.raised.push(args); return { attendance_approval_request_id: 1 }; },
-      listLockedCorrections: async () => ({
-        corrections: [
-          { attendance_locked_period_correction_event_id: 1, employee_id: 202, store_id: 3 },
-          { attendance_locked_period_correction_event_id: 2, employee_id: 303, store_id: 9 },
-        ],
-        outstanding: [
-          { attendance_approval_request_id: 900, employee_id: 202, store_id: 3, net_difference: -66.66 },
-          { attendance_approval_request_id: 901, employee_id: 303, store_id: 9, net_difference: 10 },
-        ],
-      }),
-      settleLockedCorrection: async (args) => { calls.settled.push(args); return { code: 200, adjustment_status: "SETTLED" }; },
     };
     const permissions = { require: () => (req, res, next) => next(), has: async (req, ...keys) => keys.some((k) => held.includes(k)) };
     return { routes: buildRoutes(usecase, permissions, null, scope), calls };
@@ -579,25 +565,4 @@ describe("locked-period correction routes", () => {
     assert.equal(plain.calls.raised[0].allow_locked_period, false);
   });
 
-  it("Payroll's list is filtered to the caller's outlet scope, and refused without a payroll key", async () => {
-    const payroll = wireLocked([P.VIEW_PAYROLL]);
-    const res = await invoke(payroll.routes, "GET", "/attendance/locked-period-corrections", req());
-    assert.equal(res.statusCode, 200);
-    assert.deepEqual(res.body.corrections.map((c) => c.attendance_locked_period_correction_event_id), [1]);
-    assert.deepEqual(res.body.outstanding.map((o) => o.attendance_approval_request_id), [900], "outstanding is scoped too");
-    assert.equal(res.body.pending_adjustment_count, 1, "the count is the in-scope outstanding nets");
-    const nobody = wireLocked([]);
-    assert.equal((await invoke(nobody.routes, "GET", "/attendance/locked-period-corrections", req())).statusCode, 403);
-  });
-
-  it("settle: per REQUEST, validated, scoped, passed through", async () => {
-    const w = wireLocked([P.PROCESS_PAYROLL]);
-    const body = { applied_payroll_year: 2026, applied_payroll_month: 10, applied_note: "Shortage recovery in October" };
-    const path = "/attendance/locked-period-corrections/requests/:request_id/settle";
-    assert.equal((await invoke(w.routes, "POST", path, req(body, { request_id: "900" }))).statusCode, 200);
-    assert.equal(w.calls.settled[0].request_id, 900);
-    assert.equal(w.calls.settled[0].applied_payroll_month, 10);
-    assert.equal((await invoke(w.routes, "POST", path, req(body, { request_id: "901" }))).statusCode, 403, "out of scope");
-    assert.equal((await invoke(w.routes, "POST", path, req({ applied_payroll_year: 2026 }, { request_id: "900" }))).statusCode, 400);
-  });
 });

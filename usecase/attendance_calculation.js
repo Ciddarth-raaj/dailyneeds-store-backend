@@ -43,7 +43,6 @@ const { propagationScope } = require("../utils/shift_propagation");
 const { istToday } = require("../utils/istDate");
 const { partitionClosedDays, endOfIstDay } = require("../utils/attendance_persist_guard");
 const { payrollLockedError } = require("../utils/attendance_payroll_lock");
-const { outstandingAdjustment, withEffectiveStatus } = require("../utils/attendance_locked_correction");
 const readTiming = require("../utils/attendance_read_timing");
 const {
   resolvePermissionRows,
@@ -2695,7 +2694,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    */
   // THE LOCKED-PERIOD CORRECTIONS of a range, supplied by `server.js` from
   // the regularization repository (`listLockedCorrectionsForRange`) - read
-  // only, so a day can show its authorisation, events and payroll difference.
+  // only, so a day can show its authorisation and its before/after events.
   let lockedCorrectionReader = null;
   const setLockedCorrectionReader = (reader) => {
     lockedCorrectionReader = typeof reader === "function" ? reader : null;
@@ -2749,15 +2748,11 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
               authorised_by_name: c.authorised_by_name || null,
               authorised_at: c.authorised_at || null,
               authorisation_reason: c.authorisation_reason || null,
-              events: withEffectiveStatus(c.events || []).map((ev) => ({
+              events: (c.events || []).map((ev) => ({
                 ...ev,
                 old_calculation: parseJsonOr(ev.old_calculation),
                 new_calculation: parseJsonOr(ev.new_calculation),
-                payroll_difference: parseJsonOr(ev.payroll_difference),
-                net_difference: ev.net_difference === null ? null : Number(ev.net_difference),
               })),
-              // The DERIVED net of the unsettled events - what Payroll acts on.
-              outstanding: outstandingAdjustment(c.events || []),
             }
           : null,
       };

@@ -32,19 +32,19 @@ describe(NAME, () => {
     assert.ok(!up.some((s) => /payrun_employee_calculation/.test(s)), "the frozen payrun is not touched");
   });
 
-  it("one authorisation per request; events RESTRICT deletion; the audit and settlement columns exist", () => {
+  it("one authorisation per request; events RESTRICT deletion; attendance/OT before-after columns, no money", () => {
     const [auth, ev] = up.filter((s) => /^CREATE TABLE/i.test(s));
     assert.match(auth, /UNIQUE KEY `uq_alpa_request` \(`attendance_approval_request_id`\)/);
     assert.match(auth, /`status` ENUM\('REQUIRED','AUTHORISED','APPLIED','REVOKED'\)/);
     for (const c of ["authorised_by_employee_id", "authorisation_reason", "authorised_at"]) assert.match(auth, new RegExp(`\`${c}\``));
     for (const c of [
       "attendance_approval_request_id", "employee_id", "attendance_date", "event_type", "actor_employee_id", "event_reason",
-      "occurred_at", "authorised_by_employee_id", "authorisation_reason", "authorised_at", "payrun_calculation_id",
-      "old_calculation", "new_calculation", "payroll_difference", "net_difference", "direction", "adjustment_status",
-      "applied_by", "applied_at", "applied_note", "applied_payroll_year", "applied_payroll_month",
+      "occurred_at", "authorised_by_employee_id", "authorisation_reason", "authorised_at", "old_calculation", "new_calculation",
+      "old_worked_minutes", "new_worked_minutes", "old_break_charged_minutes", "new_break_charged_minutes",
+      "old_ot_eligible_minutes", "new_ot_eligible_minutes", "old_approved_ot_minutes", "new_approved_ot_minutes",
     ]) assert.match(ev, new RegExp(`\`${c}\``), c);
-    assert.match(ev, /`direction` ENUM\('PAYABLE_TO_EMPLOYEE','RECOVERABLE_FROM_EMPLOYEE','NO_DIFFERENCE'\)/);
-    assert.match(ev, /`adjustment_status` ENUM\('PENDING_ADJUSTMENT','SETTLED','NOT_REQUIRED'\)/);
+    // Attendance only: no money, no payroll reference, no settlement.
+    assert.ok(!/net_pay|difference|direction|adjustment|applied_|payrun|rupee/i.test(ev), "no money columns");
     assert.match(ev, /ON DELETE RESTRICT/);
   });
 

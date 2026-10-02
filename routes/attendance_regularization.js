@@ -4,7 +4,6 @@ const P = require("../constants/hr_permissions");
 const respondError = require("../utils/http");
 const { requireSelf } = require("./attendance_calculation");
 const { isAdminRequest } = require("../middlewares/admin_only");
-const { isEmployeeInScope } = require("../utils/employee_branch_scope");
 
 /**
  * THE ADDITIONAL KEY PER REQUEST TYPE, on top of the generic approval keys.
@@ -792,97 +791,6 @@ class AttendanceRegularizationRoutes {
         }
       }
     );
-
-    /**
-     * PAYROLL'S LIST: `corrections` - every event, immutable - and
-     * `outstanding` - the derived net per correction request, only where it
-     * is not zero. Both filtered to the caller's outlet scope.
-     */
-    this.router.get("/attendance/locked-period-corrections", async (req, res) => {
-      try {
-        if (!req.decoded) {
-          res.status(401).json({ code: 401, msg: "Unauthorized" });
-          return;
-        }
-        if (!(await this.permissions.has(req, P.VIEW_PAYROLL, P.PROCESS_PAYROLL, P.CORRECT_LOCKED_ATTENDANCE))) {
-          AttendanceRegularizationRoutes._forbidden(res);
-          return;
-        }
-        const isValid = Joi.validate(req.query, {
-          adjustment_status: Joi.string().valid("PENDING_ADJUSTMENT", "SETTLED", "NOT_REQUIRED", "NETTED_OFF").optional(),
-          employee_id: Joi.number().integer().positive().optional(),
-          limit: Joi.number().integer().min(1).max(500).optional(),
-        });
-        if (isValid.error !== null) throw isValid.error;
-        if (!this.branchScope || typeof this.branchScope.resolve !== "function") {
-          AttendanceRegularizationRoutes._forbidden(res);
-          return;
-        }
-        const scope = await this.branchScope.resolve(req);
-        const rows = await this.usecase.listLockedCorrections({
-          adjustment_status: req.query.adjustment_status || null,
-          employee_id: req.query.employee_id ? Number(req.query.employee_id) : null,
-          limit: req.query.limit ? Number(req.query.limit) : 200,
-        });
-        const inScope = (r) => isEmployeeInScope(scope, r.store_id);
-        const outstanding = rows.outstanding.filter(inScope);
-        res.json({
-          code: 200,
-          corrections: rows.corrections.filter(inScope),
-          outstanding,
-          // THE PENDING COUNT is the outstanding nets - a netted-off
-          // correction is not payroll work and is not counted.
-          pending_adjustment_count: outstanding.length,
-        });
-      } catch (err) {
-        AttendanceRegularizationRoutes._respond(res, err);
-      }
-    });
-
-    /**
-     * SETTLE A REQUEST'S OUTSTANDING ADJUSTMENT in a later payroll month -
-     * Payroll (`process_payroll`), with a note naming the adjustment used. The
-     * derived net of the request's unsettled events is what is settled; a
-     * correction that netted to zero has nothing to settle.
-     */
-    this.router.post(
-      "/attendance/locked-period-corrections/requests/:request_id/settle",
-      this.permissions.require(P.PROCESS_PAYROLL),
-      async (req, res) => {
-        try {
-          const isValid = Joi.validate(req.body, {
-            applied_payroll_year: Joi.number().integer().min(2000).max(2100).required(),
-            applied_payroll_month: Joi.number().integer().min(1).max(12).required(),
-            applied_note: Joi.string().trim().min(5).max(500).required(),
-          });
-          if (isValid.error !== null) throw isValid.error;
-          const requestId = Number(req.params.request_id);
-          const employeeId = Number.isInteger(requestId) && requestId > 0 ? await this.usecase.requestEmployeeId(requestId) : null;
-          if (employeeId === null) {
-            res.status(404).json({ code: 404, msg: `No such request: ${req.params.request_id}` });
-            return;
-          }
-          if (!this.branchScope || typeof this.branchScope.checkEmployee !== "function") {
-            AttendanceRegularizationRoutes._forbidden(res);
-            return;
-          }
-          const scoped = await this.branchScope.checkEmployee(req, employeeId);
-          if (!scoped.ok) {
-            this.branchScope.refuse(res, scoped);
-            return;
-          }
-          const result = await this.usecase.settleLockedCorrection({
-            actor: { employee_id: req.decoded.employee_id },
-            request_id: requestId,
-            applied_payroll_year: req.body.applied_payroll_year,
-            applied_payroll_month: req.body.applied_payroll_month,
-            applied_note: req.body.applied_note,
-          });
-          res.json(result);
-      } catch (err) {
-        AttendanceRegularizationRoutes._respond(res, err);
-      }
-    });
 
     /**
      * "SELECT ALL MATCHING THE FILTERS" for a bulk action: the ids of one

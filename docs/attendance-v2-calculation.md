@@ -183,26 +183,11 @@ admin revoke (key + reason)           -> day written back, REVOKE event, REVOKED
   for the final approval, APPLIED for the revoke), inside the decision/revoke
   transaction. Everything else still raises `PAYROLL_MONTH_LOCKED`.
 * Every approving stage needs the authorisation; a rejection writes nothing.
-* `attendance_locked_period_correction_event` records the old and new day,
-  the authorisation and the payroll difference priced on the frozen row's
-  daily rate (`utils/attendance_locked_correction.js`): days x daily rate,
-  shortage x daily rate / NRM, approved OT by the payrun's group formula. PF/ESI
-  are not recomputed (`statutory_recomputed = 0`); the difference is settled
-  manually through the existing adjustment fields.
-* Direction: PAYABLE_TO_EMPLOYEE / RECOVERABLE_FROM_EMPLOYEE /
-  NO_DIFFERENCE (NOT_REQUIRED). Calculation and difference columns are never
-  updated; a revoke appends.
-* **Outstanding adjustment, derived per request**
-  (`utils/attendance_locked_correction.js#outstandingAdjustment`): the net of
-  the request's events still PENDING_ADJUSTMENT. Approve then revoke before
-  settlement nets to 0 and is not actionable: its events read a DERIVED
-  `effective_adjustment_status` of NETTED_OFF ("NETTED_OFF — no payroll
-  adjustment required"), never stored; they are excluded from the pending
-  list, the `pending_adjustment_count` and a PENDING_ADJUSTMENT filter. An event already SETTLED is never
-  netted away: approve, settle, revoke leaves the revoke's amount outstanding
-  on its own. Payroll settles the REQUEST's net once, in a LATER payroll month,
-  with a note (`POST /attendance/locked-period-corrections/requests/:request_id/settle`,
-  `process_payroll`); the netted events move to SETTLED together.
+* `attendance_locked_period_correction_event` records, append-only, the old
+  and new day and the worked / break / OT-eligible / approved-OT minutes before
+  and after. **Attendance only: no money is calculated or recorded.** The
+  frozen payrun is neither re-priced nor touched; any pay consequence is a
+  payroll matter outside this feature. A revoke appends its own event.
 * **Separation of duties**: the raiser and the employee cannot authorise; an
   approver who already decided a stage cannot authorise; the authoriser cannot
   APPROVE any stage of that request (not even by administrator override) - the

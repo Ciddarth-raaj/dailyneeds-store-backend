@@ -5,8 +5,8 @@
 -- corrected - one employee, one date, one request - only after a holder of
 -- `correct_locked_attendance` authorises the exception, with a reason. The
 -- month stays locked; `payrun_employee_calculation` is never touched; the
--- corrected day row is written inside the request's own decision transaction
--- and the payroll difference is recorded here for MANUAL settlement.
+-- corrected day row is written inside the request's own decision transaction.
+-- ATTENDANCE ONLY: no money is calculated or recorded here.
 --
 --   attendance_locked_period_authorisation   one row per request:
 --     REQUIRED    raised in a locked month, waiting for authorisation
@@ -15,10 +15,9 @@
 --     REVOKED     an authorised revoke withdrew it
 --
 --   attendance_locked_period_correction_event   one row per write to the
---     locked day (final approval, revoke). Its calculation and difference
---     columns are written once and never updated; only the settlement
---     columns move, once, PENDING_ADJUSTMENT -> SETTLED, guarded on state.
---     Never deleted by the application (RESTRICT).
+--     locked day (final approval, revoke): the day before and after and the
+--     worked / break / OT minutes before and after. Append-only - written once,
+--     never updated, never deleted by the application (RESTRICT).
 -- =====================================================================
 
 CREATE TABLE IF NOT EXISTS `attendance_locked_period_authorisation` (
@@ -58,27 +57,20 @@ CREATE TABLE IF NOT EXISTS `attendance_locked_period_correction_event` (
   `authorised_by_employee_id` INT NULL,
   `authorisation_reason`      VARCHAR(500) NULL,
   `authorised_at`             TIMESTAMP(3) NULL,
-  -- The frozen payroll it was priced against.
-  `payrun_calculation_id`   BIGINT UNSIGNED NULL,
-  `payrun_calculation_hash` CHAR(32) NULL,
-  `frozen_net_pay`          DECIMAL(12,2) NULL,
-  `old_calculation`  JSON NOT NULL,
-  `new_calculation`  JSON NOT NULL,
-  `payroll_difference` JSON NOT NULL COMMENT 'priced components, see utils/attendance_locked_correction.js',
-  `net_difference`   DECIMAL(12,2) NOT NULL COMMENT '> 0 payable to the employee, < 0 recoverable',
-  `direction`        ENUM('PAYABLE_TO_EMPLOYEE','RECOVERABLE_FROM_EMPLOYEE','NO_DIFFERENCE') NOT NULL,
-  `statutory_recomputed` TINYINT(1) NOT NULL DEFAULT 0,
-  -- Manual settlement, by Payroll, in a later month.
-  `adjustment_status` ENUM('PENDING_ADJUSTMENT','SETTLED','NOT_REQUIRED') NOT NULL,
-  `applied_by`            INT NULL,
-  `applied_at`            TIMESTAMP(3) NULL,
-  `applied_note`          VARCHAR(500) NULL,
-  `applied_payroll_year`  SMALLINT NULL,
-  `applied_payroll_month` TINYINT NULL,
+  `old_calculation`  JSON NOT NULL COMMENT 'the stored day before the event',
+  `new_calculation`  JSON NOT NULL COMMENT 'the day the event wrote',
+  -- The attendance and OT impact, in minutes, for reporting without JSON.
+  `old_worked_minutes`      INT NULL,
+  `new_worked_minutes`      INT NULL,
+  `old_break_charged_minutes` INT NULL,
+  `new_break_charged_minutes` INT NULL,
+  `old_ot_eligible_minutes` INT NULL,
+  `new_ot_eligible_minutes` INT NULL,
+  `old_approved_ot_minutes` INT NULL,
+  `new_approved_ot_minutes` INT NULL,
   PRIMARY KEY (`attendance_locked_period_correction_event_id`),
   KEY `idx_alpce_authorisation` (`attendance_locked_period_authorisation_id`),
   KEY `idx_alpce_employee_date` (`employee_id`, `attendance_date`),
-  KEY `idx_alpce_adjustment` (`adjustment_status`),
   CONSTRAINT `fk_alpce_authorisation` FOREIGN KEY (`attendance_locked_period_authorisation_id`)
     REFERENCES `attendance_locked_period_authorisation` (`attendance_locked_period_authorisation_id`)
     ON DELETE RESTRICT ON UPDATE RESTRICT

@@ -1853,9 +1853,9 @@ class AttendanceRegularizationRepository {
   }
 
   /**
-   * APPEND one correction event. The authorisation is copied onto it so the
-   * row reads on its own. Calculation and difference columns are never
-   * updated afterwards; only the settlement columns move, once.
+   * APPEND one correction event: the day before and after, the worked /
+   * break / OT minutes before and after, and the authorisation copied onto it
+   * so the row reads on its own. Never updated afterwards.
    */
   async _insertLockedCorrectionEventOnConnection(connection, args) {
     const [auth] = await queryAsync(
@@ -1867,16 +1867,17 @@ class AttendanceRegularizationRepository {
       [args.authorisation_id]
     );
     const e = args.event || {};
-    const diff = e.payroll_difference || {};
+    const impact = e.impact || {};
+    const m = (k, side) => (impact[k] && impact[k][side] !== undefined ? impact[k][side] : null);
     const inserted = await queryAsync(
       connection,
       `INSERT INTO attendance_locked_period_correction_event
          (attendance_locked_period_authorisation_id, attendance_approval_request_id, employee_id, attendance_date,
           event_type, actor_employee_id, actor_user_id, event_reason,
           authorised_by_employee_id, authorisation_reason, authorised_at,
-          payrun_calculation_id, payrun_calculation_hash, frozen_net_pay,
-          old_calculation, new_calculation, payroll_difference, net_difference, direction,
-          statutory_recomputed, adjustment_status)
+          old_calculation, new_calculation,
+          old_worked_minutes, new_worked_minutes, old_break_charged_minutes, new_break_charged_minutes,
+          old_ot_eligible_minutes, new_ot_eligible_minutes, old_approved_ot_minutes, new_approved_ot_minutes)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         args.authorisation_id,
@@ -1890,16 +1891,16 @@ class AttendanceRegularizationRepository {
         auth.authorised_by_employee_id,
         auth.authorisation_reason,
         auth.authorised_at,
-        diff.basis ? diff.basis.payrun_calculation_id : null,
-        diff.basis ? diff.basis.calculation_hash : null,
-        diff.basis ? diff.basis.frozen_net_pay : null,
         JSON.stringify(e.old_calculation || null),
         JSON.stringify(e.new_calculation || null),
-        JSON.stringify(diff),
-        Number(diff.net_difference) || 0,
-        diff.direction || "NO_DIFFERENCE",
-        diff.statutory_recomputed ? 1 : 0,
-        diff.adjustment_status || "NOT_REQUIRED",
+        m("worked_minutes", "before"),
+        m("worked_minutes", "after"),
+        m("break_charged_minutes", "before"),
+        m("break_charged_minutes", "after"),
+        m("ot_eligible_minutes", "before"),
+        m("ot_eligible_minutes", "after"),
+        m("approved_ot_minutes", "before"),
+        m("approved_ot_minutes", "after"),
       ]
     );
     return inserted ? Number(inserted.insertId) : null;
@@ -1994,21 +1995,6 @@ class AttendanceRegularizationRepository {
     }
   }
 
-  /** The frozen payroll row a locked date was paid on, or null. Read-only. */
-  async getFrozenPayrun(employeeId, attendanceDate) {
-    const [y, m] = String(attendanceDate).slice(0, 7).split("-").map(Number);
-    const rows = await this._read(
-      "GET-FROZEN-PAYRUN",
-      `SELECT payrun_calculation_id, employee_id, period_year, period_month, status,
-              monthly_gross, daily_rate, approved_ot_minutes, ot_amount, ot_groups,
-              missing_hours_minutes, missing_hours_deduction, net_pay, calculation_hash
-         FROM payrun_employee_calculation
-        WHERE employee_id = ? AND period_year = ? AND period_month = ? AND status = 'APPROVED_LOCKED'`,
-      [Number(employeeId), y, m]
-    );
-    return rows && rows[0] ? rows[0] : null;
-  }
-
   /** The STORED day row (what payroll was calculated from), or null. */
   async getStoredDay(employeeId, attendanceDate) {
     const rows = await this._read(
@@ -2045,8 +2031,8 @@ class AttendanceRegularizationRepository {
     }));
   }
 
-  /** The correction events, newest first - Payroll's settlement list. */
-  async listLockedCorrectionEvents({ employee_id = null, from_date = null, to_date = null, adjustment_status = null, authorisation_id = null, limit = 200 } = {}) {
+  /** The correction events of an employee / range / authorisation, newest first. */
+  async listLockedCorrectionEvents({ employee_id = null, from_date = null, to_date = null, authorisation_id = null, limit = 200 } = {}) {
     const where = ["1 = 1"];
     const params = [];
     if (authorisation_id) {
@@ -2061,10 +2047,6 @@ class AttendanceRegularizationRepository {
       where.push("ev.attendance_date BETWEEN ? AND ?");
       params.push(from_date, to_date);
     }
-    if (adjustment_status) {
-      where.push("ev.adjustment_status = ?");
-      params.push(adjustment_status);
-    }
     return this._read(
       "LIST-LOCKED-EVENTS",
       `SELECT ev.attendance_locked_period_correction_event_id, ev.attendance_locked_period_authorisation_id,
@@ -2074,81 +2056,20 @@ class AttendanceRegularizationRepository {
               DATE_FORMAT(ev.occurred_at, '%Y-%m-%d %H:%i:%s') AS occurred_at,
               ev.authorised_by_employee_id, be.employee_name AS authorised_by_name, ev.authorisation_reason,
               DATE_FORMAT(ev.authorised_at, '%Y-%m-%d %H:%i:%s') AS authorised_at,
-              ev.payrun_calculation_id, ev.payrun_calculation_hash, ev.frozen_net_pay,
-              ev.old_calculation, ev.new_calculation, ev.payroll_difference, ev.net_difference, ev.direction,
-              ev.statutory_recomputed, ev.adjustment_status, ev.applied_by, pe.employee_name AS applied_by_name,
-              DATE_FORMAT(ev.applied_at, '%Y-%m-%d %H:%i:%s') AS applied_at, ev.applied_note,
-              ev.applied_payroll_year, ev.applied_payroll_month
+              ev.old_calculation, ev.new_calculation,
+              ev.old_worked_minutes, ev.new_worked_minutes,
+              ev.old_break_charged_minutes, ev.new_break_charged_minutes,
+              ev.old_ot_eligible_minutes, ev.new_ot_eligible_minutes,
+              ev.old_approved_ot_minutes, ev.new_approved_ot_minutes
          FROM attendance_locked_period_correction_event ev
          LEFT JOIN new_employee ne ON ne.employee_id = ev.employee_id
          LEFT JOIN new_employee ae ON ae.employee_id = ev.actor_employee_id
          LEFT JOIN new_employee be ON be.employee_id = ev.authorised_by_employee_id
-         LEFT JOIN new_employee pe ON pe.employee_id = ev.applied_by
         WHERE ${where.join(" AND ")}
         ORDER BY ev.attendance_locked_period_correction_event_id DESC
         LIMIT ?`,
       [...params, Math.min(Math.max(Number(limit) || 200, 1), 500)]
     );
-  }
-
-  /**
-   * SETTLE A REQUEST'S OUTSTANDING ADJUSTMENT: every event the usecase netted
-   * (`event_ids`) moves PENDING_ADJUSTMENT -> SETTLED together, once, in one
-   * transaction. If the request's pending set is not exactly those events
-   * (one was appended or settled meanwhile) nothing is written - the net the
-   * caller settled is no longer the net. Calculation and difference columns
-   * are never touched.
-   */
-  async settleLockedCorrectionRequest({ authorisation_id, event_ids, applied_by, applied_note, applied_payroll_year, applied_payroll_month }) {
-    const connection = await getConnectionAsync(this.db);
-    try {
-      await beginTransactionAsync(connection);
-      const pending = await queryAsync(
-        connection,
-        `SELECT attendance_locked_period_correction_event_id AS id
-           FROM attendance_locked_period_correction_event
-          WHERE attendance_locked_period_authorisation_id = ? AND adjustment_status = 'PENDING_ADJUSTMENT'
-          FOR UPDATE`,
-        [Number(authorisation_id)]
-      );
-      const have = (pending || []).map((r) => Number(r.id)).sort((a, b) => a - b);
-      const want = (event_ids || []).map(Number).sort((a, b) => a - b);
-      if (want.length === 0 || have.length !== want.length || have.some((id, i) => id !== want[i])) {
-        await rollbackAsync(connection);
-        return { updated: 0 };
-      }
-      const result = await queryAsync(
-        connection,
-        `UPDATE attendance_locked_period_correction_event
-            SET adjustment_status = 'SETTLED', applied_by = ?, applied_at = CURRENT_TIMESTAMP(3),
-                applied_note = ?, applied_payroll_year = ?, applied_payroll_month = ?
-          WHERE attendance_locked_period_correction_event_id IN (?) AND adjustment_status = 'PENDING_ADJUSTMENT'`,
-        [applied_by, applied_note, applied_payroll_year, applied_payroll_month, want]
-      );
-      if (Number(result && result.affectedRows) !== want.length) {
-        await rollbackAsync(connection);
-        return { updated: 0 };
-      }
-      await commitAsync(connection);
-      return { updated: want.length };
-    } catch (err) {
-      await rollbackAsync(connection);
-      this._log("SETTLE-LOCKED-REQUEST", err);
-      throw err;
-    } finally {
-      connection.release();
-    }
-  }
-
-  async getLockedCorrectionEvent(eventId) {
-    const rows = await this._read(
-      "GET-LOCKED-EVENT",
-      `SELECT attendance_locked_period_correction_event_id, employee_id,
-              DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date, adjustment_status
-         FROM attendance_locked_period_correction_event WHERE attendance_locked_period_correction_event_id = ?`,
-      [Number(eventId)]
-    );
-    return rows && rows[0] ? rows[0] : null;
   }
 }
 
