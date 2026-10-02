@@ -43,6 +43,7 @@ const { propagationScope } = require("../utils/shift_propagation");
 const { istToday } = require("../utils/istDate");
 const { partitionClosedDays, endOfIstDay } = require("../utils/attendance_persist_guard");
 const { payrollLockedError } = require("../utils/attendance_payroll_lock");
+const { outstandingAdjustment } = require("../utils/attendance_locked_correction");
 const readTiming = require("../utils/attendance_read_timing");
 const {
   resolvePermissionRows,
@@ -2755,6 +2756,8 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
                 payroll_difference: parseJsonOr(ev.payroll_difference),
                 net_difference: ev.net_difference === null ? null : Number(ev.net_difference),
               })),
+              // The DERIVED net of the unsettled events - what Payroll acts on.
+              outstanding: outstandingAdjustment(c.events || []),
             }
           : null,
       };

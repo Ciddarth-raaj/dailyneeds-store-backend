@@ -213,9 +213,58 @@ function attendanceSummary(day) {
   };
 }
 
+const OUTSTANDING_LABEL = Object.freeze({
+  REVOKED_BEFORE_SETTLEMENT: "No adjustment required — correction revoked before settlement",
+  SETTLED: "Settled",
+  NONE: "No adjustment required",
+});
+
+/**
+ * THE OUTSTANDING ADJUSTMENT of ONE correction request - DERIVED, never
+ * stored. The events stay exactly as written (append-only); this nets what is
+ * still unsettled:
+ *
+ *   unsettled = the request's events still PENDING_ADJUSTMENT
+ *   net       = their signed sum (paise, so 66.66 - 66.66 is exactly 0)
+ *
+ * An event already SETTLED was applied in a payroll and is NOT netted away:
+ * approve -> settle -> revoke leaves the revoke's opposite amount outstanding
+ * on its own. approve -> revoke before settlement nets to 0 and nothing is
+ * actionable.
+ *
+ * @param {Array<{attendance_locked_period_correction_event_id, event_type,
+ *   net_difference, adjustment_status}>} events  one request's events
+ */
+function outstandingAdjustment(events) {
+  const list = Array.isArray(events) ? events : [];
+  const unsettled = list.filter((e) => e.adjustment_status === ADJUSTMENT_STATUS.PENDING_ADJUSTMENT);
+  const paise = unsettled.reduce((total, e) => total + Math.round((Number(e.net_difference) || 0) * 100), 0);
+  const direction =
+    paise > 0 ? DIRECTION.PAYABLE_TO_EMPLOYEE : paise < 0 ? DIRECTION.RECOVERABLE_FROM_EMPLOYEE : DIRECTION.NO_DIFFERENCE;
+  const nettedOff = unsettled.length > 0 && paise === 0;
+  const anySettled = list.some((e) => e.adjustment_status === ADJUSTMENT_STATUS.SETTLED);
+  let label = null;
+  if (paise === 0) {
+    if (nettedOff && unsettled.some((e) => e.event_type === "REVOKE")) label = OUTSTANDING_LABEL.REVOKED_BEFORE_SETTLEMENT;
+    else if (anySettled) label = OUTSTANDING_LABEL.SETTLED;
+    else label = OUTSTANDING_LABEL.NONE;
+  }
+  return {
+    net_difference: paise / 100,
+    absolute_amount: Math.abs(paise) / 100,
+    direction,
+    actionable: paise !== 0,
+    netted_off: nettedOff,
+    pending_event_ids: unsettled.map((e) => Number(e.attendance_locked_period_correction_event_id)),
+    label,
+  };
+}
+
 module.exports = {
   DIRECTION,
   ADJUSTMENT_STATUS,
+  OUTSTANDING_LABEL,
+  outstandingAdjustment,
   priceLockedDayCorrection,
   attendanceSummary,
 };

@@ -794,8 +794,9 @@ class AttendanceRegularizationRoutes {
     );
 
     /**
-     * PAYROLL'S LIST of locked-period correction events and their payroll
-     * differences, filtered to the caller's outlet scope.
+     * PAYROLL'S LIST: `corrections` - every event, immutable - and
+     * `outstanding` - the derived net per correction request, only where it
+     * is not zero. Both filtered to the caller's outlet scope.
      */
     this.router.get("/attendance/locked-period-corrections", async (req, res) => {
       try {
@@ -823,19 +824,25 @@ class AttendanceRegularizationRoutes {
           employee_id: req.query.employee_id ? Number(req.query.employee_id) : null,
           limit: req.query.limit ? Number(req.query.limit) : 200,
         });
-        const corrections = rows.filter((r) => isEmployeeInScope(scope, r.store_id));
-        res.json({ code: 200, corrections });
+        const inScope = (r) => isEmployeeInScope(scope, r.store_id);
+        res.json({
+          code: 200,
+          corrections: rows.corrections.filter(inScope),
+          outstanding: rows.outstanding.filter(inScope),
+        });
       } catch (err) {
         AttendanceRegularizationRoutes._respond(res, err);
       }
     });
 
     /**
-     * MARK A DIFFERENCE SETTLED in a later payroll month - Payroll
-     * (`process_payroll`), with a note naming the adjustment used.
+     * SETTLE A REQUEST'S OUTSTANDING ADJUSTMENT in a later payroll month -
+     * Payroll (`process_payroll`), with a note naming the adjustment used. The
+     * derived net of the request's unsettled events is what is settled; a
+     * correction that netted to zero has nothing to settle.
      */
     this.router.post(
-      "/attendance/locked-period-corrections/:event_id/settle",
+      "/attendance/locked-period-corrections/requests/:request_id/settle",
       this.permissions.require(P.PROCESS_PAYROLL),
       async (req, res) => {
         try {
@@ -845,24 +852,24 @@ class AttendanceRegularizationRoutes {
             applied_note: Joi.string().trim().min(5).max(500).required(),
           });
           if (isValid.error !== null) throw isValid.error;
-          const eventId = Number(req.params.event_id);
-          const event = await this.usecase.getLockedCorrectionEvent(eventId);
-          if (!event) {
-            res.status(404).json({ code: 404, msg: `No such locked-period correction: ${eventId}` });
+          const requestId = Number(req.params.request_id);
+          const employeeId = Number.isInteger(requestId) && requestId > 0 ? await this.usecase.requestEmployeeId(requestId) : null;
+          if (employeeId === null) {
+            res.status(404).json({ code: 404, msg: `No such request: ${req.params.request_id}` });
             return;
           }
           if (!this.branchScope || typeof this.branchScope.checkEmployee !== "function") {
             AttendanceRegularizationRoutes._forbidden(res);
             return;
           }
-          const scoped = await this.branchScope.checkEmployee(req, event.employee_id);
+          const scoped = await this.branchScope.checkEmployee(req, employeeId);
           if (!scoped.ok) {
             this.branchScope.refuse(res, scoped);
             return;
           }
           const result = await this.usecase.settleLockedCorrection({
             actor: { employee_id: req.decoded.employee_id },
-            event_id: eventId,
+            request_id: requestId,
             applied_payroll_year: req.body.applied_payroll_year,
             applied_payroll_month: req.body.applied_payroll_month,
             applied_note: req.body.applied_note,

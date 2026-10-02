@@ -83,3 +83,34 @@ describe("attendanceSummary", () => {
     assert.deepEqual(s.effective_punches, [{ io_time: "2026-09-12 10:09:00", source: "BIOMAX" }]);
   });
 });
+
+describe("outstandingAdjustment - the derived net per correction request", () => {
+  const { outstandingAdjustment } = require("./attendance_locked_correction");
+  const ev = (id, type, net, status) => ({ attendance_locked_period_correction_event_id: id, event_type: type, net_difference: net, adjustment_status: status });
+
+  it("A. approve -> revoke before settlement: -66.66 + 66.66 = 0, nothing actionable", () => {
+    const o = outstandingAdjustment([ev(1, "APPROVAL", -66.66, "PENDING_ADJUSTMENT"), ev(2, "REVOKE", 66.66, "PENDING_ADJUSTMENT")]);
+    assert.equal(o.net_difference, 0);
+    assert.equal(o.direction, DIRECTION.NO_DIFFERENCE);
+    assert.equal(o.actionable, false);
+    assert.equal(o.netted_off, true);
+    assert.equal(o.label, "No adjustment required — correction revoked before settlement");
+  });
+
+  it("B. approve -> settle -> revoke: the settled recovery is NOT netted; the new payable stays pending", () => {
+    const o = outstandingAdjustment([ev(1, "APPROVAL", -66.66, "SETTLED"), ev(2, "REVOKE", 66.66, "PENDING_ADJUSTMENT")]);
+    assert.equal(o.net_difference, 66.66);
+    assert.equal(o.direction, DIRECTION.PAYABLE_TO_EMPLOYEE);
+    assert.equal(o.actionable, true);
+    assert.deepEqual(o.pending_event_ids, [2]);
+  });
+
+  it("a single pending approval is outstanding as itself; all settled reads Settled; float sums are exact", () => {
+    const one = outstandingAdjustment([ev(1, "APPROVAL", -66.66, "PENDING_ADJUSTMENT")]);
+    assert.equal(one.direction, DIRECTION.RECOVERABLE_FROM_EMPLOYEE);
+    assert.equal(one.absolute_amount, 66.66);
+    assert.equal(outstandingAdjustment([ev(1, "APPROVAL", -66.66, "SETTLED")]).label, "Settled");
+    assert.equal(outstandingAdjustment([ev(1, "APPROVAL", 0, "NOT_REQUIRED")]).label, "No adjustment required");
+    assert.equal(outstandingAdjustment([ev(1, "APPROVAL", 0.1, "PENDING_ADJUSTMENT"), ev(2, "REVOKE", 0.2, "PENDING_ADJUSTMENT")]).net_difference, 0.3);
+  });
+});

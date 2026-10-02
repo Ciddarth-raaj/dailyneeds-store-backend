@@ -22,7 +22,11 @@ const shiftChangeEligibility = require("../utils/shift_change_eligibility");
 const shiftChangeBlock = require("../utils/shift_change_block");
 const { partitionClosedDays, endOfIstDay } = require("../utils/attendance_persist_guard");
 const { validateBreakPair } = require("../utils/attendance_break_regularization");
-const { priceLockedDayCorrection, attendanceSummary } = require("../utils/attendance_locked_correction");
+const {
+  priceLockedDayCorrection,
+  attendanceSummary,
+  outstandingAdjustment,
+} = require("../utils/attendance_locked_correction");
 
 /** MySQL's TINYINT(1), a JS boolean and a string "1" all mean the same thing. */
 const tinyBool = (value) => value === true || Number(value) === 1;
@@ -268,6 +272,20 @@ module.exports = (
    * What a regularization corrects: one missing punch, or a missed break (a
    * pair of punches, OUT + IN, on a complete day).
    */
+  /**
+   * THE LOCKED-PERIOD AUTHORISER APPROVES NOTHING on the request they
+   * authorised. Returns the refusal, or null.
+   */
+  const LOCKED_AUTHORISER_REASON =
+    "You authorised this request's locked-period correction, so another approver must approve it";
+  const lockedAuthoriserBlock = (authorisation, actorEmployeeId) =>
+    authorisation &&
+    authorisation.authorised_by_employee_id !== null &&
+    authorisation.authorised_by_employee_id !== undefined &&
+    Number(authorisation.authorised_by_employee_id) === Number(actorEmployeeId)
+      ? LOCKED_AUTHORISER_REASON
+      : null;
+
   /** A stored correction event, its JSON parsed, for screens. */
   const parseEventJson = (v) => {
     if (v === null || v === undefined || typeof v === "object") return v === undefined ? null : v;
@@ -1741,6 +1759,21 @@ module.exports = (
       err.name = "ForbiddenError";
       throw err;
     }
+    // ...and nobody who has already decided a stage of it: the authoriser and
+    // the approvers are different people, in either order.
+    if (
+      (request.steps || []).some(
+        (st) =>
+          (st.decision === STEP_DECISION.APPROVED || st.decision === STEP_DECISION.REJECTED) &&
+          Number(st.decided_by_employee_id) === actorId
+      )
+    ) {
+      const err = new Error(
+        "You have already decided a stage of this request, so another user must authorise its locked-period correction"
+      );
+      err.name = "ForbiddenError";
+      throw err;
+    }
     const result = await attendanceRegularizationRepo.authoriseLockedCorrection({
       request_id: Number(request_id),
       actor_employee_id: Number.isInteger(actorId) && actorId > 0 ? actorId : null,
@@ -1760,15 +1793,49 @@ module.exports = (
   /** One correction event (employee, date, status), or null. */
   const getLockedCorrectionEvent = (event_id) => attendanceRegularizationRepo.getLockedCorrectionEvent(event_id);
 
-  /** Payroll's list of locked-period correction events. */
-  const listLockedCorrections = async (filters = {}) =>
-    (await attendanceRegularizationRepo.listLockedCorrectionEvents(filters)).map(lockedEventForDisplay);
+  /**
+   * PAYROLL'S VIEW. `corrections`: every event, immutable, as recorded.
+   * `outstanding`: per correction REQUEST, the derived net of its unsettled
+   * events - only where that net is not zero. A correction revoked before
+   * either side was settled nets to 0 and is not actionable; its events stay
+   * in `corrections` (and in the Day Detail) for audit.
+   */
+  const listLockedCorrections = async (filters = {}) => {
+    const all = (await attendanceRegularizationRepo.listLockedCorrectionEvents({ ...filters, adjustment_status: null })).map(
+      lockedEventForDisplay
+    );
+    const byRequest = new Map();
+    all.forEach((e) => {
+      const key = Number(e.attendance_approval_request_id);
+      if (!byRequest.has(key)) byRequest.set(key, []);
+      byRequest.get(key).push(e);
+    });
+    const outstanding = [];
+    byRequest.forEach((events, requestId) => {
+      const o = outstandingAdjustment(events);
+      if (!o.actionable) return;
+      const first = events[events.length - 1];
+      outstanding.push({
+        attendance_approval_request_id: requestId,
+        attendance_locked_period_authorisation_id: Number(first.attendance_locked_period_authorisation_id),
+        employee_id: Number(first.employee_id),
+        employee_name: first.employee_name || null,
+        store_id: first.store_id === undefined ? null : first.store_id,
+        attendance_date: first.attendance_date,
+        ...o,
+      });
+    });
+    const corrections = filters.adjustment_status ? all.filter((e) => e.adjustment_status === filters.adjustment_status) : all;
+    return { corrections, outstanding };
+  };
 
   /**
-   * MARK A DIFFERENCE SETTLED - Payroll, once, against a LATER payroll month,
-   * with a note saying how (which adjustment field). Nothing else moves.
+   * SETTLE A REQUEST'S OUTSTANDING ADJUSTMENT - Payroll, once, in a LATER
+   * payroll month, with a note saying how (which adjustment field). Every
+   * unsettled event of the request is marked settled together, because their
+   * net is what was applied. Refused when nothing is outstanding.
    */
-  const settleLockedCorrection = async ({ actor, event_id, applied_payroll_year, applied_payroll_month, applied_note }) => {
+  const settleLockedCorrection = async ({ actor, request_id, applied_payroll_year, applied_payroll_month, applied_note }) => {
     const note = typeof applied_note === "string" ? applied_note.trim() : "";
     if (note.length < 5) throw validationError("A settlement note of at least 5 characters is required");
     const year = Number(applied_payroll_year);
@@ -1776,24 +1843,37 @@ module.exports = (
     if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) {
       throw validationError("applied_payroll_year and applied_payroll_month must name a payroll month");
     }
-    const event = await attendanceRegularizationRepo.getLockedCorrectionEvent(event_id);
-    if (!event) throw validationError(`No such locked-period correction: ${event_id}`);
-    if (event.adjustment_status !== "PENDING_ADJUSTMENT") {
-      throw validationError(`This correction is ${String(event.adjustment_status).toLowerCase().replace("_", " ")}, not pending`);
+    const auth = await attendanceRegularizationRepo.getLockedAuthorisation(request_id);
+    if (!auth) throw validationError(`Request #${request_id} has no locked-period correction`);
+    const events = await attendanceRegularizationRepo.listLockedCorrectionEvents({
+      authorisation_id: auth.attendance_locked_period_authorisation_id,
+      limit: 500,
+    });
+    const outstanding = outstandingAdjustment(events);
+    if (!outstanding.actionable) {
+      throw validationError(`Nothing is outstanding for request #${request_id}: ${outstanding.label}`);
     }
-    const corrected = Number(event.attendance_date.slice(0, 4)) * 12 + Number(event.attendance_date.slice(5, 7));
+    const corrected = Number(auth.attendance_date.slice(0, 4)) * 12 + Number(auth.attendance_date.slice(5, 7));
     if (year * 12 + month <= corrected) {
       throw validationError("A locked-period difference is settled in a LATER payroll month than the one it corrects");
     }
-    const { updated } = await attendanceRegularizationRepo.settleLockedCorrectionEvent({
-      event_id: Number(event_id),
+    const { updated } = await attendanceRegularizationRepo.settleLockedCorrectionRequest({
+      authorisation_id: auth.attendance_locked_period_authorisation_id,
+      event_ids: outstanding.pending_event_ids,
       applied_by: Number(actor.employee_id) || null,
       applied_note: note,
       applied_payroll_year: year,
       applied_payroll_month: month,
     });
-    if (updated !== 1) throw validationError("This correction was settled by somebody else - reload");
-    return { code: 200, event_id: Number(event_id), adjustment_status: "SETTLED" };
+    if (updated === 0) throw validationError("This correction changed while you were settling it - reload");
+    return {
+      code: 200,
+      attendance_approval_request_id: Number(request_id),
+      settled_event_ids: outstanding.pending_event_ids,
+      net_difference: outstanding.net_difference,
+      direction: outstanding.direction,
+      adjustment_status: "SETTLED",
+    };
   };
 
   /**
@@ -1849,6 +1929,24 @@ module.exports = (
       const err = new Error(verdict.reason);
       err.name = "ForbiddenError";
       throw err;
+    }
+
+    // SEPARATION OF DUTIES on a locked-period correction: whoever authorised
+    // the lock exception approves NO stage of that request - not as a role
+    // holder, a mapped approver or an administrator override. The stage stays
+    // with the chain's other eligible approvers, exactly as the chain routes it.
+    if (decision === STEP_DECISION.APPROVED && request.request_type === REQUEST_TYPE.REGULARIZATION) {
+      const blocked = lockedAuthoriserBlock(
+        typeof attendanceRegularizationRepo.getLockedAuthorisation === "function"
+          ? await attendanceRegularizationRepo.getLockedAuthorisation(request_id)
+          : null,
+        identity.employee_id
+      );
+      if (blocked) {
+        const err = new Error(blocked);
+        err.name = "ForbiddenError";
+        throw err;
+      }
     }
 
     const chain = request.steps.map((s) => ({
@@ -2579,7 +2677,7 @@ module.exports = (
           : null;
       }
 
-      const verdict =
+      let verdict =
         row.status === REQUEST_STATUS.PENDING && currentStep
           ? canApprove(
               currentStep,
@@ -2592,6 +2690,14 @@ module.exports = (
               row
             )
           : { allowed: false, reason: null };
+      // The locked-period authoriser is not offered a stage of this request.
+      const authoriserBlocked =
+        verdict.allowed && row.request_type === REQUEST_TYPE.REGULARIZATION
+          ? lockedAuthoriserBlock({ authorised_by_employee_id: row.locked_period_authorised_by }, identity.employee_id)
+          : null;
+      if (authoriserBlocked) {
+        verdict = { allowed: false, reason: authoriserBlocked };
+      }
 
       const decidedStep = [...chain]
         .reverse()

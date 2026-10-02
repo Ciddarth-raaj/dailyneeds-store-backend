@@ -327,13 +327,16 @@ describe("locked-period correction, as SQL", { skip: !URL && "ATTENDANCE_TEST_MY
     assert.match(notLocked.msg, /not locked/);
   });
 
-  it("settlement moves PENDING_ADJUSTMENT -> SETTLED once and touches nothing else", async () => {
+  it("request settlement moves exactly the netted pending events to SETTLED, once, and touches nothing else", async () => {
     await seed({ stage: 2 });
     const { locked_correction_event_id: id } = await decideFinal();
+    const [{ attendance_locked_period_authorisation_id: authId }] = await q(pool, "SELECT attendance_locked_period_authorisation_id FROM attendance_locked_period_authorisation WHERE attendance_approval_request_id = 300");
     const before = (await events())[0];
-    const first = await repo.settleLockedCorrectionEvent({ event_id: id, applied_by: HR, applied_note: "Shortage recovery in Oct", applied_payroll_year: 2026, applied_payroll_month: 10 });
+    // A stale set (an id that is not the pending set) writes nothing.
+    assert.equal((await repo.settleLockedCorrectionRequest({ authorisation_id: authId, event_ids: [id, 999], applied_by: HR, applied_note: "stale", applied_payroll_year: 2026, applied_payroll_month: 10 })).updated, 0);
+    const first = await repo.settleLockedCorrectionRequest({ authorisation_id: authId, event_ids: [id], applied_by: HR, applied_note: "Shortage recovery in Oct", applied_payroll_year: 2026, applied_payroll_month: 10 });
     assert.equal(first.updated, 1);
-    const again = await repo.settleLockedCorrectionEvent({ event_id: id, applied_by: HR, applied_note: "twice", applied_payroll_year: 2026, applied_payroll_month: 11 });
+    const again = await repo.settleLockedCorrectionRequest({ authorisation_id: authId, event_ids: [id], applied_by: HR, applied_note: "twice", applied_payroll_year: 2026, applied_payroll_month: 11 });
     assert.equal(again.updated, 0);
     const after = (await events())[0];
     assert.equal(after.adjustment_status, "SETTLED");

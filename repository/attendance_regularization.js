@@ -1709,7 +1709,8 @@ class AttendanceRegularizationRepository {
               bws.shift_code AS base_shift_code, bws.shift_name AS base_shift_name,
               ne.designation_id,
               -- A LOCKED-PERIOD correction's authorisation, when there is one.
-              lpa.status AS locked_period_status
+              lpa.status AS locked_period_status,
+              lpa.authorised_by_employee_id AS locked_period_authorised_by
          FROM attendance_approval_request r
          JOIN attendance_approval_step s
            ON s.attendance_approval_request_id = r.attendance_approval_request_id
@@ -2045,9 +2046,13 @@ class AttendanceRegularizationRepository {
   }
 
   /** The correction events, newest first - Payroll's settlement list. */
-  async listLockedCorrectionEvents({ employee_id = null, from_date = null, to_date = null, adjustment_status = null, limit = 200 } = {}) {
+  async listLockedCorrectionEvents({ employee_id = null, from_date = null, to_date = null, adjustment_status = null, authorisation_id = null, limit = 200 } = {}) {
     const where = ["1 = 1"];
     const params = [];
+    if (authorisation_id) {
+      where.push("ev.attendance_locked_period_authorisation_id = ?");
+      params.push(Number(authorisation_id));
+    }
     if (employee_id) {
       where.push("ev.employee_id = ?");
       params.push(Number(employee_id));
@@ -2086,17 +2091,53 @@ class AttendanceRegularizationRepository {
     );
   }
 
-  /** MARK SETTLED, once: PENDING_ADJUSTMENT -> SETTLED. Nothing else on the row moves. */
-  async settleLockedCorrectionEvent({ event_id, applied_by, applied_note, applied_payroll_year, applied_payroll_month }) {
-    const result = await this._read(
-      "SETTLE-LOCKED-EVENT",
-      `UPDATE attendance_locked_period_correction_event
-          SET adjustment_status = 'SETTLED', applied_by = ?, applied_at = CURRENT_TIMESTAMP(3),
-              applied_note = ?, applied_payroll_year = ?, applied_payroll_month = ?
-        WHERE attendance_locked_period_correction_event_id = ? AND adjustment_status = 'PENDING_ADJUSTMENT'`,
-      [applied_by, applied_note, applied_payroll_year, applied_payroll_month, Number(event_id)]
-    );
-    return { updated: Number(result && result.affectedRows) || 0 };
+  /**
+   * SETTLE A REQUEST'S OUTSTANDING ADJUSTMENT: every event the usecase netted
+   * (`event_ids`) moves PENDING_ADJUSTMENT -> SETTLED together, once, in one
+   * transaction. If the request's pending set is not exactly those events
+   * (one was appended or settled meanwhile) nothing is written - the net the
+   * caller settled is no longer the net. Calculation and difference columns
+   * are never touched.
+   */
+  async settleLockedCorrectionRequest({ authorisation_id, event_ids, applied_by, applied_note, applied_payroll_year, applied_payroll_month }) {
+    const connection = await getConnectionAsync(this.db);
+    try {
+      await beginTransactionAsync(connection);
+      const pending = await queryAsync(
+        connection,
+        `SELECT attendance_locked_period_correction_event_id AS id
+           FROM attendance_locked_period_correction_event
+          WHERE attendance_locked_period_authorisation_id = ? AND adjustment_status = 'PENDING_ADJUSTMENT'
+          FOR UPDATE`,
+        [Number(authorisation_id)]
+      );
+      const have = (pending || []).map((r) => Number(r.id)).sort((a, b) => a - b);
+      const want = (event_ids || []).map(Number).sort((a, b) => a - b);
+      if (want.length === 0 || have.length !== want.length || have.some((id, i) => id !== want[i])) {
+        await rollbackAsync(connection);
+        return { updated: 0 };
+      }
+      const result = await queryAsync(
+        connection,
+        `UPDATE attendance_locked_period_correction_event
+            SET adjustment_status = 'SETTLED', applied_by = ?, applied_at = CURRENT_TIMESTAMP(3),
+                applied_note = ?, applied_payroll_year = ?, applied_payroll_month = ?
+          WHERE attendance_locked_period_correction_event_id IN (?) AND adjustment_status = 'PENDING_ADJUSTMENT'`,
+        [applied_by, applied_note, applied_payroll_year, applied_payroll_month, want]
+      );
+      if (Number(result && result.affectedRows) !== want.length) {
+        await rollbackAsync(connection);
+        return { updated: 0 };
+      }
+      await commitAsync(connection);
+      return { updated: want.length };
+    } catch (err) {
+      await rollbackAsync(connection);
+      this._log("SETTLE-LOCKED-REQUEST", err);
+      throw err;
+    } finally {
+      connection.release();
+    }
   }
 
   async getLockedCorrectionEvent(eventId) {
