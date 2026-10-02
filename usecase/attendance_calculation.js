@@ -2685,6 +2685,36 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       : Promise.resolve([]);
 
   /**
+   * EACH DAY MARKED WITH WHETHER ITS PAYROLL MONTH IS LOCKED, for the screens
+   * that offer a correction. Read-only, one lookup per month in the range,
+   * the same `findPayrollLockedPeriods` answer the writes enforce - so a
+   * screen can say "Payroll month locked" instead of letting somebody fill a
+   * form the backend will refuse. It decides nothing; the gates stay where
+   * they are.
+   */
+  const markPayrollLocked = async (employee_id, days) => {
+    const list = Array.isArray(days) ? days : [];
+    if (list.length === 0) return list;
+    const byMonth = new Map();
+    list.forEach((d) => {
+      const date = toDateOnly(d && d.attendance_date);
+      if (date !== null && !byMonth.has(date.slice(0, 7))) {
+        byMonth.set(date.slice(0, 7), { employee_id: Number(employee_id), attendance_date: date });
+      }
+    });
+    const locked = await findPayrollLockedPeriods([...byMonth.values()]);
+    const lockedMonths = new Set(
+      (locked || []).map((p) => `${p.period_year !== undefined ? p.period_year : p.year}-${String(
+        p.period_month !== undefined ? p.period_month : p.month
+      ).padStart(2, "0")}`)
+    );
+    return list.map((d) => ({
+      ...d,
+      payroll_locked: lockedMonths.has(String(toDateOnly(d && d.attendance_date) || "").slice(0, 7)),
+    }));
+  };
+
+  /**
    * The same answer for MANY employee/date pairs at once, for reports.
    *
    * Falls back to the per-period form when the repository predates it, so a
@@ -2728,6 +2758,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     attendanceCalculationModeFor,
     attendanceDayState,
     findPayrollLockedPeriods,
+    markPayrollLocked,
     findPayrollLockedPeriodsBulk,
     listDateShiftOptions,
     calculateMonth,

@@ -352,6 +352,22 @@ class AttendanceRegularizationRoutes {
             return;
           }
 
+          // THE OUTLET SCOPE for somebody else's attendance, from the server's
+          // own facts - the same check the Permission raise for others makes.
+          // Fails closed: a wiring without the scope refuses rather than
+          // reaching every employee.
+          if (forId !== actorId) {
+            if (!this.branchScope || typeof this.branchScope.checkEmployee !== "function") {
+              AttendanceRegularizationRoutes._forbidden(res);
+              return;
+            }
+            const scoped = await this.branchScope.checkEmployee(req, forId);
+            if (!scoped.ok) {
+              this.branchScope.refuse(res, scoped);
+              return;
+            }
+          }
+
           const result = await this.usecase.raiseRequest({
             actor: { employee_id: actorId, user_type: req.decoded.user_type },
             requested_for_employee_id: forId,

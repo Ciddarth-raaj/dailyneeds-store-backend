@@ -400,17 +400,19 @@ module.exports = (
 
     // The punch time(s) this request adds: one for a missing punch, the OUT
     // and IN of a missed break.
+    // THE PAYROLL LOCK, checked at the raise as well as at the decision, for
+    // every regularization: a request in a settled month could never be
+    // approved, so it is refused before it is put in front of an approver.
+    // There is no unlock path here; a locked month is a payroll decision.
+    if (typeof attendanceCalculationUsecase.findPayrollLockedPeriods === "function") {
+      const locked = await attendanceCalculationUsecase.findPayrollLockedPeriods([
+        { employee_id: forEmployeeId, attendance_date: date },
+      ]);
+      if (locked.length > 0) throw payrollLockedActionError(locked, "A regularization for this date");
+    }
+
     let punchTimes;
     if (isBreak) {
-      // A missed break is regularized on a COMPLETE day, so the payroll lock
-      // is checked here as well as at the decision: nothing about a settled
-      // month may be put in front of an approver.
-      if (typeof attendanceCalculationUsecase.findPayrollLockedPeriods === "function") {
-        const locked = await attendanceCalculationUsecase.findPayrollLockedPeriods([
-          { employee_id: forEmployeeId, attendance_date: date },
-        ]);
-        if (locked.length > 0) throw payrollLockedActionError(locked, "A break regularization for this date");
-      }
       const verdict = validateBreakPair({
         effective_punches: day.effective_punches || [],
         out_time: break_out_time,

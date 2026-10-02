@@ -104,11 +104,17 @@ class AttendanceCalculationRoutes {
         if (isValid.error !== null) throw isValid.error;
 
         const employee_id = Number(req.decoded.employee_id);
-        const days = await this.usecase.readRange({
+        const read = await this.usecase.readRange({
           employee_id,
           from_date: req.query.from_date,
           to_date: req.query.to_date,
         });
+        // Which days sit in a payroll-locked month, so the screen can say so
+        // rather than offer a correction the backend refuses.
+        const days =
+          typeof this.usecase.markPayrollLocked === "function"
+            ? await this.usecase.markPayrollLocked(employee_id, read)
+            : read;
         res.json({ code: 200, employee_id, days });
       } catch (err) {
         respondError(res, err);
@@ -146,11 +152,16 @@ class AttendanceCalculationRoutes {
           const read = req.query.preview === "true"
             ? this.usecase.calculateRange
             : this.usecase.readRange;
-          const days = await read({
+          const rows = await read({
             employee_id: Number(req.query.employee_id),
             from_date: req.query.from_date,
             to_date: req.query.to_date,
           });
+          // Which days sit in a payroll-locked month (display only).
+          const days =
+            typeof this.usecase.markPayrollLocked === "function"
+              ? await this.usecase.markPayrollLocked(Number(req.query.employee_id), rows)
+              : rows;
           res.json({ code: 200, days });
         } catch (err) {
           respondError(res, err);

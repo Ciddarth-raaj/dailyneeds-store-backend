@@ -406,7 +406,13 @@ describe("POST /attendance/regularization - a missed break", () => {
     break_in_time: "2026-09-12 15:00:00",
     reason: "Took lunch 2-3pm, forgot to punch",
   };
-  const wireHr = (held) => {
+  // The outlet scope: EMPLOYEE_B is in the caller's outlet, 303 is not.
+  const scope = {
+    checkEmployee: async (req, id) =>
+      Number(id) === 303 ? { ok: false, reason: "OUT_OF_BRANCH", msg: "Not in your branch" } : { ok: true },
+    refuse: (res, outcome) => res.status(403).json({ code: 403, msg: outcome.msg }),
+  };
+  const wireHr = (held, branchScope = scope) => {
     const raised = [];
     const usecase = {
       raiseRequest: async (args) => {
@@ -418,7 +424,7 @@ describe("POST /attendance/regularization - a missed break", () => {
       require: () => (req, res, next) => next(),
       has: async (req, key) => held.includes(key),
     };
-    return { routes: buildRoutes(usecase, permissions, null), raised };
+    return { routes: buildRoutes(usecase, permissions, null, branchScope), raised };
   };
   const hrReq = (body) => ({ decoded: { id: 2, employee_id: 7, user_type: 1 }, query: {}, body });
 
@@ -437,6 +443,36 @@ describe("POST /attendance/regularization - a missed break", () => {
     const { routes, raised } = wireHr([]);
     const res = await invoke(routes, "POST", "/attendance/regularization", hrReq({ ...breakBody, requested_for_employee_id: 7 }));
     assert.equal(res.statusCode, 403);
+    assert.equal(raised.length, 0);
+  });
+
+  it("applies the outlet scope to somebody else's attendance, missing punch and lunch alike", async () => {
+    const { routes, raised } = wireHr([P.RAISE_ATTENDANCE_REGULARIZATION_FOR_OTHERS]);
+    const lunch = await invoke(routes, "POST", "/attendance/regularization", hrReq({ ...breakBody, requested_for_employee_id: 303 }));
+    assert.equal(lunch.statusCode, 403);
+    assert.match(lunch.body.msg, /Not in your branch/);
+    const missing = await invoke(routes, "POST", "/attendance/regularization", hrReq({
+      requested_for_employee_id: 303,
+      attendance_date: "2026-09-14",
+      punch_time: "2026-09-14 22:05:00",
+      reason: "Forgot to punch out at closing",
+    }));
+    assert.equal(missing.statusCode, 403);
+    assert.equal(raised.length, 0);
+  });
+
+  it("fails closed when no outlet scope is wired", async () => {
+    const { routes, raised } = wireHr([P.RAISE_ATTENDANCE_REGULARIZATION_FOR_OTHERS], null);
+    const res = await invoke(routes, "POST", "/attendance/regularization", hrReq(breakBody));
+    assert.equal(res.statusCode, 403);
+    assert.equal(raised.length, 0);
+  });
+
+  it("refuses an employee who alters the HR request to file lunch punches for themselves without the key", async () => {
+    const { routes, raised } = wireHr([P.RAISE_ATTENDANCE_REGULARIZATION]);
+    const res = await invoke(routes, "POST", "/attendance/regularization", hrReq({ ...breakBody, requested_for_employee_id: undefined }));
+    assert.equal(res.statusCode, 403);
+    assert.match(res.body.msg, /raise_attendance_regularization_for_others/);
     assert.equal(raised.length, 0);
   });
 

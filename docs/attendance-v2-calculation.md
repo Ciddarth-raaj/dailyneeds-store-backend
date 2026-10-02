@@ -147,7 +147,14 @@ POST /attendance/regularization
   before IN — refusing breaks outside the first/last punch, overlapping an
   existing break, or touching an existing punch. Re-checked at final approval,
   because punches can change while the request waits.
-* **Payroll lock**: refused at raise and, as for every request, at approval.
+* **Payroll lock**: every regularization (missing punch and missed break) is
+  refused at raise and, as before, at approval. `/attendance/calculated` and
+  `/attendance/me` mark each day `payroll_locked` (read-only, the same
+  `findPayrollLockedPeriods` answer) so the screens show *Payroll month locked*
+  instead of a form the backend would refuse. There is no unlock path.
+* **Outlet scope**: raising for another employee on `POST
+  /attendance/regularization` now applies the same `employeeBranchScope`
+  check as the Permission raise for others (fails closed when unwired).
 * **OT**: an open request on the date (a pending OT claim included) refuses the
   raise, as before. An APPROVED OT claim is re-capped by the engine at the
   corrected day's excess OT on every calculation; the raise and the final

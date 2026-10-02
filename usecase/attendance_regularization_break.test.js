@@ -165,6 +165,22 @@ describe("raising a missed-break regularization", () => {
     assert.equal(repo.calls.created.length, 0);
   });
 
+  it("refuses an ordinary MISSING PUNCH in a payroll-locked month at the raise too", async () => {
+    const { usecase, repo } = fakes({
+      locked: [{ employee_id: 100, year: 2026, month: 9 }],
+      day: day({ punch_count: 1, status: "REVIEW_REQUIRED", effective_punches: [punch("10:09")] }),
+      proposedDay: day({ punch_count: 2 }),
+    });
+    await assert.rejects(
+      usecase.raiseRequest({
+        actor: hr, requested_for_employee_id: 100, attendance_date: DATE,
+        reason: "Forgot to punch out", punch_time: at("22:04"),
+      }),
+      /locked/i
+    );
+    assert.equal(repo.calls.created.length, 0);
+  });
+
   it("refuses half a pair, and a missing punch and a break together", async () => {
     const { usecase } = fakes();
     await assert.rejects(raise(usecase, { break_in_time: null }), /both break_out_time and break_in_time/);
