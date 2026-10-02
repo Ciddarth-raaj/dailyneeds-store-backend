@@ -338,6 +338,76 @@ class StockReceivedRepository {
     });
   }
 
+  /**
+   * GRN headers whose GRN No (MMH_MRC_REFNO) starts with `term`, across the
+   * WHOLE history - no date filter. An exact match sorts first, then newest.
+   *
+   * The match is a prefix LIKE so the optimizer can range-scan the
+   * MMH_MRC_REFNO index (utils/ensureGofrugalIndexes.js); a `%term%`
+   * contains-match could never use it. The header rows are narrowed and
+   * capped in the inner query BEFORE the detail join, so the line count is
+   * only computed for the GRNs actually returned.
+   *
+   * Same columns and row shape as listGrnHeaders, so the list screen renders
+   * a search result with its existing grid.
+   */
+  searchGrnHeaders(term, limit = 50) {
+    const key = term != null ? String(term).trim() : "";
+    if (!key) return Promise.resolve([]);
+    const cap = Math.max(1, Math.min(Number(limit) || 50, 200));
+    const prefix = `${key.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+
+    return new Promise((resolve, reject) => {
+      if (!this.gofrugalDb) {
+        return reject(new Error("Gofrugal DB connection is not configured"));
+      }
+
+      this.gofrugalDb.query(
+        `SELECT
+            h.MMH_MRC_NO AS mmh_mrc_no,
+            h.MMH_MRC_REFNO AS mmh_mrc_refno,
+            DATE_FORMAT(h.MMH_MRC_DT, '%Y-%m-%d') AS mmh_mrc_dt,
+            h.MMH_DIST_CODE AS mmh_dist_code,
+            h.MMH_MRC_AMT AS mmh_mrc_amt,
+            MAX(dist.MDM_DIST_NAME) AS supplier_name,
+            COUNT(d.MMD_MRC_SL_NO) AS product_count
+         FROM (
+           SELECT
+               hh.MMH_MRC_NO,
+               hh.MMH_MRC_REFNO,
+               hh.MMH_MRC_DT,
+               hh.MMH_DIST_CODE,
+               hh.MMH_MRC_AMT,
+               (hh.MMH_MRC_REFNO = ?) AS is_exact
+           FROM \`${GOFRUGAL_HDR}\` hh
+           WHERE hh.MMH_MRC_REFNO LIKE ?
+           ORDER BY is_exact DESC, hh.MMH_MRC_DT DESC, hh.MMH_MRC_NO DESC
+           LIMIT ?
+         ) h
+         LEFT JOIN \`${GOFRUGAL_DTL}\` d ON d.MMD_MRC_NO = h.MMH_MRC_NO
+         LEFT JOIN \`${GOFRUGAL_DIST}\` dist
+           ON TRIM(CAST(dist.MDM_DIST_CODE AS CHAR)) = TRIM(CAST(h.MMH_DIST_CODE AS CHAR))
+         GROUP BY h.MMH_MRC_NO, h.MMH_MRC_REFNO, h.MMH_MRC_DT, h.MMH_DIST_CODE, h.MMH_MRC_AMT, h.is_exact
+         ORDER BY h.is_exact DESC, h.MMH_MRC_DT DESC, h.MMH_MRC_NO DESC`,
+        [key, prefix, cap],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.STOCK_RECEIVED",
+              code: "REPOSITORY.STOCK_RECEIVED.SEARCH_GRN_HEADERS",
+              description: err.toString(),
+              category: "",
+              ref: { term: key },
+            });
+            return reject(err);
+          }
+          resolve((rows || []).map(grnHeaderRow));
+        }
+      );
+    });
+  }
+
   listGrnDetailByRefno(refno) {
     const refnoKey =
       refno != null && String(refno).trim() !== "" ? String(refno).trim() : null;
