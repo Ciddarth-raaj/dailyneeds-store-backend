@@ -195,8 +195,10 @@ admin revoke (key + reason)           -> day written back, REVOKE event, REVOKED
 * **Outstanding adjustment, derived per request**
   (`utils/attendance_locked_correction.js#outstandingAdjustment`): the net of
   the request's events still PENDING_ADJUSTMENT. Approve then revoke before
-  settlement nets to 0 - "No adjustment required — correction revoked before
-  settlement" - and is not actionable. An event already SETTLED is never
+  settlement nets to 0 and is not actionable: its events read a DERIVED
+  `effective_adjustment_status` of NETTED_OFF ("NETTED_OFF — no payroll
+  adjustment required"), never stored; they are excluded from the pending
+  list, the `pending_adjustment_count` and a PENDING_ADJUSTMENT filter. An event already SETTLED is never
   netted away: approve, settle, revoke leaves the revoke's amount outstanding
   on its own. Payroll settles the REQUEST's net once, in a LATER payroll month,
   with a note (`POST /attendance/locked-period-corrections/requests/:request_id/settle`,
@@ -204,8 +206,8 @@ admin revoke (key + reason)           -> day written back, REVOKE event, REVOKED
 * **Separation of duties**: the raiser and the employee cannot authorise; an
   approver who already decided a stage cannot authorise; the authoriser cannot
   APPROVE any stage of that request (not even by administrator override) - the
-  stage stays with the chain's other eligible approvers. Rejecting is not
-  blocked.
+  stage stays with the chain's other eligible approvers. Rejecting stays
+  allowed (it applies no correction), with the normal reason and audit.
 
 ### Designation → role mapping, and the conservative default
 

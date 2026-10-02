@@ -26,6 +26,7 @@ const {
   priceLockedDayCorrection,
   attendanceSummary,
   outstandingAdjustment,
+  withEffectiveStatus,
 } = require("../utils/attendance_locked_correction");
 
 /** MySQL's TINYINT(1), a JS boolean and a string "1" all mean the same thing. */
@@ -1811,7 +1812,10 @@ module.exports = (
       byRequest.get(key).push(e);
     });
     const outstanding = [];
+    const history = [];
     byRequest.forEach((events, requestId) => {
+      // Each event carries its DERIVED status (NETTED_OFF inside a net of 0).
+      withEffectiveStatus(events).forEach((e) => history.push(e));
       const o = outstandingAdjustment(events);
       if (!o.actionable) return;
       const first = events[events.length - 1];
@@ -1825,7 +1829,14 @@ module.exports = (
         ...o,
       });
     });
-    const corrections = filters.adjustment_status ? all.filter((e) => e.adjustment_status === filters.adjustment_status) : all;
+    history.sort(
+      (a, b) => Number(b.attendance_locked_period_correction_event_id) - Number(a.attendance_locked_period_correction_event_id)
+    );
+    // A status filter means the EFFECTIVE status: PENDING_ADJUSTMENT never
+    // returns a netted-off event, and NETTED_OFF can be asked for.
+    const corrections = filters.adjustment_status
+      ? history.filter((e) => e.effective_adjustment_status === filters.adjustment_status)
+      : history;
     return { corrections, outstanding };
   };
 

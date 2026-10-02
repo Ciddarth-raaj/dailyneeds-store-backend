@@ -585,6 +585,7 @@ describe("locked-period correction routes", () => {
     assert.equal(res.statusCode, 200);
     assert.deepEqual(res.body.corrections.map((c) => c.attendance_locked_period_correction_event_id), [1]);
     assert.deepEqual(res.body.outstanding.map((o) => o.attendance_approval_request_id), [900], "outstanding is scoped too");
+    assert.equal(res.body.pending_adjustment_count, 1, "the count is the in-scope outstanding nets");
     const nobody = wireLocked([]);
     assert.equal((await invoke(nobody.routes, "GET", "/attendance/locked-period-corrections", req())).statusCode, 403);
   });

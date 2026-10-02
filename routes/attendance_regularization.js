@@ -809,7 +809,7 @@ class AttendanceRegularizationRoutes {
           return;
         }
         const isValid = Joi.validate(req.query, {
-          adjustment_status: Joi.string().valid("PENDING_ADJUSTMENT", "SETTLED", "NOT_REQUIRED").optional(),
+          adjustment_status: Joi.string().valid("PENDING_ADJUSTMENT", "SETTLED", "NOT_REQUIRED", "NETTED_OFF").optional(),
           employee_id: Joi.number().integer().positive().optional(),
           limit: Joi.number().integer().min(1).max(500).optional(),
         });
@@ -825,10 +825,14 @@ class AttendanceRegularizationRoutes {
           limit: req.query.limit ? Number(req.query.limit) : 200,
         });
         const inScope = (r) => isEmployeeInScope(scope, r.store_id);
+        const outstanding = rows.outstanding.filter(inScope);
         res.json({
           code: 200,
           corrections: rows.corrections.filter(inScope),
-          outstanding: rows.outstanding.filter(inScope),
+          outstanding,
+          // THE PENDING COUNT is the outstanding nets - a netted-off
+          // correction is not payroll work and is not counted.
+          pending_adjustment_count: outstanding.length,
         });
       } catch (err) {
         AttendanceRegularizationRoutes._respond(res, err);

@@ -43,7 +43,7 @@ const { propagationScope } = require("../utils/shift_propagation");
 const { istToday } = require("../utils/istDate");
 const { partitionClosedDays, endOfIstDay } = require("../utils/attendance_persist_guard");
 const { payrollLockedError } = require("../utils/attendance_payroll_lock");
-const { outstandingAdjustment } = require("../utils/attendance_locked_correction");
+const { outstandingAdjustment, withEffectiveStatus } = require("../utils/attendance_locked_correction");
 const readTiming = require("../utils/attendance_read_timing");
 const {
   resolvePermissionRows,
@@ -2749,7 +2749,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
               authorised_by_name: c.authorised_by_name || null,
               authorised_at: c.authorised_at || null,
               authorisation_reason: c.authorisation_reason || null,
-              events: (c.events || []).map((ev) => ({
+              events: withEffectiveStatus(c.events || []).map((ev) => ({
                 ...ev,
                 old_calculation: parseJsonOr(ev.old_calculation),
                 new_calculation: parseJsonOr(ev.new_calculation),

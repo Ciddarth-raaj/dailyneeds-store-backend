@@ -276,7 +276,7 @@ describe("DECREASE - Missing Lunch Punches on a locked 12-09 with OT 235 approve
     assert.equal(corrections.length, 2, "the full history is still listed");
     await assert.rejects(
       w.regularization.settleLockedCorrection({ actor: { employee_id: 9 }, request_id: id, applied_payroll_year: 2026, applied_payroll_month: 10, applied_note: "Netted off" }),
-      /Nothing is outstanding.*revoked before settlement/
+      /Nothing is outstanding.*NETTED_OFF — no payroll adjustment required/
     );
   });
 });
@@ -437,5 +437,64 @@ describe("the approval list does not offer the authoriser a stage", () => {
     assert.equal(mine.rows[0].locked_period_status, "AUTHORISED");
     const other = await listWorld(901).listApprovals({ actor: admin(902), request_type: "REGULARIZATION", status: "PENDING" });
     assert.equal(other.rows[0].actionable, true);
+  });
+});
+
+
+describe("REPORTING: a netted-off correction is not pending payroll work", () => {
+  const approveRevoke = async ({ settleFirst }) => {
+    const w = world({ punches: [raw(1, "10:09"), raw(2, "22:04")], approvedOt: 235 });
+    await w.init();
+    const raised = await w.regularization.raiseRequest({
+      actor: MANAGER, requested_for_employee_id: EMP, attendance_date: DATE, reason: "Missing Lunch Punches",
+      break_out_time: at("14:00"), break_in_time: at("15:00"), allow_locked_period: true,
+    });
+    const id = raised.attendance_approval_request_id;
+    await w.regularization.authoriseLockedCorrection({ actor: AUTHORISER, request_id: id, reason: "Lunch confirmed" });
+    await approveAll(w, id);
+    if (settleFirst) {
+      await w.regularization.settleLockedCorrection({ actor: { employee_id: 9 }, request_id: id, applied_payroll_year: 2026, applied_payroll_month: 10, applied_note: "Shortage recovery, October" });
+    }
+    await w.regularization.revokeDecision({ actor: ADMIN, request_id: id, reason: "Reverse the lunch" });
+    return w;
+  };
+
+  it("A: both events read NETTED_OFF, the pending count and the PENDING filter are empty, the history is complete", async () => {
+    const w = await approveRevoke({ settleFirst: false });
+    const all = await w.regularization.listLockedCorrections();
+    assert.equal(all.outstanding.length, 0, "pending count 0");
+    assert.deepEqual(all.corrections.map((e) => [e.event_type, e.adjustment_status, e.effective_adjustment_status]), [
+      ["REVOKE", "PENDING_ADJUSTMENT", "NETTED_OFF"],
+      ["APPROVAL", "PENDING_ADJUSTMENT", "NETTED_OFF"],
+    ]);
+    assert.equal((await w.regularization.listLockedCorrections({ adjustment_status: "PENDING_ADJUSTMENT" })).corrections.length, 0);
+    assert.equal((await w.regularization.listLockedCorrections({ adjustment_status: "NETTED_OFF" })).corrections.length, 2);
+    // The stored events are exactly as written.
+    assert.deepEqual(w.store.events.map((e) => [e.net_difference, e.adjustment_status]), [[-66.66, "PENDING_ADJUSTMENT"], [66.66, "PENDING_ADJUSTMENT"]]);
+    // The Day Detail read carries the derived state and the full history.
+    w.calculation.setLockedCorrectionReader(async () =>
+      w.store.auths.map((a) => ({
+        attendance_locked_period_authorisation_id: a.id, attendance_approval_request_id: a.attendance_approval_request_id,
+        attendance_date: DATE, status: a.status, request_status: "CANCELLED", authorised_by_employee_id: a.authorised_by_employee_id,
+        events: w.store.events.map((e) => ({ ...e })),
+      }))
+    );
+    const [day] = await w.calculation.markPayrollLocked(EMP, [await w.read()]);
+    const c = day.locked_period_correction;
+    assert.deepEqual(c.events.map((e) => [e.event_type, e.effective_adjustment_status]), [["APPROVAL", "NETTED_OFF"], ["REVOKE", "NETTED_OFF"]]);
+    assert.equal(c.outstanding.state, "NETTED_OFF");
+    assert.equal(c.outstanding.actionable, false);
+    assert.equal(c.outstanding.label, "NETTED_OFF — no payroll adjustment required");
+  });
+
+  it("B: an earlier SETTLED event is not netted - the revoke stays pending and is counted", async () => {
+    const w = await approveRevoke({ settleFirst: true });
+    const all = await w.regularization.listLockedCorrections();
+    assert.equal(all.outstanding.length, 1, "pending count 1");
+    assert.deepEqual(all.corrections.map((e) => [e.event_type, e.effective_adjustment_status]), [
+      ["REVOKE", "PENDING_ADJUSTMENT"],
+      ["APPROVAL", "SETTLED"],
+    ]);
+    assert.equal((await w.regularization.listLockedCorrections({ adjustment_status: "PENDING_ADJUSTMENT" })).corrections.length, 1);
   });
 });

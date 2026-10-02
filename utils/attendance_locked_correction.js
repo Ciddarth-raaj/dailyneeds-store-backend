@@ -214,10 +214,16 @@ function attendanceSummary(day) {
 }
 
 const OUTSTANDING_LABEL = Object.freeze({
-  REVOKED_BEFORE_SETTLEMENT: "No adjustment required — correction revoked before settlement",
+  NETTED_OFF: "NETTED_OFF — no payroll adjustment required",
   SETTLED: "Settled",
   NONE: "No adjustment required",
 });
+
+/**
+ * DERIVED, never stored: an event still PENDING_ADJUSTMENT whose request's
+ * unsettled events net to exactly zero reads NETTED_OFF - no payroll work.
+ */
+const NETTED_OFF = "NETTED_OFF";
 
 /**
  * THE OUTSTANDING ADJUSTMENT of ONE correction request - DERIVED, never
@@ -244,12 +250,21 @@ function outstandingAdjustment(events) {
   const nettedOff = unsettled.length > 0 && paise === 0;
   const anySettled = list.some((e) => e.adjustment_status === ADJUSTMENT_STATUS.SETTLED);
   let label = null;
+  let state = "OUTSTANDING";
   if (paise === 0) {
-    if (nettedOff && unsettled.some((e) => e.event_type === "REVOKE")) label = OUTSTANDING_LABEL.REVOKED_BEFORE_SETTLEMENT;
-    else if (anySettled) label = OUTSTANDING_LABEL.SETTLED;
-    else label = OUTSTANDING_LABEL.NONE;
+    if (nettedOff) {
+      label = OUTSTANDING_LABEL.NETTED_OFF;
+      state = NETTED_OFF;
+    } else if (anySettled) {
+      label = OUTSTANDING_LABEL.SETTLED;
+      state = "SETTLED";
+    } else {
+      label = OUTSTANDING_LABEL.NONE;
+      state = "NONE";
+    }
   }
   return {
+    state,
     net_difference: paise / 100,
     absolute_amount: Math.abs(paise) / 100,
     direction,
@@ -260,11 +275,28 @@ function outstandingAdjustment(events) {
   };
 }
 
+/**
+ * Each event of ONE request with its DERIVED `effective_adjustment_status`:
+ * the stored status, except NETTED_OFF for a pending event inside a net of
+ * zero. The stored columns are returned untouched beside it.
+ */
+function withEffectiveStatus(events) {
+  const list = Array.isArray(events) ? events : [];
+  const o = outstandingAdjustment(list);
+  return list.map((e) => ({
+    ...e,
+    effective_adjustment_status:
+      o.netted_off && e.adjustment_status === ADJUSTMENT_STATUS.PENDING_ADJUSTMENT ? NETTED_OFF : e.adjustment_status,
+  }));
+}
+
 module.exports = {
   DIRECTION,
   ADJUSTMENT_STATUS,
   OUTSTANDING_LABEL,
+  NETTED_OFF,
   outstandingAdjustment,
+  withEffectiveStatus,
   priceLockedDayCorrection,
   attendanceSummary,
 };
