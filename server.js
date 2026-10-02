@@ -913,6 +913,11 @@ class Server {
     // unresolved OT when a payroll month is locked - and the hook is handed
     // back the other way once both exist, because wiring it as a constructor
     // argument would be a cycle.
+    // Day reads show a locked date's authorisation, events and payroll
+    // difference (read-only).
+    this.attendanceCalculationUsecase.setLockedCorrectionReader((employeeId, from, to) =>
+      this.attendanceRegularizationRepo.listLockedCorrectionsForRange(employeeId, from, to)
+    );
     this.attendanceCalculationUsecase.setOtRequestService(
       this.attendanceRegularizationUsecase
     );

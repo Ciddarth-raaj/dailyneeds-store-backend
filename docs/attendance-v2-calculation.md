@@ -163,6 +163,38 @@ POST /attendance/regularization
 * An earlier approved regularization on the date (e.g. a completed missing
   punch) stays effective while a break request on the same date is decided.
 
+### Locked-period correction (a payroll-locked date)
+
+A correction on a date whose payroll month is `APPROVED_LOCKED` never unlocks
+the month and never touches `payrun_employee_calculation`.
+
+```
+raised (Manager/HR, for-others key)   -> authorisation REQUIRED
+authorised (correct_locked_attendance, reason; not the raiser, not the employee)
+                                      -> AUTHORISED, the chain may approve
+final approval                        -> day written, APPROVAL event, APPLIED
+admin revoke (key + reason)           -> day written back, REVOKE event, REVOKED
+```
+
+* The only write into a locked month is
+  `repository/attendance_calculation.js#writeLockedCorrectionDayOnConnection`:
+  exactly one row, the authorisation for that exact request read FOR UPDATE,
+  matching employee and date, in the status the operation needs (AUTHORISED
+  for the final approval, APPLIED for the revoke), inside the decision/revoke
+  transaction. Everything else still raises `PAYROLL_MONTH_LOCKED`.
+* Every approving stage needs the authorisation; a rejection writes nothing.
+* `attendance_locked_period_correction_event` records the old and new day,
+  the authorisation and the payroll difference priced on the frozen row's
+  daily rate (`utils/attendance_locked_correction.js`): days x daily rate,
+  shortage x daily rate / NRM, approved OT by the payrun's group formula. PF/ESI
+  are not recomputed (`statutory_recomputed = 0`); the difference is settled
+  manually through the existing adjustment fields.
+* Direction: PAYABLE_TO_EMPLOYEE / RECOVERABLE_FROM_EMPLOYEE /
+  NO_DIFFERENCE (NOT_REQUIRED). Payroll marks a PENDING_ADJUSTMENT event
+  SETTLED once, in a LATER payroll month, with a note
+  (`POST /attendance/locked-period-corrections/:id/settle`, `process_payroll`).
+  Calculation and difference columns are never updated; a revoke appends.
+
 ### Designation → role mapping, and the conservative default
 
 `attendance_approval_role` maps a designation to an approver role and a

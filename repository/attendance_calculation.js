@@ -346,6 +346,63 @@ async function writeCalculationsOnConnection(connection, rows) {
   return upsertCalculationRows(connection, rows);
 }
 
+/**
+ * THE ONE WRITE INTO A PAYROLL-LOCKED MONTH: a locked-period correction's day.
+ *
+ * NOT A BYPASS OF THE GATE ABOVE - a second, narrower gate. It writes only
+ * when ALL of these hold, checked here on the caller's connection, inside the
+ * caller's transaction (the request decision or the revoke):
+ *
+ *   - exactly ONE row, for the authorisation's employee and date
+ *   - an `attendance_locked_period_authorisation` row for that exact request,
+ *     read FOR UPDATE, matching employee and date
+ *   - in the status the operation needs: AUTHORISED for the final approval,
+ *     APPLIED for an authorised revoke
+ *
+ * Anything else throws and the caller's transaction rolls back. There is no
+ * month-level or employee-level form of this, and `payrun_employee_calculation`
+ * is not written by it.
+ */
+async function writeLockedCorrectionDayOnConnection(connection, rows, authorisation) {
+  const fail = (message) => {
+    const err = new Error(message);
+    err.name = "ValidationError";
+    err.code = "LOCKED_CORRECTION_NOT_AUTHORISED";
+    return err;
+  };
+  const { request_id, employee_id, attendance_date, expected_status } = authorisation || {};
+  if (!Array.isArray(rows) || rows.length !== 1) {
+    throw fail("A locked-period correction writes exactly one attendance day");
+  }
+  const [row] = rows;
+  const rowDate = String(row.attendance_date || "").slice(0, 10);
+  if (Number(row.employee_id) !== Number(employee_id) || rowDate !== String(attendance_date).slice(0, 10)) {
+    throw fail("The attendance day does not match the locked-period authorisation");
+  }
+  const found = await queryAsync(
+    connection,
+    `SELECT attendance_locked_period_authorisation_id, attendance_approval_request_id, employee_id,
+            DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date, status
+       FROM attendance_locked_period_authorisation
+      WHERE attendance_approval_request_id = ?
+      FOR UPDATE`,
+    [Number(request_id)]
+  );
+  const auth = found && found[0];
+  if (
+    !auth ||
+    Number(auth.employee_id) !== Number(employee_id) ||
+    auth.attendance_date !== rowDate ||
+    auth.status !== expected_status
+  ) {
+    throw fail(
+      `This locked payroll date has no ${String(expected_status || "").toLowerCase()} locked-period authorisation for request #${request_id}`
+    );
+  }
+  const written = await upsertCalculationRows(connection, rows);
+  return { ...written, authorisation_id: Number(auth.attendance_locked_period_authorisation_id) };
+}
+
 class AttendanceCalculationRepository {
   constructor(db) {
     this.db = db;
@@ -1890,6 +1947,7 @@ module.exports.AttendanceCalculationRepository = AttendanceCalculationRepository
 module.exports.CALCULATION_COLUMNS = CALCULATION_COLUMNS;
 module.exports.MONTHLY_PAYROLL_COLUMNS = MONTHLY_PAYROLL_COLUMNS;
 module.exports.writeCalculationsOnConnection = writeCalculationsOnConnection;
+module.exports.writeLockedCorrectionDayOnConnection = writeLockedCorrectionDayOnConnection;
 module.exports.readAttendanceModeHistoryOnConnection = readAttendanceModeHistoryOnConnection;
 /**
  * THE PAYROLL LOCK, exported so that every write which could invalidate a

@@ -4,6 +4,7 @@ const P = require("../constants/hr_permissions");
 const respondError = require("../utils/http");
 const { requireSelf } = require("./attendance_calculation");
 const { isAdminRequest } = require("../middlewares/admin_only");
+const { isEmployeeInScope } = require("../utils/employee_branch_scope");
 
 /**
  * THE ADDITIONAL KEY PER REQUEST TYPE, on top of the generic approval keys.
@@ -376,6 +377,9 @@ class AttendanceRegularizationRoutes {
             punch_time: req.body.punch_time || null,
             break_out_time: req.body.break_out_time || null,
             break_in_time: req.body.break_in_time || null,
+            // Manager/HR may RAISE on a payroll-locked date; it is created
+            // needing a separate locked-period authorisation.
+            allow_locked_period: await this.permissions.has(req, P.RAISE_ATTENDANCE_REGULARIZATION_FOR_OTHERS),
           });
           res.json({ code: 200, ...result });
         } catch (err) {
@@ -728,12 +732,142 @@ class AttendanceRegularizationRoutes {
                 : Number(req.decoded.employee_id),
             user_id: req.decoded.id === null || req.decoded.id === undefined ? null : Number(req.decoded.id),
             user_type: req.decoded.user_type,
+            can_correct_locked: await this.permissions.has(req, P.CORRECT_LOCKED_ATTENDANCE),
           },
           request_id: Number(req.params.request_id),
           stage_no: req.body.stage_no === undefined ? null : Number(req.body.stage_no),
           reason: req.body.reason,
         });
         res.status(result.code === 409 ? 409 : 200).json(result);
+      } catch (err) {
+        AttendanceRegularizationRoutes._respond(res, err);
+      }
+    });
+
+    /**
+     * AUTHORISE A LOCKED-PERIOD CORRECTION - the separate, recorded act that
+     * lets one pending regularization on a payroll-locked date proceed through
+     * its approval chain. `correct_locked_attendance`, the employee in the
+     * caller's outlet scope, and a reason. The raiser and the employee cannot
+     * authorise it (usecase). Nothing about the payroll month changes.
+     */
+    this.router.post(
+      "/attendance/regularization/:request_id/locked-period-authorisation",
+      this.permissions.require(P.CORRECT_LOCKED_ATTENDANCE),
+      async (req, res) => {
+        try {
+          const isValid = Joi.validate(req.body, { reason: Joi.string().trim().min(5).max(500).required() });
+          if (isValid.error !== null) throw isValid.error;
+          const requestId = Number(req.params.request_id);
+          if (!Number.isInteger(requestId) || requestId <= 0) {
+            res.status(400).json({ code: 400, msg: "request_id must be a request id" });
+            return;
+          }
+          const employeeId = await this.usecase.requestEmployeeId(requestId);
+          if (employeeId === null) {
+            res.status(404).json({ code: 404, msg: `No such request: ${requestId}` });
+            return;
+          }
+          if (!this.branchScope || typeof this.branchScope.checkEmployee !== "function") {
+            AttendanceRegularizationRoutes._forbidden(res);
+            return;
+          }
+          const scoped = await this.branchScope.checkEmployee(req, employeeId);
+          if (!scoped.ok) {
+            this.branchScope.refuse(res, scoped);
+            return;
+          }
+          const result = await this.usecase.authoriseLockedCorrection({
+            actor: {
+              employee_id: req.decoded.employee_id === undefined ? null : req.decoded.employee_id,
+              user_id: req.decoded.id === undefined ? null : req.decoded.id,
+              user_type: req.decoded.user_type,
+            },
+            request_id: requestId,
+            reason: req.body.reason,
+          });
+          res.json({ code: 200, ...result });
+        } catch (err) {
+          AttendanceRegularizationRoutes._respond(res, err);
+        }
+      }
+    );
+
+    /**
+     * PAYROLL'S LIST of locked-period correction events and their payroll
+     * differences, filtered to the caller's outlet scope.
+     */
+    this.router.get("/attendance/locked-period-corrections", async (req, res) => {
+      try {
+        if (!req.decoded) {
+          res.status(401).json({ code: 401, msg: "Unauthorized" });
+          return;
+        }
+        if (!(await this.permissions.has(req, P.VIEW_PAYROLL, P.PROCESS_PAYROLL, P.CORRECT_LOCKED_ATTENDANCE))) {
+          AttendanceRegularizationRoutes._forbidden(res);
+          return;
+        }
+        const isValid = Joi.validate(req.query, {
+          adjustment_status: Joi.string().valid("PENDING_ADJUSTMENT", "SETTLED", "NOT_REQUIRED").optional(),
+          employee_id: Joi.number().integer().positive().optional(),
+          limit: Joi.number().integer().min(1).max(500).optional(),
+        });
+        if (isValid.error !== null) throw isValid.error;
+        if (!this.branchScope || typeof this.branchScope.resolve !== "function") {
+          AttendanceRegularizationRoutes._forbidden(res);
+          return;
+        }
+        const scope = await this.branchScope.resolve(req);
+        const rows = await this.usecase.listLockedCorrections({
+          adjustment_status: req.query.adjustment_status || null,
+          employee_id: req.query.employee_id ? Number(req.query.employee_id) : null,
+          limit: req.query.limit ? Number(req.query.limit) : 200,
+        });
+        const corrections = rows.filter((r) => isEmployeeInScope(scope, r.store_id));
+        res.json({ code: 200, corrections });
+      } catch (err) {
+        AttendanceRegularizationRoutes._respond(res, err);
+      }
+    });
+
+    /**
+     * MARK A DIFFERENCE SETTLED in a later payroll month - Payroll
+     * (`process_payroll`), with a note naming the adjustment used.
+     */
+    this.router.post(
+      "/attendance/locked-period-corrections/:event_id/settle",
+      this.permissions.require(P.PROCESS_PAYROLL),
+      async (req, res) => {
+        try {
+          const isValid = Joi.validate(req.body, {
+            applied_payroll_year: Joi.number().integer().min(2000).max(2100).required(),
+            applied_payroll_month: Joi.number().integer().min(1).max(12).required(),
+            applied_note: Joi.string().trim().min(5).max(500).required(),
+          });
+          if (isValid.error !== null) throw isValid.error;
+          const eventId = Number(req.params.event_id);
+          const event = await this.usecase.getLockedCorrectionEvent(eventId);
+          if (!event) {
+            res.status(404).json({ code: 404, msg: `No such locked-period correction: ${eventId}` });
+            return;
+          }
+          if (!this.branchScope || typeof this.branchScope.checkEmployee !== "function") {
+            AttendanceRegularizationRoutes._forbidden(res);
+            return;
+          }
+          const scoped = await this.branchScope.checkEmployee(req, event.employee_id);
+          if (!scoped.ok) {
+            this.branchScope.refuse(res, scoped);
+            return;
+          }
+          const result = await this.usecase.settleLockedCorrection({
+            actor: { employee_id: req.decoded.employee_id },
+            event_id: eventId,
+            applied_payroll_year: req.body.applied_payroll_year,
+            applied_payroll_month: req.body.applied_payroll_month,
+            applied_note: req.body.applied_note,
+          });
+          res.json(result);
       } catch (err) {
         AttendanceRegularizationRoutes._respond(res, err);
       }

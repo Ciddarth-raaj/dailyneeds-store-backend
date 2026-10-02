@@ -36,6 +36,7 @@ describe(NAME, () => {
       "20261109110000-transporter-master.js",
       "20261109120000-lr-followup.js",
       "20261110120000-regularization-break-pair.js",
+      "20261111120000-attendance-locked-period-correction.js",
     ];
     assert.deepEqual(others.filter((f) => f > `${NAME}.js`).sort(), LATER);
   });

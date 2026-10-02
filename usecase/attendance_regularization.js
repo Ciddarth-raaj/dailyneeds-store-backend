@@ -22,6 +22,7 @@ const shiftChangeEligibility = require("../utils/shift_change_eligibility");
 const shiftChangeBlock = require("../utils/shift_change_block");
 const { partitionClosedDays, endOfIstDay } = require("../utils/attendance_persist_guard");
 const { validateBreakPair } = require("../utils/attendance_break_regularization");
+const { priceLockedDayCorrection, attendanceSummary } = require("../utils/attendance_locked_correction");
 
 /** MySQL's TINYINT(1), a JS boolean and a string "1" all mean the same thing. */
 const tinyBool = (value) => value === true || Number(value) === 1;
@@ -267,6 +268,25 @@ module.exports = (
    * What a regularization corrects: one missing punch, or a missed break (a
    * pair of punches, OUT + IN, on a complete day).
    */
+  /** A stored correction event, its JSON parsed, for screens. */
+  const parseEventJson = (v) => {
+    if (v === null || v === undefined || typeof v === "object") return v === undefined ? null : v;
+    try {
+      return JSON.parse(v);
+    } catch (e) {
+      return null;
+    }
+  };
+  const lockedEventForDisplay = (row) => ({
+    ...row,
+    old_calculation: parseEventJson(row.old_calculation),
+    new_calculation: parseEventJson(row.new_calculation),
+    payroll_difference: parseEventJson(row.payroll_difference),
+    net_difference: row.net_difference === null || row.net_difference === undefined ? null : Number(row.net_difference),
+    frozen_net_pay: row.frozen_net_pay === null || row.frozen_net_pay === undefined ? null : Number(row.frozen_net_pay),
+    statutory_recomputed: Number(row.statutory_recomputed) === 1,
+  });
+
   const REGULARIZATION_KIND = Object.freeze({
     MISSING_PUNCH: "MISSING_PUNCH",
     MISSED_BREAK: "MISSED_BREAK",
@@ -315,6 +335,11 @@ module.exports = (
     // `utils/attendance_break_regularization.js`.
     break_out_time = null,
     break_in_time = null,
+    // A MANAGER/HR raise (the route passes this only to holders of
+    // `raise_attendance_regularization_for_others`) may be RAISED on a
+    // payroll-locked date. It is created needing a locked-period
+    // authorisation and cannot be approved without one. Raising grants none.
+    allow_locked_period = false,
     today = null,
     now = null,
   }) => {
@@ -404,11 +429,15 @@ module.exports = (
     // every regularization: a request in a settled month could never be
     // approved, so it is refused before it is put in front of an approver.
     // There is no unlock path here; a locked month is a payroll decision.
+    let lockedPeriod = false;
     if (typeof attendanceCalculationUsecase.findPayrollLockedPeriods === "function") {
       const locked = await attendanceCalculationUsecase.findPayrollLockedPeriods([
         { employee_id: forEmployeeId, attendance_date: date },
       ]);
-      if (locked.length > 0) throw payrollLockedActionError(locked, "A regularization for this date");
+      if (locked.length > 0) {
+        if (!allow_locked_period) throw payrollLockedActionError(locked, "A regularization for this date");
+        lockedPeriod = true;
+      }
     }
 
     let punchTimes;
@@ -491,7 +520,9 @@ module.exports = (
     // raw punches plus this one, with the approval assumed - is stored in the
     // same transaction, exactly as a final approval would store it.
     let auto_approve = null;
-    if (!requiresApproval) {
+    // A locked-period correction is never auto-approved: the authorisation
+    // and the chain are the point of it.
+    if (!requiresApproval && !lockedPeriod) {
       // AN AUTO-APPROVAL IS A FINAL SETTLEMENT, so it waits for the day to
       // close. On an open day an odd punch count is not yet a MISSING punch -
       // the employee may simply not have punched out - and settling it now
@@ -546,6 +577,7 @@ module.exports = (
       punch: { punch_time: punchTime },
       punches: punchTimes.map((time) => ({ punch_time: time })),
       auto_approve,
+      lockedPeriod: lockedPeriod ? true : null,
     });
 
     return {
@@ -562,6 +594,9 @@ module.exports = (
       proposed_day: proposedDay,
       regularization_kind: isBreak ? REGULARIZATION_KIND.MISSED_BREAK : REGULARIZATION_KIND.MISSING_PUNCH,
       punch_times: punchTimes,
+      // REQUIRED: the date's payroll month is locked; the chain cannot start
+      // until a holder of `correct_locked_attendance` authorises it.
+      locked_period_status: lockedPeriod ? "REQUIRED" : null,
       // A missed break changes worked minutes, the break charged and the
       // overtime the day earns. An OT claim already APPROVED on the date is
       // re-capped by the engine at the new entitlement (it can never pay
@@ -1528,11 +1563,33 @@ module.exports = (
 
     const employeeId = Number(request.requested_for_employee_id);
     let locked = [];
+    // REVOKING A LOCKED-PERIOD CORRECTION: allowed in the locked month only
+    // for an APPLIED correction, by an administrator who also holds
+    // `correct_locked_attendance` (administrators hold every key), with the
+    // reason above - and it appends its own event. Everything else keeps the
+    // existing refusal.
+    let lockedRevoke = false;
     if (typeof attendanceCalculationUsecase.findPayrollLockedPeriods === "function") {
       locked = await attendanceCalculationUsecase.findPayrollLockedPeriods([
         { employee_id: employeeId, attendance_date: request.attendance_date },
       ]);
-      if (locked.length > 0) throw payrollLockedActionError(locked, "This revocation");
+      if (locked.length > 0) {
+        const auth =
+          request.request_type === REQUEST_TYPE.REGULARIZATION &&
+          typeof attendanceRegularizationRepo.getLockedAuthorisation === "function"
+            ? await attendanceRegularizationRepo.getLockedAuthorisation(requestId)
+            : null;
+        const holdsKey = Number(actor.user_type) === ADMIN_USER_TYPE || actor.can_correct_locked === true;
+        if (!auth || auth.status !== "APPLIED" || request.status !== REQUEST_STATUS.APPROVED) {
+          throw payrollLockedActionError(locked, "This revocation");
+        }
+        if (!holdsKey) {
+          const err = new Error("Revoking a locked-period correction needs correct_locked_attendance");
+          err.name = "ForbiddenError";
+          throw err;
+        }
+        lockedRevoke = true;
+      }
     }
 
     if (reopen) {
@@ -1602,6 +1659,27 @@ module.exports = (
     const calculations =
       dayState.closed && voidedDay ? [attendanceCalculationUsecase.toStorageRow(voidedDay)] : [];
 
+    // The REVOKE event: the stored (corrected) day, the day without the
+    // request, and that change priced on the SAME frozen payrun row. Appended;
+    // the approval event is never touched.
+    let lockedCorrection = null;
+    if (lockedRevoke) {
+      if (calculations.length !== 1) {
+        throw validationError("The day without this correction could not be calculated for the locked payroll date");
+      }
+      const [storedDay, frozen] = await Promise.all([
+        attendanceRegularizationRepo.getStoredDay(employeeId, request.attendance_date),
+        attendanceRegularizationRepo.getFrozenPayrun(employeeId, request.attendance_date),
+      ]);
+      lockedCorrection = {
+        event: {
+          old_calculation: attendanceSummary(storedDay),
+          new_calculation: attendanceSummary(voidedDay),
+          payroll_difference: priceLockedDayCorrection({ frozen, old_day: storedDay, new_day: calculations[0] }),
+        },
+      };
+    }
+
     const result = await attendanceRegularizationRepo.revokeRequest({
       requestId,
       stageNo,
@@ -1616,6 +1694,7 @@ module.exports = (
       revocableTypes: REVOCABLE_TYPES,
       calculations,
       attendanceDate: request.attendance_date,
+      lockedCorrection,
     });
     // Revoking a Permission request changes what its day forgives.
     const monthRefresh =
@@ -1629,7 +1708,92 @@ module.exports = (
       attendance_date: request.attendance_date,
       employee_id: employeeId,
       attendance_persisted: calculations.length > 0,
+      locked_correction:
+        lockedCorrection && result && result.code === 200
+          ? { event_id: result.locked_correction_event_id || null, ...lockedCorrection.event }
+          : null,
     };
+  };
+
+  /**
+   * AUTHORISE A LOCKED-PERIOD CORRECTION - the separate, recorded act.
+   *
+   * The caller holds `correct_locked_attendance` and the employee is in their
+   * outlet scope (both checked by the route). Here: a reason, a pending
+   * REGULARIZATION, and SEPARATION OF DUTIES - neither the person who raised
+   * the request nor the employee it is for may authorise it. The repository
+   * re-checks the lock and the request state in its own transaction.
+   */
+  const authoriseLockedCorrection = async ({ actor, request_id, reason }) => {
+    const why = typeof reason === "string" ? reason.trim() : "";
+    if (why.length < 5) throw validationError("An authorisation reason of at least 5 characters is required");
+    if (why.length > 500) throw validationError("An authorisation reason may be at most 500 characters");
+    const request = await attendanceRegularizationRepo.getRequest(request_id);
+    if (!request) throw validationError(`No such request: ${request_id}`);
+    if (request.request_type !== REQUEST_TYPE.REGULARIZATION || request.status !== REQUEST_STATUS.PENDING) {
+      throw validationError("Only a pending regularization can be authorised for a locked payroll date");
+    }
+    const actorId = Number(actor.employee_id);
+    if (actorId === Number(request.requested_by_employee_id) || actorId === Number(request.requested_for_employee_id)) {
+      const err = new Error(
+        "The person who raised this request, or the employee it is for, cannot authorise its locked-period correction"
+      );
+      err.name = "ForbiddenError";
+      throw err;
+    }
+    const result = await attendanceRegularizationRepo.authoriseLockedCorrection({
+      request_id: Number(request_id),
+      actor_employee_id: Number.isInteger(actorId) && actorId > 0 ? actorId : null,
+      actor_user_id: actor.user_id === undefined || actor.user_id === null ? null : Number(actor.user_id),
+      reason: why,
+    });
+    if (result.code !== 200) throw validationError(result.msg);
+    return { ...result, employee_id: Number(request.requested_for_employee_id), attendance_date: request.attendance_date };
+  };
+
+  /** The employee a request is for - for the route's outlet-scope check. */
+  const requestEmployeeId = async (request_id) => {
+    const request = await attendanceRegularizationRepo.getRequest(request_id);
+    return request ? Number(request.requested_for_employee_id) : null;
+  };
+
+  /** One correction event (employee, date, status), or null. */
+  const getLockedCorrectionEvent = (event_id) => attendanceRegularizationRepo.getLockedCorrectionEvent(event_id);
+
+  /** Payroll's list of locked-period correction events. */
+  const listLockedCorrections = async (filters = {}) =>
+    (await attendanceRegularizationRepo.listLockedCorrectionEvents(filters)).map(lockedEventForDisplay);
+
+  /**
+   * MARK A DIFFERENCE SETTLED - Payroll, once, against a LATER payroll month,
+   * with a note saying how (which adjustment field). Nothing else moves.
+   */
+  const settleLockedCorrection = async ({ actor, event_id, applied_payroll_year, applied_payroll_month, applied_note }) => {
+    const note = typeof applied_note === "string" ? applied_note.trim() : "";
+    if (note.length < 5) throw validationError("A settlement note of at least 5 characters is required");
+    const year = Number(applied_payroll_year);
+    const month = Number(applied_payroll_month);
+    if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) {
+      throw validationError("applied_payroll_year and applied_payroll_month must name a payroll month");
+    }
+    const event = await attendanceRegularizationRepo.getLockedCorrectionEvent(event_id);
+    if (!event) throw validationError(`No such locked-period correction: ${event_id}`);
+    if (event.adjustment_status !== "PENDING_ADJUSTMENT") {
+      throw validationError(`This correction is ${String(event.adjustment_status).toLowerCase().replace("_", " ")}, not pending`);
+    }
+    const corrected = Number(event.attendance_date.slice(0, 4)) * 12 + Number(event.attendance_date.slice(5, 7));
+    if (year * 12 + month <= corrected) {
+      throw validationError("A locked-period difference is settled in a LATER payroll month than the one it corrects");
+    }
+    const { updated } = await attendanceRegularizationRepo.settleLockedCorrectionEvent({
+      event_id: Number(event_id),
+      applied_by: Number(actor.employee_id) || null,
+      applied_note: note,
+      applied_payroll_year: year,
+      applied_payroll_month: month,
+    });
+    if (updated !== 1) throw validationError("This correction was settled by somebody else - reload");
+    return { code: 200, event_id: Number(event_id), adjustment_status: "SETTLED" };
   };
 
   /**
@@ -1719,11 +1883,34 @@ module.exports = (
      * nothing - it closes a request that would otherwise sit open for ever
      * against a month nobody can reopen.
      */
-    if (decision === STEP_DECISION.APPROVED && typeof attendanceCalculationUsecase.findPayrollLockedPeriods === "function") {
+    // A LOCKED-PERIOD CORRECTION: a REGULARIZATION on a locked date may be
+    // approved - every stage of it - only once its authorisation is
+    // AUTHORISED. Without one the refusal says what is missing.
+    let lockedAuthorisation = null;
+    let dateLocked = false;
+    if (typeof attendanceCalculationUsecase.findPayrollLockedPeriods === "function") {
       const locked = await attendanceCalculationUsecase.findPayrollLockedPeriods([
         { employee_id: request.requested_for_employee_id, attendance_date: request.attendance_date },
       ]);
-      if (locked.length > 0) throw payrollLockedActionError(locked, "This approval");
+      dateLocked = locked.length > 0;
+      if (dateLocked && decision === STEP_DECISION.APPROVED) {
+        lockedAuthorisation =
+          request.request_type === REQUEST_TYPE.REGULARIZATION &&
+          typeof attendanceRegularizationRepo.getLockedAuthorisation === "function"
+            ? await attendanceRegularizationRepo.getLockedAuthorisation(request_id)
+            : null;
+        if (!lockedAuthorisation || lockedAuthorisation.status !== "AUTHORISED") {
+          if (lockedAuthorisation && lockedAuthorisation.status === "REQUIRED") {
+            const err = validationError(
+              "Locked-period authorisation required: this date's payroll month is locked. A user with " +
+                "correct_locked_attendance must authorise the correction before it can be approved."
+            );
+            err.code = "LOCKED_CORRECTION_NOT_AUTHORISED";
+            throw err;
+          }
+          throw payrollLockedActionError(locked, "This approval");
+        }
+      }
     }
 
     /*
@@ -1906,6 +2093,29 @@ module.exports = (
     const calculations =
       dayState.closed && correctedDay ? [attendanceCalculationUsecase.toStorageRow(correctedDay)] : [];
 
+    // THE LOCKED-PERIOD EVENT, on the FINAL approval of an authorised
+    // correction: the stored day payroll was calculated from, the corrected
+    // day, and the difference priced on the frozen payrun row - which is read
+    // and never written.
+    let lockedCorrection = null;
+    if (lockedAuthorisation) {
+      lockedCorrection = { event: null };
+      if (next.status === REQUEST_STATUS.APPROVED) {
+        if (calculations.length !== 1) {
+          throw validationError("The corrected day could not be calculated for this locked payroll date");
+        }
+        const [storedDay, frozen] = await Promise.all([
+          attendanceRegularizationRepo.getStoredDay(request.requested_for_employee_id, request.attendance_date),
+          attendanceRegularizationRepo.getFrozenPayrun(request.requested_for_employee_id, request.attendance_date),
+        ]);
+        lockedCorrection.event = {
+          old_calculation: attendanceSummary(storedDay),
+          new_calculation: attendanceSummary(correctedDay),
+          payroll_difference: priceLockedDayCorrection({ frozen, old_day: storedDay, new_day: calculations[0] }),
+        };
+      }
+    }
+
     const saved = await attendanceRegularizationRepo.decideStage({
       requestId: Number(request_id),
       stageNo: Number(step.stage_no),
@@ -1923,7 +2133,11 @@ module.exports = (
       },
       // A Permission may be REJECTED in a locked month (it pays nothing);
       // every other type keeps the existing refusal.
-      allowRejectWhenLocked: isPermissionRequest,
+      // A Permission, or a regularization on a locked date, may be REJECTED
+      // in a locked month (it writes no attendance); every other type keeps
+      // the existing refusal.
+      allowRejectWhenLocked: isPermissionRequest || (dateLocked && request.request_type === REQUEST_TYPE.REGULARIZATION),
+      lockedCorrection,
       decisionSource: source === "TELEGRAM" ? "TELEGRAM" : "WEB",
       // THE APPROVED SHIFT BECOMES EFFECTIVE HERE AND NOWHERE ELSE, in the
       // same transaction as the decision and the recalculated day. It is an
@@ -1986,6 +2200,10 @@ module.exports = (
           ? Number(correctedDay.candidate_ot_minutes) || 0
           : 0,
       regularization_kind: isBreakRequest ? REGULARIZATION_KIND.MISSED_BREAK : null,
+      locked_correction:
+        lockedCorrection && lockedCorrection.event
+          ? { event_id: saved.locked_correction_event_id || null, ...lockedCorrection.event }
+          : null,
       // A missed break approved on a date whose OT was already claimed: the
       // engine has re-capped the approved OT at what the corrected day earns.
       ot_revalidation: isBreakRequest && dayBefore ? otRevalidation(dayBefore, correctedDay) : null,
@@ -2424,6 +2642,9 @@ module.exports = (
         proposed_punch_time: row.proposed_punch_time || null,
         // A missed break proposes a PAIR: the OUT above and this IN.
         proposed_second_punch_time: row.proposed_second_punch_time || null,
+        // REQUIRED / AUTHORISED / APPLIED / REVOKED for a locked-period
+        // correction; null on every ordinary request.
+        locked_period_status: row.locked_period_status || null,
         regularization_kind:
           row.request_type === REQUEST_TYPE.REGULARIZATION
             ? row.proposed_second_punch_time
@@ -2993,6 +3214,12 @@ module.exports = (
     raisePermissionRequest,
     decide,
     revokeDecision,
+    authoriseLockedCorrection,
+    requestEmployeeId,
+    listLockedCorrections,
+    getLockedCorrectionEvent,
+    settleLockedCorrection,
+    lockedEventForDisplay,
     REVOCABLE_TYPES,
     bulkAction,
     listBulkTargets,

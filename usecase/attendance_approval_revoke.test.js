@@ -361,7 +361,7 @@ describe("POST /attendance/approvals/:request_id/revoke", () => {
     const res = await post(buildRoutes(usecase, allowAll, null, null), PATH, req({ id: 5, employee_id: 900, user_type: 2 }, { stage_no: 2, reason: "approved by mistake" }));
     assert.equal(res.statusCode, 200);
     assert.deepEqual(usecase.calls, [
-      { actor: { employee_id: 900, user_id: 5, user_type: 2 }, request_id: 71, stage_no: 2, reason: "approved by mistake" },
+      { actor: { employee_id: 900, user_id: 5, user_type: 2, can_correct_locked: true }, request_id: 71, stage_no: 2, reason: "approved by mistake" },
     ]);
   });
 
@@ -380,7 +380,7 @@ describe("POST /attendance/approvals/:request_id/revoke", () => {
     const res = await post(buildRoutes(usecase, allowAll, null, null), PATH, req({ id: 5, employee_id: 900, user_type: 2 }, { reason: "approved by mistake" }));
     assert.equal(res.statusCode, 200);
     assert.deepEqual(usecase.calls, [
-      { actor: { employee_id: 900, user_id: 5, user_type: 2 }, request_id: 71, stage_no: null, reason: "approved by mistake" },
+      { actor: { employee_id: 900, user_id: 5, user_type: 2, can_correct_locked: true }, request_id: 71, stage_no: null, reason: "approved by mistake" },
     ]);
   });
 

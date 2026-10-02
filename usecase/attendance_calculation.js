@@ -2692,9 +2692,33 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    * form the backend will refuse. It decides nothing; the gates stay where
    * they are.
    */
+  // THE LOCKED-PERIOD CORRECTIONS of a range, supplied by `server.js` from
+  // the regularization repository (`listLockedCorrectionsForRange`) - read
+  // only, so a day can show its authorisation, events and payroll difference.
+  let lockedCorrectionReader = null;
+  const setLockedCorrectionReader = (reader) => {
+    lockedCorrectionReader = typeof reader === "function" ? reader : null;
+  };
+  const parseJsonOr = (v) => {
+    if (v === null || v === undefined || typeof v === "object") return v === undefined ? null : v;
+    try {
+      return JSON.parse(v);
+    } catch (e) {
+      return null;
+    }
+  };
+
   const markPayrollLocked = async (employee_id, days) => {
     const list = Array.isArray(days) ? days : [];
     if (list.length === 0) return list;
+    const dates = list.map((d) => toDateOnly(d && d.attendance_date)).filter(Boolean).sort();
+    const corrections =
+      lockedCorrectionReader && dates.length
+        ? await lockedCorrectionReader(Number(employee_id), dates[0], dates[dates.length - 1])
+        : [];
+    // The NEWEST authorisation of each date is the one a screen acts on.
+    const correctionByDate = new Map();
+    (corrections || []).forEach((a) => correctionByDate.set(a.attendance_date, a));
     const byMonth = new Map();
     list.forEach((d) => {
       const date = toDateOnly(d && d.attendance_date);
@@ -2708,10 +2732,33 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
         p.period_month !== undefined ? p.period_month : p.month
       ).padStart(2, "0")}`)
     );
-    return list.map((d) => ({
-      ...d,
-      payroll_locked: lockedMonths.has(String(toDateOnly(d && d.attendance_date) || "").slice(0, 7)),
-    }));
+    return list.map((d) => {
+      const date = String(toDateOnly(d && d.attendance_date) || "");
+      const c = correctionByDate.get(date) || null;
+      return {
+        ...d,
+        payroll_locked: lockedMonths.has(date.slice(0, 7)),
+        locked_period_correction: c
+          ? {
+              authorisation_id: Number(c.attendance_locked_period_authorisation_id),
+              request_id: Number(c.attendance_approval_request_id),
+              status: c.status,
+              request_status: c.request_status,
+              authorised_by_employee_id: c.authorised_by_employee_id === null ? null : Number(c.authorised_by_employee_id),
+              authorised_by_name: c.authorised_by_name || null,
+              authorised_at: c.authorised_at || null,
+              authorisation_reason: c.authorisation_reason || null,
+              events: (c.events || []).map((ev) => ({
+                ...ev,
+                old_calculation: parseJsonOr(ev.old_calculation),
+                new_calculation: parseJsonOr(ev.new_calculation),
+                payroll_difference: parseJsonOr(ev.payroll_difference),
+                net_difference: ev.net_difference === null ? null : Number(ev.net_difference),
+              })),
+            }
+          : null,
+      };
+    });
   };
 
   /**
@@ -2759,6 +2806,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     attendanceDayState,
     findPayrollLockedPeriods,
     markPayrollLocked,
+    setLockedCorrectionReader,
     findPayrollLockedPeriodsBulk,
     listDateShiftOptions,
     calculateMonth,

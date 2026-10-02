@@ -580,6 +580,18 @@ module.exports = {
   // Seeing a void in the Punch Audit needs only `view_attendance_punch_audit`.
   VOID_ATTENDANCE_PUNCH: "void_attendance_punch",
 
+  // Attendance - AUTHORISE A LOCKED-PERIOD CORRECTION.
+  //
+  // A regularization on a date whose payroll month is APPROVED_LOCKED is
+  // raised as usual but cannot be approved until a holder of this key
+  // authorises the exception for THAT request (employee + date), with a
+  // mandatory reason. The month stays locked, the frozen payrun is never
+  // re-priced, and the payroll difference is recorded for manual settlement.
+  // Also required to revoke such a correction. The raiser cannot authorise
+  // their own request. Declared by the locked-period correction migration and
+  // granted to NOBODY.
+  CORRECT_LOCKED_ATTENDANCE: "correct_locked_attendance",
+
   // ======================================== PAYRUN INITIALIZATION ==========
   //
   // CHANGING THE PAY TYPE ON ONE PAYRUN ROW - the monthly Bank <-> Cash

@@ -8,6 +8,7 @@ const {
 } = require("../utils/batchInsert");
 const {
   writeCalculationsOnConnection,
+  writeLockedCorrectionDayOnConnection,
   assertMonthsNotPayrollLocked,
   lockPayrollMonthsOnConnection,
 } = require("./attendance_calculation");
@@ -433,7 +434,7 @@ class AttendanceRegularizationRepository {
    * has already been raised (Replace Approver does that explicitly, and only
    * for undecided steps).
    */
-  async createRequest({ request, chain, punch, punches = null, auto_approve = null, permissions = null }) {
+  async createRequest({ request, chain, punch, punches = null, auto_approve = null, permissions = null, lockedPeriod = null }) {
     const connection = await getConnectionAsync(this.db);
     try {
       await beginTransactionAsync(connection);
@@ -584,6 +585,20 @@ class AttendanceRegularizationRepository {
           );
       const requestId = inserted.insertId;
 
+      // RAISED IN A PAYROLL-LOCKED MONTH: the request exists, and so does the
+      // fact that it cannot be approved until somebody holding
+      // `correct_locked_attendance` authorises it. Raising grants nothing.
+      if (lockedPeriod) {
+        const [ly, lm] = String(request.attendance_date).slice(0, 7).split("-").map(Number);
+        await queryAsync(
+          connection,
+          `INSERT INTO attendance_locked_period_authorisation
+             (attendance_approval_request_id, employee_id, attendance_date, period_year, period_month, status)
+           VALUES (?, ?, ?, ?, ?, 'REQUIRED')`,
+          [requestId, request.requested_for_employee_id, request.attendance_date, ly, lm]
+        );
+      }
+
       const stepRows = chain.map((s) => [
         requestId,
         s.stage_no,
@@ -732,6 +747,14 @@ class AttendanceRegularizationRepository {
     // (it forgives nothing and pays nothing). Every other request type keeps
     // the existing rule - any decision in a locked month is refused here.
     allowRejectWhenLocked = false,
+    // A LOCKED-PERIOD CORRECTION: `{ event }` - the old/new calculation and
+    // the priced payroll difference for the audit event. Only with this may
+    // an APPROVAL proceed in a locked month, and only while this request's
+    // authorisation is AUTHORISED (checked FOR UPDATE below). The final
+    // approval writes the one corrected day through
+    // `writeLockedCorrectionDayOnConnection`, records the event and marks the
+    // authorisation APPLIED - all in this transaction.
+    lockedCorrection = null,
   }) {
     const connection = await getConnectionAsync(this.db);
     try {
@@ -756,12 +779,25 @@ class AttendanceRegularizationRepository {
        * written to the locked month's attendance with it.
        */
       let monthLocked = false;
+      let lockedApproval = false;
       if (attendanceLock && attendanceLock.employee_id && attendanceLock.attendance_date) {
         const hits = await lockPayrollMonthsOnConnection(connection, [
           { employee_id: attendanceLock.employee_id, attendance_date: attendanceLock.attendance_date },
         ]);
         if (hits.length > 0) {
-          if (!(allowRejectWhenLocked && decision === "REJECTED")) throw payrollLockedError(hits);
+          if (lockedCorrection && decision === "APPROVED") {
+            // Every APPROVING stage in a locked month needs the authorisation,
+            // not only the last: the chain does not start until it exists.
+            await this._requireAuthorisationOnConnection(connection, {
+              request_id: requestId,
+              employee_id: attendanceLock.employee_id,
+              attendance_date: attendanceLock.attendance_date,
+              status: "AUTHORISED",
+            });
+            lockedApproval = true;
+          } else if (!(allowRejectWhenLocked && decision === "REJECTED")) {
+            throw payrollLockedError(hits);
+          }
           monthLocked = true;
         }
       }
@@ -858,7 +894,36 @@ class AttendanceRegularizationRepository {
       // by design, and the date is stored once it closes.
       // A rejection in a locked month records the decision and writes no
       // attendance: the month's stored days are frozen with its pay.
-      const stored = await writeCalculationsOnConnection(connection, monthLocked ? [] : calculations || []);
+      let stored;
+      let lockedEventId = null;
+      if (lockedApproval && next.status === "APPROVED") {
+        // THE ONE LOCKED-DAY WRITE: final approval of an authorised request.
+        stored = await writeLockedCorrectionDayOnConnection(connection, calculations || [], {
+          request_id: requestId,
+          employee_id: attendanceLock.employee_id,
+          attendance_date: attendanceLock.attendance_date,
+          expected_status: "AUTHORISED",
+        });
+        lockedEventId = await this._insertLockedCorrectionEventOnConnection(connection, {
+          authorisation_id: stored.authorisation_id,
+          request_id: requestId,
+          event_type: "APPROVAL",
+          actor_employee_id: actorId,
+          actor_user_id: null,
+          event_reason: null,
+          event: lockedCorrection.event,
+        });
+        await queryAsync(
+          connection,
+          `UPDATE attendance_locked_period_authorisation SET status = 'APPLIED'
+            WHERE attendance_locked_period_authorisation_id = ? AND status = 'AUTHORISED'`,
+          [stored.authorisation_id]
+        );
+      } else {
+        // An intermediate stage of a locked correction, or a rejection in a
+        // locked month, writes no attendance: the stored day stays as paid.
+        stored = await writeCalculationsOnConnection(connection, monthLocked ? [] : calculations || []);
+      }
 
       await commitAsync(connection);
       return {
@@ -868,6 +933,7 @@ class AttendanceRegularizationRepository {
         finalization_state: finalizationState,
         calculations_written: stored.written,
         attendance_date_shift_override_id: overrideId,
+        locked_correction_event_id: lockedEventId,
       };
     } catch (err) {
       await rollbackAsync(connection);
@@ -947,8 +1013,24 @@ class AttendanceRegularizationRepository {
     // The request's date, so the payroll row can be locked FIRST - see
     // `decideStage`. Optional for older callers, which keep the old order.
     attendanceDate = null,
+    // A LOCKED-PERIOD CORRECTION being revoked: `{ event }`. Only with this
+    // may a revoke proceed in a locked month, and only while the request's
+    // authorisation is APPLIED; the day is written through
+    // `writeLockedCorrectionDayOnConnection`, a REVOKE event is appended and
+    // the authorisation becomes REVOKED - in this transaction.
+    lockedCorrection = null,
   }) {
     const connection = await getConnectionAsync(this.db);
+    // Without a locked correction, a locked month refuses the revoke, as ever.
+    const lockOrRefuse = async (date) => {
+      const rows = [{ employee_id: employeeId, attendance_date: date }];
+      if (!lockedCorrection) {
+        await assertMonthsNotPayrollLocked(connection, rows);
+        return false;
+      }
+      const hits = await lockPayrollMonthsOnConnection(connection, rows);
+      return hits.length > 0;
+    };
     const refuse = async (msg) => {
       await rollbackAsync(connection);
       return { code: 409, msg };
@@ -968,7 +1050,7 @@ class AttendanceRegularizationRepository {
       // deadlocking. A revoke is refused in a locked month either way; this
       // only decides WHEN the lock is taken, and it is held to the end.
       if (attendanceDate) {
-        await assertMonthsNotPayrollLocked(connection, [{ employee_id: employeeId, attendance_date: attendanceDate }]);
+        await lockOrRefuse(attendanceDate);
       }
 
       // 1. The employee, first.
@@ -1103,9 +1185,15 @@ class AttendanceRegularizationRepository {
       }
 
       // 5. The payroll lock, whether or not a day row goes with this.
-      await assertMonthsNotPayrollLocked(connection, [
-        { employee_id: employeeId, attendance_date: request.attendance_date },
-      ]);
+      const lockedRevoke = await lockOrRefuse(request.attendance_date);
+      if (lockedRevoke) {
+        await this._requireAuthorisationOnConnection(connection, {
+          request_id: requestId,
+          employee_id: employeeId,
+          attendance_date: request.attendance_date,
+          status: "APPLIED",
+        });
+      }
 
       // 6. VOID the request - or, for a rejected SHIFT_CHANGE, REOPEN it.
       if (reopen) {
@@ -1236,7 +1324,33 @@ class AttendanceRegularizationRepository {
       );
 
       // 8. The day without it. A failure here rolls everything above back.
-      const stored = await writeCalculationsOnConnection(connection, calculations || []);
+      let stored;
+      let lockedEventId = null;
+      if (lockedRevoke) {
+        stored = await writeLockedCorrectionDayOnConnection(connection, calculations || [], {
+          request_id: requestId,
+          employee_id: employeeId,
+          attendance_date: request.attendance_date,
+          expected_status: "APPLIED",
+        });
+        lockedEventId = await this._insertLockedCorrectionEventOnConnection(connection, {
+          authorisation_id: stored.authorisation_id,
+          request_id: requestId,
+          event_type: "REVOKE",
+          actor_employee_id: actor && actor.employee_id ? Number(actor.employee_id) : null,
+          actor_user_id: actor && actor.user_id ? Number(actor.user_id) : null,
+          event_reason: reason,
+          event: lockedCorrection.event,
+        });
+        await queryAsync(
+          connection,
+          `UPDATE attendance_locked_period_authorisation SET status = 'REVOKED'
+            WHERE attendance_locked_period_authorisation_id = ? AND status = 'APPLIED'`,
+          [stored.authorisation_id]
+        );
+      } else {
+        stored = await writeCalculationsOnConnection(connection, calculations || []);
+      }
 
       await commitAsync(connection);
       return {
@@ -1250,6 +1364,7 @@ class AttendanceRegularizationRepository {
         revoked_stage_no: Number(stageNo),
         withdrawn_override_ids: (withdrawnOverrides || []).map((o) => Number(o.attendance_date_shift_override_id)),
         calculations_written: stored.written,
+        locked_correction_event_id: lockedEventId,
       };
     } catch (err) {
       await rollbackAsync(connection);
@@ -1592,7 +1707,9 @@ class AttendanceRegularizationRepository {
               r.requested_work_shift_id, r.base_work_shift_id,
               rws.shift_code AS requested_shift_code, rws.shift_name AS requested_shift_name,
               bws.shift_code AS base_shift_code, bws.shift_name AS base_shift_name,
-              ne.designation_id
+              ne.designation_id,
+              -- A LOCKED-PERIOD correction's authorisation, when there is one.
+              lpa.status AS locked_period_status
          FROM attendance_approval_request r
          JOIN attendance_approval_step s
            ON s.attendance_approval_request_id = r.attendance_approval_request_id
@@ -1616,6 +1733,8 @@ class AttendanceRegularizationRepository {
          LEFT JOIN work_shift ws ON ws.work_shift_id = c.work_shift_id
          LEFT JOIN work_shift rws ON rws.work_shift_id = r.requested_work_shift_id
          LEFT JOIN work_shift bws ON bws.work_shift_id = r.base_work_shift_id
+         LEFT JOIN attendance_locked_period_authorisation lpa
+           ON lpa.attendance_approval_request_id = r.attendance_approval_request_id
         WHERE ${where}
         ORDER BY r.status = 'PENDING' DESC, r.attendance_date DESC, r.attendance_approval_request_id DESC
         LIMIT ? OFFSET ?`,
@@ -1698,6 +1817,297 @@ class AttendanceRegularizationRepository {
         LIMIT ?`,
       [employee_id, from_date, to_date, Number(limit)]
     );
+  }
+
+  /* ===================================== LOCKED-PERIOD CORRECTION ====== */
+
+  /** The authorisation for a request, in the status an operation needs, FOR UPDATE - or throw. */
+  async _requireAuthorisationOnConnection(connection, { request_id, employee_id, attendance_date, status }) {
+    const rows = await queryAsync(
+      connection,
+      `SELECT attendance_locked_period_authorisation_id, employee_id,
+              DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date, status
+         FROM attendance_locked_period_authorisation
+        WHERE attendance_approval_request_id = ?
+        FOR UPDATE`,
+      [Number(request_id)]
+    );
+    const auth = rows && rows[0];
+    if (
+      !auth ||
+      Number(auth.employee_id) !== Number(employee_id) ||
+      auth.attendance_date !== String(attendance_date).slice(0, 10) ||
+      auth.status !== status
+    ) {
+      const err = new Error(
+        status === "AUTHORISED"
+          ? "Locked-period authorisation required: this date's payroll month is locked and the correction has not been authorised"
+          : "This locked payroll date has no applied locked-period correction to revoke"
+      );
+      err.name = "ValidationError";
+      err.code = "LOCKED_CORRECTION_NOT_AUTHORISED";
+      throw err;
+    }
+    return auth;
+  }
+
+  /**
+   * APPEND one correction event. The authorisation is copied onto it so the
+   * row reads on its own. Calculation and difference columns are never
+   * updated afterwards; only the settlement columns move, once.
+   */
+  async _insertLockedCorrectionEventOnConnection(connection, args) {
+    const [auth] = await queryAsync(
+      connection,
+      `SELECT employee_id, DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date,
+              authorised_by_employee_id, authorisation_reason, authorised_at
+         FROM attendance_locked_period_authorisation
+        WHERE attendance_locked_period_authorisation_id = ?`,
+      [args.authorisation_id]
+    );
+    const e = args.event || {};
+    const diff = e.payroll_difference || {};
+    const inserted = await queryAsync(
+      connection,
+      `INSERT INTO attendance_locked_period_correction_event
+         (attendance_locked_period_authorisation_id, attendance_approval_request_id, employee_id, attendance_date,
+          event_type, actor_employee_id, actor_user_id, event_reason,
+          authorised_by_employee_id, authorisation_reason, authorised_at,
+          payrun_calculation_id, payrun_calculation_hash, frozen_net_pay,
+          old_calculation, new_calculation, payroll_difference, net_difference, direction,
+          statutory_recomputed, adjustment_status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        args.authorisation_id,
+        Number(args.request_id),
+        auth.employee_id,
+        auth.attendance_date,
+        args.event_type,
+        args.actor_employee_id,
+        args.actor_user_id,
+        args.event_reason,
+        auth.authorised_by_employee_id,
+        auth.authorisation_reason,
+        auth.authorised_at,
+        diff.basis ? diff.basis.payrun_calculation_id : null,
+        diff.basis ? diff.basis.calculation_hash : null,
+        diff.basis ? diff.basis.frozen_net_pay : null,
+        JSON.stringify(e.old_calculation || null),
+        JSON.stringify(e.new_calculation || null),
+        JSON.stringify(diff),
+        Number(diff.net_difference) || 0,
+        diff.direction || "NO_DIFFERENCE",
+        diff.statutory_recomputed ? 1 : 0,
+        diff.adjustment_status || "NOT_REQUIRED",
+      ]
+    );
+    return inserted ? Number(inserted.insertId) : null;
+  }
+
+  async getLockedAuthorisation(requestId) {
+    const rows = await this._read(
+      "GET-LOCKED-AUTHORISATION",
+      `SELECT a.attendance_locked_period_authorisation_id, a.attendance_approval_request_id, a.employee_id,
+              DATE_FORMAT(a.attendance_date, '%Y-%m-%d') AS attendance_date, a.period_year, a.period_month,
+              a.status, a.authorised_by_employee_id, e.employee_name AS authorised_by_name,
+              a.authorisation_reason, DATE_FORMAT(a.authorised_at, '%Y-%m-%d %H:%i:%s') AS authorised_at
+         FROM attendance_locked_period_authorisation a
+         LEFT JOIN new_employee e ON e.employee_id = a.authorised_by_employee_id
+        WHERE a.attendance_approval_request_id = ?`,
+      [Number(requestId)]
+    );
+    return rows && rows[0] ? rows[0] : null;
+  }
+
+  /**
+   * AUTHORISE THE EXCEPTION for one PENDING regularization, in one transaction
+   * under the payroll row lock. Creates the authorisation when the request was
+   * raised before its month locked; moves REQUIRED -> AUTHORISED otherwise.
+   */
+  async authoriseLockedCorrection({ request_id, actor_employee_id, actor_user_id, reason }) {
+    const connection = await getConnectionAsync(this.db);
+    const refuse = async (msg) => {
+      await rollbackAsync(connection);
+      return { code: 409, msg };
+    };
+    try {
+      await beginTransactionAsync(connection);
+      const [request] = await queryAsync(
+        connection,
+        `SELECT attendance_approval_request_id, request_type, status, requested_for_employee_id,
+                requested_by_employee_id, DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date
+           FROM attendance_approval_request WHERE attendance_approval_request_id = ?`,
+        [Number(request_id)]
+      );
+      if (!request) return await refuse("That request no longer exists");
+      const hits = await lockPayrollMonthsOnConnection(connection, [
+        { employee_id: request.requested_for_employee_id, attendance_date: request.attendance_date },
+      ]);
+      if (hits.length === 0) return await refuse("This date's payroll month is not locked - no authorisation is needed");
+      const [locked] = await queryAsync(
+        connection,
+        `SELECT status, request_type FROM attendance_approval_request WHERE attendance_approval_request_id = ? FOR UPDATE`,
+        [Number(request_id)]
+      );
+      if (!locked || locked.request_type !== "REGULARIZATION" || locked.status !== "PENDING") {
+        return await refuse("Only a pending regularization can be authorised for a locked payroll date");
+      }
+      const existing = await queryAsync(
+        connection,
+        `SELECT attendance_locked_period_authorisation_id, status
+           FROM attendance_locked_period_authorisation WHERE attendance_approval_request_id = ? FOR UPDATE`,
+        [Number(request_id)]
+      );
+      const [y, m] = request.attendance_date.split("-").map(Number);
+      if (existing && existing[0]) {
+        if (existing[0].status !== "REQUIRED") {
+          return await refuse(`This request's locked-period authorisation is already ${existing[0].status.toLowerCase()}`);
+        }
+        await queryAsync(
+          connection,
+          `UPDATE attendance_locked_period_authorisation
+              SET status = 'AUTHORISED', authorised_by_employee_id = ?, authorised_by_user_id = ?,
+                  authorisation_reason = ?, authorised_at = CURRENT_TIMESTAMP(3)
+            WHERE attendance_locked_period_authorisation_id = ? AND status = 'REQUIRED'`,
+          [actor_employee_id, actor_user_id, reason, existing[0].attendance_locked_period_authorisation_id]
+        );
+      } else {
+        await queryAsync(
+          connection,
+          `INSERT INTO attendance_locked_period_authorisation
+             (attendance_approval_request_id, employee_id, attendance_date, period_year, period_month, status,
+              authorised_by_employee_id, authorised_by_user_id, authorisation_reason, authorised_at)
+           VALUES (?, ?, ?, ?, ?, 'AUTHORISED', ?, ?, ?, CURRENT_TIMESTAMP(3))`,
+          [Number(request_id), request.requested_for_employee_id, request.attendance_date, y, m,
+            actor_employee_id, actor_user_id, reason]
+        );
+      }
+      await commitAsync(connection);
+      return { code: 200, status: "AUTHORISED", attendance_approval_request_id: Number(request_id) };
+    } catch (err) {
+      await rollbackAsync(connection);
+      this._log("AUTHORISE-LOCKED-CORRECTION", err);
+      throw err;
+    } finally {
+      connection.release();
+    }
+  }
+
+  /** The frozen payroll row a locked date was paid on, or null. Read-only. */
+  async getFrozenPayrun(employeeId, attendanceDate) {
+    const [y, m] = String(attendanceDate).slice(0, 7).split("-").map(Number);
+    const rows = await this._read(
+      "GET-FROZEN-PAYRUN",
+      `SELECT payrun_calculation_id, employee_id, period_year, period_month, status,
+              monthly_gross, daily_rate, approved_ot_minutes, ot_amount, ot_groups,
+              missing_hours_minutes, missing_hours_deduction, net_pay, calculation_hash
+         FROM payrun_employee_calculation
+        WHERE employee_id = ? AND period_year = ? AND period_month = ? AND status = 'APPROVED_LOCKED'`,
+      [Number(employeeId), y, m]
+    );
+    return rows && rows[0] ? rows[0] : null;
+  }
+
+  /** The STORED day row (what payroll was calculated from), or null. */
+  async getStoredDay(employeeId, attendanceDate) {
+    const rows = await this._read(
+      "GET-STORED-DAY",
+      `SELECT *, DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date
+         FROM attendance_day_calculation WHERE employee_id = ? AND attendance_date = ?`,
+      [Number(employeeId), String(attendanceDate).slice(0, 10)]
+    );
+    return rows && rows[0] ? rows[0] : null;
+  }
+
+  /** Authorisations and their events for one employee over a range, for the day read. */
+  async listLockedCorrectionsForRange(employeeId, fromDate, toDate) {
+    const auths = await this._read(
+      "LIST-LOCKED-AUTH-RANGE",
+      `SELECT a.attendance_locked_period_authorisation_id, a.attendance_approval_request_id,
+              DATE_FORMAT(a.attendance_date, '%Y-%m-%d') AS attendance_date, a.status,
+              r.status AS request_status, a.authorised_by_employee_id, e.employee_name AS authorised_by_name,
+              a.authorisation_reason, DATE_FORMAT(a.authorised_at, '%Y-%m-%d %H:%i:%s') AS authorised_at
+         FROM attendance_locked_period_authorisation a
+         JOIN attendance_approval_request r ON r.attendance_approval_request_id = a.attendance_approval_request_id
+         LEFT JOIN new_employee e ON e.employee_id = a.authorised_by_employee_id
+        WHERE a.employee_id = ? AND a.attendance_date BETWEEN ? AND ?
+        ORDER BY a.attendance_locked_period_authorisation_id ASC`,
+      [Number(employeeId), fromDate, toDate]
+    );
+    if (!auths || auths.length === 0) return [];
+    const events = await this.listLockedCorrectionEvents({ employee_id: employeeId, from_date: fromDate, to_date: toDate, limit: 500 });
+    return auths.map((a) => ({
+      ...a,
+      events: events.filter(
+        (ev) => Number(ev.attendance_locked_period_authorisation_id) === Number(a.attendance_locked_period_authorisation_id)
+      ),
+    }));
+  }
+
+  /** The correction events, newest first - Payroll's settlement list. */
+  async listLockedCorrectionEvents({ employee_id = null, from_date = null, to_date = null, adjustment_status = null, limit = 200 } = {}) {
+    const where = ["1 = 1"];
+    const params = [];
+    if (employee_id) {
+      where.push("ev.employee_id = ?");
+      params.push(Number(employee_id));
+    }
+    if (from_date && to_date) {
+      where.push("ev.attendance_date BETWEEN ? AND ?");
+      params.push(from_date, to_date);
+    }
+    if (adjustment_status) {
+      where.push("ev.adjustment_status = ?");
+      params.push(adjustment_status);
+    }
+    return this._read(
+      "LIST-LOCKED-EVENTS",
+      `SELECT ev.attendance_locked_period_correction_event_id, ev.attendance_locked_period_authorisation_id,
+              ev.attendance_approval_request_id, ev.employee_id, ne.employee_name, ne.store_id,
+              DATE_FORMAT(ev.attendance_date, '%Y-%m-%d') AS attendance_date, ev.event_type,
+              ev.actor_employee_id, ae.employee_name AS actor_name, ev.event_reason,
+              DATE_FORMAT(ev.occurred_at, '%Y-%m-%d %H:%i:%s') AS occurred_at,
+              ev.authorised_by_employee_id, be.employee_name AS authorised_by_name, ev.authorisation_reason,
+              DATE_FORMAT(ev.authorised_at, '%Y-%m-%d %H:%i:%s') AS authorised_at,
+              ev.payrun_calculation_id, ev.payrun_calculation_hash, ev.frozen_net_pay,
+              ev.old_calculation, ev.new_calculation, ev.payroll_difference, ev.net_difference, ev.direction,
+              ev.statutory_recomputed, ev.adjustment_status, ev.applied_by, pe.employee_name AS applied_by_name,
+              DATE_FORMAT(ev.applied_at, '%Y-%m-%d %H:%i:%s') AS applied_at, ev.applied_note,
+              ev.applied_payroll_year, ev.applied_payroll_month
+         FROM attendance_locked_period_correction_event ev
+         LEFT JOIN new_employee ne ON ne.employee_id = ev.employee_id
+         LEFT JOIN new_employee ae ON ae.employee_id = ev.actor_employee_id
+         LEFT JOIN new_employee be ON be.employee_id = ev.authorised_by_employee_id
+         LEFT JOIN new_employee pe ON pe.employee_id = ev.applied_by
+        WHERE ${where.join(" AND ")}
+        ORDER BY ev.attendance_locked_period_correction_event_id DESC
+        LIMIT ?`,
+      [...params, Math.min(Math.max(Number(limit) || 200, 1), 500)]
+    );
+  }
+
+  /** MARK SETTLED, once: PENDING_ADJUSTMENT -> SETTLED. Nothing else on the row moves. */
+  async settleLockedCorrectionEvent({ event_id, applied_by, applied_note, applied_payroll_year, applied_payroll_month }) {
+    const result = await this._read(
+      "SETTLE-LOCKED-EVENT",
+      `UPDATE attendance_locked_period_correction_event
+          SET adjustment_status = 'SETTLED', applied_by = ?, applied_at = CURRENT_TIMESTAMP(3),
+              applied_note = ?, applied_payroll_year = ?, applied_payroll_month = ?
+        WHERE attendance_locked_period_correction_event_id = ? AND adjustment_status = 'PENDING_ADJUSTMENT'`,
+      [applied_by, applied_note, applied_payroll_year, applied_payroll_month, Number(event_id)]
+    );
+    return { updated: Number(result && result.affectedRows) || 0 };
+  }
+
+  async getLockedCorrectionEvent(eventId) {
+    const rows = await this._read(
+      "GET-LOCKED-EVENT",
+      `SELECT attendance_locked_period_correction_event_id, employee_id,
+              DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date, adjustment_status
+         FROM attendance_locked_period_correction_event WHERE attendance_locked_period_correction_event_id = ?`,
+      [Number(eventId)]
+    );
+    return rows && rows[0] ? rows[0] : null;
   }
 }
 

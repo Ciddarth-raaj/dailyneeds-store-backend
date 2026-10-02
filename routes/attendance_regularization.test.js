@@ -79,7 +79,12 @@ describe("the endpoints and their guards", () => {
         "POST /attendance/permission-request",
         "POST /attendance/regularization",
         "POST /attendance/regularization/:request_id/decision",
-      ]
+        // LOCKED-PERIOD CORRECTION: the separate authorisation, Payroll's
+        // list and the manual settlement.
+        "GET /attendance/locked-period-corrections",
+        "POST /attendance/regularization/:request_id/locked-period-authorisation",
+        "POST /attendance/locked-period-corrections/:event_id/settle",
+      ].sort()
     );
   });
 
@@ -510,5 +515,80 @@ describe("POST /attendance/regularization - a missed break", () => {
     }));
     assert.equal(res.statusCode, 400);
     assert.equal(calls.created.length, 0);
+  });
+});
+
+
+/**
+ * LOCKED-PERIOD CORRECTION routes: the key, the outlet scope, the settlement.
+ */
+describe("locked-period correction routes", () => {
+  const allGuards = guardsOf(buildRoutes({}, tagging, null));
+  const g = (m, p) => allGuards.find((x) => x.method === m && x.path === p);
+  it("authorise needs correct_locked_attendance; settle needs process_payroll", () => {
+    assert.deepEqual(g("POST", "/attendance/regularization/:request_id/locked-period-authorisation").guard, { mode: "any", keys: [P.CORRECT_LOCKED_ATTENDANCE] });
+    assert.deepEqual(g("POST", "/attendance/locked-period-corrections/:event_id/settle").guard, { mode: "any", keys: [P.PROCESS_PAYROLL] });
+  });
+
+  const scope = {
+    checkEmployee: async (req, id) => (Number(id) === 303 ? { ok: false, msg: "Not in your branch" } : { ok: true }),
+    refuse: (res, o) => res.status(403).json({ code: 403, msg: o.msg }),
+    resolve: async () => ({ kind: "OWN_BRANCHES", store_ids: [3] }),
+  };
+  const wireLocked = (held, employeeFor = 202) => {
+    const calls = { authorised: [], raised: [], settled: [] };
+    const usecase = {
+      requestEmployeeId: async () => employeeFor,
+      authoriseLockedCorrection: async (args) => { calls.authorised.push(args); return { status: "AUTHORISED" }; },
+      raiseRequest: async (args) => { calls.raised.push(args); return { attendance_approval_request_id: 1 }; },
+      listLockedCorrections: async () => [
+        { attendance_locked_period_correction_event_id: 1, employee_id: 202, store_id: 3 },
+        { attendance_locked_period_correction_event_id: 2, employee_id: 303, store_id: 9 },
+      ],
+      getLockedCorrectionEvent: async (id) => ({ attendance_locked_period_correction_event_id: id, employee_id: id === 2 ? 303 : 202 }),
+      settleLockedCorrection: async (args) => { calls.settled.push(args); return { code: 200, adjustment_status: "SETTLED" }; },
+    };
+    const permissions = { require: () => (req, res, next) => next(), has: async (req, ...keys) => keys.some((k) => held.includes(k)) };
+    return { routes: buildRoutes(usecase, permissions, null, scope), calls };
+  };
+  const req = (body = {}, params = {}, query = {}) => ({ decoded: { id: 2, employee_id: 8, user_type: 1 }, body, params, query });
+
+  it("authorise: in scope -> passes the reason through; out of scope -> 403; no reason -> 400", async () => {
+    const ok = wireLocked([P.CORRECT_LOCKED_ATTENDANCE]);
+    const res = await invoke(ok.routes, "POST", "/attendance/regularization/:request_id/locked-period-authorisation", req({ reason: "Verified with CCTV" }, { request_id: "900" }));
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.equal(ok.calls.authorised[0].request_id, 900);
+    assert.equal(ok.calls.authorised[0].reason, "Verified with CCTV");
+    const out = wireLocked([P.CORRECT_LOCKED_ATTENDANCE], 303);
+    assert.equal((await invoke(out.routes, "POST", "/attendance/regularization/:request_id/locked-period-authorisation", req({ reason: "Verified with CCTV" }, { request_id: "900" }))).statusCode, 403);
+    assert.equal(out.calls.authorised.length, 0);
+    assert.equal((await invoke(ok.routes, "POST", "/attendance/regularization/:request_id/locked-period-authorisation", req({}, { request_id: "900" }))).statusCode, 400);
+  });
+
+  it("the raise passes allow_locked_period only to holders of the for-others key", async () => {
+    const hr = wireLocked([P.RAISE_ATTENDANCE_REGULARIZATION_FOR_OTHERS]);
+    await invoke(hr.routes, "POST", "/attendance/regularization", req({ requested_for_employee_id: 202, attendance_date: "2026-09-12", punch_time: "2026-09-12 22:04:00", reason: "Forgot to punch out" }));
+    assert.equal(hr.calls.raised[0].allow_locked_period, true);
+    const plain = wireLocked([]);
+    await invoke(plain.routes, "POST", "/attendance/regularization", req({ attendance_date: "2026-09-12", punch_time: "2026-09-12 22:04:00", reason: "Forgot to punch out" }));
+    assert.equal(plain.calls.raised[0].allow_locked_period, false);
+  });
+
+  it("Payroll's list is filtered to the caller's outlet scope, and refused without a payroll key", async () => {
+    const payroll = wireLocked([P.VIEW_PAYROLL]);
+    const res = await invoke(payroll.routes, "GET", "/attendance/locked-period-corrections", req());
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.body.corrections.map((c) => c.attendance_locked_period_correction_event_id), [1]);
+    const nobody = wireLocked([]);
+    assert.equal((await invoke(nobody.routes, "GET", "/attendance/locked-period-corrections", req())).statusCode, 403);
+  });
+
+  it("settle: validated, scoped, passed through", async () => {
+    const w = wireLocked([P.PROCESS_PAYROLL]);
+    const body = { applied_payroll_year: 2026, applied_payroll_month: 10, applied_note: "Shortage recovery in October" };
+    assert.equal((await invoke(w.routes, "POST", "/attendance/locked-period-corrections/:event_id/settle", req(body, { event_id: "1" }))).statusCode, 200);
+    assert.equal(w.calls.settled[0].applied_payroll_month, 10);
+    assert.equal((await invoke(w.routes, "POST", "/attendance/locked-period-corrections/:event_id/settle", req(body, { event_id: "2" }))).statusCode, 403, "out of scope");
+    assert.equal((await invoke(w.routes, "POST", "/attendance/locked-period-corrections/:event_id/settle", req({ applied_payroll_year: 2026 }, { event_id: "1" }))).statusCode, 400);
   });
 });
