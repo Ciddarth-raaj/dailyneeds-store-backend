@@ -22,6 +22,9 @@ const fs = require("fs");
 const path = require("path");
 
 const {
+  DIRECTORY_POPULATION,
+  populationFromQuery,
+  resignedInclusivePopulation,
   buildEmployeeScope,
   buildReportAccessScope,
   accessScope,
@@ -117,7 +120,7 @@ test("THE DIRECTORY QUERY USES THE SHARED SCOPE RATHER THAN ITS OWN CLAUSE", () 
   const src = fs.readFileSync(path.join(__dirname, "employee.js"), "utf8");
   const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 
-  assert.match(code, /buildEmployeeScope\(\s*resignation,\s*filters,\s*actor\s*\)/);
+  assert.match(code, /buildEmployeeScope\(\s*resignation,\s*filters,\s*actor,\s*options\s*\)/);
   // And it no longer builds the predicate itself: exactly one occurrence of
   // the resignation clause remains in the repository layer, in employee_scope.
   const inline = code.match(/employee_name NOT IN \(\?\)/g) || [];
@@ -231,4 +234,56 @@ test("THE DIRECTORY STILL COMPOSES BOTH", () => {
       "AND new_employee.store_id IN (?) AND new_employee.designation_id IN (?)"
   );
   assert.deepStrictEqual(params, [["Gone"], [2], [15]]);
+});
+
+/* ======================== the Employee Master "Resigned" population ===== */
+const MANAGER = { userId: 9, branch_scope: { kind: "OWN_BRANCHES", store_ids: [5] } };
+const FILTERS = { store_ids: [5], designation_ids: [4] };
+
+test("DEFAULT IS BYTE-FOR-BYTE TODAY'S CLAUSE, with the option absent, DEFAULT or unknown", () => {
+  const today = buildEmployeeScope(["Gone"], FILTERS, MANAGER);
+  assert.strictEqual(
+    norm(today.where),
+    "WHERE new_employee.store_id IN (?) AND new_employee.employee_name NOT IN (?) " +
+      "AND new_employee.store_id IN (?) AND new_employee.designation_id IN (?)"
+  );
+  for (const options of [undefined, {}, { population: DIRECTORY_POPULATION.DEFAULT }, { population: "ALL" }]) {
+    assert.deepStrictEqual(buildEmployeeScope(["Gone"], FILTERS, MANAGER, options), today, JSON.stringify(options));
+  }
+});
+
+test("INCLUDE_RESIGNED changes ONLY the population clause - scope and filters are identical, in order", () => {
+  const today = buildEmployeeScope(["Gone"], FILTERS, MANAGER);
+  const incl = buildEmployeeScope(["Gone"], FILTERS, MANAGER, {
+    population: DIRECTORY_POPULATION.INCLUDE_RESIGNED,
+  });
+  assert.strictEqual(
+    norm(incl.where),
+    "WHERE new_employee.store_id IN (?) " +
+      "AND (new_employee.employee_name NOT IN (?) OR NOT (new_employee.status <=> 1)) " +
+      "AND new_employee.store_id IN (?) AND new_employee.designation_id IN (?)"
+  );
+  assert.deepStrictEqual(incl.params, today.params, "same parameters, same order");
+});
+
+test("INCLUDE_RESIGNED never removes the branch restriction, including fail-closed", () => {
+  const opts = { population: DIRECTORY_POPULATION.INCLUDE_RESIGNED };
+  assert.match(buildEmployeeScope(["Gone"], {}, MANAGER, opts).where, /new_employee\.store_id IN \(\?\)/);
+  const unresolved = buildEmployeeScope(["Gone"], {}, { userId: 9 }, opts);
+  assert.match(unresolved.where, /1 = 0/, "an actor without a resolved scope still sees nothing");
+});
+
+test("INCLUDE_RESIGNED with nobody resigned adds nothing", () => {
+  assert.deepStrictEqual(resignedInclusivePopulation([]), { conditions: [], params: [] });
+  assert.deepStrictEqual(
+    buildEmployeeScope([], {}, null, { population: DIRECTORY_POPULATION.INCLUDE_RESIGNED }),
+    { where: "", params: [] }
+  );
+});
+
+test("only include_resigned=1 opts in", () => {
+  for (const v of [1, "1"]) assert.strictEqual(populationFromQuery(v), DIRECTORY_POPULATION.INCLUDE_RESIGNED);
+  for (const v of [undefined, null, "", 0, "0", "true", 2, " "]) {
+    assert.strictEqual(populationFromQuery(v), DIRECTORY_POPULATION.DEFAULT, JSON.stringify(v));
+  }
 });

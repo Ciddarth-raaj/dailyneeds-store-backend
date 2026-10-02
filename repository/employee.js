@@ -436,7 +436,7 @@ class EmployeeRepository {
       );
     });
   }
-  get(resignation, filters, actor = null) {
+  get(resignation, filters, actor = null, options = {}) {
     return new Promise((resolve, reject) => {
       // The population - who is in this list at all - lives in
       // `employee_scope.js`, so the C3 status summary and Reports can ask the
@@ -451,10 +451,12 @@ class EmployeeRepository {
       // directly fanned each employee out once per row, which showed up as
       // the same name repeated in every employee dropdown. Collapse it to one
       // row per name first so the result stays one row per employee.
+      // `options.population` (DIRECTORY_POPULATION) - see employee_scope.js.
       const { where: whereClause, params: filterValues } = buildEmployeeScope(
         resignation,
         filters,
-        actor
+        actor,
+        options
       );
 
       const query = `

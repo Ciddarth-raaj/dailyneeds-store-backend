@@ -120,12 +120,14 @@ let lastEdit = null;
 let lastCreate = null;
 let lastUpdateData = null;
 let lastDuplicateCheck = null;
+let lastListOptions = null;
 
 const employeeUsecase = {
   // `get` receives the ACTOR, and the branch predicate is rendered from it by
   // the same `accessScope` the SQL uses - so this stub cannot agree with the
   // route while the query would not.
-  async get(filters, actor) {
+  async get(filters, actor, options) {
+    lastListOptions = options;
     const scope = accessScope(actor);
     if (scope.conditions.includes("1 = 0")) return [];
     const allowed = scope.conditions.length === 0 ? null : scope.params[0];
@@ -447,6 +449,23 @@ describe("the list, the search and the counts carry the same scope", () => {
   it("7. asking for ANOTHER branch is refused, not silently narrowed", async () => {
     const res = await get(`/employee/employees?store_ids[]=${MOOLAKULAM}`, CALLERS.managerView());
     assertRefused(res, "a store_ids filter naming another branch");
+  });
+
+  it("include_resigned=1 asks for INCLUDE_RESIGNED; no flag stays DEFAULT; the scope is unchanged", async () => {
+    let res = await get("/employee/employees?include_resigned=1", CALLERS.managerView());
+    assert.equal(res.status, 200);
+    assert.deepEqual(lastListOptions, { population: "INCLUDE_RESIGNED" });
+    for (const row of res.body) assert.equal(row.store_id, KATHIRKAMAM);
+    res = await get("/employee/employees", CALLERS.managerView());
+    assert.deepEqual(lastListOptions, { population: "DEFAULT" });
+  });
+
+  it("include_resigned=1 does not open another branch, and grants no key", async () => {
+    assertRefused(
+      await get(`/employee/employees?include_resigned=1&store_ids[]=${MOOLAKULAM}`, CALLERS.managerView()),
+      "another branch with include_resigned"
+    );
+    assertRefused(await get("/employee/employees?include_resigned=1", CALLERS.noKeys()), "no view_employees");
   });
 
   it("7. asking for their OWN branch is honoured", async () => {

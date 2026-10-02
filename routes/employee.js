@@ -3,6 +3,7 @@ const P = require("../constants/hr_permissions");
 const { requireEmployee, employeeIdOrNull } = require("../utils/actor");
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
+const { populationFromQuery } = require("../repository/employee_scope");
 const {
   sectionKeysRequired,
   isSectionOnlyWrite,
@@ -176,6 +177,12 @@ class EmployeeRoutes {
           designation_ids: Joi.array()
             .items(Joi.number().required())
             .optional(),
+          // HR -> Employee Master asks for the population in which the
+          // resigned-name exclusion no longer removes NON-ACTIVE employees,
+          // so its "Resigned" view shows people whose resignation was
+          // recorded. Active rows are unaffected. Optional and 0/1 only;
+          // omitted, the list is exactly what every other caller has had.
+          include_resigned: Joi.number().valid(0, 1).optional(),
         };
 
         const isValid = Joi.validate(req.query, schema);
@@ -193,7 +200,12 @@ class EmployeeRoutes {
         if (!scoped.ok) return this.branchScope.refuse(res, scoped);
 
         const actor = await this.branchScope.actorFor(req);
-        const employee = await this.employeeUsecase.get(req.query, actor);
+        // The population is chosen AFTER the scope has been resolved and is
+        // applied beside it, never instead of it: `include_resigned` changes
+        // which rows the name rule removes, not which branches are reachable.
+        const employee = await this.employeeUsecase.get(req.query, actor, {
+          population: populationFromQuery(req.query.include_resigned),
+        });
         res.json(employee);
       } catch (err) {
         console.log(err);

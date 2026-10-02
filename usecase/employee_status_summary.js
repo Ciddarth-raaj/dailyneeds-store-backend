@@ -422,10 +422,17 @@ class EmployeeStatusSummaryUsecase {
    *   list accepts, passed through unchanged.
    * @param options `{ disclosePfEsiApplicability, disclosePaymentRoute }` -
    *   both true only for a caller holding `view_employee_sensitive`; see the
-   *   NOT_APPLICABLE note and the payment-route note above.
+   *   NOT_APPLICABLE note and the payment-route note above. `population` is
+   *   the same DIRECTORY_POPULATION the list was asked for, so the badges
+   *   annotate exactly the rows the list returned - omitted, DEFAULT.
    */
-  async list(filters, { disclosePfEsiApplicability = false, disclosePaymentRoute = false } = {}) {
-    const employees = await this.employees.get(filters || {});
+  async list(
+    filters,
+    { disclosePfEsiApplicability = false, disclosePaymentRoute = false, population } = {}
+  ) {
+    const employees = population
+      ? await this.employees.get(filters || {}, null, { population })
+      : await this.employees.get(filters || {});
 
     const ids = [];
     for (const e of employees || []) {

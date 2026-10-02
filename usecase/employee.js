@@ -16,8 +16,12 @@ class EmployeeUsecase {
    * WHERE clause by `repository/employee_scope.js#accessScope`. An actor
    * without one is refused there (`1 = 0`), so a caller who reaches this
    * without going through the resolver gets nothing rather than everybody.
+   *
+   * `options.population` is passed through to the scope builder untouched
+   * (`repository/employee_scope.js#DIRECTORY_POPULATION`); omitted, the list
+   * is exactly what it has always been.
    */
-  get(filters, actor = null) {
+  get(filters, actor = null, options = {}) {
     return new Promise(async (resolve, reject) => {
       try {
         const resignation = await this.resignationRepo.getResignedEmployee();
@@ -25,7 +29,7 @@ class EmployeeUsecase {
         for (let i = 0; i <= resignation.length - 1; i++) {
           new_data.push(resignation[i].employee_name);
         }
-        const data = await this.employeeRepo.get(new_data, filters, actor);
+        const data = await this.employeeRepo.get(new_data, filters, actor, options);
         resolve(data);
       } catch (err) {
         reject(err);

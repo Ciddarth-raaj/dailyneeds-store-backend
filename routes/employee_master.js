@@ -2,6 +2,7 @@ const express = require("express");
 const Joi = require("@hapi/joi");
 const P = require("../constants/hr_permissions");
 const { EDITABLE_FIELDS } = require("../repository/employee_master");
+const { DIRECTORY_POPULATION, populationFromQuery } = require("../repository/employee_scope");
 const { getClientIp } = require("../utils/ip");
 const { requireAdmin } = require("../middlewares/admin_only");
 const { EMPLOYMENT_TYPES, GRADES } = require("../utils/employment_classification");
@@ -643,6 +644,9 @@ class EmployeeMasterRoutes {
         const schema = {
           store_ids: Joi.array().items(Joi.number().required()).optional(),
           designation_ids: Joi.array().items(Joi.number().required()).optional(),
+          // The same opt-in as `GET /employee/employees`, so Employee Master's
+          // badges cover the resigned employees its list now returns.
+          include_resigned: Joi.number().valid(0, 1).optional(),
         };
         const isValid = Joi.validate(req.query, schema);
         if (isValid.error !== null) throw isValid.error;
@@ -687,6 +691,11 @@ class EmployeeMasterRoutes {
           await this.statusSummary.list(filters, {
             disclosePfEsiApplicability: discloseSensitive,
             disclosePaymentRoute: discloseSensitive,
+            // Only when asked for: an absent flag must reach the usecase as
+            // absent, so the Onboarding queue's call is exactly today's.
+            ...(populationFromQuery(req.query.include_resigned) === DIRECTORY_POPULATION.INCLUDE_RESIGNED
+              ? { population: DIRECTORY_POPULATION.INCLUDE_RESIGNED }
+              : {}),
           })
         );
       } catch (err) {

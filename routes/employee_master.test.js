@@ -184,9 +184,11 @@ const bankUsecase = {
 };
 
 const summaryCalls = [];
+const summaryOptions = [];
 const statusSummaryUsecase = {
-  list: async (filters) => {
+  list: async (filters, options) => {
     summaryCalls.push(filters);
+    summaryOptions.push(options);
     return [
       { employee_id: 501, aadhaar_status: "VERIFIED", bank_status: "VERIFIED", bank_payroll_ready: true },
       { employee_id: 502, aadhaar_status: "PENDING", bank_status: "DUPLICATE_ACCOUNT", bank_payroll_ready: false },
@@ -1331,6 +1333,24 @@ describe("GET /hr/employees/status-summary", () => {
     // the parsed list is what reaches the usecase. `designation_ids` is not an
     // authorization input and is passed through as the query string gave it.
     assert.deepEqual(summaryCalls[0], { store_ids: [2, 3], designation_ids: ["15"] });
+  });
+
+  it("INCLUDE_RESIGNED reaches the usecase only when include_resigned=1 is asked for", async () => {
+    const token = tokenFor({ designationId: LIST_DESIGNATION });
+    for (const [qs, expected] of [["", undefined], ["?include_resigned=0", undefined], ["?include_resigned=1", "INCLUDE_RESIGNED"]]) {
+      summaryOptions.length = 0;
+      const r = await call("GET", `/hr/employees/status-summary${qs}`, token);
+      assert.equal(r.status, 200, qs);
+      assert.equal(summaryOptions[0].population, expected, qs || "no flag");
+      // The Onboarding queue's call carries no population key at all.
+      if (expected === undefined) assert.ok(!("population" in summaryOptions[0]), qs);
+    }
+  });
+
+  it("refuses an include_resigned that is not 0 or 1", async () => {
+    const r = await call("GET", "/hr/employees/status-summary?include_resigned=true",
+      tokenFor({ designationId: LIST_DESIGNATION }));
+    assert.equal(r.body.code, 422);
   });
 
   it("refuses a filter that is not a list of numbers", async () => {

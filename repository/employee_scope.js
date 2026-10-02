@@ -150,6 +150,71 @@ function lookupFilters(filters = {}) {
   return { conditions, params };
 }
 
+/**
+ * WHICH POPULATION A DIRECTORY REQUEST WANTS. An explicit option, so the one
+ * place that decides whether the resigned-name rule applies is the builder
+ * below - not a conditional scattered through a route or a query.
+ *
+ *   DEFAULT            the directory as it has always been: the resigned-name
+ *                      exclusion applies. Every caller that does not ask for
+ *                      anything else gets this, unchanged - the shared
+ *                      employee pickers, the HR Onboarding queue, and any
+ *                      future caller that forgets to choose.
+ *   INCLUDE_RESIGNED   the resigned-name exclusion is lifted for employees who
+ *                      are NOT active, and only for them. Asked for by HR ->
+ *                      Employee Master only, whose "Resigned" view filters
+ *                      `Number(status) !== 1` in the browser over this list.
+ *                      With the exclusion in place, everybody whose
+ *                      resignation was RECORDED (legacy screen or HR Resign,
+ *                      both write a `resignation` row) was missing from that
+ *                      view, while leavers with no row were shown.
+ *
+ *                      ACTIVE ROWS KEEP TODAY'S RULE, deliberately. Lifting
+ *                      it for them too would change the ACTIVE view - an
+ *                      active namesake of a leaver, or somebody rejoined
+ *                      after a recorded resignation, would start appearing -
+ *                      which is a separate decision, not part of restoring
+ *                      the Resigned view. `NOT (status <=> 1)` treats a NULL
+ *                      status as not active, exactly as the browser's
+ *                      `Number(status) !== 1` does.
+ *
+ * NEITHER OPTION TOUCHES AUTHORIZATION. The branch restriction (`accessScope`)
+ * and the caller's outlet / designation filters are applied identically in
+ * both: this chooses a population, never a scope.
+ */
+const DIRECTORY_POPULATION = Object.freeze({
+  DEFAULT: "DEFAULT",
+  INCLUDE_RESIGNED: "INCLUDE_RESIGNED",
+});
+
+/**
+ * The population a request's `include_resigned` asks for. Only the explicit
+ * value 1 opts in; anything else - absent, 0, "" - is DEFAULT. The routes
+ * validate the value before this is reached.
+ */
+function populationFromQuery(value) {
+  return Number(value) === 1 && String(value).trim() !== ""
+    ? DIRECTORY_POPULATION.INCLUDE_RESIGNED
+    : DIRECTORY_POPULATION.DEFAULT;
+}
+
+/**
+ * The INCLUDE_RESIGNED population: the same exclusion as `directoryPopulation`,
+ * except that it never removes a row that is not active.
+ */
+function resignedInclusivePopulation(resignedNames) {
+  const names = Array.isArray(resignedNames) ? resignedNames : [];
+  if (names.length === 0) {
+    return { conditions: [], params: [] };
+  }
+  return {
+    conditions: [
+      "(new_employee.employee_name NOT IN (?) OR NOT (new_employee.status <=> 1))",
+    ],
+    params: [names],
+  };
+}
+
 /** Join parts in order into one clause, keeping parameter order with it. */
 function compose(parts) {
   const conditions = [];
@@ -175,11 +240,18 @@ function compose(parts) {
  *
  * With nothing to exclude and no filters there are no conditions at all, and
  * the clause is empty: `WHERE` on its own is a syntax error, not a wide query.
+ *
+ * `options.population` is a DIRECTORY_POPULATION. Only INCLUDE_RESIGNED changes
+ * anything (see `resignedInclusivePopulation`); every other value, and its
+ * absence, is DEFAULT and renders exactly the clause it always has.
  */
-function buildEmployeeScope(resignedNames = [], filters = {}, actor = null) {
+function buildEmployeeScope(resignedNames = [], filters = {}, actor = null, options = {}) {
+  const population = (options && options.population) || DIRECTORY_POPULATION.DEFAULT;
   const { conditions, params } = compose([
     accessScope(actor),
-    directoryPopulation(resignedNames),
+    population === DIRECTORY_POPULATION.INCLUDE_RESIGNED
+      ? resignedInclusivePopulation(resignedNames)
+      : directoryPopulation(resignedNames),
     lookupFilters(filters),
   ]);
 
@@ -206,8 +278,11 @@ function buildReportAccessScope(filters = {}, actor = null) {
 }
 
 module.exports = {
+  DIRECTORY_POPULATION,
+  populationFromQuery,
   accessScope,
   directoryPopulation,
+  resignedInclusivePopulation,
   lookupFilters,
   compose,
   buildEmployeeScope,
