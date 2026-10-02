@@ -90,10 +90,12 @@ the A0 resolver alongside the engine.
 
 ## A3 — regularization and OT approval
 
-* **Only a missing punch may be regularized.** A request is refused for a date
-  whose effective punch count is already even, and there is no field anywhere on
-  this path for the id of an existing punch — an existing Biomax punch cannot be
-  edited because this feature cannot name one.
+* **Only a missing punch — or a missed break — may be regularized.** A
+  missing-punch request is refused for a date whose effective punch count is
+  already even; a missed break (lunch OUT + IN, see *Missed break* below) is the
+  one correction of a complete day. There is no field anywhere on this path for
+  the id of an existing punch — an existing Biomax punch cannot be edited
+  because this feature cannot name one.
 * The approved manual punch is a row in `attendance_regularized_punch`, marked
   `REGULARIZED` so a future display can say *Missed Punch – Regularized*. It
   becomes part of the effective punch list only when its request is `APPROVED`;
@@ -113,6 +115,46 @@ the A0 resolver alongside the engine.
   decider, timestamp, remarks and whether it was an administrator override.
 * Writes are transactional and guarded on the state they expect, so two
   approvers clicking at the same instant cannot both succeed.
+
+### Missed break: a regularized OUT + IN pair
+
+An employee who punched `10:09 → 22:04` but took lunch without punching has a
+complete day, so there is no missing punch to add. The SAME regularization
+request may instead carry the break's two punches:
+
+```
+POST /attendance/regularization
+{ requested_for_employee_id, attendance_date: "2026-09-12",
+  break_out_time: "2026-09-12 14:00:00", break_in_time: "2026-09-12 15:00:00",
+  reason }
+```
+
+* **Manager/HR only.** The HR raise requires
+  `raise_attendance_regularization_for_others` for a break (for yourself too);
+  `/attendance/me/regularization` has no field for one.
+* **Same storage.** Both punches are rows of `attendance_regularized_punch` on
+  the one request (migration `20261110120000-regularization-break-pair` lets a
+  request hold more than one punch, never the same instant twice). Raw punches
+  are untouched.
+* **Same approval chain, same settlement.** Both punches become effective
+  together when the request is APPROVED and SETTLED, or neither does. Revoking
+  the request withdraws both.
+* **Same engine.** The day becomes the ordinary four-punch day
+  `10:09 IN → 14:00 OUT → 15:00 IN → 22:04 OUT`; the punched gap is charged as
+  for any even-punch day. There is no second calculation path.
+* **Valid sequence only** (`utils/attendance_break_regularization.js`): the pair
+  must sit strictly inside one worked span (an IN and the OUT after it), OUT
+  before IN — refusing breaks outside the first/last punch, overlapping an
+  existing break, or touching an existing punch. Re-checked at final approval,
+  because punches can change while the request waits.
+* **Payroll lock**: refused at raise and, as for every request, at approval.
+* **OT**: an open request on the date (a pending OT claim included) refuses the
+  raise, as before. An APPROVED OT claim is re-capped by the engine at the
+  corrected day's excess OT on every calculation; the raise and the final
+  approval return `ot_revalidation` (approved OT before → after) so the effect
+  is visible. An administrator may still revoke the OT approval.
+* An earlier approved regularization on the date (e.g. a completed missing
+  punch) stays effective while a break request on the same date is decided.
 
 ### Designation → role mapping, and the conservative default
 

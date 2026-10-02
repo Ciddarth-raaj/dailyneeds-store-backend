@@ -392,3 +392,87 @@ describe("POST /attendance/me/ot-request", () => {
     assert.equal(calls.created.length, 0);
   });
 });
+
+/**
+ * A MISSED BREAK (lunch OUT + IN) through the existing HR raise. Manager/HR
+ * only: it takes `raise_attendance_regularization_for_others`, and the self
+ * route has no field for it at all.
+ */
+describe("POST /attendance/regularization - a missed break", () => {
+  const breakBody = {
+    requested_for_employee_id: EMPLOYEE_B,
+    attendance_date: "2026-09-12",
+    break_out_time: "2026-09-12 14:00:00",
+    break_in_time: "2026-09-12 15:00:00",
+    reason: "Took lunch 2-3pm, forgot to punch",
+  };
+  const wireHr = (held) => {
+    const raised = [];
+    const usecase = {
+      raiseRequest: async (args) => {
+        raised.push(args);
+        return { attendance_approval_request_id: 900, regularization_kind: "MISSED_BREAK" };
+      },
+    };
+    const permissions = {
+      require: () => (req, res, next) => next(),
+      has: async (req, key) => held.includes(key),
+    };
+    return { routes: buildRoutes(usecase, permissions, null), raised };
+  };
+  const hrReq = (body) => ({ decoded: { id: 2, employee_id: 7, user_type: 1 }, query: {}, body });
+
+  it("passes the OUT and IN to the same raiseRequest when the caller holds the for-others key", async () => {
+    const { routes, raised } = wireHr([P.RAISE_ATTENDANCE_REGULARIZATION_FOR_OTHERS]);
+    const res = await invoke(routes, "POST", "/attendance/regularization", hrReq(breakBody));
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.equal(raised.length, 1);
+    assert.equal(raised[0].requested_for_employee_id, EMPLOYEE_B);
+    assert.equal(raised[0].break_out_time, "2026-09-12 14:00:00");
+    assert.equal(raised[0].break_in_time, "2026-09-12 15:00:00");
+    assert.equal(raised[0].punch_time, null);
+  });
+
+  it("is refused without raise_attendance_regularization_for_others, even for yourself", async () => {
+    const { routes, raised } = wireHr([]);
+    const res = await invoke(routes, "POST", "/attendance/regularization", hrReq({ ...breakBody, requested_for_employee_id: 7 }));
+    assert.equal(res.statusCode, 403);
+    assert.equal(raised.length, 0);
+  });
+
+  it("refuses half a pair, and a missing punch and a break in one body", async () => {
+    const { routes, raised } = wireHr([P.RAISE_ATTENDANCE_REGULARIZATION_FOR_OTHERS]);
+    const { break_in_time, ...half } = breakBody;
+    assert.equal((await invoke(routes, "POST", "/attendance/regularization", hrReq(half))).statusCode, 400);
+    assert.equal(
+      (await invoke(routes, "POST", "/attendance/regularization", hrReq({ ...breakBody, punch_time: "2026-09-12 22:05:00" })))
+        .statusCode,
+      400
+    );
+    assert.equal(raised.length, 0);
+  });
+
+  it("the plain missing-punch raise is unchanged", async () => {
+    const { routes, raised } = wireHr([]);
+    const res = await invoke(routes, "POST", "/attendance/regularization", hrReq({
+      attendance_date: "2026-09-14",
+      punch_time: "2026-09-14 22:05:00",
+      reason: "Forgot to punch out at closing",
+    }));
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.equal(raised[0].punch_time, "2026-09-14 22:05:00");
+    assert.equal(raised[0].break_out_time, null);
+  });
+
+  it("the self route has no field for a break", async () => {
+    const { routes, calls } = wire();
+    const res = await invoke(routes, "POST", "/attendance/me/regularization", selfReq({
+      attendance_date: "2026-09-12",
+      break_out_time: "2026-09-12 14:00:00",
+      break_in_time: "2026-09-12 15:00:00",
+      reason: "Took lunch 2-3pm, forgot to punch",
+    }));
+    assert.equal(res.statusCode, 400);
+    assert.equal(calls.created.length, 0);
+  });
+});

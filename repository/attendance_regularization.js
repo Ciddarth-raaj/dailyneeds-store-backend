@@ -209,11 +209,15 @@ class AttendanceRegularizationRepository {
               DATE_FORMAT(punch_time, '%Y-%m-%d %H:%i:%s') AS punch_time,
               punch_source
          FROM attendance_regularized_punch
-        WHERE attendance_approval_request_id = ?`,
+        WHERE attendance_approval_request_id = ?
+        ORDER BY punch_time ASC, attendance_regularized_punch_id ASC`,
       [requestId]
     );
 
-    return { ...request, steps, regularized_punch: punches[0] || null };
+    // A missed-break regularization carries a PAIR (OUT + IN); every other
+    // regularization carries one. `regularized_punch` stays the first, for
+    // the readers that only ever knew one.
+    return { ...request, steps, regularized_punch: punches[0] || null, regularized_punches: punches || [] };
   }
 
   /** Is there already an open request for this employee and date? */
@@ -429,7 +433,7 @@ class AttendanceRegularizationRepository {
    * has already been raised (Replace Approver does that explicitly, and only
    * for undecided steps).
    */
-  async createRequest({ request, chain, punch, auto_approve = null, permissions = null }) {
+  async createRequest({ request, chain, punch, punches = null, auto_approve = null, permissions = null }) {
     const connection = await getConnectionAsync(this.db);
     try {
       await beginTransactionAsync(connection);
@@ -609,19 +613,25 @@ class AttendanceRegularizationRepository {
         );
       }
 
-      if (punch) {
+      // One punch (a missing punch) or a pair (a missed break: OUT + IN),
+      // written together so a request can never hold half a pair.
+      const requestPunches = Array.isArray(punches) && punches.length > 0 ? punches : punch ? [punch] : [];
+      if (requestPunches.length > 0) {
         await queryAsync(
           connection,
           `INSERT INTO attendance_regularized_punch
              (attendance_approval_request_id, employee_id, attendance_date,
               punch_time, punch_source, created_by)
-           VALUES (?, ?, ?, ?, 'REGULARIZED', ?)`,
+           VALUES ?`,
           [
-            requestId,
-            request.requested_for_employee_id,
-            request.attendance_date,
-            punch.punch_time,
-            request.requested_by_employee_id,
+            requestPunches.map((p) => [
+              requestId,
+              request.requested_for_employee_id,
+              request.attendance_date,
+              p.punch_time,
+              "REGULARIZED",
+              request.requested_by_employee_id,
+            ]),
           ]
         );
       }
@@ -1569,7 +1579,9 @@ class AttendanceRegularizationRepository {
               s.approver_employee_id AS current_stage_approver_employee_id,
               DATE_FORMAT(r.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
               DATE_FORMAT(r.decided_at, '%Y-%m-%d %H:%i:%s') AS decided_at,
-              DATE_FORMAT(p.punch_time, '%Y-%m-%d %H:%i:%s') AS proposed_punch_time,
+              DATE_FORMAT(p.first_punch_time, '%Y-%m-%d %H:%i:%s') AS proposed_punch_time,
+              IF(p.punch_count > 1, DATE_FORMAT(p.last_punch_time, '%Y-%m-%d %H:%i:%s'), NULL)
+                AS proposed_second_punch_time,
               c.shift_snapshot, c.effective_punches, c.nrm_minutes, c.worked_minutes,
               c.shortage_minutes, c.candidate_ot_minutes AS stored_candidate_ot_minutes,
               c.status AS stored_status, ws.shift_name,
@@ -1587,7 +1599,16 @@ class AttendanceRegularizationRepository {
           AND s.stage_no = r.current_stage_no
          LEFT JOIN new_employee ne ON ne.employee_id = r.requested_for_employee_id
          LEFT JOIN outlets o ON o.outlet_id = r.outlet_id
-         LEFT JOIN attendance_regularized_punch p
+         -- One row per request: a missed-break regularization holds two
+         -- punches, and joining the table directly would list it twice.
+         LEFT JOIN (
+               SELECT attendance_approval_request_id,
+                      MIN(punch_time) AS first_punch_time,
+                      MAX(punch_time) AS last_punch_time,
+                      COUNT(*)        AS punch_count
+                 FROM attendance_regularized_punch
+                GROUP BY attendance_approval_request_id
+              ) p
            ON p.attendance_approval_request_id = r.attendance_approval_request_id
          LEFT JOIN attendance_day_calculation c
            ON c.employee_id = r.requested_for_employee_id

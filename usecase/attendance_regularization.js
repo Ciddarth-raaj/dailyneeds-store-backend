@@ -21,6 +21,7 @@ const { payrollLockedActionError } = require("../utils/attendance_payroll_lock")
 const shiftChangeEligibility = require("../utils/shift_change_eligibility");
 const shiftChangeBlock = require("../utils/shift_change_block");
 const { partitionClosedDays, endOfIstDay } = require("../utils/attendance_persist_guard");
+const { validateBreakPair } = require("../utils/attendance_break_regularization");
 
 /** MySQL's TINYINT(1), a JS boolean and a string "1" all mean the same thing. */
 const tinyBool = (value) => value === true || Number(value) === 1;
@@ -263,6 +264,38 @@ module.exports = (
   };
 
   /**
+   * What a regularization corrects: one missing punch, or a missed break (a
+   * pair of punches, OUT + IN, on a complete day).
+   */
+  const REGULARIZATION_KIND = Object.freeze({
+    MISSING_PUNCH: "MISSING_PUNCH",
+    MISSED_BREAK: "MISSED_BREAK",
+  });
+
+  /**
+   * THE OT CLAIM AGAINST A CORRECTED DAY. Nothing is decided here: the
+   * existing rules already revalidate - an approved OT request is capped by
+   * the engine at the day's excess OT on every calculation, a pending one is
+   * clamped to the day's eligible OT at its final approval, and an
+   * administrator may revoke an approval. This reports, before and after, the
+   * figures those rules produce, so the approver sees the effect.
+   */
+  const otRevalidation = (before, after) => {
+    const n = (v) => Math.max(0, Math.trunc(Number(v) || 0));
+    if (!before || !after) return null;
+    const payableBefore = n(before.approved_ot_minutes);
+    const payableAfter = n(after.approved_ot_minutes);
+    return {
+      ot_claim_state: after.ot_claim_state || before.ot_claim_state || null,
+      candidate_ot_minutes_before: n(before.candidate_ot_minutes),
+      candidate_ot_minutes_after: n(after.candidate_ot_minutes),
+      approved_ot_minutes_before: payableBefore,
+      approved_ot_minutes_after: payableAfter,
+      approved_ot_reduced: payableAfter < payableBefore,
+    };
+  };
+
+  /**
    * Raise a MISSING PUNCH regularization for ONE date.
    *
    * Attendance correction only. The request carries the proposed punch, the
@@ -277,9 +310,21 @@ module.exports = (
     attendance_date,
     reason,
     punch_time = null,
+    // A MISSED BREAK instead of a missing punch: the break's OUT and IN,
+    // regularized together on a complete (even) day. See
+    // `utils/attendance_break_regularization.js`.
+    break_out_time = null,
+    break_in_time = null,
     today = null,
     now = null,
   }) => {
+    const isBreak = !!(break_out_time || break_in_time);
+    if (isBreak && punch_time) {
+      throw validationError("A request regularizes either a missing punch or a missed break, not both");
+    }
+    if (isBreak && !(break_out_time && break_in_time)) {
+      throw validationError("A missed break needs both break_out_time and break_in_time");
+    }
     const date = toDateOnly(attendance_date);
     if (date === null) throw validationError("attendance_date must be a date as YYYY-MM-DD");
     if (typeof reason !== "string" || reason.trim().length < 5) {
@@ -353,7 +398,31 @@ module.exports = (
     }
     const requiresApproval = !policy || tinyBool(policy.regularization_requires_approval);
 
-    if (day.punch_count % 2 !== 1) {
+    // The punch time(s) this request adds: one for a missing punch, the OUT
+    // and IN of a missed break.
+    let punchTimes;
+    if (isBreak) {
+      // A missed break is regularized on a COMPLETE day, so the payroll lock
+      // is checked here as well as at the decision: nothing about a settled
+      // month may be put in front of an approver.
+      if (typeof attendanceCalculationUsecase.findPayrollLockedPeriods === "function") {
+        const locked = await attendanceCalculationUsecase.findPayrollLockedPeriods([
+          { employee_id: forEmployeeId, attendance_date: date },
+        ]);
+        if (locked.length > 0) throw payrollLockedActionError(locked, "A break regularization for this date");
+      }
+      const verdict = validateBreakPair({
+        effective_punches: day.effective_punches || [],
+        out_time: break_out_time,
+        in_time: break_in_time,
+      });
+      if (!verdict.ok) throw validationError(verdict.reason);
+      punchTimes = [String(break_out_time).trim(), String(break_in_time).trim()];
+    } else {
+      punchTimes = null;
+    }
+
+    if (!isBreak && day.punch_count % 2 !== 1) {
       // Nothing is missing, so a manual punch here would be an edit to a
       // complete day rather than a regularization. Refused, not ignored. (OT
       // on a complete day is an OT request, not this.)
@@ -361,46 +430,54 @@ module.exports = (
         `${date} has ${day.punch_count} punches - a punch cannot be added to a complete day`
       );
     }
-    if (!punch_time) {
-      throw validationError("punch_time is required when a punch is missing");
+    if (!isBreak) {
+      if (!punch_time) {
+        throw validationError("punch_time is required when a punch is missing");
+      }
+      if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})?$/.test(String(punch_time).trim())) {
+        throw validationError("punch_time must be YYYY-MM-DD HH:MM:SS");
+      }
+      punchTimes = [String(punch_time).trim()];
     }
-    if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})?$/.test(String(punch_time).trim())) {
-      throw validationError("punch_time must be YYYY-MM-DD HH:MM:SS");
-    }
-    const punchTime = String(punch_time).trim();
+    const punchTime = punchTimes[0];
+    const punchLabel = punchTimes.join(" and ");
 
-    // The proposed punch has to belong to the date being regularized, under
+    // Every proposed punch has to belong to the date being regularized, under
     // the cutoff that applied on that date. A 00:30 OUT after a 10:00-22:00
     // shift does; a 09:00 punch on the following morning does not, and
     // approving it would silently credit a different day.
-    const resolvedDate = await attendanceCalculationUsecase.attendanceDateForPunchTime({
-      employee_id: forEmployeeId,
-      punch_time: punchTime,
-      near_date: date,
-    });
-    if (resolvedDate !== date) {
-      throw validationError(
-        `A punch at ${punchTime} belongs to attendance date ${
-          resolvedDate === null ? "none" : resolvedDate
-        } under this employee's shift and cutoff for ${date}, not to ${date}`
-      );
+    for (const time of punchTimes) {
+      // eslint-disable-next-line no-await-in-loop
+      const resolvedDate = await attendanceCalculationUsecase.attendanceDateForPunchTime({
+        employee_id: forEmployeeId,
+        punch_time: time,
+        near_date: date,
+      });
+      if (resolvedDate !== date) {
+        throw validationError(
+          `A punch at ${time} belongs to attendance date ${
+            resolvedDate === null ? "none" : resolvedDate
+          } under this employee's shift and cutoff for ${date}, not to ${date}`
+        );
+      }
     }
 
-    // Run the SAME engine over raw punches plus the proposed one, to prove the
-    // corrected day is calculable. Nothing is stored, and NOTHING about its
-    // overtime is carried onto this request.
+    // Run the SAME engine over raw punches plus the proposed one(s), to prove
+    // the corrected day is calculable. Nothing is stored, and NOTHING about
+    // its overtime is carried onto this request.
     const proposedDay = await attendanceCalculationUsecase.calculateProposedDay({
       employee_id: forEmployeeId,
       attendance_date: date,
       punch_time: punchTime,
+      punch_times: punchTimes,
     });
     if (!proposedDay || proposedDay.punch_count % 2 === 1) {
       throw validationError(
-        `A punch at ${punchTime} still leaves ${date} with an odd number of punches, so it cannot be what was missing`
+        `A punch at ${punchLabel} still leaves ${date} with an odd number of punches, so it cannot be what was missing`
       );
     }
     if (proposedDay.status === CALC_STATUS.REVIEW_REQUIRED) {
-      throw validationError(`A punch at ${punchTime} does not produce a calculable day for ${date}`);
+      throw validationError(`A punch at ${punchLabel} does not produce a calculable day for ${date}`);
     }
 
     const identity = await resolveIdentity(forEmployeeId);
@@ -441,6 +518,7 @@ module.exports = (
           reason: reason.trim(),
           approved_ot_minutes: 0,
           regularized_punch: { punch_id: null, io_time: punchTime },
+          regularized_punches: punchTimes.map((io_time) => ({ punch_id: null, io_time })),
         },
       });
       auto_approve = {
@@ -464,6 +542,7 @@ module.exports = (
       },
       chain,
       punch: { punch_time: punchTime },
+      punches: punchTimes.map((time) => ({ punch_time: time })),
       auto_approve,
     });
 
@@ -479,6 +558,13 @@ module.exports = (
       // be shown the corrected day rather than the broken one. Its candidate
       // OT is informational: it becomes claimable only after approval.
       proposed_day: proposedDay,
+      regularization_kind: isBreak ? REGULARIZATION_KIND.MISSED_BREAK : REGULARIZATION_KIND.MISSING_PUNCH,
+      punch_times: punchTimes,
+      // A missed break changes worked minutes, the break charged and the
+      // overtime the day earns. An OT claim already APPROVED on the date is
+      // re-capped by the engine at the new entitlement (it can never pay
+      // more than the corrected day earns); this says what that will be.
+      ot_revalidation: isBreak ? otRevalidation(day, proposedDay) : null,
       requester_class: identity.requester_class,
       requester_class_is_default: identity.requester_class_is_default,
     };
@@ -1698,6 +1784,37 @@ module.exports = (
       approvedOt = 0;
     }
 
+    // A MISSED BREAK (two punches on one request) is re-checked at its final
+    // approval against the day AS IT STANDS NOW: punches can arrive, be
+    // voided or be regularized while the request waits, and a pair that was
+    // a valid break when raised may now overlap one. The day before this
+    // decision is also what the OT revalidation below compares against.
+    const requestPunches = Array.isArray(request.regularized_punches)
+      ? request.regularized_punches
+      : request.regularized_punch
+      ? [request.regularized_punch]
+      : [];
+    const isBreakRequest = !carriesOt && !isShiftRequest && !isPermissionRequest && requestPunches.length > 1;
+    let dayBefore = null;
+    if (isBreakRequest && next.status === REQUEST_STATUS.APPROVED) {
+      [dayBefore] = await attendanceCalculationUsecase.calculateRange({
+        employee_id: request.requested_for_employee_id,
+        from_date: request.attendance_date,
+        to_date: request.attendance_date,
+      });
+      const verdict = validateBreakPair({
+        effective_punches: (dayBefore && dayBefore.effective_punches) || [],
+        out_time: requestPunches[0].punch_time,
+        in_time: requestPunches[requestPunches.length - 1].punch_time,
+      });
+      if (!verdict.ok) {
+        throw validationError(
+          `The attendance for ${request.attendance_date} has changed since this break was requested: ${verdict.reason}. ` +
+            "Reject it and raise a new one if a break is still missing."
+        );
+      }
+    }
+
     // Whatever the outcome, the date's stored calculation is about to be stale:
     // an approval makes the punch effective (attendance only - any OT the
     // corrected day earns becomes AVAILABLE to request), a rejection ends the pending
@@ -1736,13 +1853,23 @@ module.exports = (
         candidate_ot_minutes: request.candidate_ot_minutes,
         reason: request.reason,
         approved_ot_minutes: approvedOt || 0,
+        // Every punch of the request - one for a missing punch, the OUT and
+        // IN of a missed break - becomes effective together, or none does.
         regularized_punch:
-          next.status === REQUEST_STATUS.APPROVED && request.regularized_punch
+          next.status === REQUEST_STATUS.APPROVED && requestPunches.length > 0
             ? {
-                punch_id: request.regularized_punch.attendance_regularized_punch_id,
-                io_time: request.regularized_punch.punch_time,
+                punch_id: requestPunches[0].attendance_regularized_punch_id,
+                io_time: requestPunches[0].punch_time,
               }
             : null,
+        regularized_punches:
+          next.status === REQUEST_STATUS.APPROVED
+            ? requestPunches.map((p) => ({
+                punch_id: p.attendance_regularized_punch_id,
+                io_time: p.punch_time,
+                attendance_approval_request_id: Number(request_id),
+              }))
+            : [],
       },
     });
 
@@ -1856,6 +1983,10 @@ module.exports = (
         !isOtRequest && correctedDay && correctedDay.ot_claim_state === "AVAILABLE"
           ? Number(correctedDay.candidate_ot_minutes) || 0
           : 0,
+      regularization_kind: isBreakRequest ? REGULARIZATION_KIND.MISSED_BREAK : null,
+      // A missed break approved on a date whose OT was already claimed: the
+      // engine has re-capped the approved OT at what the corrected day earns.
+      ot_revalidation: isBreakRequest && dayBefore ? otRevalidation(dayBefore, correctedDay) : null,
     };
   };
 
@@ -2289,6 +2420,14 @@ module.exports = (
         not_actionable_reason: verdict.allowed ? null : verdict.reason,
         // The proposed missing punch (regularization only).
         proposed_punch_time: row.proposed_punch_time || null,
+        // A missed break proposes a PAIR: the OUT above and this IN.
+        proposed_second_punch_time: row.proposed_second_punch_time || null,
+        regularization_kind:
+          row.request_type === REQUEST_TYPE.REGULARIZATION
+            ? row.proposed_second_punch_time
+              ? REGULARIZATION_KIND.MISSED_BREAK
+              : REGULARIZATION_KIND.MISSING_PUNCH
+            : null,
         // SHIFT_CHANGE: the two shifts, as the Shift tab's table names them.
         // Null on every other type rather than absent, so one row shape
         // serves all three tabs.

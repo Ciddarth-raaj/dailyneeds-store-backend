@@ -306,20 +306,40 @@ class AttendanceRegularizationRoutes {
             requested_for_employee_id: Joi.number().integer().positive().optional(),
             attendance_date: Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).required(),
             reason: Joi.string().min(5).max(500).required(),
-            // Attendance correction only: the missing punch is required, and
-            // there is no OT on this request (the finalized OT flow raises OT
-            // separately, by the employee, after the corrected day exists).
-            punch_time: Joi.string()
-              .regex(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})?$/)
-              .required(),
+            // Attendance correction only: the missing punch - or, for a
+            // missed break, its OUT and IN - and no OT on this request (the
+            // finalized OT flow raises OT separately, by the employee, after
+            // the corrected day exists).
+            punch_time: Joi.string().regex(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})?$/),
+            break_out_time: Joi.string().regex(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})?$/),
+            break_in_time: Joi.string().regex(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})?$/),
           };
-          const isValid = Joi.validate(req.body, schema);
+          const isValid = Joi.validate(
+            req.body,
+            Joi.object(schema).xor("punch_time", "break_out_time").and("break_out_time", "break_in_time")
+          );
           if (isValid.error !== null) throw isValid.error;
 
           const actorId = Number(req.decoded.employee_id);
           const forId = req.body.requested_for_employee_id
             ? Number(req.body.requested_for_employee_id)
             : actorId;
+
+          // A MISSED BREAK is a manager/HR correction, never self-service: it
+          // adds evidence of a break to a complete day, which moves worked
+          // minutes and overtime. It takes the same key as filing for
+          // somebody else - and the chain still refuses anybody deciding
+          // their own request.
+          if (
+            req.body.break_out_time &&
+            !(await this.permissions.has(req, P.RAISE_ATTENDANCE_REGULARIZATION_FOR_OTHERS))
+          ) {
+            res.status(403).json({
+              code: 403,
+              msg: "Regularizing a missed break needs raise_attendance_regularization_for_others",
+            });
+            return;
+          }
 
           if (
             forId !== actorId &&
@@ -337,7 +357,9 @@ class AttendanceRegularizationRoutes {
             requested_for_employee_id: forId,
             attendance_date: req.body.attendance_date,
             reason: req.body.reason,
-            punch_time: req.body.punch_time,
+            punch_time: req.body.punch_time || null,
+            break_out_time: req.body.break_out_time || null,
+            break_in_time: req.body.break_in_time || null,
           });
           res.json({ code: 200, ...result });
         } catch (err) {

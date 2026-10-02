@@ -1099,10 +1099,25 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
           shiftRequest = assumed;
         } else {
           approval = assumed;
-          regularizedPunches =
-            assume.status === "APPROVED" && assume.regularized_punch
-              ? [assume.regularized_punch]
-              : [];
+          // The punches of THIS request come from the assumption (one for a
+          // missing punch, a pair for a missed break), and only when it is
+          // being approved. Any OTHER request's approved punches on the date
+          // stay: a missed break can be regularized on a day an earlier
+          // missing punch was already completed, and rejecting the second
+          // must not withdraw the first.
+          const assumedId =
+            assume.attendance_approval_request_id === undefined || assume.attendance_approval_request_id === null
+              ? null
+              : Number(assume.attendance_approval_request_id);
+          const others = regularizedPunches.filter(
+            (p) => assumedId === null || Number(p.attendance_approval_request_id) !== assumedId
+          );
+          const own = Array.isArray(assume.regularized_punches)
+            ? assume.regularized_punches
+            : assume.regularized_punch
+            ? [assume.regularized_punch]
+            : [];
+          regularizedPunches = assume.status === "APPROVED" ? [...others, ...own] : others;
         }
       }
 
@@ -1277,9 +1292,11 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    * implementation did - always gives zero, because an odd punch count exits
    * the engine before OT is calculated at all.
    */
-  const calculateProposedDay = async ({ employee_id, attendance_date, punch_time }) => {
+  const calculateProposedDay = async ({ employee_id, attendance_date, punch_time, punch_times = null }) => {
     const date = toDateOnly(attendance_date);
     if (date === null) throw validationError("attendance_date must be a date as YYYY-MM-DD");
+    // A missed break proposes a PAIR (OUT + IN); a missing punch proposes one.
+    const proposed = Array.isArray(punch_times) && punch_times.length > 0 ? punch_times : [punch_time];
 
     const [day] = await calculateRange({
       employee_id,
@@ -1289,7 +1306,8 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
         attendance_date: date,
         status: "APPROVED",
         approved_ot_minutes: 0,
-        regularized_punch: { punch_id: null, io_time: punch_time },
+        regularized_punch: { punch_id: null, io_time: proposed[0] },
+        regularized_punches: proposed.map((io_time) => ({ punch_id: null, io_time })),
       },
     });
     return day;
