@@ -86,7 +86,14 @@ const SCHEMA = [
      candidate_ot_minutes INT NULL, status VARCHAR(32) NULL,
      base_nrm_minutes INT NULL, regular_minutes INT NULL)`,
 ];
+const LOCKED_PERIOD_MIGRATION = path.join(
+  __dirname,
+  "..",
+  "migrations/mysql/migrations/sqls/20261111120000-attendance-locked-period-correction-up.sql"
+);
 const TABLES = [
+  "attendance_locked_period_correction_event",
+  "attendance_locked_period_authorisation",
   "attendance_approval_revocation",
   "attendance_day_calculation",
   "attendance_regularized_punch",
@@ -95,6 +102,7 @@ const TABLES = [
   "work_shift",
   "new_employee",
   "outlets",
+  "all_permissions",
 ];
 
 /** One request and its chain. `steps` are [role, outlet, approver, level, decision]. */
@@ -140,6 +148,13 @@ describe("approval queue outlet scope, as SQL (employee 106 shape)", { skip: !UR
     for (const ddl of SCHEMA) await query(pool, ddl);
     await query(pool, fs.readFileSync(REVOCATION_MIGRATION, "utf8"));
     await query(pool, fs.readFileSync(OUTCOME_MIGRATION, "utf8"));
+    // The locked-period correction tables (20261111120000): the approval list
+    // joins the authorisation. Run statement by statement, without relying on
+    // multipleStatements.
+    await query(pool, "CREATE TABLE IF NOT EXISTS all_permissions (permission_key VARCHAR(100))");
+    for (const st of fs.readFileSync(LOCKED_PERIOD_MIGRATION, "utf8").replace(/--[^\n]*/g, "").split(";").map((x) => x.trim()).filter(Boolean)) {
+      await query(pool, st);
+    }
     await query(pool, "INSERT INTO outlets VALUES ?", [[[WAREHOUSE, "Warehouse"], [STORE_A, "Store A"], [HEAD_OFFICE, "Head Office"], [STORE_B, "Store B"]]]);
     await query(pool, "INSERT INTO new_employee VALUES ?", [[
       [ROAMER, "Roaming Operations", WAREHOUSE, 20],

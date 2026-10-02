@@ -124,7 +124,14 @@ const SCHEMA = [
      UNIQUE KEY uq_day (employee_id, attendance_date)
    ) ENGINE=InnoDB`,
 ];
+const LOCKED_PERIOD_MIGRATION = path.join(
+  __dirname,
+  "..",
+  "migrations/mysql/migrations/sqls/20261111120000-attendance-locked-period-correction-up.sql"
+);
 const TABLES = [
+  "attendance_locked_period_correction_event",
+  "attendance_locked_period_authorisation",
   "attendance_shift_change_block",
   "attendance_approval_bulk_action_item",
   "attendance_approval_revocation",
@@ -139,6 +146,7 @@ const TABLES = [
   "work_shift",
   "outlets",
   "new_employee",
+  "all_permissions",
 ];
 
 const OUTCOME_MIGRATION = path.join(__dirname, "..", "migrations/mysql/migrations/sqls/20261106120000-attendance-approval-revocation-outcome-up.sql");
@@ -159,6 +167,13 @@ describe("Shift revoke, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL is not s
     for (const t of TABLES) await q(pool, `DROP TABLE IF EXISTS ${t}`);
     for (const ddl of SCHEMA) await q(pool, ddl);
     for (const m of MIGRATIONS) await q(pool, fs.readFileSync(m, "utf8"));
+    // The locked-period correction tables (20261111120000): the approval list
+    // joins the authorisation. Run statement by statement, without relying on
+    // multipleStatements.
+    await q(pool, "CREATE TABLE IF NOT EXISTS all_permissions (permission_key VARCHAR(100))");
+    for (const st of fs.readFileSync(LOCKED_PERIOD_MIGRATION, "utf8").replace(/--[^\n]*/g, "").split(";").map((x) => x.trim()).filter(Boolean)) {
+      await q(pool, st);
+    }
     // The HR block table, as production has it (only the columns the reopen reads).
     await q(pool, "CREATE TABLE attendance_shift_change_block (attendance_shift_change_block_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, employee_id INT NOT NULL, attendance_date DATE NOT NULL, reason VARCHAR(500) NOT NULL, removed_at TIMESTAMP(3) NULL) ENGINE=InnoDB");
     repo = buildRepo(pool);

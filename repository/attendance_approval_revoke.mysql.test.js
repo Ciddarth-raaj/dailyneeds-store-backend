@@ -106,7 +106,14 @@ const SCHEMA = [
      UNIQUE KEY uq_day (employee_id, attendance_date)
    ) ENGINE=InnoDB`,
 ];
+const LOCKED_PERIOD_MIGRATION = path.join(
+  __dirname,
+  "..",
+  "migrations/mysql/migrations/sqls/20261111120000-attendance-locked-period-correction-up.sql"
+);
 const TABLES = [
+  "attendance_locked_period_correction_event",
+  "attendance_locked_period_authorisation",
   "attendance_approval_revocation",
   "attendance_day_calculation",
   "payrun_employee_calculation",
@@ -116,6 +123,7 @@ const TABLES = [
   "work_shift",
   "outlets",
   "new_employee",
+  "all_permissions",
 ];
 
 const OUTCOME_MIGRATION = path.join(__dirname, "..", "migrations/mysql/migrations/sqls/20261106120000-attendance-approval-revocation-outcome-up.sql");
@@ -135,6 +143,13 @@ describe("admin revoke = VOID, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL i
     for (const ddl of SCHEMA) await q(pool, ddl);
     await q(pool, fs.readFileSync(MIGRATION, "utf8"));
     await q(pool, fs.readFileSync(OUTCOME_MIGRATION, "utf8"));
+    // The locked-period correction tables (20261111120000): the approval list
+    // joins the authorisation. Run statement by statement, without relying on
+    // multipleStatements.
+    await q(pool, "CREATE TABLE IF NOT EXISTS all_permissions (permission_key VARCHAR(100))");
+    for (const st of fs.readFileSync(LOCKED_PERIOD_MIGRATION, "utf8").replace(/--[^\n]*/g, "").split(";").map((x) => x.trim()).filter(Boolean)) {
+      await q(pool, st);
+    }
     repo = buildRepo(pool);
     calcRepo = buildCalcRepo(pool);
   });
