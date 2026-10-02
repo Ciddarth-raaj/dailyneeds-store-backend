@@ -2,6 +2,9 @@
 -- An active employee is missing from Employee Master / HR Onboarding /
 -- employee pickers. First case: 1530 - Sathiya Priya.
 --
+-- PREFER employee-directory-visibility.js (SELECT-only, session READ ONLY, uses the
+-- deployed code for the "before" answer). This file sets one session variable.
+--
 -- READ-ONLY. Nothing here writes. Run it on production as it is and paste the
 -- result sets back. Only @emp is employee-specific.
 --
