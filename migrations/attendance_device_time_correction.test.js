@@ -37,6 +37,7 @@ describe(NAME, () => {
       "20261109120000-lr-followup.js",
       "20261110120000-payrun-calculation-reset.js",
       "20261111120000-payrun-lifecycle.js",
+      "20261112120000-payrun-payslip.js",
     ];
     assert.deepEqual(others.filter((f) => f > `${NAME}.js`).sort(), LATER);
   });

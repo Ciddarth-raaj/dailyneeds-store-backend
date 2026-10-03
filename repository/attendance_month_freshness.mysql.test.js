@@ -122,7 +122,8 @@ const SCHEMA = [
      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, payrun_employee_id INT, payrun_calculation_id BIGINT,
      period_year INT, period_month INT, employee_id INT, action VARCHAR(16), previous_status VARCHAR(32),
      new_status VARCHAR(32), reason VARCHAR(500), remark VARCHAR(500), mode VARCHAR(16),
-     calculation_hash VARCHAR(64), net_pay DECIMAL(12,2), acted_by_employee_id INT, acted_by_user_id INT
+     calculation_hash VARCHAR(64), net_pay DECIMAL(12,2), acted_by_employee_id INT, acted_by_user_id INT,
+     payslip_id BIGINT UNSIGNED NULL
    ) ENGINE=InnoDB`,
   `CREATE TABLE attendance_recalculation_run (
      attendance_recalculation_run_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
