@@ -1339,6 +1339,19 @@ class PayrunCalculationRepository {
    * published time is the calculation row's own, so the two always agree.
    */
   async _insertPayslip(conn, { row, year, month, payslip, actorEmployee, actorUser }) {
+    // A plain (non-locking) read: every Publish of this employee month holds
+    // the calculation row FOR UPDATE first, so they are already serialized
+    // and this sees the last committed version. An INSERT ... SELECT MAX would
+    // take gap locks on payrun_payslip and could deadlock two publishers of
+    // DIFFERENT employees. The unique (payrun_employee_id, payslip_version)
+    // key is the backstop: a duplicate rolls this employee back, never two
+    // payslips with one version.
+    const [last] = await this._read(
+      "NEXT-PAYSLIP-VERSION",
+      "SELECT COALESCE(MAX(payslip_version), 0) AS v FROM payrun_payslip WHERE payrun_employee_id = ?",
+      [row.payrun_employee_id],
+      conn
+    );
     const res = await this._read(
       "INSERT-PAYSLIP",
       `INSERT INTO payrun_payslip
@@ -1347,15 +1360,12 @@ class PayrunCalculationRepository {
                calculation_version, calculation_revision, calculation_hash, source_hash, inputs_hash,
                snapshot_schema_version, template_version, snapshot_json, snapshot_sha256,
                status, published_by, published_by_user, published_at)
-       SELECT ?, ?, ?, ?, ?, ?,
-              (SELECT COALESCE(MAX(v.payslip_version), 0) + 1 FROM payrun_payslip v
-                WHERE v.payrun_employee_id = ?),
-              ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, c.published_at
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, c.published_at
          FROM payrun_employee_calculation c
         WHERE c.payrun_calculation_id = ?`,
       [
         payslip.payslip_ref, row.payrun_employee_id, row.payrun_calculation_id, row.employee_id,
-        year, month, row.payrun_employee_id,
+        year, month, Number(last.v) + 1,
         row.calculation_version, row.calculation_revision, row.calculation_hash,
         row.source_hash, row.inputs_hash,
         payslip.schema_version, payslip.template_version, payslip.text, payslip.sha256,
