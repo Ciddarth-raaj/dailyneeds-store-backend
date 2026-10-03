@@ -94,7 +94,7 @@ describe("Reset Calculation over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYS
 
     for (const id of ALL) {
       const store = id === ELSEWHERE ? OTHER_STORE : STORE;
-      await q(pool, "INSERT INTO new_employee VALUES (?, ?, ?, 1, 1, 0, '1990-06-15', '2018-04-01', NULL, '100200300400', '3100000000', 1)", [
+      await q(pool, "INSERT INTO new_employee VALUES (?, ?, ?, 1, 1, 0, '1990-06-15', '2018-04-01', NULL, '100200300400', '3100000000', 1, NULL, NULL, NULL, NULL)", [
         id, `Employee ${id}`, store,
       ]);
       // Salary Master: the approved record in force, plus history and a pending revision.

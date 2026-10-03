@@ -16,11 +16,14 @@ const MIGRATIONS = [
   "20261026120000-payrun-attendance-close-up.sql",
   "20261110120000-payrun-calculation-reset-up.sql",
   "20261111120000-payrun-lifecycle-up.sql",
+  "20261112120000-payrun-payslip-up.sql",
 ];
 const RESET_DOWN = "20261110120000-payrun-calculation-reset-down.sql";
 
 /** Every table this suite creates, children first so they drop cleanly. */
 const TABLES = [
+  "payrun_payslip_notification",
+  "payrun_payslip",
   "payrun_employee_lifecycle_audit",
   "attendance_recalculation_run",
   "payrun_employee_calculation_reset_audit",
@@ -41,6 +44,7 @@ const TABLES = [
   "attendance_permission",
   "biomax_punch",
   "employee_bank_verification",
+  "department",
   "new_employee",
 ];
 
@@ -76,7 +80,12 @@ const STAND_INS = [
      employee_id INT PRIMARY KEY, employee_name VARCHAR(100), store_id INT,
      pf_applicable TINYINT(1), esi_applicable TINYINT(1), previous_eps_member TINYINT(1),
      dob DATE, date_of_joining VARCHAR(40), resignation_date DATE NULL,
-     uan VARCHAR(45), esi_number VARCHAR(45), attendance_required TINYINT(1) DEFAULT 1
+     uan VARCHAR(45), esi_number VARCHAR(45), attendance_required TINYINT(1) DEFAULT 1,
+     bank_name VARCHAR(100) NULL, account_no VARCHAR(45) NULL, pan_no VARCHAR(20) NULL,
+     department_id INT NULL
+   ) ENGINE=InnoDB`,
+  `CREATE TABLE department (
+     department_id INT PRIMARY KEY, department_name VARCHAR(100), status TINYINT(1) DEFAULT 1
    ) ENGINE=InnoDB`,
   `CREATE TABLE all_permissions (permission_key VARCHAR(100) PRIMARY KEY) ENGINE=InnoDB`,
   `CREATE TABLE employee_salary (

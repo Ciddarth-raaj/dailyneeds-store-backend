@@ -592,6 +592,114 @@ class PayrunCalculationRoutes {
       }
     );
 
+    /**
+     * PUBLISH ALL APPROVED PAYSLIPS. `publish_payrun`. The body is the month
+     * and nothing else: WHO is approved is decided on the server, inside the
+     * caller's branch scope, at the moment of the request.
+     */
+    this.router.post(
+      "/payrun/calculation/publish-all",
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.PUBLISH_PAYRUN),
+      async (req, res) => {
+        try {
+          const isValid = Joi.validate(req.body, { ...this._month() });
+          if (isValid.error !== null) throw isValid.error;
+
+          const scoped = await this._scope(req, res, null);
+          if (!scoped) return;
+
+          const actor = await this.permissions.actorFor(req);
+          res.json({
+            code: 200,
+            ...(await this.usecase.publishAllApproved({
+              year: Number(req.body.year),
+              month: Number(req.body.month),
+              store_ids: scoped.store_ids,
+              actor,
+            })),
+          });
+        } catch (err) {
+          this._fail(res, err);
+        }
+      }
+    );
+
+    /**
+     * RETRY NOTIFICATION - send the "payslip available" message again.
+     * `publish_payrun`. Explicit ids; never republishes, never writes payroll.
+     * The Telegram destination is resolved on the server - there is no chat
+     * id field, and Joi refuses one.
+     */
+    this.router.post(
+      "/payrun/calculation/retry-notification",
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.PUBLISH_PAYRUN),
+      async (req, res) => {
+        try {
+          const isValid = Joi.validate(req.body, {
+            ...this._month(),
+            employee_ids: Joi.array()
+              .items(Joi.number().integer().positive())
+              .min(1)
+              .max(MAX_BULK_EMPLOYEES)
+              .required(),
+          });
+          if (isValid.error !== null) throw isValid.error;
+
+          const scoped = await this._scope(req, res, null);
+          if (!scoped) return;
+
+          const actor = await this.permissions.actorFor(req);
+          res.json({
+            code: 200,
+            ...(await this.usecase.retryNotification({
+              year: Number(req.body.year),
+              month: Number(req.body.month),
+              employee_ids: req.body.employee_ids,
+              store_ids: scoped.store_ids,
+              actor,
+            })),
+          });
+        } catch (err) {
+          this._fail(res, err);
+        }
+      }
+    );
+
+    /**
+     * VIEW PAYSLIP (admin). The same permissions as the month itself and the
+     * caller's branch scope. Returns the frozen snapshot - which the B3
+     * sensitive filter on this router strips of UAN / PF / ESI numbers for a
+     * caller without `view_employee_sensitive` - plus versions and attempts.
+     */
+    this.router.get(
+      "/payrun/calculation/payslip",
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.VIEW_PAYROLL, P.VIEW_SALARY),
+      async (req, res) => {
+        try {
+          const isValid = Joi.validate(req.query, {
+            ...this._month(),
+            employee_id: Joi.number().integer().positive().required(),
+          });
+          if (isValid.error !== null) throw isValid.error;
+
+          const scoped = await this._scope(req, res, null);
+          if (!scoped) return;
+
+          res.json({
+            code: 200,
+            ...(await this.usecase.getPayslip({
+              year: Number(req.query.year),
+              month: Number(req.query.month),
+              employee_id: Number(req.query.employee_id),
+              store_ids: scoped.store_ids,
+            })),
+          });
+        } catch (err) {
+          this._fail(res, err);
+        }
+      }
+    );
+
     /** Who calculated, recalculated and approved one employee's month, and when. */
     this.router.get(
       "/payrun/calculation/history",

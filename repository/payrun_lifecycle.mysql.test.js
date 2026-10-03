@@ -23,6 +23,8 @@ const buildPayrunRepo = require("./payrun");
 const buildAdjustmentRepo = require("./payrun_adjustment");
 const buildAttendanceRepo = require("./attendance_calculation");
 const buildCalculation = require("../usecase/payrun_calculation");
+const buildPayslipRepo = require("./payrun_payslip");
+const buildNotifier = require("../usecase/payslip_notification");
 const { dayRowsSql, dayRowsFingerprint } = require("../utils/attendance_month_freshness");
 const { SQLS, MIGRATIONS, TABLES, STAND_INS, SOURCES } = require("../test_support/payrun_mysql_fixture");
 
@@ -67,7 +69,7 @@ describe("payroll lifecycle over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYS
     for (const file of MIGRATIONS) await q(pool, fs.readFileSync(path.join(SQLS, file), "utf8"));
 
     for (const id of IDS) {
-      await q(pool, "INSERT INTO new_employee VALUES (?, ?, 1, 1, 1, 0, '1990-06-15', '2018-04-01', NULL, '100200300400', '3100000000', 1)", [id, `E${id}`]);
+      await q(pool, "INSERT INTO new_employee VALUES (?, ?, 1, 1, 1, 0, '1990-06-15', '2018-04-01', NULL, '100200300400', '3100000000', 1, 'State Bank', '123456789012', 'ABCDE1234F', 3)", [id, `E${id}`]);
       // 26,013.37 a month: a gross whose Net Pay is NOT a whole rupee.
       const s = await q(pool, "INSERT INTO employee_salary (employee_id, monthly_gross, daily_salary, basic, conveyance, hra, special_allowance, effective_from, status) VALUES (?, 26013.37, 1000.51, 13006.69, 2500, 5000, 5506.68, '2026-04-01', 'APPROVED')", [id]);
       const pe = await q(pool, `INSERT INTO payrun_employee
@@ -92,8 +94,19 @@ describe("payroll lifecycle over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYS
       [id, YEAR, MONTH, dayRowsFingerprint(stored)]);
     }
 
+    await q(pool, "INSERT INTO department VALUES (3, 'Grocery', 1)");
     usecase = buildCalculation(buildCalculationRepo(pool), buildPayrunRepo(pool), buildAdjustmentRepo(pool));
     usecase.today = () => "2026-10-03";
+    const payslipRepo = buildPayslipRepo(pool);
+    usecase.setPayslipServices({
+      payslipRepo,
+      notifier: buildNotifier({
+        payslipRepo,
+        identityRepo: { getActiveIdentityByEmployee: async () => null },
+        telegram: { sendMessage: async () => ({ code: 200, message_id: 1 }) },
+      }),
+      company: () => ({ name: "Daily Needs" }),
+    });
     const calculated = await usecase.calculate({ year: YEAR, month: MONTH, all_eligible: true, actor: ACTOR });
     assert.equal(calculated.calculated_count, IDS.length, JSON.stringify(calculated.results));
     const approved = await usecase.approve({ year: YEAR, month: MONTH, employee_ids: [1, 2, 3], actor: ACTOR });
@@ -214,8 +227,8 @@ describe("payroll lifecycle over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYS
   });
 
   it("the migration re-runs cleanly, and its down removes only what it added", async () => {
-    const up = MIGRATIONS[MIGRATIONS.length - 1];
-    assert.equal(up, "20261111120000-payrun-lifecycle-up.sql");
+    const up = MIGRATIONS.find((m) => m === "20261111120000-payrun-lifecycle-up.sql");
+    assert.ok(up, "the lifecycle migration is part of the fixture");
     await q(pool, fs.readFileSync(path.join(SQLS, up), "utf8"));
     const keys = await q(pool, "SELECT permission_key FROM all_permissions WHERE permission_key IN ('unlock_payrun','publish_payrun') ORDER BY 1");
     assert.deepEqual(keys.map((k) => k.permission_key), ["publish_payrun", "unlock_payrun"]);

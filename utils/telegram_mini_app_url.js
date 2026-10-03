@@ -61,6 +61,7 @@ const SECTION = Object.freeze({
   ATTENDANCE: "attendance",
   CORRECTIONS: "corrections",
   HELP: "help",
+  PAYSLIPS: "payslips",
 });
 
 const VALID_SECTIONS = Object.freeze(Object.values(SECTION));

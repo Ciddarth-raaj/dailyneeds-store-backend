@@ -264,6 +264,13 @@ const unProtectedRoutes = {
   "/telegram/attendance/date": { methods: { get: true } },
   "/telegram/attendance/regularization": { methods: { post: true } },
   "/telegram/attendance/ot-request": { methods: { post: true } },
+  // MY PAYSLIPS, the same Mini App and the same gate: `routes/telegram_payslip.js`
+  // requires the scoped `x-telegram-session` token on every one of them (or,
+  // for `/pdf` only, a two-minute pdf-link token minted under that session).
+  "/telegram/payslips": { methods: { get: true } },
+  "/telegram/payslips/detail": { methods: { get: true } },
+  "/telegram/payslips/pdf": { methods: { get: true } },
+  "/telegram/payslips/pdf-link": { methods: { post: true } },
 
   "/purchase-tally": { methods: { post: true } },
   "/purchase": { methods: { post: true } },

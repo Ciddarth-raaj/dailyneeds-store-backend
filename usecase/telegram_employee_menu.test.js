@@ -51,7 +51,7 @@ const build = ({ miniAppUrl = BASE, rows = null, throwOnLookup = false } = {}) =
 };
 
 describe("a linked employee typing /start", () => {
-  it("gets the menu title and three Web App buttons", async () => {
+  it("gets the menu title and four Web App buttons", async () => {
     const { usecase, sent } = build();
     const out = await usecase.handle(privateStart("/start"));
 
@@ -61,10 +61,11 @@ describe("a linked employee typing /start", () => {
     assert.equal(sent[0].msg, MENU.TITLE);
 
     const rows = sent[0].options.replyMarkup.inlineKeyboard;
-    assert.deepEqual(rows.map((r) => r[0].text), ["My Attendance", "Corrections", "Help"]);
+    assert.deepEqual(rows.map((r) => r[0].text), ["My Attendance", "Corrections", "My Payslips", "Help"]);
     assert.deepEqual(rows.map((r) => r[0].web_app.url), [
       `${BASE}?section=attendance`,
       `${BASE}?section=corrections`,
+      `${BASE}?section=payslips`,
       `${BASE}?section=help`,
     ]);
   });

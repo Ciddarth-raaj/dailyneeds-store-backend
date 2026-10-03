@@ -109,8 +109,11 @@ class Telegram {
 
     return new Promise(async (resolve, reject) => {
       try {
-        await requireClient().sendMessage(chat_id, msg, params);
-        resolve({ code: 200 });
+        const sent = await requireClient().sendMessage(chat_id, msg, params);
+        // The client camel-cases Telegram's answer; `message_id` is the only
+        // part of it any caller keeps (to edit or reference the message).
+        const messageId = sent ? sent.messageId || sent.message_id || null : null;
+        resolve({ code: 200, message_id: messageId });
       } catch (err) {
         // `msg` is deliberately NOT logged: it may carry a reset code or an
         // alert body. Only the chat and the error are recorded.

@@ -68,6 +68,7 @@ const MENU = Object.freeze({
   BUTTONS: Object.freeze([
     { text: "My Attendance", section: SECTION.ATTENDANCE },
     { text: "Corrections", section: SECTION.CORRECTIONS },
+    { text: "My Payslips", section: SECTION.PAYSLIPS },
     { text: "Help", section: SECTION.HELP },
   ]),
 });

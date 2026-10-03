@@ -103,7 +103,7 @@ describe("the public-route registration", () => {
    * user; if one were removed from the router but left in the map, it would
    * be a path advertised as open. Both are caught here.
    */
-  it("names exactly the five Mini App paths, and each with one method", () => {
+  it("names exactly the Mini App paths (attendance + My Payslips), and each with one method", () => {
     const paths = Object.keys(unProtectedRoutes).filter((p) => p.startsWith("/telegram/"));
     assert.deepEqual(paths.sort(), [
       "/telegram/attendance/date",
@@ -112,7 +112,15 @@ describe("the public-route registration", () => {
       "/telegram/attendance/ot-request",
       "/telegram/attendance/regularization",
       "/telegram/attendance/session",
+      "/telegram/payslips",
+      "/telegram/payslips/detail",
+      "/telegram/payslips/pdf",
+      "/telegram/payslips/pdf-link",
     ]);
+    assert.deepEqual(unProtectedRoutes["/telegram/payslips"].methods, { get: true });
+    assert.deepEqual(unProtectedRoutes["/telegram/payslips/detail"].methods, { get: true });
+    assert.deepEqual(unProtectedRoutes["/telegram/payslips/pdf"].methods, { get: true });
+    assert.deepEqual(unProtectedRoutes["/telegram/payslips/pdf-link"].methods, { post: true });
     assert.deepEqual(unProtectedRoutes["/telegram/attendance/ot-request"].methods, { post: true });
     assert.deepEqual(unProtectedRoutes["/telegram/attendance/month"].methods, { get: true });
     assert.deepEqual(unProtectedRoutes["/telegram/attendance/session"].methods, { post: true });

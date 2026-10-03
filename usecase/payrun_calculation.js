@@ -20,6 +20,14 @@ const engine = require("../utils/salary_engine");
 const { evaluatePayrollReadiness } = require("../utils/payroll_readiness");
 const { latestClosableDate } = require("../utils/attendance_persist_guard");
 const { istToday } = require("../utils/istDate");
+const crypto = require("crypto");
+const payslipSnapshot = require("../utils/payslip_snapshot");
+const {
+  SNAPSHOT_SCHEMA_VERSION,
+  TEMPLATE_VERSION,
+  NOTIFICATION_RESULT,
+  NOTIFICATION_TRIGGER,
+} = require("../constants/payslip");
 const {
   validationError,
   normalizeMonth,
@@ -112,7 +120,23 @@ class PayrunCalculationUsecase {
     this.payrunRepo = payrunRepo;
     this.adjustmentRepo = adjustmentRepo;
     this.attendanceProcessor = null;
+    this.payslipRepo = null;
+    this.notifier = null;
+    this.company = () => ({});
     this.today = () => istToday();
+  }
+
+  /**
+   * PAYSLIPS. `payslipRepo` (repository/payrun_payslip.js) reads and records
+   * payslips and notification attempts; `notifier`
+   * (usecase/payslip_notification.js) sends the figure-free "available"
+   * message after a Publish commits; `company` supplies the name and address
+   * frozen into each snapshot.
+   */
+  setPayslipServices({ payslipRepo = null, notifier = null, company = null } = {}) {
+    this.payslipRepo = payslipRepo;
+    this.notifier = notifier;
+    if (typeof company === "function") this.company = company;
   }
 
   /**
@@ -557,6 +581,7 @@ class PayrunCalculationUsecase {
     const context = await this._assemble({ year, month, store_ids });
     const presented = context.population.map((employee) => this._present(context, employee));
     const rows = presented.map((p) => p.row);
+    await this._attachPayslipStatus(context.period, rows);
 
     const wantedStatus =
       status && Object.values(CALC_STATUS).includes(String(status).toUpperCase())
@@ -581,6 +606,37 @@ class PayrunCalculationUsecase {
       summary: calc.summarize(rows),
       rows: filtered,
     };
+  }
+
+  /**
+   * THE PAYSLIP COLUMNS: whether a payslip is published, the latest Telegram
+   * notification and whether the employee has opened it. A row with no
+   * ACTIVE payslip carries nulls; a published payslip with no attempt row is
+   * NOT_ATTEMPTED. Never a figure, never a chat id.
+   */
+  async _attachPayslipStatus(period, rows) {
+    rows.forEach((row) => {
+      row.payslip = null;
+    });
+    if (!this.payslipRepo || rows.length === 0) return;
+    const ids = rows.map((r) => r.employee_id);
+    const slips = await this.payslipRepo.listMonthStatus({ year: period.year, month: period.month, employee_ids: ids });
+    const byEmployee = new Map(slips.map((p) => [Number(p.employee_id), p]));
+    rows.forEach((row) => {
+      const p = byEmployee.get(Number(row.employee_id));
+      if (!p || row.status !== CALC_STATUS.PUBLISHED) return;
+      row.payslip = {
+        payslip_version: Number(p.payslip_version),
+        published_at: p.payslip_published_at,
+        notification_status: p.notification_result || NOTIFICATION_RESULT.NOT_ATTEMPTED,
+        notification_attempts: Number(p.notification_attempts || 0),
+        notification_failure_code: p.notification_failure_code || null,
+        notification_attempted_at: p.notification_attempted_at || null,
+        viewed: Boolean(p.first_viewed_at),
+        first_viewed_at: p.first_viewed_at || null,
+        last_viewed_at: p.last_viewed_at || null,
+      };
+    });
   }
 
   /**
@@ -1725,10 +1781,20 @@ class PayrunCalculationUsecase {
       context.population.map((e) => [Number(e.employee_id), this._present(context, e)])
     );
     const monthLabel = `${period.year}-${String(period.month).padStart(2, "0")}`;
+    if (action === LIFECYCLE_ACTION.PUBLISH && !this.payslipRepo) {
+      throw new Error("Payslip publishing is not configured on this server");
+    }
+    // What the payslip needs beyond the payrun snapshot - read once, masked
+    // inside the snapshot builder, and never returned to the caller.
+    const extrasOf = new Map();
+    if (action === LIFECYCLE_ACTION.PUBLISH && presentedById.size > 0) {
+      const extras = await this.payslipRepo.listEmployeeExtras([...presentedById.keys()]);
+      extras.forEach((x) => extrasOf.set(Number(x.employee_id), x));
+    }
     const DONE = {
       [LIFECYCLE_ACTION.UNLOCK]: [ROW_RESULT.UNLOCKED, "Unlocked. The figures are kept until the employee is recalculated."],
-      [LIFECYCLE_ACTION.PUBLISH]: [ROW_RESULT.PUBLISHED, "Published."],
-      [LIFECYCLE_ACTION.UNPUBLISH]: [ROW_RESULT.UNPUBLISHED, "Unpublished. The month is Approved & Locked again."],
+      [LIFECYCLE_ACTION.PUBLISH]: [ROW_RESULT.PUBLISHED, "Payslip published."],
+      [LIFECYCLE_ACTION.UNPUBLISH]: [ROW_RESULT.UNPUBLISHED, "Payslip unpublished. It is no longer visible to the employee; the month is Approved & Locked again."],
     };
     const SKIP = {
       PUBLISHED: [ROW_RESULT.SKIPPED, "Skipped — already published. Unpublish it before unlocking."],
@@ -1738,6 +1804,7 @@ class PayrunCalculationUsecase {
       NOT_CALCULATED: [ROW_RESULT.SKIPPED, "Skipped — not calculated."],
       MONTH_LOCKED: [ROW_RESULT.LOCKED, `Payroll month ${monthLabel} is locked.`],
       SOURCE_MOVED: [ROW_RESULT.BLOCKED, "Not published — the attendance changed after this month was calculated. Unlock, recalculate and approve again."],
+      CALCULATION_CHANGED: [ROW_RESULT.BLOCKED, "Not published — the calculation changed while publishing. Reload and try again."],
       ATTENDANCE_STALE: [ROW_RESULT.BLOCKED, "Not published — the attendance summary is not current with its days. Unlock, process attendance, recalculate and approve again."],
     };
 
@@ -1801,6 +1868,43 @@ class PayrunCalculationUsecase {
         }
       }
 
+      /*
+       * THE PAYSLIP SNAPSHOT, FROM THE STORED APPROVED ROW. Nothing is
+       * recalculated: `internals.stored` is the calculation exactly as it was
+       * written. The repository re-checks the calculation id and hash under
+       * the row lock, so this can only be published against those figures.
+       */
+      let payslip = null;
+      if (action === LIFECYCLE_ACTION.PUBLISH) {
+        try {
+          const snapshot = payslipSnapshot.buildPayslipSnapshot({
+            period,
+            calculation: presented.internals.stored,
+            employee: presented.internals.employee,
+            extras: extrasOf.get(employeeId) || {},
+            company: this.company() || {},
+          });
+          const frozen = payslipSnapshot.freezeSnapshot(snapshot);
+          payslip = {
+            payslip_ref: crypto.randomBytes(16).toString("hex"),
+            payrun_calculation_id: presented.internals.stored.payrun_calculation_id,
+            calculation_hash: presented.internals.stored.calculation_hash,
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            template_version: TEMPLATE_VERSION,
+            text: frozen.text,
+            sha256: frozen.sha256,
+          };
+        } catch (err) {
+          if (err && err.name === "PayslipSnapshotError") {
+            push([ROW_RESULT.BLOCKED, `Not published — ${err.message}. Unlock, recalculate and approve again.`], {
+              error_code: err.code,
+            });
+            continue;
+          }
+          throw err;
+        }
+      }
+
       /* eslint-disable no-await-in-loop */
       try {
         const applied = await this.repo.lifecycle({
@@ -1812,13 +1916,51 @@ class PayrunCalculationUsecase {
           remark: note || null,
           mode: modeCode,
           actor,
+          payslip,
         });
-        if (applied.outcome === action) push(DONE[action], { previous_status: applied.previous_status, new_status: applied.new_status });
+        if (applied.outcome === action) {
+          push(DONE[action], {
+            previous_status: applied.previous_status,
+            new_status: applied.new_status,
+            payslip_id: applied.payslip_id || null,
+          });
+        }
         else push(SKIP[applied.outcome] || [ROW_RESULT.BLOCKED, `Not changed (${applied.outcome}).`]);
       } catch (err) {
         push([ROW_RESULT.FAILED, "This employee could not be changed. Nothing was changed for them."]);
       }
       /* eslint-enable no-await-in-loop */
+    }
+
+    /*
+     * THE NOTIFICATIONS, AFTER EVERY PUBLISH HAS COMMITTED. Publication is
+     * already final; a notification that fails or has nowhere to go is
+     * recorded against the payslip and never undoes it.
+     */
+    const notification = { sent: 0, failed: 0, no_telegram_link: 0 };
+    if (action === LIFECYCLE_ACTION.PUBLISH) {
+      const published = results.filter((r) => r.result === ROW_RESULT.PUBLISHED && r.payslip_id);
+      if (published.length > 0) {
+        const outcomes = this.notifier
+          ? await this.notifier.notifyMany(
+              published.map((r) => ({
+                payslip_id: r.payslip_id,
+                employee_id: r.employee_id,
+                period_year: period.year,
+                period_month: period.month,
+              })),
+              { trigger: NOTIFICATION_TRIGGER.PUBLISH, actor }
+            )
+          : [];
+        const byPayslip = new Map(outcomes.map((o) => [Number(o.payslip_id), o]));
+        published.forEach((r) => {
+          const o = byPayslip.get(Number(r.payslip_id));
+          r.notification_status = o ? o.result : NOTIFICATION_RESULT.NOT_ATTEMPTED;
+          if (r.notification_status === NOTIFICATION_RESULT.SENT) notification.sent += 1;
+          else if (r.notification_status === NOTIFICATION_RESULT.NO_TELEGRAM_LINK) notification.no_telegram_link += 1;
+          else notification.failed += 1;
+        });
+      }
     }
 
     const counted = (code) => results.filter((r) => r.result === code).length;
@@ -1827,6 +1969,7 @@ class PayrunCalculationUsecase {
       period_month: period.month,
       action,
       mode: modeCode,
+      notification,
       done_count: counted(DONE[action][0]),
       unlocked_count: counted(ROW_RESULT.UNLOCKED),
       published_count: counted(ROW_RESULT.PUBLISHED),
@@ -1837,6 +1980,191 @@ class PayrunCalculationUsecase {
       failed_count: counted(ROW_RESULT.FAILED),
       not_in_scope_count: counted(ROW_RESULT.NOT_IN_SCOPE),
       results,
+    };
+  }
+
+  /**
+   * PUBLISH ALL APPROVED PAYSLIPS. Who is approved and not yet published is
+   * decided here, from the server's own read of the month inside the caller's
+   * branch scope - never from a list a browser sent. Each employee is then
+   * published on their own, exactly as a selection would be.
+   */
+  async publishAllApproved({ year, month, store_ids = null, actor = {} }) {
+    const period = normalizeMonth(year, month);
+    const context = await this._assemble({ year: period.year, month: period.month, store_ids });
+    const ids = context.population
+      .map((e) => this._present(context, e).row)
+      .filter((row) => row.status === CALC_STATUS.APPROVED_LOCKED)
+      .map((row) => Number(row.employee_id));
+    if (ids.length === 0) {
+      return {
+        period_year: period.year,
+        period_month: period.month,
+        action: LIFECYCLE_ACTION.PUBLISH,
+        mode: RESET_MODE.BULK,
+        notification: { sent: 0, failed: 0, no_telegram_link: 0 },
+        done_count: 0,
+        published_count: 0,
+        skipped_count: 0,
+        blocked_count: 0,
+        locked_count: 0,
+        failed_count: 0,
+        not_in_scope_count: 0,
+        results: [],
+      };
+    }
+    return this.lifecycle({
+      action: LIFECYCLE_ACTION.PUBLISH,
+      year: period.year,
+      month: period.month,
+      employee_ids: ids,
+      mode: RESET_MODE.BULK,
+      store_ids,
+      actor,
+    });
+  }
+
+  /**
+   * RETRY NOTIFICATION - send the "payslip available" message again for
+   * published payslips whose last attempt did not reach the employee.
+   *
+   * IT NEVER REPUBLISHES. No payroll row, no payslip and no snapshot is
+   * written: each retry is one more append-only attempt row (trigger RETRY).
+   * A payslip already notified successfully is skipped, as is anybody whose
+   * month is not published or who is outside the caller's branch scope.
+   */
+  async retryNotification({ year, month, employee_ids, store_ids = null, actor = {} }) {
+    const period = normalizeMonth(year, month);
+    const ids = normalizeEmployeeIds(employee_ids);
+    if (!this.payslipRepo || !this.notifier) {
+      throw new Error("Payslip notifications are not configured on this server");
+    }
+    const context = await this._assemble({ year: period.year, month: period.month, store_ids, employee_ids: ids });
+    const presentedById = new Map(
+      context.population.map((e) => [Number(e.employee_id), this._present(context, e).row])
+    );
+    const slips = await this.payslipRepo.listMonthStatus({
+      year: period.year,
+      month: period.month,
+      employee_ids: [...presentedById.keys()],
+    });
+    const slipOf = new Map(slips.map((p) => [Number(p.employee_id), p]));
+
+    const results = [];
+    const toSend = [];
+    ids.forEach((employeeId) => {
+      const row = presentedById.get(employeeId);
+      if (!row) {
+        results.push({
+          employee_id: employeeId,
+          result: ROW_RESULT.NOT_IN_SCOPE,
+          message: "This employee is not initialized for the selected month, or is outside your branch scope",
+        });
+        return;
+      }
+      const slip = slipOf.get(employeeId);
+      const base = { employee_id: employeeId, employee_name: row.employee_name };
+      if (row.status !== CALC_STATUS.PUBLISHED || !slip) {
+        results.push({ ...base, result: ROW_RESULT.SKIPPED, message: "Skipped — payslip not published." });
+        return;
+      }
+      if (slip.notification_result === NOTIFICATION_RESULT.SENT) {
+        results.push({ ...base, result: ROW_RESULT.SKIPPED, message: "Skipped — already notified." });
+        return;
+      }
+      const entry = { ...base, payslip_id: slip.payslip_id };
+      results.push(entry);
+      toSend.push(entry);
+    });
+
+    const outcomes = await this.notifier.notifyMany(
+      toSend.map((r) => ({
+        payslip_id: r.payslip_id,
+        employee_id: r.employee_id,
+        period_year: period.year,
+        period_month: period.month,
+      })),
+      { trigger: NOTIFICATION_TRIGGER.RETRY, actor }
+    );
+    const notification = { sent: 0, failed: 0, no_telegram_link: 0 };
+    toSend.forEach((r, i) => {
+      const o = outcomes[i];
+      r.notification_status = o ? o.result : NOTIFICATION_RESULT.FAILED;
+      if (r.notification_status === NOTIFICATION_RESULT.SENT) {
+        notification.sent += 1;
+        r.result = ROW_RESULT.NOTIFIED;
+        r.message = "Notification sent.";
+      } else if (r.notification_status === NOTIFICATION_RESULT.NO_TELEGRAM_LINK) {
+        notification.no_telegram_link += 1;
+        r.result = ROW_RESULT.NOT_NOTIFIED;
+        r.message = "Not sent — no Telegram link. The payslip stays published.";
+      } else {
+        notification.failed += 1;
+        r.result = ROW_RESULT.NOT_NOTIFIED;
+        r.message = "Notification failed. The payslip stays published.";
+      }
+    });
+    const counted = (code) => results.filter((r) => r.result === code).length;
+    return {
+      period_year: period.year,
+      period_month: period.month,
+      notification,
+      notified_count: counted(ROW_RESULT.NOTIFIED),
+      not_notified_count: counted(ROW_RESULT.NOT_NOTIFIED),
+      skipped_count: counted(ROW_RESULT.SKIPPED),
+      not_in_scope_count: counted(ROW_RESULT.NOT_IN_SCOPE),
+      results,
+    };
+  }
+
+  /**
+   * ADMIN VIEW PAYSLIP - the ACTIVE frozen snapshot of one employee month,
+   * its version history and its notification attempts. Branch scope first:
+   * an employee outside the caller's branches is a 404 like a missing one.
+   * The snapshot's integrity hash is verified before it is returned.
+   */
+  async getPayslip({ year, month, employee_id, store_ids = null }) {
+    const period = normalizeMonth(year, month);
+    const ids = normalizeEmployeeIds([employee_id]);
+    const notFound = (msg) => {
+      const err = new Error(msg);
+      err.name = "NotFoundError";
+      return err;
+    };
+    if (!this.payslipRepo) throw notFound("Payslips are not configured on this server");
+    const inScope = await this.repo.listInitialized({
+      year: period.year,
+      month: period.month,
+      store_ids,
+      employee_ids: ids,
+    });
+    if (inScope.length === 0) {
+      throw notFound("This employee has no initialized payrun for the selected month, or is outside your branch scope");
+    }
+    const versions = await this.payslipRepo.listVersions({ year: period.year, month: period.month, employee_id: ids[0] });
+    const active = await this.payslipRepo.getActiveForMonth({ year: period.year, month: period.month, employee_id: ids[0] });
+    if (!active) {
+      return { period_year: period.year, period_month: period.month, employee_id: ids[0], payslip: null, versions };
+    }
+    const snapshot = payslipSnapshot.readFrozenSnapshot(active.snapshot_json, active.snapshot_sha256);
+    const notifications = await this.payslipRepo.listNotifications(active.payslip_id);
+    return {
+      period_year: period.year,
+      period_month: period.month,
+      employee_id: ids[0],
+      payslip: {
+        payslip_version: Number(active.payslip_version),
+        template_version: active.template_version,
+        snapshot_sha256: active.snapshot_sha256,
+        published_by: active.published_by,
+        published_at: active.published_at,
+        first_viewed_at: active.first_viewed_at,
+        last_viewed_at: active.last_viewed_at,
+        view_count: Number(active.view_count || 0),
+        snapshot,
+      },
+      notifications,
+      versions,
     };
   }
 

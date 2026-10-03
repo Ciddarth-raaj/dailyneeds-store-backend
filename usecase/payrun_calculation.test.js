@@ -53,6 +53,12 @@ class World {
     this.audit = [];
     this.resets = [];                // the reset audit
     this.lifecycle = [];             // the lifecycle audit
+    this.payslips = [];              // payrun_payslip rows
+    this.notifications = [];         // payrun_payslip_notification rows
+    this.telegramLinks = new Map();  // employee_id -> active employee_telegram_identity
+    this.telegramFailFor = new Set();// employee ids whose Telegram send throws
+    this.telegramSent = [];          // what the fake bot sent
+    this.extras = new Map();         // employee_id -> { account_no, pan_no, bank_name, department_name }
     this.legacy = false;             // read as the pre-readiness code did
     this.failResetFor = new Set();   // employee ids whose reset transaction throws
     this.period = null;
@@ -321,7 +327,7 @@ FakeCalculationRepo.prototype.resetCalculation = async function resetCalculation
  * expected state repeated in the update, and a lifecycle audit row with it.
  */
 FakeCalculationRepo.prototype.lifecycle = async function lifecycle({
-  action, year, month, employee_id, reason, remark, mode, actor = {},
+  action, year, month, employee_id, reason, remark, mode, actor = {}, payslip = null,
 }) {
   if (this.world.period && this.world.period.status === "LOCKED") return { employee_id, outcome: "MONTH_LOCKED" };
   const row = this.world.calculations.get(employee_id);
@@ -341,6 +347,11 @@ FakeCalculationRepo.prototype.lifecycle = async function lifecycle({
   } else if (action === "PUBLISH") {
     if (published) return { employee_id, outcome: "ALREADY_PUBLISHED" };
     if (!locked) return { employee_id, outcome: "NOT_LOCKED" };
+    if (!payslip || !payslip.text || !payslip.sha256) throw new Error("PUBLISH requires a frozen payslip snapshot");
+    if (Number(payslip.payrun_calculation_id) !== Number(row.payrun_calculation_id)
+      || payslip.calculation_hash !== row.calculation_hash) {
+      return { employee_id, outcome: "CALCULATION_CHANGED" };
+    }
     Object.assign(row, { published_by: actor.employeeId, published_at: "2026-09-06 11:00:00" });
     next = "PUBLISHED";
   } else {
@@ -348,14 +359,106 @@ FakeCalculationRepo.prototype.lifecycle = async function lifecycle({
     Object.assign(row, { published_by: null, published_at: null });
     next = "APPROVED_LOCKED";
   }
+  let payslipId = null;
+  if (action === "PUBLISH") {
+    const versions = this.world.payslips.filter((p) => p.payrun_employee_id === row.payrun_employee_id);
+    payslipId = this.world.payslips.length + 1;
+    this.world.payslips.push({
+      payslip_id: payslipId, payslip_ref: payslip.payslip_ref, payrun_employee_id: row.payrun_employee_id,
+      payrun_calculation_id: row.payrun_calculation_id, employee_id, period_year: year, period_month: month,
+      payslip_version: versions.length + 1, calculation_hash: row.calculation_hash,
+      calculation_revision: row.calculation_revision,
+      template_version: payslip.template_version, snapshot_schema_version: payslip.schema_version,
+      snapshot_json: payslip.text, snapshot_sha256: payslip.sha256, status: "ACTIVE",
+      published_by: actor.employeeId, published_at: row.published_at,
+      first_viewed_at: null, last_viewed_at: null, view_count: 0,
+    });
+  } else if (action === "UNPUBLISH") {
+    const active = this.world.payslips.find((p) => p.payrun_employee_id === row.payrun_employee_id && p.status === "ACTIVE");
+    if (active) {
+      Object.assign(active, { status: "ARCHIVED", archived_by: actor.employeeId, archive_reason: reason });
+      payslipId = active.payslip_id;
+    }
+  }
   this.world.lifecycle.push({
     employee_id, period_year: year, period_month: month, action, previous_status: previous,
     new_status: next, reason, remark, mode, acted_by_employee_id: actor.employeeId,
     calculation_hash: row.calculation_hash, net_pay: row.net_pay,
   });
+  this.world.lifecycle[this.world.lifecycle.length - 1].payslip_id = payslipId;
   if (action === "UNLOCK") this.world.audit.push({ employee_id, action: "UNLOCK", net_pay: row.net_pay });
-  return { employee_id, outcome: action, previous_status: previous, new_status: next };
+  return { employee_id, outcome: action, previous_status: previous, new_status: next, payslip_id: payslipId };
 };
+
+/** `repository/payrun_payslip.js` over the world - the reads and writes Publish uses. */
+class FakePayslipRepo {
+  constructor(world) {
+    this.world = world;
+  }
+  async listEmployeeExtras(ids) {
+    return ids.map((id) => ({ employee_id: id, ...(this.world.extras.get(id) || {}) }));
+  }
+  _latest(payslipId) {
+    const mine = this.world.notifications.filter((n) => n.payslip_id === payslipId);
+    return mine.length ? mine[mine.length - 1] : null;
+  }
+  async listMonthStatus({ year, month, employee_ids = null }) {
+    return this.world.payslips
+      .filter((p) => p.status === "ACTIVE" && p.period_year === year && p.period_month === month)
+      .filter((p) => !employee_ids || employee_ids.includes(p.employee_id))
+      .map((p) => {
+        const n = this._latest(p.payslip_id);
+        return {
+          payslip_id: p.payslip_id, employee_id: p.employee_id, payslip_version: p.payslip_version,
+          payslip_published_at: p.published_at, first_viewed_at: p.first_viewed_at,
+          last_viewed_at: p.last_viewed_at, view_count: p.view_count,
+          notification_result: n ? n.result : null, notification_attempts: n ? n.attempt_no : null,
+          notification_failure_code: n ? n.failure_code : null, notification_attempted_at: n ? "2026-09-06 11:00:01" : null,
+        };
+      });
+  }
+  async getActiveForMonth({ year, month, employee_id }) {
+    return this.world.payslips.find((p) => p.status === "ACTIVE" && p.period_year === year
+      && p.period_month === month && p.employee_id === employee_id) || null;
+  }
+  async listVersions({ year, month, employee_id }) {
+    return this.world.payslips
+      .filter((p) => p.period_year === year && p.period_month === month && p.employee_id === employee_id)
+      .map(({ snapshot_json, ...rest }) => rest)
+      .reverse();
+  }
+  async listNotifications(payslipId) {
+    return this.world.notifications.filter((n) => n.payslip_id === payslipId).slice().reverse();
+  }
+  async insertNotification(record) {
+    const attempt = this.world.notifications.filter((n) => n.payslip_id === record.payslip_id).length + 1;
+    this.world.notifications.push({ ...record, attempt_no: attempt });
+    return this.world.notifications.length;
+  }
+}
+
+/** The real notifier, over a fake identity repository and a fake bot. */
+function payslipNotifier(world) {
+  return require("./payslip_notification")({
+    payslipRepo: new FakePayslipRepo(world),
+    identityRepo: {
+      getActiveIdentityByEmployee: async (id) => world.telegramLinks.get(id) || null,
+    },
+    telegram: {
+      sendMessage: async (chatId, text, options) => {
+        const employee = [...world.telegramLinks.entries()].find(([, l]) => l.private_chat_id === chatId);
+        if (employee && world.telegramFailFor.has(employee[0])) {
+          const err = new Error("Forbidden: bot was blocked by the user");
+          err.response = { status: 403, data: { error_code: 403, description: "Forbidden: bot was blocked by the user" } };
+          throw err;
+        }
+        world.telegramSent.push({ chatId, text, options });
+        return { code: 200, message_id: 9000 + world.telegramSent.length };
+      },
+    },
+    getMiniAppUrl: () => "https://dnds.example/telegram/attendance",
+  });
+}
 
 /** Only the four methods the calculation stage borrows from initialization. */
 class FakePayrunRepo {
@@ -454,6 +557,11 @@ function build() {
   const locks = { listLockedEmployeeIds: (args) => calcRepo.listLockedEmployeeIds(args) };
 
   calculation = buildCalculation(calcRepo, payrunRepo, adjustmentRepo);
+  calculation.setPayslipServices({
+    payslipRepo: new FakePayslipRepo(world),
+    notifier: payslipNotifier(world),
+    company: () => ({ name: "Daily Needs", address: "Test Street" }),
+  });
   payrun = buildPayrun(payrunRepo, locks);
   adjustments = buildAdjustments(adjustmentRepo, payrunRepo, locks);
   return { calcRepo, payrunRepo, adjustmentRepo };
@@ -2594,6 +2702,219 @@ describe("Unlock, Publish and Unpublish", () => {
     assert.equal(
       Math.round(stored.net_pay * 100),
       Math.round((stored.total_earnings - stored.total_employee_deductions + stored.net_pay_rounding) * 100)
+    );
+  });
+});
+
+/* ======================================================================= */
+/*  PAYSLIP PUBLISH - snapshot, notification, retry, unpublish, republish   */
+/* ======================================================================= */
+
+describe("Payslip Publish", () => {
+  const snapshotText = require("../utils/payslip_snapshot");
+  const act = (action, employee_ids, over = {}) =>
+    calculation.lifecycle({
+      ...MONTH, action, employee_ids,
+      reason: action === "PUBLISH" ? null : "Attendance corrected after review",
+      mode: employee_ids.length === 1 ? "INDIVIDUAL" : "BULK",
+      actor: ACTOR, ...over,
+    });
+  const approved = async (...ids) => {
+    ids.forEach((id) => world.add(id));
+    await calculation.calculate({ ...MONTH, employee_ids: ids, actor: ACTOR });
+    const out = await calculation.approve({ ...MONTH, employee_ids: ids, actor: ACTOR });
+    assert.equal(out.approved_count, ids.length);
+  };
+  const link = (id) => world.telegramLinks.set(id, { employee_telegram_id: 600 + id, employee_id: id, private_chat_id: 70000 + id });
+  const activeOf = (id) => world.payslips.filter((p) => p.employee_id === id && p.status === "ACTIVE");
+
+  it("Approved & Locked publishes: ONE snapshot, frozen from the stored calculation, payroll stays locked", async () => {
+    await approved(1);
+    link(1);
+    const saves = [];
+    const realSave = calculation.repo.saveCalculations.bind(calculation.repo);
+    calculation.repo.saveCalculations = async (rows) => { saves.push(rows); return realSave(rows); };
+    const stored = { ...world.calculations.get(1) };
+
+    const out = await act("PUBLISH", [1]);
+    assert.equal(out.published_count, 1);
+    assert.equal(saves.length, 0, "Publish never recalculates or saves a calculation");
+    assert.equal(world.payslips.length, 1, "exactly one snapshot");
+    const slip = world.payslips[0];
+    assert.equal(slip.status, "ACTIVE");
+    assert.equal(slip.payslip_version, 1);
+    assert.equal(slip.template_version, "payslip-v1");
+    assert.equal(slip.snapshot_sha256, snapshotText.sha256(slip.snapshot_json), "hash matches contents");
+    const snap = JSON.parse(slip.snapshot_json);
+    assert.equal(Number(snap.final.net_pay), Number(stored.net_pay), "snapshot Net Pay = stored Net Pay");
+    assert.equal(Number(snap.earnings.total), Number(stored.total_earnings));
+    assert.equal(Number(snap.deductions.total), Number(stored.total_employee_deductions));
+    assert.equal(snap.source.calculation_hash, stored.calculation_hash);
+    assert.equal(snap.source.payrun_calculation_id, stored.payrun_calculation_id);
+    const row = world.calculations.get(1);
+    assert.equal(row.status, "APPROVED_LOCKED", "still locked");
+    assert.equal(row.calculation_hash, stored.calculation_hash);
+    assert.equal((await rowOf(1)).status, CALC_STATUS.PUBLISHED);
+    assert.equal(world.lifecycle.at(-1).payslip_id, slip.payslip_id, "the lifecycle row names the payslip");
+  });
+
+  it("notifies with the figure-free message to the server-resolved chat, recorded SENT, separate from publication", async () => {
+    await approved(1);
+    link(1);
+    const out = await act("PUBLISH", [1]);
+    assert.deepEqual(out.notification, { sent: 1, failed: 0, no_telegram_link: 0 });
+    assert.equal(out.results[0].notification_status, "SENT");
+    assert.equal(world.telegramSent.length, 1);
+    assert.equal(world.telegramSent[0].chatId, 70001);
+    assert.equal(world.telegramSent[0].text, "Your payslip for August 2026 is now available in My Payslips.");
+    const net = String(Math.round(Number(world.calculations.get(1).net_pay)));
+    assert.ok(!world.telegramSent[0].text.includes(net), "no Net Pay in the message");
+    assert.deepEqual(world.notifications.map((n) => [n.result, n.trigger_type, n.attempt_no]), [["SENT", "PUBLISH", 1]]);
+  });
+
+  it("no Telegram link / Telegram failure: the payslip STAYS published; NO_TELEGRAM_LINK / FAILED recorded", async () => {
+    await approved(1, 2, 3);
+    link(1);
+    link(2);
+    world.telegramFailFor.add(2);
+    const out = await act("PUBLISH", [1, 2, 3]);
+    assert.equal(out.published_count, 3, "one failed notification fails nobody's publication");
+    assert.deepEqual(out.notification, { sent: 1, failed: 1, no_telegram_link: 1 });
+    assert.deepEqual(out.results.map((r) => r.notification_status), ["SENT", "FAILED", "NO_TELEGRAM_LINK"]);
+    for (const id of [1, 2, 3]) assert.equal((await rowOf(id)).status, CALC_STATUS.PUBLISHED);
+    const view = await calculation.getMonth({ ...MONTH });
+    const statusOf = (id) => view.rows.find((r) => r.employee_id === id).payslip.notification_status;
+    assert.deepEqual([statusOf(1), statusOf(2), statusOf(3)], ["SENT", "FAILED", "NO_TELEGRAM_LINK"]);
+    assert.equal(world.notifications.find((n) => n.employee_id === 2).failure_code, "TELEGRAM_403");
+  });
+
+  it("Retry Notification: a NEW attempt row, never a republish; already-notified and unpublished are skipped", async () => {
+    await approved(1, 2, 3);
+    link(1);
+    link(2);
+    world.telegramFailFor.add(2);
+    await act("PUBLISH", [1, 2]);
+    const slipsBefore = JSON.stringify(world.payslips);
+    const lifecycleBefore = world.lifecycle.length;
+    world.telegramFailFor.delete(2);
+
+    const out = await calculation.retryNotification({ ...MONTH, employee_ids: [1, 2, 3], actor: ACTOR });
+    assert.deepEqual(out.results.map((r) => [r.employee_id, r.result]), [
+      [1, "SKIPPED"], [2, "NOTIFIED"], [3, "SKIPPED"],
+    ]);
+    assert.equal(JSON.stringify(world.payslips), slipsBefore, "no payslip written");
+    assert.equal(world.lifecycle.length, lifecycleBefore, "no lifecycle act");
+    const forTwo = world.notifications.filter((n) => n.employee_id === 2);
+    assert.deepEqual(forTwo.map((n) => [n.attempt_no, n.trigger_type, n.result]), [[1, "PUBLISH", "FAILED"], [2, "RETRY", "SENT"]]);
+  });
+
+  it("Retry for an employee with no link records NO_TELEGRAM_LINK again and keeps the payslip published", async () => {
+    await approved(1);
+    await act("PUBLISH", [1]);
+    const out = await calculation.retryNotification({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(out.results[0].result, "NOT_NOTIFIED");
+    assert.equal(world.notifications.length, 2);
+    assert.equal((await rowOf(1)).status, CALC_STATUS.PUBLISHED);
+  });
+
+  it("Publish All Approved: only Approved & Locked, decided on the server; mixed states handled per employee", async () => {
+    await approved(1, 2);
+    world.add(3);
+    await calculation.calculate({ ...MONTH, employee_ids: [3], actor: ACTOR });
+    await act("PUBLISH", [2]);
+    const before = world.payslips.length;
+    const out = await calculation.publishAllApproved({ ...MONTH, actor: ACTOR });
+    assert.deepEqual(out.results.map((r) => [r.employee_id, r.result]), [[1, "PUBLISHED"]]);
+    assert.equal(world.payslips.length, before + 1, "no duplicate snapshot for the already published");
+    assert.equal(activeOf(2).length, 1);
+    assert.equal((await rowOf(3)).status === CALC_STATUS.PUBLISHED, false);
+  });
+
+  it("bulk selection: published, skipped, blocked and not-in-scope are independent; no duplicate snapshot", async () => {
+    await approved(1, 2, 4);
+    world.add(3);
+    await calculation.calculate({ ...MONTH, employee_ids: [3], actor: ACTOR });
+    await act("PUBLISH", [4]);
+    // employee 2's salary moves after approval -> stale, refused.
+    world.salaries.set(2, { ...world.salaries.get(2), salary_id: 999, monthly_gross: 30000 });
+    const out = await act("PUBLISH", [1, 2, 3, 4, 99]);
+    assert.deepEqual(out.results.map((r) => [r.employee_id, r.result]), [
+      [1, "PUBLISHED"], [2, "BLOCKED"], [3, "SKIPPED"], [4, "SKIPPED"], [99, "NOT_IN_SCOPE"],
+    ]);
+    assert.equal(activeOf(4).length, 1);
+    assert.equal(world.payslips.filter((p) => p.employee_id === 2).length, 0);
+  });
+
+  it("the published snapshot does not change when Salary Master / attendance / adjustments change later", async () => {
+    await approved(1);
+    await act("PUBLISH", [1]);
+    const frozen = world.payslips[0].snapshot_json;
+    const viewBefore = await calculation.getPayslip({ ...MONTH, employee_id: 1 });
+    world.salaries.set(1, { ...world.salaries.get(1), salary_id: 777, monthly_gross: 99000 });
+    world.attendance.set(1, { ...world.attendance.get(1), salary_days: 10, payroll_version: 2 });
+    world.amounts.set(1, { [COMPONENT.INCENTIVE]: 5000 });
+    const viewAfter = await calculation.getPayslip({ ...MONTH, employee_id: 1 });
+    assert.equal(world.payslips[0].snapshot_json, frozen);
+    assert.deepEqual(viewAfter.payslip.snapshot, viewBefore.payslip.snapshot);
+  });
+
+  it("Unpublish archives the snapshot (kept, not deleted); payroll stays Approved & Locked; then Unlock works", async () => {
+    await approved(1);
+    await act("PUBLISH", [1]);
+    const out = await act("UNPUBLISH", [1]);
+    assert.equal(out.unpublished_count, 1);
+    assert.equal(world.payslips.length, 1, "history kept");
+    assert.equal(world.payslips[0].status, "ARCHIVED");
+    assert.equal(world.payslips[0].archive_reason, "Attendance corrected after review");
+    assert.equal(world.calculations.get(1).status, "APPROVED_LOCKED");
+    assert.equal((await rowOf(1)).payslip, null, "the screen shows no published payslip");
+    assert.equal((await calculation.getPayslip({ ...MONTH, employee_id: 1 })).payslip, null);
+    assert.equal((await act("UNLOCK", [1])).unlocked_count, 1);
+  });
+
+  it("Republish after Unpublish -> Unlock -> Recalculate -> Approve: a NEW version; the old one stays ARCHIVED", async () => {
+    await approved(1);
+    await act("PUBLISH", [1]);
+    const v1 = world.payslips[0].snapshot_json;
+    await act("UNPUBLISH", [1]);
+    await act("UNLOCK", [1]);
+    world.amounts.set(1, { [COMPONENT.INCENTIVE]: 1200 });
+    await calculation.calculate({ ...MONTH, employee_ids: [1], mode: "RECALCULATE", actor: ACTOR });
+    assert.equal((await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR })).approved_count, 1);
+    await act("PUBLISH", [1]);
+    assert.deepEqual(world.payslips.map((p) => [p.payslip_version, p.status]), [[1, "ARCHIVED"], [2, "ACTIVE"]]);
+    assert.equal(world.payslips[0].snapshot_json, v1, "the archived snapshot is not overwritten");
+    const v2 = JSON.parse(world.payslips[1].snapshot_json);
+    assert.equal(v2.earnings.lines.find((l) => l.key === "incentive").amount, "1200.00");
+    const admin = await calculation.getPayslip({ ...MONTH, employee_id: 1 });
+    assert.equal(admin.payslip.payslip_version, 2);
+    assert.equal(admin.versions.length, 2);
+  });
+
+  it("a calculation that changed between the read and the lock is refused, not published", async () => {
+    await approved(1);
+    const realLifecycle = calculation.repo.lifecycle.bind(calculation.repo);
+    calculation.repo.lifecycle = async (args) => {
+      world.calculations.get(1).calculation_hash = "changed-under-the-lock";
+      return realLifecycle(args);
+    };
+    const out = await act("PUBLISH", [1]);
+    assert.equal(out.results[0].result, "BLOCKED");
+    assert.equal(world.payslips.length, 0);
+  });
+
+  it("HR view: Not Viewed until the employee opens it; the admin viewer is branch-scoped", async () => {
+    await approved(1);
+    await act("PUBLISH", [1]);
+    let row = await rowOf(1);
+    assert.equal(row.payslip.viewed, false);
+    world.payslips[0].first_viewed_at = "2026-10-04 09:42:00";
+    row = await rowOf(1);
+    assert.equal(row.payslip.viewed, true);
+    assert.equal(row.payslip.first_viewed_at, "2026-10-04 09:42:00");
+    await assert.rejects(
+      calculation.getPayslip({ ...MONTH, employee_id: 1, store_ids: [42] }),
+      (e) => e.name === "NotFoundError"
     );
   });
 });

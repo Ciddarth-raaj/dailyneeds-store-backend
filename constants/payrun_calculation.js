@@ -138,7 +138,7 @@ const CALC_STATUS_LABEL = {
   [CALC_STATUS.RECALCULATION_REQUIRED]: "Recalculation required",
   [CALC_STATUS.READY_FOR_APPROVAL]: "Ready for approval",
   [CALC_STATUS.APPROVED_LOCKED]: "Approved & Locked",
-  [CALC_STATUS.PUBLISHED]: "Published",
+  [CALC_STATUS.PUBLISHED]: "Payslip Published",
 };
 
 /**
@@ -306,6 +306,9 @@ const ROW_RESULT = {
   UNLOCKED: "UNLOCKED",
   PUBLISHED: "PUBLISHED",
   UNPUBLISHED: "UNPUBLISHED",
+  // Retry Notification: the "payslip available" message reached / did not reach the employee.
+  NOTIFIED: "NOTIFIED",
+  NOT_NOTIFIED: "NOT_NOTIFIED",
 };
 
 /** The lifecycle log's verbs (`payrun_employee_lifecycle_audit.action`). */

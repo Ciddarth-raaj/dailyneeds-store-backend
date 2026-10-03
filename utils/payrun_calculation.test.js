@@ -606,7 +606,7 @@ describe("the status rules", () => {
       current_inputs_hash: "yyy",
     });
     assert.equal(published.status, CALC_STATUS.PUBLISHED);
-    assert.equal(published.status_label, "Published");
+    assert.equal(published.status_label, "Payslip Published");
     assert.equal(published.payslip_eligible, true);
     assert.equal(published.calculable, false, "published is locked");
 

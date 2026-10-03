@@ -123,7 +123,7 @@ describe("payroll readiness before and after, over real SQL", { skip: !URL && "A
     for (const file of MIGRATIONS) await q(pool, fs.readFileSync(path.join(SQLS, file), "utf8"));
 
     for (const id of ALL) {
-      await q(pool, "INSERT INTO new_employee VALUES (?, ?, 1, 1, 1, 0, '1990-06-15', '2018-04-01', NULL, '100200300400', '3100000000', 1)", [id, `E${id}`]);
+      await q(pool, "INSERT INTO new_employee VALUES (?, ?, 1, 1, 1, 0, '1990-06-15', '2018-04-01', NULL, '100200300400', '3100000000', 1, NULL, NULL, NULL, NULL)", [id, `E${id}`]);
       const s = await q(pool, "INSERT INTO employee_salary (employee_id, monthly_gross, daily_salary, basic, conveyance, hra, special_allowance, effective_from, status) VALUES (?, 26000, 1000, 13000, 2500, 5000, 5500, '2026-04-01', 'APPROVED')", [id]);
       const pe = await q(pool, `INSERT INTO payrun_employee
         (period_year, period_month, employee_id, employee_name, store_id, store_name, date_of_joining,

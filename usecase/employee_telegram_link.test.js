@@ -1469,7 +1469,7 @@ describe("the menu after a successful connection", () => {
       contact: { phone_number: "+919876543210", user_id: 4242, first_name: "Asha" },
     });
 
-  it("keeps the success text EXACTLY and attaches the three menu buttons", async () => {
+  it("keeps the success text EXACTLY and attaches the four menu buttons", async () => {
     const ctx = await openSession({ miniAppUrl: MINI_APP });
     const outcome = await connect(ctx);
 
@@ -1479,10 +1479,11 @@ describe("the menu after a successful connection", () => {
     assert.equal(message.text, "Telegram connected successfully ✅");
 
     const rows = message.options.replyMarkup.inlineKeyboard;
-    assert.deepEqual(rows.map((r) => r[0].text), ["My Attendance", "Corrections", "Help"]);
+    assert.deepEqual(rows.map((r) => r[0].text), ["My Attendance", "Corrections", "My Payslips", "Help"]);
     assert.deepEqual(rows.map((r) => r[0].web_app.url), [
       `${MINI_APP}?section=attendance`,
       `${MINI_APP}?section=corrections`,
+      `${MINI_APP}?section=payslips`,
       `${MINI_APP}?section=help`,
     ]);
   });

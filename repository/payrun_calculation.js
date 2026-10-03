@@ -1137,19 +1137,19 @@ class PayrunCalculationRepository {
   /** One append-only lifecycle row, on the caller's connection and transaction. */
   async _lifecycleAudit(conn, {
     row, year, month, action, previous_status, new_status, reason = null, remark = null,
-    mode, employee_id_actor = null, user_id_actor = null,
+    mode, employee_id_actor = null, user_id_actor = null, payslip_id = null,
   }) {
     await this._read(
       "INSERT-LIFECYCLE-AUDIT",
       `INSERT INTO payrun_employee_lifecycle_audit
               (payrun_employee_id, payrun_calculation_id, period_year, period_month, employee_id,
                action, previous_status, new_status, reason, remark, mode,
-               calculation_hash, net_pay, acted_by_employee_id, acted_by_user_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               calculation_hash, net_pay, acted_by_employee_id, acted_by_user_id, payslip_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         row.payrun_employee_id, row.payrun_calculation_id, year, month, row.employee_id,
         action, previous_status, new_status, reason, remark, mode,
-        row.calculation_hash, row.net_pay, employee_id_actor, user_id_actor,
+        row.calculation_hash, row.net_pay, employee_id_actor, user_id_actor, payslip_id,
       ],
       conn
     );
@@ -1172,9 +1172,17 @@ class PayrunCalculationRepository {
    *              status does not change, so every lock still holds. Refused if
    *              the attendance it was priced from has moved or is not
    *              current with its days (the same re-reads Approve makes).
-   *   UNPUBLISH  published -> APPROVED_LOCKED (published_* cleared).
+   *              PUBLISH IS PUBLISH PAYSLIP: the frozen snapshot `payslip`
+   *              (built by the usecase from this same stored row) is inserted
+   *              in this transaction, and refused unless it names the row's
+   *              calculation id and calculation hash as they are under the
+   *              lock - so a snapshot can never describe figures other than
+   *              the ones being published. A republish is a new version.
+   *   UNPUBLISH  published -> APPROVED_LOCKED (published_* cleared), and the
+   *              ACTIVE payslip is ARCHIVED - kept, never deleted, and gone
+   *              from the Mini App at commit.
    */
-  async lifecycle({ action, year, month, employee_id, reason = null, remark = null, mode, actor = {} }) {
+  async lifecycle({ action, year, month, employee_id, reason = null, remark = null, mode, actor = {}, payslip = null }) {
     const actorEmployee = actor.employeeId === undefined ? null : actor.employeeId;
     const actorUser = actor.userId === undefined ? null : actor.userId;
     const conn = await getConnectionAsync(this.db);
@@ -1196,7 +1204,8 @@ class PayrunCalculationRepository {
       const [row] = await this._read(
         "LIFECYCLE-LOCK-ROW",
         `SELECT payrun_calculation_id, payrun_employee_id, employee_id, status, published_at,
-                calculation_hash, net_pay,
+                calculation_hash, net_pay, source_hash, inputs_hash,
+                calculation_version, calculation_revision,
                 attendance_monthly_payroll_id, attendance_payroll_version,
                 DATE_FORMAT(attendance_calculated_at, '%Y-%m-%d %H:%i:%s.%f') AS attendance_calculated_at,
                 approved_ot_minutes, effective_nrm_minutes, effective_nrm_source, ot_groups
@@ -1213,6 +1222,7 @@ class PayrunCalculationRepository {
 
       let update;
       let next;
+      let payslipId = null;
       if (action === AUDIT_ACTION_LIFECYCLE.UNLOCK) {
         if (published) return done("PUBLISHED");
         if (!locked) return done("NOT_LOCKED");
@@ -1233,6 +1243,15 @@ class PayrunCalculationRepository {
         if (moved.length > 0) return done("SOURCE_MOVED", { changed: moved });
         const freshness = await this._attendanceFreshnessLocked(conn, { year, month, employee_id, stored: row });
         if (freshness) return done(freshness.outcome, { reason: freshness.reason });
+        if (!payslip || !payslip.text || !payslip.sha256) {
+          throw new Error("PUBLISH requires a frozen payslip snapshot");
+        }
+        if (
+          Number(payslip.payrun_calculation_id) !== Number(row.payrun_calculation_id) ||
+          String(payslip.calculation_hash) !== String(row.calculation_hash)
+        ) {
+          return done("CALCULATION_CHANGED");
+        }
         update = [
           `UPDATE payrun_employee_calculation
               SET published_by = ?, published_at = CURRENT_TIMESTAMP
@@ -1242,6 +1261,15 @@ class PayrunCalculationRepository {
         next = CALC_STATUS.PUBLISHED;
       } else if (action === AUDIT_ACTION_LIFECYCLE.UNPUBLISH) {
         if (!published) return done(locked ? "NOT_PUBLISHED" : "NOT_LOCKED");
+        const [activeSlip] = await this._read(
+          "UNPUBLISH-LOCK-PAYSLIP",
+          `SELECT payslip_id FROM payrun_payslip
+            WHERE payrun_employee_id = ? AND status = 'ACTIVE'
+            FOR UPDATE`,
+          [row.payrun_employee_id],
+          conn
+        );
+        payslipId = activeSlip ? activeSlip.payslip_id : null;
         update = [
           `UPDATE payrun_employee_calculation
               SET published_by = NULL, published_at = NULL
@@ -1257,9 +1285,26 @@ class PayrunCalculationRepository {
       if (!moved || Number(moved.affectedRows) !== 1) {
         throw new Error(`${action} moved ${moved ? moved.affectedRows : "no"} rows for employee ${employee_id}; rolled back`);
       }
+      if (action === AUDIT_ACTION_LIFECYCLE.PUBLISH) {
+        payslipId = await this._insertPayslip(conn, { row, year, month, payslip, actorEmployee, actorUser });
+      } else if (action === AUDIT_ACTION_LIFECYCLE.UNPUBLISH && payslipId !== null) {
+        const archived = await this._read(
+          "UNPUBLISH-ARCHIVE-PAYSLIP",
+          `UPDATE payrun_payslip
+              SET status = 'ARCHIVED', archived_by = ?, archived_by_user = ?,
+                  archived_at = CURRENT_TIMESTAMP, archive_reason = ?
+            WHERE payslip_id = ? AND status = 'ACTIVE'`,
+          [actorEmployee, actorUser, reason, payslipId],
+          conn
+        );
+        if (!archived || Number(archived.affectedRows) !== 1) {
+          throw new Error(`UNPUBLISH could not archive payslip ${payslipId}; rolled back`);
+        }
+      }
       await this._lifecycleAudit(conn, {
         row, year, month, action, previous_status: previous, new_status: next,
         reason, remark, mode, employee_id_actor: actorEmployee, user_id_actor: actorUser,
+        payslip_id: payslipId,
       });
       if (action === AUDIT_ACTION_LIFECYCLE.UNLOCK) {
         // The calculation history's own UNLOCK verb, reserved for this.
@@ -1275,7 +1320,10 @@ class PayrunCalculationRepository {
         );
       }
       await commitAsync(conn);
-      return { employee_id, outcome: action, previous_status: previous, new_status: next, net_pay: row.net_pay };
+      return {
+        employee_id, outcome: action, previous_status: previous, new_status: next, net_pay: row.net_pay,
+        payslip_id: payslipId,
+      };
     } catch (err) {
       await rollbackAsync(conn);
       throw err;
@@ -1284,12 +1332,49 @@ class PayrunCalculationRepository {
     }
   }
 
+  /**
+   * THE FROZEN SNAPSHOT, inserted inside the Publish transaction. The version
+   * is the next one for this employee month, read under the calculation row's
+   * lock (which every Publish of this employee month takes first), and the
+   * published time is the calculation row's own, so the two always agree.
+   */
+  async _insertPayslip(conn, { row, year, month, payslip, actorEmployee, actorUser }) {
+    const res = await this._read(
+      "INSERT-PAYSLIP",
+      `INSERT INTO payrun_payslip
+              (payslip_ref, payrun_employee_id, payrun_calculation_id, employee_id,
+               period_year, period_month, payslip_version,
+               calculation_version, calculation_revision, calculation_hash, source_hash, inputs_hash,
+               snapshot_schema_version, template_version, snapshot_json, snapshot_sha256,
+               status, published_by, published_by_user, published_at)
+       SELECT ?, ?, ?, ?, ?, ?,
+              (SELECT COALESCE(MAX(v.payslip_version), 0) + 1 FROM payrun_payslip v
+                WHERE v.payrun_employee_id = ?),
+              ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, c.published_at
+         FROM payrun_employee_calculation c
+        WHERE c.payrun_calculation_id = ?`,
+      [
+        payslip.payslip_ref, row.payrun_employee_id, row.payrun_calculation_id, row.employee_id,
+        year, month, row.payrun_employee_id,
+        row.calculation_version, row.calculation_revision, row.calculation_hash,
+        row.source_hash, row.inputs_hash,
+        payslip.schema_version, payslip.template_version, payslip.text, payslip.sha256,
+        actorEmployee, actorUser, row.payrun_calculation_id,
+      ],
+      conn
+    );
+    if (!res || Number(res.affectedRows) !== 1) {
+      throw new Error(`PUBLISH could not store the payslip for employee ${row.employee_id}; rolled back`);
+    }
+    return res.insertId;
+  }
+
   /** One employee's lifecycle history for the month, newest first. */
   async listLifecycleAudit({ year, month, employee_id }) {
     return this._read(
       "LIST-LIFECYCLE-AUDIT",
       `SELECT payrun_lifecycle_audit_id, action, previous_status, new_status, reason, remark, mode,
-              calculation_hash, net_pay, acted_by_employee_id, acted_by_user_id,
+              calculation_hash, net_pay, acted_by_employee_id, acted_by_user_id, payslip_id,
               DATE_FORMAT(acted_at, '%Y-%m-%d %H:%i:%s') AS acted_at
          FROM payrun_employee_lifecycle_audit
         WHERE period_year = ? AND period_month = ? AND employee_id = ?

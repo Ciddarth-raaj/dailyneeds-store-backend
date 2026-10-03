@@ -265,6 +265,11 @@ class Server {
     this.payrunCalculationRepo = require("./repository/payrun_calculation")(
       this.mysql.connection
     );
+    // Payslips: the frozen snapshots Publish creates, the Mini App reads, and
+    // the notification attempts made about them. See the file's header.
+    this.payrunPayslipRepo = require("./repository/payrun_payslip")(
+      this.mysql.connection
+    );
     // Attendance v2. The reads the calculation engine needs and the writes of
     // what it produced. It SELECTs the Biomax punch tables and never writes
     // them - the receiver process remains their only writer - and the two
@@ -869,6 +874,31 @@ class Server {
       identityRepo: this.employeeTelegramRepo,
       jwtService: require("./services/jwt"),
       getBotToken: () => process.env.TELEGRAM_BOT_TOKEN || null,
+      log: require("./utils/logger"),
+    });
+    // PAYSLIP PUBLISH. The figure-free "payslip available" Telegram message
+    // (destination resolved here from employee_telegram_identity, never from a
+    // request), and the Mini App's My Payslips reads - gated by the SAME
+    // session usecase above. Publish itself stays in the payrun usecase.
+    this.payslipNotificationUsecase = require("./usecase/payslip_notification")({
+      payslipRepo: this.payrunPayslipRepo,
+      identityRepo: this.employeeTelegramRepo,
+      telegram: require("./services/telegram")(),
+      getMiniAppUrl: () => process.env.ATTENDANCE_CORRECTION_MINI_APP_URL || null,
+      log: require("./utils/logger"),
+    });
+    this.payrunCalculationUsecase.setPayslipServices({
+      payslipRepo: this.payrunPayslipRepo,
+      notifier: this.payslipNotificationUsecase,
+      company: () => ({
+        name: process.env.PAYSLIP_COMPANY_NAME || "Daily Needs",
+        address: process.env.PAYSLIP_COMPANY_ADDRESS || null,
+      }),
+    });
+    this.telegramPayslipUsecase = require("./usecase/telegram_payslip")({
+      payslipRepo: this.payrunPayslipRepo,
+      renderPdf: require("./services/payslip_pdf").renderPayslipPdf,
+      jwtService: require("./services/jwt"),
       log: require("./utils/logger"),
     });
     // Attendance v2 / A3. Handed the calculation usecase as well, because a
@@ -1688,6 +1718,10 @@ class Server {
       this.telegramAttendanceSessionUsecase,
       this.telegramAttendanceMiniAppUsecase
     );
+    const telegramPayslipRouter = require("./routes/telegram_payslip")(
+      this.telegramAttendanceSessionUsecase,
+      this.telegramPayslipUsecase
+    );
     const attendanceDeviceTimeCorrectionRouter = require("./routes/attendance_device_time_correction")(
       this.attendanceDeviceTimeCorrectionUsecase
     );
@@ -2033,6 +2067,7 @@ class Server {
     // router, which claims the bare `/attendance` prefix.
     app.use("/", attendanceDeviceTimeCorrectionRouter.getRouter());
     app.use("/", telegramAttendanceRouter.getRouter());
+    app.use("/", telegramPayslipRouter.getRouter());
     app.use("/attendance", attendanceRawRouter.getRouter());
     app.use("/store", storeRouter.getRouter());
     app.use("/outlet", outletRouter.getRouter());
