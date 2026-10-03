@@ -37,6 +37,8 @@ const path = require("path");
 const dir = path.join(__dirname, "mysql/migrations/sqls");
 const CREATE = "20261023120000-payrun-calculation-up.sql";
 const DRIFT = "20261024120000-payrun-calculation-column-drift-up.sql";
+/* Every later migration that adds a column to the table, in order. */
+const LATER_COLUMN_MIGRATIONS = [DRIFT, "20261111120000-payrun-lifecycle-up.sql"];
 
 /** Comments may NAME a column to explain it; only statements declare one. */
 const statementsOf = (file) =>
@@ -51,9 +53,11 @@ function schemaColumns() {
   assert.ok(body, "the CREATE TABLE is not where it was");
   const columns = new Set([...body[0].matchAll(/^\s{2}`([a-z_]+)`\s+[A-Z]/gm)].map((m) => m[1]));
 
-  [...statementsOf(DRIFT).matchAll(
-    /ALTER TABLE `payrun_employee_calculation` ADD COLUMN `([a-z_]+)`/g
-  )].forEach((m) => columns.add(m[1]));
+  LATER_COLUMN_MIGRATIONS.forEach((file) =>
+    [...statementsOf(file).matchAll(
+      /ALTER TABLE `payrun_employee_calculation` ADD COLUMN `([a-z_]+)`/g
+    )].forEach((m) => columns.add(m[1]))
+  );
 
   return columns;
 }
