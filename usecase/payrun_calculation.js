@@ -14,6 +14,9 @@ const { monthWindow, statutorySetupComplete } = require("../utils/payrun_eligibi
 const { deriveState } = require("../utils/payrun_adjustments");
 const calc = require("../utils/payrun_calculation");
 const engine = require("../utils/salary_engine");
+const { evaluatePayrollReadiness } = require("../utils/payroll_readiness");
+const { latestClosableDate } = require("../utils/attendance_persist_guard");
+const { istToday } = require("../utils/istDate");
 const {
   validationError,
   normalizeMonth,
@@ -105,6 +108,19 @@ class PayrunCalculationUsecase {
     this.repo = calculationRepo;
     this.payrunRepo = payrunRepo;
     this.adjustmentRepo = adjustmentRepo;
+    this.attendanceProcessor = null;
+    this.today = () => istToday();
+  }
+
+  /**
+   * THE EXISTING ATTENDANCE ENGINE, for Process Attendance. Injected after
+   * construction (the attendance usecase is built later in `server.js`), and
+   * only its `calculateMonth({ persist: true })` is ever called - the same
+   * month persist the Attendance screens run. Payroll has no attendance logic
+   * of its own.
+   */
+  setAttendanceProcessor(attendanceCalculationUsecase) {
+    this.attendanceProcessor = attendanceCalculationUsecase || null;
   }
 
   /* ==================================================================== */
@@ -135,6 +151,7 @@ class PayrunCalculationUsecase {
 
     const [
       attendance,
+      dayRows,
       nrmGroups,
       statutory,
       salaries,
@@ -145,6 +162,9 @@ class PayrunCalculationUsecase {
       periodRow,
     ] = await Promise.all([
       this.repo.listAttendanceMonths(ids, period.year, period.month),
+      typeof this.repo.listAttendanceDayRows === "function"
+        ? this.repo.listAttendanceDayRows(ids, from, to)
+        : Promise.resolve(null),
       this.repo.listEffectiveNrm(ids, from, to),
       this.repo.listStatutoryContext(ids),
       /*
@@ -241,6 +261,10 @@ class PayrunCalculationUsecase {
       month_locked: Boolean(periodRow && periodRow.status === PERIOD_STATUS.LOCKED),
       population,
       attendanceOf: index(attendance),
+      // null when the repository cannot read day rows: readiness is then not
+      // evaluated and the older summary-flag rule applies.
+      dayRowsOf: dayRows === null ? null : group(dayRows),
+      latestClosedDate: latestClosableDate(this.today()),
       nrmOf: group(nrmGroups),
       statutoryOf: index(statutory),
       salaryOf: index(salaries),
@@ -310,6 +334,36 @@ class PayrunCalculationUsecase {
     const currentSourceHash = calc.sourceHash(currentMarkers);
     const currentInputsHash = calc.inputsHash({ amounts, pay_type: employee.pay_type });
 
+    /*
+     * THE SHARED PAYROLL READINESS. A dry run of the very calculation
+     * Calculate performs supplies its errors, so "calculable" here and
+     * "accepted" there are one decision, not two.
+     */
+    let readiness = null;
+    if (context.dayRowsOf !== null) {
+      const dryRun = calc.computeCalculation({
+        snapshot: employee,
+        attendance: attendance || {},
+        nrm,
+        amounts,
+        statutory,
+        as_of: context.window.to,
+        coverage_entry_salary: entrySalary,
+      });
+      readiness = evaluatePayrollReadiness({
+        year: context.period.year,
+        month: context.period.month,
+        snapshot: employee,
+        monthly: attendance,
+        day_rows: context.dayRowsOf.get(id) || [],
+        attendance_required: !(statutory && Number(statutory.attendance_required) === 0),
+        pending: counts,
+        closed_for_payroll: Number(employee.attendance_closed_for_payroll) === 1,
+        latest_closed_date: context.latestClosedDate,
+        calculation_errors: dryRun.errors,
+      });
+    }
+
     const verdict = calc.deriveStatus({
       calculation: stored
         ? {
@@ -340,6 +394,7 @@ class PayrunCalculationUsecase {
        */
       attendance_closed_for_payroll:
         Number(employee.attendance_closed_for_payroll) === 1,
+      readiness,
     });
 
     /**
@@ -379,6 +434,7 @@ class PayrunCalculationUsecase {
         currentSourceHash,
         currentInputsHash,
         stored,
+        readiness,
       },
       row: {
         employee_id: id,
@@ -401,6 +457,13 @@ class PayrunCalculationUsecase {
          */
         payslip_eligible: verdict.payslip_eligible,
         adjustment_state: adjustmentState,
+        /**
+         * WHETHER CALCULATE WOULD ACCEPT THIS EMPLOYEE NOW - the same verdict
+         * Calculate enforces, so Calculate All Eligible counts only these.
+         */
+        calculable: verdict.calculable !== false,
+        /** Whether Process Attendance (the existing engine) can clear a blocker. */
+        attendance_processable: Boolean(readiness && readiness.attendance_processable),
 
         /**
          * WHETHER THE ATTENDANCE THESE FIGURES WERE PRICED FROM IS SETTLED.
@@ -744,10 +807,12 @@ class PayrunCalculationUsecase {
      */
     const targetIds = wanted.all
       ? [...presentedById.entries()]
-          .filter(([, p]) =>
-            recalculating
-              ? p.row.status === CALC_STATUS.RECALCULATION_REQUIRED
-              : p.row.status === CALC_STATUS.NOT_CALCULATED
+          .filter(
+            ([, p]) =>
+              p.row.calculable &&
+              (recalculating
+                ? p.row.status === CALC_STATUS.RECALCULATION_REQUIRED
+                : p.row.status === CALC_STATUS.NOT_CALCULATED)
           )
           .map(([id]) => id)
       : wanted.ids;
@@ -801,6 +866,24 @@ class PayrunCalculationUsecase {
         return;
       }
 
+      /*
+       * THE SAME READINESS THE LIST SHOWED. An employee it does not pass is
+       * refused here, by name and with the reasons, rather than counted as
+       * eligible and then failing inside the calculation.
+       */
+      if (!presented.row.calculable) {
+        const reasons = (presented.internals.readiness && presented.internals.readiness.reasons) || [];
+        results.push({
+          employee_id: employeeId,
+          result: ROW_RESULT.BLOCKED,
+          blockers: reasons,
+          message:
+            reasons.map((r) => r.message).join("; ") ||
+            "This employee's month cannot be calculated yet.",
+        });
+        return;
+      }
+
       const built = this._buildRow(context, presented, actor);
       if (built.errors.length > 0 && built.fatal) {
         results.push({
@@ -834,11 +917,156 @@ class PayrunCalculationUsecase {
       recalculated_count: counted(ROW_RESULT.RECALCULATED),
       skipped_count: counted(ROW_RESULT.SKIPPED),
       locked_count: counted(ROW_RESULT.LOCKED),
+      blocked_count: counted(ROW_RESULT.BLOCKED),
       failed_count: counted(ROW_RESULT.FAILED),
       not_in_scope_count: counted(ROW_RESULT.NOT_IN_SCOPE),
       results: targetIds.map((id) => results.find((r) => Number(r.employee_id) === Number(id))),
     };
   }
+
+  /**
+   * PROCESS ATTENDANCE - re-run the EXISTING attendance month persist for the
+   * selected employees, from Payroll, where readiness says it would help.
+   *
+   * WHAT IT CALLS. `attendanceCalculationUsecase.calculateMonth({ persist:
+   * true })` - the same call as Attendance > Recalculate for a month. It
+   * recalculates the closed days from punches, approvals and shifts as they
+   * stand, writes the derived day rows and the monthly summary with a fresh
+   * fingerprint, and refuses a payroll-locked month itself. It reads OT and
+   * attendance approvals; it decides, creates and changes none of them, and it
+   * does not touch the salary, the payrun snapshot or any calculation.
+   *
+   * ONLY WHERE IT CAN HELP. An employee whose blockers are all ones processing
+   * cannot clear (an undecided request, OT on a day with no NRM) is SKIPPED
+   * with those reasons, not processed for show. Approved & Locked employees and
+   * a locked month are refused before the engine is called.
+   *
+   * AFTERWARDS each processed employee's readiness is re-read, so the answer
+   * says what (if anything) still stands in the way.
+   */
+  async processAttendance({ year, month, employee_ids, store_ids = null }) {
+    const period = normalizeMonth(year, month);
+    const ids = normalizeEmployeeIds(employee_ids);
+    if (!this.attendanceProcessor || typeof this.attendanceProcessor.calculateMonth !== "function") {
+      throw new Error("Attendance processing is not available");
+    }
+
+    const context = await this._assemble({
+      year: period.year,
+      month: period.month,
+      store_ids,
+      employee_ids: ids,
+    });
+    const presentedById = new Map(
+      context.population.map((e) => [Number(e.employee_id), this._present(context, e)])
+    );
+    const monthLabel = `${period.year}-${String(period.month).padStart(2, "0")}`;
+
+    const results = [];
+    const processed = [];
+    for (const employeeId of ids) {
+      const presented = presentedById.get(employeeId);
+      if (!presented) {
+        results.push({
+          employee_id: employeeId,
+          result: ROW_RESULT.NOT_IN_SCOPE,
+          message:
+            "This employee is not initialized for the selected month, or is outside your branch scope",
+        });
+        continue;
+      }
+      const name = presented.row.employee_name;
+      if (context.month_locked) {
+        results.push({
+          employee_id: employeeId,
+          employee_name: name,
+          result: ROW_RESULT.LOCKED,
+          message: `Payroll month ${monthLabel} is locked. Its attendance cannot be reprocessed.`,
+        });
+        continue;
+      }
+      if (presented.row.status === CALC_STATUS.APPROVED_LOCKED) {
+        results.push({
+          employee_id: employeeId,
+          employee_name: name,
+          result: ROW_RESULT.LOCKED,
+          message: "Payroll is Approved & Locked for this employee. Attendance cannot be reprocessed.",
+        });
+        continue;
+      }
+      const readiness = presented.internals.readiness;
+      if (!readiness || !readiness.attendance_processable) {
+        const remaining = readiness ? readiness.reasons.filter((r) => !r.processable) : [];
+        results.push({
+          employee_id: employeeId,
+          employee_name: name,
+          result: ROW_RESULT.SKIPPED,
+          blockers: remaining,
+          message:
+            remaining.length > 0
+              ? `Processing attendance would not clear this: ${remaining.map((r) => r.message).join("; ")}`
+              : "Attendance is already processed and current.",
+        });
+        continue;
+      }
+      /* eslint-disable no-await-in-loop */
+      try {
+        await this.attendanceProcessor.calculateMonth({
+          employee_id: employeeId,
+          year: period.year,
+          month: period.month,
+          persist: true,
+        });
+        processed.push(employeeId);
+        results.push({ employee_id: employeeId, employee_name: name, result: ROW_RESULT.PROCESSED });
+      } catch (err) {
+        results.push({
+          employee_id: employeeId,
+          employee_name: name,
+          result: ROW_RESULT.FAILED,
+          message: `Attendance could not be processed: ${err && err.message ? err.message : String(err)}`,
+        });
+      }
+      /* eslint-enable no-await-in-loop */
+    }
+
+    if (processed.length > 0) {
+      const after = await this._assemble({
+        year: period.year,
+        month: period.month,
+        store_ids,
+        employee_ids: processed,
+      });
+      after.population.forEach((e) => {
+        const p = this._present(after, e);
+        const entry = results.find((r) => r.employee_id === Number(e.employee_id));
+        const reasons = (p.internals.readiness && p.internals.readiness.reasons) || [];
+        entry.status = p.row.status;
+        entry.calculable = p.row.calculable;
+        entry.blockers = reasons;
+        entry.message =
+          reasons.length === 0
+            ? "Attendance processed. Nothing in attendance now blocks payroll for this employee."
+            : `Attendance processed. Still outstanding: ${reasons.map((r) => r.message).join("; ")}`;
+      });
+    }
+
+    const counted = (code) => results.filter((r) => r.result === code).length;
+    return {
+      period_year: period.year,
+      period_month: period.month,
+      processed_count: counted(ROW_RESULT.PROCESSED),
+      cleared_count: results.filter(
+        (r) => r.result === ROW_RESULT.PROCESSED && (r.blockers || []).length === 0
+      ).length,
+      skipped_count: counted(ROW_RESULT.SKIPPED),
+      locked_count: counted(ROW_RESULT.LOCKED),
+      failed_count: counted(ROW_RESULT.FAILED),
+      not_in_scope_count: counted(ROW_RESULT.NOT_IN_SCOPE),
+      results,
+    };
+  }
+
 
   /**
    * ONE CALCULATION ROW, built key by key from the SERVER's own reads.

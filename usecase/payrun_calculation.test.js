@@ -28,6 +28,7 @@ const buildPayrun = require("./payrun");
 const buildAdjustments = require("./payrun_adjustment");
 const { CALC_STATUS, ROW_RESULT, NRM_SOURCE } = require("../constants/payrun_calculation");
 const { COMPONENT } = require("../constants/payrun_adjustments");
+const { dayRowsFingerprint } = require("../utils/attendance_month_freshness");
 
 /* ============================================================== the fakes */
 
@@ -43,6 +44,7 @@ class World {
     this.employees = new Map();      // employee_id -> snapshot row
     this.attendance = new Map();     // employee_id -> monthly payroll row
     this.nrm = new Map();            // employee_id -> grouped day rows
+    this.days = new Map();           // employee_id -> stored attendance day rows
     this.pending = new Map();        // employee_id -> { pending_regularizations, pending_ot }
     this.salaries = new Map();       // employee_id -> current approved salary
     this.amounts = new Map();        // employee_id -> { component: amount }
@@ -50,6 +52,7 @@ class World {
     this.calculations = new Map();   // employee_id -> calculation row
     this.audit = [];
     this.resets = [];                // the reset audit
+    this.legacy = false;             // read as the pre-readiness code did
     this.failResetFor = new Set();   // employee ids whose reset transaction throws
     this.period = null;
     this.nextId = 1;
@@ -125,6 +128,41 @@ class World {
       ]).map((g) => ({ employee_id: employeeId, ...g }))
     );
 
+    /*
+     * THE STORED DAY ROWS THE GROUPS ABOVE SUMMARISE - one per date of the
+     * month, settled, with each group's approved OT on its first day - and the
+     * summary's fingerprint taken over them, exactly as the month persist
+     * records it. So the ordinary employee's attendance is complete AND
+     * current, and a test that wants it stale or unsettled changes one thing.
+     */
+    const rows = [];
+    let date = 1;
+    this.nrm.get(employeeId).forEach((g) => {
+      for (let i = 0; i < Number(g.day_count); i += 1) {
+        rows.push({
+          attendance_date: `2026-08-${String(date).padStart(2, "0")}`,
+          status: "FINAL", is_final: 1, attendance_day_count: 1,
+          nrm_minutes: g.nrm_minutes, base_nrm_minutes: g.nrm_minutes,
+          worked_minutes: g.nrm_minutes, shortage_minutes: 0,
+          approved_ot_minutes: i === 0 ? Number(g.approved_ot_minutes || 0) : 0,
+          ot_rate: 1, permission_minutes: 0, calculation_version: 10,
+          attendance_calculation_mode: "SHIFT_BASED",
+        });
+        date += 1;
+      }
+    });
+    for (; date <= 31; date += 1) {
+      rows.push({
+        attendance_date: `2026-08-${String(date).padStart(2, "0")}`,
+        status: "ABSENT", is_final: 1, attendance_day_count: 0,
+        nrm_minutes: 480, base_nrm_minutes: 480, worked_minutes: 0, shortage_minutes: 0,
+        approved_ot_minutes: 0, ot_rate: 1, permission_minutes: 0, calculation_version: 10,
+        attendance_calculation_mode: "SHIFT_BASED",
+      });
+    }
+    this.days.set(employeeId, rows);
+    this.attendance.get(employeeId).day_rows_fingerprint = dayRowsFingerprint(rows);
+
     // Confirmed as having no adjustment, so the ordinary employee is READY and
     // each test can take exactly one thing away.
     this.states.set(employeeId, { employee_id: employeeId, confirmed_no_adjustment: 1, remarks: null });
@@ -146,6 +184,13 @@ class FakeCalculationRepo {
 
   async listAttendanceMonths(ids) {
     return ids.map((id) => this.world.attendance.get(id)).filter(Boolean).map((r) => ({ ...r }));
+  }
+
+  async listAttendanceDayRows(ids) {
+    // `legacy` simulates the code before payroll readiness existed, so a test
+    // can create the calculations that rule allowed and production still has.
+    if (this.world.legacy) return null;
+    return ids.flatMap((id) => (this.world.days.get(id) || []).map((d) => ({ employee_id: id, ...d })));
   }
 
   async listEffectiveNrm(ids) {
@@ -373,6 +418,22 @@ function build() {
 }
 
 const MONTH = { year: 2026, month: 8 };
+
+/*
+ * CALCULATED UNDER THE PREVIOUS RULE. Before payroll readiness, Calculate
+ * accepted an employee whose attendance was missing or unsettled; those rows
+ * exist in production and must still be presented and gated correctly. The
+ * new rule refuses to create them, so they are created here as the old code
+ * did - with the day-row read switched off for the one calculate call.
+ */
+const calculateUnderPreviousRule = async (employeeId) => {
+  world.legacy = true;
+  try {
+    return await calculation.calculate({ ...MONTH, employee_ids: [employeeId], actor: ACTOR });
+  } finally {
+    world.legacy = false;
+  }
+};
 const monthView = () => calculation.getMonth({ ...MONTH });
 const rowOf = async (employeeId) =>
   (await monthView()).rows.find((r) => r.employee_id === employeeId);
@@ -692,9 +753,14 @@ describe("readiness", () => {
   it("attendance that is not final still refuses Approve & Lock", async () => {
     world.add(1);
     world.attendance.get(1).is_final = 0;
-    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    // Calculate itself now refuses it, by name...
+    const refusedCalc = await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(refusedCalc.blocked_count, 1);
+    assert.ok(refusedCalc.results[0].blockers.some((b) => b.code === "ATTENDANCE_SUMMARY_NOT_FINAL"));
+    // ...and a row calculated before the fix is still refused at approval.
+    await calculateUnderPreviousRule(1);
 
-    assert.ok((await rowOf(1)).blockers.some((b) => b.code === "ATTENDANCE_INCOMPLETE"));
+    assert.ok((await rowOf(1)).blockers.some((b) => b.code === "ATTENDANCE_SUMMARY_NOT_FINAL"));
     const refused = await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
     assert.equal(refused.approved_count, 0);
     assert.equal(refused.blocked_count, 1);
@@ -1046,6 +1112,7 @@ describe("an initialized employee whose attendance does not exist yet", () => {
     world.add(employeeId);
     world.attendance.delete(employeeId);  // no attendance_monthly_payroll row
     world.nrm.delete(employeeId);         // no final attendance_day_calculation rows
+    world.days.delete(employeeId);        // ...and no stored day rows at all
     world.pending.delete(employeeId);     // no approved and no pending OT
   };
 
@@ -1114,7 +1181,12 @@ describe("an initialized employee whose attendance does not exist yet", () => {
    */
   it("still refuses Approve & Lock once the month has been calculated", async () => {
     addWithNoAttendance(1952);
-    await calculation.calculate({ ...MONTH, employee_ids: [1952], actor: ACTOR });
+    // The new gate refuses to calculate it at all, naming why...
+    const refusedCalc = await calculation.calculate({ ...MONTH, employee_ids: [1952], actor: ACTOR });
+    assert.equal(refusedCalc.blocked_count, 1);
+    assert.ok(refusedCalc.results[0].blockers.some((b) => b.code === "ATTENDANCE_MONTH_NOT_CALCULATED"));
+    // ...and a month calculated under the previous rule is still not approvable.
+    await calculateUnderPreviousRule(1952);
 
     const row = await rowOf(1952);
     // The month WAS calculated - the refusal below is the approval gate
@@ -1123,7 +1195,7 @@ describe("an initialized employee whose attendance does not exist yet", () => {
     // were priced from an attendance month that is not settled.
     assert.equal(row.status, CALC_STATUS.ATTENDANCE_PENDING);
     assert.ok(row.calculation_hash);
-    assert.ok(row.blockers.some((b) => b.code === "ATTENDANCE_INCOMPLETE"));
+    assert.ok(row.blockers.some((b) => b.code === "ATTENDANCE_MONTH_NOT_CALCULATED"));
 
     const refused = await calculation.approve({ ...MONTH, employee_ids: [1952], actor: ACTOR });
     assert.equal(refused.approved_count, 0);
@@ -1201,14 +1273,15 @@ describe("attendance that is not settled is shown as pending, not as zero", () =
     world.add(employeeId);
     world.attendance.delete(employeeId);
     world.nrm.delete(employeeId);
-    await calculation.calculate({ ...MONTH, employee_ids: [employeeId], actor: ACTOR });
+    world.days.delete(employeeId);
+    await calculateUnderPreviousRule(employeeId);
   };
 
   /** Initialized and calculated, with an attendance month the engine has not finalized. */
   const calculatedWithNonFinalAttendance = async (employeeId) => {
     world.add(employeeId);
     world.attendance.get(employeeId).is_final = 0;
-    await calculation.calculate({ ...MONTH, employee_ids: [employeeId], actor: ACTOR });
+    await calculateUnderPreviousRule(employeeId);
   };
 
   it("a missing attendance month reads ATTENDANCE_PENDING", async () => {
@@ -1218,7 +1291,9 @@ describe("attendance that is not settled is shown as pending, not as zero", () =
     assert.equal(row.status, CALC_STATUS.ATTENDANCE_PENDING);
     assert.equal(row.status_label, "Attendance pending");
     assert.equal(row.attendance_pending, true);
-    assert.ok(row.blockers.some((b) => b.code === "ATTENDANCE_INCOMPLETE"));
+    // The exact reason, not a generic "Attendance incomplete".
+    assert.ok(row.blockers.some((b) => b.code === "ATTENDANCE_MONTH_NOT_CALCULATED"));
+    assert.ok(!row.blockers.some((b) => b.code === "ATTENDANCE_INCOMPLETE"));
   });
 
   it("an attendance month that is not final reads ATTENDANCE_PENDING", async () => {
@@ -1276,7 +1351,7 @@ describe("attendance that is not settled is shown as pending, not as zero", () =
       [COMPONENT.BONUS]: 500,
       [COMPONENT.ADVANCE_RECOVERY]: 300,
     });
-    await calculation.calculate({ ...MONTH, employee_ids: [1952], actor: ACTOR });
+    await calculateUnderPreviousRule(1952);
 
     const row = await rowOf(1952);
     assert.equal(row.status, CALC_STATUS.ATTENDANCE_PENDING);
@@ -1311,7 +1386,7 @@ describe("attendance that is not settled is shown as pending, not as zero", () =
     world.attendance.delete(1952);
     world.nrm.delete(1952);
     world.amounts.set(1952, { [COMPONENT.INCENTIVE]: 1500 });
-    await calculation.calculate({ ...MONTH, employee_ids: [1952], actor: ACTOR });
+    await calculateUnderPreviousRule(1952);
 
     const detail = await calculation.getEmployee({ ...MONTH, employee_id: 1952 });
     assert.equal(detail.status, CALC_STATUS.ATTENDANCE_PENDING);
@@ -1477,12 +1552,12 @@ describe("ATTENDANCE_PENDING, and what it does NOT bypass", () => {
   it("an ATTENDANCE_PENDING employee is refused before the approval transaction is ever opened", async () => {
     world.add(1);
     world.attendance.get(1).is_final = 0;
-    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    await calculateUnderPreviousRule(1);
 
     const row = await rowOf(1);
     assert.equal(row.status, CALC_STATUS.ATTENDANCE_PENDING);
     assert.equal(row.attendance_pending, true);
-    assert.ok(row.blockers.some((b) => b.code === "ATTENDANCE_INCOMPLETE"));
+    assert.ok(row.blockers.some((b) => b.code === "ATTENDANCE_SUMMARY_NOT_FINAL"));
 
     const refused = await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
     assert.equal(refused.approved_count, 0);
@@ -1546,11 +1621,13 @@ describe("attendance closed for payroll", () => {
 
   it("an employee who was NOT closed stays blocked from approval", async () => {
     unsettled(1);
-    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    const refusedCalc = await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(refusedCalc.blocked_count, 1, "an unclosed, unsettled month is not calculable");
+    await calculateUnderPreviousRule(1);
 
     const row = await rowOf(1);
     assert.equal(row.status, CALC_STATUS.ATTENDANCE_PENDING);
-    assert.ok(row.blockers.some((b) => b.code === "ATTENDANCE_INCOMPLETE"));
+    assert.ok(row.blockers.some((b) => b.code === "ATTENDANCE_SUMMARY_NOT_FINAL"));
     assert.ok(row.blockers.some((b) => b.code === "PENDING_ATTENDANCE_REGULARIZATION"));
     assert.ok(row.blockers.some((b) => b.code === "PENDING_OT_APPROVAL"));
 
@@ -1972,5 +2049,306 @@ describe("Reset Calculation", () => {
     assert.equal(fresh.salary_days, 25);
     assert.equal(fresh.attendance_payroll_version, 2);
     assert.equal((await rowOf(1)).status, CALC_STATUS.READY_FOR_APPROVAL);
+  });
+});
+
+/* ============================================= payroll readiness (shared) */
+
+/**
+ * THE MONTH PERSIST, AS FAR AS PAYROLL CAN SEE IT: the summary recomputed from
+ * the stored days (finality, approved OT) with a fresh fingerprint and a new
+ * version, and the NRM groups re-read from the same days. It is what
+ * `attendanceCalculationUsecase.calculateMonth({ persist: true })` leaves
+ * behind, and the ONLY thing Process Attendance may call.
+ */
+function fakeAttendanceProcessor() {
+  const calls = [];
+  return {
+    calls,
+    async calculateMonth({ employee_id, year, month, persist }) {
+      calls.push({ employee_id, year, month, persist });
+      const days = world.days.get(employee_id) || [];
+      const final = days.filter((d) => Number(d.is_final) === 1);
+      const summary = world.attendance.get(employee_id) || {
+        employee_id, attendance_monthly_payroll_id: 900 + employee_id, payroll_version: 0,
+        salary_days: 26, extra_days: 0, salary_day_earnings: 26000, extra_day_earnings: 0,
+        shortage_minutes: 0, missing_minute_deduction: 0, approved_ot_earnings: 0,
+      };
+      Object.assign(summary, {
+        is_final: final.length === days.length ? 1 : 0,
+        approved_ot_minutes: final.reduce((t, d) => t + Number(d.approved_ot_minutes || 0), 0),
+        payroll_version: Number(summary.payroll_version) + 1,
+        calculated_at: "2026-10-03 09:00:00.000",
+        day_rows_fingerprint: dayRowsFingerprint(days),
+      });
+      world.attendance.set(employee_id, summary);
+      const groups = new Map();
+      final.filter((d) => Number(d.nrm_minutes) > 0).forEach((d) => {
+        const g = groups.get(d.nrm_minutes) || {
+          employee_id, nrm_minutes: d.nrm_minutes, break_allowance_source: "SHIFT", day_count: 0, approved_ot_minutes: 0,
+        };
+        g.day_count += 1;
+        g.approved_ot_minutes += Number(d.approved_ot_minutes || 0);
+        groups.set(d.nrm_minutes, g);
+      });
+      world.nrm.set(employee_id, [...groups.values()]);
+      return {};
+    },
+  };
+}
+
+const dayOf = (employeeId, date) => world.days.get(employeeId).find((d) => d.attendance_date === date);
+const codesOf = (row) => row.blockers.map((b) => b.code);
+
+describe("Problem 1 - Attendance Pending reads the real, authoritative reason", () => {
+  /** Persisted while 7 Aug awaited a regularization; approved afterwards. */
+  const settledAfterProcessing = (employeeId) => {
+    world.add(employeeId);
+    const day = dayOf(employeeId, "2026-08-07");
+    day.status = "REGULARIZATION_PENDING";
+    day.is_final = 0;
+    world.attendance.get(employeeId).is_final = 0;
+    world.attendance.get(employeeId).day_rows_fingerprint = dayRowsFingerprint(world.days.get(employeeId));
+    // The approval rewrites the DAY only - the summary is not refreshed.
+    day.status = "FINAL";
+    day.is_final = 1;
+  };
+
+  it("a month settled after it was processed is STALE, not 'Attendance incomplete', and Process Attendance clears it", async () => {
+    settledAfterProcessing(1);
+    let row = await rowOf(1);
+    assert.equal(row.status, CALC_STATUS.NOT_CALCULATED);
+    assert.equal(row.calculable, false);
+    assert.equal(row.attendance_processable, true);
+    assert.ok(codesOf(row).includes("ATTENDANCE_STALE"));
+    assert.ok(!codesOf(row).includes("ATTENDANCE_INCOMPLETE"));
+
+    const processor = fakeAttendanceProcessor();
+    calculation.setAttendanceProcessor(processor);
+    const processed = await calculation.processAttendance({ ...MONTH, employee_ids: [1] });
+    assert.equal(processed.processed_count, 1);
+    assert.equal(processed.cleared_count, 1);
+    assert.deepEqual(processor.calls, [{ employee_id: 1, year: 2026, month: 8, persist: true }]);
+
+    row = await rowOf(1);
+    assert.equal(row.calculable, true);
+    const result = await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(result.calculated_count, 1);
+    assert.equal((await rowOf(1)).status, CALC_STATUS.READY_FOR_APPROVAL);
+  });
+
+  it("an ALREADY CALCULATED employee in that state moves out of Attendance Pending once attendance is processed", async () => {
+    world.add(1);
+    world.attendance.get(1).is_final = 0; // summary persisted mid-way
+    await calculateUnderPreviousRule(1);
+    assert.equal((await rowOf(1)).status, CALC_STATUS.ATTENDANCE_PENDING);
+    assert.ok(codesOf(await rowOf(1)).includes("ATTENDANCE_SUMMARY_NOT_FINAL"));
+
+    calculation.setAttendanceProcessor(fakeAttendanceProcessor());
+    await calculation.processAttendance({ ...MONTH, employee_ids: [1] });
+    const row = await rowOf(1);
+    // The summary moved, so the stored figures are recalculated deliberately.
+    assert.equal(row.status, CALC_STATUS.RECALCULATION_REQUIRED);
+    assert.equal(row.attendance_pending, false);
+    await calculation.calculate({ ...MONTH, employee_ids: [1], mode: "RECALCULATE", actor: ACTOR });
+    assert.equal((await rowOf(1)).status, CALC_STATUS.READY_FOR_APPROVAL);
+  });
+
+  it("genuinely incomplete attendance names the date and status, and Process Attendance does not pretend to fix it", async () => {
+    world.add(1);
+    const day = dayOf(1, "2026-08-07");
+    day.status = "REGULARIZATION_PENDING";
+    day.is_final = 0;
+    world.attendance.get(1).is_final = 0;
+    world.attendance.get(1).day_rows_fingerprint = dayRowsFingerprint(world.days.get(1));
+
+    const row = await rowOf(1);
+    const reason = row.blockers.find((b) => b.code === "ATTENDANCE_DAY_ROWS_INCOMPLETE");
+    assert.ok(reason);
+    assert.match(reason.message, /2026-08-07 \(REGULARIZATION_PENDING\)/);
+    assert.equal(row.attendance_processable, false);
+
+    const processor = fakeAttendanceProcessor();
+    calculation.setAttendanceProcessor(processor);
+    const processed = await calculation.processAttendance({ ...MONTH, employee_ids: [1] });
+    assert.equal(processed.skipped_count, 1);
+    assert.match(processed.results[0].message, /would not clear this/);
+    assert.equal(processor.calls.length, 0, "the engine is not run where it cannot help");
+  });
+
+  it("a summary processed mid-month names the dates never processed, and processing fills them", async () => {
+    world.add(1);
+    world.days.set(1, world.days.get(1).slice(0, 15));
+    world.attendance.get(1).day_rows_fingerprint = dayRowsFingerprint(world.days.get(1));
+    const row = await rowOf(1);
+    const reason = row.blockers.find((b) => b.code === "ATTENDANCE_DAY_ROWS_INCOMPLETE");
+    assert.deepEqual(reason.missing_dates.slice(0, 2), ["2026-08-16", "2026-08-17"]);
+    assert.equal(reason.missing_dates.length, 16);
+    assert.equal(row.attendance_processable, true);
+  });
+
+  it("no attendance month at all reads ATTENDANCE_MONTH_NOT_CALCULATED", async () => {
+    world.add(1);
+    world.attendance.delete(1);
+    const row = await rowOf(1);
+    assert.ok(codesOf(row).includes("ATTENDANCE_MONTH_NOT_CALCULATED"));
+    assert.equal(row.calculable, false);
+  });
+
+  it("pending approvals are named and an explicit Close Attendance for Payroll still accepts them", async () => {
+    world.add(1).add(2, { employee: { attendance_closed_for_payroll: 1 } });
+    [1, 2].forEach((id) => world.pending.set(id, { employee_id: id, pending_regularizations: 1, pending_ot: 1 }));
+    const open = await rowOf(1);
+    assert.ok(codesOf(open).includes("PENDING_ATTENDANCE_REGULARIZATION"));
+    assert.ok(codesOf(open).includes("PENDING_OT_APPROVAL"));
+    assert.equal(open.calculable, false);
+    const closed = await rowOf(2);
+    assert.equal(closed.calculable, true);
+  });
+});
+
+describe("Problem 2 - Calculate All Eligible counts only what Calculate accepts", () => {
+  /** OT approved for 5 Aug AFTER the month was processed: day 84, summary 0. */
+  const otApprovedAfterProcessing = (employeeId) => {
+    world.add(employeeId);
+    dayOf(employeeId, "2026-08-01").approved_ot_minutes = 84;
+    world.nrm.get(employeeId)[0].approved_ot_minutes = 84; // the day rows payroll groups
+  };
+  /** Approved OT on a final day with NRM 0 - summary and fingerprint agree. */
+  const otOnRestDay = (employeeId) => {
+    world.add(employeeId);
+    const day = dayOf(employeeId, "2026-08-30");
+    day.nrm_minutes = 0;
+    day.approved_ot_minutes = 60;
+    world.attendance.get(employeeId).approved_ot_minutes = 60;
+    world.attendance.get(employeeId).day_rows_fingerprint = dayRowsFingerprint(world.days.get(employeeId));
+  };
+
+  it("reproduces the defect: the old count included employees Calculate rejects", async () => {
+    otApprovedAfterProcessing(1);
+    // The previous rule - eligible means "not calculated" - counted it...
+    world.legacy = true;
+    const before = await monthView();
+    world.legacy = false;
+    assert.equal(before.summary.not_calculated, 1);
+    // ...and the calculation itself rejects it.
+    world.legacy = true;
+    const failed = await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    world.legacy = false;
+    assert.equal(failed.failed_count, 1);
+    assert.match(failed.results[0].message, /Approved OT does not reconcile: the attendance month reports 0 minutes and its day rows report 84/);
+    assert.equal(world.calculations.has(1), false);
+  });
+
+  it("an OT mismatch is not eligible, names the date, and is refused by Calculate as BLOCKED rather than FAILED", async () => {
+    otApprovedAfterProcessing(1);
+    const month = await monthView();
+    assert.equal(month.summary.not_calculated, 1);
+    assert.equal(month.summary.eligible_to_calculate, 0);
+    assert.equal(month.summary.not_calculated_blocked, 1);
+    const row = month.rows[0];
+    const ot = row.blockers.find((b) => b.code === "APPROVED_OT_MISMATCH");
+    assert.match(ot.message, /0 approved OT minutes but the settled days have 84 \(2026-08-01: 84\)/);
+    assert.ok(codesOf(row).includes("ATTENDANCE_STALE"));
+
+    const all = await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
+    assert.equal(all.results.length, 0, "Calculate All Eligible does not include it");
+    const one = await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(one.blocked_count, 1);
+    assert.equal(one.failed_count, 0);
+    assert.equal(world.attendance.get(1).approved_ot_minutes, 0, "approved OT was not silently altered");
+    assert.equal(dayOf(1, "2026-08-01").approved_ot_minutes, 84);
+
+    calculation.setAttendanceProcessor(fakeAttendanceProcessor());
+    await calculation.processAttendance({ ...MONTH, employee_ids: [1] });
+    const after = await monthView();
+    assert.equal(after.summary.eligible_to_calculate, 1);
+    const calculated = await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
+    assert.equal(calculated.calculated_count, 1);
+    assert.equal(world.calculations.get(1).approved_ot_minutes, 84);
+  });
+
+  it("OT on a day with no NRM is an NRM_MISMATCH with the date; processing cannot clear it and is not run", async () => {
+    otOnRestDay(1);
+    const row = await rowOf(1);
+    const nrm = row.blockers.find((b) => b.code === "NRM_MISMATCH");
+    assert.match(nrm.message, /2026-08-30 \(60 min\)/);
+    assert.equal(row.calculable, false);
+    assert.equal(row.attendance_processable, false);
+    const processor = fakeAttendanceProcessor();
+    calculation.setAttendanceProcessor(processor);
+    const processed = await calculation.processAttendance({ ...MONTH, employee_ids: [1] });
+    assert.equal(processed.skipped_count, 1);
+    assert.equal(processor.calls.length, 0);
+  });
+
+  it("a snapshot with no salary is SALARY_NOT_READY and not eligible", async () => {
+    world.add(1, { employee: { monthly_gross: null, basic: null } });
+    const row = await rowOf(1);
+    assert.ok(codesOf(row).includes("SALARY_NOT_READY"));
+    assert.equal(row.calculable, false);
+  });
+
+  it("THE INVARIANT: on a mixed month, the eligible count equals exactly what Calculate All Eligible calculates", async () => {
+    world.add(1).add(2).add(3); // clean
+    otApprovedAfterProcessing(4);
+    otOnRestDay(5);
+    world.add(6);
+    world.attendance.delete(6);
+    world.add(7, { employee: { monthly_gross: null } });
+    world.add(8);
+    dayOf(8, "2026-08-02").is_final = 0; // settled? no - and summary now stale
+    dayOf(8, "2026-08-02").status = "REVIEW_REQUIRED";
+
+    const before = await monthView();
+    assert.equal(before.summary.not_calculated, 8);
+    assert.equal(before.summary.eligible_to_calculate, 3);
+
+    const result = await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
+    assert.equal(result.calculated_count, before.summary.eligible_to_calculate);
+    assert.equal(result.failed_count, 0);
+    assert.deepEqual(result.results.map((r) => r.employee_id).sort(), [1, 2, 3]);
+
+    // And every employee counted eligible calculates individually too.
+    world.calculations.clear();
+    for (const id of before.rows.filter((r) => r.calculable).map((r) => r.employee_id)) {
+      const one = await calculation.calculate({ ...MONTH, employee_ids: [id], actor: ACTOR });
+      assert.equal(one.calculated_count, 1, `employee ${id} was counted eligible but did not calculate`);
+    }
+  });
+});
+
+describe("Process Attendance - safety", () => {
+  it("never touches an Approved & Locked employee or a locked month", async () => {
+    world.add(1).add(2);
+    await calculation.calculate({ ...MONTH, employee_ids: [1, 2], actor: ACTOR });
+    world.calculations.get(1).status = "APPROVED_LOCKED";
+    dayOf(2, "2026-08-03").approved_ot_minutes = 30; // make 2 processable
+    const processor = fakeAttendanceProcessor();
+    calculation.setAttendanceProcessor(processor);
+
+    const result = await calculation.processAttendance({ ...MONTH, employee_ids: [1, 2] });
+    assert.deepEqual(result.results.map((r) => r.result), ["LOCKED", "PROCESSED"]);
+    assert.deepEqual(processor.calls.map((c) => c.employee_id), [2]);
+
+    world.period = { status: "LOCKED" };
+    processor.calls.length = 0;
+    const locked = await calculation.processAttendance({ ...MONTH, employee_ids: [2] });
+    assert.equal(locked.locked_count, 1);
+    assert.equal(processor.calls.length, 0);
+  });
+
+  it("enforces the branch scope and reports an engine refusal per employee", async () => {
+    world.add(1).add(2, { employee: { store_id: 2 } });
+    dayOf(1, "2026-08-03").approved_ot_minutes = 30;
+    calculation.setAttendanceProcessor({
+      async calculateMonth() {
+        throw new Error("payroll month is locked for this employee");
+      },
+    });
+    const result = await calculation.processAttendance({ ...MONTH, employee_ids: [1, 2], store_ids: [1] });
+    assert.equal(result.failed_count, 1);
+    assert.match(result.results[0].message, /payroll month is locked/);
+    assert.equal(result.not_in_scope_count, 1);
   });
 });

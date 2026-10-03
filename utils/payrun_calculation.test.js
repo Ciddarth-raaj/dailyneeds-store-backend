@@ -629,16 +629,22 @@ describe("the month's counts", () => {
       { status: CALC_STATUS.RECALCULATION_REQUIRED, payslip_eligible: false },
       { status: CALC_STATUS.READY_FOR_APPROVAL, payslip_eligible: false },
       { status: CALC_STATUS.APPROVED_LOCKED, payslip_eligible: true },
+      // Not calculated, but Calculate would reject it: not eligible.
+      { status: CALC_STATUS.NOT_CALCULATED, payslip_eligible: false, calculable: false, attendance_processable: true },
     ]);
     assert.deepEqual(summary, {
-      initialized: 6,
-      not_calculated: 1,
+      initialized: 7,
+      not_calculated: 2,
       attendance_pending: 1,
       calculated: 1,
       recalculation_required: 1,
       ready_for_approval: 1,
       approved_locked: 1,
       payslip_eligible: 1,
+      eligible_to_calculate: 1,
+      not_calculated_blocked: 1,
+      recalculation_ready: 1,
+      attendance_processable: 1,
     });
   });
 });

@@ -286,6 +286,7 @@ const ROW_RESULT = {
   NOT_IN_SCOPE: "NOT_IN_SCOPE",
   FAILED: "FAILED",
   RESET: "RESET",
+  PROCESSED: "PROCESSED",
 };
 
 /** The calculation audit log's verbs. See the migration for why UNLOCK is here. */

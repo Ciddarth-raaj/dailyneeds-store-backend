@@ -160,11 +160,40 @@ class PayrunCalculationRepository {
               salary_day_earnings, extra_day_earnings,
               shortage_minutes, missing_minute_deduction,
               approved_ot_minutes, approved_ot_earnings,
-              DATE_FORMAT(calculated_at, '%Y-%m-%d %H:%i:%s.%f') AS calculated_at
+              DATE_FORMAT(calculated_at, '%Y-%m-%d %H:%i:%s.%f') AS calculated_at,
+              day_rows_fingerprint
          FROM attendance_monthly_payroll
         WHERE employee_id IN (?) AND period_year = ? AND period_month = ?`,
       [employeeIds, year, month],
       conn
+    );
+  }
+
+  /**
+   * THE STORED ATTENDANCE DAYS OF THE MONTH, FOR THE WHOLE POPULATION AT ONCE -
+   * what payroll readiness (`utils/payroll_readiness.js`) judges attendance
+   * completion from, exactly as the Attendance module and Approve & Lock do.
+   *
+   * THE SAME COLUMNS, IN THE SAME FORMATS, AS `dayRowsSql` - the statement the
+   * month persist fingerprints its days with - so the fingerprint computed from
+   * these rows is comparable with the one the summary recorded. Only
+   * `employee_id` is added (to split the batch) and `status` already is one of
+   * the fingerprint fields. Read only.
+   */
+  async listAttendanceDayRows(employeeIds, from, to) {
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
+    return this._read(
+      "LIST-ATTENDANCE-DAY-ROWS",
+      `SELECT employee_id,
+              DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date,
+              status, is_final, attendance_day_count, nrm_minutes, base_nrm_minutes,
+              worked_minutes, shortage_minutes, approved_ot_minutes, ot_rate,
+              permission_minutes, calculation_version, attendance_calculation_mode
+         FROM attendance_day_calculation
+        WHERE employee_id IN (?)
+          AND attendance_date BETWEEN ? AND ?
+        ORDER BY employee_id, attendance_date ASC`,
+      [employeeIds, from, to]
     );
   }
 
@@ -232,6 +261,7 @@ class PayrunCalculationRepository {
     return this._read(
       "LIST-STATUTORY-CONTEXT",
       `SELECT ne.employee_id,
+              ne.attendance_required,
               ne.pf_applicable,
               ne.esi_applicable,
               ne.previous_eps_member,

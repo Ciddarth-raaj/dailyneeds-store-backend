@@ -48,6 +48,8 @@ const APPROVER = { designation: 43, employee: 803 };       // approves, cannot c
 const VIEWER = { designation: 44, employee: 804 };         // reads payroll only
 const NO_VIEW = { designation: 45, employee: 805 };        // process_payroll alone
 const NOBODY = { designation: 46, employee: 806 };
+const PROCESSOR = { designation: 47, employee: 807 };      // payroll + recalculate_attendance
+const ATT_ONLY = { designation: 48, employee: 808 };       // recalculate_attendance, no payroll
 
 const GRANTS = {
   [CLERK.designation]: [P.VIEW_EMPLOYEES, P.PROCESS_PAYROLL],
@@ -56,6 +58,8 @@ const GRANTS = {
   [VIEWER.designation]: [P.VIEW_EMPLOYEES, P.VIEW_PAYROLL, P.VIEW_SALARY],
   [NO_VIEW.designation]: [P.PROCESS_PAYROLL],
   [NOBODY.designation]: [],
+  [PROCESSOR.designation]: [P.VIEW_EMPLOYEES, P.PROCESS_PAYROLL, P.RECALCULATE_ATTENDANCE],
+  [ATT_ONLY.designation]: [P.VIEW_EMPLOYEES, P.RECALCULATE_ATTENDANCE],
 };
 
 const EMPLOYEES = [
@@ -65,6 +69,8 @@ const EMPLOYEES = [
   { employee_id: VIEWER.employee, store_id: MOOLAKULAM, status: 1 },
   { employee_id: NO_VIEW.employee, store_id: MOOLAKULAM, status: 1 },
   { employee_id: NOBODY.employee, store_id: MOOLAKULAM, status: 1 },
+  { employee_id: PROCESSOR.employee, store_id: MOOLAKULAM, status: 1 },
+  { employee_id: ATT_ONLY.employee, store_id: MOOLAKULAM, status: 1 },
 ];
 
 /** The usecase, as a spy: what it was handed is what the route decided. */
@@ -73,6 +79,10 @@ const usecase = {
   reset: async (args) => {
     seen.push(args);
     return { reset_count: args.employee_ids.length, results: [] };
+  },
+  processAttendance: async (args) => {
+    seen.push(args);
+    return { processed_count: args.employee_ids.length, results: [] };
   },
 };
 
@@ -127,9 +137,9 @@ const tokenFor = (who) =>
     "1d"
   );
 
-const post = async (who, body) => {
+const post = async (who, body, url = "/payrun/calculation/reset") => {
   current = who || CLERK;
-  const res = await fetch(`http://127.0.0.1:${port}/payrun/calculation/reset`, {
+  const res = await fetch(`http://127.0.0.1:${port}${url}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -265,5 +275,34 @@ describe("the body is validated before the usecase is reached", () => {
     assert.deepEqual(seen[0].employee_ids, [11, 12]);
     assert.equal(seen[0].year, 2026);
     assert.equal(seen[0].month, 8);
+  });
+});
+
+describe("Process Attendance from Payroll", () => {
+  const PROCESS = "/payrun/calculation/process-attendance";
+  const BODY_P = { year: 2026, month: 9, employee_ids: [11, 12] };
+
+  it("needs process_payroll AND the attendance module's recalculate_attendance", async () => {
+    assertRefused(await post(null, BODY_P, PROCESS), "signed out");
+    assertRefused(await post(CLERK, BODY_P, PROCESS), "payroll without recalculate_attendance");
+    assertRefused(await post(ATT_ONLY, BODY_P, PROCESS), "attendance without process_payroll");
+    assertRefused(await post(VIEWER, BODY_P, PROCESS), "viewer");
+    const ok = await post(PROCESSOR, BODY_P, PROCESS);
+    assert.equal(ok.body.code, 200);
+    assert.deepEqual(seen[0].store_ids, [MOOLAKULAM], "the caller's branch scope, from the server");
+    assert.deepEqual(seen[0].employee_ids, [11, 12]);
+  });
+
+  it("takes explicit ids and a month only", async () => {
+    for (const body of [
+      { year: 2026, month: 9 },
+      { ...BODY_P, all_eligible: true },
+      { ...BODY_P, store_ids: [ECR] },
+      { ...BODY_P, persist: false },
+      { ...BODY_P, month: 13 },
+    ]) {
+      assert.equal((await post(PROCESSOR, body, PROCESS)).status, 400, JSON.stringify(body));
+    }
+    assert.equal(seen.length, 0);
   });
 });

@@ -497,6 +497,78 @@ describe("monthly attendance freshness and lock order, as SQL", { skip: !URL && 
     });
   });
 
+  describe("PAYROLL READINESS reads the SAME fingerprint the month persist records", () => {
+    const { evaluatePayrollReadiness } = require("../utils/payroll_readiness");
+    const { dayRowsFingerprint } = require("../utils/attendance_month_freshness");
+    const SEPT = Array.from({ length: 30 }, (_, i) => `2026-09-${String(i + 1).padStart(2, "0")}`);
+    const snapshot = { monthly_gross: 26000, basic: 13000, date_of_joining: "2020-01-01" };
+
+    /** Payroll's own batched reads, exactly as Calculation & Review makes them. */
+    const readiness = async () => {
+      const [monthlyRow] = await payrunRepo.listAttendanceMonths([EMP], YEAR, MONTH);
+      const dayRows = await payrunRepo.listAttendanceDayRows([EMP], "2026-09-01", "2026-09-30");
+      return {
+        monthlyRow,
+        dayRows,
+        verdict: evaluatePayrollReadiness({
+          year: YEAR, month: MONTH, snapshot, monthly: monthlyRow || null,
+          day_rows: dayRows, latest_closed_date: "2026-10-02",
+        }),
+      };
+    };
+
+    it("a freshly persisted, settled month is CURRENT and ready - the batched read reproduces the stored fingerprint", async () => {
+      await persistMonth(0, SEPT.map((d) => day(d, { shortage_minutes: 0 })));
+      const { monthlyRow, dayRows, verdict } = await readiness();
+      assert.equal(
+        dayRowsFingerprint(dayRows.map(({ employee_id, ...rest }) => rest)),
+        monthlyRow.day_rows_fingerprint,
+        "payroll's batched day read must fingerprint identically to the persist's own read-back"
+      );
+      assert.deepEqual(verdict.reasons.map((r) => r.code), []);
+      assert.equal(verdict.attendance_ready, true);
+    });
+
+    it("an OT approval that rewrites a DAY after the persist is STALE + APPROVED_OT_MISMATCH, naming the date", async () => {
+      await persistMonth(0, SEPT.map((d) => day(d, { shortage_minutes: 0 })));
+      // What an OT approval does: the day row moves, the summary does not.
+      await q(pool, "UPDATE attendance_day_calculation SET approved_ot_minutes = 84 WHERE employee_id = ? AND attendance_date = '2026-09-14'", [EMP]);
+      const { verdict } = await readiness();
+      const codes = verdict.reasons.map((r) => r.code);
+      assert.ok(codes.includes("ATTENDANCE_STALE"));
+      const ot = verdict.reasons.find((r) => r.code === "APPROVED_OT_MISMATCH");
+      assert.match(ot.message, /0 approved OT minutes but the settled days have 84 \(2026-09-14: 84\)/);
+      assert.equal(verdict.attendance_processable, true);
+
+      // Re-persisting the month (what Process Attendance runs) clears both.
+      const days = SEPT.map((d) => day(d, { shortage_minutes: 0, approved_ot_minutes: d === "2026-09-14" ? 84 : 0 }));
+      await calcRepo.saveMonthWithPayroll({
+        employee_id: EMP, period_year: YEAR, period_month: MONTH, rows: days,
+        monthly: { ...monthly(0), approved_ot_minutes: 84 },
+      });
+      const after = await readiness();
+      assert.deepEqual(after.verdict.reasons.map((r) => r.code), []);
+    });
+
+    it("a regularization settled after the persist leaves a non-final summary that reads STALE, not 'incomplete'", async () => {
+      await calcRepo.saveMonthWithPayroll({
+        employee_id: EMP, period_year: YEAR, period_month: MONTH,
+        rows: SEPT.map((d) => day(d, d === "2026-09-07" ? { status: "REGULARIZATION_PENDING", is_final: 0 } : { shortage_minutes: 0 })),
+        monthly: { ...monthly(0), is_final: 0 },
+      });
+      let { verdict } = await readiness();
+      assert.match(verdict.reasons.find((r) => r.code === "ATTENDANCE_DAY_ROWS_INCOMPLETE").message, /2026-09-07 \(REGULARIZATION_PENDING\)/);
+      // The approval settles the day; the summary still says is_final = 0.
+      await q(pool, "UPDATE attendance_day_calculation SET status = 'FINAL', is_final = 1 WHERE employee_id = ? AND attendance_date = '2026-09-07'", [EMP]);
+      ({ verdict } = await readiness());
+      const codes = verdict.reasons.map((r) => r.code);
+      assert.ok(codes.includes("ATTENDANCE_STALE"));
+      assert.ok(codes.includes("ATTENDANCE_SUMMARY_NOT_FINAL"));
+      assert.ok(!codes.includes("ATTENDANCE_DAY_ROWS_INCOMPLETE"), "the days themselves are complete");
+      assert.equal(verdict.attendance_processable, true);
+    });
+  });
+
   describe("LOCK ORDER: a Permission decision and Approve & Lock never deadlock", () => {
     /** Approve & Lock's own lock sequence: the payrun row, then the closure of pending permissions. */
     const lockPayroll = async () => {

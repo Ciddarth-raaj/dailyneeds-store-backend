@@ -797,6 +797,9 @@ class Server {
     this.attendanceCalculationUsecase = require("./usecase/attendance_calculation")(
       this.attendanceCalculationRepo
     );
+    // Payroll's Process Attendance runs THIS engine's month persist and has
+    // no attendance logic of its own - see `usecase/payrun_calculation.js`.
+    this.payrunCalculationUsecase.setAttendanceProcessor(this.attendanceCalculationUsecase);
     // The Attendance Dashboard. Orchestration only, and it calculates nothing
     // of its own: it calls the SAME pure `calculateAttendanceDay` over the
     // same effective punch stream and the same dated shift resolution, so the

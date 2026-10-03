@@ -1097,10 +1097,20 @@ function deriveStatus(input = {}) {
     adjustment_state = null,
     statutory_setup_complete = true,
     attendance_closed_for_payroll = false,
+    /*
+     * THE SHARED PAYROLL READINESS (`utils/payroll_readiness.js`). When it is
+     * given, it is the ONLY attendance answer: completion is judged from the
+     * stored day rows and a current summary, each problem is a named blocker,
+     * and `calculable` is what Calculate itself will enforce. Without it the
+     * older summary-flag rule below applies unchanged.
+     */
+    readiness = null,
   } = input;
 
   const blockers = [];
   const recalcReasons = [];
+  const readinessReasons = readiness ? readiness.reasons || [] : [];
+  const calculable = readiness ? readiness.calculable === true : true;
 
   /*
    * IS THE ATTENDANCE THIS MONTH WAS PRICED FROM SETTLED?
@@ -1136,7 +1146,9 @@ function deriveStatus(input = {}) {
    * two apart - which matters, because one of them means somebody accepted a
    * known gap.
    */
-  const attendanceAccepted = attendanceFinal || attendance_closed_for_payroll === true;
+  const attendanceAccepted = readiness
+    ? readiness.attendance_ready === true
+    : attendanceFinal || attendance_closed_for_payroll === true;
 
   if (calculation && calculation.status === CALC_STATUS.APPROVED_LOCKED) {
     return {
@@ -1151,6 +1163,7 @@ function deriveStatus(input = {}) {
        * off would hide what they signed.
        */
       attendance_pending: false,
+      calculable: false,
       /*
        * THE PAYSLIP ELIGIBILITY CONTRACT, AND IT IS DERIVED RATHER THAN
        * STORED. `payslip_eligible` is true for exactly the employees whose
@@ -1167,6 +1180,8 @@ function deriveStatus(input = {}) {
 
   if (!calculation) {
     blockers.push(blockerOf(READY_BLOCKER.NOT_CALCULATED));
+    // WHY IT CANNOT BE CALCULATED YET, by name, so "eligible" is truthful.
+    readinessReasons.forEach((r) => blockers.push(r));
     return {
       status: CALC_STATUS.NOT_CALCULATED,
       status_label: CALC_STATUS_LABEL[CALC_STATUS.NOT_CALCULATED],
@@ -1178,6 +1193,7 @@ function deriveStatus(input = {}) {
        * is the more informative thing to say about this employee.
        */
       attendance_pending: false,
+      calculable,
       payslip_eligible: false,
     };
   }
@@ -1201,6 +1217,7 @@ function deriveStatus(input = {}) {
       );
     }
     blockers.push(blockerOf(READY_BLOCKER.RECALCULATION_REQUIRED));
+    readinessReasons.forEach((r) => blockers.push(r));
     return {
       status: CALC_STATUS.RECALCULATION_REQUIRED,
       status_label: CALC_STATUS_LABEL[CALC_STATUS.RECALCULATION_REQUIRED],
@@ -1216,6 +1233,7 @@ function deriveStatus(input = {}) {
        * their zeroes as results would be the same lie with a warning over it.
        */
       attendance_pending: !attendanceAccepted,
+      calculable,
       payslip_eligible: false,
     };
   }
@@ -1226,7 +1244,11 @@ function deriveStatus(input = {}) {
    * stored flag - a stored "ready" is a flag that goes stale the moment a
    * regularization is raised.
    */
-  if (!attendanceAccepted) {
+  if (readiness) {
+    // The exact reasons, each with its dates, instead of one generic line.
+    // Pending requests are among them, already filtered by an explicit close.
+    readinessReasons.forEach((r) => blockers.push(r));
+  } else if (!attendanceAccepted) {
     blockers.push(blockerOf(READY_BLOCKER.ATTENDANCE_INCOMPLETE));
   }
   /*
@@ -1240,7 +1262,7 @@ function deriveStatus(input = {}) {
    * approver's queue and still in their own history; what has been decided is
    * that THIS MONTH'S PAY no longer waits for them.
    */
-  if (attendance_closed_for_payroll !== true) {
+  if (!readiness && attendance_closed_for_payroll !== true) {
     if (Number(pending_regularizations) > 0) {
       blockers.push(blockerOf(READY_BLOCKER.PENDING_ATTENDANCE_REGULARIZATION));
     }
@@ -1297,6 +1319,7 @@ function deriveStatus(input = {}) {
      * it has to be visible before anybody approves it.
      */
     attendance_pending: !attendanceAccepted,
+    calculable,
     payslip_eligible: false,
   };
 }
@@ -1327,8 +1350,25 @@ function summarize(rows = []) {
     ready_for_approval: 0,
     approved_locked: 0,
     payslip_eligible: 0,
+    /*
+     * WHAT CALCULATE ALL ELIGIBLE WILL ACTUALLY CALCULATE: not calculated AND
+     * passing every check Calculate enforces. `not_calculated` stays the
+     * plain count; the difference is `not_calculated_blocked`, each with its
+     * reasons on the row.
+     */
+    eligible_to_calculate: 0,
+    not_calculated_blocked: 0,
+    recalculation_ready: 0,
+    attendance_processable: 0,
   };
   rows.forEach((row) => {
+    const calculable = row.calculable !== false;
+    if (row.status === CALC_STATUS.NOT_CALCULATED) {
+      if (calculable) summary.eligible_to_calculate += 1;
+      else summary.not_calculated_blocked += 1;
+    }
+    if (row.status === CALC_STATUS.RECALCULATION_REQUIRED && calculable) summary.recalculation_ready += 1;
+    if (row.attendance_processable === true) summary.attendance_processable += 1;
     if (row.status === CALC_STATUS.NOT_CALCULATED) summary.not_calculated += 1;
     else if (row.status === CALC_STATUS.ATTENDANCE_PENDING) summary.attendance_pending += 1;
     else if (row.status === CALC_STATUS.CALCULATED) summary.calculated += 1;
