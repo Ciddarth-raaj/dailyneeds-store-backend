@@ -285,6 +285,7 @@ const ROW_RESULT = {
   LOCKED: "LOCKED",
   NOT_IN_SCOPE: "NOT_IN_SCOPE",
   FAILED: "FAILED",
+  RESET: "RESET",
 };
 
 /** The calculation audit log's verbs. See the migration for why UNLOCK is here. */
@@ -294,6 +295,51 @@ const AUDIT_ACTION = {
   APPROVE_LOCK: "APPROVE_LOCK",
   UNLOCK: "UNLOCK",
 };
+
+/**
+ * RESET CALCULATION - why somebody discarded an employee's calculated month.
+ *
+ * A CLOSED LIST, because a reset is a correction and the audit has to say what
+ * was being corrected. OTHER is allowed only with a remark - enforced by the
+ * route, the usecase AND a CHECK constraint on the audit table.
+ */
+const RESET_REASON = {
+  ATTENDANCE_CORRECTED: "ATTENDANCE_CORRECTED",
+  SALARY_MASTER_CORRECTED: "SALARY_MASTER_CORRECTED",
+  WRONG_OT: "WRONG_OT",
+  WRONG_ADDITION_DEDUCTION: "WRONG_ADDITION_DEDUCTION",
+  OTHER: "OTHER",
+};
+
+const RESET_REASON_LABEL = {
+  [RESET_REASON.ATTENDANCE_CORRECTED]: "Attendance corrected",
+  [RESET_REASON.SALARY_MASTER_CORRECTED]: "Salary Master corrected",
+  [RESET_REASON.WRONG_OT]: "Wrong OT",
+  [RESET_REASON.WRONG_ADDITION_DEDUCTION]: "Wrong addition/deduction",
+  [RESET_REASON.OTHER]: "Other",
+};
+
+/** Whether one row's action or a selection's. Recorded on every audit row. */
+const RESET_MODE = {
+  INDIVIDUAL: "INDIVIDUAL",
+  BULK: "BULK",
+};
+
+/**
+ * THE STATUSES A RESET MAY START FROM: every state in which a calculation
+ * exists and nobody has approved it. NOT_CALCULATED has nothing to reset and
+ * APPROVED_LOCKED is final - the repository refuses it again on the held row
+ * lock, by allowing only the stored CALCULATED status.
+ */
+const RESETTABLE_STATUSES = [
+  CALC_STATUS.ATTENDANCE_PENDING,
+  CALC_STATUS.CALCULATED,
+  CALC_STATUS.RECALCULATION_REQUIRED,
+  CALC_STATUS.READY_FOR_APPROVAL,
+];
+
+/** The longest remark a reset may carry - the audit column's width. */
+const RESET_REMARK_MAX = 500;
 
 /** The most employees one calculate / recalculate / approve call may carry. */
 const MAX_BULK_EMPLOYEES = 1000;
@@ -313,4 +359,9 @@ module.exports = {
   ROW_RESULT,
   AUDIT_ACTION,
   MAX_BULK_EMPLOYEES,
+  RESET_REASON,
+  RESET_REASON_LABEL,
+  RESET_MODE,
+  RESETTABLE_STATUSES,
+  RESET_REMARK_MAX,
 };

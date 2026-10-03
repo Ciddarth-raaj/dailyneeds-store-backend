@@ -22,7 +22,7 @@ const { istToday } = require("../utils/istDate");
 
 /**
  * Payrun Calculation & Review - the reads a calculated month needs, and the
- * three writes that calculate, recalculate and lock one.
+ * writes that calculate, recalculate, lock and reset one.
  *
  * EVERY READ IS BATCHED ACROSS THE WHOLE MONTH'S POPULATION, for the reason
  * `repository/payrun.js` and `repository/attendance_dashboard.js` both state:
@@ -33,7 +33,8 @@ const { istToday } = require("../utils/istDate");
  * engine, the salary lifecycle and the adjustments stage already stored, and
  * `utils/payrun_calculation.js` - which is pure - decides what it means.
  *
- * IT NEVER WRITES OUTSIDE ITS OWN TWO TABLES. There is no UPDATE of
+ * IT NEVER WRITES OUTSIDE ITS OWN TABLES (the calculation, its audit log and
+ * the reset audit). There is no UPDATE of
  * `payrun_employee`, `payrun_employee_adjustment`, `employee_salary`,
  * `new_employee` or any attendance table anywhere below. In particular,
  * CALCULATING A MONTH DOES NOT TOUCH THE SNAPSHOT: the snapshot is what the
@@ -936,6 +937,174 @@ class PayrunCalculationRepository {
     } finally {
       conn.release();
     }
+  }
+
+  /**
+   * RESET ONE EMPLOYEE'S CALCULATION - the row goes, everything else stays.
+   *
+   * "Not Calculated" IS the absence of a row here, so returning an employee to
+   * it means removing exactly one: the row for THIS year, THIS month and THIS
+   * employee. Nothing references it by foreign key, so the removal cascades
+   * nowhere, and there is no statement in this method that names any other
+   * table except the reset audit it writes.
+   *
+   * ONE TRANSACTION PER EMPLOYEE, deliberately unlike `approve`. A bulk reset
+   * that met one locked employee must still reset the other nine, and an
+   * employee half reset - row gone, audit missing - must be impossible. So each
+   * employee commits or rolls back on its own, and the caller loops.
+   *
+   * THE SAME ROW LOCK APPROVAL AND ATTENDANCE TAKE. The row is located by its
+   * identity and locked `FOR UPDATE` before its status is read, so:
+   *
+   *   approval first   it locks and approves; this wakes, sees
+   *                    APPROVED_LOCKED and refuses
+   *   reset first      it locks and deletes; the approval wakes, finds no
+   *                    row and reports NO_CALCULATION
+   *
+   * THE DELETE IS AN ALLOW-LIST. It carries `AND status = 'CALCULATED'`, so a
+   * locked row - or any stored status added later, a paid or published one -
+   * cannot be removed even by a caller that skipped every check above it. And
+   * if it removes anything other than exactly one row the whole employee rolls
+   * back.
+   *
+   * THE MONTH LOCK IS RE-READ INSIDE THE TRANSACTION, so a month locked after
+   * the usecase looked is still refused.
+   *
+   * THE REMOVED ROW IS KEPT, IN FULL, ON THE AUDIT. It is re-read through
+   * `listCalculations` on this connection after the lock - the same statement,
+   * the same DATE_FORMATs - so the snapshot reads exactly as the screen did.
+   *
+   * IDEMPOTENT: a second reset of the same employee finds no row and answers
+   * NOT_CALCULATED, writing nothing.
+   */
+  async resetCalculation({
+    year,
+    month,
+    employee_id,
+    previous_status,
+    reason,
+    remark = null,
+    mode,
+    reset_by = null,
+  }) {
+    const conn = await getConnectionAsync(this.db);
+    try {
+      await beginTransactionAsync(conn);
+
+      const [periodRow] = await this._read(
+        "RESET-LOCK-PERIOD",
+        `SELECT status FROM payrun_period
+          WHERE period_year = ? AND period_month = ?
+          LOCK IN SHARE MODE`,
+        [year, month],
+        conn
+      );
+      if (periodRow && periodRow.status === "LOCKED") {
+        await rollbackAsync(conn);
+        return { employee_id, outcome: "MONTH_LOCKED" };
+      }
+
+      // NO STATUS IN THE PREDICATE: locate by identity, lock, then inspect.
+      const [locked] = await this._read(
+        "RESET-LOCK-CALCULATION-ROW",
+        `SELECT payrun_calculation_id, status
+           FROM payrun_employee_calculation
+          WHERE period_year = ? AND period_month = ? AND employee_id = ?
+          FOR UPDATE`,
+        [year, month, employee_id],
+        conn
+      );
+      if (!locked) {
+        await rollbackAsync(conn);
+        return { employee_id, outcome: "NOT_CALCULATED" };
+      }
+      if (locked.status !== STORED_STATUS.CALCULATED) {
+        await rollbackAsync(conn);
+        return { employee_id, outcome: "LOCKED", stored_status: locked.status };
+      }
+
+      const [stored] = await this.listCalculations(
+        { year, month, employee_ids: [employee_id] },
+        conn
+      );
+
+      await this._read(
+        "INSERT-RESET-AUDIT",
+        `INSERT INTO payrun_employee_calculation_reset_audit
+                (payrun_employee_id, period_year, period_month, employee_id,
+                 payrun_calculation_id, previous_status, previous_stored_status,
+                 reset_reason, reset_remark, reset_mode,
+                 calculation_version, calculation_revision, calculation_hash,
+                 source_hash, inputs_hash, net_pay, calculation_snapshot, reset_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          stored.payrun_employee_id,
+          year,
+          month,
+          employee_id,
+          stored.payrun_calculation_id,
+          previous_status || stored.status,
+          stored.status,
+          reason,
+          remark,
+          mode,
+          stored.calculation_version,
+          stored.calculation_revision,
+          stored.calculation_hash,
+          stored.source_hash,
+          stored.inputs_hash,
+          stored.net_pay,
+          JSON.stringify(stored),
+          reset_by,
+        ],
+        conn
+      );
+
+      const deleted = await this._read(
+        "RESET-DELETE-CALCULATION",
+        `DELETE FROM payrun_employee_calculation
+          WHERE payrun_calculation_id = ?
+            AND period_year = ? AND period_month = ? AND employee_id = ?
+            AND status = 'CALCULATED'`,
+        [stored.payrun_calculation_id, year, month, employee_id],
+        conn
+      );
+      if (!deleted || Number(deleted.affectedRows) !== 1) {
+        throw new Error(
+          `Reset removed ${deleted ? deleted.affectedRows : "no"} rows for employee ${employee_id}; rolled back`
+        );
+      }
+
+      await commitAsync(conn);
+      return {
+        employee_id,
+        outcome: "RESET",
+        payrun_calculation_id: stored.payrun_calculation_id,
+        net_pay: stored.net_pay,
+      };
+    } catch (err) {
+      await rollbackAsync(conn);
+      throw err;
+    } finally {
+      conn.release();
+    }
+  }
+
+  /** One employee's reset history for the month, newest first. */
+  async listResetAudit({ year, month, employee_id }) {
+    return this._read(
+      "LIST-RESET-AUDIT",
+      `SELECT payrun_calculation_reset_audit_id, payrun_calculation_id,
+              previous_status, previous_stored_status,
+              reset_reason, reset_remark, reset_mode,
+              calculation_version, calculation_revision, calculation_hash, net_pay,
+              reset_by,
+              DATE_FORMAT(reset_at, '%Y-%m-%d %H:%i:%s') AS reset_at
+         FROM payrun_employee_calculation_reset_audit
+        WHERE period_year = ? AND period_month = ? AND employee_id = ?
+        ORDER BY payrun_calculation_reset_audit_id DESC`,
+      [year, month, employee_id]
+    );
   }
 }
 

@@ -5,6 +5,10 @@ const {
   CALCULATION_VERSION,
   ROW_RESULT,
   STORED_STATUS,
+  RESET_REASON,
+  RESET_MODE,
+  RESETTABLE_STATUSES,
+  RESET_REMARK_MAX,
 } = require("../constants/payrun_calculation");
 const { monthWindow, statutorySetupComplete } = require("../utils/payrun_eligibility");
 const { deriveState } = require("../utils/payrun_adjustments");
@@ -1234,6 +1238,196 @@ class PayrunCalculationUsecase {
   }
 
   /** One employee's calculation and approval history for the month. */
+  /**
+   * RESET CALCULATION - return the selected employees to NOT CALCULATED.
+   *
+   * WHAT IT REMOVES: the employee's generated `payrun_employee_calculation`
+   * row for THIS month, and nothing else. The snapshot, the adjustments, the
+   * no-adjustment confirmation, the monthly pay type, the attendance close and
+   * every source - salary, attendance, OT, requests, the master - stay exactly
+   * as they are, so the next Calculate produces the month afresh from them.
+   * That is structural: the repository method has no statement naming any of
+   * those tables.
+   *
+   * EXPLICIT IDS ONLY. There is no "reset everybody" flag: a reset discards
+   * somebody's reviewed figures, and it is done to the people somebody chose.
+   *
+   * THE SCOPE IS THE SERVER'S. The population is read through the caller's
+   * branch scope, so an id outside it is NOT_IN_SCOPE whatever the body says,
+   * and the month is the one in the request - every write names it.
+   *
+   * A MIXED BATCH IS NOT A FAILED BATCH. Each employee is decided and written
+   * on their own; locked, not-calculated and out-of-scope employees are
+   * reported beside the ones that were reset, and an unexpected failure on one
+   * employee is reported as FAILED for that employee alone.
+   */
+  async reset({
+    year,
+    month,
+    employee_ids,
+    reason,
+    remark = null,
+    mode,
+    store_ids = null,
+    actor = {},
+  }) {
+    const period = normalizeMonth(year, month);
+    const ids = normalizeEmployeeIds(employee_ids);
+
+    const reasonCode = String(reason === null || reason === undefined ? "" : reason)
+      .trim()
+      .toUpperCase();
+    if (!Object.values(RESET_REASON).includes(reasonCode)) {
+      throw validationError(
+        `A reset reason is required: one of ${Object.values(RESET_REASON).join(", ")}`
+      );
+    }
+    const remarkText =
+      remark === null || remark === undefined ? "" : String(remark).trim();
+    if (reasonCode === RESET_REASON.OTHER && remarkText === "") {
+      throw validationError("A remark is required when the reset reason is Other");
+    }
+    if (remarkText.length > RESET_REMARK_MAX) {
+      throw validationError(`The remark must be at most ${RESET_REMARK_MAX} characters`);
+    }
+
+    const modeCode = String(mode === null || mode === undefined ? "" : mode)
+      .trim()
+      .toUpperCase();
+    if (!Object.values(RESET_MODE).includes(modeCode)) {
+      throw validationError(`mode must be one of ${Object.values(RESET_MODE).join(", ")}`);
+    }
+    if (modeCode === RESET_MODE.INDIVIDUAL && ids.length !== 1) {
+      throw validationError("An individual reset names exactly one employee");
+    }
+
+    const context = await this._assemble({
+      year: period.year,
+      month: period.month,
+      store_ids,
+      employee_ids: ids,
+    });
+    const presentedById = new Map(
+      context.population.map((employee) => [
+        Number(employee.employee_id),
+        this._present(context, employee),
+      ])
+    );
+    const resetBy = actor && actor.employeeId !== undefined ? actor.employeeId : null;
+    const monthLabel = `${period.year}-${String(period.month).padStart(2, "0")}`;
+
+    const results = [];
+    for (const employeeId of ids) {
+      const presented = presentedById.get(employeeId);
+      if (!presented) {
+        results.push({
+          employee_id: employeeId,
+          result: ROW_RESULT.NOT_IN_SCOPE,
+          message:
+            "This employee is not initialized for the selected month, or is outside your branch scope",
+        });
+        continue;
+      }
+      const name = presented.row.employee_name;
+      if (context.month_locked) {
+        results.push({
+          employee_id: employeeId,
+          employee_name: name,
+          result: ROW_RESULT.LOCKED,
+          message: `Payroll month ${monthLabel} is locked. Its calculations cannot be reset.`,
+        });
+        continue;
+      }
+      if (presented.row.status === CALC_STATUS.APPROVED_LOCKED) {
+        results.push({
+          employee_id: employeeId,
+          employee_name: name,
+          result: ROW_RESULT.LOCKED,
+          message: "Payroll is Approved & Locked for this employee. It cannot be reset.",
+        });
+        continue;
+      }
+      if (!RESETTABLE_STATUSES.includes(presented.row.status)) {
+        results.push({
+          employee_id: employeeId,
+          employee_name: name,
+          result: ROW_RESULT.SKIPPED,
+          message: "Not calculated for this month. There is nothing to reset.",
+        });
+        continue;
+      }
+
+      /* eslint-disable no-await-in-loop */
+      let applied;
+      try {
+        applied = await this.repo.resetCalculation({
+          year: period.year,
+          month: period.month,
+          employee_id: employeeId,
+          previous_status: presented.row.status,
+          reason: reasonCode,
+          remark: remarkText === "" ? null : remarkText,
+          mode: modeCode,
+          reset_by: resetBy,
+        });
+      } catch (err) {
+        results.push({
+          employee_id: employeeId,
+          employee_name: name,
+          result: ROW_RESULT.FAILED,
+          message: "The reset could not be completed for this employee. Nothing was changed.",
+        });
+        continue;
+      }
+      /* eslint-enable no-await-in-loop */
+
+      if (applied.outcome === "RESET") {
+        results.push({
+          employee_id: employeeId,
+          employee_name: name,
+          result: ROW_RESULT.RESET,
+          previous_status: presented.row.status,
+          message: "Calculation reset. The employee is ready to calculate again.",
+        });
+      } else if (applied.outcome === "NOT_CALCULATED") {
+        results.push({
+          employee_id: employeeId,
+          employee_name: name,
+          result: ROW_RESULT.SKIPPED,
+          message: "Not calculated for this month. There is nothing to reset.",
+        });
+      } else if (applied.outcome === "MONTH_LOCKED") {
+        results.push({
+          employee_id: employeeId,
+          employee_name: name,
+          result: ROW_RESULT.LOCKED,
+          message: `Payroll month ${monthLabel} is locked. Its calculations cannot be reset.`,
+        });
+      } else {
+        results.push({
+          employee_id: employeeId,
+          employee_name: name,
+          result: ROW_RESULT.LOCKED,
+          message: "Payroll is Approved & Locked for this employee. It cannot be reset.",
+        });
+      }
+    }
+
+    const counted = (code) => results.filter((r) => r.result === code).length;
+    return {
+      period_year: period.year,
+      period_month: period.month,
+      mode: modeCode,
+      reason: reasonCode,
+      reset_count: counted(ROW_RESULT.RESET),
+      skipped_count: counted(ROW_RESULT.SKIPPED),
+      locked_count: counted(ROW_RESULT.LOCKED),
+      failed_count: counted(ROW_RESULT.FAILED),
+      not_in_scope_count: counted(ROW_RESULT.NOT_IN_SCOPE),
+      results,
+    };
+  }
+
   async getHistory({ year, month, employee_id }) {
     const period = normalizeMonth(year, month);
     const ids = normalizeEmployeeIds([employee_id]);

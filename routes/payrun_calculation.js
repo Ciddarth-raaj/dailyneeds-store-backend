@@ -3,7 +3,13 @@ const Joi = require("@hapi/joi");
 
 const P = require("../constants/hr_permissions");
 const respondError = require("../utils/http");
-const { CALC_STATUS, MAX_BULK_EMPLOYEES } = require("../constants/payrun_calculation");
+const {
+  CALC_STATUS,
+  MAX_BULK_EMPLOYEES,
+  RESET_REASON,
+  RESET_MODE,
+  RESET_REMARK_MAX,
+} = require("../constants/payrun_calculation");
 
 /**
  * Payrun Calculation & Review - the API. A STAGE of /payrun, mounted under it.
@@ -15,6 +21,7 @@ const { CALC_STATUS, MAX_BULK_EMPLOYEES } = require("../constants/payrun_calcula
  *   POST /payrun/calculation/calculate   compute the months not computed yet
  *   POST /payrun/calculation/recalculate refresh the sources on computed ones
  *   POST /payrun/calculation/approve     APPROVE & LOCK, employee by employee
+ *   POST /payrun/calculation/reset       RESET CALCULATION back to not calculated
  *   GET  /payrun/calculation/history     who calculated and approved, when
  *
  * THERE IS NO SINGLE-EMPLOYEE VARIANT OF ANY OF THE THREE WRITES, deliberately
@@ -319,6 +326,64 @@ class PayrunCalculationRoutes {
               month: Number(req.body.month),
               employee_ids: req.body.employee_ids,
               all_ready: req.body.all_ready,
+              store_ids: scoped.store_ids,
+              actor,
+            })),
+          });
+        } catch (err) {
+          this._fail(res, err);
+        }
+      }
+    );
+
+    /**
+     * RESET CALCULATION - one employee or a selection, back to NOT CALCULATED.
+     *
+     * `view_employees` AND `process_payroll`: the key that calculates and
+     * recalculates. A reset discards only what that key can already overwrite
+     * - the generated figures of an unapproved month - and it never reaches an
+     * Approved & Locked employee, which stays the `approve_payrun` holder's.
+     *
+     * EXPLICIT IDS, A REASON AND A MODE ARE REQUIRED; a remark is required for
+     * OTHER. There is no select-all flag. The month is required and every write
+     * the usecase makes names it, so a reset cannot land in another month.
+     * Who reset is the server's identity, never the body's.
+     */
+    this.router.post(
+      "/payrun/calculation/reset",
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.PROCESS_PAYROLL),
+      async (req, res) => {
+        try {
+          const isValid = Joi.validate(req.body, {
+            ...this._month(),
+            employee_ids: Joi.array()
+              .items(Joi.number().integer().positive())
+              .min(1)
+              .max(MAX_BULK_EMPLOYEES)
+              .required(),
+            reason: Joi.string()
+              .valid(...Object.values(RESET_REASON))
+              .required(),
+            remark: Joi.string().trim().max(RESET_REMARK_MAX).allow("", null).optional(),
+            mode: Joi.string()
+              .valid(...Object.values(RESET_MODE))
+              .required(),
+          });
+          if (isValid.error !== null) throw isValid.error;
+
+          const scoped = await this._scope(req, res, null);
+          if (!scoped) return;
+
+          const actor = await this.permissions.actorFor(req);
+          res.json({
+            code: 200,
+            ...(await this.usecase.reset({
+              year: Number(req.body.year),
+              month: Number(req.body.month),
+              employee_ids: req.body.employee_ids,
+              reason: req.body.reason,
+              remark: req.body.remark,
+              mode: req.body.mode,
               store_ids: scoped.store_ids,
               actor,
             })),

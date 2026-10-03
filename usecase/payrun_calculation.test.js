@@ -49,6 +49,8 @@ class World {
     this.states = new Map();         // employee_id -> { confirmed_no_adjustment }
     this.calculations = new Map();   // employee_id -> calculation row
     this.audit = [];
+    this.resets = [];                // the reset audit
+    this.failResetFor = new Set();   // employee ids whose reset transaction throws
     this.period = null;
     this.nextId = 1;
   }
@@ -240,6 +242,33 @@ class FakeCalculationRepo {
     });
   }
 }
+
+/**
+ * The real `resetCalculation`'s contract: the month lock re-read, the row
+ * found by identity, ONLY a stored CALCULATED row removed, the audit written
+ * with it - or, on a thrown error, nothing changed at all.
+ */
+FakeCalculationRepo.prototype.resetCalculation = async function resetCalculation({
+  year, month, employee_id, previous_status, reason, remark, mode, reset_by,
+}) {
+  if (this.world.failResetFor.has(employee_id)) throw new Error("simulated failure");
+  if (this.world.period && this.world.period.status === "LOCKED") {
+    return { employee_id, outcome: "MONTH_LOCKED" };
+  }
+  const row = this.world.calculations.get(employee_id);
+  if (!row) return { employee_id, outcome: "NOT_CALCULATED" };
+  if (row.status !== "CALCULATED") return { employee_id, outcome: "LOCKED", stored_status: row.status };
+  this.world.resets.push({
+    employee_id, period_year: year, period_month: month,
+    payrun_employee_id: row.payrun_employee_id,
+    payrun_calculation_id: row.payrun_calculation_id,
+    previous_status, previous_stored_status: row.status,
+    reset_reason: reason, reset_remark: remark, reset_mode: mode, reset_by,
+    net_pay: row.net_pay,
+  });
+  this.world.calculations.delete(employee_id);
+  return { employee_id, outcome: "RESET", payrun_calculation_id: row.payrun_calculation_id };
+};
 
 /** Only the four methods the calculation stage borrows from initialization. */
 class FakePayrunRepo {
@@ -1710,5 +1739,238 @@ describe("ATTENDANCE_STALE at Approve & Lock", () => {
     assert.match(row.message, /then recalculate Payroll before approving and locking/);
     assert.doesNotMatch(row.message, /days changed/);
     assert.notEqual((await rowOf(1)).status, CALC_STATUS.APPROVED_LOCKED);
+  });
+});
+
+/* ====================================================== Reset Calculation */
+
+describe("Reset Calculation", () => {
+  const reset = (over = {}) =>
+    calculation.reset({
+      ...MONTH,
+      reason: "ATTENDANCE_CORRECTED",
+      mode: "INDIVIDUAL",
+      actor: ACTOR,
+      ...over,
+    });
+  const lock = (employeeId) => {
+    const row = world.calculations.get(employeeId);
+    row.status = "APPROVED_LOCKED";
+    row.approved_by = 5;
+  };
+
+  it("resets one calculated employee back to NOT CALCULATED", async () => {
+    world.add(1);
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal((await rowOf(1)).status, CALC_STATUS.READY_FOR_APPROVAL);
+
+    const result = await reset({ employee_ids: [1] });
+    assert.equal(result.reset_count, 1);
+    assert.equal(result.results[0].result, ROW_RESULT.RESET);
+    assert.equal(result.results[0].previous_status, CALC_STATUS.READY_FOR_APPROVAL);
+
+    const row = await rowOf(1);
+    assert.equal(row.status, CALC_STATUS.NOT_CALCULATED);
+    assert.equal(row.net_pay, null);
+    assert.equal(world.calculations.has(1), false);
+  });
+
+  it("leaves every other employee's calculation exactly as it was", async () => {
+    world.add(1).add(2);
+    await calculation.calculate({ ...MONTH, employee_ids: [1, 2], actor: ACTOR });
+    const before = JSON.stringify(world.calculations.get(2));
+
+    await reset({ employee_ids: [1] });
+    assert.equal(JSON.stringify(world.calculations.get(2)), before);
+    assert.equal((await rowOf(2)).status, CALC_STATUS.READY_FOR_APPROVAL);
+  });
+
+  it("keeps the payrun's own inputs: adjustments, confirmation and pay type", async () => {
+    world.add(1);
+    world.amounts.set(1, { [COMPONENT.INCENTIVE]: 500 });
+    world.employees.get(1).pay_type = "CASH";
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    const sources = JSON.stringify([
+      world.employees.get(1), world.amounts.get(1), world.states.get(1),
+      world.attendance.get(1), world.salaries.get(1), world.nrm.get(1), world.pending.get(1),
+    ]);
+
+    await reset({ employee_ids: [1] });
+    assert.equal(
+      JSON.stringify([
+        world.employees.get(1), world.amounts.get(1), world.states.get(1),
+        world.attendance.get(1), world.salaries.get(1), world.nrm.get(1), world.pending.get(1),
+      ]),
+      sources
+    );
+  });
+
+  it("blocks an Approved & Locked employee with a clear message and changes nothing", async () => {
+    world.add(1);
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    lock(1);
+
+    const result = await reset({ employee_ids: [1] });
+    assert.equal(result.reset_count, 0);
+    assert.equal(result.locked_count, 1);
+    assert.match(result.results[0].message, /Approved & Locked/);
+    assert.equal(world.calculations.get(1).status, "APPROVED_LOCKED");
+    assert.equal(world.resets.length, 0);
+  });
+
+  it("blocks every employee in a locked (finalized) payroll month", async () => {
+    world.add(1).add(2);
+    await calculation.calculate({ ...MONTH, employee_ids: [1, 2], actor: ACTOR });
+    world.period = { status: "LOCKED" };
+
+    const result = await reset({ employee_ids: [1, 2], mode: "BULK" });
+    assert.equal(result.reset_count, 0);
+    assert.equal(result.locked_count, 2);
+    assert.match(result.results[0].message, /month 2026-08 is locked/);
+    assert.equal(world.calculations.size, 2);
+  });
+
+  it("bulk: resets the eligible, skips the locked and the not-calculated, and fails nothing", async () => {
+    world.add(1).add(2).add(3).add(4).add(5);
+    await calculation.calculate({ ...MONTH, employee_ids: [1, 2, 3, 4], actor: ACTOR });
+    lock(3);
+    lock(4);
+
+    const result = await reset({ employee_ids: [1, 2, 3, 4, 5, 999], mode: "BULK" });
+    assert.equal(result.reset_count, 2);
+    assert.equal(result.locked_count, 2);
+    assert.equal(result.skipped_count, 1);
+    assert.equal(result.not_in_scope_count, 1);
+    assert.deepEqual(
+      result.results.map((r) => [r.employee_id, r.result]),
+      [[1, "RESET"], [2, "RESET"], [3, "LOCKED"], [4, "LOCKED"], [5, "SKIPPED"], [999, "NOT_IN_SCOPE"]]
+    );
+    assert.deepEqual([...world.calculations.keys()].sort(), [3, 4]);
+    assert.ok(world.resets.every((r) => r.reset_mode === "BULK"));
+  });
+
+  it("one employee's failure does not stop the rest of the batch", async () => {
+    world.add(1).add(2);
+    await calculation.calculate({ ...MONTH, employee_ids: [1, 2], actor: ACTOR });
+    world.failResetFor.add(1);
+
+    const result = await reset({ employee_ids: [1, 2], mode: "BULK" });
+    assert.equal(result.failed_count, 1);
+    assert.equal(result.reset_count, 1);
+    assert.equal(world.calculations.has(1), true, "the failed employee keeps their calculation");
+    assert.equal(world.calculations.has(2), false);
+  });
+
+  it("enforces the branch scope: an employee outside it is NOT_IN_SCOPE and untouched", async () => {
+    world.add(1).add(2, { employee: { store_id: 2, store_name: "Branch 2" } });
+    await calculation.calculate({ ...MONTH, employee_ids: [1, 2], actor: ACTOR });
+
+    const result = await reset({ employee_ids: [1, 2], mode: "BULK", store_ids: [1] });
+    assert.equal(result.reset_count, 1);
+    assert.equal(result.not_in_scope_count, 1);
+    assert.equal(world.calculations.has(2), true);
+
+    const none = await reset({ employee_ids: [2], store_ids: [] });
+    assert.equal(none.not_in_scope_count, 1, "an empty scope is no branches, never all of them");
+    assert.equal(world.calculations.has(2), true);
+  });
+
+  it("is idempotent: a second reset finds nothing to reset and writes no audit", async () => {
+    world.add(1);
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    await reset({ employee_ids: [1] });
+    const again = await reset({ employee_ids: [1] });
+    assert.equal(again.skipped_count, 1);
+    assert.match(again.results[0].message, /nothing to reset/);
+    assert.equal(world.resets.length, 1);
+  });
+
+  it("requires a reason from the closed list", async () => {
+    world.add(1);
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    for (const reason of [undefined, null, "", "BECAUSE"]) {
+      await assert.rejects(() => reset({ employee_ids: [1], reason }), /reset reason is required/);
+    }
+    assert.equal(world.calculations.has(1), true);
+  });
+
+  it("requires a remark for Other, and caps its length", async () => {
+    world.add(1);
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    await assert.rejects(() => reset({ employee_ids: [1], reason: "OTHER" }), /remark is required/);
+    await assert.rejects(
+      () => reset({ employee_ids: [1], reason: "OTHER", remark: "   " }),
+      /remark is required/
+    );
+    await assert.rejects(
+      () => reset({ employee_ids: [1], reason: "WRONG_OT", remark: "x".repeat(501) }),
+      /at most 500/
+    );
+    assert.equal(world.calculations.has(1), true);
+
+    const ok = await reset({ employee_ids: [1], reason: "OTHER", remark: "  Joined late, HR fixed DOJ  " });
+    assert.equal(ok.reset_count, 1);
+    assert.equal(world.resets[0].reset_remark, "Joined late, HR fixed DOJ");
+  });
+
+  it("an INDIVIDUAL reset names exactly one employee; the mode must be one of the two", async () => {
+    world.add(1).add(2);
+    await assert.rejects(() => reset({ employee_ids: [1, 2] }), /exactly one employee/);
+    await assert.rejects(() => reset({ employee_ids: [1], mode: "ALL" }), /mode must be one of/);
+    await assert.rejects(() => reset({ employee_ids: [] }), /must not be empty/);
+  });
+
+  it("validates the month and writes the audit against the requested month only", async () => {
+    world.add(1);
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    await assert.rejects(() => reset({ employee_ids: [1], month: 13 }), /month 1-12/);
+
+    await reset({ employee_ids: [1], reason: "WRONG_ADDITION_DEDUCTION", remark: "bonus typo" });
+    assert.deepEqual(
+      {
+        ...world.resets[0],
+      },
+      {
+        employee_id: 1,
+        period_year: 2026,
+        period_month: 8,
+        payrun_employee_id: 101,
+        payrun_calculation_id: world.resets[0].payrun_calculation_id,
+        previous_status: CALC_STATUS.READY_FOR_APPROVAL,
+        previous_stored_status: "CALCULATED",
+        reset_reason: "WRONG_ADDITION_DEDUCTION",
+        reset_remark: "bonus typo",
+        reset_mode: "INDIVIDUAL",
+        reset_by: 77,
+        net_pay: world.resets[0].net_pay,
+      }
+    );
+    assert.equal(Number(world.resets[0].net_pay), 24301);
+  });
+
+  it("resets a RECALCULATION_REQUIRED employee too, and recalculating gives a fresh revision-1 calculation from current sources", async () => {
+    world.add(1);
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    await calculation.calculate({ ...MONTH, employee_ids: [1], mode: "RECALCULATE", actor: ACTOR });
+    assert.equal(world.calculations.get(1).calculation_revision, 2);
+
+    // Attendance corrected: one fewer salary day, as a re-run would store it.
+    Object.assign(world.attendance.get(1), {
+      salary_days: 25, salary_day_earnings: 25000, payroll_version: 2,
+      calculated_at: "2026-09-03 02:00:00.000",
+    });
+    assert.equal((await rowOf(1)).status, CALC_STATUS.RECALCULATION_REQUIRED);
+
+    const result = await reset({ employee_ids: [1] });
+    assert.equal(result.results[0].previous_status, CALC_STATUS.RECALCULATION_REQUIRED);
+    assert.equal((await rowOf(1)).status, CALC_STATUS.NOT_CALCULATED);
+
+    const again = await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(again.calculated_count, 1);
+    const fresh = world.calculations.get(1);
+    assert.equal(fresh.calculation_revision, 1);
+    assert.equal(fresh.salary_days, 25);
+    assert.equal(fresh.attendance_payroll_version, 2);
+    assert.equal((await rowOf(1)).status, CALC_STATUS.READY_FOR_APPROVAL);
   });
 });
