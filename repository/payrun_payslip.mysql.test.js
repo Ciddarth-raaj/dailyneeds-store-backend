@@ -45,6 +45,8 @@ describe("payslip publish over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
   let usecase;
   let payslipRepo;
   let miniApp;
+  let notifier;
+  const drain = () => notifier.processQueue();
   const sent = [];
   const rendered = [];
   const act = (action, ids) =>
@@ -96,9 +98,9 @@ describe("payslip publish over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
     usecase = buildCalculation(buildCalculationRepo(pool), buildPayrunRepo(pool), buildAdjustmentRepo(pool));
     usecase.today = () => "2026-10-03";
     payslipRepo = buildPayslipRepo(pool);
-    usecase.setPayslipServices({
-      payslipRepo,
-      notifier: buildNotifier({
+    await q(pool, `INSERT INTO company_details (company_name, reg_address, contact_number, gst_number, pan_number, esi_number, tan_number, pf_number)
+                   VALUES ('Daily Needs Departmental Store', '188/1 Iyyanar Koil Street, Muthirapalayam', '-', '-', '-', '51000123450001001', '-', 'TN/MAS/0012345')`);
+    notifier = buildNotifier({
         payslipRepo,
         // Employee 1 is linked; 2 is linked but Telegram refuses; 3 has no link.
         identityRepo: {
@@ -116,16 +118,19 @@ describe("payslip publish over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
             return { code: 200, message_id: 5000 + sent.length };
           },
         },
-      }),
-      company: () => ({ name: "Daily Needs" }),
-    });
+        intervalMs: 0,
+      });
+    // The worker runs only when a test drains it, so no pass started by one
+    // test can claim rows in the middle of the next. (That Publish and Retry
+    // kick it is proven in usecase/payrun_calculation.test.js.)
+    notifier.kick = () => {};
+    usecase.setPayslipServices({ payslipRepo, notifier, companyEnv: () => ({}) });
     miniApp = buildMiniApp({
       payslipRepo,
       renderPdf: async (snapshot) => {
         rendered.push(snapshot);
         return Buffer.from(`%PDF ${snapshot.final.net_pay}`);
       },
-      jwtService: { sign: async () => "t", verify: async () => ({}) },
     });
 
     const calculated = await usecase.calculate({ year: YEAR, month: MONTH, all_eligible: true, actor: ACTOR });
@@ -146,12 +151,13 @@ describe("payslip publish over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
     assert.deepEqual((await miniApp.list(1)).payslips, []);
   });
 
-  it("PUBLISH ALL: one payslip per employee, in the same transaction; notifications SENT / FAILED / NO_TELEGRAM_LINK; sources untouched", async () => {
+  it("PUBLISH ALL: one payslip per employee + its QUEUED notification, in the same transaction; the worker then records SENT / FAILED / NO_TELEGRAM_LINK; sources untouched", async () => {
     const before = await fingerprints();
     const calcBefore = await q(pool, "SELECT employee_id, net_pay, calculation_hash, calculation_revision, status FROM payrun_employee_calculation ORDER BY employee_id");
     const out = await usecase.publishAllApproved({ year: YEAR, month: MONTH, actor: ACTOR });
     assert.equal(out.published_count, 3, JSON.stringify(out.results));
-    assert.deepEqual(out.notification, { sent: 1, failed: 1, no_telegram_link: 1 });
+    assert.deepEqual(out.notification, { queued: 3 });
+    assert.ok(out.results.every((r) => r.notification_status === "QUEUED"));
 
     const slips = await q(pool, "SELECT * FROM payrun_payslip ORDER BY employee_id");
     assert.equal(slips.length, 3);
@@ -164,6 +170,13 @@ describe("payslip publish over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
       const snap = JSON.parse(slip.snapshot_json);
       assert.equal(snap.final.net_pay, Number(calcBefore[i].net_pay).toFixed(2));
       assert.equal(snap.employee.department_name, "Grocery");
+      assert.equal(snap.company.name, "Daily Needs Departmental Store");
+      assert.equal(snap.company.source, "company_details:1");
+      assert.equal(snap.statutory.uan_masked, "XXXXXXXX0400");
+      assert.ok(!slip.snapshot_json.includes("100200300400"), "full UAN never stored on the payslip");
+      const comps = snap.earnings.lines.filter((l) => ["basic", "hra", "conveyance", "special_allowance"].includes(l.key));
+      assert.equal(comps.reduce((t, l) => t + Math.round(Number(l.amount) * 100), 0), Math.round(Number(snap.earnings.salary_earnings) * 100));
+      assert.equal(comps.find((l) => l.key === "hra").amount, "5000.00");
       assert.equal(snap.employee.bank_account_masked, `XXXXXX${calcBefore[i].employee_id}012`);
       assert.ok(!slip.snapshot_json.includes("ABCDE1234F"), "full PAN never stored");
       assert.ok(!slip.snapshot_json.includes(`12345678${calcBefore[i].employee_id}012`), "full account never stored");
@@ -177,7 +190,14 @@ describe("payslip publish over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
     const lc = await q(pool, "SELECT employee_id, payslip_id FROM payrun_employee_lifecycle_audit WHERE action = 'PUBLISH' ORDER BY employee_id");
     assert.deepEqual(lc.map((r) => r.payslip_id), slips.map((s) => s.payslip_id));
 
-    const notes = await q(pool, "SELECT employee_id, result, attempt_no, trigger_type, private_chat_id, telegram_message_id, failure_code FROM payrun_payslip_notification ORDER BY employee_id");
+    const queued = await q(pool, "SELECT employee_id, result, attempt_no, trigger_type, requested_by FROM payrun_payslip_notification ORDER BY employee_id");
+    assert.deepEqual(queued.map((n) => [n.employee_id, n.result, n.attempt_no, n.trigger_type, n.requested_by]), [
+      [1, "QUEUED", 1, "PUBLISH", 77], [2, "QUEUED", 1, "PUBLISH", 77], [3, "QUEUED", 1, "PUBLISH", 77],
+    ], "queued in the publishing transaction; nothing sent by the request");
+    assert.equal(sent.length, 0);
+    await drain();
+    const notes = await q(pool, "SELECT employee_id, result, attempt_no, trigger_type, private_chat_id, telegram_message_id, failure_code, attempted_at, completed_at FROM payrun_payslip_notification ORDER BY employee_id");
+    assert.ok(notes.every((n) => n.attempted_at && n.completed_at));
     assert.deepEqual(notes.map((n) => [n.employee_id, n.result, n.attempt_no, n.trigger_type, n.failure_code]), [
       [1, "SENT", 1, "PUBLISH", null],
       [2, "FAILED", 1, "PUBLISH", "TELEGRAM_403"],
@@ -223,10 +243,11 @@ describe("payslip publish over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
     assert.equal(row.payslip.viewed, true);
   });
 
-  it("RETRY: a new attempt row for the failed one; nothing republished", async () => {
+  it("RETRY: queues a new attempt for the failed one, the worker sends it; nothing republished", async () => {
     const slipsBefore = JSON.stringify(await q(pool, "SELECT payslip_id, status, snapshot_sha256, payslip_version FROM payrun_payslip"));
     const out = await usecase.retryNotification({ year: YEAR, month: MONTH, employee_ids: [1, 2], actor: ACTOR });
-    assert.deepEqual(out.results.map((r) => r.result), ["SKIPPED", "NOT_NOTIFIED"]);
+    assert.deepEqual(out.results.map((r) => r.result), ["SKIPPED", "QUEUED"]);
+    await drain();
     const attempts = await q(pool, "SELECT attempt_no, trigger_type, result FROM payrun_payslip_notification WHERE employee_id = 2 ORDER BY attempt_no");
     assert.deepEqual(attempts.map((a) => [a.attempt_no, a.trigger_type, a.result]), [[1, "PUBLISH", "FAILED"], [2, "RETRY", "FAILED"]]);
     assert.equal(JSON.stringify(await q(pool, "SELECT payslip_id, status, snapshot_sha256, payslip_version FROM payrun_payslip")), slipsBefore);
@@ -279,14 +300,73 @@ describe("payslip publish over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
     assert.equal(list.length, 1, "the employee sees only the newest ACTIVE payslip");
   });
 
-  it("concurrent notification attempts (bulk, and two retries of one payslip) never deadlock or collide", async () => {
+  it("CONCURRENCY: simultaneous retries of one payslip queue ONE attempt (the pending key); claims never overlap", async () => {
+    await drain(); // start from an empty queue
+    const [{ payslip_id }] = await q(pool, "SELECT payslip_id FROM payrun_payslip WHERE employee_id = 2 AND status = 'ACTIVE'");
+    const outcomes = await Promise.all([1, 2, 3, 4].map(() =>
+      payslipRepo.enqueueRetry({ payslip_id, employee_id: 2, requested_by: 77 })));
+    assert.equal(outcomes.filter((o) => o.queued).length, 1, JSON.stringify(outcomes));
+    assert.ok(outcomes.filter((o) => !o.queued).every((o) => o.reason === "ALREADY_PENDING"));
+    const pending = await q(pool, "SELECT COUNT(*) AS n FROM payrun_payslip_notification WHERE payslip_id = ? AND result IN ('QUEUED','SENDING')", [payslip_id]);
+    assert.equal(pending[0].n, 1);
+
+    // Two passes claiming at once take disjoint rows.
+    const [{ payslip_id: p1 }] = await q(pool, "SELECT payslip_id FROM payrun_payslip WHERE employee_id = 1 AND status = 'ACTIVE'");
+    await payslipRepo.enqueueRetry({ payslip_id: p1, employee_id: 1, requested_by: 77 });
+    const [a, b] = await Promise.all([
+      payslipRepo.claimQueued({ limit: 1, token: "a".repeat(32) }),
+      payslipRepo.claimQueued({ limit: 1, token: "b".repeat(32) }),
+    ]);
+    const ids = [...a, ...b].map((r) => r.notification_id);
+    assert.equal(ids.length, 2);
+    assert.equal(new Set(ids).size, 2, "no attempt claimed twice");
+    // Only the claiming pass may record the outcome.
+    assert.equal(await payslipRepo.completeNotification({ notification_id: a[0].notification_id, claim_token: "c".repeat(32), result: "SENT" }), false);
+    assert.equal(await payslipRepo.completeNotification({ notification_id: a[0].notification_id, claim_token: "a".repeat(32), result: "FAILED", failure_code: "TEST" }), true);
+  });
+
+  it("STRESS: 20 rounds of concurrent queue / claim / complete across payslips - no error escapes, every attempt finishes once", async () => {
+    await drain();
+    const slips = await q(pool, "SELECT payslip_id, employee_id FROM payrun_payslip WHERE status = 'ACTIVE'");
+    // Close anything still pending so every payslip can take a new attempt.
+    await q(pool, "UPDATE payrun_payslip_notification SET result = 'FAILED', failure_code = 'TEST' WHERE result IN ('QUEUED','SENDING') AND claim_token <> ?", ["b".repeat(32)]);
+    for (let round = 0; round < 20; round += 1) {
+      await Promise.all(slips.map((sl) => payslipRepo.enqueueRetry({ payslip_id: sl.payslip_id, employee_id: sl.employee_id })));
+      const claims = await Promise.all(slips.map((_, i) =>
+        payslipRepo.claimQueued({ limit: 1, token: `${round}`.padStart(2, "0") + String(i).repeat(30) })));
+      const claimed = claims.flatMap((c, i) => c.map((r) => ({ r, token: `${round}`.padStart(2, "0") + String(i).repeat(30) })));
+      assert.equal(new Set(claimed.map((c) => c.r.notification_id)).size, claimed.length);
+      const done = await Promise.all(claimed.map(({ r, token }) =>
+        payslipRepo.completeNotification({ notification_id: r.notification_id, claim_token: token, result: "FAILED", failure_code: "TEST" })));
+      assert.ok(done.every(Boolean));
+    }
+    const pending = await q(pool, "SELECT COUNT(*) AS n FROM payrun_payslip_notification WHERE result = 'QUEUED'");
+    assert.equal(pending[0].n, 0);
+  });
+
+  it("RECOVERY: a SENDING attempt left by a dead process is closed INTERRUPTED (not re-sent); a fresh one is untouched", async () => {
+    await q(pool, "UPDATE payrun_payslip_notification SET attempted_at = CURRENT_TIMESTAMP(3) - INTERVAL 10 MINUTE WHERE result = 'SENDING' AND claim_token = ?", ["b".repeat(32)]);
+    const fixed = await payslipRepo.recoverInterrupted({ olderThanSeconds: 120 });
+    assert.equal(fixed, 1);
+    const row = (await q(pool, "SELECT result, failure_code FROM payrun_payslip_notification WHERE claim_token = ?", ["b".repeat(32)]))[0];
+    assert.deepEqual([row.result, row.failure_code], ["FAILED", "INTERRUPTED"]);
+    const before = sent.length;
+    await drain();
+    assert.equal(sent.length, before, "an interrupted attempt is never re-sent automatically");
+  });
+
+  it("UNPUBLISH withdraws a still-QUEUED notification in the same transaction", async () => {
     const [{ payslip_id }] = await q(pool, "SELECT payslip_id FROM payrun_payslip WHERE employee_id = 1 AND status = 'ACTIVE'");
-    const rec = (n) => payslipRepo.insertNotification({
-      payslip_id, employee_id: 1, trigger_type: "RETRY", result: "SENT", attempted_at: new Date(), telegram_message_id: n,
-    });
-    await Promise.all([rec(1), rec(2), rec(3)]);
-    const attempts = (await q(pool, "SELECT attempt_no FROM payrun_payslip_notification WHERE payslip_id = ? ORDER BY attempt_no", [payslip_id])).map((r) => r.attempt_no);
-    assert.deepEqual(attempts, attempts.map((_, i) => i + 1), "contiguous, unique attempt numbers");
+    // Leave one QUEUED attempt without running the worker.
+    await q(pool, "UPDATE payrun_payslip_notification SET result = 'FAILED' WHERE payslip_id = ? AND result IN ('QUEUED','SENDING')", [payslip_id]);
+    await payslipRepo.enqueueRetry({ payslip_id, employee_id: 1, requested_by: 77 });
+    const out = await act("UNPUBLISH", [1]);
+    assert.equal(out.unpublished_count, 1, JSON.stringify(out.results));
+    const last = (await q(pool, "SELECT result, failure_code FROM payrun_payslip_notification WHERE payslip_id = ? ORDER BY attempt_no DESC LIMIT 1", [payslip_id]))[0];
+    assert.deepEqual([last.result, last.failure_code], ["FAILED", "PAYSLIP_UNPUBLISHED"]);
+    // Publish employee 1 again for the tests after this one.
+    assert.equal((await act("PUBLISH", [1])).published_count, 1);
+    await drain();
   });
 
   it("the database refuses a second ACTIVE payslip for one employee month", async () => {
@@ -304,19 +384,36 @@ describe("payslip publish over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
   it("admin View Payslip: integrity-checked snapshot, versions and attempts; branch scope refuses another outlet", async () => {
     const view = await usecase.getPayslip({ year: YEAR, month: MONTH, employee_id: 2 });
     assert.equal(view.payslip.payslip_version, 1);
-    assert.equal(view.notifications.length, 2);
+    assert.ok(view.notifications.length >= 2);
     assert.ok(!JSON.stringify(view.notifications).includes("private_chat_id"));
     await assert.rejects(usecase.getPayslip({ year: YEAR, month: MONTH, employee_id: 2, store_ids: [99] }), (e) => e.name === "NotFoundError");
   });
 
-  it("the migration re-runs cleanly; its down drops only the payslip tables and column", async () => {
-    await q(pool, fs.readFileSync(path.join(SQLS, PAYSLIP_UP), "utf8"));
-    const calcBefore = JSON.stringify(await q(pool, "SELECT * FROM payrun_employee_calculation ORDER BY 1"));
-    await q(pool, fs.readFileSync(path.join(SQLS, PAYSLIP_DOWN), "utf8"));
+  it("MIGRATION up -> down -> up: re-runnable; down removes only this feature's schema; nothing published, no figure moved", async () => {
+    const payroll = async () => JSON.stringify(await q(pool,
+      "SELECT payrun_calculation_id, employee_id, status, net_pay, net_pay_rounding, total_earnings, calculation_hash, approved_at FROM payrun_employee_calculation ORDER BY 1"));
+    const sourcesBefore = await fingerprints();
+    const before = await payroll();
+    const publishedBefore = (await q(pool, "SELECT COUNT(*) AS n FROM payrun_employee_calculation WHERE published_at IS NOT NULL"))[0].n;
+
+    await q(pool, fs.readFileSync(path.join(SQLS, PAYSLIP_UP), "utf8"));       // up (again): a no-op
+    await q(pool, fs.readFileSync(path.join(SQLS, PAYSLIP_DOWN), "utf8"));     // down
     assert.equal((await q(pool, "SHOW TABLES LIKE 'payrun_payslip%'")).length, 0);
     assert.equal((await q(pool, "SHOW COLUMNS FROM payrun_employee_lifecycle_audit LIKE 'payslip_id'")).length, 0);
-    assert.equal(JSON.stringify(await q(pool, "SELECT * FROM payrun_employee_calculation ORDER BY 1")), calcBefore);
-    await q(pool, fs.readFileSync(path.join(SQLS, PAYSLIP_UP), "utf8"));
+    assert.equal(await payroll(), before, "down touches no payroll row");
+    await q(pool, fs.readFileSync(path.join(SQLS, PAYSLIP_UP), "utf8"));       // up
+    assert.deepEqual((await q(pool, "SHOW TABLES LIKE 'payrun_payslip%'")).map((r) => Object.values(r)[0]).sort(),
+      ["payrun_payslip", "payrun_payslip_notification"]);
+    assert.equal((await q(pool, "SHOW COLUMNS FROM payrun_employee_lifecycle_audit LIKE 'payslip_id'")).length, 1);
+    const keys = (await q(pool, "SHOW INDEX FROM payrun_payslip_notification")).map((r) => r.Key_name);
+    assert.ok(keys.includes("uq_payslip_notification_pending") && keys.includes("uq_payslip_notification_attempt"));
+    assert.ok((await q(pool, "SHOW INDEX FROM payrun_payslip")).some((r) => r.Key_name === "uq_payrun_payslip_active"));
+
+    assert.equal(await payroll(), before, "up touches no payroll row");
+    assert.equal((await q(pool, "SELECT COUNT(*) AS n FROM payrun_employee_calculation WHERE published_at IS NOT NULL"))[0].n, publishedBefore);
+    assert.equal((await q(pool, "SELECT COUNT(*) AS n FROM payrun_payslip"))[0].n, 0, "the migration creates no payslip");
+    assert.equal((await q(pool, "SELECT COUNT(*) AS n FROM payrun_payslip_notification"))[0].n, 0, "the migration queues no notification");
+    assert.deepEqual(await fingerprints(), sourcesBefore, "attendance, salary, OT/regularisation sources untouched");
   });
 });
 

@@ -13,9 +13,10 @@
  * Salary Master, OT or adjustments. The only arithmetic is:
  *
  *   1. the presentation split of the stored Salary Earnings across the frozen
- *      structure components (Basic / HRA / Conveyance / Special Allowance),
- *      in the proportion the month's own snapshot gives them, allocated in
- *      paise so the lines add up to the stored Salary Earnings EXACTLY;
+ *      structure components (Basic / HRA / Conveyance / Special Allowance) -
+ *      see `balancedComponents`: each is its share in whole rupees, and ONE
+ *      balancing component (Special Allowance) carries whatever paise remain,
+ *      so the lines add up to the stored Salary Earnings EXACTLY;
  *   2. CHECKS - the earnings lines must add up to the stored Total Earnings,
  *      the deductions to the stored Total Deductions, and earnings minus
  *      deductions plus the stored rounding to the stored Net Pay. A snapshot
@@ -115,6 +116,68 @@ function splitByWeights(totalPaise, weights) {
   return parts;
 }
 
+/**
+ * THE SALARY COMPONENTS, AS AN EMPLOYEE READS THEM.
+ *
+ * The approved calculation stores ONE figure - Salary Earnings - and the
+ * month's structure says how it divides (Basic / HRA / Conveyance / Special
+ * Allowance). An exact paise-proportional split is correct but prints figures
+ * like HRA 4,999.98 for a 5,000 HRA. So:
+ *
+ *   1. every component except the balancing one is its proportional share of
+ *      the stored Salary Earnings, ROUNDED TO WHOLE RUPEES (half up);
+ *   2. the BALANCING COMPONENT - Special Allowance, or the last component with
+ *      a structure value when Special Allowance is zero - is Salary Earnings
+ *      minus the others, so it carries every residual paisa;
+ *   3. the four therefore add up to the stored Salary Earnings EXACTLY.
+ *
+ * Deterministic: the same stored figures always give the same lines. Nothing
+ * else moves - Total Earnings, PF, ESI and Net Pay are the stored values.
+ * If balancing would make the balancing component negative (only possible
+ * with a near-zero balancing component), the exact paise split is used
+ * instead and the basis says so.
+ */
+function balancedComponents(totalPaise, weights) {
+  if (totalPaise === null) return null;
+  if (weights.some((w) => w === null || w < 0)) return null;
+  const sum = weights.reduce((a, b) => a + b, 0);
+  if (sum <= 0) return null;
+  let balancing = weights[3] > 0 ? 3 : -1;
+  if (balancing === -1) {
+    for (let i = weights.length - 1; i >= 0; i -= 1) {
+      if (weights[i] > 0) {
+        balancing = i;
+        break;
+      }
+    }
+  }
+  const parts = weights.map((w, i) =>
+    i === balancing || w === 0 ? 0 : Math.round((totalPaise * w) / sum / 100) * 100
+  );
+  const rest = totalPaise - parts.reduce((a, b) => a + b, 0);
+  if (rest < 0) {
+    return { parts: splitByWeights(totalPaise, weights), basis: "SALARY_EARNINGS_EXACT_PAISE_SPLIT", balancing: null };
+  }
+  parts[balancing] = rest;
+  return { parts, basis: "WHOLE_RUPEE_COMPONENTS_BALANCED", balancing };
+}
+
+const COMPONENTS = [
+  ["basic", "Basic"],
+  ["hra", "HRA"],
+  ["conveyance", "Conveyance"],
+  ["special_allowance", "Special Allowance"],
+];
+
+/** Last four characters of a statutory number; the rest masked. */
+function maskTail(value) {
+  if (value === null || value === undefined) return null;
+  const clean = String(value).replace(/\s/g, "");
+  if (clean === "") return null;
+  if (clean.length <= 4) return "XXXX";
+  return `${"X".repeat(Math.min(clean.length - 4, 8))}${clean.slice(-4)}`;
+}
+
 /* ------------------------------------------------------ the snapshot */
 
 function parseJsonList(value) {
@@ -140,7 +203,7 @@ const line = (key, label, paise, optional = false) => ({ key, label, amount: mon
  * @param {object} args.calculation  the stored `payrun_employee_calculation` row (APPROVED_LOCKED)
  * @param {object} args.employee     the month's `payrun_employee` snapshot row
  * @param {object} [args.extras]     { department_name, account_no, pan_no, bank_name } read at Publish
- * @param {object} [args.company]    { name, address }
+ * @param {object} args.company      { name, address, pf_establishment_code, esi_establishment_code, source }
  * @returns {object} the snapshot (plain JSON)
  */
 function buildPayslipSnapshot({ period, calculation, employee, extras = {}, company = {} }) {
@@ -149,6 +212,9 @@ function buildPayslipSnapshot({ period, calculation, employee, extras = {}, comp
     throw new SnapshotError("SNAPSHOT_INPUT_MISSING", "No payroll month to publish");
   }
   if (!c || !employee) throw new SnapshotError("SNAPSHOT_INPUT_MISSING", "No stored calculation to publish");
+  if (!textOrNull(company && company.name)) {
+    throw new SnapshotError("SNAPSHOT_COMPANY_MISSING", "No company details are configured for payslips");
+  }
   if (Number(c.employee_id) !== Number(employee.employee_id)) {
     throw new SnapshotError("SNAPSHOT_EMPLOYEE_MISMATCH", "The calculation and the employee do not match");
   }
@@ -159,14 +225,9 @@ function buildPayslipSnapshot({ period, calculation, employee, extras = {}, comp
     throw new SnapshotError("SNAPSHOT_INCOMPLETE", "The stored calculation has no salary earnings");
   }
   const weights = [employee.basic, employee.hra, employee.conveyance, employee.special_allowance].map(toPaise);
-  const split = splitByWeights(salaryEarnings, weights);
+  const split = balancedComponents(salaryEarnings, weights);
   const salaryLines = split
-    ? [
-        line("basic", "Basic", split[0]),
-        line("hra", "HRA", split[1]),
-        line("conveyance", "Conveyance", split[2]),
-        line("special_allowance", "Special Allowance", split[3]),
-      ]
+    ? COMPONENTS.map(([key, label], i) => line(key, label, split.parts[i]))
     : [line("salary_earnings", "Salary Earnings", salaryEarnings)];
 
   const extraDay = paiseOr0(c.extra_day_amount);
@@ -230,9 +291,14 @@ function buildPayslipSnapshot({ period, calculation, employee, extras = {}, comp
   return {
     schema_version: SNAPSHOT_SCHEMA_VERSION,
     template_version: TEMPLATE_VERSION,
+    // AS IT WAS AT PUBLISH: a later edit of the company record never
+    // changes a payslip already released.
     company: {
-      name: textOrNull(company.name) || "Daily Needs",
+      name: textOrNull(company.name),
       address: textOrNull(company.address),
+      pf_establishment_code: textOrNull(company.pf_establishment_code),
+      esi_establishment_code: textOrNull(company.esi_establishment_code),
+      source: textOrNull(company.source),
     },
     period: {
       year: Number(period.year),
@@ -268,7 +334,8 @@ function buildPayslipSnapshot({ period, calculation, employee, extras = {}, comp
     earnings: {
       lines: earningsLines,
       salary_earnings: money(salaryEarnings),
-      component_basis: split ? "SALARY_EARNINGS_SPLIT_BY_STRUCTURE" : "SALARY_EARNINGS_SINGLE_LINE",
+      component_basis: split ? split.basis : "SALARY_EARNINGS_SINGLE_LINE",
+      balancing_component: split && split.balancing !== null ? COMPONENTS[split.balancing][0] : null,
       total: money(totalEarnings),
     },
     deductions: {
@@ -277,11 +344,14 @@ function buildPayslipSnapshot({ period, calculation, employee, extras = {}, comp
     },
     statutory: {
       pf_applicable: pfApplicable,
-      uan: pfApplicable ? textOrNull(employee.uan) : null,
-      pf_number: pfApplicable ? textOrNull(employee.pf_number) : null,
+      // MASKED ON THE EMPLOYEE-FACING PAYSLIP: the last four characters
+      // identify the number to its owner; the full values stay on the
+      // month's payrun snapshot for payroll's own use.
+      uan_masked: pfApplicable ? maskTail(employee.uan) : null,
+      pf_number_masked: pfApplicable ? maskTail(employee.pf_number) : null,
       pf_wage: pfApplicable ? moneyOf(c.pf_wage) : null,
       esi_applicable: esiApplicable,
-      esi_number: esiApplicable ? textOrNull(employee.esi_number) : null,
+      esi_number_masked: esiApplicable ? maskTail(employee.esi_number) : null,
       esi_wage: esiApplicable ? moneyOf(c.esi_wage) : null,
     },
     final: {
@@ -362,6 +432,8 @@ module.exports = {
   maskAccount,
   maskPan,
   splitByWeights,
+  balancedComponents,
+  maskTail,
   buildPayslipSnapshot,
   canonicalJson,
   sha256,

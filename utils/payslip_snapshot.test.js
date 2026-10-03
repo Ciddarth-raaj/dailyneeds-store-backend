@@ -71,8 +71,12 @@ const STORED = () => ({
   approved_at: "2026-10-02 10:00:00",
 });
 const EXTRAS = { account_no: "1234 5678 9012", pan_no: "abcde1234f", bank_name: "State Bank", department_name: "Grocery" };
-const build = (over = {}) =>
-  s.buildPayslipSnapshot({ period: PERIOD, calculation: { ...STORED(), ...over }, employee: EMPLOYEE, extras: EXTRAS, company: { name: "Daily Needs" } });
+const COMPANY = {
+  name: "Daily Needs Departmental Store", address: "188/1, Iyyanar Koil Street", pf_establishment_code: "TN/MAS/0012345",
+  esi_establishment_code: "51000123450001001", source: "company_details:1",
+};
+const build = (over = {}, company = COMPANY) =>
+  s.buildPayslipSnapshot({ period: PERIOD, calculation: { ...STORED(), ...over }, employee: EMPLOYEE, extras: EXTRAS, company });
 
 const sumPaise = (lines) => lines.reduce((t, l) => t + s.toPaise(l.amount), 0);
 
@@ -95,7 +99,8 @@ describe("the snapshot copies the stored approved calculation", () => {
     const comps = snap.earnings.lines.filter((l) => ["basic", "hra", "conveyance", "special_allowance"].includes(l.key));
     assert.equal(comps.length, 4);
     assert.equal(sumPaise(comps), s.toPaise("26013.26"));
-    assert.equal(snap.earnings.component_basis, "SALARY_EARNINGS_SPLIT_BY_STRUCTURE");
+    assert.equal(snap.earnings.component_basis, "WHOLE_RUPEE_COMPONENTS_BALANCED");
+    assert.equal(snap.earnings.balancing_component, "special_allowance");
   });
 
   it("deductions lines add up to the stored Total Deductions exactly", () => {
@@ -130,7 +135,7 @@ describe("the snapshot copies the stored approved calculation", () => {
 
   it("a structure with no components falls back to one Salary Earnings line, still exact", () => {
     const snap = s.buildPayslipSnapshot({
-      period: PERIOD, calculation: STORED(), employee: { ...EMPLOYEE, basic: null }, extras: EXTRAS,
+      period: PERIOD, calculation: STORED(), employee: { ...EMPLOYEE, basic: null }, extras: EXTRAS, company: COMPANY,
     });
     assert.equal(snap.earnings.lines[0].key, "salary_earnings");
     assert.equal(sumPaise(snap.earnings.lines), s.toPaise("27826.42"));
@@ -168,7 +173,7 @@ describe("sensitive identifiers", () => {
 
   it("a CASH employee carries no bank details", () => {
     const snap = s.buildPayslipSnapshot({
-      period: PERIOD, calculation: { ...STORED(), pay_type: "CASH" }, employee: EMPLOYEE, extras: EXTRAS,
+      period: PERIOD, calculation: { ...STORED(), pay_type: "CASH" }, employee: EMPLOYEE, extras: EXTRAS, company: COMPANY,
     });
     assert.equal(snap.employee.bank_account_masked, null);
     assert.equal(snap.employee.bank_name, null);
@@ -176,8 +181,15 @@ describe("sensitive identifiers", () => {
 
   it("UAN / ESI only where applicable; employer contributions are not on the employee payslip", () => {
     const snap = build({ esi_applicable: 0 });
-    assert.equal(snap.statutory.uan, "100200300400");
-    assert.equal(snap.statutory.esi_number, null);
+    assert.equal(snap.statutory.uan_masked, "XXXXXXXX0400");
+    assert.equal(snap.statutory.pf_number_masked, "XXXXXXXX/101");
+    assert.equal(snap.statutory.esi_number_masked, null);
+    const both = build();
+    assert.equal(both.statutory.esi_number_masked, "XXXXXX0000");
+    const { text: frozen } = s.freezeSnapshot(both);
+    assert.ok(!frozen.includes("100200300400"), "full UAN never stored on the payslip");
+    assert.ok(!frozen.includes("3100000000"), "full ESI number never stored on the payslip");
+    assert.ok(!frozen.includes("TN/MAS/1/101"), "full PF number never stored on the payslip");
     const { text } = s.freezeSnapshot(build());
     assert.ok(!text.includes("employer"), "no employer_* key");
     assert.ok(!text.includes("839.33"), "no employer ESI figure");
@@ -219,5 +231,70 @@ describe("freezing, integrity and the filename", () => {
       const parts = s.splitByWeights(total, [1300669, 500000, 250000, 550668]);
       assert.equal(parts.reduce((x, y) => x + y, 0), total);
     }
+  });
+});
+
+describe("SALARY COMPONENTS: whole rupees, one balancing component, exact total", () => {
+  const comps = (snap) =>
+    Object.fromEntries(snap.earnings.lines
+      .filter((l) => ["basic", "hra", "conveyance", "special_allowance"].includes(l.key))
+      .map((l) => [l.key, l.amount]));
+
+  it("the sample month: HRA 5000.00 and Conveyance 2500.00 - not 4999.98 / 2499.99 - and Special Allowance carries the paise", () => {
+    assert.deepEqual(comps(build()), {
+      basic: "13007.00", hra: "5000.00", conveyance: "2500.00", special_allowance: "5506.26",
+    });
+  });
+
+  it("the four always sum to the stored Salary Earnings exactly; Total Earnings and Net Pay are the stored figures", () => {
+    // A spread of attendance: every salary-earnings figure from 0 to a full month in odd paise steps.
+    for (let p = 0; p <= 2601326; p += 77777) {
+      const se = s.money(p);
+      const total = s.money(p + 100051 + 31265 + 50000);
+      const net = s.money(p + 100051 + 31265 + 50000 - 299203);
+      const snap = build({ salary_earnings: se, total_earnings: total, net_pay: net, net_pay_rounding: "0.00" });
+      const sum = snap.earnings.lines
+        .filter((l) => ["basic", "hra", "conveyance", "special_allowance"].includes(l.key))
+        .reduce((t, l) => t + s.toPaise(l.amount), 0);
+      assert.equal(sum, p, `salary earnings ${se}`);
+      assert.equal(snap.earnings.total, total);
+      assert.equal(snap.final.net_pay, net);
+      for (const k of ["basic", "hra", "conveyance"]) {
+        assert.equal(s.toPaise(comps(snap)[k]) % 100, 0, `${k} is whole rupees at ${se}`);
+      }
+    }
+  });
+
+  it("deterministic: the same stored figures always give the same lines", () => {
+    assert.equal(s.freezeSnapshot(build()).text, s.freezeSnapshot(build()).text);
+  });
+
+  it("no Special Allowance in the structure: the last component with a value balances", () => {
+    const r = s.balancedComponents(1000037, [600000, 400000, 0, 0]);
+    assert.deepEqual(r.parts, [600000, 400037, 0, 0]);
+    assert.equal(r.balancing, 1);
+  });
+
+  it("a balancing component that would go negative falls back to the exact paise split, still exact", () => {
+    const r = s.balancedComponents(1060, [1000, 1000, 1000, 1]);
+    assert.equal(r.basis, "SALARY_EARNINGS_EXACT_PAISE_SPLIT");
+    assert.equal(r.parts.reduce((a, b) => a + b, 0), 1060);
+    assert.ok(r.parts.every((x) => x >= 0));
+  });
+
+  it("PF / ESI figures are copied, never re-derived from the presentation split", () => {
+    const snap = build();
+    assert.equal(snap.statutory.pf_wage, "13006.19");
+    assert.equal(snap.deductions.lines.find((l) => l.key === "employee_pf").amount, "1560.74");
+    assert.equal(snap.deductions.lines.find((l) => l.key === "employee_esi").amount, "193.69");
+  });
+});
+
+describe("company details", () => {
+  it("are frozen into the snapshot exactly as resolved at Publish", () => {
+    assert.deepEqual(build().company, COMPANY);
+  });
+  it("a payslip without a company is refused, not published with a made-up name", () => {
+    assert.throws(() => build({}, {}), (e) => e.code === "SNAPSHOT_COMPANY_MISSING");
   });
 });

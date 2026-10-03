@@ -16,8 +16,10 @@ const PAYSLIP_STATUS = Object.freeze({
   ARCHIVED: "ARCHIVED",
 });
 
-/** Stored per attempt. NOT_ATTEMPTED is derived: a payslip with no attempt row. */
+/** Stored per attempt (QUEUED -> SENDING -> outcome). NOT_ATTEMPTED is derived: no attempt row. */
 const NOTIFICATION_RESULT = Object.freeze({
+  QUEUED: "QUEUED",
+  SENDING: "SENDING",
   SENT: "SENT",
   FAILED: "FAILED",
   NO_TELEGRAM_LINK: "NO_TELEGRAM_LINK",
@@ -64,9 +66,8 @@ const NOTIFY_TIMEOUT_MS = 10000;
 /** Concurrent on-demand PDF renders across the whole process. */
 const PDF_RENDER_CONCURRENCY = 2;
 
-/** Lifetime of a Mini App PDF download link (Telegram downloadFile fetches it). */
-const PDF_LINK_TTL_SECONDS = 120;
-const PDF_LINK_SCOPE = "telegram_payslip_pdf";
+/** Lifetime of a single-use Mini App PDF download link (Telegram downloadFile fetches it). */
+const PDF_LINK_TTL_SECONDS = 60;
 
 module.exports = {
   SNAPSHOT_SCHEMA_VERSION,
@@ -83,5 +84,4 @@ module.exports = {
   NOTIFY_TIMEOUT_MS,
   PDF_RENDER_CONCURRENCY,
   PDF_LINK_TTL_SECONDS,
-  PDF_LINK_SCOPE,
 };

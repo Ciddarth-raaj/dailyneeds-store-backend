@@ -1,30 +1,60 @@
 /**
- * THE "PAYSLIP AVAILABLE" TELEGRAM NOTIFICATION.
+ * THE "PAYSLIP AVAILABLE" NOTIFICATION WORKER.
  *
  *   node --test usecase/payslip_notification.test.js
+ *
+ * The outbox is in memory here and implements the repository's contract
+ * (claim = atomic QUEUED -> SENDING under a token; complete only by the
+ * claiming token; recover stale SENDING -> FAILED / INTERRUPTED). The SQL of
+ * that contract is proven in repository/payrun_payslip.mysql.test.js.
  */
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
 const buildNotifier = require("./payslip_notification");
 
-const SLIP = { payslip_id: 11, employee_id: 101, period_year: 2026, period_month: 9 };
-const LINK = { employee_telegram_id: 5, employee_id: 101, telegram_user_id: 4242, private_chat_id: 777001 };
+function outbox() {
+  const rows = [];
+  let clock = 0;
+  return {
+    rows,
+    tick: (s) => { clock += s; },
+    queue: (r) => rows.push({ notification_id: rows.length + 1, result: "QUEUED", deliverable: 1, period_year: 2026, period_month: 9, attempt_no: 1, trigger_type: "PUBLISH", ...r }),
+    claimQueued: async ({ limit, token }) => {
+      const picked = rows.filter((r) => r.result === "QUEUED").slice(0, limit);
+      picked.forEach((r) => Object.assign(r, { result: "SENDING", claim_token: token, attempted_at: clock }));
+      return picked.map((r) => ({ ...r }));
+    },
+    completeNotification: async ({ notification_id, claim_token, ...outcome }) => {
+      const r = rows.find((x) => x.notification_id === notification_id && x.claim_token === claim_token && x.result === "SENDING");
+      if (!r) return false;
+      Object.assign(r, outcome);
+      return true;
+    },
+    recoverInterrupted: async ({ olderThanSeconds }) => {
+      let n = 0;
+      rows.filter((r) => r.result === "SENDING" && clock - r.attempted_at > olderThanSeconds).forEach((r) => {
+        Object.assign(r, { result: "FAILED", failure_code: "INTERRUPTED" });
+        n += 1;
+      });
+      return n;
+    },
+  };
+}
 
-function harness({ link = LINK, sendImpl = null, lookupThrows = false } = {}) {
-  const records = [];
+const LINKS = new Map([
+  [101, { employee_telegram_id: 5, employee_id: 101, private_chat_id: 777101 }],
+  [102, { employee_telegram_id: 6, employee_id: 102, private_chat_id: 777102 }],
+]);
+
+function harness({ sendImpl = null, lookupThrows = false, concurrency } = {}) {
+  const repo = outbox();
   const sent = [];
   const notifier = buildNotifier({
-    payslipRepo: {
-      insertNotification: async (r) => {
-        const attempt = records.filter((x) => x.payslip_id === r.payslip_id).length + 1;
-        records.push({ ...r, attempt_no: attempt });
-        return records.length;
-      },
-    },
+    payslipRepo: repo,
     identityRepo: {
       getActiveIdentityByEmployee: async (id) => {
         if (lookupThrows) throw new Error("db down");
-        return link && link.employee_id === id ? link : null;
+        return LINKS.get(id) || null;
       },
     },
     telegram: {
@@ -35,125 +65,160 @@ function harness({ link = LINK, sendImpl = null, lookupThrows = false } = {}) {
     },
     getMiniAppUrl: () => "https://dnds.example/telegram/attendance",
     timeoutMs: 50,
+    intervalMs: 0,
+    ...(concurrency ? { concurrency } : {}),
   });
-  return { notifier, records, sent };
+  return { notifier, repo, sent };
 }
 
-describe("a successful notification", () => {
-  it("goes to the employee's OWN active private chat, resolved on the server, and is tracked SENT with the message id", async () => {
-    const { notifier, records, sent } = harness();
-    const out = await notifier.notifyOne(SLIP, { trigger: "PUBLISH", actor: { employeeId: 77, userId: 7 } });
-    assert.equal(out.result, "SENT");
+describe("a queued notification is sent by the worker", () => {
+  it("to the employee's OWN active private chat, resolved on the server; recorded SENT with the message id", async () => {
+    const { notifier, repo, sent } = harness();
+    repo.queue({ payslip_id: 11, employee_id: 101 });
+    await notifier.processQueue();
     assert.equal(sent.length, 1);
-    assert.equal(sent[0].chatId, 777001);
-    assert.equal(records.length, 1);
+    assert.equal(sent[0].chatId, 777101);
     assert.deepEqual(
-      [records[0].result, records[0].trigger_type, records[0].attempt_no, records[0].telegram_message_id,
-        records[0].employee_telegram_id, records[0].private_chat_id, records[0].requested_by, records[0].requested_by_user],
-      ["SENT", "PUBLISH", 1, 555, 5, 777001, 77, 7]
+      [repo.rows[0].result, repo.rows[0].telegram_message_id, repo.rows[0].employee_telegram_id, repo.rows[0].private_chat_id],
+      ["SENT", 555, 5, 777101]
     );
-    assert.ok(records[0].attempted_at instanceof Date);
   });
 
-  it("the text is exactly the availability sentence: the month, and NO salary figure", async () => {
-    const { notifier, sent } = harness();
-    await notifier.notifyOne(SLIP);
+  it("the text is the availability sentence only - the month and no salary figure; one My Payslips button", async () => {
+    const { notifier, repo, sent } = harness();
+    repo.queue({ payslip_id: 11, employee_id: 101 });
+    await notifier.processQueue();
     assert.equal(sent[0].text, "Your payslip for September 2026 is now available in My Payslips.");
-    assert.ok(!/₹|rs\.?|net|pay\b|\d+\.\d{2}/i.test(sent[0].text.replace("payslip", "")));
-    assert.equal(sent[0].options.parseMode, null, "plain text");
-  });
-
-  it("carries one button that opens My Payslips - no document, no amount, no employee id", async () => {
-    const { notifier, sent } = harness();
-    await notifier.notifyOne(SLIP);
+    assert.ok(!/₹|\d+\.\d{2}/.test(sent[0].text));
+    assert.equal(sent[0].options.parseMode, null);
     const rows = sent[0].options.replyMarkup.inlineKeyboard;
     assert.equal(rows.length, 1);
-    assert.equal(rows[0][0].text, "Open My Payslips");
     assert.equal(rows[0][0].web_app.url, "https://dnds.example/telegram/attendance?section=payslips");
-    assert.ok(!JSON.stringify(sent[0].options).includes("101"));
   });
 });
 
-describe("when the employee cannot be reached, the payslip is untouched and the outcome is recorded", () => {
+describe("outcomes that are not SENT never touch publication", () => {
   it("no Telegram link -> NO_TELEGRAM_LINK, nothing sent", async () => {
-    const { notifier, records, sent } = harness({ link: null });
-    const out = await notifier.notifyOne(SLIP);
-    assert.equal(out.result, "NO_TELEGRAM_LINK");
+    const { notifier, repo, sent } = harness();
+    repo.queue({ payslip_id: 12, employee_id: 999 });
+    await notifier.processQueue();
     assert.equal(sent.length, 0);
-    assert.equal(records[0].result, "NO_TELEGRAM_LINK");
-    assert.equal(records[0].private_chat_id, null);
+    assert.equal(repo.rows[0].result, "NO_TELEGRAM_LINK");
   });
 
-  it("Telegram refuses -> FAILED with a short code and Telegram's description; never throws", async () => {
-    const { notifier, records } = harness({
+  it("Telegram refuses -> FAILED with a short code and Telegram's description", async () => {
+    const { notifier, repo } = harness({
       sendImpl: async () => {
         const err = new Error("Request failed");
         err.response = { status: 403, data: { error_code: 403, description: "Forbidden: bot was blocked by the user" } };
         throw err;
       },
     });
-    const out = await notifier.notifyOne(SLIP);
-    assert.equal(out.result, "FAILED");
-    assert.equal(records[0].failure_code, "TELEGRAM_403");
-    assert.equal(records[0].failure_reason, "Forbidden: bot was blocked by the user");
+    repo.queue({ payslip_id: 11, employee_id: 101 });
+    await notifier.processQueue();
+    assert.deepEqual([repo.rows[0].result, repo.rows[0].failure_code, repo.rows[0].failure_reason],
+      ["FAILED", "TELEGRAM_403", "Forbidden: bot was blocked by the user"]);
   });
 
-  it("a send that hangs is cut off at the timeout and recorded FAILED / TIMEOUT", async () => {
-    const { notifier, records } = harness({ sendImpl: () => new Promise(() => {}) });
-    const out = await notifier.notifyOne(SLIP);
-    assert.equal(out.result, "FAILED");
-    assert.equal(records[0].failure_code, "TIMEOUT");
+  it("a hanging send is cut off at the timeout (FAILED / TIMEOUT)", async () => {
+    const { notifier, repo } = harness({ sendImpl: () => new Promise(() => {}) });
+    repo.queue({ payslip_id: 11, employee_id: 101 });
+    await notifier.processQueue();
+    assert.deepEqual([repo.rows[0].result, repo.rows[0].failure_code], ["FAILED", "TIMEOUT"]);
   });
 
-  it("the identity lookup failing is FAILED, not a crash", async () => {
-    const { notifier, records } = harness({ lookupThrows: true });
-    const out = await notifier.notifyOne(SLIP);
-    assert.equal(out.result, "FAILED");
-    assert.equal(records[0].failure_code, "IDENTITY_LOOKUP_FAILED");
+  it("an identity lookup failure is FAILED, not a crash", async () => {
+    const { notifier, repo } = harness({ lookupThrows: true });
+    repo.queue({ payslip_id: 11, employee_id: 101 });
+    await notifier.processQueue();
+    assert.equal(repo.rows[0].failure_code, "IDENTITY_LOOKUP_FAILED");
+  });
+
+  it("a payslip unpublished before its turn is NOT announced", async () => {
+    const { notifier, repo, sent } = harness();
+    repo.queue({ payslip_id: 11, employee_id: 101, deliverable: 0 });
+    await notifier.processQueue();
+    assert.equal(sent.length, 0);
+    assert.deepEqual([repo.rows[0].result, repo.rows[0].failure_code], ["FAILED", "PAYSLIP_NOT_PUBLISHED"]);
   });
 });
 
-describe("retry and batches", () => {
-  it("a retry is a NEW attempt row (attempt 2, trigger RETRY); the first stays as it was", async () => {
-    let fail = true;
-    const { notifier, records } = harness({
+describe("the worker", () => {
+  it("kick() returns at once - the caller never waits on Telegram", async () => {
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    const { notifier, repo, sent } = harness({ sendImpl: async (chatId) => { await gate; sent.push(chatId); return { message_id: 1 }; } });
+    repo.queue({ payslip_id: 11, employee_id: 101 });
+    const before = Date.now();
+    assert.equal(notifier.kick(), undefined);
+    assert.ok(Date.now() - before < 20);
+    assert.equal(repo.rows[0].result, "QUEUED");
+    await new Promise((r) => setImmediate(r));
+    assert.equal(repo.rows[0].result, "SENDING");
+    release();
+    await notifier.processQueue();
+    assert.equal(repo.rows[0].result, "SENT");
+  });
+
+  it("bounded concurrency: never more than the limit at once, and a slow send holds up only itself", async () => {
+    let running = 0;
+    let peak = 0;
+    const { notifier, repo } = harness({
+      concurrency: 3,
       sendImpl: async () => {
-        if (fail) {
-          fail = false;
-          throw new Error("ETIMEDOUT");
-        }
-        return { code: 200, message_id: 9 };
+        running += 1;
+        peak = Math.max(peak, running);
+        await new Promise((r) => setTimeout(r, 10));
+        running -= 1;
+        return { message_id: 1 };
       },
     });
-    await notifier.notifyOne(SLIP, { trigger: "PUBLISH" });
-    await notifier.notifyOne(SLIP, { trigger: "RETRY" });
-    assert.deepEqual(records.map((r) => [r.attempt_no, r.trigger_type, r.result]), [
-      [1, "PUBLISH", "FAILED"],
-      [2, "RETRY", "SENT"],
+    for (let i = 0; i < 12; i += 1) repo.queue({ payslip_id: 100 + i, employee_id: 101 });
+    await notifier.processQueue();
+    assert.equal(peak, 3);
+    assert.ok(repo.rows.every((r) => r.result === "SENT"));
+  });
+
+  it("NO DUPLICATE SENDS: overlapping passes never send one attempt twice", async () => {
+    const counts = new Map();
+    const { notifier, repo } = harness({
+      sendImpl: async (chatId) => {
+        counts.set(chatId, (counts.get(chatId) || 0) + 1);
+        await new Promise((r) => setTimeout(r, 5));
+        return { message_id: 1 };
+      },
+    });
+    repo.queue({ payslip_id: 11, employee_id: 101 });
+    repo.queue({ payslip_id: 12, employee_id: 102 });
+    await Promise.all([notifier.processQueue(), notifier.processQueue(), notifier.processQueue()]);
+    assert.deepEqual([...counts.values()], [1, 1]);
+  });
+
+  it("AFTER A RESTART: QUEUED rows are sent; a stale SENDING row is closed INTERRUPTED and NOT re-sent", async () => {
+    const { notifier, repo, sent } = harness();
+    repo.queue({ payslip_id: 11, employee_id: 101 });
+    repo.queue({ payslip_id: 12, employee_id: 102, result: "SENDING", claim_token: "dead-process", attempted_at: 0 });
+    repo.tick(600);
+    await notifier.processQueue();
+    assert.deepEqual(repo.rows.map((r) => [r.payslip_id, r.result, r.failure_code || null]), [
+      [11, "SENT", null],
+      [12, "FAILED", "INTERRUPTED"],
     ]);
+    assert.deepEqual(sent.map((s) => s.chatId), [777101]);
   });
 
-  it("one failure in a batch does not stop the others; results stay in input order", async () => {
-    const links = new Map([[1, { employee_telegram_id: 1, employee_id: 1, private_chat_id: 10 }], [2, { employee_telegram_id: 2, employee_id: 2, private_chat_id: 20 }]]);
-    const records = [];
-    const notifier = buildNotifier({
-      payslipRepo: { insertNotification: async (r) => records.push(r) },
-      identityRepo: { getActiveIdentityByEmployee: async (id) => links.get(id) || null },
-      telegram: {
-        sendMessage: async (chatId) => {
-          if (chatId === 10) throw new Error("boom");
-          return { message_id: 1 };
-        },
-      },
-    });
-    const out = await notifier.notifyMany([1, 2, 3].map((id) => ({ ...SLIP, payslip_id: id, employee_id: id })));
-    assert.deepEqual(out.map((o) => o.result), ["FAILED", "SENT", "NO_TELEGRAM_LINK"]);
-    assert.equal(records.length, 3);
+  it("a recent SENDING row (another live pass) is left alone", async () => {
+    const { notifier, repo, sent } = harness();
+    repo.queue({ payslip_id: 12, employee_id: 102, result: "SENDING", claim_token: "live", attempted_at: 0 });
+    repo.tick(5);
+    await notifier.processQueue();
+    assert.equal(repo.rows[0].result, "SENDING");
+    assert.equal(sent.length, 0);
   });
 
-  it("a notifier has no way to be handed a chat id", () => {
+  it("the worker has no way to be handed a chat id", () => {
     const src = require("fs").readFileSync(require.resolve("./payslip_notification"), "utf8");
-    const notifyOneSig = src.match(/const notifyOne = async \(([^)]*)\)/)[1];
-    assert.ok(!/chat/i.test(notifyOneSig));
+    assert.ok(!/claimQueued\(\{[^}]*chat/.test(src));
+    assert.match(src, /identityRepo\.getActiveIdentityByEmployee\(row\.employee_id\)/);
   });
 });

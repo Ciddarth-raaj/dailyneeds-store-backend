@@ -31,9 +31,13 @@ class PayrunPayslipRepository {
     this.db = db;
   }
 
-  _read(code, sql, params, conn = null) {
+  _read(code, sql, params, conn = null, { quiet = [] } = {}) {
     return new Promise((resolve, reject) => {
       (conn || this.db).query(sql, params, (err, rows) => {
+        if (err && quiet.includes(err.code)) {
+          reject(err);
+          return;
+        }
         if (err) {
           logger.Log({
             level: logger.LEVEL.ERROR,
@@ -49,6 +53,28 @@ class PayrunPayslipRepository {
         resolve(rows || []);
       });
     });
+  }
+
+  /**
+   * The outbox's single-statement writes (claim, complete, recover) run in
+   * autocommit and are safe to repeat. Concurrent ones can still deadlock on
+   * the pending-marker unique index; InnoDB rolls one back, and it is simply
+   * run again - a bounded number of times.
+   */
+  async _outboxWrite(code, sql, params) {
+    for (let tries = 0; ; tries += 1) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        return await this._read(code, sql, params, null, { quiet: tries < 4 ? ["ER_LOCK_DEADLOCK", "ER_LOCK_WAIT_TIMEOUT"] : [] });
+      } catch (err) {
+        if (err && (err.code === "ER_LOCK_DEADLOCK" || err.code === "ER_LOCK_WAIT_TIMEOUT") && tries < 4) {
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise((r) => setTimeout(r, 10 + Math.floor(Math.random() * 40)));
+          continue;
+        }
+        throw err;
+      }
+    }
   }
 
   /* ------------------------------------------------------- self-service */
@@ -122,7 +148,7 @@ class PayrunPayslipRepository {
               p.view_count,
               n.result AS notification_result, n.attempt_no AS notification_attempts,
               n.failure_code AS notification_failure_code,
-              DATE_FORMAT(n.attempted_at, '%Y-%m-%d %H:%i:%s') AS notification_attempted_at
+              DATE_FORMAT(COALESCE(n.completed_at, n.attempted_at, n.queued_at), '%Y-%m-%d %H:%i:%s') AS notification_attempted_at
          FROM payrun_payslip p
          LEFT JOIN payrun_payslip_notification n
            ON n.payslip_id = p.payslip_id
@@ -173,6 +199,7 @@ class PayrunPayslipRepository {
       "LIST-NOTIFICATIONS",
       `SELECT attempt_no, trigger_type, result, telegram_message_id, failure_code, failure_reason,
               requested_by,
+              DATE_FORMAT(queued_at, '%Y-%m-%d %H:%i:%s') AS queued_at,
               DATE_FORMAT(attempted_at, '%Y-%m-%d %H:%i:%s') AS attempted_at,
               DATE_FORMAT(completed_at, '%Y-%m-%d %H:%i:%s') AS completed_at
          FROM payrun_payslip_notification
@@ -202,18 +229,13 @@ class PayrunPayslipRepository {
   /* ------------------------------------------------------ notifications */
 
   /**
-   * One finished attempt, append-only. The attempt number is the next one for
-   * the payslip: read without a locking read (an `INSERT ... SELECT MAX`
-   * takes gap locks and deadlocks when a bulk publish notifies several
-   * employees at once), then inserted; the unique (payslip_id, attempt_no)
-   * key refuses a concurrent duplicate, and the attempt is renumbered.
+   * RETRY NOTIFICATION: queue one more attempt (trigger RETRY). The attempt
+   * number is the next for the payslip; the unique pending marker refuses a
+   * second QUEUED / SENDING attempt for the same payslip, which is how two
+   * Retry clicks never become two sends.
+   * @returns {{ queued: boolean, reason?: string }}
    */
-  async insertNotification({
-    payslip_id, employee_id, trigger_type, result,
-    employee_telegram_id = null, private_chat_id = null, telegram_message_id = null,
-    failure_code = null, failure_reason = null, requested_by = null, requested_by_user = null,
-    attempted_at,
-  }) {
+  async enqueueRetry({ payslip_id, employee_id, requested_by = null, requested_by_user = null }) {
     for (let tries = 0; ; tries += 1) {
       // eslint-disable-next-line no-await-in-loop
       const [last] = await this._read(
@@ -223,27 +245,110 @@ class PayrunPayslipRepository {
       );
       try {
         // eslint-disable-next-line no-await-in-loop
-        const res = await this._read(
-          "INSERT-NOTIFICATION",
+        await this._read(
+          "QUEUE-RETRY-NOTIFICATION",
           `INSERT INTO payrun_payslip_notification
-                  (payslip_id, employee_id, attempt_no, trigger_type, result,
-                   employee_telegram_id, private_chat_id, telegram_message_id,
-                   failure_code, failure_reason, requested_by, requested_by_user,
-                   attempted_at, completed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(3))`,
-          [
-            payslip_id, employee_id, Number(last.n) + 1, trigger_type, result,
-            employee_telegram_id, private_chat_id, telegram_message_id,
-            failure_code, failure_reason ? String(failure_reason).slice(0, 255) : null,
-            requested_by, requested_by_user, attempted_at,
-          ]
+                  (payslip_id, employee_id, attempt_no, trigger_type, result, requested_by, requested_by_user)
+           VALUES (?, ?, ?, 'RETRY', 'QUEUED', ?, ?)`,
+          [payslip_id, employee_id, Number(last.n) + 1, requested_by, requested_by_user],
+          null,
+          { quiet: ["ER_DUP_ENTRY", "ER_LOCK_DEADLOCK"] }
         );
-        return Number(res.insertId || 0);
+        return { queued: true };
       } catch (err) {
-        if (err && err.code === "ER_DUP_ENTRY" && tries < 4) continue;
+        if (err && err.code === "ER_DUP_ENTRY") {
+          if (/uq_payslip_notification_pending/.test(String(err.message))) return { queued: false, reason: "ALREADY_PENDING" };
+          if (tries < 4) continue;
+        }
+        if (err && err.code === "ER_LOCK_DEADLOCK" && tries < 4) continue;
         throw err;
       }
     }
+  }
+
+  /**
+   * CLAIM up to `limit` QUEUED attempts for one worker pass. The UPDATE is
+   * the claim - atomic, so two passes (or two processes) can never take the
+   * same row - and the rows are then read back by the claim token, with
+   * whether their payslip is still ACTIVE and published.
+   */
+  async claimQueued({ limit, token }) {
+    await this._outboxWrite(
+      "CLAIM-QUEUED",
+      `UPDATE payrun_payslip_notification
+          SET result = 'SENDING', claim_token = ?, attempted_at = CURRENT_TIMESTAMP(3)
+        WHERE result = 'QUEUED'
+        ORDER BY notification_id
+        LIMIT ?`,
+      [token, limit]
+    );
+    return this._read(
+      "READ-CLAIMED",
+      `SELECT n.notification_id, n.payslip_id, n.employee_id, n.attempt_no, n.trigger_type,
+              p.period_year, p.period_month,
+              (p.status = 'ACTIVE' AND c.payrun_calculation_id IS NOT NULL) AS deliverable
+         FROM payrun_payslip_notification n
+         JOIN payrun_payslip p ON p.payslip_id = n.payslip_id
+         LEFT JOIN payrun_employee_calculation c
+           ON c.payrun_employee_id = p.payrun_employee_id
+          AND c.payrun_calculation_id = p.payrun_calculation_id
+          AND c.status = 'APPROVED_LOCKED'
+          AND c.published_at IS NOT NULL
+        WHERE n.claim_token = ? AND n.result = 'SENDING'
+        ORDER BY n.notification_id`,
+      [token]
+    );
+  }
+
+  /** Record a claimed attempt's outcome - only by the pass that claimed it. */
+  async completeNotification({
+    notification_id, claim_token, result,
+    employee_telegram_id = null, private_chat_id = null, telegram_message_id = null,
+    failure_code = null, failure_reason = null,
+  }) {
+    const res = await this._outboxWrite(
+      "COMPLETE-NOTIFICATION",
+      `UPDATE payrun_payslip_notification
+          SET result = ?, employee_telegram_id = ?, private_chat_id = ?, telegram_message_id = ?,
+              failure_code = ?, failure_reason = ?, completed_at = CURRENT_TIMESTAMP(3)
+        WHERE notification_id = ? AND claim_token = ? AND result = 'SENDING'`,
+      [
+        result, employee_telegram_id, private_chat_id, telegram_message_id,
+        failure_code, failure_reason ? String(failure_reason).slice(0, 255) : null,
+        notification_id, claim_token,
+      ]
+    );
+    return Number(res.affectedRows || 0) === 1;
+  }
+
+  /**
+   * AFTER A RESTART: an attempt left SENDING longer than any send can take
+   * belonged to a process that died mid-send. Whether Telegram delivered it
+   * is unknowable, so it is NOT re-sent (that could notify twice): it is
+   * closed as FAILED / INTERRUPTED, and Retry Notification is offered.
+   * QUEUED attempts need no recovery - the next pass simply claims them.
+   */
+  async recoverInterrupted({ olderThanSeconds }) {
+    const res = await this._outboxWrite(
+      "RECOVER-INTERRUPTED",
+      `UPDATE payrun_payslip_notification
+          SET result = 'FAILED', failure_code = 'INTERRUPTED',
+              failure_reason = 'The server stopped while sending; delivery is unknown. Use Retry Notification.',
+              completed_at = CURRENT_TIMESTAMP(3)
+        WHERE result = 'SENDING'
+          AND attempted_at < (CURRENT_TIMESTAMP(3) - INTERVAL ? SECOND)`,
+      [olderThanSeconds]
+    );
+    return Number(res.affectedRows || 0);
+  }
+
+  /** The company records Publish chooses the payslip issuer from (utils/payslip_company.js). */
+  async listCompanies() {
+    return this._read(
+      "LIST-COMPANIES",
+      "SELECT company_id, company_name, reg_address, pf_number, esi_number, status FROM company_details ORDER BY company_id",
+      []
+    );
   }
 }
 

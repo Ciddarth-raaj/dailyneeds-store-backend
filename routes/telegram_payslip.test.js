@@ -50,6 +50,7 @@ const snapFor = (employeeId, month, net) => {
       pay_type: "CASH", calculation_version: 2, calculation_revision: 1, calculation_hash: "c".repeat(32),
     },
     employee: { employee_id: employeeId, employee_name: `Emp ${employeeId}`, basic: "1", hra: "0", conveyance: "0", special_allowance: "0" },
+    company: { name: "Daily Needs Departmental Store", source: "company_details:1" },
   }));
 };
 
@@ -102,7 +103,8 @@ const session = buildSession({
   jwtService,
   getBotToken: () => BOT_TOKEN,
 });
-const payslips = buildPayslips({ payslipRepo, renderPdf, jwtService });
+let clockMs = Date.now();
+const payslips = buildPayslips({ payslipRepo, renderPdf, now: () => clockMs });
 
 let server;
 let base;
@@ -256,33 +258,63 @@ describe("the PDF, on demand", () => {
     assert.equal(rendered[0].final.net_pay, "24834.00", "the PDF and the detail read the same snapshot");
   });
 
-  it("a pdf-link token works once minted for the owner, for that payslip only, and is not a session", async () => {
+  it("the iOS fallback link: owner-only, one payslip, opaque (not a JWT), not a session, and SINGLE-USE", async () => {
     const asA = await tokenFor(5001);
     const link = await (await post("/telegram/payslips/pdf-link", { ref: A_AUG.payslip_ref }, asA)).json();
     assert.equal(link.code, 200);
-    assert.match(link.path, /^\/telegram\/payslips\/pdf\?token=/);
+    assert.equal(link.expires_in, 60);
+    assert.match(link.path, /^\/telegram\/payslips\/pdf\?t=[A-Za-z0-9_-]{43}$/);
+    const token = link.path.split("t=")[1];
+    assert.equal(token.split(".").length, 1, "not a JWT");
+    await assert.rejects(jwtService.verify(token), "not verifiable as a signed token");
+    // not a Mini App session
+    assert.equal((await get("/telegram/payslips", { "x-telegram-session": token })).status, 401);
+    // first use works ...
     const res = await get(link.path);
     assert.equal(res.status, 200);
+    assert.equal(res.headers.get("referrer-policy"), "no-referrer");
     assert.ok(Buffer.from(await res.arrayBuffer()).toString().includes("23000.00"));
-    const token = decodeURIComponent(link.path.split("token=")[1]);
-    // not a Mini App session ...
-    assert.equal((await get("/telegram/payslips", { "x-telegram-session": token })).status, 401);
-    // ... not a dnds.co.in session either
-    assert.equal(resolveIdentity(await jwtService.verify(token)), null);
+    // ... and only once
+    assert.equal((await get(link.path)).status, 401);
   });
 
-  it("a session token is not a pdf-link token; a forged one is refused; an archived payslip's link stops working", async () => {
+  it("the link expires after 60 seconds", async () => {
     const asA = await tokenFor(5001);
-    assert.equal((await get(`/telegram/payslips/pdf?token=${encodeURIComponent(asA["x-telegram-session"])}`)).status, 401);
-    assert.equal((await get("/telegram/payslips/pdf?token=forged")).status, 401);
+    const link = await (await post("/telegram/payslips/pdf-link", { ref: A_AUG.payslip_ref }, asA)).json();
+    clockMs += 61 * 1000;
+    try {
+      assert.equal((await get(link.path)).status, 401);
+    } finally {
+      clockMs = Date.now();
+    }
+  });
+
+  it("a tampered link, a session token as a link, and an unknown token are refused", async () => {
+    const asA = await tokenFor(5001);
+    const link = await (await post("/telegram/payslips/pdf-link", { ref: A_AUG.payslip_ref }, asA)).json();
+    const token = link.path.split("t=")[1];
+    const tampered = `${token.slice(0, -1)}${token.endsWith("A") ? "B" : "A"}`;
+    assert.equal((await get(`/telegram/payslips/pdf?t=${tampered}`)).status, 401);
+    assert.equal((await get(`/telegram/payslips/pdf?t=${encodeURIComponent(asA["x-telegram-session"].slice(0, 60))}`)).status, 401);
+    assert.equal((await get("/telegram/payslips/pdf?t=forged")).status, 401);
+    assert.equal((await get("/telegram/payslips/pdf?token=anything")).status, 400, "the old parameter is gone");
+    // the untampered one still works once - a bad guess does not burn it
+    assert.equal((await get(link.path)).status, 200);
+  });
+
+  it("a link for a payslip archived before it is spent stops working", async () => {
+    const asA = await tokenFor(5001);
     const link = await (await post("/telegram/payslips/pdf-link", { ref: A_JUL.payslip_ref }, asA)).json();
     A_JUL.status = "ARCHIVED";
-    assert.equal((await get(link.path)).status, 404);
-    A_JUL.status = "ACTIVE";
+    try {
+      assert.equal((await get(link.path)).status, 404);
+    } finally {
+      A_JUL.status = "ACTIVE";
+    }
   });
 
   it("ref and token together, or neither, is refused", async () => {
     assert.equal((await get("/telegram/payslips/pdf")).status, 400);
-    assert.equal((await get(`/telegram/payslips/pdf?ref=${A_SEP.payslip_ref}&token=x`)).status, 400);
+    assert.equal((await get(`/telegram/payslips/pdf?ref=${A_SEP.payslip_ref}&t=x`)).status, 400);
   });
 });

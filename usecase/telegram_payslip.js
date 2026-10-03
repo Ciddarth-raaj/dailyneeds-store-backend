@@ -1,5 +1,6 @@
 const { readFrozenSnapshot, payslipFilename } = require("../utils/payslip_snapshot");
-const { monthLabel, PDF_LINK_SCOPE, PDF_LINK_TTL_SECONDS } = require("../constants/payslip");
+const crypto = require("crypto");
+const { monthLabel, PDF_LINK_TTL_SECONDS } = require("../constants/payslip");
 
 /**
  * MY PAYSLIPS - the Telegram Mini App's self-service payslip reads.
@@ -25,11 +26,19 @@ const { monthLabel, PDF_LINK_SCOPE, PDF_LINK_TTL_SECONDS } = require("../constan
  * Rendered on demand from the same snapshot the detail screen shows, then
  * streamed and forgotten. Nothing is written to disk, S3 or the database.
  *
- * A Telegram client that downloads through `WebApp.downloadFile` fetches the
- * URL itself, without our session header, so `pdfLink` mints a token that
- * says "employee N may fetch payslip R" for two minutes. Its scope is not
- * the session's scope, so it opens nothing else, and the ownership check is
- * repeated when it is spent.
+ * THE NORMAL DOWNLOAD IS `pdf(employeeId, ref)` behind the session header.
+ *
+ * THE LINK FALLBACK exists only for Telegram's own downloader
+ * (`WebApp.downloadFile`), which fetches a URL itself and cannot send our
+ * header. `pdfLink` issues an OPAQUE random token (32 bytes) that:
+ *   - names ONE payslip of ONE employee (both re-checked when it is spent);
+ *   - lives PDF_LINK_TTL_SECONDS (60 s);
+ *   - is SINGLE-USE - removed from the store on its first presentation,
+ *     whatever the outcome;
+ *   - is not a JWT and not signed with the session key: it is meaningless to
+ *     the session gate and to the login middleware;
+ *   - is kept in this process's memory ONLY AS ITS SHA-256 - a restart
+ *     invalidates every outstanding link (fail closed).
  */
 const REF_RE = /^[0-9a-f]{32}$/;
 
@@ -58,10 +67,18 @@ function employeeView(snapshot) {
  * @param {object} deps
  * @param {object} deps.payslipRepo  repository/payrun_payslip.js
  * @param {function(object):Promise<Buffer>} deps.renderPdf  services/payslip_pdf.js#renderPayslipPdf
- * @param {object} deps.jwtService   services/jwt.js
+ * @param {function():number} [deps.now]  ms, injected in tests
  * @param {object} [deps.log]
  */
-module.exports = ({ payslipRepo, renderPdf, jwtService, log = null }) => {
+module.exports = ({ payslipRepo, renderPdf, log = null, now = () => Date.now(), linkTtlSeconds = PDF_LINK_TTL_SECONDS, maxLinks = 5000 }) => {
+  /** sha256(token) -> { employee_id, ref, expires_at } */
+  const links = new Map();
+  const hash = (token) => crypto.createHash("sha256").update(token, "utf8").digest("hex");
+  const prune = () => {
+    const t = now();
+    for (const [k, v] of links) if (v.expires_at <= t) links.delete(k);
+    while (links.size >= maxLinks) links.delete(links.keys().next().value);
+  };
   const COMPONENT = "USECASE.TELEGRAM-PAYSLIP";
   const audit = (code, ref) => {
     if (!log || typeof log.Log !== "function") return;
@@ -121,31 +138,28 @@ module.exports = ({ payslipRepo, renderPdf, jwtService, log = null }) => {
     return { buffer, filename: payslipFilename(snapshot) };
   };
 
-  /** A two-minute, single-payslip link for Telegram's own downloader. */
+  /** A one-minute, single-use, single-payslip link for Telegram's own downloader. */
   const pdfLink = async (employeeId, payslipRef) => {
     const { snapshot } = await ownPublished(employeeId, payslipRef);
-    const token = await jwtService.sign({ scope: PDF_LINK_SCOPE, emp: employeeId, ref: payslipRef }, PDF_LINK_TTL_SECONDS);
+    prune();
+    const token = crypto.randomBytes(32).toString("base64url");
+    links.set(hash(token), { employee_id: employeeId, ref: payslipRef, expires_at: now() + linkTtlSeconds * 1000 });
     return {
       code: 200,
-      path: `/telegram/payslips/pdf?token=${encodeURIComponent(token)}`,
+      path: `/telegram/payslips/pdf?t=${token}`,
       filename: payslipFilename(snapshot),
-      expires_in: PDF_LINK_TTL_SECONDS,
+      expires_in: linkTtlSeconds,
     };
   };
 
-  /** Spend a link token: the scope, the employee and the ownership are all re-checked. */
+  /** Spend a link token: once, before it expires, for its own employee and payslip. */
   const pdfByToken = async (token) => {
-    if (typeof token !== "string" || token === "") throw linkInvalid();
-    let decoded;
-    try {
-      decoded = await jwtService.verify(token);
-    } catch (err) {
-      throw linkInvalid();
-    }
-    if (!decoded || decoded.scope !== PDF_LINK_SCOPE) throw linkInvalid();
-    const employeeId = Number(decoded.emp);
-    if (!Number.isInteger(employeeId) || employeeId <= 0) throw linkInvalid();
-    return pdf(employeeId, decoded.ref);
+    if (typeof token !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(token)) throw linkInvalid();
+    const key = hash(token);
+    const grant = links.get(key);
+    links.delete(key); // single use: gone on first presentation, whatever happens next
+    if (!grant || grant.expires_at <= now()) throw linkInvalid();
+    return pdf(grant.employee_id, grant.ref);
   };
 
   return { list, detail, pdf, pdfLink, pdfByToken };

@@ -108,3 +108,41 @@ describe("rendering", () => {
     assert.equal(ok.toString(), "y");
   });
 });
+
+describe("header, wording and identifiers (final layout)", () => {
+  const { logoDataUri, LOGO_PATH } = require("./payslip_pdf");
+
+  it("the official logo is embedded as a PNG data URI from the repo - no external URL; aspect ratio kept", () => {
+    const html = payslipHtml(snapshot());
+    const bytes = fs.readFileSync(LOGO_PATH);
+    assert.equal(bytes.slice(1, 4).toString("latin1"), "PNG");
+    // 600 x 120 - the same file the web app serves as /assets/dnds-logo.png
+    assert.equal(bytes.readUInt32BE(16), 600);
+    assert.equal(bytes.readUInt32BE(20), 120);
+    assert.ok(html.includes(`<img class="logo" src="data:image/png;base64,${bytes.toString("base64")}"`));
+    assert.match(html, /\.logo \{ display: block; width: 150px; height: auto; \}/, "fixed width, height follows");
+    assert.ok(!/https?:\/\//.test(html), "no network");
+  });
+
+  it("if the logo cannot be read, the header falls back to the company name as text", () => {
+    assert.equal(logoDataUri(() => { throw new Error("ENOENT"); }), null);
+    assert.equal(logoDataUri(() => Buffer.from("not a png at all")), null);
+    const html = payslipHtml(snapshot(), { logo: null });
+    assert.ok(!html.includes("<img"));
+    assert.match(html, /<div class="co">Daily Needs<\/div>/);
+  });
+
+  it("Salary Payslip + the month top-right; Standard Working Hours / Day; no visible template version", () => {
+    const html = payslipHtml(snapshot());
+    assert.match(html, /<div class="t1">Salary Payslip<\/div><div class="t2">September 2026<\/div>/);
+    assert.ok(!html.includes("NRM"));
+    assert.ok(!html.includes("payslip-v1"), "kept in the snapshot, not printed");
+    assert.ok(html.includes("This is a system-generated payslip and does not require a signature."));
+  });
+
+  it("UAN / PF / ESI print masked; the full numbers are not on the PDF", () => {
+    const html = payslipHtml(snapshot());
+    assert.ok(html.includes("XXXXXXXX0400"));
+    assert.ok(!html.includes("100200300400"));
+  });
+});

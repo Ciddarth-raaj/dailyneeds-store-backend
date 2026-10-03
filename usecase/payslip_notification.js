@@ -1,6 +1,6 @@
+const crypto = require("crypto");
 const {
   NOTIFICATION_RESULT,
-  NOTIFICATION_TRIGGER,
   NOTIFY_CONCURRENCY,
   NOTIFY_TIMEOUT_MS,
   notificationText,
@@ -8,23 +8,33 @@ const {
 const { webAppKeyboard, SECTION } = require("../utils/telegram_mini_app_url");
 
 /**
- * "YOUR PAYSLIP IS AVAILABLE" - the Telegram notification, and only that.
+ * "YOUR PAYSLIP IS AVAILABLE" - THE TELEGRAM NOTIFICATION WORKER.
  *
- * NO DOCUMENT IS SENT. The message says a payslip exists and carries a
- * button that opens My Payslips; every figure stays behind the Mini App's
- * signed-session gate. The text is built from the month alone
- * (`notificationText`) and there is no argument through which an amount
- * could reach it.
+ * ================================================ PUBLISH NEVER WAITS ON IT
  *
- * THE DESTINATION IS THE SERVER'S. `employee_id -> active
- * employee_telegram_identity -> private_chat_id`, looked up here at send
- * time. No caller - and no browser - supplies a chat id; there is no
- * parameter for one.
+ * Publish queues attempt 1 (`payrun_payslip_notification`, QUEUED) inside
+ * the publishing transaction and returns. This worker sends separately:
  *
- * PUBLICATION IS NOT TOUCHED. A missing link records NO_TELEGRAM_LINK, an
- * error records FAILED, and either way the payslip stays published. Every
- * attempt is its own append-only row (attempt 1, 2, ...); a retry is a new
- * row with trigger RETRY and never a republish.
+ *   recover  SENDING rows older than any send can take belong to a process
+ *            that died mid-send. Delivery is unknowable, so they are closed
+ *            FAILED / INTERRUPTED - never re-sent automatically (that could
+ *            notify twice) - and Retry Notification is offered.
+ *   claim    an atomic UPDATE moves a batch QUEUED -> SENDING under a fresh
+ *            claim token; no two passes or processes can take the same row.
+ *   send     at most NOTIFY_CONCURRENCY at once, each with a timeout.
+ *   record   SENT / FAILED / NO_TELEGRAM_LINK, only by the claiming pass.
+ *
+ * A pass runs on `kick()` (after a Publish or Retry commits), on a timer, and
+ * at start-up - so QUEUED rows left by a restart are simply sent next pass.
+ *
+ * ====================================================== WHAT IS SENT ===
+ *
+ * NO DOCUMENT, NO FIGURE. The text is built from the month alone and carries
+ * one button that opens My Payslips. The destination is the server's:
+ * employee_id -> active employee_telegram_identity -> private_chat_id, looked
+ * up at send time. No caller supplies a chat id; there is no parameter for one.
+ * A payslip unpublished before its turn is not announced (FAILED /
+ * PAYSLIP_NOT_PUBLISHED).
  *
  * LOGS CARRY NO FIGURES: a code, the payslip id and the employee id.
  */
@@ -41,8 +51,7 @@ function failureOf(err) {
     (err.response && (err.response.status || (err.response.data && err.response.data.error_code))) ||
     err.status ||
     null;
-  const description =
-    (err.response && err.response.data && err.response.data.description) || null;
+  const description = (err.response && err.response.data && err.response.data.description) || null;
   if (status) {
     return {
       code: `TELEGRAM_${status}`,
@@ -89,9 +98,20 @@ async function mapLimited(items, limit, fn) {
  * @param {object} deps.telegram      services/telegram.js (sendMessage)
  * @param {function():?string} [deps.getMiniAppUrl]
  * @param {object} [deps.log]
- * @param {function():Date} [deps.now]
  */
-module.exports = ({ payslipRepo, identityRepo, telegram, getMiniAppUrl = () => null, log = null, now = () => new Date(), timeoutMs = NOTIFY_TIMEOUT_MS }) => {
+module.exports = ({
+  payslipRepo,
+  identityRepo,
+  telegram,
+  getMiniAppUrl = () => null,
+  log = null,
+  timeoutMs = NOTIFY_TIMEOUT_MS,
+  concurrency = NOTIFY_CONCURRENCY,
+  batchSize = 25,
+  // Longer than any send can take (the send itself times out at timeoutMs).
+  interruptedAfterSeconds = 120,
+  intervalMs = 30000,
+}) => {
   const COMPONENT = "USECASE.PAYSLIP-NOTIFICATION";
   const say = (code, ref, level = "error") => {
     if (!log || typeof log.Log !== "function") return;
@@ -102,26 +122,19 @@ module.exports = ({ payslipRepo, identityRepo, telegram, getMiniAppUrl = () => n
     }
   };
 
-  /**
-   * One payslip, one attempt. Never throws: the outcome is returned and
-   * recorded. `payslip` is `{ payslip_id, employee_id, period_year, period_month }`.
-   */
-  const notifyOne = async (payslip, { trigger = NOTIFICATION_TRIGGER.PUBLISH, actor = {} } = {}) => {
-    const attemptedAt = now();
-    const base = {
-      payslip_id: payslip.payslip_id,
-      employee_id: payslip.employee_id,
-      trigger_type: trigger,
-      requested_by: actor.employeeId === undefined ? null : actor.employeeId,
-      requested_by_user: actor.userId === undefined ? null : actor.userId,
-      attempted_at: attemptedAt,
-    };
+  /** One claimed attempt: decide, send, record. Never throws. */
+  const deliver = async (row, token) => {
     let outcome;
     let identity = null;
-    try {
-      identity = await identityRepo.getActiveIdentityByEmployee(payslip.employee_id);
-    } catch (err) {
-      outcome = { result: NOTIFICATION_RESULT.FAILED, failure_code: "IDENTITY_LOOKUP_FAILED", failure_reason: null };
+    if (Number(row.deliverable) !== 1) {
+      outcome = { result: NOTIFICATION_RESULT.FAILED, failure_code: "PAYSLIP_NOT_PUBLISHED", failure_reason: "The payslip is no longer published" };
+    }
+    if (!outcome) {
+      try {
+        identity = await identityRepo.getActiveIdentityByEmployee(row.employee_id);
+      } catch (err) {
+        outcome = { result: NOTIFICATION_RESULT.FAILED, failure_code: "IDENTITY_LOOKUP_FAILED", failure_reason: null };
+      }
     }
     if (!outcome && (!identity || !identity.private_chat_id)) {
       outcome = { result: NOTIFICATION_RESULT.NO_TELEGRAM_LINK, failure_code: "NO_TELEGRAM_LINK", failure_reason: null };
@@ -134,47 +147,98 @@ module.exports = ({ payslipRepo, identityRepo, telegram, getMiniAppUrl = () => n
         const sent = await withTimeout(
           telegram.sendMessage(
             identity.private_chat_id,
-            notificationText(payslip.period_year, payslip.period_month),
-            keyboard ? { parseMode: null, replyMarkup: keyboard, disableNotification: false } : { parseMode: null, disableNotification: false }
+            notificationText(row.period_year, row.period_month),
+            keyboard
+              ? { parseMode: null, replyMarkup: keyboard, disableNotification: false }
+              : { parseMode: null, disableNotification: false }
           ),
           timeoutMs
         );
-        outcome = {
-          result: NOTIFICATION_RESULT.SENT,
-          telegram_message_id: sent && sent.message_id ? sent.message_id : null,
-        };
+        outcome = { result: NOTIFICATION_RESULT.SENT, telegram_message_id: sent && sent.message_id ? sent.message_id : null };
       } catch (err) {
         const f = failureOf(err);
         outcome = { result: NOTIFICATION_RESULT.FAILED, failure_code: f.code, failure_reason: f.reason };
       }
     }
-    const record = {
-      ...base,
-      ...outcome,
-      employee_telegram_id: identity ? identity.employee_telegram_id || null : null,
-      private_chat_id: identity ? identity.private_chat_id || null : null,
-    };
     try {
-      await payslipRepo.insertNotification(record);
+      await payslipRepo.completeNotification({
+        notification_id: row.notification_id,
+        claim_token: token,
+        ...outcome,
+        employee_telegram_id: identity ? identity.employee_telegram_id || null : null,
+        private_chat_id: identity ? identity.private_chat_id || null : null,
+      });
     } catch (err) {
-      say("RECORD-FAILED", { payslip_id: payslip.payslip_id, employee_id: payslip.employee_id });
+      say("RECORD-FAILED", { payslip_id: row.payslip_id, employee_id: row.employee_id });
     }
     if (outcome.result !== NOTIFICATION_RESULT.SENT) {
-      say(outcome.failure_code || outcome.result, { payslip_id: payslip.payslip_id, employee_id: payslip.employee_id }, "info");
+      say(outcome.failure_code || outcome.result, { payslip_id: row.payslip_id, employee_id: row.employee_id }, "info");
     }
-    return {
-      payslip_id: payslip.payslip_id,
-      employee_id: payslip.employee_id,
-      result: outcome.result,
-      failure_code: outcome.failure_code || null,
-    };
+    return { payslip_id: row.payslip_id, employee_id: row.employee_id, result: outcome.result };
   };
 
-  /** Many payslips, a few at a time; one failure never stops the rest. */
-  const notifyMany = (payslips, opts = {}) =>
-    mapLimited(payslips || [], NOTIFY_CONCURRENCY, (p) => notifyOne(p, opts));
+  let running = null;
+  let again = false;
+  let stopped = false;
+  let timer = null;
 
-  return { notifyOne, notifyMany };
+  /** One pass: recover, then claim and send batches until the queue is empty. */
+  const processQueue = () => {
+    if (running) {
+      again = true;
+      return running;
+    }
+    running = (async () => {
+      const done = [];
+      try {
+        do {
+          again = false;
+          // eslint-disable-next-line no-await-in-loop
+          await payslipRepo.recoverInterrupted({ olderThanSeconds: interruptedAfterSeconds });
+          for (;;) {
+            const token = crypto.randomBytes(16).toString("hex");
+            // eslint-disable-next-line no-await-in-loop
+            const batch = await payslipRepo.claimQueued({ limit: batchSize, token });
+            if (!batch || batch.length === 0) break;
+            // eslint-disable-next-line no-await-in-loop
+            done.push(...(await mapLimited(batch, concurrency, (row) => deliver(row, token))));
+          }
+        } while (again && !stopped);
+      } catch (err) {
+        say("PASS-FAILED", {});
+      } finally {
+        running = null;
+      }
+      return done;
+    })();
+    return running;
+  };
+
+  /** Start a pass soon, without waiting for it. Safe to call any number of times. */
+  const kick = () => {
+    if (stopped) return;
+    setImmediate(() => {
+      processQueue();
+    });
+  };
+
+  /** Recover and drain now, then keep a slow timer as the safety net. */
+  const start = () => {
+    stopped = false;
+    kick();
+    if (!timer && intervalMs > 0) {
+      timer = setInterval(kick, intervalMs);
+      if (typeof timer.unref === "function") timer.unref();
+    }
+  };
+
+  const stop = () => {
+    stopped = true;
+    if (timer) clearInterval(timer);
+    timer = null;
+  };
+
+  return { processQueue, kick, start, stop };
 };
 module.exports.failureOf = failureOf;
 module.exports.mapLimited = mapLimited;

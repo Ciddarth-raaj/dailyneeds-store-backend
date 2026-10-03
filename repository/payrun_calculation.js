@@ -1287,6 +1287,17 @@ class PayrunCalculationRepository {
       }
       if (action === AUDIT_ACTION_LIFECYCLE.PUBLISH) {
         payslipId = await this._insertPayslip(conn, { row, year, month, payslip, actorEmployee, actorUser });
+        // THE OUTBOX: attempt 1 is queued in this transaction, so a committed
+        // publication always has its notification queued and a rolled-back
+        // one never does. The worker sends it; this request never waits.
+        await this._read(
+          "QUEUE-PUBLISH-NOTIFICATION",
+          `INSERT INTO payrun_payslip_notification
+                  (payslip_id, employee_id, attempt_no, trigger_type, result, requested_by, requested_by_user)
+           VALUES (?, ?, 1, 'PUBLISH', 'QUEUED', ?, ?)`,
+          [payslipId, row.employee_id, actorEmployee, actorUser],
+          conn
+        );
       } else if (action === AUDIT_ACTION_LIFECYCLE.UNPUBLISH && payslipId !== null) {
         const archived = await this._read(
           "UNPUBLISH-ARCHIVE-PAYSLIP",
@@ -1300,6 +1311,18 @@ class PayrunCalculationRepository {
         if (!archived || Number(archived.affectedRows) !== 1) {
           throw new Error(`UNPUBLISH could not archive payslip ${payslipId}; rolled back`);
         }
+        // A notification still waiting in the queue is withdrawn with it: an
+        // employee is never told about a payslip that is no longer there.
+        await this._read(
+          "UNPUBLISH-CANCEL-QUEUED-NOTIFICATION",
+          `UPDATE payrun_payslip_notification
+              SET result = 'FAILED', failure_code = 'PAYSLIP_UNPUBLISHED',
+                  failure_reason = 'Withdrawn: the payslip was unpublished before it was sent',
+                  completed_at = CURRENT_TIMESTAMP(3)
+            WHERE payslip_id = ? AND result = 'QUEUED'`,
+          [payslipId],
+          conn
+        );
       }
       await this._lifecycleAudit(conn, {
         row, year, month, action, previous_status: previous, new_status: next,

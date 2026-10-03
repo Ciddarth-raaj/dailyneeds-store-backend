@@ -45,6 +45,7 @@ const TABLES = [
   "biomax_punch",
   "employee_bank_verification",
   "department",
+  "company_details",
   "new_employee",
 ];
 
@@ -83,6 +84,14 @@ const STAND_INS = [
      uan VARCHAR(45), esi_number VARCHAR(45), attendance_required TINYINT(1) DEFAULT 1,
      bank_name VARCHAR(100) NULL, account_no VARCHAR(45) NULL, pan_no VARCHAR(20) NULL,
      department_id INT NULL
+   ) ENGINE=InnoDB`,
+  // The 20210929103343 + 20211004184520 company_details shape.
+  `CREATE TABLE company_details (
+     company_id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, company_name VARCHAR(45) NOT NULL,
+     reg_address LONGTEXT NOT NULL, logo LONGTEXT NULL, contact_number VARCHAR(45) NOT NULL,
+     gst_number VARCHAR(45) NOT NULL, pan_number VARCHAR(45) NOT NULL, esi_number VARCHAR(45) NOT NULL,
+     tan_number VARCHAR(45) NOT NULL, pf_number VARCHAR(45) NOT NULL,
+     created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP, status TINYINT NOT NULL DEFAULT 1
    ) ENGINE=InnoDB`,
   `CREATE TABLE department (
      department_id INT PRIMARY KEY, department_name VARCHAR(100), status TINYINT(1) DEFAULT 1

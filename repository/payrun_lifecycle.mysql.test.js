@@ -98,14 +98,17 @@ describe("payroll lifecycle over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYS
     usecase = buildCalculation(buildCalculationRepo(pool), buildPayrunRepo(pool), buildAdjustmentRepo(pool));
     usecase.today = () => "2026-10-03";
     const payslipRepo = buildPayslipRepo(pool);
+    await q(pool, `INSERT INTO company_details (company_name, reg_address, contact_number, gst_number, pan_number, esi_number, tan_number, pf_number)
+                   VALUES ('Daily Needs Departmental Store', '188/1 Iyyanar Koil Street', '-', '-', '-', '51000123450001001', '-', 'TN/MAS/0012345')`);
     usecase.setPayslipServices({
       payslipRepo,
       notifier: buildNotifier({
         payslipRepo,
         identityRepo: { getActiveIdentityByEmployee: async () => null },
         telegram: { sendMessage: async () => ({ code: 200, message_id: 1 }) },
+        intervalMs: 0,
       }),
-      company: () => ({ name: "Daily Needs" }),
+      companyEnv: () => ({}),
     });
     const calculated = await usecase.calculate({ year: YEAR, month: MONTH, all_eligible: true, actor: ACTOR });
     assert.equal(calculated.calculated_count, IDS.length, JSON.stringify(calculated.results));

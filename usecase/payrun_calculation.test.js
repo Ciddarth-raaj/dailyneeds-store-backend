@@ -59,6 +59,7 @@ class World {
     this.telegramFailFor = new Set();// employee ids whose Telegram send throws
     this.telegramSent = [];          // what the fake bot sent
     this.extras = new Map();         // employee_id -> { account_no, pan_no, bank_name, department_name }
+    this.companies = [{ company_id: 1, company_name: "Daily Needs Departmental Store", reg_address: "188/1 Iyyanar Koil Street", pf_number: "TN/MAS/0012345", esi_number: "51000123450001001", status: 1 }];
     this.legacy = false;             // read as the pre-readiness code did
     this.failResetFor = new Set();   // employee ids whose reset transaction throws
     this.period = null;
@@ -373,11 +374,19 @@ FakeCalculationRepo.prototype.lifecycle = async function lifecycle({
       published_by: actor.employeeId, published_at: row.published_at,
       first_viewed_at: null, last_viewed_at: null, view_count: 0,
     });
+    // The outbox row, in the same "transaction".
+    this.world.notifications.push({
+      notification_id: this.world.notifications.length + 1, payslip_id: payslipId, employee_id,
+      attempt_no: 1, trigger_type: "PUBLISH", result: "QUEUED", requested_by: actor.employeeId,
+    });
   } else if (action === "UNPUBLISH") {
     const active = this.world.payslips.find((p) => p.payrun_employee_id === row.payrun_employee_id && p.status === "ACTIVE");
     if (active) {
       Object.assign(active, { status: "ARCHIVED", archived_by: actor.employeeId, archive_reason: reason });
       payslipId = active.payslip_id;
+      this.world.notifications
+        .filter((n) => n.payslip_id === payslipId && n.result === "QUEUED")
+        .forEach((n) => Object.assign(n, { result: "FAILED", failure_code: "PAYSLIP_UNPUBLISHED" }));
     }
   }
   this.world.lifecycle.push({
@@ -430,16 +439,43 @@ class FakePayslipRepo {
   async listNotifications(payslipId) {
     return this.world.notifications.filter((n) => n.payslip_id === payslipId).slice().reverse();
   }
-  async insertNotification(record) {
-    const attempt = this.world.notifications.filter((n) => n.payslip_id === record.payslip_id).length + 1;
-    this.world.notifications.push({ ...record, attempt_no: attempt });
-    return this.world.notifications.length;
+  async listCompanies() {
+    return this.world.companies;
+  }
+  async enqueueRetry({ payslip_id, employee_id, requested_by }) {
+    const mine = this.world.notifications.filter((n) => n.payslip_id === payslip_id);
+    if (mine.some((n) => n.result === "QUEUED" || n.result === "SENDING")) return { queued: false, reason: "ALREADY_PENDING" };
+    this.world.notifications.push({
+      notification_id: this.world.notifications.length + 1, payslip_id, employee_id,
+      attempt_no: mine.length + 1, trigger_type: "RETRY", result: "QUEUED", requested_by,
+    });
+    return { queued: true };
+  }
+  async claimQueued({ limit, token }) {
+    const picked = this.world.notifications.filter((n) => n.result === "QUEUED").slice(0, limit);
+    picked.forEach((n) => Object.assign(n, { result: "SENDING", claim_token: token }));
+    return picked.map((n) => {
+      const slip = this.world.payslips.find((p) => p.payslip_id === n.payslip_id);
+      const calc = this.world.calculations.get(n.employee_id);
+      const deliverable = slip.status === "ACTIVE" && calc && calc.status === "APPROVED_LOCKED" && Boolean(calc.published_at);
+      return { ...n, period_year: slip.period_year, period_month: slip.period_month, deliverable: deliverable ? 1 : 0 };
+    });
+  }
+  async completeNotification({ notification_id, claim_token, ...outcome }) {
+    const n = this.world.notifications.find((x) => x.notification_id === notification_id && x.claim_token === claim_token && x.result === "SENDING");
+    if (!n) return false;
+    Object.assign(n, outcome);
+    return true;
+  }
+  async recoverInterrupted() {
+    return 0;
   }
 }
 
 /** The real notifier, over a fake identity repository and a fake bot. */
 function payslipNotifier(world) {
   return require("./payslip_notification")({
+    intervalMs: 0,
     payslipRepo: new FakePayslipRepo(world),
     identityRepo: {
       getActiveIdentityByEmployee: async (id) => world.telegramLinks.get(id) || null,
@@ -557,10 +593,11 @@ function build() {
   const locks = { listLockedEmployeeIds: (args) => calcRepo.listLockedEmployeeIds(args) };
 
   calculation = buildCalculation(calcRepo, payrunRepo, adjustmentRepo);
+  world.notifier = payslipNotifier(world);
   calculation.setPayslipServices({
     payslipRepo: new FakePayslipRepo(world),
-    notifier: payslipNotifier(world),
-    company: () => ({ name: "Daily Needs", address: "Test Street" }),
+    notifier: world.notifier,
+    companyEnv: () => ({}),
   });
   payrun = buildPayrun(payrunRepo, locks);
   adjustments = buildAdjustments(adjustmentRepo, payrunRepo, locks);
@@ -2758,12 +2795,48 @@ describe("Payslip Publish", () => {
     assert.equal(world.lifecycle.at(-1).payslip_id, slip.payslip_id, "the lifecycle row names the payslip");
   });
 
+  const drain = async () => {
+    await new Promise((r) => setImmediate(r));
+    await world.notifier.processQueue();
+  };
+
+  it("PUBLISH DOES NOT WAIT ON TELEGRAM: it returns with the notification QUEUED; the worker sends it afterwards", async () => {
+    await approved(1);
+    link(1);
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    const realSend = world.telegramSent;
+    world.telegramFailFor.clear();
+    const slowWorld = world;
+    const origNotifier = world.notifier;
+    // A Telegram that does not answer until released.
+    const slow = require("./payslip_notification")({
+      intervalMs: 0,
+      payslipRepo: new FakePayslipRepo(slowWorld),
+      identityRepo: { getActiveIdentityByEmployee: async (id) => slowWorld.telegramLinks.get(id) || null },
+      telegram: { sendMessage: async (chatId, text) => { await gate; realSend.push({ chatId, text }); return { message_id: 1 }; } },
+    });
+    calculation.notifier = slow;
+    const out = await act("PUBLISH", [1]);
+    assert.equal(out.published_count, 1);
+    assert.deepEqual(out.notification, { queued: 1 });
+    assert.equal(out.results[0].notification_status, "QUEUED");
+    assert.equal(world.telegramSent.length, 0, "nothing sent while the request was in flight");
+    assert.equal((await rowOf(1)).status, CALC_STATUS.PUBLISHED, "publication committed regardless");
+    release();
+    await new Promise((r) => setImmediate(r));
+    await slow.processQueue();
+    assert.equal(world.telegramSent.length, 1);
+    assert.equal(world.notifications[0].result, "SENT");
+    calculation.notifier = origNotifier;
+  });
+
   it("notifies with the figure-free message to the server-resolved chat, recorded SENT, separate from publication", async () => {
     await approved(1);
     link(1);
     const out = await act("PUBLISH", [1]);
-    assert.deepEqual(out.notification, { sent: 1, failed: 0, no_telegram_link: 0 });
-    assert.equal(out.results[0].notification_status, "SENT");
+    assert.deepEqual(out.notification, { queued: 1 });
+    await drain();
     assert.equal(world.telegramSent.length, 1);
     assert.equal(world.telegramSent[0].chatId, 70001);
     assert.equal(world.telegramSent[0].text, "Your payslip for August 2026 is now available in My Payslips.");
@@ -2779,8 +2852,7 @@ describe("Payslip Publish", () => {
     world.telegramFailFor.add(2);
     const out = await act("PUBLISH", [1, 2, 3]);
     assert.equal(out.published_count, 3, "one failed notification fails nobody's publication");
-    assert.deepEqual(out.notification, { sent: 1, failed: 1, no_telegram_link: 1 });
-    assert.deepEqual(out.results.map((r) => r.notification_status), ["SENT", "FAILED", "NO_TELEGRAM_LINK"]);
+    await drain();
     for (const id of [1, 2, 3]) assert.equal((await rowOf(id)).status, CALC_STATUS.PUBLISHED);
     const view = await calculation.getMonth({ ...MONTH });
     const statusOf = (id) => view.rows.find((r) => r.employee_id === id).payslip.notification_status;
@@ -2788,20 +2860,25 @@ describe("Payslip Publish", () => {
     assert.equal(world.notifications.find((n) => n.employee_id === 2).failure_code, "TELEGRAM_403");
   });
 
-  it("Retry Notification: a NEW attempt row, never a republish; already-notified and unpublished are skipped", async () => {
+  it("Retry Notification: queues a NEW attempt, never a republish; already-notified, pending and unpublished are skipped", async () => {
     await approved(1, 2, 3);
     link(1);
     link(2);
     world.telegramFailFor.add(2);
     await act("PUBLISH", [1, 2]);
+    await drain();
     const slipsBefore = JSON.stringify(world.payslips);
     const lifecycleBefore = world.lifecycle.length;
     world.telegramFailFor.delete(2);
 
     const out = await calculation.retryNotification({ ...MONTH, employee_ids: [1, 2, 3], actor: ACTOR });
     assert.deepEqual(out.results.map((r) => [r.employee_id, r.result]), [
-      [1, "SKIPPED"], [2, "NOTIFIED"], [3, "SKIPPED"],
+      [1, "SKIPPED"], [2, "QUEUED"], [3, "SKIPPED"],
     ]);
+    // A second retry while the first is still pending queues nothing more.
+    const again = await calculation.retryNotification({ ...MONTH, employee_ids: [2], actor: ACTOR });
+    assert.equal(again.results[0].result, "SKIPPED");
+    await drain();
     assert.equal(JSON.stringify(world.payslips), slipsBefore, "no payslip written");
     assert.equal(world.lifecycle.length, lifecycleBefore, "no lifecycle act");
     const forTwo = world.notifications.filter((n) => n.employee_id === 2);
@@ -2811,10 +2888,48 @@ describe("Payslip Publish", () => {
   it("Retry for an employee with no link records NO_TELEGRAM_LINK again and keeps the payslip published", async () => {
     await approved(1);
     await act("PUBLISH", [1]);
+    await drain();
     const out = await calculation.retryNotification({ ...MONTH, employee_ids: [1], actor: ACTOR });
-    assert.equal(out.results[0].result, "NOT_NOTIFIED");
-    assert.equal(world.notifications.length, 2);
+    assert.equal(out.results[0].result, "QUEUED");
+    await drain();
+    assert.deepEqual(world.notifications.map((n) => n.result), ["NO_TELEGRAM_LINK", "NO_TELEGRAM_LINK"]);
     assert.equal((await rowOf(1)).status, CALC_STATUS.PUBLISHED);
+  });
+
+  it("Unpublish before the worker runs withdraws the queued notification - the employee is not told", async () => {
+    await approved(1);
+    link(1);
+    const realKick = calculation.notifier.kick;
+    calculation.notifier.kick = () => {};
+    try {
+      await act("PUBLISH", [1]);
+      await act("UNPUBLISH", [1]);
+    } finally {
+      calculation.notifier.kick = realKick;
+    }
+    await drain();
+    assert.equal(world.telegramSent.length, 0);
+    assert.deepEqual([world.notifications[0].result, world.notifications[0].failure_code], ["FAILED", "PAYSLIP_UNPUBLISHED"]);
+  });
+
+  it("company details come from Company Details, are frozen at Publish, and a later edit does not change the payslip", async () => {
+    await approved(1);
+    await act("PUBLISH", [1]);
+    const snap = JSON.parse(world.payslips[0].snapshot_json);
+    assert.deepEqual(snap.company, {
+      name: "Daily Needs Departmental Store", address: "188/1 Iyyanar Koil Street",
+      pf_establishment_code: "TN/MAS/0012345", esi_establishment_code: "51000123450001001", source: "company_details:1",
+    });
+    world.companies[0].company_name = "Renamed Ltd";
+    assert.equal(JSON.parse(world.payslips[0].snapshot_json).company.name, "Daily Needs Departmental Store");
+  });
+
+  it("no usable company record: Publish is refused for everyone - nothing published with a made-up name", async () => {
+    await approved(1);
+    world.companies = [];
+    await assert.rejects(act("PUBLISH", [1]), (e) => e.code === "PAYSLIP_COMPANY_NOT_CONFIGURED");
+    assert.equal(world.payslips.length, 0);
+    assert.equal((await rowOf(1)).status, CALC_STATUS.APPROVED_LOCKED);
   });
 
   it("Publish All Approved: only Approved & Locked, decided on the server; mixed states handled per employee", async () => {

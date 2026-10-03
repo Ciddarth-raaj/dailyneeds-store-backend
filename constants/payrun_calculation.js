@@ -306,9 +306,8 @@ const ROW_RESULT = {
   UNLOCKED: "UNLOCKED",
   PUBLISHED: "PUBLISHED",
   UNPUBLISHED: "UNPUBLISHED",
-  // Retry Notification: the "payslip available" message reached / did not reach the employee.
-  NOTIFIED: "NOTIFIED",
-  NOT_NOTIFIED: "NOT_NOTIFIED",
+  // Retry Notification: one more "payslip available" attempt queued for the worker.
+  QUEUED: "QUEUED",
 };
 
 /** The lifecycle log's verbs (`payrun_employee_lifecycle_audit.action`). */

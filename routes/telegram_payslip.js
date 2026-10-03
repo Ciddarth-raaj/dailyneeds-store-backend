@@ -7,9 +7,9 @@ const respondError = require("../utils/http");
  *
  *   GET  /telegram/payslips               the employee's own published payslips
  *   GET  /telegram/payslips/detail?ref=    one of them (records the view)
- *   POST /telegram/payslips/pdf-link       a two-minute download link for one of them
- *   GET  /telegram/payslips/pdf?ref=       the PDF, with the session header
- *   GET  /telegram/payslips/pdf?token=     the PDF, with a pdf-link token
+ *   GET  /telegram/payslips/pdf?ref=       the PDF, with the session header (normal path)
+ *   POST /telegram/payslips/pdf-link       fallback: a single-use, 60-second link
+ *   GET  /telegram/payslips/pdf?t=         the PDF, spending that link
  *
  * THE SAME GATE AS THE ATTENDANCE MINI APP. A Mini App has no dnds.co.in
  * session, so these paths step past the `x-access-token` gate in
@@ -66,6 +66,7 @@ class TelegramPayslipRoutes {
       "Cache-Control": "no-store, private, max-age=0",
       Pragma: "no-cache",
       "X-Content-Type-Options": "nosniff",
+      "Referrer-Policy": "no-referrer",
     });
     res.end(buffer);
   }
@@ -107,22 +108,22 @@ class TelegramPayslipRoutes {
     });
 
     /**
-     * EXACTLY ONE OF `ref` (with the session header) OR `token` (a pdf-link
-     * token, no header). A token request never reads the header, and a ref
-     * request never reads a token.
+     * EXACTLY ONE OF `ref` (with the session header - the normal path) OR `t`
+     * (a single-use pdf-link token, no header). A token request never reads
+     * the header, and a ref request never reads a token.
      */
     r.get("/telegram/payslips/pdf", async (req, res) => {
       try {
         const isValid = Joi.validate(
           req.query || {},
           Joi.object()
-            .keys({ ref: Joi.string().regex(/^[0-9a-f]{32}$/), token: Joi.string().max(4096) })
-            .xor("ref", "token")
+            .keys({ ref: Joi.string().regex(/^[0-9a-f]{32}$/), t: Joi.string().max(64) })
+            .xor("ref", "t")
             .unknown(false)
         );
         if (isValid.error !== null) throw isValid.error;
-        if (req.query.token) {
-          TelegramPayslipRoutes._sendPdf(res, await this.payslips.pdfByToken(req.query.token));
+        if (req.query.t) {
+          TelegramPayslipRoutes._sendPdf(res, await this.payslips.pdfByToken(req.query.t));
           return;
         }
         const session = await this.session.authenticate(req.headers["x-telegram-session"]);

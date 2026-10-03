@@ -22,6 +22,7 @@ const { latestClosableDate } = require("../utils/attendance_persist_guard");
 const { istToday } = require("../utils/istDate");
 const crypto = require("crypto");
 const payslipSnapshot = require("../utils/payslip_snapshot");
+const { resolvePayslipCompany } = require("../utils/payslip_company");
 const {
   SNAPSHOT_SCHEMA_VERSION,
   TEMPLATE_VERSION,
@@ -122,21 +123,28 @@ class PayrunCalculationUsecase {
     this.attendanceProcessor = null;
     this.payslipRepo = null;
     this.notifier = null;
-    this.company = () => ({});
+    this.companyEnv = () => ({});
     this.today = () => istToday();
   }
 
   /**
    * PAYSLIPS. `payslipRepo` (repository/payrun_payslip.js) reads and records
-   * payslips and notification attempts; `notifier`
-   * (usecase/payslip_notification.js) sends the figure-free "available"
-   * message after a Publish commits; `company` supplies the name and address
-   * frozen into each snapshot.
+   * payslips and queues notification attempts; `notifier`
+   * (usecase/payslip_notification.js) is the worker that sends the
+   * figure-free "available" message - Publish only kicks it, never waits.
+   * `companyEnv` returns the PAYSLIP_COMPANY_* overrides (utils/payslip_company.js);
+   * the company itself comes from `company_details`.
    */
-  setPayslipServices({ payslipRepo = null, notifier = null, company = null } = {}) {
+  setPayslipServices({ payslipRepo = null, notifier = null, companyEnv = null } = {}) {
     this.payslipRepo = payslipRepo;
     this.notifier = notifier;
-    if (typeof company === "function") this.company = company;
+    if (typeof companyEnv === "function") this.companyEnv = companyEnv;
+  }
+
+  /** The payslip issuer, frozen into each snapshot. Refuses rather than guesses. */
+  async _payslipCompany() {
+    const rows = await this.payslipRepo.listCompanies();
+    return resolvePayslipCompany(rows, this.companyEnv() || {});
   }
 
   /**
@@ -1787,7 +1795,9 @@ class PayrunCalculationUsecase {
     // What the payslip needs beyond the payrun snapshot - read once, masked
     // inside the snapshot builder, and never returned to the caller.
     const extrasOf = new Map();
+    let company = null;
     if (action === LIFECYCLE_ACTION.PUBLISH && presentedById.size > 0) {
+      company = await this._payslipCompany();
       const extras = await this.payslipRepo.listEmployeeExtras([...presentedById.keys()]);
       extras.forEach((x) => extrasOf.set(Number(x.employee_id), x));
     }
@@ -1882,7 +1892,7 @@ class PayrunCalculationUsecase {
             calculation: presented.internals.stored,
             employee: presented.internals.employee,
             extras: extrasOf.get(employeeId) || {},
-            company: this.company() || {},
+            company,
           });
           const frozen = payslipSnapshot.freezeSnapshot(snapshot);
           payslip = {
@@ -1933,34 +1943,20 @@ class PayrunCalculationUsecase {
     }
 
     /*
-     * THE NOTIFICATIONS, AFTER EVERY PUBLISH HAS COMMITTED. Publication is
-     * already final; a notification that fails or has nowhere to go is
-     * recorded against the payslip and never undoes it.
+     * THE NOTIFICATIONS ARE ALREADY QUEUED - attempt 1 was inserted in each
+     * publishing transaction. The worker is kicked and NOT awaited: one slow
+     * or failed Telegram send can neither hold up nor roll back a
+     * publication, and this request returns with publication results only.
      */
-    const notification = { sent: 0, failed: 0, no_telegram_link: 0 };
+    const notification = { queued: 0 };
     if (action === LIFECYCLE_ACTION.PUBLISH) {
-      const published = results.filter((r) => r.result === ROW_RESULT.PUBLISHED && r.payslip_id);
-      if (published.length > 0) {
-        const outcomes = this.notifier
-          ? await this.notifier.notifyMany(
-              published.map((r) => ({
-                payslip_id: r.payslip_id,
-                employee_id: r.employee_id,
-                period_year: period.year,
-                period_month: period.month,
-              })),
-              { trigger: NOTIFICATION_TRIGGER.PUBLISH, actor }
-            )
-          : [];
-        const byPayslip = new Map(outcomes.map((o) => [Number(o.payslip_id), o]));
-        published.forEach((r) => {
-          const o = byPayslip.get(Number(r.payslip_id));
-          r.notification_status = o ? o.result : NOTIFICATION_RESULT.NOT_ATTEMPTED;
-          if (r.notification_status === NOTIFICATION_RESULT.SENT) notification.sent += 1;
-          else if (r.notification_status === NOTIFICATION_RESULT.NO_TELEGRAM_LINK) notification.no_telegram_link += 1;
-          else notification.failed += 1;
-        });
-      }
+      results.forEach((r) => {
+        if (r.result === ROW_RESULT.PUBLISHED && r.payslip_id) {
+          r.notification_status = NOTIFICATION_RESULT.QUEUED;
+          notification.queued += 1;
+        }
+      });
+      if (notification.queued > 0 && this.notifier) this.notifier.kick();
     }
 
     const counted = (code) => results.filter((r) => r.result === code).length;
@@ -2002,7 +1998,7 @@ class PayrunCalculationUsecase {
         period_month: period.month,
         action: LIFECYCLE_ACTION.PUBLISH,
         mode: RESET_MODE.BULK,
-        notification: { sent: 0, failed: 0, no_telegram_link: 0 },
+        notification: { queued: 0 },
         done_count: 0,
         published_count: 0,
         skipped_count: 0,
@@ -2025,13 +2021,13 @@ class PayrunCalculationUsecase {
   }
 
   /**
-   * RETRY NOTIFICATION - send the "payslip available" message again for
+   * RETRY NOTIFICATION - queue the "payslip available" message again for
    * published payslips whose last attempt did not reach the employee.
    *
    * IT NEVER REPUBLISHES. No payroll row, no payslip and no snapshot is
-   * written: each retry is one more append-only attempt row (trigger RETRY).
-   * A payslip already notified successfully is skipped, as is anybody whose
-   * month is not published or who is outside the caller's branch scope.
+   * written: each retry queues one more append-only attempt (trigger RETRY)
+   * for the worker. Skipped: already notified, a notification already queued
+   * or sending, not published, outside the caller's branch scope.
    */
   async retryNotification({ year, month, employee_ids, store_ids = null, actor = {} }) {
     const period = normalizeMonth(year, month);
@@ -2049,10 +2045,10 @@ class PayrunCalculationUsecase {
       employee_ids: [...presentedById.keys()],
     });
     const slipOf = new Map(slips.map((p) => [Number(p.employee_id), p]));
+    const PENDING = [NOTIFICATION_RESULT.QUEUED, NOTIFICATION_RESULT.SENDING];
 
     const results = [];
-    const toSend = [];
-    ids.forEach((employeeId) => {
+    for (const employeeId of ids) {
       const row = presentedById.get(employeeId);
       if (!row) {
         results.push({
@@ -2060,57 +2056,41 @@ class PayrunCalculationUsecase {
           result: ROW_RESULT.NOT_IN_SCOPE,
           message: "This employee is not initialized for the selected month, or is outside your branch scope",
         });
-        return;
+        continue;
       }
       const slip = slipOf.get(employeeId);
       const base = { employee_id: employeeId, employee_name: row.employee_name };
       if (row.status !== CALC_STATUS.PUBLISHED || !slip) {
         results.push({ ...base, result: ROW_RESULT.SKIPPED, message: "Skipped — payslip not published." });
-        return;
+        continue;
       }
       if (slip.notification_result === NOTIFICATION_RESULT.SENT) {
         results.push({ ...base, result: ROW_RESULT.SKIPPED, message: "Skipped — already notified." });
-        return;
+        continue;
       }
-      const entry = { ...base, payslip_id: slip.payslip_id };
-      results.push(entry);
-      toSend.push(entry);
-    });
-
-    const outcomes = await this.notifier.notifyMany(
-      toSend.map((r) => ({
-        payslip_id: r.payslip_id,
-        employee_id: r.employee_id,
-        period_year: period.year,
-        period_month: period.month,
-      })),
-      { trigger: NOTIFICATION_TRIGGER.RETRY, actor }
-    );
-    const notification = { sent: 0, failed: 0, no_telegram_link: 0 };
-    toSend.forEach((r, i) => {
-      const o = outcomes[i];
-      r.notification_status = o ? o.result : NOTIFICATION_RESULT.FAILED;
-      if (r.notification_status === NOTIFICATION_RESULT.SENT) {
-        notification.sent += 1;
-        r.result = ROW_RESULT.NOTIFIED;
-        r.message = "Notification sent.";
-      } else if (r.notification_status === NOTIFICATION_RESULT.NO_TELEGRAM_LINK) {
-        notification.no_telegram_link += 1;
-        r.result = ROW_RESULT.NOT_NOTIFIED;
-        r.message = "Not sent — no Telegram link. The payslip stays published.";
+      if (PENDING.includes(slip.notification_result)) {
+        results.push({ ...base, result: ROW_RESULT.SKIPPED, message: "Skipped — a notification is already queued." });
+        continue;
+      }
+      // eslint-disable-next-line no-await-in-loop
+      const queued = await this.payslipRepo.enqueueRetry({
+        payslip_id: slip.payslip_id,
+        employee_id: employeeId,
+        requested_by: actor.employeeId === undefined ? null : actor.employeeId,
+        requested_by_user: actor.userId === undefined ? null : actor.userId,
+      });
+      if (queued.queued) {
+        results.push({ ...base, result: ROW_RESULT.QUEUED, notification_status: NOTIFICATION_RESULT.QUEUED, message: "Notification queued." });
       } else {
-        notification.failed += 1;
-        r.result = ROW_RESULT.NOT_NOTIFIED;
-        r.message = "Notification failed. The payslip stays published.";
+        results.push({ ...base, result: ROW_RESULT.SKIPPED, message: "Skipped — a notification is already queued." });
       }
-    });
+    }
     const counted = (code) => results.filter((r) => r.result === code).length;
+    if (counted(ROW_RESULT.QUEUED) > 0) this.notifier.kick();
     return {
       period_year: period.year,
       period_month: period.month,
-      notification,
-      notified_count: counted(ROW_RESULT.NOTIFIED),
-      not_notified_count: counted(ROW_RESULT.NOT_NOTIFIED),
+      queued_count: counted(ROW_RESULT.QUEUED),
       skipped_count: counted(ROW_RESULT.SKIPPED),
       not_in_scope_count: counted(ROW_RESULT.NOT_IN_SCOPE),
       results,

@@ -890,15 +890,17 @@ class Server {
     this.payrunCalculationUsecase.setPayslipServices({
       payslipRepo: this.payrunPayslipRepo,
       notifier: this.payslipNotificationUsecase,
-      company: () => ({
-        name: process.env.PAYSLIP_COMPANY_NAME || "Daily Needs",
-        address: process.env.PAYSLIP_COMPANY_ADDRESS || null,
+      // The issuer comes from `company_details`; these only choose / override
+      // it when somebody configured them on purpose (utils/payslip_company.js).
+      companyEnv: () => ({
+        PAYSLIP_COMPANY_ID: process.env.PAYSLIP_COMPANY_ID,
+        PAYSLIP_COMPANY_NAME: process.env.PAYSLIP_COMPANY_NAME,
+        PAYSLIP_COMPANY_ADDRESS: process.env.PAYSLIP_COMPANY_ADDRESS,
       }),
     });
     this.telegramPayslipUsecase = require("./usecase/telegram_payslip")({
       payslipRepo: this.payrunPayslipRepo,
       renderPdf: require("./services/payslip_pdf").renderPayslipPdf,
-      jwtService: require("./services/jwt"),
       log: require("./utils/logger"),
     });
     // Attendance v2 / A3. Handed the calculation usecase as well, because a
@@ -2154,6 +2156,11 @@ class Server {
   initServices() {
     const CronService = require("./services/cron_service");
     this.cronService = new CronService();
+    // THE PAYSLIP NOTIFICATION WORKER: sends the QUEUED "payslip available"
+    // messages Publish / Retry left in the outbox, closes attempts a restart
+    // interrupted, and re-checks on a slow timer. It sends nothing that a
+    // person did not queue by publishing or retrying.
+    if (this.payslipNotificationUsecase) this.payslipNotificationUsecase.start();
     if (
       this.productUsecase &&
       typeof this.productUsecase.bootstrapDownloadJobsFromStore === "function"
