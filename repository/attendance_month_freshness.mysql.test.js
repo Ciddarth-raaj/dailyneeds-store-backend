@@ -569,6 +569,34 @@ describe("monthly attendance freshness and lock order, as SQL", { skip: !URL && 
     });
   });
 
+  describe("THE AUTO-REFRESH'S OWN READS, as SQL", () => {
+    const { monthFreshness } = require("../utils/attendance_month_freshness");
+    const SEPT = Array.from({ length: 30 }, (_, i) => `2026-09-${String(i + 1).padStart(2, "0")}`);
+
+    it("listMonthDayRowsForFingerprint reproduces the persisted fingerprint, and sees a later day change", async () => {
+      await persistMonth(0, SEPT.map((d) => day(d, { shortage_minutes: 0 })));
+      const [monthly] = await q(pool, "SELECT * FROM attendance_monthly_payroll WHERE employee_id = ?", [EMP]);
+      const read = () => calcRepo.listMonthDayRowsForFingerprint({ employee_id: EMP, from_date: "2026-09-01", to_date: "2026-09-30" });
+      assert.equal(monthFreshness({ monthly, dayRows: await read() }).state, "CURRENT");
+      await q(pool, "UPDATE attendance_day_calculation SET approved_ot_minutes = 84 WHERE employee_id = ? AND attendance_date = '2026-09-14'", [EMP]);
+      assert.equal(monthFreshness({ monthly, dayRows: await read() }).state, "STALE");
+    });
+
+    it("isPayrollPeriodLocked: no payrun_period table is no lock; a LOCKED period is a lock; OPEN is not", async () => {
+      await q(pool, "DROP TABLE IF EXISTS payrun_period");
+      assert.equal(await calcRepo.isPayrollPeriodLocked({ period_year: 2026, period_month: 9 }), false);
+      await q(pool, "CREATE TABLE payrun_period (payrun_period_id INT AUTO_INCREMENT PRIMARY KEY, period_year SMALLINT, period_month TINYINT, status ENUM('OPEN','LOCKED') NOT NULL DEFAULT 'OPEN')");
+      try {
+        await q(pool, "INSERT INTO payrun_period (period_year, period_month, status) VALUES (2026, 9, 'LOCKED'), (2026, 10, 'OPEN')");
+        assert.equal(await calcRepo.isPayrollPeriodLocked({ period_year: 2026, period_month: 9 }), true);
+        assert.equal(await calcRepo.isPayrollPeriodLocked({ period_year: 2026, period_month: 10 }), false);
+        assert.equal(await calcRepo.isPayrollPeriodLocked({ period_year: 2026, period_month: 11 }), false);
+      } finally {
+        await q(pool, "DROP TABLE IF EXISTS payrun_period");
+      }
+    });
+  });
+
   describe("LOCK ORDER: a Permission decision and Approve & Lock never deadlock", () => {
     /** Approve & Lock's own lock sequence: the payrun row, then the closure of pending permissions. */
     const lockPayroll = async () => {

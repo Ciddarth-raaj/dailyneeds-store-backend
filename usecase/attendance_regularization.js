@@ -166,6 +166,26 @@ module.exports = (
       ? attendanceCalculationUsecase.refreshPersistedMonth({ employee_id: employeeId, attendance_date: date, now })
       : { refreshed: false, reason: "NOT_WIRED" };
 
+  /**
+   * THE MONTHLY SUMMARY, KEPT IN STEP AFTER ANY COMMITTED DECISION THAT WROTE
+   * A DAY - every request type, not only Permission. See
+   * `attendanceCalculationUsecase.refreshAffectedMonths`.
+   *
+   * `collector`, when a bulk action passes one, defers the refresh: the
+   * entries are gathered and the bulk action refreshes each employee/month
+   * once at the end, however many of its requests touched it.
+   */
+  const refreshMonthsAfter = async (entries, { now = null, collector = null, source = null } = {}) => {
+    if (Array.isArray(collector)) {
+      collector.push(...entries);
+      return { deferred: true };
+    }
+    if (typeof attendanceCalculationUsecase.refreshAffectedMonths === "function") {
+      return attendanceCalculationUsecase.refreshAffectedMonths(entries, { now, source });
+    }
+    return { refreshed: 0, failed: 0, months: [], reason: "NOT_WIRED" };
+  };
+
   /** The refusal every "not until the day closes" rule answers with. */
   const dayOpenError = (message) => {
     const err = validationError(message);
@@ -467,8 +487,18 @@ module.exports = (
       auto_approve,
     });
 
+    // An auto-approved request wrote its corrected day in the same commit.
+    const monthRefresh =
+      auto_approve && auto_approve.calculations.length > 0 && created && (!created.code || created.code === 200)
+        ? await refreshMonthsAfter([{ employee_id: forEmployeeId, attendance_date: date }], {
+            now,
+            source: "an auto-approved regularization",
+          })
+        : null;
+
     return {
       ...created,
+      month_refresh: monthRefresh,
       status: created.status || REQUEST_STATUS.PENDING,
       auto_approved: Boolean(auto_approve),
       request_type: REQUEST_TYPE.REGULARIZATION,
@@ -1361,7 +1391,14 @@ module.exports = (
     REQUEST_TYPE.PERMISSION,
   ];
 
-  const revokeDecision = async ({ actor, request_id, stage_no = null, reason, now = null }) => {
+  const revokeDecision = async ({
+    actor,
+    request_id,
+    stage_no = null,
+    reason,
+    now = null,
+    month_refresh_collector = null,
+  }) => {
     if (!actor || Number(actor.user_type) !== ADMIN_USER_TYPE) {
       const err = new Error("Only an administrator can revoke an approval decision");
       err.name = "ForbiddenError";
@@ -1529,11 +1566,25 @@ module.exports = (
       calculations,
       attendanceDate: request.attendance_date,
     });
-    // Revoking a Permission request changes what its day forgives.
-    const monthRefresh =
-      request.request_type === REQUEST_TYPE.PERMISSION && result && result.code === 200
-        ? await refreshMonthAfter(employeeId, request.attendance_date, now)
-        : null;
+    // Revoking a Permission request changes what its day forgives (its own
+    // path, unchanged); revoking any other type that rewrote the day - OT,
+    // regularization, shift change - refreshes the month the same way.
+    const committed = result && result.code === 200;
+    const isPermission = request.request_type === REQUEST_TYPE.PERMISSION;
+    const monthRefresh = !committed
+      ? null
+      : Array.isArray(month_refresh_collector) && (isPermission || calculations.length > 0)
+      ? await refreshMonthsAfter([{ employee_id: employeeId, attendance_date: request.attendance_date }], {
+          collector: month_refresh_collector,
+        })
+      : isPermission
+      ? await refreshMonthAfter(employeeId, request.attendance_date, now)
+      : calculations.length > 0
+      ? await refreshMonthsAfter([{ employee_id: employeeId, attendance_date: request.attendance_date }], {
+          now,
+          source: `a ${request.request_type} revocation`,
+        })
+      : null;
     return {
       ...result,
       month_refresh: monthRefresh,
@@ -1562,7 +1613,15 @@ module.exports = (
    * whose day has not been recalculated. The recalculation is idempotent, so a
    * retried approval cannot double anything.
    */
-  const decide = async ({ actor, request_id, decision, remarks = null, source = "WEB", now = null }) => {
+  const decide = async ({
+    actor,
+    request_id,
+    decision,
+    remarks = null,
+    source = "WEB",
+    now = null,
+    month_refresh_collector = null,
+  }) => {
     if (decision !== STEP_DECISION.APPROVED && decision !== STEP_DECISION.REJECTED) {
       throw validationError("decision must be APPROVED or REJECTED");
     }
@@ -1820,9 +1879,23 @@ module.exports = (
     // A PERMISSION finally approved moves the day it covers; the monthly
     // summary payroll reads is re-persisted through the existing month path
     // (a no-op when the month has no summary yet). See `refreshPersistedMonth`.
+    //
+    // EVERY OTHER DECISION THAT WROTE A DAY - an OT, regularization or shift
+    // change approval, a rejection that settled the day - refreshes it too,
+    // through the same month persist. The Permission path is kept exactly.
+    // An intermediate stage leaves the stored day as it was (the request is
+    // still pending), so only the FINAL outcome refreshes.
+    const permissionRefresh = isPermissionRequest && saved.status === REQUEST_STATUS.APPROVED;
+    const otherRefresh =
+      !isPermissionRequest && calculations.length > 0 && saved.status !== REQUEST_STATUS.PENDING;
+    const entry = [{ employee_id: request.requested_for_employee_id, attendance_date: request.attendance_date }];
     const monthRefresh =
-      isPermissionRequest && saved.status === REQUEST_STATUS.APPROVED
+      Array.isArray(month_refresh_collector) && (permissionRefresh || otherRefresh)
+        ? await refreshMonthsAfter(entry, { collector: month_refresh_collector })
+        : permissionRefresh
         ? await refreshMonthAfter(request.requested_for_employee_id, request.attendance_date, now)
+        : otherRefresh
+        ? await refreshMonthsAfter(entry, { now, source: `a ${request.request_type} decision` })
         : null;
 
     return {
@@ -2540,6 +2613,10 @@ module.exports = (
           };
 
     const results = [];
+    // Every employee/month a decision in this batch rewrote, refreshed ONCE
+    // after the loop - fifty approvals for one employee's month are one
+    // month persist, not fifty.
+    const monthRefreshEntries = [];
     /* eslint-disable no-await-in-loop */
     // ONE AT A TIME, on purpose: each record is its own transaction, and two
     // records of the same employee and date must not race each other's
@@ -2608,7 +2685,13 @@ module.exports = (
             // THE SINGLE-RECORD ACTION, unchanged.
             const done =
               action === BULK_ACTION.REVOKE
-                ? await revokeDecision({ actor: revoke_actor, request_id: target.request_id, reason: why, now })
+                ? await revokeDecision({
+                    actor: revoke_actor,
+                    request_id: target.request_id,
+                    reason: why,
+                    now,
+                    month_refresh_collector: monthRefreshEntries,
+                  })
                 : await decide({
                     actor,
                     request_id: target.request_id,
@@ -2616,6 +2699,7 @@ module.exports = (
                     remarks: why || null,
                     source: "WEB",
                     now,
+                    month_refresh_collector: monthRefreshEntries,
                   });
             if (done && done.code === 200) {
               Object.assign(result, {
@@ -2688,7 +2772,12 @@ module.exports = (
       else if (r.outcome === BULK_OUTCOME.SKIPPED) summary.skipped += 1;
       else summary.failed += 1;
     });
-    return { code: 200, bulk_operation_id: operationId, action, request_type, summary, results };
+    const monthRefresh =
+      monthRefreshEntries.length > 0
+        ? await refreshMonthsAfter(monthRefreshEntries, { now, source: `a bulk ${action}` })
+        : null;
+
+    return { code: 200, bulk_operation_id: operationId, action, request_type, summary, results, month_refresh: monthRefresh };
   };
 
   /**

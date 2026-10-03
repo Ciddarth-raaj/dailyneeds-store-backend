@@ -1874,6 +1874,34 @@ class AttendanceCalculationRepository {
   }
 
   /** A stored month, for the read API. */
+  /**
+   * THE MONTH'S STORED DAY ROWS, through the SAME statement the month persist
+   * fingerprints them with (`dayRowsSql`). Read by the monthly-summary
+   * auto-refresh to decide whether a summary still matches its days.
+   */
+  async listMonthDayRowsForFingerprint({ employee_id, from_date, to_date }) {
+    return this._read("LIST-MONTH-DAY-ROWS", dayRowsSql(), [employee_id, from_date, to_date]);
+  }
+
+  /**
+   * IS THIS PAYROLL MONTH LOCKED AS A WHOLE (`payrun_period.status`)? An
+   * absent table means no period was ever opened, which cannot be locked;
+   * any other read error is thrown, so the caller fails closed.
+   */
+  async isPayrollPeriodLocked({ period_year, period_month }) {
+    try {
+      const rows = await this._read(
+        "GET-PAYROLL-PERIOD",
+        `SELECT status FROM payrun_period WHERE period_year = ? AND period_month = ?`,
+        [period_year, period_month]
+      );
+      return Boolean(rows && rows[0] && rows[0].status === "LOCKED");
+    } catch (err) {
+      if (err && err.code === "ER_NO_SUCH_TABLE") return false;
+      throw err;
+    }
+  }
+
   async getMonthlyPayroll({ employee_id, period_year, period_month }) {
     const rows = await this._read(
       "GET-MONTHLY-PAYROLL",

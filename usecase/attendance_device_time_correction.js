@@ -559,10 +559,12 @@ module.exports = (repo, attendanceCalculationUsecase, options = {}) => {
       lock_rows: lockRows,
       calculation_rows: rows,
     });
+    const monthRefresh = await refreshMonthsFor(rows, "a device time correction");
 
     const openCount = perEmployee.reduce((n, e) => n + e.open_dates.length, 0);
     return {
       code: 200,
+      month_refresh: monthRefresh,
       attendance_device_time_correction_id: stored.attendance_device_time_correction_id,
       batch_ref: batchRef,
       status: "APPLIED",
@@ -625,10 +627,12 @@ module.exports = (repo, attendanceCalculationUsecase, options = {}) => {
       lock_rows: lockRows,
       calculation_rows: rows,
     });
+    const monthRefresh = await refreshMonthsFor(rows, "a device time correction revert");
 
     const openCount = perEmployee.reduce((n, e) => n + e.open_dates.length, 0);
     return {
       code: 200,
+      month_refresh: monthRefresh,
       attendance_device_time_correction_id: id,
       status: "REVERTED",
       punch_count: items.length,
@@ -641,6 +645,19 @@ module.exports = (repo, attendanceCalculationUsecase, options = {}) => {
           : ""),
     };
   };
+
+  /**
+   * THE MONTHLY SUMMARIES THE CORRECTION'S DAYS BELONG TO, refreshed once per
+   * employee/month through the attendance month persist. See
+   * `attendanceCalculationUsecase.refreshAffectedMonths`.
+   */
+  const refreshMonthsFor = (rows, source) =>
+    typeof attendanceCalculationUsecase.refreshAffectedMonths === "function" && rows.length > 0
+      ? attendanceCalculationUsecase.refreshAffectedMonths(
+          rows.map((r) => ({ employee_id: r.employee_id, attendance_date: r.attendance_date })),
+          { source }
+        )
+      : null;
 
   const withLabel = (row) => ({ ...row, reason_label: REASON_CODES[row.reason_code] || row.reason_code });
 

@@ -238,7 +238,12 @@ describe("ARCHITECTURE: bulk -> the single-record action -> its validations, tra
   const body = src.slice(src.indexOf("const bulkAction = async"), src.indexOf("const listBulkTargets = async"));
 
   it("bulkAction calls `decide` and `revokeDecision` - the very methods the single endpoints call", () => {
-    assert.match(body, /await revokeDecision\(\{ actor: revoke_actor, request_id: target\.request_id, reason: why, now \}\)/);
+    // The same single-record method with the same arguments; the only addition
+    // is the collector that defers the month refresh to once per employee/month.
+    assert.match(
+      body,
+      /await revokeDecision\(\{\s*actor: revoke_actor,\s*request_id: target\.request_id,\s*reason: why,\s*now,\s*month_refresh_collector: monthRefreshEntries,?\s*\}\)/
+    );
     assert.match(body, /await decide\(\{/);
   });
 

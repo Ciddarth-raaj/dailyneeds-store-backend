@@ -44,6 +44,26 @@ const { istToday } = require("../utils/istDate");
 const { partitionClosedDays, endOfIstDay } = require("../utils/attendance_persist_guard");
 const { payrollLockedError } = require("../utils/attendance_payroll_lock");
 const readTiming = require("../utils/attendance_read_timing");
+const { monthFreshness } = require("../utils/attendance_month_freshness");
+
+/** Every [year, month] a date range covers, in order. */
+function monthsSpanned(from, to) {
+  const out = [];
+  let y = Number(String(from).slice(0, 4));
+  let m = Number(String(from).slice(5, 7));
+  const endY = Number(String(to).slice(0, 4));
+  const endM = Number(String(to).slice(5, 7));
+  while (y < endY || (y === endY && m <= endM)) {
+    out.push([y, m]);
+    m += 1;
+    if (m > 12) {
+      m = 1;
+      y += 1;
+    }
+  }
+  return out;
+}
+const logger = require("../utils/logger");
 const {
   resolvePermissionRows,
   permissionsByDate,
@@ -1581,6 +1601,15 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       ineligible_dates: ineligibleDates,
     });
 
+    // THE MONTH(S) THIS RANGE TOUCHED, re-persisted where their summary no
+    // longer matches the days just written - manual and scheduled
+    // recalculation, shift propagation, shift assignment and punch voids all
+    // arrive here. Once per employee/month; see `refreshAffectedMonths`.
+    const monthRefresh = await refreshAffectedMonths(
+      monthsSpanned(from, to).map(([year, month]) => ({ employee_id: employeeId, year, month })),
+      { now, source: "an attendance recalculation" }
+    );
+
     return {
       employee_id: employeeId,
       from_date: from,
@@ -1598,6 +1627,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       excluded_reason: window ? null : eligibility.exclusionReason(employment, from),
       punch_redrive: redrive,
       ...stored,
+      month_refresh: monthRefresh,
     };
   };
 
@@ -1761,6 +1791,13 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     } else {
       stored = { written: 0 };
     }
+    const monthRefresh =
+      rows.length > 0
+        ? await refreshAffectedMonths([{ employee_id: employeeId, attendance_date: date }], {
+            now,
+            source: "a date shift change",
+          })
+        : null;
 
     return {
       employee_id: employeeId,
@@ -1781,6 +1818,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       attendance_deferred: dayState.closed
         ? null
         : { reason: dayState.reason, closes_at: dayState.closes_at },
+      month_refresh: monthRefresh,
     };
   };
 
@@ -2611,24 +2649,141 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
   };
 
   /**
-   * RE-PERSIST AN EMPLOYEE'S MONTH AFTER A CHANGE THAT MOVED ITS DAYS - the
-   * existing month persist (`calculateMonth(persist=true)`), not a second
-   * payroll path.
+   * ============ KEEP THE MONTHLY SUMMARY IN STEP WITH ITS DAYS ============
    *
-   * Called after a Permission change has COMMITTED (final approval, a grant,
-   * a revoke). The change rewrote the DAY; payroll reads the monthly
-   * summary, which only the month persist writes. If a summary already
-   * exists for the month it is rewritten now, so it carries the new shortage
-   * and a fresh fingerprint of its days. If none exists yet there is nothing
-   * stale to refresh: the month is persisted, with the permission in it,
-   * whenever it is first calculated.
+   * Payroll reads `attendance_monthly_payroll`, which only the month persist
+   * (`calculateMonth({ persist: true })`) writes. Every other attendance write
+   * - an approval or revocation of any request type, a punch void, a
+   * device-time correction, a date-shift edit, a shift assignment, a manual or
+   * scheduled recalculation - rewrites DAY rows only. Until the month is
+   * persisted again its summary carries the old finality, shortage and
+   * approved OT, which is what put employees into Payroll's Attendance Pending
+   * and made "eligible" employees fail at Calculate.
    *
-   * NEVER THE GUARANTEE ON ITS OWN. It runs after the change committed and
-   * can fail (a lock timeout, a locked month) - it reports, never throws, and
-   * the change stands. What makes a stale summary unpayable is Approve &
-   * Lock's own check (`repository/payrun_calculation.js#_attendanceFreshnessLocked`):
-   * a month whose summary no longer matches its days is refused, whether or
-   * not this refresh ran.
+   * So every such write is followed by this, for exactly the employee/months
+   * it touched. It is the EXISTING month persist - no second attendance
+   * calculation - and it is careful about when it runs:
+   *
+   *   deduplicated     each employee/month at most once per call, however
+   *                    many dates or requests touched it (bulk flows pass
+   *                    all their entries in one call)
+   *   no summary       nothing to refresh: the month has never been
+   *                    processed, and processing it is a deliberate act
+   *                    (Payroll's Process Attendance, Attendance > Recalculate)
+   *   payroll locked   an Approved & Locked employee-month, or a locked
+   *                    payroll period, is never re-persisted - and the
+   *                    persist's own lock refuses it again if one lands in
+   *                    between
+   *   already current  a summary whose fingerprint still matches its stored
+   *                    days is left alone, so the nightly recalculation does
+   *                    not re-persist six hundred unchanged months
+   *
+   * IT NEVER THROWS. It runs after the mutation has committed - the approval
+   * stands either way - and reports per month. A failure is logged and
+   * returned (`failed`), and it cannot leave Payroll silently wrong: payroll
+   * readiness compares the same fingerprint and shows the month as
+   * ATTENDANCE_STALE, with Process Attendance to recover it.
+   *
+   * @param entries  [{ employee_id, attendance_date }] or
+   *                 [{ employee_id, year, month }]
+   */
+  const refreshAffectedMonths = async (entries = [], { now = null, source = null } = {}) => {
+    const pairs = new Map();
+    (Array.isArray(entries) ? entries : []).forEach((entry) => {
+      if (!entry) return;
+      const employeeId = Number(entry.employee_id);
+      let year = entry.year !== undefined ? Number(entry.year) : null;
+      let month = entry.month !== undefined ? Number(entry.month) : null;
+      if (year === null || month === null) {
+        const date = toDateOnly(entry.attendance_date);
+        if (date === null) return;
+        year = Number(date.slice(0, 4));
+        month = Number(date.slice(5, 7));
+      }
+      if (!Number.isInteger(employeeId) || employeeId <= 0 || !year || !month) return;
+      const key = `${employeeId}|${year}|${month}`;
+      if (!pairs.has(key)) pairs.set(key, { employee_id: employeeId, year, month });
+    });
+
+    const months = [];
+    for (const pair of pairs.values()) {
+      /* eslint-disable no-await-in-loop */
+      const { employee_id: employeeId, year, month } = pair;
+      const pad = (n) => String(n).padStart(2, "0");
+      const from = `${year}-${pad(month)}-01`;
+      const to = `${year}-${pad(month)}-${pad(daysInMonth(year, month))}`;
+      try {
+        const existing = attendanceCalculationRepo.getMonthlyPayroll
+          ? await attendanceCalculationRepo.getMonthlyPayroll({
+              employee_id: employeeId,
+              period_year: year,
+              period_month: month,
+            })
+          : null;
+        if (!existing) {
+          months.push({ ...pair, refreshed: false, reason: "NO_SUMMARY" });
+          continue;
+        }
+        const lockedEmployee = attendanceCalculationRepo.findPayrollLockedPeriods
+          ? await attendanceCalculationRepo.findPayrollLockedPeriods([
+              { employee_id: employeeId, attendance_date: from },
+            ])
+          : [];
+        if (lockedEmployee && lockedEmployee.length > 0) {
+          months.push({ ...pair, refreshed: false, reason: "PAYROLL_LOCKED" });
+          continue;
+        }
+        if (
+          attendanceCalculationRepo.isPayrollPeriodLocked &&
+          (await attendanceCalculationRepo.isPayrollPeriodLocked({ period_year: year, period_month: month }))
+        ) {
+          months.push({ ...pair, refreshed: false, reason: "PAYROLL_PERIOD_LOCKED" });
+          continue;
+        }
+        if (attendanceCalculationRepo.listMonthDayRowsForFingerprint) {
+          const dayRows = await attendanceCalculationRepo.listMonthDayRowsForFingerprint({
+            employee_id: employeeId,
+            from_date: from,
+            to_date: to,
+          });
+          if (monthFreshness({ monthly: existing, dayRows }).state === "CURRENT") {
+            months.push({ ...pair, refreshed: false, reason: "UP_TO_DATE" });
+            continue;
+          }
+        }
+        await calculateMonth({ employee_id: employeeId, year, month, persist: true, now });
+        months.push({ ...pair, refreshed: true });
+      } catch (err) {
+        const reason = (err && err.code) || "ERROR";
+        months.push({
+          ...pair,
+          refreshed: false,
+          failed: true,
+          reason,
+          message: err && err.message ? err.message : String(err),
+        });
+        logger.Log({
+          level: logger.LEVEL.ERROR,
+          component: "USECASE.ATTENDANCE_CALCULATION",
+          code: "USECASE.ATTENDANCE_CALCULATION.MONTH-REFRESH-FAILED",
+          description: `Monthly attendance summary not refreshed for employee ${employeeId} ${year}-${pad(month)} after ${source || "an attendance change"}: ${err && err.message ? err.message : err}. Payroll will show it as ATTENDANCE_STALE until it is processed.`,
+          category: "",
+          ref: { employee_id: employeeId, year, month, source, reason },
+        });
+      }
+      /* eslint-enable no-await-in-loop */
+    }
+    return {
+      refreshed: months.filter((m) => m.refreshed).length,
+      failed: months.filter((m) => m.failed).length,
+      months,
+    };
+  };
+
+  /**
+   * ONE EMPLOYEE AND DATE - the shape the Permission paths have always called
+   * and still call. Now a thin form of `refreshAffectedMonths`, with its
+   * original answer: `{ refreshed, year, month }`, or a reason.
    */
   const refreshPersistedMonth = async ({ employee_id, attendance_date, now = null }) => {
     const date = toDateOnly(attendance_date);
@@ -2636,28 +2791,19 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     if (date === null || !Number.isInteger(employeeId) || employeeId <= 0) {
       return { refreshed: false, reason: "INVALID" };
     }
-    const year = Number(date.slice(0, 4));
-    const month = Number(date.slice(5, 7));
-    try {
-      const existing = attendanceCalculationRepo.getMonthlyPayroll
-        ? await attendanceCalculationRepo.getMonthlyPayroll({
-            employee_id: employeeId,
-            period_year: year,
-            period_month: month,
-          })
-        : null;
-      if (!existing) return { refreshed: false, reason: "NO_SUMMARY", year, month };
-      await calculateMonth({ employee_id: employeeId, year, month, persist: true, now });
-      return { refreshed: true, year, month };
-    } catch (err) {
-      return {
-        refreshed: false,
-        reason: (err && err.code) || "ERROR",
-        message: err && err.message ? err.message : String(err),
-        year,
-        month,
-      };
-    }
+    const outcome = await refreshAffectedMonths([{ employee_id: employeeId, attendance_date: date }], {
+      now,
+      source: "a Permission change",
+    });
+    const month = outcome.months[0] || { reason: "INVALID" };
+    if (month.refreshed) return { refreshed: true, year: month.year, month: month.month };
+    return {
+      refreshed: false,
+      reason: month.reason,
+      ...(month.message ? { message: month.message } : {}),
+      year: month.year,
+      month: month.month,
+    };
   };
 
   /** The payroll lock, asked before an action rather than before a write. */
@@ -2714,5 +2860,6 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     listDateShiftOptions,
     calculateMonth,
     refreshPersistedMonth,
+    refreshAffectedMonths,
   };
 };
