@@ -9,6 +9,7 @@ const {
   RESET_REASON,
   RESET_MODE,
   RESET_REMARK_MAX,
+  LIFECYCLE_ACTION,
 } = require("../constants/payrun_calculation");
 
 /**
@@ -22,6 +23,9 @@ const {
  *   POST /payrun/calculation/recalculate refresh the sources on computed ones
  *   POST /payrun/calculation/approve     APPROVE & LOCK, employee by employee
  *   POST /payrun/calculation/reset       RESET CALCULATION back to not calculated
+ *   POST /payrun/calculation/unlock      UNLOCK an approved, unpublished month
+ *   POST /payrun/calculation/publish     PUBLISH an approved month (release)
+ *   POST /payrun/calculation/unpublish   UNPUBLISH it, back to approved & locked
  *   POST /payrun/calculation/process-attendance   re-run the EXISTING attendance
  *                                        month persist where readiness says
  *                                        it would clear a blocker
@@ -315,7 +319,10 @@ class PayrunCalculationRoutes {
       this.permissions.requireAll(P.VIEW_EMPLOYEES, P.APPROVE_PAYRUN),
       async (req, res) => {
         try {
-          const isValid = Joi.validate(req.body, this._bulkSchema("all_ready"));
+          const isValid = Joi.validate(req.body, {
+            ...this._bulkSchema("all_ready"),
+            mode: Joi.string().valid("INDIVIDUAL", "BULK").optional(),
+          });
           if (isValid.error !== null) throw isValid.error;
 
           const scoped = await this._scope(req, res, null);
@@ -329,6 +336,7 @@ class PayrunCalculationRoutes {
               month: Number(req.body.month),
               employee_ids: req.body.employee_ids,
               all_ready: req.body.all_ready,
+              mode: req.body.mode,
               store_ids: scoped.store_ids,
               actor,
             })),
@@ -435,6 +443,147 @@ class PayrunCalculationRoutes {
               month: Number(req.body.month),
               employee_ids: req.body.employee_ids,
               store_ids: scoped.store_ids,
+            })),
+          });
+        } catch (err) {
+          this._fail(res, err);
+        }
+      }
+    );
+
+    /**
+     * UNLOCK - Approved & Locked (not published) back to calculated, figures kept. `unlock_payrun`.
+     * Explicit ids, the month, a mode and (for unlock / unpublish) a reason.
+     * The actor is the server's identity and the branch scope the server's.
+     */
+    this.router.post(
+      "/payrun/calculation/unlock",
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.UNLOCK_PAYRUN),
+      async (req, res) => {
+        try {
+          const isValid = Joi.validate(req.body, {
+            ...this._month(),
+            employee_ids: Joi.array()
+              .items(Joi.number().integer().positive())
+              .min(1)
+              .max(MAX_BULK_EMPLOYEES)
+              .required(),
+            reason: Joi.string().trim().max(RESET_REMARK_MAX).allow("", null).optional(),
+            remark: Joi.string().trim().max(RESET_REMARK_MAX).allow("", null).optional(),
+            mode: Joi.string().valid("INDIVIDUAL", "BULK").required(),
+          });
+          if (isValid.error !== null) throw isValid.error;
+
+          const scoped = await this._scope(req, res, null);
+          if (!scoped) return;
+
+          const actor = await this.permissions.actorFor(req);
+          res.json({
+            code: 200,
+            ...(await this.usecase.lifecycle({
+              action: LIFECYCLE_ACTION.UNLOCK,
+              year: Number(req.body.year),
+              month: Number(req.body.month),
+              employee_ids: req.body.employee_ids,
+              reason: req.body.reason,
+              remark: req.body.remark,
+              mode: req.body.mode,
+              store_ids: scoped.store_ids,
+              actor,
+            })),
+          });
+        } catch (err) {
+          this._fail(res, err);
+        }
+      }
+    );
+
+    /**
+     * PUBLISH - release an Approved & Locked month; refused if a source moved. `publish_payrun`.
+     * Explicit ids, the month, a mode and (for unlock / unpublish) a reason.
+     * The actor is the server's identity and the branch scope the server's.
+     */
+    this.router.post(
+      "/payrun/calculation/publish",
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.PUBLISH_PAYRUN),
+      async (req, res) => {
+        try {
+          const isValid = Joi.validate(req.body, {
+            ...this._month(),
+            employee_ids: Joi.array()
+              .items(Joi.number().integer().positive())
+              .min(1)
+              .max(MAX_BULK_EMPLOYEES)
+              .required(),
+            reason: Joi.string().trim().max(RESET_REMARK_MAX).allow("", null).optional(),
+            remark: Joi.string().trim().max(RESET_REMARK_MAX).allow("", null).optional(),
+            mode: Joi.string().valid("INDIVIDUAL", "BULK").required(),
+          });
+          if (isValid.error !== null) throw isValid.error;
+
+          const scoped = await this._scope(req, res, null);
+          if (!scoped) return;
+
+          const actor = await this.permissions.actorFor(req);
+          res.json({
+            code: 200,
+            ...(await this.usecase.lifecycle({
+              action: LIFECYCLE_ACTION.PUBLISH,
+              year: Number(req.body.year),
+              month: Number(req.body.month),
+              employee_ids: req.body.employee_ids,
+              reason: req.body.reason,
+              remark: req.body.remark,
+              mode: req.body.mode,
+              store_ids: scoped.store_ids,
+              actor,
+            })),
+          });
+        } catch (err) {
+          this._fail(res, err);
+        }
+      }
+    );
+
+    /**
+     * UNPUBLISH - withdraw the release; back to Approved & Locked. `publish_payrun`.
+     * Explicit ids, the month, a mode and (for unlock / unpublish) a reason.
+     * The actor is the server's identity and the branch scope the server's.
+     */
+    this.router.post(
+      "/payrun/calculation/unpublish",
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.PUBLISH_PAYRUN),
+      async (req, res) => {
+        try {
+          const isValid = Joi.validate(req.body, {
+            ...this._month(),
+            employee_ids: Joi.array()
+              .items(Joi.number().integer().positive())
+              .min(1)
+              .max(MAX_BULK_EMPLOYEES)
+              .required(),
+            reason: Joi.string().trim().max(RESET_REMARK_MAX).allow("", null).optional(),
+            remark: Joi.string().trim().max(RESET_REMARK_MAX).allow("", null).optional(),
+            mode: Joi.string().valid("INDIVIDUAL", "BULK").required(),
+          });
+          if (isValid.error !== null) throw isValid.error;
+
+          const scoped = await this._scope(req, res, null);
+          if (!scoped) return;
+
+          const actor = await this.permissions.actorFor(req);
+          res.json({
+            code: 200,
+            ...(await this.usecase.lifecycle({
+              action: LIFECYCLE_ACTION.UNPUBLISH,
+              year: Number(req.body.year),
+              month: Number(req.body.month),
+              employee_ids: req.body.employee_ids,
+              reason: req.body.reason,
+              remark: req.body.remark,
+              mode: req.body.mode,
+              store_ids: scoped.store_ids,
+              actor,
             })),
           });
         } catch (err) {

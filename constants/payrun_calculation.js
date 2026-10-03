@@ -26,7 +26,12 @@
  * make every employee in every open month read as RECALCULATION_REQUIRED the
  * moment this number moves, including the ones already approved and locked.
  */
-const CALCULATION_VERSION = 1;
+/*
+ * 2: Net Pay is rounded to the whole rupee (half away from zero), with the
+ * difference stored as `net_pay_rounding`. Rows calculated under version 1
+ * keep their figures until somebody recalculates them.
+ */
+const CALCULATION_VERSION = 2;
 
 /**
  * THE STATE OF ONE EMPLOYEE'S CALCULATION, and the five values are exclusive
@@ -90,7 +95,17 @@ const CALC_STATUS = {
   RECALCULATION_REQUIRED: "RECALCULATION_REQUIRED",
   READY_FOR_APPROVAL: "READY_FOR_APPROVAL",
   APPROVED_LOCKED: "APPROVED_LOCKED",
+  /*
+   * PUBLISHED: approved, locked AND released for payslip / bank / downstream
+   * use. NOT a stored status - it is APPROVED_LOCKED with `published_at` set,
+   * so every lock that reads the stored status holds it exactly as firmly.
+   */
+  PUBLISHED: "PUBLISHED",
 };
+
+/** The two derived statuses that are locked. Use this, never one of them alone. */
+const LOCKED_STATUSES = [CALC_STATUS.APPROVED_LOCKED, CALC_STATUS.PUBLISHED];
+const isLockedStatus = (status) => LOCKED_STATUSES.includes(status);
 
 /**
  * WHAT IS STORED IN THE DATABASE, which is a SMALLER SET than the statuses
@@ -123,6 +138,7 @@ const CALC_STATUS_LABEL = {
   [CALC_STATUS.RECALCULATION_REQUIRED]: "Recalculation required",
   [CALC_STATUS.READY_FOR_APPROVAL]: "Ready for approval",
   [CALC_STATUS.APPROVED_LOCKED]: "Approved & Locked",
+  [CALC_STATUS.PUBLISHED]: "Published",
 };
 
 /**
@@ -287,7 +303,21 @@ const ROW_RESULT = {
   FAILED: "FAILED",
   RESET: "RESET",
   PROCESSED: "PROCESSED",
+  UNLOCKED: "UNLOCKED",
+  PUBLISHED: "PUBLISHED",
+  UNPUBLISHED: "UNPUBLISHED",
 };
+
+/** The lifecycle log's verbs (`payrun_employee_lifecycle_audit.action`). */
+const LIFECYCLE_ACTION = {
+  LOCK: "LOCK",
+  UNLOCK: "UNLOCK",
+  PUBLISH: "PUBLISH",
+  UNPUBLISH: "UNPUBLISH",
+};
+
+/** The shortest reason Unlock and Unpublish accept. */
+const LIFECYCLE_REASON_MIN = 5;
 
 /** The calculation audit log's verbs. See the migration for why UNLOCK is here. */
 const AUDIT_ACTION = {
@@ -365,4 +395,8 @@ module.exports = {
   RESET_MODE,
   RESETTABLE_STATUSES,
   RESET_REMARK_MAX,
+  LOCKED_STATUSES,
+  isLockedStatus,
+  LIFECYCLE_ACTION,
+  LIFECYCLE_REASON_MIN,
 };

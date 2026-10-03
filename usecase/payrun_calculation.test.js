@@ -52,6 +52,7 @@ class World {
     this.calculations = new Map();   // employee_id -> calculation row
     this.audit = [];
     this.resets = [];                // the reset audit
+    this.lifecycle = [];             // the lifecycle audit
     this.legacy = false;             // read as the pre-readiness code did
     this.failResetFor = new Set();   // employee ids whose reset transaction throws
     this.period = null;
@@ -313,6 +314,47 @@ FakeCalculationRepo.prototype.resetCalculation = async function resetCalculation
   });
   this.world.calculations.delete(employee_id);
   return { employee_id, outcome: "RESET", payrun_calculation_id: row.payrun_calculation_id };
+};
+
+/**
+ * The real `lifecycle`'s contract: the month lock, the row by identity, the
+ * expected state repeated in the update, and a lifecycle audit row with it.
+ */
+FakeCalculationRepo.prototype.lifecycle = async function lifecycle({
+  action, year, month, employee_id, reason, remark, mode, actor = {},
+}) {
+  if (this.world.period && this.world.period.status === "LOCKED") return { employee_id, outcome: "MONTH_LOCKED" };
+  const row = this.world.calculations.get(employee_id);
+  if (!row) return { employee_id, outcome: "NOT_CALCULATED" };
+  const locked = row.status === "APPROVED_LOCKED";
+  const published = locked && Boolean(row.published_at);
+  const previous = published ? "PUBLISHED" : row.status;
+  let next;
+  if (action === "UNLOCK") {
+    if (published) return { employee_id, outcome: "PUBLISHED" };
+    if (!locked) return { employee_id, outcome: "NOT_LOCKED" };
+    Object.assign(row, {
+      status: "CALCULATED", approved_by: null, approved_at: null, locked_by: null, locked_at: null,
+      unlocked_by: actor.employeeId, unlocked_at: "2026-09-06 10:00:00", unlock_reason: reason,
+    });
+    next = "CALCULATED";
+  } else if (action === "PUBLISH") {
+    if (published) return { employee_id, outcome: "ALREADY_PUBLISHED" };
+    if (!locked) return { employee_id, outcome: "NOT_LOCKED" };
+    Object.assign(row, { published_by: actor.employeeId, published_at: "2026-09-06 11:00:00" });
+    next = "PUBLISHED";
+  } else {
+    if (!published) return { employee_id, outcome: locked ? "NOT_PUBLISHED" : "NOT_LOCKED" };
+    Object.assign(row, { published_by: null, published_at: null });
+    next = "APPROVED_LOCKED";
+  }
+  this.world.lifecycle.push({
+    employee_id, period_year: year, period_month: month, action, previous_status: previous,
+    new_status: next, reason, remark, mode, acted_by_employee_id: actor.employeeId,
+    calculation_hash: row.calculation_hash, net_pay: row.net_pay,
+  });
+  if (action === "UNLOCK") this.world.audit.push({ employee_id, action: "UNLOCK", net_pay: row.net_pay });
+  return { employee_id, outcome: action, previous_status: previous, new_status: next };
 };
 
 /** Only the four methods the calculation stage borrows from initialization. */
@@ -893,11 +935,16 @@ describe("what a lock refuses", () => {
   });
 
   /** THE PAYSLIP ELIGIBILITY CONTRACT, per employee and both ways round. */
-  it("makes the approved employee payslip eligible and the other not", async () => {
-    const view = await monthView();
+  it("approval alone is not payslip eligible; publishing the approved employee is, and the other stays not", async () => {
+    let view = await monthView();
+    assert.equal(view.rows.find((r) => r.employee_id === 1).payslip_eligible, false);
+    assert.equal(view.summary.payslip_eligible, 0);
+
+    await calculation.lifecycle({ ...MONTH, action: "PUBLISH", employee_ids: [1], mode: "INDIVIDUAL", actor: ACTOR });
+    view = await monthView();
     const one = view.rows.find((r) => r.employee_id === 1);
     const two = view.rows.find((r) => r.employee_id === 2);
-
+    assert.equal(one.status, CALC_STATUS.PUBLISHED);
     assert.equal(one.payslip_eligible, true);
     assert.equal(two.payslip_eligible, false);
     assert.equal(view.summary.payslip_eligible, 1);
@@ -1234,7 +1281,7 @@ describe("an initialized employee whose attendance does not exist yet", () => {
     const approved = await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
     assert.equal(approved.approved_count, 1);
     assert.equal((await rowOf(1)).status, CALC_STATUS.APPROVED_LOCKED);
-    assert.equal((await rowOf(1)).payslip_eligible, true);
+    assert.equal((await rowOf(1)).payslip_eligible, false, "eligible only once published");
 
     // ...and the one with no attendance is still there, still refused.
     assert.notEqual((await rowOf(1952)).status, CALC_STATUS.APPROVED_LOCKED);
@@ -2350,5 +2397,203 @@ describe("Process Attendance - safety", () => {
     assert.equal(result.failed_count, 1);
     assert.match(result.results[0].message, /payroll month is locked/);
     assert.equal(result.not_in_scope_count, 1);
+  });
+});
+
+/* ================================================ Unlock / Publish / Unpublish */
+
+describe("Unlock, Publish and Unpublish", () => {
+  const act = (action, employee_ids, over = {}) =>
+    calculation.lifecycle({
+      ...MONTH, action, employee_ids,
+      reason: action === "PUBLISH" ? null : "Attendance corrected after review",
+      mode: employee_ids.length === 1 ? "INDIVIDUAL" : "BULK",
+      actor: ACTOR, ...over,
+    });
+  const approved = async (...ids) => {
+    ids.forEach((id) => world.add(id));
+    await calculation.calculate({ ...MONTH, employee_ids: ids, actor: ACTOR });
+    const out = await calculation.approve({ ...MONTH, employee_ids: ids, actor: ACTOR });
+    assert.equal(out.approved_count, ids.length);
+  };
+  const sources = (id) => JSON.stringify([
+    world.employees.get(id), world.attendance.get(id), world.salaries.get(id), world.nrm.get(id),
+    world.amounts.get(id), world.states.get(id), world.days.get(id),
+  ]);
+  const FIGURES = ["net_pay", "net_pay_rounding", "salary_days", "employee_pf", "employee_esi", "ot_amount", "calculation_hash", "calculation_revision"];
+  const figures = (id) => JSON.stringify(FIGURES.map((k) => world.calculations.get(id)[k]));
+
+  it("Unlock: an Approved & Locked employee returns to a reviewable state with every figure kept", async () => {
+    await approved(1);
+    world.amounts.set(1, {}); // nothing changes the sources during the act
+    const beforeFigures = figures(1);
+    const beforeSources = sources(1);
+    const out = await act("UNLOCK", [1]);
+    assert.equal(out.unlocked_count, 1);
+    const row = world.calculations.get(1);
+    assert.ok(row, "the calculation row is not deleted");
+    assert.equal(row.status, "CALCULATED");
+    assert.equal(row.approved_by, null);
+    assert.equal(row.locked_at, null);
+    assert.equal(row.unlock_reason, "Attendance corrected after review");
+    assert.equal(figures(1), beforeFigures, "salary figures unchanged until recalculated");
+    assert.equal(sources(1), beforeSources, "attendance, salary, OT, adjustments untouched");
+    assert.equal((await rowOf(1)).status, CALC_STATUS.READY_FOR_APPROVAL);
+  });
+
+  it("Unlock: the unlocked employee can be recalculated, reset and approved again", async () => {
+    await approved(1);
+    await act("UNLOCK", [1]);
+    const recalc = await calculation.calculate({ ...MONTH, employee_ids: [1], mode: "RECALCULATE", actor: ACTOR });
+    assert.equal(recalc.recalculated_count, 1);
+    assert.equal((await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR })).approved_count, 1);
+  });
+
+  it("Unlock: a reason is required; Publish needs none", async () => {
+    await approved(1);
+    await assert.rejects(() => act("UNLOCK", [1], { reason: "" }), /reason of at least 5/);
+    await assert.rejects(() => act("UNPUBLISH", [1], { reason: "x" }), /reason of at least 5/);
+    assert.equal((await act("PUBLISH", [1])).published_count, 1);
+  });
+
+  it("Unlock: the branch scope is enforced", async () => {
+    world.add(2, { employee: { store_id: 2 } });
+    await approved(1);
+    await calculation.calculate({ ...MONTH, employee_ids: [2], actor: ACTOR });
+    await calculation.approve({ ...MONTH, employee_ids: [2], actor: ACTOR });
+    const out = await act("UNLOCK", [1, 2], { store_ids: [1] });
+    assert.deepEqual(out.results.map((r) => r.result), ["UNLOCKED", "NOT_IN_SCOPE"]);
+    assert.equal(world.calculations.get(2).status, "APPROVED_LOCKED");
+  });
+
+  it("Bulk Unlock: mixed selection - eligible unlocked, published and unapproved skipped, nothing else moves", async () => {
+    await approved(1, 2, 3);
+    world.add(4);
+    await calculation.calculate({ ...MONTH, employee_ids: [4], actor: ACTOR });
+    world.add(9);
+    await calculation.calculate({ ...MONTH, employee_ids: [9], actor: ACTOR });
+    await calculation.approve({ ...MONTH, employee_ids: [9], actor: ACTOR });
+    await act("PUBLISH", [3]);
+    const untouched = JSON.stringify(world.calculations.get(9));
+
+    const out = await act("UNLOCK", [1, 2, 3, 4]);
+    assert.equal(out.unlocked_count, 2);
+    assert.equal(out.skipped_count, 2);
+    assert.deepEqual(out.results.map((r) => r.result), ["UNLOCKED", "UNLOCKED", "SKIPPED", "SKIPPED"]);
+    assert.match(out.results[2].message, /already published/);
+    assert.match(out.results[3].message, /not approved/);
+    assert.equal(world.calculations.get(3).status, "APPROVED_LOCKED");
+    assert.equal(JSON.stringify(world.calculations.get(9)), untouched);
+    assert.ok(world.lifecycle.filter((a) => a.action === "UNLOCK").every((a) => a.mode === "BULK"));
+  });
+
+  it("Publish: only Approved & Locked publishes; metadata recorded; status reads PUBLISHED", async () => {
+    await approved(1);
+    world.add(2);
+    await calculation.calculate({ ...MONTH, employee_ids: [2], actor: ACTOR });
+    const out = await act("PUBLISH", [1, 2]);
+    assert.deepEqual(out.results.map((r) => r.result), ["PUBLISHED", "SKIPPED"]);
+    const row = world.calculations.get(1);
+    assert.equal(row.status, "APPROVED_LOCKED", "the stored status - and every lock - is unchanged");
+    assert.equal(row.published_by, ACTOR.employeeId);
+    assert.ok(row.published_at);
+    assert.equal((await rowOf(1)).status, CALC_STATUS.PUBLISHED);
+    assert.equal(world.calculations.get(2).published_at, undefined);
+  });
+
+  it("Publish: a stale month (a source moved since approval) is refused, not released", async () => {
+    await approved(1);
+    world.salaries.get(1).salary_id = 777; // a revision approved after the lock
+    const out = await act("PUBLISH", [1]);
+    assert.equal(out.blocked_count, 1);
+    assert.match(out.results[0].message, /salary changed.*Unlock, recalculate and approve again/);
+    assert.ok(!world.calculations.get(1).published_at);
+  });
+
+  it("Bulk Publish works and every result is per employee", async () => {
+    await approved(1, 2, 3);
+    const out = await act("PUBLISH", [1, 2, 3]);
+    assert.equal(out.published_count, 3);
+  });
+
+  it("Unpublish: back to Approved & Locked with the calculation intact; direct Unlock from Published is refused", async () => {
+    await approved(1);
+    await act("PUBLISH", [1]);
+    const before = figures(1);
+    const refused = await act("UNLOCK", [1]);
+    assert.equal(refused.unlocked_count, 0);
+    assert.match(refused.results[0].message, /Unpublish it before unlocking/);
+    assert.equal(world.calculations.get(1).status, "APPROVED_LOCKED");
+
+    const out = await act("UNPUBLISH", [1]);
+    assert.equal(out.unpublished_count, 1);
+    assert.equal((await rowOf(1)).status, CALC_STATUS.APPROVED_LOCKED);
+    assert.equal(world.calculations.get(1).published_at, null);
+    assert.equal(figures(1), before);
+    assert.equal((await act("UNLOCK", [1])).unlocked_count, 1, "after Unpublish, Unlock succeeds");
+  });
+
+  it("Bulk Unpublish works and skips what is not published", async () => {
+    await approved(1, 2, 3);
+    await act("PUBLISH", [1, 2]);
+    const out = await act("UNPUBLISH", [1, 2, 3]);
+    assert.deepEqual(out.results.map((r) => r.result), ["UNPUBLISHED", "UNPUBLISHED", "SKIPPED"]);
+  });
+
+  it("a PUBLISHED employee cannot be recalculated, reset or approved again", async () => {
+    await approved(1);
+    await act("PUBLISH", [1]);
+    const recalc = await calculation.calculate({ ...MONTH, employee_ids: [1], mode: "RECALCULATE", actor: ACTOR });
+    assert.equal(recalc.locked_count, 1);
+    const reset = await calculation.reset({ ...MONTH, employee_ids: [1], reason: "WRONG_OT", mode: "INDIVIDUAL", actor: ACTOR });
+    assert.equal(reset.locked_count, 1);
+    const again = await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(again.already_locked_count, 1);
+  });
+
+  it("a locked payroll month refuses all three", async () => {
+    await approved(1);
+    world.period = { status: "LOCKED" };
+    for (const action of ["UNLOCK", "PUBLISH", "UNPUBLISH"]) {
+      const out = await act(action, [1]);
+      assert.equal(out.locked_count, 1, action);
+    }
+    assert.equal(world.calculations.get(1).status, "APPROVED_LOCKED");
+  });
+
+  it("AUDIT: every act is one lifecycle row with previous/new status, reason, mode and actor; approval history kept", async () => {
+    await approved(1, 2);
+    const approvals = world.audit.filter((a) => a.action === "APPROVE_LOCK").length;
+    await act("PUBLISH", [1]);
+    await act("UNPUBLISH", [1], { remark: "bank file wrong" });
+    await act("UNLOCK", [1, 2]);
+    assert.deepEqual(
+      world.lifecycle.map((a) => [a.employee_id, a.action, a.previous_status, a.new_status, a.mode]),
+      [
+        [1, "PUBLISH", "APPROVED_LOCKED", "PUBLISHED", "INDIVIDUAL"],
+        [1, "UNPUBLISH", "PUBLISHED", "APPROVED_LOCKED", "INDIVIDUAL"],
+        [1, "UNLOCK", "APPROVED_LOCKED", "CALCULATED", "BULK"],
+        [2, "UNLOCK", "APPROVED_LOCKED", "CALCULATED", "BULK"],
+      ]
+    );
+    assert.equal(world.lifecycle[1].remark, "bank file wrong");
+    assert.equal(world.lifecycle[1].reason, "Attendance corrected after review");
+    assert.ok(world.lifecycle.every((a) => a.acted_by_employee_id === ACTOR.employeeId && a.period_month === 8));
+    assert.equal(world.audit.filter((a) => a.action === "APPROVE_LOCK").length, approvals, "approval history preserved");
+  });
+
+  it("a newly calculated Net Pay is a whole rupee, and the screen shows exactly the stored figure", async () => {
+    world.add(1);
+    world.amounts.set(1, { [COMPONENT.INCENTIVE]: 0.17 });
+    world.states.set(1, { employee_id: 1, confirmed_no_adjustment: 0 });
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    const stored = world.calculations.get(1);
+    assert.equal(Number(stored.net_pay) % 1, 0);
+    assert.equal(stored.calculation_version, 2);
+    assert.equal((await rowOf(1)).net_pay, stored.net_pay);
+    assert.equal(
+      Math.round(stored.net_pay * 100),
+      Math.round((stored.total_earnings - stored.total_employee_deductions + stored.net_pay_rounding) * 100)
+    );
   });
 });

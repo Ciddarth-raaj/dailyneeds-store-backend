@@ -645,6 +645,16 @@ module.exports = {
   // given it deliberately on the rights screen.
   APPROVE_PAYRUN: "approve_payrun",
 
+  // ============================== UNLOCK / PUBLISH A PAYROLL MONTH =========
+  //
+  // UNLOCK reopens one employee's Approved & Locked month for correction;
+  // PUBLISH releases it for payslip / bank / downstream use, and UNPUBLISH
+  // withdraws that release. Both are stronger acts than approving, so each
+  // has its own key. Declared by the payrun lifecycle migration and granted
+  // to NOBODY - administrators through the user_type 2 bypass.
+  UNLOCK_PAYRUN: "unlock_payrun",
+  PUBLISH_PAYRUN: "publish_payrun",
+
   // ================================= CLOSE ATTENDANCE FOR PAYROLL ==========
   //
   // ACCEPTING THE ATTENDANCE AS IT STANDS, for one employee and one month, so

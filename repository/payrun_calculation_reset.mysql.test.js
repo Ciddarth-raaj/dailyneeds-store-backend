@@ -381,7 +381,7 @@ describe("Reset Calculation over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYS
   });
 
   it("the migration re-runs cleanly, and its down drops only its own table", async () => {
-    await q(pool, fs.readFileSync(path.join(SQLS, MIGRATIONS[MIGRATIONS.length - 1]), "utf8"));
+    await q(pool, fs.readFileSync(path.join(SQLS, "20261110120000-payrun-calculation-reset-up.sql"), "utf8"));
     const inputs = await fingerprints(pool, [...PAYRUN_INPUTS, "payrun_employee_calculation"]);
     await q(pool, fs.readFileSync(path.join(SQLS, RESET_DOWN), "utf8"));
     const left = await q(pool, "SHOW TABLES LIKE 'payrun_employee_calculation_reset_audit'");

@@ -11,7 +11,12 @@ const {
 } = require("../utils/batchInsert");
 const { locationPredicate } = require("./payrun");
 const { monthWindow } = require("../utils/payrun_eligibility");
-const { AUDIT_ACTION, STORED_STATUS } = require("../constants/payrun_calculation");
+const {
+  AUDIT_ACTION,
+  STORED_STATUS,
+  LIFECYCLE_ACTION: AUDIT_ACTION_LIFECYCLE,
+  CALC_STATUS,
+} = require("../constants/payrun_calculation");
 const {
   resolveEffectiveNrm,
   sourceMarkers,
@@ -307,14 +312,16 @@ class PayrunCalculationRepository {
               DATE_FORMAT(esi_coverage_entry_date, '%Y-%m-%d') AS esi_coverage_entry_date,
               esi_coverage_entry_salary_id, esi_coverage_entry_gross, esi_coverage_basis,
               esi_contribution_period_continues,
-              total_earnings, total_employee_deductions, net_pay, pay_type,
+              total_earnings, total_employee_deductions, net_pay, net_pay_rounding, pay_type,
               unresolved, errors, is_complete,
               calculation_version, calculation_revision, calculation_hash,
               DATE_FORMAT(calculated_at, '%Y-%m-%d %H:%i:%s') AS calculated_at,
               calculated_by,
               status,
               approved_by, DATE_FORMAT(approved_at, '%Y-%m-%d %H:%i:%s') AS approved_at,
-              locked_by,   DATE_FORMAT(locked_at,   '%Y-%m-%d %H:%i:%s') AS locked_at
+              locked_by,   DATE_FORMAT(locked_at,   '%Y-%m-%d %H:%i:%s') AS locked_at,
+              published_by, DATE_FORMAT(published_at, '%Y-%m-%d %H:%i:%s') AS published_at,
+              unlocked_by, DATE_FORMAT(unlocked_at, '%Y-%m-%d %H:%i:%s') AS unlocked_at, unlock_reason
          FROM payrun_employee_calculation
         WHERE ${clause}
         ORDER BY employee_id`,
@@ -389,7 +396,7 @@ class PayrunCalculationRepository {
       "esi_period_start", "esi_period_end", "esi_coverage_entry_date",
       "esi_coverage_entry_salary_id", "esi_coverage_entry_gross", "esi_coverage_basis",
       "esi_contribution_period_continues",
-      "total_earnings", "total_employee_deductions", "net_pay", "pay_type",
+      "total_earnings", "total_employee_deductions", "net_pay", "net_pay_rounding", "pay_type",
       "unresolved", "errors", "is_complete",
       "calculation_version", "calculation_hash", "calculated_by",
     ];
@@ -819,7 +826,7 @@ class PayrunCalculationRepository {
     return blocking;
   }
 
-  async approve({ year, month, employees, approved_by = null }) {
+  async approve({ year, month, employees, approved_by = null, approved_by_user = null, mode = "INDIVIDUAL" }) {
     if (!Array.isArray(employees) || employees.length === 0) return [];
     const conn = await getConnectionAsync(this.db);
     try {
@@ -937,6 +944,13 @@ class PayrunCalculationRepository {
           ],
           conn
         );
+
+        // THE LIFECYCLE LOG, in the same transaction as the lock it records.
+        await this._lifecycleAudit(conn, {
+          row, year, month, action: AUDIT_ACTION_LIFECYCLE.LOCK,
+          previous_status: STORED_STATUS.CALCULATED, new_status: STORED_STATUS.APPROVED_LOCKED,
+          mode, employee_id_actor: approved_by, user_id_actor: approved_by_user,
+        });
 
         // PENDING PERMISSION REQUESTS CLOSE WITH THE MONTH, in this same
         // transaction: once the row above is APPROVED_LOCKED no decision can
@@ -1118,6 +1132,170 @@ class PayrunCalculationRepository {
     } finally {
       conn.release();
     }
+  }
+
+  /** One append-only lifecycle row, on the caller's connection and transaction. */
+  async _lifecycleAudit(conn, {
+    row, year, month, action, previous_status, new_status, reason = null, remark = null,
+    mode, employee_id_actor = null, user_id_actor = null,
+  }) {
+    await this._read(
+      "INSERT-LIFECYCLE-AUDIT",
+      `INSERT INTO payrun_employee_lifecycle_audit
+              (payrun_employee_id, payrun_calculation_id, period_year, period_month, employee_id,
+               action, previous_status, new_status, reason, remark, mode,
+               calculation_hash, net_pay, acted_by_employee_id, acted_by_user_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        row.payrun_employee_id, row.payrun_calculation_id, year, month, row.employee_id,
+        action, previous_status, new_status, reason, remark, mode,
+        row.calculation_hash, row.net_pay, employee_id_actor, user_id_actor,
+      ],
+      conn
+    );
+  }
+
+  /**
+   * UNLOCK / PUBLISH / UNPUBLISH - one employee, one transaction.
+   *
+   * THE SAME DISCIPLINE AS APPROVE AND RESET: the month lock is re-read inside
+   * the transaction, the row is found by identity and locked `FOR UPDATE`
+   * before its state is inspected (so it serializes with Approve & Lock, with
+   * every attendance writer and with Reset), the UPDATE repeats the expected
+   * state in its WHERE clause, and exactly one row must move or the employee
+   * rolls back. The lifecycle audit row commits with the change or not at all.
+   *
+   *   UNLOCK     APPROVED_LOCKED and NOT published -> CALCULATED. Every figure
+   *              stays; the current approval and lock are cleared (the old
+   *              approval stays in both audit logs) and the unlock is recorded.
+   *   PUBLISH    APPROVED_LOCKED and not published -> published. The stored
+   *              status does not change, so every lock still holds. Refused if
+   *              the attendance it was priced from has moved or is not
+   *              current with its days (the same re-reads Approve makes).
+   *   UNPUBLISH  published -> APPROVED_LOCKED (published_* cleared).
+   */
+  async lifecycle({ action, year, month, employee_id, reason = null, remark = null, mode, actor = {} }) {
+    const actorEmployee = actor.employeeId === undefined ? null : actor.employeeId;
+    const actorUser = actor.userId === undefined ? null : actor.userId;
+    const conn = await getConnectionAsync(this.db);
+    const done = async (outcome, extra = {}) => {
+      await rollbackAsync(conn);
+      return { employee_id, outcome, ...extra };
+    };
+    try {
+      await beginTransactionAsync(conn);
+
+      const [periodRow] = await this._read(
+        "LIFECYCLE-LOCK-PERIOD",
+        `SELECT status FROM payrun_period WHERE period_year = ? AND period_month = ? LOCK IN SHARE MODE`,
+        [year, month],
+        conn
+      );
+      if (periodRow && periodRow.status === "LOCKED") return done("MONTH_LOCKED");
+
+      const [row] = await this._read(
+        "LIFECYCLE-LOCK-ROW",
+        `SELECT payrun_calculation_id, payrun_employee_id, employee_id, status, published_at,
+                calculation_hash, net_pay,
+                attendance_monthly_payroll_id, attendance_payroll_version,
+                DATE_FORMAT(attendance_calculated_at, '%Y-%m-%d %H:%i:%s.%f') AS attendance_calculated_at,
+                approved_ot_minutes, effective_nrm_minutes, effective_nrm_source, ot_groups
+           FROM payrun_employee_calculation
+          WHERE period_year = ? AND period_month = ? AND employee_id = ?
+          FOR UPDATE`,
+        [year, month, employee_id],
+        conn
+      );
+      if (!row) return done("NOT_CALCULATED");
+      const locked = row.status === STORED_STATUS.APPROVED_LOCKED;
+      const published = locked && row.published_at !== null && row.published_at !== undefined;
+      const previous = published ? CALC_STATUS.PUBLISHED : locked ? CALC_STATUS.APPROVED_LOCKED : row.status;
+
+      let update;
+      let next;
+      if (action === AUDIT_ACTION_LIFECYCLE.UNLOCK) {
+        if (published) return done("PUBLISHED");
+        if (!locked) return done("NOT_LOCKED");
+        update = [
+          `UPDATE payrun_employee_calculation
+              SET status = 'CALCULATED',
+                  approved_by = NULL, approved_at = NULL,
+                  locked_by = NULL, locked_at = NULL,
+                  unlocked_by = ?, unlocked_at = CURRENT_TIMESTAMP, unlock_reason = ?
+            WHERE payrun_calculation_id = ? AND status = 'APPROVED_LOCKED' AND published_at IS NULL`,
+          [actorEmployee, reason, row.payrun_calculation_id],
+        ];
+        next = STORED_STATUS.CALCULATED;
+      } else if (action === AUDIT_ACTION_LIFECYCLE.PUBLISH) {
+        if (published) return done("ALREADY_PUBLISHED");
+        if (!locked) return done("NOT_LOCKED");
+        const moved = await this._attendanceSourceChangesLocked(conn, { year, month, employee_id, stored: row });
+        if (moved.length > 0) return done("SOURCE_MOVED", { changed: moved });
+        const freshness = await this._attendanceFreshnessLocked(conn, { year, month, employee_id, stored: row });
+        if (freshness) return done(freshness.outcome, { reason: freshness.reason });
+        update = [
+          `UPDATE payrun_employee_calculation
+              SET published_by = ?, published_at = CURRENT_TIMESTAMP
+            WHERE payrun_calculation_id = ? AND status = 'APPROVED_LOCKED' AND published_at IS NULL`,
+          [actorEmployee, row.payrun_calculation_id],
+        ];
+        next = CALC_STATUS.PUBLISHED;
+      } else if (action === AUDIT_ACTION_LIFECYCLE.UNPUBLISH) {
+        if (!published) return done(locked ? "NOT_PUBLISHED" : "NOT_LOCKED");
+        update = [
+          `UPDATE payrun_employee_calculation
+              SET published_by = NULL, published_at = NULL
+            WHERE payrun_calculation_id = ? AND status = 'APPROVED_LOCKED' AND published_at IS NOT NULL`,
+          [row.payrun_calculation_id],
+        ];
+        next = CALC_STATUS.APPROVED_LOCKED;
+      } else {
+        throw new Error(`Unknown lifecycle action ${action}`);
+      }
+
+      const moved = await this._read(`LIFECYCLE-${action}`, update[0], update[1], conn);
+      if (!moved || Number(moved.affectedRows) !== 1) {
+        throw new Error(`${action} moved ${moved ? moved.affectedRows : "no"} rows for employee ${employee_id}; rolled back`);
+      }
+      await this._lifecycleAudit(conn, {
+        row, year, month, action, previous_status: previous, new_status: next,
+        reason, remark, mode, employee_id_actor: actorEmployee, user_id_actor: actorUser,
+      });
+      if (action === AUDIT_ACTION_LIFECYCLE.UNLOCK) {
+        // The calculation history's own UNLOCK verb, reserved for this.
+        await this._read(
+          "INSERT-UNLOCK-CALCULATION-AUDIT",
+          `INSERT INTO payrun_employee_calculation_audit
+                  (payrun_employee_id, period_year, period_month, employee_id, action,
+                   calculation_hash, net_pay, changed_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [row.payrun_employee_id, year, month, row.employee_id, AUDIT_ACTION.UNLOCK,
+            row.calculation_hash, row.net_pay, actorEmployee],
+          conn
+        );
+      }
+      await commitAsync(conn);
+      return { employee_id, outcome: action, previous_status: previous, new_status: next, net_pay: row.net_pay };
+    } catch (err) {
+      await rollbackAsync(conn);
+      throw err;
+    } finally {
+      conn.release();
+    }
+  }
+
+  /** One employee's lifecycle history for the month, newest first. */
+  async listLifecycleAudit({ year, month, employee_id }) {
+    return this._read(
+      "LIST-LIFECYCLE-AUDIT",
+      `SELECT payrun_lifecycle_audit_id, action, previous_status, new_status, reason, remark, mode,
+              calculation_hash, net_pay, acted_by_employee_id, acted_by_user_id,
+              DATE_FORMAT(acted_at, '%Y-%m-%d %H:%i:%s') AS acted_at
+         FROM payrun_employee_lifecycle_audit
+        WHERE period_year = ? AND period_month = ? AND employee_id = ?
+        ORDER BY payrun_lifecycle_audit_id DESC`,
+      [year, month, employee_id]
+    );
   }
 
   /** One employee's reset history for the month, newest first. */

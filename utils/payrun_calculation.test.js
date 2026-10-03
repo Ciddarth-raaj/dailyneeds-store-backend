@@ -591,14 +591,24 @@ describe("the status rules", () => {
   });
 
   /** THE PAYSLIP ELIGIBILITY CONTRACT, in both directions. */
-  it("makes an APPROVED_LOCKED employee payslip eligible and nobody else", () => {
+  it("makes ONLY a PUBLISHED employee payslip eligible - approved & locked is internal", () => {
     const locked = calc.deriveStatus({
       calculation: { status: CALC_STATUS.APPROVED_LOCKED },
       current_source_hash: "zzz",
       current_inputs_hash: "yyy",
     });
     assert.equal(locked.status, CALC_STATUS.APPROVED_LOCKED);
-    assert.equal(locked.payslip_eligible, true);
+    assert.equal(locked.payslip_eligible, false);
+
+    const published = calc.deriveStatus({
+      calculation: { status: CALC_STATUS.APPROVED_LOCKED, published_at: "2026-10-05 10:00:00" },
+      current_source_hash: "zzz",
+      current_inputs_hash: "yyy",
+    });
+    assert.equal(published.status, CALC_STATUS.PUBLISHED);
+    assert.equal(published.status_label, "Published");
+    assert.equal(published.payslip_eligible, true);
+    assert.equal(published.calculable, false, "published is locked");
 
     assert.equal(ready().payslip_eligible, false);
     assert.equal(calc.deriveStatus({ calculation: null }).payslip_eligible, false);
@@ -628,18 +638,20 @@ describe("the month's counts", () => {
       { status: CALC_STATUS.CALCULATED, payslip_eligible: false },
       { status: CALC_STATUS.RECALCULATION_REQUIRED, payslip_eligible: false },
       { status: CALC_STATUS.READY_FOR_APPROVAL, payslip_eligible: false },
-      { status: CALC_STATUS.APPROVED_LOCKED, payslip_eligible: true },
+      { status: CALC_STATUS.APPROVED_LOCKED, payslip_eligible: false },
+      { status: CALC_STATUS.PUBLISHED, payslip_eligible: true },
       // Not calculated, but Calculate would reject it: not eligible.
       { status: CALC_STATUS.NOT_CALCULATED, payslip_eligible: false, calculable: false, attendance_processable: true },
     ]);
     assert.deepEqual(summary, {
-      initialized: 7,
+      initialized: 8,
       not_calculated: 2,
       attendance_pending: 1,
       calculated: 1,
       recalculation_required: 1,
       ready_for_approval: 1,
       approved_locked: 1,
+      published: 1,
       payslip_eligible: 1,
       eligible_to_calculate: 1,
       not_calculated_blocked: 1,
@@ -971,5 +983,52 @@ describe("overtime worked against more than one NRM", () => {
     assert.equal(r.ot_amount, 250, "the payrun's own formula, unmultiplied");
     assert.equal(r.attendance_ot_earnings, 500, "carried for reconciliation");
     assert.equal(r.total_earnings, 26000 + 250, "and attendance's figure is in no total");
+  });
+});
+
+describe("Net Pay is rounded to the whole rupee in the engine", () => {
+  const r = (paise) => calc.roundToRupeePaise(paise);
+  it("rounds half away from zero, in paise: .00 stays, .49 down, .50 up, .99 up", () => {
+    assert.equal(r(5550815), 5550800); // 55,508.15 -> 55,508
+    assert.equal(r(1146432), 1146400); // 11,464.32 -> 11,464
+    assert.equal(r(3615114), 3615100); // 36,151.14 -> 36,151
+    assert.equal(r(2260283), 2260300); // 22,602.83 -> 22,603
+    assert.equal(r(1000), 1000);
+    assert.equal(r(1049), 1000);
+    assert.equal(r(1050), 1100);
+    assert.equal(r(1099), 1100);
+  });
+
+  it("handles a negative Net Pay explicitly, symmetrically, and never returns -0", () => {
+    assert.equal(r(-1049), -1000);
+    assert.equal(r(-1050), -1100);
+    assert.equal(r(-49), 0);
+    assert.ok(Object.is(r(-49), 0), "no negative zero");
+    assert.equal(r(null), null);
+  });
+
+  it("stores the rounding so the row still adds up, and changes no other figure", () => {
+    const base = run();
+    const odd = run({ amounts: { [COMPONENT.INCENTIVE]: 0.17 } });
+    const exact = Math.round((odd.total_earnings - odd.total_employee_deductions) * 100);
+    assert.equal(odd.net_pay * 100 % 100, 0, "a whole rupee");
+    assert.equal(Math.round(odd.net_pay * 100), exact + Math.round(odd.net_pay_rounding * 100));
+    assert.ok(Math.abs(odd.net_pay_rounding) <= 0.5);
+    // PF and ESI are computed from wages, never from the rounded Net Pay.
+    assert.equal(odd.employee_pf, base.employee_pf);
+    assert.equal(odd.employee_esi, base.employee_esi);
+    assert.equal(odd.pf_wage, base.pf_wage);
+    assert.equal(odd.esi_wage, base.esi_wage);
+  });
+
+  it("a whole-rupee result has zero rounding", () => {
+    const base = run();
+    assert.equal(Number.isInteger(base.net_pay), true);
+    assert.equal(base.net_pay_rounding, 0);
+  });
+
+  it("is engine version 2, which is not a source marker - approved months do not go stale", () => {
+    assert.equal(run().calculation_version, 2);
+    assert.ok(!calc.SOURCE_KEYS.includes("calculation_version"));
   });
 });

@@ -117,6 +117,13 @@ const SCHEMA = [
      employee_id INT, action VARCHAR(32), calculation_version INT, calculation_revision INT, calculation_hash VARCHAR(64),
      source_hash VARCHAR(64), net_pay DECIMAL(12,2), changed_by INT
    ) ENGINE=InnoDB`,
+  // Approve & Lock records each lock on the lifecycle log (payrun lifecycle migration).
+  `CREATE TABLE payrun_employee_lifecycle_audit (
+     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, payrun_employee_id INT, payrun_calculation_id BIGINT,
+     period_year INT, period_month INT, employee_id INT, action VARCHAR(16), previous_status VARCHAR(32),
+     new_status VARCHAR(32), reason VARCHAR(500), remark VARCHAR(500), mode VARCHAR(16),
+     calculation_hash VARCHAR(64), net_pay DECIMAL(12,2), acted_by_employee_id INT, acted_by_user_id INT
+   ) ENGINE=InnoDB`,
   `CREATE TABLE attendance_recalculation_run (
      attendance_recalculation_run_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
      work_shift_id INT NULL, status VARCHAR(32) NOT NULL, trigger_source VARCHAR(32) NOT NULL
@@ -124,7 +131,7 @@ const SCHEMA = [
 ];
 const TABLES = [
   "attendance_permission_bulk_item", "attendance_permission", "attendance_permission_bulk_operation",
-  "attendance_recalculation_run", "payrun_employee_calculation_audit", "payrun_employee_calculation",
+  "attendance_recalculation_run", "payrun_employee_lifecycle_audit", "payrun_employee_calculation_audit", "payrun_employee_calculation",
   "attendance_monthly_payroll", "attendance_day_calculation", "attendance_approval_step",
   "attendance_approval_request", "permissions", "all_permissions", "new_employee",
   "employee_attendance_calculation_mode",

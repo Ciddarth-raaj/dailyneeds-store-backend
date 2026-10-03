@@ -15,11 +15,14 @@ const MIGRATIONS = [
   "20261024120000-payrun-calculation-column-drift-up.sql",
   "20261026120000-payrun-attendance-close-up.sql",
   "20261110120000-payrun-calculation-reset-up.sql",
+  "20261111120000-payrun-lifecycle-up.sql",
 ];
 const RESET_DOWN = "20261110120000-payrun-calculation-reset-down.sql";
 
 /** Every table this suite creates, children first so they drop cleanly. */
 const TABLES = [
+  "payrun_employee_lifecycle_audit",
+  "attendance_recalculation_run",
   "payrun_employee_calculation_reset_audit",
   "payrun_employee_calculation_audit",
   "payrun_employee_calculation",
@@ -65,6 +68,10 @@ const PAYRUN_INPUTS = [
 ];
 
 const STAND_INS = [
+  `CREATE TABLE attendance_recalculation_run (
+     attendance_recalculation_run_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+     work_shift_id INT NULL, status VARCHAR(32) NOT NULL, trigger_source VARCHAR(32) NOT NULL
+   ) ENGINE=InnoDB`,
   `CREATE TABLE new_employee (
      employee_id INT PRIMARY KEY, employee_name VARCHAR(100), store_id INT,
      pf_applicable TINYINT(1), esi_applicable TINYINT(1), previous_eps_member TINYINT(1),

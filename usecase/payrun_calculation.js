@@ -9,6 +9,9 @@ const {
   RESET_MODE,
   RESETTABLE_STATUSES,
   RESET_REMARK_MAX,
+  isLockedStatus,
+  LIFECYCLE_ACTION,
+  LIFECYCLE_REASON_MIN,
 } = require("../constants/payrun_calculation");
 const { monthWindow, statutorySetupComplete } = require("../utils/payrun_eligibility");
 const { deriveState } = require("../utils/payrun_adjustments");
@@ -371,6 +374,7 @@ class PayrunCalculationUsecase {
             source_hash: stored.source_hash,
             inputs_hash: stored.inputs_hash,
             is_complete: Number(stored.is_complete) === 1,
+            published_at: stored.published_at || null,
           }
         : null,
       current_source_hash: currentSourceHash,
@@ -530,6 +534,10 @@ class PayrunCalculationUsecase {
         approved_at: stored ? stored.approved_at : null,
         locked_by: stored ? stored.locked_by : null,
         locked_at: stored ? stored.locked_at : null,
+        published_by: stored ? stored.published_by ?? null : null,
+        published_at: stored ? stored.published_at ?? null : null,
+        unlocked_by: stored ? stored.unlocked_by ?? null : null,
+        unlocked_at: stored ? stored.unlocked_at ?? null : null,
       },
     };
   }
@@ -711,6 +719,10 @@ class PayrunCalculationUsecase {
               total_earnings: provisional(stored.total_earnings),
               total_employee_deductions: provisional(stored.total_employee_deductions),
               net_pay: provisional(stored.net_pay),
+              // earnings - deductions + rounding = Net Pay. NULL before v2.
+              net_pay_rounding: provisional(
+                stored.net_pay_rounding === undefined ? null : stored.net_pay_rounding
+              ),
               pay_type: stored.pay_type,
             },
             unresolved: this._json(stored.unresolved),
@@ -838,7 +850,7 @@ class PayrunCalculationUsecase {
         return;
       }
 
-      if (presented.row.status === CALC_STATUS.APPROVED_LOCKED) {
+      if (isLockedStatus(presented.row.status)) {
         results.push({
           employee_id: employeeId,
           result: ROW_RESULT.LOCKED,
@@ -985,7 +997,7 @@ class PayrunCalculationUsecase {
         });
         continue;
       }
-      if (presented.row.status === CALC_STATUS.APPROVED_LOCKED) {
+      if (isLockedStatus(presented.row.status)) {
         results.push({
           employee_id: employeeId,
           employee_name: name,
@@ -1206,6 +1218,7 @@ class PayrunCalculationUsecase {
         total_earnings: result.total_earnings,
         total_employee_deductions: result.total_employee_deductions,
         net_pay: result.net_pay,
+        net_pay_rounding: result.net_pay_rounding,
         pay_type: result.pay_type,
 
         unresolved: JSON.stringify(result.unresolved || []),
@@ -1263,7 +1276,7 @@ class PayrunCalculationUsecase {
    * IT LOCKS EMPLOYEES, NOT THE MONTH. Everybody not in this call is exactly
    * as editable afterwards as before it.
    */
-  async approve({ year, month, employee_ids, all_ready = false, store_ids = null, actor = {} }) {
+  async approve({ year, month, employee_ids, all_ready = false, mode = null, store_ids = null, actor = {} }) {
     const period = normalizeMonth(year, month);
     const wanted = normalizeSelection({ employee_ids, all_eligible: all_ready });
 
@@ -1301,7 +1314,7 @@ class PayrunCalculationUsecase {
         });
         return;
       }
-      if (presented.row.status === CALC_STATUS.APPROVED_LOCKED) {
+      if (isLockedStatus(presented.row.status)) {
         results.push({
           employee_id: employeeId,
           result: ROW_RESULT.LOCKED,
@@ -1339,6 +1352,14 @@ class PayrunCalculationUsecase {
         month: period.month,
         employees: toApprove,
         approved_by: actor && actor.employeeId !== undefined ? actor.employeeId : null,
+        approved_by_user: actor && actor.userId !== undefined ? actor.userId : null,
+        // Recorded on the lifecycle log: a row's own button, or a selection.
+        mode:
+          mode === "INDIVIDUAL" || mode === "BULK"
+            ? mode
+            : wanted.all || targetIds.length > 1
+            ? "BULK"
+            : "INDIVIDUAL",
       });
       applied.forEach((entry) => {
         if (entry.outcome === "APPROVED") {
@@ -1566,7 +1587,7 @@ class PayrunCalculationUsecase {
         });
         continue;
       }
-      if (presented.row.status === CALC_STATUS.APPROVED_LOCKED) {
+      if (isLockedStatus(presented.row.status)) {
         results.push({
           employee_id: employeeId,
           employee_name: name,
@@ -1649,6 +1670,167 @@ class PayrunCalculationUsecase {
       reason: reasonCode,
       reset_count: counted(ROW_RESULT.RESET),
       skipped_count: counted(ROW_RESULT.SKIPPED),
+      locked_count: counted(ROW_RESULT.LOCKED),
+      failed_count: counted(ROW_RESULT.FAILED),
+      not_in_scope_count: counted(ROW_RESULT.NOT_IN_SCOPE),
+      results,
+    };
+  }
+
+  /**
+   * UNLOCK, PUBLISH, UNPUBLISH - one employee or a selection, each employee on
+   * their own (a mixed selection is never a failed batch).
+   *
+   *   UNLOCK     Approved & Locked, not published -> back to calculated, with
+   *              every figure kept until somebody recalculates. Published
+   *              payroll is refused: Unpublish first. Reason required.
+   *   PUBLISH    Approved & Locked -> Published: released for payslip / bank /
+   *              downstream use. REFUSED when any source (salary, attendance,
+   *              OT, NRM, statutory flags, adjustments, pay type) has moved
+   *              since the month was calculated - a known outdated figure is
+   *              never released; Unlock, recalculate and approve again.
+   *   UNPUBLISH  Published -> Approved & Locked. Reason required.
+   *
+   * None of them writes a figure, a source, the snapshot or another employee:
+   * the repository's single UPDATE per employee names only status, approval,
+   * lock, unlock and publish columns of that employee's row. The branch scope
+   * is the server's; the month is the request's and every write names it.
+   */
+  async lifecycle({ action, year, month, employee_ids, reason = null, remark = null, mode, store_ids = null, actor = {} }) {
+    const period = normalizeMonth(year, month);
+    const ids = normalizeEmployeeIds(employee_ids);
+    if (![LIFECYCLE_ACTION.UNLOCK, LIFECYCLE_ACTION.PUBLISH, LIFECYCLE_ACTION.UNPUBLISH].includes(action)) {
+      throw validationError("action must be UNLOCK, PUBLISH or UNPUBLISH");
+    }
+    const why = reason === null || reason === undefined ? "" : String(reason).trim();
+    const note = remark === null || remark === undefined ? "" : String(remark).trim();
+    if (action !== LIFECYCLE_ACTION.PUBLISH && why.length < LIFECYCLE_REASON_MIN) {
+      throw validationError(`A reason of at least ${LIFECYCLE_REASON_MIN} characters is required`);
+    }
+    if (why.length > RESET_REMARK_MAX || note.length > RESET_REMARK_MAX) {
+      throw validationError(`The reason and remark may be at most ${RESET_REMARK_MAX} characters each`);
+    }
+    const modeCode = String(mode || "").trim().toUpperCase();
+    if (!Object.values(RESET_MODE).includes(modeCode)) {
+      throw validationError(`mode must be one of ${Object.values(RESET_MODE).join(", ")}`);
+    }
+    if (modeCode === RESET_MODE.INDIVIDUAL && ids.length !== 1) {
+      throw validationError("An individual action names exactly one employee");
+    }
+
+    const context = await this._assemble({ year: period.year, month: period.month, store_ids, employee_ids: ids });
+    const presentedById = new Map(
+      context.population.map((e) => [Number(e.employee_id), this._present(context, e)])
+    );
+    const monthLabel = `${period.year}-${String(period.month).padStart(2, "0")}`;
+    const DONE = {
+      [LIFECYCLE_ACTION.UNLOCK]: [ROW_RESULT.UNLOCKED, "Unlocked. The figures are kept until the employee is recalculated."],
+      [LIFECYCLE_ACTION.PUBLISH]: [ROW_RESULT.PUBLISHED, "Published."],
+      [LIFECYCLE_ACTION.UNPUBLISH]: [ROW_RESULT.UNPUBLISHED, "Unpublished. The month is Approved & Locked again."],
+    };
+    const SKIP = {
+      PUBLISHED: [ROW_RESULT.SKIPPED, "Skipped — already published. Unpublish it before unlocking."],
+      ALREADY_PUBLISHED: [ROW_RESULT.SKIPPED, "Skipped — already published."],
+      NOT_LOCKED: [ROW_RESULT.SKIPPED, "Skipped — not approved & locked."],
+      NOT_PUBLISHED: [ROW_RESULT.SKIPPED, "Skipped — not published."],
+      NOT_CALCULATED: [ROW_RESULT.SKIPPED, "Skipped — not calculated."],
+      MONTH_LOCKED: [ROW_RESULT.LOCKED, `Payroll month ${monthLabel} is locked.`],
+      SOURCE_MOVED: [ROW_RESULT.BLOCKED, "Not published — the attendance changed after this month was calculated. Unlock, recalculate and approve again."],
+      ATTENDANCE_STALE: [ROW_RESULT.BLOCKED, "Not published — the attendance summary is not current with its days. Unlock, process attendance, recalculate and approve again."],
+    };
+
+    const results = [];
+    for (const employeeId of ids) {
+      const presented = presentedById.get(employeeId);
+      if (!presented) {
+        results.push({
+          employee_id: employeeId,
+          result: ROW_RESULT.NOT_IN_SCOPE,
+          message: "This employee is not initialized for the selected month, or is outside your branch scope",
+        });
+        continue;
+      }
+      const name = presented.row.employee_name;
+      const push = ([result, message], extra = {}) =>
+        results.push({ employee_id: employeeId, employee_name: name, result, message, ...extra });
+      if (context.month_locked) {
+        push(SKIP.MONTH_LOCKED);
+        continue;
+      }
+      const status = presented.row.status;
+      if (action === LIFECYCLE_ACTION.UNLOCK && status === CALC_STATUS.PUBLISHED) {
+        push(SKIP.PUBLISHED);
+        continue;
+      }
+      if (action === LIFECYCLE_ACTION.UNPUBLISH && status !== CALC_STATUS.PUBLISHED) {
+        push(isLockedStatus(status) ? SKIP.NOT_PUBLISHED : SKIP.NOT_LOCKED);
+        continue;
+      }
+      if (action === LIFECYCLE_ACTION.PUBLISH && status === CALC_STATUS.PUBLISHED) {
+        push(SKIP.ALREADY_PUBLISHED);
+        continue;
+      }
+      if (action !== LIFECYCLE_ACTION.UNPUBLISH && status !== CALC_STATUS.APPROVED_LOCKED) {
+        push(SKIP.NOT_LOCKED);
+        continue;
+      }
+      if (action === LIFECYCLE_ACTION.PUBLISH) {
+        /*
+         * NEVER RELEASE A KNOWN OUTDATED FIGURE. A locked month's status does
+         * not show staleness (nothing could be done about it while locked), so
+         * Publish compares the stored markers with the sources as they are now.
+         */
+        const { stored, currentSourceHash, currentInputsHash, currentMarkers } = presented.internals;
+        if (stored.source_hash !== currentSourceHash || stored.inputs_hash !== currentInputsHash) {
+          const reasons = calc
+            .detectChanges(calc.storedMarkers(stored), currentMarkers)
+            .map((code) => calc.recalcReasonOf(code));
+          push(
+            [
+              ROW_RESULT.BLOCKED,
+              `Not published — ${
+                reasons.map((r) => r.label.toLowerCase()).join(", ") ||
+                (stored.inputs_hash !== currentInputsHash ? "adjustments or pay type changed" : "a source changed")
+              } since this month was calculated. Unlock, recalculate and approve again.`,
+            ],
+            { recalculation_reasons: reasons }
+          );
+          continue;
+        }
+      }
+
+      /* eslint-disable no-await-in-loop */
+      try {
+        const applied = await this.repo.lifecycle({
+          action,
+          year: period.year,
+          month: period.month,
+          employee_id: employeeId,
+          reason: why || null,
+          remark: note || null,
+          mode: modeCode,
+          actor,
+        });
+        if (applied.outcome === action) push(DONE[action], { previous_status: applied.previous_status, new_status: applied.new_status });
+        else push(SKIP[applied.outcome] || [ROW_RESULT.BLOCKED, `Not changed (${applied.outcome}).`]);
+      } catch (err) {
+        push([ROW_RESULT.FAILED, "This employee could not be changed. Nothing was changed for them."]);
+      }
+      /* eslint-enable no-await-in-loop */
+    }
+
+    const counted = (code) => results.filter((r) => r.result === code).length;
+    return {
+      period_year: period.year,
+      period_month: period.month,
+      action,
+      mode: modeCode,
+      done_count: counted(DONE[action][0]),
+      unlocked_count: counted(ROW_RESULT.UNLOCKED),
+      published_count: counted(ROW_RESULT.PUBLISHED),
+      unpublished_count: counted(ROW_RESULT.UNPUBLISHED),
+      skipped_count: counted(ROW_RESULT.SKIPPED),
+      blocked_count: counted(ROW_RESULT.BLOCKED),
       locked_count: counted(ROW_RESULT.LOCKED),
       failed_count: counted(ROW_RESULT.FAILED),
       not_in_scope_count: counted(ROW_RESULT.NOT_IN_SCOPE),

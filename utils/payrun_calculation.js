@@ -76,6 +76,19 @@ function toRupees(paise) {
   return paise === null || paise === undefined ? null : Math.round(paise) / 100;
 }
 
+/**
+ * NET PAY TO THE WHOLE RUPEE, in integer paise, ROUND HALF AWAY FROM ZERO:
+ * under 50 paise goes down, 50 paise or more goes up - and a negative Net Pay
+ * (recoveries larger than the month's earnings) rounds the same way on its
+ * own side, so -10.50 is -11 and never -10. NULL stays NULL.
+ */
+function roundToRupeePaise(paise) {
+  if (paise === null || paise === undefined) return null;
+  const sign = paise < 0 ? -1 : 1;
+  const rounded = Math.floor((Math.abs(Math.round(paise)) + 50) / 100) * 100;
+  return rounded === 0 ? 0 : sign * rounded;
+}
+
 /** Paise, or zero. For the places where an absent figure genuinely IS nothing. */
 const paiseOr0 = (value) => {
   const p = toPaise(value);
@@ -952,8 +965,17 @@ function computeCalculation(input = {}, config = CONFIG) {
     ? missingDeductionPaise + employeePfPaise + employeeEsiPaise + deductionsFromNetPaise
     : null;
 
-  const netPayPaise =
+  /*
+   * NET PAY IS PAID IN WHOLE RUPEES. The identity above is computed exactly,
+   * and only its RESULT is rounded - so PF, ESI, every earning and every
+   * deduction keep their own precision and none of them is derived from the
+   * rounded figure. The rounding is stored beside it, so the row still adds
+   * up: earnings - deductions + net_pay_rounding = net_pay.
+   */
+  const exactNetPayPaise =
     totalEmployeeDeductionsPaise === null ? null : totalEarningsPaise - totalEmployeeDeductionsPaise;
+  const netPayPaise = roundToRupeePaise(exactNetPayPaise);
+  const netPayRoundingPaise = netPayPaise === null ? null : netPayPaise - exactNetPayPaise;
 
   return {
     calculation_version: CALCULATION_VERSION,
@@ -1043,6 +1065,7 @@ function computeCalculation(input = {}, config = CONFIG) {
     total_earnings: toRupees(totalEarningsPaise),
     total_employee_deductions: toRupees(totalEmployeeDeductionsPaise),
     net_pay: toRupees(netPayPaise),
+    net_pay_rounding: toRupees(netPayRoundingPaise),
     pay_type: snapshot.pay_type ?? null,
 
     /*
@@ -1151,9 +1174,15 @@ function deriveStatus(input = {}) {
     : attendanceFinal || attendance_closed_for_payroll === true;
 
   if (calculation && calculation.status === CALC_STATUS.APPROVED_LOCKED) {
+    /*
+     * PUBLISHED IS APPROVED_LOCKED WITH `published_at` SET - locked exactly as
+     * firmly, and additionally released for downstream use.
+     */
+    const published = Boolean(calculation.published_at);
+    const lockedStatus = published ? CALC_STATUS.PUBLISHED : CALC_STATUS.APPROVED_LOCKED;
     return {
-      status: CALC_STATUS.APPROVED_LOCKED,
-      status_label: CALC_STATUS_LABEL[CALC_STATUS.APPROVED_LOCKED],
+      status: lockedStatus,
+      status_label: CALC_STATUS_LABEL[lockedStatus],
       blockers: [blockerOf(READY_BLOCKER.ALREADY_LOCKED)],
       recalculation_reasons: [],
       /*
@@ -1165,6 +1194,9 @@ function deriveStatus(input = {}) {
       attendance_pending: false,
       calculable: false,
       /*
+       * PUBLISH IS THE RELEASE GATE: approved & locked is internally final,
+       * published is released. Only a published month is payslip eligible.
+       *
        * THE PAYSLIP ELIGIBILITY CONTRACT, AND IT IS DERIVED RATHER THAN
        * STORED. `payslip_eligible` is true for exactly the employees whose
        * month is APPROVED_LOCKED and false for everybody else, so there is no
@@ -1174,7 +1206,7 @@ function deriveStatus(input = {}) {
        * six hundred is one employee eligible for a payslip; the rest of the
        * month being unfinished has nothing to do with it.
        */
-      payslip_eligible: true,
+      payslip_eligible: published,
     };
   }
 
@@ -1349,6 +1381,7 @@ function summarize(rows = []) {
     recalculation_required: 0,
     ready_for_approval: 0,
     approved_locked: 0,
+    published: 0,
     payslip_eligible: 0,
     /*
      * WHAT CALCULATE ALL ELIGIBLE WILL ACTUALLY CALCULATE: not calculated AND
@@ -1375,6 +1408,7 @@ function summarize(rows = []) {
     else if (row.status === CALC_STATUS.RECALCULATION_REQUIRED) summary.recalculation_required += 1;
     else if (row.status === CALC_STATUS.READY_FOR_APPROVAL) summary.ready_for_approval += 1;
     else if (row.status === CALC_STATUS.APPROVED_LOCKED) summary.approved_locked += 1;
+    else if (row.status === CALC_STATUS.PUBLISHED) summary.published += 1;
     if (row.payslip_eligible === true) summary.payslip_eligible += 1;
   });
   return summary;
@@ -1417,6 +1451,7 @@ function calculationHash(result = {}) {
     result.total_earnings,
     result.total_employee_deductions,
     result.net_pay,
+    result.net_pay_rounding === undefined ? null : result.net_pay_rounding,
     result.pay_type,
   ]);
 }
@@ -1431,6 +1466,7 @@ module.exports = {
   inputsHash,
   detectChanges,
   computeCalculation,
+  roundToRupeePaise,
   calculationHash,
   deriveStatus,
   summarize,

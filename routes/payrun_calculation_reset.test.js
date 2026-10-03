@@ -50,6 +50,8 @@ const NO_VIEW = { designation: 45, employee: 805 };        // process_payroll al
 const NOBODY = { designation: 46, employee: 806 };
 const PROCESSOR = { designation: 47, employee: 807 };      // payroll + recalculate_attendance
 const ATT_ONLY = { designation: 48, employee: 808 };       // recalculate_attendance, no payroll
+const UNLOCKER = { designation: 49, employee: 809 };       // unlock_payrun
+const PUBLISHER = { designation: 50, employee: 810 };      // publish_payrun
 
 const GRANTS = {
   [CLERK.designation]: [P.VIEW_EMPLOYEES, P.PROCESS_PAYROLL],
@@ -60,6 +62,8 @@ const GRANTS = {
   [NOBODY.designation]: [],
   [PROCESSOR.designation]: [P.VIEW_EMPLOYEES, P.PROCESS_PAYROLL, P.RECALCULATE_ATTENDANCE],
   [ATT_ONLY.designation]: [P.VIEW_EMPLOYEES, P.RECALCULATE_ATTENDANCE],
+  [UNLOCKER.designation]: [P.VIEW_EMPLOYEES, P.UNLOCK_PAYRUN],
+  [PUBLISHER.designation]: [P.VIEW_EMPLOYEES, P.PUBLISH_PAYRUN],
 };
 
 const EMPLOYEES = [
@@ -71,6 +75,8 @@ const EMPLOYEES = [
   { employee_id: NOBODY.employee, store_id: MOOLAKULAM, status: 1 },
   { employee_id: PROCESSOR.employee, store_id: MOOLAKULAM, status: 1 },
   { employee_id: ATT_ONLY.employee, store_id: MOOLAKULAM, status: 1 },
+  { employee_id: UNLOCKER.employee, store_id: MOOLAKULAM, status: 1 },
+  { employee_id: PUBLISHER.employee, store_id: MOOLAKULAM, status: 1 },
 ];
 
 /** The usecase, as a spy: what it was handed is what the route decided. */
@@ -79,6 +85,10 @@ const usecase = {
   reset: async (args) => {
     seen.push(args);
     return { reset_count: args.employee_ids.length, results: [] };
+  },
+  lifecycle: async (args) => {
+    seen.push(args);
+    return { done_count: args.employee_ids.length, results: [] };
   },
   processAttendance: async (args) => {
     seen.push(args);
@@ -302,6 +312,40 @@ describe("Process Attendance from Payroll", () => {
       { ...BODY_P, month: 13 },
     ]) {
       assert.equal((await post(PROCESSOR, body, PROCESS)).status, 400, JSON.stringify(body));
+    }
+    assert.equal(seen.length, 0);
+  });
+});
+
+describe("Unlock / Publish / Unpublish keys", () => {
+  const BODY_L = { year: 2026, month: 8, employee_ids: [11], reason: "Correcting OT", mode: "INDIVIDUAL" };
+
+  it("unlock needs unlock_payrun - approving, publishing or calculating does not grant it", async () => {
+    for (const who of [APPROVER, PUBLISHER, CLERK, VIEWER, NOBODY]) {
+      assertRefused(await post(who, BODY_L, "/payrun/calculation/unlock"), `unlock by ${who.designation}`);
+    }
+    const ok = await post(UNLOCKER, BODY_L, "/payrun/calculation/unlock");
+    assert.equal(ok.body.code, 200);
+    assert.equal(seen[0].action, "UNLOCK");
+    assert.deepEqual(seen[0].store_ids, [MOOLAKULAM], "branch scope is the server's");
+    assert.equal(seen[0].actor.employeeId, UNLOCKER.employee);
+  });
+
+  it("publish and unpublish need publish_payrun - unlock_payrun does not grant them", async () => {
+    for (const path of ["/payrun/calculation/publish", "/payrun/calculation/unpublish"]) {
+      for (const who of [APPROVER, UNLOCKER, CLERK, NOBODY]) assertRefused(await post(who, BODY_L, path), `${path} by ${who.designation}`);
+    }
+    assert.equal((await post(PUBLISHER, BODY_L, "/payrun/calculation/publish")).body.code, 200);
+    assert.equal((await post(PUBLISHER, BODY_L, "/payrun/calculation/unpublish")).body.code, 200);
+    assert.deepEqual(seen.map((x) => x.action), ["PUBLISH", "UNPUBLISH"]);
+  });
+
+  it("the body cannot widen scope, name an actor or a status, or skip the mode", async () => {
+    for (const body of [
+      { ...BODY_L, store_ids: [ECR] }, { ...BODY_L, published_by: 1 }, { ...BODY_L, status: "CALCULATED" },
+      { year: 2026, month: 8, employee_ids: [11], reason: "x x x x" }, { ...BODY_L, employee_ids: [] },
+    ]) {
+      assert.equal((await post(UNLOCKER, body, "/payrun/calculation/unlock")).status, 400, JSON.stringify(body));
     }
     assert.equal(seen.length, 0);
   });
