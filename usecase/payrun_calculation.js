@@ -467,7 +467,9 @@ class PayrunCalculationUsecase {
          */
         calculable: verdict.calculable !== false,
         /** Whether Process Attendance (the existing engine) can clear a blocker. */
-        attendance_processable: Boolean(readiness && readiness.attendance_processable),
+        attendance_processable: Boolean(
+          readiness && readiness.attendance_processable && !isLockedStatus(verdict.status)
+        ),
 
         /**
          * WHETHER THE ATTENDANCE THESE FIGURES WERE PRICED FROM IS SETTLED.
