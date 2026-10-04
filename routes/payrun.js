@@ -2,7 +2,7 @@ const express = require("express");
 const Joi = require("@hapi/joi");
 const P = require("../constants/hr_permissions");
 const respondError = require("../utils/http");
-const { PAY_TYPES, LIFECYCLE_FILTER, ATTENDANCE_STATUS } = require("../constants/payrun");
+const { PAY_TYPES, LIFECYCLE_FILTER, ATTENDANCE_STATUS, ABSENCE_REVIEW } = require("../constants/payrun");
 
 /**
  * Payrun Initialization - the API.
@@ -121,6 +121,12 @@ class PayrunRoutes {
        */
       attendance_status: Joi.string().valid(...Object.values(ATTENDANCE_STATUS)).optional(),
       /*
+       * THE 3-DAY ABSENT REVIEW, a fourth narrowing that composes with the
+       * other three. A warning, never a state: see
+       * `utils/payrun_absence_review.js`.
+       */
+      absence: Joi.string().valid(...Object.values(ABSENCE_REVIEW)).optional(),
+      /*
        * THE SHARED SEARCH. Bounded at 120 characters and trimmed, exactly as
        * the Adjustments and Calculation stages already bound theirs - the
        * three stages answer one search box and must accept the same input.
@@ -156,7 +162,10 @@ class PayrunRoutes {
               status: req.query.status,
               lifecycle: req.query.lifecycle,
               attendance_status: req.query.attendance_status,
+              absence: req.query.absence,
               search: req.query.search,
+              // The screen shows the 3-Day Absent count on every read.
+              include_absence_review: true,
             })),
           });
         } catch (err) {

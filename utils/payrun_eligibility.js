@@ -406,8 +406,17 @@ function summarize(rows = []) {
      */
     attendance_pending: 0,
     attendance_closed_for_payroll: 0,
+    /*
+     * EXITED IS A THIRD QUESTION ABOUT THE SAME PEOPLE - the employment
+     * record's - and it is counted from the row's `exited_in_month`, the SAME
+     * dated answer the badge and the lifecycle filter read. It overlaps the
+     * workflow states (a leaver is also Ready, Blocked or Initialized) and is
+     * not part of their sum either.
+     */
+    exited: 0,
   };
   rows.forEach((row) => {
+    if (row.exited_in_month === true) summary.exited += 1;
     summary.total_eligible += 1;
     if (row.status === STATUS_GROUP.READY) summary.ready += 1;
     else if (row.status === STATUS_GROUP.BLOCKED) summary.blocked += 1;

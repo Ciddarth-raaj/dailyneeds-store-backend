@@ -6,6 +6,7 @@ const {
   PERIOD_STATUS,
   STATUS_GROUP,
   LIFECYCLE_FILTER,
+  ABSENCE_REVIEW,
   ATTENDANCE_STATUS,
   CLOSE_RESULT,
   CLOSE_RESULT_MESSAGE,
@@ -16,6 +17,7 @@ const {
   summarize,
   attendanceStatusOf,
 } = require("../utils/payrun_eligibility");
+const { absenceReview } = require("../utils/payrun_absence_review");
 
 /**
  * Payrun Initialization - Non-Initialized -> Initialize -> Calculated, and
@@ -191,6 +193,13 @@ class PayrunUsecase {
     lifecycle = null,
     search = null,
     attendance_status = null,
+    absence = null,
+    /*
+     * WHETHER TO RUN THE 3-DAY ABSENT REVIEW. Off unless asked, because only
+     * the screen needs it: `initialize` and the attendance close re-read the
+     * month through here and have no use for two more reads.
+     */
+    include_absence_review = false,
   }) {
     const period = normalizeMonth(year, month);
     const { from, to } = monthWindow(period.year, period.month);
@@ -348,6 +357,25 @@ class PayrunUsecase {
         ? String(lifecycle).toUpperCase()
         : null;
 
+    const wantedAbsence =
+      absence && Object.values(ABSENCE_REVIEW).includes(String(absence).toUpperCase())
+        ? String(absence).toUpperCase()
+        : null;
+
+    /*
+     * THE 3-DAY ABSENT REVIEW - informational, and decided on the server from
+     * the attendance engine's stored days. It is attached to the row and
+     * changes nothing else on it: not the status, not the exit, not the pay
+     * type.
+     */
+    const reviewed = include_absence_review || wantedAbsence !== null;
+    if (reviewed) {
+      const reviewOf = await this._absenceReview(period, rows);
+      rows.forEach((row) => {
+        row.absence_review = reviewOf.get(row.employee_id) || null;
+      });
+    }
+
     /*
      * THE ATTENDANCE TAB IS A THIRD INDEPENDENT NARROWING, and it composes
      * with the other two exactly as they compose with each other: "Attendance
@@ -365,6 +393,12 @@ class PayrunUsecase {
       if (wantedLifecycle === LIFECYCLE_FILTER.EXITED && row.exited_in_month !== true) return false;
       if (wantedLifecycle === LIFECYCLE_FILTER.ACTIVE && row.exited_in_month === true) return false;
       if (wantedAttendance && row.attendance_status !== wantedAttendance) return false;
+      if (
+        wantedAbsence === ABSENCE_REVIEW.THREE_DAY_ABSENT &&
+        !(row.absence_review && row.absence_review.three_day_absent === true)
+      ) {
+        return false;
+      }
       if (!matchesSearch(row, search)) return false;
       return true;
     });
@@ -376,9 +410,73 @@ class PayrunUsecase {
       month_locked: monthLocked,
       // The summary counts the WHOLE month, never the filtered view: a status
       // filter is a way of looking at the month, not a different month.
-      summary: summarize(rows),
+      summary: {
+        ...summarize(rows),
+        // Only when the review ran - an uncounted number is not a zero.
+        ...(reviewed
+          ? {
+              three_day_absent: rows.filter(
+                (row) => row.absence_review && row.absence_review.three_day_absent === true
+              ).length,
+            }
+          : {}),
+      },
       rows: filtered,
     };
+  }
+
+  /**
+   * THE 3-DAY ABSENT REVIEW FOR EVERY ROW, in two batched reads.
+   *
+   * WHO IS REVIEWED: the month's population, minus anybody already EXITED by
+   * the month end - the same dated `exited_in_month` the Exited card counts.
+   * Their exit is recorded; there is nothing for HR to discover. Somebody
+   * whose recorded exit falls AFTER the month is still reviewed, and the row
+   * says the exit is recorded.
+   *
+   * IT READS AND NEVER WRITES. Nothing here can reach `new_employee`, the
+   * payrun row or any attendance table except through a SELECT.
+   */
+  async _absenceReview(period, rows) {
+    const { from, to } = monthWindow(period.year, period.month);
+    const candidates = rows.filter((row) => row.exited_in_month !== true);
+    const ids = candidates.map((row) => row.employee_id);
+
+    const days = await this.repo.listAttendanceDays(ids, from, to);
+    const daysOf = new Map();
+    (days || []).forEach((day) => {
+      const id = Number(day.employee_id);
+      if (!daysOf.has(id)) daysOf.set(id, []);
+      daysOf.get(id).push(day);
+    });
+
+    const verdicts = new Map();
+    candidates.forEach((row) => {
+      verdicts.set(row.employee_id, absenceReview(daysOf.get(Number(row.employee_id)) || []));
+    });
+
+    /* Somebody absent all month last attended in an earlier one. */
+    const missingLastPresent = candidates
+      .filter((row) => {
+        const v = verdicts.get(row.employee_id);
+        return v.three_day_absent && !v.last_present_date;
+      })
+      .map((row) => row.employee_id);
+    const earlier = await this.repo.listLastPresentDates(missingLastPresent, to);
+    const earlierOf = new Map((earlier || []).map((r) => [Number(r.employee_id), r.last_present_date]));
+
+    const out = new Map();
+    candidates.forEach((row) => {
+      const v = verdicts.get(row.employee_id);
+      out.set(row.employee_id, {
+        three_day_absent: v.three_day_absent,
+        absent_dates: v.three_day_absent ? v.absent_dates : [],
+        last_present_date: v.last_present_date || earlierOf.get(Number(row.employee_id)) || null,
+        exit_recorded: Boolean(row.resignation_date),
+        exit_date: row.resignation_date || null,
+      });
+    });
+    return out;
   }
 
   /**

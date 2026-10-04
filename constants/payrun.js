@@ -101,6 +101,17 @@ const LIFECYCLE_FILTER = {
 };
 
 /**
+ * THE ABSENCE REVIEW FILTER - a fourth independent narrowing, and a WARNING
+ * rather than a state. THREE_DAY_ABSENT is somebody in the month's population,
+ * not exited by its end, who was absent on the last three applicable
+ * attendance days of the month. See `utils/payrun_absence_review.js`. It
+ * changes nothing about the employee and decides nothing about the payrun.
+ */
+const ABSENCE_REVIEW = {
+  THREE_DAY_ABSENT: "THREE_DAY_ABSENT",
+};
+
+/**
  * EVERY REASON AN EMPLOYEE MAY NOT BE INITIALIZED, as a code and the sentence
  * that goes with it.
  *
@@ -318,6 +329,7 @@ module.exports = {
   PERIOD_STATUS,
   STATUS_GROUP,
   LIFECYCLE_FILTER,
+  ABSENCE_REVIEW,
   BLOCK_REASON,
   BLOCK_REASON_LABEL,
   BLOCK_REASON_MESSAGE,

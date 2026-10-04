@@ -410,3 +410,22 @@ test("an unknown attendance tab is refused rather than ignored", async () => {
   });
   assert.equal(res.status, 400);
 });
+
+/* ========================================== the 3-day absent review (cards) */
+
+test("the month read accepts the absence filter, validated against the constant, and always reviews", () => {
+  assert.match(ROUTE_CODE, /absence: Joi\.string\(\)\.valid\(\.\.\.Object\.values\(ABSENCE_REVIEW\)\)\.optional\(\)/);
+  assert.match(ROUTE_CODE, /absence: req\.query\.absence/);
+  assert.match(ROUTE_CODE, /include_absence_review: true/);
+});
+
+test("the 3-day absent review only READS the attendance engine's stored days", () => {
+  assert.match(REPO_CODE, /FROM attendance_day_calculation/);
+  assert.ok(
+    !/(UPDATE|INSERT\s+INTO|DELETE\s+FROM)\s+`?attendance_day_calculation/i.test(REPO_CODE),
+    "the payrun must never write the engine's days"
+  );
+  const rule = strip(read("utils/payrun_absence_review.js"));
+  assert.ok(!/require\(/.test(rule), "the rule is pure");
+  assert.ok(!/resignation_date|new_employee/.test(rule), "the rule decides no exit");
+});

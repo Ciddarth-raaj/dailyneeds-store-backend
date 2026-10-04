@@ -289,6 +289,50 @@ class PayrunRepository {
     );
   }
 
+  /**
+   * THE ENGINE'S STORED DAYS FOR THE MONTH, for the 3-Day Absent review.
+   *
+   * A READ OF WHAT THE ATTENDANCE ENGINE ALREADY DECIDED, and only the
+   * columns the review needs: the date's verdict, whether anything was
+   * attended, which calculation mode made it, and - from the shift snapshot
+   * the engine stored for that very date - whether the roster made it a
+   * working day. Nothing is recalculated; see `utils/payrun_absence_review.js`.
+   *
+   * ONE STATEMENT FOR THE WHOLE POPULATION, on the (employee_id,
+   * attendance_date) unique key.
+   */
+  async listAttendanceDays(employeeIds, from, to) {
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
+    return this._read(
+      "LIST-ATTENDANCE-DAYS",
+      `SELECT employee_id,
+              DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date,
+              status, punch_count, attendance_day_count, attendance_calculation_mode,
+              JSON_UNQUOTE(JSON_EXTRACT(shift_snapshot, '$.is_working_day')) AS is_working_day
+         FROM attendance_day_calculation
+        WHERE employee_id IN (?) AND attendance_date >= ? AND attendance_date <= ?`,
+      [employeeIds, from, to]
+    );
+  }
+
+  /**
+   * THE LAST DATE EACH EMPLOYEE ATTENDED, ON OR BEFORE `asOf` - for the
+   * 3-Day Absent rows, where somebody absent all month last attended in an
+   * earlier one. Asked only for the flagged few.
+   */
+  async listLastPresentDates(employeeIds, asOf) {
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
+    return this._read(
+      "LIST-LAST-PRESENT-DATES",
+      `SELECT employee_id,
+              DATE_FORMAT(MAX(attendance_date), '%Y-%m-%d') AS last_present_date
+         FROM attendance_day_calculation
+        WHERE employee_id IN (?) AND attendance_date <= ? AND attendance_day_count > 0
+        GROUP BY employee_id`,
+      [employeeIds, asOf]
+    );
+  }
+
   /** The snapshots that already exist for this month. */
   async listPayrunRows({ year, month, employee_ids = null }, conn = null) {
     const params = [year, month];
