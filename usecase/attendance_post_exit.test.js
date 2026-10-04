@@ -326,3 +326,19 @@ describe("no attendance request after the last working date", () => {
     );
   });
 });
+
+describe("the stored bounds as the production driver returns them", () => {
+  it("DATE columns read as JS Date objects (no dateStrings) still bound the month", () => {
+    // Local midnight, exactly what `mysql` hands back for a DATE without dateStrings.
+    const row = {
+      employee_id: EMP, is_final: 0,
+      available_from: new Date(2026, 8, 9), available_to: new Date(2026, 8, 13),
+      held_dates: JSON.stringify([sep(3), sep(20)]),
+    };
+    const out = effectiveAttendanceMonth(row);
+    assert.equal(out.is_final, 1);
+    assert.deepEqual(out.pre_joining_held_dates, [sep(3)]);
+    assert.deepEqual(out.post_exit_held_dates, [sep(20)]);
+    assert.equal(effectiveAttendanceMonth({ ...row, held_dates: JSON.stringify([sep(10)]) }).is_final, 0);
+  });
+});

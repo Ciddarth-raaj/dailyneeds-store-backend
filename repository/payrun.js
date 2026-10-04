@@ -241,7 +241,9 @@ class PayrunRepository {
     const rows = await this._read(
       "LIST-ATTENDANCE-MONTHS",
       `SELECT attendance_monthly_payroll_id, employee_id, is_final, payroll_version,
-              held_dates, available_from, available_to,
+              held_dates,
+              DATE_FORMAT(available_from, '%Y-%m-%d') AS available_from,
+              DATE_FORMAT(available_to, '%Y-%m-%d') AS available_to,
               DATE_FORMAT(calculated_at, '%Y-%m-%d %H:%i:%s.%f') AS calculated_at
          FROM attendance_monthly_payroll
         WHERE employee_id IN (?) AND period_year = ? AND period_month = ?`,

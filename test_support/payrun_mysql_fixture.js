@@ -113,7 +113,10 @@ const STAND_INS = [
      shortage_minutes INT, missing_minute_deduction DECIMAL(12,2),
      approved_ot_minutes INT, approved_ot_earnings DECIMAL(12,2),
      calculated_at TIMESTAMP(3) NOT NULL,
-     day_rows_fingerprint VARCHAR(80) NULL
+     day_rows_fingerprint VARCHAR(80) NULL,
+     -- As the production table declares them (20260918120000-attendance-v2-
+     -- calculation): DATE and JSON, so a read meets the driver's real types.
+     available_from DATE NULL, available_to DATE NULL, held_dates JSON NULL
    ) ENGINE=InnoDB`,
   `CREATE TABLE attendance_day_calculation (
      employee_id INT NOT NULL, attendance_date DATE NOT NULL,

@@ -61,7 +61,15 @@ const SCHEMA = [
   `CREATE TABLE attendance_monthly_payroll (
      attendance_monthly_payroll_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
      ${MONTHLY_PAYROLL_COLUMNS.map((c) =>
-       ["employee_id", "period_year", "period_month"].includes(c) ? `${c} INT NOT NULL` : `\`${c}\` TEXT NULL`
+       ["employee_id", "period_year", "period_month"].includes(c)
+         ? `${c} INT NOT NULL`
+         : // The production types (20260918120000-attendance-v2-calculation),
+           // so payroll's reads meet DATE / JSON exactly as the driver returns them.
+           ["available_from", "available_to"].includes(c)
+         ? `\`${c}\` DATE NULL`
+         : c === "held_dates"
+         ? `\`${c}\` JSON NULL`
+         : `\`${c}\` TEXT NULL`
      ).join(",\n     ")},
      calculated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
      UNIQUE KEY uq_amp (employee_id, period_year, period_month)
@@ -243,7 +251,7 @@ describe("a Sep 9 joiner who left on Sep 13, through the real repositories, as S
     assert.deepEqual(await dayDates(pool), SEP_9_TO_13);
     const statuses = await q(pool, "SELECT DATE_FORMAT(attendance_date, '%Y-%m-%d') AS d, status FROM attendance_day_calculation ORDER BY d");
     assert.deepEqual(statuses.map((r) => r.status), ["FINAL", "FINAL", "FINAL", "ABSENT", "ABSENT"]);
-    const [m] = await q(pool, "SELECT * FROM attendance_monthly_payroll WHERE employee_id = ?", [EMP]);
+    const [m] = await q(pool, "SELECT *, DATE_FORMAT(available_from, '%Y-%m-%d') AS available_from, DATE_FORMAT(available_to, '%Y-%m-%d') AS available_to FROM attendance_monthly_payroll WHERE employee_id = ?", [EMP]);
     assert.equal(m.available_from, JOINED);
     assert.equal(m.available_to, LAST);
     assert.equal(String(m.available_dates), "5");
