@@ -267,8 +267,31 @@ async function lockPayrollMonthsOnConnection(connection, rows) {
  * path but the monthly save, which holds the lock across two tables and calls
  * this directly rather than gating twice.
  */
+const CALC_STATUS_NOT_JOINED = "NOT_JOINED";
+
+/**
+ * THE ONE DELETE this repository issues: derived day rows of ONE employee on
+ * the named dates. PRIVATE and unlocked - both callers (the recalculation's
+ * eligibility reconciliation and the month persist's pre-joining cleanup)
+ * hold the payroll gate for those dates before calling it.
+ */
+async function deleteCalculationDates(connection, employeeId, dates) {
+  return queryAsync(
+    connection,
+    `DELETE FROM attendance_day_calculation
+      WHERE employee_id = ?
+        AND attendance_date IN (?)`,
+    [employeeId, dates]
+  );
+}
+
 async function upsertCalculationRows(connection, rows) {
   if (!Array.isArray(rows) || rows.length === 0) return { written: 0 };
+  // A PRE-JOINING DATE IS NEVER MATERIALISED. The usecase already drops
+  // NOT_JOINED days before persisting; this is the last line, so no caller -
+  // present or future - can store a date somebody did not work here.
+  rows = rows.filter((row) => !row || row.status !== CALC_STATUS_NOT_JOINED);
+  if (rows.length === 0) return { written: 0 };
 
   const values = rows.map((row) => CALCULATION_COLUMNS.map((column) => row[column]));
   const updates = CALCULATION_COLUMNS
@@ -745,10 +768,15 @@ class AttendanceCalculationRepository {
   async getBreakOverride(employeeId) {
     const rows = await this._read(
       "GET-BREAK-OVERRIDE",
-      `SELECT employee_id, special_break_override_minutes, extra_break_hours,
-              attendance_required
-         FROM new_employee
-        WHERE employee_id = ?`,
+      // `joined_on` rides along so every calculation - the screen's read
+      // included - knows the joining date, the hard lower boundary of
+      // attendance (`utils/attendance_eligibility.js`). Parsed through the
+      // one shared rule, never compared as text.
+      `SELECT ne.employee_id, ne.special_break_override_minutes, ne.extra_break_hours,
+              ne.attendance_required,
+              DATE_FORMAT((${JOINED_ON("ne")}), '%Y-%m-%d') AS joined_on
+         FROM new_employee ne
+        WHERE ne.employee_id = ?`,
       [employeeId]
     );
     return rows && rows[0] ? rows[0] : null;
@@ -1024,13 +1052,7 @@ class AttendanceCalculationRepository {
           connection,
           doomed.map((date) => ({ employee_id: employeeId, attendance_date: date }))
         );
-        removed = await queryAsync(
-          connection,
-          `DELETE FROM attendance_day_calculation
-            WHERE employee_id = ?
-              AND attendance_date IN (?)`,
-          [employeeId, doomed]
-        );
+        removed = await deleteCalculationDates(connection, employeeId, doomed);
       }
 
       await commitAsync(connection);
@@ -1810,7 +1832,18 @@ class AttendanceCalculationRepository {
    *
    * Any failure rolls the whole thing back: neither half survives alone.
    */
-  async saveMonthWithPayroll({ employee_id, period_year, period_month, rows = [], monthly = null }) {
+  async saveMonthWithPayroll({
+    employee_id,
+    period_year,
+    period_month,
+    rows = [],
+    monthly = null,
+    // Dates of this month BEFORE THE JOINING DATE. Any row stored for one is
+    // stale by definition (it was written before the boundary was enforced)
+    // and is removed in this transaction, BEFORE the summary fingerprints the
+    // month's days - so the summary and its days agree that it does not exist.
+    pre_joining_dates = [],
+  }) {
     const employeeId = Number(employee_id);
     const year = Number(period_year);
     const month = Number(period_month);
@@ -1835,6 +1868,18 @@ class AttendanceCalculationRepository {
       ]);
 
       const calculation = await upsertCalculationRows(connection, rows);
+
+      const { from: monthFrom, to: monthTo } = monthWindow(year, month);
+      const doomed = [...new Set(Array.isArray(pre_joining_dates) ? pre_joining_dates : [])].filter(
+        (date) => typeof date === "string" && date >= monthFrom && date <= monthTo
+      );
+      let preJoiningRemoved = 0;
+      if (doomed.length > 0) {
+        // Covered by the gate above: it locked this employee/month.
+        const removed = await deleteCalculationDates(connection, employeeId, doomed);
+        preJoiningRemoved = removed ? Number(removed.affectedRows) || 0 : 0;
+      }
+
       let monthlyWritten = 0;
       if (monthly) {
         // THE DAYS THIS SUMMARY WAS MADE FROM, read back after writing them,
@@ -1850,7 +1895,7 @@ class AttendanceCalculationRepository {
       }
 
       await commitAsync(connection);
-      return { ...calculation, monthly_written: monthlyWritten };
+      return { ...calculation, monthly_written: monthlyWritten, pre_joining_removed: preJoiningRemoved };
     } catch (err) {
       await rollbackAsync(connection);
       this._log("SAVE-MONTH-WITH-PAYROLL", err);

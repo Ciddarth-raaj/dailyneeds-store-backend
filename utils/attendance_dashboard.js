@@ -228,6 +228,9 @@ function dayIssueKey(day) {
       return ISSUE_KEY.REGULARIZATION_PENDING;
     case "OT_PENDING":
       return null;
+    // Before the joining date: not an attendance day, so never an issue.
+    case "NOT_JOINED":
+      return null;
     case "ABSENT":
       return ISSUE_KEY.ABSENT;
     case "NO_SHIFT_FOR_DATE":

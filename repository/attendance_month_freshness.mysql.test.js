@@ -37,7 +37,7 @@ const UP = fs.readFileSync(path.join(SQLS, "20261107120000-attendance-permission
 // The attendance-mode migration runs after it: the day's mode column, and the
 // fingerprint widened for its version prefix.
 const MODE_UP = fs.readFileSync(path.join(SQLS, "20261108120000-employee-attendance-calculation-mode-up.sql"), "utf8");
-const { FINGERPRINT_VERSION } = require("../utils/attendance_month_freshness");
+const { FINGERPRINT_VERSION, dayRowsFingerprint } = require("../utils/attendance_month_freshness");
 const CURRENT_FINGERPRINT = new RegExp(`^${FINGERPRINT_VERSION}:[0-9a-f]{64}$`);
 
 const EMP = 601;
@@ -711,6 +711,72 @@ describe("monthly attendance freshness and lock order, as SQL", { skip: !URL && 
         }),
         (err) => err.code === "PAYROLL_MONTH_LOCKED"
       );
+    });
+  });
+
+  /*
+   * THE JOINING DATE AS THE HARD LOWER BOUNDARY, as SQL. A Sep 9 joiner with
+   * stale NO_SHIFT_FOR_DATE rows for 1-8 Sep (left by Process Attendance
+   * before the boundary was enforced): the month persist removes them before
+   * fingerprinting, the employee settings read carries the parsed joining
+   * date, and payroll's NRM evidence never reads a pre-joining row.
+   */
+  describe("a Sep 9 joiner: pre-joining rows", () => {
+    const joiner = async (doj = "2026-09-09") =>
+      q(pool, `UPDATE new_employee SET date_of_joining = ? WHERE employee_id = ?`, [doj, EMP]);
+    const preJoining = ["2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-05", "2026-09-06", "2026-09-07", "2026-09-08"];
+
+    it("the month persist deletes 1-8 Sep and fingerprints only 9 Sep onward", async () => {
+      await joiner();
+      await persistMonth(0, preJoining.map((d) => day(d, { status: "NO_SHIFT_FOR_DATE", is_final: 0, attendance_day_count: 0, nrm_minutes: 0, shortage_minutes: 0 })));
+      assert.equal((await q(pool, "SELECT COUNT(*) AS n FROM attendance_day_calculation"))[0].n, 8, "the stale rows, as found");
+
+      const out = await calcRepo.saveMonthWithPayroll({
+        employee_id: EMP, period_year: YEAR, period_month: MONTH,
+        rows: [day("2026-09-09", { shortage_minutes: 0 }), day("2026-09-10", { shortage_minutes: 0 })],
+        monthly: monthly(0),
+        pre_joining_dates: preJoining,
+      });
+      assert.equal(out.pre_joining_removed, 8);
+      const dates = (await q(pool, "SELECT DATE_FORMAT(attendance_date, '%Y-%m-%d') AS d FROM attendance_day_calculation ORDER BY d")).map((r) => r.d);
+      assert.deepEqual(dates, ["2026-09-09", "2026-09-10"]);
+      const summary = await calcRepo.getMonthlyPayroll({ employee_id: EMP, period_year: YEAR, period_month: MONTH });
+      assert.ok(summary && summary.day_rows_fingerprint, "the summary was written, fingerprinted after the delete");
+      const listed = await calcRepo.listMonthDayRowsForFingerprint({ employee_id: EMP, from_date: "2026-09-01", to_date: "2026-09-30" });
+      assert.equal(dayRowsFingerprint(listed), summary.day_rows_fingerprint, "summary and days agree: 1-8 Sep do not exist");
+    });
+
+    it("a NOT_JOINED row is never stored, even if a caller hands one in", async () => {
+      await joiner();
+      await calcRepo.saveMonthWithPayroll({
+        employee_id: EMP, period_year: YEAR, period_month: MONTH,
+        rows: [day("2026-09-05", { status: "NOT_JOINED", is_final: 1, attendance_day_count: 0 }), day("2026-09-09")],
+        monthly: monthly(0),
+      });
+      const dates = (await q(pool, "SELECT DATE_FORMAT(attendance_date, '%Y-%m-%d') AS d FROM attendance_day_calculation")).map((r) => r.d);
+      assert.deepEqual(dates, ["2026-09-09"]);
+    });
+
+    it("the employee settings read carries the parsed joining date, in either stored shape", async () => {
+      // The two break settings live on the production table; this scratch
+      // schema only needs them to exist for the read.
+      const cols = (await q(pool, "SHOW COLUMNS FROM new_employee")).map((c) => c.Field);
+      if (!cols.includes("special_break_override_minutes")) {
+        await q(pool, "ALTER TABLE new_employee ADD COLUMN special_break_override_minutes INT NULL, ADD COLUMN extra_break_hours DECIMAL(5,2) NULL");
+      }
+      await joiner("2026-09-09");
+      assert.equal((await calcRepo.getBreakOverride(EMP)).joined_on, "2026-09-09");
+      await joiner("09 September 2026");
+      assert.equal((await calcRepo.getBreakOverride(EMP)).joined_on, "2026-09-09");
+      await joiner(null);
+      assert.equal((await calcRepo.getBreakOverride(EMP)).joined_on, null);
+    });
+
+    it("payroll's NRM evidence ignores a stale FINAL row before the joining date", async () => {
+      await joiner();
+      await persistMonth(0, [day("2026-09-08", { nrm_minutes: 480 }), day("2026-09-09"), day("2026-09-10")]);
+      const groups = await payrunRepo.listEffectiveNrm([EMP], "2026-09-01", "2026-09-30");
+      assert.deepEqual(groups.map((g) => [Number(g.nrm_minutes), Number(g.day_count)]), [[660, 2]]);
     });
   });
 });

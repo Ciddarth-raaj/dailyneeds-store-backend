@@ -337,8 +337,18 @@ function computeMonthlyAttendancePayroll(input = {}) {
     };
   }
 
+  // THE JOINING DATE IS THE HARD LOWER BOUNDARY HERE TOO, not only in the
+  // denominator. A date before it is not an attendance day: whatever a caller
+  // hands in for it - a NOT_JOINED day, or a stale NO_SHIFT_FOR_DATE /
+  // ABSENT row stored before the boundary was enforced - it adds no day, no
+  // shortage, no OT, and above all is never HELD, because a held pre-joining
+  // date would keep a mid-month joiner's month from ever becoming final.
+  const joinedOn = toDateOnly(joined_on);
   (days || []).forEach((day) => {
     if (!day) return;
+    const dayDate = toDateOnly(day.attendance_date);
+    if (joinedOn !== null && dayDate !== null && dayDate < joinedOn) return;
+    if (day.status === "NOT_JOINED") return;
     attendedDays += Math.max(0, Math.trunc(day.attendance_day_count || 0));
 
     // A date that is not final is PRESENT but not settled. Its day still
